@@ -1,0 +1,8 @@
+﻿GroupName;GroupDescription;AdministrativeUnit
+SEC-Service-ConditionalAccess-Exclusion-SynchronizationServiceAccounts;Excluded accounts, Sync Service Accounts, Conditional Access;AU-Service-ConditionalAccess-CP-T0-ID
+SEC-Service-ConditionalAccess-Exclusion-EmergencyAccessAccounts;Excluded accounts, Emergency Accounts, Conditional Access;AU-Service-ConditionalAccess-CP-T0-ID
+SEC-Service-ConditionalAccess-Inclusion-Internal-Users;Included accounts, internal users, Conditional Access;AU-Service-ConditionalAccess-CP-T0-ID
+SEC-Service-ConditionalAccess-Inclusion-External-Users;Included accounts, external users with tenant account, Conditional Access;AU-Service-ConditionalAccess-CP-T0-ID
+SEC-Service-ConditionalAccess-Inclusion-PrivilegedAccounts-WDP;Included accounts, admin accounts, WorkloadPlane, Conditional Access;AU-Service-ConditionalAccess-CP-T0-ID
+SEC-Service-ConditionalAccess-Inclusion-PrivilegedAccounts-MP;Included accounts, admin accounts, WorkloadPlane, ManagementPlane;AU-Service-ConditionalAccess-CP-T0-ID
+SEC-Service-ConditionalAccess-Inclusion-PrivilegedAccounts-CP;Included accounts, admin accounts, WorkloadPlane, CP;AU-Service-ConditionalAccess-CP-T0-ID
