@@ -1,6 +1,8 @@
 ﻿#------------------------------------------------------------------------------------------------
 Write-Output "***********************************************************************************************"
-Write-Output "Management & Deployment of Privileged Identity Managemement (PIM)"
+Write-Output "PIM Assignment Wizard"
+Write-Output ""
+Write-Output "Purpose: Create new PIM Assignments using Wizard,based on existing groups, admins, AUs"
 Write-Output ""
 Write-Output "Support: Morten Knudsen - admin@example.invalid | 40 178 179"
 Write-Output "***********************************************************************************************"
@@ -159,76 +161,47 @@ Write-Output "******************************************************************
 
 
 ######################################################################################################
-# Variables
-######################################################################################################
-
-    $DeptGroupsDefinitionFile                                             = "$($global:PathScripts)\DATA\PAG-Definitions-Departments.csv"
-    $RoleGroupsDefinitionFile                                             = "$($global:PathScripts)\DATA\PAG-Definitions-Roles.csv"
-    $TaskGroupsDefinitionFile                                             = "$($global:PathScripts)\DATA\PAG-Definitions-Tasks.csv"
-    $ServiceGroupsDefinitionFile                                          = "$($global:PathScripts)\DATA\PAG-Definitions-Services.csv"
-    $ProcessGroupsDefinitionFile                                          = "$($global:PathScripts)\DATA\PAG-Definitions-Processes.csv"
-    $ResourceGroupsDefinitionFile                                         = "$($global:PathScripts)\DATA\PAG-Definitions-Resources.csv"
-    $AdministrativeUnitDefinitionFile                                     = "$($global:PathScripts)\DATA\AU-Definitions.csv"
-
-    $AdministrativeUnitRoleAssignmentsFile                                = "$($global:PathScripts)\DATA\PAG-Assignments-Roles-AUs.csv"
-    $GroupRoleAssignmentsFile                                             = "$($global:PathScripts)\DATA\PAG-Assignments-Roles-Groups.csv"
-    $GroupAzResourcesAssignmentsFile                                      = "$($global:PathScripts)\DATA\PAG-Assignments-Azure-Resources.csv"
-    $AccountsAssignmentFile                                               = "$($global:PathScripts)\DATA\PAG-Assignments-Admins.csv"
-
-    $AccountsDefinitionFile                                               = "$($global:PathScripts)\DATA\Account-Definitions-Admins.csv"
-
-    $PIM_Function_Path        = "$($global:PathScripts)\FUNCTIONS\PIM-Functions.psm1"
-
-    Write-host "Getting privileged information from Keyvault ... Please Wait !"
-    $PathADDelegationGroups   = Get-AzKeyVaultSecret -VaultName $global:KV_HighPriv_KeyVaultName -Name "PIMforADDelegationGroupsPath" -AsPlainText
-
-    $PathAccounts             = Get-AzKeyVaultSecret -VaultName $global:KV_HighPriv_KeyVaultName -Name "PIMforADAdminAccountsPath" -AsPlainText
-
-    $PIMforADGMSAName         = Get-AzKeyVaultSecret -VaultName $global:KV_HighPriv_KeyVaultName -Name "PIMforADGMSAName" -AsPlainText
-    $PIMforADDomain           = Get-AzKeyVaultSecret -VaultName $global:KV_HighPriv_KeyVaultName -Name "PIMforADDomain" -AsPlainText
-    $PIMforADDomain           = Get-AzKeyVaultSecret -VaultName $global:KV_HighPriv_KeyVaultName -Name "PIMforADDomain" -AsPlainText
-
-    $AD_Credentials = Get-GMSACredential -GMSAName $PIMforADGMSAName -Domain $PIMforADDomain
-
-######################################################################################################
 # Building lists of data
 ######################################################################################################
 
     Import-Module Microsoft.Graph.DeviceManagement.Enrollment
 
-    Write-host "[ 01 / 11 ] Building list of all Users in Entra ID ... Please Wait !"
+    $MaxSteps = "14"
+
+    Write-host ""
+    Write-host "[ 01 / $($MaxSteps) ] Building list of all Users in Entra ID ... Please Wait !"
     $Global:Users_All_ID = Get-MgUser -all:$true
 
-    Write-host "[ 02 / 11 ] Building list of all Groups in Entra ID ... Please Wait !"
+    Write-host "[ 02 / $($MaxSteps) ] Building list of all Groups in Entra ID ... Please Wait !"
     $Global:Groups_All_ID = Get-MgGroup -all:$true
 
-    Write-host "[ 03 / 11 ] Building list of all PAG-Groups in Entra ID ... Please Wait !"
+    Write-host "[ 03 / $($MaxSteps) ] Building list of all PAG-Groups in Entra ID ... Please Wait !"
     $Global:PAG_Groups_Definitions_ID = $Global:Groups_All_ID | `
                                                 Where-Object { ($_.DisplayName -like "PAG-*") } | `
                                                 Select-Object DisplayName, Description, Id | Sort-Object -Property DisplayName
 
-    Write-host "[ 04 / 11 ] Building list of all PAG-Resource Groups for PIM for AD in Entra ID ... Please Wait !"
+    Write-host "[ 04 / $($MaxSteps) ] Building list of all PAG-Resource Groups for PIM for AD in Entra ID ... Please Wait !"
     $Global:PAG_Groups_Resource_SyncAD_Definitions_ID  = $Global:PAG_Groups_Definitions_ID | `
                                                 Where-Object { ($_.DisplayName -like "PAG-RES*") -and ($_.DisplayName -like "*-S_AD")} | `
                                                 Select-Object DisplayName, Description, Id | Sort-Object -Property DisplayName
 
-    Write-host "[ 05 / 11 ] Building list of all PAG-Service Groups for PIM for AD in Entra ID ... Please Wait !"
+    Write-host "[ 05 / $($MaxSteps) ] Building list of all PAG-Service Groups for PIM for AD in Entra ID ... Please Wait !"
     $Global:PAG_Groups_Service_SyncAD_Definitions_ID  = $Global:PAG_Groups_Definitions_ID | `
                                                 Where-Object { ($_.DisplayName -like "PAG-SERV*") -and ($_.DisplayName -like "*-S_AD")} | `
                                                 Select-Object DisplayName, Description, Id | Sort-Object -Property DisplayName
 
-    Write-host "[ 06 / 11 ] Building list of all Administrative Units in Entra ID ... Please Wait !"
+    Write-host "[ 06 / $($MaxSteps) ] Building list of all Administrative Units in Entra ID ... Please Wait !"
     $Global:AU_Definitions_ID = Get-MgDirectoryAdministrativeUnit -All:$true | Select-Object DisplayName, Id | Sort-Object -Property DisplayName
 
-    Write-host "[ 07 / 11 ] Building list of all Admin Accounts in Entra ID ... Please Wait !"
-    $Global:Accounts_Definitions_ID = Get-MgUser-AllProperties-AllUsers | `
+    Write-host "[ 07 / $($MaxSteps) ] Building list of all Admin Accounts in Entra ID ... Please Wait !"
+    $Global:Accounts_Definitions_ID = $Global:Users_All_ID | `
                                                 Where-Object { ( ( ($_.UserPrincipalName -like "Admin-*") -or ($_.UserPrincipalName -like "X-Admin*") ) -and ($_.UserPrincipalName -like "*-ID*") ) } | `
                                                 Select-Object DisplayName, GivenName, SurName, Id | Sort-Object -Property DisplayName
 
-    Write-host "[ 08 / 11 ] Building list of all Role definitions for Groups in Entra ID ... Please Wait !"
+    Write-host "[ 08 / $($MaxSteps) ] Building list of all Role definitions for Groups in Entra ID ... Please Wait !"
     $Global:Role_Group_Definitions_ID       = Get-MgRoleManagementDirectoryRoleDefinition | Select-Object DisplayName, Id
 
-    Write-host "[ 09 / 11 ] Building list of all Role definitions for Administrative Units in Entra ID ... Please Wait !"
+    Write-host "[ 09 / $($MaxSteps) ] Building list of all Role definitions for Administrative Units in Entra ID ... Please Wait !"
     $Global:Role_AU_Definitions_ID          = $Global:Role_Group_Definitions_ID | `
                                                 Where-Object { ($_.DisplayName -like "Authentication Administrator") -or `
                                                                ($_.DisplayName -like "Cloud Device Administrator") -or `
@@ -243,684 +216,672 @@ Write-Output "******************************************************************
                                                                ($_.DisplayName -like "User Administrator") } | `
                                                 Select-Object DisplayName, Id | Sort-Object -Property DisplayName
 
-    Write-host "[ 10 / 11 ] Building list of all Azure Resources ... Please Wait !"
+    Write-host "[ 10 / $($MaxSteps) ] Building list of all Azure Resources ... Please Wait !"
 
-        ######################################################################################################
-        # Get MG & Subscription info
-        ######################################################################################################
+    $MgInfo = AzMGs-Query-AzARG | Query-AzResourceGraph -QueryScope Tenant
+    $SubInfo = AzSubscriptions-Query-AzARG | Query-AzResourceGraph -QueryScope Tenant
 
-        $MgInfo = AzMGs-Query-AzARG | Query-AzResourceGraph -QueryScope Tenant
-        $SubInfo = AzSubscriptions-Query-AzARG | Query-AzResourceGraph -QueryScope Tenant
+    $Global:AzureResources_Definitions_ID   = @()
+    ForEach ($Mg in $MgInfo)
+        {
+            $Obj = new-object PsCustomObject
+            $Obj | Add-Member -MemberType NoteProperty -Name DisplayName -Value $Mg.properties.displayName
+            $Obj | Add-Member -MemberType NoteProperty -Name Name -Value $Mg.name
+            $Obj | Add-Member -MemberType NoteProperty -Name Id -Value $Mg.Id
+            $Global:AzureResources_Definitions_ID += $Obj
+        }
 
-        $Global:AzureResources_Definitions_ID   = @()
-        ForEach ($Mg in $MgInfo)
+    ForEach ($Sub in $SubInfo)
+        {
+            $Obj = new-object PsCustomObject
+            $Obj | Add-Member -MemberType NoteProperty -Name DisplayName -Value $Sub.subsciptionName
+            $Obj | Add-Member -MemberType NoteProperty -Name Name -Value $Sub.subscriptionId
+            $Obj | Add-Member -MemberType NoteProperty -Name Id -Value $Sub.Id
+            $Global:AzureResources_Definitions_ID += $Obj
+        }
+
+
+##########################################################################################################################
+# Main Program
+##########################################################################################################################
+
+    #-----------------------------------------------------------------------------------------------
+    # Step 1 - TYPE of Assignment
+    #-----------------------------------------------------------------------------------------------
+
+        $Step1_Choices = [PSCustomObject]@(
+                                            [PSCustomObject]@{
+                                                Type = "EntraID_Role_Group"
+                                                Description = "Entra ID Role Assignment for Group or Admin Account"
+                                                },
+                                            [PSCustomObject]@{
+                                                Type = "EntraID_Role_AU"
+                                                Description = "Entra ID Role Assignment for Administrative Unit"
+                                                },
+                                            [PSCustomObject]@{
+                                                Type = "Azure_Resource"
+                                                Description = "Azure Resource"
+                                                },
+                                            [PSCustomObject]@{
+                                                Type = "PIM_Groups"
+                                                Description = "PIM for Groups"
+                                                },
+                                            [PSCustomObject]@{
+                                                Type = "AD_PAG_Resource_Groups"
+                                                Description = "Active Directory Resource Group"
+                                                },
+                                            [PSCustomObject]@{
+                                                Type = "AD_PAG_Service_Groups"
+                                                Description = "Active Directory Service Group"
+                                                }
+                                          )
+
+        $Step1_Result  = $Step1_Choices | Select-Object Description, Type | Out-GridView -Title "PIM Assignment Wizard | Step 1/6: Choose TYPE of Assignment" -PassThru
+
+
+    #-----------------------------------------------------------------------------------------------
+    # Step 2 - SCOPE to delegate
+    #-----------------------------------------------------------------------------------------------
+
+        If ($Step1_Result.Type -eq "EntraID_Role_Group")
             {
-                $Obj = new-object PsCustomObject
-                $Obj | Add-Member -MemberType NoteProperty -Name DisplayName -Value $Mg.properties.displayName
-                $Obj | Add-Member -MemberType NoteProperty -Name Name -Value $Mg.name
-                $Obj | Add-Member -MemberType NoteProperty -Name Id -Value $Mg.Id
-                $Global:AzureResources_Definitions_ID += $Obj
+                $Step2_Choices = $Global:Role_Group_Definitions_ID
+                $Step2_Result  = $Step2_Choices | Out-GridView -Title "PIM Assignment Wizard | Step 2/6: Choose Role to delegate (SCOPE)" -PassThru
+            }
+        ElseIf ($Step1_Result.Type -eq "EntraID_Role_AU")
+            {
+                $Step2_Choices = $Global:Role_AU_Definitions_ID
+                $Step2_Result  = $Step2_Choices | Out-GridView -Title "PIM Assignment Wizard | Step 2/6: Choose Role to delegate (SCOPE)" -PassThru
+            }
+        ElseIf ($Step1_Result.Type -eq "Azure_Resource")
+            {
+                $Step2_Choices = $Global:AzureResources_Definitions_ID 
+
+                $Step2_Result  = $Step2_Choices | Out-GridView -Title "PIM Assignment Wizard | Step 2/6: Choose Azure Resource to delegate (SCOPE)" -PassThru
+            }
+        ElseIf ($Step1_Result.Type -eq "PIM_Groups")
+            {
+                $Step2_Choices = $Global:PAG_Groups_Definitions_ID
+
+                $Step2_Result  = $Step2_Choices | Out-GridView -Title "PIM Assignment Wizard | Step 2/6: Choose Entra ID Group to delegate (SCOPE)" -PassThru
+            }
+        ElseIf ($Step1_Result.Type -eq "AD_PAG_Resource_Groups")
+            {
+                $Step2_Choices = $Global:PAG_Groups_Resource_SyncAD_Definitions_ID
+
+                $Step2_Result  = $Step2_Choices | Out-GridView -Title "PIM Assignment Wizard | Step 2/7: Choose PAG Resource Group to delegate for PIM for AD (SCOPE)" -PassThru
+            }
+        ElseIf ($Step1_Result.Type -eq "AD_PAG_Service_Groups")
+            {
+                $Step2_Choices = $Global:PAG_Groups_Service_SyncAD_Definitions_ID
+
+                $Step2_Result  = $Step2_Choices | Out-GridView -Title "PIM Assignment Wizard | Step 2/7: Choose PAG Service Group to delegate for PIM for AD (SCOPE)" -PassThru
             }
 
-        ForEach ($Sub in $SubInfo)
+
+    #-----------------------------------------------------------------------------------------------
+    # Step 3 - TYPE of security principal, WHO should be delegated - Admin Account / Group / Administrative Unit
+    #-----------------------------------------------------------------------------------------------
+
+        If ($Step1_Result.Type -eq "EntraID_Role_AU")
             {
-                $Obj = new-object PsCustomObject
-                $Obj | Add-Member -MemberType NoteProperty -Name DisplayName -Value $Sub.subsciptionName
-                $Obj | Add-Member -MemberType NoteProperty -Name Name -Value $Sub.subscriptionId
-                $Obj | Add-Member -MemberType NoteProperty -Name Id -Value $Sub.Id
-                $Global:AzureResources_Definitions_ID += $Obj
+                $Step3_Result = "Administrative Unit"
+            }
+        Else
+            {
+                $Step3_Choices = @("Admin Account","Group")
+
+                $Step3_Result  = $Step3_Choices | Out-GridView -Title "PIM Assignment Wizard | Step 3/6: Choose Type of security principal, WHO should be delegated" -PassThru
             }
 
-    Write-host "[ 11 / 11 ] Building list of all Azure Resources Roles ... Please Wait !"
-    $Global:AzureResourcesRole_Definitions_ID = Get-AzRoleDefinition | `
-                                                Select-Object Name, Description, Id | Sort-Object -Property Name
+    #-----------------------------------------------------------------------------------------------
+    # Step 4 - WHO should be delegated
+    #-----------------------------------------------------------------------------------------------
 
-##########################################################################################################################
-# Step 1 - TYPE of Assignment
-##########################################################################################################################
+        If ($Step3_Result -eq "Admin Account")
+            {
+                $Step4_Choices = $Global:Accounts_Definitions_ID
 
-    $Step1_Choices = [PSCustomObject]@(
-                                        [PSCustomObject]@{
-                                            Type = "EntraID_Role_Group"
-                                            Description = "Entra ID Role Assignment for Group or Admin Account"
-                                            },
-                                        [PSCustomObject]@{
-                                            Type = "EntraID_Role_AU"
-                                            Description = "Entra ID Role Assignment for Administrative Unit"
-                                            },
-                                        [PSCustomObject]@{
-                                            Type = "Azure_Resource"
-                                            Description = "Azure Resource"
-                                            },
-                                        [PSCustomObject]@{
-                                            Type = "PIM_Groups"
-                                            Description = "PIM for Groups"
-                                            },
-                                        [PSCustomObject]@{
-                                            Type = "AD_PAG_Resource_Groups"
-                                            Description = "Active Directory Resource Group"
-                                            },
-                                        [PSCustomObject]@{
-                                            Type = "AD_PAG_Service_Groups"
-                                            Description = "Active Directory Service Group"
-                                            }
-                                      )
+                $Step4_Result  = $Step4_Choices | Out-GridView -Title "PIM Assignment Wizard | Step 4/6: Choose Admin Account to delegate (WHO)" -PassThru
+            }
+        If ($Step3_Result -eq "Group")
+            {
+                $Step4_Choices = $Global:PAG_Groups_Definitions_ID
 
-    $Step1_Result  = $Step1_Choices | Select-Object Description, Type | Out-GridView -Title "Step 1/6: Choose TYPE of Assignment" -PassThru
+                $Step4_Result  = $Step4_Choices | Out-GridView -Title "PIM Assignment Wizard | Step 4/6: Choose Group to delegate (WHO)" -PassThru
 
+            }
+        ElseIf ($Step3_Result -eq "Administrative Unit")
+            {
+                $Step4_Choices = $Global:AU_Definitions_ID
 
-##########################################################################################################################
-# Step 2 - SCOPE to delegate
-##########################################################################################################################
+                $Step4_Result  = $Step4_Choices | Out-GridView -Title "PIM Assignment Wizard | Step 4/6: Choose Administrative Unit to delegate (WHERE)" -PassThru
+            }
 
-    If ($Step1_Result.Type -eq "EntraID_Role_Group")
-        {
-            $Step2_Choices = $Global:Role_Group_Definitions_ID
-            $Step2_Result  = $Step2_Choices | Out-GridView -Title "Step 2/6: Choose Role to delegate (SCOPE)" -PassThru
-        }
-    ElseIf ($Step1_Result.Type -eq "EntraID_Role_AU")
-        {
-            $Step2_Choices = $Global:Role_AU_Definitions_ID
-            $Step2_Result  = $Step2_Choices | Out-GridView -Title "Step 2/6: Choose Role to delegate (SCOPE)" -PassThru
-        }
-    ElseIf ($Step1_Result.Type -eq "Azure_Resource")
-        {
-            $Step2_Choices = $Global:AzureResources_Definitions_ID 
+    #-----------------------------------------------------------------------------------------------
+    # Step 5 - WHAT level of Permission - only for Azure Resources & Role Assignments for AUs
+    # AUs - WHAT level of assignment can be group or admin
+    # AzRes - can be any Azure Resource Role
+    #-----------------------------------------------------------------------------------------------
 
-            $Step2_Result  = $Step2_Choices | Out-GridView -Title "Step 2/6: Choose Azure Resource to delegate (SCOPE)" -PassThru
-        }
-    ElseIf ($Step1_Result.Type -eq "PIM_Groups")
-        {
-            $Step2_Choices = $Global:PAG_Groups_Definitions_ID
-
-            $Step2_Result  = $Step2_Choices | Out-GridView -Title "Step 2/6: Choose Entra ID Group to delegate (SCOPE)" -PassThru
-        }
-    ElseIf ($Step1_Result.Type -eq "AD_PAG_Resource_Groups")
-        {
-            $Step2_Choices = $Global:PAG_Groups_Resource_SyncAD_Definitions_ID
-
-            $Step2_Result  = $Step2_Choices | Out-GridView -Title "Step 2/7: Choose PAG Resource Group to delegate for PIM for AD (SCOPE)" -PassThru
-        }
-    ElseIf ($Step1_Result.Type -eq "AD_PAG_Service_Groups")
-        {
-            $Step2_Choices = $Global:PAG_Groups_Service_SyncAD_Definitions_ID
-
-            $Step2_Result  = $Step2_Choices | Out-GridView -Title "Step 2/7: Choose PAG Service Group to delegate for PIM for AD (SCOPE)" -PassThru
-        }
-
-
-##########################################################################################################################
-# Step 3 - TYPE of security principal, WHO should be delegated - Admin Account / Group / Administrative Unit
-##########################################################################################################################
-
-    If ($Step1_Result.Type -eq "EntraID_Role_AU")
-        {
-            $Step3_Result = "Administrative Unit"
-        }
-    Else
-        {
-            $Step3_Choices = @("Admin Account","Group")
-
-            $Step3_Result  = $Step3_Choices | Out-GridView -Title "Step 3/6: Choose Type of security principal, WHO should be delegated" -PassThru
-        }
-
-##########################################################################################################################
-# Step 4 - WHO should be delegated
-##########################################################################################################################
-
-    If ($Step3_Result -eq "Admin Account")
-        {
-            $Step4_Choices = $Global:Accounts_Definitions_ID
-
-            $Step4_Result  = $Step4_Choices | Out-GridView -Title "Step 4/6: Choose Admin Account to delegate (WHO)" -PassThru
-        }
-    If ($Step3_Result -eq "Group")
-        {
-            $Step4_Choices = $Global:PAG_Groups_Definitions_ID
-
-            $Step4_Result  = $Step4_Choices | Out-GridView -Title "Step 4/6: Choose Group to delegate (WHO)" -PassThru
-
-        }
-    ElseIf ($Step3_Result -eq "Administrative Unit")
-        {
-            $Step4_Choices = $Global:AU_Definitions_ID
-
-            $Step4_Result  = $Step4_Choices | Out-GridView -Title "Step 4/6: Choose Administrative Unit to delegate (WHERE)" -PassThru
-        }
-
-##########################################################################################################################
-# Step 5 - WHAT level of Permission - only for Azure Resources & Role Assignments for AUs
-# AUs - WHAT level of assignment can be group or admin
-# AzRes - can be any Azure Resource Role
-##########################################################################################################################
-
-    If ($Step1_Result.Type -eq "Azure_Resource")
-        {
-            $Step5_Choices = $Global:AzureResourcesRole_Definitions_ID
+        If ($Step1_Result.Type -eq "Azure_Resource")
+            {
+                $Step5_Choices = $Global:AzureResourcesRole_Definitions_ID
             
-            $Step5_Result  = $Step5_Choices | Out-GridView -Title "Step 5/6: Choose Azure Resource Role to assign for the selected Azure scope" -PassThru
-        }
+                $Step5_Result  = $Step5_Choices | Out-GridView -Title "PIM Assignment Wizard | Step 5/6: Choose Azure Resource Role to assign for the selected Azure scope" -PassThru
+            }
 
-    ElseIf ($Step1_Result.Type -eq "EntraID_Role_AU")
-        {
-            $Step5A_Choices = @("Admin Account","Group")
+        ElseIf ($Step1_Result.Type -eq "EntraID_Role_AU")
+            {
+                $Step5A_Choices = @("Admin Account","Group")
 
-            $Step5A_Result  = $Step5A_Choices | Out-GridView -Title "Step 4A/6: Choose WHO to Assign the selected Role for (WHO)" -PassThru
+                $Step5A_Result  = $Step5A_Choices | Out-GridView -Title "PIM Assignment Wizard | Step 4A/6: Choose WHO to Assign the selected Role for (WHO)" -PassThru
 
-            Switch ($Step5A_Result)
-                {
-                    "Group"         { 
-                                        $Step5_Choices = $Global:PAG_Groups_Definitions_ID
-                                    }
-                    "Admin Account" { 
-                                        $Step5_Choices = $Global:Accounts_Definitions_ID
-                                    }
-                }
+                Switch ($Step5A_Result)
+                    {
+                        "Group"         { 
+                                            $Step5_Choices = $Global:PAG_Groups_Definitions_ID
+                                        }
+                        "Admin Account" { 
+                                            $Step5_Choices = $Global:Accounts_Definitions_ID
+                                        }
+                    }
 
-            $Step5_Result  = $Step5_Choices | Out-GridView -Title "Step 5/6: Choose WHO to Assign the selected Role for (WHO)" -PassThru
-        }
+                $Step5_Result  = $Step5_Choices | Out-GridView -Title "PIM Assignment Wizard | Step 5/6: Choose WHO to Assign the selected Role for (WHO)" -PassThru
+            }
 
 
-##########################################################################################################################
-# Step 6 - Type of Assignment
-##########################################################################################################################
+    #-----------------------------------------------------------------------------------------------
+    # Step 6 - Type of Assignment
+    #-----------------------------------------------------------------------------------------------
 
-    # AU Role assignments isn't done through PIM. It Assigns a Role to a group or admin on AU
-    # Everything else is done through PIM
+        # AU Role assignments isn't done through PIM. It Assigns a Role to a group or admin on AU
+        # Everything else is done through PIM
 
-    If ($Step1_Result.Type -ne "EntraID_Role_AU")
-        {
+        If ($Step1_Result.Type -ne "EntraID_Role_AU")
+            {
 
-            $Step6_Choices = [PSCustomObject]@(
-                                                [PSCustomObject]@{
-                                                    AssignmentType = "Eligible"
-                                                    AssignmentLengthDays = 365
-                                                    Permanent = $false
-                                                    },
-                                                [PSCustomObject]@{
-                                                    AssignmentType = "Active"
-                                                    AssignmentLengthDays = 365
-                                                    Permanent = $false
-                                                    }
-                                              )
+                $Step6_Choices = [PSCustomObject]@(
+                                                    [PSCustomObject]@{
+                                                        AssignmentType = "Eligible"
+                                                        AssignmentLengthDays = 365
+                                                        Permanent = $false
+                                                        },
+                                                    [PSCustomObject]@{
+                                                        AssignmentType = "Active"
+                                                        AssignmentLengthDays = 365
+                                                        Permanent = $false
+                                                        }
+                                                  )
 
-            $Step6_Result  = $Step6_Choices | Out-GridView -Title "Step 6/6: Choose Type of Assignment (HOW)" -PassThru
-        }
+                $Step6_Result  = $Step6_Choices | Out-GridView -Title "Step 6/6: Choose Type of Assignment (HOW)" -PassThru
+            }
 
-##########################################################################################################################
-# Step 7 - Assignment
-##########################################################################################################################
+    #-----------------------------------------------------------------------------------------------
+    # Step 7 - Assignment
+    #-----------------------------------------------------------------------------------------------
 
-    If ($Step1_Result.Type -eq "EntraID_Role_Group")
-        {
-            $RoleSelectedId  = $Step2_Result.Id
-            $RoleSelectedDisplayName = $Step2_Result.DisplayName
-            $TypeOfTarget = $Step3_Result
+        If ($Step1_Result.Type -eq "EntraID_Role_Group")
+            {
+                #-----------------------------------------------------------------------
+                # Variables
+                #-----------------------------------------------------------------------
+                    $RoleSelectedId                 = $Step2_Result.Id
+                    $RoleSelectedDisplayName        = $Step2_Result.DisplayName
 
-            If ($TypeOfTarget -eq "Admin Account")
-                {
-                    $TargetSelectedId = $Step4_Result.Id
-                    $TargetSelectedDisplayName = $Step4_Result.DisplayName
-                }
-            ElseIf ($TypeOfTarget -eq "Group")
-                {
-                    $TargetSelectedId = $Step4_Result.Id
-                    $TargetSelectedDisplayName = $Step4_Result.DisplayName
-                }
-            $Assignment_Type = $Step6_Result.AssignmentType
-            $Assignment_NumOfDaysWhenExpire = $Step6_Result.AssignmentLengthDays
-            $Assignment_Permanent = $Step6_Result.Permanent
+                    $TypeOfTarget = $Step3_Result
+                    $TargetSelectedId               = $Step4_Result.Id
+                    $TargetSelectedDisplayName      = $Step4_Result.DisplayName
 
-            ########################################################################
-            # Role Assignment
-            ########################################################################
+                    $Assignment_Type                = $Step6_Result.AssignmentType
+                    $Assignment_NumOfDaysWhenExpire = $Step6_Result.AssignmentLengthDays
+                    $Assignment_Permanent           = $Step6_Result.Permanent
 
-            $Justification = "IAC: Assigning role $($RoleSelectedDisplayName) to $($TypeOfTarget) $($TargetSelectedDisplayName)"
+                #-----------------------------------------------------------------------
+                # Assignment
+                #-----------------------------------------------------------------------
 
-            $params = @{
-	                        action = "AdminAssign"
-	                        justification = $Justification
-	                        directoryScopeId = "/"
-                            roleDefinitionId = $RoleSelectedId
-                            principalId = $TargetSelectedId
+                    $Justification = "IAC: Assigning role $($RoleSelectedDisplayName) to $($TypeOfTarget) $($TargetSelectedDisplayName)"
+
+                    $params = @{
+	                                action = "AdminAssign"
+	                                justification = $Justification
+	                                directoryScopeId = "/"
+                                    roleDefinitionId = $RoleSelectedId
+                                    principalId = $TargetSelectedId
+                                }
+
+                    If (!($Assignment_Permanent))
+                        {
+                            $startDateTime = (Get-date ([datetime]::Now.ToUniversalTime()) -format "yyyy-MM-ddTHH:mm:ssK")
+                            $endDateTime   = (Get-date $StartDateTime).AddDays($Assignment_NumOfDaysWhenExpire)
+                            $endDateTime   = (Get-date $endDateTime -format "yyyy-MM-ddTHH:mm:ssK")
+
+                            $params += @{
+	                                        scheduleInfo = @{
+		                                                        startDateTime = $startDateTime
+		                                                        expiration = @{
+			                                                                    type = "AfterDateTime"
+			                                                                    endDateTime = $endDateTime
+		                                                        }
+                                                            }
+                                        }
                         }
 
-            If (!($Assignment_Permanent))
-                {
-                    $startDateTime = (Get-date ([datetime]::Now.ToUniversalTime()) -format "yyyy-MM-ddTHH:mm:ssK")
-                    $endDateTime   = (Get-date $StartDateTime).AddDays($Assignment_NumOfDaysWhenExpire)
-                    $endDateTime   = (Get-date $endDateTime -format "yyyy-MM-ddTHH:mm:ssK")
 
-                        $params += @{
-	                                    scheduleInfo = @{
-		                                                    startDateTime = $startDateTime
-		                                                    expiration = @{
-			                                                                type = "AfterDateTime"
-			                                                                endDateTime = $endDateTime
-		                                                    }
-                                                        }
-                                    }
-                }
+                    ElseIf ($Assignment_Permanent)
+                        {
+                            $startDateTime = (Get-date ([datetime]::Now.ToUniversalTime()) -format "yyyy-MM-ddTHH:mm:ssK")
+                            $endDateTime   = (Get-date $StartDateTime).AddDays($Assignment_NumOfDaysWhenExpire)
+                            $endDateTime   = (Get-date $endDateTime -format "yyyy-MM-ddTHH:mm:ssK")
 
-
-            ElseIf ($Assignment_Permanent)
-                {
-                    $startDateTime = (Get-date ([datetime]::Now.ToUniversalTime()) -format "yyyy-MM-ddTHH:mm:ssK")
-                    $endDateTime   = (Get-date $StartDateTime).AddDays($Assignment_NumOfDaysWhenExpire)
-                    $endDateTime   = (Get-date $endDateTime -format "yyyy-MM-ddTHH:mm:ssK")
-
-                        $params += @{
-	                                    scheduleInfo = @{
-   	                                                        startDateTime = $startDateTime
-		                                                    expiration = @{
-			                                                                    type = "noExpiration"
-		                                                                    }
-                                                        }
-                                    }
-                }
+                            $params += @{
+	                                        scheduleInfo = @{
+   	                                                            startDateTime = $startDateTime
+		                                                        expiration = @{
+			                                                                        type = "noExpiration"
+		                                                                        }
+                                                            }
+                                        }
+                        }
                     
-            If ($Assignment_Type -eq "Eligible")
-                {
-                    Write-Host ""
-                    Write-Host "PIM - Assigning $($RoleSelectedDisplayName) role as Eligible"
-                    Write-host "      for $($TypeOfTarget) $($TargetSelectedDisplayName)"
+                    If ($Assignment_Type -eq "Eligible")
+                        {
+                            Write-Host ""
+                            Write-Host "PIM - Assigning $($RoleSelectedDisplayName) role as Eligible"
+                            Write-host "      for $($TypeOfTarget) $($TargetSelectedDisplayName)"
 
-                    New-MgRoleManagementDirectoryRoleEligibilityScheduleRequest -BodyParameter $params
-                }
-            ElseIf ($Assignment_Type -eq "Active")
-                {
-                    Write-Host ""
-                    Write-Host "PIM - Assigning $($RoleSelectedDisplayName) role as Active"
-                    Write-host "      for $($TypeOfTarget) $($TargetSelectedDisplayName)"
+                            New-MgRoleManagementDirectoryRoleEligibilityScheduleRequest -BodyParameter $params
+                        }
+                    ElseIf ($Assignment_Type -eq "Active")
+                        {
+                            Write-Host ""
+                            Write-Host "PIM - Assigning $($RoleSelectedDisplayName) role as Active"
+                            Write-host "      for $($TypeOfTarget) $($TargetSelectedDisplayName)"
 
-                    New-MgRoleManagementDirectoryRoleAssignmentScheduleRequest -BodyParameter $params
-                }
-        }
-    ElseIf ($Step1_Result.Type -eq "EntraID_Role_AU")
-        {
-            $RoleSelectedId = $Step2_Result.Id
-            $RoleSelectedDisplayName = $Step2_Result.DisplayName
-            $AUScopeId = $Step4_Result.Id
-            $AUScopeDisplayName = $Step4_Result.DisplayName
-            $TypeOfTarget            = $Step3_Result
-            If ($TypeOfTarget -eq "Admin Account")
-                {
-                    $TargetSelectedId = $Step5_Result.Id
+                            New-MgRoleManagementDirectoryRoleAssignmentScheduleRequest -BodyParameter $params
+                        }
+            }
+        #---------------------------------------------------------------------------------------------------------------------
+        ElseIf ($Step1_Result.Type -eq "EntraID_Role_AU")
+            {
+                #-----------------------------------------------------------------------
+                # Variables
+                #-----------------------------------------------------------------------
+
+                    $RoleSelectedId            = $Step2_Result.Id
+                    $RoleSelectedDisplayName   = $Step2_Result.DisplayName
+                    $AUScopeId                 = $Step4_Result.Id
+                    $AUScopeDisplayName        = $Step4_Result.DisplayName
+                    $TypeOfTarget              = $Step3_Result
+                    $TargetSelectedId          = $Step5_Result.Id
                     $TargetSelectedDisplayName = $Step5_Result.DisplayName
-                }
 
-            ElseIf ($TypeOfTarget -eq "Group")
-                {
-                    $TargetSelectedId = $Step5_Result.Id
-                    $TargetSelectedDisplayName = $Step5_Result.DisplayName
-                }
+                #-----------------------------------------------------------------------
+                # Assignment
+                #-----------------------------------------------------------------------
 
-            $params = @{
-	            "@odata.type" = "#microsoft.graph.unifiedRoleAssignment"
-	            roleDefinitionId = "$($RoleSelectedId)"
-	            principalId = "$($TargetSelectedId)"
-	            directoryScopeId = "/administrativeUnits/$($AUScopeId)"
+                    $params = @{
+	                    "@odata.type" = "#microsoft.graph.unifiedRoleAssignment"
+	                    roleDefinitionId = "$($RoleSelectedId)"
+	                    principalId = "$($TargetSelectedId)"
+	                    directoryScopeId = "/administrativeUnits/$($AUScopeId)"
+                    }
+
+                    Write-Host ""
+                    Write-Host "PIM - Assigning $($RoleSelectedDisplayName) role"
+                    Write-host "      for $($TypeOfTarget) $($TargetSelectedDisplayName)"
+                    Write-host "      on Administrative Unit $($AUScopeDisplayName)"
+
+                    New-MgRoleManagementDirectoryRoleAssignment -BodyParameter $params
+            }
+        #---------------------------------------------------------------------------------------------------------------------
+        ElseIf ($Step1_Result.Type -eq "Azure_Resource")
+            {
+                #-----------------------------------------------------------------------
+                # Variables
+                #-----------------------------------------------------------------------
+
+                    $AzureResourceSelectedId          = $Step2_Result.Id
+                    $AzureResourceSelectedDisplayName = $Step2_Result.Name
+
+                    $TypeOfTarget                     = $Step3_Result
+                    $TargetSelectedId                 = $Step4_Result.Id
+                    $TargetSelectedDisplayName        = $Step4_Result.DisplayName
+            
+                    $AzRolePermissionId               = $Step5_Result.Id
+                    $AzRolePermissionDisplayName      = $Step5_Result.Name
+
+                    $Assignment_Type                  = $Step6_Result.AssignmentType
+                    $Assignment_NumOfDaysWhenExpire   = $Step6_Result.AssignmentLengthDays
+                    $Assignment_Permanent             = $Step6_Result.Permanent
+
+
+                #-----------------------------------------------------------------------
+                # Assignment
+                #-----------------------------------------------------------------------
+
+                    $roleDefinitionId = $AzureResourceSelectedId + "/providers/Microsoft.Authorization/roleDefinitions/" + $AzRolePermissionId
+
+                    $Justification = "IAC: Assigning role $($AzRolePermissionDisplayName) to $($TypeOfTarget) $($TargetSelectedDisplayName)"
+
+                    If (!($Assignment_Permanent))
+                        {
+                            $startDateTime = (Get-date ([datetime]::Now.ToUniversalTime()) -format "yyyy-MM-ddTHH:mm:ssK")
+                            $endDateTime   = (Get-date $StartDateTime).AddDays($Assignment_NumOfDaysWhenExpire)
+                            $endDateTime   = (Get-date $endDateTime -format "yyyy-MM-ddTHH:mm:ssK")
+
+                            $AzRoleAssignmentBody = [pscustomobject][ordered]@{
+                                                        properties = @{
+                                                                            principalId = $TargetSelectedId
+                                                                            roleDefinitionId = $roleDefinitionId
+	                                                                        requestType = "AdminAssign"
+                                                                            justification = $Justification
+                                                                            scheduleInfo = @{
+                                                                                            startDateTime = $startDateTime
+                                                                                            expiration = @{
+			                                                                                                    type = "AfterDateTime"
+			                                                                                                    endDateTime = $endDateTime
+                                                                                                            }
+                                                                                        }
+                                                                        }
+                                                    }
+                        }
+                    ElseIf ($Assignment_Permanent)
+                        {
+                            $startDateTime = (Get-date ([datetime]::Now.ToUniversalTime()) -format "yyyy-MM-ddTHH:mm:ssK")
+                            $endDateTime   = (Get-date $StartDateTime).AddDays($Assignment_NumOfDaysWhenExpire)
+                            $endDateTime   = (Get-date $endDateTime -format "yyyy-MM-ddTHH:mm:ssK")
+
+                            $AzRoleAssignmentBody = [pscustomobject][ordered]@{
+                                                        properties = @{
+                                                                            principalId = $TargetSelectedId
+                                                                            roleDefinitionId = $roleDefinitionId
+                                                                            justification = $Justification
+	                                                                        requestType = "AdminAssign"
+                                                                            scheduleInfo = @{
+                                                                                                startDateTime = $startDateTime
+                                                                                                expiration = @{
+			                                                                                                        type = "noExpiration"
+                                                                                                              }
+                                                                                            }
+                                                                      }
+                                                    }
+                        }
+
+                    $Headers = Get-AzAccessTokenManagement
+
+                    $Guid = (new-guid).Guid
+
+                    $AzRoleAssignmentBodyJson = $AzRoleAssignmentBody | ConvertTo-Json -Depth 20
+
+                    Write-Host ""
+                    Write-Host "PIM - Assigning $($AzRolePermissionDisplayName) role as $($Assignment_Type)"
+                    Write-host "      for $($TypeOfTarget) $($TargetSelectedDisplayName)"
+                    Write-Host "      on scope [ $($AzureResourceSelectedDisplayName) ]"
+                    Write-host "      $($AzureResourceSelectedId) "
+
+                    If ($AssignmentType -eq "Eligible")
+                        {
+                            $AzGraphUri = "https://management.azure.com" + $AzureResourceSelectedId + "/providers/Microsoft.Authorization/roleEligibilityScheduleRequests/" + $Guid + "?api-version=2020-10-01-preview"
+                        }
+                    ElseIf ($AssignmentType -eq "Active")
+                        {
+                            $AzGraphUri = "https://management.azure.com" + $AzureResourceSelectedId + "/providers/Microsoft.Authorization/roleEligibilityScheduleRequests/" + $Guid + "?api-version=2020-10-01-preview"
+                        }
+
+                    invoke-webrequest -UseBasicParsing -Method PUT -Uri $AzGraphUri -Headers $Headers -Body $AzRoleAssignmentBodyJson
+
+        <#
+                    Try
+                        {
+                            $Response   = invoke-webrequest -UseBasicParsing -Method PUT -Uri $AzGraphUri -Headers $Headers -Body $AzRoleAssignmentBodyJson
+                        }
+                    Catch
+                        {
+        #>
+                }
+        #---------------------------------------------------------------------------------------------------------------------
+        ElseIf ($Step1_Result.Type -eq "PIM_Groups")
+            {
+                #-----------------------------------------------------------------------
+                # Variables
+                #-----------------------------------------------------------------------
+
+                    $PIMGroupSelectedId             = $Step2_Result.Id
+                    $PIMGroupSelectedDisplayName    = $Step2_Result.DisplayName
+
+                    $TypeOfTarget                   = $Step3_Result
+
+                    $TargetSelectedId               = $Step4_Result.Id
+                    $TargetSelectedDisplayName      = $Step4_Result.DisplayName
+
+                    $Assignment_Type                = $Step6_Result.AssignmentType
+                    $Assignment_NumOfDaysWhenExpire = $Step6_Result.AssignmentLengthDays
+                    $Assignment_Permanent           = $Step6_Result.Permanent
+
+
+                #-----------------------------------------------------------------------
+                # Assignment
+                #-----------------------------------------------------------------------
+
+                    Import-Module Microsoft.Graph.DeviceManagement.Enrollment
+
+                    $Justification = "IAC: Assigning access to group $($PIMGroupSelectedDisplayName) for $($TypeOfTarget) $($TargetSelectedDisplayName)"
+
+                    $params = @{
+	                    accessId = "member"
+	                    groupId = $PIMGroupSelectedId
+	                    action = "AdminAssign"
+	                    justification = $Justification
+	                    directoryScopeId = "/"
+                        principalId = $TargetSelectedId
+                    }
+
+                    If (!($Assignment_Permanent))
+                        {
+                            $startDateTime = (Get-date ([datetime]::Now.ToUniversalTime()) -format "yyyy-MM-ddTHH:mm:ssK")
+                            $endDateTime   = (Get-date $StartDateTime).AddDays($Assignment_NumOfDaysWhenExpire)
+                            $endDateTime   = (Get-date $endDateTime -format "yyyy-MM-ddTHH:mm:ssK")
+
+                                $params += @{
+	                                            scheduleInfo = @{
+		                                                            startDateTime = $startDateTime
+		                                                            expiration = @{
+			                                                                        type = "AfterDateTime"
+			                                                                        endDateTime = $endDateTime
+		                                                            }
+                                                                }
+                                            }
+                        }
+                    ElseIf ($Assignment_Permanent)
+                        {
+                            $startDateTime = (Get-date ([datetime]::Now.ToUniversalTime()) -format "yyyy-MM-ddTHH:mm:ssK")
+                            $endDateTime   = (Get-date $StartDateTime).AddDays($Assignment_NumOfDaysWhenExpire)
+                            $endDateTime   = (Get-date $endDateTime -format "yyyy-MM-ddTHH:mm:ssK")
+
+                                $params += @{
+	                                            scheduleInfo = @{
+   	                                                                startDateTime = $startDateTime
+		                                                            expiration = @{
+			                                                                            type = "noExpiration"
+		                                                                            }
+                                                                }
+                                            }
+                        }
+
+                    Write-Host ""
+                    Write-Host "PIM - Assigning $($TypeOfTarget) $($TargetSelectedDisplayName) as $($Assignment_Type)"
+                    Write-host "      to group $($PIMGroupSelectedDisplayName)"
+
+                    If ($Assignment_Type -eq "Eligible")
+                        {
+                            New-MgBetaIdentityGovernancePrivilegedAccessGroupEligibilityScheduleRequest -BodyParameter $params
+                        }
+                    ElseIf ($AssignmentType -eq "Active")
+                        {
+                            New-MgBetaIdentityGovernancePrivilegedAccessGroupAssignmentScheduleRequest -BodyParameter $params
+                        }
+            }
+        #---------------------------------------------------------------------------------------------------------------------
+        ElseIf ($Step1_Result.Type -eq "AD_PAG_Resource_Groups")
+            {
+                #-----------------------------------------------------------------------
+                # Variables
+                #-----------------------------------------------------------------------
+
+                    $PIMGroupSelectedId             = $Step2_Result.Id
+                    $PIMGroupSelectedDisplayName    = $Step2_Result.DisplayName
+
+                    $TypeOfTarget                   = $Step3_Result
+                    $TargetSelectedId               = $Step4_Result.Id
+                    $TargetSelectedDisplayName      = $Step4_Result.DisplayName
+
+                    $Assignment_Type                = $Step6_Result.AssignmentType
+                    $Assignment_NumOfDaysWhenExpire = $Step6_Result.AssignmentLengthDays
+                    $Assignment_Permanent           = $Step6_Result.Permanent
+
+                #-----------------------------------------------------------------------
+                # Assignment
+                #-----------------------------------------------------------------------
+
+                    Import-Module Microsoft.Graph.DeviceManagement.Enrollment
+
+                    $Justification = "IAC: Assigning access to group $($PIMGroupSelectedDisplayName) for $($TypeOfTarget) $($TargetSelectedDisplayName)"
+
+                    $params = @{
+	                    accessId = "member"
+	                    groupId = $PIMGroupSelectedId
+	                    action = "AdminAssign"
+	                    justification = $Justification
+	                    directoryScopeId = "/"
+                        principalId = $TargetSelectedId
+                    }
+
+                    If (!($Assignment_Permanent))
+                        {
+                            $startDateTime = (Get-date ([datetime]::Now.ToUniversalTime()) -format "yyyy-MM-ddTHH:mm:ssK")
+                            $endDateTime   = (Get-date $StartDateTime).AddDays($Assignment_NumOfDaysWhenExpire)
+                            $endDateTime   = (Get-date $endDateTime -format "yyyy-MM-ddTHH:mm:ssK")
+
+                                $params += @{
+	                                            scheduleInfo = @{
+		                                                            startDateTime = $startDateTime
+		                                                            expiration = @{
+			                                                                        type = "AfterDateTime"
+			                                                                        endDateTime = $endDateTime
+		                                                            }
+                                                                }
+                                            }
+                        }
+                    ElseIf ($Assignment_Permanent)
+                        {
+                            $startDateTime = (Get-date ([datetime]::Now.ToUniversalTime()) -format "yyyy-MM-ddTHH:mm:ssK")
+                            $endDateTime   = (Get-date $StartDateTime).AddDays($Assignment_NumOfDaysWhenExpire)
+                            $endDateTime   = (Get-date $endDateTime -format "yyyy-MM-ddTHH:mm:ssK")
+
+                                $params += @{
+	                                            scheduleInfo = @{
+   	                                                                startDateTime = $startDateTime
+		                                                            expiration = @{
+			                                                                            type = "noExpiration"
+		                                                                            }
+                                                                }
+                                            }
+                        }
+
+                    Write-Host ""
+                    Write-Host "PIM - Assigning $($TypeOfTarget) $($TargetSelectedDisplayName) as $($Assignment_Type)"
+                    Write-host "      to group $($PIMGroupSelectedDisplayName)"
+
+                    If ($Assignment_Type -eq "Eligible")
+                        {
+                            New-MgBetaIdentityGovernancePrivilegedAccessGroupEligibilityScheduleRequest -BodyParameter $params
+                        }
+                    ElseIf ($AssignmentType -eq "Active")
+                        {
+                            New-MgBetaIdentityGovernancePrivilegedAccessGroupAssignmentScheduleRequest -BodyParameter $params
+                        }
+            }
+        #---------------------------------------------------------------------------------------------------------------------
+        ElseIf ($Step1_Result.Type -eq "AD_PAG_Service_Groups")
+            {
+                #-----------------------------------------------------------------------
+                # Variables
+                #-----------------------------------------------------------------------
+
+                    $PIMGroupSelectedId             = $Step2_Result.Id
+                    $PIMGroupSelectedDisplayName    = $Step2_Result.DisplayName
+
+                    $TypeOfTarget                   = $Step3_Result
+                    $TargetSelectedId               = $Step4_Result.Id
+                    $TargetSelectedDisplayName      = $Step4_Result.DisplayName
+
+                    $Assignment_Type                = $Step6_Result.AssignmentType
+                    $Assignment_NumOfDaysWhenExpire = $Step6_Result.AssignmentLengthDays
+                    $Assignment_Permanent           = $Step6_Result.Permanent
+
+                #-----------------------------------------------------------------------
+                # Assignment
+                #-----------------------------------------------------------------------
+
+                    Import-Module Microsoft.Graph.DeviceManagement.Enrollment
+
+                    $Justification = "IAC: Assigning access to group $($PIMGroupSelectedDisplayName) for $($TypeOfTarget) $($TargetSelectedDisplayName)"
+
+                    $params = @{
+	                    accessId = "member"
+	                    groupId = $PIMGroupSelectedId
+	                    action = "AdminAssign"
+	                    justification = $Justification
+	                    directoryScopeId = "/"
+                        principalId = $TargetSelectedId
+                    }
+
+                    If (!($Assignment_Permanent))
+                        {
+                            $startDateTime = (Get-date ([datetime]::Now.ToUniversalTime()) -format "yyyy-MM-ddTHH:mm:ssK")
+                            $endDateTime   = (Get-date $StartDateTime).AddDays($Assignment_NumOfDaysWhenExpire)
+                            $endDateTime   = (Get-date $endDateTime -format "yyyy-MM-ddTHH:mm:ssK")
+
+                                $params += @{
+	                                            scheduleInfo = @{
+		                                                            startDateTime = $startDateTime
+		                                                            expiration = @{
+			                                                                        type = "AfterDateTime"
+			                                                                        endDateTime = $endDateTime
+		                                                            }
+                                                                }
+                                            }
+                        }
+                    ElseIf ($Assignment_Permanent)
+                        {
+                            $startDateTime = (Get-date ([datetime]::Now.ToUniversalTime()) -format "yyyy-MM-ddTHH:mm:ssK")
+                            $endDateTime   = (Get-date $StartDateTime).AddDays($Assignment_NumOfDaysWhenExpire)
+                            $endDateTime   = (Get-date $endDateTime -format "yyyy-MM-ddTHH:mm:ssK")
+
+                                $params += @{
+	                                            scheduleInfo = @{
+   	                                                                startDateTime = $startDateTime
+		                                                            expiration = @{
+			                                                                            type = "noExpiration"
+		                                                                            }
+                                                                }
+                                            }
+                        }
+
+                    Write-Host ""
+                    Write-Host "PIM - Assigning $($TypeOfTarget) $($TargetSelectedDisplayName) as $($Assignment_Type)"
+                    Write-host "      to group $($PIMGroupSelectedDisplayName)"
+
+                    If ($Assignment_Type -eq "Eligible")
+                        {
+                            New-MgBetaIdentityGovernancePrivilegedAccessGroupEligibilityScheduleRequest -BodyParameter $params
+                        }
+                    ElseIf ($AssignmentType -eq "Active")
+                        {
+                            New-MgBetaIdentityGovernancePrivilegedAccessGroupAssignmentScheduleRequest -BodyParameter $params
+                        }
             }
 
-            Write-Host ""
-            Write-Host "PIM - Assigning $($RoleSelectedDisplayName) role"
-            Write-host "      for $($TypeOfTarget) $($TargetSelectedDisplayName)"
-            Write-host "      on Administrative Unit $($AUScopeDisplayName)"
-
-            New-MgRoleManagementDirectoryRoleAssignment -BodyParameter $params
-        }
-    ElseIf ($Step1_Result.Type -eq "Azure_Resource")
-        {
-            $AzureResourceSelectedId = $Step2_Result.Id
-            $AzureResourceSelectedDisplayName = $Step2_Result.Name
-
-            $TypeOfTarget = $Step3_Result
-            
-            $AzRolePermissionId = $Step5_Result.Id
-            $AzRolePermissionDisplayName = $Step5_Result.Name
-
-            $Assignment_Type = $Step6_Result.AssignmentType
-            $Assignment_NumOfDaysWhenExpire = $Step6_Result.AssignmentLengthDays
-            $Assignment_Permanent = $Step6_Result.Permanent
-
-            If ($TypeOfTarget -eq "Admin Account")
-                {
-                    $TargetSelectedId = $Step4_Result.Id
-                    $TargetSelectedDisplayName = $Step4_Result.DisplayName
-                }
-            ElseIf ($TypeOfTarget -eq "Group")
-                {
-                    $TargetSelectedId = $Step4_Result.Id
-                    $TargetSelectedDisplayName = $Step4_Result.DisplayName
-                }
-
-            $roleDefinitionId = $AzureResourceSelectedId + "/providers/Microsoft.Authorization/roleDefinitions/" + $AzRolePermissionId
-
-            $Justification = "IAC: Assigning role $($AzRolePermissionDisplayName) to $($TypeOfTarget) $($TargetSelectedDisplayName)"
-
-            If (!($Assignment_Permanent))
-                {
-                    $startDateTime = (Get-date ([datetime]::Now.ToUniversalTime()) -format "yyyy-MM-ddTHH:mm:ssK")
-                    $endDateTime   = (Get-date $StartDateTime).AddDays($Assignment_NumOfDaysWhenExpire)
-                    $endDateTime   = (Get-date $endDateTime -format "yyyy-MM-ddTHH:mm:ssK")
-
-                    $AzRoleAssignmentBody = [pscustomobject][ordered]@{
-                                                properties = @{
-                                                                    principalId = $TargetSelectedId
-                                                                    roleDefinitionId = $roleDefinitionId
-	                                                                requestType = "AdminAssign"
-                                                                    justification = $Justification
-                                                                    scheduleInfo = @{
-                                                                                    startDateTime = $startDateTime
-                                                                                    expiration = @{
-			                                                                                            type = "AfterDateTime"
-			                                                                                            endDateTime = $endDateTime
-                                                                                                    }
-                                                                                }
-                                                                }
-                                            }
-                }
-            ElseIf ($Assignment_Permanent)
-                {
-                    $startDateTime = (Get-date ([datetime]::Now.ToUniversalTime()) -format "yyyy-MM-ddTHH:mm:ssK")
-                    $endDateTime   = (Get-date $StartDateTime).AddDays($Assignment_NumOfDaysWhenExpire)
-                    $endDateTime   = (Get-date $endDateTime -format "yyyy-MM-ddTHH:mm:ssK")
-
-                    $AzRoleAssignmentBody = [pscustomobject][ordered]@{
-                                                properties = @{
-                                                                    principalId = $TargetSelectedId
-                                                                    roleDefinitionId = $roleDefinitionId
-                                                                    justification = $Justification
-	                                                                requestType = "AdminAssign"
-                                                                    scheduleInfo = @{
-                                                                                        startDateTime = $startDateTime
-                                                                                        expiration = @{
-			                                                                                                type = "noExpiration"
-                                                                                                      }
-                                                                                    }
-                                                              }
-                                            }
-                }
-
-            $Headers = Get-AzAccessTokenManagement
-
-            $Guid = (new-guid).Guid
-
-            $AzRoleAssignmentBodyJson = $AzRoleAssignmentBody | ConvertTo-Json -Depth 20
-
-            Write-Host ""
-            Write-Host "PIM - Assigning $($AzRolePermissionDisplayName) role as $($Assignment_Type)"
-            Write-host "      for $($TypeOfTarget) $($TargetSelectedDisplayName)"
-            Write-Host "      on scope [ $($AzureResourceSelectedDisplayName) ]"
-            Write-host "      $($AzureResourceSelectedId) "
-
-            If ($AssignmentType -eq "Eligible")
-                {
-                    $AzGraphUri = "https://management.azure.com" + $AzureResourceSelectedId + "/providers/Microsoft.Authorization/roleEligibilityScheduleRequests/" + $Guid + "?api-version=2020-10-01-preview"
-                }
-            ElseIf ($AssignmentType -eq "Active")
-                {
-                    $AzGraphUri = "https://management.azure.com" + $AzureResourceSelectedId + "/providers/Microsoft.Authorization/roleEligibilityScheduleRequests/" + $Guid + "?api-version=2020-10-01-preview"
-                }
-
-            invoke-webrequest -UseBasicParsing -Method PUT -Uri $AzGraphUri -Headers $Headers -Body $AzRoleAssignmentBodyJson
-
-<#
-            Try
-                {
-                    $Response   = invoke-webrequest -UseBasicParsing -Method PUT -Uri $AzGraphUri -Headers $Headers -Body $AzRoleAssignmentBodyJson
-                }
-            Catch
-                {
-#>
-        }
-    ElseIf ($Step1_Result.Type -eq "PIM_Groups")
-        {
-            $PIMGroupSelectedId = $Step2_Result.Id
-            $PIMGroupSelectedDisplayName = $Step2_Result.DisplayName
-
-            $TypeOfTarget = $Step3_Result
-
-            If ($TypeOfTarget -eq "Admin Account")
-                {
-                    $TargetSelectedId = $Step4_Result.Id
-                    $TargetSelectedDisplayName = $Step4_Result.DisplayName
-                }
-            ElseIf ($TypeOfTarget -eq "Group")
-                {
-                    $TargetSelectedId = $Step4_Result.Id
-                    $TargetSelectedDisplayName = $Step4_Result.DisplayName
-                }
-
-            $Assignment_Type = $Step6_Result.AssignmentType
-            $Assignment_NumOfDaysWhenExpire = $Step6_Result.AssignmentLengthDays
-            $Assignment_Permanent = $Step6_Result.Permanent
-
-            Import-Module Microsoft.Graph.DeviceManagement.Enrollment
-
-            $Justification = "IAC: Assigning access to group $($PIMGroupSelectedDisplayName) for $($TypeOfTarget) $($TargetSelectedDisplayName)"
-
-                $params = @{
-	                accessId = "member"
-	                groupId = $PIMGroupSelectedId
-	                action = "AdminAssign"
-	                justification = $Justification
-	                directoryScopeId = "/"
-                    principalId = $TargetSelectedId
-                }
-
-                If (!($Assignment_Permanent))
-                    {
-                        $startDateTime = (Get-date ([datetime]::Now.ToUniversalTime()) -format "yyyy-MM-ddTHH:mm:ssK")
-                        $endDateTime   = (Get-date $StartDateTime).AddDays($Assignment_NumOfDaysWhenExpire)
-                        $endDateTime   = (Get-date $endDateTime -format "yyyy-MM-ddTHH:mm:ssK")
-
-                            $params += @{
-	                                        scheduleInfo = @{
-		                                                        startDateTime = $startDateTime
-		                                                        expiration = @{
-			                                                                    type = "AfterDateTime"
-			                                                                    endDateTime = $endDateTime
-		                                                        }
-                                                            }
-                                        }
-                    }
-
-
-                    ElseIf ($Assignment_Permanent)
-                        {
-                            $startDateTime = (Get-date ([datetime]::Now.ToUniversalTime()) -format "yyyy-MM-ddTHH:mm:ssK")
-                            $endDateTime   = (Get-date $StartDateTime).AddDays($Assignment_NumOfDaysWhenExpire)
-                            $endDateTime   = (Get-date $endDateTime -format "yyyy-MM-ddTHH:mm:ssK")
-
-                                $params += @{
-	                                            scheduleInfo = @{
-   	                                                                startDateTime = $startDateTime
-		                                                            expiration = @{
-			                                                                            type = "noExpiration"
-		                                                                            }
-                                                                }
-                                            }
-                        }
-
-
-                Write-Host ""
-                Write-Host "PIM - Assigning $($TypeOfTarget) $($TargetSelectedDisplayName) as $($Assignment_Type)"
-                Write-host "      to group $($PIMGroupSelectedDisplayName)"
-
-                If ($Assignment_Type -eq "Eligible")
-                    {
-                        New-MgBetaIdentityGovernancePrivilegedAccessGroupEligibilityScheduleRequest -BodyParameter $params
-                    }
-                ElseIf ($AssignmentType -eq "Active")
-                    {
-                        New-MgBetaIdentityGovernancePrivilegedAccessGroupAssignmentScheduleRequest -BodyParameter $params
-                    }
-        }
-    ElseIf ($Step1_Result.Type -eq "AD_PAG_Resource_Groups")
-        {
-            $PIMGroupSelectedId = $Step2_Result.Id
-            $PIMGroupSelectedDisplayName = $Step2_Result.DisplayName
-
-            $TypeOfTarget = $Step3_Result
-
-            If ($TypeOfTarget -eq "Admin Account")
-                {
-                    $TargetSelectedId = $Step4_Result.Id
-                    $TargetSelectedDisplayName = $Step4_Result.DisplayName
-                }
-            ElseIf ($TypeOfTarget -eq "Group")
-                {
-                    $TargetSelectedId = $Step4_Result.Id
-                    $TargetSelectedDisplayName = $Step4_Result.DisplayName
-                }
-
-            $Assignment_Type = $Step6_Result.AssignmentType
-            $Assignment_NumOfDaysWhenExpire = $Step6_Result.AssignmentLengthDays
-            $Assignment_Permanent = $Step6_Result.Permanent
-
-            Import-Module Microsoft.Graph.DeviceManagement.Enrollment
-
-            $Justification = "IAC: Assigning access to group $($PIMGroupSelectedDisplayName) for $($TypeOfTarget) $($TargetSelectedDisplayName)"
-
-                $params = @{
-	                accessId = "member"
-	                groupId = $PIMGroupSelectedId
-	                action = "AdminAssign"
-	                justification = $Justification
-	                directoryScopeId = "/"
-                    principalId = $TargetSelectedId
-                }
-
-                If (!($Assignment_Permanent))
-                    {
-                        $startDateTime = (Get-date ([datetime]::Now.ToUniversalTime()) -format "yyyy-MM-ddTHH:mm:ssK")
-                        $endDateTime   = (Get-date $StartDateTime).AddDays($Assignment_NumOfDaysWhenExpire)
-                        $endDateTime   = (Get-date $endDateTime -format "yyyy-MM-ddTHH:mm:ssK")
-
-                            $params += @{
-	                                        scheduleInfo = @{
-		                                                        startDateTime = $startDateTime
-		                                                        expiration = @{
-			                                                                    type = "AfterDateTime"
-			                                                                    endDateTime = $endDateTime
-		                                                        }
-                                                            }
-                                        }
-                    }
-
-
-                    ElseIf ($Assignment_Permanent)
-                        {
-                            $startDateTime = (Get-date ([datetime]::Now.ToUniversalTime()) -format "yyyy-MM-ddTHH:mm:ssK")
-                            $endDateTime   = (Get-date $StartDateTime).AddDays($Assignment_NumOfDaysWhenExpire)
-                            $endDateTime   = (Get-date $endDateTime -format "yyyy-MM-ddTHH:mm:ssK")
-
-                                $params += @{
-	                                            scheduleInfo = @{
-   	                                                                startDateTime = $startDateTime
-		                                                            expiration = @{
-			                                                                            type = "noExpiration"
-		                                                                            }
-                                                                }
-                                            }
-                        }
-
-
-                Write-Host ""
-                Write-Host "PIM - Assigning $($TypeOfTarget) $($TargetSelectedDisplayName) as $($Assignment_Type)"
-                Write-host "      to group $($PIMGroupSelectedDisplayName)"
-
-                If ($Assignment_Type -eq "Eligible")
-                    {
-                        New-MgBetaIdentityGovernancePrivilegedAccessGroupEligibilityScheduleRequest -BodyParameter $params
-                    }
-                ElseIf ($AssignmentType -eq "Active")
-                    {
-                        New-MgBetaIdentityGovernancePrivilegedAccessGroupAssignmentScheduleRequest -BodyParameter $params
-                    }
-        }
-    ElseIf ($Step1_Result.Type -eq "AD_PAG_Service_Groups")
-        {
-            $PIMGroupSelectedId = $Step2_Result.Id
-            $PIMGroupSelectedDisplayName = $Step2_Result.DisplayName
-
-            $TypeOfTarget = $Step3_Result
-
-            If ($TypeOfTarget -eq "Admin Account")
-                {
-                    $TargetSelectedId = $Step4_Result.Id
-                    $TargetSelectedDisplayName = $Step4_Result.DisplayName
-                }
-            ElseIf ($TypeOfTarget -eq "Group")
-                {
-                    $TargetSelectedId = $Step4_Result.Id
-                    $TargetSelectedDisplayName = $Step4_Result.DisplayName
-                }
-
-            $Assignment_Type = $Step6_Result.AssignmentType
-            $Assignment_NumOfDaysWhenExpire = $Step6_Result.AssignmentLengthDays
-            $Assignment_Permanent = $Step6_Result.Permanent
-
-            Import-Module Microsoft.Graph.DeviceManagement.Enrollment
-
-            $Justification = "IAC: Assigning access to group $($PIMGroupSelectedDisplayName) for $($TypeOfTarget) $($TargetSelectedDisplayName)"
-
-                $params = @{
-	                accessId = "member"
-	                groupId = $PIMGroupSelectedId
-	                action = "AdminAssign"
-	                justification = $Justification
-	                directoryScopeId = "/"
-                    principalId = $TargetSelectedId
-                }
-
-                If (!($Assignment_Permanent))
-                    {
-                        $startDateTime = (Get-date ([datetime]::Now.ToUniversalTime()) -format "yyyy-MM-ddTHH:mm:ssK")
-                        $endDateTime   = (Get-date $StartDateTime).AddDays($Assignment_NumOfDaysWhenExpire)
-                        $endDateTime   = (Get-date $endDateTime -format "yyyy-MM-ddTHH:mm:ssK")
-
-                            $params += @{
-	                                        scheduleInfo = @{
-		                                                        startDateTime = $startDateTime
-		                                                        expiration = @{
-			                                                                    type = "AfterDateTime"
-			                                                                    endDateTime = $endDateTime
-		                                                        }
-                                                            }
-                                        }
-                    }
-
-
-                    ElseIf ($Assignment_Permanent)
-                        {
-                            $startDateTime = (Get-date ([datetime]::Now.ToUniversalTime()) -format "yyyy-MM-ddTHH:mm:ssK")
-                            $endDateTime   = (Get-date $StartDateTime).AddDays($Assignment_NumOfDaysWhenExpire)
-                            $endDateTime   = (Get-date $endDateTime -format "yyyy-MM-ddTHH:mm:ssK")
-
-                                $params += @{
-	                                            scheduleInfo = @{
-   	                                                                startDateTime = $startDateTime
-		                                                            expiration = @{
-			                                                                            type = "noExpiration"
-		                                                                            }
-                                                                }
-                                            }
-                        }
-
-
-                Write-Host ""
-                Write-Host "PIM - Assigning $($TypeOfTarget) $($TargetSelectedDisplayName) as $($Assignment_Type)"
-                Write-host "      to group $($PIMGroupSelectedDisplayName)"
-
-                If ($Assignment_Type -eq "Eligible")
-                    {
-                        New-MgBetaIdentityGovernancePrivilegedAccessGroupEligibilityScheduleRequest -BodyParameter $params
-                    }
-                ElseIf ($AssignmentType -eq "Active")
-                    {
-                        New-MgBetaIdentityGovernancePrivilegedAccessGroupAssignmentScheduleRequest -BodyParameter $params
-                    }
-        }
 
