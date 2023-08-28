@@ -386,7 +386,7 @@ Function Create-PIM-Group-Role
             Import-Module Microsoft.Graph.DeviceManagement.Enrollment
 
             # Search for RoleDefinition in array list of Role Definitions
-            $roleDefinition = $Global:RoleDefinitionList | Where-Object { $_.DisplayName -eq $RoleDefinitionName }
+            $roleDefinition = $Global:Role_Group_Definitions_ID | Where-Object { $_.DisplayName -eq $RoleDefinitionName }
             $roleDefinitionId = $roleDefinition.Id
 
             # Get Id of new group created
@@ -760,9 +760,6 @@ Function Create-PIM-PAG-Assignment
             $NumOfDaysWhenExpire  = 180
             $Permanent            = $false
 #>
-
-
-    Import-Module Microsoft.Graph.DeviceManagement.Enrollment
 
     # Check if group already exist
     $Group = Get-MgGroup -Filter "DisplayName eq '$($Groupname)'" -Erroraction SilentlyContinue
@@ -1724,7 +1721,7 @@ Function Assign-Roles-AdministrativeUnits-From-file-CSV
                 $AUId = ($AUs | Where-Object { $_.DisplayName -eq $AUName }).id
 
             # Get Role definition Id
-                $roleDefinition = $Global:RoleDefinitionList | Where-Object { $_.DisplayName -eq $RoleDefinitionName }
+                $roleDefinition = $Global:Role_Group_Definitions_ID | Where-Object { $_.DisplayName -eq $RoleDefinitionName }
                 $roleDefinitionId = $roleDefinition.Id
 
             # Get Group Principal Id
@@ -1829,35 +1826,6 @@ Function Assign-AzResources-Groups-From-file-CSV
 # Assignment of PIM for Azure Resources / Privileged Access Group (PAG)
 ######################################################################################################################
 
-######################################################################################################
-# Get MG & Subscription info
-######################################################################################################
-
-    # DisplayName, Name, Id
-        $MgInfo = AzMGs-Query-AzARG | Query-AzResourceGraph -QueryScope Tenant
-        $SubInfo = AzSubscriptions-Query-AzARG | Query-AzResourceGraph -QueryScope Tenant
-
-        $Array = @()
-        ForEach ($Mg in $MgInfo)
-            {
-                $Obj = new-object PsCustomObject
-                $Obj | Add-Member -MemberType NoteProperty -Name DisplayName -Value $Mg.properties.displayName
-                $Obj | Add-Member -MemberType NoteProperty -Name Name -Value $Mg.name
-                $Obj | Add-Member -MemberType NoteProperty -Name Id -Value $Mg.Id
-                $Array += $Obj
-            }
-
-        ForEach ($Sub in $SubInfo)
-            {
-                $Obj = new-object PsCustomObject
-                $Obj | Add-Member -MemberType NoteProperty -Name DisplayName -Value $Sub.subsciptionName
-                $Obj | Add-Member -MemberType NoteProperty -Name Name -Value $Sub.subscriptionId
-                $Obj | Add-Member -MemberType NoteProperty -Name Id -Value $Sub.Id
-                $Array += $Obj
-            }
-
-        $ResourceInfoArray = $Array
-
     #-------------------------------------------------------------------------------------------------------------------------------------------------------------------
     # Assignment of PAG to group - used to get eligible/active access to groups after PIM activation of PAG group
     #-------------------------------------------------------------------------------------------------------------------------------------------------------------------
@@ -1903,7 +1871,7 @@ Function Assign-AzResources-Groups-From-file-CSV
                                       -AssignmentType $AssignmentType `
                                       -NumOfDaysWhenExpire $NumOfDaysWhenExpire `
                                       -Permanent:$Permanent `
-                                      -ResourceInfoArray $ResourceInfoArray
+                                      -ResourceInfoArray $Global:AzureResources_Definitions_ID
         }
 }
 
@@ -1941,7 +1909,7 @@ Function CreateUpdate-Accounts-From-file-CSV
         {
             $FirstName              = $Entry.FirstName
             $LastName               = $Entry.LastName
-            $Intials                = $Entry.Initials
+            $Initials               = $Entry.Initials
             $TierLevel              = $Entry.TierLevel
             $TargetUsage            = $Entry.TargetUsage
             $TargetPlatform         = $Entry.TargetPlatform
@@ -2043,6 +2011,7 @@ Function CreateUpdate-Accounts-From-file-CSV
                                                  -EmailAddress $UserPrincipalName `
                                                  -UserPrincipalName $UserPrincipalName `
                                                  -Path $Path `
+                                                 -Enabled:$true `
                                                  -Credential $Credentials
                         }
                 }
@@ -2063,8 +2032,8 @@ Function Assign-Groups-Accounts-From-file-CSV
 # Admin Accounts | Delegations of PAGs
 ######################################################################################################################
 
-    $EntraID_Users = Get-MgUser-AllProperties-AllUsers
-    $EntraID_Groups = Get-MgGroup -all:$true
+    $EntraID_Users = $Global:Users_All_ID
+    $EntraID_Groups = $Global:Groups_All_ID
 
     $AdminAccounts_Data = Import-csv -Path $AccountsAssignmentFile -Delimiter ";" -Encoding UTF8
 
@@ -2590,35 +2559,6 @@ Function CreateUpdate-Policies-PIM-AzResources
 
 
 ######################################################################################################
-# Get MG & Subscription info
-######################################################################################################
-
-    # DisplayName, Name, Id
-        $MgInfo = AzMGs-Query-AzARG | Query-AzResourceGraph -QueryScope Tenant
-        $SubInfo = AzSubscriptions-Query-AzARG | Query-AzResourceGraph -QueryScope Tenant
-
-        $Array = @()
-        ForEach ($Mg in $MgInfo)
-            {
-                $Obj = new-object PsCustomObject
-                $Obj | Add-Member -MemberType NoteProperty -Name DisplayName -Value $Mg.properties.displayName
-                $Obj | Add-Member -MemberType NoteProperty -Name Name -Value $Mg.name
-                $Obj | Add-Member -MemberType NoteProperty -Name Id -Value $Mg.Id
-                $Array += $Obj
-            }
-
-        ForEach ($Sub in $SubInfo)
-            {
-                $Obj = new-object PsCustomObject
-                $Obj | Add-Member -MemberType NoteProperty -Name DisplayName -Value $Sub.subsciptionName
-                $Obj | Add-Member -MemberType NoteProperty -Name Name -Value $Sub.subscriptionId
-                $Obj | Add-Member -MemberType NoteProperty -Name Id -Value $Sub.Id
-                $Array += $Obj
-            }
-
-        $ResourceInfoArray = $Array
-
-######################################################################################################
 # Policies for PIM for Azure Resources (Azure Resource Manager)
 ######################################################################################################
 
@@ -2631,7 +2571,7 @@ Function CreateUpdate-Policies-PIM-AzResources
             $Entry = $Group.Group[0]
 
             $AzScope             = $Entry.AzScope
-            $AzDisplayName       = ($ResourceInfoArray | Where-Object { $_.Id -eq $AzScope }).DisplayName
+            $AzDisplayName       = ($Global:AzureResources_Definitions_ID | Where-Object { $_.Id -eq $AzScope }).DisplayName
             $AzScopePermission   = $Entry.AzScopePermission
             $AssignmentType      = $Entry.AssignmentType
             $NumOfDaysWhenExpire = $Entry.NumOfDaysWhenExpire
@@ -3152,7 +3092,7 @@ Function CreateUpdate-Policies-PIM-Groups
     #-------------------------------------------------------------------------------------------------------------------------------------------------------------------
 
         Write-host "Getting group-info from Entra ID ... Please Wait !"
-        $Groups_All = Get-MgGroup -All
+        $Groups_All = Get-MgGroup -all:$true
 
         # List all PIM for Groups policies
         $PIM_Policies_Groups = @()
