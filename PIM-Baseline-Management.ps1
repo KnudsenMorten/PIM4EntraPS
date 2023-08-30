@@ -4,7 +4,7 @@ Write-Output "PIM Baseline Management"
 Write-Output ""
 Write-Output "Purpose: Onboarding and management of admin accounts, groups and default PIM assignments"
 Write-Output ""
-Write-Output "Support: Morten Knudsen - admin@example.invalid | 40 178 179"
+Write-Output "Support: Morten Knudsen - mok@fjernvarmefyn.dk | 40 178 179"
 Write-Output "***********************************************************************************************"
 
 #------------------------------------------------------------------------------------------------------------
@@ -212,25 +212,25 @@ Write-Output "******************************************************************
     $Notification_Admin_EndUser_Assignment_notificationType               = "Email"
     $Notification_Admin_EndUser_recipientType                             = "Admin"
     $Notification_Admin_EndUser_notificationLevel                         = "All"
-    $Notification_Admin_EndUser_notificationRecipients                    = @("IT-Alerts-CloudIdentity@nordstern.dk")
+    $Notification_Admin_EndUser_notificationRecipients                    = @("IT-Alerts-CloudIdentity@fjernvarmefyn.dk")
     $Notification_Admin_EndUser_isDefaultRecipientsEnabled                = $true 
 
     $Notification_Requestor_EndUser_Assignment_notificationType           = "Email"
     $Notification_Requestor_EndUser_Assignment_recipientType              = "Requestor"
     $Notification_Requestor_EndUser_Assignment_notificationLevel          = "All"
-    $Notification_Requestor_EndUser_Assignment_notificationRecipients     = @("IT-Alerts-CloudIdentity@nordstern.dk")
+    $Notification_Requestor_EndUser_Assignment_notificationRecipients     = @("IT-Alerts-CloudIdentity@fjernvarmefyn.dk")
     $Notification_Requestor_EndUser_Assignment_isDefaultRecipientsEnabled = $true
 
     $Notification_Admin_Admin_Eligibility_notificationType                = "Email"
     $Notification_Admin_Admin_Eligibility_recipientType                   = "Admin"
     $Notification_Admin_Admin_Eligibility_notificationLevel               = "All"
-    $Notification_Admin_Admin_Eligibility_notificationRecipients          = @("IT-Alerts-CloudIdentity@nordstern.dk")
+    $Notification_Admin_Admin_Eligibility_notificationRecipients          = @("IT-Alerts-CloudIdentity@fjernvarmefyn.dk")
     $Notification_Admin_Admin_Eligibility_isDefaultRecipientsEnabled      = $true
 
     $Notification_Requestor_Admin_Eligibility_notificationType            = "Email"
     $Notification_Requestor_Admin_Eligibility_recipientType               = "Requestor"
     $Notification_Requestor_Admin_Eligibility_notificationLevel           = "All"
-    $Notification_Requestor_Admin_Eligibility_notificationRecipients      = @("IT-Alerts-CloudIdentity@nordstern.dk")
+    $Notification_Requestor_Admin_Eligibility_notificationRecipients      = @("IT-Alerts-CloudIdentity@fjernvarmefyn.dk")
     $Notification_Requestor_Admin_Eligibility_isDefaultRecipientsEnabled  = $true
 
 
@@ -275,10 +275,10 @@ Write-Output "******************************************************************
                                                 Select-Object DisplayName, GivenName, SurName, Id | Sort-Object -Property DisplayName
 
     Write-host "[ 08 / $($MaxSteps) ] Building list of all Role definitions for Groups in Entra ID ... Please Wait !"
-    # $Global:Role_Group_Definitions_ID = Get-MgRoleManagementDirectoryRoleDefinition | Select-Object DisplayName, Id
+    $Global:Role_Group_Definitions_ID = Get-MgRoleManagementDirectoryRoleDefinition | Select-Object DisplayName, Id
 
-    $Global:Role_Group_Definitions_ID_raw = AzRoleDefinitions-Query-AzARG | Query-AzResourceGraph -QueryScope Tenant
-    $Global:Role_Group_Definitions_ID = $Global:Role_Group_Definitions_ID_raw | Where-Object { $_.AssignableScope -eq "/" }
+#    $Global:Role_Group_Definitions_ID_raw = AzRoleDefinitions-Query-AzARG | Query-AzResourceGraph -QueryScope Tenant
+#    $Global:Role_Group_Definitions_ID = $Global:Role_Group_Definitions_ID_raw | Where-Object { $_.AssignableScope -eq "/" }
 
     Write-host "[ 09 / $($MaxSteps) ] Building list of all Role definitions for Administrative Units in Entra ID ... Please Wait !"
     $Global:Role_AU_Definitions_ID = $Global:Role_Group_Definitions_ID | `
@@ -350,6 +350,7 @@ Write-Output "******************************************************************
                                               -ServiceGroupsDefinitionFile $ServiceGroupsDefinitionFile `
                                               -ProcessGroupsDefinitionFile $ProcessGroupsDefinitionFile `
                                               -ResourceGroupsDefinitionFile $ResourceGroupsDefinitionFile
+
 
 ######################################################################################################
 # Policies for PIM for Azure AD roles
