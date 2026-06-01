@@ -1,0 +1,28 @@
+# PIM4EntraPS -- public repo .gitignore
+#
+# Mirrors the .custom / .locked split: .locked.* ships, .custom.* is
+# customer-private and never committed via `git add .` or destroyed by
+# `git clean -fd`.
+
+# ---------------------------------------------------------------------------
+#  Customer config + filters + naming -- NEVER commit
+# ---------------------------------------------------------------------------
+config/*.custom.csv
+config/*.custom.ps1
+launcher/*/LauncherConfig.custom.ps1
+launcher/*/launcher.custom.*.ps1
+
+# ---------------------------------------------------------------------------
+#  Run output -- regenerated each run, no value in git
+# ---------------------------------------------------------------------------
+logs/
+output/
+
+# ---------------------------------------------------------------------------
+#  Local IDE / OS noise
+# ---------------------------------------------------------------------------
+.vs/
+.idea/
+*.suo
+.DS_Store
+Thumbs.db
