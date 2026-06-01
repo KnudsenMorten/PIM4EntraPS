@@ -1,0 +1,530 @@
+<#
+.SYNOPSIS
+    PIM-Baseline-Management-SQL - engine script in the PIM4EntraPS solution.
+
+.NOTES
+    Solution       : PIM4EntraPS
+    File           : PIM-Baseline-Management-SQL.ps1
+    Developed by   : Morten Knudsen, Microsoft MVP (Security, Azure, Security Copilot)
+    Blog           : https://mortenknudsen.net  (alias https://aka.ms/morten)
+    GitHub         : https://github.com/KnudsenMorten
+    Support        : For public repos, open a GitHub Issue on that solution's repo.
+
+#>
+#------------------------------------------------------------------------------------------------
+Write-Output "***********************************************************************************************"
+Write-Output "PIM Baseline Management"
+Write-Output ""
+Write-Output "Purpose: Onboarding and management of admin accounts, groups and default PIM assignments"
+Write-Output ""
+Write-Output "Support: Morten Knudsen - admin@example.invalid | 40 178 179"
+Write-Output "***********************************************************************************************"
+
+#------------------------------------------------------------------------------------------------------------
+# Loading Functions, Connectivity & Default variables
+#------------------------------------------------------------------------------------------------------------
+    $ScriptDirectory = $PSScriptRoot
+    $global:PathScripts = Split-Path -parent $ScriptDirectory
+    Write-Output ""
+    Write-Output "Script Directory -> $($global:PathScripts)"
+
+    # v2 AutomationFramework bootstrap (replaces v1 Connect_Azure.ps1 chain).
+    # One call to Initialize-PlatformAutomationFramework does cert-based
+    # Connect-AzAccount, fetches Modern secrets from KV, populates
+    # $global:HighPriv_* / $global:AzureTenantId (public contract), and
+    # dot-sources Layer-1 platform-defaults.ps1. Zero v1 module imports.
+    $repoRoot = $PSScriptRoot
+    while ($repoRoot -and -not (Test-Path (Join-Path $repoRoot 'FUNCTIONS\AutomateITPS\AutomateITPS.psd1'))) {
+        $repoRoot = Split-Path -Parent $repoRoot
+    }
+    if (-not $repoRoot) {
+        throw "AutomationFramework bootstrap: cannot find FUNCTIONS\AutomateITPS\AutomateITPS.psd1 walking up from '$PSScriptRoot'."
+    }
+    $global:PathScripts = $repoRoot
+    Import-Module (Join-Path $repoRoot 'FUNCTIONS\AutomateITPS\AutomateITPS.psd1') -Global -Force -WarningAction SilentlyContinue
+    $null = Initialize-PlatformAutomationFramework -IgnoreMissingSecrets
+
+
+    # Interactive login
+    Disconnect-AzAccount
+    Connect-AzAccount
+
+    # Microsoft Graph connect with interactive login with the permission defined in the scopes
+    Disconnect-MgGraph -ErrorAction SilentlyContinue
+
+    $Scopes = @("Directory.ReadWrite.All",`
+                "PrivilegedEligibilitySchedule.ReadWrite.AzureADGroup",
+                "PrivilegedAssignmentSchedule.ReadWrite.AzureADGroup",
+                "PrivilegedAccess.ReadWrite.AzureADGroup",
+                "RoleAssignmentSchedule.ReadWrite.Directory",
+                "RoleEligibilitySchedule.ReadWrite.Directory",
+                "RoleManagementPolicy.ReadWrite.AzureADGroup",
+                "RoleManagement.ReadWrite.Directory",`
+                "AdministrativeUnit.ReadWrite.All",
+                "User.ReadWrite.All",
+                "Group.ReadWrite.All",
+                "GroupMember.ReadWrite.All"
+                )
+    Connect-MicrosoftGraphPS -Scopes $Scopes
+
+
+######################################################################################################
+# PIM Functions
+######################################################################################################
+
+    # Loading PIM functions
+    Import-Module "$($global:PathScripts)\FUNCTIONS\PIM-Functions.psm1" -Global -force -WarningAction SilentlyContinue
+
+######################################################################################################
+# PS Module dependency AzResourceGraphPS - built by Morten Knudsen
+######################################################################################################
+
+    $ModuleName = "AzResourceGraphPS"
+    $Scope      = "AllUsers"
+    Manage-Powershell-Module -ModuleName $ModuleName -Scope AllUsers
+
+######################################################################################################
+# PS Module dependency MicrosoftGraphPS - built by Morten Knudsen
+######################################################################################################
+
+    $ModuleName = "MicrosoftGraphPS"
+    $Scope      = "AllUsers"
+    Manage-Powershell-Module -ModuleName $ModuleName -Scope AllUsers
+
+######################################################################################################
+# PS Module dependency GMSACredential - credit Ryan Ephgrave
+######################################################################################################
+
+    $ModuleName = "GMSACredential"
+    $Scope      = "AllUsers"
+    Manage-Powershell-Module -ModuleName $ModuleName -Scope AllUsers
+
+    #-------------------------------------------------------
+    # Version add here, as it has been modified from the original source to show the actual code in verbose-mode
+    #-------------------------------------------------------
+    Function Get-GMSACredential{
+        <#
+        .SYNOPSIS
+        Given a GMSA account, will return a usable PSCredential object
+    
+        .DESCRIPTION
+        Checks AD for the GMSA account information and returns a usable credential. Must be run with an account that has permissions to the password
+    
+        .PARAMETER GMSAName
+        Identity of the GMSA account
+    
+        .PARAMETER Domain
+        Domain logon name of the account
+    
+        .PARAMETER SearchRoot
+        Root to search for the account (most cases can be omitted)
+    
+        .EXAMPLE
+        Get-GMSACredential -GMSAName 'gmsaUser$' -Domain 'Home.Lab'
+    
+        .NOTES
+        .Author: Ryan Ephgrave
+        #>
+        Param(
+            [Parameter(Mandatory=$true)]
+            [string]$GMSAName,
+            [Parameter(Mandatory=$true)]
+            [string]$Domain,
+            [Parameter(Mandatory=$false)]
+            [string]$SearchRoot = $(([adsisearcher]"").Searchroot.path)
+        )
+
+        $dEntryRoot = New-Object System.DirectoryServices.DirectoryEntry -ArgumentList $SearchRoot
+
+        $searcher = New-Object System.DirectoryServices.DirectorySearcher -ArgumentList $dEntryRoot
+    
+        $searcher.Filter = "(&(name=$($GMSAName.TrimEnd('$')))(ObjectCategory=msDS-GroupManagedServiceAccount))"
+        [void]$searcher.PropertiesToLoad.Add('Name')
+        [void]$searcher.PropertiesToLoad.Add('msDS-ManagedPassword')
+   
+        $searcher.SearchRoot.AuthenticationType = 'Sealing'
+    
+        $Accounts = $searcher.FindAll()
+        foreach($a in $accounts){
+            if($a.Properties.'msds-managedpassword'){
+                $pw = $a.Properties.'msds-managedpassword'
+                [Byte[]]$byteBlob = $pw.Foreach({$PSItem})
+                $MemoryStream = New-Object System.IO.MemoryStream -ArgumentList (,$byteBlob)
+                $Reader = New-Object System.IO.BinaryReader -ArgumentList $MemoryStream
+            
+                # have to move the reader to the pw offset
+                $null = $Reader.ReadInt16()
+                $null = $Reader.ReadInt16()
+                $null = $Reader.ReadInt32()
+
+                $PWOffset = $Reader.ReadInt16()
+                $Length = $byteBlob.Length - $PWOffset
+                $stringBuilder = New-Object System.Text.StringBuilder -ArgumentList $Length
+                for($i = $PWOffset; $i -le $byteBlob.Length; $i += [System.Text.UnicodeEncoding]::CharSize){
+                    $currentChar = [System.BitConverter]::ToChar($byteBlob, $i)
+                    if($currentChar -eq [char]::MinValue) { break; }
+                    [void]$stringBuilder.Append($currentChar)
+                }
+                write-verbose ""
+                Write-verbose $stringBuilder
+                write-verbose ""
+                Write-verbose $stringBuilder.ToString()
+                return ( New-Object PSCredential -ArgumentList @(
+                                        "$($Domain)\$($GMSAName)",
+                                        (ConvertTo-SecureString $stringBuilder.ToString() -AsPlainText -Force)
+                                        ))
+            }
+        }
+    }
+
+######################################################################################################
+# PS Module dependency - beta - Microsoft Graph module
+######################################################################################################
+
+    $ModuleName = "Microsoft.Graph.Beta.Identity.Governance"
+    $Scope      = "AllUsers"
+    Manage-Powershell-Module -ModuleName $ModuleName -Scope AllUsers
+
+
+######################################################################################################
+# Variables
+######################################################################################################
+
+    Write-host ""
+    Write-host "Getting privileged information from Keyvault ... Please Wait !"
+
+    $AdminAccountsInitialPassword = Get-AzKeyVaultSecret -VaultName $global:KV_HighPriv_KeyVaultName -Name "AdminAccountsInitialPassword" -AsPlainText
+
+######################################################################################################
+# Include custom settings
+######################################################################################################
+
+    # Policy configuration
+    & "$($global:PathScripts)\PIM4EntraPS\Custom-Policies.ps1"
+
+    # Source Repository
+    & "$($global:PathScripts)\PIM4EntraPS\Custom-Repository.ps1"
+
+
+######################################################################################################
+# Building lists of data
+######################################################################################################
+
+    $Context = Set-AzContext -Subscription $global:MainLogAnalyticsWorkspaceSubId
+
+    Import-Module Microsoft.Graph.DeviceManagement.Enrollment
+
+    $MaxSteps = "11"
+
+    Write-host ""
+    Write-host "[ 01 / $($MaxSteps) ] Building list of all Users in Entra ID ... Please Wait !"
+    $Global:Users_All_ID = Get-MgUser -all:$true
+
+    Write-host "[ 02 / $($MaxSteps) ] Building list of all Groups in Entra ID ... Please Wait !"
+    $Global:Groups_All_ID = Get-MgGroup -all:$true
+
+    Write-host "[ 03 / $($MaxSteps) ] Building list of all PAG-Groups in Entra ID ... Please Wait !"
+    $Global:PAG_Groups_Definitions_ID = $Global:Groups_All_ID | `
+                                                Where-Object { ($_.DisplayName -like "PAG-*") } | `
+                                                Select-Object DisplayName, Description, Id | Sort-Object -Property DisplayName
+
+    Write-host "[ 04 / $($MaxSteps) ] Building list of all PAG-Resource Groups for PIM for AD in Entra ID ... Please Wait !"
+    $Global:PAG_Groups_Resource_SyncAD_Definitions_ID  = $Global:PAG_Groups_Definitions_ID | `
+                                                Where-Object { ($_.DisplayName -like "PAG-RES*") -and ($_.DisplayName -like "*-S_AD")} | `
+                                                Select-Object DisplayName, Description, Id | Sort-Object -Property DisplayName
+
+    Write-host "[ 05 / $($MaxSteps) ] Building list of all PAG-Service Groups for PIM for AD in Entra ID ... Please Wait !"
+    $Global:PAG_Groups_Service_SyncAD_Definitions_ID  = $Global:PAG_Groups_Definitions_ID | `
+                                                Where-Object { ($_.DisplayName -like "PAG-SERV*") -and ($_.DisplayName -like "*-S_AD")} | `
+                                                Select-Object DisplayName, Description, Id | Sort-Object -Property DisplayName
+
+    Write-host "[ 06 / $($MaxSteps) ] Building list of all Administrative Units in Entra ID ... Please Wait !"
+    $Global:AU_Definitions_ID = Get-MgDirectoryAdministrativeUnit -All:$true | Select-Object DisplayName, Id | Sort-Object -Property DisplayName
+
+    Write-host "[ 07 / $($MaxSteps) ] Building list of all Admin Accounts in Entra ID ... Please Wait !"
+    $Global:Accounts_Definitions_ID = $Global:Users_All_ID | `
+                                                Where-Object { ( ( ($_.UserPrincipalName -like "Admin-*") -or ($_.UserPrincipalName -like "X-Admin*") ) -and ($_.UserPrincipalName -like "*-ID*") ) } | `
+                                                Select-Object DisplayName, GivenName, SurName, Id | Sort-Object -Property DisplayName
+
+    Write-host "[ 08 / $($MaxSteps) ] Building list of all Role definitions for Groups in Entra ID ... Please Wait !"
+    $Global:Role_Group_Definitions_ID = Get-MgRoleManagementDirectoryRoleDefinition | Select-Object DisplayName, Id
+
+    Write-host "[ 09 / $($MaxSteps) ] Building list of all Role definitions for Administrative Units in Entra ID ... Please Wait !"
+    $Global:Role_AU_Definitions_ID = $Global:Role_Group_Definitions_ID | `
+                                                Where-Object { ($_.DisplayName -like "Authentication Administrator") -or `
+                                                               ($_.DisplayName -like "Cloud Device Administrator") -or `
+                                                               ($_.DisplayName -like "Groups Administrator") -or `
+                                                               ($_.DisplayName -like "Helpdesk Administrator") -or `
+                                                               ($_.DisplayName -like "License Administrator") -or `
+                                                               ($_.DisplayName -like "Password Administrator") -or `
+                                                               ($_.DisplayName -like "Printer Administrator") -or `
+                                                               ($_.DisplayName -like "SharePoint Administrator") -or `
+                                                               ($_.DisplayName -like "Teams Administrator") -or `
+                                                               ($_.DisplayName -like "Teams Devices Administrator") -or `
+                                                               ($_.DisplayName -like "User Administrator") } | `
+                                                Select-Object DisplayName, Id | Sort-Object -Property DisplayName
+
+    Write-host "[ 10 / $($MaxSteps) ] Building list of all Azure Resources ... Please Wait !"
+
+    $MgInfo = AzMGs-Query-AzARG | Query-AzResourceGraph -QueryScope Tenant
+    $SubInfo = AzSubscriptions-Query-AzARG | Query-AzResourceGraph -QueryScope Tenant
+
+    $Global:AzureResources_Definitions_ID   = @()
+    ForEach ($Mg in $MgInfo)
+        {
+            $Obj = new-object PsCustomObject
+            $Obj | Add-Member -MemberType NoteProperty -Name DisplayName -Value $Mg.properties.displayName
+            $Obj | Add-Member -MemberType NoteProperty -Name Name -Value $Mg.name
+            $Obj | Add-Member -MemberType NoteProperty -Name Id -Value $Mg.Id
+            $Global:AzureResources_Definitions_ID += $Obj
+        }
+
+    ForEach ($Sub in $SubInfo)
+        {
+            $Obj = new-object PsCustomObject
+            $Obj | Add-Member -MemberType NoteProperty -Name DisplayName -Value $Sub.subsciptionName
+            $Obj | Add-Member -MemberType NoteProperty -Name Name -Value $Sub.subscriptionId
+            $Obj | Add-Member -MemberType NoteProperty -Name Id -Value $Sub.Id
+            $Global:AzureResources_Definitions_ID += $Obj
+        }
+
+    Write-host "[ 11 / $($MaxSteps) ] Building list of all Azure Resources Roles ... Please Wait !"
+    $Global:AzureResourcesRole_Definitions_ID = Get-AzRoleDefinition | `
+                                                Select-Object Name, Description, Id | Sort-Object -Property Name
+
+######################################################################################################################
+# AU | Administrative Units | Creation
+######################################################################################################################
+
+    CreateUpdate-AdministrativeUnits-From-SQL -SQLTable $global:SQLTableDefinitionsAU
+
+
+######################################################################################################################
+# Admin Accounts | Creations
+######################################################################################################################
+
+    CreateUpdate-Accounts-From-SQL -SQLTable $global:SQLTableDefinitionsAdminAccounts `
+                                   -DefaultPassword $AdminAccountsInitialPassword `
+                                   -OnlyID
+
+######################################################################################################
+# PAG | PIM for Groups | Privileged Access Group (PAG) - Creation
+######################################################################################################
+
+    CreateUpdate-PIM-for-Groups-From-SQL -DeptGroupsDefinitionSQLTable $global:SQLTableDefinitionsDepartments `
+                                         -RoleGroupsDefinitionSQLTable $global:SQLTableDefinitionsRoles `
+                                         -TaskGroupsDefinitionSQLTable $global:SQLTableDefinitionsTasks `
+                                         -ServiceGroupsDefinitionSQLTable $global:SQLTableDefinitionsServices `
+                                         -ProcessGroupsDefinitionSQLTable $global:SQLTableDefinitionsProcesses `
+                                         -ResourceGroupsDefinitionSQLTable $global:SQLTableDefinitionsResources
+
+######################################################################################################
+# Policies for PIM for Azure AD roles
+######################################################################################################
+
+    CreateUpdate-Policies-PIM-Roles -Expiration_EndUser_Assignment_isExpirationRequired $Expiration_EndUser_Assignment_isExpirationRequired `
+                                    -Expiration_EndUser_Assignment_maximumDuration $Expiration_EndUser_Assignment_maximumDuration `
+                                    -Expiration_Admin_Assignment_isExpirationRequired $Expiration_Admin_Assignment_isExpirationRequired `
+                                    -Expiration_Admin_Assignment_maximumDuration $Expiration_Admin_Assignment_maximumDuration `
+                                    -Expiration_Admin_Eligibility_isExpirationRequired $Expiration_Admin_Eligibility_isExpirationRequired `
+                                    -Expiration_Admin_Eligibility_maximumDuration $Expiration_Admin_Eligibility_maximumDuration `
+                                    -Enablement_Admin_Assignment_enabledRules $Enablement_Admin_Assignment_enabledRules `
+                                    -Enablement_Admin_Eligibility_enabledRules $Enablement_Admin_Eligibility_enabledRules `
+                                    -Enablement_EndUser_Assignment_enabledRules $Enablement_EndUser_Assignment_enabledRules `
+                                    -Notification_Admin_EndUser_Assignment_notificationType $Notification_Admin_EndUser_Assignment_notificationType `
+                                    -Notification_Admin_EndUser_recipientType $Notification_Admin_EndUser_recipientType `
+                                    -Notification_Admin_EndUser_notificationLevel $Notification_Admin_EndUser_notificationLevel `
+                                    -Notification_Admin_EndUser_notificationRecipients $Notification_Admin_EndUser_notificationRecipients `
+                                    -Notification_Admin_EndUser_isDefaultRecipientsEnabled $Notification_Admin_EndUser_isDefaultRecipientsEnabled `
+                                    -Notification_Requestor_EndUser_Assignment_notificationType $Notification_Requestor_EndUser_Assignment_notificationType `
+                                    -Notification_Requestor_EndUser_Assignment_recipientType $Notification_Requestor_EndUser_Assignment_recipientType `
+                                    -Notification_Requestor_EndUser_Assignment_notificationLevel $Notification_Requestor_EndUser_Assignment_notificationLevel `
+                                    -Notification_Requestor_EndUser_Assignment_notificationRecipients $Notification_Requestor_EndUser_Assignment_notificationRecipients `
+                                    -Notification_Requestor_EndUser_Assignment_isDefaultRecipientsEnabled $Notification_Requestor_EndUser_Assignment_isDefaultRecipientsEnabled `
+                                    -Notification_Admin_Admin_Eligibility_notificationType $Notification_Admin_Admin_Eligibility_notificationType `
+                                    -Notification_Admin_Admin_Eligibility_recipientType $Notification_Admin_Admin_Eligibility_recipientType `
+                                    -Notification_Admin_Admin_Eligibility_notificationLevel $Notification_Admin_Admin_Eligibility_notificationLevel `
+                                    -Notification_Admin_Admin_Eligibility_notificationRecipients $Notification_Admin_Admin_Eligibility_notificationRecipients `
+                                    -Notification_Admin_Admin_Eligibility_isDefaultRecipientsEnabled $Notification_Admin_Admin_Eligibility_isDefaultRecipientsEnabled `
+                                    -Notification_Requestor_Admin_Eligibility_notificationType $Notification_Requestor_Admin_Eligibility_notificationType `
+                                    -Notification_Requestor_Admin_Eligibility_recipientType $Notification_Requestor_Admin_Eligibility_recipientType `
+                                    -Notification_Requestor_Admin_Eligibility_notificationLevel $Notification_Requestor_Admin_Eligibility_notificationLevel `
+                                    -Notification_Requestor_Admin_Eligibility_notificationRecipients $Notification_Requestor_Admin_Eligibility_notificationRecipients `
+                                    -Notification_Requestor_Admin_Eligibility_isDefaultRecipientsEnabled $Notification_Requestor_Admin_Eligibility_isDefaultRecipientsEnabled
+
+
+######################################################################################################################
+# Assignment of Roles to Administrative Units
+######################################################################################################################
+
+    Assign-Roles-AdministrativeUnits-From-SQL -SQLTable $global:SQLTableAssignmentsRolesAUs
+
+
+######################################################################################################################
+# Assignment of PIM for Groups / Privileged Access Group (PAG)
+######################################################################################################################
+
+    Assign-Roles-Groups-From-SQL -SQLTable $global:SQLTableAssignmentsRolesGroups
+
+
+######################################################################################################################
+# Assignment of PIM for Azure Resources / Privileged Access Group (PAG)
+######################################################################################################################
+
+    Assign-AzResources-Groups-From-SQL -SQLTable $global:SQLTableAssignmentsAzureResources
+                                            
+
+######################################################################################################################
+# Admin Accounts | Assignment of Priviledge Access Groups (PAGs)
+######################################################################################################################
+
+    $MaxSteps = "11"
+
+    Write-host ""
+    Write-host "[ 01 / $($MaxSteps) ] Building list of all Users in Entra ID ... Please Wait !"
+    $Global:Users_All_ID = Get-MgUser -all:$true
+
+    Write-host "[ 02 / $($MaxSteps) ] Building list of all Groups in Entra ID ... Please Wait !"
+    $Global:Groups_All_ID = Get-MgGroup -all:$true
+
+    Write-host "[ 03 / $($MaxSteps) ] Building list of all PAG-Groups in Entra ID ... Please Wait !"
+    $Global:PAG_Groups_Definitions_ID = $Global:Groups_All_ID | `
+                                                Where-Object { ($_.DisplayName -like "PAG-*") } | `
+                                                Select-Object DisplayName, Description, Id | Sort-Object -Property DisplayName
+
+    Write-host "[ 04 / $($MaxSteps) ] Building list of all PAG-Resource Groups for PIM for AD in Entra ID ... Please Wait !"
+    $Global:PAG_Groups_Resource_SyncAD_Definitions_ID  = $Global:PAG_Groups_Definitions_ID | `
+                                                Where-Object { ($_.DisplayName -like "PAG-RES*") -and ($_.DisplayName -like "*-S_AD")} | `
+                                                Select-Object DisplayName, Description, Id | Sort-Object -Property DisplayName
+
+    Write-host "[ 05 / $($MaxSteps) ] Building list of all PAG-Service Groups for PIM for AD in Entra ID ... Please Wait !"
+    $Global:PAG_Groups_Service_SyncAD_Definitions_ID  = $Global:PAG_Groups_Definitions_ID | `
+                                                Where-Object { ($_.DisplayName -like "PAG-SERV*") -and ($_.DisplayName -like "*-S_AD")} | `
+                                                Select-Object DisplayName, Description, Id | Sort-Object -Property DisplayName
+
+    Write-host "[ 06 / $($MaxSteps) ] Building list of all Administrative Units in Entra ID ... Please Wait !"
+    $Global:AU_Definitions_ID = Get-MgDirectoryAdministrativeUnit -All:$true | Select-Object DisplayName, Id | Sort-Object -Property DisplayName
+
+    Write-host "[ 07 / $($MaxSteps) ] Building list of all Admin Accounts in Entra ID ... Please Wait !"
+    $Global:Accounts_Definitions_ID = $Global:Users_All_ID | `
+                                                Where-Object { ( ( ($_.UserPrincipalName -like "Admin-*") -or ($_.UserPrincipalName -like "X-Admin*") ) -and ($_.UserPrincipalName -like "*-ID*") ) } | `
+                                                Select-Object DisplayName, GivenName, SurName, Id | Sort-Object -Property DisplayName
+
+    Write-host "[ 08 / $($MaxSteps) ] Building list of all Role definitions for Groups in Entra ID ... Please Wait !"
+    $Global:Role_Group_Definitions_ID = Get-MgRoleManagementDirectoryRoleDefinition | Select-Object DisplayName, Id
+
+    Write-host "[ 09 / $($MaxSteps) ] Building list of all Role definitions for Administrative Units in Entra ID ... Please Wait !"
+    $Global:Role_AU_Definitions_ID = $Global:Role_Group_Definitions_ID | `
+                                                Where-Object { ($_.DisplayName -like "Authentication Administrator") -or `
+                                                               ($_.DisplayName -like "Cloud Device Administrator") -or `
+                                                               ($_.DisplayName -like "Groups Administrator") -or `
+                                                               ($_.DisplayName -like "Helpdesk Administrator") -or `
+                                                               ($_.DisplayName -like "License Administrator") -or `
+                                                               ($_.DisplayName -like "Password Administrator") -or `
+                                                               ($_.DisplayName -like "Printer Administrator") -or `
+                                                               ($_.DisplayName -like "SharePoint Administrator") -or `
+                                                               ($_.DisplayName -like "Teams Administrator") -or `
+                                                               ($_.DisplayName -like "Teams Devices Administrator") -or `
+                                                               ($_.DisplayName -like "User Administrator") } | `
+                                                Select-Object DisplayName, Id | Sort-Object -Property DisplayName
+
+    Write-host "[ 10 / $($MaxSteps) ] Building list of all Azure Resources ... Please Wait !"
+
+    $MgInfo = AzMGs-Query-AzARG | Query-AzResourceGraph -QueryScope Tenant
+    $SubInfo = AzSubscriptions-Query-AzARG | Query-AzResourceGraph -QueryScope Tenant
+
+    $Global:AzureResources_Definitions_ID   = @()
+    ForEach ($Mg in $MgInfo)
+        {
+            $Obj = new-object PsCustomObject
+            $Obj | Add-Member -MemberType NoteProperty -Name DisplayName -Value $Mg.properties.displayName
+            $Obj | Add-Member -MemberType NoteProperty -Name Name -Value $Mg.name
+            $Obj | Add-Member -MemberType NoteProperty -Name Id -Value $Mg.Id
+            $Global:AzureResources_Definitions_ID += $Obj
+        }
+
+    ForEach ($Sub in $SubInfo)
+        {
+            $Obj = new-object PsCustomObject
+            $Obj | Add-Member -MemberType NoteProperty -Name DisplayName -Value $Sub.subsciptionName
+            $Obj | Add-Member -MemberType NoteProperty -Name Name -Value $Sub.subscriptionId
+            $Obj | Add-Member -MemberType NoteProperty -Name Id -Value $Sub.Id
+            $Global:AzureResources_Definitions_ID += $Obj
+        }
+
+    Write-host "[ 11 / $($MaxSteps) ] Building list of all Azure Resources Roles ... Please Wait !"
+    $Global:AzureResourcesRole_Definitions_ID = Get-AzRoleDefinition | `
+                                                Select-Object Name, Description, Id | Sort-Object -Property Name
+
+    Assign-Groups-Accounts-From-SQL -SQLTable $global:SQLTableAssignmentsAdmins
+
+
+######################################################################################################
+# Policies for PIM for Azure Resources (Azure Resource Manager)
+######################################################################################################
+
+    CreateUpdate-Policies-PIM-AzResources-SQL -SQLTable $global:SQLTableAssignmentsAzureResources `
+                                              -Expiration_EndUser_Assignment_isExpirationRequired $Expiration_EndUser_Assignment_isExpirationRequired `
+                                              -Expiration_EndUser_Assignment_maximumDuration $Expiration_EndUser_Assignment_maximumDuration `
+                                              -Expiration_Admin_Assignment_isExpirationRequired $Expiration_Admin_Assignment_isExpirationRequired `
+                                              -Expiration_Admin_Assignment_maximumDuration $Expiration_Admin_Assignment_maximumDuration `
+                                              -Expiration_Admin_Eligibility_isExpirationRequired $Expiration_Admin_Eligibility_isExpirationRequired `
+                                              -Expiration_Admin_Eligibility_maximumDuration $Expiration_Admin_Eligibility_maximumDuration `
+                                              -Enablement_Admin_Assignment_enabledRules $Enablement_Admin_Assignment_enabledRules `
+                                              -Enablement_Admin_Eligibility_enabledRules $Enablement_Admin_Eligibility_enabledRules `
+                                              -Enablement_EndUser_Assignment_enabledRules $Enablement_EndUser_Assignment_enabledRules `
+                                              -Notification_Admin_EndUser_Assignment_notificationType $Notification_Admin_EndUser_Assignment_notificationType `
+                                              -Notification_Admin_EndUser_recipientType $Notification_Admin_EndUser_recipientType `
+                                              -Notification_Admin_EndUser_notificationLevel $Notification_Admin_EndUser_notificationLevel `
+                                              -Notification_Admin_EndUser_notificationRecipients $Notification_Admin_EndUser_notificationRecipients `
+                                              -Notification_Admin_EndUser_isDefaultRecipientsEnabled $Notification_Admin_EndUser_isDefaultRecipientsEnabled `
+                                              -Notification_Requestor_EndUser_Assignment_notificationType $Notification_Requestor_EndUser_Assignment_notificationType `
+                                              -Notification_Requestor_EndUser_Assignment_recipientType $Notification_Requestor_EndUser_Assignment_recipientType `
+                                              -Notification_Requestor_EndUser_Assignment_notificationLevel $Notification_Requestor_EndUser_Assignment_notificationLevel `
+                                              -Notification_Requestor_EndUser_Assignment_notificationRecipients $Notification_Requestor_EndUser_Assignment_notificationRecipients `
+                                              -Notification_Requestor_EndUser_Assignment_isDefaultRecipientsEnabled $Notification_Requestor_EndUser_Assignment_isDefaultRecipientsEnabled `
+                                              -Notification_Admin_Admin_Eligibility_notificationType $Notification_Admin_Admin_Eligibility_notificationType `
+                                              -Notification_Admin_Admin_Eligibility_recipientType $Notification_Admin_Admin_Eligibility_recipientType `
+                                              -Notification_Admin_Admin_Eligibility_notificationLevel $Notification_Admin_Admin_Eligibility_notificationLevel `
+                                              -Notification_Admin_Admin_Eligibility_notificationRecipients $Notification_Admin_Admin_Eligibility_notificationRecipients `
+                                              -Notification_Admin_Admin_Eligibility_isDefaultRecipientsEnabled $Notification_Admin_Admin_Eligibility_isDefaultRecipientsEnabled `
+                                              -Notification_Requestor_Admin_Eligibility_notificationType $Notification_Requestor_Admin_Eligibility_notificationType `
+                                              -Notification_Requestor_Admin_Eligibility_recipientType $Notification_Requestor_Admin_Eligibility_recipientType `
+                                              -Notification_Requestor_Admin_Eligibility_notificationLevel $Notification_Requestor_Admin_Eligibility_notificationLevel `
+                                              -Notification_Requestor_Admin_Eligibility_notificationRecipients $Notification_Requestor_Admin_Eligibility_notificationRecipients `
+                                              -Notification_Requestor_Admin_Eligibility_isDefaultRecipientsEnabled $Notification_Requestor_Admin_Eligibility_isDefaultRecipientsEnabled
+
+
+######################################################################################################
+# Policies for PIM for Groups
+######################################################################################################
+
+    CreateUpdate-Policies-PIM-Groups -Expiration_EndUser_Assignment_isExpirationRequired $Expiration_EndUser_Assignment_isExpirationRequired `
+                                     -Expiration_EndUser_Assignment_maximumDuration $Expiration_EndUser_Assignment_maximumDuration `
+                                     -Expiration_Admin_Assignment_isExpirationRequired $Expiration_Admin_Assignment_isExpirationRequired `
+                                     -Expiration_Admin_Assignment_maximumDuration $Expiration_Admin_Assignment_maximumDuration `
+                                     -Expiration_Admin_Eligibility_isExpirationRequired $Expiration_Admin_Eligibility_isExpirationRequired `
+                                     -Expiration_Admin_Eligibility_maximumDuration $Expiration_Admin_Eligibility_maximumDuration `
+                                     -Enablement_Admin_Assignment_enabledRules $Enablement_Admin_Assignment_enabledRules `
+                                     -Enablement_Admin_Eligibility_enabledRules $Enablement_Admin_Eligibility_enabledRules `
+                                     -Enablement_EndUser_Assignment_enabledRules $Enablement_EndUser_Assignment_enabledRules `
+                                     -Notification_Admin_EndUser_Assignment_notificationType $Notification_Admin_EndUser_Assignment_notificationType `
+                                     -Notification_Admin_EndUser_recipientType $Notification_Admin_EndUser_recipientType `
+                                     -Notification_Admin_EndUser_notificationLevel $Notification_Admin_EndUser_notificationLevel `
+                                     -Notification_Admin_EndUser_notificationRecipients $Notification_Admin_EndUser_notificationRecipients `
+                                     -Notification_Admin_EndUser_isDefaultRecipientsEnabled $Notification_Admin_EndUser_isDefaultRecipientsEnabled `
+                                     -Notification_Requestor_EndUser_Assignment_notificationType $Notification_Requestor_EndUser_Assignment_notificationType `
+                                     -Notification_Requestor_EndUser_Assignment_recipientType $Notification_Requestor_EndUser_Assignment_recipientType `
+                                     -Notification_Requestor_EndUser_Assignment_notificationLevel $Notification_Requestor_EndUser_Assignment_notificationLevel `
+                                     -Notification_Requestor_EndUser_Assignment_notificationRecipients $Notification_Requestor_EndUser_Assignment_notificationRecipients `
+                                     -Notification_Requestor_EndUser_Assignment_isDefaultRecipientsEnabled $Notification_Requestor_EndUser_Assignment_isDefaultRecipientsEnabled `
+                                     -Notification_Admin_Admin_Eligibility_notificationType $Notification_Admin_Admin_Eligibility_notificationType `
+                                     -Notification_Admin_Admin_Eligibility_recipientType $Notification_Admin_Admin_Eligibility_recipientType `
+                                     -Notification_Admin_Admin_Eligibility_notificationLevel $Notification_Admin_Admin_Eligibility_notificationLevel `
+                                     -Notification_Admin_Admin_Eligibility_notificationRecipients $Notification_Admin_Admin_Eligibility_notificationRecipients `
+                                     -Notification_Admin_Admin_Eligibility_isDefaultRecipientsEnabled $Notification_Admin_Admin_Eligibility_isDefaultRecipientsEnabled `
+                                     -Notification_Requestor_Admin_Eligibility_notificationType $Notification_Requestor_Admin_Eligibility_notificationType `
+                                     -Notification_Requestor_Admin_Eligibility_recipientType $Notification_Requestor_Admin_Eligibility_recipientType `
+                                     -Notification_Requestor_Admin_Eligibility_notificationLevel $Notification_Requestor_Admin_Eligibility_notificationLevel `
+                                     -Notification_Requestor_Admin_Eligibility_notificationRecipients $Notification_Requestor_Admin_Eligibility_notificationRecipients `
+                                     -Notification_Requestor_Admin_Eligibility_isDefaultRecipientsEnabled $Notification_Requestor_Admin_Eligibility_isDefaultRecipientsEnabled

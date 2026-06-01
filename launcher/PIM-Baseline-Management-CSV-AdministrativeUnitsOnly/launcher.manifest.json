@@ -1,0 +1,10 @@
+{
+  "notes": "Ported via TOOLS/New-SolutionLauncherSet.ps1. Engine copied near-verbatim with defensive patches (idempotent $global:PathScripts + FUNCTIONS/LEGACY fallback). Internal-only = False.",
+  "community": true,
+  "author": "Morten Knudsen <mok@example.invalid>",
+  "communityRepo": "PIM4EntraPS",
+  "description": "PIM-Baseline-Management-CSV-AdministrativeUnitsOnly -- v2 ported engine under PIM4EntraPS.",
+  "version": "2.0.0",
+  "scriptName": "PIM-Baseline-Management-CSV-AdministrativeUnitsOnly",
+  "scriptType": "Engine"
+}
