@@ -307,23 +307,27 @@ function Compare-PimRowSets {
     }
 
     # Pair leftover adds + removes positionally to surface column-level modifies.
+    # NOTE: avoid local variable names $before / $after -- they case-insensitively
+    # shadow the typed params $Before / $After ([object[]]), and PowerShell would
+    # coerce any subsequent assignment back to [object[]], wrapping an
+    # OrderedDictionary into a 1-element array. Use $beforeRow / $afterRow.
     $modifies = New-Object System.Collections.ArrayList
     $pairs = [Math]::Min($adds.Count, $removes.Count)
     for ($i = 0; $i -lt $pairs; $i++) {
-        $before = $removes[0]
-        $after  = $adds[0]
+        $beforeRow = $removes[0]
+        $afterRow  = $adds[0]
         $removes.RemoveAt(0); $adds.RemoveAt(0)
         $diffCols = New-Object System.Collections.ArrayList
         $allCols = @()
-        if ($before -is [System.Collections.IDictionary]) { $allCols += @($before.Keys) } else { $allCols += @($before.PSObject.Properties.Name) }
-        if ($after  -is [System.Collections.IDictionary]) { $allCols += @($after.Keys)  } else { $allCols += @($after.PSObject.Properties.Name) }
+        if ($beforeRow -is [System.Collections.IDictionary]) { $allCols += @($beforeRow.Keys) } else { $allCols += @($beforeRow.PSObject.Properties.Name) }
+        if ($afterRow  -is [System.Collections.IDictionary]) { $allCols += @($afterRow.Keys)  } else { $allCols += @($afterRow.PSObject.Properties.Name) }
         $allCols = $allCols | Select-Object -Unique
         foreach ($c in $allCols) {
-            $bv = if ($before -is [System.Collections.IDictionary]) { "$($before[$c])" } else { "$($before.PSObject.Properties[$c].Value)" }
-            $av = if ($after  -is [System.Collections.IDictionary]) { "$($after[$c])"  } else { "$($after.PSObject.Properties[$c].Value)" }
+            $bv = if ($beforeRow -is [System.Collections.IDictionary]) { "$($beforeRow[$c])" } else { "$($beforeRow.PSObject.Properties[$c].Value)" }
+            $av = if ($afterRow  -is [System.Collections.IDictionary]) { "$($afterRow[$c])"  } else { "$($afterRow.PSObject.Properties[$c].Value)" }
             if ($bv -ne $av) { [void]$diffCols.Add($c) }
         }
-        [void]$modifies.Add([ordered]@{ before = $before; after = $after; diffCols = $diffCols.ToArray() })
+        [void]$modifies.Add([ordered]@{ before = $beforeRow; after = $afterRow; diffCols = $diffCols.ToArray() })
     }
 
     return @{

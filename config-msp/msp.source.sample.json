@@ -1,0 +1,11 @@
+{
+    "_comment": "Copy this file to msp.source.json and fill in your central source. msp.source.json is gitignored. See config-msp/README.md for full setup.",
+    "sourceType": "git",
+    "url": "https://github.com/<your-msp-org>/pim-msp-central.git",
+    "branch": "main",
+    "subPath": "tenants/<tenant-id-or-customer-name>",
+    "auth": {
+        "method": "PAT",
+        "patEnvVar": "PIM_MSP_GIT_PAT"
+    }
+}
