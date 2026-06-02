@@ -1,9 +1,10 @@
 # Release notes for PIM4EntraPS
 
-## v2.1.5
+## v2.1.6
 
 Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monorepo:
 
+- release: PIM4EntraPS v2.1.6 - hotfix: Ensure-DateTime null-safe (kills persistent engine crash at PIM-Baseline-Management-CSV.ps1:1196) (bd2207d0)
 - release: PIM4EntraPS v2.1.5 - hotfix: visible feedback on Remove-orphan-assignment button (dbd9bd38)
 - release: PIM4EntraPS v2.1.4 - hotfix: PIM-Functions auto-loads naming-conventions at module init (302f0a29)
 - release: PIM4EntraPS v2.1.3 - server-side Graph filtering (Get-PimAdminsFiltered + Get-PimGroupsFiltered) + customer-naming-aware Re-add wizard + naming-convention schema doc (6936c5ea)
@@ -33,6 +34,22 @@ Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monor
 # Release notes -- PIM4EntraPS
 
 > **Curated changelog.** The publish workflow auto-prepends recent monorepo commits as a raw activity log; this file is the human-friendly narrative on top.
+
+---
+
+## v2.1.6 -- Hotfix: Ensure-DateTime null-safe (kills the persistent engine crash at line 1196)
+
+Root cause of the engine crash `Assign-Groups-Accounts-From-file-CSV : Cannot bind argument to parameter 'InputObject' because it is null` that survived v2.0.0/v2.1.x hardening:
+
+1. `CorrelateDateTimeLanguage -DateInput $ValueChk` returns `$null` when it can't parse the date (e.g. `'09/14/2026 10:44:37'` -- US format on a da-DK locale; only emits `Write-Warning`).
+2. That `$null` flows into `(Ensure-DateTime $ExpirationDate)` at 6 different call-sites in `PIM-Functions.psm1`.
+3. `Ensure-DateTime`'s `$InputObject` param was `[Parameter(Mandatory = $true)] [object]` -- PowerShell's parameter binder rejects a null Mandatory positional argument with the exact `InputObject is null` message we kept seeing.
+
+Fix: `Ensure-DateTime` is now null-safe. Removes `Mandatory = $true` from the param, returns a far-future date (`Get-Date + 99 years`) when input is null / empty / whitespace. Downstream `New-TimeSpan -End ...` gets a valid DateTime, the "is this expiring in <30 days?" check is just false, the row is treated as "not expiring" -- safe no-op instead of engine crash.
+
+No call-site changes needed (single helper hardens all 6 patterns at once).
+
+Verification: this is the same crash signature reported across smoke tests since v2.0.0; re-run the engine to confirm the row that produced `WARNING: Unable to parse datetime: '09/14/2026 10:44:37'` now continues past it instead of crashing the function.
 
 ---
 

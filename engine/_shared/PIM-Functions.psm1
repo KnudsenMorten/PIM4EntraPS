@@ -53,10 +53,24 @@ function Ensure-DateTime {
         - Accepts [datetime], [datetimeoffset], and strings.
     #>
     param(
-        [Parameter(Mandatory = $true, ValueFromPipeline = $true)]
+        # NOTE: NOT Mandatory + NOT a strict [datetime] type so $null upstream
+        # values fall through to the "treat as far-future" branch below instead
+        # of triggering a "Cannot bind argument to parameter 'InputObject' because
+        # it is null" parameter-binding error. The upstream code path is the
+        # (Get-Date)..(Ensure-DateTime $ExpirationDate) pipeline where
+        # CorrelateDateTimeLanguage returns $null on an unparseable date --
+        # without this we crash the engine at line 1196 of the baseline engine.
+        [Parameter(ValueFromPipeline = $true)]
         [object]$InputObject,
         [switch]$AssumeLocal
     )
+
+    # Null / empty / unparseable upstream -> return a far-future date so any
+    # downstream `(New-TimeSpan -End ...).TotalDays` returns a large number,
+    # and the typical "is this expiring in <30 days?" check is just false.
+    # Upstream is expected to have already emitted its own warning explaining
+    # WHY the date was unparseable; we don't double-warn here.
+    if ($null -eq $InputObject) { return (Get-Date).AddYears(99) }
 
     # Pass through
     if ($InputObject -is [datetime]) { return $InputObject }
@@ -71,7 +85,9 @@ function Ensure-DateTime {
     # Normalize string
     $s = [string]$InputObject
     if ([string]::IsNullOrWhiteSpace($s)) {
-        throw "Ensure-DateTime: Input is null or empty."
+        # Same defensive return as the null branch above -- empty strings
+        # come from blank CSV cells and should not crash the engine.
+        return (Get-Date).AddYears(99)
     }
     $s = $s.Trim()
 
