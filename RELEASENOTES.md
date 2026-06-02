@@ -1,9 +1,10 @@
 # Release notes for PIM4EntraPS
 
-## v2.1.2
+## v2.1.3
 
 Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monorepo:
 
+- release: PIM4EntraPS v2.1.3 - server-side Graph filtering (Get-PimAdminsFiltered + Get-PimGroupsFiltered) + customer-naming-aware Re-add wizard + naming-convention schema doc (6936c5ea)
 - release: PIM4EntraPS v2.1.2 - PIM Manager v0.3: pre-flight validator + bulk Fix-all + multi-step wizards + tenant cache (87feaada)
 - release: PIM4EntraPS v2.1.1 - rename pim-mapper -> pim-manager (does more than map) + field-by-field UX audit spec + wizard scaffolding (42fe18e1)
 - release: PIM4EntraPS v2.1.0 - MSP variant + AccountStatus kill-switch with CISO-controlled per-admin KV codes (d1979fe8)
@@ -30,6 +31,63 @@ Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monor
 # Release notes -- PIM4EntraPS
 
 > **Curated changelog.** The publish workflow auto-prepends recent monorepo commits as a raw activity log; this file is the human-friendly narrative on top.
+
+---
+
+## v2.1.3 -- Server-side Graph filtering + customer-naming-aware wizards + naming-convention schema
+
+Three changes that all hinge on the same thing: **the customer's naming convention is the source of truth**, both for engine performance and for the Manager's wizards. Stops the engine from fetching 514,000 users / 30,000 groups when it only needs 30 admins / 200 PIM-* groups, and stops the Manager from guessing `PIM-` prefixes that don't match what the customer actually uses.
+
+### 1. Server-side Graph filtering (the 514k user fix)
+
+Two new helpers in `engine/_shared/PIM-Functions.psm1`:
+
+- **`Get-PimAdminsFiltered`** -- replaces `Get-MgUser -All` in engine hot paths. Derives the admin name prefix(es) from `$global:PIM_NamingConventions.AdminAccountPatterns` (or legacy `AdminAccountPattern`) and passes them as `$filter=startswith(userPrincipalName, '...')` to the Graph query. On a 514,000-user tenant this returns ~30 admins instead of all 514,000.
+- **`Get-PimGroupsFiltered`** -- same idea for `Get-MgGroup -All`. Derives the prefix from `$global:PIM_NamingConventions.PimGroupPattern` (plus `PimGroupAuPattern` if it differs). Returns ~hundreds of `PIM-*` groups instead of all 30,000.
+- **`Get-PimNamePrefix`** -- helper that extracts the literal prefix (everything before the first `{Token}` placeholder) from any naming-convention pattern. Honours every customer's prefix shape (`PIM-`, `PIM_`, `grp-e-pim-`, etc.).
+
+**Fallback**: if no prefix is configured / prefix is shorter than 3 chars, both helpers warn loudly + fall back to unfiltered. Engines never silently regress.
+
+Applied across 13 engines (every `Get-MgUser -all:$true` / `Get-MgGroup -all:$true` call-site):
+
+- `PIM-Baseline-Management-CSV` (+ 6 narrowed variants)
+- `PIM-Baseline-Management-SQL`
+- `PIM-Assignment-Exporter` / `-CSV-Only`
+- `PIM-Assignment-Wizard` / `-Revoker`
+
+Customer requirement to benefit from the optimization: set `AdminAccountPatterns` + `PimGroupPattern` in `config/PIM4EntraPS.NamingConventions.custom.ps1` to match the actual tenant naming. The schema doc has a worked example per customer naming style.
+
+### 2. Manager: data-driven Re-add-definition wizard
+
+The "Re-add definition for `<tag>`" dialog now learns the right CSV + the right GroupName format from the customer's own existing data instead of guessing:
+
+- **Layer 1** -- if the customer set `TagPrefixToCsv` in their naming-conventions `.custom.ps1`, longest-prefix wins.
+- **Layer 2** -- otherwise scan all 7 `PIM-Definitions-*.csv` files: which CSV holds the most tags sharing a prefix with the missing tag? That's the default. Also copies an existing matching row's `GroupName` and substitutes the tag (so a customer with `grp-e-pim-{tag}` groups gets `grp-e-pim-<new-tag>` suggested, not the assumed `PIM-<new-tag>`).
+- **Layer 3** -- fallback to the literal prefix of `PimGroupPattern` (`pat.split('{')[0]`).
+- **Layer 4** -- if nothing matches, leave the field blank and let the operator fill in their convention manually. No `PIM-` assumption.
+
+### 3. Naming-convention schema doc (v2 of the .locked.ps1 + .custom.sample.ps1)
+
+`config/PIM4EntraPS.NamingConventions.custom.sample.ps1` rewritten as the formal schema doc -- every supported key, what consumes it, examples from real customers (Customer A: `Admin-{Initials}-L{Level}-T{Tier}-{Platform}`, Customer B: `adm{Initials}`, Customer C: `a-{Owner}`). New keys:
+
+- **`AdminAccountPatterns`** -- hashtable mapping `UserType` (Internal / External / Guest) to per-type name template. Lets a customer use `Admin-{Initials}` for internals and `X-Admin-{Initials}` or `extadm{Initials}` for externals in the same tenant. Legacy `AdminAccountPattern` (single string) still honoured as fallback.
+- **`PimGroupTagRegex`** -- optional strict regex for `GroupTag` validation. Default null (Manager accepts any alphanumeric tag).
+- **`TagPrefixToCsv`** -- hashtable mapping tag prefixes to `PIM-Definitions-*.csv` files (longest match wins). Drives the Manager's Re-add wizard CSV picker.
+- **Performance optimization section** -- documents how the literal-prefix extraction feeds both the engine's `Get-PimAdminsFiltered` / `Get-PimGroupsFiltered` and the Filters scriptblocks.
+
+### Migration
+
+- **Customers**: copy `config/PIM4EntraPS.NamingConventions.custom.sample.ps1` to `.custom.ps1` (if you haven't already), uncomment + set `AdminAccountPatterns` and `PimGroupPattern` to match your tenant. Without this, the engine helpers warn + fall back to unfiltered (same speed as before, no regression).
+- **No CSV schema change**. No launcher change. No engine API change beyond the swap from `Get-MgUser -All` to `Get-PimAdminsFiltered`.
+
+### Verification
+
+- All 13 engine `.ps1` files + the shared `.psm1` parse-clean under PowerShell 5.1.
+- `Get-PimNamePrefix` validated against patterns: `PIM-{Service}` -> `PIM-`, `PIM_{Role}_{Department}` -> `PIM_`, `grp-e-pim-{Role}` -> `grp-e-pim-`, `Admin-{Initials}` -> `Admin-`.
+
+### Known gap (v2.1.4 backlog)
+
+- The customer's shipped `PimGroupPattern` default is `PIM_{Role}_{Department}` (with underscore). But real customer data uses `PIM-` (hyphen). Until they override in `.custom.ps1`, the helpers will derive `PIM_` as the prefix and return 0 matches -- triggering the warn-and-fall-back path. Either set the override, or v2.1.4 will change the shipped default to the canonical hyphen-shape PIM-{Service}-{Name}-L{Level}-T{Tier}-{Code}-{Domain}.
 
 ---
 

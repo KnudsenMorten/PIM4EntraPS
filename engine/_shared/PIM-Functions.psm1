@@ -9016,6 +9016,127 @@ function Invoke-PimAccountRevoke {
     Write-Host "  [Revoke] audit row appended -> $auditCsv" -ForegroundColor DarkCyan
 }
 
+function Get-PimNamePrefix {
+    <#
+    .SYNOPSIS
+        Extract the literal prefix (everything before the first {Token})
+        from a naming-convention pattern.
+
+    .EXAMPLE
+        Get-PimNamePrefix 'PIM-{Service}-{Name}-L{Level}-T{Tier}-{Code}-{Domain}'
+        # -> 'PIM-'
+
+        Get-PimNamePrefix 'Admin-{Initials}-L{Level}-T{Tier}-{Platform}'
+        # -> 'Admin-'
+    #>
+    [CmdletBinding()]
+    param([string]$Pattern)
+    if (-not $Pattern) { return '' }
+    $idx = $Pattern.IndexOf('{')
+    if ($idx -lt 0) { return $Pattern }
+    return $Pattern.Substring(0, $idx)
+}
+
+function Get-PimGroupsFiltered {
+    <#
+    .SYNOPSIS
+        Server-side-filtered Get-MgGroup. Loads only groups whose displayName
+        starts with the naming-convention prefix derived from
+        $global:PIM_NamingConventions.PimGroupPattern.
+
+    .DESCRIPTION
+        Replacement for `Get-MgGroup -All` in engine hot paths. Saves the
+        full-tenant fetch (e.g. a 514 000-user tenant returns ~hundreds of
+        PIM-* groups instead of all 30 000 groups).
+
+        Fallback rules:
+          - No prefix found / prefix shorter than 3 chars => warn + fall
+            back to unfiltered Get-MgGroup -All (loud Write-Warning so the
+            operator notices the perf regression and fixes their config).
+          - Optional $Extra parameter appends extra filter clauses (OR'd
+            with the prefix clause). Used when role / dept / etc. groups
+            have their own prefix in addition to PIM- groups.
+    #>
+    [CmdletBinding()]
+    param(
+        [string[]]$Extra
+    )
+
+    $prefixes = New-Object System.Collections.ArrayList
+    $nc = $global:PIM_NamingConventions
+    if ($nc) {
+        $p = Get-PimNamePrefix -Pattern $nc.PimGroupPattern
+        if ($p -and $p.Length -ge 3) { [void]$prefixes.Add($p) }
+        # AU pattern too, in case it differs (rare but seen).
+        $pa = Get-PimNamePrefix -Pattern $nc.PimGroupAuPattern
+        if ($pa -and $pa.Length -ge 3 -and $pa -ne $p) { [void]$prefixes.Add($pa) }
+    }
+    if ($Extra) {
+        foreach ($e in $Extra) { if ($e -and -not ($prefixes -contains $e)) { [void]$prefixes.Add($e) } }
+    }
+
+    if ($prefixes.Count -eq 0) {
+        Write-Warning "Get-PimGroupsFiltered: no PimGroupPattern prefix configured (NamingConventions). Loading ALL groups (this is slow on large tenants -- set PimGroupPattern to override)."
+        return @(Get-MgGroup -All)
+    }
+
+    $clauses = $prefixes | ForEach-Object { "startswith(displayName,'$_')" }
+    $filter = $clauses -join ' or '
+    Write-Host "  [perf] Get-PimGroupsFiltered: `$filter=$filter" -ForegroundColor DarkGray
+    # ConsistencyLevel=eventual + $count required for advanced $filter shapes.
+    return @(Get-MgGroup -All -Filter $filter -ConsistencyLevel eventual -CountVariable __ -ErrorAction Stop)
+}
+
+function Get-PimAdminsFiltered {
+    <#
+    .SYNOPSIS
+        Server-side-filtered Get-MgUser. Loads only users whose
+        userPrincipalName starts with one of the admin-account prefixes
+        derived from $global:PIM_NamingConventions.AdminAccountPatterns
+        (or AdminAccountPattern legacy single string).
+
+    .DESCRIPTION
+        Replacement for `Get-MgUser -All` in engine hot paths. On a tenant
+        with 500 000 users + 30 admin accounts, this returns 30 users
+        instead of all 500 000.
+
+        Fallback: if no naming convention prefix is configured, warns and
+        falls back to unfiltered Get-MgUser -All.
+    #>
+    [CmdletBinding()]
+    param(
+        [string[]]$Extra
+    )
+
+    $prefixes = New-Object System.Collections.ArrayList
+    $nc = $global:PIM_NamingConventions
+    if ($nc) {
+        if ($nc.AdminAccountPatterns -is [hashtable]) {
+            foreach ($v in $nc.AdminAccountPatterns.Values) {
+                $p = Get-PimNamePrefix -Pattern $v
+                if ($p -and $p.Length -ge 3 -and -not ($prefixes -contains $p)) { [void]$prefixes.Add($p) }
+            }
+        }
+        if ($nc.AdminAccountPattern) {
+            $p = Get-PimNamePrefix -Pattern $nc.AdminAccountPattern
+            if ($p -and $p.Length -ge 3 -and -not ($prefixes -contains $p)) { [void]$prefixes.Add($p) }
+        }
+    }
+    if ($Extra) {
+        foreach ($e in $Extra) { if ($e -and -not ($prefixes -contains $e)) { [void]$prefixes.Add($e) } }
+    }
+
+    if ($prefixes.Count -eq 0) {
+        Write-Warning "Get-PimAdminsFiltered: no admin-name prefix in NamingConventions. Loading ALL users (this is slow on large tenants -- set AdminAccountPatterns to override)."
+        return @(Get-MgUser -All)
+    }
+
+    $clauses = $prefixes | ForEach-Object { "startswith(userPrincipalName,'$_')" }
+    $filter = $clauses -join ' or '
+    Write-Host "  [perf] Get-PimAdminsFiltered: `$filter=$filter" -ForegroundColor DarkGray
+    return @(Get-MgUser -All -Filter $filter -ConsistencyLevel eventual -CountVariable __ -ErrorAction Stop)
+}
+
 function New-PimRandomPassword {
     <#
     .SYNOPSIS

@@ -121,10 +121,10 @@ Write-Output "******************************************************************
 
     Write-host ""
     Write-host "[ 01 / $($MaxSteps) ] Building list of all Users in Entra ID ... Please Wait !"
-    $Global:Users_All_ID = Get-MgUser -all:$true
+    $Global:Users_All_ID = Get-PimAdminsFiltered
 
     Write-host "[ 02 / $($MaxSteps) ] Building list of all Groups in Entra ID ... Please Wait !"
-    $Global:Groups_All_ID = Get-MgGroup -all:$true
+    $Global:Groups_All_ID = Get-PimGroupsFiltered
 
     Write-host "[ 03 / $($MaxSteps) ] Building list of all PIM-Groups in Entra ID ... Please Wait !"
     $Global:PIM_Groups_Definitions_ID = $Global:Groups_All_ID | `
@@ -288,7 +288,7 @@ Write-Output "******************************************************************
 # Policies for PIM for Groups
 ######################################################################################################
 
-    $Groups_All = Get-MgGroup -all:$true
+    $Groups_All = Get-PimGroupsFiltered
 
     $Groups_All_Scope = $Groups_All | where-Object { ($_.SecurityEnabled -eq $true) }
     $Groups_All_Scope = $Groups_All_Scope | where-Object { ($_.GroupTypes -notin "DynamicMembership") }
