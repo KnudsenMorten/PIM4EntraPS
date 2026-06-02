@@ -1696,7 +1696,27 @@
     });
     // Wire PIM-FK-001 quick-fix buttons.
     results.querySelectorAll('[data-act="fk-remove"]').forEach(el => {
-      el.onclick = () => actionRemoveOrphanRow(el.dataset.csv, parseInt(el.dataset.row, 10));
+      el.onclick = async () => {
+        // Disable + flag the click immediately so the user sees something
+        // happen even if the underlying CSV load takes a moment.
+        if (el.dataset.busy === '1') return;
+        el.dataset.busy = '1';
+        el.disabled = true;
+        const orig = el.textContent;
+        el.textContent = 'Working...';
+        try {
+          await actionRemoveOrphanRow(el.dataset.csv, parseInt(el.dataset.row, 10));
+          el.textContent = '\u2713 Staged for delete (commit on Save tab)';
+          el.style.background = '#1f6f3f22';
+          el.style.color = '#7ee787';
+          el.style.borderColor = '#3fb950';
+        } catch (e) {
+          el.textContent = orig;
+          el.disabled = false;
+          delete el.dataset.busy;
+          alert('Remove failed: ' + (e && e.message ? e.message : e));
+        }
+      };
     });
     results.querySelectorAll('[data-act="fk-readd"]').forEach(el => {
       el.onclick = () => actionReAddDefinition(el.dataset.tag);
