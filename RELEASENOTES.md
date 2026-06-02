@@ -1,9 +1,10 @@
 # Release notes for PIM4EntraPS
 
-## v2.1.3
+## v2.1.4
 
 Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monorepo:
 
+- release: PIM4EntraPS v2.1.4 - hotfix: PIM-Functions auto-loads naming-conventions at module init (302f0a29)
 - release: PIM4EntraPS v2.1.3 - server-side Graph filtering (Get-PimAdminsFiltered + Get-PimGroupsFiltered) + customer-naming-aware Re-add wizard + naming-convention schema doc (6936c5ea)
 - release: PIM4EntraPS v2.1.2 - PIM Manager v0.3: pre-flight validator + bulk Fix-all + multi-step wizards + tenant cache (87feaada)
 - release: PIM4EntraPS v2.1.1 - rename pim-mapper -> pim-manager (does more than map) + field-by-field UX audit spec + wizard scaffolding (42fe18e1)
@@ -31,6 +32,16 @@ Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monor
 # Release notes -- PIM4EntraPS
 
 > **Curated changelog.** The publish workflow auto-prepends recent monorepo commits as a raw activity log; this file is the human-friendly narrative on top.
+
+---
+
+## v2.1.4 -- Hotfix: PIM-Functions auto-loads naming-conventions at module init
+
+v2.1.3 shipped the `Get-PimAdminsFiltered` / `Get-PimGroupsFiltered` perf helpers but missed a load step: the engine launcher (`launcher.internal-vm.ps1` / `.community-vm.ps1`) never dot-sources `config/PIM4EntraPS.NamingConventions.{locked,custom}.ps1`, so `$global:PIM_NamingConventions` was `$null` at engine runtime and the new helpers would have warned + fallen back to unfiltered (no perf win).
+
+Fix: `engine/_shared/PIM-Functions.psm1` now auto-loads both files at module-init time (`. $configRoot\PIM4EntraPS.NamingConventions.locked.ps1` then `. $configRoot\PIM4EntraPS.NamingConventions.custom.ps1` if present). Single block, idempotent, swallows + warns on failure.
+
+Verified end-to-end on the customer VM: `[perf] Get-PimAdminsFiltered: $filter=startswith(userPrincipalName,'Admin-') or startswith(userPrincipalName,'X-Admin-')` + `[perf] Get-PimGroupsFiltered: $filter=startswith(displayName,'PIM-')` both fire on engine boot.
 
 ---
 
