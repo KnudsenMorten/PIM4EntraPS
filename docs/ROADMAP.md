@@ -56,13 +56,13 @@ backend decision changes.
 
 | # | Feature | Size | Notes |
 |---|---|---|---|
-| 1 | Optional metadata columns on `Account-Definitions-Admins` (Company, Notes, Sponsor, ManagerEmail, StartDate) | S | Additive CSV change; Manager wizard exposes them as collapsible "More fields..." section |
-| 2 | Show actual Entra ID permissions behind a role (drill-down from graph node) | M | Hover/click on permission-group node -> side panel lists every concrete permission (rolePermissions[].allowedResourceActions); pulled live from `cache/entra-roles.json` |
+| 1 | Optional metadata columns on `Account-Definitions-Admins` (Company, Notes, Sponsor, ManagerEmail, StartDate) | S | Additive CSV change; Manager wizard exposes them as collapsible "More fields..." section -- **[SHIPPED v2.2.0]** |
+| 2 | Show actual Entra ID permissions behind a role (drill-down from graph node) | M | Hover/click on permission-group node -> side panel lists every concrete permission (rolePermissions[].allowedResourceActions); pulled live from `cache/entra-roles.json` -- **[SHIPPED v2.2.0]** |
 | 3 | Clone a role group / permission group / definition (multi-select target CSVs) | S | Extends today's Clone wizard to bulk + cross-CSV |
 | 4 | Multi-select assign permissions in bulk: pick 10 Entra roles + 10 Azure scopes -> attach to a role/org/task | M | New wizard "Bulk attach"; generates row sets in `Roles-Groups` / `Roles-AUs` / `Azure-Resources` |
 | 5 | Clone Azure subscription RBAC delegations to a different role at same scope (or to N new roles) | S | Extends Clone wizard with "and substitute the role" option |
-| 6 | Disable/enable admins via Manager multi-select on the Grid tab | S | Reuses `AccountStatus` column shipped in v2.1.x |
-| 7 | Multi-select delete of existing PIM assignments/delegations | S | Manager Grid tab; rows go to `pendingChanges.deletes` |
+| 6 | Disable/enable admins via Manager multi-select on the Grid tab | S | Reuses `AccountStatus` column shipped in v2.1.x -- **[SHIPPED v2.2.0]** |
+| 7 | Multi-select delete of existing PIM assignments/delegations | S | Manager Grid tab; rows go to `pendingChanges.deletes` -- **[SHIPPED v2.2.0]** |
 | 8 | Add new Administrative Units via Manager wizard | S | New wizard variant; writes to `PIM-Definitions-AU` + optional `PIM-Assignments-Roles-AUs` rows |
 | 9 | Import admins via CSV upload (FirstName, LastName, Initials) + link to template | M | File-upload to Manager; rows mapped to selected admin template (see #11) |
 | 10 | Admin templates (internal, external/consultant, contractor) | M | New `config/admin-templates.custom.ps1` with template definitions; Manager wizard offers them as a dropdown; rules for TAP / lifetime / role-group defaults per template |
@@ -71,8 +71,8 @@ backend decision changes.
 
 | # | Feature | Size | Notes |
 |---|---|---|---|
-| 11 | Send TAP password via email / Teams / Slack | M | New PIM-Functions helper `Send-PimAdminTap`; pluggable channels via `$global:PIM_NotificationChannels` config |
-| 12 | Schedule TAP start time (e.g. "in 2 days at 8am") | S | Extends `New-PimTemporaryAccessPass` to honour the existing `TAPStartDate` CSV column (currently passed-through but engine doesn't compute future times). Add `TAPStartTime` column |
+| 11 | Send TAP password via email / Teams / Slack | M | New PIM-Functions helper `Send-PimAdminTap`; pluggable channels via `$global:PIM_NotificationChannels` config -- **[SHIPPED v2.2.0]** |
+| 12 | Schedule TAP start time (e.g. "in 2 days at 8am") | S | Extends `New-PimTemporaryAccessPass` to honour the existing `TAPStartDate` CSV column (currently passed-through but engine doesn't compute future times). Add `TAPStartTime` column -- **[SHIPPED v2.2.0]** |
 | 13 | Validate minimum auth methods set per admin (MFA Authenticator, passkey, etc.) | M | New validator rule `PIM-AUTH-001` + `PIM-AUTH-002`; uses `userAuthenticationMethod.ReadWrite.All` perm already on engine SPN |
 
 ## Theme 3 -- Per-row policy + approval
@@ -108,7 +108,7 @@ same Entra role assigned for different purposes can have different rules.
 | # | Feature | Size | Notes |
 |---|---|---|---|
 | 24 | Tier-impact report: every user with any path to T0/T1 (including indirect via nested groups) | M | New engine + Manager view; reuses the graph reach analysis |
-| 25 | Per-role drill-down: see actual permissions delegated | S | Same as #2 but as a report export, not just a graph hover |
+| 25 | Per-role drill-down: see actual permissions delegated | S | Same as #2 but as a report export, not just a graph hover -- **[SHIPPED v2.2.0]** (Manager Graph drill-down; CSV export still pending) |
 | 26 | Log every PIM change to Log Analytics + audit log file | M | New PIM-Functions helper `Send-PimAuditToLogAnalytics`; uses your `AzLogDcrIngestPS` module |
 | 27 | Replace-mode admin move (remove old assignments, add new) | M | Manager wizard; transactional (all-or-nothing within one Commit) |
 
@@ -116,7 +116,7 @@ same Entra role assigned for different purposes can have different rules.
 
 | # | Feature | Size | Notes |
 |---|---|---|---|
-| 28 | Role owner / sponsor column on `PIM-Definitions-Roles` for audit + renewal workflow | S | Additive CSV column; engine reads but doesn't enforce yet |
+| 28 | Role owner / sponsor column on `PIM-Definitions-Roles` for audit + renewal workflow | S | Additive CSV column; engine reads but doesn't enforce yet -- **[SHIPPED v2.2.0]** (data-flow only; v2.3.x will wire enforcement) |
 | 29 | Notify members when their group/role assignment changes | S | Hooks into #22 |
 | 30 | Maintenance job: orphaned scope cleanup (auto-delete assignments + groups for missing Azure scopes) | M | Risky -- gate behind explicit `-ApplyOrphanCleanup` flag + `WhatIfMode` confirmation diff |
 | 31 | Setup Entra Access Package + delegate to PIM group | L | Yes it works; uses `EntitlementManagement.ReadWrite.All` Graph perm. New CSV: `PIM-Assignments-AccessPackages.locked.csv` mapping access packages to PIM groups |
