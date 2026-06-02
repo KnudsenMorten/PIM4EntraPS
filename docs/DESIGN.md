@@ -251,7 +251,7 @@ pattern via the `.custom.ps1` sibling.
 
 ### Why bake the pattern into the name
 
-The Mapper can color-code by tier without a separate lookup. KQL/Log
+The Manager can color-code by tier without a separate lookup. KQL/Log
 Analytics queries against sign-in / PIM audit logs can `parse displayName`
 to bucket by tier/service/domain. Onboarding new admins, you derive the
 group name from a worksheet — no creative-naming required, no name
@@ -313,7 +313,7 @@ delegations that ship at `L4-T2-USER-ID`.
 - The admin account name (`Admin-<Init>-<Tier>-<Platform>`).
 - The CSV column `TierLevel` on definitions and assignments.
 
-**Enforcement (planned, not in v1.0)**: the Mapper's **tier-safety lint**
+**Enforcement (planned, not in v1.0)**: the Manager's **tier-safety lint**
 flags any nesting where a T0 admin reaches a T1 asset (or worse, the
 other direction), and any level↔tier mismatch (e.g. an `L1` group tagged
 `T1`). The engine doesn't currently block tier crossings — the convention
@@ -377,7 +377,7 @@ each via Graph / RBAC / Exchange.
 `output/<csv-base>_LastApplied.csv` — a copy of what *was* applied.
 Used by:
 - Next run's delta detection (skip rows that haven't changed).
-- The Mapper's **diff vs LastApplied** view (planned).
+- The Manager's **diff vs LastApplied** view (planned).
 - Audit (git-able if you want to track changes outside the repo).
 
 **Delta files**: `<csv-base>_Delta.csv` records what changed in each run
@@ -482,10 +482,12 @@ itself is identical across flavors.
 
 ## 11. Companion tools
 
-### Mapper (`tools/pim-mapper/`)
+### Manager (`tools/pim-manager/`)
 
-Read-only graph viewer for the 14-CSV model. Loads in any browser,
-no server required, no install on the customer's VM beyond `git pull`.
+Interactive graph viewer + grid editor for the 14-CSV model. v0.2 ships
+a three-tab SPA (Graph / Grid / Save) backed by a localhost-only
+HttpListener; v0.1's static read-only HTML is still available via
+`-StaticHtml`. Loads in any browser, no install beyond `git pull`.
 
 Roadmap:
 
@@ -497,7 +499,7 @@ Roadmap:
 - **v0.5**: new-admin wizard + tag global-rename.
 - **v0.6**: one-click engine run from GUI.
 
-See [tools/pim-mapper/](../tools/pim-mapper/) for the current state.
+See [tools/pim-manager/](../tools/pim-manager/) for the current state.
 
 ### Activator (`tools/pim-activator/`)
 
@@ -604,7 +606,7 @@ does about it*.
 - **Nobody can answer "what does activating PIM-ROLE-X actually let me
   do?"** The Admin → Role group → Permission group → Service chain is
   documented nowhere; new joiners learn by guessing.
-  *The Mapper (`tools/pim-mapper`) is the answer — it reads the CSVs and
+  *The Manager (`tools/pim-manager`) is the answer — it reads the CSVs and
   shows the full chain visually, with a tier-coloured DAG.*
 
 ### Role-group misuse
@@ -785,7 +787,7 @@ same author (Morten Knudsen) and designed to be combinable:
 - **[PIM-Role-Advisor](https://github.com/KnudsenMorten/PIM-Role-Advisor)**
   — given a task the admin wants to perform, recommends the smallest
   PIM role / permission group that grants it. Closes the "which group
-  do I activate?" gap that the Mapper diagnoses structurally.
+  do I activate?" gap that the Manager diagnoses structurally.
 
 ---
 
@@ -813,7 +815,7 @@ same author (Morten Knudsen) and designed to be combinable:
 | Azure RBAC eligible state isn't in Azure Resource Graph | ARG only exposes permanent + active assignments. Eligible must come from ARM REST per-scope. Same cache pattern. |
 | Engine doesn't gate every destructive op on `-WhatIfMode` (some legacy paths) | Being incrementally hardened. New code added under the WhatIf guard pattern from day one. |
 | 14 CSVs feels like a lot | Each is small (10–500 rows typically) and represents one clean concept. Merging two would couple their schemas. |
-| No web UI for editing CSVs (yet) | The Mapper v0.2 closes this. Until then, Excel or VS Code's CSV preview. |
+| No web UI for editing CSVs (yet) | The Manager v0.2 closes this. Until then, Excel or VS Code's CSV preview. |
 
 ---
 
@@ -821,7 +823,7 @@ same author (Morten Knudsen) and designed to be combinable:
 
 - **[../README.md](../README.md)** — landing / quick start.
 - **[../RELEASENOTES.md](../RELEASENOTES.md)** — what changed each release.
-- **[../tools/pim-mapper/](../tools/pim-mapper/)** — graph viewer.
+- **[../tools/pim-manager/](../tools/pim-manager/)** — graph viewer.
 - **[../tools/pim-activator/README.md](../tools/pim-activator/README.md)** — Edge extension + Intune rollout.
 - Companion projects (see Section 15):
   [PIM4ActiveDirectoryPS](https://github.com/KnudsenMorten/PIM4ActiveDirectoryPS)

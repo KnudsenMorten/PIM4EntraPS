@@ -72,7 +72,7 @@ ADMIN-MOK-ID  --E->  PIM-ROLE-               --E--> PIM-Entra-ID-              -
 - Removing an admin = one row deletion; their entire access surface
   collapses.
 - The graph (admin → role → permission → target) is the audit answer to
-  *"who can do X?"* — see the [Mapper](#tools).
+  *"who can do X?"* — see the [Manager](#tools).
 
 See **[docs/DESIGN.md](docs/DESIGN.md)** for the full philosophy:
 direct vs indirect delegation, naming convention, tier model, lifecycle
@@ -167,16 +167,18 @@ what you need:
 
 ## Tools
 
-### Mapper — visualize the model
+### Manager — visualize + edit the model
 
-`tools/pim-mapper/Open-PimMapper.ps1` reads all 14 CSVs and renders an
-interactive directed-graph view (admin → role group → permission group →
-target) in your default browser. Click a node to see incoming/outgoing
-edges + the source CSV row. Filter by layer or by edge type (Eligible /
-Active). Regex search.
+`tools/pim-manager/Open-PimManager.ps1` reads all 14 CSVs and serves a
+three-tab SPA in your default browser: **Graph** (interactive directed
+graph: admin → role group → permission group → target, click-to-highlight
+neighbourhood, layer + edge filters, regex search), **Grid** (spreadsheet-
+style editor per CSV with add / edit / delete row), and **Save** (per-CSV
+diff preview before commit). Writes always land in `<base>.custom.csv`
+(never `.locked.csv`).
 
 ```powershell
-.\tools\pim-mapper\Open-PimMapper.ps1
+.\tools\pim-manager\Open-PimManager.ps1
 ```
 
 A 30-admin / 200-permission-group repo renders in <2 seconds, ~500
@@ -227,7 +229,7 @@ PIM4EntraPS/
     PIM4EntraPS.NamingConventions.locked.ps1
     PIM4EntraPS.Filters.locked.ps1
   tools/
-    pim-mapper/                            # browser-based graph viewer
+    pim-manager/                            # browser-based graph viewer
     pim-activator/                         # Edge extension for bulk-activate
   docs/
     DESIGN.md                              # architecture deep dive
@@ -247,7 +249,7 @@ PIM4EntraPS/
   customer overrides.
 - **[RELEASENOTES.md](RELEASENOTES.md)** — curated changelog (what changed
   each release + migration notes).
-- **[tools/pim-mapper/](tools/pim-mapper/)** — mapper docs.
+- **[tools/pim-manager/](tools/pim-manager/)** — mapper docs.
 - **[tools/pim-activator/README.md](tools/pim-activator/README.md)** —
   activator extension docs (incl. Intune rollout).
 
