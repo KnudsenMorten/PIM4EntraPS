@@ -40,6 +40,12 @@
     drift). Token names are case-sensitive.
 #>
 
+# NOTE (v2.2.0): the optional admin metadata columns Company / Notes /
+# ManagerEmail / StartDate on Account-Definitions-Admins.custom.csv and the
+# SponsorUpn / SponsorNotes columns on PIM-Definitions-Roles.custom.csv are
+# free-text -- they have no naming-convention pattern to override here. Set
+# them directly in the CSV (or via the PIM Manager wizard).
+#
 # ----- Admin accounts ------------------------------------------------------
 
 # Per-UserType admin name patterns. The engine + Manager pick by the row's

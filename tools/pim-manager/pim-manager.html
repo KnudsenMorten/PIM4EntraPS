@@ -58,6 +58,25 @@
   .pill.E { background:#1f6feb; color:#fff; }
   .pill.A { background:#bf8700; color:#fff; }
   .empty { color:#7d8590; font-style:italic; }
+  /* Per-role permission drill-down on the Graph detail panel (Roadmap #2 / #25).
+     Triggered when a node of kind 'entra-role' or 'au-role' is selected; pulls
+     from TENANT_LISTS.entraRoles cache. */
+  .role-perms { margin-top:12px; border:1px solid #21262d; border-radius:6px; background:#0d1117; }
+  .role-perms > summary { padding:6px 10px; cursor:pointer; font-size:12px; color:#e6edf3; user-select:none; list-style:none; }
+  .role-perms > summary::-webkit-details-marker { display:none; }
+  .role-perms > summary::before { content:'\25B6'; color:#7d8590; display:inline-block; width:14px; font-size:9px; transition:transform .12s ease; }
+  .role-perms[open] > summary::before { transform:rotate(90deg); }
+  .role-perms > summary:hover { background:#1f242c; }
+  .role-perms .rp-body { padding:6px 10px 10px 10px; }
+  .role-perms .rp-desc { color:#7d8590; font-style:italic; font-size:11.5px; margin:2px 0 8px 0; }
+  .role-perms .rp-group-hdr { color:#7d8590; font-size:11px; text-transform:uppercase; letter-spacing:.4px; margin:8px 0 3px 0; font-weight:600; }
+  .role-perms ul.actions { font-family:Consolas,monospace; font-size:11px; padding-left:16px; color:#a6acb5; margin:2px 0; list-style:none; }
+  .role-perms ul.actions li { padding:1px 0; word-break:break-all; }
+  .role-perms ul.actions li.allow::before  { content:'+ '; color:#7ee787; }
+  .role-perms ul.actions li.deny::before   { content:'- '; color:#ffa198; }
+  .role-perms ul.actions li.allow.data::before { content:'(D) + '; color:#7ee787; }
+  .role-perms ul.actions li.deny.data::before  { content:'(D) - '; color:#ffa198; }
+  .role-perms .rp-refresh { margin-top:6px; }
   button { background:#21262d; color:#e6edf3; border:1px solid #30363d; padding:5px 10px; border-radius:6px; cursor:pointer; font-size:12px; }
   button:hover { background:#30363d; }
   button:disabled { opacity:0.4; cursor:not-allowed; }
@@ -105,6 +124,24 @@
   table.grid td.row-actions { text-align:right; padding:2px 4px; width:34px; }
   table.grid td.row-actions button { padding:1px 6px; font-size:11px; background:transparent; border:1px solid transparent; color:#7d8590; }
   table.grid td.row-actions button:hover { color:#f85149; border-color:#f85149; }
+  /* Grid bulk-select column (Roadmap #6 + #7). Tight checkbox column,
+     reused across all 14 CSVs. */
+  table.grid th.grid-sel-col, table.grid td.grid-sel-col { width:24px; text-align:center; padding:2px 4px; }
+  table.grid td.grid-sel-col input[type=checkbox] { cursor:pointer; }
+  table.grid td.grid-sel-col input[type=checkbox]:disabled { cursor:not-allowed; opacity:.4; }
+  /* Sticky action bar that appears above the grid table when one or
+     more rows are selected. Shared between Disable/Enable (Admins CSV)
+     and Multi-delete (any CSV) actions. */
+  .grid-action-bar { display:none; position:sticky; top:0; z-index:2; background:#161b22; border-bottom:1px solid #30363d; padding:8px 14px; gap:12px; align-items:center; flex-wrap:wrap; margin-bottom:8px; border-radius:4px; }
+  .grid-action-bar.active { display:flex; }
+  .grid-action-bar .gab-count { color:#e6edf3; font-size:12px; font-weight:600; }
+  .grid-action-bar .gab-label { color:#7d8590; font-size:12px; }
+  .grid-action-bar select { background:#0d1117; color:#e6edf3; border:1px solid #30363d; border-radius:4px; padding:4px 8px; font-size:12px; }
+  .grid-action-bar button { padding:4px 10px; font-size:12px; border:1px solid #30363d; background:#21262d; color:#e6edf3; border-radius:5px; cursor:pointer; }
+  .grid-action-bar button:hover { border-color:#1f6feb; }
+  .grid-action-bar button.gab-danger { color:#fff; background:#da3633; border-color:#da3633; }
+  .grid-action-bar button.gab-danger:hover { background:#f85149; border-color:#f85149; }
+  .grid-action-bar .gab-spacer { flex:1; }
 
   /* Save tab */
   #saveTab { display:none; }
@@ -630,6 +667,22 @@
     return { items: entry.items || [], refreshedUtc: entry.refreshedUtc, ageMs, freshness: fresh };
   }
 
+  // Case-insensitive displayName lookup against the entra-roles tenant cache.
+  // Returns the full role object (with id, description, isBuiltIn, rolePermissions)
+  // or null. Powers the per-role permission drill-down on the Graph detail panel.
+  function lookupEntraRoleByName(displayName) {
+    if (!displayName) return null;
+    const c = getCachedList('entraRoles');
+    if (!c.items || !c.items.length) return null;
+    const needle = String(displayName).trim().toLowerCase();
+    for (const r of c.items) {
+      if (r && r.displayName && String(r.displayName).trim().toLowerCase() === needle) {
+        return r;
+      }
+    }
+    return null;
+  }
+
   function formatAge(ms) {
     if (ms == null) return 'never';
     if (ms < 60_000) return Math.floor(ms / 1000) + 's ago';
@@ -873,6 +926,94 @@
   document.getElementById('layout-concentric').onclick = () => runLayout('concentric');
   document.getElementById('fit').onclick = () => cy && cy.fit(null, 30);
 
+  // Extracts the Entra role displayName from a graph node's label.
+  // entra-role: the label IS the displayName.
+  // au-role:    the label is "<RoleDefinitionName> @ AU:<tag>" (server builder
+  //             in Open-PimManager.ps1 -- "$($r.RoleDefinitionName) @ AU:$($r.AdministrativeUnitTag)").
+  function roleNameFromNodeData(data) {
+    if (!data) return null;
+    const lbl = data.label || '';
+    if (data.kind === 'entra-role') return lbl;
+    if (data.kind === 'au-role') {
+      const ix = lbl.indexOf(' @ AU:');
+      return ix > 0 ? lbl.substring(0, ix) : lbl;
+    }
+    return null;
+  }
+
+  // Renders the role-permission drill-down block for an entra-role / au-role
+  // graph node. Returns an HTML fragment (string). Caller is responsible for
+  // injecting it into the detail panel.
+  function renderRolePermissions(data) {
+    const roleName = roleNameFromNodeData(data);
+    if (!roleName) return '';
+    const c = getCachedList('entraRoles');
+    // No cache at all -- can't resolve; show refresh CTA (server-only).
+    if (c.freshness === 'none') {
+      return `<div class="role-perms"><div class="rp-body"><div class="empty">Refresh tenant cache to see this role's permissions.</div>` +
+        (isServer ? `<div class="rp-refresh"><button id="btnRolePermsRefresh">\u21BB Refresh tenant lists</button></div>` : '') +
+        `</div></div>`;
+    }
+    const role = lookupEntraRoleByName(roleName);
+    if (!role) {
+      // Cache populated but role not present (stale list or role renamed).
+      return `<div class="role-perms"><div class="rp-body"><div class="empty">Role "${escapeHtml(roleName)}" not found in tenant cache. Refresh to see this role's permissions.</div>` +
+        (isServer ? `<div class="rp-refresh"><button id="btnRolePermsRefresh">\u21BB Refresh tenant lists</button></div>` : '') +
+        `</div></div>`;
+    }
+    const perms = Array.isArray(role.rolePermissions) ? role.rolePermissions : [];
+    // Aggregate counts across all rolePermissions entries.
+    let allowedCount = 0, deniedCount = 0, allowedDataCount = 0, deniedDataCount = 0;
+    for (const p of perms) {
+      allowedCount     += (p.allowedResourceActions  || []).length;
+      deniedCount      += (p.excludedResourceActions || []).length;
+      allowedDataCount += (p.allowedDataActions      || []).length;
+      deniedDataCount  += (p.excludedDataActions     || []).length;
+    }
+    const totalPerms = allowedCount + deniedCount + allowedDataCount + deniedDataCount;
+    const isCustom = role.isBuiltIn === false;
+    const title = `${isCustom ? '(custom) ' : ''}Permissions granted (${totalPerms})`;
+    const openAttr = totalPerms <= 20 ? ' open' : '';
+
+    // Build per-block body. One <details> contains a sequence of action-group
+    // blocks (allowed / excluded / allowed-data / excluded-data) for each
+    // rolePermissions entry. Most built-in roles only have one entry; custom
+    // roles can have several.
+    function listFor(items, css) {
+      return items.map(a => `<li class="${css}">${escapeHtml(a)}</li>`).join('');
+    }
+    let bodyParts = [];
+    if (role.description) {
+      bodyParts.push(`<div class="rp-desc">${escapeHtml(role.description)}</div>`);
+    }
+    perms.forEach((p, idx) => {
+      const allowed     = p.allowedResourceActions  || [];
+      const excluded    = p.excludedResourceActions || [];
+      const allowedData = p.allowedDataActions      || [];
+      const excludedData = p.excludedDataActions    || [];
+      // Optional per-entry separator when there's more than one entry.
+      if (perms.length > 1) {
+        bodyParts.push(`<div class="rp-group-hdr">Permission set ${idx + 1}</div>`);
+      }
+      if (allowed.length) {
+        bodyParts.push(`<div class="rp-group-hdr">Allowed actions (${allowed.length})</div><ul class="actions">${listFor(allowed, 'allow')}</ul>`);
+      }
+      if (excluded.length) {
+        bodyParts.push(`<div class="rp-group-hdr">Excluded actions (${excluded.length})</div><ul class="actions">${listFor(excluded, 'deny')}</ul>`);
+      }
+      if (allowedData.length) {
+        bodyParts.push(`<div class="rp-group-hdr">Allowed data actions (${allowedData.length})</div><ul class="actions">${listFor(allowedData, 'allow data')}</ul>`);
+      }
+      if (excludedData.length) {
+        bodyParts.push(`<div class="rp-group-hdr">Excluded data actions (${excludedData.length})</div><ul class="actions">${listFor(excludedData, 'deny data')}</ul>`);
+      }
+    });
+    if (!perms.length) {
+      bodyParts.push(`<div class="empty">No rolePermissions entries on this role.</div>`);
+    }
+    return `<details class="role-perms"${openAttr}><summary>${escapeHtml(title)}</summary><div class="rp-body">${bodyParts.join('')}</div></details>`;
+  }
+
   function renderDetail(el) {
     const d = document.getElementById('detail');
     if (!el) { d.innerHTML = '<div class="empty">Click a node or edge.</div>'; return; }
@@ -884,12 +1025,39 @@
       const rows = fields.filter(f => data[f]).map(f =>
         `<div class="k">${f}</div><div class="v">${escapeHtml(data[f])}</div>`).join('');
       const canDelete = isServer && ['admin','role-group','permission-group','au'].includes(data.kind);
+
+      // Per-role permission drill-down (Roadmap #2 / #25). Only entra-role +
+      // au-role nodes have a directory-role behind them; everything else gets
+      // nothing extra. Compact count row goes inside .detail-kv so the operator
+      // sees N/M without expanding; the <details> block hangs below.
+      const isRoleNode = (data.kind === 'entra-role' || data.kind === 'au-role');
+      let rolePermsSummaryRow = '';
+      let rolePermsBlock = '';
+      if (isRoleNode) {
+        const roleName = roleNameFromNodeData(data);
+        const role = lookupEntraRoleByName(roleName);
+        if (role) {
+          const perms = Array.isArray(role.rolePermissions) ? role.rolePermissions : [];
+          let resActions = 0, dataActions = 0;
+          for (const p of perms) {
+            resActions  += (p.allowedResourceActions || []).length + (p.excludedResourceActions || []).length;
+            dataActions += (p.allowedDataActions     || []).length + (p.excludedDataActions     || []).length;
+          }
+          rolePermsSummaryRow = `<div class="k">permissions</div><div class="v">${resActions} resource action${resActions === 1 ? '' : 's'} / ${dataActions} data action${dataActions === 1 ? '' : 's'}</div>`;
+        } else {
+          rolePermsSummaryRow = `<div class="k">permissions</div><div class="v" style="color:#7d8590;font-style:italic;">(not in cache)</div>`;
+        }
+        rolePermsBlock = renderRolePermissions(data);
+      }
+
       d.innerHTML = `
         <div class="detail-kv">
           <div class="k">label</div><div class="v">${escapeHtml(data.label)}</div>
           <div class="k">id</div><div class="v">${escapeHtml(data.id)}</div>
           ${rows}
+          ${rolePermsSummaryRow}
         </div>
+        ${rolePermsBlock}
         ${canDelete ? `<div class="toolbar" style="margin-top:10px;"><button class="danger" id="btnDeleteNode">Delete this node</button></div>` : ''}
         <h2>Incoming (${incoming.length})</h2>
         ${incoming.length ? incoming.map(e => neighborChip(e, 'source')).join('') : '<div class="empty">(none)</div>'}
@@ -902,6 +1070,21 @@
       });
       if (canDelete) {
         document.getElementById('btnDeleteNode').onclick = () => deleteNode(data);
+      }
+      // Wire the "Refresh tenant lists" button when the role isn't in cache.
+      const rpRefresh = document.getElementById('btnRolePermsRefresh');
+      if (rpRefresh) {
+        rpRefresh.onclick = async () => {
+          rpRefresh.disabled = true;
+          const orig = rpRefresh.textContent;
+          rpRefresh.textContent = 'Refreshing...';
+          try { await refreshTenantLists(); }
+          finally {
+            // Re-render the same node so the drill-down picks up the new cache.
+            const sel = cy.$(':selected');
+            if (sel.length) renderDetail(sel[0]); else { rpRefresh.disabled = false; rpRefresh.textContent = orig; }
+          }
+        };
       }
     } else {
       const data = el.data();
@@ -974,8 +1157,17 @@
         header: header.slice(),
         baseline: baselineRows.map(r => ({ ...r })),
         rows:     baselineRows.map(r => ({ ...r })),
-        deletes:  new Set()
+        deletes:  new Set(),
+        // Grid-tab multi-select state (rowIdx -> selected). Not persisted,
+        // not part of dirty-check; lives alongside pendingChanges purely
+        // for renderGrid + the bulk action bar (Roadmap #6 + #7).
+        selection: new Set()
       };
+    } else if (!pendingChanges[base].selection) {
+      // Defensive: rehydrate selection on legacy pendingChanges entries
+      // (e.g. created by deleteNode/deleteEdge code paths before this
+      // field existed).
+      pendingChanges[base].selection = new Set();
     }
     return pendingChanges[base];
   }
@@ -1185,6 +1377,16 @@
     const cache = csvCache[base] || { source: '?', path: '' };
     const header = p.header;
 
+    // Drop any stale selection entries pointing at rows that are now
+    // marked deleted (per spec: deleted rows cannot be selected).
+    if (p.selection && p.selection.size) {
+      for (const i of Array.from(p.selection)) {
+        if (p.deletes.has(i) || i < 0 || i >= p.rows.length) p.selection.delete(i);
+      }
+    }
+    const selCount  = p.selection ? p.selection.size : 0;
+    const isAdmins  = (base === 'Account-Definitions-Admins');
+
     // Compute which columns are dropdown-backed + which tenant-list keys feed them.
     const colSpecs = {};
     const usedListKeys = new Set();
@@ -1213,7 +1415,31 @@
       </div>
     </div>`);
     html.push(tenantBadgeBar);
+
+    // ---- Bulk-action bar (Roadmap #6 + #7) ---------------------------
+    // Visible only when one or more rows are selected. The AccountStatus
+    // dropdown is only meaningful on the Admins CSV; the Delete button
+    // works on every CSV.
+    const barCls = selCount > 0 ? 'grid-action-bar active' : 'grid-action-bar';
+    html.push(`<div id="gridActionBar" class="${barCls}">`);
+    html.push(`<span class="gab-count">${selCount} row(s) selected</span>`);
+    if (isAdmins) {
+      html.push('<span class="gab-label">Set AccountStatus to:</span>');
+      html.push('<select id="gabAccountStatus">' +
+        '<option value="Enabled">Enabled</option>' +
+        '<option value="Disabled">Disabled</option>' +
+        '<option value="Revoked">Revoked</option>' +
+        '</select>');
+      html.push('<button id="gabApplyStatus">Apply</button>');
+    }
+    html.push(`<button id="gabDelete" class="gab-danger">Delete ${selCount} selected row(s)</button>`);
+    html.push('<span class="gab-spacer"></span>');
+    html.push('<button id="gabClear">Clear selection</button>');
+    html.push('</div>');
+
     html.push('<table class="grid"><thead><tr>');
+    // Header checkbox: tri-state (none / some / all visible-selectable rows).
+    html.push('<th class="grid-sel-col"><input type="checkbox" id="gridSelectAll" title="Select / clear all visible rows"></th>');
     for (const col of header) html.push(`<th>${escapeHtml(col)}</th>`);
     html.push('<th></th></tr></thead><tbody>');
     // Pull all PIM-FK-001 (orphan) violations for THIS csv from the live
@@ -1236,6 +1462,12 @@
       let cls = deleted ? 'row-deleted' : (added ? 'row-added' : (modified ? 'row-modified' : ''));
       if (!deleted && fkOrphanRows.has(idx)) cls = (cls ? cls + ' ' : '') + 'row-orphan-error';
       html.push(`<tr data-idx="${idx}" class="${cls}">`);
+      // Per-row select checkbox (Roadmap #6 + #7). Disabled on
+      // already-deleted rows so they can't be re-selected.
+      const isSel  = !deleted && p.selection && p.selection.has(idx);
+      const selDis = deleted ? ' disabled' : '';
+      const selChk = isSel   ? ' checked'  : '';
+      html.push(`<td class="grid-sel-col"><input type="checkbox" class="grid-row-sel"${selChk}${selDis}></td>`);
       for (const col of header) {
         const v = row[col] || '';
         const spec = colSpecs[col];
@@ -1308,7 +1540,12 @@
     main.querySelectorAll('td.row-actions button').forEach(b => {
       b.onclick = () => {
         const idx = parseInt(b.parentElement.parentElement.dataset.idx, 10);
-        if (b.dataset.act === 'delete') p.deletes.add(idx);
+        if (b.dataset.act === 'delete') {
+          p.deletes.add(idx);
+          // Per spec: per-row delete also clears that row from selection
+          // (deleted rows can't be selected).
+          if (p.selection) p.selection.delete(idx);
+        }
         else if (b.dataset.act === 'undelete') p.deletes.delete(idx);
         else if (b.dataset.act === 'clone') {
           // Insert a copy of the row right above the cloned row so it's easy to spot.
@@ -1317,11 +1554,97 @@
           const newDel = new Set();
           for (const di of p.deletes) newDel.add(di >= idx ? di + 1 : di);
           p.deletes = newDel;
+          if (p.selection) {
+            const newSel = new Set();
+            for (const si of p.selection) newSel.add(si >= idx ? si + 1 : si);
+            p.selection = newSel;
+          }
         }
         markBadges();
         renderGrid(base);
       };
     });
+
+    // ---- Wire bulk-action checkboxes + action bar (Roadmap #6 + #7) --
+    // Header tri-state checkbox.
+    const selAll = document.getElementById('gridSelectAll');
+    if (selAll) {
+      // Compute selectable (= non-deleted) row indices currently rendered.
+      const selectableIdx = [];
+      p.rows.forEach((_, i) => { if (!p.deletes.has(i)) selectableIdx.push(i); });
+      const selectedCount = selectableIdx.filter(i => p.selection.has(i)).length;
+      if (selectableIdx.length === 0) {
+        selAll.checked = false; selAll.indeterminate = false; selAll.disabled = true;
+      } else if (selectedCount === 0) {
+        selAll.checked = false; selAll.indeterminate = false;
+      } else if (selectedCount === selectableIdx.length) {
+        selAll.checked = true;  selAll.indeterminate = false;
+      } else {
+        selAll.checked = false; selAll.indeterminate = true;
+      }
+      selAll.onchange = () => {
+        if (selAll.checked) { for (const i of selectableIdx) p.selection.add(i); }
+        else                { for (const i of selectableIdx) p.selection.delete(i); }
+        renderGrid(base);
+      };
+    }
+    // Per-row checkboxes.
+    main.querySelectorAll('input.grid-row-sel').forEach(cb => {
+      cb.onchange = () => {
+        const tr = cb.closest('tr');
+        const idx = parseInt(tr.dataset.idx, 10);
+        if (cb.checked) p.selection.add(idx);
+        else            p.selection.delete(idx);
+        renderGrid(base);
+      };
+    });
+    // Action-bar buttons (Apply status / Delete / Clear).
+    const gabClear = document.getElementById('gabClear');
+    if (gabClear) gabClear.onclick = () => { p.selection.clear(); renderGrid(base); };
+
+    const gabApply = document.getElementById('gabApplyStatus');
+    if (gabApply) {
+      gabApply.onclick = () => {
+        const sel = document.getElementById('gabAccountStatus');
+        const newVal = sel ? sel.value : '';
+        if (!newVal) return;
+        // AccountStatus column must exist in the Admins CSV header; if it
+        // somehow doesn't, no-op (the dropdown would have nowhere to write).
+        if (header.indexOf('AccountStatus') === -1) {
+          alert('AccountStatus column not present in this CSV.');
+          return;
+        }
+        let changed = 0;
+        for (const i of p.selection) {
+          if (p.deletes.has(i)) continue;
+          if ((p.rows[i].AccountStatus || '') !== newVal) {
+            p.rows[i].AccountStatus = newVal;
+            changed++;
+          }
+        }
+        // Per spec: don't clear selection after Apply; user can re-apply
+        // a different value without re-selecting. But do mark badges +
+        // re-render so the row-modified highlight shows up.
+        if (changed > 0) markBadges();
+        renderGrid(base);
+      };
+    }
+
+    const gabDelete = document.getElementById('gabDelete');
+    if (gabDelete) {
+      gabDelete.onclick = async () => {
+        const ids = Array.from(p.selection).filter(i => !p.deletes.has(i));
+        if (ids.length === 0) return;
+        const msg = `<p>Delete <b>${ids.length}</b> row(s) from <b>${escapeHtml(base)}</b>?</p>` +
+          `<p style="color:#7d8590">They go into pending; you can still cancel before committing on the <b>Save</b> tab.</p>`;
+        const ok = await showConfirm('Delete selected rows', msg, true);
+        if (!ok) return;
+        for (const i of ids) p.deletes.add(i);
+        p.selection.clear();
+        markBadges();
+        renderGrid(base);
+      };
+    }
 
     // Add-row + reload buttons.
     document.getElementById('btnAddRow').onclick = () => {
@@ -1331,6 +1654,12 @@
       const newDel = new Set();
       for (const i of p.deletes) newDel.add(i + 1);
       p.deletes = newDel;
+      // Selection indices need the same +1 shift since we unshifted the array.
+      if (p.selection) {
+        const newSel = new Set();
+        for (const i of p.selection) newSel.add(i + 1);
+        p.selection = newSel;
+      }
       markBadges();
       renderGrid(base);
     };

@@ -41,6 +41,10 @@ across the 14 CSVs to an input strategy with the goal of zero memorization.
 | UsageLocation | dropdown ISO 3166-1 alpha-2 | from tenant default | |
 | ForwardMailsToContact | checkbox -> TRUE/FALSE | FALSE | |
 | MailForwardAddress | autocomplete tenant users | only shown when Forward=TRUE | |
+| Company | text (v2.2.0) | empty | optional; pushed to Entra `-CompanyName` on create only when non-empty |
+| Notes | textarea (v2.2.0) | empty | optional; max 1024 chars; logged as a comment in `output/admin-passwords-<date>.txt`, NOT pushed to Entra (no good native field) |
+| ManagerEmail | autocomplete tenant users (v2.2.0) | empty | optional; UPN of the admin's people-manager. Engine resolves to Graph user id + sets `manager@odata.bind` after create. Silently skips when UPN can't be resolved in this tenant. |
+| StartDate | date picker (v2.2.0) | empty | optional; ISO date; informational only -- Entra has no native "start" field. For scheduled-credential issuance see `TAPStartDate` (roadmap #12). |
 | CreateTAP | checkbox | TRUE for Cloud/ID admins, FALSE otherwise | |
 | TAPStartDate | date picker | empty (= immediate) | |
 | AccountStatus | dropdown Enabled / Disabled / Revoked | Enabled | gated by StatusChangeCode in MSP variant |
@@ -60,6 +64,8 @@ across the 14 CSVs to an input strategy with the goal of zero memorization.
 | PermissionScope | dropdown Global / Scoped | Global |
 | SyncPlatform | dropdown AD / none | none |
 | IsRoleAssignable | checkbox | TRUE | warning shown if FALSE + a role-assignment row references this tag |
+| SponsorUpn | autocomplete tenant users (v2.2.0) | empty | optional; UPN of the role's audit / renewal owner. Engine reads but does not enforce yet -- v2.3.x wires Access Review delegation + audit-report sponsor lookup (roadmap #28 / #32). |
+| SponsorNotes | text (v2.2.0) | empty | optional; free-text justification ("renewal due Q3 2026", "delegated to ServiceNow group X"). |
 
 ### PIM-Definitions-{Tasks, Services, Processes, Resources, Departments, Organization}
 

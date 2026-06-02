@@ -1,1 +1,1 @@
-FirstName;LastName;Initials;TierLevel;TargetUsage;TargetPlatform;UserType;UserName;DisplayName;UserPrincipalName;UsageLocation;ForwardMailsToContact;MailForwardAddress;CreateTAP;TAPStartDate;AccountStatus;StatusChangeCode
+FirstName;LastName;Initials;TierLevel;TargetUsage;TargetPlatform;UserType;UserName;DisplayName;UserPrincipalName;UsageLocation;ForwardMailsToContact;MailForwardAddress;Company;Notes;ManagerEmail;StartDate;CreateTAP;TAPStartDate;AccountStatus;StatusChangeCode

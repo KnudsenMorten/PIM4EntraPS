@@ -4411,6 +4411,26 @@ Function CreateUpdate-Accounts-From-file-CSV
             $AccountStatus          = if ($Entry.PSObject.Properties.Name -contains 'AccountStatus') { $Entry.AccountStatus } else { 'Enabled' }
             $StatusChangeCode       = if ($Entry.PSObject.Properties.Name -contains 'StatusChangeCode') { $Entry.StatusChangeCode } else { '' }
 
+            # v2.2.0 (roadmap #1) -- optional admin metadata columns. All four are
+            # additive + defensive: if the CSV pre-dates v2.2.0 the column won't
+            # exist on the imported row, so we default to empty string. None of
+            # these are required by the engine; ID create branch consumes them
+            # opportunistically (Company -> -CompanyName on New-MgBetaUser,
+            # ManagerEmail -> follow-up manager@odata.bind, Notes -> password log
+            # comment, StartDate -> informational Write-Host).
+            $Company                = if ($Entry.PSObject.Properties.Name -contains 'Company')      { $Entry.Company }      else { '' }
+            $Notes                  = if ($Entry.PSObject.Properties.Name -contains 'Notes')        { $Entry.Notes }        else { '' }
+            $ManagerEmail           = if ($Entry.PSObject.Properties.Name -contains 'ManagerEmail') { $Entry.ManagerEmail } else { '' }
+            $StartDate              = if ($Entry.PSObject.Properties.Name -contains 'StartDate')    { $Entry.StartDate }    else { '' }
+
+            # Notes are written to the password log; the Graph user object has no
+            # native long-text field that fits (extensionAttributes are 256-char
+            # capped per attribute and not exposed via Update-MgBetaUser cleanly).
+            # Truncate defensively to 1024 chars so the log file stays parseable.
+            if ($Notes -and $Notes.Length -gt 1024) {
+                $Notes = $Notes.Substring(0, 1024)
+            }
+
             # MSP kill-switch / customer-driven Disable / Revoke: branch out BEFORE
             # the normal create/update path. Invoke-PimAccountStatusChange:
             #   - is a no-op when AccountStatus is empty / 'Enabled'
@@ -4475,17 +4495,66 @@ Function CreateUpdate-Accounts-From-file-CSV
                         {
                             write-host ""
                             Write-host "Creating $($TargetPlatform) account $($DisplayName)"
-                            $Result = New-MgBetaUser -GivenName $FirstName `
-                                                 -Surname $LastName `
-                                                 -DisplayName $DisplayName `
-                                                 -PasswordProfile $PasswordProfile `
-                                                 -AccountEnabled `
-                                                 -MailNickName $UserName `
-                                                 -UserPrincipalName $UserPrincipalName `
-                                                 -JobTitle $Description `
-                                                 -UsageLocation $UsageLocation
+
+                            # v2.2.0 (roadmap #1) -- splat-build so optional metadata
+                            # only shows up on the New-MgBetaUser call when the CSV row
+                            # actually has a value. Avoids pushing empty strings into
+                            # Graph + keeps the call backwards compatible with
+                            # pre-v2.2.0 CSVs that lack these columns entirely.
+                            $newUserSplat = @{
+                                GivenName         = $FirstName
+                                Surname           = $LastName
+                                DisplayName       = $DisplayName
+                                PasswordProfile   = $PasswordProfile
+                                AccountEnabled    = $true
+                                MailNickName      = $UserName
+                                UserPrincipalName = $UserPrincipalName
+                                JobTitle          = $Description
+                                UsageLocation     = $UsageLocation
+                            }
+                            if ($Company) {
+                                $newUserSplat['CompanyName'] = $Company
+                            }
+                            $Result = New-MgBetaUser @newUserSplat
 
                             $Result = Update-MgBetaUser -UserId $UserPrincipalName -PasswordPolicies DisablePasswordExpiration
+
+                            # v2.2.0 (roadmap #1) -- Notes go to the password log as a
+                            # comment; Entra has no first-class long-text field for
+                            # ad-hoc admin notes (extensionAttributes are 256-char
+                            # capped + don't round-trip cleanly via Update-MgBetaUser).
+                            # StartDate is informational only (Entra has no native
+                            # "account starts on" field; CreateTAP + TAPStartDate handle
+                            # the actual scheduled-credential case via roadmap #12).
+                            if ($Notes) {
+                                Write-Host "Note: $Notes" -ForegroundColor Cyan
+                            }
+                            if ($StartDate) {
+                                Write-Host "StartDate (informational, not pushed to Entra): $StartDate" -ForegroundColor Cyan
+                            }
+
+                            # v2.2.0 (roadmap #1) -- ManagerEmail is resolved to the
+                            # tenant user object id, then linked via the standard
+                            # manager@odata.bind reference. Try/catch because the
+                            # manager may not exist in this tenant yet (cross-tenant
+                            # guest, or manager onboarded after the admin row). The
+                            # engine intentionally does NOT fail the admin-create on
+                            # a missing manager -- the assignment is informational.
+                            if ($ManagerEmail) {
+                                Try {
+                                    $managerObj = Get-MgUser -UserId $ManagerEmail -ErrorAction Stop
+                                    if ($managerObj -and $managerObj.Id) {
+                                        $managerRef = @{
+                                            '@odata.id' = "https://graph.microsoft.com/v1.0/users/$($managerObj.Id)"
+                                        }
+                                        Set-MgUserManagerByRef -UserId $UserPrincipalName -BodyParameter $managerRef -ErrorAction Stop
+                                        Write-Host "Linked manager $ManagerEmail to $UserPrincipalName" -ForegroundColor Green
+                                    }
+                                }
+                                Catch {
+                                    Write-Host "Skipping manager link for $UserPrincipalName -> $ManagerEmail (not resolvable in this tenant): $($_.Exception.Message)" -ForegroundColor Yellow
+                                }
+                            }
 
                             Write-PimAdminPassword -UserPrincipalName $UserPrincipalName -Password $generatedPassword -Platform 'ID'
 
@@ -4497,6 +4566,39 @@ Function CreateUpdate-Accounts-From-file-CSV
                                 $tap = New-PimTemporaryAccessPass -UserId $UserPrincipalName -StartDateTime $TAPStartDate
                                 if ($tap) {
                                     Write-PimAdminTap -UserPrincipalName $UserPrincipalName -Code $tap.Code -StartDateTime $tap.StartDateTime -LifetimeInMinutes $tap.LifetimeInMinutes
+
+                                    # v2.2.0 (roadmap #11): out-of-band TAP delivery.
+                                    # Only attempts a send when the customer has actually
+                                    # configured notification channels (.custom.ps1 -- the
+                                    # .locked.ps1 defaults to an empty hashtable). A failed
+                                    # send must NOT block account creation, so the whole
+                                    # call is wrapped in try/catch + best-effort logging.
+                                    if ($global:PIM_NotificationChannels -and $global:PIM_NotificationChannels.Count -gt 0) {
+                                        Try {
+                                            $sendArgs = @{
+                                                UserPrincipalName = $UserPrincipalName
+                                                Code              = $tap.Code
+                                                LifetimeMinutes   = [int]$tap.LifetimeInMinutes
+                                            }
+                                            # StartDateTime from Graph is typically string; normalize for the helper
+                                            $sendArgs['StartDateTime'] = if ($tap.StartDateTime -is [datetime]) {
+                                                $tap.StartDateTime
+                                            } else {
+                                                try { [datetime]$tap.StartDateTime } catch { [datetime]::UtcNow }
+                                            }
+                                            if ($ManagerEmail) { $sendArgs['Recipient'] = $ManagerEmail }
+                                            $sendResult = Send-PimAdminTap @sendArgs
+                                            if ($sendResult.Sent.Count -gt 0) {
+                                                Write-Host "  -> TAP delivered via: $($sendResult.Sent -join ', ')" -ForegroundColor Green
+                                            }
+                                            if ($sendResult.Failed.Count -gt 0) {
+                                                Write-Host "  -> TAP delivery FAILED for: $($sendResult.Failed -join ', ') (account creation NOT blocked)" -ForegroundColor Yellow
+                                            }
+                                        }
+                                        Catch {
+                                            Write-Host "  -> TAP delivery threw (account creation NOT blocked): $($_.Exception.Message)" -ForegroundColor Yellow
+                                        }
+                                    }
                                 }
                             }
 
@@ -8309,7 +8411,19 @@ if (Test-Path -LiteralPath $_pimNcLocked) {
 if (Test-Path -LiteralPath $_pimNcCustom) {
     try { . $_pimNcCustom } catch { Write-Warning "PIM-Functions: failed loading $_pimNcCustom -- $($_.Exception.Message)" }
 }
-Remove-Variable -Name _pimNcRoot, _pimNcLocked, _pimNcCustom -ErrorAction SilentlyContinue
+
+# v2.2.0 (roadmap #11): load notification-channel config into
+# $global:PIM_NotificationChannels so Send-PimAdminTap (+ future
+# Send-PimAuditNotification etc.) work without per-launcher wiring.
+$_pimNcLocked2 = Join-Path $_pimNcRoot 'PIM4EntraPS.NotificationChannels.locked.ps1'
+$_pimNcCustom2 = Join-Path $_pimNcRoot 'PIM4EntraPS.NotificationChannels.custom.ps1'
+if (Test-Path -LiteralPath $_pimNcLocked2) {
+    try { . $_pimNcLocked2 } catch { Write-Warning "PIM-Functions: failed loading $_pimNcLocked2 -- $($_.Exception.Message)" }
+}
+if (Test-Path -LiteralPath $_pimNcCustom2) {
+    try { . $_pimNcCustom2 } catch { Write-Warning "PIM-Functions: failed loading $_pimNcCustom2 -- $($_.Exception.Message)" }
+}
+Remove-Variable -Name _pimNcRoot, _pimNcLocked, _pimNcCustom, _pimNcLocked2, _pimNcCustom2 -ErrorAction SilentlyContinue
 
 function Get-PimConfigDir {
     <#
@@ -8441,6 +8555,148 @@ function Get-PimOutputPath {
     return (Join-Path (Get-PimOutputDir) $Name)
 }
 
+function Resolve-PimTapStartDateTime {
+    <#
+    .SYNOPSIS
+        Parse a TAP StartDateTime input into a [datetime] (UTC).
+
+    .DESCRIPTION
+        v2.2.0 (roadmap #12). Lets the admin CSV's TAPStartDate column carry
+        relative natural-ish expressions ("in 2 days at 8am", "tomorrow 9am",
+        "next monday 10:00", "+2d 8:00") in addition to the regular ISO 8601
+        / culture-specific date strings v2.1.x already supported.
+
+        Strategy (first match wins):
+          1. Pass-through if already [datetime] / [datetimeoffset].
+          2. Pass-through for ISO 8601 (`yyyy-MM-ddTHH:mm:ssZ` shaped).
+          3. CorrelateDateTimeLanguage (handles en-US + da-DK + ISO formats).
+          4. Three relative regexes:
+               '+2d 8:00'  / 'in 2 days at 8am'  / '2 hours'
+               'tomorrow'  / 'today 9am'
+               'next monday 10:00'
+          5. Last-resort [datetime]::Parse.
+          6. $null if everything fails (caller MUST handle null).
+
+        Defaults for relative expressions: hour=09, minute=00 (typical "next
+        business day morning" handover). Caller should always check for $null
+        and fall back to "TAP starts immediately" semantics.
+
+    .PARAMETER InputValue
+        String OR [datetime]. Anything else is coerced to its .ToString().
+
+    .OUTPUTS
+        [datetime] (UTC kind) or $null.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter()][object]$InputValue
+    )
+
+    if ($null -eq $InputValue) { return $null }
+
+    # Pass-through native datetime types
+    if ($InputValue -is [datetime]) {
+        return ([datetime]$InputValue).ToUniversalTime()
+    }
+    if ($InputValue -is [datetimeoffset]) {
+        return ([datetimeoffset]$InputValue).UtcDateTime
+    }
+
+    $s = ([string]$InputValue).Trim()
+    if ([string]::IsNullOrWhiteSpace($s)) { return $null }
+
+    # --- 1. ISO 8601 fast-path -------------------------------------------------
+    # Detect Z / offset / T-separator and prefer DateTimeOffset (more forgiving)
+    if ($s -match 'Z$|[+-]\d{2}:\d{2}$|T\d') {
+        try {
+            $dto = [datetimeoffset]::MinValue
+            if ([datetimeoffset]::TryParse($s, [System.Globalization.CultureInfo]::InvariantCulture,
+                    [System.Globalization.DateTimeStyles]::AssumeUniversal, [ref]$dto)) {
+                return $dto.UtcDateTime
+            }
+        } catch {}
+    }
+
+    # --- 2. CorrelateDateTimeLanguage (en-US + da-DK + ISO formats) ------------
+    try {
+        $parsed = CorrelateDateTimeLanguage -DateInput $s -WarningAction SilentlyContinue
+        if ($parsed -is [datetime]) {
+            # Assume local kind when culture-parsed (typical CSV input). Convert to UTC.
+            if ($parsed.Kind -eq [System.DateTimeKind]::Unspecified) {
+                $parsed = [datetime]::SpecifyKind($parsed, [System.DateTimeKind]::Local)
+            }
+            return $parsed.ToUniversalTime()
+        }
+    } catch {}
+
+    # --- 3. Relative expressions -----------------------------------------------
+    # Normalize whitespace; collapse 'in 2 days at 8am' style noise words.
+    $sNorm = ($s.ToLowerInvariant() -replace '\s+', ' ').Trim()
+
+    # 3a. '+2d 8:00' / 'in 2 days at 8am' / '2 hours' / '+3 days at 8 am'
+    if ($sNorm -match '^(?:\+|in )?(\d+)\s*(d|day|days|h|hour|hours)\s*(?:at\s+)?(\d+)?(?::(\d+))?\s*(am|pm)?$') {
+        $n     = [int]$Matches[1]
+        $unit  = $Matches[2]
+        $hour  = if ($Matches[3]) { [int]$Matches[3] } else { 9 }
+        $min   = if ($Matches[4]) { [int]$Matches[4] } else { 0 }
+        $ampm  = $Matches[5]
+        if ($ampm -eq 'pm' -and $hour -lt 12) { $hour += 12 }
+        if ($ampm -eq 'am' -and $hour -eq 12) { $hour = 0 }
+        $base = (Get-Date).Date
+        if ($unit -like 'h*') {
+            # 'h' / 'hours' -- N hours from NOW; hour/min default 9:00 is ignored
+            if (-not $Matches[3]) {
+                return ([datetime]::Now).AddHours($n).ToUniversalTime()
+            }
+            # Explicit hour with 'h' is odd ('2h at 8am') -- treat as days fallback
+        }
+        $candidate = $base.AddDays($n).AddHours($hour).AddMinutes($min)
+        return ([datetime]::SpecifyKind($candidate, [System.DateTimeKind]::Local)).ToUniversalTime()
+    }
+
+    # 3b. 'tomorrow [at] 8am' / 'today 14:30'
+    if ($sNorm -match '^(tomorrow|today)\s*(?:at\s+)?(\d+)?(?::(\d+))?\s*(am|pm)?$') {
+        $dayWord = $Matches[1]
+        $hour    = if ($Matches[2]) { [int]$Matches[2] } else { 9 }
+        $min     = if ($Matches[3]) { [int]$Matches[3] } else { 0 }
+        $ampm    = $Matches[4]
+        if ($ampm -eq 'pm' -and $hour -lt 12) { $hour += 12 }
+        if ($ampm -eq 'am' -and $hour -eq 12) { $hour = 0 }
+        $offsetDays = if ($dayWord -eq 'tomorrow') { 1 } else { 0 }
+        $candidate = (Get-Date).Date.AddDays($offsetDays).AddHours($hour).AddMinutes($min)
+        return ([datetime]::SpecifyKind($candidate, [System.DateTimeKind]::Local)).ToUniversalTime()
+    }
+
+    # 3c. 'next monday [at] 10:00'
+    if ($sNorm -match '^next\s+(mon|tue|wed|thu|fri|sat|sun)\w*\s*(?:at\s+)?(\d+)?(?::(\d+))?\s*(am|pm)?$') {
+        $dayShort = $Matches[1]
+        $hour     = if ($Matches[2]) { [int]$Matches[2] } else { 9 }
+        $min      = if ($Matches[3]) { [int]$Matches[3] } else { 0 }
+        $ampm     = $Matches[4]
+        if ($ampm -eq 'pm' -and $hour -lt 12) { $hour += 12 }
+        if ($ampm -eq 'am' -and $hour -eq 12) { $hour = 0 }
+        $map = @{ mon=1; tue=2; wed=3; thu=4; fri=5; sat=6; sun=0 }
+        $targetDow = [int]$map[$dayShort]
+        $today = (Get-Date).Date
+        $todayDow = [int]$today.DayOfWeek
+        $delta = ($targetDow - $todayDow + 7) % 7
+        if ($delta -eq 0) { $delta = 7 }   # 'next monday' on a Monday = +7, not 0
+        $candidate = $today.AddDays($delta).AddHours($hour).AddMinutes($min)
+        return ([datetime]::SpecifyKind($candidate, [System.DateTimeKind]::Local)).ToUniversalTime()
+    }
+
+    # --- 4. Last resort: [datetime]::Parse -------------------------------------
+    try {
+        $fallback = [datetime]::Parse($s, [System.Globalization.CultureInfo]::CurrentCulture)
+        if ($fallback.Kind -eq [System.DateTimeKind]::Unspecified) {
+            $fallback = [datetime]::SpecifyKind($fallback, [System.DateTimeKind]::Local)
+        }
+        return $fallback.ToUniversalTime()
+    } catch {
+        return $null
+    }
+}
+
 function New-PimTemporaryAccessPass {
     <#
     .SYNOPSIS
@@ -8468,7 +8724,12 @@ function New-PimTemporaryAccessPass {
         $false = multi-use within the lifetime window.
 
     .PARAMETER StartDateTime
-        Optional ISO-8601 / parseable string. If omitted, TAP starts immediately.
+        Optional. Either an ISO-8601 string, a culture-specific date string,
+        or a v2.2.0 (roadmap #12) relative expression like "in 2 days at 8am" /
+        "tomorrow 9am" / "next monday 10:00" / "+2d 8:00". Resolution goes
+        through Resolve-PimTapStartDateTime first; if that returns $null we
+        fall back to the legacy [datetime]::Parse. Unparseable values are
+        omitted (TAP starts immediately) with a Write-Warning.
 
     .OUTPUTS
         [pscustomobject] @{ Code; StartDateTime; LifetimeInMinutes } -- caller
@@ -8487,10 +8748,26 @@ function New-PimTemporaryAccessPass {
         isUsableOnce      = $IsUsableOnce
     }
     if ($StartDateTime) {
+        # v2.2.0 (roadmap #12): try the new relative-aware resolver first
+        # (handles 'in 2 days at 8am' etc.). Fall back to the legacy direct
+        # cast for max backward compat with any pre-existing CSV cell that
+        # happens to be a hard [datetime]::Parse-able shape the new helper
+        # didn't recognize.
+        $resolved = $null
         try {
-            $body.startDateTime = ([datetime]$StartDateTime).ToUniversalTime().ToString('o')
+            $resolved = Resolve-PimTapStartDateTime -InputValue $StartDateTime
         } catch {
-            Write-Warning "  [TAP] could not parse StartDateTime '$StartDateTime' -- omitting (TAP will start immediately)."
+            $resolved = $null
+        }
+        if (-not $resolved) {
+            try {
+                $resolved = ([datetime]$StartDateTime).ToUniversalTime()
+            } catch {
+                Write-Warning "  [TAP] could not parse StartDateTime '$StartDateTime' -- omitting (TAP will start immediately)."
+            }
+        }
+        if ($resolved) {
+            $body.startDateTime = $resolved.ToString('o')
         }
     }
 
@@ -8528,6 +8805,298 @@ function Write-PimAdminTap {
     Add-Content -Path $file -Value $line -Encoding UTF8
     Write-Host "  -> TAP for $UserPrincipalName : $Code  (start=$StartDateTime, lifetime=${LifetimeInMinutes}min)" -ForegroundColor Yellow
     Write-Host "     appended to: $file" -ForegroundColor DarkCyan
+}
+
+function Send-PimAdminTap {
+    <#
+    .SYNOPSIS
+        v2.2.0 (roadmap #11) -- deliver an admin's initial Temporary Access
+        Pass (TAP) via configured notification channels (Email / Teams / Slack).
+
+    .DESCRIPTION
+        Reads `$global:PIM_NotificationChannels` for per-channel config
+        (typically populated by `config/PIM4EntraPS.NotificationChannels.locked.ps1`
+        + the customer's `.custom.ps1` override). When -Channel is omitted,
+        sends to EVERY configured channel best-effort (one failure does not
+        block the others). When -Channel is set, only that channel fires.
+
+        Channel matrix:
+          * Smtp  -> Send-MailMessage (PS 5.1 native; -WarningAction
+                     SilentlyContinue suppresses the MS deprecation warning).
+                     Recipient defaults to the parameter; admins' ManagerEmail
+                     is the typical caller-supplied value.
+          * Teams -> Invoke-RestMethod POST of an Adaptive-Card JSON payload
+                     to the channel's incoming webhook URL.
+          * Slack -> Invoke-RestMethod POST of `{ text: '...' }` to the
+                     channel's incoming webhook URL.
+
+        WhatIf semantics: when `$global:WhatIfMode -eq $true`, NO network
+        traffic is generated; the function logs `[WHATIF] would send TAP to
+        <recipient> via <channel>` and returns Sent=@().
+
+        Idempotent / side-effect-free against PIM state: sending a TAP code
+        does not change the user object or any Graph state (the TAP was
+        already minted by New-PimTemporaryAccessPass).
+
+    .PARAMETER UserPrincipalName
+        The admin the TAP belongs to.
+
+    .PARAMETER Code
+        The TAP code string (already minted by New-PimTemporaryAccessPass).
+
+    .PARAMETER StartDateTime
+        TAP start moment (UTC or local; helper formats both for the body).
+
+    .PARAMETER LifetimeMinutes
+        TAP validity window after StartDateTime.
+
+    .PARAMETER Channel
+        Optional explicit channel ('Smtp' | 'Teams' | 'Slack'). When omitted,
+        all configured channels fire.
+
+    .PARAMETER Recipient
+        Optional override. SMTP: an email address (defaults to the admin's
+        ManagerEmail when the caller provides it via this parameter).
+        Teams/Slack: ignored (the webhook URL itself targets the channel).
+
+    .OUTPUTS
+        Hashtable: @{ Sent = @('Smtp', 'Teams'); Failed = @(); Errors = @{} }
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$UserPrincipalName,
+        [Parameter(Mandatory)][string]$Code,
+        [Parameter(Mandatory)][datetime]$StartDateTime,
+        [Parameter(Mandatory)][int]$LifetimeMinutes,
+        [Parameter()][ValidateSet('Smtp','Teams','Slack')][string]$Channel,
+        [Parameter()][string]$Recipient
+    )
+
+    $result = @{
+        Sent   = @()
+        Failed = @()
+        Errors = @{}
+    }
+
+    $channels = $global:PIM_NotificationChannels
+    if ($null -eq $channels -or $channels.Count -eq 0) {
+        Write-Warning "  [TAP-Send] `$global:PIM_NotificationChannels not configured -- nothing to send to. See config/PIM4EntraPS.NotificationChannels.custom.sample.ps1."
+        return $result
+    }
+
+    # Normalize StartDateTime: prefer UTC for the wire, keep local for human eyes
+    if ($StartDateTime.Kind -eq [System.DateTimeKind]::Unspecified) {
+        $startUtc = [datetime]::SpecifyKind($StartDateTime, [System.DateTimeKind]::Local).ToUniversalTime()
+    } elseif ($StartDateTime.Kind -eq [System.DateTimeKind]::Local) {
+        $startUtc = $StartDateTime.ToUniversalTime()
+    } else {
+        $startUtc = $StartDateTime
+    }
+    $startLocal = $startUtc.ToLocalTime()
+    $expiryUtc  = $startUtc.AddMinutes($LifetimeMinutes)
+
+    $startLocalStr = $startLocal.ToString('yyyy-MM-dd HH:mm zzz')
+    $startUtcStr   = $startUtc.ToString('yyyy-MM-dd HH:mm') + ' UTC'
+    $expiryUtcStr  = $expiryUtc.ToString('yyyy-MM-dd HH:mm') + ' UTC'
+
+    $subject = "Your initial PIM admin TAP for $UserPrincipalName"
+    $bodyLines = @(
+        "Hello,"
+        ""
+        "A Temporary Access Pass (TAP) has been issued for the privileged admin account:"
+        "  $UserPrincipalName"
+        ""
+        "TAP code:        $Code"
+        "Valid from:      $startLocalStr  ($startUtcStr)"
+        "Lifetime:        $LifetimeMinutes minute(s)"
+        "Expires at:      $expiryUtcStr"
+        ""
+        "How to use it:"
+        "  1. Open https://mysignins.microsoft.com/security-info from a browser"
+        "     where you are NOT already signed in to this account."
+        "  2. Sign in with the admin UPN above; when prompted, enter the TAP"
+        "     code as the password."
+        "  3. Register your strong credentials (Passkey / Authenticator / FIDO2)"
+        "     immediately. Once registered, the TAP is single-use and burned."
+        ""
+        "If you did not request this account, contact your security operations"
+        "team immediately."
+    )
+    $body = $bodyLines -join "`r`n"
+
+    # Decide which channels to fire
+    $toFire = @()
+    if ($Channel) {
+        if ($channels.ContainsKey($Channel)) {
+            $toFire = @($Channel)
+        } else {
+            Write-Warning "  [TAP-Send] requested channel '$Channel' is not configured in `$global:PIM_NotificationChannels."
+            return $result
+        }
+    } else {
+        $toFire = @($channels.Keys)
+    }
+
+    foreach ($ch in $toFire) {
+        $cfg = $channels[$ch]
+        if ($null -eq $cfg) { continue }
+
+        # --- SMTP -----------------------------------------------------------
+        if ($ch -eq 'Smtp') {
+            $smtpRecipient = $Recipient
+            if (-not $smtpRecipient) {
+                Write-Warning "  [TAP-Send/Smtp] no recipient supplied (-Recipient empty, no ManagerEmail upstream) -- skip."
+                $result.Failed += $ch
+                $result.Errors[$ch] = 'no recipient'
+                continue
+            }
+            $server = $cfg.Server
+            $from   = $cfg.From
+            $port   = if ($cfg.Port) { [int]$cfg.Port } else { 25 }
+            $useSsl = [bool]$cfg.UseSsl
+            $cred   = $cfg.Credential
+            if (-not $server -or -not $from) {
+                Write-Warning "  [TAP-Send/Smtp] config missing Server or From -- skip."
+                $result.Failed += $ch
+                $result.Errors[$ch] = 'config Server/From missing'
+                continue
+            }
+            if ($global:WhatIfMode) {
+                Write-Host "  [WHATIF] would send TAP to $smtpRecipient via Smtp (server=$server, port=$port)" -ForegroundColor Yellow
+                continue
+            }
+            try {
+                $mailParams = @{
+                    SmtpServer = $server
+                    Port       = $port
+                    From       = $from
+                    To         = $smtpRecipient
+                    Subject    = $subject
+                    Body       = $body
+                    BodyAsHtml = $false
+                    Encoding   = [System.Text.Encoding]::UTF8
+                    ErrorAction = 'Stop'
+                }
+                if ($useSsl) { $mailParams['UseSsl'] = $true }
+                if ($cred)   { $mailParams['Credential'] = $cred }
+                Send-MailMessage @mailParams -WarningAction SilentlyContinue
+                Write-Host "  [TAP-Send/Smtp] -> $smtpRecipient OK" -ForegroundColor Green
+                $result.Sent += $ch
+            } catch {
+                Write-Warning "  [TAP-Send/Smtp] -> $smtpRecipient failed: $($_.Exception.Message)"
+                $result.Failed += $ch
+                $result.Errors[$ch] = $_.Exception.Message
+            }
+            continue
+        }
+
+        # --- Teams ----------------------------------------------------------
+        if ($ch -eq 'Teams') {
+            $url = $cfg.WebhookUrl
+            if (-not $url) {
+                Write-Warning "  [TAP-Send/Teams] no WebhookUrl configured -- skip."
+                $result.Failed += $ch
+                $result.Errors[$ch] = 'WebhookUrl missing'
+                continue
+            }
+            if ($global:WhatIfMode) {
+                Write-Host "  [WHATIF] would send TAP to Teams webhook" -ForegroundColor Yellow
+                continue
+            }
+            # Adaptive Card (1.4) wrapped in a Teams 'message' envelope. Plain
+            # text only; no avatars, no buttons. Keep payload minimal so it
+            # works in both classic Teams connectors and Workflows-based
+            # webhooks. Body is broken into TextBlocks to render readably.
+            $factSet = @(
+                @{ title = 'Admin UPN';   value = $UserPrincipalName }
+                @{ title = 'TAP code';    value = $Code }
+                @{ title = 'Valid from';  value = "$startLocalStr ($startUtcStr)" }
+                @{ title = 'Lifetime';    value = "$LifetimeMinutes minute(s)" }
+                @{ title = 'Expires at';  value = $expiryUtcStr }
+            )
+            $card = @{
+                type    = 'AdaptiveCard'
+                '$schema' = 'http://adaptivecards.io/schemas/adaptive-card.json'
+                version = '1.4'
+                body    = @(
+                    @{
+                        type    = 'TextBlock'
+                        size    = 'Medium'
+                        weight  = 'Bolder'
+                        text    = $subject
+                        wrap    = $true
+                    },
+                    @{
+                        type  = 'FactSet'
+                        facts = $factSet
+                    },
+                    @{
+                        type = 'TextBlock'
+                        text = 'Use the TAP at https://mysignins.microsoft.com/security-info to register strong credentials (Passkey / Authenticator). The TAP is single-use and burns on first successful sign-in.'
+                        wrap = $true
+                    }
+                )
+            }
+            $payload = @{
+                type        = 'message'
+                attachments = @(
+                    @{
+                        contentType = 'application/vnd.microsoft.card.adaptive'
+                        contentUrl  = $null
+                        content     = $card
+                    }
+                )
+            }
+            try {
+                $json = $payload | ConvertTo-Json -Depth 12 -Compress
+                Invoke-RestMethod -Uri $url -Method Post -ContentType 'application/json' -Body $json -ErrorAction Stop | Out-Null
+                Write-Host "  [TAP-Send/Teams] webhook POST OK" -ForegroundColor Green
+                $result.Sent += $ch
+            } catch {
+                Write-Warning "  [TAP-Send/Teams] webhook POST failed: $($_.Exception.Message)"
+                $result.Failed += $ch
+                $result.Errors[$ch] = $_.Exception.Message
+            }
+            continue
+        }
+
+        # --- Slack ----------------------------------------------------------
+        if ($ch -eq 'Slack') {
+            $url = $cfg.WebhookUrl
+            if (-not $url) {
+                Write-Warning "  [TAP-Send/Slack] no WebhookUrl configured -- skip."
+                $result.Failed += $ch
+                $result.Errors[$ch] = 'WebhookUrl missing'
+                continue
+            }
+            if ($global:WhatIfMode) {
+                Write-Host "  [WHATIF] would send TAP to Slack webhook" -ForegroundColor Yellow
+                continue
+            }
+            $text = @(
+                "*$subject*"
+                "Admin UPN: ``$UserPrincipalName``"
+                "TAP code: ``$Code``"
+                "Valid from: $startLocalStr ($startUtcStr)"
+                "Lifetime: $LifetimeMinutes minute(s); expires $expiryUtcStr"
+                "Register strong credentials at https://mysignins.microsoft.com/security-info -- single-use, burns on first sign-in."
+            ) -join "`n"
+            $payload = @{ text = $text }
+            try {
+                $json = $payload | ConvertTo-Json -Depth 4 -Compress
+                Invoke-RestMethod -Uri $url -Method Post -ContentType 'application/json' -Body $json -ErrorAction Stop | Out-Null
+                Write-Host "  [TAP-Send/Slack] webhook POST OK" -ForegroundColor Green
+                $result.Sent += $ch
+            } catch {
+                Write-Warning "  [TAP-Send/Slack] webhook POST failed: $($_.Exception.Message)"
+                $result.Failed += $ch
+                $result.Errors[$ch] = $_.Exception.Message
+            }
+            continue
+        }
+    }
+
+    return $result
 }
 
 function Write-PimAdminPassword {
