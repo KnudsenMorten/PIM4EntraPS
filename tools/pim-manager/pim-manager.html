@@ -1909,14 +1909,104 @@
       { base: 'PIM-Definitions-Organization',  label: 'Organization (org-wide grouping)' },
       { base: 'PIM-Definitions-Roles',         label: 'Roles (role group -- nests permission groups)' }
     ];
-    // Pre-suggest a target CSV based on the tag prefix.
-    let suggestedBase = 'PIM-Definitions-Tasks';
-    const t = missingTag.toLowerCase();
-    if (t.startsWith('role-'))   suggestedBase = 'PIM-Definitions-Roles';
-    else if (t.startsWith('org-')) suggestedBase = 'PIM-Definitions-Organization';
-    else if (t.startsWith('dept-')) suggestedBase = 'PIM-Definitions-Departments';
-    else if (t.includes('-svc-') || t.includes('-service-')) suggestedBase = 'PIM-Definitions-Services';
-    else if (t.includes('-resource-') || t.includes('-res-')) suggestedBase = 'PIM-Definitions-Resources';
+
+    // ------------------------------------------------------------------
+    // Suggest the target CSV + GroupName template from the CUSTOMER'S
+    // existing data, not from hardcoded heuristics. We do two layers:
+    //   1. If the operator set `$global:PIM_NamingConventions.TagPrefixToCsv`
+    //      in their naming-conventions .custom.ps1, honour it. Map shape:
+    //         { 'Azure-': 'PIM-Definitions-Resources', 'ROLE-': ... }
+    //      Longest-prefix match wins.
+    //   2. Else: scan every definition CSV for tags that share a prefix
+    //      with the missing tag (longest shared segment-aligned prefix).
+    //      The CSV with the most matches is the suggested default. We also
+    //      copy an existing row's GroupName template (with the unique
+    //      suffix substituted) for the placeholder.
+    // ------------------------------------------------------------------
+    let suggestedBase = null;
+    let suggestedGroupName = '';
+
+    // Layer 1: explicit prefix map from naming-conventions.custom.ps1.
+    const explicitMap = (PIM_NAMING && PIM_NAMING.TagPrefixToCsv && typeof PIM_NAMING.TagPrefixToCsv === 'object') ? PIM_NAMING.TagPrefixToCsv : null;
+    if (explicitMap) {
+      let bestLen = 0;
+      for (const pfx of Object.keys(explicitMap)) {
+        if (missingTag.toLowerCase().startsWith(pfx.toLowerCase()) && pfx.length > bestLen) {
+          suggestedBase = explicitMap[pfx];
+          bestLen = pfx.length;
+        }
+      }
+    }
+
+    // Layer 2: data-driven prefix scoring across the loaded definition CSVs.
+    if (!suggestedBase) {
+      const segs = missingTag.split('-').filter(s => s.length > 0);
+      // Try prefixes of decreasing length: full minus 1 segment, full minus 2, ..., just first segment.
+      // First prefix that matches anything in some CSV wins, with the
+      // CSV holding the most matches.
+      let bestMatchCount = 0;
+      let bestMatchTemplate = null;
+      for (let cut = Math.max(1, segs.length - 1); cut >= 1; cut--) {
+        const prefix = segs.slice(0, cut).join('-') + '-';
+        const csvScores = {};
+        const templates = {};
+        for (const opt of defOptions) {
+          try {
+            const data = await loadCsv(opt.base);
+            const matches = (data.rows || []).filter(r => r.GroupTag && r.GroupTag.toLowerCase().startsWith(prefix.toLowerCase()));
+            if (matches.length > 0) {
+              csvScores[opt.base] = matches.length;
+              // Capture a sample GroupName template from the longest-match row.
+              const sample = matches.find(m => m.GroupName);
+              if (sample) templates[opt.base] = sample.GroupName;
+            }
+          } catch (_) { /* ignore I/O failures, fall through */ }
+        }
+        const winners = Object.keys(csvScores);
+        if (winners.length > 0) {
+          // Sort by match count descending; first one wins.
+          winners.sort((a, b) => csvScores[b] - csvScores[a]);
+          suggestedBase = winners[0];
+          if (templates[suggestedBase]) bestMatchTemplate = templates[suggestedBase];
+          bestMatchCount = csvScores[suggestedBase];
+          break; // longest-shared-prefix wins; don't widen further
+        }
+      }
+
+      // Derive GroupName placeholder: take the sample template, strip the
+      // matched prefix's text out, and substitute the missing tag's
+      // equivalent suffix. Simplest: replace the sample's GroupTag-shaped
+      // tail with the missing tag's full string.
+      if (bestMatchTemplate) {
+        // The template looks like "PIM-<thing>". Replace the "<thing>" part
+        // (which corresponds to the sample's GroupTag) with the missing tag.
+        // Find the sample row, grab its GroupTag, then string-replace.
+        try {
+          const data = await loadCsv(suggestedBase);
+          const sample = (data.rows || []).find(r => r.GroupName === bestMatchTemplate);
+          if (sample && sample.GroupTag) {
+            suggestedGroupName = bestMatchTemplate.replace(sample.GroupTag, missingTag);
+          } else {
+            suggestedGroupName = bestMatchTemplate;
+          }
+        } catch (_) { suggestedGroupName = bestMatchTemplate; }
+      }
+    }
+
+    // Layer 3: final fallback if we still have no suggestion.
+    if (!suggestedBase) suggestedBase = 'PIM-Definitions-Tasks';
+
+    // Layer 4: use the literal prefix of the customer's PimGroupPattern
+    // (everything before the first '{' placeholder). This honours every
+    // tenant-specific prefix shape -- 'PIM-', 'PIM_', 'grp-e-pim-',
+    // 'PRIV-', whatever the customer set. No assumption.
+    if (!suggestedGroupName) {
+      const pat = (PIM_NAMING && PIM_NAMING.PimGroupPattern) || '';
+      const literalPrefix = pat ? pat.split('{')[0] : '';
+      // If the customer hasn't set a pattern, leave the field empty so they
+      // fill in whatever convention they actually use locally; don't guess.
+      suggestedGroupName = literalPrefix ? (literalPrefix + missingTag) : '';
+    }
 
     // Build modal markup. Reuse the existing #modalBg / #modal infrastructure
     // by creating a one-shot dialog div inside.
@@ -1931,7 +2021,7 @@
             defOptions.map(o => '<option value="' + o.base + '"' + (o.base === suggestedBase ? ' selected' : '') + '>' + o.label + '</option>').join('') +
           '</select></div>' +
         '<div class="field"><label>GroupTag (matches assignment rows)</label><input id="fkTag" value="' + escapeHtml(missingTag) + '"></div>' +
-        '<div class="field"><label>GroupName (Entra display name) <span style="color:#f85149">*</span></label><input id="fkName" placeholder="e.g. PIM-' + escapeHtml(missingTag) + '"></div>' +
+        '<div class="field"><label>GroupName (Entra display name) <span style="color:#f85149">*</span></label><input id="fkName" value="' + escapeHtml(suggestedGroupName) + '" placeholder="' + escapeHtml(suggestedGroupName) + '"></div>' +
         '<div class="field"><label>GroupDescription</label><input id="fkDesc" placeholder="One-line purpose"></div>' +
         '<div class="field"><label>Role-assignable group? (required when this definition is a target of Entra ID role assignments)</label>' +
           '<select id="fkIra"><option value="FALSE">No (default)</option><option value="TRUE">Yes</option></select></div>' +

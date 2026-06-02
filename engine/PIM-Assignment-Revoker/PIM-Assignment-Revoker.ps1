@@ -102,10 +102,10 @@ Function BuildData
 
     Write-host ""
     Write-host "[ 01 / $($MaxSteps) ] Building list of all Users in Entra ID ... Please Wait !"
-    $Global:Users_All_ID = Get-MgUser -all:$true
+    $Global:Users_All_ID = Get-PimAdminsFiltered
 
     Write-host "[ 02 / $($MaxSteps) ] Building list of all Groups in Entra ID ... Please Wait !"
-    $Global:Groups_All_ID = Get-MgGroup -all:$true
+    $Global:Groups_All_ID = Get-PimGroupsFiltered
 
     Write-host "[ 03 / $($MaxSteps) ] Building list of all Service Principals in Entra ID ... Please Wait !"
     $Global:ServicePrincipals_All_ID = Get-MgServicePrincipal -all:$true

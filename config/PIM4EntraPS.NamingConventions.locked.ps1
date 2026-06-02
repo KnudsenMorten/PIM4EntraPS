@@ -19,6 +19,11 @@
     The helpers read $global:PIM_NamingConventions set by this file (and
     optionally overridden by the .custom.ps1 file loaded after).
 
+    The PIM Manager UI (tools/pim-manager/) also reads from this hashtable to
+    drive the "Re-add definition" / "Fix-all" wizards -- specifically
+    TagPrefixToCsv and PimGroupTagRegex (see .custom.sample.ps1 for the
+    full schema + per-key documentation).
+
 .NOTES
     Solution     : PIM4EntraPS
     Developed by : Morten Knudsen, Microsoft MVP
@@ -41,6 +46,19 @@ $global:PIM_NamingConventions = @{
 
     # Subset for AU-bound assignments (administrative unit)
     PimGroupAuPattern = 'PIM_{Role}_AU_{AdminUnit}'
+
+    # Optional STRICT regex for GroupTag values. When set, the PIM Manager's
+    # naming-convention warning (PIM-NAME-001) fires on any tag that doesn't
+    # match. Default (null) = Manager accepts any alphanumeric tag.
+    PimGroupTagRegex = $null
+
+    # ----- Tag-prefix -> Definition CSV map (Manager wizard input) ---------
+    # When the Manager re-adds a missing definition, it uses this map to
+    # pick the right PIM-Definitions-*.csv. Longest-prefix match wins. If
+    # empty, the Manager falls back to scanning the customer's existing
+    # rows to learn which CSV historically holds tags with each prefix.
+    # See .custom.sample.ps1 for a complete worked example.
+    TagPrefixToCsv = @{}
 
     # ----- Azure resource groups -------------------------------------------
     # When PIM4EntraPS provisions Azure resources (e.g. AU storage), naming pattern:
