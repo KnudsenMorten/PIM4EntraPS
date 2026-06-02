@@ -73,7 +73,7 @@ Write-Output "******************************************************************
 ######################################################################################################
 
     # Loading PIM functions
-    Import-Module "$($global:PathScripts)\FUNCTIONS\PIM-Functions.psm1" -Global -force -WarningAction SilentlyContinue
+    Import-Module (Join-Path $PSScriptRoot '..\_shared\PIM-Functions.psm1') -Global -Force -WarningAction SilentlyContinue
 
 ######################################################################################################
 # PS Module dependency AzResourceGraphPS - built by Morten Knudsen
@@ -190,20 +190,18 @@ Write-Output "******************************************************************
 # Variables
 ######################################################################################################
 
-    Write-host ""
-    Write-host "Getting privileged information from Keyvault ... Please Wait !"
-
-    $AdminAccountsInitialPassword = Get-AzKeyVaultSecret -VaultName $global:KV_HighPriv_KeyVaultName -Name "AdminAccountsInitialPassword" -AsPlainText
+    # No KV fetch needed -- random per-account passwords are generated inside
+    # CreateUpdate-Accounts-From-SQL via New-PimRandomPassword.
 
 ######################################################################################################
 # Include custom settings
 ######################################################################################################
 
     # Policy configuration
-    & "$($global:PathScripts)\PIM4EntraPS\Custom-Policies.ps1"
+    & (Get-PimCustomScript -Name 'policies')
 
     # Source Repository
-    & "$($global:PathScripts)\PIM4EntraPS\Custom-Repository.ps1"
+    & (Get-PimCustomScript -Name 'repository')
 
 
 ######################################################################################################
@@ -223,17 +221,17 @@ Write-Output "******************************************************************
     Write-host "[ 02 / $($MaxSteps) ] Building list of all Groups in Entra ID ... Please Wait !"
     $Global:Groups_All_ID = Get-MgGroup -all:$true
 
-    Write-host "[ 03 / $($MaxSteps) ] Building list of all PAG-Groups in Entra ID ... Please Wait !"
+    Write-host "[ 03 / $($MaxSteps) ] Building list of all PIM-Groups in Entra ID ... Please Wait !"
     $Global:PAG_Groups_Definitions_ID = $Global:Groups_All_ID | `
                                                 Where-Object { ($_.DisplayName -like "PAG-*") } | `
                                                 Select-Object DisplayName, Description, Id | Sort-Object -Property DisplayName
 
-    Write-host "[ 04 / $($MaxSteps) ] Building list of all PAG-Resource Groups for PIM for AD in Entra ID ... Please Wait !"
+    Write-host "[ 04 / $($MaxSteps) ] Building list of all PIM-Resource Groups for PIM for AD in Entra ID ... Please Wait !"
     $Global:PAG_Groups_Resource_SyncAD_Definitions_ID  = $Global:PAG_Groups_Definitions_ID | `
                                                 Where-Object { ($_.DisplayName -like "PAG-RES*") -and ($_.DisplayName -like "*-S_AD")} | `
                                                 Select-Object DisplayName, Description, Id | Sort-Object -Property DisplayName
 
-    Write-host "[ 05 / $($MaxSteps) ] Building list of all PAG-Service Groups for PIM for AD in Entra ID ... Please Wait !"
+    Write-host "[ 05 / $($MaxSteps) ] Building list of all PIM-Service Groups for PIM for AD in Entra ID ... Please Wait !"
     $Global:PAG_Groups_Service_SyncAD_Definitions_ID  = $Global:PAG_Groups_Definitions_ID | `
                                                 Where-Object { ($_.DisplayName -like "PAG-SERV*") -and ($_.DisplayName -like "*-S_AD")} | `
                                                 Select-Object DisplayName, Description, Id | Sort-Object -Property DisplayName
@@ -303,9 +301,12 @@ Write-Output "******************************************************************
 # Admin Accounts | Creations
 ######################################################################################################################
 
-    CreateUpdate-Accounts-From-SQL -SQLTable $global:SQLTableDefinitionsAdminAccounts `
-                                   -DefaultPassword $AdminAccountsInitialPassword `
-                                   -OnlyID
+    if ($global:WhatIfMode) {
+        Write-Host "[WHATIF] Skipping CreateUpdate-Accounts-From-SQL (creates/modifies real admin accounts in Entra ID + Exchange Online)." -ForegroundColor Yellow
+    } else {
+        CreateUpdate-Accounts-From-SQL -SQLTable $global:SQLTableDefinitionsAdminAccounts `
+                                       -OnlyID
+    }
 
 ######################################################################################################
 # PAG | PIM for Groups | Privileged Access Group (PAG) - Creation
@@ -387,17 +388,17 @@ Write-Output "******************************************************************
     Write-host "[ 02 / $($MaxSteps) ] Building list of all Groups in Entra ID ... Please Wait !"
     $Global:Groups_All_ID = Get-MgGroup -all:$true
 
-    Write-host "[ 03 / $($MaxSteps) ] Building list of all PAG-Groups in Entra ID ... Please Wait !"
+    Write-host "[ 03 / $($MaxSteps) ] Building list of all PIM-Groups in Entra ID ... Please Wait !"
     $Global:PAG_Groups_Definitions_ID = $Global:Groups_All_ID | `
                                                 Where-Object { ($_.DisplayName -like "PAG-*") } | `
                                                 Select-Object DisplayName, Description, Id | Sort-Object -Property DisplayName
 
-    Write-host "[ 04 / $($MaxSteps) ] Building list of all PAG-Resource Groups for PIM for AD in Entra ID ... Please Wait !"
+    Write-host "[ 04 / $($MaxSteps) ] Building list of all PIM-Resource Groups for PIM for AD in Entra ID ... Please Wait !"
     $Global:PAG_Groups_Resource_SyncAD_Definitions_ID  = $Global:PAG_Groups_Definitions_ID | `
                                                 Where-Object { ($_.DisplayName -like "PAG-RES*") -and ($_.DisplayName -like "*-S_AD")} | `
                                                 Select-Object DisplayName, Description, Id | Sort-Object -Property DisplayName
 
-    Write-host "[ 05 / $($MaxSteps) ] Building list of all PAG-Service Groups for PIM for AD in Entra ID ... Please Wait !"
+    Write-host "[ 05 / $($MaxSteps) ] Building list of all PIM-Service Groups for PIM for AD in Entra ID ... Please Wait !"
     $Global:PAG_Groups_Service_SyncAD_Definitions_ID  = $Global:PAG_Groups_Definitions_ID | `
                                                 Where-Object { ($_.DisplayName -like "PAG-SERV*") -and ($_.DisplayName -like "*-S_AD")} | `
                                                 Select-Object DisplayName, Description, Id | Sort-Object -Property DisplayName
@@ -528,3 +529,4 @@ Write-Output "******************************************************************
                                      -Notification_Requestor_Admin_Eligibility_notificationLevel $Notification_Requestor_Admin_Eligibility_notificationLevel `
                                      -Notification_Requestor_Admin_Eligibility_notificationRecipients $Notification_Requestor_Admin_Eligibility_notificationRecipients `
                                      -Notification_Requestor_Admin_Eligibility_isDefaultRecipientsEnabled $Notification_Requestor_Admin_Eligibility_isDefaultRecipientsEnabled
+

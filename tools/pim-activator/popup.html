@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>PIM Activator</title>
+<style>
+  :root { color-scheme: dark; }
+  html, body { margin:0; padding:0; width:420px; font-family: -apple-system, "Segoe UI", Roboto, sans-serif; background:#0e1116; color:#e6edf3; font-size:13px; }
+  header { padding:10px 12px; border-bottom:1px solid #30363d; display:flex; align-items:center; gap:10px; }
+  header h1 { font-size:13px; margin:0; flex:1; }
+  #me { color:#7d8590; font-size:11px; }
+  button { background:#21262d; color:#e6edf3; border:1px solid #30363d; padding:6px 10px; border-radius:6px; cursor:pointer; font-size:12px; }
+  button.primary { background:#1f6feb; border-color:#1f6feb; color:#fff; }
+  button.primary:hover { background:#388bfd; }
+  button:hover { background:#30363d; }
+  button:disabled { opacity:0.5; cursor:not-allowed; }
+  .row { padding:6px 12px; border-bottom:1px solid #21262d; display:flex; align-items:flex-start; gap:8px; }
+  .row:hover { background:#161b22; }
+  .row input[type=checkbox] { margin-top:2px; }
+  .row .body { flex:1; min-width:0; }
+  .row .name { font-size:12.5px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .row .meta { font-size:10.5px; color:#7d8590; margin-top:2px; }
+  .row .status { font-size:10.5px; margin-top:2px; }
+  .status.ok { color:#3fb950; }
+  .status.err { color:#f85149; }
+  .status.pending { color:#d29922; }
+  footer { position:sticky; bottom:0; background:#161b22; border-top:1px solid #30363d; padding:8px 12px; }
+  .controls { display:grid; grid-template-columns:auto 1fr; gap:6px 10px; align-items:center; margin-bottom:8px; }
+  .controls label { font-size:11px; color:#7d8590; }
+  .controls input, .controls textarea { width:100%; box-sizing:border-box; background:#0d1117; color:#e6edf3; border:1px solid #30363d; border-radius:5px; padding:5px 7px; font-size:12px; font-family:inherit; }
+  .controls textarea { resize:vertical; min-height:30px; }
+  .actions { display:flex; gap:8px; }
+  .actions .count { flex:1; align-self:center; font-size:11px; color:#7d8590; }
+  #toolbar { display:flex; gap:6px; padding:6px 12px; border-bottom:1px solid #21262d; }
+  #toolbar input[type=search] { flex:1; background:#0d1117; color:#e6edf3; border:1px solid #30363d; border-radius:5px; padding:4px 8px; font-size:12px; }
+  #toolbar a { color:#7d8590; font-size:11px; align-self:center; cursor:pointer; text-decoration:none; }
+  #toolbar a:hover { color:#e6edf3; }
+  #status-bar { padding:8px 12px; color:#7d8590; font-size:11px; }
+  #status-bar.err { color:#f85149; }
+  .empty { padding:20px 12px; color:#7d8590; text-align:center; font-style:italic; font-size:12px; }
+  #list { max-height:340px; overflow:auto; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>PIM Activator</h1>
+  <div id="me"></div>
+  <button id="sign-in" style="display:none">Sign in</button>
+  <button id="sign-out" style="display:none">Sign out</button>
+</header>
+
+<div id="toolbar" style="display:none">
+  <input id="search" type="search" placeholder="Filter groups…">
+  <a id="select-all">all</a>
+  <a id="select-none">none</a>
+  <a id="refresh">refresh</a>
+</div>
+
+<div id="status-bar">Loading…</div>
+
+<div id="list"></div>
+
+<footer style="display:none" id="footer">
+  <div class="controls">
+    <label for="justification">Justification</label>
+    <textarea id="justification" rows="1"></textarea>
+    <label for="duration">Duration (hours)</label>
+    <input id="duration" type="number" min="0.5" max="24" step="0.5">
+  </div>
+  <div class="actions">
+    <div class="count" id="count"></div>
+    <button class="primary" id="activate" disabled>Activate selected</button>
+  </div>
+</footer>
+
+<script src="config.js"></script>
+<script type="module" src="popup.js"></script>
+</body>
+</html>
