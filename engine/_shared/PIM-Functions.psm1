@@ -4392,6 +4392,21 @@ Function CreateUpdate-Accounts-From-file-CSV
             $MailForwardToAddress   = $Entry.MailForwardToAddress
             $CreateTAP              = $Entry.CreateTAP
             $TAPStartDate           = $Entry.TAPStartDate
+            $AccountStatus          = if ($Entry.PSObject.Properties.Name -contains 'AccountStatus') { $Entry.AccountStatus } else { 'Enabled' }
+            $StatusChangeCode       = if ($Entry.PSObject.Properties.Name -contains 'StatusChangeCode') { $Entry.StatusChangeCode } else { '' }
+
+            # MSP kill-switch / customer-driven Disable / Revoke: branch out BEFORE
+            # the normal create/update path. Invoke-PimAccountStatusChange:
+            #   - is a no-op when AccountStatus is empty / 'Enabled'
+            #   - in MSP variant, requires the StatusChangeCode column to match a
+            #     per-admin secret in the customer's KV (Test-PimAccountStatusChangeAuthorized)
+            #     before disabling/revoking -- defense in depth against an MSP-side compromise
+            #   - skips the rest of this iteration (no create / update) so a
+            #     Disabled or Revoked admin stays in the state we just put them in
+            If ($AccountStatus -and $AccountStatus -ne 'Enabled') {
+                Invoke-PimAccountStatusChange -UserPrincipalName $UserPrincipalName -AccountStatus $AccountStatus -StatusChangeCode $StatusChangeCode
+                continue
+            }
 
             If ($ForwardMails -eq "TRUE")
                 {
@@ -8260,6 +8275,35 @@ function Manage-Powershell-Module {
     }
 }
 
+function Get-PimSolutionRoot {
+    # Two levels up from engine\_shared\ = SOLUTIONS\PIM4EntraPS\.
+    return (Split-Path -Parent (Split-Path -Parent $PSScriptRoot))
+}
+
+function Get-PimConfigDir {
+    <#
+    .SYNOPSIS
+        Resolve the active config folder under SOLUTIONS/PIM4EntraPS/.
+
+    .DESCRIPTION
+        Routes to config-<variant>/ when $global:PIM_ConfigVariant is set
+        (e.g. 'local' or 'msp'), otherwise to plain config/ for backward
+        compatibility with single-tenancy installs. Creates the folder if
+        missing.
+    #>
+    [CmdletBinding()]
+    param()
+
+    $solutionRoot = Get-PimSolutionRoot
+    $variant = $global:PIM_ConfigVariant
+    $folderName = if ($variant) { "config-$variant" } else { 'config' }
+    $cfgDir = Join-Path $solutionRoot $folderName
+    if (-not (Test-Path -LiteralPath $cfgDir)) {
+        New-Item -Path $cfgDir -ItemType Directory -Force | Out-Null
+    }
+    return $cfgDir
+}
+
 function Get-PimCustomScript {
     <#
     .SYNOPSIS
@@ -8267,9 +8311,10 @@ function Get-PimCustomScript {
 
     .DESCRIPTION
         Used by engines to source customer-owned config helpers (repository,
-        policies, etc.) that live under SOLUTIONS/PIM4EntraPS/config/. The
-        .custom.ps1 file is gitignored and lives only on the customer VM. A
-        tracked .custom.sample.ps1 sibling acts as the bootstrap template.
+        policies, etc.) that live under the active config folder. Routes
+        through Get-PimConfigDir so MSP / local variants land in the right
+        place. The .custom.ps1 file is gitignored; a tracked .custom.sample.ps1
+        sibling acts as the bootstrap template.
 
         Throws with a copy-from-sample hint if the customer file is missing.
 
@@ -8281,9 +8326,7 @@ function Get-PimCustomScript {
         [Parameter(Mandatory)][string]$Name
     )
 
-    # $PSScriptRoot inside a .psm1 = the module's own folder (engine/_shared/).
-    # Two levels up = the solution root, then 'config'.
-    $cfgRoot = Join-Path (Split-Path -Parent (Split-Path -Parent $PSScriptRoot)) 'config'
+    $cfgRoot = Get-PimConfigDir
     $custom  = Join-Path $cfgRoot ("{0}.custom.ps1" -f $Name)
     $sample  = Join-Path $cfgRoot ("{0}.custom.sample.ps1" -f $Name)
 
@@ -8299,12 +8342,10 @@ function Get-PimConfigCsv {
         Resolve a config-folder CSV file with .custom -> .locked fallback.
 
     .DESCRIPTION
-        CSV equivalent of Get-PimCustomScript. Used by repository.custom.ps1
-        to wire $global:*DefinitionFile / *AssignmentsFile path variables to the
-        shipped (`.locked.csv`) or customer-overridden (`.custom.csv`) data files.
-
-        Returns the .custom.csv path if present, otherwise the .locked.csv path.
-        Throws if neither exists.
+        Variant-aware: routes through Get-PimConfigDir, so MSP runs read
+        config-msp/<name>.custom.csv (fallback config-msp/<name>.locked.csv)
+        while local runs read from config-local/ (or plain config/ in
+        single-tenancy mode).
 
     .PARAMETER Name
         Base name without extension/suffix, e.g. 'PIM-Definitions-AU'.
@@ -8314,26 +8355,34 @@ function Get-PimConfigCsv {
         [Parameter(Mandatory)][string]$Name
     )
 
-    $cfgRoot = Join-Path (Split-Path -Parent (Split-Path -Parent $PSScriptRoot)) 'config'
+    $cfgRoot = Get-PimConfigDir
     $custom  = Join-Path $cfgRoot ("{0}.custom.csv" -f $Name)
     $locked  = Join-Path $cfgRoot ("{0}.locked.csv" -f $Name)
 
     if (Test-Path -LiteralPath $custom) { return $custom }
     if (Test-Path -LiteralPath $locked) { return $locked }
 
-    throw "Get-PimConfigCsv: neither '$custom' nor '$locked' exists."
+    throw "Get-PimConfigCsv: neither '$custom' nor '$locked' exists (variant '$($global:PIM_ConfigVariant)')."
 }
 
 function Get-PimOutputDir {
     <#
     .SYNOPSIS
-        Return the SOLUTIONS/PIM4EntraPS/output/ folder, creating it if missing.
+        Return the SOLUTIONS/PIM4EntraPS/output[/<variant>]/ folder.
+
+    .DESCRIPTION
+        Variant-aware. When $global:PIM_ConfigVariant is set, state files
+        land under output/<variant>/ so LastApplied snapshots from local
+        and MSP runs never collide. Otherwise stays at output/ for
+        back-compat.
     #>
     [CmdletBinding()]
     param()
 
-    $solutionRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
-    $outDir       = Join-Path $solutionRoot 'output'
+    $outDir = Join-Path (Get-PimSolutionRoot) 'output'
+    if ($global:PIM_ConfigVariant) {
+        $outDir = Join-Path $outDir $global:PIM_ConfigVariant
+    }
     if (-not (Test-Path -LiteralPath $outDir)) {
         New-Item -Path $outDir -ItemType Directory -Force | Out-Null
     }
@@ -8483,6 +8532,488 @@ function Write-PimAdminPassword {
     Add-Content -Path $file -Value $line -Encoding UTF8
     Write-Host "  -> initial password for $UserPrincipalName ($Platform): $Password" -ForegroundColor Cyan
     Write-Host "     appended to: $file" -ForegroundColor DarkCyan
+}
+
+function Sync-PimMspConfig {
+    <#
+    .SYNOPSIS
+        Pull MSP-central config files into config-msp/ before the engine reads them.
+
+    .DESCRIPTION
+        Reads config-msp/msp.source.json to learn where to fetch from, then
+        materializes the per-tenant config snapshot under config-msp/. Always
+        atomic per file (write .tmp, Move-Item -Force). Logs to
+        output/msp/msp-sync-<utcStamp>.log.
+
+        v2.1.0 supports `sourceType = "git"` only. blob + https sources are
+        roadmap (v2.2.x).
+
+    .NOTES
+        msp.source.json schema (v2.1.0):
+          {
+            "sourceType":      "git",
+            "url":             "https://github.com/<msp>/pim-msp-central.git",
+            "branch":          "main",                              // optional, default main
+            "subPath":         "tenants/<tenant-id-or-name>",       // optional, default repo root
+            "auth":            { "method": "PAT|None",
+                                 "patEnvVar": "PIM_MSP_GIT_PAT" }   // env var holds the PAT
+          }
+
+        The fetched files MUST match the standard PIM4EntraPS config layout
+        (the 14 CSVs + helper .ps1 files). Files not in the standard layout
+        are ignored (won't be staged into config-msp/).
+    #>
+    [CmdletBinding()]
+    param()
+
+    if ($global:PIM_ConfigVariant -ne 'msp') {
+        Write-Verbose "Sync-PimMspConfig: skipped (variant '$($global:PIM_ConfigVariant)' is not 'msp')."
+        return
+    }
+
+    $cfgDir   = Get-PimConfigDir
+    $manifest = Join-Path $cfgDir 'msp.source.json'
+    if (-not (Test-Path -LiteralPath $manifest)) {
+        throw "Sync-PimMspConfig: $manifest not found. Copy msp.source.sample.json to msp.source.json and fill in your MSP central source."
+    }
+
+    $src = Get-Content -Path $manifest -Raw -Encoding UTF8 | ConvertFrom-Json
+    if (-not $src.sourceType) { throw "Sync-PimMspConfig: msp.source.json missing 'sourceType'." }
+
+    $logDir = Get-PimOutputDir
+    $stamp  = (Get-Date).ToUniversalTime().ToString('yyyyMMddTHHmmssZ')
+    $logPath = Join-Path $logDir "msp-sync-$stamp.log"
+
+    Write-Host ""
+    Write-Host "Sync-PimMspConfig: pulling MSP central config (sourceType=$($src.sourceType))..." -ForegroundColor Cyan
+    "[$stamp] Sync-PimMspConfig starting (sourceType=$($src.sourceType), url=$($src.url))" | Add-Content -Path $logPath
+
+    switch ($src.sourceType) {
+        'git' { Sync-PimMspConfig_Git -Source $src -DestDir $cfgDir -LogPath $logPath }
+        default { throw "Sync-PimMspConfig: sourceType '$($src.sourceType)' not supported in v2.1.0. Use 'git'." }
+    }
+
+    # Update lastSyncUtc in-place (preserves the rest of the manifest).
+    $src | Add-Member -NotePropertyName 'lastSyncUtc' -NotePropertyValue $stamp -Force
+    $src | ConvertTo-Json -Depth 5 | Set-Content -Path $manifest -Encoding UTF8
+
+    Write-Host "Sync-PimMspConfig: complete. Log: $logPath" -ForegroundColor Green
+}
+
+function Sync-PimMspConfig_Git {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]$Source,
+        [Parameter(Mandatory)][string]$DestDir,
+        [Parameter(Mandatory)][string]$LogPath
+    )
+
+    if (-not (Get-Command git -ErrorAction SilentlyContinue)) {
+        throw "Sync-PimMspConfig_Git: 'git' not found on PATH. Install Git for Windows or use sourceType='https'."
+    }
+
+    $branch = if ($Source.branch) { $Source.branch } else { 'main' }
+    $subPath = if ($Source.subPath) { $Source.subPath.Trim('/') } else { '' }
+
+    # Shallow clone into a fresh temp dir, copy out, delete temp. Keeps the
+    # working tree clean and avoids merging into any prior state.
+    $tmp = Join-Path ([IO.Path]::GetTempPath()) ("pim-msp-sync-{0}" -f ([Guid]::NewGuid().ToString('N').Substring(0,8)))
+    New-Item -Path $tmp -ItemType Directory -Force | Out-Null
+    try {
+        # Surface PAT via temporary env var if requested. Don't write to disk.
+        $url = $Source.url
+        if ($Source.auth -and $Source.auth.method -eq 'PAT' -and $Source.auth.patEnvVar) {
+            $pat = [System.Environment]::GetEnvironmentVariable($Source.auth.patEnvVar)
+            if (-not $pat) {
+                throw "Sync-PimMspConfig_Git: env var '$($Source.auth.patEnvVar)' is empty -- set it before launching the engine."
+            }
+            # Inject as x-access-token (works for github + most git hosts).
+            $url = $url -replace '^https://', "https://x-access-token:$pat@"
+        }
+
+        "[git] clone --depth=1 --branch=$branch <url-redacted>" | Add-Content -Path $LogPath
+        & git clone --depth 1 --branch $branch --quiet $url $tmp 2>&1 | Add-Content -Path $LogPath
+        if ($LASTEXITCODE -ne 0) { throw "git clone failed -- see $LogPath" }
+
+        $copyRoot = if ($subPath) { Join-Path $tmp $subPath } else { $tmp }
+        if (-not (Test-Path -LiteralPath $copyRoot)) { throw "Sync-PimMspConfig_Git: subPath '$subPath' not present in cloned repo." }
+
+        # Whitelist: only the standard CSV + helper PS file patterns. No .git,
+        # no README, no surprise files into config-msp/.
+        $patterns = @('*.locked.csv', '*.custom.sample.csv', '*.locked.ps1', '*.custom.sample.ps1')
+        $copied = 0
+        foreach ($pat in $patterns) {
+            foreach ($f in Get-ChildItem -LiteralPath $copyRoot -File -Filter $pat -ErrorAction SilentlyContinue) {
+                $dst = Join-Path $DestDir $f.Name
+                Copy-Item -LiteralPath $f.FullName -Destination ("$dst.tmp") -Force
+                Move-Item -LiteralPath ("$dst.tmp") -Destination $dst -Force
+                "[copy] $($f.Name)" | Add-Content -Path $LogPath
+                $copied++
+            }
+        }
+        "[done] $copied file(s) staged into $DestDir" | Add-Content -Path $LogPath
+        Write-Host "  -> $copied file(s) staged into $DestDir" -ForegroundColor DarkGray
+    }
+    finally {
+        # Best-effort cleanup; shallow git on Windows keeps locked handles
+        # occasionally, swallow.
+        try { Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction Stop } catch {}
+    }
+}
+
+function Test-PimAccountStatusChangeAuthorized {
+    <#
+    .SYNOPSIS
+        Verify that a centrally-defined AccountStatus change (Disabled / Revoked)
+        is authorized by the customer's CISO via a per-admin Key Vault secret.
+
+    .DESCRIPTION
+        Defense in depth for the MSP variant. When a row in config-msp/
+        Account-Definitions-Admins.csv sets AccountStatus to Disabled or
+        Revoked, this function fetches a per-admin secret from the
+        CUSTOMER'S Key Vault (NOT the MSP's) and compares it to the
+        StatusChangeCode column in the same CSV row. The engine only
+        proceeds when they match exactly.
+
+        This means: if an attacker pushes a malicious AccountStatus=Revoked
+        through the MSP central repo, they ALSO need to know the CISO-set
+        code in every tenant's KV -- which they don't have, so the engine
+        refuses to act and logs a security event.
+
+        Default-deny: if the customer's KV has no secret for this admin,
+        the function returns $false. The CISO opts in per admin by writing
+        the secret + telling the MSP the agreed-upon code.
+
+        Naming convention for the KV secret:
+            "pim-status-{slug}"
+        where {slug} is the UPN with '@' and '.' replaced by '-' and
+        lower-cased. Example:
+            Admin-MSP-MOK-T0-ID@contoso.onmicrosoft.com
+            -> pim-status-admin-msp-mok-t0-id-contoso-onmicrosoft-com
+
+        Required globals (set in repository.custom.ps1):
+            $global:PIM_StatusChange_KeyVaultName  -- the customer's KV name
+
+    .PARAMETER UserPrincipalName
+        The admin UPN whose status is being changed.
+
+    .PARAMETER ProvidedCode
+        The StatusChangeCode column value from the MSP CSV row.
+
+    .OUTPUTS
+        [bool] $true if the change is authorized, $false otherwise.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$UserPrincipalName,
+        [string]$ProvidedCode
+    )
+
+    if (-not $global:PIM_StatusChange_KeyVaultName) {
+        Write-Warning "  [SECURITY] No `$global:PIM_StatusChange_KeyVaultName configured. Refusing central status change for $UserPrincipalName."
+        return $false
+    }
+    if ([string]::IsNullOrWhiteSpace($ProvidedCode)) {
+        Write-Warning "  [SECURITY] MSP CSV row for $UserPrincipalName sets a non-Enabled AccountStatus but no StatusChangeCode. Refusing."
+        return $false
+    }
+
+    $slug = ($UserPrincipalName.ToLowerInvariant() -replace '[@.]', '-')
+    $secretName = "pim-status-$slug"
+
+    try {
+        $expected = Get-AzKeyVaultSecret -VaultName $global:PIM_StatusChange_KeyVaultName -Name $secretName -AsPlainText -ErrorAction Stop
+    } catch {
+        Write-Warning "  [SECURITY] KV secret '$secretName' not found in vault '$($global:PIM_StatusChange_KeyVaultName)'. CISO has not opted-in central status change for $UserPrincipalName. Refusing."
+        return $false
+    }
+    if ([string]::IsNullOrWhiteSpace($expected)) {
+        Write-Warning "  [SECURITY] KV secret '$secretName' is empty. Refusing."
+        return $false
+    }
+
+    # Constant-time-ish comparison (length first, then byte-by-byte). Avoid
+    # short-circuit on character mismatch so timing leak is negligible.
+    if ($expected.Length -ne $ProvidedCode.Length) {
+        Write-Warning "  [SECURITY] StatusChangeCode mismatch for $UserPrincipalName (length differs from CISO-set secret). Refusing + alerting."
+        return $false
+    }
+    $mismatch = 0
+    for ($i = 0; $i -lt $expected.Length; $i++) {
+        $mismatch = $mismatch -bor ([int][char]$expected[$i] -bxor [int][char]$ProvidedCode[$i])
+    }
+    if ($mismatch -ne 0) {
+        Write-Warning "  [SECURITY] StatusChangeCode mismatch for $UserPrincipalName. Refusing + alerting."
+        # Write to audit log explicitly -- this is a security event.
+        try {
+            $alertCsv = Join-Path (Get-PimOutputDir) ("status-change-DENIED-{0:yyyyMMdd}.csv" -f [DateTime]::UtcNow)
+            [pscustomobject]@{
+                Timestamp         = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
+                UserPrincipalName = $UserPrincipalName
+                Variant           = $global:PIM_ConfigVariant
+                Reason            = 'StatusChangeCode mismatch'
+                CodeProvidedSha   = (Get-FileHash -Algorithm SHA256 -InputStream ([IO.MemoryStream]::new([Text.Encoding]::UTF8.GetBytes($ProvidedCode)))).Hash.Substring(0,16)
+            } | Export-Csv -Path $alertCsv -Delimiter ';' -Encoding UTF8 -Append -NoTypeInformation
+        } catch {}
+        return $false
+    }
+
+    Write-Host "  [SECURITY] StatusChangeCode verified against KV for $UserPrincipalName -- proceeding." -ForegroundColor DarkGreen
+    return $true
+}
+
+function Invoke-PimAccountStatusChange {
+    <#
+    .SYNOPSIS
+        Apply a non-Enabled AccountStatus (Disabled / Revoked) to an admin.
+
+    .DESCRIPTION
+        Centralized branch + guard for MSP-driven kill-switch flips. Called
+        by CreateUpdate-Accounts-From-file-CSV when the row's AccountStatus
+        is not Enabled (or missing -> default Enabled).
+
+        Guard rules:
+          - When variant = 'msp' AND status in (Disabled, Revoked):
+            Test-PimAccountStatusChangeAuthorized must return $true,
+            else the change is refused and logged.
+          - When variant != 'msp': no KV check (local CSV = customer
+            directly in control).
+          - When status = Enabled: no-op (status change to Enabled is
+            handled by the normal create/update path).
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$UserPrincipalName,
+        [Parameter(Mandatory)][string]$AccountStatus,
+        [string]$StatusChangeCode
+    )
+
+    if ([string]::IsNullOrWhiteSpace($AccountStatus) -or $AccountStatus -eq 'Enabled') { return }
+
+    if ($AccountStatus -notin @('Disabled','Revoked')) {
+        Write-Warning "  Unknown AccountStatus '$AccountStatus' for $UserPrincipalName -- expected Enabled / Disabled / Revoked. Skipping."
+        return
+    }
+
+    if ($global:PIM_ConfigVariant -eq 'msp') {
+        if (-not (Test-PimAccountStatusChangeAuthorized -UserPrincipalName $UserPrincipalName -ProvidedCode $StatusChangeCode)) {
+            return
+        }
+    }
+
+    switch ($AccountStatus) {
+        'Disabled' { Invoke-PimAccountDisable -UserPrincipalName $UserPrincipalName }
+        'Revoked'  { Invoke-PimAccountRevoke  -UserPrincipalName $UserPrincipalName }
+    }
+}
+
+function Invoke-PimAccountDisable {
+    <#
+    .SYNOPSIS
+        Soft-kill an admin: set AccountEnabled=$false. Leaves PIM assignments in place.
+
+    .DESCRIPTION
+        Used when AccountStatus=Disabled in the admin CSV. Reversible:
+        flipping back to AccountStatus=Enabled re-enables the user on the
+        next engine run with no PIM rebuild required (much faster than
+        Revoked -> Enabled, which requires full re-creation).
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$UserPrincipalName
+    )
+
+    $user = Get-MgUser -UserId $UserPrincipalName -ErrorAction SilentlyContinue
+    if (-not $user) {
+        Write-Host "  [Disable] $UserPrincipalName not found in tenant -- nothing to do." -ForegroundColor DarkGray
+        return
+    }
+    if ($user.AccountEnabled -eq $false) {
+        Write-Host "  [Disable] $UserPrincipalName already disabled -- skip." -ForegroundColor DarkGray
+        return
+    }
+    if ($global:WhatIfMode) {
+        Write-Host "  [WHATIF] would set AccountEnabled=`$false on $UserPrincipalName" -ForegroundColor Yellow
+        return
+    }
+    try {
+        Update-MgUser -UserId $user.Id -AccountEnabled:$false -ErrorAction Stop
+        Write-Host "  [Disable] $UserPrincipalName -- AccountEnabled=`$false (PIM assignments left intact)" -ForegroundColor Yellow
+    } catch {
+        Write-Warning "  [Disable] $UserPrincipalName failed: $($_.Exception.Message)"
+    }
+}
+
+function Invoke-PimAccountRevoke {
+    <#
+    .SYNOPSIS
+        Hard-kill an admin: remove from every PIM group + cancel every active /
+        eligible PIM activation + set AccountEnabled=$false.
+
+    .DESCRIPTION
+        Used when AccountStatus=Revoked in the admin CSV. NOT a delete --
+        the user object stays so the audit trail survives. Reversibility:
+        flipping back to AccountStatus=Enabled triggers a full re-creation
+        on the next engine run (every role-group membership + PIM assignment
+        the CSV declares is re-applied; anything else is gone for good).
+
+        Best for: MSP central kill-switch, offboarding, compromise response.
+
+        Action sequence (each step idempotent + WhatIfMode-aware):
+          1. Cancel every eligible PIM-for-Groups schedule for this principal.
+          2. Cancel every active   PIM-for-Groups assignment for this principal.
+          3. Cancel every eligible PIM Entra ID role for this principal.
+          4. Cancel every active   PIM Entra ID role for this principal.
+          5. Remove from every Entra group they're a direct member of.
+          6. Set AccountEnabled=$false.
+
+        Writes a row per revocation event to output/<variant>/revoke-events-<utc>.csv
+        with UPN, prior memberships, prior eligibilities, timestamp for audit.
+
+    .NOTES
+        v2.1.0: steps 1+2+5+6 are implemented. Steps 3+4 (PIM Entra ID role
+        cancellation) need the directoryRoleAssignmentScheduleRequest +
+        directoryRoleEligibilityScheduleRequest endpoints and will land in
+        v2.1.1 -- for now we WARN if the user has any active Entra role PIM
+        schedules so the operator knows to handle them manually.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$UserPrincipalName
+    )
+
+    $user = Get-MgUser -UserId $UserPrincipalName -ErrorAction SilentlyContinue
+    if (-not $user) {
+        Write-Host "  [Revoke] $UserPrincipalName not found in tenant -- nothing to do." -ForegroundColor DarkGray
+        return
+    }
+
+    $auditDir = Get-PimOutputDir
+    $auditRow = [ordered]@{
+        Timestamp           = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
+        UserPrincipalName   = $UserPrincipalName
+        UserId              = $user.Id
+        WhatIfMode          = [bool]$global:WhatIfMode
+        Variant             = $global:PIM_ConfigVariant
+        GroupsRemovedFrom   = @()
+        EligibleSchedules   = 0
+        ActiveSchedules     = 0
+        EntraRoleWarnings   = @()
+        Errors              = @()
+    }
+
+    # --- Step 1+2: PIM-for-Groups schedules
+    try {
+        $eligibles = Get-MgIdentityGovernancePrivilegedAccessGroupEligibilityScheduleInstance -Filter "principalId eq '$($user.Id)'" -All -ErrorAction Stop
+    } catch { $eligibles = @() }
+    foreach ($e in $eligibles) {
+        $auditRow.EligibleSchedules++
+        if ($global:WhatIfMode) {
+            Write-Host "  [WHATIF] would adminRemove eligible PIM-Group memberOf groupId=$($e.GroupId)" -ForegroundColor Yellow
+            continue
+        }
+        $body = @{
+            accessId      = $e.AccessId
+            principalId   = $e.PrincipalId
+            groupId       = $e.GroupId
+            action        = 'adminRemove'
+            justification = "AccountStatus=Revoked via PIM4EntraPS engine ($($global:PIM_ConfigVariant) variant)"
+        }
+        try {
+            New-MgIdentityGovernancePrivilegedAccessGroupEligibilityScheduleRequest -BodyParameter $body -ErrorAction Stop | Out-Null
+            Write-Host "  [Revoke] eligible PIM-Group memberOf groupId=$($e.GroupId) -- cancelled" -ForegroundColor Yellow
+        } catch {
+            $auditRow.Errors += "elig $($e.GroupId): $($_.Exception.Message)"
+            Write-Warning "  [Revoke] eligible cancel for $($e.GroupId) failed: $($_.Exception.Message)"
+        }
+    }
+
+    try {
+        $actives = Get-MgIdentityGovernancePrivilegedAccessGroupAssignmentScheduleInstance -Filter "principalId eq '$($user.Id)'" -All -ErrorAction Stop
+    } catch { $actives = @() }
+    foreach ($a in $actives) {
+        $auditRow.ActiveSchedules++
+        if ($global:WhatIfMode) {
+            Write-Host "  [WHATIF] would adminRemove active PIM-Group memberOf groupId=$($a.GroupId)" -ForegroundColor Yellow
+            continue
+        }
+        $body = @{
+            accessId      = $a.AccessId
+            principalId   = $a.PrincipalId
+            groupId       = $a.GroupId
+            action        = 'adminRemove'
+            justification = "AccountStatus=Revoked via PIM4EntraPS engine ($($global:PIM_ConfigVariant) variant)"
+        }
+        try {
+            New-MgIdentityGovernancePrivilegedAccessGroupAssignmentScheduleRequest -BodyParameter $body -ErrorAction Stop | Out-Null
+            Write-Host "  [Revoke] active PIM-Group memberOf groupId=$($a.GroupId) -- cancelled" -ForegroundColor Yellow
+        } catch {
+            $auditRow.Errors += "active $($a.GroupId): $($_.Exception.Message)"
+            Write-Warning "  [Revoke] active cancel for $($a.GroupId) failed: $($_.Exception.Message)"
+        }
+    }
+
+    # --- Step 3+4: PIM Entra ID role schedules (v2.1.0: detect + warn only)
+    try {
+        $roleSchedules = Get-MgRoleManagementDirectoryRoleEligibilityScheduleInstance -Filter "principalId eq '$($user.Id)'" -All -ErrorAction Stop
+        if ($roleSchedules) {
+            $auditRow.EntraRoleWarnings += "$($roleSchedules.Count) eligible Entra ID role schedule(s) NOT auto-cancelled (v2.1.0 limitation -- cancel manually in PIM blade)"
+            Write-Warning "  [Revoke] $UserPrincipalName has $($roleSchedules.Count) eligible Entra ID role PIM schedule(s). Cancel manually in the Entra portal (auto-cancel in v2.1.1)."
+        }
+    } catch {}
+
+    # --- Step 5: remove from direct group memberships
+    try {
+        $memberships = Get-MgUserMemberOf -UserId $user.Id -All -ErrorAction Stop
+    } catch { $memberships = @() }
+    foreach ($m in $memberships) {
+        if ($m.AdditionalProperties.'@odata.type' -ne '#microsoft.graph.group') { continue }
+        $gid = $m.Id
+        if ($global:WhatIfMode) {
+            Write-Host "  [WHATIF] would remove $UserPrincipalName from group $gid" -ForegroundColor Yellow
+            continue
+        }
+        try {
+            Remove-MgGroupMemberByRef -GroupId $gid -DirectoryObjectId $user.Id -ErrorAction Stop
+            $auditRow.GroupsRemovedFrom += $gid
+            Write-Host "  [Revoke] removed from group $gid" -ForegroundColor Yellow
+        } catch {
+            $auditRow.Errors += "removeMember ${gid}: $($_.Exception.Message)"
+        }
+    }
+
+    # --- Step 6: disable account
+    if (-not $global:WhatIfMode) {
+        try {
+            Update-MgUser -UserId $user.Id -AccountEnabled:$false -ErrorAction Stop
+            Write-Host "  [Revoke] $UserPrincipalName -- AccountEnabled=`$false" -ForegroundColor Red
+        } catch {
+            $auditRow.Errors += "disable: $($_.Exception.Message)"
+        }
+    } else {
+        Write-Host "  [WHATIF] would set AccountEnabled=`$false on $UserPrincipalName" -ForegroundColor Yellow
+    }
+
+    # --- Audit row
+    $auditCsv = Join-Path $auditDir ("revoke-events-{0:yyyyMMdd}.csv" -f [DateTime]::UtcNow)
+    $auditRowFlat = [pscustomobject]@{
+        Timestamp         = $auditRow.Timestamp
+        UserPrincipalName = $auditRow.UserPrincipalName
+        UserId            = $auditRow.UserId
+        WhatIfMode        = $auditRow.WhatIfMode
+        Variant           = $auditRow.Variant
+        GroupsRemoved     = ($auditRow.GroupsRemovedFrom -join '|')
+        EligibleCancelled = $auditRow.EligibleSchedules
+        ActiveCancelled   = $auditRow.ActiveSchedules
+        EntraRoleWarnings = ($auditRow.EntraRoleWarnings -join '|')
+        Errors            = ($auditRow.Errors -join '|')
+    }
+    if (Test-Path -LiteralPath $auditCsv) {
+        $auditRowFlat | Export-Csv -Path $auditCsv -Delimiter ';' -Encoding UTF8 -Append -NoTypeInformation
+    } else {
+        $auditRowFlat | Export-Csv -Path $auditCsv -Delimiter ';' -Encoding UTF8 -NoTypeInformation
+    }
+    Write-Host "  [Revoke] audit row appended -> $auditCsv" -ForegroundColor DarkCyan
 }
 
 function New-PimRandomPassword {

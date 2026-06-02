@@ -23,7 +23,9 @@ param(
     [string]$InstallPath,
     [switch]$WhatIfMode,
     [switch]$SuppressErrors,
-    [switch]$SuppressWarnings
+    [switch]$SuppressWarnings,
+    [ValidateSet('local','msp','')]
+    [string]$ConfigVariant = ''
 )
 
 $ErrorActionPreference = 'Stop'
@@ -73,6 +75,7 @@ $global:SettingsPath        = $PSScriptRoot
 $global:WhatIfMode          = [bool]$WhatIfMode
 $global:SuppressErrors      = [bool]$SuppressErrors
 $global:SuppressWarnings    = [bool]$SuppressWarnings
+$global:PIM_ConfigVariant   = $ConfigVariant   # '', 'local', or 'msp' (v2.1.0+)
 $global:SpnTenantId         = $ctx.Tenant.Id
 $global:SpnClientId         = $ctx.Identity.Modern.Azure.AppId
 $global:SpnClientSecret     = $appSecretPlain
@@ -87,6 +90,13 @@ $engineOwner = Split-Path -Parent (Split-Path -Parent $launcherDir)
 $solutionRoot = Split-Path -Parent (Split-Path -Parent $launcherDir)
 $engine = Join-Path $solutionRoot 'engine\PIM-Baseline-Management-CSV\PIM-Baseline-Management-CSV.ps1'
 if (-not (Test-Path -LiteralPath $engine)) { throw "Launcher: engine script not found at $engine. Expected <solroot>\engine\PIM-Baseline-Management-CSV\PIM-Baseline-Management-CSV.ps1." }
+
+# MSP variant: pull central config BEFORE the engine reads anything.
+if ($global:PIM_ConfigVariant -eq 'msp') {
+    Import-Module (Join-Path $solutionRoot 'engine\_shared\PIM-Functions.psm1') -Global -Force -WarningAction SilentlyContinue
+    Sync-PimMspConfig
+}
+
 & $engine
     Write-PlatformLog -Context $ctx -Event 'engine.end' -Message 'PIM-Baseline-Management-CSV (community cloud) completed'
 }

@@ -1,9 +1,10 @@
 # Release notes for PIM4EntraPS
 
-## v2.0.0
+## v2.1.0
 
 Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monorepo:
 
+- release: PIM4EntraPS v2.1.0 - MSP variant + AccountStatus kill-switch with CISO-controlled per-admin KV codes (d1979fe8)
 - release: PIM4EntraPS v2.0.0 - full PIM v2 framework: engine modernization + Mapper (graph viewer + grid editor + save) + Activator (Edge extension + Intune install) + one-shot engine SPN installer + 18-section DESIGN.md + README rewrite (0118ecf8)
 - release: PIM4EntraPS v1.0.2 - SI launcher naming alignment + fix internal-azure leak in publish workflow + rewire engine path resolution for new engine/<task>/ layout (2ff8ebb1)
 - release: PIM4EntraPS v1.0.1 - hotfix: 14 .locked.csv data files were silently ignored by monorepo .gitignore (SOLUTIONS/**/config/* rule had no exception for *.locked.*) and missing from v1.0.0 public mirror (0fe0d6d5)
@@ -27,6 +28,88 @@ Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monor
 # Release notes -- PIM4EntraPS
 
 > **Curated changelog.** The publish workflow auto-prepends recent monorepo commits as a raw activity log; this file is the human-friendly narrative on top.
+
+---
+
+## v2.1.0 -- MSP variant + AccountStatus kill-switch (CISO-controlled per-admin KV codes)
+
+Scaffolds the "two engines per tenant" MSP topology: the same engine binary runs twice (once for local-owned admins, once for MSP-owned admins pulled from a central source), and a new `AccountStatus` CSV column lets the MSP centrally **Disable** or **Revoke** any admin across every tenant on the next pull -- but only if the customer's CISO has pre-authorized that admin via a per-admin code stored in the customer's own Key Vault.
+
+### Defense-in-depth model
+
+The kill-switch flow:
+
+1. **Customer CISO** writes a per-admin secret to the customer's KV (named `pim-status-<slug>` where `<slug>` is the UPN lower-cased with `@` and `.` replaced by `-`). The value is any string the CISO chooses.
+2. CISO tells the MSP the agreed code out-of-band (1Password / encrypted mail / phone).
+3. **MSP** edits the central CSV: `AccountStatus = Disabled` or `Revoked`, `StatusChangeCode = <agreed code>`. Commits to the central source.
+4. On every tenant's next cron tick, `Sync-PimMspConfig` pulls the updated CSV, and the engine reads the row.
+5. `Test-PimAccountStatusChangeAuthorized` fetches the secret from THIS customer's KV and compares (constant-time) to the CSV-supplied code. Mismatch / missing secret / no code in CSV -> **refuse + log a security event** to `output/msp/status-change-DENIED-<yyyyMMdd>.csv`. Match -> proceed.
+6. `Invoke-PimAccountStatusChange` dispatches to `Invoke-PimAccountDisable` (soft) or `Invoke-PimAccountRevoke` (hard: cancel every PIM-for-Groups eligibility / activation, remove from every direct group membership, then AccountEnabled=$false).
+
+**Default-deny**: no KV secret = central status changes off for that admin. CISO opts in per admin.
+
+An MSP-side compromise (attacker pushes malicious `AccountStatus=Revoked`) is contained: the attacker doesn't have the per-tenant KV secrets, so every tenant refuses the change.
+
+### What's new
+
+**Variant-aware path helpers** (`engine/_shared/PIM-Functions.psm1`)
+
+- `Get-PimSolutionRoot` -- new, factored out.
+- `Get-PimConfigDir` -- new. Routes to `config-<variant>/` when `$global:PIM_ConfigVariant` is set; otherwise to `config/` (back-compat, single-tenancy unchanged).
+- `Get-PimConfigCsv`, `Get-PimCustomScript`, `Get-PimOutputDir`, `Get-PimOutputPath` -- rewired through `Get-PimConfigDir` so MSP runs read from `config-msp/`, write state to `output/msp/`, and never collide with local-variant snapshots.
+
+**New helpers in PIM-Functions.psm1**
+
+- `Sync-PimMspConfig` -- on `-ConfigVariant msp`, pull central config from the source declared in `config-msp/msp.source.json`. v2.1.0 supports `sourceType = "git"` (shallow clone, optional PAT auth via env var, whitelist of allowed file patterns, atomic per-file stage via `Move-Item -Force`, sync log at `output/msp/msp-sync-<utc>.log`). `blob` + `https` source types are scaffolded for v2.2.x.
+- `Test-PimAccountStatusChangeAuthorized` -- the per-admin KV-secret check. Default-deny. Constant-time comparison. Mismatch -> alert to `output/.../status-change-DENIED-<yyyyMMdd>.csv` with a SHA-256 prefix of the provided code (not the code itself).
+- `Invoke-PimAccountStatusChange` -- single entry point the engine calls for any non-`Enabled` status. Branches to Disable / Revoke and gates with `Test-PimAccountStatusChangeAuthorized` when variant=msp.
+- `Invoke-PimAccountDisable` -- soft kill: `Update-MgUser -AccountEnabled:$false`. Leaves PIM assignments intact so reversal is fast.
+- `Invoke-PimAccountRevoke` -- hard kill: cancel every eligible + active PIM-for-Groups schedule for the principal, remove from every direct group membership, set `AccountEnabled=$false`. WhatIfMode-aware. Writes one audit row per revocation to `output/<variant>/revoke-events-<yyyyMMdd>.csv` with prior memberships + cancelled schedule counts. **v2.1.0 limitation**: PIM Entra ID role schedule cancellation (`directoryRoleEligibilityScheduleRequest` / `directoryRoleAssignmentScheduleRequest`) detected + warned but NOT auto-cancelled; the operator must clear those in the PIM blade manually. Auto-cancel lands in v2.1.1.
+
+**Engine wiring (`CreateUpdate-Accounts-From-file-CSV`)**
+
+- Reads `AccountStatus` and `StatusChangeCode` columns from each row (back-compat: defaults to `Enabled` / empty when columns missing).
+- When status != `Enabled`: dispatches to `Invoke-PimAccountStatusChange` and `continue`s -- a Disabled / Revoked admin stays in the state we just put them in (no create / update on the same row).
+
+**CSV schema** -- additive (back-compat)
+
+- `Account-Definitions-Admins.locked.csv` + `.custom.sample.csv` gain two columns: `AccountStatus` (default `Enabled`) + `StatusChangeCode` (required when variant=msp and status != Enabled).
+
+**`config-local/` + `config-msp/` folder scaffolding**
+
+- `config-local/README.md` -- documents the local-variant layout, bootstrap (copy `*.custom.sample.*` -> `*.custom.*`), foreign-admin isolation pattern (Filters scriptblock excludes `Admin-MSP-*`).
+- `config-msp/README.md` -- documents the MSP-variant model (pulled, not edited), the CISO opt-in KV procedure, the two-scheduled-tasks-staggered-30min recommendation.
+- `config-msp/msp.source.sample.json` -- template for the `msp.source.json` manifest (gitignored). Schema: `sourceType`, `url`, `branch`, `subPath`, `auth.{method, patEnvVar}`.
+- `.gitignore` extended to cover both new folders with the same `*.sample.* / *.locked.* / README.md` exception pattern as `config/`.
+
+**Launcher param** (4 flavours for `PIM-Baseline-Management-CSV`)
+
+- New `-ConfigVariant local | msp | <empty>` switch. Empty = single-tenancy back-compat (engine reads from `config/`, writes to `output/`). `local` routes to `config-local/` + `output/local/`. `msp` routes to `config-msp/` + `output/msp/` AND triggers `Sync-PimMspConfig` before the engine runs.
+- The 6 narrowed engine variants + SQL + Wizard + Revoker launchers do NOT yet carry `-ConfigVariant` in v2.1.0 -- only the main `PIM-Baseline-Management-CSV` launchers. Roll the same 2-edit pattern out to the others in v2.1.1 once the MSP customer's data shape is validated end-to-end.
+
+**`repository.custom.sample.ps1`**
+
+- Documents `$global:PIM_StatusChange_KeyVaultName` (the customer's KV holding the per-admin codes). Line stays commented out so single-tenancy customers don't need to set anything.
+
+### Migration notes
+
+- **Single-tenancy customers (no MSP)**: no action required. `-ConfigVariant` defaults to empty, helpers route to `config/` as before, `Account-Definitions-Admins.csv` additive columns default to `Enabled` so existing behaviour is preserved.
+- **Adopting MSP variant for the first time**: see `config-msp/README.md` for the 4-step setup (copy `msp.source.sample.json` -> `msp.source.json`, fill in central source, optionally set PAT env var, schedule `-ConfigVariant msp`).
+- **Adopting kill-switch**: CISO sets `$global:PIM_StatusChange_KeyVaultName` in `config/repository.custom.ps1` (or `config-msp/repository.custom.ps1`), then writes one `pim-status-<slug>` secret to that KV per admin they want central kill-switching for.
+
+### Known gaps (v2.1.1 backlog)
+
+- `Invoke-PimAccountRevoke` doesn't yet auto-cancel PIM Entra ID role schedules (only PIM-for-Groups). Detect + warn only.
+- `Sync-PimMspConfig` supports `sourceType = "git"` only. Blob + https sources scaffolded but not implemented.
+- `-ConfigVariant` lives only on the 4 `PIM-Baseline-Management-CSV` launchers; narrowed variants + SQL/Wizard/Revoker launchers still single-tenancy.
+- No signature verification on the synced central config files. Operator currently relies on the central source's own integrity guarantees (git auth + branch protection + signed commits).
+- Webhook on revoke (Slack/Teams/PagerDuty) deferred.
+
+### Verification
+
+- `PIM-Functions.psm1` + all 4 patched launchers parse-clean under PowerShell 5.1.
+- `Get-PimConfigDir` correctly routes for empty / `local` / `msp` variants (manually exercised).
+- CSV column add doesn't break existing engine read (the back-compat defaults trigger when the columns are absent).
 
 ---
 

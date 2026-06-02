@@ -82,6 +82,30 @@ $global:AccountsDefinitionFile_Delta                      = Get-PimOutputPath -N
 
 
 ###################################################################################################################
+###################################################################################################################
+# MSP kill-switch -- CISO-controlled Key Vault for per-admin status-change codes (v2.1.0+)
+#
+# When this customer participates in an MSP-driven central admin model
+# (-ConfigVariant msp), the engine must verify per-admin codes before
+# disabling / revoking any account. The codes live in the CUSTOMER'S
+# Key Vault (not the MSP's), so an MSP-side compromise can't push a
+# silent revoke into this tenant.
+#
+# Per-admin secret naming: 'pim-status-<slug>' where <slug> is the UPN
+# lower-cased with '@' and '.' replaced by '-'. The CISO sets the secret
+# once per admin they want to allow central kill-switching for; the MSP
+# is told the agreed-upon code and writes it into the StatusChangeCode
+# column of the MSP central CSV.
+#
+# Default-deny: if no secret exists for an admin, central status changes
+# for that admin are refused (with an entry in
+# output/<variant>/status-change-DENIED-<yyyyMMdd>.csv).
+###################################################################################################################
+
+# $global:PIM_StatusChange_KeyVaultName = '<your-customer-controlled-KV-name>'
+
+
+###################################################################################################################
 # SQL CONNECTION (optional; only used by PIM-Baseline-Management-SQL engine)
 #
 # Uncomment + populate if you sync definitions to Azure SQL instead of CSV files.

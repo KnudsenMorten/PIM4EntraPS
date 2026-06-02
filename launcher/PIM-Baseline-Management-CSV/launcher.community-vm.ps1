@@ -21,7 +21,9 @@ param(
     [string]$LauncherConfigPath,
     [switch]$WhatIfMode,
     [switch]$SuppressErrors,
-    [switch]$SuppressWarnings
+    [switch]$SuppressWarnings,
+    [ValidateSet('local','msp','')]
+    [string]$ConfigVariant = ''
 )
 
 $ErrorActionPreference = 'Stop'
@@ -56,6 +58,7 @@ $global:SettingsPath        = $PSScriptRoot
 $global:WhatIfMode          = [bool]$WhatIfMode
 $global:SuppressErrors      = [bool]$SuppressErrors
 $global:SuppressWarnings    = [bool]$SuppressWarnings
+$global:PIM_ConfigVariant   = $ConfigVariant   # '', 'local', or 'msp' (v2.1.0+)
 
 # Resolve engine path portably -- works in the monorepo, in a published
 # community repo, and inside a bundled dependency under dependencies/<dep>/.
@@ -64,6 +67,15 @@ $engineOwner = Split-Path -Parent (Split-Path -Parent $launcherDir)
 $solutionRoot = Split-Path -Parent (Split-Path -Parent $launcherDir)
 $engine = Join-Path $solutionRoot 'engine\PIM-Baseline-Management-CSV\PIM-Baseline-Management-CSV.ps1'
 if (-not (Test-Path -LiteralPath $engine)) { throw "Launcher: engine script not found at $engine. Expected <solroot>\engine\PIM-Baseline-Management-CSV\PIM-Baseline-Management-CSV.ps1." }
+
+# MSP variant: pull central config BEFORE the engine reads anything.
+# Sync-PimMspConfig is defined in engine/_shared/PIM-Functions.psm1 and
+# is a no-op when $global:PIM_ConfigVariant != 'msp'.
+if ($global:PIM_ConfigVariant -eq 'msp') {
+    Import-Module (Join-Path $solutionRoot 'engine\_shared\PIM-Functions.psm1') -Global -Force -WarningAction SilentlyContinue
+    Sync-PimMspConfig
+}
+
 & $engine
 
 
