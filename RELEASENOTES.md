@@ -1,9 +1,10 @@
 # Release notes for PIM4EntraPS
 
-## v2.1.7
+## v2.2.0
 
 Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monorepo:
 
+- release: PIM4EntraPS v2.2.0 - Theme 1 (Manager UX polish) + Theme 2 first slice (TAP flow) (a659adf6)
 - release: PIM4EntraPS v2.1.7 - docs/ROADMAP.md (34 customer-requested features sized + sequenced + storage-backend decision) Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com> (c1ae5fc7)
 - release: PIM4EntraPS v2.1.6 - hotfix: Ensure-DateTime null-safe (kills persistent engine crash at PIM-Baseline-Management-CSV.ps1:1196) (bd2207d0)
 - release: PIM4EntraPS v2.1.5 - hotfix: visible feedback on Remove-orphan-assignment button (dbd9bd38)
@@ -35,6 +36,18 @@ Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monor
 # Release notes -- PIM4EntraPS
 
 > **Curated changelog.** The publish workflow auto-prepends recent monorepo commits as a raw activity log; this file is the human-friendly narrative on top.
+
+---
+
+## v2.2.0 -- Theme 1: Manager UX polish + Theme 2: TAP flow
+
+First slice of the v2.2.x roadmap (`docs/ROADMAP.md` Theme 1 + the first two bullets of Theme 2). Pure-additive schema + helper additions -- pre-v2.2.0 customer CSVs keep working unchanged because the engine reads every new column defensively (PSObject.Properties.Name check, default to empty string when missing).
+
+- **Roadmap #1 -- optional admin metadata columns on `Account-Definitions-Admins`.** Four new columns between `MailForwardAddress` and `CreateTAP`: `Company` (pushed to Entra `-CompanyName` on create when non-empty), `Notes` (max 1024 chars, written as a comment in `output/admin-passwords-<date>.txt` -- Entra has no good native long-text field), `ManagerEmail` (resolved to a Graph user id and linked via `manager@odata.bind` after the user is created; silently skipped when the manager UPN can't be resolved in the tenant), `StartDate` (informational only -- use `TAPStartDate` + roadmap #12 for actual scheduled-credential issuance). The PIM Manager exposes the four fields as a collapsible "More fields..." section in the admin wizard (see `docs/MANAGER-UX-AUDIT.md`).
+- **Roadmap #28 -- role sponsor / owner column on `PIM-Definitions-Roles`.** Two new trailing columns: `SponsorUpn` (UPN of the role's audit / renewal owner) and `SponsorNotes` (free-text justification, e.g. "renewal due Q3 2026"). v2.2.0 lets the data flow but does not enforce anything yet; v2.3.x will wire Access Review delegation and audit-report sponsor lookup (roadmap #28 + #32).
+- **Roadmap #2 / #25 -- per-role permission drill-down in the Manager Graph tab.** Clicking an `entra-role` or `au-role` node now expands the right detail panel with the actual delegated permissions for that directory role: a one-line "N resource actions / M data actions" count in the key/value block plus a collapsible "Permissions granted (N)" section (auto-expanded for ≤20 actions) showing the role description, allowed/excluded resource actions, and allowed/excluded data actions -- each action in a monospace list with `+` / `-` prefixes and `(D)` for data-plane. Custom roles get a "(custom)" title prefix. Data is pulled from the existing `cache/entra-roles.json` tenant cache, which now persists the `rolePermissions[]` field straight from `GET /roleManagement/directory/roleDefinitions`; first-time use after upgrade requires a tenant-list refresh (badge in the toolbar, or the inline "↻ Refresh tenant lists" button shown when a role isn't in cache) to backfill `rolePermissions` into the existing cache file.
+- **Roadmap #11 -- send TAP via email / Teams / Slack.** New `Send-PimAdminTap` helper in `engine/_shared/PIM-Functions.psm1` fans the freshly-minted TAP code out to every configured notification channel best-effort. SMTP uses `Send-MailMessage` (PS 5.1 native, with `-WarningAction SilentlyContinue` to mute MS's deprecation warning); Teams posts an Adaptive Card 1.4 payload via Workflows / connector webhook; Slack posts a plain `{ text }`. Channel matrix configured per-customer in a new `config/PIM4EntraPS.NotificationChannels.custom.ps1` (gitignored) using the schema doc'd in `.custom.sample.ps1`. Defaults to an empty hashtable in the shipped `.locked.ps1` -- no per-tenant infra leaks into the repo. WhatIfMode-aware: when set, helper logs `[WHATIF] would send TAP to ... via <channel>` and produces zero network traffic. Wired into `CreateUpdate-Accounts-From-file-CSV` immediately after `Write-PimAdminTap`; delivery failure NEVER blocks account creation (entire call is `Try {} Catch {}`-wrapped). Recipient for SMTP defaults to the admin row's `ManagerEmail` column (roadmap #1); Teams / Slack target the configured webhook URL.
+- **Roadmap #12 -- scheduled TAP start time.** New `Resolve-PimTapStartDateTime` helper recognizes relative natural-ish expressions in the `TAPStartDate` CSV column in addition to the ISO 8601 / culture-specific shapes v2.1.x already supported. Supported forms (case-insensitive, all coerce to UTC): `+2d 8:00`, `+3 days at 8am`, `in 2 days at 9am`, `2 hours` (N hours from now), `tomorrow`, `today 14:30`, `next monday 10:00`, full ISO `2026-06-04T08:00:00Z`, plus anything `CorrelateDateTimeLanguage` or `[datetime]::Parse` can handle as a last resort. Defaults for relative expressions: hour=09, minute=00 ("next business-day morning" handover convention). `New-PimTemporaryAccessPass` calls the resolver first and falls back to the legacy direct `[datetime]` cast for max backward compat; on total parse failure it omits `startDateTime` from the Graph body (TAP starts immediately) with a `Write-Warning` -- never crashes the engine.
 
 ---
 

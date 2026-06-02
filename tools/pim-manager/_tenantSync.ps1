@@ -20,10 +20,18 @@
 
     The four cache files:
 
-      entra-roles.json     items: { id, displayName, description }
+      entra-roles.json     items: { id, displayName, description, isBuiltIn,
+                                    rolePermissions: [
+                                        { allowedResourceActions, excludedResourceActions,
+                                          allowedDataActions,    excludedDataActions } ] }
       aus.json             items: { id, displayName, description }
       pim-groups.json      items: { id, displayName, description }
       azure-scopes.json    items: { id, displayName, type, scopePath }
+
+    The entra-roles `rolePermissions` field powers the per-role permission
+    drill-down in the Manager Graph tab (Roadmap #2 / #25 -- v2.2.0). It is
+    persisted as-is from Graph; field-shape per Graph docs for the
+    `unifiedRoleDefinition` resource type.
 
     Connection contract: reuses the engine globals so no browser auth flow
     is ever triggered. Required globals (populated by
@@ -208,13 +216,31 @@ function Invoke-PimGraphGetAll {
 # ---------------------------------------------------------------------------
 
 function Get-PimEntraRolesFromTenant {
-    $rows = Invoke-PimGraphGetAll -Uri 'https://graph.microsoft.com/v1.0/roleManagement/directory/roleDefinitions?$select=id,displayName,description,isBuiltIn'
+    # rolePermissions is required by the Manager's per-role permission drill-down
+    # (Roadmap #2 / #25). Graph returns it by default on roleDefinitions, but we
+    # ask for it explicitly so the $select projection doesn't strip it.
+    $rows = Invoke-PimGraphGetAll -Uri 'https://graph.microsoft.com/v1.0/roleManagement/directory/roleDefinitions?$select=id,displayName,description,isBuiltIn,rolePermissions'
     $items = foreach ($r in $rows) {
+        # Normalize rolePermissions into a plain array of ordered hashtables so
+        # ConvertTo-Json -Depth 10 produces stable, friendly JSON regardless of
+        # whether Graph returned PSCustomObject or hashtable.
+        $perms = New-Object System.Collections.ArrayList
+        if ($r.rolePermissions) {
+            foreach ($p in @($r.rolePermissions)) {
+                [void]$perms.Add([ordered]@{
+                    allowedResourceActions  = @(if ($p.allowedResourceActions)  { $p.allowedResourceActions  } else { @() })
+                    excludedResourceActions = @(if ($p.excludedResourceActions) { $p.excludedResourceActions } else { @() })
+                    allowedDataActions      = @(if ($p.allowedDataActions)      { $p.allowedDataActions      } else { @() })
+                    excludedDataActions     = @(if ($p.excludedDataActions)     { $p.excludedDataActions     } else { @() })
+                })
+            }
+        }
         [ordered]@{
-            id          = "$($r.id)"
-            displayName = "$($r.displayName)"
-            description = "$($r.description)"
-            isBuiltIn   = [bool]$r.isBuiltIn
+            id              = "$($r.id)"
+            displayName     = "$($r.displayName)"
+            description     = "$($r.description)"
+            isBuiltIn       = [bool]$r.isBuiltIn
+            rolePermissions = @($perms)
         }
     }
     return ,@($items | Sort-Object { $_.displayName })
