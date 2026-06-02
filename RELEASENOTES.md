@@ -1,9 +1,10 @@
 # Release notes for PIM4EntraPS
 
-## v2.1.4
+## v2.1.5
 
 Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monorepo:
 
+- release: PIM4EntraPS v2.1.5 - hotfix: visible feedback on Remove-orphan-assignment button (dbd9bd38)
 - release: PIM4EntraPS v2.1.4 - hotfix: PIM-Functions auto-loads naming-conventions at module init (302f0a29)
 - release: PIM4EntraPS v2.1.3 - server-side Graph filtering (Get-PimAdminsFiltered + Get-PimGroupsFiltered) + customer-naming-aware Re-add wizard + naming-convention schema doc (6936c5ea)
 - release: PIM4EntraPS v2.1.2 - PIM Manager v0.3: pre-flight validator + bulk Fix-all + multi-step wizards + tenant cache (87feaada)
@@ -32,6 +33,14 @@ Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monor
 # Release notes -- PIM4EntraPS
 
 > **Curated changelog.** The publish workflow auto-prepends recent monorepo commits as a raw activity log; this file is the human-friendly narrative on top.
+
+---
+
+## v2.1.5 -- Hotfix: visible feedback on "Remove this assignment row" button
+
+The FK-001 quick-fix "Remove this assignment row" button (v2.1.2) staged the deletion into `pendingChanges` correctly, but gave no visible feedback -- the Validate tab still showed the violation (because the validator reads on-disk CSVs, not the pending pool), and the toast at the top of `vResults` was off-screen if the operator had scrolled down. Users reported "nothing happens when I click Remove".
+
+Fix: the button itself now shows immediate status -- disabled + "Working..." while the underlying `loadCsv` + `ensurePending` resolves, then "✓ Staged for delete (commit on Save tab)" in green when it lands in the pending pool. Idempotent against double-click (busy flag).
 
 ---
 
