@@ -4,7 +4,13 @@
 <meta charset="utf-8">
 <meta name="pim-token" content="__PIM_TOKEN__">
 <meta name="pim-mode" content="__PIM_MODE__">
-<title>PIM4EntraPS Mapper</title>
+<title>PIM4EntraPS Manager</title>
+<script>
+  // Injected by Open-PimManager.ps1: naming-convention values + tenant-list cache snapshot at page load.
+  // Both are also reachable via /api/naming-conventions and /api/tenant-lists for live refresh.
+  window.PIM_NAMING_BOOT = __PIM_NAMING__;
+  window.PIM_TENANT_LISTS_BOOT = __PIM_TENANT_LISTS__;
+</script>
 <style>
   html, body { margin:0; padding:0; height:100%; font-family: -apple-system, "Segoe UI", Roboto, sans-serif; background:#0e1116; color:#e6edf3; }
   #app { display:flex; flex-direction:column; height:100vh; }
@@ -82,6 +88,20 @@
   table.grid tr.row-deleted td { text-decoration:line-through; color:#7d8590; background:#3b1f1f33; }
   table.grid tr.row-added { background:#1f6f3f22; }
   table.grid tr.row-modified { background:#bf870022; }
+  /* Rows referenced by a PIM-FK-001 (orphan: GroupTag not in any PIM-Definitions-* CSV). */
+  table.grid tr.row-orphan-error { outline:2px solid #f85149; outline-offset:-2px; background:#3b1f1f55; }
+  table.grid tr.row-orphan-error td:first-child::before { content:'\26A0  '; color:#f85149; font-weight:700; }
+  /* FK-001 quick-fix buttons embedded in the Validate tab. */
+  .v-fk-actions { display:flex; gap:6px; margin-top:6px; }
+  .v-fk-actions button { padding:3px 9px; font-size:11px; border:1px solid #30363d; background:#21262d; color:#e6edf3; border-radius:5px; cursor:pointer; }
+  .v-fk-actions button.danger { color:#ffa198; border-color:#f85149; }
+  .v-fk-actions button.danger:hover { background:#3b1f1f; }
+  .v-fk-actions button.primary { color:#fff; background:#1f6feb; border-color:#1f6feb; }
+  .v-fk-actions button.primary:hover { background:#388bfd; }
+  /* Re-add definition modal -- compact 4-field form. */
+  #fkAddDlg .field { margin:8px 0; }
+  #fkAddDlg label { display:block; font-size:11px; color:#7d8590; margin-bottom:3px; }
+  #fkAddDlg input, #fkAddDlg select { width:100%; box-sizing:border-box; padding:6px 8px; border-radius:5px; border:1px solid #30363d; background:#0d1117; color:#e6edf3; font-size:12.5px; font-family:inherit; }
   table.grid td.row-actions { text-align:right; padding:2px 4px; width:34px; }
   table.grid td.row-actions button { padding:1px 6px; font-size:11px; background:transparent; border:1px solid transparent; color:#7d8590; }
   table.grid td.row-actions button:hover { color:#f85149; border-color:#f85149; }
@@ -109,6 +129,62 @@
   #saveStatus.err { color:#ffa198; }
   #saveStatus.ok { color:#7ee787; }
 
+  /* Save-tab validation banner */
+  .save-val-banner { padding:10px 14px; border-radius:6px; margin-bottom:8px; font-size:12.5px; display:flex; align-items:center; gap:10px; }
+  .save-val-banner.err  { background:#3b1f1f22; border:1px solid #5a2a2a; color:#ffa198; }
+  .save-val-banner.warn { background:#bf870022; border:1px solid #5a4b1d; color:#ffdf5d; }
+  .save-val-banner a { color:inherit; text-decoration:underline; cursor:pointer; }
+  .save-val-banner .spacer { flex:1; }
+
+  /* Validate tab */
+  #validateTab { display:none; }
+  #validateTab.active { display:flex; flex-direction:column; background:#0d1117; }
+  #valTopBar { padding:10px 18px; background:#161b22; border-bottom:1px solid #30363d; display:flex; gap:10px; align-items:center; flex-wrap:wrap; flex:0 0 auto; }
+  #valTopBar button { font-size:12px; }
+  #valTopBar .sev-chip { padding:3px 10px; border-radius:12px; font-size:11px; cursor:pointer; user-select:none; border:1px solid transparent; display:inline-flex; align-items:center; gap:5px; }
+  #valTopBar .sev-chip.sev-error   { background:#3b1f1f44; color:#ffa198; border-color:#5a2a2a; }
+  #valTopBar .sev-chip.sev-warning { background:#bf870044; color:#ffdf5d; border-color:#5a4b1d; }
+  #valTopBar .sev-chip.sev-info    { background:#1f6feb44; color:#cae2ff; border-color:#1f6feb; }
+  #valTopBar .sev-chip.off { opacity:.4; }
+  #valTopBar .sev-chip .n { font-weight:600; }
+  #valTopBar select, #valTopBar input[type=text] { background:#0d1117; color:#e6edf3; border:1px solid #30363d; border-radius:4px; padding:4px 8px; font-size:12px; }
+  #valTopBar .spacer { flex:1; }
+  #valTopBar .v-ranat { color:#7d8590; font-size:11px; }
+  #valTopBar .v-blockToggle { display:inline-flex; align-items:center; gap:5px; font-size:11.5px; color:#7d8590; }
+  #valResults { flex:1 1 auto; overflow:auto; padding:14px 18px; }
+  #valResults .v-empty { color:#7d8590; font-style:italic; padding:20px 0; text-align:center; }
+  #valResults .v-group { margin-bottom:14px; }
+  #valResults .v-group-h { font-size:11px; text-transform:uppercase; color:#7d8590; letter-spacing:.5px; padding:4px 0 6px 0; border-bottom:1px solid #21262d; margin-bottom:6px; font-weight:600; }
+  #valResults .v-row { background:#161b22; border:1px solid #30363d; border-radius:6px; padding:8px 12px; margin:4px 0; display:flex; gap:10px; align-items:flex-start; font-size:12px; }
+  #valResults .v-row .v-sev { padding:2px 8px; border-radius:10px; font-size:10px; font-weight:700; text-transform:uppercase; min-width:46px; text-align:center; flex:0 0 auto; }
+  #valResults .v-row.v-error   .v-sev { background:#da3633; color:#fff; }
+  #valResults .v-row.v-warning .v-sev { background:#bf8700; color:#fff; }
+  #valResults .v-row.v-info    .v-sev { background:#1f6feb; color:#fff; }
+  #valResults .v-row .v-code { font-family:Consolas,monospace; color:#7d8590; font-size:11px; flex:0 0 auto; padding-top:2px; }
+  #valResults .v-row .v-body { flex:1 1 auto; min-width:0; }
+  #valResults .v-row .v-msg { color:#e6edf3; line-height:1.45; }
+  #valResults .v-row .v-msg b { color:#fff; }
+  #valResults .v-row .v-sug { color:#7d8590; font-size:11.5px; font-style:italic; margin-top:4px; line-height:1.45; }
+  #valResults .v-row .v-meta { color:#7d8590; font-size:10.5px; margin-top:3px; font-family:Consolas,monospace; }
+  #valResults .v-row .v-meta b { color:#9aa6b2; font-weight:500; }
+  #valResults .v-row .v-jump { font-size:11px; color:#cae2ff; cursor:pointer; padding:2px 8px; border-radius:4px; border:1px solid #1f6feb; background:#1f6feb22; flex:0 0 auto; align-self:center; }
+  #valResults .v-row .v-jump:hover { background:#1f6feb44; }
+  #valFooter { padding:8px 18px; background:#161b22; border-top:1px solid #30363d; display:flex; align-items:center; gap:14px; font-size:11.5px; color:#7d8590; flex:0 0 auto; }
+  #valFooter .f-counts span { margin-right:12px; }
+  #valFooter .f-counts .err { color:#ffa198; }
+  #valFooter .f-counts .warn { color:#ffdf5d; }
+  #valFooter .f-counts .nfo { color:#cae2ff; }
+  #valFooter .spacer { flex:1; }
+
+  /* Grid row-highlight for "Open in Grid" jumps */
+  table.grid tr.v-jump-flash td { background:#bf870055 !important; transition:background 1.6s ease; }
+
+  /* Graph-node violation badges (rendered in DOM overlay on top of Cytoscape) */
+  #cyViolationOverlay { position:absolute; pointer-events:none; inset:0; overflow:hidden; }
+  #cyViolationOverlay .v-node-badge { position:absolute; background:#da3633; color:#fff; border-radius:9px; min-width:16px; height:16px; line-height:16px; text-align:center; font-size:10px; font-weight:700; padding:0 4px; pointer-events:auto; cursor:default; box-shadow:0 1px 4px #000a; }
+  #cyViolationOverlay .v-node-badge.warn { background:#bf8700; }
+  #cyViolationOverlay .v-node-badge.info { background:#1f6feb; }
+
   /* Confirm modal */
   #modalBg { position:fixed; inset:0; background:#000a; display:none; align-items:center; justify-content:center; z-index:100; }
   #modalBg.active { display:flex; }
@@ -118,6 +194,129 @@
   #modal .modal-body ul { margin:6px 0; padding-left:20px; color:#7d8590; }
   #modal .modal-body li b { color:#e6edf3; }
   #modal .modal-actions { margin-top:14px; display:flex; gap:8px; justify-content:flex-end; }
+
+  /* New tab (wizard launcher) */
+  #newTab { display:none; }
+  #newTab.active { display:flex; flex-direction:column; padding:22px 26px; gap:18px; overflow:auto; background:#0d1117; }
+  #newTab .new-intro { font-size:13px; color:#7d8590; max-width:780px; line-height:1.6; }
+  #newTab .new-intro b { color:#e6edf3; }
+  .wiz-cards { display:grid; grid-template-columns:repeat(auto-fill, minmax(280px, 1fr)); gap:14px; max-width:1100px; }
+  .wiz-card { background:#161b22; border:1px solid #30363d; border-radius:8px; padding:14px 16px; cursor:pointer; transition:border-color .12s, transform .12s; }
+  .wiz-card:hover { border-color:#2f81f7; transform:translateY(-1px); }
+  .wiz-card .wiz-icon { font-size:22px; margin-bottom:6px; }
+  .wiz-card h4 { margin:0 0 6px 0; font-size:14px; color:#e6edf3; }
+  .wiz-card .wiz-sub { font-size:11.5px; color:#7d8590; line-height:1.5; }
+  .wiz-card.disabled { opacity:0.5; cursor:not-allowed; }
+  .wiz-card.disabled:hover { border-color:#30363d; transform:none; }
+
+  /* Wizard modal (extends the confirm modal styles) */
+  #wizModal { max-width:680px; min-width:520px; padding:0; display:flex; flex-direction:column; max-height:88vh; }
+  #wizModal .wiz-header { padding:14px 20px 0 20px; }
+  #wizModal .wiz-header h3 { margin:0; font-size:15px; }
+  #wizModal .wiz-steps { display:flex; gap:4px; margin-top:10px; padding-bottom:8px; border-bottom:1px solid #30363d; }
+  #wizModal .wiz-step { flex:1; text-align:center; font-size:10.5px; color:#7d8590; padding:5px 4px; border-radius:4px 4px 0 0; text-transform:uppercase; letter-spacing:.4px; }
+  #wizModal .wiz-step.active { color:#e6edf3; background:#1f6feb22; border-bottom:2px solid #2f81f7; margin-bottom:-1px; }
+  #wizModal .wiz-step.done { color:#7ee787; }
+  #wizModal .wiz-body { padding:14px 20px; overflow-y:auto; flex:1; font-size:12.5px; }
+  #wizModal .wiz-actions { padding:10px 20px 14px 20px; border-top:1px solid #30363d; display:flex; gap:8px; align-items:center; }
+  #wizModal .wiz-actions .spacer { flex:1; }
+
+  /* Wizard "why these fields" collapsible */
+  .wiz-why { background:#0d1117; border:1px solid #21262d; border-radius:6px; padding:0; margin-bottom:14px; }
+  .wiz-why summary { padding:8px 12px; cursor:pointer; color:#7d8590; font-size:11.5px; user-select:none; }
+  .wiz-why summary:hover { color:#e6edf3; }
+  .wiz-why[open] summary { color:#e6edf3; border-bottom:1px solid #21262d; }
+  .wiz-why .why-body { padding:10px 14px; font-size:11.5px; color:#9aa6b2; line-height:1.6; }
+  .wiz-why .why-body b { color:#e6edf3; }
+  .wiz-why .why-body code { background:#161b22; border:1px solid #30363d; padding:1px 5px; border-radius:3px; font-size:10.5px; color:#e3b341; font-family:Consolas,monospace; }
+
+  /* Wizard form rows */
+  .wiz-field { display:grid; grid-template-columns: 200px 1fr; gap:14px; align-items:start; padding:8px 0; border-bottom:1px solid #161b22; }
+  .wiz-field:last-child { border-bottom:none; }
+  .wiz-field .lbl { font-size:12.5px; color:#e6edf3; padding-top:6px; }
+  .wiz-field .lbl .sub { display:block; font-size:10.5px; color:#7d8590; margin-top:2px; font-weight:normal; }
+  .wiz-field .lbl .req { color:#f85149; margin-left:3px; }
+  .wiz-field .ctl { display:flex; flex-direction:column; gap:3px; }
+  .wiz-field .ctl-row { display:flex; align-items:center; gap:10px; }
+  .wiz-field input[type=text], .wiz-field input[type=number], .wiz-field select, .wiz-field textarea {
+    flex:1 1 auto; min-width:0; padding:6px 8px; border:1px solid #30363d; border-radius:4px;
+    background:#0d1117; color:#e6edf3; font-size:12.5px; font-family:inherit;
+  }
+  .wiz-field input:focus, .wiz-field select:focus, .wiz-field textarea:focus { outline:none; border-color:#2f81f7; box-shadow:0 0 0 2px #1f6feb33; }
+  .wiz-field .example { font-size:10.5px; color:#7d8590; font-style:italic; white-space:nowrap; }
+  .wiz-field .hint { font-size:10.5px; color:#7d8590; line-height:1.5; }
+  .wiz-field .hint b { color:#9aa6b2; }
+  .wiz-field .err { font-size:10.5px; color:#ffa198; }
+  .wiz-field.invalid input, .wiz-field.invalid select, .wiz-field.invalid textarea { border-color:#f85149; }
+
+  /* Live "you'll get" preview */
+  .wiz-preview { background:#0d1117; border:1px dashed #2f81f7; border-radius:6px; padding:10px 12px; margin-top:14px; font-size:11.5px; }
+  .wiz-preview .lbl { color:#7d8590; font-size:10.5px; text-transform:uppercase; letter-spacing:.5px; margin-bottom:4px; }
+  .wiz-preview .val { color:#7ee787; font-family:Consolas,monospace; word-break:break-all; }
+  .wiz-preview .val.empty { color:#7d8590; font-style:italic; font-family:inherit; }
+  .wiz-preview .row { padding:3px 0; }
+  .wiz-preview .row + .row { border-top:1px solid #161b22; padding-top:5px; margin-top:5px; }
+
+  /* Wizard summary (final step) */
+  .wiz-summary { background:#0d1117; border:1px solid #30363d; border-radius:6px; padding:12px 14px; line-height:1.55; font-size:12.5px; }
+  .wiz-summary .plain { color:#e6edf3; margin-bottom:10px; }
+  .wiz-summary .plain b { color:#7ee787; }
+  .wiz-summary .impact-tbl { width:100%; border-collapse:collapse; font-size:11.5px; margin-top:6px; }
+  .wiz-summary .impact-tbl th { color:#7d8590; font-size:10.5px; text-align:left; padding:3px 6px; border-bottom:1px solid #30363d; font-weight:500; text-transform:uppercase; letter-spacing:.4px; }
+  .wiz-summary .impact-tbl td { padding:4px 6px; border-bottom:1px solid #21262d; font-family:Consolas,monospace; color:#e6edf3; }
+  .wiz-summary .impact-tbl td.adds { color:#7ee787; }
+
+  /* Pick-list (used in wizards & clone) */
+  .wiz-picklist { background:#0d1117; border:1px solid #30363d; border-radius:4px; max-height:200px; overflow-y:auto; }
+  .wiz-picklist .pl-item { padding:5px 10px; cursor:pointer; font-size:11.5px; border-bottom:1px solid #161b22; }
+  .wiz-picklist .pl-item:hover { background:#1f242c; }
+  .wiz-picklist .pl-item.selected { background:#1f6feb22; color:#fff; border-left:2px solid #2f81f7; padding-left:8px; }
+  .wiz-picklist .pl-item .pl-sub { display:block; font-size:10px; color:#7d8590; margin-top:1px; }
+  .wiz-picklist .pl-empty { padding:10px; color:#7d8590; font-style:italic; font-size:11px; text-align:center; }
+
+  /* Tag-list (multi-pick chips) */
+  .wiz-chips { display:flex; flex-wrap:wrap; gap:4px; }
+  .wiz-chip { background:#1f6feb22; border:1px solid #1f6feb; color:#cae2ff; padding:2px 8px 2px 8px; border-radius:10px; font-size:11px; display:inline-flex; align-items:center; gap:4px; }
+  .wiz-chip .x { cursor:pointer; color:#7d8590; font-size:13px; }
+  .wiz-chip .x:hover { color:#f85149; }
+
+  /* Tenant-cache age badge (shown next to dropdowns + on toolbar) */
+  .cache-badge { display:inline-block; font-size:10px; padding:1px 6px; border-radius:8px; margin-left:6px; cursor:pointer; user-select:none; border:1px solid transparent; vertical-align:middle; }
+  .cache-badge.live  { background:#1f6f3f44; color:#7ee787; border-color:#2a563a; }
+  .cache-badge.stale { background:#bf870044; color:#ffdf5d; border-color:#5a4b1d; }
+  .cache-badge.none  { background:#3b1f1f44; color:#ffa198; border-color:#5a2a2a; }
+  .cache-badge.busy  { background:#1f6feb44; color:#cae2ff; border-color:#1f6feb; cursor:wait; }
+  .cache-badge:hover { filter:brightness(1.2); }
+
+  /* In-grid dropdown cell (uses native select for portability) */
+  table.grid td select.cell-select { background:#0d1117; color:#e6edf3; border:1px solid transparent; padding:1px 4px; font-family:Consolas,monospace; font-size:11.5px; min-width:130px; outline:none; }
+  table.grid td select.cell-select:focus { border-color:#2f81f7; box-shadow:0 0 0 1px #2f81f7; }
+  table.grid td.cell-bad { box-shadow:inset 0 0 0 1px #f85149; background:#3b1f1f33; }
+  table.grid td.cell-bad-tip { position:relative; }
+
+  /* Grid row clone button */
+  table.grid td.row-actions .row-clone { color:#7d8590; padding:1px 6px; font-size:11px; background:transparent; border:1px solid transparent; }
+  table.grid td.row-actions .row-clone:hover { color:#7ee787; border-color:#7ee787; }
+
+  /* Wizard body controls (v2.2 wizards use these simpler class names) */
+  #wizBody .field { display:grid; grid-template-columns:200px 1fr; gap:8px 12px; align-items:center; padding:6px 0; border-bottom:1px solid #161b22; }
+  #wizBody .field label { font-size:12px; color:#7d8590; }
+  #wizBody .field input, #wizBody .field select, #wizBody .field textarea { padding:6px 8px; border-radius:4px; border:1px solid #30363d; background:#0d1117; color:#e6edf3; font-size:12.5px; font-family:inherit; }
+  #wizBody .field-full { grid-column:1 / -1; }
+  #wizBody .multi { background:#0d1117; border:1px solid #30363d; border-radius:6px; padding:6px 10px; max-height:180px; overflow:auto; }
+  #wizBody .multi label { display:flex; align-items:center; gap:6px; font-size:11.5px; padding:2px 0; cursor:pointer; }
+  #wizBody .multi label:hover { background:#1f242c; }
+  #wizBody .preview { background:#0d1117; border:1px dashed #2f81f7; border-radius:6px; padding:8px 12px; margin-top:14px; font-family:Consolas,monospace; font-size:11px; max-height:240px; overflow:auto; }
+  #wizBody .pv-row { padding:2px 4px; margin:1px 0; border-radius:3px; background:#1f6f3f22; color:#7ee787; }
+  #wizBody .pv-csv { color:#7d8590; margin-right:6px; }
+  #wizBody .err { color:#ffa198; font-size:11.5px; margin-top:8px; padding:6px 10px; background:#3b1f1f22; border-radius:4px; border:1px solid #5a2a2a; }
+
+  /* Right-click context menu on Graph nodes */
+  #ctxMenu { position:fixed; display:none; background:#161b22; border:1px solid #30363d; border-radius:6px; min-width:200px; z-index:200; box-shadow:0 4px 16px #000a; padding:4px 0; }
+  #ctxMenu.active { display:block; }
+  #ctxMenu .ctx-item { padding:6px 14px; font-size:12px; cursor:pointer; color:#e6edf3; }
+  #ctxMenu .ctx-item:hover { background:#1f242c; }
+  #ctxMenu .ctx-item .ctx-sub { display:block; font-size:10.5px; color:#7d8590; margin-top:2px; }
 </style>
 <script src="https://unpkg.com/cytoscape@3.30.2/dist/cytoscape.min.js"></script>
 <script src="https://unpkg.com/dagre@0.8.5/dist/dagre.min.js"></script>
@@ -129,7 +328,9 @@
   <div id="tabs">
     <div class="tab active" data-tab="graph">Graph</div>
     <div class="tab" data-tab="grid">Grid <span id="gridDirtyBadge" class="badge" style="display:none">0</span></div>
+    <div class="tab" data-tab="new">New &amp; clone</div>
     <div class="tab" data-tab="save">Save <span id="saveDirtyBadge" class="badge" style="display:none">0</span></div>
+    <div class="tab" data-tab="validate">Validate <span id="validateErrBadge" class="badge" style="display:none;background:#da3633">0</span></div>
     <div id="tabRight">
       mode: <b id="modeLabel"></b>
       &nbsp;|&nbsp; source: <b id="src"></b>
@@ -140,8 +341,8 @@
   <!-- =========== Graph tab =========== -->
   <div id="graphTab" class="tab-panel active">
     <div class="panel" id="left">
-      <h1>PIM Mapper</h1>
-      <div class="meta">v0.2 &mdash; editor</div>
+      <h1>PIM Manager</h1>
+      <div class="meta">v0.3 &mdash; editor + wizards</div>
 
       <h2>Counts</h2>
       <div class="kpis" id="kpis"></div>
@@ -188,8 +389,50 @@
     <div id="gridMain"><div class="empty" style="padding:30px;">Pick a CSV from the left.</div></div>
   </div>
 
+  <!-- =========== New tab (wizard launcher) =========== -->
+  <div id="newTab" class="tab-panel">
+    <div class="new-intro">
+      Pick what you want to create. Each wizard walks you through the questions and figures out which CSV(s) the rows
+      go into &mdash; you don't need to remember the naming convention or the column layout. Nothing is written to disk
+      until you click <b>Commit all</b> on the <b>Save</b> tab.
+    </div>
+    <div class="wiz-cards" id="wizCards">
+      <div class="wiz-card" data-wiz="admin">
+        <div class="wiz-icon">+</div>
+        <h4>New admin account</h4>
+        <div class="wiz-sub">Onboard a person to PIM. Generates the admin row and optionally adds them to one or more role groups.</div>
+      </div>
+      <div class="wiz-card" data-wiz="permgroup-entra">
+        <div class="wiz-icon">+</div>
+        <h4>New permission group (Entra ID)</h4>
+        <div class="wiz-sub">A capability bundle that grants Entra ID role(s). Mapped to the right Definitions CSV based on what kind of work it covers.</div>
+      </div>
+      <div class="wiz-card" data-wiz="permgroup-azure">
+        <div class="wiz-icon">+</div>
+        <h4>New permission group (Azure resource)</h4>
+        <div class="wiz-sub">A capability bundle that grants an Azure RBAC role at a chosen scope (subscription, resource group, or management group).</div>
+      </div>
+      <div class="wiz-card" data-wiz="rolegroup">
+        <div class="wiz-icon">+</div>
+        <h4>New role group</h4>
+        <div class="wiz-sub">A higher-level grouping that nests one or more permission groups. Used as the assignment target for humans.</div>
+      </div>
+      <div class="wiz-card" data-wiz="clone">
+        <div class="wiz-icon">&#x2398;</div>
+        <h4>Clone an existing group</h4>
+        <div class="wiz-sub">Pick any role group or permission group as a template, give the copy a new short code, and edit before commit.</div>
+      </div>
+      <div class="wiz-card" data-wiz="project">
+        <div class="wiz-icon">&#x231A;</div>
+        <h4>Project lifecycle (time-boxed)</h4>
+        <div class="wiz-sub">Time-boxed access for a project team: create a role group, add members, set an end date. Defaults to 90 days.</div>
+      </div>
+    </div>
+  </div>
+
   <!-- =========== Save tab =========== -->
   <div id="saveTab" class="tab-panel">
+    <div id="saveValBanner"></div>
     <div class="save-toolbar">
       <button id="btnCommit" class="primary">Commit all</button>
       <button id="btnCancel">Cancel all pending</button>
@@ -198,6 +441,34 @@
       <span id="saveStatus"></span>
     </div>
     <div id="saveCards"></div>
+  </div>
+
+  <!-- =========== Validate tab =========== -->
+  <div id="validateTab" class="tab-panel">
+    <div id="valTopBar">
+      <button id="btnValRefresh" class="primary">Re-run</button>
+      <button id="btnFixAll" title="Bulk-fix orphan assignments, stale Entra roles, and role-assignable Active-vs-Eligible errors">Fix all auto-fixable errors&hellip;</button>
+      <span class="sev-chip sev-error"   data-sev="error"   title="Click to hide/show errors">errors <span class="n" id="valChipErrN">0</span></span>
+      <span class="sev-chip sev-warning" data-sev="warning" title="Click to hide/show warnings">warnings <span class="n" id="valChipWarnN">0</span></span>
+      <span class="sev-chip sev-info"    data-sev="info"    title="Click to hide/show infos">infos <span class="n" id="valChipInfoN">0</span></span>
+      <select id="valCsvFilter" title="Filter by CSV"><option value="">All CSVs</option></select>
+      <input type="text" id="valSearch" placeholder="Search message / code / column..." style="min-width:240px">
+      <span class="spacer"></span>
+      <label class="v-blockToggle" title="When ON, validation errors block the Save tab's Commit button.">
+        <input type="checkbox" id="valBlockToggle" checked> Block Save on errors
+      </label>
+      <span class="v-ranat" id="valRanAt"></span>
+    </div>
+    <div id="valResults"><div class="v-empty">Click <b>Re-run</b> to validate. Re-runs automatically after every commit.</div></div>
+    <div id="valFooter">
+      <div class="f-counts">
+        <span class="err">errors: <b id="valCountErr">0</b></span>
+        <span class="warn">warnings: <b id="valCountWarn">0</b></span>
+        <span class="nfo">infos: <b id="valCountInfo">0</b></span>
+      </div>
+      <span class="spacer"></span>
+      <span id="valCacheStatus"></span>
+    </div>
   </div>
 
 </div>
@@ -213,6 +484,27 @@
     </div>
   </div>
 </div>
+
+<!-- Wizard modal -->
+<div id="wizBg" style="position:fixed; inset:0; background:#000a; display:none; align-items:center; justify-content:center; z-index:110;">
+  <div id="wizModal" class="wizard" style="background:#161b22; border:1px solid #30363d; border-radius:8px; padding:0; display:flex; flex-direction:column; max-height:88vh; max-width:680px; min-width:520px;">
+    <div class="wiz-header">
+      <h3 id="wizTitle">Wizard</h3>
+      <div class="wiz-steps" id="wizSteps"></div>
+    </div>
+    <div class="wiz-body" id="wizBody"></div>
+    <div class="wiz-actions">
+      <button id="wizBack">&larr; Back</button>
+      <button id="wizCancel">Cancel and discard</button>
+      <span class="spacer"></span>
+      <button id="wizNext" class="primary">Next &rarr;</button>
+      <button id="wizFinish" class="primary" style="display:none">Add to pending changes</button>
+    </div>
+  </div>
+</div>
+
+<!-- Right-click context menu (Graph tab) -->
+<div id="ctxMenu"></div>
 
 <script>
   'use strict';
@@ -232,6 +524,35 @@
   const csvCache = {};
 
   const isServer = PIM_MODE === 'server' && PIM_TOKEN;
+
+  // Naming-convention + tenant-list state. Both arrive from the server-rendered
+  // page; the tenant lists can be re-pulled at runtime via /api/refresh-tenant-lists.
+  const PIM_NAMING = (window.PIM_NAMING_BOOT && typeof window.PIM_NAMING_BOOT === 'object') ? window.PIM_NAMING_BOOT : {};
+  let TENANT_LISTS = (window.PIM_TENANT_LISTS_BOOT && typeof window.PIM_TENANT_LISTS_BOOT === 'object') ? window.PIM_TENANT_LISTS_BOOT : {};
+
+  // Default naming-convention regex for the GroupTag field. The on-disk
+  // `<Tag>-L<n>-T<n>-<Code>-<Domain>[-S_AD]` shape is what the docs describe.
+  // PIM_NAMING.PimGroupPattern is a Pattern template, NOT a regex (it has
+  // {Role}/{Department}/{AdminUnit} placeholders); we derive the validator
+  // regex from the documented shape and let customers override via
+  // PIM_NAMING.PimGroupTagRegex.
+  const PIM_GROUP_TAG_REGEX = (function () {
+    const override = PIM_NAMING && PIM_NAMING.PimGroupTagRegex;
+    if (override) { try { return new RegExp(override); } catch (_) { /* fall through */ } }
+    // Permissive default: the strict permission-group shape
+    //   <Name>-L<0-9>-T<0-2>-<CP|WDP|MP|APP|USER>-<ID|RES|DAT>[-S_AD]
+    // applies only to PIM permission groups. Role groups (ROLE-*),
+    // department groups (DEPT-*, ORG-*), AD-synced groups (AD-*) and
+    // legacy tags don't carry the suffix. Accept any non-empty
+    // alphanumeric tag here so the validator emits warnings, not blocks.
+    // Customers who want strict enforcement set PimGroupTagRegex in their
+    // .custom naming-conventions file.
+    return /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
+  })();
+  const PIM_GROUP_TAG_HINT = 'Expected shape: alphanumeric tag, optionally suffixed with -L<0-9>-T<0-2>-<CP|WDP|MP|APP|USER>-<ID|RES|DAT>[-S_AD] for permission groups (overridable via PIM_NAMING.PimGroupTagRegex).';
+
+  // Concurrency guard for refresh-tenant-lists.
+  let _tenantRefreshInFlight = false;
 
   document.getElementById('modeLabel').textContent = PIM_MODE;
   if (!isServer) {
@@ -259,6 +580,7 @@
     document.querySelectorAll('.tab-panel').forEach(p => p.classList.toggle('active', p.id === name + 'Tab'));
     if (name === 'grid') renderGridList();
     if (name === 'save') renderSaveTab();
+    if (name === 'validate') openValidateTab();
   }
 
   // ===================================================================
@@ -291,6 +613,145 @@
     setInterval(() => { api('POST', '/api/heartbeat').catch(() => {}); }, 10000);
     // Fire one immediately so the server's grace window resets.
     api('POST', '/api/heartbeat').catch(() => {});
+  }
+
+  // ===================================================================
+  // Tenant-list cache + age badges
+  // ===================================================================
+  // Returns { items, refreshedUtc, ageMs, freshness: 'live'|'stale'|'none' }
+  function getCachedList(key) {
+    const entry = TENANT_LISTS && TENANT_LISTS[key];
+    if (!entry || !entry.refreshedUtc) {
+      return { items: [], refreshedUtc: null, ageMs: null, freshness: 'none' };
+    }
+    const t = Date.parse(entry.refreshedUtc);
+    const ageMs = isNaN(t) ? null : (Date.now() - t);
+    const fresh = (ageMs != null && ageMs < 24 * 3600 * 1000) ? 'live' : 'stale';
+    return { items: entry.items || [], refreshedUtc: entry.refreshedUtc, ageMs, freshness: fresh };
+  }
+
+  function formatAge(ms) {
+    if (ms == null) return 'never';
+    if (ms < 60_000) return Math.floor(ms / 1000) + 's ago';
+    if (ms < 3_600_000) return Math.floor(ms / 60_000) + 'm ago';
+    if (ms < 86_400_000) return Math.floor(ms / 3_600_000) + 'h ago';
+    return Math.floor(ms / 86_400_000) + 'd ago';
+  }
+
+  // Renders a small clickable cache-age badge inline. The container should
+  // already have a slot via class .cache-badge-slot[data-list-key="entra-roles"|...].
+  function renderCacheBadges(root) {
+    (root || document).querySelectorAll('.cache-badge-slot').forEach(slot => {
+      const key = slot.dataset.listKey;
+      const info = getCachedList(key);
+      const cls = _tenantRefreshInFlight ? 'busy' : info.freshness;
+      const label = _tenantRefreshInFlight ? 'refreshing...'
+                  : info.freshness === 'none'  ? 'no cache - click to refresh'
+                  : (info.freshness + ' \u2022 ' + formatAge(info.ageMs));
+      slot.innerHTML = `<span class="cache-badge ${cls}" title="${escapeHtml(info.refreshedUtc || 'never refreshed')}">${escapeHtml(label)}</span>`;
+      slot.querySelector('.cache-badge').onclick = () => refreshTenantLists();
+    });
+  }
+
+  async function refreshTenantLists() {
+    if (!isServer) return;
+    if (_tenantRefreshInFlight) return;
+    _tenantRefreshInFlight = true;
+    renderCacheBadges();
+    try {
+      const r = await api('POST', '/api/refresh-tenant-lists');
+      if (r && r.lists) {
+        TENANT_LISTS = r.lists;
+      } else {
+        // Fall back to GET if the POST didn't return lists.
+        TENANT_LISTS = await api('GET', '/api/tenant-lists');
+      }
+    } catch (e) {
+      console.warn('refreshTenantLists failed:', e.message);
+      alert('Tenant refresh failed: ' + e.message + '\n\nThe engine SPN globals ($global:HighPriv_Modern_* / $global:AzureTenantID) must be set in the server\'s PowerShell session before this works. Run any baseline engine once (or source your bootstrap), then restart Open-PimManager.ps1.');
+    } finally {
+      _tenantRefreshInFlight = false;
+      renderCacheBadges();
+      // Re-render anything that depends on tenant lists.
+      if (document.getElementById('gridTab').classList.contains('active') && currentGridBase) {
+        renderGrid(currentGridBase);
+      }
+    }
+  }
+
+  // ===================================================================
+  // Known dropdown columns
+  // ===================================================================
+  // Returns null if the column isn't a known dropdown target, otherwise
+  // an object: { options: [{value,label,sub}], allowCustom: true, listKey, badge }.
+  function getDropdownSpec(base, col) {
+    // Entra ID role displayName
+    if (col === 'RoleDefinitionName' &&
+        (base === 'PIM-Assignments-Roles-Groups' || base === 'PIM-Assignments-Roles-AUs')) {
+      const c = getCachedList('entraRoles');
+      return {
+        listKey: 'entraRoles',
+        allowCustom: true,
+        options: c.items.map(r => ({ value: r.displayName, label: r.displayName, sub: r.description }))
+      };
+    }
+    // AU tag
+    if (col === 'AdministrativeUnitTag' &&
+        (base === 'PIM-Assignments-Roles-AUs' || base === 'PIM-Definitions-AU')) {
+      const c = getCachedList('aus');
+      return {
+        listKey: 'aus',
+        allowCustom: true,
+        options: c.items.map(a => ({ value: a.displayName, label: a.displayName, sub: a.id }))
+      };
+    }
+    // ARM scope path
+    if (col === 'AzScope' && base === 'PIM-Assignments-Azure-Resources') {
+      const c = getCachedList('azureScopes');
+      return {
+        listKey: 'azureScopes',
+        allowCustom: true,
+        options: c.items.map(s => ({ value: s.scopePath || s.id, label: (s.displayName || s.id) + ' (' + (s.type || '') + ')', sub: s.scopePath || s.id }))
+      };
+    }
+    // GroupTag-style fields -- union of all known GroupTags from loaded
+    // definition CSVs in the local cache. Validation only; we still allow
+    // custom values (so a wizard-just-created tag can be referenced).
+    if (col === 'GroupTag' || col === 'TargetGroupTag' || col === 'SourceGroupTag') {
+      const tags = collectKnownGroupTags();
+      return {
+        listKey: null, // client-side, no cache badge needed
+        allowCustom: true,
+        options: tags.map(t => ({ value: t, label: t })),
+        validate: (val) => !val || PIM_GROUP_TAG_REGEX.test(val),
+        invalidHint: PIM_GROUP_TAG_HINT
+      };
+    }
+    return null;
+  }
+
+  function collectKnownGroupTags() {
+    // Pull from every cached definition CSV's GroupTag column + AU tags.
+    const tags = new Set();
+    const defBases = (PIM_DATA.csvBases || []).filter(b => b.group === 'Definitions').map(b => b.base);
+    for (const b of defBases) {
+      const c = csvCache[b];
+      if (!c || !c.rows) continue;
+      for (const r of c.rows) {
+        const t = r.GroupTag || r.AdministrativeUnitTag;
+        if (t) tags.add(t);
+      }
+      // Also reflect pending changes if the user added a new tag in the same session.
+      const p = pendingChanges[b];
+      if (p && p.rows) {
+        for (let i = 0; i < p.rows.length; i++) {
+          if (p.deletes.has(i)) continue;
+          const t = p.rows[i].GroupTag || p.rows[i].AdministrativeUnitTag;
+          if (t) tags.add(t);
+        }
+      }
+    }
+    return Array.from(tags).sort();
   }
 
   // ===================================================================
@@ -393,7 +854,19 @@
       'dagre':      { name: 'dagre', rankDir: 'LR', nodeSep: 18, edgeSep: 4, rankSep: 110 },
       'concentric': { name: 'concentric', concentric: n => ({admin:4,'role-group':3,'permission-group':2,'au':1}[n.data('kind')]||0), levelWidth: () => 1, animate: false }
     }[name];
-    cy.layout(opts).run();
+    try {
+      // cytoscape-dagre@2.x UMD needs explicit registration before first use.
+      // Without this the layout silently falls back to default positioning
+      // and the graph renders as a single vertical line (issue: v2.1.1).
+      if (name === 'dagre' && window.cytoscapeDagre && typeof cytoscape.use === 'function' && !cytoscape.__dagreRegistered) {
+        cytoscape.use(window.cytoscapeDagre);
+        cytoscape.__dagreRegistered = true;
+      }
+      cy.layout(opts).run();
+    } catch (e) {
+      console.warn('Layout "' + name + '" failed (' + e.message + '). Falling back to breadthfirst.');
+      cy.layout({ name: 'breadthfirst', directed: true, padding: 20, spacingFactor: 1.3 }).run();
+    }
   }
 
   document.getElementById('layout-dagre').onclick = () => runLayout('dagre');
@@ -711,6 +1184,23 @@
     const p = pendingChanges[base];
     const cache = csvCache[base] || { source: '?', path: '' };
     const header = p.header;
+
+    // Compute which columns are dropdown-backed + which tenant-list keys feed them.
+    const colSpecs = {};
+    const usedListKeys = new Set();
+    for (const col of header) {
+      const spec = getDropdownSpec(base, col);
+      if (spec) {
+        colSpecs[col] = spec;
+        if (spec.listKey) usedListKeys.add(spec.listKey);
+      }
+    }
+    const tenantBadgeBar = usedListKeys.size === 0 ? '' :
+      '<div style="margin:4px 0 8px 0; font-size:11px; color:#7d8590;">tenant lists used by this grid: ' +
+      Array.from(usedListKeys).map(k =>
+        `<span style="margin-right:8px;">${escapeHtml(k)} <span class="cache-badge-slot" data-list-key="${escapeHtml(k)}"></span></span>`
+      ).join('') + '</div>';
+
     const html = [];
     html.push(`<div class="grid-header">
       <div>
@@ -719,12 +1209,22 @@
       </div>
       <div class="toolbar">
         <button id="btnAddRow">+ Add row</button>
-        <button id="btnReloadGrid">↻ Reload from disk</button>
+        <button id="btnReloadGrid">&#x21bb; Reload from disk</button>
       </div>
     </div>`);
+    html.push(tenantBadgeBar);
     html.push('<table class="grid"><thead><tr>');
     for (const col of header) html.push(`<th>${escapeHtml(col)}</th>`);
     html.push('<th></th></tr></thead><tbody>');
+    // Pull all PIM-FK-001 (orphan) violations for THIS csv from the live
+    // validator report so we can paint the matching rows red.
+    const fkOrphanRows = new Set();
+    try {
+      const vs = (VAL_STATE && VAL_STATE.report && VAL_STATE.report.violations) || [];
+      for (const v of vs) {
+        if (v.Code === 'PIM-FK-001' && v.Csv === base && v.Row != null) fkOrphanRows.add(Number(v.Row));
+      }
+    } catch (_) {}
     p.rows.forEach((row, idx) => {
       const deleted = p.deletes.has(idx);
       const baseline = p.baseline[idx];
@@ -733,19 +1233,47 @@
         for (const c of header) { if ((row[c]||'') !== (baseline[c]||'')) { modified = true; break; } }
       }
       const added = !deleted && !baseline;
-      const cls = deleted ? 'row-deleted' : (added ? 'row-added' : (modified ? 'row-modified' : ''));
+      let cls = deleted ? 'row-deleted' : (added ? 'row-added' : (modified ? 'row-modified' : ''));
+      if (!deleted && fkOrphanRows.has(idx)) cls = (cls ? cls + ' ' : '') + 'row-orphan-error';
       html.push(`<tr data-idx="${idx}" class="${cls}">`);
       for (const col of header) {
         const v = row[col] || '';
-        html.push(`<td contenteditable="${deleted ? 'false' : 'true'}" data-col="${escapeHtml(col)}">${escapeHtml(v)}</td>`);
+        const spec = colSpecs[col];
+        let invalid = false;
+        if (spec && spec.validate && !spec.validate(v)) invalid = true;
+        const tdCls = invalid ? 'cell-bad cell-bad-tip' : '';
+        const tdTitle = invalid ? `title="${escapeHtml(spec.invalidHint || 'Invalid value')}"` : '';
+        if (spec && !deleted) {
+          // Render a native <select> with the cached options + "Custom value..." escape hatch.
+          const optHtml = ['<option value="" disabled' + (v === '' ? ' selected' : '') + '>(empty)</option>'];
+          let matched = false;
+          for (const o of spec.options) {
+            const sel = (o.value === v);
+            if (sel) matched = true;
+            optHtml.push(`<option value="${escapeHtml(o.value)}"${sel ? ' selected' : ''}>${escapeHtml(o.label || o.value)}</option>`);
+          }
+          if (v && !matched) {
+            optHtml.push(`<option value="${escapeHtml(v)}" selected>${escapeHtml(v)} (current)</option>`);
+          }
+          optHtml.push('<option value="__PIM_CUSTOM__">Custom value...</option>');
+          html.push(`<td class="${tdCls}" data-col="${escapeHtml(col)}" ${tdTitle}><select class="cell-select" data-col="${escapeHtml(col)}">${optHtml.join('')}</select></td>`);
+        } else {
+          html.push(`<td class="${tdCls}" contenteditable="${deleted ? 'false' : 'true'}" data-col="${escapeHtml(col)}" ${tdTitle}>${escapeHtml(v)}</td>`);
+        }
       }
-      html.push(`<td class="row-actions">${deleted ? '<button data-act="undelete" title="restore">↺</button>' : '<button data-act="delete" title="mark deleted">✕</button>'}</td>`);
+      const actHtml = deleted
+        ? '<button data-act="undelete" title="restore">&#x21ba;</button>'
+        : '<button data-act="clone" class="row-clone" title="clone this row">+1</button> <button data-act="delete" title="mark deleted">&#x2715;</button>';
+      html.push(`<td class="row-actions">${actHtml}</td>`);
       html.push('</tr>');
     });
     html.push('</tbody></table>');
     main.innerHTML = html.join('');
 
-    // Wire cell edits.
+    // Cache-age badges.
+    renderCacheBadges(main);
+
+    // Wire cell edits (contenteditable cells).
     main.querySelectorAll('td[contenteditable=true]').forEach(td => {
       td.addEventListener('blur', () => {
         const idx = parseInt(td.parentElement.dataset.idx, 10);
@@ -758,22 +1286,48 @@
         }
       });
     });
-    // Wire row-action buttons.
+
+    // Wire <select> changes (dropdown cells).
+    main.querySelectorAll('select.cell-select').forEach(sel => {
+      sel.addEventListener('change', () => {
+        const idx = parseInt(sel.parentElement.parentElement.dataset.idx, 10);
+        const col = sel.dataset.col;
+        let v = sel.value;
+        if (v === '__PIM_CUSTOM__') {
+          v = window.prompt('Enter custom value for ' + col + ':', p.rows[idx][col] || '') || '';
+        }
+        if ((p.rows[idx][col] || '') !== v) {
+          p.rows[idx][col] = v;
+          markBadges();
+          renderGrid(base);
+        }
+      });
+    });
+
+    // Wire row-action buttons (clone / delete / undelete).
     main.querySelectorAll('td.row-actions button').forEach(b => {
       b.onclick = () => {
         const idx = parseInt(b.parentElement.parentElement.dataset.idx, 10);
         if (b.dataset.act === 'delete') p.deletes.add(idx);
         else if (b.dataset.act === 'undelete') p.deletes.delete(idx);
+        else if (b.dataset.act === 'clone') {
+          // Insert a copy of the row right above the cloned row so it's easy to spot.
+          const copy = { ...p.rows[idx] };
+          p.rows.splice(idx, 0, copy);
+          const newDel = new Set();
+          for (const di of p.deletes) newDel.add(di >= idx ? di + 1 : di);
+          p.deletes = newDel;
+        }
         markBadges();
         renderGrid(base);
       };
     });
+
     // Add-row + reload buttons.
     document.getElementById('btnAddRow').onclick = () => {
       const empty = {};
       for (const c of header) empty[c] = '';
       p.rows.unshift(empty);
-      // Shift deletes set indices.
       const newDel = new Set();
       for (const i of p.deletes) newDel.add(i + 1);
       p.deletes = newDel;
@@ -793,6 +1347,7 @@
   // Save tab
   // ===================================================================
   async function renderSaveTab() {
+    renderSaveValBanner();
     const wrap = document.getElementById('saveCards');
     wrap.innerHTML = '';
     const bases = Object.keys(pendingChanges).filter(b => isDirty(b));
@@ -849,12 +1404,62 @@
     return pairs.map(([k, v]) => `<span class="diff-col"><b>${escapeHtml(k)}</b>=${escapeHtml(v)}</span>`).join('');
   }
 
+  // Validate naming-convention regex across every pending row of every dirty CSV.
+  // Returns array of error strings ([] means OK).
+  function validatePendingChanges() {
+    const errs = [];
+    const tagCols = ['GroupTag','TargetGroupTag','SourceGroupTag'];
+    for (const base of Object.keys(pendingChanges)) {
+      const p = pendingChanges[base];
+      if (!p) continue;
+      for (let i = 0; i < p.rows.length; i++) {
+        if (p.deletes.has(i)) continue;
+        const row = p.rows[i];
+        for (const c of tagCols) {
+          const v = row[c];
+          if (v && !PIM_GROUP_TAG_REGEX.test(v)) {
+            errs.push(`${base} row ${i+1}: invalid ${c} "${v}" - ${PIM_GROUP_TAG_HINT}`);
+          }
+        }
+      }
+    }
+    return errs;
+  }
+
   document.getElementById('btnCommit').onclick = async () => {
     if (!isServer) return;
     const status = document.getElementById('saveStatus');
     status.className = '';
     const bases = Object.keys(pendingChanges).filter(b => isDirty(b));
     if (bases.length === 0) { status.textContent = 'Nothing to commit.'; return; }
+    // Pre-flight gate (server-side validator). When Block-Save is ON
+    // (default) and any error-severity violation exists, refuse to commit
+    // and bounce the user to the Validate tab to read the details.
+    if (VAL_STATE.blockOnErrors && VAL_STATE.report && VAL_STATE.report.summary && VAL_STATE.report.summary.errors > 0) {
+      status.innerHTML = 'Refusing to commit: ' + VAL_STATE.report.summary.errors + ' validation error(s). See Validate tab.';
+      status.className = 'err';
+      switchTab('validate');
+      return;
+    }
+    const valErrs = validatePendingChanges();
+    if (valErrs.length > 0) {
+      // v2.1.2: naming-convention mismatches are WARNINGS, not blocks.
+      // Real customer data routinely has role-group tags (ROLE-*), dept tags
+      // (DEPT-*, ORG-*) and AD-synced tags (AD-*) that don't carry the strict
+      // permission-group L<n>-T<n>-Code-Domain suffix. The user gets one
+      // chance to back out via the confirm dialog; clicking OK proceeds.
+      console.warn('PIM Manager naming-convention warnings:\n  ' + valErrs.join('\n  '));
+      const proceed = await showConfirm('Naming-convention warnings',
+        '<p><b>' + valErrs.length + '</b> row(s) don\'t match the configured PIM group-tag pattern. This is usually fine -- the strict pattern only applies to permission groups, not role / department / AD-synced groups.</p>' +
+        '<details><summary style="cursor:pointer;color:#7d8590">Show details (first 20)</summary><ul>' +
+        valErrs.slice(0, 20).map(e => '<li>' + escapeHtml(e) + '</li>').join('') +
+        (valErrs.length > 20 ? '<li>... and ' + (valErrs.length - 20) + ' more (see browser console)</li>' : '') +
+        '</ul></details>' +
+        '<p style="color:#7d8590">Tighten the pattern by setting <code>$global:PIM_NamingConventions.PimGroupTagRegex</code> in your <code>config/PIM4EntraPS.NamingConventions.custom.ps1</code>.</p>' +
+        '<p>Commit anyway?</p>',
+        true);
+      if (!proceed) { status.textContent = 'Commit cancelled.'; return; }
+    }
     document.getElementById('btnCommit').disabled = true;
     document.getElementById('btnCancel').disabled = true;
     for (const base of bases) {
@@ -886,6 +1491,8 @@
     renderSaveTab();
     document.getElementById('btnCommit').disabled = false;
     document.getElementById('btnCancel').disabled = false;
+    // Re-run the pre-flight validator now that the on-disk CSVs have moved.
+    runPreflight({ silent: true }).catch(() => {});
   };
 
   document.getElementById('btnCancel').onclick = () => {
@@ -913,7 +1520,624 @@
   };
 
   // ===================================================================
-  // Modal
+  // Pre-flight validator (Validate tab + Save-tab gate + Graph overlay)
+  // ===================================================================
+  // VAL_STATE.report is the live report from /api/preflight; VAL_STATE.filters
+  // drives the UI; blockOnErrors mirrors the "Block Save" toggle.
+  const VAL_STATE = {
+    report: null,                                        // { violations, ranAt, cacheFreshness, summary }
+    inFlight: false,
+    blockOnErrors: true,
+    filters: { error: true, warning: true, info: true, csv: '', search: '' }
+  };
+
+  async function runPreflight(opts) {
+    if (!isServer) return null;
+    if (VAL_STATE.inFlight) return VAL_STATE.report;
+    VAL_STATE.inFlight = true;
+    try {
+      const r = await api('GET', '/api/preflight');
+      VAL_STATE.report = r;
+    } catch (e) {
+      console.warn('preflight failed:', e.message);
+      if (!opts || !opts.silent) alert('Pre-flight validation failed: ' + e.message);
+      VAL_STATE.report = null;
+    } finally {
+      VAL_STATE.inFlight = false;
+      reflectValidationGlobals();
+      if (document.getElementById('validateTab').classList.contains('active')) renderValidateTab();
+      if (document.getElementById('saveTab').classList.contains('active')) renderSaveValBanner();
+      renderGraphViolationBadges();
+    }
+    return VAL_STATE.report;
+  }
+
+  // Top-of-page badge on the Validate tab + Save-tab banner glue.
+  function reflectValidationGlobals() {
+    const errBadge = document.getElementById('validateErrBadge');
+    const errs = (VAL_STATE.report && VAL_STATE.report.summary) ? VAL_STATE.report.summary.errors : 0;
+    if (errs > 0) {
+      errBadge.style.display = 'inline-block';
+      errBadge.textContent = errs;
+    } else {
+      errBadge.style.display = 'none';
+    }
+  }
+
+  function openValidateTab() {
+    // Auto-run once per tab-open so the operator never sees stale data.
+    if (!VAL_STATE.report && !VAL_STATE.inFlight) {
+      runPreflight();
+    } else {
+      renderValidateTab();
+    }
+  }
+
+  function renderValidateTab() {
+    const r = VAL_STATE.report;
+    const results = document.getElementById('valResults');
+    const ranAt = document.getElementById('valRanAt');
+    const cacheStatus = document.getElementById('valCacheStatus');
+    if (!r) {
+      results.innerHTML = '<div class="v-empty">' + (VAL_STATE.inFlight ? 'Validating...' : 'No report yet. Click <b>Re-run</b>.') + '</div>';
+      document.getElementById('valChipErrN').textContent  = '0';
+      document.getElementById('valChipWarnN').textContent = '0';
+      document.getElementById('valChipInfoN').textContent = '0';
+      document.getElementById('valCountErr').textContent  = '0';
+      document.getElementById('valCountWarn').textContent = '0';
+      document.getElementById('valCountInfo').textContent = '0';
+      ranAt.textContent = '';
+      cacheStatus.textContent = '';
+      return;
+    }
+    const s = r.summary || { errors:0, warnings:0, infos:0 };
+    document.getElementById('valChipErrN').textContent  = s.errors;
+    document.getElementById('valChipWarnN').textContent = s.warnings;
+    document.getElementById('valChipInfoN').textContent = s.infos;
+    document.getElementById('valCountErr').textContent  = s.errors;
+    document.getElementById('valCountWarn').textContent = s.warnings;
+    document.getElementById('valCountInfo').textContent = s.infos;
+    ranAt.textContent = 'ran ' + r.ranAt;
+    const cf = r.cacheFreshness || {};
+    cacheStatus.innerHTML = ['entraRoles','aus','azureScopes'].map(k =>
+      'cache.' + k + ': <b style="color:' + (cf[k] === 'live' ? '#7ee787' : (cf[k] === 'stale' ? '#ffdf5d' : '#ffa198')) + '">' + escapeHtml(cf[k] || 'unknown') + '</b>'
+    ).join(' &middot; ');
+
+    // Re-fill CSV dropdown the first time we see this report.
+    const sel = document.getElementById('valCsvFilter');
+    if (sel.options.length <= 1) {
+      const csvSet = new Set();
+      for (const v of r.violations) if (v.Csv) csvSet.add(v.Csv);
+      const cur = sel.value;
+      sel.innerHTML = '<option value="">All CSVs</option>' +
+        Array.from(csvSet).sort().map(c => '<option value="' + escapeHtml(c) + '">' + escapeHtml(c) + '</option>').join('');
+      sel.value = cur;
+    }
+
+    const filters = VAL_STATE.filters;
+    const sevOrder = ['error','warning','info'];
+    const searchLc = (filters.search || '').toLowerCase();
+    const filtered = (r.violations || []).filter(v => {
+      if (!filters[v.Severity]) return false;
+      if (filters.csv && v.Csv !== filters.csv) return false;
+      if (searchLc) {
+        const hay = ((v.Message || '') + ' ' + (v.Code || '') + ' ' + (v.Column || '') + ' ' + (v.Suggestion || '')).toLowerCase();
+        if (!hay.includes(searchLc)) return false;
+      }
+      return true;
+    });
+
+    if (filtered.length === 0) {
+      results.innerHTML = '<div class="v-empty">' +
+        (r.violations.length === 0
+          ? 'No violations -- everything passes pre-flight!'
+          : 'No violations match the current filters.') + '</div>';
+      return;
+    }
+
+    // Group by severity, then CSV.
+    const bySev = { error: {}, warning: {}, info: {} };
+    for (const v of filtered) {
+      const csv = v.Csv || '<global>';
+      if (!bySev[v.Severity][csv]) bySev[v.Severity][csv] = [];
+      bySev[v.Severity][csv].push(v);
+    }
+    const html = [];
+    for (const sev of sevOrder) {
+      const csvs = Object.keys(bySev[sev]).sort();
+      if (csvs.length === 0) continue;
+      const totalSev = csvs.reduce((s, c) => s + bySev[sev][c].length, 0);
+      html.push('<div class="v-group"><div class="v-group-h">' + escapeHtml(sev) + ' (' + totalSev + ')</div>');
+      for (const c of csvs) {
+        const items = bySev[sev][c];
+        html.push('<div style="margin:6px 0 8px 0;"><div style="font-size:11.5px; color:#9aa6b2; margin-bottom:3px;"><b>' + escapeHtml(c) + '</b> &mdash; ' + items.length + '</div>');
+        for (const v of items) {
+          const rowLabel = (v.Row != null) ? ('row ' + (Number(v.Row) + 1)) : 'whole-file';
+          const colLabel = v.Column ? (' &middot; column <b>' + escapeHtml(v.Column) + '</b>') : '';
+          const jump = (v.Row != null && v.Csv && v.Csv !== '<global>')
+            ? '<div class="v-jump" data-csv="' + escapeHtml(v.Csv) + '" data-row="' + v.Row + '">Open in Grid</div>' : '';
+          // PIM-FK-001 quick-fix actions: parse the missing tag out of the
+          // message ("...GroupTag 'X' referenced here..."), offer to delete
+          // the assignment row OR to re-add the missing definition.
+          let fkActions = '';
+          if (v.Code === 'PIM-FK-001' && v.Row != null && v.Csv) {
+            const m = String(v.Message || '').match(/'([^']+)' referenced/);
+            const missingTag = m ? m[1] : '';
+            const tagAttr = escapeHtml(missingTag);
+            fkActions =
+              '<div class="v-fk-actions">' +
+                '<button class="danger" data-act="fk-remove" data-csv="' + escapeHtml(v.Csv) + '" data-row="' + v.Row + '">Remove this assignment row</button>' +
+                '<button class="primary" data-act="fk-readd" data-tag="' + tagAttr + '">Re-add definition for &quot;' + tagAttr + '&quot;</button>' +
+              '</div>';
+          }
+          html.push(
+            '<div class="v-row v-' + sev + '">' +
+              '<div class="v-sev">' + escapeHtml(sev) + '</div>' +
+              '<div class="v-code">' + escapeHtml(v.Code || '') + '</div>' +
+              '<div class="v-body">' +
+                '<div class="v-msg">' + escapeHtml(v.Message || '') + '</div>' +
+                (v.Suggestion ? '<div class="v-sug">' + escapeHtml(v.Suggestion) + '</div>' : '') +
+                '<div class="v-meta">' + rowLabel + colLabel + '</div>' +
+                fkActions +
+              '</div>' +
+              jump +
+            '</div>'
+          );
+        }
+        html.push('</div>');
+      }
+      html.push('</div>');
+    }
+    results.innerHTML = html.join('');
+
+    // Wire "Open in Grid" jumps.
+    results.querySelectorAll('.v-jump').forEach(el => {
+      el.onclick = () => jumpToGridRow(el.dataset.csv, parseInt(el.dataset.row, 10));
+    });
+    // Wire PIM-FK-001 quick-fix buttons.
+    results.querySelectorAll('[data-act="fk-remove"]').forEach(el => {
+      el.onclick = () => actionRemoveOrphanRow(el.dataset.csv, parseInt(el.dataset.row, 10));
+    });
+    results.querySelectorAll('[data-act="fk-readd"]').forEach(el => {
+      el.onclick = () => actionReAddDefinition(el.dataset.tag);
+    });
+  }
+
+  // ===================================================================
+  // FK-001 quick-fix actions
+  // ===================================================================
+
+  // Remove the orphan assignment row -- adds it to pendingChanges deletes
+  // (NOT written to disk until the operator hits Save tab -> Commit all).
+  async function actionRemoveOrphanRow(base, rowIdx) {
+    if (!base || isNaN(rowIdx)) return;
+    if (!isServer) { alert('Static mode -- cannot edit. Restart with -Server.'); return; }
+    try {
+      const data = await loadCsv(base);
+      ensurePending(base, data.header, data.rows);
+      const p = pendingChanges[base];
+      if (rowIdx < 0 || rowIdx >= p.rows.length) {
+        alert('Row index out of range. The CSV may have changed; click Re-run on Validate first.');
+        return;
+      }
+      p.deletes.add(rowIdx);
+      // Re-render any visible UI.
+      if (typeof refreshDirtyBadges === 'function') refreshDirtyBadges();
+      if (document.getElementById('gridTab').classList.contains('active') && currentGridBase === base) renderGrid(base);
+      // Tell the user where to go next.
+      const statusEl = document.getElementById('vResults');
+      if (statusEl) {
+        const toast = document.createElement('div');
+        toast.style.cssText = 'background:#3b1f1f; color:#ffa198; padding:6px 12px; margin:6px 0; border-radius:5px; font-size:12px;';
+        toast.innerHTML = '&#10003; Marked row ' + (rowIdx + 1) + ' of ' + escapeHtml(base) + ' for deletion. Open the <b>Save</b> tab to commit.';
+        statusEl.insertBefore(toast, statusEl.firstChild);
+        setTimeout(() => { try { toast.remove(); } catch (_) {} }, 6000);
+      }
+    } catch (e) {
+      alert('Remove failed: ' + e.message);
+    }
+  }
+
+  // Bulk "Fix all auto-fixable errors" dialog. Counts what's auto-fixable
+  // (orphan FK-001s, stale Entra roles, Active-on-role-assignable RA-002s)
+  // and lets the operator pick a default action per bucket. All changes go
+  // into pendingChanges; nothing is written until they hit Commit on Save.
+  async function openFixAllDialog() {
+    if (!isServer) { alert('Static mode -- cannot edit. Restart with -Server.'); return; }
+    const r = VAL_STATE && VAL_STATE.report;
+    if (!r || !Array.isArray(r.violations)) { alert('No validation report yet. Click Re-run first.'); return; }
+    // Bucket the auto-fixable errors.
+    const fkOrphans = r.violations.filter(v => v.Code === 'PIM-FK-001' && v.Row != null && v.Csv);
+    const staleRoles = r.violations.filter(v => v.Code === 'PIM-STALE-001' && v.Row != null && v.Csv);
+    const raActive  = r.violations.filter(v => v.Code === 'PIM-RA-002' && v.Row != null && v.Csv);
+    const total = fkOrphans.length + staleRoles.length + raActive.length;
+    if (total === 0) { alert('Nothing auto-fixable. (No PIM-FK-001 / PIM-STALE-001 / PIM-RA-002 errors right now.)'); return; }
+
+    const bg = document.getElementById('modalBg');
+    if (!bg) { alert('Modal container missing.'); return; }
+    bg.innerHTML =
+      '<div id="fkAddDlg" style="background:#161b22; border:1px solid #30363d; border-radius:8px; padding:18px 22px; min-width:560px; max-width:680px;">' +
+        '<h2 style="margin:0 0 6px 0; font-size:14px;">Fix all auto-fixable errors</h2>' +
+        '<div style="color:#7d8590; font-size:11.5px; margin-bottom:14px;">All changes go into <b>pending</b>. Nothing writes to disk until you commit on the Save tab. Re-run validation after applying to see what cleared.</div>' +
+
+        '<div class="field"><label>' + fkOrphans.length + ' &times; <b>PIM-FK-001</b> orphan assignment(s) <span style="color:#7d8590">&mdash; GroupTag referenced but not defined</span></label>' +
+          '<select id="fxFkAction"' + (fkOrphans.length === 0 ? ' disabled' : '') + '>' +
+            '<option value="skip">Skip (leave as is)</option>' +
+            '<option value="add" selected>Add empty definition for each missing tag (non-destructive)</option>' +
+            '<option value="delete">Delete the assignment row(s) (destructive)</option>' +
+          '</select></div>' +
+
+        '<div class="field"><label>' + staleRoles.length + ' &times; <b>PIM-STALE-001</b> stale Entra role(s) <span style="color:#7d8590">&mdash; role name not in tenant cache (renamed / removed by Microsoft)</span></label>' +
+          '<select id="fxStaleAction"' + (staleRoles.length === 0 ? ' disabled' : '') + '>' +
+            '<option value="skip">Skip (leave as is)</option>' +
+            '<option value="delete" selected>Delete the assignment row(s) (Microsoft removed / renamed the role)</option>' +
+          '</select></div>' +
+
+        '<div class="field"><label>' + raActive.length + ' &times; <b>PIM-RA-002</b> Active-on-role-assignable <span style="color:#7d8590">&mdash; Entra rejects Active assignments to role-assignable groups</span></label>' +
+          '<select id="fxRaAction"' + (raActive.length === 0 ? ' disabled' : '') + '>' +
+            '<option value="skip">Skip (leave as is)</option>' +
+            '<option value="eligible" selected>Change AssignmentType to Eligible (Entra-compliant)</option>' +
+          '</select></div>' +
+
+        '<div style="display:flex; gap:10px; margin-top:16px; justify-content:flex-end;">' +
+          '<button id="fxCancel">Cancel</button>' +
+          '<button id="fxApply" class="primary" style="background:#1f6feb; border-color:#1f6feb; color:#fff;">Apply to pending changes</button>' +
+        '</div>' +
+      '</div>';
+    bg.classList.add('active');
+    const close = () => { bg.classList.remove('active'); bg.innerHTML = ''; };
+    document.getElementById('fxCancel').onclick = close;
+    document.getElementById('fxApply').onclick = async () => {
+      const fkAction    = document.getElementById('fxFkAction').value;
+      const staleAction = document.getElementById('fxStaleAction').value;
+      const raAction    = document.getElementById('fxRaAction').value;
+      close();
+      try {
+        const result = await applyBulkFix({ fkOrphans, staleRoles, raActive, fkAction, staleAction, raAction });
+        const statusEl = document.getElementById('vResults');
+        if (statusEl) {
+          const toast = document.createElement('div');
+          toast.style.cssText = 'background:#1f6f3f22; color:#7ee787; padding:8px 12px; margin:6px 0; border-radius:5px; font-size:12px;';
+          toast.innerHTML = '&#10003; Applied: ' +
+            result.fkAdded + ' definition(s) added, ' +
+            result.fkDeleted + ' orphan assignment(s) marked for delete, ' +
+            result.staleDeleted + ' stale-role row(s) marked for delete, ' +
+            result.raChanged + ' Active&rarr;Eligible. ' +
+            'Re-run Validate + open Save tab to commit.';
+          statusEl.insertBefore(toast, statusEl.firstChild);
+          setTimeout(() => { try { toast.remove(); } catch (_) {} }, 12000);
+        }
+        if (typeof refreshDirtyBadges === 'function') refreshDirtyBadges();
+        // Auto-re-run preflight so the cleared errors disappear.
+        await runPreflight();
+      } catch (e) {
+        alert('Bulk-fix failed: ' + e.message);
+      }
+    };
+  }
+
+  async function applyBulkFix(opts) {
+    const stats = { fkAdded: 0, fkDeleted: 0, staleDeleted: 0, raChanged: 0 };
+
+    // --- FK-001: either add definitions for unique missing tags, or delete the assignment rows
+    if (opts.fkAction === 'add') {
+      // Group by missing tag so we add a definition ONCE per tag (multiple rows can reference the same missing tag).
+      const seenTags = new Set();
+      for (const v of opts.fkOrphans) {
+        const m = String(v.Message || '').match(/'([^']+)' referenced/);
+        if (!m) continue;
+        const tag = m[1];
+        if (seenTags.has(tag.toLowerCase())) continue;
+        seenTags.add(tag.toLowerCase());
+        // Pick the right definition CSV from the tag prefix.
+        const tlow = tag.toLowerCase();
+        let base = 'PIM-Definitions-Tasks';
+        if (tlow.startsWith('role-')) base = 'PIM-Definitions-Roles';
+        else if (tlow.startsWith('org-')) base = 'PIM-Definitions-Organization';
+        else if (tlow.startsWith('dept-')) base = 'PIM-Definitions-Departments';
+        else if (tlow.includes('-svc-') || tlow.includes('-service-')) base = 'PIM-Definitions-Services';
+        else if (tlow.includes('-resource-') || tlow.includes('-res-')) base = 'PIM-Definitions-Resources';
+        const data = await loadCsv(base);
+        ensurePending(base, data.header, data.rows);
+        const p = pendingChanges[base];
+        const newRow = {};
+        for (const col of p.header) {
+          if (col === 'GroupTag') newRow[col] = tag;
+          else if (col === 'GroupName') newRow[col] = 'PIM-' + tag;
+          else if (col === 'GroupDescription') newRow[col] = '(auto-added via Fix-all; review + fill in)';
+          else if (col === 'IsRoleAssignable') newRow[col] = 'FALSE';
+          else newRow[col] = '';
+        }
+        p.rows.push(newRow);
+        stats.fkAdded++;
+      }
+    } else if (opts.fkAction === 'delete') {
+      for (const v of opts.fkOrphans) {
+        const data = await loadCsv(v.Csv);
+        ensurePending(v.Csv, data.header, data.rows);
+        const p = pendingChanges[v.Csv];
+        if (Number(v.Row) >= 0 && Number(v.Row) < p.rows.length) {
+          p.deletes.add(Number(v.Row));
+          stats.fkDeleted++;
+        }
+      }
+    }
+
+    // --- STALE-001: delete the assignment rows
+    if (opts.staleAction === 'delete') {
+      for (const v of opts.staleRoles) {
+        const data = await loadCsv(v.Csv);
+        ensurePending(v.Csv, data.header, data.rows);
+        const p = pendingChanges[v.Csv];
+        if (Number(v.Row) >= 0 && Number(v.Row) < p.rows.length) {
+          p.deletes.add(Number(v.Row));
+          stats.staleDeleted++;
+        }
+      }
+    }
+
+    // --- RA-002: change AssignmentType=Active -> Eligible on the offending row
+    if (opts.raAction === 'eligible') {
+      for (const v of opts.raActive) {
+        const data = await loadCsv(v.Csv);
+        ensurePending(v.Csv, data.header, data.rows);
+        const p = pendingChanges[v.Csv];
+        const idx = Number(v.Row);
+        if (idx >= 0 && idx < p.rows.length && p.rows[idx]) {
+          p.rows[idx].AssignmentType = 'Eligible';
+          stats.raChanged++;
+        }
+      }
+    }
+
+    return stats;
+  }
+
+  // Open a small modal to add the missing definition row. The operator picks
+  // which Definitions CSV to add to (Tasks / Services / Processes / Resources
+  // / Departments / Organization), fills GroupName + GroupDescription, and
+  // the GroupTag is pre-filled with the missing value from the violation.
+  async function actionReAddDefinition(missingTag) {
+    if (!isServer) { alert('Static mode -- cannot edit. Restart with -Server.'); return; }
+    if (!missingTag) { alert('No GroupTag detected on this violation.'); return; }
+    const defOptions = [
+      { base: 'PIM-Definitions-Tasks',         label: 'Tasks (atomic permission, single capability)' },
+      { base: 'PIM-Definitions-Services',      label: 'Services (a Microsoft service / 3rd-party app)' },
+      { base: 'PIM-Definitions-Processes',     label: 'Processes (a business process / workflow)' },
+      { base: 'PIM-Definitions-Resources',     label: 'Resources (a tenant resource / artefact)' },
+      { base: 'PIM-Definitions-Departments',   label: 'Departments (an org unit)' },
+      { base: 'PIM-Definitions-Organization',  label: 'Organization (org-wide grouping)' },
+      { base: 'PIM-Definitions-Roles',         label: 'Roles (role group -- nests permission groups)' }
+    ];
+    // Pre-suggest a target CSV based on the tag prefix.
+    let suggestedBase = 'PIM-Definitions-Tasks';
+    const t = missingTag.toLowerCase();
+    if (t.startsWith('role-'))   suggestedBase = 'PIM-Definitions-Roles';
+    else if (t.startsWith('org-')) suggestedBase = 'PIM-Definitions-Organization';
+    else if (t.startsWith('dept-')) suggestedBase = 'PIM-Definitions-Departments';
+    else if (t.includes('-svc-') || t.includes('-service-')) suggestedBase = 'PIM-Definitions-Services';
+    else if (t.includes('-resource-') || t.includes('-res-')) suggestedBase = 'PIM-Definitions-Resources';
+
+    // Build modal markup. Reuse the existing #modalBg / #modal infrastructure
+    // by creating a one-shot dialog div inside.
+    const bg = document.getElementById('modalBg');
+    if (!bg) { alert('Modal container missing.'); return; }
+    bg.innerHTML =
+      '<div id="fkAddDlg" style="background:#161b22; border:1px solid #30363d; border-radius:8px; padding:18px 22px; min-width:460px; max-width:560px;">' +
+        '<h2 style="margin:0 0 6px 0; font-size:14px;">Re-add definition for <code style="color:#7ee787">' + escapeHtml(missingTag) + '</code></h2>' +
+        '<div style="color:#7d8590; font-size:11.5px; margin-bottom:14px;">Creates one row in the chosen <code>PIM-Definitions-*</code> CSV. The change is staged into pending; nothing writes to disk until you commit on the Save tab.</div>' +
+        '<div class="field"><label>Which kind of definition?</label>' +
+          '<select id="fkBase">' +
+            defOptions.map(o => '<option value="' + o.base + '"' + (o.base === suggestedBase ? ' selected' : '') + '>' + o.label + '</option>').join('') +
+          '</select></div>' +
+        '<div class="field"><label>GroupTag (matches assignment rows)</label><input id="fkTag" value="' + escapeHtml(missingTag) + '"></div>' +
+        '<div class="field"><label>GroupName (Entra display name) <span style="color:#f85149">*</span></label><input id="fkName" placeholder="e.g. PIM-' + escapeHtml(missingTag) + '"></div>' +
+        '<div class="field"><label>GroupDescription</label><input id="fkDesc" placeholder="One-line purpose"></div>' +
+        '<div class="field"><label>Role-assignable group? (required when this definition is a target of Entra ID role assignments)</label>' +
+          '<select id="fkIra"><option value="FALSE">No (default)</option><option value="TRUE">Yes</option></select></div>' +
+        '<div style="display:flex; gap:10px; margin-top:16px; justify-content:flex-end;">' +
+          '<button id="fkCancel" style="background:#21262d;">Cancel</button>' +
+          '<button id="fkOk" class="primary" style="background:#1f6feb; border-color:#1f6feb; color:#fff;">Add to pending changes</button>' +
+        '</div>' +
+      '</div>';
+    bg.classList.add('active');
+    const close = () => { bg.classList.remove('active'); bg.innerHTML = ''; };
+    document.getElementById('fkCancel').onclick = close;
+    document.getElementById('fkOk').onclick = async () => {
+      const base = document.getElementById('fkBase').value;
+      const tag  = (document.getElementById('fkTag').value || '').trim();
+      const name = (document.getElementById('fkName').value || '').trim();
+      const desc = (document.getElementById('fkDesc').value || '').trim();
+      const ira  = document.getElementById('fkIra').value;
+      if (!tag)  { alert('GroupTag is required.'); return; }
+      if (!name) { alert('GroupName is required.'); return; }
+      try {
+        const data = await loadCsv(base);
+        ensurePending(base, data.header, data.rows);
+        const p = pendingChanges[base];
+        // Build a new row honouring the loaded header order. Unknown columns
+        // get empty strings; common ones get sensible defaults.
+        const newRow = {};
+        for (const col of p.header) {
+          if (col === 'GroupTag') newRow[col] = tag;
+          else if (col === 'GroupName') newRow[col] = name;
+          else if (col === 'GroupDescription') newRow[col] = desc;
+          else if (col === 'IsRoleAssignable') newRow[col] = ira;
+          else newRow[col] = '';
+        }
+        p.rows.push(newRow);
+        if (typeof refreshDirtyBadges === 'function') refreshDirtyBadges();
+        if (document.getElementById('gridTab').classList.contains('active') && currentGridBase === base) renderGrid(base);
+        close();
+        // Toast.
+        const statusEl = document.getElementById('vResults');
+        if (statusEl) {
+          const toast = document.createElement('div');
+          toast.style.cssText = 'background:#1f6f3f22; color:#7ee787; padding:6px 12px; margin:6px 0; border-radius:5px; font-size:12px;';
+          toast.innerHTML = '&#10003; Added definition row for <b>' + escapeHtml(tag) + '</b> to ' + escapeHtml(base) + '. Re-run Validate to clear PIM-FK-001 on referencing rows.';
+          statusEl.insertBefore(toast, statusEl.firstChild);
+          setTimeout(() => { try { toast.remove(); } catch (_) {} }, 8000);
+        }
+      } catch (e) {
+        alert('Re-add failed: ' + e.message);
+      }
+    };
+  }
+
+  function renderSaveValBanner() {
+    const bar = document.getElementById('saveValBanner');
+    if (!bar) return;
+    const r = VAL_STATE.report;
+    if (!r || !r.summary) { bar.innerHTML = ''; return; }
+    const s = r.summary;
+    if (s.errors > 0 && VAL_STATE.blockOnErrors) {
+      bar.innerHTML = '<div class="save-val-banner err">' +
+        '<span>&#9888; <b>' + s.errors + '</b> validation error(s) &mdash; Save is blocked.</span>' +
+        '<span class="spacer"></span>' +
+        '<a data-act="show-val">Show validation errors</a>' +
+        '</div>';
+    } else if (s.errors > 0) {
+      bar.innerHTML = '<div class="save-val-banner err">' +
+        '<span>&#9888; <b>' + s.errors + '</b> validation error(s) (Block-Save toggle is OFF -- you can still commit).</span>' +
+        '<span class="spacer"></span><a data-act="show-val">Show validation errors</a></div>';
+    } else if (s.warnings > 0 || s.infos > 0) {
+      bar.innerHTML = '<div class="save-val-banner warn">' +
+        '<span>&#9888; <b>' + s.warnings + '</b> warning(s), <b>' + s.infos + '</b> info(s) &mdash; review before committing.</span>' +
+        '<span class="spacer"></span><a data-act="show-val">Show details</a></div>';
+    } else {
+      bar.innerHTML = '<div class="save-val-banner warn" style="background:#1f6f3f22; border-color:#2a563a; color:#7ee787;">' +
+        '<span>&#10003; All pre-flight checks pass.</span></div>';
+    }
+    const link = bar.querySelector('a[data-act=show-val]');
+    if (link) link.onclick = () => switchTab('validate');
+  }
+
+  // Jump from a violation row to the corresponding row in the Grid tab.
+  async function jumpToGridRow(base, rowIdx) {
+    switchTab('grid');
+    await openGrid(base);
+    // Defer to next tick so the table is in the DOM.
+    setTimeout(() => {
+      const main = document.getElementById('gridMain');
+      const tr = main && main.querySelector('tr[data-idx="' + rowIdx + '"]');
+      if (tr) {
+        tr.scrollIntoView({ block: 'center', behavior: 'smooth' });
+        tr.classList.add('v-jump-flash');
+        setTimeout(() => tr.classList.remove('v-jump-flash'), 3000);
+      }
+    }, 50);
+  }
+
+  // ----- Wire toolbar handlers (idempotent: re-runs only set state) -----
+  document.getElementById('btnValRefresh').onclick = () => runPreflight();
+  document.getElementById('btnFixAll').onclick = () => openFixAllDialog();
+  document.querySelectorAll('#valTopBar .sev-chip').forEach(chip => {
+    chip.onclick = () => {
+      const k = chip.dataset.sev;
+      VAL_STATE.filters[k] = !VAL_STATE.filters[k];
+      chip.classList.toggle('off', !VAL_STATE.filters[k]);
+      renderValidateTab();
+    };
+  });
+  document.getElementById('valCsvFilter').onchange = (e) => {
+    VAL_STATE.filters.csv = e.target.value || '';
+    renderValidateTab();
+  };
+  document.getElementById('valSearch').oninput = (e) => {
+    VAL_STATE.filters.search = e.target.value || '';
+    renderValidateTab();
+  };
+  document.getElementById('valBlockToggle').onchange = (e) => {
+    VAL_STATE.blockOnErrors = !!e.target.checked;
+    renderSaveValBanner();
+  };
+
+  // ----- Graph-node violation overlay -----
+  // Rendered into a DOM overlay sibling of #cy because Cytoscape doesn't
+  // natively support HTML decorations on nodes. Re-positions on pan/zoom.
+  function ensureCyOverlay() {
+    const cyEl = document.getElementById('cy');
+    if (!cyEl) return null;
+    if (cyEl.style.position !== 'relative' && cyEl.style.position !== 'absolute') cyEl.style.position = 'relative';
+    let ov = document.getElementById('cyViolationOverlay');
+    if (!ov) {
+      ov = document.createElement('div');
+      ov.id = 'cyViolationOverlay';
+      cyEl.appendChild(ov);
+    }
+    return ov;
+  }
+  function nodeIdForViolation(v) {
+    // Map a violation (CSV + Row + Column) to a graph node id when possible.
+    // Returns null when the violation isn't node-attributable.
+    if (!v || !v.Csv) return null;
+    const csv = v.Csv;
+    // Definition CSVs: GroupTag in the row indexed.
+    const defGroupCsvs = ['PIM-Definitions-Roles','PIM-Definitions-Tasks','PIM-Definitions-Services',
+      'PIM-Definitions-Processes','PIM-Definitions-Resources','PIM-Definitions-Departments','PIM-Definitions-Organization'];
+    const cache = csvCache[csv];
+    const row = (cache && cache.rows && v.Row != null) ? cache.rows[v.Row] : null;
+    if (defGroupCsvs.includes(csv) && row && row.GroupTag) return 'group:' + row.GroupTag;
+    if (csv === 'PIM-Definitions-AU' && row && row.AdministrativeUnitTag) return 'au:' + row.AdministrativeUnitTag;
+    if (csv === 'Account-Definitions-Admins' && row && row.UserPrincipalName) return row.UserPrincipalName;
+    if (csv === 'PIM-Assignments-Admins' && row) {
+      // Tag against the admin node (more useful than the row).
+      return row.Username || null;
+    }
+    if ((csv === 'PIM-Assignments-Roles-Groups' || csv === 'PIM-Assignments-Roles-AUs' ||
+         csv === 'PIM-Assignments-Azure-Resources' || csv === 'PIM-Assignments-Groups') && row) {
+      const tag = row.GroupTag || row.SourceGroupTag || row.TargetGroupTag;
+      if (tag) return 'group:' + tag;
+    }
+    return null;
+  }
+  function renderGraphViolationBadges() {
+    if (!cy) return;
+    const ov = ensureCyOverlay();
+    if (!ov) return;
+    ov.innerHTML = '';
+    if (!VAL_STATE.report || !VAL_STATE.report.violations) return;
+    // Aggregate per node: { sev counts, codes[] }.
+    const byNode = {};
+    for (const v of VAL_STATE.report.violations) {
+      const nid = nodeIdForViolation(v);
+      if (!nid) continue;
+      if (!byNode[nid]) byNode[nid] = { error: 0, warning: 0, info: 0, codes: [] };
+      byNode[nid][v.Severity] = (byNode[nid][v.Severity] || 0) + 1;
+      if (!byNode[nid].codes.includes(v.Code)) byNode[nid].codes.push(v.Code);
+    }
+    // Position badges using current node positions + pan/zoom.
+    const place = () => {
+      ov.innerHTML = '';
+      for (const id of Object.keys(byNode)) {
+        const n = cy.$id(id);
+        if (!n || n.length === 0) continue;
+        const pos = n.renderedPosition();
+        const w = n.renderedWidth();
+        const total = byNode[id].error + byNode[id].warning + byNode[id].info;
+        if (total === 0) continue;
+        const cls = byNode[id].error > 0 ? '' : (byNode[id].warning > 0 ? 'warn' : 'info');
+        const badge = document.createElement('div');
+        badge.className = 'v-node-badge ' + cls;
+        badge.textContent = total;
+        badge.title = byNode[id].codes.join(', ');
+        badge.style.left = Math.round(pos.x + (w / 2) - 6) + 'px';
+        badge.style.top  = Math.round(pos.y - (w / 2) - 6) + 'px';
+        ov.appendChild(badge);
+      }
+    };
+    place();
+    // Re-place on viewport changes. Use once-per-event listener idempotently.
+    if (!cy.__violationOverlayBound) {
+      cy.on('pan zoom render position', place);
+      cy.__violationOverlayBound = true;
+    }
+    // Remember the placer so re-renders use the latest data.
+    cy.__violationOverlayPlace = place;
+  }
+
+  // ===================================================================
+  // Confirm modal
   // ===================================================================
   function showConfirm(title, bodyHtml, dangerous) {
     return new Promise(resolve => {
@@ -930,6 +2154,2040 @@
       okBtn.onclick = () => finish(true);
       cancelBtn.onclick = () => finish(false);
     });
+  }
+
+  // ===================================================================
+  // Wizard framework
+  // ===================================================================
+  // A wizard is { title, run() -> Promise<additions[]> }.
+  //  additions[] is an array of { base, row } objects to append to pending changes.
+  // The framework hands the wizard the modal DOM nodes and a `done(additions)` callback.
+
+  const WIZ = {
+    open(title, bodyHtmlOrNode, opts) {
+      const bg = document.getElementById('wizBg');
+      document.getElementById('wizTitle').textContent = title;
+      const body = document.getElementById('wizBody');
+      body.innerHTML = '';
+      if (typeof bodyHtmlOrNode === 'string') body.innerHTML = bodyHtmlOrNode;
+      else body.appendChild(bodyHtmlOrNode);
+      // Default: single-step
+      document.getElementById('wizSteps').innerHTML = '';
+      document.getElementById('wizBack').style.display   = (opts && opts.showBack)   ? '' : 'none';
+      document.getElementById('wizNext').style.display   = (opts && opts.showNext)   ? '' : 'none';
+      document.getElementById('wizFinish').style.display = (opts && opts.showFinish !== false) ? '' : 'none';
+      bg.style.display = 'flex';
+    },
+    close() {
+      document.getElementById('wizBg').style.display = 'none';
+      document.getElementById('wizBody').innerHTML = '';
+    }
+  };
+
+  // Wire common wiz buttons. Each wizard re-binds the click handlers it needs.
+  document.getElementById('wizCancel').onclick = () => WIZ.close();
+
+  // Push a list of additions into pendingChanges. Each addition: { base, row }.
+  // Loads the CSV first (so we have an accurate header + baseline), then appends.
+  async function applyAdditions(additions) {
+    const byBase = {};
+    for (const a of additions) {
+      if (!a || !a.base || !a.row) continue;
+      (byBase[a.base] = byBase[a.base] || []).push(a.row);
+    }
+    for (const base of Object.keys(byBase)) {
+      let data;
+      try { data = await loadCsv(base); }
+      catch (e) {
+        // CSV doesn't exist yet -- bootstrap an empty pending block with the
+        // default header from PIM_DATA.csvBases (server already knows it).
+        data = { header: Object.keys(byBase[base][0]), rows: [] };
+      }
+      ensurePending(base, data.header, data.rows);
+      const p = pendingChanges[base];
+      // Add any new columns the wizard introduced.
+      for (const row of byBase[base]) {
+        for (const k of Object.keys(row)) {
+          if (!p.header.includes(k)) p.header.push(k);
+        }
+      }
+      // Prepend additions so they're visible at the top of the grid.
+      for (const row of byBase[base].slice().reverse()) {
+        p.rows.unshift(row);
+        const newDel = new Set();
+        for (const i of p.deletes) newDel.add(i + 1);
+        p.deletes = newDel;
+      }
+    }
+    markBadges();
+  }
+
+  // ===================================================================
+  // Multi-step wizard controller (built on top of the WIZ scaffold).
+  // ===================================================================
+  // wizSteps({ title, kind, state, steps:[{label, render(state, rerender), validate?(state)}], onFinish(state) })
+  //
+  // Steps[].render returns a DOM Node. Each step may call its `rerender` arg
+  // to recompose the body (used by live previews tied to inputs).
+  // validate returns true to advance, false to silently block, or a string to
+  // show as an inline error.
+  // Cancel discards any rows the wizard staged into pendingChanges; Finish
+  // does NOT discard.
+  // ===================================================================
+  let _wizCtx = null;
+  function wizSteps(opts) {
+    _wizCtx = {
+      title: opts.title,
+      kind:  opts.kind || 'wiz',
+      state: opts.state || {},
+      steps: opts.steps,
+      step:  0,
+      onFinish: opts.onFinish,
+      stagedRows: [] // [{ base, rowSnapshot }] -- for cancel-discards
+    };
+    document.getElementById('wizTitle').textContent = opts.title;
+    const stepsEl = document.getElementById('wizSteps');
+    stepsEl.innerHTML = '';
+    for (let i = 0; i < opts.steps.length; i++) {
+      const s = document.createElement('div');
+      s.className = 'wiz-step' + (i === 0 ? ' active' : '');
+      s.textContent = (i + 1) + '. ' + opts.steps[i].label;
+      stepsEl.appendChild(s);
+    }
+    document.getElementById('wizBg').style.display = 'flex';
+    _wizRenderStep();
+    document.addEventListener('keydown', _wizKey);
+  }
+  function _wizKey(e) { if (e.key === 'Escape') _wizClose(true); }
+  function _wizRenderStep() {
+    if (!_wizCtx) return;
+    // v2.1.2 fix: preserve focus + caret across re-render so live-preview
+    // updates on every keystroke don't kick the user out of the field they
+    // are typing into. (Re-rendering nukes the DOM; we save active element's
+    // id + selection range before and restore after.)
+    const ae = document.activeElement;
+    const wasInWiz = ae && document.getElementById('wizBody') && document.getElementById('wizBody').contains(ae);
+    const activeId = wasInWiz ? ae.id : null;
+    let caretStart = null, caretEnd = null;
+    if (wasInWiz && ('selectionStart' in ae)) {
+      try { caretStart = ae.selectionStart; caretEnd = ae.selectionEnd; } catch (_) {}
+    }
+
+    const { steps, step, state } = _wizCtx;
+    const body = document.getElementById('wizBody');
+    body.innerHTML = '';
+    const node = steps[step].render(state, _wizRenderStep);
+    if (node instanceof Node) body.appendChild(node); else body.innerHTML = String(node || '');
+    document.querySelectorAll('#wizSteps .wiz-step').forEach((el, i) => {
+      el.classList.toggle('active', i === step);
+      el.classList.toggle('done',   i <  step);
+    });
+    document.getElementById('wizBack').style.display   = step > 0 ? '' : 'none';
+    document.getElementById('wizNext').style.display   = step < steps.length - 1 ? '' : 'none';
+    document.getElementById('wizFinish').style.display = step === steps.length - 1 ? '' : 'none';
+
+    // Restore focus + caret on the newly-rendered element with the same id.
+    if (activeId) {
+      const newEl = document.getElementById(activeId);
+      if (newEl) {
+        try { newEl.focus({ preventScroll: true }); } catch (_) { try { newEl.focus(); } catch (_) {} }
+        if (caretStart != null && 'setSelectionRange' in newEl) {
+          try { newEl.setSelectionRange(caretStart, caretEnd); } catch (_) {}
+        }
+      }
+    }
+  }
+  function _wizErr(msg) {
+    let bar = document.getElementById('wizErrBar');
+    if (!bar) {
+      bar = document.createElement('div');
+      bar.id = 'wizErrBar';
+      bar.style.cssText = 'color:#ffa198; font-size:11.5px; margin-right:auto; padding-left:6px;';
+      document.querySelector('.wiz-actions').insertBefore(bar, document.querySelector('.wiz-actions .spacer'));
+    }
+    bar.textContent = msg;
+    setTimeout(() => { if (bar) bar.textContent = ''; }, 5000);
+  }
+  async function _wizClose(discardStaged) {
+    if (!_wizCtx) { document.getElementById('wizBg').style.display = 'none'; return; }
+    if (discardStaged && _wizCtx.stagedRows.length) {
+      const ok = window.confirm('Discard ' + _wizCtx.stagedRows.length + ' row(s) this wizard has added to pending changes?');
+      if (!ok) return;
+      const byBase = {};
+      for (const e of _wizCtx.stagedRows) { (byBase[e.base] = byBase[e.base] || []).push(e.rowSnapshot); }
+      for (const base of Object.keys(byBase)) {
+        const p = pendingChanges[base]; if (!p) continue;
+        const drop = new Set(byBase[base]);
+        const keep = [];
+        for (let i = 0; i < p.rows.length; i++) { if (!drop.has(p.rows[i])) keep.push(i); }
+        const newDel = new Set();
+        const newRows = keep.map((oldIdx, newIdx) => { if (p.deletes.has(oldIdx)) newDel.add(newIdx); return p.rows[oldIdx]; });
+        p.rows = newRows;
+        p.deletes = newDel;
+        if (!isDirty(base)) delete pendingChanges[base];
+      }
+      markBadges();
+    }
+    document.getElementById('wizBg').style.display = 'none';
+    document.removeEventListener('keydown', _wizKey);
+    const bar = document.getElementById('wizErrBar'); if (bar) bar.textContent = '';
+    _wizCtx = null;
+  }
+  // Re-wire wiz Cancel + Back + Next + Finish to drive the step controller.
+  document.getElementById('wizCancel').onclick = () => _wizClose(true);
+  document.getElementById('wizBack').onclick = () => { if (_wizCtx && _wizCtx.step > 0) { _wizCtx.step--; _wizRenderStep(); } };
+  document.getElementById('wizNext').onclick = () => {
+    if (!_wizCtx) return;
+    const s = _wizCtx.steps[_wizCtx.step];
+    if (s.validate) {
+      const r = s.validate(_wizCtx.state);
+      if (r === false) return;
+      if (typeof r === 'string' && r.length) { _wizErr(r); return; }
+    }
+    if (_wizCtx.step < _wizCtx.steps.length - 1) { _wizCtx.step++; _wizRenderStep(); }
+  };
+  document.getElementById('wizFinish').onclick = async () => {
+    if (!_wizCtx) return;
+    const s = _wizCtx.steps[_wizCtx.step];
+    if (s.validate) {
+      const r = s.validate(_wizCtx.state);
+      if (r === false) return;
+      if (typeof r === 'string' && r.length) { _wizErr(r); return; }
+    }
+    try { await _wizCtx.onFinish(_wizCtx.state, _wizCtx); }
+    catch (e) { _wizErr('Failed: ' + e.message); return; }
+    _wizCtx.stagedRows = []; // success -- don't discard on close
+    await _wizClose(false);
+    switchTab('save');
+  };
+
+  // ===================================================================
+  // UX helper: form-row, why-collapsible, live "you'll get" preview, etc.
+  // ===================================================================
+  function wuxField(opts) {
+    // opts: { id, label, sub, value, example, hint, options:[{value,label}], type='text'|'number'|'select'|'textarea', required, onInput, rows }
+    const row = document.createElement('div');
+    row.className = 'wiz-field';
+    const lbl = document.createElement('div');
+    lbl.className = 'lbl';
+    lbl.innerHTML = escapeHtml(opts.label) + (opts.required ? '<span class="req">*</span>' : '') +
+      (opts.sub ? '<span class="sub">' + escapeHtml(opts.sub) + '</span>' : '');
+    row.appendChild(lbl);
+    const ctl = document.createElement('div'); ctl.className = 'ctl';
+    const ctlRow = document.createElement('div'); ctlRow.className = 'ctl-row';
+    let input;
+    if (opts.type === 'select') {
+      input = document.createElement('select');
+      for (const o of (opts.options || [])) {
+        const opt = document.createElement('option');
+        opt.value = o.value; opt.textContent = o.label;
+        if (String(opts.value) === String(o.value)) opt.selected = true;
+        input.appendChild(opt);
+      }
+    } else if (opts.type === 'textarea') {
+      input = document.createElement('textarea');
+      input.rows = opts.rows || 3;
+      input.value = opts.value != null ? opts.value : '';
+    } else {
+      input = document.createElement('input');
+      input.type = opts.type || 'text';
+      input.value = opts.value != null ? opts.value : '';
+      if (opts.placeholder) input.placeholder = opts.placeholder;
+    }
+    if (opts.id) input.id = opts.id;
+    if (opts.onInput) {
+      const fire = () => opts.onInput(input.value, input);
+      input.addEventListener('input', fire);
+      input.addEventListener('change', fire);
+    }
+    ctlRow.appendChild(input);
+    if (opts.example) {
+      const ex = document.createElement('span'); ex.className = 'example'; ex.textContent = opts.example;
+      ctlRow.appendChild(ex);
+    }
+    ctl.appendChild(ctlRow);
+    if (opts.hint) {
+      const h = document.createElement('div'); h.className = 'hint'; h.innerHTML = opts.hint;
+      ctl.appendChild(h);
+    }
+    row.appendChild(ctl);
+    return row;
+  }
+  function wuxWhy(html) {
+    const det = document.createElement('details'); det.className = 'wiz-why';
+    const sum = document.createElement('summary'); sum.textContent = 'Why these fields?';
+    det.appendChild(sum);
+    const body = document.createElement('div'); body.className = 'why-body'; body.innerHTML = html;
+    det.appendChild(body);
+    return det;
+  }
+  function wuxPreview(rows) {
+    const box = document.createElement('div'); box.className = 'wiz-preview';
+    for (const r of rows) {
+      const row = document.createElement('div'); row.className = 'row';
+      const empty = r.val == null || r.val === '';
+      row.innerHTML = '<div class="lbl">' + escapeHtml(r.lbl) + '</div>' +
+        '<div class="val' + (empty ? ' empty' : '') + '">' + (empty ? '(fill in the fields above)' : escapeHtml(r.val)) + '</div>';
+      box.appendChild(row);
+    }
+    return box;
+  }
+  function wuxPicklist(opts) {
+    // opts: { items:[{key,label,sub?}], multi:bool, selected:Set, onChange?(selSet) }
+    const wrap = document.createElement('div'); wrap.className = 'wiz-picklist';
+    if (!opts.items || opts.items.length === 0) {
+      wrap.innerHTML = '<div class="pl-empty">(no items)</div>';
+      return wrap;
+    }
+    for (const it of opts.items) {
+      const el = document.createElement('div');
+      el.className = 'pl-item' + (opts.selected && opts.selected.has(it.key) ? ' selected' : '');
+      el.innerHTML = '<span>' + escapeHtml(it.label) + '</span>' +
+        (it.sub ? '<span class="pl-sub">' + escapeHtml(it.sub) + '</span>' : '');
+      el.onclick = () => {
+        if (opts.multi) {
+          if (opts.selected.has(it.key)) opts.selected.delete(it.key);
+          else opts.selected.add(it.key);
+        } else {
+          opts.selected.clear();
+          opts.selected.add(it.key);
+        }
+        wrap.querySelectorAll('.pl-item').forEach((n, i) => n.classList.toggle('selected', opts.selected.has(opts.items[i].key)));
+        if (opts.onChange) opts.onChange(opts.selected);
+      };
+      wrap.appendChild(el);
+    }
+    return wrap;
+  }
+  function wuxSummary(plainHtml, impactRows) {
+    // impactRows: [{ csv, adds, what }]
+    const wrap = document.createElement('div'); wrap.className = 'wiz-summary';
+    const plain = document.createElement('div'); plain.className = 'plain'; plain.innerHTML = plainHtml;
+    wrap.appendChild(plain);
+    if (impactRows && impactRows.length) {
+      const tbl = document.createElement('table'); tbl.className = 'impact-tbl';
+      tbl.innerHTML = '<thead><tr><th>CSV</th><th>Adds</th><th>What</th></tr></thead><tbody>' +
+        impactRows.map(r => '<tr><td>' + escapeHtml(r.csv) + '</td><td class="adds">+' + r.adds + '</td><td>' + escapeHtml(r.what) + '</td></tr>').join('') +
+        '</tbody>';
+      wrap.appendChild(tbl);
+    }
+    return wrap;
+  }
+  // Stage one row into pendingChanges; track for cancel-discard.
+  async function wuxStage(base, rowObj) {
+    const data = await loadCsv(base).catch(() => ({ header: Object.keys(rowObj), rows: [] }));
+    ensurePending(base, data.header, data.rows);
+    const p = pendingChanges[base];
+    for (const k of Object.keys(rowObj)) { if (!p.header.includes(k)) p.header.push(k); }
+    const full = {};
+    for (const c of p.header) full[c] = rowObj[c] != null ? String(rowObj[c]) : '';
+    for (const k of Object.keys(rowObj)) { if (!(k in full)) full[k] = String(rowObj[k]); }
+    p.rows.push(full);
+    if (_wizCtx) _wizCtx.stagedRows.push({ base, rowSnapshot: full });
+    return full;
+  }
+
+  // ===================================================================
+  // Naming-convention composers (mirror locked.csv shapes + PIM_NAMING tokens).
+  // ===================================================================
+  function sanitizePart(s) {
+    if (!s) return '';
+    return String(s).trim().replace(/\s+/g, '-').replace(/[^A-Za-z0-9\.\-]/g, '');
+  }
+  function buildAdminUserName(initials, level, tier, platform, longForm) {
+    if (!initials) return '';
+    initials = String(initials).toUpperCase().replace(/[^A-Z0-9]/g, '');
+    if (!initials) return '';
+    return longForm
+      ? 'Admin-' + initials + '-L' + level + '-T' + tier + '-' + platform
+      : 'Admin-' + initials + '-' + platform;
+  }
+  function buildAdminDisplay(first, last, usage, platform, level, tier, longForm) {
+    const name = ([first, last].filter(Boolean).join(' ') || 'Admin').trim();
+    const parts = ['Admin', usage, platform];
+    if (longForm) parts.push('L' + level, 'T' + tier);
+    return name + ' (' + parts.join(', ') + ')';
+  }
+  function buildPermGroupTag(workload, capability, level) {
+    workload = sanitizePart(workload); capability = sanitizePart(capability);
+    if (!workload || !capability) return '';
+    return workload + '-' + capability + '-L' + level;
+  }
+  function buildPermGroupName(workload, capability, level, tier, plane, platform) {
+    workload = sanitizePart(workload); capability = sanitizePart(capability);
+    if (!workload || !capability) return '';
+    return 'PIM-' + workload + '-' + capability + '-L' + level + '-T' + tier + '-' + plane + '-' + platform;
+  }
+  function buildAzureGroupTag(scopeAlias, roleAlias) {
+    scopeAlias = sanitizePart(scopeAlias); roleAlias = sanitizePart(roleAlias);
+    if (!scopeAlias || !roleAlias) return '';
+    return 'Azure-' + scopeAlias + '-' + roleAlias;
+  }
+  function buildAzureGroupName(scopeAlias, roleAlias) {
+    const t = buildAzureGroupTag(scopeAlias, roleAlias); return t ? 'PIM-' + t : '';
+  }
+  function buildRoleGroupTag(shortName)  { const s = sanitizePart(shortName); return s ? 'ROLE-' + s : ''; }
+  function buildRoleGroupName(shortName) { const t = buildRoleGroupTag(shortName); return t ? 'PIM-' + t : ''; }
+  function guessUpnSuffix() {
+    const sfx = (PIM_NAMING && PIM_NAMING.AdminAccountUpnSuffix);
+    if (sfx) return sfx;
+    const counts = {};
+    for (const n of (PIM_DATA.nodes || [])) {
+      if (n.kind !== 'admin') continue;
+      const at = (n.id || '').indexOf('@');
+      if (at > 0) {
+        const s = n.id.substring(at);
+        counts[s] = (counts[s] || 0) + 1;
+      }
+    }
+    let best = null, m = 0;
+    for (const k of Object.keys(counts)) { if (counts[k] > m) { best = k; m = counts[k]; } }
+    return best || '@yourdomain.tld';
+  }
+
+  // Plain-English permission-group categories -> CSV destination.
+  const PERM_CATEGORIES = [
+    { key:'tasks',        label:'Task',         base:'PIM-Definitions-Tasks',         help:'A discrete action (e.g. "Create users", "Reset MFA"). Most common.' },
+    { key:'services',     label:'Service',      base:'PIM-Definitions-Services',      help:'A whole service surface (e.g. "Exchange admin").' },
+    { key:'processes',    label:'Process',      base:'PIM-Definitions-Processes',     help:'A multi-step business process.' },
+    { key:'resources',    label:'Resource',     base:'PIM-Definitions-Resources',     help:'Access scoped to a specific resource.' },
+    { key:'departments',  label:'Department',   base:'PIM-Definitions-Departments',   help:'Department-scoped admin.' },
+    { key:'organization', label:'Organization', base:'PIM-Definitions-Organization',  help:'Whole-organization scope.' }
+  ];
+
+  // Cached PIM_DATA lookups for picklists.
+  function listRoleGroups()  { return (PIM_DATA.nodes||[]).filter(n => n.kind==='role-group').map(n => ({ tag:n.groupTag||(n.id||'').replace(/^group:/,''), label:n.label||n.id, source:n.source })); }
+  function listPermGroups()  { return (PIM_DATA.nodes||[]).filter(n => n.kind==='permission-group').map(n => ({ tag:n.groupTag||(n.id||'').replace(/^group:/,''), label:n.label||n.id, source:n.source })); }
+  function listAdminsLite()  { return (PIM_DATA.nodes||[]).filter(n => n.kind==='admin').map(n => ({ upn:n.id, label:n.label||n.id, tier:n.tier })); }
+  function listAUs()         { return (PIM_DATA.nodes||[]).filter(n => n.kind==='au').map(n => ({ tag:n.auTag||(n.id||'').replace(/^au:/,''), label:n.label||n.id })); }
+
+  // ===================================================================
+  // Wizard A: New admin account
+  // ===================================================================
+  async function wizardAdmin() {
+    const state = {
+      first:'', last:'', initials:'',
+      tier:'T1', level:'L3', usage:'Cloud', platform:'ID', useLongForm:true,
+      upnSuffix: guessUpnSuffix(),
+      userType:'External',
+      status:'Enabled',
+      forwardMails:'FALSE', mailForwardAddr:'',
+      createTap:'TRUE',
+      usageLocation:'DK',
+      roleGroupSel: new Set(),
+      assignmentType:'Eligible',
+      lifetimeDays:365
+    };
+    wizSteps({
+      title: 'New admin account', kind: 'admin', state,
+      steps: [
+        {
+          label: 'Person',
+          render: (s, rerender) => {
+            const f = document.createElement('div');
+            f.appendChild(wuxWhy(
+              'An <b>admin account</b> is a separate user identity used only for privileged work. ' +
+              'It lands as one row in <code>Account-Definitions-Admins.custom.csv</code>. ' +
+              'You give the person and platform; the wizard composes the UPN, display name, and short login name to match the existing naming convention.'
+            ));
+            f.appendChild(wuxField({ id:'wf-fn', label:'First name', required:true, value:s.first, example:'e.g. Anna', sub:'Account-Definitions-Admins.FirstName', onInput:(v)=>{ s.first=v; rerender(); } }));
+            f.appendChild(wuxField({ id:'wf-ln', label:'Last name',  required:true, value:s.last,  example:'e.g. Hansen', sub:'Account-Definitions-Admins.LastName', onInput:(v)=>{ s.last=v; rerender(); } }));
+            if (!s.initials && (s.first || s.last)) {
+              s.initials = ((s.first[0]||'') + (s.last[0]||'')).toUpperCase();
+            }
+            f.appendChild(wuxField({ id:'wf-ini', label:'Initials (short code)', required:true, value:s.initials, example:'e.g. AHA',
+              hint:'2-4 letters used inside the login name. Auto-fills from first+last.',
+              sub:'Account-Definitions-Admins.Initials',
+              onInput:(v)=>{ s.initials=v; rerender(); }
+            }));
+            f.appendChild(wuxField({ id:'wf-sfx', label:'UPN suffix', value:s.upnSuffix, example:'e.g. @contoso.com',
+              hint:'The bit after the @ in the admin\'s sign-in. Defaults to your existing admin pattern.',
+              sub:'Account-Definitions-Admins.UserPrincipalName suffix',
+              onInput:(v)=>{ s.upnSuffix=v; rerender(); }
+            }));
+            f.appendChild(wuxAdminLivePreview(s));
+            return f;
+          },
+          validate: (s) => {
+            if (!s.first.trim()) return 'First name is required.';
+            if (!s.last.trim())  return 'Last name is required.';
+            if (!s.initials.trim()) return 'Initials are required.';
+            if (!s.upnSuffix || s.upnSuffix.indexOf('@') < 0) return 'UPN suffix must look like @yourdomain.tld.';
+            return true;
+          }
+        },
+        {
+          label: 'Tier & platform',
+          render: (s, rerender) => {
+            const f = document.createElement('div');
+            f.appendChild(wuxWhy(
+              '<b>Tier</b> reflects sensitivity: <b>T0</b>=control plane / high-priv, <b>T1</b>=server / app admin, <b>T2</b>=workstation / helpdesk. ' +
+              '<b>Level</b> further qualifies the role within the tier (L0=top, L4=bottom). ' +
+              '<b>Platform</b> picks where the account lives: <b>ID</b>=cloud-only (Entra ID), <b>AD</b>=on-prem AD. ' +
+              'The defaults (T1 / L3 / Cloud / ID) suit most onboardings.'
+            ));
+            f.appendChild(wuxField({ id:'wf-tier', label:'Tier', required:true, type:'select', value:s.tier,
+              sub:'Account-Definitions-Admins.TierLevel',
+              options:[
+                { value:'T0', label:'T0 -- Control plane / high privilege' },
+                { value:'T1', label:'T1 -- Server / service admin (default)' },
+                { value:'T2', label:'T2 -- Workstation / helpdesk' }
+              ],
+              onInput:(v)=>{
+                s.tier=v;
+                s.level = v==='T0' ? 'L1' : (v==='T1' ? 'L3' : 'L4');
+                rerender();
+              }
+            }));
+            f.appendChild(wuxField({ id:'wf-lvl', label:'Level', required:true, type:'select', value:s.level,
+              options:[
+                { value:'L0', label:'L0 (highest in tier)' },
+                { value:'L1', label:'L1' }, { value:'L2', label:'L2' },
+                { value:'L3', label:'L3 (most common)' }, { value:'L4', label:'L4' }
+              ],
+              onInput:(v)=>{ s.level=v; rerender(); }
+            }));
+            f.appendChild(wuxField({ id:'wf-usg', label:'Usage', required:true, type:'select', value:s.usage,
+              sub:'Account-Definitions-Admins.TargetUsage',
+              options:[ { value:'Cloud', label:'Cloud (default)' }, { value:'Legacy', label:'Legacy (on-prem)' } ],
+              onInput:(v)=>{
+                s.usage=v;
+                if (v==='Cloud')  s.platform='ID';
+                if (v==='Legacy') s.platform='AD';
+                rerender();
+              }
+            }));
+            f.appendChild(wuxField({ id:'wf-plat', label:'Platform', required:true, type:'select', value:s.platform,
+              sub:'Account-Definitions-Admins.TargetPlatform',
+              options:[
+                { value:'ID', label:'ID -- Entra ID (cloud-only account)' },
+                { value:'AD', label:'AD -- Active Directory (on-prem account)' }
+              ],
+              onInput:(v)=>{ s.platform=v; rerender(); }
+            }));
+            f.appendChild(wuxField({ id:'wf-long', label:'Naming style', required:true, type:'select', value:s.useLongForm?'long':'short',
+              options:[
+                { value:'long',  label:'Long -- Admin-INI-L#-T#-PLAT (recommended for T0/T1)' },
+                { value:'short', label:'Short -- Admin-INI-PLAT' }
+              ],
+              onInput:(v)=>{ s.useLongForm = (v==='long'); rerender(); }
+            }));
+            f.appendChild(wuxAdminLivePreview(s));
+            return f;
+          }
+        },
+        {
+          label: 'Lifecycle',
+          render: (s, rerender) => {
+            const f = document.createElement('div');
+            f.appendChild(wuxWhy(
+              'Housekeeping fields the engine reads when it provisions the account. ' +
+              '<b>Status</b> is the kill-switch &mdash; leave on <b>Enabled</b> for new admins. ' +
+              '<b>Create TAP</b> issues a Temporary Access Pass at provisioning (good for first sign-in).'
+            ));
+            f.appendChild(wuxField({ id:'wf-st', label:'Status', required:true, type:'select', value:s.status,
+              sub:'Account-Definitions-Admins.AccountStatus',
+              options:[
+                { value:'Enabled',  label:'Enabled (default -- account works normally)' },
+                { value:'Disabled', label:'Disabled (account sign-in blocked)' },
+                { value:'Revoked',  label:'Revoked (kill-switch; signed out and access removed)' }
+              ],
+              hint:'Disabled / Revoked require a <b>StatusChangeCode</b> in your customer KV; the engine refuses without it.',
+              onInput:(v)=>{ s.status=v; rerender(); }
+            }));
+            f.appendChild(wuxField({ id:'wf-ut', label:'User type', type:'select', value:s.userType,
+              sub:'Account-Definitions-Admins.UserType',
+              options:[
+                { value:'External', label:'External (default -- separate identity from the person\'s primary)' },
+                { value:'Internal', label:'Internal (the admin = the person\'s primary identity)' }
+              ],
+              onInput:(v)=>{ s.userType=v; }
+            }));
+            f.appendChild(wuxField({ id:'wf-tap', label:'Create TAP at provisioning?', type:'select', value:s.createTap,
+              sub:'Account-Definitions-Admins.CreateTAP',
+              options:[ { value:'TRUE', label:'Yes (Cloud admins typically)' }, { value:'FALSE', label:'No (on-prem AD admins)' } ],
+              onInput:(v)=>{ s.createTap=v; }
+            }));
+            f.appendChild(wuxField({ id:'wf-loc', label:'Usage location', value:s.usageLocation, example:'e.g. DK / US / DE',
+              hint:'Two-letter country code used when licenses get assigned.',
+              sub:'Account-Definitions-Admins.UsageLocation',
+              onInput:(v)=>{ s.usageLocation=v; }
+            }));
+            f.appendChild(wuxField({ id:'wf-fwd', label:'Forward mail to owner?', type:'select', value:s.forwardMails,
+              sub:'Account-Definitions-Admins.ForwardMailsToContact',
+              options:[ { value:'FALSE', label:'No (default)' }, { value:'TRUE', label:'Yes' } ],
+              onInput:(v)=>{ s.forwardMails=v; rerender(); }
+            }));
+            if (s.forwardMails === 'TRUE') {
+              f.appendChild(wuxField({ id:'wf-fwa', label:'Forward to address', value:s.mailForwardAddr, example:'e.g. anna@contoso.com',
+                onInput:(v)=>{ s.mailForwardAddr=v; }
+              }));
+            }
+            return f;
+          }
+        },
+        {
+          label: 'Role groups',
+          render: (s) => {
+            const f = document.createElement('div');
+            f.appendChild(wuxWhy(
+              'Optionally add the new admin straight into one or more existing role groups. ' +
+              'Each pick becomes one row in <code>PIM-Assignments-Admins.custom.csv</code>. ' +
+              'You can skip this and add the admin to groups later from the Grid tab.'
+            ));
+            const items = listRoleGroups().map(g => ({ key:g.tag, label:g.label, sub:g.tag }));
+            const cntEl = document.createElement('div');
+            cntEl.style.cssText = 'color:#7d8590; font-size:11px; margin:6px 0;';
+            const refreshCnt = () => { cntEl.textContent = s.roleGroupSel.size + ' role group(s) selected'; };
+            const picker = wuxPicklist({ items, multi:true, selected:s.roleGroupSel, onChange: refreshCnt });
+            f.appendChild(picker);
+            refreshCnt(); f.appendChild(cntEl);
+            f.appendChild(wuxField({ id:'wf-at', label:'Assignment type', type:'select', value:s.assignmentType,
+              options:[ { value:'Eligible', label:'Eligible (default -- must activate via PIM)' }, { value:'Active', label:'Active (always-on; use sparingly)' } ],
+              onInput:(v)=>{ s.assignmentType=v; }
+            }));
+            f.appendChild(wuxField({ id:'wf-life', label:'Lifetime (days)', type:'number', value:s.lifetimeDays,
+              example:'e.g. 365', hint:'Days until the assignment expires. Use 0 for permanent (not recommended).',
+              onInput:(v)=>{ s.lifetimeDays = parseInt(v,10)||0; }
+            }));
+            return f;
+          }
+        },
+        {
+          label: 'Review',
+          render: (s) => {
+            const userName = buildAdminUserName(s.initials, s.level.replace(/^L/,''), s.tier.replace(/^T/,''), s.platform, s.useLongForm);
+            const upn = userName + (s.upnSuffix || '');
+            const n = s.roleGroupSel.size;
+            const impact = [{ csv:'Account-Definitions-Admins', adds:1, what: upn }];
+            if (n > 0) impact.push({ csv:'PIM-Assignments-Admins', adds:n, what:[...s.roleGroupSel].join(', ') });
+            return wuxSummary(
+              'This creates a new admin <b>' + escapeHtml(upn) + '</b> in 1 row of <b>Account-Definitions-Admins</b>' +
+              (n>0 ? ', and gives them <b>' + escapeHtml(s.assignmentType) + '</b> access to <b>' + n + '</b> role group(s) via <b>' + n + '</b> row(s) in <b>PIM-Assignments-Admins</b>' : '') +
+              '. No tenant changes happen until you click <b>Commit all</b> on the Save tab.',
+              impact
+            );
+          }
+        }
+      ],
+      onFinish: async (s) => {
+        const userName = buildAdminUserName(s.initials, s.level.replace(/^L/,''), s.tier.replace(/^T/,''), s.platform, s.useLongForm);
+        const upn = userName + s.upnSuffix;
+        const display = buildAdminDisplay(s.first, s.last, s.usage, s.platform, s.level.replace(/^L/,''), s.tier.replace(/^T/,''), s.useLongForm);
+        await wuxStage('Account-Definitions-Admins', {
+          FirstName: s.first.trim(), LastName: s.last.trim(), Initials: s.initials.toUpperCase(),
+          TierLevel: s.tier, TargetUsage: s.usage, TargetPlatform: s.platform,
+          UserType: s.userType,
+          UserName: userName, DisplayName: display, UserPrincipalName: upn,
+          UsageLocation: s.usageLocation,
+          ForwardMailsToContact: s.forwardMails,
+          MailForwardAddress: s.forwardMails === 'TRUE' ? s.mailForwardAddr : '',
+          CreateTAP: s.createTap, TAPStartDate: '',
+          AccountStatus: s.status, StatusChangeCode: ''
+        });
+        for (const tag of s.roleGroupSel) {
+          await wuxStage('PIM-Assignments-Admins', {
+            Username: upn, GroupTag: tag,
+            AssignmentType: s.assignmentType, Action: 'Assign',
+            UpdateExisting: 'FALSE', AutoExtend: 'TRUE',
+            NumOfDaysWhenExpire: String(s.lifetimeDays), Permanent: 'FALSE',
+            CPPlatform:'', Plane:'', TierLevel:'', PermissionScope:'', SyncPlatform:''
+          });
+        }
+      }
+    });
+  }
+  function wuxAdminLivePreview(s) {
+    const userName = buildAdminUserName(s.initials, s.level.replace(/^L/,''), s.tier.replace(/^T/,''), s.platform, s.useLongForm);
+    const upn = userName ? userName + (s.upnSuffix || '') : '';
+    const display = (s.first || s.last) ? buildAdminDisplay(s.first, s.last, s.usage, s.platform, s.level.replace(/^L/,''), s.tier.replace(/^T/,''), s.useLongForm) : '';
+    return wuxPreview([
+      { lbl:"You'll get -- UserName", val: userName },
+      { lbl:"You'll get -- UserPrincipalName", val: upn },
+      { lbl:"You'll get -- DisplayName", val: display }
+    ]);
+  }
+  // SHIM: legacy function body retained briefly for IDE references. The new
+  // multi-step implementation above is what the launcher dispatches to.
+  async function _wizardAdminLegacy() {
+    let roleGroups = [];
+    try {
+      const r = await loadCsv('PIM-Definitions-Roles');
+      roleGroups = (r.rows || []).filter(g => g.GroupTag).map(g => ({ tag: g.GroupTag, name: g.GroupName || g.GroupTag }));
+    } catch (_) {}
+
+    const adminPattern = (PIM_NAMING && PIM_NAMING.AdminAccountPattern) || 'Admin-{Initials}-L{Level}-T{Tier}-{Platform}';
+    const upnSuffix    = (PIM_NAMING && PIM_NAMING.AdminAccountUpnSuffix) || '@example.com';
+    const dnSuffix     = (PIM_NAMING && PIM_NAMING.AdminAccountDisplayNameSuffix) || ' (Admin)';
+
+    const body = document.createElement('div');
+    body.innerHTML = `
+      <div class="wiz-sub" style="padding:10px 14px 0 14px;">Onboard a new admin. Generates 1 row in <b>Account-Definitions-Admins</b> + optionally N rows in <b>PIM-Assignments-Admins</b> from the role groups you pick.</div>
+      <div style="padding:10px 14px;">
+        <div class="field"><label>First name <span style="color:#f85149">*</span></label><input id="wzFn"></div>
+        <div class="field"><label>Last name <span style="color:#f85149">*</span></label><input id="wzLn"></div>
+        <div class="field"><label>Initials <span style="color:#f85149">*</span></label><input id="wzIn" maxlength="6" style="text-transform:uppercase"></div>
+        <div class="field"><label>Tier</label><select id="wzTier"><option>T0</option><option>T1</option><option>T2</option></select></div>
+        <div class="field"><label>Level (L0-L9)</label><select id="wzLevel">${[0,1,2,3,4,5,6,7,8,9].map(i => `<option>L${i}</option>`).join('')}</select></div>
+        <div class="field"><label>Target platform</label><select id="wzPlat"><option>ID</option><option>AD</option></select></div>
+        <div class="field"><label>Create TAP?</label><select id="wzTap"><option value="FALSE">No</option><option value="TRUE">Yes</option></select></div>
+        <div class="field"><label>UPN suffix</label><input id="wzUpn" value="${escapeHtml(upnSuffix)}"></div>
+        <div class="field field-full"><label>Role groups to assign</label>
+          <div class="multi" id="wzRoles">${roleGroups.length === 0
+            ? '<div style="color:#7d8590;font-size:11.5px">(no role groups in PIM-Definitions-Roles)</div>'
+            : roleGroups.map(rg => `<label><input type="checkbox" value="${escapeHtml(rg.tag)}"> ${escapeHtml(rg.name)} <span style="color:#7d8590;font-size:10.5px">(${escapeHtml(rg.tag)})</span> <select class="rg-asg" data-tag="${escapeHtml(rg.tag)}" style="margin-left:6px; padding:1px 4px"><option>Eligible</option><option>Active</option></select></label>`).join('')}</div>
+        </div>
+        <div class="preview" id="wzPreview"></div>
+        <div class="err" id="wzErr" style="display:none"></div>
+      </div>`;
+
+    function snapshot() {
+      const init = (body.querySelector('#wzIn').value || '').toUpperCase().trim();
+      const level = body.querySelector('#wzLevel').value;
+      const tier  = body.querySelector('#wzTier').value;
+      const plat  = body.querySelector('#wzPlat').value;
+      const username = init ? `Admin-${init}-${level}-${tier}-${plat}` : '';
+      const upn = username ? (username + (body.querySelector('#wzUpn').value || '')) : '';
+      const dispName = (body.querySelector('#wzFn').value + ' ' + body.querySelector('#wzLn').value).trim() + dnSuffix;
+      return {
+        FirstName: body.querySelector('#wzFn').value || '',
+        LastName:  body.querySelector('#wzLn').value || '',
+        Initials:  init,
+        TierLevel: tier,
+        TargetUsage: 'Cloud',
+        TargetPlatform: plat,
+        UserType: 'Member',
+        UserName: username,
+        DisplayName: dispName,
+        UserPrincipalName: upn,
+        UsageLocation: '',
+        ForwardMailsToContact: 'FALSE',
+        MailForwardAddress: '',
+        CreateTAP: body.querySelector('#wzTap').value,
+        TAPStartDate: ''
+      };
+    }
+
+    function updatePreview() {
+      const s = snapshot();
+      const pv = body.querySelector('#wzPreview');
+      const picked = Array.from(body.querySelectorAll('#wzRoles input[type=checkbox]:checked')).map(cb => {
+        const sel = body.querySelector(`.rg-asg[data-tag="${CSS.escape(cb.value)}"]`);
+        return { GroupTag: cb.value, AssignmentType: sel ? sel.value : 'Eligible' };
+      });
+      const lines = [];
+      lines.push(`<div class="pv-row"><span class="pv-csv">Account-Definitions-Admins +</span>UserName=<b>${escapeHtml(s.UserName||'(needs initials)')}</b>, UPN=${escapeHtml(s.UserPrincipalName||'')}, DisplayName=${escapeHtml(s.DisplayName||'')}</div>`);
+      for (const r of picked) {
+        lines.push(`<div class="pv-row"><span class="pv-csv">PIM-Assignments-Admins +</span>Username=${escapeHtml(s.UserPrincipalName||'(pending)')}, GroupTag=${escapeHtml(r.GroupTag)}, AssignmentType=<b>${r.AssignmentType}</b></div>`);
+      }
+      pv.innerHTML = lines.join('');
+    }
+    body.addEventListener('input', updatePreview);
+    body.addEventListener('change', updatePreview);
+
+    WIZ.open('New admin', body, { showFinish: true });
+
+    document.getElementById('wizFinish').onclick = async () => {
+      const s = snapshot();
+      const err = body.querySelector('#wzErr');
+      if (!s.FirstName || !s.LastName || !s.Initials) {
+        err.textContent = 'First name, Last name and Initials are required.';
+        err.style.display = '';
+        return;
+      }
+      err.style.display = 'none';
+      const additions = [{ base: 'Account-Definitions-Admins', row: s }];
+      const picked = Array.from(body.querySelectorAll('#wzRoles input[type=checkbox]:checked')).map(cb => {
+        const sel = body.querySelector(`.rg-asg[data-tag="${CSS.escape(cb.value)}"]`);
+        return {
+          Username: s.UserPrincipalName,
+          GroupTag: cb.value,
+          AssignmentType: sel ? sel.value : 'Eligible',
+          Action: 'Assign',
+          UpdateExisting: 'FALSE',
+          AutoExtend: 'TRUE',
+          NumOfDaysWhenExpire: '365',
+          Permanent: 'FALSE',
+          CPPlatform: '', Plane: '', TierLevel: s.TierLevel, PermissionScope: '', SyncPlatform: ''
+        };
+      });
+      for (const r of picked) additions.push({ base: 'PIM-Assignments-Admins', row: r });
+      await applyAdditions(additions);
+      WIZ.close();
+      switchTab('save');
+    };
+    updatePreview();
+  }
+
+  // ===================================================================
+  // Wizard B: New permission group (Entra ID)
+  // ===================================================================
+  async function wizardPermGroupEntra() {
+    const state = {
+      category: 'tasks',
+      workload: 'Entra-ID', capability: '', description: '',
+      tier: 'T0', level: 'L1', plane: 'CP', platform: 'ID',
+      auTag: 'PIM-L1',
+      isRoleAssignable: 'TRUE',
+      owners: '',
+      grantedRoles: [],
+      nestedIn: new Set()
+    };
+    wizSteps({
+      title: 'New permission group (Entra ID)', kind: 'permgroup-entra', state,
+      steps: [
+        {
+          label: 'What is it?',
+          render: (s, rerender) => {
+            const f = document.createElement('div');
+            f.appendChild(wuxWhy(
+              'A <b>permission group</b> is a security group the engine creates in Entra ID and uses as a <b>PIM target</b>. ' +
+              'The <b>category</b> picks which Definitions CSV the row lands in. ' +
+              'The <b>workload</b> + <b>short code</b> + <b>level</b> together compose the <code>GroupTag</code> and full <code>GroupName</code>.'
+            ));
+            f.appendChild(wuxField({ id:'we-cat', label:'What kind of capability?', required:true, type:'select', value:s.category,
+              options: PERM_CATEGORIES.map(c => ({ value:c.key, label: c.label + ' -- ' + c.help })),
+              hint: 'Lands in: <b>' + escapeHtml(((PERM_CATEGORIES.find(c=>c.key===s.category))||{}).base || '?') + '.custom.csv</b>',
+              onInput:(v)=>{ s.category=v; rerender(); }
+            }));
+            f.appendChild(wuxField({ id:'we-wl', label:'Workload (top-level area)', required:true, value:s.workload,
+              example:'e.g. Entra-ID', hint:'The first segment of the GroupTag.',
+              sub:'GroupTag prefix / Workload column',
+              onInput:(v)=>{ s.workload=v; rerender(); }
+            }));
+            f.appendChild(wuxField({ id:'we-cap', label:'Short code for this permission', required:true, value:s.capability,
+              example:'e.g. Users-CreateModifyDelete',
+              hint:'The capability name (CamelCase, dashes ok). Becomes the middle of <code>GroupTag</code>.',
+              sub:'middle of GroupTag',
+              onInput:(v)=>{ s.capability=v; rerender(); }
+            }));
+            f.appendChild(wuxField({ id:'we-desc', label:'Description (human-readable)', value:s.description, type:'textarea',
+              example:'e.g. Create, Modify, Delete Users, Entra ID',
+              sub:'GroupDescription',
+              onInput:(v)=>{ s.description=v; rerender(); }
+            }));
+            f.appendChild(wuxPermGroupLivePreview(s));
+            return f;
+          },
+          validate: (s) => {
+            if (!s.workload.trim()) return 'Workload is required.';
+            if (!s.capability.trim()) return 'Short code is required.';
+            return true;
+          }
+        },
+        {
+          label: 'Tier & scope',
+          render: (s, rerender) => {
+            const f = document.createElement('div');
+            f.appendChild(wuxWhy(
+              '<b>Level</b> reflects how powerful the permission is (L0=root/cross-tenant, L1=global, L2=scoped). ' +
+              '<b>Tier</b> aligns the perm-group with the admin tiers that may receive it. ' +
+              '<b>Plane</b>: CP=Control plane, DP=Data plane. ' +
+              '<b>Administrative Unit</b> picks where the engine puts the group in Entra ID (organizational placement, not RBAC).'
+            ));
+            f.appendChild(wuxField({ id:'we-lvl', label:'Level', required:true, type:'select', value:s.level,
+              options:[
+                { value:'L0', label:'L0 -- root / cross-tenant' },
+                { value:'L1', label:'L1 -- global (default for tasks)' },
+                { value:'L2', label:'L2 -- scoped' },
+                { value:'L3', label:'L3' }, { value:'L4', label:'L4' }
+              ],
+              onInput:(v)=>{
+                s.level=v;
+                if (v==='L1') s.auTag='PIM-L1'; else if (v==='L0') s.auTag='PIM-L0'; else if (v==='L2') s.auTag='PIM-L2';
+                rerender();
+              }
+            }));
+            f.appendChild(wuxField({ id:'we-tier', label:'Tier', required:true, type:'select', value:s.tier,
+              options:[
+                { value:'T0', label:'T0 -- control plane' },
+                { value:'T1', label:'T1 -- server/app admin' },
+                { value:'T2', label:'T2 -- workstation/helpdesk' }
+              ],
+              onInput:(v)=>{ s.tier=v; rerender(); }
+            }));
+            f.appendChild(wuxField({ id:'we-pl', label:'Plane', type:'select', value:s.plane,
+              options:[
+                { value:'CP', label:'CP -- Control plane (default for Entra tasks)' },
+                { value:'DP', label:'DP -- Data plane' }
+              ],
+              onInput:(v)=>{ s.plane=v; rerender(); }
+            }));
+            f.appendChild(wuxField({ id:'we-plat', label:'CP Platform', type:'select', value:s.platform,
+              options:[ { value:'ID', label:'ID -- Entra ID' }, { value:'AD', label:'AD -- on-prem AD' } ],
+              onInput:(v)=>{ s.platform=v; rerender(); }
+            }));
+            const aus = listAUs();
+            const auOpts = aus.map(a => ({ value:a.tag, label: a.label + ' (' + a.tag + ')' }));
+            if (!aus.find(a => a.tag === s.auTag)) auOpts.unshift({ value:s.auTag, label:'(use: '+s.auTag+')' });
+            f.appendChild(wuxField({ id:'we-au', label:'Administrative Unit', type:'select', value:s.auTag,
+              options: auOpts,
+              hint:'AU placement for the group itself. The L1 default works for most task groups.',
+              sub:'AdministrativeUnitTag',
+              onInput:(v)=>{ s.auTag=v; rerender(); }
+            }));
+            f.appendChild(wuxField({ id:'we-ira', label:'Role-assignable security group?', type:'select', value:s.isRoleAssignable,
+              sub:'IsRoleAssignable',
+              options:[ { value:'TRUE', label:'Yes (required if you assign Entra ID roles to it)' }, { value:'FALSE', label:'No' } ],
+              onInput:(v)=>{ s.isRoleAssignable=v; }
+            }));
+            f.appendChild(wuxField({ id:'we-own', label:'Owner email(s)', value:s.owners, example:'e.g. ops@contoso.com',
+              hint:'Becomes the <code>Owners</code> column. Comma-separate for multiple owners.',
+              sub:'Owners',
+              onInput:(v)=>{ s.owners=v; }
+            }));
+            f.appendChild(wuxPermGroupLivePreview(s));
+            return f;
+          }
+        },
+        {
+          label: 'What does it grant?',
+          render: (s) => {
+            const f = document.createElement('div');
+            f.appendChild(wuxWhy(
+              'List the <b>Entra ID role(s)</b> this permission group is allowed to activate. ' +
+              'Each row becomes one entry in <code>PIM-Assignments-Roles-Groups.custom.csv</code>. ' +
+              'Add as many as the bundle needs; usually 1-3.'
+            ));
+            const tlEntra = getCachedList('entraRoles');
+            const wrap = document.createElement('div');
+            const repaint = () => {
+              wrap.innerHTML = '';
+              s.grantedRoles.forEach((g, i) => {
+                const row = document.createElement('div');
+                row.style.cssText = 'background:#0d1117; border:1px solid #30363d; border-radius:6px; padding:10px; margin-bottom:6px;';
+                const roleOpts = (tlEntra.items || []).map(r => '<option value="' + escapeHtml(r.displayName) + '"' + (g.roleDefinitionName===r.displayName?' selected':'') + '>' + escapeHtml(r.displayName) + '</option>').join('');
+                row.innerHTML =
+                  '<div style="display:flex; gap:6px; align-items:start;">' +
+                    (roleOpts
+                      ? '<select class="rd-name" style="flex:1; padding:5px 7px; border:1px solid #30363d; border-radius:4px; background:#0d1117; color:#e6edf3; font-size:12px;"><option value="">(pick one)</option>' + roleOpts + '</select>'
+                      : '<input class="rd-name" type="text" value="' + escapeHtml(g.roleDefinitionName) + '" placeholder="e.g. User Administrator" style="flex:1; padding:5px 7px; border:1px solid #30363d; border-radius:4px; background:#0d1117; color:#e6edf3; font-size:12px;">') +
+                    '<select class="rd-at" style="padding:5px 7px; border:1px solid #30363d; border-radius:4px; background:#0d1117; color:#e6edf3; font-size:12px;">' +
+                      '<option value="Eligible"' + (g.assignmentType==='Eligible'?' selected':'') + '>Eligible</option>' +
+                      '<option value="Active"' + (g.assignmentType==='Active'?' selected':'') + '>Active</option>' +
+                    '</select>' +
+                    '<input class="rd-life" type="number" value="' + g.lifetimeDays + '" style="width:80px; padding:5px 7px; border:1px solid #30363d; border-radius:4px; background:#0d1117; color:#e6edf3; font-size:12px;">' +
+                    '<button class="rd-rm danger" title="remove">x</button>' +
+                  '</div>' +
+                  '<div style="color:#7d8590; font-size:10.5px; margin-top:3px;">Role definition name &middot; Assignment type &middot; Days until expiry' + (tlEntra.items && tlEntra.items.length ? '' : ' (refresh tenant lists for a dropdown)') + '</div>';
+                row.querySelector('.rd-name').addEventListener('input', (e) => { g.roleDefinitionName = e.target.value; });
+                row.querySelector('.rd-name').addEventListener('change', (e) => { g.roleDefinitionName = e.target.value; });
+                row.querySelector('.rd-at').onchange = (e) => { g.assignmentType = e.target.value; };
+                row.querySelector('.rd-life').oninput = (e) => { g.lifetimeDays = parseInt(e.target.value,10)||0; };
+                row.querySelector('.rd-rm').onclick = () => { s.grantedRoles.splice(i, 1); repaint(); };
+                wrap.appendChild(row);
+              });
+            };
+            repaint();
+            f.appendChild(wrap);
+            const addBtn = document.createElement('button');
+            addBtn.textContent = '+ Add another role';
+            addBtn.onclick = () => { s.grantedRoles.push({ roleDefinitionName:'', assignmentType:'Eligible', lifetimeDays:365 }); repaint(); };
+            f.appendChild(addBtn);
+            return f;
+          }
+        },
+        {
+          label: 'Nest into role groups',
+          render: (s) => {
+            const f = document.createElement('div');
+            f.appendChild(wuxWhy(
+              'Optionally make this permission group a <b>member</b> of one or more <b>role groups</b>. ' +
+              'Anyone in those role groups will then inherit this capability. ' +
+              'Each pick adds one row to <code>PIM-Assignments-Groups.custom.csv</code>.'
+            ));
+            const items = listRoleGroups().map(g => ({ key:g.tag, label:g.label, sub:g.tag }));
+            const cntEl = document.createElement('div');
+            cntEl.style.cssText = 'color:#7d8590; font-size:11px; margin-top:6px;';
+            const refresh = () => { cntEl.textContent = s.nestedIn.size + ' role group(s) selected'; };
+            f.appendChild(wuxPicklist({ items, multi:true, selected:s.nestedIn, onChange: refresh }));
+            refresh(); f.appendChild(cntEl);
+            return f;
+          }
+        },
+        {
+          label: 'Review',
+          render: (s) => {
+            const cat = PERM_CATEGORIES.find(c => c.key === s.category);
+            const base = cat ? cat.base : 'PIM-Definitions-Tasks';
+            const lvl = s.level.replace(/^L/,''); const tier = s.tier.replace(/^T/,'');
+            const tag = buildPermGroupTag(s.workload, s.capability, lvl);
+            const name = buildPermGroupName(s.workload, s.capability, lvl, tier, s.plane, s.platform);
+            const rolesN = s.grantedRoles.filter(g => g.roleDefinitionName && g.roleDefinitionName.trim()).length;
+            const nestN  = s.nestedIn.size;
+            const impact = [{ csv: base, adds: 1, what: tag }];
+            if (rolesN) impact.push({ csv:'PIM-Assignments-Roles-Groups', adds: rolesN, what: s.grantedRoles.filter(g=>g.roleDefinitionName && g.roleDefinitionName.trim()).map(g=>g.roleDefinitionName).join(', ') });
+            if (nestN)  impact.push({ csv:'PIM-Assignments-Groups',       adds: nestN,  what: [...s.nestedIn].join(', ') });
+            return wuxSummary(
+              'This creates a new permission group <b>' + escapeHtml(name) + '</b> in 1 row of <b>' + escapeHtml(base) + '</b>' +
+              (rolesN ? ', grants it <b>' + rolesN + '</b> Entra ID role(s) via <b>' + rolesN + '</b> row(s) in <b>PIM-Assignments-Roles-Groups</b>' : '') +
+              (nestN  ? ', and nests it into <b>' + nestN + '</b> role group(s) via <b>' + nestN + '</b> row(s) in <b>PIM-Assignments-Groups</b>' : '') +
+              '. No tenant changes happen until you click <b>Commit all</b> on the Save tab.',
+              impact
+            );
+          }
+        }
+      ],
+      onFinish: async (s) => {
+        const cat = PERM_CATEGORIES.find(c => c.key === s.category);
+        const base = cat ? cat.base : 'PIM-Definitions-Tasks';
+        const lvl = s.level.replace(/^L/,''); const tier = s.tier.replace(/^T/,'');
+        const tag = buildPermGroupTag(s.workload, s.capability, lvl);
+        const name = buildPermGroupName(s.workload, s.capability, lvl, tier, s.plane, s.platform);
+        await wuxStage(base, {
+          GroupName: name, GroupDescription: s.description, GroupTag: tag,
+          AdministrativeUnitTag: s.auTag,
+          IsRoleAssignable: s.isRoleAssignable,
+          Workload: s.workload, Level: s.level, TierLevel: s.tier,
+          Plane: s.plane, CPPlatform: s.platform, Owners: s.owners
+        });
+        for (const g of s.grantedRoles.filter(g => g.roleDefinitionName && g.roleDefinitionName.trim())) {
+          await wuxStage('PIM-Assignments-Roles-Groups', {
+            GroupTag: tag, RoleDefinitionName: g.roleDefinitionName.trim(),
+            AssignmentType: g.assignmentType, Action: 'Assign',
+            UpdateExisting: 'FALSE', AutoExtend: 'TRUE',
+            NumOfDaysWhenExpire: String(g.lifetimeDays), Permanent: 'FALSE',
+            CPPlatform: s.platform, Plane: s.plane, TierLevel: s.tier, PermissionScope: 'Global', SyncPlatform: ''
+          });
+        }
+        for (const rg of s.nestedIn) {
+          await wuxStage('PIM-Assignments-Groups', {
+            TargetGroupTag: rg, SourceGroupTag: tag,
+            AssignmentType: 'Active', Action: 'Assign',
+            UpdateExisting: 'FALSE', AutoExtend: 'TRUE',
+            NumOfDaysWhenExpire: '365', Permanent: 'FALSE',
+            CPPlatform: s.platform, Plane: s.plane, TierLevel: s.tier, PermissionScope: '', SyncPlatform: ''
+          });
+        }
+      }
+    });
+  }
+  function wuxPermGroupLivePreview(s) {
+    const lvl = (s.level||'L1').replace(/^L/,''); const tier = (s.tier||'T0').replace(/^T/,'');
+    return wuxPreview([
+      { lbl:"You'll get -- GroupName", val: buildPermGroupName(s.workload, s.capability, lvl, tier, s.plane, s.platform) },
+      { lbl:"You'll get -- GroupTag",  val: buildPermGroupTag(s.workload, s.capability, lvl) }
+    ]);
+  }
+  // SHIM: retain legacy single-page wizard body for diff readability; unreachable.
+  async function _wizardPermGroupEntraLegacy() {
+    const tlEntra = getCachedList('entraRoles');
+    const tlAus   = getCachedList('aus');
+
+    // Existing role-group choices for nesting.
+    let roleGroups = [];
+    try { const r = await loadCsv('PIM-Definitions-Roles'); roleGroups = (r.rows || []).filter(g => g.GroupTag); } catch (_) {}
+
+    const defTargets = [
+      { base: 'PIM-Definitions-Tasks',        label: 'Tasks (single capability)' },
+      { base: 'PIM-Definitions-Services',     label: 'Services (full service admin)' },
+      { base: 'PIM-Definitions-Processes',    label: 'Processes' },
+      { base: 'PIM-Definitions-Resources',    label: 'Resources' },
+      { base: 'PIM-Definitions-Departments',  label: 'Departments' },
+      { base: 'PIM-Definitions-Organization', label: 'Organization' }
+    ];
+
+    const body = document.createElement('div');
+    body.innerHTML = `
+      <div class="wiz-sub" style="padding:10px 14px 0 14px;">A capability bundle that grants an Entra ID role (or AU-scoped role). Generates 1 def row + 1 assignment row + optional nest rows.</div>
+      <div style="padding:10px 14px;">
+        <div class="field"><label>Service</label><input id="wzSvc" placeholder="e.g. Entra-ID"></div>
+        <div class="field"><label>Capability name <span style="color:#f85149">*</span></label><input id="wzCap" placeholder="e.g. AppAdmin"></div>
+        <div class="field"><label>Level</label><select id="wzLevel">${[0,1,2,3,4,5,6,7,8,9].map(i => `<option>L${i}</option>`).join('')}</select></div>
+        <div class="field"><label>Tier</label><select id="wzTier"><option>T0</option><option>T1</option><option>T2</option></select></div>
+        <div class="field"><label>Code</label><select id="wzCode"><option>CP</option><option>WDP</option><option>MP</option><option>APP</option><option>USER</option></select></div>
+        <div class="field"><label>Domain</label><select id="wzDom"><option>ID</option><option>RES</option><option>DAT</option></select></div>
+        <div class="field"><label>Definition CSV</label><select id="wzDefBase">${defTargets.map(d => `<option value="${escapeHtml(d.base)}">${escapeHtml(d.label)}</option>`).join('')}</select></div>
+        <div class="field"><label>Target Entra role <span style="color:#f85149">*</span> <span class="cache-badge-slot" data-list-key="entraRoles"></span></label>
+          <select id="wzRole"><option value="">(pick one)</option>${tlEntra.items.map(r => `<option value="${escapeHtml(r.displayName)}">${escapeHtml(r.displayName)}</option>`).join('')}</select>
+        </div>
+        <div class="field"><label>AU scope (optional) <span class="cache-badge-slot" data-list-key="aus"></span></label>
+          <select id="wzAu"><option value="">(none -- tenant-wide)</option>${tlAus.items.map(a => `<option value="${escapeHtml(a.displayName)}">${escapeHtml(a.displayName)}</option>`).join('')}</select>
+        </div>
+        <div class="field"><label>Assignment type</label><select id="wzAsgType"><option>Eligible</option><option>Active</option></select></div>
+        <div class="field field-full"><label>Nest into role groups</label>
+          <div class="multi">${roleGroups.length === 0 ? '<div style="color:#7d8590">(none)</div>' : roleGroups.map(rg => `<label><input type="checkbox" value="${escapeHtml(rg.GroupTag)}"> ${escapeHtml(rg.GroupName||rg.GroupTag)} <span style="color:#7d8590;font-size:10.5px">(${escapeHtml(rg.GroupTag)})</span></label>`).join('')}</div>
+        </div>
+        <div class="preview" id="wzPreview"></div>
+        <div class="err" id="wzErr" style="display:none"></div>
+      </div>`;
+
+    function compose() {
+      const svc  = body.querySelector('#wzSvc').value.trim();
+      const cap  = body.querySelector('#wzCap').value.trim();
+      const lvl  = body.querySelector('#wzLevel').value;
+      const tier = body.querySelector('#wzTier').value;
+      const code = body.querySelector('#wzCode').value;
+      const dom  = body.querySelector('#wzDom').value;
+      const namePartSvc = svc ? (svc + '-') : '';
+      const groupName = cap ? `PIM-${namePartSvc}${cap}-${lvl}-${tier}-${code}-${dom}` : '';
+      const groupTag  = cap ? `${namePartSvc}${cap}-${lvl}-${tier}-${code}-${dom}` : '';
+      return { svc, cap, lvl, tier, code, dom, groupName, groupTag };
+    }
+
+    function updatePreview() {
+      const c = compose();
+      const auTag  = body.querySelector('#wzAu').value;
+      const role   = body.querySelector('#wzRole').value;
+      const def    = body.querySelector('#wzDefBase').value;
+      const asgB   = auTag ? 'PIM-Assignments-Roles-AUs' : 'PIM-Assignments-Roles-Groups';
+      const nested = Array.from(body.querySelectorAll('.multi input[type=checkbox]:checked')).map(x => x.value);
+      const lines = [];
+      lines.push(`<div class="pv-row"><span class="pv-csv">${escapeHtml(def)} +</span>GroupName=<b>${escapeHtml(c.groupName||'(set capability)')}</b>, GroupTag=${escapeHtml(c.groupTag||'')}</div>`);
+      if (role) lines.push(`<div class="pv-row"><span class="pv-csv">${escapeHtml(asgB)} +</span>GroupTag=${escapeHtml(c.groupTag)}, RoleDefinitionName=${escapeHtml(role)}${auTag ? ', AdministrativeUnitTag='+escapeHtml(auTag) : ''}</div>`);
+      for (const rg of nested) lines.push(`<div class="pv-row"><span class="pv-csv">PIM-Assignments-Groups +</span>TargetGroupTag=${escapeHtml(rg)}, SourceGroupTag=${escapeHtml(c.groupTag)}, AssignmentType=Eligible</div>`);
+      body.querySelector('#wzPreview').innerHTML = lines.join('');
+    }
+    body.addEventListener('input', updatePreview);
+    body.addEventListener('change', updatePreview);
+
+    WIZ.open('New permission group (Entra ID)', body);
+    renderCacheBadges(body);
+
+    document.getElementById('wizFinish').onclick = async () => {
+      const err = body.querySelector('#wzErr');
+      const c = compose();
+      const role = body.querySelector('#wzRole').value;
+      const auTag = body.querySelector('#wzAu').value;
+      const asgType = body.querySelector('#wzAsgType').value;
+      if (!c.cap || !role) { err.textContent = 'Capability name and target Entra role are required.'; err.style.display = ''; return; }
+      if (!PIM_GROUP_TAG_REGEX.test(c.groupTag)) { err.textContent = 'Generated GroupTag ' + c.groupTag + ' does not match the convention. ' + PIM_GROUP_TAG_HINT; err.style.display = ''; return; }
+      err.style.display = 'none';
+
+      const defBase = body.querySelector('#wzDefBase').value;
+      const additions = [];
+      additions.push({ base: defBase, row: {
+        GroupName: c.groupName, GroupDescription: c.cap + ' (' + (c.svc||'') + ')',
+        GroupTag: c.groupTag, AdministrativeUnitTag: auTag ? auTag : '',
+        IsRoleAssignable: 'TRUE', Workload: c.svc, Level: c.lvl, TierLevel: c.tier, Plane: c.code, CPPlatform: c.dom, Owners: ''
+      }});
+      if (auTag) {
+        additions.push({ base: 'PIM-Assignments-Roles-AUs', row: {
+          GroupTag: c.groupTag, AdministrativeUnitTag: auTag, RoleDefinitionName: role,
+          AssignmentType: asgType, Action: 'Assign', UpdateExisting: 'FALSE', AutoExtend: 'TRUE',
+          NumOfDaysWhenExpire: '365', Permanent: 'FALSE',
+          CPPlatform: c.dom, Plane: c.code, TierLevel: c.tier, PermissionScope: 'Scoped', SyncPlatform: ''
+        }});
+      } else {
+        additions.push({ base: 'PIM-Assignments-Roles-Groups', row: {
+          GroupTag: c.groupTag, RoleDefinitionName: role,
+          AssignmentType: asgType, Action: 'Assign', UpdateExisting: 'FALSE', AutoExtend: 'TRUE',
+          NumOfDaysWhenExpire: '365', Permanent: 'FALSE',
+          CPPlatform: c.dom, Plane: c.code, TierLevel: c.tier, PermissionScope: 'Global', SyncPlatform: ''
+        }});
+      }
+      const nested = Array.from(body.querySelectorAll('.multi input[type=checkbox]:checked')).map(x => x.value);
+      for (const rg of nested) {
+        additions.push({ base: 'PIM-Assignments-Groups', row: {
+          TargetGroupTag: rg, SourceGroupTag: c.groupTag,
+          AssignmentType: 'Eligible', Action: 'Assign', UpdateExisting: 'FALSE', AutoExtend: 'TRUE',
+          NumOfDaysWhenExpire: '365', Permanent: 'FALSE',
+          CPPlatform: c.dom, Plane: c.code, TierLevel: c.tier, PermissionScope: '', SyncPlatform: ''
+        }});
+      }
+      await applyAdditions(additions);
+      WIZ.close();
+      switchTab('save');
+    };
+    updatePreview();
+  }
+
+  // ===================================================================
+  // Wizard C: New permission group (Azure resource)
+  // ===================================================================
+  async function wizardPermGroupAzure() {
+    const state = {
+      scopeAlias:'', roleAlias:'',
+      azScope:'', azRole:'',
+      description:'',
+      tier:'T0', plane:'CP', platform:'ID',
+      nestedIn: new Set()
+    };
+    wizSteps({
+      title: 'New permission group (Azure resource)', kind:'permgroup-azure', state,
+      steps: [
+        {
+          label: 'Where & what',
+          render: (s, rerender) => {
+            const f = document.createElement('div');
+            f.appendChild(wuxWhy(
+              'An Azure permission group binds an <b>Azure RBAC role</b> at a chosen <b>scope</b>. ' +
+              'It lands as one row in <code>PIM-Assignments-Azure-Resources.custom.csv</code>. ' +
+              'The <b>scope alias</b> and <b>role alias</b> are short tokens that compose the <code>GroupTag</code>.'
+            ));
+            f.appendChild(wuxField({ id:'wa-scA', label:'Scope alias (short code)', required:true, value:s.scopeAlias,
+              example:'e.g. TenantRoot or SubProd or RG-Web',
+              hint:'A short label for the scope, used in the group name.',
+              onInput:(v)=>{ s.scopeAlias=v; rerender(); }
+            }));
+            const tlScopes = getCachedList('azureScopes');
+            const scopeOpts = (tlScopes.items || []).map(x => ({ value: x.scopePath || x.id, label: (x.displayName || x.id) + ' (' + (x.type || '') + ')' }));
+            scopeOpts.unshift({ value: '', label: '(pick from cache or paste below)' });
+            f.appendChild(wuxField({ id:'wa-scPick', label:'Azure scope (from tenant cache)', type:'select', value:s.azScope,
+              options: scopeOpts,
+              hint: (tlScopes.items && tlScopes.items.length) ? 'Click any to populate the path below.' : 'Tenant scope cache is empty -- paste the ARM path manually below, or refresh from the Grid tab.',
+              onInput:(v)=>{ if (v) s.azScope=v; rerender(); }
+            }));
+            f.appendChild(wuxField({ id:'wa-sc', label:'Azure scope (full ARM path)', required:true, value:s.azScope,
+              example:'/subscriptions/abc-123 or /providers/Microsoft.Management/managementGroups/X',
+              hint:'Paste the full ARM resource ID. Subscription, RG, MG, or individual resource.',
+              sub:'AzScope',
+              onInput:(v)=>{ s.azScope=v; rerender(); }
+            }));
+            f.appendChild(wuxField({ id:'wa-rA', label:'Role alias (short code)', required:true, value:s.roleAlias,
+              example:'e.g. Owner or Reader or CostMgmtContributor',
+              onInput:(v)=>{ s.roleAlias=v; rerender(); }
+            }));
+            f.appendChild(wuxField({ id:'wa-r', label:'Azure RBAC role name', required:true, value:s.azRole,
+              example:'e.g. Owner, Reader, Contributor, Cost Management Contributor',
+              hint:'The exact role definition name as Azure knows it.',
+              sub:'AzScopePermission',
+              onInput:(v)=>{ s.azRole=v; rerender(); }
+            }));
+            f.appendChild(wuxAzurePreview(s));
+            return f;
+          },
+          validate: (s) => {
+            if (!s.scopeAlias.trim()) return 'Scope alias is required.';
+            if (!s.roleAlias.trim()) return 'Role alias is required.';
+            if (!s.azScope.trim() || s.azScope.indexOf('/') !== 0) return 'Azure scope must start with /.';
+            if (!s.azRole.trim()) return 'Azure RBAC role name is required.';
+            return true;
+          }
+        },
+        {
+          label: 'Tier',
+          render: (s) => {
+            const f = document.createElement('div');
+            f.appendChild(wuxWhy(
+              'Tier aligns the perm-group with the admin tiers that may receive it. ' +
+              'Default <b>T0</b> for management-group / subscription owner-style scopes; lower tiers for individual resources.'
+            ));
+            f.appendChild(wuxField({ id:'wa-tier', label:'Tier', required:true, type:'select', value:s.tier,
+              options:[
+                { value:'T0', label:'T0 -- control plane' },
+                { value:'T1', label:'T1 -- server/app admin' },
+                { value:'T2', label:'T2 -- workstation/helpdesk' }
+              ],
+              onInput:(v)=>{ s.tier=v; }
+            }));
+            return f;
+          }
+        },
+        {
+          label: 'Nest into role groups',
+          render: (s) => {
+            const f = document.createElement('div');
+            f.appendChild(wuxWhy('Same as Entra perm-groups: optionally nest under one or more role groups.'));
+            const items = listRoleGroups().map(g => ({ key:g.tag, label:g.label, sub:g.tag }));
+            const cntEl = document.createElement('div');
+            cntEl.style.cssText = 'color:#7d8590; font-size:11px; margin-top:6px;';
+            const refresh = () => { cntEl.textContent = s.nestedIn.size + ' role group(s) selected'; };
+            f.appendChild(wuxPicklist({ items, multi:true, selected:s.nestedIn, onChange: refresh }));
+            refresh(); f.appendChild(cntEl);
+            return f;
+          }
+        },
+        {
+          label: 'Review',
+          render: (s) => {
+            const tag = buildAzureGroupTag(s.scopeAlias, s.roleAlias);
+            const nestN = s.nestedIn.size;
+            const impact = [{ csv:'PIM-Assignments-Azure-Resources', adds:1, what: tag + ' @ ' + s.azScope }];
+            if (nestN) impact.push({ csv:'PIM-Assignments-Groups', adds:nestN, what:[...s.nestedIn].join(', ') });
+            return wuxSummary(
+              'This creates an Azure permission group <b>' + escapeHtml(tag) + '</b> in 1 row of <b>PIM-Assignments-Azure-Resources</b>' +
+              (nestN ? ', and nests it into <b>' + nestN + '</b> role group(s) via <b>' + nestN + '</b> row(s) in <b>PIM-Assignments-Groups</b>' : '') +
+              '. No tenant changes happen until you click <b>Commit all</b> on the Save tab.',
+              impact
+            );
+          }
+        }
+      ],
+      onFinish: async (s) => {
+        const tag = buildAzureGroupTag(s.scopeAlias, s.roleAlias);
+        await wuxStage('PIM-Assignments-Azure-Resources', {
+          GroupTag: tag, AzScope: s.azScope.trim(), AzScopePermission: s.azRole.trim(),
+          AssignmentType: 'Active', Action: 'Assign',
+          UpdateExisting: 'FALSE', AutoExtend: 'TRUE',
+          NumOfDaysWhenExpire: '90', Permanent: 'FALSE',
+          CPPlatform: s.platform, Plane: s.plane, TierLevel: s.tier, PermissionScope: 'Scoped', SyncPlatform: ''
+        });
+        for (const rg of s.nestedIn) {
+          await wuxStage('PIM-Assignments-Groups', {
+            TargetGroupTag: rg, SourceGroupTag: tag,
+            AssignmentType: 'Active', Action: 'Assign',
+            UpdateExisting: 'FALSE', AutoExtend: 'TRUE',
+            NumOfDaysWhenExpire: '365', Permanent: 'FALSE',
+            CPPlatform: s.platform, Plane: s.plane, TierLevel: s.tier, PermissionScope: '', SyncPlatform: ''
+          });
+        }
+      }
+    });
+  }
+  function wuxAzurePreview(s) {
+    return wuxPreview([
+      { lbl:"You'll get -- GroupName", val: buildAzureGroupName(s.scopeAlias, s.roleAlias) },
+      { lbl:"You'll get -- GroupTag",  val: buildAzureGroupTag(s.scopeAlias, s.roleAlias) },
+      { lbl:"You'll get -- AzScope",   val: s.azScope || '' },
+      { lbl:"You'll get -- AzScopePermission", val: s.azRole || '' }
+    ]);
+  }
+  // SHIM: legacy implementation retained, unreachable.
+  async function _wizardPermGroupAzureLegacy() {
+    const tlScopes = getCachedList('azureScopes');
+    let roleGroups = [];
+    try { const r = await loadCsv('PIM-Definitions-Roles'); roleGroups = (r.rows || []).filter(g => g.GroupTag); } catch (_) {}
+
+    const defTargets = [
+      { base: 'PIM-Definitions-Resources',    label: 'Resources (default)' },
+      { base: 'PIM-Definitions-Services',     label: 'Services' },
+      { base: 'PIM-Definitions-Tasks',        label: 'Tasks' },
+      { base: 'PIM-Definitions-Processes',    label: 'Processes' },
+      { base: 'PIM-Definitions-Departments',  label: 'Departments' },
+      { base: 'PIM-Definitions-Organization', label: 'Organization' }
+    ];
+
+    const body = document.createElement('div');
+    body.innerHTML = `
+      <div class="wiz-sub" style="padding:10px 14px 0 14px;">A capability bundle that grants an Azure RBAC role at a chosen scope. Generates 1 def row + 1 assignment row + optional nest rows.</div>
+      <div style="padding:10px 14px;">
+        <div class="field"><label>Service</label><input id="wzSvc" value="AzRes"></div>
+        <div class="field"><label>Capability name <span style="color:#f85149">*</span></label><input id="wzCap" placeholder="e.g. mg-PROD-Owner"></div>
+        <div class="field"><label>Level</label><select id="wzLevel">${[0,1,2,3,4,5,6,7,8,9].map(i => `<option ${i===5?'selected':''}>L${i}</option>`).join('')}</select></div>
+        <div class="field"><label>Tier</label><select id="wzTier"><option>T0</option><option selected>T1</option><option>T2</option></select></div>
+        <div class="field"><label>Code</label><select id="wzCode"><option>CP</option><option selected>WDP</option><option>MP</option><option>APP</option><option>USER</option></select></div>
+        <div class="field"><label>Domain</label><select id="wzDom"><option>ID</option><option selected>RES</option><option>DAT</option></select></div>
+        <div class="field"><label>Definition CSV</label><select id="wzDefBase">${defTargets.map(d => `<option value="${escapeHtml(d.base)}">${escapeHtml(d.label)}</option>`).join('')}</select></div>
+        <div class="field"><label>AzScope <span style="color:#f85149">*</span> <span class="cache-badge-slot" data-list-key="azureScopes"></span></label>
+          <select id="wzScope"><option value="">(pick one)</option>${tlScopes.items.map(s => `<option value="${escapeHtml(s.scopePath||s.id)}">${escapeHtml((s.displayName||s.id)+' ('+(s.type||'')+')')}</option>`).join('')}<option value="__custom__">Custom ARM path...</option></select>
+        </div>
+        <div class="field"><label>Azure RBAC role (free text)</label><input id="wzRbac" value="Reader" placeholder="e.g. Owner / Contributor / Reader"></div>
+        <div class="field"><label>Assignment type</label><select id="wzAsgType"><option>Eligible</option><option>Active</option></select></div>
+        <div class="field field-full"><label>Nest into role groups</label>
+          <div class="multi">${roleGroups.length === 0 ? '<div style="color:#7d8590">(none)</div>' : roleGroups.map(rg => `<label><input type="checkbox" value="${escapeHtml(rg.GroupTag)}"> ${escapeHtml(rg.GroupName||rg.GroupTag)} <span style="color:#7d8590;font-size:10.5px">(${escapeHtml(rg.GroupTag)})</span></label>`).join('')}</div>
+        </div>
+        <div class="preview" id="wzPreview"></div>
+        <div class="err" id="wzErr" style="display:none"></div>
+      </div>`;
+
+    body.querySelector('#wzScope').addEventListener('change', (e) => {
+      if (e.target.value === '__custom__') {
+        const v = window.prompt('Enter custom ARM scope path:', '/subscriptions/') || '';
+        if (v) {
+          const o = document.createElement('option');
+          o.value = v; o.text = v + ' (custom)'; o.selected = true;
+          e.target.appendChild(o);
+        } else {
+          e.target.value = '';
+        }
+      }
+    });
+
+    function compose() {
+      const svc  = body.querySelector('#wzSvc').value.trim() || 'AzRes';
+      const cap  = body.querySelector('#wzCap').value.trim();
+      const lvl  = body.querySelector('#wzLevel').value;
+      const tier = body.querySelector('#wzTier').value;
+      const code = body.querySelector('#wzCode').value;
+      const dom  = body.querySelector('#wzDom').value;
+      const groupName = cap ? `PIM-${svc}-${cap}-${lvl}-${tier}-${code}-${dom}` : '';
+      const groupTag  = cap ? `${svc}-${cap}-${lvl}-${tier}-${code}-${dom}` : '';
+      return { svc, cap, lvl, tier, code, dom, groupName, groupTag };
+    }
+    function updatePreview() {
+      const c = compose();
+      const scope = body.querySelector('#wzScope').value;
+      const rbac  = body.querySelector('#wzRbac').value;
+      const def   = body.querySelector('#wzDefBase').value;
+      const nested = Array.from(body.querySelectorAll('.multi input[type=checkbox]:checked')).map(x => x.value);
+      const lines = [];
+      lines.push(`<div class="pv-row"><span class="pv-csv">${escapeHtml(def)} +</span>GroupName=<b>${escapeHtml(c.groupName||'(set capability)')}</b>, GroupTag=${escapeHtml(c.groupTag||'')}</div>`);
+      if (scope && rbac) lines.push(`<div class="pv-row"><span class="pv-csv">PIM-Assignments-Azure-Resources +</span>GroupTag=${escapeHtml(c.groupTag)}, AzScope=${escapeHtml(scope)}, AzScopePermission=${escapeHtml(rbac)}</div>`);
+      for (const rg of nested) lines.push(`<div class="pv-row"><span class="pv-csv">PIM-Assignments-Groups +</span>TargetGroupTag=${escapeHtml(rg)}, SourceGroupTag=${escapeHtml(c.groupTag)}, AssignmentType=Active</div>`);
+      body.querySelector('#wzPreview').innerHTML = lines.join('');
+    }
+    body.addEventListener('input', updatePreview);
+    body.addEventListener('change', updatePreview);
+
+    WIZ.open('New permission group (Azure resource)', body);
+    renderCacheBadges(body);
+
+    document.getElementById('wizFinish').onclick = async () => {
+      const err = body.querySelector('#wzErr');
+      const c = compose();
+      const scope = body.querySelector('#wzScope').value;
+      const rbac = body.querySelector('#wzRbac').value;
+      const asgType = body.querySelector('#wzAsgType').value;
+      if (!c.cap || !scope || !rbac) { err.textContent = 'Capability name, scope, and RBAC role are required.'; err.style.display = ''; return; }
+      if (!PIM_GROUP_TAG_REGEX.test(c.groupTag)) { err.textContent = 'Generated GroupTag ' + c.groupTag + ' does not match the convention. ' + PIM_GROUP_TAG_HINT; err.style.display = ''; return; }
+      err.style.display = 'none';
+
+      const defBase = body.querySelector('#wzDefBase').value;
+      const additions = [];
+      additions.push({ base: defBase, row: {
+        GroupName: c.groupName, GroupDescription: c.cap + ' (' + c.svc + ')',
+        GroupTag: c.groupTag, AdministrativeUnitTag: '', IsRoleAssignable: 'FALSE',
+        Workload: c.svc, Level: c.lvl, TierLevel: c.tier, Plane: c.code, CPPlatform: c.dom, Owners: ''
+      }});
+      additions.push({ base: 'PIM-Assignments-Azure-Resources', row: {
+        GroupTag: c.groupTag, AzScope: scope, AzScopePermission: rbac,
+        AssignmentType: asgType, Action: 'Assign', UpdateExisting: 'FALSE', AutoExtend: 'TRUE',
+        NumOfDaysWhenExpire: '90', Permanent: 'FALSE',
+        CPPlatform: c.dom, Plane: c.code, TierLevel: c.tier, PermissionScope: 'Scoped', SyncPlatform: ''
+      }});
+      const nested = Array.from(body.querySelectorAll('.multi input[type=checkbox]:checked')).map(x => x.value);
+      for (const rg of nested) {
+        additions.push({ base: 'PIM-Assignments-Groups', row: {
+          TargetGroupTag: rg, SourceGroupTag: c.groupTag,
+          AssignmentType: 'Active', Action: 'Assign', UpdateExisting: 'FALSE', AutoExtend: 'TRUE',
+          NumOfDaysWhenExpire: '365', Permanent: 'FALSE',
+          CPPlatform: c.dom, Plane: c.code, TierLevel: c.tier, PermissionScope: '', SyncPlatform: ''
+        }});
+      }
+      await applyAdditions(additions);
+      WIZ.close();
+      switchTab('save');
+    };
+    updatePreview();
+  }
+
+  // ===================================================================
+  // Wizard D: Project lifecycle (time-boxed role group)
+  // ===================================================================
+  async function wizardProject() {
+    const state = {
+      shortName:'', description:'',
+      tier:'T1',
+      permSel: new Set(),
+      adminSel: new Set(),
+      lifetimeDays: 90,
+      assignmentType: 'Eligible'
+    };
+    wizSteps({
+      title: 'Project lifecycle (time-boxed)', kind: 'project', state,
+      steps: [
+        {
+          label: 'Project',
+          render: (s, rerender) => {
+            const f = document.createElement('div');
+            f.appendChild(wuxWhy(
+              'A <b>time-boxed project group</b> is a regular role group with a deliberately short assignment lifetime. ' +
+              'The naming convention adds a <code>Project-{ShortName}</code> tag so it\'s easy to find and clean up later. ' +
+              'Default lifetime: <b>90 days</b>. Edit the rows in the Grid tab if a different shape is needed.'
+            ));
+            f.appendChild(wuxField({ id:'wp-sn', label:'Project short code', required:true, value:s.shortName,
+              example:'e.g. Migration-2026Q3',
+              hint:'Becomes part of <code>ROLE-Project-{ShortName}</code>.',
+              onInput:(v)=>{ s.shortName=v; rerender(); }
+            }));
+            f.appendChild(wuxField({ id:'wp-desc', label:'Description', type:'textarea', value:s.description,
+              example:'e.g. Quarterly tenant migration project, ends 2026-09-30',
+              onInput:(v)=>{ s.description=v; }
+            }));
+            f.appendChild(wuxField({ id:'wp-tier', label:'Tier', required:true, type:'select', value:s.tier,
+              options:[ { value:'T0', label:'T0' }, { value:'T1', label:'T1 (default)' }, { value:'T2', label:'T2' } ],
+              onInput:(v)=>{ s.tier=v; }
+            }));
+            f.appendChild(wuxField({ id:'wp-life', label:'Lifetime (days)', type:'number', value:s.lifetimeDays,
+              example:'e.g. 90', hint:'Days until each assignment expires. Use a short value for project work (default 90).',
+              onInput:(v)=>{ s.lifetimeDays = parseInt(v,10)||0; }
+            }));
+            const projShort = 'Project-' + s.shortName;
+            f.appendChild(wuxPreview([
+              { lbl:"You'll get -- GroupName", val: buildRoleGroupName(projShort) },
+              { lbl:"You'll get -- GroupTag",  val: buildRoleGroupTag(projShort) }
+            ]));
+            return f;
+          },
+          validate: (s) => s.shortName.trim() ? true : 'Project short code is required.'
+        },
+        {
+          label: 'Members',
+          render: (s) => {
+            const f = document.createElement('div');
+            f.appendChild(wuxWhy(
+              'Pick the admins who get access during the project. Each becomes one row in <code>PIM-Assignments-Admins.custom.csv</code> with the short lifetime you chose.'
+            ));
+            const items = listAdminsLite().map(a => ({ key:a.upn, label:a.label, sub:a.upn }));
+            const cntEl = document.createElement('div'); cntEl.style.cssText='color:#7d8590; font-size:11px; margin-top:6px;';
+            const refresh = () => { cntEl.textContent = s.adminSel.size + ' admin(s) selected'; };
+            f.appendChild(wuxPicklist({ items, multi:true, selected:s.adminSel, onChange: refresh }));
+            refresh(); f.appendChild(cntEl);
+            f.appendChild(wuxField({ id:'wp-at', label:'Assignment type', type:'select', value:s.assignmentType,
+              options:[ { value:'Eligible', label:'Eligible (default)' }, { value:'Active', label:'Active' } ],
+              onInput:(v)=>{ s.assignmentType=v; }
+            }));
+            return f;
+          }
+        },
+        {
+          label: 'Permissions',
+          render: (s) => {
+            const f = document.createElement('div');
+            f.appendChild(wuxWhy(
+              'Pick the <b>permission groups</b> the project gets. Each becomes a nesting row in <code>PIM-Assignments-Groups.custom.csv</code>.'
+            ));
+            const items = listPermGroups().map(g => ({ key:g.tag, label:g.label, sub:g.tag }));
+            const cntEl = document.createElement('div'); cntEl.style.cssText='color:#7d8590; font-size:11px; margin-top:6px;';
+            const refresh = () => { cntEl.textContent = s.permSel.size + ' permission group(s) selected'; };
+            f.appendChild(wuxPicklist({ items, multi:true, selected:s.permSel, onChange: refresh }));
+            refresh(); f.appendChild(cntEl);
+            return f;
+          }
+        },
+        {
+          label: 'Review',
+          render: (s) => {
+            const tag = buildRoleGroupTag('Project-' + s.shortName);
+            const impact = [{ csv:'PIM-Definitions-Roles', adds:1, what: tag }];
+            if (s.permSel.size)  impact.push({ csv:'PIM-Assignments-Groups', adds:s.permSel.size, what:[...s.permSel].join(', ') });
+            if (s.adminSel.size) impact.push({ csv:'PIM-Assignments-Admins', adds:s.adminSel.size, what:[...s.adminSel].join(', ') });
+            return wuxSummary(
+              'This creates a time-boxed role group <b>' + escapeHtml(tag) + '</b> in 1 row of <b>PIM-Definitions-Roles</b>' +
+              (s.permSel.size  ? ', nests <b>' + s.permSel.size + '</b> permission group(s)' : '') +
+              (s.adminSel.size ? ', and assigns <b>' + s.adminSel.size + '</b> admin(s)' : '') +
+              '. All assignment rows get a <b>' + s.lifetimeDays + '-day</b> expiry and <b>AutoExtend=FALSE</b> so the access disappears unless renewed. ' +
+              'No tenant changes happen until you click <b>Commit all</b> on the Save tab.',
+              impact
+            );
+          }
+        }
+      ],
+      onFinish: async (s) => {
+        const projShort = 'Project-' + s.shortName;
+        const tag = buildRoleGroupTag(projShort);
+        const name = buildRoleGroupName(projShort);
+        await wuxStage('PIM-Definitions-Roles', {
+          GroupName: name, GroupDescription: s.description, GroupTag: tag,
+          AdministrativeUnitTag: 'PIM-ROLES',
+          CPPlatform:'', Plane:'', TierLevel: s.tier, PermissionScope:'', SyncPlatform:'',
+          IsRoleAssignable:'TRUE'
+        });
+        for (const pTag of s.permSel) {
+          await wuxStage('PIM-Assignments-Groups', {
+            TargetGroupTag: tag, SourceGroupTag: pTag,
+            AssignmentType:'Active', Action:'Assign',
+            UpdateExisting:'FALSE', AutoExtend:'FALSE',
+            NumOfDaysWhenExpire: String(s.lifetimeDays), Permanent:'FALSE',
+            CPPlatform:'', Plane:'', TierLevel:s.tier, PermissionScope:'', SyncPlatform:''
+          });
+        }
+        for (const upn of s.adminSel) {
+          await wuxStage('PIM-Assignments-Admins', {
+            Username: upn, GroupTag: tag,
+            AssignmentType: s.assignmentType, Action:'Assign',
+            UpdateExisting:'FALSE', AutoExtend:'FALSE',
+            NumOfDaysWhenExpire: String(s.lifetimeDays), Permanent:'FALSE',
+            CPPlatform:'', Plane:'', TierLevel:s.tier, PermissionScope:'', SyncPlatform:''
+          });
+        }
+      }
+    });
+  }
+
+  // ===================================================================
+  // Wizard E (new): Role group
+  // ===================================================================
+  async function wizardRoleGroup() {
+    const state = {
+      shortName:'', description:'',
+      tier:'T1',
+      auTag:'PIM-ROLES',
+      isRoleAssignable:'TRUE',
+      permSel: new Set(),
+      adminSel: new Set(),
+      assignmentType:'Eligible',
+      lifetimeDays: 365
+    };
+    wizSteps({
+      title: 'New role group', kind:'rolegroup', state,
+      steps: [
+        {
+          label:'What is it?',
+          render: (s, rerender) => {
+            const f = document.createElement('div');
+            f.appendChild(wuxWhy(
+              'A <b>role group</b> is the top-level entity humans get assigned to (e.g. "Cloud Engineer", "Helpdesk"). ' +
+              'It lands as one row in <code>PIM-Definitions-Roles.custom.csv</code>. ' +
+              'You then nest <b>permission groups</b> inside it (next step) and optionally add admins (step after).'
+            ));
+            f.appendChild(wuxField({ id:'wr-sn', label:'Short name', required:true, value:s.shortName,
+              example:'e.g. CloudEngineer',
+              hint:'CamelCase. Becomes the suffix of <code>ROLE-{ShortName}</code>.',
+              onInput:(v)=>{ s.shortName=v; rerender(); }
+            }));
+            f.appendChild(wuxField({ id:'wr-desc', label:'Description', type:'textarea', value:s.description,
+              example:'e.g. Management and Architecture, Cloud',
+              onInput:(v)=>{ s.description=v; }
+            }));
+            f.appendChild(wuxField({ id:'wr-tier', label:'Tier', required:true, type:'select', value:s.tier,
+              options:[
+                { value:'T0', label:'T0 -- control plane' },
+                { value:'T1', label:'T1 -- server/app admin (default)' },
+                { value:'T2', label:'T2 -- workstation/helpdesk' }
+              ],
+              onInput:(v)=>{ s.tier=v; }
+            }));
+            f.appendChild(wuxField({ id:'wr-au', label:'Administrative Unit', value:s.auTag,
+              hint:'AU placement for the group in Entra ID. <b>PIM-ROLES</b> is the standard for role groups.',
+              onInput:(v)=>{ s.auTag=v; }
+            }));
+            f.appendChild(wuxField({ id:'wr-ira', label:'Role-assignable security group?', type:'select', value:s.isRoleAssignable,
+              options:[ { value:'TRUE', label:'Yes (default)' }, { value:'FALSE', label:'No' } ],
+              onInput:(v)=>{ s.isRoleAssignable=v; }
+            }));
+            f.appendChild(wuxPreview([
+              { lbl:"You'll get -- GroupName", val: buildRoleGroupName(s.shortName) },
+              { lbl:"You'll get -- GroupTag",  val: buildRoleGroupTag(s.shortName) }
+            ]));
+            return f;
+          },
+          validate: (s) => s.shortName.trim() ? true : 'Short name is required.'
+        },
+        {
+          label: 'Nest perm-groups',
+          render: (s) => {
+            const f = document.createElement('div');
+            f.appendChild(wuxWhy(
+              'Pick the <b>permission groups</b> this role grants. Each pick becomes one row in <code>PIM-Assignments-Groups.custom.csv</code>.'
+            ));
+            const items = listPermGroups().map(g => ({ key:g.tag, label:g.label, sub:g.tag + ' (' + (g.source||'') + ')' }));
+            const cntEl = document.createElement('div'); cntEl.style.cssText='color:#7d8590; font-size:11px; margin-top:6px;';
+            const refresh = () => { cntEl.textContent = s.permSel.size + ' permission group(s) selected'; };
+            f.appendChild(wuxPicklist({ items, multi:true, selected:s.permSel, onChange: refresh }));
+            refresh(); f.appendChild(cntEl);
+            return f;
+          }
+        },
+        {
+          label: 'Add admins',
+          render: (s) => {
+            const f = document.createElement('div');
+            f.appendChild(wuxWhy(
+              'Optionally assign admins to this new role group now. Each pick becomes one row in <code>PIM-Assignments-Admins.custom.csv</code>.'
+            ));
+            const items = listAdminsLite().map(a => ({ key:a.upn, label:a.label, sub:a.upn + (a.tier ? ' . ' + a.tier : '') }));
+            const cntEl = document.createElement('div'); cntEl.style.cssText='color:#7d8590; font-size:11px; margin-top:6px;';
+            const refresh = () => { cntEl.textContent = s.adminSel.size + ' admin(s) selected'; };
+            f.appendChild(wuxPicklist({ items, multi:true, selected:s.adminSel, onChange: refresh }));
+            refresh(); f.appendChild(cntEl);
+            f.appendChild(wuxField({ id:'wr-at', label:'Assignment type', type:'select', value:s.assignmentType,
+              options:[ { value:'Eligible', label:'Eligible (default)' }, { value:'Active', label:'Active' } ],
+              onInput:(v)=>{ s.assignmentType=v; }
+            }));
+            f.appendChild(wuxField({ id:'wr-life', label:'Lifetime (days)', type:'number', value:s.lifetimeDays,
+              onInput:(v)=>{ s.lifetimeDays = parseInt(v,10)||0; }
+            }));
+            return f;
+          }
+        },
+        {
+          label: 'Review',
+          render: (s) => {
+            const name = buildRoleGroupName(s.shortName); const tag = buildRoleGroupTag(s.shortName);
+            const impact = [{ csv:'PIM-Definitions-Roles', adds:1, what:tag }];
+            if (s.permSel.size)  impact.push({ csv:'PIM-Assignments-Groups', adds:s.permSel.size, what:[...s.permSel].join(', ') });
+            if (s.adminSel.size) impact.push({ csv:'PIM-Assignments-Admins', adds:s.adminSel.size, what:[...s.adminSel].join(', ') });
+            return wuxSummary(
+              'This creates a role group <b>' + escapeHtml(name) + '</b> in 1 row of <b>PIM-Definitions-Roles</b>' +
+              (s.permSel.size  ? ', nests <b>' + s.permSel.size + '</b> permission group(s) under it' : '') +
+              (s.adminSel.size ? ', and assigns <b>' + s.adminSel.size + '</b> admin(s)' : '') +
+              '. No tenant changes happen until you click <b>Commit all</b> on the Save tab.',
+              impact
+            );
+          }
+        }
+      ],
+      onFinish: async (s) => {
+        const tag = buildRoleGroupTag(s.shortName); const name = buildRoleGroupName(s.shortName);
+        await wuxStage('PIM-Definitions-Roles', {
+          GroupName: name, GroupDescription: s.description, GroupTag: tag,
+          AdministrativeUnitTag: s.auTag,
+          CPPlatform:'', Plane:'', TierLevel:s.tier, PermissionScope:'', SyncPlatform:'',
+          IsRoleAssignable: s.isRoleAssignable
+        });
+        for (const pTag of s.permSel) {
+          await wuxStage('PIM-Assignments-Groups', {
+            TargetGroupTag: tag, SourceGroupTag: pTag,
+            AssignmentType:'Active', Action:'Assign',
+            UpdateExisting:'FALSE', AutoExtend:'TRUE',
+            NumOfDaysWhenExpire:'365', Permanent:'FALSE',
+            CPPlatform:'', Plane:'', TierLevel:s.tier, PermissionScope:'', SyncPlatform:''
+          });
+        }
+        for (const upn of s.adminSel) {
+          await wuxStage('PIM-Assignments-Admins', {
+            Username: upn, GroupTag: tag,
+            AssignmentType: s.assignmentType, Action:'Assign',
+            UpdateExisting:'FALSE', AutoExtend:'TRUE',
+            NumOfDaysWhenExpire: String(s.lifetimeDays), Permanent:'FALSE',
+            CPPlatform:'', Plane:'', TierLevel:s.tier, PermissionScope:'', SyncPlatform:''
+          });
+        }
+      }
+    });
+  }
+
+  // ===================================================================
+  // Wizard F (new): Clone an existing group with a modal picker.
+  // ===================================================================
+  async function wizardClone(preselectTag, preselectKind, preselectBase) {
+    const state = {
+      sourceTag: preselectTag || '',
+      sourceKind: preselectKind || '',
+      sourceBase: preselectBase || '',
+      newShortName: '',
+      includeChildAssignments: true
+    };
+    wizSteps({
+      title: 'Clone an existing group', kind: 'clone', state,
+      steps: [
+        {
+          label: 'Pick the template',
+          render: (s) => {
+            const f = document.createElement('div');
+            f.appendChild(wuxWhy(
+              'Pick a <b>role group</b> or <b>permission group</b> to copy. ' +
+              'The wizard will duplicate the Definitions row + (optionally) all of its outgoing assignment rows, then let you rename it before commit.'
+            ));
+            const items = [
+              ...listRoleGroups().map(g => ({ key: 'role::' + g.tag + '::' + (g.source||''), label: g.label, sub: 'role-group . ' + g.tag })),
+              ...listPermGroups().map(g => ({ key: 'perm::' + g.tag + '::' + (g.source||''), label: g.label, sub: 'permission-group . ' + g.tag + ' (' + (g.source||'') + ')' }))
+            ];
+            const selected = new Set();
+            if (s.sourceTag) selected.add((s.sourceKind === 'role-group' ? 'role::' : 'perm::') + s.sourceTag + '::' + (s.sourceBase||''));
+            f.appendChild(wuxPicklist({
+              items, multi:false, selected,
+              onChange: (sel) => {
+                const v = [...sel][0] || '';
+                if (!v) { s.sourceTag=''; s.sourceKind=''; s.sourceBase=''; return; }
+                const parts = v.split('::');
+                s.sourceKind = parts[0] === 'role' ? 'role-group' : 'permission-group';
+                s.sourceTag  = parts[1];
+                s.sourceBase = parts[2] || (s.sourceKind === 'role-group' ? 'PIM-Definitions-Roles' : 'PIM-Definitions-Tasks');
+              }
+            }));
+            return f;
+          },
+          validate: (s) => s.sourceTag ? true : 'Pick a source group.'
+        },
+        {
+          label: 'New short code',
+          render: (s, rerender) => {
+            const f = document.createElement('div');
+            f.appendChild(wuxWhy(
+              'Give the copy a new short code. The wizard rewrites the <code>GroupTag</code> + <code>GroupName</code> ' +
+              'and (if you keep the assignments) updates the references in any outgoing rows.'
+            ));
+            f.appendChild(wuxField({ id:'wc-sn', label:'New short code', required:true, value:s.newShortName,
+              example:'e.g. AppAdmin or CloudEngineer-Pilot',
+              hint: s.sourceKind === 'role-group' ? 'Becomes <code>ROLE-{ShortName}</code>.' : 'Substitutes into the source GroupTag (or is appended with a hyphen if you give a short name only).',
+              onInput:(v)=>{ s.newShortName=v; rerender(); }
+            }));
+            f.appendChild(wuxField({ id:'wc-inc', label:'Also clone outgoing assignments?', type:'select', value:s.includeChildAssignments ? 'yes' : 'no',
+              options:[ { value:'yes', label:'Yes (default -- copy all rows that reference the source GroupTag)' }, { value:'no', label:'No (only the Definitions row)' } ],
+              onInput:(v)=>{ s.includeChildAssignments = (v === 'yes'); }
+            }));
+            f.appendChild(wuxPreview([
+              { lbl:'From', val: s.sourceTag + ' (' + s.sourceKind + ')' },
+              { lbl:'To',   val: computeCloneTag(s) }
+            ]));
+            return f;
+          },
+          validate: (s) => s.newShortName.trim() ? true : 'Enter a new short code.'
+        },
+        {
+          label: 'Review',
+          render: (s) => {
+            const newTag = computeCloneTag(s);
+            return wuxSummary(
+              'This duplicates the Definitions row for <b>' + escapeHtml(s.sourceTag) + '</b> as <b>' + escapeHtml(newTag) + '</b>' +
+              (s.includeChildAssignments ? ', and copies every outgoing assignment row that references the source GroupTag (with the new tag substituted)' : '') +
+              '. Open the Grid tab to edit the new rows before committing if anything needs tweaking. ' +
+              'No tenant changes happen until you click <b>Commit all</b> on the Save tab.',
+              null
+            );
+          }
+        }
+      ],
+      onFinish: async (s) => { await doCloneGroup(s); }
+    });
+  }
+  function computeCloneTag(s) {
+    if (s.sourceKind === 'role-group') return buildRoleGroupTag(s.newShortName);
+    if (s.newShortName.indexOf('-') >= 0) return sanitizePart(s.newShortName);
+    return s.sourceTag + '-' + sanitizePart(s.newShortName);
+  }
+  async function doCloneGroup(s) {
+    const oldTag = s.sourceTag;
+    const newTag = computeCloneTag(s);
+    const defData = await loadCsv(s.sourceBase);
+    ensurePending(s.sourceBase, defData.header, defData.rows);
+    const src = (pendingChanges[s.sourceBase].rows || []).find(r => (r.GroupTag || '') === oldTag);
+    if (!src) throw new Error('Could not locate the source row in ' + s.sourceBase + ' (GroupTag=' + oldTag + ').');
+    const clone = {};
+    for (const k of Object.keys(src)) clone[k] = src[k];
+    clone.GroupTag = newTag;
+    if (clone.GroupName && clone.GroupName.indexOf(oldTag) >= 0) clone.GroupName = clone.GroupName.split(oldTag).join(newTag);
+    else if (clone.GroupName) clone.GroupName = clone.GroupName + '-Clone';
+    else clone.GroupName = 'PIM-' + newTag;
+    if (clone.GroupDescription) clone.GroupDescription += ' (clone of ' + oldTag + ')';
+    await wuxStage(s.sourceBase, clone);
+    if (!s.includeChildAssignments) return;
+    const xrefs = [
+      { base:'PIM-Assignments-Groups',          tagCols:['SourceGroupTag','TargetGroupTag'] },
+      { base:'PIM-Assignments-Roles-Groups',    tagCols:['GroupTag'] },
+      { base:'PIM-Assignments-Roles-AUs',       tagCols:['GroupTag'] },
+      { base:'PIM-Assignments-Azure-Resources', tagCols:['GroupTag'] }
+    ];
+    for (const x of xrefs) {
+      const d = await loadCsv(x.base);
+      ensurePending(x.base, d.header, d.rows);
+      const orig = (pendingChanges[x.base].rows || []).slice();
+      for (const r of orig) {
+        for (const c of x.tagCols) {
+          if ((r[c] || '') === oldTag) {
+            const copy = {};
+            for (const k of Object.keys(r)) copy[k] = r[k];
+            copy[c] = newTag;
+            await wuxStage(x.base, copy);
+            break;
+          }
+        }
+      }
+    }
+  }
+
+  // SHIM: legacy project body retained, unreachable.
+  async function _wizardProjectLegacy() {
+    const tlScopes = getCachedList('azureScopes');
+    let admins = [];
+    try { const r = await loadCsv('Account-Definitions-Admins'); admins = (r.rows || []).filter(a => a.UserPrincipalName); } catch (_) {}
+
+    const body = document.createElement('div');
+    body.innerHTML = `
+      <div class="wiz-sub" style="padding:10px 14px 0 14px;">Generates the v2 <b>PIM-PROJECT-*</b> pattern from DESIGN.md &sect;12: one project-scoped permission group (Active) + one maintenance group (Eligible) + Active+Eligible admin assignments to the owning admin.</div>
+      <div style="padding:10px 14px;">
+        <div class="field"><label>Project short code <span style="color:#f85149">*</span></label><input id="wzProj" placeholder="e.g. LZ-MyProject"></div>
+        <div class="field"><label>Service</label><input id="wzSvc" value="AzRes"></div>
+        <div class="field"><label>AzScope <span style="color:#f85149">*</span> <span class="cache-badge-slot" data-list-key="azureScopes"></span></label>
+          <select id="wzScope"><option value="">(pick one)</option>${tlScopes.items.map(s => `<option value="${escapeHtml(s.scopePath||s.id)}">${escapeHtml((s.displayName||s.id)+' ('+(s.type||'')+')')}</option>`).join('')}<option value="__custom__">Custom ARM path...</option></select>
+        </div>
+        <div class="field"><label>RBAC role at scope</label><input id="wzRbac" value="Owner"></div>
+        <div class="field"><label>Tier</label><select id="wzTier"><option>T0</option><option selected>T1</option><option>T2</option></select></div>
+        <div class="field"><label>Level</label><select id="wzLevel">${[0,1,2,3,4,5,6,7,8,9].map(i => `<option ${i===5?'selected':''}>L${i}</option>`).join('')}</select></div>
+        <div class="field"><label>Owning admin <span style="color:#f85149">*</span></label>
+          <select id="wzOwner"><option value="">(pick one)</option>${admins.map(a => `<option value="${escapeHtml(a.UserPrincipalName)}">${escapeHtml((a.DisplayName||a.UserPrincipalName))}</option>`).join('')}</select>
+        </div>
+        <div class="preview" id="wzPreview"></div>
+        <div class="err" id="wzErr" style="display:none"></div>
+      </div>`;
+
+    body.querySelector('#wzScope').addEventListener('change', (e) => {
+      if (e.target.value === '__custom__') {
+        const v = window.prompt('Enter custom ARM scope path:', '/subscriptions/') || '';
+        if (v) { const o = document.createElement('option'); o.value = v; o.text = v + ' (custom)'; o.selected = true; e.target.appendChild(o); }
+        else { e.target.value = ''; }
+      }
+    });
+
+    function compose() {
+      const proj = body.querySelector('#wzProj').value.trim();
+      const svc  = body.querySelector('#wzSvc').value.trim() || 'AzRes';
+      const lvl  = body.querySelector('#wzLevel').value;
+      const tier = body.querySelector('#wzTier').value;
+      const suffix = '-Owner-' + lvl + '-' + tier + '-WDP-ID';
+      const tagPrj = proj ? (svc + '-' + proj + suffix) : '';
+      const tagMnt = tagPrj;
+      const namePrj = proj ? ('PIM-PROJECT-' + svc + '-' + proj + suffix) : '';
+      const nameMnt = proj ? ('PIM-' + svc + '-' + proj + suffix) : '';
+      return { proj, svc, lvl, tier, tagPrj, tagMnt, namePrj, nameMnt };
+    }
+    function updatePreview() {
+      const c = compose();
+      const scope = body.querySelector('#wzScope').value;
+      const rbac = body.querySelector('#wzRbac').value;
+      const owner = body.querySelector('#wzOwner').value;
+      const projTag = 'PROJECT-' + c.tagPrj;
+      const lines = [];
+      lines.push(`<div class="pv-row"><span class="pv-csv">PIM-Definitions-Resources +</span>${escapeHtml(c.namePrj||'(set short code)')} (project-scoped, Active)</div>`);
+      lines.push(`<div class="pv-row"><span class="pv-csv">PIM-Definitions-Resources +</span>${escapeHtml(c.nameMnt||'(set short code)')} (maintenance, Eligible)</div>`);
+      if (scope) {
+        lines.push(`<div class="pv-row"><span class="pv-csv">PIM-Assignments-Azure-Resources +</span>${escapeHtml(projTag)} -> ${escapeHtml(scope)} (${escapeHtml(rbac)}, Active)</div>`);
+        lines.push(`<div class="pv-row"><span class="pv-csv">PIM-Assignments-Azure-Resources +</span>${escapeHtml(c.tagMnt)} -> ${escapeHtml(scope)} (${escapeHtml(rbac)}, Active)</div>`);
+      }
+      if (owner) {
+        lines.push(`<div class="pv-row"><span class="pv-csv">PIM-Assignments-Admins +</span>${escapeHtml(owner)} -> ${escapeHtml(projTag)} (Active)</div>`);
+        lines.push(`<div class="pv-row"><span class="pv-csv">PIM-Assignments-Admins +</span>${escapeHtml(owner)} -> ${escapeHtml(c.tagMnt)} (Eligible)</div>`);
+      }
+      body.querySelector('#wzPreview').innerHTML = lines.join('');
+    }
+    body.addEventListener('input', updatePreview);
+    body.addEventListener('change', updatePreview);
+
+    WIZ.open('Project lifecycle (PIM-PROJECT-*)', body);
+    renderCacheBadges(body);
+
+    document.getElementById('wizFinish').onclick = async () => {
+      const err = body.querySelector('#wzErr');
+      const c = compose();
+      const scope = body.querySelector('#wzScope').value;
+      const rbac = body.querySelector('#wzRbac').value;
+      const owner = body.querySelector('#wzOwner').value;
+      if (!c.proj || !scope || !owner) { err.textContent = 'Project code, scope, and owning admin are required.'; err.style.display = ''; return; }
+      err.style.display = 'none';
+
+      const projTag = 'PROJECT-' + c.tagPrj;
+      const additions = [];
+      // Two def rows (project + maintenance).
+      additions.push({ base: 'PIM-Definitions-Resources', row: {
+        GroupName: c.namePrj, GroupDescription: 'Project-scoped (Active during engagement)',
+        GroupTag: projTag, AdministrativeUnitTag: '', IsRoleAssignable: 'FALSE',
+        Workload: c.svc, Level: c.lvl, TierLevel: c.tier, Plane: 'WDP', CPPlatform: 'ID', Owners: ''
+      }});
+      additions.push({ base: 'PIM-Definitions-Resources', row: {
+        GroupName: c.nameMnt, GroupDescription: 'Maintenance (Eligible after engagement)',
+        GroupTag: c.tagMnt, AdministrativeUnitTag: '', IsRoleAssignable: 'FALSE',
+        Workload: c.svc, Level: c.lvl, TierLevel: c.tier, Plane: 'WDP', CPPlatform: 'ID', Owners: ''
+      }});
+      // Both groups assigned to the Azure scope.
+      for (const tag of [projTag, c.tagMnt]) {
+        additions.push({ base: 'PIM-Assignments-Azure-Resources', row: {
+          GroupTag: tag, AzScope: scope, AzScopePermission: rbac,
+          AssignmentType: 'Active', Action: 'Assign', UpdateExisting: 'FALSE', AutoExtend: 'TRUE',
+          NumOfDaysWhenExpire: '90', Permanent: 'FALSE',
+          CPPlatform: 'ID', Plane: 'WDP', TierLevel: c.tier, PermissionScope: 'Scoped', SyncPlatform: ''
+        }});
+      }
+      // Owning admin: Active on project, Eligible on maintenance.
+      additions.push({ base: 'PIM-Assignments-Admins', row: {
+        Username: owner, GroupTag: projTag, AssignmentType: 'Active', Action: 'Assign', UpdateExisting: 'FALSE', AutoExtend: 'TRUE', NumOfDaysWhenExpire: '90', Permanent: 'FALSE', CPPlatform: '', Plane: '', TierLevel: c.tier, PermissionScope: '', SyncPlatform: ''
+      }});
+      additions.push({ base: 'PIM-Assignments-Admins', row: {
+        Username: owner, GroupTag: c.tagMnt, AssignmentType: 'Eligible', Action: 'Assign', UpdateExisting: 'FALSE', AutoExtend: 'TRUE', NumOfDaysWhenExpire: '365', Permanent: 'FALSE', CPPlatform: '', Plane: '', TierLevel: c.tier, PermissionScope: '', SyncPlatform: ''
+      }});
+      await applyAdditions(additions);
+      WIZ.close();
+      switchTab('save');
+    };
+    updatePreview();
+  }
+
+  // ---------- Clone with new tag ------------------------------------
+  async function cloneGroupWithNewTag(groupTag, defBase) {
+    const newSuffix = window.prompt('Enter NEW tag (replaces the existing one verbatim):', groupTag);
+    if (!newSuffix || newSuffix === groupTag) return;
+    if (!PIM_GROUP_TAG_REGEX.test(newSuffix)) {
+      if (!confirm('The new tag "' + newSuffix + '" does not match the naming convention. Continue anyway?')) return;
+    }
+    // Walk the definition CSV + every assignment CSV that may reference the tag.
+    const sources = [
+      { base: defBase, cols: ['GroupTag'] },
+      { base: 'PIM-Assignments-Admins',          cols: ['GroupTag'] },
+      { base: 'PIM-Assignments-Groups',          cols: ['TargetGroupTag','SourceGroupTag'] },
+      { base: 'PIM-Assignments-Roles-Groups',    cols: ['GroupTag'] },
+      { base: 'PIM-Assignments-Roles-AUs',       cols: ['GroupTag'] },
+      { base: 'PIM-Assignments-Azure-Resources', cols: ['GroupTag'] }
+    ];
+    const additions = [];
+    for (const s of sources) {
+      let data;
+      try { data = await loadCsv(s.base); } catch (_) { continue; }
+      for (const r of (data.rows || [])) {
+        if (s.cols.some(c => (r[c] || '') === groupTag)) {
+          const clone = { ...r };
+          for (const c of s.cols) {
+            if ((clone[c] || '') === groupTag) clone[c] = newSuffix;
+          }
+          // Also rename the GroupName if it's a definition row (best-effort substring substitution).
+          if (s.base === defBase && clone.GroupName) {
+            clone.GroupName = String(clone.GroupName).split(groupTag).join(newSuffix);
+          }
+          additions.push({ base: s.base, row: clone });
+        }
+      }
+    }
+    if (additions.length === 0) {
+      await showConfirm('Nothing to clone', '<p>No rows reference <b>' + escapeHtml(groupTag) + '</b>.</p>', false);
+      return;
+    }
+    await applyAdditions(additions);
+    switchTab('save');
+  }
+
+  // Wizard launcher buttons (cards live in the New & clone tab).
+  document.querySelectorAll('.wiz-card').forEach(card => {
+    card.onclick = () => {
+      const w = card.dataset.wiz;
+      if (w === 'admin')           return wizardAdmin();
+      if (w === 'permgroup-entra') return wizardPermGroupEntra();
+      if (w === 'permgroup-azure') return wizardPermGroupAzure();
+      if (w === 'rolegroup')       return wizardRoleGroup();
+      if (w === 'clone')           return wizardClone();
+      if (w === 'project')         return wizardProject();
+    };
+  });
+
+  // ---------- Right-click context menu on Graph nodes ---------------
+  function showCtxMenu(x, y, items) {
+    const m = document.getElementById('ctxMenu');
+    m.innerHTML = items.map((it, i) => `<div class="ctx-item" data-i="${i}">${escapeHtml(it.label)}${it.sub ? '<span class="ctx-sub">' + escapeHtml(it.sub) + '</span>' : ''}</div>`).join('');
+    m.style.left = x + 'px';
+    m.style.top = y + 'px';
+    m.classList.add('active');
+    m.querySelectorAll('.ctx-item').forEach(el => el.onclick = () => {
+      const it = items[parseInt(el.dataset.i, 10)];
+      m.classList.remove('active');
+      if (it && it.fn) it.fn();
+    });
+  }
+  document.addEventListener('click', (e) => {
+    const m = document.getElementById('ctxMenu');
+    if (m && !m.contains(e.target)) m.classList.remove('active');
+  });
+
+  // Hook into cytoscape after buildGraph (cy is ready by then).
+  // Bind once -- cytoscape's cxttap fires on right-click.
+  function bindGraphRightClick() {
+    if (!cy) return;
+    cy.on('cxttap', 'node', (evt) => {
+      const data = evt.target.data();
+      const items = [];
+      if (data.kind === 'role-group' || data.kind === 'permission-group') {
+        const tag = data.groupTag || (data.id || '').replace(/^group:/, '');
+        items.push({
+          label: 'Clone with new tag...',
+          sub: tag,
+          fn: () => wizardClone(tag, data.kind, data.source || (data.kind === 'role-group' ? 'PIM-Definitions-Roles' : 'PIM-Definitions-Tasks'))
+        });
+      }
+      items.push({ label: 'Delete this node', sub: data.label || data.id, fn: () => deleteNode(data) });
+      if (items.length === 0) return;
+      const ev = evt.originalEvent || evt;
+      showCtxMenu(ev.clientX || 200, ev.clientY || 200, items);
+    });
+  }
+  bindGraphRightClick();
+  // Re-bind after each rebuild.
+  const _origBuildGraph = buildGraph;
+  buildGraph = function () { _origBuildGraph.apply(this, arguments); bindGraphRightClick(); renderGraphViolationBadges(); };
+
+  // ===================================================================
+  // Initial UI prep
+  // ===================================================================
+  // Prime caches for any definition CSVs (so the GroupTag dropdowns have data).
+  if (isServer) {
+    (async () => {
+      const defBases = (PIM_DATA.csvBases || []).filter(b => b.group === 'Definitions').map(b => b.base);
+      for (const b of defBases) {
+        try { await loadCsv(b); } catch (_) {}
+      }
+      // Auto-run the pre-flight validator once on page load so the Save
+      // tab's gate + the Graph badges + the Validate badge are populated
+      // before the operator clicks anything.
+      runPreflight({ silent: true }).catch(() => {});
+    })();
   }
 </script>
 </body>

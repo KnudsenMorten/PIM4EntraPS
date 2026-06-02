@@ -1,9 +1,10 @@
 # Release notes for PIM4EntraPS
 
-## v2.1.1
+## v2.1.2
 
 Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monorepo:
 
+- release: PIM4EntraPS v2.1.2 - PIM Manager v0.3: pre-flight validator + bulk Fix-all + multi-step wizards + tenant cache (87feaada)
 - release: PIM4EntraPS v2.1.1 - rename pim-mapper -> pim-manager (does more than map) + field-by-field UX audit spec + wizard scaffolding (42fe18e1)
 - release: PIM4EntraPS v2.1.0 - MSP variant + AccountStatus kill-switch with CISO-controlled per-admin KV codes (d1979fe8)
 - release: PIM4EntraPS v2.0.0 - full PIM v2 framework: engine modernization + Mapper (graph viewer + grid editor + save) + Activator (Edge extension + Intune install) + one-shot engine SPN installer + 18-section DESIGN.md + README rewrite (0118ecf8)
@@ -29,6 +30,85 @@ Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monor
 # Release notes -- PIM4EntraPS
 
 > **Curated changelog.** The publish workflow auto-prepends recent monorepo commits as a raw activity log; this file is the human-friendly narrative on top.
+
+---
+
+## v2.1.2 -- PIM Manager v0.3: pre-flight validator + bulk Fix-all + multi-step wizards + tenant cache + dropdown pickers
+
+The Manager went from "spreadsheet replacement that catches errors at engine runtime" to "spreadsheet replacement that **stops you before you make the mistakes**". Five large landings (three sub-agents + targeted patches):
+
+### 1. Pre-flight validator (new `Validate` tab)
+
+`tools/pim-manager/_validator.ps1` (~870 lines) ships 16 rule codes, ran in <1 s against the production 538-node / 789-edge real-customer config, found **19 errors + 527 warnings + 161 infos** -- including the exact `Entra-ID-CostBillingReader-L1` orphan that crashed the smoke test at line 1196.
+
+Rules:
+- `PIM-FK-001/002/003` -- foreign-key checks (GroupTag / Username / AdministrativeUnitTag referenced but not defined).
+- `PIM-RA-001/002` -- role-assignable group constraints (must be Role-Assignable when terminating in an Entra ID role; only Eligible assignments to such groups).
+- `PIM-TIER-001/002` -- tier-crossing + admin/group tier mismatch.
+- `PIM-NAME-001/002` -- naming-convention regex on tags + admin UPNs.
+- `PIM-ORPHAN-001/002/003` -- admins / groups with no assignments.
+- `PIM-DUP-001` -- same admin reaches same target via 2+ paths.
+- `PIM-STALE-001/002` -- role display name or AU tag not in tenant cache (Microsoft renames / removes catch).
+- `PIM-STATUS-001` -- AccountStatus Disabled/Revoked but StatusChangeCode empty in MSP variant.
+- `PIM-DOMAIN-001` / `PIM-TAP-001` -- minor data-quality checks.
+
+UI: new Validate tab between Save and the right-side meta. Severity chips, CSV filter, regex search, "Open in Grid" jumps to the offending cell. Auto-runs on page load, after every commit, and when the tab is opened. **Save tab Commit-all is gated** when error-severity violations exist (toggle the "Block Save on errors" off to override).
+
+### 2. Bulk "Fix all auto-fixable errors" + per-error quick-fix buttons
+
+- Top-of-Validate button **Fix all auto-fixable errors&hellip;** opens a one-screen modal with three dropdowns: orphan FK-001s (default: add empty definitions), stale Entra roles STALE-001 (default: delete assignments -- Microsoft renamed/removed the role), Active-on-role-assignable RA-002 (default: change to Eligible). One Apply click stages every change into pendingChanges; auto-re-runs validator.
+- Per `PIM-FK-001` card: inline **Remove this assignment row** + **Re-add definition for &quot;X&quot;** buttons. The Re-add opens a small dialog with CSV picker (Tasks / Services / Processes / Resources / Departments / Organization / Roles), GroupTag pre-filled from the violation, GroupName + Description inputs, IsRoleAssignable default FALSE.
+- Grid tab rows that have an active FK-001 violation get a **red outline + ⚠ marker** so you can't miss them when you bounce to the Grid.
+
+### 3. Multi-step wizards in the New &amp; clone tab
+
+Six wizards, rewritten as multi-step flows with the 10 easy-UX rules from `docs/MANAGER-UX-AUDIT.md`:
+
+1. **New admin account** -- 5 steps (Person / Tier &amp; platform / Lifecycle / Role groups / Review). Auto-composes UPN + DisplayName + UserName.
+2. **New permission group (Entra ID role)** -- 5 steps. "What kind of capability?" dropdown maps to the right `PIM-Definitions-*.csv`.
+3. **New permission group (Azure resource)** -- 4 steps. Uses cached `azureScopes` picker.
+4. **New role group** -- 4 steps. Distinct from perm-group wizard (was incorrectly aliased before).
+5. **Clone an existing group** -- 3 steps. Right-click on graph opens it pre-populated with the source node.
+6. **Project lifecycle (time-boxed)** -- 4 steps. Default 90-day, AutoExtend=FALSE.
+
+Every wizard: plain-English labels + CSV column name as sub-label, "Why these fields?" collapsible per step, inline `e.g.` examples, sensible defaults (T1/L3/Cloud/ID/Eligible/365d), back-button + step pills, live "you'll get" preview, plain-English summary on Review, Cancel-and-discard with confirm.
+
+**Focus-preservation bugfix** in `_wizRenderStep` -- typing in a wizard field no longer loses focus on every keystroke (was rerendering the whole step body, clobbering active element + caret).
+
+### 4. Tenant cache + dropdown pickers
+
+- `Open-PimManager.ps1 -RefreshTenantLists` -- new CLI mode (server-side spawnable via `POST /api/refresh-tenant-lists`). Uses the engine SPN to pull Entra ID roles, AUs, current PIM-* groups, Azure scopes; caches to `tools/pim-manager/cache/*.json`.
+- New REST endpoints: `GET /api/tenant-lists`, `POST /api/refresh-tenant-lists`, `GET /api/naming-conventions`.
+- Grid tab cells become `<select>` dropdowns for `RoleDefinitionName`, `AdministrativeUnitTag`, `AzScope`, `GroupTag` (when the cache is populated). "Custom value..." escape hatch on every dropdown for stale-cache / one-off cases.
+- Cache-age badges next to each dropdown (live / stale / none).
+- `cache/` folder gitignored so tenant-specific role / AU / sub names never accidentally commit.
+
+### 5. Smaller patches
+
+- **Cytoscape-dagre registration** -- explicit `cytoscape.use(window.cytoscapeDagre)` before first layout call. Without this the graph rendered as a single vertical line (the plugin's UMD doesn't auto-register reliably). Plus a `breadthfirst` fallback if dagre throws.
+- **Naming-convention regex broadened** -- was rejecting legitimate role-group / dept-group / AD-synced tags (`ROLE-Helpdesk`, `ORG-IT`, `AD-ClientDevicesMgmt-Scoped-L2`). Default now accepts any alphanumeric tag; the strict permission-group shape is the OPT-IN regex via `$global:PIM_NamingConventions.PimGroupTagRegex` in `.custom.ps1`.
+- **Naming-convention violations** -- now WARNINGS not blocks. Confirm dialog with "Commit anyway?" instead of refusing the commit.
+- **showConfirm function header repair** -- a parallel linter had dropped a brace; restored.
+
+### Migration
+
+- **Customers**: pull this release, refresh tenant cache once on first run: `& 'tools\pim-manager\Open-PimManager.ps1' -RefreshTenantLists` (then open normally for the dropdowns to be live).
+- **Existing tenant-list cache files**: none yet -- the `cache/` folder is new in this release.
+- **No engine changes**. Engines + their launchers + the configs are unchanged from v2.1.1.
+
+### Known gaps (v2.1.3 backlog)
+
+- Legacy single-page wizard bodies still in `pim-manager.html` as dead code (`_wizardAdminLegacy` etc., ~700 lines) -- left for diff readability; strip in v2.1.3 cleanup.
+- Engine CSV auto-extend (so a customer running v1 CSV format gets the new v2 columns -- `CreateTAP`, `MailForwardAddress`, `AccountStatus`, `StatusChangeCode` -- added on first read) -- queued.
+- Engine null-guard at line 1196 of `PIM-Baseline-Management-CSV.ps1` -- the same crash class as the v2.0.0 ForEach null-guard but in a different code path; smoke test still hits it after the first 19 FK-001 errors are resolved.
+- v2.2.0 sub-agents (Live tenant overlay, Admin reach explorer, One-click engine run from GUI) -- deliberately deferred; pre-flight + Fix-all is the single biggest UX win, ship those after this iteration settles.
+
+### Verification
+
+- `_validator.ps1` + `_tenantSync.ps1` + `Open-PimManager.ps1` parse-clean under PS 5.1.
+- HTML inline JS parse-clean (`node --check` on the extracted block).
+- `Open-PimManager.ps1` boots, serves the SPA, REST endpoints accept the bearer token (smoke-tested standalone with curl).
+- Validator returns 19 errors / 527 warnings / 161 infos against real customer data in <1 s.
 
 ---
 

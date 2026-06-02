@@ -44,11 +44,11 @@
     server still binds to 127.0.0.1 only. Optional.
 
 .EXAMPLE
-    .\Open-PimMapper.ps1
+    .\Open-PimManager.ps1
     # Default: server mode, random port, opens browser.
 
 .EXAMPLE
-    .\Open-PimMapper.ps1 -StaticHtml -NoLaunch -OutHtml C:\temp\snap.html
+    .\Open-PimManager.ps1 -StaticHtml -NoLaunch -OutHtml C:\temp\snap.html
 
 .NOTES
     Security model (server mode):
@@ -77,7 +77,14 @@ param(
     [switch]$NoLaunch,
 
     [Parameter(ParameterSetName='Server')]
-    [int]$Port = 0
+    [int]$Port = 0,
+
+    # CLI mode: refresh the tenant-list cache (entra-roles, AUs, PIM groups,
+    # azure scopes) by calling Microsoft Graph + Az with the engine SPN, then
+    # exit. Does NOT start the server or open a browser. Use this in a
+    # scheduled task or from a customer bootstrap before launching the UI.
+    [Parameter(ParameterSetName='Refresh')]
+    [switch]$RefreshTenantLists
 )
 
 $ErrorActionPreference = 'Stop'
@@ -89,12 +96,16 @@ $ErrorActionPreference = 'Stop'
 $solutionRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)  # ...\PIM4EntraPS
 $configRoot   = Join-Path $solutionRoot 'config'
 $outputRoot   = Join-Path $solutionRoot 'output'
-$template     = Join-Path $PSScriptRoot 'pim-mapper.html'
-$mutationLog  = Join-Path $outputRoot 'pim-mapper-mutations.log'
+$template     = Join-Path $PSScriptRoot 'pim-manager.html'
+$tenantSync   = Join-Path $PSScriptRoot '_tenantSync.ps1'
+$validator    = Join-Path $PSScriptRoot '_validator.ps1'
+$mutationLog  = Join-Path $outputRoot 'pim-manager-mutations.log'
 
 if (-not (Test-Path -LiteralPath $configRoot)) { throw "Config folder not found: $configRoot" }
 if (-not (Test-Path -LiteralPath $template))   { throw "Template not found: $template" }
 if (-not (Test-Path -LiteralPath $outputRoot)) { New-Item -ItemType Directory -Path $outputRoot -Force | Out-Null }
+if (Test-Path -LiteralPath $tenantSync) { . $tenantSync }
+if (Test-Path -LiteralPath $validator)  { . $validator }
 
 # The 14 CSV bases the mapper edits, in stable UI order, with their default
 # headers used when creating a brand-new .custom.csv.
@@ -354,6 +365,46 @@ function Write-PimMutationLog {
 }
 
 # ---------------------------------------------------------------------------
+# Naming conventions (read .locked then overlay .custom, so the UI sees what
+# the engines would see). Best-effort: returns defaults if the files can't
+# be sourced (e.g. running outside the repo layout).
+# ---------------------------------------------------------------------------
+
+function Get-PimNamingConventions {
+    $defaults = @{
+        AdminAccountPattern           = 'adm_{Owner}'
+        AdminAccountUpnSuffix         = $null
+        PimGroupPattern               = 'PIM_{Role}_{Department}'
+        PimGroupAuPattern             = 'PIM_{Role}_AU_{AdminUnit}'
+        ResourceGroupPattern          = 'rg-pim-{Tier}'
+        AdminAccountDisplayNameSuffix = ' (Admin)'
+    }
+    # Source .locked then .custom into a fresh scope so we don't pollute the
+    # server runspace's $global state on every call.
+    $files = @(
+        (Join-Path $configRoot 'PIM4EntraPS.NamingConventions.locked.ps1'),
+        (Join-Path $configRoot 'PIM4EntraPS.NamingConventions.custom.ps1')
+    )
+    foreach ($f in $files) {
+        if (Test-Path -LiteralPath $f) {
+            try { . $f } catch { Write-Warning "  failed to source $f : $($_.Exception.Message)" }
+        }
+    }
+    if ($global:PIM_NamingConventions) {
+        # Overlay any keys actually set, else fall back to defaults.
+        foreach ($k in @($defaults.Keys)) {
+            if ($global:PIM_NamingConventions.ContainsKey($k)) {
+                $defaults[$k] = $global:PIM_NamingConventions[$k]
+            }
+        }
+        foreach ($k in $global:PIM_NamingConventions.Keys) {
+            if (-not $defaults.ContainsKey($k)) { $defaults[$k] = $global:PIM_NamingConventions[$k] }
+        }
+    }
+    return $defaults
+}
+
+# ---------------------------------------------------------------------------
 # Graph builder (same shape as v0.1, freshly recomputed each call)
 # ---------------------------------------------------------------------------
 
@@ -551,11 +602,15 @@ function Invoke-StaticHtml {
     Write-Host ""
 
     $json = $data | ConvertTo-Json -Depth 12 -Compress
+    $naming = Get-PimNamingConventions
+    $namingJson = $naming | ConvertTo-Json -Depth 4 -Compress
+    $tenantLists = Read-PimTenantListCache
+    $tenantJson  = $tenantLists | ConvertTo-Json -Depth 6 -Compress
     $html = [System.IO.File]::ReadAllText($template, [System.Text.UTF8Encoding]::new($true))
-    $html = $html.Replace('__PIM_DATA__', $json).Replace('__PIM_TOKEN__', '').Replace('__PIM_MODE__', 'static')
+    $html = $html.Replace('__PIM_DATA__', $json).Replace('__PIM_TOKEN__', '').Replace('__PIM_MODE__', 'static').Replace('__PIM_NAMING__', $namingJson).Replace('__PIM_TENANT_LISTS__', $tenantJson)
 
     if (-not $OutHtml) {
-        $OutHtml = Join-Path ([IO.Path]::GetTempPath()) ("pim-mapper-{0}.html" -f ([Guid]::NewGuid().ToString('N').Substring(0,8)))
+        $OutHtml = Join-Path ([IO.Path]::GetTempPath()) ("pim-manager-{0}.html" -f ([Guid]::NewGuid().ToString('N').Substring(0,8)))
     }
     [System.IO.File]::WriteAllText($OutHtml, $html, [System.Text.UTF8Encoding]::new($false))
     Write-Host "Rendered: $OutHtml" -ForegroundColor Green
@@ -725,8 +780,12 @@ function Handle-Request {
     if ($path -eq '/' -and $method -eq 'GET') {
         $data = Build-PimGraphData
         $json = $data | ConvertTo-Json -Depth 12 -Compress
+        $naming = Get-PimNamingConventions
+        $namingJson = $naming | ConvertTo-Json -Depth 4 -Compress
+        $tenantLists = Read-PimTenantListCache
+        $tenantJson  = $tenantLists | ConvertTo-Json -Depth 6 -Compress
         $html = [System.IO.File]::ReadAllText($template, [System.Text.UTF8Encoding]::new($true))
-        $html = $html.Replace('__PIM_DATA__', $json).Replace('__PIM_TOKEN__', $ExpectedToken).Replace('__PIM_MODE__', 'server')
+        $html = $html.Replace('__PIM_DATA__', $json).Replace('__PIM_TOKEN__', $ExpectedToken).Replace('__PIM_MODE__', 'server').Replace('__PIM_NAMING__', $namingJson).Replace('__PIM_TENANT_LISTS__', $tenantJson)
         Write-HtmlResponse -Response $resp -Html $html
         $script:lastHeartbeat = Get-Date
         return 200
@@ -810,6 +869,57 @@ function Handle-Request {
             }
         }
 
+        if ($path -eq '/api/tenant-lists' -and $method -eq 'GET') {
+            $script:lastHeartbeat = Get-Date
+            $tenantLists = Read-PimTenantListCache
+            Write-JsonResponse -Response $resp -Status 200 -Body $tenantLists
+            return 200
+        }
+
+        if ($path -eq '/api/refresh-tenant-lists' -and $method -eq 'POST') {
+            $script:lastHeartbeat = Get-Date
+            if (-not (Get-Command Invoke-PimTenantListRefresh -ErrorAction SilentlyContinue)) {
+                Write-JsonResponse -Response $resp -Status 500 -Body @{ ok = $false; error = '_tenantSync.ps1 was not loaded -- file missing next to Open-PimManager.ps1' }
+                return 500
+            }
+            try {
+                $result = Invoke-PimTenantListRefresh
+                $tenantLists = Read-PimTenantListCache
+                Write-JsonResponse -Response $resp -Status 200 -Body ([ordered]@{
+                    ok      = $result.ok
+                    reason  = $result.reason
+                    results = $result.results
+                    lists   = $tenantLists
+                })
+                return 200
+            } catch {
+                Write-JsonResponse -Response $resp -Status 500 -Body @{ ok = $false; error = "$($_.Exception.Message)" }
+                return 500
+            }
+        }
+
+        if ($path -eq '/api/naming-conventions' -and $method -eq 'GET') {
+            $script:lastHeartbeat = Get-Date
+            Write-JsonResponse -Response $resp -Status 200 -Body (Get-PimNamingConventions)
+            return 200
+        }
+
+        if ($path -eq '/api/preflight' -and $method -eq 'GET') {
+            $script:lastHeartbeat = Get-Date
+            if (-not (Get-Command Invoke-PimPreflightValidation -ErrorAction SilentlyContinue)) {
+                Write-JsonResponse -Response $resp -Status 500 -Body @{ error = '_validator.ps1 was not loaded -- file missing next to Open-PimManager.ps1' }
+                return 500
+            }
+            try {
+                $report = Invoke-PimPreflightValidation
+                Write-JsonResponse -Response $resp -Status 200 -Body $report
+                return 200
+            } catch {
+                Write-JsonResponse -Response $resp -Status 500 -Body @{ error = "$($_.Exception.Message)" }
+                return 500
+            }
+        }
+
         if ($path -match '^/api/diff/([\w\.-]+)$' -and $method -eq 'POST') {
             $base = $Matches[1]
             $spec = Get-PimCsvSpec -BaseName $base
@@ -848,9 +958,22 @@ function Handle-Request {
 # Entrypoint
 # ---------------------------------------------------------------------------
 
-if ($PSCmdlet.ParameterSetName -eq 'Static') {
-    Invoke-StaticHtml -OutHtml $OutHtml
-} else {
-    # Default = server mode (even without -Server explicitly set).
-    Invoke-Server -DesiredPort $Port
+switch ($PSCmdlet.ParameterSetName) {
+    'Static'  { Invoke-StaticHtml -OutHtml $OutHtml }
+    'Refresh' {
+        Write-Host "PIM4EntraPS Mapper -- refreshing tenant lists ..." -ForegroundColor Cyan
+        if (-not (Get-Command Invoke-PimTenantListRefresh -ErrorAction SilentlyContinue)) {
+            throw "_tenantSync.ps1 was not loaded -- expected next to Open-PimManager.ps1 at: $tenantSync"
+        }
+        $r = Invoke-PimTenantListRefresh
+        if ($r.ok) {
+            Write-Host "  done." -ForegroundColor Green
+        } else {
+            Write-Warning ("  refresh did not complete: {0}" -f ($r.reason | Out-String))
+        }
+    }
+    default {
+        # Default = server mode (even without -Server explicitly set).
+        Invoke-Server -DesiredPort $Port
+    }
 }
