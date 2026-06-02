@@ -1,9 +1,10 @@
 # Release notes for PIM4EntraPS
 
-## v2.1.0
+## v2.1.1
 
 Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monorepo:
 
+- release: PIM4EntraPS v2.1.1 - rename pim-mapper -> pim-manager (does more than map) + field-by-field UX audit spec + wizard scaffolding (42fe18e1)
 - release: PIM4EntraPS v2.1.0 - MSP variant + AccountStatus kill-switch with CISO-controlled per-admin KV codes (d1979fe8)
 - release: PIM4EntraPS v2.0.0 - full PIM v2 framework: engine modernization + Mapper (graph viewer + grid editor + save) + Activator (Edge extension + Intune install) + one-shot engine SPN installer + 18-section DESIGN.md + README rewrite (0118ecf8)
 - release: PIM4EntraPS v1.0.2 - SI launcher naming alignment + fix internal-azure leak in publish workflow + rewire engine path resolution for new engine/<task>/ layout (2ff8ebb1)
@@ -28,6 +29,48 @@ Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monor
 # Release notes -- PIM4EntraPS
 
 > **Curated changelog.** The publish workflow auto-prepends recent monorepo commits as a raw activity log; this file is the human-friendly narrative on top.
+
+---
+
+## v2.1.1 -- rename `pim-mapper` -> `pim-manager` + field-by-field UX audit + wizard scaffolding
+
+The tool is no longer just a mapper -- it creates, edits, deletes, and now (in flight) gains wizards + dropdowns + a tenant cache. Renaming so the name describes what the tool does:
+
+- `tools/pim-mapper/` -> `tools/pim-manager/`
+- `Open-PimMapper.ps1` -> `Open-PimManager.ps1`
+- `pim-mapper.html` -> `pim-manager.html`
+- `pim-mapper-mutations.log` -> `pim-manager-mutations.log`
+- HTML title + h1: "PIM4EntraPS Mapper" -> "PIM4EntraPS Manager"
+- All references in `README.md`, `docs/DESIGN.md`, `RELEASENOTES.md`, the tool's own `README.md`.
+
+### New: field-by-field UX audit (`docs/MANAGER-UX-AUDIT.md`)
+
+Maps every column across all 14 CSVs to an input strategy (dropdown / autocomplete / tenant cache / cross-CSV / inherited / auto-derived / freeform). Used as the spec for the wizards + dropdowns landing in v2.1.2. Key rules:
+
+- No typed GUIDs or ARM paths anywhere -- always picker.
+- No typed Entra role display names -- always cache-backed dropdown.
+- Selecting a `GroupTag` inherits 5 downstream columns (CPPlatform / Plane / TierLevel / PermissionScope / SyncPlatform) read-only with an override toggle.
+- Naming convention auto-applies (operator never assembles `PIM-<Service>-<Name>-L<Level>-T<Tier>-<Code>-<Domain>` manually).
+- Live preview of auto-derived fields while operator types upstream inputs.
+- "Custom..." escape hatch on every dropdown for stale-cache / one-off cases.
+- Tenant cache auto-refreshes on launch when stale (>24h) or missing.
+
+### New: wizard scaffolding (in flight, ships in v2.1.2)
+
+- `Open-PimManager.ps1` gains a new `-RefreshTenantLists` CLI mode (parses clean in v2.1.1; full functional implementation in v2.1.2). Pulls Entra ID roles, AUs, current PIM-* groups, Azure scopes via the engine SPN, caches to `tools/pim-manager/cache/*.json`.
+- New helper file: `tools/pim-manager/_tenantSync.ps1` (dot-sourced by Open-PimManager.ps1).
+- Wizards planned in v2.1.2: New admin, New permission group (Entra ID role variant), New permission group (Azure resource variant), Project lifecycle (PIM-PROJECT-* pattern), Clone permission group with new tag.
+
+### Migration
+
+- **Customers**: pull this release, your old `tools/pim-mapper/` path stops working. Replace any scripts/scheduled tasks that called `Open-PimMapper.ps1` with the same args against `Open-PimManager.ps1`.
+- **Public mirror**: the rename propagates on the next publish workflow run (tag `PIM4EntraPS-v2.1.1`).
+
+### Verification
+
+- All renamed `.ps1` files parse-clean under PowerShell 5.1.
+- HTML title + h1 updated.
+- No remaining `pim-mapper` references in any tracked file (grep-verified).
 
 ---
 
@@ -150,15 +193,15 @@ Three structural changes that break the v1.x contract:
 - `config/Custom-Policies.locked.ps1` -> `config/policies.custom.ps1` + `config/policies.custom.sample.ps1`. Same pattern.
 - `config/Account-Definitions-Admins.locked.csv` -- added `CreateTAP` + `TAPStartDate` columns.
 
-**New tool: `tools/pim-mapper/`** (interactive graph viewer + grid editor)
+**New tool: `tools/pim-manager/`** (interactive graph viewer + grid editor)
 
-- `Open-PimMapper.ps1` -- default `-Server` mode binds a localhost-only `HttpListener` on a random free port, serves the SPA, exposes REST endpoints for GET/PUT each of the 14 CSVs + diff preview + heartbeat. Bearer-token auth (random GUID per session). Auto-terminates 30 s after the browser tab closes. `-StaticHtml` reverts to the v0.1 read-only baked-HTML viewer.
-- `pim-mapper.html` -- three-tab SPA (Graph | Grid | Save).
+- `Open-PimManager.ps1` -- default `-Server` mode binds a localhost-only `HttpListener` on a random free port, serves the SPA, exposes REST endpoints for GET/PUT each of the 14 CSVs + diff preview + heartbeat. Bearer-token auth (random GUID per session). Auto-terminates 30 s after the browser tab closes. `-StaticHtml` reverts to the v0.1 read-only baked-HTML viewer.
+- `pim-manager.html` -- three-tab SPA (Graph | Grid | Save).
   - **Graph tab**: cytoscape.js DAG (admin -> role group -> permission group -> target), dagre L-to-R layout, layer + edge-type filters, regex search, click-to-highlight neighbourhood, side panel with FK chain.
   - **Grid tab**: pick any of the 14 CSVs, edit cells like a spreadsheet (`<table contenteditable>`, no third-party grid lib). Add row / delete row. Pending changes tracked per CSV.
   - **Save tab**: per-CSV diff preview (adds green, removes red, modifies yellow) before commit. One "Commit all" button writes `*.custom.csv` atomically (temp + `Move-Item -Force`, UTF-8 no-BOM, `;`-delimited).
   - Graph-tab delete button on any selected node/edge: removes the matching row(s) across affected CSVs into the pending-changes pool (commit via Save tab).
-- All writes go to `<base>.custom.csv` only -- never `<base>.locked.csv`. Mutation log appended to `output/pim-mapper-mutations.log`.
+- All writes go to `<base>.custom.csv` only -- never `<base>.locked.csv`. Mutation log appended to `output/pim-manager-mutations.log`.
 
 **New tool: `tools/pim-activator/`** (Edge browser extension for bulk PIM-for-Groups activation)
 
