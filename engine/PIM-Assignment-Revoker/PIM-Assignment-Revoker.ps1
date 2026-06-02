@@ -67,7 +67,7 @@ Write-Output "******************************************************************
 ######################################################################################################
 
     # Loading PIM functions
-    Import-Module "$($global:PathScripts)\FUNCTIONS\PIM-Functions.psm1" -Global -force -WarningAction SilentlyContinue
+    Import-Module (Join-Path $PSScriptRoot '..\_shared\PIM-Functions.psm1') -Global -Force -WarningAction SilentlyContinue
 
 ######################################################################################################
 # PS Module dependency AzResourceGraphPS - built by Morten Knudsen
@@ -798,3 +798,4 @@ While ($Step1_Result.Type -ne "Exit")
             Break
         }
 }
+

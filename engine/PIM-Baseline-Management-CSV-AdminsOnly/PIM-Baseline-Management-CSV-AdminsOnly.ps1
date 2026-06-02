@@ -72,7 +72,7 @@ Write-Output "******************************************************************
 ######################################################################################################
 
     # Loading PIM functions
-    Import-Module "$($global:PathScripts)\FUNCTIONS\PIM-Functions.psm1" -Global -force -WarningAction SilentlyContinue
+    Import-Module (Join-Path $PSScriptRoot '..\_shared\PIM-Functions.psm1') -Global -Force -WarningAction SilentlyContinue
 
 ######################################################################################################
 # PS Module dependency AzResourceGraphPS - built by Morten Knudsen
@@ -102,17 +102,15 @@ Write-Output "******************************************************************
 # Variables
 ######################################################################################################
 
-    Write-host ""
-    Write-host "Getting privileged information from Keyvault ... Please Wait !"
-
-    $AdminAccountsInitialPassword = Get-AzKeyVaultSecret -VaultName $global:KV_HighPriv_KeyVaultName -Name "AdminAccountsInitialPassword" -AsPlainText
+    # No KV fetch needed -- random per-account passwords are generated inside
+    # CreateUpdate-Accounts-From-file-CSV via New-PimRandomPassword.
 
 ######################################################################################################
 # Include custom settings
 ######################################################################################################
 
     # Source Repository
-    & "$($global:PathScripts)\PIM4EntraPS\Custom-Repository.ps1"
+    & (Get-PimCustomScript -Name 'repository')
 
 
 ######################################################################################################
@@ -203,9 +201,12 @@ Write-Output "******************************************************************
 # Admin Accounts | Create/Update
 ######################################################################################################################
 
-    CreateUpdate-Accounts-From-file-CSV -AccountsDefinitionFile $AccountsDefinitionFile `
-                                        -DefaultPassword $AdminAccountsInitialPassword `
-                                        -OnlyID
+    if ($global:WhatIfMode) {
+        Write-Host "[WHATIF] Skipping CreateUpdate-Accounts-From-file-CSV (creates/modifies real admin accounts in Entra ID + Exchange Online)." -ForegroundColor Yellow
+    } else {
+        CreateUpdate-Accounts-From-file-CSV -AccountsDefinitionFile $AccountsDefinitionFile `
+                                            -OnlyID
+    }
 
 
 ######################################################################################################

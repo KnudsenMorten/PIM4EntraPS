@@ -8,6 +8,19 @@
 $MaximumFunctionCount = 32768
 
 ######################################################################################################################
+# Strip PowerShell 7 module paths from PSModulePath when running in PS 5.1.
+#
+# Why: PS7's PackageManagement folder under '<Program Files>\PowerShell\7\Modules\' contains a
+# 'fullclr' subfolder that PS 5.1 will eagerly probe -- but the matching DLL is missing in PS7's
+# distribution (PS7 only ships 'coreclr'). Result: any module that pulls PackageManagement (e.g.
+# ExchangeOnlineManagement) fails to load with "no valid module file was found".
+######################################################################################################################
+
+if ($PSVersionTable.PSVersion.Major -lt 7) {
+    $env:PSModulePath = (($env:PSModulePath -split ';') | Where-Object { $_ -and ($_ -notmatch '\\PowerShell\\7\\') }) -join ';'
+}
+
+######################################################################################################################
 # Module-level imports — loaded ONCE when the module is imported, never inside functions or loops.
 # This prevents the PowerShell function table (4096 limit) from overflowing.
 ######################################################################################################################
@@ -271,7 +284,7 @@ Function Add-Exchange-Role-to-PAG-Group
         }
     Else
         {
-            Write-host "ERROR: Could NOT find any PAG groups with GroupTag $($GroupTag) in the definitions" -ForegroundColor Red
+            Write-host "ERROR: Could NOT find any PIM groups with GroupTag $($GroupTag) in the definitions" -ForegroundColor Red
         }
 
 }
@@ -2277,15 +2290,16 @@ Function Assign-Roles-AdministrativeUnits-From-file-CSV
 # Get current Assignments
 ######################################################################################################################
 
-    $FileOutputPath = "$($global:PathScripts)\OUTPUT\PIM"
+    $FileOutputPath = Get-PimOutputDir
 
     $FileOutputPIM4Groups = $FileOutputPath + "\" + "PIM-Delegations-PIM4Groups.csv"
     $FileOutputEntraIDRoles = $FileOutputPath + "\" + "PIM-Delegations-EntraID-Roles.csv"
     $FileOutputAzureRoles = $FileOutputPath + "\" + "PIM-Delegations-Azure-Roles.csv"
 
-    $CurrentAssignments_PIM4Groups = Import-csv -Path $FileOutputPIM4Groups -Delimiter ";" -Encoding UTF8
-    $CurrentAssignments_EntraIDRoles = Import-csv -Path $FileOutputEntraIDRoles -Delimiter ";" -Encoding UTF8
-    $CurrentAssignments_AzureRoles = Import-csv -Path $FileOutputAzureRoles -Delimiter ";" -Encoding UTF8
+    # Missing files = first run on this VM (the exporter hasn't populated them yet); treat as empty.
+    $CurrentAssignments_PIM4Groups   = if (Test-Path -LiteralPath $FileOutputPIM4Groups)   { Import-csv -Path $FileOutputPIM4Groups   -Delimiter ";" -Encoding UTF8 } else { @() }
+    $CurrentAssignments_EntraIDRoles = if (Test-Path -LiteralPath $FileOutputEntraIDRoles) { Import-csv -Path $FileOutputEntraIDRoles -Delimiter ";" -Encoding UTF8 } else { @() }
+    $CurrentAssignments_AzureRoles   = if (Test-Path -LiteralPath $FileOutputAzureRoles)   { Import-csv -Path $FileOutputAzureRoles   -Delimiter ";" -Encoding UTF8 } else { @() }
 
 ######################################################################################################################
 # Assignment of Roles to Administrative Units
@@ -2325,7 +2339,7 @@ Function Assign-Roles-AdministrativeUnits-From-file-CSV
                         }
                     Else
                         {
-                            Write-host "ERROR: Could NOT find any PAG groups with GroupTag $($GroupTag) in the definitions" -ForegroundColor Red
+                            Write-host "ERROR: Could NOT find any PIM groups with GroupTag $($GroupTag) in the definitions" -ForegroundColor Red
                         }
 
                     If ($AU)
@@ -2687,15 +2701,16 @@ Function Assign-Roles-AdministrativeUnits-From-SQL
 # Get current Assignments
 ######################################################################################################################
 
-    $FileOutputPath = "$($global:PathScripts)\OUTPUT\PIM"
+    $FileOutputPath = Get-PimOutputDir
 
     $FileOutputPIM4Groups = $FileOutputPath + "\" + "PIM-Delegations-PIM4Groups.csv"
     $FileOutputEntraIDRoles = $FileOutputPath + "\" + "PIM-Delegations-EntraID-Roles.csv"
     $FileOutputAzureRoles = $FileOutputPath + "\" + "PIM-Delegations-Azure-Roles.csv"
 
-    $CurrentAssignments_PIM4Groups = Import-csv -Path $FileOutputPIM4Groups -Delimiter ";" -Encoding UTF8
-    $CurrentAssignments_EntraIDRoles = Import-csv -Path $FileOutputEntraIDRoles -Delimiter ";" -Encoding UTF8
-    $CurrentAssignments_AzureRoles = Import-csv -Path $FileOutputAzureRoles -Delimiter ";" -Encoding UTF8
+    # Missing files = first run on this VM (the exporter hasn't populated them yet); treat as empty.
+    $CurrentAssignments_PIM4Groups   = if (Test-Path -LiteralPath $FileOutputPIM4Groups)   { Import-csv -Path $FileOutputPIM4Groups   -Delimiter ";" -Encoding UTF8 } else { @() }
+    $CurrentAssignments_EntraIDRoles = if (Test-Path -LiteralPath $FileOutputEntraIDRoles) { Import-csv -Path $FileOutputEntraIDRoles -Delimiter ";" -Encoding UTF8 } else { @() }
+    $CurrentAssignments_AzureRoles   = if (Test-Path -LiteralPath $FileOutputAzureRoles)   { Import-csv -Path $FileOutputAzureRoles   -Delimiter ";" -Encoding UTF8 } else { @() }
 
 
 ######################################################################################################################
@@ -2733,7 +2748,7 @@ Function Assign-Roles-AdministrativeUnits-From-SQL
                 }
             Else
                 {
-                    Write-host "ERROR: Could NOT find any PAG groups with GroupTag $($GroupTag) in the definitions" -ForegroundColor Red
+                    Write-host "ERROR: Could NOT find any PIM groups with GroupTag $($GroupTag) in the definitions" -ForegroundColor Red
                 }
 
             If ($AU)
@@ -2979,15 +2994,16 @@ Function Assign-Roles-Groups-From-file-CSV
 # Get current Assignments
 ######################################################################################################################
 
-    $FileOutputPath = "$($global:PathScripts)\OUTPUT\PIM"
+    $FileOutputPath = Get-PimOutputDir
 
     $FileOutputPIM4Groups = $FileOutputPath + "\" + "PIM-Delegations-PIM4Groups.csv"
     $FileOutputEntraIDRoles = $FileOutputPath + "\" + "PIM-Delegations-EntraID-Roles.csv"
     $FileOutputAzureRoles = $FileOutputPath + "\" + "PIM-Delegations-Azure-Roles.csv"
 
-    $CurrentAssignments_PIM4Groups = Import-csv -Path $FileOutputPIM4Groups -Delimiter ";" -Encoding UTF8
-    $CurrentAssignments_EntraIDRoles = Import-csv -Path $FileOutputEntraIDRoles -Delimiter ";" -Encoding UTF8
-    $CurrentAssignments_AzureRoles = Import-csv -Path $FileOutputAzureRoles -Delimiter ";" -Encoding UTF8
+    # Missing files = first run on this VM (the exporter hasn't populated them yet); treat as empty.
+    $CurrentAssignments_PIM4Groups   = if (Test-Path -LiteralPath $FileOutputPIM4Groups)   { Import-csv -Path $FileOutputPIM4Groups   -Delimiter ";" -Encoding UTF8 } else { @() }
+    $CurrentAssignments_EntraIDRoles = if (Test-Path -LiteralPath $FileOutputEntraIDRoles) { Import-csv -Path $FileOutputEntraIDRoles -Delimiter ";" -Encoding UTF8 } else { @() }
+    $CurrentAssignments_AzureRoles   = if (Test-Path -LiteralPath $FileOutputAzureRoles)   { Import-csv -Path $FileOutputAzureRoles   -Delimiter ";" -Encoding UTF8 } else { @() }
 
 ######################################################################################################################
 # Assignment of PIM for Groups / Privileged Access Group (PAG)
@@ -3059,7 +3075,7 @@ Function Assign-Roles-Groups-From-file-CSV
                 }
             Else
                 {
-                    Write-host "ERROR: Could NOT find any PAG groups with GroupTag $($GroupTag) in the definitions" -ForegroundColor Red
+                    Write-host "ERROR: Could NOT find any PIM groups with GroupTag $($GroupTag) in the definitions" -ForegroundColor Red
                 }
 
             If ($RoleDefinitionName)
@@ -3449,7 +3465,7 @@ Function Assign-Roles-Groups-From-SQL
                 }
             Else
                 {
-                    Write-host "ERROR: Could NOT find any PAG groups with GroupTag $($GroupTag) in the definitions" -ForegroundColor Red
+                    Write-host "ERROR: Could NOT find any PIM groups with GroupTag $($GroupTag) in the definitions" -ForegroundColor Red
                 }
 
             If ($RoleDefinitionName)
@@ -3477,15 +3493,16 @@ Function Assign-AzResources-Groups-From-file-CSV
 # Get current Assignments
 ######################################################################################################################
 
-    $FileOutputPath = "$($global:PathScripts)\OUTPUT\PIM"
+    $FileOutputPath = Get-PimOutputDir
 
     $FileOutputPIM4Groups = $FileOutputPath + "\" + "PIM-Delegations-PIM4Groups.csv"
     $FileOutputEntraIDRoles = $FileOutputPath + "\" + "PIM-Delegations-EntraID-Roles.csv"
     $FileOutputAzureRoles = $FileOutputPath + "\" + "PIM-Delegations-Azure-Roles.csv"
 
-    $CurrentAssignments_PIM4Groups = Import-csv -Path $FileOutputPIM4Groups -Delimiter ";" -Encoding UTF8
-    $CurrentAssignments_EntraIDRoles = Import-csv -Path $FileOutputEntraIDRoles -Delimiter ";" -Encoding UTF8
-    $CurrentAssignments_AzureRoles = Import-csv -Path $FileOutputAzureRoles -Delimiter ";" -Encoding UTF8
+    # Missing files = first run on this VM (the exporter hasn't populated them yet); treat as empty.
+    $CurrentAssignments_PIM4Groups   = if (Test-Path -LiteralPath $FileOutputPIM4Groups)   { Import-csv -Path $FileOutputPIM4Groups   -Delimiter ";" -Encoding UTF8 } else { @() }
+    $CurrentAssignments_EntraIDRoles = if (Test-Path -LiteralPath $FileOutputEntraIDRoles) { Import-csv -Path $FileOutputEntraIDRoles -Delimiter ";" -Encoding UTF8 } else { @() }
+    $CurrentAssignments_AzureRoles   = if (Test-Path -LiteralPath $FileOutputAzureRoles)   { Import-csv -Path $FileOutputAzureRoles   -Delimiter ";" -Encoding UTF8 } else { @() }
 
 ######################################################################################################################
 # Assignment of PIM for Azure Resources / Privileged Access Group (PAG)
@@ -3551,7 +3568,7 @@ Function Assign-AzResources-Groups-From-file-CSV
                 }
             Else
                 {
-                    Write-host "ERROR: Could NOT find any PAG groups with GroupTag $($GroupTag) in the definitions" -ForegroundColor Red
+                    Write-host "ERROR: Could NOT find any PIM groups with GroupTag $($GroupTag) in the definitions" -ForegroundColor Red
                 }
             
             # Check if group already exist
@@ -3895,7 +3912,7 @@ Function Assign-AzResources-Groups-From-SQL
                 }
             Else
                 {
-                    Write-host "ERROR: Could NOT find any PAG groups with GroupTag $($GroupTag) in the definitions" -ForegroundColor Red
+                    Write-host "ERROR: Could NOT find any PIM groups with GroupTag $($GroupTag) in the definitions" -ForegroundColor Red
                 }
             
             Assign-PIM-Group-Resource -GroupName $GroupName `
@@ -3922,15 +3939,16 @@ Function Assign-PIMForGroups-From-file-CSV
 # Get current Assignments
 ######################################################################################################################
 
-    $FileOutputPath = "$($global:PathScripts)\OUTPUT\PIM"
+    $FileOutputPath = Get-PimOutputDir
 
     $FileOutputPIM4Groups = $FileOutputPath + "\" + "PIM-Delegations-PIM4Groups.csv"
     $FileOutputEntraIDRoles = $FileOutputPath + "\" + "PIM-Delegations-EntraID-Roles.csv"
     $FileOutputAzureRoles = $FileOutputPath + "\" + "PIM-Delegations-Azure-Roles.csv"
 
-    $CurrentAssignments_PIM4Groups = Import-csv -Path $FileOutputPIM4Groups -Delimiter ";" -Encoding UTF8
-    $CurrentAssignments_EntraIDRoles = Import-csv -Path $FileOutputEntraIDRoles -Delimiter ";" -Encoding UTF8
-    $CurrentAssignments_AzureRoles = Import-csv -Path $FileOutputAzureRoles -Delimiter ";" -Encoding UTF8
+    # Missing files = first run on this VM (the exporter hasn't populated them yet); treat as empty.
+    $CurrentAssignments_PIM4Groups   = if (Test-Path -LiteralPath $FileOutputPIM4Groups)   { Import-csv -Path $FileOutputPIM4Groups   -Delimiter ";" -Encoding UTF8 } else { @() }
+    $CurrentAssignments_EntraIDRoles = if (Test-Path -LiteralPath $FileOutputEntraIDRoles) { Import-csv -Path $FileOutputEntraIDRoles -Delimiter ";" -Encoding UTF8 } else { @() }
+    $CurrentAssignments_AzureRoles   = if (Test-Path -LiteralPath $FileOutputAzureRoles)   { Import-csv -Path $FileOutputAzureRoles   -Delimiter ";" -Encoding UTF8 } else { @() }
 
 ######################################################################################################################
 # Assignment of PIM for Groups / Privileged Access Group (PAG)
@@ -4009,7 +4027,7 @@ Function Assign-PIMForGroups-From-file-CSV
                                 }
                             Else
                                 {
-                                    Write-host "ERROR: Could NOT find any PAG groups with GroupTag $($GroupTagSource) in the definitions" -ForegroundColor Red
+                                    Write-host "ERROR: Could NOT find any PIM groups with GroupTag $($GroupTagSource) in the definitions" -ForegroundColor Red
                                 }
                         }
 
@@ -4323,8 +4341,6 @@ Function CreateUpdate-Accounts-From-file-CSV
             [Parameter(mandatory)]
                 [string]$AccountsDefinitionFile,
             [Parameter()]
-                [string]$DefaultPassword,
-            [Parameter()]
                 [string]$PathAdmins,
             [Parameter()]
                 [string]$PathAdminsL0T0,
@@ -4342,6 +4358,7 @@ Function CreateUpdate-Accounts-From-file-CSV
 ######################################################################################################################
 
     # Exchange Online
+    Manage-Powershell-Module -ModuleName 'ExchangeOnlineManagement' -Scope AllUsers
     Write-Output "Connecting to Exchange Online using High Privilege Account using Modern method (certificate)"
     Connect-ExchangeOnline -CertificateThumbprint $HighPriv_Modern_CertificateThumbprint_O365 -AppId $HighPriv_Modern_ApplicationID_O365 -ShowProgress $false -Organization $TenantNameOrganization -ShowBanner
 
@@ -4385,11 +4402,12 @@ Function CreateUpdate-Accounts-From-file-CSV
                     $ForwardMails = $FALSE
                 }
 
-            $PasswordProfile = @{
-                                  Password = $DefaultPassword
-                                }
-
-            $AD_PasswordProfile = ConvertTo-SecureString $DefaultPassword -AsPlainText -Force 
+            # Per-account random password. Each newly-created account gets its own;
+            # captured to output/admin-passwords-<yyyyMMdd>.txt by Write-PimAdminPassword
+            # after a successful New-MgBetaUser / New-ADUser.
+            $generatedPassword  = New-PimRandomPassword
+            $PasswordProfile    = @{ Password = $generatedPassword }
+            $AD_PasswordProfile = ConvertTo-SecureString $generatedPassword -AsPlainText -Force
 
             $Description = $DisplayName
 
@@ -4437,6 +4455,19 @@ Function CreateUpdate-Accounts-From-file-CSV
                                                  -UsageLocation $UsageLocation
 
                             $Result = Update-MgBetaUser -UserId $UserPrincipalName -PasswordPolicies DisablePasswordExpiration
+
+                            Write-PimAdminPassword -UserPrincipalName $UserPrincipalName -Password $generatedPassword -Platform 'ID'
+
+                            # TAP (Temporary Access Pass) -- created when the CSV row sets CreateTAP=TRUE.
+                            # Customer-facing recommended path: deliver the TAP code out-of-band, the
+                            # admin uses it to register their own credentials, and the random password
+                            # above never has to leave the password log file.
+                            If ($CreateTAP -eq 'TRUE' -or $CreateTAP -eq $true) {
+                                $tap = New-PimTemporaryAccessPass -UserId $UserPrincipalName -StartDateTime $TAPStartDate
+                                if ($tap) {
+                                    Write-PimAdminTap -UserPrincipalName $UserPrincipalName -Code $tap.Code -StartDateTime $tap.StartDateTime -LifetimeInMinutes $tap.LifetimeInMinutes
+                                }
+                            }
 
                             If ($ForwardMails) {
                                 Try {
@@ -4491,7 +4522,7 @@ Function CreateUpdate-Accounts-From-file-CSV
                                 }
                             ElseIf ($TierLevel -eq "L1")
                                 {
-                            
+
                                     $Result = New-ADUser -Name $UserName `
                                                          -GivenName $FirstName `
                                                          -Surname $LastName `
@@ -4504,6 +4535,8 @@ Function CreateUpdate-Accounts-From-file-CSV
                                                          -Enabled:$true `
                                                          -Credential $Credentials
                                 }
+
+                            Write-PimAdminPassword -UserPrincipalName $UserPrincipalName -Password $generatedPassword -Platform 'AD'
                         }
                 }
         }
@@ -4517,8 +4550,6 @@ Function CreateUpdate-Accounts-From-SQL
 
             [Parameter(mandatory)]
                 [string]$SQLTable,
-            [Parameter()]
-                [string]$DefaultPassword,
             [Parameter()]
                 [string]$Path,
             [Parameter()]
@@ -4564,11 +4595,12 @@ Function CreateUpdate-Accounts-From-SQL
                     $ForwardMailsToContact = $FALSE
                 }
 
-            $PasswordProfile = @{
-                                  Password = $DefaultPassword
-                                }
-
-            $AD_PasswordProfile = ConvertTo-SecureString $DefaultPassword -AsPlainText -Force 
+            # Per-account random password. Each newly-created account gets its own;
+            # captured to output/admin-passwords-<yyyyMMdd>.txt by Write-PimAdminPassword
+            # after a successful New-MgBetaUser / New-ADUser.
+            $generatedPassword  = New-PimRandomPassword
+            $PasswordProfile    = @{ Password = $generatedPassword }
+            $AD_PasswordProfile = ConvertTo-SecureString $generatedPassword -AsPlainText -Force
 
             $Description = $TargetUsage + ", " + `
                            $TargetPlatform + ", " + `
@@ -4609,6 +4641,7 @@ Function CreateUpdate-Accounts-From-SQL
                                                  -JobTitle $Description `
                                                  -UsageLocation $UsageLocation
 
+                            Write-PimAdminPassword -UserPrincipalName $UserPrincipalName -Password $generatedPassword -Platform 'ID'
                         }
                 }
 
@@ -4647,6 +4680,8 @@ Function CreateUpdate-Accounts-From-SQL
                                                  -Path $Path `
                                                  -Enabled:$true `
                                                  -Credential $Credentials
+
+                            Write-PimAdminPassword -UserPrincipalName $UserPrincipalName -Password $generatedPassword -Platform 'AD'
                         }
                 }
         }
@@ -4666,15 +4701,16 @@ Function Assign-Groups-Accounts-From-file-CSV
 # Get current Assignments
 ######################################################################################################################
 
-    $FileOutputPath = "$($global:PathScripts)\OUTPUT\PIM"
+    $FileOutputPath = Get-PimOutputDir
 
     $FileOutputPIM4Groups = $FileOutputPath + "\" + "PIM-Delegations-PIM4Groups.csv"
     $FileOutputEntraIDRoles = $FileOutputPath + "\" + "PIM-Delegations-EntraID-Roles.csv"
     $FileOutputAzureRoles = $FileOutputPath + "\" + "PIM-Delegations-Azure-Roles.csv"
 
-    $CurrentAssignments_PIM4Groups = Import-csv -Path $FileOutputPIM4Groups -Delimiter ";" -Encoding UTF8
-    $CurrentAssignments_EntraIDRoles = Import-csv -Path $FileOutputEntraIDRoles -Delimiter ";" -Encoding UTF8
-    $CurrentAssignments_AzureRoles = Import-csv -Path $FileOutputAzureRoles -Delimiter ";" -Encoding UTF8
+    # Missing files = first run on this VM (the exporter hasn't populated them yet); treat as empty.
+    $CurrentAssignments_PIM4Groups   = if (Test-Path -LiteralPath $FileOutputPIM4Groups)   { Import-csv -Path $FileOutputPIM4Groups   -Delimiter ";" -Encoding UTF8 } else { @() }
+    $CurrentAssignments_EntraIDRoles = if (Test-Path -LiteralPath $FileOutputEntraIDRoles) { Import-csv -Path $FileOutputEntraIDRoles -Delimiter ";" -Encoding UTF8 } else { @() }
+    $CurrentAssignments_AzureRoles   = if (Test-Path -LiteralPath $FileOutputAzureRoles)   { Import-csv -Path $FileOutputAzureRoles   -Delimiter ";" -Encoding UTF8 } else { @() }
 
 ######################################################################################################################
 # Admin Accounts | Delegations of PAGs
@@ -4690,6 +4726,13 @@ Function Assign-Groups-Accounts-From-file-CSV
 
     ForEach ($Entry in $AdminAccounts_Data)
         {
+            # Reset per-iteration state so stale values from a prior row never leak
+            # into the next account when a GroupTag lookup misses.
+            $GroupName = $null
+            $Group     = $null
+            $UserInfo  = $null
+            $GroupInfo = $null
+
             $UserName                  = $Entry.UserName
             $GroupTag                  = $Entry.GroupTag
             $GroupAssignment           = $Entry.GroupAssignment
@@ -4741,7 +4784,8 @@ Function Assign-Groups-Accounts-From-file-CSV
                 }
             Else
                 {
-                    Write-host "ERROR: Could NOT find any PAG groups with GroupTag $($GroupTag) in the definitions" -ForegroundColor Red
+                    Write-host "ERROR: Could NOT find any PIM groups with GroupTag $($GroupTag) in the definitions -- skipping row" -ForegroundColor Red
+                    continue
                 }
 
             $UserId = $UserInfo.UserPrincipalName
@@ -5024,6 +5068,12 @@ Function Assign-Groups-Accounts-From-SQL
 
     ForEach ($Entry in $AdminAccounts_Data)
         {
+            # Reset per-iteration state so stale values from a prior row never leak
+            # into the next account when a GroupTag lookup misses.
+            $GroupName = $null
+            $Group     = $null
+            $UserInfo  = $null
+
             $UserName                  = $Entry.UserName
             $GroupTag                  = $Entry.GroupTag
             $GroupAssignment           = $Entry.GroupAssignment
@@ -5054,7 +5104,8 @@ Function Assign-Groups-Accounts-From-SQL
                 }
             Else
                 {
-                    Write-host "ERROR: Could NOT find any PAG groups with GroupTag $($GroupTag) in the definitions" -ForegroundColor Red
+                    Write-host "ERROR: Could NOT find any PIM groups with GroupTag $($GroupTag) in the definitions -- skipping row" -ForegroundColor Red
+                    continue
                 }
 
             Assign-User-PIM-PAG-Group -UserInfo $UserInfo `
@@ -5062,7 +5113,7 @@ Function Assign-Groups-Accounts-From-SQL
                                       -GroupAllArray $EntraID_Groups `
                                       -AssignmentType $AssignmentType `
                                       -NumOfDaysWhenExpire $NumOfDaysWhenExpire `
-                                      -Permanent $Permanent 
+                                      -Permanent $Permanent
         }
 }
 
@@ -8162,5 +8213,342 @@ Else
         # Many built-in roles only define a subset of the 17 standard PIM rules.
         # This is normal, not an error — print quietly so it's visible but not alarming.
         Write-Host "  (skipped - rule '$RuleId' not defined on this policy)" -ForegroundColor DarkGray
+    }
+}
+
+######################################################################################################################
+# Helpers ported from the retired 2LINKIT-Functions.psm1
+######################################################################################################################
+
+function Manage-Powershell-Module {
+    <#
+    .SYNOPSIS
+        Ensure a PSGallery module is installed + imported.
+
+    .PARAMETER ModuleName
+        PSGallery module to install/import (e.g. AzResourceGraphPS, AzLogDcrIngestPS).
+
+    .PARAMETER Scope
+        Install scope. Defaults to AllUsers (matches the legacy behaviour).
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$ModuleName,
+        [ValidateSet('AllUsers','CurrentUser')]
+        [string]$Scope = 'AllUsers'
+    )
+
+    $installed = Get-Module -ListAvailable -Name $ModuleName | Sort-Object Version -Descending | Select-Object -First 1
+    if (-not $installed) {
+        Write-Host "  [Manage-Powershell-Module] $ModuleName not found -- installing from PSGallery (Scope=$Scope)..." -ForegroundColor Gray
+        try {
+            Install-Module -Name $ModuleName -Scope $Scope -Force -AllowClobber -ErrorAction Stop -WarningAction SilentlyContinue
+        } catch {
+            Write-Warning "  [Manage-Powershell-Module] failed to install $ModuleName ($($_.Exception.Message)). Continuing -- engine may fail if it needs this module."
+            return
+        }
+        $installed = Get-Module -ListAvailable -Name $ModuleName | Sort-Object Version -Descending | Select-Object -First 1
+    }
+
+    if ($installed -and -not (Get-Module -Name $ModuleName)) {
+        try {
+            Import-Module -Name $ModuleName -Global -Force -WarningAction SilentlyContinue -ErrorAction Stop
+            Write-Host "  [Manage-Powershell-Module] $ModuleName v$($installed.Version) imported." -ForegroundColor DarkGray
+        } catch {
+            Write-Warning "  [Manage-Powershell-Module] $ModuleName found but Import-Module failed: $($_.Exception.Message)"
+        }
+    }
+}
+
+function Get-PimCustomScript {
+    <#
+    .SYNOPSIS
+        Resolve a config-folder customer-owned PS file (`<Name>.custom.ps1`).
+
+    .DESCRIPTION
+        Used by engines to source customer-owned config helpers (repository,
+        policies, etc.) that live under SOLUTIONS/PIM4EntraPS/config/. The
+        .custom.ps1 file is gitignored and lives only on the customer VM. A
+        tracked .custom.sample.ps1 sibling acts as the bootstrap template.
+
+        Throws with a copy-from-sample hint if the customer file is missing.
+
+    .PARAMETER Name
+        Base name without suffix, e.g. 'repository' -> 'repository.custom.ps1'.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$Name
+    )
+
+    # $PSScriptRoot inside a .psm1 = the module's own folder (engine/_shared/).
+    # Two levels up = the solution root, then 'config'.
+    $cfgRoot = Join-Path (Split-Path -Parent (Split-Path -Parent $PSScriptRoot)) 'config'
+    $custom  = Join-Path $cfgRoot ("{0}.custom.ps1" -f $Name)
+    $sample  = Join-Path $cfgRoot ("{0}.custom.sample.ps1" -f $Name)
+
+    if (Test-Path -LiteralPath $custom) { return $custom }
+
+    $hint = if (Test-Path -LiteralPath $sample) { " Copy '$sample' to '$custom' and edit it." } else { "" }
+    throw "Get-PimCustomScript: '$custom' not found.$hint"
+}
+
+function Get-PimConfigCsv {
+    <#
+    .SYNOPSIS
+        Resolve a config-folder CSV file with .custom -> .locked fallback.
+
+    .DESCRIPTION
+        CSV equivalent of Get-PimCustomScript. Used by repository.custom.ps1
+        to wire $global:*DefinitionFile / *AssignmentsFile path variables to the
+        shipped (`.locked.csv`) or customer-overridden (`.custom.csv`) data files.
+
+        Returns the .custom.csv path if present, otherwise the .locked.csv path.
+        Throws if neither exists.
+
+    .PARAMETER Name
+        Base name without extension/suffix, e.g. 'PIM-Definitions-AU'.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$Name
+    )
+
+    $cfgRoot = Join-Path (Split-Path -Parent (Split-Path -Parent $PSScriptRoot)) 'config'
+    $custom  = Join-Path $cfgRoot ("{0}.custom.csv" -f $Name)
+    $locked  = Join-Path $cfgRoot ("{0}.locked.csv" -f $Name)
+
+    if (Test-Path -LiteralPath $custom) { return $custom }
+    if (Test-Path -LiteralPath $locked) { return $locked }
+
+    throw "Get-PimConfigCsv: neither '$custom' nor '$locked' exists."
+}
+
+function Get-PimOutputDir {
+    <#
+    .SYNOPSIS
+        Return the SOLUTIONS/PIM4EntraPS/output/ folder, creating it if missing.
+    #>
+    [CmdletBinding()]
+    param()
+
+    $solutionRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
+    $outDir       = Join-Path $solutionRoot 'output'
+    if (-not (Test-Path -LiteralPath $outDir)) {
+        New-Item -Path $outDir -ItemType Directory -Force | Out-Null
+    }
+    return $outDir
+}
+
+function Get-PimOutputPath {
+    <#
+    .SYNOPSIS
+        Resolve a path under SOLUTIONS/PIM4EntraPS/output/ for engine state files.
+
+    .DESCRIPTION
+        Engines write per-run state CSVs here (e.g. *_LastApplied.csv used for
+        delta detection between runs). The output/ folder is gitignored, so it
+        never leaves the customer VM. Folder is created on demand.
+
+    .PARAMETER Name
+        Filename WITH extension, e.g. 'PIM-Definitions-AU_LastApplied.csv'.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$Name
+    )
+
+    return (Join-Path (Get-PimOutputDir) $Name)
+}
+
+function New-PimTemporaryAccessPass {
+    <#
+    .SYNOPSIS
+        Create a Temporary Access Pass (TAP) for a freshly-provisioned Entra ID user.
+
+    .DESCRIPTION
+        TAP gives the user a one-time code (default 60-minute lifetime) so they
+        can register their own credentials without ever needing the initial
+        random password. Use this when the account-definitions CSV row sets
+        CreateTAP = TRUE.
+
+        Requires:
+          - Graph permission: UserAuthenticationMethod.ReadWrite.All (application).
+          - The tenant's Authentication methods policy must enable TAP.
+
+    .PARAMETER UserId
+        Account UPN (the user the TAP is for).
+
+    .PARAMETER LifetimeInMinutes
+        TAP validity window after StartDateTime. Default 60. Tenant policy
+        sets the allowed min/max; values outside the policy will be rejected.
+
+    .PARAMETER IsUsableOnce
+        $true = single-use (recommended for admin bootstrap).
+        $false = multi-use within the lifetime window.
+
+    .PARAMETER StartDateTime
+        Optional ISO-8601 / parseable string. If omitted, TAP starts immediately.
+
+    .OUTPUTS
+        [pscustomobject] @{ Code; StartDateTime; LifetimeInMinutes } -- caller
+        is responsible for delivering the code to the user (out-of-band).
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$UserId,
+        [int]$LifetimeInMinutes = 60,
+        [bool]$IsUsableOnce = $true,
+        [string]$StartDateTime
+    )
+
+    $body = @{
+        lifetimeInMinutes = $LifetimeInMinutes
+        isUsableOnce      = $IsUsableOnce
+    }
+    if ($StartDateTime) {
+        try {
+            $body.startDateTime = ([datetime]$StartDateTime).ToUniversalTime().ToString('o')
+        } catch {
+            Write-Warning "  [TAP] could not parse StartDateTime '$StartDateTime' -- omitting (TAP will start immediately)."
+        }
+    }
+
+    try {
+        $tap = New-MgUserAuthenticationTemporaryAccessPassMethod -UserId $UserId -BodyParameter $body -ErrorAction Stop
+    } catch {
+        Write-Warning "  [TAP] failed for $($UserId): $($_.Exception.Message)"
+        return $null
+    }
+
+    [pscustomobject]@{
+        Code              = $tap.TemporaryAccessPass
+        StartDateTime     = $tap.StartDateTime
+        LifetimeInMinutes = $tap.LifetimeInMinutes
+        IsUsableOnce      = $tap.IsUsableOnce
+    }
+}
+
+function Write-PimAdminTap {
+    <#
+    .SYNOPSIS
+        Persist + display a TAP code issued for a newly-created admin account.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$UserPrincipalName,
+        [Parameter(Mandatory)][string]$Code,
+        [Parameter()][string]$StartDateTime,
+        [Parameter()][int]$LifetimeInMinutes
+    )
+
+    $file = Get-PimOutputPath -Name ("admin-passwords-{0:yyyyMMdd}.txt" -f [DateTime]::UtcNow)
+    $line = "{0:yyyy-MM-ddTHH:mm:ssZ}`tID`t{1}`tTAP={2}`tstart={3}`tlifetime={4}min" -f `
+            [DateTime]::UtcNow, $UserPrincipalName, $Code, $StartDateTime, $LifetimeInMinutes
+    Add-Content -Path $file -Value $line -Encoding UTF8
+    Write-Host "  -> TAP for $UserPrincipalName : $Code  (start=$StartDateTime, lifetime=${LifetimeInMinutes}min)" -ForegroundColor Yellow
+    Write-Host "     appended to: $file" -ForegroundColor DarkCyan
+}
+
+function Write-PimAdminPassword {
+    <#
+    .SYNOPSIS
+        Persist + display the random initial password assigned to a newly-created admin account.
+
+    .DESCRIPTION
+        Appends one line per account to output/admin-passwords-<yyyyMMdd>.txt and
+        echoes the same line to the console so the operator can capture it. The
+        per-day file is gitignored (lives under output/). Customers who use TAP
+        can ignore the file; for non-TAP flows it's the only place to retrieve
+        the initial password.
+
+    .PARAMETER UserPrincipalName
+        Account UPN (key the password belongs to).
+
+    .PARAMETER Password
+        The plain-text password just used to create the account.
+
+    .PARAMETER Platform
+        'ID' (Entra) or 'AD' (on-prem AD).
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$UserPrincipalName,
+        [Parameter(Mandatory)][string]$Password,
+        [Parameter(Mandatory)][ValidateSet('ID','AD')][string]$Platform
+    )
+
+    $file = Get-PimOutputPath -Name ("admin-passwords-{0:yyyyMMdd}.txt" -f [DateTime]::UtcNow)
+    $line = "{0:yyyy-MM-ddTHH:mm:ssZ}`t{1}`t{2}`t{3}" -f [DateTime]::UtcNow, $Platform, $UserPrincipalName, $Password
+    Add-Content -Path $file -Value $line -Encoding UTF8
+    Write-Host "  -> initial password for $UserPrincipalName ($Platform): $Password" -ForegroundColor Cyan
+    Write-Host "     appended to: $file" -ForegroundColor DarkCyan
+}
+
+function New-PimRandomPassword {
+    <#
+    .SYNOPSIS
+        Generate a strong random password for newly-created admin accounts.
+
+    .DESCRIPTION
+        Replacement for the legacy "fetch one shared password from Key Vault"
+        pattern. Each call returns a fresh password, so every admin account
+        provisioned via CreateUpdate-Accounts-From-file-CSV gets its own.
+        Customers using TAP (Temporary Access Pass) never need to know this
+        password; for non-TAP flows it is written to a per-run timestamped
+        file under output/admin-passwords-<utc>.txt for one-time pickup.
+
+    .PARAMETER Length
+        Password length. Default 24, minimum 16.
+
+    .OUTPUTS
+        [string] plain-text password (caller must keep secure).
+    #>
+    [CmdletBinding()]
+    param(
+        [ValidateRange(16, 128)]
+        [int]$Length = 24
+    )
+
+    $upper   = [char[]]'ABCDEFGHJKLMNPQRSTUVWXYZ'      # no I, O
+    $lower   = [char[]]'abcdefghijkmnpqrstuvwxyz'      # no l, o
+    $digits  = [char[]]'23456789'                       # no 0, 1
+    $symbols = [char[]]'!@#$%^&*-_=+?'
+
+    $rng = [System.Security.Cryptography.RandomNumberGenerator]::Create()
+    try {
+        $pickOne = {
+            param($set)
+            $buf = New-Object byte[] 4
+            $rng.GetBytes($buf)
+            $idx = [BitConverter]::ToUInt32($buf, 0) % $set.Length
+            $set[$idx]
+        }
+
+        # Guarantee at least one of each class.
+        $chars = New-Object System.Collections.ArrayList
+        [void]$chars.Add((& $pickOne $upper))
+        [void]$chars.Add((& $pickOne $lower))
+        [void]$chars.Add((& $pickOne $digits))
+        [void]$chars.Add((& $pickOne $symbols))
+
+        $allClasses = $upper + $lower + $digits + $symbols
+        for ($i = $chars.Count; $i -lt $Length; $i++) {
+            [void]$chars.Add((& $pickOne $allClasses))
+        }
+
+        # Shuffle with cryptographic randomness so the guaranteed chars don't sit at the front.
+        $arr = $chars.ToArray()
+        for ($i = $arr.Length - 1; $i -gt 0; $i--) {
+            $buf = New-Object byte[] 4
+            $rng.GetBytes($buf)
+            $j = [BitConverter]::ToUInt32($buf, 0) % ($i + 1)
+            $tmp = $arr[$i]; $arr[$i] = $arr[$j]; $arr[$j] = $tmp
+        }
+
+        return (-join $arr)
+    }
+    finally {
+        $rng.Dispose()
     }
 }

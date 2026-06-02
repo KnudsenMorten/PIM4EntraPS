@@ -1,0 +1,30 @@
+{
+  "type": "object",
+  "title": "PIM Activator managed configuration",
+  "description": "Pushed by Edge enterprise policy (Intune / Group Policy / Group Policy registry). When present, the extension uses these values instead of config.js.",
+  "properties": {
+    "tenantId": {
+      "type": "string",
+      "title": "Entra tenant id (GUID)"
+    },
+    "clientId": {
+      "type": "string",
+      "title": "App registration client id (GUID)"
+    },
+    "groupNameFilter": {
+      "type": "string",
+      "title": "Regex limiting which eligible groups are shown",
+      "description": "Default: ^PIM- (matches the PIM4EntraPS naming convention). Use .* to show all eligible groups."
+    },
+    "defaultDurationHours": {
+      "type": "number",
+      "title": "Default activation duration in hours",
+      "minimum": 0.5,
+      "maximum": 24
+    },
+    "defaultJustification": {
+      "type": "string",
+      "title": "Default text for the justification field"
+    }
+  }
+}

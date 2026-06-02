@@ -1,0 +1,936 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="pim-token" content="__PIM_TOKEN__">
+<meta name="pim-mode" content="__PIM_MODE__">
+<title>PIM4EntraPS Mapper</title>
+<style>
+  html, body { margin:0; padding:0; height:100%; font-family: -apple-system, "Segoe UI", Roboto, sans-serif; background:#0e1116; color:#e6edf3; }
+  #app { display:flex; flex-direction:column; height:100vh; }
+
+  /* Tab bar */
+  #tabs { display:flex; gap:0; background:#0d1117; border-bottom:1px solid #30363d; flex:0 0 auto; }
+  .tab { padding:9px 18px; cursor:pointer; font-size:12.5px; color:#7d8590; border-right:1px solid #21262d; user-select:none; position:relative; }
+  .tab:hover { background:#161b22; color:#e6edf3; }
+  .tab.active { background:#161b22; color:#e6edf3; border-bottom:2px solid #2f81f7; margin-bottom:-1px; }
+  .tab .badge { display:inline-block; min-width:14px; padding:0 5px; height:14px; line-height:14px; text-align:center; border-radius:7px; background:#bf8700; color:#fff; font-size:9px; margin-left:6px; font-weight:600; }
+  #tabRight { margin-left:auto; padding:8px 14px; font-size:11px; color:#7d8590; align-self:center; }
+  #tabRight b { color:#e6edf3; font-weight:500; }
+  #tabRight .modeStatic { color:#bf8700; }
+
+  /* Tab panels */
+  .tab-panel { flex:1 1 auto; overflow:hidden; display:none; }
+  .tab-panel.active { display:flex; }
+
+  /* Graph tab (same layout as v0.1) */
+  #graphTab { display:none; }
+  #graphTab.active { display:grid; grid-template-columns: 240px 1fr 320px; }
+  .panel { background:#161b22; border-right:1px solid #30363d; overflow:auto; padding:12px 14px; font-size:12.5px; }
+  .panel + .panel { border-right:none; border-left:1px solid #30363d; }
+  h1 { font-size:14px; margin:0 0 10px 0; letter-spacing:.5px; text-transform:uppercase; color:#7d8590; }
+  h2 { font-size:11px; margin:16px 0 6px 0; letter-spacing:.5px; text-transform:uppercase; color:#7d8590; font-weight:600; }
+  .meta { color:#7d8590; font-size:11px; }
+  .meta b { color:#e6edf3; font-weight:500; }
+  .legend { display:flex; flex-direction:column; gap:4px; margin:6px 0 0 0; }
+  .legend label { display:flex; align-items:center; gap:8px; cursor:pointer; user-select:none; }
+  .legend input[type=checkbox] { accent-color:#2f81f7; }
+  .swatch { width:14px; height:14px; border-radius:3px; border:1px solid #30363d; }
+  .kpis { display:grid; grid-template-columns:1fr 1fr; gap:6px; margin:8px 0; }
+  .kpi { background:#0d1117; border:1px solid #30363d; border-radius:6px; padding:6px 8px; }
+  .kpi .v { font-size:18px; font-weight:600; }
+  .kpi .k { font-size:10px; color:#7d8590; text-transform:uppercase; letter-spacing:.5px; }
+  #search { width:100%; box-sizing:border-box; padding:6px 8px; border-radius:6px; border:1px solid #30363d; background:#0d1117; color:#e6edf3; font-size:12.5px; }
+  #cy { background: radial-gradient(ellipse at center, #15191f 0%, #0e1116 100%); }
+  .detail-kv { display:grid; grid-template-columns:auto 1fr; gap:6px 10px; font-size:12px; }
+  .detail-kv .k { color:#7d8590; }
+  .detail-kv .v { color:#e6edf3; word-break:break-word; }
+  .neighbor { padding:5px 8px; border-radius:4px; cursor:pointer; margin:2px 0; background:#0d1117; border:1px solid #21262d; font-size:11.5px; }
+  .neighbor:hover { background:#1f242c; }
+  .neighbor .edge-type { float:right; font-size:10px; color:#7d8590; }
+  .pill { display:inline-block; padding:1px 6px; border-radius:10px; font-size:10px; font-weight:600; margin-right:4px; }
+  .pill.E { background:#1f6feb; color:#fff; }
+  .pill.A { background:#bf8700; color:#fff; }
+  .empty { color:#7d8590; font-style:italic; }
+  button { background:#21262d; color:#e6edf3; border:1px solid #30363d; padding:5px 10px; border-radius:6px; cursor:pointer; font-size:12px; }
+  button:hover { background:#30363d; }
+  button:disabled { opacity:0.4; cursor:not-allowed; }
+  button.danger { background:#3b1f1f; border-color:#f85149; color:#ffa198; }
+  button.danger:hover { background:#5a2a2a; }
+  button.primary { background:#1f6feb; border-color:#1f6feb; color:#fff; }
+  button.primary:hover { background:#388bfd; }
+  .toolbar { display:flex; gap:6px; margin:6px 0; flex-wrap:wrap; }
+
+  /* Grid tab */
+  #gridTab { display:none; }
+  #gridTab.active { display:grid; grid-template-columns: 280px 1fr; }
+  #gridList { background:#161b22; border-right:1px solid #30363d; overflow:auto; padding:10px 0; font-size:12.5px; }
+  #gridList .group-hdr { padding:6px 14px; font-size:10px; text-transform:uppercase; color:#7d8590; letter-spacing:.5px; font-weight:600; }
+  #gridList .item { padding:6px 14px; cursor:pointer; border-left:2px solid transparent; }
+  #gridList .item:hover { background:#1f242c; }
+  #gridList .item.active { background:#1f6feb22; border-left-color:#2f81f7; color:#fff; }
+  #gridList .item .badge { float:right; }
+  #gridMain { overflow:auto; padding:14px 18px; background:#0d1117; }
+  #gridMain .grid-header { display:flex; justify-content:space-between; align-items:center; margin-bottom:10px; gap:10px; }
+  #gridMain .grid-title { font-size:14px; font-weight:600; }
+  #gridMain .grid-sub { color:#7d8590; font-size:11px; }
+  table.grid { border-collapse:collapse; width:100%; font-size:11.5px; font-family:Consolas,monospace; }
+  table.grid th { background:#161b22; color:#7d8590; text-align:left; padding:5px 8px; border-bottom:1px solid #30363d; position:sticky; top:0; z-index:1; font-weight:500; }
+  table.grid td { padding:2px 6px; border-bottom:1px solid #21262d; color:#e6edf3; vertical-align:top; }
+  table.grid td[contenteditable="true"] { cursor:text; outline:none; }
+  table.grid td[contenteditable="true"]:focus { background:#1f6feb22; box-shadow:inset 0 0 0 1px #2f81f7; }
+  table.grid tr.row-deleted td { text-decoration:line-through; color:#7d8590; background:#3b1f1f33; }
+  table.grid tr.row-added { background:#1f6f3f22; }
+  table.grid tr.row-modified { background:#bf870022; }
+  table.grid td.row-actions { text-align:right; padding:2px 4px; width:34px; }
+  table.grid td.row-actions button { padding:1px 6px; font-size:11px; background:transparent; border:1px solid transparent; color:#7d8590; }
+  table.grid td.row-actions button:hover { color:#f85149; border-color:#f85149; }
+
+  /* Save tab */
+  #saveTab { display:none; }
+  #saveTab.active { display:flex; flex-direction:column; padding:18px 22px; gap:14px; overflow:auto; background:#0d1117; }
+  .save-card { background:#161b22; border:1px solid #30363d; border-radius:6px; padding:12px 14px; }
+  .save-card h3 { margin:0 0 6px 0; font-size:13px; }
+  .save-card .counts { font-size:12px; color:#7d8590; margin-bottom:6px; }
+  .save-card .counts .ca { color:#3fb950; margin-right:10px; }
+  .save-card .counts .cr { color:#f85149; margin-right:10px; }
+  .save-card .counts .cm { color:#e3b341; margin-right:10px; }
+  .save-card details { margin-top:6px; }
+  .save-card summary { cursor:pointer; color:#7d8590; font-size:11px; padding:3px 0; }
+  .save-card .diff-row { font-family:Consolas,monospace; font-size:11px; padding:4px 6px; margin:2px 0; border-radius:4px; }
+  .save-card .diff-row.add { background:#1f6f3f22; color:#7ee787; }
+  .save-card .diff-row.rem { background:#3b1f1f22; color:#ffa198; }
+  .save-card .diff-row.mod { background:#bf870022; color:#ffdf5d; }
+  .save-card .diff-col { display:inline-block; margin-right:8px; }
+  .save-card .diff-col b { color:#e6edf3; }
+  .save-toolbar { display:flex; gap:10px; align-items:center; }
+  .save-toolbar .spacer { flex:1; }
+  #saveStatus { color:#7d8590; font-size:12px; }
+  #saveStatus.err { color:#ffa198; }
+  #saveStatus.ok { color:#7ee787; }
+
+  /* Confirm modal */
+  #modalBg { position:fixed; inset:0; background:#000a; display:none; align-items:center; justify-content:center; z-index:100; }
+  #modalBg.active { display:flex; }
+  #modal { background:#161b22; border:1px solid #30363d; border-radius:8px; padding:16px 20px; max-width:560px; min-width:360px; }
+  #modal h3 { margin:0 0 8px 0; font-size:14px; }
+  #modal .modal-body { font-size:12px; color:#e6edf3; line-height:1.5; max-height:50vh; overflow:auto; }
+  #modal .modal-body ul { margin:6px 0; padding-left:20px; color:#7d8590; }
+  #modal .modal-body li b { color:#e6edf3; }
+  #modal .modal-actions { margin-top:14px; display:flex; gap:8px; justify-content:flex-end; }
+</style>
+<script src="https://unpkg.com/cytoscape@3.30.2/dist/cytoscape.min.js"></script>
+<script src="https://unpkg.com/dagre@0.8.5/dist/dagre.min.js"></script>
+<script src="https://unpkg.com/cytoscape-dagre@2.5.0/cytoscape-dagre.js"></script>
+</head>
+<body>
+<div id="app">
+
+  <div id="tabs">
+    <div class="tab active" data-tab="graph">Graph</div>
+    <div class="tab" data-tab="grid">Grid <span id="gridDirtyBadge" class="badge" style="display:none">0</span></div>
+    <div class="tab" data-tab="save">Save <span id="saveDirtyBadge" class="badge" style="display:none">0</span></div>
+    <div id="tabRight">
+      mode: <b id="modeLabel"></b>
+      &nbsp;|&nbsp; source: <b id="src"></b>
+      &nbsp;|&nbsp; generated: <b id="gen"></b>
+    </div>
+  </div>
+
+  <!-- =========== Graph tab =========== -->
+  <div id="graphTab" class="tab-panel active">
+    <div class="panel" id="left">
+      <h1>PIM Mapper</h1>
+      <div class="meta">v0.2 &mdash; editor</div>
+
+      <h2>Counts</h2>
+      <div class="kpis" id="kpis"></div>
+
+      <h2>Search</h2>
+      <input id="search" placeholder="Filter by label / id (regex)" autocomplete="off">
+
+      <h2>Layers</h2>
+      <div class="legend">
+        <label><input type="checkbox" data-kind="admin" checked><span class="swatch" style="background:#2f81f7"></span>Admin</label>
+        <label><input type="checkbox" data-kind="role-group" checked><span class="swatch" style="background:#a371f7"></span>Role group</label>
+        <label><input type="checkbox" data-kind="permission-group" checked><span class="swatch" style="background:#3fb950"></span>Permission group</label>
+        <label><input type="checkbox" data-kind="entra-role" checked><span class="swatch" style="background:#db6d28"></span>Entra ID role</label>
+        <label><input type="checkbox" data-kind="au-role" checked><span class="swatch" style="background:#e3b341"></span>AU-scoped role</label>
+        <label><input type="checkbox" data-kind="az-resource" checked><span class="swatch" style="background:#d2a8ff"></span>Azure resource</label>
+        <label><input type="checkbox" data-kind="au" checked><span class="swatch" style="background:#7d8590"></span>Administrative Unit</label>
+      </div>
+
+      <h2>Edge type</h2>
+      <div class="legend">
+        <label><input type="checkbox" data-edge="Eligible" checked><span class="pill E">E</span>Eligible</label>
+        <label><input type="checkbox" data-edge="Active" checked><span class="pill A">A</span>Active</label>
+      </div>
+
+      <h2>Layout</h2>
+      <div class="toolbar">
+        <button id="layout-dagre">DAG (L&rarr;R)</button>
+        <button id="layout-concentric">Concentric</button>
+        <button id="fit">Fit</button>
+      </div>
+    </div>
+
+    <div id="cy"></div>
+
+    <div class="panel" id="right">
+      <h1>Details</h1>
+      <div id="detail"><div class="empty">Click a node or edge.</div></div>
+    </div>
+  </div>
+
+  <!-- =========== Grid tab =========== -->
+  <div id="gridTab" class="tab-panel">
+    <div id="gridList"></div>
+    <div id="gridMain"><div class="empty" style="padding:30px;">Pick a CSV from the left.</div></div>
+  </div>
+
+  <!-- =========== Save tab =========== -->
+  <div id="saveTab" class="tab-panel">
+    <div class="save-toolbar">
+      <button id="btnCommit" class="primary">Commit all</button>
+      <button id="btnCancel">Cancel all pending</button>
+      <button id="btnRefresh">Refresh from server</button>
+      <span class="spacer"></span>
+      <span id="saveStatus"></span>
+    </div>
+    <div id="saveCards"></div>
+  </div>
+
+</div>
+
+<!-- Confirm modal -->
+<div id="modalBg">
+  <div id="modal">
+    <h3 id="modalTitle">Confirm</h3>
+    <div class="modal-body" id="modalBody"></div>
+    <div class="modal-actions">
+      <button id="modalCancel">Cancel</button>
+      <button id="modalOk" class="danger">Delete</button>
+    </div>
+  </div>
+</div>
+
+<script>
+  'use strict';
+
+  // ===================================================================
+  // Bootstrap
+  // ===================================================================
+  let PIM_DATA = __PIM_DATA__;
+  const PIM_TOKEN = document.querySelector('meta[name=pim-token]').content;
+  const PIM_MODE  = document.querySelector('meta[name=pim-mode]').content;  // 'server' | 'static'
+
+  // pendingChanges keyed by csv base name -> { rows: [...], baseline: [...], header: [...], deletes: Set<rowIdx> }
+  // Only present once a CSV has been touched in the grid or via a graph-delete action.
+  const pendingChanges = {};
+
+  // CSV cache (server mode): base -> { header, rows, source, path }
+  const csvCache = {};
+
+  const isServer = PIM_MODE === 'server' && PIM_TOKEN;
+
+  document.getElementById('modeLabel').textContent = PIM_MODE;
+  if (!isServer) {
+    document.getElementById('modeLabel').classList.add('modeStatic');
+    document.getElementById('modeLabel').textContent = 'static (read-only)';
+  }
+  document.getElementById('src').textContent = PIM_DATA.sourceRoot || '';
+  document.getElementById('gen').textContent = PIM_DATA.generatedUtc || '';
+  const kpis = document.getElementById('kpis');
+  for (const [k, v] of Object.entries(PIM_DATA.summary || {})) {
+    const d = document.createElement('div');
+    d.className = 'kpi';
+    d.innerHTML = `<div class="v">${v}</div><div class="k">${k}</div>`;
+    kpis.appendChild(d);
+  }
+
+  // ===================================================================
+  // Tab routing
+  // ===================================================================
+  document.querySelectorAll('.tab').forEach(t => {
+    t.onclick = () => switchTab(t.dataset.tab);
+  });
+  function switchTab(name) {
+    document.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t.dataset.tab === name));
+    document.querySelectorAll('.tab-panel').forEach(p => p.classList.toggle('active', p.id === name + 'Tab'));
+    if (name === 'grid') renderGridList();
+    if (name === 'save') renderSaveTab();
+  }
+
+  // ===================================================================
+  // Server API helpers
+  // ===================================================================
+  async function api(method, path, body) {
+    if (!isServer) throw new Error('static mode -- API not available');
+    const opts = { method, headers: { 'Authorization': 'Bearer ' + PIM_TOKEN } };
+    if (body !== undefined) {
+      opts.headers['Content-Type'] = 'application/json';
+      opts.body = JSON.stringify(body);
+    }
+    const r = await fetch(path, opts);
+    const text = await r.text();
+    let data = null;
+    try { data = text ? JSON.parse(text) : null; } catch (_) { data = { raw: text }; }
+    if (!r.ok) { throw new Error('API ' + method + ' ' + path + ' -> ' + r.status + ': ' + (data && data.error || text)); }
+    return data;
+  }
+
+  async function loadCsv(base, force) {
+    if (!force && csvCache[base]) return csvCache[base];
+    const data = await api('GET', '/api/csv/' + encodeURIComponent(base));
+    csvCache[base] = data;
+    return data;
+  }
+
+  // Heartbeat every 10s while the page is open.
+  if (isServer) {
+    setInterval(() => { api('POST', '/api/heartbeat').catch(() => {}); }, 10000);
+    // Fire one immediately so the server's grace window resets.
+    api('POST', '/api/heartbeat').catch(() => {});
+  }
+
+  // ===================================================================
+  // Cytoscape graph (Graph tab)
+  // ===================================================================
+  const KIND_COLOR = {
+    'admin':            '#2f81f7',
+    'role-group':       '#a371f7',
+    'permission-group': '#3fb950',
+    'entra-role':       '#db6d28',
+    'au-role':          '#e3b341',
+    'az-resource':      '#d2a8ff',
+    'au':               '#7d8590'
+  };
+  const KIND_SHAPE = {
+    'admin':            'round-rectangle',
+    'role-group':       'hexagon',
+    'permission-group': 'round-rectangle',
+    'entra-role':       'diamond',
+    'au-role':          'diamond',
+    'az-resource':      'tag',
+    'au':               'octagon'
+  };
+
+  let cy = null;
+
+  function buildGraph() {
+    const cyNodes = PIM_DATA.nodes.map(n => ({ data: { id: n.id, label: n.label || n.id, ...n } }));
+    const cyEdges = PIM_DATA.edges.map((e, i) => ({
+      data: {
+        id: 'e' + i,
+        source: e.source, target: e.target,
+        type: e.type, kind: e.kind,
+        source_csv: e.source_csv,
+        match: e.match || {}
+      }
+    }));
+    const nodeIds = new Set(cyNodes.map(n => n.data.id));
+    const validEdges = cyEdges.filter(e => nodeIds.has(e.data.source) && nodeIds.has(e.data.target));
+    if (validEdges.length !== cyEdges.length) {
+      console.warn('Dropped ' + (cyEdges.length - validEdges.length) + ' edges with missing endpoints.');
+    }
+
+    if (cy) { cy.destroy(); cy = null; }
+    cy = cytoscape({
+      container: document.getElementById('cy'),
+      elements: { nodes: cyNodes, edges: validEdges },
+      wheelSensitivity: 0.25,
+      style: [
+        { selector: 'node', style: {
+            'background-color': n => KIND_COLOR[n.data('kind')] || '#888',
+            'shape': n => KIND_SHAPE[n.data('kind')] || 'ellipse',
+            'label': 'data(label)',
+            'color': '#e6edf3',
+            'font-size': 9,
+            'text-wrap': 'wrap',
+            'text-max-width': 130,
+            'text-valign': 'bottom',
+            'text-margin-y': 4,
+            'border-width': 1,
+            'border-color': '#0d1117',
+            'width': 24, 'height': 24
+        }},
+        { selector: 'node:selected', style: { 'border-width': 3, 'border-color': '#f0f6fc' }},
+        { selector: 'edge', style: {
+            'line-color': e => e.data('type') === 'Active' ? '#bf8700' : (e.data('type') === 'Eligible' ? '#1f6feb' : '#444c56'),
+            'target-arrow-color': e => e.data('type') === 'Active' ? '#bf8700' : (e.data('type') === 'Eligible' ? '#1f6feb' : '#444c56'),
+            'target-arrow-shape': 'triangle',
+            'curve-style': 'bezier',
+            'width': 1.2,
+            'opacity': 0.7,
+            'label': e => e.data('type') ? e.data('type').charAt(0) : '',
+            'font-size': 8,
+            'color': '#7d8590',
+            'text-background-opacity': 0,
+            'text-rotation': 'autorotate'
+        }},
+        { selector: 'edge:selected', style: { 'width': 3, 'opacity': 1 }},
+        { selector: '.dim',  style: { 'opacity': 0.08 }},
+        { selector: '.hilite', style: { 'opacity': 1, 'z-index': 999 }}
+      ]
+    });
+    runLayout('dagre');
+
+    cy.on('tap', 'node, edge', evt => renderDetail(evt.target));
+    cy.on('tap', evt => {
+      if (evt.target === cy) { cy.elements().removeClass('dim hilite'); cy.elements().unselect(); renderDetail(null); }
+    });
+    cy.on('select', 'node', evt => {
+      const ngh = evt.target.closedNeighborhood();
+      cy.elements().addClass('dim');
+      ngh.removeClass('dim').addClass('hilite');
+    });
+    cy.on('unselect', 'node', () => cy.elements().removeClass('dim hilite'));
+  }
+
+  function runLayout(name) {
+    if (!cy) return;
+    const opts = {
+      'dagre':      { name: 'dagre', rankDir: 'LR', nodeSep: 18, edgeSep: 4, rankSep: 110 },
+      'concentric': { name: 'concentric', concentric: n => ({admin:4,'role-group':3,'permission-group':2,'au':1}[n.data('kind')]||0), levelWidth: () => 1, animate: false }
+    }[name];
+    cy.layout(opts).run();
+  }
+
+  document.getElementById('layout-dagre').onclick = () => runLayout('dagre');
+  document.getElementById('layout-concentric').onclick = () => runLayout('concentric');
+  document.getElementById('fit').onclick = () => cy && cy.fit(null, 30);
+
+  function renderDetail(el) {
+    const d = document.getElementById('detail');
+    if (!el) { d.innerHTML = '<div class="empty">Click a node or edge.</div>'; return; }
+    if (el.isNode()) {
+      const data = el.data();
+      const incoming = el.connectedEdges().filter(e => e.data('target') === data.id);
+      const outgoing = el.connectedEdges().filter(e => e.data('source') === data.id);
+      const fields = ['kind','tier','level','platform','description','source'];
+      const rows = fields.filter(f => data[f]).map(f =>
+        `<div class="k">${f}</div><div class="v">${escapeHtml(data[f])}</div>`).join('');
+      const canDelete = isServer && ['admin','role-group','permission-group','au'].includes(data.kind);
+      d.innerHTML = `
+        <div class="detail-kv">
+          <div class="k">label</div><div class="v">${escapeHtml(data.label)}</div>
+          <div class="k">id</div><div class="v">${escapeHtml(data.id)}</div>
+          ${rows}
+        </div>
+        ${canDelete ? `<div class="toolbar" style="margin-top:10px;"><button class="danger" id="btnDeleteNode">Delete this node</button></div>` : ''}
+        <h2>Incoming (${incoming.length})</h2>
+        ${incoming.length ? incoming.map(e => neighborChip(e, 'source')).join('') : '<div class="empty">(none)</div>'}
+        <h2>Outgoing (${outgoing.length})</h2>
+        ${outgoing.length ? outgoing.map(e => neighborChip(e, 'target')).join('') : '<div class="empty">(none)</div>'}
+      `;
+      d.querySelectorAll('.neighbor').forEach(n => n.onclick = () => {
+        const target = cy.$id(n.dataset.id);
+        if (target.length) { cy.elements().unselect(); target.select(); cy.center(target); renderDetail(target); }
+      });
+      if (canDelete) {
+        document.getElementById('btnDeleteNode').onclick = () => deleteNode(data);
+      }
+    } else {
+      const data = el.data();
+      d.innerHTML = `
+        <div class="detail-kv">
+          <div class="k">kind</div><div class="v">${escapeHtml(data.kind)}</div>
+          <div class="k">type</div><div class="v"><span class="pill ${data.type === 'Active' ? 'A' : 'E'}">${data.type ? data.type.charAt(0) : '?'}</span>${escapeHtml(data.type || '')}</div>
+          <div class="k">from</div><div class="v">${escapeHtml(data.source)}</div>
+          <div class="k">to</div><div class="v">${escapeHtml(data.target)}</div>
+          <div class="k">source CSV</div><div class="v">${escapeHtml(data.source_csv)}</div>
+        </div>
+        ${isServer ? `<div class="toolbar" style="margin-top:10px;"><button class="danger" id="btnDeleteEdge">Delete this delegation</button></div>` : ''}
+      `;
+      if (isServer) {
+        document.getElementById('btnDeleteEdge').onclick = () => deleteEdge(data);
+      }
+    }
+  }
+  function neighborChip(edge, dir) {
+    const otherId = edge.data(dir);
+    const other = cy.$id(otherId);
+    const label = other.length ? other.data('label') : otherId;
+    const t = edge.data('type') || '';
+    const pill = t === 'Active' ? '<span class="pill A">A</span>' : (t === 'Eligible' ? '<span class="pill E">E</span>' : '');
+    return `<div class="neighbor" data-id="${otherId}">${pill}${escapeHtml(label)}<span class="edge-type">${escapeHtml(edge.data('kind') || '')}</span></div>`;
+  }
+  function escapeHtml(s) {
+    return String(s == null ? '' : s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+  }
+
+  // Filters
+  function applyFilters() {
+    if (!cy) return;
+    const enabledKinds = new Set([...document.querySelectorAll('[data-kind]:checked')].map(el => el.dataset.kind));
+    const enabledEdges = new Set([...document.querySelectorAll('[data-edge]:checked')].map(el => el.dataset.edge));
+    cy.batch(() => {
+      cy.nodes().forEach(n => n.style('display', enabledKinds.has(n.data('kind')) ? 'element' : 'none'));
+      cy.edges().forEach(e => {
+        const t = e.data('type');
+        const typeOk = !t || enabledEdges.has(t);
+        const epOk   = enabledKinds.has(e.source().data('kind')) && enabledKinds.has(e.target().data('kind'));
+        e.style('display', (typeOk && epOk) ? 'element' : 'none');
+      });
+    });
+  }
+  document.querySelectorAll('[data-kind], [data-edge]').forEach(cb => cb.onchange = applyFilters);
+
+  const searchEl = document.getElementById('search');
+  searchEl.oninput = () => {
+    if (!cy) return;
+    const q = searchEl.value.trim();
+    if (!q) { cy.elements().removeClass('dim hilite'); return; }
+    let re;
+    try { re = new RegExp(q, 'i'); } catch (_) { return; }
+    cy.batch(() => {
+      cy.elements().addClass('dim').removeClass('hilite');
+      cy.nodes().filter(n => re.test(n.data('label') || '') || re.test(n.data('id') || ''))
+        .removeClass('dim').addClass('hilite');
+    });
+  };
+
+  buildGraph();
+
+  // ===================================================================
+  // Pending-changes machinery
+  // ===================================================================
+  function ensurePending(base, header, baselineRows) {
+    if (!pendingChanges[base]) {
+      pendingChanges[base] = {
+        header: header.slice(),
+        baseline: baselineRows.map(r => ({ ...r })),
+        rows:     baselineRows.map(r => ({ ...r })),
+        deletes:  new Set()
+      };
+    }
+    return pendingChanges[base];
+  }
+
+  function markBadges() {
+    const dirtyCount = Object.keys(pendingChanges).filter(b => isDirty(b)).length;
+    const gb = document.getElementById('gridDirtyBadge');
+    const sb = document.getElementById('saveDirtyBadge');
+    if (dirtyCount > 0) {
+      gb.style.display = 'inline-block'; gb.textContent = dirtyCount;
+      sb.style.display = 'inline-block'; sb.textContent = dirtyCount;
+    } else {
+      gb.style.display = 'none';
+      sb.style.display = 'none';
+    }
+  }
+
+  function isDirty(base) {
+    const p = pendingChanges[base];
+    if (!p) return false;
+    // Deleted indices > 0 OR any row differs from baseline OR row counts differ.
+    if (p.deletes.size > 0) return true;
+    const after = p.rows.filter((_, i) => !p.deletes.has(i));
+    if (after.length !== p.baseline.length) return true;
+    for (let i = 0; i < after.length; i++) {
+      const a = after[i], b = p.baseline[i] || {};
+      const cols = new Set([...Object.keys(a), ...Object.keys(b)]);
+      for (const c of cols) {
+        if ((a[c] || '') !== (b[c] || '')) return true;
+      }
+    }
+    return false;
+  }
+
+  function pendingFinalRows(base) {
+    const p = pendingChanges[base];
+    if (!p) return null;
+    return p.rows.filter((_, i) => !p.deletes.has(i));
+  }
+
+  // Remove rows matching all (col,val) pairs in `criteria`. Returns count removed.
+  function removeRowsMatching(base, criteria) {
+    const p = pendingChanges[base];
+    if (!p) return 0;
+    let n = 0;
+    for (let i = 0; i < p.rows.length; i++) {
+      if (p.deletes.has(i)) continue;
+      const row = p.rows[i];
+      let allMatch = true;
+      for (const k of Object.keys(criteria)) {
+        if ((row[k] || '') !== (criteria[k] || '')) { allMatch = false; break; }
+      }
+      if (allMatch) { p.deletes.add(i); n++; }
+    }
+    return n;
+  }
+
+  // ===================================================================
+  // Graph-mode deletes
+  // ===================================================================
+  async function deleteNode(data) {
+    // Gather impact across all referencing CSVs by loading them.
+    const impact = []; // [{ base, count, criteria(plural) }]
+    if (data.kind === 'admin') {
+      const adminBase = 'Account-Definitions-Admins';
+      const aData = await loadCsv(adminBase);
+      ensurePending(adminBase, aData.header, aData.rows);
+      // Match the admin by UserPrincipalName (the node id).
+      const upn = data.id;
+      const adminMatches = pendingChanges[adminBase].rows.filter((r,i) => !pendingChanges[adminBase].deletes.has(i) && (r.UserPrincipalName === upn));
+      impact.push({ base: adminBase, count: adminMatches.length, criteria: [{ UserPrincipalName: upn }] });
+
+      const asgBase = 'PIM-Assignments-Admins';
+      const sData = await loadCsv(asgBase);
+      ensurePending(asgBase, sData.header, sData.rows);
+      const sMatches = pendingChanges[asgBase].rows.filter((r,i) => !pendingChanges[asgBase].deletes.has(i) && (r.Username === upn));
+      impact.push({ base: asgBase, count: sMatches.length, criteria: [{ Username: upn }] });
+    } else if (data.kind === 'role-group' || data.kind === 'permission-group') {
+      const groupTag = data.groupTag || (data.id || '').replace(/^group:/, '');
+      const defBase = data.source;
+      const dData = await loadCsv(defBase);
+      ensurePending(defBase, dData.header, dData.rows);
+      const dMatches = pendingChanges[defBase].rows.filter((r,i) => !pendingChanges[defBase].deletes.has(i) && (r.GroupTag === groupTag));
+      impact.push({ base: defBase, count: dMatches.length, criteria: [{ GroupTag: groupTag }] });
+
+      const xrefs = [
+        { base: 'PIM-Assignments-Admins',          cols: [{ GroupTag: groupTag }] },
+        { base: 'PIM-Assignments-Groups',          cols: [{ TargetGroupTag: groupTag }, { SourceGroupTag: groupTag }] },
+        { base: 'PIM-Assignments-Roles-Groups',    cols: [{ GroupTag: groupTag }] },
+        { base: 'PIM-Assignments-Roles-AUs',       cols: [{ GroupTag: groupTag }] },
+        { base: 'PIM-Assignments-Azure-Resources', cols: [{ GroupTag: groupTag }] }
+      ];
+      for (const x of xrefs) {
+        const xData = await loadCsv(x.base);
+        ensurePending(x.base, xData.header, xData.rows);
+        let cnt = 0;
+        for (const c of x.cols) {
+          const matches = pendingChanges[x.base].rows.filter((r,i) => !pendingChanges[x.base].deletes.has(i) && Object.keys(c).every(k => (r[k] || '') === c[k]));
+          cnt += matches.length;
+        }
+        impact.push({ base: x.base, count: cnt, criteria: x.cols });
+      }
+    } else if (data.kind === 'au') {
+      const auTag = data.auTag || (data.id || '').replace(/^au:/, '');
+      const defBase = 'PIM-Definitions-AU';
+      const dData = await loadCsv(defBase);
+      ensurePending(defBase, dData.header, dData.rows);
+      const dMatches = pendingChanges[defBase].rows.filter((r,i) => !pendingChanges[defBase].deletes.has(i) && (r.AdministrativeUnitTag === auTag));
+      impact.push({ base: defBase, count: dMatches.length, criteria: [{ AdministrativeUnitTag: auTag }] });
+
+      const ausBase = 'PIM-Assignments-Roles-AUs';
+      const xData = await loadCsv(ausBase);
+      ensurePending(ausBase, xData.header, xData.rows);
+      const xMatches = pendingChanges[ausBase].rows.filter((r,i) => !pendingChanges[ausBase].deletes.has(i) && (r.AdministrativeUnitTag === auTag));
+      impact.push({ base: ausBase, count: xMatches.length, criteria: [{ AdministrativeUnitTag: auTag }] });
+    } else {
+      return;
+    }
+
+    const total = impact.reduce((s, x) => s + x.count, 0);
+    if (total === 0) {
+      await showConfirm('Nothing to delete', `<p>No matching rows found for <b>${escapeHtml(data.label || data.id)}</b>.</p>`, false);
+      return;
+    }
+    const msg = `<p>Deleting <b>${escapeHtml(data.label || data.id)}</b> will mark <b>${total}</b> row(s) for removal across <b>${impact.filter(x => x.count > 0).length}</b> CSV file(s):</p><ul>` +
+      impact.filter(x => x.count > 0).map(x => `<li><b>${x.base}</b>: ${x.count} row(s)</li>`).join('') +
+      `</ul><p style="color:#7d8590">Nothing is written to disk yet &mdash; review and commit from the <b>Save</b> tab.</p>`;
+    const ok = await showConfirm('Delete node', msg, true);
+    if (!ok) return;
+
+    for (const x of impact) {
+      for (const c of x.criteria) {
+        removeRowsMatching(x.base, c);
+      }
+    }
+    markBadges();
+    switchTab('save');
+  }
+
+  async function deleteEdge(data) {
+    const base = data.source_csv;
+    if (!base) return;
+    const xData = await loadCsv(base);
+    ensurePending(base, xData.header, xData.rows);
+    const criteria = data.match || {};
+    const matches = pendingChanges[base].rows.filter((r,i) => !pendingChanges[base].deletes.has(i) && Object.keys(criteria).every(k => (r[k] || '') === criteria[k]));
+    if (matches.length === 0) {
+      await showConfirm('Nothing to delete', `<p>No matching row found in <b>${base}</b> for this edge.</p>`, false);
+      return;
+    }
+    const msg = `<p>This edge maps to <b>${matches.length}</b> row(s) in <b>${base}</b> matching:</p>` +
+      `<ul>` + Object.entries(criteria).map(([k,v]) => `<li><b>${escapeHtml(k)}</b> = ${escapeHtml(v)}</li>`).join('') + `</ul>` +
+      `<p style="color:#7d8590">Mark for removal? Commit from the <b>Save</b> tab.</p>`;
+    const ok = await showConfirm('Delete edge', msg, true);
+    if (!ok) return;
+    removeRowsMatching(base, criteria);
+    markBadges();
+    switchTab('save');
+  }
+
+  // ===================================================================
+  // Grid tab
+  // ===================================================================
+  let currentGridBase = null;
+
+  function renderGridList() {
+    const list = document.getElementById('gridList');
+    const bases = PIM_DATA.csvBases || [];
+    // Group bases by their group ('Definitions' / 'Assignments').
+    const groups = {};
+    for (const b of bases) {
+      if (!groups[b.group]) groups[b.group] = [];
+      groups[b.group].push(b.base);
+    }
+    list.innerHTML = '';
+    for (const g of Object.keys(groups)) {
+      const h = document.createElement('div');
+      h.className = 'group-hdr';
+      h.textContent = g;
+      list.appendChild(h);
+      for (const base of groups[g]) {
+        const it = document.createElement('div');
+        it.className = 'item' + (currentGridBase === base ? ' active' : '');
+        const dirty = isDirty(base);
+        it.innerHTML = `<span>${escapeHtml(base)}</span>` + (dirty ? '<span class="badge">mod</span>' : '');
+        it.onclick = () => openGrid(base);
+        list.appendChild(it);
+      }
+    }
+  }
+
+  async function openGrid(base) {
+    currentGridBase = base;
+    renderGridList();
+    const main = document.getElementById('gridMain');
+    main.innerHTML = '<div class="empty" style="padding:30px;">Loading...</div>';
+    let data;
+    try { data = await loadCsv(base); }
+    catch (e) { main.innerHTML = `<div class="empty" style="padding:30px;color:#ffa198;">${escapeHtml(e.message)}</div>`; return; }
+    ensurePending(base, data.header, data.rows);
+    renderGrid(base);
+  }
+
+  function renderGrid(base) {
+    const main = document.getElementById('gridMain');
+    const p = pendingChanges[base];
+    const cache = csvCache[base] || { source: '?', path: '' };
+    const header = p.header;
+    const html = [];
+    html.push(`<div class="grid-header">
+      <div>
+        <div class="grid-title">${escapeHtml(base)}.custom.csv</div>
+        <div class="grid-sub">on-disk source: <b>${escapeHtml(cache.source)}</b> &nbsp;|&nbsp; ${escapeHtml(cache.path)} &nbsp;|&nbsp; ${p.rows.length - p.deletes.size} row(s) ${isDirty(base) ? '<span style="color:#e3b341">(pending changes)</span>' : ''}</div>
+      </div>
+      <div class="toolbar">
+        <button id="btnAddRow">+ Add row</button>
+        <button id="btnReloadGrid">↻ Reload from disk</button>
+      </div>
+    </div>`);
+    html.push('<table class="grid"><thead><tr>');
+    for (const col of header) html.push(`<th>${escapeHtml(col)}</th>`);
+    html.push('<th></th></tr></thead><tbody>');
+    p.rows.forEach((row, idx) => {
+      const deleted = p.deletes.has(idx);
+      const baseline = p.baseline[idx];
+      let modified = false;
+      if (!deleted && baseline) {
+        for (const c of header) { if ((row[c]||'') !== (baseline[c]||'')) { modified = true; break; } }
+      }
+      const added = !deleted && !baseline;
+      const cls = deleted ? 'row-deleted' : (added ? 'row-added' : (modified ? 'row-modified' : ''));
+      html.push(`<tr data-idx="${idx}" class="${cls}">`);
+      for (const col of header) {
+        const v = row[col] || '';
+        html.push(`<td contenteditable="${deleted ? 'false' : 'true'}" data-col="${escapeHtml(col)}">${escapeHtml(v)}</td>`);
+      }
+      html.push(`<td class="row-actions">${deleted ? '<button data-act="undelete" title="restore">↺</button>' : '<button data-act="delete" title="mark deleted">✕</button>'}</td>`);
+      html.push('</tr>');
+    });
+    html.push('</tbody></table>');
+    main.innerHTML = html.join('');
+
+    // Wire cell edits.
+    main.querySelectorAll('td[contenteditable=true]').forEach(td => {
+      td.addEventListener('blur', () => {
+        const idx = parseInt(td.parentElement.dataset.idx, 10);
+        const col = td.dataset.col;
+        const v = td.textContent;
+        if (p.rows[idx][col] !== v) {
+          p.rows[idx][col] = v;
+          markBadges();
+          renderGrid(base);
+        }
+      });
+    });
+    // Wire row-action buttons.
+    main.querySelectorAll('td.row-actions button').forEach(b => {
+      b.onclick = () => {
+        const idx = parseInt(b.parentElement.parentElement.dataset.idx, 10);
+        if (b.dataset.act === 'delete') p.deletes.add(idx);
+        else if (b.dataset.act === 'undelete') p.deletes.delete(idx);
+        markBadges();
+        renderGrid(base);
+      };
+    });
+    // Add-row + reload buttons.
+    document.getElementById('btnAddRow').onclick = () => {
+      const empty = {};
+      for (const c of header) empty[c] = '';
+      p.rows.unshift(empty);
+      // Shift deletes set indices.
+      const newDel = new Set();
+      for (const i of p.deletes) newDel.add(i + 1);
+      p.deletes = newDel;
+      markBadges();
+      renderGrid(base);
+    };
+    document.getElementById('btnReloadGrid').onclick = async () => {
+      delete pendingChanges[base];
+      const fresh = await loadCsv(base, true);
+      ensurePending(base, fresh.header, fresh.rows);
+      markBadges();
+      renderGrid(base);
+    };
+  }
+
+  // ===================================================================
+  // Save tab
+  // ===================================================================
+  async function renderSaveTab() {
+    const wrap = document.getElementById('saveCards');
+    wrap.innerHTML = '';
+    const bases = Object.keys(pendingChanges).filter(b => isDirty(b));
+    if (bases.length === 0) {
+      wrap.innerHTML = '<div class="empty" style="padding:20px;">No pending changes. Edit cells in the Grid tab, or delete a node/edge in the Graph tab.</div>';
+      document.getElementById('saveStatus').textContent = '';
+      return;
+    }
+    for (const base of bases) {
+      const card = document.createElement('div');
+      card.className = 'save-card';
+      card.id = 'save-card-' + base;
+      card.innerHTML = `<h3>${escapeHtml(base)}.custom.csv</h3><div class="counts">computing diff...</div>`;
+      wrap.appendChild(card);
+      try {
+        const finalRows = pendingFinalRows(base);
+        const diff = await api('POST', '/api/diff/' + encodeURIComponent(base), { rows: finalRows });
+        renderSaveCard(card, base, diff);
+      } catch (e) {
+        card.querySelector('.counts').innerHTML = `<span style="color:#ffa198">diff failed: ${escapeHtml(e.message)}</span>`;
+      }
+    }
+  }
+
+  function renderSaveCard(card, base, diff) {
+    const addsN = (diff.adds || []).length;
+    const remsN = (diff.removes || []).length;
+    const modsN = (diff.modifies || []).length;
+    const lines = [];
+    lines.push(`<div class="counts">
+      <span class="ca">+ ${addsN} add(s)</span>
+      <span class="cr">- ${remsN} remove(s)</span>
+      <span class="cm">~ ${modsN} modify(ies)</span>
+      <span style="color:#7d8590">(unchanged: ${diff.unchanged || 0})</span>
+    </div>`);
+    lines.push('<details><summary>row-level diff</summary><div class="diff-rows">');
+    for (const r of (diff.adds || [])) {
+      lines.push(`<div class="diff-row add">+ ${formatRowSummary(r)}</div>`);
+    }
+    for (const r of (diff.removes || [])) {
+      lines.push(`<div class="diff-row rem">- ${formatRowSummary(r)}</div>`);
+    }
+    for (const m of (diff.modifies || [])) {
+      lines.push(`<div class="diff-row mod">~ ${(m.diffCols||[]).map(c =>
+        `<span class="diff-col"><b>${escapeHtml(c)}</b>: ${escapeHtml((m.before&&m.before[c])||'')} → ${escapeHtml((m.after&&m.after[c])||'')}</span>`).join('')}</div>`);
+    }
+    lines.push('</div></details>');
+    card.innerHTML = `<h3>${escapeHtml(base)}.custom.csv</h3>` + lines.join('');
+  }
+
+  function formatRowSummary(row) {
+    // Show up to 5 non-empty fields.
+    const pairs = Object.entries(row || {}).filter(([_, v]) => v != null && String(v).length > 0).slice(0, 5);
+    return pairs.map(([k, v]) => `<span class="diff-col"><b>${escapeHtml(k)}</b>=${escapeHtml(v)}</span>`).join('');
+  }
+
+  document.getElementById('btnCommit').onclick = async () => {
+    if (!isServer) return;
+    const status = document.getElementById('saveStatus');
+    status.className = '';
+    const bases = Object.keys(pendingChanges).filter(b => isDirty(b));
+    if (bases.length === 0) { status.textContent = 'Nothing to commit.'; return; }
+    document.getElementById('btnCommit').disabled = true;
+    document.getElementById('btnCancel').disabled = true;
+    for (const base of bases) {
+      status.textContent = 'Writing ' + base + ' ...';
+      try {
+        const finalRows = pendingFinalRows(base);
+        const r = await api('PUT', '/api/csv/' + encodeURIComponent(base), { rows: finalRows });
+        // Refresh local cache + reset pending.
+        await loadCsv(base, true);
+        delete pendingChanges[base];
+        console.log('committed', base, r);
+      } catch (e) {
+        status.textContent = 'FAILED on ' + base + ': ' + e.message;
+        status.className = 'err';
+        document.getElementById('btnCommit').disabled = false;
+        document.getElementById('btnCancel').disabled = false;
+        return;
+      }
+    }
+    status.textContent = 'All commits succeeded. Refreshing graph...';
+    status.className = 'ok';
+    // Pull fresh graph data.
+    try {
+      const fresh = await api('GET', '/api/config');
+      PIM_DATA = fresh;
+      buildGraph();
+    } catch (e) { /* non-fatal */ }
+    markBadges();
+    renderSaveTab();
+    document.getElementById('btnCommit').disabled = false;
+    document.getElementById('btnCancel').disabled = false;
+  };
+
+  document.getElementById('btnCancel').onclick = () => {
+    for (const b of Object.keys(pendingChanges)) delete pendingChanges[b];
+    markBadges();
+    renderSaveTab();
+    const status = document.getElementById('saveStatus');
+    status.textContent = 'All pending changes discarded.';
+    status.className = '';
+  };
+
+  document.getElementById('btnRefresh').onclick = async () => {
+    if (!isServer) return;
+    const status = document.getElementById('saveStatus');
+    try {
+      const fresh = await api('GET', '/api/config');
+      PIM_DATA = fresh;
+      buildGraph();
+      // Re-read any cached CSVs that the user is still editing.
+      for (const b of Object.keys(csvCache)) { await loadCsv(b, true); }
+      status.textContent = 'Graph + cached CSVs refreshed.'; status.className = 'ok';
+    } catch (e) {
+      status.textContent = 'Refresh failed: ' + e.message; status.className = 'err';
+    }
+  };
+
+  // ===================================================================
+  // Modal
+  // ===================================================================
+  function showConfirm(title, bodyHtml, dangerous) {
+    return new Promise(resolve => {
+      const bg = document.getElementById('modalBg');
+      document.getElementById('modalTitle').textContent = title;
+      document.getElementById('modalBody').innerHTML = bodyHtml;
+      const okBtn = document.getElementById('modalOk');
+      const cancelBtn = document.getElementById('modalCancel');
+      okBtn.className = dangerous ? 'danger' : 'primary';
+      okBtn.textContent = dangerous ? 'Delete' : 'OK';
+      cancelBtn.style.display = dangerous ? '' : 'none';
+      bg.classList.add('active');
+      const finish = (ok) => { bg.classList.remove('active'); okBtn.onclick = null; cancelBtn.onclick = null; resolve(ok); };
+      okBtn.onclick = () => finish(true);
+      cancelBtn.onclick = () => finish(false);
+    });
+  }
+</script>
+</body>
+</html>
