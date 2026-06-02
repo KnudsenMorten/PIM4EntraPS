@@ -8280,6 +8280,21 @@ function Get-PimSolutionRoot {
     return (Split-Path -Parent (Split-Path -Parent $PSScriptRoot))
 }
 
+# Module-init: load naming-convention files into $global:PIM_NamingConventions
+# so the engine helpers (Get-PimAdminsFiltered / Get-PimGroupsFiltered) work
+# regardless of which launcher invoked us. Loads .locked.ps1 first, then
+# .custom.ps1 if present (customer's override wins on every key).
+$_pimNcRoot   = Join-Path (Split-Path -Parent (Split-Path -Parent $PSScriptRoot)) 'config'
+$_pimNcLocked = Join-Path $_pimNcRoot 'PIM4EntraPS.NamingConventions.locked.ps1'
+$_pimNcCustom = Join-Path $_pimNcRoot 'PIM4EntraPS.NamingConventions.custom.ps1'
+if (Test-Path -LiteralPath $_pimNcLocked) {
+    try { . $_pimNcLocked } catch { Write-Warning "PIM-Functions: failed loading $_pimNcLocked -- $($_.Exception.Message)" }
+}
+if (Test-Path -LiteralPath $_pimNcCustom) {
+    try { . $_pimNcCustom } catch { Write-Warning "PIM-Functions: failed loading $_pimNcCustom -- $($_.Exception.Message)" }
+}
+Remove-Variable -Name _pimNcRoot, _pimNcLocked, _pimNcCustom -ErrorAction SilentlyContinue
+
 function Get-PimConfigDir {
     <#
     .SYNOPSIS
