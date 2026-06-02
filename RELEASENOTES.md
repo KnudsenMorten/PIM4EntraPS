@@ -1,9 +1,10 @@
 # Release notes for PIM4EntraPS
 
-## v2.2.0
+## v2.2.1
 
 Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monorepo:
 
+- release: PIM4EntraPS v2.2.1 - hotfix: scrub maintainer-tenant data from shipped .locked.csv baselines + sample-file cleanup (b666d1eb)
 - release: PIM4EntraPS v2.2.0 - Theme 1 (Manager UX polish) + Theme 2 first slice (TAP flow) (a659adf6)
 - release: PIM4EntraPS v2.1.7 - docs/ROADMAP.md (34 customer-requested features sized + sequenced + storage-backend decision) Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com> (c1ae5fc7)
 - release: PIM4EntraPS v2.1.6 - hotfix: Ensure-DateTime null-safe (kills persistent engine crash at PIM-Baseline-Management-CSV.ps1:1196) (bd2207d0)
@@ -36,6 +37,21 @@ Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monor
 # Release notes -- PIM4EntraPS
 
 > **Curated changelog.** The publish workflow auto-prepends recent monorepo commits as a raw activity log; this file is the human-friendly narrative on top.
+
+---
+
+## v2.2.1 -- Hotfix: scrub maintainer-tenant data from shipped `.locked.csv` baselines + sample-file cleanup
+
+v2.2.0 inadvertently shipped the maintainer's own admin / role rows in `config\Account-Definitions-Admins.locked.csv` and `config\PIM-Definitions-Roles.locked.csv` -- both files reached the public mirror via the publish workflow. The intent of `.locked.csv` is **shipped baseline that every customer extends**; customer-specific data belongs in `.custom.csv` (gitignored). This release scrubs the leak and ships header-only baselines from now on. v2.2.1 is **non-functional for any customer already running a `.custom.csv`** -- the engine's `Get-PimConfigCsv` fallback prefers `.custom.csv` and only reads `.locked.csv` when `.custom.csv` is missing, so existing deployments see no behaviour change. Customers with no `.custom.csv` who were relying on the shipped `.locked.csv` content as their actual config should copy `.locked.csv` -> `.custom.csv` before upgrading.
+
+Scrubs applied:
+- `config\Account-Definitions-Admins.locked.csv` -- replaced with header-only (21 columns). Use `Account-Definitions-Admins.custom.sample.csv` for an annotated example row.
+- `config\PIM-Definitions-Roles.locked.csv` -- replaced with header-only (12 columns).
+- `config\PIM4EntraPS.NotificationChannels.custom.sample.ps1` -- KV-name example changed from real-looking `kv-contoso-pim-p` to generic `kv-contoso-pim-p`.
+- `config\PIM4EntraPS.NamingConventions.custom.sample.ps1` -- "Customer A (Admin- / X-Admin- with tier suffix)" relabelled to "Customer A (Admin- / X-Admin- with tier suffix)"; example initials `MOK` / owner `morten` generalised to `ABC` / `john`. Pre-existing pre-v2.2.0 wording -- scrubbed in this hotfix as part of the same sweep.
+- `docs\ROADMAP.md` -- items #1, #2, #6, #7, #11, #12, #25, #28 now annotated `[SHIPPED v2.2.0]` (#25 + #28 also note what is deferred).
+
+Note: the leaked content remains visible in the v2.2.0 tag's commit history on the public mirror until / unless that history is rewritten. v2.2.1 only stops the leak from re-publishing; it does not retroactively scrub git history. Rewriting public-mirror history is a destructive operation and is left to the maintainer's discretion.
 
 ---
 
