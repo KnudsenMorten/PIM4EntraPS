@@ -1,9 +1,10 @@
 # Release notes for PIM4EntraPS
 
-## v2.1.6
+## v2.1.7
 
 Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monorepo:
 
+- release: PIM4EntraPS v2.1.7 - docs/ROADMAP.md (34 customer-requested features sized + sequenced + storage-backend decision) Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com> (c1ae5fc7)
 - release: PIM4EntraPS v2.1.6 - hotfix: Ensure-DateTime null-safe (kills persistent engine crash at PIM-Baseline-Management-CSV.ps1:1196) (bd2207d0)
 - release: PIM4EntraPS v2.1.5 - hotfix: visible feedback on Remove-orphan-assignment button (dbd9bd38)
 - release: PIM4EntraPS v2.1.4 - hotfix: PIM-Functions auto-loads naming-conventions at module init (302f0a29)
@@ -34,6 +35,14 @@ Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monor
 # Release notes -- PIM4EntraPS
 
 > **Curated changelog.** The publish workflow auto-prepends recent monorepo commits as a raw activity log; this file is the human-friendly narrative on top.
+
+---
+
+## v2.1.7 -- Roadmap + sequencing for v2.2.x / v3.0
+
+New `docs/ROADMAP.md` captures the ~34 customer-driven feature requests with sizing (S/M/L/XL), dependencies, themes (Manager UX / TAP / per-row policy / discovery / webhooks / governance / SQL backend), and a release-by-release sequencing recommendation. Includes the one big architectural decision -- CSV vs Azure Blob vs SQL backend -- with a "stay on CSV through v2.2.x, revisit at v3.0" recommendation and explicit triggers for when to flip.
+
+Pure docs release; no code changes.
 
 ---
 
