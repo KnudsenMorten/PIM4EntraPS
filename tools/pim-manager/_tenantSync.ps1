@@ -129,9 +129,8 @@ function Assert-PimTenantConnectionContext {
     elseif ($global:AzureTenantId) { $tenantId = $global:AzureTenantId }
     if (-not $tenantId) { [void]$missing.Add('$global:AzureTenantID') }
     if ($missing.Count -gt 0) {
-        throw ("PIM Manager tenant refresh requires the engine SPN context. Missing: {0}. " +
-               "Run any baseline engine first (which calls Initialize-PlatformAutomationFramework), " +
-               "or source your bootstrap manually before -RefreshTenantLists." -f ($missing -join ', '))
+        $missingList = $missing -join ', '
+        throw "PIM Manager tenant refresh requires the engine SPN context. Missing: $missingList. Run any baseline engine first (which calls Initialize-PlatformAutomationFramework), or source your bootstrap manually before -RefreshTenantLists."
     }
     return $tenantId
 }

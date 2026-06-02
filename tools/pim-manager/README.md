@@ -1,21 +1,21 @@
-# PIM4EntraPS Mapper
+# PIM4EntraPS Manager
 
 A small graph viewer + editor for the 14-CSV PIM4EntraPS model. Runs on
 the customer's VM (no install beyond `git pull`), no external network
 access required.
 
 ```
-SOLUTIONS/PIM4EntraPS/tools/pim-mapper/
-├── Open-PimMapper.ps1   ← entry point (server + static modes)
-├── pim-mapper.html      ← single-file SPA (graph + grid + save)
+SOLUTIONS/PIM4EntraPS/tools/pim-manager/
+├── Open-PimManager.ps1   ← entry point (server + static modes)
+├── pim-manager.html      ← single-file SPA (graph + grid + save)
 └── README.md            ← this file
 ```
 
 ## Quick start
 
 ```powershell
-cd C:\path\to\AutomateIT\SOLUTIONS\PIM4EntraPS\tools\pim-mapper
-.\Open-PimMapper.ps1
+cd C:\path\to\AutomateIT\SOLUTIONS\PIM4EntraPS\tools\pim-manager
+.\Open-PimManager.ps1
 ```
 
 This starts a local HTTP server on a random free port, opens your
@@ -39,7 +39,7 @@ Other useful switches:
 - `-OutHtml <path>` &mdash; (static mode only) write the snapshot to a chosen
   path instead of a temp file.
 
-## The three tabs
+## The four tabs
 
 ### Graph
 
@@ -68,6 +68,33 @@ buffer. Per-row actions:
 
 No autosave. The Save tab is the single commit point.
 
+### New & clone (v0.3)
+
+A launcher tab with six wizard cards, designed for operators who only
+open the tool every few weeks:
+
+| Card | Purpose | CSV(s) touched |
+|---|---|---|
+| New admin account | Onboard a new privileged user | `Account-Definitions-Admins` + `PIM-Assignments-Admins` (per picked role group) |
+| New permission group (Entra ID) | A capability bundle granting Entra ID role(s) | One of `PIM-Definitions-{Tasks,Services,Processes,Resources,Departments,Organization}` + `PIM-Assignments-Roles-Groups` + `PIM-Assignments-Groups` |
+| New permission group (Azure resource) | An Azure RBAC role at a chosen scope | `PIM-Assignments-Azure-Resources` (+ `PIM-Assignments-Groups` for nesting) |
+| New role group | A higher-level grouping that nests perm-groups | `PIM-Definitions-Roles` + `PIM-Assignments-Groups` + `PIM-Assignments-Admins` |
+| Clone an existing group | Duplicate any role/permission group with a new tag | The same Definitions CSV as the source + all assignment CSVs that reference the old tag |
+| Project lifecycle (time-boxed) | Short-lived role group with default 90-day expiry, `AutoExtend=FALSE` | `PIM-Definitions-Roles` + assignments with the chosen lifetime |
+
+Each wizard follows these UX rules so the operator never has to remember the naming convention or CSV layout:
+
+1. **Plain-English labels** &mdash; the CSV column name is shown as small grey help text below the human-readable label.
+2. **Sensible defaults** for every field (T1 / L3 / Cloud / ID / Eligible / 365-day lifetime).
+3. **Inline examples** next to every input (`e.g. AppAdmin`, `e.g. AHA`).
+4. **"Why these fields?"** collapsible at the top of every step.
+5. **Multi-step layout** &mdash; max ~5 fields per screen, back-buttonable.
+6. **Live "you'll get"** preview &mdash; the auto-composed `GroupName` / `GroupTag` / `UserPrincipalName` updates as you type.
+7. **Plain-English review** &mdash; before the row-level diff, the final step shows a 1-paragraph summary of what will land where.
+8. **Right CSV chosen for you** &mdash; the perm-group wizard's "What kind of capability?" dropdown maps the human choice (Task / Service / Process / Resource / Department / Organization) to the right `PIM-Definitions-*.csv` automatically.
+9. **Cancel is the safe default** &mdash; closing the modal asks to discard any rows the wizard staged; nothing is written to disk until `Commit all`.
+10. **Clone from graph** &mdash; right-clicking a role/permission group on the Graph tab opens the Clone wizard pre-populated with that node as the source.
+
 ### Save
 
 Lists every CSV with pending changes. Each card shows add / remove /
@@ -94,7 +121,7 @@ preserved; any column that exists in your pending state but not in the
 on-disk file is appended at the end.
 
 Every successful write appends one tab-separated line to
-`output/pim-mapper-mutations.log`:
+`output/pim-manager-mutations.log`:
 
 ```
 {utcIso}\t{base}\t{adds}\t{removes}\t{modifies}\t{newRowCount}
@@ -143,10 +170,10 @@ What this does **not** prevent (out of scope for this tool):
 
 After a `git pull`, exercise these against your real CSVs:
 
-1. **Static viewer round-trip:** `.\Open-PimMapper.ps1 -StaticHtml`.
+1. **Static viewer round-trip:** `.\Open-PimManager.ps1 -StaticHtml`.
    The browser should open and show the same graph as v0.1.
 
-2. **Server boot + auth:** `.\Open-PimMapper.ps1`. Browser opens at a
+2. **Server boot + auth:** `.\Open-PimManager.ps1`. Browser opens at a
    random port. Open DevTools &rarr; Network &rarr; verify every `/api/*`
    call carries `Authorization: Bearer <guid>`. Try
    `Invoke-WebRequest http://127.0.0.1:<port>/api/config` from another
@@ -164,7 +191,7 @@ After a `git pull`, exercise these against your real CSVs:
 
 5. **Delete row:** mark a row ✕, go to Save tab, click **Commit all**.
    Verify the row is gone from the `.custom.csv`. Verify
-   `output\pim-mapper-mutations.log` got a new line with
+   `output\pim-manager-mutations.log` got a new line with
    `removes=1`.
 
 6. **Graph-mode delete:** in Graph tab, click an edge between an admin
@@ -194,8 +221,9 @@ After a `git pull`, exercise these against your real CSVs:
 
 ## Future work (roadmap)
 
-- v0.3: graph-mode drag-to-connect / right-click-delete, new-admin and
-  new-group wizards with naming-convention auto-fill.
+- v0.3 (shipped): graph-mode delete + clone, six wizards on the **New
+  & clone** tab, "Why these fields?" help, live "you'll get" previews,
+  plain-English summary on the review step.
 - v0.4: tenant overlay (live CSV vs live Entra drift detection).
 - v0.5: one-click engine run from the GUI.
 
