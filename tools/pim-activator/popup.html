@@ -10,7 +10,10 @@
      the popup. ONLY the list area scrolls. This way the user always sees
      "Developed by Morten Knudsen ... Tenant: ..." without scrolling, and
      the Activate / Justification controls don't get buried either. */
-  body { display:flex; flex-direction:column; height:600px; max-height:600px; }
+  /* Popup shrinks to content (good for the sign-in screen which only needs
+     ~150px), but caps at 600px max so the list area scrolls instead of
+     pushing the popup arbitrarily tall. */
+  body { display:flex; flex-direction:column; min-height:180px; max-height:600px; }
   /* Hidden attribute wins over display:flex (`hidden` short-circuits to
      display:none); the :not([hidden]) selector makes display:flex apply ONLY
      to the visible tab panel. */
