@@ -48,7 +48,7 @@
 
 .EXAMPLE
     Connect-MgGraph -TenantId f0fa27a0-... -Scopes 'Application.ReadWrite.All','AppRoleAssignment.ReadWrite.All','DelegatedPermissionGrant.ReadWrite.All'
-    .\Install-PimActivatorAppRegistration.ps1 -ExtensionId 'abcd...wxyz' -GrantConsent
+    .\Deploy-PimActivatorBackend.ps1 -ExtensionId 'abcd...wxyz' -GrantConsent
 
 .NOTES
     Re-runnable: if an app with the same DisplayName already exists in the
@@ -130,22 +130,34 @@ if ($existing.Count -gt 1) {
 
 if ($existing) {
     Write-Host "Updating existing app registration '$DisplayName' (appId $($existing.AppId))..." -ForegroundColor Yellow
-    # Public client redirect URI (not SPA) -- token endpoint is called from
-    # the extension's fetch context with no Origin header. Also wipe any
-    # stale -Spa URI a previous install may have left behind.
+    # Modern Edge / Chrome MV3 extension auth needs BOTH SPA URIs registered:
+    #   1. https://<id>.chromiumapp.org/  -- the redirect that
+    #      chrome.identity.launchWebAuthFlow listens for + intercepts to extract
+    #      the auth code.
+    #   2. chrome-extension://<id>/  -- because the popup.js fetch() to the
+    #      /oauth2/v2.0/token endpoint sends Origin: chrome-extension://<id>,
+    #      and Entra's SPA flow validates the Origin header against registered
+    #      redirect URIs. Without this, token redemption fails with
+    #      AADSTS9002326 ("Cross-origin token redemption is permitted only for
+    #      the 'Single-Page Application' client-type. Request origin:
+    #      'chrome-extension://<id>'").
+    # Both must be SPA type (Public Client type bounces with the same error).
+    # Wipe any stale Public Client URI a previous install may have left behind.
+    $extensionOrigin = "chrome-extension://$ExtensionId/"
     Update-MgApplication -ApplicationId $existing.Id `
-        -PublicClient @{ RedirectUris = @($redirectUri) } `
-        -Spa @{ RedirectUris = @() } `
-        -IsFallbackPublicClient:$true `
+        -Spa @{ RedirectUris = @($redirectUri, $extensionOrigin) } `
+        -PublicClient @{ RedirectUris = @() } `
+        -IsFallbackPublicClient:$false `
         -RequiredResourceAccess $requiredResourceAccess
     $app = Get-MgApplication -ApplicationId $existing.Id
 } else {
     Write-Host "Creating app registration '$DisplayName'..." -ForegroundColor Green
+    $extensionOrigin = "chrome-extension://$ExtensionId/"
     $app = New-MgApplication `
         -DisplayName $DisplayName `
         -SignInAudience 'AzureADMyOrg' `
-        -PublicClient @{ RedirectUris = @($redirectUri) } `
-        -IsFallbackPublicClient:$true `
+        -Spa @{ RedirectUris = @($redirectUri, $extensionOrigin) } `
+        -IsFallbackPublicClient:$false `
         -RequiredResourceAccess $requiredResourceAccess
 }
 
