@@ -1,9 +1,10 @@
 # Release notes for PIM4EntraPS
 
-## v2.4.9
+## v2.4.10
 
 Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monorepo:
 
+- release: PIM4EntraPS v2.4.10 - Activator popup: My Access tab + token self-heal + Auto-fix button + hide-already-active (96b0c313)
 - release: PIM4EntraPS v2.4.9 - switch CRX hosting to GitHub Pages + Chrome support + Install->Deploy renames + SPA URI fix (E2E proven) (5e263602)
 - release: PIM4EntraPS v2.4.8 - all-in-one Azure CRX hosting in Setup-PimActivator.ps1 + manifest schema fix + Test-PimActivatorFlow.ps1 (5adbd277)
 - release: PIM4EntraPS v2.4.7 - finish wiring v2.4.4's 4-method auth into community launchers + README catch-up (95a1ab25)
@@ -33,13 +34,69 @@ Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monor
 - release: PIM4EntraPS v1.0.0 - restructure to SecurityInsight conventions + .locked/.custom split + customer naming/filter extension points + generic Build-PimContext helper (additive, no engine rewire yet) (12616959)
 - port: v1 -> v2 on 14 user-selected solutions (67 engines) (fbe39214)
 - rename: SOLUTIONS/PlatformOnboarding -> SOLUTIONS/PlatformConfiguration (368f422e)
-- Merge remote-tracking branch 'origin/dev' into HEAD (b8556ec1)
 
 ---
 
 # Release notes -- PIM4EntraPS
 
 > **Curated changelog.** The publish workflow auto-prepends recent monorepo commits as a raw activity log; this file is the human-friendly narrative on top.
+
+---
+
+## v2.4.10 -- PIM Activator popup: "My Access" tab + token self-heal + Auto-fix button + hide-already-active
+
+Three popup UX wins, one new Graph scope, fully tested E2E:
+
+### 1. New "My Access" tab
+
+Sibling to the existing "Activate" tab (toggleable via tab strip at the top). Shows what the signed-in user CURRENTLY has active in this tenant:
+
+- All currently-active PIM-for-Groups memberships (filtered to `accessId='member'`)
+- Per group: start/end timestamps (when activation went live + when it expires)
+- Per group: the Entra role assignments attached to that group (role display name + scope description: "(tenant-wide)" or "AU 'EMEA-Helpdesk'")
+- Per group: a placeholder for Azure RBAC scope view (deferred to v2.4.11 -- needs a separate ARM token flow)
+
+Tabs each have a badge counter: `Activate (N)` shows the count of eligibilities the user CAN activate; `My Access (M)` shows the count CURRENTLY active. Both badges auto-update after activations land.
+
+Lazy load + 30 s in-memory cache. In-panel **Refresh** button bypasses the cache.
+
+### 2. Token self-heal (the "switch browsers / admin re-consented" fix)
+
+The cached access token is issued by Entra with a fixed scope set at sign-in time. If admin grants new scopes server-side AFTER the user signed in, the user's cached token still doesn't see them. Same problem when switching browsers (Edge -> Chrome): each browser has its own extension instance + own token cache; activations performed in Edge aren't reflected in Chrome's stale token.
+
+**Three self-heal trigger points** in `popup.js`:
+
+a. **On every `loaded()` call**: decode the cached token's JWT `scp` claim, compare against `REQUIRED_GRAPH_SCOPES` (PrivilegedAccess.ReadWrite.AzureADGroup + Group.Read.All + User.Read + the new RoleManagement.Read.Directory). If any missing -> trigger reauth.
+b. **On 401 / 403 from Graph**: if response code matches `InvalidAuthenticationToken / AccessDenied / Authorization_RequestDenied / TokenNotFound / MissingClaim / InsufficientScopes`, wrap the error as `stale=true` and reauth.
+c. **Manual button**: Auto-fix permissions in the My Access tab toolbar (see below).
+
+When reauth fires, the popup shows a **full-popup overlay banner** explaining what's happening + why ("Admin re-consented new scopes / switched browser / token expired"), waits 2.5 seconds so the user can read it, then reloads. The user signs in once; Entra issues a fresh token with the current scope set; everything continues. Old mysterious 403s replaced by a transparent re-sign-in.
+
+### 3. Auto-fix button
+
+In the My Access tab toolbar. Click -> validates `scp` claim against required scopes. If all present, shows green `Token healthy -- all 4 scope(s) present.` If any missing, shows the missing list + immediately triggers the self-heal flow.
+
+Also shows a live diagnostic next to the button (`4/4 scopes` in green, or `Missing: <list> (click Auto-fix)` in amber) so users can see token health at a glance.
+
+### 4. Hide-already-active in the Activate tab
+
+The Activate tab used to show EVERY eligibility, even ones the user had already activated -- confusing because re-activating already-active groups bounces with `AssignmentExists`. v2.4.10 now also fetches `assignmentScheduleInstances` in parallel with eligibilities and filters out rows already active. The status bar shows the count of hidden rows: `15 eligible group(s) (3 already active -> My Access).`
+
+### Files changed
+
+- `popup.html`: tab strip + new `#panel-myaccess` panel + Auto-fix button + scope-diagnostic line
+- `popup.js`: `RoleManagement.Read.Directory` added to `SCOPES`; new helpers `decodeJwtPayload` / `getTokenScopes` / `missingScopes` / `triggerInteractiveReauth`; `graph()` flags `stale=true` on auth-related errors; `loaded()` does parallel eligibility + active fetches, filters out already-active, triggers self-heal if scopes missing; Auto-fix button wired
+- `Deploy-PimActivatorBackend.ps1`: `RoleManagement.Read.Directory` added to `$needed` scope list; doc-comment updated
+- `Setup-PimActivator.ps1` (no change, runs the updated backend automatically)
+
+### Customer admin action required after upgrade
+
+Re-run `Setup-PimActivator.ps1 -PublishToGitHubPages` (with `-PushPolicy` if also pushing Edge/Chrome policy). The script's Step 4 calls Deploy-PimActivatorBackend which automatically re-grants admin consent for the new scope. Existing customers' end-users will hit the self-heal flow on first popup open after upgrade -- transparent, one click to re-sign-in.
+
+### E2E verification (2026-06-03)
+
+- Setup-PimActivator -PublishToGitHubPages run: SUCCESS, new CRX with extension ID `eheocihmlppcophaeakmdenhgcookkab` pushed to GitHub Pages, scope `RoleManagement.Read.Directory` (id `741c54c3-0c1e-44a1-818b-3f97ab4e8c83`) added + admin-consented
+- popup.js + Deploy-PimActivatorBackend.ps1 parse-clean (node --check + Parser::ParseFile)
 
 ---
 

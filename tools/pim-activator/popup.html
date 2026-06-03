@@ -5,7 +5,7 @@
 <title>PIM Activator</title>
 <style>
   :root { color-scheme: dark; }
-  html, body { margin:0; padding:0; width:420px; font-family: -apple-system, "Segoe UI", Roboto, sans-serif; background:#0e1116; color:#e6edf3; font-size:13px; }
+  html, body { margin:0; padding:0; width:780px; font-family: -apple-system, "Segoe UI", Roboto, sans-serif; background:#0e1116; color:#e6edf3; font-size:13px; }
   header { padding:10px 12px; border-bottom:1px solid #30363d; display:flex; align-items:center; gap:10px; }
   header h1 { font-size:13px; margin:0; flex:1; }
   #me { color:#7d8590; font-size:11px; }
@@ -39,6 +39,33 @@
   #status-bar.err { color:#f85149; }
   .empty { padding:20px 12px; color:#7d8590; text-align:center; font-style:italic; font-size:12px; }
   #list { max-height:340px; overflow:auto; }
+
+  /* Tab strip */
+  #tabs { display:flex; gap:4px; padding:0 12px; border-bottom:1px solid #30363d; background:#0e1116; }
+  .tab-btn { background:transparent; border:none; border-bottom:2px solid transparent; color:#7d8590; padding:8px 12px; font-size:12.5px; cursor:pointer; border-radius:0; display:inline-flex; align-items:center; gap:6px; }
+  .tab-btn:hover { background:transparent; color:#e6edf3; }
+  .tab-btn.active { color:#e6edf3; font-weight:600; border-bottom-color:#1f6feb; }
+  .tab-btn .badge { background:#21262d; color:#7d8590; border:1px solid #30363d; border-radius:10px; padding:0 6px; font-size:10.5px; min-width:14px; text-align:center; }
+  .tab-btn.active .badge { background:#1f6feb; color:#fff; border-color:#1f6feb; }
+  [role=tabpanel][hidden] { display:none; }
+
+  /* My Access tab */
+  #myaccess-toolbar { display:flex; gap:6px; padding:6px 12px; border-bottom:1px solid #21262d; align-items:center; }
+  #myaccess-toolbar .spacer { flex:1; }
+  #myaccess-status { padding:8px 12px; color:#7d8590; font-size:11px; }
+  #myaccess-status.err { color:#f85149; }
+  #myaccess-list { max-height:520px; overflow:auto; }
+  .ma-section { padding:8px 12px 4px 12px; color:#7d8590; font-size:11px; text-transform:uppercase; letter-spacing:0.5px; border-bottom:1px solid #21262d; }
+  .ma-row { padding:8px 12px; border-bottom:1px solid #21262d; }
+  .ma-row .ma-head { display:flex; align-items:baseline; gap:10px; flex-wrap:wrap; }
+  .ma-row .ma-name { font-size:12.5px; font-weight:600; flex:1; min-width:0; word-break:break-word; }
+  .ma-row .ma-times { font-size:10.5px; color:#7d8590; white-space:nowrap; }
+  .ma-row .ma-roles { margin-top:4px; padding-left:16px; }
+  .ma-row .ma-role { font-size:11.5px; color:#c9d1d9; padding:2px 0; }
+  .ma-row .ma-role .ma-scope { color:#7d8590; }
+  .ma-row .ma-role.ma-rbac { color:#7d8590; font-style:italic; }
+  .ma-row .ma-role.ma-err { color:#f85149; font-style:italic; }
+  .ma-row .ma-role.ma-loading { color:#d29922; font-style:italic; }
 </style>
 </head>
 <body>
@@ -50,29 +77,49 @@
   <button id="sign-out" style="display:none">Sign out</button>
 </header>
 
-<div id="toolbar" style="display:none">
-  <input id="search" type="search" placeholder="Filter groups…">
-  <a id="select-all">all</a>
-  <a id="select-none">none</a>
-  <a id="refresh">refresh</a>
+<div id="tabs" style="display:none">
+  <button class="tab-btn active" data-tab="activate" id="tab-btn-activate">Activate <span class="badge" id="badge-activate">0</span></button>
+  <button class="tab-btn" data-tab="myaccess" id="tab-btn-myaccess">My Access <span class="badge" id="badge-myaccess">0</span></button>
 </div>
 
-<div id="status-bar">Loading…</div>
-
-<div id="list"></div>
-
-<footer style="display:none" id="footer">
-  <div class="controls">
-    <label for="justification">Justification</label>
-    <textarea id="justification" rows="1"></textarea>
-    <label for="duration">Duration (hours)</label>
-    <input id="duration" type="number" min="0.5" max="24" step="0.5">
+<!-- =============== Activate tab =============== -->
+<div role="tabpanel" id="panel-activate">
+  <div id="toolbar" style="display:none">
+    <input id="search" type="search" placeholder="Filter groups...">
+    <a id="select-all">all</a>
+    <a id="select-none">none</a>
+    <a id="refresh">refresh</a>
   </div>
-  <div class="actions">
-    <div class="count" id="count"></div>
-    <button class="primary" id="activate" disabled>Activate selected</button>
+
+  <div id="status-bar">Loading...</div>
+
+  <div id="list"></div>
+
+  <footer style="display:none" id="footer">
+    <div class="controls">
+      <label for="justification">Justification</label>
+      <textarea id="justification" rows="1"></textarea>
+      <label for="duration">Duration (hours)</label>
+      <input id="duration" type="number" min="0.5" max="24" step="0.5">
+    </div>
+    <div class="actions">
+      <div class="count" id="count"></div>
+      <button class="primary" id="activate" disabled>Activate selected</button>
+    </div>
+  </footer>
+</div>
+
+<!-- =============== My Access tab =============== -->
+<div role="tabpanel" id="panel-myaccess" hidden>
+  <div id="myaccess-toolbar">
+    <button id="myaccess-autofix" title="Validate that your access token contains all required scopes (PrivilegedAccess, Group.Read.All, User.Read, RoleManagement.Read.Directory). If anything is missing, sign you out + back in to pick up the latest admin-consented scopes.">Auto-fix permissions</button>
+    <div id="myaccess-scope-status" style="font-size:11px;color:#7d8590;padding:0 4px;"></div>
+    <div class="spacer"></div>
+    <button id="myaccess-refresh">Refresh</button>
   </div>
-</footer>
+  <div id="myaccess-status">Loading...</div>
+  <div id="myaccess-list"></div>
+</div>
 
 <script src="config.js"></script>
 <script type="module" src="popup.js"></script>
