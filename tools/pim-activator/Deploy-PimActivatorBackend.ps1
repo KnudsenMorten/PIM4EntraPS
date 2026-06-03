@@ -23,6 +23,10 @@
       - PrivilegedAccess.ReadWrite.AzureADGroup
       - Group.Read.All
       - User.Read
+      - RoleManagement.Read.Directory   (powers the "My Access" tab -- lists
+        Entra role assignments attached to the user's active PIM-for-Groups
+        memberships. Admin-consentable. Without it, the My Access tab still
+        renders memberships but each row shows a 403 for the role lookup.)
 
     Caller (you) must have:
       - Graph scopes: Application.ReadWrite.All, AppRoleAssignment.ReadWrite.All,
@@ -103,7 +107,7 @@ $graphAppId = '00000003-0000-0000-c000-000000000000'
 $graphSp    = Get-MgServicePrincipal -Filter "appId eq '$graphAppId'"
 if (-not $graphSp) { throw "Microsoft Graph service principal not found in tenant -- this should never happen." }
 
-$needed = @('PrivilegedAccess.ReadWrite.AzureADGroup', 'Group.Read.All', 'User.Read')
+$needed = @('PrivilegedAccess.ReadWrite.AzureADGroup', 'Group.Read.All', 'User.Read', 'RoleManagement.Read.Directory')
 $scopeMap = @{}
 foreach ($name in $needed) {
     $scope = $graphSp.Oauth2PermissionScopes | Where-Object { $_.Value -eq $name }
