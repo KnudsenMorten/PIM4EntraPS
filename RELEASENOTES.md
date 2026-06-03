@@ -1,9 +1,10 @@
 # Release notes for PIM4EntraPS
 
-## v2.4.14
+## v2.4.15
 
 Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monorepo:
 
+- release: PIM4EntraPS v2.4.15 - CRITICAL FIX popup JWT decode bug caused infinite "missing scopes" reauth loop + Set-PimActivatorPolicy-Intune.ps1 Platform Script (66f07cfe)
 - release: PIM4EntraPS v2.4.14 - popup light theme (white+blue) + simplified not-configured text + ext v0.3.0->0.4.0 + correct Intune deployment guidance (b024bd79)
 - release: PIM4EntraPS v2.4.13 - CRX bundles placeholder config.js (no maintainer-tenant leak into customer installs) + ext ver 0.2.0 -> 0.3.0 (b3d55092)
 - release: PIM4EntraPS v2.4.12 - Intune-first deployment (-PrintIntuneConfig mode + HKCU-default -PushPolicyScope) (d65821df)
@@ -33,13 +34,61 @@ Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monor
 - release: PIM4EntraPS v2.1.1 - rename pim-mapper -> pim-manager (does more than map) + field-by-field UX audit spec + wizard scaffolding (42fe18e1)
 - release: PIM4EntraPS v2.1.0 - MSP variant + AccountStatus kill-switch with CISO-controlled per-admin KV codes (d1979fe8)
 - release: PIM4EntraPS v2.0.0 - full PIM v2 framework: engine modernization + Mapper (graph viewer + grid editor + save) + Activator (Edge extension + Intune install) + one-shot engine SPN installer + 18-section DESIGN.md + README rewrite (0118ecf8)
-- release: PIM4EntraPS v1.0.2 - SI launcher naming alignment + fix internal-azure leak in publish workflow + rewire engine path resolution for new engine/<task>/ layout (2ff8ebb1)
 
 ---
 
 # Release notes -- PIM4EntraPS
 
 > **Curated changelog.** The publish workflow auto-prepends recent monorepo commits as a raw activity log; this file is the human-friendly narrative on top.
+
+---
+
+## v2.4.15 -- CRITICAL FIX: popup JWT decode bug caused infinite "missing scopes" reauth loop
+
+The popup self-heal logic introduced in v2.4.10 (`decodeJwtPayload` -> `getTokenScopes` -> `missingScopes`) had a latent bug that surfaced for every user after the v2.4.10 release: a double-decode in the JWT payload parser silently swallowed every token, making it appear as if the token contained zero Graph scopes. The self-heal then triggered a full reauth + page reload, the new token was also "missing all scopes", and the popup looped indefinitely on the "Self-healing your session..." overlay.
+
+Symptom in the field: clicking the PIM Activator icon shows a brief sign-in screen, then a dark overlay flashes "Missing scopes: PrivilegedAccess.ReadWrite.AzureADGroup, Group.Read.All, User.Read, RoleManagement.Read.Directory", then the popup reloads back to sign-in. Forever. Even after `chrome.identity.clearAllCachedAuthTokens`, even after a clean OAuth round-trip with admin-consented all-scopes tokens.
+
+### Root cause
+
+`popup.js` line 117:
+
+```javascript
+const json = new TextDecoder().decode(base64UrlDecode(parts[1]))
+```
+
+`base64UrlDecode()` (line 178) already returns a UTF-8-decoded string -- not a Uint8Array. Wrapping the string in `TextDecoder().decode(...)` throws `"The provided value cannot be converted to a sequence of bytes"` in V8/Blink. The surrounding `try/catch` in `decodeJwtPayload` swallows the throw and returns `null`. From there:
+
+```
+decodeJwtPayload  -> null
+getTokenScopes    -> []  (no scp claim found)
+missingScopes     -> [all 4 required scopes]
+triggerInteractiveReauth -> overlay + reload -> loop
+```
+
+Verified by dumping the JWT directly from `chrome.storage.local` LevelDB on disk: the cached access tokens contained ALL 4 required scopes (`Group.Read.All PrivilegedAccess.ReadWrite.AzureADGroup RoleManagement.Read.Directory User.Read`), correct audience (`https://graph.microsoft.com`), correct tenant, correct app id. The bug was purely in the popup's parser, not in the OAuth flow / app registration / consent.
+
+### Fix
+
+One-line in `popup.js`:
+
+```javascript
+return JSON.parse(base64UrlDecode(parts[1]))   // string -> JSON.parse direct
+```
+
+`base64UrlDecode` already does the UTF-8 decode internally. The extra `TextDecoder().decode()` was redundant + broken.
+
+### Customer action
+
+End-users on Edge/Chrome with the extension installed:
+- Auto-update kicks in within ~30 min (Chromium polls `updates.xml` periodically). After the v0.4.1 CRX lands, restart Edge/Chrome -> the popup signs in cleanly.
+- To force the update immediately: `edge://extensions` -> toggle Developer mode on -> click **Update**. Same on `chrome://extensions`.
+
+No admin/Intune changes needed. Same forcelist + managed-storage values from v2.4.14 carry forward.
+
+### Extension version
+
+Manifest bumped 0.4.0 -> 0.4.1 so Chromium recognises the update via `updates.xml`.
 
 ---
 
