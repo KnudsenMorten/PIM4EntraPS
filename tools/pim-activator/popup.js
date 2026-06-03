@@ -65,6 +65,17 @@ const SCOPES = [
 ]
 
 const AUTHORITY    = `https://login.microsoftonline.com/${cfg.tenantId}`
+
+// Populate the footer with the configured tenant id so the user can tell at
+// a glance which tenant this popup is wired to (useful for multi-tenant
+// admins who flip between customer Edge profiles).
+;(() => {
+  const el = document.getElementById('footer-tenant')
+  if (el && cfg.tenantId) {
+    el.textContent = `Tenant: ${cfg.tenantId}`
+    el.title = `Microsoft Entra tenant id pushed via chrome.storage.managed (entraGroupRegex / tenantId / clientId). Configured at install time per Intune policy.`
+  }
+})()
 const AUTH_URL     = `${AUTHORITY}/oauth2/v2.0/authorize`
 const TOKEN_URL    = `${AUTHORITY}/oauth2/v2.0/token`
 const REDIRECT_URI = chrome.identity.getRedirectURL()  // https://<extId>.chromiumapp.org/
@@ -90,7 +101,10 @@ const els = {
   myAccessList: $('myaccess-list'),
   myAccessRefresh: $('myaccess-refresh'),
   myAccessAutofix: $('myaccess-autofix'),
-  myAccessScopeStatus: $('myaccess-scope-status')
+  myAccessScopeStatus: $('myaccess-scope-status'),
+  myAccessSelectAll:  $('myaccess-select-all'),
+  myAccessSelectNone: $('myaccess-select-none'),
+  myAccessDeactivateSelected: $('myaccess-deactivate-selected')
 }
 
 let currentAccount = null
@@ -101,6 +115,16 @@ const MYACCESS_CACHE_MS = 30 * 1000
 let myAccessCache = null      // { ts: epochMs, rows: [...] }
 let myAccessLoading = false
 let myAccessLoadedOnce = false
+
+// Tick state for the My Access tab's bulk deactivate. Set of groupIds.
+let myAccessSelected = new Set()
+function updateBulkDeactivateButton() {
+  const n = myAccessSelected.size
+  if (els.myAccessDeactivateSelected) {
+    els.myAccessDeactivateSelected.textContent = `Deactivate selected (${n})`
+    els.myAccessDeactivateSelected.disabled = n === 0
+  }
+}
 
 // ---------- Persisted state ----------
 async function getStored(keys) { return new Promise(r => chrome.storage.local.get(keys, r)) }
@@ -458,6 +482,23 @@ async function activateGroup(token, groupId, justification, durationHours) {
       startDateTime: new Date().toISOString(),
       expiration: { type: 'afterDuration', duration }
     }
+  }
+  return graph(token, 'POST', '/identityGovernance/privilegedAccess/group/assignmentScheduleRequests', body)
+}
+
+// Self-deactivate: user voluntarily drops an active PIM-for-Groups membership
+// early (before its scheduled expiry). Uses the same assignmentScheduleRequests
+// endpoint with action=selfDeactivate. No scheduleInfo required (Entra applies
+// "deactivate now"). The user can always do this for their OWN active
+// memberships -- admin/elevated roles aren't required because it's "self"
+// (the principalId on the body must match the signed-in user).
+async function deactivateGroup(token, groupId, justification) {
+  const body = {
+    accessId: 'member',
+    principalId: currentAccount.localAccountId,
+    groupId: groupId,
+    action: 'selfDeactivate',
+    justification: justification || 'User-initiated deactivation from PIM Activator'
   }
   return graph(token, 'POST', '/identityGovernance/privilegedAccess/group/assignmentScheduleRequests', body)
 }
@@ -1145,9 +1186,6 @@ function renderMyAccess(rows) {
 }
 
 function renderOneMyAccessRow(r) {
-  // Drop the "member since X . expires Y" labels (noisy + "member" is always
-  // the same string for PIM-for-Groups). Show the same info with arrow:
-  // "<start> -> <end>" with date+time for both. Empty -> "permanent".
   const fmt = (iso) => iso ? new Date(iso).toLocaleString(undefined, { dateStyle: 'short', timeStyle: 'short' }) : null
   const start = fmt(r.startDateTime)
   const end   = fmt(r.endDateTime) || 'permanent'
@@ -1155,14 +1193,61 @@ function renderOneMyAccessRow(r) {
   const row = document.createElement('div')
   row.className = 'ma-row'
   row.dataset.gid = r.groupId
+  const ticked = myAccessSelected.has(r.groupId) ? 'checked' : ''
   row.innerHTML = `
-    <div class="ma-head">
-      <div class="ma-name">${escapeHtml(r.displayName || r.groupId)}</div>
-      <div class="ma-times">${times}</div>
+    <div class="ma-head" style="display:flex;align-items:flex-start;gap:8px;">
+      <input type="checkbox" class="ma-pick" data-pick-gid="${escapeHtml(r.groupId)}" ${ticked} title="Tick to include in bulk deactivate." style="margin-top:3px;flex-shrink:0;">
+      <div style="flex:1;min-width:0;">
+        <div class="ma-name">${escapeHtml(r.displayName || r.groupId)}</div>
+        <div class="ma-times">${times}</div>
+      </div>
+      <button class="ma-deactivate" data-deact-gid="${escapeHtml(r.groupId)}" title="Drop this membership early -- you'll lose access immediately. Confirm prompt before it runs."
+        style="background:#ffffff;color:#cf222e;border:1px solid #cf222e;border-radius:4px;padding:3px 10px;font-size:11px;font-weight:600;cursor:pointer;flex-shrink:0;">Deactivate</button>
     </div>
     <div class="ma-roles" data-roles-for="${escapeHtml(r.groupId)}"></div>
   `
   els.myAccessList.appendChild(row)
+  // Wire the tick checkbox
+  const pick = row.querySelector('.ma-pick')
+  if (pick) {
+    pick.addEventListener('change', (e) => {
+      if (e.target.checked) myAccessSelected.add(r.groupId)
+      else myAccessSelected.delete(r.groupId)
+      updateBulkDeactivateButton()
+    })
+  }
+  // Wire the deactivate button (single row)
+  const btn = row.querySelector('.ma-deactivate')
+  if (btn) {
+    btn.addEventListener('click', async (e) => {
+      e.stopPropagation()
+      const groupName = r.displayName || r.groupId
+      const ok = confirm(`Deactivate your membership in:\n\n${groupName}\n\nYou will lose this access immediately. (Scheduled expiry was ${end}.) Continue?`)
+      if (!ok) return
+      btn.disabled = true
+      btn.textContent = 'Deactivating...'
+      try {
+        const fresh = await acquireGraphToken({ interactive: false })
+        const tk = fresh?.accessToken
+        if (!tk) throw new Error('Not signed in')
+        await deactivateGroup(tk, r.groupId, 'User-initiated deactivation from PIM Activator')
+        btn.textContent = 'Deactivated'
+        btn.style.background = '#dafbe1'
+        btn.style.color = '#1a7f37'
+        btn.style.borderColor = '#1a7f37'
+        // Refresh My Access in a moment so the row drops out of the list
+        setTimeout(async () => {
+          myAccessCache = null
+          const fr = await acquireGraphToken({ interactive: false })
+          await loadMyAccessTab(fr?.accessToken, { force: true })
+        }, 1200)
+      } catch (err) {
+        btn.disabled = false
+        btn.textContent = 'Deactivate'
+        alert(`Deactivation failed: ${err?.message || err}`)
+      }
+    })
+  }
   updateMyAccessRoleSlot(r)
 }
 
@@ -1692,6 +1777,66 @@ async function loaded(token) {
     const fresh = await acquireGraphToken({ interactive: false })
     const tk = fresh?.accessToken || token
     await loadMyAccessTab(tk, { force: true })
+  }
+
+  // ---- My Access bulk deactivate -----------------------------------------
+  if (els.myAccessSelectAll) {
+    els.myAccessSelectAll.onclick = () => {
+      const rows = myAccessCache?.rows || []
+      for (const r of rows) myAccessSelected.add(r.groupId)
+      for (const cb of document.querySelectorAll('.ma-pick')) cb.checked = true
+      updateBulkDeactivateButton()
+    }
+  }
+  if (els.myAccessSelectNone) {
+    els.myAccessSelectNone.onclick = () => {
+      myAccessSelected.clear()
+      for (const cb of document.querySelectorAll('.ma-pick')) cb.checked = false
+      updateBulkDeactivateButton()
+    }
+  }
+  if (els.myAccessDeactivateSelected) {
+    els.myAccessDeactivateSelected.onclick = async () => {
+      if (myAccessSelected.size === 0) return
+      const rows = (myAccessCache?.rows || []).filter(r => myAccessSelected.has(r.groupId))
+      const names = rows.map(r => r.displayName || r.groupId).join('\n  - ')
+      const ok = confirm(`Deactivate ${rows.length} membership(s):\n\n  - ${names}\n\nYou will lose this access immediately. Continue?`)
+      if (!ok) return
+      els.myAccessDeactivateSelected.disabled = true
+      els.myAccessDeactivateSelected.textContent = `Deactivating ${rows.length}...`
+      let ok2 = 0, failed = 0
+      for (const r of rows) {
+        // Reflect per-row status on the button by writing the row name in the toolbar.
+        try {
+          const fresh = await acquireGraphToken({ interactive: false })
+          const tk = fresh?.accessToken
+          if (!tk) throw new Error('Not signed in')
+          await deactivateGroup(tk, r.groupId, 'User-initiated bulk deactivation from PIM Activator')
+          ok2++
+          // Mark the row's per-row button as deactivated for visual feedback
+          const btn = document.querySelector(`button.ma-deactivate[data-deact-gid="${CSS.escape(r.groupId)}"]`)
+          if (btn) {
+            btn.textContent = 'Deactivated'
+            btn.disabled = true
+            btn.style.background = '#dafbe1'
+            btn.style.color = '#1a7f37'
+            btn.style.borderColor = '#1a7f37'
+          }
+        } catch (e) {
+          failed++
+          console.warn(`bulk deactivate failed for ${r.groupId}:`, e?.message || e)
+        }
+      }
+      els.myAccessDeactivateSelected.textContent = `${ok2} deactivated${failed ? `, ${failed} failed` : ''}`
+      // Refresh the tab after a short delay so deactivated rows drop out.
+      setTimeout(async () => {
+        myAccessSelected.clear()
+        myAccessCache = null
+        const fr = await acquireGraphToken({ interactive: false })
+        await loadMyAccessTab(fr?.accessToken, { force: true })
+        updateBulkDeactivateButton()
+      }, 1500)
+    }
   }
 
   els.search.oninput  = render

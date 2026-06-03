@@ -5,10 +5,22 @@
 <title>PIM Activator</title>
 <style>
   :root { color-scheme: light; }
-  html, body { margin:0; padding:0; width:800px; font-family: -apple-system, "Segoe UI", Roboto, sans-serif; background:#ffffff; color:#1a1a1a; font-size:13px; }
-  header { padding:10px 12px; border-bottom:1px solid #d0d7de; display:flex; align-items:center; gap:10px; background:#f6f8fa; }
-  header h1 { font-size:13px; margin:0; flex:1; color:#0969da; font-weight:600; }
-  #me { color:#57606a; font-size:11px; }
+  html, body { margin:0; padding:0; width:800px; font-family: -apple-system, "Segoe UI", Roboto, sans-serif; background:#ffffff; color:#1a1a1a; font-size:13px; overflow-x:hidden; }
+  /* Blue frame around the whole popup so it's visually distinct against
+     the page behind it (Chromium popups blend into white pages). */
+  body { border:2px solid #0969da; box-sizing:border-box; }
+  /* Role preview lines (v2.4.28+) can contain long scope strings (GUIDs,
+     /subscriptions/<id>/resourceGroups/<name>). Break inside long tokens
+     rather than pushing the row out and triggering horizontal scroll. */
+  .row .body > div, .ma-row .ma-roles > div { overflow-wrap:anywhere; word-break:break-word; }
+  /* Header is the brand banner: blue background, white text, all-caps
+     title. Stands out as the popup's identity bar against the white body. */
+  header { padding:10px 12px; border-bottom:1px solid #0969da; display:flex; align-items:center; gap:10px; background:#0969da; color:#ffffff; }
+  header h1 { font-size:17px; margin:0; flex:1; color:#ffffff; font-weight:700; letter-spacing:0.5px; text-transform:uppercase; }
+  header h1 #version-badge { color:rgba(255,255,255,0.7); }
+  #me { color:#ffffff; font-size:11px; opacity:0.9; }
+  header button { background:rgba(255,255,255,0.15); color:#ffffff; border:1px solid rgba(255,255,255,0.4); border-radius:4px; padding:3px 10px; font-size:11.5px; cursor:pointer; }
+  header button:hover { background:rgba(255,255,255,0.25); }
   button { background:#f6f8fa; color:#1a1a1a; border:1px solid #d0d7de; padding:6px 10px; border-radius:6px; cursor:pointer; font-size:12px; }
   button.primary { background:#0969da; border-color:#0969da; color:#fff; }
   button.primary:hover { background:#0860c7; }
@@ -114,6 +126,10 @@
 <div role="tabpanel" id="panel-myaccess" hidden>
   <div id="myaccess-toolbar">
     <button id="myaccess-autofix" title="Sign out and back in to refresh your Microsoft sign-in. Use this if the popup looks broken, if an admin just granted you new permissions, or if you switched between Edge and Chrome.">Re-sign in</button>
+    <button id="myaccess-select-all"  title="Tick every active membership for bulk deactivate." style="font-size:11px;">all</button>
+    <button id="myaccess-select-none" title="Untick every active membership." style="font-size:11px;">none</button>
+    <button id="myaccess-deactivate-selected" disabled title="Deactivate every ticked membership. Confirm prompt before it runs."
+      style="background:#ffffff;color:#cf222e;border:1px solid #cf222e;border-radius:4px;padding:4px 10px;font-size:11.5px;font-weight:600;cursor:pointer;">Deactivate selected (0)</button>
     <div id="myaccess-scope-status" style="font-size:11px;color:#7d8590;padding:0 4px;"></div>
     <div class="spacer"></div>
     <button id="myaccess-refresh">Refresh</button>
@@ -121,6 +137,15 @@
   <div id="myaccess-status">Loading...</div>
   <div id="myaccess-list"></div>
 </div>
+
+<footer id="popup-footer" style="padding:8px 12px;font-size:10.5px;color:#7d8590;border-top:1px solid #d0d7de;background:#f6f8fa;display:flex;align-items:center;gap:10px;">
+  <div style="flex:1;">
+    Developed by <strong style="color:#1a1a1a;">Morten Knudsen</strong>
+    &middot; part of
+    <a href="https://github.com/KnudsenMorten/PIM4EntraPS" target="_blank" rel="noopener" style="color:#0969da;text-decoration:none;">PIM4EntraPS</a>
+  </div>
+  <div id="footer-tenant" title="" style="font-family:monospace;font-size:10px;color:#57606a;"></div>
+</footer>
 
 <script src="config.js"></script>
 <script type="module" src="popup.js"></script>
