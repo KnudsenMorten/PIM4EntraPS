@@ -1,9 +1,10 @@
 # Release notes for PIM4EntraPS
 
-## v2.4.18
+## v2.4.19
 
 Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monorepo:
 
+- release: PIM4EntraPS v2.4.19 - skip empty subsections + 3-category grouping in My Access tab (Entra / Azure / Workload) (0c799e60)
 - release: PIM4EntraPS v2.4.18 - Azure RBAC visible in My Access tab + collapse for long Entra role lists (1f7def50)
 - release: PIM4EntraPS v2.4.17 - AU names resolve via AdministrativeUnit.Read.All + sort by activation time DESC + persistent AU cache + Update-PimActivatorDev.ps1 helper (b502f337)
 - release: PIM4EntraPS v2.4.16 - popup UX: hide AU GUIDs + group identical roles + 'Re-sign in' instead of 'Auto-fix permissions' + auto-switch to My Access + auto-uncheck activated rows (5f7a664a)
@@ -33,13 +34,32 @@ Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monor
 - release: PIM4EntraPS v2.1.5 - hotfix: visible feedback on Remove-orphan-assignment button (dbd9bd38)
 - release: PIM4EntraPS v2.1.4 - hotfix: PIM-Functions auto-loads naming-conventions at module init (302f0a29)
 - release: PIM4EntraPS v2.1.3 - server-side Graph filtering (Get-PimAdminsFiltered + Get-PimGroupsFiltered) + customer-naming-aware Re-add wizard + naming-convention schema doc (6936c5ea)
-- release: PIM4EntraPS v2.1.2 - PIM Manager v0.3: pre-flight validator + bulk Fix-all + multi-step wizards + tenant cache (87feaada)
 
 ---
 
 # Release notes -- PIM4EntraPS
 
 > **Curated changelog.** The publish workflow auto-prepends recent monorepo commits as a raw activity log; this file is the human-friendly narrative on top.
+
+---
+
+## v2.4.19 -- Skip empty sub-sections; three permission types now clearly distinguished
+
+Per direct customer feedback after v2.4.18, the popup no longer prints "(no Entra role assignments granted by this group)" or "(no Azure RBAC assignments granted by this group)" lines. If a group doesn't grant either, those sub-rows are omitted entirely. Same data, less noise.
+
+### The three permission types visible in My Access
+
+| Type | What it is | Where it comes from | Where rendered |
+|---|---|---|---|
+| 1. Workload access via group membership | Defender XDR, Intune, Power BI workspaces, custom apps, etc. -- whatever role the group's owning workload defines for its members | The group membership itself; whoever owns the group decides what the membership means | Parent row (group name + member-since + expires) |
+| 2. Entra (M365) roles | Helpdesk Administrator, Authentication Administrator, Global Reader, etc. | Entra role assignments where the group is the principal (`/roleManagement/directory/roleAssignments?$filter=principalId eq '<gid>'`) | "Entra role: X (scope)" sub-row, only when present |
+| 3. Azure RBAC roles | Owner, Contributor, Reader, etc. on subscriptions/RGs/resources | Azure RBAC role assignments where the group is the principal (`https://management.azure.com/providers/Microsoft.Authorization/roleAssignments?$filter=principalId eq '<gid>'`) | "Azure RBAC: X at scope" sub-row, only when present |
+
+Most PIM-for-Groups groups in the wild grant ONE of these (just workload access via membership; e.g., a "PIM-Defender-XDR-SecurityOperations" group). v2.4.19 makes that the silent default -- only Entra + Azure rows surface when there's actually something to show. Bundle groups that DO have many roles use the collapse-by-default UX shipped in v2.4.18.
+
+### Customer action
+
+End-users on Edge/Chrome auto-update or run `Update-PimActivatorDev.ps1` (maintainer-only). Manifest 0.4.4 -> 0.4.5. No new permissions vs v2.4.18.
 
 ---
 
