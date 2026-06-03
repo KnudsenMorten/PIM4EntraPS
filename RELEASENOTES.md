@@ -1,9 +1,10 @@
 # Release notes for PIM4EntraPS
 
-## v2.4.36
+## v2.4.37
 
 Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monorepo:
 
+- release: PIM4EntraPS v2.4.37 - popup actually shrinks on sign-in (block layout instead of flex:1 panel) + version badge populated at popup-load (visible pre-sign-in) (c4d7d1d4)
 - release: PIM4EntraPS v2.4.36 - popup shrinks to content on sign-in (min-height:180px max-height:600px instead of fixed 600px) (608732ac)
 - release: PIM4EntraPS v2.4.35 - role preview ACTUALLY works (per-group eq queries in parallel, transitive+direct fallback, progress bar) (95665fd5)
 - release: PIM4EntraPS v2.4.34 - footer always visible (sticky flex layout, only list scrolls) + Morten Knudsen footer link -> aka.ms/morten (1ff38bfd)
@@ -33,13 +34,24 @@ Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monor
 - release: PIM4EntraPS v2.4.13 - CRX bundles placeholder config.js (no maintainer-tenant leak into customer installs) + ext ver 0.2.0 -> 0.3.0 (b3d55092)
 - release: PIM4EntraPS v2.4.12 - Intune-first deployment (-PrintIntuneConfig mode + HKCU-default -PushPolicyScope) (d65821df)
 - release: PIM4EntraPS v2.4.11 - Activator popup: My Access tab + token self-heal + Auto-fix button + hide-already-active (db8893b1)
-- release: PIM4EntraPS v2.4.10 - Activator popup: My Access tab + token self-heal + Auto-fix button + hide-already-active (96b0c313)
 
 ---
 
 # Release notes -- PIM4EntraPS
 
 > **Curated changelog.** The publish workflow auto-prepends recent monorepo commits as a raw activity log; this file is the human-friendly narrative on top.
+
+---
+
+## v2.4.37 -- Popup ACTUALLY shrinks on sign-in screen + version badge visible pre-sign-in
+
+Two real fixes:
+
+1. **Popup size**: the v2.4.34 + v2.4.36 attempts used `body { display:flex; flex-direction:column }` with `flex:1` on the tab panel + `min-height:0` on the list. `flex:1` made the panel WANT to grow, so even with empty content the popup hit max-height (~600px). Swapped to a simple block layout: body sizes to content; only the lists get `max-height:380px; overflow-y:auto`. Now the sign-in screen is genuinely compact (~130px including header + status + footer).
+
+2. **Version badge in header**: was populated inside `loaded()` which only runs AFTER sign-in. Moved to a top-level IIFE so the version (`v0.4.29`) is visible immediately on the sign-in screen too.
+
+Manifest 0.4.28 -> 0.4.29.
 
 ---
 
