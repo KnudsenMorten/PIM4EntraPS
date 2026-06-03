@@ -987,6 +987,20 @@ async function loadMyAccessTab(token, { force = false } = {}) {
   els.myAccessStatus.classList.remove('err')
   els.myAccessList.innerHTML = ''
 
+  // Show the My Access progress bar in INDETERMINATE mode straight away --
+  // gives the user a visible "we're working" cue during the initial Graph
+  // call (paginated assignmentScheduleInstances + name hydration) before we
+  // know totals. Mode flips to determinate once the per-group role fetch
+  // starts (handled lower down by tickMyAccessProgress).
+  const maBp     = document.getElementById('myaccess-progress')
+  const maBpLbl  = document.getElementById('myaccess-progress-label')
+  const maBpCnt  = document.getElementById('myaccess-progress-count')
+  const maBpBar  = document.getElementById('myaccess-progress-bar')
+  if (maBp) maBp.style.display = ''
+  if (maBpLbl) maBpLbl.textContent = 'Loading active PIM memberships...'
+  if (maBpCnt) maBpCnt.textContent = ''
+  if (maBpBar) maBpBar.classList.add('indeterminate')
+
   try {
     // 1. Active PIM-for-Groups memberships.
     const instances = await listActiveGroupAssignmentsForMe(token)
@@ -1084,10 +1098,41 @@ async function loadMyAccessTab(token, { force = false } = {}) {
       for (const r of rows) { r.azureRoles = []; r.azureRolesNeedConsent = true }
     }
 
+    // Progress bar -- same UX as the Activate tab. N per-group Entra calls
+    // plus 1 ARG call (or 0 if no ARM token). Counters tracked separately
+    // so an Azure tick can never get overwritten by a later Entra callback.
+    const maProgressTotal = groupIds.length + (armToken ? 1 : 0)
+    let maEntraDone = 0
+    let maAzureDone = 0
+    const mbp      = document.getElementById('myaccess-progress')
+    const mbpLabel = document.getElementById('myaccess-progress-label')
+    const mbpCount = document.getElementById('myaccess-progress-count')
+    const mbpBar   = document.getElementById('myaccess-progress-bar')
+    const mbpShownAt = Date.now()
+    function tickMyAccessProgress(label) {
+      if (!mbp) return
+      mbp.style.display = ''
+      if (mbpBar) mbpBar.classList.remove('indeterminate')
+      const done = maEntraDone + maAzureDone
+      const pct = maProgressTotal ? Math.round((done / maProgressTotal) * 100) : 0
+      if (mbpLabel) mbpLabel.textContent = label ? `${label} ${pct}%` : `Fetching role assignments... ${pct}%`
+      if (mbpCount) mbpCount.textContent = `${done} / ${maProgressTotal}`
+      if (mbpBar)   mbpBar.style.width   = `${pct}%`
+      if (done >= maProgressTotal) {
+        const elapsed = Date.now() - mbpShownAt
+        const hideDelay = Math.max(800, 1500 - elapsed)
+        setTimeout(() => { if (mbp) mbp.style.display = 'none' }, hideDelay)
+      }
+    }
+    tickMyAccessProgress('Fetching role assignments...')
+
     const tasks = []
     tasks.push((async () => {
       try {
-        const be = await bulkLoadEntraRolesForGroups(token, groupIds)
+        const be = await bulkLoadEntraRolesForGroups(token, groupIds, (done) => {
+          maEntraDone = done
+          tickMyAccessProgress('Fetching Entra roles...')
+        })
         attachEntra(be)
       } catch (e) { console.warn('bulk Entra (my access):', e?.message || e) }
     })())
@@ -1097,6 +1142,7 @@ async function loadMyAccessTab(token, { force = false } = {}) {
           const ba = await bulkLoadAzureRolesForGroups(armToken, groupIds)
           attachAzure(ba)
         } catch (e) { console.warn('bulk Azure (my access):', e?.message || e) }
+        finally { maAzureDone = 1; tickMyAccessProgress('Fetching Azure RBAC...') }
       })())
     }
     await Promise.all(tasks)
@@ -1251,14 +1297,30 @@ function renderOneMyAccessRow(r) {
       updateBulkDeactivateButton()
     })
   }
-  // Wire the deactivate button (single row)
+  // Wire the deactivate button (single row) -- two-click confirm because
+  // window.confirm() is silently suppressed inside MV3 action popups.
   const btn = row.querySelector('.ma-deactivate')
   if (btn) {
+    let armed = false
+    let armTimer = null
+    const originalText = btn.textContent
+    const originalStyle = btn.style.cssText
     btn.addEventListener('click', async (e) => {
       e.stopPropagation()
-      const groupName = r.displayName || r.groupId
-      const ok = confirm(`Deactivate your membership in:\n\n${groupName}\n\nYou will lose this access immediately. (Scheduled expiry was ${end}.) Continue?`)
-      if (!ok) return
+      if (!armed) {
+        armed = true
+        btn.textContent = 'Click again to confirm'
+        btn.style.cssText = `${originalStyle};background:#cf222e;color:#ffffff;border-color:#cf222e;`
+        armTimer = setTimeout(() => {
+          armed = false
+          btn.textContent = originalText
+          btn.style.cssText = originalStyle
+        }, 5000)
+        return
+      }
+      if (armTimer) { clearTimeout(armTimer); armTimer = null }
+      armed = false
+      btn.style.cssText = originalStyle
       btn.disabled = true
       btn.textContent = 'Deactivating...'
       try {
@@ -1447,12 +1509,17 @@ function render() {
     const activeBadge = r.isActive
       ? ' <span style="background:#dafbe1;color:#1a7f37;padding:1px 6px;border-radius:8px;font-size:10.5px;font-weight:600;margin-left:6px;">already active</span>'
       : ''
-    // Activate tab: just show "ends <date+time>" -- accessId is always
-    // "member" for PIM-for-Groups so it's noise. Date+time so the user
-    // sees activation expiry to the minute, not just the day.
-    const endLabel = r.endDateTime
-      ? new Date(r.endDateTime).toLocaleString(undefined, { dateStyle: 'short', timeStyle: 'short' })
-      : 'permanent'
+    // Only show "ends ..." for rows that are CURRENTLY ACTIVE -- that timer
+    // is the activation expiry the user can extend or surrender. For ELIGIBLE
+    // (not-yet-activated) rows, r.endDateTime is the eligibility expiry (when
+    // PIM removes the entitlement entirely -- typically months/years out and
+    // irrelevant to the activation decision). Showing it misled users into
+    // thinking they were already activated.
+    const endLabel = r.isActive
+      ? (r.endDateTime
+          ? new Date(r.endDateTime).toLocaleString(undefined, { dateStyle: 'short', timeStyle: 'short' })
+          : 'permanent')
+      : null
     // Role preview: lines render once bulk pre-fetch attaches the data.
     // null = bulk fetch hasn't completed; show no line yet (silent loading).
     // [] = fetch done, group grants no roles of that type; skip.
@@ -1483,7 +1550,7 @@ function render() {
       <input type="checkbox" data-gid="${r.groupId}" ${r.checked ? 'checked' : ''} ${r.isActive ? 'disabled' : ''}>
       <div class="body">
         <div class="name" title="${escapeHtml(r.displayName || r.groupId)}">${escapeHtml(r.displayName || r.groupId)}${activeBadge}</div>
-        <div class="meta">ends ${escapeHtml(endLabel)}</div>
+        ${endLabel ? `<div class="meta">ends ${escapeHtml(endLabel)}</div>` : ''}
         ${rolesHtml}
         <div class="status" data-gid-status="${r.groupId}"></div>
       </div>
@@ -1594,6 +1661,14 @@ async function loaded(token) {
   els.me.textContent = currentAccount?.username || ''
   els.status.textContent = 'Loading your PIM delegations ... Please Wait'
 
+  // Boot-phase progress bar -- indeterminate striped animation until we know
+  // total groups. Hidden once the list renders (or on early-return error).
+  const bootBp = document.getElementById('activate-boot-progress')
+  const bootLabel = document.getElementById('activate-boot-progress-label')
+  if (bootBp) bootBp.style.display = ''
+  function setBootLabel(t) { if (bootLabel) bootLabel.textContent = t }
+  function hideBootProgress() { if (bootBp) bootBp.style.display = 'none' }
+
   // Version badge is populated at popup-load now (top of file) so it's
   // visible on the sign-in screen too, not just after loaded() runs.
 
@@ -1603,11 +1678,13 @@ async function loaded(token) {
   const miss = missingScopes(token)
   if (miss.length) {
     els.status.textContent = `Token is missing ${miss.length} scope(s); refreshing sign-in...`
+    hideBootProgress()
     return triggerInteractiveReauth(`Missing scopes: ${miss.join(', ')}`)
   }
 
   // Parallel: eligibilities + currently-active memberships. The active list
   // lets us hide rows the user already activated (they show in My Access).
+  setBootLabel('Loading eligible PIM delegations from Microsoft Graph...')
   let raw, activeRows
   try {
     [raw, activeRows] = await Promise.all([
@@ -1615,6 +1692,7 @@ async function loaded(token) {
       listActiveGroupAssignmentsForMe(token).catch(() => [])
     ])
   } catch (e) {
+    hideBootProgress()
     if (e.stale) {
       els.status.textContent = `Token rejected by Graph; refreshing sign-in...`
       return triggerInteractiveReauth(`Graph error: ${e.message}`)
@@ -1625,6 +1703,7 @@ async function loaded(token) {
   }
 
   if (!raw.length) {
+    hideBootProgress()
     els.status.textContent = 'No eligible PIM-for-Groups assignments for your account.'
     return
   }
@@ -1637,11 +1716,26 @@ async function loaded(token) {
   )
 
   const uniqueGroupIds = [...new Set(raw.map(x => x.groupId))]
+  setBootLabel(`Resolving ${uniqueGroupIds.length} group name(s)...`)
   const names = await hydrateGroupNames(token, uniqueGroupIds)
 
   const filterRe = cfg.groupNameFilter ? new RegExp(cfg.groupNameFilter, 'i') : null
-  const stored = await getStored(['selectedIds', 'lastJustification', 'lastDurationHours'])
+  const stored = await getStored(['selectedIds', 'lastJustification', 'lastDurationHours', 'justificationHistory'])
   const preSelected = new Set(stored.selectedIds || [])
+
+  // Populate the justification datalist (dropdown autocomplete) with the
+  // user's most-recent reasons. Newest at the top -- the input itself is
+  // pre-filled with the last one used so a single Enter re-uses it.
+  const history = Array.isArray(stored.justificationHistory) ? stored.justificationHistory : []
+  const dlist = document.getElementById('justification-history')
+  if (dlist) {
+    dlist.innerHTML = ''
+    for (const h of history) {
+      const opt = document.createElement('option')
+      opt.value = h
+      dlist.appendChild(opt)
+    }
+  }
 
   const allMapped = raw.map(x => ({
     id: x.id,
@@ -1674,6 +1768,7 @@ async function loaded(token) {
   els.toolbar.style.display = 'flex'
   els.footer.style.display = ''
   els.tabs.style.display = 'flex'
+  hideBootProgress()   // group list is now visible; footer bulk-fetch bar takes over
   updateBadges()
   render()
 
@@ -1692,13 +1787,40 @@ async function loaded(token) {
     const cached = await getStored([cacheKey])
     const fresh  = cached?.[cacheKey]?.ts && (Date.now() - cached[cacheKey].ts) < 60 * 60 * 1000
 
-    function attachEntra(bulkEntra, roleDefsMap) {
+    // Convert raw role-assignment items to display rows, grouping by role
+    // name and collapsing scopes through summariseScopes() -- so the same role
+    // hit on 8 different AUs renders as ONE line ("in AU 'X', 'Y' + 2 more")
+    // instead of 8 nearly-identical lines with raw GUIDs.
+    function buildEntraPreview(items, roleDefsMap) {
+      const byRole = new Map()
+      for (const a of items) {
+        const roleName = roleDefsMap[a.roleDefinitionId] || a.roleDefinitionId
+        if (!byRole.has(roleName)) byRole.set(roleName, [])
+        byRole.get(roleName).push(parseDirectoryScopeSync(a.directoryScopeId))
+      }
+      return [...byRole].map(([roleName, scopes]) => ({
+        roleName,
+        scope: summariseScopes(scopes)
+      }))
+    }
+    async function attachEntra(bulkEntra, roleDefsMap) {
+      // Pre-resolve any unknown AU display names so the preview can render
+      // friendly labels instead of "scoped to N Administrative Units".
+      if (token) {
+        const auIds = new Set()
+        for (const items of bulkEntra.values()) {
+          for (const a of (items || [])) {
+            const m = a.directoryScopeId?.match(/^\/administrativeUnits\/([0-9a-fA-F-]{36})$/)
+            if (m && !(m[1] in auNameCache)) auIds.add(m[1])
+          }
+        }
+        if (auIds.size) {
+          await Promise.all([...auIds].map(id => resolveAuDisplayName(token, id).catch(() => null)))
+        }
+      }
       for (const r of eligibleRows) {
         const entra = bulkEntra.get(r.groupId) || []
-        r.previewEntraRoles = entra.map(a => ({
-          roleName: roleDefsMap[a.roleDefinitionId] || a.roleDefinitionId,
-          scope:    a.directoryScopeId
-        }))
+        r.previewEntraRoles = buildEntraPreview(entra, roleDefsMap)
       }
       render()
     }
@@ -1722,20 +1844,33 @@ async function loaded(token) {
     // Wire the progress bar -- visible at the top of the Activate panel
     // until both Entra + Azure complete.
     const totalUnits = groupIds.length + 1   // N per-group Entra calls + 1 ARG call
-    let doneUnits = 0
+    // Track Entra + Azure counters separately and SUM them on every tick.
+    // The Entra callback sets entraDone = done (overwrites); if we shared a
+    // single doneUnits then Azure's "++" would be wiped by the next Entra
+    // callback, leaving the bar stuck at 50/51 forever. Separate counters
+    // make the order of completion irrelevant.
+    let entraDone = 0
+    let azureDone = 0
     const bp = document.getElementById('bulk-progress')
     const bpLabel = document.getElementById('bulk-progress-label')
     const bpCount = document.getElementById('bulk-progress-count')
     const bpBar   = document.getElementById('bulk-progress-bar')
+    const bpShownAt = Date.now()
     function tickProgress(label) {
       if (!bp) return
       bp.style.display = ''
+      const doneUnits = entraDone + azureDone
       const pct = totalUnits ? Math.round((doneUnits / totalUnits) * 100) : 0
       if (bpLabel) bpLabel.textContent = label ? `${label} ${pct}%` : `Fetching role assignments... ${pct}%`
       if (bpCount) bpCount.textContent = `${doneUnits} / ${totalUnits}`
       if (bpBar)   bpBar.style.width   = `${pct}%`
       if (doneUnits >= totalUnits) {
-        setTimeout(() => { if (bp) bp.style.display = 'none' }, 600)
+        // Keep the bar visible at 100% for at least 1.5s after first appearance
+        // so the user actually SEES it (parallel fetches can finish in
+        // ~300ms on small tenants -- a flash they'd miss).
+        const elapsed = Date.now() - bpShownAt
+        const hideDelay = Math.max(800, 1500 - elapsed)
+        setTimeout(() => { if (bp) bp.style.display = 'none' }, hideDelay)
       }
     }
     tickProgress('Fetching role assignments...')
@@ -1744,7 +1879,7 @@ async function loaded(token) {
       try {
         const [be, rd] = await Promise.all([
           bulkLoadEntraRolesForGroups(token, groupIds, (done, total) => {
-            doneUnits = done   // entra units land 0..N as they complete
+            entraDone = done
             tickProgress('Fetching Entra roles...')
           }),
           loadRoleDefinitions(token).catch(() => ({ idToName: {} }))
@@ -1762,7 +1897,7 @@ async function loaded(token) {
         freshAzure = ba
         attachAzure(ba)
       } catch (e) { console.warn('[PIM Activator] bulk Azure fetch failed:', e?.message || e) }
-      finally { doneUnits++; tickProgress('Fetching Azure RBAC...') }
+      finally { azureDone = 1; tickProgress('Fetching Azure RBAC...') }
     })()
 
     await Promise.all([entraTask, azureTask])
@@ -1847,12 +1982,32 @@ async function loaded(token) {
     }
   }
   if (els.myAccessDeactivateSelected) {
+    // Two-click confirm (no native confirm() -- Chromium silently suppresses
+    // window.confirm() in MV3 action popups, which made the button feel dead).
+    // First click flips the label to "Click again to confirm"; second click
+    // within 5s runs the bulk deactivate. Click outside / 5s timeout reverts.
+    let bulkArmed = false
+    let bulkArmTimer = null
+    const bulkOriginalStyle = els.myAccessDeactivateSelected.style.cssText
+    function disarmBulk() {
+      bulkArmed = false
+      if (bulkArmTimer) { clearTimeout(bulkArmTimer); bulkArmTimer = null }
+      updateBulkDeactivateButton()
+      els.myAccessDeactivateSelected.style.cssText = bulkOriginalStyle
+    }
     els.myAccessDeactivateSelected.onclick = async () => {
       if (myAccessSelected.size === 0) return
       const rows = (myAccessCache?.rows || []).filter(r => myAccessSelected.has(r.groupId))
-      const names = rows.map(r => r.displayName || r.groupId).join('\n  - ')
-      const ok = confirm(`Deactivate ${rows.length} membership(s):\n\n  - ${names}\n\nYou will lose this access immediately. Continue?`)
-      if (!ok) return
+      if (!bulkArmed) {
+        bulkArmed = true
+        els.myAccessDeactivateSelected.textContent = `Click again to confirm (${rows.length})`
+        els.myAccessDeactivateSelected.style.cssText = `${bulkOriginalStyle};background:#cf222e;color:#ffffff;border-color:#cf222e;`
+        bulkArmTimer = setTimeout(disarmBulk, 5000)
+        return
+      }
+      if (bulkArmTimer) { clearTimeout(bulkArmTimer); bulkArmTimer = null }
+      bulkArmed = false
+      els.myAccessDeactivateSelected.style.cssText = bulkOriginalStyle
       els.myAccessDeactivateSelected.disabled = true
       els.myAccessDeactivateSelected.textContent = `Deactivating ${rows.length}...`
       let ok2 = 0, failed = 0
@@ -1902,11 +2057,28 @@ async function loaded(token) {
     if (!(dur > 0)) { alert('Duration must be > 0.'); return }
 
     const selected = eligibleRows.filter(r => r.checked)
+    // Push this justification to the top of the history (dedupe, max 10).
+    // Datalist hydrates from this on next popup open.
+    const histPrev = await getStored(['justificationHistory'])
+    const prior = Array.isArray(histPrev.justificationHistory) ? histPrev.justificationHistory : []
+    const nextHistory = [just, ...prior.filter(x => x && x !== just)].slice(0, 10)
     await setStored({
       selectedIds: selected.map(r => r.groupId),
       lastJustification: just,
-      lastDurationHours: dur
+      lastDurationHours: dur,
+      justificationHistory: nextHistory
     })
+    // Refresh the dropdown live so a second activation in the same session
+    // sees the updated list without reopening the popup.
+    const dlist2 = document.getElementById('justification-history')
+    if (dlist2) {
+      dlist2.innerHTML = ''
+      for (const h of nextHistory) {
+        const opt = document.createElement('option')
+        opt.value = h
+        dlist2.appendChild(opt)
+      }
+    }
 
     els.activate.disabled = true
     selected.forEach(r => setStatus(r.groupId, 'queued...', 'pending'))

@@ -57,6 +57,7 @@
 param(
     [switch]$Repack,
     [switch]$PackOnly,
+    [string]$Version,                # set exact manifest version (e.g. 1.0.0) instead of patch bump
     [ValidateSet('Edge','Chrome','Both')]
     [string]$Browser = 'Both',
     [switch]$NoRestart,
@@ -99,14 +100,22 @@ if ($Repack -or $PackOnly) {
         Write-Warn "Node not on PATH -- skipping popup.js syntax check (consider installing Node so future SyntaxErrors get caught before pack)"
     }
 
-    # ---- Bump patch version in manifest.json ---------------------------------
-    Write-Step "Bumping manifest.json patch version"
+    # ---- Bump manifest.json version ------------------------------------------
+    # Default: increment the last (patch) component. Override with -Version
+    # to pin an exact version (used for milestone releases like 1.0.0 where
+    # the auto-bump would land on the wrong number).
     $manifestPath = Join-Path $SCRIPT_DIR 'manifest.json'
     $manifest = Get-Content $manifestPath -Raw | ConvertFrom-Json
     $oldVer = $manifest.version
-    $parts = $oldVer.Split('.')
-    $parts[-1] = ([int]$parts[-1] + 1).ToString()
-    $newVer = $parts -join '.'
+    if ($Version) {
+        Write-Step "Pinning manifest.json version to $Version (overriding auto-bump)"
+        $newVer = $Version
+    } else {
+        Write-Step "Bumping manifest.json patch version"
+        $parts = $oldVer.Split('.')
+        $parts[-1] = ([int]$parts[-1] + 1).ToString()
+        $newVer = $parts -join '.'
+    }
     $manifest.version = $newVer
     ($manifest | ConvertTo-Json -Depth 20) | Set-Content $manifestPath -Encoding UTF8
     Write-Ok "Bumped: $oldVer -> $newVer"
