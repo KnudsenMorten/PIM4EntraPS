@@ -1,9 +1,10 @@
 # Release notes for PIM4EntraPS
 
-## v2.4.28
+## v2.4.29
 
 Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monorepo:
 
+- fix(PIM4EntraPS) v2.4.29 - HOTFIX duplicate const groupIds in loadMyAccessTab (SyntaxError stuck v0.4.14 popup on 'Loading your PIM delegations...') (a0dc70a7)
 - release: PIM4EntraPS v2.4.28 - bulk role fetch + Azure Resource Graph + parallel rendering on BOTH tabs (perf overhaul, Activate now shows role preview per row) (d4075f2a)
 - release: PIM4EntraPS v2.4.27 - Activate tab smart sort (recency 2x + count 1x, decays linearly over 30d, cap at 20 activations); persisted in chrome.storage.local (594490bf)
 - release: PIM4EntraPS v2.4.26 - drop 'member' word + show date+time for activation expiry on both tabs (d7f95cfc)
@@ -33,13 +34,24 @@ Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monor
 - release: PIM4EntraPS v2.4.3 - docs: README full feature inventory (41 bullets with shipped/partial/roadmap badges) (0016c32c)
 - release: PIM4EntraPS v2.4.2 - new Revoke tab in PIM Manager GUI for bulk-revoke of active activations (5c71b61e)
 - release: PIM4EntraPS v2.4.1 - wire PIM-for-Groups preload into Baseline + swap per-row eligibility-lookup call-sites (31cdfe5a)
-- release: PIM4EntraPS v2.4.0 - perf overhaul: cached group resolution + tenant-wide preload helpers + Azure token reuse (ea55e28f)
 
 ---
 
 # Release notes -- PIM4EntraPS
 
 > **Curated changelog.** The publish workflow auto-prepends recent monorepo commits as a raw activity log; this file is the human-friendly narrative on top.
+
+---
+
+## v2.4.29 -- HOTFIX: duplicate `const groupIds` in loadMyAccessTab broke the entire popup ("just says loading..., nothing happens")
+
+v2.4.28 refactor to bulk role fetch declared `const groupIds` twice in the same function scope -- once at the top (`groupIds = [...new Set(instances.map(...))]`) and again in the new bulk-fetch block (`groupIds = rows.map(...)`). Result: `SyntaxError: Identifier 'groupIds' has already been declared` at parse time, popup.js never loads, popup hangs forever on the "Loading your PIM delegations ..." status line. Verified via `node --input-type=module --check`.
+
+Fix: drop the redeclaration; reuse the existing `groupIds`. Same data (rows are built 1:1 from instances).
+
+Added syntax-check step to the dev-loop helper (mental note) so future popup.js edits get caught before pack instead of after deploy.
+
+Manifest 0.4.14 -> 0.4.15.
 
 ---
 

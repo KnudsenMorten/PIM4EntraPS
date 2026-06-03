@@ -974,7 +974,7 @@ async function loadMyAccessTab(token, { force = false } = {}) {
     //    Entra roles first (faster), Azure roles arrive seconds later.
     //    Replaces v2.4.27's per-row sequential loop (1 call per group per
     //    type = 30+ Graph calls for 15 groups; now 2-3 total).
-    const groupIds = rows.map(r => r.groupId)
+    // (groupIds already declared at the top of this function from instances.)
     const armToken = await getArmToken()
 
     function attachEntra(bulkEntra) {
