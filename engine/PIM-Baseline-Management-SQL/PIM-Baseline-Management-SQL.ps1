@@ -17,7 +17,7 @@ Write-Output "PIM Baseline Management"
 Write-Output ""
 Write-Output "Purpose: Onboarding and management of admin accounts, groups and default PIM assignments"
 Write-Output ""
-Write-Output "Support: Morten Knudsen - admin@example.invalid | 40 178 179"
+Write-Output "Support: Morten Knudsen - mok@2linkit.net | 40 178 179"
 Write-Output "***********************************************************************************************"
 
 #------------------------------------------------------------------------------------------------------------

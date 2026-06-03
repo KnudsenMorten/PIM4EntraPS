@@ -1,1 +1,10 @@
 ﻿AUDisplayName;AUDescription;AdministrativeUnitTag;Workload;Level;TierLevel;Visibility;;;
+PIM-Groups-L0-T0-HighPriv;Container for high-privileged PIM groups;PIM-L0;PIM;L0;T0;Public;;;
+PIM-Groups-L1-T0-Global;Container for tenant-wide PIM groups;PIM-L1;PIM;L1;T0;Public;;;
+PIM-Groups-T2;Container for tier-2 PIM groups;PIM-T2;PIM;Lx;T2;Public;;;
+PIM-Groups-ROLES;Container for role-bundle PIM groups;PIM-ROLES;PIM;Lx;T2;Public;;;
+PIM-Groups-ORGANIZATION;Container for org-bundle PIM groups;PIM-ORGANIZATION;PIM;Lx;T2;Public;;;
+;;;;;;;;;
+AU-Users-Standard;Standard end-user accounts (scoped helpdesk operations);AU-Users-Standard;Entra-ID;L2;T2;Public;;;
+AU-Users-Privileged;Privileged admin accounts (scoped tier-0 operations);AU-Admins-Privileged;Entra-ID;L2;T0;HiddenMembership;;;
+AU-Devices-Corp;Corp-managed devices;AU-Devices-Corp;Entra-ID;L2;T2;Public;;;

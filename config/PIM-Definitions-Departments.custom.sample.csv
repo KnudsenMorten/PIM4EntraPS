@@ -1,1 +1,5 @@
 GroupName;GroupDescription;GroupTag;AdministrativeUnitTag;CPPlatform;Plane;TierLevel;PermissionScope;SyncPlatform;IsRoleAssignable
+PIM-DEPT-Finance;Finance department - all members;DEPT-Finance;PIM-ORGANIZATION;;;;;;TRUE
+PIM-DEPT-HR;HR department - all members;DEPT-HR;PIM-ORGANIZATION;;;;;;TRUE
+PIM-DEPT-Engineering;Engineering department - all members;DEPT-Engineering;PIM-ORGANIZATION;;;;;;TRUE
+PIM-DEPT-Sales;Sales department - all members;DEPT-Sales;PIM-ORGANIZATION;;;;;;TRUE

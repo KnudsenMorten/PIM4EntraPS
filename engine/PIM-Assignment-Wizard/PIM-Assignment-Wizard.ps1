@@ -17,7 +17,7 @@ Write-Output "PIM Assignment Wizard"
 Write-Output ""
 Write-Output "Purpose: Create new PIM Assignments using Wizard,based on existing groups, admins, AUs"
 Write-Output ""
-Write-Output "Support: Morten Knudsen - admin@example.invalid | 40 178 179"
+Write-Output "Support: Morten Knudsen - mok@2linkit.net | 40 178 179"
 Write-Output "***********************************************************************************************"
 
 #------------------------------------------------------------------------------------------------------------

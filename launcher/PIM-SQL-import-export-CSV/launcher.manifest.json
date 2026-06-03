@@ -4,7 +4,7 @@
   "scriptType": "Engine",
   "notes": "Ported via TOOLS/New-SolutionLauncherSet.ps1. Engine copied near-verbatim with defensive patches (idempotent $global:PathScripts + FUNCTIONS/LEGACY fallback). Internal-only = False.",
   "community": true,
-  "author": "Morten Knudsen <mok@example.invalid>",
+  "author": "Morten Knudsen <mok@mortenknudsen.net>",
   "communityRepo": "PIM4EntraPS",
   "scriptName": "PIM-SQL-import-export-CSV"
 }

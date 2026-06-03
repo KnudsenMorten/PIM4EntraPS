@@ -4,7 +4,7 @@
     "GeneratedBy":  "2LINKIT\\MOK@MGMT1",
     "SourceAppId":  "7602a1ec-6234-4275-ac96-ce5fa4589d1a",
     "SourceDisplayName":  "2LINKIT - Automation - Azure",
-    "SourceTenantId":  "00000000-0000-0000-0000-000000000000",
+    "SourceTenantId":  "f0fa27a0-8e7c-4f63-9a77-ec94786b7c9e",
     "AzureRbac":  [
                       {
                           "RoleDefinitionName":  "Reader",
@@ -33,13 +33,13 @@
                       {
                           "RoleDefinitionName":  "Owner",
                           "RoleDefinitionId":  "8e3af657-a8ff-443c-a75c-2fe8c4bcb635",
-                          "ScopeRaw":  "/providers/Microsoft.Management/managementGroups/00000000-0000-0000-0000-000000000000",
+                          "ScopeRaw":  "/providers/Microsoft.Management/managementGroups/f0fa27a0-8e7c-4f63-9a77-ec94786b7c9e",
                           "ScopeToken":  "/providers/Microsoft.Management/managementGroups/\u003cRootMgId\u003e"
                       },
                       {
                           "RoleDefinitionName":  "Cost Management Contributor",
                           "RoleDefinitionId":  "434105ed-43f6-45c7-a02f-909b2ba83430",
-                          "ScopeRaw":  "/providers/Microsoft.Management/managementGroups/00000000-0000-0000-0000-000000000000",
+                          "ScopeRaw":  "/providers/Microsoft.Management/managementGroups/f0fa27a0-8e7c-4f63-9a77-ec94786b7c9e",
                           "ScopeToken":  "/providers/Microsoft.Management/managementGroups/\u003cRootMgId\u003e"
                       }
                   ],

@@ -61,7 +61,7 @@ caller: `Application.ReadWrite.All`, `AppRoleAssignment.ReadWrite.All`,
 $extId = 'abcdefghijklmnopabcdefghijklmnop'
 
 # 2. Connect to Microsoft Graph against the right tenant.
-Connect-MgGraph -TenantId '00000000-0000-0000-0000-000000000000' `
+Connect-MgGraph -TenantId 'f0fa27a0-8e7c-4f63-9a77-ec94786b7c9e' `
                 -Scopes  'Application.ReadWrite.All',
                          'AppRoleAssignment.ReadWrite.All',
                          'DelegatedPermissionGrant.ReadWrite.All'
@@ -98,7 +98,7 @@ Pushes Edge enterprise policy keys that:
 .\Install-PimActivator.ps1 `
     -ExtensionId 'abcdefghijklmnopabcdefghijklmnop' `
     -UpdateUrl   'https://edge.microsoft.com/extensionwebstorebase/v1/crx' `
-    -TenantId    '00000000-0000-0000-0000-000000000000' `
+    -TenantId    'f0fa27a0-8e7c-4f63-9a77-ec94786b7c9e' `
     -ClientId    '11111111-2222-3333-4444-555555555555'
 ```
 
