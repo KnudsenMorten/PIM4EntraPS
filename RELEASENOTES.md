@@ -1,9 +1,10 @@
 # Release notes for PIM4EntraPS
 
-## v2.4.34
+## v2.4.35
 
 Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monorepo:
 
+- release: PIM4EntraPS v2.4.35 - role preview ACTUALLY works (per-group eq queries in parallel, transitive+direct fallback, progress bar) (95665fd5)
 - release: PIM4EntraPS v2.4.34 - footer always visible (sticky flex layout, only list scrolls) + Morten Knudsen footer link -> aka.ms/morten (1ff38bfd)
 - release: PIM4EntraPS v2.4.33 - role preview covers nested groups (transitiveRoleAssignments + direct in parallel, dedupe by principalId+roleDefId+scope) (7fed005c)
 - release: PIM4EntraPS v2.4.32 - popup width 800 -> 720 + nuclear max-width:100% + textarea resize:vertical (kills default horizontal scrollbar) (3995d4b8)
@@ -33,13 +34,38 @@ Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monor
 - release: PIM4EntraPS v2.4.11 - Activator popup: My Access tab + token self-heal + Auto-fix button + hide-already-active (db8893b1)
 - release: PIM4EntraPS v2.4.10 - Activator popup: My Access tab + token self-heal + Auto-fix button + hide-already-active (96b0c313)
 - release: PIM4EntraPS v2.4.9 - switch CRX hosting to GitHub Pages + Chrome support + Install->Deploy renames + SPA URI fix (E2E proven) (5e263602)
-- release: PIM4EntraPS v2.4.8 - all-in-one Azure CRX hosting in Setup-PimActivator.ps1 + manifest schema fix + Test-PimActivatorFlow.ps1 (5adbd277)
 
 ---
 
 # Release notes -- PIM4EntraPS
 
 > **Curated changelog.** The publish workflow auto-prepends recent monorepo commits as a raw activity log; this file is the human-friendly narrative on top.
+
+---
+
+## v2.4.35 -- Role preview ACTUALLY works now (per-group `eq` queries + progress bar)
+
+Root cause of "no roles shown" complaint across v2.4.28 - v2.4.34: the bulk fetch used `$filter=principalId in ('g1','g2',...)` on `/roleManagement/directory/roleAssignments`. The `in` operator is NOT documented as supported on that endpoint; Graph silently returned empty results for every chunk. Also added `$count=true` to the direct query in v2.4.33 without the matching `ConsistencyLevel: eventual` header -- HTTP 400 from Graph, fallback failed too.
+
+v2.4.35 throws out the in-clause approach entirely. Replaced with:
+- **One Graph call per group**, fired in parallel via Promise.all -- 50 concurrent fetches; browsers handle via HTTP/2 multiplexing in roughly the time of one batched call
+- Per-group call uses `transitiveRoleAssignments?$filter=principalId eq '<gid>'` with `ConsistencyLevel: eventual` -- the `eq` operator IS supported, and transitive covers nested-group inheritance
+- If transitive 4xx's for a group (some tenants restrict it), automatic fallback to direct `roleAssignments?$filter=principalId eq '<gid>'`
+- Cache key bumped to v4 to invalidate every prior bulk-fetch result (which was always empty due to the in-clause bug)
+
+### Progress bar
+
+Per user request: while bulk fetch runs, popup shows a thin blue progress bar at the top of the Activate tab:
+
+```
+Fetching Entra roles... 47%
+17 / 36
+[==========                ]
+```
+
+Ticks per completed Entra group fetch + once when Azure RBAC ARG completes. Auto-hides 600ms after reaching 100%.
+
+Manifest 0.4.24 -> 0.4.27.
 
 ---
 

@@ -122,6 +122,18 @@
 
   <div id="status-bar">Loading...</div>
 
+  <!-- Bulk-fetch progress bar (Entra transitive + direct chunks + Azure ARG).
+       Hidden by default; shown while bulk fetch is running, hidden when 100%. -->
+  <div id="bulk-progress" style="display:none;padding:6px 12px;background:#f6f8fa;border-bottom:1px solid #d0d7de;">
+    <div style="display:flex;justify-content:space-between;font-size:11px;color:#57606a;">
+      <span id="bulk-progress-label">Fetching role assignments... 0%</span>
+      <span id="bulk-progress-count">0 / 0</span>
+    </div>
+    <div style="background:#d0d7de;height:5px;border-radius:3px;overflow:hidden;margin-top:4px;">
+      <div id="bulk-progress-bar" style="background:#0969da;height:100%;width:0%;transition:width 0.2s;"></div>
+    </div>
+  </div>
+
   <div id="list"></div>
 
   <footer style="display:none" id="footer">
