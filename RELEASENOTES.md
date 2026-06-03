@@ -1,9 +1,10 @@
 # Release notes for PIM4EntraPS
 
-## v2.4.51
+## v2.4.52
 
 Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monorepo:
 
+- release: PIM4EntraPS v2.4.52 - fix documented extension id (regen-key ID was never wired into publishing pipeline) (891bc99b)
 - release: PIM4EntraPS v2.4.51 - default activation duration 1h -> 8h (extension v1.1.1) (ac415461)
 - release: PIM4EntraPS v2.4.50 - fix Deploy-PimActivatorClient.ps1 parameter sets so -TenantsCsv works without also requiring -Tenants (55b76be8)
 - release: PIM4EntraPS v2.4.49 - document server install path (PAW / admin jump box / domain-joined fleet) (154cde23)
@@ -33,13 +34,29 @@ Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monor
 - release: PIM4EntraPS v2.4.22 - Azure RBAC iterates user subscriptions instead of tenant-root (fixes 403 AuthorizationFailed) (5a5817ea)
 - release: PIM4EntraPS v2.4.21 - popup width 980px -> 800px (980 exceeded Chromium popup max, hid Sign in button offscreen) (bb8585b7)
 - release: PIM4EntraPS v2.4.20 - wider popup (980px) + Re-sign in auto-launches OAuth + Azure RBAC consent banner with 1-3 min propagation note (3c6ab56b)
-- fix(PIM4EntraPS): Update-PimActivatorDev.ps1 drops `ConvertFrom-Json -Depth` (PS 5.1 incompatible) (9ae24485)
 
 ---
 
 # Release notes -- PIM4EntraPS
 
 > **Curated changelog.** The publish workflow auto-prepends recent monorepo commits as a raw activity log; this file is the human-friendly narrative on top.
+
+---
+
+## v2.4.52 -- Fix the documented extension id (was a regenerated key never wired into the publishing pipeline) + README catch-up
+
+Critical doc + script-default fix. From v2.4.43 (extension v1.0.0) onward, `extension-identity.txt` and every install/sample command in the docs referenced extension id **`hkdglhgahonnjbfindmgplekkcngmcck`** -- the result of a regenerated signing key that was generated, documented, but **never actually wired into the publishing pipeline**. `Update-PimActivatorDev.ps1` and the gh-pages CRX have always published under the original id **`eheocihmlppcophaeakmdenhgcookkab`**. Customer installs using the documented (wrong) id wrote managed policy at a path the running extension never read -- "Not configured. Admin must set tenantId + clientId (or a Tenants array) via policy." was the symptom even when the registry was correctly populated.
+
+Sweep complete in:
+- `tools/pim-activator/extension-identity.txt` -- now states the actual id + a History block explaining what happened.
+- `tools/pim-activator/Deploy-PimActivatorIntune.ps1` -- default `-ExtensionId` parameter value corrected (any prior `-CreateIntuneRemediation` runs that relied on the parameter default produced remediations targeting the wrong id; re-run to converge).
+- `README.md` and `tools/pim-activator/README.md` -- every install / sample command updated.
+
+Recovery for existing installs: re-run `Deploy-PimActivatorClient.ps1` with `-ExtensionId 'eheocihmlppcophaeakmdenhgcookkab'`, then optionally clean up the stale HKCU/HKLM keys under the old id (`Remove-Item HKCU:\SOFTWARE\Policies\Microsoft\Edge\3rdparty\extensions\hkdglhgahonnjbfindmgplekkcngmcck -Recurse`, same for Chrome).
+
+READMEs also gained a "What's new in v1.1.1" section covering the v2.4.51 default-duration bump (1h to 8h) with the override-points table.
+
+No extension code changes -- documentation + script-default fix only. Extension manifest stays at v1.1.1 (from v2.4.51).
 
 ---
 

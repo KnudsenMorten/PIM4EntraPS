@@ -1,17 +1,28 @@
 PIM Activator extension identity
-Generated: 2026-06-03 10:02:19
+Updated: 2026-06-03 (corrected to match the actually-deployed CRX)
 
-Extension ID: hkdglhgahonnjbfindmgplekkcngmcck
+Extension ID: eheocihmlppcophaeakmdenhgcookkab
 
-This ID is deterministic because the public key in manifest.json's key
-field is fixed. Every install of this extension on any computer in any tenant
-will get the SAME extension ID, which means:
-  - The app registration redirect URI (https://hkdglhgahonnjbfindmgplekkcngmcck.chromiumapp.org/) is
-    a single, well-known value
+This ID is deterministic from the public key embedded in manifest.json's
+"key" field. Every install of this extension on any computer in any tenant
+gets the same extension ID, which means:
+  - The app registration redirect URI
+    (https://eheocihmlppcophaeakmdenhgcookkab.chromiumapp.org/) is a single,
+    well-known value
   - Customers can deploy the extension via Intune ExtensionInstallForcelist
     using the same ID everywhere
-  - The Deploy-PimActivatorBackend.ps1 script no longer needs the
-    operator to discover the ID via edge://extensions/
+  - Deploy-PimActivatorBackend.ps1 doesn't need the operator to discover the
+    ID manually via edge://extensions/
 
-If you ever regenerate the key (don't, unless lost), the extension ID will
-change. Document the new ID + update any existing app reg's redirect URIs.
+If you ever regenerate the signing key (don't, unless lost), the extension ID
+will change. Update this file + every app reg's redirect URI + every
+deployed forcelist entry.
+
+History
+- A regenerated key briefly produced ID hkdglhgahonnjbfindmgplekkcngmcck (v2.4.43
+  era) which was documented here but never actually wired into the publishing
+  pipeline. Update-PimActivatorDev.ps1 + gh-pages CRX have always used
+  eheocihmlppcophaeakmdenhgcookkab. Customer installs in v2.4.43-v2.4.51 that
+  used the documented (wrong) ID landed policy at a path the running
+  extension never read -- "Not configured" was the symptom. Corrected in
+  v2.4.52.

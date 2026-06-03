@@ -116,7 +116,7 @@ param(
     [string]$TenantsCsv,
 
     [ValidatePattern('^[a-p]{32}$')]
-    [string]$ExtensionId = 'hkdglhgahonnjbfindmgplekkcngmcck',
+    [string]$ExtensionId = 'eheocihmlppcophaeakmdenhgcookkab',
 
     [string]$UpdateUrl = 'https://knudsenmorten.github.io/PIM4EntraPS/updates.xml',
 

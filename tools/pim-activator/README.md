@@ -5,7 +5,7 @@ Chrome**: bulk-activate eligible PIM-for-Groups memberships from the
 toolbar instead of clicking through the Entra portal one role at a time.
 
 Hosted on GitHub Pages: `https://knudsenmorten.github.io/PIM4EntraPS/updates.xml`.
-Deterministic extension id: `hkdglhgahonnjbfindmgplekkcngmcck`.
+Deterministic extension id: `eheocihmlppcophaeakmdenhgcookkab`.
 
 ```
 [ extension icon ]  -->  popup
@@ -19,6 +19,30 @@ Deterministic extension id: `hkdglhgahonnjbfindmgplekkcngmcck`.
 
 Single Graph round-trip per group (Graph's PIM-for-Groups API requires it),
 but the user sees one click instead of N portal navigations.
+
+---
+
+## What's new in v1.1.1
+
+Fresh installs now default the activation duration to **8 hours** (one
+workday) instead of 1 hour. All install paths were touched so a new
+profile gets 8h out of the box. Existing managed-storage values are
+**unchanged** -- managed wins -- so this only matters for fresh
+installs.
+
+Precedence at popup-open time:
+
+`chrome.storage.local.lastDurationHours` (user's last picked value,
+per profile) > managed `defaultDurationHours` > `config.js` bundled
+default > popup.js fallback.
+
+To override the 8h default at install time:
+
+| Where | How |
+|---|---|
+| `Deploy-PimActivatorClient.ps1` | `... -DefaultDurationHours 2` |
+| `Deploy-PimActivatorIntune.ps1` | `... -DefaultDurationHours 2` |
+| Direct registry | `Set-ItemProperty 'HKCU:\SOFTWARE\Policies\Microsoft\Edge\3rdparty\extensions\<id>\policy' -Name defaultDurationHours -Value 2 -Force` |
 
 ---
 
