@@ -1220,7 +1220,7 @@ async function loaded(token) {
   els.signOut.style.display = ''
   els.signOut.onclick = signOut
   els.me.textContent = currentAccount?.username || ''
-  els.status.textContent = 'Loading eligible groups...'
+  els.status.textContent = 'Loading your PIM delegations ... Please Wait'
 
   // Show extension version in the header so support knows what the user runs.
   // Read from chrome.runtime.getManifest() -- always matches the running build.
