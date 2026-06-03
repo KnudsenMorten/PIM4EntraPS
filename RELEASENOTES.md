@@ -1,9 +1,10 @@
 # Release notes for PIM4EntraPS
 
-## v2.4.4
+## v2.4.5
 
 Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monorepo:
 
+- release: PIM4EntraPS v2.4.5 - turnkey PIM Activator install: one-command orchestrator + pinned extension identity + icons (4a26958d)
 - release: PIM4EntraPS v2.4.4 - port SI's 4-mode launcher auth + solution-wide config + new Grant-PimEngineAdminConsent helper (41e64c94)
 - release: PIM4EntraPS v2.4.3 - docs: README full feature inventory (41 bullets with shipped/partial/roadmap badges) (0016c32c)
 - release: PIM4EntraPS v2.4.2 - new Revoke tab in PIM Manager GUI for bulk-revoke of active activations (5c71b61e)
@@ -33,13 +34,60 @@ Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monor
 - move Update-Platform.ps1 into SOLUTIONS/PlatformOnboarding/INTERNAL/ (b4a46912)
 - chore: standardize PS headers, port Setup-CSA, INTERNAL tooling, README (a060047e)
 - feat: portable launcher paths + bundled dependencies in published releases (ccb4b679)
-- chore: strip 'AutomateIT' branding from user-facing launcher + doc content (653bac5f)
 
 ---
 
 # Release notes -- PIM4EntraPS
 
 > **Curated changelog.** The publish workflow auto-prepends recent monorepo commits as a raw activity log; this file is the human-friendly narrative on top.
+
+---
+
+## v2.4.5 -- Turnkey PIM Activator install: one-command orchestrator + pinned extension identity + auto-generated icons
+
+Eliminates the multi-step manual install for the PIM Activator Edge extension. One `Setup-PimActivator.ps1` call now does what previously required: generate icons, sideload the extension to discover its ID, copy `config.template.js` to `config.js`, run `Install-PimActivatorAppRegistration.ps1` with the discovered ID, paste the resulting clientId into `config.js`. All automated.
+
+### New artefacts in `tools/pim-activator/`
+
+- **`Setup-PimActivator.ps1`** -- one-command orchestrator. 6 steps, fully idempotent:
+  1. Ensures icons exist (generates 4 placeholder PNGs if `icons/` is empty)
+  2. Computes deterministic extension ID from manifest.json's `key` field
+  3. Connects to Microsoft Graph (browser flow by default; `-UseDeviceCode` for headless hosts) -- reuses existing session if scopes match
+  4. Runs `Install-PimActivatorAppRegistration.ps1` with the computed ID + `-GrantConsent`
+  5. Writes `config.js` with the resulting tenantId + clientId + sane defaults
+  6. (Optional, `-PushPolicy`) Writes Edge ExtensionInstallForcelist HKLM registry keys via `Install-PimActivator.ps1` so Edge auto-installs on next launch (no manual "Load unpacked")
+- **`extension-identity.txt`** -- documents the fixed extension ID `hkdglhgahonnjbfindmgplekkcngmcck` and explains why it's deterministic.
+- **`icons/icon-16.png` / `icon-32.png` / `icon-48.png` / `icon-128.png`** -- 4 placeholder icons (blue background + white "PIM" text). Generated programmatically; safe to overwrite with a designer-built set later. Without these, Edge "Load unpacked" rejected the manifest (`Could not load icon ... for action`).
+
+### Why the extension ID is now deterministic
+
+In v2.4.4 the `key` field was added to `manifest.json` containing a fixed 2048-bit RSA public key (SPKI DER, base64). Chromium derives the extension ID from `SHA256(publicKey)[:16]` mapped to a-p, so the ID is the same on every install on every computer in every customer tenant. Operator benefits:
+- One canonical redirect URI for the app reg (`https://hkdglhgahonnjbfindmgplekkcngmcck.chromiumapp.org/`) -- never changes
+- Same Intune `ExtensionInstallForcelist` entry deployable to every customer
+- `Setup-PimActivator.ps1` doesn't need the operator to first sideload to discover the ID
+
+### Usage
+
+**Developer workstation (sideload manually after script finishes):**
+```powershell
+.\Setup-PimActivator.ps1 -TenantId 'f0fa27a0-...'
+# then in Edge: edge://extensions/ -> Developer mode ON -> Load unpacked -> select tools\pim-activator\
+```
+
+**Production rollout (Edge auto-installs via policy registry; requires admin shell):**
+```powershell
+.\Setup-PimActivator.ps1 -TenantId 'f0fa27a0-...' -PushPolicy `
+    -CrxUpdateUrl 'https://stcorp.blob.core.windows.net/pim-activator/updates.xml'
+```
+
+Re-running the same command in the same tenant is safe -- the underlying `Install-PimActivatorAppRegistration.ps1` updates the existing app reg in place; `config.js` is overwritten with the same values; policy keys are no-op writes.
+
+### Constraints
+
+- One interactive sign-in is still required per tenant (creating an app reg in someone else's tenant requires admin auth -- Microsoft enforces this). The orchestrator funnels this into a single Connect-MgGraph call up front; everything else is automatic.
+- Cross-tenant deploy: re-run the script with each customer tenant's id. Same extension ID + extension code; per-tenant app reg + per-tenant `config.js`.
+
+Parse-clean on PS 5.1: `Setup-PimActivator.ps1` (~7 KB).
 
 ---
 

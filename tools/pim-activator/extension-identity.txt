@@ -1,0 +1,17 @@
+PIM Activator extension identity
+Generated: 2026-06-03 10:02:19
+
+Extension ID: hkdglhgahonnjbfindmgplekkcngmcck
+
+This ID is deterministic because the public key in manifest.json's key
+field is fixed. Every install of this extension on any computer in any tenant
+will get the SAME extension ID, which means:
+  - The app registration redirect URI (https://hkdglhgahonnjbfindmgplekkcngmcck.chromiumapp.org/) is
+    a single, well-known value
+  - Customers can deploy the extension via Intune ExtensionInstallForcelist
+    using the same ID everywhere
+  - The Install-PimActivatorAppRegistration.ps1 script no longer needs the
+    operator to discover the ID via edge://extensions/
+
+If you ever regenerate the key (don't, unless lost), the extension ID will
+change. Document the new ID + update any existing app reg's redirect URIs.
