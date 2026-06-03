@@ -1,9 +1,10 @@
 # Release notes for PIM4EntraPS
 
-## v2.4.20
+## v2.4.21
 
 Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monorepo:
 
+- release: PIM4EntraPS v2.4.21 - popup width 980px -> 800px (980 exceeded Chromium popup max, hid Sign in button offscreen) (bb8585b7)
 - release: PIM4EntraPS v2.4.20 - wider popup (980px) + Re-sign in auto-launches OAuth + Azure RBAC consent banner with 1-3 min propagation note (3c6ab56b)
 - fix(PIM4EntraPS): Update-PimActivatorDev.ps1 drops `ConvertFrom-Json -Depth` (PS 5.1 incompatible) (9ae24485)
 - release: PIM4EntraPS v2.4.19 - skip empty subsections + 3-category grouping in My Access tab (Entra / Azure / Workload) (0c799e60)
@@ -33,13 +34,20 @@ Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monor
 - release: PIM4EntraPS v2.2.0 - Theme 1 (Manager UX polish) + Theme 2 first slice (TAP flow) (a659adf6)
 - release: PIM4EntraPS v2.1.7 - docs/ROADMAP.md (34 customer-requested features sized + sequenced + storage-backend decision) Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com> (c1ae5fc7)
 - release: PIM4EntraPS v2.1.6 - hotfix: Ensure-DateTime null-safe (kills persistent engine crash at PIM-Baseline-Management-CSV.ps1:1196) (bd2207d0)
-- release: PIM4EntraPS v2.1.5 - hotfix: visible feedback on Remove-orphan-assignment button (dbd9bd38)
 
 ---
 
 # Release notes -- PIM4EntraPS
 
 > **Curated changelog.** The publish workflow auto-prepends recent monorepo commits as a raw activity log; this file is the human-friendly narrative on top.
+
+---
+
+## v2.4.21 -- Popup width 980px -> 800px (980 exceeded Chromium popup max, hiding the Sign in button)
+
+v2.4.20 widened the popup to 980px which exceeds Chromium's effective popup max width (~800px depending on OS/screen). Result: popup got a horizontal scrollbar and the Sign in button -- positioned to the right of the header -- ended up offscreen, making it impossible to sign in. 800px is the safe width on every Chromium version. No other code changes.
+
+Manifest 0.4.6 -> 0.4.7.
 
 ---
 
