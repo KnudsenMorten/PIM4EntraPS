@@ -150,10 +150,21 @@ See [RELEASENOTES.md](RELEASENOTES.md) for per-release detail and [docs/ROADMAP.
   - `UserAuthenticationMethod.ReadWrite.All` (TAP creation, optional)
   - `Directory.Read.All` (PIM Manager tenant-list refresh)
   - For AD-syncing engines: domain credentials on the calling host.
-- A Key Vault holding the SP certificate (or use the bootstrap pattern
-  documented in your wrapping project).
+- An authentication method for that SPN. The community launchers support
+  four methods (set in `config\PIM4EntraPS.custom.ps1` — copy the sample
+  next door first — or in any per-engine `LauncherConfig.custom.ps1`):
+  1. **Managed Identity** (`$global:UseManagedIdentity = $true`) —
+     recommended for Azure VMs / Arc / Function / Container Apps Job.
+  2. **SPN + Key Vault secret** (`$global:SpnKeyVaultName` + `$global:SpnSecretName`)
+     — the calling identity needs `Key Vault Secret User` on that vault.
+  3. **SPN + certificate** (`$global:SpnCertificateThumbprint` in
+     `Cert:\LocalMachine\My` or `Cert:\CurrentUser\My`).
+  4. **SPN + plaintext secret** (`$global:SpnClientSecret`) — **TESTING ONLY**.
 - For TAP delivery (optional, v2.2.0+): SMTP relay / Teams webhook /
   Slack webhook — see `config\PIM4EntraPS.NotificationChannels.custom.sample.ps1`.
+
+See `config\PIM4EntraPS.custom.sample.ps1` for a copy-pasteable template
+covering all four methods.
 
 One-shot SPN installer (creates + permissions + admin-consents):
 `setup\Install-PimEngineAppRegistration.ps1 -DisplayName "PIM4EntraPS-Engine"`.

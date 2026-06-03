@@ -1,9 +1,10 @@
 # Release notes for PIM4EntraPS
 
-## v2.4.6
+## v2.4.7
 
 Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monorepo:
 
+- release: PIM4EntraPS v2.4.7 - finish wiring v2.4.4's 4-method auth into community launchers + README catch-up (95a1ab25)
 - release: PIM4EntraPS v2.4.6 - fully-unattended activator deployment via bootstrap SPN (Intune-friendly) (6841d152)
 - release: PIM4EntraPS v2.4.5 - turnkey PIM Activator install: one-command orchestrator + pinned extension identity + icons (4a26958d)
 - release: PIM4EntraPS v2.4.4 - port SI's 4-mode launcher auth + solution-wide config + new Grant-PimEngineAdminConsent helper (41e64c94)
@@ -33,13 +34,41 @@ Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monor
 - Merge remote-tracking branch 'origin/dev' into HEAD (b8556ec1)
 - launchers: fix 4 template bugs preventing internal-vm engine invocation (de585260)
 - move Update-Platform.ps1 into SOLUTIONS/PlatformOnboarding/INTERNAL/ (b4a46912)
-- chore: standardize PS headers, port Setup-CSA, INTERNAL tooling, README (a060047e)
 
 ---
 
 # Release notes -- PIM4EntraPS
 
 > **Curated changelog.** The publish workflow auto-prepends recent monorepo commits as a raw activity log; this file is the human-friendly narrative on top.
+
+---
+
+## v2.4.7 -- Finish wiring v2.4.4's 4-method auth into the community launchers + README catch-up
+
+v2.4.4 shipped the SI-style helpers (`Connect-PimLauncherAuth`, the solution-wide `config\PIM4EntraPS.custom.sample.ps1`, the 4-method auth schema in `LauncherConfig.custom.sample.ps1`) but did NOT actually rewire the 42 `launcher.community-{vm,azure}.ps1` files to CALL the new helper. They were still using the old `LauncherConfigPath` + raw `$global:SpnClientSecret` flow, so the new auth methods were declarable but not honoured at runtime. v2.4.7 closes the loop.
+
+### Files updated (43 net-new diffs)
+
+- **42 community launchers** rewired: each `launcher.community-vm.ps1` + `launcher.community-azure.ps1` across all 21 engines (Check-PIM-Groups-IsRoleAssignable, Custom-Policies, Custom-Repository, Fix_PIM_MFA_Auth_Policy, GetNumberOfROles, PIM-Assignment-Exporter (+ CSV-Only), PIM-Assignment-Revoker, PIM-Assignment-Wizard, PIM-Baseline-Management-CSV (+ 6 narrowed variants + SQL), PIM-SQL-import-export-CSV, PIM-extra, SQL-Connect). Each now dot-sources `Initialize-LauncherConfig` (layered defaults -> solution-wide custom -> per-engine custom) and calls `Connect-PimLauncherAuth` instead of the old raw connect.
+- **README.md** Prerequisites section: lists all 4 auth methods and points operators at `config\PIM4EntraPS.custom.sample.ps1`.
+
+### Auth-method-detection priority (now actually honoured at runtime)
+
+1. `$global:UseManagedIdentity -eq $true` → Managed Identity
+2. `$global:SpnKeyVaultName + $global:SpnSecretName` set → SPN + KV-stored secret (fetched at launch)
+3. `$global:SpnCertificateThumbprint` set → SPN + certificate (cert presence + non-expiry validated BEFORE Connect-AzAccount/Connect-MgGraph; warns when only `Cert:\CurrentUser\My` is found rather than `LocalMachine`)
+4. `$global:SpnClientSecret + $global:SpnClientId` set → SPN + plaintext (emits `TESTING ONLY` warning)
+5. None of the above → throws with copy-pasteable "set one of these 4 method blocks" message
+
+### Pre-existing concern flagged (NOT introduced by this release)
+
+`Initialize-LauncherConfig` dot-sources every `config/*.locked.ps1` it finds. Two of those locked files (`Fix_PIM_MFA_Auth_Policy.locked.ps1`, `PIM-SQL-import-export-CSV.locked.ps1`) are FULL ENGINE scripts that auto-`Connect-AzAccount` + run Graph operations at load time. Loading the layered config currently triggers those side effects whether the operator wanted them or not. Pre-dates v2.4.x — flagging for awareness; cleanup is a v2.4.8 candidate (move those two files out of `config/`).
+
+### Internal launchers untouched
+
+`launcher.internal-vm.ps1` / `.internal-azure.ps1` continue using the AutomateIT bootstrap as before. Only community launchers got the SI-style 4-method auth wiring.
+
+Parse-clean on PS 5.1: all 42 launchers.
 
 ---
 
