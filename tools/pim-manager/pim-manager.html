@@ -216,6 +216,64 @@
   /* Grid row-highlight for "Open in Grid" jumps */
   table.grid tr.v-jump-flash td { background:#bf870055 !important; transition:background 1.6s ease; }
 
+  /* Revoke tab (v2.4.2) -- bulk-revoke of currently-active PIM assignments. */
+  #revokeTab { display:none; }
+  #revokeTab.active { display:flex; flex-direction:column; background:#0d1117; }
+  #revTopBar { padding:10px 18px; background:#161b22; border-bottom:1px solid #30363d; display:flex; gap:10px; align-items:center; flex-wrap:wrap; flex:0 0 auto; }
+  #revTopBar button { font-size:12px; }
+  #revTopBar .rev-type-chip { padding:3px 10px; border-radius:12px; font-size:11px; cursor:pointer; user-select:none; border:1px solid transparent; display:inline-flex; align-items:center; gap:5px; background:#21262d; color:#9aa6b2; }
+  #revTopBar .rev-type-chip.rev-type-all     { background:#21262d;   color:#e6edf3; border-color:#30363d; }
+  #revTopBar .rev-type-chip.rev-type-entra   { background:#db6d2844; color:#ffd2a8; border-color:#5a3a1d; }
+  #revTopBar .rev-type-chip.rev-type-azure   { background:#1f6feb44; color:#cae2ff; border-color:#1f6feb; }
+  #revTopBar .rev-type-chip.rev-type-p4g     { background:#3fb95044; color:#7ee787; border-color:#2a563a; }
+  #revTopBar .rev-type-chip.active { box-shadow:0 0 0 2px #2f81f7; }
+  #revTopBar .rev-type-chip .n { font-weight:600; }
+  #revTopBar input[type=text] { background:#0d1117; color:#e6edf3; border:1px solid #30363d; border-radius:4px; padding:4px 8px; font-size:12px; }
+  #revTopBar .spacer { flex:1; }
+  #revTopBar .rev-loaded-at { color:#7d8590; font-size:11px; }
+  #revResults { flex:1 1 auto; overflow:auto; padding:0 18px; background:#0d1117; }
+  #revResults .rev-empty { color:#7d8590; font-style:italic; padding:20px 0; text-align:center; }
+  #revResults .rev-loading { color:#cae2ff; padding:14px 0; text-align:center; }
+  #revResults .rev-error { color:#ffa198; padding:12px 14px; background:#3b1f1f22; border:1px solid #5a2a2a; border-radius:6px; margin:14px 0; }
+  table.rev-table { width:100%; border-collapse:collapse; font-size:12px; margin:10px 0 12px 0; }
+  table.rev-table th { position:sticky; top:0; background:#161b22; color:#7d8590; font-size:11px; font-weight:600; text-align:left; padding:6px 8px; border-bottom:1px solid #30363d; text-transform:uppercase; letter-spacing:.4px; cursor:pointer; user-select:none; }
+  table.rev-table th.rev-sort-col::after { content:" \25B4"; color:#2f81f7; }
+  table.rev-table th.rev-sort-col.desc::after { content:" \25BE"; color:#2f81f7; }
+  table.rev-table td { padding:5px 8px; border-bottom:1px solid #21262d; color:#e6edf3; vertical-align:top; }
+  table.rev-table td.rev-sel-col { width:24px; text-align:center; padding:2px 4px; }
+  table.rev-table td.rev-type-cell { font-family:Consolas,monospace; font-size:11px; }
+  table.rev-table td.rev-type-cell.type-entra-role     { color:#ffd2a8; }
+  table.rev-table td.rev-type-cell.type-azure-rbac     { color:#cae2ff; }
+  table.rev-table td.rev-type-cell.type-pim-for-groups { color:#7ee787; }
+  table.rev-table td.rev-scope-cell { font-family:Consolas,monospace; font-size:11px; color:#9aa6b2; max-width:340px; word-break:break-all; }
+  table.rev-table td.rev-when-cell { font-family:Consolas,monospace; font-size:10.5px; color:#7d8590; white-space:nowrap; }
+  table.rev-table tr.rev-row-sel td { background:#1f6feb14; }
+  table.rev-table tr:hover td { background:#161b2266; }
+  table.rev-table th.rev-sel-col input[type=checkbox],
+  table.rev-table td.rev-sel-col input[type=checkbox] { cursor:pointer; }
+
+  .rev-action-bar { display:none; padding:10px 18px; background:#161b22; border-top:1px solid #30363d; gap:12px; align-items:center; flex-wrap:wrap; flex:0 0 auto; }
+  .rev-action-bar.active { display:flex; }
+  .rev-action-bar .rev-count { color:#e6edf3; font-size:12px; font-weight:600; }
+  .rev-action-bar .rev-label { color:#7d8590; font-size:12px; }
+  .rev-action-bar input.rev-justify { background:#0d1117; color:#e6edf3; border:1px solid #30363d; border-radius:4px; padding:5px 8px; font-size:12px; min-width:320px; flex:1 1 auto; }
+  .rev-action-bar input.rev-justify:focus { outline:none; border-color:#2f81f7; box-shadow:0 0 0 2px #1f6feb33; }
+  .rev-action-bar button { padding:5px 12px; font-size:12px; border:1px solid #30363d; background:#21262d; color:#e6edf3; border-radius:5px; cursor:pointer; }
+  .rev-action-bar button:hover { border-color:#1f6feb; }
+  .rev-action-bar button.rev-danger { color:#fff; background:#da3633; border-color:#da3633; }
+  .rev-action-bar button.rev-danger:hover { background:#f85149; border-color:#f85149; }
+  .rev-action-bar button.rev-danger:disabled { background:#21262d; border-color:#30363d; color:#7d8590; cursor:not-allowed; }
+  .rev-action-bar .rev-spacer { flex:1; }
+
+  /* Per-row revoke result pane (after submit) */
+  #revResultsPane { padding:12px 18px; background:#161b22; border-top:1px solid #30363d; max-height:32vh; overflow:auto; flex:0 0 auto; }
+  #revResultsPane .rev-rs-h { font-size:12px; color:#e6edf3; margin-bottom:8px; font-weight:600; }
+  #revResultsPane .rev-rs-row { font-family:Consolas,monospace; font-size:11px; padding:3px 8px; margin:1px 0; border-radius:3px; display:flex; gap:8px; align-items:flex-start; }
+  #revResultsPane .rev-rs-row.ok  { background:#1f6f3f22; color:#7ee787; }
+  #revResultsPane .rev-rs-row.err { background:#3b1f1f22; color:#ffa198; }
+  #revResultsPane .rev-rs-status { flex:0 0 50px; font-weight:600; }
+  #revResultsPane .rev-rs-body { flex:1 1 auto; min-width:0; word-break:break-word; }
+
   /* Graph-node violation badges (rendered in DOM overlay on top of Cytoscape) */
   #cyViolationOverlay { position:absolute; pointer-events:none; inset:0; overflow:hidden; }
   #cyViolationOverlay .v-node-badge { position:absolute; background:#da3633; color:#fff; border-radius:9px; min-width:16px; height:16px; line-height:16px; text-align:center; font-size:10px; font-weight:700; padding:0 4px; pointer-events:auto; cursor:default; box-shadow:0 1px 4px #000a; }
@@ -368,6 +426,7 @@
     <div class="tab" data-tab="new">New &amp; clone</div>
     <div class="tab" data-tab="save">Save <span id="saveDirtyBadge" class="badge" style="display:none">0</span></div>
     <div class="tab" data-tab="validate">Validate <span id="validateErrBadge" class="badge" style="display:none;background:#da3633">0</span></div>
+    <div class="tab" data-tab="revoke">Revoke <span id="revokeCountBadge" class="badge" style="display:none;background:#da3633">0</span></div>
     <div id="tabRight">
       mode: <b id="modeLabel"></b>
       &nbsp;|&nbsp; source: <b id="src"></b>
@@ -508,6 +567,32 @@
     </div>
   </div>
 
+  <!-- =========== Revoke tab (v2.4.2) =========== -->
+  <div id="revokeTab" class="tab-panel">
+    <div id="revTopBar">
+      <button id="revBtnRefresh" class="primary">Refresh</button>
+      <span class="rev-type-chip rev-type-all"      data-type="all"             title="Show all assignment types">all <span class="n" id="revChipAll">0</span></span>
+      <span class="rev-type-chip rev-type-entra"    data-type="entra-role"      title="Entra-role active assignments">entra-role <span class="n" id="revChipEntra">0</span></span>
+      <span class="rev-type-chip rev-type-azure"    data-type="azure-rbac"      title="Azure-RBAC active assignments">azure-rbac <span class="n" id="revChipAzure">0</span></span>
+      <span class="rev-type-chip rev-type-p4g"      data-type="pim-for-groups"  title="PIM-for-Groups active assignments">pim-for-groups <span class="n" id="revChipP4g">0</span></span>
+      <input type="text" id="revSearch" placeholder="Filter Principal / Role / Scope..." style="min-width:280px">
+      <span class="spacer"></span>
+      <span class="rev-loaded-at" id="revLoadedAt"></span>
+    </div>
+    <div id="revResults">
+      <div class="rev-empty">Click <b>Refresh</b> to load currently-active PIM assignments from this tenant.</div>
+    </div>
+    <div id="revActionBar" class="rev-action-bar">
+      <span class="rev-count" id="revSelCount">0 selected</span>
+      <span class="rev-label">Justification</span>
+      <input type="text" id="revJustify" class="rev-justify" placeholder="Required: business reason for the bulk revoke" maxlength="500">
+      <span class="rev-spacer"></span>
+      <button id="revBtnRevoke" class="rev-danger" disabled>Revoke selected</button>
+      <button id="revBtnClear">Clear</button>
+    </div>
+    <div id="revResultsPane" style="display:none"></div>
+  </div>
+
 </div>
 
 <!-- Confirm modal -->
@@ -618,6 +703,7 @@
     if (name === 'grid') renderGridList();
     if (name === 'save') renderSaveTab();
     if (name === 'validate') openValidateTab();
+    if (name === 'revoke') openRevokeTab();
   }
 
   // ===================================================================
@@ -4611,6 +4697,342 @@
   // Re-bind after each rebuild.
   const _origBuildGraph = buildGraph;
   buildGraph = function () { _origBuildGraph.apply(this, arguments); bindGraphRightClick(); renderGraphViolationBadges(); };
+
+  // ===================================================================
+  // Revoke tab (v2.4.2) -- bulk-revoke of active PIM assignments via
+  // /api/active-assignments + /api/revoke. Read-only until the operator
+  // selects rows + types a justification + clicks Revoke selected.
+  // ===================================================================
+  const REV = {
+    rows: [],              // full row set from /api/active-assignments
+    selected: new Set(),   // row ids the operator has ticked
+    typeFilter: 'all',     // all | entra-role | azure-rbac | pim-for-groups
+    textFilter: '',        // free-text against principal/role/scope
+    sortKey: 'principal',  // principal | role | scope | type | start | end
+    sortDir: 1,            // 1 asc, -1 desc
+    loadedUtc: null,
+    inFlight: false
+  };
+
+  async function openRevokeTab() {
+    if (!isServer) {
+      document.getElementById('revResults').innerHTML =
+        '<div class="rev-empty">Revoke is disabled in static mode -- launch via Open-PimManager.ps1 with -Server.</div>';
+      return;
+    }
+    // First-open: kick a load. Subsequent opens reuse cached rows (60s server cache).
+    if (REV.rows.length === 0 && !REV.inFlight) {
+      await loadActiveAssignments(false);
+    } else {
+      renderRevokeTable();
+    }
+  }
+
+  async function loadActiveAssignments(force) {
+    if (REV.inFlight) return;
+    REV.inFlight = true;
+    const results = document.getElementById('revResults');
+    results.innerHTML = '<div class="rev-loading">Loading active assignments from Graph + Azure Resource Graph (5-10s) ...</div>';
+    document.getElementById('revActionBar').classList.remove('active');
+    document.getElementById('revResultsPane').style.display = 'none';
+    try {
+      const url = '/api/active-assignments' + (force ? '?refresh=1' : '');
+      const data = await api('GET', url);
+      REV.rows = Array.isArray(data && data.rows) ? data.rows : [];
+      REV.loadedUtc = (data && data.loadedUtc) || new Date().toISOString();
+      REV.selected.clear();
+      updateRevokeBadge();
+      renderRevokeTable();
+    } catch (e) {
+      results.innerHTML = '<div class="rev-error">Failed to load active assignments: ' + escapeHtml(String(e.message || e)) + '</div>';
+    } finally {
+      REV.inFlight = false;
+    }
+  }
+
+  function updateRevokeBadge() {
+    const badge = document.getElementById('revokeCountBadge');
+    if (!badge) return;
+    const n = REV.rows.length;
+    if (n > 0) {
+      badge.style.display = '';
+      badge.style.background = '#1f6feb';
+      badge.textContent = String(n);
+    } else {
+      badge.style.display = 'none';
+    }
+  }
+
+  function applyRevokeFilter() {
+    const q = (REV.textFilter || '').toLowerCase().trim();
+    const tf = REV.typeFilter;
+    let rows = REV.rows;
+    if (tf && tf !== 'all') rows = rows.filter(r => r.type === tf);
+    if (q) {
+      rows = rows.filter(r => {
+        return (r.principal || '').toLowerCase().includes(q) ||
+               (r.role || '').toLowerCase().includes(q) ||
+               (r.scope || '').toLowerCase().includes(q) ||
+               (r.justification || '').toLowerCase().includes(q);
+      });
+    }
+    // Sort
+    const key = REV.sortKey, dir = REV.sortDir;
+    rows = rows.slice().sort((a, b) => {
+      let av = a[key], bv = b[key];
+      if (av == null) av = '';
+      if (bv == null) bv = '';
+      if (av < bv) return -1 * dir;
+      if (av > bv) return  1 * dir;
+      return 0;
+    });
+    return rows;
+  }
+
+  function renderRevokeTable() {
+    const results = document.getElementById('revResults');
+    const filtered = applyRevokeFilter();
+
+    // Per-type counters (always over the unfiltered set for the chips).
+    const counts = { all: REV.rows.length, 'entra-role': 0, 'azure-rbac': 0, 'pim-for-groups': 0 };
+    for (const r of REV.rows) {
+      if (counts.hasOwnProperty(r.type)) counts[r.type]++;
+    }
+    document.getElementById('revChipAll').textContent   = counts.all;
+    document.getElementById('revChipEntra').textContent = counts['entra-role'];
+    document.getElementById('revChipAzure').textContent = counts['azure-rbac'];
+    document.getElementById('revChipP4g').textContent   = counts['pim-for-groups'];
+    document.querySelectorAll('#revTopBar .rev-type-chip').forEach(c => {
+      c.classList.toggle('active', c.dataset.type === REV.typeFilter);
+    });
+
+    // Loaded-at indicator
+    if (REV.loadedUtc) {
+      document.getElementById('revLoadedAt').textContent = 'loaded ' + REV.loadedUtc.replace('T',' ').replace(/\..*$/,'Z');
+    }
+
+    if (REV.rows.length === 0) {
+      results.innerHTML = '<div class="rev-empty">No active PIM assignments returned by Graph / ARG. (Cache may be empty -- click Refresh.)</div>';
+      updateActionBar();
+      return;
+    }
+    if (filtered.length === 0) {
+      results.innerHTML = '<div class="rev-empty">No rows match the current filter.</div>';
+      updateActionBar();
+      return;
+    }
+
+    const cols = [
+      { key: 'principal',     label: 'Principal' },
+      { key: 'role',          label: 'Role / Group' },
+      { key: 'scope',         label: 'Scope' },
+      { key: 'type',          label: 'Type' },
+      { key: 'start',         label: 'Activated' },
+      { key: 'end',           label: 'Expires' },
+      { key: 'justification', label: 'Justification' }
+    ];
+    const out = [];
+    // Header-checkbox tri-state: rendered as checked when ALL visible rows are selected.
+    const allSel = filtered.every(r => REV.selected.has(r.id));
+    out.push('<table class="rev-table"><thead><tr>');
+    out.push('<th class="rev-sel-col"><input type="checkbox" id="revHeadCheck"' + (allSel ? ' checked' : '') + '></th>');
+    for (const c of cols) {
+      const sortMark = (c.key === REV.sortKey)
+        ? (' rev-sort-col' + (REV.sortDir === -1 ? ' desc' : ''))
+        : '';
+      out.push('<th class="rev-col-' + c.key + sortMark + '" data-sort="' + c.key + '">' + escapeHtml(c.label) + '</th>');
+    }
+    out.push('</tr></thead><tbody>');
+    for (const r of filtered) {
+      const sel = REV.selected.has(r.id);
+      out.push('<tr class="rev-row' + (sel ? ' rev-row-sel' : '') + '" data-id="' + escapeHtml(r.id) + '">');
+      out.push('<td class="rev-sel-col"><input type="checkbox" class="rev-row-check"' + (sel ? ' checked' : '') + '></td>');
+      out.push('<td>' + escapeHtml(r.principal || '') + '</td>');
+      out.push('<td>' + escapeHtml(r.role || '') + '</td>');
+      out.push('<td class="rev-scope-cell">' + escapeHtml(r.scope || '') + '</td>');
+      out.push('<td class="rev-type-cell type-' + escapeHtml(r.type || '') + '">' + escapeHtml(r.type || '') + '</td>');
+      out.push('<td class="rev-when-cell">' + escapeHtml(formatRevWhen(r.start)) + '</td>');
+      out.push('<td class="rev-when-cell">' + escapeHtml(r.end ? formatRevWhen(r.end) : 'no expiration') + '</td>');
+      out.push('<td>' + escapeHtml(r.justification || '') + '</td>');
+      out.push('</tr>');
+    }
+    out.push('</tbody></table>');
+    results.innerHTML = out.join('');
+
+    // Wire row checkboxes.
+    results.querySelectorAll('tr.rev-row').forEach(tr => {
+      const id = tr.dataset.id;
+      const cb = tr.querySelector('input.rev-row-check');
+      cb.onclick = (e) => {
+        e.stopPropagation();
+        if (cb.checked) REV.selected.add(id); else REV.selected.delete(id);
+        tr.classList.toggle('rev-row-sel', cb.checked);
+        updateActionBar();
+        // Update header tri-state without full re-render.
+        const head = document.getElementById('revHeadCheck');
+        if (head) {
+          const visIds = applyRevokeFilter().map(r => r.id);
+          head.checked = visIds.length > 0 && visIds.every(i => REV.selected.has(i));
+        }
+      };
+      // Click anywhere on the row to toggle (matches grid UX).
+      tr.onclick = (e) => {
+        if (e.target && e.target.tagName === 'INPUT') return;
+        cb.checked = !cb.checked;
+        cb.onclick(e);
+      };
+    });
+    // Header checkbox: toggle all visible.
+    const head = document.getElementById('revHeadCheck');
+    if (head) {
+      head.onclick = (e) => {
+        e.stopPropagation();
+        toggleRevokeAll(head.checked);
+      };
+    }
+    // Column-header sort.
+    results.querySelectorAll('thead th[data-sort]').forEach(th => {
+      th.onclick = () => {
+        const k = th.dataset.sort;
+        if (REV.sortKey === k) REV.sortDir = -REV.sortDir;
+        else { REV.sortKey = k; REV.sortDir = 1; }
+        renderRevokeTable();
+      };
+    });
+
+    updateActionBar();
+  }
+
+  function formatRevWhen(s) {
+    if (!s) return '';
+    // s arrives as ISO 8601 from the server; show as "YYYY-MM-DD HH:MM" for compactness.
+    const m = String(s).match(/^(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2})/);
+    if (m) return m[1] + ' ' + m[2] + 'Z';
+    return String(s);
+  }
+
+  function toggleRevokeAll(on) {
+    const visible = applyRevokeFilter().map(r => r.id);
+    if (on) { for (const id of visible) REV.selected.add(id); }
+    else    { for (const id of visible) REV.selected.delete(id); }
+    renderRevokeTable();
+  }
+
+  function updateActionBar() {
+    const bar = document.getElementById('revActionBar');
+    const n = REV.selected.size;
+    document.getElementById('revSelCount').textContent = n + ' selected';
+    bar.classList.toggle('active', n > 0);
+    refreshRevokeButtonState();
+  }
+
+  function refreshRevokeButtonState() {
+    const btn = document.getElementById('revBtnRevoke');
+    if (!btn) return;
+    const j = (document.getElementById('revJustify').value || '').trim();
+    const n = REV.selected.size;
+    btn.disabled = !(n > 0 && j.length > 0);
+  }
+
+  async function submitRevoke() {
+    const justification = (document.getElementById('revJustify').value || '').trim();
+    if (!justification) return;
+    const selectedIds = Array.from(REV.selected);
+    const rows = REV.rows.filter(r => REV.selected.has(r.id));
+    if (rows.length === 0) return;
+
+    const ok = await showConfirm(
+      'Revoke ' + rows.length + ' active assignment' + (rows.length === 1 ? '' : 's'),
+      '<p>This will fire <b>' + rows.length + '</b> admin-remove call' + (rows.length === 1 ? '' : 's') +
+      ' against Microsoft Graph / Azure Resource Manager. <b>This cannot be undone.</b></p>' +
+      '<p>The affected principals will need to re-activate via PIM if they need access.</p>' +
+      '<p style="color:#7d8590;font-size:11.5px">Justification: <code style="color:#e6edf3">' +
+      escapeHtml(justification) + '</code></p>',
+      true
+    );
+    if (!ok) return;
+
+    // Build the per-row payload. The server dispatches by `type`.
+    const payload = {
+      justification: justification,
+      rows: rows.map(r => ({
+        id:               r.id,
+        type:             r.type,
+        principalId:      r.principalId,
+        roleDefinitionId: r.roleDefinitionId,
+        scope:            r.scope,
+        directoryScopeId: r.directoryScopeId,
+        groupId:          r.groupId,
+        accessId:         r.accessId
+      }))
+    };
+
+    const pane = document.getElementById('revResultsPane');
+    pane.style.display = '';
+    pane.innerHTML = '<div class="rev-rs-h">Submitting ' + rows.length + ' revoke request' +
+                     (rows.length === 1 ? '' : 's') + ' ...</div>';
+
+    let resp;
+    try {
+      resp = await api('POST', '/api/revoke', payload);
+    } catch (e) {
+      pane.innerHTML = '<div class="rev-rs-h">Revoke batch failed</div>' +
+        '<div class="rev-rs-row err"><span class="rev-rs-status">ERR</span><span class="rev-rs-body">' +
+        escapeHtml(String(e.message || e)) + '</span></div>';
+      return;
+    }
+    const results = (resp && Array.isArray(resp.results)) ? resp.results : [];
+    const okCount  = results.filter(r => r && r.ok).length;
+    const errCount = results.length - okCount;
+    const out = [];
+    out.push('<div class="rev-rs-h">Revoke batch finished: <span style="color:#7ee787">' + okCount +
+             ' ok</span>, <span style="color:#ffa198">' + errCount + ' failed</span></div>');
+    for (const r of results) {
+      const row = REV.rows.find(x => x.id === r.id) || { principal:'?', role:'?', type:'?' };
+      const label = (row.principal || '') + ' / ' + (row.role || '') + ' [' + (row.type || '') + ']';
+      if (r.ok) {
+        out.push('<div class="rev-rs-row ok"><span class="rev-rs-status">OK</span><span class="rev-rs-body">' +
+                 escapeHtml(label) + '</span></div>');
+      } else {
+        out.push('<div class="rev-rs-row err"><span class="rev-rs-status">FAIL</span><span class="rev-rs-body">' +
+                 escapeHtml(label) + ' -- ' + escapeHtml(r.error || 'unknown error') + '</span></div>');
+      }
+    }
+    pane.innerHTML = out.join('');
+
+    // Drop the successfully-revoked rows from our local cache so the table
+    // re-render reflects reality without a server round-trip. (The server's
+    // 60s cache is also bumped by the POST handler.)
+    if (okCount > 0) {
+      const okIds = new Set(results.filter(r => r && r.ok).map(r => r.id));
+      REV.rows = REV.rows.filter(r => !okIds.has(r.id));
+      for (const id of okIds) REV.selected.delete(id);
+      updateRevokeBadge();
+      renderRevokeTable();
+    }
+  }
+
+  // Wire Revoke tab controls (idempotent -- onclick assignment).
+  (function wireRevokeTab() {
+    const btnR = document.getElementById('revBtnRefresh');
+    if (btnR) btnR.onclick = () => loadActiveAssignments(true);
+
+    const search = document.getElementById('revSearch');
+    if (search) search.oninput = () => { REV.textFilter = search.value; renderRevokeTable(); };
+
+    document.querySelectorAll('#revTopBar .rev-type-chip').forEach(chip => {
+      chip.onclick = () => { REV.typeFilter = chip.dataset.type; renderRevokeTable(); };
+    });
+
+    const j = document.getElementById('revJustify');
+    if (j) j.oninput = refreshRevokeButtonState;
+
+    const btnRev = document.getElementById('revBtnRevoke');
+    if (btnRev) btnRev.onclick = submitRevoke;
+
+    const btnClr = document.getElementById('revBtnClear');
+    if (btnClr) btnClr.onclick = () => { REV.selected.clear(); renderRevokeTable(); };
+  })();
 
   // ===================================================================
   // Initial UI prep
