@@ -1,9 +1,10 @@
 # Release notes for PIM4EntraPS
 
-## v2.3.1
+## v2.3.2
 
 Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monorepo:
 
+- release: PIM4EntraPS v2.3.2 - perf + logging hotfix from function audit (Graph + Azure) (d40b311c)
 - release: PIM4EntraPS v2.3.1 - docs: README rewrite with full v2.x feature catalog + dedicated PIM Manager GUI section (85992b8f)
 - release: PIM4EntraPS v2.3.0 - drop .locked.csv baselines, custom-only from day one + enhanced .custom.sample.csv templates (e568dd6e)
 - release: PIM4EntraPS v2.2.1 - hotfix: scrub maintainer-tenant data from shipped .locked.csv baselines + sample-file cleanup (b666d1eb)
@@ -39,6 +40,30 @@ Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monor
 # Release notes -- PIM4EntraPS
 
 > **Curated changelog.** The publish workflow auto-prepends recent monorepo commits as a raw activity log; this file is the human-friendly narrative on top.
+
+---
+
+## v2.3.2 -- Perf + logging hotfix: ~70s + 30-60s off every run, plus actionable warnings on silent Graph failures
+
+Low-risk perf + observability fixes surfaced by a function-by-function audit of `PIM-Functions.psm1` (Graph eligibility reads) and the three Azure-side engine scripts (Exporter / Exporter-CSV-Only / Revoker). Bigger structural wins (`Resolve-PimGroupCached` 18-site refactor + slim-down of the hourly exporter to AzRes-eligibility-only) are sequenced into v2.4.0; this release ships the safe deletes + logging.
+
+**Azure-side perf (~70s shaved per Exporter / Revoker run):**
+- Deleted dead `AzRoleAssignments-Query-AzARG | Query-AzResourceGraph` call in `PIM-Assignment-Exporter.ps1:269` and `PIM-Assignment-Revoker.ps1:264`. The variable they assigned to was overwritten with `@()` on the very next line -- pure dead code costing 1-3 s per run. (`PIM-Assignment-Exporter-CSV-Only.ps1` keeps its ARG call because the result IS used on the following line to populate `$Global:Role_Group_Definitions_ID`.)
+- Deleted `Start-Sleep -Seconds 1` between the per-scope `roleEligibilitySchedules` and `roleAssignmentSchedules` REST calls in `PIM-Assignment-Exporter.ps1:282`. Pure idle wait, no throttle reason (ARM read budget is 12000/hr/sub; 60 sequential calls is nowhere near the ceiling). At ~60 sub+MG scopes that's **~60 s** of pointless sleep gone.
+
+**Graph-side perf (~30-60s on large tenants):**
+- Replaced `Get-MgGroup -all:$true | where-Object DisplayName -like 'PIM-*'` in `PIM_Policy_Check_Update` (line 6897) with the v2.1.3 `Get-PimGroupsFiltered` server-side `$filter=startswith(displayName,...)`. On a 30k-group tenant this drops from "fetch all 30k, client-filter to ~200 PIM-* groups" to "fetch ~200 PIM-* groups directly". The combined SecurityEnabled / GroupTypes / OnPremisesSyncEnabled local filters are folded into one `Where-Object` block.
+
+**Logging gaps (the silent failures that produce mysterious downstream crashes):**
+- `Assign-PIMForGroups-From-file-CSV` lines 4118 + 4972: the `Get-MgIdentityGovernancePrivilegedAccessGroupEligibilitySchedule -ErrorAction SilentlyContinue` lookup now uses `-ErrorAction Stop` wrapped in `Try/Catch` + `Write-Warning` with the principal UPN + group display name in the message. Previously a Graph 5xx / throttle silently returned `$null`, the engine concluded "no existing assignment", issued a duplicate `AdminAssign`, and crashed downstream with a cryptic `RoleAssignmentExists` 30 lines later. Now the operator sees: `[PIM4Groups] eligibility lookup failed for principal '<upn>' on group '<group>': <message> -- treating as MISSING; may produce duplicate-assign error downstream.`
+- `Create-PIM-Group-Role` line 679: same shape. Previously, if `Get-MgGroup` failed due to throttle/perm, `$Group=$null`, function went into the create branch, and `New-MgGroup` failed with a cryptic `UniqueValueViolated` because the group really existed. Now the operator sees a `[Create-PIM-Group-Role]` warning naming the group.
+- Module init (lines 8409 / 8412 / 8421 / 8424): added `[INFO] PIM-Functions: loaded <path>` on successful dot-source of `PIM4EntraPS.NamingConventions.{locked,custom}.ps1` + `PIM4EntraPS.NotificationChannels.{locked,custom}.ps1`, so operators can tell from the transcript whether locked or custom won, instead of debugging a later NRE when `$global:PIM_NotificationChannels` is unexpectedly empty.
+
+**Sequenced into v2.4.0** (riskier, needs regression testing):
+- `Resolve-PimGroupCached` helper + refactor of the ~18 sites that fire one `Get-MgGroup -Filter "DisplayName eq..."` per CSV row. Estimated ~3-5 min off every Baseline run at customer scale.
+- Slim the hourly Exporter down to **only** the slow leg (Azure RBAC eligibility schedules per-scope walk; the only remaining read with no tenant-wide alternative). The Graph-side enumerations (PIM-for-Groups + Entra role eligibility/active schedules) move to live preload at the start of each Baseline run -- ~10 s per engine run vs ~6 min when the snapshot is stale. Single source of truth: live Graph; only AzRes eligibility is "up to 1h stale" (and that one changes slowly anyway).
+- Active Azure RBAC role assignments move from the per-scope ARM walk to a single `Search-AzGraph -UseTenantScope` query (confirmed: `roleAssignments` IS in the `AuthorizationResources` ARG table; `roleEligibilitySchedules` is NOT, so they stay per-scope).
+- Token-header caching across the PSM1's ~10 `Get-AzAccessTokenManagement` call-sites (reuse for ~60-90 min instead of re-minting per scope-loop iteration).
 
 ---
 
