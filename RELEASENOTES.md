@@ -1,9 +1,10 @@
 # Release notes for PIM4EntraPS
 
-## v2.4.30
+## v2.4.31
 
 Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monorepo:
 
+- release: PIM4EntraPS v2.4.31 - self-deactivate (single + bulk) on My Access + blue popup frame + UPPERCASE branded header + tenantId in footer + horizontal-scroll fix (b500945a)
 - release: PIM4EntraPS v2.4.30 - drop '(M365)' label + bump bulk cache key v2 (forces fresh fetch after v0.4.14 bug) + inline 'Loading roles...' placeholder (b01dbf44)
 - fix(PIM4EntraPS): Update-PimActivatorDev.ps1 - use Get-Content pipe instead of '<' redirect (PS 5.1 doesn't support '<') (674e2f0d)
 - fix(PIM4EntraPS): Update-PimActivatorDev.ps1 -Repack now syntax-checks popup.js before pack (3557e5b6)
@@ -33,13 +34,46 @@ Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monor
 - release: PIM4EntraPS v2.4.7 - finish wiring v2.4.4's 4-method auth into community launchers + README catch-up (95a1ab25)
 - release: PIM4EntraPS v2.4.6 - fully-unattended activator deployment via bootstrap SPN (Intune-friendly) (6841d152)
 - release: PIM4EntraPS v2.4.5 - turnkey PIM Activator install: one-command orchestrator + pinned extension identity + icons (4a26958d)
-- release: PIM4EntraPS v2.4.4 - port SI's 4-mode launcher auth + solution-wide config + new Grant-PimEngineAdminConsent helper (41e64c94)
 
 ---
 
 # Release notes -- PIM4EntraPS
 
 > **Curated changelog.** The publish workflow auto-prepends recent monorepo commits as a raw activity log; this file is the human-friendly narrative on top.
+
+---
+
+## v2.4.31 -- Self-deactivate (single + bulk) on My Access + blue popup frame + horizontal-scroll fix
+
+Three feature/UX additions:
+
+### A. Self-deactivate active memberships (single and bulk)
+
+Each row on the My Access tab now has a red "Deactivate" button to the right of the group name. Click -> confirm prompt -> the popup calls `assignmentScheduleRequests` with `action: 'selfDeactivate'` -> the membership is dropped immediately (well before its scheduled expiry). The user can always do this for their OWN memberships -- no admin role required, because it's a "self" action (principalId on the request body must match the signed-in user).
+
+Multi-select bulk:
+- New checkbox to the left of each row
+- New toolbar: **all** / **none** quick-pickers + **Deactivate selected (N)** button
+- Bulk handler iterates sequentially with confirm prompt listing all picked groups, marks each row's status individually, refreshes the tab after success
+
+For shared admin accounts that activate 5+ groups every morning and want to wipe everything at end-of-day, this is one click instead of N.
+
+### B. Blue frame around the popup
+
+Chromium popups blend into white pages behind them, making it hard to tell where the popup ends and the page begins. v2.4.31 adds `border: 2px solid #0969da` (the GitHub blue accent we already use for active tab + group names) around the body. Distinct without being loud.
+
+### C. Horizontal scroll fix
+
+v0.4.14+ added role preview lines under each Activate row. Some scopes contain long unbreakable strings (`/subscriptions/<guid>/resourceGroups/<long-name>`) that pushed the row width past 800px, triggering a horizontal scrollbar in Chrome/Edge popup. Fix: `overflow-x: hidden` on the popup body + `overflow-wrap: anywhere; word-break: break-word` on the role-line divs so long tokens break inside instead of overflowing.
+
+### D. Header banner restyled + attribution footer
+
+- Title is now UPPERCASE bold ("PIM ACTIVATOR") at 17px with 0.5px letter-spacing.
+- Header bar uses blue background (`#0969da`) with white text + translucent white sign-out button -- distinct brand strip vs the white content area below.
+- Discreet footer at the bottom: "Developed by **Morten Knudsen** · part of [PIM4EntraPS](https://github.com/KnudsenMorten/PIM4EntraPS)" (link opens in a new tab).
+- Translucent white version-badge sits next to the title; same info, no longer competing for attention.
+
+Manifest 0.4.17 -> 0.4.20 (four patch bumps in the dev-helper auto-bump path).
 
 ---
 
