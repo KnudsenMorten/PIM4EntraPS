@@ -1,9 +1,10 @@
 # Release notes for PIM4EntraPS
 
-## v2.4.10
+## v2.4.11
 
 Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monorepo:
 
+- release: PIM4EntraPS v2.4.11 - Activator popup: My Access tab + token self-heal + Auto-fix button + hide-already-active (db8893b1)
 - release: PIM4EntraPS v2.4.10 - Activator popup: My Access tab + token self-heal + Auto-fix button + hide-already-active (96b0c313)
 - release: PIM4EntraPS v2.4.9 - switch CRX hosting to GitHub Pages + Chrome support + Install->Deploy renames + SPA URI fix (E2E proven) (5e263602)
 - release: PIM4EntraPS v2.4.8 - all-in-one Azure CRX hosting in Setup-PimActivator.ps1 + manifest schema fix + Test-PimActivatorFlow.ps1 (5adbd277)
@@ -33,13 +34,38 @@ Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monor
 - release: PIM4EntraPS v1.0.1 - hotfix: 14 .locked.csv data files were silently ignored by monorepo .gitignore (SOLUTIONS/**/config/* rule had no exception for *.locked.*) and missing from v1.0.0 public mirror (0fe0d6d5)
 - release: PIM4EntraPS v1.0.0 - restructure to SecurityInsight conventions + .locked/.custom split + customer naming/filter extension points + generic Build-PimContext helper (additive, no engine rewire yet) (12616959)
 - port: v1 -> v2 on 14 user-selected solutions (67 engines) (fbe39214)
-- rename: SOLUTIONS/PlatformOnboarding -> SOLUTIONS/PlatformConfiguration (368f422e)
 
 ---
 
 # Release notes -- PIM4EntraPS
 
 > **Curated changelog.** The publish workflow auto-prepends recent monorepo commits as a raw activity log; this file is the human-friendly narrative on top.
+
+---
+
+## v2.4.11 -- PIM Activator popup: version badge in header + extension version bump (0.1.0 -> 0.2.0) + brighter color contrast
+
+Three small UX wins to support customer-facing rollouts:
+
+1. **Manifest version bumped 0.1.0 -> 0.2.0** -- forces Edge / Chrome to actually pick up the v2.4.10 CRX (the previous publish had the same `0.1.0` version so Edge's auto-update check skipped the download). From v2.4.11 onward, every publish bumps the version so users actually get the new build on auto-update.
+2. **Version badge in the popup header** -- shows `v0.2.0` next to "PIM Activator". Hover tooltip shows extension ID + manifest version + name. Sourced from `chrome.runtime.getManifest()` so it always matches the running build (no risk of stale hardcoded constants). Also logged to the popup's console on every open: `[PIM Activator] v0.2.0 (id eheocihmlppcophaeakmdenhgcookkab)`. Support can now ask "what version do you see in the header?" instead of guessing.
+3. **Brighter color contrast** -- secondary/meta text bumped from `#7d8590` (medium grey, low contrast on the near-black `#0e1116` background) to `#b1bac4` (brighter grey, WCAG-comfortable). Group display name bolder + brighter (`#f0f6fc`). Row hover background slightly lighter (`#1c2128` vs `#161b22`). Borders softened (`#2d333b` vs `#21262d`). Net: easier to scan a long eligibility list under normal office lighting.
+
+### Customer auto-update path
+
+Edge / Chrome poll `https://knudsenmorten.github.io/PIM4EntraPS/updates.xml` every ~5 hours + on browser startup. The bumped `0.2.0` version triggers an auto-download + install on next poll. End-users see no prompt -- the new build appears next time they open the popup.
+
+For impatient testing: `edge://extensions/` -> toggle Developer mode ON (top-right) -> big **Update** button appears -> click. Force-polls all extension update URLs immediately.
+
+### Files changed
+
+- `tools/pim-activator/manifest.json` -- `version: 0.1.0 -> 0.2.0`
+- `tools/pim-activator/popup.html` -- version badge span in header, brighter palette throughout (single global `#7d8590 -> #b1bac4` swap + targeted row/name brighten)
+- `tools/pim-activator/popup.js` -- `loaded()` populates the version badge + console-logs the version
+
+### Follow-up roadmap
+
+- Auto-bump manifest version on every `Setup-PimActivator.ps1 -PublishToGitHubPages` run so the maintainer never forgets again (v2.4.12 candidate)
 
 ---
 

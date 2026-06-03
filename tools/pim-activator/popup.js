@@ -772,6 +772,18 @@ async function loaded(token) {
   els.me.textContent = currentAccount?.username || ''
   els.status.textContent = 'Loading eligible groups...'
 
+  // Show extension version in the header so support knows what the user runs.
+  // Read from chrome.runtime.getManifest() -- always matches the running build.
+  try {
+    const verEl = document.getElementById('version-badge')
+    const m = chrome.runtime.getManifest()
+    if (verEl && m) {
+      verEl.textContent = `v${m.version}`
+      verEl.title = `Extension ID: ${chrome.runtime.id}\nManifest version: ${m.manifest_version}\nName: ${m.name}`
+    }
+    console.log(`[PIM Activator] v${m.version} (id ${chrome.runtime.id})`)
+  } catch (e) { /* manifest read shouldn't fail in extension context */ }
+
   // Self-heal: if the cached token is missing required scopes (admin re-
   // consented new perms after the user last signed in), force a reauth
   // before doing anything else. Avoids mysterious 403s later.
