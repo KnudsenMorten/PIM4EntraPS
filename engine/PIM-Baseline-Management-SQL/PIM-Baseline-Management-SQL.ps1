@@ -212,7 +212,7 @@ Write-Output "******************************************************************
 
     Import-Module Microsoft.Graph.DeviceManagement.Enrollment
 
-    $MaxSteps = "11"
+    $MaxSteps = "12"
 
     Write-host ""
     Write-host "[ 01 / $($MaxSteps) ] Building list of all Users in Entra ID ... Please Wait !"
@@ -221,33 +221,40 @@ Write-Output "******************************************************************
     Write-host "[ 02 / $($MaxSteps) ] Building list of all Groups in Entra ID ... Please Wait !"
     $Global:Groups_All_ID = Get-PimGroupsFiltered
 
-    Write-host "[ 03 / $($MaxSteps) ] Building list of all PIM-Groups in Entra ID ... Please Wait !"
+    # v2.4.1: tenant-wide preload of PIM-for-Groups eligibility + assignment
+    # schedules. Eliminates the per-row Graph fallback that hit ~1000 single-
+    # group filter calls when the snapshot was stale (~6 min wasted at scale).
+    Write-host ""
+    Write-host "[ 03 / $($MaxSteps) ] Pre-loading PIM-for-Groups schedules tenant-wide ... Please Wait !"
+    $null = Get-PimGroupSchedulesPreloaded
+
+    Write-host "[ 04 / $($MaxSteps) ] Building list of all PIM-Groups in Entra ID ... Please Wait !"
     $Global:PAG_Groups_Definitions_ID = $Global:Groups_All_ID | `
                                                 Where-Object { ($_.DisplayName -like "PAG-*") } | `
                                                 Select-Object DisplayName, Description, Id | Sort-Object -Property DisplayName
 
-    Write-host "[ 04 / $($MaxSteps) ] Building list of all PIM-Resource Groups for PIM for AD in Entra ID ... Please Wait !"
+    Write-host "[ 05 / $($MaxSteps) ] Building list of all PIM-Resource Groups for PIM for AD in Entra ID ... Please Wait !"
     $Global:PAG_Groups_Resource_SyncAD_Definitions_ID  = $Global:PAG_Groups_Definitions_ID | `
                                                 Where-Object { ($_.DisplayName -like "PAG-RES*") -and ($_.DisplayName -like "*-S_AD")} | `
                                                 Select-Object DisplayName, Description, Id | Sort-Object -Property DisplayName
 
-    Write-host "[ 05 / $($MaxSteps) ] Building list of all PIM-Service Groups for PIM for AD in Entra ID ... Please Wait !"
+    Write-host "[ 06 / $($MaxSteps) ] Building list of all PIM-Service Groups for PIM for AD in Entra ID ... Please Wait !"
     $Global:PAG_Groups_Service_SyncAD_Definitions_ID  = $Global:PAG_Groups_Definitions_ID | `
                                                 Where-Object { ($_.DisplayName -like "PAG-SERV*") -and ($_.DisplayName -like "*-S_AD")} | `
                                                 Select-Object DisplayName, Description, Id | Sort-Object -Property DisplayName
 
-    Write-host "[ 06 / $($MaxSteps) ] Building list of all Administrative Units in Entra ID ... Please Wait !"
+    Write-host "[ 07 / $($MaxSteps) ] Building list of all Administrative Units in Entra ID ... Please Wait !"
     $Global:AU_Definitions_ID = Get-MgDirectoryAdministrativeUnit -All:$true | Select-Object DisplayName, Id | Sort-Object -Property DisplayName
 
-    Write-host "[ 07 / $($MaxSteps) ] Building list of all Admin Accounts in Entra ID ... Please Wait !"
+    Write-host "[ 08 / $($MaxSteps) ] Building list of all Admin Accounts in Entra ID ... Please Wait !"
     $Global:Accounts_Definitions_ID = $Global:Users_All_ID | `
                                                 Where-Object { ( ( ($_.UserPrincipalName -like "Admin-*") -or ($_.UserPrincipalName -like "X-Admin*") ) -and ($_.UserPrincipalName -like "*-ID*") ) } | `
                                                 Select-Object DisplayName, GivenName, SurName, Id | Sort-Object -Property DisplayName
 
-    Write-host "[ 08 / $($MaxSteps) ] Building list of all Role definitions for Groups in Entra ID ... Please Wait !"
+    Write-host "[ 09 / $($MaxSteps) ] Building list of all Role definitions for Groups in Entra ID ... Please Wait !"
     $Global:Role_Group_Definitions_ID = Get-MgRoleManagementDirectoryRoleDefinition | Select-Object DisplayName, Id
 
-    Write-host "[ 09 / $($MaxSteps) ] Building list of all Role definitions for Administrative Units in Entra ID ... Please Wait !"
+    Write-host "[ 10 / $($MaxSteps) ] Building list of all Role definitions for Administrative Units in Entra ID ... Please Wait !"
     $Global:Role_AU_Definitions_ID = $Global:Role_Group_Definitions_ID | `
                                                 Where-Object { ($_.DisplayName -like "Authentication Administrator") -or `
                                                                ($_.DisplayName -like "Cloud Device Administrator") -or `
@@ -262,7 +269,7 @@ Write-Output "******************************************************************
                                                                ($_.DisplayName -like "User Administrator") } | `
                                                 Select-Object DisplayName, Id | Sort-Object -Property DisplayName
 
-    Write-host "[ 10 / $($MaxSteps) ] Building list of all Azure Resources ... Please Wait !"
+    Write-host "[ 11 / $($MaxSteps) ] Building list of all Azure Resources ... Please Wait !"
 
     $MgInfo = AzMGs-Query-AzARG | Query-AzResourceGraph -QueryScope Tenant
     $SubInfo = AzSubscriptions-Query-AzARG | Query-AzResourceGraph -QueryScope Tenant
@@ -286,7 +293,7 @@ Write-Output "******************************************************************
             $Global:AzureResources_Definitions_ID += $Obj
         }
 
-    Write-host "[ 11 / $($MaxSteps) ] Building list of all Azure Resources Roles ... Please Wait !"
+    Write-host "[ 12 / $($MaxSteps) ] Building list of all Azure Resources Roles ... Please Wait !"
     $Global:AzureResourcesRole_Definitions_ID = Get-AzRoleDefinition | `
                                                 Select-Object Name, Description, Id | Sort-Object -Property Name
 
@@ -379,7 +386,7 @@ Write-Output "******************************************************************
 # Admin Accounts | Assignment of Priviledge Access Groups (PAGs)
 ######################################################################################################################
 
-    $MaxSteps = "11"
+    $MaxSteps = "12"
 
     Write-host ""
     Write-host "[ 01 / $($MaxSteps) ] Building list of all Users in Entra ID ... Please Wait !"
@@ -388,33 +395,40 @@ Write-Output "******************************************************************
     Write-host "[ 02 / $($MaxSteps) ] Building list of all Groups in Entra ID ... Please Wait !"
     $Global:Groups_All_ID = Get-PimGroupsFiltered
 
-    Write-host "[ 03 / $($MaxSteps) ] Building list of all PIM-Groups in Entra ID ... Please Wait !"
+    # v2.4.1: tenant-wide preload of PIM-for-Groups eligibility + assignment
+    # schedules. Eliminates the per-row Graph fallback that hit ~1000 single-
+    # group filter calls when the snapshot was stale (~6 min wasted at scale).
+    Write-host ""
+    Write-host "[ 03 / $($MaxSteps) ] Pre-loading PIM-for-Groups schedules tenant-wide ... Please Wait !"
+    $null = Get-PimGroupSchedulesPreloaded
+
+    Write-host "[ 04 / $($MaxSteps) ] Building list of all PIM-Groups in Entra ID ... Please Wait !"
     $Global:PAG_Groups_Definitions_ID = $Global:Groups_All_ID | `
                                                 Where-Object { ($_.DisplayName -like "PAG-*") } | `
                                                 Select-Object DisplayName, Description, Id | Sort-Object -Property DisplayName
 
-    Write-host "[ 04 / $($MaxSteps) ] Building list of all PIM-Resource Groups for PIM for AD in Entra ID ... Please Wait !"
+    Write-host "[ 05 / $($MaxSteps) ] Building list of all PIM-Resource Groups for PIM for AD in Entra ID ... Please Wait !"
     $Global:PAG_Groups_Resource_SyncAD_Definitions_ID  = $Global:PAG_Groups_Definitions_ID | `
                                                 Where-Object { ($_.DisplayName -like "PAG-RES*") -and ($_.DisplayName -like "*-S_AD")} | `
                                                 Select-Object DisplayName, Description, Id | Sort-Object -Property DisplayName
 
-    Write-host "[ 05 / $($MaxSteps) ] Building list of all PIM-Service Groups for PIM for AD in Entra ID ... Please Wait !"
+    Write-host "[ 06 / $($MaxSteps) ] Building list of all PIM-Service Groups for PIM for AD in Entra ID ... Please Wait !"
     $Global:PAG_Groups_Service_SyncAD_Definitions_ID  = $Global:PAG_Groups_Definitions_ID | `
                                                 Where-Object { ($_.DisplayName -like "PAG-SERV*") -and ($_.DisplayName -like "*-S_AD")} | `
                                                 Select-Object DisplayName, Description, Id | Sort-Object -Property DisplayName
 
-    Write-host "[ 06 / $($MaxSteps) ] Building list of all Administrative Units in Entra ID ... Please Wait !"
+    Write-host "[ 07 / $($MaxSteps) ] Building list of all Administrative Units in Entra ID ... Please Wait !"
     $Global:AU_Definitions_ID = Get-MgDirectoryAdministrativeUnit -All:$true | Select-Object DisplayName, Id | Sort-Object -Property DisplayName
 
-    Write-host "[ 07 / $($MaxSteps) ] Building list of all Admin Accounts in Entra ID ... Please Wait !"
+    Write-host "[ 08 / $($MaxSteps) ] Building list of all Admin Accounts in Entra ID ... Please Wait !"
     $Global:Accounts_Definitions_ID = $Global:Users_All_ID | `
                                                 Where-Object { ( ( ($_.UserPrincipalName -like "Admin-*") -or ($_.UserPrincipalName -like "X-Admin*") ) -and ($_.UserPrincipalName -like "*-ID*") ) } | `
                                                 Select-Object DisplayName, GivenName, SurName, Id | Sort-Object -Property DisplayName
 
-    Write-host "[ 08 / $($MaxSteps) ] Building list of all Role definitions for Groups in Entra ID ... Please Wait !"
+    Write-host "[ 09 / $($MaxSteps) ] Building list of all Role definitions for Groups in Entra ID ... Please Wait !"
     $Global:Role_Group_Definitions_ID = Get-MgRoleManagementDirectoryRoleDefinition | Select-Object DisplayName, Id
 
-    Write-host "[ 09 / $($MaxSteps) ] Building list of all Role definitions for Administrative Units in Entra ID ... Please Wait !"
+    Write-host "[ 10 / $($MaxSteps) ] Building list of all Role definitions for Administrative Units in Entra ID ... Please Wait !"
     $Global:Role_AU_Definitions_ID = $Global:Role_Group_Definitions_ID | `
                                                 Where-Object { ($_.DisplayName -like "Authentication Administrator") -or `
                                                                ($_.DisplayName -like "Cloud Device Administrator") -or `
@@ -429,7 +443,7 @@ Write-Output "******************************************************************
                                                                ($_.DisplayName -like "User Administrator") } | `
                                                 Select-Object DisplayName, Id | Sort-Object -Property DisplayName
 
-    Write-host "[ 10 / $($MaxSteps) ] Building list of all Azure Resources ... Please Wait !"
+    Write-host "[ 11 / $($MaxSteps) ] Building list of all Azure Resources ... Please Wait !"
 
     $MgInfo = AzMGs-Query-AzARG | Query-AzResourceGraph -QueryScope Tenant
     $SubInfo = AzSubscriptions-Query-AzARG | Query-AzResourceGraph -QueryScope Tenant
@@ -453,7 +467,7 @@ Write-Output "******************************************************************
             $Global:AzureResources_Definitions_ID += $Obj
         }
 
-    Write-host "[ 11 / $($MaxSteps) ] Building list of all Azure Resources Roles ... Please Wait !"
+    Write-host "[ 12 / $($MaxSteps) ] Building list of all Azure Resources Roles ... Please Wait !"
     $Global:AzureResourcesRole_Definitions_ID = Get-AzRoleDefinition | `
                                                 Select-Object Name, Description, Id | Sort-Object -Property Name
 

@@ -4265,14 +4265,11 @@ Function Assign-PIMForGroups-From-file-CSV
 
                                     If ( (!($CheckExistingAssignment)) -and ($AssignmentType -eq 'Eligible') )
                                         {
-                                            $GraphCheck = $null
-                                            Try {
-                                                $GraphCheck = Get-MgIdentityGovernancePrivilegedAccessGroupEligibilitySchedule `
-                                                                -Filter "groupId eq '$($Group.Id)' and principalId eq '$($PAGGroup.Id)' and accessId eq 'member'" `
-                                                                -ErrorAction Stop
-                                            } Catch {
-                                                Write-Warning "  [PIM4Groups] eligibility lookup failed for principal '$($PAGGroup.DisplayName)' on group '$($Group.DisplayName)': $($_.Exception.Message) -- treating as MISSING; may produce duplicate-assign error downstream."
-                                            }
+                                            # v2.4.1: consume tenant-wide preload from Get-PimGroupSchedulesPreloaded
+                                            # (auto-triggered on first call). Replaces the per-row Graph filter that
+                                            # cost ~600ms x ~1000 rows = ~6 min on a stale-snapshot Baseline run.
+                                            # The helper handles failures internally and returns $null on miss.
+                                            $GraphCheck = Get-PimGroupSchedule -GroupId $Group.Id -PrincipalId $PAGGroup.Id -AssignmentType Eligible -AccessId member
                                             If ($GraphCheck)
                                                 {
                                                     write-host ""
@@ -5124,14 +5121,11 @@ Function Assign-Groups-Accounts-From-file-CSV
 
                     If ( (!($CheckExistingAssignment)) -and ($AssignmentType -eq 'Eligible') )
                         {
-                            $GraphCheck = $null
-                            Try {
-                                $GraphCheck = Get-MgIdentityGovernancePrivilegedAccessGroupEligibilitySchedule `
-                                                -Filter "groupId eq '$($GroupInfo.Id)' and principalId eq '$($UserInfo.Id)' and accessId eq 'member'" `
-                                                -ErrorAction Stop
-                            } Catch {
-                                Write-Warning "  [PIM4Groups] eligibility lookup failed for principal '$($UserInfo.UserPrincipalName)' on group '$($GroupInfo.DisplayName)': $($_.Exception.Message) -- treating as MISSING; may produce duplicate-assign error downstream."
-                            }
+                            # v2.4.1: consume tenant-wide preload from Get-PimGroupSchedulesPreloaded
+                            # (auto-triggered on first call). Replaces the per-row Graph filter that
+                            # cost ~600ms x ~1000 rows = ~6 min on a stale-snapshot Baseline run.
+                            # The helper handles failures internally and returns $null on miss.
+                            $GraphCheck = Get-PimGroupSchedule -GroupId $GroupInfo.Id -PrincipalId $UserInfo.Id -AssignmentType Eligible -AccessId member
                             If ($GraphCheck)
                                 {
                                     write-host ""

@@ -1,9 +1,10 @@
 # Release notes for PIM4EntraPS
 
-## v2.4.0
+## v2.4.1
 
 Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monorepo:
 
+- release: PIM4EntraPS v2.4.1 - wire PIM-for-Groups preload into Baseline + swap per-row eligibility-lookup call-sites (31cdfe5a)
 - release: PIM4EntraPS v2.4.0 - perf overhaul: cached group resolution + tenant-wide preload helpers + Azure token reuse (ea55e28f)
 - release: PIM4EntraPS v2.3.2 - perf + logging hotfix from function audit (Graph + Azure) (d40b311c)
 - release: PIM4EntraPS v2.3.1 - docs: README rewrite with full v2.x feature catalog + dedicated PIM Manager GUI section (85992b8f)
@@ -33,13 +34,37 @@ Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monor
 - rename: TestVariables -> LauncherConfig across the repo (b60390f0)
 - restructure: Phase 4a -- launcher renames legacy->vm, cloud->azure (64578bad)
 - restructure: Phase 3 -- discovery-based publish workflow + solution.publish.json (f612c18e)
-- restructure: Phase 2 -- rewrite all path references to SOLUTIONS layout (d62d155a)
 
 ---
 
 # Release notes -- PIM4EntraPS
 
 > **Curated changelog.** The publish workflow auto-prepends recent monorepo commits as a raw activity log; this file is the human-friendly narrative on top.
+
+---
+
+## v2.4.1 -- Wire PIM-for-Groups preload into Baseline + swap per-row eligibility-lookup call-sites
+
+Activates two of the v2.4.0 helpers in the live engine flow. The Exporter slim-down that was planned for this release was **reverted before ship** because the agent's draft dropped the Entra-role + Azure-active snapshots from the hourly Exporter without compensating live-preload calls in Baseline -- which would have caused the engine to issue duplicate `AdminAssign` requests against rows it couldn't see (cryptic downstream `RoleAssignmentExists` errors). The Exporter slim-down is re-sequenced into v2.4.3 once the missing `Get-EntraRoleSchedulesPreloaded` helper exists + the `Get-AzActiveRoleAssignmentsViaArg` call is wired into Baseline startup.
+
+Changes shipped in v2.4.1:
+
+- **`engine/PIM-Baseline-Management-CSV/PIM-Baseline-Management-CSV.ps1`** + `-SQL` sibling: added a new step `[ 03 / 12 ] Pre-loading PIM-for-Groups schedules tenant-wide` immediately after the existing `Get-PimAdminsFiltered` / `Get-PimGroupsFiltered` block at engine startup. Calls `Get-PimGroupSchedulesPreloaded` (v2.4.0), which fires one paged Graph call instead of ~1000 per-row `-Filter "groupId eq..."` round-trips. `$MaxSteps` bumped 11 -> 12 in both blocks of both engines.
+- **`engine/_shared/PIM-Functions.psm1`** lines 4272 + 5128 (`Assign-PIMForGroups-From-file-CSV` -- two paired call-sites with different variable shapes): swapped `Get-MgIdentityGovernancePrivilegedAccessGroupEligibilitySchedule -Filter "..." -EA SilentlyContinue` (the per-row Graph fallback) for `Get-PimGroupSchedule -GroupId -PrincipalId -AssignmentType Eligible -AccessId member`. The v2.3.2 Try/Catch wrappers were dropped (the v2.4.0 helper handles failure internally and returns `$null` on miss); existing `If ($GraphCheck) {...}` branch logic preserved verbatim.
+
+Live `Get-MgIdentityGovernancePrivilegedAccessGroupEligibilitySchedule` caller-sites remaining in PSM1: **0** (the 3 remaining textual references are inside `Get-PimGroupSchedulesPreloaded`'s own implementation + docstring/warning text).
+
+**Customer-facing perf at scale**: when the snapshot is fresh, the v2.4.1 path is equivalent to v2.4.0 (snapshot still authoritative). When the snapshot is stale (typical hourly cron miss), v2.4.1 saves the ~6 minutes the per-row Graph fallback used to burn -- one paged call replaces ~1000 single-group lookups.
+
+Parse-clean on PS 5.1: PIM-Functions.psm1 (635 KB), PIM-Baseline-Management-CSV.ps1, PIM-Baseline-Management-SQL.ps1.
+
+### v2.4.3 carry-over (Exporter slim-down)
+
+The reverted Exporter slim-down needs these prerequisites before re-attempt:
+1. New helper `Get-EntraRoleSchedulesPreloaded` (mirror of `Get-PimGroupSchedulesPreloaded` for `roleEligibilitySchedule` + `roleAssignmentSchedule` on the `roleManagement/directory` endpoint)
+2. Call `Get-EntraRoleSchedulesPreloaded` + `Get-AzActiveRoleAssignmentsViaArg` at Baseline startup (parallel to the v2.4.1 PIM-for-Groups preload)
+3. Rewire the `$CurrentAssignments_EntraIDRoles` consumer (PSM1 lines ~2569 / 2977 / 3305) + the AzRes active-side consumer (PSM1 line ~3785) to read from the live preloads instead of the now-empty Exporter CSV
+4. THEN drop the Entra-role + AzRes-active reads from the Exporter and slim it to ~430 lines
 
 ---
 
