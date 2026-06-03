@@ -1,9 +1,10 @@
 # Release notes for PIM4EntraPS
 
-## v2.4.23
+## v2.4.24
 
 Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monorepo:
 
+- release: PIM4EntraPS v2.4.24 - already-active groups sorted to bottom of Activate tab (greyed + badge + disabled checkbox) (2c1e982c)
 - release: PIM4EntraPS v2.4.23 - loading message 'Loading your PIM delegations ... Please Wait' (was 'Loading eligible groups...') (7d4f6383)
 - release: PIM4EntraPS v2.4.22 - Azure RBAC iterates user subscriptions instead of tenant-root (fixes 403 AuthorizationFailed) (5a5817ea)
 - release: PIM4EntraPS v2.4.21 - popup width 980px -> 800px (980 exceeded Chromium popup max, hid Sign in button offscreen) (bb8585b7)
@@ -33,13 +34,26 @@ Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monor
 - release: PIM4EntraPS v2.3.1 - docs: README rewrite with full v2.x feature catalog + dedicated PIM Manager GUI section (85992b8f)
 - release: PIM4EntraPS v2.3.0 - drop .locked.csv baselines, custom-only from day one + enhanced .custom.sample.csv templates (e568dd6e)
 - release: PIM4EntraPS v2.2.1 - hotfix: scrub maintainer-tenant data from shipped .locked.csv baselines + sample-file cleanup (b666d1eb)
-- release: PIM4EntraPS v2.2.0 - Theme 1 (Manager UX polish) + Theme 2 first slice (TAP flow) (a659adf6)
 
 ---
 
 # Release notes -- PIM4EntraPS
 
 > **Curated changelog.** The publish workflow auto-prepends recent monorepo commits as a raw activity log; this file is the human-friendly narrative on top.
+
+---
+
+## v2.4.24 -- Already-active groups sorted to bottom of Activate tab (greyed-out with "already active" badge) instead of hidden
+
+v2.4.10 introduced "hide already-active eligibilities". Customer feedback: hiding lost visibility of "what do I already have". v2.4.24 changes the behavior to:
+
+- Show ALL eligibilities (no hiding)
+- Sort: ready-to-activate rows first (alphabetical), then already-active rows at the bottom (also alphabetical)
+- Already-active rows render with opacity 0.55, light grey background, "already active" green pill badge after the group name, and a disabled checkbox -- no accidental re-activate, but still visible for context
+- Select All button skips already-active rows
+- Status line: "26 ready to activate (12 already active -- shown at bottom)" instead of the old "(N already active -> My Access)"
+
+Manifest 0.4.9 -> 0.4.10.
 
 ---
 
