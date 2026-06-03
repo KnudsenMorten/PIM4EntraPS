@@ -1,9 +1,10 @@
 # Release notes for PIM4EntraPS
 
-## v2.4.45
+## v2.4.46
 
 Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monorepo:
 
+- release: PIM4EntraPS v2.4.46 - fix Graph scope for Intune Remediation create (33f33d92)
 - release: PIM4EntraPS v2.4.45 - optional Intune GroupId + self-contained local installer for AD GPO / file share / SCCM rollouts (2cd1ff6e)
 - release: PIM4EntraPS v2.4.44 - multi-tenant Tenants array + Intune Remediation deployer (extension v1.1.0) (23de65f7)
 - release: PIM4EntraPS v2.4.43 - PIM Activator extension graduates to v1.0.0 (ec7967b0)
@@ -33,13 +34,18 @@ Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monor
 - release: PIM4EntraPS v2.4.17 - AU names resolve via AdministrativeUnit.Read.All + sort by activation time DESC + persistent AU cache + Update-PimActivatorDev.ps1 helper (b502f337)
 - release: PIM4EntraPS v2.4.16 - popup UX: hide AU GUIDs + group identical roles + 'Re-sign in' instead of 'Auto-fix permissions' + auto-switch to My Access + auto-uncheck activated rows (5f7a664a)
 - release: PIM4EntraPS v2.4.15 - CRITICAL FIX popup JWT decode bug caused infinite "missing scopes" reauth loop + Set-PimActivatorPolicy-Intune.ps1 Platform Script (66f07cfe)
-- release: PIM4EntraPS v2.4.14 - popup light theme (white+blue) + simplified not-configured text + ext v0.3.0->0.4.0 + correct Intune deployment guidance (b024bd79)
 
 ---
 
 # Release notes -- PIM4EntraPS
 
 > **Curated changelog.** The publish workflow auto-prepends recent monorepo commits as a raw activity log; this file is the human-friendly narrative on top.
+
+---
+
+## v2.4.46 -- Fix Graph scope for Intune Remediation create (was DeviceManagementConfiguration, should be DeviceManagementScripts)
+
+`Deploy-PimActivatorIntune.ps1 -CreateIntuneRemediation` requested `DeviceManagementConfiguration.ReadWrite.All` but the `deviceHealthScripts` endpoint requires `DeviceManagementScripts.ReadWrite.All` (note the different noun). First-time callers hit `HTTP 403 -- Application must have one of the following scopes: DeviceManagementScripts.ReadWrite.All`. Fixed by switching the scope list to include the correct one, plus a session-scope check that auto-disconnects + reconnects if a previously-cached token is missing any required scope -- so the user doesn't have to manually `Disconnect-MgGraph` between runs after a script update.
 
 ---
 
