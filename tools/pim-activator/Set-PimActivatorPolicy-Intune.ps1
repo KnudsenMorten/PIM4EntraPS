@@ -48,6 +48,13 @@ $GroupNameFilter      = '^PIM-'                                   # Regex limiti
 $DefaultDurationHours = 8                                         # Default activation duration (typically a workday)
 $DefaultJustification = 'Daily ops'                               # Default text in justification field
 
+# Optional naming-convention regexes used to bucket groups into 3 sections
+# (Entra / Azure RBAC / PIM for Groups) on both the Activate + My Access tabs.
+# If left $null, popup uses defaults: 'Entra' for entra, '(AzRes|Azure)' for azure.
+# Override here if your customer's group names don't contain those substrings.
+$EntraGroupRegex      = $null    # e.g. 'AAD-Admin' or 'Entra-ID'
+$AzureGroupRegex      = $null    # e.g. 'AzRBAC|Azure-Sub'
+
 # ============================================================================
 #  END CUSTOMER CONFIG
 # ============================================================================
@@ -93,7 +100,17 @@ function Write-BrowserPolicy {
     Set-PolicyValue -RegPath $policyRoot -Name 'defaultDurationHours' -Value $DefaultDurationHours -Kind DWord
     Set-PolicyValue -RegPath $policyRoot -Name 'defaultJustification' -Value $DefaultJustification -Kind String
 
-    Write-Log "$Browser : 5 managed-storage values set"
+    $extraCount = 0
+    if ($EntraGroupRegex) {
+        Set-PolicyValue -RegPath $policyRoot -Name 'entraGroupRegex' -Value $EntraGroupRegex -Kind String
+        $extraCount++
+    }
+    if ($AzureGroupRegex) {
+        Set-PolicyValue -RegPath $policyRoot -Name 'azureGroupRegex' -Value $AzureGroupRegex -Kind String
+        $extraCount++
+    }
+
+    Write-Log "$Browser : $(5 + $extraCount) managed-storage values set"
 }
 
 try {

@@ -906,6 +906,63 @@ async function loadMyAccessTab(token, { force = false } = {}) {
   }
 }
 
+// Categorise a group by its NAME (cheap, instant, predictable -- the
+// customer owns the naming convention). Doesn't depend on Graph data so
+// section headers + group rows render immediately. Each customer's naming
+// convention is different (2linkit uses PIM-Entra-* / PIM-AzRes-*, others
+// might use AAD-Admins-* / Az-RBAC-*, etc.), so the patterns are
+// configurable via chrome.storage.managed:
+//
+//   entraGroupRegex   -- match for the "Entra" bucket   (default ^PIM-Entra-)
+//   azureGroupRegex   -- match for the "Azure" bucket   (default ^PIM-AzRes-)
+//
+// Groups that match neither pattern land in the "PIM for Groups (workload)"
+// bucket. Both patterns are case-insensitive.
+let __cachedCategoriseRegexes = null
+function getCategoriseRegexes() {
+  if (__cachedCategoriseRegexes) return __cachedCategoriseRegexes
+  function tryCompile(pattern, fallback) {
+    try { return new RegExp(pattern, 'i') }
+    catch (e) {
+      console.warn(`[PIM Activator] invalid regex "${pattern}", using default "${fallback}"`)
+      return new RegExp(fallback, 'i')
+    }
+  }
+  // Defaults match common naming patterns from real tenants:
+  //   "Entra"  -- substring, case-insensitive (covers PIM-Entra-*, MyOrg-Entra-Admins, etc.)
+  //   "AzRes|Azure" -- substring, case-insensitive (covers PIM-AzRes-*, *-Azure-*, etc.)
+  // Customers without these substrings in their group names can override the
+  // regex via chrome.storage.managed (entraGroupRegex / azureGroupRegex).
+  __cachedCategoriseRegexes = {
+    entra: tryCompile(cfg.entraGroupRegex || 'Entra', 'Entra'),
+    azure: tryCompile(cfg.azureGroupRegex || '(AzRes|Azure)', '(AzRes|Azure)')
+  }
+  return __cachedCategoriseRegexes
+}
+
+// Categorise a row -- prefers naming convention (instant, customer-configured
+// regex), falls back to role data (accurate but requires Graph calls). Pass
+// the full row when available so the fallback can inspect roles/azureRoles;
+// pass just the name string from the Activate tab where role data isn't
+// queried.
+function categoriseGroupByName(nameOrRow) {
+  const row  = (typeof nameOrRow === 'object' && nameOrRow) ? nameOrRow : null
+  const name = row ? row.displayName : nameOrRow
+  const n = String(name || '')
+  const r = getCategoriseRegexes()
+  if (r.entra.test(n)) return 'entra'
+  if (r.azure.test(n)) return 'azure'
+  // Fallback: customer without a naming convention -- use whatever role data
+  // we have for the row to make a best-effort placement. If no role data yet
+  // (still loading, or Activate tab where we don't query roles), default to
+  // workload.
+  if (row) {
+    if (row.azureRoles && row.azureRoles.length > 0) return 'azure'
+    if (row.roles      && row.roles.length      > 0) return 'entra'
+  }
+  return 'workload'   // Defender, Intune, PowerBI, custom apps, or unknown.
+}
+
 function renderMyAccess(rows) {
   els.myAccessList.innerHTML = ''
   if (!rows.length) {
@@ -933,33 +990,17 @@ function renderMyAccess(rows) {
     els.myAccessList.appendChild(banner)
   }
 
-  // While roles are still loading (any row with roles === null OR azureRoles
-  // === null) we fall back to a single "Active memberships" section -- we
-  // can't categorise a group until we know its role data. Once everything
-  // has loaded, renderMyAccess gets called again and we switch to the
-  // 3-section view (Entra roles / Azure RBAC / Workload access only).
-  const stillLoading = rows.some(r => r.roles === null || r.azureRoles === null)
-
-  if (stillLoading) {
-    const sec = document.createElement('div')
-    sec.className = 'ma-section'
-    sec.textContent = `Active PIM-for-Groups memberships (${rows.length})  -- loading details...`
-    els.myAccessList.appendChild(sec)
-    for (const r of rows) renderOneMyAccessRow(r)
-    return
-  }
-
-  // Categorise each row. A group with BOTH Entra + Azure roles renders in
-  // both sections (duplicate by design -- user wanted "all Entra in one
-  // place AND all Azure in one place"; explicit confirmation 2026-06-03).
-  const entraGroups    = rows.filter(r => r.roles && r.roles.length > 0)
-  const azureGroups    = rows.filter(r => r.azureRoles && r.azureRoles.length > 0)
-  const workloadOnly   = rows.filter(r => (!r.roles || r.roles.length === 0) && (!r.azureRoles || r.azureRoles.length === 0))
+  // Categorise by NAME (instant, no Graph wait). Each group lands in exactly
+  // ONE section based on its PIM-* prefix. Per-row Entra + Azure role data
+  // still loads lazily underneath each row.
+  const entraGroups    = rows.filter(r => categoriseGroupByName(r.displayName) === 'entra')
+  const azureGroups    = rows.filter(r => categoriseGroupByName(r.displayName) === 'azure')
+  const workloadGroups = rows.filter(r => categoriseGroupByName(r.displayName) === 'workload')
 
   const sectionHelp = {
-    entra:    'Entra (M365) admin roles granted via PIM-for-Groups membership',
-    azure:    'Azure RBAC roles (Owner, Contributor, etc.) granted via PIM-for-Groups membership',
-    workload: 'Workload access (Defender XDR, Intune, Power BI workspaces, etc.) -- the group membership itself is the permission; no Entra/Azure roles attached'
+    entra:    'PIM-Entra-* groups -- typically grant Entra (M365) admin roles. Roles listed under each row.',
+    azure:    'PIM-AzRes-* groups -- typically grant Azure RBAC roles. Roles listed under each row.',
+    workload: 'Everything else -- workload access (Defender XDR, Intune, Power BI workspaces, custom apps). Group membership itself IS the permission.'
   }
 
   function renderSection(title, help, members) {
@@ -971,9 +1012,9 @@ function renderMyAccess(rows) {
     for (const r of members) renderOneMyAccessRow(r)
   }
 
-  renderSection('Entra admin roles', sectionHelp.entra,    entraGroups)
-  renderSection('Azure RBAC',        sectionHelp.azure,    azureGroups)
-  renderSection('Workload access',   sectionHelp.workload, workloadOnly)
+  renderSection('Entra (PIM-Entra-*)',           sectionHelp.entra,    entraGroups)
+  renderSection('Azure RBAC (PIM-AzRes-*)',      sectionHelp.azure,    azureGroups)
+  renderSection('PIM for Groups (workload)',     sectionHelp.workload, workloadGroups)
 }
 
 function renderOneMyAccessRow(r) {
@@ -1127,15 +1168,29 @@ function updateBadges() {
 function render() {
   els.list.innerHTML = ''
   const filter = els.search.value.trim().toLowerCase()
-  let visible = 0
-  for (const r of eligibleRows) {
-    if (filter && !((r.displayName || '').toLowerCase().includes(filter) || r.groupId.includes(filter))) continue
-    visible++
+
+  // Apply free-text filter first, then bucket by naming convention so the
+  // 3 section headers (Entra / Azure / PIM for Groups) show counts of
+  // FILTERED rows, not the unfiltered total.
+  const filtered = eligibleRows.filter(r =>
+    !filter || (r.displayName || '').toLowerCase().includes(filter) || r.groupId.includes(filter)
+  )
+
+  if (!filtered.length) {
+    els.list.innerHTML = `<div class="empty">${eligibleRows.length ? 'No groups match the filter.' : 'No eligible PIM groups for your account.'}</div>`
+    updateCount()
+    return
+  }
+
+  const buckets = {
+    entra:    filtered.filter(r => categoriseGroupByName(r.displayName) === 'entra'),
+    azure:    filtered.filter(r => categoriseGroupByName(r.displayName) === 'azure'),
+    workload: filtered.filter(r => categoriseGroupByName(r.displayName) === 'workload')
+  }
+
+  function renderActivateRow(r) {
     const row = document.createElement('div')
     row.className = r.isActive ? 'row row-active-already' : 'row'
-    // Grey-out + dim opacity + disabled checkbox + "already active" badge for
-    // groups the user is already a member of. Sorted to the bottom of the
-    // list so they don't push the actionable rows down.
     if (r.isActive) row.style.cssText = 'opacity:0.55;background:#f6f8fa;'
     const activeBadge = r.isActive
       ? ' <span style="background:#dafbe1;color:#1a7f37;padding:1px 6px;border-radius:8px;font-size:10.5px;font-weight:600;margin-left:6px;">already active</span>'
@@ -1153,9 +1208,25 @@ function render() {
     }
     els.list.appendChild(row)
   }
-  if (!visible) {
-    els.list.innerHTML = `<div class="empty">${eligibleRows.length ? 'No groups match the filter.' : 'No eligible PIM groups for your account.'}</div>`
+
+  function renderActivateSection(title, members) {
+    if (!members.length) return
+    const sec = document.createElement('div')
+    sec.style.cssText = 'background:#f6f8fa;color:#0969da;padding:6px 10px;font-size:11.5px;font-weight:600;border-top:1px solid #d0d7de;border-bottom:1px solid #d0d7de;margin-top:8px;letter-spacing:0.3px;'
+    sec.textContent = `${title} (${members.length})`
+    els.list.appendChild(sec)
+    // Within each section: ready-to-activate first (alphabetical), already-active at the bottom.
+    const sorted = members.slice().sort((a, b) => {
+      if (!!a.isActive !== !!b.isActive) return a.isActive ? 1 : -1
+      return (a.displayName || '').localeCompare(b.displayName || '')
+    })
+    for (const r of sorted) renderActivateRow(r)
   }
+
+  renderActivateSection('Entra (M365) roles',        buckets.entra)
+  renderActivateSection('Azure RBAC',                buckets.azure)
+  renderActivateSection('PIM for Groups (workload)', buckets.workload)
+
   updateCount()
 }
 function updateCount() {
