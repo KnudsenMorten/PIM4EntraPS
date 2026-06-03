@@ -3,13 +3,26 @@
   "title": "PIM Activator managed configuration",
   "description": "Pushed by Edge enterprise policy (Intune / Group Policy / Group Policy registry). When present, the extension uses these values instead of config.js.",
   "properties": {
+    "Tenants": {
+      "type": "array",
+      "title": "Multi-tenant list (v1.1+, preferred over the singleton tenantId/clientId pair)",
+      "description": "Each entry is one Entra tenant the user might activate against. If exactly one entry is present the extension uses it silently. If two or more are present the popup shows a tenant picker on first run per browser profile; the choice is cached in chrome.storage.local so subsequent opens skip the picker. Admin can change the list anytime; clients re-render the picker if the cached tenant disappears.",
+      "items": {
+        "type": "object",
+        "properties": {
+          "Name":     { "type": "string", "title": "Friendly tenant label shown in the picker (e.g. 'ACME Production')" },
+          "TenantId": { "type": "string", "title": "Entra tenant id (GUID)" },
+          "ClientId": { "type": "string", "title": "App registration client id (GUID)" }
+        }
+      }
+    },
     "tenantId": {
       "type": "string",
-      "title": "Entra tenant id (GUID)"
+      "title": "Entra tenant id (GUID) -- legacy single-tenant fallback when Tenants array is not present"
     },
     "clientId": {
       "type": "string",
-      "title": "App registration client id (GUID)"
+      "title": "App registration client id (GUID) -- legacy single-tenant fallback"
     },
     "groupNameFilter": {
       "type": "string",
