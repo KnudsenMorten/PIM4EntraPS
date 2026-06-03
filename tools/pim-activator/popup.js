@@ -687,6 +687,86 @@ async function listUserSubscriptions(armToken) {
   }
 }
 
+// Bulk Entra role assignments via $filter=principalId in (...).
+// Graph caps the in-clause at ~15 ids per call; chunk accordingly. All
+// chunks fire in PARALLEL (Promise.all) -- single-thread JS doesn't block
+// on I/O so 4 chunks of 15 ids each complete in roughly the time of one.
+// Returns Map<groupId, [{ roleDefinitionId, directoryScopeId }]>.
+async function bulkLoadEntraRolesForGroups(token, groupIds) {
+  const out = new Map()
+  if (!groupIds || !groupIds.length) return out
+  const CHUNK = 15
+  const chunks = []
+  for (let i = 0; i < groupIds.length; i += CHUNK) chunks.push(groupIds.slice(i, i + CHUNK))
+
+  const results = await Promise.all(chunks.map(async chunk => {
+    const inList = chunk.map(g => `'${g}'`).join(',')
+    const url = `/roleManagement/directory/roleAssignments?$filter=principalId in (${encodeURIComponent(inList)})&$top=999`
+    try {
+      return await graph(token, 'GET', url)
+    } catch (e) {
+      console.warn(`[PIM Activator] bulk Entra chunk failed (${chunk.length} ids):`, e?.message || e)
+      return { value: [] }
+    }
+  }))
+
+  for (const res of results) {
+    for (const a of (res.value || [])) {
+      const arr = out.get(a.principalId) || []
+      arr.push({ roleDefinitionId: a.roleDefinitionId, directoryScopeId: a.directoryScopeId })
+      out.set(a.principalId, arr)
+    }
+  }
+  return out
+}
+
+// Bulk Azure RBAC via Azure Resource Graph. One KQL query, all subscriptions
+// the user can read, filtered by principalId. Joins roleDefinitions inline so
+// the role NAME comes back with the result -- no per-role lookup needed.
+// Returns Map<groupId, [{ roleName, scope }]>.
+async function bulkLoadAzureRolesForGroups(armToken, groupIds) {
+  const out = new Map()
+  if (!armToken || !groupIds || !groupIds.length) return out
+  const inList = groupIds.map(g => `'${g}'`).join(',')
+  const query = `
+    authorizationresources
+    | where type =~ "microsoft.authorization/roleassignments"
+    | extend principalId = tostring(properties.principalId)
+    | extend roleDefinitionId = tostring(properties.roleDefinitionId)
+    | extend scope = tostring(properties.scope)
+    | where principalId in (${inList})
+    | join kind=leftouter (
+        authorizationresources
+        | where type =~ "microsoft.authorization/roledefinitions"
+        | extend roleName = tostring(properties.roleName)
+        | project roleDefId = id, roleName
+      ) on $left.roleDefinitionId == $right.roleDefId
+    | project principalId, roleName, scope
+  `.trim()
+
+  try {
+    const res = await fetch('https://management.azure.com/providers/Microsoft.ResourceGraph/resources?api-version=2022-10-01', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${armToken}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ query, options: { resultFormat: 'objectArray' } })
+    })
+    if (!res.ok) {
+      const t = await res.text()
+      console.warn(`[PIM Activator] Azure Resource Graph query failed: ${res.status} ${t.substring(0, 300)}`)
+      return out
+    }
+    const j = await res.json()
+    for (const row of (j.data || [])) {
+      const arr = out.get(row.principalId) || []
+      arr.push({ roleName: row.roleName || '(unknown)', scope: row.scope || '/' })
+      out.set(row.principalId, arr)
+    }
+  } catch (e) {
+    console.warn('[PIM Activator] Azure Resource Graph call failed:', e?.message || e)
+  }
+  return out
+}
+
 async function listAzureRoleAssignmentsForGroup(armToken, groupId) {
   // Querying at tenant root (/providers/Microsoft.Authorization/...) requires
   // the caller to have read permission at tenant root scope, which most users
@@ -793,6 +873,18 @@ async function resolveAuDisplayName(token, auId) {
   return auNameCache[auId]
 }
 
+// Synchronous variant for the bulk-fetch path -- uses whatever's already in
+// auNameCache (populated lazily as the user opens popups over time). AU
+// names that aren't cached yet return name=null and the renderer degrades
+// gracefully to "scoped to N Administrative Units".
+function parseDirectoryScopeSync(directoryScopeId) {
+  if (!directoryScopeId)         return { kind: 'unknown' }
+  if (directoryScopeId === '/')  return { kind: 'tenant' }
+  const m = directoryScopeId.match(/^\/administrativeUnits\/([0-9a-fA-F-]{36})$/)
+  if (m) return { kind: 'au', auId: m[1], name: (m[1] in auNameCache ? auNameCache[m[1]] : null) }
+  return { kind: 'other', raw: directoryScopeId }
+}
+
 // Returns structured scope info so the renderer can group/summarise instead of
 // showing raw GUIDs (which end-users cannot act on or interpret).
 async function describeDirectoryScope(token, directoryScopeId) {
@@ -876,70 +968,62 @@ async function loadMyAccessTab(token, { force = false } = {}) {
     updateBadges()
     myAccessLoadedOnce = true
 
-    // 4. Acquire Azure RBAC token once (separate audience from Graph). May
-    //    return null if user hasn't consented to user_impersonation yet --
-    //    each row's Azure section will then show a friendly hint.
+    // 4. Bulk role fetch. ONE Graph $filter-in call (chunked + parallel) for
+    //    Entra; ONE Azure Resource Graph KQL for Azure RBAC. Both fire at
+    //    the same time + render independently as each completes -- user sees
+    //    Entra roles first (faster), Azure roles arrive seconds later.
+    //    Replaces v2.4.27's per-row sequential loop (1 call per group per
+    //    type = 30+ Graph calls for 15 groups; now 2-3 total).
+    const groupIds = rows.map(r => r.groupId)
     const armToken = await getArmToken()
 
-    // 5. Lazy-load Entra + Azure role assignments per group, updating the DOM
-    //    as each resolves. Sequential to be gentle on Graph/ARM throttling.
-    for (const r of rows) {
-      // --- Entra roles (Microsoft Graph) -------------------------------
-      try {
-        const assignments = await listRoleAssignmentsForGroup(token, r.groupId)
-        const resolved = []
-        for (const a of assignments) {
-          const roleName = roleDefs.idToName[a.roleDefinitionId] || a.roleDefinitionId
-          const scope    = await describeDirectoryScope(token, a.directoryScopeId)
-          resolved.push({ roleName, scope })
-        }
-        r.roles = resolved
+    function attachEntra(bulkEntra) {
+      for (const r of rows) {
+        const entra = bulkEntra.get(r.groupId) || []
+        r.roles = entra.map(a => ({
+          roleName: roleDefs.idToName[a.roleDefinitionId] || a.roleDefinitionId,
+          // For My Access we keep the structured scope descriptor (for the
+          // "in AU X" grouping etc.) -- it's resolved synchronously off the
+          // already-populated auNameCache and directoryScopeId string match.
+          scope: parseDirectoryScopeSync(a.directoryScopeId)
+        }))
         r.rolesError = null
-      } catch (e) {
-        console.warn(`role assignments lookup failed for group ${r.groupId}:`, e)
-        r.roles = []
-        r.rolesError = e.message
       }
-
-      // --- Azure RBAC roles (ARM) --------------------------------------
-      if (!armToken) {
-        r.azureRoles = []
+      renderMyAccess(rows)
+    }
+    function attachAzure(bulkAzure) {
+      const subNameById = Object.fromEntries((armSubscriptionsCache || []).map(s => [s.id, s.name]))
+      for (const r of rows) {
+        const azure = bulkAzure.get(r.groupId) || []
+        r.azureRoles = azure.map(a => ({
+          roleName: a.roleName,
+          scope:    describeArmScope(a.scope, subNameById)
+        }))
         r.azureRolesError = null
-        r.azureRolesNeedConsent = true   // suppresses per-row error; renderer shows one banner at the top of the tab instead
-      } else {
-        try {
-          const armAssignments = await listAzureRoleAssignmentsForGroup(armToken, r.groupId)
-          // Build subId -> name map for the scope describer (subscriptions
-          // were already cached by listAzureRoleAssignmentsForGroup).
-          const subNameById = Object.fromEntries((armSubscriptionsCache || []).map(s => [s.id, s.name]))
-          const resolvedArm = []
-          for (const a of armAssignments) {
-            const roleName = await resolveArmRoleName(armToken, a?.properties?.roleDefinitionId)
-            const scope    = describeArmScope(a?.properties?.scope, subNameById)
-            resolvedArm.push({ roleName, scope })
-          }
-          r.azureRoles = resolvedArm
-          r.azureRolesError = null
-        } catch (e) {
-          console.warn(`Azure RBAC lookup failed for group ${r.groupId}:`, e)
-          r.azureRoles = []
-          // Friendly error: don't dump raw ARM JSON in the popup; condense
-          // common cases to one short, actionable line.
-          let msg = e.message
-          if (msg.includes('AuthorizationFailed') || msg.includes('does not have authorization')) {
-            msg = "your account can't read Azure role assignments at this scope (needs Reader/Owner on subscription)"
-          }
-          r.azureRolesError = msg
-        }
       }
-
-      updateMyAccessRoleSlot(r)
+      renderMyAccess(rows)
     }
 
-    // All per-row data is loaded -- re-render to switch from the single
-    // "Active memberships -- loading details..." section to the 3-category
-    // view (Entra admin roles / Azure RBAC / Workload access).
-    renderMyAccess(rows)
+    if (!armToken) {
+      for (const r of rows) { r.azureRoles = []; r.azureRolesNeedConsent = true }
+    }
+
+    const tasks = []
+    tasks.push((async () => {
+      try {
+        const be = await bulkLoadEntraRolesForGroups(token, groupIds)
+        attachEntra(be)
+      } catch (e) { console.warn('bulk Entra (my access):', e?.message || e) }
+    })())
+    if (armToken) {
+      tasks.push((async () => {
+        try {
+          const ba = await bulkLoadAzureRolesForGroups(armToken, groupIds)
+          attachAzure(ba)
+        } catch (e) { console.warn('bulk Azure (my access):', e?.message || e) }
+      })())
+    }
+    await Promise.all(tasks)
   } catch (e) {
     console.error('My Access load failed:', e)
     els.myAccessStatus.textContent = `Failed to load: ${e.message}`
@@ -1249,11 +1333,30 @@ function render() {
     const endLabel = r.endDateTime
       ? new Date(r.endDateTime).toLocaleString(undefined, { dateStyle: 'short', timeStyle: 'short' })
       : 'permanent'
+    // Role preview: lines render once bulk pre-fetch attaches the data.
+    // null = bulk fetch hasn't completed; show no line yet (silent loading).
+    // [] = fetch done, group grants no roles of that type; skip.
+    const entraPreview = (r.previewEntraRoles || []).slice(0, 5)
+    const entraExtra   = (r.previewEntraRoles?.length || 0) - entraPreview.length
+    const azurePreview = (r.previewAzureRoles || []).slice(0, 5)
+    const azureExtra   = (r.previewAzureRoles?.length || 0) - azurePreview.length
+
+    function roleLines(items, extra, label, color) {
+      if (!items.length) return ''
+      const lines = items.map(x => `<div style="color:${color};font-size:11px;line-height:1.4;">&#x21B3; ${escapeHtml(label)}: <strong>${escapeHtml(x.roleName)}</strong> <span style="color:#7d8590;">${escapeHtml(typeof x.scope === 'string' ? x.scope : '')}</span></div>`)
+      if (extra > 0) lines.push(`<div style="color:#7d8590;font-size:11px;">&#x21B3; +${extra} more</div>`)
+      return lines.join('')
+    }
+
+    const rolesHtml = roleLines(entraPreview, entraExtra, 'Entra', '#0969da') +
+                      roleLines(azurePreview, azureExtra, 'Azure RBAC', '#9a3412')
+
     row.innerHTML = `
       <input type="checkbox" data-gid="${r.groupId}" ${r.checked ? 'checked' : ''} ${r.isActive ? 'disabled' : ''}>
       <div class="body">
         <div class="name" title="${escapeHtml(r.displayName || r.groupId)}">${escapeHtml(r.displayName || r.groupId)}${activeBadge}</div>
         <div class="meta">ends ${escapeHtml(endLabel)}</div>
+        ${rolesHtml}
         <div class="status" data-gid-status="${r.groupId}"></div>
       </div>
     `
@@ -1454,6 +1557,86 @@ async function loaded(token) {
   els.tabs.style.display = 'flex'
   updateBadges()
   render()
+
+  // ---- Background bulk fetch: roles for every eligible group ----------
+  // UI is immediately interactive; rows re-render with role lines as data
+  // arrives. Entra + Azure fetched IN PARALLEL with each other AND each
+  // re-renders independently as soon as its data lands -- user sees Entra
+  // lines first (faster Graph call), then Azure lines appear as ARG returns.
+  //
+  // Cache hit (1h TTL) shows everything instantly with zero network calls.
+  ;(async () => {
+    const groupIds = eligibleRows.map(r => r.groupId)
+    if (!groupIds.length) return
+
+    const cacheKey = `bulkRoles_${currentAccount?.localAccountId || 'anon'}`
+    const cached = await getStored([cacheKey])
+    const fresh  = cached?.[cacheKey]?.ts && (Date.now() - cached[cacheKey].ts) < 60 * 60 * 1000
+
+    function attachEntra(bulkEntra, roleDefsMap) {
+      for (const r of eligibleRows) {
+        const entra = bulkEntra.get(r.groupId) || []
+        r.previewEntraRoles = entra.map(a => ({
+          roleName: roleDefsMap[a.roleDefinitionId] || a.roleDefinitionId,
+          scope:    a.directoryScopeId
+        }))
+      }
+      render()
+    }
+    function attachAzure(bulkAzure) {
+      for (const r of eligibleRows) {
+        r.previewAzureRoles = bulkAzure.get(r.groupId) || []
+      }
+      render()
+    }
+
+    if (fresh) {
+      // Cache hit: render both immediately, no network calls.
+      attachEntra(new Map(cached[cacheKey].entra), cached[cacheKey].roleDefs || {})
+      attachAzure(new Map(cached[cacheKey].azure))
+      return
+    }
+
+    // Cache miss / stale: fire both in parallel; render each as it lands.
+    let freshEntra = null, freshAzure = null, freshRoleDefs = null
+
+    const entraTask = (async () => {
+      try {
+        const [be, rd] = await Promise.all([
+          bulkLoadEntraRolesForGroups(token, groupIds),
+          loadRoleDefinitions(token).catch(() => ({ idToName: {} }))
+        ])
+        freshEntra    = be
+        freshRoleDefs = rd.idToName || {}
+        attachEntra(be, freshRoleDefs)
+      } catch (e) { console.warn('[PIM Activator] bulk Entra fetch failed:', e?.message || e) }
+    })()
+
+    const azureTask = (async () => {
+      try {
+        const armToken = await getArmToken().catch(() => null)
+        const ba = await bulkLoadAzureRolesForGroups(armToken, groupIds)
+        freshAzure = ba
+        attachAzure(ba)
+      } catch (e) { console.warn('[PIM Activator] bulk Azure fetch failed:', e?.message || e) }
+    })()
+
+    await Promise.all([entraTask, azureTask])
+
+    // Persist combined snapshot (skip if either failed entirely)
+    if (freshEntra && freshAzure) {
+      try {
+        await setStored({
+          [cacheKey]: {
+            ts: Date.now(),
+            entra:    [...freshEntra],
+            azure:    [...freshAzure],
+            roleDefs: freshRoleDefs || {}
+          }
+        })
+      } catch { /* storage quota or shutdown; ignore */ }
+    }
+  })()
 
   // Tab switching -- lazy-load My Access on first click, then re-render from cache.
   els.tabBtnActivate.onclick = () => setActiveTab('activate')
