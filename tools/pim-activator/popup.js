@@ -728,64 +728,55 @@ async function listUserSubscriptions(armToken) {
   }
 }
 
-// Bulk Entra role assignments via $filter=principalId in (...).
-// Uses `transitiveRoleAssignments` so nested-group inheritance is included:
-// if Group A is a member of Group B and Group B has a role, the role flows
-// through to anyone activating Group A. Graph requires `ConsistencyLevel:
-// eventual` + `$count=true` for this endpoint.
+// Bulk Entra role assignments. Fires ONE Graph call per group, in parallel
+// via Promise.all (~50 concurrent requests; browser fetch queues + drains
+// without blocking the UI). Uses `transitiveRoleAssignments` per group so
+// nested-group inheritance is included (Group A member of Group B -> Group
+// B's roles flow through).
 //
-// Graph caps the in-clause at ~15 ids per call; chunk accordingly. All
-// chunks fire in PARALLEL (Promise.all) -- single-thread JS doesn't block
-// on I/O so 4 chunks of 15 ids each complete in roughly the time of one.
-// Returns Map<groupId, [{ roleDefinitionId, directoryScopeId }]>.
-async function bulkLoadEntraRolesForGroups(token, groupIds) {
+// Why per-group + parallel instead of $filter=principalId in (...): the
+// roleAssignments + transitiveRoleAssignments endpoints have restricted
+// $filter support; `in` is not a documented operator there. `eq` works,
+// and 50 parallel `eq` queries complete in roughly the time of one batched
+// call thanks to HTTP/2 multiplexing.
+//
+// Progress callback fires per completed query so the popup can show a
+// progress bar. Returns Map<groupId, [{ roleDefinitionId, directoryScopeId }]>.
+async function bulkLoadEntraRolesForGroups(token, groupIds, onProgress) {
   const out = new Map()
   if (!groupIds || !groupIds.length) return out
-  const CHUNK = 15
-  const chunks = []
-  for (let i = 0; i < groupIds.length; i += CHUNK) chunks.push(groupIds.slice(i, i + CHUNK))
+  let done = 0
+  const total = groupIds.length
 
-  async function queryChunk(endpoint, chunk, needConsistencyEventual) {
-    const inList = chunk.map(g => `'${g}'`).join(',')
-    // $count=true is required by transitiveRoleAssignments; harmless on others.
-    const url = `https://graph.microsoft.com/v1.0${endpoint}?$count=true&$filter=principalId in (${encodeURIComponent(inList)})&$top=999`
-    const headers = { Authorization: `Bearer ${token}` }
-    if (needConsistencyEventual) headers['ConsistencyLevel'] = 'eventual'
-    try {
+  async function fetchOne(gid) {
+    // Try transitive first (covers nested groups). If that returns 4xx
+    // (some tenants don't allow the endpoint for normal users), fall back
+    // to direct roleAssignments.
+    const tryUrl = async (endpoint, needHeaders) => {
+      const url = `https://graph.microsoft.com/v1.0${endpoint}?$filter=principalId eq '${gid}'&$top=999${needHeaders ? '&$count=true' : ''}`
+      const headers = { Authorization: `Bearer ${token}` }
+      if (needHeaders) headers['ConsistencyLevel'] = 'eventual'
       const r = await fetch(url, { headers })
-      if (!r.ok) {
-        const text = await r.text()
-        console.warn(`[PIM Activator] ${endpoint} chunk (${chunk.length} ids) failed: ${r.status} ${text.substring(0,150)}`)
-        return { value: [] }
-      }
+      if (!r.ok) return null
       return await r.json()
+    }
+    let j = null
+    try {
+      j = await tryUrl('/roleManagement/directory/transitiveRoleAssignments', true)
+      if (!j) j = await tryUrl('/roleManagement/directory/roleAssignments', false)
     } catch (e) {
-      console.warn(`[PIM Activator] ${endpoint} chunk threw:`, e?.message || e)
-      return { value: [] }
+      console.warn(`[PIM Activator] role fetch failed for ${gid}:`, e?.message || e)
     }
+    const items = (j?.value || []).map(a => ({
+      roleDefinitionId: a.roleDefinitionId,
+      directoryScopeId: a.directoryScopeId
+    }))
+    out.set(gid, items)
+    done++
+    if (onProgress) onProgress(done, total, 'entra')
   }
 
-  // Fire transitive + direct in parallel; transitive should cover everything
-  // but direct is a safety net for tenants where the transitive endpoint
-  // rejects the request (eg. when ConsistencyLevel isn't accepted).
-  const transitivePromises = chunks.map(c => queryChunk('/roleManagement/directory/transitiveRoleAssignments', c, true))
-  const directPromises     = chunks.map(c => queryChunk('/roleManagement/directory/roleAssignments',           c, false))
-  const [tRes, dRes] = await Promise.all([Promise.all(transitivePromises), Promise.all(directPromises)])
-
-  // Dedupe by (principalId, roleDefinitionId, directoryScopeId).
-  const seen = new Set()
-  function ingest(res) {
-    for (const a of (res.value || [])) {
-      const key = `${a.principalId}|${a.roleDefinitionId}|${a.directoryScopeId}`
-      if (seen.has(key)) continue
-      seen.add(key)
-      const arr = out.get(a.principalId) || []
-      arr.push({ roleDefinitionId: a.roleDefinitionId, directoryScopeId: a.directoryScopeId })
-      out.set(a.principalId, arr)
-    }
-  }
-  for (const r of tRes) ingest(r)
-  for (const r of dRes) ingest(r)
+  await Promise.all(groupIds.map(fetchOne))
   return out
 }
 
@@ -1690,7 +1681,7 @@ async function loaded(token) {
     const groupIds = eligibleRows.map(r => r.groupId)
     if (!groupIds.length) return
 
-    const cacheKey = `bulkRoles_v2_${currentAccount?.localAccountId || 'anon'}`
+    const cacheKey = `bulkRoles_v4_${currentAccount?.localAccountId || 'anon'}`
     const cached = await getStored([cacheKey])
     const fresh  = cached?.[cacheKey]?.ts && (Date.now() - cached[cacheKey].ts) < 60 * 60 * 1000
 
@@ -1721,10 +1712,34 @@ async function loaded(token) {
     // Cache miss / stale: fire both in parallel; render each as it lands.
     let freshEntra = null, freshAzure = null, freshRoleDefs = null
 
+    // Wire the progress bar -- visible at the top of the Activate panel
+    // until both Entra + Azure complete.
+    const totalUnits = groupIds.length + 1   // N per-group Entra calls + 1 ARG call
+    let doneUnits = 0
+    const bp = document.getElementById('bulk-progress')
+    const bpLabel = document.getElementById('bulk-progress-label')
+    const bpCount = document.getElementById('bulk-progress-count')
+    const bpBar   = document.getElementById('bulk-progress-bar')
+    function tickProgress(label) {
+      if (!bp) return
+      bp.style.display = ''
+      const pct = totalUnits ? Math.round((doneUnits / totalUnits) * 100) : 0
+      if (bpLabel) bpLabel.textContent = label ? `${label} ${pct}%` : `Fetching role assignments... ${pct}%`
+      if (bpCount) bpCount.textContent = `${doneUnits} / ${totalUnits}`
+      if (bpBar)   bpBar.style.width   = `${pct}%`
+      if (doneUnits >= totalUnits) {
+        setTimeout(() => { if (bp) bp.style.display = 'none' }, 600)
+      }
+    }
+    tickProgress('Fetching role assignments...')
+
     const entraTask = (async () => {
       try {
         const [be, rd] = await Promise.all([
-          bulkLoadEntraRolesForGroups(token, groupIds),
+          bulkLoadEntraRolesForGroups(token, groupIds, (done, total) => {
+            doneUnits = done   // entra units land 0..N as they complete
+            tickProgress('Fetching Entra roles...')
+          }),
           loadRoleDefinitions(token).catch(() => ({ idToName: {} }))
         ])
         freshEntra    = be
@@ -1740,6 +1755,7 @@ async function loaded(token) {
         freshAzure = ba
         attachAzure(ba)
       } catch (e) { console.warn('[PIM Activator] bulk Azure fetch failed:', e?.message || e) }
+      finally { doneUnits++; tickProgress('Fetching Azure RBAC...') }
     })()
 
     await Promise.all([entraTask, azureTask])

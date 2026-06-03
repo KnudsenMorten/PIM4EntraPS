@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "PIM Activator",
-  "version": "0.4.25",
+  "version": "0.4.27",
   "description": "Bulk-activate eligible PIM-for-Groups memberships in one click. Companion to PIM4EntraPS.",
   "action": {
     "default_popup": "popup.html",
