@@ -293,7 +293,26 @@ the admin sees one click instead of N portal navigations.
 Auth uses `chrome.identity.launchWebAuthFlow` + PKCE (no MSAL bundle).
 Extension is hosted on GitHub Pages
 (`https://knudsenmorten.github.io/PIM4EntraPS/updates.xml`); the
-deterministic extension id is `hkdglhgahonnjbfindmgplekkcngmcck`.
+deterministic extension id is `eheocihmlppcophaeakmdenhgcookkab`.
+
+### v1.1.1 -- 8-hour default activation duration
+
+Fresh installs now default the activation duration to **8 hours** (one
+workday) instead of 1 hour. Existing managed-storage values are
+untouched -- managed wins -- so this only affects new profiles / new
+installs. Precedence at popup-open time:
+
+`chrome.storage.local.lastDurationHours` (user's last picked value,
+per profile) > managed `defaultDurationHours` > `config.js` bundled
+default > popup.js fallback.
+
+To override the 8h default at install time:
+
+| Where | How |
+|---|---|
+| `Deploy-PimActivatorClient.ps1` | `... -DefaultDurationHours 2` |
+| `Deploy-PimActivatorIntune.ps1` | `... -DefaultDurationHours 2` |
+| Direct registry | `Set-ItemProperty 'HKCU:\SOFTWARE\Policies\Microsoft\Edge\3rdparty\extensions\<id>\policy' -Name defaultDurationHours -Value 2 -Force` |
 
 ### v1.1.0 -- multi-tenant support
 
