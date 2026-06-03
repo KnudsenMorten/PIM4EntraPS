@@ -76,6 +76,22 @@ const AUTHORITY    = `https://login.microsoftonline.com/${cfg.tenantId}`
     el.title = `Microsoft Entra tenant id pushed via chrome.storage.managed (entraGroupRegex / tenantId / clientId). Configured at install time per Intune policy.`
   }
 })()
+
+// Populate the version badge in the header banner at popup-load (independent
+// of sign-in state, so it's visible on the Sign in screen too). Read from
+// the running manifest so the badge always matches the actual installed
+// extension version, not whatever was hard-coded at build time.
+;(() => {
+  try {
+    const verEl = document.getElementById('version-badge')
+    const m = chrome.runtime.getManifest()
+    if (verEl && m) {
+      verEl.textContent = `v${m.version}`
+      verEl.title = `Extension ID: ${chrome.runtime.id}\nManifest version: ${m.manifest_version}\nName: ${m.name}`
+    }
+    console.log(`[PIM Activator] v${m.version} (id ${chrome.runtime.id})`)
+  } catch { /* manifest read shouldn't fail in extension context */ }
+})()
 const AUTH_URL     = `${AUTHORITY}/oauth2/v2.0/authorize`
 const TOKEN_URL    = `${AUTHORITY}/oauth2/v2.0/token`
 const REDIRECT_URI = chrome.identity.getRedirectURL()  // https://<extId>.chromiumapp.org/
@@ -1578,17 +1594,8 @@ async function loaded(token) {
   els.me.textContent = currentAccount?.username || ''
   els.status.textContent = 'Loading your PIM delegations ... Please Wait'
 
-  // Show extension version in the header so support knows what the user runs.
-  // Read from chrome.runtime.getManifest() -- always matches the running build.
-  try {
-    const verEl = document.getElementById('version-badge')
-    const m = chrome.runtime.getManifest()
-    if (verEl && m) {
-      verEl.textContent = `v${m.version}`
-      verEl.title = `Extension ID: ${chrome.runtime.id}\nManifest version: ${m.manifest_version}\nName: ${m.name}`
-    }
-    console.log(`[PIM Activator] v${m.version} (id ${chrome.runtime.id})`)
-  } catch (e) { /* manifest read shouldn't fail in extension context */ }
+  // Version badge is populated at popup-load now (top of file) so it's
+  // visible on the sign-in screen too, not just after loaded() runs.
 
   // Self-heal: if the cached token is missing required scopes (admin re-
   // consented new perms after the user last signed in), force a reauth
