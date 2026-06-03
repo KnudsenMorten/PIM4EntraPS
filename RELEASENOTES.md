@@ -1,9 +1,10 @@
 # Release notes for PIM4EntraPS
 
-## v2.4.48
+## v2.4.49
 
 Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monorepo:
 
+- release: PIM4EntraPS v2.4.49 - document server install path (PAW / admin jump box / domain-joined fleet) (154cde23)
 - release: PIM4EntraPS v2.4.48 - bring-your-own Graph session for Intune deployer (66b3ceff)
 - release: PIM4EntraPS v2.4.47 - robust Graph sign-in for Intune deployer (-UseDeviceCode + scope verification) (1a41d168)
 - release: PIM4EntraPS v2.4.46 - fix Graph scope for Intune Remediation create (33f33d92)
@@ -33,13 +34,26 @@ Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monor
 - fix(PIM4EntraPS): Update-PimActivatorDev.ps1 drops `ConvertFrom-Json -Depth` (PS 5.1 incompatible) (9ae24485)
 - release: PIM4EntraPS v2.4.19 - skip empty subsections + 3-category grouping in My Access tab (Entra / Azure / Workload) (0c799e60)
 - release: PIM4EntraPS v2.4.18 - Azure RBAC visible in My Access tab + collapse for long Entra role lists (1f7def50)
-- release: PIM4EntraPS v2.4.17 - AU names resolve via AdministrativeUnit.Read.All + sort by activation time DESC + persistent AU cache + Update-PimActivatorDev.ps1 helper (b502f337)
 
 ---
 
 # Release notes -- PIM4EntraPS
 
 > **Curated changelog.** The publish workflow auto-prepends recent monorepo commits as a raw activity log; this file is the human-friendly narrative on top.
+
+---
+
+## v2.4.49 -- Server install path documented (Windows Server / admin jump box / PAW)
+
+Two READMEs gained a "Server install" section so admins know which scope to pick when rolling the PIM Activator onto a Windows Server / admin jump box / PAW:
+
+- **`-LocalInstallerScope User`** (HKCU, no elevation) -- single-admin PAW; each admin installs once for their own RDP profile
+- **`-LocalInstallerScope Machine`** (HKLM, elevated) -- shared admin server / jump box; one install covers every RDP user; recommended default for shared boxes
+- **AD GPO Startup Script** -- domain-joined server fleets; Machine-scope installer added as a Computer Configuration startup script in the OU GPO; runs as SYSTEM at boot; every server in the OU converges
+
+The top-level README gained a `Server install` subsection in the PIM Activator area; the extension-specific README gained `Path D -- Server install` alongside the existing Intune Remediation / AD GPO / direct-registry paths in Stage 2, with a matching row in the rollout-paths comparison table.
+
+No code changes -- documentation only.
 
 ---
 

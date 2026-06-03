@@ -324,6 +324,68 @@ CSV format throughout: `Name,TenantId,ClientId`, one row per tenant.
 within ~1h) or re-run `-GenerateLocalInstaller` and redeploy the
 installer via your existing channel.
 
+### Server install (Windows Server / admin jump box / PAW)
+
+The activator runs in Edge / Chrome on Windows Server hosts just as it
+does on workstations. Typical targets:
+
+- **Admin jump boxes** — the box admins RDP into to reach customer / prod
+  estates.
+- **PAWs** (privileged access workstations) — locked-down dedicated admin
+  devices.
+- **Shared admin Windows Servers** — single host where multiple admins
+  RDP in and each needs the extension available in their session.
+
+#### Scope choice for servers
+
+- `-LocalInstallerScope User` (HKCU) — single-admin server / personal
+  PAW. Each admin runs `Install-PimActivator.ps1` once for their own
+  profile. No admin rights needed. Best when one person owns the box.
+- `-LocalInstallerScope Machine` (HKLM) — shared admin server where
+  multiple admins RDP in. One install (elevated) covers every RDP user.
+  Recommended for shared jump boxes.
+
+#### Generating the Machine-scope installer
+
+```powershell
+.\Deploy-PimActivatorIntune.ps1 -GenerateLocalInstaller `
+    -TenantsCsv .\tenants.csv `
+    -LocalInstallerOutputDir .\out-server-machine `
+    -LocalInstallerScope Machine
+```
+
+#### Deploying to the server (Machine scope)
+
+1. Copy the generated folder to the server (RDP file transfer, SMB share,
+   or PsExec).
+2. Open PowerShell **as Administrator** on the server.
+3. Run:
+   `powershell.exe -NoProfile -ExecutionPolicy Bypass -File C:\Install\PimActivator-Server\Install-PimActivator.ps1`
+4. Restart Edge and Chrome on the server (close all browser windows,
+   including any in RDP sessions).
+5. Each subsequent RDP session sees the extension auto-installed in their
+   browser within ~30s.
+6. Each admin signs in to the popup with their own admin account; if the
+   `Tenants` array has 2+ entries, each admin picks their own tenant per
+   browser profile (cached in `chrome.storage.local` per Chromium
+   profile).
+
+#### Domain-joined servers via AD GPO Startup Script
+
+- Generate the Machine-scope installer.
+- Push to GPO **Computer Configuration -> Policies -> Windows Settings
+  -> Scripts -> Startup**.
+- Add `Install-PimActivator.ps1` as a PowerShell startup script.
+- Runs as `SYSTEM` at boot, writes the HKLM policy keys, every RDP user
+  on the box gets the extension.
+
+#### The User-scope alternative (one-admin server)
+
+- Copy the existing User-scope installer folder.
+- Each admin runs it once in a non-elevated PowerShell from their RDP
+  session.
+- Only that admin's RDP sessions get the extension (their HKCU only).
+
 ### Mental model
 
 The picker and the deployment layer are independent. Policy push
