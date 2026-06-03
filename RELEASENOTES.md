@@ -1,9 +1,10 @@
 # Release notes for PIM4EntraPS
 
-## v2.4.12
+## v2.4.13
 
 Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monorepo:
 
+- release: PIM4EntraPS v2.4.13 - CRX bundles placeholder config.js (no maintainer-tenant leak into customer installs) + ext ver 0.2.0 -> 0.3.0 (b3d55092)
 - release: PIM4EntraPS v2.4.12 - Intune-first deployment (-PrintIntuneConfig mode + HKCU-default -PushPolicyScope) (d65821df)
 - release: PIM4EntraPS v2.4.11 - Activator popup: My Access tab + token self-heal + Auto-fix button + hide-already-active (db8893b1)
 - release: PIM4EntraPS v2.4.10 - Activator popup: My Access tab + token self-heal + Auto-fix button + hide-already-active (96b0c313)
@@ -33,13 +34,59 @@ Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monor
 - release: PIM4EntraPS v2.0.0 - full PIM v2 framework: engine modernization + Mapper (graph viewer + grid editor + save) + Activator (Edge extension + Intune install) + one-shot engine SPN installer + 18-section DESIGN.md + README rewrite (0118ecf8)
 - release: PIM4EntraPS v1.0.2 - SI launcher naming alignment + fix internal-azure leak in publish workflow + rewire engine path resolution for new engine/<task>/ layout (2ff8ebb1)
 - release: PIM4EntraPS v1.0.1 - hotfix: 14 .locked.csv data files were silently ignored by monorepo .gitignore (SOLUTIONS/**/config/* rule had no exception for *.locked.*) and missing from v1.0.0 public mirror (0fe0d6d5)
-- release: PIM4EntraPS v1.0.0 - restructure to SecurityInsight conventions + .locked/.custom split + customer naming/filter extension points + generic Build-PimContext helper (additive, no engine rewire yet) (12616959)
 
 ---
 
 # Release notes -- PIM4EntraPS
 
 > **Curated changelog.** The publish workflow auto-prepends recent monorepo commits as a raw activity log; this file is the human-friendly narrative on top.
+
+---
+
+## v2.4.13 -- CRX packaged with placeholder config.js (no maintainer-tenant leak into customer installs) + ext version bump 0.2.0 -> 0.3.0
+
+Closes the last multi-tenant safety hole. Previously the packed CRX bundled the maintainer's `config.js` containing the maintainer's `tenantId` + `clientId`. If a customer admin installed the CRX via Intune but forgot to push the `ExtensionSettings` JSON with managed_storage (or pushed it incorrectly), end-users would silently sign into the MAINTAINER'S tenant. Now the bundled CRX ships with placeholder zeros, so misconfiguration shows a loud error instead of a silent cross-tenant signin.
+
+### `Setup-PimActivator.ps1` change
+
+New helper `Invoke-MsedgePackWithPlaceholder` wraps every `msedge.exe --pack-extension` call (3 sites: initial pack, no-key keygen pack, re-pack after manifest sync). Flow:
+
+1. Save the current `config.js` content (the maintainer's real tenantId+clientId)
+2. Copy `config.template.js` (placeholder zeros) over `config.js`
+3. Run `msedge.exe --pack-extension` -- CRX now bundles placeholder
+4. **`finally`**: restore the maintainer's real `config.js` (so sideload-dev still works on the maintainer's box)
+
+The maintainer's `config.js` on disk is unchanged for local dev use; only the CRX-bundled copy is the placeholder.
+
+### Customer-side behaviour
+
+When a customer admin installs the CRX without pushing the Intune `ExtensionSettings` JSON:
+- `popup.js`'s `loadConfig()` reads `chrome.storage.managed.get(null)` -> returns empty
+- Falls back to bundled `config.js` -> finds `tenantId: "00000000-..."`, `clientId: "00000000-..."`
+- Existing validator (since v2.4.10) catches the placeholder zeros and shows: `Extension not configured. Admin must push tenantId + clientId via Intune (or copy config.template.js -> config.js). See README.md.`
+- No silent cross-tenant signin. Customer admin gets a clear "you missed a setup step" prompt.
+
+When a customer admin correctly pushes the `ExtensionSettings` JSON via Intune:
+- `chrome.storage.managed.get(null)` returns their tenantId + clientId
+- Merges over the empty fallback
+- popup signs into THEIR tenant, not the maintainer's
+
+### Extension version bump 0.2.0 -> 0.3.0
+
+Forces Edge / Chrome auto-update polls to actually fetch the new CRX (otherwise version match -> skip download). All existing customer installs auto-upgrade on next ~5h poll cycle.
+
+### Verification
+
+Run end-to-end on the maintainer's box:
+- `Setup-PimActivator.ps1 -PublishToGitHubPages` published CRX v0.3.0 to https://knudsenmorten.github.io/PIM4EntraPS/pim-activator.crx
+- Local `tools/pim-activator/config.js` still contains the maintainer's real values (sideload dev still works)
+- The CRX in the gh-pages branch bundles `config.js` with placeholder zeros (verified via unzip + cat)
+- Existing customer popups that already have Intune managed_storage configured: no behaviour change
+
+### Files changed
+
+- `tools/pim-activator/Setup-PimActivator.ps1`: new `Invoke-MsedgePackWithPlaceholder` helper, 3 call-sites updated
+- `tools/pim-activator/manifest.json`: version 0.2.0 -> 0.3.0
 
 ---
 

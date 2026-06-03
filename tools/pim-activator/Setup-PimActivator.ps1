@@ -284,6 +284,60 @@ if ($PushPolicy -and $PushPolicyScope -eq 'Machine') {
 # Helper: deterministic extension ID from SPKI DER bytes
 # ---------------------------------------------------------------------------
 
+function Invoke-MsedgePackWithPlaceholder {
+    <#
+    .SYNOPSIS
+        Run msedge.exe --pack-extension with a PLACEHOLDER config.js so the
+        CRX doesn't bake in the maintainer's tenantId / clientId.
+    .DESCRIPTION
+        Customers push real tenantId + clientId via Intune managed_storage
+        (popup.js's loadConfig() reads chrome.storage.managed first, falls
+        back to bundled config.js). If we ship the maintainer's actual
+        tenant in the CRX's config.js, any customer who forgets the Intune
+        managed_storage setup accidentally signs their users into the
+        maintainer's tenant. This wrapper temporarily swaps config.js with
+        config.template.js content before packing, then restores the local
+        config.js (used for sideload-dev) after packing.
+    #>
+    param(
+        [Parameter(Mandatory)][string]$EdgeExe,
+        [Parameter(Mandatory)][string]$ActivatorDir,
+        [string]$KeyPath
+    )
+    $cfgPath  = Join-Path $ActivatorDir 'config.js'
+    $tmplPath = Join-Path $ActivatorDir 'config.template.js'
+    $savedCfg = $null
+    if (Test-Path $cfgPath) { $savedCfg = Get-Content -LiteralPath $cfgPath -Raw }
+    try {
+        if (Test-Path $tmplPath) {
+            Copy-Item -LiteralPath $tmplPath -Destination $cfgPath -Force
+        } else {
+            $minimalPlaceholder = @'
+// Placeholder bundled in CRX -- customer admin pushes real values via Intune chrome.storage.managed.
+window.PIM_CONFIG = {
+  tenantId:             "00000000-0000-0000-0000-000000000000",
+  clientId:             "00000000-0000-0000-0000-000000000000",
+  groupNameFilter:      "^PIM-",
+  defaultDurationHours: 1,
+  defaultJustification: "Daily ops"
+};
+'@
+            Set-Content -LiteralPath $cfgPath -Value $minimalPlaceholder -Encoding UTF8 -NoNewline
+        }
+        if ($KeyPath) {
+            & $EdgeExe "--pack-extension=$ActivatorDir" "--pack-extension-key=$KeyPath" 2>&1 | Out-Null
+        } else {
+            & $EdgeExe "--pack-extension=$ActivatorDir" 2>&1 | Out-Null
+        }
+    } finally {
+        if ($savedCfg) {
+            Set-Content -LiteralPath $cfgPath -Value $savedCfg -Encoding UTF8 -NoNewline
+        } elseif (Test-Path $cfgPath) {
+            Remove-Item -LiteralPath $cfgPath -Force
+        }
+    }
+}
+
 function Get-ExtensionIdFromSpkiDer {
     param([byte[]]$SpkiDer)
     $sha = [System.Security.Cryptography.SHA256]::Create()
@@ -477,7 +531,7 @@ if ($PublishToGitHubPages) {
         Write-Host "          Signing key     : Re-using existing key at $LocalSigningKeyPath" -ForegroundColor Green
         if (Test-Path $packedCrx)     { Remove-Item -LiteralPath $packedCrx -Force }
         if (Test-Path $sideEffectPem) { Remove-Item -LiteralPath $sideEffectPem -Force }
-        & $edgeExe "--pack-extension=$activatorDir" "--pack-extension-key=$LocalSigningKeyPath" 2>&1 | Out-Null
+        Invoke-MsedgePackWithPlaceholder -EdgeExe $edgeExe -ActivatorDir $activatorDir -KeyPath $LocalSigningKeyPath
         $deadline = (Get-Date).AddSeconds(20)
         while (-not (Test-Path $packedCrx) -and (Get-Date) -lt $deadline) { Start-Sleep -Milliseconds 250 }
         if (-not (Test-Path $packedCrx)) {
@@ -488,7 +542,7 @@ if ($PublishToGitHubPages) {
         if (Test-Path $packedCrx)     { Remove-Item -LiteralPath $packedCrx -Force }
         if (Test-Path $sideEffectPem) { Remove-Item -LiteralPath $sideEffectPem -Force }
         # Edge with no -key: generates new key, writes <dir>.crx + <dir>.pem next to <dir>.
-        & $edgeExe "--pack-extension=$activatorDir" 2>&1 | Out-Null
+        Invoke-MsedgePackWithPlaceholder -EdgeExe $edgeExe -ActivatorDir $activatorDir
         $deadline = (Get-Date).AddSeconds(20)
         while (-not ((Test-Path $packedCrx) -and (Test-Path $sideEffectPem)) -and (Get-Date) -lt $deadline) { Start-Sleep -Milliseconds 250 }
         if (-not (Test-Path $sideEffectPem)) {
@@ -526,7 +580,7 @@ if ($PublishToGitHubPages) {
         # Re-pack the CRX so its embedded manifest matches the on-disk one we
         # just touched (Edge bakes the manifest INTO the zip body of the crx).
         Remove-Item -LiteralPath $packedCrx -Force
-        & $edgeExe "--pack-extension=$activatorDir" "--pack-extension-key=$LocalSigningKeyPath" 2>&1 | Out-Null
+        Invoke-MsedgePackWithPlaceholder -EdgeExe $edgeExe -ActivatorDir $activatorDir -KeyPath $LocalSigningKeyPath
         $deadline = (Get-Date).AddSeconds(20)
         while (-not (Test-Path $packedCrx) -and (Get-Date) -lt $deadline) { Start-Sleep -Milliseconds 250 }
         if (-not (Test-Path $packedCrx)) { throw "msedge.exe --pack-extension (re-pack after manifest sync) did not produce $packedCrx." }
