@@ -17,9 +17,9 @@
       "description": "Default: ^PIM- (matches the PIM4EntraPS naming convention). Use .* to show all eligible groups."
     },
     "defaultDurationHours": {
-      "type": "number",
-      "title": "Default activation duration in hours",
-      "minimum": 0.5,
+      "type": "integer",
+      "title": "Default activation duration in hours (1-24; use integer values only)",
+      "minimum": 1,
       "maximum": 24
     },
     "defaultJustification": {
