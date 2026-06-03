@@ -176,6 +176,17 @@ param(
     [ValidateSet('user','system')]
     [string]$RunAsAccount = 'user',
 
+    # Use device-code auth instead of the embedded browser. Helpful when:
+    # - The browser-based InteractiveBrowserCredential flow fails with
+    #   "The server has not found anything matching the requested URI" (some
+    #   environments block the localhost redirect the SDK uses).
+    # - You're running over RDP / SSH and don't have a usable browser.
+    # With -UseDeviceCode the script prints a code + URL; open them on any
+    # device, paste the code, sign in there.
+    [Parameter(ParameterSetName='CreateIntuneRemediation')]
+    [Parameter(ParameterSetName='UpdateIntuneRemediation')]
+    [switch]$UseDeviceCode,
+
     [string]$GroupNameFilter = '^PIM-',
 
     [ValidateRange(0.5, 24)]
@@ -601,7 +612,30 @@ if ($currentCtx) {
         Disconnect-MgGraph -ErrorAction SilentlyContinue | Out-Null
     }
 }
-Connect-MgGraph -Scopes $requiredScopes -NoWelcome | Out-Null
+
+$connectArgs = @{
+    Scopes      = $requiredScopes
+    NoWelcome   = $true
+}
+if ($UseDeviceCode) {
+    $connectArgs['UseDeviceCode'] = $true
+    Write-Host "   Using DEVICE CODE auth -- watch for the code + URL on next line." -ForegroundColor Cyan
+}
+Connect-MgGraph @connectArgs | Out-Null
+
+# Verify the new connection actually has the required scopes -- the SDK's
+# InteractiveBrowserCredential silently returns even when the user closes
+# the browser tab before consenting. Without this check the next Graph call
+# fails with a cryptic "browser-based authentication dialog failed" error.
+$newCtx = Get-MgContext -ErrorAction SilentlyContinue
+if (-not $newCtx) {
+    throw "Connect-MgGraph did not produce a usable session. If a browser tab opened, you may have closed it before completing consent. Try again, or re-run with -UseDeviceCode."
+}
+$stillMissing = $requiredScopes | Where-Object { $_ -notin $newCtx.Scopes }
+if ($stillMissing) {
+    throw "Connected to Graph as $($newCtx.Account), but missing scope(s): $($stillMissing -join ', '). This means consent did not complete. Disconnect-MgGraph and re-run; or re-run with -UseDeviceCode for a more reliable flow."
+}
+Write-Ok "Connected as $($newCtx.Account) ($($newCtx.TenantId))"
 
 $detB64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($detectionScript))
 $remB64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($remediationScript))
