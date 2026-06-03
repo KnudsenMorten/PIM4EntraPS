@@ -1,9 +1,10 @@
 # Release notes for PIM4EntraPS
 
-## v2.4.2
+## v2.4.3
 
 Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monorepo:
 
+- release: PIM4EntraPS v2.4.3 - docs: README full feature inventory (41 bullets with shipped/partial/roadmap badges) (0016c32c)
 - release: PIM4EntraPS v2.4.2 - new Revoke tab in PIM Manager GUI for bulk-revoke of active activations (5c71b61e)
 - release: PIM4EntraPS v2.4.1 - wire PIM-for-Groups preload into Baseline + swap per-row eligibility-lookup call-sites (31cdfe5a)
 - release: PIM4EntraPS v2.4.0 - perf overhaul: cached group resolution + tenant-wide preload helpers + Azure token reuse (ea55e28f)
@@ -33,13 +34,26 @@ Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monor
 - feat: portable launcher paths + bundled dependencies in published releases (ccb4b679)
 - chore: strip 'AutomateIT' branding from user-facing launcher + doc content (653bac5f)
 - rename: TestVariables -> LauncherConfig across the repo (b60390f0)
-- restructure: Phase 4a -- launcher renames legacy->vm, cloud->azure (64578bad)
 
 ---
 
 # Release notes -- PIM4EntraPS
 
 > **Curated changelog.** The publish workflow auto-prepends recent monorepo commits as a raw activity log; this file is the human-friendly narrative on top.
+
+---
+
+## v2.4.3 -- README: full feature inventory (41 bullets, shipped / partial / roadmap badges)
+
+Pure docs release; no code changes. README adds a new `## Features` section placed between "The core idea: 3-tier group nesting" and "Quick start", with **41 bullets** covering every shipped capability + every roadmap item -- each tagged with one of:
+
+- `[shipped vX.Y.Z]` -- in the codebase as of v2.4.2 (18 bullets)
+- `[partial]` -- partially shipped, e.g. data-flow only + enforcement is roadmap (2 bullets)
+- `[roadmap]` -- in `docs/ROADMAP.md`, not yet shipped (21 bullets)
+
+Voice preserved from the user's spec (direct, slightly informal, "ability to X" pattern); obvious typos cleaned (orhaned -> orphaned, enterprisesa -> enterprises, proces -> process). Cross-references to RELEASENOTES + ROADMAP for deeper detail. README line count: 402 -> 455 (+53).
+
+The Features section makes "what does PIM4EntraPS do today vs what's coming" a one-page lookup -- previously this required cross-referencing RELEASENOTES (curated, what shipped) + ROADMAP (sized backlog) + the engine README sections.
 
 ---
 
