@@ -729,6 +729,11 @@ async function listUserSubscriptions(armToken) {
 }
 
 // Bulk Entra role assignments via $filter=principalId in (...).
+// Uses `transitiveRoleAssignments` so nested-group inheritance is included:
+// if Group A is a member of Group B and Group B has a role, the role flows
+// through to anyone activating Group A. Graph requires `ConsistencyLevel:
+// eventual` + `$count=true` for this endpoint.
+//
 // Graph caps the in-clause at ~15 ids per call; chunk accordingly. All
 // chunks fire in PARALLEL (Promise.all) -- single-thread JS doesn't block
 // on I/O so 4 chunks of 15 ids each complete in roughly the time of one.
@@ -740,24 +745,47 @@ async function bulkLoadEntraRolesForGroups(token, groupIds) {
   const chunks = []
   for (let i = 0; i < groupIds.length; i += CHUNK) chunks.push(groupIds.slice(i, i + CHUNK))
 
-  const results = await Promise.all(chunks.map(async chunk => {
+  async function queryChunk(endpoint, chunk, needConsistencyEventual) {
     const inList = chunk.map(g => `'${g}'`).join(',')
-    const url = `/roleManagement/directory/roleAssignments?$filter=principalId in (${encodeURIComponent(inList)})&$top=999`
+    // $count=true is required by transitiveRoleAssignments; harmless on others.
+    const url = `https://graph.microsoft.com/v1.0${endpoint}?$count=true&$filter=principalId in (${encodeURIComponent(inList)})&$top=999`
+    const headers = { Authorization: `Bearer ${token}` }
+    if (needConsistencyEventual) headers['ConsistencyLevel'] = 'eventual'
     try {
-      return await graph(token, 'GET', url)
+      const r = await fetch(url, { headers })
+      if (!r.ok) {
+        const text = await r.text()
+        console.warn(`[PIM Activator] ${endpoint} chunk (${chunk.length} ids) failed: ${r.status} ${text.substring(0,150)}`)
+        return { value: [] }
+      }
+      return await r.json()
     } catch (e) {
-      console.warn(`[PIM Activator] bulk Entra chunk failed (${chunk.length} ids):`, e?.message || e)
+      console.warn(`[PIM Activator] ${endpoint} chunk threw:`, e?.message || e)
       return { value: [] }
     }
-  }))
+  }
 
-  for (const res of results) {
+  // Fire transitive + direct in parallel; transitive should cover everything
+  // but direct is a safety net for tenants where the transitive endpoint
+  // rejects the request (eg. when ConsistencyLevel isn't accepted).
+  const transitivePromises = chunks.map(c => queryChunk('/roleManagement/directory/transitiveRoleAssignments', c, true))
+  const directPromises     = chunks.map(c => queryChunk('/roleManagement/directory/roleAssignments',           c, false))
+  const [tRes, dRes] = await Promise.all([Promise.all(transitivePromises), Promise.all(directPromises)])
+
+  // Dedupe by (principalId, roleDefinitionId, directoryScopeId).
+  const seen = new Set()
+  function ingest(res) {
     for (const a of (res.value || [])) {
+      const key = `${a.principalId}|${a.roleDefinitionId}|${a.directoryScopeId}`
+      if (seen.has(key)) continue
+      seen.add(key)
       const arr = out.get(a.principalId) || []
       arr.push({ roleDefinitionId: a.roleDefinitionId, directoryScopeId: a.directoryScopeId })
       out.set(a.principalId, arr)
     }
   }
+  for (const r of tRes) ingest(r)
+  for (const r of dRes) ingest(r)
   return out
 }
 

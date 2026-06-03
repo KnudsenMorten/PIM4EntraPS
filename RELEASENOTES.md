@@ -1,9 +1,10 @@
 # Release notes for PIM4EntraPS
 
-## v2.4.32
+## v2.4.33
 
 Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monorepo:
 
+- release: PIM4EntraPS v2.4.33 - role preview covers nested groups (transitiveRoleAssignments + direct in parallel, dedupe by principalId+roleDefId+scope) (7fed005c)
 - release: PIM4EntraPS v2.4.32 - popup width 800 -> 720 + nuclear max-width:100% + textarea resize:vertical (kills default horizontal scrollbar) (3995d4b8)
 - release: PIM4EntraPS v2.4.31 - self-deactivate (single + bulk) on My Access + blue popup frame + UPPERCASE branded header + tenantId in footer + horizontal-scroll fix (b500945a)
 - release: PIM4EntraPS v2.4.30 - drop '(M365)' label + bump bulk cache key v2 (forces fresh fetch after v0.4.14 bug) + inline 'Loading roles...' placeholder (b01dbf44)
@@ -33,13 +34,30 @@ Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monor
 - release: PIM4EntraPS v2.4.9 - switch CRX hosting to GitHub Pages + Chrome support + Install->Deploy renames + SPA URI fix (E2E proven) (5e263602)
 - release: PIM4EntraPS v2.4.8 - all-in-one Azure CRX hosting in Setup-PimActivator.ps1 + manifest schema fix + Test-PimActivatorFlow.ps1 (5adbd277)
 - release: PIM4EntraPS v2.4.7 - finish wiring v2.4.4's 4-method auth into community launchers + README catch-up (95a1ab25)
-- release: PIM4EntraPS v2.4.6 - fully-unattended activator deployment via bootstrap SPN (Intune-friendly) (6841d152)
 
 ---
 
 # Release notes -- PIM4EntraPS
 
 > **Curated changelog.** The publish workflow auto-prepends recent monorepo commits as a raw activity log; this file is the human-friendly narrative on top.
+
+---
+
+## v2.4.33 -- Role preview now covers nested groups (transitiveRoleAssignments) -- "fold out the underlying permissions linked to the group"
+
+Activate + My Access tab role preview now uses `transitiveRoleAssignments` in addition to direct `roleAssignments`. If Group A is a MEMBER of Group B and Group B has the Entra role, activating Group A still gets the role -- and the popup now surfaces that nested chain inline.
+
+Implementation:
+- For each chunk of up to 15 group ids, fire BOTH endpoints in parallel:
+  - `GET /roleManagement/directory/transitiveRoleAssignments?$count=true&$filter=principalId in (...)` with `ConsistencyLevel: eventual` (Graph requires both for transitive queries).
+  - `GET /roleManagement/directory/roleAssignments?$filter=principalId in (...)` as a fallback (transitive can be flaky in some tenants).
+- Dedupe by `(principalId, roleDefinitionId, directoryScopeId)` -- the same role assignment shows up in both endpoints; we don't render it twice.
+
+Tested for the App Admin / User Admin groups in the maintainer tenant -- direct only returned 1-2 rows; transitive picks up the nested-group inheritances as well.
+
+Caveat: `transitiveRoleAssignments` returns ALL effective assignments (including direct). When transitive succeeds, the direct fallback is redundant; cost is one extra HTTP round-trip per chunk (parallel, so doesn't slow down the user). If transitive 4xx's, the direct fallback still populates the preview.
+
+Manifest 0.4.22 -> 0.4.23.
 
 ---
 
