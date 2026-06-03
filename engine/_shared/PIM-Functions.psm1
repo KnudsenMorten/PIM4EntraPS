@@ -676,8 +676,13 @@ Function Create-PIM-Group-Role
 
 
     # Check if group already exist
-    $Group = Get-MgGroup -Filter "DisplayName eq '$($Groupname)'" -ErrorAction SilentlyContinue
- 
+    $Group = $null
+    Try {
+        $Group = Get-MgGroup -Filter "DisplayName eq '$($Groupname)'" -ErrorAction Stop
+    } Catch {
+        Write-Warning "  [Create-PIM-Group-Role] group lookup for '$Groupname' failed: $($_.Exception.Message) -- treating as MISSING; will attempt create (may fail with UniqueValueViolated if the group really exists)."
+    }
+
     If (!($Group))   # create group if it doesn't exist !
         {
             If ($GroupName.Length -ge 64)
@@ -4115,9 +4120,14 @@ Function Assign-PIMForGroups-From-file-CSV
 
                                     If ( (!($CheckExistingAssignment)) -and ($AssignmentType -eq 'Eligible') )
                                         {
-                                            $GraphCheck = Get-MgIdentityGovernancePrivilegedAccessGroupEligibilitySchedule `
-                                                            -Filter "groupId eq '$($Group.Id)' and principalId eq '$($PAGGroup.Id)' and accessId eq 'member'" `
-                                                            -ErrorAction SilentlyContinue
+                                            $GraphCheck = $null
+                                            Try {
+                                                $GraphCheck = Get-MgIdentityGovernancePrivilegedAccessGroupEligibilitySchedule `
+                                                                -Filter "groupId eq '$($Group.Id)' and principalId eq '$($PAGGroup.Id)' and accessId eq 'member'" `
+                                                                -ErrorAction Stop
+                                            } Catch {
+                                                Write-Warning "  [PIM4Groups] eligibility lookup failed for principal '$($PAGGroup.DisplayName)' on group '$($Group.DisplayName)': $($_.Exception.Message) -- treating as MISSING; may produce duplicate-assign error downstream."
+                                            }
                                             If ($GraphCheck)
                                                 {
                                                     write-host ""
@@ -4969,9 +4979,14 @@ Function Assign-Groups-Accounts-From-file-CSV
 
                     If ( (!($CheckExistingAssignment)) -and ($AssignmentType -eq 'Eligible') )
                         {
-                            $GraphCheck = Get-MgIdentityGovernancePrivilegedAccessGroupEligibilitySchedule `
-                                            -Filter "groupId eq '$($GroupInfo.Id)' and principalId eq '$($UserInfo.Id)' and accessId eq 'member'" `
-                                            -ErrorAction SilentlyContinue
+                            $GraphCheck = $null
+                            Try {
+                                $GraphCheck = Get-MgIdentityGovernancePrivilegedAccessGroupEligibilitySchedule `
+                                                -Filter "groupId eq '$($GroupInfo.Id)' and principalId eq '$($UserInfo.Id)' and accessId eq 'member'" `
+                                                -ErrorAction Stop
+                            } Catch {
+                                Write-Warning "  [PIM4Groups] eligibility lookup failed for principal '$($UserInfo.UserPrincipalName)' on group '$($GroupInfo.DisplayName)': $($_.Exception.Message) -- treating as MISSING; may produce duplicate-assign error downstream."
+                            }
                             If ($GraphCheck)
                                 {
                                     write-host ""
@@ -6894,11 +6909,12 @@ Function CreateUpdate-Policies-PIM-Groups
         Write-host "Getting group-info from Entra ID ... Please Wait !"
         If ($Global:PIM_Groups_Scoped -eq "")
             {
-                $Groups_All = Get-MgGroup -all:$true
-                $Groups_All_Scope = $Groups_All | where-Object { ($_.SecurityEnabled -eq $true) }
-                $Groups_All_Scope = $Groups_All_Scope | where-Object { ($_.GroupTypes -notin "DynamicMembership") }
-                $Groups_All_Scope = $Groups_All_Scope | where-Object { ($_.OnPremisesSyncEnabled -ne $true) }
-                $Groups_All_Scope = $Groups_All_Scope | where-Object { ($_.DisplayName -like "PIM-*") }
+                # v2.3.2: server-side-filtered (startswith on the customer's
+                # PimGroupPattern prefix); skips the 30k-group dump on large
+                # tenants. The DisplayName -like 'PIM-*' filter is now implicit
+                # in Get-PimGroupsFiltered.
+                $Groups_All = Get-PimGroupsFiltered
+                $Groups_All_Scope = $Groups_All | where-Object { ($_.SecurityEnabled -eq $true) -and ($_.GroupTypes -notin "DynamicMembership") -and ($_.OnPremisesSyncEnabled -ne $true) }
             }
         Else
             {
@@ -8406,10 +8422,10 @@ $_pimNcRoot   = Join-Path (Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 $_pimNcLocked = Join-Path $_pimNcRoot 'PIM4EntraPS.NamingConventions.locked.ps1'
 $_pimNcCustom = Join-Path $_pimNcRoot 'PIM4EntraPS.NamingConventions.custom.ps1'
 if (Test-Path -LiteralPath $_pimNcLocked) {
-    try { . $_pimNcLocked } catch { Write-Warning "PIM-Functions: failed loading $_pimNcLocked -- $($_.Exception.Message)" }
+    try { . $_pimNcLocked; Write-Host "  [INFO] PIM-Functions: loaded $_pimNcLocked" -ForegroundColor DarkGray } catch { Write-Warning "PIM-Functions: failed loading $_pimNcLocked -- $($_.Exception.Message)" }
 }
 if (Test-Path -LiteralPath $_pimNcCustom) {
-    try { . $_pimNcCustom } catch { Write-Warning "PIM-Functions: failed loading $_pimNcCustom -- $($_.Exception.Message)" }
+    try { . $_pimNcCustom; Write-Host "  [INFO] PIM-Functions: loaded $_pimNcCustom (custom overrides applied)" -ForegroundColor DarkGray } catch { Write-Warning "PIM-Functions: failed loading $_pimNcCustom -- $($_.Exception.Message)" }
 }
 
 # v2.2.0 (roadmap #11): load notification-channel config into
@@ -8418,10 +8434,10 @@ if (Test-Path -LiteralPath $_pimNcCustom) {
 $_pimNcLocked2 = Join-Path $_pimNcRoot 'PIM4EntraPS.NotificationChannels.locked.ps1'
 $_pimNcCustom2 = Join-Path $_pimNcRoot 'PIM4EntraPS.NotificationChannels.custom.ps1'
 if (Test-Path -LiteralPath $_pimNcLocked2) {
-    try { . $_pimNcLocked2 } catch { Write-Warning "PIM-Functions: failed loading $_pimNcLocked2 -- $($_.Exception.Message)" }
+    try { . $_pimNcLocked2; Write-Host "  [INFO] PIM-Functions: loaded $_pimNcLocked2" -ForegroundColor DarkGray } catch { Write-Warning "PIM-Functions: failed loading $_pimNcLocked2 -- $($_.Exception.Message)" }
 }
 if (Test-Path -LiteralPath $_pimNcCustom2) {
-    try { . $_pimNcCustom2 } catch { Write-Warning "PIM-Functions: failed loading $_pimNcCustom2 -- $($_.Exception.Message)" }
+    try { . $_pimNcCustom2; Write-Host "  [INFO] PIM-Functions: loaded $_pimNcCustom2 (custom overrides applied)" -ForegroundColor DarkGray } catch { Write-Warning "PIM-Functions: failed loading $_pimNcCustom2 -- $($_.Exception.Message)" }
 }
 Remove-Variable -Name _pimNcRoot, _pimNcLocked, _pimNcCustom, _pimNcLocked2, _pimNcCustom2 -ErrorAction SilentlyContinue
 

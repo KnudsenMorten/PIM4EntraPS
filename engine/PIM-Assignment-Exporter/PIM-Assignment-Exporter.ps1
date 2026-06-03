@@ -266,8 +266,6 @@ Write-Output "******************************************************************
 
         # Step 1/2 - Get raw data
 
-            $PIMAzResourceRoleAssignmentsRaw = AzRoleAssignments-Query-AzARG | Query-AzResourceGraph -QueryScope Tenant
-
             $PIMAzResourceRoleAssignmentsRaw = @()
             ForEach ($AzScope in $Global:AzureResources_Definitions_ID)
                 {
@@ -278,8 +276,6 @@ Write-Output "******************************************************************
 
                     $AzGraphUri = "https://management.azure.com" + $AzScope.Id + "/providers/Microsoft.Authorization/roleEligibilitySchedules?api-version=2020-10-01"
                     $PIMAzResourceRoleAssignmentsRaw += ((invoke-webrequest -UseBasicParsing -Method GET -Uri $AzGraphUri -Headers $Headers).Content)
-
-                    Start-Sleep -Seconds 1
 
                     $AzGraphUri = "https://management.azure.com" + $AzScope.Id + "/providers/Microsoft.Authorization/roleAssignmentSchedules?api-version=2020-10-01"
                     $PIMAzResourceRoleAssignmentsRaw += ((invoke-webrequest -UseBasicParsing -Method GET -Uri $AzGraphUri -Headers $Headers).Content)

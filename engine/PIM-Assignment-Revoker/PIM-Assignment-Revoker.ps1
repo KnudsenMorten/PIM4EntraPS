@@ -261,8 +261,6 @@ Function BuildData
 
         # Step 1/2 - Get raw data
 
-            $PIMAzResourceRoleAssignmentsRaw = AzRoleAssignments-Query-AzARG | Query-AzResourceGraph -QueryScope Tenant
-
             $PIMAzResourceRoleAssignmentsRaw = @()
             ForEach ($AzScope in $Global:AzureResources_Definitions_ID)
                 {
