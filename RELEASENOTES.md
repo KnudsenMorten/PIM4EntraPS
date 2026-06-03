@@ -1,9 +1,10 @@
 # Release notes for PIM4EntraPS
 
-## v2.4.49
+## v2.4.50
 
 Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monorepo:
 
+- release: PIM4EntraPS v2.4.50 - fix Deploy-PimActivatorClient.ps1 parameter sets so -TenantsCsv works without also requiring -Tenants (55b76be8)
 - release: PIM4EntraPS v2.4.49 - document server install path (PAW / admin jump box / domain-joined fleet) (154cde23)
 - release: PIM4EntraPS v2.4.48 - bring-your-own Graph session for Intune deployer (66b3ceff)
 - release: PIM4EntraPS v2.4.47 - robust Graph sign-in for Intune deployer (-UseDeviceCode + scope verification) (1a41d168)
@@ -33,13 +34,28 @@ Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monor
 - release: PIM4EntraPS v2.4.20 - wider popup (980px) + Re-sign in auto-launches OAuth + Azure RBAC consent banner with 1-3 min propagation note (3c6ab56b)
 - fix(PIM4EntraPS): Update-PimActivatorDev.ps1 drops `ConvertFrom-Json -Depth` (PS 5.1 incompatible) (9ae24485)
 - release: PIM4EntraPS v2.4.19 - skip empty subsections + 3-category grouping in My Access tab (Entra / Azure / Workload) (0c799e60)
-- release: PIM4EntraPS v2.4.18 - Azure RBAC visible in My Access tab + collapse for long Entra role lists (1f7def50)
 
 ---
 
 # Release notes -- PIM4EntraPS
 
 > **Curated changelog.** The publish workflow auto-prepends recent monorepo commits as a raw activity log; this file is the human-friendly narrative on top.
+
+---
+
+## v2.4.50 -- Fix `Deploy-PimActivatorClient.ps1` parameter sets so -TenantsCsv works without also passing -Tenants
+
+The v2.4.44 multi-tenant rewrite put `-Tenants` and `-TenantsCsv` in the same `InstallMulti` parameter set with `-Tenants` marked Mandatory. Passing only `-TenantsCsv` (the documented path for CSV-driven installs) made PowerShell prompt for `Tenants[0]:`. Split the multi-tenant inputs into two distinct parameter sets -- `InstallMultiInline` (requires `-Tenants`) and `InstallMultiCsv` (requires `-TenantsCsv`) -- so each path is independently usable. The legacy single-tenant `Install` set (`-TenantId` + `-ClientId`) and `Uninstall` set are unchanged.
+
+For a single tenant, either path works equivalently and produces the same registry state (silent auto-use, no picker shown in the popup):
+
+```powershell
+# CSV path (future-proof for adding tenants later)
+.\Deploy-PimActivatorClient.ps1 -ExtensionId <id> -UpdateUrl <url> -TenantsCsv .\tenants.csv -Scope User
+
+# Singleton path (legacy)
+.\Deploy-PimActivatorClient.ps1 -ExtensionId <id> -UpdateUrl <url> -TenantId <guid> -ClientId <guid> -Scope User
+```
 
 ---
 
