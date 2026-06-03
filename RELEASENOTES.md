@@ -1,9 +1,10 @@
 # Release notes for PIM4EntraPS
 
-## v2.4.31
+## v2.4.32
 
 Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monorepo:
 
+- release: PIM4EntraPS v2.4.32 - popup width 800 -> 720 + nuclear max-width:100% + textarea resize:vertical (kills default horizontal scrollbar) (3995d4b8)
 - release: PIM4EntraPS v2.4.31 - self-deactivate (single + bulk) on My Access + blue popup frame + UPPERCASE branded header + tenantId in footer + horizontal-scroll fix (b500945a)
 - release: PIM4EntraPS v2.4.30 - drop '(M365)' label + bump bulk cache key v2 (forces fresh fetch after v0.4.14 bug) + inline 'Loading roles...' placeholder (b01dbf44)
 - fix(PIM4EntraPS): Update-PimActivatorDev.ps1 - use Get-Content pipe instead of '<' redirect (PS 5.1 doesn't support '<') (674e2f0d)
@@ -33,13 +34,28 @@ Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monor
 - release: PIM4EntraPS v2.4.8 - all-in-one Azure CRX hosting in Setup-PimActivator.ps1 + manifest schema fix + Test-PimActivatorFlow.ps1 (5adbd277)
 - release: PIM4EntraPS v2.4.7 - finish wiring v2.4.4's 4-method auth into community launchers + README catch-up (95a1ab25)
 - release: PIM4EntraPS v2.4.6 - fully-unattended activator deployment via bootstrap SPN (Intune-friendly) (6841d152)
-- release: PIM4EntraPS v2.4.5 - turnkey PIM Activator install: one-command orchestrator + pinned extension identity + icons (4a26958d)
 
 ---
 
 # Release notes -- PIM4EntraPS
 
 > **Curated changelog.** The publish workflow auto-prepends recent monorepo commits as a raw activity log; this file is the human-friendly narrative on top.
+
+---
+
+## v2.4.32 -- Popup width 800 -> 720; no more horizontal scrollbar by default
+
+Reduced width from 800px to 720px so the popup fits comfortably inside Chromium's effective popup max (the textarea resize handle + scrollbar were pushing 800px-wide content past the popup's available width, triggering a horizontal scrollbar at the bottom). Plus belt-and-braces:
+
+```css
+*, *::before, *::after { box-sizing:border-box; max-width:100%; }
+```
+
+means every element is bounded to its parent's width regardless of content. `textarea` resize locked to `vertical` only so the user-drag handle can't widen it.
+
+Visible result: no horizontal scrollbar in default state.
+
+Manifest 0.4.21 -> 0.4.22.
 
 ---
 
