@@ -510,9 +510,9 @@ time.
 
 Two-stage rollout:
 
-1. **One-time per tenant**: `Install-PimActivatorAppRegistration.ps1`
+1. **One-time per tenant**: `Deploy-PimActivatorBackend.ps1`
    creates the app registration with the right delegated permissions.
-2. **Per PAW**: `Install-PimActivator.ps1` writes Edge enterprise policy
+2. **Per PAW**: `Deploy-PimActivatorClient.ps1` writes Edge enterprise policy
    keys (force-install + per-tenant config). Intune-deployable
    unattended.
 

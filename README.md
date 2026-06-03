@@ -291,9 +291,9 @@ group (the API requires it), but the admin sees one click instead of N
 portal navigations.
 
 Auth uses `chrome.identity.launchWebAuthFlow` + PKCE (no MSAL bundle).
-Intune-deployable: a single `Install-PimActivator.ps1` writes the Edge
+Intune-deployable: a single `Deploy-PimActivatorClient.ps1` writes the Edge
 policy keys for force-install + per-tenant config; companion
-`Install-PimActivatorAppRegistration.ps1` creates the SPA app reg + redirect
+`Deploy-PimActivatorBackend.ps1` creates the SPA app reg + redirect
 URIs. See `tools/pim-activator/README.md` for the two-stage rollout.
 
 ---

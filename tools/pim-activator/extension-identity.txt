@@ -10,7 +10,7 @@ will get the SAME extension ID, which means:
     a single, well-known value
   - Customers can deploy the extension via Intune ExtensionInstallForcelist
     using the same ID everywhere
-  - The Install-PimActivatorAppRegistration.ps1 script no longer needs the
+  - The Deploy-PimActivatorBackend.ps1 script no longer needs the
     operator to discover the ID via edge://extensions/
 
 If you ever regenerate the key (don't, unless lost), the extension ID will

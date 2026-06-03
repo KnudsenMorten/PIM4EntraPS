@@ -6,7 +6,7 @@
     consent) that the PIM4EntraPS *engine* uses to apply changes to the tenant.
 
 .DESCRIPTION
-    Companion to Install-PimActivatorAppRegistration.ps1, but for the OTHER
+    Companion to Deploy-PimActivatorBackend.ps1, but for the OTHER
     direction:
 
       - Activator (browser extension)    = delegated perms, signed-in admin

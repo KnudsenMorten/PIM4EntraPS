@@ -1,9 +1,10 @@
 # Release notes for PIM4EntraPS
 
-## v2.4.8
+## v2.4.9
 
 Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monorepo:
 
+- release: PIM4EntraPS v2.4.9 - switch CRX hosting to GitHub Pages + Chrome support + Install->Deploy renames + SPA URI fix (E2E proven) (5e263602)
 - release: PIM4EntraPS v2.4.8 - all-in-one Azure CRX hosting in Setup-PimActivator.ps1 + manifest schema fix + Test-PimActivatorFlow.ps1 (5adbd277)
 - release: PIM4EntraPS v2.4.7 - finish wiring v2.4.4's 4-method auth into community launchers + README catch-up (95a1ab25)
 - release: PIM4EntraPS v2.4.6 - fully-unattended activator deployment via bootstrap SPN (Intune-friendly) (6841d152)
@@ -33,13 +34,66 @@ Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monor
 - port: v1 -> v2 on 14 user-selected solutions (67 engines) (fbe39214)
 - rename: SOLUTIONS/PlatformOnboarding -> SOLUTIONS/PlatformConfiguration (368f422e)
 - Merge remote-tracking branch 'origin/dev' into HEAD (b8556ec1)
-- launchers: fix 4 template bugs preventing internal-vm engine invocation (de585260)
 
 ---
 
 # Release notes -- PIM4EntraPS
 
 > **Curated changelog.** The publish workflow auto-prepends recent monorepo commits as a raw activity log; this file is the human-friendly narrative on top.
+
+---
+
+## v2.4.9 -- Switch CRX hosting to GitHub Pages + Chrome browser support + role-clarifying renames + SPA-redirect-URI fix (E2E proven)
+
+Tested end-to-end on the maintainer's box: Edge installed the extension via HKLM ExtensionInstallForcelist policy pointing at GitHub Pages, OAuth flow succeeded (PKCE + chrome-extension:// SPA URI), popup correctly rendered the empty-state for an account with no PIM-for-Groups eligibilities.
+
+### CRX hosting moved from Azure Storage to GitHub Pages
+
+- **`-DeployAzureCrxHost` mode removed** (along with `-AzSubscriptionId / -AzResourceGroup / -AzLocation / -AzStorageAccountName / -AzStorageContainerName / -AzKeyVaultName / -AzKeyVaultSecretName` params). All Az.Storage / Az.KeyVault dependencies dropped from `Setup-PimActivator.ps1`.
+- **`-PublishToGitHubPages` mode added.** Composes with both Interactive and Unattended auth. Verifies `gh` CLI + auth, clones the `gh-pages` branch shallowly (creates as orphan if missing), packs the CRX via `msedge.exe --pack-extension`, extracts SPKI from the CRX header (no .NET PEM parsing needed -- bypasses the PS 5.1 `ExportPkcs8PrivateKey` gap), syncs `manifest.json.key` only on drift then re-packs to keep the embedded manifest consistent, generates `updates.xml`, drops `.nojekyll`, commits + pushes. Empty-diff push detected + reported as "already up-to-date".
+- **Auto-derives `-CrxUpdateUrl`** for `-PushPolicy` from the just-published `https://<owner>.github.io/<repo>/updates.xml`.
+- **Local signing key** lives at `$env:USERPROFILE\.pim-activator\signing-key.pem` (maintainer's secret -- script prints a loud 6-line "BACK THIS UP" notice on first generation). Outside any repo so it can't accidentally commit.
+- **Cost: $0/month** (was ~$5/month Azure Storage Standard_LRS). No Azure subscription needed.
+
+### Chrome support in `Deploy-PimActivatorClient.ps1`
+
+New `-Browser` param: `Edge | Chrome | Both` (default `Both`). When `Both`, writes HKLM keys under BOTH `SOFTWARE\Policies\Microsoft\Edge` AND `SOFTWARE\Policies\Google\Chrome` -- identical key names + structure under each root (ExtensionInstallForcelist + 3rdparty\extensions\<id>\policy). `-Uninstall` honours `-Browser`. Setup-PimActivator forwards a new `-TargetBrowser` param.
+
+### Role-clarifying renames (the "what does this script do" fix)
+
+| Old name | New name | Role |
+|---|---|---|
+| `Install-PimActivatorAppRegistration.ps1` | **`Deploy-PimActivatorBackend.ps1`** | Backend -- creates the tenant Entra app reg + admin consent. Runs ONCE per customer tenant. |
+| `Install-PimActivator.ps1` | **`Deploy-PimActivatorClient.ps1`** | Client -- pushes HKLM Edge/Chrome ExtensionInstallForcelist + managed-storage policy to a single device. Runs ON every user device (Intune). |
+| `Setup-PimActivator.ps1` | `Setup-PimActivator.ps1` | Orchestrator -- calls backend, publishes CRX to GitHub Pages, then calls client. |
+| `Test-PimActivatorFlow.ps1` | unchanged | Diagnostic. |
+
+Cascade-rename across 8 source files (Setup script, both Deploy scripts, both READMEs, DESIGN.md, extension-identity.txt, Install-PimEngineAppRegistration.ps1). RELEASENOTES historical references left intact (don't rewrite history).
+
+### SPA-redirect-URI fix (the AADSTS9002326 fix)
+
+Modern Edge / Chrome MV3 extension popups send `Origin: chrome-extension://<id>` headers from their `fetch()` to `/oauth2/v2.0/token`. Entra's SPA flow validates the `Origin` header against registered SPA redirect URIs. Previously the script registered ONLY `https://<id>.chromiumapp.org/` -- which is needed for the auth-code redirect, but NOT for the cross-origin token redemption. Result: every customer hit `AADSTS9002326: Cross-origin token redemption is permitted only for the 'Single-Page Application' client-type. Request origin: 'chrome-extension://<id>'` on first sign-in.
+
+**Fix in `Deploy-PimActivatorBackend.ps1`:** register BOTH URIs as SPA type:
+- `https://<id>.chromiumapp.org/` -- for `chrome.identity.launchWebAuthFlow` redirect
+- `chrome-extension://<id>/` -- to satisfy SPA-flow Origin check during token redemption
+
+Bonus: dropped the legacy `-PublicClient` + `-IsFallbackPublicClient:$true` registration that the old script wrote. Confirmed via `Update-MgApplication`: Microsoft Graph accepts `chrome-extension://` as a SPA URI (even though the Entra portal UI rejects them with a "must start with https://" validation).
+
+### Files changed (v2.4.9 net)
+
+- `Setup-PimActivator.ps1` (322 -> ~750 lines)
+- `Deploy-PimActivatorClient.ps1` (was Install-PimActivator.ps1; renamed + Chrome support; 186 -> 239 lines)
+- `Deploy-PimActivatorBackend.ps1` (was Install-PimActivatorAppRegistration.ps1; renamed + SPA URI fix)
+- `README.md` + `tools/pim-activator/README.md` + `docs/DESIGN.md` + `extension-identity.txt` + `setup/Install-PimEngineAppRegistration.ps1` -- cascade-rename references
+- All PS 5.1 parse-clean
+
+### Verification
+
+End-to-end run on the maintainer's machine (2026-06-03):
+- Setup-PimActivator with `-PublishToGitHubPages -PushPolicy -TargetBrowser Both` -> SUCCESS
+- CRX live at https://knudsenmorten.github.io/PIM4EntraPS/pim-activator.crx
+- Edge auto-installed extension on restart, popup signed in (after the SPA URI fix), correctly displayed empty-state for an account with no PIM-for-Groups eligibilities (matches `Test-PimActivatorFlow.ps1` finding)
 
 ---
 

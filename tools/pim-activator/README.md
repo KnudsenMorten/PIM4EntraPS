@@ -28,8 +28,8 @@ tools/pim-activator/
   managed_schema.json                        # what admins can push via Intune
   config.template.js                         # copy -> config.js for dev-mode
   icons/icon-16.png / icon-32.png / icon-128.png
-  Install-PimActivatorAppRegistration.ps1    # ONE-TIME tenant setup (run by admin)
-  Install-PimActivator.ps1                   # PER-PAW install (Intune-deployable)
+  Deploy-PimActivatorBackend.ps1    # ONE-TIME tenant setup (run by admin)
+  Deploy-PimActivatorClient.ps1                   # PER-PAW install (Intune-deployable)
   README.md
 ```
 
@@ -67,7 +67,7 @@ Connect-MgGraph -TenantId 'f0fa27a0-8e7c-4f63-9a77-ec94786b7c9e' `
                          'DelegatedPermissionGrant.ReadWrite.All'
 
 # 3. Create the app, wire SPA redirect URI + delegated perms, grant consent.
-.\Install-PimActivatorAppRegistration.ps1 -ExtensionId $extId -GrantConsent
+.\Deploy-PimActivatorBackend.ps1 -ExtensionId $extId -GrantConsent
 ```
 
 Output is the `tenantId` + `clientId` you'll feed into Stage 2. Permissions
@@ -95,7 +95,7 @@ Pushes Edge enterprise policy keys that:
 **Direct install on one machine** (as admin):
 
 ```powershell
-.\Install-PimActivator.ps1 `
+.\Deploy-PimActivatorClient.ps1 `
     -ExtensionId 'abcdefghijklmnopabcdefghijklmnop' `
     -UpdateUrl   'https://edge.microsoft.com/extensionwebstorebase/v1/crx' `
     -TenantId    'f0fa27a0-8e7c-4f63-9a77-ec94786b7c9e' `
@@ -104,15 +104,15 @@ Pushes Edge enterprise policy keys that:
 
 **Intune Win32 app deployment:**
 
-1. Wrap `Install-PimActivator.ps1` + a `pim-activator.intunewin` with the
+1. Wrap `Deploy-PimActivatorClient.ps1` + a `pim-activator.intunewin` with the
    Microsoft Win32 Content Prep Tool (`IntuneWinAppUtil.exe`).
 2. Install command:
    ```
-   powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Install-PimActivator.ps1 -ExtensionId <id> -UpdateUrl <url> -TenantId <tid> -ClientId <cid>
+   powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Deploy-PimActivatorClient.ps1 -ExtensionId <id> -UpdateUrl <url> -TenantId <tid> -ClientId <cid>
    ```
 3. Uninstall command:
    ```
-   powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Install-PimActivator.ps1 -ExtensionId <id> -Uninstall
+   powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Deploy-PimActivatorClient.ps1 -ExtensionId <id> -Uninstall
    ```
 4. Detection rule: registry key
    `HKLM\SOFTWARE\Policies\Microsoft\Edge\3rdparty\extensions\<ExtensionId>\policy`
@@ -171,7 +171,7 @@ State persisted in `chrome.storage.local`:
 ## Troubleshooting
 
 - **"Extension not configured" in the popup**: managed policy keys missing
-  AND no `config.js`. Confirm `Install-PimActivator.ps1` ran successfully
+  AND no `config.js`. Confirm `Deploy-PimActivatorClient.ps1` ran successfully
   (`edge://policy` shows extension policies under the extension id).
 - **Sign-in works, no groups listed**: the user has no eligible PIM
   assignments for groups matching `groupNameFilter`. Try widening the
