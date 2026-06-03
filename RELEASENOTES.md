@@ -1,9 +1,10 @@
 # Release notes for PIM4EntraPS
 
-## v2.4.25
+## v2.4.26
 
 Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monorepo:
 
+- release: PIM4EntraPS v2.4.26 - drop 'member' word + show date+time for activation expiry on both tabs (d7f95cfc)
 - release: PIM4EntraPS v2.4.25 - 3-bucket categorisation on both Activate + My Access tabs, configurable per customer via entraGroupRegex/azureGroupRegex (chrome.storage.managed) (adaa201b)
 - release: PIM4EntraPS v2.4.24 - already-active groups sorted to bottom of Activate tab (greyed + badge + disabled checkbox) (2c1e982c)
 - release: PIM4EntraPS v2.4.23 - loading message 'Loading your PIM delegations ... Please Wait' (was 'Loading eligible groups...') (7d4f6383)
@@ -33,13 +34,23 @@ Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monor
 - release: PIM4EntraPS v2.4.0 - perf overhaul: cached group resolution + tenant-wide preload helpers + Azure token reuse (ea55e28f)
 - release: PIM4EntraPS v2.3.2 - perf + logging hotfix from function audit (Graph + Azure) (d40b311c)
 - release: PIM4EntraPS v2.3.1 - docs: README rewrite with full v2.x feature catalog + dedicated PIM Manager GUI section (85992b8f)
-- release: PIM4EntraPS v2.3.0 - drop .locked.csv baselines, custom-only from day one + enhanced .custom.sample.csv templates (e568dd6e)
 
 ---
 
 # Release notes -- PIM4EntraPS
 
 > **Curated changelog.** The publish workflow auto-prepends recent monorepo commits as a raw activity log; this file is the human-friendly narrative on top.
+
+---
+
+## v2.4.26 -- Drop redundant "member" word; show date+time for activation expiry
+
+Two text cleanups:
+
+- **Activate tab** row meta line was `member . ends 3/9/2027`. Dropped "member" (always the same word for PIM-for-Groups, pure noise) and switched from `toLocaleDateString()` to `toLocaleString({dateStyle:'short', timeStyle:'short'})` so the user sees exactly when their activation expires (e.g. `ends 3/9/27, 11:30 PM`).
+- **My Access tab** row times line was `member since 5/22/2026, 11:30:43 PM . expires 5/22/2027, 11:30:42 PM`. Compacted to `5/22/26, 11:30 PM -> 5/22/27, 11:30 PM` (start arrow end). Same data, half the width, no redundant labels.
+
+Manifest 0.4.11 -> 0.4.12.
 
 ---
 

@@ -1018,15 +1018,20 @@ function renderMyAccess(rows) {
 }
 
 function renderOneMyAccessRow(r) {
-  const start = r.startDateTime ? new Date(r.startDateTime).toLocaleString() : '?'
-  const end   = r.endDateTime   ? new Date(r.endDateTime).toLocaleString()   : 'permanent'
+  // Drop the "member since X . expires Y" labels (noisy + "member" is always
+  // the same string for PIM-for-Groups). Show the same info with arrow:
+  // "<start> -> <end>" with date+time for both. Empty -> "permanent".
+  const fmt = (iso) => iso ? new Date(iso).toLocaleString(undefined, { dateStyle: 'short', timeStyle: 'short' }) : null
+  const start = fmt(r.startDateTime)
+  const end   = fmt(r.endDateTime) || 'permanent'
+  const times = start ? `${start} &rarr; ${end}` : `ends ${end}`
   const row = document.createElement('div')
   row.className = 'ma-row'
   row.dataset.gid = r.groupId
   row.innerHTML = `
     <div class="ma-head">
       <div class="ma-name">${escapeHtml(r.displayName || r.groupId)}</div>
-      <div class="ma-times">member since ${escapeHtml(start)} &middot; expires ${escapeHtml(end)}</div>
+      <div class="ma-times">${times}</div>
     </div>
     <div class="ma-roles" data-roles-for="${escapeHtml(r.groupId)}"></div>
   `
@@ -1195,11 +1200,17 @@ function render() {
     const activeBadge = r.isActive
       ? ' <span style="background:#dafbe1;color:#1a7f37;padding:1px 6px;border-radius:8px;font-size:10.5px;font-weight:600;margin-left:6px;">already active</span>'
       : ''
+    // Activate tab: just show "ends <date+time>" -- accessId is always
+    // "member" for PIM-for-Groups so it's noise. Date+time so the user
+    // sees activation expiry to the minute, not just the day.
+    const endLabel = r.endDateTime
+      ? new Date(r.endDateTime).toLocaleString(undefined, { dateStyle: 'short', timeStyle: 'short' })
+      : 'permanent'
     row.innerHTML = `
       <input type="checkbox" data-gid="${r.groupId}" ${r.checked ? 'checked' : ''} ${r.isActive ? 'disabled' : ''}>
       <div class="body">
         <div class="name" title="${escapeHtml(r.displayName || r.groupId)}">${escapeHtml(r.displayName || r.groupId)}${activeBadge}</div>
-        <div class="meta">${escapeHtml(r.accessId)} &middot; ends ${r.endDateTime ? new Date(r.endDateTime).toLocaleDateString() : 'permanent'}</div>
+        <div class="meta">ends ${escapeHtml(endLabel)}</div>
         <div class="status" data-gid-status="${r.groupId}"></div>
       </div>
     `
