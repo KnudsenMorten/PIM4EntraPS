@@ -1,1 +1,10 @@
 ﻿GroupTag;AdministrativeUnitTag;RoleDefinitionName;AssignmentType;Action;UpdateExisting;AutoExtend;NumOfDaysWhenExpire;Permanent;CPPlatform;Plane;TierLevel;PermissionScope;SyncPlatform
+ROLE-Helpdesk;AU-Users-Standard;User Administrator;Active;Assign;FALSE;TRUE;365;FALSE;ID;CP;T2;Scoped;
+ROLE-Helpdesk;AU-Users-Standard;Password Administrator;Active;Assign;FALSE;TRUE;365;FALSE;ID;CP;T2;Scoped;
+ROLE-Helpdesk;AU-Users-Standard;Helpdesk Administrator;Active;Assign;FALSE;TRUE;365;FALSE;ID;CP;T2;Scoped;
+;;;;;;;;;;;;;
+ROLE-ServiceDeskTier1;AU-Devices-Corp;Cloud Device Administrator;Active;Assign;FALSE;TRUE;365;FALSE;ID;CP;T2;Scoped;
+ROLE-ServiceDeskTier1;AU-Users-Standard;Authentication Administrator;Eligible;Assign;FALSE;TRUE;90;FALSE;ID;CP;T2;Scoped;
+;;;;;;;;;;;;;
+ROLE-IdentityAdmin;AU-Admins-Privileged;User Administrator;Eligible;Assign;FALSE;TRUE;90;FALSE;ID;CP;T0;Scoped;
+ROLE-IdentityAdmin;AU-Admins-Privileged;Privileged Authentication Administrator;Eligible;Assign;FALSE;TRUE;90;FALSE;ID;CP;T0;Scoped;

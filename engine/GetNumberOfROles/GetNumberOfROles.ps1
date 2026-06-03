@@ -41,7 +41,7 @@ write-host "Entra ID Roles -> $($EntraRoles)"
 
 # Get count of Roles in Azure Resources
 $Headers = Get-AzAccessTokenManagement
-$AzScope = "/providers/Microsoft.Management/managementGroups/00000000-0000-0000-0000-000000000000"
+$AzScope = "/providers/Microsoft.Management/managementGroups/f0fa27a0-8e7c-4f63-9a77-ec94786b7c9e"
 $AzGraphUri = "https://management.azure.com" + $AzScope + "/providers/Microsoft.Authorization/roleDefinitions?api-version=2022-04-01"
 $Response   = invoke-webrequest -UseBasicParsing -Method GET -Uri $AzGraphUri -Headers $Headers
 $AzureRoles = (($Response.Content | ConvertFrom-Json).value).count

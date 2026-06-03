@@ -57,7 +57,7 @@
     powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Install-PimActivator.ps1 `
         -ExtensionId 'abcdefghijklmnopabcdefghijklmnop' `
         -UpdateUrl 'https://edge.microsoft.com/extensionwebstorebase/v1/crx' `
-        -TenantId '00000000-0000-0000-0000-000000000000' `
+        -TenantId 'f0fa27a0-8e7c-4f63-9a77-ec94786b7c9e' `
         -ClientId '11111111-2222-3333-4444-555555555555'
 
 .EXAMPLE

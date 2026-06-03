@@ -22,10 +22,10 @@ ALTER ROLE loginmanager ADD MEMBER [name@domain.com];
 
 #-------------------
 
-CREATE USER "admin@example.invalid" FROM EXTERNAL PROVIDER WITH DEFAULT_SCHEMA = dbo;  
+CREATE USER "mok@2linkit.net" FROM EXTERNAL PROVIDER WITH DEFAULT_SCHEMA = dbo;  
   
 -- add user to role(s) in db 
-ALTER ROLE db_owner ADD MEMBER "admin@example.invalid"; 
+ALTER ROLE db_owner ADD MEMBER "mok@2linkit.net"; 
 
 #>
 
@@ -48,7 +48,7 @@ Set-AzContext -Subscription "fce4f282-fcc6-43fb-94d8-bf1701b862c3"
 
 $Path           = "C:\SCRIPTS\DATA\"
 $csvDelimiter   = ";"
-$serverName     = "your-sql.database.windows.net"
+$serverName     = "2linkit-sql.database.windows.net"
 $databaseName   = "managedpim"
 $tableSchema    = "dbo"
 

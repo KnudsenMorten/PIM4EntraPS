@@ -1,1 +1,4 @@
 GroupName;GroupDescription;GroupTag;AdministrativeUnitTag;CPPlatform;Plane;TierLevel;PermissionScope;SyncPlatform;IsRoleAssignable
+PIM-PROC-Onboarding;Onboarding process owners;PROC-Onboarding;PIM-ORGANIZATION;;;;;;TRUE
+PIM-PROC-Offboarding;Offboarding process owners;PROC-Offboarding;PIM-ORGANIZATION;;;;;;TRUE
+PIM-PROC-AccessReview;Quarterly access review approvers;PROC-AccessReview;PIM-ORGANIZATION;;;;;;TRUE

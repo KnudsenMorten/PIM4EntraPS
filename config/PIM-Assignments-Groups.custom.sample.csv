@@ -1,1 +1,12 @@
 ﻿TargetGroupTag;SourceGroupTag;AssignmentType;Action;UpdateExisting;AutoExtend;NumOfDaysWhenExpire;Permanent;CPPlatform;Plane;TierLevel;PermissionScope;SyncPlatform;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+ROLE-IdentityAdmin;Entra-ID-GlobalAdministrator-L0;Eligible;Assign;FALSE;TRUE;90;FALSE;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+ROLE-IdentityAdmin;Entra-ID-PrivilegedRoleAdministrator-L1;Eligible;Assign;FALSE;TRUE;90;FALSE;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+ROLE-IdentityAdmin;Entra-ID-ConditionalAccessAdministrator-L1;Eligible;Assign;FALSE;TRUE;90;FALSE;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+ROLE-CloudAdmin;Entra-ID-CloudApplicationAdministrator-L1;Eligible;Assign;FALSE;TRUE;90;FALSE;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+ROLE-CloudAdmin;Entra-ID-ApplicationAdministrator-L1;Eligible;Assign;FALSE;TRUE;90;FALSE;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+ROLE-Helpdesk;Entra-ID-HelpdeskAdministrator-L1;Active;Assign;FALSE;TRUE;365;FALSE;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+ROLE-Helpdesk;Entra-ID-AuthenticationAdministrator-L1;Active;Assign;FALSE;TRUE;365;FALSE;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+ORG-IT;Entra-ID-ReportsReader-L1;Active;Assign;FALSE;TRUE;365;FALSE;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;

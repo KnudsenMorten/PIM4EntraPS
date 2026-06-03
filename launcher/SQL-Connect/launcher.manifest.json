@@ -1,7 +1,7 @@
 {
   "notes": "Ported via TOOLS/New-SolutionLauncherSet.ps1. Engine copied near-verbatim with defensive patches (idempotent $global:PathScripts + FUNCTIONS/LEGACY fallback). Internal-only = False.",
   "community": true,
-  "author": "Morten Knudsen <mok@example.invalid>",
+  "author": "Morten Knudsen <mok@mortenknudsen.net>",
   "communityRepo": "PIM4EntraPS",
   "description": "SQL-Connect -- v2 ported engine under PIM4EntraPS.",
   "version": "2.0.0",

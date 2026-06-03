@@ -1,9 +1,10 @@
 # Release notes for PIM4EntraPS
 
-## v2.2.1
+## v2.3.0
 
 Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monorepo:
 
+- release: PIM4EntraPS v2.3.0 - drop .locked.csv baselines, custom-only from day one + enhanced .custom.sample.csv templates (e568dd6e)
 - release: PIM4EntraPS v2.2.1 - hotfix: scrub maintainer-tenant data from shipped .locked.csv baselines + sample-file cleanup (b666d1eb)
 - release: PIM4EntraPS v2.2.0 - Theme 1 (Manager UX polish) + Theme 2 first slice (TAP flow) (a659adf6)
 - release: PIM4EntraPS v2.1.7 - docs/ROADMAP.md (34 customer-requested features sized + sequenced + storage-backend decision) Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com> (c1ae5fc7)
@@ -40,6 +41,21 @@ Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monor
 
 ---
 
+## v2.3.0 -- Drop `.locked.csv` baselines: PIM4EntraPS is custom-only from day one
+
+The `.locked.csv` / `.custom.csv` dual-file pattern made sense for solutions like SecurityInsight where Anthropic / 2linkit ships a baseline (detection rules, role-tier mappings) that every customer extends. **It never made sense for PIM4EntraPS**: every customer's admin set, role topology, AU layout, and assignments are unique -- there is no shared baseline to ship -- so the `.locked.csv` files were either empty stubs (useless) or had to be overwritten on day one (confusing). In v2.2.0 + v2.2.1, the dual-file pattern also caused a maintainer-tenant data leak when the maintainer's own data accidentally shipped in the .locked.csv role of the project.
+
+v2.3.0 simplifies the model: **only `.custom.sample.csv` ships** (as schema documentation + worked example rows that operators copy from). Customers always own their config as `.custom.csv` (gitignored) from day one.
+
+Changes:
+- **Removed all 14 `config/*.locked.csv` files** from the shipped repo. The `.gitignore` already excluded `.custom.csv`, so nothing the operator owns leaves their VM.
+- **`config/*.custom.sample.csv` templates rewritten** with 2-4 realistic generic example rows per file (no customer-specific data). `PIM-Assignments-Roles-Groups.custom.sample.csv` now ships as a **catalog of ~20 common built-in Entra roles** distributed across a representative set of role-group tags (`ROLE-IdentityAdmin`, `ROLE-Helpdesk`, `ROLE-SecurityOps`, `ROLE-Compliance`, etc.) -- operators get a working starting point instead of an empty header.
+- **`Get-PimConfigCsv` refactored** to read `.custom.csv` only. Pre-v2.3.0 backward-compat: if a customer still has a `<name>.locked.csv` file lying around from an old install, the engine reads it but emits a one-time `Write-Warning` per file pointing the operator at the migration step ("rename/copy to .custom.csv"). The fallback exists only to smooth one upgrade hop -- it will be removed in v2.4.0.
+- **Upgrade path for existing customers**: on first launch after pulling v2.3.0, if any `<name>.custom.csv` is missing but `<name>.locked.csv` exists, just rename `.locked.csv` to `.custom.csv` (or copy + edit if you want to keep a backup of the old shipped baseline). One-shot helper script: `Get-ChildItem .\config\*.locked.csv | ForEach-Object { Move-Item $_.FullName ($_.FullName -replace '\.locked\.csv$', '.custom.csv') -WhatIf }` (remove `-WhatIf` after reviewing the rename plan).
+- Customers who never had data in `.locked.csv` (greenfield deploys, or who already migrated to `.custom.csv` in v2.2.1+): nothing to do, engine reads `.custom.csv` as before.
+
+---
+
 ## v2.2.1 -- Hotfix: scrub maintainer-tenant data from shipped `.locked.csv` baselines + sample-file cleanup
 
 v2.2.0 inadvertently shipped the maintainer's own admin / role rows in `config\Account-Definitions-Admins.locked.csv` and `config\PIM-Definitions-Roles.locked.csv` -- both files reached the public mirror via the publish workflow. The intent of `.locked.csv` is **shipped baseline that every customer extends**; customer-specific data belongs in `.custom.csv` (gitignored). This release scrubs the leak and ships header-only baselines from now on. v2.2.1 is **non-functional for any customer already running a `.custom.csv`** -- the engine's `Get-PimConfigCsv` fallback prefers `.custom.csv` and only reads `.locked.csv` when `.custom.csv` is missing, so existing deployments see no behaviour change. Customers with no `.custom.csv` who were relying on the shipped `.locked.csv` content as their actual config should copy `.locked.csv` -> `.custom.csv` before upgrading.
@@ -47,8 +63,8 @@ v2.2.0 inadvertently shipped the maintainer's own admin / role rows in `config\A
 Scrubs applied:
 - `config\Account-Definitions-Admins.locked.csv` -- replaced with header-only (21 columns). Use `Account-Definitions-Admins.custom.sample.csv` for an annotated example row.
 - `config\PIM-Definitions-Roles.locked.csv` -- replaced with header-only (12 columns).
-- `config\PIM4EntraPS.NotificationChannels.custom.sample.ps1` -- KV-name example changed from real-looking `kv-contoso-pim-p` to generic `kv-contoso-pim-p`.
-- `config\PIM4EntraPS.NamingConventions.custom.sample.ps1` -- "Customer A (Admin- / X-Admin- with tier suffix)" relabelled to "Customer A (Admin- / X-Admin- with tier suffix)"; example initials `MOK` / owner `morten` generalised to `ABC` / `john`. Pre-existing pre-v2.2.0 wording -- scrubbed in this hotfix as part of the same sweep.
+- `config\PIM4EntraPS.NotificationChannels.custom.sample.ps1` -- KV-name example changed from real-looking `kv-2linkit-pim-p` to generic `kv-contoso-pim-p`.
+- `config\PIM4EntraPS.NamingConventions.custom.sample.ps1` -- "Customer A (current 2linkit default)" relabelled to "Customer A (Admin- / X-Admin- with tier suffix)"; example initials `MOK` / owner `morten` generalised to `ABC` / `john`. Pre-existing pre-v2.2.0 wording -- scrubbed in this hotfix as part of the same sweep.
 - `docs\ROADMAP.md` -- items #1, #2, #6, #7, #11, #12, #25, #28 now annotated `[SHIPPED v2.2.0]` (#25 + #28 also note what is deferred).
 
 Note: the leaked content remains visible in the v2.2.0 tag's commit history on the public mirror until / unless that history is rewritten. v2.2.1 only stops the leak from re-publishing; it does not retroactively scrub git history. Rewriting public-mirror history is a destructive operation and is left to the maintainer's discretion.

@@ -1,1 +1,10 @@
 ﻿Username;GroupTag;AssignmentType;Action;UpdateExisting;AutoExtend;NumOfDaysWhenExpire;Permanent;CPPlatform;Plane;TierLevel;PermissionScope;SyncPlatform
+Admin-JDO-L1-T1-ID@contoso.com;ROLE-Helpdesk;Active;Assign;FALSE;TRUE;365;FALSE;;;;;
+Admin-JDO-L1-T1-ID@contoso.com;Entra-ID-Bundle-GlobalRoles-L1;Eligible;Assign;FALSE;TRUE;365;FALSE;;;;;
+Admin-JDO-L1-T1-ID@contoso.com;ORG-IT;Active;Assign;FALSE;TRUE;90;FALSE;;;;;
+;;;;;;;;;;;;
+Admin-ABC-L0-T0-ID@contoso.com;ROLE-IdentityAdmin;Eligible;Assign;FALSE;TRUE;90;FALSE;;;;;
+Admin-ABC-L0-T0-ID@contoso.com;ROLE-SecurityOps;Eligible;Assign;FALSE;TRUE;90;FALSE;;;;;
+;;;;;;;;;;;;
+Admin-XYZ-L2-T2-ID@contoso.com;ROLE-ServiceDeskTier1;Active;Assign;FALSE;TRUE;365;FALSE;;;;;
+Admin-XYZ-L2-T2-ID@contoso.com;ROLE-Helpdesk;Active;Assign;FALSE;TRUE;365;FALSE;;;;;

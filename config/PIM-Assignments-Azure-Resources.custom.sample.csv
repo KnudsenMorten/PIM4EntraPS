@@ -1,1 +1,10 @@
 ﻿GroupTag;AzScope;AzScopePermission;AssignmentType;Action;UpdateExisting;AutoExtend;NumOfDaysWhenExpire;Permanent;CPPlatform;Plane;TierLevel;PermissionScope;SyncPlatform;
+Azure-TenantRoot-Owner;/providers/Microsoft.Management/managementGroups/00000000-0000-0000-0000-000000000000;Owner;Active;Assign;FALSE;TRUE;90;FALSE;ID;CP;T0;Scoped;;
+Azure-TenantRoot-UserAccessAdministrator;/providers/Microsoft.Management/managementGroups/00000000-0000-0000-0000-000000000000;User Access Administrator;Active;Assign;FALSE;TRUE;90;FALSE;ID;CP;T0;Scoped;;
+;;;;;;;;;;;;;;
+Azure-MG-Platform-Owner;/providers/Microsoft.Management/managementGroups/mg-platform;Owner;Active;Assign;FALSE;TRUE;90;FALSE;ID;MP;T1;Scoped;;
+Azure-MG-Platform-Identity-Owner;/providers/Microsoft.Management/managementGroups/mg-platform-identity;Owner;Active;Assign;FALSE;TRUE;90;FALSE;ID;MP;T1;Scoped;;
+Azure-MG-Platform-Management-Reader;/providers/Microsoft.Management/managementGroups/mg-platform-management;Reader;Active;Assign;FALSE;TRUE;365;FALSE;ID;MP;T1;Scoped;;
+;;;;;;;;;;;;;;
+Azure-Subscription-Prod-Contributor;/subscriptions/00000000-0000-0000-0000-000000000000;Contributor;Eligible;Assign;FALSE;TRUE;90;FALSE;ID;MP;T1;Scoped;;
+Azure-Subscription-Prod-Reader;/subscriptions/00000000-0000-0000-0000-000000000000;Reader;Active;Assign;FALSE;TRUE;365;FALSE;ID;MP;T1;Scoped;;

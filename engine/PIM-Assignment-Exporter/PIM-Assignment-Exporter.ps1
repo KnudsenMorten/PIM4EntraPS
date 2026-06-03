@@ -17,7 +17,7 @@ Write-Output "PIM Assignment Exporter"
 Write-Output ""
 Write-Output "Purpose: Export of Privileged Identity Managemement (PIM) Assignments"
 Write-Output ""
-Write-Output "Support: Morten Knudsen - admin@example.invalid | 40 178 179"
+Write-Output "Support: Morten Knudsen - mok@2linkit.net | 40 178 179"
 Write-Output "***********************************************************************************************"
 
 #------------------------------------------------------------------------------------------------------------

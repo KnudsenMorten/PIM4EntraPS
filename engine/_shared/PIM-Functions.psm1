@@ -837,7 +837,7 @@ Function Assign-PIM-Group-Resource
     $AssignmentType      = "Eligible"
     $Permanent           = $false
 
-    $AzScope             = "/providers/Microsoft.Management/managementGroups/00000000-0000-0000-0000-000000000000"
+    $AzScope             = "/providers/Microsoft.Management/managementGroups/f0fa27a0-8e7c-4f63-9a77-ec94786b7c9e"
     $AzScopePermission   = "Owner"
 #>
 
@@ -1071,7 +1071,7 @@ Function CreateUpdate-PIM-PAG-Group
             Write-host "Checking Group Owners"
             If ($Owners)
                 {
-                    # $Owners = "ADMIN-ABC-L0-T0-ID@example.invalid,x-Admin-ABC-L0-T0-ID@example.invalid,admin@example.invalid"
+                    # $Owners = "ADMIN-JT-L0-T0-ID@2linkit.net,x-Admin-MOK-L0-T0-ID@2linkit.net,mok@2linkit.net"
 
                     # Build Owner array
                     $DesiredOwnersUPN = $Owners.Split(",")
@@ -8484,13 +8484,26 @@ function Get-PimCustomScript {
 function Get-PimConfigCsv {
     <#
     .SYNOPSIS
-        Resolve a config-folder CSV file with .custom -> .locked fallback.
+        Resolve a customer-owned <name>.custom.csv config file.
 
     .DESCRIPTION
+        v2.3.0: PIM4EntraPS no longer ships `<name>.locked.csv` baseline files
+        for the per-tenant config CSVs. Every customer's PIM topology is
+        unique (admins, role groups, assignments, AU scopes), so a "shipped
+        baseline that every customer extends" is the wrong mental model --
+        customers always start from `<name>.custom.sample.csv` (which IS
+        shipped, documents the schema, and includes worked example rows) and
+        write to `<name>.custom.csv` (gitignored, customer-owned).
+
         Variant-aware: routes through Get-PimConfigDir, so MSP runs read
-        config-msp/<name>.custom.csv (fallback config-msp/<name>.locked.csv)
-        while local runs read from config-local/ (or plain config/ in
-        single-tenancy mode).
+        config-msp/<name>.custom.csv while local runs read from config-local/
+        (or plain config/ in single-tenancy mode).
+
+        Pre-v2.3.0 legacy fallback: if a customer is upgrading and still has
+        a `<name>.locked.csv` lying around (left over from v2.2.x or earlier),
+        the engine will read it but emit a one-time WARNING per file pointing
+        the operator at the migration step: rename or copy the file to
+        `<name>.custom.csv` to silence the warning.
 
     .PARAMETER Name
         Base name without extension/suffix, e.g. 'PIM-Definitions-AU'.
@@ -8503,11 +8516,22 @@ function Get-PimConfigCsv {
     $cfgRoot = Get-PimConfigDir
     $custom  = Join-Path $cfgRoot ("{0}.custom.csv" -f $Name)
     $locked  = Join-Path $cfgRoot ("{0}.locked.csv" -f $Name)
+    $sample  = Join-Path $cfgRoot ("{0}.custom.sample.csv" -f $Name)
 
     if (Test-Path -LiteralPath $custom) { return $custom }
-    if (Test-Path -LiteralPath $locked) { return $locked }
 
-    throw "Get-PimConfigCsv: neither '$custom' nor '$locked' exists (variant '$($global:PIM_ConfigVariant)')."
+    if (Test-Path -LiteralPath $locked) {
+        Write-Warning ("Get-PimConfigCsv: '{0}.locked.csv' is a legacy pre-v2.3.0 file. " +
+                       "Rename/copy it to '{0}.custom.csv' to silence this warning. " +
+                       "(.locked.csv shipped baselines were removed in v2.3.0 -- every " +
+                       "customer now owns their config as .custom.csv from day one.)" -f $Name)
+        return $locked
+    }
+
+    $hint = if (Test-Path -LiteralPath $sample) {
+        " Copy '$sample' to '$custom' and edit it."
+    } else { "" }
+    throw "Get-PimConfigCsv: '$custom' not found (variant '$($global:PIM_ConfigVariant)').$hint"
 }
 
 function Get-PimOutputDir {

@@ -282,7 +282,7 @@ $params = @{
 New-MgBetaIdentityGovernancePrivilegedAccessGroupEligibilityScheduleRequest -BodyParameter $params
 
 #----------------
-$MyId = $EntraID_Users | Where-Object { $_.UserPrincipalName -eq "admin@example.invalid" }
+$MyId = $EntraID_Users | Where-Object { $_.UserPrincipalName -eq "mok@2linkit.net" }
 $Role = $Global:RoleDefinitionList | Where-Object { $_.DisplayName -eq "Application Administrator" }
 
 $params = @{
