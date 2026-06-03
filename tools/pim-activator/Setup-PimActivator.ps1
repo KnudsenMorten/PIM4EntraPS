@@ -62,15 +62,49 @@
     .\Setup-PimActivator.ps1 -TenantId 'f0fa27a0-...' -PushPolicy `
         -CrxUpdateUrl 'https://stcorp.blob.core.windows.net/pim-activator/updates.xml'
 
+.EXAMPLE
+    # FULLY UNATTENDED rollout (Intune / scheduled task / Azure Function).
+    # Bootstrap SPN must have 3 app permissions admin-consented in the target tenant:
+    #   Application.ReadWrite.All, AppRoleAssignment.ReadWrite.All, DelegatedPermissionGrant.ReadWrite.All
+    # Cert thumbprint is preferred over plaintext secret.
+    .\Setup-PimActivator.ps1 -TenantId 'f0fa27a0-...' `
+        -BootstrapSpnAppId 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee' `
+        -BootstrapSpnCertificateThumbprint 'ABCDEF0123456789ABCDEF0123456789ABCDEF01' `
+        -PushPolicy -CrxUpdateUrl 'https://stcorp.blob.core.windows.net/pim-activator/updates.xml'
+
 .NOTES
     Solution       : PIM4EntraPS
     Component      : tools/pim-activator
     Developed by   : Morten Knudsen, Microsoft MVP
 #>
-[CmdletBinding()]
+[CmdletBinding(DefaultParameterSetName = 'Interactive')]
 param(
     [string]$TenantId,
+
+    # --- Interactive auth (default) ---
+    [Parameter(ParameterSetName = 'Interactive')]
     [switch]$UseDeviceCode,
+
+    # --- Fully-unattended SPN auth (for Intune / Azure Function / scheduled runs) ---
+    # Pass these to skip browser/device-code entirely. The bootstrap SPN needs
+    # 3 application permissions admin-consented in the target tenant:
+    #   Application.ReadWrite.All
+    #   AppRoleAssignment.ReadWrite.All
+    #   DelegatedPermissionGrant.ReadWrite.All
+    # Cert auth is preferred (no secret in scripts/transcripts); secret is
+    # accepted as a fallback. ONE of -BootstrapSpnCertificateThumbprint OR
+    # -BootstrapSpnClientSecret must be supplied alongside -BootstrapSpnAppId.
+    [Parameter(ParameterSetName = 'Unattended', Mandatory)]
+    [ValidatePattern('^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$')]
+    [string]$BootstrapSpnAppId,
+
+    [Parameter(ParameterSetName = 'Unattended')]
+    [ValidatePattern('^[0-9a-fA-F]{40}$')]
+    [string]$BootstrapSpnCertificateThumbprint,
+
+    [Parameter(ParameterSetName = 'Unattended')]
+    [string]$BootstrapSpnClientSecret,
+
     [switch]$PushPolicy,
     [string]$CrxUpdateUrl
 )
@@ -153,7 +187,38 @@ $ctx = Get-MgContext -ErrorAction SilentlyContinue
 $requiredScopes = @('Application.ReadWrite.All', 'AppRoleAssignment.ReadWrite.All', 'DelegatedPermissionGrant.ReadWrite.All')
 
 $needConnect = $true
-if ($ctx) {
+$isUnattended = $PSCmdlet.ParameterSetName -eq 'Unattended'
+
+if ($isUnattended) {
+    # --- Fully unattended path: cert or secret on a pre-staged bootstrap SPN ---
+    if (-not $TenantId) {
+        throw "-TenantId is required in unattended mode (the tenant the activator app reg lives in)."
+    }
+    if (-not $BootstrapSpnCertificateThumbprint -and -not $BootstrapSpnClientSecret) {
+        throw "Unattended mode requires either -BootstrapSpnCertificateThumbprint or -BootstrapSpnClientSecret."
+    }
+    if ($ctx) {
+        # disconnect any stale interactive session so we get a clean app-only context
+        try { Disconnect-MgGraph -ErrorAction SilentlyContinue | Out-Null } catch {}
+    }
+    if ($BootstrapSpnCertificateThumbprint) {
+        Write-Host "          Unattended (certificate) -- thumbprint $BootstrapSpnCertificateThumbprint"
+        Connect-MgGraph -ClientId $BootstrapSpnAppId `
+                        -CertificateThumbprint $BootstrapSpnCertificateThumbprint `
+                        -TenantId $TenantId -NoWelcome
+    } else {
+        Write-Host "          Unattended (client secret) -- consider rotating to a certificate for production."
+        $sec = New-Object System.Security.SecureString
+        foreach ($c in $BootstrapSpnClientSecret.ToCharArray()) { $sec.AppendChar($c) }
+        $sec.MakeReadOnly()
+        $cred = New-Object System.Management.Automation.PSCredential($BootstrapSpnAppId, $sec)
+        Connect-MgGraph -TenantId $TenantId -ClientSecretCredential $cred -NoWelcome
+    }
+    $ctx = Get-MgContext
+    Write-Host "[ 3 / 6 ] OK -- connected as app '$BootstrapSpnAppId' on $($ctx.TenantId) (app-only, no user)" -ForegroundColor Green
+    $needConnect = $false
+} elseif ($ctx) {
+    # Reuse existing valid session if scopes match (interactive only)
     $missing = $requiredScopes | Where-Object { $_ -notin $ctx.Scopes }
     if (-not $missing) {
         if (-not $TenantId -or $ctx.TenantId -eq $TenantId) {
@@ -162,6 +227,7 @@ if ($ctx) {
         }
     }
 }
+
 if ($needConnect) {
     if ($UseDeviceCode) {
         Write-Host "          Device-code flow -- visit the URL + enter code shown below."
