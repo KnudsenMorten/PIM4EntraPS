@@ -1,9 +1,10 @@
 # Release notes for PIM4EntraPS
 
-## v2.4.17
+## v2.4.18
 
 Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monorepo:
 
+- release: PIM4EntraPS v2.4.18 - Azure RBAC visible in My Access tab + collapse for long Entra role lists (1f7def50)
 - release: PIM4EntraPS v2.4.17 - AU names resolve via AdministrativeUnit.Read.All + sort by activation time DESC + persistent AU cache + Update-PimActivatorDev.ps1 helper (b502f337)
 - release: PIM4EntraPS v2.4.16 - popup UX: hide AU GUIDs + group identical roles + 'Re-sign in' instead of 'Auto-fix permissions' + auto-switch to My Access + auto-uncheck activated rows (5f7a664a)
 - release: PIM4EntraPS v2.4.15 - CRITICAL FIX popup JWT decode bug caused infinite "missing scopes" reauth loop + Set-PimActivatorPolicy-Intune.ps1 Platform Script (66f07cfe)
@@ -33,13 +34,69 @@ Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monor
 - release: PIM4EntraPS v2.1.4 - hotfix: PIM-Functions auto-loads naming-conventions at module init (302f0a29)
 - release: PIM4EntraPS v2.1.3 - server-side Graph filtering (Get-PimAdminsFiltered + Get-PimGroupsFiltered) + customer-naming-aware Re-add wizard + naming-convention schema doc (6936c5ea)
 - release: PIM4EntraPS v2.1.2 - PIM Manager v0.3: pre-flight validator + bulk Fix-all + multi-step wizards + tenant cache (87feaada)
-- release: PIM4EntraPS v2.1.1 - rename pim-mapper -> pim-manager (does more than map) + field-by-field UX audit spec + wizard scaffolding (42fe18e1)
 
 ---
 
 # Release notes -- PIM4EntraPS
 
 > **Curated changelog.** The publish workflow auto-prepends recent monorepo commits as a raw activity log; this file is the human-friendly narrative on top.
+
+---
+
+## v2.4.18 -- Azure RBAC visible in My Access tab + collapse for long Entra role lists
+
+Two improvements:
+
+### A. Azure RBAC support (new)
+
+The "Azure RBAC ... deferred to a future release" placeholder is gone. v2.4.18 now queries Azure Resource Manager directly for each active PIM-for-Groups membership and shows the actual Azure roles + scopes granted by that group, in the same tidy format used for Entra roles.
+
+### What it queries
+
+For each active group on the My Access tab, the popup hits:
+
+```
+GET https://management.azure.com/providers/Microsoft.Authorization/roleAssignments
+  ?$filter=principalId eq '<groupId>'
+  &api-version=2022-04-01
+```
+
+Then resolves each `roleDefinitionId` to a friendly name via:
+
+```
+GET https://management.azure.com<roleDefinitionId>?api-version=2022-04-01
+```
+
+Both `roleName` and the scope path are de-GUIDed for end-users. Scope rendering:
+- `/`                            -> `(tenant root)`
+- `/providers/.../managementGroups/X`  -> `Management Group 'X'`
+- `/subscriptions/<id>`          -> `Subscription '<id>'`
+- `/subscriptions/.../resourceGroups/X`  -> `Resource group 'X'`
+- anything more specific stays raw (resource-scoped assignments are usually narrow enough that the path is the most informative thing).
+
+Multiple assignments under the same role name collapse to one line: "Azure RBAC: Owner at 3 scopes ('Subscription A', 'Resource group B', ...)". Same UX pattern as the Entra role grouping shipped in v2.4.16.
+
+### Token acquisition
+
+Azure RBAC lives in ARM (audience `https://management.azure.com`), not in Microsoft Graph. v2.4.18 reuses the **same refresh_token** the popup already has (granted via `offline_access`) to mint a separate ARM-audience access token. No second interactive sign-in required. The ARM token is cached in `chrome.storage.local` with its own expiry; subsequent popup opens hit the cache, not Entra.
+
+### One-time consent
+
+On first popup-open after upgrading to v0.4.4, the popup will request the new scope `https://management.azure.com/user_impersonation`. This scope is not pre-consented in most app registrations -- the user (or admin) needs to consent once.
+
+If the consent prompt doesn't auto-appear (silent refresh path), click **Re-sign in** in the popup. Tenant admins can pre-consent by adding "Azure Service Management -> user_impersonation" to the PIM Activator app registration's API permissions and granting tenant-wide consent (Entra portal -> App registrations -> PIM Activator -> API permissions).
+
+Until consent is granted, the Azure RBAC line shows "Azure RBAC needs user_impersonation consent - click Re-sign in" instead of the deferred placeholder.
+
+### B. Collapse for long Entra role lists
+
+PIM-Entra-ID-Bundle-* groups can carry 50+ Entra role assignments. In v2.4.17 every one was rendered as a separate row, making the My Access tab unreadable for users in admin bundles. v2.4.18 collapses any group with MORE than 3 distinct Entra role names behind a "N Entra roles granted by this group (click to expand)" toggle. Click to expand, click again to collapse.
+
+Verified against a real tenant: a bundle group with 82 active roleAssignments + 50 PIM eligibilities now shows ONE summary row by default; click expands to the full list. The 82 active assignments are direct (granted immediately when group is activated -- no per-role activation needed). The 50 eligibilities require per-role PIM activation and will be added in v2.4.19 (separate "Eligible roles via this group" subsection + per-row Activate button).
+
+### Customer action
+
+End-users on Edge/Chrome auto-update or run `Update-PimActivatorDev.ps1` (maintainer-only). One-time consent prompt for `user_impersonation` at next sign-in. Manifest 0.4.3 -> 0.4.4.
 
 ---
 

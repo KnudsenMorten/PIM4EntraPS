@@ -54,6 +54,10 @@ const SCOPES = [
   // separate scope). Admin consent required.
   'https://graph.microsoft.com/AdministrativeUnit.Read.All',
   // offline_access is required to receive a refresh_token from Entra v2.
+  // The refresh_token is then used to mint a SEPARATE Azure Resource Manager
+  // token (different audience: management.azure.com) for the Azure RBAC
+  // queries on the My Access tab. Without offline_access we'd have to do
+  // two interactive sign-ins to get both Graph + ARM tokens.
   'offline_access',
   // openid is required to receive an id_token (we decode it for account info).
   'openid',
@@ -574,6 +578,92 @@ function summariseScopes(scopes) {
   return parts.join(' + ')
 }
 
+// ---------- Azure RBAC (ARM) ----------
+//
+// Azure RBAC lives in ARM (management.azure.com), NOT in Microsoft Graph. We
+// mint a separate token with the ARM audience by exchanging the same
+// refresh_token we already have (works because the user granted us
+// offline_access at sign-in). The ARM token is cached separately so we don't
+// re-mint on every popup open.
+
+const ARM_SCOPE = 'https://management.azure.com/user_impersonation'
+
+async function getArmToken() {
+  const stored = await getStored(['refreshToken', 'armAccessToken', 'armAccessTokenExpiry'])
+  if (stored.armAccessToken && stored.armAccessTokenExpiry && Date.now() < stored.armAccessTokenExpiry) {
+    return stored.armAccessToken
+  }
+  if (!stored.refreshToken) return null
+  try {
+    const tok = await exchangeToken({
+      client_id:     cfg.clientId,
+      grant_type:    'refresh_token',
+      refresh_token: stored.refreshToken,
+      scope:         `${ARM_SCOPE} offline_access`,
+      redirect_uri:  REDIRECT_URI
+    })
+    const expiry = Date.now() + (Number(tok.expires_in || 3600) - 60) * 1000
+    await setStored({
+      armAccessToken:       tok.access_token,
+      armAccessTokenExpiry: expiry,
+      // Entra rotates refresh_tokens on each redeem; persist the new one.
+      ...(tok.refresh_token ? { refreshToken: tok.refresh_token } : {})
+    })
+    return tok.access_token
+  } catch (e) {
+    console.warn('[PIM Activator] ARM token acquisition failed:', e?.message || e)
+    return null
+  }
+}
+
+async function listAzureRoleAssignmentsForGroup(armToken, groupId) {
+  // ARM roleAssignments query at tenant root. $filter on principalId returns
+  // every assignment in scopes the caller can see. assignedTo() would expand
+  // to inherited assignments but is more expensive; principalId eq is enough
+  // because we want assignments where THIS group is the principal.
+  const url = `https://management.azure.com/providers/Microsoft.Authorization/roleAssignments?$filter=principalId+eq+%27${groupId}%27&api-version=2022-04-01`
+  const res = await fetch(url, { headers: { Authorization: `Bearer ${armToken}` } })
+  if (!res.ok) {
+    const t = await res.text()
+    const err = new Error(`ARM ${res.status}: ${t.substring(0, 200)}`)
+    err.status = res.status
+    throw err
+  }
+  const j = await res.json()
+  return j.value || []
+}
+
+let armRoleNameCache = {}   // { fullRoleDefinitionId: displayName }
+async function resolveArmRoleName(armToken, roleDefinitionId) {
+  if (!roleDefinitionId) return '(unknown role)'
+  if (roleDefinitionId in armRoleNameCache) return armRoleNameCache[roleDefinitionId]
+  try {
+    const url = `https://management.azure.com${roleDefinitionId}?api-version=2022-04-01`
+    const res = await fetch(url, { headers: { Authorization: `Bearer ${armToken}` } })
+    if (res.ok) {
+      const j = await res.json()
+      armRoleNameCache[roleDefinitionId] = j?.properties?.roleName || roleDefinitionId
+    } else {
+      armRoleNameCache[roleDefinitionId] = roleDefinitionId.split('/').pop()   // GUID fallback
+    }
+  } catch {
+    armRoleNameCache[roleDefinitionId] = '(lookup failed)'
+  }
+  return armRoleNameCache[roleDefinitionId]
+}
+
+// Turn /subscriptions/<sub>/resourceGroups/<rg>/providers/... -> human-readable
+function describeArmScope(scopeStr) {
+  if (!scopeStr || scopeStr === '/')                  return '(tenant root)'
+  if (scopeStr.startsWith('/providers/Microsoft.Management/managementGroups/')) {
+    return `Management Group '${scopeStr.split('/').pop()}'`
+  }
+  if (scopeStr.match(/^\/subscriptions\/[^/]+$/))     return `Subscription '${scopeStr.split('/').pop()}'`
+  const rg = scopeStr.match(/^\/subscriptions\/[^/]+\/resourceGroups\/([^/]+)$/)
+  if (rg)                                              return `Resource group '${rg[1]}'`
+  return scopeStr   // resource-scoped or something unusual; show raw
+}
+
 async function resolveAuDisplayName(token, auId) {
   if (auId in auNameCache) return auNameCache[auId]
   try {
@@ -654,8 +744,10 @@ async function loadMyAccessTab(token, { force = false } = {}) {
       startDateTime: x.startDateTime,
       endDateTime: x.endDateTime,
       accessId: x.accessId,
-      roles: null,        // null = not loaded yet
-      rolesError: null
+      roles: null,            // Entra: null = not loaded yet
+      rolesError: null,
+      azureRoles: null,       // Azure RBAC: null = not loaded yet
+      azureRolesError: null
     })).sort((a, b) => {
       // Newest activation first -- user sees what they just activated at the
       // top, long-standing eligibilities (months-old memberships) at the
@@ -672,9 +764,15 @@ async function loadMyAccessTab(token, { force = false } = {}) {
     updateBadges()
     myAccessLoadedOnce = true
 
-    // 4. Lazy-load role assignments per group, updating the DOM as each resolves.
-    //    Sequential to be gentle on Graph throttling.
+    // 4. Acquire Azure RBAC token once (separate audience from Graph). May
+    //    return null if user hasn't consented to user_impersonation yet --
+    //    each row's Azure section will then show a friendly hint.
+    const armToken = await getArmToken()
+
+    // 5. Lazy-load Entra + Azure role assignments per group, updating the DOM
+    //    as each resolves. Sequential to be gentle on Graph/ARM throttling.
     for (const r of rows) {
+      // --- Entra roles (Microsoft Graph) -------------------------------
       try {
         const assignments = await listRoleAssignmentsForGroup(token, r.groupId)
         const resolved = []
@@ -690,6 +788,29 @@ async function loadMyAccessTab(token, { force = false } = {}) {
         r.roles = []
         r.rolesError = e.message
       }
+
+      // --- Azure RBAC roles (ARM) --------------------------------------
+      if (!armToken) {
+        r.azureRoles = []
+        r.azureRolesError = 'Azure RBAC needs user_impersonation consent - click Re-sign in'
+      } else {
+        try {
+          const armAssignments = await listAzureRoleAssignmentsForGroup(armToken, r.groupId)
+          const resolvedArm = []
+          for (const a of armAssignments) {
+            const roleName = await resolveArmRoleName(armToken, a?.properties?.roleDefinitionId)
+            const scope    = describeArmScope(a?.properties?.scope)
+            resolvedArm.push({ roleName, scope })
+          }
+          r.azureRoles = resolvedArm
+          r.azureRolesError = null
+        } catch (e) {
+          console.warn(`Azure RBAC lookup failed for group ${r.groupId}:`, e)
+          r.azureRoles = []
+          r.azureRolesError = e.message
+        }
+      }
+
       updateMyAccessRoleSlot(r)
     }
   } catch (e) {
@@ -752,28 +873,88 @@ function updateMyAccessRoleSlot(r) {
     d.innerHTML = '&#x21B3; <span class="ma-scope">(no Entra role assignments granted by this group)</span>'
     slot.appendChild(d)
   } else {
-    // Collapse 8 "Groups Administrator AU <guid>" rows into one tidy row:
-    //   "Groups Administrator -- in AU 'Marketing', 'Sales' + 6 more"
-    // Group by roleName, summarise scopes. End-users can't act on GUIDs and
-    // they make the popup unreadable, so we drop them entirely.
+    // Collapse 8 "Groups Administrator AU <guid>" rows into one tidy row.
+    // Group by roleName, summarise scopes. Then if there are MORE than 3
+    // distinct role names (PIM-Entra-ID-Bundle-* groups can have 80+ roles),
+    // default-collapse the list behind a "Show all N Entra roles" toggle so
+    // the popup is readable.
     const byRole = new Map()
     for (const role of r.roles) {
       if (!byRole.has(role.roleName)) byRole.set(role.roleName, [])
       byRole.get(role.roleName).push(role.scope)
     }
+    const roleEntries = [...byRole]
+    const COLLAPSE_THRESHOLD = 3
+
+    if (roleEntries.length > COLLAPSE_THRESHOLD) {
+      // Collapsed summary line
+      const summary = document.createElement('div')
+      summary.className = 'ma-role ma-collapsed'
+      summary.style.cursor = 'pointer'
+      summary.innerHTML = `&#x21B3; <strong>${roleEntries.length} Entra roles granted by this group</strong> <span class="ma-scope">(click to expand)</span>`
+      slot.appendChild(summary)
+
+      const detail = document.createElement('div')
+      detail.style.display = 'none'
+      detail.style.marginLeft = '0'
+      for (const [roleName, scopes] of roleEntries) {
+        const s = summariseScopes(scopes)
+        const d = document.createElement('div')
+        d.className = 'ma-role'
+        d.innerHTML = `&#x21B3; Entra role: <strong>${escapeHtml(roleName)}</strong> <span class="ma-scope">${escapeHtml(s)}</span>`
+        detail.appendChild(d)
+      }
+      slot.appendChild(detail)
+
+      summary.addEventListener('click', () => {
+        const isOpen = detail.style.display !== 'none'
+        detail.style.display = isOpen ? 'none' : 'block'
+        summary.innerHTML = isOpen
+          ? `&#x21B3; <strong>${roleEntries.length} Entra roles granted by this group</strong> <span class="ma-scope">(click to expand)</span>`
+          : `&#x21B3; <strong>${roleEntries.length} Entra roles granted by this group</strong> <span class="ma-scope">(click to collapse)</span>`
+      })
+    } else {
+      for (const [roleName, scopes] of roleEntries) {
+        const summary = summariseScopes(scopes)
+        const d = document.createElement('div')
+        d.className = 'ma-role'
+        d.innerHTML = `&#x21B3; Entra role: <strong>${escapeHtml(roleName)}</strong> <span class="ma-scope">${escapeHtml(summary)}</span>`
+        slot.appendChild(d)
+      }
+    }
+  }
+  // Azure RBAC roles -- v2.4.18 onwards we actually query ARM for these.
+  if (r.azureRoles === null) {
+    const d = document.createElement('div')
+    d.className = 'ma-role ma-loading'
+    d.textContent = 'Loading Azure RBAC...'
+    slot.appendChild(d)
+  } else if (r.azureRolesError) {
+    const d = document.createElement('div')
+    d.className = 'ma-role ma-err'
+    d.innerHTML = `&#x21B3; Azure RBAC: <span class="ma-scope">${escapeHtml(r.azureRolesError)}</span>`
+    slot.appendChild(d)
+  } else if (!r.azureRoles.length) {
+    const d = document.createElement('div')
+    d.className = 'ma-role'
+    d.innerHTML = '&#x21B3; <span class="ma-scope">(no Azure RBAC assignments granted by this group)</span>'
+    slot.appendChild(d)
+  } else {
+    // Group by Azure role name + scope summary
+    const byRole = new Map()
+    for (const role of r.azureRoles) {
+      if (!byRole.has(role.roleName)) byRole.set(role.roleName, [])
+      byRole.get(role.roleName).push(role.scope)
+    }
     for (const [roleName, scopes] of byRole) {
-      const summary = summariseScopes(scopes)
+      const unique = [...new Set(scopes)]
+      const summary = unique.length === 1 ? unique[0] : `${unique.length} scopes (${unique.slice(0,3).join(', ')}${unique.length > 3 ? '...' : ''})`
       const d = document.createElement('div')
-      d.className = 'ma-role'
-      d.innerHTML = `&#x21B3; Entra role: <strong>${escapeHtml(roleName)}</strong> <span class="ma-scope">${escapeHtml(summary)}</span>`
+      d.className = 'ma-role ma-rbac'
+      d.innerHTML = `&#x21B3; Azure RBAC: <strong>${escapeHtml(roleName)}</strong> <span class="ma-scope">at ${escapeHtml(summary)}</span>`
       slot.appendChild(d)
     }
   }
-  // Azure RBAC deferred-to-future-release placeholder, always shown.
-  const rbac = document.createElement('div')
-  rbac.className = 'ma-role ma-rbac'
-  rbac.innerHTML = '&#x21B3; Azure RBAC assignments granted by this group: see Azure portal (Azure RM API access deferred to a future release)'
-  slot.appendChild(rbac)
 }
 
 // ---------- Tabs ----------
