@@ -110,12 +110,15 @@ const REQUIRED_GRAPH_SCOPES = [
 ]
 
 // decodeJwtPayload: parse an access token, return its payload object (or null).
+// base64UrlDecode already returns a UTF-8-decoded string; wrapping the result
+// in TextDecoder().decode() throws ("provided value cannot be converted to a
+// sequence of bytes") which the try/catch silently swallows, making every
+// token look like it has zero scopes -> infinite self-heal loop.
 function decodeJwtPayload(token) {
   try {
     const parts = String(token || '').split('.')
     if (parts.length < 2) return null
-    const json = new TextDecoder().decode(base64UrlDecode(parts[1]))
-    return JSON.parse(json)
+    return JSON.parse(base64UrlDecode(parts[1]))
   } catch { return null }
 }
 
