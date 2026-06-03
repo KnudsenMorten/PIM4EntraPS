@@ -1,9 +1,11 @@
 # Release notes for PIM4EntraPS
 
-## v2.4.19
+## v2.4.20
 
 Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monorepo:
 
+- release: PIM4EntraPS v2.4.20 - wider popup (980px) + Re-sign in auto-launches OAuth + Azure RBAC consent banner with 1-3 min propagation note (3c6ab56b)
+- fix(PIM4EntraPS): Update-PimActivatorDev.ps1 drops `ConvertFrom-Json -Depth` (PS 5.1 incompatible) (9ae24485)
 - release: PIM4EntraPS v2.4.19 - skip empty subsections + 3-category grouping in My Access tab (Entra / Azure / Workload) (0c799e60)
 - release: PIM4EntraPS v2.4.18 - Azure RBAC visible in My Access tab + collapse for long Entra role lists (1f7def50)
 - release: PIM4EntraPS v2.4.17 - AU names resolve via AdministrativeUnit.Read.All + sort by activation time DESC + persistent AU cache + Update-PimActivatorDev.ps1 helper (b502f337)
@@ -32,14 +34,44 @@ Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monor
 - release: PIM4EntraPS v2.1.7 - docs/ROADMAP.md (34 customer-requested features sized + sequenced + storage-backend decision) Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com> (c1ae5fc7)
 - release: PIM4EntraPS v2.1.6 - hotfix: Ensure-DateTime null-safe (kills persistent engine crash at PIM-Baseline-Management-CSV.ps1:1196) (bd2207d0)
 - release: PIM4EntraPS v2.1.5 - hotfix: visible feedback on Remove-orphan-assignment button (dbd9bd38)
-- release: PIM4EntraPS v2.1.4 - hotfix: PIM-Functions auto-loads naming-conventions at module init (302f0a29)
-- release: PIM4EntraPS v2.1.3 - server-side Graph filtering (Get-PimAdminsFiltered + Get-PimGroupsFiltered) + customer-naming-aware Re-add wizard + naming-convention schema doc (6936c5ea)
 
 ---
 
 # Release notes -- PIM4EntraPS
 
 > **Curated changelog.** The publish workflow auto-prepends recent monorepo commits as a raw activity log; this file is the human-friendly narrative on top.
+
+---
+
+## v2.4.20 -- Wider popup (980px), Re-sign in auto-launches OAuth, Azure RBAC consent banner
+
+Three UX fixes after v2.4.19 went out:
+
+### 1. Popup width 780px -> 980px
+
+Long PIM group names + role columns wrapped awkwardly at 780px (visible in user screenshots where rows overflowed the right edge). 980px is the new max; still well within Chromium's popup limit (~1024px). Padding/columns reflow automatically.
+
+### 2. Re-sign in actually re-signs in
+
+Pre-v2.4.20 click flow: Re-sign in -> overlay -> reload -> Sign in screen. User then had to click Sign in AGAIN to trigger OAuth + consent. Two clicks for an action labelled "Re-sign in" is bad UX.
+
+v2.4.20 sets a `forceInteractive: true` flag in `chrome.storage.local` before reload; on next boot, the popup detects the flag and immediately launches `acquireGraphToken({ interactive: true })` instead of waiting for a button click. Result: one click goes straight to the Microsoft consent dialog (for any newly-added scope), then back to a populated popup.
+
+If the interactive flow fails (cancelled, network error, etc.), popup falls back to showing the Sign in button + reload button so the user can recover.
+
+### 3. Azure RBAC consent banner instead of per-row error
+
+Pre-v2.4.20: every group in the My Access list got a red "Azure RBAC: Azure RBAC needs user_impersonation consent - click Re-sign in" sub-row when ARM consent was missing. With 12+ groups that's 12 identical error lines.
+
+v2.4.20: one global yellow banner at the top of My Access:
+
+> **Azure RBAC roles not visible yet.** Admin consent for `user_impersonation` is required to show Azure roles per group. Click **Re-sign in** (top-left) to grant it. Tenant-wide one-time action.
+
+Per-row Azure subsection is suppressed when consent is missing (cleaner). When consent IS granted, Azure RBAC rows render as before.
+
+### Customer action
+
+End-users on Edge/Chrome auto-update or run `Update-PimActivatorDev.ps1`. Manifest 0.4.5 -> 0.4.6. No new scopes.
 
 ---
 

@@ -229,7 +229,7 @@ foreach ($b in $browsers) {
         $prefPath = Join-Path $b.UserData $name
         if (-not (Test-Path $prefPath)) { continue }
         try {
-            $json = Get-Content -LiteralPath $prefPath -Raw -Encoding UTF8 | ConvertFrom-Json -Depth 100
+            $json = Get-Content -LiteralPath $prefPath -Raw -Encoding UTF8 | ConvertFrom-Json
             $touched = $false
             if ($json.extensions -and $json.extensions.settings -and $json.extensions.settings.$EXT_ID) {
                 $json.extensions.settings.PSObject.Properties.Remove($EXT_ID)
