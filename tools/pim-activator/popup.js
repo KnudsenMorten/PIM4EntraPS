@@ -48,6 +48,11 @@ const SCOPES = [
   // consent required -- re-run Deploy-PimActivatorBackend.ps1 -GrantConsent
   // after upgrading the extension.
   'https://graph.microsoft.com/RoleManagement.Read.Directory',
+  // AdministrativeUnit.Read.All resolves AU displayNames (otherwise the My
+  // Access tab shows "N Administrative Units" without names because the role
+  // assignment exposes the AU id but reading the AU object requires this
+  // separate scope). Admin consent required.
+  'https://graph.microsoft.com/AdministrativeUnit.Read.All',
   // offline_access is required to receive a refresh_token from Entra v2.
   'offline_access',
   // openid is required to receive an id_token (we decode it for account info).
@@ -106,7 +111,8 @@ const REQUIRED_GRAPH_SCOPES = [
   'PrivilegedAccess.ReadWrite.AzureADGroup',
   'Group.Read.All',
   'User.Read',
-  'RoleManagement.Read.Directory'
+  'RoleManagement.Read.Directory',
+  'AdministrativeUnit.Read.All'
 ]
 
 // decodeJwtPayload: parse an access token, return its payload object (or null).
@@ -464,7 +470,41 @@ async function activateGroup(token, groupId, justification, durationHours) {
 //     killing the whole tab.
 
 let roleDefinitionsCache = null     // { idToName: { roleDefId: displayName } }
-let auNameCache = {}                // { auId: displayName | null (404) | '__err' (other) }
+let auNameCache = {}                // { auId: displayName | null (lookup failed) }
+
+// Hydrate AU name cache from chrome.storage.local on popup load so we don't
+// re-look-up the same AUs every time the popup opens. AU names rarely change;
+// stale entries get re-validated lazily as the popup queries each AU and
+// overwrites the cache entry. 24-hour TTL on individual entries to age out
+// renamed/deleted AUs.
+const AU_CACHE_TTL_MS = 24 * 60 * 60 * 1000   // 24h
+;(async () => {
+  try {
+    const stored = await getStored(['auNameCache'])
+    if (stored?.auNameCache && typeof stored.auNameCache === 'object') {
+      const now = Date.now()
+      for (const [id, entry] of Object.entries(stored.auNameCache)) {
+        // Entry can be either raw name string (legacy v2.4.x) or { name, ts }
+        if (typeof entry === 'string' || entry === null) {
+          auNameCache[id] = entry   // legacy format
+        } else if (entry?.ts && (now - entry.ts) < AU_CACHE_TTL_MS) {
+          auNameCache[id] = entry.name
+        }
+      }
+    }
+  } catch { /* missing or corrupt cache; start fresh */ }
+})()
+
+// Persist the cache after each successful lookup so the data outlives the popup.
+async function persistAuCache() {
+  try {
+    const wrapped = {}
+    for (const [id, name] of Object.entries(auNameCache)) {
+      wrapped[id] = { name, ts: Date.now() }
+    }
+    await setStored({ auNameCache: wrapped })
+  } catch { /* storage quota or shutdown; ignore */ }
+}
 
 async function listActiveGroupAssignmentsForMe(token) {
   if (!currentAccount?.localAccountId) return []
@@ -528,7 +568,7 @@ function summariseScopes(scopes) {
     const tail = unique.length > 4 ? ` + ${unique.length - 4} more` : ''
     parts.push(`in AU ${head}${tail}`)
   }
-  if (unnamedAus) parts.push(`${unnamedAus} restricted scope${unnamedAus === 1 ? '' : 's'}`)
+  if (unnamedAus) parts.push(`scoped to ${unnamedAus} Administrative Unit${unnamedAus === 1 ? '' : 's'} (admin must grant AdministrativeUnit.Read.All to show names)`)
   if (others)     parts.push(`${others} other scope${others === 1 ? '' : 's'}`)
   if (!parts.length) return '(scope unavailable)'
   return parts.join(' + ')
@@ -539,14 +579,16 @@ async function resolveAuDisplayName(token, auId) {
   try {
     const res = await graph(token, 'GET', `/directory/administrativeUnits/${auId}?$select=id,displayName`)
     auNameCache[auId] = res?.displayName || null
-    return auNameCache[auId]
   } catch (e) {
     // 404 (stale) or 403 (insufficient consent) -> cache the failure as null
-    // so the renderer can degrade to a friendly "restricted scope" label
-    // instead of showing a meaningless GUID or "__err" to the end-user.
+    // so the renderer can degrade to a friendly "N Administrative Units"
+    // label instead of showing a GUID or "__err".
     auNameCache[auId] = null
-    return null
   }
+  // Fire-and-forget persistence so subsequent popup-opens reuse the cached
+  // names without round-tripping to Graph.
+  persistAuCache()
+  return auNameCache[auId]
 }
 
 // Returns structured scope info so the renderer can group/summarise instead of
@@ -614,7 +656,15 @@ async function loadMyAccessTab(token, { force = false } = {}) {
       accessId: x.accessId,
       roles: null,        // null = not loaded yet
       rolesError: null
-    })).sort((a, b) => (a.displayName || '').localeCompare(b.displayName || ''))
+    })).sort((a, b) => {
+      // Newest activation first -- user sees what they just activated at the
+      // top, long-standing eligibilities (months-old memberships) at the
+      // bottom. Prevents the "mix of active permissions" confusion where
+      // recent activations got buried alphabetically.
+      const ta = a.startDateTime ? Date.parse(a.startDateTime) : 0
+      const tb = b.startDateTime ? Date.parse(b.startDateTime) : 0
+      return tb - ta
+    })
 
     myAccessCache = { ts: Date.now(), rows }
     els.myAccessStatus.textContent = `${rows.length} active group membership(s).`
