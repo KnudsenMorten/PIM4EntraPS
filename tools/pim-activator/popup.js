@@ -170,7 +170,14 @@ async function triggerInteractiveReauth(reason) {
     <div style="color:#3fb950;">Refreshing in a moment -- you'll be prompted to sign in once more. After that, everything works.</div>
   `
   document.body.appendChild(overlay)
-  await clearStored(['refreshToken', 'accessToken', 'accessTokenExpiry', 'account'])
+  // Wipe Graph + ARM tokens. Setting forceInteractive: true tells the next
+  // popup-load to AUTOMATICALLY launch interactiveAuth (consent prompt) instead
+  // of leaving the user staring at a Sign in button. Without this flag, user
+  // clicks Re-sign in -> overlay -> reload -> Sign in screen -> they have to
+  // click Sign in again to actually trigger the OAuth + consent flow. Two
+  // clicks = bad UX, especially for an action labelled "Re-sign in".
+  await clearStored(['refreshToken', 'accessToken', 'accessTokenExpiry', 'account', 'armAccessToken', 'armAccessTokenExpiry'])
+  await setStored({ forceInteractive: true })
   // 2.5s pause so the user can read the banner before the popup reloads.
   await new Promise(r => setTimeout(r, 2500))
   window.location.reload()
@@ -792,7 +799,8 @@ async function loadMyAccessTab(token, { force = false } = {}) {
       // --- Azure RBAC roles (ARM) --------------------------------------
       if (!armToken) {
         r.azureRoles = []
-        r.azureRolesError = 'Azure RBAC needs user_impersonation consent - click Re-sign in'
+        r.azureRolesError = null
+        r.azureRolesNeedConsent = true   // suppresses per-row error; renderer shows one banner at the top of the tab instead
       } else {
         try {
           const armAssignments = await listAzureRoleAssignmentsForGroup(armToken, r.groupId)
@@ -832,6 +840,26 @@ function renderMyAccess(rows) {
   if (!rows.length) {
     els.myAccessList.innerHTML = '<div class="empty">No active PIM-for-Groups memberships right now. Activate one from the Activate tab.</div>'
     return
+  }
+
+  // Global banner when Azure RBAC consent is missing -- replaces per-row
+  // "needs user_impersonation consent" repetition. Also calls out the
+  // 1-3 min propagation delay that catches users between "consent accepted"
+  // and "ARM actually returns role assignments instead of 403".
+  if (rows.some(r => r.azureRolesNeedConsent)) {
+    const banner = document.createElement('div')
+    banner.style.cssText = 'background:#fff8c5;border:1px solid #d4a72c;border-radius:6px;padding:10px 12px;margin:6px 0 10px 0;font-size:12.5px;color:#633c01;line-height:1.45;'
+    banner.innerHTML = `
+      <div style="font-weight:600;margin-bottom:4px;">Azure RBAC roles not visible yet.</div>
+      Admin consent for <code>user_impersonation</code> (Azure Service Management API) is required to show Azure roles per group.
+      <ol style="margin:6px 0 6px 18px;padding:0;">
+        <li>Click <strong>Re-sign in</strong> (top-left) and accept the Microsoft consent prompt.</li>
+        <li><strong>Wait 1-3 minutes</strong> for Azure to propagate the new permission across regions (this is an Azure platform delay, not the popup).</li>
+        <li>Click <strong>Refresh</strong> (top-right) -- Azure roles should now show per group.</li>
+      </ol>
+      Tenant-wide one-time action. Other users in your tenant won't see any prompt.
+    `
+    els.myAccessList.appendChild(banner)
   }
 
   // While roles are still loading (any row with roles === null OR azureRoles
@@ -979,6 +1007,10 @@ function updateOneMyAccessRoleSlot(r, slot) {
     d.className = 'ma-role ma-loading'
     d.textContent = 'Loading Azure RBAC...'
     slot.appendChild(d)
+  } else if (r.azureRolesNeedConsent) {
+    // Suppress per-row consent message; one global banner at top of My Access
+    // tab covers this (see renderMyAccess). Showing it per-row was spammy
+    // when user hadn't yet consented to user_impersonation.
   } else if (r.azureRolesError) {
     const d = document.createElement('div')
     d.className = 'ma-role ma-err'
@@ -1063,8 +1095,36 @@ function escapeHtml(s) {
 
 // ---------- Boot ----------
 async function boot() {
-  let result = await acquireGraphToken({ interactive: false })
+  // Honour the forceInteractive flag set by triggerInteractiveReauth so the
+  // "Re-sign in" button triggers OAuth + consent prompt automatically instead
+  // of leaving the user on the Sign in screen needing a second click.
+  const stored = await getStored(['forceInteractive'])
+  const forceInteractive = !!stored?.forceInteractive
+  if (forceInteractive) {
+    await clearStored(['forceInteractive'])
+  }
+
+  let result = forceInteractive ? null : await acquireGraphToken({ interactive: false })
   if (!result) {
+    if (forceInteractive) {
+      // Auto-launch the interactive flow (consent prompt for any newly-added
+      // scopes lands here).
+      els.signIn.style.display = 'none'
+      els.status.textContent = 'Signing in...'
+      try {
+        result = await acquireGraphToken({ interactive: true })
+      } catch (e) {
+        els.signIn.style.display = ''
+        els.status.textContent = `Sign-in failed: ${e.message}`
+        els.status.classList.add('err')
+        els.signIn.onclick = async () => { window.location.reload() }
+        return
+      }
+      currentAccount = result.account
+      await loaded(result.accessToken)
+      return
+    }
+
     els.signIn.style.display = ''
     els.status.textContent = 'Sign in to load your eligible PIM groups.'
     els.signIn.onclick = async () => {
