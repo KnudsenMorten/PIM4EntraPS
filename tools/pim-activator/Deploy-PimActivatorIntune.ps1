@@ -584,7 +584,24 @@ foreach ($m in $mods) {
     }
     Import-Module $m -ErrorAction Stop | Out-Null
 }
-Connect-MgGraph -Scopes 'DeviceManagementConfiguration.ReadWrite.All','DeviceManagementManagedDevices.ReadWrite.All','Group.Read.All' -NoWelcome | Out-Null
+# deviceHealthScripts (Intune Remediations) REQUIRES DeviceManagementScripts.
+# ReadWrite.All -- NOT the Configuration one. We also need Group.Read.All for
+# the assignment lookup. Force a fresh consent each session so we don't
+# inherit a stale cached token missing the right scope.
+$requiredScopes = @(
+    'DeviceManagementScripts.ReadWrite.All'
+    'DeviceManagementConfiguration.ReadWrite.All'   # used by assign endpoint
+    'Group.Read.All'
+)
+$currentCtx = Get-MgContext -ErrorAction SilentlyContinue
+if ($currentCtx) {
+    $missing = $requiredScopes | Where-Object { $_ -notin $currentCtx.Scopes }
+    if ($missing) {
+        Write-Warn "Existing Graph session is missing scope(s): $($missing -join ', '). Reconnecting for re-consent."
+        Disconnect-MgGraph -ErrorAction SilentlyContinue | Out-Null
+    }
+}
+Connect-MgGraph -Scopes $requiredScopes -NoWelcome | Out-Null
 
 $detB64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($detectionScript))
 $remB64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($remediationScript))
