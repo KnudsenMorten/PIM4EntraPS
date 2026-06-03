@@ -70,6 +70,13 @@ $filtersCustom = Join-Path $configRoot 'PIM4EntraPS.Filters.custom.ps1'
 if (Test-Path $filtersLocked) { . $filtersLocked }
 if (Test-Path $filtersCustom) { . $filtersCustom }
 
+# ---- 4b. Solution-wide customer overrides (PIM4EntraPS.custom.ps1) -----------
+# Mirrors SecurityInsight's config\SecurityInsight.custom.ps1 layer. This is
+# where customers put SPN / Managed Identity values once for ALL engines.
+# Per-engine LauncherConfig.custom.ps1 (loaded below) still wins.
+$solutionCustom = Join-Path $configRoot 'PIM4EntraPS.custom.ps1'
+if (Test-Path $solutionCustom) { . $solutionCustom }
+
 # ---- 5. Layers 6-7: per-launcher defaults + custom ---------------------------
 $launcherDir       = Split-Path -Parent $LauncherPath
 $launcherDefaults  = Join-Path $launcherDir 'LauncherConfig.defaults.ps1'
