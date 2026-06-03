@@ -1,9 +1,10 @@
 # Release notes for PIM4EntraPS
 
-## v2.4.21
+## v2.4.22
 
 Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monorepo:
 
+- release: PIM4EntraPS v2.4.22 - Azure RBAC iterates user subscriptions instead of tenant-root (fixes 403 AuthorizationFailed) (5a5817ea)
 - release: PIM4EntraPS v2.4.21 - popup width 980px -> 800px (980 exceeded Chromium popup max, hid Sign in button offscreen) (bb8585b7)
 - release: PIM4EntraPS v2.4.20 - wider popup (980px) + Re-sign in auto-launches OAuth + Azure RBAC consent banner with 1-3 min propagation note (3c6ab56b)
 - fix(PIM4EntraPS): Update-PimActivatorDev.ps1 drops `ConvertFrom-Json -Depth` (PS 5.1 incompatible) (9ae24485)
@@ -33,13 +34,29 @@ Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monor
 - release: PIM4EntraPS v2.2.1 - hotfix: scrub maintainer-tenant data from shipped .locked.csv baselines + sample-file cleanup (b666d1eb)
 - release: PIM4EntraPS v2.2.0 - Theme 1 (Manager UX polish) + Theme 2 first slice (TAP flow) (a659adf6)
 - release: PIM4EntraPS v2.1.7 - docs/ROADMAP.md (34 customer-requested features sized + sequenced + storage-backend decision) Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com> (c1ae5fc7)
-- release: PIM4EntraPS v2.1.6 - hotfix: Ensure-DateTime null-safe (kills persistent engine crash at PIM-Baseline-Management-CSV.ps1:1196) (bd2207d0)
 
 ---
 
 # Release notes -- PIM4EntraPS
 
 > **Curated changelog.** The publish workflow auto-prepends recent monorepo commits as a raw activity log; this file is the human-friendly narrative on top.
+
+---
+
+## v2.4.22 -- Azure RBAC query iterates user's subscriptions instead of tenant-root (was 403 for non-tenant-readers)
+
+v2.4.20 / .21 queried Azure RBAC at tenant-root scope (`https://management.azure.com/providers/Microsoft.Authorization/roleAssignments`). That endpoint requires the caller to have read permission at TENANT ROOT scope, which most users never have -- only Global Admin with "elevated access" toggled on, or someone explicitly assigned a role at tenant scope. Every regular user (including admins scoped to subscriptions) got HTTP 403 `AuthorizationFailed`, and v2.4.20 dumped the raw ARM JSON error into the per-row UI.
+
+v2.4.22 rewrites the strategy:
+
+1. List subscriptions the user can read: `GET https://management.azure.com/subscriptions?api-version=2022-12-01`. Cached in `armSubscriptionsCache` so we hit ARM once per popup session.
+2. For each subscription, query `GET /subscriptions/<id>/providers/Microsoft.Authorization/roleAssignments?$filter=principalId eq '<gid>'`. Anyone with at least Reader on a subscription can list role assignments in that subscription.
+3. Aggregate results, dedupe by assignment id. The subscription name is captured at query time so the renderer can show "Resource group 'X' in 'Production-Sub'" instead of bare GUIDs.
+4. Friendly error fallback: parses ARM `AuthorizationFailed` into "your account can't read Azure role assignments at this scope (needs Reader/Owner on subscription)" instead of dumping raw JSON.
+
+Tradeoff: misses tenant-root + management-group assignments for users who aren't tenant-level readers. For Global Admins with elevated access this still works because the subscription enumeration will include all subs and the root query is also still attempted as a fallback when the user has zero readable subscriptions.
+
+Manifest 0.4.7 -> 0.4.8.
 
 ---
 
