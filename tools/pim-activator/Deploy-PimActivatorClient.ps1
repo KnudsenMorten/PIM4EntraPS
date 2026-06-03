@@ -117,8 +117,10 @@ param(
     [string]$ExtensionId,
 
     [Parameter(Mandatory, ParameterSetName = 'Install')]
+    [Parameter(Mandatory, ParameterSetName = 'InstallMulti')]
     [string]$UpdateUrl,
 
+    # Single-tenant (legacy) -----------------------------------------------------
     [Parameter(Mandatory, ParameterSetName = 'Install')]
     [ValidatePattern('^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$')]
     [string]$TenantId,
@@ -127,14 +129,30 @@ param(
     [ValidatePattern('^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$')]
     [string]$ClientId,
 
+    # Multi-tenant (v1.1+) -------------------------------------------------------
+    # Array of hashtables: @(@{Name='ACME Prod';TenantId='<guid>';ClientId='<guid>'}, ...)
+    # When 2+ entries are present the popup shows a tenant picker on first open
+    # per browser profile; choice cached in chrome.storage.local (per-profile).
+    [Parameter(Mandatory, ParameterSetName = 'InstallMulti')]
+    [object[]]$Tenants,
+
+    # Optional CSV path: Name,TenantId,ClientId (one row per tenant). Convenience
+    # alternative to -Tenants for admins who maintain tenant lists in Excel.
+    [Parameter(ParameterSetName = 'InstallMulti')]
+    [string]$TenantsCsv,
+
+    # Shared options -------------------------------------------------------------
     [Parameter(ParameterSetName = 'Install')]
+    [Parameter(ParameterSetName = 'InstallMulti')]
     [string]$GroupNameFilter = '^PIM-',
 
     [Parameter(ParameterSetName = 'Install')]
+    [Parameter(ParameterSetName = 'InstallMulti')]
     [ValidateRange(0.5, 24)]
     [double]$DefaultDurationHours = 1,
 
     [Parameter(ParameterSetName = 'Install')]
+    [Parameter(ParameterSetName = 'InstallMulti')]
     [string]$DefaultJustification = 'Daily ops',
 
     [Parameter()]
@@ -230,10 +248,43 @@ if ($Scope -eq 'Machine') {
     Write-Host ""
 }
 
+# ---- Multi-tenant: normalise -Tenants / -TenantsCsv into a JSON string -------
+$tenantsJson = $null
+if ($PSCmdlet.ParameterSetName -eq 'InstallMulti') {
+    $tenantList = New-Object System.Collections.Generic.List[object]
+    if ($TenantsCsv) {
+        if (-not (Test-Path -LiteralPath $TenantsCsv)) { throw "TenantsCsv not found: $TenantsCsv" }
+        $csv = Import-Csv -LiteralPath $TenantsCsv
+        foreach ($row in $csv) {
+            if (-not $row.Name -or -not $row.TenantId -or -not $row.ClientId) {
+                throw "TenantsCsv row missing Name/TenantId/ClientId column: $($row | ConvertTo-Json -Compress)"
+            }
+            $tenantList.Add([ordered]@{ Name = $row.Name; TenantId = $row.TenantId; ClientId = $row.ClientId })
+        }
+    }
+    foreach ($t in ($Tenants | Where-Object { $_ })) {
+        # Accept hashtable or PSCustomObject; normalise to ordered hashtable.
+        $name     = if ($t -is [hashtable]) { $t['Name']     } else { $t.Name     }
+        $tenantId = if ($t -is [hashtable]) { $t['TenantId'] } else { $t.TenantId }
+        $clientId = if ($t -is [hashtable]) { $t['ClientId'] } else { $t.ClientId }
+        if (-not $name -or -not $tenantId -or -not $clientId) {
+            throw "Each -Tenants entry must have Name, TenantId, ClientId. Got: $($t | ConvertTo-Json -Compress)"
+        }
+        $tenantList.Add([ordered]@{ Name = $name; TenantId = $tenantId; ClientId = $clientId })
+    }
+    if (-not $tenantList.Count) { throw "No tenants resolved from -Tenants or -TenantsCsv." }
+    $tenantsJson = $tenantList | ConvertTo-Json -Depth 4 -Compress
+}
+
 Write-Host "Installing PIM Activator policy ($Scope scope, $Browser)..." -ForegroundColor Cyan
 Write-Host "  ExtensionId : $ExtensionId"
-Write-Host "  TenantId    : $TenantId"
-Write-Host "  ClientId    : $ClientId"
+if ($tenantsJson) {
+    Write-Host "  Tenants     : $($tenantList.Count) tenant(s) -- popup will show picker when >=2" -ForegroundColor Cyan
+    $tenantList | ForEach-Object { Write-Host "                $($_.Name) -- $($_.TenantId)" -ForegroundColor DarkGray }
+} else {
+    Write-Host "  TenantId    : $TenantId"
+    Write-Host "  ClientId    : $ClientId"
+}
 Write-Host "  UpdateUrl   : $UpdateUrl"
 
 foreach ($root in $policyRoots) {
@@ -257,8 +308,21 @@ foreach ($root in $policyRoots) {
     #    managed.tenantId at runtime.
     $managedPath = Join-Path $root.Path "3rdparty\extensions\$ExtensionId\policy"
     New-PolicyKey -Path $managedPath
-    Set-Reg -Path $managedPath -Name 'tenantId'             -Value $TenantId
-    Set-Reg -Path $managedPath -Name 'clientId'             -Value $ClientId
+    if ($tenantsJson) {
+        # Multi-tenant mode -- Tenants is a REG_SZ JSON array. Chromium parses
+        # it into managed-storage as an array of {Name,TenantId,ClientId}.
+        # Clear singleton fields so the array is the sole source of truth and
+        # there's no risk of leftover/conflicting values from a prior install.
+        foreach ($n in 'tenantId','clientId') {
+            if (Get-ItemProperty -Path $managedPath -Name $n -ErrorAction SilentlyContinue) {
+                Remove-ItemProperty -Path $managedPath -Name $n -ErrorAction SilentlyContinue
+            }
+        }
+        Set-Reg -Path $managedPath -Name 'Tenants' -Value $tenantsJson
+    } else {
+        Set-Reg -Path $managedPath -Name 'tenantId' -Value $TenantId
+        Set-Reg -Path $managedPath -Name 'clientId' -Value $ClientId
+    }
     Set-Reg -Path $managedPath -Name 'groupNameFilter'      -Value $GroupNameFilter
     Set-Reg -Path $managedPath -Name 'defaultJustification' -Value $DefaultJustification
     # defaultDurationHours is a number; both browsers accept REG_SZ and parse

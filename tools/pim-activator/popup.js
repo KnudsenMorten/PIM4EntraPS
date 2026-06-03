@@ -23,6 +23,11 @@
 // Config resolution order:
 //   1. chrome.storage.managed (Intune / Group Policy push -- preferred for enterprise rollout)
 //   2. window.PIM_CONFIG from config.js (developer-mode / manual install)
+//
+// Multi-tenant (v1.1+): if managed config carries a "Tenants" array, the
+// extension lets the user pick which tenant to use. The choice is cached in
+// chrome.storage.local (per-profile by Chromium's design) so each browser
+// profile can be wired to a different tenant on the same Windows user.
 async function loadConfig() {
   const managed = await new Promise(r => chrome.storage.managed.get(null, x => r(x || {})))
   const local   = window.PIM_CONFIG || {}
@@ -31,9 +36,72 @@ async function loadConfig() {
   return merged
 }
 
-const cfg = await loadConfig()
+// Resolve which tenant this profile uses. Returns the merged cfg object with
+// .tenantId/.clientId/.tenantName populated, plus ._allTenants for the footer
+// "switch tenant" UI when there is more than one configured.
+async function resolveTenantConfig() {
+  const raw = await loadConfig()
+  const tenants = Array.isArray(raw.Tenants) ? raw.Tenants.filter(t => t && t.TenantId && t.ClientId) : []
+
+  // Singleton mode (legacy) -- nothing to pick.
+  if (!tenants.length) {
+    return { ...raw, _allTenants: [], tenantName: null }
+  }
+
+  // Exactly one tenant -- use it silently, no picker.
+  if (tenants.length === 1) {
+    const t = tenants[0]
+    return { ...raw, tenantId: t.TenantId, clientId: t.ClientId, tenantName: t.Name || t.TenantId, _allTenants: tenants }
+  }
+
+  // Two or more -- check this profile's cached selection.
+  const cached = await new Promise(r => chrome.storage.local.get(['selectedTenantId'], r))
+  const hit = tenants.find(t => t.TenantId === cached.selectedTenantId)
+  if (hit) {
+    return { ...raw, tenantId: hit.TenantId, clientId: hit.ClientId, tenantName: hit.Name || hit.TenantId, _allTenants: tenants }
+  }
+
+  // No valid selection cached -- render the picker, never returns (reloads on click).
+  renderTenantPicker(tenants)
+  // Keep this async function pending so the rest of boot never runs until reload.
+  await new Promise(() => {})
+}
+
+function renderTenantPicker(tenants) {
+  // Hide everything else so the picker is the only thing visible.
+  for (const id of ['tabs', 'panel-activate', 'panel-myaccess']) {
+    const el = document.getElementById(id)
+    if (el) el.style.display = 'none'
+  }
+  const picker = document.getElementById('tenant-picker')
+  const list   = document.getElementById('tenant-picker-list')
+  if (!picker || !list) return
+  picker.style.display = ''
+  list.innerHTML = ''
+  for (const t of tenants) {
+    const btn = document.createElement('button')
+    btn.style.cssText = 'text-align:left;padding:10px 12px;border:1px solid #d0d7de;border-radius:6px;background:#ffffff;cursor:pointer;display:flex;flex-direction:column;gap:2px;'
+    btn.innerHTML = `<div style="font-weight:600;font-size:13px;color:#0969da;">${escapeHtmlSafe(t.Name || t.TenantId)}</div>
+                     <div style="font-family:monospace;font-size:10.5px;color:#7d8590;">${escapeHtmlSafe(t.TenantId)}</div>`
+    btn.onmouseenter = () => { btn.style.background = '#f6f8fa' }
+    btn.onmouseleave = () => { btn.style.background = '#ffffff' }
+    btn.onclick = async () => {
+      // Save selection + signed-in artifacts cleared so the next boot signs in
+      // to the chosen tenant (refresh tokens from a previous tenant are useless).
+      await new Promise(r => chrome.storage.local.set({ selectedTenantId: t.TenantId }, r))
+      await new Promise(r => chrome.storage.local.remove(['refreshToken', 'accessToken', 'accessTokenExpiry', 'armAccessToken', 'armAccessTokenExpiry', 'account'], r))
+      window.location.reload()
+    }
+    list.appendChild(btn)
+  }
+}
+
+// (escapeHtmlSafe is declared further down -- function declarations hoist, so
+// the picker can call it from this top-level boot section.)
+
+const cfg = await resolveTenantConfig()
 if (!cfg.tenantId || String(cfg.tenantId).startsWith('00000000') || !cfg.clientId || String(cfg.clientId).startsWith('00000000')) {
-  document.getElementById('status-bar').textContent = 'Not configured. Admin must set tenantId + clientId via policy.'
+  document.getElementById('status-bar').textContent = 'Not configured. Admin must set tenantId + clientId (or a Tenants array) via policy.'
   document.getElementById('status-bar').classList.add('err')
   throw new Error('config not set')
 }
@@ -66,14 +134,26 @@ const SCOPES = [
 
 const AUTHORITY    = `https://login.microsoftonline.com/${cfg.tenantId}`
 
-// Populate the footer with the configured tenant id so the user can tell at
-// a glance which tenant this popup is wired to (useful for multi-tenant
-// admins who flip between customer Edge profiles).
+// Populate the footer with the configured tenant -- friendly name if a
+// Tenants array is in play, GUID otherwise. When 2+ tenants are configured,
+// append a "switch" link that clears the cached selection and reloads the
+// picker (per-profile, not global -- other profiles keep their choice).
 ;(() => {
   const el = document.getElementById('footer-tenant')
-  if (el && cfg.tenantId) {
-    el.textContent = `Tenant: ${cfg.tenantId}`
-    el.title = `Microsoft Entra tenant id pushed via chrome.storage.managed (entraGroupRegex / tenantId / clientId). Configured at install time per Intune policy.`
+  if (!el || !cfg.tenantId) return
+  const label = cfg.tenantName ? `${cfg.tenantName}` : cfg.tenantId
+  const multi = Array.isArray(cfg._allTenants) && cfg._allTenants.length >= 2
+  el.innerHTML = `Tenant: <strong>${escapeHtmlSafe(label)}</strong>${multi ? ' <a href="#" id="switch-tenant" style="color:#0969da;text-decoration:none;margin-left:6px;">(switch)</a>' : ''}`
+  el.title = cfg.tenantName
+    ? `Selected tenant: ${cfg.tenantName}\nTenant id: ${cfg.tenantId}\nClient id: ${cfg.clientId}\n\nManaged-policy tenant list contains ${cfg._allTenants.length} entr${cfg._allTenants.length === 1 ? 'y' : 'ies'} -- this profile chose '${cfg.tenantName}'. Selection is stored per browser profile.`
+    : `Microsoft Entra tenant id pushed via chrome.storage.managed. Configured at install time per Intune policy.`
+  if (multi) {
+    const link = document.getElementById('switch-tenant')
+    if (link) link.onclick = async (e) => {
+      e.preventDefault()
+      await new Promise(r => chrome.storage.local.remove(['selectedTenantId', 'refreshToken', 'accessToken', 'accessTokenExpiry', 'armAccessToken', 'armAccessTokenExpiry', 'account'], r))
+      window.location.reload()
+    }
   }
 })()
 

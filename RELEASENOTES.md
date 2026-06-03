@@ -1,9 +1,10 @@
 # Release notes for PIM4EntraPS
 
-## v2.4.43
+## v2.4.44
 
 Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monorepo:
 
+- release: PIM4EntraPS v2.4.44 - multi-tenant Tenants array + Intune Remediation deployer (extension v1.1.0) (23de65f7)
 - release: PIM4EntraPS v2.4.43 - PIM Activator extension graduates to v1.0.0 (ec7967b0)
 - release: PIM4EntraPS v2.4.37 - popup actually shrinks on sign-in (block layout instead of flex:1 panel) + version badge populated at popup-load (visible pre-sign-in) (c4d7d1d4)
 - release: PIM4EntraPS v2.4.36 - popup shrinks to content on sign-in (min-height:180px max-height:600px instead of fixed 600px) (608732ac)
@@ -33,13 +34,69 @@ Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monor
 - release: PIM4EntraPS v2.4.15 - CRITICAL FIX popup JWT decode bug caused infinite "missing scopes" reauth loop + Set-PimActivatorPolicy-Intune.ps1 Platform Script (66f07cfe)
 - release: PIM4EntraPS v2.4.14 - popup light theme (white+blue) + simplified not-configured text + ext v0.3.0->0.4.0 + correct Intune deployment guidance (b024bd79)
 - release: PIM4EntraPS v2.4.13 - CRX bundles placeholder config.js (no maintainer-tenant leak into customer installs) + ext ver 0.2.0 -> 0.3.0 (b3d55092)
-- release: PIM4EntraPS v2.4.12 - Intune-first deployment (-PrintIntuneConfig mode + HKCU-default -PushPolicyScope) (d65821df)
 
 ---
 
 # Release notes -- PIM4EntraPS
 
 > **Curated changelog.** The publish workflow auto-prepends recent monorepo commits as a raw activity log; this file is the human-friendly narrative on top.
+
+---
+
+## v2.4.44 -- Multi-tenant Tenants array + Intune Remediations rollout (extension **v1.1.0**)
+
+The extension can now serve multiple Entra tenants from a single install on the same Windows user. Each browser profile picks its own tenant; the choice sticks per-profile thanks to `chrome.storage.local`. Admin pushes the tenant list once via Intune Remediation; clients self-heal hourly.
+
+### Extension (v1.0.0 -> v1.1.0)
+
+- New managed-config field **`Tenants`** -- JSON array of `{ Name, TenantId, ClientId }`. When 2+ entries are present, the popup shows a clean tenant picker on first open per Chromium profile. When exactly 1 entry is present, the picker is silent. When the array is missing, the legacy `tenantId`/`clientId` singleton fields still drive the extension (zero breakage for v1.0 installs).
+- **Per-profile selection** cached in `chrome.storage.local.selectedTenantId`. Switching to a different Edge profile shows the picker fresh, since each profile has its own local storage.
+- **Footer "Tenant" indicator** upgraded -- now shows the friendly tenant name (`Tenant: ACME Production`) with a `(switch)` link that clears the cached selection and re-renders the picker. Tooltip exposes the full GUID + clientId + tenant-count for debugging.
+- Sign-in/refresh artifacts are cleared on every tenant switch so OAuth never carries a refresh-token from the wrong tenant into the new one.
+
+### New helper: `Deploy-PimActivatorIntune.ps1`
+
+CSV-driven Intune Remediation deployer. One `tenants.csv` (columns: `Name,TenantId,ClientId`) drives everything. Three modes:
+
+| Mode | Purpose |
+|---|---|
+| `-GenerateScripts -TenantsCsv .\tenants.csv` | Emits `Detection.ps1` + `Remediation.ps1` to disk for manual Intune upload |
+| `-CreateIntuneRemediation -TenantsCsv ... -GroupId <guid>` | Creates the remediation in Intune via Microsoft Graph, schedules it hourly, assigns to the group, prints the remediation id |
+| `-UpdateIntuneRemediation -TenantsCsv ... -RemediationId <guid>` | Re-reads CSV and overwrites the existing remediation in place -- this is the "add a tenant" command |
+
+Schedule defaults to **every 1 hour** so adding a tenant to `tenants.csv` propagates to all assigned devices within ~1 h.
+
+### `Deploy-PimActivatorClient.ps1` -- new `-Tenants` parameter set
+
+Single-tenant `-TenantId`/`-ClientId` calls still work unchanged. New parameter set accepts `-Tenants @(@{Name='...';TenantId='...';ClientId='...'},...)` or `-TenantsCsv <path>` and writes the `Tenants` JSON to the policy registry (clearing any leftover singleton fields). Used internally by the Intune helper's remediation script.
+
+### What runs where (mental model)
+
+```
+tenants.csv         <- you edit this
+     |
+     v
+Deploy-PimActivatorIntune.ps1 -UpdateIntuneRemediation
+     |
+     v
+Intune Remediation  <- hourly silent run, no UI
+     |
+     v
+HKCU\...\3rdparty\extensions\<id>\policy\Tenants  <- JSON array
+     |
+     v
+chrome.storage.managed.Tenants                    <- browser reads
+     |
+     v
+popup.js picker UI                                <- user sees on extension click
+     |
+     v
+chrome.storage.local.selectedTenantId             <- per profile, sticks
+```
+
+Intune Remediations run silently -- the picker UI is inside the extension popup, not Intune. The two layers are independent: Intune keeps the registry healthy; the extension popup handles user-facing choice.
+
+Manifest 1.0.0 -> **1.1.0**.
 
 ---
 
