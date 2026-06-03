@@ -1,9 +1,10 @@
 # Release notes for PIM4EntraPS
 
-## v2.4.35
+## v2.4.36
 
 Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monorepo:
 
+- release: PIM4EntraPS v2.4.36 - popup shrinks to content on sign-in (min-height:180px max-height:600px instead of fixed 600px) (608732ac)
 - release: PIM4EntraPS v2.4.35 - role preview ACTUALLY works (per-group eq queries in parallel, transitive+direct fallback, progress bar) (95665fd5)
 - release: PIM4EntraPS v2.4.34 - footer always visible (sticky flex layout, only list scrolls) + Morten Knudsen footer link -> aka.ms/morten (1ff38bfd)
 - release: PIM4EntraPS v2.4.33 - role preview covers nested groups (transitiveRoleAssignments + direct in parallel, dedupe by principalId+roleDefId+scope) (7fed005c)
@@ -33,13 +34,20 @@ Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monor
 - release: PIM4EntraPS v2.4.12 - Intune-first deployment (-PrintIntuneConfig mode + HKCU-default -PushPolicyScope) (d65821df)
 - release: PIM4EntraPS v2.4.11 - Activator popup: My Access tab + token self-heal + Auto-fix button + hide-already-active (db8893b1)
 - release: PIM4EntraPS v2.4.10 - Activator popup: My Access tab + token self-heal + Auto-fix button + hide-already-active (96b0c313)
-- release: PIM4EntraPS v2.4.9 - switch CRX hosting to GitHub Pages + Chrome support + Install->Deploy renames + SPA URI fix (E2E proven) (5e263602)
 
 ---
 
 # Release notes -- PIM4EntraPS
 
 > **Curated changelog.** The publish workflow auto-prepends recent monorepo commits as a raw activity log; this file is the human-friendly narrative on top.
+
+---
+
+## v2.4.36 -- Popup shrinks to content on sign-in screen (no more big empty box)
+
+`body { height:600px }` from v2.4.34 made the popup fixed-height even on the sign-in screen, leaving a huge empty white area below the "Sign in to load..." text. Swapped to `min-height:180px; max-height:600px`. The popup now sizes naturally to content -- compact when only sign-in is shown, expands up to 600px when there's a full group list to render, then the list area scrolls within.
+
+Manifest 0.4.27 -> 0.4.28.
 
 ---
 
