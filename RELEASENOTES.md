@@ -1,9 +1,10 @@
 # Release notes for PIM4EntraPS
 
-## v2.4.16
+## v2.4.17
 
 Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monorepo:
 
+- release: PIM4EntraPS v2.4.17 - AU names resolve via AdministrativeUnit.Read.All + sort by activation time DESC + persistent AU cache + Update-PimActivatorDev.ps1 helper (b502f337)
 - release: PIM4EntraPS v2.4.16 - popup UX: hide AU GUIDs + group identical roles + 'Re-sign in' instead of 'Auto-fix permissions' + auto-switch to My Access + auto-uncheck activated rows (5f7a664a)
 - release: PIM4EntraPS v2.4.15 - CRITICAL FIX popup JWT decode bug caused infinite "missing scopes" reauth loop + Set-PimActivatorPolicy-Intune.ps1 Platform Script (66f07cfe)
 - release: PIM4EntraPS v2.4.14 - popup light theme (white+blue) + simplified not-configured text + ext v0.3.0->0.4.0 + correct Intune deployment guidance (b024bd79)
@@ -33,13 +34,51 @@ Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monor
 - release: PIM4EntraPS v2.1.3 - server-side Graph filtering (Get-PimAdminsFiltered + Get-PimGroupsFiltered) + customer-naming-aware Re-add wizard + naming-convention schema doc (6936c5ea)
 - release: PIM4EntraPS v2.1.2 - PIM Manager v0.3: pre-flight validator + bulk Fix-all + multi-step wizards + tenant cache (87feaada)
 - release: PIM4EntraPS v2.1.1 - rename pim-mapper -> pim-manager (does more than map) + field-by-field UX audit spec + wizard scaffolding (42fe18e1)
-- release: PIM4EntraPS v2.1.0 - MSP variant + AccountStatus kill-switch with CISO-controlled per-admin KV codes (d1979fe8)
 
 ---
 
 # Release notes -- PIM4EntraPS
 
 > **Curated changelog.** The publish workflow auto-prepends recent monorepo commits as a raw activity log; this file is the human-friendly narrative on top.
+
+---
+
+## v2.4.17 -- Popup: AU names resolve (AdministrativeUnit.Read.All added), My Access sorted by activation time, persistent AU cache, Update-PimActivatorDev.ps1 helper
+
+Four improvements based on direct customer feedback after v2.4.16:
+
+### 1. AdministrativeUnit.Read.All added to required Graph scopes
+
+After v2.4.16 collapsed N AU GUID rows into "Groups Administrator -- 5 restricted scopes", the next question was: what ARE those scopes? Answer: regular Administrative Units. The popup just couldn't read their names because `RoleManagement.Read.Directory` only exposes the AU id; reading the AU object itself requires `AdministrativeUnit.Read.All`. Verified against a real tenant: 12/12 AU lookups returned HTTP 403 with the old scope set.
+
+v2.4.17 adds `AdministrativeUnit.Read.All` to:
+- `popup.js` SCOPES + REQUIRED_GRAPH_SCOPES
+- `Deploy-PimActivatorBackend.ps1` `$needed` array and .NOTES
+
+After upgrading, end-users will see the consent prompt one more time (or admin can pre-consent by re-running `Deploy-PimActivatorBackend.ps1 -GrantConsent`). Then AU names render properly: "Groups Administrator -- in AU 'Marketing', 'Sales', 'HR', 'Engineering' + 4 more".
+
+If consent has NOT been granted, the popup degrades gracefully with explicit text: "scoped to 10 Administrative Units (admin must grant AdministrativeUnit.Read.All to show names)" -- replacing the previous vague "restricted scopes" label that customers found confusing.
+
+### 2. My Access sorted by activation time, newest first
+
+Previously the My Access tab sorted rows alphabetically by displayName. After activating a new group, it got buried among long-standing eligibilities (months-old memberships sorted to the top). v2.4.17 sorts by `startDateTime` DESC -- whatever you just activated appears at the top, oldest memberships at the bottom.
+
+### 3. Persistent AU name cache (chrome.storage.local, 24h TTL)
+
+The `auNameCache` was in-memory only, meaning every popup-open re-queried every AU from Graph. v2.4.17 hydrates the cache from `chrome.storage.local` at popup load and persists after each successful lookup. Re-opening the popup is now near-instant for any AU we've already seen. 24-hour TTL ages out renamed/deleted AUs. Foundation for the broader "fetch in background, cache" pattern that v2.5.0 will expand to all popup data via a service worker.
+
+### 4. Update-PimActivatorDev.ps1 dev-loop helper (NEW)
+
+Hand-written companion script for rapid dev iterations. Two modes:
+
+- **default**: kills browsers, scrubs `Extensions/<id>` + `Local Extension Settings/<id>` + Preferences/Secure Preferences entries (including HMAC integrity hashes in `protection.macs.extensions.settings`), restarts browser -> forcelist re-pulls latest CRX.
+- **`-Repack`**: also auto-bumps the manifest patch version, repacks the CRX with placeholder config, pushes to gh-pages, then flushes.
+
+Built specifically for the maintainer's managed Edge that has `DeveloperToolsAvailability=2` (no Update button on force-installed extensions). One command replaces the entire dance of Task Manager + manual cache hunt + manual git commit + manual force-reinstall. Customer rollout is unaffected -- this is a maintainer-only script.
+
+### Customer action
+
+End-users: same auto-update path as v2.4.16, plus a one-time consent prompt for `AdministrativeUnit.Read.All` (admin can pre-consent via `Deploy-PimActivatorBackend.ps1 -GrantConsent`). Manifest 0.4.2 -> 0.4.3.
 
 ---
 

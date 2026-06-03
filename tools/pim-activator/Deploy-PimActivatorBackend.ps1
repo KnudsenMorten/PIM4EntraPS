@@ -27,6 +27,11 @@
         Entra role assignments attached to the user's active PIM-for-Groups
         memberships. Admin-consentable. Without it, the My Access tab still
         renders memberships but each row shows a 403 for the role lookup.)
+      - AdministrativeUnit.Read.All     (resolves AU displayNames in the My
+        Access tab. RoleManagement.Read.Directory exposes the AU id on each
+        role assignment but reading the AU object requires this scope; without
+        it, the popup renders "scoped to N Administrative Units" without
+        names.)
 
     Caller (you) must have:
       - Graph scopes: Application.ReadWrite.All, AppRoleAssignment.ReadWrite.All,
@@ -107,7 +112,7 @@ $graphAppId = '00000003-0000-0000-c000-000000000000'
 $graphSp    = Get-MgServicePrincipal -Filter "appId eq '$graphAppId'"
 if (-not $graphSp) { throw "Microsoft Graph service principal not found in tenant -- this should never happen." }
 
-$needed = @('PrivilegedAccess.ReadWrite.AzureADGroup', 'Group.Read.All', 'User.Read', 'RoleManagement.Read.Directory')
+$needed = @('PrivilegedAccess.ReadWrite.AzureADGroup', 'Group.Read.All', 'User.Read', 'RoleManagement.Read.Directory', 'AdministrativeUnit.Read.All')
 $scopeMap = @{}
 foreach ($name in $needed) {
     $scope = $graphSp.Oauth2PermissionScopes | Where-Object { $_.Value -eq $name }
