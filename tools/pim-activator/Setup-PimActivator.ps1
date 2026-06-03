@@ -34,12 +34,32 @@
          grants tenant-wide admin consent.
       5. Writes config.js with the resulting tenantId + clientId so the
          extension popup is wired on first launch.
-      6. (Optional, -PushPolicy) Writes the HKLM ExtensionInstallForcelist
-         policy registry keys for Edge and/or Chrome (per -TargetBrowser) so
-         the browser auto-installs the extension on next launch -- no manual
-         "Load unpacked" step. Requires admin rights to write to HKLM.
-         When combined with -PublishToGitHubPages, the -CrxUpdateUrl is
-         auto-derived from the just-published updates.xml.
+      6. Three rollout modes (mutually compatible with all auth modes):
+
+         a) DEFAULT (no flag) -- prints the URLs at the end. Maintainer
+            copies them into Intune manually. No registry writes.
+
+         b) -PrintIntuneConfig -- PRIMARY PRODUCTION PATH. Same as default
+            plus emits exact copy-pasteable values for the Intune Admin
+            Center (ExtensionInstallForcelist value + managed-storage JSON
+            payload). No registry writes. Combines with
+            -PublishToGitHubPages to auto-derive the updates.xml URL.
+
+         c) -PushPolicy -- dev/testing only. Writes the
+            ExtensionInstallForcelist + managed-storage policy registry
+            keys for Edge and/or Chrome (per -TargetBrowser) so the
+            browser auto-installs the extension on next launch.
+
+            -PushPolicyScope User (DEFAULT)    HKCU writes only. No admin
+                                               required. No conflict with
+                                               Intune-managed policy.
+                                               Easy to revert.
+            -PushPolicyScope Machine           HKLM writes. CONFLICTS with
+                                               Intune. Only use on
+                                               isolated test machines.
+
+            When combined with -PublishToGitHubPages, -CrxUpdateUrl is
+            auto-derived from the just-published updates.xml.
 
     Re-runnable: every step is idempotent. Same tenant -> updates the existing
     app reg in place. Same machine -> overwrites config.js + policy keys.
@@ -67,10 +87,34 @@
     not available; rotate to a certificate for production.
 
 .PARAMETER PushPolicy
-    Also write the HKLM ExtensionInstallForcelist registry keys so the target
-    browser(s) auto-install the extension on next launch. Requires the script
-    to be running as Administrator. Skip on developer workstations; use on
-    production rollouts (Intune Win32 wrapper).
+    Dev/testing only. Writes the ExtensionInstallForcelist + managed-storage
+    policy registry keys so the target browser(s) auto-install the extension
+    on next launch.
+
+    Scope is controlled by -PushPolicyScope:
+      User    (DEFAULT) HKCU writes. No admin, no Intune conflict, easy revert.
+      Machine           HKLM writes. CONFLICTS with Intune-managed policy.
+                        Only use on isolated test machines NOT managed by Intune.
+
+    For production rollouts to fleets of devices, use -PrintIntuneConfig
+    instead and paste the values into Intune (Intune is the authoritative
+    policy source in customer environments).
+
+.PARAMETER PushPolicyScope
+    'User' (default) writes the policy keys under HKCU -- no admin required,
+    affects only the current Windows user, won't conflict with Intune-managed
+    HKLM policy, trivially revertible.
+    'Machine' writes under HKLM -- requires admin, affects every user on the
+    box, AND CONFLICTS with Intune-managed ExtensionInstallForcelist policy.
+    Only use Machine on isolated test machines that are NOT Intune-managed.
+
+.PARAMETER PrintIntuneConfig
+    PRIMARY PRODUCTION PATH. After publishing the CRX + writing config.js,
+    print the exact strings the customer's Intune admin pastes into the
+    Intune Admin Center to deploy the extension fleet-wide (forcelist value
+    + managed-storage JSON payload + step-by-step path through the UI).
+    No registry writes anywhere. Compose with -PublishToGitHubPages to
+    auto-derive the updates.xml URL the Intune payload references.
 
 .PARAMETER CrxUpdateUrl
     URL where the .crx update manifest is hosted. Only used with -PushPolicy.
@@ -116,30 +160,37 @@
     .\Setup-PimActivator.ps1 -TenantId 'f0fa27a0-...'
 
 .EXAMPLE
-    # Production rollout against an externally-hosted CRX: push policy for
-    # both Edge + Chrome.
+    # Production rollout (the normal customer flow): publish to GitHub Pages +
+    # print the exact Intune Admin Center values for the maintainer to paste.
+    # No registry writes anywhere -- Intune is the authoritative policy source.
+    .\Setup-PimActivator.ps1 -TenantId 'f0fa27a0-...' `
+        -PublishToGitHubPages -PrintIntuneConfig
+
+.EXAMPLE
+    # Dev-box testing: HKCU policy (no admin, no Intune conflict, easy revert).
+    # The forcelist + managed-storage keys are written under HKCU\SOFTWARE\Policies\
+    # for the current Windows user only.
+    .\Setup-PimActivator.ps1 -TenantId 'f0fa27a0-...' `
+        -PublishToGitHubPages -PushPolicy -PushPolicyScope User
+
+.EXAMPLE
+    # Isolated test machine NOT managed by Intune -- explicit Machine scope
+    # (HKLM, requires admin, will collide with Intune if present).
     .\Setup-PimActivator.ps1 -TenantId 'f0fa27a0-...' -PushPolicy `
+        -PushPolicyScope Machine `
         -CrxUpdateUrl 'https://knudsenmorten.github.io/PIM4EntraPS/updates.xml' `
         -TargetBrowser Both
 
 .EXAMPLE
-    # FULLY UNATTENDED rollout (Intune / scheduled task / Azure Function).
-    # Bootstrap SPN must have 3 app permissions admin-consented in the target tenant:
+    # FULLY UNATTENDED production rollout (Intune Win32 / scheduled task /
+    # Azure Function). Bootstrap SPN must have 3 app permissions admin-consented
+    # in the target tenant:
     #   Application.ReadWrite.All, AppRoleAssignment.ReadWrite.All, DelegatedPermissionGrant.ReadWrite.All
     # Cert thumbprint is preferred over plaintext secret.
     .\Setup-PimActivator.ps1 -TenantId 'f0fa27a0-...' `
         -BootstrapSpnAppId 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee' `
         -BootstrapSpnCertificateThumbprint 'ABCDEF0123456789ABCDEF0123456789ABCDEF01' `
-        -PushPolicy -CrxUpdateUrl 'https://knudsenmorten.github.io/PIM4EntraPS/updates.xml'
-
-.EXAMPLE
-    # All-in-one re-runnable deployment: publish to GitHub Pages + push Edge + Chrome
-    # ExtensionInstallForcelist policies.
-    .\Setup-PimActivator.ps1 -TenantId 'f0fa27a0-...' `
-        -PublishToGitHubPages `
-        -GitHubRepo 'KnudsenMorten/PIM4EntraPS' `
-        -PushPolicy `
-        -TargetBrowser Both
+        -PublishToGitHubPages -PrintIntuneConfig
 
 .NOTES
     Solution       : PIM4EntraPS
@@ -175,6 +226,12 @@ param(
     [string]$BootstrapSpnClientSecret,
 
     [switch]$PushPolicy,
+
+    [ValidateSet('User','Machine')]
+    [string]$PushPolicyScope = 'User',
+
+    [switch]$PrintIntuneConfig,
+
     [string]$CrxUpdateUrl,
 
     [ValidateSet('Edge','Chrome','Both')]
@@ -201,6 +258,26 @@ $configPath   = Join-Path $activatorDir 'config.js'
 
 if ($PushPolicy -and -not $CrxUpdateUrl -and -not $PublishToGitHubPages) {
     throw "-PushPolicy requires -CrxUpdateUrl (the .crx update-manifest URL), unless -PublishToGitHubPages is also set (in which case the URL is auto-derived)."
+}
+
+if ($PushPolicy -and $PrintIntuneConfig) {
+    Write-Host ""
+    Write-Host "  NOTE: both -PushPolicy and -PrintIntuneConfig were supplied. The script" -ForegroundColor Yellow
+    Write-Host "  will write the registry policy AND print the Intune copy-paste values." -ForegroundColor Yellow
+    Write-Host "  In production, prefer ONE source of truth (Intune) -- skip -PushPolicy." -ForegroundColor Yellow
+    Write-Host ""
+}
+
+if ($PushPolicy -and $PushPolicyScope -eq 'Machine') {
+    Write-Host ""
+    Write-Host "  ============================================================" -ForegroundColor Yellow
+    Write-Host "  WARNING: -PushPolicy -PushPolicyScope Machine" -ForegroundColor Yellow
+    Write-Host "  HKLM ExtensionInstallForcelist writes CONFLICT with Intune-" -ForegroundColor Yellow
+    Write-Host "  managed policy. Only use Machine scope on isolated test" -ForegroundColor Yellow
+    Write-Host "  machines that are NOT managed by Intune / GPO." -ForegroundColor Yellow
+    Write-Host "  Production rollouts should use -PrintIntuneConfig instead." -ForegroundColor Yellow
+    Write-Host "  ============================================================" -ForegroundColor Yellow
+    Write-Host ""
 }
 
 # ---------------------------------------------------------------------------
@@ -684,20 +761,118 @@ Write-Host "[ 5 / 6 ] OK -- wrote $configPath" -ForegroundColor Green
 # ---------------------------------------------------------------------------
 
 Write-Host ""
+
+# ---- 6a: -PushPolicy (dev/testing only) ------------------------------------
 if ($PushPolicy) {
     if (-not $CrxUpdateUrl) {
         throw "-PushPolicy is set but -CrxUpdateUrl is empty (and -PublishToGitHubPages did not run successfully to auto-derive one)."
     }
-    Write-Host "[ 6 / 6 ] Pushing browser policy ($TargetBrowser) -- HKLM ExtensionInstallForcelist ..." -ForegroundColor Cyan
+    $hiveLabel = if ($PushPolicyScope -eq 'Machine') { 'HKLM' } else { 'HKCU' }
+    Write-Host "[ 6 / 6 ] Pushing browser policy ($TargetBrowser, $PushPolicyScope scope / $hiveLabel) ..." -ForegroundColor Cyan
+    if ($PushPolicyScope -eq 'User') {
+        Write-Host "          HKCU-only -- won't affect other users or Intune-managed policy." -ForegroundColor Green
+    }
     if ($autoDerivedCrxUpdateUrl) {
         Write-Host "          Using auto-derived CRX update URL: $CrxUpdateUrl" -ForegroundColor DarkGray
     }
     $policyInstaller = Join-Path $activatorDir 'Deploy-PimActivatorClient.ps1'
     if (-not (Test-Path $policyInstaller)) { throw "Deploy-PimActivatorClient.ps1 not found at $policyInstaller" }
-    & $policyInstaller -ExtensionId $extensionId -UpdateUrl $CrxUpdateUrl -TenantId $ctx.TenantId -ClientId $app.AppId -Scope Machine -Browser $TargetBrowser
+    & $policyInstaller -ExtensionId $extensionId -UpdateUrl $CrxUpdateUrl -TenantId $ctx.TenantId -ClientId $app.AppId -Scope $PushPolicyScope -Browser $TargetBrowser
     Write-Host "[ 6 / 6 ] OK -- $TargetBrowser will auto-install the extension on next launch. Restart the browser(s) to trigger." -ForegroundColor Green
+
+    if ($PushPolicyScope -eq 'Machine') {
+        Write-Host ""
+        Write-Host "  ============================================================" -ForegroundColor Yellow
+        Write-Host "  REMINDER: HKLM writes were just applied. In an Intune-managed" -ForegroundColor Yellow
+        Write-Host "  environment Intune policy will fight these on every refresh." -ForegroundColor Yellow
+        Write-Host "  Production rollouts: revert with Deploy-PimActivatorClient.ps1" -ForegroundColor Yellow
+        Write-Host "  -Uninstall, then push the same payload via Intune (run this" -ForegroundColor Yellow
+        Write-Host "  script with -PrintIntuneConfig to get the exact values)." -ForegroundColor Yellow
+        Write-Host "  ============================================================" -ForegroundColor Yellow
+    }
+
+# ---- 6b: -PrintIntuneConfig (PRIMARY PRODUCTION PATH) ----------------------
+} elseif ($PrintIntuneConfig) {
+
+    # Resolve the updates.xml URL the Intune forcelist value will reference.
+    $intuneUpdateUrl = $CrxUpdateUrl
+    if (-not $intuneUpdateUrl -and $ghPagesUpdatesUrl) { $intuneUpdateUrl = $ghPagesUpdatesUrl }
+    if (-not $intuneUpdateUrl) {
+        throw "-PrintIntuneConfig needs the updates.xml URL: pass -CrxUpdateUrl, or combine with -PublishToGitHubPages to auto-derive it from the just-published manifest."
+    }
+
+    # Forcelist value: '<extensionId>;<updateUrl>' -- same format Chromium reads.
+    $forcelistValue = "$extensionId;$intuneUpdateUrl"
+
+    # Managed-storage payload: identical shape to what Deploy-PimActivatorClient
+    # writes to the registry (tenantId / clientId / groupNameFilter /
+    # defaultDurationHours / defaultJustification). Single-line so the admin
+    # can paste it straight into the Intune "Configure extension management
+    # settings" value field.
+    $managedStorageMap = [ordered]@{
+        "$extensionId" = [ordered]@{
+            installation_mode = 'force_installed'
+            update_url        = $intuneUpdateUrl
+            managed_storage   = [ordered]@{
+                tenantId             = "$($ctx.TenantId)"
+                clientId             = "$($app.AppId)"
+                groupNameFilter      = '^PIM-'
+                defaultDurationHours = 1
+                defaultJustification = 'Daily ops'
+            }
+        }
+    }
+    $managedStorageJson = ($managedStorageMap | ConvertTo-Json -Depth 5 -Compress)
+
+    Write-Host "[ 6 / 6 ] Intune deployment config (copy these into the Intune Admin Center) ..." -ForegroundColor Cyan
+    Write-Host ""
+    Write-Host "  ----- VALUES TO PASTE -----------------------------------------" -ForegroundColor Cyan
+    Write-Host ""
+    Write-Host "  ExtensionInstallForcelist value:" -ForegroundColor Yellow
+    Write-Host "    $forcelistValue"
+    Write-Host ""
+    Write-Host "  ExtensionSettings (managed-storage JSON, single line):" -ForegroundColor Yellow
+    Write-Host "    $managedStorageJson"
+    Write-Host ""
+    Write-Host "  ----- INTUNE ADMIN CENTER STEPS -------------------------------" -ForegroundColor Cyan
+
+    if ($TargetBrowser -in @('Edge','Both')) {
+        Write-Host ""
+        Write-Host "  Microsoft Edge configuration profile:" -ForegroundColor Green
+        Write-Host "    1. Devices -> Configuration -> Create -> Windows 10/11 -> Settings catalog"
+        Write-Host "    2. Add settings: 'Microsoft Edge\Extensions\Configure which extensions are installed silently'"
+        Write-Host "         Paste the ExtensionInstallForcelist value above."
+        Write-Host "    3. Add settings: 'Microsoft Edge\Extensions\Configure extension management settings'"
+        Write-Host "         Paste the ExtensionSettings JSON above."
+        Write-Host "    4. Assign to the desired device or user group."
+        Write-Host "    5. Result: Edge auto-installs the CRX on next launch + auto-updates"
+        Write-Host "         on every poll thereafter from $intuneUpdateUrl"
+    }
+
+    if ($TargetBrowser -in @('Chrome','Both')) {
+        Write-Host ""
+        Write-Host "  Google Chrome configuration profile:" -ForegroundColor Green
+        Write-Host "    1. Devices -> Configuration -> Create -> Windows 10/11 -> Settings catalog"
+        Write-Host "    2. Add settings: 'Google Chrome\Extensions\Configure the list of force-installed apps and extensions'"
+        Write-Host "         Paste the ExtensionInstallForcelist value above."
+        Write-Host "    3. Add settings: 'Google Chrome\Extensions\Extension management settings'"
+        Write-Host "         Paste the ExtensionSettings JSON above."
+        Write-Host "    4. Assign to the desired device or user group."
+        Write-Host "    5. Result: Chrome auto-installs the CRX on next launch + auto-updates"
+        Write-Host "         on every poll thereafter from $intuneUpdateUrl"
+    }
+
+    Write-Host ""
+    Write-Host "  ----- WHY THIS BEATS -PushPolicy ------------------------------" -ForegroundColor Cyan
+    Write-Host "    Intune is the authoritative policy source in customer envs." -ForegroundColor DarkGray
+    Write-Host "    Local HKLM writes from -PushPolicy would fight Intune on" -ForegroundColor DarkGray
+    Write-Host "    every refresh. Pushing via Intune is the production path." -ForegroundColor DarkGray
+    Write-Host ""
+    Write-Host "[ 6 / 6 ] OK -- Intune payload printed above. No registry writes performed." -ForegroundColor Green
+
+# ---- 6c: default -- print the URLs, nothing else ---------------------------
 } else {
-    Write-Host "[ 6 / 6 ] Skipped policy push (no -PushPolicy)." -ForegroundColor DarkGray
+    Write-Host "[ 6 / 6 ] Skipped policy push (no -PushPolicy / -PrintIntuneConfig)." -ForegroundColor DarkGray
     Write-Host ""
     Write-Host "  Sideload manually (developer workstation):" -ForegroundColor Yellow
     Write-Host "    1. Edge -> edge://extensions/   (or Chrome -> chrome://extensions/)"
@@ -706,6 +881,9 @@ if ($PushPolicy) {
     Write-Host "       $activatorDir"
     Write-Host "    4. Extension card appears -- verify the ID matches: $extensionId"
     Write-Host "    5. Pin via the puzzle (Extensions) icon"
+    Write-Host ""
+    Write-Host "  Production rollout: re-run with -PrintIntuneConfig to get the" -ForegroundColor DarkGray
+    Write-Host "  exact Intune Admin Center copy-paste values." -ForegroundColor DarkGray
 }
 
 # ---------------------------------------------------------------------------
@@ -729,7 +907,8 @@ if ($PublishToGitHubPages) {
     Write-Host "  updates.xml    : $ghPagesUpdatesUrl"
     Write-Host "  Pages reminder : Enable once via Settings -> Pages -> Branch '$GitHubBranch'"
 }
-if ($PushPolicy) { Write-Host "  Policy push    : APPLIED for $TargetBrowser -- restart browser(s) to auto-install" }
+if ($PushPolicy)         { Write-Host "  Policy push    : APPLIED for $TargetBrowser ($PushPolicyScope scope) -- restart browser(s) to auto-install" }
+if ($PrintIntuneConfig)  { Write-Host "  Intune config  : PRINTED above -- paste into Intune Admin Center (no registry writes performed)" }
 Write-Host ""
 Write-Host "Re-runnable: same command in this tenant updates the app reg in" -ForegroundColor DarkGray
 Write-Host "place, re-writes config.js, leaves the extension ID stable." -ForegroundColor DarkGray

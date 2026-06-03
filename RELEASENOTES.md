@@ -1,9 +1,10 @@
 # Release notes for PIM4EntraPS
 
-## v2.4.11
+## v2.4.12
 
 Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monorepo:
 
+- release: PIM4EntraPS v2.4.12 - Intune-first deployment (-PrintIntuneConfig mode + HKCU-default -PushPolicyScope) (d65821df)
 - release: PIM4EntraPS v2.4.11 - Activator popup: My Access tab + token self-heal + Auto-fix button + hide-already-active (db8893b1)
 - release: PIM4EntraPS v2.4.10 - Activator popup: My Access tab + token self-heal + Auto-fix button + hide-already-active (96b0c313)
 - release: PIM4EntraPS v2.4.9 - switch CRX hosting to GitHub Pages + Chrome support + Install->Deploy renames + SPA URI fix (E2E proven) (5e263602)
@@ -33,13 +34,78 @@ Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monor
 - release: PIM4EntraPS v1.0.2 - SI launcher naming alignment + fix internal-azure leak in publish workflow + rewire engine path resolution for new engine/<task>/ layout (2ff8ebb1)
 - release: PIM4EntraPS v1.0.1 - hotfix: 14 .locked.csv data files were silently ignored by monorepo .gitignore (SOLUTIONS/**/config/* rule had no exception for *.locked.*) and missing from v1.0.0 public mirror (0fe0d6d5)
 - release: PIM4EntraPS v1.0.0 - restructure to SecurityInsight conventions + .locked/.custom split + customer naming/filter extension points + generic Build-PimContext helper (additive, no engine rewire yet) (12616959)
-- port: v1 -> v2 on 14 user-selected solutions (67 engines) (fbe39214)
 
 ---
 
 # Release notes -- PIM4EntraPS
 
 > **Curated changelog.** The publish workflow auto-prepends recent monorepo commits as a raw activity log; this file is the human-friendly narrative on top.
+
+---
+
+## v2.4.12 -- Intune-first deployment: -PrintIntuneConfig mode + HKCU-default -PushPolicyScope (drops HKLM conflict with Intune)
+
+Production rollouts in customer environments use Intune as the authoritative ExtensionInstallForcelist policy source. Previous `-PushPolicy` writes to HKLM directly conflicted with Intune (last-writer-wins races on every policy refresh). v2.4.12 makes Intune the primary path.
+
+### Three rollout modes (per Setup-PimActivator.ps1)
+
+| Mode | What it does | Registry writes |
+|---|---|---|
+| **Default** (no flag) | Publish CRX + create app reg + print URLs at end | None |
+| **`-PrintIntuneConfig`** (NEW, PRIMARY PROD PATH) | Default + emits exact copy-pasteable strings for Intune Admin Center (ExtensionInstallForcelist value + ExtensionSettings JSON in canonical Chromium shape) + step-by-step Settings Catalog navigation for both Edge and Chrome | None |
+| **`-PushPolicy -PushPolicyScope User`** (NEW DEFAULT scope) | Dev-box testing only. HKCU writes. No admin, no Intune conflict, easy revert. | HKCU only |
+| **`-PushPolicy -PushPolicyScope Machine`** | Backward-compat. HKLM writes. CONFLICTS with Intune. Emits loud warning + advises use only on isolated test machines. | HKLM (warns) |
+
+### Setup-PimActivator.ps1 changes (322 -> 914 lines net through v2.4.x)
+
+- Added `-PrintIntuneConfig` switch
+- Added `-PushPolicyScope` param (defaults to User)
+- Step 6 rewritten into 3 branches (push-policy / print-intune / default)
+- Up-front warning when `-PushPolicyScope Machine` is selected
+- Note when both `-PushPolicy` and `-PrintIntuneConfig` supplied (does both with advisory rather than erroring)
+- `-PrintIntuneConfig` requires `-CrxUpdateUrl` OR `-PublishToGitHubPages` (so the printed forcelist value has a real URL)
+- Summary footer now reports `Policy push` (with scope) and `Intune config` lines
+
+### Deploy-PimActivatorClient.ps1 changes (186 -> 274 lines)
+
+- `-Scope` param default flipped from `Machine` to `User`
+- Loud yellow warning at install time when Machine scope selected; green note when User
+- HKCU forcelist + managed-storage paths confirmed (`HKCU:\SOFTWARE\Policies\Microsoft\Edge\...` + Chrome equivalent)
+- New `.EXAMPLE` for HKCU default; retained Machine example for backward compat
+
+### Intune-config printout shape (the exact `ExtensionSettings` JSON the script emits)
+
+```json
+{"<extensionId>":{"installation_mode":"force_installed","update_url":"<updatesXmlUrl>","managed_storage":{"tenantId":"<tid>","clientId":"<cid>","groupNameFilter":"^PIM-","defaultDurationHours":1,"defaultJustification":"Daily ops"}}}
+```
+
+This is the canonical Chromium `ExtensionSettings` shape that the Intune Admin Center "Configure extension management settings" setting accepts. The `managed_storage` block is what `popup.js`'s `loadConfig()` reads via `chrome.storage.managed.get(null)` -- already wired in v2.4.10. Result: customer admins push per-tenant tenantId/clientId via this single JSON, and one canonical CRX serves every customer.
+
+### Multi-tenant rollout architecture (the "beautiful" path)
+
+```
+[your dev box]
+  Setup-PimActivator.ps1 -PublishToGitHubPages
+    -> CRX published to https://knudsenmorten.github.io/PIM4EntraPS/
+
+[customer admin -- each tenant]
+  Deploy-PimActivatorBackend.ps1 -GrantConsent
+    -> creates "PIM Activator" app reg in customer's tenant
+    -> outputs their own clientId
+
+  Intune Admin Center:
+    1. ExtensionInstallForcelist: <extId>;<your-gh-pages-url>
+    2. ExtensionSettings JSON with their tenantId + their clientId
+    3. Assign to device/user group -> Edge auto-installs + uses their tenant
+```
+
+One CRX file, infinite customers, each pinned to their own tenant via Intune managed-storage.
+
+### Customer admin action required after upgrade
+
+If a customer is already running v2.4.10/2.4.11 with managed-storage already configured via Intune: no action; this release is backward-compat.
+
+If a customer is on v2.4.9 or earlier (no managed-storage in Intune yet): also push the new ExtensionSettings JSON via Intune (alongside the existing ExtensionInstallForcelist value). The `Setup-PimActivator.ps1 -PrintIntuneConfig` mode emits the exact JSON to paste.
 
 ---
 

@@ -53,8 +53,20 @@
     Optional default text for the justification field. Default 'Daily ops'.
 
 .PARAMETER Scope
-    'Machine' (default, HKLM, requires admin) or 'User' (HKCU, no admin).
-    Intune deploys typically run as SYSTEM -> use Machine.
+    'User' (default, HKCU, no admin required, no Intune conflict) or 'Machine'
+    (HKLM, requires admin).
+
+    'User' scope writes BOTH the forcelist + managed-storage keys under
+    HKCU\SOFTWARE\Policies\... which both Edge and Chrome honour for the
+    current Windows user only. Easy to revert (delete the HKCU key, no admin).
+    Recommended for dev-box testing.
+
+    'Machine' scope writes the same keys under HKLM. This affects every user
+    on the machine AND -- critically -- CONFLICTS with Intune-managed
+    ExtensionInstallForcelist policy. Only use Machine on isolated test
+    machines that are NOT managed by Intune / GPO. Production rollouts
+    should push the same key/value pairs via Intune instead (see
+    Setup-PimActivator.ps1 -PrintIntuneConfig for the exact payload).
 
 .PARAMETER Browser
     Which browser policy roots to write/remove. 'Edge', 'Chrome', or 'Both'.
@@ -66,13 +78,22 @@
     -Browser targets).
 
 .EXAMPLE
-    # Intune Win32 install command (run as SYSTEM) -- Edge + Chrome:
+    # Dev-box testing (default) -- HKCU only, no admin, no Intune conflict:
     powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Deploy-PimActivatorClient.ps1 `
         -ExtensionId 'abcdefghijklmnopabcdefghijklmnop' `
         -UpdateUrl 'https://knudsenmorten.github.io/PIM4EntraPS/updates.xml' `
         -TenantId 'f0fa27a0-8e7c-4f63-9a77-ec94786b7c9e' `
         -ClientId '11111111-2222-3333-4444-555555555555' `
         -Browser Both
+
+.EXAMPLE
+    # Isolated test machine NOT managed by Intune -- explicit Machine scope (HKLM):
+    powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Deploy-PimActivatorClient.ps1 `
+        -ExtensionId 'abcdefghijklmnopabcdefghijklmnop' `
+        -UpdateUrl 'https://knudsenmorten.github.io/PIM4EntraPS/updates.xml' `
+        -TenantId 'f0fa27a0-8e7c-4f63-9a77-ec94786b7c9e' `
+        -ClientId '11111111-2222-3333-4444-555555555555' `
+        -Scope Machine -Browser Both
 
 .EXAMPLE
     # Edge only:
@@ -118,7 +139,7 @@ param(
 
     [Parameter()]
     [ValidateSet('Machine', 'User')]
-    [string]$Scope = 'Machine',
+    [string]$Scope = 'User',
 
     [Parameter()]
     [ValidateSet('Edge', 'Chrome', 'Both')]
@@ -194,6 +215,20 @@ if ($Uninstall) {
 # ---------------------------------------------------------------------------
 # Install
 # ---------------------------------------------------------------------------
+
+if ($Scope -eq 'Machine') {
+    Write-Host ""
+    Write-Host "  *** -Scope Machine selected -- HKLM writes will be applied. ***" -ForegroundColor Yellow
+    Write-Host "  HKLM ExtensionInstallForcelist CONFLICTS with Intune-managed policy." -ForegroundColor Yellow
+    Write-Host "  Only use Machine scope on isolated test machines that are NOT Intune-managed." -ForegroundColor Yellow
+    Write-Host "  Production rollouts: push the same payload via Intune instead" -ForegroundColor Yellow
+    Write-Host "  (run Setup-PimActivator.ps1 -PrintIntuneConfig for the copy-paste values)." -ForegroundColor Yellow
+    Write-Host ""
+} else {
+    Write-Host ""
+    Write-Host "  -Scope User selected -- HKCU-only. Won't affect other users or Intune." -ForegroundColor Green
+    Write-Host ""
+}
 
 Write-Host "Installing PIM Activator policy ($Scope scope, $Browser)..." -ForegroundColor Cyan
 Write-Host "  ExtensionId : $ExtensionId"
