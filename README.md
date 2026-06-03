@@ -84,6 +84,59 @@ states, the as-code pattern, customer overrides.
 
 ---
 
+## Features
+
+Comprehensive feature inventory below. Status badges show `[shipped vX.Y.Z]` /
+`[roadmap]` / `[partial]`. Roadmap items + sizing + dependencies live in
+[docs/ROADMAP.md](docs/ROADMAP.md); per-release detail lives in
+[RELEASENOTES.md](RELEASENOTES.md).
+
+* browser-based PIM Manager GUI with 5 tabs (Graph / Grid / New & clone / Save / Validate) for editing the whole model without touching CSVs directly **[shipped v2.0.0]** (refined through v2.2.0 and v2.4.2)
+* PIM Activator Edge extension for bulk activation -- pick N PIM groups from a checkbox list, enter justification + duration, one click activates them all **[shipped v2.1.x]**
+* new Revoke tab in PIM Manager for bulk-revoke of active activations **[shipped v2.4.2]**
+* server-side Graph filtering for engine perf (`Get-PimAdminsFiltered` / `Get-PimGroupsFiltered`) -- fetches ~30 admins instead of all 514k on a large tenant **[shipped v2.1.3]**
+* customer-naming-aware Manager wizards driven by per-customer `PIM4EntraPS.NamingConventions.custom.ps1` so suggested names always match the local convention **[shipped v2.1.3]**
+* tenant-wide preload helpers + ARG-based active-assignment fetch to cut per-engine round-trips **[shipped v2.4.0]**
+* `Get-AzPimTokenCached` for token reuse across loops, avoids re-auth churn during long engine runs **[shipped v2.4.0]**
+* MSP variant with `config-msp/` + `Sync-PimMspConfig` for consultancies managing many customer tenants from one engine instance, plus CISO opt-in (per-admin secret in the customer's own Key Vault) gating centrally-issued Disable/Revoke status changes **[shipped earlier v2.x]**
+* `.locked.csv` -> `.custom.csv` consolidation -- single-file customer model, no more dual-file split **[shipped v2.3.0]**
+* validator pre-flight rule engine with 16 rule codes (FK, RA, TIER, NAME, ORPHAN, DUP, STALE, STATUS, DOMAIN, TAP) plus one-click Bulk Fix-all dialog **[shipped v2.0.x+]**
+* notification-channels config + `Send-PimAdminTap` fan-out across SMTP / Teams / Slack **[shipped v2.2.0]**
+* optional fields to allow extra metadata per admin during creation, like company field or notes field **[shipped v2.2.0]** (Company / Notes / ManagerEmail / StartDate columns)
+* ability to send tap password **[shipped v2.2.0]**
+* ability to define tap password start time like in 2 days at 8am **[shipped v2.2.0]** (`+2d 8:00`, `tomorrow`, `next monday 10:00`, full ISO, etc.)
+* ability to show more info behind a role to see actual permissions being delegated **[shipped v2.2.0]** (Manager Graph drill-down; standalone CSV export still roadmap)
+* ability to clone a role **[shipped v2.0.x]** (Clone wizard in Manager)
+* ability to add-detect new subscriptions and management groups in azure to setup pim permissions with fx contribution (define in a custom file). engine must automatically add them into definition + assignment files -- but don't automatically map new subs/MGs to anyone by default **[roadmap]** (ROADMAP #16)
+* ability to multiselect permissions like 10 entra roles and 10 azure permissions to a role/org/task/process type so we can easily setup new permissions **[roadmap]** (ROADMAP #4)
+* ability to clone azure subscription role delegations on an existing scope -- but with another role. maybe ability to clone to N new roles **[roadmap]** (ROADMAP #5)
+* ability to enumerate existing services like intune to detect new built-in roles that should be added. support defender xdr, entra id, intune **[roadmap]** (ROADMAP #18)
+* ability to add new administrative units via wizard **[roadmap]** (ROADMAP #8)
+* ability to delete via multiselect existing pim assignments/delegations **[shipped v2.2.0]** (ROADMAP #7)
+* ability to autodetect new power platform workspaces and create pim groups **[roadmap]** (ROADMAP #17)
+* ability to send a request to a webhook (or other inbound api) fx from servicenow so it can create a delegation for fx. a consultant, either as mapping to existing role or create a new role (fx new external company) **[roadmap]** (ROADMAP #21)
+* ability to send daily summary emails of pim changes (new admins, new delegations, removals, etc) **[roadmap]** (ROADMAP #23)
+* ability to send delegations based on tier model and show all users with tier 0/1 permissions including level permissions **[roadmap]** (ROADMAP #24)
+* ability to support different policies for entra id activations, so some roles require approvals whereas others don't require approval. same with activations, where it should send emails for activations and delegations, typically high-privileged roles (tier 0). these settings must be controllable in a custom file per row. proposed extra columns in the config definitions enforce approval and notifications per row. if possible the approval should be parallel-based so a request is sent to multiple emails at the same time and any one can approve. approvals should be defined on the actual assignment like global admin role -- not on activating the role **[roadmap]** (ROADMAP #14 + #15)
+* ability to validate a minimum set of authentication methods is defined for existing admins like mfa authenticator **[roadmap]** (ROADMAP #13)
+* ability to disable/enable admins using multi-select **[shipped v2.2.0]** (ROADMAP #6)
+* ability to import admins based on csv file (first name, last name, initials) and link to template for admins **[roadmap]** (ROADMAP #9)
+* define an admin template, so we have a rule for tap creation, naming, etc. like one for internal admins and another for externals/consultants **[roadmap]** (ROADMAP #10)
+* ability to clean-up pim groups that haven't been activated in N days -- remove in entra + config files **[roadmap]** (ROADMAP #20)
+* ability to validate pim assignments pointing at orphaned azure scopes that don't exist anymore **[roadmap]** (ROADMAP #19)
+* maintenance job that fixes orphaned azure scopes, orphaned roles (delete assignments + delete groups) **[roadmap]** (ROADMAP #30 + #19)
+* should we change into using another platform than CSV, like an azure storage account or sql server -- to avoid issues with multiple people modifying the csv files; can 3 people run the pim manager gui and modify files at the same time? it must scale to enterprises and we must protect the data very much. if yes, then allow import/migration of existing customers into v2 format in database **[partial]** (SQL backend already exists via the `PIM-Baseline-Management-SQL` engine; multi-writer concurrency on CSV is ROADMAP #33/#34)
+* ability to send info to users in groups/roles, in case they have been assigned new permissions (or changes) **[roadmap]** (ROADMAP #29)
+* ability to move an admin from one role to another role (where it removes old permissions) -- replace-mode **[roadmap]** (ROADMAP #27)
+* ability to log any pim changes in loganalytics + log file for audit compliance purpose **[roadmap]** (ROADMAP #26)
+* ability to define a sponsor/owner of a role for validation/audit/renewal purpose **[partial]** -- shipped v2.2.0 data-flow only; enforcement queued (ROADMAP #28)
+* ability to setup access package in entra and delegate to pim group (extra column) -- yes it works, uses `EntitlementManagement.ReadWrite.All` **[roadmap]** (ROADMAP #31)
+* ability to setup access review for pim group/role (extra column) so owners automatically must approve extensions, except for permissions where auto-extension has been defined **[roadmap]** (ROADMAP #32)
+
+See [RELEASENOTES.md](RELEASENOTES.md) for per-release detail and [docs/ROADMAP.md](docs/ROADMAP.md) for sizing + sequencing of the roadmap items.
+
+---
+
 ## Quick start
 
 ### Prerequisites
