@@ -1,9 +1,10 @@
 # Release notes for PIM4EntraPS
 
-## v2.4.5
+## v2.4.6
 
 Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monorepo:
 
+- release: PIM4EntraPS v2.4.6 - fully-unattended activator deployment via bootstrap SPN (Intune-friendly) (6841d152)
 - release: PIM4EntraPS v2.4.5 - turnkey PIM Activator install: one-command orchestrator + pinned extension identity + icons (4a26958d)
 - release: PIM4EntraPS v2.4.4 - port SI's 4-mode launcher auth + solution-wide config + new Grant-PimEngineAdminConsent helper (41e64c94)
 - release: PIM4EntraPS v2.4.3 - docs: README full feature inventory (41 bullets with shipped/partial/roadmap badges) (0016c32c)
@@ -33,13 +34,62 @@ Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monor
 - launchers: fix 4 template bugs preventing internal-vm engine invocation (de585260)
 - move Update-Platform.ps1 into SOLUTIONS/PlatformOnboarding/INTERNAL/ (b4a46912)
 - chore: standardize PS headers, port Setup-CSA, INTERNAL tooling, README (a060047e)
-- feat: portable launcher paths + bundled dependencies in published releases (ccb4b679)
 
 ---
 
 # Release notes -- PIM4EntraPS
 
 > **Curated changelog.** The publish workflow auto-prepends recent monorepo commits as a raw activity log; this file is the human-friendly narrative on top.
+
+---
+
+## v2.4.6 -- Fully-unattended activator deployment via bootstrap SPN (Intune-friendly)
+
+v2.4.5 still required an interactive Microsoft Graph sign-in inside `Setup-PimActivator.ps1` step 3. That's fine for a dev box, fatal for Intune / scheduled-task / Azure Function rollouts. v2.4.6 adds an app-only auth path using a pre-staged "bootstrap" SPN — no browser, no device code, fully scriptable.
+
+### New params on `Setup-PimActivator.ps1`
+
+- `-BootstrapSpnAppId <guid>` (mandatory in unattended mode)
+- `-BootstrapSpnCertificateThumbprint <40-hex>` (preferred — cert auth)
+- `-BootstrapSpnClientSecret <string>` (fallback — plaintext secret)
+
+When any of the `-BootstrapSpn*` params is supplied the script uses ParameterSet `Unattended`: skips browser/device-code entirely, connects to Graph app-only, and runs the rest of the flow (app reg create+consent, config.js write, optional policy push) as the bootstrap SPN. `-TenantId` is mandatory in this mode (we need to know which customer tenant to target).
+
+### Bootstrap SPN requirements
+
+The bootstrap SPN must have these 3 Microsoft Graph **application** permissions admin-consented in the **target customer tenant**:
+
+| Permission | Why |
+|---|---|
+| `Application.ReadWrite.All` | Create/update the `PIM Activator` app reg |
+| `AppRoleAssignment.ReadWrite.All` | Grant tenant-wide admin consent to delegated scopes |
+| `DelegatedPermissionGrant.ReadWrite.All` | Write the `oauth2PermissionGrants` entries |
+
+For multi-customer MSP rollouts: register the bootstrap SPN as **multi-tenant**, send each customer admin a one-click admin-consent URL (`https://login.microsoftonline.com/<tenantId>/adminconsent?client_id=<spnAppId>`), then run Setup-PimActivator with that tenant's id from Intune. Per-tenant: one consent click, then fully unattended forever.
+
+Cert auth is the security best practice — the cert thumbprint goes in clear (it's not a secret), the private key never leaves the host's cert store. Plaintext secret is supported as a fallback for quick tests but emits a "consider rotating to a certificate" warning.
+
+### Example -- Intune deployment
+
+```powershell
+.\Setup-PimActivator.ps1 -TenantId 'f0fa27a0-...' `
+    -BootstrapSpnAppId 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee' `
+    -BootstrapSpnCertificateThumbprint 'ABCDEF0123456789ABCDEF0123456789ABCDEF01' `
+    -PushPolicy `
+    -CrxUpdateUrl 'https://stcorp.blob.core.windows.net/pim-activator/updates.xml'
+```
+
+Zero interactive steps. Cert must be installed in `Cert:\LocalMachine\My` on the Intune-managed host (Intune can deploy the PFX as a Win32 dependency).
+
+### Extension end-user first run unchanged
+
+The Edge extension's first-launch interactive sign-in (admin clicks the popup, gets an Entra OAuth tab, completes once, refresh token cached in `chrome.storage.local`) is the right behaviour for user-context delegated auth and was never the target of this release. Only the DEPLOYMENT side (creating the app reg, pushing Edge policy keys) is now fully scriptable.
+
+### Re-runnability + safety
+
+Same as v2.4.5: idempotent app reg update, `config.js` overwrite, policy keys are no-op writes. Re-running with the same `-BootstrapSpn*` creds against the same tenant is a clean no-op.
+
+Parse-clean on PS 5.1.
 
 ---
 
