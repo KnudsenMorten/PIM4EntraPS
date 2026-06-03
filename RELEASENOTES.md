@@ -1,9 +1,10 @@
 # Release notes for PIM4EntraPS
 
-## v2.4.33
+## v2.4.34
 
 Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monorepo:
 
+- release: PIM4EntraPS v2.4.34 - footer always visible (sticky flex layout, only list scrolls) + Morten Knudsen footer link -> aka.ms/morten (1ff38bfd)
 - release: PIM4EntraPS v2.4.33 - role preview covers nested groups (transitiveRoleAssignments + direct in parallel, dedupe by principalId+roleDefId+scope) (7fed005c)
 - release: PIM4EntraPS v2.4.32 - popup width 800 -> 720 + nuclear max-width:100% + textarea resize:vertical (kills default horizontal scrollbar) (3995d4b8)
 - release: PIM4EntraPS v2.4.31 - self-deactivate (single + bulk) on My Access + blue popup frame + UPPERCASE branded header + tenantId in footer + horizontal-scroll fix (b500945a)
@@ -33,13 +34,29 @@ Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monor
 - release: PIM4EntraPS v2.4.10 - Activator popup: My Access tab + token self-heal + Auto-fix button + hide-already-active (96b0c313)
 - release: PIM4EntraPS v2.4.9 - switch CRX hosting to GitHub Pages + Chrome support + Install->Deploy renames + SPA URI fix (E2E proven) (5e263602)
 - release: PIM4EntraPS v2.4.8 - all-in-one Azure CRX hosting in Setup-PimActivator.ps1 + manifest schema fix + Test-PimActivatorFlow.ps1 (5adbd277)
-- release: PIM4EntraPS v2.4.7 - finish wiring v2.4.4's 4-method auth into community launchers + README catch-up (95a1ab25)
 
 ---
 
 # Release notes -- PIM4EntraPS
 
 > **Curated changelog.** The publish workflow auto-prepends recent monorepo commits as a raw activity log; this file is the human-friendly narrative on top.
+
+---
+
+## v2.4.34 -- Footer always visible; only the group list scrolls inside the popup
+
+Previously the entire popup body scrolled, so users had to scroll past the activation footer (Justification + Duration + Activate selected) and past 30+ rows just to reach the bottom attribution footer (Developed by Morten Knudsen + Tenant id). The footer was effectively hidden on first open.
+
+Fix: `body { display:flex; flex-direction:column; height:600px; }` + `#list { flex:1; overflow-y:auto; }`. Now:
+- Header bar pinned at top (blue brand banner).
+- Tab strip + filter + status pinned just below header.
+- Group list scrolls inside its own area only.
+- Activate / Justification / Duration controls pinned just above the footer.
+- "Developed by Morten Knudsen ... Tenant: ..." footer always visible at the bottom.
+
+Used `:not([hidden])` selectors on `#panel-activate` / `#panel-myaccess` so the `hidden` attribute (used to swap tabs) still suppresses display correctly despite the new `display:flex` rule.
+
+Manifest 0.4.23 -> 0.4.24.
 
 ---
 

@@ -6,6 +6,16 @@
 <style>
   :root { color-scheme: light; }
   html, body { margin:0; padding:0; width:720px; font-family: -apple-system, "Segoe UI", Roboto, sans-serif; background:#ffffff; color:#1a1a1a; font-size:13px; overflow-x:hidden; }
+  /* Pin header + activation footer + attribution footer at the top/bottom of
+     the popup. ONLY the list area scrolls. This way the user always sees
+     "Developed by Morten Knudsen ... Tenant: ..." without scrolling, and
+     the Activate / Justification controls don't get buried either. */
+  body { display:flex; flex-direction:column; height:600px; max-height:600px; }
+  /* Hidden attribute wins over display:flex (`hidden` short-circuits to
+     display:none); the :not([hidden]) selector makes display:flex apply ONLY
+     to the visible tab panel. */
+  #panel-activate:not([hidden]), #panel-myaccess:not([hidden]) { display:flex; flex-direction:column; flex:1; min-height:0; overflow:hidden; }
+  #list, #myaccess-list { flex:1; min-height:0; overflow-y:auto; }
   /* Belt-and-braces: every element confined to its parent's width.
      Prevents long unbreakable tokens (scope GUIDs, role names) from making
      rows wider than the popup and triggering horizontal scrollbar. */
@@ -146,7 +156,7 @@
 
 <footer id="popup-footer" style="padding:8px 12px;font-size:10.5px;color:#7d8590;border-top:1px solid #d0d7de;background:#f6f8fa;display:flex;align-items:center;gap:10px;">
   <div style="flex:1;">
-    Developed by <strong style="color:#1a1a1a;">Morten Knudsen</strong>
+    Developed by <a href="https://aka.ms/morten" target="_blank" rel="noopener" style="color:#0969da;text-decoration:none;font-weight:600;">Morten Knudsen</a>
     &middot; part of
     <a href="https://github.com/KnudsenMorten/PIM4EntraPS" target="_blank" rel="noopener" style="color:#0969da;text-decoration:none;">PIM4EntraPS</a>
   </div>
