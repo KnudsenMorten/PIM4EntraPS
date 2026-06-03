@@ -77,6 +77,28 @@ function Write-Err  { param([string]$Msg) Write-Host "   $Msg" -ForegroundColor 
 # ============================================================================
 if ($Repack -or $PackOnly) {
 
+    # ---- Pre-flight: syntax-check popup.js via Node ----------------------
+    # SyntaxError in popup.js silently hangs the popup ("Loading ..." forever);
+    # Edge doesn't surface JS parse errors to the user. Catch them before pack
+    # so we never ship a CRX that bricks the popup. Skipped if Node isn't on
+    # PATH (some lock-down dev boxes); -Repack proceeds without it.
+    $nodeCmd = Get-Command node -ErrorAction SilentlyContinue
+    if ($nodeCmd) {
+        Write-Step "Pre-flight: syntax-check popup.js"
+        $popupJs = Join-Path $SCRIPT_DIR 'popup.js'
+        # PowerShell 5.1 doesn't support `<` input redirection (reserved).
+        # Pipe via Get-Content -Raw instead.
+        $output = Get-Content -LiteralPath $popupJs -Raw | & node --input-type=module --check 2>&1
+        if ($LASTEXITCODE -ne 0) {
+            Write-Err "popup.js has a SyntaxError -- refusing to pack:"
+            $output | ForEach-Object { Write-Err "  $_" }
+            throw "popup.js syntax check failed. Fix the error above and re-run."
+        }
+        Write-Ok "popup.js parses cleanly"
+    } else {
+        Write-Warn "Node not on PATH -- skipping popup.js syntax check (consider installing Node so future SyntaxErrors get caught before pack)"
+    }
+
     # ---- Bump patch version in manifest.json ---------------------------------
     Write-Step "Bumping manifest.json patch version"
     $manifestPath = Join-Path $SCRIPT_DIR 'manifest.json'

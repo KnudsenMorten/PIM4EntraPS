@@ -1125,7 +1125,7 @@ function renderMyAccess(rows) {
   const workloadGroups = rows.filter(r => categoriseGroupByName(r.displayName) === 'workload')
 
   const sectionHelp = {
-    entra:    'PIM-Entra-* groups -- typically grant Entra (M365) admin roles. Roles listed under each row.',
+    entra:    'PIM-Entra-* groups -- typically grant Entra admin roles. Roles listed under each row.',
     azure:    'PIM-AzRes-* groups -- typically grant Azure RBAC roles. Roles listed under each row.',
     workload: 'Everything else -- workload access (Defender XDR, Intune, Power BI workspaces, custom apps). Group membership itself IS the permission.'
   }
@@ -1348,8 +1348,16 @@ function render() {
       return lines.join('')
     }
 
-    const rolesHtml = roleLines(entraPreview, entraExtra, 'Entra', '#0969da') +
-                      roleLines(azurePreview, azureExtra, 'Azure RBAC', '#9a3412')
+    // Show "Loading roles..." while bulk fetch is in progress so the user
+    // can tell "background fetch happening" vs "this group genuinely has no
+    // roles". Bulk fetch sets previewEntraRoles + previewAzureRoles to an
+    // array (possibly empty) when it completes; both undefined means the
+    // fetch hasn't fired yet for this row.
+    const stillFetching = r.previewEntraRoles === undefined && r.previewAzureRoles === undefined
+    const rolesHtml = stillFetching
+      ? `<div style="color:#7d8590;font-size:11px;font-style:italic;">&#x21B3; Loading roles...</div>`
+      : roleLines(entraPreview, entraExtra, 'Entra',      '#0969da') +
+        roleLines(azurePreview, azureExtra, 'Azure RBAC', '#9a3412')
 
     row.innerHTML = `
       <input type="checkbox" data-gid="${r.groupId}" ${r.checked ? 'checked' : ''} ${r.isActive ? 'disabled' : ''}>
@@ -1387,7 +1395,7 @@ function render() {
     for (const r of sorted) renderActivateRow(r)
   }
 
-  renderActivateSection('Entra (M365) roles',        buckets.entra)
+  renderActivateSection('Entra roles',               buckets.entra)
   renderActivateSection('Azure RBAC',                buckets.azure)
   renderActivateSection('PIM for Groups (workload)', buckets.workload)
 
@@ -1569,7 +1577,7 @@ async function loaded(token) {
     const groupIds = eligibleRows.map(r => r.groupId)
     if (!groupIds.length) return
 
-    const cacheKey = `bulkRoles_${currentAccount?.localAccountId || 'anon'}`
+    const cacheKey = `bulkRoles_v2_${currentAccount?.localAccountId || 'anon'}`
     const cached = await getStored([cacheKey])
     const fresh  = cached?.[cacheKey]?.ts && (Date.now() - cached[cacheKey].ts) < 60 * 60 * 1000
 

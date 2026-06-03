@@ -1,9 +1,12 @@
 # Release notes for PIM4EntraPS
 
-## v2.4.29
+## v2.4.30
 
 Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monorepo:
 
+- release: PIM4EntraPS v2.4.30 - drop '(M365)' label + bump bulk cache key v2 (forces fresh fetch after v0.4.14 bug) + inline 'Loading roles...' placeholder (b01dbf44)
+- fix(PIM4EntraPS): Update-PimActivatorDev.ps1 - use Get-Content pipe instead of '<' redirect (PS 5.1 doesn't support '<') (674e2f0d)
+- fix(PIM4EntraPS): Update-PimActivatorDev.ps1 -Repack now syntax-checks popup.js before pack (3557e5b6)
 - fix(PIM4EntraPS) v2.4.29 - HOTFIX duplicate const groupIds in loadMyAccessTab (SyntaxError stuck v0.4.14 popup on 'Loading your PIM delegations...') (a0dc70a7)
 - release: PIM4EntraPS v2.4.28 - bulk role fetch + Azure Resource Graph + parallel rendering on BOTH tabs (perf overhaul, Activate now shows role preview per row) (d4075f2a)
 - release: PIM4EntraPS v2.4.27 - Activate tab smart sort (recency 2x + count 1x, decays linearly over 30d, cap at 20 activations); persisted in chrome.storage.local (594490bf)
@@ -31,15 +34,26 @@ Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monor
 - release: PIM4EntraPS v2.4.6 - fully-unattended activator deployment via bootstrap SPN (Intune-friendly) (6841d152)
 - release: PIM4EntraPS v2.4.5 - turnkey PIM Activator install: one-command orchestrator + pinned extension identity + icons (4a26958d)
 - release: PIM4EntraPS v2.4.4 - port SI's 4-mode launcher auth + solution-wide config + new Grant-PimEngineAdminConsent helper (41e64c94)
-- release: PIM4EntraPS v2.4.3 - docs: README full feature inventory (41 bullets with shipped/partial/roadmap badges) (0016c32c)
-- release: PIM4EntraPS v2.4.2 - new Revoke tab in PIM Manager GUI for bulk-revoke of active activations (5c71b61e)
-- release: PIM4EntraPS v2.4.1 - wire PIM-for-Groups preload into Baseline + swap per-row eligibility-lookup call-sites (31cdfe5a)
 
 ---
 
 # Release notes -- PIM4EntraPS
 
 > **Curated changelog.** The publish workflow auto-prepends recent monorepo commits as a raw activity log; this file is the human-friendly narrative on top.
+
+---
+
+## v2.4.30 -- Drop "(M365)" label; bump bulk-cache key; inline "Loading roles..." while bulk fetch runs
+
+Three small fixes:
+
+1. **Section headers**: "Entra (M365) roles" -> "Entra roles" everywhere. M365 was redundant.
+2. **Bulk cache key bumped**: `bulkRoles_` -> `bulkRoles_v2_`. v0.4.14's SyntaxError may have left empty/partial data behind under the old key; bumping invalidates all caches so fresh bulk fetch runs immediately. (One-time cost for existing users.)
+3. **Inline "Loading roles..." placeholder**: each Activate row shows a faint italic "Loading roles..." while bulk fetch is in progress, so the user can tell "background fetch happening" vs "this group has no roles". Disappears as soon as the per-row data lands.
+
+v2.4.31 will add `roleEligibilityScheduleInstances` bulk fetch (for groups granting PIM-eligible roles) + `transitiveRoleAssignments` (for nested groups where Group A is a member of Group B and Group B has the roles).
+
+Manifest 0.4.15 -> 0.4.17 (one extra patch bump in the dev-helper's auto-bump path).
 
 ---
 
