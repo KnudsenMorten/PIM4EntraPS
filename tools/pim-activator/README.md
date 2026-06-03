@@ -1,8 +1,11 @@
-# PIM Activator (Edge extension)
+# PIM Activator (browser extension)
 
-Companion extension to **PIM4EntraPS**: bulk-activate eligible PIM-for-Groups
-memberships from the Edge toolbar instead of clicking through the Entra
-portal one role at a time.
+Companion Manifest V3 extension to **PIM4EntraPS** for **Edge and
+Chrome**: bulk-activate eligible PIM-for-Groups memberships from the
+toolbar instead of clicking through the Entra portal one role at a time.
+
+Hosted on GitHub Pages: `https://knudsenmorten.github.io/PIM4EntraPS/updates.xml`.
+Deterministic extension id: `hkdglhgahonnjbfindmgplekkcngmcck`.
 
 ```
 [ extension icon ]  -->  popup
@@ -19,17 +22,50 @@ but the user sees one click instead of N portal navigations.
 
 ---
 
+## What's new in v1.1.0
+
+Multi-tenant support. The managed-policy schema now accepts a
+`Tenants` array:
+
+```json
+{
+  "Tenants": [
+    { "Name": "ACME Production",  "TenantId": "...", "ClientId": "..." },
+    { "Name": "ACME Test",        "TenantId": "...", "ClientId": "..." },
+    { "Name": "Customer A",       "TenantId": "...", "ClientId": "..." }
+  ]
+}
+```
+
+Behaviour:
+
+- 0 tenants -- popup says "not configured".
+- 1 tenant -- used silently (same as v1.0).
+- 2+ tenants -- popup shows a tenant picker on first run per browser
+  profile; the choice is cached in `chrome.storage.local`. Footer shows
+  the friendly name + a `(switch)` link that clears the cached pick and
+  re-renders the picker. Per-profile only -- other Edge / Chrome profiles
+  keep their own choice.
+
+Backwards compatible: the v1.0 singleton `tenantId` / `clientId` keys
+still work as a fallback when no `Tenants` array is present.
+
+---
+
 ## File layout
 
 ```
 tools/pim-activator/
-  manifest.json                              # Edge MV3 manifest
-  popup.html / popup.js                      # the popup UI
-  managed_schema.json                        # what admins can push via Intune
+  manifest.json                              # MV3 manifest (Edge + Chrome)
+  popup.html / popup.js                      # the popup UI + tenant picker
+  managed_schema.json                        # Tenants array schema + legacy keys
   config.template.js                         # copy -> config.js for dev-mode
   icons/icon-16.png / icon-32.png / icon-128.png
-  Deploy-PimActivatorBackend.ps1    # ONE-TIME tenant setup (run by admin)
-  Deploy-PimActivatorClient.ps1                   # PER-PAW install (Intune-deployable)
+  Deploy-PimActivatorBackend.ps1             # ONE-TIME tenant setup (per Entra tenant)
+  Deploy-PimActivatorIntune.ps1              # Intune Remediation + local-installer generator
+  Deploy-PimActivatorClient.ps1              # Direct local registry write (dev / single box)
+  Deploy-PimActivatorPolicy-Admx.ps1         # ADMX template emitter (AD GPO authoring)
+  Setup-PimActivator.ps1                     # End-to-end interactive setup wrapper
   README.md
 ```
 
@@ -82,75 +118,182 @@ SPA redirect URI: `https://<ExtensionId>.chromiumapp.org/`
 Re-running the script with the same `-DisplayName` updates the existing app
 in place rather than creating a duplicate.
 
-### Stage 2 — per-PAW install (Intune-deployable, unattended)
+Repeat Stage 1 once per Entra tenant you want the picker to offer. Capture
+each `(Name, TenantId, ClientId)` triple into a CSV (`tenants.csv`):
 
-Pushes Edge enterprise policy keys that:
+```
+Name,TenantId,ClientId
+ACME Production,f0fa27a0-8e7c-4f63-9a77-ec94786b7c9e,11111111-2222-3333-4444-555555555555
+ACME Test,11112222-3333-4444-5555-666677778888,99998888-7777-6666-5555-444433332222
+Customer A,aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee,22221111-3333-4444-5555-666666666666
+```
 
-- Force-install the extension from your chosen update URL (Edge Add-ons
-  store or a private CRX host)
-- Push the per-tenant config (`tenantId`, `clientId`, etc.) into
-  `chrome.storage.managed`, which `popup.js` reads in preference to
-  `config.js`.
+That CSV is the input to every Stage 2 path below.
 
-**Direct install on one machine** (as admin):
+### Stage 2 -- choose a rollout path
+
+The extension reads its config from Chromium's `chrome.storage.managed`,
+which Edge / Chrome populate from the policy registry tree
+`HKCU|HKLM\SOFTWARE\Policies\{Microsoft\Edge | Google\Chrome}\3rdparty\extensions\<ExtensionId>\policy`.
+**All three rollout paths write the same registry keys** -- only the
+delivery mechanism differs. Pick one:
+
+| Path | Best for | Self-heal | Admin tooling |
+|---|---|---|---|
+| Intune Remediation | Intune-managed estates | Hourly (Intune-scheduled) | Intune Admin Center |
+| Local installer (GPO / file share / SCCM) | AD-managed estates, no Intune | Per-logon (GPO) or per-deployment | Group Policy Management |
+| Direct local registry write | Dev box, single-machine testing | None (one-shot) | none |
+
+#### Path A -- Intune Remediation (recommended for Intune estates)
+
+`Deploy-PimActivatorIntune.ps1` reads `tenants.csv`, generates a
+Detection + Remediation script pair, uploads them as an Intune device
+health script, and schedules hourly. Detection script compares the
+on-disk `Tenants` JSON against the desired JSON; drift -> exit 1 ->
+Intune fires the remediation, which rewrites every key from scratch.
+
+```powershell
+# Connect once with the right scope.
+Connect-MgGraph -Scopes 'DeviceManagementConfiguration.ReadWrite.All',
+                        'Group.Read.All'
+
+# First time -- create + (optionally) auto-assign in one shot.
+.\Deploy-PimActivatorIntune.ps1 -CreateIntuneRemediation `
+    -TenantsCsv .\tenants.csv `
+    -GroupId    11111111-2222-3333-4444-555555555555
+# -> prints: Remediation id: <guid>   <-- save this for later updates
+
+# -GroupId is OPTIONAL. Omit it to create the remediation unassigned, then
+# assign manually via Intune Admin Center -> Devices -> Scripts and
+# remediations -> open the new remediation -> Assignments -> Add groups.
+```
+
+**Add a tenant later:** edit `tenants.csv`, then push the change:
+
+```powershell
+.\Deploy-PimActivatorIntune.ps1 -UpdateIntuneRemediation `
+    -TenantsCsv    .\tenants.csv `
+    -RemediationId <guid-from-create-run>
+```
+
+Clients converge within ~1h (the remediation scheduler runs faster than
+the 8-hour MDM sync). No user action required.
+
+Requires `Microsoft.Graph.Beta.DeviceManagement`
+(`Install-Module Microsoft.Graph.Beta.DeviceManagement -Scope CurrentUser`).
+The signed-in user needs
+`DeviceManagementConfiguration.ReadWrite.All` consent.
+
+#### Path B -- AD GPO / file share / SCCM (local installer)
+
+Same script, different mode: `-GenerateLocalInstaller` emits a
+self-contained installer set with the tenant JSON **baked in** -- no
+parameters, no CSV dependency at deploy time. Drop on a file share, point
+your GPO Startup / Logon Script at it, or wrap in an SCCM package.
+
+```powershell
+.\Deploy-PimActivatorIntune.ps1 -GenerateLocalInstaller `
+    -TenantsCsv          .\tenants.csv `
+    -LocalInstallerScope User                          # or Machine
+# -> writes .\out-localinstaller\:
+#      Install-PimActivator.ps1     (no params)
+#      Uninstall-PimActivator.ps1   (no params)
+#      README.md                    (deploy guidance)
+```
+
+Scope choices:
+
+- `User` -- writes HKCU. Deploy via GPO **Logon Script** (User
+  Configuration -> Windows Settings -> Scripts -> Logon). No admin rights
+  required on the client. Survives Intune coexistence (HKCU does not
+  collide with HKLM forcelist policy).
+- `Machine` -- writes HKLM. Deploy via GPO **Startup Script** (Computer
+  Configuration -> Windows Settings -> Scripts -> Startup) or SCCM.
+  Affects every user on the box. **Conflicts** with Intune-managed
+  ExtensionInstallForcelist policy -- only use on non-Intune estates.
+
+Re-running the generator overwrites the installer with the latest CSV.
+Push it through your normal channel to add / remove tenants.
+
+#### Path C -- Direct local registry write (dev / single box)
+
+`Deploy-PimActivatorClient.ps1` is the lowest-level option. No Intune,
+no GPO, just a one-shot registry write. Useful for dev workstations or
+proving the flow before wiring up Path A or Path B.
 
 ```powershell
 .\Deploy-PimActivatorClient.ps1 `
-    -ExtensionId 'abcdefghijklmnopabcdefghijklmnop' `
-    -UpdateUrl   'https://edge.microsoft.com/extensionwebstorebase/v1/crx' `
-    -TenantId    'f0fa27a0-8e7c-4f63-9a77-ec94786b7c9e' `
-    -ClientId    '11111111-2222-3333-4444-555555555555'
+    -Tenants @(
+        @{ Name='ACME Production'; TenantId='f0fa27a0-...'; ClientId='11111111-...' },
+        @{ Name='ACME Test';       TenantId='11112222-...'; ClientId='99998888-...' }
+    ) `
+    -Scope User
 ```
 
-**Intune Win32 app deployment:**
+`-Scope User` (HKCU, no admin) or `-Scope Machine` (HKLM, admin
+required, conflicts with Intune). `-Browser Edge | Chrome | Both`
+(default Both -- writes identical key names under each browser's policy
+root).
 
-1. Wrap `Deploy-PimActivatorClient.ps1` + a `pim-activator.intunewin` with the
-   Microsoft Win32 Content Prep Tool (`IntuneWinAppUtil.exe`).
-2. Install command:
-   ```
-   powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Deploy-PimActivatorClient.ps1 -ExtensionId <id> -UpdateUrl <url> -TenantId <tid> -ClientId <cid>
-   ```
-3. Uninstall command:
-   ```
-   powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Deploy-PimActivatorClient.ps1 -ExtensionId <id> -Uninstall
-   ```
-4. Detection rule: registry key
-   `HKLM\SOFTWARE\Policies\Microsoft\Edge\3rdparty\extensions\<ExtensionId>\policy`
-   value `tenantId` exists.
-5. Assign to the security group containing your PAW devices.
-
-Policy is picked up by Edge on next launch — no reboot, no user interaction.
-
-**Settings Catalog alternative:** if you'd rather not deploy a Win32 app,
-use **Intune → Configuration Profiles → Settings Catalog → Microsoft Edge →
-ExtensionInstallForcelist** + **Edge → 3rd party extensions → managed
-storage**. Same registry keys, but Intune-native UI.
-
-### Stage 3 — manual dev-mode install (for testing the extension itself)
+### Stage 3 -- manual dev-mode install (testing the extension code itself)
 
 ```powershell
 Copy-Item config.template.js config.js
-# Edit config.js, set tenantId + clientId.
+# Edit config.js, set tenantId + clientId (or a Tenants array).
 ```
 
-Load unpacked at `edge://extensions` (Developer Mode on). Skip Stage 2.
+Load unpacked at `edge://extensions` or `chrome://extensions` (Developer
+Mode on). Skip Stage 2.
+
+---
+
+## Mental model
+
+The picker UI and the deployment layer are independent:
+
+```
++-----------------------+      +---------------------------+      +-----------------+
+| Path A Intune         |      |                           |      |                 |
+| Path B local install  | -->  | Chromium policy registry  | -->  | Extension popup |
+| Path C direct write   |      | (HKCU/HKLM ...\policy\    |      | (popup.html +   |
+|                       |      |  Tenants JSON)            |      |  popup.js)      |
+| silent push, no UI    |      | chrome.storage.managed    |      | -> picker if 2+ |
++-----------------------+      +---------------------------+      +-----------------+
+```
+
+The deployment layer's only job is to land the `Tenants` JSON in the
+right registry path. The picker is plain HTML/JS inside the extension
+that reads whatever is in `chrome.storage.managed` at popup-open time.
+Add or remove tenants by changing the source CSV; clients re-render the
+picker automatically when the cached tenant disappears from the
+managed list.
 
 ---
 
 ## What the user sees
 
-1. Click the extension icon → silent reauth via cached refresh token (or a
-   one-tab interactive sign-in the first time / after consent revocation).
-2. Popup lists all PIM groups they're eligible for, filtered by the regex
+1. Click the extension icon.
+2. **First run only** (2+ tenants configured) -- tenant picker lists the
+   friendly `Name` of each tenant in the managed `Tenants` array. Pick
+   one. Choice is cached per browser profile in `chrome.storage.local`.
+3. Silent reauth via cached refresh token (or a one-tab interactive
+   sign-in the first time / after consent revocation).
+4. Popup lists all PIM groups they're eligible for, filtered by the regex
    in `groupNameFilter` (default `^PIM-`).
-3. Tick the groups they need, enter a justification, pick a duration.
-4. **Activate selected** → one POST per group (sequential, gentle on
+5. Tick the groups they need, enter a justification, pick a duration.
+6. **Activate selected** -- one POST per group (sequential, gentle on
    throttling). Per-group status updates inline.
+
+Footer shows the selected tenant's friendly name. When 2+ tenants are
+configured, a `(switch)` link sits next to the name; clicking it clears
+the cached pick and re-renders the picker without affecting other browser
+profiles.
 
 State persisted in `chrome.storage.local`:
 
-- `refreshToken` / `accessToken` / `accessTokenExpiry` / `account` — auth cache
-- `selectedIds` — pre-tick the user's typical bundle next time
+- `refreshToken` / `accessToken` / `accessTokenExpiry` / `account` -- auth cache
+- `selectedTenantId` -- per-profile tenant pick (multi-tenant rollouts)
+- `selectedIds` -- pre-tick the user's typical bundle next time
 - `lastJustification` / `lastDurationHours`
 
 ---
@@ -171,8 +314,15 @@ State persisted in `chrome.storage.local`:
 ## Troubleshooting
 
 - **"Extension not configured" in the popup**: managed policy keys missing
-  AND no `config.js`. Confirm `Deploy-PimActivatorClient.ps1` ran successfully
-  (`edge://policy` shows extension policies under the extension id).
+  AND no `config.js`. Confirm the chosen Stage 2 path ran successfully
+  (`edge://policy` or `chrome://policy` shows extension policies under
+  the extension id; look for a `Tenants` value with valid JSON).
+- **Picker keeps appearing every time**: `chrome.storage.local` got
+  cleared (incognito, profile reset, "Clear browsing data -> Cookies and
+  other site data"). The pick is per browser profile and not synced.
+- **Signed into the wrong tenant**: click `(switch)` in the popup footer
+  -- this clears `selectedTenantId` for the current profile only and
+  re-renders the picker. Other profiles keep their existing pick.
 - **Sign-in works, no groups listed**: the user has no eligible PIM
   assignments for groups matching `groupNameFilter`. Try widening the
   filter to `.*` for debugging.
