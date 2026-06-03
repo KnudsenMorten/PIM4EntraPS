@@ -117,7 +117,8 @@ param(
     [string]$ExtensionId,
 
     [Parameter(Mandatory, ParameterSetName = 'Install')]
-    [Parameter(Mandatory, ParameterSetName = 'InstallMulti')]
+    [Parameter(Mandatory, ParameterSetName = 'InstallMultiInline')]
+    [Parameter(Mandatory, ParameterSetName = 'InstallMultiCsv')]
     [string]$UpdateUrl,
 
     # Single-tenant (legacy) -----------------------------------------------------
@@ -129,30 +130,35 @@ param(
     [ValidatePattern('^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$')]
     [string]$ClientId,
 
-    # Multi-tenant (v1.1+) -------------------------------------------------------
+    # Multi-tenant inline (v1.1+) ------------------------------------------------
     # Array of hashtables: @(@{Name='ACME Prod';TenantId='<guid>';ClientId='<guid>'}, ...)
     # When 2+ entries are present the popup shows a tenant picker on first open
     # per browser profile; choice cached in chrome.storage.local (per-profile).
-    [Parameter(Mandatory, ParameterSetName = 'InstallMulti')]
+    [Parameter(Mandatory, ParameterSetName = 'InstallMultiInline')]
     [object[]]$Tenants,
 
-    # Optional CSV path: Name,TenantId,ClientId (one row per tenant). Convenience
-    # alternative to -Tenants for admins who maintain tenant lists in Excel.
-    [Parameter(ParameterSetName = 'InstallMulti')]
+    # Multi-tenant via CSV (v1.1+) -----------------------------------------------
+    # CSV path with columns: Name,TenantId,ClientId (one row per tenant).
+    # Convenience alternative to -Tenants for admins who maintain tenant lists
+    # in Excel. Picking THIS sub-set requires omitting -Tenants entirely.
+    [Parameter(Mandatory, ParameterSetName = 'InstallMultiCsv')]
     [string]$TenantsCsv,
 
     # Shared options -------------------------------------------------------------
     [Parameter(ParameterSetName = 'Install')]
-    [Parameter(ParameterSetName = 'InstallMulti')]
+    [Parameter(ParameterSetName = 'InstallMultiInline')]
+    [Parameter(ParameterSetName = 'InstallMultiCsv')]
     [string]$GroupNameFilter = '^PIM-',
 
     [Parameter(ParameterSetName = 'Install')]
-    [Parameter(ParameterSetName = 'InstallMulti')]
+    [Parameter(ParameterSetName = 'InstallMultiInline')]
+    [Parameter(ParameterSetName = 'InstallMultiCsv')]
     [ValidateRange(0.5, 24)]
     [double]$DefaultDurationHours = 1,
 
     [Parameter(ParameterSetName = 'Install')]
-    [Parameter(ParameterSetName = 'InstallMulti')]
+    [Parameter(ParameterSetName = 'InstallMultiInline')]
+    [Parameter(ParameterSetName = 'InstallMultiCsv')]
     [string]$DefaultJustification = 'Daily ops',
 
     [Parameter()]
@@ -250,7 +256,7 @@ if ($Scope -eq 'Machine') {
 
 # ---- Multi-tenant: normalise -Tenants / -TenantsCsv into a JSON string -------
 $tenantsJson = $null
-if ($PSCmdlet.ParameterSetName -eq 'InstallMulti') {
+if ($PSCmdlet.ParameterSetName -in 'InstallMultiInline','InstallMultiCsv') {
     $tenantList = New-Object System.Collections.Generic.List[object]
     if ($TenantsCsv) {
         if (-not (Test-Path -LiteralPath $TenantsCsv)) { throw "TenantsCsv not found: $TenantsCsv" }
