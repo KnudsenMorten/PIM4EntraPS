@@ -1,9 +1,10 @@
 # Release notes for PIM4EntraPS
 
-## v2.4.7
+## v2.4.8
 
 Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monorepo:
 
+- release: PIM4EntraPS v2.4.8 - all-in-one Azure CRX hosting in Setup-PimActivator.ps1 + manifest schema fix + Test-PimActivatorFlow.ps1 (5adbd277)
 - release: PIM4EntraPS v2.4.7 - finish wiring v2.4.4's 4-method auth into community launchers + README catch-up (95a1ab25)
 - release: PIM4EntraPS v2.4.6 - fully-unattended activator deployment via bootstrap SPN (Intune-friendly) (6841d152)
 - release: PIM4EntraPS v2.4.5 - turnkey PIM Activator install: one-command orchestrator + pinned extension identity + icons (4a26958d)
@@ -33,13 +34,71 @@ Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monor
 - rename: SOLUTIONS/PlatformOnboarding -> SOLUTIONS/PlatformConfiguration (368f422e)
 - Merge remote-tracking branch 'origin/dev' into HEAD (b8556ec1)
 - launchers: fix 4 template bugs preventing internal-vm engine invocation (de585260)
-- move Update-Platform.ps1 into SOLUTIONS/PlatformOnboarding/INTERNAL/ (b4a46912)
 
 ---
 
 # Release notes -- PIM4EntraPS
 
 > **Curated changelog.** The publish workflow auto-prepends recent monorepo commits as a raw activity log; this file is the human-friendly narrative on top.
+
+---
+
+## v2.4.8 -- All-in-one Azure CRX hosting in Setup-PimActivator.ps1 + manifest schema fix + Test-PimActivatorFlow.ps1
+
+Single re-runnable command now does **everything** needed to host the activator extension from your own Azure subscription: resource group, signing key in Key Vault, manifest key sync, storage account, blob container, CRX packaging via msedge.exe, updates.xml generation, blob upload, and optional Edge policy push -- all idempotent.
+
+### `Setup-PimActivator.ps1` extension (322 -> 655 lines)
+
+New `-DeployAzureCrxHost` switch composes with both `Interactive` and `Unattended` auth modes. When set, a new **Step 1.5** runs BEFORE the Graph half:
+
+1. **Az preflight** -- requires existing `Connect-AzAccount` session; switches sub if `-AzSubscriptionId` given; verifies tenant matches `-TenantId`.
+2. **Ensure RG** -- gets-or-creates `$AzResourceGroup` (default `rg-pim-activator`).
+3. **Validate KV** -- mandatory `-AzKeyVaultName` (the user's existing KV; script does NOT create vaults).
+4. **Get-or-create signing key** -- looks up the PKCS#8 PEM secret in KV; if missing generates RSA 2048 + writes back as KV secret. Same secret across re-runs -> deterministic extension ID.
+5. **Sync manifest.json `key`** -- recomputes the public-key SPKI DER from the PEM, overwrites `manifest.json.key` if drift detected. The extension ID derived from this is logged.
+6. **Ensure storage account** -- default name `stpim` + first 10 hex of `sha256(tenantId)` (auto-derived; pass `-AzStorageAccountName` to override). Created with `Standard_LRS / StorageV2 / AllowBlobPublicAccess=true / HTTPS-only / TLS 1.2`.
+7. **Ensure container** -- default `pim-activator` with `-Permission Blob` (public read on individual blobs, no listing).
+8. **Pack CRX** -- writes the PEM to a temp path, runs `msedge.exe --pack-extension --pack-extension-key`, output `tools/pim-activator.crx`, temp PEM deleted in a `finally` block (no private key left on disk).
+9. **Generate `updates.xml`** -- Chromium auto-update manifest pointing at the public CRX URL.
+10. **Upload both blobs** -- CRX (`application/x-chrome-extension`) + updates.xml (`application/xml`), public read, overwriting any prior versions.
+11. **Auto-derive `-CrxUpdateUrl`** -- when `-PushPolicy` is set without an explicit `-CrxUpdateUrl`, the script uses the just-uploaded updates.xml URL.
+
+### `Test-PimActivatorFlow.ps1` (new, ~150 lines)
+
+Verifies the PIM-for-Groups bulk-activation flow WITHOUT loading the extension. Same Graph endpoints + delegated scopes as `popup.js`:
+- `Connect-MgGraph -Scopes 'PrivilegedAccess.ReadWrite.AzureADGroup', 'Group.Read.All', 'User.Read'` (interactive browser)
+- Lists the caller's `identityGovernance/privilegedAccess/group/eligibilityScheduleInstances`
+- Resolves each `groupId` -> `displayName`, applies `^PIM-` regex filter
+- Interactive multi-select prompt
+- POSTs `selfActivate` `assignmentScheduleRequests` per selected group with `justification` + `PT{N}H` duration
+- Per-row pass/fail report
+
+Useful for: validating the activator app reg's delegated grants work, validating the calling user has any eligibilities at all, debugging from the same PS session as the engine.
+
+### `managed_schema.json` fix (the "Failed to load extension" blocker)
+
+Edge's managed-schema validator only accepts `minimum`/`maximum` on `type: integer`, not `type: number`. Old schema had `defaultDurationHours: { type: 'number', minimum: 0.5, maximum: 24 }` -> Edge rejected with `Only integers can have minimum and maximum`. Fixed: `type: integer, minimum: 1, maximum: 24`. Trade-off: admin-policy-pushed defaults are now whole hours; the `Setup-PimActivator.ps1 -DefaultDurationHours` flag still accepts decimals (it writes to config.js, not the managed schema).
+
+### Prerequisites to use `-DeployAzureCrxHost`
+
+1. Az modules: `Install-Module Az.Accounts, Az.Resources, Az.Storage, Az.KeyVault -Scope CurrentUser`.
+2. `Connect-AzAccount` before invocation (interactive on dev, SPN on Intune).
+3. KV must already exist (script doesn't create vaults -- you control which one).
+4. Calling identity needs: **Contributor** on the sub + **Key Vault Secrets Officer** on the KV (RBAC) OR Get+Set on the access policy (legacy mode).
+5. Graph identity (same Connect-MgGraph flow as before) needs: `Application.ReadWrite.All`, `AppRoleAssignment.ReadWrite.All`, `DelegatedPermissionGrant.ReadWrite.All`.
+6. Edge installed (msedge.exe used for CRX packaging).
+
+### Example
+
+```powershell
+.\Setup-PimActivator.ps1 -TenantId 'f0fa27a0-...' `
+    -DeployAzureCrxHost `
+    -AzSubscriptionId '54468121-...' `
+    -AzKeyVaultName 'kv-2linkit-automation-p' `
+    -PushPolicy
+```
+
+One command: deploys storage + KV signing key + CRX + updates.xml + Edge policy. Re-run to refresh anything that drifted.
 
 ---
 
