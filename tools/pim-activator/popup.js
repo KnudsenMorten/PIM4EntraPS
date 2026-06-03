@@ -1132,16 +1132,25 @@ function render() {
     if (filter && !((r.displayName || '').toLowerCase().includes(filter) || r.groupId.includes(filter))) continue
     visible++
     const row = document.createElement('div')
-    row.className = 'row'
+    row.className = r.isActive ? 'row row-active-already' : 'row'
+    // Grey-out + dim opacity + disabled checkbox + "already active" badge for
+    // groups the user is already a member of. Sorted to the bottom of the
+    // list so they don't push the actionable rows down.
+    if (r.isActive) row.style.cssText = 'opacity:0.55;background:#f6f8fa;'
+    const activeBadge = r.isActive
+      ? ' <span style="background:#dafbe1;color:#1a7f37;padding:1px 6px;border-radius:8px;font-size:10.5px;font-weight:600;margin-left:6px;">already active</span>'
+      : ''
     row.innerHTML = `
-      <input type="checkbox" data-gid="${r.groupId}" ${r.checked ? 'checked' : ''}>
+      <input type="checkbox" data-gid="${r.groupId}" ${r.checked ? 'checked' : ''} ${r.isActive ? 'disabled' : ''}>
       <div class="body">
-        <div class="name" title="${escapeHtml(r.displayName || r.groupId)}">${escapeHtml(r.displayName || r.groupId)}</div>
+        <div class="name" title="${escapeHtml(r.displayName || r.groupId)}">${escapeHtml(r.displayName || r.groupId)}${activeBadge}</div>
         <div class="meta">${escapeHtml(r.accessId)} &middot; ends ${r.endDateTime ? new Date(r.endDateTime).toLocaleDateString() : 'permanent'}</div>
         <div class="status" data-gid-status="${r.groupId}"></div>
       </div>
     `
-    row.querySelector('input').onchange = (e) => { r.checked = e.target.checked; updateCount() }
+    if (!r.isActive) {
+      row.querySelector('input').onchange = (e) => { r.checked = e.target.checked; updateCount() }
+    }
     els.list.appendChild(row)
   }
   if (!visible) {
@@ -1286,20 +1295,28 @@ async function loaded(token) {
     displayName: names[x.groupId] || x.groupId,
     accessId: x.accessId,
     endDateTime: x.endDateTime,
-    checked: preSelected.has(x.groupId)
+    // isActive = the user is already in this group; row gets greyed out at
+    // the bottom of the list + the checkbox is disabled (no re-activation
+    // path; user goes to My Access tab to see/extend it).
+    isActive: activeKeys.has(`${x.groupId}|${x.accessId}`),
+    checked: preSelected.has(x.groupId) && !activeKeys.has(`${x.groupId}|${x.accessId}`)
   }))
   const afterNameFilter = allMapped.filter(r => !filterRe || filterRe.test(r.displayName))
-  // Hide rows already active (they appear in My Access tab instead).
-  const hiddenAsActive = afterNameFilter.filter(r => activeKeys.has(`${r.groupId}|${r.accessId}`)).length
-  eligibleRows = afterNameFilter
-    .filter(r => !activeKeys.has(`${r.groupId}|${r.accessId}`))
-    .sort((a, b) => (a.displayName || '').localeCompare(b.displayName || ''))
+  // Sort: inactive (ready-to-activate) first, alphabetical; then active rows
+  // at the bottom, also alphabetical. Lets the user see "what I already have"
+  // without burying the actionable rows.
+  eligibleRows = afterNameFilter.sort((a, b) => {
+    if (!!a.isActive !== !!b.isActive) return a.isActive ? 1 : -1
+    return (a.displayName || '').localeCompare(b.displayName || '')
+  })
 
   els.just.value = stored.lastJustification ?? (cfg.defaultJustification || '')
   els.dur.value  = stored.lastDurationHours ?? (cfg.defaultDurationHours || 1)
 
-  const hiddenNote = hiddenAsActive > 0 ? ` (${hiddenAsActive} already active -> My Access)` : ''
-  els.status.textContent = `${eligibleRows.length} eligible group(s)${hiddenNote}.`
+  const readyCount  = eligibleRows.filter(r => !r.isActive).length
+  const activeCount = eligibleRows.filter(r =>  r.isActive).length
+  const activeNote  = activeCount > 0 ? ` (${activeCount} already active -- shown at bottom)` : ''
+  els.status.textContent = `${readyCount} ready to activate${activeNote}.`
   els.toolbar.style.display = 'flex'
   els.footer.style.display = ''
   els.tabs.style.display = 'flex'
@@ -1355,7 +1372,7 @@ async function loaded(token) {
   }
 
   els.search.oninput  = render
-  els.selectAll.onclick = () => { eligibleRows.forEach(r => r.checked = true);  render() }
+  els.selectAll.onclick  = () => { eligibleRows.forEach(r => { if (!r.isActive) r.checked = true }); render() }
   els.selectNone.onclick = () => { eligibleRows.forEach(r => r.checked = false); render() }
   els.refresh.onclick = () => window.location.reload()
 
