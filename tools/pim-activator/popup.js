@@ -813,6 +813,11 @@ async function loadMyAccessTab(token, { force = false } = {}) {
 
       updateMyAccessRoleSlot(r)
     }
+
+    // All per-row data is loaded -- re-render to switch from the single
+    // "Active memberships -- loading details..." section to the 3-category
+    // view (Entra admin roles / Azure RBAC / Workload access).
+    renderMyAccess(rows)
   } catch (e) {
     console.error('My Access load failed:', e)
     els.myAccessStatus.textContent = `Failed to load: ${e.message}`
@@ -828,31 +833,76 @@ function renderMyAccess(rows) {
     els.myAccessList.innerHTML = '<div class="empty">No active PIM-for-Groups memberships right now. Activate one from the Activate tab.</div>'
     return
   }
-  const sec = document.createElement('div')
-  sec.className = 'ma-section'
-  sec.textContent = `Active PIM-for-Groups memberships (${rows.length})`
-  els.myAccessList.appendChild(sec)
 
-  for (const r of rows) {
-    const start = r.startDateTime ? new Date(r.startDateTime).toLocaleString() : '?'
-    const end   = r.endDateTime   ? new Date(r.endDateTime).toLocaleString()   : 'permanent'
-    const row = document.createElement('div')
-    row.className = 'ma-row'
-    row.dataset.gid = r.groupId
-    row.innerHTML = `
-      <div class="ma-head">
-        <div class="ma-name">${escapeHtml(r.displayName || r.groupId)}</div>
-        <div class="ma-times">member since ${escapeHtml(start)} &middot; expires ${escapeHtml(end)}</div>
-      </div>
-      <div class="ma-roles" data-roles-for="${escapeHtml(r.groupId)}"></div>
-    `
-    els.myAccessList.appendChild(row)
-    updateMyAccessRoleSlot(r)
+  // While roles are still loading (any row with roles === null OR azureRoles
+  // === null) we fall back to a single "Active memberships" section -- we
+  // can't categorise a group until we know its role data. Once everything
+  // has loaded, renderMyAccess gets called again and we switch to the
+  // 3-section view (Entra roles / Azure RBAC / Workload access only).
+  const stillLoading = rows.some(r => r.roles === null || r.azureRoles === null)
+
+  if (stillLoading) {
+    const sec = document.createElement('div')
+    sec.className = 'ma-section'
+    sec.textContent = `Active PIM-for-Groups memberships (${rows.length})  -- loading details...`
+    els.myAccessList.appendChild(sec)
+    for (const r of rows) renderOneMyAccessRow(r)
+    return
   }
+
+  // Categorise each row. A group with BOTH Entra + Azure roles renders in
+  // both sections (duplicate by design -- user wanted "all Entra in one
+  // place AND all Azure in one place"; explicit confirmation 2026-06-03).
+  const entraGroups    = rows.filter(r => r.roles && r.roles.length > 0)
+  const azureGroups    = rows.filter(r => r.azureRoles && r.azureRoles.length > 0)
+  const workloadOnly   = rows.filter(r => (!r.roles || r.roles.length === 0) && (!r.azureRoles || r.azureRoles.length === 0))
+
+  const sectionHelp = {
+    entra:    'Entra (M365) admin roles granted via PIM-for-Groups membership',
+    azure:    'Azure RBAC roles (Owner, Contributor, etc.) granted via PIM-for-Groups membership',
+    workload: 'Workload access (Defender XDR, Intune, Power BI workspaces, etc.) -- the group membership itself is the permission; no Entra/Azure roles attached'
+  }
+
+  function renderSection(title, help, members) {
+    if (!members.length) return
+    const sec = document.createElement('div')
+    sec.className = 'ma-section'
+    sec.innerHTML = `${escapeHtml(title)} (${members.length}) <span style="font-weight:400;color:#7d8590;font-size:11px;">&mdash; ${escapeHtml(help)}</span>`
+    els.myAccessList.appendChild(sec)
+    for (const r of members) renderOneMyAccessRow(r)
+  }
+
+  renderSection('Entra admin roles', sectionHelp.entra,    entraGroups)
+  renderSection('Azure RBAC',        sectionHelp.azure,    azureGroups)
+  renderSection('Workload access',   sectionHelp.workload, workloadOnly)
+}
+
+function renderOneMyAccessRow(r) {
+  const start = r.startDateTime ? new Date(r.startDateTime).toLocaleString() : '?'
+  const end   = r.endDateTime   ? new Date(r.endDateTime).toLocaleString()   : 'permanent'
+  const row = document.createElement('div')
+  row.className = 'ma-row'
+  row.dataset.gid = r.groupId
+  row.innerHTML = `
+    <div class="ma-head">
+      <div class="ma-name">${escapeHtml(r.displayName || r.groupId)}</div>
+      <div class="ma-times">member since ${escapeHtml(start)} &middot; expires ${escapeHtml(end)}</div>
+    </div>
+    <div class="ma-roles" data-roles-for="${escapeHtml(r.groupId)}"></div>
+  `
+  els.myAccessList.appendChild(row)
+  updateMyAccessRoleSlot(r)
 }
 
 function updateMyAccessRoleSlot(r) {
-  const slot = els.myAccessList.querySelector(`[data-roles-for="${CSS.escape(r.groupId)}"]`)
+  // A group can appear in TWO sections (Entra + Azure) once renderMyAccess
+  // switches to the 3-category view, so update every matching slot.
+  const slots = els.myAccessList.querySelectorAll(`[data-roles-for="${CSS.escape(r.groupId)}"]`)
+  if (!slots.length) return
+  for (const slot of slots) updateOneMyAccessRoleSlot(r, slot)
+}
+
+function updateOneMyAccessRoleSlot(r, slot) {
   if (!slot) return
   slot.innerHTML = ''
   if (r.roles === null) {
@@ -865,13 +915,13 @@ function updateMyAccessRoleSlot(r) {
   if (r.rolesError) {
     const d = document.createElement('div')
     d.className = 'ma-role ma-err'
-    d.textContent = `(could not load roles for this group: ${r.rolesError})`
+    d.textContent = `(could not load Entra roles: ${r.rolesError})`
     slot.appendChild(d)
   } else if (!r.roles.length) {
-    const d = document.createElement('div')
-    d.className = 'ma-role'
-    d.innerHTML = '&#x21B3; <span class="ma-scope">(no Entra role assignments granted by this group)</span>'
-    slot.appendChild(d)
+    // Skip rendering -- user explicitly asked to not show "no X assigned"
+    // lines. Three permission types in this popup: PIM-for-Groups (the
+    // parent row itself), Entra roles (this section), Azure RBAC (next).
+    // If a section has nothing, the cleanest UX is silence.
   } else {
     // Collapse 8 "Groups Administrator AU <guid>" rows into one tidy row.
     // Group by roleName, summarise scopes. Then if there are MORE than 3
@@ -935,10 +985,8 @@ function updateMyAccessRoleSlot(r) {
     d.innerHTML = `&#x21B3; Azure RBAC: <span class="ma-scope">${escapeHtml(r.azureRolesError)}</span>`
     slot.appendChild(d)
   } else if (!r.azureRoles.length) {
-    const d = document.createElement('div')
-    d.className = 'ma-role'
-    d.innerHTML = '&#x21B3; <span class="ma-scope">(no Azure RBAC assignments granted by this group)</span>'
-    slot.appendChild(d)
+    // Skip rendering -- same rationale as the Entra section above. If this
+    // group doesn't grant any Azure roles, just don't say anything.
   } else {
     // Group by Azure role name + scope summary
     const byRole = new Map()
