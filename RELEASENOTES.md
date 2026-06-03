@@ -1,9 +1,10 @@
 # Release notes for PIM4EntraPS
 
-## v2.4.24
+## v2.4.25
 
 Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monorepo:
 
+- release: PIM4EntraPS v2.4.25 - 3-bucket categorisation on both Activate + My Access tabs, configurable per customer via entraGroupRegex/azureGroupRegex (chrome.storage.managed) (adaa201b)
 - release: PIM4EntraPS v2.4.24 - already-active groups sorted to bottom of Activate tab (greyed + badge + disabled checkbox) (2c1e982c)
 - release: PIM4EntraPS v2.4.23 - loading message 'Loading your PIM delegations ... Please Wait' (was 'Loading eligible groups...') (7d4f6383)
 - release: PIM4EntraPS v2.4.22 - Azure RBAC iterates user subscriptions instead of tenant-root (fixes 403 AuthorizationFailed) (5a5817ea)
@@ -33,13 +34,44 @@ Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monor
 - release: PIM4EntraPS v2.3.2 - perf + logging hotfix from function audit (Graph + Azure) (d40b311c)
 - release: PIM4EntraPS v2.3.1 - docs: README rewrite with full v2.x feature catalog + dedicated PIM Manager GUI section (85992b8f)
 - release: PIM4EntraPS v2.3.0 - drop .locked.csv baselines, custom-only from day one + enhanced .custom.sample.csv templates (e568dd6e)
-- release: PIM4EntraPS v2.2.1 - hotfix: scrub maintainer-tenant data from shipped .locked.csv baselines + sample-file cleanup (b666d1eb)
 
 ---
 
 # Release notes -- PIM4EntraPS
 
 > **Curated changelog.** The publish workflow auto-prepends recent monorepo commits as a raw activity log; this file is the human-friendly narrative on top.
+
+---
+
+## v2.4.25 -- Activate + My Access tabs both use 3-bucket categorisation by name (configurable per customer via chrome.storage.managed)
+
+Both tabs now group memberships into three sections:
+
+1. **Entra (M365) roles** -- default regex `Entra` matches PIM-Entra-*, MyOrg-Entra-Admins, etc.
+2. **Azure RBAC** -- default regex `(AzRes|Azure)` matches PIM-AzRes-*, *-Azure-*, etc.
+3. **PIM for Groups (workload)** -- everything else (Defender XDR, Intune, Power BI workspaces, custom apps, etc.)
+
+Categorisation happens INSTANTLY (regex on group displayName) -- no waiting for Graph queries. Previously the My Access tab (v2.4.19) waited for all per-row role queries to complete before showing section headers; with 15+ groups that took 5-10 seconds.
+
+### Configurable per customer
+
+Different customers use different naming conventions (2linkit uses `PIM-Entra-*` / `PIM-AzRes-*`; others might use `AAD-Admin-*` / `Az-RBAC-*`; some have no convention at all). Two new optional `chrome.storage.managed` fields control the bucketing:
+
+- `entraGroupRegex` -- regex (case-insensitive) for the Entra bucket. Default `Entra`.
+- `azureGroupRegex` -- regex (case-insensitive) for the Azure bucket. Default `(AzRes|Azure)`.
+
+Pushed via the same Intune Custom Configuration Profile / Platform Script that already carries tenantId + clientId. `managed_schema.json` declares both as optional strings; `Set-PimActivatorPolicy-Intune.ps1` accepts two new variables ($EntraGroupRegex / $AzureGroupRegex) that customers can edit per-tenant before uploading the script.
+
+### Role-data fallback for customers with no naming convention
+
+If a group's name doesn't match EITHER regex, the popup falls back to inspecting whatever role data has been loaded for that row on the My Access tab:
+- has Azure RBAC roles -> Azure bucket
+- has Entra roles -> Entra bucket
+- has neither (or not loaded yet) -> PIM for Groups bucket
+
+On the Activate tab we don't query per-group roles (would be 30+ Graph calls per popup-open), so unmatched groups default to PIM for Groups. Customers with arbitrary naming should set the regexes to match their convention.
+
+Manifest 0.4.10 -> 0.4.11.
 
 ---
 

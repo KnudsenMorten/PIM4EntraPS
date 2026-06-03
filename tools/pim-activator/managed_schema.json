@@ -25,6 +25,16 @@
     "defaultJustification": {
       "type": "string",
       "title": "Default text for the justification field"
+    },
+    "entraGroupRegex": {
+      "type": "string",
+      "title": "Regex matching groups that grant Entra (M365) admin roles",
+      "description": "JavaScript regex (case-insensitive) used to bucket groups in the popup's 'Entra' section on both Activate + My Access tabs. Default 'Entra' matches PIM-Entra-*, MyOrg-Entra-Admins, etc. Override to match your naming convention (e.g. 'AAD-Admin' if you use that prefix)."
+    },
+    "azureGroupRegex": {
+      "type": "string",
+      "title": "Regex matching groups that grant Azure RBAC roles",
+      "description": "JavaScript regex (case-insensitive) used to bucket groups in the popup's 'Azure RBAC' section. Default '(AzRes|Azure)' matches PIM-AzRes-*, *-Azure-*, etc. Override to match your naming convention."
     }
   }
 }
