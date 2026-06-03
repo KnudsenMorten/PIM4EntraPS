@@ -1,9 +1,10 @@
 # Release notes for PIM4EntraPS
 
-## v2.4.47
+## v2.4.48
 
 Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monorepo:
 
+- release: PIM4EntraPS v2.4.48 - bring-your-own Graph session for Intune deployer (66b3ceff)
 - release: PIM4EntraPS v2.4.47 - robust Graph sign-in for Intune deployer (-UseDeviceCode + scope verification) (1a41d168)
 - release: PIM4EntraPS v2.4.46 - fix Graph scope for Intune Remediation create (33f33d92)
 - release: PIM4EntraPS v2.4.45 - optional Intune GroupId + self-contained local installer for AD GPO / file share / SCCM rollouts (2cd1ff6e)
@@ -33,13 +34,31 @@ Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monor
 - release: PIM4EntraPS v2.4.19 - skip empty subsections + 3-category grouping in My Access tab (Entra / Azure / Workload) (0c799e60)
 - release: PIM4EntraPS v2.4.18 - Azure RBAC visible in My Access tab + collapse for long Entra role lists (1f7def50)
 - release: PIM4EntraPS v2.4.17 - AU names resolve via AdministrativeUnit.Read.All + sort by activation time DESC + persistent AU cache + Update-PimActivatorDev.ps1 helper (b502f337)
-- release: PIM4EntraPS v2.4.16 - popup UX: hide AU GUIDs + group identical roles + 'Re-sign in' instead of 'Auto-fix permissions' + auto-switch to My Access + auto-uncheck activated rows (5f7a664a)
 
 ---
 
 # Release notes -- PIM4EntraPS
 
 > **Curated changelog.** The publish workflow auto-prepends recent monorepo commits as a raw activity log; this file is the human-friendly narrative on top.
+
+---
+
+## v2.4.48 -- Bring-your-own Graph session for `Deploy-PimActivatorIntune.ps1`
+
+Tenants that block device-code flow AND have a flaky InteractiveBrowserCredential experience (Conditional Access, blocked localhost redirects, hardened admin workstations) were left without a usable auth path. The fix: **let admins establish the Graph session themselves first**, then run the deployer -- the script now reuses an existing valid session via `Get-MgContext` and skips its own `Connect-MgGraph` entirely.
+
+Workflow:
+
+```powershell
+# Step 1 -- admin uses whatever Graph auth flow their tenant accepts
+Connect-MgGraph -Scopes 'DeviceManagementScripts.ReadWrite.All','DeviceManagementConfiguration.ReadWrite.All','Group.Read.All'
+
+# Step 2 -- run the deployer; it sees the existing session, skips its own Connect
+& Deploy-PimActivatorIntune.ps1 -CreateIntuneRemediation -TenantsCsv .\tenants.csv
+# -> "Reusing existing Graph session: admin@tenant.com (tenant <guid>)"
+```
+
+When no existing session is found the script still falls back to its own interactive `Connect-MgGraph` (and `-UseDeviceCode` from v2.4.47 remains available). Error messaging upgraded so the user knows exactly what to type if both flows fail.
 
 ---
 

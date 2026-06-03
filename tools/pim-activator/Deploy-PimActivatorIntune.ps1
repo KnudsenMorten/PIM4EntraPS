@@ -604,38 +604,58 @@ $requiredScopes = @(
     'DeviceManagementConfiguration.ReadWrite.All'   # used by assign endpoint
     'Group.Read.All'
 )
+# Reuse an existing Graph session when one with the right scopes is already
+# active -- many admins prefer to run their own Connect-MgGraph (cert auth,
+# managed identity, custom auth proxy, etc.) and call this script after.
+# If the existing session already has every required scope, we use it as-is
+# and skip our own Connect-MgGraph entirely.
 $currentCtx = Get-MgContext -ErrorAction SilentlyContinue
+$needConnect = $true
 if ($currentCtx) {
     $missing = $requiredScopes | Where-Object { $_ -notin $currentCtx.Scopes }
-    if ($missing) {
-        Write-Warn "Existing Graph session is missing scope(s): $($missing -join ', '). Reconnecting for re-consent."
+    if (-not $missing) {
+        Write-Ok "Reusing existing Graph session: $($currentCtx.Account) (tenant $($currentCtx.TenantId))"
+        $needConnect = $false
+    } else {
+        Write-Warn "Existing Graph session is missing scope(s): $($missing -join ', ')"
+        Write-Warn "Either run 'Disconnect-MgGraph' + 'Connect-MgGraph -Scopes $($requiredScopes -join ',')' yourself,"
+        Write-Warn "or let this script attempt its own Connect-MgGraph below."
         Disconnect-MgGraph -ErrorAction SilentlyContinue | Out-Null
     }
 }
 
-$connectArgs = @{
-    Scopes      = $requiredScopes
-    NoWelcome   = $true
-}
-if ($UseDeviceCode) {
-    $connectArgs['UseDeviceCode'] = $true
-    Write-Host "   Using DEVICE CODE auth -- watch for the code + URL on next line." -ForegroundColor Cyan
-}
-Connect-MgGraph @connectArgs | Out-Null
+if ($needConnect) {
+    $connectArgs = @{ Scopes = $requiredScopes; NoWelcome = $true }
+    if ($UseDeviceCode) {
+        $connectArgs['UseDeviceCode'] = $true
+        Write-Host "   Using DEVICE CODE auth -- watch for the code + URL on next line." -ForegroundColor Cyan
+    }
+    Connect-MgGraph @connectArgs | Out-Null
 
-# Verify the new connection actually has the required scopes -- the SDK's
-# InteractiveBrowserCredential silently returns even when the user closes
-# the browser tab before consenting. Without this check the next Graph call
-# fails with a cryptic "browser-based authentication dialog failed" error.
-$newCtx = Get-MgContext -ErrorAction SilentlyContinue
-if (-not $newCtx) {
-    throw "Connect-MgGraph did not produce a usable session. If a browser tab opened, you may have closed it before completing consent. Try again, or re-run with -UseDeviceCode."
+    # Post-connect verification -- InteractiveBrowserCredential can return
+    # silently if the user closes the browser tab early. Catch that here
+    # with an actionable error instead of letting the next Graph call fail.
+    $newCtx = Get-MgContext -ErrorAction SilentlyContinue
+    if (-not $newCtx) {
+        throw @'
+Connect-MgGraph did not establish a usable session. Tenants that block the
+embedded browser flow (Conditional Access, blocked localhost redirects,
+device-code-disabled environments) usually need you to start the session
+yourself. Run this in the same PowerShell window FIRST:
+
+    Connect-MgGraph -Scopes 'DeviceManagementScripts.ReadWrite.All','DeviceManagementConfiguration.ReadWrite.All','Group.Read.All'
+
+Whatever auth flow your tenant accepts (cert, managed identity, web SSO via
+your normal admin profile) is fine -- the script just needs Get-MgContext
+to return a session with those three scopes. Then re-run this command.
+'@
+    }
+    $stillMissing = $requiredScopes | Where-Object { $_ -notin $newCtx.Scopes }
+    if ($stillMissing) {
+        throw "Connected to Graph as $($newCtx.Account), but missing scope(s): $($stillMissing -join ', '). Consent did not complete. Disconnect-MgGraph and bring your own Connect-MgGraph session with the listed scopes, then re-run."
+    }
+    Write-Ok "Connected as $($newCtx.Account) (tenant $($newCtx.TenantId))"
 }
-$stillMissing = $requiredScopes | Where-Object { $_ -notin $newCtx.Scopes }
-if ($stillMissing) {
-    throw "Connected to Graph as $($newCtx.Account), but missing scope(s): $($stillMissing -join ', '). This means consent did not complete. Disconnect-MgGraph and re-run; or re-run with -UseDeviceCode for a more reliable flow."
-}
-Write-Ok "Connected as $($newCtx.Account) ($($newCtx.TenantId))"
 
 $detB64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($detectionScript))
 $remB64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($remediationScript))
