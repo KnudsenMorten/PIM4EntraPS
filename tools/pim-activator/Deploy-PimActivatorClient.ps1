@@ -154,7 +154,7 @@ param(
     [Parameter(ParameterSetName = 'InstallMultiInline')]
     [Parameter(ParameterSetName = 'InstallMultiCsv')]
     [ValidateRange(0.5, 24)]
-    [double]$DefaultDurationHours = 1,
+    [double]$DefaultDurationHours = 8,
 
     [Parameter(ParameterSetName = 'Install')]
     [Parameter(ParameterSetName = 'InstallMultiInline')]

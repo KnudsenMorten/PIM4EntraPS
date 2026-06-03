@@ -318,7 +318,7 @@ window.PIM_CONFIG = {
   tenantId:             "00000000-0000-0000-0000-000000000000",
   clientId:             "00000000-0000-0000-0000-000000000000",
   groupNameFilter:      "^PIM-",
-  defaultDurationHours: 1,
+  defaultDurationHours: 8,
   defaultJustification: "Daily ops"
 };
 '@
@@ -803,7 +803,7 @@ window.PIM_CONFIG = {
   tenantId:             "$($ctx.TenantId)",
   clientId:             "$($app.AppId)",
   groupNameFilter:      "^PIM-",
-  defaultDurationHours: 1,
+  defaultDurationHours: 8,
   defaultJustification: "Daily ops"
 };
 "@
@@ -871,7 +871,7 @@ if ($PushPolicy) {
                 tenantId             = "$($ctx.TenantId)"
                 clientId             = "$($app.AppId)"
                 groupNameFilter      = '^PIM-'
-                defaultDurationHours = 1
+                defaultDurationHours = 8
                 defaultJustification = 'Daily ops'
             }
         }

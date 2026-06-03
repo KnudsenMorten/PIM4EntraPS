@@ -1839,7 +1839,7 @@ async function loaded(token) {
   })
 
   els.just.value = stored.lastJustification ?? (cfg.defaultJustification || '')
-  els.dur.value  = stored.lastDurationHours ?? (cfg.defaultDurationHours || 1)
+  els.dur.value  = stored.lastDurationHours ?? (cfg.defaultDurationHours || 8)
 
   const readyCount  = eligibleRows.filter(r => !r.isActive).length
   const activeCount = eligibleRows.filter(r =>  r.isActive).length

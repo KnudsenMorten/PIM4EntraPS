@@ -1,9 +1,10 @@
 # Release notes for PIM4EntraPS
 
-## v2.4.50
+## v2.4.51
 
 Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monorepo:
 
+- release: PIM4EntraPS v2.4.51 - default activation duration 1h -> 8h (extension v1.1.1) (ac415461)
 - release: PIM4EntraPS v2.4.50 - fix Deploy-PimActivatorClient.ps1 parameter sets so -TenantsCsv works without also requiring -Tenants (55b76be8)
 - release: PIM4EntraPS v2.4.49 - document server install path (PAW / admin jump box / domain-joined fleet) (154cde23)
 - release: PIM4EntraPS v2.4.48 - bring-your-own Graph session for Intune deployer (66b3ceff)
@@ -33,13 +34,42 @@ Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monor
 - release: PIM4EntraPS v2.4.21 - popup width 980px -> 800px (980 exceeded Chromium popup max, hid Sign in button offscreen) (bb8585b7)
 - release: PIM4EntraPS v2.4.20 - wider popup (980px) + Re-sign in auto-launches OAuth + Azure RBAC consent banner with 1-3 min propagation note (3c6ab56b)
 - fix(PIM4EntraPS): Update-PimActivatorDev.ps1 drops `ConvertFrom-Json -Depth` (PS 5.1 incompatible) (9ae24485)
-- release: PIM4EntraPS v2.4.19 - skip empty subsections + 3-category grouping in My Access tab (Entra / Azure / Workload) (0c799e60)
 
 ---
 
 # Release notes -- PIM4EntraPS
 
 > **Curated changelog.** The publish workflow auto-prepends recent monorepo commits as a raw activity log; this file is the human-friendly narrative on top.
+
+---
+
+## v2.4.51 -- Default activation duration bumped from 1h to 8h (one workday) across all install paths
+
+Every code/script default that previously shipped `defaultDurationHours = 1` is now `defaultDurationHours = 8`. One workday is the realistic average for an admin session; one hour was the legacy "minimum demo" value and forced users to hit the duration field on every activation.
+
+Touched:
+- `popup.js` -- fallback when neither managed config nor cached last-duration is present
+- `config.template.js` -- packaged developer-mode default
+- `Setup-PimActivator.ps1` -- config.js generator, CRX placeholder template, and the printed Intune managed-storage example
+- `Deploy-PimActivatorClient.ps1` -- `-DefaultDurationHours` parameter default
+- `Deploy-PimActivatorIntune.ps1` -- `-DefaultDurationHours` parameter default (affects both `-GenerateLocalInstaller` and Intune-Remediation script bodies)
+
+ADMX (`Deploy-PimActivatorPolicy-Admx.ps1`, `Set-PimActivatorPolicy-Intune.ps1`) was already at 8.
+
+### Per-install overrides
+
+Existing customer installs that pinned 1h via Intune managed-storage are unchanged -- managed config wins. To explicitly pick a different value:
+
+| Surface | Override |
+|---|---|
+| Local install (one machine) | `Deploy-PimActivatorClient.ps1 ... -DefaultDurationHours 2` |
+| Intune Remediation (fleet) | `Deploy-PimActivatorIntune.ps1 ... -DefaultDurationHours 2 -CreateIntuneRemediation` |
+| File-share / AD GPO installer | `Deploy-PimActivatorIntune.ps1 ... -DefaultDurationHours 2 -GenerateLocalInstaller` |
+| Direct registry edit (any user) | `Set-ItemProperty 'HKCU:\SOFTWARE\Policies\Microsoft\Edge\3rdparty\extensions\<id>\policy' -Name defaultDurationHours -Value 2 -Force` (repeat for Chrome) |
+
+The popup also remembers the LAST duration the user picked (per profile via `chrome.storage.local.lastDurationHours`), so once anyone changes the value at activation time, that's what subsequent opens show -- the new 8h default only applies on a fresh install or after `chrome.storage.local.clear()`.
+
+Extension manifest 1.1.0 -> **1.1.1**.
 
 ---
 

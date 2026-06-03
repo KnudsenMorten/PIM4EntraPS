@@ -190,7 +190,7 @@ param(
     [string]$GroupNameFilter = '^PIM-',
 
     [ValidateRange(0.5, 24)]
-    [double]$DefaultDurationHours = 1,
+    [double]$DefaultDurationHours = 8,
 
     [string]$DefaultJustification = 'Daily ops'
 )

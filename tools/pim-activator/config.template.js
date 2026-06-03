@@ -13,7 +13,7 @@ window.PIM_CONFIG = {
   groupNameFilter: "^PIM-",
 
   // Default activation duration in hours (max set by tenant policy, typically 8).
-  defaultDurationHours: 1,
+  defaultDurationHours: 8,
 
   // Default text for the justification field. User can edit before activate.
   defaultJustification: "Daily ops"
