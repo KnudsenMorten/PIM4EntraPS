@@ -33,7 +33,7 @@ async function loadConfig() {
 
 const cfg = await loadConfig()
 if (!cfg.tenantId || String(cfg.tenantId).startsWith('00000000') || !cfg.clientId || String(cfg.clientId).startsWith('00000000')) {
-  document.getElementById('status-bar').textContent = 'Extension not configured. Admin must push tenantId + clientId via Intune (or copy config.template.js -> config.js). See README.md.'
+  document.getElementById('status-bar').textContent = 'Not configured. Admin must set tenantId + clientId via policy.'
   document.getElementById('status-bar').classList.add('err')
   throw new Error('config not set')
 }
