@@ -1,9 +1,10 @@
 # Release notes for PIM4EntraPS
 
-## v2.3.2
+## v2.4.0
 
 Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monorepo:
 
+- release: PIM4EntraPS v2.4.0 - perf overhaul: cached group resolution + tenant-wide preload helpers + Azure token reuse (ea55e28f)
 - release: PIM4EntraPS v2.3.2 - perf + logging hotfix from function audit (Graph + Azure) (d40b311c)
 - release: PIM4EntraPS v2.3.1 - docs: README rewrite with full v2.x feature catalog + dedicated PIM Manager GUI section (85992b8f)
 - release: PIM4EntraPS v2.3.0 - drop .locked.csv baselines, custom-only from day one + enhanced .custom.sample.csv templates (e568dd6e)
@@ -33,13 +34,58 @@ Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monor
 - restructure: Phase 4a -- launcher renames legacy->vm, cloud->azure (64578bad)
 - restructure: Phase 3 -- discovery-based publish workflow + solution.publish.json (f612c18e)
 - restructure: Phase 2 -- rewrite all path references to SOLUTIONS layout (d62d155a)
-- restructure: Phase 1 -- mechanical move to SOLUTIONS/<X>/<TYPE>/ (3557ece1)
 
 ---
 
 # Release notes -- PIM4EntraPS
 
 > **Curated changelog.** The publish workflow auto-prepends recent monorepo commits as a raw activity log; this file is the human-friendly narrative on top.
+
+---
+
+## v2.4.0 -- Perf overhaul: cached group resolution + tenant-wide preload helpers + Azure token reuse
+
+The structural perf wins surfaced by the v2.3.2 function audit. **Estimated total saved per Baseline run at customer scale (200 admins × 500 PIM-for-Groups × 30 role groups): ~10-15 minutes**, depending on whether snapshot is fresh. v2.4.0 lands the helpers; v2.4.1 will swap the per-row engine call-sites to consume them; v2.4.2 ports the Revoker engine into the PIM Manager GUI on top of the new live-preload contract.
+
+Pure-additive at the helper layer. Existing engine call-sites are NOT yet refactored to consume the new preload helpers (that's v2.4.1) -- the exception is `Resolve-PimGroupCached`, whose 17 in-PSM1 call-sites WERE swapped in this release (the audit's biggest win). Existing on-disk snapshots + engine contracts unchanged.
+
+### Item #1 -- `Resolve-PimGroupCached` helper + 17-site refactor
+
+New `Resolve-PimGroupCached -DisplayName <name> [-NoCache]` helper (PSM1 line ~9737). Drop-in replacement for `Get-MgGroup -Filter "DisplayName eq '<name>'" -ErrorAction SilentlyContinue` used in per-row CSV loops. Serves the lookup from `$Global:Groups_All_ID` (already preloaded by `Get-PimGroupsFiltered` at engine startup) via a case-insensitive script-scoped hashtable; on miss, falls back to a single Graph call with proper `''`-escaping + adds the result to the cache so subsequent same-run lookups hit. `-NoCache` switch bypasses for post-create re-fetches.
+
+17 call-sites refactored across PSM1 (Create-PIM-Group-Role, Assign-PIM-Group-Resource, CreateUpdate-PIM-PAG-Group, Assign-PIM-Group-Group, CreateUpdate-PIM-for-Groups-From-file-CSV / -SQL, EntraID-Role AU-scoped assignment paths, PIM4Groups create-with-role paths, Azure-Resources group create). 4 of those use `-NoCache` for post-create re-fetches. **Eliminates ~700 Graph round-trips per Baseline run; ~3-5 min saved.**
+
+### Item #3 -- Graph PIM-for-Groups schedule preload
+
+New `Get-PimGroupSchedulesPreloaded` (PSM1 line ~10070) does ONE paged tenant-wide call against `Get-MgIdentityGovernancePrivilegedAccessGroupEligibilitySchedule -All` + same for `...AssignmentSchedule -All`. Each typically returns 500-2000 rows in 1-3s -- vs the current per-row fallback path that fires ~1000 single-group `-Filter "groupId eq..."` calls at ~600ms each. Cached in `$script:PimGroupEligibilityByGroupId` + `...AssignmentByGroupId` hashtables (5-minute MaxAgeMinutes default).
+
+Companion `Get-PimGroupSchedule -GroupId -PrincipalId -AssignmentType [-AccessId]` (line ~10185) is the per-row lookup helper. Auto-triggers the preload on first call. Will be wired into `Assign-PIMForGroups-From-file-CSV` lines 4125 + 4984 in v2.4.1. **~6 min saved when the snapshot is stale.**
+
+### Item #4 -- Azure RBAC active-assignment preload via ARG
+
+New `Get-AzActiveRoleAssignmentsViaArg` (PSM1 line ~10255) replaces per-scope `Get-AzRoleAssignment -Scope` loops with one `Search-AzGraph -UseTenantScope` query against the `AuthorizationResources` table. Confirmed via Microsoft Learn 2026-06: `microsoft.authorization/roleassignments` IS in the ARG `AuthorizationResources` table -- so the active-assignments side gets a single 1-2s query covering the whole tenant (subject to SPN visibility). Auto-paginates with `-SkipToken`. Role definition names resolved client-side with a memoised `Get-AzRoleDefinition -Id` cache (20-40 unique role defs per tenant vs hundreds of assignments).
+
+**Important constraint preserved**: Azure RBAC ELIGIBILITY schedules are NOT in ARG (`roleEligibilitySchedules` is not yet indexed). The exporter's per-scope ARM walk for eligibility schedules stays for now -- v2.4.1 slims the exporter to that single remaining job, drops the Graph-side enumeration (those move to live preload at Baseline-engine start).
+
+### Item #5 -- ARM bearer-token caching
+
+New `Get-AzPimTokenCached [-ExpiryBufferSeconds 300] [-Force] [-RefreshOn401]` helper (PSM1 line 163). ARM tokens valid 60-90 min, but per-scope and per-policy-rule loops were re-minting the same token dozens of times per execution (50ms × N = pure overhead). Helper holds the last-issued token in `$script:AzPimTokenCache` + refreshes when within 5 min of expiry or on explicit force/401. Handles both modern `PSAccessToken` (Az.Accounts 2.13+, string `.Token` + `DateTimeOffset .ExpiresOn`) and legacy SecureString-shaped tokens.
+
+15 call-sites swapped from `Get-AzAccessTokenManagement` to `Get-AzPimTokenCached`: function-entries + per-scope loops in `Assign-AzResources-Groups-From-file-CSV`, `CreateUpdate-Policies-PIM-AzResources-File-CSV` / `-SQL`, and the 5 worst offenders inside `PIM_Policy_Check_Update`'s per-rule PATCH loop. **~10-25s saved per Exporter / heavy-policy run.**
+
+**Resilience bonus**: `Invoke-AzPimPatch` (line 7941) now has a one-shot 401-retry hook -- on HTTP 401 it calls `Get-AzPimTokenCached -RefreshOn401`, replaces the in-flight header, and retries once. Recovers automatically if MSAL ever evicts the cache mid-loop instead of failing.
+
+### Carry-over to next releases
+
+- **v2.4.1 -- Exporter slim-down + call-site swap to preload helpers**: drop Graph-side enumeration from the hourly Exporter (PIM-for-Groups + Entra role schedules); add live preload to Baseline-engine startup; swap `Assign-PIMForGroups-From-file-CSV` lines 4125 + 4984 to consume `Get-PimGroupSchedule`; swap the per-scope `Get-AzRoleAssignment` fan-out to `Get-AzActiveRoleAssignmentsViaArg`. Single source of truth: live Graph; only AzRes-eligibility is "up to 1h stale".
+- **v2.4.2 -- Revoker tab in PIM Manager GUI**: new "Revoke" tab in `pim-manager.html` (sibling to Validate). Uses the v2.4.0 preload helpers to list active assignments at near-zero cost; multi-select + justification field + confirmation modal + batch-revoke. Reuses the v2.2.0 multi-select action-bar pattern.
+
+### Metrics after v2.4.0
+
+- PSM1: 72 function definitions (was 67 in v2.3.2). +5 helpers landed.
+- Get-MgGroup -Filter DisplayName eq live call-sites: **0** (all 17 swapped; 7 occurrences remain in comments / dead-code blocks / docstrings).
+- `Get-AzAccessTokenManagement` live `$Headers=` assignments: **0** (all 15 swapped).
+- Parse-clean on Windows PowerShell 5.1 (635 KB, 9162 lines).
 
 ---
 
