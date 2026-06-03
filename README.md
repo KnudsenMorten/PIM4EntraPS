@@ -282,19 +282,69 @@ Server-mode endpoints (all bearer-token authed):
 
 ---
 
-## PIM Activator (Edge extension)
+## PIM Activator (browser extension)
 
-`tools/pim-activator/` is an Edge MV3 browser extension. Admin clicks the
-toolbar icon, picks the PIM groups they need from a checkbox list, enters
-a justification + duration, clicks **Activate**. One Graph round-trip per
-group (the API requires it), but the admin sees one click instead of N
-portal navigations.
+`tools/pim-activator/` is a Manifest V3 browser extension for **Edge and
+Chrome**. Admin clicks the toolbar icon, picks the PIM groups they need
+from a checkbox list, enters a justification + duration, clicks
+**Activate**. One Graph round-trip per group (the API requires it), but
+the admin sees one click instead of N portal navigations.
 
 Auth uses `chrome.identity.launchWebAuthFlow` + PKCE (no MSAL bundle).
-Intune-deployable: a single `Deploy-PimActivatorClient.ps1` writes the Edge
-policy keys for force-install + per-tenant config; companion
-`Deploy-PimActivatorBackend.ps1` creates the SPA app reg + redirect
-URIs. See `tools/pim-activator/README.md` for the two-stage rollout.
+Extension is hosted on GitHub Pages
+(`https://knudsenmorten.github.io/PIM4EntraPS/updates.xml`); the
+deterministic extension id is `hkdglhgahonnjbfindmgplekkcngmcck`.
+
+### v1.1.0 -- multi-tenant support
+
+The managed-policy schema now accepts a `Tenants` array; each entry is
+`{ Name, TenantId, ClientId }`. Behaviour:
+
+- 0 tenants -- popup says "not configured".
+- 1 tenant -- used silently (same as v1.0).
+- 2+ tenants -- popup shows a tenant picker on first run; the choice is
+  cached per browser profile in `chrome.storage.local`. Footer shows the
+  friendly name + a `(switch)` link to clear the cached pick.
+
+Backwards compatible: the v1.0 singleton `tenantId` / `clientId` keys
+still work as a fallback when no `Tenants` array is present.
+
+### Three rollout paths
+
+| Path | Script | Use when |
+|---|---|---|
+| Intune Remediation | `Deploy-PimActivatorIntune.ps1 -CreateIntuneRemediation` | Intune-managed estate. Hourly self-heal of policy keys. `-GroupId` is optional -- assign manually in the UI if omitted. |
+| AD GPO / file share / SCCM | `Deploy-PimActivatorIntune.ps1 -GenerateLocalInstaller` | Non-Intune estates. Emits self-contained `Install-PimActivator.ps1` + `Uninstall-PimActivator.ps1` + README with the tenant JSON baked in. `-LocalInstallerScope User` (HKCU, GPO Logon Script) or `Machine` (HKLM, GPO Startup Script). |
+| Direct local registry write | `Deploy-PimActivatorClient.ps1 -Tenants @(...)` | Dev box / single-machine testing. |
+
+CSV format throughout: `Name,TenantId,ClientId`, one row per tenant.
+
+**Adding a tenant later:** edit `tenants.csv`, then either
+`-UpdateIntuneRemediation -RemediationId <guid>` (Intune clients converge
+within ~1h) or re-run `-GenerateLocalInstaller` and redeploy the
+installer via your existing channel.
+
+### Mental model
+
+The picker and the deployment layer are independent. Policy push
+(Intune / GPO / direct registry) silently lands the `Tenants` array in
+`chrome.storage.managed`. The picker UI lives inside the extension HTML
+and only reacts to whatever is in managed storage at popup-open time.
+Add or remove tenants by changing the source CSV; clients re-render the
+picker automatically when the cached choice disappears.
+
+```
++-----------------------+      +---------------------------+      +-----------------+
+| Deploy-PimActivator   | -->  | Chromium policy registry  | -->  | Extension popup |
+| Intune (remediation)  |      | (HKCU/HKLM ...\policy\    |      | (popup.html +   |
+| LocalInstaller (GPO)  |      |  Tenants JSON)            |      |  popup.js)      |
+| Client (direct write) |      |                           |      | -> picker if 2+ |
++-----------------------+      +---------------------------+      +-----------------+
+       silent push                managed_storage payload            user-facing UI
+```
+
+See `tools/pim-activator/README.md` for the full deployment matrix +
+backend (app registration) setup.
 
 ---
 

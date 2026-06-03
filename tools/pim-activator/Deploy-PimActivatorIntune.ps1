@@ -129,12 +129,30 @@ param(
     [Parameter(Mandatory, ParameterSetName='CreateIntuneRemediation')]
     [switch]$CreateIntuneRemediation,
 
-    [Parameter(Mandatory, ParameterSetName='CreateIntuneRemediation')]
+    # Optional. When supplied, the remediation is auto-assigned to this group.
+    # When omitted, the remediation is created unassigned -- you assign it
+    # manually in the Intune UI (Devices -> Scripts and remediations -> open
+    # the new remediation -> Assignments -> Add groups).
+    [Parameter(ParameterSetName='CreateIntuneRemediation')]
     [ValidatePattern('^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$')]
     [string]$GroupId,
 
     [Parameter(Mandatory, ParameterSetName='UpdateIntuneRemediation')]
     [switch]$UpdateIntuneRemediation,
+
+    # Self-contained installer for file-share / AD GPO / SCCM rollouts.
+    # Emits ONE Install-PimActivator.ps1 (and matching Uninstall) with the
+    # tenant JSON baked in -- no params, no CSV dependency. Drop on a share,
+    # users (or GPO Startup Script) run it.
+    [Parameter(Mandatory, ParameterSetName='GenerateLocalInstaller')]
+    [switch]$GenerateLocalInstaller,
+
+    [Parameter(ParameterSetName='GenerateLocalInstaller')]
+    [string]$LocalInstallerOutputDir = (Join-Path (Get-Location) 'out-localinstaller'),
+
+    [Parameter(ParameterSetName='GenerateLocalInstaller')]
+    [ValidateSet('Machine','User')]
+    [string]$LocalInstallerScope = 'User',
 
     [Parameter(Mandatory, ParameterSetName='UpdateIntuneRemediation')]
     [ValidatePattern('^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$')]
@@ -184,15 +202,20 @@ foreach ($col in $required) {
         throw "TenantsCsv must have columns: $($required -join ', '). Missing: $col"
     }
 }
-$tenantList = foreach ($r in $rows) {
+# Wrap in @() so a single CSV row stays an ARRAY (otherwise PowerShell collapses
+# it to a lone [ordered] hashtable whose .Count reports 3 = key count, not 1 row).
+$tenantList = @(foreach ($r in $rows) {
     if (-not $r.Name -or -not $r.TenantId -or -not $r.ClientId) {
         Write-Warn "Skipping row with empty field: $($r | ConvertTo-Json -Compress)"
         continue
     }
     [ordered]@{ Name = $r.Name; TenantId = $r.TenantId; ClientId = $r.ClientId }
-}
-if (-not $tenantList) { throw "No valid tenant rows found in $TenantsCsv" }
-$tenantsJson = ConvertTo-Json -InputObject @($tenantList) -Depth 4 -Compress
+})
+if (-not $tenantList.Count) { throw "No valid tenant rows found in $TenantsCsv" }
+$tenantsJson = ConvertTo-Json -InputObject $tenantList -Depth 4 -Compress
+# ConvertTo-Json renders a single-element array as an OBJECT, not "[ {...} ]".
+# Force the array form so the popup parses Tenants as an array of one entry.
+if ($tenantList.Count -eq 1 -and $tenantsJson.StartsWith('{')) { $tenantsJson = "[$tenantsJson]" }
 
 Write-Step "Loaded $($tenantList.Count) tenant(s) from $TenantsCsv"
 $tenantList | ForEach-Object { Write-Host "   $($_.Name) -- $($_.TenantId)" -ForegroundColor DarkGray }
@@ -332,6 +355,224 @@ if ($PSCmdlet.ParameterSetName -eq 'GenerateScripts') {
 }
 
 # ----------------------------------------------------------------------------
+# Mode: GenerateLocalInstaller -- self-contained installer for file share /
+# AD Group Policy / SCCM / manual install. No CSV dependency at run time;
+# the tenants JSON is baked into the emitted script.
+# ----------------------------------------------------------------------------
+if ($PSCmdlet.ParameterSetName -eq 'GenerateLocalInstaller') {
+    if (-not (Test-Path -LiteralPath $LocalInstallerOutputDir)) {
+        New-Item -ItemType Directory -Path $LocalInstallerOutputDir | Out-Null
+    }
+    $hive = if ($LocalInstallerScope -eq 'Machine') { 'HKLM' } else { 'HKCU' }
+
+    $installer = @"
+#Requires -Version 5.1
+# ============================================================================
+# Install-PimActivator.ps1  --  self-contained (auto-generated)
+# Generated  : $(Get-Date -Format 'u')
+# Source CSV : $(Split-Path -Leaf $TenantsCsv)
+# Tenants    : $($tenantList.Count) entry/entries
+# Scope      : $LocalInstallerScope ($hive)
+# ============================================================================
+# Drop on a file share, run from AD GPO Startup Script ($LocalInstallerScope=Machine),
+# Logon Script ($LocalInstallerScope=User), SCCM application, or have an end
+# user double-click to install. No parameters, no module dependencies, no CSV
+# dependency. Re-runnable / idempotent.
+#
+# Writes the Chromium policy keys for Edge + Chrome that:
+#   1. Force-install the PIM Activator extension from the gh-pages CRX host
+#   2. Configure the multi-tenant Tenants array (popup picker fires when N>=2)
+# ============================================================================
+
+`$ErrorActionPreference = 'Stop'
+`$EXT_ID                = '$ExtensionId'
+`$UPDATE_URL            = '$UpdateUrl'
+`$TENANTS_JSON          = '$tenantsJsonEscaped'
+`$GROUP_NAME_FILTER     = '$GroupNameFilter'
+`$DEFAULT_JUSTIFICATION = '$DefaultJustification'
+`$DEFAULT_DURATION      = '$DefaultDurationHours'
+`$HIVE                  = '${hive}:'
+
+if (`$HIVE -eq 'HKLM:') {
+    # HKLM requires admin. Fail loud if invoker can't write it.
+    `$id = [Security.Principal.WindowsIdentity]::GetCurrent()
+    `$pr = New-Object Security.Principal.WindowsPrincipal(`$id)
+    if (-not `$pr.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
+        throw 'HKLM scope requires administrator. Run elevated, or regenerate the installer with -LocalInstallerScope User.'
+    }
+}
+
+`$browsers = @(
+    @{ Name='Edge';   Root="`$HIVE\SOFTWARE\Policies\Microsoft\Edge" }
+    @{ Name='Chrome'; Root="`$HIVE\SOFTWARE\Policies\Google\Chrome"  }
+)
+
+foreach (`$b in `$browsers) {
+    `$forcelistPath = Join-Path `$b.Root 'ExtensionInstallForcelist'
+    `$managedPath   = Join-Path `$b.Root "3rdparty\extensions\`$EXT_ID\policy"
+
+    foreach (`$p in @(`$forcelistPath, `$managedPath)) {
+        if (-not (Test-Path -LiteralPath `$p)) { New-Item -Path `$p -Force | Out-Null }
+    }
+
+    # Idempotent slot derived from extension id hash.
+    `$slot = ([System.Math]::Abs(`$EXT_ID.GetHashCode()) % 9000) + 1000
+    New-ItemProperty -Path `$forcelistPath -Name "`$slot" -Value "`$EXT_ID;`$UPDATE_URL" -PropertyType String -Force | Out-Null
+
+    # Clear legacy singleton values if a prior v1.0 install left them behind.
+    foreach (`$n in 'tenantId','clientId') {
+        if (Get-ItemProperty -Path `$managedPath -Name `$n -ErrorAction SilentlyContinue) {
+            Remove-ItemProperty -Path `$managedPath -Name `$n -ErrorAction SilentlyContinue
+        }
+    }
+    New-ItemProperty -Path `$managedPath -Name 'Tenants'              -Value `$TENANTS_JSON          -PropertyType String -Force | Out-Null
+    New-ItemProperty -Path `$managedPath -Name 'groupNameFilter'      -Value `$GROUP_NAME_FILTER     -PropertyType String -Force | Out-Null
+    New-ItemProperty -Path `$managedPath -Name 'defaultJustification' -Value `$DEFAULT_JUSTIFICATION -PropertyType String -Force | Out-Null
+    New-ItemProperty -Path `$managedPath -Name 'defaultDurationHours' -Value `$DEFAULT_DURATION     -PropertyType String -Force | Out-Null
+
+    Write-Host "[`$(`$b.Name)] PIM Activator policy written at `$managedPath"
+}
+
+Write-Host ''
+Write-Host 'PIM Activator policy installed. Restart Edge + Chrome to pick it up.'
+Write-Host 'Tenants in this install: $($tenantList.Count) (popup will show picker when N >= 2).'
+exit 0
+"@
+
+    $uninstaller = @"
+#Requires -Version 5.1
+# ============================================================================
+# Uninstall-PimActivator.ps1  --  removes everything Install-PimActivator.ps1 wrote
+# Generated : $(Get-Date -Format 'u')
+# Scope     : $LocalInstallerScope ($hive)
+# ============================================================================
+
+`$ErrorActionPreference = 'Stop'
+`$EXT_ID = '$ExtensionId'
+`$HIVE   = '${hive}:'
+
+if (`$HIVE -eq 'HKLM:') {
+    `$id = [Security.Principal.WindowsIdentity]::GetCurrent()
+    `$pr = New-Object Security.Principal.WindowsPrincipal(`$id)
+    if (-not `$pr.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
+        throw 'HKLM scope requires administrator.'
+    }
+}
+
+`$browsers = @(
+    @{ Name='Edge';   Root="`$HIVE\SOFTWARE\Policies\Microsoft\Edge" }
+    @{ Name='Chrome'; Root="`$HIVE\SOFTWARE\Policies\Google\Chrome"  }
+)
+
+foreach (`$b in `$browsers) {
+    `$forcelistPath = Join-Path `$b.Root 'ExtensionInstallForcelist'
+    if (Test-Path -LiteralPath `$forcelistPath) {
+        Get-ItemProperty -LiteralPath `$forcelistPath | ForEach-Object {
+            foreach (`$p in `$_.PSObject.Properties) {
+                if (`$p.Value -like "`$EXT_ID;*") {
+                    Remove-ItemProperty -LiteralPath `$forcelistPath -Name `$p.Name -ErrorAction SilentlyContinue
+                    Write-Host "[`$(`$b.Name)] removed forcelist slot `$(`$p.Name)"
+                }
+            }
+        }
+    }
+    `$managedPath = Join-Path `$b.Root "3rdparty\extensions\`$EXT_ID\policy"
+    if (Test-Path -LiteralPath `$managedPath) {
+        Remove-Item -LiteralPath `$managedPath -Recurse -Force
+        Write-Host "[`$(`$b.Name)] removed managed config at `$managedPath"
+    }
+}
+
+Write-Host 'PIM Activator policy removed. Restart Edge + Chrome to drop the extension.'
+exit 0
+"@
+
+    $tenantsCsvCopy = Join-Path $LocalInstallerOutputDir 'tenants.csv'
+    Copy-Item -LiteralPath $TenantsCsv -Destination $tenantsCsvCopy -Force
+
+    $readme = @"
+# PIM Activator -- self-contained installer
+
+Generated: $(Get-Date -Format 'u')
+Source CSV: $(Split-Path -Leaf $TenantsCsv) ($($tenantList.Count) tenant(s))
+Scope: $LocalInstallerScope ($hive)
+
+## What's in this folder
+
+- ``Install-PimActivator.ps1``    Idempotent installer. No params. Run from
+                                 anywhere. Writes Chromium policy keys.
+- ``Uninstall-PimActivator.ps1``  Removes everything Install wrote.
+- ``tenants.csv``                 Reference copy of the source tenant list
+                                 (NOT read at install time -- the JSON is
+                                 baked into Install-PimActivator.ps1).
+
+## Deployment options
+
+### A) Manual / file share
+Drop this folder on a share (e.g. ``\\srv\sw\PimActivator\``). End users (or
+your support team) run:
+```
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File \\srv\sw\PimActivator\Install-PimActivator.ps1
+```
+$(if ($LocalInstallerScope -eq 'Machine') { '(Requires elevated/admin shell because scope is Machine/HKLM.)' } else { '(No admin needed because scope is User/HKCU.)' })
+
+### B) AD Group Policy -- $LocalInstallerScope scope
+$(if ($LocalInstallerScope -eq 'Machine') {
+@'
+Computer Configuration -> Policies -> Windows Settings -> Scripts -> Startup
+- Add this Install-PimActivator.ps1 (PowerShell tab)
+- Runs as SYSTEM at boot, writes HKLM policy. All users on the machine get it.
+
+Uninstall: replace the startup script with Uninstall-PimActivator.ps1 (one-shot),
+or remove the GPO assignment + run Uninstall on each box.
+'@
+} else {
+@'
+User Configuration -> Policies -> Windows Settings -> Scripts -> Logon
+- Add this Install-PimActivator.ps1 (PowerShell tab)
+- Runs as the user at sign-in, writes HKCU policy. Only the policy-target user gets it.
+
+Uninstall: replace the logon script with Uninstall-PimActivator.ps1.
+'@
+})
+
+### C) SCCM / Configuration Manager
+Package the Install-PimActivator.ps1 as an Application (Script installer):
+- Install command : ``powershell.exe -NoProfile -ExecutionPolicy Bypass -File Install-PimActivator.ps1``
+- Uninstall command: ``powershell.exe -NoProfile -ExecutionPolicy Bypass -File Uninstall-PimActivator.ps1``
+- Detection rule: registry key ``$hive\SOFTWARE\Policies\Microsoft\Edge\3rdparty\extensions\$ExtensionId\policy`` value ``Tenants`` exists
+
+### D) Intune (use the Remediation path instead)
+This static installer is for environments WITHOUT Intune. For Intune, run
+``Deploy-PimActivatorIntune.ps1 -CreateIntuneRemediation`` instead -- you get
+the self-heal scheduler for free.
+
+## Updating the tenant list
+
+This installer has the tenant list BAKED IN at generation time. To add /
+remove tenants:
+1. Edit your source CSV (the original you fed to -TenantsCsv)
+2. Re-run ``Deploy-PimActivatorIntune.ps1 -GenerateLocalInstaller`` to emit
+   a fresh Install-PimActivator.ps1
+3. Re-deploy via your chosen rollout path (file share refresh / GPO Logoff
+   first then Logon / SCCM application update)
+"@
+
+    Set-Content -LiteralPath (Join-Path $LocalInstallerOutputDir 'Install-PimActivator.ps1')   -Value $installer   -Encoding UTF8
+    Set-Content -LiteralPath (Join-Path $LocalInstallerOutputDir 'Uninstall-PimActivator.ps1') -Value $uninstaller -Encoding UTF8
+    Set-Content -LiteralPath (Join-Path $LocalInstallerOutputDir 'README.md')                  -Value $readme      -Encoding UTF8
+
+    Write-Step "Local installer generated in $LocalInstallerOutputDir"
+    Write-Ok "Install-PimActivator.ps1   ($LocalInstallerScope scope)"
+    Write-Ok "Uninstall-PimActivator.ps1 ($LocalInstallerScope scope)"
+    Write-Ok "tenants.csv (reference copy)"
+    Write-Ok "README.md (deployment-path guide)"
+    Write-Host ''
+    Write-Host '  Drop the folder on a file share, or wire into AD GPO / SCCM. See README.md.' -ForegroundColor Cyan
+    return
+}
+
+# ----------------------------------------------------------------------------
 # Modes: CreateIntuneRemediation / UpdateIntuneRemediation
 # Microsoft Graph beta endpoint -- deviceHealthScripts is THE Remediations API.
 # ----------------------------------------------------------------------------
@@ -369,37 +610,45 @@ if ($PSCmdlet.ParameterSetName -eq 'CreateIntuneRemediation') {
     $remId = $created.id
     Write-Ok "Remediation created. Id: $remId"
 
-    # Assignment with hourly schedule.
-    Write-Step "Assigning remediation to group $GroupId (interval: every $IntervalHours hour(s))"
-    $assignment = @{
-        deviceHealthScriptAssignments = @(
-            @{
-                target = @{
-                    '@odata.type' = '#microsoft.graph.groupAssignmentTarget'
-                    groupId        = $GroupId
+    if ($GroupId) {
+        # Auto-assign to the supplied group with an hourly schedule.
+        Write-Step "Assigning remediation to group $GroupId (interval: every $IntervalHours hour(s))"
+        $assignment = @{
+            deviceHealthScriptAssignments = @(
+                @{
+                    target = @{
+                        '@odata.type' = '#microsoft.graph.groupAssignmentTarget'
+                        groupId        = $GroupId
+                    }
+                    runRemediationScript = $true
+                    runSchedule = @{
+                        '@odata.type' = '#microsoft.graph.deviceHealthScriptHourlySchedule'
+                        interval       = $IntervalHours
+                    }
                 }
-                runRemediationScript = $true
-                runSchedule = @{
-                    '@odata.type' = '#microsoft.graph.deviceHealthScriptHourlySchedule'
-                    interval       = $IntervalHours
-                }
-            }
-        )
-    } | ConvertTo-Json -Depth 10
-    Invoke-MgGraphRequest -Method POST `
-        -Uri "https://graph.microsoft.com/beta/deviceManagement/deviceHealthScripts/$remId/assign" `
-        -Body $assignment `
-        -ContentType 'application/json' | Out-Null
-    Write-Ok 'Assignment created.'
+            )
+        } | ConvertTo-Json -Depth 10
+        Invoke-MgGraphRequest -Method POST `
+            -Uri "https://graph.microsoft.com/beta/deviceManagement/deviceHealthScripts/$remId/assign" `
+            -Body $assignment `
+            -ContentType 'application/json' | Out-Null
+        Write-Ok 'Assignment created.'
+    } else {
+        Write-Warn 'No -GroupId provided -- remediation created UNASSIGNED.'
+        Write-Host '   Assign manually: Intune Admin Center -> Devices -> Scripts and remediations' -ForegroundColor DarkGray
+        Write-Host "   -> open '$DisplayName' -> Assignments -> Add groups (set schedule: hourly)" -ForegroundColor DarkGray
+    }
 
     Write-Host ''
     Write-Host "==========================================================" -ForegroundColor Green
     Write-Host " Save this Remediation Id for future -UpdateIntuneRemediation:" -ForegroundColor Green
     Write-Host "   $remId" -ForegroundColor Yellow
     Write-Host "==========================================================" -ForegroundColor Green
-    Write-Host ''
-    Write-Host " Clients in group $GroupId will receive the policy on next sync." -ForegroundColor Cyan
-    Write-Host " Detection + remediation will then run every $IntervalHours hour(s)." -ForegroundColor Cyan
+    if ($GroupId) {
+        Write-Host ''
+        Write-Host " Clients in group $GroupId will receive the policy on next sync." -ForegroundColor Cyan
+        Write-Host " Detection + remediation will then run every $IntervalHours hour(s)." -ForegroundColor Cyan
+    }
     return
 }
 

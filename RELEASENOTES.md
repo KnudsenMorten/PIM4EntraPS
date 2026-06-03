@@ -1,9 +1,10 @@
 # Release notes for PIM4EntraPS
 
-## v2.4.44
+## v2.4.45
 
 Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monorepo:
 
+- release: PIM4EntraPS v2.4.45 - optional Intune GroupId + self-contained local installer for AD GPO / file share / SCCM rollouts (2cd1ff6e)
 - release: PIM4EntraPS v2.4.44 - multi-tenant Tenants array + Intune Remediation deployer (extension v1.1.0) (23de65f7)
 - release: PIM4EntraPS v2.4.43 - PIM Activator extension graduates to v1.0.0 (ec7967b0)
 - release: PIM4EntraPS v2.4.37 - popup actually shrinks on sign-in (block layout instead of flex:1 panel) + version badge populated at popup-load (visible pre-sign-in) (c4d7d1d4)
@@ -33,13 +34,45 @@ Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monor
 - release: PIM4EntraPS v2.4.16 - popup UX: hide AU GUIDs + group identical roles + 'Re-sign in' instead of 'Auto-fix permissions' + auto-switch to My Access + auto-uncheck activated rows (5f7a664a)
 - release: PIM4EntraPS v2.4.15 - CRITICAL FIX popup JWT decode bug caused infinite "missing scopes" reauth loop + Set-PimActivatorPolicy-Intune.ps1 Platform Script (66f07cfe)
 - release: PIM4EntraPS v2.4.14 - popup light theme (white+blue) + simplified not-configured text + ext v0.3.0->0.4.0 + correct Intune deployment guidance (b024bd79)
-- release: PIM4EntraPS v2.4.13 - CRX bundles placeholder config.js (no maintainer-tenant leak into customer installs) + ext ver 0.2.0 -> 0.3.0 (b3d55092)
 
 ---
 
 # Release notes -- PIM4EntraPS
 
 > **Curated changelog.** The publish workflow auto-prepends recent monorepo commits as a raw activity log; this file is the human-friendly narrative on top.
+
+---
+
+## v2.4.45 -- Optional Intune GroupId + new self-contained installer (AD GPO / file share / SCCM)
+
+Two follow-ups on top of v2.4.44's Intune Remediation work, both driven by real rollout scenarios:
+
+### 1. `-GroupId` is now optional on `-CreateIntuneRemediation`
+
+Previously mandatory. Many admins prefer to create the remediation in Intune via Graph, then assign it manually in the Intune Admin Center UI (so they can pick the right group, set custom inclusion/exclusion rules, or stage a pilot before broad rollout). When `-GroupId` is omitted, the remediation is created **unassigned** and the script prints the exact UI navigation path to finish the assignment.
+
+### 2. New mode: `-GenerateLocalInstaller`
+
+For environments without Intune -- AD Group Policy domains, file-share rollouts, SCCM, manual installs -- a CSV-driven generator that emits a fully self-contained `Install-PimActivator.ps1`:
+
+- **No parameters, no module dependencies, no CSV dependency at run time** -- the tenants JSON is baked into the script at generation time.
+- Pair generated: `Install-PimActivator.ps1` + `Uninstall-PimActivator.ps1` + reference `tenants.csv` + `README.md` with deployment-path guidance for each rollout option.
+- `-LocalInstallerScope User` (default, HKCU, no admin, GPO Logon Script) or `-LocalInstallerScope Machine` (HKLM, admin required, GPO Startup Script). Installer self-checks the elevation requirement and fails loud if you generated a Machine-scope installer but run it non-elevated.
+- Re-runnable / idempotent. Re-generating after editing the source CSV gives you a fresh installer with the updated tenants baked in -- redeploy via file share refresh / GPO replication / SCCM application update.
+
+The Intune Remediation path (v2.4.44) is still the best fit for Intune-managed estates -- hourly self-heal scheduler comes for free. This new path is for everyone else.
+
+### Rollout decision matrix
+
+| Environment | Recommended path |
+|---|---|
+| Intune-managed | `Deploy-PimActivatorIntune.ps1 -CreateIntuneRemediation` (hourly self-heal) |
+| AD-only / on-prem | `Deploy-PimActivatorIntune.ps1 -GenerateLocalInstaller` + GPO Startup Script (Machine) or Logon Script (User) |
+| File share + manual | `Deploy-PimActivatorIntune.ps1 -GenerateLocalInstaller` -- drop on `\\srv\sw\PimActivator\`, end users run |
+| SCCM / Configuration Manager | `Deploy-PimActivatorIntune.ps1 -GenerateLocalInstaller` packaged as a Script Application |
+| Dev / single test box | `Deploy-PimActivatorClient.ps1 -Tenants @(...)` direct registry write |
+
+No extension code changes in this release -- same v1.1.0 CRX as v2.4.44, only the deployment tooling.
 
 ---
 
