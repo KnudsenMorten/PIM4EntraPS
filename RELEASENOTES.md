@@ -1,9 +1,10 @@
 # Release notes for PIM4EntraPS
 
-## v2.4.27
+## v2.4.28
 
 Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monorepo:
 
+- release: PIM4EntraPS v2.4.28 - bulk role fetch + Azure Resource Graph + parallel rendering on BOTH tabs (perf overhaul, Activate now shows role preview per row) (d4075f2a)
 - release: PIM4EntraPS v2.4.27 - Activate tab smart sort (recency 2x + count 1x, decays linearly over 30d, cap at 20 activations); persisted in chrome.storage.local (594490bf)
 - release: PIM4EntraPS v2.4.26 - drop 'member' word + show date+time for activation expiry on both tabs (d7f95cfc)
 - release: PIM4EntraPS v2.4.25 - 3-bucket categorisation on both Activate + My Access tabs, configurable per customer via entraGroupRegex/azureGroupRegex (chrome.storage.managed) (adaa201b)
@@ -33,13 +34,46 @@ Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monor
 - release: PIM4EntraPS v2.4.2 - new Revoke tab in PIM Manager GUI for bulk-revoke of active activations (5c71b61e)
 - release: PIM4EntraPS v2.4.1 - wire PIM-for-Groups preload into Baseline + swap per-row eligibility-lookup call-sites (31cdfe5a)
 - release: PIM4EntraPS v2.4.0 - perf overhaul: cached group resolution + tenant-wide preload helpers + Azure token reuse (ea55e28f)
-- release: PIM4EntraPS v2.3.2 - perf + logging hotfix from function audit (Graph + Azure) (d40b311c)
 
 ---
 
 # Release notes -- PIM4EntraPS
 
 > **Curated changelog.** The publish workflow auto-prepends recent monorepo commits as a raw activity log; this file is the human-friendly narrative on top.
+
+---
+
+## v2.4.28 -- BIG perf overhaul: bulk role fetch + Azure Resource Graph + parallel rendering on BOTH tabs
+
+End-user-visible: popup is much faster + role lines now appear under every eligible row on the Activate tab (not just My Access).
+
+### What changed under the hood
+
+Old (v2.4.27 and earlier, My Access only):
+- For each active group: 1 Graph call for Entra roles + 1 ARM call per subscription for Azure roles
+- Sequential per group; 15 groups = 30+ HTTP requests, 5-10 seconds
+- Activate tab showed no role info at all (would have been even worse)
+
+New (v2.4.28, both tabs):
+- ONE Graph call with `$filter=principalId in (g1,g2,...)` per chunk of 15 group ids -- parallel via `Promise.all` -- typically 2-3 total Graph calls for 50 groups
+- ONE Azure Resource Graph KQL query against `authorizationresources` joined with `roledefinitions` -- returns Entra-scope role assignments + role names across ALL visible subscriptions in a single ARM call
+- Cached in `chrome.storage.local` with 1-hour TTL keyed by signed-in user -- cache hits render with zero network calls
+- Entra + Azure fetches fire in PARALLEL; popup re-renders each set as it arrives so user sees Entra rows first (Graph is fast) and Azure rows seconds later (ARG slightly slower)
+- Same path on both tabs: My Access reuses `bulkLoadEntraRolesForGroups` / `bulkLoadAzureRolesForGroups`, no more sequential per-group loops
+
+### Why Azure Resource Graph (ARG)
+
+ARG (`POST https://management.azure.com/providers/Microsoft.ResourceGraph/resources`) accepts a KQL query that joins `authorizationresources` (all role assignments visible to caller across all subs) with the same table filtered to `roledefinitions` (role names) and returns just the rows we want. No per-subscription iteration, no per-role lookup. Replaces v2.4.22's "iterate subscriptions, fetch roleAssignments per sub, then fetch each roleDefinition" with one POST.
+
+### Activate tab now shows role preview per row
+
+Under each eligible row's "ends X" line, up to 5 Entra and 5 Azure roles appear as `↳ Entra: <RoleName> <scope>` and `↳ Azure RBAC: <RoleName> at <scope>`. Anything beyond 5 collapses to `↳ +N more`. Lets the user see what an activation would grant BEFORE clicking the checkbox.
+
+### Threading note
+
+JavaScript in extensions is single-threaded but `fetch()` is fully async I/O. Promise.all over chunks gives effectively concurrent I/O without Web Workers. Web Workers would only help with CPU-bound work (we don't have that).
+
+Manifest 0.4.13 -> 0.4.14. No new permissions.
 
 ---
 
