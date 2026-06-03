@@ -160,6 +160,144 @@ function Ensure-DateTime {
     throw "Ensure-DateTime: Could not parse value '$InputObject' into a DateTime with CurrentCulture '$($cur.Name)'."
 }
 
+function Get-AzPimTokenCached {
+    <#
+    .SYNOPSIS
+        Returns a cached ARM bearer-token header hashtable, refreshing
+        only when expired or on a forced refresh. Drop-in replacement
+        for Get-AzAccessTokenManagement inside loops.
+
+    .DESCRIPTION
+        ARM tokens are valid 60-90 min. Calling Get-AzAccessToken inside
+        a per-scope loop refreshes the MSAL cache hit ~50ms x N times for
+        no reason. This helper holds the last-issued token in a script-
+        scoped cache + refreshes when:
+          * cache is empty (first call)
+          * token expires within ExpiryBufferSeconds (default 300)
+          * caller passes -Force
+          * caller passes -RefreshOn401 after seeing a 401 in a downstream call
+
+        Shape is identical to Get-AzAccessTokenManagement so it is a true
+        drop-in replacement (Content-Type/Accept/Authorization keys).
+
+    .PARAMETER ExpiryBufferSeconds
+        Refresh if the cached token expires within this many seconds.
+        Default 300 (5 min) -- long enough that a loop won't see the token
+        expire mid-iteration but short enough that we don't sit on an
+        expired token.
+
+    .PARAMETER Force
+        Always refresh, ignore the cache.
+
+    .PARAMETER RefreshOn401
+        Refresh the cache. Use this when a downstream call returned 401
+        Unauthorized -- forces re-mint before the next call.
+
+    .OUTPUTS
+        [hashtable]@{ 'Content-Type'='application/json'; 'Accept'='application/json'; 'Authorization'="Bearer <token>" }
+        Identical shape to what Get-AzAccessTokenManagement returns today.
+    #>
+    [CmdletBinding()]
+    param(
+        [int]$ExpiryBufferSeconds = 300,
+        [switch]$Force,
+        [switch]$RefreshOn401
+    )
+
+    # Decide whether the cache is still good.
+    $needRefresh = $false
+    if ($Force -or $RefreshOn401) {
+        $needRefresh = $true
+    }
+    elseif (-not $script:AzPimTokenCache) {
+        $needRefresh = $true
+    }
+    elseif (-not $script:AzPimTokenCache.Headers) {
+        $needRefresh = $true
+    }
+    elseif (-not $script:AzPimTokenCache.ExpiresOn) {
+        # Unknown expiry (older Az.Accounts shape) -- treat as expired to be safe.
+        $needRefresh = $true
+    }
+    else {
+        $now = Get-Date
+        $expires = $script:AzPimTokenCache.ExpiresOn
+        $secondsLeft = ($expires - $now).TotalSeconds
+        if ($secondsLeft -le $ExpiryBufferSeconds) {
+            $needRefresh = $true
+        }
+    }
+
+    if (-not $needRefresh) {
+        return $script:AzPimTokenCache.Headers
+    }
+
+    # Mint a fresh token. Az.Accounts 2.13+ returns PSAccessToken with .Token (string) + .ExpiresOn.
+    # Older versions return .Token as SecureString and may not expose ExpiresOn. Handle both.
+    $tokenObj = $null
+    try {
+        $tokenObj = Get-AzAccessToken -ResourceUrl 'https://management.azure.com' -ErrorAction Stop
+    } catch {
+        # If the modern parameter is rejected (older Az.Accounts), fall back to -Resource.
+        try {
+            $tokenObj = Get-AzAccessToken -Resource 'https://management.azure.com' -ErrorAction Stop
+        } catch {
+            throw "Get-AzPimTokenCached: Get-AzAccessToken failed: $($_.Exception.Message)"
+        }
+    }
+
+    # Extract token string (handle both string and SecureString shapes).
+    $tokenString = $null
+    if ($tokenObj -and $tokenObj.Token) {
+        if ($tokenObj.Token -is [string]) {
+            $tokenString = $tokenObj.Token
+        }
+        elseif ($tokenObj.Token -is [System.Security.SecureString]) {
+            # PS 5.1 has no -AsPlainText on ConvertFrom-SecureString; round-trip via PSCredential.
+            $cred = New-Object System.Management.Automation.PSCredential('x', $tokenObj.Token)
+            $tokenString = $cred.GetNetworkCredential().Password
+        }
+        else {
+            $tokenString = [string]$tokenObj.Token
+        }
+    }
+
+    if ([string]::IsNullOrEmpty($tokenString)) {
+        throw "Get-AzPimTokenCached: Get-AzAccessToken returned an empty token."
+    }
+
+    # Resolve expiry. ExpiresOn is DateTimeOffset on modern Az.Accounts; older versions may not expose it.
+    $expiresOnDt = $null
+    if ($tokenObj -and ($tokenObj.PSObject.Properties.Name -contains 'ExpiresOn')) {
+        $exp = $tokenObj.ExpiresOn
+        if ($exp -is [System.DateTimeOffset]) {
+            $expiresOnDt = $exp.LocalDateTime
+        }
+        elseif ($exp -is [datetime]) {
+            $expiresOnDt = $exp
+        }
+    }
+    if (-not $expiresOnDt) {
+        # Conservative fallback: assume a 50-minute lifetime so we still benefit from caching
+        # without sitting on a stale token across a long batch.
+        $expiresOnDt = (Get-Date).AddMinutes(50)
+    }
+
+    $headers = @{
+        'Content-Type'  = 'application/json'
+        'Accept'        = 'application/json'
+        'Authorization' = "Bearer $tokenString"
+    }
+
+    $script:AzPimTokenCache = @{
+        Headers   = $headers
+        ExpiresOn = $expiresOnDt
+        IssuedAt  = Get-Date
+    }
+
+    return $headers
+}
+
 Function CorrelateDateTimeLanguage {
     [CmdletBinding()]
     param (
@@ -675,10 +813,10 @@ Function Create-PIM-Group-Role
 #>
 
 
-    # Check if group already exist
+    # Check if group already exist (PERF: cached lookup via $Global:Groups_All_ID; v2.4.0)
     $Group = $null
     Try {
-        $Group = Get-MgGroup -Filter "DisplayName eq '$($Groupname)'" -ErrorAction Stop
+        $Group = Resolve-PimGroupCached -DisplayName $Groupname
     } Catch {
         Write-Warning "  [Create-PIM-Group-Role] group lookup for '$Groupname' failed: $($_.Exception.Message) -- treating as MISSING; will attempt create (may fail with UniqueValueViolated if the group really exists)."
     }
@@ -713,7 +851,8 @@ Function Create-PIM-Group-Role
 
             # Waiting to let it sync
             Start-Sleep -Seconds 3
-            $Group = Get-MgGroup -Filter "DisplayName eq '$($Groupname)'" -ErrorAction SilentlyContinue
+            # PERF: just-created group is NOT in cache yet; force Graph fetch then add to cache for subsequent same-run lookups (v2.4.0).
+            $Group = Resolve-PimGroupCached -DisplayName $Groupname -NoCache
         }
 
     If ($Group)
@@ -846,9 +985,9 @@ Function Assign-PIM-Group-Resource
     $AzScopePermission   = "Owner"
 #>
 
-    # Check if group already exist
-    $Group = Get-MgGroup -Filter "DisplayName eq '$($Groupname)'" -Erroraction SilentlyContinue
-    
+    # Check if group already exist (PERF: cached lookup; v2.4.0)
+    $Group = Resolve-PimGroupCached -DisplayName $Groupname
+
     If (!($Group))   # create group if it doesn't exist !
         {
             If ($GroupName.Length -ge 64)
@@ -879,7 +1018,8 @@ Function Assign-PIM-Group-Resource
 
             # Waiting to let it sync
             Start-Sleep -Seconds 3
-            $Group = Get-MgGroup -Filter "DisplayName eq '$($Groupname)'" -ErrorAction SilentlyContinue
+            # PERF: just-created group; force Graph fetch + cache-add (v2.4.0).
+            $Group = Resolve-PimGroupCached -DisplayName $Groupname -NoCache
         }
 
     If ($Group)
@@ -943,7 +1083,7 @@ Function Assign-PIM-Group-Resource
                                             }
                 }
 
-            $Headers = Get-AzAccessTokenManagement
+            $Headers = Get-AzPimTokenCached
 
             $Guid = (new-guid).Guid
 
@@ -1069,7 +1209,8 @@ Function CreateUpdate-PIM-PAG-Group
 
             # Waiting to let it sync
             Start-Sleep -Seconds 5
-            $Group = Get-MgGroup -Filter "DisplayName eq '$($Groupname)'" -ErrorAction SilentlyContinue
+            # PERF: just-created group; force Graph fetch + cache-add (v2.4.0).
+            $Group = Resolve-PimGroupCached -DisplayName $Groupname -NoCache
         }
     Else
         {
@@ -1181,11 +1322,11 @@ Function Create-PIM-PAG-Assignment
             $Permanent            = $false
 #>
 
-    # Check if group already exist
-    $Group = Get-MgGroup -Filter "DisplayName eq '$($Groupname)'" -Erroraction SilentlyContinue
+    # Check if group already exist (PERF: cached lookups; v2.4.0)
+    $Group = Resolve-PimGroupCached -DisplayName $Groupname
 
     # Check if group already exist
-    $PAGGroup = Get-MgGroup -Filter "DisplayName eq '$($PAG_GroupName)'" -Erroraction SilentlyContinue
+    $PAGGroup = Resolve-PimGroupCached -DisplayName $PAG_GroupName
 
 
     If ( ($Group) -and ($PAGGroup) )
@@ -1351,7 +1492,7 @@ Function Update-PIM-Policy-Resource
          )
 
 
-    $Headers = Get-AzAccessTokenManagement
+    $Headers = Get-AzPimTokenCached
 
     write-host ""
     Write-host "  Processing PIM policy $($ruleId)"
@@ -1966,8 +2107,9 @@ Function CreateUpdate-PIM-for-Groups-From-file-CSV
                     }
 
                 $AUInfo = $AU_ALL | Where-Object { $_.DisplayName -eq $AUName }
-                    
-                $GroupInfo = Get-MgGroup -Filter "DisplayName eq '$($GroupName)'"
+
+                # PERF: cached lookup; this group was just created by CreateUpdate-PIM-PAG-Group, so allow cache (which the create-path populated via -NoCache) or fall back to Graph (v2.4.0).
+                $GroupInfo = Resolve-PimGroupCached -DisplayName $GroupName
                 Add-AdministrativeUnit-Member -AuId $AUInfo.Id -AddType Group -ObjectId $GroupInfo.Id
             }
 }
@@ -2060,8 +2202,9 @@ Function CreateUpdate-PIM-for-Groups-From-SQL
                     }
 
                 $AUInfo = $AU_ALL | Where-Object { $_.DisplayName -eq $AUName }
-                    
-                $GroupInfo = Get-MgGroup -Filter "DisplayName eq '$($GroupName)'"
+
+                # PERF: cached lookup; v2.4.0
+                $GroupInfo = Resolve-PimGroupCached -DisplayName $GroupName
                 Add-AdministrativeUnit-Member -AuId $AUInfo.Id -AddType Group -ObjectId $GroupInfo.Id
             }
 }
@@ -2411,8 +2554,8 @@ Function Assign-Roles-AdministrativeUnits-From-file-CSV
                         $roleDefinition = $Global:Role_AU_Definitions_ID | Where-Object { $_.DisplayName -eq $RoleDefinitionName }
                         $roleDefinitionId = $roleDefinition.Id
 
-                    # Get Group Principal Id
-                        $Group = Get-MgGroup -Filter "DisplayName eq '$($PAG_Groupname)'"
+                    # Get Group Principal Id (PERF: cached lookup; v2.4.0)
+                        $Group = Resolve-PimGroupCached -DisplayName $PAG_Groupname
                         $GroupName = $Group.DisplayName
                         $principalId = $Group.Id
 
@@ -2821,8 +2964,8 @@ Function Assign-Roles-AdministrativeUnits-From-SQL
                 $roleDefinition = $Global:Role_AU_Definitions_ID | Where-Object { $_.DisplayName -eq $RoleDefinitionName }
                 $roleDefinitionId = $roleDefinition.Id
 
-            # Get Group Principal Id
-                $Group = Get-MgGroup -Filter "DisplayName eq '$($PAG_Groupname)'"
+            # Get Group Principal Id (PERF: cached lookup; v2.4.0)
+                $Group = Resolve-PimGroupCached -DisplayName $PAG_Groupname
                 $principalId = $Group.Id
 
             If ( ($AUId) -and ($RoleDefinitionId) -and ($PrincipalId) )
@@ -3101,9 +3244,9 @@ Function Assign-Roles-Groups-From-file-CSV
 
             If ($RoleDefinitionName)
                 {
-                    # Check if group already exist
-                    $Group = Get-MgGroup -Filter "DisplayName eq '$($Groupname)'" -ErrorAction SilentlyContinue
-    
+                    # Check if group already exist (PERF: cached lookup; v2.4.0)
+                    $Group = Resolve-PimGroupCached -DisplayName $Groupname
+
                 If (!($Group))   # create group if it doesn't exist !
                     {
                         If ($GroupName.Length -ge 64)
@@ -3134,7 +3277,8 @@ Function Assign-Roles-Groups-From-file-CSV
 
                         # Waiting to let it sync
                         Start-Sleep -Seconds 3
-                        $Group = Get-MgGroup -Filter "DisplayName eq '$($Groupname)'" -ErrorAction SilentlyContinue
+                        # PERF: just-created group; force Graph fetch + cache-add (v2.4.0).
+                        $Group = Resolve-PimGroupCached -DisplayName $Groupname -NoCache
                     }
                     If ($Group)
                         {
@@ -3592,9 +3736,9 @@ Function Assign-AzResources-Groups-From-file-CSV
                     Write-host "ERROR: Could NOT find any PIM groups with GroupTag $($GroupTag) in the definitions" -ForegroundColor Red
                 }
             
-            # Check if group already exist
-                $Group = Get-MgGroup -Filter "DisplayName eq '$($Groupname)'" -Erroraction SilentlyContinue
-    
+            # Check if group already exist (PERF: cached lookup; v2.4.0)
+                $Group = Resolve-PimGroupCached -DisplayName $Groupname
+
                 If (!($Group))   # create group if it doesn't exist !
                     {
                         If ($GroupName.Length -ge 64)
@@ -3625,7 +3769,8 @@ Function Assign-AzResources-Groups-From-file-CSV
 
                         # Waiting to let it sync
                         Start-Sleep -Seconds 3
-                        $Group = Get-MgGroup -Filter "DisplayName eq '$($Groupname)'" -ErrorAction SilentlyContinue
+                        # PERF: just-created group; force Graph fetch + cache-add (v2.4.0).
+                        $Group = Resolve-PimGroupCached -DisplayName $Groupname -NoCache
                     }
                 If ($Group)
                     {
@@ -3643,7 +3788,7 @@ Function Assign-AzResources-Groups-From-file-CSV
                         # Query ARM directly before concluding the assignment doesn't exist.
                         If ( (!($CheckExistingAssignment)) -and ($Action -eq "Assign") )
                             {
-                                $Headers = Get-AzAccessTokenManagement
+                                $Headers = Get-AzPimTokenCached
                                 If ($Headers)
                                     {
                                         If ($AssignmentType -eq "Active")
@@ -3821,7 +3966,7 @@ Function Assign-AzResources-Groups-From-file-CSV
                                                                 }
                                     }
 
-                                $Headers = Get-AzAccessTokenManagement
+                                $Headers = Get-AzPimTokenCached
 
                                 $Guid = (new-guid).Guid
 
@@ -4069,11 +4214,11 @@ Function Assign-PIMForGroups-From-file-CSV
                             $GroupName = $GroupNameSource
                             $PAG_GroupName = $GroupNameTarget
 
-                            # Check if group already exist
-                            $Group = Get-MgGroup -Filter "DisplayName eq '$($Groupname)'" -Erroraction SilentlyContinue
+                            # Check if group already exist (PERF: cached lookups; v2.4.0)
+                            $Group = Resolve-PimGroupCached -DisplayName $Groupname
 
                             # Check if group already exist
-                            $PAGGroup = Get-MgGroup -Filter "DisplayName eq '$($PAG_GroupName)'" -Erroraction SilentlyContinue
+                            $PAGGroup = Resolve-PimGroupCached -DisplayName $PAG_GroupName
 
 
                             If ( ($Group) -and ($PAGGroup) )
@@ -5792,7 +5937,7 @@ Function CreateUpdate-Policies-PIM-AzResources-File-CSV
             Write-host "$($AzScope) "
 
             # List all PIM for Azure resources policies
-                $Headers = Get-AzAccessTokenManagement
+                $Headers = Get-AzPimTokenCached
 
             # Role Policies
                 $AzGraphUri = "https://management.azure.com" + $AzScope + "/providers/Microsoft.Authorization/roleManagementPolicies?api-version=2020-10-01"
@@ -5833,7 +5978,7 @@ Function CreateUpdate-Policies-PIM-AzResources-File-CSV
                     Write-host ""
                     Write-host "Updating policy rules for role $($AzScopePermission) (policy $($PolicyId))"
 
-                    $Headers = Get-AzAccessTokenManagement
+                    $Headers = Get-AzPimTokenCached
 
                     ############################################################################################
                     # Update policy rule -> Expiration_EndUser_Assignment
@@ -6046,7 +6191,7 @@ Function CreateUpdate-Policies-PIM-AzResources-File-CSV
                                                                     }
                                                 }
 
-                        $Headers = Get-AzAccessTokenManagement
+                        $Headers = Get-AzPimTokenCached
 
                         $Guid = (new-guid).Guid
 
@@ -6329,7 +6474,7 @@ Function CreateUpdate-Policies-PIM-AzResources-SQL
             Write-host "$($AzScope) "
 
             # List all PIM for Azure resources policies
-                $Headers = Get-AzAccessTokenManagement
+                $Headers = Get-AzPimTokenCached
 
             # Role Policies
                 $AzGraphUri = "https://management.azure.com" + $AzScope + "/providers/Microsoft.Authorization/roleManagementPolicies?api-version=2020-10-01"
@@ -6370,7 +6515,7 @@ Function CreateUpdate-Policies-PIM-AzResources-SQL
                     Write-host ""
                     Write-host "Updating policy rules for role $($AzScopePermission) (policy $($PolicyId))"
 
-                    $Headers = Get-AzAccessTokenManagement
+                    $Headers = Get-AzPimTokenCached
 
                     ############################################################################################
                     # Update policy rule -> Expiration_EndUser_Assignment
@@ -6583,7 +6728,7 @@ Function CreateUpdate-Policies-PIM-AzResources-SQL
                                                                     }
                                                 }
 
-                        $Headers = Get-AzAccessTokenManagement
+                        $Headers = Get-AzPimTokenCached
 
                         $Guid = (new-guid).Guid
 
@@ -7801,6 +7946,11 @@ function Invoke-AzPimPatch {
         [int]$MaxRetries = 6
     )
 
+    # Cached-token resilience: if MSAL evicts our token mid-loop the next PATCH
+    # comes back 401 Unauthorized. Allow exactly ONE in-flight refresh + retry
+    # before giving up so a stale cache entry can't poison a whole batch.
+    $tokenRefreshed = $false
+
     $attempt = 0
     while ($true) {
         $attempt++
@@ -7813,6 +7963,20 @@ function Invoke-AzPimPatch {
             $status = $null
             if ($resp) { $status = [int]$resp.StatusCode }
             $msg = $_.Exception.Message
+
+            # 401 Unauthorized: assume cached ARM bearer expired or was evicted.
+            # Force a refresh through Get-AzPimTokenCached and retry once (does
+            # NOT consume a $MaxRetries slot -- it's an independent recovery path).
+            if ($status -eq 401 -and -not $tokenRefreshed) {
+                $tokenRefreshed = $true
+                try {
+                    $Headers = Get-AzPimTokenCached -RefreshOn401
+                    Write-Host "    401 Unauthorized -- refreshed ARM token, retrying..." -ForegroundColor DarkYellow
+                    continue
+                } catch {
+                    return @{ Success = $false; Status = 401; Message = "Token refresh failed after 401: $($_.Exception.Message)" }
+                }
+            }
 
             # Only retry on 429 (throttling) or 5xx (transient server errors)
             $shouldRetry = ($status -eq 429) -or ($status -ge 500 -and $status -lt 600)
@@ -7983,7 +8147,7 @@ If ($PolicyRule)
                                                             }
                                                         }
 
-                                    $Headers = Get-AzAccessTokenManagement
+                                    $Headers = Get-AzPimTokenCached
                                     $AzRolePolicyBodyJson = $AzRolePolicyBody | ConvertTo-Json -Depth 20
                                     $AzGraphUri = "https://management.azure.com" + $AzScope + "/providers/Microsoft.Authorization/roleManagementPolicies/" + $PolicyId + "?api-version=2020-10-01"
                                     $patchResult = Invoke-AzPimPatch -Uri $AzGraphUri -Headers $Headers -Body $AzRolePolicyBodyJson
@@ -8055,7 +8219,7 @@ If ($PolicyRule)
                                                             }
                                                         }
 
-                                    $Headers = Get-AzAccessTokenManagement
+                                    $Headers = Get-AzPimTokenCached
                                     $AzRolePolicyBodyJson = $AzRolePolicyBody | ConvertTo-Json -Depth 20
                                     $AzGraphUri = "https://management.azure.com" + $AzScope + "/providers/Microsoft.Authorization/roleManagementPolicies/" + $policyId + "?api-version=2020-10-01"
                                     $patchResult = Invoke-AzPimPatch -Uri $AzGraphUri -Headers $Headers -Body $AzRolePolicyBodyJson
@@ -8133,7 +8297,7 @@ If ($PolicyRule)
                                                             }
                                                         }
 
-                                    $Headers = Get-AzAccessTokenManagement
+                                    $Headers = Get-AzPimTokenCached
                                     $AzRolePolicyBodyJson = $AzRolePolicyBody | ConvertTo-Json -Depth 20
                                     $AzGraphUri = "https://management.azure.com" + $AzScope + "/providers/Microsoft.Authorization/roleManagementPolicies/" + $policyId + "?api-version=2020-10-01"
                                     $patchResult = Invoke-AzPimPatch -Uri $AzGraphUri -Headers $Headers -Body $AzRolePolicyBodyJson
@@ -8266,7 +8430,7 @@ If ($PolicyRule)
                                                             }
                                                         }
 
-                                    $Headers = Get-AzAccessTokenManagement
+                                    $Headers = Get-AzPimTokenCached
                                     $AzRolePolicyBodyJson = $AzRolePolicyBody | ConvertTo-Json -Depth 20
                                     $AzGraphUri = "https://management.azure.com" + $AzScope + "/providers/Microsoft.Authorization/roleManagementPolicies/" + $policyId + "?api-version=2020-10-01"
                                     $patchResult = Invoke-AzPimPatch -Uri $AzGraphUri -Headers $Headers -Body $AzRolePolicyBodyJson
@@ -8344,7 +8508,7 @@ If ($PolicyRule)
                                                             }
                                                         }
 
-                                    $Headers = Get-AzAccessTokenManagement
+                                    $Headers = Get-AzPimTokenCached
                                     $AzRolePolicyBodyJson = $AzRolePolicyBody | ConvertTo-Json -Depth 20
                                     $AzGraphUri = "https://management.azure.com" + $AzScope + "/providers/Microsoft.Authorization/roleManagementPolicies/" + $policyId + "?api-version=2020-10-01"
                                     $patchResult = Invoke-AzPimPatch -Uri $AzGraphUri -Headers $Headers -Body $AzRolePolicyBodyJson
@@ -9727,6 +9891,112 @@ function Get-PimGroupsFiltered {
     return @(Get-MgGroup -All -Filter $filter -ConsistencyLevel eventual -CountVariable __ -ErrorAction Stop)
 }
 
+function Resolve-PimGroupCached {
+    <#
+    .SYNOPSIS
+        Look up a group by display name from the in-memory $Global:Groups_All_ID
+        cache; fall back to a single Graph call if not found.
+
+    .DESCRIPTION
+        Drop-in replacement for `Get-MgGroup -Filter "DisplayName eq '<name>'"`
+        used in per-row CSV loops. Eliminates ~700 Graph round-trips per
+        Baseline run on customer-scale tenants by serving the lookup from the
+        cache that Get-PimGroupsFiltered already populated at engine startup.
+
+        On a cache miss (group exists in tenant but didn't match the
+        PIM-prefix filter), falls back to a single `Get-MgGroup -Filter`
+        call wrapped in Try/Catch with a Write-Warning that names the
+        group. Result is added to the cache so a second lookup is free.
+
+        On total failure (Graph throws AND group not in cache), returns
+        $null + writes a warning. Callers handle $null the same way they
+        would if `Get-MgGroup -Filter` returned no rows.
+
+    .PARAMETER DisplayName
+        The group display name to resolve.
+
+    .PARAMETER NoCache
+        Skip the cache lookup; force a Graph fetch. Use sparingly (only
+        when you suspect the cache is stale, e.g. immediately after a
+        Create operation in the same run).
+
+    .OUTPUTS
+        Microsoft.Graph.PowerShell.Models.MicrosoftGraphGroup (or $null on miss).
+
+    .NOTES
+        Cache is $Global:Groups_All_ID (a hashtable keyed by DisplayName)
+        lazily initialised on first call. If the calling engine populated
+        a different cache shape (e.g. an array from Get-PimGroupsFiltered),
+        the helper handles both: array -> hashtable conversion on first
+        call, then keyed lookup thereafter.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string]$DisplayName,
+
+        [switch]$NoCache
+    )
+
+    if ([string]::IsNullOrWhiteSpace($DisplayName)) { return $null }
+
+    # Lazily initialise the script-scoped canonical cache from $Global:Groups_All_ID.
+    # The engine populates $Global:Groups_All_ID via Get-PimGroupsFiltered at startup;
+    # shape is typically an array, but tolerate hashtable too.
+    if (-not $script:PimGroupCache -or $script:PimGroupCache -isnot [hashtable]) {
+        $script:PimGroupCache = New-Object 'System.Collections.Hashtable' ([System.StringComparer]::OrdinalIgnoreCase)
+        $source = $Global:Groups_All_ID
+        if ($source) {
+            if ($source -is [hashtable]) {
+                foreach ($k in $source.Keys) {
+                    $v = $source[$k]
+                    if ($v -and $v.DisplayName) {
+                        $script:PimGroupCache[$v.DisplayName] = $v
+                    } elseif ($v) {
+                        $script:PimGroupCache[$k] = $v
+                    }
+                }
+            } else {
+                foreach ($g in @($source)) {
+                    if ($g -and $g.DisplayName -and -not $script:PimGroupCache.ContainsKey($g.DisplayName)) {
+                        $script:PimGroupCache[$g.DisplayName] = $g
+                    }
+                }
+            }
+        }
+    }
+
+    # Cache lookup (case-insensitive keyed by DisplayName).
+    if (-not $NoCache) {
+        if ($script:PimGroupCache.ContainsKey($DisplayName)) {
+            return $script:PimGroupCache[$DisplayName]
+        }
+    }
+
+    # Cache miss (or -NoCache): single Graph fetch.
+    $escaped = $DisplayName.Replace("'", "''")
+    $found = $null
+    try {
+        $found = Get-MgGroup -Filter "DisplayName eq '$escaped'" -ErrorAction Stop
+    } catch {
+        Write-Warning "  [Resolve-PimGroupCached] Graph lookup for group '$DisplayName' failed: $($_.Exception.Message)"
+        return $null
+    }
+
+    if ($found) {
+        # Graph -Filter can return 0/1/many; normalise to single object (DisplayName is non-unique in theory).
+        $first = @($found)[0]
+        if ($first -and $first.DisplayName) {
+            $script:PimGroupCache[$first.DisplayName] = $first
+        } else {
+            $script:PimGroupCache[$DisplayName] = $first
+        }
+        return $first
+    }
+
+    return $null
+}
+
 function Get-PimAdminsFiltered {
     <#
     .SYNOPSIS
@@ -9775,6 +10045,353 @@ function Get-PimAdminsFiltered {
     $filter = $clauses -join ' or '
     Write-Host "  [perf] Get-PimAdminsFiltered: `$filter=$filter" -ForegroundColor DarkGray
     return @(Get-MgUser -All -Filter $filter -ConsistencyLevel eventual -CountVariable __ -ErrorAction Stop)
+}
+
+# ---------------------------------------------------------------------------
+# v2.4.0 perf helpers -- tenant-wide preload pattern.
+#
+# Why these exist:
+#   Pre-v2.4 the Baseline / Exporter / Revoker engines fanned out one Graph
+#   call per CSV row (`Get-MgIdentityGovernance...Schedule -Filter "groupId
+#   eq '...'"`) and one ARM REST call per Azure scope. At customer scale
+#   (~1000 PIM-for-Groups rows + ~60 Azure scopes) that is ~10 min + ~70 s
+#   of pure HTTP wait. Microsoft Graph and Azure Resource Graph both
+#   support a single tenant-wide query that returns the same data in 1-3 s.
+#   These helpers do that preload ONCE per session and stage the results
+#   in $script: hashtables for O(1) lookup by the lookup helpers below.
+#
+#   Eligibility schedules are NOT in Azure Resource Graph (Microsoft Learn
+#   2026-06: AuthorizationResources table covers only roleassignments /
+#   roledefinitions / classicadministrators), so the per-scope ARM walk is
+#   still required for Azure RBAC PIM eligibility. This file only covers
+#   the parts that CAN be preloaded.
+# ---------------------------------------------------------------------------
+
+function Get-PimGroupSchedulesPreloaded {
+    <#
+    .SYNOPSIS
+        Single tenant-wide preload of ALL PIM-for-Groups eligibility +
+        assignment schedules. Replaces per-row `-Filter "groupId eq..."`
+        round-trips with a hashtable keyed by GroupId.
+
+    .DESCRIPTION
+        Calls both:
+          Get-MgIdentityGovernancePrivilegedAccessGroupEligibilitySchedule -All
+          Get-MgIdentityGovernancePrivilegedAccessGroupAssignmentSchedule -All
+        Each typically returns 500-2000 rows tenant-wide in 1-3s (one paged
+        Graph call) -- vs the current per-CSV-row 600ms x 1000 = ~10 min
+        fallback path. Result is staged in two $script: hashtables that the
+        engine helpers consult via Get-PimGroupSchedule.
+
+        Idempotent + cache-aware: if the preload has already run this session
+        (within MaxAgeMinutes, default 5), reuses the cached set. Call again
+        with -Force to refresh.
+
+    .PARAMETER MaxAgeMinutes
+        Reuse cached preload if it's younger than this. Default 5.
+
+    .PARAMETER Force
+        Refresh the cache regardless of age.
+
+    .OUTPUTS
+        PSCustomObject { Eligibility = <count>; Assignment = <count>;
+                         LoadedUtc = <datetime>; ElapsedSec = <double> }
+    #>
+    [CmdletBinding()]
+    param(
+        [int]$MaxAgeMinutes = 5,
+        [switch]$Force
+    )
+
+    # Cache hit?
+    if (-not $Force -and $script:PimGroupSchedulesPreloadLoadedUtc) {
+        $ageMin = ([DateTime]::UtcNow - $script:PimGroupSchedulesPreloadLoadedUtc).TotalMinutes
+        if ($ageMin -lt $MaxAgeMinutes) {
+            $eCount = 0
+            if ($script:PimGroupEligibilityByGroupId) {
+                foreach ($v in $script:PimGroupEligibilityByGroupId.Values) { if ($v) { $eCount += $v.Count } }
+            }
+            $aCount = 0
+            if ($script:PimGroupAssignmentByGroupId) {
+                foreach ($v in $script:PimGroupAssignmentByGroupId.Values) { if ($v) { $aCount += $v.Count } }
+            }
+            Write-Host ("  [perf] Get-PimGroupSchedulesPreloaded: cache hit (age={0:N1}m, {1} eligible + {2} active rows)" -f $ageMin, $eCount, $aCount) -ForegroundColor DarkGray
+            return [PSCustomObject]@{
+                Eligibility = $eCount
+                Assignment  = $aCount
+                LoadedUtc   = $script:PimGroupSchedulesPreloadLoadedUtc
+                ElapsedSec  = 0.0
+                CacheHit    = $true
+            }
+        }
+    }
+
+    $sw = [System.Diagnostics.Stopwatch]::StartNew()
+
+    # Eligibility preload
+    $eligRows = @()
+    Try {
+        $eligRows = @(Get-MgIdentityGovernancePrivilegedAccessGroupEligibilitySchedule -All -ErrorAction Stop)
+    } Catch {
+        Write-Warning "Get-PimGroupSchedulesPreloaded: Get-MgIdentityGovernancePrivilegedAccessGroupEligibilitySchedule failed: $($_.Exception.Message) -- eligibility cache will be empty; engine will fall back to per-row lookups."
+        $eligRows = @()
+    }
+
+    # Assignment (active) preload
+    $assignRows = @()
+    Try {
+        $assignRows = @(Get-MgIdentityGovernancePrivilegedAccessGroupAssignmentSchedule -All -ErrorAction Stop)
+    } Catch {
+        Write-Warning "Get-PimGroupSchedulesPreloaded: Get-MgIdentityGovernancePrivilegedAccessGroupAssignmentSchedule failed: $($_.Exception.Message) -- assignment cache will be empty; engine will fall back to per-row lookups."
+        $assignRows = @()
+    }
+
+    # Index by GroupId. A group may have many principals, so each value is an array.
+    $eligIdx = @{}
+    foreach ($r in $eligRows) {
+        if (-not $r) { continue }
+        $gid = [string]$r.GroupId
+        if (-not $gid) { continue }
+        if (-not $eligIdx.ContainsKey($gid)) { $eligIdx[$gid] = New-Object System.Collections.ArrayList }
+        [void]$eligIdx[$gid].Add($r)
+    }
+
+    $assignIdx = @{}
+    foreach ($r in $assignRows) {
+        if (-not $r) { continue }
+        $gid = [string]$r.GroupId
+        if (-not $gid) { continue }
+        if (-not $assignIdx.ContainsKey($gid)) { $assignIdx[$gid] = New-Object System.Collections.ArrayList }
+        [void]$assignIdx[$gid].Add($r)
+    }
+
+    $script:PimGroupEligibilityByGroupId      = $eligIdx
+    $script:PimGroupAssignmentByGroupId       = $assignIdx
+    $script:PimGroupSchedulesPreloadLoadedUtc = [DateTime]::UtcNow
+
+    $sw.Stop()
+    $elapsed = [math]::Round($sw.Elapsed.TotalSeconds, 2)
+    Write-Host ("  [perf] Get-PimGroupSchedulesPreloaded: loaded {0} eligible + {1} active in {2}s" -f $eligRows.Count, $assignRows.Count, $elapsed) -ForegroundColor DarkGray
+
+    return [PSCustomObject]@{
+        Eligibility = $eligRows.Count
+        Assignment  = $assignRows.Count
+        LoadedUtc   = $script:PimGroupSchedulesPreloadLoadedUtc
+        ElapsedSec  = $elapsed
+        CacheHit    = $false
+    }
+}
+
+function Get-PimGroupSchedule {
+    <#
+    .SYNOPSIS
+        Look up PIM-for-Groups schedules for a specific (GroupId, PrincipalId,
+        AssignmentType) tuple from the preload cache populated by
+        Get-PimGroupSchedulesPreloaded. Returns $null on miss.
+
+    .DESCRIPTION
+        Drop-in replacement for per-row `Get-MgIdentityGovernance...Schedule
+        -Filter "groupId eq '...' and principalId eq '...' and accessId eq
+        'member'"` calls in Assign-PIMForGroups-From-file-CSV (lines 4118 +
+        4972 in current PSM1).
+
+        Auto-triggers Get-PimGroupSchedulesPreloaded on first call if the
+        cache isn't populated yet.
+
+    .PARAMETER GroupId
+        The PIM-for-Groups target group.
+
+    .PARAMETER PrincipalId
+        The principal (user or group) whose schedule we want.
+
+    .PARAMETER AssignmentType
+        'Eligible' or 'Active'. Selects which preload bucket to consult.
+
+    .PARAMETER AccessId
+        'member' (default) or 'owner'. Filters within the cache result.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$GroupId,
+        [Parameter(Mandatory)][string]$PrincipalId,
+        [Parameter(Mandatory)][ValidateSet('Eligible', 'Active')][string]$AssignmentType,
+        [ValidateSet('member', 'owner')][string]$AccessId = 'member'
+    )
+
+    # Lazy preload on first call.
+    if (-not $script:PimGroupSchedulesPreloadLoadedUtc) {
+        [void](Get-PimGroupSchedulesPreloaded)
+    }
+
+    $bucket = $null
+    if ($AssignmentType -eq 'Eligible') {
+        $bucket = $script:PimGroupEligibilityByGroupId
+    } else {
+        $bucket = $script:PimGroupAssignmentByGroupId
+    }
+
+    if (-not $bucket) { return $null }
+    if (-not $bucket.ContainsKey($GroupId)) { return $null }
+
+    $rows = $bucket[$GroupId]
+    if (-not $rows -or $rows.Count -eq 0) { return $null }
+
+    # Filter to the matching principal + accessId.
+    $hits = New-Object System.Collections.ArrayList
+    foreach ($r in $rows) {
+        if (-not $r) { continue }
+        if ([string]$r.PrincipalId -ne $PrincipalId) { continue }
+        # AccessId on group schedules is typically 'member' or 'owner'.
+        $rowAccess = 'member'
+        if ($r.PSObject.Properties['AccessId'] -and $r.AccessId) { $rowAccess = [string]$r.AccessId }
+        if ($rowAccess -ne $AccessId) { continue }
+        [void]$hits.Add($r)
+    }
+
+    if ($hits.Count -eq 0) { return $null }
+    return ,$hits.ToArray()
+}
+
+function Get-AzActiveRoleAssignmentsViaArg {
+    <#
+    .SYNOPSIS
+        Single Azure Resource Graph query (Search-AzGraph -UseTenantScope)
+        returning EVERY active Azure RBAC role assignment visible to the
+        calling SPN. Replaces per-scope `Get-AzRoleAssignment -Scope` loops.
+
+    .DESCRIPTION
+        Uses the AuthorizationResources ARG table (confirmed in MS Learn
+        2026-06: contains microsoft.authorization/roleassignments tenant-
+        wide; does NOT contain roleEligibilitySchedules, so PIM eligibility
+        STILL needs the per-scope ARM walk -- this helper covers active
+        assignments only).
+
+        Auto-paginates with -SkipToken for tenants over 1000 rows.
+
+        Output shape mirrors what the existing per-scope code produces so
+        downstream code can swap in without restructuring: an array of
+        PSCustomObject with Id, Name, Scope, PrincipalId, PrincipalType,
+        RoleDefinitionId, RoleDefinitionName (resolved client-side from
+        roleDefinitionId by looking up the trailing GUID, since ARG returns
+        the full /providers/.../roleDefinitions/<guid> string).
+
+    .PARAMETER MaxAgeMinutes
+        Reuse cached preload if it's younger than this. Default 5.
+
+    .PARAMETER Force
+        Refresh the cache regardless of age.
+
+    .OUTPUTS
+        Array of role-assignment objects. Cached in $script:AzActiveRoleAssignmentsCache.
+    #>
+    [CmdletBinding()]
+    param(
+        [int]$MaxAgeMinutes = 5,
+        [switch]$Force
+    )
+
+    # Cache hit?
+    if (-not $Force -and $script:AzActiveRoleAssignmentsCacheLoadedUtc) {
+        $ageMin = ([DateTime]::UtcNow - $script:AzActiveRoleAssignmentsCacheLoadedUtc).TotalMinutes
+        if ($ageMin -lt $MaxAgeMinutes) {
+            $count = 0
+            if ($script:AzActiveRoleAssignmentsCache) { $count = @($script:AzActiveRoleAssignmentsCache).Count }
+            Write-Host ("  [perf] Get-AzActiveRoleAssignmentsViaArg: cache hit (age={0:N1}m, {1} assignments)" -f $ageMin, $count) -ForegroundColor DarkGray
+            return $script:AzActiveRoleAssignmentsCache
+        }
+    }
+
+    $sw = [System.Diagnostics.Stopwatch]::StartNew()
+
+    $q = @"
+authorizationresources
+| where type =~ 'microsoft.authorization/roleassignments'
+| project id, name, scope=tostring(properties.scope),
+          principalId=tostring(properties.principalId),
+          principalType=tostring(properties.principalType),
+          roleDefinitionId=tostring(properties.roleDefinitionId)
+"@
+
+    $all = New-Object System.Collections.ArrayList
+    $skipToken = $null
+    $pages = 0
+
+    Try {
+        do {
+            $pages++
+            if ($skipToken) {
+                $page = Search-AzGraph -Query $q -UseTenantScope -First 1000 -SkipToken $skipToken -ErrorAction Stop
+            } else {
+                $page = Search-AzGraph -Query $q -UseTenantScope -First 1000 -ErrorAction Stop
+            }
+
+            if ($page) {
+                foreach ($row in $page) { [void]$all.Add($row) }
+            }
+
+            # Search-AzGraph result objects expose SkipToken on the returned PSObject.
+            $skipToken = $null
+            if ($page -and $page.PSObject.Properties['SkipToken']) { $skipToken = $page.SkipToken }
+        } while ($skipToken)
+    } Catch {
+        Write-Warning "Get-AzActiveRoleAssignmentsViaArg: Search-AzGraph (authorizationresources) failed on page $($pages): $($_.Exception.Message) -- returning partial set of $($all.Count) row(s). Caller may need to fall back to per-scope Get-AzRoleAssignment."
+    }
+
+    # Resolve RoleDefinitionName from the trailing GUID of roleDefinitionId.
+    # We cache the lookup per definition GUID so we only call Get-AzRoleDefinition once per role.
+    $roleNameCache = @{}
+    $result = New-Object System.Collections.ArrayList
+    foreach ($row in $all) {
+        if (-not $row) { continue }
+        $rdId = [string]$row.roleDefinitionId
+        $rdGuid = $null
+        if ($rdId) {
+            # roleDefinitionId looks like /subscriptions/<sub>/providers/Microsoft.Authorization/roleDefinitions/<guid>
+            # or /providers/Microsoft.Authorization/roleDefinitions/<guid> for tenant-scoped builtin.
+            $idx = $rdId.LastIndexOf('/')
+            if ($idx -ge 0 -and $idx -lt ($rdId.Length - 1)) {
+                $rdGuid = $rdId.Substring($idx + 1)
+            }
+        }
+
+        $rdName = $null
+        if ($rdGuid) {
+            if ($roleNameCache.ContainsKey($rdGuid)) {
+                $rdName = $roleNameCache[$rdGuid]
+            } else {
+                Try {
+                    $def = Get-AzRoleDefinition -Id $rdGuid -ErrorAction Stop
+                    if ($def) { $rdName = $def.Name }
+                } Catch {
+                    Write-Warning "Get-AzActiveRoleAssignmentsViaArg: Get-AzRoleDefinition -Id $rdGuid failed: $($_.Exception.Message) -- RoleDefinitionName will be blank for this row."
+                }
+                $roleNameCache[$rdGuid] = $rdName
+            }
+        }
+
+        [void]$result.Add([PSCustomObject]@{
+            Id                 = $row.id
+            Name               = $row.name
+            Scope              = $row.scope
+            PrincipalId        = $row.principalId
+            PrincipalType      = $row.principalType
+            RoleDefinitionId   = $rdGuid
+            RoleDefinitionName = $rdName
+        })
+    }
+
+    $script:AzActiveRoleAssignmentsCache          = $result
+    $script:AzActiveRoleAssignmentsCacheLoadedUtc = [DateTime]::UtcNow
+
+    $sw.Stop()
+    $elapsed = [math]::Round($sw.Elapsed.TotalSeconds, 2)
+    Write-Host ("  [perf] Get-AzActiveRoleAssignmentsViaArg: loaded {0} assignment(s) across {1} ARG page(s) in {2}s" -f $result.Count, $pages, $elapsed) -ForegroundColor DarkGray
+
+    # TODO v2.4.x: Search-AzGraph 429 throttling is not yet handled with
+    # explicit backoff/retry -- relies on Az.ResourceGraph internal retry.
+    # If a customer trips it, add a Polly-style retry-after loop here.
+
+    return $result
 }
 
 function New-PimRandomPassword {
