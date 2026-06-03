@@ -623,21 +623,75 @@ async function getArmToken() {
   }
 }
 
-async function listAzureRoleAssignmentsForGroup(armToken, groupId) {
-  // ARM roleAssignments query at tenant root. $filter on principalId returns
-  // every assignment in scopes the caller can see. assignedTo() would expand
-  // to inherited assignments but is more expensive; principalId eq is enough
-  // because we want assignments where THIS group is the principal.
-  const url = `https://management.azure.com/providers/Microsoft.Authorization/roleAssignments?$filter=principalId+eq+%27${groupId}%27&api-version=2022-04-01`
-  const res = await fetch(url, { headers: { Authorization: `Bearer ${armToken}` } })
-  if (!res.ok) {
-    const t = await res.text()
-    const err = new Error(`ARM ${res.status}: ${t.substring(0, 200)}`)
-    err.status = res.status
-    throw err
+// Cache of subscriptions the user can read (populated on first ARM query)
+let armSubscriptionsCache = null
+async function listUserSubscriptions(armToken) {
+  if (armSubscriptionsCache) return armSubscriptionsCache
+  try {
+    const res = await fetch('https://management.azure.com/subscriptions?api-version=2022-12-01', {
+      headers: { Authorization: `Bearer ${armToken}` }
+    })
+    if (!res.ok) {
+      armSubscriptionsCache = []   // 403 or similar -> empty
+      return armSubscriptionsCache
+    }
+    const j = await res.json()
+    armSubscriptionsCache = (j.value || []).map(s => ({ id: s.subscriptionId, name: s.displayName }))
+    return armSubscriptionsCache
+  } catch {
+    armSubscriptionsCache = []
+    return armSubscriptionsCache
   }
-  const j = await res.json()
-  return j.value || []
+}
+
+async function listAzureRoleAssignmentsForGroup(armToken, groupId) {
+  // Querying at tenant root (/providers/Microsoft.Authorization/...) requires
+  // the caller to have read permission at tenant root scope, which most users
+  // DO NOT have (you'd need to be Global Admin with elevated access, or have
+  // a role at tenant root). For everyone else that returns 403 AuthorizationFailed.
+  //
+  // Workaround: enumerate the subscriptions the user can read, then query
+  // roleAssignments at each subscription scope (which the user CAN read if
+  // they have at least Reader on that subscription). Aggregate + dedupe by
+  // assignment id. Misses tenant-root and management-group assignments for
+  // users who aren't tenant-level readers, but catches every assignment in
+  // the subscriptions they actually touch.
+
+  const subs = await listUserSubscriptions(armToken)
+  if (!subs.length) {
+    // Fallback: try the tenant-root query anyway in case the user IS a
+    // tenant-level reader. If that 403s, surface a cleaner message.
+    const url = `https://management.azure.com/providers/Microsoft.Authorization/roleAssignments?$filter=principalId+eq+%27${groupId}%27&api-version=2022-04-01`
+    const res = await fetch(url, { headers: { Authorization: `Bearer ${armToken}` } })
+    if (!res.ok) {
+      const err = new Error('Account lacks Azure read permission at tenant root scope')
+      err.status = res.status
+      throw err
+    }
+    const j = await res.json()
+    return j.value || []
+  }
+
+  const seen = new Set()
+  const out  = []
+  for (const sub of subs) {
+    const url = `https://management.azure.com/subscriptions/${sub.id}/providers/Microsoft.Authorization/roleAssignments?$filter=principalId+eq+%27${groupId}%27&api-version=2022-04-01`
+    try {
+      const res = await fetch(url, { headers: { Authorization: `Bearer ${armToken}` } })
+      if (!res.ok) continue   // skip subs the user can't list roleAssignments in
+      const j = await res.json()
+      for (const a of (j.value || [])) {
+        if (seen.has(a.id)) continue
+        seen.add(a.id)
+        // Stash the subscription display name so the renderer can show it
+        a._subscriptionName = sub.name
+        out.push(a)
+      }
+    } catch {
+      // ignore per-sub failures; aggregate what we can
+    }
+  }
+  return out
 }
 
 let armRoleNameCache = {}   // { fullRoleDefinitionId: displayName }
@@ -660,14 +714,22 @@ async function resolveArmRoleName(armToken, roleDefinitionId) {
 }
 
 // Turn /subscriptions/<sub>/resourceGroups/<rg>/providers/... -> human-readable
-function describeArmScope(scopeStr) {
+function describeArmScope(scopeStr, subNameById) {
   if (!scopeStr || scopeStr === '/')                  return '(tenant root)'
   if (scopeStr.startsWith('/providers/Microsoft.Management/managementGroups/')) {
     return `Management Group '${scopeStr.split('/').pop()}'`
   }
-  if (scopeStr.match(/^\/subscriptions\/[^/]+$/))     return `Subscription '${scopeStr.split('/').pop()}'`
-  const rg = scopeStr.match(/^\/subscriptions\/[^/]+\/resourceGroups\/([^/]+)$/)
-  if (rg)                                              return `Resource group '${rg[1]}'`
+  // Show subscription friendly name when available
+  const subMatch = scopeStr.match(/^\/subscriptions\/([^/]+)$/)
+  if (subMatch) {
+    const name = subNameById ? subNameById[subMatch[1]] : null
+    return name ? `Subscription '${name}'` : `Subscription '${subMatch[1]}'`
+  }
+  const rg = scopeStr.match(/^\/subscriptions\/([^/]+)\/resourceGroups\/([^/]+)$/)
+  if (rg) {
+    const subName = subNameById ? subNameById[rg[1]] : null
+    return subName ? `Resource group '${rg[2]}' in '${subName}'` : `Resource group '${rg[2]}'`
+  }
   return scopeStr   // resource-scoped or something unusual; show raw
 }
 
@@ -804,10 +866,13 @@ async function loadMyAccessTab(token, { force = false } = {}) {
       } else {
         try {
           const armAssignments = await listAzureRoleAssignmentsForGroup(armToken, r.groupId)
+          // Build subId -> name map for the scope describer (subscriptions
+          // were already cached by listAzureRoleAssignmentsForGroup).
+          const subNameById = Object.fromEntries((armSubscriptionsCache || []).map(s => [s.id, s.name]))
           const resolvedArm = []
           for (const a of armAssignments) {
             const roleName = await resolveArmRoleName(armToken, a?.properties?.roleDefinitionId)
-            const scope    = describeArmScope(a?.properties?.scope)
+            const scope    = describeArmScope(a?.properties?.scope, subNameById)
             resolvedArm.push({ roleName, scope })
           }
           r.azureRoles = resolvedArm
@@ -815,7 +880,13 @@ async function loadMyAccessTab(token, { force = false } = {}) {
         } catch (e) {
           console.warn(`Azure RBAC lookup failed for group ${r.groupId}:`, e)
           r.azureRoles = []
-          r.azureRolesError = e.message
+          // Friendly error: don't dump raw ARM JSON in the popup; condense
+          // common cases to one short, actionable line.
+          let msg = e.message
+          if (msg.includes('AuthorizationFailed') || msg.includes('does not have authorization')) {
+            msg = "your account can't read Azure role assignments at this scope (needs Reader/Owner on subscription)"
+          }
+          r.azureRolesError = msg
         }
       }
 
