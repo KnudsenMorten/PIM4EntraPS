@@ -8,62 +8,63 @@
   html, body { margin:0; padding:0; width:780px; font-family: -apple-system, "Segoe UI", Roboto, sans-serif; background:#0e1116; color:#e6edf3; font-size:13px; }
   header { padding:10px 12px; border-bottom:1px solid #30363d; display:flex; align-items:center; gap:10px; }
   header h1 { font-size:13px; margin:0; flex:1; }
-  #me { color:#7d8590; font-size:11px; }
+  #me { color:#b1bac4; font-size:11px; }
   button { background:#21262d; color:#e6edf3; border:1px solid #30363d; padding:6px 10px; border-radius:6px; cursor:pointer; font-size:12px; }
   button.primary { background:#1f6feb; border-color:#1f6feb; color:#fff; }
   button.primary:hover { background:#388bfd; }
   button:hover { background:#30363d; }
   button:disabled { opacity:0.5; cursor:not-allowed; }
-  .row { padding:6px 12px; border-bottom:1px solid #21262d; display:flex; align-items:flex-start; gap:8px; }
-  .row:hover { background:#161b22; }
+  .row { padding:8px 12px; border-bottom:1px solid #2d333b; display:flex; align-items:flex-start; gap:8px; }
+  .row:hover { background:#1c2128; }
+  .row .name { font-weight:600; color:#f0f6fc; font-size:13px; }
   .row input[type=checkbox] { margin-top:2px; }
   .row .body { flex:1; min-width:0; }
   .row .name { font-size:12.5px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
-  .row .meta { font-size:10.5px; color:#7d8590; margin-top:2px; }
+  .row .meta { font-size:10.5px; color:#b1bac4; margin-top:2px; }
   .row .status { font-size:10.5px; margin-top:2px; }
   .status.ok { color:#3fb950; }
   .status.err { color:#f85149; }
   .status.pending { color:#d29922; }
   footer { position:sticky; bottom:0; background:#161b22; border-top:1px solid #30363d; padding:8px 12px; }
   .controls { display:grid; grid-template-columns:auto 1fr; gap:6px 10px; align-items:center; margin-bottom:8px; }
-  .controls label { font-size:11px; color:#7d8590; }
+  .controls label { font-size:11px; color:#b1bac4; }
   .controls input, .controls textarea { width:100%; box-sizing:border-box; background:#0d1117; color:#e6edf3; border:1px solid #30363d; border-radius:5px; padding:5px 7px; font-size:12px; font-family:inherit; }
   .controls textarea { resize:vertical; min-height:30px; }
   .actions { display:flex; gap:8px; }
-  .actions .count { flex:1; align-self:center; font-size:11px; color:#7d8590; }
+  .actions .count { flex:1; align-self:center; font-size:11px; color:#b1bac4; }
   #toolbar { display:flex; gap:6px; padding:6px 12px; border-bottom:1px solid #21262d; }
   #toolbar input[type=search] { flex:1; background:#0d1117; color:#e6edf3; border:1px solid #30363d; border-radius:5px; padding:4px 8px; font-size:12px; }
-  #toolbar a { color:#7d8590; font-size:11px; align-self:center; cursor:pointer; text-decoration:none; }
+  #toolbar a { color:#b1bac4; font-size:11px; align-self:center; cursor:pointer; text-decoration:none; }
   #toolbar a:hover { color:#e6edf3; }
-  #status-bar { padding:8px 12px; color:#7d8590; font-size:11px; }
+  #status-bar { padding:8px 12px; color:#b1bac4; font-size:11px; }
   #status-bar.err { color:#f85149; }
-  .empty { padding:20px 12px; color:#7d8590; text-align:center; font-style:italic; font-size:12px; }
+  .empty { padding:20px 12px; color:#b1bac4; text-align:center; font-style:italic; font-size:12px; }
   #list { max-height:340px; overflow:auto; }
 
   /* Tab strip */
   #tabs { display:flex; gap:4px; padding:0 12px; border-bottom:1px solid #30363d; background:#0e1116; }
-  .tab-btn { background:transparent; border:none; border-bottom:2px solid transparent; color:#7d8590; padding:8px 12px; font-size:12.5px; cursor:pointer; border-radius:0; display:inline-flex; align-items:center; gap:6px; }
+  .tab-btn { background:transparent; border:none; border-bottom:2px solid transparent; color:#b1bac4; padding:8px 12px; font-size:12.5px; cursor:pointer; border-radius:0; display:inline-flex; align-items:center; gap:6px; }
   .tab-btn:hover { background:transparent; color:#e6edf3; }
   .tab-btn.active { color:#e6edf3; font-weight:600; border-bottom-color:#1f6feb; }
-  .tab-btn .badge { background:#21262d; color:#7d8590; border:1px solid #30363d; border-radius:10px; padding:0 6px; font-size:10.5px; min-width:14px; text-align:center; }
+  .tab-btn .badge { background:#21262d; color:#b1bac4; border:1px solid #30363d; border-radius:10px; padding:0 6px; font-size:10.5px; min-width:14px; text-align:center; }
   .tab-btn.active .badge { background:#1f6feb; color:#fff; border-color:#1f6feb; }
   [role=tabpanel][hidden] { display:none; }
 
   /* My Access tab */
   #myaccess-toolbar { display:flex; gap:6px; padding:6px 12px; border-bottom:1px solid #21262d; align-items:center; }
   #myaccess-toolbar .spacer { flex:1; }
-  #myaccess-status { padding:8px 12px; color:#7d8590; font-size:11px; }
+  #myaccess-status { padding:8px 12px; color:#b1bac4; font-size:11px; }
   #myaccess-status.err { color:#f85149; }
   #myaccess-list { max-height:520px; overflow:auto; }
-  .ma-section { padding:8px 12px 4px 12px; color:#7d8590; font-size:11px; text-transform:uppercase; letter-spacing:0.5px; border-bottom:1px solid #21262d; }
+  .ma-section { padding:8px 12px 4px 12px; color:#b1bac4; font-size:11px; text-transform:uppercase; letter-spacing:0.5px; border-bottom:1px solid #21262d; }
   .ma-row { padding:8px 12px; border-bottom:1px solid #21262d; }
   .ma-row .ma-head { display:flex; align-items:baseline; gap:10px; flex-wrap:wrap; }
   .ma-row .ma-name { font-size:12.5px; font-weight:600; flex:1; min-width:0; word-break:break-word; }
-  .ma-row .ma-times { font-size:10.5px; color:#7d8590; white-space:nowrap; }
+  .ma-row .ma-times { font-size:10.5px; color:#b1bac4; white-space:nowrap; }
   .ma-row .ma-roles { margin-top:4px; padding-left:16px; }
   .ma-row .ma-role { font-size:11.5px; color:#c9d1d9; padding:2px 0; }
-  .ma-row .ma-role .ma-scope { color:#7d8590; }
-  .ma-row .ma-role.ma-rbac { color:#7d8590; font-style:italic; }
+  .ma-row .ma-role .ma-scope { color:#b1bac4; }
+  .ma-row .ma-role.ma-rbac { color:#b1bac4; font-style:italic; }
   .ma-row .ma-role.ma-err { color:#f85149; font-style:italic; }
   .ma-row .ma-role.ma-loading { color:#d29922; font-style:italic; }
 </style>
@@ -71,7 +72,7 @@
 <body>
 
 <header>
-  <h1>PIM Activator</h1>
+  <h1>PIM Activator <span id="version-badge" style="font-weight:400;font-size:11px;color:#b1bac4;margin-left:6px;"></span></h1>
   <div id="me"></div>
   <button id="sign-in" style="display:none">Sign in</button>
   <button id="sign-out" style="display:none">Sign out</button>
@@ -113,7 +114,7 @@
 <div role="tabpanel" id="panel-myaccess" hidden>
   <div id="myaccess-toolbar">
     <button id="myaccess-autofix" title="Validate that your access token contains all required scopes (PrivilegedAccess, Group.Read.All, User.Read, RoleManagement.Read.Directory). If anything is missing, sign you out + back in to pick up the latest admin-consented scopes.">Auto-fix permissions</button>
-    <div id="myaccess-scope-status" style="font-size:11px;color:#7d8590;padding:0 4px;"></div>
+    <div id="myaccess-scope-status" style="font-size:11px;color:#b1bac4;padding:0 4px;"></div>
     <div class="spacer"></div>
     <button id="myaccess-refresh">Refresh</button>
   </div>
