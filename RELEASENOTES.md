@@ -1,9 +1,10 @@
 # Release notes for PIM4EntraPS
 
-## v2.4.13
+## v2.4.14
 
 Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monorepo:
 
+- release: PIM4EntraPS v2.4.14 - popup light theme (white+blue) + simplified not-configured text + ext v0.3.0->0.4.0 + correct Intune deployment guidance (b024bd79)
 - release: PIM4EntraPS v2.4.13 - CRX bundles placeholder config.js (no maintainer-tenant leak into customer installs) + ext ver 0.2.0 -> 0.3.0 (b3d55092)
 - release: PIM4EntraPS v2.4.12 - Intune-first deployment (-PrintIntuneConfig mode + HKCU-default -PushPolicyScope) (d65821df)
 - release: PIM4EntraPS v2.4.11 - Activator popup: My Access tab + token self-heal + Auto-fix button + hide-already-active (db8893b1)
@@ -33,13 +34,65 @@ Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monor
 - release: PIM4EntraPS v2.1.0 - MSP variant + AccountStatus kill-switch with CISO-controlled per-admin KV codes (d1979fe8)
 - release: PIM4EntraPS v2.0.0 - full PIM v2 framework: engine modernization + Mapper (graph viewer + grid editor + save) + Activator (Edge extension + Intune install) + one-shot engine SPN installer + 18-section DESIGN.md + README rewrite (0118ecf8)
 - release: PIM4EntraPS v1.0.2 - SI launcher naming alignment + fix internal-azure leak in publish workflow + rewire engine path resolution for new engine/<task>/ layout (2ff8ebb1)
-- release: PIM4EntraPS v1.0.1 - hotfix: 14 .locked.csv data files were silently ignored by monorepo .gitignore (SOLUTIONS/**/config/* rule had no exception for *.locked.*) and missing from v1.0.0 public mirror (0fe0d6d5)
 
 ---
 
 # Release notes -- PIM4EntraPS
 
 > **Curated changelog.** The publish workflow auto-prepends recent monorepo commits as a raw activity log; this file is the human-friendly narrative on top.
+
+---
+
+## v2.4.14 -- Popup light theme (white + blue) + simplified "not configured" message + extension ver 0.3.0 -> 0.4.0 + correct Intune deployment guidance
+
+Two UX wins + one important correction to the deployment story:
+
+### Popup switched to light theme
+
+Previous dark theme (`#0e1116` near-black background) was hard to read in normal office lighting. v2.4.14 ships a clean light theme:
+
+- Background: white (`#ffffff`)
+- Body text: near-black (`#1a1a1a`)
+- Group / title accents: GitHub-style blue (`#0969da`)
+- Borders: light grey (`#d0d7de`)
+- Header / footer / section headers: subtle off-white (`#f6f8fa`)
+- Status colors: green (success) / amber (pending) / red (error) — WCAG-comfortable on white
+- Tab active state: blue underline + blue text
+- Primary button: blue (`#0969da`) + white text
+
+### Simplified "not configured" text
+
+Old: `Extension not configured. Admin must push tenantId + clientId via Intune (or copy config.template.js -> config.js). See README.md.`
+
+New: `Not configured. Admin must set tenantId + clientId via policy.`
+
+Removed "Intune" specifically because policy can come from Group Policy / Intune / Chrome Browser Cloud Management / Workspace ONE / etc. -- the popup shouldn't presume the management channel.
+
+### Important correction to the Intune deployment story (the `managed_storage` myth)
+
+v2.4.12 / 2.4.13 incorrectly told customers to push tenantId/clientId via an Intune `ExtensionSettings` JSON with a `managed_storage` block. **That property is NOT in the Chromium ExtensionSettings schema.** Edge / Chrome reject the JSON with `Schema validation error: Unknown property: managed_storage`. The forcelist install still works, but tenantId/clientId never propagate -- popup correctly shows the "Not configured" error (now in clearer wording).
+
+**The three correct ways to push `chrome.storage.managed` values via Intune:**
+
+1. **Per-customer CRX (simplest at scale)** -- each customer fork-publishes a gh-pages with their own `config.js` baked in; one CRX per customer. The maintainer's `Setup-PimActivator.ps1 -PublishToGitHubPages` can be re-run by each customer admin against their own repo.
+
+2. **PowerShell script via Intune** -- deploy `Deploy-PimActivatorClient.ps1` (which already writes the right registry keys) as a Windows 10/11 Platform Script in Intune Admin Center -> Devices -> Scripts and remediations. Pass tenantId + clientId as script parameters per customer assignment.
+
+3. **Custom OMA-URI Configuration Profile** -- 5 OMA-URI entries per browser (10 total for Edge + Chrome), one per managed-schema field, writing to `./Device/Vendor/MSFT/Registry/HKLM/SOFTWARE/Policies/Microsoft/Edge/3rdparty/extensions/<id>/policy/<key>` (and Chrome equivalent).
+
+The next release (v2.4.15) will update `Setup-PimActivator.ps1 -PrintIntuneConfig` to print the OMA-URI table + a copy-pasteable PowerShell parameter set for method 2 -- AND will REMOVE the bogus `managed_storage` JSON from the printed ExtensionSettings (so customers don't keep hitting the same schema-validation error).
+
+### manifest.json version 0.3.0 -> 0.4.0
+
+Forces Edge / Chrome auto-update polls to actually fetch the new CRX (otherwise version match -> skip download). All existing customer installs auto-upgrade on next ~5h poll.
+
+### Files changed
+
+- `tools/pim-activator/popup.html` -- full CSS palette swap (white/blue light theme)
+- `tools/pim-activator/popup.js` -- one-line error text replacement
+- `tools/pim-activator/manifest.json` -- version 0.3.0 -> 0.4.0
+
+CRX v0.4.0 published to https://knudsenmorten.github.io/PIM4EntraPS/pim-activator.crx; extension ID `eheocihmlppcophaeakmdenhgcookkab` unchanged.
 
 ---
 
