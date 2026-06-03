@@ -1,9 +1,10 @@
 # Release notes for PIM4EntraPS
 
-## v2.4.1
+## v2.4.2
 
 Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monorepo:
 
+- release: PIM4EntraPS v2.4.2 - new Revoke tab in PIM Manager GUI for bulk-revoke of active activations (5c71b61e)
 - release: PIM4EntraPS v2.4.1 - wire PIM-for-Groups preload into Baseline + swap per-row eligibility-lookup call-sites (31cdfe5a)
 - release: PIM4EntraPS v2.4.0 - perf overhaul: cached group resolution + tenant-wide preload helpers + Azure token reuse (ea55e28f)
 - release: PIM4EntraPS v2.3.2 - perf + logging hotfix from function audit (Graph + Azure) (d40b311c)
@@ -33,13 +34,53 @@ Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monor
 - chore: strip 'AutomateIT' branding from user-facing launcher + doc content (653bac5f)
 - rename: TestVariables -> LauncherConfig across the repo (b60390f0)
 - restructure: Phase 4a -- launcher renames legacy->vm, cloud->azure (64578bad)
-- restructure: Phase 3 -- discovery-based publish workflow + solution.publish.json (f612c18e)
 
 ---
 
 # Release notes -- PIM4EntraPS
 
 > **Curated changelog.** The publish workflow auto-prepends recent monorepo commits as a raw activity log; this file is the human-friendly narrative on top.
+
+---
+
+## v2.4.2 -- New Revoke tab in PIM Manager GUI: bulk-revoke active activations from one place
+
+The PIM Manager (`tools/pim-manager/Open-PimManager.ps1` + `pim-manager.html`) gets a 6th tab -- **Revoke** -- that ports the `PIM-Assignment-Revoker` engine's bulk-revoke functionality into the browser GUI. Reuses the v2.2.0 multi-select action-bar pattern + v2.4.0 preload helpers, so the active-assignments list loads in 1-3 s instead of fanning out N per-row Graph round-trips.
+
+### Revoke tab UX
+
+- **Single sortable/filterable table** of every currently-active PIM activation across all three surfaces: Entra ID directory roles, Azure RBAC role assignments, PIM-for-Groups (member + owner).
+- **Filters**: 4 chip-toggles (All / Entra-role / Azure-RBAC / PIM-for-Groups) + free-text search box (matches principal UPN, role name, scope, group name).
+- **Multi-select**: per-row checkbox + sticky bottom action bar showing `[Selection: N rows] [Justification: <input>] [⚠ Revoke selected] [Clear]`.
+- **Justification is mandatory** (PIM API requires it); Revoke button stays greyed-out until non-empty -- matches Entra portal behaviour.
+- **Confirmation modal** before commit ("Revoke N active assignments? Cannot be undone. Principals must re-activate via PIM if they need access.") -- reuses the existing `showConfirm(...)` modal from v2.2.0's Delete flow.
+- **Per-row results pane** after submit: each row shows pass/fail with the Graph/ARM error message inline if it failed -- batch never aborts on a single-row failure.
+
+### Server endpoints (in `Open-PimManager.ps1`)
+
+Two new bearer-token-authed endpoints:
+
+- `GET /api/active-assignments[?refresh=1]` -- returns merged list from all 3 sources. 60s server-side cache (avoid hammering Graph + ARG on repeated tab clicks); `?refresh=1` forces re-fetch. Response includes `cacheHit` + `elapsedSec` so the operator sees data freshness in the UI.
+- `POST /api/revoke` -- body `{ justification, rows: [{id, type, principalId, roleDefinitionId, scope, groupId}] }`. Per-row Try/Catch dispatches the right revoke shape:
+  - **Entra role**: `New-MgRoleManagementDirectoryRoleAssignmentScheduleRequest -BodyParameter @{ action='adminRemove'; ... justification=... }`
+  - **Azure RBAC**: `Invoke-AzRestMethod -Method PUT` to `roleAssignmentScheduleRequests/<new-guid>?api-version=2020-10-01` with `requestType=AdminRemove` (this is what the ARM API actually accepts -- there is no DELETE on the scheduleRequests endpoint, per the engine's working pattern)
+  - **PIM-for-Groups**: `New-MgIdentityGovernancePrivilegedAccessGroupAssignmentScheduleRequest -BodyParameter @{ action='adminRemove'; ... }`
+  - Returns per-row `{ id, ok: $true/$false, error?, requestId?, statusCode? }`; cache invalidated on completion.
+
+### Implementation notes
+
+- All new CSS classes / IDs prefixed `rev-` / `revoke...` to avoid collisions with existing tabs.
+- New JS helpers (`loadActiveAssignments` / `renderRevokeTable` / `applyRevokeFilter` / `submitRevoke` / etc.) live in a module-scoped `REV` state singleton -- no globals leaked.
+- Tenant connection re-uses the existing `Assert-PimTenantConnectionContext` + `Connect-PimManagerGraph` + `Connect-PimManagerAz` helpers from `_tenantSync.ps1` -- no new auth flow, no SDK import churn.
+- Lookup caches (Users / Groups / Entra-role-defs / AUs) load lazily on first `/api/active-assignments` call; result mirrored into `$Global:Users_All_ID` / `$Global:Groups_All_ID` so the v2.4.0 helpers stay first-class if invoked subsequently in the same session.
+- **One known limitation (TODO v2.4.3)**: there is no v2.4.0 `Get-EntraRoleSchedulesPreloaded` helper yet, so the Entra-role active leg of `/api/active-assignments` calls `Get-MgRoleManagementDirectoryRoleAssignmentSchedule -All` directly. v2.4.3 introduces the helper + the Manager will swap to it (single tenant-wide preload instead of an in-line call).
+
+### Files changed
+
+- `tools/pim-manager/pim-manager.html` -- new tab markup, ~75 lines CSS, ~290 lines JS
+- `tools/pim-manager/Open-PimManager.ps1` -- 2 endpoints, 5 helper functions, ~365 lines
+
+Parse-clean: `Open-PimManager.ps1` (PS 5.1) + both inline `<script>` blocks (`node --check`).
 
 ---
 

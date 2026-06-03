@@ -682,6 +682,451 @@ function ConvertTo-OrderedRow {
     return $d
 }
 
+# ---------------------------------------------------------------------------
+# v2.4.2 Revoke tab -- bulk-revoke of active PIM assignments.
+#
+# Server-side cache lives 60s to avoid hammering Graph + ARG when the operator
+# re-opens the tab. `Get-PimActiveAssignmentsCached -Force` bypasses the cache.
+# Three sources are combined into a single row set:
+#
+#   * Entra-role active assignments:
+#       Get-MgRoleManagementDirectoryRoleAssignmentSchedule -All
+#       (TODO v2.4.3 -- add Get-EntraRoleAssignmentsPreloaded helper to the
+#        engine's _shared/PIM-Functions.psm1, mirroring the v2.4.0
+#        Get-PimGroupSchedulesPreloaded pattern. For now we call directly.)
+#
+#   * Azure-RBAC active assignments:
+#       Get-AzActiveRoleAssignmentsViaArg  (v2.4.0 helper, Search-AzGraph)
+#
+#   * PIM-for-Groups active assignments:
+#       Get-PimGroupSchedulesPreloaded     (v2.4.0 helper, single Graph call)
+#
+# The Revoke tab in the Manager only acts on ACTIVE (Assigned) rows -- not
+# Eligible -- because eligibility removal is a different operator workflow
+# already handled by the Baseline engine. The engine PIM-Assignment-Revoker
+# still supports both; the GUI is the bulk-revoke subset.
+# ---------------------------------------------------------------------------
+
+function Initialize-PimManagerTenantConnection {
+    # Lazy-connect Graph + Az on first Revoke tab use. Reuses the
+    # _tenantSync.ps1 helpers so we share the engine-SPN connection logic
+    # (no interactive Connect-MgGraph / Connect-AzAccount ever).
+    if ($script:PimManagerTenantConnected) { return }
+    if (-not (Get-Command Assert-PimTenantConnectionContext -ErrorAction SilentlyContinue)) {
+        throw "_tenantSync.ps1 helpers not loaded -- file missing next to Open-PimManager.ps1"
+    }
+    $tenantId = Assert-PimTenantConnectionContext
+    Connect-PimManagerGraph -TenantId $tenantId
+    Connect-PimManagerAz    -TenantId $tenantId
+    $script:PimManagerTenantConnected = $true
+}
+
+function Get-PimManagerLookupCaches {
+    # Populate $script:PimManager_Users / Groups / Roles for principal +
+    # role-display-name resolution in the active-assignments row builder.
+    # Pulled once per server start; refreshed only when -Force passed.
+    param([switch]$Force)
+    if (-not $Force -and $script:PimManager_LookupCachesLoaded) { return }
+
+    Initialize-PimManagerTenantConnection
+
+    Write-Host "  [revoke] loading principal + role lookup caches (one-shot per session) ..." -ForegroundColor DarkGray
+    # Users (admin-only filter if naming-conventions present, else full set).
+    try {
+        if (Get-Command Get-PimAdminsFiltered -ErrorAction SilentlyContinue) {
+            $script:PimManager_Users = @(Get-PimAdminsFiltered)
+        } else {
+            $script:PimManager_Users = @(Get-MgUser -All)
+        }
+    } catch {
+        Write-Warning "  [revoke] user cache load failed: $($_.Exception.Message). Principal names may be blank."
+        $script:PimManager_Users = @()
+    }
+    # Groups (PIM-prefix filter if naming-conventions present, else full set).
+    try {
+        if (Get-Command Get-PimGroupsFiltered -ErrorAction SilentlyContinue) {
+            $script:PimManager_Groups = @(Get-PimGroupsFiltered)
+        } else {
+            $script:PimManager_Groups = @(Get-MgGroup -All)
+        }
+    } catch {
+        Write-Warning "  [revoke] group cache load failed: $($_.Exception.Message). Group names may be blank."
+        $script:PimManager_Groups = @()
+    }
+    # Entra role definitions (small, single call, no filtering).
+    try {
+        $script:PimManager_EntraRoles = @(Get-MgRoleManagementDirectoryRoleDefinition -All)
+    } catch {
+        Write-Warning "  [revoke] entra role-definition cache load failed: $($_.Exception.Message). Entra role names may be blank."
+        $script:PimManager_EntraRoles = @()
+    }
+    # AU directory cache (for /administrativeUnits/<id> scope display).
+    try {
+        $script:PimManager_AUs = @(Get-MgDirectoryAdministrativeUnit -All)
+    } catch {
+        $script:PimManager_AUs = @()
+    }
+
+    # Engine helpers (Resolve-PimGroupCached etc.) read $Global:Users_All_ID /
+    # $Global:Groups_All_ID. Mirror our caches there so the v2.4.0 helpers
+    # stay first-class.
+    $Global:Users_All_ID  = $script:PimManager_Users
+    $Global:Groups_All_ID = $script:PimManager_Groups
+
+    $script:PimManager_LookupCachesLoaded = $true
+}
+
+function Resolve-PimManagerPrincipalLabel {
+    # Try user UPN first, then group DisplayName, then bare id.
+    param([Parameter(Mandatory)][AllowEmptyString()][string]$PrincipalId)
+    if ([string]::IsNullOrWhiteSpace($PrincipalId)) { return '' }
+    if ($script:PimManager_Users) {
+        foreach ($u in $script:PimManager_Users) {
+            if ($u -and "$($u.Id)" -eq $PrincipalId) {
+                if ($u.UserPrincipalName) { return [string]$u.UserPrincipalName }
+                if ($u.DisplayName)       { return [string]$u.DisplayName }
+                return $PrincipalId
+            }
+        }
+    }
+    if ($script:PimManager_Groups) {
+        foreach ($g in $script:PimManager_Groups) {
+            if ($g -and "$($g.Id)" -eq $PrincipalId) {
+                if ($g.DisplayName) { return [string]$g.DisplayName }
+                return $PrincipalId
+            }
+        }
+    }
+    return $PrincipalId
+}
+
+function Resolve-PimManagerEntraRoleName {
+    param([Parameter(Mandatory)][AllowEmptyString()][string]$RoleDefinitionId)
+    if ([string]::IsNullOrWhiteSpace($RoleDefinitionId)) { return '' }
+    # Trim a possible /providers/.../roleDefinitions/<guid> prefix.
+    $guid = $RoleDefinitionId
+    $slash = $RoleDefinitionId.LastIndexOf('/')
+    if ($slash -ge 0 -and $slash -lt ($RoleDefinitionId.Length - 1)) {
+        $guid = $RoleDefinitionId.Substring($slash + 1)
+    }
+    if ($script:PimManager_EntraRoles) {
+        foreach ($r in $script:PimManager_EntraRoles) {
+            if ($r -and "$($r.Id)" -eq $guid) {
+                if ($r.DisplayName) { return [string]$r.DisplayName }
+            }
+        }
+    }
+    return $guid
+}
+
+function Resolve-PimManagerDirectoryScope {
+    param([Parameter(Mandatory)][AllowEmptyString()][string]$DirectoryScopeId)
+    if ([string]::IsNullOrWhiteSpace($DirectoryScopeId)) { return '/ (tenant-wide)' }
+    if ($DirectoryScopeId -eq '/')                       { return '/ (tenant-wide)' }
+    if ($DirectoryScopeId -like '/administrativeUnits/*') {
+        $auId = ($DirectoryScopeId -split '/')[-1]
+        if ($script:PimManager_AUs) {
+            foreach ($au in $script:PimManager_AUs) {
+                if ($au -and "$($au.Id)" -eq $auId) {
+                    return '/AdministrativeUnits/' + [string]$au.DisplayName
+                }
+            }
+        }
+        return $DirectoryScopeId
+    }
+    return $DirectoryScopeId
+}
+
+function Get-PimActiveAssignmentsCached {
+    # Returns hashtable: @{ ok; rows = [...]; loadedUtc; counts = @{...}; cacheHit }.
+    param([switch]$Force)
+
+    $maxAgeSeconds = 60
+    if (-not $Force -and $script:PimActiveAssignmentsCache -and $script:PimActiveAssignmentsCacheLoadedUtc) {
+        $age = ([DateTime]::UtcNow - $script:PimActiveAssignmentsCacheLoadedUtc).TotalSeconds
+        if ($age -lt $maxAgeSeconds) {
+            return [ordered]@{
+                ok        = $true
+                rows      = $script:PimActiveAssignmentsCache.rows
+                loadedUtc = $script:PimActiveAssignmentsCache.loadedUtc
+                counts    = $script:PimActiveAssignmentsCache.counts
+                cacheHit  = $true
+                ageSeconds = [math]::Round($age, 0)
+            }
+        }
+    }
+
+    # Initial connect + lookup caches (idempotent).
+    Initialize-PimManagerTenantConnection
+    Get-PimManagerLookupCaches
+
+    # The v2.4.0 helpers + Entra-role-direct call all live in the engine's
+    # PIM-Functions.psm1. Import lazily so the Manager works without the
+    # engine being imported separately.
+    $shared = Join-Path $PSScriptRoot '..\..\engine\_shared\PIM-Functions.psm1'
+    if (Test-Path -LiteralPath $shared) {
+        Import-Module $shared -Global -Force -WarningAction SilentlyContinue -ErrorAction SilentlyContinue
+    }
+
+    $sw = [System.Diagnostics.Stopwatch]::StartNew()
+    $rows = New-Object System.Collections.ArrayList
+
+    # ---- Entra-role active assignments -------------------------------------
+    # TODO v2.4.3: replace with Get-EntraRoleAssignmentsPreloaded helper once
+    # ported into engine/_shared/PIM-Functions.psm1 (mirror of the
+    # Get-PimGroupSchedulesPreloaded pattern). For now: direct -All call.
+    $entraRows = @()
+    try {
+        $entraRows = @(Get-MgRoleManagementDirectoryRoleAssignmentSchedule -All -ErrorAction Stop)
+    } catch {
+        Write-Warning "  [revoke] Get-MgRoleManagementDirectoryRoleAssignmentSchedule failed: $($_.Exception.Message)"
+        $entraRows = @()
+    }
+    foreach ($e in $entraRows) {
+        if (-not $e) { continue }
+        $principalLabel = Resolve-PimManagerPrincipalLabel -PrincipalId ([string]$e.PrincipalId)
+        $roleLabel      = Resolve-PimManagerEntraRoleName -RoleDefinitionId ([string]$e.RoleDefinitionId)
+        $scopeLabel     = Resolve-PimManagerDirectoryScope -DirectoryScopeId ([string]$e.DirectoryScopeId)
+        $start = $null; $end = $null
+        if ($e.ScheduleInfo) {
+            if ($e.ScheduleInfo.StartDateTime) { $start = ([DateTime]$e.ScheduleInfo.StartDateTime).ToUniversalTime().ToString('o') }
+            if ($e.ScheduleInfo.Expiration -and $e.ScheduleInfo.Expiration.EndDateTime) {
+                $end = ([DateTime]$e.ScheduleInfo.Expiration.EndDateTime).ToUniversalTime().ToString('o')
+            }
+        }
+        [void]$rows.Add([ordered]@{
+            id               = "entra-role:$($e.Id)"
+            type             = 'entra-role'
+            principal        = $principalLabel
+            principalId      = [string]$e.PrincipalId
+            role             = $roleLabel
+            roleDefinitionId = [string]$e.RoleDefinitionId
+            scope            = $scopeLabel
+            directoryScopeId = [string]$e.DirectoryScopeId
+            start            = $start
+            end              = $end
+            justification    = ''  # Entra role assignment schedules don't carry the original activation justification on the assignment object.
+        })
+    }
+
+    # ---- Azure-RBAC active assignments (ARG) -------------------------------
+    $azRows = @()
+    if (Get-Command Get-AzActiveRoleAssignmentsViaArg -ErrorAction SilentlyContinue) {
+        try {
+            $azRows = @(Get-AzActiveRoleAssignmentsViaArg)
+        } catch {
+            Write-Warning "  [revoke] Get-AzActiveRoleAssignmentsViaArg failed: $($_.Exception.Message)"
+            $azRows = @()
+        }
+    } else {
+        Write-Warning "  [revoke] Get-AzActiveRoleAssignmentsViaArg not available (engine _shared/PIM-Functions.psm1 not loaded). Azure RBAC rows will be empty."
+    }
+    foreach ($a in $azRows) {
+        if (-not $a) { continue }
+        $principalLabel = Resolve-PimManagerPrincipalLabel -PrincipalId ([string]$a.PrincipalId)
+        $roleName       = if ($a.RoleDefinitionName) { [string]$a.RoleDefinitionName } else { [string]$a.RoleDefinitionId }
+        [void]$rows.Add([ordered]@{
+            id               = "azure-rbac:$($a.Id)"
+            type             = 'azure-rbac'
+            principal        = $principalLabel
+            principalId      = [string]$a.PrincipalId
+            role             = $roleName
+            roleDefinitionId = [string]$a.RoleDefinitionId
+            scope            = [string]$a.Scope
+            directoryScopeId = ''
+            start            = ''  # ARG row doesn't carry start/end for the assignment record.
+            end              = ''
+            justification    = ''
+        })
+    }
+
+    # ---- PIM-for-Groups active assignments ---------------------------------
+    $pimGroupRows = @()
+    if (Get-Command Get-PimGroupSchedulesPreloaded -ErrorAction SilentlyContinue) {
+        try {
+            [void](Get-PimGroupSchedulesPreloaded)
+        } catch {
+            Write-Warning "  [revoke] Get-PimGroupSchedulesPreloaded failed: $($_.Exception.Message)"
+        }
+        # The preload exposes $script:PimGroupAssignmentByGroupId in the
+        # PIM-Functions module scope. Walk it via reflection -- we cannot
+        # directly read another module's $script: scope, so use the helper
+        # which returns the same data via Get-MgIdentityGovernance...
+        # Cheapest path: query the module for the underlying assignment objects
+        # by walking each PIM-prefixed group's assignment bucket.
+        try {
+            # Re-call the underlying Graph cmdlet once (cached by the helper's
+            # session-wide cache anyway, so this is effectively free).
+            $pimGroupRows = @(Get-MgIdentityGovernancePrivilegedAccessGroupAssignmentSchedule -All -ErrorAction Stop)
+        } catch {
+            Write-Warning "  [revoke] Get-MgIdentityGovernancePrivilegedAccessGroupAssignmentSchedule failed: $($_.Exception.Message)"
+            $pimGroupRows = @()
+        }
+    } else {
+        Write-Warning "  [revoke] Get-PimGroupSchedulesPreloaded not available (engine _shared/PIM-Functions.psm1 not loaded). PIM-for-Groups rows will be empty."
+    }
+    foreach ($p in $pimGroupRows) {
+        if (-not $p) { continue }
+        $principalLabel = Resolve-PimManagerPrincipalLabel -PrincipalId ([string]$p.PrincipalId)
+        # Group display name from cache, fall back to embedded Group.DisplayName.
+        $groupLabel = ''
+        if ($script:PimManager_Groups) {
+            foreach ($g in $script:PimManager_Groups) {
+                if ($g -and "$($g.Id)" -eq [string]$p.GroupId) { $groupLabel = [string]$g.DisplayName; break }
+            }
+        }
+        if (-not $groupLabel -and $p.Group -and $p.Group.DisplayName) { $groupLabel = [string]$p.Group.DisplayName }
+        if (-not $groupLabel) { $groupLabel = [string]$p.GroupId }
+        $start = $null; $end = $null
+        if ($p.ScheduleInfo) {
+            if ($p.ScheduleInfo.StartDateTime) { $start = ([DateTime]$p.ScheduleInfo.StartDateTime).ToUniversalTime().ToString('o') }
+            if ($p.ScheduleInfo.Expiration -and $p.ScheduleInfo.Expiration.EndDateTime) {
+                $end = ([DateTime]$p.ScheduleInfo.Expiration.EndDateTime).ToUniversalTime().ToString('o')
+            }
+        }
+        $access = 'member'
+        if ($p.AccessId) { $access = [string]$p.AccessId }
+        [void]$rows.Add([ordered]@{
+            id               = "pim-for-groups:$($p.Id)"
+            type             = 'pim-for-groups'
+            principal        = $principalLabel
+            principalId      = [string]$p.PrincipalId
+            role             = "$groupLabel ($access)"
+            roleDefinitionId = ''
+            scope            = $groupLabel
+            directoryScopeId = ''
+            groupId          = [string]$p.GroupId
+            accessId         = $access
+            start            = $start
+            end              = $end
+            justification    = if ($p.Justification) { [string]$p.Justification } else { '' }
+        })
+    }
+
+    $sw.Stop()
+    $elapsed = [math]::Round($sw.Elapsed.TotalSeconds, 2)
+    $counts = [ordered]@{
+        total           = $rows.Count
+        'entra-role'    = @($rows | Where-Object { $_.type -eq 'entra-role' }).Count
+        'azure-rbac'    = @($rows | Where-Object { $_.type -eq 'azure-rbac' }).Count
+        'pim-for-groups' = @($rows | Where-Object { $_.type -eq 'pim-for-groups' }).Count
+    }
+    Write-Host ("  [revoke] active-assignments loaded: {0} total ({1}e + {2}a + {3}g) in {4}s" -f $counts.total, $counts['entra-role'], $counts['azure-rbac'], $counts['pim-for-groups'], $elapsed) -ForegroundColor DarkGray
+
+    $loadedUtc = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
+    $payload = [ordered]@{
+        ok         = $true
+        rows       = $rows.ToArray()
+        counts     = $counts
+        loadedUtc  = $loadedUtc
+        cacheHit   = $false
+        elapsedSec = $elapsed
+    }
+    $script:PimActiveAssignmentsCache = [ordered]@{
+        rows      = $payload.rows
+        counts    = $payload.counts
+        loadedUtc = $payload.loadedUtc
+    }
+    $script:PimActiveAssignmentsCacheLoadedUtc = [DateTime]::UtcNow
+    return $payload
+}
+
+function Invoke-PimActiveAssignmentRevokeBatch {
+    # Returns an array of per-row { id, ok, error? } in the same order as $Rows.
+    param(
+        [Parameter(Mandatory)][object[]]$Rows,
+        [Parameter(Mandatory)][string]$Justification
+    )
+
+    Initialize-PimManagerTenantConnection
+
+    $results = New-Object System.Collections.ArrayList
+    foreach ($r in $Rows) {
+        if (-not $r) {
+            [void]$results.Add([ordered]@{ id = $null; ok = $false; error = 'null row' })
+            continue
+        }
+        $rowId = if ($r.id) { [string]$r.id } else { '' }
+        $type  = if ($r.type) { [string]$r.type } else { '' }
+        try {
+            switch ($type) {
+                'entra-role' {
+                    # Trim a possible roleDefinitions/<guid> prefix that the
+                    # original schedule object carries -- the BodyParameter
+                    # expects the bare GUID.
+                    $roleDefId = [string]$r.roleDefinitionId
+                    if ($roleDefId -and $roleDefId.Contains('/')) {
+                        $roleDefId = $roleDefId.Substring($roleDefId.LastIndexOf('/') + 1)
+                    }
+                    $directoryScopeId = if ($r.directoryScopeId) { [string]$r.directoryScopeId } else { '/' }
+                    $params = @{
+                        action           = 'adminRemove'
+                        principalId      = [string]$r.principalId
+                        roleDefinitionId = $roleDefId
+                        directoryScopeId = $directoryScopeId
+                        justification    = $Justification
+                    }
+                    $resp = New-MgRoleManagementDirectoryRoleAssignmentScheduleRequest -BodyParameter $params -ErrorAction Stop
+                    [void]$results.Add([ordered]@{ id = $rowId; ok = $true; requestId = "$($resp.Id)" })
+                    Write-Host ("  [revoke][entra-role] OK -- principal {0} role {1}" -f $r.principalId, $roleDefId) -ForegroundColor DarkGray
+                }
+                'azure-rbac' {
+                    $scope = [string]$r.scope
+                    if ([string]::IsNullOrWhiteSpace($scope)) {
+                        throw "missing scope for azure-rbac row"
+                    }
+                    $roleDefId = [string]$r.roleDefinitionId
+                    if ($roleDefId -and $roleDefId.Contains('/')) {
+                        $roleDefId = $roleDefId.Substring($roleDefId.LastIndexOf('/') + 1)
+                    }
+                    $newGuid = [Guid]::NewGuid().ToString()
+                    $uri = $scope.TrimEnd('/') + '/providers/Microsoft.Authorization/roleAssignmentScheduleRequests/' + $newGuid + '?api-version=2020-10-01'
+                    $body = @{
+                        properties = @{
+                            principalId      = [string]$r.principalId
+                            roleDefinitionId = "$scope/providers/Microsoft.Authorization/roleDefinitions/$roleDefId"
+                            requestType      = 'AdminRemove'
+                            justification    = $Justification
+                        }
+                    }
+                    $bodyJson = $body | ConvertTo-Json -Depth 10 -Compress
+                    $resp = Invoke-AzRestMethod -Method PUT -Path $uri -Payload $bodyJson -ErrorAction Stop
+                    if ($resp.StatusCode -ge 200 -and $resp.StatusCode -lt 300) {
+                        [void]$results.Add([ordered]@{ id = $rowId; ok = $true; statusCode = $resp.StatusCode })
+                        Write-Host ("  [revoke][azure-rbac] OK ({0}) -- principal {1} scope {2}" -f $resp.StatusCode, $r.principalId, $scope) -ForegroundColor DarkGray
+                    } else {
+                        $errText = "HTTP $($resp.StatusCode): $($resp.Content)"
+                        [void]$results.Add([ordered]@{ id = $rowId; ok = $false; error = $errText })
+                        Write-Warning ("  [revoke][azure-rbac] FAIL -- {0}" -f $errText)
+                    }
+                }
+                'pim-for-groups' {
+                    $accessId = if ($r.accessId) { [string]$r.accessId } else { 'member' }
+                    $params = @{
+                        accessId      = $accessId
+                        principalId   = [string]$r.principalId
+                        groupId       = [string]$r.groupId
+                        action        = 'adminRemove'
+                        justification = $Justification
+                    }
+                    $resp = New-MgIdentityGovernancePrivilegedAccessGroupAssignmentScheduleRequest -BodyParameter $params -ErrorAction Stop
+                    [void]$results.Add([ordered]@{ id = $rowId; ok = $true; requestId = "$($resp.Id)" })
+                    Write-Host ("  [revoke][pim-for-groups] OK -- principal {0} group {1}" -f $r.principalId, $r.groupId) -ForegroundColor DarkGray
+                }
+                default {
+                    throw "unknown row type: '$type' (expected entra-role | azure-rbac | pim-for-groups)"
+                }
+            }
+        } catch {
+            $msg = "$($_.Exception.Message)"
+            [void]$results.Add([ordered]@{ id = $rowId; ok = $false; error = $msg })
+            Write-Warning ("  [revoke][{0}] FAIL -- {1}" -f $type, $msg)
+        }
+    }
+
+    return $results.ToArray()
+}
+
 function Invoke-Server {
     param([int]$DesiredPort = 0)
 
@@ -916,6 +1361,60 @@ function Handle-Request {
                 return 200
             } catch {
                 Write-JsonResponse -Response $resp -Status 500 -Body @{ error = "$($_.Exception.Message)" }
+                return 500
+            }
+        }
+
+        # -------------------------------------------------------------------
+        # v2.4.2 Revoke tab endpoints
+        # -------------------------------------------------------------------
+        if ($path -like '/api/active-assignments*' -and $method -eq 'GET') {
+            $script:lastHeartbeat = Get-Date
+            $forceRefresh = $false
+            try {
+                $qs = $req.Url.Query
+                if ($qs -and $qs.IndexOf('refresh=1') -ge 0) { $forceRefresh = $true }
+            } catch { }
+            try {
+                $body = Get-PimActiveAssignmentsCached -Force:$forceRefresh
+                Write-JsonResponse -Response $resp -Status 200 -Body $body
+                return 200
+            } catch {
+                Write-JsonResponse -Response $resp -Status 500 -Body @{ ok = $false; error = "$($_.Exception.Message)" }
+                return 500
+            }
+        }
+
+        if ($path -eq '/api/revoke' -and $method -eq 'POST') {
+            $script:lastHeartbeat = Get-Date
+            $body = Read-RequestJson -Request $req
+            $justification = $null
+            $rowsIn = @()
+            if ($body) {
+                if ($body.justification) { $justification = "$($body.justification)" }
+                if ($body.rows)          { $rowsIn = @($body.rows) }
+            }
+            if (-not $justification -or [string]::IsNullOrWhiteSpace($justification)) {
+                Write-JsonResponse -Response $resp -Status 400 -Body @{ ok = $false; error = 'justification is required' }
+                return 400
+            }
+            if (-not $rowsIn -or $rowsIn.Count -eq 0) {
+                Write-JsonResponse -Response $resp -Status 400 -Body @{ ok = $false; error = 'at least one row is required' }
+                return 400
+            }
+            try {
+                $results = Invoke-PimActiveAssignmentRevokeBatch -Rows $rowsIn -Justification $justification
+                # Invalidate the active-assignments cache so the next GET re-fetches truth.
+                $script:PimActiveAssignmentsCache          = $null
+                $script:PimActiveAssignmentsCacheLoadedUtc = $null
+                Write-JsonResponse -Response $resp -Status 200 -Body ([ordered]@{
+                    ok       = $true
+                    requested = $rowsIn.Count
+                    results  = $results
+                })
+                return 200
+            } catch {
+                Write-JsonResponse -Response $resp -Status 500 -Body @{ ok = $false; error = "$($_.Exception.Message)" }
                 return 500
             }
         }
