@@ -1,9 +1,10 @@
 # Release notes for PIM4EntraPS
 
-## v2.4.15
+## v2.4.16
 
 Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monorepo:
 
+- release: PIM4EntraPS v2.4.16 - popup UX: hide AU GUIDs + group identical roles + 'Re-sign in' instead of 'Auto-fix permissions' + auto-switch to My Access + auto-uncheck activated rows (5f7a664a)
 - release: PIM4EntraPS v2.4.15 - CRITICAL FIX popup JWT decode bug caused infinite "missing scopes" reauth loop + Set-PimActivatorPolicy-Intune.ps1 Platform Script (66f07cfe)
 - release: PIM4EntraPS v2.4.14 - popup light theme (white+blue) + simplified not-configured text + ext v0.3.0->0.4.0 + correct Intune deployment guidance (b024bd79)
 - release: PIM4EntraPS v2.4.13 - CRX bundles placeholder config.js (no maintainer-tenant leak into customer installs) + ext ver 0.2.0 -> 0.3.0 (b3d55092)
@@ -33,13 +34,61 @@ Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monor
 - release: PIM4EntraPS v2.1.2 - PIM Manager v0.3: pre-flight validator + bulk Fix-all + multi-step wizards + tenant cache (87feaada)
 - release: PIM4EntraPS v2.1.1 - rename pim-mapper -> pim-manager (does more than map) + field-by-field UX audit spec + wizard scaffolding (42fe18e1)
 - release: PIM4EntraPS v2.1.0 - MSP variant + AccountStatus kill-switch with CISO-controlled per-admin KV codes (d1979fe8)
-- release: PIM4EntraPS v2.0.0 - full PIM v2 framework: engine modernization + Mapper (graph viewer + grid editor + save) + Activator (Edge extension + Intune install) + one-shot engine SPN installer + 18-section DESIGN.md + README rewrite (0118ecf8)
 
 ---
 
 # Release notes -- PIM4EntraPS
 
 > **Curated changelog.** The publish workflow auto-prepends recent monorepo commits as a raw activity log; this file is the human-friendly narrative on top.
+
+---
+
+## v2.4.16 -- Popup UX cleanup: hide GUIDs, group identical roles, "Re-sign in" instead of "Auto-fix permissions", auto-switch to My Access after activation
+
+Three end-user-facing improvements driven by direct customer feedback after the v2.4.15 unblock:
+
+### 1. My Access tab: no more GUIDs in role rows
+
+v2.4.15 (and earlier) rendered Entra role assignments as raw rows:
+
+```
+Entra role: Groups Administrator AU 06e389b6-3a01-4ead-9671-2174c67492d3
+Entra role: Groups Administrator AU 1c61e150-a6a9-478a-82ed-399807c6dd9f
+Entra role: Groups Administrator AU 4cf31b96-1d2d-46d8-896b-fdf9de888c85
+Entra role: Groups Administrator AU 4e0c2a94-2f20-402f-a10a-ef7e68b7ff5d
+... (and 4 more)
+Entra role: Authentication Administrator AU '_err'
+Entra role: Authentication Administrator AU '_err'
+```
+
+End-users can't act on GUIDs and the "_err" placeholder (from a failed admin-unit lookup) was confusing. v2.4.16 collapses identical (role, scope) entries into ONE row and replaces GUIDs with friendly names or a count:
+
+```
+Entra role: Groups Administrator      in AU 'Marketing', 'Sales', 'HR', 'Engineering' + 4 more
+Entra role: Authentication Administrator    4 restricted scopes
+```
+
+`describeDirectoryScope` now returns structured `{ kind, name?, auId?, raw? }` descriptors instead of pre-formatted strings, and the renderer groups by role name + summarises scopes via a new `summariseScopes` helper. AU lookups that fail (403 / 404) cache `null` instead of `"__err"` so the rendering can degrade gracefully to "N restricted scope(s)".
+
+### 2. "Auto-fix permissions" button -> "Re-sign in"
+
+The button label confused users -- "permissions" sounded like file ACLs and "Auto-fix" implied a repair tool. Renamed to **Re-sign in** with a tooltip describing actual usage ("Use this if the popup looks broken, if an admin just granted you new permissions, or if you switched between Edge and Chrome"). The button now always triggers a fresh interactive sign-in regardless of token state -- if your token is healthy and you click anyway, you can swap accounts or pick up updated admin-consent.
+
+The "4/4 scopes" status line next to it is hidden when the token is healthy (silent success); it only surfaces when something needs attention ("Permissions out of date - click Re-sign in").
+
+### 3. Activate tab: auto-switch to My Access after activation + auto-uncheck activated rows
+
+Previously, after activating one or more groups, the popup left you on the Activate tab with cryptic status text like "submitted (PendingProvisioning)" and no way to see what roles were actually granted -- you had to manually switch to My Access and click Refresh. v2.4.16 auto-switches to My Access, waits ~2.5s for PendingProvisioning to flip to Provisioned, then reloads the tab so you immediately see your new active memberships + the Entra roles they generated.
+
+Per-row status text also softened: "submitted - check My Access tab in a few seconds" instead of "submitted (PendingProvisioning)".
+
+Successfully-activated rows are now **automatically unchecked** -- re-opening the popup no longer shows stale selections that could trigger an accidental re-activation. Rows that failed activation stay checked so the user can retry. The persisted `selectedIds` storage entry is rewritten to match.
+
+### Customer action
+
+End-users: same auto-update path as v2.4.15. Force-update via `edge://extensions` -> Developer mode ON -> Update, OR wait ~30 min for Chromium to poll `updates.xml`. Manifest bumped 0.4.1 -> 0.4.2.
+
+No admin / Intune changes needed.
 
 ---
 

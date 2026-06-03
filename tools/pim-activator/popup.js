@@ -511,6 +511,29 @@ async function listRoleAssignmentsForGroup(token, groupId) {
   return out
 }
 
+// Turn a list of { kind, name, auId, raw } scope descriptors into ONE
+// human-readable summary string. Replaces the v2.4.15 behaviour that printed
+// raw AU GUIDs (which end-users can't act on) and one row per identical entry.
+function summariseScopes(scopes) {
+  if (!scopes || !scopes.length) return ''
+  if (scopes.some(s => s.kind === 'tenant')) return '(tenant-wide)'
+  const namedAus    = scopes.filter(s => s.kind === 'au' && s.name).map(s => s.name)
+  const unnamedAus  = scopes.filter(s => s.kind === 'au' && !s.name).length
+  const others      = scopes.filter(s => s.kind === 'other').length
+  const unique      = [...new Set(namedAus)].sort((a, b) => a.localeCompare(b))
+  const parts = []
+  if (unique.length) {
+    // Show up to 4 names inline; cap the rest with "+N more"
+    const head = unique.slice(0, 4).map(n => `'${n}'`).join(', ')
+    const tail = unique.length > 4 ? ` + ${unique.length - 4} more` : ''
+    parts.push(`in AU ${head}${tail}`)
+  }
+  if (unnamedAus) parts.push(`${unnamedAus} restricted scope${unnamedAus === 1 ? '' : 's'}`)
+  if (others)     parts.push(`${others} other scope${others === 1 ? '' : 's'}`)
+  if (!parts.length) return '(scope unavailable)'
+  return parts.join(' + ')
+}
+
 async function resolveAuDisplayName(token, auId) {
   if (auId in auNameCache) return auNameCache[auId]
   try {
@@ -518,21 +541,25 @@ async function resolveAuDisplayName(token, auId) {
     auNameCache[auId] = res?.displayName || null
     return auNameCache[auId]
   } catch (e) {
-    // 404 -> probably stale id; 403 -> insufficient consent. Fall back to raw id.
-    auNameCache[auId] = '__err'
+    // 404 (stale) or 403 (insufficient consent) -> cache the failure as null
+    // so the renderer can degrade to a friendly "restricted scope" label
+    // instead of showing a meaningless GUID or "__err" to the end-user.
+    auNameCache[auId] = null
     return null
   }
 }
 
+// Returns structured scope info so the renderer can group/summarise instead of
+// showing raw GUIDs (which end-users cannot act on or interpret).
 async function describeDirectoryScope(token, directoryScopeId) {
-  if (!directoryScopeId) return '(unknown scope)'
-  if (directoryScopeId === '/') return '(tenant-wide)'
+  if (!directoryScopeId)         return { kind: 'unknown' }
+  if (directoryScopeId === '/')  return { kind: 'tenant' }
   const auMatch = directoryScopeId.match(/^\/administrativeUnits\/([0-9a-fA-F-]{36})$/)
   if (auMatch) {
     const name = await resolveAuDisplayName(token, auMatch[1])
-    return name ? `AU '${name}'` : `AU ${auMatch[1]}`
+    return { kind: 'au', auId: auMatch[1], name }   // name is null when lookup fails
   }
-  return directoryScopeId
+  return { kind: 'other', raw: directoryScopeId }
 }
 
 async function loadMyAccessTab(token, { force = false } = {}) {
@@ -603,8 +630,8 @@ async function loadMyAccessTab(token, { force = false } = {}) {
         const resolved = []
         for (const a of assignments) {
           const roleName = roleDefs.idToName[a.roleDefinitionId] || a.roleDefinitionId
-          const scopeDesc = await describeDirectoryScope(token, a.directoryScopeId)
-          resolved.push({ roleName, scopeDesc })
+          const scope    = await describeDirectoryScope(token, a.directoryScopeId)
+          resolved.push({ roleName, scope })
         }
         r.roles = resolved
         r.rolesError = null
@@ -675,10 +702,20 @@ function updateMyAccessRoleSlot(r) {
     d.innerHTML = '&#x21B3; <span class="ma-scope">(no Entra role assignments granted by this group)</span>'
     slot.appendChild(d)
   } else {
+    // Collapse 8 "Groups Administrator AU <guid>" rows into one tidy row:
+    //   "Groups Administrator -- in AU 'Marketing', 'Sales' + 6 more"
+    // Group by roleName, summarise scopes. End-users can't act on GUIDs and
+    // they make the popup unreadable, so we drop them entirely.
+    const byRole = new Map()
     for (const role of r.roles) {
+      if (!byRole.has(role.roleName)) byRole.set(role.roleName, [])
+      byRole.get(role.roleName).push(role.scope)
+    }
+    for (const [roleName, scopes] of byRole) {
+      const summary = summariseScopes(scopes)
       const d = document.createElement('div')
       d.className = 'ma-role'
-      d.innerHTML = `&#x21B3; Entra role: <strong>${escapeHtml(role.roleName)}</strong> <span class="ma-scope">${escapeHtml(role.scopeDesc)}</span>`
+      d.innerHTML = `&#x21B3; Entra role: <strong>${escapeHtml(roleName)}</strong> <span class="ma-scope">${escapeHtml(summary)}</span>`
       slot.appendChild(d)
     }
   }
@@ -868,29 +905,36 @@ async function loaded(token) {
     const tk = fresh?.accessToken || token
     await loadMyAccessTab(tk)
   }
-  // Auto-fix button: validate token scopes + force reauth if anything missing.
+  // Re-sign in button: unconditionally trigger a fresh interactive sign-in.
+  // Previously labelled "Auto-fix permissions" which confused end users (sounds
+  // like file/ACL repair). Renamed to "Re-sign in" -- describes the action,
+  // not the implementation detail (scope validation).
   if (els.myAccessAutofix) {
     els.myAccessAutofix.onclick = async () => {
       const fresh = await acquireGraphToken({ interactive: false })
       const tk = fresh?.accessToken || token
       const miss = missingScopes(tk)
       if (miss.length === 0) {
-        els.myAccessScopeStatus.textContent = `Token healthy -- all ${REQUIRED_GRAPH_SCOPES.length} scope(s) present.`
-        els.myAccessScopeStatus.style.color = '#3fb950'
+        // Token is healthy -- user clicked anyway. Force a fresh sign-in so
+        // they can switch accounts or pick up admin-consented updates.
+        els.myAccessScopeStatus.textContent = 'Signing you out + back in to refresh permissions...'
+        els.myAccessScopeStatus.style.color = '#0969da'
+        return triggerInteractiveReauth('User requested re-sign-in')
       } else {
-        els.myAccessScopeStatus.textContent = `Missing ${miss.length} scope(s); refreshing sign-in...`
-        els.myAccessScopeStatus.style.color = '#f85149'
-        return triggerInteractiveReauth(`Auto-fix: token missing ${miss.join(', ')}`)
+        els.myAccessScopeStatus.textContent = 'Permissions out of date - refreshing sign-in...'
+        els.myAccessScopeStatus.style.color = '#cf222e'
+        return triggerInteractiveReauth(`Token missing: ${miss.join(', ')}`)
       }
     }
-    // Initial scope diagnostic on first My Access render
+    // Initial scope status: keep the label SHORT + hide it entirely when fine.
+    // Old "4/4 scopes" leaked developer-speak; users don't know what a scope
+    // is. Only surface a message when something needs attention.
     const initialMiss = missingScopes(token)
     if (initialMiss.length === 0) {
-      els.myAccessScopeStatus.textContent = `${REQUIRED_GRAPH_SCOPES.length}/${REQUIRED_GRAPH_SCOPES.length} scopes`
-      els.myAccessScopeStatus.style.color = '#3fb950'
+      els.myAccessScopeStatus.textContent = ''   // healthy: silent
     } else {
-      els.myAccessScopeStatus.textContent = `Missing: ${initialMiss.join(', ')} (click Auto-fix)`
-      els.myAccessScopeStatus.style.color = '#d29922'
+      els.myAccessScopeStatus.textContent = `Permissions out of date - click Re-sign in`
+      els.myAccessScopeStatus.style.color = '#9a6700'
     }
   }
 
@@ -932,14 +976,21 @@ async function loaded(token) {
         const tk = fresh?.accessToken || token
         const res = await activateGroup(tk, r.groupId, just, dur)
         if (res?.status === 'Provisioned' || res?.status === 'Granted') {
-          setStatus(r.groupId, `activated for +${dur}h`, 'ok')
+          setStatus(r.groupId, `active for ${dur}h - see My Access tab`, 'ok')
+          r.checked = false   // uncheck on success so re-opening popup is clean
           anySucceeded = true
         } else {
-          setStatus(r.groupId, `submitted (${res?.status || 'pending'})`, 'pending')
+          // Most PIM-for-Groups activations land in PendingProvisioning for a
+          // few seconds before flipping to Provisioned. Tell the user that's
+          // normal + where to see the final state instead of leaking the API
+          // status string verbatim.
+          setStatus(r.groupId, `submitted - check My Access tab in a few seconds`, 'pending')
+          r.checked = false   // uncheck on submit too -- activation request accepted
           anySucceeded = true
         }
       } catch (e) {
         setStatus(r.groupId, e.message, 'err')
+        // leave r.checked = true so user can retry
       }
     }
     els.activate.disabled = false
@@ -948,11 +999,20 @@ async function loaded(token) {
     // active memberships on next view (or immediately if the tab is open).
     if (anySucceeded) {
       myAccessCache = null
-      if (!els.panelMyAccess.hidden) {
-        const fresh = await acquireGraphToken({ interactive: false })
-        const tk = fresh?.accessToken || token
-        await loadMyAccessTab(tk, { force: true })
-      }
+      // Persist the cleared selection so a popup re-open doesn't re-check the
+      // groups we just activated.
+      await setStored({ selectedIds: eligibleRows.filter(r => r.checked).map(r => r.groupId) })
+      render()   // refresh checkbox state + "N selected" footer count
+      // Auto-switch to My Access tab so the user immediately sees the result
+      // (active groups + the Entra roles they generated) instead of having to
+      // hunt for it. Brief delay lets PendingProvisioning flip to Provisioned
+      // before we query.
+      setActiveTab('myaccess')
+      els.myAccessStatus.textContent = 'Waiting for activation(s) to provision...'
+      await new Promise(r => setTimeout(r, 2500))
+      const fresh = await acquireGraphToken({ interactive: false })
+      const tk = fresh?.accessToken || token
+      await loadMyAccessTab(tk, { force: true })
     }
   }
 }
