@@ -1,9 +1,10 @@
 # Release notes for PIM4EntraPS
 
-## v2.4.46
+## v2.4.47
 
 Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monorepo:
 
+- release: PIM4EntraPS v2.4.47 - robust Graph sign-in for Intune deployer (-UseDeviceCode + scope verification) (1a41d168)
 - release: PIM4EntraPS v2.4.46 - fix Graph scope for Intune Remediation create (33f33d92)
 - release: PIM4EntraPS v2.4.45 - optional Intune GroupId + self-contained local installer for AD GPO / file share / SCCM rollouts (2cd1ff6e)
 - release: PIM4EntraPS v2.4.44 - multi-tenant Tenants array + Intune Remediation deployer (extension v1.1.0) (23de65f7)
@@ -33,13 +34,23 @@ Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monor
 - release: PIM4EntraPS v2.4.18 - Azure RBAC visible in My Access tab + collapse for long Entra role lists (1f7def50)
 - release: PIM4EntraPS v2.4.17 - AU names resolve via AdministrativeUnit.Read.All + sort by activation time DESC + persistent AU cache + Update-PimActivatorDev.ps1 helper (b502f337)
 - release: PIM4EntraPS v2.4.16 - popup UX: hide AU GUIDs + group identical roles + 'Re-sign in' instead of 'Auto-fix permissions' + auto-switch to My Access + auto-uncheck activated rows (5f7a664a)
-- release: PIM4EntraPS v2.4.15 - CRITICAL FIX popup JWT decode bug caused infinite "missing scopes" reauth loop + Set-PimActivatorPolicy-Intune.ps1 Platform Script (66f07cfe)
 
 ---
 
 # Release notes -- PIM4EntraPS
 
 > **Curated changelog.** The publish workflow auto-prepends recent monorepo commits as a raw activity log; this file is the human-friendly narrative on top.
+
+---
+
+## v2.4.47 -- Robust Graph sign-in for `Deploy-PimActivatorIntune.ps1` (-UseDeviceCode fallback + post-connect scope verification)
+
+The default Microsoft.Graph.Authentication `InteractiveBrowserCredential` flow silently returns success even when the user closes the browser tab before consent completes -- the next Graph call then fails with `The server has not found anything matching the requested URI`. Two improvements:
+
+1. **Post-connect verification**. After `Connect-MgGraph`, the script reads `Get-MgContext` and confirms every required scope is present. If not, a clear error tells the user what to do (re-run + complete the browser, or fall back to device code).
+2. **New `-UseDeviceCode` switch**. Skips the embedded browser flow entirely. The script prints a code + URL; sign in on any device (phone, second laptop), paste the code, consent there. More reliable on hardened workstations, over RDP, or anywhere the SDK's localhost redirect can't bind.
+
+Recommended path if the default browser flow misbehaves: `... -CreateIntuneRemediation -TenantsCsv ... -UseDeviceCode`.
 
 ---
 
