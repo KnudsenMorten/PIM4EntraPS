@@ -1,9 +1,10 @@
 # Release notes for PIM4EntraPS
 
-## v2.4.26
+## v2.4.27
 
 Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monorepo:
 
+- release: PIM4EntraPS v2.4.27 - Activate tab smart sort (recency 2x + count 1x, decays linearly over 30d, cap at 20 activations); persisted in chrome.storage.local (594490bf)
 - release: PIM4EntraPS v2.4.26 - drop 'member' word + show date+time for activation expiry on both tabs (d7f95cfc)
 - release: PIM4EntraPS v2.4.25 - 3-bucket categorisation on both Activate + My Access tabs, configurable per customer via entraGroupRegex/azureGroupRegex (chrome.storage.managed) (adaa201b)
 - release: PIM4EntraPS v2.4.24 - already-active groups sorted to bottom of Activate tab (greyed + badge + disabled checkbox) (2c1e982c)
@@ -33,13 +34,26 @@ Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monor
 - release: PIM4EntraPS v2.4.1 - wire PIM-for-Groups preload into Baseline + swap per-row eligibility-lookup call-sites (31cdfe5a)
 - release: PIM4EntraPS v2.4.0 - perf overhaul: cached group resolution + tenant-wide preload helpers + Azure token reuse (ea55e28f)
 - release: PIM4EntraPS v2.3.2 - perf + logging hotfix from function audit (Graph + Azure) (d40b311c)
-- release: PIM4EntraPS v2.3.1 - docs: README rewrite with full v2.x feature catalog + dedicated PIM Manager GUI section (85992b8f)
 
 ---
 
 # Release notes -- PIM4EntraPS
 
 > **Curated changelog.** The publish workflow auto-prepends recent monorepo commits as a raw activity log; this file is the human-friendly narrative on top.
+
+---
+
+## v2.4.27 -- Activate tab learns your habits: most-recent / most-frequent activations bubble to the top of each bucket
+
+The popup now tracks every successful activation in `chrome.storage.local` (`activationHistory: { groupId: { count, lastActivated } }`). The Activate tab uses a composite score (recency dominates, count tiebreaks) to sort within each of the 3 buckets, so the groups you activate every morning stay at the top of each section. Groups you've never activated stay alphabetical, falling to the bottom of the "ready" rows.
+
+Implementation notes:
+- Recency component decays linearly to zero over 30 days; a group activated today scores 2.0, one activated 15 days ago scores 1.0, 30+ days ago scores 0.
+- Count component caps at 20 activations -- a long-tail "activated 200 times last year" group can't completely outrank a fresh one-off; recent wins.
+- Already-active rows still go at the bottom (greyed + badge from v2.4.24); the new sort only reorders the "ready to activate" rows within each bucket.
+- No UI changes -- the smart sort is invisible. Users just notice the popup "remembers" their habits.
+
+Manifest 0.4.12 -> 0.4.13.
 
 ---
 

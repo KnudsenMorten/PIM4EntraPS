@@ -506,6 +506,49 @@ const AU_CACHE_TTL_MS = 24 * 60 * 60 * 1000   // 24h
   } catch { /* missing or corrupt cache; start fresh */ }
 })()
 
+// Activation history: per-group counter + last-activated timestamp, persisted
+// in chrome.storage.local. Used to sort the Activate tab so the user's most-
+// used groups bubble to the top of each bucket. Recency wins over raw count
+// (a group activated yesterday ranks higher than one activated 50 times last
+// year). Set in recordActivation() on every successful activation; loaded at
+// boot into the in-memory `activationHistory` map.
+let activationHistory = {}   // { groupId: { count, lastActivated: epochMs } }
+
+;(async () => {
+  try {
+    const stored = await getStored(['activationHistory'])
+    if (stored?.activationHistory && typeof stored.activationHistory === 'object') {
+      activationHistory = stored.activationHistory
+    }
+  } catch { /* missing or corrupt; start fresh */ }
+})()
+
+function recordActivation(groupId) {
+  if (!groupId) return
+  const e = activationHistory[groupId] || { count: 0, lastActivated: 0 }
+  e.count++
+  e.lastActivated = Date.now()
+  activationHistory[groupId] = e
+  // Fire-and-forget persistence
+  setStored({ activationHistory }).catch(() => {})
+}
+
+// Composite sort score: recency dominates, count tiebreaks. Returns higher =
+// "more frequent / recent" so we use it with descending sort.
+function activationRank(groupId) {
+  const e = activationHistory[groupId]
+  if (!e) return 0
+  // Recency component: 1.0 for "right now", decays linearly to 0 over 30 days.
+  const ageMs = Date.now() - (e.lastActivated || 0)
+  const days = ageMs / (1000 * 60 * 60 * 24)
+  const recencyScore = Math.max(0, 1 - days / 30)   // 0..1
+  // Count component, capped so 50+ activations don't completely outrank
+  // a recent one-off.
+  const countScore = Math.min(e.count, 20) / 20      // 0..1
+  // Weighted blend: recency twice as influential as raw count.
+  return recencyScore * 2 + countScore
+}
+
 // Persist the cache after each successful lookup so the data outlives the popup.
 async function persistAuCache() {
   try {
@@ -1226,9 +1269,16 @@ function render() {
     sec.style.cssText = 'background:#f6f8fa;color:#0969da;padding:6px 10px;font-size:11.5px;font-weight:600;border-top:1px solid #d0d7de;border-bottom:1px solid #d0d7de;margin-top:8px;letter-spacing:0.3px;'
     sec.textContent = `${title} (${members.length})`
     els.list.appendChild(sec)
-    // Within each section: ready-to-activate first (alphabetical), already-active at the bottom.
+    // Within each section: ready-to-activate first, then already-active at
+    // the bottom. Within the "ready" rows, sort by activation history -- the
+    // groups the user activates most recently/frequently bubble to the top
+    // (so daily-use groups stay reachable, never-used ones fall to the bottom
+    // of the bucket but stay above any already-active rows). Within "ready
+    // rows with zero history", alphabetical.
     const sorted = members.slice().sort((a, b) => {
       if (!!a.isActive !== !!b.isActive) return a.isActive ? 1 : -1
+      const rank = activationRank(b.groupId) - activationRank(a.groupId)
+      if (rank !== 0) return rank
       return (a.displayName || '').localeCompare(b.displayName || '')
     })
     for (const r of sorted) renderActivateRow(r)
@@ -1488,6 +1538,7 @@ async function loaded(token) {
           setStatus(r.groupId, `active for ${dur}h - see My Access tab`, 'ok')
           r.checked = false   // uncheck on success so re-opening popup is clean
           anySucceeded = true
+          recordActivation(r.groupId)
         } else {
           // Most PIM-for-Groups activations land in PendingProvisioning for a
           // few seconds before flipping to Provisioned. Tell the user that's
@@ -1496,6 +1547,7 @@ async function loaded(token) {
           setStatus(r.groupId, `submitted - check My Access tab in a few seconds`, 'pending')
           r.checked = false   // uncheck on submit too -- activation request accepted
           anySucceeded = true
+          recordActivation(r.groupId)
         }
       } catch (e) {
         setStatus(r.groupId, e.message, 'err')
