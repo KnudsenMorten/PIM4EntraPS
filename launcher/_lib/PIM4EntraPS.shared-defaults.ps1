@@ -15,8 +15,9 @@
       3. config/PIM4EntraPS.NamingConventions.custom.ps1   (if present)
       4. config/PIM4EntraPS.Filters.locked.ps1
       5. config/PIM4EntraPS.Filters.custom.ps1             (if present)
-      6. launcher/<task>/LauncherConfig.defaults.ps1
-      7. launcher/<task>/LauncherConfig.custom.ps1         (if present)
+      6. config/PIM4EntraPS.custom.ps1                     (solution-wide auth + overrides; if present)
+      7. launcher/<task>/LauncherConfig.defaults.ps1
+      8. launcher/<task>/LauncherConfig.custom.ps1         (per-engine, wins; if present)
 
 .NOTES
     Solution     : PIM4EntraPS

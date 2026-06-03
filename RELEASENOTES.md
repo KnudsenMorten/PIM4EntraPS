@@ -1,9 +1,10 @@
 # Release notes for PIM4EntraPS
 
-## v2.4.3
+## v2.4.4
 
 Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monorepo:
 
+- release: PIM4EntraPS v2.4.4 - port SI's 4-mode launcher auth + solution-wide config + new Grant-PimEngineAdminConsent helper (41e64c94)
 - release: PIM4EntraPS v2.4.3 - docs: README full feature inventory (41 bullets with shipped/partial/roadmap badges) (0016c32c)
 - release: PIM4EntraPS v2.4.2 - new Revoke tab in PIM Manager GUI for bulk-revoke of active activations (5c71b61e)
 - release: PIM4EntraPS v2.4.1 - wire PIM-for-Groups preload into Baseline + swap per-row eligibility-lookup call-sites (31cdfe5a)
@@ -33,13 +34,49 @@ Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monor
 - chore: standardize PS headers, port Setup-CSA, INTERNAL tooling, README (a060047e)
 - feat: portable launcher paths + bundled dependencies in published releases (ccb4b679)
 - chore: strip 'AutomateIT' branding from user-facing launcher + doc content (653bac5f)
-- rename: TestVariables -> LauncherConfig across the repo (b60390f0)
 
 ---
 
 # Release notes -- PIM4EntraPS
 
 > **Curated changelog.** The publish workflow auto-prepends recent monorepo commits as a raw activity log; this file is the human-friendly narrative on top.
+
+---
+
+## v2.4.4 -- Port SecurityInsight's 4-mode launcher auth + solution-wide config + new Grant-PimEngineAdminConsent helper
+
+Mirrors the SecurityInsight (SI) launcher auth model into PIM4EntraPS so customers running both solutions use one mental model. SI ships a layered config (defaults -> solution-wide -> per-engine -> CLI) and supports 4 auth methods (Managed Identity / SPN+KV / SPN+cert / SPN+plaintext) selected by which globals are populated. v2.4.4 brings PIM4EntraPS into line.
+
+### New config + helper files
+
+- **`config/PIM4EntraPS.custom.sample.ps1`** (new, solution-wide template) -- mirrors `SecurityInsight.custom.sample.ps1`. Single place for auth + shared overrides covering every engine. Customers who already manage SI will recognize the layout. The `.gitignore` already excludes `config\*.custom.ps1`, so the populated copy stays local.
+- **`launcher/_lib/Connect-PimLauncherAuth.ps1`** (new shared helper) -- encapsulates the 4-mode connect flow. Both `launcher.community-vm.ps1` and `launcher.community-azure.ps1` consume it, eliminating the per-flavour duplication.
+- **`setup/Grant-PimEngineAdminConsent.ps1`** (new, idempotent) -- companion to `Install-PimEngineAppRegistration.ps1`. Adds tenant-wide admin-consent app-role assignments to an EXISTING engine SPN (handy when the engine app reg was created by another process and just needs catch-up perms). Skips already-granted entries; only writes the missing ones. Device-code by default so it works on hosts without a default browser.
+
+### Updated launcher files (21 LauncherConfig.custom.sample.ps1 + 2 _lib)
+
+Every `launcher/<task>/LauncherConfig.custom.sample.ps1` (21 of them across all engines) now documents the 4 auth methods as commented blocks the operator uncomments. Variable names match SI verbatim:
+
+- `$global:UseManagedIdentity = $true` + `$global:SpnTenantId` -- **Method 1: MI** (recommended for Azure VMs / Arc / Functions)
+- `$global:SpnTenantId` + `$global:SpnClientId` + `$global:SpnKeyVaultName` + `$global:SpnSecretName` -- **Method 2: SPN + KV-stored secret** (production-recommended for non-Azure-hosted)
+- `$global:SpnTenantId` + `$global:SpnClientId` + `$global:SpnCertificateThumbprint` -- **Method 3: SPN + certificate** (security best practice for VM runs)
+- `$global:SpnTenantId` + `$global:SpnClientId` + `$global:SpnClientSecret` -- **Method 4: SPN + plaintext secret** (testing only)
+
+Auth-method-detection priority (matches SI): MI first, then KV, then cert, then plaintext. First method whose globals are populated wins.
+
+`launcher/_lib/Initialize-LauncherConfig.ps1` + `PIM4EntraPS.shared-defaults.ps1` updated to load the new solution-wide config layer before per-engine config, then call `Connect-PimLauncherAuth` to do the connect.
+
+### Internal launchers untouched
+
+`launcher.internal-vm.ps1` / `.internal-azure.ps1` use the AutomateIT bootstrap which already handles cert auth from the customer KV. Left alone -- internal customers keep using the AutomateIT high-priv SPN. Only community launchers + the new solution-wide config get the SI-style auth model.
+
+### tools/pim-activator/manifest.json -- pinned extension identity (preview)
+
+Added a `key` field to `manifest.json`. This makes the Edge extension ID deterministic on every install of every customer on every computer. The ID resolved from the key is `hkdglhgahonnjbfindmgplekkcngmcck`. See v2.4.5 for the turnkey installer that consumes it.
+
+### Engine call-sites + parse-check
+
+All 29 touched PS files parse-clean on Windows PowerShell 5.1. The engine `Connect-AzAccount` / `Connect-MgGraph` paths now branch on `$global:SpnAuthMode` (set by `Connect-PimLauncherAuth`) for the right auth flavour.
 
 ---
 
