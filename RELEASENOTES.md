@@ -1,9 +1,10 @@
 # Release notes for PIM4EntraPS
 
-## v2.3.0
+## v2.3.1
 
 Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monorepo:
 
+- release: PIM4EntraPS v2.3.1 - docs: README rewrite with full v2.x feature catalog + dedicated PIM Manager GUI section (85992b8f)
 - release: PIM4EntraPS v2.3.0 - drop .locked.csv baselines, custom-only from day one + enhanced .custom.sample.csv templates (e568dd6e)
 - release: PIM4EntraPS v2.2.1 - hotfix: scrub maintainer-tenant data from shipped .locked.csv baselines + sample-file cleanup (b666d1eb)
 - release: PIM4EntraPS v2.2.0 - Theme 1 (Manager UX polish) + Theme 2 first slice (TAP flow) (a659adf6)
@@ -38,6 +39,24 @@ Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monor
 # Release notes -- PIM4EntraPS
 
 > **Curated changelog.** The publish workflow auto-prepends recent monorepo commits as a raw activity log; this file is the human-friendly narrative on top.
+
+---
+
+## v2.3.1 -- README rewrite: full v2.x feature catalog + dedicated PIM Manager (GUI) section
+
+Pure documentation release; no code changes. README brought up to date with everything that landed between v2.0.0 and v2.3.0:
+
+- **Removed all `.locked.csv` references** (obsolete since v2.3.0 dropped them).
+- **New "PIM Manager (GUI)" section** — full per-tab breakdown (Graph / Grid / New & clone / Save / Validate), `-NoLaunch` / `-StaticHtml` / `-RefreshTenantLists` mode invocations, per-role permission drill-down explanation, full server-mode endpoint list, the 16-rule validator catalog.
+- **New "Notifications & scheduled TAP" section** — `Send-PimAdminTap` (SMTP / Teams / Slack) + `Resolve-PimTapStartDateTime` (relative `+2d 8:00` / `tomorrow 9am` / `next monday 10:00` etc.) with the full supported-input list.
+- **New "Naming conventions" section** — how `PIM4EntraPS.NamingConventions.custom.ps1` feeds engine perf (Get-PimAdminsFiltered server-side `$filter`), Manager wizard name suggestions, and validator name-drift rules.
+- **New "MSP variant" section** — `config-msp/`, `Sync-PimMspConfig` git source, the CISO opt-in via customer Key Vault for centrally-issued disable/revoke (`Test-PimAccountStatusChangeAuthorized`).
+- **Updated Prerequisites** — added Graph perms required by v2.2.0+ features (UserAuthenticationMethod.ReadWrite.All for TAP, Directory.Read.All for Manager tenant cache).
+- **Updated Repo layout** — `tools/pim-manager/{_validator.ps1, _tenantSync.ps1, cache/}`, `setup/Install-PimEngineAppRegistration.ps1`, `docs/ROADMAP.md` + `docs/MANAGER-UX-AUDIT.md`.
+- **Mentioned the 500-role-assignable-groups Entra tenant cap** in the "Why nest" rationale — heavy permission/role-group reuse is what keeps you under the ceiling.
+- **Setup snippet** now uses a one-liner loop that bootstraps every `*.custom.sample.*` into `*.custom.*` at once instead of itemising files.
+
+402 lines total (was 277).
 
 ---
 
