@@ -13,7 +13,11 @@
   /* Popup sizes to content (compact on sign-in screen, expands when there's
      a group list to render). The lists themselves get an explicit max-height
      + overflow so they scroll INSIDE the popup -- footer stays visible. */
-  #list, #myaccess-list { max-height:380px; overflow-y:auto; }
+  #list, #myaccess-list { max-height:300px; overflow-y:auto; }
+  /* Hard cap on the outer popup -- prevents the whole body from scrolling
+     when the inner list + footer + attribution row would otherwise push past
+     Chromium's popup viewport. Only the list area scrolls. */
+  html, body { max-height:600px; overflow-y:hidden; }
   /* Belt-and-braces: every element confined to its parent's width.
      Prevents long unbreakable tokens (scope GUIDs, role names) from making
      rows wider than the popup and triggering horizontal scrollbar. */
@@ -65,7 +69,7 @@
   #status-bar { padding:8px 12px; color:#57606a; font-size:11px; }
   #status-bar.err { color:#cf222e; font-weight:500; }
   .empty { padding:20px 12px; color:#57606a; text-align:center; font-style:italic; font-size:12px; }
-  #list { max-height:340px; overflow:auto; }
+  /* (single max-height rule for #list lives above with #myaccess-list) */
 
   /* Tab strip */
   #tabs { display:flex; gap:4px; padding:0 12px; border-bottom:1px solid #d0d7de; background:#f6f8fa; }
@@ -75,6 +79,32 @@
   .tab-btn .badge { background:#eaeef2; color:#57606a; border:1px solid #d0d7de; border-radius:10px; padding:0 6px; font-size:10.5px; min-width:14px; text-align:center; }
   .tab-btn.active .badge { background:#0969da; color:#fff; border-color:#0969da; }
   [role=tabpanel][hidden] { display:none; }
+
+  /* Reusable progress bar -- used on Activate (sign-in load + bulk role fetch)
+     and My Access (role assignment fetch). Taller than the old 5px stripe so
+     users actually notice it; min-height ensures it occupies vertical space
+     immediately. */
+  .progress-bar { padding:8px 12px; background:#f6f8fa; border-bottom:1px solid #d0d7de; }
+  .progress-bar .progress-row { display:flex; justify-content:space-between; font-size:11.5px; color:#0969da; font-weight:600; }
+  .progress-bar .progress-track { background:#d0d7de; height:8px; border-radius:4px; overflow:hidden; margin-top:5px; }
+  .progress-bar .progress-fill { background:#0969da; height:100%; width:0%; transition:width 0.25s ease-out; border-radius:4px; }
+  /* Indeterminate mode -- used when total is unknown (initial page load,
+     paginated Graph fetches). Animated stripe scrolls across the track. */
+  .progress-bar .progress-fill.indeterminate {
+    width:100% !important;
+    background-image: linear-gradient(90deg,
+      rgba(255,255,255,0) 0%,
+      rgba(255,255,255,0.55) 50%,
+      rgba(255,255,255,0) 100%),
+      #0969da;
+    background-size: 50% 100%, 100% 100%;
+    background-repeat: no-repeat;
+    animation: indeterminate-slide 1.2s linear infinite;
+  }
+  @keyframes indeterminate-slide {
+    0%   { background-position: -50% 0, 0 0; }
+    100% { background-position: 150% 0, 0 0; }
+  }
 
   /* My Access tab */
   #myaccess-toolbar { display:flex; gap:6px; padding:6px 12px; border-bottom:1px solid #eaeef2; align-items:center; background:#ffffff; }
@@ -120,24 +150,39 @@
 
   <div id="status-bar">Loading...</div>
 
-  <!-- Bulk-fetch progress bar (Entra transitive + direct chunks + Azure ARG).
-       Hidden by default; shown while bulk fetch is running, hidden when 100%. -->
-  <div id="bulk-progress" style="display:none;padding:6px 12px;background:#f6f8fa;border-bottom:1px solid #d0d7de;">
-    <div style="display:flex;justify-content:space-between;font-size:11px;color:#57606a;">
-      <span id="bulk-progress-label">Fetching role assignments... 0%</span>
-      <span id="bulk-progress-count">0 / 0</span>
+  <!-- Boot-phase progress (indeterminate -- no totals during paginated
+       eligibility + name hydration). Visible from sign-in completion until
+       the group list renders. Then bulk-fetch bar in the footer takes over. -->
+  <div id="activate-boot-progress" class="progress-bar" style="display:none;">
+    <div class="progress-row">
+      <span id="activate-boot-progress-label">Loading your PIM delegations...</span>
+      <span></span>
     </div>
-    <div style="background:#d0d7de;height:5px;border-radius:3px;overflow:hidden;margin-top:4px;">
-      <div id="bulk-progress-bar" style="background:#0969da;height:100%;width:0%;transition:width 0.2s;"></div>
+    <div class="progress-track">
+      <div id="activate-boot-progress-bar" class="progress-fill indeterminate"></div>
     </div>
   </div>
 
   <div id="list"></div>
 
   <footer style="display:none" id="footer">
+    <!-- Background role-fetch progress: group list renders instantly, then
+         this bar appears in the footer while roles + AU names stream in.
+         User explicitly asked for it here (not above the list) so the
+         pulldown content stays stable while progress updates. -->
+    <div id="bulk-progress" class="progress-bar" style="display:none;margin:-8px -12px 8px -12px;border-top:1px solid #d0d7de;">
+      <div class="progress-row">
+        <span id="bulk-progress-label">Fetching role assignments... 0%</span>
+        <span id="bulk-progress-count">0 / 0</span>
+      </div>
+      <div class="progress-track">
+        <div id="bulk-progress-bar" class="progress-fill"></div>
+      </div>
+    </div>
     <div class="controls">
       <label for="justification">Justification</label>
-      <textarea id="justification" rows="1"></textarea>
+      <input id="justification" type="text" list="justification-history" autocomplete="off" placeholder="e.g. Daily ops">
+      <datalist id="justification-history"></datalist>
       <label for="duration">Duration (hours)</label>
       <input id="duration" type="number" min="0.5" max="24" step="0.5">
     </div>
@@ -161,6 +206,19 @@
     <button id="myaccess-refresh">Refresh</button>
   </div>
   <div id="myaccess-status">Loading...</div>
+
+  <!-- My Access role-fetch progress: rows render instantly with names, then
+       this bar shows while Entra + Azure RBAC roles stream in per group. -->
+  <div id="myaccess-progress" class="progress-bar" style="display:none;">
+    <div class="progress-row">
+      <span id="myaccess-progress-label">Fetching role assignments... 0%</span>
+      <span id="myaccess-progress-count">0 / 0</span>
+    </div>
+    <div class="progress-track">
+      <div id="myaccess-progress-bar" class="progress-fill"></div>
+    </div>
+  </div>
+
   <div id="myaccess-list"></div>
 </div>
 

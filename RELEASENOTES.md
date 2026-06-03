@@ -1,9 +1,10 @@
 # Release notes for PIM4EntraPS
 
-## v2.4.37
+## v2.4.43
 
 Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monorepo:
 
+- release: PIM4EntraPS v2.4.43 - PIM Activator extension graduates to v1.0.0 (ec7967b0)
 - release: PIM4EntraPS v2.4.37 - popup actually shrinks on sign-in (block layout instead of flex:1 panel) + version badge populated at popup-load (visible pre-sign-in) (c4d7d1d4)
 - release: PIM4EntraPS v2.4.36 - popup shrinks to content on sign-in (min-height:180px max-height:600px instead of fixed 600px) (608732ac)
 - release: PIM4EntraPS v2.4.35 - role preview ACTUALLY works (per-group eq queries in parallel, transitive+direct fallback, progress bar) (95665fd5)
@@ -33,13 +34,35 @@ Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monor
 - release: PIM4EntraPS v2.4.14 - popup light theme (white+blue) + simplified not-configured text + ext v0.3.0->0.4.0 + correct Intune deployment guidance (b024bd79)
 - release: PIM4EntraPS v2.4.13 - CRX bundles placeholder config.js (no maintainer-tenant leak into customer installs) + ext ver 0.2.0 -> 0.3.0 (b3d55092)
 - release: PIM4EntraPS v2.4.12 - Intune-first deployment (-PrintIntuneConfig mode + HKCU-default -PushPolicyScope) (d65821df)
-- release: PIM4EntraPS v2.4.11 - Activator popup: My Access tab + token self-heal + Auto-fix button + hide-already-active (db8893b1)
 
 ---
 
 # Release notes -- PIM4EntraPS
 
 > **Curated changelog.** The publish workflow auto-prepends recent monorepo commits as a raw activity log; this file is the human-friendly narrative on top.
+
+---
+
+## v2.4.43 -- PIM Activator extension graduates to **v1.0.0** (production)
+
+Milestone release: the browser extension leaves the `0.4.x` beta numbering and ships as **v1.0.0**. Same MV3 CRX, same code that's been iterated on in production for weeks -- just a version statement that the feature set is stable enough to recommend to customers without "dev preview" caveats.
+
+### What you actually get on v1.0.0
+
+End-to-end PIM-for-Groups self-service in two tabs inside Edge or Chrome:
+
+- **Activate tab** -- one-click bulk activation of every eligible PIM-for-Groups membership. Justification + duration entered once, applied to every ticked row. New: dropdown of the last 10 reasons used (datalist autocomplete), so a returning user can pick "Daily ops" or "Incident response" instead of retyping.
+- **My Access tab** -- every currently-active membership in one place, with per-row Deactivate AND multi-select "Deactivate selected (N)" for surrendering early. Two-click confirm pattern on both buttons (Chromium silently suppresses `window.confirm()` in MV3 popups, so the previous native-dialog approach looked broken).
+- **Role preview** -- each eligible group row shows the Entra roles and Azure RBAC roles you'll inherit when you activate, including roles granted via nested group membership. Administrative Unit scopes resolved to friendly names (`in AU 'Tier0-Devices'`) instead of raw GUIDs.
+- **Progress bars** -- indeterminate striped bar during the post-sign-in load (no totals yet), then a determinate 0-100% bar in the Activate footer + My Access toolbar while per-group roles stream in. Separate counters for the Entra + Azure tasks so a race between the two can never strand the bar at 50/51.
+- **Multi-tenant aware** -- tenant ID surfaced in the popup footer so admins managing multiple Entra tenants see at a glance which one they're hitting.
+
+### Manifest + tooling
+
+- Extension manifest pinned to **1.0.0** (no more auto-bump landing on `0.4.x`)
+- `Update-PimActivatorDev.ps1` gains `-Version <ver>` to pin an exact manifest version for milestone releases; default behaviour (auto-bump patch) unchanged
+
+Manifest 0.4.34 -> **1.0.0**.
 
 ---
 
