@@ -12,18 +12,25 @@
   window.PIM_TENANT_LISTS_BOOT = __PIM_TENANT_LISTS__;
 </script>
 <style>
-  html, body { margin:0; padding:0; height:100%; font-family: -apple-system, "Segoe UI", Roboto, sans-serif; background:#0e1116; color:#e6edf3; }
-  #app { display:flex; flex-direction:column; height:100vh; }
+  html, body { margin:0; padding:0; height:100%; font-family: -apple-system, "Segoe UI", Roboto, sans-serif; background:#ffffff; color:#1a1a1a; }
+  #app { display:flex; flex-direction:column; height:100vh; border:2px solid #0969da; box-sizing:border-box; }
+
+  /* Brand banner -- matches the PIM Activator extension's branded header
+     (blue background, white text, uppercase, large). Sits above the tab bar
+     so the product identity is obvious from the moment the page opens. */
+  #brand { background:#0969da; color:#ffffff; padding:10px 16px; display:flex; align-items:center; gap:12px; flex:0 0 auto; border-bottom:1px solid #0969da; }
+  #brand h1 { margin:0; font-size:18px; font-weight:700; letter-spacing:0.6px; text-transform:uppercase; color:#ffffff; flex:1; }
+  #brand .brand-sub { font-size:11px; opacity:0.85; color:#ffffff; }
 
   /* Tab bar */
-  #tabs { display:flex; gap:0; background:#0d1117; border-bottom:1px solid #30363d; flex:0 0 auto; }
-  .tab { padding:9px 18px; cursor:pointer; font-size:12.5px; color:#7d8590; border-right:1px solid #21262d; user-select:none; position:relative; }
-  .tab:hover { background:#161b22; color:#e6edf3; }
-  .tab.active { background:#161b22; color:#e6edf3; border-bottom:2px solid #2f81f7; margin-bottom:-1px; }
-  .tab .badge { display:inline-block; min-width:14px; padding:0 5px; height:14px; line-height:14px; text-align:center; border-radius:7px; background:#bf8700; color:#fff; font-size:9px; margin-left:6px; font-weight:600; }
-  #tabRight { margin-left:auto; padding:8px 14px; font-size:11px; color:#7d8590; align-self:center; }
-  #tabRight b { color:#e6edf3; font-weight:500; }
-  #tabRight .modeStatic { color:#bf8700; }
+  #tabs { display:flex; gap:0; background:#f6f8fa; border-bottom:1px solid #d0d7de; flex:0 0 auto; }
+  .tab { padding:9px 18px; cursor:pointer; font-size:12.5px; color:#57606a; border-right:1px solid #eaeef2; user-select:none; position:relative; }
+  .tab:hover { background:#f6f8fa; color:#1a1a1a; }
+  .tab.active { background:#f6f8fa; color:#0969da; border-bottom:2px solid #0969da; margin-bottom:-1px; font-weight:600; }
+  .tab .badge { display:inline-block; min-width:14px; padding:0 5px; height:14px; line-height:14px; text-align:center; border-radius:7px; background:#9a6700; color:#fff; font-size:9px; margin-left:6px; font-weight:600; }
+  #tabRight { margin-left:auto; padding:8px 14px; font-size:11px; color:#57606a; align-self:center; }
+  #tabRight b { color:#1a1a1a; font-weight:500; }
+  #tabRight .modeStatic { color:#9a6700; }
 
   /* Tab panels */
   .tab-panel { flex:1 1 auto; overflow:hidden; display:none; }
@@ -32,98 +39,98 @@
   /* Graph tab (same layout as v0.1) */
   #graphTab { display:none; }
   #graphTab.active { display:grid; grid-template-columns: 240px 1fr 320px; }
-  .panel { background:#161b22; border-right:1px solid #30363d; overflow:auto; padding:12px 14px; font-size:12.5px; }
-  .panel + .panel { border-right:none; border-left:1px solid #30363d; }
-  h1 { font-size:14px; margin:0 0 10px 0; letter-spacing:.5px; text-transform:uppercase; color:#7d8590; }
-  h2 { font-size:11px; margin:16px 0 6px 0; letter-spacing:.5px; text-transform:uppercase; color:#7d8590; font-weight:600; }
-  .meta { color:#7d8590; font-size:11px; }
-  .meta b { color:#e6edf3; font-weight:500; }
+  .panel { background:#f6f8fa; border-right:1px solid #d0d7de; overflow:auto; padding:12px 14px; font-size:12.5px; }
+  .panel + .panel { border-right:none; border-left:1px solid #d0d7de; }
+  h1 { font-size:14px; margin:0 0 10px 0; letter-spacing:.5px; text-transform:uppercase; color:#57606a; }
+  h2 { font-size:11px; margin:16px 0 6px 0; letter-spacing:.5px; text-transform:uppercase; color:#57606a; font-weight:600; }
+  .meta { color:#57606a; font-size:11px; }
+  .meta b { color:#1a1a1a; font-weight:500; }
   .legend { display:flex; flex-direction:column; gap:4px; margin:6px 0 0 0; }
   .legend label { display:flex; align-items:center; gap:8px; cursor:pointer; user-select:none; }
-  .legend input[type=checkbox] { accent-color:#2f81f7; }
-  .swatch { width:14px; height:14px; border-radius:3px; border:1px solid #30363d; }
+  .legend input[type=checkbox] { accent-color:#0969da; }
+  .swatch { width:14px; height:14px; border-radius:3px; border:1px solid #d0d7de; }
   .kpis { display:grid; grid-template-columns:1fr 1fr; gap:6px; margin:8px 0; }
-  .kpi { background:#0d1117; border:1px solid #30363d; border-radius:6px; padding:6px 8px; }
+  .kpi { background:#f6f8fa; border:1px solid #d0d7de; border-radius:6px; padding:6px 8px; }
   .kpi .v { font-size:18px; font-weight:600; }
-  .kpi .k { font-size:10px; color:#7d8590; text-transform:uppercase; letter-spacing:.5px; }
-  #search { width:100%; box-sizing:border-box; padding:6px 8px; border-radius:6px; border:1px solid #30363d; background:#0d1117; color:#e6edf3; font-size:12.5px; }
-  #cy { background: radial-gradient(ellipse at center, #15191f 0%, #0e1116 100%); }
+  .kpi .k { font-size:10px; color:#57606a; text-transform:uppercase; letter-spacing:.5px; }
+  #search { width:100%; box-sizing:border-box; padding:6px 8px; border-radius:6px; border:1px solid #d0d7de; background:#f6f8fa; color:#1a1a1a; font-size:12.5px; }
+  #cy { background: radial-gradient(ellipse at center, #f6f8fa 0%, #ffffff 100%); }
   .detail-kv { display:grid; grid-template-columns:auto 1fr; gap:6px 10px; font-size:12px; }
-  .detail-kv .k { color:#7d8590; }
-  .detail-kv .v { color:#e6edf3; word-break:break-word; }
-  .neighbor { padding:5px 8px; border-radius:4px; cursor:pointer; margin:2px 0; background:#0d1117; border:1px solid #21262d; font-size:11.5px; }
-  .neighbor:hover { background:#1f242c; }
-  .neighbor .edge-type { float:right; font-size:10px; color:#7d8590; }
+  .detail-kv .k { color:#57606a; }
+  .detail-kv .v { color:#1a1a1a; word-break:break-word; }
+  .neighbor { padding:5px 8px; border-radius:4px; cursor:pointer; margin:2px 0; background:#f6f8fa; border:1px solid #eaeef2; font-size:11.5px; }
+  .neighbor:hover { background:#eaeef2; }
+  .neighbor .edge-type { float:right; font-size:10px; color:#57606a; }
   .pill { display:inline-block; padding:1px 6px; border-radius:10px; font-size:10px; font-weight:600; margin-right:4px; }
-  .pill.E { background:#1f6feb; color:#fff; }
-  .pill.A { background:#bf8700; color:#fff; }
-  .empty { color:#7d8590; font-style:italic; }
+  .pill.E { background:#0969da; color:#fff; }
+  .pill.A { background:#9a6700; color:#fff; }
+  .empty { color:#57606a; font-style:italic; }
   /* Per-role permission drill-down on the Graph detail panel (Roadmap #2 / #25).
      Triggered when a node of kind 'entra-role' or 'au-role' is selected; pulls
      from TENANT_LISTS.entraRoles cache. */
-  .role-perms { margin-top:12px; border:1px solid #21262d; border-radius:6px; background:#0d1117; }
-  .role-perms > summary { padding:6px 10px; cursor:pointer; font-size:12px; color:#e6edf3; user-select:none; list-style:none; }
+  .role-perms { margin-top:12px; border:1px solid #eaeef2; border-radius:6px; background:#f6f8fa; }
+  .role-perms > summary { padding:6px 10px; cursor:pointer; font-size:12px; color:#1a1a1a; user-select:none; list-style:none; }
   .role-perms > summary::-webkit-details-marker { display:none; }
-  .role-perms > summary::before { content:'\25B6'; color:#7d8590; display:inline-block; width:14px; font-size:9px; transition:transform .12s ease; }
+  .role-perms > summary::before { content:'\25B6'; color:#57606a; display:inline-block; width:14px; font-size:9px; transition:transform .12s ease; }
   .role-perms[open] > summary::before { transform:rotate(90deg); }
-  .role-perms > summary:hover { background:#1f242c; }
+  .role-perms > summary:hover { background:#eaeef2; }
   .role-perms .rp-body { padding:6px 10px 10px 10px; }
-  .role-perms .rp-desc { color:#7d8590; font-style:italic; font-size:11.5px; margin:2px 0 8px 0; }
-  .role-perms .rp-group-hdr { color:#7d8590; font-size:11px; text-transform:uppercase; letter-spacing:.4px; margin:8px 0 3px 0; font-weight:600; }
-  .role-perms ul.actions { font-family:Consolas,monospace; font-size:11px; padding-left:16px; color:#a6acb5; margin:2px 0; list-style:none; }
+  .role-perms .rp-desc { color:#57606a; font-style:italic; font-size:11.5px; margin:2px 0 8px 0; }
+  .role-perms .rp-group-hdr { color:#57606a; font-size:11px; text-transform:uppercase; letter-spacing:.4px; margin:8px 0 3px 0; font-weight:600; }
+  .role-perms ul.actions { font-family:Consolas,monospace; font-size:11px; padding-left:16px; color:#6e7681; margin:2px 0; list-style:none; }
   .role-perms ul.actions li { padding:1px 0; word-break:break-all; }
-  .role-perms ul.actions li.allow::before  { content:'+ '; color:#7ee787; }
-  .role-perms ul.actions li.deny::before   { content:'- '; color:#ffa198; }
-  .role-perms ul.actions li.allow.data::before { content:'(D) + '; color:#7ee787; }
-  .role-perms ul.actions li.deny.data::before  { content:'(D) - '; color:#ffa198; }
+  .role-perms ul.actions li.allow::before  { content:'+ '; color:#1a7f37; }
+  .role-perms ul.actions li.deny::before   { content:'- '; color:#cf222e; }
+  .role-perms ul.actions li.allow.data::before { content:'(D) + '; color:#1a7f37; }
+  .role-perms ul.actions li.deny.data::before  { content:'(D) - '; color:#cf222e; }
   .role-perms .rp-refresh { margin-top:6px; }
-  button { background:#21262d; color:#e6edf3; border:1px solid #30363d; padding:5px 10px; border-radius:6px; cursor:pointer; font-size:12px; }
-  button:hover { background:#30363d; }
+  button { background:#eaeef2; color:#1a1a1a; border:1px solid #d0d7de; padding:5px 10px; border-radius:6px; cursor:pointer; font-size:12px; }
+  button:hover { background:#d0d7de; }
   button:disabled { opacity:0.4; cursor:not-allowed; }
-  button.danger { background:#3b1f1f; border-color:#f85149; color:#ffa198; }
-  button.danger:hover { background:#5a2a2a; }
-  button.primary { background:#1f6feb; border-color:#1f6feb; color:#fff; }
-  button.primary:hover { background:#388bfd; }
+  button.danger { background:#ffebe9; border-color:#cf222e; color:#cf222e; }
+  button.danger:hover { background:#ffcecb; }
+  button.primary { background:#0969da; border-color:#0969da; color:#fff; }
+  button.primary:hover { background:#0860c7; }
   .toolbar { display:flex; gap:6px; margin:6px 0; flex-wrap:wrap; }
 
   /* Grid tab */
   #gridTab { display:none; }
   #gridTab.active { display:grid; grid-template-columns: 280px 1fr; }
-  #gridList { background:#161b22; border-right:1px solid #30363d; overflow:auto; padding:10px 0; font-size:12.5px; }
-  #gridList .group-hdr { padding:6px 14px; font-size:10px; text-transform:uppercase; color:#7d8590; letter-spacing:.5px; font-weight:600; }
+  #gridList { background:#f6f8fa; border-right:1px solid #d0d7de; overflow:auto; padding:10px 0; font-size:12.5px; }
+  #gridList .group-hdr { padding:6px 14px; font-size:10px; text-transform:uppercase; color:#57606a; letter-spacing:.5px; font-weight:600; }
   #gridList .item { padding:6px 14px; cursor:pointer; border-left:2px solid transparent; }
-  #gridList .item:hover { background:#1f242c; }
-  #gridList .item.active { background:#1f6feb22; border-left-color:#2f81f7; color:#fff; }
+  #gridList .item:hover { background:#eaeef2; }
+  #gridList .item.active { background:#ddf4ff; border-left-color:#0969da; color:#0969da; }
   #gridList .item .badge { float:right; }
-  #gridMain { overflow:auto; padding:14px 18px; background:#0d1117; }
+  #gridMain { overflow:auto; padding:14px 18px; background:#f6f8fa; }
   #gridMain .grid-header { display:flex; justify-content:space-between; align-items:center; margin-bottom:10px; gap:10px; }
   #gridMain .grid-title { font-size:14px; font-weight:600; }
-  #gridMain .grid-sub { color:#7d8590; font-size:11px; }
+  #gridMain .grid-sub { color:#57606a; font-size:11px; }
   table.grid { border-collapse:collapse; width:100%; font-size:11.5px; font-family:Consolas,monospace; }
-  table.grid th { background:#161b22; color:#7d8590; text-align:left; padding:5px 8px; border-bottom:1px solid #30363d; position:sticky; top:0; z-index:1; font-weight:500; }
-  table.grid td { padding:2px 6px; border-bottom:1px solid #21262d; color:#e6edf3; vertical-align:top; }
+  table.grid th { background:#f6f8fa; color:#57606a; text-align:left; padding:5px 8px; border-bottom:1px solid #d0d7de; position:sticky; top:0; z-index:1; font-weight:500; }
+  table.grid td { padding:2px 6px; border-bottom:1px solid #eaeef2; color:#1a1a1a; vertical-align:top; }
   table.grid td[contenteditable="true"] { cursor:text; outline:none; }
-  table.grid td[contenteditable="true"]:focus { background:#1f6feb22; box-shadow:inset 0 0 0 1px #2f81f7; }
-  table.grid tr.row-deleted td { text-decoration:line-through; color:#7d8590; background:#3b1f1f33; }
-  table.grid tr.row-added { background:#1f6f3f22; }
-  table.grid tr.row-modified { background:#bf870022; }
+  table.grid td[contenteditable="true"]:focus { background:#ddf4ff; box-shadow:inset 0 0 0 1px #0969da; }
+  table.grid tr.row-deleted td { text-decoration:line-through; color:#57606a; background:#ffebe9; }
+  table.grid tr.row-added { background:#dafbe1; }
+  table.grid tr.row-modified { background:#fff8c5; }
   /* Rows referenced by a PIM-FK-001 (orphan: GroupTag not in any PIM-Definitions-* CSV). */
-  table.grid tr.row-orphan-error { outline:2px solid #f85149; outline-offset:-2px; background:#3b1f1f55; }
-  table.grid tr.row-orphan-error td:first-child::before { content:'\26A0  '; color:#f85149; font-weight:700; }
+  table.grid tr.row-orphan-error { outline:2px solid #cf222e; outline-offset:-2px; background:#ffebe9; }
+  table.grid tr.row-orphan-error td:first-child::before { content:'\26A0  '; color:#cf222e; font-weight:700; }
   /* FK-001 quick-fix buttons embedded in the Validate tab. */
   .v-fk-actions { display:flex; gap:6px; margin-top:6px; }
-  .v-fk-actions button { padding:3px 9px; font-size:11px; border:1px solid #30363d; background:#21262d; color:#e6edf3; border-radius:5px; cursor:pointer; }
-  .v-fk-actions button.danger { color:#ffa198; border-color:#f85149; }
-  .v-fk-actions button.danger:hover { background:#3b1f1f; }
-  .v-fk-actions button.primary { color:#fff; background:#1f6feb; border-color:#1f6feb; }
-  .v-fk-actions button.primary:hover { background:#388bfd; }
+  .v-fk-actions button { padding:3px 9px; font-size:11px; border:1px solid #d0d7de; background:#eaeef2; color:#1a1a1a; border-radius:5px; cursor:pointer; }
+  .v-fk-actions button.danger { color:#cf222e; border-color:#cf222e; }
+  .v-fk-actions button.danger:hover { background:#ffebe9; }
+  .v-fk-actions button.primary { color:#fff; background:#0969da; border-color:#0969da; }
+  .v-fk-actions button.primary:hover { background:#0860c7; }
   /* Re-add definition modal -- compact 4-field form. */
   #fkAddDlg .field { margin:8px 0; }
-  #fkAddDlg label { display:block; font-size:11px; color:#7d8590; margin-bottom:3px; }
-  #fkAddDlg input, #fkAddDlg select { width:100%; box-sizing:border-box; padding:6px 8px; border-radius:5px; border:1px solid #30363d; background:#0d1117; color:#e6edf3; font-size:12.5px; font-family:inherit; }
+  #fkAddDlg label { display:block; font-size:11px; color:#57606a; margin-bottom:3px; }
+  #fkAddDlg input, #fkAddDlg select { width:100%; box-sizing:border-box; padding:6px 8px; border-radius:5px; border:1px solid #d0d7de; background:#f6f8fa; color:#1a1a1a; font-size:12.5px; font-family:inherit; }
   table.grid td.row-actions { text-align:right; padding:2px 4px; width:34px; }
-  table.grid td.row-actions button { padding:1px 6px; font-size:11px; background:transparent; border:1px solid transparent; color:#7d8590; }
-  table.grid td.row-actions button:hover { color:#f85149; border-color:#f85149; }
+  table.grid td.row-actions button { padding:1px 6px; font-size:11px; background:transparent; border:1px solid transparent; color:#57606a; }
+  table.grid td.row-actions button:hover { color:#cf222e; border-color:#cf222e; }
   /* Grid bulk-select column (Roadmap #6 + #7). Tight checkbox column,
      reused across all 14 CSVs. */
   table.grid th.grid-sel-col, table.grid td.grid-sel-col { width:24px; text-align:center; padding:2px 4px; }
@@ -132,286 +139,286 @@
   /* Sticky action bar that appears above the grid table when one or
      more rows are selected. Shared between Disable/Enable (Admins CSV)
      and Multi-delete (any CSV) actions. */
-  .grid-action-bar { display:none; position:sticky; top:0; z-index:2; background:#161b22; border-bottom:1px solid #30363d; padding:8px 14px; gap:12px; align-items:center; flex-wrap:wrap; margin-bottom:8px; border-radius:4px; }
+  .grid-action-bar { display:none; position:sticky; top:0; z-index:2; background:#f6f8fa; border-bottom:1px solid #d0d7de; padding:8px 14px; gap:12px; align-items:center; flex-wrap:wrap; margin-bottom:8px; border-radius:4px; }
   .grid-action-bar.active { display:flex; }
-  .grid-action-bar .gab-count { color:#e6edf3; font-size:12px; font-weight:600; }
-  .grid-action-bar .gab-label { color:#7d8590; font-size:12px; }
-  .grid-action-bar select { background:#0d1117; color:#e6edf3; border:1px solid #30363d; border-radius:4px; padding:4px 8px; font-size:12px; }
-  .grid-action-bar button { padding:4px 10px; font-size:12px; border:1px solid #30363d; background:#21262d; color:#e6edf3; border-radius:5px; cursor:pointer; }
-  .grid-action-bar button:hover { border-color:#1f6feb; }
-  .grid-action-bar button.gab-danger { color:#fff; background:#da3633; border-color:#da3633; }
-  .grid-action-bar button.gab-danger:hover { background:#f85149; border-color:#f85149; }
+  .grid-action-bar .gab-count { color:#1a1a1a; font-size:12px; font-weight:600; }
+  .grid-action-bar .gab-label { color:#57606a; font-size:12px; }
+  .grid-action-bar select { background:#f6f8fa; color:#1a1a1a; border:1px solid #d0d7de; border-radius:4px; padding:4px 8px; font-size:12px; }
+  .grid-action-bar button { padding:4px 10px; font-size:12px; border:1px solid #d0d7de; background:#eaeef2; color:#1a1a1a; border-radius:5px; cursor:pointer; }
+  .grid-action-bar button:hover { border-color:#0969da; }
+  .grid-action-bar button.gab-danger { color:#fff; background:#cf222e; border-color:#cf222e; }
+  .grid-action-bar button.gab-danger:hover { background:#a40e26; border-color:#a40e26; }
   .grid-action-bar .gab-spacer { flex:1; }
 
   /* Save tab */
   #saveTab { display:none; }
-  #saveTab.active { display:flex; flex-direction:column; padding:18px 22px; gap:14px; overflow:auto; background:#0d1117; }
-  .save-card { background:#161b22; border:1px solid #30363d; border-radius:6px; padding:12px 14px; }
+  #saveTab.active { display:flex; flex-direction:column; padding:18px 22px; gap:14px; overflow:auto; background:#f6f8fa; }
+  .save-card { background:#f6f8fa; border:1px solid #d0d7de; border-radius:6px; padding:12px 14px; }
   .save-card h3 { margin:0 0 6px 0; font-size:13px; }
-  .save-card .counts { font-size:12px; color:#7d8590; margin-bottom:6px; }
-  .save-card .counts .ca { color:#3fb950; margin-right:10px; }
-  .save-card .counts .cr { color:#f85149; margin-right:10px; }
-  .save-card .counts .cm { color:#e3b341; margin-right:10px; }
+  .save-card .counts { font-size:12px; color:#57606a; margin-bottom:6px; }
+  .save-card .counts .ca { color:#1a7f37; margin-right:10px; }
+  .save-card .counts .cr { color:#cf222e; margin-right:10px; }
+  .save-card .counts .cm { color:#9a6700; margin-right:10px; }
   .save-card details { margin-top:6px; }
-  .save-card summary { cursor:pointer; color:#7d8590; font-size:11px; padding:3px 0; }
+  .save-card summary { cursor:pointer; color:#57606a; font-size:11px; padding:3px 0; }
   .save-card .diff-row { font-family:Consolas,monospace; font-size:11px; padding:4px 6px; margin:2px 0; border-radius:4px; }
-  .save-card .diff-row.add { background:#1f6f3f22; color:#7ee787; }
-  .save-card .diff-row.rem { background:#3b1f1f22; color:#ffa198; }
-  .save-card .diff-row.mod { background:#bf870022; color:#ffdf5d; }
+  .save-card .diff-row.add { background:#dafbe1; color:#1a7f37; }
+  .save-card .diff-row.rem { background:#ffebe9; color:#cf222e; }
+  .save-card .diff-row.mod { background:#fff8c5; color:#9a6700; }
   .save-card .diff-col { display:inline-block; margin-right:8px; }
-  .save-card .diff-col b { color:#e6edf3; }
+  .save-card .diff-col b { color:#1a1a1a; }
   .save-toolbar { display:flex; gap:10px; align-items:center; }
   .save-toolbar .spacer { flex:1; }
-  #saveStatus { color:#7d8590; font-size:12px; }
-  #saveStatus.err { color:#ffa198; }
-  #saveStatus.ok { color:#7ee787; }
+  #saveStatus { color:#57606a; font-size:12px; }
+  #saveStatus.err { color:#cf222e; }
+  #saveStatus.ok { color:#1a7f37; }
 
   /* Save-tab validation banner */
   .save-val-banner { padding:10px 14px; border-radius:6px; margin-bottom:8px; font-size:12.5px; display:flex; align-items:center; gap:10px; }
-  .save-val-banner.err  { background:#3b1f1f22; border:1px solid #5a2a2a; color:#ffa198; }
-  .save-val-banner.warn { background:#bf870022; border:1px solid #5a4b1d; color:#ffdf5d; }
+  .save-val-banner.err  { background:#ffebe9; border:1px solid #ffcecb; color:#cf222e; }
+  .save-val-banner.warn { background:#fff8c5; border:1px solid #d4a72c; color:#9a6700; }
   .save-val-banner a { color:inherit; text-decoration:underline; cursor:pointer; }
   .save-val-banner .spacer { flex:1; }
 
   /* Validate tab */
   #validateTab { display:none; }
-  #validateTab.active { display:flex; flex-direction:column; background:#0d1117; }
-  #valTopBar { padding:10px 18px; background:#161b22; border-bottom:1px solid #30363d; display:flex; gap:10px; align-items:center; flex-wrap:wrap; flex:0 0 auto; }
+  #validateTab.active { display:flex; flex-direction:column; background:#f6f8fa; }
+  #valTopBar { padding:10px 18px; background:#f6f8fa; border-bottom:1px solid #d0d7de; display:flex; gap:10px; align-items:center; flex-wrap:wrap; flex:0 0 auto; }
   #valTopBar button { font-size:12px; }
   #valTopBar .sev-chip { padding:3px 10px; border-radius:12px; font-size:11px; cursor:pointer; user-select:none; border:1px solid transparent; display:inline-flex; align-items:center; gap:5px; }
-  #valTopBar .sev-chip.sev-error   { background:#3b1f1f44; color:#ffa198; border-color:#5a2a2a; }
-  #valTopBar .sev-chip.sev-warning { background:#bf870044; color:#ffdf5d; border-color:#5a4b1d; }
-  #valTopBar .sev-chip.sev-info    { background:#1f6feb44; color:#cae2ff; border-color:#1f6feb; }
+  #valTopBar .sev-chip.sev-error   { background:#ffebe9; color:#cf222e; border-color:#ffcecb; }
+  #valTopBar .sev-chip.sev-warning { background:#fff8c5; color:#9a6700; border-color:#d4a72c; }
+  #valTopBar .sev-chip.sev-info    { background:#ddf4ff; color:#0969da; border-color:#0969da; }
   #valTopBar .sev-chip.off { opacity:.4; }
   #valTopBar .sev-chip .n { font-weight:600; }
-  #valTopBar select, #valTopBar input[type=text] { background:#0d1117; color:#e6edf3; border:1px solid #30363d; border-radius:4px; padding:4px 8px; font-size:12px; }
+  #valTopBar select, #valTopBar input[type=text] { background:#f6f8fa; color:#1a1a1a; border:1px solid #d0d7de; border-radius:4px; padding:4px 8px; font-size:12px; }
   #valTopBar .spacer { flex:1; }
-  #valTopBar .v-ranat { color:#7d8590; font-size:11px; }
-  #valTopBar .v-blockToggle { display:inline-flex; align-items:center; gap:5px; font-size:11.5px; color:#7d8590; }
+  #valTopBar .v-ranat { color:#57606a; font-size:11px; }
+  #valTopBar .v-blockToggle { display:inline-flex; align-items:center; gap:5px; font-size:11.5px; color:#57606a; }
   #valResults { flex:1 1 auto; overflow:auto; padding:14px 18px; }
-  #valResults .v-empty { color:#7d8590; font-style:italic; padding:20px 0; text-align:center; }
+  #valResults .v-empty { color:#57606a; font-style:italic; padding:20px 0; text-align:center; }
   #valResults .v-group { margin-bottom:14px; }
-  #valResults .v-group-h { font-size:11px; text-transform:uppercase; color:#7d8590; letter-spacing:.5px; padding:4px 0 6px 0; border-bottom:1px solid #21262d; margin-bottom:6px; font-weight:600; }
-  #valResults .v-row { background:#161b22; border:1px solid #30363d; border-radius:6px; padding:8px 12px; margin:4px 0; display:flex; gap:10px; align-items:flex-start; font-size:12px; }
+  #valResults .v-group-h { font-size:11px; text-transform:uppercase; color:#57606a; letter-spacing:.5px; padding:4px 0 6px 0; border-bottom:1px solid #eaeef2; margin-bottom:6px; font-weight:600; }
+  #valResults .v-row { background:#f6f8fa; border:1px solid #d0d7de; border-radius:6px; padding:8px 12px; margin:4px 0; display:flex; gap:10px; align-items:flex-start; font-size:12px; }
   #valResults .v-row .v-sev { padding:2px 8px; border-radius:10px; font-size:10px; font-weight:700; text-transform:uppercase; min-width:46px; text-align:center; flex:0 0 auto; }
-  #valResults .v-row.v-error   .v-sev { background:#da3633; color:#fff; }
-  #valResults .v-row.v-warning .v-sev { background:#bf8700; color:#fff; }
-  #valResults .v-row.v-info    .v-sev { background:#1f6feb; color:#fff; }
-  #valResults .v-row .v-code { font-family:Consolas,monospace; color:#7d8590; font-size:11px; flex:0 0 auto; padding-top:2px; }
+  #valResults .v-row.v-error   .v-sev { background:#cf222e; color:#fff; }
+  #valResults .v-row.v-warning .v-sev { background:#9a6700; color:#fff; }
+  #valResults .v-row.v-info    .v-sev { background:#0969da; color:#fff; }
+  #valResults .v-row .v-code { font-family:Consolas,monospace; color:#57606a; font-size:11px; flex:0 0 auto; padding-top:2px; }
   #valResults .v-row .v-body { flex:1 1 auto; min-width:0; }
-  #valResults .v-row .v-msg { color:#e6edf3; line-height:1.45; }
+  #valResults .v-row .v-msg { color:#1a1a1a; line-height:1.45; }
   #valResults .v-row .v-msg b { color:#fff; }
-  #valResults .v-row .v-sug { color:#7d8590; font-size:11.5px; font-style:italic; margin-top:4px; line-height:1.45; }
-  #valResults .v-row .v-meta { color:#7d8590; font-size:10.5px; margin-top:3px; font-family:Consolas,monospace; }
-  #valResults .v-row .v-meta b { color:#9aa6b2; font-weight:500; }
-  #valResults .v-row .v-jump { font-size:11px; color:#cae2ff; cursor:pointer; padding:2px 8px; border-radius:4px; border:1px solid #1f6feb; background:#1f6feb22; flex:0 0 auto; align-self:center; }
-  #valResults .v-row .v-jump:hover { background:#1f6feb44; }
-  #valFooter { padding:8px 18px; background:#161b22; border-top:1px solid #30363d; display:flex; align-items:center; gap:14px; font-size:11.5px; color:#7d8590; flex:0 0 auto; }
+  #valResults .v-row .v-sug { color:#57606a; font-size:11.5px; font-style:italic; margin-top:4px; line-height:1.45; }
+  #valResults .v-row .v-meta { color:#57606a; font-size:10.5px; margin-top:3px; font-family:Consolas,monospace; }
+  #valResults .v-row .v-meta b { color:#6e7681; font-weight:500; }
+  #valResults .v-row .v-jump { font-size:11px; color:#0969da; cursor:pointer; padding:2px 8px; border-radius:4px; border:1px solid #0969da; background:#ddf4ff; flex:0 0 auto; align-self:center; }
+  #valResults .v-row .v-jump:hover { background:#ddf4ff; }
+  #valFooter { padding:8px 18px; background:#f6f8fa; border-top:1px solid #d0d7de; display:flex; align-items:center; gap:14px; font-size:11.5px; color:#57606a; flex:0 0 auto; }
   #valFooter .f-counts span { margin-right:12px; }
-  #valFooter .f-counts .err { color:#ffa198; }
-  #valFooter .f-counts .warn { color:#ffdf5d; }
-  #valFooter .f-counts .nfo { color:#cae2ff; }
+  #valFooter .f-counts .err { color:#cf222e; }
+  #valFooter .f-counts .warn { color:#9a6700; }
+  #valFooter .f-counts .nfo { color:#0969da; }
   #valFooter .spacer { flex:1; }
 
   /* Grid row-highlight for "Open in Grid" jumps */
-  table.grid tr.v-jump-flash td { background:#bf870055 !important; transition:background 1.6s ease; }
+  table.grid tr.v-jump-flash td { background:#fff8c5 !important; transition:background 1.6s ease; }
 
   /* Revoke tab (v2.4.2) -- bulk-revoke of currently-active PIM assignments. */
   #revokeTab { display:none; }
-  #revokeTab.active { display:flex; flex-direction:column; background:#0d1117; }
-  #revTopBar { padding:10px 18px; background:#161b22; border-bottom:1px solid #30363d; display:flex; gap:10px; align-items:center; flex-wrap:wrap; flex:0 0 auto; }
+  #revokeTab.active { display:flex; flex-direction:column; background:#f6f8fa; }
+  #revTopBar { padding:10px 18px; background:#f6f8fa; border-bottom:1px solid #d0d7de; display:flex; gap:10px; align-items:center; flex-wrap:wrap; flex:0 0 auto; }
   #revTopBar button { font-size:12px; }
-  #revTopBar .rev-type-chip { padding:3px 10px; border-radius:12px; font-size:11px; cursor:pointer; user-select:none; border:1px solid transparent; display:inline-flex; align-items:center; gap:5px; background:#21262d; color:#9aa6b2; }
-  #revTopBar .rev-type-chip.rev-type-all     { background:#21262d;   color:#e6edf3; border-color:#30363d; }
-  #revTopBar .rev-type-chip.rev-type-entra   { background:#db6d2844; color:#ffd2a8; border-color:#5a3a1d; }
-  #revTopBar .rev-type-chip.rev-type-azure   { background:#1f6feb44; color:#cae2ff; border-color:#1f6feb; }
-  #revTopBar .rev-type-chip.rev-type-p4g     { background:#3fb95044; color:#7ee787; border-color:#2a563a; }
-  #revTopBar .rev-type-chip.active { box-shadow:0 0 0 2px #2f81f7; }
+  #revTopBar .rev-type-chip { padding:3px 10px; border-radius:12px; font-size:11px; cursor:pointer; user-select:none; border:1px solid transparent; display:inline-flex; align-items:center; gap:5px; background:#eaeef2; color:#6e7681; }
+  #revTopBar .rev-type-chip.rev-type-all     { background:#eaeef2;   color:#1a1a1a; border-color:#d0d7de; }
+  #revTopBar .rev-type-chip.rev-type-entra   { background:#ffe1c2; color:#b35900; border-color:#fcb887; }
+  #revTopBar .rev-type-chip.rev-type-azure   { background:#ddf4ff; color:#0969da; border-color:#0969da; }
+  #revTopBar .rev-type-chip.rev-type-p4g     { background:#dafbe1; color:#1a7f37; border-color:#1a7f37; }
+  #revTopBar .rev-type-chip.active { box-shadow:0 0 0 2px #0969da; }
   #revTopBar .rev-type-chip .n { font-weight:600; }
-  #revTopBar input[type=text] { background:#0d1117; color:#e6edf3; border:1px solid #30363d; border-radius:4px; padding:4px 8px; font-size:12px; }
+  #revTopBar input[type=text] { background:#f6f8fa; color:#1a1a1a; border:1px solid #d0d7de; border-radius:4px; padding:4px 8px; font-size:12px; }
   #revTopBar .spacer { flex:1; }
-  #revTopBar .rev-loaded-at { color:#7d8590; font-size:11px; }
-  #revResults { flex:1 1 auto; overflow:auto; padding:0 18px; background:#0d1117; }
-  #revResults .rev-empty { color:#7d8590; font-style:italic; padding:20px 0; text-align:center; }
-  #revResults .rev-loading { color:#cae2ff; padding:14px 0; text-align:center; }
-  #revResults .rev-error { color:#ffa198; padding:12px 14px; background:#3b1f1f22; border:1px solid #5a2a2a; border-radius:6px; margin:14px 0; }
+  #revTopBar .rev-loaded-at { color:#57606a; font-size:11px; }
+  #revResults { flex:1 1 auto; overflow:auto; padding:0 18px; background:#f6f8fa; }
+  #revResults .rev-empty { color:#57606a; font-style:italic; padding:20px 0; text-align:center; }
+  #revResults .rev-loading { color:#0969da; padding:14px 0; text-align:center; }
+  #revResults .rev-error { color:#cf222e; padding:12px 14px; background:#ffebe9; border:1px solid #ffcecb; border-radius:6px; margin:14px 0; }
   table.rev-table { width:100%; border-collapse:collapse; font-size:12px; margin:10px 0 12px 0; }
-  table.rev-table th { position:sticky; top:0; background:#161b22; color:#7d8590; font-size:11px; font-weight:600; text-align:left; padding:6px 8px; border-bottom:1px solid #30363d; text-transform:uppercase; letter-spacing:.4px; cursor:pointer; user-select:none; }
-  table.rev-table th.rev-sort-col::after { content:" \25B4"; color:#2f81f7; }
-  table.rev-table th.rev-sort-col.desc::after { content:" \25BE"; color:#2f81f7; }
-  table.rev-table td { padding:5px 8px; border-bottom:1px solid #21262d; color:#e6edf3; vertical-align:top; }
+  table.rev-table th { position:sticky; top:0; background:#f6f8fa; color:#57606a; font-size:11px; font-weight:600; text-align:left; padding:6px 8px; border-bottom:1px solid #d0d7de; text-transform:uppercase; letter-spacing:.4px; cursor:pointer; user-select:none; }
+  table.rev-table th.rev-sort-col::after { content:" \25B4"; color:#0969da; }
+  table.rev-table th.rev-sort-col.desc::after { content:" \25BE"; color:#0969da; }
+  table.rev-table td { padding:5px 8px; border-bottom:1px solid #eaeef2; color:#1a1a1a; vertical-align:top; }
   table.rev-table td.rev-sel-col { width:24px; text-align:center; padding:2px 4px; }
   table.rev-table td.rev-type-cell { font-family:Consolas,monospace; font-size:11px; }
-  table.rev-table td.rev-type-cell.type-entra-role     { color:#ffd2a8; }
-  table.rev-table td.rev-type-cell.type-azure-rbac     { color:#cae2ff; }
-  table.rev-table td.rev-type-cell.type-pim-for-groups { color:#7ee787; }
-  table.rev-table td.rev-scope-cell { font-family:Consolas,monospace; font-size:11px; color:#9aa6b2; max-width:340px; word-break:break-all; }
-  table.rev-table td.rev-when-cell { font-family:Consolas,monospace; font-size:10.5px; color:#7d8590; white-space:nowrap; }
-  table.rev-table tr.rev-row-sel td { background:#1f6feb14; }
-  table.rev-table tr:hover td { background:#161b2266; }
+  table.rev-table td.rev-type-cell.type-entra-role     { color:#b35900; }
+  table.rev-table td.rev-type-cell.type-azure-rbac     { color:#0969da; }
+  table.rev-table td.rev-type-cell.type-pim-for-groups { color:#1a7f37; }
+  table.rev-table td.rev-scope-cell { font-family:Consolas,monospace; font-size:11px; color:#6e7681; max-width:340px; word-break:break-all; }
+  table.rev-table td.rev-when-cell { font-family:Consolas,monospace; font-size:10.5px; color:#57606a; white-space:nowrap; }
+  table.rev-table tr.rev-row-sel td { background:#ddf4ff; }
+  table.rev-table tr:hover td { background:#eaeef2; }
   table.rev-table th.rev-sel-col input[type=checkbox],
   table.rev-table td.rev-sel-col input[type=checkbox] { cursor:pointer; }
 
-  .rev-action-bar { display:none; padding:10px 18px; background:#161b22; border-top:1px solid #30363d; gap:12px; align-items:center; flex-wrap:wrap; flex:0 0 auto; }
+  .rev-action-bar { display:none; padding:10px 18px; background:#f6f8fa; border-top:1px solid #d0d7de; gap:12px; align-items:center; flex-wrap:wrap; flex:0 0 auto; }
   .rev-action-bar.active { display:flex; }
-  .rev-action-bar .rev-count { color:#e6edf3; font-size:12px; font-weight:600; }
-  .rev-action-bar .rev-label { color:#7d8590; font-size:12px; }
-  .rev-action-bar input.rev-justify { background:#0d1117; color:#e6edf3; border:1px solid #30363d; border-radius:4px; padding:5px 8px; font-size:12px; min-width:320px; flex:1 1 auto; }
-  .rev-action-bar input.rev-justify:focus { outline:none; border-color:#2f81f7; box-shadow:0 0 0 2px #1f6feb33; }
-  .rev-action-bar button { padding:5px 12px; font-size:12px; border:1px solid #30363d; background:#21262d; color:#e6edf3; border-radius:5px; cursor:pointer; }
-  .rev-action-bar button:hover { border-color:#1f6feb; }
-  .rev-action-bar button.rev-danger { color:#fff; background:#da3633; border-color:#da3633; }
-  .rev-action-bar button.rev-danger:hover { background:#f85149; border-color:#f85149; }
-  .rev-action-bar button.rev-danger:disabled { background:#21262d; border-color:#30363d; color:#7d8590; cursor:not-allowed; }
+  .rev-action-bar .rev-count { color:#1a1a1a; font-size:12px; font-weight:600; }
+  .rev-action-bar .rev-label { color:#57606a; font-size:12px; }
+  .rev-action-bar input.rev-justify { background:#f6f8fa; color:#1a1a1a; border:1px solid #d0d7de; border-radius:4px; padding:5px 8px; font-size:12px; min-width:320px; flex:1 1 auto; }
+  .rev-action-bar input.rev-justify:focus { outline:none; border-color:#0969da; box-shadow:0 0 0 2px #ddf4ff; }
+  .rev-action-bar button { padding:5px 12px; font-size:12px; border:1px solid #d0d7de; background:#eaeef2; color:#1a1a1a; border-radius:5px; cursor:pointer; }
+  .rev-action-bar button:hover { border-color:#0969da; }
+  .rev-action-bar button.rev-danger { color:#fff; background:#cf222e; border-color:#cf222e; }
+  .rev-action-bar button.rev-danger:hover { background:#a40e26; border-color:#a40e26; }
+  .rev-action-bar button.rev-danger:disabled { background:#eaeef2; border-color:#d0d7de; color:#57606a; cursor:not-allowed; }
   .rev-action-bar .rev-spacer { flex:1; }
 
   /* Per-row revoke result pane (after submit) */
-  #revResultsPane { padding:12px 18px; background:#161b22; border-top:1px solid #30363d; max-height:32vh; overflow:auto; flex:0 0 auto; }
-  #revResultsPane .rev-rs-h { font-size:12px; color:#e6edf3; margin-bottom:8px; font-weight:600; }
+  #revResultsPane { padding:12px 18px; background:#f6f8fa; border-top:1px solid #d0d7de; max-height:32vh; overflow:auto; flex:0 0 auto; }
+  #revResultsPane .rev-rs-h { font-size:12px; color:#1a1a1a; margin-bottom:8px; font-weight:600; }
   #revResultsPane .rev-rs-row { font-family:Consolas,monospace; font-size:11px; padding:3px 8px; margin:1px 0; border-radius:3px; display:flex; gap:8px; align-items:flex-start; }
-  #revResultsPane .rev-rs-row.ok  { background:#1f6f3f22; color:#7ee787; }
-  #revResultsPane .rev-rs-row.err { background:#3b1f1f22; color:#ffa198; }
+  #revResultsPane .rev-rs-row.ok  { background:#dafbe1; color:#1a7f37; }
+  #revResultsPane .rev-rs-row.err { background:#ffebe9; color:#cf222e; }
   #revResultsPane .rev-rs-status { flex:0 0 50px; font-weight:600; }
   #revResultsPane .rev-rs-body { flex:1 1 auto; min-width:0; word-break:break-word; }
 
   /* Graph-node violation badges (rendered in DOM overlay on top of Cytoscape) */
   #cyViolationOverlay { position:absolute; pointer-events:none; inset:0; overflow:hidden; }
-  #cyViolationOverlay .v-node-badge { position:absolute; background:#da3633; color:#fff; border-radius:9px; min-width:16px; height:16px; line-height:16px; text-align:center; font-size:10px; font-weight:700; padding:0 4px; pointer-events:auto; cursor:default; box-shadow:0 1px 4px #000a; }
-  #cyViolationOverlay .v-node-badge.warn { background:#bf8700; }
-  #cyViolationOverlay .v-node-badge.info { background:#1f6feb; }
+  #cyViolationOverlay .v-node-badge { position:absolute; background:#cf222e; color:#fff; border-radius:9px; min-width:16px; height:16px; line-height:16px; text-align:center; font-size:10px; font-weight:700; padding:0 4px; pointer-events:auto; cursor:default; box-shadow:0 1px 4px #000a; }
+  #cyViolationOverlay .v-node-badge.warn { background:#9a6700; }
+  #cyViolationOverlay .v-node-badge.info { background:#0969da; }
 
   /* Confirm modal */
   #modalBg { position:fixed; inset:0; background:#000a; display:none; align-items:center; justify-content:center; z-index:100; }
   #modalBg.active { display:flex; }
-  #modal { background:#161b22; border:1px solid #30363d; border-radius:8px; padding:16px 20px; max-width:560px; min-width:360px; }
+  #modal { background:#f6f8fa; border:1px solid #d0d7de; border-radius:8px; padding:16px 20px; max-width:560px; min-width:360px; }
   #modal h3 { margin:0 0 8px 0; font-size:14px; }
-  #modal .modal-body { font-size:12px; color:#e6edf3; line-height:1.5; max-height:50vh; overflow:auto; }
-  #modal .modal-body ul { margin:6px 0; padding-left:20px; color:#7d8590; }
-  #modal .modal-body li b { color:#e6edf3; }
+  #modal .modal-body { font-size:12px; color:#1a1a1a; line-height:1.5; max-height:50vh; overflow:auto; }
+  #modal .modal-body ul { margin:6px 0; padding-left:20px; color:#57606a; }
+  #modal .modal-body li b { color:#1a1a1a; }
   #modal .modal-actions { margin-top:14px; display:flex; gap:8px; justify-content:flex-end; }
 
   /* New tab (wizard launcher) */
   #newTab { display:none; }
-  #newTab.active { display:flex; flex-direction:column; padding:22px 26px; gap:18px; overflow:auto; background:#0d1117; }
-  #newTab .new-intro { font-size:13px; color:#7d8590; max-width:780px; line-height:1.6; }
-  #newTab .new-intro b { color:#e6edf3; }
+  #newTab.active { display:flex; flex-direction:column; padding:22px 26px; gap:18px; overflow:auto; background:#f6f8fa; }
+  #newTab .new-intro { font-size:13px; color:#57606a; max-width:780px; line-height:1.6; }
+  #newTab .new-intro b { color:#1a1a1a; }
   .wiz-cards { display:grid; grid-template-columns:repeat(auto-fill, minmax(280px, 1fr)); gap:14px; max-width:1100px; }
-  .wiz-card { background:#161b22; border:1px solid #30363d; border-radius:8px; padding:14px 16px; cursor:pointer; transition:border-color .12s, transform .12s; }
-  .wiz-card:hover { border-color:#2f81f7; transform:translateY(-1px); }
+  .wiz-card { background:#f6f8fa; border:1px solid #d0d7de; border-radius:8px; padding:14px 16px; cursor:pointer; transition:border-color .12s, transform .12s; }
+  .wiz-card:hover { border-color:#0969da; transform:translateY(-1px); }
   .wiz-card .wiz-icon { font-size:22px; margin-bottom:6px; }
-  .wiz-card h4 { margin:0 0 6px 0; font-size:14px; color:#e6edf3; }
-  .wiz-card .wiz-sub { font-size:11.5px; color:#7d8590; line-height:1.5; }
+  .wiz-card h4 { margin:0 0 6px 0; font-size:14px; color:#1a1a1a; }
+  .wiz-card .wiz-sub { font-size:11.5px; color:#57606a; line-height:1.5; }
   .wiz-card.disabled { opacity:0.5; cursor:not-allowed; }
-  .wiz-card.disabled:hover { border-color:#30363d; transform:none; }
+  .wiz-card.disabled:hover { border-color:#d0d7de; transform:none; }
 
   /* Wizard modal (extends the confirm modal styles) */
   #wizModal { max-width:680px; min-width:520px; padding:0; display:flex; flex-direction:column; max-height:88vh; }
   #wizModal .wiz-header { padding:14px 20px 0 20px; }
   #wizModal .wiz-header h3 { margin:0; font-size:15px; }
-  #wizModal .wiz-steps { display:flex; gap:4px; margin-top:10px; padding-bottom:8px; border-bottom:1px solid #30363d; }
-  #wizModal .wiz-step { flex:1; text-align:center; font-size:10.5px; color:#7d8590; padding:5px 4px; border-radius:4px 4px 0 0; text-transform:uppercase; letter-spacing:.4px; }
-  #wizModal .wiz-step.active { color:#e6edf3; background:#1f6feb22; border-bottom:2px solid #2f81f7; margin-bottom:-1px; }
-  #wizModal .wiz-step.done { color:#7ee787; }
+  #wizModal .wiz-steps { display:flex; gap:4px; margin-top:10px; padding-bottom:8px; border-bottom:1px solid #d0d7de; }
+  #wizModal .wiz-step { flex:1; text-align:center; font-size:10.5px; color:#57606a; padding:5px 4px; border-radius:4px 4px 0 0; text-transform:uppercase; letter-spacing:.4px; }
+  #wizModal .wiz-step.active { color:#1a1a1a; background:#ddf4ff; border-bottom:2px solid #0969da; margin-bottom:-1px; }
+  #wizModal .wiz-step.done { color:#1a7f37; }
   #wizModal .wiz-body { padding:14px 20px; overflow-y:auto; flex:1; font-size:12.5px; }
-  #wizModal .wiz-actions { padding:10px 20px 14px 20px; border-top:1px solid #30363d; display:flex; gap:8px; align-items:center; }
+  #wizModal .wiz-actions { padding:10px 20px 14px 20px; border-top:1px solid #d0d7de; display:flex; gap:8px; align-items:center; }
   #wizModal .wiz-actions .spacer { flex:1; }
 
   /* Wizard "why these fields" collapsible */
-  .wiz-why { background:#0d1117; border:1px solid #21262d; border-radius:6px; padding:0; margin-bottom:14px; }
-  .wiz-why summary { padding:8px 12px; cursor:pointer; color:#7d8590; font-size:11.5px; user-select:none; }
-  .wiz-why summary:hover { color:#e6edf3; }
-  .wiz-why[open] summary { color:#e6edf3; border-bottom:1px solid #21262d; }
-  .wiz-why .why-body { padding:10px 14px; font-size:11.5px; color:#9aa6b2; line-height:1.6; }
-  .wiz-why .why-body b { color:#e6edf3; }
-  .wiz-why .why-body code { background:#161b22; border:1px solid #30363d; padding:1px 5px; border-radius:3px; font-size:10.5px; color:#e3b341; font-family:Consolas,monospace; }
+  .wiz-why { background:#f6f8fa; border:1px solid #eaeef2; border-radius:6px; padding:0; margin-bottom:14px; }
+  .wiz-why summary { padding:8px 12px; cursor:pointer; color:#57606a; font-size:11.5px; user-select:none; }
+  .wiz-why summary:hover { color:#1a1a1a; }
+  .wiz-why[open] summary { color:#1a1a1a; border-bottom:1px solid #eaeef2; }
+  .wiz-why .why-body { padding:10px 14px; font-size:11.5px; color:#6e7681; line-height:1.6; }
+  .wiz-why .why-body b { color:#1a1a1a; }
+  .wiz-why .why-body code { background:#f6f8fa; border:1px solid #d0d7de; padding:1px 5px; border-radius:3px; font-size:10.5px; color:#9a6700; font-family:Consolas,monospace; }
 
   /* Wizard form rows */
-  .wiz-field { display:grid; grid-template-columns: 200px 1fr; gap:14px; align-items:start; padding:8px 0; border-bottom:1px solid #161b22; }
+  .wiz-field { display:grid; grid-template-columns: 200px 1fr; gap:14px; align-items:start; padding:8px 0; border-bottom:1px solid #f6f8fa; }
   .wiz-field:last-child { border-bottom:none; }
-  .wiz-field .lbl { font-size:12.5px; color:#e6edf3; padding-top:6px; }
-  .wiz-field .lbl .sub { display:block; font-size:10.5px; color:#7d8590; margin-top:2px; font-weight:normal; }
-  .wiz-field .lbl .req { color:#f85149; margin-left:3px; }
+  .wiz-field .lbl { font-size:12.5px; color:#1a1a1a; padding-top:6px; }
+  .wiz-field .lbl .sub { display:block; font-size:10.5px; color:#57606a; margin-top:2px; font-weight:normal; }
+  .wiz-field .lbl .req { color:#cf222e; margin-left:3px; }
   .wiz-field .ctl { display:flex; flex-direction:column; gap:3px; }
   .wiz-field .ctl-row { display:flex; align-items:center; gap:10px; }
   .wiz-field input[type=text], .wiz-field input[type=number], .wiz-field select, .wiz-field textarea {
-    flex:1 1 auto; min-width:0; padding:6px 8px; border:1px solid #30363d; border-radius:4px;
-    background:#0d1117; color:#e6edf3; font-size:12.5px; font-family:inherit;
+    flex:1 1 auto; min-width:0; padding:6px 8px; border:1px solid #d0d7de; border-radius:4px;
+    background:#f6f8fa; color:#1a1a1a; font-size:12.5px; font-family:inherit;
   }
-  .wiz-field input:focus, .wiz-field select:focus, .wiz-field textarea:focus { outline:none; border-color:#2f81f7; box-shadow:0 0 0 2px #1f6feb33; }
-  .wiz-field .example { font-size:10.5px; color:#7d8590; font-style:italic; white-space:nowrap; }
-  .wiz-field .hint { font-size:10.5px; color:#7d8590; line-height:1.5; }
-  .wiz-field .hint b { color:#9aa6b2; }
-  .wiz-field .err { font-size:10.5px; color:#ffa198; }
-  .wiz-field.invalid input, .wiz-field.invalid select, .wiz-field.invalid textarea { border-color:#f85149; }
+  .wiz-field input:focus, .wiz-field select:focus, .wiz-field textarea:focus { outline:none; border-color:#0969da; box-shadow:0 0 0 2px #ddf4ff; }
+  .wiz-field .example { font-size:10.5px; color:#57606a; font-style:italic; white-space:nowrap; }
+  .wiz-field .hint { font-size:10.5px; color:#57606a; line-height:1.5; }
+  .wiz-field .hint b { color:#6e7681; }
+  .wiz-field .err { font-size:10.5px; color:#cf222e; }
+  .wiz-field.invalid input, .wiz-field.invalid select, .wiz-field.invalid textarea { border-color:#cf222e; }
 
   /* Live "you'll get" preview */
-  .wiz-preview { background:#0d1117; border:1px dashed #2f81f7; border-radius:6px; padding:10px 12px; margin-top:14px; font-size:11.5px; }
-  .wiz-preview .lbl { color:#7d8590; font-size:10.5px; text-transform:uppercase; letter-spacing:.5px; margin-bottom:4px; }
-  .wiz-preview .val { color:#7ee787; font-family:Consolas,monospace; word-break:break-all; }
-  .wiz-preview .val.empty { color:#7d8590; font-style:italic; font-family:inherit; }
+  .wiz-preview { background:#f6f8fa; border:1px dashed #0969da; border-radius:6px; padding:10px 12px; margin-top:14px; font-size:11.5px; }
+  .wiz-preview .lbl { color:#57606a; font-size:10.5px; text-transform:uppercase; letter-spacing:.5px; margin-bottom:4px; }
+  .wiz-preview .val { color:#1a7f37; font-family:Consolas,monospace; word-break:break-all; }
+  .wiz-preview .val.empty { color:#57606a; font-style:italic; font-family:inherit; }
   .wiz-preview .row { padding:3px 0; }
-  .wiz-preview .row + .row { border-top:1px solid #161b22; padding-top:5px; margin-top:5px; }
+  .wiz-preview .row + .row { border-top:1px solid #f6f8fa; padding-top:5px; margin-top:5px; }
 
   /* Wizard summary (final step) */
-  .wiz-summary { background:#0d1117; border:1px solid #30363d; border-radius:6px; padding:12px 14px; line-height:1.55; font-size:12.5px; }
-  .wiz-summary .plain { color:#e6edf3; margin-bottom:10px; }
-  .wiz-summary .plain b { color:#7ee787; }
+  .wiz-summary { background:#f6f8fa; border:1px solid #d0d7de; border-radius:6px; padding:12px 14px; line-height:1.55; font-size:12.5px; }
+  .wiz-summary .plain { color:#1a1a1a; margin-bottom:10px; }
+  .wiz-summary .plain b { color:#1a7f37; }
   .wiz-summary .impact-tbl { width:100%; border-collapse:collapse; font-size:11.5px; margin-top:6px; }
-  .wiz-summary .impact-tbl th { color:#7d8590; font-size:10.5px; text-align:left; padding:3px 6px; border-bottom:1px solid #30363d; font-weight:500; text-transform:uppercase; letter-spacing:.4px; }
-  .wiz-summary .impact-tbl td { padding:4px 6px; border-bottom:1px solid #21262d; font-family:Consolas,monospace; color:#e6edf3; }
-  .wiz-summary .impact-tbl td.adds { color:#7ee787; }
+  .wiz-summary .impact-tbl th { color:#57606a; font-size:10.5px; text-align:left; padding:3px 6px; border-bottom:1px solid #d0d7de; font-weight:500; text-transform:uppercase; letter-spacing:.4px; }
+  .wiz-summary .impact-tbl td { padding:4px 6px; border-bottom:1px solid #eaeef2; font-family:Consolas,monospace; color:#1a1a1a; }
+  .wiz-summary .impact-tbl td.adds { color:#1a7f37; }
 
   /* Pick-list (used in wizards & clone) */
-  .wiz-picklist { background:#0d1117; border:1px solid #30363d; border-radius:4px; max-height:200px; overflow-y:auto; }
-  .wiz-picklist .pl-item { padding:5px 10px; cursor:pointer; font-size:11.5px; border-bottom:1px solid #161b22; }
-  .wiz-picklist .pl-item:hover { background:#1f242c; }
-  .wiz-picklist .pl-item.selected { background:#1f6feb22; color:#fff; border-left:2px solid #2f81f7; padding-left:8px; }
-  .wiz-picklist .pl-item .pl-sub { display:block; font-size:10px; color:#7d8590; margin-top:1px; }
-  .wiz-picklist .pl-empty { padding:10px; color:#7d8590; font-style:italic; font-size:11px; text-align:center; }
+  .wiz-picklist { background:#f6f8fa; border:1px solid #d0d7de; border-radius:4px; max-height:200px; overflow-y:auto; }
+  .wiz-picklist .pl-item { padding:5px 10px; cursor:pointer; font-size:11.5px; border-bottom:1px solid #f6f8fa; }
+  .wiz-picklist .pl-item:hover { background:#eaeef2; }
+  .wiz-picklist .pl-item.selected { background:#ddf4ff; color:#0969da; border-left:2px solid #0969da; padding-left:8px; }
+  .wiz-picklist .pl-item .pl-sub { display:block; font-size:10px; color:#57606a; margin-top:1px; }
+  .wiz-picklist .pl-empty { padding:10px; color:#57606a; font-style:italic; font-size:11px; text-align:center; }
 
   /* Tag-list (multi-pick chips) */
   .wiz-chips { display:flex; flex-wrap:wrap; gap:4px; }
-  .wiz-chip { background:#1f6feb22; border:1px solid #1f6feb; color:#cae2ff; padding:2px 8px 2px 8px; border-radius:10px; font-size:11px; display:inline-flex; align-items:center; gap:4px; }
-  .wiz-chip .x { cursor:pointer; color:#7d8590; font-size:13px; }
-  .wiz-chip .x:hover { color:#f85149; }
+  .wiz-chip { background:#ddf4ff; border:1px solid #0969da; color:#0969da; padding:2px 8px 2px 8px; border-radius:10px; font-size:11px; display:inline-flex; align-items:center; gap:4px; }
+  .wiz-chip .x { cursor:pointer; color:#57606a; font-size:13px; }
+  .wiz-chip .x:hover { color:#cf222e; }
 
   /* Tenant-cache age badge (shown next to dropdowns + on toolbar) */
   .cache-badge { display:inline-block; font-size:10px; padding:1px 6px; border-radius:8px; margin-left:6px; cursor:pointer; user-select:none; border:1px solid transparent; vertical-align:middle; }
-  .cache-badge.live  { background:#1f6f3f44; color:#7ee787; border-color:#2a563a; }
-  .cache-badge.stale { background:#bf870044; color:#ffdf5d; border-color:#5a4b1d; }
-  .cache-badge.none  { background:#3b1f1f44; color:#ffa198; border-color:#5a2a2a; }
-  .cache-badge.busy  { background:#1f6feb44; color:#cae2ff; border-color:#1f6feb; cursor:wait; }
+  .cache-badge.live  { background:#dafbe1; color:#1a7f37; border-color:#1a7f37; }
+  .cache-badge.stale { background:#fff8c5; color:#9a6700; border-color:#d4a72c; }
+  .cache-badge.none  { background:#ffebe9; color:#cf222e; border-color:#ffcecb; }
+  .cache-badge.busy  { background:#ddf4ff; color:#0969da; border-color:#0969da; cursor:wait; }
   .cache-badge:hover { filter:brightness(1.2); }
 
   /* In-grid dropdown cell (uses native select for portability) */
-  table.grid td select.cell-select { background:#0d1117; color:#e6edf3; border:1px solid transparent; padding:1px 4px; font-family:Consolas,monospace; font-size:11.5px; min-width:130px; outline:none; }
-  table.grid td select.cell-select:focus { border-color:#2f81f7; box-shadow:0 0 0 1px #2f81f7; }
-  table.grid td.cell-bad { box-shadow:inset 0 0 0 1px #f85149; background:#3b1f1f33; }
+  table.grid td select.cell-select { background:#f6f8fa; color:#1a1a1a; border:1px solid transparent; padding:1px 4px; font-family:Consolas,monospace; font-size:11.5px; min-width:130px; outline:none; }
+  table.grid td select.cell-select:focus { border-color:#0969da; box-shadow:0 0 0 1px #0969da; }
+  table.grid td.cell-bad { box-shadow:inset 0 0 0 1px #cf222e; background:#ffebe9; }
   table.grid td.cell-bad-tip { position:relative; }
 
   /* Grid row clone button */
-  table.grid td.row-actions .row-clone { color:#7d8590; padding:1px 6px; font-size:11px; background:transparent; border:1px solid transparent; }
-  table.grid td.row-actions .row-clone:hover { color:#7ee787; border-color:#7ee787; }
+  table.grid td.row-actions .row-clone { color:#57606a; padding:1px 6px; font-size:11px; background:transparent; border:1px solid transparent; }
+  table.grid td.row-actions .row-clone:hover { color:#1a7f37; border-color:#1a7f37; }
 
   /* Wizard body controls (v2.2 wizards use these simpler class names) */
-  #wizBody .field { display:grid; grid-template-columns:200px 1fr; gap:8px 12px; align-items:center; padding:6px 0; border-bottom:1px solid #161b22; }
-  #wizBody .field label { font-size:12px; color:#7d8590; }
-  #wizBody .field input, #wizBody .field select, #wizBody .field textarea { padding:6px 8px; border-radius:4px; border:1px solid #30363d; background:#0d1117; color:#e6edf3; font-size:12.5px; font-family:inherit; }
+  #wizBody .field { display:grid; grid-template-columns:200px 1fr; gap:8px 12px; align-items:center; padding:6px 0; border-bottom:1px solid #f6f8fa; }
+  #wizBody .field label { font-size:12px; color:#57606a; }
+  #wizBody .field input, #wizBody .field select, #wizBody .field textarea { padding:6px 8px; border-radius:4px; border:1px solid #d0d7de; background:#f6f8fa; color:#1a1a1a; font-size:12.5px; font-family:inherit; }
   #wizBody .field-full { grid-column:1 / -1; }
-  #wizBody .multi { background:#0d1117; border:1px solid #30363d; border-radius:6px; padding:6px 10px; max-height:180px; overflow:auto; }
+  #wizBody .multi { background:#f6f8fa; border:1px solid #d0d7de; border-radius:6px; padding:6px 10px; max-height:180px; overflow:auto; }
   #wizBody .multi label { display:flex; align-items:center; gap:6px; font-size:11.5px; padding:2px 0; cursor:pointer; }
-  #wizBody .multi label:hover { background:#1f242c; }
-  #wizBody .preview { background:#0d1117; border:1px dashed #2f81f7; border-radius:6px; padding:8px 12px; margin-top:14px; font-family:Consolas,monospace; font-size:11px; max-height:240px; overflow:auto; }
-  #wizBody .pv-row { padding:2px 4px; margin:1px 0; border-radius:3px; background:#1f6f3f22; color:#7ee787; }
-  #wizBody .pv-csv { color:#7d8590; margin-right:6px; }
-  #wizBody .err { color:#ffa198; font-size:11.5px; margin-top:8px; padding:6px 10px; background:#3b1f1f22; border-radius:4px; border:1px solid #5a2a2a; }
+  #wizBody .multi label:hover { background:#eaeef2; }
+  #wizBody .preview { background:#f6f8fa; border:1px dashed #0969da; border-radius:6px; padding:8px 12px; margin-top:14px; font-family:Consolas,monospace; font-size:11px; max-height:240px; overflow:auto; }
+  #wizBody .pv-row { padding:2px 4px; margin:1px 0; border-radius:3px; background:#dafbe1; color:#1a7f37; }
+  #wizBody .pv-csv { color:#57606a; margin-right:6px; }
+  #wizBody .err { color:#cf222e; font-size:11.5px; margin-top:8px; padding:6px 10px; background:#ffebe9; border-radius:4px; border:1px solid #ffcecb; }
 
   /* Right-click context menu on Graph nodes */
-  #ctxMenu { position:fixed; display:none; background:#161b22; border:1px solid #30363d; border-radius:6px; min-width:200px; z-index:200; box-shadow:0 4px 16px #000a; padding:4px 0; }
+  #ctxMenu { position:fixed; display:none; background:#f6f8fa; border:1px solid #d0d7de; border-radius:6px; min-width:200px; z-index:200; box-shadow:0 4px 16px #000a; padding:4px 0; }
   #ctxMenu.active { display:block; }
-  #ctxMenu .ctx-item { padding:6px 14px; font-size:12px; cursor:pointer; color:#e6edf3; }
-  #ctxMenu .ctx-item:hover { background:#1f242c; }
-  #ctxMenu .ctx-item .ctx-sub { display:block; font-size:10.5px; color:#7d8590; margin-top:2px; }
+  #ctxMenu .ctx-item { padding:6px 14px; font-size:12px; cursor:pointer; color:#1a1a1a; }
+  #ctxMenu .ctx-item:hover { background:#eaeef2; }
+  #ctxMenu .ctx-item .ctx-sub { display:block; font-size:10.5px; color:#57606a; margin-top:2px; }
 </style>
 <script src="https://unpkg.com/cytoscape@3.30.2/dist/cytoscape.min.js"></script>
 <script src="https://unpkg.com/dagre@0.8.5/dist/dagre.min.js"></script>
@@ -420,13 +427,18 @@
 <body>
 <div id="app">
 
+  <div id="brand">
+    <h1>PIM Manager</h1>
+    <div class="brand-sub">PIM4EntraPS &middot; configuration editor</div>
+  </div>
+
   <div id="tabs">
     <div class="tab active" data-tab="graph">Graph</div>
     <div class="tab" data-tab="grid">Grid <span id="gridDirtyBadge" class="badge" style="display:none">0</span></div>
     <div class="tab" data-tab="new">New &amp; clone</div>
     <div class="tab" data-tab="save">Save <span id="saveDirtyBadge" class="badge" style="display:none">0</span></div>
-    <div class="tab" data-tab="validate">Validate <span id="validateErrBadge" class="badge" style="display:none;background:#da3633">0</span></div>
-    <div class="tab" data-tab="revoke">Revoke <span id="revokeCountBadge" class="badge" style="display:none;background:#da3633">0</span></div>
+    <div class="tab" data-tab="validate">Validate <span id="validateErrBadge" class="badge" style="display:none;background:#cf222e">0</span></div>
+    <div class="tab" data-tab="revoke">Revoke <span id="revokeCountBadge" class="badge" style="display:none;background:#cf222e">0</span></div>
     <div id="tabRight">
       mode: <b id="modeLabel"></b>
       &nbsp;|&nbsp; source: <b id="src"></b>
@@ -437,7 +449,7 @@
   <!-- =========== Graph tab =========== -->
   <div id="graphTab" class="tab-panel active">
     <div class="panel" id="left">
-      <h1>PIM Manager</h1>
+      <h1>Graph view</h1>
       <div class="meta">v0.3 &mdash; editor + wizards</div>
 
       <h2>Counts</h2>
@@ -448,13 +460,13 @@
 
       <h2>Layers</h2>
       <div class="legend">
-        <label><input type="checkbox" data-kind="admin" checked><span class="swatch" style="background:#2f81f7"></span>Admin</label>
+        <label><input type="checkbox" data-kind="admin" checked><span class="swatch" style="background:#0969da"></span>Admin</label>
         <label><input type="checkbox" data-kind="role-group" checked><span class="swatch" style="background:#a371f7"></span>Role group</label>
-        <label><input type="checkbox" data-kind="permission-group" checked><span class="swatch" style="background:#3fb950"></span>Permission group</label>
+        <label><input type="checkbox" data-kind="permission-group" checked><span class="swatch" style="background:#1a7f37"></span>Permission group</label>
         <label><input type="checkbox" data-kind="entra-role" checked><span class="swatch" style="background:#db6d28"></span>Entra ID role</label>
-        <label><input type="checkbox" data-kind="au-role" checked><span class="swatch" style="background:#e3b341"></span>AU-scoped role</label>
+        <label><input type="checkbox" data-kind="au-role" checked><span class="swatch" style="background:#9a6700"></span>AU-scoped role</label>
         <label><input type="checkbox" data-kind="az-resource" checked><span class="swatch" style="background:#d2a8ff"></span>Azure resource</label>
-        <label><input type="checkbox" data-kind="au" checked><span class="swatch" style="background:#7d8590"></span>Administrative Unit</label>
+        <label><input type="checkbox" data-kind="au" checked><span class="swatch" style="background:#57606a"></span>Administrative Unit</label>
       </div>
 
       <h2>Edge type</h2>
@@ -609,7 +621,7 @@
 
 <!-- Wizard modal -->
 <div id="wizBg" style="position:fixed; inset:0; background:#000a; display:none; align-items:center; justify-content:center; z-index:110;">
-  <div id="wizModal" class="wizard" style="background:#161b22; border:1px solid #30363d; border-radius:8px; padding:0; display:flex; flex-direction:column; max-height:88vh; max-width:680px; min-width:520px;">
+  <div id="wizModal" class="wizard" style="background:#f6f8fa; border:1px solid #d0d7de; border-radius:8px; padding:0; display:flex; flex-direction:column; max-height:88vh; max-width:680px; min-width:520px;">
     <div class="wiz-header">
       <h3 id="wizTitle">Wizard</h3>
       <div class="wiz-steps" id="wizSteps"></div>
@@ -897,13 +909,13 @@
   // Cytoscape graph (Graph tab)
   // ===================================================================
   const KIND_COLOR = {
-    'admin':            '#2f81f7',
+    'admin':            '#0969da',
     'role-group':       '#a371f7',
-    'permission-group': '#3fb950',
+    'permission-group': '#1a7f37',
     'entra-role':       '#db6d28',
-    'au-role':          '#e3b341',
+    'au-role':          '#9a6700',
     'az-resource':      '#d2a8ff',
-    'au':               '#7d8590'
+    'au':               '#57606a'
   };
   const KIND_SHAPE = {
     'admin':            'round-rectangle',
@@ -941,30 +953,30 @@
       wheelSensitivity: 0.25,
       style: [
         { selector: 'node', style: {
-            'background-color': n => KIND_COLOR[n.data('kind')] || '#888',
+            'background-color': n => KIND_COLOR[n.data('kind')] || '#6e7681',
             'shape': n => KIND_SHAPE[n.data('kind')] || 'ellipse',
             'label': 'data(label)',
-            'color': '#e6edf3',
+            'color': '#1a1a1a',
             'font-size': 9,
             'text-wrap': 'wrap',
             'text-max-width': 130,
             'text-valign': 'bottom',
             'text-margin-y': 4,
             'border-width': 1,
-            'border-color': '#0d1117',
+            'border-color': '#f6f8fa',
             'width': 24, 'height': 24
         }},
-        { selector: 'node:selected', style: { 'border-width': 3, 'border-color': '#f0f6fc' }},
+        { selector: 'node:selected', style: { 'border-width': 3, 'border-color': '#0969da' }},
         { selector: 'edge', style: {
-            'line-color': e => e.data('type') === 'Active' ? '#bf8700' : (e.data('type') === 'Eligible' ? '#1f6feb' : '#444c56'),
-            'target-arrow-color': e => e.data('type') === 'Active' ? '#bf8700' : (e.data('type') === 'Eligible' ? '#1f6feb' : '#444c56'),
+            'line-color': e => e.data('type') === 'Active' ? '#9a6700' : (e.data('type') === 'Eligible' ? '#0969da' : '#d0d7de'),
+            'target-arrow-color': e => e.data('type') === 'Active' ? '#9a6700' : (e.data('type') === 'Eligible' ? '#0969da' : '#d0d7de'),
             'target-arrow-shape': 'triangle',
             'curve-style': 'bezier',
             'width': 1.2,
             'opacity': 0.7,
             'label': e => e.data('type') ? e.data('type').charAt(0) : '',
             'font-size': 8,
-            'color': '#7d8590',
+            'color': '#57606a',
             'text-background-opacity': 0,
             'text-rotation': 'autorotate'
         }},
@@ -1131,7 +1143,7 @@
           }
           rolePermsSummaryRow = `<div class="k">permissions</div><div class="v">${resActions} resource action${resActions === 1 ? '' : 's'} / ${dataActions} data action${dataActions === 1 ? '' : 's'}</div>`;
         } else {
-          rolePermsSummaryRow = `<div class="k">permissions</div><div class="v" style="color:#7d8590;font-style:italic;">(not in cache)</div>`;
+          rolePermsSummaryRow = `<div class="k">permissions</div><div class="v" style="color:#57606a;font-style:italic;">(not in cache)</div>`;
         }
         rolePermsBlock = renderRolePermissions(data);
       }
@@ -1380,7 +1392,7 @@
     }
     const msg = `<p>Deleting <b>${escapeHtml(data.label || data.id)}</b> will mark <b>${total}</b> row(s) for removal across <b>${impact.filter(x => x.count > 0).length}</b> CSV file(s):</p><ul>` +
       impact.filter(x => x.count > 0).map(x => `<li><b>${x.base}</b>: ${x.count} row(s)</li>`).join('') +
-      `</ul><p style="color:#7d8590">Nothing is written to disk yet &mdash; review and commit from the <b>Save</b> tab.</p>`;
+      `</ul><p style="color:#57606a">Nothing is written to disk yet &mdash; review and commit from the <b>Save</b> tab.</p>`;
     const ok = await showConfirm('Delete node', msg, true);
     if (!ok) return;
 
@@ -1406,7 +1418,7 @@
     }
     const msg = `<p>This edge maps to <b>${matches.length}</b> row(s) in <b>${base}</b> matching:</p>` +
       `<ul>` + Object.entries(criteria).map(([k,v]) => `<li><b>${escapeHtml(k)}</b> = ${escapeHtml(v)}</li>`).join('') + `</ul>` +
-      `<p style="color:#7d8590">Mark for removal? Commit from the <b>Save</b> tab.</p>`;
+      `<p style="color:#57606a">Mark for removal? Commit from the <b>Save</b> tab.</p>`;
     const ok = await showConfirm('Delete edge', msg, true);
     if (!ok) return;
     removeRowsMatching(base, criteria);
@@ -1452,7 +1464,7 @@
     main.innerHTML = '<div class="empty" style="padding:30px;">Loading...</div>';
     let data;
     try { data = await loadCsv(base); }
-    catch (e) { main.innerHTML = `<div class="empty" style="padding:30px;color:#ffa198;">${escapeHtml(e.message)}</div>`; return; }
+    catch (e) { main.innerHTML = `<div class="empty" style="padding:30px;color:#cf222e;">${escapeHtml(e.message)}</div>`; return; }
     ensurePending(base, data.header, data.rows);
     renderGrid(base);
   }
@@ -1484,7 +1496,7 @@
       }
     }
     const tenantBadgeBar = usedListKeys.size === 0 ? '' :
-      '<div style="margin:4px 0 8px 0; font-size:11px; color:#7d8590;">tenant lists used by this grid: ' +
+      '<div style="margin:4px 0 8px 0; font-size:11px; color:#57606a;">tenant lists used by this grid: ' +
       Array.from(usedListKeys).map(k =>
         `<span style="margin-right:8px;">${escapeHtml(k)} <span class="cache-badge-slot" data-list-key="${escapeHtml(k)}"></span></span>`
       ).join('') + '</div>';
@@ -1493,7 +1505,7 @@
     html.push(`<div class="grid-header">
       <div>
         <div class="grid-title">${escapeHtml(base)}.custom.csv</div>
-        <div class="grid-sub">on-disk source: <b>${escapeHtml(cache.source)}</b> &nbsp;|&nbsp; ${escapeHtml(cache.path)} &nbsp;|&nbsp; ${p.rows.length - p.deletes.size} row(s) ${isDirty(base) ? '<span style="color:#e3b341">(pending changes)</span>' : ''}</div>
+        <div class="grid-sub">on-disk source: <b>${escapeHtml(cache.source)}</b> &nbsp;|&nbsp; ${escapeHtml(cache.path)} &nbsp;|&nbsp; ${p.rows.length - p.deletes.size} row(s) ${isDirty(base) ? '<span style="color:#9a6700">(pending changes)</span>' : ''}</div>
       </div>
       <div class="toolbar">
         <button id="btnAddRow">+ Add row</button>
@@ -1722,7 +1734,7 @@
         const ids = Array.from(p.selection).filter(i => !p.deletes.has(i));
         if (ids.length === 0) return;
         const msg = `<p>Delete <b>${ids.length}</b> row(s) from <b>${escapeHtml(base)}</b>?</p>` +
-          `<p style="color:#7d8590">They go into pending; you can still cancel before committing on the <b>Save</b> tab.</p>`;
+          `<p style="color:#57606a">They go into pending; you can still cancel before committing on the <b>Save</b> tab.</p>`;
         const ok = await showConfirm('Delete selected rows', msg, true);
         if (!ok) return;
         for (const i of ids) p.deletes.add(i);
@@ -1782,7 +1794,7 @@
         const diff = await api('POST', '/api/diff/' + encodeURIComponent(base), { rows: finalRows });
         renderSaveCard(card, base, diff);
       } catch (e) {
-        card.querySelector('.counts').innerHTML = `<span style="color:#ffa198">diff failed: ${escapeHtml(e.message)}</span>`;
+        card.querySelector('.counts').innerHTML = `<span style="color:#cf222e">diff failed: ${escapeHtml(e.message)}</span>`;
       }
     }
   }
@@ -1796,7 +1808,7 @@
       <span class="ca">+ ${addsN} add(s)</span>
       <span class="cr">- ${remsN} remove(s)</span>
       <span class="cm">~ ${modsN} modify(ies)</span>
-      <span style="color:#7d8590">(unchanged: ${diff.unchanged || 0})</span>
+      <span style="color:#57606a">(unchanged: ${diff.unchanged || 0})</span>
     </div>`);
     lines.push('<details><summary>row-level diff</summary><div class="diff-rows">');
     for (const r of (diff.adds || [])) {
@@ -1866,11 +1878,11 @@
       console.warn('PIM Manager naming-convention warnings:\n  ' + valErrs.join('\n  '));
       const proceed = await showConfirm('Naming-convention warnings',
         '<p><b>' + valErrs.length + '</b> row(s) don\'t match the configured PIM group-tag pattern. This is usually fine -- the strict pattern only applies to permission groups, not role / department / AD-synced groups.</p>' +
-        '<details><summary style="cursor:pointer;color:#7d8590">Show details (first 20)</summary><ul>' +
+        '<details><summary style="cursor:pointer;color:#57606a">Show details (first 20)</summary><ul>' +
         valErrs.slice(0, 20).map(e => '<li>' + escapeHtml(e) + '</li>').join('') +
         (valErrs.length > 20 ? '<li>... and ' + (valErrs.length - 20) + ' more (see browser console)</li>' : '') +
         '</ul></details>' +
-        '<p style="color:#7d8590">Tighten the pattern by setting <code>$global:PIM_NamingConventions.PimGroupTagRegex</code> in your <code>config/PIM4EntraPS.NamingConventions.custom.ps1</code>.</p>' +
+        '<p style="color:#57606a">Tighten the pattern by setting <code>$global:PIM_NamingConventions.PimGroupTagRegex</code> in your <code>config/PIM4EntraPS.NamingConventions.custom.ps1</code>.</p>' +
         '<p>Commit anyway?</p>',
         true);
       if (!proceed) { status.textContent = 'Commit cancelled.'; return; }
@@ -2015,7 +2027,7 @@
     ranAt.textContent = 'ran ' + r.ranAt;
     const cf = r.cacheFreshness || {};
     cacheStatus.innerHTML = ['entraRoles','aus','azureScopes'].map(k =>
-      'cache.' + k + ': <b style="color:' + (cf[k] === 'live' ? '#7ee787' : (cf[k] === 'stale' ? '#ffdf5d' : '#ffa198')) + '">' + escapeHtml(cf[k] || 'unknown') + '</b>'
+      'cache.' + k + ': <b style="color:' + (cf[k] === 'live' ? '#1a7f37' : (cf[k] === 'stale' ? '#9a6700' : '#cf222e')) + '">' + escapeHtml(cf[k] || 'unknown') + '</b>'
     ).join(' &middot; ');
 
     // Re-fill CSV dropdown the first time we see this report.
@@ -2065,7 +2077,7 @@
       html.push('<div class="v-group"><div class="v-group-h">' + escapeHtml(sev) + ' (' + totalSev + ')</div>');
       for (const c of csvs) {
         const items = bySev[sev][c];
-        html.push('<div style="margin:6px 0 8px 0;"><div style="font-size:11.5px; color:#9aa6b2; margin-bottom:3px;"><b>' + escapeHtml(c) + '</b> &mdash; ' + items.length + '</div>');
+        html.push('<div style="margin:6px 0 8px 0;"><div style="font-size:11.5px; color:#6e7681; margin-bottom:3px;"><b>' + escapeHtml(c) + '</b> &mdash; ' + items.length + '</div>');
         for (const v of items) {
           const rowLabel = (v.Row != null) ? ('row ' + (Number(v.Row) + 1)) : 'whole-file';
           const colLabel = v.Column ? (' &middot; column <b>' + escapeHtml(v.Column) + '</b>') : '';
@@ -2122,9 +2134,9 @@
         try {
           await actionRemoveOrphanRow(el.dataset.csv, parseInt(el.dataset.row, 10));
           el.textContent = '\u2713 Staged for delete (commit on Save tab)';
-          el.style.background = '#1f6f3f22';
-          el.style.color = '#7ee787';
-          el.style.borderColor = '#3fb950';
+          el.style.background = '#dafbe1';
+          el.style.color = '#1a7f37';
+          el.style.borderColor = '#1a7f37';
         } catch (e) {
           el.textContent = orig;
           el.disabled = false;
@@ -2163,7 +2175,7 @@
       const statusEl = document.getElementById('vResults');
       if (statusEl) {
         const toast = document.createElement('div');
-        toast.style.cssText = 'background:#3b1f1f; color:#ffa198; padding:6px 12px; margin:6px 0; border-radius:5px; font-size:12px;';
+        toast.style.cssText = 'background:#ffebe9; color:#cf222e; padding:6px 12px; margin:6px 0; border-radius:5px; font-size:12px;';
         toast.innerHTML = '&#10003; Marked row ' + (rowIdx + 1) + ' of ' + escapeHtml(base) + ' for deletion. Open the <b>Save</b> tab to commit.';
         statusEl.insertBefore(toast, statusEl.firstChild);
         setTimeout(() => { try { toast.remove(); } catch (_) {} }, 6000);
@@ -2191,24 +2203,24 @@
     const bg = document.getElementById('modalBg');
     if (!bg) { alert('Modal container missing.'); return; }
     bg.innerHTML =
-      '<div id="fkAddDlg" style="background:#161b22; border:1px solid #30363d; border-radius:8px; padding:18px 22px; min-width:560px; max-width:680px;">' +
+      '<div id="fkAddDlg" style="background:#f6f8fa; border:1px solid #d0d7de; border-radius:8px; padding:18px 22px; min-width:560px; max-width:680px;">' +
         '<h2 style="margin:0 0 6px 0; font-size:14px;">Fix all auto-fixable errors</h2>' +
-        '<div style="color:#7d8590; font-size:11.5px; margin-bottom:14px;">All changes go into <b>pending</b>. Nothing writes to disk until you commit on the Save tab. Re-run validation after applying to see what cleared.</div>' +
+        '<div style="color:#57606a; font-size:11.5px; margin-bottom:14px;">All changes go into <b>pending</b>. Nothing writes to disk until you commit on the Save tab. Re-run validation after applying to see what cleared.</div>' +
 
-        '<div class="field"><label>' + fkOrphans.length + ' &times; <b>PIM-FK-001</b> orphan assignment(s) <span style="color:#7d8590">&mdash; GroupTag referenced but not defined</span></label>' +
+        '<div class="field"><label>' + fkOrphans.length + ' &times; <b>PIM-FK-001</b> orphan assignment(s) <span style="color:#57606a">&mdash; GroupTag referenced but not defined</span></label>' +
           '<select id="fxFkAction"' + (fkOrphans.length === 0 ? ' disabled' : '') + '>' +
             '<option value="skip">Skip (leave as is)</option>' +
             '<option value="add" selected>Add empty definition for each missing tag (non-destructive)</option>' +
             '<option value="delete">Delete the assignment row(s) (destructive)</option>' +
           '</select></div>' +
 
-        '<div class="field"><label>' + staleRoles.length + ' &times; <b>PIM-STALE-001</b> stale Entra role(s) <span style="color:#7d8590">&mdash; role name not in tenant cache (renamed / removed by Microsoft)</span></label>' +
+        '<div class="field"><label>' + staleRoles.length + ' &times; <b>PIM-STALE-001</b> stale Entra role(s) <span style="color:#57606a">&mdash; role name not in tenant cache (renamed / removed by Microsoft)</span></label>' +
           '<select id="fxStaleAction"' + (staleRoles.length === 0 ? ' disabled' : '') + '>' +
             '<option value="skip">Skip (leave as is)</option>' +
             '<option value="delete" selected>Delete the assignment row(s) (Microsoft removed / renamed the role)</option>' +
           '</select></div>' +
 
-        '<div class="field"><label>' + raActive.length + ' &times; <b>PIM-RA-002</b> Active-on-role-assignable <span style="color:#7d8590">&mdash; Entra rejects Active assignments to role-assignable groups</span></label>' +
+        '<div class="field"><label>' + raActive.length + ' &times; <b>PIM-RA-002</b> Active-on-role-assignable <span style="color:#57606a">&mdash; Entra rejects Active assignments to role-assignable groups</span></label>' +
           '<select id="fxRaAction"' + (raActive.length === 0 ? ' disabled' : '') + '>' +
             '<option value="skip">Skip (leave as is)</option>' +
             '<option value="eligible" selected>Change AssignmentType to Eligible (Entra-compliant)</option>' +
@@ -2216,7 +2228,7 @@
 
         '<div style="display:flex; gap:10px; margin-top:16px; justify-content:flex-end;">' +
           '<button id="fxCancel">Cancel</button>' +
-          '<button id="fxApply" class="primary" style="background:#1f6feb; border-color:#1f6feb; color:#fff;">Apply to pending changes</button>' +
+          '<button id="fxApply" class="primary" style="background:#0969da; border-color:#0969da; color:#fff;">Apply to pending changes</button>' +
         '</div>' +
       '</div>';
     bg.classList.add('active');
@@ -2232,7 +2244,7 @@
         const statusEl = document.getElementById('vResults');
         if (statusEl) {
           const toast = document.createElement('div');
-          toast.style.cssText = 'background:#1f6f3f22; color:#7ee787; padding:8px 12px; margin:6px 0; border-radius:5px; font-size:12px;';
+          toast.style.cssText = 'background:#dafbe1; color:#1a7f37; padding:8px 12px; margin:6px 0; border-radius:5px; font-size:12px;';
           toast.innerHTML = '&#10003; Applied: ' +
             result.fkAdded + ' definition(s) added, ' +
             result.fkDeleted + ' orphan assignment(s) marked for delete, ' +
@@ -2448,21 +2460,21 @@
     const bg = document.getElementById('modalBg');
     if (!bg) { alert('Modal container missing.'); return; }
     bg.innerHTML =
-      '<div id="fkAddDlg" style="background:#161b22; border:1px solid #30363d; border-radius:8px; padding:18px 22px; min-width:460px; max-width:560px;">' +
-        '<h2 style="margin:0 0 6px 0; font-size:14px;">Re-add definition for <code style="color:#7ee787">' + escapeHtml(missingTag) + '</code></h2>' +
-        '<div style="color:#7d8590; font-size:11.5px; margin-bottom:14px;">Creates one row in the chosen <code>PIM-Definitions-*</code> CSV. The change is staged into pending; nothing writes to disk until you commit on the Save tab.</div>' +
+      '<div id="fkAddDlg" style="background:#f6f8fa; border:1px solid #d0d7de; border-radius:8px; padding:18px 22px; min-width:460px; max-width:560px;">' +
+        '<h2 style="margin:0 0 6px 0; font-size:14px;">Re-add definition for <code style="color:#1a7f37">' + escapeHtml(missingTag) + '</code></h2>' +
+        '<div style="color:#57606a; font-size:11.5px; margin-bottom:14px;">Creates one row in the chosen <code>PIM-Definitions-*</code> CSV. The change is staged into pending; nothing writes to disk until you commit on the Save tab.</div>' +
         '<div class="field"><label>Which kind of definition?</label>' +
           '<select id="fkBase">' +
             defOptions.map(o => '<option value="' + o.base + '"' + (o.base === suggestedBase ? ' selected' : '') + '>' + o.label + '</option>').join('') +
           '</select></div>' +
         '<div class="field"><label>GroupTag (matches assignment rows)</label><input id="fkTag" value="' + escapeHtml(missingTag) + '"></div>' +
-        '<div class="field"><label>GroupName (Entra display name) <span style="color:#f85149">*</span></label><input id="fkName" value="' + escapeHtml(suggestedGroupName) + '" placeholder="' + escapeHtml(suggestedGroupName) + '"></div>' +
+        '<div class="field"><label>GroupName (Entra display name) <span style="color:#cf222e">*</span></label><input id="fkName" value="' + escapeHtml(suggestedGroupName) + '" placeholder="' + escapeHtml(suggestedGroupName) + '"></div>' +
         '<div class="field"><label>GroupDescription</label><input id="fkDesc" placeholder="One-line purpose"></div>' +
         '<div class="field"><label>Role-assignable group? (required when this definition is a target of Entra ID role assignments)</label>' +
           '<select id="fkIra"><option value="FALSE">No (default)</option><option value="TRUE">Yes</option></select></div>' +
         '<div style="display:flex; gap:10px; margin-top:16px; justify-content:flex-end;">' +
-          '<button id="fkCancel" style="background:#21262d;">Cancel</button>' +
-          '<button id="fkOk" class="primary" style="background:#1f6feb; border-color:#1f6feb; color:#fff;">Add to pending changes</button>' +
+          '<button id="fkCancel" style="background:#eaeef2;">Cancel</button>' +
+          '<button id="fkOk" class="primary" style="background:#0969da; border-color:#0969da; color:#fff;">Add to pending changes</button>' +
         '</div>' +
       '</div>';
     bg.classList.add('active');
@@ -2498,7 +2510,7 @@
         const statusEl = document.getElementById('vResults');
         if (statusEl) {
           const toast = document.createElement('div');
-          toast.style.cssText = 'background:#1f6f3f22; color:#7ee787; padding:6px 12px; margin:6px 0; border-radius:5px; font-size:12px;';
+          toast.style.cssText = 'background:#dafbe1; color:#1a7f37; padding:6px 12px; margin:6px 0; border-radius:5px; font-size:12px;';
           toast.innerHTML = '&#10003; Added definition row for <b>' + escapeHtml(tag) + '</b> to ' + escapeHtml(base) + '. Re-run Validate to clear PIM-FK-001 on referencing rows.';
           statusEl.insertBefore(toast, statusEl.firstChild);
           setTimeout(() => { try { toast.remove(); } catch (_) {} }, 8000);
@@ -2530,7 +2542,7 @@
         '<span>&#9888; <b>' + s.warnings + '</b> warning(s), <b>' + s.infos + '</b> info(s) &mdash; review before committing.</span>' +
         '<span class="spacer"></span><a data-act="show-val">Show details</a></div>';
     } else {
-      bar.innerHTML = '<div class="save-val-banner warn" style="background:#1f6f3f22; border-color:#2a563a; color:#7ee787;">' +
+      bar.innerHTML = '<div class="save-val-banner warn" style="background:#dafbe1; border-color:#1a7f37; color:#1a7f37;">' +
         '<span>&#10003; All pre-flight checks pass.</span></div>';
     }
     const link = bar.querySelector('a[data-act=show-val]');
@@ -2827,7 +2839,7 @@
     if (!bar) {
       bar = document.createElement('div');
       bar.id = 'wizErrBar';
-      bar.style.cssText = 'color:#ffa198; font-size:11.5px; margin-right:auto; padding-left:6px;';
+      bar.style.cssText = 'color:#cf222e; font-size:11.5px; margin-right:auto; padding-left:6px;';
       document.querySelector('.wiz-actions').insertBefore(bar, document.querySelector('.wiz-actions .spacer'));
     }
     bar.textContent = msg;
@@ -3262,7 +3274,7 @@
             ));
             const items = listRoleGroups().map(g => ({ key:g.tag, label:g.label, sub:g.tag }));
             const cntEl = document.createElement('div');
-            cntEl.style.cssText = 'color:#7d8590; font-size:11px; margin:6px 0;';
+            cntEl.style.cssText = 'color:#57606a; font-size:11px; margin:6px 0;';
             const refreshCnt = () => { cntEl.textContent = s.roleGroupSel.size + ' role group(s) selected'; };
             const picker = wuxPicklist({ items, multi:true, selected:s.roleGroupSel, onChange: refreshCnt });
             f.appendChild(picker);
@@ -3349,9 +3361,9 @@
     body.innerHTML = `
       <div class="wiz-sub" style="padding:10px 14px 0 14px;">Onboard a new admin. Generates 1 row in <b>Account-Definitions-Admins</b> + optionally N rows in <b>PIM-Assignments-Admins</b> from the role groups you pick.</div>
       <div style="padding:10px 14px;">
-        <div class="field"><label>First name <span style="color:#f85149">*</span></label><input id="wzFn"></div>
-        <div class="field"><label>Last name <span style="color:#f85149">*</span></label><input id="wzLn"></div>
-        <div class="field"><label>Initials <span style="color:#f85149">*</span></label><input id="wzIn" maxlength="6" style="text-transform:uppercase"></div>
+        <div class="field"><label>First name <span style="color:#cf222e">*</span></label><input id="wzFn"></div>
+        <div class="field"><label>Last name <span style="color:#cf222e">*</span></label><input id="wzLn"></div>
+        <div class="field"><label>Initials <span style="color:#cf222e">*</span></label><input id="wzIn" maxlength="6" style="text-transform:uppercase"></div>
         <div class="field"><label>Tier</label><select id="wzTier"><option>T0</option><option>T1</option><option>T2</option></select></div>
         <div class="field"><label>Level (L0-L9)</label><select id="wzLevel">${[0,1,2,3,4,5,6,7,8,9].map(i => `<option>L${i}</option>`).join('')}</select></div>
         <div class="field"><label>Target platform</label><select id="wzPlat"><option>ID</option><option>AD</option></select></div>
@@ -3359,8 +3371,8 @@
         <div class="field"><label>UPN suffix</label><input id="wzUpn" value="${escapeHtml(upnSuffix)}"></div>
         <div class="field field-full"><label>Role groups to assign</label>
           <div class="multi" id="wzRoles">${roleGroups.length === 0
-            ? '<div style="color:#7d8590;font-size:11.5px">(no role groups in PIM-Definitions-Roles)</div>'
-            : roleGroups.map(rg => `<label><input type="checkbox" value="${escapeHtml(rg.tag)}"> ${escapeHtml(rg.name)} <span style="color:#7d8590;font-size:10.5px">(${escapeHtml(rg.tag)})</span> <select class="rg-asg" data-tag="${escapeHtml(rg.tag)}" style="margin-left:6px; padding:1px 4px"><option>Eligible</option><option>Active</option></select></label>`).join('')}</div>
+            ? '<div style="color:#57606a;font-size:11.5px">(no role groups in PIM-Definitions-Roles)</div>'
+            : roleGroups.map(rg => `<label><input type="checkbox" value="${escapeHtml(rg.tag)}"> ${escapeHtml(rg.name)} <span style="color:#57606a;font-size:10.5px">(${escapeHtml(rg.tag)})</span> <select class="rg-asg" data-tag="${escapeHtml(rg.tag)}" style="margin-left:6px; padding:1px 4px"><option>Eligible</option><option>Active</option></select></label>`).join('')}</div>
         </div>
         <div class="preview" id="wzPreview"></div>
         <div class="err" id="wzErr" style="display:none"></div>
@@ -3580,21 +3592,21 @@
               wrap.innerHTML = '';
               s.grantedRoles.forEach((g, i) => {
                 const row = document.createElement('div');
-                row.style.cssText = 'background:#0d1117; border:1px solid #30363d; border-radius:6px; padding:10px; margin-bottom:6px;';
+                row.style.cssText = 'background:#f6f8fa; border:1px solid #d0d7de; border-radius:6px; padding:10px; margin-bottom:6px;';
                 const roleOpts = (tlEntra.items || []).map(r => '<option value="' + escapeHtml(r.displayName) + '"' + (g.roleDefinitionName===r.displayName?' selected':'') + '>' + escapeHtml(r.displayName) + '</option>').join('');
                 row.innerHTML =
                   '<div style="display:flex; gap:6px; align-items:start;">' +
                     (roleOpts
-                      ? '<select class="rd-name" style="flex:1; padding:5px 7px; border:1px solid #30363d; border-radius:4px; background:#0d1117; color:#e6edf3; font-size:12px;"><option value="">(pick one)</option>' + roleOpts + '</select>'
-                      : '<input class="rd-name" type="text" value="' + escapeHtml(g.roleDefinitionName) + '" placeholder="e.g. User Administrator" style="flex:1; padding:5px 7px; border:1px solid #30363d; border-radius:4px; background:#0d1117; color:#e6edf3; font-size:12px;">') +
-                    '<select class="rd-at" style="padding:5px 7px; border:1px solid #30363d; border-radius:4px; background:#0d1117; color:#e6edf3; font-size:12px;">' +
+                      ? '<select class="rd-name" style="flex:1; padding:5px 7px; border:1px solid #d0d7de; border-radius:4px; background:#f6f8fa; color:#1a1a1a; font-size:12px;"><option value="">(pick one)</option>' + roleOpts + '</select>'
+                      : '<input class="rd-name" type="text" value="' + escapeHtml(g.roleDefinitionName) + '" placeholder="e.g. User Administrator" style="flex:1; padding:5px 7px; border:1px solid #d0d7de; border-radius:4px; background:#f6f8fa; color:#1a1a1a; font-size:12px;">') +
+                    '<select class="rd-at" style="padding:5px 7px; border:1px solid #d0d7de; border-radius:4px; background:#f6f8fa; color:#1a1a1a; font-size:12px;">' +
                       '<option value="Eligible"' + (g.assignmentType==='Eligible'?' selected':'') + '>Eligible</option>' +
                       '<option value="Active"' + (g.assignmentType==='Active'?' selected':'') + '>Active</option>' +
                     '</select>' +
-                    '<input class="rd-life" type="number" value="' + g.lifetimeDays + '" style="width:80px; padding:5px 7px; border:1px solid #30363d; border-radius:4px; background:#0d1117; color:#e6edf3; font-size:12px;">' +
+                    '<input class="rd-life" type="number" value="' + g.lifetimeDays + '" style="width:80px; padding:5px 7px; border:1px solid #d0d7de; border-radius:4px; background:#f6f8fa; color:#1a1a1a; font-size:12px;">' +
                     '<button class="rd-rm danger" title="remove">x</button>' +
                   '</div>' +
-                  '<div style="color:#7d8590; font-size:10.5px; margin-top:3px;">Role definition name &middot; Assignment type &middot; Days until expiry' + (tlEntra.items && tlEntra.items.length ? '' : ' (refresh tenant lists for a dropdown)') + '</div>';
+                  '<div style="color:#57606a; font-size:10.5px; margin-top:3px;">Role definition name &middot; Assignment type &middot; Days until expiry' + (tlEntra.items && tlEntra.items.length ? '' : ' (refresh tenant lists for a dropdown)') + '</div>';
                 row.querySelector('.rd-name').addEventListener('input', (e) => { g.roleDefinitionName = e.target.value; });
                 row.querySelector('.rd-name').addEventListener('change', (e) => { g.roleDefinitionName = e.target.value; });
                 row.querySelector('.rd-at').onchange = (e) => { g.assignmentType = e.target.value; };
@@ -3623,7 +3635,7 @@
             ));
             const items = listRoleGroups().map(g => ({ key:g.tag, label:g.label, sub:g.tag }));
             const cntEl = document.createElement('div');
-            cntEl.style.cssText = 'color:#7d8590; font-size:11px; margin-top:6px;';
+            cntEl.style.cssText = 'color:#57606a; font-size:11px; margin-top:6px;';
             const refresh = () => { cntEl.textContent = s.nestedIn.size + ' role group(s) selected'; };
             f.appendChild(wuxPicklist({ items, multi:true, selected:s.nestedIn, onChange: refresh }));
             refresh(); f.appendChild(cntEl);
@@ -3717,13 +3729,13 @@
       <div class="wiz-sub" style="padding:10px 14px 0 14px;">A capability bundle that grants an Entra ID role (or AU-scoped role). Generates 1 def row + 1 assignment row + optional nest rows.</div>
       <div style="padding:10px 14px;">
         <div class="field"><label>Service</label><input id="wzSvc" placeholder="e.g. Entra-ID"></div>
-        <div class="field"><label>Capability name <span style="color:#f85149">*</span></label><input id="wzCap" placeholder="e.g. AppAdmin"></div>
+        <div class="field"><label>Capability name <span style="color:#cf222e">*</span></label><input id="wzCap" placeholder="e.g. AppAdmin"></div>
         <div class="field"><label>Level</label><select id="wzLevel">${[0,1,2,3,4,5,6,7,8,9].map(i => `<option>L${i}</option>`).join('')}</select></div>
         <div class="field"><label>Tier</label><select id="wzTier"><option>T0</option><option>T1</option><option>T2</option></select></div>
         <div class="field"><label>Code</label><select id="wzCode"><option>CP</option><option>WDP</option><option>MP</option><option>APP</option><option>USER</option></select></div>
         <div class="field"><label>Domain</label><select id="wzDom"><option>ID</option><option>RES</option><option>DAT</option></select></div>
         <div class="field"><label>Definition CSV</label><select id="wzDefBase">${defTargets.map(d => `<option value="${escapeHtml(d.base)}">${escapeHtml(d.label)}</option>`).join('')}</select></div>
-        <div class="field"><label>Target Entra role <span style="color:#f85149">*</span> <span class="cache-badge-slot" data-list-key="entraRoles"></span></label>
+        <div class="field"><label>Target Entra role <span style="color:#cf222e">*</span> <span class="cache-badge-slot" data-list-key="entraRoles"></span></label>
           <select id="wzRole"><option value="">(pick one)</option>${tlEntra.items.map(r => `<option value="${escapeHtml(r.displayName)}">${escapeHtml(r.displayName)}</option>`).join('')}</select>
         </div>
         <div class="field"><label>AU scope (optional) <span class="cache-badge-slot" data-list-key="aus"></span></label>
@@ -3731,7 +3743,7 @@
         </div>
         <div class="field"><label>Assignment type</label><select id="wzAsgType"><option>Eligible</option><option>Active</option></select></div>
         <div class="field field-full"><label>Nest into role groups</label>
-          <div class="multi">${roleGroups.length === 0 ? '<div style="color:#7d8590">(none)</div>' : roleGroups.map(rg => `<label><input type="checkbox" value="${escapeHtml(rg.GroupTag)}"> ${escapeHtml(rg.GroupName||rg.GroupTag)} <span style="color:#7d8590;font-size:10.5px">(${escapeHtml(rg.GroupTag)})</span></label>`).join('')}</div>
+          <div class="multi">${roleGroups.length === 0 ? '<div style="color:#57606a">(none)</div>' : roleGroups.map(rg => `<label><input type="checkbox" value="${escapeHtml(rg.GroupTag)}"> ${escapeHtml(rg.GroupName||rg.GroupTag)} <span style="color:#57606a;font-size:10.5px">(${escapeHtml(rg.GroupTag)})</span></label>`).join('')}</div>
         </div>
         <div class="preview" id="wzPreview"></div>
         <div class="err" id="wzErr" style="display:none"></div>
@@ -3906,7 +3918,7 @@
             f.appendChild(wuxWhy('Same as Entra perm-groups: optionally nest under one or more role groups.'));
             const items = listRoleGroups().map(g => ({ key:g.tag, label:g.label, sub:g.tag }));
             const cntEl = document.createElement('div');
-            cntEl.style.cssText = 'color:#7d8590; font-size:11px; margin-top:6px;';
+            cntEl.style.cssText = 'color:#57606a; font-size:11px; margin-top:6px;';
             const refresh = () => { cntEl.textContent = s.nestedIn.size + ' role group(s) selected'; };
             f.appendChild(wuxPicklist({ items, multi:true, selected:s.nestedIn, onChange: refresh }));
             refresh(); f.appendChild(cntEl);
@@ -3978,19 +3990,19 @@
       <div class="wiz-sub" style="padding:10px 14px 0 14px;">A capability bundle that grants an Azure RBAC role at a chosen scope. Generates 1 def row + 1 assignment row + optional nest rows.</div>
       <div style="padding:10px 14px;">
         <div class="field"><label>Service</label><input id="wzSvc" value="AzRes"></div>
-        <div class="field"><label>Capability name <span style="color:#f85149">*</span></label><input id="wzCap" placeholder="e.g. mg-PROD-Owner"></div>
+        <div class="field"><label>Capability name <span style="color:#cf222e">*</span></label><input id="wzCap" placeholder="e.g. mg-PROD-Owner"></div>
         <div class="field"><label>Level</label><select id="wzLevel">${[0,1,2,3,4,5,6,7,8,9].map(i => `<option ${i===5?'selected':''}>L${i}</option>`).join('')}</select></div>
         <div class="field"><label>Tier</label><select id="wzTier"><option>T0</option><option selected>T1</option><option>T2</option></select></div>
         <div class="field"><label>Code</label><select id="wzCode"><option>CP</option><option selected>WDP</option><option>MP</option><option>APP</option><option>USER</option></select></div>
         <div class="field"><label>Domain</label><select id="wzDom"><option>ID</option><option selected>RES</option><option>DAT</option></select></div>
         <div class="field"><label>Definition CSV</label><select id="wzDefBase">${defTargets.map(d => `<option value="${escapeHtml(d.base)}">${escapeHtml(d.label)}</option>`).join('')}</select></div>
-        <div class="field"><label>AzScope <span style="color:#f85149">*</span> <span class="cache-badge-slot" data-list-key="azureScopes"></span></label>
+        <div class="field"><label>AzScope <span style="color:#cf222e">*</span> <span class="cache-badge-slot" data-list-key="azureScopes"></span></label>
           <select id="wzScope"><option value="">(pick one)</option>${tlScopes.items.map(s => `<option value="${escapeHtml(s.scopePath||s.id)}">${escapeHtml((s.displayName||s.id)+' ('+(s.type||'')+')')}</option>`).join('')}<option value="__custom__">Custom ARM path...</option></select>
         </div>
         <div class="field"><label>Azure RBAC role (free text)</label><input id="wzRbac" value="Reader" placeholder="e.g. Owner / Contributor / Reader"></div>
         <div class="field"><label>Assignment type</label><select id="wzAsgType"><option>Eligible</option><option>Active</option></select></div>
         <div class="field field-full"><label>Nest into role groups</label>
-          <div class="multi">${roleGroups.length === 0 ? '<div style="color:#7d8590">(none)</div>' : roleGroups.map(rg => `<label><input type="checkbox" value="${escapeHtml(rg.GroupTag)}"> ${escapeHtml(rg.GroupName||rg.GroupTag)} <span style="color:#7d8590;font-size:10.5px">(${escapeHtml(rg.GroupTag)})</span></label>`).join('')}</div>
+          <div class="multi">${roleGroups.length === 0 ? '<div style="color:#57606a">(none)</div>' : roleGroups.map(rg => `<label><input type="checkbox" value="${escapeHtml(rg.GroupTag)}"> ${escapeHtml(rg.GroupName||rg.GroupTag)} <span style="color:#57606a;font-size:10.5px">(${escapeHtml(rg.GroupTag)})</span></label>`).join('')}</div>
         </div>
         <div class="preview" id="wzPreview"></div>
         <div class="err" id="wzErr" style="display:none"></div>
@@ -4135,7 +4147,7 @@
               'Pick the admins who get access during the project. Each becomes one row in <code>PIM-Assignments-Admins.custom.csv</code> with the short lifetime you chose.'
             ));
             const items = listAdminsLite().map(a => ({ key:a.upn, label:a.label, sub:a.upn }));
-            const cntEl = document.createElement('div'); cntEl.style.cssText='color:#7d8590; font-size:11px; margin-top:6px;';
+            const cntEl = document.createElement('div'); cntEl.style.cssText='color:#57606a; font-size:11px; margin-top:6px;';
             const refresh = () => { cntEl.textContent = s.adminSel.size + ' admin(s) selected'; };
             f.appendChild(wuxPicklist({ items, multi:true, selected:s.adminSel, onChange: refresh }));
             refresh(); f.appendChild(cntEl);
@@ -4154,7 +4166,7 @@
               'Pick the <b>permission groups</b> the project gets. Each becomes a nesting row in <code>PIM-Assignments-Groups.custom.csv</code>.'
             ));
             const items = listPermGroups().map(g => ({ key:g.tag, label:g.label, sub:g.tag }));
-            const cntEl = document.createElement('div'); cntEl.style.cssText='color:#7d8590; font-size:11px; margin-top:6px;';
+            const cntEl = document.createElement('div'); cntEl.style.cssText='color:#57606a; font-size:11px; margin-top:6px;';
             const refresh = () => { cntEl.textContent = s.permSel.size + ' permission group(s) selected'; };
             f.appendChild(wuxPicklist({ items, multi:true, selected:s.permSel, onChange: refresh }));
             refresh(); f.appendChild(cntEl);
@@ -4278,7 +4290,7 @@
               'Pick the <b>permission groups</b> this role grants. Each pick becomes one row in <code>PIM-Assignments-Groups.custom.csv</code>.'
             ));
             const items = listPermGroups().map(g => ({ key:g.tag, label:g.label, sub:g.tag + ' (' + (g.source||'') + ')' }));
-            const cntEl = document.createElement('div'); cntEl.style.cssText='color:#7d8590; font-size:11px; margin-top:6px;';
+            const cntEl = document.createElement('div'); cntEl.style.cssText='color:#57606a; font-size:11px; margin-top:6px;';
             const refresh = () => { cntEl.textContent = s.permSel.size + ' permission group(s) selected'; };
             f.appendChild(wuxPicklist({ items, multi:true, selected:s.permSel, onChange: refresh }));
             refresh(); f.appendChild(cntEl);
@@ -4293,7 +4305,7 @@
               'Optionally assign admins to this new role group now. Each pick becomes one row in <code>PIM-Assignments-Admins.custom.csv</code>.'
             ));
             const items = listAdminsLite().map(a => ({ key:a.upn, label:a.label, sub:a.upn + (a.tier ? ' . ' + a.tier : '') }));
-            const cntEl = document.createElement('div'); cntEl.style.cssText='color:#7d8590; font-size:11px; margin-top:6px;';
+            const cntEl = document.createElement('div'); cntEl.style.cssText='color:#57606a; font-size:11px; margin-top:6px;';
             const refresh = () => { cntEl.textContent = s.adminSel.size + ' admin(s) selected'; };
             f.appendChild(wuxPicklist({ items, multi:true, selected:s.adminSel, onChange: refresh }));
             refresh(); f.appendChild(cntEl);
@@ -4494,15 +4506,15 @@
     body.innerHTML = `
       <div class="wiz-sub" style="padding:10px 14px 0 14px;">Generates the v2 <b>PIM-PROJECT-*</b> pattern from DESIGN.md &sect;12: one project-scoped permission group (Active) + one maintenance group (Eligible) + Active+Eligible admin assignments to the owning admin.</div>
       <div style="padding:10px 14px;">
-        <div class="field"><label>Project short code <span style="color:#f85149">*</span></label><input id="wzProj" placeholder="e.g. LZ-MyProject"></div>
+        <div class="field"><label>Project short code <span style="color:#cf222e">*</span></label><input id="wzProj" placeholder="e.g. LZ-MyProject"></div>
         <div class="field"><label>Service</label><input id="wzSvc" value="AzRes"></div>
-        <div class="field"><label>AzScope <span style="color:#f85149">*</span> <span class="cache-badge-slot" data-list-key="azureScopes"></span></label>
+        <div class="field"><label>AzScope <span style="color:#cf222e">*</span> <span class="cache-badge-slot" data-list-key="azureScopes"></span></label>
           <select id="wzScope"><option value="">(pick one)</option>${tlScopes.items.map(s => `<option value="${escapeHtml(s.scopePath||s.id)}">${escapeHtml((s.displayName||s.id)+' ('+(s.type||'')+')')}</option>`).join('')}<option value="__custom__">Custom ARM path...</option></select>
         </div>
         <div class="field"><label>RBAC role at scope</label><input id="wzRbac" value="Owner"></div>
         <div class="field"><label>Tier</label><select id="wzTier"><option>T0</option><option selected>T1</option><option>T2</option></select></div>
         <div class="field"><label>Level</label><select id="wzLevel">${[0,1,2,3,4,5,6,7,8,9].map(i => `<option ${i===5?'selected':''}>L${i}</option>`).join('')}</select></div>
-        <div class="field"><label>Owning admin <span style="color:#f85149">*</span></label>
+        <div class="field"><label>Owning admin <span style="color:#cf222e">*</span></label>
           <select id="wzOwner"><option value="">(pick one)</option>${admins.map(a => `<option value="${escapeHtml(a.UserPrincipalName)}">${escapeHtml((a.DisplayName||a.UserPrincipalName))}</option>`).join('')}</select>
         </div>
         <div class="preview" id="wzPreview"></div>
@@ -4756,7 +4768,7 @@
     const n = REV.rows.length;
     if (n > 0) {
       badge.style.display = '';
-      badge.style.background = '#1f6feb';
+      badge.style.background = '#0969da';
       badge.textContent = String(n);
     } else {
       badge.style.display = 'none';
@@ -4946,7 +4958,7 @@
       '<p>This will fire <b>' + rows.length + '</b> admin-remove call' + (rows.length === 1 ? '' : 's') +
       ' against Microsoft Graph / Azure Resource Manager. <b>This cannot be undone.</b></p>' +
       '<p>The affected principals will need to re-activate via PIM if they need access.</p>' +
-      '<p style="color:#7d8590;font-size:11.5px">Justification: <code style="color:#e6edf3">' +
+      '<p style="color:#57606a;font-size:11.5px">Justification: <code style="color:#1a1a1a">' +
       escapeHtml(justification) + '</code></p>',
       true
     );
@@ -4985,8 +4997,8 @@
     const okCount  = results.filter(r => r && r.ok).length;
     const errCount = results.length - okCount;
     const out = [];
-    out.push('<div class="rev-rs-h">Revoke batch finished: <span style="color:#7ee787">' + okCount +
-             ' ok</span>, <span style="color:#ffa198">' + errCount + ' failed</span></div>');
+    out.push('<div class="rev-rs-h">Revoke batch finished: <span style="color:#1a7f37">' + okCount +
+             ' ok</span>, <span style="color:#cf222e">' + errCount + ' failed</span></div>');
     for (const r of results) {
       const row = REV.rows.find(x => x.id === r.id) || { principal:'?', role:'?', type:'?' };
       const label = (row.principal || '') + ' / ' + (row.role || '') + ' [' + (row.type || '') + ']';
