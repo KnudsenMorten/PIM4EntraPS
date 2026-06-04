@@ -1,9 +1,10 @@
 # Release notes for PIM4EntraPS
 
-## v2.4.52
+## v2.4.53
 
 Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monorepo:
 
+- release: PIM4EntraPS v2.4.53 - re-skin PIM Manager to match PIM Activator brand (light palette + branded blue PIM MANAGER banner) (085269d8)
 - release: PIM4EntraPS v2.4.52 - fix documented extension id (regen-key ID was never wired into publishing pipeline) (891bc99b)
 - release: PIM4EntraPS v2.4.51 - default activation duration 1h -> 8h (extension v1.1.1) (ac415461)
 - release: PIM4EntraPS v2.4.50 - fix Deploy-PimActivatorClient.ps1 parameter sets so -TenantsCsv works without also requiring -Tenants (55b76be8)
@@ -33,13 +34,45 @@ Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monor
 - release: PIM4EntraPS v2.4.23 - loading message 'Loading your PIM delegations ... Please Wait' (was 'Loading eligible groups...') (7d4f6383)
 - release: PIM4EntraPS v2.4.22 - Azure RBAC iterates user subscriptions instead of tenant-root (fixes 403 AuthorizationFailed) (5a5817ea)
 - release: PIM4EntraPS v2.4.21 - popup width 980px -> 800px (980 exceeded Chromium popup max, hid Sign in button offscreen) (bb8585b7)
-- release: PIM4EntraPS v2.4.20 - wider popup (980px) + Re-sign in auto-launches OAuth + Azure RBAC consent banner with 1-3 min propagation note (3c6ab56b)
 
 ---
 
 # Release notes -- PIM4EntraPS
 
 > **Curated changelog.** The publish workflow auto-prepends recent monorepo commits as a raw activity log; this file is the human-friendly narrative on top.
+
+---
+
+## v2.4.53 -- PIM Manager re-skinned to match the PIM Activator brand (light palette + branded blue banner)
+
+The local PIM Manager (`tools/pim-manager/pim-manager.html`) was the only PIM4EntraPS UI still on a GitHub-Primer dark theme while the Activator went light + branded back in v1.0.0. Brought them in alignment so customers see one consistent look across both surfaces.
+
+### Color palette migration (dark -> light)
+
+31 unique hex values swept across the top-level `<style>` block, ~100 inline `style=""` attributes, the Cytoscape graph style sheet, and dynamic HTML-builder string literals. Mapping highlights:
+
+- Body / canvas: `#0e1116` `#0d1117` `#161b22` -> `#ffffff` / `#f6f8fa`
+- Text: `#e6edf3` -> `#1a1a1a`; muted `#7d8590` -> `#57606a`
+- Borders: `#30363d` -> `#d0d7de`; `#21262d` -> `#eaeef2`
+- Primary blue: `#1f6feb` / `#2f81f7` -> `#0969da`
+- Yellows: `#bf8700` / `#e3b341` / `#ffdf5d` -> `#9a6700`
+- Reds: `#f85149` / `#da3633` / `#ffa198` -> `#cf222e`
+- Greens: `#3fb950` / `#7ee787` -> `#1a7f37`
+
+Preserved intentionally (semantic, not theme): the Cytoscape node-kind identifier colors (`#a371f7` role-group purple, `#d2a8ff` az-resource lavender, `#db6d28` entra-role orange) -- changing these would break the on-screen legend's swatch-to-node contract.
+
+### Branded banner
+
+New `#brand` div above the tab bar: blue background (`#0969da`), white uppercase "PIM MANAGER" at 18px (matches the Activator's 17px branded header style), with a small subtitle ("PIM4EntraPS · configuration editor"). The redundant sidebar `<h1>PIM Manager</h1>` was repurposed as "Graph view" (the panel it actually labels).
+
+### Structural CSS
+
+- 2px solid `#0969da` border around `#app` (matches the Activator's blue frame).
+- Active tab indicator stays blue underlined; active tab text bumped to `#0969da` + bold for visibility.
+- Cytoscape canvas radial gradient flipped from dark to light (`#f6f8fa` -> `#ffffff`).
+- Checkbox `accent-color` updated to `#0969da`.
+
+No code logic changes -- pure visual restyle. No version bump on the extension (still v1.1.1).
 
 ---
 
