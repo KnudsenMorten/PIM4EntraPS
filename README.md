@@ -253,6 +253,16 @@ and passing `startswith(...)` to Graph.
 `tools/pim-manager/Open-PimManager.ps1` reads all `*.custom.csv` files and
 serves a five-tab SPA in your default browser:
 
+**v2.4.53 -- brand alignment with the Activator.** The Manager UI is now
+on the same light palette (`#ffffff` body, `#f6f8fa` panels, `#0969da`
+blue accents) as the PIM Activator extension, with a branded blue
+`PIM MANAGER` banner above the tab bar and solid-blue tile cards on the
+New & clone tab. Cytoscape node-kind colours (purple role groups,
+lavender Azure resources, orange Entra roles) are preserved on purpose
+-- they're the legend-to-node contract. Pure visual restyle, no
+behaviour changes.
+
+
 | Tab | What it does |
 |---|---|
 | **Graph** | Interactive directed graph: admin → role group → permission group → target. Click-to-highlight neighbourhood. Layer + edge filters. Regex search. Cytoscape.js + dagre layout. ~500 nodes / ~800 edges renders in <2s. |

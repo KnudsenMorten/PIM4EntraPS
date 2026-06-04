@@ -11,6 +11,26 @@ SOLUTIONS/PIM4EntraPS/tools/pim-manager/
 └── README.md            ← this file
 ```
 
+## Look and feel (v2.4.53)
+
+The Manager editor was the last PIM4EntraPS surface still on the
+GitHub-Primer dark theme while the Activator extension switched to a
+light + branded palette back in v1.0.0. v2.4.53 brings the Manager into
+alignment: light theme (`#ffffff` body, `#f6f8fa` panels, `#1a1a1a` text,
+`#0969da` blue accents, `#57606a` muted), a 2px solid `#0969da` frame
+around the app, a branded blue banner with a white uppercase
+`PIM MANAGER` title at 18px above the tab bar, and solid-blue tile cards
+on the New & clone tab (white text + white icons, blue shadow,
+darker-blue hover).
+
+Cytoscape node-kind identifier colours are kept as-is on purpose --
+purple role groups, lavender Azure resources, orange Entra roles --
+because they're the legend-to-node contract the operator reads the graph
+through.
+
+No code logic changed in this release; pure visual restyle. The
+Activator extension stays at v1.1.1.
+
 ## Quick start
 
 ```powershell

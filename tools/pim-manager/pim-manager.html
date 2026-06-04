@@ -299,17 +299,20 @@
 
   /* New tab (wizard launcher) */
   #newTab { display:none; }
-  #newTab.active { display:flex; flex-direction:column; padding:22px 26px; gap:18px; overflow:auto; background:#f6f8fa; }
-  #newTab .new-intro { font-size:13px; color:#57606a; max-width:780px; line-height:1.6; }
-  #newTab .new-intro b { color:#1a1a1a; }
+  #newTab.active { display:flex; flex-direction:column; padding:22px 26px; gap:18px; overflow:auto; background:#ffffff; }
+  #newTab .new-intro { font-size:13px; color:#1a1a1a; max-width:780px; line-height:1.6; }
+  #newTab .new-intro b { color:#0969da; }
   .wiz-cards { display:grid; grid-template-columns:repeat(auto-fill, minmax(280px, 1fr)); gap:14px; max-width:1100px; }
-  .wiz-card { background:#f6f8fa; border:1px solid #d0d7de; border-radius:8px; padding:14px 16px; cursor:pointer; transition:border-color .12s, transform .12s; }
-  .wiz-card:hover { border-color:#0969da; transform:translateY(-1px); }
-  .wiz-card .wiz-icon { font-size:22px; margin-bottom:6px; }
-  .wiz-card h4 { margin:0 0 6px 0; font-size:14px; color:#1a1a1a; }
-  .wiz-card .wiz-sub { font-size:11.5px; color:#57606a; line-height:1.5; }
-  .wiz-card.disabled { opacity:0.5; cursor:not-allowed; }
-  .wiz-card.disabled:hover { border-color:#d0d7de; transform:none; }
+  /* Branded blue tiles -- matches the PIM Activator header treatment.
+     White text on #0969da blue, with a slight tone shift on hover so the
+     interaction is obvious. */
+  .wiz-card { background:#0969da; border:1px solid #0969da; border-radius:8px; padding:16px 18px; cursor:pointer; transition:background .12s, transform .12s, box-shadow .12s; box-shadow:0 1px 3px rgba(9,105,218,0.25); color:#ffffff; }
+  .wiz-card:hover { background:#0860c7; border-color:#0860c7; transform:translateY(-1px); box-shadow:0 4px 10px rgba(9,105,218,0.35); }
+  .wiz-card .wiz-icon { font-size:24px; margin-bottom:8px; color:#ffffff; }
+  .wiz-card h4 { margin:0 0 6px 0; font-size:14.5px; color:#ffffff; font-weight:700; letter-spacing:0.2px; }
+  .wiz-card .wiz-sub { font-size:12px; color:rgba(255,255,255,0.92); line-height:1.55; }
+  .wiz-card.disabled { opacity:0.55; cursor:not-allowed; }
+  .wiz-card.disabled:hover { background:#0969da; border-color:#0969da; transform:none; box-shadow:0 1px 3px rgba(9,105,218,0.25); }
 
   /* Wizard modal (extends the confirm modal styles) */
   #wizModal { max-width:680px; min-width:520px; padding:0; display:flex; flex-direction:column; max-height:88vh; }

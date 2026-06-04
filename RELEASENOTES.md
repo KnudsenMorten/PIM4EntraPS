@@ -1,9 +1,11 @@
 # Release notes for PIM4EntraPS
 
-## v2.4.53
+## v2.4.54
 
 Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monorepo:
 
+- release: PIM4EntraPS v2.4.54 - READMEs catch up on the v2.4.53 PIM Manager restyle (be852908)
+- polish: PIM Manager New&clone tiles - branded blue cards with white text for stronger readability (4a9a69ea)
 - release: PIM4EntraPS v2.4.53 - re-skin PIM Manager to match PIM Activator brand (light palette + branded blue PIM MANAGER banner) (085269d8)
 - release: PIM4EntraPS v2.4.52 - fix documented extension id (regen-key ID was never wired into publishing pipeline) (891bc99b)
 - release: PIM4EntraPS v2.4.51 - default activation duration 1h -> 8h (extension v1.1.1) (ac415461)
@@ -32,14 +34,20 @@ Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monor
 - release: PIM4EntraPS v2.4.25 - 3-bucket categorisation on both Activate + My Access tabs, configurable per customer via entraGroupRegex/azureGroupRegex (chrome.storage.managed) (adaa201b)
 - release: PIM4EntraPS v2.4.24 - already-active groups sorted to bottom of Activate tab (greyed + badge + disabled checkbox) (2c1e982c)
 - release: PIM4EntraPS v2.4.23 - loading message 'Loading your PIM delegations ... Please Wait' (was 'Loading eligible groups...') (7d4f6383)
-- release: PIM4EntraPS v2.4.22 - Azure RBAC iterates user subscriptions instead of tenant-root (fixes 403 AuthorizationFailed) (5a5817ea)
-- release: PIM4EntraPS v2.4.21 - popup width 980px -> 800px (980 exceeded Chromium popup max, hid Sign in button offscreen) (bb8585b7)
 
 ---
 
 # Release notes -- PIM4EntraPS
 
 > **Curated changelog.** The publish workflow auto-prepends recent monorepo commits as a raw activity log; this file is the human-friendly narrative on top.
+
+---
+
+## v2.4.54 -- READMEs catch up on the v2.4.53 PIM Manager restyle
+
+Top-level `README.md` gains a short "v2.4.53 -- brand alignment with the Activator" paragraph in the `## PIM Manager (GUI)` section just before the 5-tab table -- light palette, branded blue PIM MANAGER banner, blue New & clone tile cards, Cytoscape graph-node colours preserved on purpose. Tool-specific `tools/pim-manager/README.md` gains a new `## Look and feel (v2.4.53)` block at the top of the doc with the same narrative plus the historical "Activator went light in v1.0.0; now they match" context.
+
+No code or extension changes -- documentation only. Extension stays at v1.1.1.
 
 ---
 
