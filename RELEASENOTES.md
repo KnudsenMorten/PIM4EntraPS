@@ -1,9 +1,10 @@
 # Release notes for PIM4EntraPS
 
-## v2.4.54
+## v2.4.55
 
 Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monorepo:
 
+- release: PIM4EntraPS v2.4.55 - release notes rewritten for readability (fe342f9e)
 - release: PIM4EntraPS v2.4.54 - READMEs catch up on the v2.4.53 PIM Manager restyle (be852908)
 - polish: PIM Manager New&clone tiles - branded blue cards with white text for stronger readability (4a9a69ea)
 - release: PIM4EntraPS v2.4.53 - re-skin PIM Manager to match PIM Activator brand (light palette + branded blue PIM MANAGER banner) (085269d8)
@@ -33,7 +34,6 @@ Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monor
 - release: PIM4EntraPS v2.4.26 - drop 'member' word + show date+time for activation expiry on both tabs (d7f95cfc)
 - release: PIM4EntraPS v2.4.25 - 3-bucket categorisation on both Activate + My Access tabs, configurable per customer via entraGroupRegex/azureGroupRegex (chrome.storage.managed) (adaa201b)
 - release: PIM4EntraPS v2.4.24 - already-active groups sorted to bottom of Activate tab (greyed + badge + disabled checkbox) (2c1e982c)
-- release: PIM4EntraPS v2.4.23 - loading message 'Loading your PIM delegations ... Please Wait' (was 'Loading eligible groups...') (7d4f6383)
 
 ---
 
@@ -43,247 +43,194 @@ Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monor
 
 ---
 
-## v2.4.54 -- READMEs catch up on the v2.4.53 PIM Manager restyle
+## v2.4.55 -- Release notes rewrite for readability
 
-Top-level `README.md` gains a short "v2.4.53 -- brand alignment with the Activator" paragraph in the `## PIM Manager (GUI)` section just before the 5-tab table -- light palette, branded blue PIM MANAGER banner, blue New & clone tile cards, Cytoscape graph-node colours preserved on purpose. Tool-specific `tools/pim-manager/README.md` gains a new `## Look and feel (v2.4.53)` block at the top of the doc with the same narrative plus the historical "Activator went light in v1.0.0; now they match" context.
+Consolidated the recent release-notes entries into a more reader-friendly narrative. Specifically:
 
-No code or extension changes -- documentation only. Extension stays at v1.1.1.
+- **v2.4.45 → v2.4.50** were six small follow-up patches on top of the v2.4.44 Intune deployer; folded into a single "Polishing the Intune deployer" entry that walks through the five common failure modes the patches addressed
+- **v2.4.54** was a doc-only catch-up on the v2.4.53 restyle; merged into the v2.4.53 entry as a single brand-makeover story
+- The remaining entries (v2.4.51 default-duration bump, v2.4.52 extension-ID fix, v2.4.53 PIM Manager restyle, v2.4.44 multi-tenant + Intune Remediations) were rewritten to lead with what changed for **you**, not the implementation detail -- recovery commands stay where they help, hex codes and module noise dropped
 
----
-
-## v2.4.53 -- PIM Manager re-skinned to match the PIM Activator brand (light palette + branded blue banner)
-
-The local PIM Manager (`tools/pim-manager/pim-manager.html`) was the only PIM4EntraPS UI still on a GitHub-Primer dark theme while the Activator went light + branded back in v1.0.0. Brought them in alignment so customers see one consistent look across both surfaces.
-
-### Color palette migration (dark -> light)
-
-31 unique hex values swept across the top-level `<style>` block, ~100 inline `style=""` attributes, the Cytoscape graph style sheet, and dynamic HTML-builder string literals. Mapping highlights:
-
-- Body / canvas: `#0e1116` `#0d1117` `#161b22` -> `#ffffff` / `#f6f8fa`
-- Text: `#e6edf3` -> `#1a1a1a`; muted `#7d8590` -> `#57606a`
-- Borders: `#30363d` -> `#d0d7de`; `#21262d` -> `#eaeef2`
-- Primary blue: `#1f6feb` / `#2f81f7` -> `#0969da`
-- Yellows: `#bf8700` / `#e3b341` / `#ffdf5d` -> `#9a6700`
-- Reds: `#f85149` / `#da3633` / `#ffa198` -> `#cf222e`
-- Greens: `#3fb950` / `#7ee787` -> `#1a7f37`
-
-Preserved intentionally (semantic, not theme): the Cytoscape node-kind identifier colors (`#a371f7` role-group purple, `#d2a8ff` az-resource lavender, `#db6d28` entra-role orange) -- changing these would break the on-screen legend's swatch-to-node contract.
-
-### Branded banner
-
-New `#brand` div above the tab bar: blue background (`#0969da`), white uppercase "PIM MANAGER" at 18px (matches the Activator's 17px branded header style), with a small subtitle ("PIM4EntraPS · configuration editor"). The redundant sidebar `<h1>PIM Manager</h1>` was repurposed as "Graph view" (the panel it actually labels).
-
-### Structural CSS
-
-- 2px solid `#0969da` border around `#app` (matches the Activator's blue frame).
-- Active tab indicator stays blue underlined; active tab text bumped to `#0969da` + bold for visibility.
-- Cytoscape canvas radial gradient flipped from dark to light (`#f6f8fa` -> `#ffffff`).
-- Checkbox `accent-color` updated to `#0969da`.
-
-No code logic changes -- pure visual restyle. No version bump on the extension (still v1.1.1).
+No code, script, or extension changes -- pure release-notes restructuring. Extension stays at v1.1.1.
 
 ---
 
-## v2.4.52 -- Fix the documented extension id (was a regenerated key never wired into the publishing pipeline) + README catch-up
+## v2.4.53 / v2.4.54 -- PIM Manager gets the brand makeover
 
-Critical doc + script-default fix. From v2.4.43 (extension v1.0.0) onward, `extension-identity.txt` and every install/sample command in the docs referenced extension id **`hkdglhgahonnjbfindmgplekkcngmcck`** -- the result of a regenerated signing key that was generated, documented, but **never actually wired into the publishing pipeline**. `Update-PimActivatorDev.ps1` and the gh-pages CRX have always published under the original id **`eheocihmlppcophaeakmdenhgcookkab`**. Customer installs using the documented (wrong) id wrote managed policy at a path the running extension never read -- "Not configured. Admin must set tenantId + clientId (or a Tenants array) via policy." was the symptom even when the registry was correctly populated.
+The local PIM Manager (the editor you open with `Open-PimManager.ps1`) had been stuck on the old dark theme since v0.1, while the browser extension switched to a clean light brand back in v1.0.0. With this release, the two finally match.
 
-Sweep complete in:
-- `tools/pim-activator/extension-identity.txt` -- now states the actual id + a History block explaining what happened.
-- `tools/pim-activator/Deploy-PimActivatorIntune.ps1` -- default `-ExtensionId` parameter value corrected (any prior `-CreateIntuneRemediation` runs that relied on the parameter default produced remediations targeting the wrong id; re-run to converge).
-- `README.md` and `tools/pim-activator/README.md` -- every install / sample command updated.
+What you'll notice when you open it next:
 
-Recovery for existing installs: re-run `Deploy-PimActivatorClient.ps1` with `-ExtensionId 'eheocihmlppcophaeakmdenhgcookkab'`, then optionally clean up the stale HKCU/HKLM keys under the old id (`Remove-Item HKCU:\SOFTWARE\Policies\Microsoft\Edge\3rdparty\extensions\hkdglhgahonnjbfindmgplekkcngmcck -Recurse`, same for Chrome).
+- **White background, dark text, blue accents** -- friendly on the eyes when you're working in the editor for half an hour
+- **Big blue banner** across the top: **PIM MANAGER** in white uppercase, with a subtitle that names the tool ("PIM4EntraPS · configuration editor")
+- **A 2px blue frame** around the whole window so the tool stands out when you have a stack of admin windows open
+- **The "New & clone" cards** (where you pick which kind of thing to create) are now solid blue tiles with white text -- scan-them-in-a-second readable
+- **The graph view's coloured nodes are unchanged** on purpose. The purple / lavender / orange swatches in the legend have to match the nodes themselves, so they're part of the contract, not the theme
 
-READMEs also gained a "What's new in v1.1.1" section covering the v2.4.51 default-duration bump (1h to 8h) with the override-points table.
-
-No extension code changes -- documentation + script-default fix only. Extension manifest stays at v1.1.1 (from v2.4.51).
-
----
-
-## v2.4.51 -- Default activation duration bumped from 1h to 8h (one workday) across all install paths
-
-Every code/script default that previously shipped `defaultDurationHours = 1` is now `defaultDurationHours = 8`. One workday is the realistic average for an admin session; one hour was the legacy "minimum demo" value and forced users to hit the duration field on every activation.
-
-Touched:
-- `popup.js` -- fallback when neither managed config nor cached last-duration is present
-- `config.template.js` -- packaged developer-mode default
-- `Setup-PimActivator.ps1` -- config.js generator, CRX placeholder template, and the printed Intune managed-storage example
-- `Deploy-PimActivatorClient.ps1` -- `-DefaultDurationHours` parameter default
-- `Deploy-PimActivatorIntune.ps1` -- `-DefaultDurationHours` parameter default (affects both `-GenerateLocalInstaller` and Intune-Remediation script bodies)
-
-ADMX (`Deploy-PimActivatorPolicy-Admx.ps1`, `Set-PimActivatorPolicy-Intune.ps1`) was already at 8.
-
-### Per-install overrides
-
-Existing customer installs that pinned 1h via Intune managed-storage are unchanged -- managed config wins. To explicitly pick a different value:
-
-| Surface | Override |
-|---|---|
-| Local install (one machine) | `Deploy-PimActivatorClient.ps1 ... -DefaultDurationHours 2` |
-| Intune Remediation (fleet) | `Deploy-PimActivatorIntune.ps1 ... -DefaultDurationHours 2 -CreateIntuneRemediation` |
-| File-share / AD GPO installer | `Deploy-PimActivatorIntune.ps1 ... -DefaultDurationHours 2 -GenerateLocalInstaller` |
-| Direct registry edit (any user) | `Set-ItemProperty 'HKCU:\SOFTWARE\Policies\Microsoft\Edge\3rdparty\extensions\<id>\policy' -Name defaultDurationHours -Value 2 -Force` (repeat for Chrome) |
-
-The popup also remembers the LAST duration the user picked (per profile via `chrome.storage.local.lastDurationHours`), so once anyone changes the value at activation time, that's what subsequent opens show -- the new 8h default only applies on a fresh install or after `chrome.storage.local.clear()`.
-
-Extension manifest 1.1.0 -> **1.1.1**.
+No behavior changes anywhere -- pure visual restyle. The Activator extension is still at v1.1.1. (v2.4.54 was a doc-only follow-up that brought the two READMEs in sync with the restyle.)
 
 ---
 
-## v2.4.50 -- Fix `Deploy-PimActivatorClient.ps1` parameter sets so -TenantsCsv works without also passing -Tenants
+## v2.4.52 -- Recovering from a documented-but-wrong extension ID
 
-The v2.4.44 multi-tenant rewrite put `-Tenants` and `-TenantsCsv` in the same `InstallMulti` parameter set with `-Tenants` marked Mandatory. Passing only `-TenantsCsv` (the documented path for CSV-driven installs) made PowerShell prompt for `Tenants[0]:`. Split the multi-tenant inputs into two distinct parameter sets -- `InstallMultiInline` (requires `-Tenants`) and `InstallMultiCsv` (requires `-TenantsCsv`) -- so each path is independently usable. The legacy single-tenant `Install` set (`-TenantId` + `-ClientId`) and `Uninstall` set are unchanged.
+Embarrassing one to write up, but worth being transparent about.
 
-For a single tenant, either path works equivalently and produces the same registry state (silent auto-use, no picker shown in the popup):
+Back at v2.4.43, the extension signing key was regenerated and the new ID (`hkdg...`) got recorded in `extension-identity.txt` and every install command in the docs. What **didn't** happen: actually swapping the signing key in `Update-PimActivatorDev.ps1`. So for nine releases, the docs said one ID, the published CRX used a different one (`ehec...`), and every customer who copy-pasted the documented install command wrote tenant config to a registry path the running extension was never reading.
+
+The symptom: extension installs fine, popup opens, but shows **"Not configured. Admin must set tenantId + clientId (or a Tenants array) via policy."** -- even when the registry actually had the right values, just at the wrong path.
+
+Fixed in this release:
+- `extension-identity.txt` now states the **actual** ID, with a History block explaining what happened
+- `Deploy-PimActivatorIntune.ps1`'s default `-ExtensionId` parameter points at the right ID
+- Every install / sample command in both READMEs corrected
+
+**If you ran an install during v2.4.43–v2.4.51 and the popup says "Not configured"**, re-run `Deploy-PimActivatorClient.ps1` with the right ID and restart Edge + Chrome:
 
 ```powershell
-# CSV path (future-proof for adding tenants later)
-.\Deploy-PimActivatorClient.ps1 -ExtensionId <id> -UpdateUrl <url> -TenantsCsv .\tenants.csv -Scope User
-
-# Singleton path (legacy)
-.\Deploy-PimActivatorClient.ps1 -ExtensionId <id> -UpdateUrl <url> -TenantId <guid> -ClientId <guid> -Scope User
+.\Deploy-PimActivatorClient.ps1 `
+    -ExtensionId 'eheocihmlppcophaeakmdenhgcookkab' `
+    -UpdateUrl   'https://knudsenmorten.github.io/PIM4EntraPS/updates.xml' `
+    -TenantsCsv  .\tenants.csv `
+    -Scope       User
 ```
 
----
+Cleaning up the stale registry entries at the old ID is optional -- the new install just overwrites the path the extension actually reads, so the popup starts working immediately.
 
-## v2.4.49 -- Server install path documented (Windows Server / admin jump box / PAW)
-
-Two READMEs gained a "Server install" section so admins know which scope to pick when rolling the PIM Activator onto a Windows Server / admin jump box / PAW:
-
-- **`-LocalInstallerScope User`** (HKCU, no elevation) -- single-admin PAW; each admin installs once for their own RDP profile
-- **`-LocalInstallerScope Machine`** (HKLM, elevated) -- shared admin server / jump box; one install covers every RDP user; recommended default for shared boxes
-- **AD GPO Startup Script** -- domain-joined server fleets; Machine-scope installer added as a Computer Configuration startup script in the OU GPO; runs as SYSTEM at boot; every server in the OU converges
-
-The top-level README gained a `Server install` subsection in the PIM Activator area; the extension-specific README gained `Path D -- Server install` alongside the existing Intune Remediation / AD GPO / direct-registry paths in Stage 2, with a matching row in the rollout-paths comparison table.
-
-No code changes -- documentation only.
+No extension code changes; the CRX has been v1.1.1 since v2.4.51 and that's still what's on gh-pages.
 
 ---
 
-## v2.4.48 -- Bring-your-own Graph session for `Deploy-PimActivatorIntune.ps1`
+## v2.4.51 -- Default activation duration is 8 hours, not 1 (extension v1.1.1)
 
-Tenants that block device-code flow AND have a flaky InteractiveBrowserCredential experience (Conditional Access, blocked localhost redirects, hardened admin workstations) were left without a usable auth path. The fix: **let admins establish the Graph session themselves first**, then run the deployer -- the script now reuses an existing valid session via `Get-MgContext` and skips its own `Connect-MgGraph` entirely.
+Small change with a real quality-of-life payoff. The popup used to default the duration field to **1 hour**, which forced every user to retype "8" on every activation. One hour is the minimum the API will accept; it's not a realistic admin session.
 
-Workflow:
+New default everywhere is **8 hours** (one workday). Touched all five places that ship a default value -- the bundled extension code, the developer-mode config placeholder, the Setup-PimActivator config.js generator, and both deployment scripts. The ADMX path was already at 8.
 
-```powershell
-# Step 1 -- admin uses whatever Graph auth flow their tenant accepts
-Connect-MgGraph -Scopes 'DeviceManagementScripts.ReadWrite.All','DeviceManagementConfiguration.ReadWrite.All','Group.Read.All'
+**Existing customer installs that pinned 1h via Intune managed-storage are unchanged** -- managed config always wins over the bundled default. The new 8h kicks in for fresh installs and for users who haven't activated anything yet. (The popup also remembers the last duration the user picked, per profile, so once anyone clicks Activate with a non-default value, that becomes their personal default.)
 
-# Step 2 -- run the deployer; it sees the existing session, skips its own Connect
-& Deploy-PimActivatorIntune.ps1 -CreateIntuneRemediation -TenantsCsv .\tenants.csv
-# -> "Reusing existing Graph session: admin@tenant.com (tenant <guid>)"
-```
+To pick a value other than 8h at install time: pass `-DefaultDurationHours 2` (or whatever) to the install script. Direct registry edit also works for tweaks after the fact.
 
-When no existing session is found the script still falls back to its own interactive `Connect-MgGraph` (and `-UseDeviceCode` from v2.4.47 remains available). Error messaging upgraded so the user knows exactly what to type if both flows fail.
+Extension manifest 1.1.0 → **1.1.1**.
 
 ---
 
-## v2.4.47 -- Robust Graph sign-in for `Deploy-PimActivatorIntune.ps1` (-UseDeviceCode fallback + post-connect scope verification)
+## v2.4.45 – v2.4.50 -- Polishing the Intune deployer
 
-The default Microsoft.Graph.Authentication `InteractiveBrowserCredential` flow silently returns success even when the user closes the browser tab before consent completes -- the next Graph call then fails with `The server has not found anything matching the requested URI`. Two improvements:
+Six small releases over a couple of days, all chipping away at rough edges in the `Deploy-PimActivatorIntune.ps1` flow that v2.4.44 introduced. Together they answer "I tried it and it didn't work because…" for the five most common failure modes.
 
-1. **Post-connect verification**. After `Connect-MgGraph`, the script reads `Get-MgContext` and confirms every required scope is present. If not, a clear error tells the user what to do (re-run + complete the browser, or fall back to device code).
-2. **New `-UseDeviceCode` switch**. Skips the embedded browser flow entirely. The script prints a code + URL; sign in on any device (phone, second laptop), paste the code, consent there. More reliable on hardened workstations, over RDP, or anywhere the SDK's localhost redirect can't bind.
+### Optional `-GroupId` (v2.4.45)
 
-Recommended path if the default browser flow misbehaves: `... -CreateIntuneRemediation -TenantsCsv ... -UseDeviceCode`.
+Was mandatory; many admins prefer to create the remediation in Intune via Graph, then assign it manually in the Intune Admin Center UI so they can stage a pilot before broad rollout. Now optional -- omit it and the remediation is created **unassigned**, with the script printing the exact UI navigation path to finish the assignment.
 
----
+### New mode: `-GenerateLocalInstaller` (v2.4.45)
 
-## v2.4.46 -- Fix Graph scope for Intune Remediation create (was DeviceManagementConfiguration, should be DeviceManagementScripts)
+For environments without Intune -- AD GPO domains, file share rollouts, SCCM, manual installs on a handful of laptops -- a CSV-driven generator that emits a fully self-contained `Install-PimActivator.ps1` (plus matching Uninstall + a README explaining each rollout path). The tenant JSON is baked into the installer at generation time, so no run-time parameters and no CSV dependency on the target machine. Two scopes:
 
-`Deploy-PimActivatorIntune.ps1 -CreateIntuneRemediation` requested `DeviceManagementConfiguration.ReadWrite.All` but the `deviceHealthScripts` endpoint requires `DeviceManagementScripts.ReadWrite.All` (note the different noun). First-time callers hit `HTTP 403 -- Application must have one of the following scopes: DeviceManagementScripts.ReadWrite.All`. Fixed by switching the scope list to include the correct one, plus a session-scope check that auto-disconnects + reconnects if a previously-cached token is missing any required scope -- so the user doesn't have to manually `Disconnect-MgGraph` between runs after a script update.
-
----
-
-## v2.4.45 -- Optional Intune GroupId + new self-contained installer (AD GPO / file share / SCCM)
-
-Two follow-ups on top of v2.4.44's Intune Remediation work, both driven by real rollout scenarios:
-
-### 1. `-GroupId` is now optional on `-CreateIntuneRemediation`
-
-Previously mandatory. Many admins prefer to create the remediation in Intune via Graph, then assign it manually in the Intune Admin Center UI (so they can pick the right group, set custom inclusion/exclusion rules, or stage a pilot before broad rollout). When `-GroupId` is omitted, the remediation is created **unassigned** and the script prints the exact UI navigation path to finish the assignment.
-
-### 2. New mode: `-GenerateLocalInstaller`
-
-For environments without Intune -- AD Group Policy domains, file-share rollouts, SCCM, manual installs -- a CSV-driven generator that emits a fully self-contained `Install-PimActivator.ps1`:
-
-- **No parameters, no module dependencies, no CSV dependency at run time** -- the tenants JSON is baked into the script at generation time.
-- Pair generated: `Install-PimActivator.ps1` + `Uninstall-PimActivator.ps1` + reference `tenants.csv` + `README.md` with deployment-path guidance for each rollout option.
-- `-LocalInstallerScope User` (default, HKCU, no admin, GPO Logon Script) or `-LocalInstallerScope Machine` (HKLM, admin required, GPO Startup Script). Installer self-checks the elevation requirement and fails loud if you generated a Machine-scope installer but run it non-elevated.
-- Re-runnable / idempotent. Re-generating after editing the source CSV gives you a fresh installer with the updated tenants baked in -- redeploy via file share refresh / GPO replication / SCCM application update.
-
-The Intune Remediation path (v2.4.44) is still the best fit for Intune-managed estates -- hourly self-heal scheduler comes for free. This new path is for everyone else.
-
-### Rollout decision matrix
+- `-LocalInstallerScope User` -- HKCU, no admin needed. Ideal for GPO Logon Scripts or a folder on a file share that admins click into.
+- `-LocalInstallerScope Machine` -- HKLM, elevated. Ideal for GPO Startup Scripts on shared admin servers. The installer self-checks elevation and fails loud if you forgot to right-click → Run as administrator.
 
 | Environment | Recommended path |
 |---|---|
 | Intune-managed | `Deploy-PimActivatorIntune.ps1 -CreateIntuneRemediation` (hourly self-heal) |
-| AD-only / on-prem | `Deploy-PimActivatorIntune.ps1 -GenerateLocalInstaller` + GPO Startup Script (Machine) or Logon Script (User) |
-| File share + manual | `Deploy-PimActivatorIntune.ps1 -GenerateLocalInstaller` -- drop on `\\srv\sw\PimActivator\`, end users run |
-| SCCM / Configuration Manager | `Deploy-PimActivatorIntune.ps1 -GenerateLocalInstaller` packaged as a Script Application |
-| Dev / single test box | `Deploy-PimActivatorClient.ps1 -Tenants @(...)` direct registry write |
+| AD-only / on-prem | `Deploy-PimActivatorIntune.ps1 -GenerateLocalInstaller` + GPO Startup or Logon Script |
+| File share + manual | `Deploy-PimActivatorIntune.ps1 -GenerateLocalInstaller` -- drop on `\\srv\sw\PimActivator\` |
+| SCCM | `Deploy-PimActivatorIntune.ps1 -GenerateLocalInstaller` packaged as a Script Application |
+| Single test box | `Deploy-PimActivatorClient.ps1 -Tenants @(...)` direct registry write |
 
-No extension code changes in this release -- same v1.1.0 CRX as v2.4.44, only the deployment tooling.
+### Right Graph scope (v2.4.46)
+
+`-CreateIntuneRemediation` was asking for `DeviceManagementConfiguration.ReadWrite.All` but the `deviceHealthScripts` endpoint actually wants `DeviceManagementScripts.ReadWrite.All` (different noun). Hit HTTP 403 for everyone on first try. Fixed, plus the script now auto-disconnects and reconnects when your cached Graph token is missing any required scope -- so you don't have to manually `Disconnect-MgGraph` after every script update.
+
+### `-UseDeviceCode` + post-connect scope verification (v2.4.47)
+
+The default Microsoft.Graph SDK auth flow silently returns "success" even when the user closes the browser tab before consenting -- the next Graph call then fails with a cryptic "The server has not found anything matching the requested URI". Two improvements:
+
+- **Post-connect verification** -- the script reads `Get-MgContext` right after `Connect-MgGraph` and confirms every required scope is actually present. If not, you get an actionable error instead of a misleading 404.
+- **`-UseDeviceCode` switch** -- skips the embedded browser entirely, prints a code + URL you paste on any device. Much more reliable over RDP, on hardened workstations, or anywhere the SDK's localhost redirect URI can't bind.
+
+### Bring-your-own Graph session (v2.4.48)
+
+Some tenants block device code AND have a flaky interactive browser experience (Conditional Access, blocked localhost redirects, etc.). Solution: just let admins establish the Graph session themselves first, then run the deployer. The script now checks `Get-MgContext` -- if you've already connected with the right scopes, it skips its own `Connect-MgGraph` entirely.
+
+```powershell
+# Step 1 -- use whatever auth flow your tenant accepts
+Connect-MgGraph -Scopes 'DeviceManagementScripts.ReadWrite.All','DeviceManagementConfiguration.ReadWrite.All','Group.Read.All'
+
+# Step 2 -- run the deployer
+& Deploy-PimActivatorIntune.ps1 -CreateIntuneRemediation -TenantsCsv .\tenants.csv
+# -> "Reusing existing Graph session: admin@tenant.com"
+```
+
+### Server install path documented (v2.4.49)
+
+Both READMEs gained a "Server install" section covering admin jump boxes, PAWs, and shared Windows Servers. Three paths depending on machine type: **User scope** for personal PAWs (one admin, HKCU, no elevation), **Machine scope** for shared servers (HKLM, elevated, covers every RDP user in one install), and **AD GPO Startup Script** for domain-joined server fleets (runs as SYSTEM at boot, every server in the OU converges).
+
+### `-TenantsCsv` works on its own (v2.4.50)
+
+PowerShell parameter-set bug -- `-TenantsCsv` and `-Tenants` were in the same set with `-Tenants` marked mandatory, so passing only `-TenantsCsv` prompted you for `Tenants[0]:`. Split into two distinct parameter sets so each input mode is independently usable. Single-tenant CSV install now works clean:
+
+```powershell
+.\Deploy-PimActivatorClient.ps1 -ExtensionId <id> -UpdateUrl <url> -TenantsCsv .\tenants.csv -Scope User
+```
+
+(Legacy singleton path `-TenantId` + `-ClientId` was never broken; only the multi-tenant CSV input had the bug.)
 
 ---
 
-## v2.4.44 -- Multi-tenant Tenants array + Intune Remediations rollout (extension **v1.1.0**)
+## v2.4.44 -- Multi-tenant support + Intune rollout (extension v1.1.0)
 
-The extension can now serve multiple Entra tenants from a single install on the same Windows user. Each browser profile picks its own tenant; the choice sticks per-profile thanks to `chrome.storage.local`. Admin pushes the tenant list once via Intune Remediation; clients self-heal hourly.
+The big release for consultants and MSPs: **one extension install can now serve multiple Entra tenants on the same Windows user**. Each browser profile picks its own tenant; the choice sticks per-profile thanks to `chrome.storage.local`.
 
-### Extension (v1.0.0 -> v1.1.0)
+### What you see in the popup (extension v1.0.0 → v1.1.0)
 
-- New managed-config field **`Tenants`** -- JSON array of `{ Name, TenantId, ClientId }`. When 2+ entries are present, the popup shows a clean tenant picker on first open per Chromium profile. When exactly 1 entry is present, the picker is silent. When the array is missing, the legacy `tenantId`/`clientId` singleton fields still drive the extension (zero breakage for v1.0 installs).
-- **Per-profile selection** cached in `chrome.storage.local.selectedTenantId`. Switching to a different Edge profile shows the picker fresh, since each profile has its own local storage.
-- **Footer "Tenant" indicator** upgraded -- now shows the friendly tenant name (`Tenant: ACME Production`) with a `(switch)` link that clears the cached selection and re-renders the picker. Tooltip exposes the full GUID + clientId + tenant-count for debugging.
-- Sign-in/refresh artifacts are cleared on every tenant switch so OAuth never carries a refresh-token from the wrong tenant into the new one.
+- **A `Tenants` managed-config field** -- a JSON array of `{ Name, TenantId, ClientId }` entries. When 2+ entries are present, the popup shows a clean tenant picker on first open per Chromium profile. When exactly 1 entry is present, the picker is silent. When the array is missing, the old `tenantId`/`clientId` singleton fields still drive the extension -- so existing v1.0 installs continue working untouched.
+- **Per-profile selection cached** -- pick your tenant once per profile and the popup remembers it next time. Switch to a different Edge profile and you get the picker fresh, ready to pick a different tenant.
+- **Friendly tenant name in the footer** -- replaces the GUID with the human label you chose ("Tenant: ACME Production") plus a (switch) link to change selection.
+- **Clean OAuth boundaries** -- sign-in artifacts and refresh tokens are wiped on every tenant switch so the popup never carries a token from the previous tenant into the new one.
 
 ### New helper: `Deploy-PimActivatorIntune.ps1`
 
-CSV-driven Intune Remediation deployer. One `tenants.csv` (columns: `Name,TenantId,ClientId`) drives everything. Three modes:
+A CSV-driven Intune Remediation deployer. One `tenants.csv` (columns: `Name,TenantId,ClientId`) drives the whole story:
 
 | Mode | Purpose |
 |---|---|
-| `-GenerateScripts -TenantsCsv .\tenants.csv` | Emits `Detection.ps1` + `Remediation.ps1` to disk for manual Intune upload |
-| `-CreateIntuneRemediation -TenantsCsv ... -GroupId <guid>` | Creates the remediation in Intune via Microsoft Graph, schedules it hourly, assigns to the group, prints the remediation id |
-| `-UpdateIntuneRemediation -TenantsCsv ... -RemediationId <guid>` | Re-reads CSV and overwrites the existing remediation in place -- this is the "add a tenant" command |
+| `-GenerateScripts` | Emit `Detection.ps1` + `Remediation.ps1` to disk for manual upload via the Intune UI |
+| `-CreateIntuneRemediation` | Push it to Intune via Microsoft Graph, schedule hourly, optionally assign to a group, print the remediation ID |
+| `-UpdateIntuneRemediation` | Re-read the CSV and overwrite an existing remediation in place -- the "add a tenant" command |
 
-Schedule defaults to **every 1 hour** so adding a tenant to `tenants.csv` propagates to all assigned devices within ~1 h.
+Schedule defaults to **hourly**, so adding a tenant to the CSV propagates to all assigned devices within an hour.
 
-### `Deploy-PimActivatorClient.ps1` -- new `-Tenants` parameter set
+### Direct registry write: new `-Tenants` parameter
 
-Single-tenant `-TenantId`/`-ClientId` calls still work unchanged. New parameter set accepts `-Tenants @(@{Name='...';TenantId='...';ClientId='...'},...)` or `-TenantsCsv <path>` and writes the `Tenants` JSON to the policy registry (clearing any leftover singleton fields). Used internally by the Intune helper's remediation script.
+`Deploy-PimActivatorClient.ps1` gains a `-Tenants` parameter set (and `-TenantsCsv` alternative) for direct HKCU / HKLM writes -- useful for dev boxes and one-off test machines without going through Intune. The singleton `-TenantId` + `-ClientId` style still works for legacy / single-tenant installs.
 
-### What runs where (mental model)
+### How the layers fit together
 
 ```
-tenants.csv         <- you edit this
+tenants.csv                                          <- you edit this
      |
      v
 Deploy-PimActivatorIntune.ps1 -UpdateIntuneRemediation
      |
      v
-Intune Remediation  <- hourly silent run, no UI
+Intune Remediation                                   <- hourly silent run, no UI
      |
      v
-HKCU\...\3rdparty\extensions\<id>\policy\Tenants  <- JSON array
+HKCU\...\3rdparty\extensions\<id>\policy\Tenants     <- JSON array
      |
      v
-chrome.storage.managed.Tenants                    <- browser reads
+chrome.storage.managed.Tenants                       <- browser reads
      |
      v
-popup.js picker UI                                <- user sees on extension click
+popup.js picker UI                                   <- user sees on extension click
      |
      v
-chrome.storage.local.selectedTenantId             <- per profile, sticks
+chrome.storage.local.selectedTenantId                <- per profile, sticks
 ```
 
-Intune Remediations run silently -- the picker UI is inside the extension popup, not Intune. The two layers are independent: Intune keeps the registry healthy; the extension popup handles user-facing choice.
+Intune Remediations are silent registry pushes -- they don't show a UI. The picker the user sees lives inside the extension popup, not Intune. Two independent layers: Intune keeps the registry healthy; the extension popup handles user-facing choice.
 
-Manifest 1.0.0 -> **1.1.0**.
+Extension manifest 1.0.0 → **1.1.0**.
 
 ---
 
