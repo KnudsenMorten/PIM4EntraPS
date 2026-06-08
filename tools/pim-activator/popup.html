@@ -17,7 +17,7 @@
   /* Hard cap on the outer popup -- prevents the whole body from scrolling
      when the inner list + footer + attribution row would otherwise push past
      Chromium's popup viewport. Only the list area scrolls. */
-  html, body { max-height:600px; overflow-y:hidden; }
+  html, body { max-height:600px; overflow-y:auto; }
   /* Belt-and-braces: every element confined to its parent's width.
      Prevents long unbreakable tokens (scope GUIDs, role names) from making
      rows wider than the popup and triggering horizontal scrollbar. */
