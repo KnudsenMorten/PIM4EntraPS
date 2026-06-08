@@ -1,9 +1,10 @@
 # Release notes for PIM4EntraPS
 
-## v2.4.75
+## v2.4.76
 
 Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monorepo:
 
+- release: PIM4EntraPS v2.4.76 + extension v1.5.0 - tenant-portable bootstrap via Microsoft Graph CLI clientId + SPN substring discovery + Deploy-PimActivatorClient defaults to HKLM (3306ff77)
 - release: PIM4EntraPS v2.4.75 - engine fixes: policy PATCH backtick + schedule preload + generic datetime + 36159-day bug + skip-line shows role/principal (c9f2f00f)
 - release: PIM4EntraPS v2.4.74 - Deploy-PimActivatorIntune body shape fix (parent CHOICE + child collection) (5bf32754)
 - release: PIM4EntraPS v2.4.73 - tagged single-line engine PIM actions + auto-interactive Connect-MgGraph in deploy scripts (3bc2a91f)
@@ -33,13 +34,43 @@ Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monor
 - polish: PIM Manager New&clone tiles - branded blue cards with white text for stronger readability (4a9a69ea)
 - release: PIM4EntraPS v2.4.53 - re-skin PIM Manager to match PIM Activator brand (light palette + branded blue PIM MANAGER banner) (085269d8)
 - release: PIM4EntraPS v2.4.52 - fix documented extension id (regen-key ID was never wired into publishing pipeline) (891bc99b)
-- release: PIM4EntraPS v2.4.51 - default activation duration 1h -> 8h (extension v1.1.1) (ac415461)
 
 ---
 
 # Release notes -- PIM4EntraPS
 
 > **Curated changelog.** The publish workflow auto-prepends recent monorepo commits as a raw activity log; this file is the human-friendly narrative on top.
+
+---
+
+## v2.4.76 -- PIM Activator extension v1.5.0: tenant-portable bootstrap + SPN substring discovery + Deploy-PimActivatorClient defaults to HKLM
+
+**1. Extension v1.5.0 -- bootstrap sign-in now works in any tenant**
+
+Previously the bootstrap sign-in used a hardcoded clientId (`e96afaa6-1c00-4320-9a4c-334558138e09`) that was actually the upstream dev's single-tenant app reg. The moment a customer in any other tenant clicked "Sign in to auto-discover", Microsoft returned:
+
+```
+AADSTS700016: Application with identifier 'e96afaa6-...' was not found in the directory '<customer>'.
+```
+
+Switched the bootstrap clientId to Microsoft's own **Microsoft Graph Command Line Tools** multi-tenant app (`14d82eec-204b-4c2f-b7e8-296a70dab67e`) -- Microsoft pre-provisions this service principal in every Entra tenant by default (it's the same SPN `Connect-MgGraph` uses). Works in every tenant with no per-customer setup. Bootstrap scope narrowed to `User.Read + Application.Read.All + openid + profile + offline_access` (discovery-only). The runtime sign-in (after the user saves the discovered customer-tenant clientId) does its own sign-in against THAT clientId with the full PrivilegedAccess / Group / RoleManagement scope set.
+
+Dropped the bootstrap-token persistence -- those tokens only carry discovery scopes and would never satisfy a runtime activation call.
+
+**2. SPN lookup: servicePrincipals (not applications) + substring (not startsWith)**
+
+Discovery query rewritten to `/v1.0/servicePrincipals?$search="displayName:PIM Activator"&$count=true&$top=25` with `ConsistencyLevel: eventual`. A customer can rename the SPN to `ACME PIM Activator (prod)`, `Contoso-PIM-Activator-Workload`, etc. and discovery still finds it because the match is now substring-based. Defensive client-side `.toLowerCase().includes('pim activator')` filter still drops near-match noise from the Graph tokenizer. Multi-match path (`apps.length > 1`) already shows a picker list -- unchanged.
+
+**3. Deploy-PimActivatorClient.ps1 defaults `-Scope` to `Machine` (HKLM)**
+
+Most operators running this script want force-install for every user on the box. The User-scope (HKCU) install was the default but only covers the running user's profile, which surprised people on shared / RDS / VM hosts.
+
+- Default flipped to `-Scope Machine` -> writes to `HKLM:\SOFTWARE\Policies\Microsoft\Edge|Google\Chrome\ExtensionInstallForcelist`.
+- Added an early elevation check so `-Scope Machine` without admin fails fast with a clear message instead of letting `New-Item` throw an opaque registry-permission error mid-write.
+- Reworded the warning banner from the multi-line Yellow Intune-conflict block to a single Cyan default-mode line + a DarkGray reminder that on Intune-managed devices the Intune policy will overwrite this on next sync (use `Deploy-PimActivatorIntune.ps1` there).
+- `.EXAMPLE` block reordered: zero-arg call now shown first as "Default per-machine install"; `-Scope User` retained as the opt-out for HKCU.
+
+Re-run with `-Scope User` for the old behavior.
 
 ---
 

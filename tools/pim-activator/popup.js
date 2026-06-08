@@ -119,7 +119,7 @@ function renderOnboarding(currentCfg) {
     const apps = result.apps || []
     if (tid) tenantInput.value = tid
     if (apps.length === 0) {
-      statusEl.textContent = `Tenant detected (${tid || '?'}). No app registration found whose display name starts with "PIM Activator". Paste the client id manually below.`
+      statusEl.textContent = `Tenant detected (${tid || '?'}). No service principal found whose display name contains "PIM Activator". Paste the client id manually below.`
     } else if (apps.length === 1) {
       clientInput.value = apps[0].appId
       statusEl.textContent = `Found 1 app: ${apps[0].displayName}. Tenant + client id pre-filled below.`

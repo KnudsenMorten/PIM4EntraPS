@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "PIM Activator",
-  "version": "1.4.9",
+  "version": "1.5.0",
   "description": "Bulk-activate your eligible Entra ID, Azure and PIM for Groups (incl. workload RBAC) PIM assignments in one click. Companion to PIM4EntraPS module (https://github.com/KnudsenMorten/PIM4EntraPS)",
   "action": {
     "default_popup": "popup.html",
