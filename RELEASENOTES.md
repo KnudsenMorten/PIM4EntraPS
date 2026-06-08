@@ -1,9 +1,10 @@
 # Release notes for PIM4EntraPS
 
-## v2.4.81
+## v2.4.82
 
 Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monorepo:
 
+- release: PIM4EntraPS v2.4.82 + extension v1.5.7 - version badge actually renders (separate version-badge.js loaded synchronously from popup.html, sidesteps popup.js onboarding-park trap that blocked the previous IIFE) (65167d60)
 - release: PIM4EntraPS v2.4.81 + extension v1.5.6 - scrub historical e96af GUID from background.js comment so CRX binary contains zero trace (5732c210)
 - release: PIM4EntraPS v2.4.80 + extension v1.5.5 - single-line footer with attribution + GitHub/Report chips, MVP recoloured blue + comma form, GitHub link to repo (d49b7653)
 - release: PIM4EntraPS v2.4.79 - Deploy-PimActivatorClient writes ExtensionInstallAllowlist + ExtensionInstallSources alongside ExtensionInstallForcelist + republished extension v1.5.2 to gh-pages (85325930)
@@ -33,13 +34,38 @@ Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monor
 - release: PIM Activator extension v1.4.6 -> v1.4.9 (39e0920d)
 - release: PIM Activator extension v1.4.3 -> v1.4.6 (d462d1bf)
 - chore(pim-activator): trim orphaned managed-policy code + rename dev script + rewrite README (552d0185)
-- release: PIM Activator extension v1.4.2 - onboarding wizard + direct PIM + favorites (b1987c59)
 
 ---
 
 # Release notes -- PIM4EntraPS
 
 > **Curated changelog.** The publish workflow auto-prepends recent monorepo commits as a raw activity log; this file is the human-friendly narrative on top.
+
+---
+
+## v2.4.82 -- PIM Activator extension v1.5.7: version badge actually renders (was hidden by onboarding park)
+
+The header version badge has been declared in popup.html for several releases, but never actually rendered for users who weren't onboarded yet. Root cause:
+
+```js
+// popup.js lines 41-48
+const cfg = await loadConfig()
+if (!cfg.tenantId || ... || !cfg.clientId || ...) {
+  renderOnboarding(cfg)
+  await new Promise(() => {}) // <-- parks forever during onboarding
+}
+// ... 250 lines later ...
+;(() => { /* populate version-badge */ })()  // <-- NEVER REACHED on first-run popups
+```
+
+The IIFE that populated `#version-badge` was at the bottom of popup.js -- well past the `await new Promise(() => {})` that intentionally parks execution during the onboarding wizard. First-run popups (no saved tenant/client) therefore showed an empty badge slot forever.
+
+**Fix:** moved the badge-population logic into a dedicated `version-badge.js` loaded synchronously from popup.html BEFORE the popup.js module. The badge now populates during HTML parse, independent of whether popup.js completes its boot. (MV3 CSP forbids inline `<script>` blocks, hence the separate file.)
+
+Also:
+- Default badge text `v?` in the HTML so the pill placeholder is visible even if `chrome.runtime.getManifest()` fails for any reason.
+- `document.title` now stamps as `PIM Activator v1.5.7` -- visible in the Windows taskbar tooltip + alt-tab title row.
+- Badge pill tightened: brighter border (`0.55` alpha), brighter background fill (`0.25` alpha), slightly more padding for readability against the blue header.
 
 ---
 
