@@ -159,11 +159,13 @@ if ($Uninstall) {
     Write-Host "Removing PIM Activator force-install ($Scope scope, $Browser) for extension $ExtensionId..." -ForegroundColor Yellow
 
     foreach ($root in $policyRoots) {
-        $forcelistPath = Join-Path $root.Path 'ExtensionInstallForcelist'
-        if (Test-Path -LiteralPath $forcelistPath) {
-            if (Get-ItemProperty -Path $forcelistPath -Name "$slot" -ErrorAction SilentlyContinue) {
-                Remove-ItemProperty -Path $forcelistPath -Name "$slot" -Force
-                Write-Host "  [$($root.Name)] removed forcelist slot $slot at $forcelistPath" -ForegroundColor DarkGray
+        foreach ($subKey in 'ExtensionInstallForcelist','ExtensionInstallAllowlist','ExtensionInstallSources') {
+            $kp = Join-Path $root.Path $subKey
+            if (Test-Path -LiteralPath $kp) {
+                if (Get-ItemProperty -Path $kp -Name "$slot" -ErrorAction SilentlyContinue) {
+                    Remove-ItemProperty -Path $kp -Name "$slot" -Force
+                    Write-Host "  [$($root.Name)] removed $subKey slot $slot at $kp" -ForegroundColor DarkGray
+                }
             }
         }
 
@@ -207,18 +209,55 @@ $_defaultUpdUrl = 'https://knudsenmorten.github.io/PIM4EntraPS/updates.xml'
 if ($ExtensionId -ne $_defaultExtId)  { Write-Host "  ExtensionId : $ExtensionId  (overridden -- default is $_defaultExtId)" -ForegroundColor Yellow }
 if ($UpdateUrl   -ne $_defaultUpdUrl) { Write-Host "  UpdateUrl   : $UpdateUrl  (overridden -- default is $_defaultUpdUrl)" -ForegroundColor Yellow }
 
+# Derive the source-host pattern from the update URL so a customer who
+# self-hosts the CRX (different update.xml host) gets the right allow
+# pattern instead of a stale knudsenmorten.github.io one.
+$sourcePattern = $null
+try {
+    $u = [Uri]::new($UpdateUrl)
+    if ($u.Scheme -and $u.Host) {
+        $sourcePattern = "$($u.Scheme)://$($u.Host)/*"
+    }
+} catch {
+    # Leave $sourcePattern null; we'll skip writing ExtensionInstallSources.
+}
+
 foreach ($root in $policyRoots) {
     Write-Host ""
     Write-Host "  [$($root.Name)] writing under $($root.Path)" -ForegroundColor Cyan
 
-    # ExtensionInstallForcelist value format is "<extension-id>;<update-url>".
-    # Each entry occupies a named slot (a free-form string), and Chromium
-    # iterates every value under the key. Re-running this script with the
-    # same ExtensionId always lands in the same slot (deterministic hash).
+    # 1. ExtensionInstallForcelist -- the "install this extension and keep it
+    #    installed" directive. Value format is "<extension-id>;<update-url>".
+    #    Each entry occupies a named slot (a free-form string); re-running with
+    #    the same ExtensionId lands in the same slot (deterministic hash) so
+    #    re-runs are idempotent and never collide with other policy-installed
+    #    extensions in the same forcelist.
     $forcelistPath = Join-Path $root.Path 'ExtensionInstallForcelist'
     New-PolicyKey -Path $forcelistPath
     Set-Reg -Path $forcelistPath -Name "$slot" -Value "$ExtensionId;$UpdateUrl"
-    Write-Host "    -> forcelist slot $slot set" -ForegroundColor DarkGray
+    Write-Host "    -> ExtensionInstallForcelist slot $slot set ($ExtensionId;$UpdateUrl)" -ForegroundColor DarkGray
+
+    # 2. ExtensionInstallAllowlist -- defensive belt-and-braces. If the admin
+    #    has set ExtensionInstallBlocklist to '*' (deny-all default), the
+    #    forcelist still wins for this id, but having the id explicitly
+    #    allow-listed survives any later policy that swaps the precedence
+    #    semantics. No-op when no blocklist is in play.
+    $allowPath = Join-Path $root.Path 'ExtensionInstallAllowlist'
+    New-PolicyKey -Path $allowPath
+    Set-Reg -Path $allowPath -Name "$slot" -Value $ExtensionId
+    Write-Host "    -> ExtensionInstallAllowlist slot $slot set ($ExtensionId)" -ForegroundColor DarkGray
+
+    # 3. ExtensionInstallSources -- whitelist the host the CRX + updates.xml
+    #    are served from. Required if the admin has restricted ExtensionInstallSources
+    #    to a non-default value (some hardened baselines do). Without this,
+    #    a CRX download from a non-Web-Store URL silently fails the integrity
+    #    check on download. Skipped when $UpdateUrl can't be URL-parsed.
+    if ($sourcePattern) {
+        $sourcesPath = Join-Path $root.Path 'ExtensionInstallSources'
+        New-PolicyKey -Path $sourcesPath
+        Set-Reg -Path $sourcesPath -Name "$slot" -Value $sourcePattern
+        Write-Host "    -> ExtensionInstallSources slot $slot set ($sourcePattern)" -ForegroundColor DarkGray
+    }
 
     # v1.1.x of the extension also read chrome.storage.managed config that
     # this script used to push (tenantId/clientId/Tenants/etc.). v1.2.0+
