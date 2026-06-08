@@ -40,11 +40,88 @@ const KNOWN_BAD_LEGACY_CLIENTIDS = [
   'e96afaa6-1c00-4320-9a4c-334558138e09',
 ]
 
+// v1.6.0+ multi-tenant catalog support.
+// Catalog entry shape:
+//   {
+//     name:                  "NunaGreen",
+//     tenantId:              "<GUID>",
+//     clientId:              "<GUID>",
+//     defaultJustification:  "Change in infrastructure",   // optional
+//     defaultDurationHours:  8,                            // optional
+//     groupNameFilter:       "^PIM-",                      // optional regex
+//     entraGroupRegex:       "Entra",                      // optional regex
+//     azureGroupRegex:       "(AzRes|Azure)"               // optional regex
+//   }
+//
+// Sources, merged in order (later overrides earlier on the same tenantId):
+//   1. chrome.storage.managed.tenantCatalog  (Intune / GPO / HKLM-pushed,
+//      string of JSON-encoded array per Chromium policy schema)
+//   2. chrome.storage.local.tenantCatalog    (manually imported via wizard,
+//      array directly -- we control the writer)
+//
+// Active selection: chrome.storage.local.activeTenantId (tenantId of the
+// currently-active entry). Set by the header dropdown / wizard picker.
+//
+// Per-customer token cache: chrome.storage.local.tenantTokens (object,
+// keyed by tenantId) -- holds { refreshToken, accessToken, accessTokenExpiry,
+// armAccessToken, armAccessTokenExpiry, account } per customer so switching
+// back to a customer signed in earlier in the session is sub-second.
+async function readMergedCatalog() {
+  let managed = []
+  let local   = []
+  try {
+    const m = await new Promise(r => chrome.storage.managed.get(['tenantCatalog'], r))
+    if (m && m.tenantCatalog) {
+      const parsed = (typeof m.tenantCatalog === 'string')
+        ? JSON.parse(m.tenantCatalog)
+        : m.tenantCatalog
+      if (Array.isArray(parsed)) managed = parsed
+    }
+  } catch (e) {
+    console.warn('[PIM Activator] managed catalog read/parse failed:', e.message || e)
+  }
+  try {
+    const l = await new Promise(r => chrome.storage.local.get(['tenantCatalog'], r))
+    if (Array.isArray(l.tenantCatalog)) local = l.tenantCatalog
+  } catch (e) { /* ignore */ }
+  const merged = []
+  const seen = new Set()
+  for (const entry of [...managed, ...local]) {
+    if (!entry || typeof entry !== 'object') continue
+    const tid = String(entry.tenantId || '').trim().toLowerCase()
+    const cid = String(entry.clientId || '').trim().toLowerCase()
+    if (!isGuidStr(tid) || !isGuidStr(cid)) continue
+    if (KNOWN_BAD_LEGACY_CLIENTIDS.includes(cid)) continue
+    if (seen.has(tid)) {
+      // Local overrides managed for the same tenant -- replace.
+      const idx = merged.findIndex(e => String(e.tenantId).toLowerCase() === tid)
+      if (idx >= 0) merged[idx] = entry
+      continue
+    }
+    seen.add(tid)
+    merged.push(entry)
+  }
+  return merged
+}
+
+function isGuidStr(s) {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(s || '')
+}
+
+function emptyConfig() {
+  return { tenantId: '', clientId: '', defaultJustification: '', defaultDurationHours: 0,
+           groupNameFilter: '', entraGroupRegex: '', azureGroupRegex: '',
+           catalog: [], activeTenantId: '', tenantName: '' }
+}
+
 async function loadConfig() {
   const u = await new Promise(r => chrome.storage.local.get(
     ['userTenantId','userClientId','userDefaultJustification','userDefaultDurationHours',
-     'userGroupNameFilter','userEntraGroupRegex','userAzureGroupRegex'], r))
+     'userGroupNameFilter','userEntraGroupRegex','userAzureGroupRegex',
+     'activeTenantId','tenantTokens'], r))
 
+  // Defensive purge of the known-bad legacy upstream clientId (see comment
+  // on KNOWN_BAD_LEGACY_CLIENTIDS above).
   if (u.userClientId && KNOWN_BAD_LEGACY_CLIENTIDS.includes(String(u.userClientId).toLowerCase())) {
     console.warn('[PIM Activator] purging legacy bad userClientId ' + u.userClientId + ' from chrome.storage.local + reloading extension to evict stale MV3 service worker')
     await new Promise(r => chrome.storage.local.remove([
@@ -52,37 +129,83 @@ async function loadConfig() {
       'refreshToken','accessToken','accessTokenExpiry',
       'armAccessToken','armAccessTokenExpiry','account'
     ], r))
-    // chrome.runtime.reload() hard-restarts the extension including the
-    // MV3 service worker. Without this, popup.js could see the purge but
-    // background.js (the bootstrap sign-in) would still be the stale
-    // v1.4.x build that uses the bad upstream clientId, and the next
-    // sign-in attempt would AADSTS700016 again. Reload kills the SW too.
-    try { chrome.runtime.reload() } catch (e) { /* not always available; falls through to onboarding render */ }
-    return { tenantId: '', clientId: '', defaultJustification: '', defaultDurationHours: 0 }
+    try { chrome.runtime.reload() } catch (e) { /* fall through */ }
+    return emptyConfig()
   }
 
+  const catalog = await readMergedCatalog()
+
+  // ----- v1.6.0+ catalog path ------------------------------------------------
+  if (catalog.length > 0) {
+    let activeId = String(u.activeTenantId || '').trim().toLowerCase()
+    let active = catalog.find(e => String(e.tenantId).toLowerCase() === activeId)
+    // If no active selection (or stale selection), auto-pick the first entry
+    // when there's only one. With many entries we fall through and let the
+    // wizard render the picker.
+    if (!active && catalog.length === 1) {
+      active = catalog[0]
+      activeId = String(active.tenantId).toLowerCase()
+      await new Promise(r => chrome.storage.local.set({ activeTenantId: activeId }, r))
+    }
+    if (active) {
+      // Restore this customer's cached token bundle into the legacy keys the
+      // rest of popup.js already reads. Switching customers replaces these.
+      const tokens = (u.tenantTokens && typeof u.tenantTokens === 'object')
+        ? u.tenantTokens[String(active.tenantId).toLowerCase()] : null
+      if (tokens) {
+        await new Promise(r => chrome.storage.local.set({
+          refreshToken:         tokens.refreshToken         || null,
+          accessToken:          tokens.accessToken          || null,
+          accessTokenExpiry:    tokens.accessTokenExpiry    || 0,
+          armAccessToken:       tokens.armAccessToken       || null,
+          armAccessTokenExpiry: tokens.armAccessTokenExpiry || 0,
+          account:              tokens.account              || null,
+        }, r))
+      } else {
+        // No cached tokens for this customer -- clear stale ones from a
+        // different customer's session so the sign-in flow runs cleanly.
+        await new Promise(r => chrome.storage.local.remove(
+          ['refreshToken','accessToken','accessTokenExpiry',
+           'armAccessToken','armAccessTokenExpiry','account'], r))
+      }
+      return {
+        tenantId:             active.tenantId,
+        clientId:             active.clientId,
+        defaultJustification: active.defaultJustification || '',
+        defaultDurationHours: active.defaultDurationHours || 0,
+        groupNameFilter:      active.groupNameFilter      || '',
+        entraGroupRegex:      active.entraGroupRegex      || '',
+        azureGroupRegex:      active.azureGroupRegex      || '',
+        catalog,
+        activeTenantId:     String(active.tenantId).toLowerCase(),
+        tenantName:         active.name || active.tenantId,
+      }
+    }
+    // Catalog exists but no active selection -- caller renders picker.
+    return Object.assign(emptyConfig(), { catalog })
+  }
+
+  // ----- Legacy single-tenant path (pre-v1.6.0) ------------------------------
   return {
     tenantId:             u.userTenantId             || '',
     clientId:             u.userClientId             || '',
     defaultJustification: u.userDefaultJustification || '',
     defaultDurationHours: u.userDefaultDurationHours || 0,
-    // Per-customer naming convention -- populated from the well-known JSON
-    // (or pasted manually in the wizard's advanced section if exposed).
-    // groupNameFilter limits the Activate tab to groups matching the regex
-    // (e.g. '^PIM-' for tenants that prefix all PIM-managed groups with PIM-).
-    // entraGroupRegex / azureGroupRegex are used by categoriseGroupByName
-    // to bucket eligibilities into the Entra / Azure / Workload sections.
     groupNameFilter:      u.userGroupNameFilter      || '',
     entraGroupRegex:      u.userEntraGroupRegex      || '',
     azureGroupRegex:      u.userAzureGroupRegex      || '',
+    catalog:              [],
+    activeTenantId:     '',
+    tenantName:         '',
   }
 }
 
 const cfg = await loadConfig()
 if (!cfg.tenantId || String(cfg.tenantId).startsWith('00000000') || !cfg.clientId || String(cfg.clientId).startsWith('00000000')) {
-  // Render the soft onboarding wizard instead of throwing a red error.
-  // Returns once the user clicks Save (which writes to chrome.storage.local
-  // and reloads). v2.4.11+: no more dead-end "Not configured" message.
+  // No active customer config. If the catalog has entries, render the
+  // customer-picker first (v1.6.0+ MSP path). Otherwise render the
+  // empty-catalog onboarding wizard which offers "import catalog" + the
+  // legacy single-customer manual-entry path.
   renderOnboarding(cfg)
   await new Promise(() => {}) // park the rest of boot until reload
 }
@@ -105,6 +228,90 @@ function renderOnboarding(currentCfg) {
   const ob = document.getElementById('onboarding')
   if (!ob) return
   ob.style.display = ''
+
+  // ----- v1.6.0+ catalog UI -------------------------------------------------
+  // Injected at the TOP of the onboarding div, above the legacy auto-discover
+  // + manual-entry panels. Two modes:
+  //   A) catalog has entries -> render customer picker; user selects active
+  //   B) catalog empty       -> render "Import catalog (paste JSON)" + a tip
+  // Existing legacy single-customer wizard remains visible BELOW the catalog
+  // panel as the fallback path -- still works for single-tenant deployments.
+  const catalog = Array.isArray(currentCfg.catalog) ? currentCfg.catalog : []
+  let catalogPanel = document.getElementById('ob-catalog')
+  if (!catalogPanel) {
+    catalogPanel = document.createElement('div')
+    catalogPanel.id = 'ob-catalog'
+    catalogPanel.style.cssText = 'margin-bottom:14px;padding:10px;background:#f0fdf4;border:1px solid #86efac;border-radius:6px;'
+    ob.insertBefore(catalogPanel, ob.firstChild)
+  }
+  if (catalog.length > 0) {
+    catalogPanel.innerHTML =
+      '<div style="font-size:12.5px;color:#166534;font-weight:600;margin-bottom:6px;">Pick a tenant (' + catalog.length + ' in catalog)</div>' +
+      '<div style="font-size:11px;color:#15803d;margin-bottom:8px;line-height:1.45;">Catalog loaded from Intune managed config or local import. Pick the tenant to activate now -- you can switch anytime from the header.</div>' +
+      '<select id="ob-catalog-pick" style="width:100%;padding:6px 7px;font-size:12px;background:#ffffff;border:1px solid #86efac;border-radius:5px;margin-bottom:8px;">' +
+        catalog.map(c => '<option value="' + escapeHtmlSafe(c.tenantId) + '">' + escapeHtmlSafe(c.name || c.tenantId) + ' (' + escapeHtmlSafe(c.tenantId) + ')</option>').join('') +
+      '</select>' +
+      '<button id="ob-catalog-go" class="primary" style="font-size:12px;">Use this tenant</button>' +
+      '<button id="ob-catalog-clear" style="font-size:11px;margin-left:8px;padding:5px 10px;border:1px solid #d0d7de;border-radius:4px;background:#ffffff;cursor:pointer;">Clear local catalog</button>'
+    document.getElementById('ob-catalog-go').onclick = async () => {
+      const sel = document.getElementById('ob-catalog-pick')
+      const tid = (sel && sel.value || '').toLowerCase()
+      if (!tid) return
+      await new Promise(r => chrome.storage.local.set({ activeTenantId: tid }, r))
+      // Clear stale tokens from a different customer's session.
+      await new Promise(r => chrome.storage.local.remove(
+        ['refreshToken','accessToken','accessTokenExpiry','armAccessToken','armAccessTokenExpiry','account'], r))
+      window.location.reload()
+    }
+    document.getElementById('ob-catalog-clear').onclick = async () => {
+      if (!confirm('Clear the LOCAL customer catalog from this browser profile? Intune-pushed entries will be restored on next popup load.')) return
+      await new Promise(r => chrome.storage.local.remove(['tenantCatalog','activeTenantId','tenantTokens'], r))
+      window.location.reload()
+    }
+  } else {
+    catalogPanel.innerHTML =
+      '<div style="font-size:12.5px;color:#166534;font-weight:600;margin-bottom:6px;">Import tenant catalog (MSP / multi-tenant)</div>' +
+      '<div style="font-size:11px;color:#15803d;margin-bottom:8px;line-height:1.45;">' +
+        'Paste a JSON array of tenants below to bulk-onboard. Each entry: ' +
+        '<code style="background:#ffffff;padding:1px 3px;border-radius:3px;">{name, tenantId, clientId, defaultJustification?, defaultDurationHours?, groupNameFilter?, entraGroupRegex?, azureGroupRegex?}</code>. ' +
+        'After import the picker appears above. ' +
+        '<strong>Tip:</strong> Intune admins can push the same catalog machine-wide via Settings Catalog -> Configure managed extensions -> key <code style="background:#ffffff;padding:1px 3px;border-radius:3px;">tenantCatalog</code>.' +
+      '</div>' +
+      '<textarea id="ob-catalog-json" rows="5" placeholder=\'[{"name":"NunaGreen","tenantId":"00000000-0000-0000-0000-000000000000","clientId":"00000000-0000-0000-0000-000000000000","groupNameFilter":"^PIM-"}]\' style="width:100%;box-sizing:border-box;font-family:monospace;font-size:11px;background:#ffffff;border:1px solid #86efac;border-radius:5px;padding:6px 7px;margin-bottom:8px;"></textarea>' +
+      '<button id="ob-catalog-import" class="primary" style="font-size:12px;">Import tenant catalog</button>'
+    document.getElementById('ob-catalog-import').onclick = async () => {
+      const ta = document.getElementById('ob-catalog-json')
+      const raw = (ta && ta.value || '').trim()
+      if (!raw) { showErr('Paste a JSON array first.'); ta && ta.focus(); return }
+      let parsed
+      try { parsed = JSON.parse(raw) }
+      catch (e) { showErr('JSON parse failed: ' + e.message); return }
+      if (!Array.isArray(parsed) || parsed.length === 0) { showErr('JSON must be a non-empty array of customer objects.'); return }
+      const cleaned = []
+      for (const entry of parsed) {
+        if (!entry || typeof entry !== 'object') continue
+        const tid = String(entry.tenantId || '').trim().toLowerCase()
+        const cid = String(entry.clientId || '').trim().toLowerCase()
+        if (!isGuidStr(tid) || !isGuidStr(cid)) { showErr('Entry "' + (entry.name || tid) + '" has invalid tenantId or clientId.'); return }
+        if (KNOWN_BAD_LEGACY_CLIENTIDS.includes(cid)) { showErr('Entry "' + (entry.name || tid) + '" uses the known-bad upstream-dev clientId. Replace with your customer-tenant PIM Activator app reg appId.'); return }
+        cleaned.push({
+          name:                 String(entry.name || '').trim() || tid,
+          tenantId:             tid,
+          clientId:             cid,
+          defaultJustification: typeof entry.defaultJustification === 'string' ? entry.defaultJustification : undefined,
+          defaultDurationHours: typeof entry.defaultDurationHours === 'number' ? entry.defaultDurationHours : undefined,
+          groupNameFilter:      typeof entry.groupNameFilter      === 'string' ? entry.groupNameFilter      : undefined,
+          entraGroupRegex:      typeof entry.entraGroupRegex      === 'string' ? entry.entraGroupRegex      : undefined,
+          azureGroupRegex:      typeof entry.azureGroupRegex      === 'string' ? entry.azureGroupRegex      : undefined,
+        })
+      }
+      await new Promise(r => chrome.storage.local.set({
+        tenantCatalog: cleaned,
+        activeTenantId: cleaned.length === 1 ? cleaned[0].tenantId : ''
+      }, r))
+      window.location.reload()
+    }
+  }
 
   // Pre-fill any non-placeholder values we DID find (e.g. tenantId from
   // managed but clientId blank).
@@ -335,17 +542,62 @@ const AUTHORITY    = `https://login.microsoftonline.com/${cfg.tenantId}`
 ;(() => {
   const el = document.getElementById('footer-tenant')
   if (!el || !cfg.tenantId) return
-  el.innerHTML = `Tenant: <strong>${escapeHtmlSafe(cfg.tenantId)}</strong> <a href="#" id="reset-config" style="color:#0969da;text-decoration:none;margin-left:6px;">(reset)</a>`
-  el.title = `Tenant id: ${cfg.tenantId}\nClient id: ${cfg.clientId}\n\nSaved to this browser profile. Click 'reset' to clear and re-run the onboarding wizard.`
+  const tenantLabelPrefix = cfg.tenantName ? `${escapeHtmlSafe(cfg.tenantName)} ` : ''
+  el.innerHTML = `${tenantLabelPrefix}Tenant: <strong>${escapeHtmlSafe(cfg.tenantId)}</strong> <a href="#" id="reset-config" style="color:#0969da;text-decoration:none;margin-left:6px;">(reset)</a>`
+  el.title = `Tenant: ${cfg.tenantName || '(legacy single-tenant install)'}\nTenant id: ${cfg.tenantId}\nClient id: ${cfg.clientId}\n\nClick 'reset' to clear this browser profile's saved config and re-run the wizard.`
   const link = document.getElementById('reset-config')
   if (link) link.onclick = async (e) => {
     e.preventDefault()
-    if (!confirm('Clear PIM Activator config for THIS browser profile and start over?')) return
+    if (!confirm('Clear PIM Activator config for THIS browser profile and start over? (Catalog + per-customer token cache will also be cleared.)')) return
     await new Promise(r => chrome.storage.local.remove([
       'userTenantId','userClientId','userDefaultJustification','userDefaultDurationHours',
       'userGroupNameFilter','userEntraGroupRegex','userAzureGroupRegex',
+      'tenantCatalog','activeTenantId','tenantTokens',
       'refreshToken','accessToken','accessTokenExpiry','armAccessToken','armAccessTokenExpiry','account'
     ], r))
+    window.location.reload()
+  }
+})()
+
+// v1.6.0+ header customer-switcher. Visible only when catalog has >=2
+// entries. Picking an entry sets activeTenantId, snapshots current
+// tokens into tenantTokens[oldId], and reloads the popup.
+;(() => {
+  const sel = document.getElementById('customer-switcher')
+  if (!sel) return
+  const catalog = Array.isArray(cfg.catalog) ? cfg.catalog : []
+  if (catalog.length < 2) return
+  sel.innerHTML = catalog
+    .map(c => {
+      const tid = String(c.tenantId).toLowerCase()
+      const sel = tid === cfg.activeTenantId ? ' selected' : ''
+      return `<option value="${escapeHtmlSafe(tid)}"${sel}>${escapeHtmlSafe(c.name || tid)}</option>`
+    })
+    .join('')
+  sel.style.display = ''
+  sel.onchange = async () => {
+    const newTid = (sel.value || '').toLowerCase()
+    if (!newTid || newTid === cfg.activeTenantId) return
+    // Snapshot current active customer's tokens into the per-customer cache
+    // so switching back is instant. persistTokens already writes after every
+    // sign-in, but in-memory token mutations between sign-ins live in the
+    // legacy keys -- copy the latest state.
+    const cur = await getStored(['refreshToken','accessToken','accessTokenExpiry','armAccessToken','armAccessTokenExpiry','account','tenantTokens'])
+    const cache = (cur.tenantTokens && typeof cur.tenantTokens === 'object') ? cur.tenantTokens : {}
+    if (cfg.activeTenantId) {
+      cache[cfg.activeTenantId] = {
+        refreshToken:         cur.refreshToken,
+        accessToken:          cur.accessToken,
+        accessTokenExpiry:    cur.accessTokenExpiry,
+        armAccessToken:       cur.armAccessToken,
+        armAccessTokenExpiry: cur.armAccessTokenExpiry,
+        account:              cur.account,
+      }
+    }
+    await setStored({ tenantTokens: cache, activeTenantId: newTid })
+    // Clear in-flight token state; loadConfig on reload will restore the
+    // new customer's cached tokens (or trigger sign-in if none).
+    await clearStored(['refreshToken','accessToken','accessTokenExpiry','armAccessToken','armAccessTokenExpiry','account'])
     window.location.reload()
   }
 })()
@@ -598,6 +850,20 @@ async function persistTokens(tok) {
     accessTokenExpiry:  expiry,
     account
   })
+  // v1.6.0+ catalog: also stash into per-customer token cache keyed by
+  // active tenantId, so switching back to this customer later (via the
+  // header switcher) restores tokens without re-running launchWebAuthFlow.
+  if (cfg.activeTenantId) {
+    const stored = await getStored(['tenantTokens'])
+    const cache = (stored.tenantTokens && typeof stored.tenantTokens === 'object') ? stored.tenantTokens : {}
+    cache[cfg.activeTenantId] = {
+      refreshToken:      tok.refresh_token || null,
+      accessToken:       tok.access_token,
+      accessTokenExpiry: expiry,
+      account
+    }
+    await setStored({ tenantTokens: cache })
+  }
   return { accessToken: tok.access_token, account }
 }
 
