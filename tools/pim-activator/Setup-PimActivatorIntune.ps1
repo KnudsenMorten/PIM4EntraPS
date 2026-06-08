@@ -173,7 +173,11 @@ foreach ($entry in $catalog) {
     if (-not $entry.tenantId) { throw "Catalog entry '$($entry.name)' missing 'tenantId'." }
     if (-not $entry.clientId) { throw "Catalog entry '$($entry.name)' missing 'clientId'." }
 }
-$minifiedCatalog = ($catalog | ConvertTo-Json -Depth 10 -Compress)
+# PS 5.1's ConvertTo-Json drops the outer array brackets when piped a
+# single-element array (PS 7+ has -AsArray to override; 5.1 doesn't).
+# Use -InputObject + @($catalog) to force ConvertTo-Json to see the value
+# as an array, so the JSON always emits [{...}, ...] not {...}.
+$minifiedCatalog = ConvertTo-Json -InputObject @($catalog) -Depth 10 -Compress
 Write-Host "Catalog loaded: $count tenant(s) -- $((($catalog | ForEach-Object name) -join ', '))" -ForegroundColor Cyan
 
 $forcelistValue = "$ExtensionId;$UpdateUrl"

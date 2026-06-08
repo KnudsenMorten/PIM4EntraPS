@@ -1,9 +1,10 @@
 # Release notes for PIM4EntraPS
 
-## v2.4.95
+## v2.4.96
 
 Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monorepo:
 
+- release: PIM4EntraPS v2.4.96 + extension v1.6.8 - TWO bugs blocking chrome.storage.managed: (a) manifest now declares storage.managed_schema -> managed-schema.json (without this Chromium returns empty from chrome.storage.managed regardless of registry) + (b) all 3 Intune push scripts now use ConvertTo-Json -InputObject @($catalog) to preserve array brackets on single-element catalogs (PS 5.1 + 7 compatible, prevents single-tenant catalog from being serialized as {object} instead of [array]) (4693e4cb)
 - release: PIM4EntraPS v2.4.95 + extension v1.6.7 - popup max-height bumped 600->800px (Chromium's hard cap) + catalog import textarea shrunk from 6 to 3 rows (resize:vertical retained), so Save and continue button no longer disappears on first-run (a2c1331e)
 - fix Verify-PimActivatorIntunePolicy.ps1: PS 5.1 doesn't accept 'if (...) {...} else {...}' as an expression inside Write-Host -ForegroundColor argument; lift the choice into a separate $summaryColor variable (9e0c5644)
 - add Verify-PimActivatorIntunePolicy.ps1 - portable HKLM registry verifier for the 6 PIM Activator Intune policies, runs on any Windows endpoint with PS 5.1+ (no Graph dep) (8bf15a34)
@@ -33,7 +34,6 @@ Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monor
 - release: PIM4EntraPS v2.4.79 - Deploy-PimActivatorClient writes ExtensionInstallAllowlist + ExtensionInstallSources alongside ExtensionInstallForcelist + republished extension v1.5.2 to gh-pages (85325930)
 - release: PIM4EntraPS v2.4.78 + extension v1.5.2 - manifest homepage_url -> GitHub repo (a270e8cf)
 - release: PIM4EntraPS v2.4.77 + extension v1.5.1 - surface developer/contact info via manifest author+homepage_url + 2-line popup footer with MVP badge + email/blog/GitHub/YouTube/bug-report links (254a7072)
-- release: PIM4EntraPS v2.4.76 + extension v1.5.0 - tenant-portable bootstrap via Microsoft Graph CLI clientId + SPN substring discovery + Deploy-PimActivatorClient defaults to HKLM (3306ff77)
 
 ---
 

@@ -203,7 +203,7 @@ foreach ($entry in $catalog) {
     if (-not $entry.tenantId) { throw "Catalog entry '$($entry.name)' missing 'tenantId'." }
     if (-not $entry.clientId) { throw "Catalog entry '$($entry.name)' missing 'clientId'." }
 }
-$minifiedCatalog = ($catalog | ConvertTo-Json -Depth 10 -Compress)
+$minifiedCatalog = ConvertTo-Json -InputObject @($catalog) -Depth 10 -Compress
 Write-Host "Catalog loaded: $count tenant(s) -- $((($catalog | ForEach-Object name) -join ', '))" -ForegroundColor Cyan
 
 # ---- 6. Create / get the Configuration Profile shell --------------------

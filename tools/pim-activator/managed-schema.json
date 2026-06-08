@@ -1,0 +1,13 @@
+{
+  "$schema": "http://json-schema.org/draft-04/schema#",
+  "title": "PIM Activator managed configuration",
+  "description": "Schema for the chrome.storage.managed configuration the PIM Activator extension reads on every popup load. Admins push values via the HKLM\\SOFTWARE\\Policies\\Microsoft\\Edge\\3rdparty\\extensions\\<extId>\\policy registry path (or the Google\\Chrome equivalent), typically via Intune ADMX-backed Configuration Profile.",
+  "type": "object",
+  "properties": {
+    "tenantCatalog": {
+      "title": "Tenant catalog (JSON-encoded array)",
+      "description": "A JSON-encoded array of tenant entries. Each entry: { name, tenantId, clientId, defaultJustification?, defaultDurationHours?, prefix?, entraPrefix?, azurePrefix?, groupNameFilter?, entraGroupRegex?, azureGroupRegex? }. The extension parses this string on every popup load and merges it with any locally-imported catalog before rendering the tenant-switcher dropdown.",
+      "type": "string"
+    }
+  }
+}
