@@ -1,9 +1,10 @@
 # Release notes for PIM4EntraPS
 
-## v2.4.86
+## v2.4.87
 
 Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monorepo:
 
+- release: PIM4EntraPS v2.4.87 + extension v1.5.11 - auto-discover via /.well-known/pim-activator.json on corporate domain (zero-OAuth, per-customer naming-convention regexes in same JSON) (b0d213ba)
 - release: PIM4EntraPS v2.4.86 + extension v1.5.10 - bootstrap discovery switched to OAuth2 device-code flow (fixes AADSTS50011, auto-discover now works in any tenant without per-tenant app-reg setup) (3658f74f)
 - release: PIM4EntraPS v2.4.85 + extension v1.5.9 - hard-evict stale MV3 service worker on legacy-clientId detect (popup.js calls chrome.runtime.reload + Update script wipes Service Worker dir) (cba9c04b)
 - release: PIM4EntraPS v2.4.84 - trim popup.js comment noise around legacy-clientId sentinel so casual grep surfaces only the single sentinel entry (no behaviour change, ext stays v1.5.8) (bef4c339)
@@ -33,13 +34,56 @@ Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monor
 - release: PIM4EntraPS v2.4.60 - auto-rename pre-v2.0 unsuffixed config files (a65dd161)
 - release: PIM4EntraPS v2.4.59 - docs catch-up for v2.4.56-58 (1f8eb644)
 - release: PIM4EntraPS v2.4.58 - Deploy-PimActivatorBackend -GrantConsent default ON (2803a811)
-- release: PIM4EntraPS v2.4.57 - default ExtensionId + UpdateUrl in Deploy-PimActivator* scripts (473969c8)
 
 ---
 
 # Release notes -- PIM4EntraPS
 
 > **Curated changelog.** The publish workflow auto-prepends recent monorepo commits as a raw activity log; this file is the human-friendly narrative on top.
+
+---
+
+## v2.4.87 -- PIM Activator extension v1.5.11: auto-discover via well-known URI on corporate domain (replaces device code, which CA-blocks in most tenants)
+
+Device-code flow shipped in v1.5.10 was blocked by Conditional Access in most production tenants (CA's AiTM-phishing protection covers device code). All OAuth-based bootstrap paths now ruled out (700016 with single-tenant clientId / 50011 with Microsoft Graph CLI / CA-blocked device code / multi-tenant publisher app explicitly off the table / manual paste explicitly off the table).
+
+Replaced the bootstrap entirely with a **well-known URI lookup on the corporate web domain**:
+
+1. User enters work email in the wizard.
+2. Service worker GETs `https://<email-domain>/.well-known/pim-activator.json` (with a `www.` fallback).
+3. JSON contains `tenantId` + `clientId` + optional per-customer config; popup pre-fills the wizard.
+4. User clicks Save -> runtime sign-in fires against the discovered clientId via `launchWebAuthFlow` (the customer's own PIM Activator app reg has `chromiumapp.org` registered per `Deploy-PimActivatorBackend.ps1`).
+
+**JSON schema** (admin publishes once on the corporate domain):
+
+```json
+{
+  "tenantId":             "<tenant GUID>",
+  "clientId":             "<PIM Activator app appId>",
+  "defaultJustification": "Change in infrastructure",
+  "defaultDurationHours": 8,
+  "groupNameFilter":      "^PIM-",
+  "entraGroupRegex":      "Entra",
+  "azureGroupRegex":      "(AzRes|Azure)"
+}
+```
+
+The last three fields are per-customer naming-convention regexes that were already supported by the extension (`cfg.groupNameFilter` at `popup.js:2405` + `cfg.entraGroupRegex`/`azureGroupRegex` at `1732-1733`) but never persisted by the wizard before -- now they ride in the JSON and are saved to chrome.storage.local as `userGroupNameFilter` / `userEntraGroupRegex` / `userAzureGroupRegex`. Each customer's `PIM-` (or `Admin-`, or whatever they use) prefix flows through without code changes on our side.
+
+**Why publishing the JSON publicly is safe** (covered the discussion at length, repeating the short form):
+
+- `tenantId` is already public via the unauthenticated OIDC discovery endpoint Microsoft hosts at `login.microsoftonline.com/<domain>/.well-known/openid-configuration` -- you cannot hide it.
+- `clientId` is public by OAuth2 spec; it appears in every authorize URL the browser sends. It is NOT a credential.
+
+**Removed in this release:**
+- `background.js` device-code grant + token polling.
+- `popup.js` device-code panel + copy-button rendering.
+- Bootstrap clientId constant (no bootstrap sign-in needed anymore -- discovery is a plain HTTPS fetch).
+- popup.js `discoveryDeviceCode` chrome.storage.local key + boot pickup logic.
+
+**Added:**
+- `host_permissions: "https://*/*"` in manifest -- needed for the well-known fetch to arbitrary corporate domains. Edge for Business managed installs can pre-approve.
+- The 3 regex keys in `loadConfig` / `processDiscoveryResult` / `onboarding-save` / reset handler.
 
 ---
 

@@ -42,7 +42,8 @@ const KNOWN_BAD_LEGACY_CLIENTIDS = [
 
 async function loadConfig() {
   const u = await new Promise(r => chrome.storage.local.get(
-    ['userTenantId','userClientId','userDefaultJustification','userDefaultDurationHours'], r))
+    ['userTenantId','userClientId','userDefaultJustification','userDefaultDurationHours',
+     'userGroupNameFilter','userEntraGroupRegex','userAzureGroupRegex'], r))
 
   if (u.userClientId && KNOWN_BAD_LEGACY_CLIENTIDS.includes(String(u.userClientId).toLowerCase())) {
     console.warn('[PIM Activator] purging legacy bad userClientId ' + u.userClientId + ' from chrome.storage.local + reloading extension to evict stale MV3 service worker')
@@ -65,6 +66,15 @@ async function loadConfig() {
     clientId:             u.userClientId             || '',
     defaultJustification: u.userDefaultJustification || '',
     defaultDurationHours: u.userDefaultDurationHours || 0,
+    // Per-customer naming convention -- populated from the well-known JSON
+    // (or pasted manually in the wizard's advanced section if exposed).
+    // groupNameFilter limits the Activate tab to groups matching the regex
+    // (e.g. '^PIM-' for tenants that prefix all PIM-managed groups with PIM-).
+    // entraGroupRegex / azureGroupRegex are used by categoriseGroupByName
+    // to bucket eligibilities into the Entra / Azure / Workload sections.
+    groupNameFilter:      u.userGroupNameFilter      || '',
+    entraGroupRegex:      u.userEntraGroupRegex      || '',
+    azureGroupRegex:      u.userAzureGroupRegex      || '',
   }
 }
 
@@ -143,115 +153,65 @@ function renderOnboarding(currentCfg) {
   // every 1.5s while a discovery is in flight; the very first thing it does
   // on (re)load is also check for an in-flight or completed result so a
   // sign-in that finished while the popup was dead picks up on next open.
+  // Stashed by processDiscoveryResult so the Save handler can persist the
+  // regex fields (which don't have visible input boxes in the wizard).
+  let _lastDiscovery = null
   function processDiscoveryResult(result) {
     if (!result) return
-    const tid = result.tenantId
-    const apps = result.apps || []
-    if (tid) tenantInput.value = tid
-    if (apps.length === 0) {
-      statusEl.textContent = `Tenant detected (${tid || '?'}). No service principal found whose display name contains "PIM Activator". Paste the client id manually below.`
-    } else if (apps.length === 1) {
-      clientInput.value = apps[0].appId
-      statusEl.textContent = `Found 1 app: ${apps[0].displayName}. Tenant + client id pre-filled below.`
-    } else {
-      statusEl.textContent = `Found ${apps.length} matching apps. Pick one:`
-      const appsWrap = document.getElementById('ob-auto-apps')
-      const appsList = document.getElementById('ob-auto-apps-list')
-      appsWrap.style.display = ''
-      appsList.innerHTML = ''
-      for (const a of apps) {
-        const btn = document.createElement('button')
-        btn.style.cssText = 'text-align:left;padding:8px 10px;border:1px solid #d0d7de;border-radius:5px;background:#ffffff;cursor:pointer;'
-        btn.innerHTML = `<div style="font-weight:600;font-size:12.5px;color:#0969da;">${escapeHtmlSafe(a.displayName)}</div>
-                         <div style="font-family:monospace;font-size:10.5px;color:#7d8590;">${escapeHtmlSafe(a.appId)}</div>`
-        btn.onmouseenter = () => { btn.style.background = '#f6f8fa' }
-        btn.onmouseleave = () => { btn.style.background = '#ffffff' }
-        btn.onclick = () => {
-          clientInput.value = a.appId
-          statusEl.textContent = `Selected: ${a.displayName}. Pre-filled below.`
-        }
-        appsList.appendChild(btn)
-      }
+    _lastDiscovery = result
+    // v1.5.11+ shape from /.well-known/pim-activator.json:
+    //   { tenantId, clientId, source,
+    //     defaultJustification?, defaultDurationHours?,
+    //     groupNameFilter?, entraGroupRegex?, azureGroupRegex? }
+    if (result.tenantId) tenantInput.value = result.tenantId
+    if (result.clientId) clientInput.value = result.clientId
+    if (typeof result.defaultJustification === 'string' && result.defaultJustification.trim()) {
+      justInput.value = result.defaultJustification.trim()
     }
+    if (typeof result.defaultDurationHours === 'number' && result.defaultDurationHours > 0) {
+      durInput.value = result.defaultDurationHours
+    }
+    const src = result.source ? ` (from ${result.source})` : ''
+    const filters = []
+    if (result.groupNameFilter) filters.push('groupNameFilter=' + result.groupNameFilter)
+    if (result.entraGroupRegex) filters.push('entraGroupRegex=' + result.entraGroupRegex)
+    if (result.azureGroupRegex) filters.push('azureGroupRegex=' + result.azureGroupRegex)
+    const filterNote = filters.length ? ' Applied filters: ' + filters.join(' / ') + '.' : ''
+    statusEl.textContent = `Config discovered${src}.${filterNote} Click "Save and continue" below.`
     startBtn.disabled = false
-    startBtn.textContent = 'Sign in to auto-discover'
-  }
-
-  // ----- Render device-code panel (v1.5.10+ device-code flow) --------------
-  // background.js writes { userCode, verificationUri, ... } to
-  // chrome.storage.local.discoveryDeviceCode the moment Entra returns a code.
-  // We render an obvious "Go to <URL> and enter <CODE>" block + a copy button
-  // + an open-tab button so the user has the cheapest possible UX.
-  function renderDeviceCode(dc) {
-    if (!dc) { devicePanel.innerHTML = ''; return }
-    var safeCode = escapeHtmlSafe(dc.userCode || '')
-    var safeUri  = escapeHtmlSafe(dc.verificationUri || 'https://microsoft.com/devicelogin')
-    devicePanel.innerHTML =
-      '<div style="border:1px solid #d0d7de;border-radius:6px;padding:10px 12px;background:#dbeafe;">' +
-        '<div style="font-weight:600;font-size:12.5px;color:#0969da;margin-bottom:6px;">Sign in via device code</div>' +
-        '<ol style="margin:0 0 6px 18px;padding:0;font-size:11.5px;color:#24292f;line-height:1.55;">' +
-          '<li>Open <a href="' + safeUri + '" target="_blank" rel="noopener" id="ob-dc-open" style="color:#0969da;text-decoration:none;font-weight:600;">' + safeUri + '</a></li>' +
-          '<li>Enter the code: ' +
-            '<span id="ob-dc-code" style="font-family:monospace;font-size:14px;font-weight:700;background:#ffffff;border:1px solid #b7c4d3;padding:2px 8px;border-radius:4px;margin:0 4px;letter-spacing:1.5px;">' + safeCode + '</span>' +
-            '<button id="ob-dc-copy" style="font-size:10.5px;padding:2px 8px;border:1px solid #d0d7de;border-radius:4px;background:#ffffff;cursor:pointer;">copy</button>' +
-          '</li>' +
-          '<li>Sign in as a tenant admin and approve the consent prompt.</li>' +
-        '</ol>' +
-        '<div style="font-size:10.5px;color:#57606a;">Waiting for sign-in to complete...</div>' +
-      '</div>'
-    var copyBtn = document.getElementById('ob-dc-copy')
-    if (copyBtn) {
-      copyBtn.onclick = function () {
-        try {
-          navigator.clipboard.writeText(dc.userCode || '').then(function () {
-            copyBtn.textContent = 'copied'
-            setTimeout(function () { copyBtn.textContent = 'copy' }, 1500)
-          })
-        } catch (e) { /* no clipboard perm, just show */ }
-      }
-    }
+    startBtn.textContent = 'Re-discover'
   }
 
   // ----- Poll chrome.storage.local for the service worker's result ---------
   let _pollTimer = null
-  function startPolling(timeoutMs = 900000) {
+  function startPolling(timeoutMs = 30000) {
     if (_pollTimer) clearInterval(_pollTimer)
     const deadline = Date.now() + timeoutMs
     devicePanel.style.display = ''
     startBtn.disabled = true
-    startBtn.textContent = 'Sign-in in progress...'
-    let _lastDcCode = null
+    startBtn.textContent = 'Discovering...'
     _pollTimer = setInterval(async () => {
       const got = await new Promise(r => chrome.storage.local.get(
-        ['discoveryStatus','discoveryResult','discoveryError','discoveryDeviceCode'], r))
+        ['discoveryStatus','discoveryResult','discoveryError'], r))
       if (got.discoveryStatus) statusEl.textContent = got.discoveryStatus
-      // Render device-code panel as soon as it appears (and on re-open if it's
-      // still in flight). Only re-render when the code changes to avoid blowing
-      // away the user's copy-button click feedback every tick.
-      if (got.discoveryDeviceCode && got.discoveryDeviceCode.userCode && got.discoveryDeviceCode.userCode !== _lastDcCode) {
-        _lastDcCode = got.discoveryDeviceCode.userCode
-        renderDeviceCode(got.discoveryDeviceCode)
-      }
       if (got.discoveryError) {
         clearInterval(_pollTimer); _pollTimer = null
         showErr(got.discoveryError)
-        statusEl.textContent = 'Sign-in did not complete.'
+        statusEl.textContent = 'Discovery did not complete -- fill the fields below manually.'
         startBtn.disabled = false
-        startBtn.textContent = 'Sign in to auto-discover'
-        renderDeviceCode(null)
-        chrome.storage.local.remove(['discoveryError','discoveryStatus','discoveryDeviceCode'])
+        startBtn.textContent = 'Retry auto-discover'
+        chrome.storage.local.remove(['discoveryError','discoveryStatus'])
         return
       }
       if (got.discoveryResult) {
         clearInterval(_pollTimer); _pollTimer = null
         processDiscoveryResult(got.discoveryResult)
-        renderDeviceCode(null)
-        chrome.storage.local.remove(['discoveryResult','discoveryStatus','discoveryDeviceCode'])
+        chrome.storage.local.remove(['discoveryResult','discoveryStatus'])
         return
       }
       if (Date.now() > deadline) {
         clearInterval(_pollTimer); _pollTimer = null
-        showErr('Sign-in timed out -- click "Sign in to auto-discover" to try again.')
+        showErr('Discovery timed out -- fill the fields below manually.')
         startBtn.disabled = false
         startBtn.textContent = 'Sign in to auto-discover'
       }
@@ -271,10 +231,8 @@ function renderOnboarding(currentCfg) {
     } else if (got.discoveryError) {
       showErr(got.discoveryError)
       chrome.storage.local.remove(['discoveryError','discoveryStatus','discoveryDeviceCode'])
-    } else if (got.discoveryDeviceCode || got.discoveryStatus) {
-      // A flow is mid-air -- resume polling, and immediately render the
-      // device-code panel if we already have a code in storage.
-      if (got.discoveryDeviceCode) renderDeviceCode(got.discoveryDeviceCode)
+    } else if (got.discoveryStatus) {
+      // A discovery is mid-air -- resume polling.
       startPolling()
     }
   })()
@@ -313,11 +271,22 @@ function renderOnboarding(currentCfg) {
       return
     }
 
+    // Persist the regex / naming-convention fields from the most recent
+    // discovery (no visible input boxes in the wizard for these; they ride
+    // along on the discovered JSON). Empty string = unset, the engine
+    // falls back to its built-in defaults.
+    const groupNameFilter = (_lastDiscovery && typeof _lastDiscovery.groupNameFilter === 'string') ? _lastDiscovery.groupNameFilter : ''
+    const entraGroupRegex = (_lastDiscovery && typeof _lastDiscovery.entraGroupRegex === 'string') ? _lastDiscovery.entraGroupRegex : ''
+    const azureGroupRegex = (_lastDiscovery && typeof _lastDiscovery.azureGroupRegex === 'string') ? _lastDiscovery.azureGroupRegex : ''
+
     await new Promise(r => chrome.storage.local.set({
       userTenantId:             tenantId,
       userClientId:             clientId,
       userDefaultJustification: justification,
       userDefaultDurationHours: durationHours,
+      userGroupNameFilter:      groupNameFilter,
+      userEntraGroupRegex:      entraGroupRegex,
+      userAzureGroupRegex:      azureGroupRegex,
     }, r))
     // Wipe any half-baked sign-in artifacts from a previous attempt so the
     // next boot signs in cleanly against the freshly-saved config.
@@ -374,6 +343,7 @@ const AUTHORITY    = `https://login.microsoftonline.com/${cfg.tenantId}`
     if (!confirm('Clear PIM Activator config for THIS browser profile and start over?')) return
     await new Promise(r => chrome.storage.local.remove([
       'userTenantId','userClientId','userDefaultJustification','userDefaultDurationHours',
+      'userGroupNameFilter','userEntraGroupRegex','userAzureGroupRegex',
       'refreshToken','accessToken','accessTokenExpiry','armAccessToken','armAccessTokenExpiry','account'
     ], r))
     window.location.reload()

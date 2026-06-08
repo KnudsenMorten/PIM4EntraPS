@@ -151,40 +151,32 @@
     Let's set this up. Sign in to auto-discover your tenant + app registration, or fill in the fields below and click <strong>Save</strong>.
   </div>
 
-  <!-- Auto-discover panel. The PIM Activator app reg is single-tenant per
-       deployment, so we can't sign in via /common. Workflow: user enters
-       work email -> the worker calls Microsoft's unauthenticated
-       /common/userrealm endpoint to resolve the email's home tenant id ->
-       then signs in via /{tenantId}/oauth2/v2.0/authorize -> queries Graph
-       for app registrations whose displayName starts with "PIM Activator". -->
+  <!-- Auto-discover panel (v1.5.11+ -- well-known URI flow, no OAuth).
+       Workflow: user enters work email -> the worker GETs
+       https://<email-domain>/.well-known/pim4entraps-config.json (and a
+       www. fallback). The JSON must contain { tenantId, clientId } GUIDs
+       (optional defaultJustification, defaultDurationHours). The admin
+       publishes this file once on the corporate web domain. -->
   <div id="ob-auto" style="margin-bottom:14px;padding:10px;background:#eef6ff;border:1px solid #b6dcfe;border-radius:6px;">
     <div style="font-size:12.5px;color:#1a1a1a;font-weight:600;margin-bottom:4px;">Auto-discover (recommended)</div>
     <div style="font-size:11.5px;color:#57606a;line-height:1.45;margin-bottom:8px;">
-      Enter your work email, sign in once as a tenant admin, and the extension finds your tenant id + lists every app registration with "PIM Activator" in its display name. Needs the <code>Application.Read.All</code> delegated permission (admin role).
+      Enter your work email. The extension fetches <code>https://&lt;your-domain&gt;/.well-known/pim4entraps-config.json</code> and pre-fills the fields below. No sign-in or admin consent needed at this step.
     </div>
     <div style="display:flex;gap:8px;align-items:center;margin-bottom:8px;">
       <input id="ob-auto-email" type="email" placeholder="admin@yourtenant.com" autocomplete="username" spellcheck="false"
              style="flex:1;background:#ffffff;color:#1a1a1a;border:1px solid #d0d7de;border-radius:5px;padding:5px 7px;font-size:12px;">
     </div>
-    <button id="ob-auto-start" class="primary">Sign in to auto-discover</button>
+    <button id="ob-auto-start" class="primary">Auto-discover from corporate domain</button>
 
-    <!-- Sign-in status surfaces here once the wizard kicks off. The Microsoft
-         sign-in itself happens in a new browser window opened by
-         chrome.identity.launchWebAuthFlow -- no code-paste step. KEEP THE
-         POPUP OPEN until the sign-in window closes: extension popups die
-         when they lose focus, and a dead popup can't process the callback. -->
+    <!-- Discovery status surfaces here once kicked off. The worker writes
+         updates to chrome.storage.local.discoveryStatus and the popup
+         polls every ~1.5s; if the popup dies mid-flow, the next open
+         picks up where we left off. -->
     <div id="ob-auto-device" style="display:none;margin-top:10px;padding:10px;background:#ffffff;border:1px solid #b6dcfe;border-radius:5px;">
-      <div id="ob-auto-status" style="font-size:12px;color:#0969da;font-weight:600;">Signing in...</div>
+      <div id="ob-auto-status" style="font-size:12px;color:#0969da;font-weight:600;">Discovering...</div>
       <div style="font-size:11px;color:#7d8590;margin-top:4px;line-height:1.45;">
-        Complete sign-in in the new browser window. If this popup closes, just click the PIM Activator icon again -- progress is picked up automatically.
+        Fetching config from your corporate domain. If discovery fails, just fill the fields below manually.
       </div>
-    </div>
-
-    <!-- App-reg picker surfaces here AFTER sign-in completes. Auto-collapses
-         to a single line ("found 1: PIM Activator") when there's exactly one. -->
-    <div id="ob-auto-apps" style="display:none;margin-top:10px;">
-      <div style="font-size:11.5px;color:#57606a;margin-bottom:6px;">PIM Activator app registrations found in this tenant:</div>
-      <div id="ob-auto-apps-list" style="display:flex;flex-direction:column;gap:6px;"></div>
     </div>
   </div>
 
