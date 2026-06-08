@@ -10,8 +10,9 @@
     that tells the browser to install + auto-update the extension from the
     given -UpdateUrl on next launch.
 
-    Per-user (-Scope User, default, HKCU) or per-machine (-Scope Machine,
-    HKLM). Both browsers read the SAME key names under different roots:
+    Per-machine (-Scope Machine, default, HKLM, requires admin) or per-user
+    (-Scope User, HKCU, no admin). Both browsers read the SAME key names
+    under different roots:
       Edge   : SOFTWARE\Policies\Microsoft\Edge\ExtensionInstallForcelist
       Chrome : SOFTWARE\Policies\Google\Chrome\ExtensionInstallForcelist
 
@@ -32,9 +33,13 @@
     https://knudsenmorten.github.io/PIM4EntraPS/updates.xml
 
 .PARAMETER Scope
-    'User' (default, HKCU, no admin required, no Intune conflict) or
-    'Machine' (HKLM, requires admin, conflicts with Intune-managed
-    ExtensionInstallForcelist policy if the device is enrolled).
+    'Machine' (default, HKLM, requires admin, force-installs for every user
+    on the box) or 'User' (HKCU, no admin required, current-user only, no
+    Intune conflict).
+
+    On Intune-managed devices the HKLM ExtensionInstallForcelist value will
+    be overwritten by Intune's policy on next sync -- use Intune's own
+    Settings Catalog entry instead (see Deploy-PimActivatorIntune.ps1).
 
 .PARAMETER Browser
     'Edge', 'Chrome', or 'Both' (default).
@@ -43,23 +48,19 @@
     Remove the forcelist entry this script writes.
 
 .EXAMPLE
-    # Dev-box install (HKCU, no admin):
-    .\Deploy-PimActivatorClient.ps1 `
-        -ExtensionId 'eheocihmlppcophaeakmdenhgcookkab' `
-        -UpdateUrl   'https://knudsenmorten.github.io/PIM4EntraPS/updates.xml'
+    # Default per-machine install (HKLM, requires admin, applies to every
+    # user on this box):
+    .\Deploy-PimActivatorClient.ps1
 
-    # On next Edge / Chrome launch the extension installs.
-    # The user then opens the popup, completes the one-time onboarding
+    # On next Edge / Chrome launch the extension installs for every user.
+    # Each user then opens the popup, completes the one-time onboarding
     # wizard (work email -> tenant + app reg auto-discovered), and starts
     # activating PIM eligibilities.
 
 .EXAMPLE
-    # Per-machine install on an isolated test box (HKLM, requires admin,
-    # do NOT use on Intune-managed devices):
-    .\Deploy-PimActivatorClient.ps1 `
-        -ExtensionId 'eheocihmlppcophaeakmdenhgcookkab' `
-        -UpdateUrl   'https://knudsenmorten.github.io/PIM4EntraPS/updates.xml' `
-        -Scope Machine
+    # Current-user install (HKCU, no admin needed, won't conflict with
+    # Intune-pushed policy):
+    .\Deploy-PimActivatorClient.ps1 -Scope User
 
 .EXAMPLE
     # Edge only:
@@ -100,7 +101,7 @@ param(
 
     [Parameter()]
     [ValidateSet('Machine', 'User')]
-    [string]$Scope = 'User',
+    [string]$Scope = 'Machine',
 
     [Parameter()]
     [ValidateSet('Edge', 'Chrome', 'Both')]
@@ -111,6 +112,15 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+
+# HKLM requires admin. Fail fast with a clear message instead of letting
+# New-Item fault out mid-write with an opaque registry-permission error.
+if ($Scope -eq 'Machine') {
+    $isAdmin = ([Security.Principal.WindowsPrincipal]([Security.Principal.WindowsIdentity]::GetCurrent())).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+    if (-not $isAdmin) {
+        throw "-Scope Machine writes to HKLM and requires elevation. Re-run from an elevated PowerShell session, or pass -Scope User to write only the current-user HKCU forcelist."
+    }
+}
 
 # ---------------------------------------------------------------------------
 # Build the list of policy roots we'll operate on, one per targeted browser.
@@ -177,10 +187,9 @@ if ($Uninstall) {
 
 if ($Scope -eq 'Machine') {
     Write-Host ""
-    Write-Host "  *** -Scope Machine selected -- HKLM writes will be applied. ***" -ForegroundColor Yellow
-    Write-Host "  HKLM ExtensionInstallForcelist CONFLICTS with Intune-managed policy." -ForegroundColor Yellow
-    Write-Host "  Only use Machine scope on isolated test machines that are NOT Intune-managed." -ForegroundColor Yellow
-    Write-Host "  Production rollouts: push the same forcelist entry via Intune instead." -ForegroundColor Yellow
+    Write-Host "  -Scope Machine (default) -- writing to HKLM, applies to every user on this box." -ForegroundColor Cyan
+    Write-Host "  Note: on Intune-managed devices, the Intune-pushed ExtensionInstallForcelist will" -ForegroundColor DarkGray
+    Write-Host "        overwrite this on next sync -- use Deploy-PimActivatorIntune.ps1 there." -ForegroundColor DarkGray
     Write-Host ""
 } else {
     Write-Host ""

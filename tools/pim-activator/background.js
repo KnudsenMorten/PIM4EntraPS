@@ -16,7 +16,21 @@
 //   4. popup polls chrome.storage.local every ~1.5s -- if it died and the
 //      user reopens, the next poll finds the result and finishes the wizard
 
-const BOOTSTRAP_CLIENT_ID = 'e96afaa6-1c00-4320-9a4c-334558138e09'
+// Microsoft Graph Command Line Tools -- a Microsoft-owned multi-tenant FOCI
+// client that already exists as a service principal in EVERY Entra tenant
+// by default. We use it ONLY for the bootstrap discovery sign-in (just
+// enough Application.Read.All / User.Read to query the tenant for any SPN
+// whose displayName contains "PIM Activator"). After discovery, the user
+// saves the discovered tenant-local PIM Activator clientId and every
+// subsequent runtime sign-in uses THAT clientId (with the full scope set
+// the customer's per-tenant app reg has admin-consented).
+//
+// Why this is necessary: an extension bundled clientId from the upstream
+// dev's tenant (e.g. e96afaa6-...-334558138e09) returns AADSTS700016
+// "Application not found in directory" the moment a customer in some
+// other tenant tries to sign in -- the app reg simply doesn't exist
+// there. The Microsoft Graph CLI app does, in every tenant.
+const BOOTSTRAP_CLIENT_ID = '14d82eec-204b-4c2f-b7e8-296a70dab67e'
 const REDIRECT_URI        = chrome.identity.getRedirectURL()
 
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
@@ -78,19 +92,14 @@ async function runDiscovery(email) {
   authUrl.searchParams.set('response_type', 'code')
   authUrl.searchParams.set('redirect_uri',  REDIRECT_URI)
   authUrl.searchParams.set('response_mode', 'query')
-  // Request the FULL runtime scope set during the wizard sign-in, not just
-  // the discovery scopes -- this way the refresh_token we persist below
-  // satisfies both Graph (PrivilegedAccess.ReadWrite.AzureADGroup, etc.) and
-  // (via silent renewal at the runtime layer) ARM. Net effect: the user
-  // signs in ONCE during onboarding and the runtime never re-prompts.
+  // Discovery-only scopes -- just enough to enumerate SPNs in the tenant.
+  // The runtime sign-in (popup.js, after the user saves the discovered
+  // clientId) will request the full PrivilegedAccess / Group / RoleManagement
+  // scope set against the customer's PIM Activator app reg, which is where
+  // those scopes are actually consented.
   authUrl.searchParams.set('scope', [
     'https://graph.microsoft.com/User.Read',
     'https://graph.microsoft.com/Application.Read.All',
-    'https://graph.microsoft.com/PrivilegedAccess.ReadWrite.AzureADGroup',
-    'https://graph.microsoft.com/Group.Read.All',
-    'https://graph.microsoft.com/RoleManagement.Read.Directory',
-    'https://graph.microsoft.com/RoleManagement.ReadWrite.Directory',
-    'https://graph.microsoft.com/AdministrativeUnit.Read.All',
     'openid', 'profile', 'offline_access',
   ].join(' '))
   // NO prompt=select_account: the account picker is hosted on /common/SAS,
@@ -147,42 +156,49 @@ async function runDiscovery(email) {
   } catch { /* fall through */ }
   if (!tid) throw new Error('id_token missing tenant id claim.')
 
-  await setStatus('Looking up PIM Activator app registrations...')
+  await setStatus('Looking up service principals whose displayName contains "PIM Activator"...')
 
-  const appsResp = await fetch(
-    "https://graph.microsoft.com/v1.0/applications?$filter=" +
-    encodeURIComponent("startswith(displayName,'PIM Activator')") +
-    "&$select=appId,displayName,id",
-    { headers: { Authorization: 'Bearer ' + token.access_token } })
+  // Search service principals (not applications) by displayName SUBSTRING --
+  // so the customer can rename the SPN to e.g. "ACME PIM Activator", "PIM
+  // Activator (prod)", "Contoso-PIM-Activator-Workload" and the discovery
+  // still finds it. Graph requires the advanced query parameters for
+  // $search on directory objects: `ConsistencyLevel: eventual` header +
+  // `$count=true`. The $search syntax `"displayName:PIM Activator"`
+  // matches any SPN whose displayName CONTAINS that string (case-insensitive,
+  // word-boundary-aware tokenizer Graph applies to displayName).
+  const searchUrl =
+    'https://graph.microsoft.com/v1.0/servicePrincipals' +
+    '?$search=' + encodeURIComponent('"displayName:PIM Activator"') +
+    '&$select=appId,displayName,id' +
+    '&$count=true' +
+    '&$top=25'
+  const appsResp = await fetch(searchUrl, {
+    headers: {
+      Authorization:    'Bearer ' + token.access_token,
+      ConsistencyLevel: 'eventual',
+    },
+  })
   const appsBody = await appsResp.json()
   if (!appsResp.ok) {
-    const msg = appsBody.error?.message || appsBody.error || 'app lookup failed'
-    throw new Error(`Tenant detected (${tid}). App lookup failed: ${msg}. Paste the client id manually below.`)
+    const msg = appsBody.error?.message || appsBody.error || 'SPN lookup failed'
+    throw new Error(`Tenant detected (${tid}). Service-principal lookup failed: ${msg}. Paste the client id manually below.`)
   }
-  const apps = (appsBody.value || []).filter(a => a && a.appId)
+  // Defensive: only keep SPNs whose displayName actually contains the phrase
+  // (the Graph tokenizer is generous and can occasionally surface near-matches
+  // when the query is broad).
+  const needle = 'pim activator'
+  const apps = (appsBody.value || [])
+    .filter(a => a && a.appId && (a.displayName || '').toLowerCase().includes(needle))
 
-  // Persist the freshly-minted refresh_token + access_token into the SAME
-  // chrome.storage.local keys the runtime sign-in uses. The runtime layer
-  // (popup.js) checks these on boot before launching its own sign-in --
-  // when they're already present and the refresh_token still works, the
-  // user never sees a second consent prompt. Account claims come from the
-  // id_token (oid = localAccountId, upn / preferred_username = username,
-  // tid = tenantId, already extracted above).
-  let claims = {}
-  try {
-    claims = JSON.parse(atob(token.id_token.split('.')[1].replace(/-/g,'+').replace(/_/g,'/')))
-  } catch { /* fall through with empty claims; account remains a best-effort hint */ }
-
-  await new Promise(r => chrome.storage.local.set({
-    refreshToken:      token.refresh_token,
-    accessToken:       token.access_token,
-    accessTokenExpiry: Date.now() + (Number(token.expires_in) || 3600) * 1000,
-    account: {
-      username:       claims.preferred_username || claims.upn || claims.unique_name || '',
-      localAccountId: claims.oid || '',
-      tenantId:       tid,
-    },
-  }, r))
+  // NOTE: we intentionally do NOT persist this bootstrap refresh/access
+  // token to the runtime keys (refreshToken / accessToken / account). The
+  // bootstrap signed in against the Microsoft Graph CLI client and only
+  // holds User.Read + Application.Read.All -- nowhere near enough for the
+  // runtime activation calls (PrivilegedAccess.ReadWrite.AzureADGroup, etc).
+  // After the user saves the discovered customer-tenant clientId, popup.js
+  // reloads and the next sign-in fires against THAT clientId with the full
+  // runtime scope set already admin-consented on the customer's PIM
+  // Activator app reg.
 
   return { tenantId: tid, apps }
 }
