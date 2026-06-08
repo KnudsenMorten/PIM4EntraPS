@@ -92,6 +92,7 @@ function _prefixToRegex(p, anchorStart) {
 async function readMergedCatalog() {
   let managed = []
   let local   = []
+  let managedErr = null
   try {
     const m = await new Promise(r => chrome.storage.managed.get(['tenantCatalog'], r))
     if (m && m.tenantCatalog) {
@@ -101,7 +102,8 @@ async function readMergedCatalog() {
       if (Array.isArray(parsed)) managed = parsed
     }
   } catch (e) {
-    console.warn('[PIM Activator] managed catalog read/parse failed:', e.message || e)
+    managedErr = e.message || String(e)
+    console.warn('[PIM Activator] managed catalog read/parse failed:', managedErr)
   }
   try {
     const l = await new Promise(r => chrome.storage.local.get(['tenantCatalog'], r))
@@ -116,13 +118,19 @@ async function readMergedCatalog() {
     if (!isGuidStr(tid) || !isGuidStr(cid)) continue
     if (KNOWN_BAD_LEGACY_CLIENTIDS.includes(cid)) continue
     if (seen.has(tid)) {
-      // Local overrides managed for the same tenant -- replace.
       const idx = merged.findIndex(e => String(e.tenantId).toLowerCase() === tid)
       if (idx >= 0) merged[idx] = entry
       continue
     }
     seen.add(tid)
     merged.push(entry)
+  }
+  // Stash source breakdown for the onboarding wizard "where did this come from?"
+  // status line. Read by renderOnboarding without re-querying storage.
+  merged._sources = {
+    managedRaw: managed.length,
+    localRaw:   local.length,
+    managedErr
   }
   return merged
 }
@@ -267,17 +275,43 @@ function renderOnboarding(currentCfg) {
   // Existing legacy single-customer wizard remains visible BELOW the catalog
   // panel as the fallback path -- still works for single-tenant deployments.
   const catalog = Array.isArray(currentCfg.catalog) ? currentCfg.catalog : []
+  const sources = (catalog && catalog._sources) || { managedRaw: 0, localRaw: 0, managedErr: null }
   let catalogPanel = document.getElementById('ob-catalog')
   if (!catalogPanel) {
     catalogPanel = document.createElement('div')
     catalogPanel.id = 'ob-catalog'
     catalogPanel.style.cssText = 'margin-bottom:14px;padding:10px;background:#f0fdf4;border:1px solid #86efac;border-radius:6px;'
-    ob.insertBefore(catalogPanel, ob.firstChild)
+    // Insert AFTER the Welcome heading + subtitle (the first 2 children of
+    // #onboarding) so the order is: Welcome -> Catalog panel -> Manual entry.
+    // The Welcome block is the page title -> catalog is the first action ->
+    // manual entry is the fallback.
+    const afterEl = ob.children.length >= 2 ? ob.children[1].nextSibling : ob.firstChild
+    if (afterEl) ob.insertBefore(catalogPanel, afterEl)
+    else         ob.appendChild(catalogPanel)
   }
+  // Source-status line: tell the operator EXACTLY where the catalog came from
+  // (Intune-pushed via chrome.storage.managed vs locally imported). Critical
+  // for trouble-shooting "did my Intune policy land?" on a managed device.
+  const _statusLine = (function () {
+    if (sources.managedErr) {
+      return '<span style="color:#cf222e;">Intune managed config read FAILED: ' + escapeHtmlSafe(sources.managedErr) + '. Only local entries visible.</span>'
+    }
+    if (sources.managedRaw > 0 && sources.localRaw > 0) {
+      return '<span style="color:#166534;">&#10003; Detected ' + sources.managedRaw + ' Intune-managed + ' + sources.localRaw + ' locally-imported entries.</span>'
+    }
+    if (sources.managedRaw > 0) {
+      return '<span style="color:#166534;">&#10003; Detected ' + sources.managedRaw + ' entries from Intune managed config (chrome.storage.managed.tenantCatalog).</span>'
+    }
+    if (sources.localRaw > 0) {
+      return '<span style="color:#166534;">&#10003; ' + sources.localRaw + ' entries imported locally in this browser profile. <span style="color:#57606a;">(No Intune managed config detected on this device.)</span></span>'
+    }
+    return '<span style="color:#57606a;">No Intune managed config detected (chrome.storage.managed.tenantCatalog is empty) and no local catalog imported yet.</span>'
+  })()
   if (catalog.length > 0) {
     catalogPanel.innerHTML =
-      '<div style="font-size:12.5px;color:#166534;font-weight:600;margin-bottom:6px;">Pick a tenant (' + catalog.length + ' in catalog)</div>' +
-      '<div style="font-size:11px;color:#15803d;margin-bottom:8px;line-height:1.45;">Catalog loaded from Intune managed config or local import. Pick the tenant to activate now -- you can switch anytime from the header.</div>' +
+      '<div style="font-size:12.5px;color:#166534;font-weight:600;margin-bottom:4px;">Pick a tenant (' + catalog.length + ' in catalog)</div>' +
+      '<div style="font-size:10.5px;margin-bottom:6px;line-height:1.4;">' + _statusLine + '</div>' +
+      '<div style="font-size:11px;color:#15803d;margin-bottom:8px;line-height:1.45;">Pick the tenant to activate now -- you can switch anytime from the header dropdown.</div>' +
       '<select id="ob-catalog-pick" style="width:100%;padding:6px 7px;font-size:12px;background:#ffffff;border:1px solid #86efac;border-radius:5px;margin-bottom:8px;">' +
         catalog.map(c => '<option value="' + escapeHtmlSafe(c.tenantId) + '">' + escapeHtmlSafe(c.name || c.tenantId) + ' (' + escapeHtmlSafe(c.tenantId) + ')</option>').join('') +
       '</select>' +
@@ -300,7 +334,8 @@ function renderOnboarding(currentCfg) {
     }
   } else {
     catalogPanel.innerHTML =
-      '<div style="font-size:12.5px;color:#166534;font-weight:600;margin-bottom:6px;">Import tenant catalog (MSP / multi-tenant)</div>' +
+      '<div style="font-size:12.5px;color:#166534;font-weight:600;margin-bottom:4px;">Import tenant catalog (MSP / multi-tenant)</div>' +
+      '<div style="font-size:10.5px;margin-bottom:8px;line-height:1.4;">' + _statusLine + '</div>' +
       '<div style="font-size:11px;color:#15803d;margin-bottom:8px;line-height:1.45;">' +
         'Paste a JSON array of tenants below to bulk-onboard. Each entry: ' +
         '<code style="background:#ffffff;padding:1px 3px;border-radius:3px;">{name, tenantId, clientId, defaultJustification?, defaultDurationHours?, prefix?, entraPrefix?, azurePrefix?}</code>. ' +
