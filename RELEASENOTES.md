@@ -1,9 +1,10 @@
 # Release notes for PIM4EntraPS
 
-## v2.4.80
+## v2.4.81
 
 Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monorepo:
 
+- release: PIM4EntraPS v2.4.81 + extension v1.5.6 - scrub historical e96af GUID from background.js comment so CRX binary contains zero trace (5732c210)
 - release: PIM4EntraPS v2.4.80 + extension v1.5.5 - single-line footer with attribution + GitHub/Report chips, MVP recoloured blue + comma form, GitHub link to repo (d49b7653)
 - release: PIM4EntraPS v2.4.79 - Deploy-PimActivatorClient writes ExtensionInstallAllowlist + ExtensionInstallSources alongside ExtensionInstallForcelist + republished extension v1.5.2 to gh-pages (85325930)
 - release: PIM4EntraPS v2.4.78 + extension v1.5.2 - manifest homepage_url -> GitHub repo (a270e8cf)
@@ -33,13 +34,22 @@ Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monor
 - release: PIM Activator extension v1.4.3 -> v1.4.6 (d462d1bf)
 - chore(pim-activator): trim orphaned managed-policy code + rename dev script + rewrite README (552d0185)
 - release: PIM Activator extension v1.4.2 - onboarding wizard + direct PIM + favorites (b1987c59)
-- release: PIM4EntraPS v2.4.55 - release notes rewritten for readability (fe342f9e)
 
 ---
 
 # Release notes -- PIM4EntraPS
 
 > **Curated changelog.** The publish workflow auto-prepends recent monorepo commits as a raw activity log; this file is the human-friendly narrative on top.
+
+---
+
+## v2.4.81 -- PIM Activator extension v1.5.6: nuke last `e96af` trace from code/comments
+
+Purely a cleanup release. The bad upstream clientId `e96afaa6-...-334558138e09` was replaced as an executable constant back in v1.5.0 (-> Microsoft Graph CLI `14d82eec-...`), but the GUID still survived as a literal string inside an explanatory comment in `background.js`. Any `strings(1)` / grep of the packed CRX would surface it and cause "why is this id still in the binary?" confusion during incident review.
+
+Rewrote the comment to use a generic phrasing ("a single-tenant app-reg clientId from any one tenant") instead of the specific historical GUID. The only places `e96af` survives in the entire monorepo now are this RELEASENOTES file and the v2.4.76 entry that documented the original fix.
+
+Republished CRX + updates.xml to gh-pages as v1.5.6.
 
 ---
 

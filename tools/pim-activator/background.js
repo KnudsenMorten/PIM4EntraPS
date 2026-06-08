@@ -25,11 +25,11 @@
 // subsequent runtime sign-in uses THAT clientId (with the full scope set
 // the customer's per-tenant app reg has admin-consented).
 //
-// Why this is necessary: an extension bundled clientId from the upstream
-// dev's tenant (e.g. e96afaa6-...-334558138e09) returns AADSTS700016
-// "Application not found in directory" the moment a customer in some
-// other tenant tries to sign in -- the app reg simply doesn't exist
-// there. The Microsoft Graph CLI app does, in every tenant.
+// Why this is necessary: bundling a single-tenant app-reg clientId from
+// any one tenant returns AADSTS700016 "Application not found in directory"
+// the moment a customer in some other tenant tries to sign in -- the
+// app reg simply doesn't exist there. The Microsoft Graph CLI app does,
+// in every tenant.
 const BOOTSTRAP_CLIENT_ID = '14d82eec-204b-4c2f-b7e8-296a70dab67e'
 const REDIRECT_URI        = chrome.identity.getRedirectURL()
 
