@@ -27,9 +27,34 @@
 // legacy paths (window.PIM_CONFIG from config.js + chrome.storage.managed
 // from Intune / GPO push) so there is exactly ONE source of truth and no
 // silent override surprises.
+// Known-bad clientIds that pre-v1.5.0 onboarding could have written to
+// chrome.storage.local as `userClientId`. Specifically: the upstream dev's
+// single-tenant PIM Activator app reg, which was both the bootstrap AND
+// the auto-discovered "PIM Activator" app in the dev's tenant -- so a
+// v1.4.x onboarding completed against the dev's tenant would save
+// e96afaa6 as `userClientId`. Any of these in chrome.storage produces
+// AADSTS700016 against every other tenant ("Application with identifier
+// 'e96afaa6-...' was not found in the directory 'X'"). Purged on load so
+// the onboarding wizard re-runs and discovers the CUSTOMER tenant's
+// actual PIM Activator SPN.
+const KNOWN_BAD_LEGACY_CLIENTIDS = [
+  'e96afaa6-1c00-4320-9a4c-334558138e09',
+]
+
 async function loadConfig() {
   const u = await new Promise(r => chrome.storage.local.get(
     ['userTenantId','userClientId','userDefaultJustification','userDefaultDurationHours'], r))
+
+  if (u.userClientId && KNOWN_BAD_LEGACY_CLIENTIDS.includes(String(u.userClientId).toLowerCase())) {
+    console.warn('[PIM Activator] purging legacy bad userClientId ' + u.userClientId + ' from chrome.storage.local and re-running onboarding')
+    await new Promise(r => chrome.storage.local.remove([
+      'userTenantId','userClientId',
+      'refreshToken','accessToken','accessTokenExpiry',
+      'armAccessToken','armAccessTokenExpiry','account'
+    ], r))
+    return { tenantId: '', clientId: '', defaultJustification: '', defaultDurationHours: 0 }
+  }
+
   return {
     tenantId:             u.userTenantId             || '',
     clientId:             u.userClientId             || '',
@@ -225,6 +250,15 @@ function renderOnboarding(currentCfg) {
 
     if (!isGuid(tenantId)) { showErr('Tenant id must be a GUID (e.g. f0fa27a0-8e7c-4f63-9a77-ec94786b7c9e).'); tenantInput.focus(); return }
     if (!isGuid(clientId)) { showErr('Client id must be a GUID. This is the Application (client) id of the PIM Activator app registration in your tenant.'); clientInput.focus(); return }
+    // Block writing the known-bad legacy upstream-dev clientId -- if the user
+    // sees it in the field (auto-filled from a stale chrome.storage.sync or
+    // a previous v1.4.x discovery), make them pick the correct customer-tenant
+    // SPN before saving.
+    if (KNOWN_BAD_LEGACY_CLIENTIDS.includes(clientId.toLowerCase())) {
+      showErr('That clientId (' + clientId + ') is the upstream dev\'s app reg and does NOT exist in your tenant. Click "Sign in to auto-discover" and pick the SPN whose displayName contains "PIM Activator" in YOUR tenant.')
+      clientInput.focus()
+      return
+    }
 
     await new Promise(r => chrome.storage.local.set({
       userTenantId:             tenantId,

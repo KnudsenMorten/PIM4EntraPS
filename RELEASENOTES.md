@@ -1,9 +1,10 @@
 # Release notes for PIM4EntraPS
 
-## v2.4.82
+## v2.4.83
 
 Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monorepo:
 
+- release: PIM4EntraPS v2.4.83 + extension v1.5.8 - auto-purge legacy bad userClientId (e96afaa6) from chrome.storage on load + block re-save in onboarding wizard (133fe3a5)
 - release: PIM4EntraPS v2.4.82 + extension v1.5.7 - version badge actually renders (separate version-badge.js loaded synchronously from popup.html, sidesteps popup.js onboarding-park trap that blocked the previous IIFE) (65167d60)
 - release: PIM4EntraPS v2.4.81 + extension v1.5.6 - scrub historical e96af GUID from background.js comment so CRX binary contains zero trace (5732c210)
 - release: PIM4EntraPS v2.4.80 + extension v1.5.5 - single-line footer with attribution + GitHub/Report chips, MVP recoloured blue + comma form, GitHub link to repo (d49b7653)
@@ -33,13 +34,25 @@ Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monor
 - release: PIM4EntraPS v2.4.56 - auto-bootstrap missing .custom config files from samples (2855fbd6)
 - release: PIM Activator extension v1.4.6 -> v1.4.9 (39e0920d)
 - release: PIM Activator extension v1.4.3 -> v1.4.6 (d462d1bf)
-- chore(pim-activator): trim orphaned managed-policy code + rename dev script + rewrite README (552d0185)
 
 ---
 
 # Release notes -- PIM4EntraPS
 
 > **Curated changelog.** The publish workflow auto-prepends recent monorepo commits as a raw activity log; this file is the human-friendly narrative on top.
+
+---
+
+## v2.4.83 -- PIM Activator extension v1.5.8: auto-purge legacy bad `userClientId` from chrome.storage
+
+Customer report: even after wiping `Local Extension Settings\<id>\` via `Update-PimActivator-Extension.ps1`, the AADSTS700016 with `client_id=e96afaa6-1c00-4320-9a4c-334558138e09` would come back. Root cause traced: that GUID is the upstream dev's PIM Activator app reg appId -- in v1.4.x the bootstrap signed into the dev's tenant and discovery returned that app, which got saved as the user's `userClientId` in chrome.storage.local. Any later wipe followed by an Edge profile sync would restore it from cloud, and the runtime would happily use it (resulting in AADSTS700016 against the customer tenant where that app reg does NOT exist).
+
+**Two-layer defense added:**
+
+1. **`loadConfig()` purge guard** -- on every popup load, if `userClientId` matches the known-bad upstream GUID, all auth artifacts (`userTenantId`, `userClientId`, `refreshToken`, `accessToken*`, `armAccessToken*`, `account`) are removed from chrome.storage.local and `loadConfig` returns empty config -- triggering the onboarding wizard to re-run and discover the CUSTOMER tenant's actual PIM Activator SPN.
+2. **`onboarding-save` write guard** -- the Save handler refuses to write the known-bad GUID and shows a clear error: "That clientId is the upstream dev's app reg and does NOT exist in your tenant. Click 'Sign in to auto-discover' and pick the SPN whose displayName contains 'PIM Activator' in YOUR tenant."
+
+Both guards key off a single `KNOWN_BAD_LEGACY_CLIENTIDS` array at the top of popup.js so adding more known-bad values in future requires a single-line change.
 
 ---
 
