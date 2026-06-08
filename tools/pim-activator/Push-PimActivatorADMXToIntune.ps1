@@ -88,7 +88,7 @@ try {
 if ($Remove) {
     if ($existing) {
         Write-Host "Removing existing ADMX upload '$admxFileName' (id $($existing.id))..." -ForegroundColor Yellow
-        Invoke-MgGraphRequest -Method DELETE -Uri "https://graph.microsoft.com/beta/deviceManagement/groupPolicyUploadedDefinitionFiles/$($existing.id)" -ErrorAction Stop | Out-Null
+        Invoke-MgGraphRequest -Method POST -Uri "https://graph.microsoft.com/beta/deviceManagement/groupPolicyUploadedDefinitionFiles/$($existing.id)/remove" -ErrorAction Stop | Out-Null
         Write-Host "[OK] Removed." -ForegroundColor Green
     } else {
         Write-Host "Nothing to remove -- no upload named '$admxFileName' in tenant $($ctx.TenantId)." -ForegroundColor Gray
@@ -112,8 +112,66 @@ Write-Host "ADML: $AdmlPath ($($admlBytes.Length) bytes)" -ForegroundColor Cyan
 # ---- 4. (Intune groupPolicyUploadedDefinitionFile is POST-only) ----------
 # To update, delete first then POST anew. Microsoft's documented pattern.
 if ($existing) {
-    Write-Host "Existing upload found (id $($existing.id), status $($existing.status)). Deleting before re-upload..." -ForegroundColor Yellow
-    Invoke-MgGraphRequest -Method DELETE -Uri "https://graph.microsoft.com/beta/deviceManagement/groupPolicyUploadedDefinitionFiles/$($existing.id)" -ErrorAction Stop | Out-Null
+    # State-aware handling. Intune's groupPolicyUploadedDefinitionFile goes
+    # through asynchronous transient states (uploadInProgress, removalInProgress)
+    # before reaching a terminal one (available, uploadFailed, removed). Calling
+    # /remove on a transient row returns 400 "OperationInProgress".
+    #
+    # Strategy:
+    #   uploadInProgress    -> wait until terminal; if it becomes 'available',
+    #                          this IS our upload (it's the right content) -> exit success
+    #   available           -> /remove + wait for 404 -> re-upload
+    #   removalInProgress   -> wait for 404 -> re-upload
+    #   uploadFailed        -> /remove + wait for 404 -> re-upload
+    #   anything else       -> /remove + wait for 404 -> re-upload (best effort)
+    if ($existing.status -in @('uploadInProgress','removalInProgress')) {
+        Write-Host "Existing upload (id $($existing.id)) is in transient state '$($existing.status)'. Waiting for it to settle..." -ForegroundColor Yellow
+    } elseif ($existing.status -in @('available')) {
+        Write-Host "Existing upload (id $($existing.id), status $($existing.status)). Calling /remove action..." -ForegroundColor Yellow
+        Invoke-MgGraphRequest -Method POST -Uri "https://graph.microsoft.com/beta/deviceManagement/groupPolicyUploadedDefinitionFiles/$($existing.id)/remove" -ErrorAction Stop | Out-Null
+    } else {
+        Write-Host "Existing upload (id $($existing.id), status $($existing.status)). Attempting /remove..." -ForegroundColor Yellow
+        try {
+            Invoke-MgGraphRequest -Method POST -Uri "https://graph.microsoft.com/beta/deviceManagement/groupPolicyUploadedDefinitionFiles/$($existing.id)/remove" -ErrorAction Stop | Out-Null
+        } catch {
+            Write-Warning "/remove failed ($($_.Exception.Message)). Will still wait + retry."
+        }
+    }
+    Write-Host "Polling until terminal state..." -ForegroundColor Cyan
+    $deadline2 = (Get-Date).AddMinutes(3)
+    $skipReupload = $false
+    do {
+        Start-Sleep -Seconds 3
+        try {
+            $check = Invoke-MgGraphRequest -Method GET `
+                -Uri "https://graph.microsoft.com/beta/deviceManagement/groupPolicyUploadedDefinitionFiles/$($existing.id)" `
+                -ErrorAction Stop
+            Write-Host "  status: $($check.status)" -ForegroundColor Gray
+            if ($check.status -eq 'available') {
+                # Upload completed successfully. If this row was already 'available'
+                # at script entry, we /remove'd it and will re-upload (so the next
+                # poll will eventually 404). If it was 'uploadInProgress' at entry,
+                # this IS our content from a prior run -- success, exit early.
+                if ($existing.status -eq 'uploadInProgress') {
+                    Write-Host "[OK] Prior upload completed successfully (status='available'). Nothing more to do." -ForegroundColor Green
+                    Write-Host ""
+                    Write-Host "Upload id: $($existing.id)" -ForegroundColor Gray
+                    $skipReupload = $true
+                    break
+                }
+                # else: just-/remove'd, but state hasn't moved yet -- keep polling.
+            }
+        } catch {
+            $msg = $_.Exception.Message
+            if ($msg -match '404|NotFound|does not exist') {
+                Write-Host "  status: removed (404 -- ready to re-upload)" -ForegroundColor Green
+                break
+            }
+            Write-Warning "Poll failed: $msg"
+            break
+        }
+    } while ((Get-Date) -lt $deadline2)
+    if ($skipReupload) { return }
 }
 
 $bodyHashtable = @{

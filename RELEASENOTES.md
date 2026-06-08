@@ -1,9 +1,15 @@
 # Release notes for PIM4EntraPS
 
-## v2.4.93
+## v2.4.94
 
 Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monorepo:
 
+- release: PIM4EntraPS v2.4.94 + extension v1.6.6 - Setup-PimActivatorIntune.ps1 one-click unified ADMX-backed profile + popup body overflow:auto so content past 600px scrolls + 3-row status panel (Intune managed config / local imported / total in catalog) replaces single-line status (f9d64236)
+- fix Push-PimActivatorTenantCatalogProfile.ps1: lookup ADMX-ingested definitions via /groupPolicyDefinitions?$filter=startswith(categoryPath,'\PIM4EntraPS') -- the /groupPolicyUploadedDefinitionFiles/{id}/definitions navigation isn't queryable (7a4c6b8f)
+- add Push-PimActivatorTenantCatalogProfile.ps1 - automates ADMX-backed Configuration Profile creation (looks up ingested ADMX policy definitions + posts presentationValues binding the catalog JSON to Edge + Chrome policies) (3dfe8f3a)
+- fix Push-PimActivatorADMXToIntune.ps1: state-aware handling of in-flight uploads (don't /remove an uploadInProgress or removalInProgress row; wait for terminal state, exit early if uploadInProgress reaches 'available') (20b51d5f)
+- fix: skip /remove when existing upload is already in removalInProgress (avoids 400 OperationInProgress on second run) (ca417bef)
+- fix Push-PimActivatorADMXToIntune.ps1: groupPolicyUploadedDefinitionFiles requires POST .../remove action (not DELETE); poll until 404 before re-upload to avoid 409 (e1e85ed3)
 - release: PIM4EntraPS v2.4.93 + extension v1.6.5 - rewrite Push-PimActivatorTenantCatalogIntune.ps1 as PS remediation (was hitting Registry CSP block 0x87d1fde8 on Edge/Chrome 3rdparty namespace) + ship ADMX template + Push-PimActivatorADMXToIntune.ps1 for the proper Settings Catalog path + popup source-detection status line (ed206a0a)
 - release: PIM4EntraPS v2.4.92 + extension v1.6.4 - strip auto-discover panel + well-known URI flow + gut background.js to empty stub; reorder onboarding to catalog -> Welcome -> manual entry (c4c0b499)
 - release: PIM4EntraPS v2.4.91 + extension v1.6.3 - retire global KNOWN_BAD_LEGACY_CLIENTIDS ban; v1.6 catalog binds tenantId+clientId per-entry so the same GUID is valid in the tenant that owns it (cc3a7cae)
@@ -28,18 +34,54 @@ Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monor
 - release: PIM4EntraPS v2.4.74 - Deploy-PimActivatorIntune body shape fix (parent CHOICE + child collection) (5bf32754)
 - release: PIM4EntraPS v2.4.73 - tagged single-line engine PIM actions + auto-interactive Connect-MgGraph in deploy scripts (3bc2a91f)
 - release: PIM4EntraPS v2.4.72 - re-add Deploy-PimActivatorIntune + shorter engine logs + cleaner client output (03610db1)
-- release: PIM4EntraPS v2.4.71 - SI parity for launcher transcript + banner format + engine module-load line (75cddf60)
-- release: PIM4EntraPS v2.4.70 - AdminAccountPatterns accepts string[] + Admin-/X-Admin defaults (af7e87c7)
-- release: PIM4EntraPS v2.4.69 - CRITICAL stop duplicate-group creation + rename PAG->Group + fix locked naming default (2320fe94)
-- release: PIM4EntraPS v2.4.68 - V1 EXO permission docs + Entra-propagation retry on -NoCache lookups (79013ffa)
-- release: PIM4EntraPS v2.4.67 - Modern auth prefers cert; full EXO V3 module reset (717d5f2b)
-- release: PIM4EntraPS v2.4.66 - EXO V3 retry + verbose bootstrap + shared launcher banner across all 21 internal-vm launchers (d7516509)
 
 ---
 
 # Release notes -- PIM4EntraPS
 
 > **Curated changelog.** The publish workflow auto-prepends recent monorepo commits as a raw activity log; this file is the human-friendly narrative on top.
+
+---
+
+## v2.4.94 -- Setup-PimActivatorIntune.ps1: one-click ADMX-backed Intune profile (forcelist + sources + tenant catalog in a single Configuration Profile)
+
+Single-script unified Intune setup. After the ADMX is ingested (`Push-PimActivatorADMXToIntune.ps1`, one-time per tenant), this script creates ONE `groupPolicyConfigurations` profile carrying 6 definitionValues:
+
+| Browser | Definition | Source ADMX | Value |
+|---|---|---|---|
+| Edge | "Control which extensions are installed silently" (`ExtensionInstallForcelist`) | Microsoft Edge ADMX | `<extId>;<updateUrl>` |
+| Edge | "Configure extension and user script install sources" (`ExtensionInstallSources`) | Microsoft Edge ADMX | `https://knudsenmorten.github.io/*` |
+| Edge | "Tenant catalog -- Microsoft Edge" | Our `PIM4EntraPS.PimActivator.admx` | tenantCatalog JSON (one-line) |
+| Chrome | "Configure the list of force-installed apps and extensions" | Google Chrome ADMX | `<extId>;<updateUrl>` |
+| Chrome | "Configure extension, app, and user script install sources" | Google Chrome ADMX | `https://knudsenmorten.github.io/*` |
+| Chrome | "Tenant catalog -- Google Chrome" | Our `PIM4EntraPS.PimActivator.admx` | tenantCatalog JSON (one-line) |
+
+**One profile -- one assignment.** Customer endpoints sync, install the extension, allow the gh-pages source, and the popup auto-detects the Intune-pushed catalog via `chrome.storage.managed.tenantCatalog`. Zero further touch.
+
+Idempotent: lookup by display name, wipe + re-write definition values in place when re-running.
+
+**Per-tenant ID resolution at runtime:** the Edge + Chrome ADMX policy IDs are auto-assigned per-tenant when Intune ingests them. Script resolves by `categoryPath` + machine-class `displayName` lookup (`/groupPolicyDefinitions?$filter=categoryPath eq '\Microsoft Edge\Extensions'`) -- no hardcoded GUIDs that drift between tenants.
+
+**Helper functions:**
+- `Find-PolicyDef` -- displayName + categoryPath lookup, machine-class only
+- `Get-Presentations` -- separate call for each definition's `/presentations` collection (Graph `$expand` depth-limited)
+- `New-DefValue` -- emits the right body shape for either Text (single string) OR List (string[] wrapped as `{name, value}` pairs, slot-numbered)
+
+Tested end-to-end against 2linkIT tenant: 6 definition values written, profile `33da37a0-1d7e-4e4a-a505-3990cad5d8e9` created. Only remaining manual step: assign to a device group in the portal.
+
+**Customer flow simplified to 3 commands:**
+```powershell
+# 1. one-time per tenant
+Push-PimActivatorADMXToIntune.ps1
+
+# 2. one-time discovery (auto-finds your PIM Activator app reg)
+Test-PushTenantCatalog.ps1   # writes discovered-tenant-catalog.json
+
+# 3. one-time setup of the unified profile
+Setup-PimActivatorIntune.ps1 -CatalogJsonPath .\discovered-tenant-catalog.json -AssignToGroupId <group-id>
+```
+
+After that: customer endpoints get the policy on next Intune sync, end users see the populated tenant switcher in the popup, no further intervention needed.
 
 ---
 

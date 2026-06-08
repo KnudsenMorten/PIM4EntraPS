@@ -289,23 +289,34 @@ function renderOnboarding(currentCfg) {
     if (afterEl) ob.insertBefore(catalogPanel, afterEl)
     else         ob.appendChild(catalogPanel)
   }
-  // Source-status line: tell the operator EXACTLY where the catalog came from
-  // (Intune-pushed via chrome.storage.managed vs locally imported). Critical
+  // Source-detection panel -- three labeled rows so the operator can tell at
+  // a glance whether the Intune managed config landed, whether locally-
+  // imported entries are present, and the total entries in catalog. Critical
   // for trouble-shooting "did my Intune policy land?" on a managed device.
   const _statusLine = (function () {
-    if (sources.managedErr) {
-      return '<span style="color:#cf222e;">Intune managed config read FAILED: ' + escapeHtmlSafe(sources.managedErr) + '. Only local entries visible.</span>'
+    const _row = function (label, ok, detail, errColor) {
+      const icon = ok ? '<span style="color:#15803d;font-weight:700;">&#10003;</span>' :
+                        '<span style="color:' + (errColor || '#9a3412') + ';font-weight:700;">&#10007;</span>'
+      const value = ok ? '<span style="color:#15803d;font-weight:600;">' + detail + '</span>' :
+                         '<span style="color:' + (errColor || '#9a3412') + ';">' + detail + '</span>'
+      return '<div style="display:flex;align-items:baseline;gap:6px;font-size:10.5px;">' +
+               '<span style="color:#57606a;flex:0 0 180px;">' + label + '</span>' +
+               icon + ' ' + value +
+             '</div>'
     }
-    if (sources.managedRaw > 0 && sources.localRaw > 0) {
-      return '<span style="color:#166534;">&#10003; Detected ' + sources.managedRaw + ' Intune-managed + ' + sources.localRaw + ' locally-imported entries.</span>'
-    }
-    if (sources.managedRaw > 0) {
-      return '<span style="color:#166534;">&#10003; Detected ' + sources.managedRaw + ' entries from Intune managed config (chrome.storage.managed.tenantCatalog).</span>'
-    }
-    if (sources.localRaw > 0) {
-      return '<span style="color:#166534;">&#10003; ' + sources.localRaw + ' entries imported locally in this browser profile. <span style="color:#57606a;">(No Intune managed config detected on this device.)</span></span>'
-    }
-    return '<span style="color:#57606a;">No Intune managed config detected (chrome.storage.managed.tenantCatalog is empty) and no local catalog imported yet.</span>'
+    const managedOk = sources.managedRaw > 0 && !sources.managedErr
+    const localOk   = sources.localRaw   > 0
+    const total     = catalog.length
+    const managedDetail = sources.managedErr
+      ? 'READ FAILED: ' + escapeHtmlSafe(sources.managedErr)
+      : (sources.managedRaw > 0 ? sources.managedRaw + ' entries (chrome.storage.managed.tenantCatalog)' : 'NOT DETECTED (chrome.storage.managed.tenantCatalog is empty)')
+    const localDetail = sources.localRaw > 0
+      ? sources.localRaw + ' entries (chrome.storage.local.tenantCatalog)'
+      : 'none imported in this browser profile'
+    const totalDetail = total > 0 ? total + ' tenant(s) available' : 'no tenants available yet'
+    return _row('Intune managed config:', managedOk, managedDetail, sources.managedErr ? '#cf222e' : '#9a3412') +
+           _row('Local imported config:', localOk,   localDetail) +
+           _row('Total in catalog:',      total > 0, totalDetail)
   })()
   if (catalog.length > 0) {
     catalogPanel.innerHTML =
