@@ -64,11 +64,29 @@
 #   Internal -> a-{Owner}                                      e.g. a-john
 #   External -> g-{Owner}                                      e.g. g-vendor1
 #
+# --- Form A: hashtable (UserType -> template) ---
+# Use this when you have generative templates per user-type AND want the
+# engine to also use the hashtable VALUES as the Graph-filter prefix
+# source (engine derives the prefix from each value).
+#
 # $global:PIM_NamingConventions.AdminAccountPatterns = @{
 #     Internal = 'Admin-{Initials}-L{Level}-T{Tier}-{Platform}'
 #     External = 'X-Admin-{Initials}-L{Level}-T{Tier}-{Platform}'
 #     Guest    = 'g-{Owner}'                # rare
 # }
+#
+# --- Form B: string array (simple prefix list) ---
+# Use this when all you need is to widen the Graph-filter prefix list so
+# Get-PimAdminsFiltered loads existing admins under multiple naming
+# conventions. Simpler than Form A. The engine treats each entry as a
+# bare prefix (no token substitution). Filtering only; generation still
+# uses AdminAccountPattern (singular).
+#
+# $global:PIM_NamingConventions.AdminAccountPatterns = @(
+#     'Admin-'           # ADMIN-Brian-L0-T0-ID@...
+#     'X-Admin'          # x-Admin-MOK-L0-T0-ID@...
+#     'adm_'             # legacy short-form (drop if not used)
+# )
 
 # UPN suffix for new admin accounts. Null = use the tenant's default verified
 # domain. Set explicitly when you have a dedicated admin domain (recommended).

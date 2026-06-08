@@ -20,90 +20,223 @@
 //   - lastDurationHours    (per user)
 //   - selectedIds          (group ids the user typically activates -- pre-checked on load)
 
-// Config resolution order:
-//   1. chrome.storage.managed (Intune / Group Policy push -- preferred for enterprise rollout)
-//   2. window.PIM_CONFIG from config.js (developer-mode / manual install)
-//
-// Multi-tenant (v1.1+): if managed config carries a "Tenants" array, the
-// extension lets the user pick which tenant to use. The choice is cached in
-// chrome.storage.local (per-profile by Chromium's design) so each browser
-// profile can be wired to a different tenant on the same Windows user.
+// Config is per-browser-profile only. The user runs the in-popup onboarding
+// wizard once per profile (sign in once, tenant + app reg auto-discovered),
+// and the resulting tenantId / clientId / defaultJustification /
+// defaultDurationHours land in chrome.storage.local. v1.2.0 retired the
+// legacy paths (window.PIM_CONFIG from config.js + chrome.storage.managed
+// from Intune / GPO push) so there is exactly ONE source of truth and no
+// silent override surprises.
 async function loadConfig() {
-  const managed = await new Promise(r => chrome.storage.managed.get(null, x => r(x || {})))
-  const local   = window.PIM_CONFIG || {}
-  // Managed wins per-key (so an admin can push only tenant+client and let users keep local defaults).
-  const merged = { ...local, ...Object.fromEntries(Object.entries(managed).filter(([_, v]) => v != null && v !== '')) }
-  return merged
+  const u = await new Promise(r => chrome.storage.local.get(
+    ['userTenantId','userClientId','userDefaultJustification','userDefaultDurationHours'], r))
+  return {
+    tenantId:             u.userTenantId             || '',
+    clientId:             u.userClientId             || '',
+    defaultJustification: u.userDefaultJustification || '',
+    defaultDurationHours: u.userDefaultDurationHours || 0,
+  }
 }
 
-// Resolve which tenant this profile uses. Returns the merged cfg object with
-// .tenantId/.clientId/.tenantName populated, plus ._allTenants for the footer
-// "switch tenant" UI when there is more than one configured.
-async function resolveTenantConfig() {
-  const raw = await loadConfig()
-  const tenants = Array.isArray(raw.Tenants) ? raw.Tenants.filter(t => t && t.TenantId && t.ClientId) : []
-
-  // Singleton mode (legacy) -- nothing to pick.
-  if (!tenants.length) {
-    return { ...raw, _allTenants: [], tenantName: null }
-  }
-
-  // Exactly one tenant -- use it silently, no picker.
-  if (tenants.length === 1) {
-    const t = tenants[0]
-    return { ...raw, tenantId: t.TenantId, clientId: t.ClientId, tenantName: t.Name || t.TenantId, _allTenants: tenants }
-  }
-
-  // Two or more -- check this profile's cached selection.
-  const cached = await new Promise(r => chrome.storage.local.get(['selectedTenantId'], r))
-  const hit = tenants.find(t => t.TenantId === cached.selectedTenantId)
-  if (hit) {
-    return { ...raw, tenantId: hit.TenantId, clientId: hit.ClientId, tenantName: hit.Name || hit.TenantId, _allTenants: tenants }
-  }
-
-  // No valid selection cached -- render the picker, never returns (reloads on click).
-  renderTenantPicker(tenants)
-  // Keep this async function pending so the rest of boot never runs until reload.
-  await new Promise(() => {})
+const cfg = await loadConfig()
+if (!cfg.tenantId || String(cfg.tenantId).startsWith('00000000') || !cfg.clientId || String(cfg.clientId).startsWith('00000000')) {
+  // Render the soft onboarding wizard instead of throwing a red error.
+  // Returns once the user clicks Save (which writes to chrome.storage.local
+  // and reloads). v2.4.11+: no more dead-end "Not configured" message.
+  renderOnboarding(cfg)
+  await new Promise(() => {}) // park the rest of boot until reload
 }
 
-function renderTenantPicker(tenants) {
-  // Hide everything else so the picker is the only thing visible.
+/**
+ * Inline first-run wizard. Auto-discovers tenant + PIM Activator app reg
+ * via the email-driven OIDC-discovery + service-worker sign-in flow, then
+ * lets the user confirm default justification + duration and saves to
+ * chrome.storage.local. Single source of truth (v1.2.0+).
+ */
+function renderOnboarding(currentCfg) {
+  // Hide the main UI so the wizard is the only thing visible.
   for (const id of ['tabs', 'panel-activate', 'panel-myaccess']) {
     const el = document.getElementById(id)
     if (el) el.style.display = 'none'
   }
-  const picker = document.getElementById('tenant-picker')
-  const list   = document.getElementById('tenant-picker-list')
-  if (!picker || !list) return
-  picker.style.display = ''
-  list.innerHTML = ''
-  for (const t of tenants) {
-    const btn = document.createElement('button')
-    btn.style.cssText = 'text-align:left;padding:10px 12px;border:1px solid #d0d7de;border-radius:6px;background:#ffffff;cursor:pointer;display:flex;flex-direction:column;gap:2px;'
-    btn.innerHTML = `<div style="font-weight:600;font-size:13px;color:#0969da;">${escapeHtmlSafe(t.Name || t.TenantId)}</div>
-                     <div style="font-family:monospace;font-size:10.5px;color:#7d8590;">${escapeHtmlSafe(t.TenantId)}</div>`
-    btn.onmouseenter = () => { btn.style.background = '#f6f8fa' }
-    btn.onmouseleave = () => { btn.style.background = '#ffffff' }
-    btn.onclick = async () => {
-      // Save selection + signed-in artifacts cleared so the next boot signs in
-      // to the chosen tenant (refresh tokens from a previous tenant are useless).
-      await new Promise(r => chrome.storage.local.set({ selectedTenantId: t.TenantId }, r))
-      await new Promise(r => chrome.storage.local.remove(['refreshToken', 'accessToken', 'accessTokenExpiry', 'armAccessToken', 'armAccessTokenExpiry', 'account'], r))
-      window.location.reload()
-    }
-    list.appendChild(btn)
+  const sb = document.getElementById('status-bar')
+  if (sb) { sb.textContent = ''; sb.style.display = 'none' }
+
+  const ob = document.getElementById('onboarding')
+  if (!ob) return
+  ob.style.display = ''
+
+  // Pre-fill any non-placeholder values we DID find (e.g. tenantId from
+  // managed but clientId blank).
+  const tenantInput = document.getElementById('ob-tenant')
+  const clientInput = document.getElementById('ob-client')
+  const justInput   = document.getElementById('ob-justification')
+  const durInput    = document.getElementById('ob-duration')
+  if (currentCfg.tenantId && !String(currentCfg.tenantId).startsWith('00000000')) {
+    tenantInput.value = currentCfg.tenantId
   }
-}
+  if (currentCfg.clientId && !String(currentCfg.clientId).startsWith('00000000')) {
+    clientInput.value = currentCfg.clientId
+  }
+  if (currentCfg.defaultJustification) justInput.value = currentCfg.defaultJustification
+  if (currentCfg.defaultDurationHours) durInput.value  = currentCfg.defaultDurationHours
 
-// (escapeHtmlSafe is declared further down -- function declarations hoist, so
-// the picker can call it from this top-level boot section.)
+  const errBox = document.getElementById('onboarding-error')
+  const showErr = (msg) => {
+    if (!errBox) return
+    errBox.textContent = msg
+    errBox.style.display = msg ? '' : 'none'
+  }
 
-const cfg = await resolveTenantConfig()
-if (!cfg.tenantId || String(cfg.tenantId).startsWith('00000000') || !cfg.clientId || String(cfg.clientId).startsWith('00000000')) {
-  document.getElementById('status-bar').textContent = 'Not configured. Admin must set tenantId + clientId (or a Tenants array) via policy.'
-  document.getElementById('status-bar').classList.add('err')
-  throw new Error('config not set')
+  const isGuid = (s) => /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test((s || '').trim())
+
+  // ----- Auto-discover -- runs in the MV3 service worker --------------------
+  // The sign-in / Graph-lookup pipeline lives in background.js so the
+  // browser-popup can die mid-flow (it does, every time Microsoft's
+  // sign-in window steals focus) without aborting. The popup just kicks
+  // off the worker via chrome.runtime.sendMessage and polls
+  // chrome.storage.local every ~1.5s for the result. When the user
+  // reopens the popup after sign-in completes, the very first poll
+  // finishes the wizard.
+  // Single-tenant deployments can reuse the PER-TENANT PIM Activator app
+  // reg as the bootstrap client (just add Application.Read.All delegated
+  // permission + admin-consent on it). Multi-tenant rollouts should register
+  // a separate "PIM Activator Bootstrap" multi-tenant app and put its
+  // clientId here instead.
+  const startBtn   = document.getElementById('ob-auto-start')
+  const devicePanel = document.getElementById('ob-auto-device')
+  const statusEl    = document.getElementById('ob-auto-status')
+
+  // ----- Status display + result processing --------------------------------
+  // Pulled out so BOTH the start-click handler AND the initial-load check
+  // (below) can use the same renderer. The popup polls chrome.storage.local
+  // every 1.5s while a discovery is in flight; the very first thing it does
+  // on (re)load is also check for an in-flight or completed result so a
+  // sign-in that finished while the popup was dead picks up on next open.
+  function processDiscoveryResult(result) {
+    if (!result) return
+    const tid = result.tenantId
+    const apps = result.apps || []
+    if (tid) tenantInput.value = tid
+    if (apps.length === 0) {
+      statusEl.textContent = `Tenant detected (${tid || '?'}). No app registration found whose display name starts with "PIM Activator". Paste the client id manually below.`
+    } else if (apps.length === 1) {
+      clientInput.value = apps[0].appId
+      statusEl.textContent = `Found 1 app: ${apps[0].displayName}. Tenant + client id pre-filled below.`
+    } else {
+      statusEl.textContent = `Found ${apps.length} matching apps. Pick one:`
+      const appsWrap = document.getElementById('ob-auto-apps')
+      const appsList = document.getElementById('ob-auto-apps-list')
+      appsWrap.style.display = ''
+      appsList.innerHTML = ''
+      for (const a of apps) {
+        const btn = document.createElement('button')
+        btn.style.cssText = 'text-align:left;padding:8px 10px;border:1px solid #d0d7de;border-radius:5px;background:#ffffff;cursor:pointer;'
+        btn.innerHTML = `<div style="font-weight:600;font-size:12.5px;color:#0969da;">${escapeHtmlSafe(a.displayName)}</div>
+                         <div style="font-family:monospace;font-size:10.5px;color:#7d8590;">${escapeHtmlSafe(a.appId)}</div>`
+        btn.onmouseenter = () => { btn.style.background = '#f6f8fa' }
+        btn.onmouseleave = () => { btn.style.background = '#ffffff' }
+        btn.onclick = () => {
+          clientInput.value = a.appId
+          statusEl.textContent = `Selected: ${a.displayName}. Pre-filled below.`
+        }
+        appsList.appendChild(btn)
+      }
+    }
+    startBtn.disabled = false
+    startBtn.textContent = 'Sign in to auto-discover'
+  }
+
+  // ----- Poll chrome.storage.local for the service worker's result ---------
+  let _pollTimer = null
+  function startPolling(timeoutMs = 600000) {
+    if (_pollTimer) clearInterval(_pollTimer)
+    const deadline = Date.now() + timeoutMs
+    devicePanel.style.display = ''
+    startBtn.disabled = true
+    startBtn.textContent = 'Sign-in in progress...'
+    _pollTimer = setInterval(async () => {
+      const got = await new Promise(r => chrome.storage.local.get(
+        ['discoveryStatus','discoveryResult','discoveryError'], r))
+      if (got.discoveryStatus) statusEl.textContent = got.discoveryStatus
+      if (got.discoveryError) {
+        clearInterval(_pollTimer); _pollTimer = null
+        showErr(got.discoveryError)
+        statusEl.textContent = 'Sign-in did not complete.'
+        startBtn.disabled = false
+        startBtn.textContent = 'Sign in to auto-discover'
+        chrome.storage.local.remove(['discoveryError','discoveryStatus'])
+        return
+      }
+      if (got.discoveryResult) {
+        clearInterval(_pollTimer); _pollTimer = null
+        processDiscoveryResult(got.discoveryResult)
+        chrome.storage.local.remove(['discoveryResult','discoveryStatus'])
+        return
+      }
+      if (Date.now() > deadline) {
+        clearInterval(_pollTimer); _pollTimer = null
+        showErr('Sign-in timed out -- click "Sign in to auto-discover" to try again.')
+        startBtn.disabled = false
+        startBtn.textContent = 'Sign in to auto-discover'
+      }
+    }, 1500)
+  }
+
+  // On wizard load: if the service worker is mid-discovery (or finished while
+  // the popup was dead) pick up where we left off without the user having
+  // to click again.
+  ;(async () => {
+    const got = await new Promise(r => chrome.storage.local.get(
+      ['discoveryStatus','discoveryResult','discoveryError'], r))
+    if (got.discoveryResult) {
+      processDiscoveryResult(got.discoveryResult)
+      chrome.storage.local.remove(['discoveryResult','discoveryStatus'])
+    } else if (got.discoveryError) {
+      showErr(got.discoveryError)
+      chrome.storage.local.remove(['discoveryError','discoveryStatus'])
+    } else if (got.discoveryStatus) {
+      // A flow is mid-air -- resume polling.
+      startPolling()
+    }
+  })()
+
+  startBtn.onclick = () => {
+    showErr('')
+    const emailInput = document.getElementById('ob-auto-email')
+    const email = (emailInput?.value || '').trim()
+    if (!email || !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) {
+      showErr('Enter your work email above first (e.g. admin@yourtenant.com).')
+      emailInput?.focus()
+      return
+    }
+    chrome.runtime.sendMessage({ cmd: 'start-discovery', email }, () => {
+      // Ignore the ack -- the worker writes the real result to storage.
+      startPolling()
+    })
+  }
+
+  document.getElementById('onboarding-save').onclick = async () => {
+    showErr('')
+    const tenantId = (tenantInput.value || '').trim()
+    const clientId = (clientInput.value || '').trim()
+    const justification = (justInput.value || '').trim() || 'Change in infrastructure'
+    const durationHours = Math.max(0.5, Math.min(24, Number(durInput.value) || 8))
+
+    if (!isGuid(tenantId)) { showErr('Tenant id must be a GUID (e.g. f0fa27a0-8e7c-4f63-9a77-ec94786b7c9e).'); tenantInput.focus(); return }
+    if (!isGuid(clientId)) { showErr('Client id must be a GUID. This is the Application (client) id of the PIM Activator app registration in your tenant.'); clientInput.focus(); return }
+
+    await new Promise(r => chrome.storage.local.set({
+      userTenantId:             tenantId,
+      userClientId:             clientId,
+      userDefaultJustification: justification,
+      userDefaultDurationHours: durationHours,
+    }, r))
+    // Wipe any half-baked sign-in artifacts from a previous attempt so the
+    // next boot signs in cleanly against the freshly-saved config.
+    await new Promise(r => chrome.storage.local.remove(['refreshToken','accessToken','accessTokenExpiry','armAccessToken','armAccessTokenExpiry','account'], r))
+    window.location.reload()
+  }
 }
 
 const SCOPES = [
@@ -116,6 +249,11 @@ const SCOPES = [
   // consent required -- re-run Deploy-PimActivatorBackend.ps1 -GrantConsent
   // after upgrading the extension.
   'https://graph.microsoft.com/RoleManagement.Read.Directory',
+  // RoleManagement.ReadWrite.Directory (v1.3.0+) -- activates DIRECT Entra
+  // role assignments (role granted directly to the user, no PIM group in
+  // between). POSTs roleAssignmentScheduleRequests with action=selfActivate.
+  // Admin consent required.
+  'https://graph.microsoft.com/RoleManagement.ReadWrite.Directory',
   // AdministrativeUnit.Read.All resolves AU displayNames (otherwise the My
   // Access tab shows "N Administrative Units" without names because the role
   // assignment exposes the AU id but reading the AU object requires this
@@ -134,26 +272,24 @@ const SCOPES = [
 
 const AUTHORITY    = `https://login.microsoftonline.com/${cfg.tenantId}`
 
-// Populate the footer with the configured tenant -- friendly name if a
-// Tenants array is in play, GUID otherwise. When 2+ tenants are configured,
-// append a "switch" link that clears the cached selection and reloads the
-// picker (per-profile, not global -- other profiles keep their choice).
+// Populate the footer with the configured tenant id (the only source of
+// truth in v1.2.0+). The "Reset" link wipes per-profile config so the user
+// can re-run the onboarding wizard (e.g. when migrating profiles between
+// tenants).
 ;(() => {
   const el = document.getElementById('footer-tenant')
   if (!el || !cfg.tenantId) return
-  const label = cfg.tenantName ? `${cfg.tenantName}` : cfg.tenantId
-  const multi = Array.isArray(cfg._allTenants) && cfg._allTenants.length >= 2
-  el.innerHTML = `Tenant: <strong>${escapeHtmlSafe(label)}</strong>${multi ? ' <a href="#" id="switch-tenant" style="color:#0969da;text-decoration:none;margin-left:6px;">(switch)</a>' : ''}`
-  el.title = cfg.tenantName
-    ? `Selected tenant: ${cfg.tenantName}\nTenant id: ${cfg.tenantId}\nClient id: ${cfg.clientId}\n\nManaged-policy tenant list contains ${cfg._allTenants.length} entr${cfg._allTenants.length === 1 ? 'y' : 'ies'} -- this profile chose '${cfg.tenantName}'. Selection is stored per browser profile.`
-    : `Microsoft Entra tenant id pushed via chrome.storage.managed. Configured at install time per Intune policy.`
-  if (multi) {
-    const link = document.getElementById('switch-tenant')
-    if (link) link.onclick = async (e) => {
-      e.preventDefault()
-      await new Promise(r => chrome.storage.local.remove(['selectedTenantId', 'refreshToken', 'accessToken', 'accessTokenExpiry', 'armAccessToken', 'armAccessTokenExpiry', 'account'], r))
-      window.location.reload()
-    }
+  el.innerHTML = `Tenant: <strong>${escapeHtmlSafe(cfg.tenantId)}</strong> <a href="#" id="reset-config" style="color:#0969da;text-decoration:none;margin-left:6px;">(reset)</a>`
+  el.title = `Tenant id: ${cfg.tenantId}\nClient id: ${cfg.clientId}\n\nSaved to this browser profile. Click 'reset' to clear and re-run the onboarding wizard.`
+  const link = document.getElementById('reset-config')
+  if (link) link.onclick = async (e) => {
+    e.preventDefault()
+    if (!confirm('Clear PIM Activator config for THIS browser profile and start over?')) return
+    await new Promise(r => chrome.storage.local.remove([
+      'userTenantId','userClientId','userDefaultJustification','userDefaultDurationHours',
+      'refreshToken','accessToken','accessTokenExpiry','armAccessToken','armAccessTokenExpiry','account'
+    ], r))
+    window.location.reload()
   }
 })()
 
@@ -182,7 +318,7 @@ const els = {
   signIn: $('sign-in'), signOut: $('sign-out'),
   me: $('me'), status: $('status-bar'),
   list: $('list'), footer: $('footer'), toolbar: $('toolbar'),
-  search: $('search'), selectAll: $('select-all'), selectNone: $('select-none'), refresh: $('refresh'),
+  search: $('search'), selectAll: $('select-all'), selectNone: $('select-none'), collapseAll: $('collapse-all'), expandAll: $('expand-all'), refresh: $('refresh'),
   just: $('justification'), dur: $('duration'), count: $('count'), activate: $('activate'),
   // Tabs
   tabs: $('tabs'),
@@ -236,6 +372,7 @@ const REQUIRED_GRAPH_SCOPES = [
   'Group.Read.All',
   'User.Read',
   'RoleManagement.Read.Directory',
+  'RoleManagement.ReadWrite.Directory',
   'AdministrativeUnit.Read.All'
 ]
 
@@ -599,6 +736,199 @@ async function deactivateGroup(token, groupId, justification) {
   return graph(token, 'POST', '/identityGovernance/privilegedAccess/group/assignmentScheduleRequests', body)
 }
 
+// ---------- Direct (PIM v1) Entra role eligibilities ----------
+// Lists eligible Entra DIRECTORY roles that are assigned to the user
+// DIRECTLY (not via a PIM-for-Groups membership). These are the "PIM v1"
+// assignments many tenants still use alongside PIM-for-Groups (v2).
+// Requires RoleManagement.Read.Directory (read) + RoleManagement.ReadWrite.Directory
+// (activate).
+async function listEligibleDirectEntraRolesForMe(token) {
+  if (!currentAccount?.localAccountId) return []
+  // $expand=roleDefinition to get the displayName in one round trip; saves us
+  // the per-id /roleDefinitions/{id} call.
+  const filter = encodeURIComponent(`principalId eq '${currentAccount.localAccountId}'`)
+  const url = `/roleManagement/directory/roleEligibilityScheduleInstances?$filter=${filter}&$expand=roleDefinition($select=id,displayName)`
+  const out = []
+  let next = url
+  while (next) {
+    const res = await graph(token, 'GET', next)
+    out.push(...(res.value || []))
+    next = res['@odata.nextLink'] ? res['@odata.nextLink'].replace('https://graph.microsoft.com/v1.0', '') : null
+  }
+  return out
+}
+
+// List CURRENTLY-ACTIVE direct Entra role assignments (the user already
+// activated this role) so we can grey-out the Activate row and surface it
+// on My Access. Mirrors listActiveGroupAssignmentsForMe for the v1 path.
+async function listActiveDirectEntraRolesForMe(token) {
+  if (!currentAccount?.localAccountId) return []
+  const filter = encodeURIComponent(`principalId eq '${currentAccount.localAccountId}' and assignmentType eq 'Activated'`)
+  const url = `/roleManagement/directory/roleAssignmentScheduleInstances?$filter=${filter}&$expand=roleDefinition($select=id,displayName)`
+  const out = []
+  let next = url
+  while (next) {
+    const res = await graph(token, 'GET', next)
+    out.push(...(res.value || []))
+    next = res['@odata.nextLink'] ? res['@odata.nextLink'].replace('https://graph.microsoft.com/v1.0', '') : null
+  }
+  return out
+}
+
+async function activateDirectEntraRole(token, roleDefinitionId, directoryScopeId, justification, durationHours) {
+  const totalMin = Math.round(durationHours * 60)
+  const h = Math.floor(totalMin / 60)
+  const m = totalMin % 60
+  const duration = `PT${h}H${m}M`
+  const body = {
+    action: 'selfActivate',
+    principalId: currentAccount.localAccountId,
+    roleDefinitionId,
+    directoryScopeId: directoryScopeId || '/',
+    justification,
+    scheduleInfo: {
+      startDateTime: new Date().toISOString(),
+      expiration: { type: 'afterDuration', duration }
+    }
+  }
+  return graph(token, 'POST', '/roleManagement/directory/roleAssignmentScheduleRequests', body)
+}
+
+async function deactivateDirectEntraRole(token, roleDefinitionId, directoryScopeId, justification) {
+  const body = {
+    action: 'selfDeactivate',
+    principalId: currentAccount.localAccountId,
+    roleDefinitionId,
+    directoryScopeId: directoryScopeId || '/',
+    justification: justification || 'User-initiated deactivation from PIM Activator'
+  }
+  return graph(token, 'POST', '/roleManagement/directory/roleAssignmentScheduleRequests', body)
+}
+
+// ---------- Direct (PIM v1) Azure RBAC eligibilities ----------
+// Lists eligible Azure RBAC role assignments via ARM. Iterates subscriptions
+// the caller can see (asTarget() filter scopes to "for me"). Each subscription
+// is hit independently so a 403 on one (CA restrictions, sub deleted) does
+// not abort the whole list.
+async function listEligibleDirectAzureRbacForMe(armToken) {
+  if (!armToken) return []
+  // 1) List all subscriptions visible to caller
+  let subs = []
+  try {
+    const subsResp = await fetch('https://management.azure.com/subscriptions?api-version=2020-01-01', {
+      headers: { Authorization: 'Bearer ' + armToken }
+    })
+    if (subsResp.ok) {
+      const j = await subsResp.json()
+      subs = (j.value || []).map(s => s.subscriptionId).filter(Boolean)
+    }
+  } catch { /* no subs -> no rbac eligibilities */ }
+  const out = []
+  // 2) Per-subscription eligibility query
+  const apiVersion = '2020-10-01'
+  for (const subId of subs) {
+    try {
+      const url = `https://management.azure.com/subscriptions/${subId}/providers/Microsoft.Authorization/roleEligibilityScheduleInstances?api-version=${apiVersion}&$filter=asTarget()`
+      const r = await fetch(url, { headers: { Authorization: 'Bearer ' + armToken } })
+      if (!r.ok) continue
+      const j = await r.json()
+      for (const inst of (j.value || [])) {
+        out.push({ ...inst, _subscriptionId: subId })
+      }
+    } catch { /* skip subscription on failure */ }
+  }
+  return out
+}
+
+async function listActiveDirectAzureRbacForMe(armToken) {
+  if (!armToken) return []
+  let subs = []
+  try {
+    const subsResp = await fetch('https://management.azure.com/subscriptions?api-version=2020-01-01', {
+      headers: { Authorization: 'Bearer ' + armToken }
+    })
+    if (subsResp.ok) {
+      const j = await subsResp.json()
+      subs = (j.value || []).map(s => s.subscriptionId).filter(Boolean)
+    }
+  } catch { /* */ }
+  const out = []
+  const apiVersion = '2020-10-01'
+  for (const subId of subs) {
+    try {
+      const url = `https://management.azure.com/subscriptions/${subId}/providers/Microsoft.Authorization/roleAssignmentScheduleInstances?api-version=${apiVersion}&$filter=asTarget()`
+      const r = await fetch(url, { headers: { Authorization: 'Bearer ' + armToken } })
+      if (!r.ok) continue
+      const j = await r.json()
+      for (const inst of (j.value || [])) {
+        // Only count ACTIVATED rows (PIM "Activated" assignmentType). Permanent
+        // assignments show up too and would clutter the UI.
+        const at = inst.properties?.assignmentType || ''
+        if (at.toLowerCase() === 'activated') out.push({ ...inst, _subscriptionId: subId })
+      }
+    } catch { /* */ }
+  }
+  return out
+}
+
+async function activateDirectAzureRbac(armToken, scope, roleDefinitionId, principalId, justification, durationHours) {
+  // ARM uses PUT with a client-generated GUID for the request id (the
+  // server side dedups via that id; resending the same GUID is a retry).
+  const guid = ([1e7]+-1e3+-4e3+-8e3+-1e11).replace(/[018]/g, c =>
+    (c ^ crypto.getRandomValues(new Uint8Array(1))[0] & 15 >> c/4).toString(16))
+  const totalMin = Math.round(durationHours * 60)
+  const h = Math.floor(totalMin / 60)
+  const m = totalMin % 60
+  const duration = `PT${h}H${m}M`
+  const url = `https://management.azure.com${scope}/providers/Microsoft.Authorization/roleAssignmentScheduleRequests/${guid}?api-version=2020-10-01`
+  const body = {
+    properties: {
+      principalId,
+      roleDefinitionId, // full ARM resource id e.g. /providers/Microsoft.Authorization/roleDefinitions/{guid}
+      requestType: 'SelfActivate',
+      justification,
+      scheduleInfo: {
+        startDateTime: new Date().toISOString(),
+        expiration: { type: 'AfterDuration', duration }
+      }
+    }
+  }
+  const resp = await fetch(url, {
+    method: 'PUT',
+    headers: { Authorization: 'Bearer ' + armToken, 'Content-Type': 'application/json' },
+    body: JSON.stringify(body)
+  })
+  if (!resp.ok) {
+    const err = await resp.text().catch(() => '')
+    throw new Error(`ARM activate failed (${resp.status}): ${err.slice(0, 300)}`)
+  }
+  return resp.json()
+}
+
+async function deactivateDirectAzureRbac(armToken, scope, roleDefinitionId, principalId, justification) {
+  const guid = ([1e7]+-1e3+-4e3+-8e3+-1e11).replace(/[018]/g, c =>
+    (c ^ crypto.getRandomValues(new Uint8Array(1))[0] & 15 >> c/4).toString(16))
+  const url = `https://management.azure.com${scope}/providers/Microsoft.Authorization/roleAssignmentScheduleRequests/${guid}?api-version=2020-10-01`
+  const body = {
+    properties: {
+      principalId,
+      roleDefinitionId,
+      requestType: 'SelfDeactivate',
+      justification: justification || 'User-initiated deactivation from PIM Activator'
+    }
+  }
+  const resp = await fetch(url, {
+    method: 'PUT',
+    headers: { Authorization: 'Bearer ' + armToken, 'Content-Type': 'application/json' },
+    body: JSON.stringify(body)
+  })
+  if (!resp.ok) {
+    const err = await resp.text().catch(() => '')
+    throw new Error(`ARM deactivate failed (${resp.status}): ${err.slice(0, 300)}`)
+  }
+  return resp.json()
+}
+
 // ---------- My Access (active assignments) ----------
 //
 // Lists what the signed-in user CURRENTLY has active in this tenant:
@@ -659,6 +989,37 @@ let activationHistory = {}   // { groupId: { count, lastActivated: epochMs } }
     }
   } catch { /* missing or corrupt; start fresh */ }
 })()
+
+// User-pinned favorite rows on the Activate tab. Keyed by rowKey (covers
+// group rows + direct Entra rows + direct Azure RBAC rows uniformly).
+// Persisted to chrome.storage.local so the choice survives popup close +
+// Edge restart. Favorites sort to the TOP of their section (above the
+// recency/frequency sort below) so the user's "daily click" rows are
+// always one click away.
+let favorites = {}   // { rowKey: true }
+
+// Per-row collapse state for the transitive-role preview under each group row.
+// Session-only (not persisted) -- the preview default is expanded, the user
+// clicks the toggle to hide a busy row's role list. Keyed by rowKey so the
+// state survives a re-render (favourite toggle, sort change, etc.).
+let collapsedRows = new Set()
+
+;(async () => {
+  try {
+    const stored = await getStored(['favorites'])
+    if (stored?.favorites && typeof stored.favorites === 'object') {
+      favorites = stored.favorites
+    }
+  } catch { /* missing or corrupt; start fresh */ }
+})()
+
+function isFavorite(rowKey) { return !!(rowKey && favorites[rowKey]) }
+function toggleFavorite(rowKey) {
+  if (!rowKey) return
+  if (favorites[rowKey]) delete favorites[rowKey]
+  else favorites[rowKey] = true
+  setStored({ favorites }).catch(() => {})
+}
 
 function recordActivation(groupId) {
   if (!groupId) return
@@ -845,9 +1206,16 @@ async function bulkLoadEntraRolesForGroups(token, groupIds, onProgress) {
   const total = groupIds.length
 
   async function fetchOne(gid) {
-    // Try transitive first (covers nested groups). If that returns 4xx
-    // (some tenants don't allow the endpoint for normal users), fall back
-    // to direct roleAssignments.
+    // Use the TRANSITIVE /roleAssignments endpoint by design. PIM4EntraPS
+    // architecture nests role groups inside many task groups, and each
+    // task group carries the actual role assignment. Activating one
+    // role group ("Cloud Engineer") gives the user the union of role
+    // grants from every nested task group beneath it -- the user must
+    // see that union here, otherwise the preview underreports what the
+    // activation will actually grant. v1.4.4 mistakenly dropped this
+    // endpoint; v1.4.5 restores it. Fall back to direct /roleAssignments
+    // when transitive returns 4xx (some tenants restrict it for
+    // non-privileged users).
     const tryUrl = async (endpoint, needHeaders) => {
       const url = `https://graph.microsoft.com/v1.0${endpoint}?$filter=principalId eq '${gid}'&$top=999${needHeaders ? '&$count=true' : ''}`
       const headers = { Authorization: `Bearer ${token}` }
@@ -1082,13 +1450,23 @@ async function loadMyAccessTab(token, { force = false } = {}) {
   if (maBpBar) maBpBar.classList.add('indeterminate')
 
   try {
-    // 1. Active PIM-for-Groups memberships.
-    const instances = await listActiveGroupAssignmentsForMe(token)
+    // 1. Active PIM-for-Groups memberships + active direct (PIM v1) Entra
+    //    roles + active direct Azure RBAC roles. All three fetched in
+    //    parallel; each has its own catch so a permission or 404 on one
+    //    surface can't blank the whole tab.
+    let armTokenEarly = null
+    try { armTokenEarly = await getArmToken() } catch { /* ARM optional */ }
 
-    if (!instances.length) {
+    const [instances, directEntraActive, directAzureActive] = await Promise.all([
+      listActiveGroupAssignmentsForMe(token).catch(() => []),
+      listActiveDirectEntraRolesForMe(token).catch(() => []),
+      armTokenEarly ? listActiveDirectAzureRbacForMe(armTokenEarly).catch(() => []) : Promise.resolve([]),
+    ])
+
+    if (!instances.length && !directEntraActive.length && !directAzureActive.length) {
       myAccessCache = { ts: Date.now(), rows: [] }
       els.myAccessStatus.textContent = ''
-      els.myAccessList.innerHTML = '<div class="empty">No active PIM-for-Groups memberships right now. Activate one from the Activate tab.</div>'
+      els.myAccessList.innerHTML = '<div class="empty">No active PIM assignments right now. Activate one from the Activate tab.</div>'
       updateBadges()
       myAccessLoadedOnce = true
       return
@@ -1111,8 +1489,12 @@ async function loadMyAccessTab(token, { force = false } = {}) {
     }
 
     // 3. Build rows (no per-group role lookup yet -- defer to render so each
-    //    row can show a per-group loading state + per-group error).
-    const rows = instances.map(x => ({
+    //    row can show a per-group loading state + per-group error). Three
+    //    kinds: 'group' (existing PIM v2 path), 'entraDirect' (PIM v1
+    //    direct Entra role), 'azureDirect' (PIM v1 direct Azure RBAC).
+    const groupRows = instances.map(x => ({
+      kind: 'group',
+      rowKey: `group:${x.groupId}`,
       groupId: x.groupId,
       displayName: names[x.groupId] || x.groupId,
       startDateTime: x.startDateTime,
@@ -1122,7 +1504,53 @@ async function loadMyAccessTab(token, { force = false } = {}) {
       rolesError: null,
       azureRoles: null,       // Azure RBAC: null = not loaded yet
       azureRolesError: null
-    })).sort((a, b) => {
+    }))
+
+    const entraDirectRows = (directEntraActive || []).map(x => ({
+      kind: 'entraDirect',
+      rowKey: `entraDirect:${x.roleDefinitionId}:${x.directoryScopeId || '/'}`,
+      roleDefinitionId: x.roleDefinitionId,
+      directoryScopeId: x.directoryScopeId || '/',
+      displayName: x.roleDefinition?.displayName || x.roleDefinitionId,
+      startDateTime: x.startDateTime,
+      endDateTime: x.endDateTime,
+    }))
+
+    // Pre-resolve AU display names referenced by direct (PIM v1) Entra rows so
+    // the scope label renders as the AU name instead of a raw GUID. Mirrors the
+    // same pattern in the Activate tab loader.
+    {
+      const auIds = new Set()
+      const auRe  = /^\/administrativeUnits\/([0-9a-fA-F-]{36})$/
+      for (const r of entraDirectRows) {
+        const m = (r.directoryScopeId || '').match(auRe)
+        if (m && !(m[1] in auNameCache)) auIds.add(m[1])
+      }
+      if (auIds.size) {
+        await Promise.all([...auIds].map(id => resolveAuDisplayName(token, id).catch(() => null)))
+      }
+    }
+
+    const azureDirectRows = (directAzureActive || []).map(x => {
+      const p = x.properties || {}
+      const scope = p.scope || `/subscriptions/${x._subscriptionId}`
+      const roleName = p.expandedProperties?.roleDefinition?.displayName
+        || p.roleDefinitionId?.split('/').pop()
+        || '(unknown role)'
+      const scopeName = p.expandedProperties?.scope?.displayName || scope
+      return {
+        kind: 'azureDirect',
+        rowKey: `azureDirect:${p.roleDefinitionId}:${scope}`,
+        roleDefinitionId: p.roleDefinitionId,
+        armScope: scope,
+        principalId: p.principalId || currentAccount.localAccountId,
+        displayName: `${roleName} @ ${scopeName}`,
+        startDateTime: p.startDateTime,
+        endDateTime: p.endDateTime,
+      }
+    })
+
+    const rows = [...groupRows, ...entraDirectRows, ...azureDirectRows].sort((a, b) => {
       // Newest activation first -- user sees what they just activated at the
       // top, long-standing eligibilities (months-old memberships) at the
       // bottom. Prevents the "mix of active permissions" confusion where
@@ -1133,7 +1561,14 @@ async function loadMyAccessTab(token, { force = false } = {}) {
     })
 
     myAccessCache = { ts: Date.now(), rows }
-    els.myAccessStatus.textContent = `${rows.length} active group membership(s).`
+    const cntGroups = rows.filter(r => r.kind === 'group').length
+    const cntED     = rows.filter(r => r.kind === 'entraDirect').length
+    const cntAD     = rows.filter(r => r.kind === 'azureDirect').length
+    const parts = []
+    if (cntGroups) parts.push(`${cntGroups} group membership${cntGroups === 1 ? '' : 's'}`)
+    if (cntED)     parts.push(`${cntED} direct Entra role${cntED === 1 ? '' : 's'}`)
+    if (cntAD)     parts.push(`${cntAD} direct Azure RBAC role${cntAD === 1 ? '' : 's'}`)
+    els.myAccessStatus.textContent = parts.length ? `Active: ${parts.join(', ')}.` : ''
     renderMyAccess(rows)
     updateBadges()
     myAccessLoadedOnce = true
@@ -1148,7 +1583,10 @@ async function loadMyAccessTab(token, { force = false } = {}) {
     const armToken = await getArmToken()
 
     function attachEntra(bulkEntra) {
+      // Only group rows need bulk-Entra hydration (the "this group grants
+      // these Entra roles" data). Direct rows ARE the role and skip this.
       for (const r of rows) {
+        if (r.kind !== 'group') continue
         const entra = bulkEntra.get(r.groupId) || []
         r.roles = entra.map(a => ({
           roleName: roleDefs.idToName[a.roleDefinitionId] || a.roleDefinitionId,
@@ -1164,6 +1602,7 @@ async function loadMyAccessTab(token, { force = false } = {}) {
     function attachAzure(bulkAzure) {
       const subNameById = Object.fromEntries((armSubscriptionsCache || []).map(s => [s.id, s.name]))
       for (const r of rows) {
+        if (r.kind !== 'group') continue
         const azure = bulkAzure.get(r.groupId) || []
         r.azureRoles = azure.map(a => ({
           roleName: a.roleName,
@@ -1175,7 +1614,11 @@ async function loadMyAccessTab(token, { force = false } = {}) {
     }
 
     if (!armToken) {
-      for (const r of rows) { r.azureRoles = []; r.azureRolesNeedConsent = true }
+      for (const r of rows) {
+        if (r.kind !== 'group') continue
+        r.azureRoles = []
+        r.azureRolesNeedConsent = true
+      }
     }
 
     // Progress bar -- same UX as the Activate tab. N per-group Entra calls
@@ -1238,15 +1681,14 @@ async function loadMyAccessTab(token, { force = false } = {}) {
 // Categorise a group by its NAME (cheap, instant, predictable -- the
 // customer owns the naming convention). Doesn't depend on Graph data so
 // section headers + group rows render immediately. Each customer's naming
-// convention is different (2linkit uses PIM-Entra-* / PIM-AzRes-*, others
-// might use AAD-Admins-* / Az-RBAC-*, etc.), so the patterns are
-// configurable via chrome.storage.managed:
+// convention is different; customisation is on the roadmap (would extend
+// the onboarding wizard's saved config):
 //
-//   entraGroupRegex   -- match for the "Entra" bucket   (default ^PIM-Entra-)
-//   azureGroupRegex   -- match for the "Azure" bucket   (default ^PIM-AzRes-)
+//   entraGroupRegex   -- match for the "Entra" bucket   (default: "Entra")
+//   azureGroupRegex   -- match for the "Azure" bucket   (default: "AzRes|Azure")
 //
-// Groups that match neither pattern land in the "PIM for Groups (workload)"
-// bucket. Both patterns are case-insensitive.
+// Groups that match neither pattern land in the "PIM for Groups (Workload
+// RBAC delegations)" bucket. Both patterns are case-insensitive.
 let __cachedCategoriseRegexes = null
 function getCategoriseRegexes() {
   if (__cachedCategoriseRegexes) return __cachedCategoriseRegexes
@@ -1258,10 +1700,10 @@ function getCategoriseRegexes() {
     }
   }
   // Defaults match common naming patterns from real tenants:
-  //   "Entra"  -- substring, case-insensitive (covers PIM-Entra-*, MyOrg-Entra-Admins, etc.)
-  //   "AzRes|Azure" -- substring, case-insensitive (covers PIM-AzRes-*, *-Azure-*, etc.)
-  // Customers without these substrings in their group names can override the
-  // regex via chrome.storage.managed (entraGroupRegex / azureGroupRegex).
+  //   "Entra"        -- substring match, case-insensitive
+  //   "AzRes|Azure"  -- substring match, case-insensitive
+  // Customers without these substrings get the defaults; per-tenant regex
+  // overrides are future work (would be added to the onboarding wizard).
   __cachedCategoriseRegexes = {
     entra: tryCompile(cfg.entraGroupRegex || 'Entra', 'Entra'),
     azure: tryCompile(cfg.azureGroupRegex || '(AzRes|Azure)', '(AzRes|Azure)')
@@ -1305,31 +1747,34 @@ function renderMyAccess(rows) {
   // and "ARM actually returns role assignments instead of 403".
   if (rows.some(r => r.azureRolesNeedConsent)) {
     const banner = document.createElement('div')
-    banner.style.cssText = 'background:#fff8c5;border:1px solid #d4a72c;border-radius:6px;padding:10px 12px;margin:6px 0 10px 0;font-size:12.5px;color:#633c01;line-height:1.45;'
+    banner.style.cssText = 'background:#fff8c5;border:1px solid #d4a72c;border-radius:6px;padding:8px 10px;margin:6px 0 10px 0;font-size:12px;color:#633c01;line-height:1.4;'
     banner.innerHTML = `
-      <div style="font-weight:600;margin-bottom:4px;">Azure RBAC roles not visible yet.</div>
-      Admin consent for <code>user_impersonation</code> (Azure Service Management API) is required to show Azure roles per group.
-      <ol style="margin:6px 0 6px 18px;padding:0;">
-        <li>Click <strong>Re-sign in</strong> (top-left) and accept the Microsoft consent prompt.</li>
-        <li><strong>Wait 1-3 minutes</strong> for Azure to propagate the new permission across regions (this is an Azure platform delay, not the popup).</li>
-        <li>Click <strong>Refresh</strong> (top-right) -- Azure roles should now show per group.</li>
-      </ol>
-      Tenant-wide one-time action. Other users in your tenant won't see any prompt.
+      Azure RBAC roles not visible yet. Click <strong>Re-sign in</strong>, wait 1-3 min for Azure to propagate, then <strong>Refresh</strong>.
     `
     els.myAccessList.appendChild(banner)
   }
 
-  // Categorise by NAME (instant, no Graph wait). Each group lands in exactly
-  // ONE section based on its PIM-* prefix. Per-row Entra + Azure role data
-  // still loads lazily underneath each row.
-  const entraGroups    = rows.filter(r => categoriseGroupByName(r.displayName) === 'entra')
-  const azureGroups    = rows.filter(r => categoriseGroupByName(r.displayName) === 'azure')
-  const workloadGroups = rows.filter(r => categoriseGroupByName(r.displayName) === 'workload')
+  // Pull starred rows into a top-level Favorites section spanning every
+  // category -- mirrors the Activate tab. Favorites are keyed by rowKey,
+  // which is shared between tabs (group:{gid} / entraDirect:... /
+  // azureDirect:...), so starring a row anywhere highlights it everywhere.
+  const favs           = rows.filter(r => isFavorite(r.rowKey || r.groupId))
+  const nonFavs        = rows.filter(r => !isFavorite(r.rowKey || r.groupId))
+
+  // Categorise. Direct (PIM v1) rows know their surface directly from the
+  // API; group rows (PIM v2) fall back to regex-by-name categorisation.
+  const entraDirect    = nonFavs.filter(r => r.kind === 'entraDirect')
+  const azureDirect    = nonFavs.filter(r => r.kind === 'azureDirect')
+  const entraGroups    = nonFavs.filter(r => r.kind === 'group' && categoriseGroupByName(r.displayName) === 'entra')
+  const azureGroups    = nonFavs.filter(r => r.kind === 'group' && categoriseGroupByName(r.displayName) === 'azure')
+  const workloadGroups = nonFavs.filter(r => r.kind === 'group' && categoriseGroupByName(r.displayName) === 'workload')
 
   const sectionHelp = {
-    entra:    'PIM-Entra-* groups -- typically grant Entra admin roles. Roles listed under each row.',
-    azure:    'PIM-AzRes-* groups -- typically grant Azure RBAC roles. Roles listed under each row.',
-    workload: 'Everything else -- workload access (Defender XDR, Intune, Power BI workspaces, custom apps). Group membership itself IS the permission.'
+    entraDirect: 'Role assigned directly to the user (no PIM group in between).',
+    azureDirect: 'Azure RBAC role assigned directly to the user at the listed scope.',
+    entra:       'Groups that grant Entra admin roles. Roles listed under each row.',
+    azure:       'Groups that grant Azure RBAC roles. Roles listed under each row.',
+    workload:    'Group membership itself IS the permission (Defender XDR, Intune, Power BI workspaces, etc.).'
   }
 
   function renderSection(title, help, members) {
@@ -1341,9 +1786,18 @@ function renderMyAccess(rows) {
     for (const r of members) renderOneMyAccessRow(r)
   }
 
-  renderSection('Entra (PIM-Entra-*)',           sectionHelp.entra,    entraGroups)
-  renderSection('Azure RBAC (PIM-AzRes-*)',      sectionHelp.azure,    azureGroups)
-  renderSection('PIM for Groups (workload)',     sectionHelp.workload, workloadGroups)
+  // Favorites first (spans all categories). Bottom divider for visual break.
+  renderSection('\u2605 Favorites',                            'Starred from the Activate tab. Click \u2605 to unfavorite.', favs)
+  if (favs.length) {
+    const div = document.createElement('div')
+    div.style.cssText = 'border-top:3px double #d0d7de;margin:6px 0 0 0;'
+    els.myAccessList.appendChild(div)
+  }
+  renderSection('Entra roles (direct)',                       sectionHelp.entraDirect, entraDirect)
+  renderSection('Azure RBAC (direct)',                        sectionHelp.azureDirect, azureDirect)
+  renderSection('Entra (via PIM group)',                      sectionHelp.entra,       entraGroups)
+  renderSection('Azure RBAC (via PIM group)',                 sectionHelp.azure,       azureGroups)
+  renderSection('PIM for Groups (Workload RBAC delegations)', sectionHelp.workload,    workloadGroups)
 }
 
 function renderOneMyAccessRow(r) {
@@ -1353,27 +1807,38 @@ function renderOneMyAccessRow(r) {
   const times = start ? `${start} &rarr; ${end}` : `ends ${end}`
   const row = document.createElement('div')
   row.className = 'ma-row'
-  row.dataset.gid = r.groupId
-  const ticked = myAccessSelected.has(r.groupId) ? 'checked' : ''
+  const rk = r.rowKey || r.groupId
+  row.dataset.rk = rk
+  const ticked = myAccessSelected.has(rk) ? 'checked' : ''
+  const isFav = isFavorite(rk)
+  const starColor = isFav ? '#d4a72c' : '#bbb'
+  const starChar  = isFav ? '\u2605' : '\u2606'
   row.innerHTML = `
     <div class="ma-head" style="display:flex;align-items:flex-start;gap:8px;">
-      <input type="checkbox" class="ma-pick" data-pick-gid="${escapeHtml(r.groupId)}" ${ticked} title="Tick to include in bulk deactivate." style="margin-top:3px;flex-shrink:0;">
+      <input type="checkbox" class="ma-pick" data-pick-rk="${escapeHtml(rk)}" ${ticked} title="Tick to include in bulk deactivate." style="margin-top:3px;flex-shrink:0;">
+      <span class="ma-fav-toggle" data-fav-rk="${escapeHtml(rk)}" title="${isFav ? 'Unfavorite' : 'Favorite -- pins this row to the top'}" style="cursor:pointer;color:${starColor};font-size:15px;line-height:1;margin-top:2px;flex-shrink:0;user-select:none;">${starChar}</span>
       <div style="flex:1;min-width:0;">
-        <div class="ma-name">${escapeHtml(r.displayName || r.groupId)}</div>
+        <div class="ma-name">${escapeHtml(r.displayName || rk)}</div>
         <div class="ma-times">${times}</div>
       </div>
-      <button class="ma-deactivate" data-deact-gid="${escapeHtml(r.groupId)}" title="Drop this membership early -- you'll lose access immediately. Confirm prompt before it runs."
+      <button class="ma-deactivate" data-deact-rk="${escapeHtml(rk)}" title="Drop this assignment early -- you'll lose access immediately. Confirm prompt before it runs."
         style="background:#ffffff;color:#cf222e;border:1px solid #cf222e;border-radius:4px;padding:3px 10px;font-size:11px;font-weight:600;cursor:pointer;flex-shrink:0;">Deactivate</button>
     </div>
-    <div class="ma-roles" data-roles-for="${escapeHtml(r.groupId)}"></div>
+    <div class="ma-roles" data-roles-for="${escapeHtml(rk)}"></div>
   `
   els.myAccessList.appendChild(row)
+  const star = row.querySelector('.ma-fav-toggle')
+  if (star) star.onclick = (e) => {
+    e.stopPropagation()
+    toggleFavorite(rk)
+    if (myAccessCache?.rows) renderMyAccess(myAccessCache.rows)
+  }
   // Wire the tick checkbox
   const pick = row.querySelector('.ma-pick')
   if (pick) {
     pick.addEventListener('change', (e) => {
-      if (e.target.checked) myAccessSelected.add(r.groupId)
-      else myAccessSelected.delete(r.groupId)
+      if (e.target.checked) myAccessSelected.add(rk)
+      else myAccessSelected.delete(rk)
       updateBulkDeactivateButton()
     })
   }
@@ -1407,7 +1872,15 @@ function renderOneMyAccessRow(r) {
         const fresh = await acquireGraphToken({ interactive: false })
         const tk = fresh?.accessToken
         if (!tk) throw new Error('Not signed in')
-        await deactivateGroup(tk, r.groupId, 'User-initiated deactivation from PIM Activator')
+        if (r.kind === 'entraDirect') {
+          await deactivateDirectEntraRole(tk, r.roleDefinitionId, r.directoryScopeId, 'User-initiated deactivation from PIM Activator')
+        } else if (r.kind === 'azureDirect') {
+          const arm = await getArmToken().catch(() => null)
+          if (!arm) throw new Error('Azure RBAC deactivate needs an ARM token; re-sign in.')
+          await deactivateDirectAzureRbac(arm, r.armScope, r.roleDefinitionId, r.principalId, 'User-initiated deactivation from PIM Activator')
+        } else {
+          await deactivateGroup(tk, r.groupId, 'User-initiated deactivation from PIM Activator')
+        }
         btn.textContent = 'Deactivated'
         btn.style.background = '#dafbe1'
         btn.style.color = '#1a7f37'
@@ -1459,7 +1932,7 @@ function updateOneMyAccessRoleSlot(r, slot) {
   } else {
     // Collapse 8 "Groups Administrator AU <guid>" rows into one tidy row.
     // Group by roleName, summarise scopes. Then if there are MORE than 3
-    // distinct role names (PIM-Entra-ID-Bundle-* groups can have 80+ roles),
+    // distinct role names (bundle groups can have 80+ roles),
     // default-collapse the list behind a "Show all N Entra roles" toggle so
     // the popup is readable.
     const byRole = new Map()
@@ -1554,8 +2027,17 @@ function setActiveTab(name) {
 
 function updateBadges() {
   els.badgeActivate.textContent = String(eligibleRows.length || 0)
-  const n = myAccessCache?.rows?.length ?? 0
-  els.badgeMyAccess.textContent = String(n)
+  // My Access count is meaningful only AFTER the tab has been loaded at
+  // least once (cache is populated). Until then, show no number rather than
+  // a misleading "0" -- the user opens the tab, sees the real count, and
+  // the badge stays accurate from then on.
+  if (myAccessCache?.rows) {
+    els.badgeMyAccess.textContent = String(myAccessCache.rows.length)
+    els.badgeMyAccess.style.display = ''
+  } else {
+    els.badgeMyAccess.textContent = ''
+    els.badgeMyAccess.style.display = 'none'
+  }
 }
 
 // ---------- Render ----------
@@ -1571,15 +2053,30 @@ function render() {
   )
 
   if (!filtered.length) {
-    els.list.innerHTML = `<div class="empty">${eligibleRows.length ? 'No groups match the filter.' : 'No eligible PIM groups for your account.'}</div>`
+    els.list.innerHTML = `<div class="empty">${eligibleRows.length ? 'No rows match the filter.' : 'No eligible PIM assignments for your account.'}</div>`
     updateCount()
     return
   }
 
+  // Pull starred rows out into a top-level "Favorites" section that spans
+  // ALL categories. Inside the per-category sections below, favorites are
+  // skipped (they already appear at the top) so the same row doesn't show
+  // twice. v1.4.2+ -- replaces the per-section favorites pinning that the
+  // earlier 1.4.0 ship used.
+  const favRows    = filtered.filter(r => isFavorite(r.rowKey || r.groupId))
+  const nonFavRows = filtered.filter(r => !isFavorite(r.rowKey || r.groupId))
+
+  // Direct (PIM v1) rows are categorised by their own .kind -- no regex
+  // needed because the API tells us directly which surface they came from.
+  // Group rows (PIM v2) keep the regex-driven categorisation since the only
+  // signal we have is the displayName.
   const buckets = {
-    entra:    filtered.filter(r => categoriseGroupByName(r.displayName) === 'entra'),
-    azure:    filtered.filter(r => categoriseGroupByName(r.displayName) === 'azure'),
-    workload: filtered.filter(r => categoriseGroupByName(r.displayName) === 'workload')
+    favorites:   favRows,
+    entraDirect: nonFavRows.filter(r => r.kind === 'entraDirect'),
+    azureDirect: nonFavRows.filter(r => r.kind === 'azureDirect'),
+    entra:       nonFavRows.filter(r => r.kind === 'group' && categoriseGroupByName(r.displayName) === 'entra'),
+    azure:       nonFavRows.filter(r => r.kind === 'group' && categoriseGroupByName(r.displayName) === 'azure'),
+    workload:    nonFavRows.filter(r => r.kind === 'group' && categoriseGroupByName(r.displayName) === 'workload')
   }
 
   function renderActivateRow(r) {
@@ -1603,10 +2100,13 @@ function render() {
     // Role preview: lines render once bulk pre-fetch attaches the data.
     // null = bulk fetch hasn't completed; show no line yet (silent loading).
     // [] = fetch done, group grants no roles of that type; skip.
-    const entraPreview = (r.previewEntraRoles || []).slice(0, 5)
-    const entraExtra   = (r.previewEntraRoles?.length || 0) - entraPreview.length
-    const azurePreview = (r.previewAzureRoles || []).slice(0, 5)
-    const azureExtra   = (r.previewAzureRoles?.length || 0) - azurePreview.length
+    // v1.4.6+: show ALL roles + scopes per group, no roll-up. Role groups
+    // in PIM4EntraPS routinely have 10-30+ nested task-group grants and
+    // the operator needs to see every line to evaluate the activation.
+    const entraPreview = (r.previewEntraRoles || [])
+    const entraExtra   = 0
+    const azurePreview = (r.previewAzureRoles || [])
+    const azureExtra   = 0
 
     function roleLines(items, extra, label, color) {
       if (!items.length) return ''
@@ -1620,23 +2120,70 @@ function render() {
     // roles". Bulk fetch sets previewEntraRoles + previewAzureRoles to an
     // array (possibly empty) when it completes; both undefined means the
     // fetch hasn't fired yet for this row.
-    const stillFetching = r.previewEntraRoles === undefined && r.previewAzureRoles === undefined
-    const rolesHtml = stillFetching
-      ? `<div style="color:#7d8590;font-size:11px;font-style:italic;">&#x21B3; Loading roles...</div>`
-      : roleLines(entraPreview, entraExtra, 'Entra',      '#0969da') +
-        roleLines(azurePreview, azureExtra, 'Azure RBAC', '#9a3412')
+    // Direct (PIM v1) rows ARE the role -- no preview lines needed (those
+    // were a "this group grants these roles" hint, irrelevant when the row
+    // is the role itself). Group rows keep the bulk-fetched preview.
+    const idAttr = r.rowKey || `group:${r.groupId}`
+    let rolesHtml = ''
+    if (r.kind === 'group') {
+      const stillFetching = r.previewEntraRoles === undefined && r.previewAzureRoles === undefined
+      if (stillFetching) {
+        rolesHtml = `<div style="color:#7d8590;font-size:11px;font-style:italic;">&#x21B3; Loading roles...</div>`
+      } else {
+        const totalLines = entraPreview.length + azurePreview.length
+        const isCollapsed = collapsedRows.has(idAttr)
+        if (totalLines === 0) {
+          rolesHtml = ''
+        } else if (isCollapsed) {
+          rolesHtml = `<div class="role-toggle" data-toggle-rk="${escapeHtml(idAttr)}" style="color:#0969da;font-size:11px;line-height:1.4;cursor:pointer;user-select:none;" title="Show the transitive roles this group grants.">&#x25B6; <strong>${totalLines} transitive role${totalLines === 1 ? '' : 's'}</strong> <span style="color:#7d8590;">(click to expand)</span></div>`
+        } else {
+          const toggle = `<div class="role-toggle" data-toggle-rk="${escapeHtml(idAttr)}" style="color:#0969da;font-size:11px;line-height:1.4;cursor:pointer;user-select:none;" title="Hide the transitive role list.">&#x25BC; <span style="color:#7d8590;">hide ${totalLines} transitive role${totalLines === 1 ? '' : 's'}</span></div>`
+          rolesHtml = toggle +
+            roleLines(entraPreview, entraExtra, 'Entra',      '#0969da') +
+            roleLines(azurePreview, azureExtra, 'Azure RBAC', '#0969da')
+        }
+      }
+    } else if (r.kind === 'entraDirect' && r.directoryScopeId && r.directoryScopeId !== '/') {
+      // Resolve "/administrativeUnits/{guid}" to the AU display name when the
+      // pre-resolve pass populated auNameCache. Falls back to the raw scope
+      // when the lookup failed (e.g. permission denied on Directory.Read.All
+      // for that AU) so the operator can still see what scope the eligibility
+      // targets even if we can't name it.
+      const scopeObj = parseDirectoryScopeSync(r.directoryScopeId)
+      const scopeLabel = summariseScopes([scopeObj])
+      rolesHtml = `<div style="color:#7d8590;font-size:11px;line-height:1.4;">&#x21B3; scope: <strong>${escapeHtml(scopeLabel)}</strong></div>`
+    }
 
+    const isFav = isFavorite(idAttr)
+    // Filled star = favorite, outline star = not. Clicking toggles + persists.
+    // Sort uses isFavorite() so favorited rows pin to the top of their section.
+    const starColor = isFav ? '#d4a72c' : '#bbb'
+    const starChar  = isFav ? '\u2605' : '\u2606'
     row.innerHTML = `
-      <input type="checkbox" data-gid="${r.groupId}" ${r.checked ? 'checked' : ''} ${r.isActive ? 'disabled' : ''}>
+      <input type="checkbox" data-rk="${escapeHtml(idAttr)}" ${r.checked ? 'checked' : ''} ${r.isActive ? 'disabled' : ''}>
+      <span class="fav-toggle" data-fav-rk="${escapeHtml(idAttr)}" title="${isFav ? 'Unfavorite' : 'Favorite -- pins this row to the top of its section'}" style="cursor:pointer;color:${starColor};font-size:15px;line-height:1;margin:1px 4px 0 0;user-select:none;">${starChar}</span>
       <div class="body">
-        <div class="name" title="${escapeHtml(r.displayName || r.groupId)}">${escapeHtml(r.displayName || r.groupId)}${activeBadge}</div>
+        <div class="name" title="${escapeHtml(r.displayName || idAttr)}">${escapeHtml(r.displayName || idAttr)}${activeBadge}</div>
         ${endLabel ? `<div class="meta">ends ${escapeHtml(endLabel)}</div>` : ''}
         ${rolesHtml}
-        <div class="status" data-gid-status="${r.groupId}"></div>
+        <div class="status" data-rk-status="${escapeHtml(idAttr)}"></div>
       </div>
     `
     if (!r.isActive) {
       row.querySelector('input').onchange = (e) => { r.checked = e.target.checked; updateCount() }
+    }
+    const star = row.querySelector('.fav-toggle')
+    if (star) star.onclick = (e) => {
+      e.stopPropagation()
+      toggleFavorite(idAttr)
+      render() // re-render so the row jumps to the top of its section
+    }
+    const tog = row.querySelector('.role-toggle')
+    if (tog) tog.onclick = (e) => {
+      e.stopPropagation()
+      const rk = tog.dataset.toggleRk
+      if (collapsedRows.has(rk)) collapsedRows.delete(rk); else collapsedRows.add(rk)
+      render()
     }
     els.list.appendChild(row)
   }
@@ -1654,17 +2201,33 @@ function render() {
     // of the bucket but stay above any already-active rows). Within "ready
     // rows with zero history", alphabetical.
     const sorted = members.slice().sort((a, b) => {
+      // 1) Active rows sink to the bottom (existing behaviour).
       if (!!a.isActive !== !!b.isActive) return a.isActive ? 1 : -1
-      const rank = activationRank(b.groupId) - activationRank(a.groupId)
+      // 2) Recency/frequency. Direct rows have no groupId; rank by rowKey
+      //    so the same sort still works without throwing on undefined.
+      //    (Favorites no longer pin per-section -- they live in their own
+      //    top-level "Favorites" section spanning every category.)
+      const rank = activationRank(b.groupId || b.rowKey) - activationRank(a.groupId || a.rowKey)
       if (rank !== 0) return rank
       return (a.displayName || '').localeCompare(b.displayName || '')
     })
     for (const r of sorted) renderActivateRow(r)
   }
 
-  renderActivateSection('Entra roles',               buckets.entra)
-  renderActivateSection('Azure RBAC',                buckets.azure)
-  renderActivateSection('PIM for Groups (workload)', buckets.workload)
+  // Favorites first -- single section spanning every category. Visually
+  // separated from the rest by the existing section-header band. A bottom
+  // divider is added below to make the break extra clear.
+  renderActivateSection('\u2605 Favorites',                              buckets.favorites)
+  if (buckets.favorites.length) {
+    const div = document.createElement('div')
+    div.style.cssText = 'border-top:3px double #d0d7de;margin:6px 0 0 0;'
+    els.list.appendChild(div)
+  }
+  renderActivateSection('Entra roles (direct)',                          buckets.entraDirect)
+  renderActivateSection('Azure RBAC (direct)',                           buckets.azureDirect)
+  renderActivateSection('Entra roles (via PIM Group)',                   buckets.entra)
+  renderActivateSection('Azure RBAC (via PIM Group)',                    buckets.azure)
+  renderActivateSection('PIM for Groups (Workload RBAC delegations)',    buckets.workload)
 
   updateCount()
 }
@@ -1673,8 +2236,12 @@ function updateCount() {
   els.count.textContent = n ? `${n} selected` : 'Select one or more groups'
   els.activate.disabled = n === 0
 }
-function setStatus(groupId, text, cls) {
-  const el = document.querySelector(`[data-gid-status="${CSS.escape(groupId)}"]`)
+function setStatus(rowKey, text, cls) {
+  // v1.3.0+: rows render with data-rk-status (rowKey) instead of the
+  // group-only data-gid-status. Accept either so callers that still pass a
+  // bare groupId resolve correctly when given a "group:{gid}:member" rowKey.
+  const el = document.querySelector(`[data-rk-status="${CSS.escape(rowKey)}"]`)
+                || document.querySelector(`[data-gid-status="${CSS.escape(rowKey)}"]`)
   if (!el) return
   el.textContent = text
   el.className = `status ${cls}`
@@ -1762,14 +2329,23 @@ async function loaded(token) {
     return triggerInteractiveReauth(`Missing scopes: ${miss.join(', ')}`)
   }
 
-  // Parallel: eligibilities + currently-active memberships. The active list
-  // lets us hide rows the user already activated (they show in My Access).
-  setBootLabel('Loading eligible PIM delegations from Microsoft Graph...')
-  let raw, activeRows
+  // Parallel: PIM-for-Groups eligibilities + currently-active memberships +
+  // direct (PIM v1) Entra eligibilities + active direct Entra + Azure RBAC
+  // eligibilities + active Azure RBAC. Some sources may 403 / 404 (tenant
+  // doesn't use that path, or permission still propagating); each gets its
+  // own catch so a single failure cannot wipe the whole list.
+  setBootLabel('Loading eligible PIM delegations from Microsoft Graph + ARM...')
+  let raw, activeRows, directEntra, activeDirectEntra, directAzure, activeDirectAzure
+  let armTok = null
+  try { armTok = await getArmToken() } catch { /* ARM optional -- Entra still works */ }
   try {
-    [raw, activeRows] = await Promise.all([
+    [raw, activeRows, directEntra, activeDirectEntra, directAzure, activeDirectAzure] = await Promise.all([
       listEligibleForMe(token),
-      listActiveGroupAssignmentsForMe(token).catch(() => [])
+      listActiveGroupAssignmentsForMe(token).catch(() => []),
+      listEligibleDirectEntraRolesForMe(token).catch(() => []),
+      listActiveDirectEntraRolesForMe(token).catch(() => []),
+      armTok ? listEligibleDirectAzureRbacForMe(armTok).catch(() => []) : Promise.resolve([]),
+      armTok ? listActiveDirectAzureRbacForMe(armTok).catch(() => [])   : Promise.resolve([]),
     ])
   } catch (e) {
     hideBootProgress()
@@ -1782,9 +2358,12 @@ async function loaded(token) {
     return
   }
 
-  if (!raw.length) {
+  // Only early-return when ALL three sources are empty -- a user who has
+  // zero PIM-for-Groups eligibilities (raw) might still have direct
+  // (PIM v1) Entra or Azure RBAC eligibilities to display.
+  if (!raw.length && !directEntra.length && !directAzure.length) {
     hideBootProgress()
-    els.status.textContent = 'No eligible PIM-for-Groups assignments for your account.'
+    els.status.textContent = 'No eligible PIM assignments for your account.'
     return
   }
 
@@ -1817,8 +2396,13 @@ async function loaded(token) {
     }
   }
 
-  const allMapped = raw.map(x => ({
+  const groupRows = raw.map(x => ({
+    kind: 'group',
     id: x.id,
+    // rowKey deliberately drops accessId so favorites match the same row on
+    // the My Access tab (which uses "group:{groupId}" too). In practice
+    // PIM-for-Groups eligibilities are always accessId=member.
+    rowKey: `group:${x.groupId}`,
     groupId: x.groupId,
     displayName: names[x.groupId] || x.groupId,
     accessId: x.accessId,
@@ -1829,6 +2413,72 @@ async function loaded(token) {
     isActive: activeKeys.has(`${x.groupId}|${x.accessId}`),
     checked: preSelected.has(x.groupId) && !activeKeys.has(`${x.groupId}|${x.accessId}`)
   }))
+
+  // Direct (PIM v1) Entra role eligibilities. Each row carries the role
+  // definition id + the scope id we need for activation; the displayName is
+  // the role's displayName (e.g. "Global Reader") so the bucket already has
+  // a meaningful name without a regex pass.
+  const activeDirectEntraKeys = new Set(
+    (activeDirectEntra || []).map(a => `${a.roleDefinitionId}|${a.directoryScopeId || '/'}`)
+  )
+  const directEntraRows = (directEntra || []).map(x => ({
+    kind: 'entraDirect',
+    id: x.id,
+    rowKey: `entraDirect:${x.roleDefinitionId}:${x.directoryScopeId || '/'}`,
+    roleDefinitionId: x.roleDefinitionId,
+    directoryScopeId: x.directoryScopeId || '/',
+    displayName: x.roleDefinition?.displayName || x.roleDefinitionId,
+    endDateTime: x.endDateTime,
+    isActive: activeDirectEntraKeys.has(`${x.roleDefinitionId}|${x.directoryScopeId || '/'}`),
+    checked: false
+  }))
+
+  // Pre-resolve any AU display names referenced by direct (PIM v1) Entra rows
+  // -- otherwise the scope line renders as a raw "/administrativeUnits/{guid}"
+  // path. Resolved names land in auNameCache; the render path picks them up
+  // synchronously via parseDirectoryScopeSync.
+  {
+    const auIds = new Set()
+    const auRe  = /^\/administrativeUnits\/([0-9a-fA-F-]{36})$/
+    for (const r of [...directEntraRows, ...(directEntra || []).map(x => ({ directoryScopeId: x.directoryScopeId }))]) {
+      const m = (r.directoryScopeId || '').match(auRe)
+      if (m && !(m[1] in auNameCache)) auIds.add(m[1])
+    }
+    if (auIds.size) {
+      await Promise.all([...auIds].map(id => resolveAuDisplayName(token, id).catch(() => null)))
+    }
+  }
+
+  // Direct Azure RBAC role eligibilities. Each row carries the ARM scope +
+  // role definition id (ARM-style fully-qualified ids). principalId comes
+  // from the eligibility instance itself, not from currentAccount, because
+  // the same eligibility might be granted to a group the user is in (group-
+  // eligibility) -- the activate body wants the eligibility's principalId.
+  const activeDirectAzureKeys = new Set(
+    (activeDirectAzure || []).map(a => `${a.properties?.roleDefinitionId}|${a.properties?.scope || a._subscriptionId}`)
+  )
+  const directAzureRows = (directAzure || []).map(x => {
+    const p = x.properties || {}
+    const scope = p.scope || `/subscriptions/${x._subscriptionId}`
+    const roleName = p.expandedProperties?.roleDefinition?.displayName
+      || p.roleDefinitionId?.split('/').pop()
+      || '(unknown role)'
+    const scopeName = p.expandedProperties?.scope?.displayName || scope
+    return {
+      kind: 'azureDirect',
+      id: x.name || x.id,
+      rowKey: `azureDirect:${p.roleDefinitionId}:${scope}`,
+      roleDefinitionId: p.roleDefinitionId,
+      armScope: scope,
+      principalId: p.principalId || currentAccount.localAccountId,
+      displayName: `${roleName} @ ${scopeName}`,
+      endDateTime: p.endDateTime,
+      isActive: activeDirectAzureKeys.has(`${p.roleDefinitionId}|${scope}`),
+      checked: false
+    }
+  })
+
+  const allMapped = [...groupRows, ...directEntraRows, ...directAzureRows]
   const afterNameFilter = allMapped.filter(r => !filterRe || filterRe.test(r.displayName))
   // Sort: inactive (ready-to-activate) first, alphabetical; then active rows
   // at the bottom, also alphabetical. Lets the user see "what I already have"
@@ -1867,21 +2517,32 @@ async function loaded(token) {
     const cached = await getStored([cacheKey])
     const fresh  = cached?.[cacheKey]?.ts && (Date.now() - cached[cacheKey].ts) < 60 * 60 * 1000
 
-    // Convert raw role-assignment items to display rows, grouping by role
-    // name and collapsing scopes through summariseScopes() -- so the same role
-    // hit on 8 different AUs renders as ONE line ("in AU 'X', 'Y' + 2 more")
-    // instead of 8 nearly-identical lines with raw GUIDs.
+    // Convert raw role-assignment items to display rows -- ONE row per
+    // (role, scope) pair so the user sees the FULL list of permissions the
+    // group transitively grants, not a rolled-up summary. PIM4EntraPS role
+    // groups commonly resolve to 10+ nested task groups, each scoped to a
+    // different AU; the user needs every one of those visible to evaluate
+    // "is this the right activation". Dedup identical (role, scope) pairs
+    // so the same assignment surfacing through two transitive paths only
+    // shows once.
     function buildEntraPreview(items, roleDefsMap) {
-      const byRole = new Map()
+      const seen = new Set()
+      const out = []
       for (const a of items) {
         const roleName = roleDefsMap[a.roleDefinitionId] || a.roleDefinitionId
-        if (!byRole.has(roleName)) byRole.set(roleName, [])
-        byRole.get(roleName).push(parseDirectoryScopeSync(a.directoryScopeId))
+        const scopeObj = parseDirectoryScopeSync(a.directoryScopeId)
+        const scopeKey = scopeObj.kind === 'au'     ? `au:${scopeObj.auId}` :
+                         scopeObj.kind === 'tenant' ? 'tenant' :
+                         scopeObj.kind === 'other'  ? `other:${scopeObj.raw}` : 'unknown'
+        const k = `${roleName}|${scopeKey}`
+        if (seen.has(k)) continue
+        seen.add(k)
+        out.push({ roleName, scope: summariseScopes([scopeObj]) })
       }
-      return [...byRole].map(([roleName, scopes]) => ({
-        roleName,
-        scope: summariseScopes(scopes)
-      }))
+      // Stable display order: alphabetical by role, then by scope label.
+      out.sort((a, b) => (a.roleName || '').localeCompare(b.roleName || '')
+                       || (a.scope || '').localeCompare(b.scope || ''))
+      return out
     }
     async function attachEntra(bulkEntra, roleDefsMap) {
       // Pre-resolve any unknown AU display names so the preview can render
@@ -1904,9 +2565,29 @@ async function loaded(token) {
       }
       render()
     }
+    // v1.4.7+: same one-line-per-(role,scope) treatment as Entra. Dedup
+    // identical pairs (same role hit through 2 transitive paths). Format
+    // the ARM scope through describeArmScope() so the user sees
+    // "sub 'ACME Prod' / rg 'rg-platform-l1'" instead of a raw GUID path.
+    function buildAzurePreview(items, subNameById) {
+      const seen = new Set()
+      const out = []
+      for (const a of (items || [])) {
+        const roleName = a.roleName || '(unknown role)'
+        const rawScope = a.scope || '/'
+        const k = `${roleName}|${rawScope}`
+        if (seen.has(k)) continue
+        seen.add(k)
+        out.push({ roleName, scope: describeArmScope(rawScope, subNameById) })
+      }
+      out.sort((a, b) => (a.roleName || '').localeCompare(b.roleName || '')
+                       || (a.scope || '').localeCompare(b.scope || ''))
+      return out
+    }
     function attachAzure(bulkAzure) {
+      const subNameById = Object.fromEntries((armSubscriptionsCache || []).map(s => [s.id, s.name]))
       for (const r of eligibleRows) {
-        r.previewAzureRoles = bulkAzure.get(r.groupId) || []
+        r.previewAzureRoles = buildAzurePreview(bulkAzure.get(r.groupId) || [], subNameById)
       }
       render()
     }
@@ -2049,7 +2730,8 @@ async function loaded(token) {
   if (els.myAccessSelectAll) {
     els.myAccessSelectAll.onclick = () => {
       const rows = myAccessCache?.rows || []
-      for (const r of rows) myAccessSelected.add(r.groupId)
+      // Use rowKey (covers all kinds); fall back to groupId for older cache.
+      for (const r of rows) myAccessSelected.add(r.rowKey || r.groupId)
       for (const cb of document.querySelectorAll('.ma-pick')) cb.checked = true
       updateBulkDeactivateButton()
     }
@@ -2077,7 +2759,7 @@ async function loaded(token) {
     }
     els.myAccessDeactivateSelected.onclick = async () => {
       if (myAccessSelected.size === 0) return
-      const rows = (myAccessCache?.rows || []).filter(r => myAccessSelected.has(r.groupId))
+      const rows = (myAccessCache?.rows || []).filter(r => myAccessSelected.has(r.rowKey || r.groupId))
       if (!bulkArmed) {
         bulkArmed = true
         els.myAccessDeactivateSelected.textContent = `Click again to confirm (${rows.length})`
@@ -2097,10 +2779,21 @@ async function loaded(token) {
           const fresh = await acquireGraphToken({ interactive: false })
           const tk = fresh?.accessToken
           if (!tk) throw new Error('Not signed in')
-          await deactivateGroup(tk, r.groupId, 'User-initiated bulk deactivation from PIM Activator')
+          if (r.kind === 'entraDirect') {
+            await deactivateDirectEntraRole(tk, r.roleDefinitionId, r.directoryScopeId, 'User-initiated bulk deactivation from PIM Activator')
+          } else if (r.kind === 'azureDirect') {
+            const arm = await getArmToken().catch(() => null)
+            if (!arm) throw new Error('Azure RBAC deactivate needs an ARM token')
+            await deactivateDirectAzureRbac(arm, r.armScope, r.roleDefinitionId, r.principalId, 'User-initiated bulk deactivation from PIM Activator')
+          } else {
+            await deactivateGroup(tk, r.groupId, 'User-initiated bulk deactivation from PIM Activator')
+          }
           ok2++
-          // Mark the row's per-row button as deactivated for visual feedback
-          const btn = document.querySelector(`button.ma-deactivate[data-deact-gid="${CSS.escape(r.groupId)}"]`)
+          // Mark the row's per-row button as deactivated for visual feedback.
+          // v1.3.0 changed the attribute from data-deact-gid (group only) to
+          // data-deact-rk (rowKey) so direct rows also get visual feedback.
+          const rk = r.rowKey || r.groupId
+          const btn = document.querySelector(`button.ma-deactivate[data-deact-rk="${CSS.escape(rk)}"]`)
           if (btn) {
             btn.textContent = 'Deactivated'
             btn.disabled = true
@@ -2128,6 +2821,15 @@ async function loaded(token) {
   els.search.oninput  = render
   els.selectAll.onclick  = () => { eligibleRows.forEach(r => { if (!r.isActive) r.checked = true }); render() }
   els.selectNone.onclick = () => { eligibleRows.forEach(r => r.checked = false); render() }
+  els.collapseAll.onclick = () => {
+    // Add every group row's rowKey to the collapsed set. Per-row toggle keeps
+    // working afterwards -- this is a bulk preset, not an exclusive mode.
+    for (const r of eligibleRows) {
+      if (r.kind === 'group') collapsedRows.add(r.rowKey || `group:${r.groupId}`)
+    }
+    render()
+  }
+  els.expandAll.onclick = () => { collapsedRows.clear(); render() }
   els.refresh.onclick = () => window.location.reload()
 
   els.activate.onclick = async () => {
@@ -2161,35 +2863,53 @@ async function loaded(token) {
     }
 
     els.activate.disabled = true
-    selected.forEach(r => setStatus(r.groupId, 'queued...', 'pending'))
+    selected.forEach(r => setStatus(r.rowKey || r.groupId, 'queued...', 'pending'))
 
     let anySucceeded = false
 
-    // Activate sequentially to be gentle on PIM throttling.
+    // Activate sequentially to be gentle on PIM / ARM throttling. The
+    // dispatcher switches on r.kind:
+    //   group       -> Graph POST assignmentScheduleRequests (PIM-for-Groups, v2)
+    //   entraDirect -> Graph POST roleAssignmentScheduleRequests (PIM v1 direct)
+    //   azureDirect -> ARM   PUT  roleAssignmentScheduleRequests/{guid} (PIM v1 direct Azure RBAC)
     for (const r of selected) {
-      setStatus(r.groupId, 'activating...', 'pending')
+      const rk = r.rowKey || r.groupId
+      setStatus(rk, 'activating...', 'pending')
       try {
         // Re-acquire token per round in case the previous one expired mid-loop.
         const fresh = await acquireGraphToken({ interactive: false })
         const tk = fresh?.accessToken || token
-        const res = await activateGroup(tk, r.groupId, just, dur)
-        if (res?.status === 'Provisioned' || res?.status === 'Granted') {
-          setStatus(r.groupId, `active for ${dur}h - see My Access tab`, 'ok')
-          r.checked = false   // uncheck on success so re-opening popup is clean
-          anySucceeded = true
-          recordActivation(r.groupId)
+
+        let res, statusOk, statusPending
+        if (r.kind === 'entraDirect') {
+          res = await activateDirectEntraRole(tk, r.roleDefinitionId, r.directoryScopeId, just, dur)
+          statusOk      = res?.status === 'Provisioned' || res?.status === 'Granted'
+          statusPending = !statusOk
+        } else if (r.kind === 'azureDirect') {
+          const arm = await getArmToken().catch(() => null)
+          if (!arm) throw new Error('Azure RBAC activation needs an ARM token; re-sign in.')
+          res = await activateDirectAzureRbac(arm, r.armScope, r.roleDefinitionId, r.principalId, just, dur)
+          statusOk      = res?.properties?.status === 'Provisioned'
+          statusPending = !statusOk
         } else {
-          // Most PIM-for-Groups activations land in PendingProvisioning for a
-          // few seconds before flipping to Provisioned. Tell the user that's
-          // normal + where to see the final state instead of leaking the API
-          // status string verbatim.
-          setStatus(r.groupId, `submitted - check My Access tab in a few seconds`, 'pending')
-          r.checked = false   // uncheck on submit too -- activation request accepted
-          anySucceeded = true
-          recordActivation(r.groupId)
+          res = await activateGroup(tk, r.groupId, just, dur)
+          statusOk      = res?.status === 'Provisioned' || res?.status === 'Granted'
+          statusPending = !statusOk
         }
+
+        if (statusOk) {
+          setStatus(rk, `active for ${dur}h - see My Access tab`, 'ok')
+        } else {
+          setStatus(rk, `submitted - check My Access tab in a few seconds`, 'pending')
+        }
+        r.checked = false
+        anySucceeded = true
+        // Group activations recorded against groupId; direct activations
+        // recorded against rowKey so the activation-history sort still works
+        // (groups vs direct rows live in different buckets, no key collision).
+        recordActivation(r.kind === 'group' ? r.groupId : rk)
       } catch (e) {
-        setStatus(r.groupId, e.message, 'err')
+        setStatus(rk, e.message, 'err')
         // leave r.checked = true so user can retry
       }
     }
@@ -2201,7 +2921,7 @@ async function loaded(token) {
       myAccessCache = null
       // Persist the cleared selection so a popup re-open doesn't re-check the
       // groups we just activated.
-      await setStored({ selectedIds: eligibleRows.filter(r => r.checked).map(r => r.groupId) })
+      await setStored({ selectedIds: eligibleRows.filter(r => r.checked && r.groupId).map(r => r.groupId) })
       render()   // refresh checkbox state + "N selected" footer count
       // Auto-switch to My Access tab so the user immediately sees the result
       // (active groups + the Entra roles they generated) instead of having to

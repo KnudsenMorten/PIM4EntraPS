@@ -32,9 +32,26 @@
 $global:PIM_NamingConventions = @{
 
     # ----- Admin accounts ---------------------------------------------------
-    # Single privileged-tier admin account per human user.
-    # Token: {Owner} = the human user's display name or sAMAccountName
-    AdminAccountPattern = 'adm_{Owner}'
+    # TWO separate concepts, often confused:
+    #
+    #   AdminAccountPattern  (singular, string, has {Owner} token)
+    #     -> TEMPLATE used by Resolve-PimAdminName to GENERATE new admin UPNs.
+    #        E.g. 'Admin-{Owner}-L0-T0-ID' + Owner 'Brian' yields
+    #        'Admin-Brian-L0-T0-ID'. Only matters when the engine creates
+    #        new admins.
+    #
+    #   AdminAccountPatterns (plural; accepts string[], hashtable, or single string)
+    #     -> Prefix(es) used by Get-PimAdminsFiltered to build the Graph
+    #        $filter that decides which existing users get loaded into the
+    #        $Global:Users_All_ID cache. If your tenant has admins under
+    #        multiple prefix conventions (Admin-*, X-Admin*, ...), list
+    #        them ALL here so the cache catches them all.
+    #
+    # Defaults below assume the 'Admin-' / 'X-Admin' tier-naming convention
+    # observed in production tenants. Override either key in
+    # PIM4EntraPS.NamingConventions.custom.ps1 if your tenant differs.
+    AdminAccountPattern  = 'Admin-{Owner}'
+    AdminAccountPatterns = @('Admin-', 'X-Admin')
 
     # UPN suffix for admin accounts (when creating new ones). Null = use tenant default.
     AdminAccountUpnSuffix = $null
@@ -42,10 +59,18 @@ $global:PIM_NamingConventions = @{
     # ----- PIM groups -------------------------------------------------------
     # Security groups created/managed for PIM role assignment.
     # Tokens: {Role}, {Department}, {Tier}
-    PimGroupPattern = 'PIM_{Role}_{Department}'
+    # v2.4.69: switched separator '_' -> '-'. The underscore-form was a
+    # legacy carry-over and didn't match what any in-the-wild customer
+    # uses (PIM-DEPT-Finance, PIM-ROLE-Internal-IT, etc.). The mismatch
+    # caused Get-PimGroupsFiltered to query startswith(displayName,'PIM_')
+    # and return zero rows, which collapsed the cache and led every
+    # CreateUpdate-PIM-Group call to look up an empty cache, find $null,
+    # and create a duplicate group every run. If your tenant really does
+    # use underscores, override in PIM4EntraPS.NamingConventions.custom.ps1.
+    PimGroupPattern = 'PIM-{Role}-{Department}'
 
     # Subset for AU-bound assignments (administrative unit)
-    PimGroupAuPattern = 'PIM_{Role}_AU_{AdminUnit}'
+    PimGroupAuPattern = 'PIM-{Role}-AU-{AdminUnit}'
 
     # Optional STRICT regex for GroupTag values. When set, the PIM Manager's
     # naming-convention warning (PIM-NAME-001) fires on any tag that doesn't

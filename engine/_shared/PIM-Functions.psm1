@@ -312,32 +312,58 @@ Function CorrelateDateTimeLanguage {
 
     $DateInput = $DateInput.ToString().Trim()
 
+    # Generic, culture-agnostic parse. Tries a broad set of cultures with TryParse first
+    # (handles virtually every well-formed timestamp .NET can recognize regardless of
+    # 12/24h, separator, ordering, or zone suffix), then falls back to a small list of
+    # explicit ParseExact formats for any oddball strings .NET can't auto-detect.
+    $cultures = @(
+        [CultureInfo]::InvariantCulture,
+        [CultureInfo]::GetCultureInfo("en-US"),
+        [CultureInfo]::GetCultureInfo("en-GB"),
+        [CultureInfo]::GetCultureInfo("da-DK"),
+        [CultureInfo]::CurrentCulture
+    ) | Select-Object -Unique
+
+    # AssumeUniversal=64 + AdjustToUniversal=16 -> 80; AssumeLocal=32; None=0.
+    # Listed as int to avoid PS7-strict-mode enum -bor issues.
+    $styles = @(
+        [System.Globalization.DateTimeStyles]([int]([System.Globalization.DateTimeStyles]::AssumeUniversal) -bor [int]([System.Globalization.DateTimeStyles]::AdjustToUniversal)),
+        [System.Globalization.DateTimeStyles]::AssumeLocal,
+        [System.Globalization.DateTimeStyles]::None
+    )
+
+    foreach ($culture in $cultures) {
+        foreach ($style in $styles) {
+            $parsed = [datetime]::MinValue
+            if ([datetime]::TryParse($DateInput, $culture, $style, [ref]$parsed)) {
+                Write-Debug "Parsed via TryParse culture='$($culture.Name)' style=$style"
+                return $parsed
+            }
+        }
+    }
+
+    # Explicit fallbacks for formats .NET's auto-detect rejects in some cultures
     $formats = @(
-        "M/d/yyyy h:mm:ss tt", 
-        "dd-MM-yyyy HH:mm:ss", 
+        "M/d/yyyy h:mm:ss tt",
+        "M/d/yyyy H:mm:ss",
+        "MM/dd/yyyy HH:mm:ss",
+        "MM/dd/yyyy H:mm:ss",
+        "dd-MM-yyyy HH:mm:ss",
+        "dd-MM-yyyy H:mm:ss",
         "yyyy-MM-ddTHH:mm:ssZ",
         "yyyy-MM-ddTHH:mm:ss.fffffffZ",
         "yyyy-MM-ddTHH:mm:ss.fffZ",
         "yyyy-MM-ddTHH:mm:ssK",
-        "yyyy-MM-ddTHH:mm:ss", 
-        "yyyy-MM-dd", 
+        "yyyy-MM-ddTHH:mm:ss",
+        "yyyy-MM-dd",
         "MM/dd/yyyy"
     )
-
-    $cultures = @(
-        [CultureInfo]::GetCultureInfo("en-US"),
-        [CultureInfo]::GetCultureInfo("da-DK"),
-        [CultureInfo]::InvariantCulture
-    )
-
     foreach ($culture in $cultures) {
         foreach ($fmt in $formats) {
-            try {
-                $parsedDate = [DateTime]::ParseExact($DateInput, $fmt, $culture)
-                Write-Debug "Parsed using format '$fmt' and culture '$($culture.Name)'"
-                return $parsedDate
-            } catch {
-                Write-Debug "Failed format '$fmt' with culture '$($culture.Name)'"
+            $parsed = [datetime]::MinValue
+            if ([datetime]::TryParseExact($DateInput, $fmt, $culture, [System.Globalization.DateTimeStyles]::None, [ref]$parsed)) {
+                Write-Debug "Parsed via ParseExact fmt='$fmt' culture='$($culture.Name)'"
+                return $parsed
             }
         }
     }
@@ -1136,7 +1162,7 @@ Function Assign-PIM-Group-Resource
 }
 
 
-Function CreateUpdate-PIM-PAG-Group
+Function CreateUpdate-PIM-Group
 {
 
     [CmdletBinding()]
@@ -1173,9 +1199,23 @@ Function CreateUpdate-PIM-PAG-Group
         }
 
 
-    # Check if group already exist
-    # OLD METHOD - SLOW - $Group = Get-MgGroup -Filter "DisplayName eq '$($Groupname)'" -Erroraction SilentlyContinue
-    $Group = $Global:Groups_All_ID | where-object { $_.DisplayName -eq $GroupName }
+    # Check if group already exist (cache lookup with Graph fallback).
+    # BUG (pre-v2.4.69): used bare `$Global:Groups_All_ID | where-object` here,
+    # which only checks the cache populated by Get-PimGroupsFiltered. If the
+    # customer's naming-convention filter (PIM4EntraPS.NamingConventions.custom.ps1)
+    # doesn't match the actual group prefix in the tenant (e.g. filter says
+    # 'PIM_*' but groups are 'PIM-*'), the cache is empty, the cache lookup
+    # returns $null, and the engine creates a DUPLICATE for every group on
+    # every run. Aligned with the other create-group sites (lines 819, 989,
+    # 3248) that use Resolve-PimGroupCached -- which falls back to Graph
+    # when the cache misses, catching the existing group regardless of
+    # whether the convention filter pre-loaded it.
+    $Group = $null
+    Try {
+        $Group = Resolve-PimGroupCached -DisplayName $Groupname
+    } Catch {
+        Write-Warning "  [CreateUpdate-PIM-Group] group lookup for '$Groupname' failed: $($_.Exception.Message) -- treating as MISSING; create attempt below may emit UniqueValueViolated if the group really exists."
+    }
 
     If (!($Group))   # create group if it doesn't exist !
         {
@@ -1292,6 +1332,13 @@ Function CreateUpdate-PIM-PAG-Group
                 }
         }
 }
+
+# Back-compat alias: v2.4.69 renamed CreateUpdate-PIM-PAG-Group -> CreateUpdate-PIM-Group
+# ('PAG' = the old 'Privileged Access Group' label; the product is just called
+# 'PIM group' now). Keeps any out-of-tree caller that still uses the old name
+# working without surprise breakage; remove in a future major when all engines
+# have been swept.
+Set-Alias -Name CreateUpdate-PIM-PAG-Group -Value CreateUpdate-PIM-Group -Scope Global -ErrorAction SilentlyContinue
 
 
 Function Create-PIM-PAG-Assignment
@@ -2089,7 +2136,7 @@ Function CreateUpdate-PIM-for-Groups-From-file-CSV
 
                 write-host ""
                 Write-host "Processing group $($GroupName)"
-                CreateUpdate-PIM-PAG-Group -GroupName $GroupName `
+                CreateUpdate-PIM-Group -GroupName $GroupName `
                                            -GroupDescription $GroupDescription `
                                            -IsRoleAssignable $IsRoleAssignable `
                                            -Owners $Owners
@@ -2108,7 +2155,7 @@ Function CreateUpdate-PIM-for-Groups-From-file-CSV
 
                 $AUInfo = $AU_ALL | Where-Object { $_.DisplayName -eq $AUName }
 
-                # PERF: cached lookup; this group was just created by CreateUpdate-PIM-PAG-Group, so allow cache (which the create-path populated via -NoCache) or fall back to Graph (v2.4.0).
+                # PERF: cached lookup; this group was just created by CreateUpdate-PIM-Group, so allow cache (which the create-path populated via -NoCache) or fall back to Graph (v2.4.0).
                 $GroupInfo = Resolve-PimGroupCached -DisplayName $GroupName
                 Add-AdministrativeUnit-Member -AuId $AUInfo.Id -AddType Group -ObjectId $GroupInfo.Id
             }
@@ -2185,7 +2232,7 @@ Function CreateUpdate-PIM-for-Groups-From-SQL
 
                 write-host ""
                 Write-host "Processing group $($GroupName)"
-                CreateUpdate-PIM-PAG-Group -GroupName $GroupName `
+                CreateUpdate-PIM-Group -GroupName $GroupName `
                                            -GroupDescription $GroupDescription `
                                            -IsRoleAssignable $IsRoleAssignable
 
@@ -2611,7 +2658,7 @@ Function Assign-Roles-AdministrativeUnits-From-file-CSV
                                     If ($GraphCheck)
                                         {
                                             write-host ""
-                                            Write-host "Existing Assignment found via Graph (not in snapshot) ... treating as existing"
+                                            Write-host "OK - Exists: $RoleDefinitionName -> $($Group.DisplayName)"
                                             $GraphExpirationType = $GraphCheck[0].ScheduleInfo.Expiration.Type
                                             # Graph returns "noExpiration" or "afterDateTime"; EndDateTime is null when permanent
                                             $GraphEndDateTime = If ($GraphExpirationType -ieq "noExpiration") { $null } Else { $GraphCheck[0].ScheduleInfo.Expiration.EndDateTime }
@@ -2644,7 +2691,7 @@ Function Assign-Roles-AdministrativeUnits-From-file-CSV
                                     If ($GraphCheck)
                                         {
                                             write-host ""
-                                            Write-host "Existing Assignment found via Graph (not in snapshot) ... treating as existing"
+                                            Write-host "OK - Exists: $RoleDefinitionName -> $($Group.DisplayName)"
                                             $GraphExpirationType = $GraphCheck[0].ScheduleInfo.Expiration.Type
                                             $GraphEndDateTime = If ($GraphExpirationType -ieq "noExpiration") { $null } Else { $GraphCheck[0].ScheduleInfo.Expiration.EndDateTime }
                                             $CheckExistingAssignment = [PSCustomObject]@{
@@ -2667,19 +2714,13 @@ Function Assign-Roles-AdministrativeUnits-From-file-CSV
                                         {
                                             If ( ( ($Action -eq "Assign") -and ($UpdateExisting) ) -or ($Action -eq "Update") )
                                                 {
-                                                    write-host ""
-                                                    Write-host "Existing Assignment will be updated with assignment details"
-                                                    Write-host "Mode: AdminUpdate"
-                                                    write-host ""
+                                                    Write-host "UPDATE: $RoleDefinitionName -> $($Group.DisplayName) (refreshing assignment details)" -ForegroundColor Yellow
                                                     $PIMAction = "AdminUpdate"
                                                 }
                                             Else
                                                 {
                                                     # BUG FIX 3: Permanent assignment exists and no update requested - explicitly NoAction
-                                                    write-host ""
-                                                    Write-host "Existing permanent Assignment found ... skipping"
-                                                    Write-host "Mode: NoAction"
-                                                    write-host ""
+                                                    Write-host "OK - Permanent exists: $RoleDefinitionName -> $($Group.DisplayName) (skipping)" -ForegroundColor Green
                                                     $PIMAction = "NoAction"
                                                 }
                                         }
@@ -2692,45 +2733,49 @@ Function Assign-Roles-AdministrativeUnits-From-file-CSV
                                             # (can happen with live Graph data), treat as permanent to avoid crash
                                             If ([string]::IsNullOrWhiteSpace($ValueChk))
                                                 {
-                                                    write-host ""
-                                                    Write-host "Existing permanent Assignment found ... skipping"
-                                                    Write-host "Mode: NoAction"
-                                                    write-host ""
+                                                    Write-host "OK - Permanent exists: $RoleDefinitionName -> $($Group.DisplayName) (skipping)" -ForegroundColor Green
                                                     $PIMAction = "NoAction"
                                                 }
                                             Else
                                                 {
                                                     $ExpirationDate = CorrelateDateTimeLanguage -DateInput $ValueChk
-
-                                                    # Calculate and round the number of days
-                                                    $NumOfDaysBeforeExpiration = (New-TimeSpan -Start (Get-Date) -End (Ensure-DateTime $ExpirationDate)).TotalDays
-                                                    $NumOfDaysBeforeExpiration = [math]::Round($NumOfDaysBeforeExpiration, 0)
-
-                                                    If ( ($NumOfDaysBeforeExpiration -le 30) -and ($AutoExtend) )
-                                                        {
-                                                            # change action from AdminAssign to AdminExtend
-                                                            write-host ""
-                                                            Write-host "Existing Assignment will expire in $($NumOfDaysBeforeExpiration) days"
-                                                            write-host "Assignment will be extended as AutoExtend=TRUE"
-                                                            Write-host "Mode: AdminExtend"
-                                                            write-host ""
-                                                            $PIMAction = "AdminExtend"
-                                                        }
-                                                    ElseIf ( ( ($Action -eq "Assign") -and ($UpdateExisting) ) -or ($Action -eq "Update") )
+                                                    If (-not $ExpirationDate)
                                                         {
                                                             write-host ""
-                                                            Write-host "Existing Assignment will be updated with assignment details"
-                                                            Write-host "Mode: AdminUpdate"
+                                                            Write-host "OK - Exists (unparseable expiry '$ValueChk'): $RoleDefinitionName -> $($Group.DisplayName) (skipping)" -ForegroundColor Yellow
                                                             write-host ""
-                                                            $PIMAction = "AdminUpdate"
+                                                            $PIMAction = "NoAction"
                                                         }
                                                     Else
                                                         {
-                                                            write-host ""
-                                                            Write-host "Existing Assignment found ... skipping (expires in $($NumOfDaysBeforeExpiration) days)"
-                                                            Write-host "Mode: NoAction"
-                                                            write-host ""
-                                                            $PIMAction = "NoAction"
+                                                            # Calculate and round the number of days
+                                                            $NumOfDaysBeforeExpiration = (New-TimeSpan -Start (Get-Date) -End $ExpirationDate).TotalDays
+                                                            $NumOfDaysBeforeExpiration = [math]::Round($NumOfDaysBeforeExpiration, 0)
+
+                                                            If ( ($NumOfDaysBeforeExpiration -le 30) -and ($AutoExtend) )
+                                                                {
+                                                                    # change action from AdminAssign to AdminExtend
+                                                                    write-host ""
+                                                                    Write-host "EXTEND: $RoleDefinitionName -> $($Group.DisplayName) (expires in $($NumOfDaysBeforeExpiration) days)" -ForegroundColor Yellow
+                                                                    write-host "Assignment will be extended as AutoExtend=TRUE"
+                                                                    write-host ""
+                                                                    $PIMAction = "AdminExtend"
+                                                                }
+                                                            ElseIf ( ( ($Action -eq "Assign") -and ($UpdateExisting) ) -or ($Action -eq "Update") )
+                                                                {
+                                                                    write-host ""
+                                                                    Write-host "Existing Assignment will be updated with assignment details"
+                                                                    Write-host "Mode: AdminUpdate"
+                                                                    write-host ""
+                                                                    $PIMAction = "AdminUpdate"
+                                                                }
+                                                            Else
+                                                                {
+                                                                    write-host ""
+                                                                    Write-host "OK - Exists: $RoleDefinitionName -> $($Group.DisplayName) (expires in $($NumOfDaysBeforeExpiration) days, skipping)" -ForegroundColor Green
+                                                                    write-host ""
+                                                                    $PIMAction = "NoAction"
+                                                                }
                                                         }
                                                 }
                                         }
@@ -2745,10 +2790,7 @@ Function Assign-Roles-AdministrativeUnits-From-file-CSV
                             
                             If ( ($CheckExistingAssignment) -and ($Action -eq "Remove") )
                                 {
-                                    write-host ""
-                                    Write-host "Assignment was found .... removing"
-                                    Write-host "Mode: AdminRemove"
-                                    write-host ""
+                                    Write-host "REMOVE: $RoleDefinitionName -> $($Group.DisplayName)" -ForegroundColor Red
                                     $PIMAction = "AdminRemove"
                                 }
 
@@ -2758,10 +2800,7 @@ Function Assign-Roles-AdministrativeUnits-From-file-CSV
                                 # Print action summary - only for AdminAssign (not for Extend/Update)
                                 If ($PIMAction -eq "AdminAssign")
                                     {
-                                        write-host ""
-                                        Write-host "Assignment was NOT found .... creating"
-                                        Write-host "Mode: AdminAssign"
-                                        write-host ""
+                                        Write-host "ASSIGN: $RoleDefinitionName -> $($Group.DisplayName) (new assignment)" -ForegroundColor Cyan
                                     }
                                     $Justification = "IAC: Assigning role $($RoleDefinitionName) to role group $($Group.DisplayName)"
 
@@ -2820,7 +2859,7 @@ Function Assign-Roles-AdministrativeUnits-From-file-CSV
                                                     }
                                                     Catch {
                                                         If ($_.FullyQualifiedErrorId -like "*RoleAssignmentExists*")
-                                                            { Write-host "Existing Assignment found via Graph (API confirmed) ... skipping" -ForegroundColor Green }
+                                                            { Write-host "OK - Exists: $RoleDefinitionName -> $($Group.DisplayName) (Graph confirmed, skipping)" -ForegroundColor Green }
                                                         ElseIf ($_.FullyQualifiedErrorId -like "*RoleAssignmentDoesNotExist*")
                                                             { Write-host "Assignment already removed (not found in Graph) ... skipping" -ForegroundColor Green }
                                                         Else
@@ -2837,7 +2876,7 @@ Function Assign-Roles-AdministrativeUnits-From-file-CSV
                                                     }
                                                     Catch {
                                                         If ($_.FullyQualifiedErrorId -like "*RoleAssignmentExists*")
-                                                            { Write-host "Existing Assignment found via Graph (API confirmed) ... skipping" -ForegroundColor Green }
+                                                            { Write-host "OK - Exists: $RoleDefinitionName -> $($Group.DisplayName) (Graph confirmed, skipping)" -ForegroundColor Green }
                                                         ElseIf ($_.FullyQualifiedErrorId -like "*RoleAssignmentDoesNotExist*")
                                                             { Write-host "Assignment already removed (not found in Graph) ... skipping" -ForegroundColor Green }
                                                         Else
@@ -2995,7 +3034,7 @@ Function Assign-Roles-AdministrativeUnits-From-SQL
                                         {
                                             # BUG FIX 3: Permanent assignment exists, no update requested - explicitly NoAction
                                             write-host ""
-                                            Write-host "Existing permanent Assignment found ... skipping"
+                                            Write-host "OK - Permanent exists: $RoleDefinitionName -> $($Group.DisplayName) (skipping)"
                                             Write-host "Mode: NoAction"
                                             write-host ""
                                             $PIMAction = "NoAction"
@@ -3005,38 +3044,60 @@ Function Assign-Roles-AdministrativeUnits-From-SQL
                                 {
                                     # not permanent - check expiry
                                     $ValueChk = [string]$CheckExistingAssignment.ScheduleExpirationEndDateTime
-                                    $ExpirationDate = CorrelateDateTimeLanguage -DateInput $ValueChk
-
-                                    # Calculate and round the number of days
-                                    $NumOfDaysBeforeExpiration = (New-TimeSpan -Start (Get-Date) -End (Ensure-DateTime $ExpirationDate)).TotalDays
-                                    $NumOfDaysBeforeExpiration = [math]::Round($NumOfDaysBeforeExpiration, 0)
-
-                                    If ( ($NumOfDaysBeforeExpiration -le 30) -and ($AutoExtend) )
+                                    If ([string]::IsNullOrWhiteSpace($ValueChk))
                                         {
-                                            # change action from AdminAssign to AdminExtend
+                                            # Empty EndDateTime despite not being noExpiration -> treat as permanent
                                             write-host ""
-                                            Write-host "Existing Assignment will expire in $($NumOfDaysBeforeExpiration) days"
-                                            write-host "Assignment will be extended as AutoExtend=TRUE"
-                                            Write-host "Mode: AdminExtend"
-                                            write-host ""
-                                            $PIMAction = "AdminExtend"
-                                        }
-                                    ElseIf ( ( ($Action -eq "Assign") -and ($UpdateExisting) ) -or ($Action -eq "Update") )
-                                        {
-                                            write-host ""
-                                            Write-host "Existing Assignment will be updated with assignment details"
-                                            Write-host "Mode: AdminUpdate"
-                                            write-host ""
-                                            $PIMAction = "AdminUpdate"
-                                        }
-                                    Else
-                                        {
-                                            # BUG FIX 2: Simplified - assignment exists, not expiring soon, no update requested -> skip
-                                            write-host ""
-                                            Write-host "Existing Assignment found ... skipping (expires in $($NumOfDaysBeforeExpiration) days)"
+                                            Write-host "OK - Permanent exists: $RoleDefinitionName -> $($Group.DisplayName) (skipping)" -ForegroundColor Green
                                             Write-host "Mode: NoAction"
                                             write-host ""
                                             $PIMAction = "NoAction"
+                                        }
+                                    Else
+                                        {
+                                            $ExpirationDate = CorrelateDateTimeLanguage -DateInput $ValueChk
+                                            If (-not $ExpirationDate)
+                                                {
+                                                    # Unparseable EndDateTime -> safer to skip than to act on bogus math
+                                                    write-host ""
+                                                    Write-host "OK - Exists (unparseable expiry '$ValueChk'): $RoleDefinitionName -> $($Group.DisplayName) (skipping)" -ForegroundColor Yellow
+                                                    Write-host "Mode: NoAction"
+                                                    write-host ""
+                                                    $PIMAction = "NoAction"
+                                                }
+                                            Else
+                                                {
+                                                    # Calculate and round the number of days
+                                                    $NumOfDaysBeforeExpiration = (New-TimeSpan -Start (Get-Date) -End $ExpirationDate).TotalDays
+                                                    $NumOfDaysBeforeExpiration = [math]::Round($NumOfDaysBeforeExpiration, 0)
+
+                                                    If ( ($NumOfDaysBeforeExpiration -le 30) -and ($AutoExtend) )
+                                                        {
+                                                            # change action from AdminAssign to AdminExtend
+                                                            write-host ""
+                                                            Write-host "Existing Assignment will expire in $($NumOfDaysBeforeExpiration) days"
+                                                            write-host "Assignment will be extended as AutoExtend=TRUE"
+                                                            Write-host "Mode: AdminExtend"
+                                                            write-host ""
+                                                            $PIMAction = "AdminExtend"
+                                                        }
+                                                    ElseIf ( ( ($Action -eq "Assign") -and ($UpdateExisting) ) -or ($Action -eq "Update") )
+                                                        {
+                                                            write-host ""
+                                                            Write-host "Existing Assignment will be updated with assignment details"
+                                                            Write-host "Mode: AdminUpdate"
+                                                            write-host ""
+                                                            $PIMAction = "AdminUpdate"
+                                                        }
+                                                    Else
+                                                        {
+                                                            write-host ""
+                                                            Write-host "OK - Exists: $RoleDefinitionName -> $($Group.DisplayName) (expires in $($NumOfDaysBeforeExpiration) days, skipping)" -ForegroundColor Green
+                                                            Write-host "Mode: NoAction"
+                                                            write-host ""
+                                                            $PIMAction = "NoAction"
+                                                        }
+                                                }
                                         }
                                 }
                         }
@@ -3327,7 +3388,7 @@ Function Assign-Roles-Groups-From-file-CSV
                                     If ($GraphCheck)
                                         {
                                             write-host ""
-                                            Write-host "Existing Assignment found via Graph (not in snapshot) ... treating as existing"
+                                            Write-host "OK - Exists: $RoleDefinitionName -> $($Group.DisplayName)"
                                             $GraphExpirationType = $GraphCheck[0].ScheduleInfo.Expiration.Type
                                             $GraphEndDateTime = If ($GraphExpirationType -ieq "noExpiration") { $null } Else { $GraphCheck[0].ScheduleInfo.Expiration.EndDateTime }
                                             $CheckExistingAssignment = [PSCustomObject]@{
@@ -3363,7 +3424,7 @@ Function Assign-Roles-Groups-From-file-CSV
                                     If ($GraphCheck)
                                         {
                                             write-host ""
-                                            Write-host "Existing Assignment found via Graph (not in snapshot) ... treating as existing"
+                                            Write-host "OK - Exists: $RoleDefinitionName -> $($Group.DisplayName)"
                                             $GraphExpirationType = $GraphCheck[0].ScheduleInfo.Expiration.Type
                                             $GraphEndDateTime = If ($GraphExpirationType -ieq "noExpiration") { $null } Else { $GraphCheck[0].ScheduleInfo.Expiration.EndDateTime }
                                             $CheckExistingAssignment = [PSCustomObject]@{
@@ -3386,19 +3447,13 @@ Function Assign-Roles-Groups-From-file-CSV
                                         {
                                             If ( ( ($Action -eq "Assign") -and ($UpdateExisting) ) -or ($Action -eq "Update") )
                                                 {
-                                                    write-host ""
-                                                    Write-host "Existing Assignment will be updated with assignment details"
-                                                    Write-host "Mode: AdminUpdate"
-                                                    write-host ""
+                                                    Write-host "UPDATE: $RoleDefinitionName -> $($Group.DisplayName) (refreshing assignment details)" -ForegroundColor Yellow
                                                     $PIMAction = "AdminUpdate"
                                                 }
                                             Else
                                                 {
                                                     # BUG FIX 3: Permanent assignment exists, no update requested - explicitly NoAction
-                                                    write-host ""
-                                                    Write-host "Existing permanent Assignment found ... skipping"
-                                                    Write-host "Mode: NoAction"
-                                                    write-host ""
+                                                    Write-host "OK - Permanent exists: $RoleDefinitionName -> $($Group.DisplayName) (skipping)" -ForegroundColor Green
                                                     $PIMAction = "NoAction"
                                                 }
                                         }
@@ -3408,10 +3463,7 @@ Function Assign-Roles-Groups-From-file-CSV
                                             $ValueChk = [string]$CheckExistingAssignment.ScheduleExpirationEndDateTime
                                             If ([string]::IsNullOrWhiteSpace($ValueChk))
                                                 {
-                                                    write-host ""
-                                                    Write-host "Existing permanent Assignment found ... skipping"
-                                                    Write-host "Mode: NoAction"
-                                                    write-host ""
+                                                    Write-host "OK - Permanent exists: $RoleDefinitionName -> $($Group.DisplayName) (skipping)" -ForegroundColor Green
                                                     $PIMAction = "NoAction"
                                                 }
                                             Else
@@ -3422,9 +3474,8 @@ Function Assign-Roles-Groups-From-file-CSV
                                                     If ( ($NumOfDaysBeforeExpiration -le 30) -and ($AutoExtend) )
                                                         {
                                                             write-host ""
-                                                            Write-host "Existing Assignment will expire in $($NumOfDaysBeforeExpiration) days"
+                                                            Write-host "EXTEND: $RoleDefinitionName -> $($Group.DisplayName) (expires in $($NumOfDaysBeforeExpiration) days)" -ForegroundColor Yellow
                                                             write-host "Assignment will be extended as AutoExtend=TRUE"
-                                                            Write-host "Mode: AdminExtend"
                                                             write-host ""
                                                             $PIMAction = "AdminExtend"
                                                         }
@@ -3439,8 +3490,7 @@ Function Assign-Roles-Groups-From-file-CSV
                                                     Else
                                                         {
                                                             write-host ""
-                                                            Write-host "Existing Assignment found ... skipping (expires in $($NumOfDaysBeforeExpiration) days)"
-                                                            Write-host "Mode: NoAction"
+                                                            Write-host "OK - Exists: $RoleDefinitionName -> $($Group.DisplayName) (expires in $($NumOfDaysBeforeExpiration) days, skipping)" -ForegroundColor Green
                                                             write-host ""
                                                             $PIMAction = "NoAction"
                                                         }
@@ -3456,10 +3506,7 @@ Function Assign-Roles-Groups-From-file-CSV
 
                             If ( ($CheckExistingAssignment) -and ($Action -eq "Remove") )
                                 {
-                                    write-host ""
-                                    Write-host "Assignment was found .... removing"
-                                    Write-host "Mode: AdminRemove"
-                                    write-host ""
+                                    Write-host "REMOVE: $RoleDefinitionName -> $($Group.DisplayName)" -ForegroundColor Red
                                     $PIMAction = "AdminRemove"
                                 }
 
@@ -3469,10 +3516,7 @@ Function Assign-Roles-Groups-From-file-CSV
                                 # Print action summary - only for AdminAssign (not for Extend/Update)
                                 If ($PIMAction -eq "AdminAssign")
                                     {
-                                        write-host ""
-                                        Write-host "Assignment was NOT found .... creating"
-                                        Write-host "Mode: AdminAssign"
-                                        write-host ""
+                                        Write-host "ASSIGN: $RoleDefinitionName -> $($Group.DisplayName) (new assignment)" -ForegroundColor Cyan
                                     }
 
                                     $Justification = "IAC: Assigning role $($RoleDefinitionName) to role group $($Group.DisplayName)"
@@ -3841,7 +3885,7 @@ Function Assign-AzResources-Groups-From-file-CSV
                                             {
                                                 # BUG FIX 3: Permanent assignment exists, no update requested - explicitly NoAction
                                                 write-host ""
-                                                Write-host "Existing permanent Assignment found ... skipping"
+                                                Write-host "OK - Permanent exists: $RoleDefinitionName -> $($Group.DisplayName) (skipping)"
                                                 Write-host "Mode: NoAction"
                                                 write-host ""
                                                 $PIMAction = "NoAction"
@@ -3855,8 +3899,16 @@ Function Assign-AzResources-Groups-From-file-CSV
                                             {
                                                 # has an expiry date - calculate days remaining
                                                 $ExpirationDate = CorrelateDateTimeLanguage -DateInput $ValueChk
-                                                $NumOfDaysBeforeExpiration = (New-TimeSpan -Start (Get-Date) -End (Ensure-DateTime $ExpirationDate)).TotalDays
-                                                $NumOfDaysBeforeExpiration = [math]::Round($NumOfDaysBeforeExpiration, 0)
+                                                If (-not $ExpirationDate)
+                                                    {
+                                                        # Unparseable expiry -> assume full window to avoid bogus 99-year math
+                                                        $NumOfDaysBeforeExpiration = $NumOfDaysWhenExpire
+                                                    }
+                                                Else
+                                                    {
+                                                        $NumOfDaysBeforeExpiration = (New-TimeSpan -Start (Get-Date) -End $ExpirationDate).TotalDays
+                                                        $NumOfDaysBeforeExpiration = [math]::Round($NumOfDaysBeforeExpiration, 0)
+                                                    }
                                             }
                                         Else
                                             {
@@ -3885,7 +3937,7 @@ Function Assign-AzResources-Groups-From-file-CSV
                                             {
                                                 # BUG FIX 2: Simplified - assignment exists, not expiring soon -> skip
                                                 write-host ""
-                                                Write-host "Existing Assignment found ... skipping (expires in $($NumOfDaysBeforeExpiration) days)"
+                                                Write-host "OK - Exists: $RoleDefinitionName -> $($Group.DisplayName) (expires in $($NumOfDaysBeforeExpiration) days, skipping)" -ForegroundColor Green
                                                 Write-host "Mode: NoAction"
                                                 write-host ""
                                                 $PIMAction = "NoAction"
@@ -4250,7 +4302,7 @@ Function Assign-PIMForGroups-From-file-CSV
                                             If ($GraphCheck)
                                                 {
                                                     write-host ""
-                                                    Write-host "Existing Assignment found via Graph (not in snapshot) ... treating as existing"
+                                                    Write-host "OK - Exists: $RoleDefinitionName -> $($Group.DisplayName)"
                                                     $GraphExpirationType = $GraphCheck[0].ScheduleInfo.Expiration.Type
                                                     $GraphEndDateTime = If ($GraphExpirationType -ieq "noExpiration") { $null } Else { $GraphCheck[0].ScheduleInfo.Expiration.EndDateTime }
                                                     $CheckExistingAssignment = [PSCustomObject]@{
@@ -4273,7 +4325,7 @@ Function Assign-PIMForGroups-From-file-CSV
                                             If ($GraphCheck)
                                                 {
                                                     write-host ""
-                                                    Write-host "Existing Assignment found via Graph (not in snapshot) ... treating as existing"
+                                                    Write-host "OK - Exists: $RoleDefinitionName -> $($Group.DisplayName)"
                                                     $GraphExpirationType = $GraphCheck[0].ScheduleInfo.Expiration.Type
                                                     $GraphEndDateTime = If ($GraphExpirationType -ieq "noExpiration") { $null } Else { $GraphCheck[0].ScheduleInfo.Expiration.EndDateTime }
                                                     $CheckExistingAssignment = [PSCustomObject]@{
@@ -4305,7 +4357,7 @@ Function Assign-PIMForGroups-From-file-CSV
                                                         {
                                                             # BUG FIX 3: Permanent assignment exists, no update requested - explicitly NoAction
                                                             write-host ""
-                                                            Write-host "Existing permanent Assignment found ... skipping"
+                                                            Write-host "OK - Permanent exists: $RoleDefinitionName -> $($Group.DisplayName) (skipping)"
                                                             Write-host "Mode: NoAction"
                                                             write-host ""
                                                             $PIMAction = "NoAction"
@@ -4318,7 +4370,7 @@ Function Assign-PIMForGroups-From-file-CSV
                                                     If ([string]::IsNullOrWhiteSpace($ValueChk))
                                                         {
                                                             write-host ""
-                                                            Write-host "Existing permanent Assignment found ... skipping"
+                                                            Write-host "OK - Permanent exists: $RoleDefinitionName -> $($Group.DisplayName) (skipping)"
                                                             Write-host "Mode: NoAction"
                                                             write-host ""
                                                             $PIMAction = "NoAction"
@@ -4326,32 +4378,42 @@ Function Assign-PIMForGroups-From-file-CSV
                                                     Else
                                                         {
                                                             $ExpirationDate = CorrelateDateTimeLanguage -DateInput $ValueChk
-                                                            $NumOfDaysBeforeExpiration = (New-TimeSpan -Start (Get-Date) -End (Ensure-DateTime $ExpirationDate)).TotalDays
-                                                            $NumOfDaysBeforeExpiration = [math]::Round($NumOfDaysBeforeExpiration, 0)
-                                                            If ( ($NumOfDaysBeforeExpiration -le 30) -and ($AutoExtend) )
+                                                            If (-not $ExpirationDate)
                                                                 {
                                                                     write-host ""
-                                                                    Write-host "Existing Assignment will expire in $($NumOfDaysBeforeExpiration) days"
-                                                                    write-host "Assignment will be extended as AutoExtend=TRUE"
-                                                                    Write-host "Mode: AdminExtend"
-                                                                    write-host ""
-                                                                    $PIMAction = "AdminExtend"
-                                                                }
-                                                            ElseIf ( ( ($Action -eq "Assign") -and ($UpdateExisting) ) -or ($Action -eq "Update") )
-                                                                {
-                                                                    write-host ""
-                                                                    Write-host "Existing Assignment will be updated with assignment details"
-                                                                    Write-host "Mode: AdminUpdate"
-                                                                    write-host ""
-                                                                    $PIMAction = "AdminUpdate"
-                                                                }
-                                                            Else
-                                                                {
-                                                                    write-host ""
-                                                                    Write-host "Existing Assignment found ... skipping (expires in $($NumOfDaysBeforeExpiration) days)"
+                                                                    Write-host "OK - Exists (unparseable expiry '$ValueChk'): $RoleDefinitionName -> $($Group.DisplayName) (skipping)" -ForegroundColor Yellow
                                                                     Write-host "Mode: NoAction"
                                                                     write-host ""
                                                                     $PIMAction = "NoAction"
+                                                                }
+                                                            Else
+                                                                {
+                                                                    $NumOfDaysBeforeExpiration = (New-TimeSpan -Start (Get-Date) -End $ExpirationDate).TotalDays
+                                                                    $NumOfDaysBeforeExpiration = [math]::Round($NumOfDaysBeforeExpiration, 0)
+                                                                    If ( ($NumOfDaysBeforeExpiration -le 30) -and ($AutoExtend) )
+                                                                        {
+                                                                            write-host ""
+                                                                            Write-host "EXTEND: $RoleDefinitionName -> $($Group.DisplayName) (expires in $($NumOfDaysBeforeExpiration) days)" -ForegroundColor Yellow
+                                                                            write-host "Assignment will be extended as AutoExtend=TRUE"
+                                                                                    write-host ""
+                                                                            $PIMAction = "AdminExtend"
+                                                                        }
+                                                                    ElseIf ( ( ($Action -eq "Assign") -and ($UpdateExisting) ) -or ($Action -eq "Update") )
+                                                                        {
+                                                                            write-host ""
+                                                                            Write-host "Existing Assignment will be updated with assignment details"
+                                                                            Write-host "Mode: AdminUpdate"
+                                                                            write-host ""
+                                                                            $PIMAction = "AdminUpdate"
+                                                                        }
+                                                                    Else
+                                                                        {
+                                                                            write-host ""
+                                                                            Write-host "OK - Exists: $RoleDefinitionName -> $($Group.DisplayName) (expires in $($NumOfDaysBeforeExpiration) days, skipping)" -ForegroundColor Green
+                                                                            Write-host "Mode: NoAction"
+                                                                            write-host ""
+                                                                            $PIMAction = "NoAction"
+                                                                        }
                                                                 }
                                                         }
                                                 }
@@ -4526,9 +4588,106 @@ Function CreateUpdate-Accounts-From-file-CSV
 ######################################################################################################################
 
     # Exchange Online
+    # v2 AutomateIT contract: once a solution is on the AutomateIT platform,
+    # ALL auth goes through the HighPriv (Modern) SPN -- the operational
+    # identity. Bootstrap SPN stays min-privilege (KV-read-only). EXO is the
+    # only path here that requires cert (no client_secret support for
+    # app-only), so the Modern SPN gets its OWN cert (distinct from
+    # Bootstrap) -- provision once per tenant via New-PlatformModernCert.ps1,
+    # which generates + installs the cert locally, registers it on the SPN,
+    # and writes the thumbprint to KV. Connect-PlatformModern then exposes
+    # the thumbprint via the global on every engine run.
     Manage-Powershell-Module -ModuleName 'ExchangeOnlineManagement' -Scope AllUsers
-    Write-Output "Connecting to Exchange Online using High Privilege Account using Modern method (certificate)"
-    Connect-ExchangeOnline -CertificateThumbprint $HighPriv_Modern_CertificateThumbprint_O365 -AppId $HighPriv_Modern_ApplicationID_O365 -ShowProgress $false -Organization $TenantNameOrganization -ShowBanner
+    $exoAppId = $global:HighPriv_Modern_ApplicationID_Azure
+    $exoThumb = $global:HighPriv_Modern_CertificateThumbprint_Azure
+    if (-not $exoAppId -or -not $exoThumb) {
+        throw @"
+Connect-ExchangeOnline: Modern SPN cert not usable for EXO app-only auth.
+  AppId      : $exoAppId
+  Thumbprint : $exoThumb
+
+Fix (one-time per tenant):
+  1. Confirm Initialize-PlatformAutomationFramework ran successfully
+     (`$global:HighPriv_Modern_ApplicationID_Azure` populated above).
+  2. From an ELEVATED PowerShell on this host, provision the Modern SPN cert:
+       . `$global:PathScripts\SOLUTIONS\PlatformConfiguration\INTERNAL\Provision\New-PlatformModernCert.ps1
+     The script creates a self-signed cert, installs it in Cert:\LocalMachine\My,
+     registers it on the Modern SPN in Entra, and writes the thumbprint to
+     KV as 'Modern-Thumbprint'. Idempotent -- safe to re-run.
+  3. In Entra, grant the Modern SPN (one-time, manual):
+       - API permission: Office 365 Exchange Online -> Exchange.ManageAsApp
+         (V1, Application, admin-consented).  NOTE: this is the V1 variant.
+         Despite "V2" (Exchange.ManageAsAppV2) sounding newer, cmdlet-set
+         authorization for the EXO V3 module is governed by the V1 permission;
+         granting only V2 results in an empty cmdlet set at connect time,
+         which surfaces as the misleading 'Module could not be correctly
+         formed. Please run Connect-ExchangeOnline again.' error.
+       - Directory role : Exchange Recipient Administrator
+  4. Re-run the launcher.
+"@
+    }
+    # -Organization is REQUIRED for cert-based Connect-ExchangeOnline (unlike
+    # the interactive path, where it's optional). The customer's repository
+    # .custom.ps1 SHOULD set $TenantNameOrganization to the tenant's primary
+    # .onmicrosoft.com domain, but on cold installs that variable is often
+    # empty -- and the old interactive auth path silently masked the gap by
+    # not requiring it. Auto-resolve from MgGraph (we're already connected
+    # via Initialize-PlatformAutomationFramework) so the cert path doesn't
+    # block on a missing customer-config setting.
+    $exoOrg = $TenantNameOrganization
+    if ([string]::IsNullOrWhiteSpace($exoOrg)) {
+        try {
+            $org = Get-MgOrganization -ErrorAction Stop -WarningAction SilentlyContinue
+            if ($org) {
+                $initial = $org.VerifiedDomains | Where-Object IsInitial -eq $true | Select-Object -First 1
+                if ($initial) { $exoOrg = $initial.Name }
+            }
+        } catch {}
+        if ([string]::IsNullOrWhiteSpace($exoOrg)) {
+            throw "Connect-ExchangeOnline: `$TenantNameOrganization` is empty and Get-MgOrganization couldn't auto-resolve the initial .onmicrosoft.com domain. Set `$TenantNameOrganization = 'yourtenant.onmicrosoft.com'` in config\repository.custom.ps1."
+        }
+        Write-Output "  [info] `$TenantNameOrganization` not set in repository.custom.ps1; auto-resolved to '$exoOrg' from Get-MgOrganization."
+    }
+    # ExchangeOnlineManagement V3 has a documented runspace-state bug where
+    # Connect-ExchangeOnline errors with "Module could not be correctly formed.
+    # Please run Connect-ExchangeOnline again." -- and the naive retry alone
+    # does NOT fix it on PS 7.5+. The full Microsoft Q&A reset chain is:
+    #   1. Disconnect any prior session
+    #   2. Remove EXO module AND the dynamic CreateExoPSSession* modules
+    #      (these are generated proxies that retain bad state across reloads)
+    #   3. Import EXO fresh with -DisableNameChecking (skips Get-Verb noise
+    #      that triggers a different module-loading path in PS 7.5)
+    #   4. Connect; on the V3 quirk error, repeat the whole reset chain
+    function Reset-ExoModuleState {
+        try { Disconnect-ExchangeOnline -Confirm:$false -ErrorAction SilentlyContinue -WarningAction SilentlyContinue | Out-Null } catch {}
+        Get-Module -Name 'CreateExoPSSession*' -ErrorAction SilentlyContinue | Remove-Module -Force -ErrorAction SilentlyContinue
+        Get-Module -Name 'tmp_*' -ErrorAction SilentlyContinue | Remove-Module -Force -ErrorAction SilentlyContinue
+        Remove-Module ExchangeOnlineManagement -Force -ErrorAction SilentlyContinue
+        Import-Module ExchangeOnlineManagement -Force -DisableNameChecking -ErrorAction SilentlyContinue -WarningAction SilentlyContinue
+    }
+    Reset-ExoModuleState
+
+    Write-Output "Connecting to Exchange Online using HighPriv Modern SPN (AppId $exoAppId, cert $exoThumb, organization $exoOrg) ..."
+    $exoConnected = $false
+    for ($_exoAttempt = 1; $_exoAttempt -le 2; $_exoAttempt++) {
+        try {
+            Connect-ExchangeOnline -CertificateThumbprint $exoThumb -AppId $exoAppId -ShowProgress $false -Organization $exoOrg -ShowBanner -ErrorAction Stop
+            $exoConnected = $true
+            break
+        } catch {
+            $_exoErr = $_
+            if ($_exoAttempt -eq 1 -and $_exoErr.Exception.Message -match 'Module could not be correctly formed|InternalUrgent|forming the session') {
+                Write-Warning "Connect-ExchangeOnline: attempt 1 hit the EXO V3 runspace-state bug ('$($_exoErr.Exception.Message.Trim())'). Performing full module reset + retry..."
+                Reset-ExoModuleState
+                Start-Sleep -Seconds 3
+                continue
+            }
+            throw $_exoErr
+        }
+    }
+    if (-not $exoConnected) {
+        throw "Connect-ExchangeOnline: both attempts failed after the EXO V3 module-reset workaround. Inspect the last error above for the real cause (not the 'Module could not be correctly formed' symptom)."
+    }
 
     $AdminAccounts_Data = Import-csv -Path $AccountsDefinitionFile -Delimiter ";" -Encoding UTF8
 
@@ -5106,7 +5265,7 @@ Function Assign-Groups-Accounts-From-file-CSV
                             If ($GraphCheck)
                                 {
                                     write-host ""
-                                    Write-host "Existing Assignment found via Graph (not in snapshot) ... treating as existing"
+                                    Write-host "OK - Exists: $RoleDefinitionName -> $($Group.DisplayName)"
                                     $GraphExpirationType = $GraphCheck[0].ScheduleInfo.Expiration.Type
                                     $GraphEndDateTime = If ($GraphExpirationType -ieq "noExpiration") { $null } Else { $GraphCheck[0].ScheduleInfo.Expiration.EndDateTime }
                                     $CheckExistingAssignment = [PSCustomObject]@{
@@ -5129,7 +5288,7 @@ Function Assign-Groups-Accounts-From-file-CSV
                             If ($GraphCheck)
                                 {
                                     write-host ""
-                                    Write-host "Existing Assignment found via Graph (not in snapshot) ... treating as existing"
+                                    Write-host "OK - Exists: $RoleDefinitionName -> $($Group.DisplayName)"
                                     $GraphExpirationType = $GraphCheck[0].ScheduleInfo.Expiration.Type
                                     $GraphEndDateTime = If ($GraphExpirationType -ieq "noExpiration") { $null } Else { $GraphCheck[0].ScheduleInfo.Expiration.EndDateTime }
                                     $CheckExistingAssignment = [PSCustomObject]@{
@@ -5165,7 +5324,7 @@ Function Assign-Groups-Accounts-From-file-CSV
                                     If ([string]::IsNullOrWhiteSpace($ValueChk))
                                         {
                                             write-host ""
-                                            Write-host "Existing permanent Assignment found ... skipping"
+                                            Write-host "OK - Permanent exists: $RoleDefinitionName -> $($Group.DisplayName) (skipping)"
                                             Write-host "Mode: NoAction"
                                             write-host ""
                                             $PIMAction = "NoAction"
@@ -5173,32 +5332,40 @@ Function Assign-Groups-Accounts-From-file-CSV
                                     Else
                                         {
                                             $ExpirationDate = CorrelateDateTimeLanguage -DateInput $ValueChk
-                                            $NumOfDaysBeforeExpiration = (New-TimeSpan -Start (Get-Date) -End (Ensure-DateTime $ExpirationDate)).TotalDays
-                                            $NumOfDaysBeforeExpiration = [math]::Round($NumOfDaysBeforeExpiration, 0)
-                                            If ( ($NumOfDaysBeforeExpiration -le 30) -and ($AutoExtend) )
+                                            If (-not $ExpirationDate)
                                                 {
                                                     write-host ""
-                                                    Write-host "Existing Assignment will expire in $($NumOfDaysBeforeExpiration) days"
-                                                    write-host "Assignment will be extended as AutoExtend=TRUE"
-                                                    Write-host "Mode: AdminExtend"
-                                                    write-host ""
-                                                    $PIMAction = "AdminExtend"
-                                                }
-                                            ElseIf ( ( ($Action -eq "Assign") -and ($UpdateExisting) ) -or ($Action -eq "Update") )
-                                                {
-                                                    write-host ""
-                                                    Write-host "Existing Assignment will be updated with assignment details"
-                                                    Write-host "Mode: AdminUpdate"
-                                                    write-host ""
-                                                    $PIMAction = "AdminUpdate"
-                                                }
-                                            Else
-                                                {
-                                                    write-host ""
-                                                    Write-host "Existing Assignment found ... skipping (expires in $($NumOfDaysBeforeExpiration) days)"
+                                                    Write-host "OK - Exists (unparseable expiry '$ValueChk'): $RoleDefinitionName -> $($Group.DisplayName) (skipping)" -ForegroundColor Yellow
                                                     Write-host "Mode: NoAction"
                                                     write-host ""
                                                     $PIMAction = "NoAction"
+                                                }
+                                            Else
+                                                {
+                                                    $NumOfDaysBeforeExpiration = (New-TimeSpan -Start (Get-Date) -End $ExpirationDate).TotalDays
+                                                    $NumOfDaysBeforeExpiration = [math]::Round($NumOfDaysBeforeExpiration, 0)
+                                                    If ( ($NumOfDaysBeforeExpiration -le 30) -and ($AutoExtend) )
+                                                        {
+                                                            write-host ""
+                                                            Write-host "Existing Assignment will expire in $($NumOfDaysBeforeExpiration) days"
+                                                            write-host "Assignment will be extended as AutoExtend=TRUE"
+                                                            Write-host "Mode: AdminExtend"
+                                                            write-host ""
+                                                            $PIMAction = "AdminExtend"
+                                                        }
+                                                    ElseIf ( ( ($Action -eq "Assign") -and ($UpdateExisting) ) -or ($Action -eq "Update") )
+                                                        {
+                                                            Write-host "UPDATE: $RoleDefinitionName -> $($Group.DisplayName) (refreshing assignment details)" -ForegroundColor Yellow
+                                                            $PIMAction = "AdminUpdate"
+                                                        }
+                                                    Else
+                                                        {
+                                                            write-host ""
+                                                            Write-host "OK - Exists: $RoleDefinitionName -> $($Group.DisplayName) (expires in $($NumOfDaysBeforeExpiration) days, skipping)" -ForegroundColor Green
+                                                            Write-host "Mode: NoAction"
+                                                            write-host ""
+                                                            $PIMAction = "NoAction"
+                                                        }
                                                 }
                                         }
                                 }
@@ -5296,7 +5463,7 @@ Function Assign-Groups-Accounts-From-file-CSV
                                     Catch {
                                         $ErrCode = $_.FullyQualifiedErrorId
                                         If ($ErrCode -like "*RoleAssignmentExists*")
-                                            { Write-host "Existing Assignment found via Graph (API confirmed) ... skipping" -ForegroundColor Green }
+                                            { Write-host "OK - Exists: $RoleDefinitionName -> $($Group.DisplayName) (Graph confirmed, skipping)" -ForegroundColor Green }
                                         ElseIf ($ErrCode -like "*RoleAssignmentDoesNotExist*")
                                             { Write-host "Assignment already removed (not found in Graph) ... skipping" -ForegroundColor Green }
                                         ElseIf ($ErrCode -like "*NestingNotSupportedForRoleAssignableGroup*")
@@ -5317,7 +5484,7 @@ Function Assign-Groups-Accounts-From-file-CSV
                                     Catch {
                                         $ErrCode = $_.FullyQualifiedErrorId
                                         If ($ErrCode -like "*RoleAssignmentExists*")
-                                            { Write-host "Existing Assignment found via Graph (API confirmed) ... skipping" -ForegroundColor Green }
+                                            { Write-host "OK - Exists: $RoleDefinitionName -> $($Group.DisplayName) (Graph confirmed, skipping)" -ForegroundColor Green }
                                         ElseIf ($ErrCode -like "*RoleAssignmentDoesNotExist*")
                                             { Write-host "Assignment already removed (not found in Graph) ... skipping" -ForegroundColor Green }
                                         ElseIf ($ErrCode -like "*NestingNotSupportedForRoleAssignableGroup*")
@@ -8109,8 +8276,8 @@ If ($PolicyRule)
                                                   }
 
                                     try {
-                                        Update-MgPolicyRoleManagementPolicyRule -UnifiedRoleManagementPolicyId $Policy.id ``
-                                                                                -UnifiedRoleManagementPolicyRuleId $RuleId ``
+                                        Update-MgPolicyRoleManagementPolicyRule -UnifiedRoleManagementPolicyId $Policy.id `
+                                                                                -UnifiedRoleManagementPolicyRuleId $RuleId `
                                                                                 -BodyParameter $PolicyBody -ErrorAction Stop
                                     } catch {
                                         Write-Host ("    FAILED to PATCH {0}: {1}" -f $RuleId, $_.Exception.Message) -ForegroundColor Red
@@ -8185,8 +8352,8 @@ If ($PolicyRule)
                                                   }
 
                                     try {
-                                        Update-MgPolicyRoleManagementPolicyRule -UnifiedRoleManagementPolicyId $Policy.id ``
-                                                                                -UnifiedRoleManagementPolicyRuleId $RuleId ``
+                                        Update-MgPolicyRoleManagementPolicyRule -UnifiedRoleManagementPolicyId $Policy.id `
+                                                                                -UnifiedRoleManagementPolicyRuleId $RuleId `
                                                                                 -BodyParameter $PolicyBody -ErrorAction Stop
                                     } catch {
                                         Write-Host ("    FAILED to PATCH {0}: {1}" -f $RuleId, $_.Exception.Message) -ForegroundColor Red
@@ -8262,8 +8429,8 @@ If ($PolicyRule)
                                                   }
 
                                     try {
-                                        Update-MgPolicyRoleManagementPolicyRule -UnifiedRoleManagementPolicyId $Policy.id ``
-                                                                                -UnifiedRoleManagementPolicyRuleId $RuleId ``
+                                        Update-MgPolicyRoleManagementPolicyRule -UnifiedRoleManagementPolicyId $Policy.id `
+                                                                                -UnifiedRoleManagementPolicyRuleId $RuleId `
                                                                                 -BodyParameter $PolicyBody -ErrorAction Stop
                                     } catch {
                                         Write-Host ("    FAILED to PATCH {0}: {1}" -f $RuleId, $_.Exception.Message) -ForegroundColor Red
@@ -8383,8 +8550,8 @@ If ($PolicyRule)
                                                   }
 
                                     try {
-                                        Update-MgPolicyRoleManagementPolicyRule -UnifiedRoleManagementPolicyId $Policy.id ``
-                                                                                -UnifiedRoleManagementPolicyRuleId $RuleId ``
+                                        Update-MgPolicyRoleManagementPolicyRule -UnifiedRoleManagementPolicyId $Policy.id `
+                                                                                -UnifiedRoleManagementPolicyRuleId $RuleId `
                                                                                 -BodyParameter $PolicyBody -ErrorAction Stop
                                     } catch {
                                         Write-Host ("    FAILED to PATCH {0}: {1}" -f $RuleId, $_.Exception.Message) -ForegroundColor Red
@@ -8473,8 +8640,8 @@ If ($PolicyRule)
                                                   }
 
                                     try {
-                                        Update-MgPolicyRoleManagementPolicyRule -UnifiedRoleManagementPolicyId $Policy.id ``
-                                                                                -UnifiedRoleManagementPolicyRuleId $RuleId ``
+                                        Update-MgPolicyRoleManagementPolicyRule -UnifiedRoleManagementPolicyId $Policy.id `
+                                                                                -UnifiedRoleManagementPolicyRuleId $RuleId `
                                                                                 -BodyParameter $PolicyBody -ErrorAction Stop
                                     } catch {
                                         Write-Host ("    FAILED to PATCH {0}: {1}" -f $RuleId, $_.Exception.Message) -ForegroundColor Red
@@ -8572,6 +8739,32 @@ function Get-PimSolutionRoot {
     return (Split-Path -Parent (Split-Path -Parent $PSScriptRoot))
 }
 
+# Module-init: stamp the running PIM4EntraPS solution version on every engine
+# load. Same one-line format as SI emits at engine startup
+# ("SecurityInsight RiskAnalysis engine v2.2.387 (<path>)").
+$_pimVerFile = Join-Path (Split-Path -Parent (Split-Path -Parent $PSScriptRoot)) 'VERSION'
+if (Test-Path -LiteralPath $_pimVerFile) {
+    try {
+        $_pimVer = (Get-Content -LiteralPath $_pimVerFile -Raw).Trim()
+        if ($_pimVer) {
+            $_pimEngineName = $null
+            $_pimEngineFile = $null
+            try {
+                $_pimCaller = Get-PSCallStack | Where-Object { $_.ScriptName -and ($_.ScriptName -ne $PSCommandPath) -and ($_.ScriptName -notmatch '_shared') } | Select-Object -First 1
+                if ($_pimCaller -and $_pimCaller.ScriptName) {
+                    $_pimEngineFile = $_pimCaller.ScriptName
+                    $_pimEngineName = [System.IO.Path]::GetFileNameWithoutExtension($_pimEngineFile)
+                }
+            } catch {}
+            if ($_pimEngineName) {
+                Write-Host ("  [INFO] PIM4EntraPS {0} engine v{1} ({2})" -f $_pimEngineName, $_pimVer, $_pimEngineFile)
+            } else {
+                Write-Host ("  [INFO] PIM4EntraPS solution v{0}" -f $_pimVer)
+            }
+        }
+    } catch { Write-Warning "PIM-Functions: failed reading VERSION at $_pimVerFile -- $($_.Exception.Message)" }
+}
+
 # Module-init: load naming-convention files into $global:PIM_NamingConventions
 # so the engine helpers (Get-PimAdminsFiltered / Get-PimGroupsFiltered) work
 # regardless of which launcher invoked us. Loads .locked.ps1 first, then
@@ -8647,12 +8840,36 @@ function Get-PimCustomScript {
 
     $cfgRoot = Get-PimConfigDir
     $custom  = Join-Path $cfgRoot ("{0}.custom.ps1" -f $Name)
+    $legacy  = Join-Path $cfgRoot ("{0}.ps1" -f $Name)        # pre-v2.0 unsuffixed customer file
     $sample  = Join-Path $cfgRoot ("{0}.custom.sample.ps1" -f $Name)
 
     if (Test-Path -LiteralPath $custom) { return $custom }
 
-    $hint = if (Test-Path -LiteralPath $sample) { " Copy '$sample' to '$custom' and edit it." } else { "" }
-    throw "Get-PimCustomScript: '$custom' not found.$hint"
+    # v1 upgrade path: a customer migrating from pre-v2.0 PIM4EntraPS may have
+    # copied their old `<name>.ps1` (unsuffixed) into the new config/ folder.
+    # Treat the unsuffixed file as real customer data and RENAME it into the
+    # v2 .custom.ps1 slot in place -- preserves edits, makes the next run
+    # invisible, and short-circuits the sample auto-bootstrap below so we
+    # don't trample the customer's actual data with a template.
+    if (Test-Path -LiteralPath $legacy) {
+        Move-Item -LiteralPath $legacy -Destination $custom -Force
+        Write-Warning "Get-PimCustomScript: migrated pre-v2.0 '$legacy' -> '$custom' (renamed in place). Your file content is preserved; only the filename suffix changed."
+        return $custom
+    }
+
+    # First-run bootstrap: if the customer file is missing but a sample exists,
+    # auto-copy the sample to the customer slot and continue. The sample is the
+    # documented bootstrap template; copying it lets a fresh install run end-
+    # to-end without the operator hand-copying 20+ files. WARNING emitted so
+    # the operator knows to review/replace placeholder values before the next
+    # production run.
+    if (Test-Path -LiteralPath $sample) {
+        Copy-Item -LiteralPath $sample -Destination $custom -Force
+        Write-Warning "Get-PimCustomScript: auto-bootstrapped '$custom' from sample. REVIEW + customize before relying on this run -- the sample is a template, not production config."
+        return $custom
+    }
+
+    throw "Get-PimCustomScript: '$custom' not found, and no sample to bootstrap from."
 }
 
 function Get-PimConfigCsv {
@@ -8689,10 +8906,23 @@ function Get-PimConfigCsv {
 
     $cfgRoot = Get-PimConfigDir
     $custom  = Join-Path $cfgRoot ("{0}.custom.csv" -f $Name)
+    $legacy  = Join-Path $cfgRoot ("{0}.csv" -f $Name)        # pre-v2.0 unsuffixed customer file
     $locked  = Join-Path $cfgRoot ("{0}.locked.csv" -f $Name)
     $sample  = Join-Path $cfgRoot ("{0}.custom.sample.csv" -f $Name)
 
     if (Test-Path -LiteralPath $custom) { return $custom }
+
+    # v1 upgrade path: a customer migrating from pre-v2.0 PIM4EntraPS may have
+    # copied their old `<name>.csv` (unsuffixed) into the new config/ folder.
+    # Treat the unsuffixed file as real customer data and RENAME it into the
+    # v2 .custom.csv slot in place -- preserves rows, makes the next run
+    # invisible, and short-circuits the sample auto-bootstrap below so we
+    # don't trample the customer's actual data with a template.
+    if (Test-Path -LiteralPath $legacy) {
+        Move-Item -LiteralPath $legacy -Destination $custom -Force
+        Write-Warning "Get-PimConfigCsv: migrated pre-v2.0 '$legacy' -> '$custom' (renamed in place). Your rows are preserved; only the filename suffix changed."
+        return $custom
+    }
 
     if (Test-Path -LiteralPath $locked) {
         Write-Warning ("Get-PimConfigCsv: '{0}.locked.csv' is a legacy pre-v2.3.0 file. " +
@@ -8702,10 +8932,17 @@ function Get-PimConfigCsv {
         return $locked
     }
 
-    $hint = if (Test-Path -LiteralPath $sample) {
-        " Copy '$sample' to '$custom' and edit it."
-    } else { "" }
-    throw "Get-PimConfigCsv: '$custom' not found (variant '$($global:PIM_ConfigVariant)').$hint"
+    # First-run bootstrap: if the customer CSV is missing but a sample exists,
+    # auto-copy the sample to the customer slot and continue. Sample CSVs ship
+    # with worked example rows -- letting them flow through unmodified would
+    # apply EXAMPLE definitions to a live tenant, so the warning is explicit.
+    if (Test-Path -LiteralPath $sample) {
+        Copy-Item -LiteralPath $sample -Destination $custom -Force
+        Write-Warning "Get-PimConfigCsv: auto-bootstrapped '$custom' from sample. REVIEW + replace example rows before relying on this run -- the sample contains placeholder data, not production rows."
+        return $custom
+    }
+
+    throw "Get-PimConfigCsv: '$custom' not found (variant '$($global:PIM_ConfigVariant)') and no sample to bootstrap from."
 }
 
 function Get-PimOutputDir {
@@ -9967,14 +10204,32 @@ function Resolve-PimGroupCached {
         }
     }
 
-    # Cache miss (or -NoCache): single Graph fetch.
+    # Cache miss (or -NoCache): Graph fetch with eventual-consistency retry.
+    # When -NoCache is used, the caller is signaling "I just created this
+    # group, expect Entra propagation lag" -- a single Graph call returns 0
+    # results because the new object isn't replicated to the search index
+    # yet (typical lag: 3-30s, occasionally longer). Without retry, the
+    # function returns $null + the caller passes an empty string to the
+    # next Add-Member / Add-AU call, which fails with "Cannot bind argument
+    # to parameter 'ObjectId' because it is an empty string."
     $escaped = $DisplayName.Replace("'", "''")
     $found = $null
-    try {
-        $found = Get-MgGroup -Filter "DisplayName eq '$escaped'" -ErrorAction Stop
-    } catch {
-        Write-Warning "  [Resolve-PimGroupCached] Graph lookup for group '$DisplayName' failed: $($_.Exception.Message)"
-        return $null
+    $maxAttempts = if ($NoCache) { 6 } else { 1 }
+    $backoff     = 5
+    for ($attempt = 1; $attempt -le $maxAttempts; $attempt++) {
+        try {
+            $found = Get-MgGroup -Filter "DisplayName eq '$escaped'" -ErrorAction Stop
+            if ($found) { break }
+        } catch {
+            if ($attempt -eq $maxAttempts) {
+                Write-Warning "  [Resolve-PimGroupCached] Graph lookup for group '$DisplayName' failed after $attempt attempt(s): $($_.Exception.Message)"
+                return $null
+            }
+        }
+        if ($attempt -lt $maxAttempts) {
+            Write-Host ("  [Resolve-PimGroupCached] '{0}' not visible yet (attempt {1}/{2}); waiting {3}s for Entra propagation..." -f $DisplayName, $attempt, $maxAttempts, $backoff) -ForegroundColor DarkGray
+            Start-Sleep -Seconds $backoff
+        }
     }
 
     if ($found) {
@@ -9988,6 +10243,7 @@ function Resolve-PimGroupCached {
         return $first
     }
 
+    Write-Warning ("  [Resolve-PimGroupCached] '{0}' not found in Graph after {1} attempts (~{2}s of Entra propagation wait). Returning `$null; caller will likely fail with an empty-string error." -f $DisplayName, $maxAttempts, ($maxAttempts * $backoff))
     return $null
 }
 
@@ -10015,11 +10271,29 @@ function Get-PimAdminsFiltered {
     $prefixes = New-Object System.Collections.ArrayList
     $nc = $global:PIM_NamingConventions
     if ($nc) {
+        # AdminAccountPatterns accepts THREE shapes -- pick whichever fits the
+        # tenant's mental model:
+        #   1. [hashtable]  @{ Internal = 'adm_{Owner}'; External = 'ext_{Owner}' }
+        #      (UserType -> template; values can be templates OR plain prefixes)
+        #   2. [string[]]   @('adm_', 'Admin-', 'X-Admin')
+        #      (plain prefix list -- simplest when you just need to widen the filter)
+        #   3. [string]     'adm_'
+        #      (single prefix as a bare string)
         if ($nc.AdminAccountPatterns -is [hashtable]) {
             foreach ($v in $nc.AdminAccountPatterns.Values) {
                 $p = Get-PimNamePrefix -Pattern $v
                 if ($p -and $p.Length -ge 3 -and -not ($prefixes -contains $p)) { [void]$prefixes.Add($p) }
             }
+        }
+        elseif ($nc.AdminAccountPatterns -is [System.Collections.IEnumerable] -and $nc.AdminAccountPatterns -isnot [string]) {
+            foreach ($v in $nc.AdminAccountPatterns) {
+                $p = Get-PimNamePrefix -Pattern $v
+                if ($p -and $p.Length -ge 3 -and -not ($prefixes -contains $p)) { [void]$prefixes.Add($p) }
+            }
+        }
+        elseif ($nc.AdminAccountPatterns -is [string] -and $nc.AdminAccountPatterns) {
+            $p = Get-PimNamePrefix -Pattern $nc.AdminAccountPatterns
+            if ($p -and $p.Length -ge 3 -and -not ($prefixes -contains $p)) { [void]$prefixes.Add($p) }
         }
         if ($nc.AdminAccountPattern) {
             $p = Get-PimNamePrefix -Pattern $nc.AdminAccountPattern
@@ -10122,21 +10396,40 @@ function Get-PimGroupSchedulesPreloaded {
 
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
 
+    # Microsoft.Graph SDK regression (~v2.30+): the cmdlets
+    # Get-MgIdentityGovernancePrivilegedAccessGroup{Eligibility,Assignment}Schedule
+    # added client-side validation that REQUIRES -GroupId, -PrincipalId, or
+    # -Filter -- '-All' alone now throws MissingParameters even though the
+    # underlying REST endpoint still supports an unfiltered tenant-wide list.
+    # Bypass via Invoke-MgGraphRequest against the raw v1.0 endpoint, hand-
+    # rolling the @odata.nextLink pagination.
+    function _Get-PimSchedulePaged {
+        param([Parameter(Mandatory)][string]$RelativeUri)
+        $rows = @()
+        $uri  = "https://graph.microsoft.com/v1.0/$RelativeUri`?`$top=999"
+        while ($uri) {
+            $resp = Invoke-MgGraphRequest -Method GET -Uri $uri -ErrorAction Stop
+            if ($resp.value) { $rows += $resp.value }
+            $uri = $resp.'@odata.nextLink'
+        }
+        return $rows
+    }
+
     # Eligibility preload
     $eligRows = @()
     Try {
-        $eligRows = @(Get-MgIdentityGovernancePrivilegedAccessGroupEligibilitySchedule -All -ErrorAction Stop)
+        $eligRows = @(_Get-PimSchedulePaged -RelativeUri 'identityGovernance/privilegedAccess/group/eligibilitySchedules')
     } Catch {
-        Write-Warning "Get-PimGroupSchedulesPreloaded: Get-MgIdentityGovernancePrivilegedAccessGroupEligibilitySchedule failed: $($_.Exception.Message) -- eligibility cache will be empty; engine will fall back to per-row lookups."
+        Write-Warning "Get-PimGroupSchedulesPreloaded: eligibilitySchedules list failed: $($_.Exception.Message) -- eligibility cache will be empty; engine will fall back to per-row lookups."
         $eligRows = @()
     }
 
     # Assignment (active) preload
     $assignRows = @()
     Try {
-        $assignRows = @(Get-MgIdentityGovernancePrivilegedAccessGroupAssignmentSchedule -All -ErrorAction Stop)
+        $assignRows = @(_Get-PimSchedulePaged -RelativeUri 'identityGovernance/privilegedAccess/group/assignmentSchedules')
     } Catch {
-        Write-Warning "Get-PimGroupSchedulesPreloaded: Get-MgIdentityGovernancePrivilegedAccessGroupAssignmentSchedule failed: $($_.Exception.Message) -- assignment cache will be empty; engine will fall back to per-row lookups."
+        Write-Warning "Get-PimGroupSchedulesPreloaded: assignmentSchedules list failed: $($_.Exception.Message) -- assignment cache will be empty; engine will fall back to per-row lookups."
         $assignRows = @()
     }
 

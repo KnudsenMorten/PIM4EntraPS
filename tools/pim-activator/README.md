@@ -1,422 +1,344 @@
 # PIM Activator (browser extension)
 
-Companion Manifest V3 extension to **PIM4EntraPS** for **Edge and
-Chrome**: bulk-activate eligible PIM-for-Groups memberships from the
-toolbar instead of clicking through the Entra portal one role at a time.
+Companion **Manifest V3** browser extension to the **PIM4EntraPS** PowerShell
+module — bulk-activate every PIM assignment you're eligible for from a single
+toolbar popup, instead of clicking through the Entra portal one role at a
+time.
 
-Hosted on GitHub Pages: `https://knudsenmorten.github.io/PIM4EntraPS/updates.xml`.
+- Works in **Microsoft Edge** and **Google Chrome** (both Chromium MV3)
+- Activates **all four PIM surfaces**:
+  - Direct Entra role assignments
+  - Direct Azure RBAC role assignments
+  - PIM for Groups → Entra role grants
+  - PIM for Groups → Azure RBAC grants
+  - PIM for Groups → workload RBAC delegations (Defender XDR, Intune, Power BI workspaces, custom apps)
+- ★ **Favorites** — star the rows you click daily; they pin to the top of every section
+- **My Access** tab — see what's active right now, one-click deactivate
+- **No tenant config push** — each browser profile signs in once via the in-popup wizard
+
+Published CRX is auto-updated from
+`https://knudsenmorten.github.io/PIM4EntraPS/updates.xml`.
 Deterministic extension id: `eheocihmlppcophaeakmdenhgcookkab`.
 
+---
+
+## Quick start
+
 ```
-[ extension icon ]  -->  popup
-                          - PIM-Helpdesk-L1                 [x]
-                          - PIM-Sharepoint-SiteAdmins-L2    [ ]
-                          - PIM-AzRes-MP-Platform-L3        [x]
-                          Justification: "ticket INC1234"
-                          Duration:      1 hour
-                          [Activate selected]   -->  3 POSTs to Graph
+┌──────────────────────────────────────────────────────────────────────┐
+│ 1. Tenant admin (once per tenant): run Deploy-PimActivatorBackend.ps1│
+│    -> creates the PIM Activator Entra app reg + grants admin consent │
+│                                                                      │
+│ 2. Per machine: run Deploy-PimActivatorClient.ps1                    │
+│    -> writes the ExtensionInstallForcelist HKCU/HKLM policy so the   │
+│       browser auto-installs the extension on next launch             │
+│                                                                      │
+│ 3. Per browser profile (the user, first popup open):                 │
+│    -> on-screen wizard: type work email -> sign in once -> tenant    │
+│       + app reg auto-discovered -> Save -> ready to activate         │
+└──────────────────────────────────────────────────────────────────────┘
 ```
 
-Single Graph round-trip per group (Graph's PIM-for-Groups API requires it),
-but the user sees one click instead of N portal navigations.
+After step 3 a typical activation is **3 clicks**: open popup, tick the
+groups/roles you want, click **Activate selected**. The first activation
+of a starred row drops to **1 click** on subsequent days because favorites
+sit at the top and the last-used justification + duration are remembered.
 
 ---
 
-## What's new in v1.1.1
+## Scripts in this folder
 
-Fresh installs now default the activation duration to **8 hours** (one
-workday) instead of 1 hour. All install paths were touched so a new
-profile gets 8h out of the box. Existing managed-storage values are
-**unchanged** -- managed wins -- so this only matters for fresh
-installs.
+| Script | Audience | Purpose |
+|---|---|---|
+| `Deploy-PimActivatorBackend.ps1` | Tenant admin | One-time per tenant — create the Entra app reg + grant delegated permissions |
+| `Deploy-PimActivatorClient.ps1`  | Endpoint admin | Per-machine or per-fleet — push `ExtensionInstallForcelist` so the extension auto-installs |
+| `Update-PimActivator-Extension.ps1` | Extension maintainer | Dev loop — pack new CRX, push to `gh-pages`, flush local browser |
+| `Test-PimActivatorFlow.ps1`      | QA / smoke test | Headless verification of the end-to-end activation path |
 
-Precedence at popup-open time:
-
-`chrome.storage.local.lastDurationHours` (user's last picked value,
-per profile) > managed `defaultDurationHours` > `config.js` bundled
-default > popup.js fallback.
-
-To override the 8h default at install time:
-
-| Where | How |
-|---|---|
-| `Deploy-PimActivatorClient.ps1` | `... -DefaultDurationHours 2` |
-| `Deploy-PimActivatorIntune.ps1` | `... -DefaultDurationHours 2` |
-| Direct registry | `Set-ItemProperty 'HKCU:\SOFTWARE\Policies\Microsoft\Edge\3rdparty\extensions\<id>\policy' -Name defaultDurationHours -Value 2 -Force` |
+Files that USE to exist but have been removed in v1.2.0+ (config now lives
+in the browser profile, not in the Windows registry):
+`config.js`, `config.template.js`, `managed_schema.json`, `admx/`,
+`Setup-PimActivator.ps1`, `Deploy-PimActivatorIntune.ps1`,
+`Set-PimActivatorPolicy-Intune.ps1`, `Deploy-PimActivatorPolicy-Admx.ps1`.
 
 ---
 
-## What's new in v1.1.0
+## `Deploy-PimActivatorBackend.ps1` — tenant app registration
 
-Multi-tenant support. The managed-policy schema now accepts a
-`Tenants` array:
+Run once per Entra tenant, signed in as a user who can create app
+registrations and grant admin consent (Application Administrator + Cloud
+Application Administrator, or Global Administrator).
 
-```json
-{
-  "Tenants": [
-    { "Name": "ACME Production",  "TenantId": "...", "ClientId": "..." },
-    { "Name": "ACME Test",        "TenantId": "...", "ClientId": "..." },
-    { "Name": "Customer A",       "TenantId": "...", "ClientId": "..." }
-  ]
-}
+All parameters have sensible defaults — the **zero-arg invocation** creates
+the `PIM Activator` app reg with the canonical extension id and tenant-wide
+admin consent already granted:
+
+```powershell
+# Zero-arg -- creates "PIM Activator" app reg + grants admin consent:
+.\Deploy-PimActivatorBackend.ps1
+
+# Custom display name:
+.\Deploy-PimActivatorBackend.ps1 -DisplayName 'PIM Activator (prod)'
+
+# Different extension id (only if you've forked the extension under your
+# own signing key -- never needed for the upstream distribution):
+.\Deploy-PimActivatorBackend.ps1 -ExtensionId 'abcdefghijklmnopabcdefghijklmnop'
+
+# Skip admin consent (rare -- e.g. caller isn't Privileged Role Admin and
+# consent will land later via Enterprise apps blade):
+.\Deploy-PimActivatorBackend.ps1 -GrantConsent:$false
 ```
 
-Behaviour:
+Defaults wired into the script (since v2.4.57 / v2.4.58):
 
-- 0 tenants -- popup says "not configured".
-- 1 tenant -- used silently (same as v1.0).
-- 2+ tenants -- popup shows a tenant picker on first run per browser
-  profile; the choice is cached in `chrome.storage.local`. Footer shows
-  the friendly name + a `(switch)` link that clears the cached pick and
-  re-renders the picker. Per-profile only -- other Edge / Chrome profiles
-  keep their own choice.
+| Parameter | Default | Override when |
+|---|---|---|
+| `-ExtensionId` | `eheocihmlppcophaeakmdenhgcookkab` | Only if forking the extension under a different key |
+| `-DisplayName` | `PIM Activator` | You want a per-env suffix (prod / staging / etc.) |
+| `-GrantConsent` | `$true` | Pass `:$false` to skip tenant-wide consent |
+| `-TenantId` | Active `Get-MgContext` tenant | Cross-check guard if you want a hard-fail on wrong tenant |
 
-Backwards compatible: the v1.0 singleton `tenantId` / `clientId` keys
-still work as a fallback when no `Tenants` array is present.
+What it does:
+
+1. Resolves the IDs of the required delegated permissions on Microsoft Graph
+   + Azure Service Management.
+2. Creates the app reg (or updates the existing one with the same display
+   name) with SPA redirect URIs `https://<ext-id>.chromiumapp.org/` and
+   `chrome-extension://<ext-id>/`.
+3. Creates the Enterprise Application (service principal) in your tenant.
+4. When `-GrantConsent` is on (default), writes the tenant-wide OAuth2
+   grants so users do not see consent prompts at first sign-in.
+
+Required delegated permissions (auto-resolved + auto-consented by `-GrantConsent`):
+
+| API | Permission | Purpose |
+|---|---|---|
+| Microsoft Graph | `PrivilegedAccess.ReadWrite.AzureADGroup` | Activate / deactivate PIM-for-Groups memberships |
+| Microsoft Graph | `Group.Read.All` | List + name eligible groups |
+| Microsoft Graph | `User.Read` | id_token claims (signed-in user) |
+| Microsoft Graph | `RoleManagement.Read.Directory` | My Access — resolve Entra role assignments per group |
+| Microsoft Graph | `RoleManagement.ReadWrite.Directory` | Activate / deactivate direct Entra role assignments |
+| Microsoft Graph | `AdministrativeUnit.Read.All` | My Access — resolve AU displayNames |
+| Microsoft Graph | `Application.Read.All` | Onboarding wizard — discover the per-tenant app reg by display name |
+| Azure Service Management | `user_impersonation` | Mint ARM token for Azure RBAC eligibility + activation |
+
+Script prints the resulting `tenantId` + `clientId`. You only need them if
+you want to pre-fill the onboarding wizard for users; otherwise the wizard
+discovers them automatically.
 
 ---
 
-## File layout
+## `Deploy-PimActivatorClient.ps1` — force-install on user machines
 
-```
-tools/pim-activator/
-  manifest.json                              # MV3 manifest (Edge + Chrome)
-  popup.html / popup.js                      # the popup UI + tenant picker
-  managed_schema.json                        # Tenants array schema + legacy keys
-  config.template.js                         # copy -> config.js for dev-mode
-  icons/icon-16.png / icon-32.png / icon-128.png
-  Deploy-PimActivatorBackend.ps1             # ONE-TIME tenant setup (per Entra tenant)
-  Deploy-PimActivatorIntune.ps1              # Intune Remediation + local-installer generator
-  Deploy-PimActivatorClient.ps1              # Direct local registry write (dev / single box)
-  Deploy-PimActivatorPolicy-Admx.ps1         # ADMX template emitter (AD GPO authoring)
-  Setup-PimActivator.ps1                     # End-to-end interactive setup wrapper
-  README.md
-```
+Writes the `ExtensionInstallForcelist` Chromium enterprise policy so the
+browser auto-installs the extension on next launch. Designed for unattended
+rollout via Intune / GPO / Configuration Manager.
 
-> **Auth stack:** the popup uses `chrome.identity.launchWebAuthFlow` + PKCE
-> directly against the Entra v2 endpoints (`/oauth2/v2.0/authorize` +
-> `/oauth2/v2.0/token`). No third-party libraries -- vanilla JS + the Web
-> Crypto API for the SHA-256 challenge. This is the canonical auth pattern
-> for Chromium-family MV3 extensions: it avoids the MSAL.js popup-closes-on-
-> blur pitfall and keeps the shipped bundle small. The refresh token is
-> cached in `chrome.storage.local` so silent reauth works across popup
-> sessions until the user revokes consent or hits the Entra refresh-token
-> lifetime cap.
-
----
-
-## Two-stage rollout
-
-### Stage 1 — one-time tenant setup (run once, in the admin tenant)
-
-Create the app registration the extension authenticates against. Requires
-**Application Administrator** (or higher) and these Graph scopes on the
-caller: `Application.ReadWrite.All`, `AppRoleAssignment.ReadWrite.All`,
-`DelegatedPermissionGrant.ReadWrite.All`.
+Both the extension id and the update URL are pre-baked into the script
+(since v2.4.57) — vanilla invocation Just Works:
 
 ```powershell
-# 1. Load the extension unpacked once to discover the extension id assigned
-#    by Edge (edge://extensions -> Developer Mode -> Load unpacked).
-#    The id is a 32-char lowercase string (a-p).
-$extId = 'abcdefghijklmnopabcdefghijklmnop'
+# Dev box, current user only, no admin required (default):
+.\Deploy-PimActivatorClient.ps1
 
-# 2. Connect to Microsoft Graph against the right tenant.
-Connect-MgGraph -TenantId 'f0fa27a0-8e7c-4f63-9a77-ec94786b7c9e' `
-                -Scopes  'Application.ReadWrite.All',
-                         'AppRoleAssignment.ReadWrite.All',
-                         'DelegatedPermissionGrant.ReadWrite.All'
+# Per-machine (HKLM) on an isolated test machine or un-managed server
+# (admin required; do NOT use on Intune-managed devices -- HKLM conflicts
+# with Intune-pushed ExtensionInstallForcelist):
+.\Deploy-PimActivatorClient.ps1 -Scope Machine
 
-# 3. Create the app, wire SPA redirect URI + delegated perms, grant consent.
-.\Deploy-PimActivatorBackend.ps1 -ExtensionId $extId -GrantConsent
-```
+# Edge only (skip Chrome):
+.\Deploy-PimActivatorClient.ps1 -Browser Edge
 
-Output is the `tenantId` + `clientId` you'll feed into Stage 2. Permissions
-configured on the app registration:
+# Uninstall (removes the forcelist entry):
+.\Deploy-PimActivatorClient.ps1 -Uninstall
 
-- `PrivilegedAccess.ReadWrite.AzureADGroup` (delegated)
-- `Group.Read.All` (delegated)
-- `User.Read` (delegated)
-
-SPA redirect URI: `https://<ExtensionId>.chromiumapp.org/`
-
-Re-running the script with the same `-DisplayName` updates the existing app
-in place rather than creating a duplicate.
-
-Repeat Stage 1 once per Entra tenant you want the picker to offer. Capture
-each `(Name, TenantId, ClientId)` triple into a CSV (`tenants.csv`):
-
-```
-Name,TenantId,ClientId
-ACME Production,f0fa27a0-8e7c-4f63-9a77-ec94786b7c9e,11111111-2222-3333-4444-555555555555
-ACME Test,11112222-3333-4444-5555-666677778888,99998888-7777-6666-5555-444433332222
-Customer A,aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee,22221111-3333-4444-5555-666666666666
-```
-
-That CSV is the input to every Stage 2 path below.
-
-### Stage 2 -- choose a rollout path
-
-The extension reads its config from Chromium's `chrome.storage.managed`,
-which Edge / Chrome populate from the policy registry tree
-`HKCU|HKLM\SOFTWARE\Policies\{Microsoft\Edge | Google\Chrome}\3rdparty\extensions\<ExtensionId>\policy`.
-**All three rollout paths write the same registry keys** -- only the
-delivery mechanism differs. Pick one:
-
-| Path | Best for | Self-heal | Admin tooling |
-|---|---|---|---|
-| Intune Remediation | Intune-managed estates | Hourly (Intune-scheduled) | Intune Admin Center |
-| Local installer (GPO / file share / SCCM) | AD-managed estates, no Intune | Per-logon (GPO) or per-deployment | Group Policy Management |
-| Direct local registry write | Dev box, single-machine testing | None (one-shot) | none |
-| Server install (PAW / jump box) | Windows Server hosts where admins RDP in | None (one-shot) or per-boot (GPO Startup) | manual / GPO |
-
-#### Path A -- Intune Remediation (recommended for Intune estates)
-
-`Deploy-PimActivatorIntune.ps1` reads `tenants.csv`, generates a
-Detection + Remediation script pair, uploads them as an Intune device
-health script, and schedules hourly. Detection script compares the
-on-disk `Tenants` JSON against the desired JSON; drift -> exit 1 ->
-Intune fires the remediation, which rewrites every key from scratch.
-
-```powershell
-# Connect once with the right scope.
-Connect-MgGraph -Scopes 'DeviceManagementConfiguration.ReadWrite.All',
-                        'Group.Read.All'
-
-# First time -- create + (optionally) auto-assign in one shot.
-.\Deploy-PimActivatorIntune.ps1 -CreateIntuneRemediation `
-    -TenantsCsv .\tenants.csv `
-    -GroupId    11111111-2222-3333-4444-555555555555
-# -> prints: Remediation id: <guid>   <-- save this for later updates
-
-# -GroupId is OPTIONAL. Omit it to create the remediation unassigned, then
-# assign manually via Intune Admin Center -> Devices -> Scripts and
-# remediations -> open the new remediation -> Assignments -> Add groups.
-```
-
-**Add a tenant later:** edit `tenants.csv`, then push the change:
-
-```powershell
-.\Deploy-PimActivatorIntune.ps1 -UpdateIntuneRemediation `
-    -TenantsCsv    .\tenants.csv `
-    -RemediationId <guid-from-create-run>
-```
-
-Clients converge within ~1h (the remediation scheduler runs faster than
-the 8-hour MDM sync). No user action required.
-
-Requires `Microsoft.Graph.Beta.DeviceManagement`
-(`Install-Module Microsoft.Graph.Beta.DeviceManagement -Scope CurrentUser`).
-The signed-in user needs
-`DeviceManagementConfiguration.ReadWrite.All` consent.
-
-#### Path B -- AD GPO / file share / SCCM (local installer)
-
-Same script, different mode: `-GenerateLocalInstaller` emits a
-self-contained installer set with the tenant JSON **baked in** -- no
-parameters, no CSV dependency at deploy time. Drop on a file share, point
-your GPO Startup / Logon Script at it, or wrap in an SCCM package.
-
-```powershell
-.\Deploy-PimActivatorIntune.ps1 -GenerateLocalInstaller `
-    -TenantsCsv          .\tenants.csv `
-    -LocalInstallerScope User                          # or Machine
-# -> writes .\out-localinstaller\:
-#      Install-PimActivator.ps1     (no params)
-#      Uninstall-PimActivator.ps1   (no params)
-#      README.md                    (deploy guidance)
-```
-
-Scope choices:
-
-- `User` -- writes HKCU. Deploy via GPO **Logon Script** (User
-  Configuration -> Windows Settings -> Scripts -> Logon). No admin rights
-  required on the client. Survives Intune coexistence (HKCU does not
-  collide with HKLM forcelist policy).
-- `Machine` -- writes HKLM. Deploy via GPO **Startup Script** (Computer
-  Configuration -> Windows Settings -> Scripts -> Startup) or SCCM.
-  Affects every user on the box. **Conflicts** with Intune-managed
-  ExtensionInstallForcelist policy -- only use on non-Intune estates.
-
-Re-running the generator overwrites the installer with the latest CSV.
-Push it through your normal channel to add / remove tenants.
-
-#### Path C -- Direct local registry write (dev / single box)
-
-`Deploy-PimActivatorClient.ps1` is the lowest-level option. No Intune,
-no GPO, just a one-shot registry write. Useful for dev workstations or
-proving the flow before wiring up Path A or Path B.
-
-```powershell
+# Forked the extension under your own key + own gh-pages mirror:
 .\Deploy-PimActivatorClient.ps1 `
-    -Tenants @(
-        @{ Name='ACME Production'; TenantId='f0fa27a0-...'; ClientId='11111111-...' },
-        @{ Name='ACME Test';       TenantId='11112222-...'; ClientId='99998888-...' }
-    ) `
-    -Scope User
+    -ExtensionId 'abcdefghijklmnopabcdefghijklmnop' `
+    -UpdateUrl   'https://your-fork.example.com/updates.xml'
 ```
 
-`-Scope User` (HKCU, no admin) or `-Scope Machine` (HKLM, admin
-required, conflicts with Intune). `-Browser Edge | Chrome | Both`
-(default Both -- writes identical key names under each browser's policy
-root).
+Defaults wired into the script:
 
-#### Path D -- Server install (Windows Server / admin jump box / PAW)
+| Parameter | Default | Override when |
+|---|---|---|
+| `-ExtensionId` | `eheocihmlppcophaeakmdenhgcookkab` | Forking under a different signing key |
+| `-UpdateUrl` | `https://knudsenmorten.github.io/PIM4EntraPS/updates.xml` | Self-hosting your own CRX mirror |
+| `-Scope` | `User` (HKCU) | `Machine` for un-managed servers / kiosk boxes |
+| `-Browser` | `Both` | `Edge` or `Chrome` to skip the other |
 
-The activator runs in Edge / Chrome on Windows Server hosts just as it
-does on workstations. Typical targets:
+### Intune managed-policy equivalent (no script)
 
-- **Admin jump boxes** -- the box admins RDP into to reach customer /
-  prod estates.
-- **PAWs** (privileged access workstations) -- locked-down dedicated
-  admin devices.
-- **Shared admin Windows Servers** -- single host where multiple admins
-  RDP in and each needs the extension available in their session.
+Microsoft Edge → **Configuration profile** → **Settings catalog** →
+**Extensions** → **Configure which extensions are installed silently**.
+Add a single entry:
 
-**Scope choice for servers**
+```
+eheocihmlppcophaeakmdenhgcookkab;https://knudsenmorten.github.io/PIM4EntraPS/updates.xml
+```
 
-- `-LocalInstallerScope User` (HKCU) -- single-admin server / personal
-  PAW. Each admin runs `Install-PimActivator.ps1` once for their own
-  profile. No admin rights needed. Best when one person owns the box.
-- `-LocalInstallerScope Machine` (HKLM) -- shared admin server where
-  multiple admins RDP in. One install (elevated) covers every RDP user.
-  Recommended for shared jump boxes.
+Same effect as running `Deploy-PimActivatorClient.ps1 -Scope Machine`
+fleet-wide.
 
-**Generating the Machine-scope installer**
+---
+
+## First-run user experience
+
+On the **first** time a user opens the popup in a given browser profile,
+the **onboarding wizard** appears:
+
+1. **Welcome card** — *Let's set this up.*
+2. **Email field** — user types their work email (e.g.
+   `admin@contoso.com`). Used solely to look up the tenant id via
+   Microsoft's OpenID Connect discovery (`/{domain}/.well-known/openid-configuration`).
+3. **Sign in to auto-discover** — opens a normal Microsoft sign-in window
+   against the tenant-specific authorize endpoint. The sign-in flow runs
+   in the extension's MV3 service worker so it survives the popup losing
+   focus.
+4. **App registration auto-detected** — the extension queries Graph
+   `/applications?$filter=startswith(displayName,'PIM Activator')` and
+   pre-fills the client id. If multiple app regs match, a picker appears.
+5. **Defaults pre-filled** — Justification: *Change in infrastructure*,
+   Duration: *8h*. Editable.
+6. **Save and continue** — values persist to `chrome.storage.local` for
+   this browser profile.
+
+From then on, the popup boots straight to the **Activate** tab.
+
+The footer of every popup shows the configured tenant id and a `(reset)`
+link that wipes the per-profile config so the wizard can be re-run (useful
+when migrating profiles between tenants).
+
+---
+
+## Activate tab
+
+```
++-----------------------------------+
+| Activate (53)   My Access         |
+| -------------------------------- |
+|  ★ Favorites                  (2) |
+|  ☐ ★ Global Reader   ↳ Entra: ... |
+|  ☐ ★ PIM-Helpdesk-L1              |
+| ================================= |
+|  Entra roles (direct)         (4) |
+|  ☐ ☆ Application Administrator    |
+|  ...                              |
+|  Azure RBAC (direct)          (2) |
+|  Entra roles (via PIM Group) (37) |
+|  Azure RBAC (via PIM Group)   (2) |
+|  PIM for Groups (workload)    (8) |
+| -------------------------------- |
+| Justification: Change in infra... |
+| Duration:      8                  |
+|              [Activate selected]  |
++-----------------------------------+
+```
+
+- Star (★ / ☆) any row to **favorite** it; favorites pin to the very top
+  across every category. Persisted per browser profile.
+- **Multi-select** with checkboxes; **Activate selected** dispatches one
+  request per ticked row, with status pills updating live.
+- Recency / frequency sort keeps yesterday's clicks within easy reach
+  even if you haven't starred them.
+
+## My Access tab
+
+Shows everything currently active for the signed-in user, in the same
+5-section layout (plus the ★ Favorites section at top). Per-row
+**Deactivate** button — drops the assignment early; bulk **Deactivate
+selected** in the toolbar for multi-row teardown.
+
+---
+
+## `Update-PimActivator-Extension.ps1` — maintainer dev loop
+
+Maintainer-only — repacks the CRX, pushes it to the `gh-pages` branch of
+the PIM4EntraPS repo, and flushes the local Edge cache so the next popup
+open downloads the fresh build.
 
 ```powershell
-.\Deploy-PimActivatorIntune.ps1 -GenerateLocalInstaller `
-    -TenantsCsv .\tenants.csv `
-    -LocalInstallerOutputDir .\out-server-machine `
-    -LocalInstallerScope Machine
+# Just flush the local browser (gh-pages is already up-to-date):
+.\Update-PimActivator-Extension.ps1
+
+# Bump patch version, repack, push to gh-pages, flush local browser:
+.\Update-PimActivator-Extension.ps1 -Repack
+
+# Pin an exact version (e.g. milestone release):
+.\Update-PimActivator-Extension.ps1 -Repack -Version 1.5.0
+
+# CI / unattended: pack + push gh-pages, don't touch the running browser:
+.\Update-PimActivator-Extension.ps1 -PackOnly
 ```
 
-**Deploying to the server (Machine scope)**
+Prereqs (one-time per dev box):
 
-1. Copy the generated folder to the server (RDP file transfer, SMB
-   share, or PsExec).
-2. Open PowerShell **as Administrator** on the server.
-3. Run:
-   `powershell.exe -NoProfile -ExecutionPolicy Bypass -File C:\Install\PimActivator-Server\Install-PimActivator.ps1`
-4. Restart Edge and Chrome on the server (close all browser windows,
-   including any in RDP sessions).
-5. Each subsequent RDP session sees the extension auto-installed in
-   their browser within ~30s.
-6. Each admin signs in to the popup with their own admin account; if
-   the `Tenants` array has 2+ entries, each admin picks their own
-   tenant per browser profile (cached in `chrome.storage.local` per
-   Chromium profile).
+- Edge installed (used as the CRX packer via `msedge.exe --pack-extension`).
+- The signing key at `%USERPROFILE%\.pim-activator\signing-key.pem` (generated
+  the first time `Edge` packs the extension; commit-protected, do NOT share).
+- Git access to the `gh-pages` branch of `KnudsenMorten/PIM4EntraPS`.
 
-**Domain-joined servers via AD GPO Startup Script**
+---
 
-- Generate the Machine-scope installer.
-- Push to GPO **Computer Configuration -> Policies -> Windows Settings
-  -> Scripts -> Startup**.
-- Add `Install-PimActivator.ps1` as a PowerShell startup script.
-- Runs as `SYSTEM` at boot, writes the HKLM policy keys, every RDP user
-  on the box gets the extension.
+## `Test-PimActivatorFlow.ps1` — smoke test
 
-**The User-scope alternative (one-admin server)**
-
-- Copy the existing User-scope installer folder.
-- Each admin runs it once in a non-elevated PowerShell from their RDP
-  session.
-- Only that admin's RDP sessions get the extension (their HKCU only).
-
-### Stage 3 -- manual dev-mode install (testing the extension code itself)
+Headless verification of the end-to-end activation path. Useful in CI to
+catch regressions in the Graph + ARM contracts before publishing a CRX.
 
 ```powershell
-Copy-Item config.template.js config.js
-# Edit config.js, set tenantId + clientId (or a Tenants array).
+.\Test-PimActivatorFlow.ps1 -TenantId '<guid>' -ClientId '<guid>'
 ```
 
-Load unpacked at `edge://extensions` or `chrome://extensions` (Developer
-Mode on). Skip Stage 2.
-
 ---
 
-## Mental model
-
-The picker UI and the deployment layer are independent:
+## Architecture / how config flows
 
 ```
-+-----------------------+      +---------------------------+      +-----------------+
-| Path A Intune         |      |                           |      |                 |
-| Path B local install  | -->  | Chromium policy registry  | -->  | Extension popup |
-| Path C direct write   |      | (HKCU/HKLM ...\policy\    |      | (popup.html +   |
-|                       |      |  Tenants JSON)            |      |  popup.js)      |
-| silent push, no UI    |      | chrome.storage.managed    |      | -> picker if 2+ |
-+-----------------------+      +---------------------------+      +-----------------+
+┌──────────────────────────┐   one-time per tenant
+│Deploy-PimActivatorBackend│ -------------------------> Entra app reg
+│       .ps1               │                            + admin consent
+└──────────────────────────┘
+
+┌──────────────────────────┐   one-time per machine / fleet
+│Deploy-PimActivatorClient │ -------------------------> ExtensionInstallForcelist
+│       .ps1               │                            policy in HKCU / HKLM
+└──────────────────────────┘                                |
+                                                            v
+                                                    Edge / Chrome auto-installs
+                                                    extension on next launch
+
+┌──────────────────────────┐   one-time per browser profile
+│  In-popup onboarding     │ -------------------------> chrome.storage.local
+│  wizard (popup.js +      │                            (this browser profile only)
+│  background.js)          │
+└──────────────────────────┘                                |
+                                                            v
+                                                    popup.js reads tenantId +
+                                                    clientId + defaults from
+                                                    chrome.storage.local on
+                                                    every popup open
 ```
 
-The deployment layer's only job is to land the `Tenants` JSON in the
-right registry path. The picker is plain HTML/JS inside the extension
-that reads whatever is in `chrome.storage.managed` at popup-open time.
-Add or remove tenants by changing the source CSV; clients re-render the
-picker automatically when the cached tenant disappears from the
-managed list.
+No registry-backed Group Policy / Intune managed-storage push is involved
+in the runtime config — every browser profile holds its own tenant id +
+client id locally. This is intentional for the MSP scenario where one
+Windows user has many Edge profiles each signed in to a different
+customer tenant.
 
 ---
 
-## What the user sees
+## Files in this folder
 
-1. Click the extension icon.
-2. **First run only** (2+ tenants configured) -- tenant picker lists the
-   friendly `Name` of each tenant in the managed `Tenants` array. Pick
-   one. Choice is cached per browser profile in `chrome.storage.local`.
-3. Silent reauth via cached refresh token (or a one-tab interactive
-   sign-in the first time / after consent revocation).
-4. Popup lists all PIM groups they're eligible for, filtered by the regex
-   in `groupNameFilter` (default `^PIM-`).
-5. Tick the groups they need, enter a justification, pick a duration.
-6. **Activate selected** -- one POST per group (sequential, gentle on
-   throttling). Per-group status updates inline.
-
-Footer shows the selected tenant's friendly name. When 2+ tenants are
-configured, a `(switch)` link sits next to the name; clicking it clears
-the cached pick and re-renders the picker without affecting other browser
-profiles.
-
-State persisted in `chrome.storage.local`:
-
-- `refreshToken` / `accessToken` / `accessTokenExpiry` / `account` -- auth cache
-- `selectedTenantId` -- per-profile tenant pick (multi-tenant rollouts)
-- `selectedIds` -- pre-tick the user's typical bundle next time
-- `lastJustification` / `lastDurationHours`
-
----
-
-## Permissions reference
-
-| Surface | Perm | Type | Why |
-|---|---|---|---|
-| App reg (per Stage 1) | `PrivilegedAccess.ReadWrite.AzureADGroup` | Delegated | Read user's eligible groups; create activation requests |
-| App reg (per Stage 1) | `Group.Read.All` | Delegated | Resolve groupId → displayName for the picker |
-| App reg (per Stage 1) | `User.Read` | Delegated | Sign-in / read principal id |
-| Caller of Stage 1 | `Application.ReadWrite.All` | Delegated | Create the app registration |
-| Caller of Stage 1 | `AppRoleAssignment.ReadWrite.All` + `DelegatedPermissionGrant.ReadWrite.All` | Delegated | Grant admin consent (only if `-GrantConsent`) |
-| Caller of Stage 2 | (local admin) | — | HKLM registry write |
-
----
-
-## Troubleshooting
-
-- **"Extension not configured" in the popup**: managed policy keys missing
-  AND no `config.js`. Confirm the chosen Stage 2 path ran successfully
-  (`edge://policy` or `chrome://policy` shows extension policies under
-  the extension id; look for a `Tenants` value with valid JSON).
-- **Picker keeps appearing every time**: `chrome.storage.local` got
-  cleared (incognito, profile reset, "Clear browsing data -> Cookies and
-  other site data"). The pick is per browser profile and not synced.
-- **Signed into the wrong tenant**: click `(switch)` in the popup footer
-  -- this clears `selectedTenantId` for the current profile only and
-  re-renders the picker. Other profiles keep their existing pick.
-- **Sign-in works, no groups listed**: the user has no eligible PIM
-  assignments for groups matching `groupNameFilter`. Try widening the
-  filter to `.*` for debugging.
-- **HTTP 403 on activate**: tenant requires MFA in-flow for activation.
-  Entra returns `interaction_required` / `claims_challenge`; click sign-out
-  then sign-in again and complete MFA. Conditional Access policy gating
-  PIM is fully honored.
-- **HTTP 429**: PIM throttles aggressively. The popup activates groups
-  sequentially to stay under the rate limit. If you need >5 activations
-  per second, wait between bursts.
+| File | Type | Purpose |
+|---|---|---|
+| `manifest.json`   | extension | MV3 manifest (version, permissions, service-worker registration) |
+| `popup.html`      | extension | Popup UI (Activate tab, My Access tab, onboarding wizard) |
+| `popup.js`        | extension | Popup logic (sign-in, list, activate, deactivate, render) |
+| `background.js`   | extension | MV3 service worker (onboarding sign-in flow that survives popup death) |
+| `icons/`          | extension | 16/32/128 px toolbar icons |
+| `extension-identity.txt` | extension | Public key + deterministic extension id |
+| `Deploy-PimActivatorBackend.ps1`     | tenant setup | App reg + admin consent |
+| `Deploy-PimActivatorClient.ps1`      | endpoint setup | ExtensionInstallForcelist policy |
+| `Update-PimActivator-Extension.ps1`  | maintainer dev loop | Pack + push CRX, flush local browser |
+| `Test-PimActivatorFlow.ps1`          | QA | Smoke-test the activation path |
+| `README.md`       | docs | This file |

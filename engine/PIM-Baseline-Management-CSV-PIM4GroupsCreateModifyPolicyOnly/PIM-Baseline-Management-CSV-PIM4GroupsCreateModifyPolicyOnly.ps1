@@ -258,7 +258,7 @@ Write-Output "******************************************************************
 
                 write-host ""
                 Write-host "Processing group $($GroupName)"
-                CreateUpdate-PIM-PAG-Group -GroupName $GroupName `
+                CreateUpdate-PIM-Group -GroupName $GroupName `
                                            -GroupDescription $GroupDescription `
                                            -IsRoleAssignable $IsRoleAssignable `
                                            -Owners $Owners

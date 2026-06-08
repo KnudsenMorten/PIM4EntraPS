@@ -1,45 +1,658 @@
 # Release notes for PIM4EntraPS
 
-## v2.4.55
+## v2.4.75
 
 Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monorepo:
 
+- release: PIM4EntraPS v2.4.75 - engine fixes: policy PATCH backtick + schedule preload + generic datetime + 36159-day bug + skip-line shows role/principal (c9f2f00f)
+- release: PIM4EntraPS v2.4.74 - Deploy-PimActivatorIntune body shape fix (parent CHOICE + child collection) (5bf32754)
+- release: PIM4EntraPS v2.4.73 - tagged single-line engine PIM actions + auto-interactive Connect-MgGraph in deploy scripts (3bc2a91f)
+- release: PIM4EntraPS v2.4.72 - re-add Deploy-PimActivatorIntune + shorter engine logs + cleaner client output (03610db1)
+- release: PIM4EntraPS v2.4.71 - SI parity for launcher transcript + banner format + engine module-load line (75cddf60)
+- release: PIM4EntraPS v2.4.70 - AdminAccountPatterns accepts string[] + Admin-/X-Admin defaults (af7e87c7)
+- release: PIM4EntraPS v2.4.69 - CRITICAL stop duplicate-group creation + rename PAG->Group + fix locked naming default (2320fe94)
+- release: PIM4EntraPS v2.4.68 - V1 EXO permission docs + Entra-propagation retry on -NoCache lookups (79013ffa)
+- release: PIM4EntraPS v2.4.67 - Modern auth prefers cert; full EXO V3 module reset (717d5f2b)
+- release: PIM4EntraPS v2.4.66 - EXO V3 retry + verbose bootstrap + shared launcher banner across all 21 internal-vm launchers (d7516509)
+- release: PIM4EntraPS v2.4.65 + New-PlatformModernCert.ps1 provisioner (ecc7c9ec)
+- release: PIM4EntraPS v2.4.64 - Modern SPN cert sourced from KV, not from BootstrapThumbprint (101e2bfa)
+- release: PIM4EntraPS v2.4.63 - EXO auto-resolves -Organization from MgGraph (5dffb3d3)
+- release: PIM4EntraPS v2.4.62 - route EXO cert auth through HighPriv Modern SPN (supersedes v2.4.61) (67a7b836)
+- release: PIM4EntraPS v2.4.61 + AutomateITPS bootstrap-cert globals (bf262e1b)
+- release: PIM4EntraPS v2.4.60 - auto-rename pre-v2.0 unsuffixed config files (a65dd161)
+- release: PIM4EntraPS v2.4.59 - docs catch-up for v2.4.56-58 (1f8eb644)
+- release: PIM4EntraPS v2.4.58 - Deploy-PimActivatorBackend -GrantConsent default ON (2803a811)
+- release: PIM4EntraPS v2.4.57 - default ExtensionId + UpdateUrl in Deploy-PimActivator* scripts (473969c8)
+- release: PIM4EntraPS v2.4.56 - auto-bootstrap missing .custom config files from samples (2855fbd6)
+- release: PIM Activator extension v1.4.6 -> v1.4.9 (39e0920d)
+- release: PIM Activator extension v1.4.3 -> v1.4.6 (d462d1bf)
+- chore(pim-activator): trim orphaned managed-policy code + rename dev script + rewrite README (552d0185)
+- release: PIM Activator extension v1.4.2 - onboarding wizard + direct PIM + favorites (b1987c59)
 - release: PIM4EntraPS v2.4.55 - release notes rewritten for readability (fe342f9e)
 - release: PIM4EntraPS v2.4.54 - READMEs catch up on the v2.4.53 PIM Manager restyle (be852908)
 - polish: PIM Manager New&clone tiles - branded blue cards with white text for stronger readability (4a9a69ea)
 - release: PIM4EntraPS v2.4.53 - re-skin PIM Manager to match PIM Activator brand (light palette + branded blue PIM MANAGER banner) (085269d8)
 - release: PIM4EntraPS v2.4.52 - fix documented extension id (regen-key ID was never wired into publishing pipeline) (891bc99b)
 - release: PIM4EntraPS v2.4.51 - default activation duration 1h -> 8h (extension v1.1.1) (ac415461)
-- release: PIM4EntraPS v2.4.50 - fix Deploy-PimActivatorClient.ps1 parameter sets so -TenantsCsv works without also requiring -Tenants (55b76be8)
-- release: PIM4EntraPS v2.4.49 - document server install path (PAW / admin jump box / domain-joined fleet) (154cde23)
-- release: PIM4EntraPS v2.4.48 - bring-your-own Graph session for Intune deployer (66b3ceff)
-- release: PIM4EntraPS v2.4.47 - robust Graph sign-in for Intune deployer (-UseDeviceCode + scope verification) (1a41d168)
-- release: PIM4EntraPS v2.4.46 - fix Graph scope for Intune Remediation create (33f33d92)
-- release: PIM4EntraPS v2.4.45 - optional Intune GroupId + self-contained local installer for AD GPO / file share / SCCM rollouts (2cd1ff6e)
-- release: PIM4EntraPS v2.4.44 - multi-tenant Tenants array + Intune Remediation deployer (extension v1.1.0) (23de65f7)
-- release: PIM4EntraPS v2.4.43 - PIM Activator extension graduates to v1.0.0 (ec7967b0)
-- release: PIM4EntraPS v2.4.37 - popup actually shrinks on sign-in (block layout instead of flex:1 panel) + version badge populated at popup-load (visible pre-sign-in) (c4d7d1d4)
-- release: PIM4EntraPS v2.4.36 - popup shrinks to content on sign-in (min-height:180px max-height:600px instead of fixed 600px) (608732ac)
-- release: PIM4EntraPS v2.4.35 - role preview ACTUALLY works (per-group eq queries in parallel, transitive+direct fallback, progress bar) (95665fd5)
-- release: PIM4EntraPS v2.4.34 - footer always visible (sticky flex layout, only list scrolls) + Morten Knudsen footer link -> aka.ms/morten (1ff38bfd)
-- release: PIM4EntraPS v2.4.33 - role preview covers nested groups (transitiveRoleAssignments + direct in parallel, dedupe by principalId+roleDefId+scope) (7fed005c)
-- release: PIM4EntraPS v2.4.32 - popup width 800 -> 720 + nuclear max-width:100% + textarea resize:vertical (kills default horizontal scrollbar) (3995d4b8)
-- release: PIM4EntraPS v2.4.31 - self-deactivate (single + bulk) on My Access + blue popup frame + UPPERCASE branded header + tenantId in footer + horizontal-scroll fix (b500945a)
-- release: PIM4EntraPS v2.4.30 - drop '(M365)' label + bump bulk cache key v2 (forces fresh fetch after v0.4.14 bug) + inline 'Loading roles...' placeholder (b01dbf44)
-- fix(PIM4EntraPS): Update-PimActivatorDev.ps1 - use Get-Content pipe instead of '<' redirect (PS 5.1 doesn't support '<') (674e2f0d)
-- fix(PIM4EntraPS): Update-PimActivatorDev.ps1 -Repack now syntax-checks popup.js before pack (3557e5b6)
-- fix(PIM4EntraPS) v2.4.29 - HOTFIX duplicate const groupIds in loadMyAccessTab (SyntaxError stuck v0.4.14 popup on 'Loading your PIM delegations...') (a0dc70a7)
-- release: PIM4EntraPS v2.4.28 - bulk role fetch + Azure Resource Graph + parallel rendering on BOTH tabs (perf overhaul, Activate now shows role preview per row) (d4075f2a)
-- release: PIM4EntraPS v2.4.27 - Activate tab smart sort (recency 2x + count 1x, decays linearly over 30d, cap at 20 activations); persisted in chrome.storage.local (594490bf)
-- release: PIM4EntraPS v2.4.26 - drop 'member' word + show date+time for activation expiry on both tabs (d7f95cfc)
-- release: PIM4EntraPS v2.4.25 - 3-bucket categorisation on both Activate + My Access tabs, configurable per customer via entraGroupRegex/azureGroupRegex (chrome.storage.managed) (adaa201b)
-- release: PIM4EntraPS v2.4.24 - already-active groups sorted to bottom of Activate tab (greyed + badge + disabled checkbox) (2c1e982c)
 
 ---
 
 # Release notes -- PIM4EntraPS
 
 > **Curated changelog.** The publish workflow auto-prepends recent monorepo commits as a raw activity log; this file is the human-friendly narrative on top.
+
+---
+
+## v2.4.75 -- Engine fixes: PIM policy rule PATCH, schedule preload, generic datetime parser, "expires in 36159 days"
+
+Four customer-reported regressions from a single launcher run:
+
+**1. `Update-MgPolicyRoleManagementPolicyRule` crashed on every role**
+
+Five call sites in `Update-PIMPolicy` (lines 8192/8268/8345/8466/8556) used a double-backtick (`` `` ``) where a single backtick (`` ` ``) line-continuation was intended. PowerShell saw `` ` `` as a positional argument and threw `A positional parameter cannot be found that accepts argument '`'` -- so every policy rule PATCH failed. Fixed all five sites.
+
+**2. `Get-MgIdentityGovernancePrivilegedAccessGroup{Eligibility,Assignment}Schedule -All` started throwing `MissingParameters`**
+
+Recent Microsoft.Graph SDK build rejects `-All` without `-GroupId` or `-PrincipalId` (parameter-set validation regression). The preload at `Get-PimGroupSchedulesPreloaded` swapped the cmdlet calls for a direct paged `Invoke-MgGraphRequest` against `https://graph.microsoft.com/v1.0/identityGovernance/privilegedAccess/group/{eligibility,assignment}Schedules?$top=999` with manual `@odata.nextLink` pagination -- same shape, no SDK validation, no tenant-wide enumeration error.
+
+**3. `Unable to parse datetime: '07/13/2026 13:53:47'`**
+
+`CorrelateDateTimeLanguage` had a fixed list of `ParseExact` formats and missed the 24-hour `MM/dd/yyyy HH:mm:ss` shape Graph sometimes returns. Rewrote the function to:
+- try `[datetime]::TryParse` with **InvariantCulture + en-US + en-GB + da-DK + CurrentCulture** under three styles (`AssumeUniversal|AdjustToUniversal`, `AssumeLocal`, `None`),
+- then fall through to the explicit `ParseExact` format list as a safety net,
+- and finally Write-Warning only if nothing parses.
+
+Verified on both **PS 5.1** and **pwsh 7**: parses `07/13/2026 13:53:47`, `13/07/2026 13:53:47`, `13.07.2026 13:53:47`, `2026-07-13T13:53:47Z`, RFC1123, ISO-date-only -- and still returns `$null` (with warning) for genuinely garbage input.
+
+**4. `Existing Assignment found ... skipping (expires in 36159 days)`**
+
+When an assignment's `ScheduleExpirationEndDateTime` was empty or unparseable, the code fell through to `Ensure-DateTime $null` which defensively returns `(Get-Date).AddYears(99)` -- yielding the absurd "36159 days" figure (= 99 years). Added explicit `IsNullOrWhiteSpace` + post-parse null guards to four code paths (Group-eligibility, Role-direct, Role-PAG-group, and the Role-direct duplicate at 4327); each now logs either `OK - Permanent exists: <role> -> <principal>` (empty) or `OK - Exists (unparseable expiry 'X'): <role> -> <principal>` (parse-fail) and keeps `PIMAction = "NoAction"` without computing bogus day-counts.
+
+**5. Skip-line wording: include role + principal**
+
+All four `"Existing Assignment found ... skipping (expires in N days)"` lines reformatted to the same `OK - Exists: <role> -> <principal> (expires in N days, skipping)` tag the AdminAssign/EXTEND/UPDATE lines already use, so every skipped assignment in a run is greppable to a specific role/principal pair instead of an opaque "something was skipped".
+
+---
+
+## v2.4.74 -- Deploy-PimActivatorIntune.ps1: correct Settings Catalog body shape (parent CHOICE + child collection)
+
+v2.4.72 shipped the Intune script with stale Settings Catalog setting IDs and the wrong body shape -- a flat `SimpleSettingCollectionInstance` referencing the old `microsoft_edgev106` / `google~googlechrome~policy` IDs that Microsoft has since renamed. The POST returned `400 Bad Request: Setting Id is not found in the Settings Catalog Database`.
+
+Live-queried `/beta/deviceManagement/configurationSettings` for the actual current IDs + schema; both Edge and Chrome use a **parent CHOICE setting** (Enabled/Disabled) with a **child SimpleSettingCollection** holding the extension-id list. Corrected IDs:
+
+| Browser | Parent (CHOICE) ID |
+|---|---|
+| Edge | `device_vendor_msft_policy_config_microsoft_edge~policy~microsoft_edge~extensions_extensioninstallforcelist` |
+| Chrome | `device_vendor_msft_policy_config_chromeintunev1~policy~googlechrome~extensions_extensioninstallforcelist` |
+
+Body builder rewritten to nest the child collection inside `choiceSettingValue.children` with the `_extensioninstallforcelistdesc` child setting holding the actual `<extension-id>;<update-url>` value. Idempotent PUT path uses the same shape.
+
+Verified the JSON shape against the live Graph schema response (both settings are `deviceManagementConfigurationChoiceSettingDefinition`; child is `deviceManagementConfigurationSimpleSettingCollectionDefinition`).
+
+---
+
+## v2.4.73 -- Engine log lines: tagged single-line PIM actions + auto-interactive Connect-MgGraph in deploy scripts
+
+**1. Engine log lines collapsed + tagged with PIM action**
+
+Every PIM-action code path used to emit a 2-3 line block with separate `Mode: X` status:
+
+```
+Existing Assignment will be updated with assignment details
+Mode: AdminUpdate
+
+Existing Assignment will expire in 18 days
+Mode: AdminExtend
+
+Existing Assignment found ... skipping (expires in 32 days)
+Mode: NoAction
+
+Assignment was found .... removing
+Mode: AdminRemove
+
+Assignment was NOT found .... creating
+Mode: AdminAssign
+
+Existing Assignment found via Graph (API confirmed) ... skipping
+```
+
+Now collapsed into one tagged + coloured line per case with role + principal context:
+
+```
+UPDATE: User Administrator -> PIM-Entra-ID-UserAdministrator-L1 (refreshing assignment details)        [Yellow]
+EXTEND: User Administrator -> PIM-Entra-ID-UserAdministrator-L1 (expires in 18 days)                  [Yellow]
+OK - Exists: User Administrator -> PIM-Entra-ID-UserAdministrator-L1 (expires in 32 days, skipping)   [Green]
+REMOVE: User Administrator -> PIM-Entra-ID-UserAdministrator-L1                                        [Red]
+ASSIGN: User Administrator -> PIM-Entra-ID-UserAdministrator-L1 (new assignment)                       [Cyan]
+OK - Exists: User Administrator -> PIM-Entra-ID-UserAdministrator-L1 (Graph confirmed, skipping)       [Green]
+```
+
+3 lines -> 1 line per assignment processed. With 100+ assignments per run that's a 300+ line reduction. Operator can grep the colour tag (UPDATE / EXTEND / REMOVE / ASSIGN / OK) to find what actually changed vs what was a no-op.
+
+**2. Deploy-PimActivator{Backend,Intune}.ps1 auto-launch Connect-MgGraph if no context exists**
+
+Previous behaviour: hard-throw `"Connect-MgGraph required."` if `Get-MgContext` returned null. Operator had to know the exact scopes string, run `Connect-MgGraph -Scopes '...'` themselves, then re-run the deploy script.
+
+New behaviour: if `Get-MgContext` is null OR missing required scopes, the script auto-launches `Connect-MgGraph -Scopes <required-scopes> -NoWelcome` interactively (browser flow). Operator signs in once and the script continues without re-launch.
+
+Required scopes per script:
+
+| Script | Scopes auto-requested |
+|---|---|
+| `Deploy-PimActivatorBackend.ps1` | `Application.ReadWrite.All`, `AppRoleAssignment.ReadWrite.All`, `DelegatedPermissionGrant.ReadWrite.All` |
+| `Deploy-PimActivatorIntune.ps1` | `DeviceManagementConfiguration.ReadWrite.All`, `Group.Read.All` |
+
+Pre-connecting yourself still works (useful for `-TenantId` pinning when scripting); the auto-connect only fires when context is missing.
+
+Other ps1 in `tools\pim-activator\`:
+- `Deploy-PimActivatorClient.ps1` -- no Graph, registry only (no change)
+- `Update-PimActivator-Extension.ps1` -- no Graph (no change)
+- `Test-PimActivatorFlow.ps1` -- already does interactive Connect-MgGraph unconditionally (no change)
+
+---
+
+## v2.4.72 -- Deploy-PimActivatorIntune.ps1 re-added + shorter engine log lines + client output cleanup
+
+Three operator-facing changes.
+
+**1. `Deploy-PimActivatorIntune.ps1` is back**
+
+Re-introduces the Intune deployment script that was removed in the v1.2.0 activator overhaul. Same defaults as `Deploy-PimActivatorClient.ps1` -- a zero-arg invocation creates a Settings Catalog configuration policy that force-installs the extension on Edge + Chrome:
+
+```powershell
+Connect-MgGraph -Scopes 'DeviceManagementConfiguration.ReadWrite.All','Group.Read.All'
+.\Deploy-PimActivatorIntune.ps1
+# Optional auto-assign to a target group:
+.\Deploy-PimActivatorIntune.ps1 -AssignToGroupId <group-id>
+# Cleanup:
+.\Deploy-PimActivatorIntune.ps1 -Remove
+```
+
+Default profile DisplayName + Description both lead with `[PimActivator]` so the profile is filter-friendly in the Intune portal (Configuration profiles list filter on `[PimActivator]` finds it in one click). Idempotent -- re-running with the same DisplayName PATCHes the existing profile in place, no duplicates / accumulation. Different-named existing profiles co-exist; Intune unions ExtensionInstallForcelist values across applicable profiles per extension id, so the customer's other extensions and ours all force-install without conflict.
+
+Uses the BETA Graph endpoint (`/beta/deviceManagement/configurationPolicies`) for Settings Catalog v2 (still beta despite years of "promised GA").
+
+**2. Engine log lines for existing-assignment cases shortened**
+
+`PIM-Functions.psm1` was emitting verbose contextless lines:
+
+```
+Existing Assignment found via Graph (not in snapshot) ... treating as existing
+Existing permanent Assignment found ... skipping
+Mode: NoAction
+```
+
+Now collapsed + context-tagged:
+
+```
+OK - Exists: User Administrator -> PIM-Entra-ID-UserAdministrator-L1
+OK - Permanent exists: User Administrator -> PIM-Entra-ID-UserAdministrator-L1 (skipping)
+```
+
+Two-line output instead of three, role + principal embedded, `OK -` prefix consistent with the engine's other "OK" status lines.
+
+**3. `Deploy-PimActivatorClient.ps1` stops echoing baked-in defaults**
+
+v2.4.57 made `-ExtensionId` and `-UpdateUrl` defaultable, but the script kept printing them as `ExtensionId : eheoc... / UpdateUrl : https://...` -- which made operators think they had to supply them. Now those lines only print when the operator explicitly overrode (with a Yellow note showing the default value). Zero-arg run is now visually silent on those parameters.
+
+---
+
+## v2.4.71 -- SI parity: launcher transcript to logs/ + banner format matches SecurityInsight
+
+Two layout-consistency fixes -- the operator should not be able to tell PIM4EntraPS launchers apart from SI launchers at run start.
+
+**1. Auto-transcript to `SOLUTIONS\PIM4EntraPS\logs\`**
+
+New shared helper `launcher\_lib\Start-PimLauncherTranscript.ps1`, mirrors the SI `Start-LauncherTranscript.ps1` exactly:
+
+- Writes to `<repoRoot>\SOLUTIONS\PIM4EntraPS\logs\<engine>_<flavour>_<utcStamp>.log`
+- One folder per repo (grep-friendly)
+- UTC stamp: `yyyyMMddTHHmmssZ` (sortable)
+- Retention: prune > 30 days (`$global:PIM_LogRetentionDays` to override)
+- Opt-out: `$global:PIM_DisableTranscript = $true` for lab / CI runs
+
+All 21 `launcher.internal-vm.ps1` files batch-patched to dot-source the helper + call `Start-PimLauncherTranscript -Engine $engineFolderName -Flavour 'internal-vm' -RepoRoot $InstallPath` right after the banner. Transcript path is echoed back as a Cyan `[INFO]   transcript:` line so the operator can find the file even if they didn't notice the folder.
+
+**2. Banner format aligned 1:1 with SI's `Write-Banner`**
+
+Previous PIM banner emitted a `[INFO] PIM4EntraPS <engine> launcher (<flavour>) v<X>` line in a custom delimited block. Now identical to SI:
+
+```
+========================================================================================
+  PIM4EntraPS -- PIM-Baseline-Management-CSV    [internal-vm]   v2.4.71
+
+  Developed by Morten Knudsen -- Microsoft MVP
+  Blog:    https://mortenknudsen.net   (aka.ms/morten)
+  GitHub:  https://github.com/KnudsenMorten
+  Support: GitHub Issues on the public repo, or mok@mortenknudsen.net (internal)
+========================================================================================
+```
+
+Same 88-character delimiter, same indentation, same colour, same dev/support credits as SI. Engine-name + flavour still auto-detected from `$PSCommandPath` so each launcher.ps1 keeps the two-line invocation.
+
+**3. Engine module-load line also re-aligned with SI**
+
+`PIM-Functions.psm1` module-load previously emitted a 3-line Cyan boxed `[INFO]` block. Now a single line mirroring SI's `Write-Info` style at engine startup:
+
+```
+  [INFO] PIM4EntraPS PIM-Baseline-Management-CSV engine v2.4.71 (<full path>)
+```
+
+vs SI's
+
+```
+[INFO] SecurityInsight RiskAnalysis engine v2.2.387 (<full path>)
+```
+
+Identical shape.
+
+Scope deferred (will follow once these settle): same treatment for `internal-azure`, `community-vm`, `community-azure` launcher flavours -- internal-vm is what operators run interactively. The shared helpers are flavour-agnostic; only the two-line invocation needs adding to the other launchers.
+
+---
+
+## v2.4.70 -- AdminAccountPatterns accepts string[] form + Admin- / X-Admin defaults
+
+Two related changes for admin-account naming-convention handling.
+
+**1. AdminAccountPatterns now accepts a plain string array**
+
+Previously `Get-PimAdminsFiltered` only recognised `$global:PIM_NamingConventions.AdminAccountPatterns` as a **hashtable** (UserType -> template). If a customer set it to a **string array** (the simpler form for "I just want to widen the prefix list for filtering"), the engine silently ignored it and the filter fell back to the singular `AdminAccountPattern`.
+
+Now `AdminAccountPatterns` is accepted in three shapes -- engine picks the right path:
+
+```powershell
+# Form A: hashtable (per-UserType templates)
+$global:PIM_NamingConventions.AdminAccountPatterns = @{
+    Internal = 'Admin-{Initials}-L{Level}-T{Tier}-{Platform}'
+    External = 'X-Admin-{Initials}-L{Level}-T{Tier}-{Platform}'
+}
+
+# Form B: string array (simple prefix list -- new in v2.4.70)
+$global:PIM_NamingConventions.AdminAccountPatterns = @('Admin-', 'X-Admin')
+
+# Form C: single string (rare; equivalent to AdminAccountPattern)
+$global:PIM_NamingConventions.AdminAccountPatterns = 'Admin-'
+```
+
+Use whichever fits the tenant's mental model. The sample (`.custom.sample.ps1`) now shows both Forms A and B with worked examples.
+
+**2. Locked defaults: Admin- / X-Admin (instead of adm_)**
+
+`PIM4EntraPS.NamingConventions.locked.ps1` defaults changed:
+
+```powershell
+AdminAccountPattern   = 'adm_{Owner}'        ->  'Admin-{Owner}'
+AdminAccountPatterns  = (not set)            ->  @('Admin-', 'X-Admin')
+```
+
+Reflects what every production tenant we've seen actually uses for tier-N admin UPNs (`Admin-Brian-L0-T0-ID@…`, `x-Admin-MOK-L0-T0-ID@…`). The legacy `adm_` default was wrong for everyone -- it caused `Get-PimAdminsFiltered` to query `startswith(userPrincipalName, 'adm_')` and return zero results on every customer, which then cascaded into the cache-miss → false "Owner UPN not found" warning emitted by the engine at every group-owners pass.
+
+Tenants that genuinely use `adm_` (none observed so far) can override in `PIM4EntraPS.NamingConventions.custom.ps1`:
+
+```powershell
+$global:PIM_NamingConventions.AdminAccountPattern  = 'adm_{Owner}'
+$global:PIM_NamingConventions.AdminAccountPatterns = @('adm_')
+```
+
+---
+
+## v2.4.69 -- CRITICAL: stop duplicate-group creation + rename PAG->Group + fix locked naming convention
+
+**1. Critical duplicate-create bug FIXED**
+
+`CreateUpdate-PIM-Group` (was `CreateUpdate-PIM-PAG-Group` -- see point 2) had a defective "does the group already exist?" check at line 1178:
+
+```powershell
+$Group = $Global:Groups_All_ID | where-object { $_.DisplayName -eq $GroupName }
+```
+
+This only checked the in-memory cache populated by `Get-PimGroupsFiltered` at engine startup. If the cache was empty -- which happens whenever the customer's `PimGroupPattern` naming-convention prefix doesn't match what's actually in the tenant -- the lookup returned `$null`, the engine concluded the group didn't exist, and it created a **duplicate** for every group in the CSV on every single run.
+
+Two customers hit this in production before we caught it -- the trigger was the locked default `PimGroupPattern = 'PIM_{Role}_{Department}'` (underscore) not matching real-world groups named `PIM-DEPT-Finance` / `PIM-ROLE-Internal-IT` (hyphen). Get-PimGroupsFiltered ran with `startswith(displayName,'PIM_')` and returned zero rows.
+
+Fix: line 1178 now uses `Resolve-PimGroupCached` (which has Graph fallback when cache misses), aligned with the other three create-group sites in the same module that were already correct. Even if the cache is mis-populated for any reason, the Graph fallback catches existing groups.
+
+**Cleanup for affected customers** -- remove the empty duplicate groups created by pre-v2.4.69 runs. Easiest path: list every PIM-* group sorted by createdDateTime, identify pairs with identical DisplayName, delete the newer one (older = real, newer = duplicate). The newly-created duplicates have empty membership lists, so they're identifiable that way too:
+
+```powershell
+$dupes = Get-MgGroup -Filter "startswith(displayName,'PIM-')" -All -Property Id,DisplayName,CreatedDateTime |
+    Group-Object DisplayName | Where-Object Count -gt 1
+foreach ($g in $dupes) {
+    $newest = $g.Group | Sort-Object CreatedDateTime -Descending | Select-Object -First 1
+    Write-Host "DUPLICATE: $($g.Name) -- delete $($newest.Id) (created $($newest.CreatedDateTime))"
+    # Remove-MgGroup -GroupId $newest.Id -Confirm:$false   # uncomment after eyeballing the list
+}
+```
+
+**2. `CreateUpdate-PIM-PAG-Group` renamed -> `CreateUpdate-PIM-Group`**
+
+"PAG" was the old "Privileged Access Group" label; the product is just called "PIM group" now. Back-compat alias `Set-Alias CreateUpdate-PIM-PAG-Group CreateUpdate-PIM-Group` ships in PIM-Functions.psm1 so any out-of-tree caller still works during the transition.
+
+In-tree call sites updated:
+- `PIM-Baseline-Management-CSV/PIM-Baseline-Management-CSV.ps1`
+- `PIM-Baseline-Management-CSV-PIM4GroupsCreateModifyPolicyOnly/...`
+- 2 internal call sites in `PIM-Functions.psm1`
+
+**3. Locked naming-convention defaults: `PIM_` -> `PIM-`**
+
+`PIM4EntraPS.NamingConventions.locked.ps1` changed:
+
+```powershell
+PimGroupPattern   = 'PIM_{Role}_{Department}'      ->  'PIM-{Role}-{Department}'
+PimGroupAuPattern = 'PIM_{Role}_AU_{AdminUnit}'    ->  'PIM-{Role}-AU-{AdminUnit}'
+```
+
+Reflects what every real-world customer uses (no one was on underscores). `AdminAccountPattern` stays at `adm_{Owner}` -- admin UPNs DO use underscore there. If your tenant is somehow on the legacy underscore convention for PIM groups, override in `PIM4EntraPS.NamingConventions.custom.ps1`.
+
+---
+
+## v2.4.68 -- Two real fixes: V1 EXO permission docs + Entra propagation retry
+
+Documenting what actually unblocked customer onboarding, plus a related
+post-group-create race fix.
+
+**1. `Exchange.ManageAsApp` (V1) is the actually-needed permission, NOT V2**
+
+The EXO V3 connect error `Module could not be correctly formed. Please run Connect-ExchangeOnline again.` is misleading. EXO V3's connect sequence is:
+
+  1. OAuth token acquire (cert + AppId)
+  2. Open REST session to Exchange Online
+  3. Enumerate cmdlets the authenticated identity has rights to call
+  4. Build a dynamic PowerShell module from those cmdlets
+
+When step 3 returns zero cmdlets (no Exchange-related directory role AND/OR wrong API permission), step 4 emits `Module could not be correctly formed` because there's literally nothing to form.
+
+Earlier docs (v2.4.62 onward) recommended granting `Exchange.ManageAsAppV2`. That sounds newer + better, but cmdlet-set authorization for the EXO V3 module is actually consulted against `Exchange.ManageAsApp` (V1). Granting only V2 produces the misleading error.
+
+Updated:
+- PIM-Functions.psm1 Connect-ExchangeOnline failure message now says V1
+  with an inline explanation of the V1-vs-V2 trap
+- New-PlatformModernCert.ps1 final summary block now ends with an
+  explicit "TWO MANUAL ENTRA STEPS REMAINING" call-out (yellow) listing
+  V1 permission + Exchange Recipient Administrator role with the
+  V1-vs-V2 footnote
+
+Wasted-effort retrospective for the v2.4.66 EXO retry + v2.4.67 full
+module-reset code: kept in place (cheap defensive code), but the real
+fix for "Module could not be correctly formed" is the V1 perm. If you
+hit it on a fresh tenant, grant V1 first; only investigate runspace /
+EDR / Defender if V1 doesn't unblock you.
+
+**2. Resolve-PimGroupCached retry-with-backoff when `-NoCache` is set**
+
+After a freshly-created group, the engine called Resolve-PimGroupCached -NoCache and Graph returned 0 results because the new group hadn't propagated to the search index yet (typical Entra lag: 3-30s, sometimes longer). The single-shot Graph query gave $null, the caller passed empty string to Add-AdministrativeUnit-Member -ObjectId, which threw "Cannot bind argument to parameter 'ObjectId' because it is an empty string."
+
+When `-NoCache` is used (signalling "I just created this object"), Resolve-PimGroupCached now retries up to 6 times with 5s backoff (~30s total wait) before giving up. Single-shot behavior preserved when `-NoCache` is NOT used (cache hits are still O(1)).
+
+A loud `Write-Warning` fires only when all retries are exhausted and the group really isn't visible -- the caller still gets `$null` and still throws the bind error, but at least the operator sees WHY before the misleading parameter-binding stack trace.
+
+---
+
+## v2.4.67 -- Modern auth: cert preferred over secret + EXO V3 full module reset
+
+Two related changes shipped together.
+
+**1. Connect-PlatformModern now prefers cert over secret**
+
+`AutomateITPS.Connect-PlatformModern` reads `Modern-Thumbprint` from KV at startup; if both the KV secret exists AND a matching cert is in `Cert:\LocalMachine\My` / `CurrentUser\My` (not expired), the Modern SPN authenticates via cert for BOTH Az and Graph. The Modern secret is not fetched in that case (`$global:HighPriv_Modern_Secret_Azure` stays `$null`, so engines that read it can tell "secret was not needed").
+
+Fallback: if KV has no thumbprint OR the cert isn't locally present, the v2.3 secret path runs as before (no behavior change for tenants that haven't provisioned the Modern cert yet via `New-PlatformModernCert.ps1`).
+
+A new global tracks which path was used:
+
+```powershell
+$global:HighPriv_Modern_AuthMethod   # 'Cert' or 'Secret'
+```
+
+The PIM-Baseline-Management-CSV engine's `[OK] Platform connected ...` line now reads this global and prints `auth=cert` or `auth=secret` -- previously printed a misleading `cert+secret` whenever both globals happened to be populated.
+
+**2. EXO V3 'Module could not be correctly formed' -- full module reset**
+
+v2.4.66's retry (`Disconnect + Remove-Module + Import-Module`) was insufficient on PowerShell 7.5+ -- the bug persists across the simple reset. New `Reset-ExoModuleState` helper in `PIM-Functions.psm1` runs the full Microsoft Q&A workaround chain:
+
+1. `Disconnect-ExchangeOnline` (any prior session)
+2. Remove dynamic proxy modules: `CreateExoPSSession*` AND `tmp_*` (these are auto-generated by EXO V3 and retain bad state across `Remove-Module ExchangeOnlineManagement` alone)
+3. `Remove-Module ExchangeOnlineManagement -Force`
+4. `Import-Module ExchangeOnlineManagement -Force -DisableNameChecking` (skips `Get-Verb` noise that triggers a different module-loading path in PS 7.5)
+5. Sleep 3s (was 2s) before retry
+
+If the V3 quirk still persists after the full reset on a second attempt, the real exception bubbles up so the operator can see the underlying cause (vs the V3 symptom). If you keep hitting this even with the full reset, the next escalation is pinning EXO module to a known-good version (`Install-Module ExchangeOnlineManagement -RequiredVersion 3.5.1 -Force`) -- documented as a separate Microsoft issue for PS 7.5.
+
+---
+
+## v2.4.66 -- EXO V3 retry + verbose bootstrap + launcher / engine version banners
+
+Three operator-facing fixes shipped together.
+
+**1. Exchange Online V3 'Module could not be correctly formed' retry**
+
+Connect-ExchangeOnline V3 has a documented runspace-state bug where the first attempt errors with `Module could not be correctly formed. Please run Connect-ExchangeOnline again.` even when the auth inputs are valid. PIM-Baseline-Management-CSV used to bubble this up as a hard fail. Now the engine:
+
+1. Disconnects any prior EXO session
+2. Removes + force-reimports the `ExchangeOnlineManagement` module
+3. Calls `Connect-ExchangeOnline`
+4. On a `Module could not be correctly formed` / `forming the session` error, repeats steps 1-3 once and retries
+
+If the retry succeeds, the run continues normally. If both attempts fail, the second exception bubbles up with the real cause -- not the misleading V3 quirk symptom.
+
+**2. Verbose bootstrap output**
+
+The `Initialize-PlatformAutomationFramework` call was silent (`$null = ...` consumed all output). Operators saw a few seconds of mystery delay between the engine title banner and `[ 01 / 12 ]`. The engine now prints:
+
+```
+[STEP]  Resolving AutomateIT repo root
+[OK]    repo root: D:\AutomateIT
+[STEP]  Importing AutomateITPS module
+[OK]    AutomateITPS loaded
+[STEP]  Initialize-PlatformAutomationFramework (bootstrap SPN -> KV -> Modern SPN -> populate $global:HighPriv_* / $global:Context)
+[OK]    Platform connected in 4.2s -- tenant c2738ae6-..., KV kv-ng-automateit-p, Modern AppId c3689610-..., cert+secret
+```
+
+The trailing token (`cert+secret` / `secret-only` / `(none -- check KV)`) is a quick health probe -- if it says `(none -- check KV)`, KV is missing `Modern-AppId` or `Modern-Secret` and the subsequent engine work is going to fail.
+
+**3. Launcher + engine version banners (SI parity)**
+
+Three layers of the stack now print their version, each on a clearly bounded Cyan block:
+
+- **Launcher** (`launcher.internal-vm.ps1`):
+  ```
+  =================================================================================
+   [INFO] PIM4EntraPS PIM-Baseline-Management-CSV launcher (internal-vm) v2.4.66
+   [INFO]   launcher : D:\AutomateIT\SOLUTIONS\PIM4EntraPS\launcher\...
+  =================================================================================
+  ```
+- **Engine module load** (`PIM-Functions.psm1`):
+  ```
+  =================================================================================
+   [INFO] PIM4EntraPS PIM-Baseline-Management-CSV engine v2.4.66 (D:\AutomateIT\SOLUTIONS\PIM4EntraPS\engine\PIM-Baseline-Management-CSV\PIM-Baseline-Management-CSV.ps1)
+  =================================================================================
+  ```
+- **Solution version** stamped from `SOLUTIONS\PIM4EntraPS\VERSION` -- the same file the launcher banner reads.
+
+Cyan + boxed delimiters so the version line doesn't blend with the gray `loaded ...` lines like v2.4.65's did. Engine-name detection uses `Get-PSCallStack` so it auto-fills with whichever engine `Import-Module PIM-Functions` was called from.
+
+Note: this release wires the launcher banner for `PIM-Baseline-Management-CSV/launcher.internal-vm.ps1` as the template. Other PIM launchers (PIM-Assignment-Exporter, Check-PIM-Groups-IsRoleAssignable, etc.) get the same banner by copying the 14-line block; will propagate them in a follow-up release once the pattern stabilises.
+
+---
+
+## v2.4.65 -- Modern SPN cert provisioner + version stamp + corrected EXO error
+
+Three small but operator-facing fixes:
+
+1. **`New-PlatformModernCert.ps1`** -- new script under
+   `SOLUTIONS\PlatformConfiguration\INTERNAL\Provision\`. Mirrors the
+   Bootstrap pattern but for the operational Modern SPN. One elevated
+   run on a freshly-onboarded host:
+     - Generates a self-signed cert (`CN=AutomateIT-HighPriv-<COMPUTERNAME>`)
+     - Installs in `Cert:\LocalMachine\My`
+     - Registers it as a credential on the Modern SPN in Entra via Graph
+     - Writes the thumbprint to KV as `Modern-Thumbprint`
+   Idempotent -- no-op if KV already has the secret AND the cert is on
+   this host. Use `-Force` to add a host-specific credential on
+   additional hosts (each gets its own cert; SPN accepts many).
+
+2. **Version stamp at PIM-Functions module load.** Every engine now
+   prints `[INFO] PIM4EntraPS solution v<VERSION>` from the `VERSION`
+   file at startup -- same SI pattern, scannable, ties the run log to
+   a specific release. The previous `Sync-AutomateIT` -> wrong-version
+   issue (drift between solutions on the host) becomes obvious in the
+   log: PIM4EntraPS line shows what was actually loaded.
+
+3. **EXO cert-missing error message rewritten.** v2.4.62 told the operator
+   to "upload the AutomateIT bootstrap cert as additional credential on the
+   Modern SPN" -- that was reverted in v2.4.64 (Bootstrap and Modern get
+   distinct certs) but the error text in `PIM-Functions.psm1` still showed
+   the old guidance. Now it points at `New-PlatformModernCert.ps1` and the
+   correct workflow.
+
+---
+
+## v2.4.64 -- Modern SPN gets its OWN cert (don't mix with Bootstrap)
+
+Correcting v2.4.62's "reuse the Bootstrap cert on the Modern SPN" guidance. That was sloppy -- the Bootstrap and HighPriv (Modern) identities are intentionally separate SPNs with intentionally separate roles, and sharing crypto material between them collapses the boundary. **Each SPN gets its own cert.**
+
+What changed in `AutomateITPS.Connect-PlatformModern`:
+
+- Removed the `BootstrapThumbprint` read from `platform-config.json` (introduced in v2.4.62)
+- Added a new `-ModernThumbprintSecretName` parameter (default: `Modern-Thumbprint`) that reads the Modern SPN's cert thumbprint from KV alongside `Modern-AppId` + `Modern-Secret`
+- `$global:HighPriv_Modern_CertificateThumbprint_Azure` is populated only when BOTH the KV secret exists AND the matching cert is installed locally + still valid
+- Loud `Write-Warning` if KV has the thumbprint but the cert isn't in `Cert:\` (typical "I added the KV secret but forgot to install the cert on this host" misconfig)
+
+**Customer one-time setup** (per tenant, replaces the v2.4.62 instructions):
+
+1. Create a NEW cert for the Modern SPN. Self-signed is fine:
+   ```powershell
+   $cert = New-SelfSignedCertificate -Subject 'CN=AutomateIT-Modern-Cert' -CertStoreLocation 'Cert:\LocalMachine\My' -KeyExportPolicy Exportable -KeySpec Signature -KeyLength 2048 -HashAlgorithm SHA256 -NotAfter (Get-Date).AddYears(2)
+   Export-Certificate -Cert $cert -FilePath C:\TMP\automateit-modern.cer
+   ```
+
+2. Upload `automateit-modern.cer` to the HighPriv Modern SPN in Entra (App registrations → HighPriv SPN → Certificates & secrets → Upload certificate). **Do NOT reuse the Bootstrap cert.**
+
+3. Store the thumbprint in KV alongside the existing `Modern-AppId` + `Modern-Secret`:
+   ```powershell
+   Set-AzKeyVaultSecret -VaultName <kv-name> -Name Modern-Thumbprint -SecretValue (ConvertTo-SecureString $cert.Thumbprint -AsPlainText -Force)
+   ```
+
+4. Install the cert (with private key) on every host that runs operational engines that need cert-app-only auth. Same `.pfx` import to `Cert:\LocalMachine\My`.
+
+5. Modern SPN still needs the API perm + directory role from v2.4.62:
+   - **Office 365 Exchange Online → Exchange.ManageAsAppV2** (Application, admin-consented)
+   - **Exchange Recipient Administrator** directory role
+
+**Recovery for tenants that already followed v2.4.62's reuse-the-Bootstrap-cert path:** the simplest path is to remove the Bootstrap cert credential from the Modern SPN (Entra → App registrations → Modern SPN → Certificates & secrets → delete) and follow steps 1-4 above with a fresh Modern-specific cert. If you'd rather keep what's already in place, you can short-circuit by writing the Bootstrap thumbprint into the `Modern-Thumbprint` KV secret -- the engine then works, but the SPN isolation that the rest of the design relies on is gone.
+
+---
+
+## v2.4.63 -- EXO auto-resolves -Organization from MgGraph when unset
+
+Hot follow-up to v2.4.62. The new cert-based `Connect-ExchangeOnline` path requires `-Organization <tenant>.onmicrosoft.com`; the old interactive path did not. Customers whose `repository.custom.ps1` never set `$TenantNameOrganization` (common on cold installs -- the variable wasn't even mentioned in the sample) tripped on `OperationStopped: Value cannot be null. (Parameter 'Organization cannot be null for certificate based connections.')` immediately after the v2.4.62 success log line.
+
+`PIM-Functions.psm1` Connect-ExchangeOnline call now auto-resolves the value from `Get-MgOrganization` (we're already MgGraph-connected via `Initialize-PlatformAutomationFramework`) -- picks the verified domain where `IsInitial = true`. If the operator has explicitly set `$TenantNameOrganization` in `repository.custom.ps1`, that value wins; only empty/whitespace falls through to auto-resolve. A `[info]` log line documents the resolved value so the operator can spot it in the run log.
+
+Hard throw with an explicit "set `$TenantNameOrganization` in `repository.custom.ps1`" pointer if Graph itself can't return an org (genuine misconfig, not a missing customer setting).
+
+No customer action needed -- just `Sync-AutomateIT` and re-run.
+
+---
+
+## v2.4.62 -- One auth stack: Exchange Online now uses the HighPriv (Modern) SPN
+
+The CSV baseline engine (`PIM-Baseline-Management-CSV`) used to call `Connect-ExchangeOnline -CertificateThumbprint $HighPriv_Modern_CertificateThumbprint_O365 -AppId $HighPriv_Modern_ApplicationID_O365 ...`. Those `_O365`-suffixed globals are v1-era legacy slots that v2.3 `Connect-PlatformAutomationFramework` no longer populates -- the chain only sets `_Azure`. Result: both args resolved to `$null`, `Connect-ExchangeOnline` silently fell back to interactive browser auth, and on a headless box you'd get an `OperationCanceledException` from `DefaultOSBrowser.HttpListenerInterceptor` after the OAuth listener never received a redirect.
+
+This release codifies the principle the AutomateIT platform has been moving toward: **one auth stack per solution that's on AutomateIT, no legacy SPN straddling**. v2.4.61 took a wrong turn here -- it routed cert auth through the Bootstrap SPN, which is by design min-privilege (KV-read-only). This release walks that back: cert reuse stays, but the operational identity is the HighPriv (Modern) SPN, which is where API permissions belong.
+
+What changed:
+
+1. **`AutomateITPS.Connect-PlatformModern`** now exposes the cert thumbprint as `$global:HighPriv_Modern_CertificateThumbprint_Azure` -- previously hard-set to `$null` ("v2.3 = secret only"). The thumbprint is sourced from `platform-config.json` `BootstrapThumbprint` (the same cert file is reused on both Bootstrap and Modern SPNs) and is populated only when the cert is actually installed locally (`Cert:\LocalMachine\My` or `Cert:\CurrentUser\My`) AND not expired. So `if ($global:HighPriv_Modern_CertificateThumbprint_Azure)` is the "can the Modern SPN do cert-app-only?" probe.
+
+2. **`PIM-Functions.psm1` Connect-ExchangeOnline call** now reads from `$global:HighPriv_Modern_ApplicationID_Azure` + `$global:HighPriv_Modern_CertificateThumbprint_Azure`. No `_O365` fallback -- if the Modern cert isn't usable, the engine throws with an actionable error that tells the operator exactly what to do.
+
+3. **v2.4.61's `$global:HighPriv_Bootstrap_*` globals are reverted** -- the bootstrap identity stays unexposed, restoring the original min-privilege boundary. `Disconnect-Platform` no longer references them.
+
+**One-time per tenant**, on the **HighPriv (Modern) SPN** (the operational identity -- `AutomateIT-HighPrivileged-Tier0-vm-automation-p` or equivalent in your tenant):
+
+| Type | What | Where |
+|---|---|---|
+| Credential | Upload the AutomateIT bootstrap `.cer` as an additional certificate credential (same cert file, second SPN registration). The cert stays in `Cert:\LocalMachine\My` from the bootstrap install -- no new cert provisioning. | Entra ID -> App registrations -> HighPriv SPN -> Certificates & secrets -> Upload certificate |
+| API permission | **Office 365 Exchange Online -> Exchange.ManageAsAppV2** (Application, admin-consented) | Entra ID -> App registrations -> HighPriv SPN -> API permissions |
+| Directory role | **Exchange Recipient Administrator** (or Exchange Administrator if you need broader EXO ops) | Entra ID -> Roles and administrators -> Exchange Recipient Administrator -> Add assignments |
+
+After granting, the next run of `PIM-Baseline-Management-CSV` will reach `Connect-ExchangeOnline` and authenticate as the HighPriv SPN via cert -- no browser, no interactive fallback. The legacy v1 `_O365` SPN can be deprovisioned.
+
+---
+
+## v2.4.61 -- SUPERSEDED by v2.4.62
+
+Initial pass at the EXO cert-auth fix wired permissions through the Bootstrap SPN. Architecturally wrong -- Bootstrap must stay min-privilege. **See v2.4.62 above for the corrected design (cert is reused on the HighPriv Modern SPN).** v2.4.61's `$global:HighPriv_Bootstrap_*` globals are removed in v2.4.62.
+
+---
+
+## v2.4.60 -- Pre-v2.0 config files auto-rename into the v2 .custom slot
+
+A customer migrating from PIM4EntraPS v1.x typically had filenames like `PIM-Definitions-Roles.csv` (no suffix). Copying those into the v2 `config/` folder used to do nothing — the engine looks for `<name>.custom.csv` and silently ignored the unsuffixed file. Combined with the v2.4.56 sample auto-bootstrap added two releases ago, the result was that v1 files sat untouched while the engine quietly created `<name>.custom.csv` from the example sample on top — overwriting nothing, but ignoring the customer's actual rows.
+
+`Get-PimCustomScript` and `Get-PimConfigCsv` now detect the unsuffixed pre-v2.0 file (`<name>.csv` / `<name>.ps1`) and `Move-Item` it into the `<name>.custom.csv` / `<name>.custom.ps1` slot before the sample bootstrap would fire. The move is in-place — your content is preserved, only the filename suffix changes. A loud `Write-Warning` notes the migration so the operator can confirm.
+
+Resolution priority (CSV; PS1 is the same minus the legacy step):
+
+| Step | What's checked | Action |
+|---|---|---|
+| 1 | `<name>.custom.csv` exists | Return as-is |
+| 2 | `<name>.csv` (v1, unsuffixed) | **Rename to `.custom.csv`**, warn, return (NEW in v2.4.60) |
+| 3 | `<name>.locked.csv` (pre-v2.3.0 shipped baseline) | Return with legacy warning (unchanged) |
+| 4 | `<name>.custom.sample.csv` exists | Copy to `.custom.csv`, warn, return (added in v2.4.56) |
+| 5 | None of the above | Throw |
+
+The order matters: customer data (v1 rename) wins over shipped templates (sample bootstrap), so a customer who copied their v1 export over never silently runs the engine against placeholder rows.
+
+If you've already let v2.4.56 auto-bootstrap a sample into `.custom.csv` on top of an existing v1 file, delete the unwanted `.custom.csv` and re-run -- step 2 will now pick the v1 file up cleanly.
+
+---
+
+## v2.4.58 -- Deploy-PimActivatorBackend now grants consent by default
+
+Tiny but high-impact polish on the activator setup flow. `Deploy-PimActivatorBackend.ps1` no longer needs `-GrantConsent` to do the obviously-right thing:
+
+```powershell
+# Before (v2.4.57 and earlier):
+.\Deploy-PimActivatorBackend.ps1 -GrantConsent
+
+# Now:
+.\Deploy-PimActivatorBackend.ps1
+```
+
+Why default-on: without admin consent, every user that opens the extension's onboarding wizard hits a per-user consent dialog they likely can't approve themselves -- and almost nobody actually wanted that outcome. The old default forced operators to remember `-GrantConsent` or end up with a half-deployed app reg.
+
+Skip the consent step (rare -- e.g. you don't hold Privileged Role Administrator and consent will land later via the Enterprise apps blade) with `-GrantConsent:$false`.
+
+---
+
+## v2.4.57 -- Activator deploy scripts default the constants
+
+`Deploy-PimActivatorBackend.ps1` and `Deploy-PimActivatorClient.ps1` no longer make you re-type values that are the same on every install of the upstream distribution:
+
+- `-ExtensionId` defaults to `eheocihmlppcophaeakmdenhgcookkab` (derived from the manifest `key` field, identical everywhere)
+- `-UpdateUrl` defaults to `https://knudsenmorten.github.io/PIM4EntraPS/updates.xml`
+
+So a fresh tenant is now just:
+
+```powershell
+Connect-MgGraph -Scopes 'Application.ReadWrite.All','AppRoleAssignment.ReadWrite.All','DelegatedPermissionGrant.ReadWrite.All'
+.\Deploy-PimActivatorBackend.ps1                # backend (combined with v2.4.58 = no args needed)
+.\Deploy-PimActivatorClient.ps1 -Scope Machine  # forcelist on un-managed servers
+```
+
+Override only if you fork the extension under your own signing key or self-host the CRX mirror -- that combination is the only case where the constants change.
+
+---
+
+## v2.4.56 -- First-run bootstrap: missing .custom files auto-copy from samples
+
+A cold install of PIM4EntraPS on a new customer used to fail on the first launcher invocation with "Get-PimConfigCsv: 'PIM-Definitions-Departments.custom.csv' not found. Copy '...custom.sample.csv' to '...custom.csv' and edit it." -- once for each missing file. Ten-plus CSVs + a few `.ps1` scripts = a tedious manual copy chain before the engine would even start.
+
+`Get-PimCustomScript` and `Get-PimConfigCsv` (engine/_shared/PIM-Functions.psm1) now bootstrap a missing `.custom.*` from its `.custom.sample.*` sibling on first miss, emit a loud `Write-Warning`, and continue. The warning explicitly says the sample is template/example data, not production rows -- so operators know they MUST review the freshly-bootstrapped files before relying on subsequent runs.
+
+If no sample exists alongside, behavior is unchanged: hard throw with the missing-file path. The legacy `.locked.csv` pre-v2.3.0 fallback (with its existing one-time warning) still wins over the sample bootstrap.
 
 ---
 
