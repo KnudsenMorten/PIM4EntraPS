@@ -45,12 +45,18 @@ async function loadConfig() {
     ['userTenantId','userClientId','userDefaultJustification','userDefaultDurationHours'], r))
 
   if (u.userClientId && KNOWN_BAD_LEGACY_CLIENTIDS.includes(String(u.userClientId).toLowerCase())) {
-    console.warn('[PIM Activator] purging legacy bad userClientId ' + u.userClientId + ' from chrome.storage.local and re-running onboarding')
+    console.warn('[PIM Activator] purging legacy bad userClientId ' + u.userClientId + ' from chrome.storage.local + reloading extension to evict stale MV3 service worker')
     await new Promise(r => chrome.storage.local.remove([
       'userTenantId','userClientId',
       'refreshToken','accessToken','accessTokenExpiry',
       'armAccessToken','armAccessTokenExpiry','account'
     ], r))
+    // chrome.runtime.reload() hard-restarts the extension including the
+    // MV3 service worker. Without this, popup.js could see the purge but
+    // background.js (the bootstrap sign-in) would still be the stale
+    // v1.4.x build that uses the bad upstream clientId, and the next
+    // sign-in attempt would AADSTS700016 again. Reload kills the SW too.
+    try { chrome.runtime.reload() } catch (e) { /* not always available; falls through to onboarding render */ }
     return { tenantId: '', clientId: '', defaultJustification: '', defaultDurationHours: 0 }
   }
 

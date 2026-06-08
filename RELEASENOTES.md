@@ -1,9 +1,10 @@
 # Release notes for PIM4EntraPS
 
-## v2.4.84
+## v2.4.85
 
 Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monorepo:
 
+- release: PIM4EntraPS v2.4.85 + extension v1.5.9 - hard-evict stale MV3 service worker on legacy-clientId detect (popup.js calls chrome.runtime.reload + Update script wipes Service Worker dir) (cba9c04b)
 - release: PIM4EntraPS v2.4.84 - trim popup.js comment noise around legacy-clientId sentinel so casual grep surfaces only the single sentinel entry (no behaviour change, ext stays v1.5.8) (bef4c339)
 - release: PIM4EntraPS v2.4.83 + extension v1.5.8 - auto-purge legacy bad userClientId (e96afaa6) from chrome.storage on load + block re-save in onboarding wizard (133fe3a5)
 - release: PIM4EntraPS v2.4.82 + extension v1.5.7 - version badge actually renders (separate version-badge.js loaded synchronously from popup.html, sidesteps popup.js onboarding-park trap that blocked the previous IIFE) (65167d60)
@@ -33,13 +34,29 @@ Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monor
 - release: PIM4EntraPS v2.4.58 - Deploy-PimActivatorBackend -GrantConsent default ON (2803a811)
 - release: PIM4EntraPS v2.4.57 - default ExtensionId + UpdateUrl in Deploy-PimActivator* scripts (473969c8)
 - release: PIM4EntraPS v2.4.56 - auto-bootstrap missing .custom config files from samples (2855fbd6)
-- release: PIM Activator extension v1.4.6 -> v1.4.9 (39e0920d)
 
 ---
 
 # Release notes -- PIM4EntraPS
 
 > **Curated changelog.** The publish workflow auto-prepends recent monorepo commits as a raw activity log; this file is the human-friendly narrative on top.
+
+---
+
+## v2.4.85 -- PIM Activator extension v1.5.9: hard-evict stale MV3 service worker on legacy-clientId detect
+
+v1.5.8's chrome.storage purge fired (popup.js code-side guard), but customers continued to see `client_id=e96afaa6` in OAuth URLs. Root cause: **MV3 split-personality cache.** Chrome MV3 keeps two completely separate update tracks:
+
+- **Popup files** (`popup.html` + `popup.js`) re-read from disk on every popup click. They updated to v1.5.8 cleanly.
+- **Service worker** (`background.js`) persists in `Service Worker\Database\` LevelDB *until idle for ~5 min* OR browser fully restarted. Customer's SW was still v1.4.x with `BOOTSTRAP_CLIENT_ID = 'e96afaa6'`. The popup-side purge of `userClientId` was fine, but the bootstrap sign-in that runs in the SW still went to the bad clientId.
+
+**Two-layer fix (so this becomes truly self-healing on every customer):**
+
+1. **`popup.js` purge handler now also calls `chrome.runtime.reload()`** -- hard-restarts the entire extension including the MV3 service worker, swapping in the new background.js immediately. Without this, the popup would purge storage but the bootstrap sign-in (which runs in the stale SW) would still use the bad clientId on the very next click.
+
+2. **`Update-PimActivator-Extension.ps1` now nukes `<UserData>\Service Worker\` dir** -- after the existing extension-binary + Local Extension Settings wipe, the script removes the entire profile-wide Service Worker registration cache (`Database\` + `ScriptCache\`). On next Edge launch, every extension + site re-registers its SW from scratch -- including PIM Activator, which picks up the freshly-installed background.js. Brute-force but reliable.
+
+Operationally for stuck customers: `pwsh Update-PimActivator-Extension.ps1` once is now guaranteed to land them on the latest SW. After that, the v1.5.9 popup guard handles every future case automatically.
 
 ---
 

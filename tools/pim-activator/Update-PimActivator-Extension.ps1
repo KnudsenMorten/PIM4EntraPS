@@ -292,6 +292,33 @@ foreach ($b in $browsers) {
     }
 }
 
+# Brute-force nuke MV3 service worker registration cache. Chromium stores
+# extension service workers under `Service Worker\Database\` (LevelDB with
+# registration metadata) and `Service Worker\ScriptCache\` (the cached SW
+# script bytes). When the extension binary is replaced on disk but the SW
+# registration in this LevelDB still points at the OLD version, Chrome
+# happily resurrects the old service worker on next launch -- which is
+# why customer browsers kept signing in with the upstream e96afaa6 client
+# even after the extension binary itself had updated. These dirs are
+# SHARED across all extensions + websites in the profile, so wiping them
+# also forces every other site/extension to re-register its SW on next
+# launch. Acceptable trade-off in a "force the PIM Activator to the
+# absolute latest" maintenance op.
+Write-Step "Nuking MV3 Service Worker registration cache"
+foreach ($b in $browsers) {
+    $swDir = Join-Path $b.UserData 'Service Worker'
+    if (Test-Path $swDir) {
+        try {
+            Remove-Item $swDir -Recurse -Force -ErrorAction Stop
+            Write-Ok "$($b.Name): removed $swDir (all SW registrations evicted; will re-register on next launch)"
+        } catch {
+            Write-Err "$($b.Name): Service Worker dir - $($_.Exception.Message)"
+        }
+    } else {
+        Write-Warn "$($b.Name): no Service Worker dir to evict"
+    }
+}
+
 if ($NoRestart) {
     Write-Step "Done - browser not restarted (-NoRestart)"
     Write-Ok "Launch Edge/Chrome yourself; forcelist will pull the latest CRX."
