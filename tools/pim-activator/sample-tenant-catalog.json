@@ -1,0 +1,10 @@
+[
+  {
+    "name":        "Contoso",
+    "tenantId":    "00000000-0000-0000-0000-000000000000",
+    "clientId":    "00000000-0000-0000-0000-000000000000",
+    "prefix":      "PIM-",
+    "entraPrefix": ["PIM-Entra", "PIM-AAD"],
+    "azurePrefix": ["PIM-Azure", "PIM-AzRes"]
+  }
+]
