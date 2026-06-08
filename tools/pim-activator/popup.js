@@ -43,15 +43,39 @@ const KNOWN_BAD_LEGACY_CLIENTIDS = [
 // v1.6.0+ multi-tenant catalog support.
 // Catalog entry shape:
 //   {
-//     name:                  "NunaGreen",
+//     name:                  "Contoso",
 //     tenantId:              "<GUID>",
 //     clientId:              "<GUID>",
 //     defaultJustification:  "Change in infrastructure",   // optional
 //     defaultDurationHours:  8,                            // optional
-//     groupNameFilter:       "^PIM-",                      // optional regex
+//     // ----- Naming-convention shortcuts (v1.6.1+, admin-friendly) -----
+//     // prefix / entraPrefix / azurePrefix accept either a literal string
+//     // or a string[] of literal alternatives. Internally we escape the
+//     // literals + wrap them as a regex. Pick whichever matches your
+//     // tenant's naming convention; the regex fields below are advanced
+//     // power-user overrides.
+//     prefix:                "PIM-",                       // -> groupNameFilter = "^PIM-"
+//     entraPrefix:           ["PIM-Entra","PIM-AAD"],      // -> entraGroupRegex = "(PIM-Entra|PIM-AAD)"
+//     azurePrefix:           ["PIM-Azure","PIM-AzRes"],    // -> azureGroupRegex = "(PIM-Azure|PIM-AzRes)"
+//     // ----- Advanced regex overrides (raw, win over the prefix shortcuts) -----
+//     groupNameFilter:       "^PIM-",                      // optional regex; overrides `prefix`
 //     entraGroupRegex:       "Entra",                      // optional regex
 //     azureGroupRegex:       "(AzRes|Azure)"               // optional regex
 //   }
+
+// Build a regex string from either a literal prefix string OR a string[] of
+// literals. Returns '' if input is empty/invalid.
+function _prefixToRegex(p, anchorStart) {
+  if (!p) return ''
+  const arr = Array.isArray(p) ? p : [String(p)]
+  const escaped = arr
+    .map(s => String(s || '').trim())
+    .filter(s => s.length > 0)
+    .map(s => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
+  if (escaped.length === 0) return ''
+  const body = escaped.length === 1 ? escaped[0] : '(' + escaped.join('|') + ')'
+  return anchorStart ? '^' + body : body
+}
 //
 // Sources, merged in order (later overrides earlier on the same tenantId):
 //   1. chrome.storage.managed.tenantCatalog  (Intune / GPO / HKLM-pushed,
@@ -148,6 +172,13 @@ async function loadConfig() {
       await new Promise(r => chrome.storage.local.set({ activeTenantId: activeId }, r))
     }
     if (active) {
+      // Resolve admin-friendly prefix shortcuts into the existing regex fields
+      // (advanced regex always wins). Mutates a shallow copy of `active`.
+      active = Object.assign({}, active)
+      if (!active.groupNameFilter && active.prefix)      active.groupNameFilter = _prefixToRegex(active.prefix, true)
+      if (!active.entraGroupRegex && active.entraPrefix) active.entraGroupRegex = _prefixToRegex(active.entraPrefix, false)
+      if (!active.azureGroupRegex && active.azurePrefix) active.azureGroupRegex = _prefixToRegex(active.azurePrefix, false)
+
       // Restore this customer's cached token bundle into the legacy keys the
       // rest of popup.js already reads. Switching customers replaces these.
       const tokens = (u.tenantTokens && typeof u.tenantTokens === 'object')
@@ -273,11 +304,12 @@ function renderOnboarding(currentCfg) {
       '<div style="font-size:12.5px;color:#166534;font-weight:600;margin-bottom:6px;">Import tenant catalog (MSP / multi-tenant)</div>' +
       '<div style="font-size:11px;color:#15803d;margin-bottom:8px;line-height:1.45;">' +
         'Paste a JSON array of tenants below to bulk-onboard. Each entry: ' +
-        '<code style="background:#ffffff;padding:1px 3px;border-radius:3px;">{name, tenantId, clientId, defaultJustification?, defaultDurationHours?, groupNameFilter?, entraGroupRegex?, azureGroupRegex?}</code>. ' +
+        '<code style="background:#ffffff;padding:1px 3px;border-radius:3px;">{name, tenantId, clientId, defaultJustification?, defaultDurationHours?, prefix?, entraPrefix?, azurePrefix?}</code>. ' +
+        'Prefix fields accept a string OR string[]. ' +
         'After import the picker appears above. ' +
         '<strong>Tip:</strong> Intune admins can push the same catalog machine-wide via Settings Catalog -> Configure managed extensions -> key <code style="background:#ffffff;padding:1px 3px;border-radius:3px;">tenantCatalog</code>.' +
       '</div>' +
-      '<textarea id="ob-catalog-json" rows="5" placeholder=\'[{"name":"NunaGreen","tenantId":"00000000-0000-0000-0000-000000000000","clientId":"00000000-0000-0000-0000-000000000000","groupNameFilter":"^PIM-"}]\' style="width:100%;box-sizing:border-box;font-family:monospace;font-size:11px;background:#ffffff;border:1px solid #86efac;border-radius:5px;padding:6px 7px;margin-bottom:8px;"></textarea>' +
+      '<textarea id="ob-catalog-json" rows="6" placeholder=\'[{"name":"Contoso","tenantId":"00000000-0000-0000-0000-000000000000","clientId":"00000000-0000-0000-0000-000000000000","prefix":"PIM-","entraPrefix":["PIM-Entra","PIM-AAD"],"azurePrefix":["PIM-Azure","PIM-AzRes"]}]\' style="width:100%;box-sizing:border-box;font-family:monospace;font-size:11px;background:#ffffff;border:1px solid #86efac;border-radius:5px;padding:6px 7px;margin-bottom:8px;"></textarea>' +
       '<button id="ob-catalog-import" class="primary" style="font-size:12px;">Import tenant catalog</button>'
     document.getElementById('ob-catalog-import').onclick = async () => {
       const ta = document.getElementById('ob-catalog-json')
@@ -294,12 +326,18 @@ function renderOnboarding(currentCfg) {
         const cid = String(entry.clientId || '').trim().toLowerCase()
         if (!isGuidStr(tid) || !isGuidStr(cid)) { showErr('Entry "' + (entry.name || tid) + '" has invalid tenantId or clientId.'); return }
         if (KNOWN_BAD_LEGACY_CLIENTIDS.includes(cid)) { showErr('Entry "' + (entry.name || tid) + '" uses the known-bad upstream-dev clientId. Replace with your customer-tenant PIM Activator app reg appId.'); return }
+        const _strOrArr = (v) => (typeof v === 'string' || Array.isArray(v)) ? v : undefined
         cleaned.push({
           name:                 String(entry.name || '').trim() || tid,
           tenantId:             tid,
           clientId:             cid,
           defaultJustification: typeof entry.defaultJustification === 'string' ? entry.defaultJustification : undefined,
           defaultDurationHours: typeof entry.defaultDurationHours === 'number' ? entry.defaultDurationHours : undefined,
+          // Admin-friendly prefix shortcuts (v1.6.1+)
+          prefix:               _strOrArr(entry.prefix),
+          entraPrefix:          _strOrArr(entry.entraPrefix),
+          azurePrefix:          _strOrArr(entry.azurePrefix),
+          // Advanced raw-regex overrides
           groupNameFilter:      typeof entry.groupNameFilter      === 'string' ? entry.groupNameFilter      : undefined,
           entraGroupRegex:      typeof entry.entraGroupRegex      === 'string' ? entry.entraGroupRegex      : undefined,
           azureGroupRegex:      typeof entry.azureGroupRegex      === 'string' ? entry.azureGroupRegex      : undefined,
