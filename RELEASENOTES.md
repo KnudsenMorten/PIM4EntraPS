@@ -1,9 +1,10 @@
 # Release notes for PIM4EntraPS
 
-## v2.4.89
+## v2.4.90
 
 Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monorepo:
 
+- release: PIM4EntraPS v2.4.90 - Push-PimActivatorTenantCatalogIntune.ps1 (native Intune Custom Configuration Profile via OMA-URI + Registry CSP) for chrome.storage.managed tenant catalog push + sample JSON template (a718097b)
 - release: PIM4EntraPS v2.4.89 + extension v1.6.2 - admin-friendly prefix shortcuts in catalog entries + scrub customer name from sample (ba82aaf4)
 - release: PIM4EntraPS v2.4.88 + extension v1.6.0 - tenant catalog + header switcher for MSP / one-admin-many-tenants workflow (538f6803)
 - release: PIM4EntraPS v2.4.87 + extension v1.5.11 - auto-discover via /.well-known/pim-activator.json on corporate domain (zero-OAuth, per-customer naming-convention regexes in same JSON) (b0d213ba)
@@ -33,13 +34,53 @@ Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monor
 - release: PIM4EntraPS v2.4.63 - EXO auto-resolves -Organization from MgGraph (5dffb3d3)
 - release: PIM4EntraPS v2.4.62 - route EXO cert auth through HighPriv Modern SPN (supersedes v2.4.61) (67a7b836)
 - release: PIM4EntraPS v2.4.61 + AutomateITPS bootstrap-cert globals (bf262e1b)
-- release: PIM4EntraPS v2.4.60 - auto-rename pre-v2.0 unsuffixed config files (a65dd161)
 
 ---
 
 # Release notes -- PIM4EntraPS
 
 > **Curated changelog.** The publish workflow auto-prepends recent monorepo commits as a raw activity log; this file is the human-friendly narrative on top.
+
+---
+
+## v2.4.90 -- Push-PimActivatorTenantCatalogIntune.ps1: native Intune Custom Configuration Profile (OMA-URI + Registry CSP) for tenant catalog push
+
+There is **no built-in Settings Catalog template** for arbitrary self-hosted Edge extensions' `chrome.storage.managed` data -- Microsoft only exposes 3rd-party extension policies for Edge Add-ons Store-published extensions. For PIM Activator (self-hosted CRX) the standard ways to push the registry value `chrome.storage.managed.tenantCatalog` reads from are:
+
+| Path | "Standard" | Native Intune | Continuously enforced |
+|---|---|---|---|
+| Custom Configuration Profile + OMA-URI + Registry CSP (this script) | Yes | Yes | Yes |
+| PowerShell remediation script | Less | Sort of | No (runs on schedule) |
+| Custom ADMX ingestion | Most | Yes | Yes (heavy to author) |
+
+Picked the OMA-URI / Registry CSP path -- creates a single `windows10CustomConfiguration` with one OMA-URI line per browser (Edge + Chrome by default), value = JSON-encoded tenant catalog. Intune writes the registry value on every device sync and re-enforces if anything overwrites it.
+
+**Idempotent:** lookup by display name, PATCH if exists, POST if new. Re-running with an updated catalog file replaces the value in place.
+
+**Use:**
+```powershell
+Push-PimActivatorTenantCatalogIntune.ps1 -CatalogJsonPath .\my-tenants.json
+```
+A `sample-tenant-catalog.json` ships alongside as a fill-in template.
+
+**Schema** (each array element):
+```json
+{
+  "name":        "Contoso",
+  "tenantId":    "<GUID>",
+  "clientId":    "<GUID>",
+  "prefix":      "PIM-",
+  "entraPrefix": ["PIM-Entra","PIM-AAD"],
+  "azurePrefix": ["PIM-Azure","PIM-AzRes"]
+}
+```
+
+The extension reads `chrome.storage.managed.tenantCatalog` on every popup load, merges with `chrome.storage.local.tenantCatalog` (manually-imported entries), and renders the header tenant-switcher dropdown.
+
+**Verify on a target device after Intune sync:**
+```powershell
+Get-ItemProperty -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Edge\3rdparty\extensions\eheocihmlppcophaeakmdenhgcookkab\policy' -Name tenantCatalog
+```
 
 ---
 
