@@ -27,18 +27,17 @@
 // legacy paths (window.PIM_CONFIG from config.js + chrome.storage.managed
 // from Intune / GPO push) so there is exactly ONE source of truth and no
 // silent override surprises.
-// Sentinel list of legacy clientIds pre-v1.5.0 onboarding could have
-// written to chrome.storage.local as `userClientId`. v1.4.x bootstrapped
-// against the upstream dev tenant and saved the dev's own app-reg appId
-// as the user's clientId; any of those values in chrome.storage now
-// produces AADSTS700016 against every other tenant. Purged on load so
-// the onboarding wizard re-runs and discovers the CUSTOMER tenant's
-// actual PIM Activator SPN. The literal GUID below is required for the
-// equality check at the bottom of loadConfig + the write-guard in the
-// onboarding-save handler -- it is NOT a live clientId reference.
-const KNOWN_BAD_LEGACY_CLIENTIDS = [
-  'e96afaa6-1c00-4320-9a4c-334558138e09',
-]
+// Obsolete sentinel (kept empty for back-compat with all the call sites
+// that reference it). In v1.5.8 we listed the dev-tenant clientId here so
+// stale chrome.storage.local entries from v1.4.x onboarding (which had a
+// bug that saved the dev's clientId into customer tenants) were auto-
+// purged. The v1.6+ catalog model binds tenantId+clientId together per
+// entry, so the same clientId is legitimately valid in the tenant that
+// owns it -- a global ban filters it out everywhere, which is wrong.
+// Empty array keeps all the call-sites (loadConfig, readMergedCatalog,
+// onboarding-save) running as no-ops. Add a GUID here only if a new
+// global-ban scenario emerges.
+const KNOWN_BAD_LEGACY_CLIENTIDS = []
 
 // v1.6.0+ multi-tenant catalog support.
 // Catalog entry shape:
