@@ -1,9 +1,10 @@
 # Release notes for PIM4EntraPS
 
-## v2.4.83
+## v2.4.84
 
 Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monorepo:
 
+- release: PIM4EntraPS v2.4.84 - trim popup.js comment noise around legacy-clientId sentinel so casual grep surfaces only the single sentinel entry (no behaviour change, ext stays v1.5.8) (bef4c339)
 - release: PIM4EntraPS v2.4.83 + extension v1.5.8 - auto-purge legacy bad userClientId (e96afaa6) from chrome.storage on load + block re-save in onboarding wizard (133fe3a5)
 - release: PIM4EntraPS v2.4.82 + extension v1.5.7 - version badge actually renders (separate version-badge.js loaded synchronously from popup.html, sidesteps popup.js onboarding-park trap that blocked the previous IIFE) (65167d60)
 - release: PIM4EntraPS v2.4.81 + extension v1.5.6 - scrub historical e96af GUID from background.js comment so CRX binary contains zero trace (5732c210)
@@ -33,13 +34,20 @@ Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monor
 - release: PIM4EntraPS v2.4.57 - default ExtensionId + UpdateUrl in Deploy-PimActivator* scripts (473969c8)
 - release: PIM4EntraPS v2.4.56 - auto-bootstrap missing .custom config files from samples (2855fbd6)
 - release: PIM Activator extension v1.4.6 -> v1.4.9 (39e0920d)
-- release: PIM Activator extension v1.4.3 -> v1.4.6 (d462d1bf)
 
 ---
 
 # Release notes -- PIM4EntraPS
 
 > **Curated changelog.** The publish workflow auto-prepends recent monorepo commits as a raw activity log; this file is the human-friendly narrative on top.
+
+---
+
+## v2.4.84 -- popup.js comment hygiene around the legacy-clientId sentinel
+
+Pure comment-noise reduction around `KNOWN_BAD_LEGACY_CLIENTIDS`. Previously the explanatory paragraph repeated the literal `e96afaa6-...` GUID three times to walk through the failure mode -- meaning a quick `grep e96af` on the extension folder lit up multiple unrelated lines and made it look like the bad value was still being used. Trimmed the comment to one sentence + one fact ("the literal GUID below is required for the equality check, NOT a live reference") so future greps surface ONLY the single sentinel-array entry that the load + save guards key off.
+
+No behaviour change. Extension version unchanged at v1.5.8.
 
 ---
 
