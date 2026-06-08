@@ -1,9 +1,10 @@
 # Release notes for PIM4EntraPS
 
-## v2.4.79
+## v2.4.80
 
 Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monorepo:
 
+- release: PIM4EntraPS v2.4.80 + extension v1.5.5 - single-line footer with attribution + GitHub/Report chips, MVP recoloured blue + comma form, GitHub link to repo (d49b7653)
 - release: PIM4EntraPS v2.4.79 - Deploy-PimActivatorClient writes ExtensionInstallAllowlist + ExtensionInstallSources alongside ExtensionInstallForcelist + republished extension v1.5.2 to gh-pages (85325930)
 - release: PIM4EntraPS v2.4.78 + extension v1.5.2 - manifest homepage_url -> GitHub repo (a270e8cf)
 - release: PIM4EntraPS v2.4.77 + extension v1.5.1 - surface developer/contact info via manifest author+homepage_url + 2-line popup footer with MVP badge + email/blog/GitHub/YouTube/bug-report links (254a7072)
@@ -33,13 +34,31 @@ Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monor
 - chore(pim-activator): trim orphaned managed-policy code + rename dev script + rewrite README (552d0185)
 - release: PIM Activator extension v1.4.2 - onboarding wizard + direct PIM + favorites (b1987c59)
 - release: PIM4EntraPS v2.4.55 - release notes rewritten for readability (fe342f9e)
-- release: PIM4EntraPS v2.4.54 - READMEs catch up on the v2.4.53 PIM Manager restyle (be852908)
 
 ---
 
 # Release notes -- PIM4EntraPS
 
 > **Curated changelog.** The publish workflow auto-prepends recent monorepo commits as a raw activity log; this file is the human-friendly narrative on top.
+
+---
+
+## v2.4.80 -- PIM Activator extension v1.5.5: single-line footer with all attribution + chips, blue MVP
+
+Consolidated three quick iterations (v1.5.3 -> v1.5.4 -> v1.5.5) into the final footer:
+
+> **PIM ACTIVATOR**, part of **PIM4EntraPS** -- Developed by **Morten Knudsen**, **Microsoft MVP** | &#128279; **GitHub** | &#128027; **Report bug**
+
+**Changes vs v1.5.2:**
+
+- **Footer collapsed from 2 rows to 1.** GitHub + Report bug chips moved up onto the same row as the attribution line (`flex-wrap` so it gracefully reflows on narrow popups).
+- **Removed:** YouTube chip, `mailto:` email, blog link (`mortenknudsen.net`).
+- **"Microsoft MVP" recoloured** from Red (`#cf222e`) -> Blue (`#0969da`, same as the other footer links). Square brackets dropped: `[Microsoft MVP]` -> `, Microsoft MVP`.
+- **GitHub link** now points to the repo (`https://github.com/KnudsenMorten/PIM4EntraPS`), not the user profile (`https://github.com/KnudsenMorten`).
+- **`manifest.json` `author`** dropped the email -> `"Morten Knudsen (Microsoft MVP)"`.
+- **`manifest.json` `homepage_url`** -> `https://github.com/KnudsenMorten/PIM4EntraPS` (was the blog URL); `chrome://extensions` "Visit website" now lands on the repo.
+
+Republished CRX + updates.xml to gh-pages -- customer browsers will fetch v1.5.5 within Chromium's normal auto-update window (~5 min after launch, then every ~5h).
 
 ---
 
