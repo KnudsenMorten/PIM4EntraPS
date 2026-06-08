@@ -1,9 +1,10 @@
 # Release notes for PIM4EntraPS
 
-## v2.4.88
+## v2.4.89
 
 Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monorepo:
 
+- release: PIM4EntraPS v2.4.89 + extension v1.6.2 - admin-friendly prefix shortcuts in catalog entries + scrub customer name from sample (ba82aaf4)
 - release: PIM4EntraPS v2.4.88 + extension v1.6.0 - tenant catalog + header switcher for MSP / one-admin-many-tenants workflow (538f6803)
 - release: PIM4EntraPS v2.4.87 + extension v1.5.11 - auto-discover via /.well-known/pim-activator.json on corporate domain (zero-OAuth, per-customer naming-convention regexes in same JSON) (b0d213ba)
 - release: PIM4EntraPS v2.4.86 + extension v1.5.10 - bootstrap discovery switched to OAuth2 device-code flow (fixes AADSTS50011, auto-discover now works in any tenant without per-tenant app-reg setup) (3658f74f)
@@ -33,13 +34,32 @@ Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monor
 - release: PIM4EntraPS v2.4.62 - route EXO cert auth through HighPriv Modern SPN (supersedes v2.4.61) (67a7b836)
 - release: PIM4EntraPS v2.4.61 + AutomateITPS bootstrap-cert globals (bf262e1b)
 - release: PIM4EntraPS v2.4.60 - auto-rename pre-v2.0 unsuffixed config files (a65dd161)
-- release: PIM4EntraPS v2.4.59 - docs catch-up for v2.4.56-58 (1f8eb644)
 
 ---
 
 # Release notes -- PIM4EntraPS
 
 > **Curated changelog.** The publish workflow auto-prepends recent monorepo commits as a raw activity log; this file is the human-friendly narrative on top.
+
+---
+
+## v2.4.89 -- PIM Activator extension v1.6.2: admin-friendly prefix shortcuts (`prefix`/`entraPrefix`/`azurePrefix`) in catalog entries
+
+v1.6.0 required raw regex (`groupNameFilter`, `entraGroupRegex`, `azureGroupRegex`) in catalog entries -- error-prone for admins who think in literal prefixes.
+
+**Added three optional literal-prefix fields** (each accepts a string OR string[]):
+
+| Catalog field | Internal regex it builds | Wins when |
+|---|---|---|
+| `prefix: "PIM-"` | `^PIM-` (anchored start) | No explicit `groupNameFilter` |
+| `entraPrefix: ["PIM-Entra","PIM-AAD"]` | `(PIM-Entra\|PIM-AAD)` | No explicit `entraGroupRegex` |
+| `azurePrefix: ["PIM-Azure","PIM-AzRes"]` | `(PIM-Azure\|PIM-AzRes)` | No explicit `azureGroupRegex` |
+
+Literals are regex-escaped (`.*+?^${}()|[\]\\`) before wrapping. Explicit `*Regex` fields still win when both are present (advanced override).
+
+Wizard placeholder + import-help text updated to show the new shorter shape. Backward compatible -- v1.6.0 catalogs with raw `groupNameFilter` etc. still work.
+
+Sample example string in the wizard placeholder switched from a real customer name to `Contoso` (per "no customer names in docs / code samples" rule).
 
 ---
 
@@ -60,7 +80,7 @@ After exhausting every auto-discovery path (OAuth bootstrap = 700016 in customer
 
 ```json
 {
-  "name":                 "NunaGreen",
+  "name":                 "Contoso",
   "tenantId":             "00000000-0000-0000-0000-000000000000",
   "clientId":             "00000000-0000-0000-0000-000000000000",
   "defaultJustification": "Change in infrastructure",
@@ -92,7 +112,7 @@ After exhausting every auto-discovery path (OAuth bootstrap = 700016 in customer
 
 **Single-tenant deployments:** unchanged. If you don't import a catalog, the legacy wizard fields work as before. Existing `userTenantId` / `userClientId` etc. in chrome.storage.local are honored.
 
-**For your dev test (mortenknudsen.net + NunaGreen):**
+**For your dev test (mortenknudsen.net + Contoso):**
 
 1. Edge auto-fetches v1.6.0 from gh-pages within ~5 min after restart (or run `Update-PimActivator-Extension.ps1` to force).
 2. Click PIM Activator icon -> onboarding wizard appears.
@@ -100,7 +120,7 @@ After exhausting every auto-discovery path (OAuth bootstrap = 700016 in customer
    ```json
    [
      {"name":"mortenknudsen.net","tenantId":"<your-dev-tenant-GUID>","clientId":"<your-PIM-Activator-appId>","groupNameFilter":"^PIM-"},
-     {"name":"NunaGreen","tenantId":"<NunaGreen-tenant-GUID>","clientId":"<NunaGreen-PIM-Activator-appId>","groupNameFilter":"^PIM-"}
+     {"name":"Contoso","tenantId":"<Contoso-tenant-GUID>","clientId":"<Contoso-PIM-Activator-appId>","groupNameFilter":"^PIM-"}
    ]
    ```
 4. Click "Import tenant catalog" -> picker appears -> pick a tenant -> "Use this tenant" -> runtime sign-in fires against THAT tenant's PIM Activator app reg (which has chromiumapp.org registered per Deploy-PimActivatorBackend.ps1).
