@@ -1,9 +1,10 @@
 # Release notes for PIM4EntraPS
 
-## v2.4.78
+## v2.4.79
 
 Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monorepo:
 
+- release: PIM4EntraPS v2.4.79 - Deploy-PimActivatorClient writes ExtensionInstallAllowlist + ExtensionInstallSources alongside ExtensionInstallForcelist + republished extension v1.5.2 to gh-pages (85325930)
 - release: PIM4EntraPS v2.4.78 + extension v1.5.2 - manifest homepage_url -> GitHub repo (a270e8cf)
 - release: PIM4EntraPS v2.4.77 + extension v1.5.1 - surface developer/contact info via manifest author+homepage_url + 2-line popup footer with MVP badge + email/blog/GitHub/YouTube/bug-report links (254a7072)
 - release: PIM4EntraPS v2.4.76 + extension v1.5.0 - tenant-portable bootstrap via Microsoft Graph CLI clientId + SPN substring discovery + Deploy-PimActivatorClient defaults to HKLM (3306ff77)
@@ -33,13 +34,36 @@ Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monor
 - release: PIM Activator extension v1.4.2 - onboarding wizard + direct PIM + favorites (b1987c59)
 - release: PIM4EntraPS v2.4.55 - release notes rewritten for readability (fe342f9e)
 - release: PIM4EntraPS v2.4.54 - READMEs catch up on the v2.4.53 PIM Manager restyle (be852908)
-- polish: PIM Manager New&clone tiles - branded blue cards with white text for stronger readability (4a9a69ea)
 
 ---
 
 # Release notes -- PIM4EntraPS
 
 > **Curated changelog.** The publish workflow auto-prepends recent monorepo commits as a raw activity log; this file is the human-friendly narrative on top.
+
+---
+
+## v2.4.79 -- Deploy-PimActivatorClient.ps1: belt-and-braces auto-update policies + gh-pages republish of extension v1.5.2
+
+Two related fixes for the "extension on my server is 2 versions behind" problem:
+
+**1. gh-pages refresh**
+
+The customer-facing extension is fetched from `https://knudsenmorten.github.io/PIM4EntraPS/updates.xml`, which lives on the `gh-pages` branch -- a separate publish step from the monorepo `main` commits. v1.5.0 / v1.5.1 / v1.5.2 changes landed on `main` but `gh-pages/updates.xml` was still advertising v1.4.9, so customer browsers polled the update URL and saw "you already have the latest" -- nothing to download. Republished gh-pages so `updates.xml` now advertises v1.5.2 and `pim-activator.crx` matches. GitHub Pages CDN takes ~1-5 min to fully propagate after a push; after that, every customer's next Edge / Chrome launch will fetch v1.5.2 within Chromium's normal auto-update window (~5 minutes after launch, then every ~5 hours).
+
+**2. Deploy-PimActivatorClient.ps1 now writes 3 policies, not 1**
+
+For each targeted browser (Edge / Chrome) under each scope root (HKLM / HKCU), the install path writes:
+
+| Subkey | Value | Why |
+|---|---|---|
+| `ExtensionInstallForcelist` | `<id>;<update_url>` | "Install + keep installed" -- the core force-install directive (unchanged). |
+| `ExtensionInstallAllowlist` | `<id>` | Defensive -- explicitly allows this id even if the admin has set `ExtensionInstallBlocklist=*`. No-op when no blocklist is in play. |
+| `ExtensionInstallSources` | `<scheme>://<host>/*` from `$UpdateUrl` | Defensive -- whitelists the host serving the CRX so hardened baselines that restrict `ExtensionInstallSources` don't silently block the download. Derived from `$UpdateUrl` so customers who self-host get the right pattern instead of a stale `knudsenmorten.github.io` one. |
+
+All three use the same deterministic slot number (`(hash(id) % 9000) + 1000`) so re-runs are idempotent and never collide with other policy-installed extensions in the same forcelist / allowlist / sources entries.
+
+`-Uninstall` was extended to remove the same slot from all three subkeys.
 
 ---
 
