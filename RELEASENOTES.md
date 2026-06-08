@@ -1,9 +1,10 @@
 # Release notes for PIM4EntraPS
 
-## v2.4.77
+## v2.4.78
 
 Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monorepo:
 
+- release: PIM4EntraPS v2.4.78 + extension v1.5.2 - manifest homepage_url -> GitHub repo (a270e8cf)
 - release: PIM4EntraPS v2.4.77 + extension v1.5.1 - surface developer/contact info via manifest author+homepage_url + 2-line popup footer with MVP badge + email/blog/GitHub/YouTube/bug-report links (254a7072)
 - release: PIM4EntraPS v2.4.76 + extension v1.5.0 - tenant-portable bootstrap via Microsoft Graph CLI clientId + SPN substring discovery + Deploy-PimActivatorClient defaults to HKLM (3306ff77)
 - release: PIM4EntraPS v2.4.75 - engine fixes: policy PATCH backtick + schedule preload + generic datetime + 36159-day bug + skip-line shows role/principal (c9f2f00f)
@@ -33,13 +34,18 @@ Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monor
 - release: PIM4EntraPS v2.4.55 - release notes rewritten for readability (fe342f9e)
 - release: PIM4EntraPS v2.4.54 - READMEs catch up on the v2.4.53 PIM Manager restyle (be852908)
 - polish: PIM Manager New&clone tiles - branded blue cards with white text for stronger readability (4a9a69ea)
-- release: PIM4EntraPS v2.4.53 - re-skin PIM Manager to match PIM Activator brand (light palette + branded blue PIM MANAGER banner) (085269d8)
 
 ---
 
 # Release notes -- PIM4EntraPS
 
 > **Curated changelog.** The publish workflow auto-prepends recent monorepo commits as a raw activity log; this file is the human-friendly narrative on top.
+
+---
+
+## v2.4.78 -- PIM Activator extension v1.5.2: manifest homepage_url points to the GitHub repo
+
+`chrome://extensions` "Visit website" link now lands on the source repo (`https://github.com/KnudsenMorten/PIM4EntraPS`) instead of the blog -- admins reviewing the extension can jump straight to the source / issues / release notes.
 
 ---
 
