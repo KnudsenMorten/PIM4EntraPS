@@ -263,9 +263,15 @@ function New-DefValue {
             value                         = [string]$Value
         }
     } else {
-        $slot = 1
+        # For non-explicit-value listBox (e.g. Chromium ExtensionInstallForcelist,
+        # ExtensionInstallSources), the Intune portal editor renders the `name`
+        # field as the row's visible data AND the Group Policy CSP write to the
+        # device's registry reads from `name` too. The `value` field is only
+        # meaningful for explicitValue=true listBoxes (key=>value pairs).
+        # Setting both to the same data covers both possibilities + matches
+        # what the portal shows after manual entry.
         $valuesList = @( foreach ($v in @($Value)) {
-            @{ name = ($slot++).ToString(); value = [string]$v }
+            @{ name = [string]$v; value = [string]$v }
         })
         @{
             '@odata.type'                = '#microsoft.graph.groupPolicyPresentationValueList'
