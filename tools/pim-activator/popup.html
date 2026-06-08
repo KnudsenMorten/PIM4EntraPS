@@ -130,6 +130,12 @@
 <header>
   <h1 id="popup-title">PIM Activator <span id="version-badge" style="display:inline-block;font-weight:600;font-size:11px;color:#ffffff;background:rgba(255,255,255,0.25);border:1px solid rgba(255,255,255,0.55);padding:2px 8px;border-radius:10px;margin-left:8px;letter-spacing:0.3px;text-transform:none;vertical-align:middle;">v?</span></h1>
   <script src="version-badge.js"></script>
+  <!-- v1.6.0+ customer switcher. Populated by popup.js setupCustomerSwitcher()
+       when chrome.storage[managed|local].customerCatalog has >=2 entries.
+       Hidden for single-customer / pre-onboarded installs. Picking an entry
+       sets activeCustomerId and reloads the popup against that customer. -->
+  <select id="customer-switcher" title="Switch tenant"
+          style="display:none;background:rgba(255,255,255,0.15);color:#ffffff;border:1px solid rgba(255,255,255,0.55);border-radius:5px;padding:3px 6px;font-size:11.5px;font-weight:600;margin-right:8px;cursor:pointer;max-width:170px;"></select>
   <div id="me"></div>
   <button id="sign-in" style="display:none">Sign in</button>
   <button id="sign-out" style="display:none">Sign out</button>

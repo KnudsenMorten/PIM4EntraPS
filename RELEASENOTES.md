@@ -1,9 +1,10 @@
 # Release notes for PIM4EntraPS
 
-## v2.4.87
+## v2.4.88
 
 Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monorepo:
 
+- release: PIM4EntraPS v2.4.88 + extension v1.6.0 - tenant catalog + header switcher for MSP / one-admin-many-tenants workflow (538f6803)
 - release: PIM4EntraPS v2.4.87 + extension v1.5.11 - auto-discover via /.well-known/pim-activator.json on corporate domain (zero-OAuth, per-customer naming-convention regexes in same JSON) (b0d213ba)
 - release: PIM4EntraPS v2.4.86 + extension v1.5.10 - bootstrap discovery switched to OAuth2 device-code flow (fixes AADSTS50011, auto-discover now works in any tenant without per-tenant app-reg setup) (3658f74f)
 - release: PIM4EntraPS v2.4.85 + extension v1.5.9 - hard-evict stale MV3 service worker on legacy-clientId detect (popup.js calls chrome.runtime.reload + Update script wipes Service Worker dir) (cba9c04b)
@@ -33,13 +34,81 @@ Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monor
 - release: PIM4EntraPS v2.4.61 + AutomateITPS bootstrap-cert globals (bf262e1b)
 - release: PIM4EntraPS v2.4.60 - auto-rename pre-v2.0 unsuffixed config files (a65dd161)
 - release: PIM4EntraPS v2.4.59 - docs catch-up for v2.4.56-58 (1f8eb644)
-- release: PIM4EntraPS v2.4.58 - Deploy-PimActivatorBackend -GrantConsent default ON (2803a811)
 
 ---
 
 # Release notes -- PIM4EntraPS
 
 > **Curated changelog.** The publish workflow auto-prepends recent monorepo commits as a raw activity log; this file is the human-friendly narrative on top.
+
+---
+
+## v2.4.88 -- PIM Activator extension v1.6.0: tenant catalog + header switcher for MSP / multi-tenant admins
+
+After exhausting every auto-discovery path (OAuth bootstrap = 700016 in customer tenants / Microsoft Graph CLI bootstrap = 50011 redirect URI / device code = CA-blocked / multi-tenant publisher app = ruled out / well-known URI = publicly enumerable / native messaging WAM = wrong context for an MSP connecting to 100 tenants from one machine), the right architecture for one-admin-multiple-tenants is **catalog + context switcher**, not discovery.
+
+**New storage model:**
+
+| Key | Source | Purpose |
+|---|---|---|
+| `chrome.storage.managed.tenantCatalog` | Intune Settings Catalog "Configure managed extensions" (JSON-encoded string) | Admin pushes the same catalog to all MSP machines |
+| `chrome.storage.local.tenantCatalog` | Manually imported via wizard | Per-Edge-profile additions / overrides |
+| `chrome.storage.local.activeTenantId` | Picked by user via header switcher | Which catalog entry is "now" |
+| `chrome.storage.local.tenantTokens` | Written after every sign-in, keyed by `tenantId` | Per-tenant refresh + access token cache; switching back is sub-second |
+
+**Catalog entry schema:**
+
+```json
+{
+  "name":                 "NunaGreen",
+  "tenantId":             "00000000-0000-0000-0000-000000000000",
+  "clientId":             "00000000-0000-0000-0000-000000000000",
+  "defaultJustification": "Change in infrastructure",
+  "defaultDurationHours": 8,
+  "groupNameFilter":      "^PIM-",
+  "entraGroupRegex":      "Entra",
+  "azureGroupRegex":      "(AzRes|Azure)"
+}
+```
+
+**Onboarding wizard (renderOnboarding) now branches three ways:**
+1. **Catalog has entries + no active selection**: shows a green "Pick a tenant" picker (dropdown of all catalog entries with their tenantId), with "Use this tenant" and "Clear local catalog" buttons.
+2. **Catalog empty**: shows "Import tenant catalog (MSP / multi-tenant)" with a textarea for pasting the JSON array + an Intune-tip box pointing at the same Settings Catalog key. Auto-discover legacy wizard remains below as a fallback for single-tenant deployments.
+3. **Catalog populated + active selection** (boot path): main UI loads with the active tenant's config.
+
+**Header tenant switcher** appears when catalog has >=2 entries. Picking a new entry:
+- Snapshots the current tenant's tokens into `tenantTokens[oldTid]`
+- Sets `activeTenantId = newTid`
+- Clears the in-flight token state
+- Reloads the popup -> loadConfig restores the new tenant's cached tokens (or triggers sign-in if none)
+
+**persistTokens** now ALSO writes into `tenantTokens[activeTenantId]` after every successful sign-in / refresh so switching back is instant.
+
+**Reset handler** wipes catalog + per-tenant tokens + legacy keys on confirm.
+
+**Footer** shows `{tenantName} Tenant: {tenantId} (reset)` -- the friendly customer name (from catalog) is prefixed if available, falls back to bare tenantId for legacy single-tenant installs.
+
+**For Intune-managed MSP fleets:** push the catalog once via Intune Settings Catalog -> Microsoft Edge -> Extensions -> Configure managed extensions -> key `tenantCatalog`, value = JSON-encoded string of the array. All your machines pick it up on next Intune sync (~8h, force from device for faster). Per-tenant active selection still happens locally via the header switcher (per-session).
+
+**Single-tenant deployments:** unchanged. If you don't import a catalog, the legacy wizard fields work as before. Existing `userTenantId` / `userClientId` etc. in chrome.storage.local are honored.
+
+**For your dev test (mortenknudsen.net + NunaGreen):**
+
+1. Edge auto-fetches v1.6.0 from gh-pages within ~5 min after restart (or run `Update-PimActivator-Extension.ps1` to force).
+2. Click PIM Activator icon -> onboarding wizard appears.
+3. Paste a 2-entry catalog into the green "Import tenant catalog" textarea:
+   ```json
+   [
+     {"name":"mortenknudsen.net","tenantId":"<your-dev-tenant-GUID>","clientId":"<your-PIM-Activator-appId>","groupNameFilter":"^PIM-"},
+     {"name":"NunaGreen","tenantId":"<NunaGreen-tenant-GUID>","clientId":"<NunaGreen-PIM-Activator-appId>","groupNameFilter":"^PIM-"}
+   ]
+   ```
+4. Click "Import tenant catalog" -> picker appears -> pick a tenant -> "Use this tenant" -> runtime sign-in fires against THAT tenant's PIM Activator app reg (which has chromiumapp.org registered per Deploy-PimActivatorBackend.ps1).
+5. Switch tenants anytime via the header dropdown -- tokens cached per tenant, sub-second switch when both already signed in.
+
+**Removed:** well-known URI fetch path in popup.js / background.js (kept the background.js file as the SW host, but the worker is now thin -- no discovery flow needed).
+
+**`Deploy-PimActivatorIntune.ps1` unchanged.** Re-running it just updates the existing forcelist profile (lookup by DisplayName, PATCH if exists). For Intune-push of the tenant catalog itself, use the standard Intune Settings Catalog flow described above; full automation of THAT push deferred to a future release.
 
 ---
 
