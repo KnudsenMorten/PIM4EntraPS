@@ -154,39 +154,10 @@
 <div id="onboarding" style="display:none;padding:16px;background:#ffffff;">
   <div style="font-size:15px;font-weight:600;color:#1a1a1a;margin-bottom:6px;">Welcome to PIM Activator</div>
   <div style="font-size:12.5px;color:#57606a;margin-bottom:12px;line-height:1.45;">
-    Let's set this up. Sign in to auto-discover your tenant + app registration, or fill in the fields below and click <strong>Save</strong>.
+    Either import a tenant catalog above (MSP / multi-tenant), OR fill in a single tenant manually below and click <strong>Save and continue</strong>.
   </div>
 
-  <!-- Auto-discover panel (v1.5.11+ -- well-known URI flow, no OAuth).
-       Workflow: user enters work email -> the worker GETs
-       https://<email-domain>/.well-known/pim4entraps-config.json (and a
-       www. fallback). The JSON must contain { tenantId, clientId } GUIDs
-       (optional defaultJustification, defaultDurationHours). The admin
-       publishes this file once on the corporate web domain. -->
-  <div id="ob-auto" style="margin-bottom:14px;padding:10px;background:#eef6ff;border:1px solid #b6dcfe;border-radius:6px;">
-    <div style="font-size:12.5px;color:#1a1a1a;font-weight:600;margin-bottom:4px;">Auto-discover (recommended)</div>
-    <div style="font-size:11.5px;color:#57606a;line-height:1.45;margin-bottom:8px;">
-      Enter your work email. The extension fetches <code>https://&lt;your-domain&gt;/.well-known/pim4entraps-config.json</code> and pre-fills the fields below. No sign-in or admin consent needed at this step.
-    </div>
-    <div style="display:flex;gap:8px;align-items:center;margin-bottom:8px;">
-      <input id="ob-auto-email" type="email" placeholder="admin@yourtenant.com" autocomplete="username" spellcheck="false"
-             style="flex:1;background:#ffffff;color:#1a1a1a;border:1px solid #d0d7de;border-radius:5px;padding:5px 7px;font-size:12px;">
-    </div>
-    <button id="ob-auto-start" class="primary">Auto-discover from corporate domain</button>
-
-    <!-- Discovery status surfaces here once kicked off. The worker writes
-         updates to chrome.storage.local.discoveryStatus and the popup
-         polls every ~1.5s; if the popup dies mid-flow, the next open
-         picks up where we left off. -->
-    <div id="ob-auto-device" style="display:none;margin-top:10px;padding:10px;background:#ffffff;border:1px solid #b6dcfe;border-radius:5px;">
-      <div id="ob-auto-status" style="font-size:12px;color:#0969da;font-weight:600;">Discovering...</div>
-      <div style="font-size:11px;color:#7d8590;margin-top:4px;line-height:1.45;">
-        Fetching config from your corporate domain. If discovery fails, just fill the fields below manually.
-      </div>
-    </div>
-  </div>
-
-  <div style="font-size:11px;color:#7d8590;text-transform:uppercase;letter-spacing:0.5px;margin:4px 0 8px;">Or enter manually</div>
+  <div style="font-size:11px;color:#7d8590;text-transform:uppercase;letter-spacing:0.5px;margin:4px 0 8px;">Single tenant -- manual entry</div>
 
   <div style="display:grid;grid-template-columns:auto 1fr;gap:8px 10px;align-items:center;">
     <label for="ob-tenant" style="font-size:11.5px;color:#57606a;">Tenant id</label>

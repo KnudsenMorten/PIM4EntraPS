@@ -1,9 +1,10 @@
 # Release notes for PIM4EntraPS
 
-## v2.4.91
+## v2.4.92
 
 Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monorepo:
 
+- release: PIM4EntraPS v2.4.92 + extension v1.6.4 - strip auto-discover panel + well-known URI flow + gut background.js to empty stub; reorder onboarding to catalog -> Welcome -> manual entry (c4c0b499)
 - release: PIM4EntraPS v2.4.91 + extension v1.6.3 - retire global KNOWN_BAD_LEGACY_CLIENTIDS ban; v1.6 catalog binds tenantId+clientId per-entry so the same GUID is valid in the tenant that owns it (cc3a7cae)
 - fix Test-PushTenantCatalog: explicit -Property projection + ServicePrincipal fallback so Get-MgApplication's default-projection AppId-drop in some SDK versions doesn't produce null clientId (c12c92a4)
 - add Test-PushTenantCatalog.ps1 - auto-discovers tenant + PIM Activator app reg in currently-connected Graph context, builds 1-entry catalog, hands off to Push-PimActivatorTenantCatalogIntune.ps1 (zero-typing first-test helper) (09c083f3)
@@ -33,13 +34,32 @@ Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monor
 - release: PIM4EntraPS v2.4.67 - Modern auth prefers cert; full EXO V3 module reset (717d5f2b)
 - release: PIM4EntraPS v2.4.66 - EXO V3 retry + verbose bootstrap + shared launcher banner across all 21 internal-vm launchers (d7516509)
 - release: PIM4EntraPS v2.4.65 + New-PlatformModernCert.ps1 provisioner (ecc7c9ec)
-- release: PIM4EntraPS v2.4.64 - Modern SPN cert sourced from KV, not from BootstrapThumbprint (101e2bfa)
 
 ---
 
 # Release notes -- PIM4EntraPS
 
 > **Curated changelog.** The publish workflow auto-prepends recent monorepo commits as a raw activity log; this file is the human-friendly narrative on top.
+
+---
+
+## v2.4.92 -- PIM Activator extension v1.6.4: strip the auto-discover panel + retire well-known URI flow + background.js gutted
+
+User report: the v1.6.3 onboarding wizard still showed the leftover "Auto-discover (recommended)" panel from v1.5.11 referencing `https://<your-domain>/.well-known/pim-activator.json` and "Discovery did not complete" errors. That flow was retired by the catalog model -- the panel was dead UI.
+
+**Removed:**
+- The entire `#ob-auto` blue panel + `ob-auto-email` input + `ob-auto-start` button + `ob-auto-device` status div from `popup.html`.
+- `processDiscoveryResult`, `startPolling`, `renderDeviceCode`, the `_lastDiscovery` stash, the on-load discovery-resume IIFE, and the `startBtn.onclick` -> `sendMessage cmd:start-discovery` handler from `popup.js` (~120 lines).
+- `background.js` runDiscovery, well-known fetch, OIDC tenant resolution, all of it. The file now contains a single comment block stating the SW has nothing to do -- the manifest still references it because Chromium MV3 requires a service_worker entry, but no listeners register.
+
+**Layout reordered as catalog -> Welcome -> manual entry:**
+- Top: green "Import tenant catalog" panel (injected by popup.js when no catalog yet, or "Pick a tenant" picker when catalog has entries)
+- Middle: "Welcome to PIM Activator" heading + new subtitle "Either import a tenant catalog above (MSP / multi-tenant), OR fill in a single tenant manually below and click Save and continue."
+- Bottom: "Single tenant -- manual entry" header + 4-input grid (tenantId / clientId / justification / duration)
+
+`onboarding-save` handler simplified -- no more `_lastDiscovery` dependency, regex fields default empty for the single-tenant path (catalog entries carry their own prefix/regex per-entry).
+
+Net: the wizard now has exactly two paths and no dead code.
 
 ---
 
