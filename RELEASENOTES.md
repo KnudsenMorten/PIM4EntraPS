@@ -1,9 +1,12 @@
 # Release notes for PIM4EntraPS
 
-## v2.4.90
+## v2.4.91
 
 Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monorepo:
 
+- release: PIM4EntraPS v2.4.91 + extension v1.6.3 - retire global KNOWN_BAD_LEGACY_CLIENTIDS ban; v1.6 catalog binds tenantId+clientId per-entry so the same GUID is valid in the tenant that owns it (cc3a7cae)
+- fix Test-PushTenantCatalog: explicit -Property projection + ServicePrincipal fallback so Get-MgApplication's default-projection AppId-drop in some SDK versions doesn't produce null clientId (c12c92a4)
+- add Test-PushTenantCatalog.ps1 - auto-discovers tenant + PIM Activator app reg in currently-connected Graph context, builds 1-entry catalog, hands off to Push-PimActivatorTenantCatalogIntune.ps1 (zero-typing first-test helper) (09c083f3)
 - release: PIM4EntraPS v2.4.90 - Push-PimActivatorTenantCatalogIntune.ps1 (native Intune Custom Configuration Profile via OMA-URI + Registry CSP) for chrome.storage.managed tenant catalog push + sample JSON template (a718097b)
 - release: PIM4EntraPS v2.4.89 + extension v1.6.2 - admin-friendly prefix shortcuts in catalog entries + scrub customer name from sample (ba82aaf4)
 - release: PIM4EntraPS v2.4.88 + extension v1.6.0 - tenant catalog + header switcher for MSP / one-admin-many-tenants workflow (538f6803)
@@ -31,15 +34,24 @@ Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monor
 - release: PIM4EntraPS v2.4.66 - EXO V3 retry + verbose bootstrap + shared launcher banner across all 21 internal-vm launchers (d7516509)
 - release: PIM4EntraPS v2.4.65 + New-PlatformModernCert.ps1 provisioner (ecc7c9ec)
 - release: PIM4EntraPS v2.4.64 - Modern SPN cert sourced from KV, not from BootstrapThumbprint (101e2bfa)
-- release: PIM4EntraPS v2.4.63 - EXO auto-resolves -Organization from MgGraph (5dffb3d3)
-- release: PIM4EntraPS v2.4.62 - route EXO cert auth through HighPriv Modern SPN (supersedes v2.4.61) (67a7b836)
-- release: PIM4EntraPS v2.4.61 + AutomateITPS bootstrap-cert globals (bf262e1b)
 
 ---
 
 # Release notes -- PIM4EntraPS
 
 > **Curated changelog.** The publish workflow auto-prepends recent monorepo commits as a raw activity log; this file is the human-friendly narrative on top.
+
+---
+
+## v2.4.91 -- PIM Activator extension v1.6.3: retire the global `KNOWN_BAD_LEGACY_CLIENTIDS` ban
+
+v1.5.8 added a global sentinel that filtered out clientId `e96afaa6-1c00-4320-9a4c-334558138e09` from chrome.storage on every popup load, plus from catalog imports and the onboarding-save handler. The intent was right (stale v1.4.x onboarding had saved that GUID into customer chrome.storage where it didn't belong, producing AADSTS700016). The implementation was wrong.
+
+That GUID is the **legitimate PIM Activator app reg in the dev tenant that owns it** (2linkIT). In a v1.6 catalog where each entry binds `tenantId + clientId` together, the same GUID IS valid in the tenant that hosts it -- a global ban filters legitimate entries out everywhere.
+
+**Emptied the `KNOWN_BAD_LEGACY_CLIENTIDS` array** (kept as `[]` for back-compat with all the existing call sites, which become no-ops). The catalog model itself prevents the original v1.4.x bug: you can't accidentally onboard "customer tenant X with the dev's clientId" because each entry is one tenant+client pair, validated against each other implicitly when the runtime sign-in fires.
+
+If a new global-ban scenario emerges later, add a GUID to the array and all three call sites resume behaving as before.
 
 ---
 
