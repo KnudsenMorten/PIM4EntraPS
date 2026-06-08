@@ -27,16 +27,15 @@
 // legacy paths (window.PIM_CONFIG from config.js + chrome.storage.managed
 // from Intune / GPO push) so there is exactly ONE source of truth and no
 // silent override surprises.
-// Known-bad clientIds that pre-v1.5.0 onboarding could have written to
-// chrome.storage.local as `userClientId`. Specifically: the upstream dev's
-// single-tenant PIM Activator app reg, which was both the bootstrap AND
-// the auto-discovered "PIM Activator" app in the dev's tenant -- so a
-// v1.4.x onboarding completed against the dev's tenant would save
-// e96afaa6 as `userClientId`. Any of these in chrome.storage produces
-// AADSTS700016 against every other tenant ("Application with identifier
-// 'e96afaa6-...' was not found in the directory 'X'"). Purged on load so
+// Sentinel list of legacy clientIds pre-v1.5.0 onboarding could have
+// written to chrome.storage.local as `userClientId`. v1.4.x bootstrapped
+// against the upstream dev tenant and saved the dev's own app-reg appId
+// as the user's clientId; any of those values in chrome.storage now
+// produces AADSTS700016 against every other tenant. Purged on load so
 // the onboarding wizard re-runs and discovers the CUSTOMER tenant's
-// actual PIM Activator SPN.
+// actual PIM Activator SPN. The literal GUID below is required for the
+// equality check at the bottom of loadConfig + the write-guard in the
+// onboarding-save handler -- it is NOT a live clientId reference.
 const KNOWN_BAD_LEGACY_CLIENTIDS = [
   'e96afaa6-1c00-4320-9a4c-334558138e09',
 ]
