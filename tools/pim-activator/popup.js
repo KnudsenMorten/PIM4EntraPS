@@ -374,127 +374,10 @@ function renderOnboarding(currentCfg) {
 
   const isGuid = (s) => /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test((s || '').trim())
 
-  // ----- Auto-discover -- runs in the MV3 service worker --------------------
-  // The sign-in / Graph-lookup pipeline lives in background.js so the
-  // browser-popup can die mid-flow (it does, every time Microsoft's
-  // sign-in window steals focus) without aborting. The popup just kicks
-  // off the worker via chrome.runtime.sendMessage and polls
-  // chrome.storage.local every ~1.5s for the result. When the user
-  // reopens the popup after sign-in completes, the very first poll
-  // finishes the wizard.
-  // Single-tenant deployments can reuse the PER-TENANT PIM Activator app
-  // reg as the bootstrap client (just add Application.Read.All delegated
-  // permission + admin-consent on it). Multi-tenant rollouts should register
-  // a separate "PIM Activator Bootstrap" multi-tenant app and put its
-  // clientId here instead.
-  const startBtn   = document.getElementById('ob-auto-start')
-  const devicePanel = document.getElementById('ob-auto-device')
-  const statusEl    = document.getElementById('ob-auto-status')
-
-  // ----- Status display + result processing --------------------------------
-  // Pulled out so BOTH the start-click handler AND the initial-load check
-  // (below) can use the same renderer. The popup polls chrome.storage.local
-  // every 1.5s while a discovery is in flight; the very first thing it does
-  // on (re)load is also check for an in-flight or completed result so a
-  // sign-in that finished while the popup was dead picks up on next open.
-  // Stashed by processDiscoveryResult so the Save handler can persist the
-  // regex fields (which don't have visible input boxes in the wizard).
-  let _lastDiscovery = null
-  function processDiscoveryResult(result) {
-    if (!result) return
-    _lastDiscovery = result
-    // v1.5.11+ shape from /.well-known/pim-activator.json:
-    //   { tenantId, clientId, source,
-    //     defaultJustification?, defaultDurationHours?,
-    //     groupNameFilter?, entraGroupRegex?, azureGroupRegex? }
-    if (result.tenantId) tenantInput.value = result.tenantId
-    if (result.clientId) clientInput.value = result.clientId
-    if (typeof result.defaultJustification === 'string' && result.defaultJustification.trim()) {
-      justInput.value = result.defaultJustification.trim()
-    }
-    if (typeof result.defaultDurationHours === 'number' && result.defaultDurationHours > 0) {
-      durInput.value = result.defaultDurationHours
-    }
-    const src = result.source ? ` (from ${result.source})` : ''
-    const filters = []
-    if (result.groupNameFilter) filters.push('groupNameFilter=' + result.groupNameFilter)
-    if (result.entraGroupRegex) filters.push('entraGroupRegex=' + result.entraGroupRegex)
-    if (result.azureGroupRegex) filters.push('azureGroupRegex=' + result.azureGroupRegex)
-    const filterNote = filters.length ? ' Applied filters: ' + filters.join(' / ') + '.' : ''
-    statusEl.textContent = `Config discovered${src}.${filterNote} Click "Save and continue" below.`
-    startBtn.disabled = false
-    startBtn.textContent = 'Re-discover'
-  }
-
-  // ----- Poll chrome.storage.local for the service worker's result ---------
-  let _pollTimer = null
-  function startPolling(timeoutMs = 30000) {
-    if (_pollTimer) clearInterval(_pollTimer)
-    const deadline = Date.now() + timeoutMs
-    devicePanel.style.display = ''
-    startBtn.disabled = true
-    startBtn.textContent = 'Discovering...'
-    _pollTimer = setInterval(async () => {
-      const got = await new Promise(r => chrome.storage.local.get(
-        ['discoveryStatus','discoveryResult','discoveryError'], r))
-      if (got.discoveryStatus) statusEl.textContent = got.discoveryStatus
-      if (got.discoveryError) {
-        clearInterval(_pollTimer); _pollTimer = null
-        showErr(got.discoveryError)
-        statusEl.textContent = 'Discovery did not complete -- fill the fields below manually.'
-        startBtn.disabled = false
-        startBtn.textContent = 'Retry auto-discover'
-        chrome.storage.local.remove(['discoveryError','discoveryStatus'])
-        return
-      }
-      if (got.discoveryResult) {
-        clearInterval(_pollTimer); _pollTimer = null
-        processDiscoveryResult(got.discoveryResult)
-        chrome.storage.local.remove(['discoveryResult','discoveryStatus'])
-        return
-      }
-      if (Date.now() > deadline) {
-        clearInterval(_pollTimer); _pollTimer = null
-        showErr('Discovery timed out -- fill the fields below manually.')
-        startBtn.disabled = false
-        startBtn.textContent = 'Sign in to auto-discover'
-      }
-    }, 1500)
-  }
-
-  // On wizard load: if the service worker is mid-discovery (or finished while
-  // the popup was dead) pick up where we left off without the user having
-  // to click again. Includes the device-code panel render so a popup
-  // reopened DURING device-code wait shows the code again.
-  ;(async () => {
-    const got = await new Promise(r => chrome.storage.local.get(
-      ['discoveryStatus','discoveryResult','discoveryError','discoveryDeviceCode'], r))
-    if (got.discoveryResult) {
-      processDiscoveryResult(got.discoveryResult)
-      chrome.storage.local.remove(['discoveryResult','discoveryStatus','discoveryDeviceCode'])
-    } else if (got.discoveryError) {
-      showErr(got.discoveryError)
-      chrome.storage.local.remove(['discoveryError','discoveryStatus','discoveryDeviceCode'])
-    } else if (got.discoveryStatus) {
-      // A discovery is mid-air -- resume polling.
-      startPolling()
-    }
-  })()
-
-  startBtn.onclick = () => {
-    showErr('')
-    const emailInput = document.getElementById('ob-auto-email')
-    const email = (emailInput?.value || '').trim()
-    if (!email || !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) {
-      showErr('Enter your work email above first (e.g. admin@yourtenant.com).')
-      emailInput?.focus()
-      return
-    }
-    chrome.runtime.sendMessage({ cmd: 'start-discovery', email }, () => {
-      // Ignore the ack -- the worker writes the real result to storage.
-      startPolling()
-    })
-  }
+  // v1.6.4+: auto-discover / well-known URI flow removed -- replaced by the
+  // catalog model. The single-tenant manual-entry path below remains for
+  // non-MSP deployments. Reads/writes only chrome.storage.local; no
+  // background.js sign-in / discovery dependency.
 
   document.getElementById('onboarding-save').onclick = async () => {
     showErr('')
@@ -505,32 +388,18 @@ function renderOnboarding(currentCfg) {
 
     if (!isGuid(tenantId)) { showErr('Tenant id must be a GUID (e.g. f0fa27a0-8e7c-4f63-9a77-ec94786b7c9e).'); tenantInput.focus(); return }
     if (!isGuid(clientId)) { showErr('Client id must be a GUID. This is the Application (client) id of the PIM Activator app registration in your tenant.'); clientInput.focus(); return }
-    // Block writing the known-bad legacy upstream-dev clientId -- if the user
-    // sees it in the field (auto-filled from a stale chrome.storage.sync or
-    // a previous v1.4.x discovery), make them pick the correct customer-tenant
-    // SPN before saving.
-    if (KNOWN_BAD_LEGACY_CLIENTIDS.includes(clientId.toLowerCase())) {
-      showErr('That clientId (' + clientId + ') is the upstream dev\'s app reg and does NOT exist in your tenant. Click "Sign in to auto-discover" and pick the SPN whose displayName contains "PIM Activator" in YOUR tenant.')
-      clientInput.focus()
-      return
-    }
-
-    // Persist the regex / naming-convention fields from the most recent
-    // discovery (no visible input boxes in the wizard for these; they ride
-    // along on the discovered JSON). Empty string = unset, the engine
-    // falls back to its built-in defaults.
-    const groupNameFilter = (_lastDiscovery && typeof _lastDiscovery.groupNameFilter === 'string') ? _lastDiscovery.groupNameFilter : ''
-    const entraGroupRegex = (_lastDiscovery && typeof _lastDiscovery.entraGroupRegex === 'string') ? _lastDiscovery.entraGroupRegex : ''
-    const azureGroupRegex = (_lastDiscovery && typeof _lastDiscovery.azureGroupRegex === 'string') ? _lastDiscovery.azureGroupRegex : ''
 
     await new Promise(r => chrome.storage.local.set({
       userTenantId:             tenantId,
       userClientId:             clientId,
       userDefaultJustification: justification,
       userDefaultDurationHours: durationHours,
-      userGroupNameFilter:      groupNameFilter,
-      userEntraGroupRegex:      entraGroupRegex,
-      userAzureGroupRegex:      azureGroupRegex,
+      // The naming-convention regex fields default empty in the single-tenant
+      // manual flow; admins who want them should use the catalog (which lets
+      // them set prefix / entraPrefix / azurePrefix per entry).
+      userGroupNameFilter:      '',
+      userEntraGroupRegex:      '',
+      userAzureGroupRegex:      '',
     }, r))
     // Wipe any half-baked sign-in artifacts from a previous attempt so the
     // next boot signs in cleanly against the freshly-saved config.
