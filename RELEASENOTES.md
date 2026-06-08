@@ -1,9 +1,10 @@
 # Release notes for PIM4EntraPS
 
-## v2.4.85
+## v2.4.86
 
 Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monorepo:
 
+- release: PIM4EntraPS v2.4.86 + extension v1.5.10 - bootstrap discovery switched to OAuth2 device-code flow (fixes AADSTS50011, auto-discover now works in any tenant without per-tenant app-reg setup) (3658f74f)
 - release: PIM4EntraPS v2.4.85 + extension v1.5.9 - hard-evict stale MV3 service worker on legacy-clientId detect (popup.js calls chrome.runtime.reload + Update script wipes Service Worker dir) (cba9c04b)
 - release: PIM4EntraPS v2.4.84 - trim popup.js comment noise around legacy-clientId sentinel so casual grep surfaces only the single sentinel entry (no behaviour change, ext stays v1.5.8) (bef4c339)
 - release: PIM4EntraPS v2.4.83 + extension v1.5.8 - auto-purge legacy bad userClientId (e96afaa6) from chrome.storage on load + block re-save in onboarding wizard (133fe3a5)
@@ -33,13 +34,41 @@ Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monor
 - release: PIM4EntraPS v2.4.59 - docs catch-up for v2.4.56-58 (1f8eb644)
 - release: PIM4EntraPS v2.4.58 - Deploy-PimActivatorBackend -GrantConsent default ON (2803a811)
 - release: PIM4EntraPS v2.4.57 - default ExtensionId + UpdateUrl in Deploy-PimActivator* scripts (473969c8)
-- release: PIM4EntraPS v2.4.56 - auto-bootstrap missing .custom config files from samples (2855fbd6)
 
 ---
 
 # Release notes -- PIM4EntraPS
 
 > **Curated changelog.** The publish workflow auto-prepends recent monorepo commits as a raw activity log; this file is the human-friendly narrative on top.
+
+---
+
+## v2.4.86 -- PIM Activator extension v1.5.10: auto-discover via OAuth2 device-code flow (fixes AADSTS50011 redirect-URI mismatch)
+
+v1.5.0 swapped the bootstrap clientId from a single-tenant upstream-dev app (`e96afaa6-...`, fails `AADSTS700016` in every other tenant) to Microsoft Graph Command Line Tools (`14d82eec-...`, exists in every tenant). That fixed 700016, but uncovered the next layer: the chrome-extension OAuth path `chrome.identity.launchWebAuthFlow` requires `https://<extId>.chromiumapp.org/` to be pre-registered as a redirect URI on the app reg -- and Microsoft owns the Graph CLI app, so we can't add URIs to it. Customer sign-in now failed with `AADSTS50011 The redirect URI does not match the redirect URIs configured for the application`.
+
+**Refactored the bootstrap to OAuth2 device-code flow (RFC 8628).** Device code grant does not use a redirect URI at all -- Entra returns a `user_code` + `verification_uri`, the user authorizes in a separate tab, and the service worker polls the token endpoint until a token is issued (or expiry). This works against Microsoft Graph CLI without any tenant-side or app-reg-side setup.
+
+**New flow (background.js):**
+1. Resolve tenant GUID via OIDC discovery on the email's domain (unchanged).
+2. POST `{tenant}/oauth2/v2.0/devicecode` with `client_id=14d82eec` + discovery scopes -> `{ device_code, user_code, verification_uri, expires_in, interval }`.
+3. Write `{ userCode, verificationUri, expiresAt, message }` to `chrome.storage.local.discoveryDeviceCode` so the popup can render the "Open URL, enter code XXXX" panel.
+4. Poll `{tenant}/oauth2/v2.0/token` with `grant_type=urn:ietf:params:oauth:grant-type:device_code` every `interval` seconds. Handle `authorization_pending` (retry), `slow_down` (bump interval +5s per spec), `expired_token` / `authorization_declined` / `bad_verification_code` (surface as error).
+5. On success: query `/servicePrincipals?$search="displayName:PIM Activator"&$count=true` with `ConsistencyLevel: eventual` (unchanged) and return matched apps to the popup for picker rendering.
+
+**New device-code panel (popup.js):**
+- Big blue callout with 3 numbered steps: open URL, enter code, sign in.
+- The `user_code` is shown in a monospace pill (font-size 14, letter-spacing 1.5) with an inline `copy` button that uses `navigator.clipboard.writeText` and flips the button text to `copied` for 1.5s.
+- The verification URI is a real `<a target="_blank">` so a single click opens a new tab.
+- "Waiting for sign-in to complete..." status line below.
+- Panel re-renders on popup re-open if the device-code flow is still in flight, so a customer who closed the popup mid-auth doesn't lose the code.
+
+Side effects:
+- Discovery timeout extended from 600s (10 min) to 900s (15 min) to match Entra's typical `expires_in` for device codes.
+- `discoveryDeviceCode` chrome.storage.local key is cleared on success, error, and timeout paths.
+- Bootstrap-side `launchWebAuthFlow` callsite + the PKCE helpers removed -- device code is the sole bootstrap path now.
+
+Net effect: auto-discover now works in any Entra tenant with zero per-customer app-registration setup. UX cost is one extra click (open the verification tab) vs the prior popup-based sign-in; in exchange the architecture stops depending on us owning an app reg in every tenant.
 
 ---
 
