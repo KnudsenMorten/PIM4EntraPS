@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="utf-8"?>
+<policyDefinitionResources revision="1.0" schemaVersion="1.0"
+                            xmlns="http://schemas.microsoft.com/GroupPolicy/2006/07/PolicyDefinitions"
+                            xmlns:xsd="http://www.w3.org/2001/XMLSchema"
+                            xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+  <displayName>PIM Activator (PIM4EntraPS)</displayName>
+  <description>Custom ADMX template for the PIM Activator browser extension.</description>
+  <resources>
+    <stringTable>
+      <string id="SUPPORTED_W10_Edge_Chrome">Microsoft Edge and Google Chrome on Windows 10 and later</string>
+      <string id="PIM4EntraPS_Cat">PIM4EntraPS</string>
+      <string id="PimActivator_Cat">PIM Activator</string>
+      <string id="TenantCatalog_Edge">Tenant catalog -- Microsoft Edge</string>
+      <string id="TenantCatalog_Chrome">Tenant catalog -- Google Chrome</string>
+      <string id="TenantCatalog_Explain">JSON array of tenants for the PIM Activator browser extension. The extension reads this via chrome.storage.managed.tenantCatalog on every popup load.
+
+Each array entry must have the shape:
+  { "name": "Display name", "tenantId": "&lt;GUID&gt;", "clientId": "&lt;GUID&gt;",
+    "prefix": "PIM-",                          (optional)
+    "entraPrefix": ["PIM-Entra","PIM-AAD"],    (optional, string or string array)
+    "azurePrefix": ["PIM-Azure","PIM-AzRes"]   (optional, string or string array) }
+
+When this policy is Enabled and a value is set, the extension's header tenant switcher lists every entry; admins on this device can pick which tenant is currently active. When Disabled or Not Configured, the extension falls back to chrome.storage.local imports done from the popup wizard.</string>
+    </stringTable>
+    <presentationTable>
+      <presentation id="TenantCatalog_Edge_Presentation">
+        <textBox refId="TenantCatalog_Edge_Value">
+          <label>Tenant catalog JSON (Edge):</label>
+        </textBox>
+      </presentation>
+      <presentation id="TenantCatalog_Chrome_Presentation">
+        <textBox refId="TenantCatalog_Chrome_Value">
+          <label>Tenant catalog JSON (Chrome):</label>
+        </textBox>
+      </presentation>
+    </presentationTable>
+  </resources>
+</policyDefinitionResources>

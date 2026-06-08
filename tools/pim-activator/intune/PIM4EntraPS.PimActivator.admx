@@ -1,0 +1,84 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  PIM Activator - Custom ADMX template for Intune Settings Catalog.
+
+  Purpose: declare ADMX-backed policies that write to the Chromium 3rdparty
+  extension policy registry path, so chrome.storage.managed.tenantCatalog
+  becomes pushable via standard Intune Configuration Profiles. Bypasses the
+  Registry CSP restriction (error 0x87d1fde8) that blocks direct writes
+  under SOFTWARE\Policies\Microsoft\Edge\3rdparty\* via OMA-URI.
+
+  Ingestion:
+    Push-PimActivatorADMXToIntune.ps1   (sibling helper that POSTs to
+    /beta/deviceManagement/groupPolicyUploadedDefinitionFiles)
+
+  After ingestion the policies surface in:
+    Intune admin center -> Devices -> Configuration profiles -> Create ->
+    Templates -> Imported Administrative templates -> "PIM Activator"
+    category. Admin pastes the catalog JSON into the textbox + assigns to
+    a group. Intune writes the value via the Group Policy CSP (not the
+    Registry CSP), which Microsoft trusts to write under Edge's namespace.
+
+  Extension id is the canonical 'eheocihmlppcophaeakmdenhgcookkab' (derived
+  from manifest.json "key" public key fingerprint).
+-->
+<policyDefinitions revision="1.0" schemaVersion="1.0"
+                   xmlns="http://schemas.microsoft.com/GroupPolicy/2006/07/PolicyDefinitions"
+                   xmlns:xsd="http://www.w3.org/2001/XMLSchema"
+                   xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+
+  <policyNamespaces>
+    <target prefix="pimactivator" namespace="MortenKnudsen.PIM4EntraPS.PimActivator" />
+    <using  prefix="windows"      namespace="Microsoft.Policies.Windows" />
+  </policyNamespaces>
+
+  <resources minRequiredRevision="1.0" />
+
+  <supportedOn>
+    <definitions>
+      <definition name="SUPPORTED_W10_Edge_Chrome"
+                  displayName="$(string.SUPPORTED_W10_Edge_Chrome)" />
+    </definitions>
+  </supportedOn>
+
+  <categories>
+    <category name="PIM4EntraPS_Cat"  displayName="$(string.PIM4EntraPS_Cat)" />
+    <category name="PimActivator_Cat" displayName="$(string.PimActivator_Cat)">
+      <parentCategory ref="PIM4EntraPS_Cat" />
+    </category>
+  </categories>
+
+  <policies>
+
+    <!-- Microsoft Edge: writes
+         HKLM\SOFTWARE\Policies\Microsoft\Edge\3rdparty\extensions\eheocihmlppcophaeakmdenhgcookkab\policy\tenantCatalog -->
+    <policy name="TenantCatalog_Edge"
+            class="Machine"
+            displayName="$(string.TenantCatalog_Edge)"
+            explainText="$(string.TenantCatalog_Explain)"
+            presentation="$(presentation.TenantCatalog_Edge_Presentation)"
+            key="SOFTWARE\Policies\Microsoft\Edge\3rdparty\extensions\eheocihmlppcophaeakmdenhgcookkab\policy">
+      <parentCategory ref="PimActivator_Cat" />
+      <supportedOn    ref="SUPPORTED_W10_Edge_Chrome" />
+      <elements>
+        <text id="TenantCatalog_Edge_Value" valueName="tenantCatalog" required="true" maxLength="32768" />
+      </elements>
+    </policy>
+
+    <!-- Google Chrome: writes
+         HKLM\SOFTWARE\Policies\Google\Chrome\3rdparty\extensions\eheocihmlppcophaeakmdenhgcookkab\policy\tenantCatalog -->
+    <policy name="TenantCatalog_Chrome"
+            class="Machine"
+            displayName="$(string.TenantCatalog_Chrome)"
+            explainText="$(string.TenantCatalog_Explain)"
+            presentation="$(presentation.TenantCatalog_Chrome_Presentation)"
+            key="SOFTWARE\Policies\Google\Chrome\3rdparty\extensions\eheocihmlppcophaeakmdenhgcookkab\policy">
+      <parentCategory ref="PimActivator_Cat" />
+      <supportedOn    ref="SUPPORTED_W10_Edge_Chrome" />
+      <elements>
+        <text id="TenantCatalog_Chrome_Value" valueName="tenantCatalog" required="true" maxLength="32768" />
+      </elements>
+    </policy>
+
+  </policies>
+</policyDefinitions>

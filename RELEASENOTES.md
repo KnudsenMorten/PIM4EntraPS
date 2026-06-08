@@ -1,9 +1,10 @@
 # Release notes for PIM4EntraPS
 
-## v2.4.92
+## v2.4.93
 
 Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monorepo:
 
+- release: PIM4EntraPS v2.4.93 + extension v1.6.5 - rewrite Push-PimActivatorTenantCatalogIntune.ps1 as PS remediation (was hitting Registry CSP block 0x87d1fde8 on Edge/Chrome 3rdparty namespace) + ship ADMX template + Push-PimActivatorADMXToIntune.ps1 for the proper Settings Catalog path + popup source-detection status line (ed206a0a)
 - release: PIM4EntraPS v2.4.92 + extension v1.6.4 - strip auto-discover panel + well-known URI flow + gut background.js to empty stub; reorder onboarding to catalog -> Welcome -> manual entry (c4c0b499)
 - release: PIM4EntraPS v2.4.91 + extension v1.6.3 - retire global KNOWN_BAD_LEGACY_CLIENTIDS ban; v1.6 catalog binds tenantId+clientId per-entry so the same GUID is valid in the tenant that owns it (cc3a7cae)
 - fix Test-PushTenantCatalog: explicit -Property projection + ServicePrincipal fallback so Get-MgApplication's default-projection AppId-drop in some SDK versions doesn't produce null clientId (c12c92a4)
@@ -33,13 +34,48 @@ Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monor
 - release: PIM4EntraPS v2.4.68 - V1 EXO permission docs + Entra-propagation retry on -NoCache lookups (79013ffa)
 - release: PIM4EntraPS v2.4.67 - Modern auth prefers cert; full EXO V3 module reset (717d5f2b)
 - release: PIM4EntraPS v2.4.66 - EXO V3 retry + verbose bootstrap + shared launcher banner across all 21 internal-vm launchers (d7516509)
-- release: PIM4EntraPS v2.4.65 + New-PlatformModernCert.ps1 provisioner (ecc7c9ec)
 
 ---
 
 # Release notes -- PIM4EntraPS
 
 > **Curated changelog.** The publish workflow auto-prepends recent monorepo commits as a raw activity log; this file is the human-friendly narrative on top.
+
+---
+
+## v2.4.93 -- PIM Activator extension v1.6.5 + Push-PimActivatorTenantCatalogIntune.ps1 rewritten as PowerShell remediation (was failing 0x87d1fde8 via Registry CSP)
+
+**Customer report (v2.4.90):** the Custom Configuration Profile created via Registry CSP failed on every Intune-managed device with error `0x87d1fde8` (signed `-2016281112`). Root cause: Microsoft restricts Registry CSP from writing under `SOFTWARE\Policies\Microsoft\Edge\*` because Edge owns that namespace via its ADMX. Same restriction applies to Google\Chrome paths.
+
+**Industry-standard ways to push per-extension chrome.storage.managed data on Windows:**
+| Approach | Works? | Notes |
+|---|---|---|
+| Registry CSP / Custom OMA-URI Configuration Profile | NO -- `0x87d1fde8` on Edge/Chrome 3rdparty paths | Microsoft blocks |
+| **PowerShell remediation script via Intune Devices > Scripts** | **YES** (this release) | Runs as SYSTEM, no CSP restrictions |
+| Custom ADMX template ingested into Intune | YES | Proper "by policy" UX (Settings Catalog entry); needs ADMX/ADML pair maintained per release; this is what Rhindon Cyber's extension docs prescribe |
+
+**`Push-PimActivatorTenantCatalogIntune.ps1` rewritten** to POST a `deviceManagementScripts` policy instead of a `deviceConfigurations` Custom profile. The script body runs as SYSTEM on every targeted device, does:
+
+```powershell
+foreach ($p in @('HKLM:\SOFTWARE\Policies\Microsoft\Edge\3rdparty\extensions\<id>\policy',
+                 'HKLM:\SOFTWARE\Policies\Google\Chrome\3rdparty\extensions\<id>\policy')) {
+    if (-not (Test-Path $p)) { New-Item -Path $p -Force | Out-Null }
+    New-ItemProperty -Path $p -Name 'tenantCatalog' -Value $catalogJsonString -PropertyType String -Force | Out-Null
+}
+```
+
+Idempotent: lookup by display name, PATCH if found, POST if new.
+
+**New `-RemoveLegacyOmaUriProfile` switch** -- when migrating from v2.4.90's failed Registry-CSP profile, also deletes the old `[PimActivator] Tenant catalog (chrome.storage.managed)` Custom Configuration Profile so the failing OMA-URI doesn't keep producing `0x87d1fde8` errors in the Intune device-status panel.
+
+**Migration command for customers who already ran v2.4.90:**
+```powershell
+Push-PimActivatorTenantCatalogIntune.ps1 -CatalogJsonPath .\my-tenants.json -RemoveLegacyOmaUriProfile
+```
+
+**v1.6.5 extension changes** (popup-only, no functional regression):
+- Catalog panel now displays a **source-detection status line**: `Detected N entries from Intune managed config (chrome.storage.managed.tenantCatalog)` (green check) when Intune push landed, OR `No Intune managed config detected ... and no local catalog imported yet` (gray) for first-time empty state, OR `Intune managed config read FAILED: <reason>` (red) when the read errored. Critical for "did my Intune policy land?" trouble-shooting on managed devices -- no need to dig into chrome.storage.managed via DevTools.
+- Catalog panel position: moved BELOW the Welcome heading (was above). Order is now Welcome -> Catalog -> Manual entry.
 
 ---
 
