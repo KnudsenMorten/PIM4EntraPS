@@ -1,9 +1,10 @@
 # Release notes for PIM4EntraPS
 
-## v2.4.76
+## v2.4.77
 
 Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monorepo:
 
+- release: PIM4EntraPS v2.4.77 + extension v1.5.1 - surface developer/contact info via manifest author+homepage_url + 2-line popup footer with MVP badge + email/blog/GitHub/YouTube/bug-report links (254a7072)
 - release: PIM4EntraPS v2.4.76 + extension v1.5.0 - tenant-portable bootstrap via Microsoft Graph CLI clientId + SPN substring discovery + Deploy-PimActivatorClient defaults to HKLM (3306ff77)
 - release: PIM4EntraPS v2.4.75 - engine fixes: policy PATCH backtick + schedule preload + generic datetime + 36159-day bug + skip-line shows role/principal (c9f2f00f)
 - release: PIM4EntraPS v2.4.74 - Deploy-PimActivatorIntune body shape fix (parent CHOICE + child collection) (5bf32754)
@@ -33,13 +34,43 @@ Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monor
 - release: PIM4EntraPS v2.4.54 - READMEs catch up on the v2.4.53 PIM Manager restyle (be852908)
 - polish: PIM Manager New&clone tiles - branded blue cards with white text for stronger readability (4a9a69ea)
 - release: PIM4EntraPS v2.4.53 - re-skin PIM Manager to match PIM Activator brand (light palette + branded blue PIM MANAGER banner) (085269d8)
-- release: PIM4EntraPS v2.4.52 - fix documented extension id (regen-key ID was never wired into publishing pipeline) (891bc99b)
 
 ---
 
 # Release notes -- PIM4EntraPS
 
 > **Curated changelog.** The publish workflow auto-prepends recent monorepo commits as a raw activity log; this file is the human-friendly narrative on top.
+
+---
+
+## v2.4.77 -- PIM Activator extension v1.5.1: developer / contact info surfaced in extension + popup
+
+Two surfaces where the extension previously hid the developer + support channels:
+
+**1. `manifest.json` -- now declares `author` + `homepage_url`**
+
+```json
+"author":       "Morten Knudsen (Microsoft MVP) <mok@mortenknudsen.net>",
+"homepage_url": "https://mortenknudsen.net"
+```
+
+Chrome's `chrome://extensions` detail page surfaces both fields; admins doing extension inventory / supply-chain review can now see who owns the code and where to file issues without unpacking the package.
+
+**2. Popup footer expanded -- 2 lines, all contact channels one click away**
+
+Line 1 (unchanged shape, two new chips):
+- Author link (`aka.ms/morten`)
+- **Microsoft MVP** badge (Red, tooltip "Microsoft Most Valuable Professional")
+- `part of PIM4EntraPS` (links to repo)
+
+Line 2 (new):
+- Direct email: `mok@mortenknudsen.net`
+- Blog: `mortenknudsen.net`
+- GitHub: `KnudsenMorten`
+- YouTube: `@KnudsenMorten`
+- Bug report: `PIM4EntraPS/issues`
+
+Visual: matches the same `#0969da` link color the rest of the popup already uses; separators are pale-gray `|`. Total footer height bump is one ~14px row -- still fits the popup window without scrollbar reflow.
 
 ---
 
