@@ -8,7 +8,7 @@
                               GitHub Pages via the forcelist policy.
 
     2. -Repack             -> also bumps the patch version, repacks the CRX
-                              with placeholder config, pushes pim-activator.crx
+                              repacks the CRX, pushes pim-activator.crx
                               + updates.xml to the gh-pages branch, THEN does
                               the flush + restart. End-to-end "make my browser
                               show the latest code" in one command.
@@ -37,20 +37,26 @@
 .EXAMPLE
     # I edited popup.js, gh-pages is already up to date, just want local browser
     # to redownload the existing CRX. Quick flush + restart.
-    .\Update-PimActivatorDev.ps1
+    .\Update-PimActivator-Extension.ps1
 
 .EXAMPLE
     # I edited popup.js, bump version + push CRX + flush my browser. Full loop.
-    .\Update-PimActivatorDev.ps1 -Repack
+    .\Update-PimActivator-Extension.ps1 -Repack
 
 .EXAMPLE
     # CI-style: pack + push but don't touch my running browser.
-    .\Update-PimActivatorDev.ps1 -PackOnly
+    .\Update-PimActivator-Extension.ps1 -PackOnly
 
 .NOTES
-    Companion to Setup-PimActivator.ps1 (the customer-facing installer) +
-    Deploy-PimActivatorClient.ps1 (registry forcelist writer). Those are
-    for one-time customer onboarding; this is for the maintainer's dev loop.
+    Maintainer-only -- iterates the published CRX during development.
+    Customer-facing scripts:
+      Deploy-PimActivatorBackend.ps1 -- creates the per-tenant Entra app
+        registration + grants admin consent (one-time per tenant).
+      Deploy-PimActivatorClient.ps1  -- pushes the ExtensionInstallForcelist
+        policy to user machines (one-time per machine / fleet).
+    Tenant config (tenantId + clientId) is no longer pushed via this
+    script -- the in-popup onboarding wizard captures it per browser
+    profile on first run.
 #>
 
 [CmdletBinding()]
@@ -120,8 +126,8 @@ if ($Repack -or $PackOnly) {
     ($manifest | ConvertTo-Json -Depth 20) | Set-Content $manifestPath -Encoding UTF8
     Write-Ok "Bumped: $oldVer -> $newVer"
 
-    # ---- Repack CRX with placeholder config ---------------------------------
-    Write-Step "Repacking CRX with placeholder config"
+    # ---- Repack CRX ---------------------------------------------------------
+    Write-Step "Repacking CRX"
     $edgeExe = 'C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe'
     if (-not (Test-Path $edgeExe)) {
         $edgeExe = 'C:\Program Files\Microsoft\Edge\Application\msedge.exe'
@@ -131,44 +137,30 @@ if ($Repack -or $PackOnly) {
     $keyPath = "$env:USERPROFILE\.pim-activator\signing-key.pem"
     if (-not (Test-Path $keyPath)) { throw "signing key missing: $keyPath" }
 
-    $cfgPath  = Join-Path $SCRIPT_DIR 'config.js'
-    $tmplPath = Join-Path $SCRIPT_DIR 'config.template.js'
-    $savedCfg = if (Test-Path $cfgPath) { Get-Content -LiteralPath $cfgPath -Raw } else { $null }
+    # v1.2.0+: no config.js / config.template.js swap. The extension no
+    # longer has a baked-in config -- the in-popup onboarding wizard is the
+    # only source of tenant id / client id (per browser profile).
 
     # msedge cannot pack while a running instance holds the source dir.
     Get-Process msedge -ErrorAction SilentlyContinue | Stop-Process -Force
     Start-Sleep -Seconds 2
 
-    try {
-        if (Test-Path $tmplPath) {
-            Copy-Item -LiteralPath $tmplPath -Destination $cfgPath -Force
-        } else {
-            throw "config.template.js missing - refusing to pack (would leak maintainer tenant)"
-        }
+    $crxOutput = "$SCRIPT_DIR.crx"
+    if (Test-Path $crxOutput) { Remove-Item $crxOutput -Force }
 
-        $crxOutput = "$SCRIPT_DIR.crx"
-        if (Test-Path $crxOutput) { Remove-Item $crxOutput -Force }
+    $packArgs = @("--pack-extension=$SCRIPT_DIR", "--pack-extension-key=$keyPath")
+    Start-Process -FilePath $edgeExe -ArgumentList $packArgs -NoNewWindow -Wait | Out-Null
+    Start-Sleep -Seconds 2
 
-        $packArgs = @("--pack-extension=$SCRIPT_DIR", "--pack-extension-key=$keyPath")
-        Start-Process -FilePath $edgeExe -ArgumentList $packArgs -NoNewWindow -Wait | Out-Null
-        Start-Sleep -Seconds 2
-
-        if (-not (Test-Path $crxOutput)) {
-            throw "msedge.exe --pack-extension did not produce $crxOutput"
-        }
-        $crxSize = (Get-Item $crxOutput).Length
-        Write-Ok "CRX packed: $crxSize bytes ($crxOutput)"
-
-        # Sanity-check CRX magic
-        $magic = -join ([System.IO.File]::ReadAllBytes($crxOutput) | Select-Object -First 4 | ForEach-Object { [char]$_ })
-        if ($magic -ne 'Cr24') { throw "CRX magic header invalid - got '$magic'" }
-    } finally {
-        if ($savedCfg) {
-            Set-Content -LiteralPath $cfgPath -Value $savedCfg -Encoding UTF8 -NoNewline
-        } elseif (Test-Path $cfgPath) {
-            Remove-Item $cfgPath -Force
-        }
+    if (-not (Test-Path $crxOutput)) {
+        throw "msedge.exe --pack-extension did not produce $crxOutput"
     }
+    $crxSize = (Get-Item $crxOutput).Length
+    Write-Ok "CRX packed: $crxSize bytes ($crxOutput)"
+
+    # Sanity-check CRX magic
+    $magic = -join ([System.IO.File]::ReadAllBytes($crxOutput) | Select-Object -First 4 | ForEach-Object { [char]$_ })
+    if ($magic -ne 'Cr24') { throw "CRX magic header invalid - got '$magic'" }
 
     # ---- Publish to gh-pages -------------------------------------------------
     Write-Step "Publishing CRX + updates.xml to gh-pages"

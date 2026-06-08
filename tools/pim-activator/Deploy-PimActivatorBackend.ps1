@@ -19,9 +19,17 @@
     AADSTS9002326 ("Cross-origin token redemption is permitted only for the
     'Single-Page Application' client-type").
 
-    Required delegated Graph permissions (resolved by displayName -> id at runtime):
-      - PrivilegedAccess.ReadWrite.AzureADGroup
-      - Group.Read.All
+    Required delegated permissions (resolved by displayName -> id at runtime):
+      Microsoft Graph (00000003-0000-0000-c000-000000000000):
+        - PrivilegedAccess.ReadWrite.AzureADGroup (POST/DELETE activation -- ReadWrite REQUIRED, Read-only breaks Activate)
+        - Group.Read.All
+        - User.Read
+        - RoleManagement.Read.Directory
+        - RoleManagement.ReadWrite.Directory (activate direct Entra role assignments)
+        - AdministrativeUnit.Read.All
+        - Application.Read.All (first-run onboarding wizard -- discovers the per-tenant app reg by displayName)
+      Azure Service Management (797f4846-ba00-4fd7-ba43-dac1f8f63013):
+        - user_impersonation (mint ARM token for Azure RBAC eligibility + activation)
       - User.Read
       - RoleManagement.Read.Directory   (powers the "My Access" tab -- lists
         Entra role assignments attached to the user's active PIM-for-Groups
@@ -56,7 +64,14 @@
     -TenantId you passed, or the home tenant of the signed-in account).
 
 .EXAMPLE
-    Connect-MgGraph -TenantId f0fa27a0-... -Scopes 'Application.ReadWrite.All','AppRoleAssignment.ReadWrite.All','DelegatedPermissionGrant.ReadWrite.All'
+    # Zero-arg -- script auto-runs Connect-MgGraph interactively if no
+    # context exists, with the right scopes:
+    .\Deploy-PimActivatorBackend.ps1
+
+.EXAMPLE
+    # Skip auto-connect by pre-connecting yourself (useful when scripting
+    # against a specific tenant):
+    Connect-MgGraph -TenantId <tenant-id> -Scopes 'Application.ReadWrite.All','AppRoleAssignment.ReadWrite.All','DelegatedPermissionGrant.ReadWrite.All'
     .\Deploy-PimActivatorBackend.ps1 -ExtensionId 'abcd...wxyz' -GrantConsent
 
 .NOTES
@@ -66,15 +81,23 @@
 #>
 [CmdletBinding()]
 param(
-    [Parameter(Mandatory)]
+    # Extension id is derived from the manifest.json "key" field, which is
+    # identical across every install of this distribution -- so default it
+    # rather than make every operator look it up. Override only if you fork
+    # the extension under a different key.
     [ValidatePattern('^[a-p]{32}$')]   # Chromium extension id format
-    [string]$ExtensionId,
+    [string]$ExtensionId = 'eheocihmlppcophaeakmdenhgcookkab',
 
     [string]$DisplayName = 'PIM Activator',
 
     [string]$TenantId,
 
-    [switch]$GrantConsent
+    # Default ON: a fresh app reg without admin consent makes every user hit
+    # the per-user consent dialog on first sign-in, which most operators don't
+    # want. Pass -GrantConsent:$false to skip the tenant-wide consent step
+    # (rare -- e.g. when the caller doesn't hold Privileged Role Administrator
+    # and a delegated approver will consent later via the Enterprise apps blade).
+    [switch]$GrantConsent = $true
 )
 
 $ErrorActionPreference = 'Stop'
@@ -83,16 +106,28 @@ $ErrorActionPreference = 'Stop'
 # Connect (or verify) Microsoft Graph
 # ---------------------------------------------------------------------------
 
-$ctx = Get-MgContext
+$_requiredScopes = @(
+    'Application.ReadWrite.All'
+    'AppRoleAssignment.ReadWrite.All'
+    'DelegatedPermissionGrant.ReadWrite.All'
+)
+
+$ctx = Get-MgContext -ErrorAction SilentlyContinue
 if (-not $ctx) {
-    Write-Host "Not connected to Microsoft Graph. Run Connect-MgGraph first:" -ForegroundColor Yellow
-    Write-Host "  Connect-MgGraph -Scopes 'Application.ReadWrite.All','AppRoleAssignment.ReadWrite.All','DelegatedPermissionGrant.ReadWrite.All'" -ForegroundColor Yellow
-    throw "Connect-MgGraph required."
+    Write-Host "Not connected to Microsoft Graph. Launching interactive sign-in (scopes: $($_requiredScopes -join ', '))..." -ForegroundColor Yellow
+    Connect-MgGraph -Scopes $_requiredScopes -NoWelcome -ErrorAction Stop | Out-Null
+    $ctx = Get-MgContext -ErrorAction Stop
 }
 
-$missingScopes = @('Application.ReadWrite.All') | Where-Object { $_ -notin $ctx.Scopes }
+$missingScopes = $_requiredScopes | Where-Object { $_ -notin $ctx.Scopes }
 if ($missingScopes) {
-    throw "Current Graph session is missing required scopes: $($missingScopes -join ', '). Re-run Connect-MgGraph with those scopes."
+    Write-Host "Current Graph session is missing required scopes: $($missingScopes -join ', '). Re-connecting interactively..." -ForegroundColor Yellow
+    Connect-MgGraph -Scopes $_requiredScopes -NoWelcome -ErrorAction Stop | Out-Null
+    $ctx = Get-MgContext -ErrorAction Stop
+    $stillMissing = $_requiredScopes | Where-Object { $_ -notin $ctx.Scopes }
+    if ($stillMissing) {
+        throw "After re-connect, Graph session is STILL missing: $($stillMissing -join ', '). Admin consent may be required."
+    }
 }
 
 if ($TenantId -and $TenantId -ne $ctx.TenantId) {
@@ -112,7 +147,38 @@ $graphAppId = '00000003-0000-0000-c000-000000000000'
 $graphSp    = Get-MgServicePrincipal -Filter "appId eq '$graphAppId'"
 if (-not $graphSp) { throw "Microsoft Graph service principal not found in tenant -- this should never happen." }
 
-$needed = @('PrivilegedAccess.ReadWrite.AzureADGroup', 'Group.Read.All', 'User.Read', 'RoleManagement.Read.Directory', 'AdministrativeUnit.Read.All')
+$needed = @(
+    # Activation / deactivation -- POST + DELETE on
+    # /privilegedAccess/aadGroups/.../assignmentScheduleRequests.
+    # ReadWrite is the ONLY variant that grants the write half; Read-only
+    # breaks every Activate / Deactivate click with HTTP 403. Do NOT
+    # downgrade to PrivilegedAccess.Read.AzureADGroup.
+    'PrivilegedAccess.ReadWrite.AzureADGroup',
+    # Listing eligible groups + hydrating displayNames.
+    'Group.Read.All',
+    # id_token claims (account name shown in the popup header).
+    'User.Read',
+    # My Access tab -- resolves Entra role assignments attached to the active
+    # PIM-for-Groups memberships via roleManagement/directory/roleAssignments.
+    # NOTE: ReadWrite covers Read so this entry is technically redundant when
+    # ReadWrite is below, but it is kept for documentation purposes / tenants
+    # that prefer the smaller scope when read-only is sufficient.
+    'RoleManagement.Read.Directory',
+    # v1.3.0 -- activate direct Entra role assignments (role granted directly
+    # to the user, no PIM group in between). Lists eligibilities AND POSTs
+    # roleAssignmentScheduleRequests with action=selfActivate. Without
+    # ReadWrite the Activate tab can only surface PIM-for-Groups rows;
+    # activation of direct role assignments returns 403.
+    'RoleManagement.ReadWrite.Directory',
+    # My Access tab -- resolves Administrative Unit displayNames so the
+    # scope column shows the AU name instead of "N Administrative Units".
+    'AdministrativeUnit.Read.All',
+    # First-run onboarding wizard (popup v1.1.2+) -- after interactive
+    # sign-in the wizard queries /applications?$filter=startswith(displayName,
+    # 'PIM Activator') so the admin can pick the per-tenant app reg without
+    # typing the GUID. Read-only is correct here -- we never write app regs.
+    'Application.Read.All'
+)
 $scopeMap = @{}
 foreach ($name in $needed) {
     $scope = $graphSp.Oauth2PermissionScopes | Where-Object { $_.Value -eq $name }
@@ -121,10 +187,28 @@ foreach ($name in $needed) {
     Write-Host ("  resolved {0,-45} -> {1}" -f $name, $scope.Id) -ForegroundColor DarkGray
 }
 
-$requiredResourceAccess = @(@{
-    ResourceAppId  = $graphAppId
-    ResourceAccess = $needed | ForEach-Object { @{ Id = $scopeMap[$_]; Type = 'Scope' } }
-})
+# Azure Service Management API (well-known appId 797f4846-...) +
+# user_impersonation. Required so the popup can mint an ARM token (separate
+# audience: management.azure.com) and list Azure RBAC eligibilities + active
+# assignments. Without it, the My Access tab shows a "Azure RBAC roles not
+# visible yet" banner and the Azure-direct rows on Activate never load.
+$asmAppId = '797f4846-ba00-4fd7-ba43-dac1f8f63013'
+$asmSp    = Get-MgServicePrincipal -Filter "appId eq '$asmAppId'"
+if (-not $asmSp) { throw "Azure Service Management service principal not found in tenant." }
+$asmScope = $asmSp.Oauth2PermissionScopes | Where-Object { $_.Value -eq 'user_impersonation' }
+if (-not $asmScope) { throw "user_impersonation scope not found on Azure Service Management SP." }
+Write-Host ("  resolved {0,-45} -> {1}" -f 'user_impersonation (ASM)', $asmScope.Id) -ForegroundColor DarkGray
+
+$requiredResourceAccess = @(
+    @{
+        ResourceAppId  = $graphAppId
+        ResourceAccess = $needed | ForEach-Object { @{ Id = $scopeMap[$_]; Type = 'Scope' } }
+    },
+    @{
+        ResourceAppId  = $asmAppId
+        ResourceAccess = @( @{ Id = $asmScope.Id; Type = 'Scope' } )
+    }
+)
 
 $redirectUri = "https://$ExtensionId.chromiumapp.org/"
 
@@ -186,14 +270,34 @@ if (-not $sp) {
 if ($GrantConsent) {
     Write-Host ""
     Write-Host "Granting tenant-wide admin consent for delegated scopes..." -ForegroundColor Cyan
-    $scopeString = ($needed -join ' ')
+    # Include the OpenID Connect basics + offline_access alongside the Graph
+    # delegated scopes. They are NOT in $needed (which lists named API
+    # permissions for RequiredResourceAccess), but tenants with restrictive
+    # user-consent settings route sign-ins through the "Approval required"
+    # workflow whenever the requested scope set isn't fully covered by an
+    # existing grant -- and the extension always asks for openid/profile/
+    # offline_access. Bake them in so first-run users sign in silently.
+    $scopeString = (($needed + @('openid','profile','offline_access')) -join ' ')
     $existingGrant = Get-MgOauth2PermissionGrant -Filter "clientId eq '$($sp.Id)' and consentType eq 'AllPrincipals' and resourceId eq '$($graphSp.Id)'" -ErrorAction SilentlyContinue
     if ($existingGrant) {
         Update-MgOauth2PermissionGrant -OAuth2PermissionGrantId $existingGrant.Id -Scope $scopeString
-        Write-Host "  updated existing consent grant" -ForegroundColor DarkGray
+        Write-Host "  updated existing Graph consent grant" -ForegroundColor DarkGray
     } else {
         New-MgOauth2PermissionGrant -ClientId $sp.Id -ConsentType 'AllPrincipals' -ResourceId $graphSp.Id -Scope $scopeString | Out-Null
-        Write-Host "  created new consent grant" -ForegroundColor DarkGray
+        Write-Host "  created new Graph consent grant" -ForegroundColor DarkGray
+    }
+
+    # Azure Service Management user_impersonation -- mirrors the Graph block
+    # above but against the ARM SP. Without admin-consent here, the popup
+    # surfaces a yellow "Azure RBAC roles not visible yet" banner until the
+    # admin runs through this script with -GrantConsent.
+    $existingAsmGrant = Get-MgOauth2PermissionGrant -Filter "clientId eq '$($sp.Id)' and consentType eq 'AllPrincipals' and resourceId eq '$($asmSp.Id)'" -ErrorAction SilentlyContinue
+    if ($existingAsmGrant) {
+        Update-MgOauth2PermissionGrant -OAuth2PermissionGrantId $existingAsmGrant.Id -Scope 'user_impersonation'
+        Write-Host "  updated existing ARM consent grant" -ForegroundColor DarkGray
+    } else {
+        New-MgOauth2PermissionGrant -ClientId $sp.Id -ConsentType 'AllPrincipals' -ResourceId $asmSp.Id -Scope 'user_impersonation' | Out-Null
+        Write-Host "  created new ARM consent grant" -ForegroundColor DarkGray
     }
 }
 
@@ -211,9 +315,10 @@ Write-Host "  clientId    : $($app.AppId)"
 Write-Host "  redirectUri : $redirectUri"
 Write-Host ""
 Write-Host "Next steps:" -ForegroundColor Yellow
-Write-Host "  1. Copy config.template.js to config.js in the extension folder."
-Write-Host "  2. Replace the placeholder tenantId + clientId with the values above."
-Write-Host "  3. Reload the extension at edge://extensions."
+Write-Host "  1. Install the CRX in Edge / Chrome (Deploy-PimActivatorClient.ps1 or sideload)."
+Write-Host "  2. Open the extension popup. The first-run wizard will ask for your work email,"
+Write-Host "     auto-discover this tenant + the PIM Activator app reg, and save the values"
+Write-Host "     into the browser profile -- no config.js / Group Policy / Intune push needed."
 if (-not $GrantConsent) {
     Write-Host ""
     Write-Host "Tip: re-run with -GrantConsent to grant tenant-wide admin consent (avoids" -ForegroundColor DarkYellow

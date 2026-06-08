@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "PIM Activator",
-  "version": "1.1.1",
-  "description": "Bulk-activate eligible PIM-for-Groups memberships in one click. Companion to PIM4EntraPS.",
+  "version": "1.4.9",
+  "description": "Bulk-activate your eligible Entra ID, Azure and PIM for Groups (incl. workload RBAC) PIM assignments in one click. Companion to PIM4EntraPS module (https://github.com/KnudsenMorten/PIM4EntraPS)",
   "action": {
     "default_popup": "popup.html",
     "default_title": "PIM Activator",
@@ -11,6 +11,9 @@
       "32": "icons/icon-32.png",
       "128": "icons/icon-128.png"
     }
+  },
+  "background": {
+    "service_worker": "background.js"
   },
   "icons": {
     "16": "icons/icon-16.png",
@@ -21,9 +24,6 @@
     "storage",
     "identity"
   ],
-  "storage": {
-    "managed_schema": "managed_schema.json"
-  },
   "host_permissions": [
     "https://graph.microsoft.com/*",
     "https://login.microsoftonline.com/*"

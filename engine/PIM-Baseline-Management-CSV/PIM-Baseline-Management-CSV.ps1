@@ -33,6 +33,7 @@ Write-Output "******************************************************************
     # Connect-AzAccount, fetches Modern secrets from KV, populates
     # $global:HighPriv_* / $global:AzureTenantId (public contract), and
     # dot-sources Layer-1 platform-defaults.ps1. Zero v1 module imports.
+    Write-Host "[STEP]  Resolving AutomateIT repo root"
     $repoRoot = $PSScriptRoot
     while ($repoRoot -and -not (Test-Path (Join-Path $repoRoot 'FUNCTIONS\AutomateITPS\AutomateITPS.psd1'))) {
         $repoRoot = Split-Path -Parent $repoRoot
@@ -40,9 +41,30 @@ Write-Output "******************************************************************
     if (-not $repoRoot) {
         throw "AutomationFramework bootstrap: cannot find FUNCTIONS\AutomateITPS\AutomateITPS.psd1 walking up from '$PSScriptRoot'."
     }
+    Write-Host ("[OK]    repo root: {0}" -f $repoRoot)
     $global:PathScripts = $repoRoot
+
+    Write-Host "[STEP]  Importing AutomateITPS module"
     Import-Module (Join-Path $repoRoot 'FUNCTIONS\AutomateITPS\AutomateITPS.psd1') -Global -Force -WarningAction SilentlyContinue
+    Write-Host ("[OK]    AutomateITPS loaded")
+
+    Write-Host "[STEP]  Initialize-PlatformAutomationFramework (bootstrap SPN -> KV -> Modern SPN -> populate `$global:HighPriv_* / `$global:Context)"
+    $_bootSw = [System.Diagnostics.Stopwatch]::StartNew()
     $null = Initialize-PlatformAutomationFramework -IgnoreMissingSecrets
+    $_bootSw.Stop()
+    $_tenantId   = $global:AzureTenantId
+    $_modernApp  = $global:HighPriv_Modern_ApplicationID_Azure
+    $_modernThumb= $global:HighPriv_Modern_CertificateThumbprint_Azure
+    $_kvName     = $global:KV_HighPriv_KeyVaultName
+    # Authoritative auth-method label: set by Connect-PlatformModern. Falls back
+    # to inference for old AutomateITPS that didn't populate the global.
+    $_modernAuth = if ($global:HighPriv_Modern_AuthMethod) {
+                       $global:HighPriv_Modern_AuthMethod.ToLower()
+                   } elseif ($_modernThumb) { 'cert' }
+                     elseif ($global:HighPriv_Modern_Secret_Azure) { 'secret' }
+                     else { '(none -- check KV)' }
+    Write-Host ("[OK]    Platform connected in {0:N1}s -- tenant {1}, KV {2}, Modern AppId {3} (auth={4})" -f $_bootSw.Elapsed.TotalSeconds, $_tenantId, $_kvName, $_modernApp, $_modernAuth)
+    Write-Host ""
 
 <#
     Disconnect-AzAccount
@@ -278,7 +300,7 @@ Write-Output "******************************************************************
 
                 write-host ""
                 Write-host "Processing group $($GroupName)"
-                CreateUpdate-PIM-PAG-Group -GroupName $GroupName `
+                CreateUpdate-PIM-Group -GroupName $GroupName `
                                            -GroupDescription $GroupDescription `
                                            -IsRoleAssignable $IsRoleAssignable `
                                            -Owners $Owners
