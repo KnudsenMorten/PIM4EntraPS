@@ -1,9 +1,13 @@
 # Release notes for PIM4EntraPS
 
-## v2.4.94
+## v2.4.95
 
 Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monorepo:
 
+- release: PIM4EntraPS v2.4.95 + extension v1.6.7 - popup max-height bumped 600->800px (Chromium's hard cap) + catalog import textarea shrunk from 6 to 3 rows (resize:vertical retained), so Save and continue button no longer disappears on first-run (a2c1331e)
+- fix Verify-PimActivatorIntunePolicy.ps1: PS 5.1 doesn't accept 'if (...) {...} else {...}' as an expression inside Write-Host -ForegroundColor argument; lift the choice into a separate $summaryColor variable (9e0c5644)
+- add Verify-PimActivatorIntunePolicy.ps1 - portable HKLM registry verifier for the 6 PIM Activator Intune policies, runs on any Windows endpoint with PS 5.1+ (no Graph dep) (8bf15a34)
+- fix Setup-PimActivatorIntune.ps1 list-value shape: put data in BOTH 'name' and 'value' for non-explicit-value listBox presentations (Intune portal editor renders 'name', not 'value'; the v2.4.94 release showed slot numbers like '1' instead of the extension+URL string) (ec6fe4ee)
 - release: PIM4EntraPS v2.4.94 + extension v1.6.6 - Setup-PimActivatorIntune.ps1 one-click unified ADMX-backed profile + popup body overflow:auto so content past 600px scrolls + 3-row status panel (Intune managed config / local imported / total in catalog) replaces single-line status (f9d64236)
 - fix Push-PimActivatorTenantCatalogProfile.ps1: lookup ADMX-ingested definitions via /groupPolicyDefinitions?$filter=startswith(categoryPath,'\PIM4EntraPS') -- the /groupPolicyUploadedDefinitionFiles/{id}/definitions navigation isn't queryable (7a4c6b8f)
 - add Push-PimActivatorTenantCatalogProfile.ps1 - automates ADMX-backed Configuration Profile creation (looks up ingested ADMX policy definitions + posts presentationValues binding the catalog JSON to Edge + Chrome policies) (3dfe8f3a)
@@ -30,10 +34,6 @@ Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monor
 - release: PIM4EntraPS v2.4.78 + extension v1.5.2 - manifest homepage_url -> GitHub repo (a270e8cf)
 - release: PIM4EntraPS v2.4.77 + extension v1.5.1 - surface developer/contact info via manifest author+homepage_url + 2-line popup footer with MVP badge + email/blog/GitHub/YouTube/bug-report links (254a7072)
 - release: PIM4EntraPS v2.4.76 + extension v1.5.0 - tenant-portable bootstrap via Microsoft Graph CLI clientId + SPN substring discovery + Deploy-PimActivatorClient defaults to HKLM (3306ff77)
-- release: PIM4EntraPS v2.4.75 - engine fixes: policy PATCH backtick + schedule preload + generic datetime + 36159-day bug + skip-line shows role/principal (c9f2f00f)
-- release: PIM4EntraPS v2.4.74 - Deploy-PimActivatorIntune body shape fix (parent CHOICE + child collection) (5bf32754)
-- release: PIM4EntraPS v2.4.73 - tagged single-line engine PIM actions + auto-interactive Connect-MgGraph in deploy scripts (3bc2a91f)
-- release: PIM4EntraPS v2.4.72 - re-add Deploy-PimActivatorIntune + shorter engine logs + cleaner client output (03610db1)
 
 ---
 

@@ -354,7 +354,7 @@ function renderOnboarding(currentCfg) {
         'After import the picker appears above. ' +
         '<strong>Tip:</strong> Intune admins can push the same catalog machine-wide via Settings Catalog -> Configure managed extensions -> key <code style="background:#ffffff;padding:1px 3px;border-radius:3px;">tenantCatalog</code>.' +
       '</div>' +
-      '<textarea id="ob-catalog-json" rows="6" placeholder=\'[{"name":"Contoso","tenantId":"00000000-0000-0000-0000-000000000000","clientId":"00000000-0000-0000-0000-000000000000","prefix":"PIM-","entraPrefix":["PIM-Entra","PIM-AAD"],"azurePrefix":["PIM-Azure","PIM-AzRes"]}]\' style="width:100%;box-sizing:border-box;font-family:monospace;font-size:11px;background:#ffffff;border:1px solid #86efac;border-radius:5px;padding:6px 7px;margin-bottom:8px;"></textarea>' +
+      '<textarea id="ob-catalog-json" rows="3" placeholder=\'[{"name":"Contoso","tenantId":"00000000-0000-0000-0000-000000000000","clientId":"00000000-0000-0000-0000-000000000000","prefix":"PIM-","entraPrefix":["PIM-Entra","PIM-AAD"],"azurePrefix":["PIM-Azure","PIM-AzRes"]}]\' style="width:100%;box-sizing:border-box;font-family:monospace;font-size:11px;background:#ffffff;border:1px solid #86efac;border-radius:5px;padding:6px 7px;margin-bottom:8px;resize:vertical;"></textarea>' +
       '<button id="ob-catalog-import" class="primary" style="font-size:12px;">Import tenant catalog</button>'
     document.getElementById('ob-catalog-import').onclick = async () => {
       const ta = document.getElementById('ob-catalog-json')
