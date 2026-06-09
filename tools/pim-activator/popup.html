@@ -280,19 +280,26 @@
   <div id="myaccess-list"></div>
 </div>
 
-<footer id="popup-footer" style="padding:8px 12px;font-size:10.5px;color:#7d8590;border-top:1px solid #d0d7de;background:#f6f8fa;">
-  <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
-    <div style="flex:1;min-width:0;">
+<footer id="popup-footer" style="padding:8px 12px;font-size:10.5px;color:#7d8590;border-top:1px solid #d0d7de;background:#f6f8fa;line-height:1.45;">
+  <!-- Row 1: title + repo + GitHub + Report bug on the LEFT  |  tenant ID on the RIGHT -->
+  <div style="display:flex;justify-content:space-between;align-items:baseline;gap:10px;flex-wrap:wrap;">
+    <div>
       <span style="font-weight:700;letter-spacing:0.3px;color:#24292f;">PIM ACTIVATOR</span>,
       part of <a href="https://github.com/KnudsenMorten/PIM4EntraPS" target="_blank" rel="noopener" style="color:#0969da;text-decoration:none;">PIM4EntraPS</a>
-      &mdash; Developed by <a href="https://aka.ms/morten" target="_blank" rel="noopener" style="color:#0969da;text-decoration:none;font-weight:600;">Morten Knudsen</a><span style="color:#0969da;">,</span>
-      <span title="Microsoft Most Valuable Professional" style="color:#0969da;font-weight:600;">Microsoft MVP</span>
       <span style="color:#d0d7de;margin:0 4px;">|</span>
       <a href="https://github.com/KnudsenMorten/PIM4EntraPS" target="_blank" rel="noopener" title="Source &amp; issues" style="color:#0969da;text-decoration:none;">&#128279; GitHub</a>
       <span style="color:#d0d7de;margin:0 4px;">|</span>
       <a href="https://github.com/KnudsenMorten/PIM4EntraPS/issues" target="_blank" rel="noopener" title="Report a bug" style="color:#0969da;text-decoration:none;">&#128027; Report bug</a>
     </div>
-    <div id="footer-tenant" title="" style="font-family:monospace;font-size:10px;color:#57606a;"></div>
+    <div id="footer-tenant-id" title="" style="font-family:monospace;font-size:10px;color:#57606a;text-align:right;"></div>
+  </div>
+  <!-- Row 2: developer attribution on the LEFT  |  tenant NAME + reset on the RIGHT -->
+  <div style="display:flex;justify-content:space-between;align-items:baseline;gap:10px;flex-wrap:wrap;margin-top:3px;">
+    <div>
+      Developed by <a href="https://aka.ms/morten" target="_blank" rel="noopener" style="color:#0969da;text-decoration:none;font-weight:600;">Morten Knudsen</a><span style="color:#0969da;">,</span>
+      <span title="Microsoft Most Valuable Professional" style="color:#0969da;font-weight:600;">Microsoft MVP</span>
+    </div>
+    <div id="footer-tenant-name" title="" style="font-size:11px;color:#24292f;font-weight:600;text-align:right;"></div>
   </div>
 </footer>
 
