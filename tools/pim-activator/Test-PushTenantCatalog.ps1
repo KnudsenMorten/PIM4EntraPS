@@ -135,12 +135,14 @@ Write-Host "App reg:   $($picked.DisplayName) (appId $clientId; source $($picked
 # ---- 4. Build catalog JSON -----------------------------------------------
 $catalog = @(
     [ordered]@{
-        name        = $tenantName
-        tenantId    = $tenantId
-        clientId    = $clientId
-        prefix      = 'PIM-'
-        entraPrefix = @('PIM-Entra','PIM-AAD')
-        azurePrefix = @('PIM-Azure','PIM-AzRes')
+        name                 = $tenantName
+        tenantId             = $tenantId
+        clientId             = $clientId
+        defaultJustification = 'Change in infrastructure'
+        defaultDurationHours = 8
+        prefix               = 'PIM-'
+        entraPrefix          = @('PIM-Entra','PIM-AAD')
+        azurePrefix          = @('PIM-Azure','PIM-AzRes')
     }
 )
 $catalogPath = Join-Path $scriptDir 'discovered-tenant-catalog.json'

@@ -1,20 +1,53 @@
 #Requires -Version 5.1
 <#
 .SYNOPSIS
-    Dev-loop helper for rapid PIM Activator iteration. Two modes:
+    Trigger a PIM Activator extension update on the local browser.
 
-    1. Default (no flags)  -> just flush local browser caches + restart Edge so
-                              the next launch pulls the latest CRX from
-                              GitHub Pages via the forcelist policy.
+    Core purpose: make Edge / Chrome pick up the latest CRX from GitHub
+    Pages NOW, instead of waiting hours for Chromium's default update
+    poll. The forcelist policy (ExtensionInstallForcelist) is what
+    actually installs / refreshes the extension; this script just
+    convinces the browser to run that update check immediately.
 
-    2. -Repack             -> also bumps the patch version, repacks the CRX
-                              repacks the CRX, pushes pim-activator.crx
-                              + updates.xml to the gh-pages branch, THEN does
-                              the flush + restart. End-to-end "make my browser
-                              show the latest code" in one command.
+    Two modes:
 
-    Built for iterations 0.4.2 -> 0.4.3 -> 0.4.4 -> ... where you don't want
-    to manually kill processes, patch Preferences JSON, push gh-pages, etc.
+    1. Default (no flags)  -> evict the cached extension binary
+                              (<UserData>\Extensions\<EXT_ID>), then
+                              relaunch the browser with the Chromium
+                              update flags --extensions-update-frequency=30
+                              so the forcelist update kicks within ~30s.
+                              No Preferences / Secure Preferences /
+                              Service Worker touching -- profile data
+                              is left fully intact.
+
+    2. -Repack             -> also bumps the patch version, repacks the
+                              CRX, pushes pim-activator.crx + updates.xml
+                              to the gh-pages branch, THEN runs the
+                              flush + restart. End-to-end "make my
+                              browser show the latest code" in one
+                              command.
+
+    Built for iterations 0.4.2 -> 0.4.3 -> 0.4.4 -> ... where you don't
+    want to manually kill processes, evict the cached CRX, wait hours
+    for the update poll, etc.
+
+.WARNING (2026-06-09 incident)
+    Earlier versions of this script ran TWO destructive actions on every
+    "flush" invocation: (1) rewrote <profile>\Preferences + Secure
+    Preferences via a PS 5.1 ConvertFrom-Json / ConvertTo-Json round-trip,
+    and (2) deleted <profile>\Service Worker. At least one device lost
+    its entire Edge profile (bookmarks, history, saved tabs, sign-ins)
+    because the JSON round-trip corrupted Preferences and Chromium reset
+    the profile on next launch.
+
+    Neither is necessary to trigger an extension update -- the cached
+    binary evict + fast-poll relaunch (default path above) does that on
+    its own. Both destructive paths are now OPT-IN behind explicit
+    switches and should normally never be used:
+      -DangerouslyPatchPreferences   (the JSON rewrite)
+      -DangerouslyWipeServiceWorker  (the SW dir delete)
+
+    A casual re-run can no longer destroy profile data.
 
 .PARAMETER Repack
     If set, repacks the extension and pushes it to gh-pages before flushing
@@ -67,7 +100,16 @@ param(
     [ValidateSet('Edge','Chrome','Both')]
     [string]$Browser = 'Both',
     [switch]$NoRestart,
-    [string]$GhPagesDir = (Join-Path $env:LOCALAPPDATA 'PimActivatorPages')
+    [string]$GhPagesDir = (Join-Path $env:LOCALAPPDATA 'PimActivatorPages'),
+    # ----- DESTRUCTIVE opt-in flags (DEFAULT: OFF) -----
+    # 2026-06-09 -- earlier versions of this script ran both of these by
+    # default during a "flush" run, and at least one device lost the entire
+    # Edge profile (bookmarks / history / saved tabs reset) because the
+    # PS 5.1 JSON round-trip in DangerouslyPatchPreferences corrupted the
+    # Preferences file. Both are now opt-in and gated behind explicit
+    # switches so a casual re-run can never destroy profile data again.
+    [switch]$DangerouslyPatchPreferences,   # JSON-rewrite Preferences + Secure Preferences -- CAN BRICK A PROFILE
+    [switch]$DangerouslyWipeServiceWorker   # delete <profile>\Service Worker -- evicts SW registrations for ALL extensions/sites
 )
 
 $ErrorActionPreference = 'Stop'
@@ -240,44 +282,75 @@ foreach ($b in $browsers) {
     }
 }
 
-Write-Step "Patching Preferences JSON (settings + HMACs + pin/toolbar)"
-# Aggressive scrub: covers extensions.settings.<id>, the HMAC integrity hash
-# at protection.macs.extensions.settings.<id> (without removing the MAC,
-# Edge rejects our scrub + reinstates the stale entry), plus pinned/toolbar
-# arrays. Hard-won lesson from the 0.4.0 -> 0.4.2 dev loop where the user
-# kept getting "file not found" because Secure Preferences held a path to
-# a deleted version folder. See feedback_pim_no_update_button.md.
-foreach ($b in $browsers) {
-    foreach ($name in 'Preferences','Secure Preferences') {
-        $prefPath = Join-Path $b.UserData $name
-        if (-not (Test-Path $prefPath)) { continue }
-        try {
-            $json = Get-Content -LiteralPath $prefPath -Raw -Encoding UTF8 | ConvertFrom-Json
-            $touched = $false
-            if ($json.extensions -and $json.extensions.settings -and $json.extensions.settings.$EXT_ID) {
-                $json.extensions.settings.PSObject.Properties.Remove($EXT_ID)
-                $touched = $true
+# ============================================================================
+# Preferences / Secure Preferences JSON rewrite
+# ============================================================================
+# DESTRUCTIVE -- opt-in only (-DangerouslyPatchPreferences).
+#
+# 2026-06-09 incident: this block ran by default in every "flush" run.
+# PowerShell 5.1's `ConvertTo-Json -Depth 100 -Compress` round-trip is
+# unreliable for the Edge/Chrome Preferences shape (Unicode, deeply
+# nested objects, integer/number type drift). The corruption produced a
+# file Edge/Chrome could not parse on next launch -- Chromium then
+# silently RESETS the entire profile to defaults, losing bookmarks,
+# history, saved tabs, signed-in accounts, etc.
+#
+# The original purpose was solving a v0.4.x dev-loop quirk where Secure
+# Preferences cached a path to a deleted extension version folder. The
+# extension-binary cleanup at line ~234 already covers that path.
+# Preferences rewrite is no longer needed for the normal flush.
+#
+# Pass -DangerouslyPatchPreferences ONLY when you specifically need to
+# scrub the extensions.settings.<id> + protection.macs.extensions.* keys
+# (the dev-iteration use case) AND you have backups of the profile.
+if ($DangerouslyPatchPreferences) {
+    Write-Warn "DangerouslyPatchPreferences set -- writing Preferences JSON. Profile data can be lost if the JSON round-trip drops content."
+    Write-Step "Patching Preferences JSON (settings + HMACs + pin/toolbar)"
+    foreach ($b in $browsers) {
+        foreach ($name in 'Preferences','Secure Preferences') {
+            $prefPath = Join-Path $b.UserData $name
+            if (-not (Test-Path $prefPath)) { continue }
+            # Belt-and-braces: timestamped backup of the raw bytes BEFORE we
+            # touch the file. If our rewrite corrupts it, the operator can
+            # restore from the .bak.<ts> sidecar.
+            try {
+                $stamp = (Get-Date).ToString('yyyyMMddHHmmss')
+                Copy-Item -LiteralPath $prefPath -Destination "$prefPath.bak.$stamp" -Force -ErrorAction Stop
+                Write-Ok "$($b.Name) $name : backup saved as $name.bak.$stamp"
+            } catch {
+                Write-Err "$($b.Name) $name : could NOT create backup -- aborting rewrite to be safe. $($_.Exception.Message)"
+                continue
             }
-            if ($json.protection -and $json.protection.macs -and $json.protection.macs.extensions -and $json.protection.macs.extensions.settings -and $json.protection.macs.extensions.settings.$EXT_ID) {
-                $json.protection.macs.extensions.settings.PSObject.Properties.Remove($EXT_ID)
-                $touched = $true
+            try {
+                $json = Get-Content -LiteralPath $prefPath -Raw -Encoding UTF8 | ConvertFrom-Json
+                $touched = $false
+                if ($json.extensions -and $json.extensions.settings -and $json.extensions.settings.$EXT_ID) {
+                    $json.extensions.settings.PSObject.Properties.Remove($EXT_ID)
+                    $touched = $true
+                }
+                if ($json.protection -and $json.protection.macs -and $json.protection.macs.extensions -and $json.protection.macs.extensions.settings -and $json.protection.macs.extensions.settings.$EXT_ID) {
+                    $json.protection.macs.extensions.settings.PSObject.Properties.Remove($EXT_ID)
+                    $touched = $true
+                }
+                if ($json.extensions -and $json.extensions.pinned_extensions -and ($json.extensions.pinned_extensions -contains $EXT_ID)) {
+                    $json.extensions.pinned_extensions = @($json.extensions.pinned_extensions | Where-Object { $_ -ne $EXT_ID })
+                    $touched = $true
+                }
+                if ($json.extensions -and $json.extensions.toolbar -and ($json.extensions.toolbar -contains $EXT_ID)) {
+                    $json.extensions.toolbar = @($json.extensions.toolbar | Where-Object { $_ -ne $EXT_ID })
+                    $touched = $true
+                }
+                if ($touched) {
+                    ($json | ConvertTo-Json -Depth 100 -Compress) | Set-Content -LiteralPath $prefPath -Encoding UTF8 -NoNewline
+                    Write-Ok "$($b.Name) $name : scrubbed"
+                }
+            } catch {
+                Write-Err "$($b.Name) $name : $($_.Exception.Message)"
             }
-            if ($json.extensions -and $json.extensions.pinned_extensions -and ($json.extensions.pinned_extensions -contains $EXT_ID)) {
-                $json.extensions.pinned_extensions = @($json.extensions.pinned_extensions | Where-Object { $_ -ne $EXT_ID })
-                $touched = $true
-            }
-            if ($json.extensions -and $json.extensions.toolbar -and ($json.extensions.toolbar -contains $EXT_ID)) {
-                $json.extensions.toolbar = @($json.extensions.toolbar | Where-Object { $_ -ne $EXT_ID })
-                $touched = $true
-            }
-            if ($touched) {
-                ($json | ConvertTo-Json -Depth 100 -Compress) | Set-Content -LiteralPath $prefPath -Encoding UTF8 -NoNewline
-                Write-Ok "$($b.Name) $name : scrubbed"
-            }
-        } catch {
-            Write-Err "$($b.Name) $name : $($_.Exception.Message)"
         }
     }
+} else {
+    Write-Warn "Skipping Preferences JSON rewrite (default since 2026-06-09 -- pass -DangerouslyPatchPreferences to opt in)"
 }
 
 # Also clear secondary extension caches (Local Extension Settings, Sync, etc.)
@@ -292,31 +365,41 @@ foreach ($b in $browsers) {
     }
 }
 
-# Brute-force nuke MV3 service worker registration cache. Chromium stores
-# extension service workers under `Service Worker\Database\` (LevelDB with
-# registration metadata) and `Service Worker\ScriptCache\` (the cached SW
-# script bytes). When the extension binary is replaced on disk but the SW
-# registration in this LevelDB still points at the OLD version, Chrome
-# happily resurrects the old service worker on next launch -- which is
-# why customer browsers kept signing in with the upstream e96afaa6 client
-# even after the extension binary itself had updated. These dirs are
-# SHARED across all extensions + websites in the profile, so wiping them
-# also forces every other site/extension to re-register its SW on next
-# launch. Acceptable trade-off in a "force the PIM Activator to the
-# absolute latest" maintenance op.
-Write-Step "Nuking MV3 Service Worker registration cache"
-foreach ($b in $browsers) {
-    $swDir = Join-Path $b.UserData 'Service Worker'
-    if (Test-Path $swDir) {
-        try {
-            Remove-Item $swDir -Recurse -Force -ErrorAction Stop
-            Write-Ok "$($b.Name): removed $swDir (all SW registrations evicted; will re-register on next launch)"
-        } catch {
-            Write-Err "$($b.Name): Service Worker dir - $($_.Exception.Message)"
+# ============================================================================
+# MV3 Service Worker registration cache wipe
+# ============================================================================
+# DESTRUCTIVE -- opt-in only (-DangerouslyWipeServiceWorker).
+#
+# Chromium stores service-worker registration metadata + the cached SW
+# script bytes under `<profile>\Service Worker\`. This dir is SHARED
+# across every extension AND every website in the profile -- removing
+# it forces every other extension/site to re-register its SW on next
+# launch. In addition, in some profile configurations this dir contains
+# transient state that other Chromium subsystems depend on; wiping it
+# has been correlated with profile-data oddities post-launch.
+#
+# 2026-06-09: made opt-in alongside the Preferences rewrite, since both
+# were running together by default during the same flush run that
+# caused the profile loss. The extension-binary delete at line ~234 is
+# usually enough to make Chrome pull the latest CRX on next launch.
+if ($DangerouslyWipeServiceWorker) {
+    Write-Warn "DangerouslyWipeServiceWorker set -- wiping <profile>\Service Worker. ALL extensions + sites re-register their SWs."
+    Write-Step "Nuking MV3 Service Worker registration cache"
+    foreach ($b in $browsers) {
+        $swDir = Join-Path $b.UserData 'Service Worker'
+        if (Test-Path $swDir) {
+            try {
+                Remove-Item $swDir -Recurse -Force -ErrorAction Stop
+                Write-Ok "$($b.Name): removed $swDir (all SW registrations evicted; will re-register on next launch)"
+            } catch {
+                Write-Err "$($b.Name): Service Worker dir - $($_.Exception.Message)"
+            }
+        } else {
+            Write-Warn "$($b.Name): no Service Worker dir to evict"
         }
-    } else {
-        Write-Warn "$($b.Name): no Service Worker dir to evict"
     }
+} else {
+    Write-Warn "Skipping Service Worker dir wipe (default since 2026-06-09 -- pass -DangerouslyWipeServiceWorker to opt in)"
 }
 
 if ($NoRestart) {
@@ -325,7 +408,13 @@ if ($NoRestart) {
     return
 }
 
-Write-Step "Relaunching browser(s)"
+Write-Step "Relaunching browser(s) with fast-update-poll flag"
+# --extensions-update-frequency=30 tells Chromium to poll every extension's
+# update_url every 30 seconds (default is 5 hours). Without this flag, the
+# forcelist update kicks "eventually" -- often not at all during a 1-min
+# dev iteration. With it, the new CRX from gh-pages lands within ~30s of
+# launch. The flag only affects extension update cadence -- no profile
+# data is touched.
 foreach ($b in $browsers) {
     $exe = if ($b.Name -eq 'Edge') {
         'C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe'
@@ -340,10 +429,11 @@ foreach ($b in $browsers) {
         Write-Warn "$($b.Name): exe not found, skipping launch"
         continue
     }
-    Start-Process -FilePath $exe | Out-Null
-    Write-Ok "$($b.Name): launched"
+    Start-Process -FilePath $exe -ArgumentList '--extensions-update-frequency=30' | Out-Null
+    Write-Ok "$($b.Name): launched (--extensions-update-frequency=30)"
 }
 
 Write-Step "Done"
 Write-Ok "Browser launched. Forcelist policy will pull the latest CRX within ~30s."
 Write-Ok "Check progress at edge://extensions / chrome://extensions (Developer mode on)."
+Write-Ok "If it doesn't appear: open edge://extensions, enable Developer mode, click 'Update'."

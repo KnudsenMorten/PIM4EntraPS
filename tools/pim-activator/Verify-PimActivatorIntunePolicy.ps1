@@ -104,6 +104,22 @@ foreach ($c in $checks) {
             $v = (Get-ItemProperty -LiteralPath $c.Path -Name $c.Name -ErrorAction Stop).($c.Name)
             $preview = if ($v.Length -gt 200) { $v.Substring(0,200) + '... (' + $v.Length + ' chars)' } else { $v }
             Write-Host ('  ' + $c.Name + ' = ' + $preview) -ForegroundColor Green
+            # Catalog-shape diagnosis: the extension's loadConfig expects an ARRAY of
+            # tenant objects (must start with '['). PS 5.1's ConvertTo-Json bug in
+            # the pre-v2.4.96 Setup script serialized single-entry catalogs as a
+            # plain OBJECT (starts with '{') -- chrome.storage.managed read succeeds
+            # but Array.isArray() check returns false -> popup shows "NOT DETECTED".
+            if ($c.Name -eq 'tenantCatalog') {
+                $first = $v.Trim().Substring(0,1)
+                if ($first -eq '[') {
+                    Write-Host '  -> Shape: ARRAY [{...}]  (CORRECT, extension can parse)' -ForegroundColor Green
+                } elseif ($first -eq '{') {
+                    Write-Host '  -> Shape: OBJECT {...}   (BROKEN -- catalog will not be detected by the popup!' -ForegroundColor Red
+                    Write-Host '     Fix: re-run Setup-PimActivatorIntune.ps1 v2.4.96+ which forces array-JSON output.' -ForegroundColor Red
+                } else {
+                    Write-Host ('  -> Shape: UNKNOWN (starts with "' + $first + '")') -ForegroundColor Yellow
+                }
+            }
             $pass++
         } catch {
             Write-Host ("  MISSING value '" + $c.Name + "': " + $_.Exception.Message) -ForegroundColor Red

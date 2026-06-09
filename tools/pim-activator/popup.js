@@ -96,9 +96,16 @@ async function readMergedCatalog() {
   try {
     const m = await new Promise(r => chrome.storage.managed.get(['tenantCatalog'], r))
     if (m && m.tenantCatalog) {
-      const parsed = (typeof m.tenantCatalog === 'string')
+      let parsed = (typeof m.tenantCatalog === 'string')
         ? JSON.parse(m.tenantCatalog)
         : m.tenantCatalog
+      // Defensive: PS 5.1's ConvertTo-Json had a single-element-array unwrap
+      // bug that serialized 1-tenant catalogs as {...} instead of [{...}].
+      // Accept both shapes so the popup works against pre-v2.4.96 Intune
+      // pushes too. Wrap a single object in a 1-element array.
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed) && parsed.tenantId) {
+        parsed = [parsed]
+      }
       if (Array.isArray(parsed)) managed = parsed
     }
   } catch (e) {
@@ -170,14 +177,12 @@ async function loadConfig() {
   if (catalog.length > 0) {
     let activeId = String(u.activeTenantId || '').trim().toLowerCase()
     let active = catalog.find(e => String(e.tenantId).toLowerCase() === activeId)
-    // If no active selection (or stale selection), auto-pick the first entry
-    // when there's only one. With many entries we fall through and let the
-    // wizard render the picker.
-    if (!active && catalog.length === 1) {
-      active = catalog[0]
-      activeId = String(active.tenantId).toLowerCase()
-      await new Promise(r => chrome.storage.local.set({ activeTenantId: activeId }, r))
-    }
+    // v1.6.15+: NO auto-pick on fresh deployment. Even with a single-tenant
+    // catalog (typical Intune-pushed customer scenario), the wizard must
+    // render so the user explicitly chooses 'Use centrally deployed' /
+    // 'Import JSON' / 'Add manual'. Auto-picking the lone entry skipped
+    // the wizard entirely and the user never got to see / approve where
+    // the config came from.
     if (active) {
       // Resolve admin-friendly prefix shortcuts into the existing regex fields
       // (advanced regex always wins). Mutates a shallow copy of `active`.
@@ -276,16 +281,31 @@ function renderOnboarding(currentCfg) {
   // panel as the fallback path -- still works for single-tenant deployments.
   const catalog = Array.isArray(currentCfg.catalog) ? currentCfg.catalog : []
   const sources = (catalog && catalog._sources) || { managedRaw: 0, localRaw: 0, managedErr: null }
+
+  // ----- v1.6.14+ mode selector -------------------------------------------
+  // Shown FIRST when the wizard has no usable catalog yet (post-reset or
+  // first-run). Three cards: use centrally-deployed (Intune), import a
+  // JSON catalog manually, or add a single tenant by hand. Picking one
+  // reveals the relevant section + a "back" link to return to the picker.
+  // Skipped entirely when catalog has >=1 entries -- we go straight to
+  // the tenant picker (existing behavior).
+  let modeSelector = document.getElementById('ob-mode-selector')
+  if (!modeSelector) {
+    modeSelector = document.createElement('div')
+    modeSelector.id = 'ob-mode-selector'
+    modeSelector.style.cssText = 'margin-bottom:14px;'
+    // Insert as the FIRST child of #onboarding, before the Welcome heading,
+    // so the mode selector is the first thing the user sees.
+    ob.insertBefore(modeSelector, ob.firstChild)
+  }
   let catalogPanel = document.getElementById('ob-catalog')
   if (!catalogPanel) {
     catalogPanel = document.createElement('div')
     catalogPanel.id = 'ob-catalog'
     catalogPanel.style.cssText = 'margin-bottom:14px;padding:10px;background:#f0fdf4;border:1px solid #86efac;border-radius:6px;'
-    // Insert AFTER the Welcome heading + subtitle (the first 2 children of
-    // #onboarding) so the order is: Welcome -> Catalog panel -> Manual entry.
-    // The Welcome block is the page title -> catalog is the first action ->
-    // manual entry is the fallback.
-    const afterEl = ob.children.length >= 2 ? ob.children[1].nextSibling : ob.firstChild
+    // Insert AFTER Welcome + subtitle (which are now child #2 and #3 after
+    // the mode selector). Order: Mode selector -> Welcome -> Catalog -> Manual.
+    const afterEl = ob.children.length >= 3 ? ob.children[2].nextSibling : null
     if (afterEl) ob.insertBefore(catalogPanel, afterEl)
     else         ob.appendChild(catalogPanel)
   }
@@ -318,33 +338,24 @@ function renderOnboarding(currentCfg) {
            _row('Local imported config:', localOk,   localDetail) +
            _row('Total in catalog:',      total > 0, totalDetail)
   })()
-  if (catalog.length > 0) {
-    catalogPanel.innerHTML =
-      '<div style="font-size:12.5px;color:#166534;font-weight:600;margin-bottom:4px;">Pick a tenant (' + catalog.length + ' in catalog)</div>' +
-      '<div style="font-size:10.5px;margin-bottom:6px;line-height:1.4;">' + _statusLine + '</div>' +
-      '<div style="font-size:11px;color:#15803d;margin-bottom:8px;line-height:1.45;">Pick the tenant to activate now -- you can switch anytime from the header dropdown.</div>' +
-      '<select id="ob-catalog-pick" style="width:100%;padding:6px 7px;font-size:12px;background:#ffffff;border:1px solid #86efac;border-radius:5px;margin-bottom:8px;">' +
-        catalog.map(c => '<option value="' + escapeHtmlSafe(c.tenantId) + '">' + escapeHtmlSafe(c.name || c.tenantId) + ' (' + escapeHtmlSafe(c.tenantId) + ')</option>').join('') +
-      '</select>' +
-      '<button id="ob-catalog-go" class="primary" style="font-size:12px;">Use this tenant</button>' +
-      '<button id="ob-catalog-clear" style="font-size:11px;margin-left:8px;padding:5px 10px;border:1px solid #d0d7de;border-radius:4px;background:#ffffff;cursor:pointer;">Clear local catalog</button>'
-    document.getElementById('ob-catalog-go').onclick = async () => {
-      const sel = document.getElementById('ob-catalog-pick')
-      const tid = (sel && sel.value || '').toLowerCase()
-      if (!tid) return
-      await new Promise(r => chrome.storage.local.set({ activeTenantId: tid }, r))
-      // Clear stale tokens from a different customer's session.
-      await new Promise(r => chrome.storage.local.remove(
-        ['refreshToken','accessToken','accessTokenExpiry','armAccessToken','armAccessTokenExpiry','account'], r))
-      window.location.reload()
-    }
-    document.getElementById('ob-catalog-clear').onclick = async () => {
-      if (!confirm('Clear the LOCAL customer catalog from this browser profile? Intune-pushed entries will be restored on next popup load.')) return
-      await new Promise(r => chrome.storage.local.remove(['tenantCatalog','activeTenantId','tenantTokens'], r))
-      window.location.reload()
-    }
-  } else {
-    catalogPanel.innerHTML =
+  // v1.6.15+: catalogPanel ALWAYS renders both sub-views (picker + import)
+  // and the mode-selector logic toggles which is visible. Lets the user
+  // switch between "use the existing catalog" and "import a fresh JSON"
+  // regardless of current catalog state.
+  const pickerHtml = catalog.length > 0
+    ? ('<div id="ob-catalog-picker">' +
+         '<div style="font-size:12.5px;color:#166534;font-weight:600;margin-bottom:4px;">Pick a tenant (' + catalog.length + ' in catalog)</div>' +
+         '<div style="font-size:10.5px;margin-bottom:6px;line-height:1.4;">' + _statusLine + '</div>' +
+         '<div style="font-size:11px;color:#15803d;margin-bottom:8px;line-height:1.45;">Pick the tenant to activate now -- you can switch anytime from the header dropdown.</div>' +
+         '<select id="ob-catalog-pick" style="width:100%;padding:6px 7px;font-size:12px;background:#ffffff;border:1px solid #86efac;border-radius:5px;margin-bottom:8px;">' +
+           catalog.map(c => '<option value="' + escapeHtmlSafe(c.tenantId) + '">' + escapeHtmlSafe(c.name || c.tenantId) + ' (' + escapeHtmlSafe(c.tenantId) + ')</option>').join('') +
+         '</select>' +
+         '<button id="ob-catalog-go" class="primary" style="font-size:12px;">Use this tenant</button>' +
+         '<button id="ob-catalog-clear" style="font-size:11px;margin-left:8px;padding:5px 10px;border:1px solid #d0d7de;border-radius:4px;background:#ffffff;cursor:pointer;">Clear local catalog</button>' +
+       '</div>')
+    : ''
+  const importHtml =
+    '<div id="ob-catalog-import-section">' +
       '<div style="font-size:12.5px;color:#166534;font-weight:600;margin-bottom:4px;">Import tenant catalog (MSP / multi-tenant)</div>' +
       '<div style="font-size:10.5px;margin-bottom:8px;line-height:1.4;">' + _statusLine + '</div>' +
       '<div style="font-size:11px;color:#15803d;margin-bottom:8px;line-height:1.45;">' +
@@ -355,7 +366,29 @@ function renderOnboarding(currentCfg) {
         '<strong>Tip:</strong> Intune admins can push the same catalog machine-wide via Settings Catalog -> Configure managed extensions -> key <code style="background:#ffffff;padding:1px 3px;border-radius:3px;">tenantCatalog</code>.' +
       '</div>' +
       '<textarea id="ob-catalog-json" rows="3" placeholder=\'[{"name":"Contoso","tenantId":"00000000-0000-0000-0000-000000000000","clientId":"00000000-0000-0000-0000-000000000000","prefix":"PIM-","entraPrefix":["PIM-Entra","PIM-AAD"],"azurePrefix":["PIM-Azure","PIM-AzRes"]}]\' style="width:100%;box-sizing:border-box;font-family:monospace;font-size:11px;background:#ffffff;border:1px solid #86efac;border-radius:5px;padding:6px 7px;margin-bottom:8px;resize:vertical;"></textarea>' +
-      '<button id="ob-catalog-import" class="primary" style="font-size:12px;">Import tenant catalog</button>'
+      '<button id="ob-catalog-import" class="primary" style="font-size:12px;">Import tenant catalog</button>' +
+    '</div>'
+  catalogPanel.innerHTML = pickerHtml + importHtml
+  // Picker wiring (only present when catalog has entries)
+  const pickGoBtn = document.getElementById('ob-catalog-go')
+  if (pickGoBtn) {
+    pickGoBtn.onclick = async () => {
+      const sel = document.getElementById('ob-catalog-pick')
+      const tid = (sel && sel.value || '').toLowerCase()
+      if (!tid) return
+      await new Promise(r => chrome.storage.local.set({ activeTenantId: tid }, r))
+      await new Promise(r => chrome.storage.local.remove(
+        ['refreshToken','accessToken','accessTokenExpiry','armAccessToken','armAccessTokenExpiry','account'], r))
+      window.location.reload()
+    }
+    document.getElementById('ob-catalog-clear').onclick = async () => {
+      if (!confirm('Clear the LOCAL customer catalog from this browser profile? Intune-pushed entries will be restored on next popup load.')) return
+      await new Promise(r => chrome.storage.local.remove(['tenantCatalog','activeTenantId','tenantTokens'], r))
+      window.location.reload()
+    }
+  }
+  // Import wiring (always present)
+  ;(function () {
     document.getElementById('ob-catalog-import').onclick = async () => {
       const ta = document.getElementById('ob-catalog-json')
       const raw = (ta && ta.value || '').trim()
@@ -394,7 +427,126 @@ function renderOnboarding(currentCfg) {
       }, r))
       window.location.reload()
     }
+  })()
+
+  // ----- v1.6.14+ mode-selector render + section show/hide ----------------
+  // Identify the existing manual-entry section (the "SINGLE TENANT -- MANUAL
+  // ENTRY" header + the grid + the Save-and-continue button) so the mode
+  // selector can toggle them as one unit.
+  const manualGrid    = document.querySelector('#onboarding div[style*="grid-template-columns:auto 1fr"]')
+  const manualHeader  = manualGrid && manualGrid.previousElementSibling
+  const manualSaveBtn = document.getElementById('onboarding-save')
+  const manualSaveRow = manualSaveBtn && manualSaveBtn.parentElement
+  // The Welcome heading + its subtitle (children #2 and #3 of #onboarding
+  // after the mode-selector div) -- hidden alongside everything else when
+  // the user drills into a mode.
+  const welcomeHeading = ob.children[1] || null
+  const welcomeSubtitle = ob.children[2] || null
+
+  // v1.6.15+: 'menu' is the default top-level mode selector. ALWAYS shown
+  // on fresh wizard render regardless of catalog state -- user explicitly
+  // picks the source rather than being silently auto-routed when there
+  // happens to be a single managed entry. Modes:
+  //   'menu'    -> mode-selector card grid + Welcome
+  //   'picker'  -> catalogPanel showing the tenant picker (when 2+ entries
+  //                from managed/local catalog and user chose centrally-deployed)
+  //   'json'    -> catalogPanel showing the import textarea
+  //   'manual'  -> manual-entry grid + Save button
+  function showSections(mode) {
+    modeSelector.style.display    = (mode === 'menu') ? '' : 'none'
+    if (welcomeHeading)  welcomeHeading.style.display  = (mode === 'menu') ? '' : 'none'
+    if (welcomeSubtitle) welcomeSubtitle.style.display = (mode === 'menu') ? '' : 'none'
+    catalogPanel.style.display    = (mode === 'json' || mode === 'picker') ? '' : 'none'
+    // Inside catalogPanel, toggle the picker sub-div vs the import sub-div
+    const pickerSub = document.getElementById('ob-catalog-picker')
+    const importSub = document.getElementById('ob-catalog-import-section')
+    if (pickerSub) pickerSub.style.display = (mode === 'picker') ? '' : 'none'
+    if (importSub) importSub.style.display = (mode === 'json')   ? '' : 'none'
+    // Manual entry section
+    if (manualHeader)  manualHeader.style.display  = (mode === 'manual') ? '' : 'none'
+    if (manualGrid)    manualGrid.style.display    = (mode === 'manual') ? 'grid' : 'none'
+    if (manualSaveRow) manualSaveRow.style.display = (mode === 'manual') ? '' : 'none'
   }
+
+  // Build the 3-card mode selector. Always rendered; visibility controlled
+  // above. "Use centrally deployed" reflects the LIVE Intune-detection state
+  // -- shows a green check + entry count when managed has content, gray X
+  // when empty. Clicking it tries to use whatever's currently in chrome.
+  // storage.managed; if empty, surfaces an actionable error.
+  const _managedOk   = sources.managedRaw > 0 && !sources.managedErr
+  const _managedNote = sources.managedErr
+    ? '<span style="color:#cf222e;">Read failed: ' + escapeHtmlSafe(sources.managedErr) + '</span>'
+    : (sources.managedRaw > 0
+        ? '<span style="color:#15803d;font-weight:600;">&#10003; ' + sources.managedRaw + ' tenant(s) detected</span>'
+        : '<span style="color:#9a3412;">&#10007; Not detected on this device yet</span>')
+  const _cardCss = 'cursor:pointer;padding:12px;background:#ffffff;border:1px solid #d0d7de;border-radius:6px;text-align:left;transition:border-color 0.1s,background 0.1s;'
+  modeSelector.innerHTML =
+    '<div style="font-size:15px;font-weight:600;color:#1a1a1a;margin-bottom:6px;">Welcome to PIM Activator</div>' +
+    '<div style="font-size:12.5px;color:#57606a;margin-bottom:14px;line-height:1.45;">How do you want to configure this browser profile?</div>' +
+    '<div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;">' +
+      '<button class="ob-mode-card" data-mode="managed" style="' + _cardCss + '">' +
+        '<div style="font-size:12.5px;font-weight:700;color:#166534;margin-bottom:4px;">Use centrally deployed</div>' +
+        '<div style="font-size:11px;color:#57606a;line-height:1.4;margin-bottom:6px;">Read the Intune-pushed catalog (chrome.storage.managed.tenantCatalog).</div>' +
+        '<div style="font-size:10.5px;">' + _managedNote + '</div>' +
+      '</button>' +
+      '<button class="ob-mode-card" data-mode="json" style="' + _cardCss + '">' +
+        '<div style="font-size:12.5px;font-weight:700;color:#0969da;margin-bottom:4px;">Import JSON catalog</div>' +
+        '<div style="font-size:11px;color:#57606a;line-height:1.4;">MSP / multi-tenant. Paste a JSON array of tenants -- bulk import.</div>' +
+      '</button>' +
+      '<button class="ob-mode-card" data-mode="manual" style="' + _cardCss + '">' +
+        '<div style="font-size:12.5px;font-weight:700;color:#24292f;margin-bottom:4px;">Add single tenant</div>' +
+        '<div style="font-size:11px;color:#57606a;line-height:1.4;">Type tenantId + clientId from Entra portal. One-tenant deployments.</div>' +
+      '</button>' +
+    '</div>'
+  // Hover affordance
+  modeSelector.querySelectorAll('.ob-mode-card').forEach(function (btn) {
+    btn.addEventListener('mouseenter', function () { btn.style.borderColor = '#0969da'; btn.style.background = '#f6f8fa' })
+    btn.addEventListener('mouseleave', function () { btn.style.borderColor = '#d0d7de'; btn.style.background = '#ffffff' })
+    btn.addEventListener('click', async function () {
+      const mode = btn.getAttribute('data-mode')
+      if (mode === 'managed') {
+        if (!_managedOk) {
+          alert('No Intune managed config detected on this device.\n\n' +
+                '1. Confirm the [PimActivator] All-in-one Intune profile is assigned to a group this device is in.\n' +
+                '2. Force a sync: Settings -> Accounts -> Access work or school -> Info -> Sync.\n' +
+                '3. Restart Edge.\n' +
+                '4. Re-open this popup.')
+          return
+        }
+        // Managed catalog detected. Single-tenant case: set activeTenantId to
+        // the lone entry + reload. Multi-tenant case: show the catalog picker
+        // (already rendered in catalogPanel via the catalog.length > 0 branch).
+        if (catalog.length === 1) {
+          await new Promise(r => chrome.storage.local.set({ activeTenantId: String(catalog[0].tenantId).toLowerCase() }, r))
+          window.location.reload()
+        } else {
+          showSections('picker')   // show the 2+ entry picker
+        }
+        return
+      }
+      if (mode === 'json')   { showSections('json') }
+      if (mode === 'manual') { showSections('manual') }
+    })
+  })
+
+  // Helper to insert a "back to menu" link inside catalog + manual sections.
+  function addBackLink(target) {
+    if (!target) return
+    if (target.querySelector('.ob-back-link')) return
+    const back = document.createElement('a')
+    back.href = '#'
+    back.className = 'ob-back-link'
+    back.style.cssText = 'display:inline-block;margin-top:8px;font-size:11px;color:#0969da;text-decoration:none;'
+    back.textContent = '\u2190 Back to setup options'
+    back.onclick = function (e) { e.preventDefault(); showSections('menu') }
+    target.appendChild(back)
+  }
+  addBackLink(catalogPanel)
+  if (manualSaveRow) addBackLink(manualSaveRow)
+
+  // Initial visibility: if catalog has entries, picker is shown (catalog panel
+  // already rendered as picker above). Otherwise, mode selector takes over.
+  showSections('menu')
 
   // Pre-fill any non-placeholder values we DID find (e.g. tenantId from
   // managed but clientId blank).
@@ -492,11 +644,20 @@ const AUTHORITY    = `https://login.microsoftonline.com/${cfg.tenantId}`
 // can re-run the onboarding wizard (e.g. when migrating profiles between
 // tenants).
 ;(() => {
-  const el = document.getElementById('footer-tenant')
-  if (!el || !cfg.tenantId) return
-  const tenantLabelPrefix = cfg.tenantName ? `${escapeHtmlSafe(cfg.tenantName)} ` : ''
-  el.innerHTML = `${tenantLabelPrefix}Tenant: <strong>${escapeHtmlSafe(cfg.tenantId)}</strong> <a href="#" id="reset-config" style="color:#0969da;text-decoration:none;margin-left:6px;">(reset)</a>`
-  el.title = `Tenant: ${cfg.tenantName || '(legacy single-tenant install)'}\nTenant id: ${cfg.tenantId}\nClient id: ${cfg.clientId}\n\nClick 'reset' to clear this browser profile's saved config and re-run the wizard.`
+  const elId   = document.getElementById('footer-tenant-id')
+  const elName = document.getElementById('footer-tenant-name')
+  if ((!elId && !elName) || !cfg.tenantId) return
+  // v1.6.16+ two-row footer (back from v1.6.13's single-row attempt):
+  //   Row 1 right: full tenant ID (monospace, dim)
+  //   Row 2 right: tenant friendly name (bold) + (reset) link
+  if (elId)   elId.innerHTML   = `Tenant: <span style="color:#0969da;">${escapeHtmlSafe(cfg.tenantId)}</span>`
+  if (elName) {
+    const name = cfg.tenantName ? escapeHtmlSafe(cfg.tenantName) : '(legacy single-tenant)'
+    elName.innerHTML = `${name} <a href="#" id="reset-config" style="color:#0969da;text-decoration:none;font-weight:400;margin-left:6px;">(reset)</a>`
+  }
+  const tipText = `Tenant: ${cfg.tenantName || '(legacy single-tenant install)'}\nTenant id: ${cfg.tenantId}\nClient id: ${cfg.clientId}\n\nClick 'reset' to clear this browser profile's saved config and re-run the wizard.`
+  if (elId)   elId.title   = tipText
+  if (elName) elName.title = tipText
   const link = document.getElementById('reset-config')
   if (link) link.onclick = async (e) => {
     e.preventDefault()
@@ -903,7 +1064,31 @@ async function acquireGraphToken({ interactive = false, scopes = SCOPES } = {}) 
 }
 
 async function signOut() {
-  await clearStored(['refreshToken', 'accessToken', 'accessTokenExpiry', 'account'])
+  // Clear the legacy single-tenant token keys + the ARM token bundle.
+  await clearStored(['refreshToken', 'accessToken', 'accessTokenExpiry',
+                     'armAccessToken', 'armAccessTokenExpiry', 'account'])
+  // v1.6.x: per-tenant token cache (tenantTokens[<tid>]) survives in
+  // chrome.storage.local so switching tenants from the header dropdown is
+  // sub-second. On sign-out we MUST also evict the active tenant's entry
+  // from that cache -- otherwise loadConfig on next popup load restores
+  // its tokens into the legacy keys and the user is silently signed back
+  // in despite clicking "Sign out". Bug shipped pre-v1.6.14.
+  if (cfg && cfg.activeTenantId) {
+    const stored = await getStored(['tenantTokens'])
+    const cache = (stored.tenantTokens && typeof stored.tenantTokens === 'object') ? stored.tenantTokens : {}
+    if (cache[cfg.activeTenantId]) {
+      delete cache[cfg.activeTenantId]
+      await setStored({ tenantTokens: cache })
+    }
+  }
+  // Open Microsoft's logout page in a new tab so the Edge-side session
+  // cookies are killed too (otherwise the next sign-in is silent because
+  // the browser still has a valid ESTSAUTH cookie for this account).
+  // Use window.open (no extra permission needed; chrome.tabs would require
+  // declaring the "tabs" permission in manifest, scary on install).
+  try {
+    window.open('https://login.microsoftonline.com/common/oauth2/v2.0/logout', '_blank')
+  } catch (e) { /* ignore -- local clear above is enough to force re-auth */ }
   currentAccount = null
   window.location.reload()
 }

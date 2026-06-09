@@ -1,9 +1,18 @@
 # Release notes for PIM4EntraPS
 
-## v2.4.96
+## v2.4.97
 
 Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monorepo:
 
+- release: PIM4EntraPS v2.4.97 - Update-PimActivator-Extension.ps1 SAFETY FIX (no more profile wipes) + faster update trigger via --extensions-update-frequency=30 (cdc2c7cb)
+- release: extension v1.6.16 - revert v1.6.13's footer-collapse experiment; restore 2-row footer layout (row 1: title + repo + GitHub + Report bug | tenant ID; row 2: dev attribution | tenant name + reset) (7018f592)
+- release: extension v1.6.15 - wizard ALWAYS shows mode-selector on fresh deploy (removed auto-pick for single-tenant catalog that was silently skipping the picker); catalogPanel now carries BOTH picker + import sub-divs so 'Use centrally deployed' (multi) and 'Import JSON' modes can toggle independently regardless of current catalog state (a3885a4a)
+- release: extension v1.6.14 - (a) new 3-card mode selector on first-run/reset wizard: 'Use centrally deployed' / 'Import JSON catalog' / 'Add single tenant'; each mode shows only its relevant section + a Back link to return to the picker (b) fix signOut: clear tenantTokens[activeTenantId] (was leaving the per-tenant token cache so loadConfig silently restored tokens after sign-out) + open login.microsoftonline.com/common/oauth2/v2.0/logout in a new tab to kill the Edge-side session cookies (c1d17a33)
+- release: extension v1.6.13 - footer collapsed to single compact row (left: title + repo + dev attribution + GitHub/Report icons; right: tenant short-name + abbreviated ID + reset). Uses flex-wrap so right side drops to second line only when needed instead of getting clipped. Test-PushTenantCatalog.ps1 now seeds defaultJustification + defaultDurationHours in the auto-generated catalog. (5b308334)
+- release: extension v1.6.12 - footer row 1 now carries GitHub + Report bug chips next to title; row 2 only shows developer attribution + tenant name (fb0a3d86)
+- release: extension v1.6.11 - footer 2-row flex layout (title left + tenant ID right on row 1; dev attribution left + tenant name right on row 2) (3bee8363)
+- release: extension v1.6.10 - footer split into 3 stacked rows (title / tenant info / dev attribution) so tenant name is on its own line + Developed by moves below; tenant name rendered prominent (bold sans-serif) with monospaced GUID after (34f0511f)
+- release: extension v1.6.9 - popup.js readMergedCatalog wraps single-object catalog as 1-element array (defense against pre-v2.4.96 PS 5.1 unwrap bug pushed by old Intune profiles); Verify-PimActivatorIntunePolicy.ps1 shows tenantCatalog shape ARRAY vs OBJECT clearly (52e05f16)
 - release: PIM4EntraPS v2.4.96 + extension v1.6.8 - TWO bugs blocking chrome.storage.managed: (a) manifest now declares storage.managed_schema -> managed-schema.json (without this Chromium returns empty from chrome.storage.managed regardless of registry) + (b) all 3 Intune push scripts now use ConvertTo-Json -InputObject @($catalog) to preserve array brackets on single-element catalogs (PS 5.1 + 7 compatible, prevents single-tenant catalog from being serialized as {object} instead of [array]) (4693e4cb)
 - release: PIM4EntraPS v2.4.95 + extension v1.6.7 - popup max-height bumped 600->800px (Chromium's hard cap) + catalog import textarea shrunk from 6 to 3 rows (resize:vertical retained), so Save and continue button no longer disappears on first-run (a2c1331e)
 - fix Verify-PimActivatorIntunePolicy.ps1: PS 5.1 doesn't accept 'if (...) {...} else {...}' as an expression inside Write-Host -ForegroundColor argument; lift the choice into a separate $summaryColor variable (9e0c5644)
@@ -25,21 +34,36 @@ Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monor
 - release: PIM4EntraPS v2.4.88 + extension v1.6.0 - tenant catalog + header switcher for MSP / one-admin-many-tenants workflow (538f6803)
 - release: PIM4EntraPS v2.4.87 + extension v1.5.11 - auto-discover via /.well-known/pim-activator.json on corporate domain (zero-OAuth, per-customer naming-convention regexes in same JSON) (b0d213ba)
 - release: PIM4EntraPS v2.4.86 + extension v1.5.10 - bootstrap discovery switched to OAuth2 device-code flow (fixes AADSTS50011, auto-discover now works in any tenant without per-tenant app-reg setup) (3658f74f)
-- release: PIM4EntraPS v2.4.85 + extension v1.5.9 - hard-evict stale MV3 service worker on legacy-clientId detect (popup.js calls chrome.runtime.reload + Update script wipes Service Worker dir) (cba9c04b)
-- release: PIM4EntraPS v2.4.84 - trim popup.js comment noise around legacy-clientId sentinel so casual grep surfaces only the single sentinel entry (no behaviour change, ext stays v1.5.8) (bef4c339)
-- release: PIM4EntraPS v2.4.83 + extension v1.5.8 - auto-purge legacy bad userClientId (e96afaa6) from chrome.storage on load + block re-save in onboarding wizard (133fe3a5)
-- release: PIM4EntraPS v2.4.82 + extension v1.5.7 - version badge actually renders (separate version-badge.js loaded synchronously from popup.html, sidesteps popup.js onboarding-park trap that blocked the previous IIFE) (65167d60)
-- release: PIM4EntraPS v2.4.81 + extension v1.5.6 - scrub historical e96af GUID from background.js comment so CRX binary contains zero trace (5732c210)
-- release: PIM4EntraPS v2.4.80 + extension v1.5.5 - single-line footer with attribution + GitHub/Report chips, MVP recoloured blue + comma form, GitHub link to repo (d49b7653)
-- release: PIM4EntraPS v2.4.79 - Deploy-PimActivatorClient writes ExtensionInstallAllowlist + ExtensionInstallSources alongside ExtensionInstallForcelist + republished extension v1.5.2 to gh-pages (85325930)
-- release: PIM4EntraPS v2.4.78 + extension v1.5.2 - manifest homepage_url -> GitHub repo (a270e8cf)
-- release: PIM4EntraPS v2.4.77 + extension v1.5.1 - surface developer/contact info via manifest author+homepage_url + 2-line popup footer with MVP badge + email/blog/GitHub/YouTube/bug-report links (254a7072)
 
 ---
 
 # Release notes -- PIM4EntraPS
 
 > **Curated changelog.** The publish workflow auto-prepends recent monorepo commits as a raw activity log; this file is the human-friendly narrative on top.
+
+---
+
+## v2.4.97 -- Update-PimActivator-Extension.ps1 SAFETY FIX: stop destroying browser profiles, trigger updates via --extensions-update-frequency=30
+
+**Critical fix.** Earlier versions of `Update-PimActivator-Extension.ps1` ran two destructive actions on every "flush" invocation:
+
+1. **JSON-rewrite of `<UserData>\Preferences` + `<UserData>\Secure Preferences`** -- PowerShell 5.1's `ConvertFrom-Json | ConvertTo-Json -Depth 100 -Compress` round-trip is unreliable for the Chromium Preferences shape (Unicode, deep nesting, integer/number type drift). The corruption produced a file Edge/Chrome could not parse on next launch, and Chromium **silently reset the entire profile to defaults** -- losing bookmarks, history, saved tabs, signed-in accounts.
+2. **Wholesale delete of `<UserData>\Service Worker`** -- evicted SW registrations for ALL extensions and sites in that profile, not just PIM Activator.
+
+At least one device lost its entire Edge profile this way. Both destructive paths are now **opt-in behind explicit switches** (`-DangerouslyPatchPreferences`, `-DangerouslyWipeServiceWorker`) and the safe default path does not touch profile data at all.
+
+**Core purpose of the script restored to a safe, fast path:**
+
+The script's job is to make Edge / Chrome pick up the latest CRX from GitHub Pages **now** instead of waiting Chromium's default ~5-hour update poll. The new safe flow:
+
+1. Kill the browser process.
+2. Delete the cached CRX folder at `<UserData>\Extensions\<EXT_ID>` (no profile data here -- just the unpacked extension binary the forcelist policy will re-download).
+3. Delete secondary extension caches (`Local Extension Settings\<id>`, `Sync Extension Settings\<id>`, `Extension State\<id>`, `Extension Scripts\<id>`, `Extension Rules\<id>`) -- all scoped to PIM Activator's extension ID; no shared state touched.
+4. Relaunch browser with `--extensions-update-frequency=30` so the `ExtensionInstallForcelist` policy polls the update_url within ~30 seconds (default is 5 hours). Within ~30s the new CRX lands.
+
+**No more profile loss is possible from a casual re-run.** The destructive switches still exist for the rare dev-iteration case where you specifically need to scrub `extensions.settings.<id>` HMACs from a corrupted profile, but they are now opt-in and create a `.bak.<timestamp>` sidecar before any rewrite.
+
+Header `.WARNING (2026-06-09 incident)` block in the script documents the failure mode so future maintainers don't reintroduce it.
 
 ---
 
