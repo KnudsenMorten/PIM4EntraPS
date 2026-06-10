@@ -303,126 +303,197 @@ the admin sees one click instead of N portal navigations.
 Auth uses `chrome.identity.launchWebAuthFlow` + PKCE (no MSAL bundle).
 Extension is hosted on GitHub Pages
 (`https://knudsenmorten.github.io/PIM4EntraPS/updates.xml`); the
-deterministic extension id is `eheocihmlppcophaeakmdenhgcookkab`.
+canonical extension id is `eheocihmlppcophaeakmdenhgcookkab` (derived
+from the manifest's `key` field — same id on every fleet, every tenant).
 
-### v1.1.1 -- 8-hour default activation duration
+### Deployment scripts at a glance
 
-Fresh installs now default the activation duration to **8 hours** (one
-workday) instead of 1 hour. Existing managed-storage values are
-untouched -- managed wins -- so this only affects new profiles / new
-installs. Precedence at popup-open time:
+The activator ships three scripts in `tools/pim-activator/`. Pick by
+deployment target — the architecture decisions inside each are already
+made for you (single source of truth per registry slot, no IME slot-
+cycling, auto-discover from live Entra, ASCII output for Windows Server
+consoles).
 
-`chrome.storage.local.lastDurationHours` (user's last picked value,
-per profile) > managed `defaultDurationHours` > `config.js` bundled
-default > popup.js fallback.
-
-To override the 8h default at install time:
-
-| Where | How |
-|---|---|
-| `Deploy-PimActivatorClient.ps1` | `... -DefaultDurationHours 2` |
-| `Deploy-PimActivatorIntune.ps1` | `... -DefaultDurationHours 2` |
-| Direct registry | `Set-ItemProperty 'HKCU:\SOFTWARE\Policies\Microsoft\Edge\3rdparty\extensions\<id>\policy' -Name defaultDurationHours -Value 2 -Force` |
-
-### v1.1.0 -- multi-tenant support
-
-The managed-policy schema now accepts a `Tenants` array; each entry is
-`{ Name, TenantId, ClientId }`. Behaviour:
-
-- 0 tenants -- popup says "not configured".
-- 1 tenant -- used silently (same as v1.0).
-- 2+ tenants -- popup shows a tenant picker on first run; the choice is
-  cached per browser profile in `chrome.storage.local`. Footer shows the
-  friendly name + a `(switch)` link to clear the cached pick.
-
-Backwards compatible: the v1.0 singleton `tenantId` / `clientId` keys
-still work as a fallback when no `Tenants` array is present.
-
-### Three rollout paths
-
-| Path | Script | Use when |
+| Script | Use when | Discovers tenant from |
 |---|---|---|
-| Intune Remediation | `Deploy-PimActivatorIntune.ps1 -CreateIntuneRemediation` | Intune-managed estate. Hourly self-heal of policy keys. `-GroupId` is optional -- assign manually in the UI if omitted. |
-| AD GPO / file share / SCCM | `Deploy-PimActivatorIntune.ps1 -GenerateLocalInstaller` | Non-Intune estates. Emits self-contained `Install-PimActivator.ps1` + `Uninstall-PimActivator.ps1` + README with the tenant JSON baked in. `-LocalInstallerScope User` (HKCU, GPO Logon Script) or `Machine` (HKLM, GPO Startup Script). |
-| Direct local registry write | `Deploy-PimActivatorClient.ps1 -Tenants @(...)` | Dev box / single-machine testing. |
+| `Deploy-PimActivatorIntune.ps1` | Intune-managed estate (the common case). | Live Entra via `Connect-MgGraph`. |
+| `Deploy-PimActivatorClient.ps1` | Non-Intune-managed box (PAW, jump box, dev box). | Live Entra via `Connect-MgGraph` (v2.4.111+). |
+| `Update-PimActivator-Extension.ps1` | Maintainer's machine. Repacks the CRX from `manifest.json` and publishes to gh-pages. | Master signing key (`%USERPROFILE%\.pim-activator\signing-key.pem` on `mgmt1`). |
 
-CSV format throughout: `Name,TenantId,ClientId`, one row per tenant.
+Two recovery scripts also live alongside, for the rare case Chrome marks
+the extension `DISABLE_CORRUPTED` (binary deleted but Secure Preferences
+registration stuck):
 
-**Adding a tenant later:** edit `tenants.csv`, then either
-`-UpdateIntuneRemediation -RemediationId <guid>` (Intune clients converge
-within ~1h) or re-run `-GenerateLocalInstaller` and redeploy the
-installer via your existing channel.
+| Script | What it does |
+|---|---|
+| `Fix-PimActivatorStuck.ps1` | One-time, surgical: scrubs the stale `extensions.settings.<id>` + HMAC entries from `Preferences` + `Secure Preferences` across every Chrome / Edge profile on the box. Pure string-surgery brace counting -- no PS 5.1 `ConvertTo-Json` round-trip, can't brick a profile. |
+| `Reset-CorruptedExtensions.ps1` | Generic auto-heal. Scans every profile for entries with `disable_reasons & 1024` (DISABLE_CORRUPTED) and removes them. Schedule as a logon task for a self-healing fleet. |
 
-### Server install (Windows Server / admin jump box / PAW)
+### Intune deploy (`Deploy-PimActivatorIntune.ps1`)
 
-The activator runs in Edge / Chrome on Windows Server hosts just as it
-does on workstations. Typical targets:
+The Intune deploy creates / updates a Group Policy Configuration profile
+called `[PimActivator] client settings`, carrying **four policies per
+browser**:
 
-- **Admin jump boxes** — the box admins RDP into to reach customer / prod
-  estates.
-- **PAWs** (privileged access workstations) — locked-down dedicated admin
-  devices.
-- **Shared admin Windows Servers** — single host where multiple admins
-  RDP in and each needs the extension available in their session.
+1. **`ExtensionInstallForcelist`** -- force-install from the gh-pages
+   CRX (eheocih…;updates.xml).
+2. **`ExtensionInstallSources`** -- whitelist `https://knudsenmorten.github.io/*`
+   as a CRX install source.
+3. **`ExtensionSettings`** -- pre-grants `<all_urls>` runtime hosts so
+   the v1.5.11+ permission-expansion gate never fires
+   (`{installation_mode: force_installed, update_url, runtime_allowed_hosts: ['<all_urls>']}`).
+4. **`Tenant catalog`** -- pushes the tenant JSON into
+   `chrome.storage.managed.tenantCatalog` so the popup's
+   *Use centrally deployed* tile lights up on first open.
 
-#### Scope choice for servers
+The script also auto-uploads the custom **PIM4EntraPS.PimActivator.admx**
+the first time it runs in a tenant (idempotent -- skips on subsequent
+runs). The ADMX is self-contained (no `<using>` dependencies on
+`Microsoft.Policies.Windows` after v2.4.109), so it lands cleanly on both
+permissive and strict Intune tenants.
 
-- `-LocalInstallerScope User` (HKCU) — single-admin server / personal
-  PAW. Each admin runs `Install-PimActivator.ps1` once for their own
-  profile. No admin rights needed. Best when one person owns the box.
-- `-LocalInstallerScope Machine` (HKLM) — shared admin server where
-  multiple admins RDP in. One install (elevated) covers every RDP user.
-  Recommended for shared jump boxes.
-
-#### Generating the Machine-scope installer
+#### Zero-arg run
 
 ```powershell
-.\Deploy-PimActivatorIntune.ps1 -GenerateLocalInstaller `
-    -TenantsCsv .\tenants.csv `
-    -LocalInstallerOutputDir .\out-server-machine `
-    -LocalInstallerScope Machine
+.\Deploy-PimActivatorIntune.ps1
+# Connects Graph (interactive if not connected),
+# reads tenant displayName + tenantId from /organization,
+# resolves the PIM Activator app registration via
+#   /applications?$filter=startswith(displayName,'PIM Activator')
+# (use a -ClientId override or -CatalogJsonPath if displayName isn't
+#  the standard "PIM Activator")
 ```
 
-#### Deploying to the server (Machine scope)
+#### Conflict awareness (v2.4.110)
 
-1. Copy the generated folder to the server (RDP file transfer, SMB share,
-   or PsExec).
-2. Open PowerShell **as Administrator** on the server.
-3. Run:
-   `powershell.exe -NoProfile -ExecutionPolicy Bypass -File C:\Install\PimActivator-Server\Install-PimActivator.ps1`
-4. Restart Edge and Chrome on the server (close all browser windows,
-   including any in RDP sessions).
-5. Each subsequent RDP session sees the extension auto-installed in their
-   browser within ~30s.
-6. Each admin signs in to the popup with their own admin account; if the
-   `Tenants` array has 2+ entries, each admin picks their own tenant per
-   browser profile (cached in `chrome.storage.local` per Chromium
-   profile).
+Before creating the profile, the script scans Settings Catalog +
+Administrative Templates for any OTHER policy already managing
+`ExtensionInstallForcelist`. If one exists:
 
-#### Domain-joined servers via AD GPO Startup Script
+- **Default**: aborts with the exact `<extId>;<updateUrl>` line the
+  operator should add to the existing policy. (IME does not reliably
+  merge forcelist writes across mechanisms; mixing them causes the
+  entry to cycle on/off in HKLM on every sync.)
+- **`-Force`**: proceeds BUT skips the Forcelist definition values --
+  the script writes only Sources + Settings + Tenant catalog. Prints an
+  `[ACTION REQUIRED]` block naming the conflicting policy and the
+  forcelist row the operator must add there.
 
-- Generate the Machine-scope installer.
-- Push to GPO **Computer Configuration -> Policies -> Windows Settings
-  -> Scripts -> Startup**.
-- Add `Install-PimActivator.ps1` as a PowerShell startup script.
-- Runs as `SYSTEM` at boot, writes the HKLM policy keys, every RDP user
-  on the box gets the extension.
+#### Required Graph scopes
 
-#### The User-scope alternative (one-admin server)
+```
+DeviceManagementConfiguration.ReadWrite.All
+Application.Read.All
+Organization.Read.All
+Group.Read.All     # only when -AssignToGroupId is supplied
+```
 
-- Copy the existing User-scope installer folder.
-- Each admin runs it once in a non-elevated PowerShell from their RDP
-  session.
-- Only that admin's RDP sessions get the extension (their HKCU only).
+### Non-Intune deploy (`Deploy-PimActivatorClient.ps1`)
 
-### Mental model
+For PAWs, admin jump boxes, dev workstations, and any other box that
+isn't Intune-managed. Writes directly to the Chromium policy keys:
 
-The picker and the deployment layer are independent. Policy push
-(Intune / GPO / direct registry) silently lands the `Tenants` array in
-`chrome.storage.managed`. The picker UI lives inside the extension HTML
-and only reacts to whatever is in managed storage at popup-open time.
-Add or remove tenants by changing the source CSV; clients re-render the
-picker automatically when the cached choice disappears.
+```
+HKLM:\SOFTWARE\Policies\Microsoft\Edge\ExtensionInstallForcelist
+HKLM:\SOFTWARE\Policies\Microsoft\Edge\ExtensionInstallSources
+HKLM:\SOFTWARE\Policies\Microsoft\Edge\3rdparty\extensions\<id>\policy\tenantCatalog
+HKLM:\SOFTWARE\Policies\Google\Chrome\...   (same structure)
+```
+
+`-Scope Machine` (default, HKLM, requires admin) covers every user on
+the box. `-Scope User` writes to HKCU for the current-user only (no
+admin required).
+
+#### Tenant catalog auto-discovery (v2.4.111)
+
+When `-CatalogJsonPath` is omitted (the common case), the script
+auto-discovers the tenant + PIM Activator app registration from the LIVE
+Microsoft Graph context — same logic as `Deploy-PimActivatorIntune.ps1`.
+Connect-MgGraph fires interactively if not already connected.
+
+Every run logs which source is used:
+
+```
+catalog source: live Entra auto-discover  (tenant 'Nunagreen' / c2738ae6-...  clientId b2065373-...)
+```
+
+→ Impossible to silently write a different tenant's data. (v2.4.111
+fixed a regression where the script used to fall back to a sibling
+`discovered-tenant-catalog.json` file. That file is now gitignored.)
+
+#### Common server scenarios
+
+- **Shared admin server (multiple RDPs)** — `-Scope Machine`, run once
+  as admin. Every RDP user gets the extension on next browser launch.
+- **Personal PAW (one admin)** — `-Scope User`, run from the admin's
+  own RDP session. No admin rights needed.
+- **AD-joined fleet via GPO Startup Script** — call the script with
+  `-Scope Machine` from a GPO startup script under
+  `Computer Configuration → Policies → Windows Settings → Scripts → Startup`.
+
+### Activation duration default
+
+Fresh installs default to **8 hours** (one workday). Precedence at
+popup-open time:
+
+`chrome.storage.local.lastDurationHours` (user's last picked value, per
+profile) > managed `defaultDurationHours` (registry) > popup.js fallback.
+
+Override per box via either deploy script's parameter, or for a single
+profile directly in registry:
+
+```powershell
+Set-ItemProperty 'HKCU:\SOFTWARE\Policies\Microsoft\Edge\3rdparty\extensions\eheocihmlppcophaeakmdenhgcookkab\policy' `
+    -Name defaultDurationHours -Value 2 -Force
+```
+
+### Multi-tenant model
+
+The popup reads its tenant config from two layers, in order:
+
+1. **Manual single-tenant entry** -- `chrome.storage.local.userTenantId`
+   + `userClientId`, written by the popup's onboarding wizard's
+   *Add single tenant* tile. v1.6.25+ this ALWAYS wins, even when
+   managed catalog is present (fixes a "Save loops back to onboarding"
+   regression caused by stale managed catalog overriding manual saves).
+2. **Managed catalog** -- `chrome.storage.managed.tenantCatalog`,
+   pushed by either deploy script. JSON array of
+   `{name, tenantId, clientId, defaultJustification, defaultDurationHours, prefix, entraPrefix, azurePrefix}`.
+
+| Catalog size | Popup behaviour |
+|---|---|
+| 0 entries | Onboarding wizard: *Add single tenant* (manual) or *Import JSON* tiles. |
+| 1 entry | Popup uses it silently. Tenant chip in header shows the friendly name. |
+| 2+ entries | Header shows a tenant switcher dropdown. Each admin picks per browser profile (cached in `chrome.storage.local.activeTenantId`). |
+
+The picker, the deployment layer, and the manual-entry path are all
+independent. Adding a tenant later = update the source on whichever
+layer is in play (re-run `Deploy-PimActivatorIntune.ps1` for the
+ADMX-backed profile, re-run `Deploy-PimActivatorClient.ps1` for direct
+registry boxes, or have the user click *Add single tenant* in the
+popup wizard).
+
+```
++-------------------------------+      +---------------------------+      +------------------+
+| Deploy-PimActivatorIntune.ps1 | -->  | Chromium policy registry  | -->  | Extension popup  |
+| (ADMX-backed Intune profile)  |      | (HKLM ...\3rdparty\       |      | popup.html +     |
++-------------------------------+      |  extensions\<id>\policy\  |      | popup.js         |
+| Deploy-PimActivatorClient.ps1 | -->  |  tenantCatalog JSON)      |      |                  |
+| (direct HKLM/HKCU)            |      +---------------------------+      | -> single tenant |
++-------------------------------+                                         |    (silent)      |
+                                                                          | -> 2+ tenants    |
+                                                                          |    (picker)      |
+                                                                          | -> 0 tenants OR  |
+                                                                          |    user clicks   |
+                                                                          |    "Add single   |
+                                                                          |    tenant"       |
+                                                                          |    (wizard)      |
+                                                                          +------------------+
+       silent push                   managed_storage payload                 user-facing UI
+```
+
+See `tools/pim-activator/README.md` for the full deployment matrix +
+backend (app registration) setup.
 
 ```
 +-----------------------+      +---------------------------+      +-----------------+
