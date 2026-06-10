@@ -1,9 +1,10 @@
 # Release notes for PIM4EntraPS
 
-## v2.4.98
+## v2.4.99
 
 Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monorepo:
 
+- release: PIM4EntraPS v2.4.99 - Deploy-PimActivatorIntune.ps1 catalog auto-discover (hotfix over v2.4.98) (785ff800)
 - release: PIM4EntraPS v2.4.98 + extension v1.6.19 - unified Intune deploy + critical fix for ExtensionSettings schema bug that froze fleet at old versions + popup CSS no longer overflows Chromium popup cap (508f6eab)
 - release: PIM4EntraPS v2.4.97 - Update-PimActivator-Extension.ps1 SAFETY FIX (no more profile wipes) + faster update trigger via --extensions-update-frequency=30 (cdc2c7cb)
 - release: extension v1.6.16 - revert v1.6.13's footer-collapse experiment; restore 2-row footer layout (row 1: title + repo + GitHub + Report bug | tenant ID; row 2: dev attribution | tenant name + reset) (7018f592)
@@ -33,13 +34,24 @@ Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monor
 - release: PIM4EntraPS v2.4.90 - Push-PimActivatorTenantCatalogIntune.ps1 (native Intune Custom Configuration Profile via OMA-URI + Registry CSP) for chrome.storage.managed tenant catalog push + sample JSON template (a718097b)
 - release: PIM4EntraPS v2.4.89 + extension v1.6.2 - admin-friendly prefix shortcuts in catalog entries + scrub customer name from sample (ba82aaf4)
 - release: PIM4EntraPS v2.4.88 + extension v1.6.0 - tenant catalog + header switcher for MSP / one-admin-many-tenants workflow (538f6803)
-- release: PIM4EntraPS v2.4.87 + extension v1.5.11 - auto-discover via /.well-known/pim-activator.json on corporate domain (zero-OAuth, per-customer naming-convention regexes in same JSON) (b0d213ba)
 
 ---
 
 # Release notes -- PIM4EntraPS
 
 > **Curated changelog.** The publish workflow auto-prepends recent monorepo commits as a raw activity log; this file is the human-friendly narrative on top.
+
+---
+
+## v2.4.99 -- Deploy-PimActivatorIntune.ps1 catalog auto-discover (HOTFIX over v2.4.98)
+
+**Hotfix.** `Deploy-PimActivatorIntune.ps1` in v2.4.98 made `-CatalogJsonPath` mandatory, which broke customer deploys at sites where the operator hadn't hand-crafted a JSON catalog yet (script just prompted at the param input and didn't proceed). This release demotes the parameter to optional and adds two ways to ship a catalog without supplying a file:
+
+- **Default: auto-discover from Entra.** Zero-arg invocation now queries `/organization` for tenant id + display name AND `/applications?$filter=startswith(displayName,'PIM Activator')` for the per-tenant app registration (the SPN that `Deploy-PimActivatorBackend.ps1` creates earlier in the deploy sequence). Catalog is built in-memory from those facts and pushed through the ADMX template into `chrome.storage.managed.tenantCatalog`. `startswith` (not `eq`) so renamed variants like `'[2linkIT] PIM Activator'` or `'PIM Activator (prod)'` still match -- same lookup the popup's onboarding wizard uses.
+- **Manual override with `-ClientId <guid>`.** Skips the `/applications` round-trip when the operator already knows the app's appId from their backend deploy. Tenant id + name still auto-resolved from `/organization`.
+- **`-CatalogJsonPath`** still honored, takes precedence over both flags.
+
+**Required Graph scopes** widened to include `Application.Read.All` and `Organization.Read.All` for the auto-discover path. Connect-MgGraph adds them transparently to the existing session; operators don't need to do anything extra.
 
 ---
 
