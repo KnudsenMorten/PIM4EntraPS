@@ -315,15 +315,33 @@ if ($admxRow -and $admxRow.status -in @('available','uploadCompleted')) {
         } while ((Get-Date) -lt $rmDeadline)
     }
     Write-Host "Uploading ADMX ($($admxBytes.Length) bytes) + ADML ($($admlBytes.Length) bytes)..." -ForegroundColor Cyan
+    # v2.4.107: explicit @odata.type discriminators on both the outer entity
+    # and the inner groupPolicyUploadedLanguageFile collection items. Without
+    # them, some Intune tenants (Nunagreen 2026-06-10) silently NULL out
+    # every field in the POSTed payload -- the row gets created but
+    # targetNamespace, targetPrefix, content, languageCodes,
+    # groupPolicyUploadedLanguageFiles all come back as null/empty, and
+    # status flips to uploadFailed with uploadInfo:null. With the explicit
+    # types Intune's strict validator can deserialize the entity correctly.
+    # Other tenants (2linkit) tolerated the missing types because their
+    # endpoint version has a default type fallback; we now always set them
+    # so every tenant works regardless of strictness.
     $admxBody = @{
+        '@odata.type'                     = '#microsoft.graph.groupPolicyUploadedDefinitionFile'
         fileName                          = $admxFileName
         languageCodes                     = @('en-US')
         targetPrefix                      = 'pimactivator'
         targetNamespace                   = 'MortenKnudsen.PIM4EntraPS.PimActivator'
         policyType                        = 'admxIngested'
         revision                          = '1.0'
+        defaultLanguageCode               = 'en-US'
         content                           = $admxBase64
-        groupPolicyUploadedLanguageFiles  = @(@{ fileName = $admlFileName; languageCode = 'en-US'; content = $admlBase64 })
+        groupPolicyUploadedLanguageFiles  = @(@{
+            '@odata.type' = '#microsoft.graph.groupPolicyUploadedLanguageFile'
+            fileName      = $admlFileName
+            languageCode  = 'en-US'
+            content       = $admlBase64
+        })
     } | ConvertTo-Json -Depth 20
     $admxCreated = Invoke-MgGraphRequest -Method POST -Uri 'https://graph.microsoft.com/beta/deviceManagement/groupPolicyUploadedDefinitionFiles' -Body $admxBody -ContentType 'application/json' -ErrorAction Stop
     Write-Host "[OK] ADMX uploaded (id=$($admxCreated.id), status=$($admxCreated.status)). Waiting for Intune to process..." -ForegroundColor Green

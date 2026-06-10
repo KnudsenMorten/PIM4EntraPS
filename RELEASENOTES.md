@@ -1,9 +1,10 @@
 # Release notes for PIM4EntraPS
 
-## v2.4.106
+## v2.4.107
 
 Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monorepo:
 
+- release: PIM4EntraPS v2.4.107 - Deploy-PimActivatorIntune.ps1 ADMX payload now has explicit @odata.type (fixes silent field null-out on strict tenants) (ab4a8d34)
 - release: PIM4EntraPS v2.4.106 - Deploy-PimActivatorIntune.ps1 dumps full ADMX upload-failure detail (uploadInfo:null was hiding everything) (23320078)
 - release: PIM4EntraPS v2.4.105 + extension v1.6.24 - fix popup pre-sign-in tabpanel bleed + fix Update script silently aborting gh-pages publish (097fba84)
 - release: PIM4EntraPS v2.4.104 + extension v1.6.22 - -Repack works on PS 5.1 (mgmt1's runtime); guard moved from PEM input to produced CRX output bytes (6cdfd661)
@@ -33,13 +34,22 @@ Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monor
 - add Push-PimActivatorTenantCatalogProfile.ps1 - automates ADMX-backed Configuration Profile creation (looks up ingested ADMX policy definitions + posts presentationValues binding the catalog JSON to Edge + Chrome policies) (3dfe8f3a)
 - fix Push-PimActivatorADMXToIntune.ps1: state-aware handling of in-flight uploads (don't /remove an uploadInProgress or removalInProgress row; wait for terminal state, exit early if uploadInProgress reaches 'available') (20b51d5f)
 - fix: skip /remove when existing upload is already in removalInProgress (avoids 400 OperationInProgress on second run) (ca417bef)
-- fix Push-PimActivatorADMXToIntune.ps1: groupPolicyUploadedDefinitionFiles requires POST .../remove action (not DELETE); poll until 404 before re-upload to avoid 409 (e1e85ed3)
 
 ---
 
 # Release notes -- PIM4EntraPS
 
 > **Curated changelog.** The publish workflow auto-prepends recent monorepo commits as a raw activity log; this file is the human-friendly narrative on top.
+
+---
+
+## v2.4.107 -- Deploy-PimActivatorIntune.ps1 sets explicit @odata.type on the ADMX upload payload (fixes silent null-out on strict tenants)
+
+v2.4.106's full-response diagnostics surfaced the actual rejection: customer tenant accepted the POST and created the `groupPolicyUploadedDefinitionFiles` row, but every field we sent (`targetNamespace`, `targetPrefix`, `content`, `revision`, `languageCodes`, the entire `groupPolicyUploadedLanguageFiles` collection) came back as `null` or `[]`. Only `fileName` and `defaultLanguageCode` stuck. Classic symptom of a Graph beta endpoint with strict type discrimination -- without an explicit `@odata.type` on the entity, Intune's deserializer couldn't bind any of the typed properties, but didn't reject the request either; just silently emitted an empty row + `status=uploadFailed`.
+
+Fix: payload now carries `'@odata.type' = '#microsoft.graph.groupPolicyUploadedDefinitionFile'` on the outer body and `'@odata.type' = '#microsoft.graph.groupPolicyUploadedLanguageFile'` on each inner collection item. Other tenants (2linkit, where v2.4.98-v2.4.106 worked) tolerated the missing type discriminator because the endpoint version they hit had a default type fallback. Now we always set the type so the deploy survives whichever tenant strictness level Intune routes through.
+
+Also added an explicit `defaultLanguageCode = 'en-US'` on the outer body (was being auto-populated by Intune on tolerant tenants but missing from the body on strict ones).
 
 ---
 
