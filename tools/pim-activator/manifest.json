@@ -1,41 +1,41 @@
-{
-  "manifest_version": 3,
-  "name": "PIM Activator",
-  "version": "1.6.20",
-  "description": "Bulk-activate your eligible Entra ID, Azure and PIM for Groups (incl. workload RBAC) PIM assignments in one click. Companion to PIM4EntraPS module (https://github.com/KnudsenMorten/PIM4EntraPS)",
-  "author": "Morten Knudsen (Microsoft MVP)",
-  "homepage_url": "https://github.com/KnudsenMorten/PIM4EntraPS",
-  "action": {
-    "default_popup": "popup.html",
-    "default_title": "PIM Activator",
-    "default_icon": {
-      "16": "icons/icon-16.png",
-      "32": "icons/icon-32.png",
-      "128": "icons/icon-128.png"
-    }
-  },
-  "background": {
-    "service_worker": "background.js"
-  },
-  "icons": {
-    "16": "icons/icon-16.png",
-    "32": "icons/icon-32.png",
-    "128": "icons/icon-128.png"
-  },
-  "permissions": [
-    "storage",
-    "identity"
-  ],
-  "storage": {
-    "managed_schema": "managed-schema.json"
-  },
-  "host_permissions": [
-    "https://graph.microsoft.com/*",
-    "https://login.microsoftonline.com/*",
-    "https://*/*"
-  ],
-  "content_security_policy": {
-    "extension_pages": "script-src 'self'; object-src 'self'"
-  },
-  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAylVgN8LeqORsS3t7PR0y7KHh+khip9HieYzy7VCEN+N1GPv6EG66c1O3RRuPMY1db0aeREeOkGqtnC29oOtYiec7t8+syJkAcx+xbtWFzCgpwkQTooGQ7pHbF+5B+cMyVHMw7g53T5BdHRj/In2qHi5m3wReJKjl+qwD8IQM5c3M3Qwd4dfSb3wdmHadRVG+4XpkOeonJAEx7JN11ic1XPBMTKL31FHYJTkJUBI0rN6841ecwUh9dze8hcg8IAw+BxJ3YuK5mIRzWLj1kve9x8RLONsEsgCGcmJFOwI1M8tS/Y0bXonQt6KorDuUiDEjzUpOlC+kwdicUtIKqg4LGQIDAQAB"
+﻿{
+    "manifest_version":  3,
+    "name":  "PIM Activator",
+    "version":  "1.6.22",
+    "description":  "Bulk-activate your eligible Entra ID, Azure and PIM for Groups (incl. workload RBAC) PIM assignments in one click. Companion to PIM4EntraPS module (https://github.com/KnudsenMorten/PIM4EntraPS)",
+    "author":  "Morten Knudsen (Microsoft MVP)",
+    "homepage_url":  "https://github.com/KnudsenMorten/PIM4EntraPS",
+    "action":  {
+                   "default_popup":  "popup.html",
+                   "default_title":  "PIM Activator",
+                   "default_icon":  {
+                                        "16":  "icons/icon-16.png",
+                                        "32":  "icons/icon-32.png",
+                                        "128":  "icons/icon-128.png"
+                                    }
+               },
+    "background":  {
+                       "service_worker":  "background.js"
+                   },
+    "icons":  {
+                  "16":  "icons/icon-16.png",
+                  "32":  "icons/icon-32.png",
+                  "128":  "icons/icon-128.png"
+              },
+    "permissions":  [
+                        "storage",
+                        "identity"
+                    ],
+    "storage":  {
+                    "managed_schema":  "managed-schema.json"
+                },
+    "host_permissions":  [
+                             "https://graph.microsoft.com/*",
+                             "https://login.microsoftonline.com/*",
+                             "https://*/*"
+                         ],
+    "content_security_policy":  {
+                                    "extension_pages":  "script-src \u0027self\u0027; object-src \u0027self\u0027"
+                                },
+    "key":  "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAylVgN8LeqORsS3t7PR0y7KHh+khip9HieYzy7VCEN+N1GPv6EG66c1O3RRuPMY1db0aeREeOkGqtnC29oOtYiec7t8+syJkAcx+xbtWFzCgpwkQTooGQ7pHbF+5B+cMyVHMw7g53T5BdHRj/In2qHi5m3wReJKjl+qwD8IQM5c3M3Qwd4dfSb3wdmHadRVG+4XpkOeonJAEx7JN11ic1XPBMTKL31FHYJTkJUBI0rN6841ecwUh9dze8hcg8IAw+BxJ3YuK5mIRzWLj1kve9x8RLONsEsgCGcmJFOwI1M8tS/Y0bXonQt6KorDuUiDEjzUpOlC+kwdicUtIKqg4LGQIDAQAB"
 }

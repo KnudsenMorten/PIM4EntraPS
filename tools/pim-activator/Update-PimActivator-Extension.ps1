@@ -471,16 +471,19 @@ if ($Repack -or $PackOnly) {
     if (-not (Test-Path $keyPath)) { throw "signing key missing: $keyPath" }
 
     # PRE-PACK GUARD (added 2026-06-10 after the wrong-key CRX bricked
-    # the update path for the whole fleet). Compute the extension id that
-    # WOULD result from packing with this local key, and refuse to pack
-    # if it doesn't match the policy-registered EXT_ID. Stops a wrong-key
-    # CRX from EVER reaching gh-pages, which is the only way to keep
-    # already-installed instances upgrading.
+    # the update path for the whole fleet). Best-effort: tries ImportFromPem
+    # (.NET Core 3.0+ / PS 7+ only). On PS 5.1 ImportFromPem is missing and
+    # we fall back to a POST-pack guard on the produced CRX bytes (which
+    # uses only basic byte operations and works on every PS version).
+    # Either way the script REFUSES to publish a CRX whose canonical id
+    # doesn't match the policy-registered EXT_ID.
     Write-Step "Pre-pack guard: verifying local signing key derives the correct extension id"
     $derivedFromLocalKey = $null
+    $preCheckRan = $false
     try {
         $pem = [System.IO.File]::ReadAllText($keyPath)
         $rsa = [System.Security.Cryptography.RSA]::Create()
+        # ImportFromPem is .NET Core 3.0+ / PS 7+ only; will throw on PS 5.1.
         $rsa.ImportFromPem($pem) | Out-Null
         $pubDer = $rsa.ExportSubjectPublicKeyInfo()
         $hash   = [System.Security.Cryptography.SHA256]::Create().ComputeHash($pubDer)
@@ -492,19 +495,25 @@ if ($Repack -or $PackOnly) {
             [void]$sb.Append([char](97 + $lo))
         }
         $derivedFromLocalKey = $sb.ToString()
+        $preCheckRan = $true
     } catch {
-        throw "Could not derive extension id from local signing key at '$keyPath': $($_.Exception.Message). Refusing to pack."
+        # Most common cause on PS 5.1: ImportFromPem missing. The post-pack
+        # guard below catches the same wrong-key case from the produced CRX
+        # bytes, so we don't refuse to pack here -- we just warn.
+        Write-Warn "Skipping PEM-based pre-pack check ($($_.Exception.Message.Split([Environment]::NewLine)[0])). Will validate produced CRX bytes after pack instead."
     }
-    Write-Host ("   Key path                : {0}" -f $keyPath) -ForegroundColor Cyan
-    Write-Host ("   Derived extension id    : {0}" -f $derivedFromLocalKey) -ForegroundColor Cyan
-    Write-Host ("   Policy-registered id    : {0}" -f $EXT_ID) -ForegroundColor Cyan
-    if ($derivedFromLocalKey -ne $EXT_ID) {
-        Write-Err "WRONG SIGNING KEY -- this key produces id '$derivedFromLocalKey', NOT '$EXT_ID'."
-        Write-Err "Packing with this key and pushing to gh-pages would brick the entire fleet's update path"
-        Write-Err "(every installed instance is registered against '$EXT_ID' and would silently reject a CRX with any other id)."
-        throw "Pack aborted. The signing key at '$keyPath' is not the master key. Recover the correct '$EXT_ID' key from another machine / backup / Key Vault before re-running -Repack or -PackOnly."
+    if ($preCheckRan) {
+        Write-Host ("   Key path                : {0}" -f $keyPath) -ForegroundColor Cyan
+        Write-Host ("   Derived extension id    : {0}" -f $derivedFromLocalKey) -ForegroundColor Cyan
+        Write-Host ("   Policy-registered id    : {0}" -f $EXT_ID) -ForegroundColor Cyan
+        if ($derivedFromLocalKey -ne $EXT_ID) {
+            Write-Err "WRONG SIGNING KEY -- this key produces id '$derivedFromLocalKey', NOT '$EXT_ID'."
+            Write-Err "Packing with this key and pushing to gh-pages would brick the entire fleet's update path"
+            Write-Err "(every installed instance is registered against '$EXT_ID' and would silently reject a CRX with any other id)."
+            throw "Pack aborted. The signing key at '$keyPath' is not the master key. Recover the correct '$EXT_ID' key from another machine / backup / Key Vault before re-running -Repack or -PackOnly."
+        }
+        Write-Ok "Local signing key matches the policy-registered extension id. Safe to pack."
     }
-    Write-Ok "Local signing key matches the policy-registered extension id. Safe to pack."
 
     # v1.2.0+: no config.js / config.template.js swap. The extension no
     # longer has a baked-in config -- the in-popup onboarding wizard is the
@@ -530,6 +539,105 @@ if ($Repack -or $PackOnly) {
     # Sanity-check CRX magic
     $magic = -join ([System.IO.File]::ReadAllBytes($crxOutput) | Select-Object -First 4 | ForEach-Object { [char]$_ })
     if ($magic -ne 'Cr24') { throw "CRX magic header invalid - got '$magic'" }
+
+    # POST-PACK GUARD (PS-version-agnostic): derive the canonical Chromium
+    # extension id directly from the freshly-packed CRX file's protobuf header
+    # and compare to EXT_ID. Catches the wrong-signing-key case even when the
+    # PEM-based pre-pack guard above was skipped (e.g. on PS 5.1 where
+    # ImportFromPem is unavailable). Uses only basic byte ops -- works on
+    # every PowerShell version. If derived id doesn't match, the local CRX
+    # is deleted before any push step can run.
+    Write-Step "Post-pack guard: deriving canonical extension id from produced CRX"
+    $crxBytes = [System.IO.File]::ReadAllBytes($crxOutput)
+    if ([System.BitConverter]::ToUInt32($crxBytes, 4) -lt 3) {
+        throw "Post-pack guard: produced CRX is not v3 (or higher) -- cannot derive id. Aborting."
+    }
+    $hdrLen = [System.BitConverter]::ToUInt32($crxBytes, 8)
+    $endIx  = 12 + $hdrLen
+    $i      = 12
+    $publicKey = $null
+    while ($i -lt $endIx -and -not $publicKey) {
+        $tag = 0; $shift = 0
+        while ($i -lt $endIx) {
+            $x = $crxBytes[$i]; $tag = $tag -bor (($x -band 0x7F) -shl $shift); $i++
+            if (($x -band 0x80) -eq 0) { break }
+            $shift += 7
+        }
+        $fieldNum = $tag -shr 3; $wireType = $tag -band 7
+        if ($fieldNum -eq 2 -and $wireType -eq 2) {
+            $msgLen = 0; $shift = 0
+            while ($i -lt $endIx) {
+                $x = $crxBytes[$i]; $msgLen = $msgLen -bor (($x -band 0x7F) -shl $shift); $i++
+                if (($x -band 0x80) -eq 0) { break }
+                $shift += 7
+            }
+            $msgEnd = $i + $msgLen
+            while ($i -lt $msgEnd -and -not $publicKey) {
+                $itag = 0; $shift = 0
+                while ($i -lt $msgEnd) {
+                    $x = $crxBytes[$i]; $itag = $itag -bor (($x -band 0x7F) -shl $shift); $i++
+                    if (($x -band 0x80) -eq 0) { break }
+                    $shift += 7
+                }
+                $iField = $itag -shr 3; $iWire = $itag -band 7
+                if ($iField -eq 1 -and $iWire -eq 2) {
+                    $keyLen = 0; $shift = 0
+                    while ($i -lt $msgEnd) {
+                        $x = $crxBytes[$i]; $keyLen = $keyLen -bor (($x -band 0x7F) -shl $shift); $i++
+                        if (($x -band 0x80) -eq 0) { break }
+                        $shift += 7
+                    }
+                    $publicKey = $crxBytes[$i..($i + $keyLen - 1)]
+                    $i += $keyLen
+                } else {
+                    if ($iWire -eq 2) {
+                        $skipLen = 0; $shift = 0
+                        while ($i -lt $msgEnd) {
+                            $x = $crxBytes[$i]; $skipLen = $skipLen -bor (($x -band 0x7F) -shl $shift); $i++
+                            if (($x -band 0x80) -eq 0) { break }
+                            $shift += 7
+                        }
+                        $i += $skipLen
+                    } elseif ($iWire -eq 0) {
+                        while ($i -lt $msgEnd) { $x = $crxBytes[$i]; $i++; if (($x -band 0x80) -eq 0) { break } }
+                    } else { break }
+                }
+            }
+        } else {
+            if ($wireType -eq 2) {
+                $skipLen = 0; $shift = 0
+                while ($i -lt $endIx) {
+                    $x = $crxBytes[$i]; $skipLen = $skipLen -bor (($x -band 0x7F) -shl $shift); $i++
+                    if (($x -band 0x80) -eq 0) { break }
+                    $shift += 7
+                }
+                $i += $skipLen
+            } elseif ($wireType -eq 0) {
+                while ($i -lt $endIx) { $x = $crxBytes[$i]; $i++; if (($x -band 0x80) -eq 0) { break } }
+            } else { break }
+        }
+    }
+    if (-not $publicKey) {
+        Remove-Item $crxOutput -Force -ErrorAction SilentlyContinue
+        throw "Post-pack guard: could not extract public_key from produced CRX header. Deleted CRX and aborting."
+    }
+    $hash = [System.Security.Cryptography.SHA256]::Create().ComputeHash($publicKey)
+    $sb   = [System.Text.StringBuilder]::new()
+    foreach ($byte in $hash[0..15]) {
+        $hi = ($byte -shr 4) -band 0xF
+        $lo = $byte -band 0xF
+        [void]$sb.Append([char](97 + $hi))
+        [void]$sb.Append([char](97 + $lo))
+    }
+    $derivedFromCrx = $sb.ToString()
+    Write-Host ("   CRX path                : {0}" -f $crxOutput) -ForegroundColor Cyan
+    Write-Host ("   Derived extension id    : {0}" -f $derivedFromCrx) -ForegroundColor Cyan
+    Write-Host ("   Policy-registered id    : {0}" -f $EXT_ID) -ForegroundColor Cyan
+    if ($derivedFromCrx -ne $EXT_ID) {
+        Remove-Item $crxOutput -Force -ErrorAction SilentlyContinue
+        throw "Post-pack guard: produced CRX has id '$derivedFromCrx', NOT '$EXT_ID'. Pushing this CRX to gh-pages would brick every installed instance. Local CRX deleted; nothing was pushed."
+    }
+    Write-Ok "Produced CRX validates against policy-registered extension id. Safe to publish."
 
     # ---- Publish to gh-pages -------------------------------------------------
     Write-Step "Publishing CRX + updates.xml to gh-pages"
