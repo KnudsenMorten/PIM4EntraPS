@@ -5,19 +5,15 @@
 <title>PIM Activator</title>
 <style>
   :root { color-scheme: light; }
-  /* Flex column at 800px (Chromium popup cap) so the inner list grows /
-     shrinks to whatever vertical space is left after the header, the
-     Justification/Duration/Activate row, AND the credit footer. No outer
-     scrollbar -- only the role list scrolls. v1.6.19 layout fix. */
-  html, body {
-    margin:0; padding:0; width:720px;
-    font-family: -apple-system, "Segoe UI", Roboto, sans-serif;
-    background:#ffffff; color:#1a1a1a; font-size:13px;
-    overflow:hidden;
-    height:800px;
-    display:flex; flex-direction:column;
-  }
-  #list, #myaccess-list { flex:1; min-height:0; overflow-y:auto; }
+  /* v1.6.20 revert: v1.6.19's flex-column layout (height:800px + display:flex
+     on body) broke on Edge -- popup rendered without the tab strip and with
+     both tabpanels visible at once. Restored the pre-v1.6.19 natural flow
+     (body scrolls if content exceeds cap) at smaller dimensions per maintainer
+     ask. Cap chosen below Chromium's hard 800px so the popup never bumps the
+     viewport ceiling on a maxed-out role list. */
+  html, body { margin:0; padding:0; width:680px; font-family: -apple-system, "Segoe UI", Roboto, sans-serif; background:#ffffff; color:#1a1a1a; font-size:13px; overflow-x:hidden; }
+  #list, #myaccess-list { max-height:260px; overflow-y:auto; }
+  html, body { max-height:700px; overflow-y:auto; }
   /* Belt-and-braces: every element confined to its parent's width.
      Prevents long unbreakable tokens (scope GUIDs, role names) from making
      rows wider than the popup and triggering horizontal scrollbar. */

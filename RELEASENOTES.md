@@ -1,9 +1,10 @@
 # Release notes for PIM4EntraPS
 
-## v2.4.100
+## v2.4.101
 
 Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monorepo:
 
+- release: PIM4EntraPS v2.4.101 + extension v1.6.20 - popup CSS revert (v1.6.19 flex-column broke Edge) (709005f7)
 - release: PIM4EntraPS v2.4.100 - Update-PimActivator-Extension.ps1 flush now scrubs stale Secure Preferences registration alongside cached CRX (prevents DISABLE_CORRUPTED trap) (3a9de353)
 - release: PIM4EntraPS v2.4.99 - Deploy-PimActivatorIntune.ps1 catalog auto-discover (hotfix over v2.4.98) (785ff800)
 - release: PIM4EntraPS v2.4.98 + extension v1.6.19 - unified Intune deploy + critical fix for ExtensionSettings schema bug that froze fleet at old versions + popup CSS no longer overflows Chromium popup cap (508f6eab)
@@ -33,13 +34,22 @@ Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monor
 - fix Test-PushTenantCatalog: explicit -Property projection + ServicePrincipal fallback so Get-MgApplication's default-projection AppId-drop in some SDK versions doesn't produce null clientId (c12c92a4)
 - add Test-PushTenantCatalog.ps1 - auto-discovers tenant + PIM Activator app reg in currently-connected Graph context, builds 1-entry catalog, hands off to Push-PimActivatorTenantCatalogIntune.ps1 (zero-typing first-test helper) (09c083f3)
 - release: PIM4EntraPS v2.4.90 - Push-PimActivatorTenantCatalogIntune.ps1 (native Intune Custom Configuration Profile via OMA-URI + Registry CSP) for chrome.storage.managed tenant catalog push + sample JSON template (a718097b)
-- release: PIM4EntraPS v2.4.89 + extension v1.6.2 - admin-friendly prefix shortcuts in catalog entries + scrub customer name from sample (ba82aaf4)
 
 ---
 
 # Release notes -- PIM4EntraPS
 
 > **Curated changelog.** The publish workflow auto-prepends recent monorepo commits as a raw activity log; this file is the human-friendly narrative on top.
+
+---
+
+## v2.4.101 + extension v1.6.20 -- popup CSS revert (v1.6.19's flex-column layout broke on Edge)
+
+v1.6.19 switched `popup.html` from natural-flow + `max-height:800px` to fixed `height:800px; display:flex; flex-direction:column;` so the role list could grow / shrink to fill the popup. On Edge that combination rendered the popup with NO tab strip (it's hidden until sign-in, but the flex layout collapsed surrounding wrapping too) and BOTH tabpanels visible at once -- top half showing My Roles' sign-in prompt, bottom half showing My Access' bulk controls -- with no Justification / Duration / Activate row or credit footer anywhere. Reproduced on a maintainer Edge install; same broken render on Chrome wherever the extension actually loads.
+
+Reverted to the pre-v1.6.19 natural-flow layout (`max-height` on body, fixed `max-height:260px` on the lists, body itself scrolls if total content exceeds cap) at slightly smaller dimensions per maintainer ask: width 680px (was 720), body cap 700px (was 800), list cap 260px (was 300). Smaller popup, simpler CSS, no Edge incompatibility.
+
+The flex-column experiment is documented in the file header so it doesn't get re-tried -- the simple `max-height` + body-scroll pattern is the right shape for Chromium extension popups.
 
 ---
 
