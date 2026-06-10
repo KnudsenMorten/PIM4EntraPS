@@ -29,7 +29,6 @@
 
   <policyNamespaces>
     <target prefix="pimactivator" namespace="MortenKnudsen.PIM4EntraPS.PimActivator" />
-    <using  prefix="windows"      namespace="Microsoft.Policies.Windows" />
   </policyNamespaces>
 
   <resources minRequiredRevision="1.0" />
