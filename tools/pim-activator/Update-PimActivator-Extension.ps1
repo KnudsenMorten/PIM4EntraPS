@@ -767,21 +767,23 @@ foreach ($b in $browsers) {
         } else {
             $miss++
         }
-        # 2026-06-10: ALWAYS scrub the matching Secure Preferences + Preferences
-        # registration when we delete the on-disk extension folder. If we only
-        # deleted the binary but left the registration, Chrome on next launch
-        # would set disable_reasons=DISABLE_CORRUPTED (1024), log
-        # 'All forced extensions seem to be installed', and refuse to retry the
-        # install -- exact trap the flush kept walking right into. Pure string
-        # surgery, no JSON round-trip, no profile-corruption risk.
-        if ($deletedThisProfile) {
-            $n = 0
-            $n += (Remove-JsonExtensionEntry -Path (Join-Path $profile.FullName 'Preferences'))
-            $n += (Remove-JsonExtensionEntry -Path (Join-Path $profile.FullName 'Secure Preferences'))
-            if ($n -gt 0) {
-                Write-Ok "$($b.Name) [$($profile.Name)]: cleared $n stale registration entries from (Secure )Preferences"
-                $prefsCleared += $n
-            }
+        # 2026-06-10 (v2.4.103): UNCONDITIONAL scrub of stale Preferences +
+        # Secure Preferences registrations -- not gated on whether the on-disk
+        # extension folder was found. The v2.4.100 fix only scrubbed when the
+        # binary was deleted, but the trap shape is the opposite: profiles can
+        # have STALE registration entries WITHOUT a cached binary (Chrome
+        # already self-removed the corrupted folder but kept the registration
+        # with disable_reasons=1024 DISABLE_CORRUPTED, refusing forcelist
+        # retry). Those profiles report 'no Extensions\<id> folder yet' which
+        # looked like 'nothing to do' to v2.4.100 -- but they were exactly the
+        # ones blocking install. Now we always sweep. Pure string surgery,
+        # no JSON round-trip, .bak files written before any rewrite.
+        $n = 0
+        $n += (Remove-JsonExtensionEntry -Path (Join-Path $profile.FullName 'Preferences'))
+        $n += (Remove-JsonExtensionEntry -Path (Join-Path $profile.FullName 'Secure Preferences'))
+        if ($n -gt 0) {
+            Write-Ok "$($b.Name) [$($profile.Name)]: cleared $n stale registration entries from (Secure )Preferences"
+            $prefsCleared += $n
         }
     }
     Write-Ok "$($b.Name): scanned $($profiles.Count) profile(s) -- removed cache from $hit, none present in $miss, registration entries scrubbed: $prefsCleared"
