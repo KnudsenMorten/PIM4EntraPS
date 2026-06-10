@@ -1,9 +1,10 @@
 # Release notes for PIM4EntraPS
 
-## v2.4.108
+## v2.4.109
 
 Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monorepo:
 
+- release: PIM4EntraPS v2.4.109 - PIM4EntraPS.PimActivator.admx removes unused <using> namespace dependency (strict tenants rejected upload as NamespaceMissing:Microsoft.Policies.Windows) (91c3e488)
 - release: PIM4EntraPS v2.4.108 - Deploy-PimActivatorIntune.ps1 drops defaultLanguageCode from ADMX upload payload (Intune 400 ADMXDefaultLanguageCodeNotNull) (a17463d2)
 - release: PIM4EntraPS v2.4.107 - Deploy-PimActivatorIntune.ps1 ADMX payload now has explicit @odata.type (fixes silent field null-out on strict tenants) (ab4a8d34)
 - release: PIM4EntraPS v2.4.106 - Deploy-PimActivatorIntune.ps1 dumps full ADMX upload-failure detail (uploadInfo:null was hiding everything) (23320078)
@@ -33,13 +34,28 @@ Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monor
 - release: PIM4EntraPS v2.4.94 + extension v1.6.6 - Setup-PimActivatorIntune.ps1 one-click unified ADMX-backed profile + popup body overflow:auto so content past 600px scrolls + 3-row status panel (Intune managed config / local imported / total in catalog) replaces single-line status (f9d64236)
 - fix Push-PimActivatorTenantCatalogProfile.ps1: lookup ADMX-ingested definitions via /groupPolicyDefinitions?$filter=startswith(categoryPath,'\PIM4EntraPS') -- the /groupPolicyUploadedDefinitionFiles/{id}/definitions navigation isn't queryable (7a4c6b8f)
 - add Push-PimActivatorTenantCatalogProfile.ps1 - automates ADMX-backed Configuration Profile creation (looks up ingested ADMX policy definitions + posts presentationValues binding the catalog JSON to Edge + Chrome policies) (3dfe8f3a)
-- fix Push-PimActivatorADMXToIntune.ps1: state-aware handling of in-flight uploads (don't /remove an uploadInProgress or removalInProgress row; wait for terminal state, exit early if uploadInProgress reaches 'available') (20b51d5f)
 
 ---
 
 # Release notes -- PIM4EntraPS
 
 > **Curated changelog.** The publish workflow auto-prepends recent monorepo commits as a raw activity log; this file is the human-friendly narrative on top.
+
+---
+
+## v2.4.109 -- PIM4EntraPS.PimActivator.admx removed unused `<using>` namespace dependency (strict Intune tenants rejected the upload as `NamespaceMissing`)
+
+Customer-tenant deploy surfaced the actual root cause via the portal's "Import ADMX" workflow (which gave the clear error the Graph endpoint hid):
+
+> `ADMX file referenced not found NamespaceMissing:Microsoft.Policies.Windows. Please upload it first.`
+
+The ADMX declared `<using prefix="windows" namespace="Microsoft.Policies.Windows" />` but never actually referenced the `windows:` prefix anywhere -- pure dead code. Strict Intune tenants check that every `<using>` target is pre-loaded and reject when it isn't (Nunagreen 2026-06-10). Tolerant tenants (2linkit) skipped the check and the ADMX uploaded fine -- which is why this file shipped for months with the latent bug.
+
+Fix: removed the `<using>` declaration. Our ADMX is now fully self-contained -- zero external namespace dependencies -- works on every tenant strictness level.
+
+Verified end-to-end on mgmt1 against the 2linkit tenant (which had been freshly cleaned of all prior ADMX rows): upload succeeded with `status: available` on the first try; subsequent policy-resolution loop found all 4 policies per browser (Forcelist, Sources, Settings, Tenant catalog); all 8 definition values set on `[PimActivator] client settings`; tenant catalog pushed for both Edge + Chrome.
+
+(Note: the v2.4.107 `@odata.type` discriminators stay -- still needed by strict tenants for proper deserialization. v2.4.108's `defaultLanguageCode` removal also stays -- Intune still requires that field absent. v2.4.109 is the final piece of the strict-tenant compatibility set.)
 
 ---
 
