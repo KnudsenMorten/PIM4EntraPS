@@ -1,9 +1,10 @@
 # Release notes for PIM4EntraPS
 
-## v2.4.112
+## v2.4.113
 
 Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monorepo:
 
+- release: PIM4EntraPS v2.4.113 - README PIM Activator section rewritten to today's deploy architecture (docs-only) (df162df9)
 - release: PIM4EntraPS v2.4.112 + extension v1.6.25 - popup manual single-tenant entry wins over managed catalog (fixes Save->onboarding loop on contaminated boxes) (b5ab0aa7)
 - release: PIM4EntraPS v2.4.111 - Deploy-PimActivatorClient.ps1 stops defaulting to sibling discovered-tenant-catalog.json (cross-tenant leak); auto-discovers from live Entra instead (34a1f1c8)
 - release: PIM4EntraPS v2.4.110 - Deploy-PimActivatorIntune.ps1 auto-skips Forcelist defValues when existing policy owns slot (avoids IME slot-cycling under -Force) (1771e06b)
@@ -33,13 +34,28 @@ Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monor
 - release: PIM4EntraPS v2.4.95 + extension v1.6.7 - popup max-height bumped 600->800px (Chromium's hard cap) + catalog import textarea shrunk from 6 to 3 rows (resize:vertical retained), so Save and continue button no longer disappears on first-run (a2c1331e)
 - fix Verify-PimActivatorIntunePolicy.ps1: PS 5.1 doesn't accept 'if (...) {...} else {...}' as an expression inside Write-Host -ForegroundColor argument; lift the choice into a separate $summaryColor variable (9e0c5644)
 - add Verify-PimActivatorIntunePolicy.ps1 - portable HKLM registry verifier for the 6 PIM Activator Intune policies, runs on any Windows endpoint with PS 5.1+ (no Graph dep) (8bf15a34)
-- fix Setup-PimActivatorIntune.ps1 list-value shape: put data in BOTH 'name' and 'value' for non-explicit-value listBox presentations (Intune portal editor renders 'name', not 'value'; the v2.4.94 release showed slot numbers like '1' instead of the extension+URL string) (ec6fe4ee)
 
 ---
 
 # Release notes -- PIM4EntraPS
 
 > **Curated changelog.** The publish workflow auto-prepends recent monorepo commits as a raw activity log; this file is the human-friendly narrative on top.
+
+---
+
+## v2.4.113 -- README: PIM Activator section rewritten to reflect today's deploy architecture (v2.4.103-v2.4.112 cumulative)
+
+Replaces the outdated v1.1.x Activator section -- which still documented `-CreateIntuneRemediation`, `-GenerateLocalInstaller` paths and 1-hour duration defaults -- with the current architecture:
+
+- Three deployment scripts described by use case (Intune-managed / non-Intune / maintainer repack), each with its tenant-discovery source explicitly noted (live Entra via Connect-MgGraph for both `Deploy-PimActivator{Intune,Client}.ps1`; master signing key in `~/.pim-activator/signing-key.pem` for `Update-PimActivator-Extension.ps1`).
+- Two recovery scripts (`Fix-PimActivatorStuck.ps1`, `Reset-CorruptedExtensions.ps1`) called out for the DISABLE_CORRUPTED state Chromium gets into when the extension binary is removed but Secure Preferences keeps the registration entry.
+- The four-policy ADMX profile shape (Forcelist + Sources + ExtensionSettings with `runtime_allowed_hosts: ['<all_urls>']` + Tenant catalog) documented per browser.
+- The v2.4.110 conflict-aware `-Force` behaviour (skips Forcelist defValues when an upstream Settings Catalog policy already owns the slot).
+- The v2.4.111 live-Entra auto-discover for `Deploy-PimActivatorClient.ps1` + the explicit `catalog source: ...` log line.
+- The v1.6.25 manual-entry-wins logic that prevents stale managed catalog from shadowing an explicit manual save.
+- Three-layer tenant config model (manual single-tenant > managed catalog) with a table of catalog-size behaviours.
+
+Pure documentation -- no script behaviour changes.
 
 ---
 
