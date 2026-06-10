@@ -1,9 +1,11 @@
 # Release notes for PIM4EntraPS
 
-## v2.4.101
+## v2.4.102
 
 Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monorepo:
 
+- release: PIM4EntraPS v2.4.102 - Deploy-PimActivatorIntune.ps1 pre-flight scan for conflicting ExtensionInstallForcelist policies (prevents IME slot-cycling silent failure) (7e7de5d7)
+- add Audit-ChromeForcelistInIntune.ps1 - read-only diagnostic that scans every Intune configuration policy (Settings Catalog + Administrative Templates + custom device configs) for Chrome ExtensionInstallForcelist values, flags malformed entries (empty string, invalid ext id, missing update URL). Used to pin down which Intune profile is shipping the bad forcelist entry that's blocking all extension installs. (bd371bf3)
 - release: PIM4EntraPS v2.4.101 + extension v1.6.20 - popup CSS revert (v1.6.19 flex-column broke Edge) (709005f7)
 - release: PIM4EntraPS v2.4.100 - Update-PimActivator-Extension.ps1 flush now scrubs stale Secure Preferences registration alongside cached CRX (prevents DISABLE_CORRUPTED trap) (3a9de353)
 - release: PIM4EntraPS v2.4.99 - Deploy-PimActivatorIntune.ps1 catalog auto-discover (hotfix over v2.4.98) (785ff800)
@@ -32,14 +34,30 @@ Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monor
 - release: PIM4EntraPS v2.4.92 + extension v1.6.4 - strip auto-discover panel + well-known URI flow + gut background.js to empty stub; reorder onboarding to catalog -> Welcome -> manual entry (c4c0b499)
 - release: PIM4EntraPS v2.4.91 + extension v1.6.3 - retire global KNOWN_BAD_LEGACY_CLIENTIDS ban; v1.6 catalog binds tenantId+clientId per-entry so the same GUID is valid in the tenant that owns it (cc3a7cae)
 - fix Test-PushTenantCatalog: explicit -Property projection + ServicePrincipal fallback so Get-MgApplication's default-projection AppId-drop in some SDK versions doesn't produce null clientId (c12c92a4)
-- add Test-PushTenantCatalog.ps1 - auto-discovers tenant + PIM Activator app reg in currently-connected Graph context, builds 1-entry catalog, hands off to Push-PimActivatorTenantCatalogIntune.ps1 (zero-typing first-test helper) (09c083f3)
-- release: PIM4EntraPS v2.4.90 - Push-PimActivatorTenantCatalogIntune.ps1 (native Intune Custom Configuration Profile via OMA-URI + Registry CSP) for chrome.storage.managed tenant catalog push + sample JSON template (a718097b)
 
 ---
 
 # Release notes -- PIM4EntraPS
 
 > **Curated changelog.** The publish workflow auto-prepends recent monorepo commits as a raw activity log; this file is the human-friendly narrative on top.
+
+---
+
+## v2.4.102 -- Deploy-PimActivatorIntune.ps1 pre-flight scan for conflicting ExtensionInstallForcelist policies
+
+**Reason.** A 2-laptop customer deploy hit a silent failure that took an hour to root-cause: the tenant already had a Settings Catalog profile (`Browser Extensions Silently Installed (Google Chrome + Edge)`) pushing Google Docs Offline + Dashlane to the same HKLM forcelist key our ADMX-backed `[PimActivator] client settings` profile writes to. Intune Management Extension does NOT merge ExtensionInstallForcelist writes across mechanisms -- Settings Catalog wins, ADMX-backed loses, and our PIM Activator entry got overwritten on every sync cycle. Intune reported "green" on both policies (because each one successfully wrote ITS values), but the laptops ended up with PIM Activator missing from HKLM and `chrome://policy` showing a stale or absent forcelist entry. Recovery required adding our extension id to the customer's existing Settings Catalog policy manually.
+
+**Fix.** `Deploy-PimActivatorIntune.ps1` now runs a pre-flight Graph scan BEFORE creating / updating its ADMX profile. The scan walks:
+
+- `deviceManagement/configurationPolicies` (Settings Catalog)
+- `deviceManagement/groupPolicyConfigurations` (Administrative Templates / ADMX-backed)
+
+and reports any policy (other than our own `$DisplayName`) that already manages Chrome / Edge `ExtensionInstallForcelist`. Per matching policy it prints type (SettingsCatalog vs AdminTemplate), display name, and current forcelist entries. If a conflict is found:
+
+- By default the script **aborts** with the exact `extension_id;update_url` row the operator should add to the existing Intune policy instead -- preserving the customer's existing forcelist setup and avoiding the IME slot-cycling problem.
+- Pass `-Force` to push the ADMX profile anyway -- useful when the operator has verified the existing policy is unassigned, scoped to a non-conflicting group, or otherwise safe.
+
+The other settings the ADMX profile carries (`ExtensionInstallSources`, `ExtensionSettings`, `TenantCatalog`) don't contest any Settings Catalog policy, so even when the operator splits the deploy (forcelist via existing Settings Catalog + everything else via this ADMX profile) the architecture works cleanly.
 
 ---
 
