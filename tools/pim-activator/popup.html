@@ -74,7 +74,14 @@
   .tab-btn.active { color:#0969da; font-weight:600; border-bottom-color:#0969da; }
   .tab-btn .badge { background:#eaeef2; color:#57606a; border:1px solid #d0d7de; border-radius:10px; padding:0 6px; font-size:10.5px; min-width:14px; text-align:center; }
   .tab-btn.active .badge { background:#0969da; color:#fff; border-color:#0969da; }
-  [role=tabpanel][hidden] { display:none; }
+  /* `!important` because both tabpanels carry inline `display:flex` for
+     their flex-column layout when shown. Without `!important` the inline
+     style wins over this rule and BOTH panels render at once when the
+     tab strip is hidden (pre-sign-in state), bleeding My Access's
+     toolbar/status into the Activate sign-in prompt. Tab toggling sets /
+     removes the `hidden` attribute; with `!important` that toggle wins
+     over the inline `display:flex`. v1.6.23 fix. */
+  [role=tabpanel][hidden] { display:none !important; }
 
   /* Reusable progress bar -- used on Activate (sign-in load + bulk role fetch)
      and My Access (role assignment fetch). Taller than the old 5px stripe so

@@ -1,9 +1,10 @@
 # Release notes for PIM4EntraPS
 
-## v2.4.104
+## v2.4.105
 
 Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monorepo:
 
+- release: PIM4EntraPS v2.4.105 + extension v1.6.24 - fix popup pre-sign-in tabpanel bleed + fix Update script silently aborting gh-pages publish (097fba84)
 - release: PIM4EntraPS v2.4.104 + extension v1.6.22 - -Repack works on PS 5.1 (mgmt1's runtime); guard moved from PEM input to produced CRX output bytes (6cdfd661)
 - release: PIM4EntraPS v2.4.103 - Update-PimActivator-Extension.ps1 scrubs stale Secure Preferences UNCONDITIONALLY (v2.4.100 only scrubbed when binary present, missed the actual trap shape) (41fd4236)
 - release: PIM4EntraPS v2.4.102 - Deploy-PimActivatorIntune.ps1 pre-flight scan for conflicting ExtensionInstallForcelist policies (prevents IME slot-cycling silent failure) (7e7de5d7)
@@ -33,13 +34,22 @@ Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monor
 - fix: skip /remove when existing upload is already in removalInProgress (avoids 400 OperationInProgress on second run) (ca417bef)
 - fix Push-PimActivatorADMXToIntune.ps1: groupPolicyUploadedDefinitionFiles requires POST .../remove action (not DELETE); poll until 404 before re-upload to avoid 409 (e1e85ed3)
 - release: PIM4EntraPS v2.4.93 + extension v1.6.5 - rewrite Push-PimActivatorTenantCatalogIntune.ps1 as PS remediation (was hitting Registry CSP block 0x87d1fde8 on Edge/Chrome 3rdparty namespace) + ship ADMX template + Push-PimActivatorADMXToIntune.ps1 for the proper Settings Catalog path + popup source-detection status line (ed206a0a)
-- release: PIM4EntraPS v2.4.92 + extension v1.6.4 - strip auto-discover panel + well-known URI flow + gut background.js to empty stub; reorder onboarding to catalog -> Welcome -> manual entry (c4c0b499)
 
 ---
 
 # Release notes -- PIM4EntraPS
 
 > **Curated changelog.** The publish workflow auto-prepends recent monorepo commits as a raw activity log; this file is the human-friendly narrative on top.
+
+---
+
+## v2.4.105 + extension v1.6.24 -- popup pre-sign-in showed both tabpanels bleeding together; gh-pages publish silently aborted on git stderr
+
+**Popup fix (extension v1.6.23/v1.6.24).** Pre-sign-in the popup showed the Activate-tab sign-in prompt AND the My Access-tab toolbar (`Re-sign in | all | none | Deactivate selected (0)` + `Loading...`) at the same time. The tab strip itself is intentionally hidden before sign-in completes; both tabpanels carry inline `style="display:flex; flex-direction:column"` for their post-sign-in layout; and the `[role=tabpanel][hidden] { display:none; }` CSS rule that's supposed to suppress the inactive panel was being **overridden by the inline `display:flex`** (inline style beats external CSS without `!important`). Result: `panel-myaccess` had the `hidden` attribute set but rendered anyway. Fix: `[role=tabpanel][hidden] { display:none !important; }` -- now `hidden` always wins, tab toggling still works (JS removes the attribute when switching tabs, inline display:flex takes over).
+
+**Publish-step fix (script).** `Update-PimActivator-Extension.ps1`'s `-Repack` / `-PackOnly` was silently aborting the gh-pages push step on a CLEAN run. Root cause: git writes informational lines (`Cloning into...`, `From <repo>`, etc.) to stderr even on success. The previous `2>&1 | Out-Null` pipeline routed those into PowerShell's error stream, which the script-wide `$ErrorActionPreference = 'Stop'` then treated as terminating errors. The CRX got packed + validated, but never pushed -- gh-pages stayed on the previous version while the script reported success. Switched to `2>$null 1>$null` + explicit `$LASTEXITCODE` checks so only real git failures abort the step. Also replaced `git pull` with `git fetch + git reset --hard origin/gh-pages` to dodge the shallow-clone "reference already exists" quirk that sometimes corrupts the local ref database.
+
+Verified end-to-end on mgmt1: extension v1.6.24 is live on gh-pages (commit d1b165e), and the popup pre-sign-in screen now shows only the header + sign-in prompt + credit footer (no My Access bleed-through).
 
 ---
 
