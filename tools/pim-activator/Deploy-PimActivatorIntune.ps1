@@ -123,6 +123,19 @@ param(
     [Parameter(ParameterSetName = 'Install')]
     [string]$TenantName,
 
+    # Bypass the pre-flight scan for existing Intune policies that already
+    # manage ExtensionInstallForcelist on Chrome / Edge. By default the script
+    # aborts if any other policy is found, because mixing Settings Catalog +
+    # ADMX writes to the SAME registry key (HKLM\Policies\<browser>\
+    # ExtensionInstallForcelist) causes IME to cycle entries on every sync --
+    # one source's writes survive, the others get overwritten. Settings
+    # Catalog wins over ADMX in our experience. -Force skips the check and
+    # creates the ADMX profile anyway; only use this if you've manually
+    # verified the existing policy doesn't conflict (e.g. it only targets
+    # an empty group).
+    [Parameter(ParameterSetName = 'Install')]
+    [switch]$Force,
+
     [Parameter(Mandatory, ParameterSetName = 'Uninstall')]
     [switch]$Remove
 )
@@ -146,6 +159,119 @@ if ($missingScopes) {
     $ctx = Get-MgContext
 }
 Write-Host "Connected to tenant $($ctx.TenantId) as $($ctx.Account)" -ForegroundColor Gray
+
+# ---- 1.25. Pre-flight: scan for existing ExtensionInstallForcelist policies ---
+#
+# IME does NOT merge ExtensionInstallForcelist writes across mechanisms
+# (Settings Catalog vs ADMX-backed Administrative Templates). If a customer
+# already has, say, a Settings Catalog profile pushing Dashlane + Google Docs
+# Offline to the same HKLM key, our ADMX-backed forcelist write will land
+# briefly and then be overwritten on the next sync cycle. The fix is to add
+# our extension id to the CUSTOMER'S existing policy instead of creating a
+# new ADMX profile that fights with it.
+#
+# This block runs read-only against Graph and lists every Intune policy that
+# touches Chrome / Edge ExtensionInstallForcelist (excluding any profile with
+# our own $DisplayName). If matches are found, prints them and aborts -- the
+# operator can either (a) add our extension id to the existing policy in the
+# Intune portal, or (b) re-run with -Force.
+if (-not $Remove) {
+    Write-Host ''
+    Write-Host "Pre-flight: scanning for existing Intune policies that manage ExtensionInstallForcelist..." -ForegroundColor Cyan
+
+    $conflicts = New-Object System.Collections.Generic.List[object]
+
+    # 1.25a. Settings Catalog (deviceManagement/configurationPolicies)
+    $cpResp = Invoke-MgGraphRequest -Method GET -Uri 'https://graph.microsoft.com/beta/deviceManagement/configurationPolicies' -ErrorAction SilentlyContinue
+    $policies = if ($cpResp) { @($cpResp.value) } else { @() }
+    while ($cpResp.'@odata.nextLink') {
+        $cpResp = Invoke-MgGraphRequest -Method GET -Uri $cpResp.'@odata.nextLink' -ErrorAction SilentlyContinue
+        if ($cpResp) { $policies += $cpResp.value }
+    }
+    foreach ($p in $policies) {
+        if ($p.name -eq $DisplayName) { continue }
+        $sResp = Invoke-MgGraphRequest -Method GET -Uri ("https://graph.microsoft.com/beta/deviceManagement/configurationPolicies/{0}/settings" -f $p.id) -ErrorAction SilentlyContinue
+        if (-not $sResp) { continue }
+        $jsonBlob = ($sResp.value | ConvertTo-Json -Depth 30 -Compress -ErrorAction SilentlyContinue)
+        if ($jsonBlob -match 'ExtensionInstallForcelist' -or $jsonBlob -match 'extensioninstallforcelist') {
+            $ids = @()
+            foreach ($m in [regex]::Matches($jsonBlob, '"value"\s*:\s*"([a-p]{32};[^"]+)"')) { $ids += $m.Groups[1].Value }
+            $conflicts.Add([pscustomobject]@{
+                Type   = 'SettingsCatalog'
+                Name   = $p.name
+                Id     = $p.id
+                Values = ($ids | Select-Object -Unique)
+            })
+        }
+    }
+
+    # 1.25b. ADMX-backed (deviceManagement/groupPolicyConfigurations)
+    $gpResp = Invoke-MgGraphRequest -Method GET -Uri 'https://graph.microsoft.com/beta/deviceManagement/groupPolicyConfigurations' -ErrorAction SilentlyContinue
+    $configs = if ($gpResp) { @($gpResp.value) } else { @() }
+    while ($gpResp.'@odata.nextLink') {
+        $gpResp = Invoke-MgGraphRequest -Method GET -Uri $gpResp.'@odata.nextLink' -ErrorAction SilentlyContinue
+        if ($gpResp) { $configs += $gpResp.value }
+    }
+    foreach ($c in $configs) {
+        if ($c.displayName -eq $DisplayName) { continue }
+        $dvResp = Invoke-MgGraphRequest -Method GET -Uri ("https://graph.microsoft.com/beta/deviceManagement/groupPolicyConfigurations/{0}/definitionValues?`$expand=definition" -f $c.id) -ErrorAction SilentlyContinue
+        if (-not $dvResp) { continue }
+        foreach ($dv in @($dvResp.value)) {
+            $defName = $dv.definition.displayName
+            if ($defName -notmatch 'ExtensionInstallForcelist' -and $defName -notmatch 'Configure the list of force-installed' -and $defName -notmatch 'Control which extensions are installed silently') { continue }
+            $pvResp = Invoke-MgGraphRequest -Method GET -Uri ("https://graph.microsoft.com/beta/deviceManagement/groupPolicyConfigurations/{0}/definitionValues/{1}/presentationValues?`$expand=presentation" -f $c.id, $dv.id) -ErrorAction SilentlyContinue
+            $ids = @()
+            foreach ($pv in @($pvResp.value)) {
+                if ($pv.values) {
+                    foreach ($v in @($pv.values)) {
+                        if ($v -is [System.Collections.IDictionary] -and $v.ContainsKey('value')) { $ids += [string]$v['value'] }
+                    }
+                } elseif ($pv.value -is [string]) { $ids += $pv.value }
+            }
+            $conflicts.Add([pscustomobject]@{
+                Type   = 'AdminTemplate'
+                Name   = ("{0}  ({1})" -f $c.displayName, $defName)
+                Id     = $c.id
+                Values = ($ids | Select-Object -Unique)
+            })
+        }
+    }
+
+    if ($conflicts.Count -gt 0) {
+        Write-Host ''
+        Write-Host "[CONFLICT] Found $($conflicts.Count) other Intune policy/policies that already manage ExtensionInstallForcelist:" -ForegroundColor Yellow
+        foreach ($c in $conflicts) {
+            Write-Host ("  - [{0}] {1}" -f $c.Type, $c.Name) -ForegroundColor Yellow
+            foreach ($v in $c.Values) { Write-Host ("        {0}" -f $v) -ForegroundColor Gray }
+        }
+        Write-Host ''
+        Write-Host "Why this matters:" -ForegroundColor Cyan
+        Write-Host "  IME does NOT reliably merge ExtensionInstallForcelist writes across mechanisms." -ForegroundColor Gray
+        Write-Host "  Creating an ADMX-backed '$DisplayName' profile in this tenant will cause" -ForegroundColor Gray
+        Write-Host "  PIM Activator's forcelist entry to cycle on/off in the HKLM registry on every" -ForegroundColor Gray
+        Write-Host "  sync, because the other policy/policies above will overwrite our entry." -ForegroundColor Gray
+        Write-Host ''
+        Write-Host "Recommended fix:" -ForegroundColor Cyan
+        Write-Host "  Open the existing policy in Intune portal and ADD this forcelist row to both" -ForegroundColor Gray
+        Write-Host "  the Chrome and Edge extension lists (then delete any blank trailing rows):" -ForegroundColor Gray
+        Write-Host ("    {0};{1}" -f $ExtensionId, $UpdateUrl) -ForegroundColor Green
+        Write-Host ''
+        Write-Host "  The other settings this script ships (ExtensionInstallSources, ExtensionSettings," -ForegroundColor Gray
+        Write-Host "  Tenant catalog) DON'T conflict with any Settings Catalog policy, so you can still" -ForegroundColor Gray
+        Write-Host "  run this script with -Force to push them -- it will write the forcelist entry too" -ForegroundColor Gray
+        Write-Host "  but understand that the existing policy will overwrite it on every sync until you" -ForegroundColor Gray
+        Write-Host "  also add our extension id there." -ForegroundColor Gray
+        Write-Host ''
+        if (-not $Force) {
+            Write-Host "Aborting. Re-run with -Force to proceed anyway." -ForegroundColor Red
+            return
+        }
+        Write-Host "-Force supplied; proceeding despite conflict." -ForegroundColor Yellow
+    } else {
+        Write-Host "[OK] No existing ExtensionInstallForcelist policies found in tenant." -ForegroundColor Green
+    }
+}
+
 
 # ---- 1.5. Ensure the PIM Activator ADMX is ingested in this tenant -------
 # Idempotent. Skips entirely if the ADMX is already uploaded + available;
