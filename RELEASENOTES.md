@@ -1,9 +1,10 @@
 # Release notes for PIM4EntraPS
 
-## v2.4.109
+## v2.4.110
 
 Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monorepo:
 
+- release: PIM4EntraPS v2.4.110 - Deploy-PimActivatorIntune.ps1 auto-skips Forcelist defValues when existing policy owns slot (avoids IME slot-cycling under -Force) (1771e06b)
 - release: PIM4EntraPS v2.4.109 - PIM4EntraPS.PimActivator.admx removes unused <using> namespace dependency (strict tenants rejected upload as NamespaceMissing:Microsoft.Policies.Windows) (91c3e488)
 - release: PIM4EntraPS v2.4.108 - Deploy-PimActivatorIntune.ps1 drops defaultLanguageCode from ADMX upload payload (Intune 400 ADMXDefaultLanguageCodeNotNull) (a17463d2)
 - release: PIM4EntraPS v2.4.107 - Deploy-PimActivatorIntune.ps1 ADMX payload now has explicit @odata.type (fixes silent field null-out on strict tenants) (ab4a8d34)
@@ -33,13 +34,29 @@ Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monor
 - fix Setup-PimActivatorIntune.ps1 list-value shape: put data in BOTH 'name' and 'value' for non-explicit-value listBox presentations (Intune portal editor renders 'name', not 'value'; the v2.4.94 release showed slot numbers like '1' instead of the extension+URL string) (ec6fe4ee)
 - release: PIM4EntraPS v2.4.94 + extension v1.6.6 - Setup-PimActivatorIntune.ps1 one-click unified ADMX-backed profile + popup body overflow:auto so content past 600px scrolls + 3-row status panel (Intune managed config / local imported / total in catalog) replaces single-line status (f9d64236)
 - fix Push-PimActivatorTenantCatalogProfile.ps1: lookup ADMX-ingested definitions via /groupPolicyDefinitions?$filter=startswith(categoryPath,'\PIM4EntraPS') -- the /groupPolicyUploadedDefinitionFiles/{id}/definitions navigation isn't queryable (7a4c6b8f)
-- add Push-PimActivatorTenantCatalogProfile.ps1 - automates ADMX-backed Configuration Profile creation (looks up ingested ADMX policy definitions + posts presentationValues binding the catalog JSON to Edge + Chrome policies) (3dfe8f3a)
 
 ---
 
 # Release notes -- PIM4EntraPS
 
 > **Curated changelog.** The publish workflow auto-prepends recent monorepo commits as a raw activity log; this file is the human-friendly narrative on top.
+
+---
+
+## v2.4.110 -- Deploy-PimActivatorIntune.ps1 auto-skips Forcelist defValues when an existing policy already owns the slot (avoids IME slot-cycling even under `-Force`)
+
+Earlier today's incident: on a tenant where the operator already had a Settings Catalog policy pushing the PIM Activator forcelist, running this script with `-Force` re-wrote a competing forcelist definition value into the ADMX profile -- re-creating the exact IME slot-cycling problem the v2.4.102 pre-flight scan was meant to prevent. `-Force` was meant to override the *abort* on conflict, not to push a known-conflicting write.
+
+Fix: when the pre-flight scan finds a conflict AND `-Force` is supplied, the script now:
+
+1. Prints an `ACTION REQUIRED` block naming each conflicting policy + the exact `<extId>;<updateUrl>` row the operator must paste into those policy's extension lists.
+2. Sets `$script:SkipForcelistDueToConflict = $true`.
+3. **Skips the Forcelist policy entirely** in the resolution loop (no Forcelist definition lookup attempt) and writes only `Sources`, `Settings`, `Catalog` (3 per browser, 6 total).
+4. The write loop logs `[SKIP] $b Forcelist not written -- existing policy in tenant owns this registry slot. Add '<extId>;<updateUrl>' there.` per browser, making the residual operator-side task crystal clear.
+
+When no conflict exists, behaviour is unchanged: 8 definition values get written (Forcelist + Sources + Settings + Catalog x Edge + Chrome).
+
+Verified end-to-end on mgmt1 against 2linkit (which has the existing Settings Catalog policy in play): script printed the conflict, the ACTION REQUIRED block, then wrote only the 6 non-forcelist definition values + 2 `[SKIP]` lines naming the row to add upstream.
 
 ---
 

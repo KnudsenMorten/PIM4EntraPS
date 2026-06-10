@@ -237,6 +237,14 @@ if (-not $Remove) {
         }
     }
 
+    # v2.4.110: when a conflict exists AND the operator passed -Force, we now
+    # automatically SKIP writing the forcelist definition values (Edge +
+    # Chrome) -- the conflicting policy already owns that registry slot, and
+    # double-writing causes IME slot-cycling. The non-conflicting parts
+    # (ExtensionInstallSources, ExtensionSettings, Tenant catalog) still
+    # get pushed. Tracked via $script:SkipForcelistDueToConflict so the
+    # later loop knows to skip Forcelist entries.
+    $script:SkipForcelistDueToConflict = $false
     if ($conflicts.Count -gt 0) {
         Write-Host ''
         Write-Host "[CONFLICT] Found $($conflicts.Count) other Intune policy/policies that already manage ExtensionInstallForcelist:" -ForegroundColor Yellow
@@ -256,17 +264,24 @@ if (-not $Remove) {
         Write-Host "  the Chrome and Edge extension lists (then delete any blank trailing rows):" -ForegroundColor Gray
         Write-Host ("    {0};{1}" -f $ExtensionId, $UpdateUrl) -ForegroundColor Green
         Write-Host ''
-        Write-Host "  The other settings this script ships (ExtensionInstallSources, ExtensionSettings," -ForegroundColor Gray
-        Write-Host "  Tenant catalog) DON'T conflict with any Settings Catalog policy, so you can still" -ForegroundColor Gray
-        Write-Host "  run this script with -Force to push them -- it will write the forcelist entry too" -ForegroundColor Gray
-        Write-Host "  but understand that the existing policy will overwrite it on every sync until you" -ForegroundColor Gray
-        Write-Host "  also add our extension id there." -ForegroundColor Gray
-        Write-Host ''
         if (-not $Force) {
-            Write-Host "Aborting. Re-run with -Force to proceed anyway." -ForegroundColor Red
+            Write-Host "Aborting. Re-run with -Force to push the non-forcelist policies (Sources, Settings, Tenant catalog) only." -ForegroundColor Red
+            Write-Host "When -Force is used and a conflict exists, this script auto-skips the forcelist definition values" -ForegroundColor Gray
+            Write-Host "so the existing policy's forcelist is left untouched (no IME slot-cycling)." -ForegroundColor Gray
             return
         }
-        Write-Host "-Force supplied; proceeding despite conflict." -ForegroundColor Yellow
+        Write-Host "-Force supplied: proceeding -- WITHOUT writing the forcelist definition values." -ForegroundColor Yellow
+        Write-Host "                  Only Sources, Settings + Tenant catalog will be pushed via this ADMX profile." -ForegroundColor Gray
+        Write-Host ''
+        Write-Host "ACTION REQUIRED on the existing conflicting policy (Intune portal):" -ForegroundColor Cyan
+        foreach ($c in $conflicts) {
+            Write-Host ("  - {0}: '{1}'" -f $c.Type, $c.Name) -ForegroundColor Cyan
+        }
+        Write-Host "  Open that policy and add this forcelist row to BOTH the Chrome and Edge extension lists:" -ForegroundColor Cyan
+        Write-Host ("    {0};{1}" -f $ExtensionId, $UpdateUrl) -ForegroundColor Green
+        Write-Host "  (delete any trailing blank rows the Settings Catalog UI leaves behind)" -ForegroundColor Gray
+        Write-Host ''
+        $script:SkipForcelistDueToConflict = $true
     } else {
         Write-Host "[OK] No existing ExtensionInstallForcelist policies found in tenant." -ForegroundColor Green
     }
@@ -556,9 +571,17 @@ $extSettingsJson = (@{ $ExtensionId = @{
 }} | ConvertTo-Json -Depth 5 -Compress)
 
 $resolved = @{}
+# v2.4.110: when a conflicting forcelist policy was detected upstream AND
+# -Force was used, skip the Forcelist policy entirely so we don't write
+# a definition value that would compete with the existing policy.
+$policyKeys = if ($script:SkipForcelistDueToConflict) {
+    @('Sources','Settings','Catalog')
+} else {
+    @('Forcelist','Sources','Settings','Catalog')
+}
 foreach ($b in $browsersToInclude) {
     $resolved[$b] = @{}
-    foreach ($k in 'Forcelist','Sources','Settings','Catalog') {
+    foreach ($k in $policyKeys) {
         $spec = $policyMap[$b][$k]
         $def  = Find-PolicyDef -DisplayNameLike $spec.displayName -CategoryPath $spec.categoryPath
         if (-not $def) {
@@ -640,12 +663,20 @@ function New-DefValue {
 }
 
 foreach ($b in $browsersToInclude) {
-    # Forcelist: list of "<extId>;<updateUrl>"
-    $defFL = $resolved[$b]['Forcelist'].Definition
-    $prFL  = $resolved[$b]['Forcelist'].Presentations | Select-Object -First 1
-    $bodyFL = (New-DefValue -Definition $defFL -Presentation $prFL -Kind List -Value @($forcelistValue)) | ConvertTo-Json -Depth 20
-    Invoke-MgGraphRequest -Method POST -Uri "https://graph.microsoft.com/beta/deviceManagement/groupPolicyConfigurations/$profileId/definitionValues" -Body $bodyFL -ContentType 'application/json' -ErrorAction Stop | Out-Null
-    Write-Host "  [OK] $b Forcelist set ($forcelistValue)" -ForegroundColor Green
+    # v2.4.110: skip the Forcelist write when an upstream conflicting policy
+    # exists. The conflict scan + -Force branch sets
+    # $script:SkipForcelistDueToConflict and prints the action-required
+    # instructions for the operator; here we just skip the POST.
+    if ($script:SkipForcelistDueToConflict) {
+        Write-Host "  [SKIP] $b Forcelist not written -- existing policy in tenant owns this registry slot. Add '$forcelistValue' there." -ForegroundColor Yellow
+    } else {
+        # Forcelist: list of "<extId>;<updateUrl>"
+        $defFL = $resolved[$b]['Forcelist'].Definition
+        $prFL  = $resolved[$b]['Forcelist'].Presentations | Select-Object -First 1
+        $bodyFL = (New-DefValue -Definition $defFL -Presentation $prFL -Kind List -Value @($forcelistValue)) | ConvertTo-Json -Depth 20
+        Invoke-MgGraphRequest -Method POST -Uri "https://graph.microsoft.com/beta/deviceManagement/groupPolicyConfigurations/$profileId/definitionValues" -Body $bodyFL -ContentType 'application/json' -ErrorAction Stop | Out-Null
+        Write-Host "  [OK] $b Forcelist set ($forcelistValue)" -ForegroundColor Green
+    }
 
     # Sources: list of URL patterns
     $defSR = $resolved[$b]['Sources'].Definition
