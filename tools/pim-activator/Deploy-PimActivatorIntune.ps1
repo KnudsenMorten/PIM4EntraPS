@@ -75,8 +75,17 @@
 #>
 [CmdletBinding(DefaultParameterSetName = 'Install')]
 param(
-    [Parameter(Mandatory, ParameterSetName = 'Install')]
-    [ValidateScript({ Test-Path -LiteralPath $_ -PathType Leaf })]
+    # Optional. When supplied, the profile also includes the TenantCatalog
+    # setting (chrome.storage.managed.tenantCatalog) so the popup's
+    # 'Use centrally deployed' tile is active immediately on every box. When
+    # OMITTED, the script ships the three install policies (forcelist + sources
+    # + ExtensionSettings) only -- the extension installs fine, and users
+    # populate their tenants via the in-popup wizard ('Add single tenant' or
+    # 'Import JSON catalog'). Mandatory in v2.4.98; demoted to optional in
+    # v2.4.99 after customer tenants without a prepared catalog couldn't
+    # complete a zero-arg deploy.
+    [Parameter(ParameterSetName = 'Install')]
+    [ValidateScript({ -not $_ -or (Test-Path -LiteralPath $_ -PathType Leaf) })]
     [string]$CatalogJsonPath,
 
     [Parameter()]
@@ -98,6 +107,21 @@ param(
 
     [Parameter(ParameterSetName = 'Install')]
     [string]$AssignToGroupId,
+
+    # Skip the Entra /applications round-trip and use the provided clientId
+    # directly. Tenant id + tenant name are still auto-resolved via
+    # Graph /organization. Use this when you ran Deploy-PimActivatorBackend.ps1
+    # earlier and already know the appId. Ignored when -CatalogJsonPath is
+    # also supplied (file takes precedence over both flags).
+    [Parameter(ParameterSetName = 'Install')]
+    [ValidatePattern('^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$')]
+    [string]$ClientId,
+
+    # Optional. Override the auto-resolved tenant display name (from
+    # /organization). Useful when you want a friendlier label in the popup's
+    # tenant chip. Ignored when -CatalogJsonPath is supplied.
+    [Parameter(ParameterSetName = 'Install')]
+    [string]$TenantName,
 
     [Parameter(Mandatory, ParameterSetName = 'Uninstall')]
     [switch]$Remove
@@ -232,15 +256,74 @@ function Get-Presentations {
     return @($r.value)
 }
 
-# ---- 4. Read + validate the catalog JSON --------------------------------
-$catalogJson = Get-Content -LiteralPath $CatalogJsonPath -Raw -Encoding UTF8
-try {
-    $catalog = $catalogJson | ConvertFrom-Json
-} catch {
-    throw "Could not parse '$CatalogJsonPath' as JSON: $($_.Exception.Message)"
+# ---- 4. Catalog: read from file OR auto-discover from Entra -------------
+# If -CatalogJsonPath is supplied, use it verbatim. Otherwise auto-discover
+# the per-tenant PIM Activator app registration (created by
+# Deploy-PimActivatorBackend.ps1 -- default displayName 'PIM Activator')
+# and the current tenant via Microsoft Graph, then build a single-entry
+# catalog from those facts. Customers no longer need to hand-craft the
+# JSON before they can run this script.
+if ($CatalogJsonPath) {
+    $catalogJson = Get-Content -LiteralPath $CatalogJsonPath -Raw -Encoding UTF8
+    try {
+        $catalog = $catalogJson | ConvertFrom-Json
+    } catch {
+        throw "Could not parse '$CatalogJsonPath' as JSON: $($_.Exception.Message)"
+    }
+} else {
+    # No -CatalogJsonPath. Two sub-paths:
+    #   (a) operator passed -ClientId         -> skip Entra /applications round-trip, use it directly
+    #   (b) operator passed nothing extra     -> auto-discover via /applications?displayName eq 'PIM Activator'
+    # Tenant id + tenant name come from /organization either way (unless
+    # -TenantName was passed to override the label).
+    $needsOrgScope = $true
+    $needsAppScope = -not $ClientId   # only query /applications if we don't already know clientId
+    $scopesNeeded  = @('DeviceManagementConfiguration.ReadWrite.All','Organization.Read.All')
+    if ($needsAppScope) { $scopesNeeded += 'Application.Read.All' }
+    $missing = $scopesNeeded | Where-Object { $_ -notin (Get-MgContext).Scopes }
+    if ($missing) {
+        Connect-MgGraph -Scopes $scopesNeeded -NoWelcome -ErrorAction Stop | Out-Null
+    }
+
+    # Tenant id + display name from Graph /organization
+    $org = (Invoke-MgGraphRequest -Method GET -Uri 'https://graph.microsoft.com/v1.0/organization').value | Select-Object -First 1
+    if (-not $org) { throw "Could not resolve current tenant via /organization. Re-run with -CatalogJsonPath <file> to bypass auto-discovery." }
+    $tenantIdResolved   = $org.id
+    $tenantNameResolved = if ($TenantName) { $TenantName } else { $org.displayName }
+
+    if ($ClientId) {
+        $clientIdResolved = $ClientId
+        Write-Host ("Using provided -ClientId for tenant '{0}' ({1})." -f $tenantNameResolved, $tenantIdResolved) -ForegroundColor Cyan
+    } else {
+        Write-Host "Auto-discovering PIM Activator app registration from Entra..." -ForegroundColor Cyan
+        # startswith() rather than `eq` so the lookup still works when the
+        # operator renamed the app to a variant like 'PIM Activator (prod)'
+        # or '[2linkIT] PIM Activator'. Same pattern as the popup's
+        # onboarding wizard uses.
+        $appName = 'PIM Activator'
+        $appResp = Invoke-MgGraphRequest -Method GET -Uri ("https://graph.microsoft.com/v1.0/applications?`$filter=startswith(displayName,'$appName')")
+        $app = $appResp.value | Select-Object -First 1
+        if (-not $app) {
+            throw "No app registration with displayName starting with '$appName' found in tenant '$tenantNameResolved' ($tenantIdResolved). Run Deploy-PimActivatorBackend.ps1 once to create it, OR pass -ClientId <guid>, OR pass -CatalogJsonPath <file>."
+        }
+        $clientIdResolved = $app.appId
+        Write-Host ("Found app '{0}' (clientId {1})." -f $app.displayName, $clientIdResolved) -ForegroundColor Green
+    }
+
+    $catalog = @(
+        [pscustomobject]@{
+            name                  = $tenantNameResolved
+            tenantId              = $tenantIdResolved
+            clientId              = $clientIdResolved
+            defaultJustification  = 'Change in infrastructure'
+            defaultDurationHours  = 8
+        }
+    )
+    Write-Host ("Catalog built  : name='{0}'  tenantId={1}  clientId={2}" -f $tenantNameResolved, $tenantIdResolved, $clientIdResolved) -ForegroundColor Green
 }
+
 $count = @($catalog).Count
-if ($count -eq 0) { throw "Catalog JSON is an empty array." }
+if ($count -eq 0) { throw "Catalog is empty after $(if ($CatalogJsonPath) { 'reading file' } else { 'auto-discovery' })." }
 foreach ($entry in $catalog) {
     if (-not $entry.name)     { throw "Catalog entry missing 'name'." }
     if (-not $entry.tenantId) { throw "Catalog entry '$($entry.name)' missing 'tenantId'." }
@@ -251,7 +334,7 @@ foreach ($entry in $catalog) {
 # Use -InputObject + @($catalog) to force ConvertTo-Json to see the value
 # as an array, so the JSON always emits [{...}, ...] not {...}.
 $minifiedCatalog = ConvertTo-Json -InputObject @($catalog) -Depth 10 -Compress
-Write-Host "Catalog loaded: $count tenant(s) -- $((($catalog | ForEach-Object name) -join ', '))" -ForegroundColor Cyan
+Write-Host "Catalog ready: $count tenant(s) -- $((($catalog | ForEach-Object name) -join ', '))" -ForegroundColor Cyan
 
 $forcelistValue = "$ExtensionId;$UpdateUrl"
 Write-Host "Forcelist:     $forcelistValue" -ForegroundColor Cyan
@@ -308,7 +391,7 @@ foreach ($b in $browsersToInclude) {
         $spec = $policyMap[$b][$k]
         $def  = Find-PolicyDef -DisplayNameLike $spec.displayName -CategoryPath $spec.categoryPath
         if (-not $def) {
-            $hint = if ($k -eq 'Catalog') { ' -- run Push-PimActivatorADMXToIntune.ps1 first to ingest the ADMX' } else { '' }
+            $hint = if ($k -eq 'Catalog') { ' -- the custom ADMX is auto-ingested at the top of this script; if you see this error it means the ADMX upload itself failed. Re-run after addressing that.' } else { '' }
             throw "Could not find $b policy '$($spec.displayName)' under '$($spec.categoryPath)' (machine class)$hint."
         }
         $pres = Get-Presentations -DefinitionId $def.id
