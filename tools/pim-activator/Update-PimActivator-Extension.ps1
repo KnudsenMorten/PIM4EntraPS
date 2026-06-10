@@ -643,15 +643,31 @@ if ($Repack -or $PackOnly) {
     Write-Step "Publishing CRX + updates.xml to gh-pages"
     $repoUrl = 'https://github.com/KnudsenMorten/PIM4EntraPS.git'
 
+    # 2026-06-10 (v2.4.105): git writes informational output ('Cloning into...',
+    # 'From <repo>', 'Updating...') to stderr even on success. The previous
+    # '2>&1 | Out-Null' pipeline captured those as PowerShell error records,
+    # which the script-wide $ErrorActionPreference = 'Stop' then treated as
+    # terminating errors -- silently aborting the publish step on a clean
+    # 'reference already exists' (which is actually a status message, not a
+    # failure). Switched to '2>$null' so git's stderr is discarded by the
+    # OS, never enters PowerShell's error stream, and only a non-zero
+    # $LASTEXITCODE counts as a real failure.
     if (-not (Test-Path (Join-Path $GhPagesDir '.git'))) {
         Write-Ok "Cloning gh-pages into $GhPagesDir (one-time)"
         if (Test-Path $GhPagesDir) { Remove-Item $GhPagesDir -Recurse -Force }
         New-Item -ItemType Directory -Path $GhPagesDir -Force | Out-Null
-        & git clone --branch gh-pages --depth 1 $repoUrl $GhPagesDir 2>&1 | Out-Null
+        & git clone --branch gh-pages --depth 1 $repoUrl $GhPagesDir 2>$null 1>$null
+        if ($LASTEXITCODE -ne 0) { throw "git clone of gh-pages failed (exit $LASTEXITCODE). Run manually to see the error." }
     } else {
         Write-Ok "Refreshing existing gh-pages clone"
         Push-Location $GhPagesDir
-        try { & git pull --quiet origin gh-pages 2>&1 | Out-Null } finally { Pop-Location }
+        try {
+            # 'reference already exists' on pull is a transient quirk of shallow
+            # clones; ignore non-zero exit on pull and let the subsequent add /
+            # commit / push surface any real problem.
+            & git fetch --quiet origin gh-pages 2>$null 1>$null
+            & git reset --hard origin/gh-pages 2>$null 1>$null
+        } finally { Pop-Location }
     }
 
     Copy-Item "$SCRIPT_DIR.crx" (Join-Path $GhPagesDir 'pim-activator.crx') -Force
@@ -668,9 +684,11 @@ if ($Repack -or $PackOnly) {
 
     Push-Location $GhPagesDir
     try {
-        & git add pim-activator.crx updates.xml | Out-Null
-        & git -c user.email='mok@mortenknudsen.net' -c user.name='Morten Knudsen' commit -m "PIM Activator extension v$newVer (dev iteration)" 2>&1 | Out-Null
-        & git push origin gh-pages 2>&1 | ForEach-Object { Write-Host "   $_" -ForegroundColor Gray }
+        & git add pim-activator.crx updates.xml 2>$null 1>$null
+        & git -c user.email='mok@mortenknudsen.net' -c user.name='Morten Knudsen' commit -m "PIM Activator extension v$newVer (dev iteration)" 2>$null 1>$null
+        if ($LASTEXITCODE -ne 0) { Write-Warn "git commit reported non-zero exit. Continuing to push (may be no-op if nothing changed)." }
+        & git push origin gh-pages 2>$null 1>$null
+        if ($LASTEXITCODE -ne 0) { throw "git push to gh-pages failed (exit $LASTEXITCODE). Run 'git push origin gh-pages' inside $GhPagesDir to see the error." }
     } finally { Pop-Location }
     Write-Ok "v$newVer published to https://knudsenmorten.github.io/PIM4EntraPS/"
 
