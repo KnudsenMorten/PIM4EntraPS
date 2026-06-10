@@ -1,9 +1,10 @@
 # Release notes for PIM4EntraPS
 
-## v2.4.103
+## v2.4.104
 
 Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monorepo:
 
+- release: PIM4EntraPS v2.4.104 + extension v1.6.22 - -Repack works on PS 5.1 (mgmt1's runtime); guard moved from PEM input to produced CRX output bytes (6cdfd661)
 - release: PIM4EntraPS v2.4.103 - Update-PimActivator-Extension.ps1 scrubs stale Secure Preferences UNCONDITIONALLY (v2.4.100 only scrubbed when binary present, missed the actual trap shape) (41fd4236)
 - release: PIM4EntraPS v2.4.102 - Deploy-PimActivatorIntune.ps1 pre-flight scan for conflicting ExtensionInstallForcelist policies (prevents IME slot-cycling silent failure) (7e7de5d7)
 - add Audit-ChromeForcelistInIntune.ps1 - read-only diagnostic that scans every Intune configuration policy (Settings Catalog + Administrative Templates + custom device configs) for Chrome ExtensionInstallForcelist values, flags malformed entries (empty string, invalid ext id, missing update URL). Used to pin down which Intune profile is shipping the bad forcelist entry that's blocking all extension installs. (bd371bf3)
@@ -33,13 +34,24 @@ Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monor
 - fix Push-PimActivatorADMXToIntune.ps1: groupPolicyUploadedDefinitionFiles requires POST .../remove action (not DELETE); poll until 404 before re-upload to avoid 409 (e1e85ed3)
 - release: PIM4EntraPS v2.4.93 + extension v1.6.5 - rewrite Push-PimActivatorTenantCatalogIntune.ps1 as PS remediation (was hitting Registry CSP block 0x87d1fde8 on Edge/Chrome 3rdparty namespace) + ship ADMX template + Push-PimActivatorADMXToIntune.ps1 for the proper Settings Catalog path + popup source-detection status line (ed206a0a)
 - release: PIM4EntraPS v2.4.92 + extension v1.6.4 - strip auto-discover panel + well-known URI flow + gut background.js to empty stub; reorder onboarding to catalog -> Welcome -> manual entry (c4c0b499)
-- release: PIM4EntraPS v2.4.91 + extension v1.6.3 - retire global KNOWN_BAD_LEGACY_CLIENTIDS ban; v1.6 catalog binds tenantId+clientId per-entry so the same GUID is valid in the tenant that owns it (cc3a7cae)
 
 ---
 
 # Release notes -- PIM4EntraPS
 
 > **Curated changelog.** The publish workflow auto-prepends recent monorepo commits as a raw activity log; this file is the human-friendly narrative on top.
+
+---
+
+## v2.4.104 + extension v1.6.22 -- Update-PimActivator-Extension.ps1 -Repack / -PackOnly works on PS 5.1 (v2.4.98 PEM-based pre-pack guard required PS 7+)
+
+**Reason.** v2.4.98 added a pre-pack signing-key guard that derives the extension id from `signing-key.pem` via `[System.Security.Cryptography.RSA]::Create().ImportFromPem()`. That API is .NET Core 3.0+ / PS 7+ only -- PS 5.1's `RSACryptoServiceProvider` doesn't have it. On mgmt1 (the master signing-key host, which runs PS 5.1 by default), the guard threw `Method invocation failed because [System.Security.Cryptography.RSACryptoServiceProvider] does not contain a method named 'ImportFromPem'` and aborted every repack attempt. v1.6.20 (popup CSS revert) could never reach gh-pages, leaving the fleet stuck on v1.6.19's broken flex-column popup.
+
+**Fix.** Pre-pack guard is now best-effort: tries `ImportFromPem`, on any failure prints a `Skipping PEM-based pre-pack check` warning and falls through. A new POST-pack guard then derives the canonical extension id from the freshly-packed CRX's protobuf v3 header (`SHA256(first AsymmetricKeyProof.public_key)` -> first 16 bytes -> remapped 0-15 -> 'a'-'p') using only basic byte operations -- works identically on PS 5.1 and PS 7+. If derived id doesn't match the policy-registered EXT_ID, the local CRX is deleted before any `git push origin gh-pages` runs. End result: wrong-key protection survives on every PS version, and `-Repack` / `-PackOnly` now produce + publish a CRX on PS 5.1 as well as PS 7+.
+
+Verified on mgmt1: clean PackOnly run produced + pushed extension v1.6.22 CRX with `derived id eheocihmlppcophaeakmdenhgcookkab matches policy id` confirmation. The pre-pack PEM check still runs and succeeds when invoked from a PS 7+ console, providing an earlier abort if the wrong key is detected.
+
+(Pattern note for future scripts: any PEM-key-validation guard should validate the produced output bytes, not the input PEM. PEM parsing in pure .NET Framework 4.x / PS 5.1 is painful -- whereas reading bytes from a produced artifact and parsing protobuf / DER / etc with integer math works on every PS version.)
 
 ---
 
