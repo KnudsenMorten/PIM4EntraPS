@@ -688,26 +688,103 @@ foreach ($b in $browsers) {
     }
 }
 
-Write-Step "Deleting cached extension binaries (across ALL profiles)"
+# Pure brace-counting JSON property removal. Same shape as
+# Fix-PimActivatorStuck.ps1 / Reset-CorruptedExtensions.ps1 -- no PS 5.1
+# ConvertTo-Json round-trip, so the 2026-06-09 profile-corruption footgun
+# cannot fire. Removes every JSON occurrence of "<EXT_ID>": ... (object,
+# array, string, or scalar value) plus swallows one comma so the result
+# stays valid JSON. Returns the count of entries removed.
+function Remove-JsonExtensionEntry {
+    param([Parameter(Mandatory)][string]$Path)
+    if (-not (Test-Path -LiteralPath $Path)) { return 0 }
+    $utf8 = New-Object System.Text.UTF8Encoding($false)
+    $text = [System.IO.File]::ReadAllText($Path, $utf8)
+    $orig = $text
+    $removed = 0
+    $key = '"' + $EXT_ID + '":'
+    while ($true) {
+        $s = $text.IndexOf($key)
+        if ($s -lt 0) { break }
+        $vs = $s + $key.Length
+        while ($vs -lt $text.Length -and [char]::IsWhiteSpace($text[$vs])) { $vs++ }
+        if ($vs -ge $text.Length) { break }
+        $ch = $text[$vs]
+        $endIdx = -1
+        if ($ch -eq '{' -or $ch -eq '[') {
+            $open  = $ch; $close = if ($open -eq '{') { '}' } else { ']' }
+            $depth = 1; $i = $vs + 1
+            while ($depth -gt 0 -and $i -lt $text.Length) {
+                $c = $text[$i]
+                if ($c -eq '"') { $i++; while ($i -lt $text.Length -and $text[$i] -ne '"') { if ($text[$i] -eq '\') { $i++ }; $i++ } }
+                elseif ($c -eq $open) { $depth++ } elseif ($c -eq $close) { $depth-- }
+                $i++
+            }
+            $endIdx = $i
+        } elseif ($ch -eq '"') {
+            $i = $vs + 1
+            while ($i -lt $text.Length -and $text[$i] -ne '"') { if ($text[$i] -eq '\') { $i++ }; $i++ }
+            $endIdx = $i + 1
+        } else {
+            $i = $vs; while ($i -lt $text.Length -and $text[$i] -notin @(',','}',']')) { $i++ }
+            $endIdx = $i
+        }
+        if ($endIdx -lt 0) { break }
+        $cs = $s; $ce = $endIdx
+        $j = $cs - 1; while ($j -ge 0 -and [char]::IsWhiteSpace($text[$j])) { $j-- }
+        if ($j -ge 0 -and $text[$j] -eq ',') { $cs = $j }
+        else {
+            $k = $ce; while ($k -lt $text.Length -and [char]::IsWhiteSpace($text[$k])) { $k++ }
+            if ($k -lt $text.Length -and $text[$k] -eq ',') { $ce = $k + 1 }
+        }
+        $text = $text.Substring(0, $cs) + $text.Substring($ce)
+        $removed++
+    }
+    if ($removed -gt 0 -and $text -ne $orig) {
+        $stamp = (Get-Date).ToString('yyyyMMddHHmmss')
+        Copy-Item -LiteralPath $Path -Destination "$Path.bak.$stamp" -Force
+        [System.IO.File]::WriteAllText($Path, $text, $utf8)
+    }
+    return $removed
+}
+
+Write-Step "Deleting cached extension binaries + stale Secure Preferences registration (across ALL profiles)"
 foreach ($b in $browsers) {
     $profiles = @(Get-BrowserProfiles $b.UserDataRoot)
     if (-not $profiles) { Write-Warn "$($b.Name): no profile folders found under $($b.UserDataRoot)"; continue }
-    $hit = 0; $miss = 0
+    $hit = 0; $miss = 0; $prefsCleared = 0
     foreach ($profile in $profiles) {
         $path = Join-Path $profile.FullName "Extensions\$EXT_ID"
+        $deletedThisProfile = $false
         if (Test-Path -LiteralPath $path) {
             try {
                 Remove-Item -LiteralPath $path -Recurse -Force -ErrorAction Stop
                 Write-Ok "$($b.Name) [$($profile.Name)]: removed cached extension"
                 $hit++
+                $deletedThisProfile = $true
             } catch {
                 Write-Err "$($b.Name) [$($profile.Name)]: failed - $($_.Exception.Message)"
             }
         } else {
             $miss++
         }
+        # 2026-06-10: ALWAYS scrub the matching Secure Preferences + Preferences
+        # registration when we delete the on-disk extension folder. If we only
+        # deleted the binary but left the registration, Chrome on next launch
+        # would set disable_reasons=DISABLE_CORRUPTED (1024), log
+        # 'All forced extensions seem to be installed', and refuse to retry the
+        # install -- exact trap the flush kept walking right into. Pure string
+        # surgery, no JSON round-trip, no profile-corruption risk.
+        if ($deletedThisProfile) {
+            $n = 0
+            $n += (Remove-JsonExtensionEntry -Path (Join-Path $profile.FullName 'Preferences'))
+            $n += (Remove-JsonExtensionEntry -Path (Join-Path $profile.FullName 'Secure Preferences'))
+            if ($n -gt 0) {
+                Write-Ok "$($b.Name) [$($profile.Name)]: cleared $n stale registration entries from (Secure )Preferences"
+                $prefsCleared += $n
+            }
+        }
     }
-    Write-Ok "$($b.Name): scanned $($profiles.Count) profile(s) -- removed cache from $hit, none present in $miss"
+    Write-Ok "$($b.Name): scanned $($profiles.Count) profile(s) -- removed cache from $hit, none present in $miss, registration entries scrubbed: $prefsCleared"
 }
 
 # ============================================================================

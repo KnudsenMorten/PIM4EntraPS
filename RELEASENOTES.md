@@ -1,9 +1,10 @@
 # Release notes for PIM4EntraPS
 
-## v2.4.99
+## v2.4.100
 
 Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monorepo:
 
+- release: PIM4EntraPS v2.4.100 - Update-PimActivator-Extension.ps1 flush now scrubs stale Secure Preferences registration alongside cached CRX (prevents DISABLE_CORRUPTED trap) (3a9de353)
 - release: PIM4EntraPS v2.4.99 - Deploy-PimActivatorIntune.ps1 catalog auto-discover (hotfix over v2.4.98) (785ff800)
 - release: PIM4EntraPS v2.4.98 + extension v1.6.19 - unified Intune deploy + critical fix for ExtensionSettings schema bug that froze fleet at old versions + popup CSS no longer overflows Chromium popup cap (508f6eab)
 - release: PIM4EntraPS v2.4.97 - Update-PimActivator-Extension.ps1 SAFETY FIX (no more profile wipes) + faster update trigger via --extensions-update-frequency=30 (cdc2c7cb)
@@ -33,13 +34,29 @@ Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monor
 - add Test-PushTenantCatalog.ps1 - auto-discovers tenant + PIM Activator app reg in currently-connected Graph context, builds 1-entry catalog, hands off to Push-PimActivatorTenantCatalogIntune.ps1 (zero-typing first-test helper) (09c083f3)
 - release: PIM4EntraPS v2.4.90 - Push-PimActivatorTenantCatalogIntune.ps1 (native Intune Custom Configuration Profile via OMA-URI + Registry CSP) for chrome.storage.managed tenant catalog push + sample JSON template (a718097b)
 - release: PIM4EntraPS v2.4.89 + extension v1.6.2 - admin-friendly prefix shortcuts in catalog entries + scrub customer name from sample (ba82aaf4)
-- release: PIM4EntraPS v2.4.88 + extension v1.6.0 - tenant catalog + header switcher for MSP / one-admin-many-tenants workflow (538f6803)
 
 ---
 
 # Release notes -- PIM4EntraPS
 
 > **Curated changelog.** The publish workflow auto-prepends recent monorepo commits as a raw activity log; this file is the human-friendly narrative on top.
+
+---
+
+## v2.4.100 -- Update-PimActivator-Extension.ps1 flush now scrubs stale Secure Preferences registration alongside the cached CRX (prevents DISABLE_CORRUPTED trap)
+
+**Critical follow-up to v2.4.98's flush hardening.** The v2.4.98 flush step deleted the cached extension binary on every profile but left the `extensions.settings.<id>` registration intact in `Preferences` + `Secure Preferences`. On the next browser launch, Chromium saw a registration claiming "installed" while the files on disk were gone -- the content-verification subsystem then marked the entry with `disable_reasons` bit 1024 (`DISABLE_CORRUPTED`) and refused to retry the forcelist install. End result: the flush ran "successfully" on N profiles but a subset (typically the ones browsing actively at the moment Chrome was killed) wound up with the extension permanently unable to reinstall until the operator surgically scrubbed those Secure Preferences entries.
+
+Reproduced on a maintainer laptop with 36 Chrome profiles: 4 profiles (`Default`, `Profile 1`, `Profile 45`, `Profile 56`) were left in the DISABLE_CORRUPTED-trap state after a v2.4.98 flush run. The extension showed missing in those profiles indefinitely; the other 32 profiles installed v1.6.19 normally on next launch.
+
+**Fix.** The flush loop in `Update-PimActivator-Extension.ps1` now does both halves of the cleanup in lockstep, profile-by-profile:
+
+1. Delete the cached binary at `<UserData>\<profile>\Extensions\<EXT_ID>` (unchanged).
+2. **NEW**: surgically remove the `"<EXT_ID>": {...}` entry from `<UserData>\<profile>\Preferences` AND `<UserData>\<profile>\Secure Preferences` using the same pure-text brace-counting JSON-property removal pattern as `Fix-PimActivatorStuck.ps1` / `Reset-CorruptedExtensions.ps1`. No PS 5.1 `ConvertTo-Json` round-trip (which is what bricked profiles in the 2026-06-09 incident; see v2.4.97 release notes). A timestamped `.bak.<ts>` is written next to each modified file before any rewrite.
+
+Final summary line now reports both numbers: `cached extension folders deleted: N, registration entries scrubbed: M`. The two should generally track 1:1 (one delete typically scrubs 2 JSON entries -- one in `Preferences` and one in `Secure Preferences`).
+
+**`Reset-CorruptedExtensions.ps1` (shipped in v2.4.98) remains useful as a one-off recovery script for laptops that already hit the v2.4.98 trap before this release lands** -- it scans every Chrome + Edge profile for entries with `disable_reasons` matching a configurable bitmask (default 1024 = `DISABLE_CORRUPTED`) and removes them. Pair with `-DryRun` to detect first. The v2.4.100 Update-PimActivator-Extension.ps1 fix is the prevention story; Reset-CorruptedExtensions.ps1 is the cure for already-affected devices.
 
 ---
 
