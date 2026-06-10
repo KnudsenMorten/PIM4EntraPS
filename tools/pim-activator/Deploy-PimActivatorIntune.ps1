@@ -1,96 +1,96 @@
 #Requires -Version 5.1
-#Requires -Modules Microsoft.Graph.Authentication, Microsoft.Graph.Groups
+#Requires -Modules Microsoft.Graph.Authentication
 <#
 .SYNOPSIS
-    Create / update the Intune Settings Catalog profile that force-installs
-    the PIM Activator browser extension on Edge + Chrome.
+    Intune setup for the PIM Activator browser extension. Creates a
+    single Group Policy Configuration profile ('[PimActivator] client
+    settings') carrying every client-side policy per browser:
+
+      1. ExtensionInstallForcelist  -- force-install the extension from
+                                       gh-pages CRX update URL
+      2. ExtensionInstallSources    -- whitelist the gh-pages host for
+                                       self-hosted CRX installation
+      3. ExtensionSettings          -- pre-grants <all_urls> runtime
+                                       permissions so Chrome's permission-
+                                       expansion gate doesn't silently
+                                       disable auto-update from earlier
+                                       narrower-permission versions
+      4. TenantCatalog              -- push the tenant catalog JSON for
+                                       chrome.storage.managed (uses our
+                                       ingested ADMX template)
+
+    After this script runs, the operator's only remaining manual step is
+    assigning the profile to a device group. Customer endpoints sync, get
+    the policies, install the extension, and read the tenant catalog --
+    zero further intervention.
 
 .DESCRIPTION
-    Wraps the manual portal flow (Endpoint Manager -> Devices -> Configuration
-    profiles -> Settings catalog -> "Configure the list of force-installed
-    apps and extensions") into one re-runnable script. Same defaults as
-    Deploy-PimActivatorClient.ps1 -- a zero-arg invocation creates the
-    profile with the canonical extension id + update URL.
+    Prerequisite: Push-PimActivatorADMXToIntune.ps1 must have been run
+    once in this tenant (uploads the custom ADMX exposing TenantCatalog
+    as a Group Policy definition).
 
-    Idempotent. If a profile with the same -DisplayName already exists, the
-    script PATCHes its settings rather than creating a duplicate. Re-running
-    after changing the extension id or update URL updates in place.
+    Idempotent: lookup by display name, PATCH existing in-place (wipes
+    prior definitionValues + posts fresh).
 
-    Optional: -AssignToGroupId <group-id> assigns the profile to a Entra
-    group. Without it the profile is created but unassigned (operator can
-    assign later in the portal).
-
-.PARAMETER ExtensionId
-    Chrome/Edge extension id. Default: 'eheocihmlppcophaeakmdenhgcookkab'
-    (the canonical PIM Activator id; same in every install). Override only
-    when forking under a different signing key.
-
-.PARAMETER UpdateUrl
-    HTTPS URL to the Chromium update manifest (updates.xml). Default:
-    'https://knudsenmorten.github.io/PIM4EntraPS/updates.xml'. Override
-    only when self-hosting the CRX mirror.
+.PARAMETER CatalogJsonPath
+    Path to a JSON file containing the tenant catalog array. Required.
 
 .PARAMETER DisplayName
-    Intune profile display name. Default: 'PIM Activator -- Force-install
-    extension (Edge + Chrome)'. Used for the idempotency lookup.
+    Display name of the unified Configuration Profile. Default:
+    '[PimActivator] client settings'.
 
-.PARAMETER Description
-    Intune profile description. Default: explains what it does.
+.PARAMETER ExtensionId
+    Chrome/Edge extension id. Default 'eheocihmlppcophaeakmdenhgcookkab'.
+
+.PARAMETER UpdateUrl
+    Self-hosted updates.xml URL. Default
+    'https://knudsenmorten.github.io/PIM4EntraPS/updates.xml'.
+
+.PARAMETER SourcePattern
+    URL pattern for ExtensionInstallSources. Default
+    'https://knudsenmorten.github.io/*'.
 
 .PARAMETER Browser
-    Which browser to target. Default: 'Both'. Use 'Edge' or 'Chrome' to
-    create a profile that only covers one.
+    'Both' (default), 'Edge', or 'Chrome'.
 
 .PARAMETER AssignToGroupId
-    Optional Entra group object id to assign the profile to. Without this,
-    the profile is created unassigned (assign later via the portal).
+    Optional Entra group object id to assign the profile to.
 
 .PARAMETER Remove
-    Remove the profile instead of creating / updating it. Looks up by
-    DisplayName, deletes if found. Idempotent (no-op when not found).
+    Delete the profile. Idempotent.
 
 .EXAMPLE
-    # Zero-arg: script auto-runs Connect-MgGraph interactively if no Graph
-    # context exists, with the right scopes. Creates the profile with the
-    # canonical defaults, unassigned.
-    .\Deploy-PimActivatorIntune.ps1
+    .\Deploy-PimActivatorIntune.ps1 -CatalogJsonPath .\discovered-tenant-catalog.json
 
 .EXAMPLE
-    # Create + auto-assign to a target group:
-    .\Deploy-PimActivatorIntune.ps1 -AssignToGroupId 11111111-2222-3333-4444-555555555555
+    .\Deploy-PimActivatorIntune.ps1 -CatalogJsonPath .\discovered-tenant-catalog.json -AssignToGroupId 11111111-2222-3333-4444-555555555555
 
 .EXAMPLE
-    # Remove (cleanup):
     .\Deploy-PimActivatorIntune.ps1 -Remove
 
 .NOTES
-    Re-introduced in PIM4EntraPS v2.4.72 after the v1.2.0 activator overhaul
-    deleted the original Deploy-PimActivatorIntune script. Solution +
-    architecture: Morten Knudsen, 2linkIT.
-
     Required Graph scopes (delegated):
-      - DeviceManagementConfiguration.ReadWrite.All  (create/update profile)
-      - Group.Read.All                               (resolve -AssignToGroupId)
-
-    The script uses the BETA Graph endpoint /beta/deviceManagement/
-    configurationPolicies (Settings Catalog v2). Microsoft has been
-    promising GA for years; until then the beta endpoint is the canonical
-    one for Settings-Catalog automation.
+      - DeviceManagementConfiguration.ReadWrite.All
+      - Group.Read.All (only when -AssignToGroupId is passed)
 #>
 [CmdletBinding(DefaultParameterSetName = 'Install')]
 param(
+    [Parameter(Mandatory, ParameterSetName = 'Install')]
+    [ValidateScript({ Test-Path -LiteralPath $_ -PathType Leaf })]
+    [string]$CatalogJsonPath,
+
+    [Parameter()]
+    [string]$DisplayName = '[PimActivator] client settings',
+
     [Parameter()]
     [ValidatePattern('^[a-p]{32}$')]
     [string]$ExtensionId = 'eheocihmlppcophaeakmdenhgcookkab',
 
-    [Parameter(ParameterSetName = 'Install')]
+    [Parameter()]
     [string]$UpdateUrl = 'https://knudsenmorten.github.io/PIM4EntraPS/updates.xml',
 
     [Parameter()]
-    [string]$DisplayName = '[PimActivator] Force-install extension (Edge + Chrome)',
-
-    [Parameter()]
-    [string]$Description = '[PimActivator] Force-installs the PIM Activator browser extension on Edge + Chrome via Chromium ExtensionInstallForcelist policy. Created by PIM4EntraPS/tools/pim-activator/Deploy-PimActivatorIntune.ps1.',
+    [string]$SourcePattern = 'https://knudsenmorten.github.io/*',
 
     [Parameter()]
     [ValidateSet('Both','Edge','Chrome')]
@@ -105,151 +105,324 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
-# ---- 1. Verify / establish Graph context ----------------------------------
-# DeviceManagementConfiguration.ReadWrite.All is required for the policy CRUD.
-# Group.Read.All is required only when -AssignToGroupId is passed (Get-MgGroup
-# call for the friendly-name lookup). Request both up-front so the operator
-# isn't re-prompted later if they decide to assign mid-session.
-$_requiredScopes = @(
-    'DeviceManagementConfiguration.ReadWrite.All'
-    'Group.Read.All'
-)
-
+# ---- 1. Graph context -----------------------------------------------------
+$_requiredScopes = @('DeviceManagementConfiguration.ReadWrite.All')
+if ($AssignToGroupId) { $_requiredScopes += 'Group.Read.All' }
 $ctx = Get-MgContext -ErrorAction SilentlyContinue
 if (-not $ctx) {
     Write-Host "Not connected to Microsoft Graph. Launching interactive sign-in (scopes: $($_requiredScopes -join ', '))..." -ForegroundColor Yellow
-    Connect-MgGraph -Scopes $_requiredScopes -NoWelcome -ErrorAction Stop | Out-Null
-    $ctx = Get-MgContext -ErrorAction Stop
+    Connect-MgGraph -Scopes $_requiredScopes -NoWelcome -ErrorAction Stop
+    $ctx = Get-MgContext
+}
+$missingScopes = $_requiredScopes | Where-Object { $_ -notin $ctx.Scopes }
+if ($missingScopes) {
+    Write-Host "Re-connecting Graph to include missing scope(s): $($missingScopes -join ', ')" -ForegroundColor Yellow
+    Disconnect-MgGraph -ErrorAction SilentlyContinue | Out-Null
+    Connect-MgGraph -Scopes $_requiredScopes -NoWelcome -ErrorAction Stop
+    $ctx = Get-MgContext
+}
+Write-Host "Connected to tenant $($ctx.TenantId) as $($ctx.Account)" -ForegroundColor Gray
+
+# ---- 1.5. Ensure the PIM Activator ADMX is ingested in this tenant -------
+# Idempotent. Skips entirely if the ADMX is already uploaded + available;
+# uploads it (with the sibling intune\*.admx + en-US\*.adml pair) only
+# when missing. Previously this was a separate script
+# (Push-PimActivatorADMXToIntune.ps1); folded inline 2026-06-10 to make
+# Deploy-PimActivatorIntune.ps1 the ONLY Intune script the operator runs.
+$admxPath  = Join-Path $PSScriptRoot 'intune\PIM4EntraPS.PimActivator.admx'
+$admlPath  = Join-Path $PSScriptRoot 'intune\en-US\PIM4EntraPS.PimActivator.adml'
+$admxFileName = if (Test-Path -LiteralPath $admxPath) { Split-Path -Leaf $admxPath } else { 'PIM4EntraPS.PimActivator.admx' }
+$admxListUri  = "https://graph.microsoft.com/beta/deviceManagement/groupPolicyUploadedDefinitionFiles?`$filter=fileName eq '$admxFileName'"
+$admxRow = $null
+try {
+    $admxResp = Invoke-MgGraphRequest -Method GET -Uri $admxListUri -ErrorAction Stop
+    if ($admxResp.value) { $admxRow = $admxResp.value | Select-Object -First 1 }
+} catch {
+    Write-Warning "ADMX lookup failed (will still try upload): $($_.Exception.Message)"
 }
 
-$missing = $_requiredScopes | Where-Object { $_ -notin $ctx.Scopes }
-if ($missing) {
-    Write-Host "Current Graph session is missing required scopes: $($missing -join ', '). Re-connecting interactively..." -ForegroundColor Yellow
-    Connect-MgGraph -Scopes $_requiredScopes -NoWelcome -ErrorAction Stop | Out-Null
-    $ctx = Get-MgContext -ErrorAction Stop
-    $stillMissing = $_requiredScopes | Where-Object { $_ -notin $ctx.Scopes }
-    if ($stillMissing) {
-        throw "After re-connect, Graph session is STILL missing: $($stillMissing -join ', '). Admin consent may be required."
+if ($admxRow -and $admxRow.status -in @('available','uploadCompleted')) {
+    Write-Host "ADMX '$admxFileName' already ingested (status=$($admxRow.status), id=$($admxRow.id)). Skipping upload." -ForegroundColor Gray
+} else {
+    if (-not (Test-Path -LiteralPath $admxPath)) { throw "ADMX file not found at '$admxPath' -- can't auto-ingest. Place the .admx + .adml pair under .\intune\ next to this script." }
+    if (-not (Test-Path -LiteralPath $admlPath)) { throw "ADML file not found at '$admlPath' -- can't auto-ingest." }
+    $admxBytes  = [System.IO.File]::ReadAllBytes($admxPath)
+    $admlBytes  = [System.IO.File]::ReadAllBytes($admlPath)
+    $admxBase64 = [Convert]::ToBase64String($admxBytes)
+    $admlBase64 = [Convert]::ToBase64String($admlBytes)
+    $admlFileName = Split-Path -Leaf $admlPath
+    # If a stale row exists (failed / transient), /remove first.
+    if ($admxRow) {
+        Write-Host "Existing ADMX row in non-available state '$($admxRow.status)' -- removing before re-upload..." -ForegroundColor Yellow
+        try { Invoke-MgGraphRequest -Method POST -Uri "https://graph.microsoft.com/beta/deviceManagement/groupPolicyUploadedDefinitionFiles/$($admxRow.id)/remove" -ErrorAction Stop | Out-Null } catch { Write-Warning "/remove failed: $($_.Exception.Message)" }
+        $rmDeadline = (Get-Date).AddMinutes(2)
+        do {
+            Start-Sleep -Seconds 3
+            try {
+                $chk = Invoke-MgGraphRequest -Method GET -Uri "https://graph.microsoft.com/beta/deviceManagement/groupPolicyUploadedDefinitionFiles/$($admxRow.id)" -ErrorAction Stop
+                Write-Host "  status: $($chk.status)" -ForegroundColor Gray
+            } catch { if ($_.Exception.Message -match '404|NotFound') { break } else { Write-Warning $_.Exception.Message; break } }
+        } while ((Get-Date) -lt $rmDeadline)
     }
+    Write-Host "Uploading ADMX ($($admxBytes.Length) bytes) + ADML ($($admlBytes.Length) bytes)..." -ForegroundColor Cyan
+    $admxBody = @{
+        fileName                          = $admxFileName
+        languageCodes                     = @('en-US')
+        targetPrefix                      = 'pimactivator'
+        targetNamespace                   = 'MortenKnudsen.PIM4EntraPS.PimActivator'
+        policyType                        = 'admxIngested'
+        revision                          = '1.0'
+        content                           = $admxBase64
+        groupPolicyUploadedLanguageFiles  = @(@{ fileName = $admlFileName; languageCode = 'en-US'; content = $admlBase64 })
+    } | ConvertTo-Json -Depth 20
+    $admxCreated = Invoke-MgGraphRequest -Method POST -Uri 'https://graph.microsoft.com/beta/deviceManagement/groupPolicyUploadedDefinitionFiles' -Body $admxBody -ContentType 'application/json' -ErrorAction Stop
+    Write-Host "[OK] ADMX uploaded (id=$($admxCreated.id), status=$($admxCreated.status)). Waiting for Intune to process..." -ForegroundColor Green
+    $upDeadline = (Get-Date).AddMinutes(3)
+    do {
+        Start-Sleep -Seconds 4
+        try {
+            $chk = Invoke-MgGraphRequest -Method GET -Uri "https://graph.microsoft.com/beta/deviceManagement/groupPolicyUploadedDefinitionFiles/$($admxCreated.id)" -ErrorAction Stop
+            Write-Host "  status: $($chk.status)" -ForegroundColor Gray
+            if ($chk.status -in @('available','uploadCompleted')) { break }
+            if ($chk.status -in @('uploadFailed','removalFailed')) {
+                throw "Intune rejected the ADMX. status=$($chk.status). uploadInfo: $($chk.uploadInfo | ConvertTo-Json -Compress)"
+            }
+        } catch { Write-Warning "Status poll failed: $($_.Exception.Message)"; break }
+    } while ((Get-Date) -lt $upDeadline)
 }
 
-Write-Host "Tenant   : $($ctx.TenantId)"  -ForegroundColor Cyan
-Write-Host "Signed-in: $($ctx.Account)"   -ForegroundColor Cyan
-Write-Host ""
-
-# ---- 2. Look up existing profile (idempotency) ----------------------------
-$forcelistValue = "$ExtensionId;$UpdateUrl"
-$listUri = "https://graph.microsoft.com/beta/deviceManagement/configurationPolicies?`$filter=name eq '$DisplayName'"
+# ---- 2. Lookup existing Configuration Profile by display name -----------
+$listUri  = "https://graph.microsoft.com/beta/deviceManagement/groupPolicyConfigurations?`$filter=displayName eq '$DisplayName'"
 $existing = $null
 try {
-    $listResp = Invoke-MgGraphRequest -Method GET -Uri $listUri -ErrorAction Stop
-    $existing = $listResp.value | Select-Object -First 1
+    $resp = Invoke-MgGraphRequest -Method GET -Uri $listUri -ErrorAction Stop
+    if ($resp.value -and $resp.value.Count -gt 0) { $existing = $resp.value[0] }
 } catch {
-    throw "Failed to list existing configuration policies: $($_.Exception.Message)"
+    Write-Warning "Lookup failed (will attempt POST): $($_.Exception.Message)"
 }
 
-# ---- Remove path ----------------------------------------------------------
 if ($Remove) {
-    if (-not $existing) {
-        Write-Host "No profile named '$DisplayName' found in tenant. Nothing to remove." -ForegroundColor Yellow
-        return
+    if ($existing) {
+        Write-Host "Removing existing profile '$DisplayName' (id $($existing.id))..." -ForegroundColor Yellow
+        Invoke-MgGraphRequest -Method DELETE -Uri "https://graph.microsoft.com/beta/deviceManagement/groupPolicyConfigurations/$($existing.id)" -ErrorAction Stop | Out-Null
+        Write-Host "[OK] Removed." -ForegroundColor Green
+    } else {
+        Write-Host "Nothing to remove -- no profile named '$DisplayName' in tenant $($ctx.TenantId)." -ForegroundColor Gray
     }
-    Write-Host "Removing profile '$DisplayName' (id $($existing.id))..." -ForegroundColor Yellow
-    Invoke-MgGraphRequest -Method DELETE -Uri "https://graph.microsoft.com/beta/deviceManagement/configurationPolicies/$($existing.id)" -ErrorAction Stop | Out-Null
-    Write-Host "[OK] Removed." -ForegroundColor Green
     return
 }
 
-# ---- 3. Build settings array (Edge and/or Chrome) -------------------------
-# Settings-Catalog parent/child structure:
-#   - Parent is a CHOICE setting with options Disabled (_0) and Enabled (_1).
-#   - Enabled REQUIRES a child SimpleSettingCollection containing the actual
-#     list of "<extension-id>;<update-url>" strings (the *desc setting).
-# IDs are static across tenants (Microsoft-owned, queried from
-# /beta/deviceManagement/configurationSettings).
-$browserSchemas = @{
-    Edge = @{
-        ParentId       = 'device_vendor_msft_policy_config_microsoft_edge~policy~microsoft_edge~extensions_extensioninstallforcelist'
-        EnabledOptionId= 'device_vendor_msft_policy_config_microsoft_edge~policy~microsoft_edge~extensions_extensioninstallforcelist_1'
-        ChildId        = 'device_vendor_msft_policy_config_microsoft_edge~policy~microsoft_edge~extensions_extensioninstallforcelist_extensioninstallforcelistdesc'
+# ---- 3. Helper: look up policy by displayName + categoryPath + machine class
+function Find-PolicyDef {
+    param([string]$DisplayNameLike, [string]$CategoryPath)
+    $uri = "https://graph.microsoft.com/beta/deviceManagement/groupPolicyDefinitions?`$filter=categoryPath eq '$CategoryPath'&`$top=999"
+    $r = Invoke-MgGraphRequest -Method GET -Uri $uri -ErrorAction Stop
+    $hit = $r.value | Where-Object { $_.classType -eq 'machine' -and $_.displayName -eq $DisplayNameLike } | Select-Object -First 1
+    if (-not $hit) {
+        $hit = $r.value | Where-Object { $_.classType -eq 'machine' -and $_.displayName -match [regex]::Escape($DisplayNameLike) } | Select-Object -First 1
     }
-    Chrome = @{
-        ParentId       = 'device_vendor_msft_policy_config_chromeintunev1~policy~googlechrome~extensions_extensioninstallforcelist'
-        EnabledOptionId= 'device_vendor_msft_policy_config_chromeintunev1~policy~googlechrome~extensions_extensioninstallforcelist_1'
-        ChildId        = 'device_vendor_msft_policy_config_chromeintunev1~policy~googlechrome~extensions_extensioninstallforcelist_extensioninstallforcelistdesc'
-    }
+    return $hit
 }
 
+function Get-Presentations {
+    param([string]$DefinitionId)
+    $r = Invoke-MgGraphRequest -Method GET `
+        -Uri "https://graph.microsoft.com/beta/deviceManagement/groupPolicyDefinitions/$DefinitionId/presentations" `
+        -ErrorAction Stop
+    return @($r.value)
+}
+
+# ---- 4. Read + validate the catalog JSON --------------------------------
+$catalogJson = Get-Content -LiteralPath $CatalogJsonPath -Raw -Encoding UTF8
+try {
+    $catalog = $catalogJson | ConvertFrom-Json
+} catch {
+    throw "Could not parse '$CatalogJsonPath' as JSON: $($_.Exception.Message)"
+}
+$count = @($catalog).Count
+if ($count -eq 0) { throw "Catalog JSON is an empty array." }
+foreach ($entry in $catalog) {
+    if (-not $entry.name)     { throw "Catalog entry missing 'name'." }
+    if (-not $entry.tenantId) { throw "Catalog entry '$($entry.name)' missing 'tenantId'." }
+    if (-not $entry.clientId) { throw "Catalog entry '$($entry.name)' missing 'clientId'." }
+}
+# PS 5.1's ConvertTo-Json drops the outer array brackets when piped a
+# single-element array (PS 7+ has -AsArray to override; 5.1 doesn't).
+# Use -InputObject + @($catalog) to force ConvertTo-Json to see the value
+# as an array, so the JSON always emits [{...}, ...] not {...}.
+$minifiedCatalog = ConvertTo-Json -InputObject @($catalog) -Depth 10 -Compress
+Write-Host "Catalog loaded: $count tenant(s) -- $((($catalog | ForEach-Object name) -join ', '))" -ForegroundColor Cyan
+
+$forcelistValue = "$ExtensionId;$UpdateUrl"
+Write-Host "Forcelist:     $forcelistValue" -ForegroundColor Cyan
+Write-Host "Source:        $SourcePattern" -ForegroundColor Cyan
+
+# ---- 5. Discover all the policies we need -------------------------------
 $browsersToInclude = switch ($Browser) {
     'Both'   { @('Edge','Chrome') }
     'Edge'   { @('Edge') }
     'Chrome' { @('Chrome') }
 }
 
-$settings = foreach ($b in $browsersToInclude) {
-    $schema = $browserSchemas[$b]
-    @{
-        '@odata.type'   = '#microsoft.graph.deviceManagementConfigurationSetting'
-        settingInstance = @{
-            '@odata.type'        = '#microsoft.graph.deviceManagementConfigurationChoiceSettingInstance'
-            settingDefinitionId  = $schema.ParentId
-            choiceSettingValue   = @{
-                '@odata.type' = '#microsoft.graph.deviceManagementConfigurationChoiceSettingValue'
-                value         = $schema.EnabledOptionId
-                children      = @(
-                    @{
-                        '@odata.type'                = '#microsoft.graph.deviceManagementConfigurationSimpleSettingCollectionInstance'
-                        settingDefinitionId          = $schema.ChildId
-                        simpleSettingCollectionValue = @(
-                            @{
-                                '@odata.type' = '#microsoft.graph.deviceManagementConfigurationStringSettingValue'
-                                value         = $forcelistValue
-                            }
-                        )
-                    }
-                )
-            }
-        }
+# Policy display-name + category-path mapping. Microsoft's ADMX uses these
+# exact strings; resolved once at runtime to per-tenant policy IDs.
+#
+# FOUR policies pushed per browser:
+#   Forcelist : install + keep installed (the install directive itself)
+#   Sources   : whitelist the gh-pages host as a CRX install source
+#   Settings  : ExtensionSettings JSON -- pre-grants runtime_allowed_hosts =
+#               '<all_urls>' to bypass Chrome's permission-expansion gate
+#               (added 2026-06-10 after the v1.5.11 host_permissions=https://*/*
+#               change froze the fleet on managed Chrome -- the gate silently
+#               disables every auto-update from a narrower-permission install
+#               and DeveloperToolsAvailability=2 hides the Enable button)
+#   Catalog   : tenant catalog JSON via chrome.storage.managed (custom ADMX)
+$policyMap = @{
+    Edge   = @{
+        Forcelist = @{ displayName = 'Control which extensions are installed silently';     categoryPath = '\Microsoft Edge\Extensions' }
+        Sources   = @{ displayName = 'Configure extension and user script install sources'; categoryPath = '\Microsoft Edge\Extensions' }
+        Settings  = @{ displayName = 'Extension management settings';                       categoryPath = '\Microsoft Edge\Extensions' }
+        Catalog   = @{ displayName = 'Tenant catalog -- Microsoft Edge';                    categoryPath = '\PIM4EntraPS\PIM Activator' }
+    }
+    Chrome = @{
+        Forcelist = @{ displayName = 'Configure the list of force-installed apps and extensions';        categoryPath = '\Google\Google Chrome\Extensions' }
+        Sources   = @{ displayName = 'Configure extension, app, and user script install sources';        categoryPath = '\Google\Google Chrome\Extensions' }
+        Settings  = @{ displayName = 'Extension management settings';                                    categoryPath = '\Google\Google Chrome\Extensions' }
+        Catalog   = @{ displayName = 'Tenant catalog -- Google Chrome';                                  categoryPath = '\PIM4EntraPS\PIM Activator' }
     }
 }
 
-# ---- 4. Create or update ---------------------------------------------------
-$body = @{
-    name         = $DisplayName
-    description  = $Description
-    platforms    = 'windows10'
-    technologies = 'mdm'
-    roleScopeTagIds = @('0')
-    settings     = @($settings)
-} | ConvertTo-Json -Depth 20
+# ExtensionSettings policy value (single JSON string keyed by extension id).
+# runtime_allowed_hosts=['<all_urls>'] pre-grants the broad scope so Chrome's
+# auto-update doesn't trip the permission-expansion gate.
+$extSettingsJson = (@{ $ExtensionId = @{
+    installation_mode    = 'force_installed'
+    update_url           = $UpdateUrl
+    runtime_allowed_hosts = @('<all_urls>')
+}} | ConvertTo-Json -Depth 5 -Compress)
 
-if ($existing) {
-    Write-Host "Profile '$DisplayName' exists (id $($existing.id)). PATCHing settings..." -ForegroundColor Cyan
-    Invoke-MgGraphRequest -Method PUT `
-        -Uri "https://graph.microsoft.com/beta/deviceManagement/configurationPolicies/$($existing.id)" `
-        -Body $body -ContentType 'application/json' -ErrorAction Stop | Out-Null
-    $policyId = $existing.id
-    Write-Host "[OK] Profile updated. ExtensionInstallForcelist value: $forcelistValue" -ForegroundColor Green
-} else {
-    Write-Host "Creating profile '$DisplayName'..." -ForegroundColor Cyan
-    $created = Invoke-MgGraphRequest -Method POST `
-        -Uri 'https://graph.microsoft.com/beta/deviceManagement/configurationPolicies' `
-        -Body $body -ContentType 'application/json' -ErrorAction Stop
-    $policyId = $created.id
-    Write-Host "[OK] Profile created. id=$policyId  forcelist=$forcelistValue" -ForegroundColor Green
+$resolved = @{}
+foreach ($b in $browsersToInclude) {
+    $resolved[$b] = @{}
+    foreach ($k in 'Forcelist','Sources','Settings','Catalog') {
+        $spec = $policyMap[$b][$k]
+        $def  = Find-PolicyDef -DisplayNameLike $spec.displayName -CategoryPath $spec.categoryPath
+        if (-not $def) {
+            $hint = if ($k -eq 'Catalog') { ' -- run Push-PimActivatorADMXToIntune.ps1 first to ingest the ADMX' } else { '' }
+            throw "Could not find $b policy '$($spec.displayName)' under '$($spec.categoryPath)' (machine class)$hint."
+        }
+        $pres = Get-Presentations -DefinitionId $def.id
+        Write-Host "  $b/$k -> '$($def.displayName)' (id $($def.id), $($pres.Count) presentation(s))" -ForegroundColor Gray
+        $resolved[$b][$k] = @{ Definition = $def; Presentations = $pres }
+    }
 }
 
-# ---- 5. Optional assignment -----------------------------------------------
+# ---- 6. Create / get the Configuration Profile shell --------------------
+if (-not $existing) {
+    Write-Host "Creating profile '$DisplayName'..." -ForegroundColor Cyan
+    $profileBody = @{
+        displayName     = $DisplayName
+        description     = "[PimActivator] client-side policies for Edge + Chrome. Force-installs the PIM Activator extension ($ExtensionId) from $UpdateUrl, whitelists $SourcePattern as an install source, pre-grants <all_urls> runtime permissions (so the manifest's broad host scope doesn't trip Chrome's permission-expansion gate during auto-update), and pushes the tenant catalog ($count tenant(s)) for chrome.storage.managed.tenantCatalog. Generated by PIM4EntraPS/tools/pim-activator/Deploy-PimActivatorIntune.ps1."
+        roleScopeTagIds = @('0')
+    } | ConvertTo-Json -Depth 10
+    $created = Invoke-MgGraphRequest -Method POST `
+        -Uri 'https://graph.microsoft.com/beta/deviceManagement/groupPolicyConfigurations' `
+        -Body $profileBody -ContentType 'application/json' -ErrorAction Stop
+    $profileId = $created.id
+    Write-Host "[OK] Profile created. id=$profileId" -ForegroundColor Green
+} else {
+    $profileId = $existing.id
+    Write-Host "Profile '$DisplayName' exists (id $profileId). Wiping prior definition values + writing fresh..." -ForegroundColor Cyan
+    try {
+        $existingVals = Invoke-MgGraphRequest -Method GET `
+            -Uri "https://graph.microsoft.com/beta/deviceManagement/groupPolicyConfigurations/$profileId/definitionValues" `
+            -ErrorAction Stop
+        foreach ($v in @($existingVals.value)) {
+            Invoke-MgGraphRequest -Method DELETE `
+                -Uri "https://graph.microsoft.com/beta/deviceManagement/groupPolicyConfigurations/$profileId/definitionValues/$($v.id)" `
+                -ErrorAction Stop | Out-Null
+        }
+    } catch {
+        Write-Warning "Could not clear prior definition values: $($_.Exception.Message)."
+    }
+}
+
+# ---- 7. POST definition values --------------------------------------------
+function New-DefValue {
+    param(
+        [Parameter(Mandatory)] $Definition,
+        [Parameter(Mandatory)] $Presentation,
+        [Parameter(Mandatory)] [ValidateSet('Text','List')] [string]$Kind,
+        [Parameter(Mandatory)] [object]$Value      # string for Text, string[] for List
+    )
+    $presValue = if ($Kind -eq 'Text') {
+        @{
+            '@odata.type'                = '#microsoft.graph.groupPolicyPresentationValueText'
+            'presentation@odata.bind'    = "https://graph.microsoft.com/beta/deviceManagement/groupPolicyDefinitions('$($Definition.id)')/presentations('$($Presentation.id)')"
+            value                         = [string]$Value
+        }
+    } else {
+        # For non-explicit-value listBox (e.g. Chromium ExtensionInstallForcelist,
+        # ExtensionInstallSources), the Intune portal editor renders the `name`
+        # field as the row's visible data AND the Group Policy CSP write to the
+        # device's registry reads from `name` too. The `value` field is only
+        # meaningful for explicitValue=true listBoxes (key=>value pairs).
+        # Setting both to the same data covers both possibilities + matches
+        # what the portal shows after manual entry.
+        $valuesList = @( foreach ($v in @($Value)) {
+            @{ name = [string]$v; value = [string]$v }
+        })
+        @{
+            '@odata.type'                = '#microsoft.graph.groupPolicyPresentationValueList'
+            'presentation@odata.bind'    = "https://graph.microsoft.com/beta/deviceManagement/groupPolicyDefinitions('$($Definition.id)')/presentations('$($Presentation.id)')"
+            values                        = $valuesList
+        }
+    }
+    return @{
+        enabled                          = $true
+        'definition@odata.bind'          = "https://graph.microsoft.com/beta/deviceManagement/groupPolicyDefinitions('$($Definition.id)')"
+        presentationValues               = @($presValue)
+    }
+}
+
+foreach ($b in $browsersToInclude) {
+    # Forcelist: list of "<extId>;<updateUrl>"
+    $defFL = $resolved[$b]['Forcelist'].Definition
+    $prFL  = $resolved[$b]['Forcelist'].Presentations | Select-Object -First 1
+    $bodyFL = (New-DefValue -Definition $defFL -Presentation $prFL -Kind List -Value @($forcelistValue)) | ConvertTo-Json -Depth 20
+    Invoke-MgGraphRequest -Method POST -Uri "https://graph.microsoft.com/beta/deviceManagement/groupPolicyConfigurations/$profileId/definitionValues" -Body $bodyFL -ContentType 'application/json' -ErrorAction Stop | Out-Null
+    Write-Host "  [OK] $b Forcelist set ($forcelistValue)" -ForegroundColor Green
+
+    # Sources: list of URL patterns
+    $defSR = $resolved[$b]['Sources'].Definition
+    $prSR  = $resolved[$b]['Sources'].Presentations | Select-Object -First 1
+    $bodySR = (New-DefValue -Definition $defSR -Presentation $prSR -Kind List -Value @($SourcePattern)) | ConvertTo-Json -Depth 20
+    Invoke-MgGraphRequest -Method POST -Uri "https://graph.microsoft.com/beta/deviceManagement/groupPolicyConfigurations/$profileId/definitionValues" -Body $bodySR -ContentType 'application/json' -ErrorAction Stop | Out-Null
+    Write-Host "  [OK] $b Sources set ($SourcePattern)" -ForegroundColor Green
+
+    # ExtensionSettings: single JSON string. Pre-grants <all_urls> runtime
+    # hosts for our ext id so Chrome's permission-expansion gate skips the
+    # auto-update silent-disable. Only takes effect for THIS extension id.
+    $defXS = $resolved[$b]['Settings'].Definition
+    $prXS  = $resolved[$b]['Settings'].Presentations | Where-Object { $_.'@odata.type' -match 'TextBox|Text$' } | Select-Object -First 1
+    if (-not $prXS) { $prXS = $resolved[$b]['Settings'].Presentations | Select-Object -First 1 }
+    $bodyXS = (New-DefValue -Definition $defXS -Presentation $prXS -Kind Text -Value $extSettingsJson) | ConvertTo-Json -Depth 20
+    Invoke-MgGraphRequest -Method POST -Uri "https://graph.microsoft.com/beta/deviceManagement/groupPolicyConfigurations/$profileId/definitionValues" -Body $bodyXS -ContentType 'application/json' -ErrorAction Stop | Out-Null
+    Write-Host "  [OK] $b ExtensionSettings set (runtime_allowed_hosts=<all_urls> for $ExtensionId -- bypasses permission-expansion gate)" -ForegroundColor Green
+
+    # Tenant catalog: single JSON string
+    $defTC = $resolved[$b]['Catalog'].Definition
+    $prTC  = $resolved[$b]['Catalog'].Presentations | Where-Object { $_.'@odata.type' -match 'TextBox|Text$' } | Select-Object -First 1
+    if (-not $prTC) { $prTC = $resolved[$b]['Catalog'].Presentations | Select-Object -First 1 }
+    $bodyTC = (New-DefValue -Definition $defTC -Presentation $prTC -Kind Text -Value $minifiedCatalog) | ConvertTo-Json -Depth 20
+    Invoke-MgGraphRequest -Method POST -Uri "https://graph.microsoft.com/beta/deviceManagement/groupPolicyConfigurations/$profileId/definitionValues" -Body $bodyTC -ContentType 'application/json' -ErrorAction Stop | Out-Null
+    Write-Host "  [OK] $b TenantCatalog set ($($minifiedCatalog.Length) chars)" -ForegroundColor Green
+}
+
+# ---- 8. Optional assignment ---------------------------------------------
 if ($AssignToGroupId) {
     Write-Host ""
     Write-Host "Assigning profile to group $AssignToGroupId ..." -ForegroundColor Cyan
-    # Verify the group exists (friendly error if the ID is wrong)
-    try {
-        $grp = Get-MgGroup -GroupId $AssignToGroupId -ErrorAction Stop
-        Write-Host "  Target group: '$($grp.DisplayName)' ($AssignToGroupId)" -ForegroundColor Gray
-    } catch {
-        throw "Group $AssignToGroupId not found in tenant: $($_.Exception.Message)"
-    }
     $assignBody = @{
         assignments = @(
             @{
@@ -261,15 +434,20 @@ if ($AssignToGroupId) {
         )
     } | ConvertTo-Json -Depth 10
     Invoke-MgGraphRequest -Method POST `
-        -Uri "https://graph.microsoft.com/beta/deviceManagement/configurationPolicies/$policyId/assign" `
+        -Uri "https://graph.microsoft.com/beta/deviceManagement/groupPolicyConfigurations/$profileId/assign" `
         -Body $assignBody -ContentType 'application/json' -ErrorAction Stop | Out-Null
     Write-Host "[OK] Assignment created." -ForegroundColor Green
 } else {
     Write-Host ""
     Write-Host "Profile is UNASSIGNED. Assign in portal:" -ForegroundColor Yellow
     Write-Host "  Intune admin center -> Devices -> Configuration profiles -> '$DisplayName' -> Assignments" -ForegroundColor Yellow
-    Write-Host "Or re-run this script with -AssignToGroupId <group-id>." -ForegroundColor Yellow
+    Write-Host "Or re-run with -AssignToGroupId <group-id>." -ForegroundColor Yellow
 }
 
 Write-Host ""
-Write-Host "Done. Targeted devices receive the policy on next Intune sync (~8h, or force from device)." -ForegroundColor Green
+Write-Host "Done. Customer endpoints receive the unified policy on next Intune sync (~8h, or force from device)." -ForegroundColor Green
+Write-Host ""
+Write-Host "Verify on a target device after sync:" -ForegroundColor Gray
+Write-Host "  Get-Item       'HKLM:\SOFTWARE\Policies\Microsoft\Edge\ExtensionInstallForcelist'" -ForegroundColor Gray
+Write-Host "  Get-Item       'HKLM:\SOFTWARE\Policies\Microsoft\Edge\ExtensionInstallSources'" -ForegroundColor Gray
+Write-Host "  Get-ItemProperty 'HKLM:\SOFTWARE\Policies\Microsoft\Edge\3rdparty\extensions\$ExtensionId\policy' -Name tenantCatalog" -ForegroundColor Gray

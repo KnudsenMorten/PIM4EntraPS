@@ -1,9 +1,10 @@
 # Release notes for PIM4EntraPS
 
-## v2.4.97
+## v2.4.98
 
 Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monorepo:
 
+- release: PIM4EntraPS v2.4.98 + extension v1.6.19 - unified Intune deploy + critical fix for ExtensionSettings schema bug that froze fleet at old versions + popup CSS no longer overflows Chromium popup cap (508f6eab)
 - release: PIM4EntraPS v2.4.97 - Update-PimActivator-Extension.ps1 SAFETY FIX (no more profile wipes) + faster update trigger via --extensions-update-frequency=30 (cdc2c7cb)
 - release: extension v1.6.16 - revert v1.6.13's footer-collapse experiment; restore 2-row footer layout (row 1: title + repo + GitHub + Report bug | tenant ID; row 2: dev attribution | tenant name + reset) (7018f592)
 - release: extension v1.6.15 - wizard ALWAYS shows mode-selector on fresh deploy (removed auto-pick for single-tenant catalog that was silently skipping the picker); catalogPanel now carries BOTH picker + import sub-divs so 'Use centrally deployed' (multi) and 'Import JSON' modes can toggle independently regardless of current catalog state (a3885a4a)
@@ -33,13 +34,53 @@ Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monor
 - release: PIM4EntraPS v2.4.89 + extension v1.6.2 - admin-friendly prefix shortcuts in catalog entries + scrub customer name from sample (ba82aaf4)
 - release: PIM4EntraPS v2.4.88 + extension v1.6.0 - tenant catalog + header switcher for MSP / one-admin-many-tenants workflow (538f6803)
 - release: PIM4EntraPS v2.4.87 + extension v1.5.11 - auto-discover via /.well-known/pim-activator.json on corporate domain (zero-OAuth, per-customer naming-convention regexes in same JSON) (b0d213ba)
-- release: PIM4EntraPS v2.4.86 + extension v1.5.10 - bootstrap discovery switched to OAuth2 device-code flow (fixes AADSTS50011, auto-discover now works in any tenant without per-tenant app-reg setup) (3658f74f)
 
 ---
 
 # Release notes -- PIM4EntraPS
 
 > **Curated changelog.** The publish workflow auto-prepends recent monorepo commits as a raw activity log; this file is the human-friendly narrative on top.
+
+---
+
+## v2.4.98 + extension v1.6.19 -- unified Intune deploy + critical fix for `ExtensionSettings` schema bug that froze the fleet + popup layout no longer needs outer scroll
+
+**Extension v1.6.19 layout fix (popup).** `popup.html` switched from a hardcoded `max-height:300px` on the role list + `max-height:800px` on the body (which together overflowed Chromium's 800px popup cap and forced an OUTER scrollbar over the credit footer + Activate button) to a flex-column layout where the role list grows / shrinks to fill whatever vertical space is left after the fixed UI. End result: the popup fits Chromium's 800px cap exactly, the role list is the ONLY scrollable region, and the Justification / Duration / Activate button + the two-row credit footer stay anchored at the bottom always-visible. Same fix applies to the My Access tab.
+
+**Critical fix.** Fleet across multiple customer tenants was stuck at whichever extension version each device last consented to (some on v1.1.1, others on v1.6.14, etc.), with no path forward via the forcelist alone. Two compounding bugs:
+
+1. `Deploy-PimActivatorClient.ps1` wrote the `ExtensionSettings` registry policy in the wrong shape. On Windows, Chromium expects: registry value NAME = the extension id, value DATA = bare per-extension settings dict. The script was writing value NAME = `*` + value DATA = `{"<id>":{...}}` -- producing the shape `{"*":{"<id>":{...}}}` that Chromium's schema validator rejects with `Error at ExtensionSettings.*: Schema validation error: Unknown property: <id>`. Silently dropped policy, no permission-expansion bypass.
+2. Without that bypass, every device that auto-updated past extension v1.5.11 hit Chrome's permission-expansion gate. v1.5.11 added `https://*/*` to `host_permissions` for the `/.well-known/pim-activator.json` discover feature; Chrome treats that as a broader-permission upgrade and silently disables the install until the user clicks "Enable" in `chrome://extensions`. With managed Chrome's `DeveloperToolsAvailability=2` baseline the Enable button is hidden -- so devices stayed pinned to the last consented version forever.
+
+Both fixed:
+
+- `Deploy-PimActivatorClient.ps1` writes `ExtensionSettings` with the correct shape now.
+- `Deploy-PimActivatorIntune.ps1` pushes `ExtensionSettings` as part of the unified profile (the Intune ADMX path was never affected by the registry shape bug -- it just didn't include `ExtensionSettings` at all until this release).
+
+**Consolidated Intune deployment to a single script.** `Deploy-PimActivatorIntune.ps1` is now the only Intune script the operator runs. It auto-uploads the custom ADMX if missing, then creates / updates the `[PimActivator] client settings` profile carrying all four policies per browser:
+
+1. `ExtensionInstallForcelist` -- force-install from the gh-pages CRX
+2. `ExtensionInstallSources` -- whitelist gh-pages as a CRX install source
+3. `ExtensionSettings` -- pre-grants `<all_urls>` runtime hosts so the permission-expansion gate never fires
+4. `TenantCatalog` -- pushes the tenant catalog JSON for `chrome.storage.managed`
+
+The older scripts (`Setup-PimActivatorIntune.ps1`, `Push-PimActivatorADMXToIntune.ps1`, `Push-PimActivatorTenantCatalogIntune.ps1`, `Push-PimActivatorTenantCatalogProfile.ps1`) are deleted. The ADMX upload step is inlined and idempotent -- it skips silently when the ADMX is already ingested.
+
+**`Deploy-PimActivatorClient.ps1` dropped `ExtensionInstallAllowlist` from the default write set.** On some Chromium versions an Allowlist with a single id is interpreted as "deny every other extension" even without a `*` blocklist in play -- so operators on those builds couldn't install any other extension after running the script. Forcelist already overrides the blocklist for the listed id, so the Allowlist write was always defensive belt-and-braces, never load-bearing. Now opt-in only behind `-WriteAllowlist`.
+
+**`Deploy-PimActivatorClient.ps1` now pushes the tenant catalog.** Earlier client-deploy ran stopped at the install policies and required manual catalog import from the popup. The script now writes the catalog JSON under `…\3rdparty\extensions\<id>\policy\tenantCatalog`, the same path the ADMX template eventually writes to. Default catalog is the sibling `discovered-tenant-catalog.json`; pass `-CatalogJsonPath` to override or `-SkipTenantCatalog` to skip.
+
+**New `Fix-PimActivatorStuck.ps1` -- one-time per-device recovery for laptops already stuck.** Run on any device whose Chrome shows the old version OR an `ERR_FILE_NOT_FOUND` icon. The script surgically removes the stale `extensions.settings.<id>` registration (plus its HMAC and any `pinned_extensions` reference) from `<UserData>\Default\Preferences` and `<UserData>\Default\Secure Preferences` across every profile folder, then exits. Pure string-surgery with brace counting -- no PS 5.1 `ConvertTo-Json` round-trip, so the 2026-06-09 profile-corruption footgun cannot fire. Reopen the browser and the forcelist installer runs fresh on a clean state.
+
+**`Update-PimActivator-Extension.ps1` hardened against a fresh batch of failure modes discovered while debugging the fleet freeze:**
+
+- Pre-flight compliance check at the top of every run. Reports whether the `ExtensionInstallForcelist` registry value is present, whether the gh-pages updates.xml is reachable, what version it advertises, and -- when missing -- the exact `New-ItemProperty` one-liner to write the policy. Failures are warnings, not hard aborts.
+- Pre-pack signing-key guard. Computes the extension id the local `signing-key.pem` will produce; if it doesn't match the registered policy id, the pack step throws BEFORE running `msedge --pack-extension`. The fleet got bricked once already by a CRX packed with a regenerated key from the wrong machine; this guard makes that incident unreproducible.
+- Post-pack / pre-flush gh-pages CRX validation. Downloads the live CRX, derives its canonical extension id via proper protobuf parsing of the v3 header (`SHA256(public_key)` from the first `AsymmetricKeyProof`, first 16 bytes, remapped 0..15 -> 'a'..'p'). If the derived id doesn't match the policy id, the flush step refuses to proceed -- prevents a future wrong-key CRX from bricking installed instances by deleting their cached binary with no working replacement to install.
+- Defense-in-depth `Local State` backup. Every run writes a timestamped `Local State.bak.<ts>` next to the live file BEFORE touching any extension folder. Two profile-loss incidents in two days showed even the now-opt-in destructive paths weren't the whole story; surrounding Chromium subsystems can also reset `Local State` during a force-killed-mid-write race. The auto-backup is the undo file -- 30-second recovery by copying the `.bak` over the live file.
+- Graceful close + force-kill only stragglers. Replaces the previous bare `Stop-Process -Force`. Browser processes get a `CloseMainWindow()` first, then we wait up to 10 seconds for the original PID set to exit, then force-kill anything still running. Gives Chrome time to flush its in-flight `Local State` write -- which was the most plausible root cause of the 2026-06-10 profile-registry reset.
+- Multi-profile awareness in the flush + verification phases. Previous versions hardcoded `Default`. A maintainer's laptop had 59 Chrome profiles, only some with the extension installed; flushing only `Default` produced a misleading "no cached extension" while every `Profile NN\` folder still had a stuck old install. The script enumerates every `Default` and `Profile NN\` folder under each browser's User Data root and operates on all of them. Post-relaunch verification reports per-profile installed version vs the gh-pages-advertised version, so per-profile drift is visible.
+- ASCII labels replace emoji output. Windows Server consoles render Chromium emoji glyphs as garbled multi-byte sequences. `[OK]` / `[FAIL]` / `[WARN]` / `[REUSE]` / `[SCOPE]` / `[FORCE]` / `[DRY-RUN]` / `[TRIGGER]` / `[DEVICES]` / `[START]` / `[SUMMARY]` are used everywhere. Same information, readable on every Windows host.
 
 ---
 
