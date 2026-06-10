@@ -173,6 +173,38 @@ async function loadConfig() {
 
   const catalog = await readMergedCatalog()
 
+  // ----- v1.6.25+: manual single-tenant entry always wins over managed catalog
+  // If the user explicitly saved a tenantId + clientId via the onboarding
+  // wizard's manual entry (chrome.storage.local.userTenantId / userClientId),
+  // that is the authoritative config -- even if a stale managed catalog is
+  // present in chrome.storage.managed (e.g. left over from a Deploy-Pim*-Client
+  // run that wrote a different tenant's data, or from a pre-v2.4.111 cross-
+  // tenant leak). Without this branch, the catalog path below shadows the
+  // user's saved manual config on every reload, causing the "Save and continue"
+  // button to appear broken (it saves, but the next reload shows onboarding
+  // again because the catalog overrides it). Symptom reproed 2026-06-10
+  // against a Nunagreen-tenant box whose registry still had 2linkIT's
+  // catalog from before v2.4.111.
+  const manualTid = String(u.userTenantId || '').trim().toLowerCase()
+  const manualCid = String(u.userClientId || '').trim().toLowerCase()
+  const manualSetExplicitly =
+    isGuidStr(manualTid) && !manualTid.startsWith('00000000') &&
+    isGuidStr(manualCid) && !manualCid.startsWith('00000000')
+  if (manualSetExplicitly) {
+    return {
+      tenantId:             u.userTenantId,
+      clientId:             u.userClientId,
+      defaultJustification: u.userDefaultJustification || 'Change in infrastructure',
+      defaultDurationHours: u.userDefaultDurationHours || 8,
+      groupNameFilter:      u.userGroupNameFilter      || '',
+      entraGroupRegex:      u.userEntraGroupRegex      || '',
+      azureGroupRegex:      u.userAzureGroupRegex      || '',
+      catalog,
+      activeTenantId:       manualTid,
+      tenantName:           '(manual entry)',
+    }
+  }
+
   // ----- v1.6.0+ catalog path ------------------------------------------------
   if (catalog.length > 0) {
     let activeId = String(u.activeTenantId || '').trim().toLowerCase()

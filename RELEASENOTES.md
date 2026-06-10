@@ -1,9 +1,10 @@
 # Release notes for PIM4EntraPS
 
-## v2.4.111
+## v2.4.112
 
 Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monorepo:
 
+- release: PIM4EntraPS v2.4.112 + extension v1.6.25 - popup manual single-tenant entry wins over managed catalog (fixes Save->onboarding loop on contaminated boxes) (b5ab0aa7)
 - release: PIM4EntraPS v2.4.111 - Deploy-PimActivatorClient.ps1 stops defaulting to sibling discovered-tenant-catalog.json (cross-tenant leak); auto-discovers from live Entra instead (34a1f1c8)
 - release: PIM4EntraPS v2.4.110 - Deploy-PimActivatorIntune.ps1 auto-skips Forcelist defValues when existing policy owns slot (avoids IME slot-cycling under -Force) (1771e06b)
 - release: PIM4EntraPS v2.4.109 - PIM4EntraPS.PimActivator.admx removes unused <using> namespace dependency (strict tenants rejected upload as NamespaceMissing:Microsoft.Policies.Windows) (91c3e488)
@@ -33,13 +34,27 @@ Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monor
 - fix Verify-PimActivatorIntunePolicy.ps1: PS 5.1 doesn't accept 'if (...) {...} else {...}' as an expression inside Write-Host -ForegroundColor argument; lift the choice into a separate $summaryColor variable (9e0c5644)
 - add Verify-PimActivatorIntunePolicy.ps1 - portable HKLM registry verifier for the 6 PIM Activator Intune policies, runs on any Windows endpoint with PS 5.1+ (no Graph dep) (8bf15a34)
 - fix Setup-PimActivatorIntune.ps1 list-value shape: put data in BOTH 'name' and 'value' for non-explicit-value listBox presentations (Intune portal editor renders 'name', not 'value'; the v2.4.94 release showed slot numbers like '1' instead of the extension+URL string) (ec6fe4ee)
-- release: PIM4EntraPS v2.4.94 + extension v1.6.6 - Setup-PimActivatorIntune.ps1 one-click unified ADMX-backed profile + popup body overflow:auto so content past 600px scrolls + 3-row status panel (Intune managed config / local imported / total in catalog) replaces single-line status (f9d64236)
 
 ---
 
 # Release notes -- PIM4EntraPS
 
 > **Curated changelog.** The publish workflow auto-prepends recent monorepo commits as a raw activity log; this file is the human-friendly narrative on top.
+
+---
+
+## v2.4.112 + extension v1.6.25 -- popup manual single-tenant entry now always wins over managed catalog (fixes "Save and continue" looping back to onboarding)
+
+Same v2.4.111 cross-tenant-leak incident exposed a second compounding bug: when `chrome.storage.managed.tenantCatalog` (registry-pushed) and the manual single-tenant entry (`chrome.storage.local.userTenantId / userClientId`) BOTH exist, the popup's `loadConfig()` always preferred the managed catalog. So on a box where the bad 2linkIT catalog was still in registry, the user could type Nunagreen's tenant + clientId in the manual form, click "Save and continue", and:
+
+1. The save succeeded (`userTenantId = Nunagreen` written to `chrome.storage.local`).
+2. The popup reloaded.
+3. `loadConfig()` saw the managed catalog (2linkIT) first, picked the catalog branch, found no `activeTenantId` matching, returned an empty config -- triggering `renderOnboarding()` to fire AGAIN.
+4. From the user's perspective: "I saved but it goes back to onboarding -- save isn't working."
+
+**Fix.** `popup.js` `loadConfig()` now checks for an explicitly saved manual single-tenant config (both userTenantId AND userClientId being non-zero GUIDs) BEFORE the catalog branch. When manual is set, the returned config uses manual values + `tenantName: '(manual entry)'`. Catalog still populates so the switcher chip can render if the user wants to swap. This means once you click "Save and continue" with valid GUIDs, your manual config sticks across reloads regardless of what's in managed storage.
+
+Note: this is a popup-level fix. The underlying registry leak should still be cleaned up by re-running `Deploy-PimActivatorClient.ps1` (v2.4.111+, which auto-discovers from live Entra) on the affected box -- that overwrites the bad `tenantCatalog` registry value with the correct one. The v1.6.25 popup change just prevents the symptom that "Save doesn't work" while the leak persists.
 
 ---
 
