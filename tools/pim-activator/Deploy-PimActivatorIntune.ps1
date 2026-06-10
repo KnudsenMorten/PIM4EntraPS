@@ -326,6 +326,14 @@ if ($admxRow -and $admxRow.status -in @('available','uploadCompleted')) {
     # Other tenants (2linkit) tolerated the missing types because their
     # endpoint version has a default type fallback; we now always set them
     # so every tenant works regardless of strictness.
+    # NOTE: do NOT include 'defaultLanguageCode' in the payload -- Intune
+    # rejects with 400 "ADMX DefaultLanguageCode needs to be null, it will
+    # taken from ADML file" (CustomApiErrorPhrase ADMXDefaultLanguageCodeNotNull).
+    # The service derives defaultLanguageCode from the first ADML's
+    # languageCode field, and we just observe it as 'en-US' on the row
+    # after upload. v2.4.107 added it explicitly trying to satisfy a strict
+    # tenant; v2.4.108 reverted that part. The @odata.type discriminators
+    # stay -- those ARE required by strict tenants like Nunagreen.
     $admxBody = @{
         '@odata.type'                     = '#microsoft.graph.groupPolicyUploadedDefinitionFile'
         fileName                          = $admxFileName
@@ -334,7 +342,6 @@ if ($admxRow -and $admxRow.status -in @('available','uploadCompleted')) {
         targetNamespace                   = 'MortenKnudsen.PIM4EntraPS.PimActivator'
         policyType                        = 'admxIngested'
         revision                          = '1.0'
-        defaultLanguageCode               = 'en-US'
         content                           = $admxBase64
         groupPolicyUploadedLanguageFiles  = @(@{
             '@odata.type' = '#microsoft.graph.groupPolicyUploadedLanguageFile'

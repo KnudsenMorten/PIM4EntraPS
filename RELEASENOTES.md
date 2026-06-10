@@ -1,9 +1,10 @@
 # Release notes for PIM4EntraPS
 
-## v2.4.107
+## v2.4.108
 
 Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monorepo:
 
+- release: PIM4EntraPS v2.4.108 - Deploy-PimActivatorIntune.ps1 drops defaultLanguageCode from ADMX upload payload (Intune 400 ADMXDefaultLanguageCodeNotNull) (a17463d2)
 - release: PIM4EntraPS v2.4.107 - Deploy-PimActivatorIntune.ps1 ADMX payload now has explicit @odata.type (fixes silent field null-out on strict tenants) (ab4a8d34)
 - release: PIM4EntraPS v2.4.106 - Deploy-PimActivatorIntune.ps1 dumps full ADMX upload-failure detail (uploadInfo:null was hiding everything) (23320078)
 - release: PIM4EntraPS v2.4.105 + extension v1.6.24 - fix popup pre-sign-in tabpanel bleed + fix Update script silently aborting gh-pages publish (097fba84)
@@ -33,13 +34,20 @@ Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monor
 - fix Push-PimActivatorTenantCatalogProfile.ps1: lookup ADMX-ingested definitions via /groupPolicyDefinitions?$filter=startswith(categoryPath,'\PIM4EntraPS') -- the /groupPolicyUploadedDefinitionFiles/{id}/definitions navigation isn't queryable (7a4c6b8f)
 - add Push-PimActivatorTenantCatalogProfile.ps1 - automates ADMX-backed Configuration Profile creation (looks up ingested ADMX policy definitions + posts presentationValues binding the catalog JSON to Edge + Chrome policies) (3dfe8f3a)
 - fix Push-PimActivatorADMXToIntune.ps1: state-aware handling of in-flight uploads (don't /remove an uploadInProgress or removalInProgress row; wait for terminal state, exit early if uploadInProgress reaches 'available') (20b51d5f)
-- fix: skip /remove when existing upload is already in removalInProgress (avoids 400 OperationInProgress on second run) (ca417bef)
 
 ---
 
 # Release notes -- PIM4EntraPS
 
 > **Curated changelog.** The publish workflow auto-prepends recent monorepo commits as a raw activity log; this file is the human-friendly narrative on top.
+
+---
+
+## v2.4.108 -- Deploy-PimActivatorIntune.ps1 drops `defaultLanguageCode` from ADMX payload (Intune requires it absent; v2.4.107 wrongly added it)
+
+v2.4.107 added `defaultLanguageCode = 'en-US'` to the upload body, thinking it would help on strict tenants. Intune is explicit: `400 Bad Request -- ADMX DefaultLanguageCode needs to be null, it will taken from ADML file` (CustomApiErrorPhrase `ADMXDefaultLanguageCodeNotNull`). The service derives this field from the first ADML's `languageCode` and rejects any payload that tries to set it. v2.4.108 removes the field; the v2.4.107 `@odata.type` discriminators (which ARE required by strict tenants) stay.
+
+Net: v2.4.107 fixed the silent null-out by adding @odata.type AND broke the upload by also adding defaultLanguageCode. v2.4.108 keeps the first fix, removes the second.
 
 ---
 
