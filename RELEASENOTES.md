@@ -1,9 +1,10 @@
 # Release notes for PIM4EntraPS
 
-## v2.4.102
+## v2.4.103
 
 Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monorepo:
 
+- release: PIM4EntraPS v2.4.103 - Update-PimActivator-Extension.ps1 scrubs stale Secure Preferences UNCONDITIONALLY (v2.4.100 only scrubbed when binary present, missed the actual trap shape) (41fd4236)
 - release: PIM4EntraPS v2.4.102 - Deploy-PimActivatorIntune.ps1 pre-flight scan for conflicting ExtensionInstallForcelist policies (prevents IME slot-cycling silent failure) (7e7de5d7)
 - add Audit-ChromeForcelistInIntune.ps1 - read-only diagnostic that scans every Intune configuration policy (Settings Catalog + Administrative Templates + custom device configs) for Chrome ExtensionInstallForcelist values, flags malformed entries (empty string, invalid ext id, missing update URL). Used to pin down which Intune profile is shipping the bad forcelist entry that's blocking all extension installs. (bd371bf3)
 - release: PIM4EntraPS v2.4.101 + extension v1.6.20 - popup CSS revert (v1.6.19 flex-column broke Edge) (709005f7)
@@ -33,13 +34,20 @@ Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monor
 - release: PIM4EntraPS v2.4.93 + extension v1.6.5 - rewrite Push-PimActivatorTenantCatalogIntune.ps1 as PS remediation (was hitting Registry CSP block 0x87d1fde8 on Edge/Chrome 3rdparty namespace) + ship ADMX template + Push-PimActivatorADMXToIntune.ps1 for the proper Settings Catalog path + popup source-detection status line (ed206a0a)
 - release: PIM4EntraPS v2.4.92 + extension v1.6.4 - strip auto-discover panel + well-known URI flow + gut background.js to empty stub; reorder onboarding to catalog -> Welcome -> manual entry (c4c0b499)
 - release: PIM4EntraPS v2.4.91 + extension v1.6.3 - retire global KNOWN_BAD_LEGACY_CLIENTIDS ban; v1.6 catalog binds tenantId+clientId per-entry so the same GUID is valid in the tenant that owns it (cc3a7cae)
-- fix Test-PushTenantCatalog: explicit -Property projection + ServicePrincipal fallback so Get-MgApplication's default-projection AppId-drop in some SDK versions doesn't produce null clientId (c12c92a4)
 
 ---
 
 # Release notes -- PIM4EntraPS
 
 > **Curated changelog.** The publish workflow auto-prepends recent monorepo commits as a raw activity log; this file is the human-friendly narrative on top.
+
+---
+
+## v2.4.103 -- Update-PimActivator-Extension.ps1 scrubs stale Secure Preferences UNCONDITIONALLY (v2.4.100 only scrubbed when binary present)
+
+v2.4.100 added Secure Preferences scrub to the flush step but **gated it on binary deletion** -- `if ($deletedThisProfile)`. The actual trap is the opposite: when Chrome self-removes a corrupted extension folder but keeps the `extensions.settings.<id>` registration entry with `disable_reasons = 1024 (DISABLE_CORRUPTED)`, the profile reports "no Extensions\<id> folder yet" -- looks like nothing to do, but it's exactly the profile blocked from forcelist install. On a 36-Chrome-profile laptop, v2.4.100 ran clean ("removed cache from 0, registration entries scrubbed: 0") but the laptop stayed broken across all 36 profiles because the stale registrations were never touched.
+
+`Fix-PimActivatorStuck.ps1` always scrubbed unconditionally and pulled the laptop out of the trap in one run (17 stale entries across 4 profiles -- the ones that had been broken). v2.4.103 brings the Update script's flush in line: the Secure Preferences + Preferences scrub now runs on every profile every time, with or without a cached binary present. Result reported in the same "registration entries scrubbed: N" line as before, but now N reflects all stale entries found, not just the ones in cache-deleted profiles.
 
 ---
 
