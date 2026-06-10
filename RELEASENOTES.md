@@ -1,9 +1,10 @@
 # Release notes for PIM4EntraPS
 
-## v2.4.105
+## v2.4.106
 
 Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monorepo:
 
+- release: PIM4EntraPS v2.4.106 - Deploy-PimActivatorIntune.ps1 dumps full ADMX upload-failure detail (uploadInfo:null was hiding everything) (23320078)
 - release: PIM4EntraPS v2.4.105 + extension v1.6.24 - fix popup pre-sign-in tabpanel bleed + fix Update script silently aborting gh-pages publish (097fba84)
 - release: PIM4EntraPS v2.4.104 + extension v1.6.22 - -Repack works on PS 5.1 (mgmt1's runtime); guard moved from PEM input to produced CRX output bytes (6cdfd661)
 - release: PIM4EntraPS v2.4.103 - Update-PimActivator-Extension.ps1 scrubs stale Secure Preferences UNCONDITIONALLY (v2.4.100 only scrubbed when binary present, missed the actual trap shape) (41fd4236)
@@ -33,13 +34,20 @@ Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monor
 - fix Push-PimActivatorADMXToIntune.ps1: state-aware handling of in-flight uploads (don't /remove an uploadInProgress or removalInProgress row; wait for terminal state, exit early if uploadInProgress reaches 'available') (20b51d5f)
 - fix: skip /remove when existing upload is already in removalInProgress (avoids 400 OperationInProgress on second run) (ca417bef)
 - fix Push-PimActivatorADMXToIntune.ps1: groupPolicyUploadedDefinitionFiles requires POST .../remove action (not DELETE); poll until 404 before re-upload to avoid 409 (e1e85ed3)
-- release: PIM4EntraPS v2.4.93 + extension v1.6.5 - rewrite Push-PimActivatorTenantCatalogIntune.ps1 as PS remediation (was hitting Registry CSP block 0x87d1fde8 on Edge/Chrome 3rdparty namespace) + ship ADMX template + Push-PimActivatorADMXToIntune.ps1 for the proper Settings Catalog path + popup source-detection status line (ed206a0a)
 
 ---
 
 # Release notes -- PIM4EntraPS
 
 > **Curated changelog.** The publish workflow auto-prepends recent monorepo commits as a raw activity log; this file is the human-friendly narrative on top.
+
+---
+
+## v2.4.106 -- Deploy-PimActivatorIntune.ps1 dumps full ADMX upload-failure detail (status=uploadFailed previously surfaced only as `uploadInfo: null`)
+
+Customer-tenant rollout hit `status: uploadFailed` on the custom ADMX upload step with no further detail (`uploadInfo: null`), making diagnosis impossible. Intune's `groupPolicyUploadedDefinitionFiles` endpoint sometimes carries the actual rejection reason in a sub-collection (`groupPolicyOperations`) or in fields the previous code didn't print -- the old throw line only stringified `uploadInfo`, so any other field with the real error went unseen. Now on `uploadFailed` / `removalFailed` the script prints the full Graph row JSON (depth 8) and then fetches + prints every `groupPolicyOperations` entry (`operationType`, `status`, `errorCode`, `errorMessage`, `statusDetails`) before throwing. Next failure will give us real signal to act on rather than `null`.
+
+The throw message itself now lists the three most-common causes (tenant ADMX cap, stale-row contention, Intune service-side transient) with the right next-step for each.
 
 ---
 

@@ -335,7 +335,27 @@ if ($admxRow -and $admxRow.status -in @('available','uploadCompleted')) {
             Write-Host "  status: $($chk.status)" -ForegroundColor Gray
             if ($chk.status -in @('available','uploadCompleted')) { break }
             if ($chk.status -in @('uploadFailed','removalFailed')) {
-                throw "Intune rejected the ADMX. status=$($chk.status). uploadInfo: $($chk.uploadInfo | ConvertTo-Json -Compress)"
+                # uploadInfo is often null on uploadFailed; dump the WHOLE row
+                # to surface anything Intune did set (errorMessage, statusDetails,
+                # etc -- field names vary across Intune service versions). Also
+                # dump groupPolicyOperations sub-collection which sometimes
+                # carries the validation error when uploadInfo doesn't.
+                Write-Host '--- Failed ADMX row (full Graph response) ---' -ForegroundColor Red
+                Write-Host (($chk | ConvertTo-Json -Depth 8) -split "`n" | ForEach-Object { "  $_" } | Out-String) -ForegroundColor Gray
+                try {
+                    $opsResp = Invoke-MgGraphRequest -Method GET -Uri "https://graph.microsoft.com/beta/deviceManagement/groupPolicyUploadedDefinitionFiles/$($admxCreated.id)/groupPolicyOperations" -ErrorAction Stop
+                    if ($opsResp.value -and $opsResp.value.Count -gt 0) {
+                        Write-Host '--- groupPolicyOperations sub-collection ---' -ForegroundColor Red
+                        foreach ($op in $opsResp.value) {
+                            Write-Host ("  operationType={0,-20} status={1,-15} errorCode={2,-10} errorMessage={3}" -f $op.operationType, $op.status, $op.lastModifiedDateTime, $op.errorMessage) -ForegroundColor Gray
+                            if ($op.statusDetails) { Write-Host ("    statusDetails: {0}" -f ($op.statusDetails | ConvertTo-Json -Depth 4 -Compress)) -ForegroundColor Gray }
+                        }
+                    }
+                } catch {
+                    Write-Host "  (could not fetch groupPolicyOperations sub-collection: $($_.Exception.Message))" -ForegroundColor Gray
+                }
+                Write-Host '--- end of failure detail ---' -ForegroundColor Red
+                throw "Intune rejected the ADMX. status=$($chk.status). See full Graph response above for any details Intune did return. Common causes on tenants where this works elsewhere: (a) tenant has reached its ADMX upload cap (rare), (b) the ADMX/ADML pair conflicts with a stale row that didn't fully clean up -- run the script again, or (c) Intune service-side transient (wait 5-10 min, retry)."
             }
         } catch { Write-Warning "Status poll failed: $($_.Exception.Message)"; break }
     } while ((Get-Date) -lt $upDeadline)
