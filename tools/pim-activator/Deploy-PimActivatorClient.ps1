@@ -107,15 +107,21 @@ param(
     [ValidateSet('Edge', 'Chrome', 'Both')]
     [string]$Browser = 'Both',
 
-    # Optional path to the tenant catalog JSON. When supplied, the script
-    # also writes the catalog under the per-extension chrome.storage.managed
-    # registry path so non-Intune boxes get parity with Intune-managed ones
-    # ("Use centrally deployed" tile in the popup turns from 'Not detected'
-    # to active). Defaults to the sibling discovered-tenant-catalog.json if
-    # it exists -- so a zero-arg run works out of the box on the maintainer's
-    # repo layout. Pass an empty string or use -SkipTenantCatalog to skip.
+    # Optional path to the tenant catalog JSON. v2.4.111 removed the previous
+    # sibling-file default ('discovered-tenant-catalog.json' next to this
+    # script) after a customer-tenant incident where that file -- left over
+    # in a working dir from a different tenant -- got picked up silently and
+    # written 2linkIT's tenant id + client id into the customer's registry.
+    # Now: when omitted (the common case), the script auto-discovers the
+    # tenant + PIM Activator app registration from the LIVE Microsoft Graph
+    # context on the box (Connect-MgGraph runs interactively if not already
+    # connected, exactly like Deploy-PimActivatorIntune.ps1's auto-discover).
+    # That guarantees the catalog matches the tenant the operator is signed
+    # into right now -- never a stale file from elsewhere. Pass an explicit
+    # path to override, or -SkipTenantCatalog to skip the catalog write
+    # entirely (still writes the forcelist / sources / settings policies).
     [Parameter(ParameterSetName = 'Install')]
-    [string]$CatalogJsonPath = (Join-Path (Split-Path -Parent $MyInvocation.MyCommand.Path) 'discovered-tenant-catalog.json'),
+    [string]$CatalogJsonPath,
 
     [Parameter(ParameterSetName = 'Install')]
     [switch]$SkipTenantCatalog,
@@ -346,26 +352,79 @@ foreach ($root in $policyRoots) {
     # The extension reads chrome.storage.managed.tenantCatalog at popup
     # open time. Same effect as Intune ADMX delivery, just locally pushed.
     # Skipped when -SkipTenantCatalog OR when the JSON file isn't present.
-    if (-not $SkipTenantCatalog -and $CatalogJsonPath -and (Test-Path -LiteralPath $CatalogJsonPath)) {
-        try {
-            $catalogRaw = Get-Content -LiteralPath $CatalogJsonPath -Raw -Encoding UTF8
-            $catalog    = $catalogRaw | ConvertFrom-Json
-            # PS 5.1 unwraps single-element arrays during pipeline -- use
-            # InputObject + @($catalog) so the JSON keeps its [ ] brackets
-            # whether the catalog has 1 or many tenants.
-            $catalogMin = ConvertTo-Json -InputObject @($catalog) -Depth 10 -Compress
-            $catalogKey = Join-Path $root.Path "3rdparty\extensions\$ExtensionId\policy"
-            New-PolicyKey -Path $catalogKey
-            Set-Reg -Path $catalogKey -Name 'tenantCatalog' -Value $catalogMin
-            $tenantCount = @($catalog).Count
-            Write-Host "    -> tenantCatalog written ($tenantCount tenant(s)) under 3rdparty\extensions\$ExtensionId\policy" -ForegroundColor DarkGray
-        } catch {
-            Write-Warning "    Tenant catalog push failed: $($_.Exception.Message). Other policies were still written."
-        }
-    } elseif ($SkipTenantCatalog) {
+    if ($SkipTenantCatalog) {
         Write-Host "    -> tenantCatalog skipped (-SkipTenantCatalog)" -ForegroundColor DarkGray
-    } elseif ($CatalogJsonPath) {
-        Write-Host "    -> tenantCatalog skipped (no JSON found at $CatalogJsonPath)" -ForegroundColor DarkGray
+    } else {
+        # Resolve the catalog object: explicit file > live Entra auto-discover.
+        # No more silent fallback to a sibling 'discovered-tenant-catalog.json' --
+        # see v2.4.111 release notes for the cross-tenant-leak incident.
+        $catalog = $null
+        if ($CatalogJsonPath -and (Test-Path -LiteralPath $CatalogJsonPath)) {
+            try {
+                $catalogRaw = Get-Content -LiteralPath $CatalogJsonPath -Raw -Encoding UTF8
+                $catalog    = $catalogRaw | ConvertFrom-Json
+                Write-Host "    -> catalog source: -CatalogJsonPath '$CatalogJsonPath'" -ForegroundColor DarkGray
+            } catch {
+                Write-Warning "    -CatalogJsonPath parse failed: $($_.Exception.Message). Will try live Entra auto-discover instead."
+                $catalog = $null
+            }
+        } elseif ($CatalogJsonPath) {
+            Write-Warning "    -CatalogJsonPath '$CatalogJsonPath' not found. Falling back to live Entra auto-discover."
+        }
+
+        if (-not $catalog) {
+            # Live auto-discover from the connected Microsoft Graph context.
+            # Mirrors Deploy-PimActivatorIntune.ps1's discover logic so the same
+            # catalog ends up in registry for non-Intune-managed boxes.
+            if (-not (Get-Module -ListAvailable Microsoft.Graph.Authentication)) {
+                Write-Warning "    Microsoft.Graph.Authentication module not installed; tenantCatalog skipped. Install with: Install-Module Microsoft.Graph.Authentication -Scope CurrentUser"
+            } else {
+                Import-Module Microsoft.Graph.Authentication -ErrorAction Stop
+                $ctx = Get-MgContext -ErrorAction SilentlyContinue
+                if (-not $ctx) {
+                    Write-Host "    -> connecting to Microsoft Graph (interactive) to auto-discover tenant + PIM Activator app..." -ForegroundColor Cyan
+                    try { Connect-MgGraph -Scopes 'Organization.Read.All','Application.Read.All' -NoWelcome -ErrorAction Stop; $ctx = Get-MgContext } catch { Write-Warning "    Connect-MgGraph failed: $($_.Exception.Message). tenantCatalog skipped."; $ctx = $null }
+                }
+                if ($ctx) {
+                    try {
+                        $orgResp = Invoke-MgGraphRequest -Method GET -Uri 'https://graph.microsoft.com/v1.0/organization' -ErrorAction Stop
+                        $org = @($orgResp.value)[0]
+                        $appResp = Invoke-MgGraphRequest -Method GET -Uri "https://graph.microsoft.com/v1.0/applications?`$filter=startswith(displayName,'PIM Activator')" -ErrorAction Stop
+                        $app = @($appResp.value)[0]
+                        if (-not $org -or -not $app) {
+                            Write-Warning "    Live Entra auto-discover incomplete (org or PIM Activator app missing). tenantCatalog skipped."
+                        } else {
+                            $catalog = [pscustomobject]@{
+                                name                  = $org.displayName
+                                tenantId              = $org.id
+                                clientId              = $app.appId
+                                defaultJustification  = 'Change in infrastructure'
+                                defaultDurationHours  = 8
+                            }
+                            Write-Host ("    -> catalog source: live Entra auto-discover  (tenant '{0}' / {1}  clientId {2})" -f $org.displayName, $org.id, $app.appId) -ForegroundColor Cyan
+                        }
+                    } catch {
+                        Write-Warning "    Live Entra auto-discover failed: $($_.Exception.Message). tenantCatalog skipped."
+                    }
+                }
+            }
+        }
+
+        if ($catalog) {
+            try {
+                # PS 5.1 unwraps single-element arrays during pipeline -- use
+                # InputObject + @($catalog) so the JSON keeps its [ ] brackets
+                # whether the catalog has 1 or many tenants.
+                $catalogMin = ConvertTo-Json -InputObject @($catalog) -Depth 10 -Compress
+                $catalogKey = Join-Path $root.Path "3rdparty\extensions\$ExtensionId\policy"
+                New-PolicyKey -Path $catalogKey
+                Set-Reg -Path $catalogKey -Name 'tenantCatalog' -Value $catalogMin
+                $tenantCount = @($catalog).Count
+                Write-Host "    -> tenantCatalog written ($tenantCount tenant(s)) under 3rdparty\extensions\$ExtensionId\policy" -ForegroundColor DarkGray
+            } catch {
+                Write-Warning "    Tenant catalog write failed: $($_.Exception.Message). Other policies were still written."
+            }
+        }
     }
 }
 
