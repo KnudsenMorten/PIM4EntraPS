@@ -5,19 +5,19 @@
 <title>PIM Activator</title>
 <style>
   :root { color-scheme: light; }
-  html, body { margin:0; padding:0; width:720px; font-family: -apple-system, "Segoe UI", Roboto, sans-serif; background:#ffffff; color:#1a1a1a; font-size:13px; overflow-x:hidden; }
-  /* Pin header + activation footer + attribution footer at the top/bottom of
-     the popup. ONLY the list area scrolls. This way the user always sees
-     "Developed by Morten Knudsen ... Tenant: ..." without scrolling, and
-     the Activate / Justification controls don't get buried either. */
-  /* Popup sizes to content (compact on sign-in screen, expands when there's
-     a group list to render). The lists themselves get an explicit max-height
-     + overflow so they scroll INSIDE the popup -- footer stays visible. */
-  #list, #myaccess-list { max-height:300px; overflow-y:auto; }
-  /* Hard cap on the outer popup -- prevents the whole body from scrolling
-     when the inner list + footer + attribution row would otherwise push past
-     Chromium's popup viewport. Only the list area scrolls. */
-  html, body { max-height:800px; overflow-y:auto; }   /* 800px = Chromium's hard cap for extension popups */
+  /* Flex column at 800px (Chromium popup cap) so the inner list grows /
+     shrinks to whatever vertical space is left after the header, the
+     Justification/Duration/Activate row, AND the credit footer. No outer
+     scrollbar -- only the role list scrolls. v1.6.19 layout fix. */
+  html, body {
+    margin:0; padding:0; width:720px;
+    font-family: -apple-system, "Segoe UI", Roboto, sans-serif;
+    background:#ffffff; color:#1a1a1a; font-size:13px;
+    overflow:hidden;
+    height:800px;
+    display:flex; flex-direction:column;
+  }
+  #list, #myaccess-list { flex:1; min-height:0; overflow-y:auto; }
   /* Belt-and-braces: every element confined to its parent's width.
      Prevents long unbreakable tokens (scope GUIDs, role names) from making
      rows wider than the popup and triggering horizontal scrollbar. */
@@ -111,7 +111,9 @@
   #myaccess-toolbar .spacer { flex:1; }
   #myaccess-status { padding:8px 12px; color:#57606a; font-size:11px; }
   #myaccess-status.err { color:#cf222e; }
-  #myaccess-list { max-height:520px; overflow:auto; }
+  /* #myaccess-list inherits flex:1 / min-height:0 / overflow-y:auto from
+     the combined rule near the top. No hardcoded max-height -- the list
+     grows to fill the panel just like #list does. v1.6.19 layout fix. */
   .ma-section { padding:8px 12px 4px 12px; color:#57606a; font-size:11px; text-transform:uppercase; letter-spacing:0.5px; border-bottom:1px solid #eaeef2; background:#f6f8fa; }
   .ma-row { padding:8px 12px; border-bottom:1px solid #eaeef2; }
   .ma-row .ma-head { display:flex; align-items:baseline; gap:10px; flex-wrap:wrap; }
@@ -196,7 +198,7 @@
 </div>
 
 <!-- =============== Activate tab =============== -->
-<div role="tabpanel" id="panel-activate">
+<div role="tabpanel" id="panel-activate" style="display:flex; flex-direction:column; flex:1; min-height:0; overflow:hidden;">
   <div id="toolbar" style="display:none">
     <input id="search" type="search" placeholder="Filter groups...">
     <a id="select-all">all</a>
@@ -252,7 +254,7 @@
 </div>
 
 <!-- =============== My Access tab =============== -->
-<div role="tabpanel" id="panel-myaccess" hidden>
+<div role="tabpanel" id="panel-myaccess" hidden style="display:flex; flex-direction:column; flex:1; min-height:0; overflow:hidden;">
   <div id="myaccess-toolbar">
     <button id="myaccess-autofix" title="Sign out and back in to refresh your Microsoft sign-in. Use this if the popup looks broken, if an admin just granted you new permissions, or if you switched between Edge and Chrome.">Re-sign in</button>
     <button id="myaccess-select-all"  title="Tick every active membership for bulk deactivate." style="font-size:11px;">all</button>

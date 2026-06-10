@@ -107,6 +107,27 @@ param(
     [ValidateSet('Edge', 'Chrome', 'Both')]
     [string]$Browser = 'Both',
 
+    # Optional path to the tenant catalog JSON. When supplied, the script
+    # also writes the catalog under the per-extension chrome.storage.managed
+    # registry path so non-Intune boxes get parity with Intune-managed ones
+    # ("Use centrally deployed" tile in the popup turns from 'Not detected'
+    # to active). Defaults to the sibling discovered-tenant-catalog.json if
+    # it exists -- so a zero-arg run works out of the box on the maintainer's
+    # repo layout. Pass an empty string or use -SkipTenantCatalog to skip.
+    [Parameter(ParameterSetName = 'Install')]
+    [string]$CatalogJsonPath = (Join-Path (Split-Path -Parent $MyInvocation.MyCommand.Path) 'discovered-tenant-catalog.json'),
+
+    [Parameter(ParameterSetName = 'Install')]
+    [switch]$SkipTenantCatalog,
+
+    # Opt-in: also write ExtensionInstallAllowlist for our id. Only useful
+    # in environments where the admin has set ExtensionInstallBlocklist='*'.
+    # Default OFF since this caused "can't install any other extension" on
+    # some Chromium versions where the presence of an Allowlist key with
+    # a single entry was interpreted as "deny everything else" (2026-06-10).
+    [Parameter(ParameterSetName = 'Install')]
+    [switch]$WriteAllowlist,
+
     [Parameter(Mandatory, ParameterSetName = 'Uninstall')]
     [switch]$Uninstall
 )
@@ -159,7 +180,13 @@ if ($Uninstall) {
     Write-Host "Removing PIM Activator force-install ($Scope scope, $Browser) for extension $ExtensionId..." -ForegroundColor Yellow
 
     foreach ($root in $policyRoots) {
-        foreach ($subKey in 'ExtensionInstallForcelist','ExtensionInstallAllowlist','ExtensionInstallSources') {
+        # Also clean up the 3rdparty\extensions\<id> tree (tenantCatalog) on uninstall.
+        $catalogRoot = Join-Path $root.Path "3rdparty\extensions\$ExtensionId"
+        if (Test-Path $catalogRoot) {
+            Remove-Item -Path $catalogRoot -Recurse -Force -ErrorAction SilentlyContinue
+            Write-Host "  [$($root.Name)] removed 3rdparty\extensions\$ExtensionId" -ForegroundColor DarkGray
+        }
+        foreach ($subKey in 'ExtensionInstallForcelist','ExtensionInstallAllowlist','ExtensionInstallSources','ExtensionSettings') {
             $kp = Join-Path $root.Path $subKey
             if (Test-Path -LiteralPath $kp) {
                 if (Get-ItemProperty -Path $kp -Name "$slot" -ErrorAction SilentlyContinue) {
@@ -237,15 +264,23 @@ foreach ($root in $policyRoots) {
     Set-Reg -Path $forcelistPath -Name "$slot" -Value "$ExtensionId;$UpdateUrl"
     Write-Host "    -> ExtensionInstallForcelist slot $slot set ($ExtensionId;$UpdateUrl)" -ForegroundColor DarkGray
 
-    # 2. ExtensionInstallAllowlist -- defensive belt-and-braces. If the admin
-    #    has set ExtensionInstallBlocklist to '*' (deny-all default), the
-    #    forcelist still wins for this id, but having the id explicitly
-    #    allow-listed survives any later policy that swaps the precedence
-    #    semantics. No-op when no blocklist is in play.
-    $allowPath = Join-Path $root.Path 'ExtensionInstallAllowlist'
-    New-PolicyKey -Path $allowPath
-    Set-Reg -Path $allowPath -Name "$slot" -Value $ExtensionId
-    Write-Host "    -> ExtensionInstallAllowlist slot $slot set ($ExtensionId)" -ForegroundColor DarkGray
+    # 2. ExtensionInstallAllowlist -- OPT-IN ONLY (-WriteAllowlist).
+    #
+    # 2026-06-10: this used to be written by default as "belt and braces"
+    # in case the admin had ExtensionInstallBlocklist='*'. In practice it
+    # backfired -- on some Chromium versions an Allowlist with ONLY one
+    # id is interpreted as "deny every other extension" even without a
+    # '*' blocklist in play. Symptom: users couldn't install any other
+    # extension. Forcelist already overrides the blocklist for our id,
+    # so the Allowlist write was redundant. Now only written when the
+    # operator explicitly opts in for an environment that DOES set a
+    # '*' blocklist.
+    if ($WriteAllowlist) {
+        $allowPath = Join-Path $root.Path 'ExtensionInstallAllowlist'
+        New-PolicyKey -Path $allowPath
+        Set-Reg -Path $allowPath -Name "$slot" -Value $ExtensionId
+        Write-Host "    -> ExtensionInstallAllowlist slot $slot set ($ExtensionId)  [opt-in, -WriteAllowlist]" -ForegroundColor DarkGray
+    }
 
     # 3. ExtensionInstallSources -- whitelist the host the CRX + updates.xml
     #    are served from. Required if the admin has restricted ExtensionInstallSources
@@ -259,12 +294,79 @@ foreach ($root in $policyRoots) {
         Write-Host "    -> ExtensionInstallSources slot $slot set ($sourcePattern)" -ForegroundColor DarkGray
     }
 
-    # v1.1.x of the extension also read chrome.storage.managed config that
-    # this script used to push (tenantId/clientId/Tenants/etc.). v1.2.0+
-    # ignores it entirely -- tenant id + client id now come from the in-
-    # popup onboarding wizard (per browser profile) instead. Any legacy
-    # managed-config key sitting around is harmless but stale; we leave it
-    # alone here (use -Uninstall to wipe it cleanly).
+    # 4. ExtensionSettings -- per-extension override that pre-grants the
+    #    runtime hosts (a.k.a. <all_urls>) for THIS extension only.
+    #
+    # 2026-06-10 fleet-freeze root cause: from v1.5.11 onward the extension
+    # manifest declares 'https://*/*' in host_permissions (needed by the
+    # /.well-known/pim-activator.json auto-discover feature). Chrome's
+    # auto-update detects this as a permission EXPANSION vs the previously-
+    # installed version and SILENTLY DISABLES the upgrade until the user
+    # clicks Enable in chrome://extensions. With managed Chrome and
+    # DeveloperToolsAvailability=2 (our standard hardening), the user
+    # can't click Enable -- the device is frozen at whatever version it
+    # last consented to. Whole fleet ended up stuck on a mix of v1.1.1,
+    # v1.6.14, etc., with no path forward via the forcelist alone.
+    #
+    # ExtensionSettings runtime_allowed_hosts:['<all_urls>'] pre-grants
+    # the broad scope at policy level, so the permission-expansion gate
+    # never fires and auto-update proceeds silently. Targeted at the
+    # extension id only -- it does NOT grant <all_urls> to anything else.
+    #
+    # Registry layout for Chromium's ExtensionSettings policy on Windows:
+    #   - Key  : <policy-root>\ExtensionSettings
+    #   - Value NAME = the extension id (or '*' for the wildcard default)
+    #   - Value DATA = JSON string of the per-extension settings dict
+    # i.e. NOT {"eheoci...":{...}} written under value name '*' -- that
+    # combo is interpreted as {"*":{"eheoci...":{...}}} which fails
+    # schema validation ("Unknown property: eheoci...") and Chrome silently
+    # drops the policy (2026-06-10 bug). Value name carries the id;
+    # value data carries only the inner per-extension dict.
+    $extSettingsPath = Join-Path $root.Path 'ExtensionSettings'
+    New-PolicyKey -Path $extSettingsPath
+    $extSettingsJson = (@{
+        installation_mode     = 'force_installed'
+        update_url            = $UpdateUrl
+        runtime_allowed_hosts = @('<all_urls>')
+    } | ConvertTo-Json -Depth 5 -Compress)
+    Set-Reg -Path $extSettingsPath -Name $ExtensionId -Value $extSettingsJson
+    Write-Host "    -> ExtensionSettings configured (runtime_allowed_hosts = <all_urls>) -- bypasses permission-expansion gate" -ForegroundColor DarkGray
+
+    # 5. Tenant catalog (chrome.storage.managed.tenantCatalog).
+    #
+    # On Intune-managed boxes the catalog arrives through the custom ADMX
+    # template (Group Policy CSP), surfacing under chrome.storage.managed
+    # so the popup's 'Use centrally deployed' tile turns active. On
+    # non-Intune boxes the same data path -- the chrome.storage.managed
+    # registry namespace -- is directly writable from an admin shell:
+    #
+    #   <policy-root>\3rdparty\extensions\<EXT_ID>\policy\
+    #     tenantCatalog (REG_SZ) = minified JSON array of tenant entries
+    #
+    # The extension reads chrome.storage.managed.tenantCatalog at popup
+    # open time. Same effect as Intune ADMX delivery, just locally pushed.
+    # Skipped when -SkipTenantCatalog OR when the JSON file isn't present.
+    if (-not $SkipTenantCatalog -and $CatalogJsonPath -and (Test-Path -LiteralPath $CatalogJsonPath)) {
+        try {
+            $catalogRaw = Get-Content -LiteralPath $CatalogJsonPath -Raw -Encoding UTF8
+            $catalog    = $catalogRaw | ConvertFrom-Json
+            # PS 5.1 unwraps single-element arrays during pipeline -- use
+            # InputObject + @($catalog) so the JSON keeps its [ ] brackets
+            # whether the catalog has 1 or many tenants.
+            $catalogMin = ConvertTo-Json -InputObject @($catalog) -Depth 10 -Compress
+            $catalogKey = Join-Path $root.Path "3rdparty\extensions\$ExtensionId\policy"
+            New-PolicyKey -Path $catalogKey
+            Set-Reg -Path $catalogKey -Name 'tenantCatalog' -Value $catalogMin
+            $tenantCount = @($catalog).Count
+            Write-Host "    -> tenantCatalog written ($tenantCount tenant(s)) under 3rdparty\extensions\$ExtensionId\policy" -ForegroundColor DarkGray
+        } catch {
+            Write-Warning "    Tenant catalog push failed: $($_.Exception.Message). Other policies were still written."
+        }
+    } elseif ($SkipTenantCatalog) {
+        Write-Host "    -> tenantCatalog skipped (-SkipTenantCatalog)" -ForegroundColor DarkGray
+    } elseif ($CatalogJsonPath) {
+        Write-Host "    -> tenantCatalog skipped (no JSON found at $CatalogJsonPath)" -ForegroundColor DarkGray
+    }
 }
 
 Write-Host ""
