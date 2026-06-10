@@ -1,9 +1,10 @@
 # Release notes for PIM4EntraPS
 
-## v2.4.110
+## v2.4.111
 
 Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monorepo:
 
+- release: PIM4EntraPS v2.4.111 - Deploy-PimActivatorClient.ps1 stops defaulting to sibling discovered-tenant-catalog.json (cross-tenant leak); auto-discovers from live Entra instead (34a1f1c8)
 - release: PIM4EntraPS v2.4.110 - Deploy-PimActivatorIntune.ps1 auto-skips Forcelist defValues when existing policy owns slot (avoids IME slot-cycling under -Force) (1771e06b)
 - release: PIM4EntraPS v2.4.109 - PIM4EntraPS.PimActivator.admx removes unused <using> namespace dependency (strict tenants rejected upload as NamespaceMissing:Microsoft.Policies.Windows) (91c3e488)
 - release: PIM4EntraPS v2.4.108 - Deploy-PimActivatorIntune.ps1 drops defaultLanguageCode from ADMX upload payload (Intune 400 ADMXDefaultLanguageCodeNotNull) (a17463d2)
@@ -33,13 +34,28 @@ Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monor
 - add Verify-PimActivatorIntunePolicy.ps1 - portable HKLM registry verifier for the 6 PIM Activator Intune policies, runs on any Windows endpoint with PS 5.1+ (no Graph dep) (8bf15a34)
 - fix Setup-PimActivatorIntune.ps1 list-value shape: put data in BOTH 'name' and 'value' for non-explicit-value listBox presentations (Intune portal editor renders 'name', not 'value'; the v2.4.94 release showed slot numbers like '1' instead of the extension+URL string) (ec6fe4ee)
 - release: PIM4EntraPS v2.4.94 + extension v1.6.6 - Setup-PimActivatorIntune.ps1 one-click unified ADMX-backed profile + popup body overflow:auto so content past 600px scrolls + 3-row status panel (Intune managed config / local imported / total in catalog) replaces single-line status (f9d64236)
-- fix Push-PimActivatorTenantCatalogProfile.ps1: lookup ADMX-ingested definitions via /groupPolicyDefinitions?$filter=startswith(categoryPath,'\PIM4EntraPS') -- the /groupPolicyUploadedDefinitionFiles/{id}/definitions navigation isn't queryable (7a4c6b8f)
 
 ---
 
 # Release notes -- PIM4EntraPS
 
 > **Curated changelog.** The publish workflow auto-prepends recent monorepo commits as a raw activity log; this file is the human-friendly narrative on top.
+
+---
+
+## v2.4.111 -- Deploy-PimActivatorClient.ps1 stops defaulting to the sibling `discovered-tenant-catalog.json` (cross-tenant leak); auto-discovers from live Entra instead
+
+**Incident.** A customer deploy ran `Deploy-PimActivatorClient.ps1` on a Nunagreen-tenant box. The script's `-CatalogJsonPath` parameter defaulted to `(scriptDir)\discovered-tenant-catalog.json` -- a sibling file pattern that "worked out of the box on the maintainer's repo layout". That file was untracked but PRESENT on the box (likely transferred along with the script folder from an earlier setup on a 2linkIT-tenant box). The script silently picked it up and wrote **2linkIT's** tenantId + clientId into the customer's `chrome.storage.managed.tenantCatalog` registry path -- cross-tenant data leak. No log line called it out because the file existed and the script saw nothing to warn about.
+
+**Fix.** Three parts:
+
+1. `Deploy-PimActivatorClient.ps1`: removed the sibling-file default. When `-CatalogJsonPath` is omitted (the common case), the script now **auto-discovers from the LIVE Microsoft Graph context on the box** -- same logic Deploy-PimActivatorIntune.ps1 uses: `/organization` for tenant id + display name, `/applications?$filter=startswith(displayName,'PIM Activator')` for the per-tenant client id. Connect-MgGraph runs interactively if not already connected. The catalog source is now ALWAYS the tenant the operator is currently signed into -- never a stale file from somewhere else.
+
+2. `.gitignore` (PIM4EntraPS-level): added `tools/pim-activator/discovered-tenant-catalog.json`. Defense-in-depth so an accidentally-committed catalog file from a maintainer's working dir can never propagate to other tenants' boxes via `git pull`.
+
+3. Each catalog-source path now logs a clear line: `catalog source: -CatalogJsonPath '...'` or `catalog source: live Entra auto-discover  (tenant 'X' / <tenantId>  clientId <appId>)`. The operator sees on every run which tenant's data is about to be written, so a cross-tenant mismatch is impossible to miss.
+
+**Recovery on a contaminated box.** Re-run `Deploy-PimActivatorClient.ps1` after `git pull`. With v2.4.111, it discovers the box's actual tenant and overwrites the bad `tenantCatalog` registry value with the correct one. Verify with `Get-ItemProperty 'HKLM:\SOFTWARE\Policies\Microsoft\Edge\3rdparty\extensions\eheocihmlppcophaeakmdenhgcookkab\policy' -Name tenantCatalog` -- the JSON should contain the box's own tenant id, not 2linkIT's `f0fa27a0-...`.
 
 ---
 
