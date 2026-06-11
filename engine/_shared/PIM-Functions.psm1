@@ -4981,59 +4981,48 @@ Fix (one-time per tenant):
                             write-host ""
                             Write-host "Creating $($TargetPlatform) account $($DisplayName)"
 
+                            # v2.4.121: CSV TierLevel column carries the TIER
+                            # (T0/T1/T2/T3) -- NOT the Level. Level is a
+                            # separate dimension encoded elsewhere (typically
+                            # in the UPN body, e.g. 'Admin-SKR-L0-T0-ID' carries
+                            # both L0 Level and T0 Tier). The old engine matched
+                            # CSV TierLevel against literal "L0" / "L1" -- so
+                            # any CSV using "T0" / "T1" silently dropped every
+                            # Create row. Fixed by matching against the actual
+                            # Tier convention. The legacy "L0" / "L1" literals
+                            # are accepted as back-compat so historical CSVs
+                            # that mis-labelled the column don't break.
+                            #
+                            # Tier 0 (T0) -> high-priv OU ($PathAdminsL0T0).
+                            # Tier 1/2/3 (T1/T2/T3) and blank -> general OU
+                            # ($PathAdmins).
+                            $tierUpper = if ($null -ne $TierLevel) { ([string]$TierLevel).ToUpperInvariant().Trim() } else { '' }
+                            $isTier0 = ($tierUpper -eq 'T0') -or ($tierUpper -eq 'L0')  # 'L0' kept ONLY for back-compat with the pre-v2.4.121 misnamed CSVs
+                            $targetOu = if ($isTier0) { $PathAdminsL0T0 } else { $PathAdmins }
+                            $tierForLog = if ([string]::IsNullOrWhiteSpace($tierUpper)) { '<blank>' } else { $tierUpper }
+
                             $createOk = $false
-                            try {
-                                If ($TierLevel -eq "L0")
-                                    {
-
-                                        $Result = New-ADUser -Name $UserName `
-                                                             -GivenName $FirstName `
-                                                             -Surname $LastName `
-                                                             -DisplayName $DisplayName `
-                                                             -Description $Description `
-                                                             -AccountPassword $AD_PasswordProfile `
-                                                             -EmailAddress $UserPrincipalName `
-                                                             -UserPrincipalName $UserPrincipalName `
-                                                             -Path $PathAdminsL0T0 `
-                                                             -Enabled:$true `
-                                                             @adCommonParams `
-                                                             -ErrorAction Stop
-                                        $createOk = $true
-                                    }
-                                ElseIf ($TierLevel -eq "L1")
-                                    {
-
-                                        $Result = New-ADUser -Name $UserName `
-                                                             -GivenName $FirstName `
-                                                             -Surname $LastName `
-                                                             -DisplayName $DisplayName `
-                                                             -Description $Description `
-                                                             -AccountPassword $AD_PasswordProfile `
-                                                             -EmailAddress $UserPrincipalName `
-                                                             -UserPrincipalName $UserPrincipalName `
-                                                             -Path $PathAdmins `
-                                                             -Enabled:$true `
-                                                             @adCommonParams `
-                                                             -ErrorAction Stop
-                                        $createOk = $true
-                                    }
-                                Else
-                                    {
-                                        # v2.4.120: previously the engine silently
-                                        # skipped rows whose TierLevel wasn't
-                                        # "L0" or "L1" (including blank, "L2",
-                                        # "T0", typos, etc.). The Create branch
-                                        # printed "Creating AD account ..." but
-                                        # neither If nor ElseIf matched, no
-                                        # New-ADUser call was made, no error,
-                                        # no password persisted -- the row
-                                        # disappeared from the log without trace.
-                                        # Surface the skip explicitly.
-                                        $tierForLog = if ([string]::IsNullOrWhiteSpace($TierLevel)) { '<blank>' } else { $TierLevel }
-                                        Write-Host ("ERROR: New-ADUser SKIPPED for {0} -- CSV TierLevel '{1}' is not 'L0' or 'L1'; engine has no OU to target. Fix the CSV TierLevel column or extend the AD-create branch to handle this tier. NOT persisting password." -f $UserPrincipalName, $tierForLog) -ForegroundColor Red
-                                    }
-                            } catch {
-                                Write-Host ("ERROR: New-ADUser failed for {0}: {1}. NOT persisting password." -f $UserPrincipalName, $_.Exception.Message) -ForegroundColor Red
+                            if ([string]::IsNullOrWhiteSpace($targetOu)) {
+                                Write-Host ("ERROR: New-ADUser SKIPPED for {0} -- target OU is empty (TierLevel='{1}' resolved to {2}, but the corresponding -Path parameter wasn't supplied by the launcher). Fix the launcher's PathAdmins / PathAdminsL0T0 wiring. NOT persisting password." -f $UserPrincipalName, $tierForLog, $(if ($isHighPriv) { '$PathAdminsL0T0' } else { '$PathAdmins' })) -ForegroundColor Red
+                            } else {
+                                try {
+                                    $Result = New-ADUser -Name $UserName `
+                                                         -GivenName $FirstName `
+                                                         -Surname $LastName `
+                                                         -DisplayName $DisplayName `
+                                                         -Description $Description `
+                                                         -AccountPassword $AD_PasswordProfile `
+                                                         -EmailAddress $UserPrincipalName `
+                                                         -UserPrincipalName $UserPrincipalName `
+                                                         -Path $targetOu `
+                                                         -Enabled:$true `
+                                                         @adCommonParams `
+                                                         -ErrorAction Stop
+                                    $createOk = $true
+                                    Write-Host ("  -> OU: {0}" -f $targetOu) -ForegroundColor DarkGray
+                                } catch {
+                                    Write-Host ("ERROR: New-ADUser failed for {0} (TierLevel='{1}', OU='{2}'): {3}. NOT persisting password." -f $UserPrincipalName, $tierForLog, $targetOu, $_.Exception.Message) -ForegroundColor Red
+                                }
                             }
 
                             # Only persist the generated password when the

@@ -1,9 +1,10 @@
 # Release notes for PIM4EntraPS
 
-## v2.4.120
+## v2.4.121
 
 Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monorepo:
 
+- release: PIM4EntraPS v2.4.121 -- AD-create branch matches CSV TierLevel against the Tier convention (T0/T1/T2/T3) -- T0 -> PathAdminsL0T0, T1/T2/T3/blank -> PathAdmins. Previously the engine matched Level literals (L0/L1) so Tier-formatted CSVs silently dropped every Create row. L0 still accepted as T0-equivalent for back-compat. Level and Tier are distinct dimensions; CSV column is the Tier. (5d0cdd62)
 - release: PIM4EntraPS v2.4.120 -- AD-create branch surfaces an explicit [ERROR] when CSV TierLevel is blank or not L0/L1 (previously: dangling 'Creating AD account' header with no New-ADUser call, no exception, no password file row, row silently dropped) (93e53c67)
 - release: PIM4EntraPS v2.4.119 -- engine imports AutomateITPS.AD + calls Resolve-PlatformGMSACredentials after Initialize-PlatformLegacyIdentity so KV stub passwords on gMSA Legacy.* slots get swapped for the real managed password read from the DC (gMSA msDS-ManagedPassword); the AD branch then auths normally via -Credential (3e002976)
 - release: PIM4EntraPS v2.4.118 -- AD branch: revert v2.4.117 gMSA -Credential omission; restore v1 always-pass-Credential contract (customer test on SYSTEM-running host proved dropping -Credential cascades through to computer-account auth which lacks write rights). Hard-fail Get-ADUser + conditional Write-PimAdminPassword improvements kept. (c766ed13)
@@ -33,13 +34,51 @@ Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monor
 - release: extension v1.6.15 - wizard ALWAYS shows mode-selector on fresh deploy (removed auto-pick for single-tenant catalog that was silently skipping the picker); catalogPanel now carries BOTH picker + import sub-divs so 'Use centrally deployed' (multi) and 'Import JSON' modes can toggle independently regardless of current catalog state (a3885a4a)
 - release: extension v1.6.14 - (a) new 3-card mode selector on first-run/reset wizard: 'Use centrally deployed' / 'Import JSON catalog' / 'Add single tenant'; each mode shows only its relevant section + a Back link to return to the picker (b) fix signOut: clear tenantTokens[activeTenantId] (was leaving the per-tenant token cache so loadConfig silently restored tokens after sign-out) + open login.microsoftonline.com/common/oauth2/v2.0/logout in a new tab to kill the Edge-side session cookies (c1d17a33)
 - release: extension v1.6.13 - footer collapsed to single compact row (left: title + repo + dev attribution + GitHub/Report icons; right: tenant short-name + abbreviated ID + reset). Uses flex-wrap so right side drops to second line only when needed instead of getting clipped. Test-PushTenantCatalog.ps1 now seeds defaultJustification + defaultDurationHours in the auto-generated catalog. (5b308334)
-- release: extension v1.6.12 - footer row 1 now carries GitHub + Report bug chips next to title; row 2 only shows developer attribution + tenant name (fb0a3d86)
 
 ---
 
 # Release notes -- PIM4EntraPS
 
 > **Curated changelog.** The publish workflow auto-prepends recent monorepo commits as a raw activity log; this file is the human-friendly narrative on top.
+
+---
+
+## v2.4.121 -- AD-create branch: match CSV TierLevel against the Tier convention (T0/T1/T2/T3); previously only Level literals (L0/L1) matched, so Tier-formatted CSVs silently dropped every Create row
+
+### Concept clarification
+
+**Level and Tier are NOT the same thing.** They're two parallel dimensions in the PIM model:
+
+- **Level** (L0/L1/L2/L3, ...) -- privilege depth of the account itself.
+- **Tier** (T0/T1/T2/T3) -- AD security-tier model the account belongs to.
+
+A given admin account is described by BOTH (e.g. `Admin-SKR-L0-T0-ID` = Level 0 Cloud admin in Tier 0). They get encoded together in the UPN body.
+
+### Symptom
+
+Every row in the customer's `Account-Definitions-Admins.custom.csv` has `TierLevel = T0` (the **Tier**). The engine's Create branch matched literal `L0` / `L1` (the **Level**). No row ever matched, so every AD-Create silently no-op'd pre-v2.4.120 or surfaced the unknown-tier error in v2.4.120 -- no AD object ever got created.
+
+### Root cause
+
+The engine's `If ($TierLevel -eq "L0") / ElseIf ($TierLevel -eq "L1")` chain treated the CSV column as the Level, when in fact the column is the Tier (the column name `TierLevel` is ambiguous and the historical Level convention was a misnomer).
+
+### Fix
+
+Engine now matches the CSV column against the Tier convention:
+
+- `T0` -> high-priv OU (`$PathAdminsL0T0`).
+- `T1` / `T2` / `T3` / blank -> general OU (`$PathAdmins`).
+- `L0` is still recognised as `T0` purely as back-compat for pre-v2.4.121 CSVs that mis-labelled the column with the Level value.
+
+The engine also now logs the resolved OU on a successful create -- `  -> OU: <DistinguishedName>` -- and defensively guards an empty `$PathAdmins` / `$PathAdminsL0T0` (launcher mis-wire) with a clear red `[ERROR]` instead of calling `New-ADUser -Path ''`.
+
+### Files changed
+
+- `engine/_shared/PIM-Functions.psm1` -- `If L0 / ElseIf L1 / Else` chain replaced with a Tier-aware normaliser; OU resolution + emptiness guard before `New-ADUser`; per-create OU log line.
+
+### How to apply
+
+- Pull, rerun. The Tier-formatted CSVs (yours) now provision the `ADM-*` / `Admin-*-AD` / `x-Admin-*-AD` rows that have been silently failing.
 
 ---
 
