@@ -211,8 +211,12 @@ function Invoke-PimPreflightValidation {
         try {
             $tplate = [string]$naming.AdminAccountPattern
             # Tokens like {Owner} -> .+ ; escape the rest.
+            # NB: [regex]::Escape escapes '{' but NOT '}' (.NET asymmetry), so
+            # the closing brace must be matched optionally-escaped -- the old
+            # pattern ('\\\}') never matched, the token survived as a literal,
+            # and EVERY legitimate UPN got a false PIM-NAME-002 warning.
             $reSrc = [regex]::Escape($tplate)
-            $reSrc = $reSrc -replace '\\\{[A-Za-z][A-Za-z0-9]*\\\}', '.+'
+            $reSrc = $reSrc -replace '\\\{[A-Za-z][A-Za-z0-9]*\\?\}', '.+'
             $adminPatternRegex = [regex]::new('^' + $reSrc + '($|@)')
         } catch { $adminPatternRegex = $null }
     }
