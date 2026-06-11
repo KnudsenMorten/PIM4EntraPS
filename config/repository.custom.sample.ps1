@@ -80,6 +80,15 @@ $global:AccountsDefinitionFile                            = Get-PimConfigCsv  -N
 $global:AccountsDefinitionFile_LastApplied                = Get-PimOutputPath -Name 'Account-Definitions-Admins_LastApplied.csv'
 $global:AccountsDefinitionFile_Delta                      = Get-PimOutputPath -Name 'Account-Definitions-Admins_Delta.csv'
 
+# --- Workload RBAC assignments (OPT-IN; v2.4.143+) ---
+# No wiring needed here: the engine auto-detects
+#   config[/<variant>]/PIM-Assignments-Workloads.custom.csv
+# and, when present, applies PIM groups to workload RBAC roles
+# (Defender XDR Unified RBAC, Intune, ...) via the connector definitions
+# in workloads/connectors/*.connector.json. Start from
+# PIM-Assignments-Workloads.custom.sample.csv and see
+# docs/WORKLOAD-CONNECTORS.md. No file = step is skipped.
+
 
 ###################################################################################################################
 ###################################################################################################################

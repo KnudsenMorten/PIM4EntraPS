@@ -1,9 +1,10 @@
 # Release notes for PIM4EntraPS
 
-## v2.4.142
+## v2.4.143
 
 Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monorepo:
 
+- release: PIM4EntraPS v2.4.143 -- wire Apply-PimWorkloadAssignments into PIM-Baseline-Management-CSV as a final opt-in Workload RBAC step: runs only when config[/<variant>]/PIM-Assignments-Workloads.custom.csv exists (NOT via Get-PimConfigCsv -- its sample auto-bootstrap would arm the feature with shipped example rows), honors -WhatIfMode, resolves connectors from workloads/connectors/, benefits from the engine Groups_All_ID inventory for GroupTag cache-hit resolution; repository.custom.sample.ps1 documents the opt-in (c9e22c20)
 - release: PIM4EntraPS v2.4.142 -- Workload Connectors phase 1: JSON connector definitions for Defender XDR Unified RBAC + Intune roles (live role listing, token-templated assign/remove bodies); 15th config file PIM-Assignments-Workloads (desired state, full Manager lifecycle); engine Apply-PimWorkloadAssignments (idempotent diff-and-apply, -WhatIfMode, removes only self-created assignments); Manager Maintenance panel with live role pickers + /api/workloads + /api/workload-roles. Live-verified: 16 Defender + 11 Intune roles listed from a real tenant, WhatIf plan resolved real group->objectId with exact would-assign lines. Design doc extended with activation-stats right-sizing, deleted-resource auto-cleanup, orphaned-group drift phases (63ebc705)
 - release: PIM4EntraPS v2.4.141 -- Permission Templates: maintainer-curated delegation packs in templates/*.template.json (distributed by repo sync), diffed per active instance by GET /api/templates (presence by natural row keys); Create tab shows each pack as Up-to-date or "n new permission(s)" with one-click import into pending; shipped starter pack defender-xdr v2 (7 Unified-RBAC workload groups, grown from 3 in v1 to demo the new-permissions flow). Plus docs/WORKLOAD-CONNECTORS.md: full design for applying PIM groups to workload RBAC (Defender XDR, Intune, Power BI, Dataverse, Business Central, Azure AI) via JSON connector definitions + a 15th desired-state CSV + an engine applier with auth adapters (bfc8f329)
 - release: PIM4EntraPS v2.4.141 -- Delegation Map becomes an editor: select an admin -> "+ Assign to group..." stages PIM-Assignments-Admins rows by clicking one or more role/org groups (duplicate-guarded, Eligible/365d defaults); select a role group -> "+ Link capability bundle..." stages PIM-Assignments-Groups nesting rows; staged relations draw as dashed amber wires via a pending overlay on the board model. Two-step focus UX (pick person or permission -> board collapses to the transitive path, toggleable). Long Azure scope/AU names render two-line with full wrap in focus view (545976d0)
@@ -33,13 +34,25 @@ Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monor
 - release: PIM4EntraPS v2.4.116 -- PIM-Baseline-Management-CSV engine calls Initialize-PlatformLegacyIdentity right after Initialize-PlatformAutomationFramework so KV Legacy-UserName/Password-Internal-Prod actually land in Context.Identity.Legacy.Internal.Prod (v2.4.115 wired the reader but nothing was populating the slot) (8965324b)
 - release: PIM4EntraPS v2.4.115 -- PIM-Baseline-Management-CSV engine now prefers v2 platform Context.Identity.Legacy.Internal.Prod for AD/gMSA credential (KV: Legacy-UserName-Internal-Prod + Legacy-Password-Internal-Prod), falls back to legacy $AD_Credentials global (98f29b4b)
 - release: PIM4EntraPS v2.4.114 -- PIM-Baseline-Management-CSV engine now calls CreateUpdate-Accounts-From-file-CSV with -OnlyAD too (was hardcoded to -OnlyID; AD rows in the CSV were silently ignored); guards on Get-ADUser availability + $AD_Credentials (3fa86c9a)
-- release: PIM4EntraPS v2.4.113 - README PIM Activator section rewritten to today's deploy architecture (docs-only) (df162df9)
 
 ---
 
 # Release notes -- PIM4EntraPS
 
 > **Curated changelog.** The publish workflow auto-prepends recent monorepo commits as a raw activity log; this file is the human-friendly narrative on top.
+
+---
+
+## v2.4.143 -- Workload RBAC applier wired into the CSV baseline engine (opt-in)
+
+The v2.4.142 `Apply-PimWorkloadAssignments` function now actually runs on the pull cycle: PIM-Baseline-Management-CSV gained a final **Workload RBAC** step after the admin-assignment step.
+
+- **Opt-in by file presence**: the step runs only when `config[/<variant>]/PIM-Assignments-Workloads.custom.csv` exists. Deliberately NOT resolved via `Get-PimConfigCsv` -- its first-run auto-bootstrap would copy the shipped EXAMPLE rows into live config and the engine would try to apply them. No file = one grey skip line.
+- Honors `-WhatIfMode` like the account steps; connector definitions resolve from `workloads/connectors/` at the solution root; variant-aware (config-local vs config-msp).
+- `repository.custom.sample.ps1` documents the opt-in (no path wiring needed -- the engine self-detects).
+- Group resolution gets the engine's full `$Global:Groups_All_ID` inventory (built earlier in the run), so GroupTag lookups are cache-hits instead of per-row Graph queries.
+
+Verified: engine parses clean; resolution + skip path tested in a real PS 5.1 process against the live config layout (no customer file present -> step skips; connectors dir + exported applier both resolve). The apply path itself was live-verified in v2.4.142's WhatIf run against a real tenant.
 
 ---
 
