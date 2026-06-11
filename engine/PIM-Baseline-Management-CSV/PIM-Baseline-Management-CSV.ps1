@@ -238,10 +238,31 @@ Write-Output "******************************************************************
 ######################################################################################################################
 
     if ($global:WhatIfMode) {
-        Write-Host "[WHATIF] Skipping CreateUpdate-Accounts-From-file-CSV (creates/modifies real admin accounts in Entra ID + Exchange Online)." -ForegroundColor Yellow
+        Write-Host "[WHATIF] Skipping CreateUpdate-Accounts-From-file-CSV (creates/modifies real admin accounts in Entra ID + on-prem AD + Exchange Online)." -ForegroundColor Yellow
     } else {
+        # ID rows (Entra-ID cloud admin accounts). Always runs -- pure cloud, no on-prem dep.
         CreateUpdate-Accounts-From-file-CSV -AccountsDefinitionFile $AccountsDefinitionFile `
                                             -OnlyID
+
+        # AD rows (on-prem AD admin accounts). Only runs when the ActiveDirectory
+        # RSAT module is loadable AND $AD_Credentials is populated -- skips cleanly
+        # on cloud-only hosts that have AD rows in the CSV they don't intend to
+        # provision here. Pre-v2.4.114 this branch was never called at all, so
+        # AD rows in the CSV were silently ignored.
+        $adCmdAvailable = $null -ne (Get-Command Get-ADUser -ErrorAction SilentlyContinue)
+        if (-not $adCmdAvailable) {
+            Write-Host "[INFO] ActiveDirectory module not available on this host -- skipping AD-account branch. AD rows in the CSV will not be provisioned in this run." -ForegroundColor Yellow
+        }
+        elseif (-not $AD_Credentials) {
+            Write-Host "[INFO] `$AD_Credentials not set (legacy Connect_Azure / 2LINKIT-Functions did not populate it) -- skipping AD-account branch. AD rows in the CSV will not be provisioned in this run." -ForegroundColor Yellow
+        }
+        else {
+            CreateUpdate-Accounts-From-file-CSV -AccountsDefinitionFile $AccountsDefinitionFile `
+                                                -Credentials       $AD_Credentials `
+                                                -PathAdmins        $PathAdmins `
+                                                -PathAdminsL0T0    $PathAdminsL0T0 `
+                                                -OnlyAD
+        }
     }
 
 ######################################################################################################
