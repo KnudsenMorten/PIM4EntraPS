@@ -1,9 +1,10 @@
 # Release notes for PIM4EntraPS
 
-## v2.4.124
+## v2.4.125
 
 Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monorepo:
 
+- release: PIM4EntraPS v2.4.125 -- guard Add-AdministrativeUnit-Member against null \$AUInfo / \$GroupInfo at both CreateUpdate-PIM-for-Groups-From-file-CSV call sites so a row with a missing AdministrativeUnitTag logs a clear red error and 'continue's instead of crashing the engine with 'Cannot process argument transformation on parameter ObjectId. Cannot convert value to type System.String.' (db887ecf)
 - release: PIM4EntraPS v2.4.124 -- PathAdmins / PathAdminsL0T0 moved under canonical \$global:PIM_NamingConventions hashtable (matching AdminAccountPatterns, PimGroupPattern, TagPrefixToCsv) with v2.4.123 free-floating-globals shape kept as back-compat fallback; locked.ps1 + custom.sample.ps1 updated to document the new shape (dca61cd2)
 - release: PIM4EntraPS v2.4.123 -- (1) skip Connect-ExchangeOnline on the -OnlyAD invocation + reuse existing EXO session via Get-ConnectionInformation so EXO connects exactly once per launcher run (was 2x after v2.4.114); (2) engine resolves $PathAdmins / $PathAdminsL0T0 from $global: fallback so AD-create rows finally have an OU to target (a7e9f695)
 - release: PIM4EntraPS v2.4.122 -- AD-create OU routing now driven by UserName naming convention (regex match on L0/T0 markers bounded by -/_/. in the name) instead of CSV TierLevel column; matches the customer pattern where privilege class is encoded in the account name itself (c0788dfc)
@@ -33,13 +34,78 @@ Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monor
 - release: PIM4EntraPS v2.4.99 - Deploy-PimActivatorIntune.ps1 catalog auto-discover (hotfix over v2.4.98) (785ff800)
 - release: PIM4EntraPS v2.4.98 + extension v1.6.19 - unified Intune deploy + critical fix for ExtensionSettings schema bug that froze fleet at old versions + popup CSS no longer overflows Chromium popup cap (508f6eab)
 - release: PIM4EntraPS v2.4.97 - Update-PimActivator-Extension.ps1 SAFETY FIX (no more profile wipes) + faster update trigger via --extensions-update-frequency=30 (cdc2c7cb)
-- release: extension v1.6.16 - revert v1.6.13's footer-collapse experiment; restore 2-row footer layout (row 1: title + repo + GitHub + Report bug | tenant ID; row 2: dev attribution | tenant name + reset) (7018f592)
 
 ---
 
 # Release notes -- PIM4EntraPS
 
 > **Curated changelog.** The publish workflow auto-prepends recent monorepo commits as a raw activity log; this file is the human-friendly narrative on top.
+
+---
+
+## v2.4.125 -- guard `Add-AdministrativeUnit-Member` against null lookups so a single bad CSV row doesn't crash the engine with a cryptic `Cannot process argument transformation on parameter 'ObjectId'` error
+
+### Symptom
+
+```
+Processing group PIM-Entra-ID-AuthenticationAdministrator-L1-T0-CP-ID
+Checking Group Owners
+OK - Group PIM-Entra-ID-AuthenticationAdministrator-L1-T0-CP-ID exists with correct data
+launcher.internal-vm.ps1: Cannot process argument transformation on parameter 'ObjectId'. Cannot convert value to type System.String.
+```
+
+The engine processed the group fine, then crashed immediately after on the next call -- `Add-AdministrativeUnit-Member -ObjectId <null>`.
+
+### Root cause
+
+Two `CreateUpdate-PIM-for-Groups-From-file-CSV`-style loops did this:
+
+```powershell
+$AU = $Global:AU_Definitions | where AdministrativeUnitTag -eq $row.AdministrativeUnitTag
+if ($AU) { $AUName = $AU.AUDisplayName }
+else     { Write-Host "ERROR: Could NOT find any AU..." -ForegroundColor Red }
+                                # ^^^ NO 'continue' -- execution falls through
+
+$AUInfo = $AU_ALL | Where DisplayName -eq $AUName       # $AUName empty -> $AUInfo $null
+$GroupInfo = Resolve-PimGroupCached -DisplayName $GroupName
+Add-AdministrativeUnit-Member -AuId $AUInfo.Id -AddType Group -ObjectId $GroupInfo.Id
+                                #   ^^^^^^^^^^                            ^^^^^^^^^^^^^
+                                #   $null on prior miss; passing to        $null when cache miss
+                                #   [string]$AuId fails 'Cannot process    on a brand-new group
+                                #   argument transformation'.              that hasn't propagated.
+```
+
+The "Could NOT find any AU" error printed to console but the loop fell straight through into the AU member-add, where the mandatory `[string]` params on `Add-AdministrativeUnit-Member` refused to bind `$null` -- terminating the whole engine.
+
+### Fix
+
+Both call sites (lines ~2160 and ~2255 of `engine/_shared/PIM-Functions.psm1`) now guard both lookups BEFORE calling `Add-AdministrativeUnit-Member`:
+
+```powershell
+if (-not $AUInfo -or [string]::IsNullOrWhiteSpace([string]$AUInfo.Id)) {
+    Write-Host "ERROR: AU lookup failed for tag '...'; skipping AU member-add for group '...'." -ForegroundColor Red
+    continue
+}
+if (-not $GroupInfo -or [string]::IsNullOrWhiteSpace([string]$GroupInfo.Id)) {
+    Write-Host "ERROR: Resolve-PimGroupCached returned null for '...' -- can't bind it to AU '...'. Skipping." -ForegroundColor Red
+    continue
+}
+Add-AdministrativeUnit-Member -AuId $AUInfo.Id -AddType Group -ObjectId $GroupInfo.Id
+```
+
+A single bad row now logs a clear red error and the engine continues with the next row instead of dying.
+
+### Operator action
+
+If you see the `ERROR: AU lookup failed for tag '<X>'` line, the CSV row's `AdministrativeUnitTag` column doesn't match any AU defined in your AU CSV. Either add the AU definition or fix the tag in the offending row.
+
+### Files changed
+
+- `engine/_shared/PIM-Functions.psm1` -- both `CreateUpdate-PIM-for-Groups-From-file-CSV` loops guard `$AUInfo` and `$GroupInfo` before calling `Add-AdministrativeUnit-Member`.
+
+### How to apply
+
+- Pull, rerun. The launcher should now complete every group-processing pass even if a row has a missing AU tag.
 
 ---
 
