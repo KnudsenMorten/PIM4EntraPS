@@ -1,9 +1,10 @@
 # Release notes for PIM4EntraPS
 
-## v2.4.119
+## v2.4.120
 
 Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monorepo:
 
+- release: PIM4EntraPS v2.4.120 -- AD-create branch surfaces an explicit [ERROR] when CSV TierLevel is blank or not L0/L1 (previously: dangling 'Creating AD account' header with no New-ADUser call, no exception, no password file row, row silently dropped) (93e53c67)
 - release: PIM4EntraPS v2.4.119 -- engine imports AutomateITPS.AD + calls Resolve-PlatformGMSACredentials after Initialize-PlatformLegacyIdentity so KV stub passwords on gMSA Legacy.* slots get swapped for the real managed password read from the DC (gMSA msDS-ManagedPassword); the AD branch then auths normally via -Credential (3e002976)
 - release: PIM4EntraPS v2.4.118 -- AD branch: revert v2.4.117 gMSA -Credential omission; restore v1 always-pass-Credential contract (customer test on SYSTEM-running host proved dropping -Credential cascades through to computer-account auth which lacks write rights). Hard-fail Get-ADUser + conditional Write-PimAdminPassword improvements kept. (c766ed13)
 - release: PIM4EntraPS v2.4.117 -- CRITICAL fix: AD branch is now gMSA-aware (drops -Credential when SAM ends with $) + hard-fails Get-ADUser instead of swallowing auth errors that cascaded into Create + Write-PimAdminPassword writing phantom passwords for accounts that never existed (d76bccea)
@@ -33,13 +34,55 @@ Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monor
 - release: extension v1.6.14 - (a) new 3-card mode selector on first-run/reset wizard: 'Use centrally deployed' / 'Import JSON catalog' / 'Add single tenant'; each mode shows only its relevant section + a Back link to return to the picker (b) fix signOut: clear tenantTokens[activeTenantId] (was leaving the per-tenant token cache so loadConfig silently restored tokens after sign-out) + open login.microsoftonline.com/common/oauth2/v2.0/logout in a new tab to kill the Edge-side session cookies (c1d17a33)
 - release: extension v1.6.13 - footer collapsed to single compact row (left: title + repo + dev attribution + GitHub/Report icons; right: tenant short-name + abbreviated ID + reset). Uses flex-wrap so right side drops to second line only when needed instead of getting clipped. Test-PushTenantCatalog.ps1 now seeds defaultJustification + defaultDurationHours in the auto-generated catalog. (5b308334)
 - release: extension v1.6.12 - footer row 1 now carries GitHub + Report bug chips next to title; row 2 only shows developer attribution + tenant name (fb0a3d86)
-- release: extension v1.6.11 - footer 2-row flex layout (title left + tenant ID right on row 1; dev attribution left + tenant name right on row 2) (3bee8363)
 
 ---
 
 # Release notes -- PIM4EntraPS
 
 > **Curated changelog.** The publish workflow auto-prepends recent monorepo commits as a raw activity log; this file is the human-friendly narrative on top.
+
+---
+
+## v2.4.120 -- AD-create branch: surface "Creating AD account" rows that have an unknown / blank TierLevel instead of silently dropping them
+
+### Symptom
+
+```
+Updating AD user Simon Kriegbaum (Admin, Legacy, AD, L0, T0)
+Updating AD user Morten Knudsen (Admin, Legacy, AD, L0, T0)
+...
+Creating AD account Kasper Teilbæk (Admin, Legacy, AD)
+Creating AD account Martin Skjøth-Jarecki (Admin, Cloud, AD)
+Updating AD user Martin Jakub Skjøth-Jarecki (Admin, Cloud, AD)
+```
+
+Two `Creating AD account ...` lines but **no password persisted, no error printed**, and a subsequent re-run showed no AD object created. The rows just disappeared.
+
+### Root cause
+
+The AD Create branch matches `If ($TierLevel -eq "L0")` then `ElseIf ($TierLevel -eq "L1")` -- with no `Else`. CSV rows whose TierLevel column is blank (e.g. the `ADM-KST-AD`, `ADM-MASK-AD` family without a `-L0-T0` suffix) hit neither branch, so `New-ADUser` was never called, no exception fired, `$createOk` stayed `$false`, password persistence was correctly skipped -- and the row dropped out of the log with the only evidence being the dangling `Creating AD account ...` header.
+
+### Fix
+
+Added an `Else` clause to the Create branch. When `TierLevel` isn't `L0` or `L1` the engine now prints a clear red `[ERROR]` line naming the UPN and the offending TierLevel value (`<blank>` rendered explicitly when empty/whitespace), instead of silently dropping the row:
+
+```
+ERROR: New-ADUser SKIPPED for ADM-KST-AD@nordstern.dk -- CSV TierLevel '<blank>' is not 'L0' or 'L1'; engine has no OU to target. Fix the CSV TierLevel column or extend the AD-create branch to handle this tier. NOT persisting password.
+```
+
+This brings the silent-drop pattern in line with the rest of v2.4.117+'s "no phantom passwords" contract: every CSV row now either succeeds, prints a clear error, or skips with a clear info line -- nothing is dropped silently.
+
+### Operator action
+
+Fix the CSV TierLevel column on the offending rows (or, if those rows are legitimately L2/non-tiered and should go to a different OU, extend the create branch to handle that tier with its own OU path).
+
+### Files changed
+
+- `engine/_shared/PIM-Functions.psm1` -- `Else` clause added to the AD-Create branch's `If L0 / ElseIf L1` chain in `CreateUpdate-Accounts-From-file-CSV`.
+
+### How to apply
+
+- Pull, rerun the launcher.
 
 ---
 
