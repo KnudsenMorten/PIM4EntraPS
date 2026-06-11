@@ -64,6 +64,23 @@ Write-Output "******************************************************************
                      elseif ($global:HighPriv_Modern_Secret_Azure) { 'secret' }
                      else { '(none -- check KV)' }
     Write-Host ("[OK]    Platform connected in {0:N1}s -- tenant {1}, KV {2}, Modern AppId {3} (auth={4})" -f $_bootSw.Elapsed.TotalSeconds, $_tenantId, $_kvName, $_modernApp, $_modernAuth)
+
+    # v2.4.116: pull legacy on-prem AD/gMSA credentials from KV into
+    # $global:Context.Identity.Legacy.*. Initialize-PlatformAutomationFramework
+    # only stages Modern (cloud SPN) credentials -- the on-prem PSCredential
+    # used by the AD-account branch of CreateUpdate-Accounts-From-file-CSV
+    # lives under Legacy.Internal.Prod, populated by KV secrets
+    # 'Legacy-UserName-Internal-Prod' + 'Legacy-Password-Internal-Prod'.
+    # -IgnoreMissing so cloud-only tenants (no on-prem AD) don't blow up;
+    # the AD-branch guard below logs a clean skip line when the credential
+    # isn't there.
+    if ($global:Context) {
+        try {
+            $null = Initialize-PlatformLegacyIdentity -Context $global:Context -IgnoreMissing
+        } catch {
+            Write-Warning ("Initialize-PlatformLegacyIdentity failed: {0} -- AD-account branch will skip." -f $_.Exception.Message)
+        }
+    }
     Write-Host ""
 
 <#
