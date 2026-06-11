@@ -1395,3 +1395,32 @@ Write-Output "******************************************************************
                                                 Select-Object Name, Description, Id | Sort-Object -Property Name
 
     Assign-Groups-Accounts-From-file-CSV -AccountsAssignmentFile $AccountsAssignmentFile
+
+
+######################################################################################################################
+# Workload RBAC | Defender XDR / Intune / ... | Apply PIM groups to workload roles
+######################################################################################################################
+# v2.4.143: optional step -- runs only when the operator has created
+# config[/<variant>]/PIM-Assignments-Workloads.custom.csv. The file is
+# deliberately NOT resolved via Get-PimConfigCsv: its first-run sample
+# auto-bootstrap would copy the shipped EXAMPLE rows into a live tenant's
+# config and this step would then try to apply them. An opt-in feature
+# must require a deliberately-created file.
+#
+# Connector definitions ship in workloads/connectors/*.connector.json
+# (roles are listed LIVE from each workload, so new Microsoft roles need
+# no maintenance). Full design: docs/WORKLOAD-CONNECTORS.md.
+# Honors -WhatIfMode like the account steps above; the applier is
+# idempotent and only ever deletes assignments it created itself.
+
+    $WorkloadsAssignmentFile = Join-Path (Get-PimConfigDir) 'PIM-Assignments-Workloads.custom.csv'
+    $WorkloadConnectorsDir   = Join-Path (Get-PimSolutionRoot) 'workloads\connectors'
+    if ((Test-Path -LiteralPath $WorkloadsAssignmentFile) -and (Test-Path -LiteralPath $WorkloadConnectorsDir)) {
+        Write-host ""
+        Write-host "Applying workload RBAC assignments (PIM groups -> workload roles) ... Please Wait !"
+        Apply-PimWorkloadAssignments -WorkloadsAssignmentFile $WorkloadsAssignmentFile `
+                                     -ConnectorsDir $WorkloadConnectorsDir `
+                                     -WhatIfMode:($global:WhatIfMode -eq $true)
+    } else {
+        Write-host "  [workloads] no PIM-Assignments-Workloads.custom.csv in config -- workload RBAC step skipped (opt-in; see docs/WORKLOAD-CONNECTORS.md)." -ForegroundColor DarkGray
+    }
