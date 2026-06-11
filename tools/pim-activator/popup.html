@@ -128,6 +128,14 @@
   .ma-row .ma-role.ma-rbac { color:#57606a; font-style:italic; }
   .ma-row .ma-role.ma-err { color:#cf222e; font-style:italic; }
   .ma-row .ma-role.ma-loading { color:#9a6700; font-style:italic; }
+
+  /* Customer-switcher dropdown LIST. The closed control sits on the blue
+     header and needs white text (inline style on the element), but the
+     open option list is painted by the OS on a white background -- the
+     inherited color:#ffffff made every non-highlighted tenant white-on-white
+     (only the hovered row was readable). Options must set their own colors. */
+  #customer-switcher option { background:#ffffff; color:#1a1a1a; font-weight:400; }
+  #customer-switcher option:checked { background:#0969da; color:#ffffff; }
 </style>
 </head>
 <body>

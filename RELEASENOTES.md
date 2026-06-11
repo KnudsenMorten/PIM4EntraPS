@@ -1,9 +1,10 @@
 # Release notes for PIM4EntraPS
 
-## v2.4.129
+## v2.4.130
 
 Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monorepo:
 
+- release: PIM4EntraPS v2.4.130 -- Revoke tab live-verified on a real tenant (987 active assignments incl. 43 pim-for-groups that were invisible before: Graph refuses unfiltered assignmentSchedules, now per-group $batch queries over PIM-prefix candidates); served requests count as heartbeat so slow loads no longer self-reap the server; hashtable principal/role/AU label indexes; _tenantSync reuses existing app-only contexts + secret-auth fallback (was cert-only); new -ConnectPlatform launcher switch. Manager branding aligned with PIM Activator (banner version badge, in-banner instance switcher, tab/button/badge treatment). Activator popup: tenant-dropdown options got explicit colors -- 3-tenant list was white-on-white except the highlighted row (repack+redeploy needed to ship to browsers) (fb3a5f86)
 - release: PIM4EntraPS v2.4.129 -- PIM Manager finalized: MSP multi-instance support (instances.custom.json registry + -Instance/-ConfigRoot + header dropdown + per-instance CSV/log/tenant-cache isolation, SQL-ready seam behind Read-PimCsvRows/Write-PimCsvCustom); single-threaded-server freeze fixed (compiled Levenshtein + compiled JSON serializer + mtime-keyed preflight cache: page load 12s+ -> 0.5s, warm preflight 0.03s; client-abort tolerance + no response double-writes; SPA fetch timeout so lost connections error instead of hanging wizard Finish forever); blank ;;;;; separator rows survive commit round-trips (was: 53 rows -> 37 after a no-op save); wizard-staged rows light tab badges. Verified with headless-Chrome E2E: all 6 tabs, all 6 wizards end-to-end, commit-to-disk + mutation log, instance switching, static render, -Instance/-ConfigRoot startup (f7a3c7ae)
 - release: PIM4EntraPS v2.4.128 -- fix the v2.4.126/127 AU-guard itself: `@(...) | Where-Object` unwraps a single surviving Id back to a bare string, so `[0]` indexed the FIRST CHARACTER of the GUID and AU member-adds called Graph with ids like '2'/'3' (Invalid object identifier, 400); zero-match case crashed on null-array index because $null.Count -eq 0 is $false on PS 5.1. Whole pipeline now wrapped in @(...) at all 4 sites; verified all 5 input shapes in a real PS 5.1 process (28c8c708)
 - release: PIM4EntraPS v2.4.127 -- v2.4.125/126 AU member-add guards missed the inline copies of the create-groups loop in PIM-Baseline-Management-CSV.ps1 + PIM4GroupsCreateModifyPolicyOnly.ps1 (the main CSV engine never calls the patched module functions); field run on v2.4.126 still crashed with ObjectId transformation error on a tenant with duplicate group DisplayNames -- both inline loops now normalise AU/group lookups + ERROR/WARNING/skip before calling Add-AdministrativeUnit-Member (b8d102ab)
@@ -33,13 +34,48 @@ Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monor
 - release: PIM4EntraPS v2.4.103 - Update-PimActivator-Extension.ps1 scrubs stale Secure Preferences UNCONDITIONALLY (v2.4.100 only scrubbed when binary present, missed the actual trap shape) (41fd4236)
 - release: PIM4EntraPS v2.4.102 - Deploy-PimActivatorIntune.ps1 pre-flight scan for conflicting ExtensionInstallForcelist policies (prevents IME slot-cycling silent failure) (7e7de5d7)
 - add Audit-ChromeForcelistInIntune.ps1 - read-only diagnostic that scans every Intune configuration policy (Settings Catalog + Administrative Templates + custom device configs) for Chrome ExtensionInstallForcelist values, flags malformed entries (empty string, invalid ext id, missing update URL). Used to pin down which Intune profile is shipping the bad forcelist entry that's blocking all extension installs. (bd371bf3)
-- release: PIM4EntraPS v2.4.101 + extension v1.6.20 - popup CSS revert (v1.6.19 flex-column broke Edge) (709005f7)
 
 ---
 
 # Release notes -- PIM4EntraPS
 
 > **Curated changelog.** The publish workflow auto-prepends recent monorepo commits as a raw activity log; this file is the human-friendly narrative on top.
+
+---
+
+## v2.4.130 -- Revoke tab live-verified against a real tenant (987 assignments) + `-ConnectPlatform`; Manager branding aligned with the PIM Activator; Activator tenant-dropdown readability fix
+
+### Revoke tab -- now proven end-to-end on a live tenant
+
+A full read-only load against a production tenant surfaced and fixed four issues:
+
+1. **pim-for-groups was always 0**: Graph refuses an unfiltered `assignmentSchedules` list (`MissingParameters: GroupId or PrincipalId`), so both the engine bulk preload and the naive `-All` call silently returned nothing. Now: one filtered query per PIM-convention group, sent through `/v1.0/$batch` 20-at-a-time (a sequential per-group loop took >4 minutes; batched it's seconds), with candidates limited to the `PIM-` naming-convention prefix (the lookup cache can contain the whole tenant, and dynamic groups fail with `ResourceTypeNotSupported` anyway). Result on the verification tenant: 43 active group assignments (members AND owners) that were previously invisible.
+2. **Server reaped itself after slow loads**: the active-assignments call blocked the single-threaded loop for ~90s, the browser's queued heartbeats never processed, and the server shut down right after answering. A served request now counts as client activity.
+3. **O(rows x principals) label resolution**: principal/role/AU labels resolved via linear scans per row; now hashtable indexes.
+4. **Cert-only connection contract**: `_tenantSync.ps1` demanded a Modern-SPN certificate thumbprint even when the process already had a working app-only Graph + Az connection. Now it (a) reuses an existing matching app-only context, (b) falls back cert -> client-secret (what `Connect-PlatformModern` populates on tenants without a Modern cert). Never interactive.
+
+New launcher switch: **`-ConnectPlatform`** -- bootstraps the AutomateITPS platform connection (bootstrap cert -> KV -> Modern SPN, app-only) inside the server process, so `.\Open-PimManager.ps1 -ConnectPlatform` is all that's needed to use the Revoke tab on a mgmt box.
+
+Verified live: 987 active assignments (360 entra-role + 584 azure-rbac + 43 pim-for-groups) loaded with correct principal/role/scope labels; 60s server cache answers repeats in 0.07s; server survives the load. Revoke POST not exercised (read-only verification); the revoke request builders are code-reviewed and the endpoint validates justification + rows.
+
+### Manager branding aligned with the PIM Activator
+
+- Version badge in the blue banner (same translucent pill as the Activator header; reads `SOLUTIONS/PIM4EntraPS/VERSION`).
+- Instance switcher moved INTO the blue banner, styled exactly like the Activator's customer-switcher (translucent white on blue), including explicit option colors so the open list is readable.
+- Tab strip: Activator treatment -- transparent tabs, blue hover, 2px active underline, neutral gray count badges that turn blue on the active tab.
+- Buttons: Activator base treatment (`#f6f8fa` bg, `#eaeef2` hover).
+
+### PIM Activator fix -- tenant dropdown readability
+
+With 3 tenants in the header customer-switcher, only the highlighted row was readable; the others rendered white-on-white. Cause: the closed control needs white text on the blue banner, but the OS paints the open option list on white and the options inherited `color:#ffffff`. `popup.html` now gives options explicit colors (`#1a1a1a` on white; selected: white on blue). **Operators must repack + redeploy the extension from mgmt1 to ship this to browsers** -- the repo change alone doesn't update installed extensions.
+
+### Files changed
+
+- `tools/pim-manager/Open-PimManager.ps1` -- `-ConnectPlatform`, batched p4g queries, heartbeat-on-served-request, lookup indexes, version badge injection.
+- `tools/pim-manager/_tenantSync.ps1` -- context reuse + secret-auth fallback.
+- `tools/pim-manager/pim-manager.html` -- banner badge + in-banner instance switcher + Activator-aligned tabs/buttons/badges.
+- `tools/pim-manager/README.md` -- `-ConnectPlatform` + Revoke self-test instructions.
+- `tools/pim-activator/popup.html` -- dropdown option colors.
 
 ---
 

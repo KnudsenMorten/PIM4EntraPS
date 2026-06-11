@@ -132,69 +132,124 @@ function Read-PimTenantListCache {
 # ---------------------------------------------------------------------------
 
 function Assert-PimTenantConnectionContext {
-    # Verify the engine SPN globals are present. Throw with an actionable error
-    # if not. We deliberately do NOT auto-bootstrap the AutomateITPS framework
-    # here -- the caller (Open-PimManager.ps1) does that before dot-sourcing us.
-    $missing = New-Object System.Collections.ArrayList
-    if (-not $global:HighPriv_Modern_ApplicationID_Azure)        { [void]$missing.Add('$global:HighPriv_Modern_ApplicationID_Azure') }
-    if (-not $global:HighPriv_Modern_CertificateThumbprint_Azure) { [void]$missing.Add('$global:HighPriv_Modern_CertificateThumbprint_Azure') }
+    # Verify a usable tenant connection context. Accepted, in order:
+    #   1. An ALREADY-CONNECTED app-only Graph context (Connect-Platform did the
+    #      work in this process -- e.g. launched via -ConnectPlatform). Tenant
+    #      comes from the live context.
+    #   2. Engine SPN globals with a certificate thumbprint (cert auth).
+    #   3. Engine SPN globals with a client secret (secret auth -- what
+    #      Connect-PlatformModern populates on tenants without a Modern cert).
+    # Never falls back to interactive sign-in.
     $tenantId = $null
     if     ($global:AzureTenantID) { $tenantId = $global:AzureTenantID }
     elseif ($global:AzureTenantId) { $tenantId = $global:AzureTenantId }
+
+    try {
+        $mg = Get-MgContext -ErrorAction SilentlyContinue
+        if ($mg -and $mg.AuthType -eq 'AppOnly' -and (-not $tenantId -or $mg.TenantId -eq $tenantId)) {
+            return $(if ($tenantId) { $tenantId } else { $mg.TenantId })
+        }
+    } catch { }
+
+    $missing = New-Object System.Collections.ArrayList
+    if (-not $global:HighPriv_Modern_ApplicationID_Azure) { [void]$missing.Add('$global:HighPriv_Modern_ApplicationID_Azure') }
+    if (-not $global:HighPriv_Modern_CertificateThumbprint_Azure -and -not $global:HighPriv_Modern_Secret_Azure) {
+        [void]$missing.Add('$global:HighPriv_Modern_CertificateThumbprint_Azure (or $global:HighPriv_Modern_Secret_Azure)')
+    }
     if (-not $tenantId) { [void]$missing.Add('$global:AzureTenantID') }
     if ($missing.Count -gt 0) {
         $missingList = $missing -join ', '
-        throw "PIM Manager tenant refresh requires the engine SPN context. Missing: $missingList. Run any baseline engine first (which calls Initialize-PlatformAutomationFramework), or source your bootstrap manually before -RefreshTenantLists."
+        throw "PIM Manager tenant access requires the engine SPN context. Missing: $missingList. Launch with Open-PimManager.ps1 -ConnectPlatform (recommended), or run any baseline engine first, or source your bootstrap manually."
     }
     return $tenantId
 }
 
 function Connect-PimManagerGraph {
-    # Uses MicrosoftGraphPS if available (matches engines), else falls back to
-    # native Connect-MgGraph with certificate auth. Either way: app-only.
+    # Reuses an existing matching app-only context when present; otherwise
+    # connects via cert thumbprint, else via client secret. Always app-only.
     param([Parameter(Mandatory)][string]$TenantId)
-    $appId = $global:HighPriv_Modern_ApplicationID_Azure
-    $thumb = $global:HighPriv_Modern_CertificateThumbprint_Azure
+    $appId  = $global:HighPriv_Modern_ApplicationID_Azure
+    $thumb  = $global:HighPriv_Modern_CertificateThumbprint_Azure
+    $secret = $global:HighPriv_Modern_Secret_Azure
 
+    try {
+        $mg = Get-MgContext -ErrorAction SilentlyContinue
+        if ($mg -and $mg.AuthType -eq 'AppOnly' -and $mg.TenantId -eq $TenantId) { return }
+    } catch { }
+
+    if (-not $appId) { throw "Connect-PimManagerGraph: no existing Graph context and `$global:HighPriv_Modern_ApplicationID_Azure is not set." }
     try { Disconnect-MgGraph -ErrorAction SilentlyContinue | Out-Null } catch { }
 
-    $hasModule = Get-Module -ListAvailable -Name MicrosoftGraphPS | Select-Object -First 1
-    if ($hasModule) {
-        Import-Module MicrosoftGraphPS -Global -Force -WarningAction SilentlyContinue
-        Connect-MicrosoftGraphPS `
-            -AppId $appId `
-            -CertificateThumbprint $thumb `
-            -TenantId $TenantId `
-            -ErrorAction Stop | Out-Null
-    } else {
+    if ($thumb) {
+        $hasModule = Get-Module -ListAvailable -Name MicrosoftGraphPS | Select-Object -First 1
+        if ($hasModule) {
+            Import-Module MicrosoftGraphPS -Global -Force -WarningAction SilentlyContinue
+            Connect-MicrosoftGraphPS `
+                -AppId $appId `
+                -CertificateThumbprint $thumb `
+                -TenantId $TenantId `
+                -ErrorAction Stop | Out-Null
+        } else {
+            Import-Module Microsoft.Graph.Authentication -Force -WarningAction SilentlyContinue
+            Connect-MgGraph `
+                -ClientId $appId `
+                -CertificateThumbprint $thumb `
+                -TenantId $TenantId `
+                -NoWelcome `
+                -ErrorAction Stop | Out-Null
+        }
+        return
+    }
+    if ($secret) {
         Import-Module Microsoft.Graph.Authentication -Force -WarningAction SilentlyContinue
+        $sec  = ConvertTo-SecureString -String ([string]$secret) -AsPlainText -Force
+        $cred = New-Object System.Management.Automation.PSCredential($appId, $sec)
         Connect-MgGraph `
-            -ClientId $appId `
-            -CertificateThumbprint $thumb `
             -TenantId $TenantId `
+            -ClientSecretCredential $cred `
             -NoWelcome `
             -ErrorAction Stop | Out-Null
+        return
     }
+    throw "Connect-PimManagerGraph: neither a certificate thumbprint nor a client secret is available for app $appId."
 }
 
 function Connect-PimManagerAz {
     param([Parameter(Mandatory)][string]$TenantId)
-    $appId = $global:HighPriv_Modern_ApplicationID_Azure
-    $thumb = $global:HighPriv_Modern_CertificateThumbprint_Azure
+    $appId  = $global:HighPriv_Modern_ApplicationID_Azure
+    $thumb  = $global:HighPriv_Modern_CertificateThumbprint_Azure
+    $secret = $global:HighPriv_Modern_Secret_Azure
 
-    # Reuse an existing matching context if present (engines may already be connected).
+    # Reuse an existing matching context if present (engines / Connect-Platform
+    # may already be connected -- account match on appId, or any app-only
+    # context in the right tenant when appId is unknown).
     try {
         $ctx = Get-AzContext -ErrorAction SilentlyContinue
-        if ($ctx -and $ctx.Tenant.Id -eq $TenantId -and $ctx.Account.Id -eq $appId) { return }
+        if ($ctx -and $ctx.Tenant.Id -eq $TenantId -and (-not $appId -or $ctx.Account.Id -eq $appId)) { return }
     } catch { }
 
+    if (-not $appId) { throw "Connect-PimManagerAz: no existing Az context for tenant $TenantId and `$global:HighPriv_Modern_ApplicationID_Azure is not set." }
     Import-Module Az.Accounts -Force -WarningAction SilentlyContinue
-    Connect-AzAccount `
-        -ServicePrincipal `
-        -ApplicationId $appId `
-        -CertificateThumbprint $thumb `
-        -TenantId $TenantId `
-        -ErrorAction Stop | Out-Null
+    if ($thumb) {
+        Connect-AzAccount `
+            -ServicePrincipal `
+            -ApplicationId $appId `
+            -CertificateThumbprint $thumb `
+            -TenantId $TenantId `
+            -ErrorAction Stop | Out-Null
+        return
+    }
+    if ($secret) {
+        $sec  = ConvertTo-SecureString -String ([string]$secret) -AsPlainText -Force
+        $cred = New-Object System.Management.Automation.PSCredential($appId, $sec)
+        Connect-AzAccount `
+            -ServicePrincipal `
+            -Credential $cred `
+            -TenantId $TenantId `
+            -ErrorAction Stop | Out-Null
+        return
+    }
+    throw "Connect-PimManagerAz: neither a certificate thumbprint nor a client secret is available for app $appId."
 }
 
 # ---------------------------------------------------------------------------

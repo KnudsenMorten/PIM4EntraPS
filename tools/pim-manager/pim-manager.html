@@ -22,15 +22,27 @@
      (blue background, white text, uppercase, large). Sits above the tab bar
      so the product identity is obvious from the moment the page opens. */
   #brand { background:#0969da; color:#ffffff; padding:10px 16px; display:flex; align-items:center; gap:12px; flex:0 0 auto; border-bottom:1px solid #0969da; }
-  #brand h1 { margin:0; font-size:18px; font-weight:700; letter-spacing:0.6px; text-transform:uppercase; color:#ffffff; flex:1; }
+  #brand h1 { margin:0; font-size:17px; font-weight:700; letter-spacing:0.5px; text-transform:uppercase; color:#ffffff; flex:1; }
   #brand .brand-sub { font-size:11px; opacity:0.85; color:#ffffff; }
+  /* Version badge -- same pill treatment as the PIM Activator header badge. */
+  #versionBadge { display:inline-block; font-weight:600; font-size:11px; color:#ffffff; background:rgba(255,255,255,0.25); border:1px solid rgba(255,255,255,0.55); padding:2px 8px; border-radius:10px; margin-left:8px; letter-spacing:0.3px; text-transform:none; vertical-align:middle; }
+  /* Instance switcher -- same control + placement + look as the Activator's
+     header customer-switcher (translucent white on the blue banner). */
+  #instancePick { background:rgba(255,255,255,0.15); color:#ffffff; border:1px solid rgba(255,255,255,0.55); border-radius:5px; padding:3px 6px; font-size:11.5px; font-weight:600; cursor:pointer; max-width:190px; }
+  /* The open option list is painted by the OS on a white background -- options
+     must set their own colors or every non-highlighted row is white-on-white
+     (same bug class as the Activator customer-switcher). */
+  #instancePick option { background:#ffffff; color:#1a1a1a; font-weight:400; }
+  #instancePick option:checked { background:#0969da; color:#ffffff; }
 
-  /* Tab bar */
-  #tabs { display:flex; gap:0; background:#f6f8fa; border-bottom:1px solid #d0d7de; flex:0 0 auto; }
-  .tab { padding:9px 18px; cursor:pointer; font-size:12.5px; color:#57606a; border-right:1px solid #eaeef2; user-select:none; position:relative; }
-  .tab:hover { background:#f6f8fa; color:#1a1a1a; }
-  .tab.active { background:#f6f8fa; color:#0969da; border-bottom:2px solid #0969da; margin-bottom:-1px; font-weight:600; }
-  .tab .badge { display:inline-block; min-width:14px; padding:0 5px; height:14px; line-height:14px; text-align:center; border-radius:7px; background:#9a6700; color:#fff; font-size:9px; margin-left:6px; font-weight:600; }
+  /* Tab bar -- Activator tab-strip treatment (transparent tabs, blue hover,
+     2px active underline, neutral count badges that go blue when active). */
+  #tabs { display:flex; gap:4px; background:#f6f8fa; border-bottom:1px solid #d0d7de; flex:0 0 auto; padding:0 8px; }
+  .tab { padding:9px 14px; cursor:pointer; font-size:12.5px; color:#57606a; border-bottom:2px solid transparent; user-select:none; position:relative; }
+  .tab:hover { background:transparent; color:#0969da; }
+  .tab.active { background:transparent; color:#0969da; border-bottom-color:#0969da; font-weight:600; }
+  .tab .badge { display:inline-block; min-width:14px; padding:0 6px; height:14px; line-height:14px; text-align:center; border-radius:10px; background:#eaeef2; color:#57606a; border:1px solid #d0d7de; font-size:10px; margin-left:6px; font-weight:600; }
+  .tab.active .badge { background:#0969da; color:#fff; border-color:#0969da; }
   #tabRight { margin-left:auto; padding:8px 14px; font-size:11px; color:#57606a; align-self:center; }
   #tabRight b { color:#1a1a1a; font-weight:500; }
   #tabRight .modeStatic { color:#9a6700; }
@@ -87,8 +99,9 @@
   .role-perms ul.actions li.allow.data::before { content:'(D) + '; color:#1a7f37; }
   .role-perms ul.actions li.deny.data::before  { content:'(D) - '; color:#cf222e; }
   .role-perms .rp-refresh { margin-top:6px; }
-  button { background:#eaeef2; color:#1a1a1a; border:1px solid #d0d7de; padding:5px 10px; border-radius:6px; cursor:pointer; font-size:12px; }
-  button:hover { background:#d0d7de; }
+  /* Buttons -- Activator treatment (#f6f8fa base, #eaeef2 hover). */
+  button { background:#f6f8fa; color:#1a1a1a; border:1px solid #d0d7de; padding:5px 10px; border-radius:6px; cursor:pointer; font-size:12px; }
+  button:hover { background:#eaeef2; }
   button:disabled { opacity:0.4; cursor:not-allowed; }
   button.danger { background:#ffebe9; border-color:#cf222e; color:#cf222e; }
   button.danger:hover { background:#ffcecb; }
@@ -434,7 +447,8 @@
 <div id="app">
 
   <div id="brand">
-    <h1>PIM Manager</h1>
+    <h1>PIM Manager <span id="versionBadge">__PIM_VERSION__</span></h1>
+    <select id="instancePick" title="Switch instance" style="display:none"></select>
     <div class="brand-sub">PIM4EntraPS &middot; configuration editor</div>
   </div>
 
@@ -446,7 +460,6 @@
     <div class="tab" data-tab="validate">Validate <span id="validateErrBadge" class="badge" style="display:none;background:#cf222e">0</span></div>
     <div class="tab" data-tab="revoke">Revoke <span id="revokeCountBadge" class="badge" style="display:none;background:#cf222e">0</span></div>
     <div id="tabRight">
-      <span id="instanceWrap" style="display:none">instance: <select id="instancePick" style="font-size:11px; padding:1px 4px; border:1px solid #d0d7de; border-radius:4px; background:#fff; color:#0969da; font-weight:600;"></select> &nbsp;|&nbsp;</span>
       mode: <b id="modeLabel"></b>
       &nbsp;|&nbsp; source: <b id="src"></b>
       &nbsp;|&nbsp; generated: <b id="gen"></b>
@@ -780,13 +793,12 @@
   // ===================================================================
   (function initInstancePicker() {
     const boot = window.PIM_INSTANCES_BOOT || { active: 'local', instances: [] };
-    const wrap = document.getElementById('instanceWrap');
     const pick = document.getElementById('instancePick');
-    if (!isServer || !wrap || !pick || !boot.instances || boot.instances.length < 2) return;
+    if (!isServer || !pick || !boot.instances || boot.instances.length < 2) return;
     pick.innerHTML = boot.instances.map(i =>
       `<option value="${escapeHtml(i.name)}"${i.name === boot.active ? ' selected' : ''}>${escapeHtml(i.name)}</option>`
     ).join('');
-    wrap.style.display = '';
+    pick.style.display = '';
     pick.onchange = async () => {
       const target = pick.value;
       if (target === boot.active) return;

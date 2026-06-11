@@ -68,6 +68,28 @@ Other useful switches:
   config folder directly, without declaring it in the registry.
 - `-RefreshTenantLists` &mdash; CLI-only: refresh the tenant-list cache via the
   engine SPN, then exit (no server, no browser). For scheduled tasks.
+- `-ConnectPlatform` &mdash; bootstrap the AutomateITPS platform connection
+  (bootstrap cert &rarr; Key Vault &rarr; Modern SPN, app-only Graph + Az)
+  in the server process before starting. This is what the **Revoke tab**
+  and tenant-list refresh need; without it they show a clear
+  "engine SPN context missing" error. Works with cert or secret auth.
+
+## Testing the Revoke tab yourself
+
+On a mgmt box with the standard bootstrap setup (`bootstrap/platform-config.json`
++ bootstrap cert in the machine store):
+
+```powershell
+cd <repo>\SOLUTIONS\PIM4EntraPS\tools\pim-manager
+.\Open-PimManager.ps1 -ConnectPlatform
+```
+
+Open the Revoke tab and click **Refresh**. First load takes 1-2 minutes on
+a real tenant (Azure Resource Graph is the slow leg); the result is cached
+for 60s and repeat views are instant. Expect three row types: entra-role,
+azure-rbac, and pim-for-groups (members AND owners of PIM-onboarded groups).
+Loading is read-only &mdash; nothing is revoked until you select rows, type a
+justification, and click **Revoke selected**.
 
 ## Instances (MSP multi-customer support)
 
