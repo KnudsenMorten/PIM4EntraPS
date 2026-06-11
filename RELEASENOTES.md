@@ -1,9 +1,10 @@
 # Release notes for PIM4EntraPS
 
-## v2.4.121
+## v2.4.122
 
 Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monorepo:
 
+- release: PIM4EntraPS v2.4.122 -- AD-create OU routing now driven by UserName naming convention (regex match on L0/T0 markers bounded by -/_/. in the name) instead of CSV TierLevel column; matches the customer pattern where privilege class is encoded in the account name itself (c0788dfc)
 - release: PIM4EntraPS v2.4.121 -- AD-create branch matches CSV TierLevel against the Tier convention (T0/T1/T2/T3) -- T0 -> PathAdminsL0T0, T1/T2/T3/blank -> PathAdmins. Previously the engine matched Level literals (L0/L1) so Tier-formatted CSVs silently dropped every Create row. L0 still accepted as T0-equivalent for back-compat. Level and Tier are distinct dimensions; CSV column is the Tier. (5d0cdd62)
 - release: PIM4EntraPS v2.4.120 -- AD-create branch surfaces an explicit [ERROR] when CSV TierLevel is blank or not L0/L1 (previously: dangling 'Creating AD account' header with no New-ADUser call, no exception, no password file row, row silently dropped) (93e53c67)
 - release: PIM4EntraPS v2.4.119 -- engine imports AutomateITPS.AD + calls Resolve-PlatformGMSACredentials after Initialize-PlatformLegacyIdentity so KV stub passwords on gMSA Legacy.* slots get swapped for the real managed password read from the DC (gMSA msDS-ManagedPassword); the AD branch then auths normally via -Credential (3e002976)
@@ -33,13 +34,58 @@ Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monor
 - release: extension v1.6.16 - revert v1.6.13's footer-collapse experiment; restore 2-row footer layout (row 1: title + repo + GitHub + Report bug | tenant ID; row 2: dev attribution | tenant name + reset) (7018f592)
 - release: extension v1.6.15 - wizard ALWAYS shows mode-selector on fresh deploy (removed auto-pick for single-tenant catalog that was silently skipping the picker); catalogPanel now carries BOTH picker + import sub-divs so 'Use centrally deployed' (multi) and 'Import JSON' modes can toggle independently regardless of current catalog state (a3885a4a)
 - release: extension v1.6.14 - (a) new 3-card mode selector on first-run/reset wizard: 'Use centrally deployed' / 'Import JSON catalog' / 'Add single tenant'; each mode shows only its relevant section + a Back link to return to the picker (b) fix signOut: clear tenantTokens[activeTenantId] (was leaving the per-tenant token cache so loadConfig silently restored tokens after sign-out) + open login.microsoftonline.com/common/oauth2/v2.0/logout in a new tab to kill the Edge-side session cookies (c1d17a33)
-- release: extension v1.6.13 - footer collapsed to single compact row (left: title + repo + dev attribution + GitHub/Report icons; right: tenant short-name + abbreviated ID + reset). Uses flex-wrap so right side drops to second line only when needed instead of getting clipped. Test-PushTenantCatalog.ps1 now seeds defaultJustification + defaultDurationHours in the auto-generated catalog. (5b308334)
 
 ---
 
 # Release notes -- PIM4EntraPS
 
 > **Curated changelog.** The publish workflow auto-prepends recent monorepo commits as a raw activity log; this file is the human-friendly narrative on top.
+
+---
+
+## v2.4.122 -- AD-create branch: drive OU routing off the UserName (account naming convention) instead of the CSV TierLevel column
+
+### Concept change
+
+Customers carry the privilege class **in the account name itself** (`Admin-SKR-L0-T0-ID` carries both `L0` Level and `T0` Tier markers in the UPN body). The CSV `TierLevel` column is not the source of routing truth -- the name is.
+
+### Fix
+
+The AD-create branch no longer reads the CSV `TierLevel` column for OU routing. Instead it inspects the `UserName` field with a bounded regex:
+
+```
+(?i)(^|[-_.])(L0|T0)([-_.]|$)
+```
+
+- Match on `L0` or `T0` bounded by `-` / `_` / `.` (so `Admin-SKR-L0-T0-ID`, `Admin-MASK-L0`, `Foo.T0.Bar` all hit; `L01` / `XLT0` don't).
+- Match -> high-priv account -> route to `$PathAdminsL0T0`.
+- No match -> general admin -> route to `$PathAdmins`.
+
+Net effect on the customer's CSV:
+
+| UserName | Old behaviour (`L0` literal match) | New behaviour (name marker) | OU |
+|---|---|---|---|
+| `Admin-SKR-L0-T0-ID` | matched -> created | matched -> created | `$PathAdminsL0T0` |
+| `Admin-SKR-ID` | not matched -> silent skip | not matched -> created | `$PathAdmins` |
+| `ADM-KST-AD` | not matched -> silent skip | not matched -> created | `$PathAdmins` |
+| `Admin-MASK-L0-T0-AD` | not matched (TierLevel='T0') -> silent skip | L0 marker present -> created | `$PathAdminsL0T0` |
+
+Every silently-dropped CSV row from the pre-v2.4.122 engine now flows through.
+
+The log line on each successful create surfaces the routing decision and the resolved OU:
+
+```
+Creating AD account Kasper Teilbæk (Admin, Legacy, AD)
+  -> OU: OU=Admin,OU=AdminAccounts,DC=casa,DC=dk
+```
+
+### Files changed
+
+- `engine/_shared/PIM-Functions.psm1` -- CSV `TierLevel`-driven routing replaced with `UserName` regex match for `L0`/`T0` markers.
+
+### How to apply
+
+- Pull, rerun. Every row should now reach `New-ADUser` -- success or hard error, no silent drops.
 
 ---
 
