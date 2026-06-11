@@ -1,9 +1,10 @@
 # Release notes for PIM4EntraPS
 
-## v2.4.140
+## v2.4.141
 
 Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monorepo:
 
+- release: PIM4EntraPS v2.4.141 -- Permission Templates: maintainer-curated delegation packs in templates/*.template.json (distributed by repo sync), diffed per active instance by GET /api/templates (presence by natural row keys); Create tab shows each pack as Up-to-date or "n new permission(s)" with one-click import into pending; shipped starter pack defender-xdr v2 (7 Unified-RBAC workload groups, grown from 3 in v1 to demo the new-permissions flow). Plus docs/WORKLOAD-CONNECTORS.md: full design for applying PIM groups to workload RBAC (Defender XDR, Intune, Power BI, Dataverse, Business Central, Azure AI) via JSON connector definitions + a 15th desired-state CSV + an engine applier with auth adapters (bfc8f329)
 - release: PIM4EntraPS v2.4.141 -- Delegation Map becomes an editor: select an admin -> "+ Assign to group..." stages PIM-Assignments-Admins rows by clicking one or more role/org groups (duplicate-guarded, Eligible/365d defaults); select a role group -> "+ Link capability bundle..." stages PIM-Assignments-Groups nesting rows; staged relations draw as dashed amber wires via a pending overlay on the board model. Two-step focus UX (pick person or permission -> board collapses to the transitive path, toggleable). Long Azure scope/AU names render two-line with full wrap in focus view (545976d0)
 - release: PIM4EntraPS v2.4.139 -- PIM Manager Delegation Map (new landing tab): the PIM v2 model as a 4-column flow board (People -> Roles & Org Groups -> Capability Bundles -> Permissions & Targets, with terminal permission groups rendered as workload/app-RBAC groups for Power BI/Intune/Defender XDR/3rd-party); click-to-light full path in both directions with selection-only wires (Active amber, Eligible blue), every box = Definitions row / every wire = Assignments row with open-in-grid jump; search dims non-matches; static-mode compatible. Tabs reordered to operator lifecycle: Create -> Delegation Map -> Validate -> Review & Save -> Maintenance -> Advanced View (grid) (55be87b9)
 - release: PIM4EntraPS v2.4.138 -- PIM Manager role pickers auto-load from the tenant: new azure-rbac-roles tenant-list kind (Get-AzRoleDefinition, per-instance cache, included in -RefreshTenantLists); Azure perm-group workflow picks the RBAC role from the tenant list (fills exact name + alias, free-text fallback); both perm-group workflows auto-load empty lists silently on open via ensureTenantLists; AzScopePermission renders as a dropdown in the Configuration grid. Kills the typed-role-name spelling-error class; validator STALE checks remain the safety net (a2afd078)
@@ -33,13 +34,29 @@ Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monor
 - release: PIM4EntraPS v2.4.114 -- PIM-Baseline-Management-CSV engine now calls CreateUpdate-Accounts-From-file-CSV with -OnlyAD too (was hardcoded to -OnlyID; AD rows in the CSV were silently ignored); guards on Get-ADUser availability + $AD_Credentials (3fa86c9a)
 - release: PIM4EntraPS v2.4.113 - README PIM Activator section rewritten to today's deploy architecture (docs-only) (df162df9)
 - release: PIM4EntraPS v2.4.112 + extension v1.6.25 - popup manual single-tenant entry wins over managed catalog (fixes Save->onboarding loop on contaminated boxes) (b5ab0aa7)
-- release: PIM4EntraPS v2.4.111 - Deploy-PimActivatorClient.ps1 stops defaulting to sibling discovered-tenant-catalog.json (cross-tenant leak); auto-discovers from live Entra instead (34a1f1c8)
 
 ---
 
 # Release notes -- PIM4EntraPS
 
 > **Curated changelog.** The publish workflow auto-prepends recent monorepo commits as a raw activity log; this file is the human-friendly narrative on top.
+
+---
+
+## v2.4.141 -- Permission Templates: centrally maintained delegation packs with one-click import of new permissions
+
+### The model
+
+`templates/*.template.json` ships with the repo, so the maintainer curates the packs centrally and `sync-automateit` distributes them to every install -- no separate subscription infrastructure needed. Each template carries an id, a version, and rows for any of the 14 configuration files. The Manager diffs the template against the ACTIVE tenant instance (row presence by natural key: GroupTag for definitions, composite keys for assignments) and the Create tab shows each pack as a card: **"Up to date ✓"** or **"n new permission(s)" + Import into pending**. When the maintainer extends a template -- the shipped example is Defender XDR, which grew from 3 operator groups (v1) to 7 incl. read-only and client-scoped response (v2) -- every tenant sees exactly the missing rows on next open and imports them with one click. Imports stage into pending like everything else; Review &amp; Save commits.
+
+New endpoint: `GET /api/templates` (bearer-gated, per-instance diff). Shipped starter pack: `templates/defender-xdr.template.json` (7 workload groups for Defender XDR Unified RBAC, naming-convention conformant).
+
+### Roadmap captured (operator requests)
+
+- **Workload-side RBAC delegation**: have the tool perform the actual in-portal assignment of PIM groups to workload roles (Defender XDR Unified RBAC role assignments; Intune's 14+ built-in roles) instead of manual portal clicks. Proposed shape: a declarative `PIM-Assignments-Workloads` file (Workload;RoleName;GroupTag;...) edited via the Manager with role pickers loaded live per workload (Graph: `/roleManagement/defender/roleDefinitions`, `/deviceManagement/roleDefinitions`), applied by the ENGINE via Graph on its normal pull cycle -- keeping the established GUI-stages / engine-applies trust model.
+- **Resource discovery**: sync new Azure subscriptions / management groups (cache exists today) + Power BI workspaces, and auto-stage the corresponding PIM definition rows so new resources become linkable on the Delegation Map immediately.
+
+Verified by headless-Chrome E2E on a demo tenant: template card renders with version + row count, import stages 7 rows into pending (badge + Review &amp; Save card), cancel reverts cleanly. Zero console errors.
 
 ---
 

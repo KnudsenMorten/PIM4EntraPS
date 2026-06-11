@@ -594,6 +594,16 @@
         <div class="wiz-sub">Temporary access for a project team: role group, members, and a fixed end date. Defaults to 90 days.</div>
       </div>
     </div>
+
+    <!-- Permission templates: centrally maintained delegation packs
+         (templates/*.template.json, distributed by repo sync). When the
+         maintainer extends a template, subscribed tenants see the new
+         permissions here and import them into pending with one click. -->
+    <div id="tplSection" style="padding:0 18px 18px 18px;">
+      <h3 style="font-size:12px; text-transform:uppercase; letter-spacing:.5px; color:#0969da; margin:8px 0 4px 0;">Permission Templates</h3>
+      <div style="color:#57606a; font-size:11.5px; margin-bottom:10px;">Centrally maintained delegation packs. When a template gains new roles (e.g. Defender XDR grew from 3 to 7), the new rows show here for one-click import into pending.</div>
+      <div id="tplCards"><div class="empty">Loading templates&hellip;</div></div>
+    </div>
   </div>
 
   <!-- =========== Save tab =========== -->
@@ -767,6 +777,7 @@
     document.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t.dataset.tab === name));
     document.querySelectorAll('.tab-panel').forEach(p => p.classList.toggle('active', p.id === name + 'Tab'));
     if (name === 'map') renderAccessMap();
+    if (name === 'new') renderTemplates();
     if (name === 'grid') renderGridList();
     if (name === 'save') renderSaveTab();
     if (name === 'validate') openValidateTab();
@@ -5275,6 +5286,72 @@
     const btnClr = document.getElementById('revBtnClear');
     if (btnClr) btnClr.onclick = () => { REV.selected.clear(); renderRevokeTable(); };
   })();
+
+  // ===================================================================
+  // Permission templates (Create tab) -- centrally maintained delegation
+  // packs diffed against the active instance by /api/templates.
+  // ===================================================================
+  async function renderTemplates() {
+    const wrap = document.getElementById('tplCards');
+    if (!wrap) return;
+    if (!isServer) { wrap.innerHTML = '<div class="empty">Templates need server mode.</div>'; return; }
+    try {
+      const r = await api('GET', '/api/templates');
+      const tpls = (r && r.templates) || [];
+      if (!tpls.length) { wrap.innerHTML = '<div class="empty">No templates found (templates/*.template.json).</div>'; return; }
+      wrap.innerHTML = '';
+      for (const t of tpls) {
+        const card = document.createElement('div');
+        card.style.cssText = 'border:1px solid #d0d7de; border-radius:8px; background:#ffffff; padding:10px 14px; margin:6px 0; display:flex; align-items:center; gap:14px;';
+        if (t.error) {
+          card.innerHTML = '<div style="color:#cf222e; font-size:12px;">' + escapeHtml(t.id) + ': ' + escapeHtml(t.error) + '</div>';
+          wrap.appendChild(card); continue;
+        }
+        const upToDate = t.missingCount === 0;
+        card.innerHTML =
+          '<div style="flex:1; min-width:0;">' +
+            '<div style="font-size:13px; font-weight:600;">' + escapeHtml(t.name) + ' <span style="font-size:10.5px; color:#57606a; font-weight:400;">v' + escapeHtml(String(t.version)) + ' &middot; ' + t.totalRows + ' row(s)</span></div>' +
+            '<div style="font-size:11.5px; color:#57606a; margin-top:2px;">' + escapeHtml(t.description || '') + '</div>' +
+          '</div>' +
+          (upToDate
+            ? '<div style="color:#1a7f37; font-size:12px; white-space:nowrap;">&#x2713; Up to date</div>'
+            : '<div style="color:#9a6700; font-size:12px; white-space:nowrap;">' + t.missingCount + ' new permission(s)</div>' +
+              '<button class="primary tpl-import">Import into pending</button>');
+        wrap.appendChild(card);
+        const btn = card.querySelector('.tpl-import');
+        if (btn) btn.onclick = async () => {
+          btn.disabled = true; btn.textContent = 'Importing...';
+          try {
+            let n = 0;
+            for (const base of Object.keys(t.missing || {})) {
+              const data = await loadCsv(base);
+              ensurePending(base, data.header, data.rows);
+              const p = pendingChanges[base];
+              for (const tr of t.missing[base]) {
+                const row = {};
+                for (const c of p.header) row[c] = '';
+                for (const k of Object.keys(tr)) { if (!p.header.includes(k)) p.header.push(k); row[k] = String(tr[k] == null ? '' : tr[k]); }
+                p.rows.push(row);
+                n++;
+              }
+            }
+            markBadges();
+            btn.textContent = '✓ ' + n + ' staged';
+            const note = document.createElement('div');
+            note.style.cssText = 'color:#1a7f37; font-size:11.5px; white-space:nowrap;';
+            note.innerHTML = 'commit on <a style="color:#0969da; cursor:pointer;">Review &amp; Save</a>';
+            note.querySelector('a').onclick = () => switchTab('save');
+            card.appendChild(note);
+          } catch (e) {
+            btn.disabled = false; btn.textContent = 'Import into pending';
+            alert('Template import failed: ' + e.message);
+          }
+        };
+      }
+    } catch (e) {
+      wrap.innerHTML = '<div class="empty" style="color:#cf222e;">Template check failed: ' + escapeHtml(e.message) + '</div>';
+    }
+  }
 
   // ===================================================================
   // Access Map -- 4-column flow board (admins | role groups | permission

@@ -1678,6 +1678,72 @@ function Handle-Request {
         # -------------------------------------------------------------------
         # MSP multi-instance endpoints
         # -------------------------------------------------------------------
+        # -------------------------------------------------------------------
+        # Permission templates -- centrally maintained delegation packs
+        # (templates/*.template.json ships with the repo; sync distributes).
+        # The endpoint diffs each template against the ACTIVE instance and
+        # reports the rows the instance doesn't have yet, so the UI can show
+        # 'new permissions available to delegate' when a template grows.
+        # -------------------------------------------------------------------
+        if ($path -eq '/api/templates' -and $method -eq 'GET') {
+            $script:lastHeartbeat = Get-Date
+            function Get-PimTemplateRowKey {
+                param([string]$Base, [object]$Row)
+                $g = { param($p) $x = $Row.PSObject.Properties[$p]; if ($x -and $x.Value) { "$($x.Value)" } else { '' } }
+                switch -Wildcard ($Base) {
+                    'PIM-Definitions-AU'              { return (& $g 'AdministrativeUnitTag') }
+                    'PIM-Definitions-*'               { return (& $g 'GroupTag') }
+                    'Account-Definitions-Admins'      { return (& $g 'UserName') }
+                    'PIM-Assignments-Admins'          { return ((& $g 'Username') + '|' + (& $g 'GroupTag')) }
+                    'PIM-Assignments-Groups'          { return ((& $g 'TargetGroupTag') + '|' + (& $g 'SourceGroupTag')) }
+                    'PIM-Assignments-Roles-Groups'    { return ((& $g 'GroupTag') + '|' + (& $g 'RoleDefinitionName')) }
+                    'PIM-Assignments-Roles-AUs'       { return ((& $g 'GroupTag') + '|' + (& $g 'AdministrativeUnitTag') + '|' + (& $g 'RoleDefinitionName')) }
+                    'PIM-Assignments-Azure-Resources' { return ((& $g 'GroupTag') + '|' + (& $g 'AzScope') + '|' + (& $g 'AzScopePermission')) }
+                    default { return '' }
+                }
+            }
+            $tplDir = Join-Path $solutionRoot 'templates'
+            $outList = New-Object System.Collections.ArrayList
+            if (Test-Path -LiteralPath $tplDir) {
+                foreach ($f in (Get-ChildItem $tplDir -Filter '*.template.json' -File | Sort-Object Name)) {
+                    try {
+                        $raw = [System.IO.File]::ReadAllText($f.FullName, [System.Text.UTF8Encoding]::new($false))
+                        if ($raw.Length -gt 0 -and [int][char]$raw[0] -eq 0xFEFF) { $raw = $raw.Substring(1) }
+                        $tpl = $raw | ConvertFrom-Json
+                        $missing = [ordered]@{}
+                        $missingCount = 0
+                        $totalCount = 0
+                        foreach ($baseProp in $tpl.rows.PSObject.Properties) {
+                            $base = $baseProp.Name
+                            if (-not (Get-PimCsvSpec -BaseName $base)) { continue }
+                            $current = Read-PimCsvRows -BaseName $base
+                            $existing = @{}
+                            foreach ($r in $current.rows) {
+                                $k = Get-PimTemplateRowKey -Base $base -Row ([pscustomobject]$r)
+                                if ($k -and $k -ne '|' ) { $existing[$k.ToLowerInvariant()] = $true }
+                            }
+                            $miss = New-Object System.Collections.ArrayList
+                            foreach ($tr in @($baseProp.Value)) {
+                                $totalCount++
+                                $k = Get-PimTemplateRowKey -Base $base -Row $tr
+                                if ($k -and -not $existing.ContainsKey($k.ToLowerInvariant())) { [void]$miss.Add($tr) }
+                            }
+                            if ($miss.Count -gt 0) { $missing[$base] = $miss.ToArray(); $missingCount += $miss.Count }
+                        }
+                        [void]$outList.Add([ordered]@{
+                            id = "$($tpl.id)"; name = "$($tpl.name)"; version = $tpl.version
+                            description = "$($tpl.description)"
+                            totalRows = $totalCount; missingCount = $missingCount; missing = $missing
+                        })
+                    } catch {
+                        [void]$outList.Add([ordered]@{ id = $f.Name; error = "$($_.Exception.Message)" })
+                    }
+                }
+            }
+            Write-JsonResponse -Response $resp -Status 200 -Body ([ordered]@{ templates = $outList.ToArray() })
+            return 200
+        }
+
         if ($path -eq '/api/instances' -and $method -eq 'GET') {
             $script:lastHeartbeat = Get-Date
             # foreach statement, not pipeline -- see the GET / handler note.
