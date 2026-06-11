@@ -1,9 +1,10 @@
 # Release notes for PIM4EntraPS
 
-## v2.4.135
+## v2.4.136
 
 Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monorepo:
 
+- release: PIM4EntraPS v2.4.136 -- PIM Manager: collapsible file rail on the Configuration tab (chevron toggle, 280px -> 30px strip, preference persists in localStorage); E2E-verified collapse/persist/expand with zero console errors (0713483c)
 - release: PIM4EntraPS v2.4.135 -- PIM Manager: PIM-RING-001 downgraded to warning (never blocks Save) + Fix-all gained a ring bucket defaulting to repair-to-Ring-2 (least privilege; clear-to-0 as explicit alternative); instances.custom.json entries can declare per-tenant connections (tenantId+appId + certThumbprint for mgmt-box machine-store certs, OR keyVaultName+secretName for one central KV secret per tenant -- the cloud-portable shape an App Service port reads via Managed Identity); instance switch drops the Graph session and retargets the SPN globals so Active Assignments + tenant-cache refresh hit the selected tenant. E2E-verified against 3 demo tenant instances (afcba721)
 - release: PIM4EntraPS v2.4.134 -- deployment rings for staged MSP admin rollout: Ring column on Account-Definitions-Admins (blank=0=veteran/all tenants, 1=pilot+test, 2=new hire/test only) x $global:PIM_TenantRing per tenant (unset=0=production, safe default) x one rule (apply iff admin.Ring <= tenant.Ring); engine filters at all 4 admin load sites (CSV+SQL accounts/assignments) via shared helpers with UserName->ring map; SQL-ready (collapses to WHERE Ring <= @TenantRing later). Manager: Ring dropdown in grid, onboarding workflow defaults new hires to ring 2, PIM-RING-001 validator error on invalid values (engine treats them as 0 = over-grant). Plus professional Create-tab workflow names (00f1afe7)
 - release: PIM4EntraPS v2.4.133 -- PIM Manager: Graph view removed (was unused + the only CDN dependency; SPA now makes zero external requests, data model behind the wizards kept); professional tabs (Configuration landing / Create / Review & Save / Validate / Active Assignments) + labelled Tenant switcher sorted for 25+ MSP instances with config-root tooltips; fixed TDZ init abort on the landing-tab rail render (a456cc00)
@@ -33,13 +34,18 @@ Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monor
 - release: PIM4EntraPS v2.4.109 - PIM4EntraPS.PimActivator.admx removes unused <using> namespace dependency (strict tenants rejected upload as NamespaceMissing:Microsoft.Policies.Windows) (91c3e488)
 - release: PIM4EntraPS v2.4.108 - Deploy-PimActivatorIntune.ps1 drops defaultLanguageCode from ADMX upload payload (Intune 400 ADMXDefaultLanguageCodeNotNull) (a17463d2)
 - release: PIM4EntraPS v2.4.107 - Deploy-PimActivatorIntune.ps1 ADMX payload now has explicit @odata.type (fixes silent field null-out on strict tenants) (ab4a8d34)
-- release: PIM4EntraPS v2.4.106 - Deploy-PimActivatorIntune.ps1 dumps full ADMX upload-failure detail (uploadInfo:null was hiding everything) (23320078)
 
 ---
 
 # Release notes -- PIM4EntraPS
 
 > **Curated changelog.** The publish workflow auto-prepends recent monorepo commits as a raw activity log; this file is the human-friendly narrative on top.
+
+---
+
+## v2.4.136 -- PIM Manager: collapsible file rail on the Configuration tab
+
+The left file list collapses to a 30px strip via a chevron toggle at its top, giving the data table the full width (~250px gained on a 1480px window). The preference persists in the browser (localStorage) across sessions. E2E-verified: collapse / persist-across-reload / expand / normal grid flow, zero console errors.
 
 ---
 

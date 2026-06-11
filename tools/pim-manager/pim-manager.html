@@ -112,6 +112,13 @@
   /* Grid tab */
   #gridTab { display:none; }
   #gridTab.active { display:grid; grid-template-columns: 280px 1fr; }
+  /* Collapsed rail: thin strip with just the expand toggle -- gives the
+     table the full width. State persists in localStorage. */
+  #gridTab.rail-collapsed.active { grid-template-columns: 30px 1fr; }
+  #gridTab.rail-collapsed #gridList .item,
+  #gridTab.rail-collapsed #gridList .group-hdr { display:none; }
+  #railToggle { display:flex; align-items:center; justify-content:center; height:26px; margin:0 6px 6px 6px; cursor:pointer; border:1px solid #d0d7de; border-radius:5px; background:#ffffff; color:#57606a; font-size:12px; user-select:none; }
+  #railToggle:hover { background:#eaeef2; color:#0969da; }
   #gridList { background:#f6f8fa; border-right:1px solid #d0d7de; overflow:auto; padding:10px 0; font-size:12.5px; }
   #gridList .group-hdr { padding:6px 14px; font-size:10px; text-transform:uppercase; color:#57606a; letter-spacing:.5px; font-weight:600; }
   #gridList .item { padding:6px 14px; cursor:pointer; border-left:2px solid transparent; }
@@ -1487,6 +1494,19 @@
       groups[b.group].push(b.base);
     }
     list.innerHTML = '';
+    // Collapse toggle -- gives the table the full width; state persists.
+    const tab = document.getElementById('gridTab');
+    const collapsed = localStorage.getItem('pimRailCollapsed') === '1';
+    tab.classList.toggle('rail-collapsed', collapsed);
+    const tog = document.createElement('div');
+    tog.id = 'railToggle';
+    tog.textContent = collapsed ? '❯' : '❮';
+    tog.title = collapsed ? 'Expand file list' : 'Collapse file list';
+    tog.onclick = () => {
+      localStorage.setItem('pimRailCollapsed', tab.classList.contains('rail-collapsed') ? '0' : '1');
+      renderGridList();
+    };
+    list.appendChild(tog);
     for (const g of Object.keys(groups)) {
       const h = document.createElement('div');
       h.className = 'group-hdr';
