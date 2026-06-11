@@ -1,9 +1,10 @@
 # Release notes for PIM4EntraPS
 
-## v2.4.126
+## v2.4.127
 
 Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monorepo:
 
+- release: PIM4EntraPS v2.4.127 -- v2.4.125/126 AU member-add guards missed the inline copies of the create-groups loop in PIM-Baseline-Management-CSV.ps1 + PIM4GroupsCreateModifyPolicyOnly.ps1 (the main CSV engine never calls the patched module functions); field run on v2.4.126 still crashed with ObjectId transformation error on a tenant with duplicate group DisplayNames -- both inline loops now normalise AU/group lookups + ERROR/WARNING/skip before calling Add-AdministrativeUnit-Member (b8d102ab)
 - release: PIM4EntraPS v2.4.126 -- harden v2.4.125 Add-AdministrativeUnit-Member guard to handle multi-match arrays too (mandatory [string] params reject collections the same way they reject null); collapses to first match with a yellow WARNING line when count > 1, red ERROR + continue when count == 0 (028fa9d6)
 - release: PIM4EntraPS v2.4.125 -- guard Add-AdministrativeUnit-Member against null \$AUInfo / \$GroupInfo at both CreateUpdate-PIM-for-Groups-From-file-CSV call sites so a row with a missing AdministrativeUnitTag logs a clear red error and 'continue's instead of crashing the engine with 'Cannot process argument transformation on parameter ObjectId. Cannot convert value to type System.String.' (db887ecf)
 - release: PIM4EntraPS v2.4.124 -- PathAdmins / PathAdminsL0T0 moved under canonical \$global:PIM_NamingConventions hashtable (matching AdminAccountPatterns, PimGroupPattern, TagPrefixToCsv) with v2.4.123 free-floating-globals shape kept as back-compat fallback; locked.ps1 + custom.sample.ps1 updated to document the new shape (dca61cd2)
@@ -33,13 +34,40 @@ Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monor
 - release: PIM4EntraPS v2.4.101 + extension v1.6.20 - popup CSS revert (v1.6.19 flex-column broke Edge) (709005f7)
 - release: PIM4EntraPS v2.4.100 - Update-PimActivator-Extension.ps1 flush now scrubs stale Secure Preferences registration alongside cached CRX (prevents DISABLE_CORRUPTED trap) (3a9de353)
 - release: PIM4EntraPS v2.4.99 - Deploy-PimActivatorIntune.ps1 catalog auto-discover (hotfix over v2.4.98) (785ff800)
-- release: PIM4EntraPS v2.4.98 + extension v1.6.19 - unified Intune deploy + critical fix for ExtensionSettings schema bug that froze fleet at old versions + popup CSS no longer overflows Chromium popup cap (508f6eab)
 
 ---
 
 # Release notes -- PIM4EntraPS
 
 > **Curated changelog.** The publish workflow auto-prepends recent monorepo commits as a raw activity log; this file is the human-friendly narrative on top.
+
+---
+
+## v2.4.127 -- the v2.4.125/126 AU member-add guards missed the inline copies of the loop in two engines; the main CSV engine still crashed
+
+### Why
+
+v2.4.125/126 guarded the two `Add-AdministrativeUnit-Member` call sites inside `engine/_shared/PIM-Functions.psm1` (`CreateUpdate-PIM-for-Groups-From-file-CSV` / `-From-SQL`). But the **main CSV engine does not call those module functions** -- `PIM-Baseline-Management-CSV.ps1` (and the `PIM4GroupsCreateModifyPolicyOnly` variant) carry their own inline copy of the same create-groups loop, which still did:
+
+```powershell
+$GroupInfo = Get-MgGroup -Filter "DisplayName eq '$($GroupName)'"
+Add-AdministrativeUnit-Member -AuId $AUInfo.Id -AddType Group -ObjectId $GroupInfo.Id
+```
+
+A field run on v2.4.126 reproduced the exact pre-fix crash (`Cannot process argument transformation on parameter 'ObjectId'. Cannot convert value to type System.String.`) right after `OK - Group ... exists with correct data` -- proving the executed path was the inline engine loop, not the patched module functions. The trigger in that tenant: **two groups sharing the same DisplayName**, so the `DisplayName eq` Graph filter returned 2 rows and `$GroupInfo.Id` became a `[string[]]`, which the mandatory `[string]` parameter rejects at binding time. (`-ErrorAction SilentlyContinue` on the call does not help -- argument-transformation failures happen at parameter binding, before error-action preferences apply.)
+
+### Fix
+
+Both inline engine loops now use the exact v2.4.126 guard: normalise AU + group lookups to flat non-empty `[string[]]`, red `[ERROR]` + `continue` on 0 matches, yellow `[WARNING]` + use-first on multi-match (naming the duplicate so operators can clean it up), and call `Add-AdministrativeUnit-Member` with explicit `[string]` casts.
+
+### Files changed
+
+- `engine/PIM-Baseline-Management-CSV/PIM-Baseline-Management-CSV.ps1` -- guard the inline AU member-add loop.
+- `engine/PIM-Baseline-Management-CSV-PIM4GroupsCreateModifyPolicyOnly/PIM-Baseline-Management-CSV-PIM4GroupsCreateModifyPolicyOnly.ps1` -- same guard for its copy of the loop.
+
+### Operator note
+
+If the run now prints `WARNING: Group lookup for '<name>' returned 2 matches -- the tenant has DUPLICATE groups with this DisplayName`, the tenant really has two groups with that DisplayName (typically leftovers from the pre-v2.4.69 duplicate-create bug). The engine proceeds with the first match, but the duplicate should be reviewed and removed.
 
 ---
 
