@@ -4981,25 +4981,21 @@ Fix (one-time per tenant):
                             write-host ""
                             Write-host "Creating $($TargetPlatform) account $($DisplayName)"
 
-                            # v2.4.121: CSV TierLevel column carries the TIER
-                            # (T0/T1/T2/T3) -- NOT the Level. Level is a
-                            # separate dimension encoded elsewhere (typically
-                            # in the UPN body, e.g. 'Admin-SKR-L0-T0-ID' carries
-                            # both L0 Level and T0 Tier). The old engine matched
-                            # CSV TierLevel against literal "L0" / "L1" -- so
-                            # any CSV using "T0" / "T1" silently dropped every
-                            # Create row. Fixed by matching against the actual
-                            # Tier convention. The legacy "L0" / "L1" literals
-                            # are accepted as back-compat so historical CSVs
-                            # that mis-labelled the column don't break.
-                            #
-                            # Tier 0 (T0) -> high-priv OU ($PathAdminsL0T0).
-                            # Tier 1/2/3 (T1/T2/T3) and blank -> general OU
-                            # ($PathAdmins).
-                            $tierUpper = if ($null -ne $TierLevel) { ([string]$TierLevel).ToUpperInvariant().Trim() } else { '' }
-                            $isTier0 = ($tierUpper -eq 'T0') -or ($tierUpper -eq 'L0')  # 'L0' kept ONLY for back-compat with the pre-v2.4.121 misnamed CSVs
-                            $targetOu = if ($isTier0) { $PathAdminsL0T0 } else { $PathAdmins }
-                            $tierForLog = if ([string]::IsNullOrWhiteSpace($tierUpper)) { '<blank>' } else { $tierUpper }
+                            # v2.4.122: OU routing driven by the UserName / UPN
+                            # NAMING -- not the CSV TierLevel column. Customers
+                            # encode the privilege class in the account name
+                            # itself (e.g. 'Admin-SKR-L0-T0-ID' carries both
+                            # the L0 Level and T0 Tier markers). If the UserName
+                            # carries an 'L0' or 'T0' marker (case-insensitive,
+                            # bounded by '-' so 'L0-' / '-L0' / '-T0' / 'T0-'
+                            # match but 'L01' / 'LT0' don't), the account is
+                            # high-priv and routes to $PathAdminsL0T0; every
+                            # other name (the default) routes to $PathAdmins.
+                            $userNameForRouting = [string]$UserName
+                            $highPrivRegex = '(?i)(^|[-_.])(L0|T0)([-_.]|$)'
+                            $isHighPriv = $userNameForRouting -match $highPrivRegex
+                            $targetOu = if ($isHighPriv) { $PathAdminsL0T0 } else { $PathAdmins }
+                            $tierForLog = if ($isHighPriv) { 'high-priv (L0/T0 marker in UserName)' } else { 'general (no L0/T0 marker in UserName)' }
 
                             $createOk = $false
                             if ([string]::IsNullOrWhiteSpace($targetOu)) {
