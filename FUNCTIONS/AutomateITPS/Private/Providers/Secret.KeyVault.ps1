@@ -12,8 +12,8 @@ function Get-PlatformSecretKeyVault {
     if (-not (Get-Module -ListAvailable -Name Az.KeyVault)) {
         throw "Get-PlatformSecretKeyVault: module Az.KeyVault not available. Install-Module Az.KeyVault -Scope CurrentUser"
     }
-    Import-Module Az.Accounts -ErrorAction Stop
-    Import-Module Az.KeyVault -ErrorAction Stop
+    # No explicit Import-Module -- Get-AzContext / Get-AzKeyVaultSecret
+    # auto-load Az.Accounts / Az.KeyVault on first call.
 
     $existing = Get-AzContext -ErrorAction SilentlyContinue
     if (-not $existing) {
@@ -53,7 +53,8 @@ function Get-AutomateITAzureToken {
     if (-not (Get-Module -ListAvailable -Name Az.Accounts)) {
         throw "Get-AutomateITAzureToken: module Az.Accounts not available. Install-Module Az.Accounts -Scope CurrentUser"
     }
-    Import-Module Az.Accounts -ErrorAction Stop
+    # No explicit Import-Module Az.Accounts -- Get-AzContext / Connect-AzAccount
+    # / Get-AzAccessToken auto-load it on first call.
 
     if ($Context.Host.Kind -ne 'Dev') {
         $existing = Get-AzContext -ErrorAction SilentlyContinue

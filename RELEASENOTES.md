@@ -1,9 +1,10 @@
 # Release notes for PIM4EntraPS
 
-## v2.4.113
+## v2.4.114
 
 Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monorepo:
 
+- release: PIM4EntraPS v2.4.114 -- PIM-Baseline-Management-CSV engine now calls CreateUpdate-Accounts-From-file-CSV with -OnlyAD too (was hardcoded to -OnlyID; AD rows in the CSV were silently ignored); guards on Get-ADUser availability + $AD_Credentials (3fa86c9a)
 - release: PIM4EntraPS v2.4.113 - README PIM Activator section rewritten to today's deploy architecture (docs-only) (df162df9)
 - release: PIM4EntraPS v2.4.112 + extension v1.6.25 - popup manual single-tenant entry wins over managed catalog (fixes Save->onboarding loop on contaminated boxes) (b5ab0aa7)
 - release: PIM4EntraPS v2.4.111 - Deploy-PimActivatorClient.ps1 stops defaulting to sibling discovered-tenant-catalog.json (cross-tenant leak); auto-discovers from live Entra instead (34a1f1c8)
@@ -33,13 +34,56 @@ Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monor
 - release: PIM4EntraPS v2.4.96 + extension v1.6.8 - TWO bugs blocking chrome.storage.managed: (a) manifest now declares storage.managed_schema -> managed-schema.json (without this Chromium returns empty from chrome.storage.managed regardless of registry) + (b) all 3 Intune push scripts now use ConvertTo-Json -InputObject @($catalog) to preserve array brackets on single-element catalogs (PS 5.1 + 7 compatible, prevents single-tenant catalog from being serialized as {object} instead of [array]) (4693e4cb)
 - release: PIM4EntraPS v2.4.95 + extension v1.6.7 - popup max-height bumped 600->800px (Chromium's hard cap) + catalog import textarea shrunk from 6 to 3 rows (resize:vertical retained), so Save and continue button no longer disappears on first-run (a2c1331e)
 - fix Verify-PimActivatorIntunePolicy.ps1: PS 5.1 doesn't accept 'if (...) {...} else {...}' as an expression inside Write-Host -ForegroundColor argument; lift the choice into a separate $summaryColor variable (9e0c5644)
-- add Verify-PimActivatorIntunePolicy.ps1 - portable HKLM registry verifier for the 6 PIM Activator Intune policies, runs on any Windows endpoint with PS 5.1+ (no Graph dep) (8bf15a34)
 
 ---
 
 # Release notes -- PIM4EntraPS
 
 > **Curated changelog.** The publish workflow auto-prepends recent monorepo commits as a raw activity log; this file is the human-friendly narrative on top.
+
+---
+
+## v2.4.114 -- PIM-Baseline-Management-CSV engine: actually provision the AD rows in the CSV (engine was hardcoded to `-OnlyID`)
+
+### Symptom
+
+A customer ran the launcher with a CSV containing both ID rows (cloud admins, e.g. `Admin-SKR-L0-T0-ID@nordstern.dk`) AND AD rows (on-prem admins, e.g. `Admin-SKR-L0-T0-AD@nordstern.dk`). The engine logged `Updating ID user ...` for every ID row -- but never logged `Updating AD user ...` for any AD row. The AD-account branch of `CreateUpdate-Accounts-From-file-CSV` (in `engine/_shared/PIM-Functions.psm1` line 4927) was simply never reached.
+
+### Root cause
+
+`engine/PIM-Baseline-Management-CSV/PIM-Baseline-Management-CSV.ps1` line 243 hardcoded `-OnlyID` on the single call to `CreateUpdate-Accounts-From-file-CSV`. The AD branch is gated on `-OnlyAD`, which the engine never passes -- so AD rows in the CSV were silently ignored on every run since the function was introduced.
+
+### Fix
+
+Engine now makes a second call with `-OnlyAD`, gated on:
+
+1. `Get-Command Get-ADUser` resolving (i.e. the ActiveDirectory RSAT module is loadable on this host) -- skips cleanly on cloud-only hosts that have AD rows in the CSV they don't intend to provision here.
+2. `$AD_Credentials` being populated (legacy `Connect_Azure` / `2LINKIT-Functions` are expected to set it).
+
+When either guard fails, the engine prints a yellow `[INFO]` line explaining why the AD branch is being skipped, instead of silently doing nothing. When both guards pass, `CreateUpdate-Accounts-From-file-CSV -OnlyAD -Credentials $AD_Credentials -PathAdmins ... -PathAdminsL0T0 ...` runs and the AD branch processes every CSV row with `TargetPlatform=AD` exactly as it always could -- the gate just never lifted before.
+
+### Files changed
+
+- `engine/PIM-Baseline-Management-CSV/PIM-Baseline-Management-CSV.ps1` -- second `CreateUpdate-Accounts-From-file-CSV -OnlyAD` call added after the existing `-OnlyID` one, with AD-availability guards.
+
+### How to apply
+
+- Pull, rerun the launcher. With the ActiveDirectory module + `$AD_Credentials` available, you'll now see `Updating AD user ...` / `Creating AD account ...` lines alongside the existing ID-side output for every CSV row with `TargetPlatform=AD`. Without them, you'll get a clear `[INFO]` line explaining the skip.
+
+### Note -- companion-step required on tenants whose admin UPNs use non-default prefixes
+
+The Graph filter that builds `$Global:Users_All_ID` is keyed off `$global:PIM_NamingConventions.AdminAccountPatterns`. The locked default ships `@('Admin-', 'X-Admin')`. Tenants whose CSV carries admins under additional prefixes (e.g. `ADM-`, `Adm-`, `X-Adm-`) must drop a `config/PIM4EntraPS.NamingConventions.custom.ps1` widening the list:
+
+```powershell
+$global:PIM_NamingConventions.AdminAccountPatterns = @(
+    'Adm-{Initials}-L{Level}-T{Tier}-{Platform}'
+    'Admin-{Initials}-L{Level}-T{Tier}-{Platform}'
+    'X-Adm-{Initials}-L{Level}-T{Tier}-{Platform}'
+    'X-Admin-{Initials}-L{Level}-T{Tier}-{Platform}'
+)
+```
+
+Without this, admins under non-default prefixes are absent from `$Global:Users_All_ID`, which then surfaces downstream as a `Cannot process argument transformation on parameter 'ObjectId'` crash when `Add-AdministrativeUnit-Member` / `New-MgGroupOwnerByRef` get handed a `$null` ObjectId.
 
 ---
 
