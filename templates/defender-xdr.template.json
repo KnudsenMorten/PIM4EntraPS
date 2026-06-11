@@ -1,0 +1,17 @@
+{
+  "id": "defender-xdr",
+  "name": "Microsoft Defender XDR delegation",
+  "version": 2,
+  "description": "Permission groups for Defender XDR Unified RBAC. These are workload groups: Defender XDR assigns its RBAC roles directly to the Entra groups (no Entra directory role involved). v1 shipped the three operator groups; v2 adds the read-only counterparts and the client-scoped response group.",
+  "rows": {
+    "PIM-Definitions-Services": [
+      { "GroupName": "PIM-Defender-XDR-SecurityOperations-Operator-L3-T1-MP-ID", "GroupDescription": "Defender XDR - Security Operations, Operator (manage incidents, run scans)", "GroupTag": "Defender-XDR-SecurityOperations-Operator-L3", "AdministrativeUnitTag": "PIM-L1", "IsRoleAssignable": "FALSE", "Workload": "Defender-XDR", "Level": "L3", "TierLevel": "T1", "Plane": "MP", "CPPlatform": "ID", "Owners": "" },
+      { "GroupName": "PIM-Defender-XDR-SecurityPosture-Operator-L3-T1-MP-ID", "GroupDescription": "Defender XDR - Security Posture, Operator (exposure management, recommendations)", "GroupTag": "Defender-XDR-SecurityPosture-Operator-L3", "AdministrativeUnitTag": "PIM-L1", "IsRoleAssignable": "FALSE", "Workload": "Defender-XDR", "Level": "L3", "TierLevel": "T1", "Plane": "MP", "CPPlatform": "ID", "Owners": "" },
+      { "GroupName": "PIM-Defender-XDR-AuthorizationAndSettings-Admin-L2-T1-MP-ID", "GroupDescription": "Defender XDR - Authorization & Settings, Admin (RBAC + system settings)", "GroupTag": "Defender-XDR-AuthorizationAndSettings-Admin-L2", "AdministrativeUnitTag": "PIM-L1", "IsRoleAssignable": "FALSE", "Workload": "Defender-XDR", "Level": "L2", "TierLevel": "T1", "Plane": "MP", "CPPlatform": "ID", "Owners": "" },
+      { "GroupName": "PIM-Defender-XDR-SecurityOperations-Reader-L4-T1-MP-ID", "GroupDescription": "Defender XDR - Security Operations, Read-only (view incidents and alerts)", "GroupTag": "Defender-XDR-SecurityOperations-Reader-L4", "AdministrativeUnitTag": "PIM-L1", "IsRoleAssignable": "FALSE", "Workload": "Defender-XDR", "Level": "L4", "TierLevel": "T1", "Plane": "MP", "CPPlatform": "ID", "Owners": "" },
+      { "GroupName": "PIM-Defender-XDR-SecurityPosture-Reader-L4-T1-MP-ID", "GroupDescription": "Defender XDR - Security Posture, Read-only (view exposure and recommendations)", "GroupTag": "Defender-XDR-SecurityPosture-Reader-L4", "AdministrativeUnitTag": "PIM-L1", "IsRoleAssignable": "FALSE", "Workload": "Defender-XDR", "Level": "L4", "TierLevel": "T1", "Plane": "MP", "CPPlatform": "ID", "Owners": "" },
+      { "GroupName": "PIM-Defender-XDR-AuthorizationAndSettings-Reader-L4-T1-MP-ID", "GroupDescription": "Defender XDR - Authorization & Settings, Read-only (view RBAC + settings)", "GroupTag": "Defender-XDR-AuthorizationAndSettings-Reader-L4", "AdministrativeUnitTag": "PIM-L1", "IsRoleAssignable": "FALSE", "Workload": "Defender-XDR", "Level": "L4", "TierLevel": "T1", "Plane": "MP", "CPPlatform": "ID", "Owners": "" },
+      { "GroupName": "PIM-Defender-XDR-SecurityOperations-Response-Clients-L4-T1-MP-ID", "GroupDescription": "Defender XDR - Security Operations, Response actions scoped to client devices", "GroupTag": "Defender-XDR-SecurityOperations-Response-Scope-Clients-L4", "AdministrativeUnitTag": "PIM-L1", "IsRoleAssignable": "FALSE", "Workload": "Defender-XDR", "Level": "L4", "TierLevel": "T1", "Plane": "MP", "CPPlatform": "ID", "Owners": "" }
+    ]
+  }
+}
