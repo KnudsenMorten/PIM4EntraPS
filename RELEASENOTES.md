@@ -1,9 +1,10 @@
 # Release notes for PIM4EntraPS
 
-## v2.4.139
+## v2.4.140
 
 Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monorepo:
 
+- release: PIM4EntraPS v2.4.141 -- Delegation Map becomes an editor: select an admin -> "+ Assign to group..." stages PIM-Assignments-Admins rows by clicking one or more role/org groups (duplicate-guarded, Eligible/365d defaults); select a role group -> "+ Link capability bundle..." stages PIM-Assignments-Groups nesting rows; staged relations draw as dashed amber wires via a pending overlay on the board model. Two-step focus UX (pick person or permission -> board collapses to the transitive path, toggleable). Long Azure scope/AU names render two-line with full wrap in focus view (545976d0)
 - release: PIM4EntraPS v2.4.139 -- PIM Manager Delegation Map (new landing tab): the PIM v2 model as a 4-column flow board (People -> Roles & Org Groups -> Capability Bundles -> Permissions & Targets, with terminal permission groups rendered as workload/app-RBAC groups for Power BI/Intune/Defender XDR/3rd-party); click-to-light full path in both directions with selection-only wires (Active amber, Eligible blue), every box = Definitions row / every wire = Assignments row with open-in-grid jump; search dims non-matches; static-mode compatible. Tabs reordered to operator lifecycle: Create -> Delegation Map -> Validate -> Review & Save -> Maintenance -> Advanced View (grid) (55be87b9)
 - release: PIM4EntraPS v2.4.138 -- PIM Manager role pickers auto-load from the tenant: new azure-rbac-roles tenant-list kind (Get-AzRoleDefinition, per-instance cache, included in -RefreshTenantLists); Azure perm-group workflow picks the RBAC role from the tenant list (fills exact name + alias, free-text fallback); both perm-group workflows auto-load empty lists silently on open via ensureTenantLists; AzScopePermission renders as a dropdown in the Configuration grid. Kills the typed-role-name spelling-error class; validator STALE checks remain the safety net (a2afd078)
 - release: PIM4EntraPS v2.4.137 -- PIM Manager validator: PIM-NAME-002 false positive on EVERY UPN fixed -- [regex]::Escape escapes { but not } (.NET asymmetry), so the {Token}->.+ replacement never matched and UPNs were checked against the literal template string; closing brace now matched optionally-escaped. Demo tenants validate fully clean (0 errors, 0 warnings) (87116adf)
@@ -33,13 +34,32 @@ Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monor
 - release: PIM4EntraPS v2.4.113 - README PIM Activator section rewritten to today's deploy architecture (docs-only) (df162df9)
 - release: PIM4EntraPS v2.4.112 + extension v1.6.25 - popup manual single-tenant entry wins over managed catalog (fixes Save->onboarding loop on contaminated boxes) (b5ab0aa7)
 - release: PIM4EntraPS v2.4.111 - Deploy-PimActivatorClient.ps1 stops defaulting to sibling discovered-tenant-catalog.json (cross-tenant leak); auto-discovers from live Entra instead (34a1f1c8)
-- release: PIM4EntraPS v2.4.110 - Deploy-PimActivatorIntune.ps1 auto-skips Forcelist defValues when existing policy owns slot (avoids IME slot-cycling under -Force) (1771e06b)
 
 ---
 
 # Release notes -- PIM4EntraPS
 
 > **Curated changelog.** The publish workflow auto-prepends recent monorepo commits as a raw activity log; this file is the human-friendly narrative on top.
+
+---
+
+## v2.4.140 -- Delegation Map becomes an editor: assign admins to groups + link capability bundles by clicking; two-step focus UX; long-name handling
+
+### Assign on the board
+
+- Select an admin -> **"+ Assign to group..."**: the role/org-group column lights up as link targets; every click stages one `PIM-Assignments-Admins` row (Eligible, 365 days, AutoExtend -- same defaults as the onboarding workflow) into pending. One or many; duplicate links are guarded with a notice; Done / Esc exits.
+- Select a role group -> **"+ Link capability bundle..."**: same flow staging `PIM-Assignments-Groups` nesting rows.
+- Staged-but-uncommitted relations render as **dashed amber wires** immediately (pending overlay on the board model); commit happens on Review &amp; Save as always.
+
+### Two-step focus UX
+
+Step 1: pick a person (left) or a permission (right). Step 2: the board **collapses to the transitive path** -- only the selected node's reach remains visible. A toolbar toggle switches back to the dimmed-overview style. In the collapsed view labels get room to wrap fully.
+
+### Long names
+
+Azure scopes and AU-scoped roles render as two-line items: role name bold, scope as a small muted second line -- no more single-line ARM-path truncation. Full wrap in focus view; full id on hover.
+
+Verified by headless-Chrome E2E: focus collapse + toggle, assign banner + candidate-column highlight, duplicate guard, real staging on live data (row in pending, badge, cancel-clean), role-group link button. Zero console errors.
 
 ---
 
