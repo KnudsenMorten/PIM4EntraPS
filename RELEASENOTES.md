@@ -1,9 +1,10 @@
 # Release notes for PIM4EntraPS
 
-## v2.4.114
+## v2.4.115
 
 Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monorepo:
 
+- release: PIM4EntraPS v2.4.115 -- PIM-Baseline-Management-CSV engine now prefers v2 platform Context.Identity.Legacy.Internal.Prod for AD/gMSA credential (KV: Legacy-UserName-Internal-Prod + Legacy-Password-Internal-Prod), falls back to legacy $AD_Credentials global (98f29b4b)
 - release: PIM4EntraPS v2.4.114 -- PIM-Baseline-Management-CSV engine now calls CreateUpdate-Accounts-From-file-CSV with -OnlyAD too (was hardcoded to -OnlyID; AD rows in the CSV were silently ignored); guards on Get-ADUser availability + $AD_Credentials (3fa86c9a)
 - release: PIM4EntraPS v2.4.113 - README PIM Activator section rewritten to today's deploy architecture (docs-only) (df162df9)
 - release: PIM4EntraPS v2.4.112 + extension v1.6.25 - popup manual single-tenant entry wins over managed catalog (fixes Save->onboarding loop on contaminated boxes) (b5ab0aa7)
@@ -33,13 +34,46 @@ Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monor
 - release: extension v1.6.9 - popup.js readMergedCatalog wraps single-object catalog as 1-element array (defense against pre-v2.4.96 PS 5.1 unwrap bug pushed by old Intune profiles); Verify-PimActivatorIntunePolicy.ps1 shows tenantCatalog shape ARRAY vs OBJECT clearly (52e05f16)
 - release: PIM4EntraPS v2.4.96 + extension v1.6.8 - TWO bugs blocking chrome.storage.managed: (a) manifest now declares storage.managed_schema -> managed-schema.json (without this Chromium returns empty from chrome.storage.managed regardless of registry) + (b) all 3 Intune push scripts now use ConvertTo-Json -InputObject @($catalog) to preserve array brackets on single-element catalogs (PS 5.1 + 7 compatible, prevents single-tenant catalog from being serialized as {object} instead of [array]) (4693e4cb)
 - release: PIM4EntraPS v2.4.95 + extension v1.6.7 - popup max-height bumped 600->800px (Chromium's hard cap) + catalog import textarea shrunk from 6 to 3 rows (resize:vertical retained), so Save and continue button no longer disappears on first-run (a2c1331e)
-- fix Verify-PimActivatorIntunePolicy.ps1: PS 5.1 doesn't accept 'if (...) {...} else {...}' as an expression inside Write-Host -ForegroundColor argument; lift the choice into a separate $summaryColor variable (9e0c5644)
 
 ---
 
 # Release notes -- PIM4EntraPS
 
 > **Curated changelog.** The publish workflow auto-prepends recent monorepo commits as a raw activity log; this file is the human-friendly narrative on top.
+
+---
+
+## v2.4.115 -- PIM-Baseline-Management-CSV engine: pull AD credential from v2 platform context (`$global:Context.Identity.Legacy.Internal.Prod`), legacy `$AD_Credentials` global as fallback
+
+### Why
+
+v2.4.114 wired the `-OnlyAD` branch but the guard checked only `$AD_Credentials` -- the v1-era global populated by `Connect_Azure.ps1` / `2LINKIT-Functions.psm1`. On hosts running the v2 platform bootstrap chain (Initialize-PlatformAutomationFramework -> Initialize-PlatformLegacyIdentity), the AD/gMSA credential is stashed at `$global:Context.Identity.Legacy.Internal.Prod` instead -- a real `[PSCredential]` built from the KV secrets `Legacy-UserName-Internal-Prod` + `Legacy-Password-Internal-Prod`. The v2.4.114 guard didn't know about that path, so v2-bootstrapped hosts that DO have the KV secrets still saw `[INFO] $AD_Credentials not set ... -- skipping AD-account branch`.
+
+### Fix
+
+Engine now resolves the AD credential from, in order:
+
+1. `$global:Context.Identity.Legacy.Internal.Prod` -- preferred, the v2 platform path. Populated by `Initialize-PlatformLegacyIdentity` (AutomateITPS) when KV carries the two secrets above.
+2. `$AD_Credentials` -- legacy global, kept for back-compat with hosts still on the v1 bootstrap chain.
+
+When one resolves, the engine logs `[INFO] AD credential source: <which path>` before calling `CreateUpdate-Accounts-From-file-CSV -OnlyAD`. When neither resolves, the skip message now points operators directly at the two KV secret names to add, including the gMSA note ("any non-empty string for gMSA, real password otherwise").
+
+### KV-side recipe for gMSA tenants
+
+```
+Legacy-UserName-Internal-Prod  ->  <domain>\<gMSA-name>$    e.g. casa.dk\gMSA-AUTM-L1-T0$
+Legacy-Password-Internal-Prod  ->  <any non-empty string>   gMSA passwords aren't user-accessible
+```
+
+Process must already be running AS the gMSA (Scheduled Task with the gMSA as Principal). Kerberos handles the actual auth; the PSCredential just satisfies the `-Credential` parameter on `Get-ADUser` / `Set-ADUser` / `New-ADUser`.
+
+### Files changed
+
+- `engine/PIM-Baseline-Management-CSV/PIM-Baseline-Management-CSV.ps1` -- AD credential resolution chain reworked to prefer the v2 Context path.
+
+### How to apply
+
+- Pull. Add the two KV secrets if you don't already have them (legacy tenants migrating to v2 will already carry them under the same names). Rerun the launcher.
 
 ---
 

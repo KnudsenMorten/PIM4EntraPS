@@ -245,20 +245,39 @@ Write-Output "******************************************************************
                                             -OnlyID
 
         # AD rows (on-prem AD admin accounts). Only runs when the ActiveDirectory
-        # RSAT module is loadable AND $AD_Credentials is populated -- skips cleanly
-        # on cloud-only hosts that have AD rows in the CSV they don't intend to
-        # provision here. Pre-v2.4.114 this branch was never called at all, so
-        # AD rows in the CSV were silently ignored.
+        # RSAT module is loadable AND an AD credential is available -- skips
+        # cleanly on cloud-only hosts that have AD rows in the CSV they don't
+        # intend to provision here. Pre-v2.4.114 this branch was never called
+        # at all, so AD rows in the CSV were silently ignored.
+        #
+        # Credential resolution (v2.4.115): the v2 platform stages the on-prem
+        # AD / gMSA credential at $global:Context.Identity.Legacy.Internal.Prod
+        # via Initialize-PlatformLegacyIdentity (which reads KV secrets
+        # 'Legacy-UserName-Internal-Prod' + 'Legacy-Password-Internal-Prod').
+        # We prefer that path; fall back to the legacy $AD_Credentials global
+        # for backwards-compat with hosts still on v1-era bootstrap chains.
         $adCmdAvailable = $null -ne (Get-Command Get-ADUser -ErrorAction SilentlyContinue)
+        $adCred = $null
+        $adCredSource = $null
+        if ($global:Context -and $global:Context.Identity -and $global:Context.Identity.Legacy -and $global:Context.Identity.Legacy.Internal -and $global:Context.Identity.Legacy.Internal.Prod) {
+            $adCred       = $global:Context.Identity.Legacy.Internal.Prod
+            $adCredSource = '$global:Context.Identity.Legacy.Internal.Prod (KV: Legacy-UserName-Internal-Prod + Legacy-Password-Internal-Prod)'
+        }
+        elseif ($AD_Credentials) {
+            $adCred       = $AD_Credentials
+            $adCredSource = '$AD_Credentials (legacy global)'
+        }
+
         if (-not $adCmdAvailable) {
             Write-Host "[INFO] ActiveDirectory module not available on this host -- skipping AD-account branch. AD rows in the CSV will not be provisioned in this run." -ForegroundColor Yellow
         }
-        elseif (-not $AD_Credentials) {
-            Write-Host "[INFO] `$AD_Credentials not set (legacy Connect_Azure / 2LINKIT-Functions did not populate it) -- skipping AD-account branch. AD rows in the CSV will not be provisioned in this run." -ForegroundColor Yellow
+        elseif (-not $adCred) {
+            Write-Host "[INFO] No AD credential available -- skipping AD-account branch. Add KV secrets 'Legacy-UserName-Internal-Prod' (e.g. <domain>\<gMSA>`$) + 'Legacy-Password-Internal-Prod' (any non-empty string for gMSA, real password otherwise) so Initialize-PlatformLegacyIdentity stages it at `$global:Context.Identity.Legacy.Internal.Prod." -ForegroundColor Yellow
         }
         else {
+            Write-Host "[INFO] AD credential source: $adCredSource" -ForegroundColor DarkGray
             CreateUpdate-Accounts-From-file-CSV -AccountsDefinitionFile $AccountsDefinitionFile `
-                                                -Credentials       $AD_Credentials `
+                                                -Credentials       $adCred `
                                                 -PathAdmins        $PathAdmins `
                                                 -PathAdminsL0T0    $PathAdminsL0T0 `
                                                 -OnlyAD
