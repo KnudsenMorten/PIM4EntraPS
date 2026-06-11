@@ -34,32 +34,46 @@
 # Levenshtein (for the "did you mean" suggestion in PIM-FK-001)
 # ---------------------------------------------------------------------------
 
+# Compiled Levenshtein. The original pure-PS char-by-char DP loop cost the
+# /api/preflight endpoint ~10 of its 12 seconds (each "did you mean"
+# suggestion = full haystack scan; PS loop iterations are ~1000x slower than
+# compiled code) -- and the server is single-threaded, so every page load
+# (which auto-runs preflight) froze ALL other API calls for that long.
+if (-not ('PimManager.Levenshtein' -as [type])) {
+    Add-Type -TypeDefinition @'
+namespace PimManager {
+    public static class Levenshtein {
+        public static int Distance(string a, string b) {
+            if (string.IsNullOrEmpty(a)) return string.IsNullOrEmpty(b) ? 0 : b.Length;
+            if (string.IsNullOrEmpty(b)) return a.Length;
+            int la = a.Length, lb = b.Length;
+            int[] prev = new int[lb + 1];
+            int[] curr = new int[lb + 1];
+            for (int j = 0; j <= lb; j++) prev[j] = j;
+            for (int i = 1; i <= la; i++) {
+                curr[0] = i;
+                for (int j = 1; j <= lb; j++) {
+                    int cost = (a[i - 1] == b[j - 1]) ? 0 : 1;
+                    int m = curr[j - 1] + 1;
+                    if (prev[j] + 1 < m) m = prev[j] + 1;
+                    if (prev[j - 1] + cost < m) m = prev[j - 1] + cost;
+                    curr[j] = m;
+                }
+                int[] tmp = prev; prev = curr; curr = tmp;
+            }
+            return prev[lb];
+        }
+    }
+}
+'@ -ErrorAction Stop
+}
+
 function Get-PimLevenshteinDistance {
     param(
         [Parameter(Mandatory)][AllowEmptyString()][string]$A,
         [Parameter(Mandatory)][AllowEmptyString()][string]$B
     )
-    if ([string]::IsNullOrEmpty($A)) { return [int]$B.Length }
-    if ([string]::IsNullOrEmpty($B)) { return [int]$A.Length }
-    $la = $A.Length; $lb = $B.Length
-    # Two-row DP to keep memory bounded.
-    $prev = New-Object 'int[]' ($lb + 1)
-    $curr = New-Object 'int[]' ($lb + 1)
-    for ($j = 0; $j -le $lb; $j++) { $prev[$j] = $j }
-    for ($i = 1; $i -le $la; $i++) {
-        $curr[0] = $i
-        for ($j = 1; $j -le $lb; $j++) {
-            $cost = if ($A[$i - 1] -eq $B[$j - 1]) { 0 } else { 1 }
-            $a1 = $curr[$j - 1] + 1
-            $a2 = $prev[$j] + 1
-            $a3 = $prev[$j - 1] + $cost
-            $m = $a1; if ($a2 -lt $m) { $m = $a2 }; if ($a3 -lt $m) { $m = $a3 }
-            $curr[$j] = $m
-        }
-        # swap
-        $tmp = $prev; $prev = $curr; $curr = $tmp
-    }
-    return [int]$prev[$lb]
+    return [PimManager.Levenshtein]::Distance($A, $B)
 }
 
 function Get-PimClosestMatches {

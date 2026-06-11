@@ -1,0 +1,22 @@
+{
+  "_comment": [
+    "PIM Manager MSP instance registry. Copy to instances.custom.json (gitignored) and edit.",
+    "Each instance points at one customer's PIM4EntraPS config folder (the 14 CSVs +",
+    "NamingConventions files). outputRoot is optional -- defaults to a sibling 'output'",
+    "folder next to the configRoot. The solution's own config/ folder is always available",
+    "as the built-in instance named 'local' and must not be declared here.",
+    "Pick the startup instance with: .\\Open-PimManager.ps1 -Instance customerA",
+    "or switch live via the instance dropdown in the Manager header."
+  ],
+  "instances": [
+    {
+      "name": "customerA",
+      "configRoot": "E:\\MSP\\customerA\\PIM4EntraPS\\config"
+    },
+    {
+      "name": "customerB",
+      "configRoot": "E:\\MSP\\customerB\\PIM4EntraPS\\config",
+      "outputRoot": "E:\\MSP\\customerB\\PIM4EntraPS\\output"
+    }
+  ]
+}

@@ -24,6 +24,10 @@ output/
 # ---------------------------------------------------------------------------
 tools/pim-manager/cache/
 
+# PIM Manager MSP instance registry -- maps instance names to per-customer
+# config roots on the operator's box. NEVER commit (customer names + paths).
+tools/pim-manager/instances.custom.json
+
 # ---------------------------------------------------------------------------
 #  Local IDE / OS noise
 # ---------------------------------------------------------------------------
