@@ -833,9 +833,10 @@
     });
   }
 
-  async function refreshTenantLists() {
+  async function refreshTenantLists(opts) {
     if (!isServer) return;
     if (_tenantRefreshInFlight) return;
+    const silent = !!(opts && opts.silent);
     _tenantRefreshInFlight = true;
     renderCacheBadges();
     try {
@@ -848,7 +849,9 @@
       }
     } catch (e) {
       console.warn('refreshTenantLists failed:', e.message);
-      alert('Tenant refresh failed: ' + e.message + '\n\nThe engine SPN globals ($global:HighPriv_Modern_* / $global:AzureTenantID) must be set in the server\'s PowerShell session before this works. Run any baseline engine once (or source your bootstrap), then restart Open-PimManager.ps1.');
+      if (!silent) {
+        alert('Tenant refresh failed: ' + e.message + '\n\nThe engine SPN globals ($global:HighPriv_Modern_* / $global:AzureTenantID) must be set in the server\'s PowerShell session before this works. Launch with -ConnectPlatform (or declare the tenant connection on the instance), then retry.');
+      }
     } finally {
       _tenantRefreshInFlight = false;
       renderCacheBadges();
@@ -857,6 +860,21 @@
         renderGrid(currentGridBase);
       }
     }
+  }
+
+  // Auto-load: wizards call this when they open so pickers fill themselves
+  // from the live tenant instead of forcing the operator to type role names
+  // (spelling errors in RoleDefinitionName / AzScopePermission silently break
+  // engine runs). Silent on failure -- the wizard falls back to free text and
+  // the cache badge shows 'none'. Re-renders the current wizard step when
+  // fresh data arrives.
+  function ensureTenantLists(keys) {
+    if (!isServer || _tenantRefreshInFlight) return;
+    const missing = (keys || []).some(k => getCachedList(k).freshness === 'none');
+    if (!missing) return;
+    refreshTenantLists({ silent: true }).then(() => {
+      try { if (_wizCtx) _wizRenderStep(); } catch (_) {}
+    });
   }
 
   // ===================================================================
@@ -906,6 +924,15 @@
         listKey: 'azureScopes',
         allowCustom: true,
         options: c.items.map(s => ({ value: s.scopePath || s.id, label: (s.displayName || s.id) + ' (' + (s.type || '') + ')', sub: s.scopePath || s.id }))
+      };
+    }
+    // Azure RBAC role name
+    if (col === 'AzScopePermission' && base === 'PIM-Assignments-Azure-Resources') {
+      const c = getCachedList('azureRbacRoles');
+      return {
+        listKey: 'azureRbacRoles',
+        allowCustom: true,
+        options: c.items.map(r => ({ value: r.displayName, label: r.displayName + (r.isCustom ? ' (custom)' : ''), sub: r.description }))
       };
     }
     // GroupTag-style fields -- union of all known GroupTags from loaded
@@ -3567,6 +3594,9 @@
   // Wizard B: New permission group (Entra ID)
   // ===================================================================
   async function wizardPermGroupEntra() {
+    // Auto-fill the Entra role picker from the live tenant so the operator
+    // selects role names instead of typing them.
+    ensureTenantLists(['entraRoles']);
     const state = {
       category: 'tasks',
       workload: 'Entra-ID', capability: '', description: '',
@@ -3940,6 +3970,9 @@
   // Wizard C: New permission group (Azure resource)
   // ===================================================================
   async function wizardPermGroupAzure() {
+    // Auto-fill the scope + RBAC-role pickers from the live tenant so the
+    // operator selects names instead of typing them.
+    ensureTenantLists(['azureScopes', 'azureRbacRoles']);
     const state = {
       scopeAlias:'', roleAlias:'',
       azScope:'', azRole:'',
@@ -3981,6 +4014,16 @@
             f.appendChild(wuxField({ id:'wa-rA', label:'Role alias (short code)', required:true, value:s.roleAlias,
               example:'e.g. Owner or Reader or CostMgmtContributor',
               onInput:(v)=>{ s.roleAlias=v; rerender(); }
+            }));
+            const tlRbac = getCachedList('azureRbacRoles');
+            const rbacOpts = (tlRbac.items || []).map(x => ({ value: x.displayName, label: x.displayName + (x.isCustom ? ' (custom)' : '') }));
+            rbacOpts.unshift({ value: '', label: '(pick from tenant roles or type below)' });
+            f.appendChild(wuxField({ id:'wa-rPick', label:'Azure RBAC role (from tenant)', type:'select', value:s.azRole,
+              options: rbacOpts,
+              hint: (tlRbac.items && tlRbac.items.length)
+                ? 'Loaded live from the tenant -- picking here avoids spelling errors.'
+                : 'Tenant role cache is loading (or no tenant connection) -- type the exact role name below.',
+              onInput:(v)=>{ if (v) { s.azRole=v; if (!s.roleAlias) { s.roleAlias = sanitizePart(v); } } rerender(); }
             }));
             f.appendChild(wuxField({ id:'wa-r', label:'Azure RBAC role name', required:true, value:s.azRole,
               example:'e.g. Owner, Reader, Contributor, Cost Management Contributor',

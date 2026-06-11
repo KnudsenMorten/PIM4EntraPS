@@ -1,9 +1,10 @@
 # Release notes for PIM4EntraPS
 
-## v2.4.137
+## v2.4.138
 
 Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monorepo:
 
+- release: PIM4EntraPS v2.4.138 -- PIM Manager role pickers auto-load from the tenant: new azure-rbac-roles tenant-list kind (Get-AzRoleDefinition, per-instance cache, included in -RefreshTenantLists); Azure perm-group workflow picks the RBAC role from the tenant list (fills exact name + alias, free-text fallback); both perm-group workflows auto-load empty lists silently on open via ensureTenantLists; AzScopePermission renders as a dropdown in the Configuration grid. Kills the typed-role-name spelling-error class; validator STALE checks remain the safety net (a2afd078)
 - release: PIM4EntraPS v2.4.137 -- PIM Manager validator: PIM-NAME-002 false positive on EVERY UPN fixed -- [regex]::Escape escapes { but not } (.NET asymmetry), so the {Token}->.+ replacement never matched and UPNs were checked against the literal template string; closing brace now matched optionally-escaped. Demo tenants validate fully clean (0 errors, 0 warnings) (87116adf)
 - release: PIM4EntraPS v2.4.136 -- PIM Manager: collapsible file rail on the Configuration tab (chevron toggle, 280px -> 30px strip, preference persists in localStorage); E2E-verified collapse/persist/expand with zero console errors (0713483c)
 - release: PIM4EntraPS v2.4.135 -- PIM Manager: PIM-RING-001 downgraded to warning (never blocks Save) + Fix-all gained a ring bucket defaulting to repair-to-Ring-2 (least privilege; clear-to-0 as explicit alternative); instances.custom.json entries can declare per-tenant connections (tenantId+appId + certThumbprint for mgmt-box machine-store certs, OR keyVaultName+secretName for one central KV secret per tenant -- the cloud-portable shape an App Service port reads via Managed Identity); instance switch drops the Graph session and retargets the SPN globals so Active Assignments + tenant-cache refresh hit the selected tenant. E2E-verified against 3 demo tenant instances (afcba721)
@@ -33,13 +34,29 @@ Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monor
 - release: PIM4EntraPS v2.4.111 - Deploy-PimActivatorClient.ps1 stops defaulting to sibling discovered-tenant-catalog.json (cross-tenant leak); auto-discovers from live Entra instead (34a1f1c8)
 - release: PIM4EntraPS v2.4.110 - Deploy-PimActivatorIntune.ps1 auto-skips Forcelist defValues when existing policy owns slot (avoids IME slot-cycling under -Force) (1771e06b)
 - release: PIM4EntraPS v2.4.109 - PIM4EntraPS.PimActivator.admx removes unused <using> namespace dependency (strict tenants rejected upload as NamespaceMissing:Microsoft.Policies.Windows) (91c3e488)
-- release: PIM4EntraPS v2.4.108 - Deploy-PimActivatorIntune.ps1 drops defaultLanguageCode from ADMX upload payload (Intune 400 ADMXDefaultLanguageCodeNotNull) (a17463d2)
 
 ---
 
 # Release notes -- PIM4EntraPS
 
 > **Curated changelog.** The publish workflow auto-prepends recent monorepo commits as a raw activity log; this file is the human-friendly narrative on top.
+
+---
+
+## v2.4.138 -- PIM Manager: role pickers auto-load from the tenant (Entra roles + NEW Azure RBAC role definitions) -- no more typed role names
+
+### Why
+
+Typing `RoleDefinitionName` / `AzScopePermission` by hand invites spelling errors ('dsa', 'Contributer', ...) that silently break engine assignment runs. The validator catches Entra-role typos against the tenant cache (PIM-STALE-001), but the better fix is removing the typing.
+
+### What changed
+
+- **New tenant-list kind: `azure-rbac-roles`** (`Get-AzRoleDefinition` -- built-in + custom roles). Cached per instance like the other four lists; included in `-RefreshTenantLists`.
+- **Azure permission-group workflow**: the RBAC role is now picked from the tenant list (picking also fills the exact role name + a sensible alias); free-text remains as the fallback when no tenant connection exists.
+- **Entra permission-group workflow**: already had a cache-fed role dropdown -- now both workflows **auto-load** their lists on open (`ensureTenantLists`): when a needed list is empty and the server has a tenant connection, the refresh fires silently in the background and the open wizard step re-renders with live data. No connection -> silent fallback to free text, no error popups.
+- **Configuration grid**: `AzScopePermission` renders as a dropdown fed from the new RBAC list (with custom-value escape hatch), same as `RoleDefinitionName` / `AdministrativeUnitTag` / `AzScope`.
+
+Verified by headless-Chrome E2E on a demo tenant with seeded caches: scope + RBAC dropdowns populate, picking fills the exact names, the Entra role select lists cached roles, and the grid cell renders the dropdown. Zero console errors.
 
 ---
 
