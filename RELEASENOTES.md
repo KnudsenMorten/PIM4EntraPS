@@ -1,9 +1,10 @@
 # Release notes for PIM4EntraPS
 
-## v2.4.128
+## v2.4.129
 
 Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monorepo:
 
+- release: PIM4EntraPS v2.4.129 -- PIM Manager finalized: MSP multi-instance support (instances.custom.json registry + -Instance/-ConfigRoot + header dropdown + per-instance CSV/log/tenant-cache isolation, SQL-ready seam behind Read-PimCsvRows/Write-PimCsvCustom); single-threaded-server freeze fixed (compiled Levenshtein + compiled JSON serializer + mtime-keyed preflight cache: page load 12s+ -> 0.5s, warm preflight 0.03s; client-abort tolerance + no response double-writes; SPA fetch timeout so lost connections error instead of hanging wizard Finish forever); blank ;;;;; separator rows survive commit round-trips (was: 53 rows -> 37 after a no-op save); wizard-staged rows light tab badges. Verified with headless-Chrome E2E: all 6 tabs, all 6 wizards end-to-end, commit-to-disk + mutation log, instance switching, static render, -Instance/-ConfigRoot startup (f7a3c7ae)
 - release: PIM4EntraPS v2.4.128 -- fix the v2.4.126/127 AU-guard itself: `@(...) | Where-Object` unwraps a single surviving Id back to a bare string, so `[0]` indexed the FIRST CHARACTER of the GUID and AU member-adds called Graph with ids like '2'/'3' (Invalid object identifier, 400); zero-match case crashed on null-array index because $null.Count -eq 0 is $false on PS 5.1. Whole pipeline now wrapped in @(...) at all 4 sites; verified all 5 input shapes in a real PS 5.1 process (28c8c708)
 - release: PIM4EntraPS v2.4.127 -- v2.4.125/126 AU member-add guards missed the inline copies of the create-groups loop in PIM-Baseline-Management-CSV.ps1 + PIM4GroupsCreateModifyPolicyOnly.ps1 (the main CSV engine never calls the patched module functions); field run on v2.4.126 still crashed with ObjectId transformation error on a tenant with duplicate group DisplayNames -- both inline loops now normalise AU/group lookups + ERROR/WARNING/skip before calling Add-AdministrativeUnit-Member (b8d102ab)
 - release: PIM4EntraPS v2.4.126 -- harden v2.4.125 Add-AdministrativeUnit-Member guard to handle multi-match arrays too (mandatory [string] params reject collections the same way they reject null); collapses to first match with a yellow WARNING line when count > 1, red ERROR + continue when count == 0 (028fa9d6)
@@ -33,13 +34,61 @@ Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monor
 - release: PIM4EntraPS v2.4.102 - Deploy-PimActivatorIntune.ps1 pre-flight scan for conflicting ExtensionInstallForcelist policies (prevents IME slot-cycling silent failure) (7e7de5d7)
 - add Audit-ChromeForcelistInIntune.ps1 - read-only diagnostic that scans every Intune configuration policy (Settings Catalog + Administrative Templates + custom device configs) for Chrome ExtensionInstallForcelist values, flags malformed entries (empty string, invalid ext id, missing update URL). Used to pin down which Intune profile is shipping the bad forcelist entry that's blocking all extension installs. (bd371bf3)
 - release: PIM4EntraPS v2.4.101 + extension v1.6.20 - popup CSS revert (v1.6.19 flex-column broke Edge) (709005f7)
-- release: PIM4EntraPS v2.4.100 - Update-PimActivator-Extension.ps1 flush now scrubs stale Secure Preferences registration alongside cached CRX (prevents DISABLE_CORRUPTED trap) (3a9de353)
 
 ---
 
 # Release notes -- PIM4EntraPS
 
 > **Curated changelog.** The publish workflow auto-prepends recent monorepo commits as a raw activity log; this file is the human-friendly narrative on top.
+
+---
+
+## v2.4.129 -- PIM Manager finalized: MSP multi-instance support, single-threaded-server freeze fixed (12s page load -> <1s), blank separator rows preserved, full headless-browser E2E pass
+
+### MSP multi-instance support (new)
+
+One Manager install can now serve many customers' data sets:
+
+- **Instance registry** `tools/pim-manager/instances.custom.json` (gitignored; `instances.custom.sample.json` ships) maps instance names to per-customer config roots. The solution's own `config/` is always available as the built-in instance `local`.
+- **`-Instance <name>`** starts the Manager with that instance active; **`-ConfigRoot <path>`** points it at any config folder ad-hoc.
+- **Header dropdown** (visible when 2+ instances exist) switches instances live: the server swaps its config/output roots, clears per-instance caches, and the page reloads. Uncommitted changes prompt before being discarded.
+- **Per-instance everything**: CSV I/O, `pim-manager-mutations.log`, the tenant-list cache (`cache/<instance>/`), the validator, and the graph. Tenant data (role names, AU ids, subscription ids) can never bleed across customers.
+- New endpoints: `GET /api/instances`, `POST /api/instance` (both bearer-token-gated like the rest).
+- **SQL roadmap seam**: instances are resolved behind `Read-PimCsvRows` / `Write-PimCsvCustom`; per-customer SQL databases later mean a connection-string field on the registry entry + a SQL implementation of those two functions -- the SPA and endpoints stay unchanged.
+
+### Server freeze fixed (the "nothing works" bug)
+
+The HTTP server is single-threaded, and `/api/preflight` (auto-run on every page load) blocked it for **~12 seconds**: queued requests died with `The specified network name is no longer available`, the SPA's fetches hung forever (wizard Finish frozen with no error), and a failed write cascaded into a second `Write-JsonResponse` on the same response (`This operation cannot be performed after the response has been submitted`). Four fixes:
+
+1. **Compiled Levenshtein** (Add-Type C#) -- the validator's "did you mean" suggestions cost ~10s in pure-PS DP loops; now milliseconds.
+2. **Compiled JSON serializer** -- PS 5.1 `ConvertTo-Json` needed seconds for 300-400KB payloads; a C# normalizer + `JavaScriptSerializer` does it in milliseconds. Used for all responses and the served SPA.
+3. **Preflight result cache** keyed on instance + the 14 CSVs' LastWriteTimes -- warm preflight now answers in 0.03s; only an actual CSV change re-runs the validator (~4s).
+4. **Client-abort tolerance + no double-writes** -- response writers swallow client-gone errors with a log line; the SPA's `api()` got a 120s AbortController timeout so a lost connection surfaces as a readable error instead of an eternal hang.
+
+Measured: page load 12s+ -> ~0.5s; `/api/config` 2.4s -> 0.6s; warm `/api/preflight` 12s -> 0.03s.
+
+### Blank separator rows preserved
+
+`Read-PimCsvRows` dropped all-empty rows, so one Manager commit silently destroyed the `;;;;;` separator rows customers maintain in Excel (observed: 53 raw rows -> 37 after a no-op save). Blank rows now load as empty grid rows and write back unchanged. Engines and the validator already skip them.
+
+### Smaller fixes
+
+- Wizard-staged rows now light the Grid/Save tab badges immediately (`wuxStage` calls `markBadges`).
+- Static mode (`-StaticHtml`) renders with the new placeholders; instance switching is server-mode-only.
+
+### Verified (headless Chrome E2E, real server, real CSVs)
+
+All 6 tabs render error-free; all 6 wizards complete end-to-end (admin, perm-group Entra, perm-group Azure, role group, clone, project); grid editing on all 14 CSVs + add-row + dirty badges; Save commit writes to disk atomically + mutation log + badge clears; Validate re-run (19/527/161 findings on test data); Revoke degrades to a clear actionable error without SPN context; instance dropdown switches and reloads against the second instance and back; `-Instance` / `-ConfigRoot` startup; static render leaves no unsubstituted placeholders.
+
+### Files changed
+
+- `tools/pim-manager/Open-PimManager.ps1` -- instances, compiled JSON, preflight cache, robust response writers.
+- `tools/pim-manager/_validator.ps1` -- compiled Levenshtein.
+- `tools/pim-manager/_tenantSync.ps1` -- per-instance cache partitioning.
+- `tools/pim-manager/pim-manager.html` -- api() timeout, instance dropdown, badge fix.
+- `tools/pim-manager/instances.custom.sample.json` -- new template.
+- `tools/pim-manager/README.md` -- instances + updated file map + write-fidelity notes.
+- `.gitignore` -- `tools/pim-manager/instances.custom.json`.
 
 ---
 

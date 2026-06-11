@@ -61,6 +61,12 @@ function Get-PimTenantCacheRoot {
         $script:PimManagerRoot = Split-Path -Parent $PSCommandPath
     }
     $cacheRoot = Join-Path $script:PimManagerRoot 'cache'
+    # MSP multi-instance: each instance is a different tenant, so role names /
+    # AU ids / subscription ids must never bleed across customers. 'local'
+    # keeps the flat cache/ folder for back-compat with existing installs.
+    if ($script:PimInstanceName -and $script:PimInstanceName -ne 'local') {
+        $cacheRoot = Join-Path $cacheRoot $script:PimInstanceName
+    }
     if (-not (Test-Path -LiteralPath $cacheRoot)) {
         New-Item -ItemType Directory -Path $cacheRoot -Force | Out-Null
     }

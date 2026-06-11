@@ -84,7 +84,21 @@ param(
     # exit. Does NOT start the server or open a browser. Use this in a
     # scheduled task or from a customer bootstrap before launching the UI.
     [Parameter(ParameterSetName='Refresh')]
-    [switch]$RefreshTenantLists
+    [switch]$RefreshTenantLists,
+
+    # MSP / multi-instance support. An "instance" is one customer's PIM4EntraPS
+    # data set: a config root (the 14 CSVs + NamingConventions files) and its
+    # sibling output folder. Instances are declared in
+    # tools/pim-manager/instances.custom.json (gitignored):
+    #   { "instances": [ { "name": "customerA", "configRoot": "E:\\msp\\customerA\\PIM4EntraPS\\config" } ] }
+    # The solution's own config/ folder is always available as instance 'local'.
+    # -Instance picks the active instance at startup; the UI can switch at
+    # runtime via the instance dropdown (server mode only).
+    [string]$Instance,
+
+    # Ad-hoc instance: point the Manager at any config folder directly without
+    # declaring it in instances.custom.json. Wins over -Instance.
+    [string]$ConfigRoot
 )
 
 $ErrorActionPreference = 'Stop'
@@ -94,16 +108,93 @@ $ErrorActionPreference = 'Stop'
 # ---------------------------------------------------------------------------
 
 $solutionRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)  # ...\PIM4EntraPS
-$configRoot   = Join-Path $solutionRoot 'config'
-$outputRoot   = Join-Path $solutionRoot 'output'
 $template     = Join-Path $PSScriptRoot 'pim-manager.html'
 $tenantSync   = Join-Path $PSScriptRoot '_tenantSync.ps1'
 $validator    = Join-Path $PSScriptRoot '_validator.ps1'
-$mutationLog  = Join-Path $outputRoot 'pim-manager-mutations.log'
+$instancesFile = Join-Path $PSScriptRoot 'instances.custom.json'
 
-if (-not (Test-Path -LiteralPath $configRoot)) { throw "Config folder not found: $configRoot" }
+# ---------------------------------------------------------------------------
+# Instances (MSP multi-customer support)
+#
+# An instance = one customer's data set. 'local' (the solution's own config/)
+# always exists; more come from tools/pim-manager/instances.custom.json.
+# All CSV / naming-convention / output / tenant-cache I/O resolves through
+# $script:configRoot + $script:outputRoot + $script:PimInstanceName, which
+# Set-PimManagerInstance swaps at runtime (UI dropdown -> POST /api/instance).
+#
+# SQL note: when instances move from per-customer CSV folders to per-customer
+# SQL databases, Set-PimManagerInstance is the seam -- the registry entry
+# grows a connection-string field and Read-PimCsvRows/Write-PimCsvCustom get
+# a SQL-backed implementation; nothing above this layer changes.
+# ---------------------------------------------------------------------------
+
+function Get-PimManagerInstances {
+    # Returns array of @{ name; configRoot; outputRoot } -- 'local' first.
+    $list = New-Object System.Collections.ArrayList
+    [void]$list.Add(@{
+        name       = 'local'
+        configRoot = (Join-Path $solutionRoot 'config')
+        outputRoot = (Join-Path $solutionRoot 'output')
+    })
+    if (Test-Path -LiteralPath $instancesFile) {
+        try {
+            $raw = [System.IO.File]::ReadAllText($instancesFile, [System.Text.UTF8Encoding]::new($false))
+            if ($raw.Length -gt 0 -and [int][char]$raw[0] -eq 0xFEFF) { $raw = $raw.Substring(1) }
+            $parsed = $raw | ConvertFrom-Json
+            foreach ($e in @($parsed.instances)) {
+                if (-not $e -or -not $e.name -or -not $e.configRoot) { continue }
+                if ($e.name -eq 'local') { continue }  # reserved
+                $cfg = [string]$e.configRoot
+                $out = if ($e.outputRoot) { [string]$e.outputRoot } else {
+                    # Default: sibling 'output' folder next to the config folder.
+                    Join-Path (Split-Path -Parent $cfg) 'output'
+                }
+                [void]$list.Add(@{ name = [string]$e.name; configRoot = $cfg; outputRoot = $out })
+            }
+        } catch {
+            Write-Warning "instances.custom.json could not be parsed: $($_.Exception.Message) -- only the 'local' instance is available."
+        }
+    }
+    return ,$list.ToArray()
+}
+
+function Set-PimManagerInstance {
+    # Switch the active instance. Throws if the name is unknown or the config
+    # folder is missing. Clears every per-instance server-side cache.
+    param([Parameter(Mandatory)][string]$Name)
+    $inst = $null
+    foreach ($i in (Get-PimManagerInstances)) { if ($i.name -eq $Name) { $inst = $i; break } }
+    if (-not $inst) { throw "Unknown instance '$Name'. Declare it in $instancesFile." }
+    if (-not (Test-Path -LiteralPath $inst.configRoot)) { throw "Instance '$Name': config folder not found: $($inst.configRoot)" }
+    if (-not (Test-Path -LiteralPath $inst.outputRoot)) { New-Item -ItemType Directory -Path $inst.outputRoot -Force | Out-Null }
+
+    $script:PimInstanceName = $inst.name
+    $script:configRoot      = $inst.configRoot
+    $script:outputRoot      = $inst.outputRoot
+    $script:mutationLog     = Join-Path $inst.outputRoot 'pim-manager-mutations.log'
+
+    # Per-instance state must not leak across customers.
+    $script:PimActiveAssignmentsCache          = $null
+    $script:PimActiveAssignmentsCacheLoadedUtc = $null
+    $script:PimManager_LookupCachesLoaded      = $false
+
+    Write-Host ("  instance: {0}  (config: {1})" -f $inst.name, $inst.configRoot) -ForegroundColor Cyan
+}
+
+# Resolve the startup instance: -ConfigRoot (ad-hoc) > -Instance (registry) > 'local'.
+if ($ConfigRoot) {
+    if (-not (Test-Path -LiteralPath $ConfigRoot)) { throw "-ConfigRoot folder not found: $ConfigRoot" }
+    $script:PimInstanceName = 'custom'
+    $script:configRoot      = $ConfigRoot
+    $script:outputRoot      = Join-Path (Split-Path -Parent $ConfigRoot) 'output'
+    if (-not (Test-Path -LiteralPath $script:outputRoot)) { New-Item -ItemType Directory -Path $script:outputRoot -Force | Out-Null }
+    $script:mutationLog     = Join-Path $script:outputRoot 'pim-manager-mutations.log'
+    Write-Host ("  instance: custom (config: {0})" -f $ConfigRoot) -ForegroundColor Cyan
+} else {
+    Set-PimManagerInstance -Name $(if ($Instance) { $Instance } else { 'local' })
+}
+
 if (-not (Test-Path -LiteralPath $template))   { throw "Template not found: $template" }
-if (-not (Test-Path -LiteralPath $outputRoot)) { New-Item -ItemType Directory -Path $outputRoot -Force | Out-Null }
 if (Test-Path -LiteralPath $tenantSync) { . $tenantSync }
 if (Test-Path -LiteralPath $validator)  { . $validator }
 
@@ -180,10 +271,12 @@ function Read-PimCsvRows {
 
     $rows = New-Object System.Collections.ArrayList
     foreach ($r in (Import-Csv -Path $resolved.Path -Delimiter ';' -Encoding UTF8)) {
-        # Drop blank rows (every column null/empty).
-        $hasAny = $false
-        foreach ($p in $r.PSObject.Properties) { if ($null -ne $p.Value -and "$($p.Value)".Length -gt 0) { $hasAny = $true; break } }
-        if (-not $hasAny) { continue }
+        # KEEP blank rows (every column empty). Customers use ';;;;;' rows as
+        # visual group separators in Excel; dropping them here meant every
+        # Manager commit silently destroyed the hand-maintained layout
+        # (observed: 53 raw rows -> 37 after one PUT round-trip). The engines
+        # and the validator both skip blank rows themselves, and the grid
+        # renders them as empty editable rows -- same as Excel does.
         $obj = [ordered]@{}
         foreach ($col in $headerCols) {
             $val = $null
@@ -601,13 +694,14 @@ function Invoke-StaticHtml {
     }
     Write-Host ""
 
-    $json = $data | ConvertTo-Json -Depth 12 -Compress
+    $json = ConvertTo-PimJson -Body $data
     $naming = Get-PimNamingConventions
-    $namingJson = $naming | ConvertTo-Json -Depth 4 -Compress
+    $namingJson = ConvertTo-PimJson -Body $naming
     $tenantLists = Read-PimTenantListCache
-    $tenantJson  = $tenantLists | ConvertTo-Json -Depth 6 -Compress
+    $tenantJson  = ConvertTo-PimJson -Body $tenantLists
+    $instJson = ConvertTo-PimJson -Body ([ordered]@{ active = $script:PimInstanceName; instances = @() })
     $html = [System.IO.File]::ReadAllText($template, [System.Text.UTF8Encoding]::new($true))
-    $html = $html.Replace('__PIM_DATA__', $json).Replace('__PIM_TOKEN__', '').Replace('__PIM_MODE__', 'static').Replace('__PIM_NAMING__', $namingJson).Replace('__PIM_TENANT_LISTS__', $tenantJson)
+    $html = $html.Replace('__PIM_DATA__', $json).Replace('__PIM_TOKEN__', '').Replace('__PIM_MODE__', 'static').Replace('__PIM_NAMING__', $namingJson).Replace('__PIM_TENANT_LISTS__', $tenantJson).Replace('__PIM_INSTANCES__', $instJson)
 
     if (-not $OutHtml) {
         $OutHtml = Join-Path ([IO.Path]::GetTempPath()) ("pim-manager-{0}.html" -f ([Guid]::NewGuid().ToString('N').Substring(0,8)))
@@ -632,19 +726,118 @@ function Get-FreeTcpPort {
     return $p
 }
 
+# ---------------------------------------------------------------------------
+# Fast JSON serializer. PS 5.1's ConvertTo-Json needs ~10s for a 300KB
+# payload (measured on the /api/preflight report) and the server is
+# single-threaded -- every second spent serializing blocks ALL other
+# requests, and queued requests die with 'specified network name is no
+# longer available'. JavaScriptSerializer does the same payload in <0.5s.
+# ---------------------------------------------------------------------------
+
+Add-Type -AssemblyName System.Web.Extensions -ErrorAction SilentlyContinue
+
+# Compiled normalizer + serializer. A pure-PS recursive normalizer costs one
+# PS function invocation per value (~0.1ms each); a 400KB graph payload has
+# tens of thousands of values = seconds per request on the single-threaded
+# server. The C# walk does the same shape conversion in milliseconds.
+if (-not ('PimManager.Json' -as [type])) {
+    Add-Type -ReferencedAssemblies @('System.Web.Extensions', [System.Management.Automation.PSObject].Assembly.Location) -TypeDefinition @'
+using System;
+using System.Collections;
+using System.Collections.Generic;
+using System.Management.Automation;
+using System.Web.Script.Serialization;
+
+namespace PimManager {
+    public static class Json {
+        public static string Serialize(object value) {
+            var ser = new JavaScriptSerializer();
+            ser.MaxJsonLength = 268435456;
+            ser.RecursionLimit = 64;
+            return ser.Serialize(Normalize(value, 0));
+        }
+        public static object Normalize(object value, int depth) {
+            if (value == null || depth > 24) return null;
+            var pso = value as PSObject;
+            if (pso != null) {
+                var baseObj = pso.BaseObject;
+                if (baseObj is PSCustomObject) {
+                    var d = new Dictionary<string, object>();
+                    foreach (var p in pso.Properties) {
+                        object pv;
+                        try { pv = p.Value; } catch { pv = null; }
+                        d[p.Name] = Normalize(pv, depth + 1);
+                    }
+                    return d;
+                }
+                return Normalize(baseObj, depth);
+            }
+            if (value is string || value is bool || value is int || value is long ||
+                value is double || value is decimal || value is float ||
+                value is byte || value is short || value is uint || value is ulong || value is ushort) return value;
+            if (value is DateTime) return ((DateTime)value).ToUniversalTime().ToString("o");
+            if (value is Guid || value is Uri || value is char || value is TimeSpan || value.GetType().IsEnum) return value.ToString();
+            var dict = value as IDictionary;
+            if (dict != null) {
+                var d = new Dictionary<string, object>();
+                foreach (DictionaryEntry e in dict) d[Convert.ToString(e.Key)] = Normalize(e.Value, depth + 1);
+                return d;
+            }
+            var en = value as IEnumerable;
+            if (en != null) {
+                var list = new List<object>();
+                foreach (var item in en) list.Add(Normalize(item, depth + 1));
+                return list;
+            }
+            // Arbitrary .NET object (e.g. PSCustomObject reached without PSObject
+            // wrapper): walk its PSObject properties via a fresh wrap.
+            var wrapped = PSObject.AsPSObject(value);
+            var dd = new Dictionary<string, object>();
+            foreach (var p in wrapped.Properties) {
+                object pv;
+                try { pv = p.Value; } catch { pv = null; }
+                dd[p.Name] = Normalize(pv, depth + 1);
+            }
+            if (dd.Count > 0) return dd;
+            return value.ToString();
+        }
+    }
+}
+'@ -ErrorAction Stop
+}
+
+function ConvertTo-PimJson {
+    param([Parameter(Mandatory)][AllowNull()][object]$Body)
+    try {
+        return [PimManager.Json]::Serialize($Body)
+    } catch {
+        # Fallback: the slow-but-thorough built-in.
+        return ($Body | ConvertTo-Json -Depth 12 -Compress)
+    }
+}
+
 function Write-JsonResponse {
     param(
         [Parameter(Mandatory)][System.Net.HttpListenerResponse]$Response,
         [Parameter(Mandatory)][int]$Status,
         [Parameter(Mandatory)][object]$Body
     )
-    $Response.StatusCode = $Status
-    $Response.ContentType = 'application/json; charset=utf-8'
-    $json = $Body | ConvertTo-Json -Depth 12 -Compress
+    $json = ConvertTo-PimJson -Body $Body
     $bytes = [System.Text.Encoding]::UTF8.GetBytes($json)
-    $Response.ContentLength64 = $bytes.LongLength
-    $Response.OutputStream.Write($bytes, 0, $bytes.Length)
-    $Response.OutputStream.Close()
+    # Client-abort tolerance: a browser that gave up (tab closed, fetch
+    # timeout) makes OutputStream.Write throw. Swallow + log instead of
+    # cascading into a second Write-JsonResponse call on the same response
+    # ('This operation cannot be performed after the response has been
+    # submitted').
+    try {
+        $Response.StatusCode = $Status
+        $Response.ContentType = 'application/json; charset=utf-8'
+        $Response.ContentLength64 = $bytes.LongLength
+        $Response.OutputStream.Write($bytes, 0, $bytes.Length)
+        $Response.OutputStream.Close()
+    } catch {
+        Write-Host ("  [net] client gone before response could be written ({0} bytes, status {1}): {2}" -f $bytes.Length, $Status, $_.Exception.Message) -ForegroundColor DarkGray
+    }
 }
 
 function Write-HtmlResponse {
@@ -652,12 +845,16 @@ function Write-HtmlResponse {
         [Parameter(Mandatory)][System.Net.HttpListenerResponse]$Response,
         [Parameter(Mandatory)][string]$Html
     )
-    $Response.StatusCode = 200
-    $Response.ContentType = 'text/html; charset=utf-8'
-    $bytes = [System.Text.Encoding]::UTF8.GetBytes($Html)
-    $Response.ContentLength64 = $bytes.LongLength
-    $Response.OutputStream.Write($bytes, 0, $bytes.Length)
-    $Response.OutputStream.Close()
+    try {
+        $Response.StatusCode = 200
+        $Response.ContentType = 'text/html; charset=utf-8'
+        $bytes = [System.Text.Encoding]::UTF8.GetBytes($Html)
+        $Response.ContentLength64 = $bytes.LongLength
+        $Response.OutputStream.Write($bytes, 0, $bytes.Length)
+        $Response.OutputStream.Close()
+    } catch {
+        Write-Host ("  [net] client gone before HTML response could be written: {0}" -f $_.Exception.Message) -ForegroundColor DarkGray
+    }
 }
 
 function Read-RequestJson {
@@ -1224,13 +1421,22 @@ function Handle-Request {
     # JS can read it without exposing it on the URL after the first hop.
     if ($path -eq '/' -and $method -eq 'GET') {
         $data = Build-PimGraphData
-        $json = $data | ConvertTo-Json -Depth 12 -Compress
+        $json = ConvertTo-PimJson -Body $data
         $naming = Get-PimNamingConventions
-        $namingJson = $naming | ConvertTo-Json -Depth 4 -Compress
+        $namingJson = ConvertTo-PimJson -Body $naming
         $tenantLists = Read-PimTenantListCache
-        $tenantJson  = $tenantLists | ConvertTo-Json -Depth 6 -Compress
+        $tenantJson  = ConvertTo-PimJson -Body $tenantLists
+        # NB: foreach statement, not pipeline -- Get-PimManagerInstances returns a
+        # comma-wrapped array, and piping that sends the WHOLE array as one item
+        # (member enumeration then collapses .name into a string[]).
+        $instList = New-Object System.Collections.ArrayList
+        foreach ($i in (Get-PimManagerInstances)) { [void]$instList.Add([ordered]@{ name = $i.name; configRoot = $i.configRoot }) }
+        $instJson = ConvertTo-PimJson -Body ([ordered]@{
+            active    = $script:PimInstanceName
+            instances = $instList.ToArray()
+        })
         $html = [System.IO.File]::ReadAllText($template, [System.Text.UTF8Encoding]::new($true))
-        $html = $html.Replace('__PIM_DATA__', $json).Replace('__PIM_TOKEN__', $ExpectedToken).Replace('__PIM_MODE__', 'server').Replace('__PIM_NAMING__', $namingJson).Replace('__PIM_TENANT_LISTS__', $tenantJson)
+        $html = $html.Replace('__PIM_DATA__', $json).Replace('__PIM_TOKEN__', $ExpectedToken).Replace('__PIM_MODE__', 'server').Replace('__PIM_NAMING__', $namingJson).Replace('__PIM_TENANT_LISTS__', $tenantJson).Replace('__PIM_INSTANCES__', $instJson)
         Write-HtmlResponse -Response $resp -Html $html
         $script:lastHeartbeat = Get-Date
         return 200
@@ -1349,6 +1555,39 @@ function Handle-Request {
             return 200
         }
 
+        # -------------------------------------------------------------------
+        # MSP multi-instance endpoints
+        # -------------------------------------------------------------------
+        if ($path -eq '/api/instances' -and $method -eq 'GET') {
+            $script:lastHeartbeat = Get-Date
+            # foreach statement, not pipeline -- see the GET / handler note.
+            $instList = New-Object System.Collections.ArrayList
+            foreach ($i in (Get-PimManagerInstances)) { [void]$instList.Add([ordered]@{ name = $i.name; configRoot = $i.configRoot }) }
+            Write-JsonResponse -Response $resp -Status 200 -Body ([ordered]@{
+                active    = $script:PimInstanceName
+                instances = $instList.ToArray()
+            })
+            return 200
+        }
+
+        if ($path -eq '/api/instance' -and $method -eq 'POST') {
+            $script:lastHeartbeat = Get-Date
+            $body = Read-RequestJson -Request $req
+            $name = if ($body -and $body.name) { "$($body.name)" } else { '' }
+            if (-not $name) {
+                Write-JsonResponse -Response $resp -Status 400 -Body @{ ok = $false; error = 'instance name is required' }
+                return 400
+            }
+            try {
+                Set-PimManagerInstance -Name $name
+                Write-JsonResponse -Response $resp -Status 200 -Body ([ordered]@{ ok = $true; active = $script:PimInstanceName })
+                return 200
+            } catch {
+                Write-JsonResponse -Response $resp -Status 400 -Body @{ ok = $false; error = "$($_.Exception.Message)" }
+                return 400
+            }
+        }
+
         if ($path -eq '/api/preflight' -and $method -eq 'GET') {
             $script:lastHeartbeat = Get-Date
             if (-not (Get-Command Invoke-PimPreflightValidation -ErrorAction SilentlyContinue)) {
@@ -1356,7 +1595,21 @@ function Handle-Request {
                 return 500
             }
             try {
+                # Cache keyed on instance + the CSVs' LastWriteTimes: every page
+                # load auto-runs preflight, and the validator costs seconds on
+                # the single-threaded server. Unchanged inputs -> cached report.
+                $stamp = $script:PimInstanceName
+                foreach ($spec in (Get-PimCsvBases)) {
+                    $resolved = Resolve-PimCsvPath -BaseName $spec.base
+                    if ($resolved) { $stamp += '|' + $spec.base + ':' + ([System.IO.File]::GetLastWriteTimeUtc($resolved.Path).Ticks) }
+                }
+                if ($script:PimPreflightCacheStamp -eq $stamp -and $script:PimPreflightCacheReport) {
+                    Write-JsonResponse -Response $resp -Status 200 -Body $script:PimPreflightCacheReport
+                    return 200
+                }
                 $report = Invoke-PimPreflightValidation
+                $script:PimPreflightCacheStamp  = $stamp
+                $script:PimPreflightCacheReport = $report
                 Write-JsonResponse -Response $resp -Status 200 -Body $report
                 return 200
             } catch {

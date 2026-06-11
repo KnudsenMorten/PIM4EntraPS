@@ -10,6 +10,9 @@
   // Both are also reachable via /api/naming-conventions and /api/tenant-lists for live refresh.
   window.PIM_NAMING_BOOT = __PIM_NAMING__;
   window.PIM_TENANT_LISTS_BOOT = __PIM_TENANT_LISTS__;
+  // MSP multi-instance: { active: 'local', instances: [{name, configRoot}, ...] }.
+  // More than one instance -> the header shows an instance switcher.
+  window.PIM_INSTANCES_BOOT = __PIM_INSTANCES__;
 </script>
 <style>
   html, body { margin:0; padding:0; height:100%; font-family: -apple-system, "Segoe UI", Roboto, sans-serif; background:#ffffff; color:#1a1a1a; }
@@ -443,6 +446,7 @@
     <div class="tab" data-tab="validate">Validate <span id="validateErrBadge" class="badge" style="display:none;background:#cf222e">0</span></div>
     <div class="tab" data-tab="revoke">Revoke <span id="revokeCountBadge" class="badge" style="display:none;background:#cf222e">0</span></div>
     <div id="tabRight">
+      <span id="instanceWrap" style="display:none">instance: <select id="instancePick" style="font-size:11px; padding:1px 4px; border:1px solid #d0d7de; border-radius:4px; background:#fff; color:#0969da; font-weight:600;"></select> &nbsp;|&nbsp;</span>
       mode: <b id="modeLabel"></b>
       &nbsp;|&nbsp; source: <b id="src"></b>
       &nbsp;|&nbsp; generated: <b id="gen"></b>
@@ -724,15 +728,30 @@
   // ===================================================================
   // Server API helpers
   // ===================================================================
-  async function api(method, path, body) {
+  async function api(method, path, body, opts2) {
     if (!isServer) throw new Error('static mode -- API not available');
-    const opts = { method, headers: { 'Authorization': 'Bearer ' + PIM_TOKEN } };
+    // Timeout guard: the server is single-threaded, so a slow endpoint
+    // queues everything behind it and an aborted connection used to leave
+    // this fetch hanging FOREVER (wizard Finish frozen with no error).
+    // 120s covers the slowest legit endpoint (active-assignments on a big
+    // tenant); everything else answers in <1s.
+    const timeoutMs = (opts2 && opts2.timeoutMs) || 120000;
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+    const opts = { method, headers: { 'Authorization': 'Bearer ' + PIM_TOKEN }, signal: ctrl.signal };
     if (body !== undefined) {
       opts.headers['Content-Type'] = 'application/json';
       opts.body = JSON.stringify(body);
     }
-    const r = await fetch(path, opts);
-    const text = await r.text();
+    let r, text;
+    try {
+      r = await fetch(path, opts);
+      text = await r.text();
+    } catch (e) {
+      throw new Error('API ' + method + ' ' + path + ' failed: ' + (e.name === 'AbortError' ? 'timed out after ' + Math.round(timeoutMs / 1000) + 's (server busy or connection lost -- retry)' : e.message));
+    } finally {
+      clearTimeout(timer);
+    }
     let data = null;
     try { data = text ? JSON.parse(text) : null; } catch (_) { data = { raw: text }; }
     if (!r.ok) { throw new Error('API ' + method + ' ' + path + ' -> ' + r.status + ': ' + (data && data.error || text)); }
@@ -752,6 +771,40 @@
     // Fire one immediately so the server's grace window resets.
     api('POST', '/api/heartbeat').catch(() => {});
   }
+
+  // ===================================================================
+  // MSP multi-instance switcher (header dropdown; server mode only).
+  // Switching tells the server to swap its config/output roots, then
+  // reloads the page so PIM_DATA / naming / tenant lists rebuild from
+  // the new instance. Pending (uncommitted) changes are confirmed away.
+  // ===================================================================
+  (function initInstancePicker() {
+    const boot = window.PIM_INSTANCES_BOOT || { active: 'local', instances: [] };
+    const wrap = document.getElementById('instanceWrap');
+    const pick = document.getElementById('instancePick');
+    if (!isServer || !wrap || !pick || !boot.instances || boot.instances.length < 2) return;
+    pick.innerHTML = boot.instances.map(i =>
+      `<option value="${escapeHtml(i.name)}"${i.name === boot.active ? ' selected' : ''}>${escapeHtml(i.name)}</option>`
+    ).join('');
+    wrap.style.display = '';
+    pick.onchange = async () => {
+      const target = pick.value;
+      if (target === boot.active) return;
+      const dirtyBases = Object.keys(pendingChanges).filter(b => isDirty(b));
+      if (dirtyBases.length) {
+        const ok = window.confirm('You have uncommitted changes in: ' + dirtyBases.join(', ') +
+          '\n\nSwitching instance discards them. Continue?');
+        if (!ok) { pick.value = boot.active; return; }
+      }
+      try {
+        await api('POST', '/api/instance', { name: target });
+        location.reload();
+      } catch (e) {
+        alert('Instance switch failed: ' + e.message);
+        pick.value = boot.active;
+      }
+    };
+  })();
 
   // ===================================================================
   // Tenant-list cache + age badges
@@ -3024,6 +3077,7 @@
     for (const k of Object.keys(rowObj)) { if (!(k in full)) full[k] = String(rowObj[k]); }
     p.rows.push(full);
     if (_wizCtx) _wizCtx.stagedRows.push({ base, rowSnapshot: full });
+    markBadges();  // wizard-staged rows must light the Grid/Save tab badges immediately
     return full;
   }
 

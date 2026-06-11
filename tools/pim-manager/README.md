@@ -1,14 +1,18 @@
 # PIM4EntraPS Manager
 
-A small graph viewer + editor for the 14-CSV PIM4EntraPS model. Runs on
+A graph viewer + editor for the 14-CSV PIM4EntraPS model. Runs on
 the customer's VM (no install beyond `git pull`), no external network
-access required.
+access required for editing. Supports a single local instance and MSP
+multi-instance setups (one Manager, many customers' data sets).
 
 ```
 SOLUTIONS/PIM4EntraPS/tools/pim-manager/
-├── Open-PimManager.ps1   ← entry point (server + static modes)
-├── pim-manager.html      ← single-file SPA (graph + grid + save)
-└── README.md            ← this file
+├── Open-PimManager.ps1            ← entry point (server / static / refresh modes)
+├── pim-manager.html               ← single-file SPA (6 tabs: Graph / Grid / New & clone / Save / Validate / Revoke)
+├── _validator.ps1                 ← pre-flight validation rules (PIM-FK-*, PIM-RA-*, PIM-TIER-*, ...)
+├── _tenantSync.ps1                ← tenant-list cache (entra roles, AUs, PIM groups, azure scopes)
+├── instances.custom.sample.json   ← MSP instance registry template
+└── README.md                      ← this file
 ```
 
 ## Look and feel (v2.4.53)
@@ -58,6 +62,47 @@ Other useful switches:
   free port is picked.
 - `-OutHtml <path>` &mdash; (static mode only) write the snapshot to a chosen
   path instead of a temp file.
+- `-Instance <name>` &mdash; start with a named instance from
+  `instances.custom.json` active (see *Instances* below).
+- `-ConfigRoot <path>` &mdash; ad-hoc instance: point the Manager at any
+  config folder directly, without declaring it in the registry.
+- `-RefreshTenantLists` &mdash; CLI-only: refresh the tenant-list cache via the
+  engine SPN, then exit (no server, no browser). For scheduled tasks.
+
+## Instances (MSP multi-customer support)
+
+An **instance** is one customer's PIM4EntraPS data set: a config root
+(the 14 CSVs + NamingConventions files) and a sibling output folder.
+The solution's own `config/` is always available as the built-in
+instance **local**. More instances come from
+`tools/pim-manager/instances.custom.json` (gitignored &mdash; copy the
+`.sample.json` next to it):
+
+```json
+{
+  "instances": [
+    { "name": "customerA", "configRoot": "E:\\MSP\\customerA\\PIM4EntraPS\\config" }
+  ]
+}
+```
+
+With two or more instances available, the Manager header shows an
+**instance dropdown**. Switching tells the server to swap its config /
+output roots and reloads the page; uncommitted changes prompt a confirm
+before being discarded. Everything is per-instance:
+
+- CSV reads/writes resolve against the active instance's config root.
+- `output/pim-manager-mutations.log` lands in the instance's output folder.
+- The tenant-list cache is partitioned per instance
+  (`cache/<name>/*.json`) so role names / AU ids / subscription ids never
+  bleed across customers (`local` keeps the flat `cache/` for back-compat).
+- The pre-flight validator and the graph rebuild from the active instance.
+
+SQL roadmap: when instances move from per-customer CSV folders to
+per-customer SQL databases, the registry entry grows a connection-string
+field and `Read-PimCsvRows` / `Write-PimCsvCustom` in
+`Open-PimManager.ps1` get a SQL-backed implementation &mdash; the rest of
+the server and the whole SPA sit above that seam and stay unchanged.
 
 ## The four tabs
 
@@ -138,7 +183,9 @@ never touched. The customer-override pattern is documented in
 Files are written **atomically** (write to `.tmp`, then `Move-Item -Force`),
 **UTF-8 without BOM**, **`;` delimiter**. The original header order is
 preserved; any column that exists in your pending state but not in the
-on-disk file is appended at the end.
+on-disk file is appended at the end. Blank separator rows (`;;;;;` lines
+used as visual grouping in Excel) **survive the round-trip** &mdash; they
+load as empty grid rows and are written back unchanged.
 
 Every successful write appends one tab-separated line to
 `output/pim-manager-mutations.log`:
