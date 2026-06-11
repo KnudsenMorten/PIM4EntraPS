@@ -1,9 +1,10 @@
 # Release notes for PIM4EntraPS
 
-## v2.4.122
+## v2.4.123
 
 Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monorepo:
 
+- release: PIM4EntraPS v2.4.123 -- (1) skip Connect-ExchangeOnline on the -OnlyAD invocation + reuse existing EXO session via Get-ConnectionInformation so EXO connects exactly once per launcher run (was 2x after v2.4.114); (2) engine resolves $PathAdmins / $PathAdminsL0T0 from $global: fallback so AD-create rows finally have an OU to target (a7e9f695)
 - release: PIM4EntraPS v2.4.122 -- AD-create OU routing now driven by UserName naming convention (regex match on L0/T0 markers bounded by -/_/. in the name) instead of CSV TierLevel column; matches the customer pattern where privilege class is encoded in the account name itself (c0788dfc)
 - release: PIM4EntraPS v2.4.121 -- AD-create branch matches CSV TierLevel against the Tier convention (T0/T1/T2/T3) -- T0 -> PathAdminsL0T0, T1/T2/T3/blank -> PathAdmins. Previously the engine matched Level literals (L0/L1) so Tier-formatted CSVs silently dropped every Create row. L0 still accepted as T0-equivalent for back-compat. Level and Tier are distinct dimensions; CSV column is the Tier. (5d0cdd62)
 - release: PIM4EntraPS v2.4.120 -- AD-create branch surfaces an explicit [ERROR] when CSV TierLevel is blank or not L0/L1 (previously: dangling 'Creating AD account' header with no New-ADUser call, no exception, no password file row, row silently dropped) (93e53c67)
@@ -33,13 +34,57 @@ Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monor
 - release: PIM4EntraPS v2.4.97 - Update-PimActivator-Extension.ps1 SAFETY FIX (no more profile wipes) + faster update trigger via --extensions-update-frequency=30 (cdc2c7cb)
 - release: extension v1.6.16 - revert v1.6.13's footer-collapse experiment; restore 2-row footer layout (row 1: title + repo + GitHub + Report bug | tenant ID; row 2: dev attribution | tenant name + reset) (7018f592)
 - release: extension v1.6.15 - wizard ALWAYS shows mode-selector on fresh deploy (removed auto-pick for single-tenant catalog that was silently skipping the picker); catalogPanel now carries BOTH picker + import sub-divs so 'Use centrally deployed' (multi) and 'Import JSON' modes can toggle independently regardless of current catalog state (a3885a4a)
-- release: extension v1.6.14 - (a) new 3-card mode selector on first-run/reset wizard: 'Use centrally deployed' / 'Import JSON catalog' / 'Add single tenant'; each mode shows only its relevant section + a Back link to return to the picker (b) fix signOut: clear tenantTokens[activeTenantId] (was leaving the per-tenant token cache so loadConfig silently restored tokens after sign-out) + open login.microsoftonline.com/common/oauth2/v2.0/logout in a new tab to kill the Edge-side session cookies (c1d17a33)
 
 ---
 
 # Release notes -- PIM4EntraPS
 
 > **Curated changelog.** The publish workflow auto-prepends recent monorepo commits as a raw activity log; this file is the human-friendly narrative on top.
+
+---
+
+## v2.4.123 -- two engine fixes: (1) skip Connect-ExchangeOnline on the `-OnlyAD` invocation + reuse existing EXO session; (2) read `$PathAdmins` / `$PathAdminsL0T0` from globals so AD-create finally has an OU to target
+
+### Fix 1 -- Exchange Online was connecting twice
+
+v2.4.114 made the engine call `CreateUpdate-Accounts-From-file-CSV` twice -- once with `-OnlyID`, once with `-OnlyAD`. The function unconditionally did `Connect-ExchangeOnline` at the top, so the AD invocation reconnected EXO even though the AD branch never touches a mailbox (`Set-Mailbox` only fires in the ID branch at lines 4797 and 4918).
+
+Now the function:
+
+- Skips the entire EXO setup block when `-OnlyAD` is set and `-OnlyID` is not. Logs `[info] -OnlyAD invocation -- skipping Connect-ExchangeOnline (AD branch doesn't touch Exchange).`
+- Otherwise calls `Get-ConnectionInformation` and reuses any session whose `TokenStatus -eq 'Active'` or `State -eq 'Connected'`. Logs `[info] EXO already connected in this session ... -- skipping re-connect.`
+
+Net effect on a normal launcher run: exactly **one** Connect-ExchangeOnline.
+
+### Fix 2 -- `$PathAdmins` / `$PathAdminsL0T0` were never defined
+
+The engine has always passed `-PathAdmins $PathAdmins -PathAdminsL0T0 $PathAdminsL0T0` to `CreateUpdate-Accounts-From-file-CSV`, but no shipped config / launcher actually defined those script-scope variables. The legacy v1 setup populated them as `$global:PathAdmins` / `$global:PathAdminsL0T0` in `repository.custom.ps1`. In v2 there's no equivalent. So on every fresh-v2 run, `$PathAdmins = $null` -> v2.4.122's "target OU is empty" guard fires for every Create.
+
+Engine now:
+
+1. Falls back to `$global:PathAdmins` / `$global:PathAdminsL0T0` when the script-scope variables are empty.
+2. Logs the resolved values (`[INFO] PathAdmins = OU=...`) so operators can spot drift between expected and actual OUs.
+3. If BOTH are still empty after the global fallback, prints a clear `[INFO]` line telling the operator exactly where to set them (`config/PIM4EntraPS.NamingConventions.custom.ps1`) and **calls the AD branch with neither -Path argument** -- so Updates still go through for existing accounts, and only the Create path (which needs the OU) is suppressed for this run.
+
+### Customer action -- set the OUs in NamingConventions.custom.ps1
+
+Add to `config/PIM4EntraPS.NamingConventions.custom.ps1` (alongside the `AdminAccountPatterns` block):
+
+```powershell
+$global:PathAdmins     = 'OU=Admin,OU=AdminAccounts,DC=casa,DC=dk'        # general admin OU
+$global:PathAdminsL0T0 = 'OU=AdminL0T0,OU=AdminAccounts,DC=casa,DC=dk'    # high-priv (L0/T0) OU
+```
+
+Replace the DN values with the actual OUs in your tenant. The high-priv OU receives any account whose UserName carries an `L0` or `T0` marker (per v2.4.122 routing); everything else lands in the general OU.
+
+### Files changed
+
+- `engine/_shared/PIM-Functions.psm1` -- `CreateUpdate-Accounts-From-file-CSV` gates `Connect-ExchangeOnline` behind `-not $OnlyAD` AND a `Get-ConnectionInformation` reuse check.
+- `engine/PIM-Baseline-Management-CSV/PIM-Baseline-Management-CSV.ps1` -- `$PathAdmins` / `$PathAdminsL0T0` fallback to `$global:` + diagnostic logs + safe-skip Create when both still empty.
+
+### How to apply
+
+- Pull. Add the two `$global:Path*` settings to your `NamingConventions.custom.ps1`. Rerun the launcher. EXO should now connect once; the AD-create rows that have been failing on the "target OU is empty" guard should now reach `New-ADUser -Path <DN>` and succeed (assuming the gMSA has create rights on those OUs).
 
 ---
 
