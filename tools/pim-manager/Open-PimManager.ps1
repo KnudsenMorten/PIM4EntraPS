@@ -228,7 +228,7 @@ if ($ConnectPlatform) {
 # The 14 CSV bases the mapper edits, in stable UI order, with their default
 # headers used when creating a brand-new .custom.csv.
 $script:PimCsvBases = @(
-    [ordered]@{ base = 'Account-Definitions-Admins';      group = 'Definitions';  defaultHeader = @('FirstName','LastName','Initials','TierLevel','TargetUsage','TargetPlatform','UserType','UserName','DisplayName','UserPrincipalName','UsageLocation','ForwardMailsToContact','MailForwardAddress','CreateTAP','TAPStartDate') },
+    [ordered]@{ base = 'Account-Definitions-Admins';      group = 'Definitions';  defaultHeader = @('FirstName','LastName','Initials','TierLevel','TargetUsage','TargetPlatform','UserType','UserName','DisplayName','UserPrincipalName','UsageLocation','ForwardMailsToContact','MailForwardAddress','CreateTAP','TAPStartDate','Ring') },
     [ordered]@{ base = 'PIM-Definitions-Roles';           group = 'Definitions';  defaultHeader = @('GroupName','GroupDescription','GroupTag','AdministrativeUnitTag','CPPlatform','Plane','TierLevel','PermissionScope','SyncPlatform','IsRoleAssignable') },
     [ordered]@{ base = 'PIM-Definitions-Tasks';           group = 'Definitions';  defaultHeader = @('GroupName','GroupDescription','GroupTag','AdministrativeUnitTag','IsRoleAssignable','Workload','Level','TierLevel','Plane','CPPlatform','Owners') },
     [ordered]@{ base = 'PIM-Definitions-Services';        group = 'Definitions';  defaultHeader = @('GroupName','GroupDescription','GroupTag','AdministrativeUnitTag','IsRoleAssignable','Workload','Level','TierLevel','Plane','CPPlatform','Owners') },

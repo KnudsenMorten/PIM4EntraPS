@@ -852,6 +852,28 @@ function Invoke-PimPreflightValidation {
     }
 
     # ------------------------------------------------------------------
+    # PIM-RING-001: Ring column (deployment-ring rollout staging) must be
+    # blank, 0, 1, or 2. Anything else is treated as 0 by the engine (full
+    # reach) -- a typo like 'Ring=22' would silently grant ALL tenants, so
+    # flag it as an error.
+    # ------------------------------------------------------------------
+    if ($loaded.ContainsKey('Account-Definitions-Admins')) {
+        $rows = $loaded['Account-Definitions-Admins'].rows
+        for ($i = 0; $i -lt $rows.Count; $i++) {
+            $r = $rows[$i]
+            if (Test-PimRowIsBlank -Row $r) { continue }
+            $ringVal = (Get-PimRowValue -Row $r -Column 'Ring').Trim()
+            if (-not $ringVal) { continue }
+            if ($ringVal -notin @('0','1','2')) {
+                $upn = Get-PimRowValue -Row $r -Column 'UserPrincipalName'
+                [void]$violations.Add((New-PimViolation -Severity 'error' -Code 'PIM-RING-001' -Csv 'Account-Definitions-Admins' -Row $i -Column 'Ring' `
+                    -Message "Ring '$ringVal' for '$upn' is not a valid deployment ring (blank, 0, 1, or 2). The engine treats invalid values as 0 = ALL tenants -- a typo here silently over-grants." `
+                    -Suggestion "Set Ring to 2 (test tenants only), 1 (pilot + test), 0 (all tenants), or leave blank (= 0)."))
+            }
+        }
+    }
+
+    # ------------------------------------------------------------------
     # PIM-TAP-001: CreateTAP=TRUE but TargetPlatform=AD (TAP is Entra-only).
     # ------------------------------------------------------------------
     if ($loaded.ContainsKey('Account-Definitions-Admins')) {
