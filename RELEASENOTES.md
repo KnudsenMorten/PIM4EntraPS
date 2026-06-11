@@ -1,9 +1,10 @@
 # Release notes for PIM4EntraPS
 
-## v2.4.131
+## v2.4.132
 
 Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monorepo:
 
+- release: PIM4EntraPS v2.4.132 -- PIM Activator v1.6.26 packed + published to gh-pages (tenant-dropdown readability fix live; post-pack guard validated canonical id; live updates.xml + CRX byte-verified); Update-PimActivator-Extension.ps1 git calls wrapped in Invoke-GitQuiet -- `2>$null` under EAP=Stop turned a harmless CRLF warning from `git add` into a terminating NativeCommandError that aborted the publish mid-way (3f79b213)
 - release: PIM4EntraPS v2.4.131 -- PIM Manager pwsh-7 launch fixed: gate the compiled JSON serializer (System.Web.Extensions / JavaScriptSerializer, .NET-Framework-only; explicit -ReferencedAssemblies broke core resolution with CS0012) on PSEdition Desktop; PowerShell 7 uses native ConvertTo-Json which is already fast. Verified both editions: pwsh7 preflight 2.0s cold / 0.04s warm, PS 5.1 3.3s via compiled path (c69fe4ec)
 - release: PIM4EntraPS v2.4.130 -- Revoke tab live-verified on a real tenant (987 active assignments incl. 43 pim-for-groups that were invisible before: Graph refuses unfiltered assignmentSchedules, now per-group $batch queries over PIM-prefix candidates); served requests count as heartbeat so slow loads no longer self-reap the server; hashtable principal/role/AU label indexes; _tenantSync reuses existing app-only contexts + secret-auth fallback (was cert-only); new -ConnectPlatform launcher switch. Manager branding aligned with PIM Activator (banner version badge, in-banner instance switcher, tab/button/badge treatment). Activator popup: tenant-dropdown options got explicit colors -- 3-tenant list was white-on-white except the highlighted row (repack+redeploy needed to ship to browsers) (fb3a5f86)
 - release: PIM4EntraPS v2.4.129 -- PIM Manager finalized: MSP multi-instance support (instances.custom.json registry + -Instance/-ConfigRoot + header dropdown + per-instance CSV/log/tenant-cache isolation, SQL-ready seam behind Read-PimCsvRows/Write-PimCsvCustom); single-threaded-server freeze fixed (compiled Levenshtein + compiled JSON serializer + mtime-keyed preflight cache: page load 12s+ -> 0.5s, warm preflight 0.03s; client-abort tolerance + no response double-writes; SPA fetch timeout so lost connections error instead of hanging wizard Finish forever); blank ;;;;; separator rows survive commit round-trips (was: 53 rows -> 37 after a no-op save); wizard-staged rows light tab badges. Verified with headless-Chrome E2E: all 6 tabs, all 6 wizards end-to-end, commit-to-disk + mutation log, instance switching, static render, -Instance/-ConfigRoot startup (f7a3c7ae)
@@ -33,13 +34,24 @@ Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monor
 - release: PIM4EntraPS v2.4.105 + extension v1.6.24 - fix popup pre-sign-in tabpanel bleed + fix Update script silently aborting gh-pages publish (097fba84)
 - release: PIM4EntraPS v2.4.104 + extension v1.6.22 - -Repack works on PS 5.1 (mgmt1's runtime); guard moved from PEM input to produced CRX output bytes (6cdfd661)
 - release: PIM4EntraPS v2.4.103 - Update-PimActivator-Extension.ps1 scrubs stale Secure Preferences UNCONDITIONALLY (v2.4.100 only scrubbed when binary present, missed the actual trap shape) (41fd4236)
-- release: PIM4EntraPS v2.4.102 - Deploy-PimActivatorIntune.ps1 pre-flight scan for conflicting ExtensionInstallForcelist policies (prevents IME slot-cycling silent failure) (7e7de5d7)
 
 ---
 
 # Release notes -- PIM4EntraPS
 
 > **Curated changelog.** The publish workflow auto-prepends recent monorepo commits as a raw activity log; this file is the human-friendly narrative on top.
+
+---
+
+## v2.4.132 -- PIM Activator v1.6.26 packed + published (tenant-dropdown readability fix live); repack script no longer dies on git stderr warnings
+
+### Activator v1.6.26 deployed
+
+The v2.4.130 tenant-dropdown fix (explicit option colors -- 3-tenant list was white-on-white except the highlighted row) is now packed and published: `manifest.json` 1.6.25 -> 1.6.26, CRX repacked with the master signing key (post-pack guard confirmed the canonical extension id), pushed to gh-pages, and the live update URL verified advertising v1.6.26 with a byte-identical CRX. Browsers on the forcelist pick it up on their next update poll; for an immediate pull on a specific machine run `Update-PimActivator-Extension.ps1` (default flush mode) there.
+
+### Repack script hardening
+
+`Update-PimActivator-Extension.ps1` ran native git with `2>$null` under the script-wide `$ErrorActionPreference='Stop'` -- on PS 5.1 that converts ANY stderr line into a terminating NativeCommandError, and a harmless `LF will be replaced by CRLF` warning from `git add` aborted the publish mid-way (CRX staged in the gh-pages clone but never committed/pushed). All five git call sites now go through an `Invoke-GitQuiet` wrapper that runs with EAP=Continue and judges success by exit code only.
 
 ---
 

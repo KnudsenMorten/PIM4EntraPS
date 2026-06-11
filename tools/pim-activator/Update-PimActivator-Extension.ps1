@@ -652,12 +652,26 @@ if ($Repack -or $PackOnly) {
     # failure). Switched to '2>$null' so git's stderr is discarded by the
     # OS, never enters PowerShell's error stream, and only a non-zero
     # $LASTEXITCODE counts as a real failure.
+    # Native git wrapper. Under $ErrorActionPreference='Stop' (script-wide),
+    # PS 5.1 turns ANY stderr line from a native command WITH a 2> redirect
+    # into a terminating NativeCommandError -- a harmless 'LF will be replaced
+    # by CRLF' warning from `git add` killed the publish mid-way on 2026-06-11
+    # (CRX staged but never committed/pushed). Run git with EAP=Continue and
+    # judge success by exit code only.
+    function Invoke-GitQuiet {
+        param([Parameter(Mandatory)][string[]]$GitArgs)
+        $eap = $ErrorActionPreference
+        $ErrorActionPreference = 'Continue'
+        try { & git @GitArgs 2>&1 | Out-Null } finally { $ErrorActionPreference = $eap }
+        return $LASTEXITCODE
+    }
+
     if (-not (Test-Path (Join-Path $GhPagesDir '.git'))) {
         Write-Ok "Cloning gh-pages into $GhPagesDir (one-time)"
         if (Test-Path $GhPagesDir) { Remove-Item $GhPagesDir -Recurse -Force }
         New-Item -ItemType Directory -Path $GhPagesDir -Force | Out-Null
-        & git clone --branch gh-pages --depth 1 $repoUrl $GhPagesDir 2>$null 1>$null
-        if ($LASTEXITCODE -ne 0) { throw "git clone of gh-pages failed (exit $LASTEXITCODE). Run manually to see the error." }
+        $rc = Invoke-GitQuiet @('clone','--branch','gh-pages','--depth','1',$repoUrl,$GhPagesDir)
+        if ($rc -ne 0) { throw "git clone of gh-pages failed (exit $rc). Run manually to see the error." }
     } else {
         Write-Ok "Refreshing existing gh-pages clone"
         Push-Location $GhPagesDir
@@ -665,8 +679,8 @@ if ($Repack -or $PackOnly) {
             # 'reference already exists' on pull is a transient quirk of shallow
             # clones; ignore non-zero exit on pull and let the subsequent add /
             # commit / push surface any real problem.
-            & git fetch --quiet origin gh-pages 2>$null 1>$null
-            & git reset --hard origin/gh-pages 2>$null 1>$null
+            [void](Invoke-GitQuiet @('fetch','--quiet','origin','gh-pages'))
+            [void](Invoke-GitQuiet @('reset','--hard','origin/gh-pages'))
         } finally { Pop-Location }
     }
 
@@ -684,11 +698,12 @@ if ($Repack -or $PackOnly) {
 
     Push-Location $GhPagesDir
     try {
-        & git add pim-activator.crx updates.xml 2>$null 1>$null
-        & git -c user.email='mok@mortenknudsen.net' -c user.name='Morten Knudsen' commit -m "PIM Activator extension v$newVer (dev iteration)" 2>$null 1>$null
-        if ($LASTEXITCODE -ne 0) { Write-Warn "git commit reported non-zero exit. Continuing to push (may be no-op if nothing changed)." }
-        & git push origin gh-pages 2>$null 1>$null
-        if ($LASTEXITCODE -ne 0) { throw "git push to gh-pages failed (exit $LASTEXITCODE). Run 'git push origin gh-pages' inside $GhPagesDir to see the error." }
+        $rc = Invoke-GitQuiet @('add','pim-activator.crx','updates.xml')
+        if ($rc -ne 0) { throw "git add in gh-pages clone failed (exit $rc)." }
+        $rc = Invoke-GitQuiet @('-c','user.email=mok@mortenknudsen.net','-c','user.name=Morten Knudsen','commit','-m',"PIM Activator extension v$newVer (dev iteration)")
+        if ($rc -ne 0) { Write-Warn "git commit reported non-zero exit. Continuing to push (may be no-op if nothing changed)." }
+        $rc = Invoke-GitQuiet @('push','origin','gh-pages')
+        if ($rc -ne 0) { throw "git push to gh-pages failed (exit $rc). Run 'git push origin gh-pages' inside $GhPagesDir to see the error." }
     } finally { Pop-Location }
     Write-Ok "v$newVer published to https://knudsenmorten.github.io/PIM4EntraPS/"
 
