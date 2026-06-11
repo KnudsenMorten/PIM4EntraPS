@@ -4926,9 +4926,45 @@ Fix (one-time per tenant):
 
             ElseIf ( ($TargetPlatform -eq "AD") -and ($OnlyID -eq $false) -and ($OnlyAD -eq $true) )
                 {
-                    $User = Get-ADUser -Filter 'UserPrincipalName -eq $UserPrincipalName' `
-                                       -Credential $Credentials `
-                                       -ErrorAction SilentlyContinue
+                    # v2.4.117: gMSA detection + safer auth-failure handling.
+                    # gMSAs have NO user-accessible password. Passing them as a
+                    # PSCredential makes the AD cmdlets send the placeholder
+                    # password to the DC -> "Authentication failed". gMSAs
+                    # authenticate via Kerberos using the calling process
+                    # token, so we MUST omit -Credential and rely on the
+                    # process running AS the gMSA (Scheduled Task with
+                    # Principal = the gMSA). Detect via the trailing $ in the
+                    # SAM name.
+                    $adCommonParams = @{}
+                    $isGmsa = $Credentials -and $Credentials.UserName -and ($Credentials.UserName -match '\$$')
+                    if ($Credentials -and -not $isGmsa) {
+                        $adCommonParams['Credential'] = $Credentials
+                    }
+
+                    # Hard-fail Get-ADUser so an auth/DC issue can't silently
+                    # cascade into the Create branch (which used to generate
+                    # + persist a password before New-ADUser even ran -- and
+                    # since New-ADUser would also fail the AD account never
+                    # existed; the password file just filled up with phantom
+                    # entries).
+                    $User = $null
+                    $getAdUserErr = $null
+                    try {
+                        $User = Get-ADUser -Filter 'UserPrincipalName -eq $UserPrincipalName' @adCommonParams -ErrorAction Stop
+                    } catch {
+                        $getAdUserErr = $_
+                    }
+
+                    if ($getAdUserErr) {
+                        $authMsg = $getAdUserErr.Exception.Message
+                        if ($isGmsa) {
+                            Write-Host ("ERROR: Get-ADUser failed for {0} while running as gMSA '{1}'. Verify the Scheduled Task / parent process is actually running AS the gMSA (whoami /user should match), that the gMSA has 'PrincipalsAllowedToRetrieveManagedPassword' set for this host, and that the host has DC connectivity. Skipping this AD row -- NOT writing password file. Detail: {2}" -f $UserPrincipalName, $Credentials.UserName, $authMsg) -ForegroundColor Red
+                        } else {
+                            Write-Host ("ERROR: Get-ADUser failed for {0} with credential '{1}': {2}. Skipping this AD row -- NOT writing password file." -f $UserPrincipalName, $Credentials.UserName, $authMsg) -ForegroundColor Red
+                        }
+                        continue
+                    }
+
                     If ($User)
                         {
                             # Update
@@ -4941,46 +4977,62 @@ Fix (one-time per tenant):
                                                -Description $Description `
                                                -EmailAddress $UserPrincipalName `
                                                -UserPrincipalName $UserPrincipalName `
-                                               -Credential $Credentials
+                                               @adCommonParams
 
                         }
                     Else
                         {
                             write-host ""
                             Write-host "Creating $($TargetPlatform) account $($DisplayName)"
-                            
-                            If ($TierLevel -eq "L0")
-                                {
-                            
-                                    $Result = New-ADUser -Name $UserName `
-                                                         -GivenName $FirstName `
-                                                         -Surname $LastName `
-                                                         -DisplayName $DisplayName `
-                                                         -Description $Description `
-                                                         -AccountPassword $AD_PasswordProfile `
-                                                         -EmailAddress $UserPrincipalName `
-                                                         -UserPrincipalName $UserPrincipalName `
-                                                         -Path $PathAdminsL0T0 `
-                                                         -Enabled:$true `
-                                                         -Credential $Credentials
-                                }
-                            ElseIf ($TierLevel -eq "L1")
-                                {
 
-                                    $Result = New-ADUser -Name $UserName `
-                                                         -GivenName $FirstName `
-                                                         -Surname $LastName `
-                                                         -DisplayName $DisplayName `
-                                                         -Description $Description `
-                                                         -AccountPassword $AD_PasswordProfile `
-                                                         -EmailAddress $UserPrincipalName `
-                                                         -UserPrincipalName $UserPrincipalName `
-                                                         -Path $PathAdmins `
-                                                         -Enabled:$true `
-                                                         -Credential $Credentials
-                                }
+                            $createOk = $false
+                            try {
+                                If ($TierLevel -eq "L0")
+                                    {
 
-                            Write-PimAdminPassword -UserPrincipalName $UserPrincipalName -Password $generatedPassword -Platform 'AD'
+                                        $Result = New-ADUser -Name $UserName `
+                                                             -GivenName $FirstName `
+                                                             -Surname $LastName `
+                                                             -DisplayName $DisplayName `
+                                                             -Description $Description `
+                                                             -AccountPassword $AD_PasswordProfile `
+                                                             -EmailAddress $UserPrincipalName `
+                                                             -UserPrincipalName $UserPrincipalName `
+                                                             -Path $PathAdminsL0T0 `
+                                                             -Enabled:$true `
+                                                             @adCommonParams `
+                                                             -ErrorAction Stop
+                                        $createOk = $true
+                                    }
+                                ElseIf ($TierLevel -eq "L1")
+                                    {
+
+                                        $Result = New-ADUser -Name $UserName `
+                                                             -GivenName $FirstName `
+                                                             -Surname $LastName `
+                                                             -DisplayName $DisplayName `
+                                                             -Description $Description `
+                                                             -AccountPassword $AD_PasswordProfile `
+                                                             -EmailAddress $UserPrincipalName `
+                                                             -UserPrincipalName $UserPrincipalName `
+                                                             -Path $PathAdmins `
+                                                             -Enabled:$true `
+                                                             @adCommonParams `
+                                                             -ErrorAction Stop
+                                        $createOk = $true
+                                    }
+                            } catch {
+                                Write-Host ("ERROR: New-ADUser failed for {0}: {1}. NOT persisting password." -f $UserPrincipalName, $_.Exception.Message) -ForegroundColor Red
+                            }
+
+                            # Only persist the generated password when the
+                            # AD account was actually created. Previously the
+                            # password file got an entry even when create
+                            # failed -- phantom credentials accumulating
+                            # every run.
+                            if ($createOk) {
+                                Write-PimAdminPassword -UserPrincipalName $UserPrincipalName -Password $generatedPassword -Platform 'AD'
+                            }
                         }
                 }
         }
