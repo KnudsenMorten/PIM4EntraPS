@@ -328,14 +328,32 @@ Write-Output "******************************************************************
             $adCredSource = '$AD_Credentials (legacy global)'
         }
 
+        # v2.4.123: resolve $PathAdmins / $PathAdminsL0T0 from globals if the
+        # local script-scope variables aren't set. Customers historically set
+        # these in config/PIM4EntraPS.NamingConventions.custom.ps1 as globals
+        # (e.g. $global:PathAdmins = 'OU=Admin,OU=AdminAccounts,DC=casa,DC=dk').
+        # The engine never had a fallback, so missing config -> $null -> the
+        # AD-create branch's "target OU is empty" guard fires for every Create.
+        if (-not $PathAdmins      -and $global:PathAdmins)      { $PathAdmins      = $global:PathAdmins }
+        if (-not $PathAdminsL0T0  -and $global:PathAdminsL0T0)  { $PathAdminsL0T0  = $global:PathAdminsL0T0 }
+
         if (-not $adCmdAvailable) {
             Write-Host "[INFO] ActiveDirectory module not available on this host -- skipping AD-account branch. AD rows in the CSV will not be provisioned in this run." -ForegroundColor Yellow
         }
         elseif (-not $adCred) {
             Write-Host "[INFO] No AD credential available -- skipping AD-account branch. Add KV secrets 'Legacy-UserName-Internal-Prod' (e.g. <domain>\<gMSA>`$) + 'Legacy-Password-Internal-Prod' (any non-empty string for gMSA, real password otherwise) so Initialize-PlatformLegacyIdentity stages it at `$global:Context.Identity.Legacy.Internal.Prod." -ForegroundColor Yellow
         }
+        elseif (-not $PathAdmins -and -not $PathAdminsL0T0) {
+            Write-Host "[INFO] Neither `$PathAdmins nor `$PathAdminsL0T0 is set (no `$global:PathAdmins / `$global:PathAdminsL0T0 found). Add them to config/PIM4EntraPS.NamingConventions.custom.ps1 (e.g. `$global:PathAdmins = 'OU=Admin,OU=AdminAccounts,DC=casa,DC=dk'). Skipping AD-create branch -- existing accounts will still get Set-ADUser updates, but no new AD accounts will be provisioned in this run." -ForegroundColor Yellow
+            # Updates still work without -Path; only Create needs the OU.
+            CreateUpdate-Accounts-From-file-CSV -AccountsDefinitionFile $AccountsDefinitionFile `
+                                                -Credentials       $adCred `
+                                                -OnlyAD
+        }
         else {
             Write-Host "[INFO] AD credential source: $adCredSource" -ForegroundColor DarkGray
+            if ($PathAdmins)     { Write-Host ("[INFO] PathAdmins      = {0}" -f $PathAdmins) -ForegroundColor DarkGray }
+            if ($PathAdminsL0T0) { Write-Host ("[INFO] PathAdminsL0T0  = {0}" -f $PathAdminsL0T0) -ForegroundColor DarkGray }
             CreateUpdate-Accounts-From-file-CSV -AccountsDefinitionFile $AccountsDefinitionFile `
                                                 -Credentials       $adCred `
                                                 -PathAdmins        $PathAdmins `

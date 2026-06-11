@@ -4597,6 +4597,28 @@ Function CreateUpdate-Accounts-From-file-CSV
     # which generates + installs the cert locally, registers it on the SPN,
     # and writes the thumbprint to KV. Connect-PlatformModern then exposes
     # the thumbprint via the global on every engine run.
+    #
+    # v2.4.123: EXO is only used by the ID branch (Set-Mailbox forwarding
+    # rules). The AD branch never touches EXO. Skip the entire EXO setup
+    # when the caller passed -OnlyAD -- avoids the second redundant EXO
+    # connect that v2.4.114 introduced when the engine started calling
+    # CreateUpdate-Accounts-From-file-CSV twice (once for ID, once for AD).
+    # Also short-circuit if a healthy EXO session is already attached to
+    # the runspace (re-runs in the same shell shouldn't disconnect /
+    # reconnect needlessly).
+    if ($OnlyAD -and -not $OnlyID) {
+        Write-Output "  [info] -OnlyAD invocation -- skipping Connect-ExchangeOnline (AD branch doesn't touch Exchange)."
+    }
+    else {
+
+    $existingExo = $null
+    try { $existingExo = Get-ConnectionInformation -ErrorAction SilentlyContinue } catch {}
+    $exoAlreadyConnected = @($existingExo | Where-Object { $_.TokenStatus -eq 'Active' -or $_.State -eq 'Connected' }).Count -gt 0
+    if ($exoAlreadyConnected) {
+        Write-Output "  [info] EXO already connected in this session (Get-ConnectionInformation) -- skipping re-connect."
+        $exoConnected = $true
+    }
+    else {
     Manage-Powershell-Module -ModuleName 'ExchangeOnlineManagement' -Scope AllUsers
     $exoAppId = $global:HighPriv_Modern_ApplicationID_Azure
     $exoThumb = $global:HighPriv_Modern_CertificateThumbprint_Azure
@@ -4688,6 +4710,8 @@ Fix (one-time per tenant):
     if (-not $exoConnected) {
         throw "Connect-ExchangeOnline: both attempts failed after the EXO V3 module-reset workaround. Inspect the last error above for the real cause (not the 'Module could not be correctly formed' symptom)."
     }
+    }   # end: EXO not already connected -- did a real connect
+    }   # end: ID branch needs EXO (else $OnlyAD skip-EXO)
 
     $AdminAccounts_Data = Import-csv -Path $AccountsDefinitionFile -Delimiter ";" -Encoding UTF8
 
