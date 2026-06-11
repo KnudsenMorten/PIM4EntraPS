@@ -1,9 +1,10 @@
 # Release notes for PIM4EntraPS
 
-## v2.4.116
+## v2.4.117
 
 Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monorepo:
 
+- release: PIM4EntraPS v2.4.117 -- CRITICAL fix: AD branch is now gMSA-aware (drops -Credential when SAM ends with $) + hard-fails Get-ADUser instead of swallowing auth errors that cascaded into Create + Write-PimAdminPassword writing phantom passwords for accounts that never existed (d76bccea)
 - release: PIM4EntraPS v2.4.116 -- PIM-Baseline-Management-CSV engine calls Initialize-PlatformLegacyIdentity right after Initialize-PlatformAutomationFramework so KV Legacy-UserName/Password-Internal-Prod actually land in Context.Identity.Legacy.Internal.Prod (v2.4.115 wired the reader but nothing was populating the slot) (8965324b)
 - release: PIM4EntraPS v2.4.115 -- PIM-Baseline-Management-CSV engine now prefers v2 platform Context.Identity.Legacy.Internal.Prod for AD/gMSA credential (KV: Legacy-UserName-Internal-Prod + Legacy-Password-Internal-Prod), falls back to legacy $AD_Credentials global (98f29b4b)
 - release: PIM4EntraPS v2.4.114 -- PIM-Baseline-Management-CSV engine now calls CreateUpdate-Accounts-From-file-CSV with -OnlyAD too (was hardcoded to -OnlyID; AD rows in the CSV were silently ignored); guards on Get-ADUser availability + $AD_Credentials (3fa86c9a)
@@ -33,13 +34,62 @@ Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monor
 - release: extension v1.6.11 - footer 2-row flex layout (title left + tenant ID right on row 1; dev attribution left + tenant name right on row 2) (3bee8363)
 - release: extension v1.6.10 - footer split into 3 stacked rows (title / tenant info / dev attribution) so tenant name is on its own line + Developed by moves below; tenant name rendered prominent (bold sans-serif) with monospaced GUID after (34f0511f)
 - release: extension v1.6.9 - popup.js readMergedCatalog wraps single-object catalog as 1-element array (defense against pre-v2.4.96 PS 5.1 unwrap bug pushed by old Intune profiles); Verify-PimActivatorIntunePolicy.ps1 shows tenantCatalog shape ARRAY vs OBJECT clearly (52e05f16)
-- release: PIM4EntraPS v2.4.96 + extension v1.6.8 - TWO bugs blocking chrome.storage.managed: (a) manifest now declares storage.managed_schema -> managed-schema.json (without this Chromium returns empty from chrome.storage.managed regardless of registry) + (b) all 3 Intune push scripts now use ConvertTo-Json -InputObject @($catalog) to preserve array brackets on single-element catalogs (PS 5.1 + 7 compatible, prevents single-tenant catalog from being serialized as {object} instead of [array]) (4693e4cb)
 
 ---
 
 # Release notes -- PIM4EntraPS
 
 > **Curated changelog.** The publish workflow auto-prepends recent monorepo commits as a raw activity log; this file is the human-friendly narrative on top.
+
+---
+
+## v2.4.117 -- AD-account branch: gMSA-aware auth + stop persisting phantom passwords on auth failure (data-integrity fix)
+
+### Symptoms (both observed on a gMSA-bound host)
+
+```
+Get-ADUser: Authentication failed, see inner exception.
+
+Creating AD account Simon Kriegbaum (Admin, Legacy, AD, L0, T0)
+  -> initial password for Admin-SKR-L0-T0-AD@nordstern.dk (AD): yZ@y87crP5^Z89@a5XSH&^F^
+     appended to: E:\AutomateIT\SOLUTIONS\PIM4EntraPS\output\admin-passwords-20260611.txt
+```
+
+Two real problems compounded.
+
+### Root cause 1 -- gMSA cannot authenticate via `-Credential`
+
+`Get-ADUser`, `Set-ADUser`, `New-ADUser` were always called with `-Credential $Credentials`. For a real user account this works -- the password from KV authenticates against the DC. For a **group Managed Service Account (gMSA)**, the user-accessible password doesn't exist; KV holds a placeholder string. Passing that PSCredential to `Get-ADUser` makes the cmdlet send the placeholder to the DC -> `Authentication failed`.
+
+gMSAs auth via **Kerberos using the calling process token** -- the Scheduled Task / parent process must already be running AS the gMSA (Principal = `<domain>\<gMSA>$`), and the cmdlet must be called WITHOUT `-Credential` so the AD module uses the process identity.
+
+### Root cause 2 -- phantom passwords on auth failure
+
+`Get-ADUser` had `-ErrorAction SilentlyContinue`, so when the gMSA auth fix above failed, `$User` came back `$null` -- and the engine fell into the **Create** branch. `Write-PimAdminPassword` ran BEFORE `New-ADUser` even tried, persisting a generated password for an account that never existed. `New-ADUser` then also failed (same auth issue, swallowed by `-ErrorAction Stop` not being set), but the password file already had the entry. Next run repeated the cycle -> the password file kept growing with phantom credentials for users that never got created. Active data-integrity hazard.
+
+### Fix
+
+1. **gMSA detection** -- the AD branch now checks `$Credentials.UserName` for a trailing `$` (gMSA SAM convention). When detected, the engine builds an empty splat (`@{}`) instead of `@{ Credential = $Credentials }` and the AD cmdlets fall through to Kerberos / process-identity auth. Real-user creds still take the `-Credential` path.
+
+2. **Hard-fail on auth/DC errors** -- `Get-ADUser` now runs with `-ErrorAction Stop` inside a `try/catch`. On failure the engine prints a clear actionable error (gMSA-specific guidance when applicable: verify `whoami /user`, `PrincipalsAllowedToRetrieveManagedPassword`, DC connectivity) and **`continue`s to the next CSV row** without touching the password file.
+
+3. **Conditional password persistence** -- `New-ADUser` now runs with `-ErrorAction Stop` inside a `try/catch`. `Write-PimAdminPassword` only fires when `$createOk = $true`. If `New-ADUser` fails, the password file is NOT touched and the error is printed.
+
+### Operator action -- gMSA hosts
+
+- Scheduled Task Principal MUST be the gMSA (`<domain>\<gMSA>$`, "Do not store password" / gMSA-managed).
+- The gMSA needs `PrincipalsAllowedToRetrieveManagedPassword` containing the host's computer object so the host can retrieve the gMSA password from AD.
+- gMSA must have the AD permissions to create/modify user objects in the configured `$PathAdmins` / `$PathAdminsL0T0` OUs.
+
+`whoami /user` from inside the Scheduled Task script (use a one-off `cmd.exe /c whoami /user > C:\temp\whoami.txt` to confirm) should print the gMSA SID -- if it prints a human SID instead, the Task is running interactively rather than under the gMSA Principal and AD ops will fail.
+
+### Files changed
+
+- `engine/_shared/PIM-Functions.psm1` -- AD branch of `CreateUpdate-Accounts-From-file-CSV` rewritten: gMSA splat + try/catch on `Get-ADUser` + `New-ADUser` + conditional `Write-PimAdminPassword`.
+
+### How to apply
+
+- Pull. If your prior runs left phantom password rows in `output/admin-passwords-*.txt`, those represent accounts that never existed in AD -- safe to manually purge.
 
 ---
 
