@@ -1,22 +1,40 @@
 {
   "_comment": [
     "PIM Manager MSP instance registry. Copy to instances.custom.json (gitignored) and edit.",
-    "Each instance points at one customer's PIM4EntraPS config folder (the 14 CSVs +",
+    "Each instance points at one tenant's PIM4EntraPS config folder (the 14 CSVs +",
     "NamingConventions files). outputRoot is optional -- defaults to a sibling 'output'",
     "folder next to the configRoot. The solution's own config/ folder is always available",
     "as the built-in instance named 'local' and must not be declared here.",
+    "",
+    "Optional per-tenant CONNECTION fields (used by Active Assignments + tenant-cache",
+    "refresh; switching instances retargets the app-only Graph/Az connection):",
+    "  tenantId        -- the tenant to connect to",
+    "  appId           -- the SPN in that tenant",
+    "  certThumbprint  -- mgmt-box shape: per-tenant cert in the machine store",
+    "  keyVaultName + secretName -- cloud-portable shape: one client secret per tenant",
+    "                     in one central vault (an Azure App Service port reads the same",
+    "                     vault via Managed Identity, nothing else changes)",
+    "Use certThumbprint OR keyVaultName+secretName, not both.",
+    "",
     "Pick the startup instance with: .\\Open-PimManager.ps1 -Instance customerA",
-    "or switch live via the instance dropdown in the Manager header."
+    "or switch live via the Tenant dropdown in the Manager header."
   ],
   "instances": [
     {
       "name": "customerA",
-      "configRoot": "E:\\MSP\\customerA\\PIM4EntraPS\\config"
+      "configRoot": "E:\\MSP\\customerA\\PIM4EntraPS\\config",
+      "tenantId": "00000000-0000-0000-0000-000000000000",
+      "appId": "11111111-1111-1111-1111-111111111111",
+      "certThumbprint": "0123456789ABCDEF0123456789ABCDEF01234567"
     },
     {
       "name": "customerB",
       "configRoot": "E:\\MSP\\customerB\\PIM4EntraPS\\config",
-      "outputRoot": "E:\\MSP\\customerB\\PIM4EntraPS\\output"
+      "outputRoot": "E:\\MSP\\customerB\\PIM4EntraPS\\output",
+      "tenantId": "22222222-2222-2222-2222-222222222222",
+      "appId": "33333333-3333-3333-3333-333333333333",
+      "keyVaultName": "kv-msp-pim-tenants",
+      "secretName": "PIM-Tenant-customerB-Secret"
     }
   ]
 }

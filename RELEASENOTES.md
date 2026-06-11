@@ -1,9 +1,10 @@
 # Release notes for PIM4EntraPS
 
-## v2.4.134
+## v2.4.135
 
 Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monorepo:
 
+- release: PIM4EntraPS v2.4.135 -- PIM Manager: PIM-RING-001 downgraded to warning (never blocks Save) + Fix-all gained a ring bucket defaulting to repair-to-Ring-2 (least privilege; clear-to-0 as explicit alternative); instances.custom.json entries can declare per-tenant connections (tenantId+appId + certThumbprint for mgmt-box machine-store certs, OR keyVaultName+secretName for one central KV secret per tenant -- the cloud-portable shape an App Service port reads via Managed Identity); instance switch drops the Graph session and retargets the SPN globals so Active Assignments + tenant-cache refresh hit the selected tenant. E2E-verified against 3 demo tenant instances (afcba721)
 - release: PIM4EntraPS v2.4.134 -- deployment rings for staged MSP admin rollout: Ring column on Account-Definitions-Admins (blank=0=veteran/all tenants, 1=pilot+test, 2=new hire/test only) x $global:PIM_TenantRing per tenant (unset=0=production, safe default) x one rule (apply iff admin.Ring <= tenant.Ring); engine filters at all 4 admin load sites (CSV+SQL accounts/assignments) via shared helpers with UserName->ring map; SQL-ready (collapses to WHERE Ring <= @TenantRing later). Manager: Ring dropdown in grid, onboarding workflow defaults new hires to ring 2, PIM-RING-001 validator error on invalid values (engine treats them as 0 = over-grant). Plus professional Create-tab workflow names (00f1afe7)
 - release: PIM4EntraPS v2.4.133 -- PIM Manager: Graph view removed (was unused + the only CDN dependency; SPA now makes zero external requests, data model behind the wizards kept); professional tabs (Configuration landing / Create / Review & Save / Validate / Active Assignments) + labelled Tenant switcher sorted for 25+ MSP instances with config-root tooltips; fixed TDZ init abort on the landing-tab rail render (a456cc00)
 - release: PIM4EntraPS v2.4.132 -- PIM Activator v1.6.26 packed + published to gh-pages (tenant-dropdown readability fix live; post-pack guard validated canonical id; live updates.xml + CRX byte-verified); Update-PimActivator-Extension.ps1 git calls wrapped in Invoke-GitQuiet -- `2>$null` under EAP=Stop turned a harmless CRLF warning from `git add` into a terminating NativeCommandError that aborted the publish mid-way (3f79b213)
@@ -33,13 +34,33 @@ Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monor
 - release: PIM4EntraPS v2.4.108 - Deploy-PimActivatorIntune.ps1 drops defaultLanguageCode from ADMX upload payload (Intune 400 ADMXDefaultLanguageCodeNotNull) (a17463d2)
 - release: PIM4EntraPS v2.4.107 - Deploy-PimActivatorIntune.ps1 ADMX payload now has explicit @odata.type (fixes silent field null-out on strict tenants) (ab4a8d34)
 - release: PIM4EntraPS v2.4.106 - Deploy-PimActivatorIntune.ps1 dumps full ADMX upload-failure detail (uploadInfo:null was hiding everything) (23320078)
-- release: PIM4EntraPS v2.4.105 + extension v1.6.24 - fix popup pre-sign-in tabpanel bleed + fix Update script silently aborting gh-pages publish (097fba84)
 
 ---
 
 # Release notes -- PIM4EntraPS
 
 > **Curated changelog.** The publish workflow auto-prepends recent monorepo commits as a raw activity log; this file is the human-friendly narrative on top.
+
+---
+
+## v2.4.135 -- PIM Manager: ring findings are non-blocking + Fix-all repairs them; per-tenant connections on instance switch (machine-store cert or central Key Vault)
+
+### PIM-RING-001: warning + auto-fix, never a Save blocker
+
+Per operator decision, an invalid `Ring` value is now a **warning** (the Block-Save gate only counts errors) and the Validate tab's **Fix all** dialog gained a ring bucket: default action repairs invalid values to **Ring 2** (least privilege -- test tenants only; promote afterwards), with "clear (= 0, all tenants)" as the explicit alternative. Repairs land in pending like every other fix; nothing writes until Commit all.
+
+### Instance switch retargets the tenant connection
+
+The Manager runs on the mgmt box, which holds credentials for every customer tenant. Registry entries in `instances.custom.json` can now declare the connection per tenant:
+
+- `tenantId` + `appId` + `certThumbprint` -- mgmt-box shape (per-tenant cert in the machine store).
+- `tenantId` + `appId` + `keyVaultName`/`secretName` -- **central Key Vault** shape: one client secret per tenant in one vault, resolved with the current Az context. This is the cloud-portable form -- an Azure App Service port reads the same vault via Managed Identity with zero changes to the resolution logic.
+
+Switching instances drops the current Graph session and points the SPN globals at the selected tenant, so **Active Assignments** and tenant-cache refresh always talk to the tenant you're looking at. Tenant-list caches were already partitioned per instance (v2.4.129).
+
+### Verified
+
+Headless-Chrome E2E against three demo tenant instances (test/pilot/prod rings): Tenant dropdown lists all instances; switching lands on the right config root; the admins grid renders Ring as a dropdown; an injected invalid ring surfaces as a PIM-RING-001 **warning**; Fix-all defaults to the Ring-2 repair and the pending row carries it. Zero console errors.
 
 ---
 
