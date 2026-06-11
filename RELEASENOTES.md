@@ -1,9 +1,10 @@
 # Release notes for PIM4EntraPS
 
-## v2.4.117
+## v2.4.118
 
 Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monorepo:
 
+- release: PIM4EntraPS v2.4.118 -- AD branch: revert v2.4.117 gMSA -Credential omission; restore v1 always-pass-Credential contract (customer test on SYSTEM-running host proved dropping -Credential cascades through to computer-account auth which lacks write rights). Hard-fail Get-ADUser + conditional Write-PimAdminPassword improvements kept. (c766ed13)
 - release: PIM4EntraPS v2.4.117 -- CRITICAL fix: AD branch is now gMSA-aware (drops -Credential when SAM ends with $) + hard-fails Get-ADUser instead of swallowing auth errors that cascaded into Create + Write-PimAdminPassword writing phantom passwords for accounts that never existed (d76bccea)
 - release: PIM4EntraPS v2.4.116 -- PIM-Baseline-Management-CSV engine calls Initialize-PlatformLegacyIdentity right after Initialize-PlatformAutomationFramework so KV Legacy-UserName/Password-Internal-Prod actually land in Context.Identity.Legacy.Internal.Prod (v2.4.115 wired the reader but nothing was populating the slot) (8965324b)
 - release: PIM4EntraPS v2.4.115 -- PIM-Baseline-Management-CSV engine now prefers v2 platform Context.Identity.Legacy.Internal.Prod for AD/gMSA credential (KV: Legacy-UserName-Internal-Prod + Legacy-Password-Internal-Prod), falls back to legacy $AD_Credentials global (98f29b4b)
@@ -33,13 +34,39 @@ Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monor
 - release: extension v1.6.12 - footer row 1 now carries GitHub + Report bug chips next to title; row 2 only shows developer attribution + tenant name (fb0a3d86)
 - release: extension v1.6.11 - footer 2-row flex layout (title left + tenant ID right on row 1; dev attribution left + tenant name right on row 2) (3bee8363)
 - release: extension v1.6.10 - footer split into 3 stacked rows (title / tenant info / dev attribution) so tenant name is on its own line + Developed by moves below; tenant name rendered prominent (bold sans-serif) with monospaced GUID after (34f0511f)
-- release: extension v1.6.9 - popup.js readMergedCatalog wraps single-object catalog as 1-element array (defense against pre-v2.4.96 PS 5.1 unwrap bug pushed by old Intune profiles); Verify-PimActivatorIntunePolicy.ps1 shows tenantCatalog shape ARRAY vs OBJECT clearly (52e05f16)
 
 ---
 
 # Release notes -- PIM4EntraPS
 
 > **Curated changelog.** The publish workflow auto-prepends recent monorepo commits as a raw activity log; this file is the human-friendly narrative on top.
+
+---
+
+## v2.4.118 -- AD-account branch: revert the v2.4.117 gMSA `-Credential` omission, restore the v1 "always pass -Credential" contract
+
+### Why
+
+v2.4.117 auto-detected gMSA-style credentials (UserName ending in `$`) and dropped `-Credential` from the AD cmdlets, on the assumption the process was running AS the gMSA via a Scheduled Task. In practice the v1 contract -- which customers actually use -- builds a regular `PSCredential` from KV (`Legacy-UserName-Internal-Prod` + `Legacy-Password-Internal-Prod`) and passes it to every AD cmdlet via `-Credential`, regardless of whether the SAM name looks gMSA-shaped. The v2.4.117 detection broke that contract.
+
+Verified on a live customer test: the launcher ran as `NT AUTHORITY\SYSTEM` (Kerberos used the COMPUTER account `azwe-s-autm-p01$`, not the gMSA), so dropping `-Credential` made the AD cmdlets fall through to computer-account auth -- which has read but not write, hence `Set-ADUser: Insufficient access rights`.
+
+### Fix
+
+`engine/_shared/PIM-Functions.psm1` AD branch: `-Credential` is now always passed when `$Credentials` is populated, matching the v1 behavior. The credential-resolution chain (v2 Context.Identity.Legacy.Internal.Prod -> legacy `$AD_Credentials`) added in v2.4.115 / v2.4.116 stays.
+
+The v2.4.117 safety improvements that are NOT reverted:
+
+- **Hard-fail Get-ADUser** -- `-ErrorAction Stop` inside `try/catch`; on failure the engine prints a clear error and `continue`s to the next CSV row instead of cascading into the Create branch.
+- **Conditional `Write-PimAdminPassword`** -- `New-ADUser` runs with `-ErrorAction Stop`; the password is persisted only when `$createOk = $true`. No more phantom passwords for accounts that never got created.
+
+### Files changed
+
+- `engine/_shared/PIM-Functions.psm1` -- gMSA-detection branch removed; `-Credential $Credentials` always wired through `$adCommonParams` splat.
+
+### How to apply
+
+- Pull, rerun the launcher with your normal KV credentials in place.
 
 ---
 
