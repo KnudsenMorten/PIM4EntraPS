@@ -85,6 +85,23 @@ $global:PIM_NamingConventions = @{
     # See .custom.sample.ps1 for a complete worked example.
     TagPrefixToCsv = @{}
 
+    # ----- On-prem AD OU paths ---------------------------------------------
+    # Where the PIM-Baseline-Management-CSV engine's AD-Create branch lands
+    # new admin accounts (New-ADUser -Path <DN>). Two OUs:
+    #
+    #   PathAdmins     -- general admin accounts (no L0/T0 marker in name)
+    #   PathAdminsL0T0 -- high-priv admins whose UserName carries L0 or T0
+    #                     (e.g. 'Admin-SKR-L0-T0-AD'); routed automatically
+    #                     by the v2.4.122 UserName-regex check.
+    #
+    # Both default to $null -- customers must override in
+    # PIM4EntraPS.NamingConventions.custom.ps1, e.g.:
+    #   $global:PIM_NamingConventions.PathAdmins     = 'OU=...,DC=casa,DC=dk'
+    #   $global:PIM_NamingConventions.PathAdminsL0T0 = 'OU=...,DC=casa,DC=dk'
+    # Co-mingled tenants point both at the same DN.
+    PathAdmins     = $null
+    PathAdminsL0T0 = $null
+
     # ----- Azure resource groups -------------------------------------------
     # When PIM4EntraPS provisions Azure resources (e.g. AU storage), naming pattern:
     ResourceGroupPattern = 'rg-pim-{Tier}'
