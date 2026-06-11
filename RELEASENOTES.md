@@ -1,9 +1,10 @@
 # Release notes for PIM4EntraPS
 
-## v2.4.138
+## v2.4.139
 
 Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monorepo:
 
+- release: PIM4EntraPS v2.4.139 -- PIM Manager Delegation Map (new landing tab): the PIM v2 model as a 4-column flow board (People -> Roles & Org Groups -> Capability Bundles -> Permissions & Targets, with terminal permission groups rendered as workload/app-RBAC groups for Power BI/Intune/Defender XDR/3rd-party); click-to-light full path in both directions with selection-only wires (Active amber, Eligible blue), every box = Definitions row / every wire = Assignments row with open-in-grid jump; search dims non-matches; static-mode compatible. Tabs reordered to operator lifecycle: Create -> Delegation Map -> Validate -> Review & Save -> Maintenance -> Advanced View (grid) (55be87b9)
 - release: PIM4EntraPS v2.4.138 -- PIM Manager role pickers auto-load from the tenant: new azure-rbac-roles tenant-list kind (Get-AzRoleDefinition, per-instance cache, included in -RefreshTenantLists); Azure perm-group workflow picks the RBAC role from the tenant list (fills exact name + alias, free-text fallback); both perm-group workflows auto-load empty lists silently on open via ensureTenantLists; AzScopePermission renders as a dropdown in the Configuration grid. Kills the typed-role-name spelling-error class; validator STALE checks remain the safety net (a2afd078)
 - release: PIM4EntraPS v2.4.137 -- PIM Manager validator: PIM-NAME-002 false positive on EVERY UPN fixed -- [regex]::Escape escapes { but not } (.NET asymmetry), so the {Token}->.+ replacement never matched and UPNs were checked against the literal template string; closing brace now matched optionally-escaped. Demo tenants validate fully clean (0 errors, 0 warnings) (87116adf)
 - release: PIM4EntraPS v2.4.136 -- PIM Manager: collapsible file rail on the Configuration tab (chevron toggle, 280px -> 30px strip, preference persists in localStorage); E2E-verified collapse/persist/expand with zero console errors (0713483c)
@@ -33,13 +34,33 @@ Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monor
 - release: PIM4EntraPS v2.4.112 + extension v1.6.25 - popup manual single-tenant entry wins over managed catalog (fixes Save->onboarding loop on contaminated boxes) (b5ab0aa7)
 - release: PIM4EntraPS v2.4.111 - Deploy-PimActivatorClient.ps1 stops defaulting to sibling discovered-tenant-catalog.json (cross-tenant leak); auto-discovers from live Entra instead (34a1f1c8)
 - release: PIM4EntraPS v2.4.110 - Deploy-PimActivatorIntune.ps1 auto-skips Forcelist defValues when existing policy owns slot (avoids IME slot-cycling under -Force) (1771e06b)
-- release: PIM4EntraPS v2.4.109 - PIM4EntraPS.PimActivator.admx removes unused <using> namespace dependency (strict tenants rejected upload as NamespaceMissing:Microsoft.Policies.Windows) (91c3e488)
 
 ---
 
 # Release notes -- PIM4EntraPS
 
 > **Curated changelog.** The publish workflow auto-prepends recent monorepo commits as a raw activity log; this file is the human-friendly narrative on top.
+
+---
+
+## v2.4.139 -- PIM Manager: NEW Delegation Map (the PIM v2 model on one board) + lifecycle tab order
+
+### Delegation Map -- new landing tab
+
+The PIM v2 design -- least-privilege delegation through group nesting and the RBAC support in hundreds of Entra-integrated apps -- was invisible in the raw Definitions + Assignments files. The new **Delegation Map** makes it the first thing operators see, as a four-column flow board (deterministic layout, no graph spaghetti):
+
+**People** (admins, tier-colored, reach counts) &rarr; **Roles &amp; Org Groups** (direct assignments, grouped ROLE-/DEPT-/ORG-) &rarr; **Capability Bundles** (permission groups via nesting, grouped by definitions file) &rarr; **Permissions &amp; Targets** (Entra roles, AU-scoped roles, Azure RBAC at scope). Permission groups with no Entra/Azure binding render as **workload groups (&#x2B21; app RBAC)** -- the Power BI / Intune / Defender XDR / 3rd-party delegation path, finally shown as the feature it is rather than an "orphan".
+
+- **Click anything &rarr; full path lights up in BOTH directions**, everything else dims, wires draw only for the selection. Answers the two operator questions directly: *what can this person reach?* and *who can reach this scope/role?*
+- **Every box = a Definitions row, every wire = an Assignments row** -- the board teaches the file model; the detail strip jumps straight to the file in the Advanced View. Active assignments draw amber, Eligible blue.
+- Search box dims non-matches; works in static mode too (pure client-side over the served data model).
+- Roadmap: drag-to-connect editing (stage assignment rows by dragging), ring/tenant lens, live drift overlay vs. actual Entra membership.
+
+### Lifecycle tab order
+
+Tabs now follow the operator working sequence: **Create &rarr; Delegation Map &rarr; Validate &rarr; Review &amp; Save &rarr; Maintenance** (active assignments / revoke; access reviews planned) -- with the raw file grid renamed **Advanced View (grid)** and placed deliberately last.
+
+Verified by headless-Chrome E2E on the demo tenants: forward path from an admin (wires + dim + counts), reverse path from an Entra role ("reachable by 3 admins"), search, open-in-grid jump. Zero console errors.
 
 ---
 

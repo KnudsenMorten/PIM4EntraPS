@@ -109,6 +109,34 @@
   button.primary:hover { background:#0860c7; }
   .toolbar { display:flex; gap:6px; margin:6px 0; flex-wrap:wrap; }
 
+  /* Access Map tab -- 4-column flow board (admins -> role groups -> permission
+     groups -> targets). Wires draw ONLY for the selected path; default view is
+     clean columns with reach counts. */
+  #mapTab { display:none; }
+  #mapTab.active { display:flex; flex-direction:column; }
+  #mapToolbar { display:flex; gap:10px; align-items:center; padding:8px 14px; border-bottom:1px solid #d0d7de; background:#ffffff; flex:0 0 auto; }
+  #mapSearch { min-width:280px; padding:5px 9px; border:1px solid #d0d7de; border-radius:6px; font-size:12.5px; background:#ffffff; color:#1a1a1a; }
+  .map-hint { color:#57606a; font-size:11px; }
+  #mapBoard { flex:1 1 auto; min-height:0; display:grid; grid-template-columns:repeat(4, 1fr); gap:14px; padding:12px 14px; position:relative; background:#f6f8fa; overflow:hidden; }
+  #mapWires { position:absolute; inset:0; width:100%; height:100%; pointer-events:none; z-index:5; }
+  .map-col { display:flex; flex-direction:column; min-height:0; background:#ffffff; border:1px solid #d0d7de; border-radius:8px; overflow:hidden; }
+  .map-col h3 { margin:0; padding:8px 12px; font-size:11px; text-transform:uppercase; letter-spacing:.5px; color:#0969da; background:#f6f8fa; border-bottom:1px solid #d0d7de; }
+  .map-col-sub { display:block; font-size:10px; color:#57606a; text-transform:none; letter-spacing:0; font-weight:400; margin-top:1px; }
+  .map-col-body { flex:1 1 auto; overflow-y:auto; padding:6px; }
+  .map-group-hdr { padding:6px 8px 2px 8px; font-size:9.5px; text-transform:uppercase; letter-spacing:.5px; color:#57606a; font-weight:600; }
+  .map-item { padding:5px 9px; margin:2px 0; border:1px solid #eaeef2; border-radius:6px; cursor:pointer; font-size:12px; color:#1a1a1a; background:#ffffff; display:flex; align-items:center; gap:7px; transition:opacity .12s ease; }
+  .map-item:hover { border-color:#0969da; background:#f6f8fa; }
+  .map-item.sel { border-color:#0969da; background:#ddf4ff; font-weight:600; box-shadow:0 0 0 1px #0969da; }
+  .map-item.path { border-color:#0969da; background:#f0f7ff; }
+  .map-item.dim { opacity:0.25; }
+  .map-item .map-dot { width:9px; height:9px; border-radius:50%; flex:0 0 auto; }
+  .map-item .map-label { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .map-item .map-count { font-size:10px; color:#57606a; flex:0 0 auto; }
+  #mapDetail { flex:0 0 auto; padding:8px 14px; border-top:1px solid #d0d7de; background:#ffffff; font-size:12px; color:#1a1a1a; min-height:38px; }
+  #mapDetail .empty { color:#57606a; font-style:italic; }
+  #mapDetail a { color:#0969da; cursor:pointer; text-decoration:none; }
+  #mapDetail a:hover { text-decoration:underline; }
+
   /* Grid tab */
   #gridTab { display:none; }
   #gridTab.active { display:grid; grid-template-columns: 280px 1fr; }
@@ -457,12 +485,16 @@
     <div class="brand-sub">PIM4EntraPS &middot; Configuration Manager</div>
   </div>
 
+  <!-- Tab order follows the operator lifecycle: 1 Create, 2 Delegate/Map,
+       3 Validate, 4 Commit, 5 Maintenance (revoke / access reviews). The raw
+       file grid is the advanced surface, deliberately last. -->
   <div id="tabs">
-    <div class="tab active" data-tab="grid">Configuration <span id="gridDirtyBadge" class="badge" style="display:none">0</span></div>
     <div class="tab" data-tab="new">Create</div>
-    <div class="tab" data-tab="save">Review &amp; Save <span id="saveDirtyBadge" class="badge" style="display:none">0</span></div>
+    <div class="tab active" data-tab="map">Delegation Map</div>
     <div class="tab" data-tab="validate">Validate <span id="validateErrBadge" class="badge" style="display:none;background:#cf222e">0</span></div>
-    <div class="tab" data-tab="revoke">Active Assignments <span id="revokeCountBadge" class="badge" style="display:none;background:#cf222e">0</span></div>
+    <div class="tab" data-tab="save">Review &amp; Save <span id="saveDirtyBadge" class="badge" style="display:none">0</span></div>
+    <div class="tab" data-tab="revoke">Maintenance <span id="revokeCountBadge" class="badge" style="display:none;background:#cf222e">0</span></div>
+    <div class="tab" data-tab="grid">Advanced View (grid) <span id="gridDirtyBadge" class="badge" style="display:none">0</span></div>
     <div id="tabRight">
       mode: <b id="modeLabel"></b>
       &nbsp;|&nbsp; source: <b id="src"></b>
@@ -470,8 +502,37 @@
     </div>
   </div>
 
+  <!-- =========== Access Map tab =========== -->
+  <div id="mapTab" class="tab-panel active">
+    <div id="mapToolbar">
+      <input type="text" id="mapSearch" placeholder="Find a person, group, role or scope...">
+      <button id="mapClear" style="display:none">Clear selection</button>
+      <span class="map-hint">Click any item to light up its complete access path &mdash; who reaches what, and through which groups. Every box is a Definitions row; every wire is an Assignments row.</span>
+    </div>
+    <div id="mapBoard">
+      <svg id="mapWires"></svg>
+      <div class="map-col">
+        <h3>People <span class="map-col-sub">admins &middot; direct assignments</span></h3>
+        <div class="map-col-body" id="mapCol0"></div>
+      </div>
+      <div class="map-col">
+        <h3>Roles &amp; Org Groups <span class="map-col-sub">ROLE- / DEPT- / ORG-</span></h3>
+        <div class="map-col-body" id="mapCol1"></div>
+      </div>
+      <div class="map-col">
+        <h3>Capability Bundles <span class="map-col-sub">permission groups, nested</span></h3>
+        <div class="map-col-body" id="mapCol2"></div>
+      </div>
+      <div class="map-col">
+        <h3>Permissions &amp; Targets <span class="map-col-sub">Entra &middot; AU &middot; Azure &middot; workloads</span></h3>
+        <div class="map-col-body" id="mapCol3"></div>
+      </div>
+    </div>
+    <div id="mapDetail"><span class="empty">Nothing selected.</span></div>
+  </div>
+
   <!-- =========== Configuration (grid) tab =========== -->
-  <div id="gridTab" class="tab-panel active">
+  <div id="gridTab" class="tab-panel">
     <div id="gridList"></div>
     <div id="gridMain"><div class="empty" style="padding:30px;">Pick a configuration file from the left.</div></div>
   </div>
@@ -687,6 +748,7 @@
   function switchTab(name) {
     document.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t.dataset.tab === name));
     document.querySelectorAll('.tab-panel').forEach(p => p.classList.toggle('active', p.id === name + 'Tab'));
+    if (name === 'map') renderAccessMap();
     if (name === 'grid') renderGridList();
     if (name === 'save') renderSaveTab();
     if (name === 'validate') openValidateTab();
@@ -5197,11 +5259,252 @@
   })();
 
   // ===================================================================
+  // Access Map -- 4-column flow board (admins | role groups | permission
+  // groups | targets). Wires render only for the selected node's full
+  // path (both directions); everything else dims. Every box is a
+  // Definitions row, every wire an Assignments row.
+  // ===================================================================
+  const MAP = { sel: null, model: null, q: '' };
+
+  function buildMapModel() {
+    const nodes = PIM_DATA.nodes || [], edges = PIM_DATA.edges || [];
+    const byId = {}; nodes.forEach(n => { byId[n.id] = n; });
+    const colOf = n => {
+      if (!n) return -1;
+      if (n.kind === 'admin') return 0;
+      if (n.kind === 'role-group') return 1;
+      if (n.kind === 'permission-group') return 2;
+      if (n.kind === 'entra-role' || n.kind === 'au-role' || n.kind === 'az-resource') return 3;
+      return -1;
+    };
+    const fwd = {}, back = {};
+    for (const e of edges) {
+      if (e.cosmetic || e.kind === 'au-to-au-role') continue;
+      if (colOf(byId[e.source]) < 0 || colOf(byId[e.target]) < 0) continue;
+      (fwd[e.source] = fwd[e.source] || []).push(e);
+      (back[e.target] = back[e.target] || []).push(e);
+    }
+    // Workload groups: permission groups with no Entra/Azure binding --
+    // consumed by app RBAC (Power BI, Intune, Defender XDR, 3rd-party)
+    // through plain group membership.
+    const workload = new Set();
+    for (const n of nodes) {
+      if (n.kind !== 'permission-group') continue;
+      const outs = fwd[n.id] || [];
+      if (!outs.some(e => colOf(byId[e.target]) === 3)) workload.add(n.id);
+    }
+    return { nodes, byId, fwd, back, colOf, workload };
+  }
+
+  function mapBfs(startId, dirMap, edgeKey) {
+    // Walk dirMap (fwd or back) from startId; returns { nodes:Set, edges:[] }.
+    const seen = new Set([startId]); const edgesOut = []; const queue = [startId];
+    while (queue.length) {
+      const cur = queue.shift();
+      for (const e of (dirMap[cur] || [])) {
+        edgesOut.push(e);
+        const next = e[edgeKey];
+        if (!seen.has(next)) { seen.add(next); queue.push(next); }
+      }
+    }
+    return { nodes: seen, edges: edgesOut };
+  }
+
+  const MAP_DOT = { 'admin': '#0969da', 'role-group': '#8250df', 'permission-group': '#1a7f37', 'entra-role': '#db6d28', 'au-role': '#9a6700', 'az-resource': '#8250df' };
+
+  function mapReachCount(m, id) {
+    const f = mapBfs(id, m.fwd, 'target');
+    let targets = 0, workloads = 0;
+    for (const nid of f.nodes) {
+      const n = m.byId[nid];
+      if (m.colOf(n) === 3) targets++;
+      else if (m.workload.has(nid)) workloads++;
+    }
+    return targets + workloads;
+  }
+
+  function mapItem(m, n, extraBadge) {
+    const el = document.createElement('div');
+    el.className = 'map-item';
+    el.dataset.id = n.id;
+    const dot = document.createElement('span');
+    dot.className = 'map-dot';
+    dot.style.background = MAP_DOT[n.kind] || '#57606a';
+    el.appendChild(dot);
+    const lbl = document.createElement('span');
+    lbl.className = 'map-label';
+    lbl.textContent = n.label || n.id;
+    lbl.title = n.id;
+    el.appendChild(lbl);
+    const cnt = document.createElement('span');
+    cnt.className = 'map-count';
+    cnt.textContent = extraBadge != null ? extraBadge : '';
+    el.appendChild(cnt);
+    el.onclick = () => mapSelect(n.id);
+    return el;
+  }
+
+  function renderAccessMap() {
+    const m = buildMapModel();
+    MAP.model = m;
+    const cols = [[], [], [], []];
+    for (const n of m.nodes) {
+      const c = m.colOf(n);
+      if (c >= 0) cols[c].push(n);
+    }
+    for (const c of cols) c.sort((a, b) => String(a.label || a.id).localeCompare(String(b.label || b.id)));
+
+    // col 0: admins (tier dot colors + reach count)
+    const c0 = document.getElementById('mapCol0'); c0.innerHTML = '';
+    for (const n of cols[0]) {
+      const reach = mapReachCount(m, n.id);
+      const el = mapItem(m, n, reach ? ('→ ' + reach) : '');
+      if (n.tier) el.querySelector('.map-dot').style.background = ({ 'T0': '#cf222e', 'T1': '#9a6700', 'T2': '#1a7f37' })[String(n.tier).toUpperCase()] || '#0969da';
+      c0.appendChild(el);
+    }
+
+    // col 1: role/org groups grouped by tag prefix
+    const c1 = document.getElementById('mapCol1'); c1.innerHTML = '';
+    const prefOf = n => { const t = String(n.groupTag || ''); const mch = t.match(/^(ROLE|DEPT|ORG|CORG|PROJECT|SRV)-/i); return mch ? mch[1].toUpperCase() : 'OTHER'; };
+    const byPref = {};
+    for (const n of cols[1]) (byPref[prefOf(n)] = byPref[prefOf(n)] || []).push(n);
+    for (const g of Object.keys(byPref).sort()) {
+      const h = document.createElement('div'); h.className = 'map-group-hdr'; h.textContent = g; c1.appendChild(h);
+      for (const n of byPref[g]) c1.appendChild(mapItem(m, n, '→ ' + ((m.fwd[n.id] || []).length)));
+    }
+
+    // col 2: permission groups grouped by source CSV; workload badge
+    const c2 = document.getElementById('mapCol2'); c2.innerHTML = '';
+    const srcOf = n => String(n.source || '').replace('PIM-Definitions-', '') || 'Other';
+    const bySrc = {};
+    for (const n of cols[2]) (bySrc[srcOf(n)] = bySrc[srcOf(n)] || []).push(n);
+    for (const g of Object.keys(bySrc).sort()) {
+      const h = document.createElement('div'); h.className = 'map-group-hdr'; h.textContent = g; c2.appendChild(h);
+      for (const n of bySrc[g]) c2.appendChild(mapItem(m, n, m.workload.has(n.id) ? '⬡ app RBAC' : ''));
+    }
+
+    // col 3: targets grouped by kind
+    const c3 = document.getElementById('mapCol3'); c3.innerHTML = '';
+    const kindHdr = { 'entra-role': 'Entra ID roles', 'au-role': 'AU-scoped roles', 'az-resource': 'Azure RBAC @ scope' };
+    for (const k of ['entra-role', 'au-role', 'az-resource']) {
+      const items = cols[3].filter(n => n.kind === k);
+      if (!items.length) continue;
+      const h = document.createElement('div'); h.className = 'map-group-hdr'; h.textContent = kindHdr[k]; c3.appendChild(h);
+      for (const n of items) c3.appendChild(mapItem(m, n, '← ' + ((m.back[n.id] || []).length)));
+    }
+
+    mapApplySearch();
+    if (MAP.sel && m.byId[MAP.sel]) mapSelect(MAP.sel, true); else mapClearSel(true);
+  }
+
+  function mapClearSel(keep) {
+    MAP.sel = null;
+    document.querySelectorAll('#mapBoard .map-item').forEach(el => el.classList.remove('sel', 'path', 'dim'));
+    document.getElementById('mapWires').innerHTML = '';
+    document.getElementById('mapClear').style.display = 'none';
+    document.getElementById('mapDetail').innerHTML = '<span class="empty">Nothing selected.</span>';
+    if (!keep) mapApplySearch();
+  }
+
+  function mapSelect(id, rerendered) {
+    const m = MAP.model || buildMapModel();
+    MAP.sel = id;
+    const down = mapBfs(id, m.fwd, 'target');     // everything this node grants
+    const up   = mapBfs(id, m.back, 'source');    // everyone who reaches this node
+    const nodeSet = new Set([...down.nodes, ...up.nodes]);
+    const pathEdges = [...down.edges, ...up.edges];
+
+    document.querySelectorAll('#mapBoard .map-item').forEach(el => {
+      const inPath = nodeSet.has(el.dataset.id);
+      el.classList.toggle('dim', !inPath);
+      el.classList.toggle('path', inPath && el.dataset.id !== id);
+      el.classList.toggle('sel', el.dataset.id === id);
+    });
+    // scroll selected into view on first selection
+    if (!rerendered) {
+      const selEl = document.querySelector('#mapBoard .map-item.sel');
+      if (selEl) selEl.scrollIntoView({ block: 'nearest' });
+    }
+    mapDrawWires(pathEdges);
+    document.getElementById('mapClear').style.display = '';
+    mapRenderDetail(m, id, down, up);
+  }
+
+  function mapDrawWires(edges) {
+    const svg = document.getElementById('mapWires');
+    const board = document.getElementById('mapBoard');
+    const bRect = board.getBoundingClientRect();
+    svg.setAttribute('viewBox', '0 0 ' + bRect.width + ' ' + bRect.height);
+    let html = '';
+    const seen = new Set();
+    for (const e of edges) {
+      const key = e.source + '>' + e.target;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      const sEl = document.querySelector('#mapBoard .map-item[data-id="' + CSS.escape(e.source) + '"]');
+      const tEl = document.querySelector('#mapBoard .map-item[data-id="' + CSS.escape(e.target) + '"]');
+      if (!sEl || !tEl) continue;
+      const sR = sEl.getBoundingClientRect(), tR = tEl.getBoundingClientRect();
+      // skip wires to items scrolled out of their column
+      const sCol = sEl.closest('.map-col-body').getBoundingClientRect();
+      const tCol = tEl.closest('.map-col-body').getBoundingClientRect();
+      if (sR.bottom < sCol.top || sR.top > sCol.bottom || tR.bottom < tCol.top || tR.top > tCol.bottom) continue;
+      const x1 = sR.right - bRect.left, y1 = sR.top + sR.height / 2 - bRect.top;
+      const x2 = tR.left - bRect.left,  y2 = tR.top + tR.height / 2 - bRect.top;
+      const dx = Math.max(30, (x2 - x1) / 2);
+      const active = (e.type === 'Active');
+      html += '<path d="M ' + x1 + ' ' + y1 + ' C ' + (x1 + dx) + ' ' + y1 + ', ' + (x2 - dx) + ' ' + y2 + ', ' + x2 + ' ' + y2 +
+              '" fill="none" stroke="' + (active ? '#9a6700' : '#0969da') + '" stroke-width="1.6" opacity="0.7"/>';
+    }
+    svg.innerHTML = html;
+  }
+
+  function mapRenderDetail(m, id, down, up) {
+    const n = m.byId[id]; if (!n) return;
+    const cnt = k => [...down.nodes].filter(x => m.byId[x] && m.byId[x].kind === k).length;
+    const admins = [...up.nodes].filter(x => m.byId[x] && m.byId[x].kind === 'admin' && x !== id).length;
+    const workloads = [...down.nodes].filter(x => m.workload.has(x) && x !== id).length;
+    const bits = [];
+    if (n.kind === 'admin') {
+      bits.push('<b>' + escapeHtml(n.label || n.id) + '</b> reaches');
+      bits.push(cnt('role-group') + ' role group(s) &rarr; ' + cnt('permission-group') + ' capability bundle(s) &rarr; ' +
+        cnt('entra-role') + ' Entra role(s), ' + cnt('au-role') + ' AU-scoped role(s), ' + cnt('az-resource') + ' Azure scope(s)' +
+        (workloads ? ', ' + workloads + ' workload group(s) (app RBAC)' : ''));
+    } else {
+      bits.push('<b>' + escapeHtml(n.label || n.id) + '</b> <span style="color:#57606a">(' + escapeHtml(n.kind) + ')</span> &mdash; reachable by <b>' + admins + '</b> admin(s)');
+      if (m.workload.has(id)) bits.push('<span style="color:#57606a">&#x2B21; workload group: grants app RBAC (Power BI / Intune / Defender XDR / 3rd-party) via membership</span>');
+    }
+    if (n.source) {
+      bits.push('<a data-base="' + escapeHtml(n.source) + '">Open ' + escapeHtml(n.source) + ' in Configuration</a>');
+    }
+    const d = document.getElementById('mapDetail');
+    d.innerHTML = bits.join(' &nbsp;&middot;&nbsp; ');
+    const link = d.querySelector('a[data-base]');
+    if (link) link.onclick = () => { switchTab('grid'); openGrid(link.dataset.base); };
+  }
+
+  function mapApplySearch() {
+    const q = (MAP.q || '').trim().toLowerCase();
+    if (MAP.sel) return; // selection owns the dimming
+    document.querySelectorAll('#mapBoard .map-item').forEach(el => {
+      el.classList.toggle('dim', !!q && !el.querySelector('.map-label').textContent.toLowerCase().includes(q));
+    });
+  }
+
+  document.getElementById('mapSearch').oninput = (e) => { MAP.q = e.target.value; if (MAP.sel) mapClearSel(); mapApplySearch(); };
+  document.getElementById('mapClear').onclick = () => { mapClearSel(); };
+  // Redraw wires when columns scroll or the window resizes.
+  document.querySelectorAll('#mapBoard .map-col-body').forEach(b => {
+    b.addEventListener('scroll', () => { if (MAP.sel) mapSelect(MAP.sel, true); }, { passive: true });
+  });
+  window.addEventListener('resize', () => { if (MAP.sel) mapSelect(MAP.sel, true); });
+
+  // ===================================================================
   // Initial UI prep
   // ===================================================================
-  // Configuration is the landing tab -- populate its file rail immediately.
-  // (Must run after ALL let/const declarations above; see the TDZ note at
-  // the old buildGraph() call site.)
+  // Access Map is the landing tab. (Must run after ALL let/const
+  // declarations above; see the TDZ note at the old buildGraph() call site.)
+  renderAccessMap();
   renderGridList();
   // Prime caches for any definition CSVs (so the GroupTag dropdowns have data).
   if (isServer) {

@@ -137,14 +137,36 @@ field and `Read-PimCsvRows` / `Write-PimCsvCustom` in
 `Open-PimManager.ps1` get a SQL-backed implementation &mdash; the rest of
 the server and the whole SPA sit above that seam and stay unchanged.
 
-## The five tabs
+## The tabs (operator lifecycle order)
 
-> The Graph view was removed in v2.4.133 (operator feedback: unused). It
-> was also the SPA's only CDN dependency (cytoscape/dagre), so the Manager
-> is now fully offline-capable. The node/edge data model behind it still
-> powers the Create-tab wizards.
+Tabs follow the working sequence: **1 Create** &rarr; **2 Delegation Map**
+&rarr; **3 Validate** &rarr; **4 Review &amp; Save** &rarr; **5 Maintenance**
+&rarr; Advanced View (grid) as the deliberate last resort.
 
-### Configuration (landing tab)
+### Delegation Map (landing tab)
+
+The PIM v2 model on one board, four columns left to right: **People**
+(admins) &rarr; **Roles &amp; Org Groups** (direct assignment: ROLE- /
+DEPT- / ORG-) &rarr; **Capability Bundles** (permission groups, reached
+via group nesting) &rarr; **Permissions &amp; Targets** (Entra roles,
+AU-scoped roles, Azure RBAC at scope). Permission groups with no
+Entra/Azure binding are marked **&#x2B21; app RBAC** &mdash; workload
+groups consumed by Power BI / Intune / Defender XDR / any 3rd-party app
+that supports Entra groups.
+
+Click any item and its **complete path lights up in both directions**
+(wires draw only for the selection -- no spaghetti): click a person to
+see everything they can reach; click an Azure scope or Entra role to see
+every human who reaches it and through which groups. Every box is a
+Definitions row and every wire an Assignments row, with an
+"Open ... in Configuration" jump in the detail strip. Search dims
+non-matches. Active assignments draw amber, Eligible blue.
+
+> The old free-form Graph view was removed in v2.4.133 (unused, and the
+> SPA's only CDN dependency). The Delegation Map replaces it with a
+> deterministic flow layout that matches how the model is explained.
+
+### Advanced View (grid)
 
 Left rail lists all 14 configuration files (grouped by Definitions /
 Assignments). A `mod` badge marks any file with pending changes.
