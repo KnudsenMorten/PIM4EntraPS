@@ -1,9 +1,10 @@
 # Release notes for PIM4EntraPS
 
-## v2.4.141
+## v2.4.142
 
 Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monorepo:
 
+- release: PIM4EntraPS v2.4.142 -- Workload Connectors phase 1: JSON connector definitions for Defender XDR Unified RBAC + Intune roles (live role listing, token-templated assign/remove bodies); 15th config file PIM-Assignments-Workloads (desired state, full Manager lifecycle); engine Apply-PimWorkloadAssignments (idempotent diff-and-apply, -WhatIfMode, removes only self-created assignments); Manager Maintenance panel with live role pickers + /api/workloads + /api/workload-roles. Live-verified: 16 Defender + 11 Intune roles listed from a real tenant, WhatIf plan resolved real group->objectId with exact would-assign lines. Design doc extended with activation-stats right-sizing, deleted-resource auto-cleanup, orphaned-group drift phases (63ebc705)
 - release: PIM4EntraPS v2.4.141 -- Permission Templates: maintainer-curated delegation packs in templates/*.template.json (distributed by repo sync), diffed per active instance by GET /api/templates (presence by natural row keys); Create tab shows each pack as Up-to-date or "n new permission(s)" with one-click import into pending; shipped starter pack defender-xdr v2 (7 Unified-RBAC workload groups, grown from 3 in v1 to demo the new-permissions flow). Plus docs/WORKLOAD-CONNECTORS.md: full design for applying PIM groups to workload RBAC (Defender XDR, Intune, Power BI, Dataverse, Business Central, Azure AI) via JSON connector definitions + a 15th desired-state CSV + an engine applier with auth adapters (bfc8f329)
 - release: PIM4EntraPS v2.4.141 -- Delegation Map becomes an editor: select an admin -> "+ Assign to group..." stages PIM-Assignments-Admins rows by clicking one or more role/org groups (duplicate-guarded, Eligible/365d defaults); select a role group -> "+ Link capability bundle..." stages PIM-Assignments-Groups nesting rows; staged relations draw as dashed amber wires via a pending overlay on the board model. Two-step focus UX (pick person or permission -> board collapses to the transitive path, toggleable). Long Azure scope/AU names render two-line with full wrap in focus view (545976d0)
 - release: PIM4EntraPS v2.4.139 -- PIM Manager Delegation Map (new landing tab): the PIM v2 model as a 4-column flow board (People -> Roles & Org Groups -> Capability Bundles -> Permissions & Targets, with terminal permission groups rendered as workload/app-RBAC groups for Power BI/Intune/Defender XDR/3rd-party); click-to-light full path in both directions with selection-only wires (Active amber, Eligible blue), every box = Definitions row / every wire = Assignments row with open-in-grid jump; search dims non-matches; static-mode compatible. Tabs reordered to operator lifecycle: Create -> Delegation Map -> Validate -> Review & Save -> Maintenance -> Advanced View (grid) (55be87b9)
@@ -33,13 +34,28 @@ Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monor
 - release: PIM4EntraPS v2.4.115 -- PIM-Baseline-Management-CSV engine now prefers v2 platform Context.Identity.Legacy.Internal.Prod for AD/gMSA credential (KV: Legacy-UserName-Internal-Prod + Legacy-Password-Internal-Prod), falls back to legacy $AD_Credentials global (98f29b4b)
 - release: PIM4EntraPS v2.4.114 -- PIM-Baseline-Management-CSV engine now calls CreateUpdate-Accounts-From-file-CSV with -OnlyAD too (was hardcoded to -OnlyID; AD rows in the CSV were silently ignored); guards on Get-ADUser availability + $AD_Credentials (3fa86c9a)
 - release: PIM4EntraPS v2.4.113 - README PIM Activator section rewritten to today's deploy architecture (docs-only) (df162df9)
-- release: PIM4EntraPS v2.4.112 + extension v1.6.25 - popup manual single-tenant entry wins over managed catalog (fixes Save->onboarding loop on contaminated boxes) (b5ab0aa7)
 
 ---
 
 # Release notes -- PIM4EntraPS
 
 > **Curated changelog.** The publish workflow auto-prepends recent monorepo commits as a raw activity log; this file is the human-friendly narrative on top.
+
+---
+
+## v2.4.142 -- Workload Connectors Phase 1: PIM groups applied to Defender XDR Unified RBAC + Intune roles, declaratively
+
+Implements phase 1 of docs/WORKLOAD-CONNECTORS.md -- the last mile of PIM v2: binding PIM groups to each workload's own RBAC without portal clicks.
+
+- **Connector definitions** `workloads/connectors/{defender-xdr,intune}.connector.json` -- pure JSON descriptions of each workload's API (list roles / list assignments / assign / remove with `{token}` body templates). New workload or API change = edit JSON, no code. Roles are listed LIVE, so new Microsoft roles appear with zero maintenance.
+- **15th configuration file** `PIM-Assignments-Workloads` (Workload;RoleName;GroupTag;Scope;Action;Notes) -- desired state, full Manager lifecycle (grid, pending, Review &amp; Save, MSP sync).
+- **Engine applier** `Apply-PimWorkloadAssignments -WorkloadsAssignmentFile ... -ConnectorsDir ... [-WhatIfMode]` -- resolves GroupTag -> Entra group, RoleName -> live role id, diffs against current workload assignments, assigns what's missing, removes only assignments it created itself (displayName prefix guard; shared/manual assignments are flagged for a human). Idempotent; unknown workloads/roles produce clear errors listing the valid values.
+- **Manager**: the Maintenance tab gains a Workload Delegation panel -- workload picker (from connectors), role picker loaded live from the tenant, PIM-group picker -- staging rows into pending.
+- New endpoints: `GET /api/workloads`, `GET /api/workload-roles?id=...` (live, needs the tenant connection).
+
+**Live-verified on a real tenant**: Defender XDR listed 16 Unified-RBAC role definitions, Intune its 11 built-ins; the WhatIf plan resolved a real group to its objectId and produced exact would-assign lines for both workloads; bad rows (unknown workload, misspelled role) fail with actionable messages. Panel E2E: connectors + 322 PIM groups populate, staging works.
+
+Design doc also extended with the requested lifecycle phases: activation-stats right-sizing recommendations, deleted-resource auto-cleanup (config + backend), and orphaned-PIM-group drift detection.
 
 ---
 

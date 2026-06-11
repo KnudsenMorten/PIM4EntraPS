@@ -1,0 +1,44 @@
+{
+  "id": "intune",
+  "name": "Microsoft Intune (RBAC roles)",
+  "auth": "graph",
+  "permissionsNeeded": ["DeviceManagementRBAC.Read.All (list)", "DeviceManagementRBAC.ReadWrite.All (apply)"],
+  "api": {
+    "baseUrl": "https://graph.microsoft.com/beta",
+    "listRoles": {
+      "method": "GET",
+      "path": "/deviceManagement/roleDefinitions",
+      "itemsPath": "value",
+      "roleId": "id",
+      "roleName": "displayName",
+      "roleDescription": "description"
+    },
+    "listAssignments": {
+      "method": "GET",
+      "path": "/deviceManagement/roleDefinitions('{roleId}')/roleAssignments",
+      "itemsPath": "value",
+      "assignmentId": "id",
+      "principalIds": "members"
+    },
+    "getAssignment": {
+      "method": "GET",
+      "path": "/deviceManagement/roleAssignments/{assignmentId}",
+      "principalIds": "members"
+    },
+    "assign": {
+      "method": "POST",
+      "path": "/deviceManagement/roleAssignments",
+      "body": {
+        "displayName": "PIM4EntraPS: {groupTag} -> {roleName}",
+        "description": "Managed by PIM4EntraPS workload connector",
+        "roleDefinition@odata.bind": "https://graph.microsoft.com/beta/deviceManagement/roleDefinitions('{roleId}')",
+        "members": ["{groupId}"],
+        "scopeType": "allDevicesAndLicensedUsers"
+      }
+    },
+    "remove": {
+      "method": "DELETE",
+      "path": "/deviceManagement/roleAssignments/{assignmentId}"
+    }
+  }
+}

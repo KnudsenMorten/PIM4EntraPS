@@ -647,8 +647,20 @@
     </div>
   </div>
 
-  <!-- =========== Revoke tab (v2.4.2) =========== -->
+  <!-- =========== Maintenance tab =========== -->
   <div id="revokeTab" class="tab-panel">
+    <!-- Workload delegation: bind PIM groups to workload RBAC roles
+         (Defender XDR, Intune, ...) -- stages rows into
+         PIM-Assignments-Workloads; the engine applies them via the
+         connector framework (docs/WORKLOAD-CONNECTORS.md). -->
+    <div id="wlPanel" style="flex:0 0 auto; padding:8px 12px; border-bottom:1px solid #d0d7de; background:#ffffff; display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
+      <span style="font-size:11px; text-transform:uppercase; letter-spacing:.5px; color:#0969da; font-weight:600;">Workload delegation</span>
+      <select id="wlWorkload" style="min-width:220px;"><option value="">(pick workload)</option></select>
+      <select id="wlRole" style="min-width:220px;" disabled><option value="">(role -- pick workload first)</option></select>
+      <select id="wlGroup" style="min-width:240px;"><option value="">(PIM group)</option></select>
+      <button id="wlStage" class="primary" disabled>Stage assignment</button>
+      <span id="wlStatus" style="font-size:11.5px; color:#57606a;"></span>
+    </div>
     <div id="revTopBar">
       <button id="revBtnRefresh" class="primary">Refresh</button>
       <span class="rev-type-chip rev-type-all"      data-type="all"             title="Show all assignment types">all <span class="n" id="revChipAll">0</span></span>
@@ -4967,7 +4979,70 @@
     inFlight: false
   };
 
+  // ----- Workload delegation panel (Maintenance tab) -----
+  let _wlInit = false;
+  async function initWorkloadPanel() {
+    if (_wlInit || !isServer) return;
+    _wlInit = true;
+    const wSel = document.getElementById('wlWorkload');
+    const rSel = document.getElementById('wlRole');
+    const gSel = document.getElementById('wlGroup');
+    const btn  = document.getElementById('wlStage');
+    const st   = document.getElementById('wlStatus');
+    // PIM groups (role + permission groups from the data model)
+    const groups = (PIM_DATA.nodes || []).filter(n => n.kind === 'role-group' || n.kind === 'permission-group')
+      .map(n => ({ tag: n.groupTag || String(n.id).replace(/^group:/, ''), label: n.label || n.id }))
+      .sort((a, b) => a.label.localeCompare(b.label));
+    gSel.innerHTML = '<option value="">(PIM group)</option>' + groups.map(g =>
+      `<option value="${escapeHtml(g.tag)}">${escapeHtml(g.label)}</option>`).join('');
+    try {
+      const r = await api('GET', '/api/workloads');
+      wSel.innerHTML = '<option value="">(pick workload)</option>' + (r.workloads || []).map(w =>
+        `<option value="${escapeHtml(w.id)}">${escapeHtml(w.name)}</option>`).join('');
+    } catch (e) { st.textContent = 'connector list failed: ' + e.message; }
+    const refresh = () => { btn.disabled = !(wSel.value && rSel.value && gSel.value); };
+    wSel.onchange = async () => {
+      rSel.disabled = true; rSel.innerHTML = '<option value="">loading roles…</option>'; refresh();
+      if (!wSel.value) { rSel.innerHTML = '<option value="">(role -- pick workload first)</option>'; return; }
+      try {
+        const r = await api('GET', '/api/workload-roles?id=' + encodeURIComponent(wSel.value));
+        rSel.innerHTML = '<option value="">(pick role)</option>' + (r.roles || []).map(x =>
+          `<option value="${escapeHtml(x.name)}" title="${escapeHtml(x.description || '')}">${escapeHtml(x.name)}</option>`).join('');
+        rSel.disabled = false;
+        st.textContent = (r.roles || []).length + ' role(s) loaded live from the tenant';
+      } catch (e) {
+        rSel.innerHTML = '<option value="">(roles unavailable)</option>';
+        st.textContent = 'role load failed: ' + e.message + ' (tenant connection required -- launch with -ConnectPlatform)';
+      }
+      refresh();
+    };
+    rSel.onchange = refresh; gSel.onchange = refresh;
+    btn.onclick = async () => {
+      try {
+        const base = 'PIM-Assignments-Workloads';
+        const data = await loadCsv(base);
+        ensurePending(base, data.header, data.rows);
+        const p = pendingChanges[base];
+        const dup = p.rows.some(r => (r.Workload || '').toLowerCase() === wSel.value.toLowerCase() &&
+          (r.RoleName || '').toLowerCase() === rSel.value.toLowerCase() &&
+          (r.GroupTag || '').toLowerCase() === gSel.value.toLowerCase());
+        if (dup) { st.textContent = 'already staged / present'; return; }
+        const row = {};
+        for (const c of p.header) row[c] = '';
+        row.Workload = wSel.value; row.RoleName = rSel.value; row.GroupTag = gSel.value;
+        row.Scope = ''; row.Action = 'Assign'; row.Notes = 'staged via Manager';
+        p.rows.push(row);
+        markBadges();
+        st.innerHTML = '&#10003; staged: ' + escapeHtml(wSel.value) + ' / ' + escapeHtml(rSel.value) + ' &rarr; ' + escapeHtml(gSel.value) + ' &mdash; commit on Review &amp; Save; the engine applies it on its next run';
+      } catch (e) { st.textContent = 'stage failed: ' + e.message; }
+    };
+  }
+
   async function openRevokeTab() {
+    // Await the (fast) workload-panel init BEFORE kicking the heavy
+    // active-assignments load: the server is single-threaded, so firing the
+    // big request first would starve the small one for minutes.
+    try { await initWorkloadPanel(); } catch (_) {}
     if (!isServer) {
       document.getElementById('revResults').innerHTML =
         '<div class="rev-empty">Revoke is disabled in static mode -- launch via Open-PimManager.ps1 with -Server.</div>';

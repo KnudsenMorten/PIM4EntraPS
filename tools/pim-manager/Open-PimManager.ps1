@@ -295,7 +295,8 @@ $script:PimCsvBases = @(
     [ordered]@{ base = 'PIM-Assignments-Groups';          group = 'Assignments';  defaultHeader = @('TargetGroupTag','SourceGroupTag','AssignmentType','Action','UpdateExisting','AutoExtend','NumOfDaysWhenExpire','Permanent','CPPlatform','Plane','TierLevel','PermissionScope','SyncPlatform') },
     [ordered]@{ base = 'PIM-Assignments-Roles-Groups';    group = 'Assignments';  defaultHeader = @('GroupTag','RoleDefinitionName','AssignmentType','Action','UpdateExisting','AutoExtend','NumOfDaysWhenExpire','Permanent','CPPlatform','Plane','TierLevel','PermissionScope','SyncPlatform') },
     [ordered]@{ base = 'PIM-Assignments-Roles-AUs';       group = 'Assignments';  defaultHeader = @('GroupTag','AdministrativeUnitTag','RoleDefinitionName','AssignmentType','Action','UpdateExisting','AutoExtend','NumOfDaysWhenExpire','Permanent','CPPlatform','Plane','TierLevel','PermissionScope','SyncPlatform') },
-    [ordered]@{ base = 'PIM-Assignments-Azure-Resources'; group = 'Assignments';  defaultHeader = @('GroupTag','AzScope','AzScopePermission','AssignmentType','Action','UpdateExisting','AutoExtend','NumOfDaysWhenExpire','Permanent','CPPlatform','Plane','TierLevel','PermissionScope','SyncPlatform') }
+    [ordered]@{ base = 'PIM-Assignments-Azure-Resources'; group = 'Assignments';  defaultHeader = @('GroupTag','AzScope','AzScopePermission','AssignmentType','Action','UpdateExisting','AutoExtend','NumOfDaysWhenExpire','Permanent','CPPlatform','Plane','TierLevel','PermissionScope','SyncPlatform') },
+    [ordered]@{ base = 'PIM-Assignments-Workloads';       group = 'Assignments';  defaultHeader = @('Workload','RoleName','GroupTag','Scope','Action','Notes') }
 )
 
 # ---------------------------------------------------------------------------
@@ -1742,6 +1743,49 @@ function Handle-Request {
             }
             Write-JsonResponse -Response $resp -Status 200 -Body ([ordered]@{ templates = $outList.ToArray() })
             return 200
+        }
+
+        # -------------------------------------------------------------------
+        # Workload connectors (docs/WORKLOAD-CONNECTORS.md)
+        # -------------------------------------------------------------------
+        if ($path -eq '/api/workloads' -and $method -eq 'GET') {
+            $script:lastHeartbeat = Get-Date
+            $shared = Join-Path $PSScriptRoot '..\..\engine\_shared\PIM-Functions.psm1'
+            if (-not (Get-Command Read-PimWorkloadConnectors -ErrorAction SilentlyContinue) -and (Test-Path -LiteralPath $shared)) {
+                Import-Module $shared -Global -Force -WarningAction SilentlyContinue -ErrorAction SilentlyContinue
+            }
+            $dir = Join-Path $solutionRoot 'workloads\connectors'
+            $list = New-Object System.Collections.ArrayList
+            foreach ($c in @(Read-PimWorkloadConnectors -ConnectorsDir $dir)) {
+                [void]$list.Add([ordered]@{ id = "$($c.id)"; name = "$($c.name)"; auth = "$($c.auth)"; permissionsNeeded = @($c.permissionsNeeded) })
+            }
+            Write-JsonResponse -Response $resp -Status 200 -Body ([ordered]@{ workloads = $list.ToArray() })
+            return 200
+        }
+
+        if ($path -eq '/api/workload-roles' -and $method -eq 'GET') {
+            $script:lastHeartbeat = Get-Date
+            $wid = ''
+            if ($req.Url.Query -match '(\?|&)id=([^&]+)') { $wid = [uri]::UnescapeDataString($Matches[2]) }
+            if (-not $wid) { Write-JsonResponse -Response $resp -Status 400 -Body @{ error = 'id query parameter is required' }; return 400 }
+            $shared = Join-Path $PSScriptRoot '..\..\engine\_shared\PIM-Functions.psm1'
+            if (-not (Get-Command Get-PimWorkloadRoles -ErrorAction SilentlyContinue) -and (Test-Path -LiteralPath $shared)) {
+                Import-Module $shared -Global -Force -WarningAction SilentlyContinue -ErrorAction SilentlyContinue
+            }
+            $dir = Join-Path $solutionRoot 'workloads\connectors'
+            $conn = @(Read-PimWorkloadConnectors -ConnectorsDir $dir) | Where-Object { "$($_.id)" -ieq $wid } | Select-Object -First 1
+            if (-not $conn) { Write-JsonResponse -Response $resp -Status 404 -Body @{ error = "unknown workload connector: $wid" }; return 404 }
+            try {
+                # Live tenant call -- requires the app-only connection
+                # (-ConnectPlatform / per-instance connection).
+                Initialize-PimManagerTenantConnection
+                $roles = @(Get-PimWorkloadRoles -Connector $conn)
+                Write-JsonResponse -Response $resp -Status 200 -Body ([ordered]@{ id = $wid; roles = $roles })
+                return 200
+            } catch {
+                Write-JsonResponse -Response $resp -Status 502 -Body @{ error = "$($_.Exception.Message)" }
+                return 502
+            }
         }
 
         if ($path -eq '/api/instances' -and $method -eq 'GET') {
