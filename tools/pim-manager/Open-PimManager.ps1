@@ -761,12 +761,16 @@ function Get-FreeTcpPort {
 # longer available'. JavaScriptSerializer does the same payload in <0.5s.
 # ---------------------------------------------------------------------------
 
+# Compiled normalizer + serializer -- Windows PowerShell 5.1 ONLY. 5.1's
+# ConvertTo-Json needs seconds for 300-400KB payloads, so we compile a C#
+# walk + JavaScriptSerializer (System.Web.Extensions). Both are .NET
+# Framework-only: on PowerShell 7 the Add-Type fails with CS0012 (mscorlib
+# not referenced) -- and pwsh's built-in ConvertTo-Json is already fast, so
+# ConvertTo-PimJson simply falls back to it there.
+$script:PimUseCompiledJson = ($PSVersionTable.PSEdition -eq 'Desktop')
+if ($script:PimUseCompiledJson) {
 Add-Type -AssemblyName System.Web.Extensions -ErrorAction SilentlyContinue
 
-# Compiled normalizer + serializer. A pure-PS recursive normalizer costs one
-# PS function invocation per value (~0.1ms each); a 400KB graph payload has
-# tens of thousands of values = seconds per request on the single-threaded
-# server. The C# walk does the same shape conversion in milliseconds.
 if (-not ('PimManager.Json' -as [type])) {
     Add-Type -ReferencedAssemblies @('System.Web.Extensions', [System.Management.Automation.PSObject].Assembly.Location) -TypeDefinition @'
 using System;
@@ -832,15 +836,17 @@ namespace PimManager {
 }
 '@ -ErrorAction Stop
 }
+}
 
 function ConvertTo-PimJson {
     param([Parameter(Mandatory)][AllowNull()][object]$Body)
-    try {
-        return [PimManager.Json]::Serialize($Body)
-    } catch {
-        # Fallback: the slow-but-thorough built-in.
-        return ($Body | ConvertTo-Json -Depth 12 -Compress)
+    if ($script:PimUseCompiledJson -and ('PimManager.Json' -as [type])) {
+        try {
+            return [PimManager.Json]::Serialize($Body)
+        } catch { }
     }
+    # PowerShell 7 (fast native ConvertTo-Json), or 5.1 compile/serialize failure.
+    return ($Body | ConvertTo-Json -Depth 12 -Compress)
 }
 
 function Write-JsonResponse {

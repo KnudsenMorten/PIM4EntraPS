@@ -1,9 +1,10 @@
 # Release notes for PIM4EntraPS
 
-## v2.4.130
+## v2.4.131
 
 Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monorepo:
 
+- release: PIM4EntraPS v2.4.131 -- PIM Manager pwsh-7 launch fixed: gate the compiled JSON serializer (System.Web.Extensions / JavaScriptSerializer, .NET-Framework-only; explicit -ReferencedAssemblies broke core resolution with CS0012) on PSEdition Desktop; PowerShell 7 uses native ConvertTo-Json which is already fast. Verified both editions: pwsh7 preflight 2.0s cold / 0.04s warm, PS 5.1 3.3s via compiled path (c69fe4ec)
 - release: PIM4EntraPS v2.4.130 -- Revoke tab live-verified on a real tenant (987 active assignments incl. 43 pim-for-groups that were invisible before: Graph refuses unfiltered assignmentSchedules, now per-group $batch queries over PIM-prefix candidates); served requests count as heartbeat so slow loads no longer self-reap the server; hashtable principal/role/AU label indexes; _tenantSync reuses existing app-only contexts + secret-auth fallback (was cert-only); new -ConnectPlatform launcher switch. Manager branding aligned with PIM Activator (banner version badge, in-banner instance switcher, tab/button/badge treatment). Activator popup: tenant-dropdown options got explicit colors -- 3-tenant list was white-on-white except the highlighted row (repack+redeploy needed to ship to browsers) (fb3a5f86)
 - release: PIM4EntraPS v2.4.129 -- PIM Manager finalized: MSP multi-instance support (instances.custom.json registry + -Instance/-ConfigRoot + header dropdown + per-instance CSV/log/tenant-cache isolation, SQL-ready seam behind Read-PimCsvRows/Write-PimCsvCustom); single-threaded-server freeze fixed (compiled Levenshtein + compiled JSON serializer + mtime-keyed preflight cache: page load 12s+ -> 0.5s, warm preflight 0.03s; client-abort tolerance + no response double-writes; SPA fetch timeout so lost connections error instead of hanging wizard Finish forever); blank ;;;;; separator rows survive commit round-trips (was: 53 rows -> 37 after a no-op save); wizard-staged rows light tab badges. Verified with headless-Chrome E2E: all 6 tabs, all 6 wizards end-to-end, commit-to-disk + mutation log, instance switching, static render, -Instance/-ConfigRoot startup (f7a3c7ae)
 - release: PIM4EntraPS v2.4.128 -- fix the v2.4.126/127 AU-guard itself: `@(...) | Where-Object` unwraps a single surviving Id back to a bare string, so `[0]` indexed the FIRST CHARACTER of the GUID and AU member-adds called Graph with ids like '2'/'3' (Invalid object identifier, 400); zero-match case crashed on null-array index because $null.Count -eq 0 is $false on PS 5.1. Whole pipeline now wrapped in @(...) at all 4 sites; verified all 5 input shapes in a real PS 5.1 process (28c8c708)
@@ -33,13 +34,20 @@ Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monor
 - release: PIM4EntraPS v2.4.104 + extension v1.6.22 - -Repack works on PS 5.1 (mgmt1's runtime); guard moved from PEM input to produced CRX output bytes (6cdfd661)
 - release: PIM4EntraPS v2.4.103 - Update-PimActivator-Extension.ps1 scrubs stale Secure Preferences UNCONDITIONALLY (v2.4.100 only scrubbed when binary present, missed the actual trap shape) (41fd4236)
 - release: PIM4EntraPS v2.4.102 - Deploy-PimActivatorIntune.ps1 pre-flight scan for conflicting ExtensionInstallForcelist policies (prevents IME slot-cycling silent failure) (7e7de5d7)
-- add Audit-ChromeForcelistInIntune.ps1 - read-only diagnostic that scans every Intune configuration policy (Settings Catalog + Administrative Templates + custom device configs) for Chrome ExtensionInstallForcelist values, flags malformed entries (empty string, invalid ext id, missing update URL). Used to pin down which Intune profile is shipping the bad forcelist entry that's blocking all extension installs. (bd371bf3)
 
 ---
 
 # Release notes -- PIM4EntraPS
 
 > **Curated changelog.** The publish workflow auto-prepends recent monorepo commits as a raw activity log; this file is the human-friendly narrative on top.
+
+---
+
+## v2.4.131 -- PIM Manager: PowerShell 7 launch fixed (Add-Type CS0012 on the compiled JSON serializer)
+
+`Open-PimManager.ps1` under pwsh 7 died at startup: the v2.4.129 compiled JSON serializer references `System.Web.Extensions` (JavaScriptSerializer), which is .NET Framework-only, and the explicit `-ReferencedAssemblies` list broke core-assembly resolution (`CS0012: 'Object' is defined in 'mscorlib'`). The compiled path only exists because **5.1's** `ConvertTo-Json` is slow -- pwsh 7's is already fast. The compile is now gated on `PSEdition -eq 'Desktop'`; on PowerShell 7 `ConvertTo-PimJson` uses the native cmdlet.
+
+Verified on both editions: pwsh 7 -- SPA 200, config 0.4s, preflight cold 2.0s / warm 0.04s; Windows PowerShell 5.1 -- preflight 3.3s via the compiled path, warm cached.
 
 ---
 
