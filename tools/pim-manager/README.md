@@ -1,105 +1,69 @@
 # PIM4EntraPS Manager
 
-An editor for the 14-CSV PIM4EntraPS model. Runs on
-the customer's VM (no install beyond `git pull`), no external network
-access required. Supports a single local instance and MSP
-multi-instance setups (one Manager, many customers' data sets).
+A local, zero-install editor for the **15-CSV PIM4EntraPS model**. Runs on
+the customer's VM (nothing beyond `git pull`), binds to localhost only,
+and writes exclusively to `<name>.custom.csv` overrides. Supports a single
+local instance and MSP multi-instance setups (one Manager, many customers'
+data sets, per-instance tenant connections).
 
 ```
 SOLUTIONS/PIM4EntraPS/tools/pim-manager/
-├── Open-PimManager.ps1            ← entry point (server / static / refresh modes)
-├── pim-manager.html               ← single-file SPA (5 tabs: Configuration / Create / Review & Save / Validate / Active Assignments)
-├── _validator.ps1                 ← pre-flight validation rules (PIM-FK-*, PIM-RA-*, PIM-TIER-*, ...)
+├── Open-PimManager.ps1            ← entry point: local HTTP server + REST API
+├── pim-manager.html               ← single-file SPA (6 tabs, see below)
+├── _validator.ps1                 ← pre-flight validation rules (PIM-FK-*, PIM-RA-*, PIM-WL-*, ...)
 ├── _tenantSync.ps1                ← tenant-list cache (entra roles, AUs, PIM groups, azure scopes)
 ├── instances.custom.sample.json   ← MSP instance registry template
+├── cache/                         ← tenant-list cache (per instance: cache/<name>/)
 └── README.md                      ← this file
 ```
 
-## Look and feel (v2.4.53)
+## What it edits
 
-The Manager editor was the last PIM4EntraPS surface still on the
-GitHub-Primer dark theme while the Activator extension switched to a
-light + branded palette back in v1.0.0. v2.4.53 brings the Manager into
-alignment: light theme (`#ffffff` body, `#f6f8fa` panels, `#1a1a1a` text,
-`#0969da` blue accents, `#57606a` muted), a 2px solid `#0969da` frame
-around the app, a branded blue banner with a white uppercase
-`PIM MANAGER` title at 18px above the tab bar, and solid-blue tile cards
-on the New & clone tab (white text + white icons, blue shadow,
-darker-blue hover).
+The Manager covers all 15 configuration CSVs:
 
-Cytoscape node-kind identifier colours are kept as-is on purpose --
-purple role groups, lavender Azure resources, orange Entra roles --
-because they're the legend-to-node contract the operator reads the graph
-through.
+| Group | CSVs |
+|---|---|
+| Definitions | `Account-Definitions-Admins`, `PIM-Definitions-{Roles,Tasks,Services,Processes,Resources,Departments,Organization,AU}` |
+| Assignments | `PIM-Assignments-{Admins,Groups,Roles-Groups,Roles-AUs,Azure-Resources,Workloads}` |
 
-No code logic changed in this release; pure visual restyle. The
-Activator extension stays at v1.1.1.
+`PIM-Assignments-Workloads` (v2.4.142+) binds PIM groups to **workload
+RBAC roles** (Defender XDR, Intune, any connector under
+`workloads/connectors/*.connector.json`); the CSV engine applies the rows
+as its final step (v2.4.143+, opt-in — the step self-skips when the
+custom CSV is absent). See `../../docs/WORKLOAD-CONNECTORS.md`.
 
 ## Quick start
 
 ```powershell
 cd C:\path\to\AutomateIT\SOLUTIONS\PIM4EntraPS\tools\pim-manager
-.\Open-PimManager.ps1
+.\Open-PimManager.ps1                    # plain editor
+.\Open-PimManager.ps1 -ConnectPlatform   # + live tabs (Active Assignments, cache refresh, workload roles)
 ```
 
-This starts a local HTTP server on a random free port, opens your
-default browser to it, and gives you a 5-tab editor (Configuration /
-Create / Review & Save / Validate / Active Assignments). When you
-close the browser tab the server self-terminates after
-~30 seconds.
+Starts a local HTTP server on a random free port and opens your default
+browser. Closing the browser tab self-terminates the server after ~30
+seconds (heartbeat).
 
-## Modes
+## Switches
 
-| Mode | Switch | Capability |
-|---|---|---|
-| **Server** (default) | `-Server` (or no switch) | Read + edit. Saves back to `<name>.custom.csv`. |
-| **Static** | `-StaticHtml` | DEPRECATED since the Graph view was removed (v2.4.133) -- the snapshot has no API, so the editor tabs can't load data. Kept for back-compat only. |
-
-Other useful switches:
-
-- `-NoLaunch` &mdash; don't open the browser. In server mode prints the URL +
-  token to stdout; in static mode prints the rendered file path.
-- `-Port <n>` &mdash; force a specific port (server mode). Otherwise a random
-  free port is picked.
-- `-OutHtml <path>` &mdash; (static mode only) write the snapshot to a chosen
-  path instead of a temp file.
-- `-Instance <name>` &mdash; start with a named instance from
-  `instances.custom.json` active (see *Instances* below).
-- `-ConfigRoot <path>` &mdash; ad-hoc instance: point the Manager at any
-  config folder directly, without declaring it in the registry.
-- `-RefreshTenantLists` &mdash; CLI-only: refresh the tenant-list cache via the
-  engine SPN, then exit (no server, no browser). For scheduled tasks.
-- `-ConnectPlatform` &mdash; bootstrap the AutomateITPS platform connection
-  (bootstrap cert &rarr; Key Vault &rarr; Modern SPN, app-only Graph + Az)
-  in the server process before starting. This is what the **Revoke tab**
-  and tenant-list refresh need; without it they show a clear
-  "engine SPN context missing" error. Works with cert or secret auth.
-
-## Testing the Revoke tab yourself
-
-On a mgmt box with the standard bootstrap setup (`bootstrap/platform-config.json`
-+ bootstrap cert in the machine store):
-
-```powershell
-cd <repo>\SOLUTIONS\PIM4EntraPS\tools\pim-manager
-.\Open-PimManager.ps1 -ConnectPlatform
-```
-
-Open the Revoke tab and click **Refresh**. First load takes 1-2 minutes on
-a real tenant (Azure Resource Graph is the slow leg); the result is cached
-for 60s and repeat views are instant. Expect three row types: entra-role,
-azure-rbac, and pim-for-groups (members AND owners of PIM-onboarded groups).
-Loading is read-only &mdash; nothing is revoked until you select rows, type a
-justification, and click **Revoke selected**.
+| Switch | Purpose |
+|---|---|
+| *(none)* / `-Server` | Read + edit mode. Saves to `<name>.custom.csv`. |
+| `-NoLaunch` | Don't open the browser; print URL + session token to stdout. |
+| `-Port <n>` | Force a port (default: random free). |
+| `-Instance <name>` | Start with a named instance from `instances.custom.json`. |
+| `-ConfigRoot <path>` | Ad-hoc instance: point at any config folder without registering it. |
+| `-RefreshTenantLists` | CLI-only cache refresh via the engine SPN, then exit (for scheduled tasks). |
+| `-ConnectPlatform` | Bootstrap the AutomateITPS platform connection (bootstrap cert → Key Vault → Modern SPN, app-only Graph + Az) in the server process. Required by the Active Assignments tab, tenant-cache refresh, and the live workload-role loader. |
+| `-StaticHtml` | DEPRECATED (kept for back-compat; the snapshot has no API since the Graph view was removed in v2.4.133). |
 
 ## Instances (MSP multi-customer support)
 
-An **instance** is one customer's PIM4EntraPS data set: a config root
-(the 14 CSVs + NamingConventions files) and a sibling output folder.
-The solution's own `config/` is always available as the built-in
-instance **local**. More instances come from
-`tools/pim-manager/instances.custom.json` (gitignored &mdash; copy the
-`.sample.json` next to it):
+An **instance** is one customer's data set: a config root (the 15 CSVs +
+NamingConventions) and a sibling output folder. The solution's own
+`config/` is always available as the built-in instance **local**. More
+instances come from `tools/pim-manager/instances.custom.json` (gitignored —
+copy the `.sample.json`):
 
 ```json
 {
@@ -109,83 +73,60 @@ instance **local**. More instances come from
 }
 ```
 
-Each instance entry can also carry the tenant **connection**
-(`tenantId` + `appId` + either `certThumbprint` for mgmt-box machine-store
-certs, or `keyVaultName`/`secretName` for a central Key Vault holding one
-client secret per tenant -- see `instances.custom.sample.json`). With a
-connection declared, switching instances also retargets the app-only
-Graph/Az session, so **Active Assignments** and tenant-cache refresh hit
-the selected tenant. The Key Vault shape is the cloud-portable one: an
-Azure App Service port reads the same vault via Managed Identity.
+Each entry can also carry the tenant **connection** (`tenantId` + `appId`
++ either `certThumbprint` for mgmt-box machine-store certs, or
+`keyVaultName`/`secretName` for a central Key Vault with one client secret
+per tenant — see the sample). With a connection declared, switching
+instances retargets the app-only Graph/Az session too, so **Active
+Assignments** and cache refresh hit the selected tenant. The Key Vault
+shape is cloud-portable: an Azure App Service port reads the same vault
+via Managed Identity.
 
-With two or more instances available, the Manager header shows the
-**Tenant dropdown** (blue banner, next to the version badge). Switching
-tells the server to swap its config / output roots and reloads the page;
-uncommitted changes prompt a confirm before being discarded. Everything
-is per-instance:
-
-- CSV reads/writes resolve against the active instance's config root.
-- `output/pim-manager-mutations.log` lands in the instance's output folder.
-- The tenant-list cache is partitioned per instance
-  (`cache/<name>/*.json`) so role names / AU ids / subscription ids never
-  bleed across customers (`local` keeps the flat `cache/` for back-compat).
-- The pre-flight validator and the graph rebuild from the active instance.
+With 2+ instances, the header shows the **Tenant dropdown**. Switching
+swaps config/output roots and reloads (uncommitted changes prompt first).
+Everything is per-instance: CSV reads/writes, the mutations log, the
+tenant-list cache (`cache/<name>/*.json` — names/ids never bleed across
+customers), the validator, and the Delegation Map.
 
 SQL roadmap: when instances move from per-customer CSV folders to
 per-customer SQL databases, the registry entry grows a connection-string
-field and `Read-PimCsvRows` / `Write-PimCsvCustom` in
-`Open-PimManager.ps1` get a SQL-backed implementation &mdash; the rest of
-the server and the whole SPA sit above that seam and stay unchanged.
+field and `Read-PimCsvRows` / `Write-PimCsvCustom` get a SQL-backed
+implementation — the server API and the whole SPA sit above that seam.
 
-## The tabs (operator lifecycle order)
+## The six tabs (operator lifecycle order)
 
-Tabs follow the working sequence: **1 Create** &rarr; **2 Delegation Map**
-&rarr; **3 Validate** &rarr; **4 Review &amp; Save** &rarr; **5 Maintenance**
-&rarr; Advanced View (grid) as the deliberate last resort.
+**1 Create** → **2 Delegation Map** → **3 Validate** → **4 Review & Save**
+→ **5 Active Assignments** → **Advanced View** (grid) as the deliberate
+last resort.
 
 ### Delegation Map (landing tab)
 
 The PIM v2 model on one board, four columns left to right: **People**
-(admins) &rarr; **Roles &amp; Org Groups** (direct assignment: ROLE- /
-DEPT- / ORG-) &rarr; **Capability Bundles** (permission groups, reached
-via group nesting) &rarr; **Permissions &amp; Targets** (Entra roles,
-AU-scoped roles, Azure RBAC at scope). Permission groups with no
-Entra/Azure binding are marked **&#x2B21; app RBAC** &mdash; workload
-groups consumed by Power BI / Intune / Defender XDR / any 3rd-party app
-that supports Entra groups.
+(admins) → **Roles & Org Groups** (direct assignment: ROLE- / DEPT- /
+ORG-) → **Capability Bundles** (permission groups, reached via group
+nesting) → **Permissions & Targets** (Entra roles, AU-scoped roles, Azure
+RBAC at scope, workload roles).
 
 Click any item and its **complete path lights up in both directions**
-(wires draw only for the selection -- no spaghetti): click a person to
-see everything they can reach; click an Azure scope or Entra role to see
-every human who reaches it and through which groups. Every box is a
-Definitions row and every wire an Assignments row, with an
-"Open ... in Configuration" jump in the detail strip. Search dims
-non-matches. Active assignments draw amber, Eligible blue.
+(wires draw only for the selection — no spaghetti): click a person to see
+everything they can reach; click a target to see every human who reaches
+it and through which groups. Every box is a Definitions row and every wire
+an Assignments row, with an "Open … in Configuration" jump in the detail
+strip. Search dims non-matches. Active assignments draw amber, Eligible
+blue. Permission groups with no Entra/Azure binding are marked **⬡ app
+RBAC** — workload groups consumed by Power BI / Intune / Defender XDR /
+any third-party app that supports Entra groups.
 
-> The old free-form Graph view was removed in v2.4.133 (unused, and the
-> SPA's only CDN dependency). The Delegation Map replaces it with a
-> deterministic flow layout that matches how the model is explained.
+**Workload delegation panel** (v2.4.142+): pick a workload connector →
+the role dropdown loads the workload's **live role list** through the
+connector's Graph adapter (needs `-ConnectPlatform`) → pick a PIM group →
+the panel stages a `PIM-Assignments-Workloads` row. The staged row commits
+through Review & Save like any other change.
 
-### Advanced View (grid)
+### Create (wizard templates)
 
-Left rail lists all 14 configuration files (grouped by Definitions /
-Assignments). A `mod` badge marks any file with pending changes.
-
-Main area is a vanilla `<table>` with `contenteditable` cells. Edit a
-cell, hit Tab or click out, the change goes into the pending-changes
-buffer. Per-row actions:
-
-- **✕** &mdash; mark for deletion (greys the row out; ✕ becomes ↺ to undo)
-- **+1** &mdash; clone the row
-- **+ Add row** &mdash; prepend a blank row
-- **↻ Reload from disk** &mdash; discard pending changes for this file only
-
-No autosave. The Review &amp; Save tab is the single commit point.
-
-### Create (wizards)
-
-A launcher tab with six wizard cards, designed for operators who only
-open the tool every few weeks:
+A launcher tab with six wizard cards, designed for operators who only open
+the tool every few weeks:
 
 | Card | Purpose | CSV(s) touched |
 |---|---|---|
@@ -193,168 +134,131 @@ open the tool every few weeks:
 | New permission group (Entra ID) | A capability bundle granting Entra ID role(s) | One of `PIM-Definitions-{Tasks,Services,Processes,Resources,Departments,Organization}` + `PIM-Assignments-Roles-Groups` + `PIM-Assignments-Groups` |
 | New permission group (Azure resource) | An Azure RBAC role at a chosen scope | `PIM-Assignments-Azure-Resources` (+ `PIM-Assignments-Groups` for nesting) |
 | New role group | A higher-level grouping that nests perm-groups | `PIM-Definitions-Roles` + `PIM-Assignments-Groups` + `PIM-Assignments-Admins` |
-| Clone an existing group | Duplicate any role/permission group with a new tag | The same Definitions CSV as the source + all assignment CSVs that reference the old tag |
-| Project lifecycle (time-boxed) | Short-lived role group with default 90-day expiry, `AutoExtend=FALSE` | `PIM-Definitions-Roles` + assignments with the chosen lifetime |
+| Clone an existing group | Duplicate any role/permission group with a new tag | The source's Definitions CSV + all assignment CSVs that reference the old tag |
+| Project lifecycle (time-boxed) | Short-lived role group, default 90-day expiry, `AutoExtend=FALSE` | `PIM-Definitions-Roles` + assignments with the chosen lifetime |
 
-Each wizard follows these UX rules so the operator never has to remember the naming convention or CSV layout:
-
-1. **Plain-English labels** &mdash; the CSV column name is shown as small grey help text below the human-readable label.
-2. **Sensible defaults** for every field (T1 / L3 / Cloud / ID / Eligible / 365-day lifetime).
-3. **Inline examples** next to every input (`e.g. AppAdmin`, `e.g. AHA`).
-4. **"Why these fields?"** collapsible at the top of every step.
-5. **Multi-step layout** &mdash; max ~5 fields per screen, back-buttonable.
-6. **Live "you'll get"** preview &mdash; the auto-composed `GroupName` / `GroupTag` / `UserPrincipalName` updates as you type.
-7. **Plain-English review** &mdash; before the row-level diff, the final step shows a 1-paragraph summary of what will land where.
-8. **Right CSV chosen for you** &mdash; the perm-group wizard's "What kind of capability?" dropdown maps the human choice (Task / Service / Process / Resource / Department / Organization) to the right `PIM-Definitions-*.csv` automatically.
-9. **Cancel is the safe default** &mdash; closing the modal asks to discard any rows the wizard staged; nothing is written to disk until `Commit all`.
-
-### Review &amp; Save
-
-Lists every file with pending changes. Each card shows add / remove /
-modify counts (green / red / yellow) and a collapsible row-level diff.
-
-- **Commit all** &mdash; PUTs each modified file to `/api/csv/<base>`. On
-  success refreshes the data model. On failure stops at the failing file
-  (no half-commits). Blocked while the validator reports errors (toggle
-  on the Validate tab).
-- **Cancel all pending** &mdash; reverts all in-memory state to the last
-  loaded server data. No disk writes.
-- **Refresh from server** &mdash; re-reads everything from disk. Use this if
-  you (or someone else) edited a file in Excel while the Manager was open.
+Wizard UX rules: plain-English labels (CSV column shown as help text),
+sensible defaults (T1 / L3 / Cloud / ID / Eligible / 365-day lifetime),
+inline examples, "Why these fields?" collapsibles, max ~5 fields per step,
+live "you'll get" naming preview, a plain-English summary before the
+row-level diff, the right CSV picked for you, and Cancel as the safe
+default — nothing is written until **Commit all**.
 
 ### Validate
 
-Runs the server-side pre-flight validator (`_validator.ps1`): referential
-integrity across the 14 files (PIM-FK-*), role-assignability rules
-(PIM-RA-*), tier-crossing warnings (PIM-TIER-*), naming-convention checks
-(PIM-NAME-*), orphans, duplicates, and tenant-cache freshness. Errors can
-block the commit button; many findings carry one-click fixes.
+Runs the server-side pre-flight validator (`_validator.ps1`) against the
+active instance. Errors can block the commit button (toggle on the tab);
+many findings carry one-click or Fix-all repairs. Rule families:
+
+| Family | Checks |
+|---|---|
+| `PIM-FK-*` | Referential integrity: every `GroupTag` referenced by any assignment CSV (incl. `PIM-Assignments-Workloads`) exists in a Definitions CSV (with did-you-mean suggestions); every assignment `Username` exists in `Account-Definitions-Admins`; AU references resolve. |
+| `PIM-RA-*` | Role-assignability rules (groups bound to Entra roles must be role-assignable, etc.). |
+| `PIM-TIER-*` | Tier-crossing warnings (e.g. a T2 admin reaching a T0 capability). |
+| `PIM-NAME-*` | Naming-convention conformance (group tags, admin UPN pattern — both customer-overridable via NamingConventions). |
+| `PIM-WL-*` | Workload rows: `PIM-WL-001` Workload must have a connector under `workloads/connectors/` (did-you-mean on typos); `PIM-WL-002` RoleName required; `PIM-WL-003` Action must be Assign / Remove / blank. |
+| `PIM-RING-001` | `Ring` on `Account-Definitions-Admins` must be blank/0/1/2 — anything else is treated as 0 (ALL tenants) by the engine, so a typo silently over-grants. Fix-all repairs to Ring=2 (least privilege). |
+| `PIM-TAP-001` | `CreateTAP=TRUE` with `TargetPlatform=AD` (TAP is Entra-only). |
+| `PIM-DUP-*` / `PIM-ORPHAN-*` | Duplicate keys; defined-but-never-assigned / assigned-but-unreachable items. |
+| `PIM-IO-*` / cache freshness | Missing/unreadable CSVs; stale tenant-list cache (>24 h) feeding the live-name checks. |
+
+### Review & Save
+
+Lists every file with pending changes: add / remove / modify counts and a
+collapsible row-level diff per file.
+
+- **Commit all** — PUTs each modified file to `/api/csv/<base>`; stops at
+  the first failing file (no half-commits); blocked while the validator
+  reports errors (if enabled).
+- **Cancel all pending** — reverts in-memory state, no disk writes.
+- **Refresh from server** — re-reads from disk (use after editing a CSV in
+  Excel while the Manager was open).
 
 ### Active Assignments
 
-Live view of currently-ACTIVE PIM assignments in the connected tenant
-(entra-role, azure-rbac, pim-for-groups) with bulk revoke. Requires the
-engine SPN context &mdash; launch with `-ConnectPlatform`.
+Live view of currently-ACTIVE PIM assignments in the connected tenant —
+three row types: entra-role, azure-rbac, and pim-for-groups (members AND
+owners of PIM-onboarded groups) — with bulk revoke (select rows, type a
+justification, **Revoke selected**). Requires `-ConnectPlatform`. First
+load takes 1–2 minutes on a real tenant (Azure Resource Graph is the slow
+leg); results are cached for 60 s.
+
+### Advanced View (grid)
+
+Left rail lists all 15 files (grouped Definitions / Assignments) with a
+`mod` badge for pending changes. The main area is a vanilla
+`contenteditable` table: edit a cell, Tab out, the change joins the
+pending buffer. Per-row: **✕** delete (↺ to undo), **+1** clone, **+ Add
+row**, **↻ Reload from disk** (this file only). No autosave — Review &
+Save is the single commit point.
 
 ## Where edits land
 
-**Always** in `<base>.custom.csv`. The shipped `<base>.locked.csv` is
-never touched. The customer-override pattern is documented in
-[../../docs/DESIGN.md § 8](../../docs/DESIGN.md).
+**Always** in `<base>.custom.csv`; the shipped `<base>.locked.csv` is
+never touched (customer-override pattern: `../../docs/DESIGN.md § 8`).
 
-Files are written **atomically** (write to `.tmp`, then `Move-Item -Force`),
-**UTF-8 without BOM**, **`;` delimiter**. The original header order is
-preserved; any column that exists in your pending state but not in the
-on-disk file is appended at the end. Blank separator rows (`;;;;;` lines
-used as visual grouping in Excel) **survive the round-trip** &mdash; they
-load as empty grid rows and are written back unchanged.
-
-Every successful write appends one tab-separated line to
+Writes are **atomic** (`.tmp` then `Move-Item -Force`), **UTF-8 without
+BOM**, **`;`-delimited**, header order preserved (new columns append at
+the end). Blank separator rows (`;;;;;` visual grouping in Excel) survive
+the round-trip. Every successful write appends one tab-separated line to
 `output/pim-manager-mutations.log`:
 
 ```
 {utcIso}\t{base}\t{adds}\t{removes}\t{modifies}\t{newRowCount}
 ```
 
-Use this for audit + debugging. The file is not gitignored automatically;
-add it to `.gitignore` if you don't want to track it.
-
 ## Security model (server mode)
 
-The editor is a single-user dev tool. The security model is intentionally
-minimal:
+Single-user dev tool; the model is intentionally minimal:
 
-- **Localhost-only bind.** The HttpListener binds `http://127.0.0.1:<port>/`.
-  Other hosts on the network can never reach it; the OS routes
-  `127.0.0.1` only to the same machine.
-- **Per-session bearer token.** At every server start a fresh random
-  `GUID` is generated and required on every `/api/*` request as
-  `Authorization: Bearer <token>`. The token is embedded in a `<meta>`
-  tag of the served HTML, so only the browser session that the launcher
-  opened can call the API. A second browser tab opened by hand to the
-  same URL won't have the token. Restarting the server invalidates the
-  previous token.
-- **Heartbeat lifecycle.** The browser pings `/api/heartbeat` every 10
-  seconds. If 30 seconds pass with no ping (browser tab closed or
-  network blip) the server self-terminates. No long-lived background
-  process.
+- **Localhost-only bind** — `http://127.0.0.1:<port>/`; unreachable from
+  the network.
+- **Per-session bearer token** — fresh GUID per server start, required on
+  every `/api/*` call, embedded in the served HTML only. Token-less
+  requests get 401; restarting invalidates the old token.
+- **Heartbeat lifecycle** — browser pings every 10 s; 30 s of silence
+  self-terminates the server. No long-lived background process.
 
-What this prevents:
-
-- A malicious site you visit in another tab cannot read or modify your
-  CSVs &mdash; CORS aside, it doesn't know the bearer token, and the API
-  rejects token-less requests with 401.
-- A colleague on your network cannot reach the editor &mdash; the listener
-  is bound to the loopback interface only.
-- A forgotten browser tab cannot leave an editable port open overnight
-  &mdash; the heartbeat timeout reaps the server.
-
-What this does **not** prevent (out of scope for this tool):
-
-- A user with shell access on your own machine can read the token from
-  process memory or the served HTML. The tool isn't a multi-tenant
-  service; it lives only while you're using it.
+Not in scope: a user with shell access on the same machine can read the
+token from process memory — the tool lives only while you're using it.
 
 ## Manual test plan
 
 After a `git pull`, exercise these against your real CSVs:
 
-1. **Static viewer round-trip:** `.\Open-PimManager.ps1 -StaticHtml`.
-   The browser should open and show the same graph as v0.1.
-
-2. **Server boot + auth:** `.\Open-PimManager.ps1`. Browser opens at a
-   random port. Open DevTools &rarr; Network &rarr; verify every `/api/*`
-   call carries `Authorization: Bearer <guid>`. Try
-   `Invoke-WebRequest http://127.0.0.1:<port>/api/config` from another
-   PowerShell prompt without the token &mdash; should get **401**.
-
-3. **Grid edit:** open the Grid tab, pick `PIM-Definitions-Tasks`, edit
-   a `GroupDescription` cell, Tab out. Side rail badge should change to
-   `(mod)`. Tab title badges (Grid / Save) show `1`.
-
-4. **Add row:** click `+ Add row`, fill in `GroupName`, `GroupTag`, save.
-   In another shell verify
-   `Get-Item config\PIM-Definitions-Tasks.custom.csv` exists and the new
-   row is in it as UTF-8 without BOM (`Get-Content -Encoding Byte -TotalCount 3`
-   should not start `EF BB BF`).
-
-5. **Delete row:** mark a row ✕, go to Save tab, click **Commit all**.
-   Verify the row is gone from the `.custom.csv`. Verify
-   `output\pim-manager-mutations.log` got a new line with
-   `removes=1`.
-
-6. **Graph-mode delete:** in Graph tab, click an edge between an admin
-   and a role group. The right panel shows a "Delete this delegation"
-   button. Click it, confirm. The Save tab now shows that one assignment
-   row is pending removal in `PIM-Assignments-Admins`. Commit, verify
-   `.custom.csv` updated.
-
-7. **Node delete with cascade:** click an admin node, hit "Delete this
-   node". The confirm dialog should list rows across
-   `Account-Definitions-Admins` AND `PIM-Assignments-Admins`. Cancel
-   (don't actually delete unless you mean to).
-
-8. **Heartbeat reap:** start the server with `-NoLaunch`. Don't open the
-   browser. After ~45 seconds the server should print
-   `heartbeat timeout` and exit.
-
-9. **Reload from disk:** open a CSV in the Grid tab. In another window
-   edit the same `.custom.csv` in Notepad and save. Click
-   **↻ Reload from disk** in the grid &mdash; your in-grid pending changes
-   should be discarded for that CSV only.
-
+1. **Server boot + auth:** `.\Open-PimManager.ps1`. DevTools → Network →
+   every `/api/*` call carries `Authorization: Bearer <guid>`. A token-less
+   `Invoke-WebRequest http://127.0.0.1:<port>/api/config` gets **401**.
+2. **Grid edit:** Advanced View → `PIM-Definitions-Tasks` → edit a
+   `GroupDescription` cell → Tab out → side-rail badge shows `mod`, tab
+   badges count 1.
+3. **Add + commit:** add a row with `GroupName` + `GroupTag`, Commit all.
+   Verify `config\PIM-Definitions-Tasks.custom.csv` contains it as UTF-8
+   without BOM and `output\pim-manager-mutations.log` grew one line.
+4. **Delete row:** mark ✕, commit, verify the row left the `.custom.csv`
+   and the log line shows `removes=1`.
+5. **Delegation Map:** click an admin — the full path to every reachable
+   target lights up; click an Azure scope — every human that reaches it
+   lights up. "Open … in Configuration" jumps to the right grid row.
+6. **Workload panel:** with `-ConnectPlatform`, pick `defender-xdr` — the
+   role dropdown loads live role names; stage a row; the Review & Save diff
+   shows a `PIM-Assignments-Workloads` add.
+7. **Validator:** put a typo workload (`defnder-xdr`) and a bogus
+   `GroupTag` into `PIM-Assignments-Workloads.custom.csv` → Validate shows
+   `PIM-WL-001` (with did-you-mean) and `PIM-FK-001`. Remove the rows.
+8. **Heartbeat reap:** `-NoLaunch`, don't open a browser → after ~45 s the
+   server prints `heartbeat timeout` and exits.
+9. **Reload from disk:** edit the same CSV in Notepad while the grid has
+   pending changes → **↻ Reload from disk** discards pending for that file
+   only.
 10. **Engine compatibility:** after a commit, run the relevant baseline
-    engine (e.g. `PIM-Baseline-Management-CSV-AdminsOnly`) in
-    `-WhatIfMode` and confirm it picks up your `.custom.csv` (look for
-    the file's path in the engine log).
+    engine in `-WhatIfMode` and confirm it picks up your `.custom.csv`.
 
-## Future work (roadmap)
+## Roadmap
 
-- v0.3 (shipped): graph-mode delete + clone, six wizards on the **New
-  & clone** tab, "Why these fields?" help, live "you'll get" previews,
-  plain-English summary on the review step.
-- v0.4: tenant overlay (live CSV vs live Entra drift detection).
-- v0.5: one-click engine run from the GUI.
-
-See [../../docs/DESIGN.md § 11](../../docs/DESIGN.md) for the full
-mapper roadmap.
+- v0.3 (shipped): wizards, graph-mode delete + clone, plain-English review.
+- v2.4.133 (shipped): Delegation Map replaced the free-form Graph view.
+- v2.4.142–144 (shipped): workload connectors — live role loader panel,
+  engine applier wiring, `PIM-WL-*` validator rules.
+- Next: tenant overlay (live CSV vs live Entra drift detection) and
+  one-click engine run from the GUI. See `../../docs/DESIGN.md § 11`.

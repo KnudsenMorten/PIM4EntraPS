@@ -350,6 +350,7 @@ function Invoke-PimPreflightValidation {
         @{ Csv = 'PIM-Assignments-Roles-Groups';    Cols = @('GroupTag') }
         @{ Csv = 'PIM-Assignments-Roles-AUs';       Cols = @('GroupTag') }
         @{ Csv = 'PIM-Assignments-Azure-Resources'; Cols = @('GroupTag') }
+        @{ Csv = 'PIM-Assignments-Workloads';       Cols = @('GroupTag') }
     )
     $knownTagList = @($allGroupTags)
     foreach ($ref in $tagRefs) {
@@ -893,6 +894,63 @@ function Invoke-PimPreflightValidation {
                 [void]$violations.Add((New-PimViolation -Severity 'info' -Code 'PIM-TAP-001' -Csv 'Account-Definitions-Admins' -Row $i -Column 'CreateTAP' `
                     -Message "CreateTAP=TRUE for '$upn' but TargetPlatform=AD. Temporary Access Pass is an Entra-ID-only feature; AD-only admins cannot have a TAP." `
                     -Suggestion "Set CreateTAP=FALSE for AD-only admins, or change TargetPlatform to ID/Both if the admin should also exist in Entra."))
+            }
+        }
+    }
+
+    # ------------------------------------------------------------------
+    # PIM-WL-*: workload RBAC rows (PIM-Assignments-Workloads). The engine
+    # applies these via workloads/connectors/<id>.connector.json, so a row
+    # whose Workload has no connector file is silently unappliable -- catch
+    # it here. GroupTag FK coverage comes from PIM-FK-001 (tagRefs above).
+    # ------------------------------------------------------------------
+    if ($loaded.ContainsKey('PIM-Assignments-Workloads')) {
+        $connectorIds = @()
+        try {
+            $connDir = Join-Path (Split-Path -Parent (Split-Path -Parent $PSScriptRoot)) 'workloads\connectors'
+            if (Test-Path -LiteralPath $connDir) {
+                $connectorIds = @(Get-ChildItem -LiteralPath $connDir -Filter '*.connector.json' |
+                    ForEach-Object { $_.Name -replace '\.connector\.json$', '' })
+            }
+        } catch { $connectorIds = @() }
+
+        $rows = $loaded['PIM-Assignments-Workloads'].rows
+        for ($i = 0; $i -lt $rows.Count; $i++) {
+            $r = $rows[$i]
+            if (Test-PimRowIsBlank -Row $r) { continue }
+
+            # PIM-WL-001: Workload must have a connector definition.
+            $wl = (Get-PimRowValue -Row $r -Column 'Workload').Trim()
+            if (-not $wl) {
+                [void]$violations.Add((New-PimViolation -Severity 'error' -Code 'PIM-WL-001' -Csv 'PIM-Assignments-Workloads' -Row $i -Column 'Workload' `
+                    -Message "Workload is empty -- the engine cannot pick a connector for this row." `
+                    -Suggestion ("Set Workload to one of: " + ($(if ($connectorIds.Count) { $connectorIds -join ', ' } else { '(no connectors found under workloads\connectors)' })) + ".")))
+            } elseif ($connectorIds.Count -gt 0 -and ($connectorIds -notcontains $wl)) {
+                $suggestion = "Available connectors: $($connectorIds -join ', '). Add workloads\connectors\$wl.connector.json or fix the Workload value."
+                $near = Get-PimClosestMatches -Needle $wl -Haystack $connectorIds -MaxDistance 5 -Top 2
+                if ($near -and $near.Count -gt 0) {
+                    $suggestion = "Did you mean: $(($near | ForEach-Object { $_.Value }) -join ', ')? Available connectors: $($connectorIds -join ', ')."
+                }
+                [void]$violations.Add((New-PimViolation -Severity 'error' -Code 'PIM-WL-001' -Csv 'PIM-Assignments-Workloads' -Row $i -Column 'Workload' `
+                    -Message "Workload '$wl' has no connector (workloads\connectors\$wl.connector.json not found) -- the engine skips this row with an error." `
+                    -Suggestion $suggestion))
+            }
+
+            # PIM-WL-002: RoleName is required (it is matched against the
+            # connector's live role list at apply time).
+            $roleName = (Get-PimRowValue -Row $r -Column 'RoleName').Trim()
+            if (-not $roleName) {
+                [void]$violations.Add((New-PimViolation -Severity 'error' -Code 'PIM-WL-002' -Csv 'PIM-Assignments-Workloads' -Row $i -Column 'RoleName' `
+                    -Message "RoleName is empty -- the engine cannot resolve which workload role to assign." `
+                    -Suggestion "Use the Workload delegation panel on the Delegation Map tab to pick a live role name, or copy it from the workload's admin portal."))
+            }
+
+            # PIM-WL-003: Action must be blank (= Assign), Assign, or Remove.
+            $action = (Get-PimRowValue -Row $r -Column 'Action').Trim()
+            if ($action -and $action -notin @('Assign','Remove')) {
+                [void]$violations.Add((New-PimViolation -Severity 'warning' -Code 'PIM-WL-003' -Csv 'PIM-Assignments-Workloads' -Row $i -Column 'Action' `
+                    -Message "Action '$action' is not recognised (valid: Assign, Remove, or blank = Assign). The engine treats unknown actions as errors at apply time." `
+                    -Suggestion "Change Action to Assign or Remove (or clear it for the Assign default)."))
             }
         }
     }
