@@ -74,7 +74,7 @@ function Get-PimTenantCacheRoot {
 }
 
 function Get-PimTenantCacheFile {
-    param([Parameter(Mandatory)][ValidateSet('entra-roles','aus','pim-groups','azure-scopes')][string]$Kind)
+    param([Parameter(Mandatory)][ValidateSet('entra-roles','aus','pim-groups','azure-scopes','azure-rbac-roles')][string]$Kind)
     Join-Path (Get-PimTenantCacheRoot) ("{0}.json" -f $Kind)
 }
 
@@ -101,10 +101,11 @@ function Read-PimTenantListCache {
     # Missing files yield $null entries -- UI must tolerate.
     $out = [ordered]@{}
     $kinds = @(
-        @{ kind = 'entra-roles';  key = 'entraRoles' },
-        @{ kind = 'aus';          key = 'aus' },
-        @{ kind = 'pim-groups';   key = 'pimGroups' },
-        @{ kind = 'azure-scopes'; key = 'azureScopes' }
+        @{ kind = 'entra-roles';      key = 'entraRoles' },
+        @{ kind = 'aus';              key = 'aus' },
+        @{ kind = 'pim-groups';       key = 'pimGroups' },
+        @{ kind = 'azure-scopes';     key = 'azureScopes' },
+        @{ kind = 'azure-rbac-roles'; key = 'azureRbacRoles' }
     )
     foreach ($k in $kinds) {
         $f = Get-PimTenantCacheFile -Kind $k.kind
@@ -400,6 +401,29 @@ function Get-PimAzureScopesFromTenant {
     return ,@($items)
 }
 
+function Get-PimAzureRbacRolesFromTenant {
+    # Azure RBAC role DEFINITIONS (Owner, Contributor, Reader, custom roles...)
+    # for the Azure permission-group pickers -- so operators select role names
+    # instead of typing them (spelling errors in AzScopePermission silently
+    # break the engine's role assignment).
+    $items = New-Object System.Collections.ArrayList
+    try {
+        Import-Module Az.Resources -ErrorAction SilentlyContinue | Out-Null
+        $defs = Get-AzRoleDefinition -ErrorAction Stop
+        foreach ($d in $defs) {
+            [void]$items.Add([ordered]@{
+                id          = "$($d.Id)"
+                displayName = "$($d.Name)"
+                description = "$($d.Description)"
+                isCustom    = [bool]$d.IsCustom
+            })
+        }
+    } catch {
+        Write-Warning ("  Get-AzRoleDefinition failed: {0}" -f $_.Exception.Message)
+    }
+    return ,@($items | Sort-Object { $_.displayName })
+}
+
 # ---------------------------------------------------------------------------
 # Orchestrator
 # ---------------------------------------------------------------------------
@@ -431,10 +455,11 @@ function Invoke-PimTenantListRefresh {
         $results = [ordered]@{}
 
         foreach ($step in @(
-            @{ kind = 'entra-roles';  label = 'Entra ID roles';        fn = { Get-PimEntraRolesFromTenant } },
-            @{ kind = 'aus';          label = 'Administrative Units';  fn = { Get-PimAdministrativeUnitsFromTenant } },
-            @{ kind = 'pim-groups';   label = 'PIM-* groups';          fn = { Get-PimGroupsFromTenant } },
-            @{ kind = 'azure-scopes'; label = 'Azure scopes';          fn = { Get-PimAzureScopesFromTenant } }
+            @{ kind = 'entra-roles';      label = 'Entra ID roles';        fn = { Get-PimEntraRolesFromTenant } },
+            @{ kind = 'aus';              label = 'Administrative Units';  fn = { Get-PimAdministrativeUnitsFromTenant } },
+            @{ kind = 'pim-groups';       label = 'PIM-* groups';          fn = { Get-PimGroupsFromTenant } },
+            @{ kind = 'azure-scopes';     label = 'Azure scopes';          fn = { Get-PimAzureScopesFromTenant } },
+            @{ kind = 'azure-rbac-roles'; label = 'Azure RBAC roles';      fn = { Get-PimAzureRbacRolesFromTenant } }
         )) {
             $kind  = $step.kind
             $label = $step.label
