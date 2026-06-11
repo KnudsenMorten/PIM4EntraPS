@@ -1,9 +1,10 @@
 # Release notes for PIM4EntraPS
 
-## v2.4.133
+## v2.4.134
 
 Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monorepo:
 
+- release: PIM4EntraPS v2.4.134 -- deployment rings for staged MSP admin rollout: Ring column on Account-Definitions-Admins (blank=0=veteran/all tenants, 1=pilot+test, 2=new hire/test only) x $global:PIM_TenantRing per tenant (unset=0=production, safe default) x one rule (apply iff admin.Ring <= tenant.Ring); engine filters at all 4 admin load sites (CSV+SQL accounts/assignments) via shared helpers with UserName->ring map; SQL-ready (collapses to WHERE Ring <= @TenantRing later). Manager: Ring dropdown in grid, onboarding workflow defaults new hires to ring 2, PIM-RING-001 validator error on invalid values (engine treats them as 0 = over-grant). Plus professional Create-tab workflow names (00f1afe7)
 - release: PIM4EntraPS v2.4.133 -- PIM Manager: Graph view removed (was unused + the only CDN dependency; SPA now makes zero external requests, data model behind the wizards kept); professional tabs (Configuration landing / Create / Review & Save / Validate / Active Assignments) + labelled Tenant switcher sorted for 25+ MSP instances with config-root tooltips; fixed TDZ init abort on the landing-tab rail render (a456cc00)
 - release: PIM4EntraPS v2.4.132 -- PIM Activator v1.6.26 packed + published to gh-pages (tenant-dropdown readability fix live; post-pack guard validated canonical id; live updates.xml + CRX byte-verified); Update-PimActivator-Extension.ps1 git calls wrapped in Invoke-GitQuiet -- `2>$null` under EAP=Stop turned a harmless CRLF warning from `git add` into a terminating NativeCommandError that aborted the publish mid-way (3f79b213)
 - release: PIM4EntraPS v2.4.131 -- PIM Manager pwsh-7 launch fixed: gate the compiled JSON serializer (System.Web.Extensions / JavaScriptSerializer, .NET-Framework-only; explicit -ReferencedAssemblies broke core resolution with CS0012) on PSEdition Desktop; PowerShell 7 uses native ConvertTo-Json which is already fast. Verified both editions: pwsh7 preflight 2.0s cold / 0.04s warm, PS 5.1 3.3s via compiled path (c69fe4ec)
@@ -33,13 +34,47 @@ Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monor
 - release: PIM4EntraPS v2.4.107 - Deploy-PimActivatorIntune.ps1 ADMX payload now has explicit @odata.type (fixes silent field null-out on strict tenants) (ab4a8d34)
 - release: PIM4EntraPS v2.4.106 - Deploy-PimActivatorIntune.ps1 dumps full ADMX upload-failure detail (uploadInfo:null was hiding everything) (23320078)
 - release: PIM4EntraPS v2.4.105 + extension v1.6.24 - fix popup pre-sign-in tabpanel bleed + fix Update script silently aborting gh-pages publish (097fba84)
-- release: PIM4EntraPS v2.4.104 + extension v1.6.22 - -Repack works on PS 5.1 (mgmt1's runtime); guard moved from PEM input to produced CRX output bytes (6cdfd661)
 
 ---
 
 # Release notes -- PIM4EntraPS
 
 > **Curated changelog.** The publish workflow auto-prepends recent monorepo commits as a raw activity log; this file is the human-friendly narrative on top.
+
+---
+
+## v2.4.134 -- Deployment rings: staged MSP admin rollout (engine + PIM Manager), SQL-ready by design
+
+### The model -- one number on the admin, one number on the tenant, one rule
+
+New-hire administrators must not start with access to every tenant. Instead of per-person exceptions or per-tenant access lists, v2.4.134 introduces **deployment rings**:
+
+- **`Ring` column** on `Account-Definitions-Admins` (lives in the centrally-synced MSP config): `0` = veteran, all tenants; `1` = pilot + test tenants; `2` = new hire, test tenants only. **Blank / missing = 0**, so every existing admin keeps full reach with zero migration work.
+- **`$global:PIM_TenantRing`** declared once per tenant in that tenant's own config-local custom file (never in the synced MSP files): `2` = test tenant, `1` = pilot, `0` = production. **Unset = 0** -- an unconfigured tenant only accepts ring-0 admins (safe by default).
+- **Rule: an admin row applies in a tenant iff `admin.Ring <= tenant.Ring`.** Promotion = edit ONE cell in the central CSV (2 -> 1 -> 0); the sync fans it out everywhere. Demotion/offboarding follows the existing AccountStatus / revoker flow.
+
+Why rings instead of access templates: rings ARE templates -- exactly three of them, totally ordered, with no way to express a snowflake. If a genuine exception ever becomes unavoidable, add one more ring rather than a per-person tenant list.
+
+### Engine
+
+Four new shared helpers in `engine/_shared/PIM-Functions.psm1` (`Get-PimTenantRing`, `Get-PimAdminRingValue`, `Select-PimAdminRowsByRing`, `Select-PimAssignmentRowsByRing`) applied at all four admin-row load sites: accounts-from-CSV, accounts-from-SQL, assignments-from-CSV, assignments-from-SQL. Account filtering also records a UserName/UPN -> ring map so assignment rows for ring-excluded admins are dropped by the same rule; admins the map doesn't know (e.g. local-config admins without a Ring column) are never touched. Skipped rows log one gray `[ring]` summary line -- staging, not an error.
+
+**SQL-ready**: the model is deliberately column-shaped. When the SQL backend becomes primary, the rule collapses to `WHERE Ring <= @TenantRing` in the query; the row-level helpers remain as the guard, unchanged.
+
+### PIM Manager
+
+- **Configuration grid**: `Ring` renders as a dropdown (0 / 1 / 2 with plain-language labels) on `Account-Definitions-Admins`.
+- **Administrator Onboarding workflow**: new required **Deployment ring** field -- defaulting to **2 (test tenants only)** so the safe path is the default path for every new hire.
+- **Validator**: new `PIM-RING-001` error -- a Ring value outside blank/0/1/2 is flagged, because the engine treats invalid values as 0 (= ALL tenants) and a typo must not silently over-grant.
+- Samples updated: `Account-Definitions-Admins.custom.sample.csv` carries the Ring column; `PIM4EntraPS.NamingConventions.custom.sample.ps1` documents `$global:PIM_TenantRing`.
+
+### Also in this release
+
+Create-tab workflow names professionalized: Administrator Onboarding / Permission Group (Entra ID) / Permission Group (Azure Resource) / Role Group / Duplicate Existing Group / Time-boxed Project Access.
+
+### Verified
+
+Ring matrix tested in a real PS 5.1 process (tenant ring 0/1/2 x admin rings blank/1/2/invalid + unknown-admin assignments + empty input). Manager E2E: onboarding workflow shows the ring field defaulting to 2 and the staged row carries it; zero console errors.
 
 ---
 

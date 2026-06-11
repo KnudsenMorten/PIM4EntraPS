@@ -2327,6 +2327,128 @@ Function CreateUpdate-PIM-for-Groups-From-SQL
 }
 
 
+# ===========================================================================
+# Deployment rings (v2.4.134) -- MSP admin rollout staging.
+#
+# One number on the admin, one number on the tenant, one rule -- no
+# per-person exceptions:
+#
+#   Admin  Ring column (Account-Definitions-Admins):  0 | 1 | 2
+#     0 = veteran      -> provisioned in ALL tenants (blank/missing = 0,
+#                         so every pre-ring admin keeps full reach)
+#     1 = proven       -> ring-1 + ring-2 tenants
+#     2 = new hire     -> ring-2 (test) tenants only
+#
+#   Tenant ring ($global:PIM_TenantRing in the tenant's own config-local
+#   custom.ps1; NOT in the MSP-synced files):  0 | 1 | 2
+#     2 = test tenant, 1 = pilot tenant, 0 = production (default when
+#     unset -- safe: an unconfigured tenant only takes ring-0 admins)
+#
+#   RULE: an admin row applies in this tenant iff  admin.Ring <= tenant.Ring
+#
+# Promotion = edit ONE cell in the central MSP CSV (2 -> 1 -> 0); the sync
+# fans it out. SQL note: this is deliberately column-shaped -- the future
+# SQL backend implements the same rule as 'WHERE Ring <= @TenantRing' and
+# these helpers keep working on the returned rows unchanged.
+# ===========================================================================
+
+Function Get-PimTenantRing {
+    # Tenant ring: $global:PIM_TenantRing wins; $global:PIM_NamingConventions.TenantRing
+    # as fallback shape; default 0 (production -- ring-0 admins only).
+    $raw = $null
+    if ($null -ne $global:PIM_TenantRing) { $raw = $global:PIM_TenantRing }
+    elseif ($global:PIM_NamingConventions -is [hashtable] -and $global:PIM_NamingConventions.ContainsKey('TenantRing')) { $raw = $global:PIM_NamingConventions['TenantRing'] }
+    if ($null -eq $raw -or "$raw" -eq '') { return 0 }
+    $parsed = 0
+    if ([int]::TryParse("$raw", [ref]$parsed) -and $parsed -ge 0 -and $parsed -le 9) { return $parsed }
+    Write-Host "WARNING: PIM_TenantRing value '$raw' is not a valid ring number (0-9). Using 0 (production)." -ForegroundColor Yellow
+    return 0
+}
+
+Function Get-PimAdminRingValue {
+    # Ring of one admin row: blank / missing / non-numeric = 0 (full reach).
+    param([Parameter(Mandatory)][AllowNull()][object]$Row)
+    if ($null -eq $Row) { return 0 }
+    $v = $null
+    if ($Row -is [System.Collections.IDictionary]) { if ($Row.Contains('Ring')) { $v = $Row['Ring'] } }
+    else { $p = $Row.PSObject.Properties['Ring']; if ($p) { $v = $p.Value } }
+    if ($null -eq $v -or "$v".Trim() -eq '') { return 0 }
+    $parsed = 0
+    if ([int]::TryParse("$v".Trim(), [ref]$parsed) -and $parsed -ge 0) { return $parsed }
+    return 0
+}
+
+Function Select-PimAdminRowsByRing {
+    # Filters Account-Definitions-Admins rows to this tenant's ring AND
+    # records each admin's ring in $Global:PIM_AdminRingByUserName (keyed by
+    # lower-cased UserName + UserPrincipalName) so the assignment loader can
+    # apply the same rule without re-reading the accounts file.
+    # NB: returns a plain array (callers collect with @(...)); a comma-wrapped
+    # return here would nest the array one level deep.
+    param(
+        [Parameter(Mandatory)][AllowEmptyCollection()][AllowNull()][object[]]$Rows,
+        [string]$Label = 'Account-Definitions-Admins'
+    )
+    if ($null -eq $Rows) { return @() }
+    $tenantRing = Get-PimTenantRing
+    if (-not ($Global:PIM_AdminRingByUserName -is [hashtable])) { $Global:PIM_AdminRingByUserName = @{} }
+    $kept = New-Object System.Collections.ArrayList
+    $skipped = 0
+    foreach ($r in $Rows) {
+        if ($null -eq $r) { continue }
+        $ring = Get-PimAdminRingValue -Row $r
+        foreach ($keyProp in @('UserName','UserPrincipalName')) {
+            $kv = $null
+            $p = $r.PSObject.Properties[$keyProp]
+            if ($p -and $p.Value) { $kv = "$($p.Value)".Trim().ToLowerInvariant() }
+            if ($kv) { $Global:PIM_AdminRingByUserName[$kv] = $ring }
+        }
+        if ($ring -le $tenantRing) { [void]$kept.Add($r) } else { $skipped++ }
+    }
+    if ($skipped -gt 0) {
+        Write-Host ("  [ring] tenant ring {0}: skipped {1} admin row(s) from {2} with Ring > {0} (rollout staging -- not an error)" -f $tenantRing, $skipped, $Label) -ForegroundColor DarkGray
+    }
+    return $kept.ToArray()
+}
+
+Function Test-PimAdminRingExcluded {
+    # TRUE when this UserName/UPN belongs to an admin whose ring excludes the
+    # current tenant. Unknown names return FALSE (kept) -- ring filtering only
+    # acts on admins it positively knows about (e.g. local-config admins
+    # without a Ring column are never touched).
+    param([Parameter(Mandatory)][AllowEmptyString()][string]$UserName)
+    if ([string]::IsNullOrWhiteSpace($UserName)) { return $false }
+    if (-not ($Global:PIM_AdminRingByUserName -is [hashtable])) { return $false }
+    $k = $UserName.Trim().ToLowerInvariant()
+    if (-not $Global:PIM_AdminRingByUserName.ContainsKey($k)) { return $false }
+    return ($Global:PIM_AdminRingByUserName[$k] -gt (Get-PimTenantRing))
+}
+
+Function Select-PimAssignmentRowsByRing {
+    # Filters PIM-Assignments-Admins-shaped rows (Username column) against the
+    # ring map built by Select-PimAdminRowsByRing. Plain-array return; see
+    # Select-PimAdminRowsByRing note.
+    param(
+        [Parameter(Mandatory)][AllowEmptyCollection()][AllowNull()][object[]]$Rows,
+        [string]$Label = 'PIM-Assignments-Admins'
+    )
+    if ($null -eq $Rows) { return @() }
+    $kept = New-Object System.Collections.ArrayList
+    $skipped = 0
+    foreach ($r in $Rows) {
+        if ($null -eq $r) { continue }
+        $u = ''
+        $p = $r.PSObject.Properties['UserName']
+        if (-not $p) { $p = $r.PSObject.Properties['Username'] }
+        if ($p -and $p.Value) { $u = "$($p.Value)" }
+        if (Test-PimAdminRingExcluded -UserName $u) { $skipped++ } else { [void]$kept.Add($r) }
+    }
+    if ($skipped -gt 0) {
+        Write-Host ("  [ring] tenant ring {0}: skipped {1} assignment row(s) from {2} for ring-excluded admins" -f (Get-PimTenantRing), $skipped, $Label) -ForegroundColor DarkGray
+    }
+    return $kept.ToArray()
+}
+
 Function Build-List-of-Definitions
 {
     [CmdletBinding()]
@@ -2388,6 +2510,10 @@ Function Build-List-of-Definitions
 
         # remove empty lines
         $AdminAccounts_Data = $AdminAccounts_Data | Where { $_.UserName -ne "" }
+
+        # Deployment-ring staging (v2.4.134): drop admins whose Ring excludes
+        # this tenant + record the ring map for the assignment loaders.
+        $AdminAccounts_Data = @(Select-PimAdminRowsByRing -Rows @($AdminAccounts_Data))
 
         # Build global variable
         $Global:Accounts_Definitions = $AdminAccounts_Data
@@ -4788,6 +4914,9 @@ Fix (one-time per tenant):
     # remove empty lines
     $AdminAccounts_Data = $AdminAccounts_Data | Where { $_.UserName -ne "" }
 
+    # Deployment-ring staging (v2.4.134): an admin row is only provisioned in
+    # this tenant when admin.Ring <= $global:PIM_TenantRing. Blank Ring = 0.
+    $AdminAccounts_Data = @(Select-PimAdminRowsByRing -Rows @($AdminAccounts_Data))
 
     ForEach ($Entry in $AdminAccounts_Data)
         {
@@ -5156,6 +5285,11 @@ Function CreateUpdate-Accounts-From-SQL
     # remove empty lines
     $AdminAccounts_Data = $AdminAccounts_Data | Where { $_.UserName -ne "" }
 
+    # Deployment-ring staging (v2.4.134) -- same rule as the CSV path. When
+    # the SQL backend becomes primary, push this into the query as
+    # 'WHERE Ring <= @TenantRing'; the row-level filter stays as the guard.
+    $AdminAccounts_Data = @(Select-PimAdminRowsByRing -Rows @($AdminAccounts_Data) -Label $SQLTable)
+
     ForEach ($Entry in $AdminAccounts_Data)
         {
             $FirstName              = $Entry.FirstName
@@ -5309,6 +5443,11 @@ Function Assign-Groups-Accounts-From-file-CSV
 
     # remove empty lines
     $AdminAccounts_Data = $AdminAccounts_Data | Where { $_.UserName -ne "" }
+
+    # Deployment-ring staging (v2.4.134): drop assignment rows for admins
+    # whose Ring excludes this tenant (map built by Select-PimAdminRowsByRing
+    # when the accounts/definitions were loaded; unknown admins are kept).
+    $AdminAccounts_Data = @(Select-PimAssignmentRowsByRing -Rows @($AdminAccounts_Data))
 
     ForEach ($Entry in $AdminAccounts_Data)
         {
@@ -5661,6 +5800,9 @@ Function Assign-Groups-Accounts-From-SQL
 
     # remove empty lines
     $AdminAccounts_Data = $AdminAccounts_Data | Where { $_.UserName -ne "" }
+
+    # Deployment-ring staging (v2.4.134) -- same rule as the CSV path.
+    $AdminAccounts_Data = @(Select-PimAssignmentRowsByRing -Rows @($AdminAccounts_Data) -Label $SQLTable)
 
     ForEach ($Entry in $AdminAccounts_Data)
         {

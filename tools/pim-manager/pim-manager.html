@@ -469,43 +469,43 @@
     <div id="gridMain"><div class="empty" style="padding:30px;">Pick a configuration file from the left.</div></div>
   </div>
 
-  <!-- =========== New tab (wizard launcher) =========== -->
+  <!-- =========== Create tab (guided workflows) =========== -->
   <div id="newTab" class="tab-panel">
     <div class="new-intro">
-      Pick what you want to create. Each wizard walks you through the questions and figures out which CSV(s) the rows
-      go into &mdash; you don't need to remember the naming convention or the column layout. Nothing is written to disk
-      until you click <b>Commit all</b> on the <b>Review &amp; Save</b> tab.
+      Select the object type to create. Each guided workflow determines the correct configuration file(s) and
+      composes names according to the naming convention &mdash; no manual file or column knowledge required.
+      Nothing is written to disk until <b>Commit all</b> on the <b>Review &amp; Save</b> tab.
     </div>
     <div class="wiz-cards" id="wizCards">
       <div class="wiz-card" data-wiz="admin">
         <div class="wiz-icon">+</div>
-        <h4>New admin account</h4>
-        <div class="wiz-sub">Onboard a person to PIM. Generates the admin row and optionally adds them to one or more role groups.</div>
+        <h4>Administrator Onboarding</h4>
+        <div class="wiz-sub">Provision a privileged account for a new administrator and assign it to one or more role groups.</div>
       </div>
       <div class="wiz-card" data-wiz="permgroup-entra">
         <div class="wiz-icon">+</div>
-        <h4>New permission group (Entra ID)</h4>
-        <div class="wiz-sub">A capability bundle that grants Entra ID role(s). Mapped to the right Definitions CSV based on what kind of work it covers.</div>
+        <h4>Permission Group &mdash; Entra ID</h4>
+        <div class="wiz-sub">A capability bundle granting Entra ID role(s). Routed to the correct definitions file based on the type of work it covers.</div>
       </div>
       <div class="wiz-card" data-wiz="permgroup-azure">
         <div class="wiz-icon">+</div>
-        <h4>New permission group (Azure resource)</h4>
-        <div class="wiz-sub">A capability bundle that grants an Azure RBAC role at a chosen scope (subscription, resource group, or management group).</div>
+        <h4>Permission Group &mdash; Azure Resource</h4>
+        <div class="wiz-sub">A capability bundle granting an Azure RBAC role at a chosen scope (management group, subscription, or resource group).</div>
       </div>
       <div class="wiz-card" data-wiz="rolegroup">
         <div class="wiz-icon">+</div>
-        <h4>New role group</h4>
-        <div class="wiz-sub">A higher-level grouping that nests one or more permission groups. Used as the assignment target for humans.</div>
+        <h4>Role Group</h4>
+        <div class="wiz-sub">An organizational grouping that nests one or more permission groups. The assignment target for administrators.</div>
       </div>
       <div class="wiz-card" data-wiz="clone">
         <div class="wiz-icon">&#x2398;</div>
-        <h4>Clone an existing group</h4>
-        <div class="wiz-sub">Pick any role group or permission group as a template, give the copy a new short code, and edit before commit.</div>
+        <h4>Duplicate Existing Group</h4>
+        <div class="wiz-sub">Use any role group or permission group as a template, assign a new short code, and adjust before committing.</div>
       </div>
       <div class="wiz-card" data-wiz="project">
         <div class="wiz-icon">&#x231A;</div>
-        <h4>Project lifecycle (time-boxed)</h4>
-        <div class="wiz-sub">Time-boxed access for a project team: create a role group, add members, set an end date. Defaults to 90 days.</div>
+        <h4>Time-boxed Project Access</h4>
+        <div class="wiz-sub">Temporary access for a project team: role group, members, and a fixed end date. Defaults to 90 days.</div>
       </div>
     </div>
   </div>
@@ -858,6 +858,20 @@
   // Returns null if the column isn't a known dropdown target, otherwise
   // an object: { options: [{value,label,sub}], allowCustom: true, listKey, badge }.
   function getDropdownSpec(base, col) {
+    // Deployment ring (MSP rollout staging): 0 = all tenants, 1 = pilot+test,
+    // 2 = test tenants only. Blank = 0. The engine provisions the admin in a
+    // tenant only when admin.Ring <= that tenant's $global:PIM_TenantRing.
+    if (col === 'Ring' && base === 'Account-Definitions-Admins') {
+      return {
+        listKey: null,
+        allowCustom: false,
+        options: [
+          { value: '0', label: '0 — all tenants (veteran)' },
+          { value: '1', label: '1 — pilot + test tenants' },
+          { value: '2', label: '2 — test tenants only (new hire)' }
+        ]
+      };
+    }
     // Entra ID role displayName
     if (col === 'RoleDefinitionName' &&
         (base === 'PIM-Assignments-Roles-Groups' || base === 'PIM-Assignments-Roles-AUs')) {
@@ -3144,6 +3158,7 @@
       forwardMails:'FALSE', mailForwardAddr:'',
       createTap:'TRUE',
       usageLocation:'DK',
+      ring:'2',   // new hires start in ring 2 (test tenants); promote 2 -> 1 -> 0 centrally
       roleGroupSel: new Set(),
       assignmentType:'Eligible',
       lifetimeDays:365
@@ -3241,6 +3256,16 @@
                 { value:'short', label:'Short -- Admin-INI-PLAT' }
               ],
               onInput:(v)=>{ s.useLongForm = (v==='long'); rerender(); }
+            }));
+            f.appendChild(wuxField({ id:'wf-ring', label:'Deployment ring', required:true, type:'select', value:s.ring,
+              sub:'Account-Definitions-Admins.Ring',
+              hint:'MSP rollout staging. New hires start in ring 2 (test tenants only) and are promoted 2 → 1 → 0 by editing this one value centrally. Each tenant declares its own ring via $global:PIM_TenantRing.',
+              options:[
+                { value:'2', label:'2 -- Test tenants only (new hire, default)' },
+                { value:'1', label:'1 -- Pilot + test tenants' },
+                { value:'0', label:'0 -- All tenants (veteran)' }
+              ],
+              onInput:(v)=>{ s.ring=v; }
             }));
             f.appendChild(wuxAdminLivePreview(s));
             return f;
@@ -3353,7 +3378,8 @@
           ForwardMailsToContact: s.forwardMails,
           MailForwardAddress: s.forwardMails === 'TRUE' ? s.mailForwardAddr : '',
           CreateTAP: s.createTap, TAPStartDate: '',
-          AccountStatus: s.status, StatusChangeCode: ''
+          AccountStatus: s.status, StatusChangeCode: '',
+          Ring: s.ring
         });
         for (const tag of s.roleGroupSel) {
           await wuxStage('PIM-Assignments-Admins', {

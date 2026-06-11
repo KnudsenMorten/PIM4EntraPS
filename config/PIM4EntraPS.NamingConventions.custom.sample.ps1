@@ -229,3 +229,20 @@
 # directly and pass it to the Get-MgGroup query, turning an O(N=tenant-size)
 # fetch into O(N=PIM-prefixed-groups-only). Until then, the client-side
 # filter still works -- just slower for large tenants.
+
+# ----- Deployment ring (MSP rollout staging, v2.4.134) ---------------------
+#
+# Declares which ring THIS tenant belongs to. Set it in the tenant's own
+# config-local custom file -- never in the MSP-synced files (every tenant
+# would get the same value, defeating the point).
+#
+#   2 = test tenant      (new-hire admins land here first)
+#   1 = pilot tenant     (early production)
+#   0 = production       (default when not set -- only ring-0 admins apply)
+#
+# The engine provisions an admin from Account-Definitions-Admins in this
+# tenant only when the admin's Ring column <= this value (blank Ring = 0 =
+# veteran with full reach). Promotion of an admin = edit the ONE Ring cell
+# in the central MSP CSV: 2 -> 1 -> 0. No per-person exceptions needed.
+#
+# $global:PIM_TenantRing = 2
