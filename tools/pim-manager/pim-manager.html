@@ -131,7 +131,24 @@
   .map-item.dim { opacity:0.25; }
   .map-item .map-dot { width:9px; height:9px; border-radius:50%; flex:0 0 auto; }
   .map-item .map-label { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  /* Long Azure scopes / role names: two-line target items (name bold,
+     scope small + muted), and FULL wrapping in step-2 focus where the
+     board only holds the selected path. */
+  .map-item .map-label .map-sub-line { display:block; font-size:10px; color:#57606a; font-weight:400; overflow:hidden; text-overflow:ellipsis; }
+  #mapBoard.focused .map-item .map-label, #mapBoard.focused .map-item .map-label .map-sub-line { white-space:normal; word-break:break-word; }
   .map-item .map-count { font-size:10px; color:#57606a; flex:0 0 auto; }
+  /* Assign mode: linking the selected node to candidates in the next column
+     (admin -> role groups, or role group -> capability bundles). The
+     candidate column gets .assign-cands; its items show as link targets. */
+  #mapBoard.assign-mode .map-col.assign-cands .map-item { border-style:dashed; border-color:#0969da; opacity:1; display:flex !important; }
+  #mapBoard.assign-mode .map-col.assign-cands .map-item:hover { background:#ddf4ff; }
+  #mapBoard.assign-mode .map-col:not(.assign-cands) .map-item:not(.sel):not(.path) { opacity:0.35; }
+  /* Step-2 focus: with a selection active the board collapses to the
+     transitive path; the toolbar toggle switches back to dimmed-overview. */
+  #mapBoard.focused .map-item.dim { display:none; }
+  .map-item .map-pend { font-size:10px; color:#9a6700; font-weight:600; flex:0 0 auto; }
+  #mapDetail button { margin-left:8px; padding:3px 10px; font-size:11.5px; }
+  #mapDetail .assign-banner { color:#0969da; font-weight:600; }
   #mapDetail { flex:0 0 auto; padding:8px 14px; border-top:1px solid #d0d7de; background:#ffffff; font-size:12px; color:#1a1a1a; min-height:38px; }
   #mapDetail .empty { color:#57606a; font-style:italic; }
   #mapDetail a { color:#0969da; cursor:pointer; text-decoration:none; }
@@ -506,8 +523,9 @@
   <div id="mapTab" class="tab-panel active">
     <div id="mapToolbar">
       <input type="text" id="mapSearch" placeholder="Find a person, group, role or scope...">
-      <button id="mapClear" style="display:none">Clear selection</button>
-      <span class="map-hint">Click any item to light up its complete access path &mdash; who reaches what, and through which groups. Every box is a Definitions row; every wire is an Assignments row.</span>
+      <button id="mapClear" style="display:none">Back to overview</button>
+      <button id="mapFocusToggle" style="display:none">Show all (dimmed)</button>
+      <span class="map-hint" id="mapHint"><b>Step 1:</b> pick a person (left) or a permission (right). <b>Step 2:</b> the board collapses to their transitive path &mdash; who reaches what, through which groups. Every box is a Definitions row; every wire is an Assignments row.</span>
     </div>
     <div id="mapBoard">
       <svg id="mapWires"></svg>
@@ -5293,6 +5311,38 @@
       const outs = fwd[n.id] || [];
       if (!outs.some(e => colOf(byId[e.target]) === 3)) workload.add(n.id);
     }
+
+    // Overlay STAGED (uncommitted) relations from pendingChanges as dashed
+    // pending edges, so assignments made on this board show up immediately.
+    const upnIndex = {}, tagIndex = {};
+    for (const n of nodes) {
+      if (n.kind === 'admin') upnIndex[String(n.id).toLowerCase()] = n.id;
+      if (n.groupTag) tagIndex[String(n.groupTag).toLowerCase()] = n.id;
+    }
+    const addPending = (srcId, tgtId, type) => {
+      if (!srcId || !tgtId || !byId[srcId] || !byId[tgtId]) return;
+      if ((fwd[srcId] || []).some(e => e.target === tgtId)) return;
+      const e = { source: srcId, target: tgtId, type: type || 'Eligible', kind: 'pending', pending: true };
+      (fwd[srcId] = fwd[srcId] || []).push(e);
+      (back[tgtId] = back[tgtId] || []).push(e);
+    };
+    const overlay = (base, keyFn, edgeFn) => {
+      const p = pendingChanges[base];
+      if (!p) return;
+      const baseKeys = new Set(p.baseline.map(keyFn).filter(Boolean));
+      for (const r of p.rows) {
+        const k = keyFn(r);
+        if (!k || baseKeys.has(k)) continue;
+        edgeFn(r);
+      }
+    };
+    overlay('PIM-Assignments-Admins',
+      r => (r.Username && r.GroupTag) ? (String(r.Username).toLowerCase() + '>' + String(r.GroupTag).toLowerCase()) : null,
+      r => addPending(upnIndex[String(r.Username).toLowerCase()], tagIndex[String(r.GroupTag).toLowerCase()], r.AssignmentType));
+    overlay('PIM-Assignments-Groups',
+      r => (r.TargetGroupTag && r.SourceGroupTag) ? (String(r.TargetGroupTag).toLowerCase() + '>' + String(r.SourceGroupTag).toLowerCase()) : null,
+      r => addPending(tagIndex[String(r.TargetGroupTag).toLowerCase()], tagIndex[String(r.SourceGroupTag).toLowerCase()], r.AssignmentType));
+
     return { nodes, byId, fwd, back, colOf, workload };
   }
 
@@ -5333,14 +5383,26 @@
     el.appendChild(dot);
     const lbl = document.createElement('span');
     lbl.className = 'map-label';
-    lbl.textContent = n.label || n.id;
+    // Long Azure scopes / AU-scoped roles: split "<name> @ <scope>" into a
+    // bold first line + small muted scope line instead of one truncated mess.
+    const full = String(n.label || n.id);
+    const atIx = (n.kind === 'az-resource' || n.kind === 'au-role') ? full.indexOf(' @ ') : -1;
+    if (atIx > 0) {
+      lbl.textContent = full.substring(0, atIx);
+      const sub = document.createElement('span');
+      sub.className = 'map-sub-line';
+      sub.textContent = full.substring(atIx + 3);
+      lbl.appendChild(sub);
+    } else {
+      lbl.textContent = full;
+    }
     lbl.title = n.id;
     el.appendChild(lbl);
     const cnt = document.createElement('span');
     cnt.className = 'map-count';
     cnt.textContent = extraBadge != null ? extraBadge : '';
     el.appendChild(cnt);
-    el.onclick = () => mapSelect(n.id);
+    el.onclick = () => { if (MAP.assign) { mapTryStage(n); } else { mapSelect(n.id); } };
     return el;
   }
 
@@ -5399,9 +5461,13 @@
 
   function mapClearSel(keep) {
     MAP.sel = null;
+    mapEndAssign(true);
+    const board = document.getElementById('mapBoard');
+    board.classList.remove('focused');
     document.querySelectorAll('#mapBoard .map-item').forEach(el => el.classList.remove('sel', 'path', 'dim'));
     document.getElementById('mapWires').innerHTML = '';
     document.getElementById('mapClear').style.display = 'none';
+    document.getElementById('mapFocusToggle').style.display = 'none';
     document.getElementById('mapDetail').innerHTML = '<span class="empty">Nothing selected.</span>';
     if (!keep) mapApplySearch();
   }
@@ -5420,6 +5486,12 @@
       el.classList.toggle('path', inPath && el.dataset.id !== id);
       el.classList.toggle('sel', el.dataset.id === id);
     });
+    // Step 2: collapse the board to the transitive path (toggleable back to
+    // dimmed-overview via the toolbar button).
+    const board = document.getElementById('mapBoard');
+    board.classList.toggle('focused', MAP.focusMode !== false);
+    document.getElementById('mapFocusToggle').style.display = '';
+    document.getElementById('mapFocusToggle').textContent = (MAP.focusMode !== false) ? 'Show all (dimmed)' : 'Focus path only';
     // scroll selected into view on first selection
     if (!rerendered) {
       const selEl = document.querySelector('#mapBoard .map-item.sel');
@@ -5453,10 +5525,94 @@
       const x2 = tR.left - bRect.left,  y2 = tR.top + tR.height / 2 - bRect.top;
       const dx = Math.max(30, (x2 - x1) / 2);
       const active = (e.type === 'Active');
+      const dash = e.pending ? ' stroke-dasharray="6 4"' : '';
       html += '<path d="M ' + x1 + ' ' + y1 + ' C ' + (x1 + dx) + ' ' + y1 + ', ' + (x2 - dx) + ' ' + y2 + ', ' + x2 + ' ' + y2 +
-              '" fill="none" stroke="' + (active ? '#9a6700' : '#0969da') + '" stroke-width="1.6" opacity="0.7"/>';
+              '" fill="none" stroke="' + (e.pending ? '#9a6700' : (active ? '#9a6700' : '#0969da')) + '" stroke-width="' + (e.pending ? '2' : '1.6') + '" opacity="0.75"' + dash + '/>';
     }
     svg.innerHTML = html;
+  }
+
+  // ----- Assign mode: link the selected node to one or more candidates -----
+  // admin -> role/org groups  => stages PIM-Assignments-Admins rows
+  // role group -> bundles     => stages PIM-Assignments-Groups nesting rows
+  function mapBeginAssign(fromId) {
+    const m = MAP.model; if (!m) return;
+    const n = m.byId[fromId]; if (!n) return;
+    const mode = n.kind === 'admin' ? 'admin' : (n.kind === 'role-group' ? 'role' : null);
+    if (!mode) return;
+    MAP.assign = { fromId, mode, count: 0 };
+    MAP.focusMode = false;          // candidates must be visible
+    mapSelect(fromId, true);
+    const board = document.getElementById('mapBoard');
+    board.classList.add('assign-mode');
+    board.querySelectorAll('.map-col').forEach((c, i) => c.classList.toggle('assign-cands', mode === 'admin' ? i === 1 : i === 2));
+    mapAssignBanner('');
+  }
+
+  function mapEndAssign(silent) {
+    if (!MAP.assign) return;
+    const a = MAP.assign;
+    MAP.assign = null;
+    MAP.focusMode = true;
+    const board = document.getElementById('mapBoard');
+    board.classList.remove('assign-mode');
+    board.querySelectorAll('.map-col').forEach(c => c.classList.remove('assign-cands'));
+    if (!silent && MAP.sel) mapSelect(MAP.sel, true);
+    if (!silent && a.count > 0) {
+      const d = document.getElementById('mapDetail');
+      d.innerHTML += ' &nbsp;<span style="color:#9a6700">&#x270E; ' + a.count + ' staged (dashed) &mdash; commit on <a id="mapGoSave">Review &amp; Save</a></span>';
+      const go = document.getElementById('mapGoSave');
+      if (go) go.onclick = () => switchTab('save');
+    }
+  }
+
+  function mapAssignBanner(note) {
+    const a = MAP.assign; if (!a) return;
+    const m = MAP.model;
+    const from = m.byId[a.fromId];
+    const what = a.mode === 'admin' ? 'role / org groups (middle-left column)' : 'capability bundles (middle-right column)';
+    const d = document.getElementById('mapDetail');
+    d.innerHTML = '<span class="assign-banner">Assigning <b>' + escapeHtml(from.label || from.id) + '</b>:</span> click one or more ' + what +
+      ' &mdash; each click stages an Eligible assignment row (365 days, AutoExtend). ' +
+      '<b>' + a.count + '</b> staged' + (note ? ' &nbsp;&middot;&nbsp; ' + note : '') +
+      ' <button id="mapAssignDone">Done</button>';
+    const btn = document.getElementById('mapAssignDone');
+    if (btn) btn.onclick = () => mapEndAssign(false);
+  }
+
+  async function mapTryStage(n) {
+    const a = MAP.assign; if (!a) return;
+    const m = MAP.model;
+    const from = m.byId[a.fromId];
+    if (a.mode === 'admin' && n.kind !== 'role-group') { mapAssignBanner('pick from the highlighted column'); return; }
+    if (a.mode === 'role'  && n.kind !== 'permission-group') { mapAssignBanner('pick from the highlighted column'); return; }
+    if ((m.fwd[a.fromId] || []).some(e => e.target === n.id)) { mapAssignBanner('already linked to ' + escapeHtml(n.label || n.id)); return; }
+    const base = a.mode === 'admin' ? 'PIM-Assignments-Admins' : 'PIM-Assignments-Groups';
+    try {
+      const data = await loadCsv(base);
+      ensurePending(base, data.header, data.rows);
+      const p = pendingChanges[base];
+      const row = {};
+      for (const c of p.header) row[c] = '';
+      const tagOf = x => x.groupTag || String(x.id).replace(/^group:/, '');
+      if (a.mode === 'admin') { row.Username = from.id; row.GroupTag = tagOf(n); }
+      else { row.TargetGroupTag = tagOf(from); row.SourceGroupTag = tagOf(n); }
+      row.AssignmentType = 'Eligible'; row.Action = 'Assign'; row.UpdateExisting = 'FALSE';
+      row.AutoExtend = 'TRUE'; row.NumOfDaysWhenExpire = '365'; row.Permanent = 'FALSE';
+      p.rows.push(row);
+      markBadges();
+      a.count++;
+      // Rebuild with the pending overlay so the dashed wire appears, then
+      // restore assign-mode chrome (renderAccessMap -> mapSelect resets it).
+      renderAccessMap();
+      const board = document.getElementById('mapBoard');
+      board.classList.add('assign-mode');
+      board.classList.remove('focused');
+      board.querySelectorAll('.map-col').forEach((c, i) => c.classList.toggle('assign-cands', a.mode === 'admin' ? i === 1 : i === 2));
+      mapAssignBanner('staged &rarr; ' + escapeHtml(n.label || n.id));
+    } catch (e) {
+      mapAssignBanner('<span style="color:#cf222e">failed: ' + escapeHtml(e.message) + '</span>');
+    }
   }
 
   function mapRenderDetail(m, id, down, up) {
@@ -5475,10 +5631,17 @@
       if (m.workload.has(id)) bits.push('<span style="color:#57606a">&#x2B21; workload group: grants app RBAC (Power BI / Intune / Defender XDR / 3rd-party) via membership</span>');
     }
     if (n.source) {
-      bits.push('<a data-base="' + escapeHtml(n.source) + '">Open ' + escapeHtml(n.source) + ' in Configuration</a>');
+      bits.push('<a data-base="' + escapeHtml(n.source) + '">Open ' + escapeHtml(n.source) + ' in Advanced View</a>');
     }
     const d = document.getElementById('mapDetail');
     d.innerHTML = bits.join(' &nbsp;&middot;&nbsp; ');
+    if (isServer && n.kind === 'admin') {
+      d.innerHTML += ' <button id="mapBtnAssign">&#xFF0B; Assign to group&hellip;</button>';
+    } else if (isServer && n.kind === 'role-group') {
+      d.innerHTML += ' <button id="mapBtnAssign">&#xFF0B; Link capability bundle&hellip;</button>';
+    }
+    const ab = document.getElementById('mapBtnAssign');
+    if (ab) ab.onclick = () => mapBeginAssign(id);
     const link = d.querySelector('a[data-base]');
     if (link) link.onclick = () => { switchTab('grid'); openGrid(link.dataset.base); };
   }
@@ -5493,6 +5656,16 @@
 
   document.getElementById('mapSearch').oninput = (e) => { MAP.q = e.target.value; if (MAP.sel) mapClearSel(); mapApplySearch(); };
   document.getElementById('mapClear').onclick = () => { mapClearSel(); };
+  document.getElementById('mapFocusToggle').onclick = () => {
+    MAP.focusMode = (MAP.focusMode === false);   // toggle; default true
+    if (MAP.sel) mapSelect(MAP.sel, true);
+  };
+  document.addEventListener('keydown', (e) => {
+    if (e.key !== 'Escape' || !MAP.assign) return;
+    const wiz = document.getElementById('wizBg');
+    if (wiz && getComputedStyle(wiz).display !== 'none') return;   // wizard owns Esc
+    mapEndAssign(false);
+  });
   // Redraw wires when columns scroll or the window resizes.
   document.querySelectorAll('#mapBoard .map-col-body').forEach(b => {
     b.addEventListener('scroll', () => { if (MAP.sel) mapSelect(MAP.sel, true); }, { passive: true });
