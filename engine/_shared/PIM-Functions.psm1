@@ -2157,6 +2157,26 @@ Function CreateUpdate-PIM-for-Groups-From-file-CSV
 
                 # PERF: cached lookup; this group was just created by CreateUpdate-PIM-Group, so allow cache (which the create-path populated via -NoCache) or fall back to Graph (v2.4.0).
                 $GroupInfo = Resolve-PimGroupCached -DisplayName $GroupName
+
+                # v2.4.125: guard the AU member-add against null lookups so a
+                # single bad row doesn't crash the whole engine with the
+                # cryptic 'Cannot process argument transformation on parameter
+                # ObjectId. Cannot convert value to type System.String.'
+                # error. Both $AUInfo and $GroupInfo can come back null --
+                # $AUInfo when AdministrativeUnitTag in the CSV doesn't match
+                # anything in $Global:AU_Definitions (the "Could NOT find any
+                # AU" error printed above didn't 'continue', so we used to
+                # crash on $null.Id right here); $GroupInfo when the just-
+                # created group hasn't yet propagated through Graph (rare).
+                if (-not $AUInfo -or [string]::IsNullOrWhiteSpace([string]$AUInfo.Id)) {
+                    Write-Host ("ERROR: AU lookup failed for tag '{0}' (resolved AUName='{1}'); skipping AU member-add for group '{2}'." -f $AdministrativeUnitTag, $AUName, $GroupName) -ForegroundColor Red
+                    continue
+                }
+                if (-not $GroupInfo -or [string]::IsNullOrWhiteSpace([string]$GroupInfo.Id)) {
+                    Write-Host ("ERROR: Resolve-PimGroupCached returned null for '{0}' -- can't bind it to AU '{1}'. Skipping." -f $GroupName, $AUName) -ForegroundColor Red
+                    continue
+                }
+
                 Add-AdministrativeUnit-Member -AuId $AUInfo.Id -AddType Group -ObjectId $GroupInfo.Id
             }
 }
@@ -2252,6 +2272,18 @@ Function CreateUpdate-PIM-for-Groups-From-SQL
 
                 # PERF: cached lookup; v2.4.0
                 $GroupInfo = Resolve-PimGroupCached -DisplayName $GroupName
+
+                # v2.4.125: same null-lookup guard as the other CreateUpdate-PIM-*
+                # call site -- see comment above (line ~2160) for the rationale.
+                if (-not $AUInfo -or [string]::IsNullOrWhiteSpace([string]$AUInfo.Id)) {
+                    Write-Host ("ERROR: AU lookup failed for tag '{0}' (resolved AUName='{1}'); skipping AU member-add for group '{2}'." -f $AdministrativeUnitTag, $AUName, $GroupName) -ForegroundColor Red
+                    continue
+                }
+                if (-not $GroupInfo -or [string]::IsNullOrWhiteSpace([string]$GroupInfo.Id)) {
+                    Write-Host ("ERROR: Resolve-PimGroupCached returned null for '{0}' -- can't bind it to AU '{1}'. Skipping." -f $GroupName, $AUName) -ForegroundColor Red
+                    continue
+                }
+
                 Add-AdministrativeUnit-Member -AuId $AUInfo.Id -AddType Group -ObjectId $GroupInfo.Id
             }
 }
