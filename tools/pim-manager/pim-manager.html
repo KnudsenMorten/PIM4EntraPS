@@ -439,26 +439,23 @@
   #ctxMenu .ctx-item:hover { background:#eaeef2; }
   #ctxMenu .ctx-item .ctx-sub { display:block; font-size:10.5px; color:#57606a; margin-top:2px; }
 </style>
-<script src="https://unpkg.com/cytoscape@3.30.2/dist/cytoscape.min.js"></script>
-<script src="https://unpkg.com/dagre@0.8.5/dist/dagre.min.js"></script>
-<script src="https://unpkg.com/cytoscape-dagre@2.5.0/cytoscape-dagre.js"></script>
 </head>
 <body>
 <div id="app">
 
   <div id="brand">
     <h1>PIM Manager <span id="versionBadge">__PIM_VERSION__</span></h1>
-    <select id="instancePick" title="Switch instance" style="display:none"></select>
-    <div class="brand-sub">PIM4EntraPS &middot; configuration editor</div>
+    <span id="instanceLabel" style="display:none; font-size:11.5px; color:#ffffff; opacity:0.85;">Tenant</span>
+    <select id="instancePick" title="Switch tenant instance" style="display:none"></select>
+    <div class="brand-sub">PIM4EntraPS &middot; Configuration Manager</div>
   </div>
 
   <div id="tabs">
-    <div class="tab active" data-tab="graph">Graph</div>
-    <div class="tab" data-tab="grid">Grid <span id="gridDirtyBadge" class="badge" style="display:none">0</span></div>
-    <div class="tab" data-tab="new">New &amp; clone</div>
-    <div class="tab" data-tab="save">Save <span id="saveDirtyBadge" class="badge" style="display:none">0</span></div>
+    <div class="tab active" data-tab="grid">Configuration <span id="gridDirtyBadge" class="badge" style="display:none">0</span></div>
+    <div class="tab" data-tab="new">Create</div>
+    <div class="tab" data-tab="save">Review &amp; Save <span id="saveDirtyBadge" class="badge" style="display:none">0</span></div>
     <div class="tab" data-tab="validate">Validate <span id="validateErrBadge" class="badge" style="display:none;background:#cf222e">0</span></div>
-    <div class="tab" data-tab="revoke">Revoke <span id="revokeCountBadge" class="badge" style="display:none;background:#cf222e">0</span></div>
+    <div class="tab" data-tab="revoke">Active Assignments <span id="revokeCountBadge" class="badge" style="display:none;background:#cf222e">0</span></div>
     <div id="tabRight">
       mode: <b id="modeLabel"></b>
       &nbsp;|&nbsp; source: <b id="src"></b>
@@ -466,55 +463,10 @@
     </div>
   </div>
 
-  <!-- =========== Graph tab =========== -->
-  <div id="graphTab" class="tab-panel active">
-    <div class="panel" id="left">
-      <h1>Graph view</h1>
-      <div class="meta">v0.3 &mdash; editor + wizards</div>
-
-      <h2>Counts</h2>
-      <div class="kpis" id="kpis"></div>
-
-      <h2>Search</h2>
-      <input id="search" placeholder="Filter by label / id (regex)" autocomplete="off">
-
-      <h2>Layers</h2>
-      <div class="legend">
-        <label><input type="checkbox" data-kind="admin" checked><span class="swatch" style="background:#0969da"></span>Admin</label>
-        <label><input type="checkbox" data-kind="role-group" checked><span class="swatch" style="background:#a371f7"></span>Role group</label>
-        <label><input type="checkbox" data-kind="permission-group" checked><span class="swatch" style="background:#1a7f37"></span>Permission group</label>
-        <label><input type="checkbox" data-kind="entra-role" checked><span class="swatch" style="background:#db6d28"></span>Entra ID role</label>
-        <label><input type="checkbox" data-kind="au-role" checked><span class="swatch" style="background:#9a6700"></span>AU-scoped role</label>
-        <label><input type="checkbox" data-kind="az-resource" checked><span class="swatch" style="background:#d2a8ff"></span>Azure resource</label>
-        <label><input type="checkbox" data-kind="au" checked><span class="swatch" style="background:#57606a"></span>Administrative Unit</label>
-      </div>
-
-      <h2>Edge type</h2>
-      <div class="legend">
-        <label><input type="checkbox" data-edge="Eligible" checked><span class="pill E">E</span>Eligible</label>
-        <label><input type="checkbox" data-edge="Active" checked><span class="pill A">A</span>Active</label>
-      </div>
-
-      <h2>Layout</h2>
-      <div class="toolbar">
-        <button id="layout-dagre">DAG (L&rarr;R)</button>
-        <button id="layout-concentric">Concentric</button>
-        <button id="fit">Fit</button>
-      </div>
-    </div>
-
-    <div id="cy"></div>
-
-    <div class="panel" id="right">
-      <h1>Details</h1>
-      <div id="detail"><div class="empty">Click a node or edge.</div></div>
-    </div>
-  </div>
-
-  <!-- =========== Grid tab =========== -->
-  <div id="gridTab" class="tab-panel">
+  <!-- =========== Configuration (grid) tab =========== -->
+  <div id="gridTab" class="tab-panel active">
     <div id="gridList"></div>
-    <div id="gridMain"><div class="empty" style="padding:30px;">Pick a CSV from the left.</div></div>
+    <div id="gridMain"><div class="empty" style="padding:30px;">Pick a configuration file from the left.</div></div>
   </div>
 
   <!-- =========== New tab (wizard launcher) =========== -->
@@ -522,7 +474,7 @@
     <div class="new-intro">
       Pick what you want to create. Each wizard walks you through the questions and figures out which CSV(s) the rows
       go into &mdash; you don't need to remember the naming convention or the column layout. Nothing is written to disk
-      until you click <b>Commit all</b> on the <b>Save</b> tab.
+      until you click <b>Commit all</b> on the <b>Review &amp; Save</b> tab.
     </div>
     <div class="wiz-cards" id="wizCards">
       <div class="wiz-card" data-wiz="admin">
@@ -715,13 +667,9 @@
   }
   document.getElementById('src').textContent = PIM_DATA.sourceRoot || '';
   document.getElementById('gen').textContent = PIM_DATA.generatedUtc || '';
-  const kpis = document.getElementById('kpis');
-  for (const [k, v] of Object.entries(PIM_DATA.summary || {})) {
-    const d = document.createElement('div');
-    d.className = 'kpi';
-    d.innerHTML = `<div class="v">${v}</div><div class="k">${k}</div>`;
-    kpis.appendChild(d);
-  }
+  // (Graph view removed in v2.4.133 -- the KPI strip lived in its side panel.
+  // PIM_DATA.summary is still served; render it elsewhere if a dashboard
+  // surface comes back.)
 
   // ===================================================================
   // Tab routing
@@ -794,11 +742,17 @@
   (function initInstancePicker() {
     const boot = window.PIM_INSTANCES_BOOT || { active: 'local', instances: [] };
     const pick = document.getElementById('instancePick');
+    const lbl = document.getElementById('instanceLabel');
     if (!isServer || !pick || !boot.instances || boot.instances.length < 2) return;
-    pick.innerHTML = boot.instances.map(i =>
-      `<option value="${escapeHtml(i.name)}"${i.name === boot.active ? ' selected' : ''}>${escapeHtml(i.name)}</option>`
+    // Sorted alphabetically with 'local' pinned first -- MSP setups carry
+    // 25+ tenant instances and an unsorted list is unusable at that scale.
+    const sorted = boot.instances.slice().sort((a, b) =>
+      (a.name === 'local' ? -1 : b.name === 'local' ? 1 : a.name.localeCompare(b.name, undefined, { sensitivity: 'base' })));
+    pick.innerHTML = sorted.map(i =>
+      `<option value="${escapeHtml(i.name)}" title="${escapeHtml(i.configRoot || '')}"${i.name === boot.active ? ' selected' : ''}>${escapeHtml(i.name)}</option>`
     ).join('');
     pick.style.display = '';
+    if (lbl) lbl.style.display = '';
     pick.onchange = async () => {
       const target = pick.value;
       if (target === boot.active) return;
@@ -998,6 +952,12 @@
   let cy = null;
 
   function buildGraph() {
+    // Graph VIEW removed in v2.4.133 (operator feedback: unused; it was also
+    // the only CDN dependency, breaking the no-external-network promise).
+    // PIM_DATA.nodes/edges remain the data model behind the wizards
+    // (listRoleGroups / listPermGroups / listAdminsLite) -- only the
+    // cytoscape rendering is gone. Everything below is dormant.
+    if (!document.getElementById('cy') || typeof cytoscape === 'undefined') return;
     const cyNodes = PIM_DATA.nodes.map(n => ({ data: { id: n.id, label: n.label || n.id, ...n } }));
     const cyEdges = PIM_DATA.edges.map((e, i) => ({
       data: {
@@ -1088,9 +1048,10 @@
     }
   }
 
-  document.getElementById('layout-dagre').onclick = () => runLayout('dagre');
-  document.getElementById('layout-concentric').onclick = () => runLayout('concentric');
-  document.getElementById('fit').onclick = () => cy && cy.fit(null, 30);
+  // Graph-view controls (dormant -- elements removed with the Graph tab).
+  { const el = document.getElementById('layout-dagre');      if (el) el.onclick = () => runLayout('dagre'); }
+  { const el = document.getElementById('layout-concentric'); if (el) el.onclick = () => runLayout('concentric'); }
+  { const el = document.getElementById('fit');               if (el) el.onclick = () => cy && cy.fit(null, 30); }
 
   // Extracts the Entra role displayName from a graph node's label.
   // entra-role: the label IS the displayName.
@@ -1299,7 +1260,7 @@
   document.querySelectorAll('[data-kind], [data-edge]').forEach(cb => cb.onchange = applyFilters);
 
   const searchEl = document.getElementById('search');
-  searchEl.oninput = () => {
+  if (searchEl) searchEl.oninput = () => {
     if (!cy) return;
     const q = searchEl.value.trim();
     if (!q) { cy.elements().removeClass('dim hilite'); return; }
@@ -1312,7 +1273,10 @@
     });
   };
 
-  buildGraph();
+  buildGraph();          // dormant no-op without the Graph view
+  // NB: renderGridList() for the landing tab is called at the very END of
+  // this script -- calling it here trips the TDZ on `let currentGridBase`
+  // (declared further down) and aborts the whole init.
 
   // ===================================================================
   // Pending-changes machinery
@@ -1460,7 +1424,7 @@
     }
     const msg = `<p>Deleting <b>${escapeHtml(data.label || data.id)}</b> will mark <b>${total}</b> row(s) for removal across <b>${impact.filter(x => x.count > 0).length}</b> CSV file(s):</p><ul>` +
       impact.filter(x => x.count > 0).map(x => `<li><b>${x.base}</b>: ${x.count} row(s)</li>`).join('') +
-      `</ul><p style="color:#57606a">Nothing is written to disk yet &mdash; review and commit from the <b>Save</b> tab.</p>`;
+      `</ul><p style="color:#57606a">Nothing is written to disk yet &mdash; review and commit from the <b>Review &amp; Save</b> tab.</p>`;
     const ok = await showConfirm('Delete node', msg, true);
     if (!ok) return;
 
@@ -1486,7 +1450,7 @@
     }
     const msg = `<p>This edge maps to <b>${matches.length}</b> row(s) in <b>${base}</b> matching:</p>` +
       `<ul>` + Object.entries(criteria).map(([k,v]) => `<li><b>${escapeHtml(k)}</b> = ${escapeHtml(v)}</li>`).join('') + `</ul>` +
-      `<p style="color:#57606a">Mark for removal? Commit from the <b>Save</b> tab.</p>`;
+      `<p style="color:#57606a">Mark for removal? Commit from the <b>Review &amp; Save</b> tab.</p>`;
     const ok = await showConfirm('Delete edge', msg, true);
     if (!ok) return;
     removeRowsMatching(base, criteria);
@@ -1802,7 +1766,7 @@
         const ids = Array.from(p.selection).filter(i => !p.deletes.has(i));
         if (ids.length === 0) return;
         const msg = `<p>Delete <b>${ids.length}</b> row(s) from <b>${escapeHtml(base)}</b>?</p>` +
-          `<p style="color:#57606a">They go into pending; you can still cancel before committing on the <b>Save</b> tab.</p>`;
+          `<p style="color:#57606a">They go into pending; you can still cancel before committing on the <b>Review &amp; Save</b> tab.</p>`;
         const ok = await showConfirm('Delete selected rows', msg, true);
         if (!ok) return;
         for (const i of ids) p.deletes.add(i);
@@ -1847,7 +1811,7 @@
     wrap.innerHTML = '';
     const bases = Object.keys(pendingChanges).filter(b => isDirty(b));
     if (bases.length === 0) {
-      wrap.innerHTML = '<div class="empty" style="padding:20px;">No pending changes. Edit cells in the Grid tab, or delete a node/edge in the Graph tab.</div>';
+      wrap.innerHTML = '<div class="empty" style="padding:20px;">No pending changes. Edit cells on the <b>Configuration</b> tab, or stage new objects from the <b>Create</b> tab.</div>';
       document.getElementById('saveStatus').textContent = '';
       return;
     }
@@ -2201,7 +2165,7 @@
         el.textContent = 'Working...';
         try {
           await actionRemoveOrphanRow(el.dataset.csv, parseInt(el.dataset.row, 10));
-          el.textContent = '\u2713 Staged for delete (commit on Save tab)';
+          el.textContent = '\u2713 Staged for delete (commit on the Review &amp; Save tab)';
           el.style.background = '#dafbe1';
           el.style.color = '#1a7f37';
           el.style.borderColor = '#1a7f37';
@@ -2244,7 +2208,7 @@
       if (statusEl) {
         const toast = document.createElement('div');
         toast.style.cssText = 'background:#ffebe9; color:#cf222e; padding:6px 12px; margin:6px 0; border-radius:5px; font-size:12px;';
-        toast.innerHTML = '&#10003; Marked row ' + (rowIdx + 1) + ' of ' + escapeHtml(base) + ' for deletion. Open the <b>Save</b> tab to commit.';
+        toast.innerHTML = '&#10003; Marked row ' + (rowIdx + 1) + ' of ' + escapeHtml(base) + ' for deletion. Open the <b>Review &amp; Save</b> tab to commit.';
         statusEl.insertBefore(toast, statusEl.firstChild);
         setTimeout(() => { try { toast.remove(); } catch (_) {} }, 6000);
       }
@@ -2273,7 +2237,7 @@
     bg.innerHTML =
       '<div id="fkAddDlg" style="background:#f6f8fa; border:1px solid #d0d7de; border-radius:8px; padding:18px 22px; min-width:560px; max-width:680px;">' +
         '<h2 style="margin:0 0 6px 0; font-size:14px;">Fix all auto-fixable errors</h2>' +
-        '<div style="color:#57606a; font-size:11.5px; margin-bottom:14px;">All changes go into <b>pending</b>. Nothing writes to disk until you commit on the Save tab. Re-run validation after applying to see what cleared.</div>' +
+        '<div style="color:#57606a; font-size:11.5px; margin-bottom:14px;">All changes go into <b>pending</b>. Nothing writes to disk until you commit on the Review &amp; Save tab. Re-run validation after applying to see what cleared.</div>' +
 
         '<div class="field"><label>' + fkOrphans.length + ' &times; <b>PIM-FK-001</b> orphan assignment(s) <span style="color:#57606a">&mdash; GroupTag referenced but not defined</span></label>' +
           '<select id="fxFkAction"' + (fkOrphans.length === 0 ? ' disabled' : '') + '>' +
@@ -2318,7 +2282,7 @@
             result.fkDeleted + ' orphan assignment(s) marked for delete, ' +
             result.staleDeleted + ' stale-role row(s) marked for delete, ' +
             result.raChanged + ' Active&rarr;Eligible. ' +
-            'Re-run Validate + open Save tab to commit.';
+            'Re-run Validate + open the Review &amp; Save tab to commit.';
           statusEl.insertBefore(toast, statusEl.firstChild);
           setTimeout(() => { try { toast.remove(); } catch (_) {} }, 12000);
         }
@@ -2530,7 +2494,7 @@
     bg.innerHTML =
       '<div id="fkAddDlg" style="background:#f6f8fa; border:1px solid #d0d7de; border-radius:8px; padding:18px 22px; min-width:460px; max-width:560px;">' +
         '<h2 style="margin:0 0 6px 0; font-size:14px;">Re-add definition for <code style="color:#1a7f37">' + escapeHtml(missingTag) + '</code></h2>' +
-        '<div style="color:#57606a; font-size:11.5px; margin-bottom:14px;">Creates one row in the chosen <code>PIM-Definitions-*</code> CSV. The change is staged into pending; nothing writes to disk until you commit on the Save tab.</div>' +
+        '<div style="color:#57606a; font-size:11.5px; margin-bottom:14px;">Creates one row in the chosen <code>PIM-Definitions-*</code> CSV. The change is staged into pending; nothing writes to disk until you commit on the Review &amp; Save tab.</div>' +
         '<div class="field"><label>Which kind of definition?</label>' +
           '<select id="fkBase">' +
             defOptions.map(o => '<option value="' + o.base + '"' + (o.base === suggestedBase ? ' selected' : '') + '>' + o.label + '</option>').join('') +
@@ -3370,7 +3334,7 @@
             return wuxSummary(
               'This creates a new admin <b>' + escapeHtml(upn) + '</b> in 1 row of <b>Account-Definitions-Admins</b>' +
               (n>0 ? ', and gives them <b>' + escapeHtml(s.assignmentType) + '</b> access to <b>' + n + '</b> role group(s) via <b>' + n + '</b> row(s) in <b>PIM-Assignments-Admins</b>' : '') +
-              '. No tenant changes happen until you click <b>Commit all</b> on the Save tab.',
+              '. No tenant changes happen until you click <b>Commit all</b> on the Review &amp; Save tab.',
               impact
             );
           }
@@ -3728,7 +3692,7 @@
               'This creates a new permission group <b>' + escapeHtml(name) + '</b> in 1 row of <b>' + escapeHtml(base) + '</b>' +
               (rolesN ? ', grants it <b>' + rolesN + '</b> Entra ID role(s) via <b>' + rolesN + '</b> row(s) in <b>PIM-Assignments-Roles-Groups</b>' : '') +
               (nestN  ? ', and nests it into <b>' + nestN + '</b> role group(s) via <b>' + nestN + '</b> row(s) in <b>PIM-Assignments-Groups</b>' : '') +
-              '. No tenant changes happen until you click <b>Commit all</b> on the Save tab.',
+              '. No tenant changes happen until you click <b>Commit all</b> on the Review &amp; Save tab.',
               impact
             );
           }
@@ -4004,7 +3968,7 @@
             return wuxSummary(
               'This creates an Azure permission group <b>' + escapeHtml(tag) + '</b> in 1 row of <b>PIM-Assignments-Azure-Resources</b>' +
               (nestN ? ', and nests it into <b>' + nestN + '</b> role group(s) via <b>' + nestN + '</b> row(s) in <b>PIM-Assignments-Groups</b>' : '') +
-              '. No tenant changes happen until you click <b>Commit all</b> on the Save tab.',
+              '. No tenant changes happen until you click <b>Commit all</b> on the Review &amp; Save tab.',
               impact
             );
           }
@@ -4254,7 +4218,7 @@
               (s.permSel.size  ? ', nests <b>' + s.permSel.size + '</b> permission group(s)' : '') +
               (s.adminSel.size ? ', and assigns <b>' + s.adminSel.size + '</b> admin(s)' : '') +
               '. All assignment rows get a <b>' + s.lifetimeDays + '-day</b> expiry and <b>AutoExtend=FALSE</b> so the access disappears unless renewed. ' +
-              'No tenant changes happen until you click <b>Commit all</b> on the Save tab.',
+              'No tenant changes happen until you click <b>Commit all</b> on the Review &amp; Save tab.',
               impact
             );
           }
@@ -4399,7 +4363,7 @@
               'This creates a role group <b>' + escapeHtml(name) + '</b> in 1 row of <b>PIM-Definitions-Roles</b>' +
               (s.permSel.size  ? ', nests <b>' + s.permSel.size + '</b> permission group(s) under it' : '') +
               (s.adminSel.size ? ', and assigns <b>' + s.adminSel.size + '</b> admin(s)' : '') +
-              '. No tenant changes happen until you click <b>Commit all</b> on the Save tab.',
+              '. No tenant changes happen until you click <b>Commit all</b> on the Review &amp; Save tab.',
               impact
             );
           }
@@ -4511,7 +4475,7 @@
               'This duplicates the Definitions row for <b>' + escapeHtml(s.sourceTag) + '</b> as <b>' + escapeHtml(newTag) + '</b>' +
               (s.includeChildAssignments ? ', and copies every outgoing assignment row that references the source GroupTag (with the new tag substituted)' : '') +
               '. Open the Grid tab to edit the new rows before committing if anything needs tweaking. ' +
-              'No tenant changes happen until you click <b>Commit all</b> on the Save tab.',
+              'No tenant changes happen until you click <b>Commit all</b> on the Review &amp; Save tab.',
               null
             );
           }
@@ -5118,6 +5082,10 @@
   // ===================================================================
   // Initial UI prep
   // ===================================================================
+  // Configuration is the landing tab -- populate its file rail immediately.
+  // (Must run after ALL let/const declarations above; see the TDZ note at
+  // the old buildGraph() call site.)
+  renderGridList();
   // Prime caches for any definition CSVs (so the GroupTag dropdowns have data).
   if (isServer) {
     (async () => {
@@ -5125,9 +5093,9 @@
       for (const b of defBases) {
         try { await loadCsv(b); } catch (_) {}
       }
-      // Auto-run the pre-flight validator once on page load so the Save
-      // tab's gate + the Graph badges + the Validate badge are populated
-      // before the operator clicks anything.
+      // Auto-run the pre-flight validator once on page load so the
+      // Review & Save gate + the Validate badge are populated before
+      // the operator clicks anything.
       runPreflight({ silent: true }).catch(() => {});
     })();
   }

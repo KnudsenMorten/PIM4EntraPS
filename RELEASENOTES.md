@@ -1,9 +1,10 @@
 # Release notes for PIM4EntraPS
 
-## v2.4.132
+## v2.4.133
 
 Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monorepo:
 
+- release: PIM4EntraPS v2.4.133 -- PIM Manager: Graph view removed (was unused + the only CDN dependency; SPA now makes zero external requests, data model behind the wizards kept); professional tabs (Configuration landing / Create / Review & Save / Validate / Active Assignments) + labelled Tenant switcher sorted for 25+ MSP instances with config-root tooltips; fixed TDZ init abort on the landing-tab rail render (a456cc00)
 - release: PIM4EntraPS v2.4.132 -- PIM Activator v1.6.26 packed + published to gh-pages (tenant-dropdown readability fix live; post-pack guard validated canonical id; live updates.xml + CRX byte-verified); Update-PimActivator-Extension.ps1 git calls wrapped in Invoke-GitQuiet -- `2>$null` under EAP=Stop turned a harmless CRLF warning from `git add` into a terminating NativeCommandError that aborted the publish mid-way (3f79b213)
 - release: PIM4EntraPS v2.4.131 -- PIM Manager pwsh-7 launch fixed: gate the compiled JSON serializer (System.Web.Extensions / JavaScriptSerializer, .NET-Framework-only; explicit -ReferencedAssemblies broke core resolution with CS0012) on PSEdition Desktop; PowerShell 7 uses native ConvertTo-Json which is already fast. Verified both editions: pwsh7 preflight 2.0s cold / 0.04s warm, PS 5.1 3.3s via compiled path (c69fe4ec)
 - release: PIM4EntraPS v2.4.130 -- Revoke tab live-verified on a real tenant (987 active assignments incl. 43 pim-for-groups that were invisible before: Graph refuses unfiltered assignmentSchedules, now per-group $batch queries over PIM-prefix candidates); served requests count as heartbeat so slow loads no longer self-reap the server; hashtable principal/role/AU label indexes; _tenantSync reuses existing app-only contexts + secret-auth fallback (was cert-only); new -ConnectPlatform launcher switch. Manager branding aligned with PIM Activator (banner version badge, in-banner instance switcher, tab/button/badge treatment). Activator popup: tenant-dropdown options got explicit colors -- 3-tenant list was white-on-white except the highlighted row (repack+redeploy needed to ship to browsers) (fb3a5f86)
@@ -33,13 +34,32 @@ Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monor
 - release: PIM4EntraPS v2.4.106 - Deploy-PimActivatorIntune.ps1 dumps full ADMX upload-failure detail (uploadInfo:null was hiding everything) (23320078)
 - release: PIM4EntraPS v2.4.105 + extension v1.6.24 - fix popup pre-sign-in tabpanel bleed + fix Update script silently aborting gh-pages publish (097fba84)
 - release: PIM4EntraPS v2.4.104 + extension v1.6.22 - -Repack works on PS 5.1 (mgmt1's runtime); guard moved from PEM input to produced CRX output bytes (6cdfd661)
-- release: PIM4EntraPS v2.4.103 - Update-PimActivator-Extension.ps1 scrubs stale Secure Preferences UNCONDITIONALLY (v2.4.100 only scrubbed when binary present, missed the actual trap shape) (41fd4236)
 
 ---
 
 # Release notes -- PIM4EntraPS
 
 > **Curated changelog.** The publish workflow auto-prepends recent monorepo commits as a raw activity log; this file is the human-friendly narrative on top.
+
+---
+
+## v2.4.133 -- PIM Manager: Graph view removed (now fully offline), professional tab naming + layout, tenant picker built for 25+ MSP instances
+
+### Graph view removed
+
+Operator feedback: unused. It was also the SPA's ONLY external dependency (cytoscape + dagre from a CDN), contradicting the "no external network access" promise -- verified zero external requests after removal. The node/edge data model it rendered still powers the Create-tab wizards; only the view is gone. `-StaticHtml` mode (which existed to snapshot the graph) is deprecated.
+
+### Professional naming + layout
+
+- Tabs: **Configuration** (landing tab, file rail pre-populated on load) / **Create** / **Review &amp; Save** / **Validate** / **Active Assignments**. All user-facing strings updated to match.
+- Banner: "PIM4EntraPS &middot; Configuration Manager" subtitle, version badge, and a labelled **Tenant** switcher.
+- Tenant switcher built for MSP scale: alphabetically sorted with `local` pinned first, config-root tooltips per entry -- usable with 25+ tenant instances in `instances.custom.json`.
+
+### Fix
+
+Landing-tab rail population hit a temporal-dead-zone error (`Cannot access 'currentGridBase' before initialization`) that aborted the whole SPA init; the startup render now runs after all declarations.
+
+Verified by headless-Chrome E2E: 5 tabs render, grid landing populated (14 files), all panels switch, wizards stage + cancel cleanly, zero console errors, zero external network requests.
 
 ---
 

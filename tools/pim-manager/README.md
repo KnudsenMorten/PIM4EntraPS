@@ -1,14 +1,14 @@
 # PIM4EntraPS Manager
 
-A graph viewer + editor for the 14-CSV PIM4EntraPS model. Runs on
+An editor for the 14-CSV PIM4EntraPS model. Runs on
 the customer's VM (no install beyond `git pull`), no external network
-access required for editing. Supports a single local instance and MSP
+access required. Supports a single local instance and MSP
 multi-instance setups (one Manager, many customers' data sets).
 
 ```
 SOLUTIONS/PIM4EntraPS/tools/pim-manager/
 ├── Open-PimManager.ps1            ← entry point (server / static / refresh modes)
-├── pim-manager.html               ← single-file SPA (6 tabs: Graph / Grid / New & clone / Save / Validate / Revoke)
+├── pim-manager.html               ← single-file SPA (5 tabs: Configuration / Create / Review & Save / Validate / Active Assignments)
 ├── _validator.ps1                 ← pre-flight validation rules (PIM-FK-*, PIM-RA-*, PIM-TIER-*, ...)
 ├── _tenantSync.ps1                ← tenant-list cache (entra roles, AUs, PIM groups, azure scopes)
 ├── instances.custom.sample.json   ← MSP instance registry template
@@ -43,8 +43,9 @@ cd C:\path\to\AutomateIT\SOLUTIONS\PIM4EntraPS\tools\pim-manager
 ```
 
 This starts a local HTTP server on a random free port, opens your
-default browser to it, and gives you a 3-tab editor (Graph / Grid /
-Save). When you close the browser tab the server self-terminates after
+default browser to it, and gives you a 5-tab editor (Configuration /
+Create / Review & Save / Validate / Active Assignments). When you
+close the browser tab the server self-terminates after
 ~30 seconds.
 
 ## Modes
@@ -52,7 +53,7 @@ Save). When you close the browser tab the server self-terminates after
 | Mode | Switch | Capability |
 |---|---|---|
 | **Server** (default) | `-Server` (or no switch) | Read + edit. Saves back to `<name>.custom.csv`. |
-| **Static** | `-StaticHtml` | Read-only snapshot of the graph baked into a single HTML file. Same as v0.1. |
+| **Static** | `-StaticHtml` | DEPRECATED since the Graph view was removed (v2.4.133) -- the snapshot has no API, so the editor tabs can't load data. Kept for back-compat only. |
 
 Other useful switches:
 
@@ -126,36 +127,30 @@ field and `Read-PimCsvRows` / `Write-PimCsvCustom` in
 `Open-PimManager.ps1` get a SQL-backed implementation &mdash; the rest of
 the server and the whole SPA sit above that seam and stay unchanged.
 
-## The four tabs
+## The five tabs
 
-### Graph
+> The Graph view was removed in v2.4.133 (operator feedback: unused). It
+> was also the SPA's only CDN dependency (cytoscape/dagre), so the Manager
+> is now fully offline-capable. The node/edge data model behind it still
+> powers the Create-tab wizards.
 
-The v0.1 read-only DAG viewer, plus one editor addition: when you
-select a node (admin / role group / permission group / AU) or an edge,
-the right panel grows a **Delete** button. Clicking it shows a confirm
-dialog listing every CSV row that would be removed, then records the
-deletes as in-memory pending changes &mdash; nothing is written until you
-go to the Save tab.
+### Configuration (landing tab)
 
-Drag-to-connect and right-click-to-delete graph editing is deferred to
-v0.3.
-
-### Grid
-
-Left rail lists all 14 CSVs (grouped by Definitions / Assignments).
-A `(mod)` badge marks any CSV with pending changes.
+Left rail lists all 14 configuration files (grouped by Definitions /
+Assignments). A `mod` badge marks any file with pending changes.
 
 Main area is a vanilla `<table>` with `contenteditable` cells. Edit a
 cell, hit Tab or click out, the change goes into the pending-changes
 buffer. Per-row actions:
 
 - **✕** &mdash; mark for deletion (greys the row out; ✕ becomes ↺ to undo)
+- **+1** &mdash; clone the row
 - **+ Add row** &mdash; prepend a blank row
-- **↻ Reload from disk** &mdash; discard pending changes for this CSV only
+- **↻ Reload from disk** &mdash; discard pending changes for this file only
 
-No autosave. The Save tab is the single commit point.
+No autosave. The Review &amp; Save tab is the single commit point.
 
-### New & clone (v0.3)
+### Create (wizards)
 
 A launcher tab with six wizard cards, designed for operators who only
 open the tool every few weeks:
@@ -180,21 +175,34 @@ Each wizard follows these UX rules so the operator never has to remember the nam
 7. **Plain-English review** &mdash; before the row-level diff, the final step shows a 1-paragraph summary of what will land where.
 8. **Right CSV chosen for you** &mdash; the perm-group wizard's "What kind of capability?" dropdown maps the human choice (Task / Service / Process / Resource / Department / Organization) to the right `PIM-Definitions-*.csv` automatically.
 9. **Cancel is the safe default** &mdash; closing the modal asks to discard any rows the wizard staged; nothing is written to disk until `Commit all`.
-10. **Clone from graph** &mdash; right-clicking a role/permission group on the Graph tab opens the Clone wizard pre-populated with that node as the source.
 
-### Save
+### Review &amp; Save
 
-Lists every CSV with pending changes. Each card shows add / remove /
+Lists every file with pending changes. Each card shows add / remove /
 modify counts (green / red / yellow) and a collapsible row-level diff.
 
-- **Commit all** &mdash; PUTs each modified CSV to `/api/csv/<base>`. On
-  success refreshes the graph. On failure stops at the failing CSV (no
-  half-commits).
+- **Commit all** &mdash; PUTs each modified file to `/api/csv/<base>`. On
+  success refreshes the data model. On failure stops at the failing file
+  (no half-commits). Blocked while the validator reports errors (toggle
+  on the Validate tab).
 - **Cancel all pending** &mdash; reverts all in-memory state to the last
   loaded server data. No disk writes.
-- **Refresh from server** &mdash; re-reads the graph + cached CSVs from
-  disk. Use this if you (or someone else) edited a CSV in Excel while
-  the mapper was open.
+- **Refresh from server** &mdash; re-reads everything from disk. Use this if
+  you (or someone else) edited a file in Excel while the Manager was open.
+
+### Validate
+
+Runs the server-side pre-flight validator (`_validator.ps1`): referential
+integrity across the 14 files (PIM-FK-*), role-assignability rules
+(PIM-RA-*), tier-crossing warnings (PIM-TIER-*), naming-convention checks
+(PIM-NAME-*), orphans, duplicates, and tenant-cache freshness. Errors can
+block the commit button; many findings carry one-click fixes.
+
+### Active Assignments
+
+Live view of currently-ACTIVE PIM assignments in the connected tenant
+(entra-role, azure-rbac, pim-for-groups) with bulk revoke. Requires the
+engine SPN context &mdash; launch with `-ConnectPlatform`.
 
 ## Where edits land
 
