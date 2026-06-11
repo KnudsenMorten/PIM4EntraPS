@@ -1,9 +1,10 @@
 # Release notes for PIM4EntraPS
 
-## v2.4.115
+## v2.4.116
 
 Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monorepo:
 
+- release: PIM4EntraPS v2.4.116 -- PIM-Baseline-Management-CSV engine calls Initialize-PlatformLegacyIdentity right after Initialize-PlatformAutomationFramework so KV Legacy-UserName/Password-Internal-Prod actually land in Context.Identity.Legacy.Internal.Prod (v2.4.115 wired the reader but nothing was populating the slot) (8965324b)
 - release: PIM4EntraPS v2.4.115 -- PIM-Baseline-Management-CSV engine now prefers v2 platform Context.Identity.Legacy.Internal.Prod for AD/gMSA credential (KV: Legacy-UserName-Internal-Prod + Legacy-Password-Internal-Prod), falls back to legacy $AD_Credentials global (98f29b4b)
 - release: PIM4EntraPS v2.4.114 -- PIM-Baseline-Management-CSV engine now calls CreateUpdate-Accounts-From-file-CSV with -OnlyAD too (was hardcoded to -OnlyID; AD rows in the CSV were silently ignored); guards on Get-ADUser availability + $AD_Credentials (3fa86c9a)
 - release: PIM4EntraPS v2.4.113 - README PIM Activator section rewritten to today's deploy architecture (docs-only) (df162df9)
@@ -33,13 +34,40 @@ Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monor
 - release: extension v1.6.10 - footer split into 3 stacked rows (title / tenant info / dev attribution) so tenant name is on its own line + Developed by moves below; tenant name rendered prominent (bold sans-serif) with monospaced GUID after (34f0511f)
 - release: extension v1.6.9 - popup.js readMergedCatalog wraps single-object catalog as 1-element array (defense against pre-v2.4.96 PS 5.1 unwrap bug pushed by old Intune profiles); Verify-PimActivatorIntunePolicy.ps1 shows tenantCatalog shape ARRAY vs OBJECT clearly (52e05f16)
 - release: PIM4EntraPS v2.4.96 + extension v1.6.8 - TWO bugs blocking chrome.storage.managed: (a) manifest now declares storage.managed_schema -> managed-schema.json (without this Chromium returns empty from chrome.storage.managed regardless of registry) + (b) all 3 Intune push scripts now use ConvertTo-Json -InputObject @($catalog) to preserve array brackets on single-element catalogs (PS 5.1 + 7 compatible, prevents single-tenant catalog from being serialized as {object} instead of [array]) (4693e4cb)
-- release: PIM4EntraPS v2.4.95 + extension v1.6.7 - popup max-height bumped 600->800px (Chromium's hard cap) + catalog import textarea shrunk from 6 to 3 rows (resize:vertical retained), so Save and continue button no longer disappears on first-run (a2c1331e)
 
 ---
 
 # Release notes -- PIM4EntraPS
 
 > **Curated changelog.** The publish workflow auto-prepends recent monorepo commits as a raw activity log; this file is the human-friendly narrative on top.
+
+---
+
+## v2.4.116 -- PIM-Baseline-Management-CSV engine: actually call `Initialize-PlatformLegacyIdentity` so the KV legacy secrets land in Context.Identity.Legacy.*
+
+### Symptom
+
+After v2.4.115 the customer added `Legacy-UserName-Internal-Prod` + `Legacy-Password-Internal-Prod` to KV, but the engine still printed `[INFO] No AD credential available -- skipping AD-account branch`. `$global:Context.Identity.Legacy.Internal.Prod` was `$null` despite both KV secrets being present.
+
+### Root cause
+
+`Initialize-PlatformAutomationFramework` / `Connect-Platform` only call `Initialize-PlatformIdentity` (for Modern cloud SPN credentials). `Initialize-PlatformLegacyIdentity` is a separately-exported function in AutomateITPS that has to be invoked explicitly -- and the PIM-Baseline-Management-CSV engine never did. KV secrets were sitting there, AutomateITPS knows the mapping, but nothing was pulling them through.
+
+### Fix
+
+Engine now calls `Initialize-PlatformLegacyIdentity -Context $global:Context -IgnoreMissing` right after `Initialize-PlatformAutomationFramework`, so the `Legacy.Internal.Prod` PSCredential gets staged into `$global:Context.Identity.Legacy.Internal.Prod` (along with `Legacy.Internal.Dev`, `Legacy.Internal.Test`, `Legacy.DMZ.Prod`, etc. -- all the legacy slots AutomateITPS knows about).
+
+The credential-resolution chain added in v2.4.115 then picks it up and the AD branch runs.
+
+`-IgnoreMissing` means cloud-only tenants with no on-prem AD slots in KV don't error -- the AD branch just skips with the existing clean `[INFO]` line.
+
+### Files changed
+
+- `engine/PIM-Baseline-Management-CSV/PIM-Baseline-Management-CSV.ps1` -- `Initialize-PlatformLegacyIdentity` call added right after `Initialize-PlatformAutomationFramework`.
+
+### How to apply
+
+- Pull. KV secrets from v2.4.115 stay as-is. Rerun the launcher -- you should now see `[INFO] AD credential source: $global:Context.Identity.Legacy.Internal.Prod (KV: Legacy-UserName-Internal-Prod + Legacy-Password-Internal-Prod)` followed by `Updating AD user ...` / `Creating AD account ...`.
 
 ---
 
