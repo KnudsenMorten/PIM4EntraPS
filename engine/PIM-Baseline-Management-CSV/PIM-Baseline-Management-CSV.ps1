@@ -328,14 +328,31 @@ Write-Output "******************************************************************
             $adCredSource = '$AD_Credentials (legacy global)'
         }
 
-        # v2.4.123: resolve $PathAdmins / $PathAdminsL0T0 from globals if the
-        # local script-scope variables aren't set. Customers historically set
-        # these in config/PIM4EntraPS.NamingConventions.custom.ps1 as globals
-        # (e.g. $global:PathAdmins = 'OU=Admin,OU=AdminAccounts,DC=casa,DC=dk').
+        # v2.4.124: resolve $PathAdmins / $PathAdminsL0T0 in priority order:
+        #   1. script-scope variables already set above (no source today,
+        #      reserved for future per-invocation overrides)
+        #   2. $global:PIM_NamingConventions.PathAdmins / .PathAdminsL0T0
+        #      (canonical v2 shape -- lives in PIM4EntraPS.NamingConventions
+        #      .custom.ps1 next to AdminAccountPatterns, PimGroupPattern,
+        #      TagPrefixToCsv etc.)
+        #   3. $global:PathAdmins / $global:PathAdminsL0T0 (v1 back-compat
+        #      from the legacy repository.custom.ps1)
         # The engine never had a fallback, so missing config -> $null -> the
         # AD-create branch's "target OU is empty" guard fires for every Create.
-        if (-not $PathAdmins      -and $global:PathAdmins)      { $PathAdmins      = $global:PathAdmins }
-        if (-not $PathAdminsL0T0  -and $global:PathAdminsL0T0)  { $PathAdminsL0T0  = $global:PathAdminsL0T0 }
+        if (-not $PathAdmins) {
+            if ($global:PIM_NamingConventions -and $global:PIM_NamingConventions.PathAdmins) {
+                $PathAdmins = $global:PIM_NamingConventions.PathAdmins
+            } elseif ($global:PathAdmins) {
+                $PathAdmins = $global:PathAdmins
+            }
+        }
+        if (-not $PathAdminsL0T0) {
+            if ($global:PIM_NamingConventions -and $global:PIM_NamingConventions.PathAdminsL0T0) {
+                $PathAdminsL0T0 = $global:PIM_NamingConventions.PathAdminsL0T0
+            } elseif ($global:PathAdminsL0T0) {
+                $PathAdminsL0T0 = $global:PathAdminsL0T0
+            }
+        }
 
         if (-not $adCmdAvailable) {
             Write-Host "[INFO] ActiveDirectory module not available on this host -- skipping AD-account branch. AD rows in the CSV will not be provisioned in this run." -ForegroundColor Yellow
@@ -344,7 +361,7 @@ Write-Output "******************************************************************
             Write-Host "[INFO] No AD credential available -- skipping AD-account branch. Add KV secrets 'Legacy-UserName-Internal-Prod' (e.g. <domain>\<gMSA>`$) + 'Legacy-Password-Internal-Prod' (any non-empty string for gMSA, real password otherwise) so Initialize-PlatformLegacyIdentity stages it at `$global:Context.Identity.Legacy.Internal.Prod." -ForegroundColor Yellow
         }
         elseif (-not $PathAdmins -and -not $PathAdminsL0T0) {
-            Write-Host "[INFO] Neither `$PathAdmins nor `$PathAdminsL0T0 is set (no `$global:PathAdmins / `$global:PathAdminsL0T0 found). Add them to config/PIM4EntraPS.NamingConventions.custom.ps1 (e.g. `$global:PathAdmins = 'OU=Admin,OU=AdminAccounts,DC=casa,DC=dk'). Skipping AD-create branch -- existing accounts will still get Set-ADUser updates, but no new AD accounts will be provisioned in this run." -ForegroundColor Yellow
+            Write-Host "[INFO] Neither `$PathAdmins nor `$PathAdminsL0T0 is set. Add to config/PIM4EntraPS.NamingConventions.custom.ps1: `$global:PIM_NamingConventions.PathAdmins = 'OU=...,DC=casa,DC=dk' and `$global:PIM_NamingConventions.PathAdminsL0T0 = 'OU=...,DC=casa,DC=dk'. Updates still go through; only new AD accounts won't be provisioned in this run." -ForegroundColor Yellow
             # Updates still work without -Path; only Create needs the OU.
             CreateUpdate-Accounts-From-file-CSV -AccountsDefinitionFile $AccountsDefinitionFile `
                                                 -Credentials       $adCred `

@@ -1,9 +1,10 @@
 # Release notes for PIM4EntraPS
 
-## v2.4.123
+## v2.4.124
 
 Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monorepo:
 
+- release: PIM4EntraPS v2.4.124 -- PathAdmins / PathAdminsL0T0 moved under canonical \$global:PIM_NamingConventions hashtable (matching AdminAccountPatterns, PimGroupPattern, TagPrefixToCsv) with v2.4.123 free-floating-globals shape kept as back-compat fallback; locked.ps1 + custom.sample.ps1 updated to document the new shape (dca61cd2)
 - release: PIM4EntraPS v2.4.123 -- (1) skip Connect-ExchangeOnline on the -OnlyAD invocation + reuse existing EXO session via Get-ConnectionInformation so EXO connects exactly once per launcher run (was 2x after v2.4.114); (2) engine resolves $PathAdmins / $PathAdminsL0T0 from $global: fallback so AD-create rows finally have an OU to target (a7e9f695)
 - release: PIM4EntraPS v2.4.122 -- AD-create OU routing now driven by UserName naming convention (regex match on L0/T0 markers bounded by -/_/. in the name) instead of CSV TierLevel column; matches the customer pattern where privilege class is encoded in the account name itself (c0788dfc)
 - release: PIM4EntraPS v2.4.121 -- AD-create branch matches CSV TierLevel against the Tier convention (T0/T1/T2/T3) -- T0 -> PathAdminsL0T0, T1/T2/T3/blank -> PathAdmins. Previously the engine matched Level literals (L0/L1) so Tier-formatted CSVs silently dropped every Create row. L0 still accepted as T0-equivalent for back-compat. Level and Tier are distinct dimensions; CSV column is the Tier. (5d0cdd62)
@@ -33,13 +34,47 @@ Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monor
 - release: PIM4EntraPS v2.4.98 + extension v1.6.19 - unified Intune deploy + critical fix for ExtensionSettings schema bug that froze fleet at old versions + popup CSS no longer overflows Chromium popup cap (508f6eab)
 - release: PIM4EntraPS v2.4.97 - Update-PimActivator-Extension.ps1 SAFETY FIX (no more profile wipes) + faster update trigger via --extensions-update-frequency=30 (cdc2c7cb)
 - release: extension v1.6.16 - revert v1.6.13's footer-collapse experiment; restore 2-row footer layout (row 1: title + repo + GitHub + Report bug | tenant ID; row 2: dev attribution | tenant name + reset) (7018f592)
-- release: extension v1.6.15 - wizard ALWAYS shows mode-selector on fresh deploy (removed auto-pick for single-tenant catalog that was silently skipping the picker); catalogPanel now carries BOTH picker + import sub-divs so 'Use centrally deployed' (multi) and 'Import JSON' modes can toggle independently regardless of current catalog state (a3885a4a)
 
 ---
 
 # Release notes -- PIM4EntraPS
 
 > **Curated changelog.** The publish workflow auto-prepends recent monorepo commits as a raw activity log; this file is the human-friendly narrative on top.
+
+---
+
+## v2.4.124 -- `$PathAdmins` / `$PathAdminsL0T0` now live under the canonical `$global:PIM_NamingConventions` hashtable
+
+### Why
+
+v2.4.123 wired the engine to fall back to `$global:PathAdmins` / `$global:PathAdminsL0T0` -- free-floating globals. That doesn't match the rest of the PIM4EntraPS naming-convention surface, which lives under a single hashtable (`AdminAccountPatterns`, `PimGroupPattern`, `TagPrefixToCsv`, etc. all sit on `$global:PIM_NamingConventions.*`). The free-floating shape introduced a second convention to remember and made the customer-config file inconsistent.
+
+### Fix
+
+Resolution order in the engine is now:
+
+1. Script-scope `$PathAdmins` / `$PathAdminsL0T0` (reserved for future per-invocation overrides; nothing sets them today).
+2. `$global:PIM_NamingConventions.PathAdmins` / `$global:PIM_NamingConventions.PathAdminsL0T0` -- canonical v2 shape.
+3. `$global:PathAdmins` / `$global:PathAdminsL0T0` -- v2.4.123 back-compat for anyone who already added the free-floating form.
+
+`config/PIM4EntraPS.NamingConventions.locked.ps1` now seeds both keys as `$null` so the hashtable surface lists them next to the other naming-convention defaults. `PIM4EntraPS.NamingConventions.custom.sample.ps1` documents the canonical override form with a worked example.
+
+### How to apply
+
+Drop into `config/PIM4EntraPS.NamingConventions.custom.ps1`:
+
+```powershell
+$global:PIM_NamingConventions.PathAdmins     = 'OU=Admin Accounts,OU=OnPrem Only - No Sync to Cloud,OU=SPECIAL ACCOUNTS,DC=CASA,DC=DK'
+$global:PIM_NamingConventions.PathAdminsL0T0 = 'OU=Admin Accounts,OU=OnPrem Only - No Sync to Cloud,OU=SPECIAL ACCOUNTS,DC=CASA,DC=DK'
+```
+
+Replace the DNs with your tenant's OUs. Tenants that co-mingle high-priv and general admins in one OU point both at the same DN.
+
+### Files changed
+
+- `engine/PIM-Baseline-Management-CSV/PIM-Baseline-Management-CSV.ps1` -- resolution chain extended to read `$global:PIM_NamingConventions.Path*` ahead of the free-floating globals; updated skip-message instructs operators to use the canonical hashtable form.
+- `config/PIM4EntraPS.NamingConventions.locked.ps1` -- `PathAdmins` + `PathAdminsL0T0` keys seeded as `$null` with inline docs.
+- `config/PIM4EntraPS.NamingConventions.custom.sample.ps1` -- worked override example added.
 
 ---
 

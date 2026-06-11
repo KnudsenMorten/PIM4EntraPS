@@ -98,6 +98,23 @@
 # $global:PIM_NamingConventions.AdminAccountDisplayNameSuffix = ' (Admin)'
 
 
+# ----- On-prem AD OU paths -------------------------------------------------
+# Where the PIM-Baseline-Management-CSV engine's AD-Create branch lands new
+# admin accounts (New-ADUser -Path <DN>).
+#
+#   PathAdmins     -- general admins (no L0/T0 marker in name)
+#   PathAdminsL0T0 -- high-priv admins (UserName carries L0 or T0, e.g.
+#                     'Admin-SKR-L0-T0-AD'); routed automatically by the
+#                     engine's UserName-regex check.
+#
+# Tenants that co-mingle both classes in one OU just point both at the
+# same DN. Single-quote the strings -- spaces and hyphens in OU names
+# (e.g. 'OnPrem Only - No Sync to Cloud') need no escaping.
+#
+# $global:PIM_NamingConventions.PathAdmins     = 'OU=Admin Accounts,OU=OnPrem Only - No Sync to Cloud,OU=SPECIAL ACCOUNTS,DC=casa,DC=dk'
+# $global:PIM_NamingConventions.PathAdminsL0T0 = 'OU=Admin Accounts,OU=OnPrem Only - No Sync to Cloud,OU=SPECIAL ACCOUNTS,DC=casa,DC=dk'
+
+
 # ----- PIM groups ----------------------------------------------------------
 
 # Entra ID group name template for PIM permission groups.
