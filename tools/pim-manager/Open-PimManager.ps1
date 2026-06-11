@@ -98,7 +98,14 @@ param(
 
     # Ad-hoc instance: point the Manager at any config folder directly without
     # declaring it in instances.custom.json. Wins over -Instance.
-    [string]$ConfigRoot
+    [string]$ConfigRoot,
+
+    # Bootstrap the AutomateITPS platform connection (bootstrap cert -> Key
+    # Vault -> Modern SPN -> Graph + Az app-only) in THIS process before
+    # starting, so the Revoke tab + tenant-list refresh work without running a
+    # baseline engine first. Requires FUNCTIONS\AutomateITPS in the repo and a
+    # bootstrap/platform-config.json (the standard mgmt-box setup).
+    [switch]$ConnectPlatform
 )
 
 $ErrorActionPreference = 'Stop'
@@ -127,6 +134,16 @@ $instancesFile = Join-Path $PSScriptRoot 'instances.custom.json'
 # grows a connection-string field and Read-PimCsvRows/Write-PimCsvCustom get
 # a SQL-backed implementation; nothing above this layer changes.
 # ---------------------------------------------------------------------------
+
+function Get-PimSolutionVersion {
+    # Reads SOLUTIONS/PIM4EntraPS/VERSION for the header badge (same pill the
+    # PIM Activator shows). Best-effort: 'v?' when the file is missing.
+    $vf = Join-Path $solutionRoot 'VERSION'
+    if (Test-Path -LiteralPath $vf) {
+        try { return ('v' + ([System.IO.File]::ReadAllText($vf).Trim())) } catch { }
+    }
+    return 'v?'
+}
 
 function Get-PimManagerInstances {
     # Returns array of @{ name; configRoot; outputRoot } -- 'local' first.
@@ -197,6 +214,16 @@ if ($ConfigRoot) {
 if (-not (Test-Path -LiteralPath $template))   { throw "Template not found: $template" }
 if (Test-Path -LiteralPath $tenantSync) { . $tenantSync }
 if (Test-Path -LiteralPath $validator)  { . $validator }
+
+if ($ConnectPlatform) {
+    $repoRoot = Split-Path -Parent (Split-Path -Parent $solutionRoot)   # ...\AutomateIT
+    $psd1 = Join-Path $repoRoot 'FUNCTIONS\AutomateITPS\AutomateITPS.psd1'
+    if (-not (Test-Path -LiteralPath $psd1)) { throw "-ConnectPlatform: AutomateITPS module not found at $psd1" }
+    Write-Host "Connecting platform (AutomateITPS bootstrap -> Modern SPN, app-only) ..." -ForegroundColor Cyan
+    Import-Module $psd1 -Global -Force -WarningAction SilentlyContinue
+    $null = Connect-Platform
+    Write-Host ("  connected: tenant {0}" -f $global:AzureTenantID) -ForegroundColor Green
+}
 
 # The 14 CSV bases the mapper edits, in stable UI order, with their default
 # headers used when creating a brand-new .custom.csv.
@@ -701,7 +728,7 @@ function Invoke-StaticHtml {
     $tenantJson  = ConvertTo-PimJson -Body $tenantLists
     $instJson = ConvertTo-PimJson -Body ([ordered]@{ active = $script:PimInstanceName; instances = @() })
     $html = [System.IO.File]::ReadAllText($template, [System.Text.UTF8Encoding]::new($true))
-    $html = $html.Replace('__PIM_DATA__', $json).Replace('__PIM_TOKEN__', '').Replace('__PIM_MODE__', 'static').Replace('__PIM_NAMING__', $namingJson).Replace('__PIM_TENANT_LISTS__', $tenantJson).Replace('__PIM_INSTANCES__', $instJson)
+    $html = $html.Replace('__PIM_DATA__', $json).Replace('__PIM_TOKEN__', '').Replace('__PIM_MODE__', 'static').Replace('__PIM_NAMING__', $namingJson).Replace('__PIM_TENANT_LISTS__', $tenantJson).Replace('__PIM_INSTANCES__', $instJson).Replace('__PIM_VERSION__', (Get-PimSolutionVersion))
 
     if (-not $OutHtml) {
         $OutHtml = Join-Path ([IO.Path]::GetTempPath()) ("pim-manager-{0}.html" -f ([Guid]::NewGuid().ToString('N').Substring(0,8)))
@@ -970,29 +997,36 @@ function Get-PimManagerLookupCaches {
     $Global:Users_All_ID  = $script:PimManager_Users
     $Global:Groups_All_ID = $script:PimManager_Groups
 
+    # Id-keyed indexes: the row builder resolves principal/role/AU labels per
+    # assignment row, and a linear scan per row is O(rows x principals) --
+    # measurably seconds on a 944-row tenant. Hashtables make it O(rows).
+    $script:PimManager_UserById  = @{}
+    foreach ($u in $script:PimManager_Users)  { if ($u -and $u.Id)  { $script:PimManager_UserById["$($u.Id)"]  = $u } }
+    $script:PimManager_GroupById = @{}
+    foreach ($g in $script:PimManager_Groups) { if ($g -and $g.Id)  { $script:PimManager_GroupById["$($g.Id)"] = $g } }
+    $script:PimManager_RoleById  = @{}
+    foreach ($r in $script:PimManager_EntraRoles) { if ($r -and $r.Id) { $script:PimManager_RoleById["$($r.Id)"] = $r } }
+    $script:PimManager_AuById    = @{}
+    foreach ($a in $script:PimManager_AUs) { if ($a -and $a.Id) { $script:PimManager_AuById["$($a.Id)"] = $a } }
+
     $script:PimManager_LookupCachesLoaded = $true
 }
 
 function Resolve-PimManagerPrincipalLabel {
-    # Try user UPN first, then group DisplayName, then bare id.
+    # Try user UPN first, then group DisplayName, then bare id. Hashtable
+    # lookups -- called once per assignment row (944 rows on a real tenant).
     param([Parameter(Mandatory)][AllowEmptyString()][string]$PrincipalId)
     if ([string]::IsNullOrWhiteSpace($PrincipalId)) { return '' }
-    if ($script:PimManager_Users) {
-        foreach ($u in $script:PimManager_Users) {
-            if ($u -and "$($u.Id)" -eq $PrincipalId) {
-                if ($u.UserPrincipalName) { return [string]$u.UserPrincipalName }
-                if ($u.DisplayName)       { return [string]$u.DisplayName }
-                return $PrincipalId
-            }
-        }
+    if ($script:PimManager_UserById -and $script:PimManager_UserById.ContainsKey($PrincipalId)) {
+        $u = $script:PimManager_UserById[$PrincipalId]
+        if ($u.UserPrincipalName) { return [string]$u.UserPrincipalName }
+        if ($u.DisplayName)       { return [string]$u.DisplayName }
+        return $PrincipalId
     }
-    if ($script:PimManager_Groups) {
-        foreach ($g in $script:PimManager_Groups) {
-            if ($g -and "$($g.Id)" -eq $PrincipalId) {
-                if ($g.DisplayName) { return [string]$g.DisplayName }
-                return $PrincipalId
-            }
-        }
+    if ($script:PimManager_GroupById -and $script:PimManager_GroupById.ContainsKey($PrincipalId)) {
+        $g = $script:PimManager_GroupById[$PrincipalId]
+        if ($g.DisplayName) { return [string]$g.DisplayName }
+        return $PrincipalId
     }
     return $PrincipalId
 }
@@ -1006,12 +1040,9 @@ function Resolve-PimManagerEntraRoleName {
     if ($slash -ge 0 -and $slash -lt ($RoleDefinitionId.Length - 1)) {
         $guid = $RoleDefinitionId.Substring($slash + 1)
     }
-    if ($script:PimManager_EntraRoles) {
-        foreach ($r in $script:PimManager_EntraRoles) {
-            if ($r -and "$($r.Id)" -eq $guid) {
-                if ($r.DisplayName) { return [string]$r.DisplayName }
-            }
-        }
+    if ($script:PimManager_RoleById -and $script:PimManager_RoleById.ContainsKey($guid)) {
+        $r = $script:PimManager_RoleById[$guid]
+        if ($r.DisplayName) { return [string]$r.DisplayName }
     }
     return $guid
 }
@@ -1022,12 +1053,8 @@ function Resolve-PimManagerDirectoryScope {
     if ($DirectoryScopeId -eq '/')                       { return '/ (tenant-wide)' }
     if ($DirectoryScopeId -like '/administrativeUnits/*') {
         $auId = ($DirectoryScopeId -split '/')[-1]
-        if ($script:PimManager_AUs) {
-            foreach ($au in $script:PimManager_AUs) {
-                if ($au -and "$($au.Id)" -eq $auId) {
-                    return '/AdministrativeUnits/' + [string]$au.DisplayName
-                }
-            }
+        if ($script:PimManager_AuById -and $script:PimManager_AuById.ContainsKey($auId)) {
+            return '/AdministrativeUnits/' + [string]$script:PimManager_AuById[$auId].DisplayName
         }
         return $DirectoryScopeId
     }
@@ -1138,29 +1165,56 @@ function Get-PimActiveAssignmentsCached {
     }
 
     # ---- PIM-for-Groups active assignments ---------------------------------
+    # Graph REFUSES an unfiltered list on assignmentSchedules ('MissingParameters:
+    # The required parameters GroupId or PrincipalId is missing') -- both the
+    # engine's bulk preload and a naive -All call get BadRequest. The supported
+    # shape is one filtered query per group. Two scale guards:
+    #   1. Only PIM-convention groups qualify (the lookup cache can contain the
+    #      whole tenant when the naming filter is broad; dynamic groups fail
+    #      with ResourceTypeNotSupported anyway).
+    #   2. Queries go through /v1.0/$batch, 20 per round-trip -- a per-group
+    #      sequential loop took >4 minutes on a real tenant.
     $pimGroupRows = @()
-    if (Get-Command Get-PimGroupSchedulesPreloaded -ErrorAction SilentlyContinue) {
-        try {
-            [void](Get-PimGroupSchedulesPreloaded)
-        } catch {
-            Write-Warning "  [revoke] Get-PimGroupSchedulesPreloaded failed: $($_.Exception.Message)"
+    $pimPrefix = 'PIM-'
+    try {
+        if ((Get-Command Get-PimNamePrefix -ErrorAction SilentlyContinue) -and $global:PIM_NamingConventions -and $global:PIM_NamingConventions.PimGroupPattern) {
+            $p = Get-PimNamePrefix -Pattern $global:PIM_NamingConventions.PimGroupPattern
+            if ($p -and $p.Length -ge 3) { $pimPrefix = $p }
         }
-        # The preload exposes $script:PimGroupAssignmentByGroupId in the
-        # PIM-Functions module scope. Walk it via reflection -- we cannot
-        # directly read another module's $script: scope, so use the helper
-        # which returns the same data via Get-MgIdentityGovernance...
-        # Cheapest path: query the module for the underlying assignment objects
-        # by walking each PIM-prefixed group's assignment bucket.
-        try {
-            # Re-call the underlying Graph cmdlet once (cached by the helper's
-            # session-wide cache anyway, so this is effectively free).
-            $pimGroupRows = @(Get-MgIdentityGovernancePrivilegedAccessGroupAssignmentSchedule -All -ErrorAction Stop)
-        } catch {
-            Write-Warning "  [revoke] Get-MgIdentityGovernancePrivilegedAccessGroupAssignmentSchedule failed: $($_.Exception.Message)"
-            $pimGroupRows = @()
+    } catch { }
+    $pimGroupsToQuery = @($script:PimManager_Groups | Where-Object { $_ -and $_.Id -and $_.DisplayName -and ([string]$_.DisplayName).StartsWith($pimPrefix, [System.StringComparison]::OrdinalIgnoreCase) })
+    if ($pimGroupsToQuery.Count -gt 0) {
+        $gFail = 0
+        for ($ofs = 0; $ofs -lt $pimGroupsToQuery.Count; $ofs += 20) {
+            $slice = $pimGroupsToQuery[$ofs..([Math]::Min($ofs + 19, $pimGroupsToQuery.Count - 1))]
+            $requests = New-Object System.Collections.ArrayList
+            for ($i = 0; $i -lt $slice.Count; $i++) {
+                [void]$requests.Add(@{
+                    id     = "$i"
+                    method = 'GET'
+                    url    = "/identityGovernance/privilegedAccess/group/assignmentSchedules?`$filter=groupId eq '$($slice[$i].Id)'"
+                })
+            }
+            try {
+                $resp = Invoke-MgGraphRequest -Method POST -Uri 'https://graph.microsoft.com/v1.0/$batch' -Body (@{ requests = $requests.ToArray() } | ConvertTo-Json -Depth 6) -ContentType 'application/json' -ErrorAction Stop
+                foreach ($br in @($resp.responses)) {
+                    if ($br.status -ge 200 -and $br.status -lt 300 -and $br.body -and $br.body.value) {
+                        foreach ($v in @($br.body.value)) { $pimGroupRows += $v }
+                    } elseif ($br.status -ge 400) {
+                        $gFail++
+                        $errCode = if ($br.body -and $br.body.error) { $br.body.error.code } else { $br.status }
+                        if ($gFail -le 3) { Write-Warning ("  [revoke] assignmentSchedules for group '{0}' failed: {1}" -f $slice[[int]$br.id].DisplayName, $errCode) }
+                    }
+                }
+            } catch {
+                $gFail += $slice.Count
+                if ($gFail -le 25) { Write-Warning "  [revoke] `$batch round-trip failed: $($_.Exception.Message)" }
+            }
         }
+        if ($gFail -gt 3) { Write-Warning ("  [revoke] assignmentSchedules failed for {0} group(s) total (first 3 shown)." -f $gFail) }
+        Write-Host ("  [revoke] pim-for-groups: {0} active assignment(s) across {1} PIM group(s) ({2} batch round-trips)" -f $pimGroupRows.Count, $pimGroupsToQuery.Count, [Math]::Ceiling($pimGroupsToQuery.Count / 20)) -ForegroundColor DarkGray
     } else {
-        Write-Warning "  [revoke] Get-PimGroupSchedulesPreloaded not available (engine _shared/PIM-Functions.psm1 not loaded). PIM-for-Groups rows will be empty."
+        Write-Warning ("  [revoke] no '{0}'-prefixed groups in the lookup cache. PIM-for-Groups rows will be empty." -f $pimPrefix)
     }
     foreach ($p in $pimGroupRows) {
         if (-not $p) { continue }
@@ -1392,6 +1446,12 @@ function Invoke-Server {
             }
             $ts = $started.ToString('HH:mm:ss')
             Write-Host ("  [{0}] {1,-6} {2,-40} -> {3}" -f $ts, $ctx.Request.HttpMethod, $ctx.Request.Url.PathAndQuery, $status) -ForegroundColor DarkGray
+            # A served request IS client activity. Long-running endpoints
+            # (active-assignments took 90s on a real tenant) block the
+            # single-threaded loop, so the browser's 10s heartbeats queue
+            # unprocessed -- without this, the server reaped itself right
+            # after answering the slow request.
+            $script:lastHeartbeat = Get-Date
         }
 
         # Heartbeat check.
@@ -1436,7 +1496,7 @@ function Handle-Request {
             instances = $instList.ToArray()
         })
         $html = [System.IO.File]::ReadAllText($template, [System.Text.UTF8Encoding]::new($true))
-        $html = $html.Replace('__PIM_DATA__', $json).Replace('__PIM_TOKEN__', $ExpectedToken).Replace('__PIM_MODE__', 'server').Replace('__PIM_NAMING__', $namingJson).Replace('__PIM_TENANT_LISTS__', $tenantJson).Replace('__PIM_INSTANCES__', $instJson)
+        $html = $html.Replace('__PIM_DATA__', $json).Replace('__PIM_TOKEN__', $ExpectedToken).Replace('__PIM_MODE__', 'server').Replace('__PIM_NAMING__', $namingJson).Replace('__PIM_TENANT_LISTS__', $tenantJson).Replace('__PIM_INSTANCES__', $instJson).Replace('__PIM_VERSION__', (Get-PimSolutionVersion))
         Write-HtmlResponse -Response $resp -Html $html
         $script:lastHeartbeat = Get-Date
         return 200
