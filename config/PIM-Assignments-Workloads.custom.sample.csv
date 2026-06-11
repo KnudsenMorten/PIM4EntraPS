@@ -1,0 +1,5 @@
+Workload;RoleName;GroupTag;Scope;Action;Notes
+defender-xdr;Security operator;Defender-XDR-SecurityOperations-Operator-L3;/;Assign;Unified RBAC - manage incidents and run scans
+defender-xdr;Security reader;Defender-XDR-SecurityOperations-Reader-L4;/;Assign;Unified RBAC - read-only
+intune;Help Desk Operator;Intune-Helpdesk-L3;;Assign;Intune built-in role
+intune;Read Only Operator;Intune-Reader-L4;;Assign;Intune built-in role

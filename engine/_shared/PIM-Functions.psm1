@@ -2449,6 +2449,223 @@ Function Select-PimAssignmentRowsByRing {
     return $kept.ToArray()
 }
 
+# ===========================================================================
+# Workload connectors (v2.4.142) -- apply PIM groups to workload RBAC
+# (Defender XDR Unified RBAC, Intune roles, ...) from declarative files:
+#   workloads/connectors/<id>.connector.json  -- HOW to talk to a workload
+#   config/PIM-Assignments-Workloads.custom.csv -- desired state per tenant
+# Full design: docs/WORKLOAD-CONNECTORS.md. Phase 1 supports auth=graph.
+# ===========================================================================
+
+Function Expand-PimWorkloadTokens {
+    # Replaces {token} / {token|default} in a string from a hashtable.
+    param([Parameter(Mandatory)][AllowEmptyString()][string]$Text, [Parameter(Mandatory)][hashtable]$Tokens)
+    return ([regex]::Replace($Text, '\{([A-Za-z][A-Za-z0-9]*)(\|([^}]*))?\}', {
+        param($m)
+        $k = $m.Groups[1].Value
+        if ($Tokens.ContainsKey($k) -and $null -ne $Tokens[$k] -and "$($Tokens[$k])" -ne '') { return "$($Tokens[$k])" }
+        if ($m.Groups[2].Success) { return $m.Groups[3].Value }
+        return ''
+    }))
+}
+
+Function Read-PimWorkloadConnectors {
+    param([Parameter(Mandatory)][string]$ConnectorsDir)
+    $out = New-Object System.Collections.ArrayList
+    if (-not (Test-Path -LiteralPath $ConnectorsDir)) { return ,$out.ToArray() }
+    foreach ($f in (Get-ChildItem $ConnectorsDir -Filter '*.connector.json' -File | Sort-Object Name)) {
+        try {
+            $raw = [System.IO.File]::ReadAllText($f.FullName, [System.Text.UTF8Encoding]::new($false))
+            if ($raw.Length -gt 0 -and [int][char]$raw[0] -eq 0xFEFF) { $raw = $raw.Substring(1) }
+            [void]$out.Add(($raw | ConvertFrom-Json))
+        } catch {
+            Write-Host "ERROR: connector $($f.Name) could not be parsed: $($_.Exception.Message)" -ForegroundColor Red
+        }
+    }
+    # Plain return (callers collect with @()); comma-wrap would nest -- see
+    # the v2.4.128 lesson.
+    return $out.ToArray()
+}
+
+Function Invoke-PimWorkloadApi {
+    # Executes one connector API descriptor (graph adapter). Returns parsed body.
+    param(
+        [Parameter(Mandatory)][object]$Connector,
+        [Parameter(Mandatory)][object]$Op,
+        [hashtable]$Tokens = @{},
+        [object]$Body = $null
+    )
+    if ("$($Connector.auth)" -ne 'graph') { throw "Connector '$($Connector.id)': auth adapter '$($Connector.auth)' is not implemented yet (phase 1 = graph)." }
+    $uri = "$($Connector.api.baseUrl)" + (Expand-PimWorkloadTokens -Text "$($Op.path)" -Tokens $Tokens)
+    if ($Body) {
+        $json = $Body | ConvertTo-Json -Depth 8
+        return Invoke-MgGraphRequest -Method $Op.method -Uri $uri -Body $json -ContentType 'application/json' -ErrorAction Stop
+    }
+    return Invoke-MgGraphRequest -Method $Op.method -Uri $uri -ErrorAction Stop
+}
+
+Function Get-PimWorkloadRoles {
+    # Live role definitions for one connector: @( @{ id; name; description } ).
+    param([Parameter(Mandatory)][object]$Connector)
+    $op = $Connector.api.listRoles
+    if (-not $op) {
+        # Connectors without a role-listing API may carry a static roles array.
+        return @(@($Connector.roles) | ForEach-Object { @{ id = "$($_.id)"; name = "$($_.name)"; description = "$($_.description)" } })
+    }
+    $resp = Invoke-PimWorkloadApi -Connector $Connector -Op $op
+    $items = if ($op.itemsPath) { $resp.($op.itemsPath) } else { $resp }
+    $out = New-Object System.Collections.ArrayList
+    foreach ($r in @($items)) {
+        [void]$out.Add(@{
+            id          = "$($r.($op.roleId))"
+            name        = "$($r.($op.roleName))"
+            description = $(if ($op.roleDescription -and $r.($op.roleDescription)) { "$($r.($op.roleDescription))" } else { '' })
+        })
+    }
+    return $out.ToArray()
+}
+
+Function Get-PimWorkloadAssignmentPrincipals {
+    # Normalises one assignment item to @{ id; principals = string[] },
+    # fetching the detail record when the list shape omits members.
+    param([Parameter(Mandatory)][object]$Connector, [Parameter(Mandatory)][object]$Item)
+    $la = $Connector.api.listAssignments
+    $id = "$($Item.($la.assignmentId))"
+    $principals = @()
+    if ($la.principalIds -and $null -ne $Item.($la.principalIds)) {
+        $principals = @($Item.($la.principalIds)) | ForEach-Object { "$_" }
+    } elseif ($Connector.api.getAssignment) {
+        $ga = $Connector.api.getAssignment
+        $detail = Invoke-PimWorkloadApi -Connector $Connector -Op $ga -Tokens @{ assignmentId = $id }
+        if ($ga.principalIds -and $null -ne $detail.($ga.principalIds)) {
+            $principals = @($detail.($ga.principalIds)) | ForEach-Object { "$_" }
+        }
+    }
+    return @{ id = $id; principals = $principals; displayName = "$($Item.displayName)" }
+}
+
+Function Apply-PimWorkloadAssignments {
+    <#
+    .SYNOPSIS
+        Applies PIM-Assignments-Workloads desired state to the workloads via
+        their connector definitions. Idempotent; -WhatIfMode prints the plan.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$WorkloadsAssignmentFile,
+        [Parameter(Mandatory)][string]$ConnectorsDir,
+        [switch]$WhatIfMode
+    )
+    if (-not (Test-Path -LiteralPath $WorkloadsAssignmentFile)) {
+        Write-Host "  [workloads] no desired-state file at $WorkloadsAssignmentFile -- nothing to do." -ForegroundColor DarkGray
+        return
+    }
+    $connectors = @{}
+    foreach ($c in (Read-PimWorkloadConnectors -ConnectorsDir $ConnectorsDir)) { $connectors["$($c.id)".ToLowerInvariant()] = $c }
+    $rows = @(Import-Csv -Path $WorkloadsAssignmentFile -Delimiter ';' -Encoding UTF8 | Where-Object { $_.Workload -and $_.RoleName -and $_.GroupTag })
+    Write-Host ("  [workloads] {0} desired row(s), {1} connector(s){2}" -f $rows.Count, $connectors.Count, $(if ($WhatIfMode) { ' (WHATIF -- no changes will be made)' } else { '' })) -ForegroundColor Cyan
+
+    $rolesCache = @{}        # connectorId -> roles array
+    foreach ($row in $rows) {
+        $wid = "$($row.Workload)".Trim().ToLowerInvariant()
+        $conn = $connectors[$wid]
+        if (-not $conn) { Write-Host "ERROR: row references unknown workload '$($row.Workload)' (no connector). Skipping." -ForegroundColor Red; continue }
+        $action = if ("$($row.Action)".Trim()) { "$($row.Action)".Trim() } else { 'Assign' }
+
+        # GroupTag -> group: prefer the engine's groups cache (DisplayName
+        # contains the tag by convention); fall back to Graph lookups.
+        $group = $null
+        $tag = "$($row.GroupTag)".Trim()
+        foreach ($g in @($Global:Groups_All_ID)) {
+            if ($g -and "$($g.DisplayName)" -match [regex]::Escape($tag)) { $group = $g; break }
+        }
+        if (-not $group) {
+            try { $group = @(Get-MgGroup -Filter "displayName eq 'PIM-$tag'" -ErrorAction Stop)[0] } catch { }
+        }
+        if (-not $group) {
+            try { $found = @(Get-MgGroup -Search ('"displayName:' + $tag + '"') -ConsistencyLevel eventual -Top 2 -ErrorAction Stop); if ($found.Count -ge 1) { $group = $found[0] } } catch { }
+        }
+        if (-not $group) { Write-Host "ERROR: GroupTag '$tag' could not be resolved to an Entra group. Skipping row." -ForegroundColor Red; continue }
+        $groupId = "$($group.Id)"
+
+        # Resolve role name -> id (live; cached per connector per run).
+        if (-not $rolesCache.ContainsKey($wid)) {
+            try { $rolesCache[$wid] = @(Get-PimWorkloadRoles -Connector $conn) }
+            catch { Write-Host "ERROR: connector '$wid' role listing failed: $($_.Exception.Message). Skipping its rows." -ForegroundColor Red; $rolesCache[$wid] = $null }
+        }
+        $roles = $rolesCache[$wid]
+        if ($null -eq $roles) { continue }
+        $role = $roles | Where-Object { "$($_.name)" -ieq "$($row.RoleName)".Trim() } | Select-Object -First 1
+        if (-not $role) { Write-Host "ERROR: workload '$wid' has no role named '$($row.RoleName)'. Valid: $(($roles | ForEach-Object { $_.name }) -join ', ')" -ForegroundColor Red; continue }
+
+        $tokens = @{ groupId = $groupId; groupTag = $tag; roleId = $role.id; roleName = $role.name; scope = "$($row.Scope)".Trim() }
+
+        # Current state: list assignments (per-role when the path needs {roleId}).
+        $la = $conn.api.listAssignments
+        $items = @()
+        try {
+            $resp = Invoke-PimWorkloadApi -Connector $conn -Op $la -Tokens $tokens
+            $items = if ($la.itemsPath) { @($resp.($la.itemsPath)) } else { @($resp) }
+            if ($la.roleId) {
+                $items = @($items | Where-Object { "$($_.($la.roleId))" -match [regex]::Escape($role.id) })
+            }
+        } catch {
+            Write-Host "ERROR: connector '$wid' assignment listing failed: $($_.Exception.Message). Skipping row." -ForegroundColor Red; continue
+        }
+        $existing = $null
+        foreach ($it in $items) {
+            $norm = Get-PimWorkloadAssignmentPrincipals -Connector $conn -Item $it
+            if ($norm.principals -contains $groupId) { $existing = $norm; break }
+        }
+
+        if ($action -ieq 'Assign') {
+            if ($existing) {
+                Write-Host ("  [workloads] OK -- {0}: '{1}' already assigned to {2}" -f $conn.name, $role.name, $tag) -ForegroundColor Green
+                continue
+            }
+            if ($WhatIfMode) {
+                Write-Host ("  [workloads][WHATIF] would assign {0} role '{1}' to group {2} ({3})" -f $conn.name, $role.name, $tag, $groupId) -ForegroundColor Yellow
+                continue
+            }
+            # Build body from the template with token substitution (recursive).
+            $bodyJson = ($conn.api.assign.body | ConvertTo-Json -Depth 8)
+            $bodyJson = Expand-PimWorkloadTokens -Text $bodyJson -Tokens $tokens
+            $body = $bodyJson | ConvertFrom-Json
+            try {
+                [void](Invoke-PimWorkloadApi -Connector $conn -Op $conn.api.assign -Tokens $tokens -Body $body)
+                Write-Host ("  [workloads] ASSIGNED -- {0}: '{1}' -> {2}" -f $conn.name, $role.name, $tag) -ForegroundColor Cyan
+            } catch {
+                Write-Host ("ERROR: assign failed for {0} '{1}' -> {2}: {3}" -f $conn.name, $role.name, $tag, $_.Exception.Message) -ForegroundColor Red
+            }
+        }
+        elseif ($action -ieq 'Remove') {
+            if (-not $existing) {
+                Write-Host ("  [workloads] OK -- {0}: '{1}' not assigned to {2} (nothing to remove)" -f $conn.name, $role.name, $tag) -ForegroundColor Green
+                continue
+            }
+            # Safety: only delete assignments this tool created (displayName
+            # prefix); shared/manual assignments need a human.
+            if ($existing.displayName -notlike 'PIM4EntraPS:*' ) {
+                Write-Host ("WARNING: {0} assignment '{1}' was not created by PIM4EntraPS -- remove it manually in the portal (refusing to delete shared/manual assignments)." -f $conn.name, $existing.displayName) -ForegroundColor Yellow
+                continue
+            }
+            if ($WhatIfMode) {
+                Write-Host ("  [workloads][WHATIF] would remove {0} assignment '{1}' ({2})" -f $conn.name, $existing.displayName, $existing.id) -ForegroundColor Yellow
+                continue
+            }
+            try {
+                [void](Invoke-PimWorkloadApi -Connector $conn -Op $conn.api.remove -Tokens @{ assignmentId = $existing.id })
+                Write-Host ("  [workloads] REMOVED -- {0}: '{1}'" -f $conn.name, $existing.displayName) -ForegroundColor Cyan
+            } catch {
+                Write-Host ("ERROR: remove failed for {0} '{1}': {2}" -f $conn.name, $existing.displayName, $_.Exception.Message) -ForegroundColor Red
+            }
+        }
+        else {
+            Write-Host "WARNING: unknown Action '$action' on workload row (expected Assign/Remove). Skipping." -ForegroundColor Yellow
+        }
+    }
+}
+
 Function Build-List-of-Definitions
 {
     [CmdletBinding()]

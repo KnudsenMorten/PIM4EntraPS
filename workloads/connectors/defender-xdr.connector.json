@@ -1,0 +1,39 @@
+{
+  "id": "defender-xdr",
+  "name": "Microsoft Defender XDR (Unified RBAC)",
+  "auth": "graph",
+  "permissionsNeeded": ["RoleManagement.Read.Defender (list)", "RoleManagement.ReadWrite.Defender (apply)"],
+  "api": {
+    "baseUrl": "https://graph.microsoft.com/beta",
+    "listRoles": {
+      "method": "GET",
+      "path": "/roleManagement/defender/roleDefinitions",
+      "itemsPath": "value",
+      "roleId": "id",
+      "roleName": "displayName",
+      "roleDescription": "description"
+    },
+    "listAssignments": {
+      "method": "GET",
+      "path": "/roleManagement/defender/roleAssignments",
+      "itemsPath": "value",
+      "assignmentId": "id",
+      "roleId": "roleDefinitionId",
+      "principalIds": "principalIds"
+    },
+    "assign": {
+      "method": "POST",
+      "path": "/roleManagement/defender/roleAssignments",
+      "body": {
+        "displayName": "PIM4EntraPS: {groupTag} -> {roleName}",
+        "roleDefinitionId": "{roleId}",
+        "principalIds": ["{groupId}"],
+        "directoryScopeIds": ["{scope|/}"]
+      }
+    },
+    "remove": {
+      "method": "DELETE",
+      "path": "/roleManagement/defender/roleAssignments/{assignmentId}"
+    }
+  }
+}

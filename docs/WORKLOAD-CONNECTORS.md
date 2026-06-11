@@ -118,11 +118,30 @@ minutes after they exist.
 
 ## Phasing
 
-1. **Phase 1**: connector schema + `defender-xdr` + `intune` connectors
-   (both pure Graph, same token we already hold); CSV + engine applier with
-   -WhatIfMode; Manager panel with live role pickers.
+1. **Phase 1 (SHIPPED v2.4.142)**: connector schema + `defender-xdr` +
+   `intune` connectors (both pure Graph, same token we already hold);
+   `PIM-Assignments-Workloads` CSV + engine applier
+   (`Apply-PimWorkloadAssignments -WhatIfMode`); Manager panel on the
+   Maintenance tab with live role pickers.
 2. **Phase 2**: `powerbi` adapter + workspace discovery.
 3. **Phase 3**: `dataverse` (group teams) + `businesscentral` (security
    groups); both need per-environment app users -- bootstrap docs per tenant.
 4. **Phase 4**: drift report -- engine compares desired vs actual per workload
    and the Validate tab shows workload-side drift like any other finding.
+
+## Lifecycle / maintenance phases (operator-requested)
+
+5. **Right-sizing recommendations from activation stats**: pull PIM
+   activation history (Graph audit logs / `roleAssignmentScheduleInstances`)
+   per group + role; surface "0 activations in N days" findings on the
+   Validate tab with a one-click stage-for-removal -- least privilege by
+   subtraction, driven by evidence.
+6. **Deleted-resource auto-cleanup**: when discovery sees an Azure scope (or
+   Power BI workspace) referenced by `PIM-Assignments-Azure-Resources` /
+   workload rows that no longer exists, stage removal of the rows AND mark the
+   backing PIM groups + workload delegations for backend cleanup (engine
+   deletes the Entra groups it created once nothing references them) -- no
+   leftovers in config or tenant.
+7. **Orphaned PIM-group detection**: tenant-side groups matching the PIM
+   naming convention with no corresponding Definitions row (or vice versa) --
+   reported as drift with stage-to-adopt / stage-to-delete actions.
