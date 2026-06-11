@@ -2243,8 +2243,9 @@
     const fkOrphans = r.violations.filter(v => v.Code === 'PIM-FK-001' && v.Row != null && v.Csv);
     const staleRoles = r.violations.filter(v => v.Code === 'PIM-STALE-001' && v.Row != null && v.Csv);
     const raActive  = r.violations.filter(v => v.Code === 'PIM-RA-002' && v.Row != null && v.Csv);
-    const total = fkOrphans.length + staleRoles.length + raActive.length;
-    if (total === 0) { alert('Nothing auto-fixable. (No PIM-FK-001 / PIM-STALE-001 / PIM-RA-002 errors right now.)'); return; }
+    const ringBad   = r.violations.filter(v => v.Code === 'PIM-RING-001' && v.Row != null && v.Csv);
+    const total = fkOrphans.length + staleRoles.length + raActive.length + ringBad.length;
+    if (total === 0) { alert('Nothing auto-fixable. (No PIM-FK-001 / PIM-STALE-001 / PIM-RA-002 / PIM-RING-001 findings right now.)'); return; }
 
     const bg = document.getElementById('modalBg');
     if (!bg) { alert('Modal container missing.'); return; }
@@ -2272,6 +2273,13 @@
             '<option value="eligible" selected>Change AssignmentType to Eligible (Entra-compliant)</option>' +
           '</select></div>' +
 
+        '<div class="field"><label>' + ringBad.length + ' &times; <b>PIM-RING-001</b> invalid deployment ring <span style="color:#57606a">&mdash; engine treats invalid values as 0 (ALL tenants)</span></label>' +
+          '<select id="fxRingAction"' + (ringBad.length === 0 ? ' disabled' : '') + '>' +
+            '<option value="skip">Skip (leave as is)</option>' +
+            '<option value="ring2" selected>Set Ring to 2 -- test tenants only (least privilege; promote afterwards)</option>' +
+            '<option value="clear">Clear Ring (= 0, all tenants)</option>' +
+          '</select></div>' +
+
         '<div style="display:flex; gap:10px; margin-top:16px; justify-content:flex-end;">' +
           '<button id="fxCancel">Cancel</button>' +
           '<button id="fxApply" class="primary" style="background:#0969da; border-color:#0969da; color:#fff;">Apply to pending changes</button>' +
@@ -2284,9 +2292,10 @@
       const fkAction    = document.getElementById('fxFkAction').value;
       const staleAction = document.getElementById('fxStaleAction').value;
       const raAction    = document.getElementById('fxRaAction').value;
+      const ringAction  = document.getElementById('fxRingAction').value;
       close();
       try {
-        const result = await applyBulkFix({ fkOrphans, staleRoles, raActive, fkAction, staleAction, raAction });
+        const result = await applyBulkFix({ fkOrphans, staleRoles, raActive, ringBad, fkAction, staleAction, raAction, ringAction });
         const statusEl = document.getElementById('vResults');
         if (statusEl) {
           const toast = document.createElement('div');
@@ -2295,7 +2304,8 @@
             result.fkAdded + ' definition(s) added, ' +
             result.fkDeleted + ' orphan assignment(s) marked for delete, ' +
             result.staleDeleted + ' stale-role row(s) marked for delete, ' +
-            result.raChanged + ' Active&rarr;Eligible. ' +
+            result.raChanged + ' Active&rarr;Eligible, ' +
+            result.ringFixed + ' ring value(s) repaired. ' +
             'Re-run Validate + open the Review &amp; Save tab to commit.';
           statusEl.insertBefore(toast, statusEl.firstChild);
           setTimeout(() => { try { toast.remove(); } catch (_) {} }, 12000);
@@ -2310,7 +2320,7 @@
   }
 
   async function applyBulkFix(opts) {
-    const stats = { fkAdded: 0, fkDeleted: 0, staleDeleted: 0, raChanged: 0 };
+    const stats = { fkAdded: 0, fkDeleted: 0, staleDeleted: 0, raChanged: 0, ringFixed: 0 };
 
     // --- FK-001: either add definitions for unique missing tags, or delete the assignment rows
     if (opts.fkAction === 'add') {
@@ -2379,6 +2389,24 @@
         if (idx >= 0 && idx < p.rows.length && p.rows[idx]) {
           p.rows[idx].AssignmentType = 'Eligible';
           stats.raChanged++;
+        }
+      }
+    }
+
+    // --- RING-001: repair invalid deployment-ring values. Default = Ring 2
+    // (least privilege -- test tenants only; promote afterwards). The engine
+    // treats invalid values as 0 (ALL tenants), so leaving them is the only
+    // dangerous choice.
+    if (opts.ringAction === 'ring2' || opts.ringAction === 'clear') {
+      const newVal = opts.ringAction === 'ring2' ? '2' : '';
+      for (const v of (opts.ringBad || [])) {
+        const data = await loadCsv(v.Csv);
+        ensurePending(v.Csv, data.header, data.rows);
+        const p = pendingChanges[v.Csv];
+        const idx = Number(v.Row);
+        if (idx >= 0 && idx < p.rows.length && p.rows[idx]) {
+          p.rows[idx].Ring = newVal;
+          stats.ringFixed++;
         }
       }
     }

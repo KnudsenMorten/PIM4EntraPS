@@ -109,10 +109,20 @@ instance **local**. More instances come from
 }
 ```
 
-With two or more instances available, the Manager header shows an
-**instance dropdown**. Switching tells the server to swap its config /
-output roots and reloads the page; uncommitted changes prompt a confirm
-before being discarded. Everything is per-instance:
+Each instance entry can also carry the tenant **connection**
+(`tenantId` + `appId` + either `certThumbprint` for mgmt-box machine-store
+certs, or `keyVaultName`/`secretName` for a central Key Vault holding one
+client secret per tenant -- see `instances.custom.sample.json`). With a
+connection declared, switching instances also retargets the app-only
+Graph/Az session, so **Active Assignments** and tenant-cache refresh hit
+the selected tenant. The Key Vault shape is the cloud-portable one: an
+Azure App Service port reads the same vault via Managed Identity.
+
+With two or more instances available, the Manager header shows the
+**Tenant dropdown** (blue banner, next to the version badge). Switching
+tells the server to swap its config / output roots and reloads the page;
+uncommitted changes prompt a confirm before being discarded. Everything
+is per-instance:
 
 - CSV reads/writes resolve against the active instance's config root.
 - `output/pim-manager-mutations.log` lands in the instance's output folder.

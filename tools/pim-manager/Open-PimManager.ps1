@@ -166,7 +166,27 @@ function Get-PimManagerInstances {
                     # Default: sibling 'output' folder next to the config folder.
                     Join-Path (Split-Path -Parent $cfg) 'output'
                 }
-                [void]$list.Add(@{ name = [string]$e.name; configRoot = $cfg; outputRoot = $out })
+                [void]$list.Add(@{
+                    name       = [string]$e.name
+                    configRoot = $cfg
+                    outputRoot = $out
+                    # Optional per-tenant connection. Two credential shapes:
+                    #   certThumbprint -- mgmt-box deployment (certs for every
+                    #     tenant in the machine store).
+                    #   keyVaultName + secretName -- central Key Vault holding
+                    #     one client secret per tenant. This is the
+                    #     cloud-portable shape: an Azure App Service port uses
+                    #     Managed Identity -> the same vault -> the same
+                    #     naming, with zero changes to this resolution logic.
+                    # When tenantId is set, switching to this instance
+                    # retargets the app-only Graph/Az connection so Active
+                    # Assignments + tenant-cache refresh hit THIS tenant.
+                    tenantId       = $(if ($e.tenantId)       { [string]$e.tenantId }       else { $null })
+                    appId          = $(if ($e.appId)          { [string]$e.appId }          else { $null })
+                    certThumbprint = $(if ($e.certThumbprint) { [string]$e.certThumbprint } else { $null })
+                    keyVaultName   = $(if ($e.keyVaultName)   { [string]$e.keyVaultName }   else { $null })
+                    secretName     = $(if ($e.secretName)     { [string]$e.secretName }     else { $null })
+                })
             }
         } catch {
             Write-Warning "instances.custom.json could not be parsed: $($_.Exception.Message) -- only the 'local' instance is available."
@@ -195,7 +215,41 @@ function Set-PimManagerInstance {
     $script:PimActiveAssignmentsCacheLoadedUtc = $null
     $script:PimManager_LookupCachesLoaded      = $false
 
-    Write-Host ("  instance: {0}  (config: {1})" -f $inst.name, $inst.configRoot) -ForegroundColor Cyan
+    # Per-tenant connection retargeting: when the registry entry carries
+    # tenantId (+ optional appId / certThumbprint -- the mgmt box has the
+    # certs for every tenant in its store), point the engine SPN globals at
+    # THIS tenant and drop the current Graph session. The next Active
+    # Assignments / tenant-cache call reconnects app-only to the right
+    # tenant via _tenantSync's Connect-PimManagerGraph/Az.
+    if ($inst.tenantId) {
+        $global:AzureTenantID = $inst.tenantId
+        if ($inst.appId) { $global:HighPriv_Modern_ApplicationID_Azure = $inst.appId }
+        if ($inst.certThumbprint) {
+            # Mgmt-box shape: per-tenant cert in the machine store.
+            $global:HighPriv_Modern_CertificateThumbprint_Azure = $inst.certThumbprint
+            # A secret from a previously-connected tenant must never be
+            # replayed against this one.
+            $global:HighPriv_Modern_Secret_Azure = $null
+        } elseif ($inst.keyVaultName -and $inst.secretName) {
+            # Central-Key-Vault shape (cloud-portable): one client secret per
+            # tenant in one vault. Pulled with the CURRENT Az context (the
+            # bootstrap connection from -ConnectPlatform on the mgmt box; a
+            # Managed Identity on an Azure App Service port). Lazy failure is
+            # fine -- _tenantSync throws a clear error on first tenant call.
+            try {
+                $sec = Get-AzKeyVaultSecret -VaultName $inst.keyVaultName -Name $inst.secretName -AsPlainText -ErrorAction Stop
+                $global:HighPriv_Modern_Secret_Azure = $sec
+                $global:HighPriv_Modern_CertificateThumbprint_Azure = $null
+            } catch {
+                Write-Warning ("instance '{0}': Key Vault secret {1}/{2} could not be read ({3}). Tenant-connected features will fail until resolved. Is the platform connected (-ConnectPlatform) and does this identity have get-secret on the vault?" -f $inst.name, $inst.keyVaultName, $inst.secretName, $_.Exception.Message)
+            }
+        }
+        $script:PimManagerTenantConnected = $false
+        try { Disconnect-MgGraph -ErrorAction SilentlyContinue | Out-Null } catch { }
+        Write-Host ("  instance: {0}  (config: {1}, tenant: {2})" -f $inst.name, $inst.configRoot, $inst.tenantId) -ForegroundColor Cyan
+    } else {
+        Write-Host ("  instance: {0}  (config: {1})" -f $inst.name, $inst.configRoot) -ForegroundColor Cyan
+    }
 }
 
 # Resolve the startup instance: -ConfigRoot (ad-hoc) > -Instance (registry) > 'local'.

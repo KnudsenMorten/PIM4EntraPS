@@ -854,8 +854,9 @@ function Invoke-PimPreflightValidation {
     # ------------------------------------------------------------------
     # PIM-RING-001: Ring column (deployment-ring rollout staging) must be
     # blank, 0, 1, or 2. Anything else is treated as 0 by the engine (full
-    # reach) -- a typo like 'Ring=22' would silently grant ALL tenants, so
-    # flag it as an error.
+    # reach) -- a typo like 'Ring=22' silently grants ALL tenants. Severity
+    # is WARNING by design (never blocks Save); the Validate tab's Fix-all
+    # repairs it to Ring=2 (least privilege).
     # ------------------------------------------------------------------
     if ($loaded.ContainsKey('Account-Definitions-Admins')) {
         $rows = $loaded['Account-Definitions-Admins'].rows
@@ -866,9 +867,9 @@ function Invoke-PimPreflightValidation {
             if (-not $ringVal) { continue }
             if ($ringVal -notin @('0','1','2')) {
                 $upn = Get-PimRowValue -Row $r -Column 'UserPrincipalName'
-                [void]$violations.Add((New-PimViolation -Severity 'error' -Code 'PIM-RING-001' -Csv 'Account-Definitions-Admins' -Row $i -Column 'Ring' `
+                [void]$violations.Add((New-PimViolation -Severity 'warning' -Code 'PIM-RING-001' -Csv 'Account-Definitions-Admins' -Row $i -Column 'Ring' `
                     -Message "Ring '$ringVal' for '$upn' is not a valid deployment ring (blank, 0, 1, or 2). The engine treats invalid values as 0 = ALL tenants -- a typo here silently over-grants." `
-                    -Suggestion "Set Ring to 2 (test tenants only), 1 (pilot + test), 0 (all tenants), or leave blank (= 0)."))
+                    -Suggestion "Use Fix-all (sets Ring=2, least privilege), or set Ring to 2 / 1 / 0 manually."))
             }
         }
     }
