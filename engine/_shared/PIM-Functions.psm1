@@ -4926,18 +4926,17 @@ Fix (one-time per tenant):
 
             ElseIf ( ($TargetPlatform -eq "AD") -and ($OnlyID -eq $false) -and ($OnlyAD -eq $true) )
                 {
-                    # v2.4.117: gMSA detection + safer auth-failure handling.
-                    # gMSAs have NO user-accessible password. Passing them as a
-                    # PSCredential makes the AD cmdlets send the placeholder
-                    # password to the DC -> "Authentication failed". gMSAs
-                    # authenticate via Kerberos using the calling process
-                    # token, so we MUST omit -Credential and rely on the
-                    # process running AS the gMSA (Scheduled Task with
-                    # Principal = the gMSA). Detect via the trailing $ in the
-                    # SAM name.
+                    # v2.4.118: revert the gMSA -Credential omission added in
+                    # v2.4.117. The v1 contract was: always pass -Credential
+                    # using a real service-account credential held in KV
+                    # (Legacy-UserName-Internal-Prod + Legacy-Password-Internal-Prod).
+                    # Real gMSA hosting -- where the process runs AS the gMSA
+                    # under a Scheduled Task -- doesn't go through this code
+                    # path with a placeholder password; it's expected to use
+                    # a regular AD service account that DOES have a real
+                    # password. Matching the v1 behavior unconditionally.
                     $adCommonParams = @{}
-                    $isGmsa = $Credentials -and $Credentials.UserName -and ($Credentials.UserName -match '\$$')
-                    if ($Credentials -and -not $isGmsa) {
+                    if ($Credentials) {
                         $adCommonParams['Credential'] = $Credentials
                     }
 
@@ -4957,11 +4956,8 @@ Fix (one-time per tenant):
 
                     if ($getAdUserErr) {
                         $authMsg = $getAdUserErr.Exception.Message
-                        if ($isGmsa) {
-                            Write-Host ("ERROR: Get-ADUser failed for {0} while running as gMSA '{1}'. Verify the Scheduled Task / parent process is actually running AS the gMSA (whoami /user should match), that the gMSA has 'PrincipalsAllowedToRetrieveManagedPassword' set for this host, and that the host has DC connectivity. Skipping this AD row -- NOT writing password file. Detail: {2}" -f $UserPrincipalName, $Credentials.UserName, $authMsg) -ForegroundColor Red
-                        } else {
-                            Write-Host ("ERROR: Get-ADUser failed for {0} with credential '{1}': {2}. Skipping this AD row -- NOT writing password file." -f $UserPrincipalName, $Credentials.UserName, $authMsg) -ForegroundColor Red
-                        }
+                        $credName = if ($Credentials -and $Credentials.UserName) { $Credentials.UserName } else { '<no credential>' }
+                        Write-Host ("ERROR: Get-ADUser failed for {0} with credential '{1}': {2}. Skipping this AD row -- NOT writing password file." -f $UserPrincipalName, $credName, $authMsg) -ForegroundColor Red
                         continue
                     }
 
