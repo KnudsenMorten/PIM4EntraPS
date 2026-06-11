@@ -74,11 +74,54 @@ Write-Output "******************************************************************
     # -IgnoreMissing so cloud-only tenants (no on-prem AD) don't blow up;
     # the AD-branch guard below logs a clean skip line when the credential
     # isn't there.
+    #
+    # v2.4.119: when the KV-staged Legacy-* PSCredentials are gMSAs/sMSAs
+    # (UserName matches *gMSA* or *sMSA*), the KV password is just a stub --
+    # the REAL managed password lives on the gMSA's msDS-ManagedPassword AD
+    # attribute. Resolve-PlatformGMSACredentials walks every Legacy.* slot,
+    # detects gMSA SAM names, reads the managed-password blob from the DC,
+    # parses it, and replaces the stub PSCredential with a real one carrying
+    # the actual gMSA password. After this the engine's AD branch can pass
+    # -Credential to Get-ADUser / Set-ADUser / New-ADUser exactly like a
+    # regular service account -- no Scheduled-Task-runs-as-gMSA dance needed
+    # (the calling host just has to be listed in the gMSA's
+    # PrincipalsAllowedToRetrieveManagedPassword).
     if ($global:Context) {
         try {
             $null = Initialize-PlatformLegacyIdentity -Context $global:Context -IgnoreMissing
         } catch {
             Write-Warning ("Initialize-PlatformLegacyIdentity failed: {0} -- AD-account branch will skip." -f $_.Exception.Message)
+        }
+
+        # AutomateITPS.AD ships Resolve-PlatformGMSACredentials. Import only if
+        # the cmdlet isn't already in the session.
+        if (-not (Get-Command Resolve-PlatformGMSACredentials -ErrorAction SilentlyContinue)) {
+            $automateItPsAdRoot = Join-Path $repoRoot 'FUNCTIONS\AutomateITPS.AD\AutomateITPS.AD.psd1'
+            if (Test-Path -LiteralPath $automateItPsAdRoot) {
+                try {
+                    Import-Module $automateItPsAdRoot -Global -Force -WarningAction SilentlyContinue -ErrorAction Stop
+                } catch {
+                    Write-Warning ("AutomateITPS.AD import failed: {0} -- gMSA password retrieval will be skipped; passing through stub KV password (which will fail real-AD auth for gMSAs)." -f $_.Exception.Message)
+                }
+            }
+        }
+
+        if (Get-Command Resolve-PlatformGMSACredentials -ErrorAction SilentlyContinue) {
+            try {
+                $gmsaResult = Resolve-PlatformGMSACredentials -Context $global:Context -IgnoreMissing
+                if ($gmsaResult) {
+                    if ($gmsaResult.Updated -and $gmsaResult.Updated.Count -gt 0) {
+                        Write-Host ("[OK]    Resolve-PlatformGMSACredentials: {0} gMSA slot(s) refreshed from DC -- {1}" -f $gmsaResult.Updated.Count, ($gmsaResult.Updated -join ', ')) -ForegroundColor Green
+                    }
+                    if ($gmsaResult.Failed -and $gmsaResult.Failed.Count -gt 0) {
+                        foreach ($f in $gmsaResult.Failed) {
+                            Write-Warning ("Resolve-PlatformGMSACredentials FAILED for '{0}' ({1}): {2}" -f $f.Path, $f.UserName, $f.Reason)
+                        }
+                    }
+                }
+            } catch {
+                Write-Warning ("Resolve-PlatformGMSACredentials failed: {0} -- gMSA slots will keep their stub KV passwords (which fail real-AD auth)." -f $_.Exception.Message)
+            }
         }
     }
     Write-Host ""

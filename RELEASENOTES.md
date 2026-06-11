@@ -1,9 +1,10 @@
 # Release notes for PIM4EntraPS
 
-## v2.4.118
+## v2.4.119
 
 Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monorepo:
 
+- release: PIM4EntraPS v2.4.119 -- engine imports AutomateITPS.AD + calls Resolve-PlatformGMSACredentials after Initialize-PlatformLegacyIdentity so KV stub passwords on gMSA Legacy.* slots get swapped for the real managed password read from the DC (gMSA msDS-ManagedPassword); the AD branch then auths normally via -Credential (3e002976)
 - release: PIM4EntraPS v2.4.118 -- AD branch: revert v2.4.117 gMSA -Credential omission; restore v1 always-pass-Credential contract (customer test on SYSTEM-running host proved dropping -Credential cascades through to computer-account auth which lacks write rights). Hard-fail Get-ADUser + conditional Write-PimAdminPassword improvements kept. (c766ed13)
 - release: PIM4EntraPS v2.4.117 -- CRITICAL fix: AD branch is now gMSA-aware (drops -Credential when SAM ends with $) + hard-fails Get-ADUser instead of swallowing auth errors that cascaded into Create + Write-PimAdminPassword writing phantom passwords for accounts that never existed (d76bccea)
 - release: PIM4EntraPS v2.4.116 -- PIM-Baseline-Management-CSV engine calls Initialize-PlatformLegacyIdentity right after Initialize-PlatformAutomationFramework so KV Legacy-UserName/Password-Internal-Prod actually land in Context.Identity.Legacy.Internal.Prod (v2.4.115 wired the reader but nothing was populating the slot) (8965324b)
@@ -33,13 +34,61 @@ Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monor
 - release: extension v1.6.13 - footer collapsed to single compact row (left: title + repo + dev attribution + GitHub/Report icons; right: tenant short-name + abbreviated ID + reset). Uses flex-wrap so right side drops to second line only when needed instead of getting clipped. Test-PushTenantCatalog.ps1 now seeds defaultJustification + defaultDurationHours in the auto-generated catalog. (5b308334)
 - release: extension v1.6.12 - footer row 1 now carries GitHub + Report bug chips next to title; row 2 only shows developer attribution + tenant name (fb0a3d86)
 - release: extension v1.6.11 - footer 2-row flex layout (title left + tenant ID right on row 1; dev attribution left + tenant name right on row 2) (3bee8363)
-- release: extension v1.6.10 - footer split into 3 stacked rows (title / tenant info / dev attribution) so tenant name is on its own line + Developed by moves below; tenant name rendered prominent (bold sans-serif) with monospaced GUID after (34f0511f)
 
 ---
 
 # Release notes -- PIM4EntraPS
 
 > **Curated changelog.** The publish workflow auto-prepends recent monorepo commits as a raw activity log; this file is the human-friendly narrative on top.
+
+---
+
+## v2.4.119 -- PIM-Baseline-Management-CSV engine: call `Resolve-PlatformGMSACredentials` after `Initialize-PlatformLegacyIdentity` so gMSA stub passwords get swapped for the real managed password read from the DC
+
+### Why
+
+v2.4.116-v2.4.118 wired up the v2 platform-context credential path, but the resulting `$global:Context.Identity.Legacy.Internal.Prod` PSCredential was built from the raw KV values -- `Legacy-UserName-Internal-Prod` (`<domain>\<gMSA>$`) + `Legacy-Password-Internal-Prod` (a stub string). For a gMSA, that stub password gets rejected by the DC -> `Authentication failed`. This matched the v1 wire pattern but missed the v1 customer's actual code, which detected gMSA SAM names (`*gMSA*` / `*sMSA*`) and called `Get-GMSACredential` to read the **real managed password** from the gMSA's `msDS-ManagedPassword` AD attribute, replacing the stub before the credential ever hit an AD cmdlet.
+
+AutomateITPS.AD already ships:
+
+- `Get-GMSACredential` -- ADSI-based managed-password reader.
+- `Resolve-PlatformGMSACredentials` -- walks every `$Context.Identity.Legacy.*` slot, detects gMSAs by SAM name, calls `Get-GMSACredential`, and writes the real PSCredential back into the same slot. Returns Updated / Skipped / Failed lists.
+
+The engine was just never calling it.
+
+### Fix
+
+`engine/PIM-Baseline-Management-CSV/PIM-Baseline-Management-CSV.ps1` now:
+
+1. Imports `AutomateITPS.AD` if its cmdlets aren't already in the session (via `FUNCTIONS\AutomateITPS.AD\AutomateITPS.AD.psd1` next to the AutomateITPS.psd1 it already imports).
+2. Calls `Resolve-PlatformGMSACredentials -Context $global:Context -IgnoreMissing` right after `Initialize-PlatformLegacyIdentity`.
+3. Logs the results -- `[OK] Resolve-PlatformGMSACredentials: N gMSA slot(s) refreshed from DC -- Internal.Prod, ...` for successes; per-slot `Write-Warning` lines for failures (e.g. host not in `PrincipalsAllowedToRetrieveManagedPassword`).
+4. After the swap, `$global:Context.Identity.Legacy.Internal.Prod` carries the gMSA's REAL password. The downstream AD branch then passes `-Credential` to `Get-ADUser` / `Set-ADUser` / `New-ADUser` exactly like a regular service-account flow -- the Scheduled-Task-runs-as-gMSA dance is NOT required.
+
+### Operator requirements (gMSA hosts)
+
+- Host must be listed in `PrincipalsAllowedToRetrieveManagedPassword` on the gMSA AD object. Verify:
+  ```powershell
+  (Get-ADServiceAccount 'gMSA-AUTM-L1-T0' -Properties PrincipalsAllowedToRetrieveManagedPassword).PrincipalsAllowedToRetrieveManagedPassword
+  ```
+  Expected: the host's computer object (or a group containing it).
+- KV stays simple -- `Legacy-UserName-Internal-Prod` holds `<domain>\<gMSA>$`, `Legacy-Password-Internal-Prod` holds any stub string (it gets thrown away after the DC read).
+- gMSA still needs AD write permissions on the admin OUs to actually mutate user objects -- the password swap fixes auth, not authorization.
+
+### Files changed
+
+- `engine/PIM-Baseline-Management-CSV/PIM-Baseline-Management-CSV.ps1` -- AutomateITPS.AD import + `Resolve-PlatformGMSACredentials` call between `Initialize-PlatformLegacyIdentity` and the engine main loop.
+
+### How to apply
+
+- Pull. Make sure the host is in `PrincipalsAllowedToRetrieveManagedPassword` for the gMSA. Rerun the launcher. Expected log additions:
+  ```
+  [OK]    Resolve-PlatformGMSACredentials: 1 gMSA slot(s) refreshed from DC -- Internal.Prod
+  [INFO]  AD credential source: $global:Context.Identity.Legacy.Internal.Prod (KV: Legacy-UserName-Internal-Prod + Legacy-Password-Internal-Prod)
+  ...
+  Updating AD user Simon Kriegbaum (Admin, Legacy, AD, L0, T0)
+  ```
+  (Successful -- no `Authentication failed`, no `Insufficient access`.)
 
 ---
 
