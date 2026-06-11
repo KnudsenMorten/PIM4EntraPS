@@ -2168,16 +2168,30 @@ Function CreateUpdate-PIM-for-Groups-From-file-CSV
                 # AU" error printed above didn't 'continue', so we used to
                 # crash on $null.Id right here); $GroupInfo when the just-
                 # created group hasn't yet propagated through Graph (rare).
-                if (-not $AUInfo -or [string]::IsNullOrWhiteSpace([string]$AUInfo.Id)) {
+                # v2.4.126: normalise both lookups to a single non-empty
+                # string Id before calling Add-AdministrativeUnit-Member. The
+                # cmdlet declares -AuId and -ObjectId as mandatory [string]
+                # so it rejects $null AND [string[]] (multi-match) with the
+                # same cryptic 'Cannot process argument transformation' error.
+                $auIdResolved    = @($AUInfo    | Where-Object { $_ } | Select-Object -ExpandProperty Id -ErrorAction SilentlyContinue) | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) }
+                $groupIdResolved = @($GroupInfo | Where-Object { $_ } | Select-Object -ExpandProperty Id -ErrorAction SilentlyContinue) | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) }
+
+                if ($auIdResolved.Count -eq 0) {
                     Write-Host ("ERROR: AU lookup failed for tag '{0}' (resolved AUName='{1}'); skipping AU member-add for group '{2}'." -f $AdministrativeUnitTag, $AUName, $GroupName) -ForegroundColor Red
                     continue
                 }
-                if (-not $GroupInfo -or [string]::IsNullOrWhiteSpace([string]$GroupInfo.Id)) {
+                if ($auIdResolved.Count -gt 1) {
+                    Write-Host ("WARNING: AU lookup for tag '{0}' returned {1} matches (DisplayName='{2}'). Using the first ('{3}')." -f $AdministrativeUnitTag, $auIdResolved.Count, $AUName, $auIdResolved[0]) -ForegroundColor Yellow
+                }
+                if ($groupIdResolved.Count -eq 0) {
                     Write-Host ("ERROR: Resolve-PimGroupCached returned null for '{0}' -- can't bind it to AU '{1}'. Skipping." -f $GroupName, $AUName) -ForegroundColor Red
                     continue
                 }
+                if ($groupIdResolved.Count -gt 1) {
+                    Write-Host ("WARNING: Group lookup for '{0}' returned {1} matches. Using the first ('{2}')." -f $GroupName, $groupIdResolved.Count, $groupIdResolved[0]) -ForegroundColor Yellow
+                }
 
-                Add-AdministrativeUnit-Member -AuId $AUInfo.Id -AddType Group -ObjectId $GroupInfo.Id
+                Add-AdministrativeUnit-Member -AuId ([string]$auIdResolved[0]) -AddType Group -ObjectId ([string]$groupIdResolved[0])
             }
 }
 
@@ -2275,16 +2289,30 @@ Function CreateUpdate-PIM-for-Groups-From-SQL
 
                 # v2.4.125: same null-lookup guard as the other CreateUpdate-PIM-*
                 # call site -- see comment above (line ~2160) for the rationale.
-                if (-not $AUInfo -or [string]::IsNullOrWhiteSpace([string]$AUInfo.Id)) {
+                # v2.4.126: normalise both lookups to a single non-empty
+                # string Id before calling Add-AdministrativeUnit-Member. The
+                # cmdlet declares -AuId and -ObjectId as mandatory [string]
+                # so it rejects $null AND [string[]] (multi-match) with the
+                # same cryptic 'Cannot process argument transformation' error.
+                $auIdResolved    = @($AUInfo    | Where-Object { $_ } | Select-Object -ExpandProperty Id -ErrorAction SilentlyContinue) | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) }
+                $groupIdResolved = @($GroupInfo | Where-Object { $_ } | Select-Object -ExpandProperty Id -ErrorAction SilentlyContinue) | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) }
+
+                if ($auIdResolved.Count -eq 0) {
                     Write-Host ("ERROR: AU lookup failed for tag '{0}' (resolved AUName='{1}'); skipping AU member-add for group '{2}'." -f $AdministrativeUnitTag, $AUName, $GroupName) -ForegroundColor Red
                     continue
                 }
-                if (-not $GroupInfo -or [string]::IsNullOrWhiteSpace([string]$GroupInfo.Id)) {
+                if ($auIdResolved.Count -gt 1) {
+                    Write-Host ("WARNING: AU lookup for tag '{0}' returned {1} matches (DisplayName='{2}'). Using the first ('{3}')." -f $AdministrativeUnitTag, $auIdResolved.Count, $AUName, $auIdResolved[0]) -ForegroundColor Yellow
+                }
+                if ($groupIdResolved.Count -eq 0) {
                     Write-Host ("ERROR: Resolve-PimGroupCached returned null for '{0}' -- can't bind it to AU '{1}'. Skipping." -f $GroupName, $AUName) -ForegroundColor Red
                     continue
                 }
+                if ($groupIdResolved.Count -gt 1) {
+                    Write-Host ("WARNING: Group lookup for '{0}' returned {1} matches. Using the first ('{2}')." -f $GroupName, $groupIdResolved.Count, $groupIdResolved[0]) -ForegroundColor Yellow
+                }
 
-                Add-AdministrativeUnit-Member -AuId $AUInfo.Id -AddType Group -ObjectId $GroupInfo.Id
+                Add-AdministrativeUnit-Member -AuId ([string]$auIdResolved[0]) -AddType Group -ObjectId ([string]$groupIdResolved[0])
             }
 }
 

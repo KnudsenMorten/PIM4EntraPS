@@ -1,9 +1,10 @@
 # Release notes for PIM4EntraPS
 
-## v2.4.125
+## v2.4.126
 
 Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monorepo:
 
+- release: PIM4EntraPS v2.4.126 -- harden v2.4.125 Add-AdministrativeUnit-Member guard to handle multi-match arrays too (mandatory [string] params reject collections the same way they reject null); collapses to first match with a yellow WARNING line when count > 1, red ERROR + continue when count == 0 (028fa9d6)
 - release: PIM4EntraPS v2.4.125 -- guard Add-AdministrativeUnit-Member against null \$AUInfo / \$GroupInfo at both CreateUpdate-PIM-for-Groups-From-file-CSV call sites so a row with a missing AdministrativeUnitTag logs a clear red error and 'continue's instead of crashing the engine with 'Cannot process argument transformation on parameter ObjectId. Cannot convert value to type System.String.' (db887ecf)
 - release: PIM4EntraPS v2.4.124 -- PathAdmins / PathAdminsL0T0 moved under canonical \$global:PIM_NamingConventions hashtable (matching AdminAccountPatterns, PimGroupPattern, TagPrefixToCsv) with v2.4.123 free-floating-globals shape kept as back-compat fallback; locked.ps1 + custom.sample.ps1 updated to document the new shape (dca61cd2)
 - release: PIM4EntraPS v2.4.123 -- (1) skip Connect-ExchangeOnline on the -OnlyAD invocation + reuse existing EXO session via Get-ConnectionInformation so EXO connects exactly once per launcher run (was 2x after v2.4.114); (2) engine resolves $PathAdmins / $PathAdminsL0T0 from $global: fallback so AD-create rows finally have an OU to target (a7e9f695)
@@ -33,13 +34,45 @@ Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monor
 - release: PIM4EntraPS v2.4.100 - Update-PimActivator-Extension.ps1 flush now scrubs stale Secure Preferences registration alongside cached CRX (prevents DISABLE_CORRUPTED trap) (3a9de353)
 - release: PIM4EntraPS v2.4.99 - Deploy-PimActivatorIntune.ps1 catalog auto-discover (hotfix over v2.4.98) (785ff800)
 - release: PIM4EntraPS v2.4.98 + extension v1.6.19 - unified Intune deploy + critical fix for ExtensionSettings schema bug that froze fleet at old versions + popup CSS no longer overflows Chromium popup cap (508f6eab)
-- release: PIM4EntraPS v2.4.97 - Update-PimActivator-Extension.ps1 SAFETY FIX (no more profile wipes) + faster update trigger via --extensions-update-frequency=30 (cdc2c7cb)
 
 ---
 
 # Release notes -- PIM4EntraPS
 
 > **Curated changelog.** The publish workflow auto-prepends recent monorepo commits as a raw activity log; this file is the human-friendly narrative on top.
+
+---
+
+## v2.4.126 -- harden v2.4.125 `Add-AdministrativeUnit-Member` guard to also handle multi-match (array) lookups, not just null
+
+### Why
+
+v2.4.125 caught `$null` from the AU / Group lookups but not the case where `Where-Object` returns **multiple matches** -- e.g. two AUs sharing a `DisplayName`, or a `DisplayName eq` Graph filter returning more than one row. `$AUInfo.Id` then yields a `[string[]]`, and `Add-AdministrativeUnit-Member -AuId @('id1','id2')` blows up with exactly the same cryptic `Cannot process argument transformation on parameter 'ObjectId'` error as the null case -- because mandatory `[string]` params reject collections the same way they reject `$null`.
+
+### Fix
+
+Both guard sites now normalise the lookup to a flat `[string[]]` of non-empty Ids:
+
+```powershell
+$auIdResolved    = @($AUInfo    | Select -ExpandProperty Id) | Where { -not [string]::IsNullOrWhiteSpace([string]$_) }
+$groupIdResolved = @($GroupInfo | Select -ExpandProperty Id) | Where { -not [string]::IsNullOrWhiteSpace([string]$_) }
+```
+
+Then explicitly handles the three cases:
+
+- `.Count -eq 0` -> red `[ERROR]` + `continue`.
+- `.Count -gt 1` -> yellow `[WARNING]` line naming the multi-match + use the first match.
+- `.Count -eq 1` -> proceed.
+
+`Add-AdministrativeUnit-Member -AuId ([string]$auIdResolved[0]) -ObjectId ([string]$groupIdResolved[0])` finally calls the cmdlet with single strings.
+
+### Files changed
+
+- `engine/_shared/PIM-Functions.psm1` -- both `CreateUpdate-PIM-for-Groups-From-file-CSV` AU member-add guards now handle null AND multi-match, with explicit yellow `WARNING` when multi-match is hit so operators can find and fix the duplicate DisplayName in their tenant.
+
+### How to apply
+
+- Pull, rerun. If you still see `Cannot process argument transformation on parameter 'ObjectId'`, confirm `Get-Content E:\AutomateIT\SOLUTIONS\PIM4EntraPS\VERSION` reads `2.4.126` -- the most common reason for the error to repeat is that the sync didn't update the engine on the customer box.
 
 ---
 
