@@ -287,8 +287,13 @@ Write-Output "******************************************************************
                 # Cannot convert value to type System.String.' (-ErrorAction does
                 # NOT help: transformation failures happen at parameter binding,
                 # before error-action preferences apply.)
-                $auIdResolved    = @($AUInfo    | Where-Object { $_ } | Select-Object -ExpandProperty Id -ErrorAction SilentlyContinue) | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) }
-                $groupIdResolved = @($GroupInfo | Where-Object { $_ } | Select-Object -ExpandProperty Id -ErrorAction SilentlyContinue) | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) }
+                # v2.4.128: the WHOLE pipeline must sit inside @(...). The v2.4.127
+                # shape `@(...) | Where-Object` let the final Where-Object unwrap a
+                # single surviving Id back to a bare [string], so `[0]` indexed the
+                # FIRST CHARACTER of the GUID and the AU member-add ran with ids
+                # like '2' / '3' (Graph: Invalid object identifier).
+                $auIdResolved    = @($AUInfo    | Where-Object { $_ } | Select-Object -ExpandProperty Id -ErrorAction SilentlyContinue | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) })
+                $groupIdResolved = @($GroupInfo | Where-Object { $_ } | Select-Object -ExpandProperty Id -ErrorAction SilentlyContinue | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) })
 
                 if ($auIdResolved.Count -eq 0) {
                     Write-Host ("ERROR: AU lookup failed for tag '{0}' (resolved AUName='{1}'); skipping AU member-add for group '{2}'." -f $AdministrativeUnitTag, $AUName, $GroupName) -ForegroundColor Red

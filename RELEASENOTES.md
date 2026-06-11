@@ -1,9 +1,10 @@
 # Release notes for PIM4EntraPS
 
-## v2.4.127
+## v2.4.128
 
 Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monorepo:
 
+- release: PIM4EntraPS v2.4.128 -- fix the v2.4.126/127 AU-guard itself: `@(...) | Where-Object` unwraps a single surviving Id back to a bare string, so `[0]` indexed the FIRST CHARACTER of the GUID and AU member-adds called Graph with ids like '2'/'3' (Invalid object identifier, 400); zero-match case crashed on null-array index because $null.Count -eq 0 is $false on PS 5.1. Whole pipeline now wrapped in @(...) at all 4 sites; verified all 5 input shapes in a real PS 5.1 process (28c8c708)
 - release: PIM4EntraPS v2.4.127 -- v2.4.125/126 AU member-add guards missed the inline copies of the create-groups loop in PIM-Baseline-Management-CSV.ps1 + PIM4GroupsCreateModifyPolicyOnly.ps1 (the main CSV engine never calls the patched module functions); field run on v2.4.126 still crashed with ObjectId transformation error on a tenant with duplicate group DisplayNames -- both inline loops now normalise AU/group lookups + ERROR/WARNING/skip before calling Add-AdministrativeUnit-Member (b8d102ab)
 - release: PIM4EntraPS v2.4.126 -- harden v2.4.125 Add-AdministrativeUnit-Member guard to handle multi-match arrays too (mandatory [string] params reject collections the same way they reject null); collapses to first match with a yellow WARNING line when count > 1, red ERROR + continue when count == 0 (028fa9d6)
 - release: PIM4EntraPS v2.4.125 -- guard Add-AdministrativeUnit-Member against null \$AUInfo / \$GroupInfo at both CreateUpdate-PIM-for-Groups-From-file-CSV call sites so a row with a missing AdministrativeUnitTag logs a clear red error and 'continue's instead of crashing the engine with 'Cannot process argument transformation on parameter ObjectId. Cannot convert value to type System.String.' (db887ecf)
@@ -33,13 +34,51 @@ Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monor
 - add Audit-ChromeForcelistInIntune.ps1 - read-only diagnostic that scans every Intune configuration policy (Settings Catalog + Administrative Templates + custom device configs) for Chrome ExtensionInstallForcelist values, flags malformed entries (empty string, invalid ext id, missing update URL). Used to pin down which Intune profile is shipping the bad forcelist entry that's blocking all extension installs. (bd371bf3)
 - release: PIM4EntraPS v2.4.101 + extension v1.6.20 - popup CSS revert (v1.6.19 flex-column broke Edge) (709005f7)
 - release: PIM4EntraPS v2.4.100 - Update-PimActivator-Extension.ps1 flush now scrubs stale Secure Preferences registration alongside cached CRX (prevents DISABLE_CORRUPTED trap) (3a9de353)
-- release: PIM4EntraPS v2.4.99 - Deploy-PimActivatorIntune.ps1 catalog auto-discover (hotfix over v2.4.98) (785ff800)
 
 ---
 
 # Release notes -- PIM4EntraPS
 
 > **Curated changelog.** The publish workflow auto-prepends recent monorepo commits as a raw activity log; this file is the human-friendly narrative on top.
+
+---
+
+## v2.4.128 -- FIX the v2.4.126/127 guard itself: a PowerShell pipeline-unwrap bug truncated GUIDs to their first character, so AU member-adds ran with ids like '2' / '3'
+
+### Why
+
+The v2.4.126/127 guard normalised the AU/group lookups with:
+
+```powershell
+$auIdResolved = @($AUInfo | ... | Select-Object -ExpandProperty Id ...) | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) }
+```
+
+The `@(...)` only wraps the *input* to the final `Where-Object` -- and when exactly **one** Id survives the filter, the pipeline unwraps it back to a bare `[string]`. `$auIdResolved[0]` then indexes the **first character of the GUID** instead of the first array element. Field symptom on v2.4.127:
+
+```
+Get-MgDirectoryAdministrativeUnitMember_List: Invalid object identifier '2'.  Status: 400 (BadRequest)
+Adding [Group] with 3 to Administrative Unit (AU) with id 2
+```
+
+Every single-match row (the normal case!) called Graph with one-character ids. No tenant damage: both the membership list and the member-add were rejected by Graph with 400 before any write. The zero-match case was broken too -- `$null.Count -eq 0` is `$false` on PS 5.1, so the skip-guard fell through and crashed on `Cannot index into a null array`.
+
+### Fix
+
+Wrap the ENTIRE pipeline in `@(...)` at all four sites (two module call sites from v2.4.126, two inline engine loops from v2.4.127):
+
+```powershell
+$auIdResolved = @($AUInfo | Where-Object { $_ } | Select-Object -ExpandProperty Id -ErrorAction SilentlyContinue | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) })
+```
+
+Now `$auIdResolved` is always a real array: `.Count` is reliable, `[0]` returns the full GUID.
+
+Verified in a real Windows PowerShell 5.1 process against all five shapes (single match, multi match, null input, null Id property, object without Id property) -- full GUID round-trips in every populated case, clean skip in every empty case.
+
+### Files changed
+
+- `engine/_shared/PIM-Functions.psm1` -- both `CreateUpdate-PIM-for-Groups-From-*` guard sites.
+- `engine/PIM-Baseline-Management-CSV/PIM-Baseline-Management-CSV.ps1` -- inline loop guard.
+- `engine/PIM-Baseline-Management-CSV-PIM4GroupsCreateModifyPolicyOnly/PIM-Baseline-Management-CSV-PIM4GroupsCreateModifyPolicyOnly.ps1` -- inline loop guard.
 
 ---
 
