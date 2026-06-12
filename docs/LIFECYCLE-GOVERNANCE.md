@@ -223,7 +223,7 @@ All engine and Manager transactions converge on **`output/audit/pim-audit-<yyyyM
 | 8 | Emergency override (passphrase-hash verification in config/emergency.custom.ps1; KV verification = follow-up) | **shipped v2.4.158** |
 | 9 | Resource discovery: engine Notify sweep (audit `resource.discovered`) + Manager Portal surface/acknowledge; automatic ROW creation for discovered resources is the documented follow-up | **shipped v2.4.159** |
 | 10 | Access reviews (§ 14): engine-owned Entra review schedules (auto-apply OFF), decision sweep, deny tombstones + PIM-REV-001 | design agreed |
-| 11 | External request intake (§ 15): MID-server file-drop inbox, signed typed requests, template-only onboarding, high-priv hard deny, Manager approval queue | design agreed |
+| 11 | External request intake (§ 15): SNOW → MID-server file-drop inbox → MANAGER ingests + approval queue (engine never reads external input); signed typed requests, template-only onboarding, high-priv hard deny | design agreed |
 
 Phase order optimizes for dependency flow (templates before policies before approvals before emergency) and for the operator's immediate scenario (scheduling + TAP windows first).
 
@@ -244,7 +244,9 @@ Phase order optimizes for dependency flow (templates before policies before appr
 
 **Constraints**: pull-not-push (AutomateIT invariant); NO inbound endpoint, webhook, function, or internet-exposed storage; a compromised workflow must never be able to create an admin or activate a role.
 
-**Transport (primary, fully internal)**: ServiceNow workflow → **ServiceNow MID Server** (the customer's existing internal broker — runs inside the network, connects outbound-only to the SNOW cloud) → drops a signed request file into an **internal inbox directory** (SMB share / folder on the automation server). Directory ACL: the MID service account has **create-only** rights (cannot read, modify, or delete queued files — a compromised MID cannot tamper with requests in flight); the engine account owns the folder and moves every file to `processed/` or `rejected/<reason>/` after verification. No service listens anywhere. *(Fallback for customers without MID servers: an Azure Storage queue in the customer subscription, SNOW writing with a single-container-scoped SP — still outbound-only from both sides.)*
+**Direction**: requests flow FROM ServiceNow INTO the Manager — the Manager owns ingestion and the data structure; the engine never reads external input (it stays purely declarative, applying CSV state only). The intake therefore adds zero attack surface to the engine.
+
+**Transport (primary, fully internal)**: ServiceNow workflow → **ServiceNow MID Server** (the customer's existing internal broker — runs inside the network, connects outbound-only to the SNOW cloud) → drops a signed request file into an **internal inbox directory** (SMB share / folder reachable from the Manager box). Directory ACL: the MID service account has **create-only** rights (cannot read, modify, or delete queued files — a compromised MID cannot tamper with requests in flight); the Manager's account owns the folder and moves every file to `processed/` or `rejected/<reason>/` after verification. No service listens anywhere. **The Manager ingests the inbox on open and on demand (refresh)** — requests queue for the operator; approved ones stage through the normal pending → Review & Save flow into the CSVs, and the engine picks them up like any other staged change. Lights-out auto-apply through the engine is deliberately NOT part of this design. *(Fallback for customers without MID servers: an Azure Storage queue in the customer subscription, SNOW writing with a single-container-scoped SP — still outbound-only from both sides, still ingested by the Manager.)*
 
 **Security layers (defense in depth, each independently rotatable via Key Vault)**:
 
@@ -252,7 +254,7 @@ Phase order optimizes for dependency flow (templates before policies before appr
 2. **Typed allow-list**: `assignment.add`, `assignment.remove`, `admin.onboard` only. `admin.onboard` may ONLY reference a shipped/customer **admin template id** — SNOW instantiates pre-approved shapes, never arbitrary accounts.
 3. **High-priv hard deny**: any group whose `PolicyTemplate = approval-required` (GA, PRA, tenant-root owners) is NOT requestable through the intake, ever.
 4. **Activation out of scope by design**: the intake manages assignments/onboarding only. Activating a role remains exclusively behind PIM's MFA + approval policies (+ the phase-4 owner approvals) — the "activate a role" attack path does not exist in this channel.
-5. **Human in the loop by default**: verified requests surface as PENDING in the Manager's Governance tab; an Admin accepts and the rows materialize through the normal Review & Save flow. Per-request-type `Auto` mode is opt-in for low-priv only.
+5. **Human in the loop, always**: verified requests surface as PENDING in the Manager's Governance tab; an Admin accepts and the rows materialize through the normal Review & Save flow into the CSVs. There is no path from a request to Entra that bypasses the operator + the CSV.
 6. **Full audit**: `request.received` / `request.rejected` (with reason) / `request.applied` in the jsonl.
 
 Attack analysis: an attacker needs the SNOW signing key AND internal file-drop access, and even then can only *request* template-shaped low-priv changes that default to human approval — with every step in the audit trail.

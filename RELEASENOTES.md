@@ -1,9 +1,10 @@
 # Release notes for PIM4EntraPS
 
-## v2.4.161
+## v2.4.162
 
 Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monorepo:
 
+- release: PIM4EntraPS v2.4.162 -- phase 11 design correction: the MANAGER ingests external requests (SNOW -> MID inbox -> Manager verify + approval queue -> pending -> Review & Save -> CSV), the engine never reads external input and stays purely declarative; no lights-out path bypassing operator + CSV (2cc21156)
 - release: PIM4EntraPS v2.4.161 -- design phases 10+11 in docs/LIFECYCLE-GOVERNANCE.md: access reviews as hybrid (Entra review UX, engine-owned schedules with auto-apply OFF + decision sweep; Deny -> engine tombstone suppression layer treated as Action=Remove so the CSV never re-delegates a review-removed member; PIM-REV-001 reconciliation flag) + external request intake via ServiceNow MID Server file-drop inbox (fully internal pull-only, create-only writer ACL, signed typed requests w/ nonce ledger, admin.onboard restricted to template ids, approval-required groups hard-denied, activation out of scope, Manager approval queue default, full audit; Azure Storage queue as no-MID fallback) (7400b94c)
 - release: PIM4EntraPS v2.4.160 + extension v1.6.27 -- dead CA-session tokens self-heal instead of erroring: mid-action staleness (401/token-shaped 403) during Activate / Deactivate / My Access load routes to triggerInteractiveReauth (wipes Graph+ARM tokens = auto sign-out, overlay now names Conditional Access session lifetime, popup reloads straight into interactive sign-in); popup-open dead-refresh-token path already self-healed via tryRefresh cache wipe. node --check + 7 behavioral assertions green. CRX repack on the signing-key box still required to publish 1.6.27 to the fleet (6b31c951)
 - release: PIM4EntraPS v2.4.159 -- lifecycle phase 9: resource discovery. Engine Invoke-PimResourceDiscovery (end of run, PIM_ResourceDiscoveryMode Off/Notify default Notify): new Azure subscriptions + Entra role definitions vs output/state/discovery-baseline.json (first run establishes silently; each item audited resource.discovered once, baseline rolls forward). Manager Governance tab Discovered-resources section over the _tenantSync caches with per-instance baseline + Admin-gated Acknowledge (resource.baseline audited); endpoints /api/discovered-resources + /api/discovery-baseline. Auto row-creation = documented follow-up. 14-check harness green PS 5.1 + pwsh 7; node --check green. ALL NINE LIFECYCLE-GOVERNANCE PHASES NOW SHIPPED (v2.4.153-159) (a1944979)
@@ -33,7 +34,6 @@ Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monor
 - release: PIM4EntraPS v2.4.135 -- PIM Manager: PIM-RING-001 downgraded to warning (never blocks Save) + Fix-all gained a ring bucket defaulting to repair-to-Ring-2 (least privilege; clear-to-0 as explicit alternative); instances.custom.json entries can declare per-tenant connections (tenantId+appId + certThumbprint for mgmt-box machine-store certs, OR keyVaultName+secretName for one central KV secret per tenant -- the cloud-portable shape an App Service port reads via Managed Identity); instance switch drops the Graph session and retargets the SPN globals so Active Assignments + tenant-cache refresh hit the selected tenant. E2E-verified against 3 demo tenant instances (afcba721)
 - release: PIM4EntraPS v2.4.134 -- deployment rings for staged MSP admin rollout: Ring column on Account-Definitions-Admins (blank=0=veteran/all tenants, 1=pilot+test, 2=new hire/test only) x $global:PIM_TenantRing per tenant (unset=0=production, safe default) x one rule (apply iff admin.Ring <= tenant.Ring); engine filters at all 4 admin load sites (CSV+SQL accounts/assignments) via shared helpers with UserName->ring map; SQL-ready (collapses to WHERE Ring <= @TenantRing later). Manager: Ring dropdown in grid, onboarding workflow defaults new hires to ring 2, PIM-RING-001 validator error on invalid values (engine treats them as 0 = over-grant). Plus professional Create-tab workflow names (00f1afe7)
 - release: PIM4EntraPS v2.4.133 -- PIM Manager: Graph view removed (was unused + the only CDN dependency; SPA now makes zero external requests, data model behind the wizards kept); professional tabs (Configuration landing / Create / Review & Save / Validate / Active Assignments) + labelled Tenant switcher sorted for 25+ MSP instances with config-root tooltips; fixed TDZ init abort on the landing-tab rail render (a456cc00)
-- release: PIM4EntraPS v2.4.132 -- PIM Activator v1.6.26 packed + published to gh-pages (tenant-dropdown readability fix live; post-pack guard validated canonical id; live updates.xml + CRX byte-verified); Update-PimActivator-Extension.ps1 git calls wrapped in Invoke-GitQuiet -- `2>$null` under EAP=Stop turned a harmless CRLF warning from `git add` into a terminating NativeCommandError that aborted the publish mid-way (3f79b213)
 
 ---
 
@@ -42,6 +42,10 @@ Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monor
 > **Curated changelog.** The publish workflow auto-prepends recent monorepo commits as a raw activity log; this file is the human-friendly narrative on top.
 
 ---
+
+## v2.4.162 -- design correction (phase 11): the MANAGER ingests external requests, not the engine
+
+Operator clarification on § 15: requests flow FROM ServiceNow INTO the Manager. The Manager (which owns the data structure) ingests the MID-server inbox on open + on demand, verifies, queues for operator approval, and approved requests stage through the normal pending -> Review & Save flow into the CSVs -- the engine stays purely declarative and NEVER reads external input, so the intake adds zero attack surface to the engine. There is deliberately no lights-out path from a request to Entra that bypasses the operator + the CSV.
 
 ## v2.4.161 -- design: access reviews (phase 10) + external request intake (phase 11)
 
