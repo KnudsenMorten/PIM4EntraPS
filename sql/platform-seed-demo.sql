@@ -25,13 +25,15 @@ WHEN MATCHED THEN UPDATE SET AppId = s.AppId, CertificateThumbprint = s.Certific
 
 MERGE pim.CentralAdmins AS t
 USING (VALUES
-    (N'Admin-AAA-L0-T0-ID', N'Demo Admin Ring0 (broad)',  N'admin-aaa-l0-t0-id@demo-mgmt.example', 0, NULL),
-    (N'Admin-BBB-L1-T1-ID', N'Demo Admin Ring1 (pilot)',  N'admin-bbb-l1-t1-id@demo-mgmt.example', 1, NULL),
-    (N'Admin-CCC-L3-T1-ID', N'Demo Consultant Ring2',     N'admin-ccc-l3-t1-id@demo-mgmt.example', 2, N'consultant')
-) AS s (UserName, DisplayName, Upn, Ring, Template)
+    (N'Admin-AAA-L0-T0-ID', N'Demo Admin Ring0 (broad)',  N'admin-aaa-l0-t0-id@demo-mgmt.example', 0, NULL,          N'Alice', N'Anderson', N'AAA', N'T0', 'DK'),
+    (N'Admin-BBB-L1-T1-ID', N'Demo Admin Ring1 (pilot)',  N'admin-bbb-l1-t1-id@demo-mgmt.example', 1, NULL,          N'Bob',   N'Berg',     N'BBB', N'T1', 'DK'),
+    (N'Admin-CCC-L3-T1-ID', N'Demo Consultant Ring2',     N'admin-ccc-l3-t1-id@demo-mgmt.example', 2, N'consultant', N'Cara',  N'Carlsen',  N'CCC', N'T1', 'DK')
+) AS s (UserName, DisplayName, Upn, Ring, Template, FirstName, LastName, Initials, TierLevel, UsageLocation)
 ON t.UserName = s.UserName
-WHEN NOT MATCHED THEN INSERT (UserName, DisplayName, Upn, Ring, Template) VALUES (s.UserName, s.DisplayName, s.Upn, s.Ring, s.Template)
-WHEN MATCHED THEN UPDATE SET DisplayName = s.DisplayName, Upn = s.Upn, Ring = s.Ring, Template = s.Template, UpdatedAtUtc = SYSUTCDATETIME();
+WHEN NOT MATCHED THEN INSERT (UserName, DisplayName, Upn, Ring, Template, FirstName, LastName, Initials, TierLevel, UsageLocation)
+    VALUES (s.UserName, s.DisplayName, s.Upn, s.Ring, s.Template, s.FirstName, s.LastName, s.Initials, s.TierLevel, s.UsageLocation)
+WHEN MATCHED THEN UPDATE SET DisplayName = s.DisplayName, Upn = s.Upn, Ring = s.Ring, Template = s.Template,
+    FirstName = s.FirstName, LastName = s.LastName, Initials = s.Initials, TierLevel = s.TierLevel, UsageLocation = s.UsageLocation, UpdatedAtUtc = SYSUTCDATETIME();
 
 -- Secret pointers (no secret values in demo data)
 MERGE platform.Secrets AS t
