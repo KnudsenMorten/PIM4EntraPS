@@ -52,3 +52,4 @@ tools/pim-activator/discovered-tenant-catalog.json
 # Customer-customized mail + admin templates (LIFECYCLE-GOVERNANCE phases 2+)
 templates/mail/*.mailtemplate.custom.html
 templates/admin/*.admintemplate.custom.json
+templates/policy/*.policytemplate.custom.json

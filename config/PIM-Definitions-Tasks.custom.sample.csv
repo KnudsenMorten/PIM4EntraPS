@@ -1,7 +1,7 @@
-GroupName;GroupDescription;GroupTag;AdministrativeUnitTag;IsRoleAssignable;Workload;Level;TierLevel;Plane;CPPlatform;Owners;;
-PIM-Entra-ID-Users-CreateModifyDelete-L1-T0-CP-ID;Create, Modify, Delete Users, Entra ID;Entra-ID-Users-CreateModifyDelete-L1;PIM-L1;TRUE;Entra-ID;L1;T0;CP;ID;identity-owner@contoso.com;;
-PIM-Entra-ID-Users-Password-Reset-L1-T0-CP-ID;Reset Password on Users, Entra ID;Entra-ID-Users-Password-Reset-L1;PIM-L1;TRUE;Entra-ID;L1;T0;CP;ID;helpdesk-lead@contoso.com;;
-PIM-Entra-ID-Users-AuthenticationMethods-Manage-L1-T0-CP-ID;Manage Authentication methods on Users, Entra ID;Entra-ID-Users-AuthenticationMethods-Manage-L1;PIM-L1;TRUE;Entra-ID;L1;T0;CP;ID;helpdesk-lead@contoso.com;;
-;;;;;;;;;;;;
-PIM-Entra-ID-Groups-CreateModifyDelete-L1-T0-CP-ID;Create, Modify, Delete Groups, Entra ID;Entra-ID-Groups-CreateModifyDelete-L1;PIM-L1;TRUE;Entra-ID;L1;T0;CP;ID;identity-owner@contoso.com;;
-PIM-Entra-ID-Groups-Membership-Manage-L1-T0-CP-ID;Add, Remove Group Memberships, Entra ID;Entra-ID-Groups-Membership-Manage-L1;PIM-L1;TRUE;Entra-ID;L1;T0;CP;ID;helpdesk-lead@contoso.com;;
+GroupName;GroupDescription;GroupTag;AdministrativeUnitTag;IsRoleAssignable;Workload;Level;TierLevel;Plane;CPPlatform;Owners;PolicyTemplate
+PIM-Entra-ID-Users-CreateModifyDelete-L1-T0-CP-ID;Create, Modify, Delete Users, Entra ID;Entra-ID-Users-CreateModifyDelete-L1;PIM-L1;TRUE;Entra-ID;L1;T0;CP;ID;identity-owner@contoso.com;
+PIM-Entra-ID-Users-Password-Reset-L1-T0-CP-ID;Reset Password on Users, Entra ID;Entra-ID-Users-Password-Reset-L1;PIM-L1;TRUE;Entra-ID;L1;T0;CP;ID;helpdesk-lead@contoso.com;
+PIM-Entra-ID-Users-AuthenticationMethods-Manage-L1-T0-CP-ID;Manage Authentication methods on Users, Entra ID;Entra-ID-Users-AuthenticationMethods-Manage-L1;PIM-L1;TRUE;Entra-ID;L1;T0;CP;ID;helpdesk-lead@contoso.com;
+;;;;;;;;;;;
+PIM-Entra-ID-Groups-CreateModifyDelete-L1-T0-CP-ID;Create, Modify, Delete Groups, Entra ID;Entra-ID-Groups-CreateModifyDelete-L1;PIM-L1;TRUE;Entra-ID;L1;T0;CP;ID;identity-owner@contoso.com;
+PIM-Entra-ID-Groups-Membership-Manage-L1-T0-CP-ID;Add, Remove Group Memberships, Entra ID;Entra-ID-Groups-Membership-Manage-L1;PIM-L1;TRUE;Entra-ID;L1;T0;CP;ID;helpdesk-lead@contoso.com;

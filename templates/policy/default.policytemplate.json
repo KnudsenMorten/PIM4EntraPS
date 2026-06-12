@@ -1,0 +1,6 @@
+{
+  "id": "default",
+  "name": "Default",
+  "description": "The engine's standard policy baseline (MFA + justification on activation, expirations and notifications from policies.custom.ps1). Deliberately carries NO overrides: groups linked to 'default' keep the global pass's settings, and the engine never touches an approval rule it did not itself apply.",
+  "rules": {}
+}

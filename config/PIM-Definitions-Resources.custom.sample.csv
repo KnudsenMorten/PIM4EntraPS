@@ -1,5 +1,5 @@
-﻿GroupName;GroupDescription;GroupTag;AdministrativeUnitTag;CPPlatform;Plane;TierLevel;PermissionScope;SyncPlatform;IsRoleAssignable
-PIM-RES-FileShare-Finance;File share - Finance department;RES-FileShare-Finance;PIM-ORGANIZATION;FILE;DP;T2;Scoped;FS;FALSE
-PIM-RES-SharePoint-HR;SharePoint site - HR department;RES-SharePoint-HR;PIM-ORGANIZATION;M365;DP;T2;Scoped;SP;FALSE
-PIM-RES-AzureSQL-AppDB-Reader;Azure SQL AppDB reader;RES-AzureSQL-AppDB-Reader;PIM-ORGANIZATION;AZ;DP;T1;Scoped;AZ;FALSE
-PIM-RES-AzureSQL-AppDB-Writer;Azure SQL AppDB writer;RES-AzureSQL-AppDB-Writer;PIM-ORGANIZATION;AZ;DP;T1;Scoped;AZ;FALSE
+GroupName;GroupDescription;GroupTag;AdministrativeUnitTag;CPPlatform;Plane;TierLevel;PermissionScope;SyncPlatform;IsRoleAssignable;PolicyTemplate
+PIM-RES-FileShare-Finance;File share - Finance department;RES-FileShare-Finance;PIM-ORGANIZATION;FILE;DP;T2;Scoped;FS;FALSE;
+PIM-RES-SharePoint-HR;SharePoint site - HR department;RES-SharePoint-HR;PIM-ORGANIZATION;M365;DP;T2;Scoped;SP;FALSE;
+PIM-RES-AzureSQL-AppDB-Reader;Azure SQL AppDB reader;RES-AzureSQL-AppDB-Reader;PIM-ORGANIZATION;AZ;DP;T1;Scoped;AZ;FALSE;
+PIM-RES-AzureSQL-AppDB-Writer;Azure SQL AppDB writer;RES-AzureSQL-AppDB-Writer;PIM-ORGANIZATION;AZ;DP;T1;Scoped;AZ;FALSE;

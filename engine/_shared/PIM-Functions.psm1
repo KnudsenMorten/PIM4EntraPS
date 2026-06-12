@@ -9689,6 +9689,333 @@ function Save-PimTapState {
     ($State | ConvertTo-Json -Depth 4) | Set-Content -LiteralPath $f -Encoding UTF8
 }
 
+# --- Policy templates + approvals (LIFECYCLE-GOVERNANCE phases 3+4) ----------
+# templates/policy/<id>.policytemplate.json (+ .custom.json, same id wins)
+# linked per definition row via the PolicyTemplate column. The engine
+# re-applies a group's rules whenever the linked template's content hash
+# differs from the last applied one (output/state/policy-state.json).
+# Approvers come from the definition CSVs' Owners column; Parallel = native
+# any-one-wins ApprovalRule with all owners; Serial = first owner with the
+# escalation sweep (Invoke-PimApprovalEscalation) rotating to the next owner
+# after escalationHours.
+
+function Get-PimPolicyTemplates {
+    $dir = Join-Path $PSScriptRoot '..\..\templates\policy'
+    $byId = @{}
+    if (Test-Path -LiteralPath $dir) {
+        $files = @(Get-ChildItem -LiteralPath $dir -Filter '*.policytemplate.json' -ErrorAction SilentlyContinue) +
+                 @(Get-ChildItem -LiteralPath $dir -Filter '*.policytemplate.custom.json' -ErrorAction SilentlyContinue)
+        foreach ($f in $files) {
+            try {
+                $j = Get-Content -LiteralPath $f.FullName -Raw -Encoding UTF8 | ConvertFrom-Json
+                if ($j.id) { $byId[[string]$j.id] = $j }   # custom enumerates last -> same id wins
+            } catch { Write-Warning "policy template '$($f.Name)' unreadable: $($_.Exception.Message)" }
+        }
+    }
+    $out = @{}
+    foreach ($id in @($byId.Keys)) {
+        $j = $byId[$id]
+        $rules = @{}
+        # single-level extends (a template may extend 'default' only -- keeps merge trivial)
+        if ($j.extends -and $byId.ContainsKey([string]$j.extends)) {
+            $base = $byId[[string]$j.extends]
+            if ($base.rules) { foreach ($p in $base.rules.PSObject.Properties) { $rules[$p.Name] = $p.Value } }
+        }
+        if ($j.rules) { foreach ($p in $j.rules.PSObject.Properties) { $rules[$p.Name] = $p.Value } }
+        $canon = (@($rules.Keys | Sort-Object | ForEach-Object { "$_=" + ($rules[$_] | ConvertTo-Json -Depth 8 -Compress) }) -join ';')
+        $sha = [System.BitConverter]::ToString([System.Security.Cryptography.SHA256]::Create().ComputeHash([System.Text.Encoding]::UTF8.GetBytes($canon))).Replace('-', '')
+        $out[$id] = @{ Id = $id; Rules = $rules; Hash = $sha }
+    }
+    $out
+}
+
+function Get-PimDefinitionPolicyMap {
+    # GroupName -> @{ TemplateId; Owners[]; GroupTag } across all definition
+    # CSVs. PolicyTemplate blank/missing = 'default'. Owners come from the
+    # Owners column (semicolon list); the Roles CSV uses SponsorUpn.
+    $map = @{}
+    foreach ($base in @('PIM-Definitions-Roles','PIM-Definitions-Tasks','PIM-Definitions-Services','PIM-Definitions-Processes','PIM-Definitions-Resources','PIM-Definitions-Departments','PIM-Definitions-Organization')) {
+        $path = $null
+        try { $path = Get-PimConfigCsv -Name $base } catch { continue }
+        if (-not $path -or -not (Test-Path -LiteralPath $path)) { continue }
+        $rows = @()
+        try { $rows = Import-Csv -Path $path -Delimiter ';' -Encoding UTF8 } catch { continue }
+        foreach ($r in $rows) {
+            $gName = if ($r.PSObject.Properties.Name -contains 'GroupName') { "$($r.GroupName)".Trim() } else { '' }
+            if (-not $gName) { continue }
+            $tplId = if ($r.PSObject.Properties.Name -contains 'PolicyTemplate') { "$($r.PolicyTemplate)".Trim() } else { '' }
+            if (-not $tplId) { $tplId = 'default' }
+            $ownersRaw = ''
+            if ($r.PSObject.Properties.Name -contains 'Owners' -and "$($r.Owners)".Trim()) { $ownersRaw = "$($r.Owners)" }
+            elseif ($r.PSObject.Properties.Name -contains 'SponsorUpn') { $ownersRaw = "$($r.SponsorUpn)" }
+            $owners = @($ownersRaw -split '[;,]' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+            $map[$gName] = @{
+                TemplateId = $tplId
+                Owners     = $owners
+                GroupTag   = $(if ($r.PSObject.Properties.Name -contains 'GroupTag') { "$($r.GroupTag)" } else { '' })
+            }
+        }
+    }
+    $map
+}
+
+function Get-PimPolicyStateFile {
+    $stateDir = Join-Path (Get-PimOutputDir) 'state'
+    if (-not (Test-Path -LiteralPath $stateDir)) { New-Item -ItemType Directory -Path $stateDir -Force | Out-Null }
+    Join-Path $stateDir 'policy-state.json'
+}
+
+function Get-PimPolicyState {
+    $f = Get-PimPolicyStateFile
+    if (-not (Test-Path -LiteralPath $f)) { return @{} }
+    try {
+        $raw = Get-Content -LiteralPath $f -Raw -Encoding UTF8
+        if (-not $raw -or -not $raw.Trim()) { return @{} }
+        $obj = $raw | ConvertFrom-Json
+        $map = @{}
+        foreach ($p in $obj.PSObject.Properties) { $map[$p.Name] = $p.Value }
+        return $map
+    } catch {
+        Write-Warning "policy-state.json unreadable ($($_.Exception.Message)) -- treating as empty (worst case: templates re-apply, which is idempotent)."
+        return @{}
+    }
+}
+
+function Save-PimPolicyState {
+    param([Parameter(Mandatory)][hashtable]$State)
+    ($State | ConvertTo-Json -Depth 8) | Set-Content -LiteralPath (Get-PimPolicyStateFile) -Encoding UTF8
+}
+
+function Resolve-PimApproverObjects {
+    # UPNs -> Graph singleUser approver objects. Unresolvable UPNs are
+    # skipped with a warning (an approval rule with zero approvers is the
+    # caller's responsibility to reject).
+    param([Parameter(Mandatory)][AllowEmptyCollection()][string[]]$Upns)
+    $out = @()
+    foreach ($u in @($Upns | Where-Object { $_ })) {
+        try {
+            $usr = Get-MgUser -UserId $u -ErrorAction Stop
+            if ($usr -and $usr.Id) {
+                $out += @{ '@odata.type' = '#microsoft.graph.singleUser'; userId = $usr.Id; description = $u }
+            }
+        } catch { Write-Warning "  [Approval] approver '$u' not resolvable in this tenant -- skipped." }
+    }
+    ,$out
+}
+
+function Set-PimGroupApprovalRule {
+    # PATCH the member-role ApprovalRule on one group policy. $Approvers
+    # empty + $Required:$false = disable approval.
+    param(
+        [Parameter(Mandatory)]$Policy,
+        [Parameter(Mandatory)][bool]$Required,
+        [AllowEmptyCollection()][array]$Approvers = @()
+    )
+    PIM_Policy_Check_Update -RuleId Approval_EndUser_Assignment -RuleType ApprovalRule -Policy $Policy -PIM_API MicrosoftGraph `
+        -approvalMode SingleStage `
+        -isApprovalRequired $Required `
+        -isRequestorJustificationRequired $Required `
+        -isApprovalRequiredForExtension $false `
+        -isApproverJustificationRequired $Required `
+        -isEscalationEnabled $false `
+        -escalationTimeInMinutes 0 `
+        -approvalStageTimeOutInDays 1 `
+        -primaryApprovers $Approvers -escalationApprovers @() `
+        -caller EndUser -Operations all -Level Assignment -inheritableSettings @() -enforcedSettings @()
+}
+
+function Get-PimGroupMemberPolicy {
+    # The group's MEMBER-role PIM policy with rules expanded (activation
+    # approval/enablement live on the member policy, not the owner one).
+    param([Parameter(Mandatory)][string]$GroupId)
+    $assignment = Get-MgPolicyRoleManagementPolicyAssignment -Filter "scopeId eq '$GroupId' and scopeType eq 'Group' and roleDefinitionId eq 'member'" -ErrorAction Stop | Select-Object -First 1
+    if (-not $assignment -or -not $assignment.PolicyId) { return $null }
+    Get-MgPolicyRoleManagementPolicy -UnifiedRoleManagementPolicyId $assignment.PolicyId -ExpandProperty rules -ErrorAction Stop
+}
+
+function Invoke-PimPolicyTemplateApply {
+    <#
+    .SYNOPSIS
+        Apply linked policy templates to their groups -- hash-gated, so a
+        run where nothing changed is a no-op per group.
+    #>
+    [CmdletBinding()]
+    param()
+
+    $templates = Get-PimPolicyTemplates
+    if ($templates.Count -eq 0) { return }
+    $map = Get-PimDefinitionPolicyMap
+    if ($map.Count -eq 0) { return }
+    $state = Get-PimPolicyState
+
+    Write-Host ""
+    Write-Host "Policy templates: checking $($map.Count) definition group(s) against $($templates.Count) template(s)..." -ForegroundColor Cyan
+
+    foreach ($gName in @($map.Keys)) {
+        $entry = $map[$gName]
+        $tplId = $entry.TemplateId
+        if (-not $templates.ContainsKey($tplId)) {
+            Write-Warning "  [Policy] group '$gName' links PolicyTemplate '$tplId' which does not exist under templates\policy -- skipped (validator PIM-POL-001 catches this in the Manager)."
+            continue
+        }
+        $tpl = $templates[$tplId]
+        $st  = $state[$gName]
+        if ($st -and "$($st.appliedHash)" -eq $tpl.Hash) { continue }   # NoChange
+
+        # Emergency override (phase 8) wins while active: skip re-applying
+        # the normal template to scoped groups so the override isn't undone
+        # mid-window; Invoke-PimEmergencyOverride restores them at expiry.
+        if ((Get-Command Test-PimEmergencyOverrideActive -ErrorAction SilentlyContinue) -and (Test-PimEmergencyOverrideActive -GroupTag $entry.GroupTag)) {
+            Write-Host "  [Policy] '$gName' is under an ACTIVE emergency override -- template apply deferred until the override expires." -ForegroundColor Yellow
+            continue
+        }
+
+        $grp = $null
+        try {
+            $safeName = $gName -replace "'", "''"
+            $grp = Get-MgGroup -Filter "displayName eq '$safeName'" -ErrorAction Stop | Select-Object -First 1
+        } catch { Write-Warning "  [Policy] lookup for group '$gName' failed: $($_.Exception.Message)"; continue }
+        if (-not $grp) {
+            Write-Host "  [Policy] group '$gName' not in tenant yet -- template apply deferred to a later run." -ForegroundColor Gray
+            continue
+        }
+
+        $policy = $null
+        try { $policy = Get-PimGroupMemberPolicy -GroupId $grp.Id } catch { Write-Warning "  [Policy] member policy for '$gName' not readable: $($_.Exception.Message)"; continue }
+        if (-not $policy) { Write-Warning "  [Policy] no member PIM policy found for '$gName' -- is the group PIM-enabled?"; continue }
+
+        Write-Host "  [Policy] applying template '$tplId' to '$gName'..." -ForegroundColor Yellow
+
+        $approvalSpec = $null
+        foreach ($ruleKey in @($tpl.Rules.Keys)) {
+            $val = $tpl.Rules[$ruleKey]
+            switch ($ruleKey) {
+                'Approval' { $approvalSpec = $val }
+                'Member_Enablement_EndUser_Assignment_enabledRules' {
+                    PIM_Policy_Check_Update -RuleId Enablement_EndUser_Assignment -RuleType EnablementRule -Policy $policy -PIM_API MicrosoftGraph `
+                        -enabledRules @($val) -caller EndUser -Operations all -Level Assignment -inheritableSettings @() -enforcedSettings @()
+                }
+                'Member_Expiration_EndUser_Assignment_maximumDuration' {
+                    PIM_Policy_Check_Update -RuleId Expiration_EndUser_Assignment -RuleType ExpirationRule -Policy $policy -PIM_API MicrosoftGraph `
+                        -isExpirationRequired $true -maximumDuration ([string]$val) -caller EndUser -Operations all -Level Assignment -inheritableSettings @() -enforcedSettings @()
+                }
+                default { Write-Warning "  [Policy] template '$tplId' rule '$ruleKey' is not a supported override key -- ignored." }
+            }
+        }
+
+        # Approval rule. SAFETY: 'mode None / no Approval block' only actively
+        # DISABLES approval when the state shows WE enabled it earlier -- a
+        # customer's manually-configured approval is never silently removed.
+        $approvalMode = if ($approvalSpec -and $approvalSpec.mode) { [string]$approvalSpec.mode } else { 'None' }
+        $activeIdx = 0
+        if ($approvalMode -ne 'None') {
+            $owners = @($entry.Owners)
+            if ($owners.Count -eq 0) {
+                Write-Warning "  [Policy] '$gName' template '$tplId' requires approval but the definition row has NO owners -- approval rule NOT applied (PIM-APR-001)."
+                $approvalMode = 'None'
+            } else {
+                if ($st -and $st.approval -and $null -ne $st.approval.activeApproverIndex) { $activeIdx = [int]$st.approval.activeApproverIndex }
+                if ($activeIdx -ge $owners.Count) { $activeIdx = 0 }
+                $apprUpns = if ($approvalMode -eq 'Serial') { @($owners[$activeIdx]) } else { @($owners) }
+                $approvers = Resolve-PimApproverObjects -Upns $apprUpns
+                if (@($approvers).Count -eq 0) {
+                    Write-Warning "  [Policy] '$gName': none of the owners resolve in this tenant -- approval rule NOT applied."
+                    $approvalMode = 'None'
+                } else {
+                    Set-PimGroupApprovalRule -Policy $policy -Required $true -Approvers $approvers
+                }
+            }
+        } elseif ($st -and $st.approval -and "$($st.approval.mode)" -ne 'None') {
+            Write-Host "  [Policy] '$gName' moved off an approval template -- disabling the approval rule the engine previously applied." -ForegroundColor Yellow
+            Set-PimGroupApprovalRule -Policy $policy -Required $false -Approvers @()
+        }
+
+        $state[$gName] = @{
+            templateId   = $tplId
+            appliedHash  = $tpl.Hash
+            appliedAtUtc = [datetime]::UtcNow.ToString('o')
+            groupId      = $grp.Id
+            groupTag     = $entry.GroupTag
+            approval     = @{
+                mode                = $approvalMode
+                owners              = @($entry.Owners)
+                activeApproverIndex = $activeIdx
+                escalationHours     = $(if ($approvalSpec -and $approvalSpec.escalationHours) { [int]$approvalSpec.escalationHours } else { 4 })
+            }
+        }
+        Save-PimPolicyState -State $state   # per-group save = crash-safe
+    }
+}
+
+function Invoke-PimApprovalEscalation {
+    <#
+    .SYNOPSIS
+        Serial-approval escalation sweep: activation requests pending longer
+        than escalationHours rotate the policy's approver to the next owner
+        and notify them (approval-escalation mail template). Latency is
+        bounded by engine run frequency -- schedule hourly on tenants using
+        Serial mode.
+    #>
+    [CmdletBinding()]
+    param()
+
+    $state = Get-PimPolicyState
+    $serialGroups = @($state.Keys | Where-Object { $state[$_].approval -and "$($state[$_].approval.mode)" -eq 'Serial' })
+    if ($serialGroups.Count -eq 0) { return }
+
+    Write-Host ""
+    Write-Host "Approval escalation sweep: $($serialGroups.Count) group(s) in Serial mode..." -ForegroundColor Cyan
+
+    foreach ($gName in $serialGroups) {
+        $st = $state[$gName]
+        $owners = @($st.approval.owners)
+        $idx    = [int]$st.approval.activeApproverIndex
+        if ($idx + 1 -ge $owners.Count) { continue }   # nobody left to escalate to
+
+        $pending = @()
+        try {
+            $pending = @(Get-MgIdentityGovernancePrivilegedAccessGroupAssignmentScheduleRequest -Filter "groupId eq '$($st.groupId)'" -ErrorAction Stop |
+                Where-Object { $_.Status -eq 'PendingApproval' })
+        } catch { Write-Warning "  [Escalation] cannot read pending requests for '$gName': $($_.Exception.Message)"; continue }
+        if ($pending.Count -eq 0) { continue }
+
+        $threshold = [datetime]::UtcNow.AddHours(-1 * [int]$st.approval.escalationHours)
+        $overdue = @($pending | Where-Object { $_.CreatedDateTime -and ([datetime]$_.CreatedDateTime) -lt $threshold })
+        if ($overdue.Count -eq 0) { continue }
+
+        $nextIdx = $idx + 1
+        $nextOwner = $owners[$nextIdx]
+        Write-Host "  [Escalation] '$gName': $($overdue.Count) request(s) pending past $($st.approval.escalationHours)h -- rotating approver $($owners[$idx]) -> $nextOwner" -ForegroundColor Yellow
+
+        $approvers = Resolve-PimApproverObjects -Upns @($nextOwner)
+        if (@($approvers).Count -eq 0) { Write-Warning "  [Escalation] next owner '$nextOwner' not resolvable -- skipped."; continue }
+        $policy = $null
+        try { $policy = Get-PimGroupMemberPolicy -GroupId $st.groupId } catch { Write-Warning "  [Escalation] member policy unreadable for '$gName': $($_.Exception.Message)"; continue }
+        if (-not $policy) { continue }
+        Set-PimGroupApprovalRule -Policy $policy -Required $true -Approvers $approvers
+
+        if ($global:PIM_NotificationChannels -and $global:PIM_NotificationChannels.Count -gt 0 -and (Get-Command Send-PimTemplatedMail -ErrorAction SilentlyContinue)) {
+            try {
+                Send-PimTemplatedMail -Type 'approval-escalation' -Recipient $nextOwner -Tokens @{
+                    ApproverName        = $nextOwner
+                    PreviousApprover    = $owners[$idx]
+                    RequestorUpn        = (@($overdue | ForEach-Object { $_.PrincipalId }) -join ', ')
+                    RoleName            = 'member'
+                    GroupName           = $gName
+                    Justification       = (@($overdue | ForEach-Object { $_.Justification }) -join ' | ')
+                    RequestedAt         = (@($overdue | ForEach-Object { "$($_.CreatedDateTime)" }) -join ', ')
+                    EscalatedAfterHours = $st.approval.escalationHours
+                    ApprovalUrl         = 'https://entra.microsoft.com/#view/Microsoft_Azure_PIMCommon/ApproveRequestMenuBlade/~/aadgroup'
+                } | Out-Null
+            } catch { Write-Warning "  [Escalation] notification to '$nextOwner' failed: $($_.Exception.Message)" }
+        }
+
+        $st.approval.activeApproverIndex = $nextIdx
+        $state[$gName] = $st
+        Save-PimPolicyState -State $state
+    }
+}
+
 function Invoke-PimTapProvisioning {
     <#
     .SYNOPSIS
