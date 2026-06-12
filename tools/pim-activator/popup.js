@@ -870,15 +870,15 @@ async function triggerInteractiveReauth(reason) {
   const overlay = document.createElement('div')
   overlay.style.cssText = 'position:fixed;inset:0;z-index:9999;background:rgba(13,17,23,0.95);color:#e6edf3;padding:20px 22px;display:flex;flex-direction:column;justify-content:center;align-items:flex-start;font-family:inherit;font-size:13px;line-height:1.5;'
   overlay.innerHTML = `
-    <div style="color:#58a6ff;font-weight:600;font-size:14px;margin-bottom:10px;">Self-healing your session...</div>
+    <div style="color:#58a6ff;font-weight:600;font-size:14px;margin-bottom:10px;">Your session expired -- signing you in again...</div>
     <div style="color:#e6edf3;margin-bottom:10px;">${escapeHtmlSafe(reason)}</div>
-    <div style="color:#7d8590;margin-bottom:6px;">Your access token doesn't match the currently-granted permissions. This usually happens after:</div>
+    <div style="color:#7d8590;margin-bottom:6px;">The cached sign-in is no longer valid. This usually happens when:</div>
     <ul style="color:#7d8590;margin:0 0 12px 18px;padding:0;">
+      <li>A Conditional Access policy enforces a sign-in/session lifetime (token expired or was revoked)</li>
       <li>Admin re-consented new scopes (e.g. RoleManagement.Read.Directory)</li>
       <li>You switched browser (Edge -> Chrome or vice versa)</li>
-      <li>Token expired or was revoked</li>
     </ul>
-    <div style="color:#3fb950;">Refreshing in a moment -- you'll be prompted to sign in once more. After that, everything works.</div>
+    <div style="color:#3fb950;">You've been signed out automatically. The sign-in prompt opens in a moment -- after that, everything works.</div>
   `
   document.body.appendChild(overlay)
   // Wipe Graph + ARM tokens. Setting forceInteractive: true tells the next
@@ -2163,6 +2163,10 @@ async function loadMyAccessTab(token, { force = false } = {}) {
     await Promise.all(tasks)
   } catch (e) {
     console.error('My Access load failed:', e)
+    if (e.stale) {
+      els.myAccessStatus.textContent = 'Session expired -- signing in again...'
+      return triggerInteractiveReauth(`Your session expired while loading My Access (${e.message}).`)
+    }
     els.myAccessStatus.textContent = `Failed to load: ${e.message}`
     els.myAccessStatus.classList.add('err')
   } finally {
@@ -2386,6 +2390,9 @@ function renderOneMyAccessRow(r) {
       } catch (err) {
         btn.disabled = false
         btn.textContent = 'Deactivate'
+        if (err?.stale) {
+          return triggerInteractiveReauth(`Your session expired while deactivating (${err.message}).`)
+        }
         alert(`Deactivation failed: ${err?.message || err}`)
       }
     })
@@ -3401,6 +3408,13 @@ async function loaded(token) {
         // (groups vs direct rows live in different buckets, no key collision).
         recordActivation(r.kind === 'group' ? r.groupId : rk)
       } catch (e) {
+        // v1.6.x: a DEAD session (Conditional Access sign-in frequency /
+        // session lifetime killed the token mid-popup) must not surface as a
+        // cryptic per-row error -- sign the user out + relaunch sign-in.
+        if (e.stale) {
+          setStatus(rk, 'session expired -- signing in again...', 'pending')
+          return triggerInteractiveReauth(`Your session expired while activating (${e.message}). Re-select the rows after signing in.`)
+        }
         setStatus(rk, e.message, 'err')
         // leave r.checked = true so user can retry
       }

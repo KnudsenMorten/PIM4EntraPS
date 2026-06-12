@@ -1,9 +1,10 @@
 # Release notes for PIM4EntraPS
 
-## v2.4.159
+## v2.4.160
 
 Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monorepo:
 
+- release: PIM4EntraPS v2.4.160 + extension v1.6.27 -- dead CA-session tokens self-heal instead of erroring: mid-action staleness (401/token-shaped 403) during Activate / Deactivate / My Access load routes to triggerInteractiveReauth (wipes Graph+ARM tokens = auto sign-out, overlay now names Conditional Access session lifetime, popup reloads straight into interactive sign-in); popup-open dead-refresh-token path already self-healed via tryRefresh cache wipe. node --check + 7 behavioral assertions green. CRX repack on the signing-key box still required to publish 1.6.27 to the fleet (6b31c951)
 - release: PIM4EntraPS v2.4.159 -- lifecycle phase 9: resource discovery. Engine Invoke-PimResourceDiscovery (end of run, PIM_ResourceDiscoveryMode Off/Notify default Notify): new Azure subscriptions + Entra role definitions vs output/state/discovery-baseline.json (first run establishes silently; each item audited resource.discovered once, baseline rolls forward). Manager Governance tab Discovered-resources section over the _tenantSync caches with per-instance baseline + Admin-gated Acknowledge (resource.baseline audited); endpoints /api/discovered-resources + /api/discovery-baseline. Auto row-creation = documented follow-up. 14-check harness green PS 5.1 + pwsh 7; node --check green. ALL NINE LIFECYCLE-GOVERNANCE PHASES NOW SHIPPED (v2.4.153-159) (a1944979)
 - release: PIM4EntraPS v2.4.159-pre -- v2.4.158 lifecycle phases 7+8: Manager RBAC Reader/Admin/SuperAdmin (manager-access.custom.json, Windows identity, fail-closed, server-side 403 gates on csv-save/revoke/refresh=Admin + instance/emergency=SuperAdmin, role boot-injected into SPA); Governance tab (role banner, emergency panel, mail-template status, jsonl audit viewer; endpoints /api/access,/api/audit,/api/mail-templates,/api/emergency*); emergency break-glass override (SHA256 passphrase hash in emergency.custom.ps1, constant-time + 15-min lockout; Invoke-PimEmergencyOverride ordered before the template pass: scoped approval disable + owner notification via new emergency-override mail template + same-run auto-restore at TTL expiry with archive + full audit chain). 38-check harness green PS 5.1 + pwsh 7; node --check green (c2739856)
 - release: PIM4EntraPS v2.4.157 -- lifecycle phase 6: unified append-only audit jsonl (output/audit/pim-audit-<yyyyMM>.jsonl; Write-PimAuditEvent best-effort; 13 engine actions wired incl. account/tap/policy/approval/offboard/retire/drift/mail; Manager emits config.csv.save with manager:<windows-identity> actor + session runId) + automatic CSV schema upgrade for existing installs (Invoke-PimCsvSchemaUpgrade at engine start + Manager instance load appends ProvisionDate/TAPLifetimeHours/Template/OffboardDate/DeleteAfterDays + PolicyTemplate/Lifecycle with blank = default = auto-approval; idempotent byte-preserving line-append, quoted-multiline fallback; fixed blank-separator false-multiline + requoted-header re-upgrade loop). 25-check harness green PS 5.1 + pwsh 7 (9d923f67)
@@ -33,7 +34,6 @@ Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monor
 - release: PIM4EntraPS v2.4.133 -- PIM Manager: Graph view removed (was unused + the only CDN dependency; SPA now makes zero external requests, data model behind the wizards kept); professional tabs (Configuration landing / Create / Review & Save / Validate / Active Assignments) + labelled Tenant switcher sorted for 25+ MSP instances with config-root tooltips; fixed TDZ init abort on the landing-tab rail render (a456cc00)
 - release: PIM4EntraPS v2.4.132 -- PIM Activator v1.6.26 packed + published to gh-pages (tenant-dropdown readability fix live; post-pack guard validated canonical id; live updates.xml + CRX byte-verified); Update-PimActivator-Extension.ps1 git calls wrapped in Invoke-GitQuiet -- `2>$null` under EAP=Stop turned a harmless CRLF warning from `git add` into a terminating NativeCommandError that aborted the publish mid-way (3f79b213)
 - release: PIM4EntraPS v2.4.131 -- PIM Manager pwsh-7 launch fixed: gate the compiled JSON serializer (System.Web.Extensions / JavaScriptSerializer, .NET-Framework-only; explicit -ReferencedAssemblies broke core resolution with CS0012) on PSEdition Desktop; PowerShell 7 uses native ConvertTo-Json which is already fast. Verified both editions: pwsh7 preflight 2.0s cold / 0.04s warm, PS 5.1 3.3s via compiled path (c69fe4ec)
-- release: PIM4EntraPS v2.4.130 -- Revoke tab live-verified on a real tenant (987 active assignments incl. 43 pim-for-groups that were invisible before: Graph refuses unfiltered assignmentSchedules, now per-group $batch queries over PIM-prefix candidates); served requests count as heartbeat so slow loads no longer self-reap the server; hashtable principal/role/AU label indexes; _tenantSync reuses existing app-only contexts + secret-auth fallback (was cert-only); new -ConnectPlatform launcher switch. Manager branding aligned with PIM Activator (banner version badge, in-banner instance switcher, tab/button/badge treatment). Activator popup: tenant-dropdown options got explicit colors -- 3-tenant list was white-on-white except the highlighted row (repack+redeploy needed to ship to browsers) (fb3a5f86)
 
 ---
 
@@ -42,6 +42,16 @@ Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monor
 > **Curated changelog.** The publish workflow auto-prepends recent monorepo commits as a raw activity log; this file is the human-friendly narrative on top.
 
 ---
+
+## v2.4.160 -- PIM Activator extension v1.6.27: dead sessions self-heal instead of erroring
+
+Operator request: with Conditional Access enforcing sign-in/session lifetimes, a user can have the popup "signed in" while the underlying token is dead -- and mid-action failures surfaced as cryptic errors.
+
+How it already worked at popup OPEN (no change needed): the silent path (`tryRefresh`) detects a CA-killed refresh token (`invalid_grant`/`interaction_required`), wipes the cached tokens, and shows the sign-in screen -- effectively an automatic sign-out.
+
+What v1.6.27 fixes -- the MID-ACTION cases now self-heal too: token-staleness (`401` / token-shaped `403`) during **Activate**, **Deactivate**, or **My Access load** no longer prints an error. Instead the existing self-heal pipeline runs: cached Graph + ARM tokens are wiped (= signed out), an explanatory overlay shows ("Your session expired -- signing you in again..." -- wording now explicitly names Conditional Access session lifetime as the usual cause), and the popup reloads straight into the interactive sign-in (no extra click). The activation flow notes that selections need re-picking after the fresh sign-in. Genuine non-auth errors still show as errors.
+
+`popup.js` passes `node --check`; 7 behavioral assertions verified. **Repack + publish reminder:** the CRX must be repacked on the management box holding the master signing key (`Update-PimActivator-Extension.ps1`) for the fleet to receive 1.6.27 via updates.xml -- this release ships the source.
 
 ## v2.4.159 -- Lifecycle phase 9: resource discovery (new subscriptions / Entra roles)
 
