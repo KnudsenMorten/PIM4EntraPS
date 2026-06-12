@@ -1,9 +1,10 @@
 # Release notes for PIM4EntraPS
 
-## v2.4.170
+## v2.4.171
 
 Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monorepo:
 
+- release: PIM4EntraPS v2.4.171 -- Purpose column (Day2Day|HighPriv) makes the two admin naming conventions explicit (Admin-INI-PLAT day2day vs dedicated Admin-INI-L0-T0-PLAT high-priv); TierLevel removed from canonical schema (legacy fallback kept). Engine OU routing keys off Purpose; AdminAccountPatternHighPriv + Purpose-aware PIM-NAME-002; Manager wizard Purpose field replaces Tier/Level/Naming-style, map dots color by Purpose, initials auto-derive bug fixed (pinned at 1 char after first name); admin templates prefill Purpose; pim.CentralAdmins migrated (both DBs); live tenant accounts renamed + LIVE fan-out idempotent re-run green. (1f706eed)
 - release: PIM4EntraPS v2.4.170 -- first LIVE multi-tenant MSP fan-out (Invoke-PimMspFanout.ps1: registry-driven, ring-filtered via pim.vw_AdminTenantTargets, child-process SQL isolation for the SqlServer/Graph Azure.Core conflict, WhatIf default) + engine fixes (modern ForwardMailsToContact/MailForwardAddress columns finally read w/ legacy fallback; EXO connect skipped when no row requests forwarding; replication-404 retry on post-create PATCH) + pim.CentralAdmins account-material columns w/ idempotent upgrade. Verified live: 5 accounts across 2 real test tenants, ring semantics correct, second pass idempotent. (9356c120)
 - release: PIM4EntraPS v2.4.169 -- Install-PimEngineAppRegistration: MachineStore defaults ON (cert in Cert:\LocalMachine\My unless -MachineStore:$false for ad-hoc per-user testing); operator decision, CurrentUser default was a foot-gun. AzureRbac redo for the first test tenant intentionally skipped (recorded in platform.Tenants notes in both DBs) (55b0bbf9)
 - release: PIM4EntraPS v2.4.168 -- Install-PimEngineAppRegistration -MachineStore switch: cert created/reused in Cert:\LocalMachine\My (visible in certlm.msc, usable by service/scheduled-task identities, matches platform security design); default stays CurrentUser; docstrings name the selected store. Field cause: operator could not find the cert -- it was in the user store while certlm shows the machine store (3aaa6d09)
@@ -33,7 +34,6 @@ Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monor
 - release: PIM4EntraPS v2.4.144 -- Manager PIM-WL-* validator rules (workload connector existence with did-you-mean, required RoleName, Assign/Remove action gate) + GroupTag FK coverage for PIM-Assignments-Workloads via PIM-FK-001; thorough Manager README rewrite (15-CSV model, six lifecycle tabs incl. Workload delegation panel, Rings, validator rule catalog, MSP instances, refreshed test plan) (f860d4f6)
 - release: PIM4EntraPS v2.4.143 -- wire Apply-PimWorkloadAssignments into PIM-Baseline-Management-CSV as a final opt-in Workload RBAC step: runs only when config[/<variant>]/PIM-Assignments-Workloads.custom.csv exists (NOT via Get-PimConfigCsv -- its sample auto-bootstrap would arm the feature with shipped example rows), honors -WhatIfMode, resolves connectors from workloads/connectors/, benefits from the engine Groups_All_ID inventory for GroupTag cache-hit resolution; repository.custom.sample.ps1 documents the opt-in (c9e22c20)
 - release: PIM4EntraPS v2.4.142 -- Workload Connectors phase 1: JSON connector definitions for Defender XDR Unified RBAC + Intune roles (live role listing, token-templated assign/remove bodies); 15th config file PIM-Assignments-Workloads (desired state, full Manager lifecycle); engine Apply-PimWorkloadAssignments (idempotent diff-and-apply, -WhatIfMode, removes only self-created assignments); Manager Maintenance panel with live role pickers + /api/workloads + /api/workload-roles. Live-verified: 16 Defender + 11 Intune roles listed from a real tenant, WhatIf plan resolved real group->objectId with exact would-assign lines. Design doc extended with activation-stats right-sizing, deleted-resource auto-cleanup, orphaned-group drift phases (63ebc705)
-- release: PIM4EntraPS v2.4.141 -- Permission Templates: maintainer-curated delegation packs in templates/*.template.json (distributed by repo sync), diffed per active instance by GET /api/templates (presence by natural row keys); Create tab shows each pack as Up-to-date or "n new permission(s)" with one-click import into pending; shipped starter pack defender-xdr v2 (7 Unified-RBAC workload groups, grown from 3 in v1 to demo the new-permissions flow). Plus docs/WORKLOAD-CONNECTORS.md: full design for applying PIM groups to workload RBAC (Defender XDR, Intune, Power BI, Dataverse, Business Central, Azure AI) via JSON connector definitions + a 15th desired-state CSV + an engine applier with auth adapters (bfc8f329)
 
 ---
 
@@ -42,6 +42,23 @@ Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monor
 > **Curated changelog.** The publish workflow auto-prepends recent monorepo commits as a raw activity log; this file is the human-friendly narrative on top.
 
 ---
+
+## v2.4.171 -- Purpose column: two admin naming conventions made explicit (TierLevel removed)
+
+Operator correction: admin accounts follow TWO distinct naming conventions, and the per-admin TierLevel column was misleading (a day-2-day admin spans multiple level/tier assignments over time -- L3-T1 one day, T0-L2 the next; live environments had T0 stamped on every row regardless):
+
+- **Day-2-day admin** -> `Admin-INI-ID` (Entra) / `Admin-INI-AD` (legacy AD) -- NO level/tier markers.
+- **High-priv admin** -> `Admin-INI-L0-T0-ID` / `-AD` -- a DEDICATED tier-0 account whose markers drive OU/tier routing.
+
+The new **`Purpose` column (Day2Day | HighPriv)** in Account-Definitions-Admins is the explicit selector; **TierLevel is removed from the canonical schema** (existing files keep it harmlessly; the engine reads it only as legacy fallback):
+
+- **Engine**: OU routing (PathAdmins vs PathAdminsL0T0) now keys off Purpose, with the v2.4.122 UserName-marker check as fallback for blank Purpose; description strings and the account-create audit event carry Purpose; `Invoke-PimCsvSchemaUpgrade` auto-appends Purpose to customer CSVs (blank = legacy behavior).
+- **Naming config**: `AdminAccountPatternHighPriv` joins `AdminAccountPattern` in NamingConventions (locked default `Admin-{Owner}-L0-T0-{Platform}`); validator **PIM-NAME-002** is now Purpose-aware (HighPriv rows validate against the high-priv pattern, Day2Day against the day-2-day pattern, blank accepts either).
+- **Manager**: the admin wizard's Tier/Level/Naming-style trio is replaced by ONE **Purpose** field that drives the generated name; admin map dots color by Purpose (HighPriv red / Day2Day blue); admin pickers show the Purpose; **initials auto-derive bug fixed** (typing the first name pinned the auto-value at one char -- it now keeps following name edits until manually overridden).
+- **Templates/samples**: admin templates prefill `Purpose=Day2Day` (Level/TierLevel prefills dropped); sample CSVs and README examples renamed to the real conventions.
+- **MSP platform**: `pim.CentralAdmins.TierLevel` -> `Purpose` (idempotent upgrade incl. column drop); demo seed renamed (`Admin-BBB-ID`, `Admin-CCC-ID`); fan-out feeds Purpose through to the per-tenant CSV.
+
+Verified: engine module import + schema-upgrade unit test green; validator run against a live config = zero PIM-NAME-002 under both conventions; both registry DBs (Azure SQL + local Express) migrated; live test-tenant accounts renamed via Graph and a LIVE fan-out re-run was cleanly idempotent against the new names.
 
 ## v2.4.170 -- the first LIVE multi-tenant MSP fan-out (phase 12a runs for real)
 

@@ -5161,7 +5161,13 @@ Fix (one-time per tenant):
             $FirstName              = $Entry.FirstName
             $LastName               = $Entry.LastName
             $Initials               = $Entry.Initials
-            $TierLevel              = $Entry.TierLevel
+            # v2.4.171: Purpose column (Day2Day | HighPriv) replaces TierLevel.
+            # Day-2-day accounts span multiple level/tier assignments, so a
+            # per-account tier was misleading; high-priv accounts carry the
+            # fixed -L0-T0- markers in the UserName. TierLevel still read as
+            # legacy fallback for pre-v2.4.171 CSVs.
+            $Purpose                = if ($Entry.PSObject.Properties.Name -contains 'Purpose' -and "$($Entry.Purpose)".Trim()) { "$($Entry.Purpose)".Trim() } else { '' }
+            $TierLevel              = if ($Entry.PSObject.Properties.Name -contains 'TierLevel') { $Entry.TierLevel } else { '' }
             $TargetUsage            = $Entry.TargetUsage
             $TargetPlatform         = $Entry.TargetPlatform
             $UserType               = $Entry.UserType
@@ -5368,7 +5374,7 @@ Fix (one-time per tenant):
                             }
 
                             if (Get-Command Write-PimAuditEvent -ErrorAction SilentlyContinue) {
-                                Write-PimAuditEvent -Action 'account.create' -Target $UserPrincipalName -After @{ displayName = $DisplayName; tierLevel = $TierLevel; platform = 'ID'; template = $(if ($Entry.PSObject.Properties.Name -contains 'Template') { "$($Entry.Template)" } else { '' }) }
+                                Write-PimAuditEvent -Action 'account.create' -Target $UserPrincipalName -After @{ displayName = $DisplayName; purpose = $Purpose; tierLevel = $TierLevel; platform = 'ID'; template = $(if ($Entry.PSObject.Properties.Name -contains 'Template') { "$($Entry.Template)" } else { '' }) }
                             }
 
                             # v2.2.0 (roadmap #1) -- Notes go to the password log as a
@@ -5506,19 +5512,17 @@ Fix (one-time per tenant):
                             write-host ""
                             Write-host "Creating $($TargetPlatform) account $($DisplayName)"
 
-                            # v2.4.122: OU routing driven by the UserName / UPN
-                            # NAMING -- not the CSV TierLevel column. Customers
-                            # encode the privilege class in the account name
-                            # itself (e.g. 'Admin-SKR-L0-T0-ID' carries both
-                            # the L0 Level and T0 Tier markers). If the UserName
-                            # carries an 'L0' or 'T0' marker (case-insensitive,
+                            # v2.4.171: OU routing driven by the Purpose column
+                            # (HighPriv -> $PathAdminsL0T0, Day2Day/other ->
+                            # $PathAdmins). Blank Purpose falls back to the
+                            # v2.4.122 UserName-marker check: high-priv accounts
+                            # carry the -L0-T0- markers in the name
+                            # (e.g. 'Admin-SKR-L0-T0-AD'; case-insensitive,
                             # bounded by '-' so 'L0-' / '-L0' / '-T0' / 'T0-'
-                            # match but 'L01' / 'LT0' don't), the account is
-                            # high-priv and routes to $PathAdminsL0T0; every
-                            # other name (the default) routes to $PathAdmins.
+                            # match but 'L01' / 'LT0' don't).
                             $userNameForRouting = [string]$UserName
                             $highPrivRegex = '(?i)(^|[-_.])(L0|T0)([-_.]|$)'
-                            $isHighPriv = $userNameForRouting -match $highPrivRegex
+                            $isHighPriv = if ($Purpose) { $Purpose -ieq 'HighPriv' } else { $userNameForRouting -match $highPrivRegex }
                             $targetOu = if ($isHighPriv) { $PathAdminsL0T0 } else { $PathAdmins }
                             $tierForLog = if ($isHighPriv) { 'high-priv (L0/T0 marker in UserName)' } else { 'general (no L0/T0 marker in UserName)' }
 
@@ -5597,7 +5601,9 @@ Function CreateUpdate-Accounts-From-SQL
             $FirstName              = $Entry.FirstName
             $LastName               = $Entry.LastName
             $Initials               = $Entry.Initials
-            $TierLevel              = $Entry.TierLevel
+            # v2.4.171: Purpose (Day2Day | HighPriv) replaces TierLevel; legacy fallback below.
+            $Purpose                = if ($Entry.PSObject.Properties.Name -contains 'Purpose' -and "$($Entry.Purpose)".Trim()) { "$($Entry.Purpose)".Trim() } else { '' }
+            $TierLevel              = if ($Entry.PSObject.Properties.Name -contains 'TierLevel') { $Entry.TierLevel } else { '' }
             $TargetUsage            = $Entry.TargetUsage
             $TargetPlatform         = $Entry.TargetPlatform
             $UserType               = $Entry.UserType
@@ -5624,10 +5630,7 @@ Function CreateUpdate-Accounts-From-SQL
             $PasswordProfile    = @{ Password = $generatedPassword }
             $AD_PasswordProfile = ConvertTo-SecureString $generatedPassword -AsPlainText -Force
 
-            $Description = $TargetUsage + ", " + `
-                           $TargetPlatform + ", " + `
-                           $TierLevel + ", " + `
-                           $UserType
+            $Description = (@($TargetUsage, $TargetPlatform, $(if ($Purpose) { $Purpose } elseif ("$TierLevel".Trim()) { $TierLevel }), $UserType) | Where-Object { $_ }) -join ", "
 
             If ( ($TargetPlatform -eq "ID") -and ($OnlyID -eq $true) -and ($OnlyAD -eq $false) )
                 {
@@ -10130,7 +10133,11 @@ function Save-PimOffboardState {
 # byte-for-byte except for the appended columns.
 
 $script:PimCsvSchemaAdditions = @{
-    'Account-Definitions-Admins'   = @('ProvisionDate', 'TAPLifetimeHours', 'Template', 'OffboardDate', 'DeleteAfterDays')
+    # v2.4.171: Purpose (Day2Day | HighPriv) replaces the misleading TierLevel
+    # column (a day-2-day account spans multiple tier assignments). Blank =
+    # legacy fallback (UserName -L0-T0- marker check). TierLevel is no longer
+    # part of the canonical schema; existing files keep it harmlessly.
+    'Account-Definitions-Admins'   = @('ProvisionDate', 'TAPLifetimeHours', 'Template', 'OffboardDate', 'DeleteAfterDays', 'Purpose')
     'PIM-Definitions-Roles'        = @('PolicyTemplate', 'Lifecycle')
     'PIM-Definitions-Tasks'        = @('PolicyTemplate', 'Lifecycle')
     'PIM-Definitions-Services'     = @('PolicyTemplate', 'Lifecycle')

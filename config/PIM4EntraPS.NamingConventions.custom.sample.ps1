@@ -52,9 +52,13 @@
 # `UserType` column in Account-Definitions-Admins (case-insensitive).
 # Tokens: {Initials}, {Owner}, {Tier}, {Level}, {Platform}
 #
-# Customer A (Admin- / X-Admin- with tier suffix):
-#   Internal -> Admin-{Initials}-L{Level}-T{Tier}-{Platform}   e.g. Admin-ABC-L0-T0-ID
-#   External -> X-Admin-{Initials}-L{Level}-T{Tier}-{Platform} e.g. X-Admin-VND-L1-T1-ID
+# Customer A (Admin- / X-Admin-). Day-2-day admin accounts carry NO level/tier
+# markers -- one account spans multiple L/T assignments (L3-T1 one day, L2-T0
+# the next), so a baked-in pair would mislead. Markers are reserved for
+# DEDICATED tier-0 accounts (Admin-ABC-L0-T0-ID), where they drive OU/tier routing:
+#   Internal -> Admin-{Initials}-{Platform}                    e.g. Admin-ABC-ID
+#   External -> X-Admin-{Initials}-{Platform}                  e.g. X-Admin-VND-ID
+#   Dedicated T0 -> Admin-{Initials}-L{Level}-T{Tier}-{Platform} e.g. Admin-ABC-L0-T0-ID
 #
 # Customer B (compact form):
 #   Internal -> adm{Initials}                                  e.g. admABC
@@ -70,8 +74,8 @@
 # source (engine derives the prefix from each value).
 #
 # $global:PIM_NamingConventions.AdminAccountPatterns = @{
-#     Internal = 'Admin-{Initials}-L{Level}-T{Tier}-{Platform}'
-#     External = 'X-Admin-{Initials}-L{Level}-T{Tier}-{Platform}'
+#     Internal = 'Admin-{Initials}-{Platform}'
+#     External = 'X-Admin-{Initials}-{Platform}'
 #     Guest    = 'g-{Owner}'                # rare
 # }
 #

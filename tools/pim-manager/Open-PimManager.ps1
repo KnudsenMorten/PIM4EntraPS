@@ -430,7 +430,7 @@ if ($ConnectPlatform) {
 # The 14 CSV bases the mapper edits, in stable UI order, with their default
 # headers used when creating a brand-new .custom.csv.
 $script:PimCsvBases = @(
-    [ordered]@{ base = 'Account-Definitions-Admins';      group = 'Definitions';  defaultHeader = @('FirstName','LastName','Initials','TierLevel','TargetUsage','TargetPlatform','UserType','UserName','DisplayName','UserPrincipalName','UsageLocation','ForwardMailsToContact','MailForwardAddress','CreateTAP','TAPStartDate','Ring') },
+    [ordered]@{ base = 'Account-Definitions-Admins';      group = 'Definitions';  defaultHeader = @('FirstName','LastName','Initials','Purpose','TargetUsage','TargetPlatform','UserType','UserName','DisplayName','UserPrincipalName','UsageLocation','ForwardMailsToContact','MailForwardAddress','CreateTAP','TAPStartDate','Ring') },
     [ordered]@{ base = 'PIM-Definitions-Roles';           group = 'Definitions';  defaultHeader = @('GroupName','GroupDescription','GroupTag','AdministrativeUnitTag','CPPlatform','Plane','TierLevel','PermissionScope','SyncPlatform','IsRoleAssignable') },
     [ordered]@{ base = 'PIM-Definitions-Tasks';           group = 'Definitions';  defaultHeader = @('GroupName','GroupDescription','GroupTag','AdministrativeUnitTag','IsRoleAssignable','Workload','Level','TierLevel','Plane','CPPlatform','Owners') },
     [ordered]@{ base = 'PIM-Definitions-Services';        group = 'Definitions';  defaultHeader = @('GroupName','GroupDescription','GroupTag','AdministrativeUnitTag','IsRoleAssignable','Workload','Level','TierLevel','Plane','CPPlatform','Owners') },
@@ -779,11 +779,19 @@ function Build-PimGraphData {
 
     foreach ($a in $admins) {
         if (-not $a.UserPrincipalName) { continue }
+        # v2.4.171: Purpose (Day2Day | HighPriv) replaces the per-admin
+        # TierLevel column. Explicit Purpose wins; blank falls back to the
+        # UserName -L0-T0- marker check; legacy TierLevel kept as last resort
+        # for the map's tier coloring on not-yet-upgraded CSVs.
+        $purposeVal = if ($a.PSObject.Properties.Name -contains 'Purpose' -and "$($a.Purpose)".Trim()) { "$($a.Purpose)".Trim() }
+                      elseif ("$($a.UserName)" -match '(?i)(^|[-_.])(L0|T0)([-_.]|$)') { 'HighPriv' }
+                      else { 'Day2Day' }
         [void]$nodes.Add([ordered]@{
             id       = $a.UserPrincipalName
             label    = $a.DisplayName
             kind     = 'admin'
-            tier     = $a.TierLevel
+            purpose  = $purposeVal
+            tier     = $(if ($a.PSObject.Properties.Name -contains 'TierLevel') { $a.TierLevel } else { '' })
             platform = $a.TargetPlatform
             source   = 'Account-Definitions-Admins'
         })
