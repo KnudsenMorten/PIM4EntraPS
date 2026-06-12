@@ -1,0 +1,47 @@
+{
+  "id": "azure-rbac",
+  "name": "Azure RBAC (ARM role assignments at a scope)",
+  "auth": "arm",
+  "status": "structure built v2.4.183 -- ARM roleAssignments PUT-with-client-GUID. Live-validation pending an ARM token + a scope the SPN can read/write role assignments on.",
+  "permissionsNeeded": ["Microsoft.Authorization/roleAssignments/write + /read at the target scope (e.g. the 'User Access Administrator' or 'Owner' role for the SPN), Microsoft.Authorization/roleDefinitions/read"],
+  "prerequisites": {
+    "scopeIsArmPath": "Each row's Scope column = the ARM scope path the role applies at, e.g. /subscriptions/<sub> or /subscriptions/<sub>/resourceGroups/<rg> or a resource id. Role definitions + assignments are listed/created at that scope.",
+    "roleIdIsFullPath": "listRoles returns each role's full resource id (/subscriptions/.../roleDefinitions/<guid>); the assign body uses it verbatim as roleDefinitionId.",
+    "clientGuidPut": "ARM creates a role assignment with PUT to roleAssignments/<new-guid> -- the engine supplies a fresh {newId} per row.",
+    "tokenAdapter": "auth=arm -> token for https://management.azure.com/ via $global:PIM_WorkloadTokens['arm'] (launcher-minted) or Get-AzAccessToken."
+  },
+  "api": {
+    "baseUrl": "https://management.azure.com",
+    "listRoles": {
+      "method": "GET",
+      "path": "{scope}/providers/Microsoft.Authorization/roleDefinitions?api-version=2022-04-01",
+      "itemsPath": "value",
+      "roleId": "id",
+      "roleName": "properties.roleName",
+      "roleDescription": "properties.description"
+    },
+    "listAssignments": {
+      "method": "GET",
+      "path": "{scope}/providers/Microsoft.Authorization/roleAssignments?api-version=2022-04-01",
+      "itemsPath": "value",
+      "assignmentId": "name",
+      "roleId": "properties.roleDefinitionId",
+      "principalIds": "properties.principalId"
+    },
+    "assign": {
+      "method": "PUT",
+      "path": "{scope}/providers/Microsoft.Authorization/roleAssignments/{newId}?api-version=2022-04-01",
+      "body": {
+        "properties": {
+          "roleDefinitionId": "{roleId}",
+          "principalId": "{groupId}",
+          "principalType": "Group"
+        }
+      }
+    },
+    "remove": {
+      "method": "DELETE",
+      "path": "{scope}/providers/Microsoft.Authorization/roleAssignments/{assignmentId}?api-version=2022-04-01"
+    }
+  }
+}

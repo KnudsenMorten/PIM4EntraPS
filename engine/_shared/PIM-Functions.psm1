@@ -2544,7 +2544,9 @@ Function Invoke-PimWorkloadApi {
         [hashtable]$Tokens = @{},
         [object]$Body = $null
     )
-    $uri = "$($Connector.api.baseUrl)" + (Expand-PimWorkloadTokens -Text "$($Op.path)" -Tokens $Tokens)
+    # baseUrl is token-expanded too, so per-environment connectors (Business
+    # Central, Dataverse) can put {resource}/{scope} in the host/path root.
+    $uri = (Expand-PimWorkloadTokens -Text "$($Connector.api.baseUrl)" -Tokens $Tokens) + (Expand-PimWorkloadTokens -Text "$($Op.path)" -Tokens $Tokens)
     if ("$($Connector.auth)" -eq 'graph') {
         if ($Body) { return Invoke-MgGraphRequest -Method $Op.method -Uri $uri -Body ($Body | ConvertTo-Json -Depth 8) -ContentType 'application/json' -ErrorAction Stop }
         return Invoke-MgGraphRequest -Method $Op.method -Uri $uri -ErrorAction Stop

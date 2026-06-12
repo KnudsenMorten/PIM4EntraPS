@@ -1,9 +1,10 @@
 # Release notes for PIM4EntraPS
 
-## v2.4.182
+## v2.4.183
 
 Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monorepo:
 
+- release: PIM4EntraPS v2.4.183 -- entra-approle + azure-rbac connectors + connector status map (22b8a121)
 - release: PIM4EntraPS v2.4.182 -- connector framework nested-path fix + per-row resource support (8140d9e3)
 - release: PIM4EntraPS v2.4.181 -- Pester job (all flows rerunnable) + multi-auth connector framework + powerbi connector (a6153dd5)
 - release: PIM4EntraPS v2.4.180 -- entra-roles workload connector (live-tested: 145 directory roles) + activation prereqs (Intune always-on; Defender Unified RBAC = portal activation, no Graph endpoint) + app catalog (120 apps by mechanism) + 100 PIM use-cases (60b72237)
@@ -33,7 +34,6 @@ Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monor
 - release: PIM4EntraPS v2.4.157-pre offboarding -- v2.4.156 lifecycle phase 5: OffboardDate/DeleteAfterDays admin offboarding via Invoke-PimAdminOffboarding (reuses Invoke-PimAccountRevoke + session revocation + offboarding-notice mail; offboard-state.json idempotency; WhatIf-aware; create/update loop gates rows past OffboardDate); Lifecycle=Retire group retirement (role assignments + members + delete with PIM- prefix guard; Azure RBAC documented v1 limitation); membership drift cleanup Off/Report/Enforce vs PIM-Assignments-Admins (nested groups report-only); validators PIM-OFF-001/PIM-LC-001 + OffboardDate in PIM-SCHED-001; samples updated. 24-check harness green PS 5.1 + pwsh 7 (e64bc85e)
 - release: PIM4EntraPS v2.4.155 -- lifecycle phases 3+4: policy templates (templates/policy: default = no overrides for zero behavior change, approval-required = MFA+justification + Serial approval w/ 4h escalation) linked per definition row via new PolicyTemplate column (7 sample CSVs updated, GA group ships linked as worked example); Invoke-PimPolicyTemplateApply hash-gates re-apply via output/state/policy-state.json through the existing PIM_Policy_Check_Update diff-then-patch core, never disabling approval it did not itself enable; Owners columns become functional approvers (Parallel = native any-one-wins; Serial = first owner + Invoke-PimApprovalEscalation rotating to the next owner past escalationHours w/ approval-escalation mail); validators PIM-POL-001 + PIM-APR-001; engine run hooks both passes. 27-check harness green PS 5.1 + pwsh 7 (61b7ef6f)
 - release: PIM4EntraPS v2.4.154 -- lifecycle phase 2: customizable mail templates (templates/mail/<type>.mailtemplate[.custom].html, 7 types, subject comment + {{Token}} substitution, unknown-token warnings; Send-PimTemplatedMail dispatches Smtp HTML / Teams card / Slack text with WhatIf + best-effort semantics; Send-PimAdminTap routes through tap-delivery template with hardcoded fallback; new-admin manager notification on creation) + admin templates (templates/admin/*.admintemplate.json: consultant, new-employee-next-month with the FirstWorkdayNextMonth-3d / @08:00 / 8h scenario; GET /api/admin-templates; wizard Start-from-template picker prefilling state + role groups; Template traceability column). 31-check harness green PS 5.1 + pwsh 7; node --check green (529a581b)
-- release: PIM4EntraPS v2.4.153 -- lifecycle phase 1: shared date-expression resolver (PIM-DateExpression.ps1: Now/FirstDayNextMonth/FirstWorkdayNextMonth/FirstDayNextWeek/FirstWorkdayNextWeek +/-Nd @HH:mm, yyyy-MM-dd[@HH:mm]; legacy-parser + cast fallback; UTC); ProvisionDate scheduled creation (engine skips row until resolved time -- forwarded-TAP-mail scenario); TAPLifetimeHours + TAP creation deferred to within PIM_TapCreateLeadHours (48h) of the start window via idempotent Invoke-PimTapProvisioning (tap-state.json, runs in create AND update branches); Manager onboarding groups TAP fields into one fieldset with live /api/resolve-date previews (UsageLocation moved out); grid bulk Move-to-ring with lowered-ring warning; validators PIM-SCHED-001/002 + PIM-TAP-002; sample CSV updated. 44-check harness green PS 5.1 + pwsh 7; both HTML script blocks pass node --check (77223207)
 
 ---
 
@@ -42,6 +42,15 @@ Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monor
 > **Curated changelog.** The publish workflow auto-prepends recent monorepo commits as a raw activity log; this file is the human-friendly narrative on top.
 
 ---
+
+## v2.4.183 -- entra-approle (generic SaaS/SAP/ServiceNow) + azure-rbac connectors + connector status map
+
+- **`entra-approle` connector** (new) -- the generic Entra **app-role** grant: binds a PIM group to an app role on any enterprise/gallery app's service principal (`/servicePrincipals/{resource}/appRoleAssignedTo`). `perRowResource: true` -> each row's `Resource` = the target SP object id. This is the single mechanism behind 100+ Entra-integrated apps (SAP Cloud Identity, ServiceNow, Salesforce, custom apps) -- the `docs/ENTRA-GROUP-APP-CATALOG.md` catalog collapses to this one connector for app-level access. Schema-validated by the Pester suite (13/13); live-validation pending a target SP that exposes app roles.
+- **`azure-rbac` connector** (new) -- Azure RBAC role assignments at any ARM scope (subscription / resource group / resource), PUT-with-client-GUID, per-row `Scope`. Uses the `arm` token adapter. Schema-validated; live-validation pending an ARM token + a writable scope.
+- **Framework: `baseUrl` is now token-expanded** (not just the path), so per-environment connectors (Business Central, Dataverse) can place `{resource}`/`{scope}` in the host root. Backward-compatible (no braces in existing baseUrls = no-op).
+- **`workloads/connectors/README.md`** (new) -- honest status + mechanism map for every workload: which fit the flat assignment model (shipped, framework-driven), which need a future **nested-membership** adapter with the exact REST documented as a spec (Dataverse group-team security roles, Business Central permission sets, Azure DevOps group membership), and which are **cmdlet/portal only** (Exchange RBAC role groups, Purview, MDI) or already covered by `entra-roles`/`defender-xdr` (MDCA, MDO). No fabricated stubs.
+
+VERSION -> 2.4.183.
 
 ## v2.4.182 -- connector framework: nested-path fix + per-row resource (enables generic SaaS/ARM connectors)
 
