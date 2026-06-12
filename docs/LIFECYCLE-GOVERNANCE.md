@@ -290,6 +290,45 @@ Migration path:
 3. **`Invoke-PimCsvToDbMigration`**: idempotent per-instance importer -- validator runs first, rows load, counts verify, CSVs are archived (never deleted).
 4. **Safety nets**: nightly CSV snapshot export from the DB (git-diffability + the Excel escape hatch preserved).
 
+## 17. Email routing & people directory — no per-admin manager maintenance (design)
+
+**Problem**: `ManagerEmail` per admin row is hard/impossible to maintain at fleet scale, and a leaver's address lingers in many places (ManagerEmail rows, group Owners/approvers, future access-review reviewers, escalation contacts). When a manager leaves, the fix must be a few edits — not a hunt.
+
+**Where an email is actually needed today** (so the design covers all of them):
+- TAP-delivery + new-admin lifecycle mails (currently per-admin `ManagerEmail`)
+- Approval/owner mails — already group-scoped via Owners on the approval-required groups (correct place; stays)
+- Serial-approval escalation + offboarding notices
+- Access-review reviewers (§ 14, phase 10) and intake nudges (§ 15)
+
+**Design — three layers, deterministic resolution order (each step configurable):**
+
+1. **Department link instead of person link**: `Account-Definitions-Admins` gains a `Department` column; a new **`config/PIM-Definitions-Contacts.custom.csv`** (the people directory) holds one row per department/function: `Department;ManagerEmail;DeputyEmails;Mode(Serial|Parallel)`. A consultant links to a department; the department's manager is defined ONCE. Manager churn = one row edit.
+2. **Central override**: `config/mail-routing.custom.json` — `{ "AdminLifecycleRecipients": [...], "Mode": "Parallel|Serial", "PerAdminWins": true|false }`. With `PerAdminWins=true` (default) a filled per-admin `ManagerEmail` still wins; `false` forces the central route (lockdown mode).
+3. **Per-admin `ManagerEmail`** becomes an optional override, no longer the primary mechanism.
+
+Resolution: per-admin (if set AND PerAdminWins) → department contact row (via admin.Department) → central AdminLifecycleRecipients → skip-with-audit if nothing resolves. Serial mode walks the list with the existing phase-4 escalation machinery; Parallel sends to all.
+
+**Manager GUI — "Contacts & email flow" area** (new Governance sub-tab):
+- Edit the people directory + central routing config with live "who would get the TAP mail for admin X?" preview.
+- **"Person left" sweep**: enter an email → the Manager scans EVERY reference (ManagerEmail columns, Department contacts, group Owners across all Definitions CSVs, mail-routing config, manager-access.custom.json RBAC entries) → shows the hit list → stages a replace-all-with-successor (or blank) through the normal pending → Review & Save flow, fully audited (`contact.replaced`).
+- Approvals stay EXPLICIT on the specific high-priv groups (approval-required policy template + Owners) — this section changes who gets *notified/escalated to*, never *what requires approval*.
+
+## 18. Self-service delegation layers (design, exploratory)
+
+**Operator ask**: let business units self-manage a bounded slice — create/enable their own admins, auto-disable after N days without sign-in, and delegate a scoped permission subset (e.g. only subscriptions under one management group) — without giving them the Manager or the engine.
+
+**Verdict: feasible, as a LAYER on the existing model — the delegation boundary is data, not new privilege machinery:**
+
+1. **Delegation units**: a new `config/PIM-Definitions-DelegationUnits.custom.csv` groups what § 17 and the templates already model: `UnitTag;Department;AllowedAdminTemplates;AllowedGroupTags;AllowedAzScopePrefix;MaxAdmins;InactivityDisableDays;ApproverContact`. A unit = (who may ask) × (which admin templates they may instantiate) × (which group tags / Azure scope prefixes they may touch) × (quotas). Example: `BU-Finance` may onboard `consultant`-template admins and assign only `ROLE-Finance-*` groups and Azure scopes under `/providers/Microsoft.Management/managementGroups/mg-finance`.
+2. **Self-service front end = the § 15 intake, not a new trust path**: requests from the business land as signed intake requests (ServiceNow catalog item, or a thin internal "self-service portal" page) and materialize ONLY through the declarative CSV layer with the § 15 guardrails (typed allow-list, template-only onboarding, approval-required groups hard-denied). The delegation unit is the authorization filter the intake processor enforces per requester.
+3. **The permanently-running web service** (user-anticipated): a small internal-only site (same localhost-style security model grown up: Entra sign-in + MFA, RBAC by delegation unit, runs as a low-priv identity with NO Graph write permissions — it can only write signed intake files). Even fully compromised, it can request nothing outside its unit's template/scope envelope, and high-priv is structurally unreachable. The engine remains the only writer to Entra/Azure. **Hosting options**, both with zero public ingress:
+   - **Azure private-endpoint deployment (PREFERRED — modern, zero public exposure)**: App Service / Container Apps with `publicNetworkAccess=Disabled` and a **Private Endpoint** into the corp VNet (reached via ExpressRoute / S2S VPN; name resolution via the `privatelink` DNS zone). The site is unreachable from the internet by construction; Entra auth + CA still apply on top. Its intake drop lands on Azure Files/Blob behind a private endpoint in the same VNet, which the on-prem intake processor pulls — preserving pull-not-push end to end. Managed Identity holds storage-write only; PaaS patching/scaling for free.
+   - **On-prem IIS/Kestrel** on the automation/management subnet (fallback for customers without VNet connectivity).
+4. **Inactivity auto-disable**: engine-side sweep (no service needed) — `signInActivity.lastSignInDateTime` from Graph vs `InactivityDisableDays` per delegation unit; expired admins get `AccountStatus=Disabled` staged (Report mode) or applied (Enforce mode) + audit + notice mail via § 17 routing. This also benefits non-delegated admins as a general hygiene feature.
+5. **Azure scope slicing**: already native — Azure assignment rows take any scope; the delegation unit's `AllowedAzScopePrefix` confines self-service rows to subscriptions under the unit's management group.
+
+Build order when scheduled: § 17 first (contacts/routing — self-service approvals depend on it) → intake processor (§ 15 phase 11) → delegation-unit filter → inactivity sweep → portal front end last.
+
 ## Out of scope / known limitations
 
 - Holiday-aware workday calculation (Mon–Fri only).
