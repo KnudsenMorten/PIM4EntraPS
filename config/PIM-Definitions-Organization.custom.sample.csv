@@ -1,4 +1,4 @@
-GroupName;GroupDescription;GroupTag;AdministrativeUnitTag;CPPlatform;Plane;TierLevel;PermissionScope;SyncPlatform;IsRoleAssignable;PolicyTemplate
-PIM-ORG-IT;IT organization - all members;ORG-IT;PIM-ORGANIZATION;;;;;;TRUE;
-PIM-ORG-Security;Security organization - all members;ORG-Security;PIM-ORGANIZATION;;;;;;TRUE;
-PIM-ORG-Operations;Operations organization - all members;ORG-Operations;PIM-ORGANIZATION;;;;;;TRUE;
+GroupName;GroupDescription;GroupTag;AdministrativeUnitTag;CPPlatform;Plane;TierLevel;PermissionScope;SyncPlatform;IsRoleAssignable;PolicyTemplate;Lifecycle
+PIM-ORG-IT;IT organization - all members;ORG-IT;PIM-ORGANIZATION;;;;;;TRUE;;
+PIM-ORG-Security;Security organization - all members;ORG-Security;PIM-ORGANIZATION;;;;;;TRUE;;
+PIM-ORG-Operations;Operations organization - all members;ORG-Operations;PIM-ORGANIZATION;;;;;;TRUE;;

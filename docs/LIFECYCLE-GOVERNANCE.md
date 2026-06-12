@@ -217,7 +217,7 @@ All engine and Manager transactions converge on **`output/audit/pim-audit-<yyyyM
 | 2 | Admin templates (2 shipped) + `Template` column + wizard picker; mail templates + `Send-PimTemplatedMail` | **shipped v2.4.154** |
 | 3 | Policy templates + `PolicyTemplate` linking + hash-based re-apply | **shipped v2.4.155** |
 | 4 | Approvals: parallel (native) + serial escalation sweep, Owners become functional (approval chips land with the Governance tab) | **shipped v2.4.155** |
-| 5 | Offboarding: `OffboardDate`/`DeleteAfterDays`/`Lifecycle=Retire` + drift cleanup modes | engine, validator |
+| 5 | Offboarding: `OffboardDate`/`DeleteAfterDays`/`Lifecycle=Retire` + drift cleanup modes | **shipped v2.4.156** |
 | 6 | Unified jsonl audit + Manager audit viewer (+ optional AzLogDcrIngestPS sink) | engine, manager |
 | 7 | Manager RBAC + Governance tab shell | manager |
 | 8 | Emergency override (needs 3 + 7) | manager, engine |
