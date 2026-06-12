@@ -1,9 +1,10 @@
 # Release notes for PIM4EntraPS
 
-## v2.4.151
+## v2.4.152
 
 Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monorepo:
 
+- release: PIM4EntraPS v2.4.152 -- docs/LIFECYCLE-GOVERNANCE.md: architecture for the 13 lifecycle/governance features (shared date-expression resolver; ProvisionDate scheduled admin creation incl. the forwarded-TAP-mail dependency scenario; TAP windows via TAPStartDate expressions + TAPLifetimeHours with near-window deferred creation + one GUI fieldset; admin templates w/ variables; ring-move actions; mail templates; policy templates w/ PolicyTemplate link + hash re-apply; Owners-driven parallel/serial approvals; KV-passphrase emergency override w/ TTL restore; OffboardDate/DeleteAfterDays/Lifecycle=Retire offboarding + drift cleanup; unified jsonl audit; Reader/Admin/SuperAdmin manager RBAC + Governance tab; resource auto-discovery Off/Portal/Engine). 9 dependency-ordered phases (c9a37c61)
 - release: PIM4EntraPS v2.4.151 -- Show-PimActivatorBanner troubleshooting header in all three deploy scripts (script + solution version, verified Graph SDK version, optional Az module versions, PS runtime+edition; Client uses GraphOptional soft mode + standalone-copy guard; fixed @($null) AzModules expansion crashing Get-Module on pwsh 7); ADMX ingestion pre-upload now sweeps ALL rows matching fileName OR targetNamespace (half-removed ghost rows keep owning the namespace -> Intune mangles targetPrefix to pimactivator<rowId> and nulls the ingest) and waits 60s for namespace release before upload/retry (10s demonstrably too short; live run went green on attempt 2 after full remove+settle). Harness 13 checks green PS 5.1 + pwsh 7 (71841415)
 - release: PIM4EntraPS v2.4.150 -- Intune deploy: forcelist conflict no longer aborts (per-browser Not-configured skip, exact setting names printed at [SKIP] for manual re-enable, -Force now means write-everything); session-role pre-check via token wids claim with one automatic disconnect+re-auth when the PIM activation postdates the token (backend hard-stop on app-admin family + PRA for consent, Intune soft-fail for scoped RBAC); ADMX ingestion retries once after removing a failed row and stops fatally on double failure instead of limping to a confusing later crash; docs scrub of customer-identifying details and captured console output across RELEASENOTES/README/popup.js. Harness 15+13 checks green PS 5.1 + pwsh 7 (0ecb3032)
 - release: PIM4EntraPS v2.4.149 -- Deploy-PimActivatorIntune gets the v2.4.147/148 auth hardening via new shared _PimActivatorAuth.ps1 (Connect-PimActivatorGraph full sequence: Edge-mode cached-MSAL discard, Edge-PKCE/MSAL sign-in, provided-token scope bypass, TenantId enforcement, /me probe auto-heal; Connect-MgGraphViaEdge; parameterized Assert-GraphModuleVersions; version banner + broken-auth help). Intune script: -UseEdge default ON, banner, all conditional scopes (Organization.Read.All/Application.Read.All) requested up front since Edge tokens cannot scope-escalate mid-run; old mid-run reconnect kept as MSAL-only safety net. Backend slims to dot-source, behavior identical. 17-check harness green PS 5.1 + pwsh 7 (7ac2c838)
@@ -33,7 +34,6 @@ Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monor
 - release: PIM4EntraPS v2.4.125 -- guard Add-AdministrativeUnit-Member against null \$AUInfo / \$GroupInfo at both CreateUpdate-PIM-for-Groups-From-file-CSV call sites so a row with a missing AdministrativeUnitTag logs a clear red error and 'continue's instead of crashing the engine with 'Cannot process argument transformation on parameter ObjectId. Cannot convert value to type System.String.' (db887ecf)
 - release: PIM4EntraPS v2.4.124 -- PathAdmins / PathAdminsL0T0 moved under canonical \$global:PIM_NamingConventions hashtable (matching AdminAccountPatterns, PimGroupPattern, TagPrefixToCsv) with v2.4.123 free-floating-globals shape kept as back-compat fallback; locked.ps1 + custom.sample.ps1 updated to document the new shape (dca61cd2)
 - release: PIM4EntraPS v2.4.123 -- (1) skip Connect-ExchangeOnline on the -OnlyAD invocation + reuse existing EXO session via Get-ConnectionInformation so EXO connects exactly once per launcher run (was 2x after v2.4.114); (2) engine resolves $PathAdmins / $PathAdminsL0T0 from $global: fallback so AD-create rows finally have an OU to target (a7e9f695)
-- release: PIM4EntraPS v2.4.122 -- AD-create OU routing now driven by UserName naming convention (regex match on L0/T0 markers bounded by -/_/. in the name) instead of CSV TierLevel column; matches the customer pattern where privilege class is encoded in the account name itself (c0788dfc)
 
 ---
 
@@ -42,6 +42,26 @@ Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monor
 > **Curated changelog.** The publish workflow auto-prepends recent monorepo commits as a raw activity log; this file is the human-friendly narrative on top.
 
 ---
+
+## v2.4.152 -- design: Admin Lifecycle & Governance (docs/LIFECYCLE-GOVERNANCE.md)
+
+Architecture for the thirteen operator-requested lifecycle/governance features, grounded in the current 15-CSV + Manager + engine model and phased for incremental delivery:
+
+1. **Date expressions** (`Now`, `FirstWorkdayNextMonth-3d`, `2026-07-01@08:00`) as the shared resolver behind every scheduled feature, with live preview in the Manager and PIM-SCHED-* validators.
+2. **Scheduled admin creation** (`ProvisionDate`) -- engine skips rows until the resolved time; covers the "create the admin after the dependent normal account exists so the forwarded TAP mail can land" scenario.
+3. **Scheduled TAP windows** (`TAPStartDate` expressions + new `TAPLifetimeHours`), TAP creation deferred to the run nearest the window; **TAP fields grouped into one GUI fieldset** (UsageLocation moves out).
+4. **Admin templates** (`templates/admin/*.admintemplate.json`; shipped: `consultant`, `new-employee-next-month`) prefilling the onboarding wizard, with variables.
+5. **Ring moves** as first-class Manager actions (map context action + grid bulk action).
+6. **Mail templates** (`templates/mail/*.mailtemplate[.custom].html`) with token substitution for new-admin / TAP / role / permission / approval / offboarding mails.
+7. **Policy templates** (`default`, `approval-required`) linked per definition row via `PolicyTemplate`, hash-based automatic re-apply by the engine.
+8. **Approvals** from the Owners columns: native parallel (any-one-wins) + engine-implemented serial escalation after N hours.
+9. **Emergency override** -- KV-verified passphrase disables approval on scoped high-priv groups with TTL auto-restore and owner notification.
+10. **Offboarding** (`OffboardDate`, `DeleteAfterDays`, `Lifecycle=Retire`, drift cleanup Report/Enforce).
+11. **Unified append-only jsonl audit** for every engine + Manager transaction (optional Log Analytics sink via AzLogDcrIngestPS).
+12. **Manager RBAC** -- Reader/Admin/SuperAdmin from `manager-access.custom.json`, role-gated endpoints + new Governance tab.
+13. **Resource auto-discovery** (new subscriptions / Entra roles / workload resources) handled per type as Off / Portal (one-click stage) / Engine (zero-touch).
+
+Nine implementation phases ordered by dependency (scheduling first, emergency last). Document: `docs/LIFECYCLE-GOVERNANCE.md`.
 
 ## v2.4.151 -- deploy scripts: troubleshooting banner everywhere + ADMX namespace-ghost cleanup
 
