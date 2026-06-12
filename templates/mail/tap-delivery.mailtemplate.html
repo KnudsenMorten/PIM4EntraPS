@@ -1,0 +1,23 @@
+<!-- subject: Your initial PIM admin TAP for {{UserPrincipalName}} -->
+<!-- tokens: UserPrincipalName, TapCode, TapStartLocal, TapStartUtc, TapLifetimeMinutes, TapLifetimeHours, TapExpiresUtc -->
+<!-- To customize: copy this file to tap-delivery.mailtemplate.custom.html and edit (the .custom file wins and is never overwritten by updates). -->
+<html>
+<body style="font-family:Segoe UI,Arial,sans-serif; color:#24292f; font-size:14px;">
+  <p>Hello,</p>
+  <p>A Temporary Access Pass (TAP) has been issued for the privileged admin account:</p>
+  <p style="font-size:16px;"><b>{{UserPrincipalName}}</b></p>
+  <table cellpadding="4" style="border-collapse:collapse; font-size:14px;">
+    <tr><td><b>TAP code</b></td><td style="font-family:Consolas,monospace; font-size:16px;">{{TapCode}}</td></tr>
+    <tr><td><b>Valid from</b></td><td>{{TapStartLocal}} ({{TapStartUtc}})</td></tr>
+    <tr><td><b>Lifetime</b></td><td>{{TapLifetimeMinutes}} minute(s)</td></tr>
+    <tr><td><b>Expires at</b></td><td>{{TapExpiresUtc}}</td></tr>
+  </table>
+  <p><b>How to use it:</b></p>
+  <ol>
+    <li>Open <a href="https://mysignins.microsoft.com/security-info">https://mysignins.microsoft.com/security-info</a> from a browser where you are NOT already signed in to this account.</li>
+    <li>Sign in with the admin UPN above; when prompted, enter the TAP code as the password.</li>
+    <li>Register your strong credentials (Passkey / Authenticator / FIDO2) immediately. Once registered, the TAP is single-use and burned.</li>
+  </ol>
+  <p style="color:#57606a;">If you did not request this account, contact your security operations team immediately.</p>
+</body>
+</html>

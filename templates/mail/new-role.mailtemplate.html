@@ -1,0 +1,16 @@
+<!-- subject: Role assignment for {{UserPrincipalName}}: {{RoleName}} -->
+<!-- tokens: DisplayName, UserPrincipalName, RoleName, GroupName, GroupTag, AssignmentType, Date -->
+<!-- Sent when an admin is assigned to a role group. To customize: copy to new-role.mailtemplate.custom.html and edit. -->
+<html>
+<body style="font-family:Segoe UI,Arial,sans-serif; color:#24292f; font-size:14px;">
+  <p>Hello {{DisplayName}},</p>
+  <p>Your admin account <b>{{UserPrincipalName}}</b> has been given a role assignment on {{Date}}:</p>
+  <table cellpadding="4" style="border-collapse:collapse; font-size:14px;">
+    <tr><td><b>Role</b></td><td>{{RoleName}}</td></tr>
+    <tr><td><b>Via group</b></td><td>{{GroupName}} ({{GroupTag}})</td></tr>
+    <tr><td><b>Assignment type</b></td><td>{{AssignmentType}}</td></tr>
+  </table>
+  <p>Eligible assignments are activated on demand through PIM (or the PIM Activator extension) and may require justification, MFA, or approval depending on the role's policy.</p>
+  <p style="color:#57606a;">If this assignment was not expected, contact your security operations team.</p>
+</body>
+</html>

@@ -1,0 +1,18 @@
+<!-- subject: New privileged admin account created: {{UserPrincipalName}} -->
+<!-- tokens: DisplayName, UserPrincipalName, Company, ManagerEmail, TierLevel, Date -->
+<!-- To customize: copy this file to new-admin.mailtemplate.custom.html and edit. -->
+<html>
+<body style="font-family:Segoe UI,Arial,sans-serif; color:#24292f; font-size:14px;">
+  <p>Hello,</p>
+  <p>A new privileged admin account has been provisioned by the PIM engine on {{Date}}:</p>
+  <table cellpadding="4" style="border-collapse:collapse; font-size:14px;">
+    <tr><td><b>Display name</b></td><td>{{DisplayName}}</td></tr>
+    <tr><td><b>UPN</b></td><td>{{UserPrincipalName}}</td></tr>
+    <tr><td><b>Tier</b></td><td>{{TierLevel}}</td></tr>
+    <tr><td><b>Company</b></td><td>{{Company}}</td></tr>
+  </table>
+  <p>You are receiving this because you are registered as the responsible manager ({{ManagerEmail}}).
+     Sign-in credentials are delivered separately (Temporary Access Pass or password log, per your onboarding flow).</p>
+  <p style="color:#57606a;">If this account was not expected, contact your security operations team.</p>
+</body>
+</html>

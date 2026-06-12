@@ -48,3 +48,7 @@ tools/pim-activator.pem
 # written to chrome.storage.managed. v2.4.111 made the client script
 # auto-discover from live Entra by default; this ignore is the safety net.
 tools/pim-activator/discovered-tenant-catalog.json
+
+# Customer-customized mail + admin templates (LIFECYCLE-GOVERNANCE phases 2+)
+templates/mail/*.mailtemplate.custom.html
+templates/admin/*.admintemplate.custom.json

@@ -1,0 +1,16 @@
+<!-- subject: ESCALATED approval: {{RequestorUpn}} requests {{RoleName}} -->
+<!-- tokens: ApproverName, PreviousApprover, RequestorUpn, RoleName, GroupName, Justification, RequestedAt, EscalatedAfterHours, ApprovalUrl -->
+<!-- Sent when a serial approval escalates to the next owner. To customize: copy to approval-escalation.mailtemplate.custom.html and edit. -->
+<html>
+<body style="font-family:Segoe UI,Arial,sans-serif; color:#24292f; font-size:14px;">
+  <p>Hello {{ApproverName}},</p>
+  <p>An approval request was not decided by {{PreviousApprover}} within {{EscalatedAfterHours}} hour(s) and has <b>escalated to you</b>:</p>
+  <table cellpadding="4" style="border-collapse:collapse; font-size:14px;">
+    <tr><td><b>Requestor</b></td><td>{{RequestorUpn}}</td></tr>
+    <tr><td><b>Role / group</b></td><td>{{RoleName}} ({{GroupName}})</td></tr>
+    <tr><td><b>Justification</b></td><td>{{Justification}}</td></tr>
+    <tr><td><b>Originally requested</b></td><td>{{RequestedAt}}</td></tr>
+  </table>
+  <p><a href="{{ApprovalUrl}}">Open the approval in the Entra portal</a> to approve or deny.</p>
+</body>
+</html>

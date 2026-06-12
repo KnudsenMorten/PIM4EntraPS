@@ -214,7 +214,7 @@ All engine and Manager transactions converge on **`output/audit/pim-audit-<yyyyM
 | Phase | Scope | Ships |
 |---|---|---|
 | 1 | Date-expression resolver + `ProvisionDate`/`TAPLifetimeHours` + TAP deferral + TAP GUI grouping + ring-move UI + validators (SCHED/TAP-002) | **shipped v2.4.153** |
-| 2 | Admin templates (2 shipped) + `Template` column + wizard picker; mail templates + `Send-PimTemplatedMail` | templates/, engine, manager |
+| 2 | Admin templates (2 shipped) + `Template` column + wizard picker; mail templates + `Send-PimTemplatedMail` | **shipped v2.4.154** |
 | 3 | Policy templates + `PolicyTemplate` linking + hash-based re-apply | templates/, engine, validator |
 | 4 | Approvals: parallel (native) + serial escalation sweep, Owners become functional, approval chips | engine, manager |
 | 5 | Offboarding: `OffboardDate`/`DeleteAfterDays`/`Lifecycle=Retire` + drift cleanup modes | engine, validator |

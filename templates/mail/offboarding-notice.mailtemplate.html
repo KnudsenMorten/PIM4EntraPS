@@ -1,0 +1,16 @@
+<!-- subject: Admin offboarding: {{UserPrincipalName}} -->
+<!-- tokens: DisplayName, UserPrincipalName, OffboardDate, Steps, Date -->
+<!-- Sent to the responsible manager when the engine offboards an admin. To customize: copy to offboarding-notice.mailtemplate.custom.html and edit. -->
+<html>
+<body style="font-family:Segoe UI,Arial,sans-serif; color:#24292f; font-size:14px;">
+  <p>Hello,</p>
+  <p>The PIM engine has offboarded the privileged admin account below per its configured OffboardDate:</p>
+  <table cellpadding="4" style="border-collapse:collapse; font-size:14px;">
+    <tr><td><b>Display name</b></td><td>{{DisplayName}}</td></tr>
+    <tr><td><b>UPN</b></td><td>{{UserPrincipalName}}</td></tr>
+    <tr><td><b>Offboard date</b></td><td>{{OffboardDate}}</td></tr>
+    <tr><td><b>Actions taken</b></td><td>{{Steps}}</td></tr>
+  </table>
+  <p style="color:#57606a;">Every step is recorded in the engine audit log ({{Date}}). If this offboarding was not expected, contact your security operations team immediately.</p>
+</body>
+</html>
