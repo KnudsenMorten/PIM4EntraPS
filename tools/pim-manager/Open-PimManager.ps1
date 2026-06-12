@@ -129,6 +129,97 @@ if (Test-Path -LiteralPath $_dateExprLib) { . $_dateExprLib }
 # One id per Manager session -- groups this session's audit events (phase 6).
 $script:PimManagerSessionId = [guid]::NewGuid().ToString('N')
 
+# ---------------------------------------------------------------------------
+# Manager RBAC (LIFECYCLE-GOVERNANCE phase 7) -- Reader / Admin / SuperAdmin.
+# Identity = the Windows user running the Manager (it binds to localhost).
+# config/manager-access.custom.json: [ { "identity": "DOMAIN\\user", "role":
+# "Reader|Admin|SuperAdmin" } ]. Missing file = the launcher is SuperAdmin
+# (backward-compatible single-operator install); file present + identity not
+# listed = Reader. The server is the enforcement boundary; the GUI only
+# hides what the role cannot do.
+# ---------------------------------------------------------------------------
+
+function Get-PimManagerRole {
+    $who = try { [System.Security.Principal.WindowsIdentity]::GetCurrent().Name } catch { $env:USERNAME }
+    $f = Join-Path $script:configRoot 'manager-access.custom.json'
+    if (-not (Test-Path -LiteralPath $f)) {
+        return @{ role = 'SuperAdmin'; identity = $who; source = 'default (no manager-access.custom.json)' }
+    }
+    try {
+        $list = Get-Content -LiteralPath $f -Raw -Encoding UTF8 | ConvertFrom-Json
+        foreach ($e in @($list)) {
+            if ("$($e.identity)" -and ("$($e.identity)".ToLowerInvariant() -eq $who.ToLowerInvariant())) {
+                $r = "$($e.role)"
+                if ($r -notin @('Reader', 'Admin', 'SuperAdmin')) { $r = 'Reader' }
+                return @{ role = $r; identity = $who; source = 'manager-access.custom.json' }
+            }
+        }
+    } catch {
+        Write-Warning "manager-access.custom.json unreadable ($($_.Exception.Message)) -- failing CLOSED to Reader."
+        return @{ role = 'Reader'; identity = $who; source = 'unreadable access file (fail closed)' }
+    }
+    @{ role = 'Reader'; identity = $who; source = 'not listed in manager-access.custom.json' }
+}
+
+function Test-PimManagerRoleAtLeast {
+    param([Parameter(Mandatory)][ValidateSet('Reader', 'Admin', 'SuperAdmin')][string]$Minimum)
+    $rank = @{ Reader = 0; Admin = 1; SuperAdmin = 2 }
+    $rank[(Get-PimManagerRole).role] -ge $rank[$Minimum]
+}
+
+function Write-PimManagerAuditEvent {
+    param(
+        [Parameter(Mandatory)][string]$Action,
+        [Parameter(Mandatory)][string]$Target,
+        [object]$After = $null,
+        [string]$Result = 'ok'
+    )
+    try {
+        $auditDir = Join-Path $script:outputRoot 'audit'
+        if (-not (Test-Path -LiteralPath $auditDir)) { New-Item -ItemType Directory -Path $auditDir -Force | Out-Null }
+        $auditFile = Join-Path $auditDir ("pim-audit-{0}.jsonl" -f [datetime]::UtcNow.ToString('yyyyMM'))
+        $who = try { [System.Security.Principal.WindowsIdentity]::GetCurrent().Name } catch { $env:USERNAME }
+        $evt = [ordered]@{
+            ts = [datetime]::UtcNow.ToString('o'); runId = "$($script:PimManagerSessionId)"; correlationId = ''
+            actor = "manager:$who"; action = $Action; target = $Target
+            before = $null; after = $After; result = $Result; whatIf = $false
+        }
+        [System.IO.File]::AppendAllText($auditFile, (($evt | ConvertTo-Json -Depth 5 -Compress) + "`r`n"), (New-Object System.Text.UTF8Encoding($false)))
+    } catch { Write-Warning "audit write failed: $($_.Exception.Message)" }
+}
+
+# Emergency override state (phase 8). The passcode is verified against a
+# SHA256 hash in config/emergency.custom.ps1 ($global:PIM_EmergencyPasscodeHash
+# = lowercase hex of SHA256(passcode)) -- generate with:
+#   [BitConverter]::ToString([Security.Cryptography.SHA256]::Create().ComputeHash([Text.Encoding]::UTF8.GetBytes('passphrase'))).Replace('-','').ToLower()
+# Key-Vault-backed verification is a documented follow-up.
+$script:EmergencyAttempts = @()
+
+function Test-PimEmergencyPasscode {
+    param([Parameter(Mandatory)][string]$Passcode)
+    # lockout: 5 failures within 15 minutes locks the endpoint
+    $cutoff = [datetime]::UtcNow.AddMinutes(-15)
+    $script:EmergencyAttempts = @($script:EmergencyAttempts | Where-Object { $_ -gt $cutoff })
+    if ($script:EmergencyAttempts.Count -ge 5) { return @{ ok = $false; error = 'locked: too many failed attempts -- wait 15 minutes' } }
+
+    $hashFile = Join-Path $script:configRoot 'emergency.custom.ps1'
+    $expected = $null
+    if (Test-Path -LiteralPath $hashFile) { try { . $hashFile; $expected = $global:PIM_EmergencyPasscodeHash } catch {} }
+    if (-not $expected) { return @{ ok = $false; error = 'no emergency passcode configured (config/emergency.custom.ps1 must set $global:PIM_EmergencyPasscodeHash)' } }
+
+    $actual = [System.BitConverter]::ToString([System.Security.Cryptography.SHA256]::Create().ComputeHash([System.Text.Encoding]::UTF8.GetBytes($Passcode))).Replace('-', '').ToLowerInvariant()
+    # constant-time compare
+    $exp = "$expected".ToLowerInvariant()
+    $diff = $actual.Length -bxor $exp.Length
+    for ($i = 0; $i -lt [Math]::Min($actual.Length, $exp.Length); $i++) { $diff = $diff -bor ([int][char]$actual[$i] -bxor [int][char]$exp[$i]) }
+    if ($diff -ne 0) {
+        $script:EmergencyAttempts += [datetime]::UtcNow
+        Write-PimManagerAuditEvent -Action 'emergency.passcode.failed' -Target 'emergency-override' -Result 'denied'
+        return @{ ok = $false; error = 'invalid passcode' }
+    }
+    @{ ok = $true }
+}
+
 # CSV schema auto-upgrade: customer installs predate the lifecycle columns.
 # Append any missing ones (blank = default behavior = auto-approval) before
 # the GUI loads the CSVs, so the grid shows the columns and the wizard's
@@ -865,7 +956,7 @@ function Invoke-StaticHtml {
     $tenantJson  = ConvertTo-PimJson -Body $tenantLists
     $instJson = ConvertTo-PimJson -Body ([ordered]@{ active = $script:PimInstanceName; instances = @() })
     $html = [System.IO.File]::ReadAllText($template, [System.Text.UTF8Encoding]::new($true))
-    $html = $html.Replace('__PIM_DATA__', $json).Replace('__PIM_TOKEN__', '').Replace('__PIM_MODE__', 'static').Replace('__PIM_NAMING__', $namingJson).Replace('__PIM_TENANT_LISTS__', $tenantJson).Replace('__PIM_INSTANCES__', $instJson).Replace('__PIM_VERSION__', (Get-PimSolutionVersion))
+    $html = $html.Replace('__PIM_DATA__', $json).Replace('__PIM_TOKEN__', '').Replace('__PIM_MODE__', 'static').Replace('__PIM_NAMING__', $namingJson).Replace('__PIM_TENANT_LISTS__', $tenantJson).Replace('__PIM_INSTANCES__', $instJson).Replace('__PIM_VERSION__', (Get-PimSolutionVersion)).Replace('__PIM_ROLE__', '{"role":"Reader","identity":"static","source":"static mode"}')
 
     if (-not $OutHtml) {
         $OutHtml = Join-Path ([IO.Path]::GetTempPath()) ("pim-manager-{0}.html" -f ([Guid]::NewGuid().ToString('N').Substring(0,8)))
@@ -1639,7 +1730,8 @@ function Handle-Request {
             instances = $instList.ToArray()
         })
         $html = [System.IO.File]::ReadAllText($template, [System.Text.UTF8Encoding]::new($true))
-        $html = $html.Replace('__PIM_DATA__', $json).Replace('__PIM_TOKEN__', $ExpectedToken).Replace('__PIM_MODE__', 'server').Replace('__PIM_NAMING__', $namingJson).Replace('__PIM_TENANT_LISTS__', $tenantJson).Replace('__PIM_INSTANCES__', $instJson).Replace('__PIM_VERSION__', (Get-PimSolutionVersion))
+        $roleJson = (Get-PimManagerRole | ConvertTo-Json -Compress)
+        $html = $html.Replace('__PIM_DATA__', $json).Replace('__PIM_TOKEN__', $ExpectedToken).Replace('__PIM_MODE__', 'server').Replace('__PIM_NAMING__', $namingJson).Replace('__PIM_TENANT_LISTS__', $tenantJson).Replace('__PIM_INSTANCES__', $instJson).Replace('__PIM_VERSION__', (Get-PimSolutionVersion)).Replace('__PIM_ROLE__', $roleJson)
         Write-HtmlResponse -Response $resp -Html $html
         $script:lastHeartbeat = Get-Date
         return 200
@@ -1694,6 +1786,10 @@ function Handle-Request {
                 return 200
             }
             if ($method -eq 'PUT') {
+                if (-not (Test-PimManagerRoleAtLeast -Minimum 'Admin')) {
+                    Write-JsonResponse -Response $resp -Status 403 -Body @{ error = "Your Manager role is Reader -- saving CSV changes requires Admin. See config/manager-access.custom.json." }
+                    return 403
+                }
                 $body = Read-RequestJson -Request $req
                 $rowsRaw = @()
                 if ($body -and $body.rows) { $rowsRaw = @($body.rows) }
@@ -1731,6 +1827,10 @@ function Handle-Request {
         }
 
         if ($path -eq '/api/refresh-tenant-lists' -and $method -eq 'POST') {
+            if (-not (Test-PimManagerRoleAtLeast -Minimum 'Admin')) {
+                Write-JsonResponse -Response $resp -Status 403 -Body @{ error = 'Admin role required. See config/manager-access.custom.json.' }
+                return 403
+            }
             $script:lastHeartbeat = Get-Date
             if (-not (Get-Command Invoke-PimTenantListRefresh -ErrorAction SilentlyContinue)) {
                 Write-JsonResponse -Response $resp -Status 500 -Body @{ ok = $false; error = '_tenantSync.ps1 was not loaded -- file missing next to Open-PimManager.ps1' }
@@ -1781,6 +1881,122 @@ function Handle-Request {
                 }
             }
             Write-JsonResponse -Response $resp -Status 200 -Body @{ templates = @($byId.Values | Sort-Object { $_.name }) }
+            return 200
+        }
+
+        # -------------------------------------------------------------------
+        # Governance endpoints (LIFECYCLE-GOVERNANCE phases 7+8)
+        # -------------------------------------------------------------------
+        if ($path -eq '/api/access' -and $method -eq 'GET') {
+            $script:lastHeartbeat = Get-Date
+            Write-JsonResponse -Response $resp -Status 200 -Body (Get-PimManagerRole)
+            return 200
+        }
+
+        if ($path -eq '/api/audit' -and $method -eq 'GET') {
+            $script:lastHeartbeat = Get-Date
+            $limit = 200
+            if ($req.Url.Query -match '(\?|&)limit=(\d+)') { $limit = [Math]::Min(2000, [int]$Matches[2]) }
+            $events = New-Object System.Collections.ArrayList
+            $auditDir = Join-Path $script:outputRoot 'audit'
+            foreach ($month in @([datetime]::UtcNow.ToString('yyyyMM'), [datetime]::UtcNow.AddMonths(-1).ToString('yyyyMM'))) {
+                $f = Join-Path $auditDir "pim-audit-$month.jsonl"
+                if (Test-Path -LiteralPath $f) {
+                    foreach ($line in @(Get-Content -LiteralPath $f -Encoding UTF8)) {
+                        if ($line.Trim()) { try { [void]$events.Add(($line | ConvertFrom-Json)) } catch {} }
+                    }
+                }
+            }
+            $sorted = @($events | Sort-Object { "$($_.ts)" } -Descending | Select-Object -First $limit)
+            Write-JsonResponse -Response $resp -Status 200 -Body @{ events = $sorted; total = $events.Count }
+            return 200
+        }
+
+        if ($path -eq '/api/mail-templates' -and $method -eq 'GET') {
+            $script:lastHeartbeat = Get-Date
+            $mailDir = Join-Path $solutionRoot 'templates\mail'
+            $items = @()
+            if (Test-Path -LiteralPath $mailDir) {
+                foreach ($f in @(Get-ChildItem -LiteralPath $mailDir -Filter '*.mailtemplate.html')) {
+                    $t = $f.Name -replace '\.mailtemplate\.html$', ''
+                    $customPath = Join-Path $mailDir "$t.mailtemplate.custom.html"
+                    $subject = ''
+                    try { if ((Get-Content -LiteralPath $f.FullName -TotalCount 1) -match '<!--\s*subject:\s*(.+?)\s*-->') { $subject = $Matches[1] } } catch {}
+                    $items += @{ type = $t; customized = [bool](Test-Path -LiteralPath $customPath); subject = $subject }
+                }
+            }
+            Write-JsonResponse -Response $resp -Status 200 -Body @{ templates = @($items | Sort-Object { $_.type }) }
+            return 200
+        }
+
+        if ($path -eq '/api/emergency-status' -and $method -eq 'GET') {
+            $script:lastHeartbeat = Get-Date
+            $ovFile = Join-Path $script:configRoot 'emergency-override.custom.json'
+            if (-not (Test-Path -LiteralPath $ovFile)) {
+                Write-JsonResponse -Response $resp -Status 200 -Body @{ active = $false }
+                return 200
+            }
+            try {
+                $ov = Get-Content -LiteralPath $ovFile -Raw -Encoding UTF8 | ConvertFrom-Json
+                $expired = $true
+                try { $expired = ([datetime]::UtcNow -ge ([datetime]$ov.expiresAtUtc).ToUniversalTime()) } catch {}
+                Write-JsonResponse -Response $resp -Status 200 -Body @{
+                    active = [bool]($ov.active -and -not $expired); expired = $expired
+                    activatedBy = "$($ov.activatedBy)"; activatedAtUtc = "$($ov.activatedAtUtc)"; expiresAtUtc = "$($ov.expiresAtUtc)"
+                    reason = "$($ov.reason)"; scopeGroupTags = @($ov.scopeGroupTags); appliedGroups = @($ov.appliedGroups)
+                }
+            } catch {
+                Write-JsonResponse -Response $resp -Status 200 -Body @{ active = $false; error = "$($_.Exception.Message)" }
+            }
+            return 200
+        }
+
+        if ($path -eq '/api/emergency' -and $method -eq 'POST') {
+            $script:lastHeartbeat = Get-Date
+            if (-not (Test-PimManagerRoleAtLeast -Minimum 'SuperAdmin')) {
+                Write-JsonResponse -Response $resp -Status 403 -Body @{ error = 'SuperAdmin role required for the emergency override' }
+                return 403
+            }
+            $body = Read-RequestJson -Request $req
+            $check = Test-PimEmergencyPasscode -Passcode "$($body.passcode)"
+            if (-not $check.ok) {
+                Write-JsonResponse -Response $resp -Status 403 -Body @{ error = $check.error }
+                return 403
+            }
+            $hours = 4
+            if ($body.hours) { $hours = [Math]::Min(24, [Math]::Max(1, [int]$body.hours)) }
+            $who = (Get-PimManagerRole).identity
+            $ov = [ordered]@{
+                active         = $true
+                scopeGroupTags = @($body.scopeGroupTags | Where-Object { $_ })
+                activatedBy    = $who
+                activatedAtUtc = [datetime]::UtcNow.ToString('o')
+                expiresAtUtc   = [datetime]::UtcNow.AddHours($hours).ToString('o')
+                reason         = "$($body.reason)"
+                appliedGroups  = @()
+            }
+            ($ov | ConvertTo-Json -Depth 4) | Set-Content -LiteralPath (Join-Path $script:configRoot 'emergency-override.custom.json') -Encoding UTF8
+            Write-PimManagerAuditEvent -Action 'emergency.activate' -Target (@($ov.scopeGroupTags) -join ',') -After @{ hours = $hours; reason = "$($body.reason)"; expiresAtUtc = $ov.expiresAtUtc }
+            Write-JsonResponse -Response $resp -Status 200 -Body @{ ok = $true; expiresAtUtc = $ov.expiresAtUtc; note = 'The engine disables approval on the scoped groups on its next run (run it now for immediate effect) and auto-restores normal policy at expiry.' }
+            return 200
+        }
+
+        if ($path -eq '/api/emergency-restore' -and $method -eq 'POST') {
+            $script:lastHeartbeat = Get-Date
+            if (-not (Test-PimManagerRoleAtLeast -Minimum 'SuperAdmin')) {
+                Write-JsonResponse -Response $resp -Status 403 -Body @{ error = 'SuperAdmin role required' }
+                return 403
+            }
+            $ovFile = Join-Path $script:configRoot 'emergency-override.custom.json'
+            if (Test-Path -LiteralPath $ovFile) {
+                try {
+                    $ov = Get-Content -LiteralPath $ovFile -Raw -Encoding UTF8 | ConvertFrom-Json
+                    $ov.expiresAtUtc = [datetime]::UtcNow.ToString('o')   # expire NOW; engine restores on next run
+                    ($ov | ConvertTo-Json -Depth 4) | Set-Content -LiteralPath $ovFile -Encoding UTF8
+                    Write-PimManagerAuditEvent -Action 'emergency.restore.requested' -Target (@($ov.scopeGroupTags) -join ',')
+                } catch {}
+            }
+            Write-JsonResponse -Response $resp -Status 200 -Body @{ ok = $true; note = 'Override expired; the engine re-applies the normal approval policy on its next run.' }
             return 200
         }
 
@@ -1934,6 +2150,10 @@ function Handle-Request {
         }
 
         if ($path -eq '/api/instance' -and $method -eq 'POST') {
+            if (-not (Test-PimManagerRoleAtLeast -Minimum 'SuperAdmin')) {
+                Write-JsonResponse -Response $resp -Status 403 -Body @{ error = 'SuperAdmin role required. See config/manager-access.custom.json.' }
+                return 403
+            }
             $script:lastHeartbeat = Get-Date
             $body = Read-RequestJson -Request $req
             $name = if ($body -and $body.name) { "$($body.name)" } else { '' }
@@ -2002,6 +2222,10 @@ function Handle-Request {
         }
 
         if ($path -eq '/api/revoke' -and $method -eq 'POST') {
+            if (-not (Test-PimManagerRoleAtLeast -Minimum 'Admin')) {
+                Write-JsonResponse -Response $resp -Status 403 -Body @{ error = 'Admin role required. See config/manager-access.custom.json.' }
+                return 403
+            }
             $script:lastHeartbeat = Get-Date
             $body = Read-RequestJson -Request $req
             $justification = $null

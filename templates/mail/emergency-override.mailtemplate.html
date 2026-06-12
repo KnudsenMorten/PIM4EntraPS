@@ -1,0 +1,17 @@
+<!-- subject: EMERGENCY override active on {{GroupName}} -- approval disabled -->
+<!-- tokens: GroupName, ActivatedBy, ExpiresAtUtc, Reason -->
+<!-- Sent to every owner of a group whose approval requirement was disabled by the break-glass override. To customize: copy to emergency-override.mailtemplate.custom.html and edit. -->
+<html>
+<body style="font-family:Segoe UI,Arial,sans-serif; color:#24292f; font-size:14px;">
+  <p>Hello,</p>
+  <p style="color:#cf222e;"><b>The activation-approval requirement on a high-privilege group you own has been temporarily DISABLED via the emergency override.</b></p>
+  <table cellpadding="4" style="border-collapse:collapse; font-size:14px;">
+    <tr><td><b>Group</b></td><td>{{GroupName}}</td></tr>
+    <tr><td><b>Activated by</b></td><td>{{ActivatedBy}}</td></tr>
+    <tr><td><b>Reason</b></td><td>{{Reason}}</td></tr>
+    <tr><td><b>Auto-restores</b></td><td>{{ExpiresAtUtc}} UTC</td></tr>
+  </table>
+  <p>Activations of this group do NOT require approval until the override expires; the engine then re-applies the normal policy automatically. Every action is in the engine audit log.</p>
+  <p style="color:#57606a;">If this override is unexpected, treat it as a security incident and contact your security operations team immediately.</p>
+</body>
+</html>

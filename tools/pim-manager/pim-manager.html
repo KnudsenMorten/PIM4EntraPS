@@ -13,6 +13,9 @@
   // MSP multi-instance: { active: 'local', instances: [{name, configRoot}, ...] }.
   // More than one instance -> the header shows an instance switcher.
   window.PIM_INSTANCES_BOOT = __PIM_INSTANCES__;
+  // Manager RBAC (phase 7): { role: 'Reader|Admin|SuperAdmin', identity, source }.
+  // The server enforces; this only drives what the UI shows.
+  window.PIM_ROLE_BOOT = __PIM_ROLE__;
 </script>
 <style>
   html, body { margin:0; padding:0; height:100%; font-family: -apple-system, "Segoe UI", Roboto, sans-serif; background:#ffffff; color:#1a1a1a; }
@@ -512,6 +515,7 @@
     <div class="tab" data-tab="save">Review &amp; Save <span id="saveDirtyBadge" class="badge" style="display:none">0</span></div>
     <div class="tab" data-tab="revoke">Maintenance <span id="revokeCountBadge" class="badge" style="display:none;background:#cf222e">0</span></div>
     <div class="tab" data-tab="grid">Advanced View (grid) <span id="gridDirtyBadge" class="badge" style="display:none">0</span></div>
+    <div class="tab" data-tab="governance">Governance <span id="govEmergencyBadge" class="badge" style="display:none;background:#cf222e">!</span></div>
     <div id="tabRight">
       mode: <b id="modeLabel"></b>
       &nbsp;|&nbsp; source: <b id="src"></b>
@@ -644,6 +648,13 @@
       </div>
       <span class="spacer"></span>
       <span id="valCacheStatus"></span>
+    </div>
+  </div>
+
+  <!-- =========== Governance tab (phases 7+8) =========== -->
+  <div id="governanceTab" class="tab-panel">
+    <div style="flex:1 1 auto; overflow:auto; padding:14px 18px;" id="govBody">
+      <div style="color:#57606a; font-size:12px;">Loading governance data&hellip;</div>
     </div>
   </div>
 
@@ -794,6 +805,84 @@
     if (name === 'save') renderSaveTab();
     if (name === 'validate') openValidateTab();
     if (name === 'revoke') openRevokeTab();
+    if (name === 'governance') renderGovernance();
+  }
+
+  // ===================================================================
+  // Governance tab (phases 7+8): role banner, emergency override, mail
+  // template status, audit viewer. The SERVER enforces the role on every
+  // endpoint; this UI only reflects it.
+  // ===================================================================
+  const PIM_ROLE = (window.PIM_ROLE_BOOT && window.PIM_ROLE_BOOT.role) || 'Reader';
+
+  async function renderGovernance() {
+    const body = document.getElementById('govBody');
+    if (!isServer) { body.innerHTML = '<div style="color:#57606a">Static mode -- governance data needs the server.</div>'; return; }
+    const esc = escapeHtml;
+    let emergency = { active: false }, mail = { templates: [] }, audit = { events: [], total: 0 };
+    try { emergency = await api('GET', '/api/emergency-status'); } catch (_) {}
+    try { mail = await api('GET', '/api/mail-templates'); } catch (_) {}
+    try { audit = await api('GET', '/api/audit?limit=100'); } catch (_) {}
+    document.getElementById('govEmergencyBadge').style.display = emergency.active ? '' : 'none';
+
+    const h = [];
+    h.push(`<div style="margin-bottom:16px;"><span style="font-size:11px;text-transform:uppercase;letter-spacing:.5px;color:#0969da;font-weight:600;">Your access</span>` +
+      `<div style="font-size:13px;margin-top:4px;">Role: <b>${esc(PIM_ROLE)}</b> &mdash; ${esc((window.PIM_ROLE_BOOT && window.PIM_ROLE_BOOT.identity) || '')} <span style="color:#57606a">(${esc((window.PIM_ROLE_BOOT && window.PIM_ROLE_BOOT.source) || '')})</span></div>` +
+      `<div style="color:#57606a;font-size:11.5px;margin-top:2px;">Reader = view only &middot; Admin = stage/commit + revoke &middot; SuperAdmin = instances, emergency override, maintenance. Mapping file: <code>config/manager-access.custom.json</code>.</div></div>`);
+
+    h.push('<div style="margin-bottom:16px;"><span style="font-size:11px;text-transform:uppercase;letter-spacing:.5px;color:#cf222e;font-weight:600;">Emergency override (break-glass)</span>');
+    if (emergency.active) {
+      h.push(`<div style="margin-top:6px;padding:10px;border:1px solid #cf222e;border-radius:6px;background:#fff5f5;font-size:12.5px;">` +
+        `<b>ACTIVE</b> &mdash; approval disabled on <b>${esc((emergency.scopeGroupTags || []).filter(Boolean).join(', ') || 'ALL approval-protected groups')}</b> ` +
+        `until <b>${esc(emergency.expiresAtUtc || '')}</b> UTC (by ${esc(emergency.activatedBy || '')}; reason: ${esc(emergency.reason || '-')}). ` +
+        `Engine-applied so far: ${esc(((emergency.appliedGroups || []).filter(Boolean).join(', ')) || '(pending next engine run)')}` +
+        `${PIM_ROLE === 'SuperAdmin' ? ' <button id="govEmRestore" style="margin-left:8px;">Restore now</button>' : ''}</div>`);
+    } else if (PIM_ROLE === 'SuperAdmin') {
+      h.push(`<div style="margin-top:6px;font-size:12.5px;display:flex;gap:8px;align-items:center;flex-wrap:wrap;">` +
+        `<input type="password" id="govEmPass" placeholder="emergency passphrase" style="min-width:200px;">` +
+        `<input type="number" id="govEmHours" value="4" min="1" max="24" style="width:64px;" title="hours until auto-restore">` +
+        `<input type="text" id="govEmScope" placeholder="scope GroupTags (semicolon-separated; empty = all approval groups)" style="min-width:340px;">` +
+        `<input type="text" id="govEmReason" placeholder="reason (audited)" style="min-width:220px;">` +
+        `<button id="govEmActivate" style="background:#cf222e;color:#fff;border:1px solid #cf222e;border-radius:5px;padding:4px 10px;cursor:pointer;">Disable approval</button>` +
+        `<span id="govEmStatus" style="color:#57606a;font-size:11.5px;"></span></div>` +
+        `<div style="color:#57606a;font-size:11px;margin-top:4px;">Verified against the passphrase hash in <code>config/emergency.custom.ps1</code>. The engine disables the approval rule on its next run and auto-restores the linked policy template at expiry. Group owners are notified; everything lands in the audit trail.</div>`);
+    } else {
+      h.push('<div style="margin-top:6px;color:#57606a;font-size:12px;">Inactive. Activation requires the SuperAdmin role + the emergency passphrase.</div>');
+    }
+    h.push('</div>');
+
+    h.push('<div style="margin-bottom:16px;"><span style="font-size:11px;text-transform:uppercase;letter-spacing:.5px;color:#0969da;font-weight:600;">Mail templates</span>');
+    h.push('<table class="grid" style="margin-top:6px;font-size:12px;"><thead><tr><th>Type</th><th>Subject</th><th>Source</th></tr></thead><tbody>');
+    for (const t of (mail.templates || [])) {
+      h.push(`<tr><td>${esc(t.type)}</td><td>${esc(t.subject || '')}</td><td>${t.customized ? '<b>customized</b> (.custom.html)' : 'shipped default'}</td></tr>`);
+    }
+    h.push('</tbody></table><div style="color:#57606a;font-size:11px;margin-top:4px;">Customize by copying <code>templates/mail/&lt;type&gt;.mailtemplate.html</code> to <code>&lt;type&gt;.mailtemplate.custom.html</code> and editing -- the .custom file wins and survives updates.</div></div>');
+
+    h.push(`<div><span style="font-size:11px;text-transform:uppercase;letter-spacing:.5px;color:#0969da;font-weight:600;">Audit trail</span> <span style="color:#57606a;font-size:11px;">(${(audit.events || []).length} of ${audit.total || 0} events, newest first &mdash; output/audit/pim-audit-&lt;yyyyMM&gt;.jsonl)</span>`);
+    h.push('<table class="grid" style="margin-top:6px;font-size:11.5px;"><thead><tr><th>When (UTC)</th><th>Actor</th><th>Action</th><th>Target</th><th>Result</th></tr></thead><tbody>');
+    for (const e of (audit.events || [])) {
+      h.push(`<tr><td style="white-space:nowrap;">${esc((e.ts || '').replace('T', ' ').substring(0, 19))}</td><td>${esc(e.actor || '')}</td><td>${esc(e.action || '')}</td><td>${esc(e.target || '')}</td><td>${esc(e.result || '')}</td></tr>`);
+    }
+    h.push('</tbody></table></div>');
+    body.innerHTML = h.join('');
+
+    const act = document.getElementById('govEmActivate');
+    if (act) act.onclick = async () => {
+      const status = document.getElementById('govEmStatus');
+      status.textContent = 'activating...';
+      try {
+        const r = await api('POST', '/api/emergency', {
+          passcode: document.getElementById('govEmPass').value,
+          hours: parseInt(document.getElementById('govEmHours').value, 10) || 4,
+          scopeGroupTags: document.getElementById('govEmScope').value.split(';').map(s => s.trim()).filter(Boolean),
+          reason: document.getElementById('govEmReason').value
+        });
+        status.textContent = 'active until ' + r.expiresAtUtc;
+        renderGovernance();
+      } catch (e2) { status.textContent = e2.message; }
+    };
+    const rst = document.getElementById('govEmRestore');
+    if (rst) rst.onclick = async () => { try { await api('POST', '/api/emergency-restore'); } catch (_) {} renderGovernance(); };
   }
 
   // ===================================================================

@@ -53,3 +53,6 @@ tools/pim-activator/discovered-tenant-catalog.json
 templates/mail/*.mailtemplate.custom.html
 templates/admin/*.admintemplate.custom.json
 templates/policy/*.policytemplate.custom.json
+config/*.custom.json
+config-local/*.custom.json
+config-msp/*.custom.json

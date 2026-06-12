@@ -219,8 +219,8 @@ All engine and Manager transactions converge on **`output/audit/pim-audit-<yyyyM
 | 4 | Approvals: parallel (native) + serial escalation sweep, Owners become functional (approval chips land with the Governance tab) | **shipped v2.4.155** |
 | 5 | Offboarding: `OffboardDate`/`DeleteAfterDays`/`Lifecycle=Retire` + drift cleanup modes | **shipped v2.4.156** |
 | 6 | Unified jsonl audit (viewer lands with the Governance tab; optional AzLogDcrIngestPS sink is a follow-up) | **shipped v2.4.157** |
-| 7 | Manager RBAC + Governance tab shell | manager |
-| 8 | Emergency override (needs 3 + 7) | manager, engine |
+| 7 | Manager RBAC + Governance tab (role banner, audit viewer, mail-template status, emergency panel) | **shipped v2.4.158** |
+| 8 | Emergency override (passphrase-hash verification in config/emergency.custom.ps1; KV verification = follow-up) | **shipped v2.4.158** |
 | 9 | Resource auto-discovery (Portal mode first, Engine mode second) | manager, engine |
 
 Phase order optimizes for dependency flow (templates before policies before approvals before emergency) and for the operator's immediate scenario (scheduling + TAP windows first).

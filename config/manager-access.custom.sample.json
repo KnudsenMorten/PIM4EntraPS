@@ -1,0 +1,5 @@
+[
+  { "identity": "DOMAIN\\operator1", "role": "SuperAdmin" },
+  { "identity": "DOMAIN\\operator2", "role": "Admin" },
+  { "identity": "DOMAIN\\auditor1",  "role": "Reader" }
+]
