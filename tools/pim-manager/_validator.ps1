@@ -31,6 +31,15 @@
 #>
 
 # ---------------------------------------------------------------------------
+# Shared date-expression resolver (PIM-SCHED-* rules + /api/resolve-date).
+# Same file the engine dot-sources -- GUI, validator and engine must resolve
+# identically. Guarded: if the layout is unusual and the file is missing, the
+# SCHED rules skip instead of breaking the whole validator.
+# ---------------------------------------------------------------------------
+$_dateExprLib = Join-Path $PSScriptRoot '..\..\engine\_shared\PIM-DateExpression.ps1'
+if (Test-Path -LiteralPath $_dateExprLib) { . $_dateExprLib }
+
+# ---------------------------------------------------------------------------
 # Levenshtein (for the "did you mean" suggestion in PIM-FK-001)
 # ---------------------------------------------------------------------------
 
@@ -894,6 +903,60 @@ function Invoke-PimPreflightValidation {
                 [void]$violations.Add((New-PimViolation -Severity 'info' -Code 'PIM-TAP-001' -Csv 'Account-Definitions-Admins' -Row $i -Column 'CreateTAP' `
                     -Message "CreateTAP=TRUE for '$upn' but TargetPlatform=AD. Temporary Access Pass is an Entra-ID-only feature; AD-only admins cannot have a TAP." `
                     -Suggestion "Set CreateTAP=FALSE for AD-only admins, or change TargetPlatform to ID/Both if the admin should also exist in Entra."))
+            }
+        }
+    }
+
+    # ------------------------------------------------------------------
+    # PIM-SCHED-* + PIM-TAP-002: scheduling columns (LIFECYCLE-GOVERNANCE
+    # phase 1). ProvisionDate must be a valid date expression (grammar only
+    # -- the engine treats unparseable as Now, which would provision EARLY);
+    # TAPStartDate failures are warnings (legacy natural-language values like
+    # 'tomorrow 9am' resolve in the engine's extended parser, which is not
+    # loaded here); TAPLifetimeHours must be numeric 1..720; TAPStartDate
+    # before ProvisionDate means the TAP window predates the account.
+    # ------------------------------------------------------------------
+    if ($loaded.ContainsKey('Account-Definitions-Admins') -and (Get-Command Resolve-PimDateExpression -ErrorAction SilentlyContinue)) {
+        $rows = $loaded['Account-Definitions-Admins'].rows
+        for ($i = 0; $i -lt $rows.Count; $i++) {
+            $r = $rows[$i]
+            if (Test-PimRowIsBlank -Row $r) { continue }
+            $upn = Get-PimRowValue -Row $r -Column 'UserPrincipalName'
+
+            $provRaw = (Get-PimRowValue -Row $r -Column 'ProvisionDate').Trim()
+            $provUtc = $null
+            if ($provRaw) {
+                try { $provUtc = Resolve-PimDateExpression -Expression $provRaw } catch {
+                    [void]$violations.Add((New-PimViolation -Severity 'error' -Code 'PIM-SCHED-001' -Csv 'Account-Definitions-Admins' -Row $i -Column 'ProvisionDate' `
+                        -Message "ProvisionDate '$provRaw' for '$upn' is not a valid date expression -- the engine would treat it as Now and provision immediately." `
+                        -Suggestion "Use: Now | FirstDayNextMonth / FirstWorkdayNextMonth / FirstDayNextWeek / FirstWorkdayNextWeek with optional +Nd/-Nd and @HH:mm, or yyyy-MM-dd[@HH:mm] (e.g. 'FirstWorkdayNextMonth-3d')."))
+                }
+            }
+
+            $tapRaw = (Get-PimRowValue -Row $r -Column 'TAPStartDate').Trim()
+            $tapUtc = $null
+            if ($tapRaw) {
+                try { $tapUtc = Resolve-PimDateExpression -Expression $tapRaw } catch {
+                    [void]$violations.Add((New-PimViolation -Severity 'warning' -Code 'PIM-SCHED-001' -Csv 'Account-Definitions-Admins' -Row $i -Column 'TAPStartDate' `
+                        -Message "TAPStartDate '$tapRaw' for '$upn' does not match the date-expression grammar. The engine's extended parser may still accept it (legacy natural-language values), but prefer the grammar so the GUI preview and validator can verify it." `
+                        -Suggestion "Use e.g. 'FirstWorkdayNextMonth@08:00' or '2026-07-01@08:00'."))
+                }
+            }
+
+            if ($provUtc -and $tapUtc -and $tapUtc -lt $provUtc) {
+                [void]$violations.Add((New-PimViolation -Severity 'warning' -Code 'PIM-SCHED-002' -Csv 'Account-Definitions-Admins' -Row $i -Column 'TAPStartDate' `
+                    -Message "TAPStartDate ($($tapUtc.ToString('yyyy-MM-dd HH:mm')) UTC) for '$upn' is EARLIER than ProvisionDate ($($provUtc.ToString('yyyy-MM-dd HH:mm')) UTC) -- the TAP window would open before the account exists." `
+                    -Suggestion "Move TAPStartDate to or after ProvisionDate (the operator pattern is: provision a few days early, TAP opens on the start day, e.g. ProvisionDate=FirstWorkdayNextMonth-3d, TAPStartDate=FirstWorkdayNextMonth@08:00)."))
+            }
+
+            $lifeRaw = (Get-PimRowValue -Row $r -Column 'TAPLifetimeHours').Trim()
+            if ($lifeRaw) {
+                $lifeNum = 0
+                if (-not [double]::TryParse($lifeRaw, [ref]$lifeNum) -or $lifeNum -lt 1 -or $lifeNum -gt 720) {
+                    [void]$violations.Add((New-PimViolation -Severity 'error' -Code 'PIM-TAP-002' -Csv 'Account-Definitions-Admins' -Row $i -Column 'TAPLifetimeHours' `
+                        -Message "TAPLifetimeHours '$lifeRaw' for '$upn' must be a number between 1 and 720 (Graph caps TAP lifetime at 30 days). The engine falls back to the tenant default lifetime for invalid values." `
+                        -Suggestion "Set the intended validity window in hours, e.g. 8."))
+                }
             }
         }
     }

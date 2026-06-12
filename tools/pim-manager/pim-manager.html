@@ -1725,6 +1725,18 @@
         '<option value="Revoked">Revoked</option>' +
         '</select>');
       html.push('<button id="gabApplyStatus">Apply</button>');
+      // Ring moves as a first-class action (LIFECYCLE-GOVERNANCE phase 1):
+      // promote 2 -> 1 -> 0 (or pull back) without hand-editing the column.
+      html.push('<span class="gab-label">Move to ring:</span>');
+      html.push('<select id="gabRing">' +
+        '<option value="2">2 (test tenants)</option>' +
+        '<option value="1">1 (pilot)</option>' +
+        '<option value="0">0 (all tenants)</option>' +
+        '</select>');
+      html.push('<button id="gabApplyRing">Apply</button>');
+      if (p.ringNote) {
+        html.push(`<span class="gab-label" style="color:#9a6700">${escapeHtml(p.ringNote)}</span>`);
+      }
     }
     html.push(`<button id="gabDelete" class="gab-danger">Delete ${selCount} selected row(s)</button>`);
     html.push('<span class="gab-spacer"></span>');
@@ -1919,6 +1931,36 @@
         // Per spec: don't clear selection after Apply; user can re-apply
         // a different value without re-selecting. But do mark badges +
         // re-render so the row-modified highlight shows up.
+        if (changed > 0) markBadges();
+        renderGrid(base);
+      };
+    }
+
+    const gabApplyRing = document.getElementById('gabApplyRing');
+    if (gabApplyRing) {
+      gabApplyRing.onclick = () => {
+        const sel = document.getElementById('gabRing');
+        const newVal = sel ? sel.value : '';
+        if (!newVal) return;
+        if (header.indexOf('Ring') === -1) {
+          alert('Ring column not present in this CSV.');
+          return;
+        }
+        let changed = 0, lowered = 0;
+        for (const i of p.selection) {
+          if (p.deletes.has(i)) continue;
+          const cur = (p.rows[i].Ring || '').trim();
+          if (cur !== newVal) {
+            // A LOWER ring = wider reach (0 = all tenants). Surface it --
+            // promotion is usually intentional, but worth a visible count.
+            if (cur !== '' && parseInt(newVal, 10) < parseInt(cur, 10)) lowered++;
+            p.rows[i].Ring = newVal;
+            changed++;
+          }
+        }
+        p.ringNote = lowered > 0
+          ? `Ring lowered on ${lowered} row(s) -- wider deployment reach. Review on the Review & Save tab.`
+          : '';
         if (changed > 0) markBadges();
         renderGrid(base);
       };
@@ -3125,6 +3167,30 @@
   // ===================================================================
   // UX helper: form-row, why-collapsible, live "you'll get" preview, etc.
   // ===================================================================
+  // Date-expression input with a debounced live resolve preview (server-side
+  // resolver = the same code the engine runs, via /api/resolve-date).
+  // Appends the field AND its preview line to container `f`.
+  function wuxDateField(f, opts) {
+    const prev = document.createElement('div');
+    prev.style.cssText = 'font-size:11px; margin:-4px 0 8px 2px; color:#57606a;';
+    let timer = null;
+    const update = (v) => {
+      clearTimeout(timer);
+      if (!v || !v.trim()) { prev.textContent = ''; return; }
+      timer = setTimeout(async () => {
+        try {
+          const r = await api('GET', '/api/resolve-date?expr=' + encodeURIComponent(v.trim()));
+          if (r && r.ok) { prev.textContent = '↳ resolves to ' + r.display + ' = ' + r.utc + ' UTC'; prev.style.color = '#1a7f37'; }
+          else { prev.textContent = '⚠ ' + ((r && r.error) || 'cannot resolve'); prev.style.color = '#9a6700'; }
+        } catch (e) { prev.textContent = ''; }
+      }, 350);
+    };
+    const wrapped = Object.assign({}, opts, { onInput: (v) => { opts.onInput(v); update(v); } });
+    f.appendChild(wuxField(wrapped));
+    f.appendChild(prev);
+    update(opts.value || '');
+  }
+
   function wuxField(opts) {
     // opts: { id, label, sub, value, example, hint, options:[{value,label}], type='text'|'number'|'select'|'textarea', required, onInput, rows }
     const row = document.createElement('div');
@@ -3334,7 +3400,8 @@
       userType:'External',
       status:'Enabled',
       forwardMails:'FALSE', mailForwardAddr:'',
-      createTap:'TRUE',
+      createTap:'TRUE', tapStartDate:'', tapLifetimeHours:'',
+      provisionDate:'',
       usageLocation:'DK',
       ring:'2',   // new hires start in ring 2 (test tenants); promote 2 -> 1 -> 0 centrally
       roleGroupSel: new Set(),
@@ -3476,16 +3543,41 @@
               ],
               onInput:(v)=>{ s.userType=v; }
             }));
-            f.appendChild(wuxField({ id:'wf-tap', label:'Create TAP at provisioning?', type:'select', value:s.createTap,
-              sub:'Account-Definitions-Admins.CreateTAP',
-              options:[ { value:'TRUE', label:'Yes (Cloud admins typically)' }, { value:'FALSE', label:'No (on-prem AD admins)' } ],
-              onInput:(v)=>{ s.createTap=v; }
-            }));
             f.appendChild(wuxField({ id:'wf-loc', label:'Usage location', value:s.usageLocation, example:'e.g. DK / US / DE',
               hint:'Two-letter country code used when licenses get assigned.',
               sub:'Account-Definitions-Admins.UsageLocation',
               onInput:(v)=>{ s.usageLocation=v; }
             }));
+            wuxDateField(f, { id:'wf-prov', label:'Provision on (scheduled creation)', value:s.provisionDate,
+              example:'e.g. FirstWorkdayNextMonth-3d or 2026-06-28 -- blank = next engine run',
+              hint:'The engine skips this row until the date resolves. Use it when the admin must be created AFTER a dependent normal account exists (e.g. so the forwarded TAP mail can land).',
+              sub:'Account-Definitions-Admins.ProvisionDate',
+              onInput:(v)=>{ s.provisionDate=v; }
+            });
+            // --- Temporary Access Pass (one group -- LIFECYCLE-GOVERNANCE phase 1) ---
+            const tapHdr = document.createElement('div');
+            tapHdr.style.cssText = 'font-weight:600; font-size:12px; color:#24292f; border-top:1px solid #d0d7de; padding-top:10px; margin:12px 0 6px;';
+            tapHdr.textContent = 'Temporary Access Pass';
+            f.appendChild(tapHdr);
+            f.appendChild(wuxField({ id:'wf-tap', label:'Create TAP at provisioning?', type:'select', value:s.createTap,
+              sub:'Account-Definitions-Admins.CreateTAP',
+              options:[ { value:'TRUE', label:'Yes (Cloud admins typically)' }, { value:'FALSE', label:'No (on-prem AD admins)' } ],
+              onInput:(v)=>{ s.createTap=v; rerender(); }
+            }));
+            if (s.createTap === 'TRUE') {
+              wuxDateField(f, { id:'wf-tapstart', label:'TAP valid from', value:s.tapStartDate,
+                example:'e.g. FirstWorkdayNextMonth@08:00 -- blank = immediately',
+                hint:'The engine creates the TAP close to this window (not at provisioning) so the code is fresh when the admin can actually use it.',
+                sub:'Account-Definitions-Admins.TAPStartDate',
+                onInput:(v)=>{ s.tapStartDate=v; }
+              });
+              f.appendChild(wuxField({ id:'wf-taplife', label:'TAP lifetime (hours)', type:'number', value:s.tapLifetimeHours,
+                example:'e.g. 8 -- blank = tenant default (60 min)',
+                hint:'How long the TAP stays usable after it becomes valid (1-720).',
+                sub:'Account-Definitions-Admins.TAPLifetimeHours',
+                onInput:(v)=>{ s.tapLifetimeHours=v; }
+              }));
+            }
             f.appendChild(wuxField({ id:'wf-fwd', label:'Forward mail to owner?', type:'select', value:s.forwardMails,
               sub:'Account-Definitions-Admins.ForwardMailsToContact',
               options:[ { value:'FALSE', label:'No (default)' }, { value:'TRUE', label:'Yes' } ],
@@ -3555,7 +3647,10 @@
           UsageLocation: s.usageLocation,
           ForwardMailsToContact: s.forwardMails,
           MailForwardAddress: s.forwardMails === 'TRUE' ? s.mailForwardAddr : '',
-          CreateTAP: s.createTap, TAPStartDate: '',
+          ProvisionDate: s.provisionDate.trim(),
+          CreateTAP: s.createTap,
+          TAPStartDate: s.createTap === 'TRUE' ? s.tapStartDate.trim() : '',
+          TAPLifetimeHours: s.createTap === 'TRUE' ? String(s.tapLifetimeHours || '').trim() : '',
           AccountStatus: s.status, StatusChangeCode: '',
           Ring: s.ring
         });
@@ -3638,7 +3733,9 @@
         ForwardMailsToContact: 'FALSE',
         MailForwardAddress: '',
         CreateTAP: body.querySelector('#wzTap').value,
-        TAPStartDate: ''
+        TAPStartDate: '',
+        TAPLifetimeHours: '',
+        ProvisionDate: ''
       };
     }
 
