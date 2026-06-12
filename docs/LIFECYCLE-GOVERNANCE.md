@@ -224,7 +224,7 @@ All engine and Manager transactions converge on **`output/audit/pim-audit-<yyyyM
 | 9 | Resource discovery: engine Notify sweep (audit `resource.discovered`) + Manager Portal surface/acknowledge; automatic ROW creation for discovered resources is the documented follow-up | **shipped v2.4.159** |
 | 10 | Access reviews (§ 14): engine-owned Entra review schedules (auto-apply OFF), decision sweep, deny tombstones + PIM-REV-001 | design agreed |
 | 11 | External request intake (§ 15): SNOW → MID-server file-drop inbox → MANAGER ingests + approval queue (engine never reads external input); signed typed requests, template-only onboarding, high-priv hard deny | design agreed |
-| 12 | Manager Entra MFA sign-in + SQL data store with Entra-only auth + CSV→DB migration (§ 16) — the v3.0 line | design agreed |
+| 12 | Manager Entra MFA sign-in + SQL data store (Azure SQL/MI **and** on-prem/hybrid SQL Server, Entra or Windows-Integrated auth — never SQL logins) + CSV→DB migration (§ 16) — the v3.0 line | design agreed |
 
 Phase order optimizes for dependency flow (templates before policies before approvals before emergency) and for the operator's immediate scenario (scheduling + TAP windows first).
 
@@ -274,7 +274,15 @@ Three operator asks that converge on one architecture:
 
 **Remote operation today**: `-ConfigRoot \\server\share` over SMB works now, but it is a workaround (ACLs, duplicate module installs, no concurrency).
 
-**SQL data store (v3.0)**: the original ROADMAP decision (stay CSV, revisit at v3.0) predates multiple writers (Manager + engine + intake processor), state layers, RBAC, and audit. Decision: **Azure SQL (or SQL MI / on-prem SQL, customer choice) with Entra-only authentication** -- no SQL logins to steal; the laptop Manager connects as the operator's Entra identity (MFA + CA enforced at the database door), the engine as its existing SPN/MSI; DB roles mirror Reader/Admin/SuperAdmin.
+**SQL data store (v3.0)**: the original ROADMAP decision (stay CSV, revisit at v3.0) predates multiple writers (Manager + engine + intake processor), state layers, RBAC, and audit. Decision: SQL becomes the primary store, with **cloud AND on-prem/hybrid SQL both first-class** -- the repository layer takes a connection profile (`$global:PIM_SqlConnection = @{ Server; Database; AuthMode }`), TLS enforced, and NO credential ever lives in config:
+
+| Deployment | Operator (Manager) auth | Engine auth | MFA at the DB door |
+|---|---|---|---|
+| Azure SQL Database / Managed Instance | Entra interactive (`AuthMode=EntraInteractive`) -- MFA + Conditional Access enforced by Entra | SPN / Managed Identity (`EntraSpn`) | yes (Entra) |
+| On-prem / hybrid SQL Server (classic AD) | Windows Integrated / Kerberos (`WindowsIntegrated`) -- domain identity, no SQL logins | gMSA or AD service account | no -- MFA comes from the Manager's Entra sign-in gate (app layer) + host/network controls |
+| SQL Server 2022+ Arc-enabled (hybrid, optional) | Entra auth on-prem via Azure Arc | SPN | yes (Entra) |
+
+SQL logins are disabled in every mode -- there is never a SQL password to steal. DB roles mirror Reader/Admin/SuperAdmin in all deployments. For classic on-prem AD customers the documented guidance is: app-layer MFA (the Manager's Entra sign-in) is the MFA boundary, and the SQL Server should only be reachable from the automation/management subnet.
 
 Migration path:
 1. **Repository abstraction first**: `Get-PimRows -Table X` / `Save-PimRows` with `$global:PIM_DataStore = 'Csv' | 'Sql'`; Manager, engine and validator route through it -- both stores work during transition, and `Csv` stays supported indefinitely for small installs.

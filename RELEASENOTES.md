@@ -1,9 +1,10 @@
 # Release notes for PIM4EntraPS
 
-## v2.4.164
+## v2.4.165
 
 Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monorepo:
 
+- release: PIM4EntraPS v2.4.165 -- phase 12 design: on-prem/hybrid SQL Server first-class alongside Azure SQL/MI. Repository connection profile $global:PIM_SqlConnection w/ AuthMode EntraInteractive|EntraSpn|WindowsIntegrated, TLS enforced, SQL logins disabled in every mode; Azure = Entra MFA+CA at the DB door, classic on-prem AD = Windows Integrated/Kerberos (operator) + gMSA (engine) with the Manager Entra sign-in as the app-layer MFA boundary + subnet scoping, SQL 2022+ Arc = optional Entra-on-prem middle ground; DB roles mirror Reader/Admin/SuperAdmin everywhere (cb3b328b)
 - release: PIM4EntraPS v2.4.164 -- phase 12 / v3.0 design (doc § 16): Manager Entra MFA sign-in (Edge PKCE loopback, amr-claim MFA check, RBAC by Entra UPN, CA applies; protects use-of-Manager not files-on-compromised-host); remote operation interim via -ConfigRoot SMB; SQL data store decision (Azure SQL / SQL MI / on-prem, Entra-only auth = no SQL creds, laptop Manager connects as operator w/ MFA at the DB door, engine as SPN/MSI, DB roles mirror Reader/Admin/SuperAdmin) with migration path: Get-PimRows/Save-PimRows repository abstraction + PIM_DataStore Csv|Sql (Csv supported indefinitely), schema = 15 logical tables + state + audit + intake, idempotent Invoke-PimCsvToDbMigration, nightly CSV snapshot export (25165e36)
 - release: PIM4EntraPS v2.4.163 -- phase 11 design: per-type intake routing (config/intake-routing.custom.json Approve default / Auto) + Invoke-PimIntakeProcessor headless scheduled task (drains the durable MID file-drop inbox every ~10 min; Auto -> verified rows in PIM-Assignments-FromIntake.custom.csv overlay unioned by the engine, no raw input to the engine + no Manager write-race; Approve -> queued + operator nudge mail); MID delivery decoupled from Manager lifetime (files queue in the directory); guardrails non-negotiable (no Auto for approval-required groups, template-only onboarding) (3e4dde55)
 - release: PIM4EntraPS v2.4.162 -- phase 11 design correction: the MANAGER ingests external requests (SNOW -> MID inbox -> Manager verify + approval queue -> pending -> Review & Save -> CSV), the engine never reads external input and stays purely declarative; no lights-out path bypassing operator + CSV (2cc21156)
@@ -33,7 +34,6 @@ Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monor
 - release: PIM4EntraPS v2.4.138 -- PIM Manager role pickers auto-load from the tenant: new azure-rbac-roles tenant-list kind (Get-AzRoleDefinition, per-instance cache, included in -RefreshTenantLists); Azure perm-group workflow picks the RBAC role from the tenant list (fills exact name + alias, free-text fallback); both perm-group workflows auto-load empty lists silently on open via ensureTenantLists; AzScopePermission renders as a dropdown in the Configuration grid. Kills the typed-role-name spelling-error class; validator STALE checks remain the safety net (a2afd078)
 - release: PIM4EntraPS v2.4.137 -- PIM Manager validator: PIM-NAME-002 false positive on EVERY UPN fixed -- [regex]::Escape escapes { but not } (.NET asymmetry), so the {Token}->.+ replacement never matched and UPNs were checked against the literal template string; closing brace now matched optionally-escaped. Demo tenants validate fully clean (0 errors, 0 warnings) (87116adf)
 - release: PIM4EntraPS v2.4.136 -- PIM Manager: collapsible file rail on the Configuration tab (chevron toggle, 280px -> 30px strip, preference persists in localStorage); E2E-verified collapse/persist/expand with zero console errors (0713483c)
-- release: PIM4EntraPS v2.4.135 -- PIM Manager: PIM-RING-001 downgraded to warning (never blocks Save) + Fix-all gained a ring bucket defaulting to repair-to-Ring-2 (least privilege; clear-to-0 as explicit alternative); instances.custom.json entries can declare per-tenant connections (tenantId+appId + certThumbprint for mgmt-box machine-store certs, OR keyVaultName+secretName for one central KV secret per tenant -- the cloud-portable shape an App Service port reads via Managed Identity); instance switch drops the Graph session and retargets the SPN globals so Active Assignments + tenant-cache refresh hit the selected tenant. E2E-verified against 3 demo tenant instances (afcba721)
 
 ---
 
@@ -42,6 +42,16 @@ Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monor
 > **Curated changelog.** The publish workflow auto-prepends recent monorepo commits as a raw activity log; this file is the human-friendly narrative on top.
 
 ---
+
+## v2.4.165 -- design (phase 12): on-prem/hybrid SQL Server is first-class alongside Azure SQL
+
+§ 16 gains the deployment/auth support matrix -- the repository layer takes a connection profile (`$global:PIM_SqlConnection`, `AuthMode = EntraInteractive | EntraSpn | WindowsIntegrated`), TLS enforced, no credential in config, **SQL logins disabled in every mode**:
+
+- **Azure SQL Database / Managed Instance**: operator = Entra interactive (MFA + Conditional Access at the database door); engine = SPN / Managed Identity.
+- **On-prem / hybrid SQL Server (classic AD)**: operator = Windows Integrated / Kerberos; engine = gMSA or AD service account. MFA boundary = the Manager's Entra sign-in gate (app layer) + network scoping of the SQL Server to the automation/management subnet.
+- **SQL Server 2022+ Arc-enabled** (optional hybrid middle ground): Entra auth on-prem -- MFA at the database door without moving the data.
+
+DB roles mirror Reader/Admin/SuperAdmin in all deployments.
 
 ## v2.4.164 -- design (phase 12 / v3.0): Manager Entra MFA + SQL data store with CSV migration
 
