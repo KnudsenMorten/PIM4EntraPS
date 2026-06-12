@@ -143,9 +143,30 @@ Write-Host ""
 # Resolve Microsoft Graph delegated permission ids
 # ---------------------------------------------------------------------------
 
+# First-party Microsoft service principals (Graph, ARM) are NOT guaranteed to
+# exist in every tenant -- fresh / lightly-used tenants only get them
+# instantiated on first use. Application.ReadWrite.All (already held by the
+# caller) is enough to instantiate the well-known appId on the spot, so
+# resolve-or-create instead of assuming presence.
+function Resolve-FirstPartySp {
+    param([string]$AppId, [string]$Name)
+    $sp = Get-MgServicePrincipal -Filter "appId eq '$AppId'"
+    if (-not $sp) {
+        Write-Host "  $Name service principal not present in tenant -- instantiating it (appId $AppId)..." -ForegroundColor Yellow
+        try {
+            $created = New-MgServicePrincipal -AppId $AppId
+            # Re-fetch so downstream consumers see fully-populated properties
+            # (Oauth2PermissionScopes in particular).
+            $sp = Get-MgServicePrincipal -ServicePrincipalId $created.Id
+        } catch {
+            throw "$Name service principal (appId $AppId) is missing from tenant $TenantId and could not be instantiated: $($_.Exception.Message)"
+        }
+    }
+    $sp
+}
+
 $graphAppId = '00000003-0000-0000-c000-000000000000'
-$graphSp    = Get-MgServicePrincipal -Filter "appId eq '$graphAppId'"
-if (-not $graphSp) { throw "Microsoft Graph service principal not found in tenant -- this should never happen." }
+$graphSp    = Resolve-FirstPartySp -AppId $graphAppId -Name 'Microsoft Graph'
 
 $needed = @(
     # Activation / deactivation -- POST + DELETE on
@@ -193,8 +214,7 @@ foreach ($name in $needed) {
 # assignments. Without it, the My Access tab shows a "Azure RBAC roles not
 # visible yet" banner and the Azure-direct rows on Activate never load.
 $asmAppId = '797f4846-ba00-4fd7-ba43-dac1f8f63013'
-$asmSp    = Get-MgServicePrincipal -Filter "appId eq '$asmAppId'"
-if (-not $asmSp) { throw "Azure Service Management service principal not found in tenant." }
+$asmSp    = Resolve-FirstPartySp -AppId $asmAppId -Name 'Azure Service Management'
 $asmScope = $asmSp.Oauth2PermissionScopes | Where-Object { $_.Value -eq 'user_impersonation' }
 if (-not $asmScope) { throw "user_impersonation scope not found on Azure Service Management SP." }
 Write-Host ("  resolved {0,-45} -> {1}" -f 'user_impersonation (ASM)', $asmScope.Id) -ForegroundColor DarkGray

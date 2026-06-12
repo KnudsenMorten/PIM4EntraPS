@@ -1,9 +1,10 @@
 # Release notes for PIM4EntraPS
 
-## v2.4.144
+## v2.4.145
 
 Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monorepo:
 
+- release: PIM4EntraPS v2.4.145 -- Deploy-PimActivatorBackend auto-instantiates missing first-party SPs (Microsoft Graph 00000003 / Azure Service Management 797f4846) via New-MgServicePrincipal instead of throwing "should never happen"; fresh tenants only provision well-known Microsoft SPs on first use. Resolve-FirstPartySp helper re-fetches after create so Oauth2PermissionScopes is populated; create-failure throws SP name + appId + tenant + Graph error. Harness green on PS 5.1 + pwsh 7 (1c61fee8)
 - release: PIM4EntraPS v2.4.144 -- Manager PIM-WL-* validator rules (workload connector existence with did-you-mean, required RoleName, Assign/Remove action gate) + GroupTag FK coverage for PIM-Assignments-Workloads via PIM-FK-001; thorough Manager README rewrite (15-CSV model, six lifecycle tabs incl. Workload delegation panel, Rings, validator rule catalog, MSP instances, refreshed test plan) (f860d4f6)
 - release: PIM4EntraPS v2.4.143 -- wire Apply-PimWorkloadAssignments into PIM-Baseline-Management-CSV as a final opt-in Workload RBAC step: runs only when config[/<variant>]/PIM-Assignments-Workloads.custom.csv exists (NOT via Get-PimConfigCsv -- its sample auto-bootstrap would arm the feature with shipped example rows), honors -WhatIfMode, resolves connectors from workloads/connectors/, benefits from the engine Groups_All_ID inventory for GroupTag cache-hit resolution; repository.custom.sample.ps1 documents the opt-in (c9e22c20)
 - release: PIM4EntraPS v2.4.142 -- Workload Connectors phase 1: JSON connector definitions for Defender XDR Unified RBAC + Intune roles (live role listing, token-templated assign/remove bodies); 15th config file PIM-Assignments-Workloads (desired state, full Manager lifecycle); engine Apply-PimWorkloadAssignments (idempotent diff-and-apply, -WhatIfMode, removes only self-created assignments); Manager Maintenance panel with live role pickers + /api/workloads + /api/workload-roles. Live-verified: 16 Defender + 11 Intune roles listed from a real tenant, WhatIf plan resolved real group->objectId with exact would-assign lines. Design doc extended with activation-stats right-sizing, deleted-resource auto-cleanup, orphaned-group drift phases (63ebc705)
@@ -33,7 +34,6 @@ Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monor
 - release: PIM4EntraPS v2.4.118 -- AD branch: revert v2.4.117 gMSA -Credential omission; restore v1 always-pass-Credential contract (customer test on SYSTEM-running host proved dropping -Credential cascades through to computer-account auth which lacks write rights). Hard-fail Get-ADUser + conditional Write-PimAdminPassword improvements kept. (c766ed13)
 - release: PIM4EntraPS v2.4.117 -- CRITICAL fix: AD branch is now gMSA-aware (drops -Credential when SAM ends with $) + hard-fails Get-ADUser instead of swallowing auth errors that cascaded into Create + Write-PimAdminPassword writing phantom passwords for accounts that never existed (d76bccea)
 - release: PIM4EntraPS v2.4.116 -- PIM-Baseline-Management-CSV engine calls Initialize-PlatformLegacyIdentity right after Initialize-PlatformAutomationFramework so KV Legacy-UserName/Password-Internal-Prod actually land in Context.Identity.Legacy.Internal.Prod (v2.4.115 wired the reader but nothing was populating the slot) (8965324b)
-- release: PIM4EntraPS v2.4.115 -- PIM-Baseline-Management-CSV engine now prefers v2 platform Context.Identity.Legacy.Internal.Prod for AD/gMSA credential (KV: Legacy-UserName-Internal-Prod + Legacy-Password-Internal-Prod), falls back to legacy $AD_Credentials global (98f29b4b)
 
 ---
 
@@ -42,6 +42,16 @@ Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monor
 > **Curated changelog.** The publish workflow auto-prepends recent monorepo commits as a raw activity log; this file is the human-friendly narrative on top.
 
 ---
+
+## v2.4.145 -- Activator backend deploy: auto-instantiate missing first-party service principals
+
+`Deploy-PimActivatorBackend.ps1` died with *"Microsoft Graph service principal not found in tenant -- this should never happen"* in a tenant where the first-party SP genuinely wasn't there. It CAN happen: fresh or lightly-used tenants only get the well-known Microsoft service principals (Microsoft Graph `00000003-...`, Azure Service Management `797f4846-...`) instantiated on first use.
+
+- New `Resolve-FirstPartySp` helper: looks the SP up by appId and, when absent, instantiates it via `New-MgServicePrincipal -AppId ...` (covered by the `Application.ReadWrite.All` scope the script already requires), then re-fetches by id so `Oauth2PermissionScopes` is fully populated for the permission-id resolution that follows.
+- Both lookups (Graph and ASM) go through the helper -- the ASM SP is the one most often missing in practice (tenants with no prior Azure activity).
+- If instantiation itself fails, the throw now names the SP, its appId, the tenant, and the underlying Graph error instead of the old dead-end message.
+
+Verified: parse-clean + 4-case harness (existing SP passthrough, missing-SP instantiate + re-fetch with scopes, create-failure throws actionable message) green in real PS 5.1 **and** pwsh 7 processes.
 
 ## v2.4.144 -- Manager: PIM-WL-* validator rules for workload rows + thorough README rewrite
 
