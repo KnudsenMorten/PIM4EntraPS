@@ -1,6 +1,6 @@
 # Release notes for PIM4EntraPS
 
-## v2.4.183
+## v2.4.184
 
 Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monorepo:
 
