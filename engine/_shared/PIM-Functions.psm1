@@ -54,6 +54,11 @@ ForEach ($_mod in $_PIM_ModulesToLoad) {
 # Set-PimBaselineApplied. The local engine pulls + verifies the signed MSP baseline.
 . (Join-Path $PSScriptRoot 'PIM-Baseline.ps1')
 
+# Template versioning + fleet conformance -- Get-PimConformance (gap/exempt/drift/
+# catalog-ahead reconcile), approval gate, ring-driven rollout, exemptions with
+# mandatory expiry. Own file so the pim-manager dot-sources it standalone.
+. (Join-Path $PSScriptRoot 'PIM-Conformance.ps1')
+
 function Ensure-DateTime {
     <#
         .SYNOPSIS

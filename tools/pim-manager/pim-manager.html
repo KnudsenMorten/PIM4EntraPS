@@ -516,6 +516,7 @@
     <div class="tab" data-tab="revoke">Maintenance <span id="revokeCountBadge" class="badge" style="display:none;background:#cf222e">0</span></div>
     <div class="tab" data-tab="grid">Advanced View (grid) <span id="gridDirtyBadge" class="badge" style="display:none">0</span></div>
     <div class="tab" data-tab="governance">Governance <span id="govEmergencyBadge" class="badge" style="display:none;background:#cf222e">!</span></div>
+    <div class="tab" data-tab="conformance">Conformance</div>
     <div id="tabRight">
       mode: <b id="modeLabel"></b>
       &nbsp;|&nbsp; source: <b id="src"></b>
@@ -655,6 +656,13 @@
   <div id="governanceTab" class="tab-panel">
     <div style="flex:1 1 auto; overflow:auto; padding:14px 18px;" id="govBody">
       <div style="color:#57606a; font-size:12px;">Loading governance data&hellip;</div>
+    </div>
+  </div>
+
+  <!-- =========== Conformance tab (template versioning + reconcile) =========== -->
+  <div id="conformanceTab" class="tab-panel">
+    <div style="flex:1 1 auto; overflow:auto; padding:14px 18px;" id="confBody">
+      <div style="color:#57606a; font-size:12px;">Loading conformance&hellip;</div>
     </div>
   </div>
 
@@ -806,6 +814,108 @@
     if (name === 'validate') openValidateTab();
     if (name === 'revoke') openRevokeTab();
     if (name === 'governance') renderGovernance();
+    if (name === 'conformance') renderConformance();
+  }
+
+  // ===================================================================
+  // Conformance tab: native template versioning + reconcile for THIS
+  // instance (engine/_shared/PIM-Conformance.ps1 via /api/conformance/*).
+  // Rings drive rollout; only approved templates deploy; gaps vs exemptions
+  // (mandatory expiry); capability-watch surfaces catalog-ahead roles.
+  // ===================================================================
+  let confSel = null;
+  async function renderConformance() {
+    const body = document.getElementById('confBody');
+    if (!isServer) { body.innerHTML = '<div style="color:#57606a">Static mode -- conformance needs the server.</div>'; return; }
+    const esc = escapeHtml;
+    let data;
+    try { data = await api('GET', '/api/conformance/templates'); }
+    catch (e) { body.innerHTML = '<div style="color:#cf222e">Failed to load templates: ' + esc(e.message) + '</div>'; return; }
+    const tpls = data.templates || [];
+    if (!confSel && tpls.length) confSel = tpls[0].templateId;
+    const opts = tpls.map(t => `<option value="${esc(t.templateId)}" ${t.templateId===confSel?'selected':''}>${esc(t.templateId)} · v${t.templateVersion} [${esc(t.status)}]${t.behind>0?(' · −'+t.behind):''}</option>`).join('');
+    let h = `<div style="margin-bottom:12px;"><span style="font-size:11px;text-transform:uppercase;letter-spacing:.5px;color:#0969da;font-weight:600;">Fleet conformance · instance ${esc(data.instance)} · tenant ring ${data.tenantRing}</span></div>`;
+    if (!tpls.length) { body.innerHTML = h + '<div style="color:#57606a;font-size:12.5px;">No workload templates under <code>workloads/templates/*.template.json</code>.</div>'; return; }
+    h += `<div style="display:flex;gap:8px;align-items:center;margin-bottom:10px;flex-wrap:wrap;">
+      <select id="confTpl" style="padding:5px 8px;">${opts}</select>
+      <button id="confReload" class="btn-sec">&#8635; Reload</button>
+      <button id="confApprove" class="btn-sec" style="display:none;">&#10003; Approve draft</button>
+      <span id="confMeta" style="color:#57606a;font-size:12px;"></span></div>
+      <div style="color:#57606a;font-size:11.5px;margin-bottom:8px;">Rings drive rollout; only <b>approved</b> templates deploy; absent desired binding = <b>Gap</b> unless an active <b>exemption</b> (mandatory expiry).</div>
+      <div id="confMatrix"></div>
+      <div id="confCatalog" style="margin-top:12px;"></div>
+      <div style="margin-top:14px;padding:12px;background:#f6f8fa;border:1px solid #d0d7de;border-radius:8px;">
+        <b style="font-size:13px;">Deploy (ring roll-forward)</b>
+        <div style="color:#57606a;font-size:11.5px;margin:4px 0 8px;">Approved only. Each entry the tenant ring puts in scope; exemptions skipped; dry-run first; stamps local version.</div>
+        <button id="confDry" class="btn">Dry-run (WhatIf)</button>
+        <button id="confLive" class="btn" disabled>Deploy live</button>
+        <span id="confDeployHint" style="color:#57606a;font-size:12px;margin-left:8px;"></span>
+        <pre id="confLog" style="white-space:pre-wrap;font-size:11.5px;margin-top:8px;max-height:220px;overflow:auto;"></pre>
+      </div>`;
+    body.innerHTML = h;
+    document.getElementById('confTpl').onchange = (e) => { confSel = e.target.value; loadConfMatrix(); };
+    document.getElementById('confReload').onclick = renderConformance;
+    const meta = tpls.find(t => t.templateId === confSel) || {};
+    const appr = document.getElementById('confApprove');
+    appr.style.display = meta.approved ? 'none' : '';
+    appr.onclick = async () => {
+      if (!confirm('Approve this draft? Only approved templates deploy.')) return;
+      try { await api('POST', '/api/conformance/approve', { templateId: confSel }); renderConformance(); }
+      catch (e) { alert('Approve failed: ' + e.message); }
+    };
+    document.getElementById('confDry').onclick = () => confDeploy(true);
+    document.getElementById('confLive').onclick = () => { if (confirm('Deploy LIVE (ring-gated) for this instance?')) confDeploy(false); };
+    loadConfMatrix();
+  }
+
+  let confLastKeys = [];
+  async function loadConfMatrix() {
+    const esc = escapeHtml;
+    const m = document.getElementById('confMatrix');
+    document.getElementById('confLive').disabled = true;
+    document.getElementById('confDeployHint').textContent = '';
+    document.getElementById('confLog').textContent = '';
+    let c;
+    try { c = await api('GET', '/api/conformance?template=' + encodeURIComponent(confSel)); }
+    catch (e) { m.innerHTML = '<div style="color:#cf222e">' + esc(e.message) + '</div>'; return; }
+    document.getElementById('confMeta').innerHTML = `workload <code>${esc(c.workload)}</code> · v${c.templateVersion} · <b style="color:${c.status==='approved'?'#116329':'#cf222e'}">${esc(c.status)}</b>` + (c.behind>0?` · behind ${c.behind}`:'');
+    confLastKeys = c.keys || [];
+    const col = { UpToDate:'#dafbe1;color:#116329', Gap:'#ffebe9;color:#cf222e', Exempt:'#eaeef2;color:#57606a', DriftExtra:'#fff1e5;color:#bc4c00', OutOfRing:'#f6f8fa;color:#8c959f' };
+    const gl = { UpToDate:'✓', Gap:'✗', Exempt:'⊘', DriftExtra:'!', OutOfRing:'·' };
+    let html = '<table style="border-collapse:collapse;font-size:12.5px;"><tr><th style="text-align:left;padding:4px 8px;border-bottom:2px solid #d0d7de;">Entry key</th><th style="padding:4px 8px;border-bottom:2px solid #d0d7de;">Status</th><th style="padding:4px 8px;border-bottom:2px solid #d0d7de;">Exempt</th></tr>';
+    for (const k of confLastKeys) {
+      const s = (c.statuses||{})[k] || 'OutOfRing';
+      html += `<tr><td style="padding:4px 8px;border-bottom:1px solid #eef0f3;"><code>${esc(k)}</code></td>` +
+        `<td style="padding:4px 8px;border-bottom:1px solid #eef0f3;text-align:center;background:${col[s]||''};font-weight:600;" title="${s}">${gl[s]||'·'} ${s}</td>` +
+        `<td style="padding:4px 8px;border-bottom:1px solid #eef0f3;text-align:center;"><button class="btn-sec confExempt" data-k="${esc(k)}" style="font-size:11px;padding:2px 8px;">exempt…</button></td></tr>`;
+    }
+    html += '</table>';
+    m.innerHTML = html;
+    m.querySelectorAll('.confExempt').forEach(b => b.onclick = () => confExempt(b.dataset.k));
+    const ca = c.catalogAhead || [];
+    document.getElementById('confCatalog').innerHTML = ca.length
+      ? `<div style="padding:10px;background:#ddf4ff;border:1px solid #54aeff;border-radius:8px;font-size:12.5px;"><b>Catalog-ahead</b> — live roles no template covers yet (capability-watch): ${ca.map(esc).join(', ')}</div>`
+      : '';
+  }
+
+  async function confExempt(key) {
+    const reason = prompt('Exemption reason for "' + key + '" (required):'); if (!reason) return;
+    const exp = prompt('Expiry date (YYYY-MM-DD) — mandatory, exemptions always expire:'); if (!exp) return;
+    try {
+      await api('POST', '/api/conformance/exemptions', { templateId: confSel, itemKey: key, reason, expiresUtc: new Date(exp + 'T00:00:00Z').toISOString() });
+      loadConfMatrix();
+    } catch (e) { alert('Exemption rejected: ' + e.message); }
+  }
+
+  async function confDeploy(whatIf) {
+    const hint = document.getElementById('confDeployHint'), log = document.getElementById('confLog');
+    hint.textContent = whatIf ? 'Running dry-run…' : 'Deploying…';
+    try {
+      const r = await api('POST', '/api/conformance/deploy', { templateId: confSel, whatIf });
+      log.textContent = (r.log || '') + '\n' + ((r.rows||[]).map(x => `${x.Action} ${x.Workload}/${x.RoleName} -> ${x.GroupTag}`).join('\n'));
+      if (whatIf) { document.getElementById('confLive').disabled = false; hint.textContent = 'Dry-run done — "Deploy live" unlocked.'; }
+      else { hint.textContent = 'Deployed. Reloading…'; document.getElementById('confLive').disabled = true; loadConfMatrix(); }
+    } catch (e) { hint.textContent = 'Failed: ' + e.message; }
   }
 
   // ===================================================================

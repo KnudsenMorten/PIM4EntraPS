@@ -2239,6 +2239,157 @@ function Handle-Request {
             }
         }
 
+        # -------------------------------------------------------------------
+        # Native template versioning + conformance (engine/_shared/PIM-Conformance.ps1).
+        # Per-instance: ring = Get-PimTenantRing, applied version + exemptions are
+        # keyed by the active instance. /api/conformance/* (distinct from the
+        # CSV-template /api/templates above).
+        # -------------------------------------------------------------------
+        if ($path -like '/api/conformance*') {
+            $script:lastHeartbeat = Get-Date
+            $shared = Join-Path $PSScriptRoot '..\..\engine\_shared\PIM-Functions.psm1'
+            if (-not (Get-Command Get-PimConformance -ErrorAction SilentlyContinue) -and (Test-Path -LiteralPath $shared)) {
+                Import-Module $shared -Global -Force -WarningAction SilentlyContinue -ErrorAction SilentlyContinue
+            }
+            $confTplDir = Join-Path $solutionRoot 'workloads\templates'
+            $confExFile = Join-Path $script:configRoot 'exemptions.json'
+            $confState  = Join-Path $script:outputRoot 'state\template-state.json'
+            $confTenant = "$script:PimInstanceName"
+            $confRing   = Get-PimTenantRing
+            $readEx = {
+                $f = $confExFile
+                if (-not (Test-Path -LiteralPath $f)) { $f = Join-Path $solutionRoot 'config\exemptions.sample.json' }
+                if (-not (Test-Path -LiteralPath $f)) { return @() }
+                try { return @((Get-Content -LiteralPath $f -Raw -Encoding UTF8 | ConvertFrom-Json).exemptions) } catch { return @() }
+            }
+            $findTplFile = {
+                param($Id)
+                if (-not (Test-Path -LiteralPath $confTplDir)) { return $null }
+                foreach ($f in Get-ChildItem -LiteralPath $confTplDir -Filter '*.template.json' -File) {
+                    try { $t = ConvertTo-PimTemplate -Json ([System.IO.File]::ReadAllText($f.FullName, [System.Text.UTF8Encoding]::new($false)))
+                          if ("$($t.templateId)" -eq "$Id") { return $f.FullName } } catch {}
+                }
+                return $null
+            }
+
+            if ($path -eq '/api/conformance/templates' -and $method -eq 'GET') {
+                $all = @(Read-PimApprovedTemplates -SourceDir $confTplDir -IncludeDrafts -WarningAction SilentlyContinue)
+                $rows = New-Object System.Collections.ArrayList
+                foreach ($t in $all) {
+                    $st = Get-PimTemplateState -StateFile $confState -TenantId $confTenant -TemplateId "$($t.templateId)"
+                    $applied = if ($st) { [int]("$($st.LastAppliedVersion)" -as [int]) } else { 0 }
+                    [void]$rows.Add([ordered]@{
+                        templateId = "$($t.templateId)"; workload = "$($t.workload)"
+                        templateVersion = [int]("$($t.templateVersion)" -as [int]); status = "$($t.status)"
+                        approved = [bool](Test-PimTemplateApproved -Template $t); entries = @($t.entries).Count
+                        appliedVersion = $applied; behind = [math]::Max(0, [int]("$($t.templateVersion)" -as [int]) - $applied)
+                    })
+                }
+                Write-JsonResponse -Response $resp -Status 200 -Body ([ordered]@{ instance = $confTenant; tenantRing = $confRing; templates = $rows.ToArray() })
+                return 200
+            }
+
+            if ($path -eq '/api/conformance' -and $method -eq 'GET') {
+                $tid = ''
+                if ($req.Url.Query -match '(\?|&)template=([^&]+)') { $tid = [uri]::UnescapeDataString($Matches[2]) }
+                $tpl = @(Read-PimApprovedTemplates -SourceDir $confTplDir -IncludeDrafts -WarningAction SilentlyContinue | Where-Object { "$($_.templateId)" -eq "$tid" })
+                if (-not $tid -or -not $tpl) { Write-JsonResponse -Response $resp -Status 400 -Body @{ error = 'unknown template' }; return 400 }
+                $tpl = $tpl[0]
+                $now = [datetime]::UtcNow
+                $exKeys = Get-PimActiveExemptionKeys -Exemptions (& $readEx) -TenantId $confTenant -TemplateId "$tid" -NowUtc $now
+                $st = Get-PimTemplateState -StateFile $confState -TenantId $confTenant -TemplateId "$tid"
+                $applied = if ($st) { [int]("$($st.LastAppliedVersion)" -as [int]) } else { 0 }
+                # Best-effort live catalog (the connector's live roles); skip if no connection.
+                $liveCat = @()
+                try {
+                    $dir = Join-Path $solutionRoot 'workloads\connectors'
+                    $conn = @(Read-PimWorkloadConnectors -ConnectorsDir $dir) | Where-Object { "$($_.id)" -ieq "$($tpl.workload)" } | Select-Object -First 1
+                    if ($conn) { Initialize-PimManagerTenantConnection; $liveCat = @(Get-PimWorkloadRoles -Connector $conn | ForEach-Object { "$($_.name)" }) }
+                } catch { $liveCat = @() }
+                $c = Get-PimConformance -Template $tpl -TenantRing $confRing -TenantId $confTenant -ActiveExemptionKeys $exKeys -LiveCatalog $liveCat -AppliedVersion $applied
+                $statusMap = [ordered]@{}
+                foreach ($r in $c.Rows) { $statusMap["$($r.Key)"] = "$($r.Status)" }
+                Write-JsonResponse -Response $resp -Status 200 -Body ([ordered]@{
+                    templateId = "$($tpl.templateId)"; workload = "$($tpl.workload)"; templateVersion = $c.TemplateVersion
+                    status = "$($tpl.status)"; tenantRing = $confRing; appliedVersion = $applied; behind = $c.Behind
+                    keys = @(@($tpl.entries) | ForEach-Object { "$($_.key)" }); statuses = $statusMap
+                    counts = $c.Counts; catalogAhead = @($c.CatalogAhead | ForEach-Object { "$($_.Capability)" })
+                })
+                return 200
+            }
+
+            if ($path -eq '/api/conformance/exemptions' -and $method -eq 'POST') {
+                $b = Read-RequestJson -Request $req
+                $cand = [pscustomobject]@{
+                    tenantId = $confTenant; templateId = "$($b.templateId)"; itemKey = "$($b.itemKey)"
+                    reason = "$($b.reason)"; approvedBy = "$($b.approvedBy)"
+                    approvedUtc = ([datetime]::UtcNow).ToString('o'); expiresUtc = "$($b.expiresUtc)"
+                }
+                $v = Test-PimExemptionValid -Exemption $cand -NowUtc ([datetime]::UtcNow)
+                if ($v.state -eq 'Invalid') { Write-JsonResponse -Response $resp -Status 400 -Body @{ error = ("exemption rejected: {0}" -f $v.detail) }; return 400 }
+                $list = New-Object System.Collections.Generic.List[object]
+                foreach ($e in (& $readEx)) { $list.Add($e) }
+                $list.Add($cand)
+                $dir = Split-Path -Parent $confExFile
+                if ($dir -and -not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+                @{ exemptions = $list.ToArray() } | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $confExFile -Encoding UTF8
+                Write-JsonResponse -Response $resp -Status 200 -Body @{ ok = $true; state = $v.state; count = $list.Count }
+                return 200
+            }
+
+            if ($path -eq '/api/conformance/approve' -and $method -eq 'POST') {
+                if (-not (Test-PimManagerRoleAtLeast -Minimum 'SuperAdmin')) { Write-JsonResponse -Response $resp -Status 403 -Body @{ error = 'SuperAdmin role required' }; return 403 }
+                $b = Read-RequestJson -Request $req
+                $file = & $findTplFile "$($b.templateId)"
+                if (-not $file) { Write-JsonResponse -Response $resp -Status 400 -Body @{ error = 'unknown template' }; return 400 }
+                $tpl = ConvertTo-PimTemplate -Json ([System.IO.File]::ReadAllText($file, [System.Text.UTF8Encoding]::new($false)))
+                $by = if ("$($b.approvedBy)".Trim()) { "$($b.approvedBy)" } else { 'manager' }
+                $appr = Approve-PimTemplate -Template $tpl -ApprovedBy $by -NowUtc ([datetime]::UtcNow)
+                $appr | ConvertTo-Json -Depth 30 | Set-Content -LiteralPath $file -Encoding UTF8
+                Write-JsonResponse -Response $resp -Status 200 -Body @{ ok = $true; status = "$($appr.status)" }
+                return 200
+            }
+
+            if ($path -eq '/api/conformance/promote' -and $method -eq 'POST') {
+                if (-not (Test-PimManagerRoleAtLeast -Minimum 'SuperAdmin')) { Write-JsonResponse -Response $resp -Status 403 -Body @{ error = 'SuperAdmin role required' }; return 403 }
+                $b = Read-RequestJson -Request $req
+                $file = & $findTplFile "$($b.templateId)"
+                if (-not $file) { Write-JsonResponse -Response $resp -Status 400 -Body @{ error = 'unknown template' }; return 400 }
+                $tpl = ConvertTo-PimTemplate -Json ([System.IO.File]::ReadAllText($file, [System.Text.UTF8Encoding]::new($false)))
+                try {
+                    $pr = Set-PimEntryRing -Template $tpl -Key "$($b.key)" -Ring ([int]$b.ring)
+                    $pr | ConvertTo-Json -Depth 30 | Set-Content -LiteralPath $file -Encoding UTF8
+                    Write-JsonResponse -Response $resp -Status 200 -Body @{ ok = $true; key = "$($b.key)"; ring = [int]$b.ring }
+                    return 200
+                } catch { Write-JsonResponse -Response $resp -Status 400 -Body @{ error = "$($_.Exception.Message)" }; return 400 }
+            }
+
+            if ($path -eq '/api/conformance/deploy' -and $method -eq 'POST') {
+                if (-not (Test-PimManagerRoleAtLeast -Minimum 'SuperAdmin')) { Write-JsonResponse -Response $resp -Status 403 -Body @{ error = 'SuperAdmin role required' }; return 403 }
+                $b = Read-RequestJson -Request $req
+                $tpl = @(Read-PimApprovedTemplates -SourceDir $confTplDir -WarningAction SilentlyContinue | Where-Object { "$($_.templateId)" -eq "$($b.templateId)" })
+                if (-not $tpl) { Write-JsonResponse -Response $resp -Status 400 -Body @{ error = 'unknown or unapproved template (only approved deploy)' }; return 400 }
+                $tpl = $tpl[0]
+                $whatIf = [bool]$b.whatIf
+                try {
+                    $rows = @(Get-PimRollForwardRows -Template $tpl -TenantRing $confRing -TenantId $confTenant -Exemptions (& $readEx) -NowUtc ([datetime]::UtcNow))
+                    if (-not $rows.Count) { Write-JsonResponse -Response $resp -Status 200 -Body @{ ok = $true; whatIf = $whatIf; rows = @(); message = 'no in-scope, non-exempt entries for this ring' }; return 200 }
+                    $tmpCsv = Join-Path $env:TEMP ("pim-rollfwd-{0}.csv" -f ([guid]::NewGuid().ToString('N').Substring(0,8)))
+                    $rows | Select-Object Workload,RoleName,GroupTag,Scope,Resource,Action | Export-Csv -LiteralPath $tmpCsv -NoTypeInformation -Delimiter ';' -Encoding UTF8
+                    Initialize-PimManagerTenantConnection
+                    $connDir = Join-Path $solutionRoot 'workloads\connectors'
+                    $out = Apply-PimWorkloadAssignments -WorkloadsAssignmentFile $tmpCsv -ConnectorsDir $connDir -WhatIfMode:$whatIf *>&1 | Out-String
+                    Remove-Item -LiteralPath $tmpCsv -Force -ErrorAction SilentlyContinue
+                    if (-not $whatIf) { Set-PimTemplateState -StateFile $confState -TenantId $confTenant -TemplateId "$($tpl.templateId)" -Version ([int]("$($tpl.templateVersion)" -as [int])) -NowUtc ([datetime]::UtcNow) | Out-Null }
+                    Write-JsonResponse -Response $resp -Status 200 -Body ([ordered]@{ ok = $true; whatIf = $whatIf; rows = @($rows); log = "$out" })
+                    return 200
+                } catch { Write-JsonResponse -Response $resp -Status 502 -Body @{ error = "$($_.Exception.Message)" }; return 502 }
+            }
+
+            Write-JsonResponse -Response $resp -Status 404 -Body @{ error = ("not found: {0} {1}" -f $method, $path) }
+            return 404
+        }
+
         if ($path -eq '/api/instances' -and $method -eq 'GET') {
             $script:lastHeartbeat = Get-Date
             # foreach statement, not pipeline -- see the GET / handler note.
