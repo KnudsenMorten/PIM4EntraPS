@@ -1445,6 +1445,12 @@ Write-Output "******************************************************************
 # 'default' carries no overrides, so tenants that never link a template see
 # zero behavior change.
 
+    # Emergency override first: an EXPIRED override clears the scoped groups'
+    # applied hashes so the template pass right after restores normal policy
+    # in the same run; an ACTIVE one disables approval and the template pass
+    # skips its groups (Test-PimEmergencyOverrideActive).
+    Invoke-PimEmergencyOverride
+
     Invoke-PimPolicyTemplateApply
 
     Invoke-PimApprovalEscalation

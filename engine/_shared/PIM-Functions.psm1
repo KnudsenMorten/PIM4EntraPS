@@ -10156,6 +10156,115 @@ function Invoke-PimCsvSchemaUpgrade {
     }
 }
 
+# --- Emergency override (LIFECYCLE-GOVERNANCE phase 8) ------------------------
+# Break-glass for approval-protected high-priv groups (GA / PRA / tenant-root
+# owners): a SuperAdmin activates it from the Manager (passcode-verified);
+# config/emergency-override.custom.json scopes it; the engine disables the
+# approval rule on the scoped groups and AUTO-RESTORES the linked policy
+# template when the TTL expires. Runs BEFORE Invoke-PimPolicyTemplateApply so
+# an expiry clears the hashes and the same run re-applies normal policy.
+
+function Get-PimEmergencyOverrideFile {
+    Join-Path (Get-PimConfigDir) 'emergency-override.custom.json'
+}
+
+function Get-PimEmergencyOverride {
+    $f = Get-PimEmergencyOverrideFile
+    if (-not (Test-Path -LiteralPath $f)) { return $null }
+    try { Get-Content -LiteralPath $f -Raw -Encoding UTF8 | ConvertFrom-Json } catch { $null }
+}
+
+function Test-PimEmergencyOverrideActive {
+    param([string]$GroupTag)
+    $ov = Get-PimEmergencyOverride
+    if (-not $ov -or -not $ov.active) { return $false }
+    try { if ([datetime]::UtcNow -ge ([datetime]$ov.expiresAtUtc).ToUniversalTime()) { return $false } } catch { return $false }
+    $scope = @($ov.scopeGroupTags | Where-Object { $_ })
+    if ($scope.Count -eq 0) { return $true }
+    return [bool]($GroupTag -and ($scope -contains $GroupTag))
+}
+
+function Invoke-PimEmergencyOverride {
+    <#
+    .SYNOPSIS
+        Engine step: apply an ACTIVE emergency override (disable approval on
+        scoped groups, notify their owners) or restore after expiry (clear
+        the scoped groups' applied hashes so the template pass that follows
+        re-applies normal policy in the same run).
+    #>
+    [CmdletBinding()]
+    param()
+
+    $f  = Get-PimEmergencyOverrideFile
+    $ov = Get-PimEmergencyOverride
+    if (-not $ov) { return }
+
+    $expired = $true
+    try { $expired = ([datetime]::UtcNow -ge ([datetime]$ov.expiresAtUtc).ToUniversalTime()) } catch {}
+
+    $state = Get-PimPolicyState
+    $scoped = @($state.Keys | Where-Object {
+        $tag = "$($state[$_].groupTag)"
+        $inScope = (@($ov.scopeGroupTags | Where-Object { $_ }).Count -eq 0) -or (@($ov.scopeGroupTags) -contains $tag)
+        $inScope -and $state[$_].approval -and "$($state[$_].approval.mode)" -ne 'None'
+    })
+
+    if (-not $ov.active -or $expired) {
+        if ($ov.active -and $expired) {
+            Write-Host ""
+            Write-Host "Emergency override EXPIRED -- restoring normal approval policy on $($scoped.Count) group(s)..." -ForegroundColor Yellow
+            foreach ($g in $scoped) { $state[$g].appliedHash = '' }
+            Save-PimPolicyState -State $state
+            $archiveDir = Join-Path (Get-PimOutputDir) 'audit'
+            if (-not (Test-Path -LiteralPath $archiveDir)) { New-Item -ItemType Directory -Path $archiveDir -Force | Out-Null }
+            Move-Item -LiteralPath $f -Destination (Join-Path $archiveDir ("emergency-override-{0}.json" -f [datetime]::UtcNow.ToString('yyyyMMdd-HHmmss'))) -Force
+            Write-PimAuditEvent -Action 'emergency.restore' -Target (@($ov.scopeGroupTags) -join ',') -Before @{ activatedBy = "$($ov.activatedBy)"; expiresAtUtc = "$($ov.expiresAtUtc)" } -After @{ restoredGroups = $scoped }
+        }
+        return
+    }
+
+    # ACTIVE: disable approval once per scoped group
+    $applied = @($ov.appliedGroups | Where-Object { $_ })
+    $newlyApplied = @()
+    foreach ($g in $scoped) {
+        if ($applied -contains $g) { continue }
+        $policy = $null
+        try { $policy = Get-PimGroupMemberPolicy -GroupId "$($state[$g].groupId)" } catch { Write-Warning "  [Emergency] member policy for '$g' unreadable: $($_.Exception.Message)"; continue }
+        if (-not $policy) { continue }
+        Write-Host "  [Emergency] APPROVAL DISABLED on '$g' (override by $($ov.activatedBy), expires $($ov.expiresAtUtc) UTC)" -ForegroundColor Red
+        Set-PimGroupApprovalRule -Policy $policy -Required $false -Approvers @()
+        Write-PimAuditEvent -Action 'emergency.apply' -Target $g -After @{ activatedBy = "$($ov.activatedBy)"; expiresAtUtc = "$($ov.expiresAtUtc)"; reason = "$($ov.reason)" }
+        $newlyApplied += $g
+
+        # Owner heads-up -- best-effort
+        $owners = @($state[$g].approval.owners | Where-Object { $_ })
+        if ($owners.Count -gt 0 -and $global:PIM_NotificationChannels -and $global:PIM_NotificationChannels.Count -gt 0) {
+            foreach ($own in $owners) {
+                try {
+                    Send-PimTemplatedMail -Type 'emergency-override' -Recipient $own -Tokens @{
+                        GroupName   = $g
+                        ActivatedBy = "$($ov.activatedBy)"
+                        ExpiresAtUtc = "$($ov.expiresAtUtc)"
+                        Reason      = "$($ov.reason)"
+                    } | Out-Null
+                } catch { Write-Warning "  [Emergency] owner notification to '$own' failed: $($_.Exception.Message)" }
+            }
+        }
+    }
+    if ($newlyApplied.Count -gt 0) {
+        $ovOut = [ordered]@{
+            active         = $true
+            scopeGroupTags = @($ov.scopeGroupTags)
+            activatedBy    = "$($ov.activatedBy)"
+            activatedAtUtc = "$($ov.activatedAtUtc)"
+            expiresAtUtc   = "$($ov.expiresAtUtc)"
+            reason         = "$($ov.reason)"
+            appliedGroups  = @($applied + $newlyApplied)
+        }
+        ($ovOut | ConvertTo-Json -Depth 4) | Set-Content -LiteralPath $f -Encoding UTF8
+    }
+}
+
 # --- Unified audit (LIFECYCLE-GOVERNANCE phase 6) ------------------------------
 # Every engine transaction emits one JSON line to
 # output/audit/pim-audit-<yyyyMM>.jsonl (append-only, monthly files). The
