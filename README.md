@@ -414,7 +414,7 @@ Connect-MgGraph fires interactively if not already connected.
 Every run logs which source is used:
 
 ```
-catalog source: live Entra auto-discover  (tenant 'Nunagreen' / c2738ae6-...  clientId b2065373-...)
+catalog source: live Entra auto-discover  (tenant '<CustomerTenant>' / <tenant-guid>...  clientId b2065373-...)
 ```
 
 → Impossible to silently write a different tenant's data. (v2.4.111
