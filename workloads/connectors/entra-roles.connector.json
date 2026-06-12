@@ -1,0 +1,42 @@
+{
+  "id": "entra-roles",
+  "name": "Microsoft Entra ID (directory roles)",
+  "auth": "graph",
+  "permissionsNeeded": ["RoleManagement.Read.Directory (list)", "RoleManagement.ReadWrite.Directory (apply)"],
+  "prerequisites": {
+    "roleAssignableGroup": "The PIM group must be role-assignable (isAssignableToRole=true at creation; immutable afterward) to receive an Entra directory role. CreateUpdate-PIM-Group sets this for PIM- groups that map to directory roles.",
+    "noActivationNeeded": "Entra directory RBAC is always on; built-in roles always present. Only RoleManagement.ReadWrite.Directory is required to assign."
+  },
+  "api": {
+    "baseUrl": "https://graph.microsoft.com/v1.0",
+    "listRoles": {
+      "method": "GET",
+      "path": "/roleManagement/directory/roleDefinitions",
+      "itemsPath": "value",
+      "roleId": "id",
+      "roleName": "displayName",
+      "roleDescription": "description"
+    },
+    "listAssignments": {
+      "method": "GET",
+      "path": "/roleManagement/directory/roleAssignments?$filter=roleDefinitionId eq '{roleId}'",
+      "itemsPath": "value",
+      "assignmentId": "id",
+      "roleId": "roleDefinitionId",
+      "principalIds": "principalId"
+    },
+    "assign": {
+      "method": "POST",
+      "path": "/roleManagement/directory/roleAssignments",
+      "body": {
+        "roleDefinitionId": "{roleId}",
+        "principalId": "{groupId}",
+        "directoryScopeId": "{scope|/}"
+      }
+    },
+    "remove": {
+      "method": "DELETE",
+      "path": "/roleManagement/directory/roleAssignments/{assignmentId}"
+    }
+  }
+}

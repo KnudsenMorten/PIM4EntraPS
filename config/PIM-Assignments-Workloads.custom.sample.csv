@@ -1,5 +1,20 @@
 Workload;RoleName;GroupTag;Scope;Action;Notes
-defender-xdr;Security operator;Defender-XDR-SecurityOperations-Operator-L3;/;Assign;Unified RBAC - manage incidents and run scans
-defender-xdr;Security reader;Defender-XDR-SecurityOperations-Reader-L4;/;Assign;Unified RBAC - read-only
-intune;Help Desk Operator;Intune-Helpdesk-L3;;Assign;Intune built-in role
-intune;Read Only Operator;Intune-Reader-L4;;Assign;Intune built-in role
+# Desired-state: bind a PIM group to a workload RBAC role. The engine
+# (Apply-PimWorkloadAssignments) resolves GroupTag -> Entra group, looks up the
+# role by name via the connector, and creates the assignment idempotently.
+# Ship the SAME rows to every customer tenant to make them identical.
+#
+# Defender XDR: Unified RBAC must be ACTIVATED first (portal prerequisite, no
+#   Graph endpoint) + RoleManagement.ReadWrite.Defender on the engine SPN.
+#   Production convention: one custom Defender role per PIM group, same name.
+defender-xdr;PIM-Defender-XDR-SecurityOperations-Operator-L3-T1-MP-ID;PIM-Defender-XDR-SecurityOperations-Operator-L3-T1-MP-ID;/;Assign;manage incidents + run scans
+defender-xdr;PIM-Defender-XDR-SecurityOperations-Reader-L4-T1-MP-ID;PIM-Defender-XDR-SecurityOperations-Reader-L4-T1-MP-ID;/;Assign;read-only SecOps
+defender-xdr;PIM-Defender-XDR-SecurityPosture-Operator-L3-T1-MP-ID;PIM-Defender-XDR-SecurityPosture-Operator-L3-T1-MP-ID;/;Assign;exposure mgmt
+defender-xdr;PIM-Defender-XDR-AuthorizationAndSettings-Admin-L2-T1-MP-ID;PIM-Defender-XDR-AuthorizationAndSettings-Admin-L2-T1-MP-ID;/;Assign;auth + settings admin
+# Intune: no activation needed (RBAC always on). RoleName = a BUILT-IN Intune role.
+intune;Help Desk Operator;PIM-Intune-HelpDeskOperator-L4-T1-WDP-ID;;Assign;built-in
+intune;Policy and Profile manager;PIM-Intune-PolicyAndProfileManager-L3-T1-WDP-ID;;Assign;built-in
+intune;Read Only Operator;PIM-Intune-ReadOnlyOperator-L5-T1-WDP-ID;;Assign;built-in
+intune;Application Manager;PIM-Intune-ApplicationManager-L3-T1-WDP-ID;;Assign;built-in
+intune;Endpoint Security Manager;PIM-Intune-EndpointSecurityManager-L3-T1-WDP-ID;;Assign;built-in
+intune;Endpoint Privilege Manager;PIM-Intune-EndpointPrivilegeManager-L3-T1-WDP-ID;;Assign;built-in
