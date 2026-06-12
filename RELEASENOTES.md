@@ -1,9 +1,10 @@
 # Release notes for PIM4EntraPS
 
-## v2.4.145
+## v2.4.146
 
 Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monorepo:
 
+- release: PIM4EntraPS v2.4.146 -- Deploy-PimActivatorBackend pre-flights ACTIVE Entra roles (app-admin family for app-reg/SP steps; PRA/GA when -GrantConsent) with PIM activate-then-reconnect guidance, fail-open if membership read is blocked; all SP reads/creates moved to raw Invoke-MgGraphRequest (GET servicePrincipals(appId=...) + POST) because New-MgServicePrincipal returned silent $null on a permission denial, breaking the v2.4.145 re-fetch with an empty-ServicePrincipalId bind. 12-case harness green on PS 5.1 + pwsh 7 (38f2fd0b)
 - release: PIM4EntraPS v2.4.145 -- Deploy-PimActivatorBackend auto-instantiates missing first-party SPs (Microsoft Graph 00000003 / Azure Service Management 797f4846) via New-MgServicePrincipal instead of throwing "should never happen"; fresh tenants only provision well-known Microsoft SPs on first use. Resolve-FirstPartySp helper re-fetches after create so Oauth2PermissionScopes is populated; create-failure throws SP name + appId + tenant + Graph error. Harness green on PS 5.1 + pwsh 7 (1c61fee8)
 - release: PIM4EntraPS v2.4.144 -- Manager PIM-WL-* validator rules (workload connector existence with did-you-mean, required RoleName, Assign/Remove action gate) + GroupTag FK coverage for PIM-Assignments-Workloads via PIM-FK-001; thorough Manager README rewrite (15-CSV model, six lifecycle tabs incl. Workload delegation panel, Rings, validator rule catalog, MSP instances, refreshed test plan) (f860d4f6)
 - release: PIM4EntraPS v2.4.143 -- wire Apply-PimWorkloadAssignments into PIM-Baseline-Management-CSV as a final opt-in Workload RBAC step: runs only when config[/<variant>]/PIM-Assignments-Workloads.custom.csv exists (NOT via Get-PimConfigCsv -- its sample auto-bootstrap would arm the feature with shipped example rows), honors -WhatIfMode, resolves connectors from workloads/connectors/, benefits from the engine Groups_All_ID inventory for GroupTag cache-hit resolution; repository.custom.sample.ps1 documents the opt-in (c9e22c20)
@@ -33,7 +34,6 @@ Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monor
 - release: PIM4EntraPS v2.4.119 -- engine imports AutomateITPS.AD + calls Resolve-PlatformGMSACredentials after Initialize-PlatformLegacyIdentity so KV stub passwords on gMSA Legacy.* slots get swapped for the real managed password read from the DC (gMSA msDS-ManagedPassword); the AD branch then auths normally via -Credential (3e002976)
 - release: PIM4EntraPS v2.4.118 -- AD branch: revert v2.4.117 gMSA -Credential omission; restore v1 always-pass-Credential contract (customer test on SYSTEM-running host proved dropping -Credential cascades through to computer-account auth which lacks write rights). Hard-fail Get-ADUser + conditional Write-PimAdminPassword improvements kept. (c766ed13)
 - release: PIM4EntraPS v2.4.117 -- CRITICAL fix: AD branch is now gMSA-aware (drops -Credential when SAM ends with $) + hard-fails Get-ADUser instead of swallowing auth errors that cascaded into Create + Write-PimAdminPassword writing phantom passwords for accounts that never existed (d76bccea)
-- release: PIM4EntraPS v2.4.116 -- PIM-Baseline-Management-CSV engine calls Initialize-PlatformLegacyIdentity right after Initialize-PlatformAutomationFramework so KV Legacy-UserName/Password-Internal-Prod actually land in Context.Identity.Legacy.Internal.Prod (v2.4.115 wired the reader but nothing was populating the slot) (8965324b)
 
 ---
 
@@ -42,6 +42,16 @@ Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monor
 > **Curated changelog.** The publish workflow auto-prepends recent monorepo commits as a raw activity log; this file is the human-friendly narrative on top.
 
 ---
+
+## v2.4.146 -- Activator backend deploy: active-role pre-flight + raw Graph requests for SP work
+
+Follow-up to v2.4.145, prompted by a second field failure on the same tenant: `New-MgServicePrincipal` returned **nothing at all** -- no error, no Id -- so the v2.4.145 re-fetch blew up with *"Cannot bind argument to parameter 'ServicePrincipalId' because it is an empty string"*. The SDK cmdlet was masking what was almost certainly a permission denial (the operator's PIM activations weren't reflected in the session).
+
+- **Pre-flight role check** (`Assert-ActiveEntraRoles`) right after connect: reads the signed-in admin's ACTIVE directory roles via `/me/memberOf/microsoft.graph.directoryRole` and stops up front with actionable guidance instead of a confusing mid-run failure. Requirements enforced: an active **Application Administrator / Cloud Application Administrator / Global Administrator** for the app-reg + SP steps, plus **Privileged Role Administrator / Global Administrator** when `-GrantConsent` is on (tenant-wide consent incl. the protected `RoleManagement.ReadWrite.Directory` scope). The error spells out the PIM gotcha: activate first, `Disconnect-MgGraph`, re-run -- a session established before the activation doesn't carry the role. Fail-open: if the membership read itself is blocked, warn and continue rather than break the deploy.
+- **Raw `Invoke-MgGraphRequest` for all service-principal reads/creates** (first-party SPs and the app's own SP): `GET /servicePrincipals(appId='...')` + `POST /servicePrincipals`, so a real 403 surfaces with the actual Graph error text instead of the SDK's silent `$null`. Non-404 GET errors rethrow; missing-after-create gets a short replication-tolerant retry loop before failing with re-run guidance.
+- Header docs now state the exact role requirements incl. the PIM-activation ordering.
+
+Verified: parse-clean + 12-case harness (role matrix incl. the CloudAppAdmin+PRA+SecAdmin field set, consent-on/off gating, fail-open path, SP passthrough/instantiate/403-surfacing/replication-timeout/non-404-rethrow) green in real PS 5.1 **and** pwsh 7 processes.
 
 ## v2.4.145 -- Activator backend deploy: auto-instantiate missing first-party service principals
 

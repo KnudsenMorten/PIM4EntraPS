@@ -44,7 +44,16 @@
     Caller (you) must have:
       - Graph scopes: Application.ReadWrite.All, AppRoleAssignment.ReadWrite.All,
                       DelegatedPermissionGrant.ReadWrite.All
-      - Entra role: Application Administrator (or Cloud App Admin / Global Admin)
+      - Entra roles, ACTIVE in the session (PIM-eligible does NOT count until
+        activated -- activate in PIM FIRST, then Connect-MgGraph; a session
+        established before the activation will not carry the role):
+          * Application Administrator OR Cloud Application Administrator OR
+            Global Administrator -- app registration + service principals
+          * Privileged Role Administrator OR Global Administrator -- only when
+            -GrantConsent is used (tenant-wide admin consent incl. the
+            protected RoleManagement.ReadWrite.Directory scope)
+        The script pre-flights these and stops with actionable guidance when
+        a required role is missing or not yet activated.
 
 .PARAMETER ExtensionId
     The Edge extension id assigned when you load the unpacked extension at
@@ -140,29 +149,95 @@ Write-Host "Signed-in: $($ctx.Account)" -ForegroundColor Cyan
 Write-Host ""
 
 # ---------------------------------------------------------------------------
+# Pre-flight: verify the signed-in admin's ACTIVE directory roles
+# ---------------------------------------------------------------------------
+
+# PIM-eligible roles do NOT count until activated, and a Graph session
+# established BEFORE the activation may not reflect it. Check up front so the
+# operator gets one clear message instead of a confusing mid-run 403 (or the
+# SDK's silent-empty-result variant of one).
+function Assert-ActiveEntraRoles {
+    param([bool]$NeedsConsentRole)
+
+    $tpl = @{   # well-known directory role template ids
+        GlobalAdmin   = '62e90394-69f5-4237-9190-012177145e10'
+        AppAdmin      = '9b895d92-2cd3-44c7-9d02-a6ac2d5ea5c3'
+        CloudAppAdmin = '158c047a-c907-4556-b7ef-446551a6b5f7'
+        PrivRoleAdmin = 'e8611ab8-c189-46e8-94e1-60213ab1f814'
+    }
+    try {
+        $resp = Invoke-MgGraphRequest -Method GET -Uri 'v1.0/me/memberOf/microsoft.graph.directoryRole?$select=displayName,roleTemplateId'
+    } catch {
+        # Best-effort: reading own role memberships can itself be blocked by
+        # scope/tenant policy -- don't fail the deploy over the pre-flight.
+        Write-Host "Pre-flight: could not read your active directory roles -- continuing without the check. ($($_.Exception.Message))" -ForegroundColor DarkYellow
+        return
+    }
+    $active    = @($resp.value)
+    $names     = if ($active) { @($active | ForEach-Object { $_.displayName }) -join ', ' } else { '(none)' }
+    $activeIds = @($active | ForEach-Object { $_.roleTemplateId })
+    Write-Host "Active directory roles: $names" -ForegroundColor Cyan
+    Write-Host ""
+
+    $problems = @()
+    if (-not ($activeIds | Where-Object { $_ -in @($tpl.GlobalAdmin, $tpl.AppAdmin, $tpl.CloudAppAdmin) })) {
+        $problems += "App registration + service-principal steps need an ACTIVE 'Application Administrator', 'Cloud Application Administrator' or 'Global Administrator' role."
+    }
+    if ($NeedsConsentRole -and -not ($activeIds | Where-Object { $_ -in @($tpl.GlobalAdmin, $tpl.PrivRoleAdmin) })) {
+        $problems += "-GrantConsent (tenant-wide admin consent incl. the protected RoleManagement.ReadWrite.Directory scope) needs an ACTIVE 'Privileged Role Administrator' or 'Global Administrator' role. Alternative: re-run with -GrantConsent:`$false and have an authorized admin consent later via the Enterprise applications blade."
+    }
+    if ($problems) {
+        throw ("Missing ACTIVE Entra roles:`n  - " + ($problems -join "`n  - ") + "`nIf these roles are PIM-eligible, activate them in PIM first, then run Disconnect-MgGraph and re-run this script so the new Graph session is established AFTER the activation.")
+    }
+}
+
+Assert-ActiveEntraRoles -NeedsConsentRole:([bool]$GrantConsent)
+
+# ---------------------------------------------------------------------------
 # Resolve Microsoft Graph delegated permission ids
 # ---------------------------------------------------------------------------
 
 # First-party Microsoft service principals (Graph, ARM) are NOT guaranteed to
 # exist in every tenant -- fresh / lightly-used tenants only get them
-# instantiated on first use. Application.ReadWrite.All (already held by the
-# caller) is enough to instantiate the well-known appId on the spot, so
-# resolve-or-create instead of assuming presence.
+# instantiated on first use, so resolve-or-create instead of assuming
+# presence. Raw Invoke-MgGraphRequest throughout: the SDK's
+# New-MgServicePrincipal has been observed returning $null (no error, no Id)
+# on permission failures, masking the real API response entirely.
 function Resolve-FirstPartySp {
     param([string]$AppId, [string]$Name)
-    $sp = Get-MgServicePrincipal -Filter "appId eq '$AppId'"
-    if (-not $sp) {
-        Write-Host "  $Name service principal not present in tenant -- instantiating it (appId $AppId)..." -ForegroundColor Yellow
+
+    function Get-RawSpByAppId([string]$Id) {
         try {
-            $created = New-MgServicePrincipal -AppId $AppId
-            # Re-fetch so downstream consumers see fully-populated properties
-            # (Oauth2PermissionScopes in particular).
-            $sp = Get-MgServicePrincipal -ServicePrincipalId $created.Id
+            Invoke-MgGraphRequest -Method GET -Uri "v1.0/servicePrincipals(appId='$Id')"
         } catch {
-            throw "$Name service principal (appId $AppId) is missing from tenant $TenantId and could not be instantiated: $($_.Exception.Message)"
+            if ("$_" -match 'Request_ResourceNotFound|ResourceNotFound|does not exist|404') { return $null }
+            throw
         }
     }
-    $sp
+
+    $raw = Get-RawSpByAppId $AppId
+    if (-not $raw) {
+        Write-Host "  $Name service principal not present in tenant -- instantiating it (appId $AppId)..." -ForegroundColor Yellow
+        try {
+            Invoke-MgGraphRequest -Method POST -Uri 'v1.0/servicePrincipals' -Body @{ appId = $AppId } | Out-Null
+        } catch {
+            throw "$Name service principal (appId $AppId) could not be instantiated in tenant ${TenantId}: $($_.Exception.Message)"
+        }
+        # New SPs can take a few seconds to become queryable.
+        for ($i = 0; $i -lt 6 -and -not $raw; $i++) {
+            $raw = Get-RawSpByAppId $AppId
+            if (-not $raw) { Start-Sleep -Seconds 2 }
+        }
+        if (-not $raw) {
+            throw "$Name service principal (appId $AppId) was created but is not yet queryable in tenant $TenantId -- Entra replication delay. Re-run this script in a minute."
+        }
+    }
+    # Project the raw hashtable onto the object shape downstream code consumes.
+    [pscustomobject]@{
+        Id                     = $raw.id
+        DisplayName            = $raw.displayName
+        Oauth2PermissionScopes = @($raw.oauth2PermissionScopes | ForEach-Object { [pscustomobject]@{ Id = $_.id; Value = $_.value } })
+    }
 }
 
 $graphAppId = '00000003-0000-0000-c000-000000000000'
@@ -274,10 +349,13 @@ if ($existing) {
         -RequiredResourceAccess $requiredResourceAccess
 }
 
-# Ensure the service principal exists in the tenant (creates the enterprise app).
-$sp = Get-MgServicePrincipal -Filter "appId eq '$($app.AppId)'" -ErrorAction SilentlyContinue
+# Ensure the service principal exists in the tenant (creates the enterprise
+# app). Raw requests for the same silent-null reason as Resolve-FirstPartySp.
+$sp = $null
+try { $sp = Invoke-MgGraphRequest -Method GET -Uri "v1.0/servicePrincipals(appId='$($app.AppId)')" }
+catch { if ("$_" -notmatch 'Request_ResourceNotFound|ResourceNotFound|does not exist|404') { throw } }
 if (-not $sp) {
-    $sp = New-MgServicePrincipal -AppId $app.AppId
+    $sp = Invoke-MgGraphRequest -Method POST -Uri 'v1.0/servicePrincipals' -Body @{ appId = $app.AppId }
     Write-Host "Created service principal (objectId $($sp.Id))." -ForegroundColor Green
 } else {
     Write-Host "Service principal already present (objectId $($sp.Id))." -ForegroundColor DarkGray
