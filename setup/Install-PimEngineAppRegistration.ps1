@@ -40,7 +40,7 @@
     Optional. If omitted, uses whatever Connect-MgGraph defaulted to.
 
 .PARAMETER ExistingThumbprint
-    Use a pre-issued cert (must already be in the selected store -- Cert:\CurrentUser\My, or Cert:\LocalMachine\My with -MachineStore -- with the
+    Use a pre-issued cert (must already be in the selected store -- Cert:\LocalMachine\My by default, or Cert:\CurrentUser\My with -MachineStore:$false -- with the
     private key present). When omitted, the script generates a fresh
     self-signed cert.
 
@@ -128,12 +128,13 @@ param(
 
     [switch]$IncludeExchange,
 
-    # Create/reuse the certificate in Cert:\LocalMachine\My instead of
-    # Cert:\CurrentUser\My. Use this on the engine host: the machine store is
-    # visible in certlm.msc, readable by service/scheduled-task identities
-    # (grant the private key to the run-as account), and matches the
-    # platform security design. Requires an elevated session.
-    [switch]$MachineStore
+    # Default ON: the certificate is created/reused in Cert:\LocalMachine\My
+    # -- visible in certlm.msc, readable by service/scheduled-task identities
+    # (grant the private key to the run-as account), and matching the
+    # platform security design. Requires an elevated session. Pass
+    # -MachineStore:$false only for ad-hoc per-user testing
+    # (Cert:\CurrentUser\My).
+    [switch]$MachineStore = $true
 )
 
 $ErrorActionPreference = 'Stop'
