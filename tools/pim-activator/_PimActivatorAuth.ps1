@@ -227,8 +227,27 @@ function Connect-PimActivatorGraph {
     param(
         [Parameter(Mandatory)][string[]]$RequiredScopes,
         [string]$TenantId,
-        [bool]$UseEdge = $true
+        [bool]$UseEdge = $true,
+        # App-only (certificate) sign-in for headless/automation runs. When both
+        # are supplied the function connects app-only and skips the interactive
+        # machinery (Edge, delegated-scope verification, /me probe). The app
+        # must hold the equivalent APPLICATION permissions (Application.ReadWrite.All
+        # for app-reg CRUD; DelegatedPermissionGrant.ReadWrite.All for -GrantConsent).
+        [string]$AppId,
+        [string]$CertificateThumbprint
     )
+
+    if ($AppId -and $CertificateThumbprint) {
+        if (-not $TenantId) { throw "App-only sign-in requires -TenantId." }
+        Disconnect-MgGraph -ErrorAction SilentlyContinue | Out-Null
+        Connect-MgGraph -ClientId $AppId -TenantId $TenantId -CertificateThumbprint $CertificateThumbprint -NoWelcome -ErrorAction Stop | Out-Null
+        $ctx = Get-MgContext -ErrorAction Stop
+        # App-only probe (no /me in app context): read one application object.
+        try { Invoke-MgGraphRequest -Method GET -Uri 'v1.0/applications?$top=1&$select=id' | Out-Null }
+        catch { throw "App-only Graph connect succeeded but a test read failed: $($_.Exception.Message)" }
+        Write-Host "Connected app-only as $($ctx.AppName) ($($ctx.ClientId)) in tenant $($ctx.TenantId)." -ForegroundColor Green
+        return $ctx
+    }
 
     $connectArgs = @{ Scopes = $RequiredScopes; NoWelcome = $true; ErrorAction = 'Stop' }
     if ($TenantId) { $connectArgs['TenantId'] = $TenantId }

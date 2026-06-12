@@ -117,10 +117,18 @@ param(
     # Line Tools' app as Connect-MgGraph (auth-code + PKCE on a loopback
     # listener), so no extra app registration or consent. Pass
     # -UseEdge:$false to fall back to MSAL's default-browser flow.
-    [switch]$UseEdge = $true
+    [switch]$UseEdge = $true,
+
+    # App-only (certificate) sign-in for headless deployment. Supply both with
+    # -TenantId; the app must hold Application.ReadWrite.All (app-reg CRUD) and,
+    # for -GrantConsent, DelegatedPermissionGrant.ReadWrite.All. When used, the
+    # interactive Edge flow + delegated role pre-flight are skipped.
+    [string]$AppId,
+    [string]$CertificateThumbprint
 )
 
 $ErrorActionPreference = 'Stop'
+$script:PimActivatorAppOnly = [bool]($AppId -and $CertificateThumbprint)
 
 # Shared auth machinery: version banner, Graph SDK version-conflict check,
 # Edge-forced PKCE sign-in, session probe/heal. One implementation for all
@@ -139,7 +147,7 @@ $_requiredScopes = @(
     'DelegatedPermissionGrant.ReadWrite.All'
 )
 
-$ctx = Connect-PimActivatorGraph -RequiredScopes $_requiredScopes -TenantId $TenantId -UseEdge:([bool]$UseEdge)
+$ctx = Connect-PimActivatorGraph -RequiredScopes $_requiredScopes -TenantId $TenantId -UseEdge:([bool]$UseEdge) -AppId $AppId -CertificateThumbprint $CertificateThumbprint
 $TenantId = $ctx.TenantId
 
 Write-Host "Tenant   : $TenantId"  -ForegroundColor Cyan
@@ -229,8 +237,10 @@ if ($null -ne (Get-PaTokenRoleIds)) {
             ) `
             -RoleDescription "an ACTIVE 'Privileged Role Administrator' or 'Global Administrator' role (needed for -GrantConsent; alternatively re-run with -GrantConsent:`$false)"
     }
-} else {
+} elseif (-not $script:PimActivatorAppOnly) {
     Assert-ActiveEntraRoles -NeedsConsentRole:([bool]$GrantConsent)
+} else {
+    Write-Host "App-only mode: skipping delegated role pre-flight (app permissions govern; calls will error clearly if insufficient)." -ForegroundColor DarkYellow
 }
 
 # ---------------------------------------------------------------------------
@@ -395,7 +405,19 @@ $sp = $null
 try { $sp = Invoke-MgGraphRequest -Method GET -Uri "v1.0/servicePrincipals(appId='$($app.AppId)')" }
 catch { if ("$_" -notmatch 'Request_ResourceNotFound|ResourceNotFound|does not exist|404') { throw } }
 if (-not $sp) {
-    $sp = Invoke-MgGraphRequest -Method POST -Uri 'v1.0/servicePrincipals' -Body @{ appId = $app.AppId }
+    # A freshly-created application object can take a few seconds to replicate;
+    # POSTing the SP immediately then 400s with NoBackingApplicationObject.
+    # Retry with backoff instead of failing the deploy.
+    $sp = $null
+    for ($spTry = 1; $spTry -le 6; $spTry++) {
+        try { $sp = Invoke-MgGraphRequest -Method POST -Uri 'v1.0/servicePrincipals' -Body @{ appId = $app.AppId }; break }
+        catch {
+            if ("$_" -match 'NoBackingApplicationObject|does not reference a valid application' -and $spTry -lt 6) {
+                Write-Host "  app object not replicated yet -- retry $spTry/6 in $($spTry * 5)s" -ForegroundColor DarkGray
+                Start-Sleep -Seconds ($spTry * 5)
+            } else { throw }
+        }
+    }
     Write-Host "Created service principal (objectId $($sp.Id))." -ForegroundColor Green
 } else {
     Write-Host "Service principal already present (objectId $($sp.Id))." -ForegroundColor DarkGray
