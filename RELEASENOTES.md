@@ -1,9 +1,10 @@
 # Release notes for PIM4EntraPS
 
-## v2.4.172
+## v2.4.173
 
 Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monorepo:
 
+- release: PIM4EntraPS v2.4.173 -- Core/Pro licensing, 100% offline: signed .pimlicense (RSA-SHA256 over payload bytes, embedded public cert, PS5.1-safe raw-bytes X509 load, no call-home/activation ever) + Test-PimProFeature gate (tenant-bound; fan-out skips unlicensed tenants; expiry -> grace -> disable; Core never affected) + Manager Governance License panel (/api/license) + internal-only issuer (INTERNAL/pim-licensing, non-exportable machine-store key) + first gated feature = MSP fan-out. SQL data store deliberately Core (free). 12-assertion PS5.1 battery green incl. tamper + tenant-binding tests. (25b3bb0e)
 - release: PIM4EntraPS v2.4.172 -- design: LIFECYCLE-GOVERNANCE Sec 17 email routing & people directory (Department link + PIM-Definitions-Contacts + central mail-routing.custom.json override w/ PerAdminWins precedence; Manager "Contacts & email flow" area incl. person-left sweep staging replace-with-successor) + Sec 18 self-service delegation layers (delegation units = templates x group tags x AzScope prefix x quotas x inactivity-disable; intake-based, engine stays sole writer; preferred web tier = Azure App Service w/ Private Endpoint, zero public exposure; engine signInActivity inactivity sweep) (e6559da1)
 - release: PIM4EntraPS v2.4.171 -- Purpose column (Day2Day|HighPriv) makes the two admin naming conventions explicit (Admin-INI-PLAT day2day vs dedicated Admin-INI-L0-T0-PLAT high-priv); TierLevel removed from canonical schema (legacy fallback kept). Engine OU routing keys off Purpose; AdminAccountPatternHighPriv + Purpose-aware PIM-NAME-002; Manager wizard Purpose field replaces Tier/Level/Naming-style, map dots color by Purpose, initials auto-derive bug fixed (pinned at 1 char after first name); admin templates prefill Purpose; pim.CentralAdmins migrated (both DBs); live tenant accounts renamed + LIVE fan-out idempotent re-run green. (1f706eed)
 - release: PIM4EntraPS v2.4.170 -- first LIVE multi-tenant MSP fan-out (Invoke-PimMspFanout.ps1: registry-driven, ring-filtered via pim.vw_AdminTenantTargets, child-process SQL isolation for the SqlServer/Graph Azure.Core conflict, WhatIf default) + engine fixes (modern ForwardMailsToContact/MailForwardAddress columns finally read w/ legacy fallback; EXO connect skipped when no row requests forwarding; replication-404 retry on post-create PATCH) + pim.CentralAdmins account-material columns w/ idempotent upgrade. Verified live: 5 accounts across 2 real test tenants, ring semantics correct, second pass idempotent. (9356c120)
@@ -33,7 +34,6 @@ Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monor
 - release: PIM4EntraPS v2.4.146 -- Deploy-PimActivatorBackend pre-flights ACTIVE Entra roles (app-admin family for app-reg/SP steps; PRA/GA when -GrantConsent) with PIM activate-then-reconnect guidance, fail-open if membership read is blocked; all SP reads/creates moved to raw Invoke-MgGraphRequest (GET servicePrincipals(appId=...) + POST) because New-MgServicePrincipal returned silent $null on a permission denial, breaking the v2.4.145 re-fetch with an empty-ServicePrincipalId bind. 12-case harness green on PS 5.1 + pwsh 7 (38f2fd0b)
 - release: PIM4EntraPS v2.4.145 -- Deploy-PimActivatorBackend auto-instantiates missing first-party SPs (Microsoft Graph 00000003 / Azure Service Management 797f4846) via New-MgServicePrincipal instead of throwing "should never happen"; fresh tenants only provision well-known Microsoft SPs on first use. Resolve-FirstPartySp helper re-fetches after create so Oauth2PermissionScopes is populated; create-failure throws SP name + appId + tenant + Graph error. Harness green on PS 5.1 + pwsh 7 (1c61fee8)
 - release: PIM4EntraPS v2.4.144 -- Manager PIM-WL-* validator rules (workload connector existence with did-you-mean, required RoleName, Assign/Remove action gate) + GroupTag FK coverage for PIM-Assignments-Workloads via PIM-FK-001; thorough Manager README rewrite (15-CSV model, six lifecycle tabs incl. Workload delegation panel, Rings, validator rule catalog, MSP instances, refreshed test plan) (f860d4f6)
-- release: PIM4EntraPS v2.4.143 -- wire Apply-PimWorkloadAssignments into PIM-Baseline-Management-CSV as a final opt-in Workload RBAC step: runs only when config[/<variant>]/PIM-Assignments-Workloads.custom.csv exists (NOT via Get-PimConfigCsv -- its sample auto-bootstrap would arm the feature with shipped example rows), honors -WhatIfMode, resolves connectors from workloads/connectors/, benefits from the engine Groups_All_ID inventory for GroupTag cache-hit resolution; repository.custom.sample.ps1 documents the opt-in (c9e22c20)
 
 ---
 
@@ -42,6 +42,18 @@ Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monor
 > **Curated changelog.** The publish workflow auto-prepends recent monorepo commits as a raw activity log; this file is the human-friendly narrative on top.
 
 ---
+
+## v2.4.173 -- Core/Pro licensing: 100% OFFLINE .pimlicense (no online access, ever)
+
+Commercial split shipped (docs/LICENSING.md): **Core stays free and fully functional** -- engine, all CSVs, Manager, lifecycle, policy templates, audit, **and the SQL data store** (operator decision: SQL = Core). **Pro features** (MspFanout, WorkloadConnectors, Intake, AccessReviews, SelfService, ContactsRouting) gate on a customer license file:
+
+- **`engine/_shared/PIM-License.ps1`** (new, dot-sourced by engine + Manager): verifies `config/*.pimlicense` -- an RSA-SHA256-signed payload (customer, sku, features incl. `*`, tenant GUIDs, validity, graceDays) -- against the embedded PUBLIC certificate. **Fully offline by design**: the customer gets a file, drops it in `config\`, done. No activation server, no call-home, nothing to reach. PS 5.1-safe (raw-bytes X509Certificate2 -- no ImportFromPem).
+- **`Test-PimProFeature`** gate: tenant-bound (MSP fan-out checks per tenant and SKIPS unlicensed tenants instead of failing the fleet), one operator message per blocked feature + `license.blocked` audit. Expiry -> 30-day default grace with renew warnings -> Pro disables. **Core is never affected; an expired license can never break a tenant.**
+- **Manager**: Governance tab gains a License panel (`/api/license`): status, features, tenant binding, expiry, grace warning -- or a friendly "Core is free" note when no license is present.
+- **Issuer is internal-only** (`INTERNAL\pim-licensing\New-PimLicense.ps1`, outside the published tree): signs with the non-exportable `CN=PIM4EntraPS-Licensing` machine-store key on the maintainer host -- same trust model as the extension signing key. `*.pimlicense` gitignored everywhere.
+- First gated feature: **Invoke-PimMspFanout** (banner shows license status; per-tenant license check in the loop).
+
+Verified: 12-assertion battery on PS 5.1 (valid load, wildcard features, licensed-tenant pass, foreign-tenant block, tamper -> Invalid + blocked, missing -> Core-only, restore -> Valid) + licensed fan-out WhatIf shows the Pro banner and plans normally. Honesty note in docs: for a source-distributed product the gate is compliance/UX -- the real boundary is distributing Pro code privately; the license file makes entitlement provable offline.
 
 ## v2.4.172 -- design: email routing via departments (§ 17) + self-service delegation layers (§ 18)
 

@@ -819,17 +819,31 @@
     const body = document.getElementById('govBody');
     if (!isServer) { body.innerHTML = '<div style="color:#57606a">Static mode -- governance data needs the server.</div>'; return; }
     const esc = escapeHtml;
-    let emergency = { active: false }, mail = { templates: [] }, audit = { events: [], total: 0 }, disc = { baselineMissing: true, newItems: [] };
+    let emergency = { active: false }, mail = { templates: [] }, audit = { events: [], total: 0 }, disc = { baselineMissing: true, newItems: [] }, lic = null;
     try { emergency = await api('GET', '/api/emergency-status'); } catch (_) {}
     try { mail = await api('GET', '/api/mail-templates'); } catch (_) {}
     try { audit = await api('GET', '/api/audit?limit=100'); } catch (_) {}
     try { disc = await api('GET', '/api/discovered-resources'); } catch (_) {}
+    try { lic = await api('GET', '/api/license'); } catch (_) {}
     document.getElementById('govEmergencyBadge').style.display = emergency.active ? '' : 'none';
 
     const h = [];
     h.push(`<div style="margin-bottom:16px;"><span style="font-size:11px;text-transform:uppercase;letter-spacing:.5px;color:#0969da;font-weight:600;">Your access</span>` +
       `<div style="font-size:13px;margin-top:4px;">Role: <b>${esc(PIM_ROLE)}</b> &mdash; ${esc((window.PIM_ROLE_BOOT && window.PIM_ROLE_BOOT.identity) || '')} <span style="color:#57606a">(${esc((window.PIM_ROLE_BOOT && window.PIM_ROLE_BOOT.source) || '')})</span></div>` +
       `<div style="color:#57606a;font-size:11.5px;margin-top:2px;">Reader = view only &middot; Admin = stage/commit + revoke &middot; SuperAdmin = instances, emergency override, maintenance. Mapping file: <code>config/manager-access.custom.json</code>.</div></div>`);
+
+    // License panel (offline .pimlicense -- Core is free, Pro features gate)
+    if (lic) {
+      const licOk = lic.status === 'Valid';
+      const licGrace = lic.status === 'Grace';
+      const col = licOk ? '#1a7f37' : (licGrace ? '#9a6700' : '#57606a');
+      h.push(`<div style="margin-bottom:16px;"><span style="font-size:11px;text-transform:uppercase;letter-spacing:.5px;color:#0969da;font-weight:600;">License</span>` +
+        `<div style="font-size:13px;margin-top:4px;color:${col};"><b>${esc(lic.statusText || '')}</b></div>` +
+        (licOk || licGrace
+          ? `<div style="color:#57606a;font-size:11.5px;margin-top:2px;">Features: ${esc((lic.features || []).join(', ') || '-')} &middot; Tenants: ${esc((lic.tenantIds || []).length ? (lic.tenantIds || []).join(', ') : 'any')} &middot; Valid to: ${esc(lic.validTo || '')}${licGrace ? ' &middot; <b style="color:#9a6700">grace until ' + esc(lic.graceUntil || '') + ' -- renew now</b>' : ''}</div>`
+          : `<div style="color:#57606a;font-size:11.5px;margin-top:2px;">Core features are free and fully functional. Pro features (MSP fan-out, workload connectors, intake, access reviews, self-service) need a <code>.pimlicense</code> file in <code>config\\</code> -- delivered offline, no internet access required.</div>`) +
+        `</div>`);
+    }
 
     h.push('<div style="margin-bottom:16px;"><span style="font-size:11px;text-transform:uppercase;letter-spacing:.5px;color:#cf222e;font-weight:600;">Emergency override (break-glass)</span>');
     if (emergency.active) {

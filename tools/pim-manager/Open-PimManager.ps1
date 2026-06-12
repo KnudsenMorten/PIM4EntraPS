@@ -126,6 +126,11 @@ $instancesFile = Join-Path $PSScriptRoot 'instances.custom.json'
 $_dateExprLib = Join-Path $solutionRoot 'engine\_shared\PIM-DateExpression.ps1'
 if (Test-Path -LiteralPath $_dateExprLib) { . $_dateExprLib }
 
+# Offline Pro licensing (engine/_shared/PIM-License.ps1) -- powers the
+# Governance license panel (/api/license). Core Manager features never gate.
+$_licenseLib = Join-Path $solutionRoot 'engine\_shared\PIM-License.ps1'
+if (Test-Path -LiteralPath $_licenseLib) { . $_licenseLib }
+
 # One id per Manager session -- groups this session's audit events (phase 6).
 $script:PimManagerSessionId = [guid]::NewGuid().ToString('N')
 
@@ -1898,6 +1903,27 @@ function Handle-Request {
         if ($path -eq '/api/access' -and $method -eq 'GET') {
             $script:lastHeartbeat = Get-Date
             Write-JsonResponse -Response $resp -Status 200 -Body (Get-PimManagerRole)
+            return 200
+        }
+
+        if ($path -eq '/api/license' -and $method -eq 'GET') {
+            $script:lastHeartbeat = Get-Date
+            if (Get-Command Get-PimLicense -ErrorAction SilentlyContinue) {
+                $lic = Get-PimLicense -Refresh
+                Write-JsonResponse -Response $resp -Status 200 -Body @{
+                    status     = $lic.Status
+                    statusText = (Get-PimLicenseStatusText)
+                    customer   = $lic.Customer
+                    sku        = $lic.Sku
+                    features   = @($lic.Features)
+                    tenantIds  = @($lic.TenantIds)
+                    validTo    = $(if ($lic.ValidTo) { $lic.ValidTo.ToString('yyyy-MM-dd') } else { '' })
+                    graceUntil = $(if ($lic.GraceUntil) { $lic.GraceUntil.ToString('yyyy-MM-dd') } else { '' })
+                    reason     = $lic.Reason
+                }
+            } else {
+                Write-JsonResponse -Response $resp -Status 200 -Body @{ status = 'Missing'; statusText = 'Core (free)'; reason = 'license library not loaded' }
+            }
             return 200
         }
 

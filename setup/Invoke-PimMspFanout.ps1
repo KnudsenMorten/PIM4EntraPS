@@ -91,6 +91,11 @@ Write-Host " PIM4EntraPS MSP fan-out $(if ($WhatIfMode) { '(WHATIF -- plan only)
 Write-Host "==========================================================================" -ForegroundColor Cyan
 Write-Host "  registry: $ServerInstance / $Database"
 
+# MSP fan-out is a Pro feature (offline .pimlicense in config\; Core is free).
+. (Join-Path (Split-Path -Parent $PSScriptRoot) 'engine\_shared\PIM-License.ps1')
+Write-Host "  license : $(Get-PimLicenseStatusText)"
+if (-not (Test-PimProFeature 'MspFanout')) { return }
+
 $targets = Get-PimRegistryRows -Query @"
 SELECT v.TenantId, v.TenantName, v.TenantRing, v.UserName, v.AdminRing,
        a.AppId, a.CertificateThumbprint,
@@ -115,6 +120,13 @@ foreach ($grp in $byTenant) {
     $cert = Get-Item "Cert:\LocalMachine\My\$($t.CertificateThumbprint)" -ErrorAction SilentlyContinue
     if (-not $cert) {
         Write-Host "  [skip] certificate $($t.CertificateThumbprint) not in Cert:\LocalMachine\My (demo tenant or not enrolled on this host)." -ForegroundColor DarkGray
+        continue
+    }
+
+    # Tenant-bound licensing: a tenant outside the license's tenantIds is
+    # skipped, not failed -- the rest of the fleet still deploys.
+    if (-not (Test-PimProFeature 'MspFanout' -TenantId "$($t.TenantId)")) {
+        $results += [pscustomobject]@{ Tenant = $t.TenantName; Status = 'skipped (not licensed)'; Admins = 0 }
         continue
     }
 

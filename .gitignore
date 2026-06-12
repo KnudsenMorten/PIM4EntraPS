@@ -56,3 +56,6 @@ templates/policy/*.policytemplate.custom.json
 config/*.custom.json
 config-local/*.custom.json
 config-msp/*.custom.json
+
+# Customer license files -- delivered offline, never tracked anywhere
+*.pimlicense
