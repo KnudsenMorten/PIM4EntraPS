@@ -2501,21 +2501,58 @@ Function Read-PimWorkloadConnectors {
     return $out.ToArray()
 }
 
+Function Get-PimNestedProp {
+    # Read a possibly-dotted property path ('properties.roleName') off an object.
+    param([object]$Object, [string]$Path)
+    if (-not $Path) { return $null }
+    $cur = $Object
+    foreach ($seg in ($Path -split '\.')) {
+        if ($null -eq $cur) { return $null }
+        $cur = $cur.$seg
+    }
+    return $cur
+}
+
+Function Get-PimWorkloadToken {
+    # Bearer token for a non-graph connector adapter. The LAUNCHER pre-mints
+    # tokens into $global:PIM_WorkloadTokens (auth -> token) BEFORE the engine
+    # imports this module (avoids the Az.Core-vs-Graph assembly conflict). If
+    # absent, best-effort Get-AzAccessToken with a per-adapter resource map.
+    param([Parameter(Mandatory)][object]$Connector)
+    $auth = "$($Connector.auth)".ToLowerInvariant()
+    if ($global:PIM_WorkloadTokens -and $global:PIM_WorkloadTokens[$auth]) { return $global:PIM_WorkloadTokens[$auth] }
+    $res = switch ($auth) {
+        'arm'             { 'https://management.azure.com/' }
+        'powerbi'         { 'https://analysis.windows.net/powerbi/api' }
+        'businesscentral' { 'https://api.businesscentral.dynamics.com' }
+        'devops'          { '499b84ac-1321-427f-aa17-267ca6975798' }   # Azure DevOps resource
+        'dataverse'       { if ($Connector.tokenResource) { "$($Connector.tokenResource)" } else { "$($Connector.api.baseUrl)" } }
+        default           { $null }
+    }
+    if (-not $res) { throw "Connector '$($Connector.id)': no token resource for auth adapter '$auth' (populate `$global:PIM_WorkloadTokens['$auth'])." }
+    $t = (Get-AzAccessToken -ResourceUrl $res -ErrorAction Stop).Token
+    if ($t -is [securestring]) { [System.Net.NetworkCredential]::new('', $t).Password } else { $t }
+}
+
 Function Invoke-PimWorkloadApi {
-    # Executes one connector API descriptor (graph adapter). Returns parsed body.
+    # Executes one connector API descriptor. auth='graph' goes through the live
+    # Graph SDK session; any other adapter uses Invoke-RestMethod with a bearer
+    # token from Get-PimWorkloadToken. Returns parsed body.
     param(
         [Parameter(Mandatory)][object]$Connector,
         [Parameter(Mandatory)][object]$Op,
         [hashtable]$Tokens = @{},
         [object]$Body = $null
     )
-    if ("$($Connector.auth)" -ne 'graph') { throw "Connector '$($Connector.id)': auth adapter '$($Connector.auth)' is not implemented yet (phase 1 = graph)." }
     $uri = "$($Connector.api.baseUrl)" + (Expand-PimWorkloadTokens -Text "$($Op.path)" -Tokens $Tokens)
-    if ($Body) {
-        $json = $Body | ConvertTo-Json -Depth 8
-        return Invoke-MgGraphRequest -Method $Op.method -Uri $uri -Body $json -ContentType 'application/json' -ErrorAction Stop
+    if ("$($Connector.auth)" -eq 'graph') {
+        if ($Body) { return Invoke-MgGraphRequest -Method $Op.method -Uri $uri -Body ($Body | ConvertTo-Json -Depth 8) -ContentType 'application/json' -ErrorAction Stop }
+        return Invoke-MgGraphRequest -Method $Op.method -Uri $uri -ErrorAction Stop
     }
-    return Invoke-MgGraphRequest -Method $Op.method -Uri $uri -ErrorAction Stop
+    # Token-based REST adapter (arm / powerbi / devops / businesscentral / dataverse).
+    $hdr = @{ Authorization = "Bearer $(Get-PimWorkloadToken -Connector $Connector)" }
+    if ($Body) { return Invoke-RestMethod -Method $Op.method -Uri $uri -Headers $hdr -Body ($Body | ConvertTo-Json -Depth 8) -ContentType 'application/json' -ErrorAction Stop }
+    return Invoke-RestMethod -Method $Op.method -Uri $uri -Headers $hdr -ErrorAction Stop
 }
 
 Function Get-PimWorkloadRoles {
@@ -2527,13 +2564,13 @@ Function Get-PimWorkloadRoles {
         return @(@($Connector.roles) | ForEach-Object { @{ id = "$($_.id)"; name = "$($_.name)"; description = "$($_.description)" } })
     }
     $resp = Invoke-PimWorkloadApi -Connector $Connector -Op $op
-    $items = if ($op.itemsPath) { $resp.($op.itemsPath) } else { $resp }
+    $items = if ($op.itemsPath) { Get-PimNestedProp $resp $op.itemsPath } else { $resp }
     $out = New-Object System.Collections.ArrayList
     foreach ($r in @($items)) {
         [void]$out.Add(@{
-            id          = "$($r.($op.roleId))"
-            name        = "$($r.($op.roleName))"
-            description = $(if ($op.roleDescription -and $r.($op.roleDescription)) { "$($r.($op.roleDescription))" } else { '' })
+            id          = "$(Get-PimNestedProp $r $op.roleId)"
+            name        = "$(Get-PimNestedProp $r $op.roleName)"
+            description = $(if ($op.roleDescription) { "$(Get-PimNestedProp $r $op.roleDescription)" } else { '' })
         })
     }
     return $out.ToArray()
@@ -2544,15 +2581,15 @@ Function Get-PimWorkloadAssignmentPrincipals {
     # fetching the detail record when the list shape omits members.
     param([Parameter(Mandatory)][object]$Connector, [Parameter(Mandatory)][object]$Item)
     $la = $Connector.api.listAssignments
-    $id = "$($Item.($la.assignmentId))"
+    $id = "$(Get-PimNestedProp $Item $la.assignmentId)"
     $principals = @()
-    if ($la.principalIds -and $null -ne $Item.($la.principalIds)) {
-        $principals = @($Item.($la.principalIds)) | ForEach-Object { "$_" }
+    if ($la.principalIds -and $null -ne (Get-PimNestedProp $Item $la.principalIds)) {
+        $principals = @(Get-PimNestedProp $Item $la.principalIds) | ForEach-Object { "$_" }
     } elseif ($Connector.api.getAssignment) {
         $ga = $Connector.api.getAssignment
         $detail = Invoke-PimWorkloadApi -Connector $Connector -Op $ga -Tokens @{ assignmentId = $id }
-        if ($ga.principalIds -and $null -ne $detail.($ga.principalIds)) {
-            $principals = @($detail.($ga.principalIds)) | ForEach-Object { "$_" }
+        if ($ga.principalIds -and $null -ne (Get-PimNestedProp $detail $ga.principalIds)) {
+            $principals = @(Get-PimNestedProp $detail $ga.principalIds) | ForEach-Object { "$_" }
         }
     }
     return @{ id = $id; principals = $principals; displayName = "$($Item.displayName)" }
@@ -2612,7 +2649,7 @@ Function Apply-PimWorkloadAssignments {
         $role = $roles | Where-Object { "$($_.name)" -ieq "$($row.RoleName)".Trim() } | Select-Object -First 1
         if (-not $role) { Write-Host "ERROR: workload '$wid' has no role named '$($row.RoleName)'. Valid: $(($roles | ForEach-Object { $_.name }) -join ', ')" -ForegroundColor Red; continue }
 
-        $tokens = @{ groupId = $groupId; groupTag = $tag; roleId = $role.id; roleName = $role.name; scope = "$($row.Scope)".Trim() }
+        $tokens = @{ groupId = $groupId; groupTag = $tag; roleId = $role.id; roleName = $role.name; scope = "$($row.Scope)".Trim(); newId = [guid]::NewGuid().ToString() }
 
         # Current state: list assignments (per-role when the path needs {roleId}).
         $la = $conn.api.listAssignments
