@@ -169,8 +169,8 @@ if (Test-Path (Join-Path $cfg 'PIM4EntraPS.NamingConventions.locked.ps1')) {
     function Get-PimCsvBases { @('Account-Definitions-Admins','PIM-Assignments-Admins','PIM-Definitions-Roles','PIM-Definitions-Tasks','PIM-Definitions-Services','PIM-Definitions-Processes','PIM-Definitions-Resources','PIM-Definitions-Departments','PIM-Definitions-Organization','PIM-Definitions-AU','PIM-Assignments-Groups','PIM-Assignments-Roles-Groups','PIM-Assignments-Roles-AUs','PIM-Assignments-Azure-Resources','PIM-Assignments-Workloads') | ForEach-Object { [pscustomobject]@{ base=$_ } } }
     function Resolve-PimCsvPath { param([string]$BaseName) $p=Join-Path $cfg "$BaseName.custom.csv"; if (Test-Path $p) { $p } else { $null } }
     . (Join-Path $root 'tools\pim-manager\_validator.ps1')
-    T 'validator runs + returns findings collection' { $v=@(Invoke-PimPreflightValidation); $null -ne $v }
-    T 'no naming (PIM-NAME-002) violations in live config' { @(Invoke-PimPreflightValidation | Where-Object Code -eq 'PIM-NAME-002').Count -eq 0 }
+    T 'validator runs + returns violations collection' { $r=Invoke-PimPreflightValidation; $null -ne $r.violations -or $null -ne $r }
+    T 'no naming (PIM-NAME-002) violations in live config' { @((Invoke-PimPreflightValidation).violations | Where-Object Code -eq 'PIM-NAME-002').Count -eq 0 }
 } else { S 'validator' 'naming conventions file not found' }
 
 Section 'LIVE-ONLY (Graph/SQL write paths -- validated live, skipped offline)'
