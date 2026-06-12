@@ -1,9 +1,10 @@
 # Release notes for PIM4EntraPS
 
-## v2.4.149
+## v2.4.150
 
 Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monorepo:
 
+- release: PIM4EntraPS v2.4.150 -- Intune deploy: forcelist conflict no longer aborts (per-browser Not-configured skip, exact setting names printed at [SKIP] for manual re-enable, -Force now means write-everything); session-role pre-check via token wids claim with one automatic disconnect+re-auth when the PIM activation postdates the token (backend hard-stop on app-admin family + PRA for consent, Intune soft-fail for scoped RBAC); ADMX ingestion retries once after removing a failed row and stops fatally on double failure instead of limping to a confusing later crash; docs scrub of customer-identifying details and captured console output across RELEASENOTES/README/popup.js. Harness 15+13 checks green PS 5.1 + pwsh 7 (0ecb3032)
 - release: PIM4EntraPS v2.4.149 -- Deploy-PimActivatorIntune gets the v2.4.147/148 auth hardening via new shared _PimActivatorAuth.ps1 (Connect-PimActivatorGraph full sequence: Edge-mode cached-MSAL discard, Edge-PKCE/MSAL sign-in, provided-token scope bypass, TenantId enforcement, /me probe auto-heal; Connect-MgGraphViaEdge; parameterized Assert-GraphModuleVersions; version banner + broken-auth help). Intune script: -UseEdge default ON, banner, all conditional scopes (Organization.Read.All/Application.Read.All) requested up front since Edge tokens cannot scope-escalate mid-run; old mid-run reconnect kept as MSAL-only safety net. Backend slims to dot-source, behavior identical. 17-check harness green PS 5.1 + pwsh 7 (7ac2c838)
 - release: PIM4EntraPS v2.4.148 -- Deploy-PimActivatorBackend: empty role list from /me/memberOf is inconclusive (lean 3-scope token lacks directory-read, Graph filters roles silently -- field op HAD activated CAA+PRA and was wrongly blocked) so warn+continue; non-empty lists still enforced. Edge mode discards cached MSAL contexts before the first Graph call (cached context re-auths via system-default browser = the IE+Edge double-launch). Harness green PS 5.1 + pwsh 7 (f56ef452)
 - release: PIM4EntraPS v2.4.147 -- Deploy-PimActivatorBackend signs in through Edge by default (own auth-code+PKCE S256 flow on a loopback TcpListener with the first-party Graph CLI Tools app, token to Connect-MgGraph -AccessToken) because MSAL always launches the system-default browser and legacy IE on servers mangles the redirect into state-mismatch loops; Graph SDK version-conflict pre-flight (mixed Microsoft.Graph.* submodule versions = confirmed cause of silent-null cmdlets + broken token cache); version banner from solution VERSION file; post-connect /me probe reconnects dead cached sessions up front; -AccessToken pre-connects supported; device-code flow removed entirely (MS blocks globally). Loopback flow harness green on PS 5.1 + pwsh 7 (16762fda)
@@ -33,7 +34,6 @@ Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monor
 - release: PIM4EntraPS v2.4.123 -- (1) skip Connect-ExchangeOnline on the -OnlyAD invocation + reuse existing EXO session via Get-ConnectionInformation so EXO connects exactly once per launcher run (was 2x after v2.4.114); (2) engine resolves $PathAdmins / $PathAdminsL0T0 from $global: fallback so AD-create rows finally have an OU to target (a7e9f695)
 - release: PIM4EntraPS v2.4.122 -- AD-create OU routing now driven by UserName naming convention (regex match on L0/T0 markers bounded by -/_/. in the name) instead of CSV TierLevel column; matches the customer pattern where privilege class is encoded in the account name itself (c0788dfc)
 - release: PIM4EntraPS v2.4.121 -- AD-create branch matches CSV TierLevel against the Tier convention (T0/T1/T2/T3) -- T0 -> PathAdminsL0T0, T1/T2/T3/blank -> PathAdmins. Previously the engine matched Level literals (L0/L1) so Tier-formatted CSVs silently dropped every Create row. L0 still accepted as T0-equivalent for back-compat. Level and Tier are distinct dimensions; CSV column is the Tier. (5d0cdd62)
-- release: PIM4EntraPS v2.4.120 -- AD-create branch surfaces an explicit [ERROR] when CSV TierLevel is blank or not L0/L1 (previously: dangling 'Creating AD account' header with no New-ADUser call, no exception, no password file row, row silently dropped) (93e53c67)
 
 ---
 
@@ -42,6 +42,24 @@ Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monor
 > **Curated changelog.** The publish workflow auto-prepends recent monorepo commits as a raw activity log; this file is the human-friendly narrative on top.
 
 ---
+
+## v2.4.150 -- Intune deploy: forcelist conflicts no longer abort -- per-browser 'Not configured' skip + named settings; session-role pre-check; ADMX ingestion retry; docs scrub
+
+Also in this release:
+
+- **Session-role pre-check with auto re-auth** (`Assert-PaSessionRole` in `_PimActivatorAuth.ps1`): the Edge flow now decodes its own token's `wids` claim (active directory roles at issuance -- readable with zero extra scopes, unlike `/me/memberOf` which hides roles from lean tokens). Both deploy scripts check the required roles up front; if missing -- the classic "activated the PIM role after signing in" case -- they disconnect and re-auth ONCE automatically before failing. The backend checks the app-admin family (+ PRA/GA for `-GrantConsent`) with hard stop; the Intune script checks Intune Administrator/GA with soft-fail (a scoped Intune RBAC assignment never appears in wids but still authorizes the writes).
+- **ADMX ingestion auto-retry**: field case -- Intune accepted the ADMX POST, then nulled the row and flipped to `uploadFailed`; the script's deliberate throw was swallowed by its own status-poll catch and it limped on to a confusing 'Could not find Tenant catalog' crash much later. Ingestion now removes the failed row, lets the service settle, retries once, and a second failure or poll timeout stops the run immediately with retry guidance. A 403 on the upload gets the Intune-RBAC explanation (activate Intune Administrator; the Graph scope alone is not enough).
+- **Docs scrub**: historical release-note entries, the README sample output, and a popup.js comment were scrubbed of customer-identifying details and captured console output; release notes and docs now use generic descriptors only.
+
+Operator-requested default-behavior change after hitting the conflict gate live (an existing Chrome-only Settings Catalog policy owning ExtensionInstallForcelist):
+
+- **A detected forcelist conflict no longer aborts the deploy** (and `-Force` is no longer needed for the common case). The profile is created with everything pushed EXCEPT the forcelist setting(s) for the conflicting browser(s), which are left **'Not configured'** -- two writers on the same `HKLM\Policies\<browser>\ExtensionInstallForcelist` key make IME cycle the entries every sync.
+- **Per-browser granularity**: forcelist registry slots are per-browser, so a Chrome-only conflict still gets the **Edge forcelist written** (and vice versa). Conflicting policies are classified from their forcelist setting-definition ids (Settings Catalog) / definition category paths (ADMX); unrecognizable ids are conservatively treated as owning both.
+- **The exact Intune setting names are printed at each [SKIP] line** (from the live resolved definitions -- Chrome's "Configure the list of force-installed apps and extensions" vs Edge's silent-install setting, each with its category path and the row value), so the operator can configure them manually in this profile later if the conflicting policy goes away. The definition resolution now always includes Forcelist for this reason; only the write is skipped.
+- **`-Force` re-purposed**: writes EVERY forcelist value despite detected conflicts (for operators who verified the overlap is harmless, e.g. the other policy targets an empty group). The old `-Force` semantics (skip forcelist, push the rest) are the new default.
+- **Intune RBAC 403 hint**: the ADMX upload (first write of every run) now catches 403 and explains that the Graph scope is not the problem -- activate 'Intune Administrator' in PIM, `Disconnect-MgGraph`, re-run so the fresh token carries the role. Field case: all reads worked, first write 403'd, root cause was the un-activated Intune role.
+
+Verified: 15-check harness (parse, no legacy abort/skip-flag remnants, browser classification matrix incl. PS 5.1 single-element-unwrap guard, Forcelist-always-resolved invariant, chrome-only-conflict-writes-Edge gating, RBAC hint presence) green in real PS 5.1 **and** pwsh 7 processes.
 
 ## v2.4.149 -- Intune deploy gets the same auth hardening; shared _PimActivatorAuth.ps1
 
@@ -766,7 +784,7 @@ The AD Create branch matches `If ($TierLevel -eq "L0")` then `ElseIf ($TierLevel
 Added an `Else` clause to the Create branch. When `TierLevel` isn't `L0` or `L1` the engine now prints a clear red `[ERROR]` line naming the UPN and the offending TierLevel value (`<blank>` rendered explicitly when empty/whitespace), instead of silently dropping the row:
 
 ```
-ERROR: New-ADUser SKIPPED for ADM-KST-AD@nordstern.dk -- CSV TierLevel '<blank>' is not 'L0' or 'L1'; engine has no OU to target. Fix the CSV TierLevel column or extend the AD-create branch to handle this tier. NOT persisting password.
+ERROR: New-ADUser SKIPPED for ADM-KST-AD@customer-domain.tld -- CSV TierLevel '<blank>' is not 'L0' or 'L1'; engine has no OU to target. Fix the CSV TierLevel column or extend the AD-create branch to handle this tier. NOT persisting password.
 ```
 
 This brings the silent-drop pattern in line with the rest of v2.4.117+'s "no phantom passwords" contract: every CSV row now either succeeds, prints a clear error, or skips with a clear info line -- nothing is dropped silently.
@@ -869,7 +887,7 @@ The v2.4.117 safety improvements that are NOT reverted:
 Get-ADUser: Authentication failed, see inner exception.
 
 Creating AD account Simon Kriegbaum (Admin, Legacy, AD, L0, T0)
-  -> initial password for Admin-SKR-L0-T0-AD@nordstern.dk (AD): yZ@y87crP5^Z89@a5XSH&^F^
+  -> initial password for Admin-SKR-L0-T0-AD@customer-domain.tld (AD): <generated-password>
      appended to: E:\AutomateIT\SOLUTIONS\PIM4EntraPS\output\admin-passwords-20260611.txt
 ```
 
@@ -977,7 +995,7 @@ Process must already be running AS the gMSA (Scheduled Task with the gMSA as Pri
 
 ### Symptom
 
-A customer ran the launcher with a CSV containing both ID rows (cloud admins, e.g. `Admin-SKR-L0-T0-ID@nordstern.dk`) AND AD rows (on-prem admins, e.g. `Admin-SKR-L0-T0-AD@nordstern.dk`). The engine logged `Updating ID user ...` for every ID row -- but never logged `Updating AD user ...` for any AD row. The AD-account branch of `CreateUpdate-Accounts-From-file-CSV` (in `engine/_shared/PIM-Functions.psm1` line 4927) was simply never reached.
+A customer ran the launcher with a CSV containing both ID rows (cloud admins, e.g. `Admin-SKR-L0-T0-ID@customer-domain.tld`) AND AD rows (on-prem admins, e.g. `Admin-SKR-L0-T0-AD@customer-domain.tld`). The engine logged `Updating ID user ...` for every ID row -- but never logged `Updating AD user ...` for any AD row. The AD-account branch of `CreateUpdate-Accounts-From-file-CSV` (in `engine/_shared/PIM-Functions.psm1` line 4927) was simply never reached.
 
 ### Root cause
 
@@ -1035,9 +1053,9 @@ Pure documentation -- no script behaviour changes.
 
 ## v2.4.112 + extension v1.6.25 -- popup manual single-tenant entry now always wins over managed catalog (fixes "Save and continue" looping back to onboarding)
 
-Same v2.4.111 cross-tenant-leak incident exposed a second compounding bug: when `chrome.storage.managed.tenantCatalog` (registry-pushed) and the manual single-tenant entry (`chrome.storage.local.userTenantId / userClientId`) BOTH exist, the popup's `loadConfig()` always preferred the managed catalog. So on a box where the bad 2linkIT catalog was still in registry, the user could type Nunagreen's tenant + clientId in the manual form, click "Save and continue", and:
+Same v2.4.111 cross-tenant-leak incident exposed a second compounding bug: when `chrome.storage.managed.tenantCatalog` (registry-pushed) and the manual single-tenant entry (`chrome.storage.local.userTenantId / userClientId`) BOTH exist, the popup's `loadConfig()` always preferred the managed catalog. So on a box where the bad 2linkIT catalog was still in registry, the user could type the customer tenant's id + clientId in the manual form, click "Save and continue", and:
 
-1. The save succeeded (`userTenantId = Nunagreen` written to `chrome.storage.local`).
+1. The save succeeded (`userTenantId = <customer tenant>` written to `chrome.storage.local`).
 2. The popup reloaded.
 3. `loadConfig()` saw the managed catalog (2linkIT) first, picked the catalog branch, found no `activeTenantId` matching, returned an empty config -- triggering `renderOnboarding()` to fire AGAIN.
 4. From the user's perspective: "I saved but it goes back to onboarding -- save isn't working."
@@ -1050,7 +1068,7 @@ Note: this is a popup-level fix. The underlying registry leak should still be cl
 
 ## v2.4.111 -- Deploy-PimActivatorClient.ps1 stops defaulting to the sibling `discovered-tenant-catalog.json` (cross-tenant leak); auto-discovers from live Entra instead
 
-**Incident.** A customer deploy ran `Deploy-PimActivatorClient.ps1` on a Nunagreen-tenant box. The script's `-CatalogJsonPath` parameter defaulted to `(scriptDir)\discovered-tenant-catalog.json` -- a sibling file pattern that "worked out of the box on the maintainer's repo layout". That file was untracked but PRESENT on the box (likely transferred along with the script folder from an earlier setup on a 2linkIT-tenant box). The script silently picked it up and wrote **2linkIT's** tenantId + clientId into the customer's `chrome.storage.managed.tenantCatalog` registry path -- cross-tenant data leak. No log line called it out because the file existed and the script saw nothing to warn about.
+**Incident.** A customer deploy ran `Deploy-PimActivatorClient.ps1` on a customer-tenant box. The script's `-CatalogJsonPath` parameter defaulted to `(scriptDir)\discovered-tenant-catalog.json` -- a sibling file pattern that "worked out of the box on the maintainer's repo layout". That file was untracked but PRESENT on the box (likely transferred along with the script folder from an earlier setup on a 2linkIT-tenant box). The script silently picked it up and wrote **2linkIT's** tenantId + clientId into the customer's `chrome.storage.managed.tenantCatalog` registry path -- cross-tenant data leak. No log line called it out because the file existed and the script saw nothing to warn about.
 
 **Fix.** Three parts:
 
@@ -1087,7 +1105,7 @@ Customer-tenant deploy surfaced the actual root cause via the portal's "Import A
 
 > `ADMX file referenced not found NamespaceMissing:Microsoft.Policies.Windows. Please upload it first.`
 
-The ADMX declared `<using prefix="windows" namespace="Microsoft.Policies.Windows" />` but never actually referenced the `windows:` prefix anywhere -- pure dead code. Strict Intune tenants check that every `<using>` target is pre-loaded and reject when it isn't (Nunagreen 2026-06-10). Tolerant tenants (2linkit) skipped the check and the ADMX uploaded fine -- which is why this file shipped for months with the latent bug.
+The ADMX declared `<using prefix="windows" namespace="Microsoft.Policies.Windows" />` but never actually referenced the `windows:` prefix anywhere -- pure dead code. Strict Intune tenants check that every `<using>` target is pre-loaded and reject when it isn't (observed on a strict customer tenant 2026-06-10). Tolerant tenants (2linkit) skipped the check and the ADMX uploaded fine -- which is why this file shipped for months with the latent bug.
 
 Fix: removed the `<using>` declaration. Our ADMX is now fully self-contained -- zero external namespace dependencies -- works on every tenant strictness level.
 

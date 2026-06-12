@@ -123,8 +123,62 @@ function Connect-MgGraphViaEdge {
         code_verifier = $verifier
         scope         = (@($Scopes) -join ' ')
     }
+
+    # Stash the token's claims: the wids claim lists the user's ACTIVE
+    # directory roles at issuance, readable without any directory-read scope
+    # (unlike /me/memberOf, which silently hides roles from lean tokens).
+    # Used by Assert-PaSessionRole for the activate-role-then-reconnect dance.
+    $script:PaTokenClaims = $null
+    try {
+        $payload = ($tok.access_token -split '\.')[1].Replace('-', '+').Replace('_', '/')
+        switch ($payload.Length % 4) { 2 { $payload += '==' } 3 { $payload += '=' } }
+        $script:PaTokenClaims = [System.Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($payload)) | ConvertFrom-Json
+    } catch { }
+
     Connect-MgGraph -AccessToken (ConvertTo-SecureString $tok.access_token -AsPlainText -Force) -NoWelcome -ErrorAction Stop | Out-Null
     Write-Host 'Connected via Edge sign-in (token valid ~1 hour).' -ForegroundColor Green
+}
+
+# Active directory role template ids from the CURRENT session token's wids
+# claim. Only known for sessions established by Connect-MgGraphViaEdge;
+# returns $null (= unknown, not "no roles") for MSAL / operator-provided
+# token sessions.
+function Get-PaTokenRoleIds {
+    if ($script:PaTokenClaims -and $script:PaTokenClaims.PSObject.Properties['wids']) { return @($script:PaTokenClaims.wids) }
+    $null
+}
+
+# Ensure the session token carries at least one of the given directory role
+# template ids. Typical failure: the operator activated the PIM role AFTER
+# signing in, so the token predates the activation -- in that case disconnect
+# and re-run the supplied connect scriptblock ONCE to mint a fresh token,
+# then re-check. -SoftFail warns and continues instead of throwing (for
+# targets like Intune where a scoped, non-directory RBAC assignment can
+# authorize the writes without ever appearing in wids). No-op when the
+# session's roles cannot be determined.
+function Assert-PaSessionRole {
+    param(
+        [Parameter(Mandatory)][string[]]$AnyOfRoleIds,
+        [Parameter(Mandatory)][string]$RoleDescription,
+        [Parameter(Mandatory)][scriptblock]$Reconnect,
+        [switch]$SoftFail
+    )
+    $wids = Get-PaTokenRoleIds
+    if ($null -eq $wids) { return }   # cannot introspect -- let the API be the judge
+    if (@($wids | Where-Object { $_ -in $AnyOfRoleIds }).Count -gt 0) { return }
+
+    Write-Host "Session token does not carry $RoleDescription." -ForegroundColor Yellow
+    Write-Host 'If you activated it in PIM after signing in, the token predates the activation -- re-authenticating to pick it up...' -ForegroundColor Yellow
+    Disconnect-MgGraph -ErrorAction SilentlyContinue | Out-Null
+    & $Reconnect
+
+    $wids = Get-PaTokenRoleIds
+    if ($null -eq $wids -or @($wids | Where-Object { $_ -in $AnyOfRoleIds }).Count -gt 0) { return }
+    if ($SoftFail) {
+        Write-Host "Still no $RoleDescription in the fresh token -- continuing anyway (a scoped RBAC assignment may still authorize the writes; expect a 403 otherwise)." -ForegroundColor DarkYellow
+        return
+    }
+    throw "Even after a fresh sign-in, the session does not carry $RoleDescription. Activate it in PIM, wait for the activation to complete, then re-run this script."
 }
 
 # One-stop connect: discard cached MSAL contexts in Edge mode (they re-auth

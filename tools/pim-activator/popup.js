@@ -183,7 +183,7 @@ async function loadConfig() {
   // user's saved manual config on every reload, causing the "Save and continue"
   // button to appear broken (it saves, but the next reload shows onboarding
   // again because the catalog overrides it). Symptom reproed 2026-06-10
-  // against a Nunagreen-tenant box whose registry still had 2linkIT's
+  // against a customer-tenant box whose registry still had 2linkIT's
   // catalog from before v2.4.111.
   const manualTid = String(u.userTenantId || '').trim().toLowerCase()
   const manualCid = String(u.userClientId || '').trim().toLowerCase()

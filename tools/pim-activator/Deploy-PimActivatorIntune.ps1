@@ -123,16 +123,16 @@ param(
     [Parameter(ParameterSetName = 'Install')]
     [string]$TenantName,
 
-    # Bypass the pre-flight scan for existing Intune policies that already
-    # manage ExtensionInstallForcelist on Chrome / Edge. By default the script
-    # aborts if any other policy is found, because mixing Settings Catalog +
-    # ADMX writes to the SAME registry key (HKLM\Policies\<browser>\
-    # ExtensionInstallForcelist) causes IME to cycle entries on every sync --
-    # one source's writes survive, the others get overwritten. Settings
-    # Catalog wins over ADMX in our experience. -Force skips the check and
-    # creates the ADMX profile anyway; only use this if you've manually
-    # verified the existing policy doesn't conflict (e.g. it only targets
-    # an empty group).
+    # The pre-flight scan finds existing Intune policies that already manage
+    # ExtensionInstallForcelist. Default behavior (v2.4.150): the profile is
+    # still created, but the forcelist setting for any CONFLICTING browser is
+    # left 'Not configured' -- mixing two writers on the same registry key
+    # (HKLM\Policies\<browser>\ExtensionInstallForcelist) makes IME cycle the
+    # entries on every sync. Forcelist slots are per-browser, so a Chrome-only
+    # conflict still gets the Edge forcelist written (and vice versa). -Force
+    # writes EVERY forcelist value despite detected conflicts; only use it
+    # when you've manually verified the existing policy is harmless (e.g. it
+    # targets an empty group).
     [Parameter(ParameterSetName = 'Install')]
     [switch]$Force,
 
@@ -171,6 +171,20 @@ if (-not $Remove -and -not $CatalogJsonPath) {
 $ctx = Connect-PimActivatorGraph -RequiredScopes $_requiredScopes -UseEdge:([bool]$UseEdge)
 Write-Host "Connected to tenant $($ctx.TenantId) as $($ctx.Account)" -ForegroundColor Gray
 
+# Intune authorizes WRITES by directory role, not by the Graph scope --
+# field case: every read worked, the first POST 403'd because the freshly
+# activated Intune Administrator role was not in the (older) token. Check
+# the session token's wids up front and re-auth once if missing. SoftFail:
+# a scoped Intune RBAC assignment (not a directory role) can also authorize
+# the writes and never appears in wids -- don't hard-block those operators.
+Assert-PaSessionRole -SoftFail `
+    -AnyOfRoleIds @(
+        '3a2c62db-5318-420d-8d74-23affee5d9d5'   # Intune Administrator
+        '62e90394-69f5-4237-9190-012177145e10'   # Global Administrator
+    ) `
+    -RoleDescription "an ACTIVE 'Intune Administrator' (or Global Administrator) role" `
+    -Reconnect { $script:ctx = Connect-PimActivatorGraph -RequiredScopes $_requiredScopes -UseEdge:([bool]$UseEdge) }
+
 # ---- 1.25. Pre-flight: scan for existing ExtensionInstallForcelist policies ---
 #
 # IME does NOT merge ExtensionInstallForcelist writes across mechanisms
@@ -190,6 +204,24 @@ if (-not $Remove) {
     Write-Host ''
     Write-Host "Pre-flight: scanning for existing Intune policies that manage ExtensionInstallForcelist..." -ForegroundColor Cyan
 
+    # Forcelist registry keys are PER-BROWSER (HKLM\...\Google\Chrome\... vs
+    # HKLM\...\Microsoft\Edge\...), so a Chrome-only policy does NOT conflict
+    # with our Edge forcelist write. Classify which browser(s) a conflicting
+    # policy owns from its forcelist setting-definition ids; unrecognizable
+    # ids are treated as owning both (conservative).
+    function Get-PaForcelistBrowsersFromBlob {
+        param([string]$Blob)
+        $browsers = @()
+        foreach ($m in [regex]::Matches($Blob, '"settingDefinitionId"\s*:\s*"([^"]*extensioninstallforcelist[^"]*)"', 'IgnoreCase')) {
+            $sid = $m.Groups[1].Value.ToLowerInvariant()
+            if ($sid -match 'edge')               { $browsers += 'Edge' }
+            elseif ($sid -match 'chrome|google')  { $browsers += 'Chrome' }
+            else                                  { $browsers += 'Chrome', 'Edge' }
+        }
+        if (-not $browsers) { $browsers = @('Chrome', 'Edge') }
+        @($browsers | Select-Object -Unique)
+    }
+
     $conflicts = New-Object System.Collections.Generic.List[object]
 
     # 1.25a. Settings Catalog (deviceManagement/configurationPolicies)
@@ -204,14 +236,15 @@ if (-not $Remove) {
         $sResp = Invoke-MgGraphRequest -Method GET -Uri ("https://graph.microsoft.com/beta/deviceManagement/configurationPolicies/{0}/settings" -f $p.id) -ErrorAction SilentlyContinue
         if (-not $sResp) { continue }
         $jsonBlob = ($sResp.value | ConvertTo-Json -Depth 30 -Compress -ErrorAction SilentlyContinue)
-        if ($jsonBlob -match 'ExtensionInstallForcelist' -or $jsonBlob -match 'extensioninstallforcelist') {
+        if ($jsonBlob -match 'extensioninstallforcelist') {
             $ids = @()
             foreach ($m in [regex]::Matches($jsonBlob, '"value"\s*:\s*"([a-p]{32};[^"]+)"')) { $ids += $m.Groups[1].Value }
             $conflicts.Add([pscustomobject]@{
-                Type   = 'SettingsCatalog'
-                Name   = $p.name
-                Id     = $p.id
-                Values = ($ids | Select-Object -Unique)
+                Type     = 'SettingsCatalog'
+                Name     = $p.name
+                Id       = $p.id
+                Browsers = @(Get-PaForcelistBrowsersFromBlob -Blob $jsonBlob)
+                Values   = ($ids | Select-Object -Unique)
             })
         }
     }
@@ -239,60 +272,55 @@ if (-not $Remove) {
                     }
                 } elseif ($pv.value -is [string]) { $ids += $pv.value }
             }
+            $catText  = "$($dv.definition.categoryPath) $defName".ToLowerInvariant()
+            $dvBrowsers = @()
+            if ($catText -match 'edge')          { $dvBrowsers += 'Edge' }
+            if ($catText -match 'chrome|google') { $dvBrowsers += 'Chrome' }
+            if (-not $dvBrowsers)                { $dvBrowsers = @('Chrome', 'Edge') }
             $conflicts.Add([pscustomobject]@{
-                Type   = 'AdminTemplate'
-                Name   = ("{0}  ({1})" -f $c.displayName, $defName)
-                Id     = $c.id
-                Values = ($ids | Select-Object -Unique)
+                Type     = 'AdminTemplate'
+                Name     = ("{0}  ({1})" -f $c.displayName, $defName)
+                Id       = $c.id
+                Browsers = $dvBrowsers
+                Values   = ($ids | Select-Object -Unique)
             })
         }
     }
 
-    # v2.4.110: when a conflict exists AND the operator passed -Force, we now
-    # automatically SKIP writing the forcelist definition values (Edge +
-    # Chrome) -- the conflicting policy already owns that registry slot, and
-    # double-writing causes IME slot-cycling. The non-conflicting parts
-    # (ExtensionInstallSources, ExtensionSettings, Tenant catalog) still
-    # get pushed. Tracked via $script:SkipForcelistDueToConflict so the
-    # later loop knows to skip Forcelist entries.
-    $script:SkipForcelistDueToConflict = $false
+    # v2.4.150: a conflict no longer aborts. Forcelist registry slots are
+    # PER-BROWSER, so only the browser(s) actually owned by another policy
+    # get their forcelist setting left 'Not configured' in our profile;
+    # everything else (the other browser's forcelist, Sources,
+    # ExtensionSettings, Tenant catalog) is still pushed. -Force writes
+    # every forcelist value anyway -- only for operators who verified the
+    # overlap is harmless.
+    $script:SkipForcelistBrowsers = @()
     if ($conflicts.Count -gt 0) {
         Write-Host ''
         Write-Host "[CONFLICT] Found $($conflicts.Count) other Intune policy/policies that already manage ExtensionInstallForcelist:" -ForegroundColor Yellow
         foreach ($c in $conflicts) {
-            Write-Host ("  - [{0}] {1}" -f $c.Type, $c.Name) -ForegroundColor Yellow
+            Write-Host ("  - [{0}] {1}  (browser: {2})" -f $c.Type, $c.Name, ($c.Browsers -join ' + ')) -ForegroundColor Yellow
             foreach ($v in $c.Values) { Write-Host ("        {0}" -f $v) -ForegroundColor Gray }
         }
         Write-Host ''
         Write-Host "Why this matters:" -ForegroundColor Cyan
-        Write-Host "  IME does NOT reliably merge ExtensionInstallForcelist writes across mechanisms." -ForegroundColor Gray
-        Write-Host "  Creating an ADMX-backed '$DisplayName' profile in this tenant will cause" -ForegroundColor Gray
-        Write-Host "  PIM Activator's forcelist entry to cycle on/off in the HKLM registry on every" -ForegroundColor Gray
-        Write-Host "  sync, because the other policy/policies above will overwrite our entry." -ForegroundColor Gray
+        Write-Host "  IME does NOT reliably merge ExtensionInstallForcelist writes across mechanisms;" -ForegroundColor Gray
+        Write-Host "  double-writing the same browser's forcelist slot makes the entries cycle on/off" -ForegroundColor Gray
+        Write-Host "  in the HKLM registry on every sync." -ForegroundColor Gray
         Write-Host ''
-        Write-Host "Recommended fix:" -ForegroundColor Cyan
-        Write-Host "  Open the existing policy in Intune portal and ADD this forcelist row to both" -ForegroundColor Gray
-        Write-Host "  the Chrome and Edge extension lists (then delete any blank trailing rows):" -ForegroundColor Gray
-        Write-Host ("    {0};{1}" -f $ExtensionId, $UpdateUrl) -ForegroundColor Green
-        Write-Host ''
-        if (-not $Force) {
-            Write-Host "Aborting. Re-run with -Force to push the non-forcelist policies (Sources, Settings, Tenant catalog) only." -ForegroundColor Red
-            Write-Host "When -Force is used and a conflict exists, this script auto-skips the forcelist definition values" -ForegroundColor Gray
-            Write-Host "so the existing policy's forcelist is left untouched (no IME slot-cycling)." -ForegroundColor Gray
-            return
+        if ($Force) {
+            Write-Host "-Force supplied: writing ALL forcelist values anyway (you have verified the overlap is harmless)." -ForegroundColor Yellow
+        } else {
+            $script:SkipForcelistBrowsers = @($conflicts | ForEach-Object { $_.Browsers } | Select-Object -Unique)
+            Write-Host ("Proceeding: this profile will leave the {0} forcelist setting(s) 'Not configured' so the" -f ($script:SkipForcelistBrowsers -join ' + ')) -ForegroundColor Yellow
+            Write-Host "existing policy keeps sole ownership of that registry slot. The exact Intune setting" -ForegroundColor Yellow
+            Write-Host "name(s) to re-enable later are printed below at the [SKIP] line(s)." -ForegroundColor Yellow
+            Write-Host ''
+            Write-Host "To force-install PIM Activator on the skipped browser(s) NOW, add this row to the" -ForegroundColor Cyan
+            Write-Host "existing policy's forcelist instead (then delete any blank trailing rows):" -ForegroundColor Cyan
+            Write-Host ("    {0};{1}" -f $ExtensionId, $UpdateUrl) -ForegroundColor Green
         }
-        Write-Host "-Force supplied: proceeding -- WITHOUT writing the forcelist definition values." -ForegroundColor Yellow
-        Write-Host "                  Only Sources, Settings + Tenant catalog will be pushed via this ADMX profile." -ForegroundColor Gray
         Write-Host ''
-        Write-Host "ACTION REQUIRED on the existing conflicting policy (Intune portal):" -ForegroundColor Cyan
-        foreach ($c in $conflicts) {
-            Write-Host ("  - {0}: '{1}'" -f $c.Type, $c.Name) -ForegroundColor Cyan
-        }
-        Write-Host "  Open that policy and add this forcelist row to BOTH the Chrome and Edge extension lists:" -ForegroundColor Cyan
-        Write-Host ("    {0};{1}" -f $ExtensionId, $UpdateUrl) -ForegroundColor Green
-        Write-Host "  (delete any trailing blank rows the Settings Catalog UI leaves behind)" -ForegroundColor Gray
-        Write-Host ''
-        $script:SkipForcelistDueToConflict = $true
     } else {
         Write-Host "[OK] No existing ExtensionInstallForcelist policies found in tenant." -ForegroundColor Green
     }
@@ -343,7 +371,7 @@ if ($admxRow -and $admxRow.status -in @('available','uploadCompleted')) {
     Write-Host "Uploading ADMX ($($admxBytes.Length) bytes) + ADML ($($admlBytes.Length) bytes)..." -ForegroundColor Cyan
     # v2.4.107: explicit @odata.type discriminators on both the outer entity
     # and the inner groupPolicyUploadedLanguageFile collection items. Without
-    # them, some Intune tenants (Nunagreen 2026-06-10) silently NULL out
+    # them, some strict Intune tenants (observed 2026-06-10) silently NULL out
     # every field in the POSTed payload -- the row gets created but
     # targetNamespace, targetPrefix, content, languageCodes,
     # groupPolicyUploadedLanguageFiles all come back as null/empty, and
@@ -359,7 +387,7 @@ if ($admxRow -and $admxRow.status -in @('available','uploadCompleted')) {
     # languageCode field, and we just observe it as 'en-US' on the row
     # after upload. v2.4.107 added it explicitly trying to satisfy a strict
     # tenant; v2.4.108 reverted that part. The @odata.type discriminators
-    # stay -- those ARE required by strict tenants like Nunagreen.
+    # stay -- those ARE required by strict tenants.
     $admxBody = @{
         '@odata.type'                     = '#microsoft.graph.groupPolicyUploadedDefinitionFile'
         fileName                          = $admxFileName
@@ -376,25 +404,43 @@ if ($admxRow -and $admxRow.status -in @('available','uploadCompleted')) {
             content       = $admlBase64
         })
     } | ConvertTo-Json -Depth 20
-    $admxCreated = Invoke-MgGraphRequest -Method POST -Uri 'https://graph.microsoft.com/beta/deviceManagement/groupPolicyUploadedDefinitionFiles' -Body $admxBody -ContentType 'application/json' -ErrorAction Stop
-    Write-Host "[OK] ADMX uploaded (id=$($admxCreated.id), status=$($admxCreated.status)). Waiting for Intune to process..." -ForegroundColor Green
-    $upDeadline = (Get-Date).AddMinutes(3)
-    do {
-        Start-Sleep -Seconds 4
+    # v2.4.150: one POST + poll, returning a verdict instead of throwing from
+    # inside the poll's try -- the old deliberate uploadFailed throw was
+    # swallowed by the poll's own catch ("Status poll failed" warning) and
+    # the script limped on until a confusing 'Could not find Tenant catalog'
+    # error much later.
+    function Invoke-PaAdmxUploadOnce {
+        param([string]$Body, [int]$Attempt)
         try {
-            $chk = Invoke-MgGraphRequest -Method GET -Uri "https://graph.microsoft.com/beta/deviceManagement/groupPolicyUploadedDefinitionFiles/$($admxCreated.id)" -ErrorAction Stop
+            $created = Invoke-MgGraphRequest -Method POST -Uri 'https://graph.microsoft.com/beta/deviceManagement/groupPolicyUploadedDefinitionFiles' -Body $Body -ContentType 'application/json' -ErrorAction Stop
+        } catch {
+            # First WRITE of every run. A 403 here despite the
+            # DeviceManagementConfiguration.ReadWrite.All scope means the
+            # Intune SERVICE rejected the caller's directory roles -- the
+            # Graph scope alone is not enough for Intune writes.
+            if ("$_" -match '403|Forbidden|not authorized') {
+                throw ("Intune refused the write (403): $($_.Exception.Message)`nYour Graph scope is fine -- this is Intune RBAC. Activate 'Intune Administrator' (or a scoped Intune RBAC role with Device Configurations create/update) in PIM, then run Disconnect-MgGraph and re-run this script so the fresh token carries the role.")
+            }
+            throw
+        }
+        Write-Host "[OK] ADMX uploaded (id=$($created.id), status=$($created.status)). Waiting for Intune to process (attempt $Attempt)..." -ForegroundColor Green
+        $deadline = (Get-Date).AddMinutes(3)
+        do {
+            Start-Sleep -Seconds 4
+            $chk = $null
+            try { $chk = Invoke-MgGraphRequest -Method GET -Uri "https://graph.microsoft.com/beta/deviceManagement/groupPolicyUploadedDefinitionFiles/$($created.id)" -ErrorAction Stop }
+            catch { Write-Warning "Status poll failed (will keep polling): $($_.Exception.Message)"; continue }
             Write-Host "  status: $($chk.status)" -ForegroundColor Gray
-            if ($chk.status -in @('available','uploadCompleted')) { break }
-            if ($chk.status -in @('uploadFailed','removalFailed')) {
+            if ($chk.status -in @('available', 'uploadCompleted')) { return @{ Ok = $true; Row = $chk } }
+            if ($chk.status -in @('uploadFailed', 'removalFailed')) {
                 # uploadInfo is often null on uploadFailed; dump the WHOLE row
-                # to surface anything Intune did set (errorMessage, statusDetails,
-                # etc -- field names vary across Intune service versions). Also
-                # dump groupPolicyOperations sub-collection which sometimes
-                # carries the validation error when uploadInfo doesn't.
+                # to surface anything Intune did set, plus the
+                # groupPolicyOperations sub-collection which sometimes carries
+                # the validation error when uploadInfo doesn't.
                 Write-Host '--- Failed ADMX row (full Graph response) ---' -ForegroundColor Red
                 Write-Host (($chk | ConvertTo-Json -Depth 8) -split "`n" | ForEach-Object { "  $_" } | Out-String) -ForegroundColor Gray
                 try {
-                    $opsResp = Invoke-MgGraphRequest -Method GET -Uri "https://graph.microsoft.com/beta/deviceManagement/groupPolicyUploadedDefinitionFiles/$($admxCreated.id)/groupPolicyOperations" -ErrorAction Stop
+                    $opsResp = Invoke-MgGraphRequest -Method GET -Uri "https://graph.microsoft.com/beta/deviceManagement/groupPolicyUploadedDefinitionFiles/$($created.id)/groupPolicyOperations" -ErrorAction Stop
                     if ($opsResp.value -and $opsResp.value.Count -gt 0) {
                         Write-Host '--- groupPolicyOperations sub-collection ---' -ForegroundColor Red
                         foreach ($op in $opsResp.value) {
@@ -406,10 +452,32 @@ if ($admxRow -and $admxRow.status -in @('available','uploadCompleted')) {
                     Write-Host "  (could not fetch groupPolicyOperations sub-collection: $($_.Exception.Message))" -ForegroundColor Gray
                 }
                 Write-Host '--- end of failure detail ---' -ForegroundColor Red
-                throw "Intune rejected the ADMX. status=$($chk.status). See full Graph response above for any details Intune did return. Common causes on tenants where this works elsewhere: (a) tenant has reached its ADMX upload cap (rare), (b) the ADMX/ADML pair conflicts with a stale row that didn't fully clean up -- run the script again, or (c) Intune service-side transient (wait 5-10 min, retry)."
+                return @{ Ok = $false; Row = $chk }
             }
-        } catch { Write-Warning "Status poll failed: $($_.Exception.Message)"; break }
-    } while ((Get-Date) -lt $upDeadline)
+        } while ((Get-Date) -lt $deadline)
+        return @{ Ok = $false; Row = $null; TimedOut = $true }
+    }
+
+    $admxResult = Invoke-PaAdmxUploadOnce -Body $admxBody -Attempt 1
+    if (-not $admxResult.Ok -and $admxResult.Row) {
+        # Field case (2026-06-12): first ingest nulled the row + uploadFailed,
+        # the immediate re-run succeeded -- Intune's ADMX pipeline is
+        # transiently flaky. Remove the corpse, let the service settle, retry once.
+        Write-Host 'First ingestion attempt failed -- removing the failed row and retrying once...' -ForegroundColor Yellow
+        try { Invoke-MgGraphRequest -Method POST -Uri "https://graph.microsoft.com/beta/deviceManagement/groupPolicyUploadedDefinitionFiles/$($admxResult.Row.id)/remove" -ErrorAction Stop | Out-Null } catch { Write-Warning "/remove failed: $($_.Exception.Message)" }
+        $rmDeadline2 = (Get-Date).AddMinutes(2)
+        do {
+            Start-Sleep -Seconds 3
+            try { Invoke-MgGraphRequest -Method GET -Uri "https://graph.microsoft.com/beta/deviceManagement/groupPolicyUploadedDefinitionFiles/$($admxResult.Row.id)" -ErrorAction Stop | Out-Null }
+            catch { break }   # 404 = corpse gone
+        } while ((Get-Date) -lt $rmDeadline2)
+        Start-Sleep -Seconds 10
+        $admxResult = Invoke-PaAdmxUploadOnce -Body $admxBody -Attempt 2
+    }
+    if (-not $admxResult.Ok) {
+        $why = if ($admxResult.TimedOut) { 'Intune did not reach a terminal ADMX status within 3 minutes' } else { 'Intune rejected the ADMX (status=uploadFailed) twice in a row' }
+        throw "$why. The Tenant catalog policy cannot deploy without the ingested ADMX, so stopping here. Wait 5-10 minutes and re-run this script (stale rows are removed automatically). If it persists: check Devices > Configuration > Import ADMX in the Intune portal and Intune service health."
+    }
 }
 
 # ---- 2. Lookup existing Configuration Profile by display name -----------
@@ -584,14 +652,11 @@ $extSettingsJson = (@{ $ExtensionId = @{
 }} | ConvertTo-Json -Depth 5 -Compress)
 
 $resolved = @{}
-# v2.4.110: when a conflicting forcelist policy was detected upstream AND
-# -Force was used, skip the Forcelist policy entirely so we don't write
-# a definition value that would compete with the existing policy.
-$policyKeys = if ($script:SkipForcelistDueToConflict) {
-    @('Sources','Settings','Catalog')
-} else {
-    @('Forcelist','Sources','Settings','Catalog')
-}
+# Always resolve all four definitions -- even a conflict-skipped browser's
+# Forcelist is resolved, because the [SKIP] message prints its exact Intune
+# setting name + category so the operator can configure it manually later.
+# Only the WRITE is skipped (write loop below).
+$policyKeys = @('Forcelist','Sources','Settings','Catalog')
 foreach ($b in $browsersToInclude) {
     $resolved[$b] = @{}
     foreach ($k in $policyKeys) {
@@ -676,12 +741,16 @@ function New-DefValue {
 }
 
 foreach ($b in $browsersToInclude) {
-    # v2.4.110: skip the Forcelist write when an upstream conflicting policy
-    # exists. The conflict scan + -Force branch sets
-    # $script:SkipForcelistDueToConflict and prints the action-required
-    # instructions for the operator; here we just skip the POST.
-    if ($script:SkipForcelistDueToConflict) {
-        Write-Host "  [SKIP] $b Forcelist not written -- existing policy in tenant owns this registry slot. Add '$forcelistValue' there." -ForegroundColor Yellow
+    # v2.4.150: leave the Forcelist 'Not configured' (= no definition value)
+    # for browsers whose registry slot another tenant policy already owns.
+    # Print the exact Intune setting name + category so the operator can
+    # configure it in THIS profile later if the conflicting policy goes away.
+    if ($script:SkipForcelistBrowsers -contains $b) {
+        $defFL = $resolved[$b]['Forcelist'].Definition
+        Write-Host "  [SKIP] $b Forcelist left 'Not configured' -- another policy in the tenant owns this registry slot." -ForegroundColor Yellow
+        Write-Host ("         To configure it later in this profile ('{0}') once the conflict is gone:" -f $DisplayName) -ForegroundColor Gray
+        Write-Host ("           Setting : '{0}'  (category: {1})" -f $defFL.displayName, $defFL.categoryPath) -ForegroundColor Gray
+        Write-Host ("           Row     : {0}" -f $forcelistValue) -ForegroundColor Gray
     } else {
         # Forcelist: list of "<extId>;<updateUrl>"
         $defFL = $resolved[$b]['Forcelist'].Definition

@@ -208,7 +208,31 @@ function Assert-ActiveEntraRoles {
     }
 }
 
-Assert-ActiveEntraRoles -NeedsConsentRole:([bool]$GrantConsent)
+# Preferred check: the session token's wids claim (works with the lean Edge
+# token, where /me/memberOf hides roles without a directory-read scope) and
+# auto re-auths ONCE when the PIM activation postdates the token. Falls back
+# to the memberOf-based check for MSAL / operator-provided sessions where
+# the raw token is not in hand.
+if ($null -ne (Get-PaTokenRoleIds)) {
+    $_reconnect = { $script:ctx = Connect-PimActivatorGraph -RequiredScopes $_requiredScopes -TenantId $TenantId -UseEdge:([bool]$UseEdge) }
+    Assert-PaSessionRole -Reconnect $_reconnect `
+        -AnyOfRoleIds @(
+            '62e90394-69f5-4237-9190-012177145e10'   # Global Administrator
+            '9b895d92-2cd3-44c7-9d02-a6ac2d5ea5c3'   # Application Administrator
+            '158c047a-c907-4556-b7ef-446551a6b5f7'   # Cloud Application Administrator
+        ) `
+        -RoleDescription "an ACTIVE 'Application Administrator' / 'Cloud Application Administrator' / 'Global Administrator' role (needed for the app registration + service principals)"
+    if ($GrantConsent) {
+        Assert-PaSessionRole -Reconnect $_reconnect `
+            -AnyOfRoleIds @(
+                '62e90394-69f5-4237-9190-012177145e10'   # Global Administrator
+                'e8611ab8-c189-46e8-94e1-60213ab1f814'   # Privileged Role Administrator
+            ) `
+            -RoleDescription "an ACTIVE 'Privileged Role Administrator' or 'Global Administrator' role (needed for -GrantConsent; alternatively re-run with -GrantConsent:`$false)"
+    }
+} else {
+    Assert-ActiveEntraRoles -NeedsConsentRole:([bool]$GrantConsent)
+}
 
 # ---------------------------------------------------------------------------
 # Resolve Microsoft Graph delegated permission ids
