@@ -962,6 +962,72 @@ function Invoke-PimPreflightValidation {
     }
 
     # ------------------------------------------------------------------
+    # PIM-POL-001 + PIM-APR-001: policy templates + approvals (LIFECYCLE-
+    # GOVERNANCE phases 3+4). A PolicyTemplate value must reference an
+    # existing templates/policy/<id>.policytemplate[.custom].json; rows whose
+    # effective template requires approval need owners (>=2 for Serial, or
+    # the escalation has nowhere to go).
+    # ------------------------------------------------------------------
+    $policyTpls = @{}
+    try {
+        $polDir = Join-Path (Split-Path -Parent (Split-Path -Parent $PSScriptRoot)) 'templates\policy'
+        if (Test-Path -LiteralPath $polDir) {
+            $polFiles = @(Get-ChildItem -LiteralPath $polDir -Filter '*.policytemplate.json' -ErrorAction SilentlyContinue) +
+                        @(Get-ChildItem -LiteralPath $polDir -Filter '*.policytemplate.custom.json' -ErrorAction SilentlyContinue)
+            $rawTpls = @{}
+            foreach ($pf in $polFiles) {
+                try { $pj = Get-Content -LiteralPath $pf.FullName -Raw | ConvertFrom-Json; if ($pj.id) { $rawTpls[[string]$pj.id] = $pj } } catch {}
+            }
+            foreach ($tid in @($rawTpls.Keys)) {
+                $pj = $rawTpls[$tid]
+                $apr = $null
+                if ($pj.extends -and $rawTpls.ContainsKey([string]$pj.extends) -and $rawTpls[[string]$pj.extends].rules -and $rawTpls[[string]$pj.extends].rules.Approval) {
+                    $apr = $rawTpls[[string]$pj.extends].rules.Approval
+                }
+                if ($pj.rules -and $pj.rules.Approval) { $apr = $pj.rules.Approval }
+                $policyTpls[$tid] = @{ ApprovalMode = $(if ($apr -and $apr.mode) { [string]$apr.mode } else { 'None' }) }
+            }
+        }
+    } catch { $policyTpls = @{} }
+
+    if ($policyTpls.Count -gt 0) {
+        foreach ($defBase in @('PIM-Definitions-Roles','PIM-Definitions-Tasks','PIM-Definitions-Services','PIM-Definitions-Processes','PIM-Definitions-Resources','PIM-Definitions-Departments','PIM-Definitions-Organization')) {
+            if (-not $loaded.ContainsKey($defBase)) { continue }
+            $rows = $loaded[$defBase].rows
+            for ($i = 0; $i -lt $rows.Count; $i++) {
+                $r = $rows[$i]
+                if (Test-PimRowIsBlank -Row $r) { continue }
+                $tplVal = (Get-PimRowValue -Row $r -Column 'PolicyTemplate').Trim()
+                $gName  = (Get-PimRowValue -Row $r -Column 'GroupName').Trim()
+
+                if ($tplVal -and -not $policyTpls.ContainsKey($tplVal)) {
+                    [void]$violations.Add((New-PimViolation -Severity 'error' -Code 'PIM-POL-001' -Csv $defBase -Row $i -Column 'PolicyTemplate' `
+                        -Message "PolicyTemplate '$tplVal' for '$gName' has no matching templates\policy\$tplVal.policytemplate.json -- the engine skips the row's policy apply." `
+                        -Suggestion ("Available templates: " + (@($policyTpls.Keys | Sort-Object) -join ', ') + ".")))
+                    continue
+                }
+                $effTpl = if ($tplVal) { $tplVal } else { 'default' }
+                if (-not $policyTpls.ContainsKey($effTpl)) { continue }
+                $mode = $policyTpls[$effTpl].ApprovalMode
+                if ($mode -eq 'None') { continue }
+
+                $ownersRaw = (Get-PimRowValue -Row $r -Column 'Owners').Trim()
+                if (-not $ownersRaw) { $ownersRaw = (Get-PimRowValue -Row $r -Column 'SponsorUpn').Trim() }
+                $owners = @($ownersRaw -split '[;,]' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+                if ($owners.Count -eq 0) {
+                    [void]$violations.Add((New-PimViolation -Severity 'error' -Code 'PIM-APR-001' -Csv $defBase -Row $i -Column 'Owners' `
+                        -Message "'$gName' links policy template '$effTpl' ($mode approval) but the row has NO owners -- there is nobody to approve, so the engine will not apply the approval rule." `
+                        -Suggestion "Add approver UPNs to the Owners column (semicolon-separated). Serial approval escalates down the list in order."))
+                } elseif ($mode -eq 'Serial' -and $owners.Count -lt 2) {
+                    [void]$violations.Add((New-PimViolation -Severity 'warning' -Code 'PIM-APR-001' -Csv $defBase -Row $i -Column 'Owners' `
+                        -Message "'$gName' uses SERIAL approval with only one owner -- an unanswered request has nowhere to escalate." `
+                        -Suggestion "Add a second owner, or switch the template's approval mode to Parallel."))
+                }
+            }
+        }
+    }
+
+    # ------------------------------------------------------------------
     # PIM-WL-*: workload RBAC rows (PIM-Assignments-Workloads). The engine
     # applies these via workloads/connectors/<id>.connector.json, so a row
     # whose Workload has no connector file is silently unappliable -- catch

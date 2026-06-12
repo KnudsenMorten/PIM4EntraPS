@@ -1424,3 +1424,17 @@ Write-Output "******************************************************************
     } else {
         Write-host "  [workloads] no PIM-Assignments-Workloads.custom.csv in config -- workload RBAC step skipped (opt-in; see docs/WORKLOAD-CONNECTORS.md)." -ForegroundColor DarkGray
     }
+
+######################################################################################################################
+# Policy templates + approvals | LIFECYCLE-GOVERNANCE phases 3+4
+######################################################################################################################
+# Groups whose definition row links a PolicyTemplate (templates/policy/) get
+# the template's rule overrides applied; hash-gated, so unchanged templates
+# are a per-group no-op. Approvers come from the row's Owners column
+# (Parallel = native any-one-wins; Serial = engine escalation sweep below).
+# 'default' carries no overrides, so tenants that never link a template see
+# zero behavior change.
+
+    Invoke-PimPolicyTemplateApply
+
+    Invoke-PimApprovalEscalation
