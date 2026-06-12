@@ -10571,6 +10571,70 @@ function Invoke-PimMembershipDriftCleanup {
     if ($driftCount -eq 0) { Write-Host "  [Drift] no unexpected user members found." -ForegroundColor Green }
 }
 
+function Invoke-PimResourceDiscovery {
+    <#
+    .SYNOPSIS
+        Engine-side resource discovery (LIFECYCLE-GOVERNANCE phase 9):
+        detect NEW Azure subscriptions and NEW Entra role definitions since
+        the last run, log + audit them. $global:PIM_ResourceDiscoveryMode =
+        'Off' | 'Notify' (default). Baseline: output/state/discovery-baseline.json
+        (first run establishes it silently). Auto-CREATION of definition/
+        assignment rows is the documented follow-up -- the Manager's
+        Governance tab surfaces the same items for the portal flow.
+    #>
+    [CmdletBinding()]
+    param()
+
+    $mode = if ($global:PIM_ResourceDiscoveryMode) { "$($global:PIM_ResourceDiscoveryMode)" } else { 'Notify' }
+    if ($mode -eq 'Off') { return }
+
+    $current = @{ subscriptionIds = @(); entraRoleIds = @(); names = @{} }
+    try {
+        foreach ($s in @(Get-AzSubscription -ErrorAction Stop)) {
+            $current.subscriptionIds += "$($s.Id)"
+            $current.names["$($s.Id)"] = "$($s.Name)"
+        }
+    } catch { Write-Warning "  [Discovery] subscription enumeration failed: $($_.Exception.Message)" }
+    try {
+        foreach ($r in @(Get-MgRoleManagementDirectoryRoleDefinition -All -ErrorAction Stop)) {
+            $current.entraRoleIds += "$($r.Id)"
+            $current.names["$($r.Id)"] = "$($r.DisplayName)"
+        }
+    } catch { Write-Warning "  [Discovery] Entra role enumeration failed: $($_.Exception.Message)" }
+    if ($current.subscriptionIds.Count -eq 0 -and $current.entraRoleIds.Count -eq 0) { return }
+
+    $stateDir = Join-Path (Get-PimOutputDir) 'state'
+    if (-not (Test-Path -LiteralPath $stateDir)) { New-Item -ItemType Directory -Path $stateDir -Force | Out-Null }
+    $baseFile = Join-Path $stateDir 'discovery-baseline.json'
+
+    if (-not (Test-Path -LiteralPath $baseFile)) {
+        ([ordered]@{ savedAtUtc = [datetime]::UtcNow.ToString('o'); subscriptionIds = $current.subscriptionIds; entraRoleIds = $current.entraRoleIds } | ConvertTo-Json -Depth 4) |
+            Set-Content -LiteralPath $baseFile -Encoding UTF8
+        Write-Host "  [Discovery] baseline established ($($current.subscriptionIds.Count) subscription(s), $($current.entraRoleIds.Count) Entra role(s)) -- new resources are reported from the next run." -ForegroundColor Gray
+        return
+    }
+
+    $baseline = $null
+    try { $baseline = Get-Content -LiteralPath $baseFile -Raw -Encoding UTF8 | ConvertFrom-Json } catch { return }
+    $newSubs  = @($current.subscriptionIds | Where-Object { @($baseline.subscriptionIds) -notcontains $_ })
+    $newRoles = @($current.entraRoleIds | Where-Object { @($baseline.entraRoleIds) -notcontains $_ })
+    if ($newSubs.Count -eq 0 -and $newRoles.Count -eq 0) { return }
+
+    Write-Host ""
+    Write-Host "Resource discovery: $($newSubs.Count) new subscription(s), $($newRoles.Count) new Entra role(s) since the baseline." -ForegroundColor Cyan
+    foreach ($id in $newSubs) {
+        Write-Host "  [Discovery] NEW Azure subscription: $($current.names[$id]) ($id) -- stage its PIM definition/assignment rows via the Manager." -ForegroundColor Yellow
+        Write-PimAuditEvent -Action 'resource.discovered' -Target "$($current.names[$id])" -After @{ kind = 'azure-subscription'; id = $id }
+    }
+    foreach ($id in $newRoles) {
+        Write-Host "  [Discovery] NEW Entra role definition: $($current.names[$id]) ($id)" -ForegroundColor Yellow
+        Write-PimAuditEvent -Action 'resource.discovered' -Target "$($current.names[$id])" -After @{ kind = 'entra-role'; id = $id }
+    }
+    # Each new item notifies once: roll the baseline forward.
+    ([ordered]@{ savedAtUtc = [datetime]::UtcNow.ToString('o'); subscriptionIds = $current.subscriptionIds; entraRoleIds = $current.entraRoleIds } | ConvertTo-Json -Depth 4) |
+        Set-Content -LiteralPath $baseFile -Encoding UTF8
+}
+
 function Invoke-PimTapProvisioning {
     <#
     .SYNOPSIS
