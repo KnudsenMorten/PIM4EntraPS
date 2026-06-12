@@ -1,9 +1,10 @@
 # Release notes for PIM4EntraPS
 
-## v2.4.165
+## v2.4.166
 
 Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monorepo:
 
+- release: PIM4EntraPS v2.4.166 -- phase 12a groundwork: sql/platform-schema.sql (platform.Tenants w/ rings, TenantApps w/ thumbprint identifiers, Secrets Always-Encrypted-ready OR KeyVaultUri pointer w/ shape check, pim.CentralAdmins, platform.AuditEvents, pim.vw_AdminTenantTargets implementing engine ring semantics) + platform-seed-demo.sql (fictional 5-tenant/3-admin MSP sim). Deployed + verified on BOTH matrix targets: Azure SQL serverless w/ Entra-only auth (SPN admin, token connections) AND on-prem SQL 2022 Express w/ Windows Integrated; identical fan-out ring0->5, ring1->3, ring2->2 (486fa199)
 - release: PIM4EntraPS v2.4.165 -- phase 12 design: on-prem/hybrid SQL Server first-class alongside Azure SQL/MI. Repository connection profile $global:PIM_SqlConnection w/ AuthMode EntraInteractive|EntraSpn|WindowsIntegrated, TLS enforced, SQL logins disabled in every mode; Azure = Entra MFA+CA at the DB door, classic on-prem AD = Windows Integrated/Kerberos (operator) + gMSA (engine) with the Manager Entra sign-in as the app-layer MFA boundary + subnet scoping, SQL 2022+ Arc = optional Entra-on-prem middle ground; DB roles mirror Reader/Admin/SuperAdmin everywhere (cb3b328b)
 - release: PIM4EntraPS v2.4.164 -- phase 12 / v3.0 design (doc § 16): Manager Entra MFA sign-in (Edge PKCE loopback, amr-claim MFA check, RBAC by Entra UPN, CA applies; protects use-of-Manager not files-on-compromised-host); remote operation interim via -ConfigRoot SMB; SQL data store decision (Azure SQL / SQL MI / on-prem, Entra-only auth = no SQL creds, laptop Manager connects as operator w/ MFA at the DB door, engine as SPN/MSI, DB roles mirror Reader/Admin/SuperAdmin) with migration path: Get-PimRows/Save-PimRows repository abstraction + PIM_DataStore Csv|Sql (Csv supported indefinitely), schema = 15 logical tables + state + audit + intake, idempotent Invoke-PimCsvToDbMigration, nightly CSV snapshot export (25165e36)
 - release: PIM4EntraPS v2.4.163 -- phase 11 design: per-type intake routing (config/intake-routing.custom.json Approve default / Auto) + Invoke-PimIntakeProcessor headless scheduled task (drains the durable MID file-drop inbox every ~10 min; Auto -> verified rows in PIM-Assignments-FromIntake.custom.csv overlay unioned by the engine, no raw input to the engine + no Manager write-race; Approve -> queued + operator nudge mail); MID delivery decoupled from Manager lifetime (files queue in the directory); guardrails non-negotiable (no Auto for approval-required groups, template-only onboarding) (3e4dde55)
@@ -33,7 +34,6 @@ Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monor
 - release: PIM4EntraPS v2.4.139 -- PIM Manager Delegation Map (new landing tab): the PIM v2 model as a 4-column flow board (People -> Roles & Org Groups -> Capability Bundles -> Permissions & Targets, with terminal permission groups rendered as workload/app-RBAC groups for Power BI/Intune/Defender XDR/3rd-party); click-to-light full path in both directions with selection-only wires (Active amber, Eligible blue), every box = Definitions row / every wire = Assignments row with open-in-grid jump; search dims non-matches; static-mode compatible. Tabs reordered to operator lifecycle: Create -> Delegation Map -> Validate -> Review & Save -> Maintenance -> Advanced View (grid) (55be87b9)
 - release: PIM4EntraPS v2.4.138 -- PIM Manager role pickers auto-load from the tenant: new azure-rbac-roles tenant-list kind (Get-AzRoleDefinition, per-instance cache, included in -RefreshTenantLists); Azure perm-group workflow picks the RBAC role from the tenant list (fills exact name + alias, free-text fallback); both perm-group workflows auto-load empty lists silently on open via ensureTenantLists; AzScopePermission renders as a dropdown in the Configuration grid. Kills the typed-role-name spelling-error class; validator STALE checks remain the safety net (a2afd078)
 - release: PIM4EntraPS v2.4.137 -- PIM Manager validator: PIM-NAME-002 false positive on EVERY UPN fixed -- [regex]::Escape escapes { but not } (.NET asymmetry), so the {Token}->.+ replacement never matched and UPNs were checked against the literal template string; closing brace now matched optionally-escaped. Demo tenants validate fully clean (0 errors, 0 warnings) (87116adf)
-- release: PIM4EntraPS v2.4.136 -- PIM Manager: collapsible file rail on the Configuration tab (chevron toggle, 280px -> 30px strip, preference persists in localStorage); E2E-verified collapse/persist/expand with zero console errors (0713483c)
 
 ---
 
@@ -42,6 +42,15 @@ Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monor
 > **Curated changelog.** The publish workflow auto-prepends recent monorepo commits as a raw activity log; this file is the human-friendly narrative on top.
 
 ---
+
+## v2.4.166 -- phase 12a groundwork: the MSP platform schema (ships) + dual deployment proven
+
+New `sql/` folder with the common platform registry shared by PIM4EntraPS and TenantManager (§ 16):
+
+- **`platform-schema.sql`** (idempotent): `platform.Tenants` (ring per tenant), `platform.TenantApps` (per-tenant/per-product AppId + CertificateThumbprint -- identifiers in plain columns; private keys stay in the machine cert store), `platform.Secrets` (Always-Encrypted-ready CipherValue OR a KeyVaultUri pointer -- shape-checked so a row is exactly one of the two), `pim.CentralAdmins` (central IT admins with Ring + admin-template link), `platform.AuditEvents` (append-only, the jsonl schema as a table), and **`pim.vw_AdminTenantTargets`** -- the MSP ring fan-out view implementing the engine's exact semantics (admin.Ring <= tenant.Ring: a ring-0 admin reaches every tenant, a ring-2 consultant only test tenants).
+- **`platform-seed-demo.sql`**: fictional 5-tenant / 3-admin MSP simulation (rings 2/2/1/0/0 vs admins ring 0/1/2) for testing.
+
+Deployment proven on BOTH targets per the § 16 matrix: an Azure SQL logical server (serverless GP_S_Gen5_1, auto-pause) with **Entra-only authentication** (the bootstrap SQL login is disabled by design; admin = the automation SPN, access-token connections only), and **SQL Server 2022 Express on-prem** via Windows Integrated auth. Identical schema + seed verified on both: ring-0 admin -> 5 tenants, ring-1 -> 3, ring-2 -> 2. Dev note: local Express currently runs its self-signed TLS cert (clients use TrustServerCertificate); issue a real certificate before production use.
 
 ## v2.4.165 -- design (phase 12): on-prem/hybrid SQL Server is first-class alongside Azure SQL
 
