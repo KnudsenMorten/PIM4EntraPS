@@ -1,9 +1,10 @@
 # Release notes for PIM4EntraPS
 
-## v2.4.147
+## v2.4.148
 
 Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monorepo:
 
+- release: PIM4EntraPS v2.4.148 -- Deploy-PimActivatorBackend: empty role list from /me/memberOf is inconclusive (lean 3-scope token lacks directory-read, Graph filters roles silently -- field op HAD activated CAA+PRA and was wrongly blocked) so warn+continue; non-empty lists still enforced. Edge mode discards cached MSAL contexts before the first Graph call (cached context re-auths via system-default browser = the IE+Edge double-launch). Harness green PS 5.1 + pwsh 7 (f56ef452)
 - release: PIM4EntraPS v2.4.147 -- Deploy-PimActivatorBackend signs in through Edge by default (own auth-code+PKCE S256 flow on a loopback TcpListener with the first-party Graph CLI Tools app, token to Connect-MgGraph -AccessToken) because MSAL always launches the system-default browser and legacy IE on servers mangles the redirect into state-mismatch loops; Graph SDK version-conflict pre-flight (mixed Microsoft.Graph.* submodule versions = confirmed cause of silent-null cmdlets + broken token cache); version banner from solution VERSION file; post-connect /me probe reconnects dead cached sessions up front; -AccessToken pre-connects supported; device-code flow removed entirely (MS blocks globally). Loopback flow harness green on PS 5.1 + pwsh 7 (16762fda)
 - release: PIM4EntraPS v2.4.146 -- Deploy-PimActivatorBackend pre-flights ACTIVE Entra roles (app-admin family for app-reg/SP steps; PRA/GA when -GrantConsent) with PIM activate-then-reconnect guidance, fail-open if membership read is blocked; all SP reads/creates moved to raw Invoke-MgGraphRequest (GET servicePrincipals(appId=...) + POST) because New-MgServicePrincipal returned silent $null on a permission denial, breaking the v2.4.145 re-fetch with an empty-ServicePrincipalId bind. 12-case harness green on PS 5.1 + pwsh 7 (38f2fd0b)
 - release: PIM4EntraPS v2.4.145 -- Deploy-PimActivatorBackend auto-instantiates missing first-party SPs (Microsoft Graph 00000003 / Azure Service Management 797f4846) via New-MgServicePrincipal instead of throwing "should never happen"; fresh tenants only provision well-known Microsoft SPs on first use. Resolve-FirstPartySp helper re-fetches after create so Oauth2PermissionScopes is populated; create-failure throws SP name + appId + tenant + Graph error. Harness green on PS 5.1 + pwsh 7 (1c61fee8)
@@ -33,7 +34,6 @@ Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monor
 - release: PIM4EntraPS v2.4.121 -- AD-create branch matches CSV TierLevel against the Tier convention (T0/T1/T2/T3) -- T0 -> PathAdminsL0T0, T1/T2/T3/blank -> PathAdmins. Previously the engine matched Level literals (L0/L1) so Tier-formatted CSVs silently dropped every Create row. L0 still accepted as T0-equivalent for back-compat. Level and Tier are distinct dimensions; CSV column is the Tier. (5d0cdd62)
 - release: PIM4EntraPS v2.4.120 -- AD-create branch surfaces an explicit [ERROR] when CSV TierLevel is blank or not L0/L1 (previously: dangling 'Creating AD account' header with no New-ADUser call, no exception, no password file row, row silently dropped) (93e53c67)
 - release: PIM4EntraPS v2.4.119 -- engine imports AutomateITPS.AD + calls Resolve-PlatformGMSACredentials after Initialize-PlatformLegacyIdentity so KV stub passwords on gMSA Legacy.* slots get swapped for the real managed password read from the DC (gMSA msDS-ManagedPassword); the AD branch then auths normally via -Credential (3e002976)
-- release: PIM4EntraPS v2.4.118 -- AD branch: revert v2.4.117 gMSA -Credential omission; restore v1 always-pass-Credential contract (customer test on SYSTEM-running host proved dropping -Credential cascades through to computer-account auth which lacks write rights). Hard-fail Get-ADUser + conditional Write-PimAdminPassword improvements kept. (c766ed13)
 
 ---
 
@@ -42,6 +42,16 @@ Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monor
 > **Curated changelog.** The publish workflow auto-prepends recent monorepo commits as a raw activity log; this file is the human-friendly narrative on top.
 
 ---
+
+## v2.4.148 -- Activator backend deploy: empty role list is inconclusive, not fatal + cached MSAL sessions discarded in Edge mode
+
+Two field fixes on top of v2.4.147, both caught live:
+
+- **Role pre-flight: empty result no longer blocks.** Listing directory-role memberships via `/me/memberOf` needs a directory-read scope (`Directory.Read.All` / `RoleManagement.Read.Directory`) that the script's lean three-scope token does NOT carry -- Graph silently filters the roles out instead of returning 403. Field case: operator had genuinely activated Cloud App Admin + PRA in PIM and the check still said "(none)" and refused to run. Empty now warns ("cannot see your role memberships with this token (or none are active)") and continues; a non-empty list is complete and is still enforced exactly as before.
+- **Edge mode discards cached MSAL sessions up front.** A cached `Connect-MgGraph` interactive context re-auths through the SYSTEM DEFAULT browser the moment any call needs a fresh token -- so the field run opened legacy IE (which died on state-mismatch) AND Edge side by side. With `-UseEdge` (the default), any cached non-provided-token context is now disconnected before the first Graph call; sign-in goes through Edge, period.
+- Sanity-checked the Edge flow's authorize URL against the live `organizations` endpoint during debugging: HTTP 200, login page renders, no AADSTS errors -- URL construction confirmed good.
+
+Verified: parse-clean + harness (discard-precedes-probe ordering, Edge loopback flow end-to-end with PKCE round-trip, empty-roles-continue, insufficient-roles-throw, CAA+PRA-pass) green in real PS 5.1 **and** pwsh 7 processes.
 
 ## v2.4.147 -- Activator backend deploy: sign-in through Edge by default + Graph SDK version-conflict pre-flight + version banner
 
