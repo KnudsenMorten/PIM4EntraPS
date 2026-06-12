@@ -40,7 +40,7 @@
     Optional. If omitted, uses whatever Connect-MgGraph defaulted to.
 
 .PARAMETER ExistingThumbprint
-    Use a pre-issued cert (must already be in Cert:\CurrentUser\My with the
+    Use a pre-issued cert (must already be in the selected store -- Cert:\CurrentUser\My, or Cert:\LocalMachine\My with -MachineStore -- with the
     private key present). When omitted, the script generates a fresh
     self-signed cert.
 
@@ -84,7 +84,7 @@
     .\Install-PimEngineAppRegistration.ps1 -GrantConsent -IncludeExchange -ExportPfxPath C:\TMP\pim-engine.pfx
 
 .EXAMPLE
-    # Reuse an existing cert (already in Cert:\CurrentUser\My):
+    # Reuse an existing cert (already in the selected store):
     .\Install-PimEngineAppRegistration.ps1 -ExistingThumbprint '0123ABCD...' -GrantConsent
 
 .NOTES
@@ -126,7 +126,14 @@ param(
 
     [switch]$AzureRbac,
 
-    [switch]$IncludeExchange
+    [switch]$IncludeExchange,
+
+    # Create/reuse the certificate in Cert:\LocalMachine\My instead of
+    # Cert:\CurrentUser\My. Use this on the engine host: the machine store is
+    # visible in certlm.msc, readable by service/scheduled-task identities
+    # (grant the private key to the run-as account), and matches the
+    # platform security design. Requires an elevated session.
+    [switch]$MachineStore
 )
 
 $ErrorActionPreference = 'Stop'
@@ -235,32 +242,33 @@ if ($IncludeExchange) {
 Write-Host ""
 Write-Host "Preparing certificate..." -ForegroundColor Cyan
 
+$certStore = if ($MachineStore) { 'Cert:\LocalMachine\My' } else { 'Cert:\CurrentUser\My' }
 if ($ExistingThumbprint) {
-    $cert = Get-Item -Path "Cert:\CurrentUser\My\$ExistingThumbprint" -ErrorAction SilentlyContinue
-    if (-not $cert) { throw "Cert with thumbprint $ExistingThumbprint not found in Cert:\CurrentUser\My." }
-    Write-Host "  using existing cert: $($cert.Subject) (thumbprint $($cert.Thumbprint))" -ForegroundColor DarkGray
+    $cert = Get-Item -Path "$certStore\$ExistingThumbprint" -ErrorAction SilentlyContinue
+    if (-not $cert) { throw "Cert with thumbprint $ExistingThumbprint not found in $certStore." }
+    Write-Host "  using existing cert: $($cert.Subject) (thumbprint $($cert.Thumbprint), store $certStore)" -ForegroundColor DarkGray
 } else {
     # Re-run friendly: reuse the newest still-valid cert with our subject
     # before minting another one. The v2.4.166 behavior minted a fresh cert
     # on EVERY run, orphaning the previous key + desyncing the platform
     # registry's recorded thumbprint.
-    $cert = Get-ChildItem 'Cert:\CurrentUser\My' |
+    $cert = Get-ChildItem $certStore |
         Where-Object { $_.Subject -eq $CertSubject -and $_.NotAfter -gt (Get-Date).AddDays(30) -and $_.HasPrivateKey } |
         Sort-Object NotAfter -Descending | Select-Object -First 1
     if ($cert) {
-        Write-Host "  reusing existing cert: $($cert.Subject) (thumbprint $($cert.Thumbprint), expires $($cert.NotAfter.ToString('yyyy-MM-dd')))" -ForegroundColor DarkGray
+        Write-Host "  reusing existing cert: $($cert.Subject) (thumbprint $($cert.Thumbprint), expires $($cert.NotAfter.ToString('yyyy-MM-dd')), store $certStore)" -ForegroundColor DarkGray
     } else {
         $notAfter = (Get-Date).AddYears($CertValidityYears)
         $cert = New-SelfSignedCertificate `
             -Subject $CertSubject `
-            -CertStoreLocation 'Cert:\CurrentUser\My' `
+            -CertStoreLocation $certStore `
             -KeyExportPolicy Exportable `
             -KeySpec Signature `
             -KeyLength 2048 `
             -KeyAlgorithm RSA `
             -HashAlgorithm SHA256 `
             -NotAfter $notAfter
-        Write-Host "  created self-signed cert: $($cert.Subject) (thumbprint $($cert.Thumbprint), expires $($cert.NotAfter.ToString('yyyy-MM-dd')))" -ForegroundColor Green
+        Write-Host "  created self-signed cert: $($cert.Subject) (thumbprint $($cert.Thumbprint), expires $($cert.NotAfter.ToString('yyyy-MM-dd')), store $certStore)" -ForegroundColor Green
     }
 }
 
