@@ -819,10 +819,11 @@
     const body = document.getElementById('govBody');
     if (!isServer) { body.innerHTML = '<div style="color:#57606a">Static mode -- governance data needs the server.</div>'; return; }
     const esc = escapeHtml;
-    let emergency = { active: false }, mail = { templates: [] }, audit = { events: [], total: 0 };
+    let emergency = { active: false }, mail = { templates: [] }, audit = { events: [], total: 0 }, disc = { baselineMissing: true, newItems: [] };
     try { emergency = await api('GET', '/api/emergency-status'); } catch (_) {}
     try { mail = await api('GET', '/api/mail-templates'); } catch (_) {}
     try { audit = await api('GET', '/api/audit?limit=100'); } catch (_) {}
+    try { disc = await api('GET', '/api/discovered-resources'); } catch (_) {}
     document.getElementById('govEmergencyBadge').style.display = emergency.active ? '' : 'none';
 
     const h = [];
@@ -848,6 +849,24 @@
         `<div style="color:#57606a;font-size:11px;margin-top:4px;">Verified against the passphrase hash in <code>config/emergency.custom.ps1</code>. The engine disables the approval rule on its next run and auto-restores the linked policy template at expiry. Group owners are notified; everything lands in the audit trail.</div>`);
     } else {
       h.push('<div style="margin-top:6px;color:#57606a;font-size:12px;">Inactive. Activation requires the SuperAdmin role + the emergency passphrase.</div>');
+    }
+    h.push('</div>');
+
+    // Discovered resources (phase 9, Portal mode)
+    h.push('<div style="margin-bottom:16px;"><span style="font-size:11px;text-transform:uppercase;letter-spacing:.5px;color:#0969da;font-weight:600;">Discovered resources</span>');
+    if (disc.baselineMissing) {
+      h.push(`<div style="margin-top:6px;font-size:12.5px;color:#57606a;">No discovery baseline yet${disc.currentCounts ? ` (current: ${disc.currentCounts.azureScopes} Azure scope(s), ${disc.currentCounts.entraRoles} Entra role(s))` : ''}.` +
+        `${PIM_ROLE !== 'Reader' ? ' <button id="govDiscAck">Set baseline from current state</button>' : ''} New subscriptions / roles appearing after the baseline show up here and in the engine run log (resource.discovered).</div>`);
+    } else if ((disc.newItems || []).length === 0) {
+      h.push(`<div style="margin-top:6px;font-size:12.5px;color:#1a7f37;">No new resources since the baseline (${esc((disc.baselineAtUtc || '').substring(0, 16).replace('T', ' '))} UTC).</div>`);
+    } else {
+      h.push('<table class="grid" style="margin-top:6px;font-size:12px;"><thead><tr><th>Kind</th><th>Name</th><th>Id</th></tr></thead><tbody>');
+      for (const it of disc.newItems) {
+        h.push(`<tr><td>${esc(it.kind)}</td><td>${esc(it.displayName || '')}</td><td style="font-family:Consolas,monospace;font-size:11px;">${esc(it.id)}</td></tr>`);
+      }
+      h.push('</tbody></table>');
+      h.push(`<div style="margin-top:6px;font-size:12px;">Onboard them via the <b>Create</b> tab wizards (perm-group / role group), then` +
+        `${PIM_ROLE !== 'Reader' ? ' <button id="govDiscAck">Acknowledge all (reset baseline)</button>' : ' acknowledge (Admin role required)'}.</div>`);
     }
     h.push('</div>');
 
@@ -883,6 +902,8 @@
     };
     const rst = document.getElementById('govEmRestore');
     if (rst) rst.onclick = async () => { try { await api('POST', '/api/emergency-restore'); } catch (_) {} renderGovernance(); };
+    const ack = document.getElementById('govDiscAck');
+    if (ack) ack.onclick = async () => { try { await api('POST', '/api/discovery-baseline'); } catch (e3) { alert(e3.message); } renderGovernance(); };
   }
 
   // ===================================================================

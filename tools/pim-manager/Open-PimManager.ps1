@@ -2001,6 +2001,74 @@ function Handle-Request {
         }
 
         # -------------------------------------------------------------------
+        # Resource auto-discovery (LIFECYCLE-GOVERNANCE phase 9, Portal mode)
+        # Diffs the _tenantSync caches (azure scopes + entra roles) against
+        # cache/<instance>/discovery-baseline.json. Acknowledge = snapshot
+        # the current state as the new baseline.
+        # -------------------------------------------------------------------
+        if ($path -eq '/api/discovered-resources' -and $method -eq 'GET') {
+            $script:lastHeartbeat = Get-Date
+            $cacheDir = Join-Path $PSScriptRoot ("cache\{0}" -f $script:PimInstanceName)
+            $baseFile = Join-Path $cacheDir 'discovery-baseline.json'
+            $readItems = {
+                param($file)
+                try {
+                    if (Test-Path -LiteralPath $file) { @((Get-Content -LiteralPath $file -Raw -Encoding UTF8 | ConvertFrom-Json).items) } else { @() }
+                } catch { @() }
+            }
+            $scopes = & $readItems (Join-Path $cacheDir 'azure-scopes.json')
+            $roles  = & $readItems (Join-Path $cacheDir 'entra-roles.json')
+            if (-not (Test-Path -LiteralPath $baseFile)) {
+                Write-JsonResponse -Response $resp -Status 200 -Body @{
+                    baselineMissing = $true
+                    currentCounts   = @{ azureScopes = $scopes.Count; entraRoles = $roles.Count }
+                    newItems        = @()
+                }
+                return 200
+            }
+            $baseline = $null
+            try { $baseline = Get-Content -LiteralPath $baseFile -Raw -Encoding UTF8 | ConvertFrom-Json } catch {}
+            $knownScopes = @($baseline.azureScopeIds | Where-Object { $_ })
+            $knownRoles  = @($baseline.entraRoleIds | Where-Object { $_ })
+            $newItems = @()
+            foreach ($s in $scopes) { if ($knownScopes -notcontains "$($s.id)") { $newItems += @{ kind = "azure-$($s.type)"; id = "$($s.id)"; displayName = "$($s.displayName)"; scopePath = "$($s.scopePath)" } } }
+            foreach ($r2 in $roles)  { if ($knownRoles -notcontains "$($r2.id)")  { $newItems += @{ kind = 'entra-role'; id = "$($r2.id)"; displayName = "$($r2.displayName)" } } }
+            Write-JsonResponse -Response $resp -Status 200 -Body @{
+                baselineMissing = $false
+                baselineAtUtc   = "$($baseline.savedAtUtc)"
+                newItems        = $newItems
+            }
+            return 200
+        }
+
+        if ($path -eq '/api/discovery-baseline' -and $method -eq 'POST') {
+            $script:lastHeartbeat = Get-Date
+            if (-not (Test-PimManagerRoleAtLeast -Minimum 'Admin')) {
+                Write-JsonResponse -Response $resp -Status 403 -Body @{ error = 'Admin role required to acknowledge discovered resources.' }
+                return 403
+            }
+            $cacheDir = Join-Path $PSScriptRoot ("cache\{0}" -f $script:PimInstanceName)
+            $readItems = {
+                param($file)
+                try {
+                    if (Test-Path -LiteralPath $file) { @((Get-Content -LiteralPath $file -Raw -Encoding UTF8 | ConvertFrom-Json).items) } else { @() }
+                } catch { @() }
+            }
+            $scopes = & $readItems (Join-Path $cacheDir 'azure-scopes.json')
+            $roles  = & $readItems (Join-Path $cacheDir 'entra-roles.json')
+            $baseline = [ordered]@{
+                savedAtUtc    = [datetime]::UtcNow.ToString('o')
+                azureScopeIds = @($scopes | ForEach-Object { "$($_.id)" })
+                entraRoleIds  = @($roles | ForEach-Object { "$($_.id)" })
+            }
+            if (-not (Test-Path -LiteralPath $cacheDir)) { New-Item -ItemType Directory -Path $cacheDir -Force | Out-Null }
+            ($baseline | ConvertTo-Json -Depth 4) | Set-Content -LiteralPath (Join-Path $cacheDir 'discovery-baseline.json') -Encoding UTF8
+            Write-PimManagerAuditEvent -Action 'resource.baseline' -Target $script:PimInstanceName -After @{ azureScopes = @($baseline.azureScopeIds).Count; entraRoles = @($baseline.entraRoleIds).Count }
+            Write-JsonResponse -Response $resp -Status 200 -Body @{ ok = $true; savedAtUtc = $baseline.savedAtUtc }
+            return 200
+        }
+
+        # -------------------------------------------------------------------
         # Date-expression live preview (LIFECYCLE-GOVERNANCE phase 1) --
         # the onboarding wizard previews ProvisionDate / TAPStartDate while
         # the operator types ("resolves to Mon 2026-07-01 08:00 UTC").

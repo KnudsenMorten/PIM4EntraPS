@@ -221,7 +221,7 @@ All engine and Manager transactions converge on **`output/audit/pim-audit-<yyyyM
 | 6 | Unified jsonl audit (viewer lands with the Governance tab; optional AzLogDcrIngestPS sink is a follow-up) | **shipped v2.4.157** |
 | 7 | Manager RBAC + Governance tab (role banner, audit viewer, mail-template status, emergency panel) | **shipped v2.4.158** |
 | 8 | Emergency override (passphrase-hash verification in config/emergency.custom.ps1; KV verification = follow-up) | **shipped v2.4.158** |
-| 9 | Resource auto-discovery (Portal mode first, Engine mode second) | manager, engine |
+| 9 | Resource discovery: engine Notify sweep (audit `resource.discovered`) + Manager Portal surface/acknowledge; automatic ROW creation for discovered resources is the documented follow-up | **shipped v2.4.159** |
 
 Phase order optimizes for dependency flow (templates before policies before approvals before emergency) and for the operator's immediate scenario (scheduling + TAP windows first).
 

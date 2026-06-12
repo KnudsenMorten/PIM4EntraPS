@@ -1470,3 +1470,12 @@ Write-Output "******************************************************************
     Invoke-PimGroupRetirement
 
     Invoke-PimMembershipDriftCleanup
+
+######################################################################################################################
+# Resource discovery | LIFECYCLE-GOVERNANCE phase 9
+######################################################################################################################
+# New Azure subscriptions / Entra role definitions since the last run are
+# logged + audited (resource.discovered) so they can be onboarded via the
+# Manager. $global:PIM_ResourceDiscoveryMode = Off | Notify (default).
+
+    Invoke-PimResourceDiscovery
