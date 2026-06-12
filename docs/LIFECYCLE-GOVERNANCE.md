@@ -224,6 +224,7 @@ All engine and Manager transactions converge on **`output/audit/pim-audit-<yyyyM
 | 9 | Resource discovery: engine Notify sweep (audit `resource.discovered`) + Manager Portal surface/acknowledge; automatic ROW creation for discovered resources is the documented follow-up | **shipped v2.4.159** |
 | 10 | Access reviews (§ 14): engine-owned Entra review schedules (auto-apply OFF), decision sweep, deny tombstones + PIM-REV-001 | design agreed |
 | 11 | External request intake (§ 15): SNOW → MID-server file-drop inbox → MANAGER ingests + approval queue (engine never reads external input); signed typed requests, template-only onboarding, high-priv hard deny | design agreed |
+| 12 | Manager Entra MFA sign-in + SQL data store with Entra-only auth + CSV→DB migration (§ 16) — the v3.0 line | design agreed |
 
 Phase order optimizes for dependency flow (templates before policies before approvals before emergency) and for the operator's immediate scenario (scheduling + TAP windows first).
 
@@ -264,6 +265,22 @@ Phase order optimizes for dependency flow (templates before policies before appr
 6. **Full audit**: `request.received` / `request.rejected` (with reason) / `request.applied` in the jsonl.
 
 Attack analysis: an attacker needs the SNOW signing key AND internal file-drop access, and even then can only *request* template-shaped low-priv changes that default to human approval — with every step in the audit trail.
+
+## 16. Manager MFA + remote operation + SQL data store (design, phase 12 / v3.0)
+
+Three operator asks that converge on one architecture:
+
+**Manager MFA**: on startup the Manager requires an interactive Entra sign-in (reusing the Edge PKCE loopback flow from the activator backend), verifies the token's `amr` claim includes MFA, and maps RBAC (Reader/Admin/SuperAdmin) to the **Entra UPN** instead of the Windows identity -- which also activates everything Conditional Access can add (compliant device, sign-in frequency). Honest scope: this protects USE of the Manager and its tenant connections; it cannot protect the files on the automation server from an attacker who already has code execution there -- host hardening (PAW, JIT) remains its own discipline.
+
+**Remote operation today**: `-ConfigRoot \\server\share` over SMB works now, but it is a workaround (ACLs, duplicate module installs, no concurrency).
+
+**SQL data store (v3.0)**: the original ROADMAP decision (stay CSV, revisit at v3.0) predates multiple writers (Manager + engine + intake processor), state layers, RBAC, and audit. Decision: **Azure SQL (or SQL MI / on-prem SQL, customer choice) with Entra-only authentication** -- no SQL logins to steal; the laptop Manager connects as the operator's Entra identity (MFA + CA enforced at the database door), the engine as its existing SPN/MSI; DB roles mirror Reader/Admin/SuperAdmin.
+
+Migration path:
+1. **Repository abstraction first**: `Get-PimRows -Table X` / `Save-PimRows` with `$global:PIM_DataStore = 'Csv' | 'Sql'`; Manager, engine and validator route through it -- both stores work during transition, and `Csv` stays supported indefinitely for small installs.
+2. **Schema** mirrors the existing model: the 15 logical tables + state (tap/policy/offboard/review-tombstones) + the audit log (jsonl -> append-only table, finally queryable) + intake requests.
+3. **`Invoke-PimCsvToDbMigration`**: idempotent per-instance importer -- validator runs first, rows load, counts verify, CSVs are archived (never deleted).
+4. **Safety nets**: nightly CSV snapshot export from the DB (git-diffability + the Excel escape hatch preserved).
 
 ## Out of scope / known limitations
 

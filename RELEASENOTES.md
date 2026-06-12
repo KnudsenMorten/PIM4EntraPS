@@ -1,9 +1,10 @@
 # Release notes for PIM4EntraPS
 
-## v2.4.163
+## v2.4.164
 
 Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monorepo:
 
+- release: PIM4EntraPS v2.4.164 -- phase 12 / v3.0 design (doc § 16): Manager Entra MFA sign-in (Edge PKCE loopback, amr-claim MFA check, RBAC by Entra UPN, CA applies; protects use-of-Manager not files-on-compromised-host); remote operation interim via -ConfigRoot SMB; SQL data store decision (Azure SQL / SQL MI / on-prem, Entra-only auth = no SQL creds, laptop Manager connects as operator w/ MFA at the DB door, engine as SPN/MSI, DB roles mirror Reader/Admin/SuperAdmin) with migration path: Get-PimRows/Save-PimRows repository abstraction + PIM_DataStore Csv|Sql (Csv supported indefinitely), schema = 15 logical tables + state + audit + intake, idempotent Invoke-PimCsvToDbMigration, nightly CSV snapshot export (25165e36)
 - release: PIM4EntraPS v2.4.163 -- phase 11 design: per-type intake routing (config/intake-routing.custom.json Approve default / Auto) + Invoke-PimIntakeProcessor headless scheduled task (drains the durable MID file-drop inbox every ~10 min; Auto -> verified rows in PIM-Assignments-FromIntake.custom.csv overlay unioned by the engine, no raw input to the engine + no Manager write-race; Approve -> queued + operator nudge mail); MID delivery decoupled from Manager lifetime (files queue in the directory); guardrails non-negotiable (no Auto for approval-required groups, template-only onboarding) (3e4dde55)
 - release: PIM4EntraPS v2.4.162 -- phase 11 design correction: the MANAGER ingests external requests (SNOW -> MID inbox -> Manager verify + approval queue -> pending -> Review & Save -> CSV), the engine never reads external input and stays purely declarative; no lights-out path bypassing operator + CSV (2cc21156)
 - release: PIM4EntraPS v2.4.161 -- design phases 10+11 in docs/LIFECYCLE-GOVERNANCE.md: access reviews as hybrid (Entra review UX, engine-owned schedules with auto-apply OFF + decision sweep; Deny -> engine tombstone suppression layer treated as Action=Remove so the CSV never re-delegates a review-removed member; PIM-REV-001 reconciliation flag) + external request intake via ServiceNow MID Server file-drop inbox (fully internal pull-only, create-only writer ACL, signed typed requests w/ nonce ledger, admin.onboard restricted to template ids, approval-required groups hard-denied, activation out of scope, Manager approval queue default, full audit; Azure Storage queue as no-MID fallback) (7400b94c)
@@ -33,7 +34,6 @@ Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monor
 - release: PIM4EntraPS v2.4.137 -- PIM Manager validator: PIM-NAME-002 false positive on EVERY UPN fixed -- [regex]::Escape escapes { but not } (.NET asymmetry), so the {Token}->.+ replacement never matched and UPNs were checked against the literal template string; closing brace now matched optionally-escaped. Demo tenants validate fully clean (0 errors, 0 warnings) (87116adf)
 - release: PIM4EntraPS v2.4.136 -- PIM Manager: collapsible file rail on the Configuration tab (chevron toggle, 280px -> 30px strip, preference persists in localStorage); E2E-verified collapse/persist/expand with zero console errors (0713483c)
 - release: PIM4EntraPS v2.4.135 -- PIM Manager: PIM-RING-001 downgraded to warning (never blocks Save) + Fix-all gained a ring bucket defaulting to repair-to-Ring-2 (least privilege; clear-to-0 as explicit alternative); instances.custom.json entries can declare per-tenant connections (tenantId+appId + certThumbprint for mgmt-box machine-store certs, OR keyVaultName+secretName for one central KV secret per tenant -- the cloud-portable shape an App Service port reads via Managed Identity); instance switch drops the Graph session and retargets the SPN globals so Active Assignments + tenant-cache refresh hit the selected tenant. E2E-verified against 3 demo tenant instances (afcba721)
-- release: PIM4EntraPS v2.4.134 -- deployment rings for staged MSP admin rollout: Ring column on Account-Definitions-Admins (blank=0=veteran/all tenants, 1=pilot+test, 2=new hire/test only) x $global:PIM_TenantRing per tenant (unset=0=production, safe default) x one rule (apply iff admin.Ring <= tenant.Ring); engine filters at all 4 admin load sites (CSV+SQL accounts/assignments) via shared helpers with UserName->ring map; SQL-ready (collapses to WHERE Ring <= @TenantRing later). Manager: Ring dropdown in grid, onboarding workflow defaults new hires to ring 2, PIM-RING-001 validator error on invalid values (engine treats them as 0 = over-grant). Plus professional Create-tab workflow names (00f1afe7)
 
 ---
 
@@ -42,6 +42,14 @@ Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monor
 > **Curated changelog.** The publish workflow auto-prepends recent monorepo commits as a raw activity log; this file is the human-friendly narrative on top.
 
 ---
+
+## v2.4.164 -- design (phase 12 / v3.0): Manager Entra MFA + SQL data store with CSV migration
+
+New § 16 in docs/LIFECYCLE-GOVERNANCE.md, answering three operator asks with one architecture:
+
+- **Manager MFA**: interactive Entra sign-in at Manager startup (the proven Edge PKCE loopback flow), `amr` claim must include MFA, RBAC maps to the Entra UPN -- Conditional Access (compliant device, sign-in frequency) applies. Documented honestly: protects USE of the Manager, not the files on a compromised host.
+- **Remote operation**: `-ConfigRoot \\server\share` works today as a stopgap; the real answer is the data store move.
+- **SQL data store (the v3.0 line)**: Azure SQL / SQL MI / on-prem SQL with **Entra-only authentication** -- no SQL credentials to steal; the laptop Manager connects as the operator (MFA at the database door), the engine as its SPN/MSI; DB roles mirror Reader/Admin/SuperAdmin. Migration path: repository abstraction (`$global:PIM_DataStore = 'Csv'|'Sql'`, CSV supported indefinitely), schema mirroring the 15 logical tables + state + audit + intake, idempotent `Invoke-PimCsvToDbMigration` (validate -> load -> verify -> archive CSVs), nightly CSV snapshot export to keep git-diffability and the Excel escape hatch.
 
 ## v2.4.163 -- design (phase 11): per-type Approve/Auto routing + the intake processor
 
