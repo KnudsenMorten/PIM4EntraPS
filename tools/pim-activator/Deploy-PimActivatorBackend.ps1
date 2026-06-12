@@ -127,8 +127,7 @@ $ErrorActionPreference = 'Stop'
 # pim-activator deploy scripts.
 . (Join-Path $PSScriptRoot '_PimActivatorAuth.ps1')
 
-Write-Host "Deploy-PimActivatorBackend -- PIM4EntraPS $(Get-PimActivatorSolutionVersion)" -ForegroundColor Cyan
-Write-Host "Graph SDK  : v$(Assert-GraphModuleVersions -Modules 'Microsoft.Graph.Authentication','Microsoft.Graph.Applications','Microsoft.Graph.Identity.SignIns')" -ForegroundColor Cyan
+Show-PimActivatorBanner -ScriptName 'Deploy-PimActivatorBackend' -GraphModules 'Microsoft.Graph.Authentication', 'Microsoft.Graph.Applications', 'Microsoft.Graph.Identity.SignIns'
 
 # ---------------------------------------------------------------------------
 # Connect (or verify) Microsoft Graph

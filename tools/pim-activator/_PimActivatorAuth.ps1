@@ -29,6 +29,41 @@ function Assert-GraphModuleVersions {
     $vers[0]
 }
 
+# Standard troubleshooting banner: script + solution version, the exact
+# module versions in play, and the PowerShell runtime. Version drift (stale
+# Graph submodules, old Az, PS 5.1-vs-7 differences) has repeatedly been the
+# real root cause behind "weird" auth/deserialization failures -- having the
+# versions in every console capture removes a whole class of guesswork.
+# -GraphModules also VERIFIES the set loads at one common version
+# (Assert-GraphModuleVersions); -AzModules just reports what is installed.
+function Show-PimActivatorBanner {
+    param(
+        [Parameter(Mandatory)][string]$ScriptName,
+        [string[]]$GraphModules,
+        [string[]]$AzModules,
+        # For scripts where Graph is an optional code path (e.g. the client
+        # deploy's tenantCatalog auto-discovery): report instead of throwing
+        # when the module is missing or version-mixed.
+        [switch]$GraphOptional
+    )
+    Write-Host "$ScriptName -- PIM4EntraPS $(Get-PimActivatorSolutionVersion)" -ForegroundColor Cyan
+    if ($GraphModules) {
+        try {
+            Write-Host "Graph SDK  : v$(Assert-GraphModuleVersions -Modules $GraphModules)" -ForegroundColor Cyan
+        } catch {
+            if (-not $GraphOptional) { throw }
+            Write-Host "Graph SDK  : unavailable -- $(($_.Exception.Message -split '\.')[0])" -ForegroundColor DarkYellow
+        }
+    }
+    foreach ($m in @($AzModules | Where-Object { $_ })) {
+        $mod = Get-Module -Name $m -ErrorAction SilentlyContinue
+        if (-not $mod) { $mod = Get-Module -ListAvailable -Name $m -ErrorAction SilentlyContinue | Sort-Object Version -Descending | Select-Object -First 1 }
+        $v = if ($mod) { "v$($mod.Version)" } else { 'not installed' }
+        Write-Host ("{0,-11}: {1}" -f $m, $v) -ForegroundColor Cyan
+    }
+    Write-Host "PowerShell : $($PSVersionTable.PSVersion) ($($PSVersionTable.PSEdition))" -ForegroundColor Cyan
+}
+
 # The guidance shown whenever a host cannot complete the sign-in.
 function Get-PaBrokenAuthHelp {
     @"
