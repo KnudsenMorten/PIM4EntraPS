@@ -240,17 +240,28 @@ if ($ExistingThumbprint) {
     if (-not $cert) { throw "Cert with thumbprint $ExistingThumbprint not found in Cert:\CurrentUser\My." }
     Write-Host "  using existing cert: $($cert.Subject) (thumbprint $($cert.Thumbprint))" -ForegroundColor DarkGray
 } else {
-    $notAfter = (Get-Date).AddYears($CertValidityYears)
-    $cert = New-SelfSignedCertificate `
-        -Subject $CertSubject `
-        -CertStoreLocation 'Cert:\CurrentUser\My' `
-        -KeyExportPolicy Exportable `
-        -KeySpec Signature `
-        -KeyLength 2048 `
-        -KeyAlgorithm RSA `
-        -HashAlgorithm SHA256 `
-        -NotAfter $notAfter
-    Write-Host "  created self-signed cert: $($cert.Subject) (thumbprint $($cert.Thumbprint), expires $($cert.NotAfter.ToString('yyyy-MM-dd')))" -ForegroundColor Green
+    # Re-run friendly: reuse the newest still-valid cert with our subject
+    # before minting another one. The v2.4.166 behavior minted a fresh cert
+    # on EVERY run, orphaning the previous key + desyncing the platform
+    # registry's recorded thumbprint.
+    $cert = Get-ChildItem 'Cert:\CurrentUser\My' |
+        Where-Object { $_.Subject -eq $CertSubject -and $_.NotAfter -gt (Get-Date).AddDays(30) -and $_.HasPrivateKey } |
+        Sort-Object NotAfter -Descending | Select-Object -First 1
+    if ($cert) {
+        Write-Host "  reusing existing cert: $($cert.Subject) (thumbprint $($cert.Thumbprint), expires $($cert.NotAfter.ToString('yyyy-MM-dd')))" -ForegroundColor DarkGray
+    } else {
+        $notAfter = (Get-Date).AddYears($CertValidityYears)
+        $cert = New-SelfSignedCertificate `
+            -Subject $CertSubject `
+            -CertStoreLocation 'Cert:\CurrentUser\My' `
+            -KeyExportPolicy Exportable `
+            -KeySpec Signature `
+            -KeyLength 2048 `
+            -KeyAlgorithm RSA `
+            -HashAlgorithm SHA256 `
+            -NotAfter $notAfter
+        Write-Host "  created self-signed cert: $($cert.Subject) (thumbprint $($cert.Thumbprint), expires $($cert.NotAfter.ToString('yyyy-MM-dd')))" -ForegroundColor Green
+    }
 }
 
 $certBytes  = $cert.GetRawCertData()
@@ -269,12 +280,13 @@ if ($existing.Count -gt 1) {
 }
 
 $keyCredentials = @(@{
-    Type           = 'AsymmetricX509Cert'
-    Usage          = 'Verify'
-    Key            = $certBytes
-    DisplayName    = "PIM4EntraPS Engine cert ($($cert.NotBefore.ToString('yyyy-MM-dd')) -> $($cert.NotAfter.ToString('yyyy-MM-dd')))"
-    StartDateTime  = $cert.NotBefore
-    EndDateTime    = $cert.NotAfter
+    Type                = 'AsymmetricX509Cert'
+    Usage               = 'Verify'
+    Key                 = $certBytes
+    CustomKeyIdentifier = $cert.GetCertHash()   # thumbprint bytes -- the cross-representation identity
+    DisplayName         = "PIM4EntraPS Engine cert ($($cert.NotBefore.ToString('yyyy-MM-dd')) -> $($cert.NotAfter.ToString('yyyy-MM-dd')))"
+    StartDateTime       = $cert.NotBefore
+    EndDateTime         = $cert.NotAfter
 })
 
 if ($existing) {
@@ -282,9 +294,17 @@ if ($existing) {
     # Preserve any other key credentials already on the app (e.g. older certs
     # the customer rotated in). We add ours alongside; rotation drops the old
     # ones manually.
+    # Dedupe by CERT THUMBPRINT via CustomKeyIdentifier: Graph NEVER returns
+    # the public key bytes when READING keyCredentials (Key = $null on every
+    # existing entry), so the old first-20-bytes-of-Key grouping crashed on
+    # any re-run ("Cannot index into a null array"). CustomKeyIdentifier is
+    # present on both read entries and our new one. Existing entries win the
+    # tie (their KeyId is preserved; Graph keeps their key material).
     $allKeys = @($existing.KeyCredentials) + $keyCredentials
-    # Dedupe by thumbprint (use first 20 bytes of the Key as a key-id surrogate).
-    $allKeys = $allKeys | Group-Object { ($_.Key[0..19] | ForEach-Object { $_.ToString('x2') }) -join '' } | ForEach-Object { $_.Group[0] }
+    $allKeys = $allKeys | Group-Object {
+        if ($_.CustomKeyIdentifier) { (@($_.CustomKeyIdentifier | ForEach-Object { $_.ToString('x2') }) -join '') }
+        else { [guid]::NewGuid().ToString() }   # no identity -> keep as-is
+    } | ForEach-Object { $_.Group[0] }
 
     Update-MgApplication -ApplicationId $existing.Id `
         -RequiredResourceAccess $requiredResourceAccess `

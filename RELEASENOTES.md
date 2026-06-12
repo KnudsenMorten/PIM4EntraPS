@@ -1,9 +1,10 @@
 # Release notes for PIM4EntraPS
 
-## v2.4.166
+## v2.4.167
 
 Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monorepo:
 
+- release: PIM4EntraPS v2.4.167 -- Install-PimEngineAppRegistration re-run fixes: keyCredentials merge now dedupes by thumbprint via CustomKeyIdentifier (Graph returns Key=$null on read -> old first-20-bytes grouping crashed every re-run with null-array index; existing entries win ties preserving KeyId/key material; new credential stamped with GetCertHash); cert auto-reuse of newest still-valid matching-subject store cert (>30d, has private key) instead of minting a duplicate per run (one mgmt-host key for N per-tenant apps = MSP pattern); -ExistingThumbprint still pins. Parse + merge unit test green. Follow-up queued: -MachineStore option for LocalMachine\My (4bfc72b8)
 - release: PIM4EntraPS v2.4.166 -- phase 12a groundwork: sql/platform-schema.sql (platform.Tenants w/ rings, TenantApps w/ thumbprint identifiers, Secrets Always-Encrypted-ready OR KeyVaultUri pointer w/ shape check, pim.CentralAdmins, platform.AuditEvents, pim.vw_AdminTenantTargets implementing engine ring semantics) + platform-seed-demo.sql (fictional 5-tenant/3-admin MSP sim). Deployed + verified on BOTH matrix targets: Azure SQL serverless w/ Entra-only auth (SPN admin, token connections) AND on-prem SQL 2022 Express w/ Windows Integrated; identical fan-out ring0->5, ring1->3, ring2->2 (486fa199)
 - release: PIM4EntraPS v2.4.165 -- phase 12 design: on-prem/hybrid SQL Server first-class alongside Azure SQL/MI. Repository connection profile $global:PIM_SqlConnection w/ AuthMode EntraInteractive|EntraSpn|WindowsIntegrated, TLS enforced, SQL logins disabled in every mode; Azure = Entra MFA+CA at the DB door, classic on-prem AD = Windows Integrated/Kerberos (operator) + gMSA (engine) with the Manager Entra sign-in as the app-layer MFA boundary + subnet scoping, SQL 2022+ Arc = optional Entra-on-prem middle ground; DB roles mirror Reader/Admin/SuperAdmin everywhere (cb3b328b)
 - release: PIM4EntraPS v2.4.164 -- phase 12 / v3.0 design (doc § 16): Manager Entra MFA sign-in (Edge PKCE loopback, amr-claim MFA check, RBAC by Entra UPN, CA applies; protects use-of-Manager not files-on-compromised-host); remote operation interim via -ConfigRoot SMB; SQL data store decision (Azure SQL / SQL MI / on-prem, Entra-only auth = no SQL creds, laptop Manager connects as operator w/ MFA at the DB door, engine as SPN/MSI, DB roles mirror Reader/Admin/SuperAdmin) with migration path: Get-PimRows/Save-PimRows repository abstraction + PIM_DataStore Csv|Sql (Csv supported indefinitely), schema = 15 logical tables + state + audit + intake, idempotent Invoke-PimCsvToDbMigration, nightly CSV snapshot export (25165e36)
@@ -33,7 +34,6 @@ Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monor
 - release: PIM4EntraPS v2.4.141 -- Delegation Map becomes an editor: select an admin -> "+ Assign to group..." stages PIM-Assignments-Admins rows by clicking one or more role/org groups (duplicate-guarded, Eligible/365d defaults); select a role group -> "+ Link capability bundle..." stages PIM-Assignments-Groups nesting rows; staged relations draw as dashed amber wires via a pending overlay on the board model. Two-step focus UX (pick person or permission -> board collapses to the transitive path, toggleable). Long Azure scope/AU names render two-line with full wrap in focus view (545976d0)
 - release: PIM4EntraPS v2.4.139 -- PIM Manager Delegation Map (new landing tab): the PIM v2 model as a 4-column flow board (People -> Roles & Org Groups -> Capability Bundles -> Permissions & Targets, with terminal permission groups rendered as workload/app-RBAC groups for Power BI/Intune/Defender XDR/3rd-party); click-to-light full path in both directions with selection-only wires (Active amber, Eligible blue), every box = Definitions row / every wire = Assignments row with open-in-grid jump; search dims non-matches; static-mode compatible. Tabs reordered to operator lifecycle: Create -> Delegation Map -> Validate -> Review & Save -> Maintenance -> Advanced View (grid) (55be87b9)
 - release: PIM4EntraPS v2.4.138 -- PIM Manager role pickers auto-load from the tenant: new azure-rbac-roles tenant-list kind (Get-AzRoleDefinition, per-instance cache, included in -RefreshTenantLists); Azure perm-group workflow picks the RBAC role from the tenant list (fills exact name + alias, free-text fallback); both perm-group workflows auto-load empty lists silently on open via ensureTenantLists; AzScopePermission renders as a dropdown in the Configuration grid. Kills the typed-role-name spelling-error class; validator STALE checks remain the safety net (a2afd078)
-- release: PIM4EntraPS v2.4.137 -- PIM Manager validator: PIM-NAME-002 false positive on EVERY UPN fixed -- [regex]::Escape escapes { but not } (.NET asymmetry), so the {Token}->.+ replacement never matched and UPNs were checked against the literal template string; closing brace now matched optionally-escaped. Demo tenants validate fully clean (0 errors, 0 warnings) (87116adf)
 
 ---
 
@@ -42,6 +42,15 @@ Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monor
 > **Curated changelog.** The publish workflow auto-prepends recent monorepo commits as a raw activity log; this file is the human-friendly narrative on top.
 
 ---
+
+## v2.4.167 -- Install-PimEngineAppRegistration: re-runs no longer crash or mint duplicate certs
+
+Field failure on the second run (`-AzureRbac` added after a successful first install):
+
+- **KeyCredentials merge crashed on every re-run** -- Graph NEVER returns the public key bytes when READING an app's keyCredentials (`Key = $null` on each existing entry), so the dedupe-by-first-20-key-bytes grouping died with "Cannot index into a null array". The merge now identifies certificates by **thumbprint via `CustomKeyIdentifier`** (present on read entries; now also stamped on the credential we write), with existing entries winning ties so their KeyId + key material are preserved.
+- **Every run minted a fresh self-signed cert**, orphaning the previous key and desyncing the platform registry's recorded thumbprint. The installer now **reuses the newest still-valid cert with the matching subject** from the store (>30 days remaining, private key present) and only generates when none exists -- which also gives the natural MSP pattern: one management-host key, N per-tenant app registrations trusting it. `-ExistingThumbprint` still pins explicitly.
+
+Verified: parse-clean + merge unit test (existing-same-cert + existing-older-cert + new-same-cert -> 2 entries, existing wins). Known follow-up: the cert lands in `CurrentUser\My`; a `-MachineStore` option for `LocalMachine\My` (the engine-service + security-design preference) is queued.
 
 ## v2.4.166 -- phase 12a groundwork: the MSP platform schema (ships) + dual deployment proven
 
