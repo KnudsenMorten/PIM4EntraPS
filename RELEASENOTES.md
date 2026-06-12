@@ -1,9 +1,10 @@
 # Release notes for PIM4EntraPS
 
-## v2.4.148
+## v2.4.149
 
 Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monorepo:
 
+- release: PIM4EntraPS v2.4.149 -- Deploy-PimActivatorIntune gets the v2.4.147/148 auth hardening via new shared _PimActivatorAuth.ps1 (Connect-PimActivatorGraph full sequence: Edge-mode cached-MSAL discard, Edge-PKCE/MSAL sign-in, provided-token scope bypass, TenantId enforcement, /me probe auto-heal; Connect-MgGraphViaEdge; parameterized Assert-GraphModuleVersions; version banner + broken-auth help). Intune script: -UseEdge default ON, banner, all conditional scopes (Organization.Read.All/Application.Read.All) requested up front since Edge tokens cannot scope-escalate mid-run; old mid-run reconnect kept as MSAL-only safety net. Backend slims to dot-source, behavior identical. 17-check harness green PS 5.1 + pwsh 7 (7ac2c838)
 - release: PIM4EntraPS v2.4.148 -- Deploy-PimActivatorBackend: empty role list from /me/memberOf is inconclusive (lean 3-scope token lacks directory-read, Graph filters roles silently -- field op HAD activated CAA+PRA and was wrongly blocked) so warn+continue; non-empty lists still enforced. Edge mode discards cached MSAL contexts before the first Graph call (cached context re-auths via system-default browser = the IE+Edge double-launch). Harness green PS 5.1 + pwsh 7 (f56ef452)
 - release: PIM4EntraPS v2.4.147 -- Deploy-PimActivatorBackend signs in through Edge by default (own auth-code+PKCE S256 flow on a loopback TcpListener with the first-party Graph CLI Tools app, token to Connect-MgGraph -AccessToken) because MSAL always launches the system-default browser and legacy IE on servers mangles the redirect into state-mismatch loops; Graph SDK version-conflict pre-flight (mixed Microsoft.Graph.* submodule versions = confirmed cause of silent-null cmdlets + broken token cache); version banner from solution VERSION file; post-connect /me probe reconnects dead cached sessions up front; -AccessToken pre-connects supported; device-code flow removed entirely (MS blocks globally). Loopback flow harness green on PS 5.1 + pwsh 7 (16762fda)
 - release: PIM4EntraPS v2.4.146 -- Deploy-PimActivatorBackend pre-flights ACTIVE Entra roles (app-admin family for app-reg/SP steps; PRA/GA when -GrantConsent) with PIM activate-then-reconnect guidance, fail-open if membership read is blocked; all SP reads/creates moved to raw Invoke-MgGraphRequest (GET servicePrincipals(appId=...) + POST) because New-MgServicePrincipal returned silent $null on a permission denial, breaking the v2.4.145 re-fetch with an empty-ServicePrincipalId bind. 12-case harness green on PS 5.1 + pwsh 7 (38f2fd0b)
@@ -33,7 +34,6 @@ Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monor
 - release: PIM4EntraPS v2.4.122 -- AD-create OU routing now driven by UserName naming convention (regex match on L0/T0 markers bounded by -/_/. in the name) instead of CSV TierLevel column; matches the customer pattern where privilege class is encoded in the account name itself (c0788dfc)
 - release: PIM4EntraPS v2.4.121 -- AD-create branch matches CSV TierLevel against the Tier convention (T0/T1/T2/T3) -- T0 -> PathAdminsL0T0, T1/T2/T3/blank -> PathAdmins. Previously the engine matched Level literals (L0/L1) so Tier-formatted CSVs silently dropped every Create row. L0 still accepted as T0-equivalent for back-compat. Level and Tier are distinct dimensions; CSV column is the Tier. (5d0cdd62)
 - release: PIM4EntraPS v2.4.120 -- AD-create branch surfaces an explicit [ERROR] when CSV TierLevel is blank or not L0/L1 (previously: dangling 'Creating AD account' header with no New-ADUser call, no exception, no password file row, row silently dropped) (93e53c67)
-- release: PIM4EntraPS v2.4.119 -- engine imports AutomateITPS.AD + calls Resolve-PlatformGMSACredentials after Initialize-PlatformLegacyIdentity so KV stub passwords on gMSA Legacy.* slots get swapped for the real managed password read from the DC (gMSA msDS-ManagedPassword); the AD branch then auths normally via -Credential (3e002976)
 
 ---
 
@@ -42,6 +42,21 @@ Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monor
 > **Curated changelog.** The publish workflow auto-prepends recent monorepo commits as a raw activity log; this file is the human-friendly narrative on top.
 
 ---
+
+## v2.4.149 -- Intune deploy gets the same auth hardening; shared _PimActivatorAuth.ps1
+
+`Deploy-PimActivatorIntune.ps1` had the identical raw `Connect-MgGraph` pattern that made the backend deploy fail on servers (default-browser IE -> MSAL state-mismatch loops, stale module versions, dead cached sessions). Instead of copy-pasting the v2.4.147/148 machinery, it now lives once in **`_PimActivatorAuth.ps1`** (dot-sourced, functions only):
+
+- `Connect-PimActivatorGraph` -- the full connect sequence: discard cached MSAL contexts in Edge mode, Edge-PKCE or MSAL sign-in, scope verification (skipped for provided tokens), `-TenantId` enforcement, `/me` probe with one-shot auto-heal.
+- `Connect-MgGraphViaEdge` -- the loopback auth-code+PKCE flow (unchanged from v2.4.147).
+- `Assert-GraphModuleVersions` -- mixed-submodule-version detection, now parameterized (backend checks its trio, Intune checks Authentication).
+- `Get-PimActivatorSolutionVersion` / `Get-PaBrokenAuthHelp` -- version banner + the 5-option troubleshooting text.
+
+`Deploy-PimActivatorIntune.ps1` changes: version + SDK banner, `-UseEdge` (default ON, `-UseEdge:$false` reverts), and **all conditional scopes are requested up front** (`Organization.Read.All` + `Application.Read.All` join the initial sign-in when the auto-discovery branch will need them) -- the Edge token cannot be scope-escalated mid-run, unlike a cached MSAL session with accumulated consent. The old mid-run re-connect remains only as a safety net for pre-connected MSAL sessions.
+
+`Deploy-PimActivatorBackend.ps1` slims down to dot-source the shared file; behavior identical to v2.4.148 (verified by regression harness).
+
+Verified: 17-check harness -- all three files parse, no duplicated functions, Edge loopback flow end-to-end, discard/scope/tenant-mismatch/auto-heal orchestration paths, module-version mismatch detection, role pre-flight regression -- green in real PS 5.1 **and** pwsh 7 processes.
 
 ## v2.4.148 -- Activator backend deploy: empty role list is inconclusive, not fatal + cached MSAL sessions discarded in Edge mode
 

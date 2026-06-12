@@ -137,27 +137,38 @@ param(
     [switch]$Force,
 
     [Parameter(Mandatory, ParameterSetName = 'Uninstall')]
-    [switch]$Remove
+    [switch]$Remove,
+
+    # Default ON: run the interactive sign-in through Microsoft Edge
+    # explicitly instead of the system default browser (legacy IE on many
+    # servers mangles the auth redirect -> MSAL 'state mismatch'). Same
+    # mechanism as Deploy-PimActivatorBackend.ps1; see _PimActivatorAuth.ps1.
+    # Pass -UseEdge:$false to fall back to MSAL's default-browser flow.
+    [Parameter()]
+    [switch]$UseEdge = $true
 )
 
 $ErrorActionPreference = 'Stop'
 
+# Shared auth machinery: version banner, Graph SDK version-conflict check,
+# Edge-forced PKCE sign-in, session probe/heal.
+. (Join-Path $PSScriptRoot '_PimActivatorAuth.ps1')
+
+Write-Host "Deploy-PimActivatorIntune -- PIM4EntraPS $(Get-PimActivatorSolutionVersion)" -ForegroundColor Cyan
+Write-Host "Graph SDK  : v$(Assert-GraphModuleVersions)" -ForegroundColor Cyan
+
 # ---- 1. Graph context -----------------------------------------------------
+# Request EVERY scope this run can need up front. The Edge flow's token
+# carries exactly what was requested (no accumulated-consent padding like a
+# cached MSAL session), so the later auto-discovery step must not rely on a
+# mid-run scope escalation.
 $_requiredScopes = @('DeviceManagementConfiguration.ReadWrite.All')
 if ($AssignToGroupId) { $_requiredScopes += 'Group.Read.All' }
-$ctx = Get-MgContext -ErrorAction SilentlyContinue
-if (-not $ctx) {
-    Write-Host "Not connected to Microsoft Graph. Launching interactive sign-in (scopes: $($_requiredScopes -join ', '))..." -ForegroundColor Yellow
-    Connect-MgGraph -Scopes $_requiredScopes -NoWelcome -ErrorAction Stop
-    $ctx = Get-MgContext
+if (-not $Remove -and -not $CatalogJsonPath) {
+    $_requiredScopes += 'Organization.Read.All'                      # tenant id + display name via /organization
+    if (-not $ClientId) { $_requiredScopes += 'Application.Read.All' }  # auto-discover the app reg by displayName
 }
-$missingScopes = $_requiredScopes | Where-Object { $_ -notin $ctx.Scopes }
-if ($missingScopes) {
-    Write-Host "Re-connecting Graph to include missing scope(s): $($missingScopes -join ', ')" -ForegroundColor Yellow
-    Disconnect-MgGraph -ErrorAction SilentlyContinue | Out-Null
-    Connect-MgGraph -Scopes $_requiredScopes -NoWelcome -ErrorAction Stop
-    $ctx = Get-MgContext
-}
+$ctx = Connect-PimActivatorGraph -RequiredScopes $_requiredScopes -UseEdge:([bool]$UseEdge)
 Write-Host "Connected to tenant $($ctx.TenantId) as $($ctx.Account)" -ForegroundColor Gray
 
 # ---- 1.25. Pre-flight: scan for existing ExtensionInstallForcelist policies ---
@@ -462,12 +473,14 @@ if ($CatalogJsonPath) {
     #   (b) operator passed nothing extra     -> auto-discover via /applications?displayName eq 'PIM Activator'
     # Tenant id + tenant name come from /organization either way (unless
     # -TenantName was passed to override the label).
-    $needsOrgScope = $true
-    $needsAppScope = -not $ClientId   # only query /applications if we don't already know clientId
-    $scopesNeeded  = @('DeviceManagementConfiguration.ReadWrite.All','Organization.Read.All')
-    if ($needsAppScope) { $scopesNeeded += 'Application.Read.All' }
+    # Scopes for this branch (Organization.Read.All + Application.Read.All
+    # when auto-discovering) are requested up front in step 1 -- the Edge
+    # flow's token cannot be scope-escalated mid-run. This safety net only
+    # fires for pre-connected MSAL sessions that are missing them.
+    $scopesNeeded = @('DeviceManagementConfiguration.ReadWrite.All', 'Organization.Read.All')
+    if (-not $ClientId) { $scopesNeeded += 'Application.Read.All' }
     $missing = $scopesNeeded | Where-Object { $_ -notin (Get-MgContext).Scopes }
-    if ($missing) {
+    if ($missing -and (Get-MgContext).TokenCredentialType -ne 'UserProvidedAccessToken') {
         Connect-MgGraph -Scopes $scopesNeeded -NoWelcome -ErrorAction Stop | Out-Null
     }
 
