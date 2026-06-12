@@ -50,6 +50,10 @@ ForEach ($_mod in $_PIM_ModulesToLoad) {
 # Own file so the Manager dot-sources it standalone; Core is never gated.
 . (Join-Path $PSScriptRoot 'PIM-License.ps1')
 
+# Baseline-courier consumer (§ 19) -- Get-PimBaselineBundle / Test-PimBaselineDoc /
+# Set-PimBaselineApplied. The local engine pulls + verifies the signed MSP baseline.
+. (Join-Path $PSScriptRoot 'PIM-Baseline.ps1')
+
 function Ensure-DateTime {
     <#
         .SYNOPSIS
