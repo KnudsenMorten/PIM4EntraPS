@@ -389,15 +389,25 @@ The SQL stores are **never connected** — no sync, no cross-reads, no MSP stand
 1. **Baseline IN = a pull, not a push.** The MSP exports a signed, versioned **baseline bundle** (same RSA-signing model as the offline `.pimlicense`). The per-tenant engine — running with the *local* credential, reaching *outward* — fetches and **verifies** it before applying `Owner=MSP` rows. Tamper-evident; the customer can inspect exactly what they accept. (Mechanically a pull → reach stays outbound-from-the-customer; MSP never reaches in.)
 2. **Rollup OUT = customer-emitted summary.** The local engine emits a signed **summary** (drift/compliance counts, never raw privileged data) for the MSP fleet view — ideally landed first in the customer's own Log Analytics (via `AzLogDcrIngestPS`) and read by the MSP from there.
 
-### Ownership split (core)
+### Ownership split (core) — separation, NOT gatekeeping
 
-- `Owner=MSP` — baseline + guardrails (tier-0 reservation, approval-required groups, naming, rings). Read-only to local IT; arrives as the signed bundle.
-- `Owner=Local` — day-2-day admins, local resources (subscriptions under the customer's management group). Managed by local IT in the local store.
-- **Disjoint namespaces**, enforced by engine + validator: MSP never overwrites Local; Local can never touch MSP-owned objects. (Not "MSP wins ties" — a precedence rule would mean the boundary is wrong.)
+The two stores are **separate**; the `Owner` tag is **provenance**, not a permission gate:
 
-### Delegation within the envelope
+- `Owner=Local` — the customer's local store, in their own DB. Local IT manages it **fully autonomously**: their day-2-day admins, their **privileged accounts**, their delegations, their local resources (subscriptions under their management group). **No MSP request, no MSP approval** — it is their data and their decision.
+- `Owner=MSP` — baseline standards the MSP distributes (naming, ring policy, recommended templates), pulled down as the signed bundle and merged **additively** on top. Local doesn't hand-edit these only because **the next pull refreshes them** (overwrite-avoidance), not because they're forbidden.
+- The runtime merge is just: apply pulled-down MSP baseline + apply everything Local owns. Neither side blocks the other, and neither holds a credential or connection into the other's environment. The MSP baseline is *standards distributed*, not *control imposed*.
+- **Optional** (off by default): a customer/MSP that explicitly wants certain items reserved (e.g. tier-0 only from the MSP) can mark baseline entries `Enforced` — then the engine refuses a local override of those specific keys. This is a deliberate opt-in, not the default; the default is full local autonomy. (Earlier builds shipped a hard `CK_LocalAdmins_NoHighPriv` data-layer constraint — removed in v2.4.177 as over-reach.)
 
-Delegation units (§18) live in the **local store** and are **bounded by the MSP guardrails**. MSP controls the *envelope* (declarative, tamper-evident, shipped as the bundle); the customer controls *everything inside it* and their own data store. Neither side holds a credential or connection into the other's environment.
+### Delegation (local-owned, autonomous)
+
+Delegation units (§18) live in the **local store** and are managed by local IT themselves — they self-delegate within their tenant without asking the MSP. When local genuinely needs something the MSP distributes (e.g. a standard template update), that flows down in the next baseline pull; nothing flows the other way as a permission request. Neither side holds a credential or connection into the other's environment.
+
+The **MSP central admins are created IN the local tenant** — the local engine run applies the pulled-down MSP baseline (provisioning the central admin accounts in that customer tenant) merged with the local-owned admins. There is no central directory of admin objects; every admin materializes in the tenant it serves.
+
+### Two kinds of approval — keep them separate
+
+- **Delegation-time approval (ours).** Any approval around *assigning/delegating* access — staging a change and approving it — is handled in our layer (the PIM Manager / the declarative flow). This is the "should this person get this eligibility" decision.
+- **Activation approval (native PIM, we are not involved).** When a user *activates* an eligible role/group, the approval is enforced by the **native Entra PIM approval policy** on that role/group (which our engine *configures* via the policy template, e.g. `approval-required`, but does not mediate). The PIM Manager plays **no part** in the activation approval path — activation stays entirely behind native PIM's MFA + approval + the group owners as approvers.
 
 ### Per-profile capability / tradeoff table (kept honest)
 
