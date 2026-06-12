@@ -1,0 +1,14 @@
+{
+  "_doc": "Per-instance PIM workload-template exemptions (engine/_shared/PIM-Conformance.ps1). An absent desired binding is a GAP unless an ACTIVE exemption row makes it EXEMPT. 'reason' AND 'expiresUtc' are MANDATORY -- exemptions always expire; no-expiry is ignored (warned), and once expiresUtc passes it lapses back to Gap and re-enters the next deploy. Copy to exemptions.json (gitignored, per instance configRoot) for live use. tenantId = the manager instance name; itemKey must match a template entry 'key'.",
+  "exemptions": [
+    {
+      "tenantId": "local",
+      "templateId": "defender-xdr-roles",
+      "itemKey": "role:Security Administrator",
+      "reason": "This tenant manages Sec Admin delegation manually; PIM binding deferred to their change window.",
+      "approvedBy": "platform-team",
+      "approvedUtc": "2026-06-13T00:00:00Z",
+      "expiresUtc": "2026-09-01T00:00:00Z"
+    }
+  ]
+}

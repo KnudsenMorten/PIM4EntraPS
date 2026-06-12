@@ -41,7 +41,9 @@ try {
 
     $base = "http://127.0.0.1:$Port"
     $hdr  = @{ Authorization = "Bearer $token" }
-    function Probe($path) { Invoke-RestMethod -Uri "$base$path" -Headers $hdr -TimeoutSec 20 }
+    # 90s: the first /api/conformance* call cold-imports the (large) PIM-Functions
+    # module, like other module-backed endpoints; 20s clipped that on a cold box.
+    function Probe($path) { Invoke-RestMethod -Uri "$base$path" -Headers $hdr -TimeoutSec 90 }
     function Beat { try { Invoke-RestMethod -Method POST -Uri "$base/api/heartbeat" -Headers $hdr -TimeoutSec 10 | Out-Null } catch {} }
 
     # 401 without token
@@ -64,7 +66,9 @@ try {
         @{ p='/api/emergency-status';    chk={ param($r) $r -ne $null } },
         @{ p='/api/resolve-date?expr=Now'; chk={ param($r) $r -ne $null } },
         @{ p='/api/instances';           chk={ param($r) $r -ne $null } },
-        @{ p='/api/preflight';           chk={ param($r) $r -ne $null } }
+        @{ p='/api/preflight';           chk={ param($r) $r -ne $null } },
+        @{ p='/api/conformance/templates'; chk={ param($r) $r.templates -ne $null } },
+        @{ p='/api/conformance?template=defender-xdr-roles'; chk={ param($r) @($r.keys).Count -ge 1 -and $r.statuses -ne $null } }
     )) {
         Beat
         $ok = $false
