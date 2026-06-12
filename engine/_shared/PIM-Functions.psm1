@@ -2557,13 +2557,15 @@ Function Invoke-PimWorkloadApi {
 
 Function Get-PimWorkloadRoles {
     # Live role definitions for one connector: @( @{ id; name; description } ).
-    param([Parameter(Mandatory)][object]$Connector)
+    # $Tokens lets a per-row connector scope role-listing to a {resource}/{scope}
+    # (e.g. a target service principal for entra-approle, or an ARM scope).
+    param([Parameter(Mandatory)][object]$Connector, [hashtable]$Tokens = @{})
     $op = $Connector.api.listRoles
     if (-not $op) {
         # Connectors without a role-listing API may carry a static roles array.
         return @(@($Connector.roles) | ForEach-Object { @{ id = "$($_.id)"; name = "$($_.name)"; description = "$($_.description)" } })
     }
-    $resp = Invoke-PimWorkloadApi -Connector $Connector -Op $op
+    $resp = Invoke-PimWorkloadApi -Connector $Connector -Op $op -Tokens $Tokens
     $items = if ($op.itemsPath) { Get-PimNestedProp $resp $op.itemsPath } else { $resp }
     $out = New-Object System.Collections.ArrayList
     foreach ($r in @($items)) {
@@ -2639,26 +2641,39 @@ Function Apply-PimWorkloadAssignments {
         if (-not $group) { Write-Host "ERROR: GroupTag '$tag' could not be resolved to an Entra group. Skipping row." -ForegroundColor Red; continue }
         $groupId = "$($group.Id)"
 
-        # Resolve role name -> id (live; cached per connector per run).
-        if (-not $rolesCache.ContainsKey($wid)) {
-            try { $rolesCache[$wid] = @(Get-PimWorkloadRoles -Connector $conn) }
-            catch { Write-Host "ERROR: connector '$wid' role listing failed: $($_.Exception.Message). Skipping its rows." -ForegroundColor Red; $rolesCache[$wid] = $null }
+        # Per-row resource (e.g. target service principal for entra-approle).
+        $resource = "$($row.Resource)".Trim()
+        if ($conn.perRowResource -and -not $resource) {
+            Write-Host "ERROR: connector '$wid' requires a per-row Resource (target service principal / app), but the row has none. Skipping." -ForegroundColor Red; continue
         }
-        $roles = $rolesCache[$wid]
+        $scope = "$($row.Scope)".Trim()
+
+        # Base tokens are known before the role lookup so listRoles can be scoped
+        # to {resource}/{scope}; roleId/roleName are added once the role resolves.
+        $tokens = @{ groupId = $groupId; groupTag = $tag; resource = $resource; scope = $scope; newId = [guid]::NewGuid().ToString() }
+
+        # Resolve role name -> id (live; cached per connector + resource + scope
+        # per run, because custom/app roles differ by resource/scope).
+        $cacheKey = "$wid|$resource|$scope"
+        if (-not $rolesCache.ContainsKey($cacheKey)) {
+            try { $rolesCache[$cacheKey] = @(Get-PimWorkloadRoles -Connector $conn -Tokens $tokens) }
+            catch { Write-Host "ERROR: connector '$wid' role listing failed: $($_.Exception.Message). Skipping its rows." -ForegroundColor Red; $rolesCache[$cacheKey] = $null }
+        }
+        $roles = $rolesCache[$cacheKey]
         if ($null -eq $roles) { continue }
         $role = $roles | Where-Object { "$($_.name)" -ieq "$($row.RoleName)".Trim() } | Select-Object -First 1
-        if (-not $role) { Write-Host "ERROR: workload '$wid' has no role named '$($row.RoleName)'. Valid: $(($roles | ForEach-Object { $_.name }) -join ', ')" -ForegroundColor Red; continue }
+        if (-not $role) { Write-Host "ERROR: workload '$wid' has no role named '$($row.RoleName)'$(if ($resource) { " on resource '$resource'" }). Valid: $(($roles | ForEach-Object { $_.name }) -join ', ')" -ForegroundColor Red; continue }
 
-        $tokens = @{ groupId = $groupId; groupTag = $tag; roleId = $role.id; roleName = $role.name; scope = "$($row.Scope)".Trim(); newId = [guid]::NewGuid().ToString() }
+        $tokens.roleId = $role.id; $tokens.roleName = $role.name
 
         # Current state: list assignments (per-role when the path needs {roleId}).
         $la = $conn.api.listAssignments
         $items = @()
         try {
             $resp = Invoke-PimWorkloadApi -Connector $conn -Op $la -Tokens $tokens
-            $items = if ($la.itemsPath) { @($resp.($la.itemsPath)) } else { @($resp) }
+            $items = if ($la.itemsPath) { @(Get-PimNestedProp $resp $la.itemsPath) } else { @($resp) }
             if ($la.roleId) {
-                $items = @($items | Where-Object { "$($_.($la.roleId))" -match [regex]::Escape($role.id) })
+                $items = @($items | Where-Object { "$(Get-PimNestedProp $_ $la.roleId)" -match [regex]::Escape($role.id) })
             }
         } catch {
             Write-Host "ERROR: connector '$wid' assignment listing failed: $($_.Exception.Message). Skipping row." -ForegroundColor Red; continue

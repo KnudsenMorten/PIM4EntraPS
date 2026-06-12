@@ -1,9 +1,10 @@
 # Release notes for PIM4EntraPS
 
-## v2.4.181
+## v2.4.182
 
 Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monorepo:
 
+- release: PIM4EntraPS v2.4.182 -- connector framework nested-path fix + per-row resource support (8140d9e3)
 - release: PIM4EntraPS v2.4.181 -- Pester job (all flows rerunnable) + multi-auth connector framework + powerbi connector (a6153dd5)
 - release: PIM4EntraPS v2.4.180 -- entra-roles workload connector (live-tested: 145 directory roles) + activation prereqs (Intune always-on; Defender Unified RBAC = portal activation, no Graph endpoint) + app catalog (120 apps by mechanism) + 100 PIM use-cases (60b72237)
 - release: PIM4EntraPS v2.4.179 -- Manager + scenario functional test suites (68 assertions, rerunnable) (a7d01e49)
@@ -33,7 +34,6 @@ Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monor
 - release: PIM4EntraPS v2.4.155 -- lifecycle phases 3+4: policy templates (templates/policy: default = no overrides for zero behavior change, approval-required = MFA+justification + Serial approval w/ 4h escalation) linked per definition row via new PolicyTemplate column (7 sample CSVs updated, GA group ships linked as worked example); Invoke-PimPolicyTemplateApply hash-gates re-apply via output/state/policy-state.json through the existing PIM_Policy_Check_Update diff-then-patch core, never disabling approval it did not itself enable; Owners columns become functional approvers (Parallel = native any-one-wins; Serial = first owner + Invoke-PimApprovalEscalation rotating to the next owner past escalationHours w/ approval-escalation mail); validators PIM-POL-001 + PIM-APR-001; engine run hooks both passes. 27-check harness green PS 5.1 + pwsh 7 (61b7ef6f)
 - release: PIM4EntraPS v2.4.154 -- lifecycle phase 2: customizable mail templates (templates/mail/<type>.mailtemplate[.custom].html, 7 types, subject comment + {{Token}} substitution, unknown-token warnings; Send-PimTemplatedMail dispatches Smtp HTML / Teams card / Slack text with WhatIf + best-effort semantics; Send-PimAdminTap routes through tap-delivery template with hardcoded fallback; new-admin manager notification on creation) + admin templates (templates/admin/*.admintemplate.json: consultant, new-employee-next-month with the FirstWorkdayNextMonth-3d / @08:00 / 8h scenario; GET /api/admin-templates; wizard Start-from-template picker prefilling state + role groups; Template traceability column). 31-check harness green PS 5.1 + pwsh 7; node --check green (529a581b)
 - release: PIM4EntraPS v2.4.153 -- lifecycle phase 1: shared date-expression resolver (PIM-DateExpression.ps1: Now/FirstDayNextMonth/FirstWorkdayNextMonth/FirstDayNextWeek/FirstWorkdayNextWeek +/-Nd @HH:mm, yyyy-MM-dd[@HH:mm]; legacy-parser + cast fallback; UTC); ProvisionDate scheduled creation (engine skips row until resolved time -- forwarded-TAP-mail scenario); TAPLifetimeHours + TAP creation deferred to within PIM_TapCreateLeadHours (48h) of the start window via idempotent Invoke-PimTapProvisioning (tap-state.json, runs in create AND update branches); Manager onboarding groups TAP fields into one fieldset with live /api/resolve-date previews (UsageLocation moved out); grid bulk Move-to-ring with lowered-ring warning; validators PIM-SCHED-001/002 + PIM-TAP-002; sample CSV updated. 44-check harness green PS 5.1 + pwsh 7; both HTML script blocks pass node --check (77223207)
-- release: PIM4EntraPS v2.4.152 -- docs/LIFECYCLE-GOVERNANCE.md: architecture for the 13 lifecycle/governance features (shared date-expression resolver; ProvisionDate scheduled admin creation incl. the forwarded-TAP-mail dependency scenario; TAP windows via TAPStartDate expressions + TAPLifetimeHours with near-window deferred creation + one GUI fieldset; admin templates w/ variables; ring-move actions; mail templates; policy templates w/ PolicyTemplate link + hash re-apply; Owners-driven parallel/serial approvals; KV-passphrase emergency override w/ TTL restore; OffboardDate/DeleteAfterDays/Lifecycle=Retire offboarding + drift cleanup; unified jsonl audit; Reader/Admin/SuperAdmin manager RBAC + Governance tab; resource auto-discovery Off/Portal/Engine). 9 dependency-ordered phases (c9a37c61)
 
 ---
 
@@ -42,6 +42,16 @@ Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monor
 > **Curated changelog.** The publish workflow auto-prepends recent monorepo commits as a raw activity log; this file is the human-friendly narrative on top.
 
 ---
+
+## v2.4.182 -- connector framework: nested-path fix + per-row resource (enables generic SaaS/ARM connectors)
+
+Framework correctness + extensibility ahead of the remaining workload connectors (all 13 Pester assertions still green):
+
+- **Bug fix (nested response paths):** `Apply-PimWorkloadAssignments` read `itemsPath` and the assignment `roleId` with single-property access (`$_.($la.roleId)`), so any connector whose `roleId`/`itemsPath` is **nested** (e.g. ARM's `properties.roleDefinitionId`) silently failed to match existing assignments -- it would never see the current state and could re-create or misreport. Both now go through `Get-PimNestedProp` (dotted-path aware), consistent with the rest of the framework.
+- **Per-row resource support:** connectors can declare `"perRowResource": true`; the desired-state row then carries a `Resource` column (e.g. the target **service principal** for an app-role grant, or an ARM scope). `Get-PimWorkloadRoles` now accepts the row tokens so role-listing can be scoped per-resource, and the role cache is keyed by `workload|resource|scope` (custom/app roles differ by resource). This is the missing piece for a generic `entra-approle` connector (one connector covering SAP, ServiceNow and 100+ gallery apps via per-row target SP) and for ARM role-listing per scope -- those connectors land next on top of it.
+- Token build reordered so `{resource}`/`{scope}` are known before the role lookup (listRoles can be scoped); `roleId`/`roleName` are added once the role resolves.
+
+VERSION -> 2.4.182.
 
 ## v2.4.181 -- Pester job (all flows rerunnable) + multi-auth connector framework + powerbi connector
 
