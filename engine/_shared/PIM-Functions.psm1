@@ -46,6 +46,10 @@ ForEach ($_mod in $_PIM_ModulesToLoad) {
 # expressions identically.
 . (Join-Path $PSScriptRoot 'PIM-DateExpression.ps1')
 
+# Offline Pro licensing (Core/Pro split) -- Get-PimLicense / Test-PimProFeature.
+# Own file so the Manager dot-sources it standalone; Core is never gated.
+. (Join-Path $PSScriptRoot 'PIM-License.ps1')
+
 function Ensure-DateTime {
     <#
         .SYNOPSIS
