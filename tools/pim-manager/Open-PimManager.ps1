@@ -126,6 +126,52 @@ $instancesFile = Join-Path $PSScriptRoot 'instances.custom.json'
 $_dateExprLib = Join-Path $solutionRoot 'engine\_shared\PIM-DateExpression.ps1'
 if (Test-Path -LiteralPath $_dateExprLib) { . $_dateExprLib }
 
+# One id per Manager session -- groups this session's audit events (phase 6).
+$script:PimManagerSessionId = [guid]::NewGuid().ToString('N')
+
+# CSV schema auto-upgrade: customer installs predate the lifecycle columns.
+# Append any missing ones (blank = default behavior = auto-approval) before
+# the GUI loads the CSVs, so the grid shows the columns and the wizard's
+# staged rows align. Mirrors the engine-run upgrade; idempotent.
+function Invoke-PimManagerCsvSchemaUpgrade {
+    param([Parameter(Mandatory)][string]$Dir)
+    $additions = @{
+        'Account-Definitions-Admins'   = @('ProvisionDate', 'TAPLifetimeHours', 'Template', 'OffboardDate', 'DeleteAfterDays')
+        'PIM-Definitions-Roles'        = @('PolicyTemplate', 'Lifecycle')
+        'PIM-Definitions-Tasks'        = @('PolicyTemplate', 'Lifecycle')
+        'PIM-Definitions-Services'     = @('PolicyTemplate', 'Lifecycle')
+        'PIM-Definitions-Processes'    = @('PolicyTemplate', 'Lifecycle')
+        'PIM-Definitions-Resources'    = @('PolicyTemplate', 'Lifecycle')
+        'PIM-Definitions-Departments'  = @('PolicyTemplate', 'Lifecycle')
+        'PIM-Definitions-Organization' = @('PolicyTemplate', 'Lifecycle')
+    }
+    foreach ($base in @($additions.Keys)) {
+        $path = Join-Path $Dir "$base.custom.csv"
+        if (-not (Test-Path -LiteralPath $path)) { continue }
+        try {
+            $lines = @(Get-Content -LiteralPath $path -Encoding UTF8)
+            if ($lines.Count -eq 0) { continue }
+            $headerCols = @($lines[0] -split ';' | ForEach-Object { $_.Trim().Trim('"') })
+            $missing = @($additions[$base] | Where-Object { $headerCols -notcontains $_ })
+            if ($missing.Count -eq 0) { continue }
+            $parsed = @(Import-Csv -Path $path -Delimiter ';' -Encoding UTF8)
+            $dataLines = @($lines | Select-Object -Skip 1 | Where-Object { "$_".Trim() })
+            if ($parsed.Count -ne $dataLines.Count) {
+                foreach ($r in $parsed) { foreach ($col in $missing) { $r | Add-Member -NotePropertyName $col -NotePropertyValue '' -Force } }
+                $parsed | Export-Csv -Path $path -Delimiter ';' -Encoding UTF8 -NoTypeInformation
+            } else {
+                $pad = (';' * $missing.Count)
+                $lines[0] = $lines[0] + ';' + ($missing -join ';')
+                for ($i = 1; $i -lt $lines.Count; $i++) { if ($lines[$i].Trim()) { $lines[$i] = $lines[$i] + $pad } }
+                Set-Content -LiteralPath $path -Value $lines -Encoding UTF8
+            }
+            Write-Host "  [Schema] $base.custom.csv upgraded: added $($missing -join ', ')" -ForegroundColor Cyan
+        } catch {
+            Write-Warning "  [Schema] upgrade of $base.custom.csv failed (file left untouched): $($_.Exception.Message)"
+        }
+    }
+}
+
 # ---------------------------------------------------------------------------
 # Instances (MSP multi-customer support)
 #
@@ -216,6 +262,10 @@ function Set-PimManagerInstance {
     $script:outputRoot      = $inst.outputRoot
     $script:mutationLog     = Join-Path $inst.outputRoot 'pim-manager-mutations.log'
 
+    # Lifecycle columns materialize on first open after an update (blank =
+    # default behavior = auto-approval). Idempotent.
+    Invoke-PimManagerCsvSchemaUpgrade -Dir $inst.configRoot
+
     # Per-instance state must not leak across customers.
     $script:PimActiveAssignmentsCache          = $null
     $script:PimActiveAssignmentsCacheLoadedUtc = $null
@@ -266,6 +316,7 @@ if ($ConfigRoot) {
     $script:outputRoot      = Join-Path (Split-Path -Parent $ConfigRoot) 'output'
     if (-not (Test-Path -LiteralPath $script:outputRoot)) { New-Item -ItemType Directory -Path $script:outputRoot -Force | Out-Null }
     $script:mutationLog     = Join-Path $script:outputRoot 'pim-manager-mutations.log'
+    Invoke-PimManagerCsvSchemaUpgrade -Dir $ConfigRoot
     Write-Host ("  instance: custom (config: {0})" -f $ConfigRoot) -ForegroundColor Cyan
 } else {
     Set-PimManagerInstance -Name $(if ($Instance) { $Instance } else { 'local' })
@@ -543,6 +594,31 @@ function Write-PimMutationLog {
     $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
     # AppendAllText creates the file if missing, no BOM, UTF-8.
     [System.IO.File]::AppendAllText($mutationLog, ($line + "`r`n"), $utf8NoBom)
+
+    # Phase 6: same event also lands in the unified audit jsonl (one schema
+    # for engine + Manager; actor records the Windows identity driving the
+    # localhost session). Best-effort -- never blocks a save.
+    try {
+        $auditDir = Join-Path $script:outputRoot 'audit'
+        if (-not (Test-Path -LiteralPath $auditDir)) { New-Item -ItemType Directory -Path $auditDir -Force | Out-Null }
+        $auditFile = Join-Path $auditDir ("pim-audit-{0}.jsonl" -f [datetime]::UtcNow.ToString('yyyyMM'))
+        $who = try { [System.Security.Principal.WindowsIdentity]::GetCurrent().Name } catch { $env:USERNAME }
+        $evt = [ordered]@{
+            ts            = [datetime]::UtcNow.ToString('o')
+            runId         = "$($script:PimManagerSessionId)"
+            correlationId = ''
+            actor         = "manager:$who"
+            action        = 'config.csv.save'
+            target        = $BaseName
+            before        = $null
+            after         = @{ adds = $Adds; removes = $Removes; modifies = $Modifies; rowCount = $NewRowCount; instance = "$($script:PimInstanceName)" }
+            result        = 'ok'
+            whatIf        = $false
+        }
+        [System.IO.File]::AppendAllText($auditFile, (($evt | ConvertTo-Json -Depth 5 -Compress) + "`r`n"), $utf8NoBom)
+    } catch {
+        Write-Warning "audit write failed (save NOT blocked): $($_.Exception.Message)"
+    }
 }
 
 # ---------------------------------------------------------------------------

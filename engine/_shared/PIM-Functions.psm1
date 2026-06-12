@@ -5277,6 +5277,10 @@ Fix (one-time per tenant):
                                                     -UsageLocation $UsageLocation `
                                                     -PasswordPolicies DisablePasswordExpiration
 
+                            if (Get-Command Write-PimAuditEvent -ErrorAction SilentlyContinue) {
+                                Write-PimAuditEvent -Action 'account.update' -Target $UserPrincipalName -After @{ displayName = $DisplayName; platform = 'ID' }
+                            }
+
                             If ($ForwardMails) {
                                 Try {
                                     Set-Mailbox -Identity $UserPrincipalName -ForwardingSmtpAddress $MailForwardToAddress -DeliverToMailboxAndForward:$false -ErrorAction Stop
@@ -5320,6 +5324,10 @@ Fix (one-time per tenant):
                             $Result = New-MgBetaUser @newUserSplat
 
                             $Result = Update-MgBetaUser -UserId $UserPrincipalName -PasswordPolicies DisablePasswordExpiration
+
+                            if (Get-Command Write-PimAuditEvent -ErrorAction SilentlyContinue) {
+                                Write-PimAuditEvent -Action 'account.create' -Target $UserPrincipalName -After @{ displayName = $DisplayName; tierLevel = $TierLevel; platform = 'ID'; template = $(if ($Entry.PSObject.Properties.Name -contains 'Template') { "$($Entry.Template)" } else { '' }) }
+                            }
 
                             # v2.2.0 (roadmap #1) -- Notes go to the password log as a
                             # comment; Entra has no first-class long-text field for
@@ -9957,6 +9965,9 @@ function Invoke-PimPolicyTemplateApply {
             }
         }
         Save-PimPolicyState -State $state   # per-group save = crash-safe
+        if (Get-Command Write-PimAuditEvent -ErrorAction SilentlyContinue) {
+            Write-PimAuditEvent -Action 'policy.apply' -Target $gName -Before @{ hash = $(if ($st) { "$($st.appliedHash)" } else { $null }) } -After @{ templateId = $tplId; hash = $tpl.Hash; approvalMode = $approvalMode }
+        }
     }
 }
 
@@ -10026,6 +10037,9 @@ function Invoke-PimApprovalEscalation {
         $st.approval.activeApproverIndex = $nextIdx
         $state[$gName] = $st
         Save-PimPolicyState -State $state
+        if (Get-Command Write-PimAuditEvent -ErrorAction SilentlyContinue) {
+            Write-PimAuditEvent -Action 'approval.escalate' -Target $gName -Before @{ approver = $owners[$idx] } -After @{ approver = $nextOwner; pendingRequests = $overdue.Count }
+        }
     }
 }
 
@@ -10063,6 +10077,124 @@ function Get-PimOffboardState {
 function Save-PimOffboardState {
     param([Parameter(Mandatory)][hashtable]$State)
     ($State | ConvertTo-Json -Depth 6) | Set-Content -LiteralPath (Get-PimOffboardStateFile) -Encoding UTF8
+}
+
+# --- CSV schema auto-upgrade (LIFECYCLE-GOVERNANCE) ---------------------------
+# Customer installs predate the lifecycle columns. The engine + Manager read
+# all of them defensively (missing column = blank = default behavior = NO
+# approval requirement), but the columns should still materialize in the
+# customer's .custom.csv files so operators can see and edit them. Runs at
+# engine start and Manager startup; idempotent; preserves existing content
+# byte-for-byte except for the appended columns.
+
+$script:PimCsvSchemaAdditions = @{
+    'Account-Definitions-Admins'   = @('ProvisionDate', 'TAPLifetimeHours', 'Template', 'OffboardDate', 'DeleteAfterDays')
+    'PIM-Definitions-Roles'        = @('PolicyTemplate', 'Lifecycle')
+    'PIM-Definitions-Tasks'        = @('PolicyTemplate', 'Lifecycle')
+    'PIM-Definitions-Services'     = @('PolicyTemplate', 'Lifecycle')
+    'PIM-Definitions-Processes'    = @('PolicyTemplate', 'Lifecycle')
+    'PIM-Definitions-Resources'    = @('PolicyTemplate', 'Lifecycle')
+    'PIM-Definitions-Departments'  = @('PolicyTemplate', 'Lifecycle')
+    'PIM-Definitions-Organization' = @('PolicyTemplate', 'Lifecycle')
+}
+
+function Invoke-PimCsvSchemaUpgrade {
+    <#
+    .SYNOPSIS
+        Append missing lifecycle/governance columns to existing customer
+        .custom.csv files. Blank values = default behavior (auto-approval,
+        no scheduling, no offboarding) -- zero behavior change until the
+        operator fills them in.
+    #>
+    [CmdletBinding()]
+    param(
+        # Override for tests / ad-hoc runs; default = the active config dir.
+        [string]$ConfigDir
+    )
+
+    if (-not $ConfigDir) {
+        try { $ConfigDir = Get-PimConfigDir } catch { return }
+    }
+    if (-not $ConfigDir -or -not (Test-Path -LiteralPath $ConfigDir)) { return }
+
+    foreach ($base in @($script:PimCsvSchemaAdditions.Keys)) {
+        $path = Join-Path $ConfigDir "$base.custom.csv"
+        if (-not (Test-Path -LiteralPath $path)) { continue }
+
+        $lines = @(Get-Content -LiteralPath $path -Encoding UTF8)
+        if ($lines.Count -eq 0) { continue }
+        # Trim('"') so a previously round-tripped (fully quoted) file still
+        # reports its columns correctly -- otherwise the upgrade loops.
+        $headerCols = @($lines[0] -split ';' | ForEach-Object { $_.Trim().Trim('"') })
+        $missing = @($script:PimCsvSchemaAdditions[$base] | Where-Object { $headerCols -notcontains $_ })
+        if ($missing.Count -eq 0) { continue }
+
+        # Safety: a quoted field containing a newline would make line-append
+        # corrupt the file. Detect by comparing parsed row count to physical
+        # NON-BLANK data-line count (Import-Csv skips truly blank separator
+        # lines); mismatch -> round-trip through Import/Export-Csv (correct,
+        # just normalizes quoting).
+        $parsed = @(Import-Csv -Path $path -Delimiter ';' -Encoding UTF8)
+        $dataLines = @($lines | Select-Object -Skip 1 | Where-Object { "$_".Trim() })
+        $multiline = ($parsed.Count -ne $dataLines.Count)
+
+        if ($multiline) {
+            foreach ($r in $parsed) { foreach ($col in $missing) { $r | Add-Member -NotePropertyName $col -NotePropertyValue '' -Force } }
+            $parsed | Export-Csv -Path $path -Delimiter ';' -Encoding UTF8 -NoTypeInformation
+        } else {
+            $pad = (';' * $missing.Count)
+            $lines[0] = $lines[0] + ';' + ($missing -join ';')
+            for ($i = 1; $i -lt $lines.Count; $i++) {
+                if ($lines[$i].Trim()) { $lines[$i] = $lines[$i] + $pad }
+            }
+            Set-Content -LiteralPath $path -Value $lines -Encoding UTF8
+        }
+        Write-Host "  [Schema] $base.custom.csv upgraded: added $($missing -join ', ') (blank = default behavior / auto-approval)." -ForegroundColor Cyan
+        if (Get-Command Write-PimAuditEvent -ErrorAction SilentlyContinue) {
+            Write-PimAuditEvent -Action 'config.schema.upgrade' -Target "$base.custom.csv" -After @{ added = $missing }
+        }
+    }
+}
+
+# --- Unified audit (LIFECYCLE-GOVERNANCE phase 6) ------------------------------
+# Every engine transaction emits one JSON line to
+# output/audit/pim-audit-<yyyyMM>.jsonl (append-only, monthly files). The
+# Manager writes the same schema from its own process (actor manager:<user>).
+# Audit writes are best-effort by design -- a logging failure must never
+# break provisioning.
+
+$script:PimAuditRunId = [guid]::NewGuid().ToString('N')   # one id per module load = one engine run
+
+function Write-PimAuditEvent {
+    param(
+        [Parameter(Mandatory)][string]$Action,   # e.g. account.create | tap.create | policy.apply | mail.send
+        [Parameter(Mandatory)][string]$Target,
+        [object]$Before = $null,
+        [object]$After = $null,
+        [string]$Result = 'ok',
+        [string]$Actor = 'engine',
+        [string]$CorrelationId = ''
+    )
+    try {
+        $dir = Join-Path (Get-PimOutputDir) 'audit'
+        if (-not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+        $f = Join-Path $dir ("pim-audit-{0}.jsonl" -f [datetime]::UtcNow.ToString('yyyyMM'))
+        $evt = [ordered]@{
+            ts            = [datetime]::UtcNow.ToString('o')
+            runId         = $script:PimAuditRunId
+            correlationId = $CorrelationId
+            actor         = $Actor
+            action        = $Action
+            target        = $Target
+            before        = $Before
+            after         = $After
+            result        = $Result
+            whatIf        = [bool]$global:WhatIfMode
+        }
+        [System.IO.File]::AppendAllText($f, (($evt | ConvertTo-Json -Depth 6 -Compress) + "`r`n"), (New-Object System.Text.UTF8Encoding($false)))
+    } catch {
+        Write-Warning "audit write failed (engine NOT blocked): $($_.Exception.Message)"
+    }
 }
 
 function Invoke-PimAdminOffboarding {
@@ -10124,6 +10256,9 @@ function Invoke-PimAdminOffboarding {
             if (-not $global:WhatIfMode) {
                 $state[$upn] = @{ revokedAtUtc = [datetime]::UtcNow.ToString('o'); offboardDate = "$($row.OffboardDate)" }
                 Save-PimOffboardState -State $state
+                if (Get-Command Write-PimAuditEvent -ErrorAction SilentlyContinue) {
+                    Write-PimAuditEvent -Action 'account.offboard.revoke' -Target $upn -After @{ offboardDate = "$($row.OffboardDate)"; deleteAfterDays = "$($row.DeleteAfterDays)" }
+                }
             }
             $st = $state[$upn]
         }
@@ -10145,6 +10280,9 @@ function Invoke-PimAdminOffboarding {
                             $st | Add-Member -NotePropertyName deletedAtUtc -NotePropertyValue ([datetime]::UtcNow.ToString('o')) -Force
                             $state[$upn] = $st
                             Save-PimOffboardState -State $state
+                            if (Get-Command Write-PimAuditEvent -ErrorAction SilentlyContinue) {
+                                Write-PimAuditEvent -Action 'account.offboard.delete' -Target $upn -Before @{ revokedAtUtc = "$($st.revokedAtUtc)" } -After @{ retentionDays = $delDays }
+                            }
                         } catch {
                             if ("$_" -match 'Request_ResourceNotFound|does not exist') {
                                 Write-Host "  [Offboard] $upn already gone from the tenant." -ForegroundColor DarkGray
@@ -10234,6 +10372,9 @@ function Invoke-PimGroupRetirement {
                 try {
                     Remove-MgGroup -GroupId $grp.Id -ErrorAction Stop
                     Write-Host "  [Retire] group '$gName' DELETED. Remove the CSV row to finish." -ForegroundColor Red
+                    if (Get-Command Write-PimAuditEvent -ErrorAction SilentlyContinue) {
+                        Write-PimAuditEvent -Action 'group.retire' -Target $gName -Before @{ groupId = $grp.Id } -After @{ deleted = $true }
+                    }
                 } catch { Write-Warning "  [Retire] delete of '$gName' failed: $($_.Exception.Message)" }
             }
         }
@@ -10308,6 +10449,9 @@ function Invoke-PimMembershipDriftCleanup {
                     try {
                         Remove-MgGroupMemberByRef -GroupId $grp.Id -DirectoryObjectId $m.Id -ErrorAction Stop
                         Write-Host "  [Drift/ENFORCE] removed $mUpn from '$gName' (not in PIM-Assignments-Admins)" -ForegroundColor Red
+                        if (Get-Command Write-PimAuditEvent -ErrorAction SilentlyContinue) {
+                            Write-PimAuditEvent -Action 'membership.drift.remove' -Target "$mUpn -> $gName" -After @{ groupId = $grp.Id }
+                        }
                     } catch { Write-Warning "  [Drift] removal of $mUpn from '$gName' failed: $($_.Exception.Message)" }
                 }
             } else {
@@ -10385,6 +10529,9 @@ function Invoke-PimTapProvisioning {
     # second TAP on the next run (the code is already in the TAP log file).
     $tapState[$UserPrincipalName] = @{ issuedAtUtc = [datetime]::UtcNow.ToString('o'); startDateTime = "$($tap.StartDateTime)"; lifetimeInMinutes = $tap.LifetimeInMinutes }
     Save-PimTapState -State $tapState
+    if (Get-Command Write-PimAuditEvent -ErrorAction SilentlyContinue) {
+        Write-PimAuditEvent -Action 'tap.create' -Target $UserPrincipalName -After @{ startDateTime = "$($tap.StartDateTime)"; lifetimeInMinutes = $tap.LifetimeInMinutes }
+    }
 
     # Out-of-band delivery -- only when notification channels are configured;
     # best-effort, never blocks provisioning.
@@ -10711,6 +10858,11 @@ function Send-PimTemplatedMail {
             }
             continue
         }
+    }
+    if (Get-Command Write-PimAuditEvent -ErrorAction SilentlyContinue) {
+        Write-PimAuditEvent -Action 'mail.send' -Target ("{0} -> {1}" -f $Type, $(if ($Recipient) { $Recipient } else { '(webhooks)' })) `
+            -After @{ sent = @($result.Sent); failed = @($result.Failed); template = $(if ($result.TemplateUsed) { Split-Path -Leaf $result.TemplateUsed } else { $null }) } `
+            -Result $(if (@($result.Failed).Count -gt 0) { 'partial' } else { 'ok' })
     }
     $result
 }
@@ -11371,6 +11523,9 @@ function Invoke-PimAccountDisable {
     try {
         Update-MgUser -UserId $user.Id -AccountEnabled:$false -ErrorAction Stop
         Write-Host "  [Disable] $UserPrincipalName -- AccountEnabled=`$false (PIM assignments left intact)" -ForegroundColor Yellow
+        if (Get-Command Write-PimAuditEvent -ErrorAction SilentlyContinue) {
+            Write-PimAuditEvent -Action 'account.disable' -Target $UserPrincipalName -Before @{ accountEnabled = $true } -After @{ accountEnabled = $false }
+        }
     } catch {
         Write-Warning "  [Disable] $UserPrincipalName failed: $($_.Exception.Message)"
     }
@@ -11546,6 +11701,13 @@ function Invoke-PimAccountRevoke {
         $auditRowFlat | Export-Csv -Path $auditCsv -Delimiter ';' -Encoding UTF8 -NoTypeInformation
     }
     Write-Host "  [Revoke] audit row appended -> $auditCsv" -ForegroundColor DarkCyan
+    if (Get-Command Write-PimAuditEvent -ErrorAction SilentlyContinue) {
+        Write-PimAuditEvent -Action 'account.revoke' -Target $UserPrincipalName -After @{
+            groupsRemoved     = @($auditRow.GroupsRemovedFrom)
+            eligibleCancelled = $auditRow.EligibleSchedules
+            activeCancelled   = $auditRow.ActiveSchedules
+        } -Result $(if (@($auditRow.Errors).Count -gt 0) { 'partial' } else { 'ok' })
+    }
 }
 
 function Get-PimNamePrefix {

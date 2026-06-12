@@ -218,7 +218,7 @@ All engine and Manager transactions converge on **`output/audit/pim-audit-<yyyyM
 | 3 | Policy templates + `PolicyTemplate` linking + hash-based re-apply | **shipped v2.4.155** |
 | 4 | Approvals: parallel (native) + serial escalation sweep, Owners become functional (approval chips land with the Governance tab) | **shipped v2.4.155** |
 | 5 | Offboarding: `OffboardDate`/`DeleteAfterDays`/`Lifecycle=Retire` + drift cleanup modes | **shipped v2.4.156** |
-| 6 | Unified jsonl audit + Manager audit viewer (+ optional AzLogDcrIngestPS sink) | engine, manager |
+| 6 | Unified jsonl audit (viewer lands with the Governance tab; optional AzLogDcrIngestPS sink is a follow-up) | **shipped v2.4.157** |
 | 7 | Manager RBAC + Governance tab shell | manager |
 | 8 | Emergency override (needs 3 + 7) | manager, engine |
 | 9 | Resource auto-discovery (Portal mode first, Engine mode second) | manager, engine |
