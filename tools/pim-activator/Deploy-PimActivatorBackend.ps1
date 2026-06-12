@@ -245,6 +245,17 @@ function Invoke-PaGraphConnect {
 }
 
 $ctx = Get-MgContext -ErrorAction SilentlyContinue
+
+if ($UseEdge -and $ctx -and $ctx.TokenCredentialType -ne 'UserProvidedAccessToken') {
+    # A cached MSAL context re-auths through the SYSTEM DEFAULT browser the
+    # moment any call needs a fresh token -- the exact behavior -UseEdge
+    # exists to avoid (field case: IE and Edge both opened, the IE attempt
+    # died on state-mismatch). Discard it and sign in through Edge instead.
+    Write-Host "Discarding cached MSAL Graph session (it would re-auth via the system default browser)..." -ForegroundColor Yellow
+    Disconnect-MgGraph -ErrorAction SilentlyContinue | Out-Null
+    $ctx = $null
+}
+
 if (-not $ctx) {
     Write-Host "Not connected to Microsoft Graph. Launching sign-in (scopes: $($_requiredScopes -join ', '))..." -ForegroundColor Yellow
     Invoke-PaGraphConnect
@@ -350,8 +361,21 @@ function Assert-ActiveEntraRoles {
         Write-Host "Pre-flight: could not read your active directory roles -- continuing without the check. ($($_.Exception.Message))" -ForegroundColor DarkYellow
         return
     }
-    $active    = @($resp.value)
-    $names     = if ($active) { @($active | ForEach-Object { $_.displayName }) -join ', ' } else { '(none)' }
+    $active = @($resp.value)
+    if (-not $active) {
+        # Empty is INCONCLUSIVE, not proof of no active roles: listing
+        # directory-role memberships needs a directory-read scope
+        # (Directory.Read.All / RoleManagement.Read.Directory) that this
+        # script's lean token set does not include -- without it Graph
+        # silently filters the roles out of memberOf instead of returning
+        # 403. Field case: operator HAD activated the roles in PIM and the
+        # check still showed '(none)'. Warn and continue; the real calls
+        # will 403 with clear errors if roles are genuinely missing.
+        Write-Host "Pre-flight: cannot see your directory-role memberships with this token (or no roles are active) -- continuing. If later calls fail with 403: activate 'Application Administrator' or 'Cloud Application Administrator' in PIM (+ 'Privileged Role Administrator' for -GrantConsent)." -ForegroundColor DarkYellow
+        Write-Host ""
+        return
+    }
+    $names     = @($active | ForEach-Object { $_.displayName }) -join ', '
     $activeIds = @($active | ForEach-Object { $_.roleTemplateId })
     Write-Host "Active directory roles: $names" -ForegroundColor Cyan
     Write-Host ""
