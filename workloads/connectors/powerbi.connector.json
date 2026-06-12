@@ -1,0 +1,41 @@
+{
+  "id": "powerbi",
+  "name": "Microsoft Power BI / Fabric (workspace roles)",
+  "auth": "powerbi",
+  "status": "structure built v2.4.181 (fits the connector schema: static roles + per-row workspace scope). Live-validation pending a Power BI service principal with tenant/workspace access (the test SPN saw 0 workspaces).",
+  "permissionsNeeded": ["Power BI: Tenant.ReadWrite.All or workspace admin; 'Allow service principals to use Power BI APIs' tenant setting"],
+  "prerequisites": {
+    "tokenAdapter": "auth=powerbi -> token for https://analysis.windows.net/powerbi/api, supplied via $global:PIM_WorkloadTokens['powerbi'] (launcher-minted) or Get-AzAccessToken.",
+    "scopeIsWorkspace": "Row Scope = the Power BI workspace (group) id; the PIM group is added to that workspace with the access right named by RoleName.",
+    "rolesAreFixed": "Power BI workspace roles are a fixed enum (no list API) -- declared as a static roles array below."
+  },
+  "roles": [
+    { "id": "Admin", "name": "Admin", "description": "Workspace admin" },
+    { "id": "Member", "name": "Member", "description": "Workspace member" },
+    { "id": "Contributor", "name": "Contributor", "description": "Workspace contributor" },
+    { "id": "Viewer", "name": "Viewer", "description": "Workspace viewer (read)" }
+  ],
+  "api": {
+    "baseUrl": "https://api.powerbi.com",
+    "listAssignments": {
+      "method": "GET",
+      "path": "/v1.0/myorg/groups/{scope}/users",
+      "itemsPath": "value",
+      "assignmentId": "identifier",
+      "principalIds": "identifier"
+    },
+    "assign": {
+      "method": "POST",
+      "path": "/v1.0/myorg/groups/{scope}/users",
+      "body": {
+        "identifier": "{groupId}",
+        "principalType": "Group",
+        "groupUserAccessRight": "{roleName}"
+      }
+    },
+    "remove": {
+      "method": "DELETE",
+      "path": "/v1.0/myorg/groups/{scope}/users/{assignmentId}"
+    }
+  }
+}

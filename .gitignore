@@ -59,3 +59,5 @@ config-msp/*.custom.json
 
 # Customer license files -- delivered offline, never tracked anywhere
 *.pimlicense
+
+config-test/

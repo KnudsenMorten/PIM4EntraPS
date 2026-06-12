@@ -1,9 +1,10 @@
 # Release notes for PIM4EntraPS
 
-## v2.4.180
+## v2.4.181
 
 Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monorepo:
 
+- release: PIM4EntraPS v2.4.181 -- Pester job (all flows rerunnable) + multi-auth connector framework + powerbi connector (a6153dd5)
 - release: PIM4EntraPS v2.4.180 -- entra-roles workload connector (live-tested: 145 directory roles) + activation prereqs (Intune always-on; Defender Unified RBAC = portal activation, no Graph endpoint) + app catalog (120 apps by mechanism) + 100 PIM use-cases (60b72237)
 - release: PIM4EntraPS v2.4.179 -- Manager + scenario functional test suites (68 assertions, rerunnable) (a7d01e49)
 - release: PIM4EntraPS v2.4.178 -- rerunnable functional test suite (40 pass/0 fail/6 live-skip) + cloud-native container engine documented in repo (98ffdb04)
@@ -33,7 +34,6 @@ Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monor
 - release: PIM4EntraPS v2.4.154 -- lifecycle phase 2: customizable mail templates (templates/mail/<type>.mailtemplate[.custom].html, 7 types, subject comment + {{Token}} substitution, unknown-token warnings; Send-PimTemplatedMail dispatches Smtp HTML / Teams card / Slack text with WhatIf + best-effort semantics; Send-PimAdminTap routes through tap-delivery template with hardcoded fallback; new-admin manager notification on creation) + admin templates (templates/admin/*.admintemplate.json: consultant, new-employee-next-month with the FirstWorkdayNextMonth-3d / @08:00 / 8h scenario; GET /api/admin-templates; wizard Start-from-template picker prefilling state + role groups; Template traceability column). 31-check harness green PS 5.1 + pwsh 7; node --check green (529a581b)
 - release: PIM4EntraPS v2.4.153 -- lifecycle phase 1: shared date-expression resolver (PIM-DateExpression.ps1: Now/FirstDayNextMonth/FirstWorkdayNextMonth/FirstDayNextWeek/FirstWorkdayNextWeek +/-Nd @HH:mm, yyyy-MM-dd[@HH:mm]; legacy-parser + cast fallback; UTC); ProvisionDate scheduled creation (engine skips row until resolved time -- forwarded-TAP-mail scenario); TAPLifetimeHours + TAP creation deferred to within PIM_TapCreateLeadHours (48h) of the start window via idempotent Invoke-PimTapProvisioning (tap-state.json, runs in create AND update branches); Manager onboarding groups TAP fields into one fieldset with live /api/resolve-date previews (UsageLocation moved out); grid bulk Move-to-ring with lowered-ring warning; validators PIM-SCHED-001/002 + PIM-TAP-002; sample CSV updated. 44-check harness green PS 5.1 + pwsh 7; both HTML script blocks pass node --check (77223207)
 - release: PIM4EntraPS v2.4.152 -- docs/LIFECYCLE-GOVERNANCE.md: architecture for the 13 lifecycle/governance features (shared date-expression resolver; ProvisionDate scheduled admin creation incl. the forwarded-TAP-mail dependency scenario; TAP windows via TAPStartDate expressions + TAPLifetimeHours with near-window deferred creation + one GUI fieldset; admin templates w/ variables; ring-move actions; mail templates; policy templates w/ PolicyTemplate link + hash re-apply; Owners-driven parallel/serial approvals; KV-passphrase emergency override w/ TTL restore; OffboardDate/DeleteAfterDays/Lifecycle=Retire offboarding + drift cleanup; unified jsonl audit; Reader/Admin/SuperAdmin manager RBAC + Governance tab; resource auto-discovery Off/Portal/Engine). 9 dependency-ordered phases (c9a37c61)
-- release: PIM4EntraPS v2.4.151 -- Show-PimActivatorBanner troubleshooting header in all three deploy scripts (script + solution version, verified Graph SDK version, optional Az module versions, PS runtime+edition; Client uses GraphOptional soft mode + standalone-copy guard; fixed @($null) AzModules expansion crashing Get-Module on pwsh 7); ADMX ingestion pre-upload now sweeps ALL rows matching fileName OR targetNamespace (half-removed ghost rows keep owning the namespace -> Intune mangles targetPrefix to pimactivator<rowId> and nulls the ingest) and waits 60s for namespace release before upload/retry (10s demonstrably too short; live run went green on attempt 2 after full remove+settle). Harness 13 checks green PS 5.1 + pwsh 7 (71841415)
 
 ---
 
@@ -42,6 +42,17 @@ Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monor
 > **Curated changelog.** The publish workflow auto-prepends recent monorepo commits as a raw activity log; this file is the human-friendly narrative on top.
 
 ---
+
+## v2.4.181 -- Pester job (all flows rerunnable) + multi-auth connector framework + powerbi connector
+
+You asked to "add all test to pester jobs so we can rerun all flows and scenarios" -- done -- and the connector framework needed to grow past Graph-only before the remaining workload connectors can exist.
+
+- **`tests/PIM.Tests.ps1`** -- a real Pester v5 job: **13 It blocks, 13 PASS, 0 fail**. It runs the three functional suites (engine/Manager/scenarios = 68 assertions) as clean child processes and asserts each exits 0, then tests the workload-connector framework in-proc (`Get-PimNestedProp` dotted paths, `Get-PimWorkloadToken` launcher-override + unknown-adapter throw, **every `*.connector.json` is valid JSON with a known auth adapter + assign/remove ops + listRoles-or-static-roles**, powerbi static-role load), plus offline feature spot-checks (date grammar, license, password classes, HighPriv routing regex). One command reruns every flow: `Invoke-Pester -Path tests\PIM.Tests.ps1`.
+- **`tests/Run-AllPimTests.ps1`** now drives Pester when Pester 5+ is present (falls back to the three child-process suites otherwise) -- one entry point for the whole suite.
+- **Multi-auth connector framework** in `PIM-Functions.psm1`: `Invoke-PimWorkloadApi` is no longer Graph-only. It now resolves an auth adapter per connector (`graph` via `Invoke-MgGraphRequest`; `arm` / `powerbi` / `devops` / `businesscentral` / `dataverse` via token-REST), `Get-PimWorkloadToken` maps each adapter to its resource/audience and prefers a launcher-minted token from `$global:PIM_WorkloadTokens[$auth]` (avoids the Azure.Core/Az assembly conflict by minting tokens before module import), and `Get-PimNestedProp` reads dotted response paths so connectors can declare `itemsPath`/`assignmentId` against any API shape. `Apply-PimWorkloadAssignments` now also hands each row a fresh `newId` GUID for APIs (ARM) that PUT a client-supplied assignment id.
+- **`workloads/connectors/powerbi.connector.json`** (new) -- Power BI / Fabric workspace roles on the `powerbi` adapter (static Admin/Member/Contributor/Viewer enum, per-row workspace scope, add/list/remove against `/v1.0/myorg/groups/{scope}/users`). Structure built and schema-validated by the Pester job; **live-validation pending** a Power BI service principal with workspace access (the test SPN saw 0 workspaces) -- marked as such in the connector `status`.
+
+The remaining workload connectors (azure-rbac/ARM, entra-approle generic, business-central, dataverse, devops, exchange-online) now have a framework to plug into; each still needs its per-adapter assign-body + scope-injection wired and live-validated. VERSION -> 2.4.181.
 
 ## v2.4.180 -- workload connectors: entra-roles (live-tested) + activation prereqs + app catalog + 100 PIM use-cases
 
