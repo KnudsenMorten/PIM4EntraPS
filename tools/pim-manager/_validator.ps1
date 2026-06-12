@@ -958,6 +958,50 @@ function Invoke-PimPreflightValidation {
                         -Suggestion "Set the intended validity window in hours, e.g. 8."))
                 }
             }
+
+            # Phase 5: offboarding columns
+            $offRaw = (Get-PimRowValue -Row $r -Column 'OffboardDate').Trim()
+            if ($offRaw) {
+                try { $null = Resolve-PimDateExpression -Expression $offRaw } catch {
+                    [void]$violations.Add((New-PimViolation -Severity 'error' -Code 'PIM-SCHED-001' -Csv 'Account-Definitions-Admins' -Row $i -Column 'OffboardDate' `
+                        -Message "OffboardDate '$offRaw' for '$upn' is not a valid date expression -- the offboarding sweep skips the row, so this admin will NOT be offboarded." `
+                        -Suggestion "Use the date-expression grammar, e.g. '2026-09-30' or 'FirstDayNextMonth'."))
+                }
+            }
+            $delRaw = (Get-PimRowValue -Row $r -Column 'DeleteAfterDays').Trim()
+            if ($delRaw) {
+                $delNum = 0
+                if (-not [int]::TryParse($delRaw, [ref]$delNum) -or $delNum -lt 0) {
+                    [void]$violations.Add((New-PimViolation -Severity 'error' -Code 'PIM-OFF-001' -Csv 'Account-Definitions-Admins' -Row $i -Column 'DeleteAfterDays' `
+                        -Message "DeleteAfterDays '$delRaw' for '$upn' must be a non-negative integer (days between revoke and account deletion). The engine skips the delete step for invalid values." `
+                        -Suggestion "Set the retention in whole days, e.g. 30 -- or leave blank to never delete."))
+                } elseif (-not $offRaw) {
+                    [void]$violations.Add((New-PimViolation -Severity 'warning' -Code 'PIM-OFF-001' -Csv 'Account-Definitions-Admins' -Row $i -Column 'DeleteAfterDays' `
+                        -Message "DeleteAfterDays is set for '$upn' but OffboardDate is empty -- the retention only counts from the offboarding revoke, so nothing will happen." `
+                        -Suggestion "Set OffboardDate too, or clear DeleteAfterDays."))
+                }
+            }
+        }
+    }
+
+    # ------------------------------------------------------------------
+    # PIM-LC-001: Lifecycle column on definition rows (phase 5) -- only
+    # blank or 'Retire' are meaningful; anything else is a typo that
+    # silently does nothing.
+    # ------------------------------------------------------------------
+    foreach ($defBase in @('PIM-Definitions-Roles','PIM-Definitions-Tasks','PIM-Definitions-Services','PIM-Definitions-Processes','PIM-Definitions-Resources','PIM-Definitions-Departments','PIM-Definitions-Organization')) {
+        if (-not $loaded.ContainsKey($defBase)) { continue }
+        $rows = $loaded[$defBase].rows
+        for ($i = 0; $i -lt $rows.Count; $i++) {
+            $r = $rows[$i]
+            if (Test-PimRowIsBlank -Row $r) { continue }
+            $lc = (Get-PimRowValue -Row $r -Column 'Lifecycle').Trim()
+            if ($lc -and $lc -ne 'Retire') {
+                $gn = (Get-PimRowValue -Row $r -Column 'GroupName').Trim()
+                [void]$violations.Add((New-PimViolation -Severity 'warning' -Code 'PIM-LC-001' -Csv $defBase -Row $i -Column 'Lifecycle' `
+                    -Message "Lifecycle '$lc' for '$gn' is not a recognized value -- the engine only acts on 'Retire' (case-sensitive); this row's value does nothing." `
+                    -Suggestion "Use 'Retire' to retire the group (role assignments + members removed, group deleted), or leave blank."))
+            }
         }
     }
 

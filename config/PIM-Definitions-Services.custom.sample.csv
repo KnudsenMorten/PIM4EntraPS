@@ -1,11 +1,11 @@
-GroupName;GroupDescription;GroupTag;AdministrativeUnitTag;IsRoleAssignable;Workload;Level;TierLevel;Plane;CPPlatform;Owners;PolicyTemplate
-PIM-Entra-ID-GlobalAdministrator-L0-T0-CP-ID;Global administrators, Entra ID;Entra-ID-GlobalAdministrator-L0;PIM-L0;TRUE;Entra-ID;L0;T0;CP;ID;identity-owner@contoso.com;approval-required
-;;;;;;;;;;;
-PIM-Entra-ID-GlobalReader-L1-T0-CP-ID;Global Reader, Entra ID;Entra-ID-GlobalReader-L1;PIM-L1;TRUE;Entra-ID;L1;T0;CP;ID;identity-owner@contoso.com;
-PIM-Entra-ID-UserAdministrator-L1-T0-CP-ID;User Administrator, Entra ID;Entra-ID-UserAdministrator-L1;PIM-L1;TRUE;Entra-ID;L1;T0;CP;ID;identity-owner@contoso.com;
-PIM-Entra-ID-HelpdeskAdministrator-L1-T0-CP-ID;Helpdesk Administrator, Entra ID;Entra-ID-HelpdeskAdministrator-L1;PIM-L1;TRUE;Entra-ID;L1;T0;CP;ID;helpdesk-lead@contoso.com;
-PIM-Entra-ID-SecurityAdministrator-L1-T0-CP-ID;Security Administrator, Entra ID;Entra-ID-SecurityAdministrator-L1;PIM-L1;TRUE;Entra-ID;L1;T0;CP;ID;soc-lead@contoso.com;
-PIM-Entra-ID-Bundle-GlobalRoles-L1-T0-CP-ID;Entra ID Global Roles (bundle);Entra-ID-Bundle-GlobalRoles-L1;PIM-L1;TRUE;Entra-ID;L1;T0;CP;ID;identity-owner@contoso.com;
-;;;;;;;;;;;
-PIM-AD-EnterpriseAdministrators-L0-T0-CP-ID-S_AD;Enterprise administrators, AD;AD-EnterpriseAdministrator-L0;PIM-L0;FALSE;AD;L0;T0;CP;ID;infra-owner@contoso.com;
-PIM-AD-DomainAdministrators-L1-T0-CP-ID-S_AD;Domain administrators, AD;AD-DomainAdministrators-L1;PIM-L1;FALSE;AD;L1;T0;CP;ID;infra-owner@contoso.com;
+GroupName;GroupDescription;GroupTag;AdministrativeUnitTag;IsRoleAssignable;Workload;Level;TierLevel;Plane;CPPlatform;Owners;PolicyTemplate;Lifecycle
+PIM-Entra-ID-GlobalAdministrator-L0-T0-CP-ID;Global administrators, Entra ID;Entra-ID-GlobalAdministrator-L0;PIM-L0;TRUE;Entra-ID;L0;T0;CP;ID;identity-owner@contoso.com;approval-required;
+;;;;;;;;;;;;
+PIM-Entra-ID-GlobalReader-L1-T0-CP-ID;Global Reader, Entra ID;Entra-ID-GlobalReader-L1;PIM-L1;TRUE;Entra-ID;L1;T0;CP;ID;identity-owner@contoso.com;;
+PIM-Entra-ID-UserAdministrator-L1-T0-CP-ID;User Administrator, Entra ID;Entra-ID-UserAdministrator-L1;PIM-L1;TRUE;Entra-ID;L1;T0;CP;ID;identity-owner@contoso.com;;
+PIM-Entra-ID-HelpdeskAdministrator-L1-T0-CP-ID;Helpdesk Administrator, Entra ID;Entra-ID-HelpdeskAdministrator-L1;PIM-L1;TRUE;Entra-ID;L1;T0;CP;ID;helpdesk-lead@contoso.com;;
+PIM-Entra-ID-SecurityAdministrator-L1-T0-CP-ID;Security Administrator, Entra ID;Entra-ID-SecurityAdministrator-L1;PIM-L1;TRUE;Entra-ID;L1;T0;CP;ID;soc-lead@contoso.com;;
+PIM-Entra-ID-Bundle-GlobalRoles-L1-T0-CP-ID;Entra ID Global Roles (bundle);Entra-ID-Bundle-GlobalRoles-L1;PIM-L1;TRUE;Entra-ID;L1;T0;CP;ID;identity-owner@contoso.com;;
+;;;;;;;;;;;;
+PIM-AD-EnterpriseAdministrators-L0-T0-CP-ID-S_AD;Enterprise administrators, AD;AD-EnterpriseAdministrator-L0;PIM-L0;FALSE;AD;L0;T0;CP;ID;infra-owner@contoso.com;;
+PIM-AD-DomainAdministrators-L1-T0-CP-ID-S_AD;Domain administrators, AD;AD-DomainAdministrators-L1;PIM-L1;FALSE;AD;L1;T0;CP;ID;infra-owner@contoso.com;;

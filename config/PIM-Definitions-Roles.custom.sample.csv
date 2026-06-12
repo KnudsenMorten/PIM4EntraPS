@@ -1,8 +1,8 @@
-GroupName;GroupDescription;GroupTag;AdministrativeUnitTag;CPPlatform;Plane;TierLevel;PermissionScope;SyncPlatform;IsRoleAssignable;SponsorUpn;SponsorNotes;PolicyTemplate
-PIM-ROLE-IdentityAdmin;Identity & Access platform admins (high-privilege);ROLE-IdentityAdmin;PIM-ROLES;;;;;;TRUE;identity-owner@contoso.com;Quarterly access review owner - identity platform;
-PIM-ROLE-CloudAdmin;Cloud workload admins (Exchange/SharePoint/Teams/Intune);ROLE-CloudAdmin;PIM-ROLES;;;;;;TRUE;cloud-owner@contoso.com;Quarterly access review owner - cloud workloads;
-PIM-ROLE-Helpdesk;Helpdesk operators - tier-2 user mgmt;ROLE-Helpdesk;PIM-ROLES;;;;;;TRUE;helpdesk-lead@contoso.com;Quarterly access review owner - helpdesk;
-PIM-ROLE-ServiceDeskTier1;Service desk tier-1 - read-only break-glass;ROLE-ServiceDeskTier1;PIM-ROLES;;;;;;TRUE;servicedesk-lead@contoso.com;Quarterly access review owner - tier-1 service desk;
-PIM-ROLE-SecurityOps;Security operations - SecAdmin/SecReader/AuthPolicy;ROLE-SecurityOps;PIM-ROLES;;;;;;TRUE;soc-lead@contoso.com;Quarterly access review owner - SOC;
-PIM-ROLE-Compliance;Compliance & e-discovery admins;ROLE-Compliance;PIM-ROLES;;;;;;TRUE;compliance-owner@contoso.com;Quarterly access review owner - compliance;
-PIM-ROLE-ServerOperator;Server/infrastructure operators;ROLE-ServerOperator;PIM-ROLES;;;;;;TRUE;infra-owner@contoso.com;Quarterly access review owner - infrastructure;
+GroupName;GroupDescription;GroupTag;AdministrativeUnitTag;CPPlatform;Plane;TierLevel;PermissionScope;SyncPlatform;IsRoleAssignable;SponsorUpn;SponsorNotes;PolicyTemplate;Lifecycle
+PIM-ROLE-IdentityAdmin;Identity & Access platform admins (high-privilege);ROLE-IdentityAdmin;PIM-ROLES;;;;;;TRUE;identity-owner@contoso.com;Quarterly access review owner - identity platform;;
+PIM-ROLE-CloudAdmin;Cloud workload admins (Exchange/SharePoint/Teams/Intune);ROLE-CloudAdmin;PIM-ROLES;;;;;;TRUE;cloud-owner@contoso.com;Quarterly access review owner - cloud workloads;;
+PIM-ROLE-Helpdesk;Helpdesk operators - tier-2 user mgmt;ROLE-Helpdesk;PIM-ROLES;;;;;;TRUE;helpdesk-lead@contoso.com;Quarterly access review owner - helpdesk;;
+PIM-ROLE-ServiceDeskTier1;Service desk tier-1 - read-only break-glass;ROLE-ServiceDeskTier1;PIM-ROLES;;;;;;TRUE;servicedesk-lead@contoso.com;Quarterly access review owner - tier-1 service desk;;
+PIM-ROLE-SecurityOps;Security operations - SecAdmin/SecReader/AuthPolicy;ROLE-SecurityOps;PIM-ROLES;;;;;;TRUE;soc-lead@contoso.com;Quarterly access review owner - SOC;;
+PIM-ROLE-Compliance;Compliance & e-discovery admins;ROLE-Compliance;PIM-ROLES;;;;;;TRUE;compliance-owner@contoso.com;Quarterly access review owner - compliance;;
+PIM-ROLE-ServerOperator;Server/infrastructure operators;ROLE-ServerOperator;PIM-ROLES;;;;;;TRUE;infra-owner@contoso.com;Quarterly access review owner - infrastructure;;

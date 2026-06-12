@@ -5206,6 +5206,19 @@ Fix (one-time per tenant):
                 }
             }
 
+            # Phase 5: a row past its OffboardDate belongs to the offboarding
+            # sweep (Invoke-PimAdminOffboarding) -- the create/update path must
+            # not recreate or refresh it.
+            $OffboardDate = if ($Entry.PSObject.Properties.Name -contains 'OffboardDate') { $Entry.OffboardDate } else { '' }
+            if ($OffboardDate -and $OffboardDate.Trim()) {
+                $offboardAtUtc = $null
+                try { $offboardAtUtc = Resolve-PimDateExpression -Expression $OffboardDate } catch {}
+                if ($offboardAtUtc -and $offboardAtUtc -le [datetime]::UtcNow) {
+                    Write-Host "OFFBOARDING: $UserPrincipalName passed OffboardDate ($($offboardAtUtc.ToString('yyyy-MM-dd HH:mm')) UTC) -- handled by the offboarding sweep, skipping create/update." -ForegroundColor Cyan
+                    continue
+                }
+            }
+
             # Notes are written to the password log; the Graph user object has no
             # native long-text field that fits (extensionAttributes are 256-char
             # capped per attribute and not exposed via Update-MgBetaUser cleanly).
@@ -10014,6 +10027,295 @@ function Invoke-PimApprovalEscalation {
         $state[$gName] = $st
         Save-PimPolicyState -State $state
     }
+}
+
+# --- Offboarding (LIFECYCLE-GOVERNANCE phase 5) -------------------------------
+# Admins: OffboardDate (date expression) triggers the revoke pipeline (the
+# existing Invoke-PimAccountRevoke does PIM schedule cancellation + group
+# removal + disable, with its own audit CSV) plus sign-in session revocation
+# and the offboarding-notice mail; DeleteAfterDays later the account is
+# deleted. Groups: Lifecycle=Retire removes role assignments + members and
+# deletes the group (engine-created naming-prefix guard). Drift:
+# $global:PIM_OffboardCleanupMode = Off | Report | Enforce.
+
+function Get-PimOffboardStateFile {
+    $stateDir = Join-Path (Get-PimOutputDir) 'state'
+    if (-not (Test-Path -LiteralPath $stateDir)) { New-Item -ItemType Directory -Path $stateDir -Force | Out-Null }
+    Join-Path $stateDir 'offboard-state.json'
+}
+
+function Get-PimOffboardState {
+    $f = Get-PimOffboardStateFile
+    if (-not (Test-Path -LiteralPath $f)) { return @{} }
+    try {
+        $raw = Get-Content -LiteralPath $f -Raw -Encoding UTF8
+        if (-not $raw -or -not $raw.Trim()) { return @{} }
+        $obj = $raw | ConvertFrom-Json
+        $map = @{}
+        foreach ($p in $obj.PSObject.Properties) { $map[$p.Name] = $p.Value }
+        return $map
+    } catch {
+        Write-Warning "offboard-state.json unreadable ($($_.Exception.Message)) -- treating as empty (worst case: a revoke re-runs, which is idempotent)."
+        return @{}
+    }
+}
+
+function Save-PimOffboardState {
+    param([Parameter(Mandatory)][hashtable]$State)
+    ($State | ConvertTo-Json -Depth 6) | Set-Content -LiteralPath (Get-PimOffboardStateFile) -Encoding UTF8
+}
+
+function Invoke-PimAdminOffboarding {
+    <#
+    .SYNOPSIS
+        Date-driven admin offboarding: revoke at OffboardDate, delete
+        DeleteAfterDays later. Idempotent via offboard-state.json.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$AccountsDefinitionFile
+    )
+
+    if (-not (Test-Path -LiteralPath $AccountsDefinitionFile)) { return }
+    $rows = @()
+    try { $rows = Import-Csv -Path $AccountsDefinitionFile -Delimiter ';' -Encoding UTF8 | Where-Object { $_.UserName } } catch { return }
+    $candidates = @($rows | Where-Object { $_.PSObject.Properties.Name -contains 'OffboardDate' -and "$($_.OffboardDate)".Trim() })
+    if ($candidates.Count -eq 0) { return }
+
+    Write-Host ""
+    Write-Host "Offboarding sweep: $($candidates.Count) row(s) carry an OffboardDate..." -ForegroundColor Cyan
+    $state = Get-PimOffboardState
+
+    foreach ($row in $candidates) {
+        $upn = if ($global:DefaultDomainUPN) { "$($row.UserName)@$($global:DefaultDomainUPN)" } else { "$($row.UserPrincipalName)" }
+        if (-not $upn) { continue }
+
+        $offUtc = $null
+        try { $offUtc = Resolve-PimDateExpression -Expression "$($row.OffboardDate)" } catch {
+            Write-Warning "  [Offboard] cannot parse OffboardDate '$($row.OffboardDate)' for $upn -- row skipped (PIM-SCHED-001 catches this in the Manager)."
+            continue
+        }
+        if ($offUtc -gt [datetime]::UtcNow) { continue }   # not yet due
+
+        $st = $state[$upn]
+
+        # Step 1: revoke (once). Reuses the proven kill-switch pipeline.
+        if (-not ($st -and $st.revokedAtUtc)) {
+            Write-Host "  [Offboard] $upn reached OffboardDate ($($offUtc.ToString('yyyy-MM-dd HH:mm')) UTC) -- revoking..." -ForegroundColor Yellow
+            Invoke-PimAccountRevoke -UserPrincipalName $upn
+            if (-not $global:WhatIfMode) {
+                try {
+                    Invoke-MgGraphRequest -Method POST -Uri "https://graph.microsoft.com/v1.0/users/$upn/revokeSignInSessions" -ErrorAction Stop | Out-Null
+                    Write-Host "  [Offboard] $upn -- sign-in sessions revoked." -ForegroundColor Yellow
+                } catch { Write-Warning "  [Offboard] revokeSignInSessions for $upn failed: $($_.Exception.Message)" }
+            }
+            $mgr = if ($row.PSObject.Properties.Name -contains 'ManagerEmail') { "$($row.ManagerEmail)".Trim() } else { '' }
+            if ($mgr -and $global:PIM_NotificationChannels -and $global:PIM_NotificationChannels.Count -gt 0 -and (Get-Command Send-PimTemplatedMail -ErrorAction SilentlyContinue)) {
+                try {
+                    Send-PimTemplatedMail -Type 'offboarding-notice' -Recipient $mgr -Tokens @{
+                        DisplayName       = "$($row.DisplayName)"
+                        UserPrincipalName = $upn
+                        OffboardDate      = "$($row.OffboardDate)"
+                        Steps             = 'PIM schedules cancelled, group memberships removed, account disabled, sessions revoked' + $(if ("$($row.DeleteAfterDays)".Trim()) { ", deletion scheduled after $($row.DeleteAfterDays) day(s)" } else { '' })
+                        Date              = (Get-Date).ToString('yyyy-MM-dd')
+                    } | Out-Null
+                } catch { Write-Warning "  [Offboard] notice mail failed (offboarding NOT blocked): $($_.Exception.Message)" }
+            }
+            if (-not $global:WhatIfMode) {
+                $state[$upn] = @{ revokedAtUtc = [datetime]::UtcNow.ToString('o'); offboardDate = "$($row.OffboardDate)" }
+                Save-PimOffboardState -State $state
+            }
+            $st = $state[$upn]
+        }
+
+        # Step 2: delete after the retention window (only when configured).
+        $delDaysRaw = if ($row.PSObject.Properties.Name -contains 'DeleteAfterDays') { "$($row.DeleteAfterDays)".Trim() } else { '' }
+        if ($st -and $st.revokedAtUtc -and -not $st.deletedAtUtc -and $delDaysRaw) {
+            $delDays = 0
+            if ([int]::TryParse($delDaysRaw, [ref]$delDays) -and $delDays -ge 0) {
+                $dueUtc = ([datetime]$st.revokedAtUtc).ToUniversalTime().AddDays($delDays)
+                if ([datetime]::UtcNow -ge $dueUtc) {
+                    if ($global:WhatIfMode) {
+                        Write-Host "  [WHATIF] would DELETE $upn (revoked $($st.revokedAtUtc), retention $delDays day(s) elapsed)" -ForegroundColor Yellow
+                    } else {
+                        try {
+                            $usr = Get-MgUser -UserId $upn -ErrorAction Stop
+                            Remove-MgUser -UserId $usr.Id -ErrorAction Stop
+                            Write-Host "  [Offboard] $upn DELETED (retention $delDays day(s) elapsed). Remove the CSV row to finish." -ForegroundColor Red
+                            $st | Add-Member -NotePropertyName deletedAtUtc -NotePropertyValue ([datetime]::UtcNow.ToString('o')) -Force
+                            $state[$upn] = $st
+                            Save-PimOffboardState -State $state
+                        } catch {
+                            if ("$_" -match 'Request_ResourceNotFound|does not exist') {
+                                Write-Host "  [Offboard] $upn already gone from the tenant." -ForegroundColor DarkGray
+                                $st | Add-Member -NotePropertyName deletedAtUtc -NotePropertyValue ([datetime]::UtcNow.ToString('o')) -Force
+                                $state[$upn] = $st
+                                Save-PimOffboardState -State $state
+                            } else {
+                                Write-Warning "  [Offboard] delete of $upn failed: $($_.Exception.Message)"
+                            }
+                        }
+                    }
+                } else {
+                    Write-Host "  [Offboard] $upn revoked; deletion due $($dueUtc.ToString('yyyy-MM-dd')) UTC." -ForegroundColor Gray
+                }
+            } else {
+                Write-Warning "  [Offboard] DeleteAfterDays '$delDaysRaw' for $upn is not a non-negative integer -- delete step skipped."
+            }
+        }
+    }
+}
+
+function Invoke-PimGroupRetirement {
+    <#
+    .SYNOPSIS
+        Lifecycle=Retire on a definition row removes the group's directory
+        role assignments + members and deletes the group itself -- guarded
+        to groups matching the engine's naming prefix so a hand-made group
+        with the same name in the CSV is never deleted.
+    #>
+    [CmdletBinding()]
+    param(
+        [string]$GroupNamePrefix = $(if ($global:PIM_GroupPrefix) { $global:PIM_GroupPrefix } else { 'PIM-' })
+    )
+
+    foreach ($base in @('PIM-Definitions-Roles','PIM-Definitions-Tasks','PIM-Definitions-Services','PIM-Definitions-Processes','PIM-Definitions-Resources','PIM-Definitions-Departments','PIM-Definitions-Organization')) {
+        $path = $null
+        try { $path = Get-PimConfigCsv -Name $base } catch { continue }
+        if (-not $path -or -not (Test-Path -LiteralPath $path)) { continue }
+        $rows = @()
+        try { $rows = Import-Csv -Path $path -Delimiter ';' -Encoding UTF8 } catch { continue }
+        $retire = @($rows | Where-Object { $_.GroupName -and $_.PSObject.Properties.Name -contains 'Lifecycle' -and "$($_.Lifecycle)".Trim() -eq 'Retire' })
+        foreach ($row in $retire) {
+            $gName = "$($row.GroupName)".Trim()
+            if (-not $gName.StartsWith($GroupNamePrefix, [System.StringComparison]::OrdinalIgnoreCase)) {
+                Write-Warning "  [Retire] '$gName' does not match the engine naming prefix '$GroupNamePrefix' -- refusing to retire a group the engine may not own."
+                continue
+            }
+            $grp = $null
+            try {
+                $safeName = $gName -replace "'", "''"
+                $grp = Get-MgGroup -Filter "displayName eq '$safeName'" -ErrorAction Stop | Select-Object -First 1
+            } catch { Write-Warning "  [Retire] lookup for '$gName' failed: $($_.Exception.Message)"; continue }
+            if (-not $grp) {
+                Write-Host "  [Retire] '$gName' already gone -- remove the CSV row (or its Retire flag) to finish." -ForegroundColor DarkGray
+                continue
+            }
+
+            Write-Host "  [Retire] retiring '$gName' ($($grp.Id))..." -ForegroundColor Yellow
+
+            # 1. Directory role assignments held BY the group
+            try {
+                $roleAssignments = @(Get-MgRoleManagementDirectoryRoleAssignment -Filter "principalId eq '$($grp.Id)'" -ErrorAction Stop)
+                foreach ($ra in $roleAssignments) {
+                    if ($global:WhatIfMode) { Write-Host "  [WHATIF] would remove directory role assignment $($ra.Id) from '$gName'" -ForegroundColor Yellow; continue }
+                    try {
+                        Remove-MgRoleManagementDirectoryRoleAssignment -UnifiedRoleAssignmentId $ra.Id -ErrorAction Stop
+                        Write-Host "  [Retire] removed directory role assignment $($ra.Id)" -ForegroundColor Yellow
+                    } catch { Write-Warning "  [Retire] role assignment $($ra.Id) removal failed: $($_.Exception.Message)" }
+                }
+            } catch { Write-Warning "  [Retire] role assignment enumeration failed for '$gName': $($_.Exception.Message)" }
+
+            # 2. Members out (so PIM-for-Groups schedules stop granting anything)
+            try {
+                $members = @(Get-MgGroupMember -GroupId $grp.Id -All -ErrorAction Stop)
+                foreach ($m in $members) {
+                    if ($global:WhatIfMode) { Write-Host "  [WHATIF] would remove member $($m.Id) from '$gName'" -ForegroundColor Yellow; continue }
+                    try { Remove-MgGroupMemberByRef -GroupId $grp.Id -DirectoryObjectId $m.Id -ErrorAction Stop } catch { Write-Warning "  [Retire] member $($m.Id) removal failed: $($_.Exception.Message)" }
+                }
+            } catch { Write-Warning "  [Retire] member enumeration failed for '$gName': $($_.Exception.Message)" }
+
+            # 3. The group itself. Azure RBAC assignments held by the group are
+            #    NOT swept here (v1 limitation) -- they die with the group object,
+            #    but review the Azure side if the group was Azure-scoped.
+            if ($global:WhatIfMode) {
+                Write-Host "  [WHATIF] would DELETE group '$gName'" -ForegroundColor Yellow
+            } else {
+                try {
+                    Remove-MgGroup -GroupId $grp.Id -ErrorAction Stop
+                    Write-Host "  [Retire] group '$gName' DELETED. Remove the CSV row to finish." -ForegroundColor Red
+                } catch { Write-Warning "  [Retire] delete of '$gName' failed: $($_.Exception.Message)" }
+            }
+        }
+    }
+}
+
+function Invoke-PimMembershipDriftCleanup {
+    <#
+    .SYNOPSIS
+        Compare live direct USER members of engine-managed groups against the
+        assignment CSVs. $global:PIM_OffboardCleanupMode: Off (skip),
+        Report (default -- log drift), Enforce (remove unexpected users).
+        Unexpected NESTED GROUPS are always report-only (group nesting is
+        engine-managed via PIM-Assignments-Groups, but removal is riskier).
+    #>
+    [CmdletBinding()]
+    param()
+
+    $mode = if ($global:PIM_OffboardCleanupMode) { "$($global:PIM_OffboardCleanupMode)" } else { 'Report' }
+    if ($mode -eq 'Off') { return }
+
+    # Expected USER members per GroupTag from the admin assignment CSV
+    $expectedByTag = @{}
+    $asgPath = $null
+    try { $asgPath = Get-PimConfigCsv -Name 'PIM-Assignments-Admins' } catch {}
+    if ($asgPath -and (Test-Path -LiteralPath $asgPath)) {
+        foreach ($r in @(Import-Csv -Path $asgPath -Delimiter ';' -Encoding UTF8)) {
+            if (-not $r.GroupTag -or -not $r.Username) { continue }
+            if ($r.PSObject.Properties.Name -contains 'Action' -and "$($r.Action)".Trim() -eq 'Remove') { continue }
+            $tag = "$($r.GroupTag)".Trim()
+            if (-not $expectedByTag.ContainsKey($tag)) { $expectedByTag[$tag] = New-Object System.Collections.Generic.HashSet[string]([System.StringComparer]::OrdinalIgnoreCase) }
+            [void]$expectedByTag[$tag].Add("$($r.Username)".Trim())
+        }
+    }
+    if ($expectedByTag.Count -eq 0) { return }
+
+    # GroupTag -> GroupName from the definition CSVs
+    $map = Get-PimDefinitionPolicyMap   # carries GroupTag per GroupName
+    $nameByTag = @{}
+    foreach ($gName in $map.Keys) { if ($map[$gName].GroupTag) { $nameByTag["$($map[$gName].GroupTag)"] = $gName } }
+
+    Write-Host ""
+    Write-Host "Membership drift sweep ($mode): $($expectedByTag.Count) group tag(s) with expected members..." -ForegroundColor Cyan
+    $driftCount = 0
+
+    foreach ($tag in @($expectedByTag.Keys)) {
+        if (-not $nameByTag.ContainsKey($tag)) { continue }
+        $gName = $nameByTag[$tag]
+        $grp = $null
+        try {
+            $safeName = $gName -replace "'", "''"
+            $grp = Get-MgGroup -Filter "displayName eq '$safeName'" -ErrorAction Stop | Select-Object -First 1
+        } catch { continue }
+        if (-not $grp) { continue }
+
+        $members = @()
+        try { $members = @(Get-MgGroupMember -GroupId $grp.Id -All -ErrorAction Stop) } catch { continue }
+        foreach ($m in $members) {
+            $odataType = "$($m.AdditionalProperties['@odata.type'])"
+            if ($odataType -eq '#microsoft.graph.group') {
+                Write-Host "  [Drift] '$gName' contains nested group $($m.Id) -- report-only (group nesting is managed via PIM-Assignments-Groups)." -ForegroundColor Gray
+                continue
+            }
+            $mUpn = "$($m.AdditionalProperties['userPrincipalName'])"
+            if (-not $mUpn) { continue }
+            if ($expectedByTag[$tag].Contains($mUpn)) { continue }
+            $driftCount++
+            if ($mode -eq 'Enforce') {
+                if ($global:WhatIfMode) {
+                    Write-Host "  [WHATIF] would remove drift member $mUpn from '$gName'" -ForegroundColor Yellow
+                } else {
+                    try {
+                        Remove-MgGroupMemberByRef -GroupId $grp.Id -DirectoryObjectId $m.Id -ErrorAction Stop
+                        Write-Host "  [Drift/ENFORCE] removed $mUpn from '$gName' (not in PIM-Assignments-Admins)" -ForegroundColor Red
+                    } catch { Write-Warning "  [Drift] removal of $mUpn from '$gName' failed: $($_.Exception.Message)" }
+                }
+            } else {
+                Write-Host "  [Drift/REPORT] $mUpn is a member of '$gName' but NOT in PIM-Assignments-Admins -- set `$global:PIM_OffboardCleanupMode='Enforce' to auto-remove." -ForegroundColor Yellow
+            }
+        }
+    }
+    if ($driftCount -eq 0) { Write-Host "  [Drift] no unexpected user members found." -ForegroundColor Green }
 }
 
 function Invoke-PimTapProvisioning {

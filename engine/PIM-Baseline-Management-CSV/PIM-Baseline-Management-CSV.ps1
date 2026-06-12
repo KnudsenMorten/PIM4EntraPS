@@ -1438,3 +1438,19 @@ Write-Output "******************************************************************
     Invoke-PimPolicyTemplateApply
 
     Invoke-PimApprovalEscalation
+
+######################################################################################################################
+# Offboarding | LIFECYCLE-GOVERNANCE phase 5
+######################################################################################################################
+# Admins past their OffboardDate are revoked (PIM schedules + memberships +
+# disable + session revocation, offboarding-notice mail) and deleted
+# DeleteAfterDays later. Definition rows with Lifecycle=Retire have their
+# role assignments + members removed and the group deleted (naming-prefix
+# guard). Drift cleanup compares live members vs the assignment CSVs --
+# $global:PIM_OffboardCleanupMode = Off | Report (default) | Enforce.
+
+    Invoke-PimAdminOffboarding -AccountsDefinitionFile $AccountsDefinitionFile
+
+    Invoke-PimGroupRetirement
+
+    Invoke-PimMembershipDriftCleanup
