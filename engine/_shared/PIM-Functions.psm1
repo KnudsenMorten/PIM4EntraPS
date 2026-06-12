@@ -40,6 +40,12 @@ ForEach ($_mod in $_PIM_ModulesToLoad) {
     }
 }
 
+# Shared date-expression resolver (docs/LIFECYCLE-GOVERNANCE.md § 1). Lives in
+# its own file because the pim-manager (validator + /api/resolve-date preview)
+# dot-sources it standalone -- engine, GUI and validator must resolve
+# expressions identically.
+. (Join-Path $PSScriptRoot 'PIM-DateExpression.ps1')
+
 function Ensure-DateTime {
     <#
         .SYNOPSIS
@@ -5174,6 +5180,32 @@ Fix (one-time per tenant):
             $ManagerEmail           = if ($Entry.PSObject.Properties.Name -contains 'ManagerEmail') { $Entry.ManagerEmail } else { '' }
             $StartDate              = if ($Entry.PSObject.Properties.Name -contains 'StartDate')    { $Entry.StartDate }    else { '' }
 
+            # LIFECYCLE-GOVERNANCE phase 1 -- scheduling columns, both additive
+            # + defensive like the v2.2.0 metadata set. ProvisionDate gates the
+            # whole row (date expression; blank = Now); TAPLifetimeHours feeds
+            # the TAP validity window (blank = tenant default, 60 min).
+            $ProvisionDate          = if ($Entry.PSObject.Properties.Name -contains 'ProvisionDate')    { $Entry.ProvisionDate }    else { '' }
+            $TAPLifetimeHours       = if ($Entry.PSObject.Properties.Name -contains 'TAPLifetimeHours') { $Entry.TAPLifetimeHours } else { '' }
+
+            # Scheduled creation: a row whose ProvisionDate resolves in the
+            # future is skipped entirely this run (incl. status handling) and
+            # materializes on the first run at/after the resolved time. An
+            # unparseable expression is treated as Now (create rather than
+            # silently never-create) with a loud warning -- the Manager's
+            # PIM-SCHED-001 validator catches bad expressions before they land.
+            if ($ProvisionDate -and $ProvisionDate.Trim()) {
+                $provisionAtUtc = $null
+                try {
+                    $provisionAtUtc = Resolve-PimDateExpression -Expression $ProvisionDate
+                } catch {
+                    Write-Host "SCHEDULE: cannot parse ProvisionDate '$ProvisionDate' for $UserPrincipalName -- treating as Now. $($_.Exception.Message)" -ForegroundColor Yellow
+                }
+                if ($provisionAtUtc -and $provisionAtUtc -gt [datetime]::UtcNow) {
+                    Write-Host "SCHEDULED: $UserPrincipalName provisions at $($provisionAtUtc.ToString('yyyy-MM-dd HH:mm')) UTC -- skipping this run." -ForegroundColor Cyan
+                    continue
+                }
+            }
+
             # Notes are written to the password log; the Graph user object has no
             # native long-text field that fits (extensionAttributes are 256-char
             # capped per attribute and not exposed via Update-MgBetaUser cleanly).
@@ -5241,6 +5273,12 @@ Fix (one-time per tenant):
                                     Write-host "Failure: Cannot set mail-forwarding. Check available Exchange licenses or wait 20 min to let Entra sync up !" -ForegroundColor Yellow
                                 }
                             }
+
+                            # Phase 1: deferred-TAP pickup. A TAP whose start window was
+                            # too far out at account-creation time gets created here on a
+                            # later run; idempotent via tap-state.json (no-op when the
+                            # TAP was already issued or CreateTAP is not TRUE).
+                            Invoke-PimTapProvisioning -UserPrincipalName $UserPrincipalName -CreateTAP $CreateTAP -TAPStartDate $TAPStartDate -TAPLifetimeHours $TAPLifetimeHours -ManagerEmail $ManagerEmail
                         }
                     Else
                         {
@@ -5313,45 +5351,11 @@ Fix (one-time per tenant):
                             # Customer-facing recommended path: deliver the TAP code out-of-band, the
                             # admin uses it to register their own credentials, and the random password
                             # above never has to leave the password log file.
-                            If ($CreateTAP -eq 'TRUE' -or $CreateTAP -eq $true) {
-                                $tap = New-PimTemporaryAccessPass -UserId $UserPrincipalName -StartDateTime $TAPStartDate
-                                if ($tap) {
-                                    Write-PimAdminTap -UserPrincipalName $UserPrincipalName -Code $tap.Code -StartDateTime $tap.StartDateTime -LifetimeInMinutes $tap.LifetimeInMinutes
-
-                                    # v2.2.0 (roadmap #11): out-of-band TAP delivery.
-                                    # Only attempts a send when the customer has actually
-                                    # configured notification channels (.custom.ps1 -- the
-                                    # .locked.ps1 defaults to an empty hashtable). A failed
-                                    # send must NOT block account creation, so the whole
-                                    # call is wrapped in try/catch + best-effort logging.
-                                    if ($global:PIM_NotificationChannels -and $global:PIM_NotificationChannels.Count -gt 0) {
-                                        Try {
-                                            $sendArgs = @{
-                                                UserPrincipalName = $UserPrincipalName
-                                                Code              = $tap.Code
-                                                LifetimeMinutes   = [int]$tap.LifetimeInMinutes
-                                            }
-                                            # StartDateTime from Graph is typically string; normalize for the helper
-                                            $sendArgs['StartDateTime'] = if ($tap.StartDateTime -is [datetime]) {
-                                                $tap.StartDateTime
-                                            } else {
-                                                try { [datetime]$tap.StartDateTime } catch { [datetime]::UtcNow }
-                                            }
-                                            if ($ManagerEmail) { $sendArgs['Recipient'] = $ManagerEmail }
-                                            $sendResult = Send-PimAdminTap @sendArgs
-                                            if ($sendResult.Sent.Count -gt 0) {
-                                                Write-Host "  -> TAP delivered via: $($sendResult.Sent -join ', ')" -ForegroundColor Green
-                                            }
-                                            if ($sendResult.Failed.Count -gt 0) {
-                                                Write-Host "  -> TAP delivery FAILED for: $($sendResult.Failed -join ', ') (account creation NOT blocked)" -ForegroundColor Yellow
-                                            }
-                                        }
-                                        Catch {
-                                            Write-Host "  -> TAP delivery threw (account creation NOT blocked): $($_.Exception.Message)" -ForegroundColor Yellow
-                                        }
-                                    }
-                                }
-                            }
+                            # Phase 1: hoisted into Invoke-PimTapProvisioning (idempotent via
+                            # tap-state.json, deferred when TAPStartDate is outside the lead
+                            # window, lifetime from TAPLifetimeHours) so the Update branch can
+                            # pick up deferred TAPs on later runs.
+                            Invoke-PimTapProvisioning -UserPrincipalName $UserPrincipalName -CreateTAP $CreateTAP -TAPStartDate $TAPStartDate -TAPLifetimeHours $TAPLifetimeHours -ManagerEmail $ManagerEmail
 
                             If ($ForwardMails) {
                                 Try {
@@ -9630,6 +9634,137 @@ function Resolve-PimTapStartDateTime {
         return $fallback.ToUniversalTime()
     } catch {
         return $null
+    }
+}
+
+# --- TAP provisioning state (LIFECYCLE-GOVERNANCE phase 1) -------------------
+# TAP creation can be DEFERRED past account creation (far-future TAPStartDate),
+# which means later engine runs -- where the account already exists and takes
+# the Update path -- must know whether this row's TAP was already issued.
+# Append-only JSON state keyed by UPN under output/state/tap-state.json.
+
+function Get-PimTapStateFile {
+    $stateDir = Join-Path (Get-PimOutputDir) 'state'
+    if (-not (Test-Path -LiteralPath $stateDir)) { New-Item -ItemType Directory -Path $stateDir -Force | Out-Null }
+    Join-Path $stateDir 'tap-state.json'
+}
+
+function Get-PimTapState {
+    $f = Get-PimTapStateFile
+    if (-not (Test-Path -LiteralPath $f)) { return @{} }
+    try {
+        $raw = Get-Content -LiteralPath $f -Raw -Encoding UTF8
+        if (-not $raw -or -not $raw.Trim()) { return @{} }
+        $obj = $raw | ConvertFrom-Json
+        $map = @{}
+        foreach ($p in $obj.PSObject.Properties) { $map[$p.Name] = $p.Value }
+        return $map
+    } catch {
+        Write-Warning "tap-state.json unreadable ($($_.Exception.Message)) -- treating as empty (worst case: a TAP is re-issued)."
+        return @{}
+    }
+}
+
+function Save-PimTapState {
+    param([Parameter(Mandatory)][hashtable]$State)
+    $f = Get-PimTapStateFile
+    ($State | ConvertTo-Json -Depth 4) | Set-Content -LiteralPath $f -Encoding UTF8
+}
+
+function Invoke-PimTapProvisioning {
+    <#
+    .SYNOPSIS
+        Idempotent TAP provisioning for one admin row -- handles the deferred
+        window, the lifetime, delivery, and the issued-state bookkeeping.
+
+    .DESCRIPTION
+        Called from BOTH the create and the update branch of
+        CreateUpdate-Accounts-From-file-CSV so a deferred TAP is picked up by
+        a later engine run. Rules:
+          - CreateTAP not TRUE -> no-op.
+          - TAP already issued for this UPN (tap-state.json) -> no-op.
+          - TAPStartDate resolves further out than $global:PIM_TapCreateLeadHours
+            (default 48) -> log 'TAP DEFERRED' and return; a run inside the
+            lead window creates it. Rationale: a long-pending TAP is a standing
+            credential, and some tenants reject far-future startDateTime.
+          - Otherwise create the TAP (lifetime from TAPLifetimeHours when
+            given), log it, attempt out-of-band delivery (best-effort, never
+            blocks), and record the issuance in tap-state.json.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$UserPrincipalName,
+        [string]$CreateTAP,
+        [string]$TAPStartDate,
+        [string]$TAPLifetimeHours,
+        [string]$ManagerEmail
+    )
+
+    if (-not ($CreateTAP -eq 'TRUE' -or $CreateTAP -eq $true)) { return }
+
+    $tapState = Get-PimTapState
+    if ($tapState.ContainsKey($UserPrincipalName)) { return }   # already issued
+
+    # Deferred-window check
+    if ($TAPStartDate -and $TAPStartDate.Trim()) {
+        $startUtc = $null
+        try { $startUtc = Resolve-PimDateExpression -Expression $TAPStartDate } catch {
+            Write-Host "  [TAP] cannot parse TAPStartDate '$TAPStartDate' for $UserPrincipalName -- TAP will start immediately. $($_.Exception.Message)" -ForegroundColor Yellow
+        }
+        $leadHours = if ($global:PIM_TapCreateLeadHours) { [int]$global:PIM_TapCreateLeadHours } else { 48 }
+        if ($startUtc -and $startUtc -gt [datetime]::UtcNow.AddHours($leadHours)) {
+            Write-Host "  [TAP] DEFERRED for $UserPrincipalName -- starts $($startUtc.ToString('yyyy-MM-dd HH:mm')) UTC, more than $leadHours h out. Created by a later run inside the lead window." -ForegroundColor Cyan
+            return
+        }
+    }
+
+    $tapArgs = @{ UserId = $UserPrincipalName }
+    if ($TAPStartDate -and $TAPStartDate.Trim()) { $tapArgs['StartDateTime'] = $TAPStartDate }
+    if ($TAPLifetimeHours -and $TAPLifetimeHours.Trim()) {
+        $hours = 0
+        if ([double]::TryParse($TAPLifetimeHours, [ref]$hours) -and $hours -gt 0 -and $hours -le 720) {
+            $tapArgs['LifetimeInMinutes'] = [int][math]::Round($hours * 60)
+        } else {
+            Write-Host "  [TAP] TAPLifetimeHours '$TAPLifetimeHours' for $UserPrincipalName is not a number in 1..720 -- using the default lifetime." -ForegroundColor Yellow
+        }
+    }
+
+    $tap = New-PimTemporaryAccessPass @tapArgs
+    if (-not $tap) { return }
+
+    Write-PimAdminTap -UserPrincipalName $UserPrincipalName -Code $tap.Code -StartDateTime $tap.StartDateTime -LifetimeInMinutes $tap.LifetimeInMinutes
+
+    # Record issuance BEFORE delivery -- a delivery failure must not cause a
+    # second TAP on the next run (the code is already in the TAP log file).
+    $tapState[$UserPrincipalName] = @{ issuedAtUtc = [datetime]::UtcNow.ToString('o'); startDateTime = "$($tap.StartDateTime)"; lifetimeInMinutes = $tap.LifetimeInMinutes }
+    Save-PimTapState -State $tapState
+
+    # Out-of-band delivery -- only when notification channels are configured;
+    # best-effort, never blocks provisioning.
+    if ($global:PIM_NotificationChannels -and $global:PIM_NotificationChannels.Count -gt 0) {
+        Try {
+            $sendArgs = @{
+                UserPrincipalName = $UserPrincipalName
+                Code              = $tap.Code
+                LifetimeMinutes   = [int]$tap.LifetimeInMinutes
+            }
+            $sendArgs['StartDateTime'] = if ($tap.StartDateTime -is [datetime]) {
+                $tap.StartDateTime
+            } else {
+                try { [datetime]$tap.StartDateTime } catch { [datetime]::UtcNow }
+            }
+            if ($ManagerEmail) { $sendArgs['Recipient'] = $ManagerEmail }
+            $sendResult = Send-PimAdminTap @sendArgs
+            if ($sendResult.Sent.Count -gt 0) {
+                Write-Host "  -> TAP delivered via: $($sendResult.Sent -join ', ')" -ForegroundColor Green
+            }
+            if ($sendResult.Failed.Count -gt 0) {
+                Write-Host "  -> TAP delivery FAILED for: $($sendResult.Failed -join ', ') (provisioning NOT blocked)" -ForegroundColor Yellow
+            }
+        }
+        Catch {
+            Write-Host "  -> TAP delivery threw (provisioning NOT blocked): $($_.Exception.Message)" -ForegroundColor Yellow
+        }
     }
 }
 

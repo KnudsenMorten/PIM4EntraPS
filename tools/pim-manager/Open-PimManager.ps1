@@ -120,6 +120,12 @@ $tenantSync   = Join-Path $PSScriptRoot '_tenantSync.ps1'
 $validator    = Join-Path $PSScriptRoot '_validator.ps1'
 $instancesFile = Join-Path $PSScriptRoot 'instances.custom.json'
 
+# Shared date-expression resolver (engine/_shared/PIM-DateExpression.ps1) --
+# powers the /api/resolve-date live preview; the validator dot-sources the
+# same file so GUI, validator and engine agree.
+$_dateExprLib = Join-Path $solutionRoot 'engine\_shared\PIM-DateExpression.ps1'
+if (Test-Path -LiteralPath $_dateExprLib) { . $_dateExprLib }
+
 # ---------------------------------------------------------------------------
 # Instances (MSP multi-customer support)
 #
@@ -1673,6 +1679,31 @@ function Handle-Request {
         if ($path -eq '/api/naming-conventions' -and $method -eq 'GET') {
             $script:lastHeartbeat = Get-Date
             Write-JsonResponse -Response $resp -Status 200 -Body (Get-PimNamingConventions)
+            return 200
+        }
+
+        # -------------------------------------------------------------------
+        # Date-expression live preview (LIFECYCLE-GOVERNANCE phase 1) --
+        # the onboarding wizard previews ProvisionDate / TAPStartDate while
+        # the operator types ("resolves to Mon 2026-07-01 08:00 UTC").
+        # -------------------------------------------------------------------
+        if ($path -eq '/api/resolve-date' -and $method -eq 'GET') {
+            $script:lastHeartbeat = Get-Date
+            $expr = $req.QueryString['expr']
+            if (-not $expr -or -not (Get-Command Resolve-PimDateExpression -ErrorAction SilentlyContinue)) {
+                Write-JsonResponse -Response $resp -Status 200 -Body @{ ok = $false; error = $(if ($expr) { 'resolver not loaded' } else { 'expr query parameter required' }) }
+                return 200
+            }
+            try {
+                $resolved = Resolve-PimDateExpression -Expression $expr
+                Write-JsonResponse -Response $resp -Status 200 -Body @{
+                    ok       = $true
+                    utc      = $resolved.ToString('yyyy-MM-dd HH:mm')
+                    display  = $resolved.ToLocalTime().ToString('ddd yyyy-MM-dd HH:mm') + ' (local)'
+                }
+            } catch {
+                Write-JsonResponse -Response $resp -Status 200 -Body @{ ok = $false; error = "$($_.Exception.Message)" }
+            }
             return 200
         }
 
