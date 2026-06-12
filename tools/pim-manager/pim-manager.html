@@ -3496,7 +3496,7 @@
   // Cached PIM_DATA lookups for picklists.
   function listRoleGroups()  { return (PIM_DATA.nodes||[]).filter(n => n.kind==='role-group').map(n => ({ tag:n.groupTag||(n.id||'').replace(/^group:/,''), label:n.label||n.id, source:n.source })); }
   function listPermGroups()  { return (PIM_DATA.nodes||[]).filter(n => n.kind==='permission-group').map(n => ({ tag:n.groupTag||(n.id||'').replace(/^group:/,''), label:n.label||n.id, source:n.source })); }
-  function listAdminsLite()  { return (PIM_DATA.nodes||[]).filter(n => n.kind==='admin').map(n => ({ upn:n.id, label:n.label||n.id, tier:n.tier })); }
+  function listAdminsLite()  { return (PIM_DATA.nodes||[]).filter(n => n.kind==='admin').map(n => ({ upn:n.id, label:n.label||n.id, tier:n.tier, purpose:n.purpose })); }
   function listAUs()         { return (PIM_DATA.nodes||[]).filter(n => n.kind==='au').map(n => ({ tag:n.auTag||(n.id||'').replace(/^au:/,''), label:n.label||n.id })); }
 
   // ===================================================================
@@ -3508,6 +3508,7 @@
     if (!tpl) return;
     const p = tpl.prefill || {};
     const map = {
+      Purpose:'purpose',
       TierLevel:'tier', Level:'level', TargetUsage:'usage', TargetPlatform:'platform',
       UserType:'userType', UsageLocation:'usageLocation', Ring:'ring',
       ForwardMailsToContact:'forwardMails', MailForwardAddress:'mailForwardAddr',
@@ -3516,6 +3517,12 @@
       AccountStatus:'status'
     };
     for (const k in map) { if (Object.prototype.hasOwnProperty.call(p, k)) s[map[k]] = String(p[k]); }
+    // Purpose drives the naming convention (v2.4.171): HighPriv = the
+    // dedicated Admin-INI-L0-T0-PLAT account, anything else = day-2-day
+    // Admin-INI-PLAT.
+    const hp = String(s.purpose || '').toLowerCase() === 'highpriv';
+    s.useLongForm = hp;
+    if (hp) { s.tier = 'T0'; s.level = 'L0'; }
     const ad = tpl.assignmentDefaults || {};
     if (ad.AssignmentType) s.assignmentType = String(ad.AssignmentType);
     if (ad.NumOfDaysWhenExpire != null) s.lifetimeDays = parseInt(ad.NumOfDaysWhenExpire, 10) || s.lifetimeDays;
@@ -3535,7 +3542,11 @@
 
     const state = {
       first:'', last:'', initials:'',
-      tier:'T1', level:'L3', usage:'Cloud', platform:'ID', useLongForm:true,
+      // Purpose drives the naming convention (v2.4.171): Day2Day (default) =
+      // Admin-INI-PLAT (one account spans multiple level/tier assignments, so
+      // no L#-T# markers); HighPriv = the dedicated Admin-INI-L0-T0-PLAT
+      // account whose markers drive OU/tier routing.
+      purpose:'Day2Day', tier:'T1', level:'L3', usage:'Cloud', platform:'ID', useLongForm:false,
       upnSuffix: guessUpnSuffix(),
       userType:'External',
       status:'Enabled',
@@ -3577,13 +3588,18 @@
             }
             f.appendChild(wuxField({ id:'wf-fn', label:'First name', required:true, value:s.first, example:'e.g. Anna', sub:'Account-Definitions-Admins.FirstName', onInput:(v)=>{ s.first=v; rerender(); } }));
             f.appendChild(wuxField({ id:'wf-ln', label:'Last name',  required:true, value:s.last,  example:'e.g. Hansen', sub:'Account-Definitions-Admins.LastName', onInput:(v)=>{ s.last=v; rerender(); } }));
-            if (!s.initials && (s.first || s.last)) {
+            // Auto-derive initials from first+last and KEEP following name
+            // edits while the value is still auto-derived ("M" must become
+            // "MK" when the last name arrives). A manual edit of the
+            // initials field pins it (initialsAuto=false) and wins.
+            if (s.initialsAuto !== false && (s.first || s.last)) {
               s.initials = ((s.first[0]||'') + (s.last[0]||'')).toUpperCase();
+              s.initialsAuto = true;
             }
             f.appendChild(wuxField({ id:'wf-ini', label:'Initials (short code)', required:true, value:s.initials, example:'e.g. AHA',
-              hint:'2-4 letters used inside the login name. Auto-fills from first+last.',
+              hint:'2-4 letters used inside the login name. Auto-fills from first+last; type your own to override.',
               sub:'Account-Definitions-Admins.Initials',
-              onInput:(v)=>{ s.initials=v; rerender(); }
+              onInput:(v)=>{ s.initials=v; s.initialsAuto = !v.trim(); rerender(); }
             }));
             f.appendChild(wuxField({ id:'wf-sfx', label:'UPN suffix', value:s.upnSuffix, example:'e.g. @contoso.com',
               hint:'The bit after the @ in the admin\'s sign-in. Defaults to your existing admin pattern.',
@@ -3602,35 +3618,28 @@
           }
         },
         {
-          label: 'Tier & platform',
+          label: 'Purpose & platform',
           render: (s, rerender) => {
             const f = document.createElement('div');
             f.appendChild(wuxWhy(
-              '<b>Tier</b> reflects sensitivity: <b>T0</b>=control plane / high-priv, <b>T1</b>=server / app admin, <b>T2</b>=workstation / helpdesk. ' +
-              '<b>Level</b> further qualifies the role within the tier (L0=top, L4=bottom). ' +
-              '<b>Platform</b> picks where the account lives: <b>ID</b>=cloud-only (Entra ID), <b>AD</b>=on-prem AD. ' +
-              'The defaults (T1 / L3 / Cloud / ID) suit most onboardings.'
+              '<b>Purpose</b> picks the account class and its naming convention: a <b>day-2-day</b> admin (Admin-INI-ID / Admin-INI-AD) ' +
+              'spans multiple level/tier assignments over time, so its name carries NO L#-T# markers; a <b>high-priv</b> admin is a ' +
+              'DEDICATED tier-0 account (Admin-INI-L0-T0-ID / -AD) whose markers drive OU/tier routing. ' +
+              '<b>Platform</b> picks where the account lives: <b>ID</b>=cloud-only (Entra ID), <b>AD</b>=on-prem AD.'
             ));
-            f.appendChild(wuxField({ id:'wf-tier', label:'Tier', required:true, type:'select', value:s.tier,
-              sub:'Account-Definitions-Admins.TierLevel',
+            f.appendChild(wuxField({ id:'wf-purpose', label:'Purpose', required:true, type:'select', value:s.purpose,
+              sub:'Account-Definitions-Admins.Purpose',
               options:[
-                { value:'T0', label:'T0 -- Control plane / high privilege' },
-                { value:'T1', label:'T1 -- Server / service admin (default)' },
-                { value:'T2', label:'T2 -- Workstation / helpdesk' }
+                { value:'Day2Day',  label:'Day-2-day admin -- Admin-INI-PLAT (default)' },
+                { value:'HighPriv', label:'High-priv dedicated -- Admin-INI-L0-T0-PLAT' }
               ],
               onInput:(v)=>{
-                s.tier=v;
-                s.level = v==='T0' ? 'L1' : (v==='T1' ? 'L3' : 'L4');
+                s.purpose=v;
+                const hp = (v==='HighPriv');
+                s.useLongForm = hp;
+                if (hp) { s.tier='T0'; s.level='L0'; } else { s.tier='T1'; s.level='L3'; }
                 rerender();
               }
-            }));
-            f.appendChild(wuxField({ id:'wf-lvl', label:'Level', required:true, type:'select', value:s.level,
-              options:[
-                { value:'L0', label:'L0 (highest in tier)' },
-                { value:'L1', label:'L1' }, { value:'L2', label:'L2' },
-                { value:'L3', label:'L3 (most common)' }, { value:'L4', label:'L4' }
-              ],
-              onInput:(v)=>{ s.level=v; rerender(); }
             }));
             f.appendChild(wuxField({ id:'wf-usg', label:'Usage', required:true, type:'select', value:s.usage,
               sub:'Account-Definitions-Admins.TargetUsage',
@@ -3649,13 +3658,6 @@
                 { value:'AD', label:'AD -- Active Directory (on-prem account)' }
               ],
               onInput:(v)=>{ s.platform=v; rerender(); }
-            }));
-            f.appendChild(wuxField({ id:'wf-long', label:'Naming style', required:true, type:'select', value:s.useLongForm?'long':'short',
-              options:[
-                { value:'long',  label:'Long -- Admin-INI-L#-T#-PLAT (recommended for T0/T1)' },
-                { value:'short', label:'Short -- Admin-INI-PLAT' }
-              ],
-              onInput:(v)=>{ s.useLongForm = (v==='long'); rerender(); }
             }));
             f.appendChild(wuxField({ id:'wf-ring', label:'Deployment ring', required:true, type:'select', value:s.ring,
               sub:'Account-Definitions-Admins.Ring',
@@ -3796,7 +3798,7 @@
         const display = buildAdminDisplay(s.first, s.last, s.usage, s.platform, s.level.replace(/^L/,''), s.tier.replace(/^T/,''), s.useLongForm);
         await wuxStage('Account-Definitions-Admins', {
           FirstName: s.first.trim(), LastName: s.last.trim(), Initials: s.initials.toUpperCase(),
-          TierLevel: s.tier, TargetUsage: s.usage, TargetPlatform: s.platform,
+          Purpose: s.purpose, TargetUsage: s.usage, TargetPlatform: s.platform,
           UserType: s.userType,
           UserName: userName, DisplayName: display, UserPrincipalName: upn,
           UsageLocation: s.usageLocation,
@@ -3841,7 +3843,7 @@
       roleGroups = (r.rows || []).filter(g => g.GroupTag).map(g => ({ tag: g.GroupTag, name: g.GroupName || g.GroupTag }));
     } catch (_) {}
 
-    const adminPattern = (PIM_NAMING && PIM_NAMING.AdminAccountPattern) || 'Admin-{Initials}-L{Level}-T{Tier}-{Platform}';
+    const adminPattern = (PIM_NAMING && PIM_NAMING.AdminAccountPattern) || 'Admin-{Initials}-{Platform}';
     const upnSuffix    = (PIM_NAMING && PIM_NAMING.AdminAccountUpnSuffix) || '@example.com';
     const dnSuffix     = (PIM_NAMING && PIM_NAMING.AdminAccountDisplayNameSuffix) || ' (Admin)';
 
@@ -3871,14 +3873,17 @@
       const level = body.querySelector('#wzLevel').value;
       const tier  = body.querySelector('#wzTier').value;
       const plat  = body.querySelector('#wzPlat').value;
-      const username = init ? `Admin-${init}-${level}-${tier}-${plat}` : '';
+      // Day-2-day admins are Admin-INI-PLAT (no level/tier markers -- the same
+      // account spans multiple L/T assignments). Only dedicated T0 accounts
+      // carry the markers (Admin-INI-L0-T0-PLAT) for OU/tier routing.
+      const username = init ? (tier === 'T0' ? `Admin-${init}-${level}-${tier}-${plat}` : `Admin-${init}-${plat}`) : '';
       const upn = username ? (username + (body.querySelector('#wzUpn').value || '')) : '';
       const dispName = (body.querySelector('#wzFn').value + ' ' + body.querySelector('#wzLn').value).trim() + dnSuffix;
       return {
         FirstName: body.querySelector('#wzFn').value || '',
         LastName:  body.querySelector('#wzLn').value || '',
         Initials:  init,
-        TierLevel: tier,
+        Purpose:   (tier === 'T0' ? 'HighPriv' : 'Day2Day'),
         TargetUsage: 'Cloud',
         TargetPlatform: plat,
         UserType: 'Member',
@@ -4810,7 +4815,7 @@
             f.appendChild(wuxWhy(
               'Optionally assign admins to this new role group now. Each pick becomes one row in <code>PIM-Assignments-Admins.custom.csv</code>.'
             ));
-            const items = listAdminsLite().map(a => ({ key:a.upn, label:a.label, sub:a.upn + (a.tier ? ' . ' + a.tier : '') }));
+            const items = listAdminsLite().map(a => ({ key:a.upn, label:a.label, sub:a.upn + (a.purpose ? ' . ' + a.purpose : (a.tier ? ' . ' + a.tier : '')) }));
             const cntEl = document.createElement('div'); cntEl.style.cssText='color:#57606a; font-size:11px; margin-top:6px;';
             const refresh = () => { cntEl.textContent = s.adminSel.size + ' admin(s) selected'; };
             f.appendChild(wuxPicklist({ items, multi:true, selected:s.adminSel, onChange: refresh }));
@@ -5821,12 +5826,16 @@
     }
     for (const c of cols) c.sort((a, b) => String(a.label || a.id).localeCompare(String(b.label || b.id)));
 
-    // col 0: admins (tier dot colors + reach count)
+    // col 0: admins (dot color: Purpose -- HighPriv red / Day2Day blue;
+    // legacy tier fallback for not-yet-upgraded CSVs)
     const c0 = document.getElementById('mapCol0'); c0.innerHTML = '';
     for (const n of cols[0]) {
       const reach = mapReachCount(m, n.id);
       const el = mapItem(m, n, reach ? ('→ ' + reach) : '');
-      if (n.tier) el.querySelector('.map-dot').style.background = ({ 'T0': '#cf222e', 'T1': '#9a6700', 'T2': '#1a7f37' })[String(n.tier).toUpperCase()] || '#0969da';
+      const purp = String(n.purpose || '').toLowerCase();
+      if (purp === 'highpriv') el.querySelector('.map-dot').style.background = '#cf222e';
+      else if (purp === 'day2day') el.querySelector('.map-dot').style.background = '#0969da';
+      else if (n.tier) el.querySelector('.map-dot').style.background = ({ 'T0': '#cf222e', 'T1': '#9a6700', 'T2': '#1a7f37' })[String(n.tier).toUpperCase()] || '#0969da';
       c0.appendChild(el);
     }
 

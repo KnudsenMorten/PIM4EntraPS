@@ -214,11 +214,14 @@ function Invoke-PimPreflightValidation {
     if (-not $groupTagRegex) {
         $groupTagRegex = [regex]::new('^[A-Za-z0-9][A-Za-z0-9._-]*-L[0-9]-T[0-2]-(CP|WDP|MP|APP|USER)-(ID|RES|DAT)(-S_AD)?$')
     }
-    # Admin UPN pattern: customer-overridable token-style ('adm_{Owner}'), turned into a permissive regex.
-    $adminPatternRegex = $null
-    if ($naming -and $naming.ContainsKey('AdminAccountPattern') -and $naming.AdminAccountPattern) {
+    # Admin UPN patterns: customer-overridable token-style ('adm_{Owner}'), turned into permissive regexes.
+    # v2.4.171: TWO conventions -- AdminAccountPattern (day-2-day, no level/tier
+    # markers) and AdminAccountPatternHighPriv (dedicated high-priv accounts,
+    # -L0-T0- markers). A row's Purpose column picks which one applies; blank
+    # Purpose accepts either.
+    function ConvertTo-PimPatternRegex([string]$tplate) {
+        if (-not $tplate) { return $null }
         try {
-            $tplate = [string]$naming.AdminAccountPattern
             # Tokens like {Owner} -> .+ ; escape the rest.
             # NB: [regex]::Escape escapes '{' but NOT '}' (.NET asymmetry), so
             # the closing brace must be matched optionally-escaped -- the old
@@ -226,8 +229,16 @@ function Invoke-PimPreflightValidation {
             # and EVERY legitimate UPN got a false PIM-NAME-002 warning.
             $reSrc = [regex]::Escape($tplate)
             $reSrc = $reSrc -replace '\\\{[A-Za-z][A-Za-z0-9]*\\?\}', '.+'
-            $adminPatternRegex = [regex]::new('^' + $reSrc + '($|@)')
-        } catch { $adminPatternRegex = $null }
+            [regex]::new('^' + $reSrc + '($|@)')
+        } catch { $null }
+    }
+    $adminPatternRegex = $null
+    $adminPatternHighPrivRegex = $null
+    if ($naming -and $naming.ContainsKey('AdminAccountPattern') -and $naming.AdminAccountPattern) {
+        $adminPatternRegex = ConvertTo-PimPatternRegex ([string]$naming.AdminAccountPattern)
+    }
+    if ($naming -and $naming.ContainsKey('AdminAccountPatternHighPriv') -and $naming.AdminAccountPatternHighPriv) {
+        $adminPatternHighPrivRegex = ConvertTo-PimPatternRegex ([string]$naming.AdminAccountPatternHighPriv)
     }
 
     # ------------------------------------------------------------------
@@ -570,19 +581,30 @@ function Invoke-PimPreflightValidation {
     }
 
     # ------------------------------------------------------------------
-    # PIM-NAME-002: admin UPN doesn't match AdminAccountPattern.
+    # PIM-NAME-002: admin UPN doesn't match the convention its Purpose selects.
+    # Purpose=HighPriv -> AdminAccountPatternHighPriv; Purpose=Day2Day ->
+    # AdminAccountPattern; blank/unknown Purpose -> either pattern passes.
     # ------------------------------------------------------------------
-    if ($adminPatternRegex -and $loaded.ContainsKey('Account-Definitions-Admins')) {
+    if (($adminPatternRegex -or $adminPatternHighPrivRegex) -and $loaded.ContainsKey('Account-Definitions-Admins')) {
         $rows = $loaded['Account-Definitions-Admins'].rows
         for ($i = 0; $i -lt $rows.Count; $i++) {
             $r = $rows[$i]
             if (Test-PimRowIsBlank -Row $r) { continue }
             $upn = Get-PimRowValue -Row $r -Column 'UserPrincipalName'
             if (-not $upn) { continue }
-            if (-not $adminPatternRegex.IsMatch($upn)) {
+            $purpose = "$(Get-PimRowValue -Row $r -Column 'Purpose')".Trim()
+            $applicable = if ($purpose -ieq 'HighPriv' -and $adminPatternHighPrivRegex) { @($adminPatternHighPrivRegex) }
+                          elseif ($purpose -ieq 'Day2Day' -and $adminPatternRegex)      { @($adminPatternRegex) }
+                          else { @($adminPatternRegex, $adminPatternHighPrivRegex | Where-Object { $_ }) }
+            $matched = $false
+            foreach ($rx in $applicable) { if ($rx.IsMatch($upn)) { $matched = $true; break } }
+            if (-not $matched) {
+                $patLabel = if ($purpose -ieq 'HighPriv') { "AdminAccountPatternHighPriv '$($naming.AdminAccountPatternHighPriv)'" }
+                            elseif ($purpose -ieq 'Day2Day') { "AdminAccountPattern '$($naming.AdminAccountPattern)'" }
+                            else { "AdminAccountPattern '$($naming.AdminAccountPattern)' or AdminAccountPatternHighPriv '$($naming.AdminAccountPatternHighPriv)'" }
                 [void]$violations.Add((New-PimViolation -Severity 'warning' -Code 'PIM-NAME-002' -Csv 'Account-Definitions-Admins' -Row $i -Column 'UserPrincipalName' `
-                    -Message "UPN '$upn' doesn't match AdminAccountPattern '$($naming.AdminAccountPattern)'." `
-                    -Suggestion "Either rename to fit the pattern, or override PIM_NAMING.AdminAccountPattern in your .custom.ps1."))
+                    -Message "UPN '$upn' (Purpose='$purpose') doesn't match $patLabel." `
+                    -Suggestion "Either rename to fit the convention, fix the row's Purpose, or override the pattern in your NamingConventions .custom.ps1."))
             }
         }
     }

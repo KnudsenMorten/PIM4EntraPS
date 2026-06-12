@@ -53,7 +53,7 @@ represent a job function). Assign admins to role groups via PIM:
 Admin                 Role Group              Permission Groups               Target
 (the user)            (the job function)      (atomic capability)             (Entra / Azure / AU)
 
-Admin-ABC-L1-T1-ID  --E->  PIM-ROLE-           --E--> PIM-Entra-ID-              --E--> "Application Administrator"
+Admin-ABC-ID        --E->  PIM-ROLE-           --E--> PIM-Entra-ID-              --E--> "Application Administrator"
                            CloudEngineer              AppAdmin-L1-T0-CP-ID                   (Entra ID role)
                                                 --A--> PIM-AzDevOps-               --A--> "Build Administrator"
                                                        TeamsContrib-L2-T1-...                 (AzDevOps role)

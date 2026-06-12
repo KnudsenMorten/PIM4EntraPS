@@ -94,7 +94,7 @@ Write-Host "  registry: $ServerInstance / $Database"
 $targets = Get-PimRegistryRows -Query @"
 SELECT v.TenantId, v.TenantName, v.TenantRing, v.UserName, v.AdminRing,
        a.AppId, a.CertificateThumbprint,
-       c.DisplayName, c.FirstName, c.LastName, c.Initials, c.TierLevel, c.UsageLocation, c.Ring
+       c.DisplayName, c.FirstName, c.LastName, c.Initials, c.Purpose, c.UsageLocation, c.Ring
 FROM pim.vw_AdminTenantTargets v
 JOIN platform.TenantApps a ON a.TenantId = v.TenantId AND a.Product = 'PIM'
 JOIN pim.CentralAdmins c   ON c.UserName = v.UserName
@@ -146,7 +146,7 @@ foreach ($grp in $byTenant) {
             FirstName             = "$($a.FirstName)"
             LastName              = "$($a.LastName)"
             Initials              = "$($a.Initials)"
-            TierLevel             = "$($a.TierLevel)"
+            Purpose               = "$($a.Purpose)"
             TargetUsage           = 'Cloud'
             TargetPlatform        = 'ID'
             UserType              = 'External'

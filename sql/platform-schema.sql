@@ -65,13 +65,20 @@ CREATE TABLE pim.CentralAdmins (
     FirstName     NVARCHAR(100) NULL,
     LastName      NVARCHAR(100) NULL,
     Initials      NVARCHAR(10)  NULL,
-    TierLevel     NVARCHAR(10)  NULL,                   -- T0 / T1 / T2
-    UsageLocation CHAR(2)       NULL
+    UsageLocation CHAR(2)       NULL,
+    -- Day2Day (Admin-INI-PLAT, no markers) | HighPriv (Admin-INI-L0-T0-PLAT).
+    -- Replaced the misleading TierLevel column (v2.4.171): a day-2-day account
+    -- spans multiple tier assignments, so a per-account tier was meaningless.
+    Purpose       NVARCHAR(20)  NULL
 );
 
 -- schema upgrade for pre-existing installs (idempotent)
 IF COL_LENGTH('pim.CentralAdmins', 'FirstName') IS NULL
-    ALTER TABLE pim.CentralAdmins ADD FirstName NVARCHAR(100) NULL, LastName NVARCHAR(100) NULL, Initials NVARCHAR(10) NULL, TierLevel NVARCHAR(10) NULL, UsageLocation CHAR(2) NULL;
+    ALTER TABLE pim.CentralAdmins ADD FirstName NVARCHAR(100) NULL, LastName NVARCHAR(100) NULL, Initials NVARCHAR(10) NULL, UsageLocation CHAR(2) NULL;
+IF COL_LENGTH('pim.CentralAdmins', 'Purpose') IS NULL
+    ALTER TABLE pim.CentralAdmins ADD Purpose NVARCHAR(20) NULL;
+IF COL_LENGTH('pim.CentralAdmins', 'TierLevel') IS NOT NULL
+    ALTER TABLE pim.CentralAdmins DROP COLUMN TierLevel;
 
 IF OBJECT_ID('platform.AuditEvents') IS NULL
 CREATE TABLE platform.AuditEvents (

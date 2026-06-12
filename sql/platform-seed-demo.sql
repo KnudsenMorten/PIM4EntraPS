@@ -23,17 +23,22 @@ ON t.TenantId = s.TenantId AND t.Product = s.Product
 WHEN NOT MATCHED THEN INSERT (TenantId, Product, AppId, CertificateThumbprint) VALUES (s.TenantId, s.Product, s.AppId, s.CertificateThumbprint)
 WHEN MATCHED THEN UPDATE SET AppId = s.AppId, CertificateThumbprint = s.CertificateThumbprint, UpdatedAtUtc = SYSUTCDATETIME();
 
+-- Naming convention (two distinct conventions, selected by Purpose):
+--   Day2Day  -> Admin-<initials>-ID / Admin-<initials>-AD (no markers; the
+--               account spans multiple level/tier assignments over time)
+--   HighPriv -> Admin-<initials>-L0-T0-ID / -AD (dedicated tier-0 account;
+--               the markers drive OU/tier routing)
 MERGE pim.CentralAdmins AS t
 USING (VALUES
-    (N'Admin-AAA-L0-T0-ID', N'Demo Admin Ring0 (broad)',  N'admin-aaa-l0-t0-id@demo-mgmt.example', 0, NULL,          N'Alice', N'Anderson', N'AAA', N'T0', 'DK'),
-    (N'Admin-BBB-L1-T1-ID', N'Demo Admin Ring1 (pilot)',  N'admin-bbb-l1-t1-id@demo-mgmt.example', 1, NULL,          N'Bob',   N'Berg',     N'BBB', N'T1', 'DK'),
-    (N'Admin-CCC-L3-T1-ID', N'Demo Consultant Ring2',     N'admin-ccc-l3-t1-id@demo-mgmt.example', 2, N'consultant', N'Cara',  N'Carlsen',  N'CCC', N'T1', 'DK')
-) AS s (UserName, DisplayName, Upn, Ring, Template, FirstName, LastName, Initials, TierLevel, UsageLocation)
+    (N'Admin-AAA-L0-T0-ID', N'Demo Admin Ring0 (broad)',  N'admin-aaa-l0-t0-id@demo-mgmt.example', 0, NULL,          N'Alice', N'Anderson', N'AAA', N'HighPriv', 'DK'),
+    (N'Admin-BBB-ID',       N'Demo Admin Ring1 (pilot)',  N'admin-bbb-id@demo-mgmt.example',       1, NULL,          N'Bob',   N'Berg',     N'BBB', N'Day2Day',  'DK'),
+    (N'Admin-CCC-ID',       N'Demo Consultant Ring2',     N'admin-ccc-id@demo-mgmt.example',       2, N'consultant', N'Cara',  N'Carlsen',  N'CCC', N'Day2Day',  'DK')
+) AS s (UserName, DisplayName, Upn, Ring, Template, FirstName, LastName, Initials, Purpose, UsageLocation)
 ON t.UserName = s.UserName
-WHEN NOT MATCHED THEN INSERT (UserName, DisplayName, Upn, Ring, Template, FirstName, LastName, Initials, TierLevel, UsageLocation)
-    VALUES (s.UserName, s.DisplayName, s.Upn, s.Ring, s.Template, s.FirstName, s.LastName, s.Initials, s.TierLevel, s.UsageLocation)
+WHEN NOT MATCHED THEN INSERT (UserName, DisplayName, Upn, Ring, Template, FirstName, LastName, Initials, Purpose, UsageLocation)
+    VALUES (s.UserName, s.DisplayName, s.Upn, s.Ring, s.Template, s.FirstName, s.LastName, s.Initials, s.Purpose, s.UsageLocation)
 WHEN MATCHED THEN UPDATE SET DisplayName = s.DisplayName, Upn = s.Upn, Ring = s.Ring, Template = s.Template,
-    FirstName = s.FirstName, LastName = s.LastName, Initials = s.Initials, TierLevel = s.TierLevel, UsageLocation = s.UsageLocation, UpdatedAtUtc = SYSUTCDATETIME();
+    FirstName = s.FirstName, LastName = s.LastName, Initials = s.Initials, Purpose = s.Purpose, UsageLocation = s.UsageLocation, UpdatedAtUtc = SYSUTCDATETIME();
 
 -- Secret pointers (no secret values in demo data)
 MERGE platform.Secrets AS t

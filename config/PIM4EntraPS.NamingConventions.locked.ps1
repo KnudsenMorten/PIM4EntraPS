@@ -32,13 +32,34 @@
 $global:PIM_NamingConventions = @{
 
     # ----- Admin accounts ---------------------------------------------------
-    # TWO separate concepts, often confused:
+    # Admin accounts follow TWO DISTINCT naming conventions:
+    #
+    #   Day-2-day admin   -> Admin-{Initials}-{Platform}
+    #     e.g. Admin-ABC-ID (Entra) / Admin-ABC-AD (legacy AD).
+    #     NO level/tier markers in the name: one day-2-day account spans
+    #     multiple level/tier assignments over time (L3-T1 one day, L2-T0
+    #     the next), so a baked-in L#-T# pair would mislead.
+    #
+    #   High-priv admin   -> Admin-{Initials}-L0-T0-{Platform}
+    #     e.g. Admin-ABC-L0-T0-ID (Entra) / Admin-ABC-L0-T0-AD (legacy AD).
+    #     A DEDICATED account for the tier-0 boundary. The -L0-T0- markers
+    #     in the UserName drive OU/tier routing (see PathAdmins /
+    #     PathAdminsL0T0 below); the Account-Definitions-Admins 'Purpose'
+    #     column (Day2Day | HighPriv) is the explicit selector, with the
+    #     marker check as legacy fallback for blank Purpose.
+    #
+    # THREE separate config concepts, often confused:
     #
     #   AdminAccountPattern  (singular, string, has {Owner} token)
-    #     -> TEMPLATE used by Resolve-PimAdminName to GENERATE new admin UPNs.
-    #        E.g. 'Admin-{Owner}-L0-T0-ID' + Owner 'Brian' yields
-    #        'Admin-Brian-L0-T0-ID'. Only matters when the engine creates
+    #     -> TEMPLATE used by Resolve-PimAdminName to GENERATE new
+    #        day-2-day admin UPNs. Only matters when the engine creates
     #        new admins.
+    #
+    #   AdminAccountPatternHighPriv (singular, string)
+    #     -> TEMPLATE for the DEDICATED high-priv accounts (the marker-
+    #        carrying convention). Used by the Manager wizard's naming
+    #        preview and accepted by the PIM-NAME-002 validator alongside
+    #        the day-2-day pattern.
     #
     #   AdminAccountPatterns (plural; accepts string[], hashtable, or single string)
     #     -> Prefix(es) used by Get-PimAdminsFiltered to build the Graph
@@ -47,11 +68,12 @@ $global:PIM_NamingConventions = @{
     #        multiple prefix conventions (Admin-*, X-Admin*, ...), list
     #        them ALL here so the cache catches them all.
     #
-    # Defaults below assume the 'Admin-' / 'X-Admin' tier-naming convention
-    # observed in production tenants. Override either key in
+    # Defaults below assume the 'Admin-' / 'X-Admin' convention observed in
+    # production tenants. Override any key in
     # PIM4EntraPS.NamingConventions.custom.ps1 if your tenant differs.
-    AdminAccountPattern  = 'Admin-{Owner}'
-    AdminAccountPatterns = @('Admin-', 'X-Admin')
+    AdminAccountPattern         = 'Admin-{Owner}'
+    AdminAccountPatternHighPriv = 'Admin-{Owner}-L0-T0-{Platform}'
+    AdminAccountPatterns        = @('Admin-', 'X-Admin')
 
     # UPN suffix for admin accounts (when creating new ones). Null = use tenant default.
     AdminAccountUpnSuffix = $null
