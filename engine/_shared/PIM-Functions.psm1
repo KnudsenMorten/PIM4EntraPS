@@ -5347,6 +5347,24 @@ Fix (one-time per tenant):
 
                             Write-PimAdminPassword -UserPrincipalName $UserPrincipalName -Password $generatedPassword -Platform 'ID'
 
+                            # Phase 2: 'new-admin' notification (templates/mail/new-admin.*)
+                            # to the manager -- best-effort, channels-gated, never blocks
+                            # creation. Customizable like every engine mail.
+                            if ($ManagerEmail -and $global:PIM_NotificationChannels -and $global:PIM_NotificationChannels.Count -gt 0 -and (Get-Command Send-PimTemplatedMail -ErrorAction SilentlyContinue)) {
+                                try {
+                                    Send-PimTemplatedMail -Type 'new-admin' -Recipient $ManagerEmail -Tokens @{
+                                        DisplayName       = $DisplayName
+                                        UserPrincipalName = $UserPrincipalName
+                                        Company           = $Company
+                                        ManagerEmail      = $ManagerEmail
+                                        TierLevel         = $TierLevel
+                                        Date              = (Get-Date).ToString('yyyy-MM-dd')
+                                    } | Out-Null
+                                } catch {
+                                    Write-Host "  -> new-admin mail failed (creation NOT blocked): $($_.Exception.Message)" -ForegroundColor Yellow
+                                }
+                            }
+
                             # TAP (Temporary Access Pass) -- created when the CSV row sets CreateTAP=TRUE.
                             # Customer-facing recommended path: deliver the TAP code out-of-band, the
                             # admin uses it to register their own credentials, and the random password
@@ -9878,6 +9896,196 @@ function Write-PimAdminTap {
     Write-Host "     appended to: $file" -ForegroundColor DarkCyan
 }
 
+# --- Mail templates (LIFECYCLE-GOVERNANCE phase 2) ---------------------------
+# Every engine-sent mail is a customizable template under templates/mail/:
+#   <type>.mailtemplate.html         shipped default (locked)
+#   <type>.mailtemplate.custom.html  customer override (gitignored, wins)
+# Subject = first '<!-- subject: ... -->' comment; {{Token}} substitution is a
+# straight string replace (no code execution); unknown tokens render empty
+# with a run-log warning.
+
+function Get-PimMailTemplate {
+    param([Parameter(Mandatory)][string]$Type)
+    $dir = Join-Path $PSScriptRoot '..\..\templates\mail'
+    foreach ($cand in @("$Type.mailtemplate.custom.html", "$Type.mailtemplate.html")) {
+        $p = Join-Path $dir $cand
+        if (Test-Path -LiteralPath $p) { return $p }
+    }
+    $null
+}
+
+function ConvertTo-PimMailRendering {
+    # Pure render step (separated from sending for testability): template
+    # text + tokens -> @{ Subject; BodyHtml; BodyText }.
+    param(
+        [Parameter(Mandatory)][string]$TemplateText,
+        [Parameter(Mandatory)][hashtable]$Tokens
+    )
+    $subject = 'PIM4EntraPS notification'
+    if ($TemplateText -match '<!--\s*subject:\s*(.+?)\s*-->') { $subject = $Matches[1] }
+
+    $render = {
+        param([string]$text)
+        foreach ($k in $Tokens.Keys) {
+            $text = $text -replace ('\{\{' + [regex]::Escape($k) + '\}\}'), ([string]$Tokens[$k] -replace '\$', '$$$$')
+        }
+        $leftover = @([regex]::Matches($text, '\{\{(\w+)\}\}') | ForEach-Object { $_.Groups[1].Value } | Select-Object -Unique)
+        if ($leftover.Count -gt 0) {
+            Write-Warning "  [Mail] template references unknown token(s): $($leftover -join ', ') -- rendered empty."
+            $text = [regex]::Replace($text, '\{\{\w+\}\}', '')
+        }
+        $text
+    }
+    $subject  = & $render $subject
+    $bodyHtml = & $render $TemplateText
+    # Plaintext flavor for Teams/Slack: strip the subject comment + tags,
+    # decode the entities the shipped templates use, collapse whitespace.
+    $bodyText = $bodyHtml -replace '<!--.*?-->', ''
+    $bodyText = $bodyText -replace '(?i)<br\s*/?>', "`r`n" -replace '(?i)</(p|div|li|h[1-6]|tr)>', "`r`n"
+    $bodyText = $bodyText -replace '<[^>]+>', ''
+    $bodyText = $bodyText -replace '&nbsp;', ' ' -replace '&amp;', '&' -replace '&lt;', '<' -replace '&gt;', '>' -replace '&quot;', '"'
+    $bodyText = (($bodyText -split "`r?`n" | ForEach-Object { $_.TrimEnd() }) -join "`r`n") -replace "(`r`n){3,}", "`r`n`r`n"
+    @{ Subject = $subject; BodyHtml = $bodyHtml; BodyText = $bodyText.Trim() }
+}
+
+function Send-PimTemplatedMail {
+    <#
+    .SYNOPSIS
+        Render a mail template and deliver it via the configured notification
+        channels (Smtp HTML / Teams adaptive card / Slack text).
+
+    .DESCRIPTION
+        Channel semantics mirror Send-PimAdminTap: -Channel omitted = every
+        configured channel fires best-effort; `$global:WhatIfMode` suppresses
+        all network traffic. Returns @{ Sent; Failed; Errors; TemplateUsed }.
+        When no template file exists for -Type the function warns and returns
+        without sending (callers with a legacy hardcoded body use that as
+        their fallback path).
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$Type,
+        [Parameter(Mandatory)][hashtable]$Tokens,
+        [Parameter()][string]$Recipient,
+        [Parameter()][ValidateSet('Smtp','Teams','Slack')][string]$Channel
+    )
+
+    $result = @{ Sent = @(); Failed = @(); Errors = @{}; TemplateUsed = $null }
+
+    $tplPath = Get-PimMailTemplate -Type $Type
+    if (-not $tplPath) {
+        Write-Warning "  [Mail] no template for type '$Type' under templates\mail -- nothing sent."
+        return $result
+    }
+    $result.TemplateUsed = $tplPath
+    $rendered = ConvertTo-PimMailRendering -TemplateText (Get-Content -LiteralPath $tplPath -Raw -Encoding UTF8) -Tokens $Tokens
+    $subject  = $rendered.Subject
+
+    $channels = $global:PIM_NotificationChannels
+    if ($null -eq $channels -or $channels.Count -eq 0) {
+        Write-Warning "  [Mail] `$global:PIM_NotificationChannels not configured -- nothing to send to."
+        return $result
+    }
+    $toFire = @()
+    if ($Channel) {
+        if ($channels.ContainsKey($Channel)) { $toFire = @($Channel) }
+        else { Write-Warning "  [Mail] requested channel '$Channel' is not configured."; return $result }
+    } else {
+        $toFire = @($channels.Keys)
+    }
+
+    foreach ($ch in $toFire) {
+        $cfg = $channels[$ch]
+        if ($null -eq $cfg) { continue }
+
+        if ($ch -eq 'Smtp') {
+            if (-not $Recipient) {
+                Write-Warning "  [Mail/Smtp] no recipient for '$Type' -- skip."
+                $result.Failed += $ch; $result.Errors[$ch] = 'no recipient'; continue
+            }
+            if (-not $cfg.Server -or -not $cfg.From) {
+                Write-Warning "  [Mail/Smtp] config missing Server or From -- skip."
+                $result.Failed += $ch; $result.Errors[$ch] = 'config Server/From missing'; continue
+            }
+            if ($global:WhatIfMode) { Write-Host "  [WHATIF] would send '$Type' mail to $Recipient via Smtp" -ForegroundColor Yellow; continue }
+            try {
+                $mailParams = @{
+                    SmtpServer = $cfg.Server
+                    Port       = $(if ($cfg.Port) { [int]$cfg.Port } else { 25 })
+                    From       = $cfg.From
+                    To         = $Recipient
+                    Subject    = $subject
+                    Body       = $rendered.BodyHtml
+                    BodyAsHtml = $true
+                    Encoding   = [System.Text.Encoding]::UTF8
+                    ErrorAction = 'Stop'
+                }
+                if ($cfg.UseSsl)     { $mailParams['UseSsl'] = $true }
+                if ($cfg.Credential) { $mailParams['Credential'] = $cfg.Credential }
+                Send-MailMessage @mailParams -WarningAction SilentlyContinue
+                Write-Host "  [Mail/Smtp] '$Type' -> $Recipient OK" -ForegroundColor Green
+                $result.Sent += $ch
+            } catch {
+                Write-Warning "  [Mail/Smtp] '$Type' -> $Recipient failed: $($_.Exception.Message)"
+                $result.Failed += $ch; $result.Errors[$ch] = $_.Exception.Message
+            }
+            continue
+        }
+
+        if ($ch -eq 'Teams') {
+            if (-not $cfg.WebhookUrl) {
+                Write-Warning "  [Mail/Teams] no WebhookUrl configured -- skip."
+                $result.Failed += $ch; $result.Errors[$ch] = 'WebhookUrl missing'; continue
+            }
+            if ($global:WhatIfMode) { Write-Host "  [WHATIF] would send '$Type' mail to Teams webhook" -ForegroundColor Yellow; continue }
+            $payload = @{
+                type        = 'message'
+                attachments = @(@{
+                    contentType = 'application/vnd.microsoft.card.adaptive'
+                    contentUrl  = $null
+                    content     = @{
+                        type      = 'AdaptiveCard'
+                        '$schema' = 'http://adaptivecards.io/schemas/adaptive-card.json'
+                        version   = '1.4'
+                        body      = @(
+                            @{ type = 'TextBlock'; size = 'Medium'; weight = 'Bolder'; text = $subject; wrap = $true },
+                            @{ type = 'TextBlock'; text = $rendered.BodyText; wrap = $true }
+                        )
+                    }
+                })
+            }
+            try {
+                Invoke-RestMethod -Uri $cfg.WebhookUrl -Method Post -ContentType 'application/json' -Body ($payload | ConvertTo-Json -Depth 12 -Compress) -ErrorAction Stop | Out-Null
+                Write-Host "  [Mail/Teams] '$Type' webhook POST OK" -ForegroundColor Green
+                $result.Sent += $ch
+            } catch {
+                Write-Warning "  [Mail/Teams] '$Type' webhook POST failed: $($_.Exception.Message)"
+                $result.Failed += $ch; $result.Errors[$ch] = $_.Exception.Message
+            }
+            continue
+        }
+
+        if ($ch -eq 'Slack') {
+            if (-not $cfg.WebhookUrl) {
+                Write-Warning "  [Mail/Slack] no WebhookUrl configured -- skip."
+                $result.Failed += $ch; $result.Errors[$ch] = 'WebhookUrl missing'; continue
+            }
+            if ($global:WhatIfMode) { Write-Host "  [WHATIF] would send '$Type' mail to Slack webhook" -ForegroundColor Yellow; continue }
+            try {
+                $slackBody = @{ text = "*$subject*`n$($rendered.BodyText)" } | ConvertTo-Json -Depth 4 -Compress
+                Invoke-RestMethod -Uri $cfg.WebhookUrl -Method Post -ContentType 'application/json' -Body $slackBody -ErrorAction Stop | Out-Null
+                Write-Host "  [Mail/Slack] '$Type' webhook POST OK" -ForegroundColor Green
+                $result.Sent += $ch
+            } catch {
+                Write-Warning "  [Mail/Slack] '$Type' webhook POST failed: $($_.Exception.Message)"
+                $result.Failed += $ch; $result.Errors[$ch] = $_.Exception.Message
+            }
+            continue
+        }
+    }
+    $result
+}
+
 function Send-PimAdminTap {
     <#
     .SYNOPSIS
@@ -9969,6 +10177,30 @@ function Send-PimAdminTap {
     $startLocalStr = $startLocal.ToString('yyyy-MM-dd HH:mm zzz')
     $startUtcStr   = $startUtc.ToString('yyyy-MM-dd HH:mm') + ' UTC'
     $expiryUtcStr  = $expiryUtc.ToString('yyyy-MM-dd HH:mm') + ' UTC'
+
+    # Phase 2: template-based delivery. The shipped
+    # templates/mail/tap-delivery.mailtemplate.html mirrors the hardcoded
+    # body below (which stays as the last-resort fallback for stripped-down
+    # installs); customers customize via tap-delivery.mailtemplate.custom.html.
+    $tplPath = if (Get-Command Get-PimMailTemplate -ErrorAction SilentlyContinue) { Get-PimMailTemplate -Type 'tap-delivery' } else { $null }
+    if ($tplPath) {
+        $tmArgs = @{
+            Type   = 'tap-delivery'
+            Tokens = @{
+                UserPrincipalName  = $UserPrincipalName
+                TapCode            = $Code
+                TapStartLocal      = $startLocalStr
+                TapStartUtc        = $startUtcStr
+                TapLifetimeMinutes = $LifetimeMinutes
+                TapLifetimeHours   = [math]::Round($LifetimeMinutes / 60, 1)
+                TapExpiresUtc      = $expiryUtcStr
+            }
+        }
+        if ($Recipient) { $tmArgs['Recipient'] = $Recipient }
+        if ($Channel)   { $tmArgs['Channel']   = $Channel }
+        $tplResult = Send-PimTemplatedMail @tmArgs
+        return @{ Sent = $tplResult.Sent; Failed = $tplResult.Failed; Errors = $tplResult.Errors }
+    }
 
     $subject = "Your initial PIM admin TAP for $UserPrincipalName"
     $bodyLines = @(

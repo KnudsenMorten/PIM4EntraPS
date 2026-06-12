@@ -1,0 +1,17 @@
+<!-- subject: Approval needed: {{RequestorUpn}} requests {{RoleName}} -->
+<!-- tokens: ApproverName, RequestorUpn, RoleName, GroupName, Justification, RequestedAt, ApprovalUrl -->
+<!-- Sent to an approver when an activation needs their decision. To customize: copy to approval-request.mailtemplate.custom.html and edit. -->
+<html>
+<body style="font-family:Segoe UI,Arial,sans-serif; color:#24292f; font-size:14px;">
+  <p>Hello {{ApproverName}},</p>
+  <p>A privileged activation is waiting for your approval:</p>
+  <table cellpadding="4" style="border-collapse:collapse; font-size:14px;">
+    <tr><td><b>Requestor</b></td><td>{{RequestorUpn}}</td></tr>
+    <tr><td><b>Role / group</b></td><td>{{RoleName}} ({{GroupName}})</td></tr>
+    <tr><td><b>Justification</b></td><td>{{Justification}}</td></tr>
+    <tr><td><b>Requested at</b></td><td>{{RequestedAt}}</td></tr>
+  </table>
+  <p><a href="{{ApprovalUrl}}">Open the approval in the Entra portal</a> to approve or deny.</p>
+  <p style="color:#57606a;">Unanswered requests escalate to the next owner per the role's approval policy.</p>
+</body>
+</html>

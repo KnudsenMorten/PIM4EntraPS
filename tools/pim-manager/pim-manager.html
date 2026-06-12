@@ -3392,7 +3392,37 @@
   // ===================================================================
   // Wizard A: New admin account
   // ===================================================================
+  // Apply an admin template's prestaged values onto the wizard state
+  // (LIFECYCLE-GOVERNANCE phase 2). Everything stays editable afterwards.
+  function applyAdminTemplate(s, tpl) {
+    if (!tpl) return;
+    const p = tpl.prefill || {};
+    const map = {
+      TierLevel:'tier', Level:'level', TargetUsage:'usage', TargetPlatform:'platform',
+      UserType:'userType', UsageLocation:'usageLocation', Ring:'ring',
+      ForwardMailsToContact:'forwardMails', MailForwardAddress:'mailForwardAddr',
+      ProvisionDate:'provisionDate', CreateTAP:'createTap',
+      TAPStartDate:'tapStartDate', TAPLifetimeHours:'tapLifetimeHours',
+      AccountStatus:'status'
+    };
+    for (const k in map) { if (Object.prototype.hasOwnProperty.call(p, k)) s[map[k]] = String(p[k]); }
+    const ad = tpl.assignmentDefaults || {};
+    if (ad.AssignmentType) s.assignmentType = String(ad.AssignmentType);
+    if (ad.NumOfDaysWhenExpire != null) s.lifetimeDays = parseInt(ad.NumOfDaysWhenExpire, 10) || s.lifetimeDays;
+    if (Array.isArray(tpl.assignments)) {
+      for (const a of tpl.assignments) { if (a && a.GroupTag) s.roleGroupSel.add(a.GroupTag); }
+    }
+  }
+
   async function wizardAdmin() {
+    // Phase 2: fetch admin templates up front so the picker renders
+    // synchronously inside step 1. Best-effort -- no templates = no picker.
+    let adminTemplates = [];
+    try {
+      const r = await api('GET', '/api/admin-templates');
+      adminTemplates = (r && r.templates) || [];
+    } catch (_) {}
+
     const state = {
       first:'', last:'', initials:'',
       tier:'T1', level:'L3', usage:'Cloud', platform:'ID', useLongForm:true,
@@ -3406,7 +3436,8 @@
       ring:'2',   // new hires start in ring 2 (test tenants); promote 2 -> 1 -> 0 centrally
       roleGroupSel: new Set(),
       assignmentType:'Eligible',
-      lifetimeDays:365
+      lifetimeDays:365,
+      templateId:''
     };
     wizSteps({
       title: 'New admin account', kind: 'admin', state,
@@ -3420,6 +3451,20 @@
               'It lands as one row in <code>Account-Definitions-Admins.custom.csv</code>. ' +
               'You give the person and platform; the wizard composes the UPN, display name, and short login name to match the existing naming convention.'
             ));
+            if (adminTemplates.length) {
+              f.appendChild(wuxField({ id:'wf-tpl', label:'Start from template', type:'select', value:s.templateId,
+                sub:'templates/admin/*.admintemplate.json -- prestages tier, scheduling, TAP and forwarding; everything stays editable',
+                options:[{ value:'', label:'(none -- start blank)' }].concat(adminTemplates.map(t => ({ value:t.id, label:t.name }))),
+                onInput:(v)=>{ s.templateId=v; applyAdminTemplate(s, adminTemplates.find(t=>t.id===v)); rerender(); }
+              }));
+              const cur = adminTemplates.find(t => t.id === s.templateId);
+              if (cur && cur.description) {
+                const d = document.createElement('div');
+                d.style.cssText = 'color:#57606a; font-size:11px; margin:-4px 0 10px 2px;';
+                d.textContent = cur.description;
+                f.appendChild(d);
+              }
+            }
             f.appendChild(wuxField({ id:'wf-fn', label:'First name', required:true, value:s.first, example:'e.g. Anna', sub:'Account-Definitions-Admins.FirstName', onInput:(v)=>{ s.first=v; rerender(); } }));
             f.appendChild(wuxField({ id:'wf-ln', label:'Last name',  required:true, value:s.last,  example:'e.g. Hansen', sub:'Account-Definitions-Admins.LastName', onInput:(v)=>{ s.last=v; rerender(); } }));
             if (!s.initials && (s.first || s.last)) {
@@ -3652,7 +3697,8 @@
           TAPStartDate: s.createTap === 'TRUE' ? s.tapStartDate.trim() : '',
           TAPLifetimeHours: s.createTap === 'TRUE' ? String(s.tapLifetimeHours || '').trim() : '',
           AccountStatus: s.status, StatusChangeCode: '',
-          Ring: s.ring
+          Ring: s.ring,
+          Template: s.templateId || ''
         });
         for (const tag of s.roleGroupSel) {
           await wuxStage('PIM-Assignments-Admins', {

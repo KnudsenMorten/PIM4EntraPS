@@ -1683,6 +1683,32 @@ function Handle-Request {
         }
 
         # -------------------------------------------------------------------
+        # Admin templates (LIFECYCLE-GOVERNANCE phase 2) -- prestaged admin
+        # settings for the onboarding wizard. Shipped *.admintemplate.json +
+        # customer *.admintemplate.custom.json (additive; same id in a custom
+        # file overrides the shipped one).
+        # -------------------------------------------------------------------
+        if ($path -eq '/api/admin-templates' -and $method -eq 'GET') {
+            $script:lastHeartbeat = Get-Date
+            $tplDir = Join-Path $solutionRoot 'templates\admin'
+            $byId = @{}
+            if (Test-Path -LiteralPath $tplDir) {
+                $files = @(Get-ChildItem -LiteralPath $tplDir -Filter '*.admintemplate.json' -ErrorAction SilentlyContinue) +
+                         @(Get-ChildItem -LiteralPath $tplDir -Filter '*.admintemplate.custom.json' -ErrorAction SilentlyContinue)
+                foreach ($f in $files) {
+                    try {
+                        $tpl = Get-Content -LiteralPath $f.FullName -Raw -Encoding UTF8 | ConvertFrom-Json
+                        if ($tpl.id) { $byId[$tpl.id] = $tpl }   # custom files enumerate last -> same id wins
+                    } catch {
+                        Write-Warning "admin template '$($f.Name)' unreadable: $($_.Exception.Message)"
+                    }
+                }
+            }
+            Write-JsonResponse -Response $resp -Status 200 -Body @{ templates = @($byId.Values | Sort-Object { $_.name }) }
+            return 200
+        }
+
+        # -------------------------------------------------------------------
         # Date-expression live preview (LIFECYCLE-GOVERNANCE phase 1) --
         # the onboarding wizard previews ProvisionDate / TAPStartDate while
         # the operator types ("resolves to Mon 2026-07-01 08:00 UTC").
