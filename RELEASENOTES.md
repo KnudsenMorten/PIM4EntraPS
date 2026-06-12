@@ -1,9 +1,10 @@
 # Release notes for PIM4EntraPS
 
-## v2.4.169
+## v2.4.170
 
 Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monorepo:
 
+- release: PIM4EntraPS v2.4.170 -- first LIVE multi-tenant MSP fan-out (Invoke-PimMspFanout.ps1: registry-driven, ring-filtered via pim.vw_AdminTenantTargets, child-process SQL isolation for the SqlServer/Graph Azure.Core conflict, WhatIf default) + engine fixes (modern ForwardMailsToContact/MailForwardAddress columns finally read w/ legacy fallback; EXO connect skipped when no row requests forwarding; replication-404 retry on post-create PATCH) + pim.CentralAdmins account-material columns w/ idempotent upgrade. Verified live: 5 accounts across 2 real test tenants, ring semantics correct, second pass idempotent. (9356c120)
 - release: PIM4EntraPS v2.4.169 -- Install-PimEngineAppRegistration: MachineStore defaults ON (cert in Cert:\LocalMachine\My unless -MachineStore:$false for ad-hoc per-user testing); operator decision, CurrentUser default was a foot-gun. AzureRbac redo for the first test tenant intentionally skipped (recorded in platform.Tenants notes in both DBs) (55b0bbf9)
 - release: PIM4EntraPS v2.4.168 -- Install-PimEngineAppRegistration -MachineStore switch: cert created/reused in Cert:\LocalMachine\My (visible in certlm.msc, usable by service/scheduled-task identities, matches platform security design); default stays CurrentUser; docstrings name the selected store. Field cause: operator could not find the cert -- it was in the user store while certlm shows the machine store (3aaa6d09)
 - release: PIM4EntraPS v2.4.167 -- Install-PimEngineAppRegistration re-run fixes: keyCredentials merge now dedupes by thumbprint via CustomKeyIdentifier (Graph returns Key=$null on read -> old first-20-bytes grouping crashed every re-run with null-array index; existing entries win ties preserving KeyId/key material; new credential stamped with GetCertHash); cert auto-reuse of newest still-valid matching-subject store cert (>30d, has private key) instead of minting a duplicate per run (one mgmt-host key for N per-tenant apps = MSP pattern); -ExistingThumbprint still pins. Parse + merge unit test green. Follow-up queued: -MachineStore option for LocalMachine\My (4bfc72b8)
@@ -33,7 +34,6 @@ Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monor
 - release: PIM4EntraPS v2.4.143 -- wire Apply-PimWorkloadAssignments into PIM-Baseline-Management-CSV as a final opt-in Workload RBAC step: runs only when config[/<variant>]/PIM-Assignments-Workloads.custom.csv exists (NOT via Get-PimConfigCsv -- its sample auto-bootstrap would arm the feature with shipped example rows), honors -WhatIfMode, resolves connectors from workloads/connectors/, benefits from the engine Groups_All_ID inventory for GroupTag cache-hit resolution; repository.custom.sample.ps1 documents the opt-in (c9e22c20)
 - release: PIM4EntraPS v2.4.142 -- Workload Connectors phase 1: JSON connector definitions for Defender XDR Unified RBAC + Intune roles (live role listing, token-templated assign/remove bodies); 15th config file PIM-Assignments-Workloads (desired state, full Manager lifecycle); engine Apply-PimWorkloadAssignments (idempotent diff-and-apply, -WhatIfMode, removes only self-created assignments); Manager Maintenance panel with live role pickers + /api/workloads + /api/workload-roles. Live-verified: 16 Defender + 11 Intune roles listed from a real tenant, WhatIf plan resolved real group->objectId with exact would-assign lines. Design doc extended with activation-stats right-sizing, deleted-resource auto-cleanup, orphaned-group drift phases (63ebc705)
 - release: PIM4EntraPS v2.4.141 -- Permission Templates: maintainer-curated delegation packs in templates/*.template.json (distributed by repo sync), diffed per active instance by GET /api/templates (presence by natural row keys); Create tab shows each pack as Up-to-date or "n new permission(s)" with one-click import into pending; shipped starter pack defender-xdr v2 (7 Unified-RBAC workload groups, grown from 3 in v1 to demo the new-permissions flow). Plus docs/WORKLOAD-CONNECTORS.md: full design for applying PIM groups to workload RBAC (Defender XDR, Intune, Power BI, Dataverse, Business Central, Azure AI) via JSON connector definitions + a 15th desired-state CSV + an engine applier with auth adapters (bfc8f329)
-- release: PIM4EntraPS v2.4.141 -- Delegation Map becomes an editor: select an admin -> "+ Assign to group..." stages PIM-Assignments-Admins rows by clicking one or more role/org groups (duplicate-guarded, Eligible/365d defaults); select a role group -> "+ Link capability bundle..." stages PIM-Assignments-Groups nesting rows; staged relations draw as dashed amber wires via a pending overlay on the board model. Two-step focus UX (pick person or permission -> board collapses to the transitive path, toggleable). Long Azure scope/AU names render two-line with full wrap in focus view (545976d0)
 
 ---
 
@@ -42,6 +42,22 @@ Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monor
 > **Curated changelog.** The publish workflow auto-prepends recent monorepo commits as a raw activity log; this file is the human-friendly narrative on top.
 
 ---
+
+## v2.4.170 -- the first LIVE multi-tenant MSP fan-out (phase 12a runs for real)
+
+New **`setup/Invoke-PimMspFanout.ps1`** -- the registry-driven multi-tenant deployment pass over the § 16 platform: for every tenant in `platform.Tenants` with a PIM app whose certificate is present in `Cert:\LocalMachine\My` (fictional demo tenants drop out automatically), it connects Graph app-only, resolves the tenant default domain, builds a per-tenant Account-Definitions CSV from `pim.CentralAdmins` ring-filtered by `pim.vw_AdminTenantTargets`, and hands it to the engine's `CreateUpdate-Accounts-From-file-CSV -OnlyID`. `-WhatIfMode` defaults ON (plan only); `-UseAzureSql` switches the registry from on-prem Windows-auth to Azure SQL access-token auth.
+
+**Process-hygiene lesson baked in**: the SqlServer module (and Az.Accounts) bundle an OLDER `Azure.Core` than the Graph SDK -- loading them before `Connect-MgGraph` breaks app-only auth with "Method not found: Azure.Core.TokenRequestContext..ctor". The orchestrator therefore runs ALL registry SQL in a child process (JSON-marshalled) and keeps the parent Graph-only.
+
+Engine fixes shipped with it:
+
+- **Modern forwarding columns were never read** (dormant since the schema modernization): the account function only looked at legacy `ForwardMails`/`MailForwardToAddress`, so `ForwardMailsToContact`/`MailForwardAddress` rows silently never forwarded. Now modern-name-first with legacy fallback.
+- **Exchange Online connect is skipped when no CSV row requests forwarding** -- it was unconditionally fatal for ID runs even when nothing needed a mailbox (engine SPNs without `Exchange.ManageAsApp` couldn't run account passes at all).
+- **Graph replication-404 retry**: the immediate post-create PATCH (`DisablePasswordExpiration`) can hit a read replica that hasn't seen the new user yet (`Request_ResourceNotFound`); now retried with backoff instead of leaving the policy unset.
+
+Schema: `pim.CentralAdmins` gains the account-material columns the fan-out feeds the engine (`FirstName`, `LastName`, `Initials`, `TierLevel`, `UsageLocation`) with an idempotent upgrade for existing installs; demo seed updated to carry them.
+
+Verified LIVE against two real test tenants sharing one management-host certificate: 5 admin accounts created (ring-2 tenant received all 3 central admins, ring-1 tenant the ring-0/ring-1 pair -- the consultant correctly stopped at the test ring), and a second pass was cleanly idempotent (update path, no errors, Exchange connect skipped in both tenants).
 
 ## v2.4.169 -- Install-PimEngineAppRegistration: machine store is the DEFAULT
 

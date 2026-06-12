@@ -59,8 +59,19 @@ CREATE TABLE pim.CentralAdmins (
     Template     NVARCHAR(100) NULL,                    -- admin template id (consultant / new-employee-next-month / ...)
     Enabled      BIT           NOT NULL CONSTRAINT DF_CentralAdmins_Enabled DEFAULT 1,
     Notes        NVARCHAR(1000) NULL,
-    UpdatedAtUtc DATETIME2     NOT NULL CONSTRAINT DF_CentralAdmins_Updated DEFAULT SYSUTCDATETIME()
+    UpdatedAtUtc DATETIME2     NOT NULL CONSTRAINT DF_CentralAdmins_Updated DEFAULT SYSUTCDATETIME(),
+    -- account-material fields consumed by the MSP fan-out (per-tenant account
+    -- creation; UPN per tenant = UserName@<tenant default domain>)
+    FirstName     NVARCHAR(100) NULL,
+    LastName      NVARCHAR(100) NULL,
+    Initials      NVARCHAR(10)  NULL,
+    TierLevel     NVARCHAR(10)  NULL,                   -- T0 / T1 / T2
+    UsageLocation CHAR(2)       NULL
 );
+
+-- schema upgrade for pre-existing installs (idempotent)
+IF COL_LENGTH('pim.CentralAdmins', 'FirstName') IS NULL
+    ALTER TABLE pim.CentralAdmins ADD FirstName NVARCHAR(100) NULL, LastName NVARCHAR(100) NULL, Initials NVARCHAR(10) NULL, TierLevel NVARCHAR(10) NULL, UsageLocation CHAR(2) NULL;
 
 IF OBJECT_ID('platform.AuditEvents') IS NULL
 CREATE TABLE platform.AuditEvents (

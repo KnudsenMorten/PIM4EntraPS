@@ -5025,8 +5025,23 @@ Function CreateUpdate-Accounts-From-file-CSV
     # Also short-circuit if a healthy EXO session is already attached to
     # the runspace (re-runs in the same shell shouldn't disconnect /
     # reconnect needlessly).
+    # v2.4.170: EXO is ONLY needed when at least one CSV row actually requests
+    # mail forwarding. Connecting unconditionally made Exchange.ManageAsApp a
+    # hard dependency for every ID run -- incl. tenants that never forward.
+    $_fwdRequested = $false
+    try {
+        $_fwdProbe = Import-Csv -Path $AccountsDefinitionFile -Delimiter ';' -Encoding UTF8
+        $_fwdRequested = @($_fwdProbe | Where-Object {
+            ($_.PSObject.Properties.Name -contains 'ForwardMailsToContact' -and "$($_.ForwardMailsToContact)".Trim() -eq 'TRUE') -or
+            ($_.PSObject.Properties.Name -contains 'ForwardMails' -and "$($_.ForwardMails)".Trim() -eq 'TRUE')
+        }).Count -gt 0
+    } catch {}
+
     if ($OnlyAD -and -not $OnlyID) {
         Write-Output "  [info] -OnlyAD invocation -- skipping Connect-ExchangeOnline (AD branch doesn't touch Exchange)."
+    }
+    elseif (-not $_fwdRequested) {
+        Write-Output "  [info] no row requests mail forwarding -- skipping Connect-ExchangeOnline (not needed this run)."
     }
     else {
 
@@ -5161,8 +5176,13 @@ Fix (one-time per tenant):
             }
 
             $DisplayName            = $Entry.DisplayName
-            $ForwardMails           = $Entry.ForwardMails
-            $MailForwardToAddress   = $Entry.MailForwardToAddress
+            # v2.4.170: the schema's column names are ForwardMailsToContact +
+            # MailForwardAddress; the legacy names (ForwardMails /
+            # MailForwardToAddress) were read here EXCLUSIVELY, so forwarding
+            # silently never applied from modern CSVs. Read modern-first with
+            # legacy fallback.
+            $ForwardMails           = if ($Entry.PSObject.Properties.Name -contains 'ForwardMailsToContact' -and "$($Entry.ForwardMailsToContact)".Trim()) { $Entry.ForwardMailsToContact } else { $Entry.ForwardMails }
+            $MailForwardToAddress   = if ($Entry.PSObject.Properties.Name -contains 'MailForwardAddress' -and "$($Entry.MailForwardAddress)".Trim()) { $Entry.MailForwardAddress } else { $Entry.MailForwardToAddress }
             $CreateTAP              = $Entry.CreateTAP
             $TAPStartDate           = $Entry.TAPStartDate
             $AccountStatus          = if ($Entry.PSObject.Properties.Name -contains 'AccountStatus') { $Entry.AccountStatus } else { 'Enabled' }
@@ -5323,7 +5343,29 @@ Fix (one-time per tenant):
                             }
                             $Result = New-MgBetaUser @newUserSplat
 
-                            $Result = Update-MgBetaUser -UserId $UserPrincipalName -PasswordPolicies DisablePasswordExpiration
+                            # Graph read replicas can lag the create by a few seconds --
+                            # the immediate follow-up PATCH then 404s (Request_ResourceNotFound)
+                            # even though the user exists. Retry with backoff instead of
+                            # leaving the account without DisablePasswordExpiration.
+                            $_pwPolicySet = $false
+                            for ($_try = 1; $_try -le 5; $_try++) {
+                                Try {
+                                    $Result = Update-MgBetaUser -UserId $UserPrincipalName -PasswordPolicies DisablePasswordExpiration -ErrorAction Stop
+                                    $_pwPolicySet = $true
+                                    break
+                                }
+                                Catch {
+                                    if ($_.Exception.Message -match 'Request_ResourceNotFound|does not exist' -and $_try -lt 5) {
+                                        Write-Host "  [info] new account not visible on Graph read replica yet -- retry $_try/5 in $($_try * 3)s" -ForegroundColor DarkGray
+                                        Start-Sleep -Seconds ($_try * 3)
+                                    } else {
+                                        throw
+                                    }
+                                }
+                            }
+                            if (-not $_pwPolicySet) {
+                                Write-Host "Failure: could not set DisablePasswordExpiration on $UserPrincipalName after retries." -ForegroundColor Yellow
+                            }
 
                             if (Get-Command Write-PimAuditEvent -ErrorAction SilentlyContinue) {
                                 Write-PimAuditEvent -Action 'account.create' -Target $UserPrincipalName -After @{ displayName = $DisplayName; tierLevel = $TierLevel; platform = 'ID'; template = $(if ($Entry.PSObject.Properties.Name -contains 'Template') { "$($Entry.Template)" } else { '' }) }
