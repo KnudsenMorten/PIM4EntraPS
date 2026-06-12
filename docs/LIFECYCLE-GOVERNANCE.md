@@ -222,8 +222,40 @@ All engine and Manager transactions converge on **`output/audit/pim-audit-<yyyyM
 | 7 | Manager RBAC + Governance tab (role banner, audit viewer, mail-template status, emergency panel) | **shipped v2.4.158** |
 | 8 | Emergency override (passphrase-hash verification in config/emergency.custom.ps1; KV verification = follow-up) | **shipped v2.4.158** |
 | 9 | Resource discovery: engine Notify sweep (audit `resource.discovered`) + Manager Portal surface/acknowledge; automatic ROW creation for discovered resources is the documented follow-up | **shipped v2.4.159** |
+| 10 | Access reviews (§ 14): engine-owned Entra review schedules (auto-apply OFF), decision sweep, deny tombstones + PIM-REV-001 | design agreed |
+| 11 | External request intake (§ 15): MID-server file-drop inbox, signed typed requests, template-only onboarding, high-priv hard deny, Manager approval queue | design agreed |
 
 Phase order optimizes for dependency flow (templates before policies before approvals before emergency) and for the operator's immediate scenario (scheduling + TAP windows first).
+
+## 14. Access reviews — business-driven extend/remove (design, phase 10)
+
+**The circularity problem**: Entra Access Review auto-apply removes a member in Entra, but the CSV is the source of truth — the engine re-delegates on the next run (and the phase-5 drift cleanup actively enforces CSV-wins). Native auto-apply is fundamentally incompatible with a declarative engine.
+
+**Decision: hybrid.** Entra Access Reviews provide the reviewer UX (MyAccess portal, reminders, delegation — we will not rebuild that, and the Manager is operator-localhost-only); the engine owns both the review lifecycle and the application of decisions. Reviews NEVER touch Entra directly.
+
+1. **Engine creates + maintains review schedule definitions** (Graph `accessReviewScheduleDefinitions`) for groups that opt in — `ReviewCycle` carried by the policy template (like approvals) or a per-row column. Reviewers = the row's **Owners**. **Auto-apply = OFF** on every review the engine creates; the engine warns about (and refuses to manage) reviews with auto-apply ON against engine-managed groups.
+2. **Decision sweep** (`Invoke-PimAccessReviewSync`, every run): pulls completed instances' decisions.
+   - **Approve** → keep; optionally re-stamp the assignment expiry (`NumOfDaysWhenExpire` window restarts) — the consultant-extension scenario.
+   - **Deny** → write a **tombstone** `(principal, GroupTag, reviewId, decidedAt)` to the engine-owned suppression layer `output/state/review-tombstones.json`. The engine does NOT edit customer CSVs.
+3. **Tombstone layer**: the assignment step treats a tombstoned pair as `Action=Remove` regardless of the CSV — membership is removed and never re-delegated. A validator rule (PIM-REV-001) flags the CSV row: "review-denied <date> — remove this row (or clear the tombstone) to acknowledge." The human reconciles the CSV at their own pace; the Manager-stages / engine-applies trust model stays intact.
+4. Everything audited (`review.created`, `review.decision`, `review.tombstone.applied`) + `offboarding-notice`-style mail to the denied principal's manager.
+
+## 15. External request intake — ServiceNow et al. (design, phase 11)
+
+**Constraints**: pull-not-push (AutomateIT invariant); NO inbound endpoint, webhook, function, or internet-exposed storage; a compromised workflow must never be able to create an admin or activate a role.
+
+**Transport (primary, fully internal)**: ServiceNow workflow → **ServiceNow MID Server** (the customer's existing internal broker — runs inside the network, connects outbound-only to the SNOW cloud) → drops a signed request file into an **internal inbox directory** (SMB share / folder on the automation server). Directory ACL: the MID service account has **create-only** rights (cannot read, modify, or delete queued files — a compromised MID cannot tamper with requests in flight); the engine account owns the folder and moves every file to `processed/` or `rejected/<reason>/` after verification. No service listens anywhere. *(Fallback for customers without MID servers: an Azure Storage queue in the customer subscription, SNOW writing with a single-container-scoped SP — still outbound-only from both sides.)*
+
+**Security layers (defense in depth, each independently rotatable via Key Vault)**:
+
+1. **Payload signing**: SNOW signs `type + payload + timestamp + nonce` (HMAC-SHA256 shared secret in the SNOW credential store + customer KV, or RSA with the public key in KV). The engine verifies, rejects timestamps older than ~15 min, and keeps a processed-nonce ledger — file-drop access alone yields nothing, and replay of a captured legitimate request fails.
+2. **Typed allow-list**: `assignment.add`, `assignment.remove`, `admin.onboard` only. `admin.onboard` may ONLY reference a shipped/customer **admin template id** — SNOW instantiates pre-approved shapes, never arbitrary accounts.
+3. **High-priv hard deny**: any group whose `PolicyTemplate = approval-required` (GA, PRA, tenant-root owners) is NOT requestable through the intake, ever.
+4. **Activation out of scope by design**: the intake manages assignments/onboarding only. Activating a role remains exclusively behind PIM's MFA + approval policies (+ the phase-4 owner approvals) — the "activate a role" attack path does not exist in this channel.
+5. **Human in the loop by default**: verified requests surface as PENDING in the Manager's Governance tab; an Admin accepts and the rows materialize through the normal Review & Save flow. Per-request-type `Auto` mode is opt-in for low-priv only.
+6. **Full audit**: `request.received` / `request.rejected` (with reason) / `request.applied` in the jsonl.
+
+Attack analysis: an attacker needs the SNOW signing key AND internal file-drop access, and even then can only *request* template-shaped low-priv changes that default to human approval — with every step in the audit trail.
 
 ## Out of scope / known limitations
 
