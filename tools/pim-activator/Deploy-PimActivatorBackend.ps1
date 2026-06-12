@@ -106,10 +106,41 @@ param(
     # want. Pass -GrantConsent:$false to skip the tenant-wide consent step
     # (rare -- e.g. when the caller doesn't hold Privileged Role Administrator
     # and a delegated approver will consent later via the Enterprise apps blade).
-    [switch]$GrantConsent = $true
+    [switch]$GrantConsent = $true,
+
+    # Default ON: run the interactive sign-in through Microsoft Edge
+    # explicitly instead of the system default browser. MSAL's interactive
+    # flow launches whatever the OS default handler is -- on servers that is
+    # often legacy Internet Explorer, which mangles the auth redirect and
+    # kills the flow with MSAL's 'state mismatch' error, re-prompting on
+    # every Graph call. Uses the same first-party 'Microsoft Graph Command
+    # Line Tools' app as Connect-MgGraph (auth-code + PKCE on a loopback
+    # listener), so no extra app registration or consent. Pass
+    # -UseEdge:$false to fall back to MSAL's default-browser flow.
+    [switch]$UseEdge = $true
 )
 
 $ErrorActionPreference = 'Stop'
+
+# Version banner -- VERSION lives at the PIM4EntraPS solution root, two
+# levels up from tools/pim-activator/.
+$_versionFile = Join-Path $PSScriptRoot '..\..\VERSION'
+$_scriptVer   = if (Test-Path $_versionFile) { 'v' + (Get-Content $_versionFile -TotalCount 1).Trim() } else { '(VERSION file not found)' }
+Write-Host "Deploy-PimActivatorBackend -- PIM4EntraPS $_scriptVer" -ForegroundColor Cyan
+
+# Mixed Microsoft.Graph submodule versions (a stale install loaded alongside a
+# newer one) cause exactly the failures this script has hit in the field:
+# cmdlets returning silent `$null instead of erroring, and token requests that
+# bypass the cache and re-prompt interactively on every call. Verify the
+# loaded trio agree before doing anything.
+$_graphMods = 'Microsoft.Graph.Authentication', 'Microsoft.Graph.Applications', 'Microsoft.Graph.Identity.SignIns' |
+    ForEach-Object { Import-Module $_ -PassThru -ErrorAction Stop }
+$_graphVers = @($_graphMods | ForEach-Object { $_.Version.ToString() } | Sort-Object -Unique)
+if ($_graphVers.Count -gt 1) {
+    $detail = ($_graphMods | ForEach-Object { "$($_.Name) $($_.Version)" }) -join ', '
+    throw "Mixed Microsoft.Graph module versions loaded in this session: $detail. All Microsoft.Graph.* submodules must be the SAME version -- this mismatch causes silent cmdlet failures and broken token caching. Fix: close ALL PowerShell sessions, remove the stale versions (Get-InstalledModule Microsoft.Graph* -AllVersions to inspect, Uninstall-Module <name> -RequiredVersion <old>), or Update-Module Microsoft.Graph -Force, then retry in a fresh session."
+}
+Write-Host "Graph SDK  : v$($_graphVers[0])" -ForegroundColor Cyan
 
 # ---------------------------------------------------------------------------
 # Connect (or verify) Microsoft Graph
@@ -121,20 +152,122 @@ $_requiredScopes = @(
     'DelegatedPermissionGrant.ReadWrite.All'
 )
 
+$_connectArgs = @{ Scopes = $_requiredScopes; NoWelcome = $true; ErrorAction = 'Stop' }
+if ($TenantId) { $_connectArgs['TenantId'] = $TenantId }
+
+# Interactive sign-in forced through Microsoft Edge (-UseEdge). MSAL offers
+# no way to pick the browser, so this runs the auth-code + PKCE flow itself:
+# loopback TcpListener (no HttpListener URL-ACL requirement, works
+# non-elevated), Edge launched explicitly on the authorize URL, token
+# exchanged and handed to Connect-MgGraph -AccessToken.
+function Connect-MgGraphViaEdge {
+    param([string[]]$Scopes, [string]$Tenant)
+
+    $clientId = '14d82eec-204b-4c2f-b7e8-296a70dab67e'   # Microsoft Graph Command Line Tools (same app Connect-MgGraph uses)
+    $edge = @(
+        (Join-Path ${env:ProgramFiles(x86)} 'Microsoft\Edge\Application\msedge.exe'),
+        (Join-Path $env:ProgramFiles 'Microsoft\Edge\Application\msedge.exe')
+    ) | Where-Object { $_ -and (Test-Path $_) } | Select-Object -First 1
+    if (-not $edge) { throw 'msedge.exe not found under Program Files -- cannot use -UseEdge on this host.' }
+
+    # PKCE verifier + S256 challenge
+    $bytes = New-Object byte[] 32
+    [System.Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($bytes)
+    $verifier  = [Convert]::ToBase64String($bytes).TrimEnd('=').Replace('+', '-').Replace('/', '_')
+    $sha       = [System.Security.Cryptography.SHA256]::Create()
+    $challenge = [Convert]::ToBase64String($sha.ComputeHash([System.Text.Encoding]::ASCII.GetBytes($verifier))).TrimEnd('=').Replace('+', '-').Replace('/', '_')
+    $state     = [guid]::NewGuid().ToString('N')
+
+    # Loopback listener on an OS-assigned free port. First-party public
+    # clients accept any localhost port on the redirect URI.
+    $tcp = New-Object System.Net.Sockets.TcpListener([System.Net.IPAddress]::Loopback, 0)
+    $tcp.Start()
+    $port     = ([System.Net.IPEndPoint]$tcp.LocalEndpoint).Port
+    $redirect = "http://localhost:$port/"
+
+    $scopeStr = [uri]::EscapeDataString(((@($Scopes) + 'openid', 'profile', 'offline_access') -join ' '))
+    $authUrl  = "https://login.microsoftonline.com/$Tenant/oauth2/v2.0/authorize" +
+                "?client_id=$clientId&response_type=code&response_mode=query" +
+                "&redirect_uri=$([uri]::EscapeDataString($redirect))" +
+                "&scope=$scopeStr&state=$state" +
+                "&code_challenge=$challenge&code_challenge_method=S256&prompt=select_account"
+
+    Write-Host "Launching Edge for sign-in (loopback listener on $redirect)..." -ForegroundColor Yellow
+    Start-Process -FilePath $edge -ArgumentList @('--new-window', $authUrl)
+
+    $query = $null
+    try {
+        $deadline = (Get-Date).AddMinutes(5)
+        while (-not $query) {
+            if ((Get-Date) -gt $deadline) { throw 'Timed out (5 min) waiting for the sign-in redirect from Edge.' }
+            if (-not $tcp.Pending()) { Start-Sleep -Milliseconds 200; continue }
+            $client = $tcp.AcceptTcpClient()
+            try {
+                $stream      = $client.GetStream()
+                $reader      = New-Object System.IO.StreamReader($stream)
+                $requestLine = $reader.ReadLine()
+                $html   = '<html><body style="font-family:sans-serif"><h3>Sign-in complete.</h3>You can close this tab and return to PowerShell.</body></html>'
+                $writer = New-Object System.IO.StreamWriter($stream)
+                $writer.Write("HTTP/1.1 200 OK`r`nContent-Type: text/html`r`nContent-Length: $($html.Length)`r`nConnection: close`r`n`r`n$html")
+                $writer.Flush()
+                if ($requestLine -match '^GET /\?(\S+) HTTP') { $query = $Matches[1] }
+            } finally { $client.Close() }
+        }
+    } finally { $tcp.Stop() }
+
+    $kv = @{}
+    foreach ($pair in ($query -split '&')) {
+        $k, $v = $pair -split '=', 2
+        $kv[$k] = if ($null -ne $v) { [uri]::UnescapeDataString(($v -replace '\+', ' ')) } else { '' }
+    }
+    if ($kv['error'])             { throw "Sign-in failed: $($kv['error']) -- $($kv['error_description'])" }
+    if ($kv['state'] -ne $state)  { throw 'State mismatch on the loopback redirect -- the response did not come from this sign-in attempt. Close ALL browser windows and retry.' }
+    if (-not $kv['code'])         { throw 'Sign-in redirect carried no authorization code.' }
+
+    $tok = Invoke-RestMethod -Method POST -Uri "https://login.microsoftonline.com/$Tenant/oauth2/v2.0/token" -ContentType 'application/x-www-form-urlencoded' -Body @{
+        client_id     = $clientId
+        grant_type    = 'authorization_code'
+        code          = $kv['code']
+        redirect_uri  = $redirect
+        code_verifier = $verifier
+        scope         = (@($Scopes) -join ' ')
+    }
+    Connect-MgGraph -AccessToken (ConvertTo-SecureString $tok.access_token -AsPlainText -Force) -NoWelcome -ErrorAction Stop | Out-Null
+    Write-Host 'Connected via Edge sign-in (token valid ~1 hour).' -ForegroundColor Green
+}
+
+function Invoke-PaGraphConnect {
+    if ($UseEdge) {
+        Connect-MgGraphViaEdge -Scopes $_requiredScopes -Tenant $(if ($TenantId) { $TenantId } else { 'organizations' })
+    } else {
+        Connect-MgGraph @_connectArgs | Out-Null
+    }
+}
+
 $ctx = Get-MgContext -ErrorAction SilentlyContinue
 if (-not $ctx) {
-    Write-Host "Not connected to Microsoft Graph. Launching interactive sign-in (scopes: $($_requiredScopes -join ', '))..." -ForegroundColor Yellow
-    Connect-MgGraph -Scopes $_requiredScopes -NoWelcome -ErrorAction Stop | Out-Null
+    Write-Host "Not connected to Microsoft Graph. Launching sign-in (scopes: $($_requiredScopes -join ', '))..." -ForegroundColor Yellow
+    Invoke-PaGraphConnect
     $ctx = Get-MgContext -ErrorAction Stop
 }
 
 $missingScopes = $_requiredScopes | Where-Object { $_ -notin $ctx.Scopes }
+if ($missingScopes -and $ctx.TokenCredentialType -eq 'UserProvidedAccessToken') {
+    # Edge-flow and operator-provided tokens both land here: scope
+    # introspection is unreliable for provided tokens and re-connecting
+    # would discard the token -- trust it and let the actual Graph calls be
+    # the judge. (The Edge flow requested exactly $_requiredScopes itself.)
+    if (-not $UseEdge) {
+        Write-Host "Session uses a user-provided access token -- skipping scope verification (required: $($_requiredScopes -join ', '))." -ForegroundColor DarkYellow
+    }
+    $missingScopes = $null
+}
 if ($missingScopes) {
-    Write-Host "Current Graph session is missing required scopes: $($missingScopes -join ', '). Re-connecting interactively..." -ForegroundColor Yellow
-    Connect-MgGraph -Scopes $_requiredScopes -NoWelcome -ErrorAction Stop | Out-Null
+    Write-Host "Current Graph session is missing required scopes: $($missingScopes -join ', '). Re-connecting..." -ForegroundColor Yellow
+    Invoke-PaGraphConnect
     $ctx = Get-MgContext -ErrorAction Stop
     $stillMissing = $_requiredScopes | Where-Object { $_ -notin $ctx.Scopes }
-    if ($stillMissing) {
+    if ($stillMissing -and $ctx.TokenCredentialType -ne 'UserProvidedAccessToken') {
         throw "After re-connect, Graph session is STILL missing: $($stillMissing -join ', '). Admin consent may be required."
     }
 }
@@ -143,6 +276,45 @@ if ($TenantId -and $TenantId -ne $ctx.TenantId) {
     throw "Connected to tenant $($ctx.TenantId) but -TenantId says $TenantId. Reconnect with the correct -TenantId."
 }
 $TenantId = $ctx.TenantId
+
+# A cached context can outlive its ability to mint tokens (refresh token
+# expired/evicted, Conditional Access reauth policy). Without this probe, the
+# FIRST real Graph call mid-script triggers a surprise interactive sign-in --
+# which on managed servers often dies with MSAL's state-mismatch error (a
+# proxy / security product truncating the redirect URL). Validate up front
+# and reconnect cleanly instead.
+# The guidance shown whenever this host cannot complete browser auth.
+$_brokenAuthHelp = @"
+This host cannot complete the sign-in. Known causes + fixes, in order of likelihood:
+  1. Mixed Microsoft.Graph module versions (confirmed field cause of silent failures + MSAL 'state mismatch' loops): Get-InstalledModule Microsoft.Graph* -AllVersions -- remove old versions, start a FRESH PowerShell session, retry.
+  2. The system default browser is legacy Internet Explorer, which mangles the auth redirect. This script defaults to -UseEdge (launches Edge explicitly) to avoid that; if you passed -UseEdge:`$false, drop it. To fix the host itself: Settings > Default apps > set Microsoft Edge as default for HTTP/HTTPS.
+  3. Stale pending sign-in tabs answering the listener with an old state: close ALL browser windows, retry once.
+  4. Run this script from another machine where sign-in works (it only talks to Graph -- nothing tenant-side requires this host).
+  5. Pre-connect with an access token minted via Az PowerShell's WAM broker (native account picker, no browser involved):
+       Connect-AzAccount -TenantId <tenant-id>     # if it opens a browser instead of a native window: Update-AzConfig -EnableLoginByWam `$true
+       `$t = Get-AzAccessToken -ResourceUrl 'https://graph.microsoft.com'
+       `$sec = if (`$t.Token -is [securestring]) { `$t.Token } else { ConvertTo-SecureString `$t.Token -AsPlainText -Force }
+       Connect-MgGraph -AccessToken `$sec
+     then re-run this script in the same session.
+"@
+
+try {
+    Invoke-MgGraphRequest -Method GET -Uri 'v1.0/me?$select=id' | Out-Null
+} catch {
+    if ($ctx.TokenCredentialType -eq 'UserProvidedAccessToken' -and -not $UseEdge) {
+        throw ("The pre-connected access token was rejected: $($_.Exception.Message)`nProvided tokens expire after ~1 hour -- mint a fresh one and Connect-MgGraph -AccessToken again.")
+    }
+    Write-Host "Cached Graph session can no longer mint tokens -- reconnecting fresh..." -ForegroundColor Yellow
+    Disconnect-MgGraph -ErrorAction SilentlyContinue | Out-Null
+    try {
+        Invoke-PaGraphConnect
+        $ctx = Get-MgContext -ErrorAction Stop
+        $TenantId = $ctx.TenantId
+        Invoke-MgGraphRequest -Method GET -Uri 'v1.0/me?$select=id' | Out-Null
+    } catch {
+        throw ("Re-connect failed: $($_.Exception.Message)`n$_brokenAuthHelp")
+    }
+}
 
 Write-Host "Tenant   : $TenantId"  -ForegroundColor Cyan
 Write-Host "Signed-in: $($ctx.Account)" -ForegroundColor Cyan
@@ -168,7 +340,12 @@ function Assert-ActiveEntraRoles {
     try {
         $resp = Invoke-MgGraphRequest -Method GET -Uri 'v1.0/me/memberOf/microsoft.graph.directoryRole?$select=displayName,roleTemplateId'
     } catch {
-        # Best-effort: reading own role memberships can itself be blocked by
+        # Auth failures are NOT a skippable pre-flight problem -- every later
+        # Graph call will hit the same wall. Stop with reconnect guidance.
+        if ("$_" -match 'authentication failed|msal-statemismatcherror|invalid_grant|AADSTS') {
+            throw ("Graph authentication failed: $($_.Exception.Message)`n$_brokenAuthHelp")
+        }
+        # Best-effort otherwise: reading own role memberships can be blocked by
         # scope/tenant policy -- don't fail the deploy over the pre-flight.
         Write-Host "Pre-flight: could not read your active directory roles -- continuing without the check. ($($_.Exception.Message))" -ForegroundColor DarkYellow
         return

@@ -1,9 +1,10 @@
 # Release notes for PIM4EntraPS
 
-## v2.4.146
+## v2.4.147
 
 Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monorepo:
 
+- release: PIM4EntraPS v2.4.147 -- Deploy-PimActivatorBackend signs in through Edge by default (own auth-code+PKCE S256 flow on a loopback TcpListener with the first-party Graph CLI Tools app, token to Connect-MgGraph -AccessToken) because MSAL always launches the system-default browser and legacy IE on servers mangles the redirect into state-mismatch loops; Graph SDK version-conflict pre-flight (mixed Microsoft.Graph.* submodule versions = confirmed cause of silent-null cmdlets + broken token cache); version banner from solution VERSION file; post-connect /me probe reconnects dead cached sessions up front; -AccessToken pre-connects supported; device-code flow removed entirely (MS blocks globally). Loopback flow harness green on PS 5.1 + pwsh 7 (16762fda)
 - release: PIM4EntraPS v2.4.146 -- Deploy-PimActivatorBackend pre-flights ACTIVE Entra roles (app-admin family for app-reg/SP steps; PRA/GA when -GrantConsent) with PIM activate-then-reconnect guidance, fail-open if membership read is blocked; all SP reads/creates moved to raw Invoke-MgGraphRequest (GET servicePrincipals(appId=...) + POST) because New-MgServicePrincipal returned silent $null on a permission denial, breaking the v2.4.145 re-fetch with an empty-ServicePrincipalId bind. 12-case harness green on PS 5.1 + pwsh 7 (38f2fd0b)
 - release: PIM4EntraPS v2.4.145 -- Deploy-PimActivatorBackend auto-instantiates missing first-party SPs (Microsoft Graph 00000003 / Azure Service Management 797f4846) via New-MgServicePrincipal instead of throwing "should never happen"; fresh tenants only provision well-known Microsoft SPs on first use. Resolve-FirstPartySp helper re-fetches after create so Oauth2PermissionScopes is populated; create-failure throws SP name + appId + tenant + Graph error. Harness green on PS 5.1 + pwsh 7 (1c61fee8)
 - release: PIM4EntraPS v2.4.144 -- Manager PIM-WL-* validator rules (workload connector existence with did-you-mean, required RoleName, Assign/Remove action gate) + GroupTag FK coverage for PIM-Assignments-Workloads via PIM-FK-001; thorough Manager README rewrite (15-CSV model, six lifecycle tabs incl. Workload delegation panel, Rings, validator rule catalog, MSP instances, refreshed test plan) (f860d4f6)
@@ -33,7 +34,6 @@ Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monor
 - release: PIM4EntraPS v2.4.120 -- AD-create branch surfaces an explicit [ERROR] when CSV TierLevel is blank or not L0/L1 (previously: dangling 'Creating AD account' header with no New-ADUser call, no exception, no password file row, row silently dropped) (93e53c67)
 - release: PIM4EntraPS v2.4.119 -- engine imports AutomateITPS.AD + calls Resolve-PlatformGMSACredentials after Initialize-PlatformLegacyIdentity so KV stub passwords on gMSA Legacy.* slots get swapped for the real managed password read from the DC (gMSA msDS-ManagedPassword); the AD branch then auths normally via -Credential (3e002976)
 - release: PIM4EntraPS v2.4.118 -- AD branch: revert v2.4.117 gMSA -Credential omission; restore v1 always-pass-Credential contract (customer test on SYSTEM-running host proved dropping -Credential cascades through to computer-account auth which lacks write rights). Hard-fail Get-ADUser + conditional Write-PimAdminPassword improvements kept. (c766ed13)
-- release: PIM4EntraPS v2.4.117 -- CRITICAL fix: AD branch is now gMSA-aware (drops -Credential when SAM ends with $) + hard-fails Get-ADUser instead of swallowing auth errors that cascaded into Create + Write-PimAdminPassword writing phantom passwords for accounts that never existed (d76bccea)
 
 ---
 
@@ -42,6 +42,19 @@ Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monor
 > **Curated changelog.** The publish workflow auto-prepends recent monorepo commits as a raw activity log; this file is the human-friendly narrative on top.
 
 ---
+
+## v2.4.147 -- Activator backend deploy: sign-in through Edge by default + Graph SDK version-conflict pre-flight + version banner
+
+Field debugging on a server whose default browser is legacy Internet Explorer exposed the whole failure chain: MSAL's interactive flow always launches the SYSTEM DEFAULT browser (no way to choose), IE mangles the auth redirect, every Graph call re-prompts and dies with MSAL's 'state mismatch' -- and a stale Microsoft.Graph module version conflict on the same box made SDK cmdlets fail silently on top.
+
+- **Sign-in runs through Microsoft Edge by default** (`-UseEdge`, default ON; `-UseEdge:$false` reverts to MSAL's default-browser flow). The script runs the auth-code + PKCE (S256) flow itself against the same first-party "Microsoft Graph Command Line Tools" app Connect-MgGraph uses -- loopback `TcpListener` on an OS-assigned port (no HttpListener URL-ACL, works non-elevated), Edge launched explicitly on the authorize URL, state validated, token exchanged and handed to `Connect-MgGraph -AccessToken`. No extra app registration or consent.
+- **Graph SDK version-conflict pre-flight**: mixed `Microsoft.Graph.*` submodule versions loaded in one session (a stale install alongside a newer one) are the confirmed field cause of silent-`$null` cmdlets and broken token caching. The script now loads Authentication/Applications/Identity.SignIns, verifies they agree, prints the SDK version, and stops with cleanup guidance when they don't.
+- **Version banner**: every run prints `Deploy-PimActivatorBackend -- PIM4EntraPS v<x.y.z>` (reads the solution VERSION file) so operators can see at a glance which version a box runs.
+- **Session probe after connect**: a cached Graph context that can no longer mint tokens (expired refresh, CA reauth) is detected up front via a cheap `/me` call and reconnected cleanly -- previously the first real Graph call mid-run triggered a surprise interactive prompt.
+- Pre-connected `Connect-MgGraph -AccessToken` sessions are now supported (scope introspection skipped -- the calls themselves are the judge); auth failures in the pre-flight are fatal with a 5-option troubleshooting guide instead of fail-open.
+- **Device-code flow deliberately NOT offered anywhere** -- Microsoft blocks it globally via managed Conditional Access policies.
+
+Verified: parse-clean + harness driving the real loopback listener end-to-end (background HTTP hit: happy path incl. PKCE verifier round-trip + completion page, forged-state rejection, error-redirect surfacing AADSTS detail) green in real PS 5.1 **and** pwsh 7 processes.
 
 ## v2.4.146 -- Activator backend deploy: active-role pre-flight + raw Graph requests for SP work
 
