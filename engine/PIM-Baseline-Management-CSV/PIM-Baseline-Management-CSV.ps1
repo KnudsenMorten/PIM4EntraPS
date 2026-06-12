@@ -287,6 +287,16 @@ Write-Output "******************************************************************
 
 
 ######################################################################################################################
+# Config CSV schema auto-upgrade | LIFECYCLE-GOVERNANCE
+######################################################################################################################
+# Customer installs predate the lifecycle columns (ProvisionDate, TAP window,
+# PolicyTemplate, OffboardDate, ...). Append the missing columns with blank
+# values = default behavior = auto-approval; idempotent, runs before any CSV
+# is consumed.
+
+    Invoke-PimCsvSchemaUpgrade
+
+######################################################################################################################
 # AU | Administrative Units | Creation
 ######################################################################################################################
 
