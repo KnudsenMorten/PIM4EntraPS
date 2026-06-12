@@ -1,9 +1,10 @@
 # Release notes for PIM4EntraPS
 
-## v2.4.178
+## v2.4.179
 
 Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monorepo:
 
+- release: PIM4EntraPS v2.4.179 -- Manager + scenario functional test suites (68 assertions, rerunnable) (a7d01e49)
 - release: PIM4EntraPS v2.4.178 -- rerunnable functional test suite (40 pass/0 fail/6 live-skip) + cloud-native container engine documented in repo (98ffdb04)
 - release: PIM4EntraPS v2.4.177 -- true local engine + signed baseline courier (private-endpoint) + cross-tenant pull PROVEN + local autonomy (750c2ae0)
 - release: PIM4EntraPS v2.4.176 -- MSP+local simulation made real: local-store schema (pim.LocalAdmins/LocalResources Owner=Local, data-layer guardrail CK_LocalAdmins_NoHighPriv = tier-0 rejected at INSERT) + local-seed-demo; pim.CentralAdmins.Owner column (baseline=MSP); Invoke-PimMspSimulation.ps1 (two stores never linked, read each separately, in-memory merge = MSP fleet view + local-IT view + combined apply plan + guardrail proof); activator backend app-only deploy (_PimActivatorAuth cert sign-in path + Deploy-PimActivatorBackend -AppId/-CertificateThumbprint, SP-create retry through replication window). Lab-verified incl. genuine cross-tenant local store in a separate tenant sub (public+single-IP-firewall Entra-only as cross-tenant PE exemption); local-IT folder copy validates clean. VERSION->2.4.176. (f03187aa)
@@ -33,7 +34,6 @@ Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monor
 - release: PIM4EntraPS v2.4.152 -- docs/LIFECYCLE-GOVERNANCE.md: architecture for the 13 lifecycle/governance features (shared date-expression resolver; ProvisionDate scheduled admin creation incl. the forwarded-TAP-mail dependency scenario; TAP windows via TAPStartDate expressions + TAPLifetimeHours with near-window deferred creation + one GUI fieldset; admin templates w/ variables; ring-move actions; mail templates; policy templates w/ PolicyTemplate link + hash re-apply; Owners-driven parallel/serial approvals; KV-passphrase emergency override w/ TTL restore; OffboardDate/DeleteAfterDays/Lifecycle=Retire offboarding + drift cleanup; unified jsonl audit; Reader/Admin/SuperAdmin manager RBAC + Governance tab; resource auto-discovery Off/Portal/Engine). 9 dependency-ordered phases (c9a37c61)
 - release: PIM4EntraPS v2.4.151 -- Show-PimActivatorBanner troubleshooting header in all three deploy scripts (script + solution version, verified Graph SDK version, optional Az module versions, PS runtime+edition; Client uses GraphOptional soft mode + standalone-copy guard; fixed @($null) AzModules expansion crashing Get-Module on pwsh 7); ADMX ingestion pre-upload now sweeps ALL rows matching fileName OR targetNamespace (half-removed ghost rows keep owning the namespace -> Intune mangles targetPrefix to pimactivator<rowId> and nulls the ingest) and waits 60s for namespace release before upload/retry (10s demonstrably too short; live run went green on attempt 2 after full remove+settle). Harness 13 checks green PS 5.1 + pwsh 7 (71841415)
 - release: PIM4EntraPS v2.4.150 -- Intune deploy: forcelist conflict no longer aborts (per-browser Not-configured skip, exact setting names printed at [SKIP] for manual re-enable, -Force now means write-everything); session-role pre-check via token wids claim with one automatic disconnect+re-auth when the PIM activation postdates the token (backend hard-stop on app-admin family + PRA for consent, Intune soft-fail for scoped RBAC); ADMX ingestion retries once after removing a failed row and stops fatally on double failure instead of limping to a confusing later crash; docs scrub of customer-identifying details and captured console output across RELEASENOTES/README/popup.js. Harness 15+13 checks green PS 5.1 + pwsh 7 (0ecb3032)
-- release: PIM4EntraPS v2.4.149 -- Deploy-PimActivatorIntune gets the v2.4.147/148 auth hardening via new shared _PimActivatorAuth.ps1 (Connect-PimActivatorGraph full sequence: Edge-mode cached-MSAL discard, Edge-PKCE/MSAL sign-in, provided-token scope bypass, TenantId enforcement, /me probe auto-heal; Connect-MgGraphViaEdge; parameterized Assert-GraphModuleVersions; version banner + broken-auth help). Intune script: -UseEdge default ON, banner, all conditional scopes (Organization.Read.All/Application.Read.All) requested up front since Edge tokens cannot scope-escalate mid-run; old mid-run reconnect kept as MSAL-only safety net. Backend slims to dot-source, behavior identical. 17-check harness green PS 5.1 + pwsh 7 (7ac2c838)
 
 ---
 
@@ -42,6 +42,15 @@ Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monor
 > **Curated changelog.** The publish workflow auto-prepends recent monorepo commits as a raw activity log; this file is the human-friendly narrative on top.
 
 ---
+
+## v2.4.179 -- Manager + scenario test suites (68 assertions total, rerunnable)
+
+Expanded the rerunnable functional test suite to cover the Manager and real scenarios (you asked for "functional test all features in engine and manager", with examples like create-admin-with-schedule+TAP, duplicate role, high-role approval):
+
+- **`tests/Test-PimManagerEndpoints.ps1`** -- boots the Manager (`Open-PimManager.ps1 -Server -NoLaunch`) headless, captures the session bearer token, and probes the HTTP server over real 127.0.0.1: **14 PASS** -- 401 without the token, then 200 + valid JSON from `/api/config, access, license, audit, mail-templates, admin-templates, templates, naming-conventions, emergency-status, resolve-date, instances, preflight`.
+- **`tests/Test-PimScenarios.ps1`** -- **14 PASS** -- validator negative scenarios calibrated to the REAL rule codes (PIM-FK-* dangling assignment + undefined admin, **PIM-TAP-002** TAP lifetime >720h, **PIM-SCHED-002** TAP window opens before ProvisionDate, PIM-SCHED-001 unparseable date, **PIM-DUP-001** admin reaching one target via two role-group paths, clean config = zero errors) plus lifecycle positives (create-admin-with-schedule resolves a future UTC date; TAP `@08:00`; consultant + new-employee templates) and the approval scenario (approval-required template enables approval; escalation mail renders; Serial rotation precondition).
+- **`tests/Run-AllPimTests.ps1`** -- one-shot runner (each suite in a clean child process). Total **68 assertions** across engine (40) + Manager (14) + scenarios (14), all green; live Graph/SQL write paths SKIP with reasons.
+- **Fix:** the earlier validator assertions read the wrong shape -- `Invoke-PimPreflightValidation` returns `@{ violations = [...] }`; tests now read `.violations` (the old form was a false pass). VERSION -> 2.4.179.
 
 ## v2.4.178 -- rerunnable functional test suite + cloud-native container engine (documented in repo)
 
