@@ -33,23 +33,40 @@
 param(
     [string]$CentralServer,
     [string]$LocalServer,
-    [string]$TenantName = 'Demo Ring2 Lab A'
+    [string]$TenantName = 'Demo Ring2 Lab A',
+    # Cross-tenant local store (the real § 19 placement): the customer store
+    # lives in the customer's own tenant, so it needs that tenant's own token.
+    # Supply the local engine SPN to mint a separate local-store token; omit to
+    # use the current Az context for both (same-tenant lab).
+    [string]$LocalTenantId,
+    [string]$LocalAppId,
+    [string]$LocalThumbprint = '50F3106D437C87374CACB28D47E8DEADB9BC0FE1'
 )
 
 $ErrorActionPreference = 'Stop'
 Import-Module SqlServer -ErrorAction Stop
 
 if (-not $CentralServer) { $CentralServer = (Get-Content C:\TMP\pim-sqlserver-name.txt -Raw).Trim() + '.database.windows.net' }
-if (-not $LocalServer)   { $LocalServer   = (Get-Content C:\TMP\pim-localsql-name.txt -Raw).Trim() + '.database.windows.net' }
 
-function Get-PimSqlToken {
-    $t = (Get-AzAccessToken -ResourceUrl 'https://database.windows.net/').Token
-    if ($t -is [securestring]) { $t = [System.Net.NetworkCredential]::new('', $t).Password }
-    $t
+function ConvertTo-PlainToken($t) { if ($t -is [securestring]) { [System.Net.NetworkCredential]::new('', $t).Password } else { $t } }
+
+# Capture the CENTRAL (MSP) token from the current context first.
+$script:CentralToken = ConvertTo-PlainToken (Get-AzAccessToken -ResourceUrl 'https://database.windows.net/').Token
+
+# Mint the LOCAL (customer-tenant) token separately when cross-tenant params given.
+if ($LocalAppId -and $LocalTenantId) {
+    Connect-AzAccount -ServicePrincipal -ApplicationId $LocalAppId -CertificateThumbprint $LocalThumbprint -Tenant $LocalTenantId -ErrorAction Stop | Out-Null
+    $script:LocalToken = ConvertTo-PlainToken (Get-AzAccessToken -ResourceUrl 'https://database.windows.net/').Token
+    if (-not $LocalServer) { $LocalServer = (Get-AzSqlServer -ResourceGroupName 'rg-pim-local' | Select-Object -First 1).ServerName + '.database.windows.net' }
+} else {
+    $script:LocalToken = $script:CentralToken
+    if (-not $LocalServer) { throw "Provide -LocalServer (same-context) or -LocalAppId/-LocalTenantId (cross-tenant)." }
 }
+
 function Invoke-PimRead {
     param([string]$Server, [string]$Db, [string]$Query)
-    Invoke-Sqlcmd -ServerInstance $Server -Database $Db -AccessToken (Get-PimSqlToken) -Encrypt Mandatory -Query $Query -QueryTimeout 60
+    $tok = if ($Server -eq $CentralServer) { $script:CentralToken } else { $script:LocalToken }
+    Invoke-Sqlcmd -ServerInstance $Server -Database $Db -AccessToken $tok -Encrypt Mandatory -Query $Query -QueryTimeout 60
 }
 
 Write-Host ""
@@ -94,7 +111,8 @@ $tenant = $fleet | Where-Object { $_.DisplayName -eq $TenantName } | Select-Obje
 $tenantRing = if ($tenant) { [int]$tenant.Ring } else { 2 }
 Write-Host ""
 Write-Host "--- MERGED ENGINE PLAN for $TenantName (ring $tenantRing) --------------" -ForegroundColor Yellow
-Write-Host "  (MSP baseline where adminRing <= tenantRing)  +  (all Owner=Local rows)"
+Write-Host "  All of these are CREATED IN THE LOCAL TENANT by the local engine run:"
+Write-Host "  the MSP central admins (from the pulled baseline) + the local-owned admins."
 $mspReaching = @($baseline | Where-Object { [int]$_.Ring -le $tenantRing })
 foreach ($r in $mspReaching) { Write-Host ("    MSP   {0,-20} {1,-9} (read-only to local IT)" -f $r.UserName, $r.Purpose) -ForegroundColor DarkGray }
 foreach ($r in $localAdmins) { Write-Host ("    LOCAL {0,-20} {1,-9} (managed by local IT)" -f $r.UserName, $r.Purpose) }
@@ -102,18 +120,19 @@ $total = $mspReaching.Count + @($localAdmins).Count
 Write-Host "  => $total admin objects apply to this tenant ($($mspReaching.Count) MSP + $(@($localAdmins).Count) local), zero namespace overlap."
 
 # ---------------------------------------------------------------------------
-# Boundary proof: the local store is structurally incapable of tier-0.
+# Ownership = separation, NOT gatekeeping. Local IT is autonomous in its own
+# store (may create any Purpose, incl. privileged, with no MSP request). The
+# Owner tag is provenance: Owner=MSP rows are refreshed on each baseline pull
+# (so they aren't hand-edited locally), Owner=Local rows are the customer's.
 # ---------------------------------------------------------------------------
 Write-Host ""
-Write-Host "--- OWNERSHIP BOUNDARY (data-layer guardrail) --------------------------" -ForegroundColor Yellow
-try {
-    Invoke-Sqlcmd -ServerInstance $LocalServer -Database 'PimLocal' -AccessToken (Get-PimSqlToken) -Encrypt Mandatory -QueryTimeout 30 `
-        -Query "INSERT INTO pim.LocalAdmins (UserName,DisplayName,Purpose) VALUES (N'Admin-SIM-L0-T0-ID',N'sim tier0 attempt',N'HighPriv')" -ErrorAction Stop
-    Write-Host "  UNEXPECTED: local IT created a HighPriv admin -- guardrail FAILED" -ForegroundColor Red
-} catch {
-    Write-Host "  Local IT attempt to create a tier-0 (HighPriv) admin was REJECTED at INSERT" -ForegroundColor Green
-    Write-Host "  by CK_LocalAdmins_NoHighPriv -- tier-0 is Owner=MSP and unreachable locally." -ForegroundColor Green
-}
+Write-Host "--- OWNERSHIP SEPARATION (provenance, not a gate) ----------------------" -ForegroundColor Yellow
+$mspOwned   = @($baseline).Count
+$localOwned = @($localAdmins).Count
+Write-Host "  Owner=MSP rows (pulled-down baseline, refreshed each pull): $mspOwned"
+Write-Host "  Owner=Local rows (customer-managed, fully autonomous):      $localOwned"
+Write-Host "  Local IT may create ANY Purpose in their store (no MSP approval); the"
+Write-Host "  baseline is additive standards on top -- the two stores are never linked."
 
 Write-Host ""
 Write-Host "Simulation complete (read-only). The two stores were never linked; the merge" -ForegroundColor Cyan
