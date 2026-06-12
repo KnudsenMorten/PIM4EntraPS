@@ -154,8 +154,7 @@ $ErrorActionPreference = 'Stop'
 # Edge-forced PKCE sign-in, session probe/heal.
 . (Join-Path $PSScriptRoot '_PimActivatorAuth.ps1')
 
-Write-Host "Deploy-PimActivatorIntune -- PIM4EntraPS $(Get-PimActivatorSolutionVersion)" -ForegroundColor Cyan
-Write-Host "Graph SDK  : v$(Assert-GraphModuleVersions)" -ForegroundColor Cyan
+Show-PimActivatorBanner -ScriptName 'Deploy-PimActivatorIntune' -GraphModules 'Microsoft.Graph.Authentication'
 
 # ---- 1. Graph context -----------------------------------------------------
 # Request EVERY scope this run can need up front. The Edge flow's token
@@ -336,17 +335,28 @@ if (-not $Remove) {
 $admxPath  = Join-Path $PSScriptRoot 'intune\PIM4EntraPS.PimActivator.admx'
 $admlPath  = Join-Path $PSScriptRoot 'intune\en-US\PIM4EntraPS.PimActivator.adml'
 $admxFileName = if (Test-Path -LiteralPath $admxPath) { Split-Path -Leaf $admxPath } else { 'PIM4EntraPS.PimActivator.admx' }
-$admxListUri  = "https://graph.microsoft.com/beta/deviceManagement/groupPolicyUploadedDefinitionFiles?`$filter=fileName eq '$admxFileName'"
-$admxRow = $null
+$admxTargetNamespace = 'MortenKnudsen.PIM4EntraPS.PimActivator'
+# v2.4.151: list ALL uploaded definition files and match by fileName OR
+# targetNamespace. A half-removed ghost row can keep OWNING the namespace
+# while no longer matching a fileName filter -- Intune then mangles the new
+# row's targetPrefix (observed live as 'pimactivator<rowId>') and the ingest
+# fails with every field nulled.
+$admxRows = @()
 try {
-    $admxResp = Invoke-MgGraphRequest -Method GET -Uri $admxListUri -ErrorAction Stop
-    if ($admxResp.value) { $admxRow = $admxResp.value | Select-Object -First 1 }
+    $admxResp = Invoke-MgGraphRequest -Method GET -Uri 'https://graph.microsoft.com/beta/deviceManagement/groupPolicyUploadedDefinitionFiles' -ErrorAction Stop
+    $allAdmx = @($admxResp.value)
+    while ($admxResp.'@odata.nextLink') {
+        $admxResp = Invoke-MgGraphRequest -Method GET -Uri $admxResp.'@odata.nextLink' -ErrorAction Stop
+        $allAdmx += $admxResp.value
+    }
+    $admxRows = @($allAdmx | Where-Object { $_.fileName -eq $admxFileName -or $_.targetNamespace -eq $admxTargetNamespace })
 } catch {
     Write-Warning "ADMX lookup failed (will still try upload): $($_.Exception.Message)"
 }
 
-if ($admxRow -and $admxRow.status -in @('available','uploadCompleted')) {
-    Write-Host "ADMX '$admxFileName' already ingested (status=$($admxRow.status), id=$($admxRow.id)). Skipping upload." -ForegroundColor Gray
+$availableRow = $admxRows | Where-Object { $_.status -in @('available', 'uploadCompleted') } | Select-Object -First 1
+if ($availableRow) {
+    Write-Host "ADMX '$admxFileName' already ingested (status=$($availableRow.status), id=$($availableRow.id)). Skipping upload." -ForegroundColor Gray
 } else {
     if (-not (Test-Path -LiteralPath $admxPath)) { throw "ADMX file not found at '$admxPath' -- can't auto-ingest. Place the .admx + .adml pair under .\intune\ next to this script." }
     if (-not (Test-Path -LiteralPath $admlPath)) { throw "ADML file not found at '$admlPath' -- can't auto-ingest." }
@@ -355,18 +365,25 @@ if ($admxRow -and $admxRow.status -in @('available','uploadCompleted')) {
     $admxBase64 = [Convert]::ToBase64String($admxBytes)
     $admlBase64 = [Convert]::ToBase64String($admlBytes)
     $admlFileName = Split-Path -Leaf $admlPath
-    # If a stale row exists (failed / transient), /remove first.
-    if ($admxRow) {
-        Write-Host "Existing ADMX row in non-available state '$($admxRow.status)' -- removing before re-upload..." -ForegroundColor Yellow
-        try { Invoke-MgGraphRequest -Method POST -Uri "https://graph.microsoft.com/beta/deviceManagement/groupPolicyUploadedDefinitionFiles/$($admxRow.id)/remove" -ErrorAction Stop | Out-Null } catch { Write-Warning "/remove failed: $($_.Exception.Message)" }
-        $rmDeadline = (Get-Date).AddMinutes(2)
+    # Remove EVERY stale row claiming our fileName / namespace and wait for
+    # each to fully disappear, then give the service time to release the
+    # namespace -- uploading while a ghost still holds it reproduces the
+    # nulled-row uploadFailed.
+    foreach ($row in $admxRows) {
+        Write-Host "Existing ADMX row in non-available state '$($row.status)' (id $($row.id)) -- removing before re-upload..." -ForegroundColor Yellow
+        try { Invoke-MgGraphRequest -Method POST -Uri "https://graph.microsoft.com/beta/deviceManagement/groupPolicyUploadedDefinitionFiles/$($row.id)/remove" -ErrorAction Stop | Out-Null } catch { Write-Warning "/remove failed: $($_.Exception.Message)" }
+        $rmDeadline = (Get-Date).AddMinutes(3)
         do {
-            Start-Sleep -Seconds 3
+            Start-Sleep -Seconds 5
             try {
-                $chk = Invoke-MgGraphRequest -Method GET -Uri "https://graph.microsoft.com/beta/deviceManagement/groupPolicyUploadedDefinitionFiles/$($admxRow.id)" -ErrorAction Stop
+                $chk = Invoke-MgGraphRequest -Method GET -Uri "https://graph.microsoft.com/beta/deviceManagement/groupPolicyUploadedDefinitionFiles/$($row.id)" -ErrorAction Stop
                 Write-Host "  status: $($chk.status)" -ForegroundColor Gray
-            } catch { if ($_.Exception.Message -match '404|NotFound') { break } else { Write-Warning $_.Exception.Message; break } }
+            } catch { break }   # 404 = fully gone
         } while ((Get-Date) -lt $rmDeadline)
+    }
+    if ($admxRows) {
+        Write-Host 'Letting the Intune service release the ADMX namespace (60s)...' -ForegroundColor Gray
+        Start-Sleep -Seconds 60
     }
     Write-Host "Uploading ADMX ($($admxBytes.Length) bytes) + ADML ($($admlBytes.Length) bytes)..." -ForegroundColor Cyan
     # v2.4.107: explicit @odata.type discriminators on both the outer entity
@@ -393,7 +410,7 @@ if ($admxRow -and $admxRow.status -in @('available','uploadCompleted')) {
         fileName                          = $admxFileName
         languageCodes                     = @('en-US')
         targetPrefix                      = 'pimactivator'
-        targetNamespace                   = 'MortenKnudsen.PIM4EntraPS.PimActivator'
+        targetNamespace                   = $admxTargetNamespace
         policyType                        = 'admxIngested'
         revision                          = '1.0'
         content                           = $admxBase64
@@ -471,7 +488,8 @@ if ($admxRow -and $admxRow.status -in @('available','uploadCompleted')) {
             try { Invoke-MgGraphRequest -Method GET -Uri "https://graph.microsoft.com/beta/deviceManagement/groupPolicyUploadedDefinitionFiles/$($admxResult.Row.id)" -ErrorAction Stop | Out-Null }
             catch { break }   # 404 = corpse gone
         } while ((Get-Date) -lt $rmDeadline2)
-        Start-Sleep -Seconds 10
+        Write-Host 'Letting the Intune service release the ADMX namespace (60s)...' -ForegroundColor Gray
+        Start-Sleep -Seconds 60
         $admxResult = Invoke-PaAdmxUploadOnce -Body $admxBody -Attempt 2
     }
     if (-not $admxResult.Ok) {

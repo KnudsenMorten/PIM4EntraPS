@@ -140,6 +140,15 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
+# Troubleshooting banner (script + solution + module + PS versions). Guarded:
+# this script is sometimes copied to a client box standalone, without the
+# sibling _PimActivatorAuth.ps1 -- skip the banner rather than break.
+$_authLib = Join-Path $PSScriptRoot '_PimActivatorAuth.ps1'
+if (Test-Path $_authLib) {
+    . $_authLib
+    Show-PimActivatorBanner -ScriptName 'Deploy-PimActivatorClient' -GraphModules 'Microsoft.Graph.Authentication' -GraphOptional
+}
+
 # HKLM requires admin. Fail fast with a clear message instead of letting
 # New-Item fault out mid-write with an opaque registry-permission error.
 if ($Scope -eq 'Machine') {
