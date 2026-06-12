@@ -3,6 +3,12 @@
   "name": "Microsoft Defender XDR (Unified RBAC)",
   "auth": "graph",
   "permissionsNeeded": ["RoleManagement.Read.Defender (list)", "RoleManagement.ReadWrite.Defender (apply)"],
+  "prerequisites": {
+    "activateUnifiedRbac": "MANUAL, one-time, per tenant. Microsoft Defender XDR Unified RBAC must be activated before any roleAssignment works: Defender portal (security.microsoft.com) > Settings > Permissions > Roles > 'Activate Microsoft Defender XDR Unified RBAC', toggling the workloads on. Until then roleDefinitions/roleAssignments return 403 Forbidden.",
+    "noGraphActivationEndpoint": "Probed 2026-06-12: there is NO public Microsoft Graph / security endpoint to activate Unified RBAC. /roleManagement/defender (container) 404s; /security/settings 400s. Working RBAC endpoints once active: /beta/roleManagement/defender/roleDefinitions, /roleAssignments, /resourceNamespaces. So activation cannot be automated via Graph -- it stays a documented portal prerequisite.",
+    "rolesAreBuiltInOrCustom": "PIM groups bind to Defender roles by displayName via listRoles. Use built-in Defender roles, or create custom roles whose displayName matches the PIM group (production convention: one custom role per PIM-Defender-XDR-* group). Create custom roles before assign.",
+    "note": "Make customer tenants IDENTICAL by shipping the same PIM-Assignments-Workloads desired-state once activation is done + the engine SPN holds RoleManagement.ReadWrite.Defender."
+  },
   "api": {
     "baseUrl": "https://graph.microsoft.com/beta",
     "listRoles": {

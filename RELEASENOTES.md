@@ -1,9 +1,10 @@
 # Release notes for PIM4EntraPS
 
-## v2.4.179
+## v2.4.180
 
 Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monorepo:
 
+- release: PIM4EntraPS v2.4.180 -- entra-roles workload connector (live-tested: 145 directory roles) + activation prereqs (Intune always-on; Defender Unified RBAC = portal activation, no Graph endpoint) + app catalog (120 apps by mechanism) + 100 PIM use-cases (60b72237)
 - release: PIM4EntraPS v2.4.179 -- Manager + scenario functional test suites (68 assertions, rerunnable) (a7d01e49)
 - release: PIM4EntraPS v2.4.178 -- rerunnable functional test suite (40 pass/0 fail/6 live-skip) + cloud-native container engine documented in repo (98ffdb04)
 - release: PIM4EntraPS v2.4.177 -- true local engine + signed baseline courier (private-endpoint) + cross-tenant pull PROVEN + local autonomy (750c2ae0)
@@ -33,7 +34,6 @@ Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monor
 - release: PIM4EntraPS v2.4.153 -- lifecycle phase 1: shared date-expression resolver (PIM-DateExpression.ps1: Now/FirstDayNextMonth/FirstWorkdayNextMonth/FirstDayNextWeek/FirstWorkdayNextWeek +/-Nd @HH:mm, yyyy-MM-dd[@HH:mm]; legacy-parser + cast fallback; UTC); ProvisionDate scheduled creation (engine skips row until resolved time -- forwarded-TAP-mail scenario); TAPLifetimeHours + TAP creation deferred to within PIM_TapCreateLeadHours (48h) of the start window via idempotent Invoke-PimTapProvisioning (tap-state.json, runs in create AND update branches); Manager onboarding groups TAP fields into one fieldset with live /api/resolve-date previews (UsageLocation moved out); grid bulk Move-to-ring with lowered-ring warning; validators PIM-SCHED-001/002 + PIM-TAP-002; sample CSV updated. 44-check harness green PS 5.1 + pwsh 7; both HTML script blocks pass node --check (77223207)
 - release: PIM4EntraPS v2.4.152 -- docs/LIFECYCLE-GOVERNANCE.md: architecture for the 13 lifecycle/governance features (shared date-expression resolver; ProvisionDate scheduled admin creation incl. the forwarded-TAP-mail dependency scenario; TAP windows via TAPStartDate expressions + TAPLifetimeHours with near-window deferred creation + one GUI fieldset; admin templates w/ variables; ring-move actions; mail templates; policy templates w/ PolicyTemplate link + hash re-apply; Owners-driven parallel/serial approvals; KV-passphrase emergency override w/ TTL restore; OffboardDate/DeleteAfterDays/Lifecycle=Retire offboarding + drift cleanup; unified jsonl audit; Reader/Admin/SuperAdmin manager RBAC + Governance tab; resource auto-discovery Off/Portal/Engine). 9 dependency-ordered phases (c9a37c61)
 - release: PIM4EntraPS v2.4.151 -- Show-PimActivatorBanner troubleshooting header in all three deploy scripts (script + solution version, verified Graph SDK version, optional Az module versions, PS runtime+edition; Client uses GraphOptional soft mode + standalone-copy guard; fixed @($null) AzModules expansion crashing Get-Module on pwsh 7); ADMX ingestion pre-upload now sweeps ALL rows matching fileName OR targetNamespace (half-removed ghost rows keep owning the namespace -> Intune mangles targetPrefix to pimactivator<rowId> and nulls the ingest) and waits 60s for namespace release before upload/retry (10s demonstrably too short; live run went green on attempt 2 after full remove+settle). Harness 13 checks green PS 5.1 + pwsh 7 (71841415)
-- release: PIM4EntraPS v2.4.150 -- Intune deploy: forcelist conflict no longer aborts (per-browser Not-configured skip, exact setting names printed at [SKIP] for manual re-enable, -Force now means write-everything); session-role pre-check via token wids claim with one automatic disconnect+re-auth when the PIM activation postdates the token (backend hard-stop on app-admin family + PRA for consent, Intune soft-fail for scoped RBAC); ADMX ingestion retries once after removing a failed row and stops fatally on double failure instead of limping to a confusing later crash; docs scrub of customer-identifying details and captured console output across RELEASENOTES/README/popup.js. Harness 15+13 checks green PS 5.1 + pwsh 7 (0ecb3032)
 
 ---
 
@@ -42,6 +42,14 @@ Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monor
 > **Curated changelog.** The publish workflow auto-prepends recent monorepo commits as a raw activity log; this file is the human-friendly narrative on top.
 
 ---
+
+## v2.4.180 -- workload connectors: entra-roles (live-tested) + activation prereqs + app catalog + 100 PIM use-cases
+
+- **`entra-roles` workload connector** (new) -- binds a role-assignable PIM group to an Entra **directory role** (`/roleManagement/directory`). **Live-tested in prod**: listed 145 directory roles through the connector. Works with the existing Graph adapter; only `RoleManagement.ReadWrite.Directory` needed.
+- **Activation prerequisites recorded** on the connectors after probing a live tenant: **Intune** RBAC is always on (10 built-in roles, no activation; `DeviceManagementRBAC.ReadWrite.All`); **Defender XDR** Unified RBAC must be activated in the portal first -- **there is no public Graph endpoint** to activate it (`/roleManagement/defender` container 404s, `/security/settings` 400s) -- then `RoleManagement.ReadWrite.Defender`. The engine already applies on its run (`PIM-Baseline-Management-CSV.ps1` → `Apply-PimWorkloadAssignments`, opt-in by `PIM-Assignments-Workloads.custom.csv`, WhatIf, idempotent); the 403s in test tenants were missing prereqs, not engine gaps.
+- **`docs/ENTRA-GROUP-APP-CATALOG.md`** -- 120 Microsoft + third-party apps that consume Entra groups, classified by mechanism (RBAC-API connector / app-role / SCIM / claim / licensing) so "100+ apps" reduces to a handful of connector patterns (per-workload RBAC connectors + one generic `entra-approle` + standard SCIM/claim).
+- **`docs/PIM-USECASES.md`** -- 100 just-in-time activation scenarios (finance editing the chart of accounts, HR restructuring the org, SecOps live-response, etc.) showing the eligible→activate→expire pattern per workload.
+- Sample `PIM-Assignments-Workloads.custom.sample.csv` refreshed to real Defender + Intune built-in-role shapes. VERSION -> 2.4.180.
 
 ## v2.4.179 -- Manager + scenario test suites (68 assertions total, rerunnable)
 

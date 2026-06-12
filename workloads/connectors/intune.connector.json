@@ -3,6 +3,9 @@
   "name": "Microsoft Intune (RBAC roles)",
   "auth": "graph",
   "permissionsNeeded": ["DeviceManagementRBAC.Read.All (list)", "DeviceManagementRBAC.ReadWrite.All (apply)"],
+  "prerequisites": {
+    "noActivationNeeded": "Intune RBAC is ALWAYS on -- no activation prerequisite. The built-in roles are always present (verified 2026-06-12: /beta/deviceManagement/roleDefinitions?$filter=isBuiltIn eq true returns Endpoint Security Manager, Application Manager, Endpoint Privilege Manager, Read Only Operator, School Administrator, Help Desk Operator, Endpoint Privilege Reader, Policy and Profile manager, Intune Role Administrator, Multi Admin Approval Policy Manager). Bind PIM groups directly via /deviceManagement/roleAssignments; only DeviceManagementRBAC.ReadWrite.All is required."
+  },
   "api": {
     "baseUrl": "https://graph.microsoft.com/beta",
     "listRoles": {
