@@ -103,6 +103,19 @@
 
 
 # ===========================================================================
+# Redirect-all override (test / lab visibility)
+# ===========================================================================
+#
+# When set, EVERY mail the engine sends (templated lifecycle mail + TAP
+# delivery) goes to this one address instead of its real recipient -- so an
+# operator can watch the entire mail flow from a single mailbox. The original
+# recipient is logged and surfaced in the template token set ({RedirectedFrom}),
+# never silently dropped. Leave unset/blank in production.
+#
+# $global:PIM_MailRedirectAllTo = 'mailflow-watch@contoso.com'
+
+
+# ===========================================================================
 # WhatIf semantics
 # ===========================================================================
 #

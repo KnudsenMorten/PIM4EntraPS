@@ -228,6 +228,26 @@ All engine and Manager transactions converge on **`output/audit/pim-audit-<yyyyM
 
 Phase order optimizes for dependency flow (templates before policies before approvals before emergency) and for the operator's immediate scenario (scheduling + TAP windows first).
 
+## 13a. Two-plane network topology — admin plane vs self-service plane (agreed + partially built)
+
+The Manager/SQL and the self-service portal occupy **two separate network planes**, matching their trust levels. This is the agreed hosting architecture for both on-prem and Azure deployments.
+
+**Admin plane (tight)** — operators only:
+- PIM **Manager + SQL co-located** in the same network so the interface can be clamped to a narrow source list (jumphosts / PAWs).
+- Both **private-endpoint-only, public network access disabled**. SQL is **Entra-only auth** (no SQL logins). Manager↔SQL traffic stays within the private-endpoint subnet.
+- Manager inbound restricted to admin source ranges (management / PAW / SAW subnets).
+
+**Self-service plane (broad)** — business users:
+- A **separate** app, reachable from the whole internal range, also **private-endpoint-only (never public)**.
+- **No Graph write permission and no write path to the authoritative tables.** It (a) reads a curated catalog of what each delegation unit may request, and (b) writes **signed requests** only. The admin-plane intake processor pulls and validates them (§15). Data flow is one-directional: `self-service → request store → (pull) → admin plane → engine → Entra`. Even fully compromised, it can only *request* template-shaped, in-scope changes that still pass approval.
+
+**Built reference (this environment, sub `sg-platform-sponsorship-mvp`, westeurope):**
+- Admin Manager host = App Service `app-pim-manager-*` (`publicNetworkAccess=Disabled`), private endpoint in `vnet-platform/pim-pe` (10.100.20.0/24), inbound access-restricted to 10.100.2.0/24 (management) + 10.100.8.0/24 (PAW) + 10.100.9.0/24 (SAW) + implicit deny-all.
+- Registry SQL = `sql-pimplatform-we*` (serverless GP_S_Gen5_1, **Entra-only**, **public disabled**), private endpoint in the same `pim-pe` subnet; `privatelink.database.windows.net` zone linked to the VNet.
+- Self-service app = a second App Service (private endpoint in a dedicated `pim-selfservice-pe` subnet, broad internal allow) — built later with the §18 delegation work.
+
+**DNS caveat (important for private endpoints):** this VNet uses **custom DNS** (domain controllers `10.100.1.4/.5`), which do not resolve the Azure `privatelink.*` zones. Production fix = a **conditional forwarder** (or **Azure DNS Private Resolver**) on the DCs sending `database.windows.net` / `azurewebsites.net` to `168.63.129.16` so the private zones resolve VNet-wide. Until then, the management host uses **hosts-file entries** to the private-endpoint IPs for bootstrap/testing.
+
 ## 14. Access reviews — business-driven extend/remove (design, phase 10)
 
 **The circularity problem**: Entra Access Review auto-apply removes a member in Entra, but the CSV is the source of truth — the engine re-delegates on the next run (and the phase-5 drift cleanup actively enforces CSV-wins). Native auto-apply is fundamentally incompatible with a declarative engine.

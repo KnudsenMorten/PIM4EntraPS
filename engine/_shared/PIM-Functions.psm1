@@ -10974,6 +10974,20 @@ function Send-PimTemplatedMail {
 
     $result = @{ Sent = @(); Failed = @(); Errors = @{}; TemplateUsed = $null }
 
+    # Global recipient override (test/lab visibility). When
+    # $global:PIM_MailRedirectAllTo is set, EVERY mail goes there instead of
+    # its real recipient -- so an operator can watch the full mail flow from a
+    # single mailbox. The original recipient is surfaced in the token set and
+    # the log line; never silently dropped.
+    if ($global:PIM_MailRedirectAllTo -and "$($global:PIM_MailRedirectAllTo)".Trim()) {
+        $_redir = "$($global:PIM_MailRedirectAllTo)".Trim()
+        if ($Recipient -and $Recipient -ne $_redir) {
+            Write-Host "  [Mail] redirect override: '$Recipient' -> $_redir" -ForegroundColor DarkYellow
+            $Tokens = @{} + $Tokens; $Tokens['RedirectedFrom'] = $Recipient
+        }
+        $Recipient = $_redir
+    }
+
     $tplPath = Get-PimMailTemplate -Type $Type
     if (-not $tplPath) {
         Write-Warning "  [Mail] no template for type '$Type' under templates\mail -- nothing sent."
@@ -11162,6 +11176,13 @@ function Send-PimAdminTap {
         Sent   = @()
         Failed = @()
         Errors = @{}
+    }
+
+    # Global recipient override (test/lab visibility) -- see Send-PimTemplatedMail.
+    if ($global:PIM_MailRedirectAllTo -and "$($global:PIM_MailRedirectAllTo)".Trim()) {
+        $_redir = "$($global:PIM_MailRedirectAllTo)".Trim()
+        if ($Recipient -and $Recipient -ne $_redir) { Write-Host "  [TAP mail] redirect override: '$Recipient' -> $_redir" -ForegroundColor DarkYellow }
+        $Recipient = $_redir
     }
 
     $channels = $global:PIM_NotificationChannels
