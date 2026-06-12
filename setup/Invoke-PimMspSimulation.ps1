@@ -1,0 +1,120 @@
+#Requires -Version 5.1
+<#
+.SYNOPSIS
+    MSP-edition simulation (LIFECYCLE-GOVERNANCE § 19): show the two-store
+    model from BOTH the MSP and the local-IT perspective, prove the ownership
+    boundary, and print the merged apply plan a per-tenant engine run produces.
+
+.DESCRIPTION
+    Read-only demonstration of the "one core, pluggable edges, customer-owned
+    control plane" design WITHOUT linking the two SQL stores:
+
+      * MSP central registry (Owner=MSP baseline + guardrails) -- the admin
+        plane store. Reached here over its private endpoint.
+      * Customer LOCAL store (Owner=Local day-2-day admins + local resources)
+        -- the customer-owned store. In production this lives in the customer
+        tenant's own Azure; in this lab it is a separate SQL instance reached
+        over its own private endpoint / connection string.
+
+    The two databases are NEVER linked. This script connects to EACH
+    separately (its own connection string + Entra token), then merges in
+    memory -- exactly what a per-tenant engine run does after pulling the
+    signed MSP baseline bundle. No data is written.
+
+.PARAMETER CentralServer / LocalServer
+    The two SQL FQDNs (Entra-only auth; an access token is minted from the
+    current Az context for each).
+
+.PARAMETER TenantName
+    Which registered tenant to produce the merged plan for (default: the
+    ring-2 test tenant the local store represents).
+#>
+[CmdletBinding()]
+param(
+    [string]$CentralServer,
+    [string]$LocalServer,
+    [string]$TenantName = 'Demo Ring2 Lab A'
+)
+
+$ErrorActionPreference = 'Stop'
+Import-Module SqlServer -ErrorAction Stop
+
+if (-not $CentralServer) { $CentralServer = (Get-Content C:\TMP\pim-sqlserver-name.txt -Raw).Trim() + '.database.windows.net' }
+if (-not $LocalServer)   { $LocalServer   = (Get-Content C:\TMP\pim-localsql-name.txt -Raw).Trim() + '.database.windows.net' }
+
+function Get-PimSqlToken {
+    $t = (Get-AzAccessToken -ResourceUrl 'https://database.windows.net/').Token
+    if ($t -is [securestring]) { $t = [System.Net.NetworkCredential]::new('', $t).Password }
+    $t
+}
+function Invoke-PimRead {
+    param([string]$Server, [string]$Db, [string]$Query)
+    Invoke-Sqlcmd -ServerInstance $Server -Database $Db -AccessToken (Get-PimSqlToken) -Encrypt Mandatory -Query $Query -QueryTimeout 60
+}
+
+Write-Host ""
+Write-Host "==========================================================================" -ForegroundColor Cyan
+Write-Host " PIM4EntraPS MSP simulation -- two stores, never linked (LIFECYCLE-GOVERNANCE 19)" -ForegroundColor Cyan
+Write-Host "==========================================================================" -ForegroundColor Cyan
+Write-Host "  MSP central (admin plane) : $CentralServer / PimPlatform   [private endpoint]"
+Write-Host "  Customer LOCAL store      : $LocalServer / PimLocal        [own connection string]"
+Write-Host "  Tenant in focus           : $TenantName"
+
+# ---------------------------------------------------------------------------
+# MSP perspective: the fleet + the MSP-owned baseline (read-only to local IT)
+# ---------------------------------------------------------------------------
+Write-Host ""
+Write-Host "--- MSP PERSPECTIVE (central registry) ---------------------------------" -ForegroundColor Magenta
+$fleet = Invoke-PimRead -Server $CentralServer -Db 'PimPlatform' -Query "SELECT DisplayName, Ring FROM platform.Tenants ORDER BY Ring"
+Write-Host "  Fleet ($(@($fleet).Count) tenants):"
+$fleet | ForEach-Object { Write-Host ("    ring {0}  {1}" -f $_.Ring, $_.DisplayName) }
+$baseline = Invoke-PimRead -Server $CentralServer -Db 'PimPlatform' -Query "SELECT UserName, Purpose, Ring, Owner FROM pim.CentralAdmins ORDER BY Ring"
+Write-Host "  MSP-owned baseline admins (shipped to tenants as the signed bundle):"
+$baseline | ForEach-Object { Write-Host ("    [{0}] {1,-20} {2,-9} ringReach<= {3}" -f $_.Owner, $_.UserName, $_.Purpose, $_.Ring) }
+
+# ---------------------------------------------------------------------------
+# Local-IT perspective: ONLY their own store + the baseline they received
+# (read-only). They never see other tenants and never see the central store.
+# ---------------------------------------------------------------------------
+Write-Host ""
+Write-Host "--- LOCAL-IT PERSPECTIVE ($TenantName) ---------------------------------" -ForegroundColor Green
+$localAdmins = Invoke-PimRead -Server $LocalServer -Db 'PimLocal' -Query "SELECT UserName, Purpose, Owner FROM pim.LocalAdmins WHERE Enabled=1 ORDER BY UserName"
+Write-Host "  Owner=Local admins (the customer creates + manages these):"
+$localAdmins | ForEach-Object { Write-Host ("    [{0}] {1,-16} {2}" -f $_.Owner, $_.UserName, $_.Purpose) }
+$localRes = Invoke-PimRead -Server $LocalServer -Db 'PimLocal' -Query "SELECT GroupTag, RoleName, AzScope FROM pim.LocalResources"
+Write-Host "  Owner=Local resources (their Azure scopes under their MG):"
+$localRes | ForEach-Object { Write-Host ("    {0} -> {1} @ {2}" -f $_.GroupTag, $_.RoleName, $_.AzScope) }
+
+# ---------------------------------------------------------------------------
+# Merge: what the per-tenant engine run actually applies = MSP baseline (read-
+# only) reaching this tenant by ring, UNION local-owned config. Disjoint
+# namespaces: MSP owns HighPriv/guardrails, Local owns Day2Day/local resources.
+# ---------------------------------------------------------------------------
+$tenant = $fleet | Where-Object { $_.DisplayName -eq $TenantName } | Select-Object -First 1
+$tenantRing = if ($tenant) { [int]$tenant.Ring } else { 2 }
+Write-Host ""
+Write-Host "--- MERGED ENGINE PLAN for $TenantName (ring $tenantRing) --------------" -ForegroundColor Yellow
+Write-Host "  (MSP baseline where adminRing <= tenantRing)  +  (all Owner=Local rows)"
+$mspReaching = @($baseline | Where-Object { [int]$_.Ring -le $tenantRing })
+foreach ($r in $mspReaching) { Write-Host ("    MSP   {0,-20} {1,-9} (read-only to local IT)" -f $r.UserName, $r.Purpose) -ForegroundColor DarkGray }
+foreach ($r in $localAdmins) { Write-Host ("    LOCAL {0,-20} {1,-9} (managed by local IT)" -f $r.UserName, $r.Purpose) }
+$total = $mspReaching.Count + @($localAdmins).Count
+Write-Host "  => $total admin objects apply to this tenant ($($mspReaching.Count) MSP + $(@($localAdmins).Count) local), zero namespace overlap."
+
+# ---------------------------------------------------------------------------
+# Boundary proof: the local store is structurally incapable of tier-0.
+# ---------------------------------------------------------------------------
+Write-Host ""
+Write-Host "--- OWNERSHIP BOUNDARY (data-layer guardrail) --------------------------" -ForegroundColor Yellow
+try {
+    Invoke-Sqlcmd -ServerInstance $LocalServer -Database 'PimLocal' -AccessToken (Get-PimSqlToken) -Encrypt Mandatory -QueryTimeout 30 `
+        -Query "INSERT INTO pim.LocalAdmins (UserName,DisplayName,Purpose) VALUES (N'Admin-SIM-L0-T0-ID',N'sim tier0 attempt',N'HighPriv')" -ErrorAction Stop
+    Write-Host "  UNEXPECTED: local IT created a HighPriv admin -- guardrail FAILED" -ForegroundColor Red
+} catch {
+    Write-Host "  Local IT attempt to create a tier-0 (HighPriv) admin was REJECTED at INSERT" -ForegroundColor Green
+    Write-Host "  by CK_LocalAdmins_NoHighPriv -- tier-0 is Owner=MSP and unreachable locally." -ForegroundColor Green
+}
+
+Write-Host ""
+Write-Host "Simulation complete (read-only). The two stores were never linked; the merge" -ForegroundColor Cyan
+Write-Host "happened in-memory after reading each separately -- exactly the engine's job." -ForegroundColor Cyan

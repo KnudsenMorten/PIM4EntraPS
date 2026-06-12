@@ -79,6 +79,11 @@ IF COL_LENGTH('pim.CentralAdmins', 'Purpose') IS NULL
     ALTER TABLE pim.CentralAdmins ADD Purpose NVARCHAR(20) NULL;
 IF COL_LENGTH('pim.CentralAdmins', 'TierLevel') IS NOT NULL
     ALTER TABLE pim.CentralAdmins DROP COLUMN TierLevel;
+-- § 19 Owner tag: rows in the central registry are MSP-owned baseline by
+-- definition (the local store holds Owner=Local). Kept explicit so a merged
+-- view across both stores can attribute every row.
+IF COL_LENGTH('pim.CentralAdmins', 'Owner') IS NULL
+    ALTER TABLE pim.CentralAdmins ADD Owner NVARCHAR(10) NOT NULL CONSTRAINT DF_CentralAdmins_Owner DEFAULT 'MSP';
 
 IF OBJECT_ID('platform.AuditEvents') IS NULL
 CREATE TABLE platform.AuditEvents (
