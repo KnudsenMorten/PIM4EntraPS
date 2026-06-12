@@ -1,0 +1,45 @@
+{
+  "id": "entra-approle",
+  "name": "Generic Entra app-role grant (gallery / SaaS apps incl. SAP, ServiceNow)",
+  "auth": "graph",
+  "perRowResource": true,
+  "status": "structure built v2.4.183 -- Graph appRoleAssignedTo, the single mechanism behind 100+ gallery/SaaS apps. Live-validation pending a tenant with a target SP that exposes app roles.",
+  "permissionsNeeded": ["AppRoleAssignment.ReadWrite.All", "Application.Read.All (to list a target SP's appRoles)"],
+  "prerequisites": {
+    "perRowResource": "Each desired-state row's Resource column = the OBJECT ID of the target application's service principal (the enterprise app). One connector covers every app that publishes Entra app roles -- SAP Cloud Identity, ServiceNow, Salesforce, etc.",
+    "appRolesMustExist": "The target SP must expose app roles whose allowedMemberTypes include 'User' (group assignment uses the user-assignment path). Apps with no roles expose only the default-access role id 00000000-0000-0000-0000-000000000000.",
+    "groupAssignment": "Assigning an Entra GROUP to an app role requires the app to support group assignment (most enterprise apps do; some single-tenant apps restrict to users)."
+  },
+  "api": {
+    "baseUrl": "https://graph.microsoft.com/v1.0",
+    "listRoles": {
+      "method": "GET",
+      "path": "/servicePrincipals/{resource}?$select=appRoles",
+      "itemsPath": "appRoles",
+      "roleId": "id",
+      "roleName": "displayName",
+      "roleDescription": "description"
+    },
+    "listAssignments": {
+      "method": "GET",
+      "path": "/servicePrincipals/{resource}/appRoleAssignedTo",
+      "itemsPath": "value",
+      "assignmentId": "id",
+      "roleId": "appRoleId",
+      "principalIds": "principalId"
+    },
+    "assign": {
+      "method": "POST",
+      "path": "/servicePrincipals/{resource}/appRoleAssignedTo",
+      "body": {
+        "principalId": "{groupId}",
+        "resourceId": "{resource}",
+        "appRoleId": "{roleId}"
+      }
+    },
+    "remove": {
+      "method": "DELETE",
+      "path": "/servicePrincipals/{resource}/appRoleAssignedTo/{assignmentId}"
+    }
+  }
+}
