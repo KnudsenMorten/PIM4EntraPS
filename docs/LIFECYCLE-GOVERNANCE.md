@@ -349,6 +349,81 @@ Resolution: per-admin (if set AND PerAdminWins) → department contact row (via 
 
 Build order when scheduled: § 17 first (contacts/routing — self-service approvals depend on it) → intake processor (§ 15 phase 11) → delegation-unit filter → inactivity sweep → portal front end last.
 
+## 19. MSP edition — one core, pluggable edges, customer-owned control plane (design)
+
+The MSP edition lets one operator manage privileged access across many customer tenants without the customer giving up control of their own data, identities, logs, or Conditional Access. The design principle: **vary the edges, never the core.**
+
+### Why not GDAP as the primary model
+
+GDAP + a multi-tenant partner app (the Inforcer/CoreView default) is disqualified for the primary target market and is, at best, a niche profile:
+
+- **EA/MCA exclusion**: GDAP only covers CSP-licensed customers. Enterprises on EA/MCA agreements — the primary market — can't use it at all.
+- **No log attribution**: GDAP actions land in the customer's logs as object ids from the *partner* tenant; the customer must ask the MSP "who is this GUID?" to audit their own environment.
+- **Weaker Conditional Access**: the acting identity is foreign (lives in the partner tenant), so the customer can't natively enforce their own MFA / device / location policy on it — only coarse cross-tenant inbound trust.
+
+All three share one root cause: a **foreign acting identity** gives the customer only indirect, delegated control. The fix is to keep the acting identity **local to the customer tenant**.
+
+### The rule: vary the edges, never the core
+
+- **One core (single implementation, profile-independent):** the declarative engine, the Owner-tag merge, the signed-baseline courier, the validator, the Manager. None of it knows which auth or storage profile is underneath.
+- **Two pluggable edges:** an **auth profile** ("get a token for tenant X") and a **storage profile** ("read/write these rows"). Both are deliberately *thin* — if a model can't be expressed behind those two contracts, it's trying to fork the core and is rejected.
+
+This is "support multiple models" (the customer base is heterogeneous) without "fit everything into one engine" and without forking into many.
+
+### Auth profiles
+
+| Profile | Identity | Customer control | Use |
+|---|---|---|---|
+| **B — per-tenant cert (default)** | single-tenant app + **non-exportable cert, one per tenant**, registered in the customer tenant | full: native CA, attribution, lifecycle, instant revocation (disable the app) | EA/MCA enterprises (primary) |
+| **A — GDAP (option)** | multi-tenant partner app + GDAP relationship | indirect (cross-tenant trust); no local attribution | CSP-managed SMBs only |
+| **On-prem — Windows/gMSA** | domain service account / gMSA | AD/Kerberos + host/network controls | classic hybrid AD |
+
+### Storage profiles
+
+`Csv` (small installs), **local SQL in the customer's own Azure** (enterprise default), or a central SQL partition. Behind one repository contract (`Get-PimRows` / `Save-PimRows`, `$global:PIM_DataStore`). `Csv` stays supported indefinitely.
+
+### No-linked-SQL courier (core, profile-independent)
+
+The SQL stores are **never connected** — no sync, no cross-reads, no MSP standing access into a customer store (every one of those puts a live connection or standing credential across the trust boundary, which EA/MCA security teams veto). Only two **signed** artifacts cross the boundary:
+
+1. **Baseline IN = a pull, not a push.** The MSP exports a signed, versioned **baseline bundle** (same RSA-signing model as the offline `.pimlicense`). The per-tenant engine — running with the *local* credential, reaching *outward* — fetches and **verifies** it before applying `Owner=MSP` rows. Tamper-evident; the customer can inspect exactly what they accept. (Mechanically a pull → reach stays outbound-from-the-customer; MSP never reaches in.)
+2. **Rollup OUT = customer-emitted summary.** The local engine emits a signed **summary** (drift/compliance counts, never raw privileged data) for the MSP fleet view — ideally landed first in the customer's own Log Analytics (via `AzLogDcrIngestPS`) and read by the MSP from there.
+
+### Ownership split (core)
+
+- `Owner=MSP` — baseline + guardrails (tier-0 reservation, approval-required groups, naming, rings). Read-only to local IT; arrives as the signed bundle.
+- `Owner=Local` — day-2-day admins, local resources (subscriptions under the customer's management group). Managed by local IT in the local store.
+- **Disjoint namespaces**, enforced by engine + validator: MSP never overwrites Local; Local can never touch MSP-owned objects. (Not "MSP wins ties" — a precedence rule would mean the boundary is wrong.)
+
+### Delegation within the envelope
+
+Delegation units (§18) live in the **local store** and are **bounded by the MSP guardrails**. MSP controls the *envelope* (declarative, tamper-evident, shipped as the bundle); the customer controls *everything inside it* and their own data store. Neither side holds a credential or connection into the other's environment.
+
+### Per-profile capability / tradeoff table (kept honest)
+
+The customer-owned-control-plane benefits are **Model B properties**, not universal — docs and sales must say so per profile rather than overselling.
+
+| Capability | B (per-tenant cert) | A (GDAP) | On-prem gMSA |
+|---|---|---|---|
+| EA/MCA customers | ✅ | ❌ CSP only | n/a (on-prem) |
+| Human attribution in the customer's own log | ✅ via local audit + Log Analytics | ❌ partner-tenant object ids | ✅ local |
+| Customer-owned Conditional Access | ✅ (CA for workload identities; Premium for IP-lock) | ⚠️ indirect (cross-tenant trust) | AD/Kerberos + network |
+| Customer revocation | ✅ disable the local app | end the GDAP relationship | disable the gMSA |
+| Credential sprawl | N certs — **lifecycle automation required** | none (no stored secret) | gMSA-managed |
+| Setup friction | per-tenant onboarding | low (one consent) | domain join |
+
+### Same design for TenantManager
+
+The platform registry is shared (`platform.Tenants` / `platform.TenantApps`, distinguished by `Product`). TenantManager reuses the identical core, the same auth/storage profiles, the same signed-courier and Owner-tag split — it is simply another `Product` value on the same substrate.
+
+### Build order (demand-driven)
+
+1. **Ship first:** the core contract + **Model B** + **local SQL** (enterprise target) + the signed baseline courier + Owner-tag enforcement.
+2. **On demand:** the GDAP profile, the CSV/central storage profiles, and the local self-service plane (§18).
+3. **Guardrails on pluralism:** every profile must be thin enough to sit behind the contract; one conformance test suite runs against each profile; **no profile is built speculatively** — only when a real customer needs it.
+
+Cert lifecycle is a first-class part of Model B, not polish: one cert **per tenant** (never a shared cert across customers — that would make the per-tenant-identity security claim false), with the registry tracking thumbprint + expiry, an auto-renewal job, and expiry alerting.
+
 ## Out of scope / known limitations
 
 - Holiday-aware workday calculation (Mon–Fri only).
