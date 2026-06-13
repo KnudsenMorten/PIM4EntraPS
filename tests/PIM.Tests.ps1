@@ -302,3 +302,61 @@ Describe 'Change queue + full/delta run modes' {
         (Get-PimChangeQueueDdl) | Should -BeLike '*CREATE TABLE pim.ChangeQueue*'
     }
 }
+
+Describe 'Azure auto-discovery + reconcile' {
+    It 'stable key is move-invariant for a subscription' {
+        (Get-PimAzureStableKey -ScopePath '/subscriptions/abc-123') | Should -Be 'sub:abc-123'
+        # same sub, different MG parent in the path component is irrelevant -- key is the GUID
+        (Get-PimAzureStableKey -ScopePath '/subscriptions/abc-123/resourceGroups/rg1') | Should -Be 'sub:abc-123/rg:rg1'
+        (Get-PimAzureStableKey -ScopePath '/providers/Microsoft.Management/managementGroups/lz-corp') | Should -Be 'mg:lz-corp'
+    }
+    It 'new scope matching an auto-import rule -> create(autoImport=true)' {
+        $disc = @([pscustomobject]@{ scopeType='subscription'; scopePath='/subscriptions/new-1'; scopeName='lz-app-prod'; mgmtGroupDepth=1 })
+        $rules = @(@{ scopeTypes=@('subscription'); minLevel=0; maxLevel=4 })
+        $plan = Get-PimAzureReconcilePlan -Discovered $disc -Existing @() -AutoImportRules $rules
+        @($plan.create).Count | Should -Be 1
+        $plan.create[0].autoImport | Should -BeTrue
+        "$($plan.create[0].expected.groupName)" | Should -BeLike 'PIM-Azure-LzAppProd-L1-T1-WDP-*'
+    }
+    It 'new scope with no matching rule -> create(autoImport=false) (pending decision)' {
+        $disc = @([pscustomobject]@{ scopeType='managementGroup'; scopePath='/providers/Microsoft.Management/managementGroups/platform'; scopeName='platform'; mgmtGroupDepth=1 })
+        $plan = Get-PimAzureReconcilePlan -Discovered $disc -Existing @() -AutoImportRules @(@{ scopeTypes=@('subscription') })
+        $plan.create[0].autoImport | Should -BeFalse
+    }
+    It 'moved/renamed scope (same stable key, new expected name) -> rename' {
+        $disc = @([pscustomobject]@{ scopeType='subscription'; scopePath='/subscriptions/s1'; scopeName='lz-corp-prod'; mgmtGroupDepth=1 })
+        $exist = @([pscustomobject]@{ scopeType='subscription'; scopePath='/subscriptions/s1'; scopeName='old-name'; groupName='PIM-Azure-OldName-L1-T1-WDP-RES' })
+        $plan = Get-PimAzureReconcilePlan -Discovered $disc -Existing $exist
+        @($plan.rename).Count | Should -Be 1
+        "$($plan.rename[0].from)" | Should -Be 'PIM-Azure-OldName-L1-T1-WDP-RES'
+        "$($plan.rename[0].to)" | Should -BeLike 'PIM-Azure-LzCorpProd-*'
+    }
+    It 'definition whose scope is gone -> orphan; unchanged stays unchanged' {
+        $disc = @([pscustomobject]@{ scopeType='subscription'; scopePath='/subscriptions/keep'; scopeName='lz-keep'; mgmtGroupDepth=1 })
+        $exp = Get-PimAzureScopeDerivation -ScopeType subscription -ScopePath '/subscriptions/keep' -ScopeName 'lz-keep'
+        $exist = @(
+            [pscustomobject]@{ scopeType='subscription'; scopePath='/subscriptions/keep'; scopeName='lz-keep'; groupName="$($exp.groupName)" }
+            [pscustomobject]@{ scopeType='subscription'; scopePath='/subscriptions/gone'; scopeName='dead'; groupName='PIM-Azure-Dead-L1-T1-WDP-RES' }
+        )
+        $plan = Get-PimAzureReconcilePlan -Discovered $disc -Existing $exist
+        @($plan.orphan).Count | Should -Be 1; "$($plan.orphan[0].groupName)" | Should -Be 'PIM-Azure-Dead-L1-T1-WDP-RES'
+        @($plan.unchanged).Count | Should -Be 1
+    }
+    It 'reconcile plan -> change-queue records (auto-create + rename; orphans gated)' {
+        $disc = @(
+            [pscustomobject]@{ scopeType='subscription'; scopePath='/subscriptions/n1'; scopeName='lz-new'; mgmtGroupDepth=1 }
+            [pscustomobject]@{ scopeType='subscription'; scopePath='/subscriptions/m1'; scopeName='lz-moved'; mgmtGroupDepth=1 }
+        )
+        $exist = @(
+            [pscustomobject]@{ scopeType='subscription'; scopePath='/subscriptions/m1'; scopeName='old'; groupName='PIM-Azure-Old-L1-T1-WDP-RES' }
+            [pscustomobject]@{ scopeType='subscription'; scopePath='/subscriptions/dead'; scopeName='dead'; groupName='PIM-Azure-Dead-L1-T1-WDP-RES' }
+        )
+        $plan = Get-PimAzureReconcilePlan -Discovered $disc -Existing $exist -AutoImportRules @(@{ scopeTypes=@('subscription'); maxLevel=4 })
+        $changes = @(ConvertTo-PimReconcileQueueChanges -Plan $plan)
+        @($changes | Where-Object op -eq 'Create').Count | Should -Be 1   # lz-new auto-created
+        @($changes | Where-Object op -eq 'Update').Count | Should -Be 1   # m1 renamed
+        @($changes | Where-Object op -eq 'Remove').Count | Should -Be 0   # orphan not removed without -IncludeOrphanRemovals
+        $withOrphans = @(ConvertTo-PimReconcileQueueChanges -Plan $plan -IncludeOrphanRemovals)
+        @($withOrphans | Where-Object op -eq 'Remove').Count | Should -Be 1
+    }
+}

@@ -76,6 +76,10 @@ ForEach ($_mod in $_PIM_ModulesToLoad) {
 # engine drains the queue fast (delta) instead of a full reconcile sweep.
 . (Join-Path $PSScriptRoot 'PIM-ChangeQueue.ps1')
 
+# Azure scope auto-discovery + reconcile -- discovered MGs/subs/RGs vs existing
+# definitions -> create/rename-on-move/orphan plan, feeding the change queue.
+. (Join-Path $PSScriptRoot 'PIM-AzureDiscovery.ps1')
+
 function Ensure-DateTime {
     <#
         .SYNOPSIS
