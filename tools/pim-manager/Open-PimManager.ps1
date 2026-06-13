@@ -1810,12 +1810,24 @@ function Handle-Request {
 
             if ($method -eq 'GET') {
                 $payload = Read-PimCsvRows -BaseName $base
+                $rows = @($payload.rows)
+                # Portal-admin read scoping: a delegated GUI-manager (non-super,
+                # with a portal-admins profile) sees only the rows their tier/
+                # level/service/scope allows. Super-admins + users with no portal
+                # profile see everything (unchanged).
+                $portalFiltered = $false
+                if ((Get-Command Test-PimManagerRoleAtLeast -ErrorAction SilentlyContinue) -and -not (Test-PimManagerRoleAtLeast -Minimum 'SuperAdmin') -and (Get-Command Read-PimPortalProfiles -ErrorAction SilentlyContinue)) {
+                    $who = (Get-PimManagerRole).identity
+                    $prof = Get-PimPortalProfile -Profiles (Read-PimPortalProfiles -ConfigDir $script:configRoot) -Identity "$who"
+                    if ($prof) { $rows = @(Select-PimPortalVisibleRows -Profile $prof -Rows $rows -Base $base); $portalFiltered = $true }
+                }
                 $body = [ordered]@{
                     base   = $base
                     path   = $payload.path
                     source = $payload.source
                     header = $payload.header
-                    rows   = $payload.rows
+                    rows   = $rows
+                    portalFiltered = $portalFiltered
                 }
                 Write-JsonResponse -Response $resp -Status 200 -Body $body
                 return 200
