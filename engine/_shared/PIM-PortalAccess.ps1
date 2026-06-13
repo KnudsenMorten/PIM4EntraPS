@@ -71,7 +71,12 @@ function Get-PimGroupFacets {
     $plane    = & $get 'Plane'
     $tierRaw  = & $get 'TierLevel'
     $levelRaw = & $get 'Level'
-    $scope    = & $get 'PermissionScope'; if (-not $scope) { $scope = & $get 'AzScope' }
+    # scope is a GENERAL dimension: Azure ARM scope, Defender device-group scope
+    # (all assets / servers / workstations), Power BI workspace, and for ENTRA the
+    # Administrative Unit (L2 auth-admin-on-AU vs L1 tenant-wide vs L0 GA).
+    $scope    = & $get 'PermissionScope'; if (-not $scope) { $scope = & $get 'AzScope' }; if (-not $scope) { $scope = & $get 'Scope' }; if (-not $scope) { $scope = & $get 'AdministrativeUnitTag' }
+    # Defender (and similar) encode scope as a NAME SEGMENT: ...-Scope-<Clients|Servers>-L<n>...
+    if (-not $scope -and $name) { $ms = [regex]::Match($name, '(?i)-Scope-([A-Za-z0-9]+)-L\d'); if ($ms.Success) { $scope = $ms.Groups[1].Value } }
     $au       = & $get 'AdministrativeUnitTag'
 
     # Name-grammar fallback: PIM-{Service}-{Name}-L{n}-T{n}-{Code}-{Domain}

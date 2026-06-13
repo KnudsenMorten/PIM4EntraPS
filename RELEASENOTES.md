@@ -1,9 +1,10 @@
 # Release notes for PIM4EntraPS
 
-## v2.4.200
+## v2.4.201
 
 Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monorepo:
 
+- release: PIM4EntraPS v2.4.201 -- Approver Matrix layered by scope + persona support-functions (d643e64a)
 - release: PIM4EntraPS v2.4.200 -- Approver Matrix (dimensional routing + escalation chain) (25ed077d)
 - release: PIM4EntraPS v2.4.199 -- lifecycle calendar (phase 9): expirations, auto-renew, escalation (2103344a)
 - release: PIM4EntraPS v2.4.198 -- resource approvers/owners (phase 8) (0729974b)
@@ -33,7 +34,6 @@ Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monor
 - release: PIM4EntraPS v2.4.174 -- mail redirect override ($global:PIM_MailRedirectAllTo: all engine mail -> one mailbox for flow visibility, {RedirectedFrom} token, off by default) + two-plane private-endpoint topology built (admin plane Manager+SQL co-located private-endpoint-only/public-disabled/SQL Entra-only/inbound clamped to jumphost+PAW+SAW; self-service plane separate broad-internal private-endpoint app, signed-requests-only) documented LIFECYCLE-GOVERNANCE 13a incl custom-DNS forwarder caveat + app-only Exchange enablement proven (engine SPN self-grants Exchange.ManageAsApp + Exchange Admin; Graph Mail.Send correctly denied) (050921c7)
 - release: PIM4EntraPS v2.4.173 -- Core/Pro licensing, 100% offline: signed .pimlicense (RSA-SHA256 over payload bytes, embedded public cert, PS5.1-safe raw-bytes X509 load, no call-home/activation ever) + Test-PimProFeature gate (tenant-bound; fan-out skips unlicensed tenants; expiry -> grace -> disable; Core never affected) + Manager Governance License panel (/api/license) + internal-only issuer (INTERNAL/pim-licensing, non-exportable machine-store key) + first gated feature = MSP fan-out. SQL data store deliberately Core (free). 12-assertion PS5.1 battery green incl. tamper + tenant-binding tests. (25b3bb0e)
 - release: PIM4EntraPS v2.4.172 -- design: LIFECYCLE-GOVERNANCE Sec 17 email routing & people directory (Department link + PIM-Definitions-Contacts + central mail-routing.custom.json override w/ PerAdminWins precedence; Manager "Contacts & email flow" area incl. person-left sweep staging replace-with-successor) + Sec 18 self-service delegation layers (delegation units = templates x group tags x AzScope prefix x quotas x inactivity-disable; intake-based, engine stays sole writer; preferred web tier = Azure App Service w/ Private Endpoint, zero public exposure; engine signInActivity inactivity sweep) (e6559da1)
-- release: PIM4EntraPS v2.4.171 -- Purpose column (Day2Day|HighPriv) makes the two admin naming conventions explicit (Admin-INI-PLAT day2day vs dedicated Admin-INI-L0-T0-PLAT high-priv); TierLevel removed from canonical schema (legacy fallback kept). Engine OU routing keys off Purpose; AdminAccountPatternHighPriv + Purpose-aware PIM-NAME-002; Manager wizard Purpose field replaces Tier/Level/Naming-style, map dots color by Purpose, initials auto-derive bug fixed (pinned at 1 char after first name); admin templates prefill Purpose; pim.CentralAdmins migrated (both DBs); live tenant accounts renamed + LIVE fan-out idempotent re-run green. (1f706eed)
 
 ---
 
@@ -42,6 +42,17 @@ Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monor
 > **Curated changelog.** The publish workflow auto-prepends recent monorepo commits as a raw activity log; this file is the human-friendly narrative on top.
 
 ---
+
+## v2.4.201 -- Approver Matrix: layered by scope + persona support-functions + escalation steps
+
+The layered approver model, fully dimensional and grounded in the real naming:
+
+- **`scope` is a first-class dimension** alongside workload/tier/level/plane: Azure ARM scope, Power BI workspace, **Entra AU** (L2 auth-admin-on-AU vs L1 tenant-wide vs L0 GA), and **Defender device-group scope** parsed from the group NAME segment (`...-Scope-Servers-L3...` / `-Scope-Clients-...`; there is no Scope column). `Get-PimGroupFacets` resolves all of these.
+- **Layered approval**: a scope-specific rule (e.g. a Power BI workspace, or Defender Servers) is the PRIMARY/routing approver, but the broader workload **service owner** can also approve (`Get-PimAllApproversForResource` = all matching layers; `Get-PimApproverLayers` = the ordered layers, most-specific first).
+- **Escalation steps through the layers**: `Get-PimEscalationTargetForRequest` -- as a pending request ages past `SlaHours`, it escalates to the next (broader) layer (workspace approver -> service owner -> ... -> top).
+- **Support-function personas**: rules reference `@CISO` / `@ITManager` / `@HRManager` / `@PIMDelegationOwner` (and any business persona), resolved from the `SupportFunctions` config -- define once, use as broad/top escalation everywhere. Generalises to business workloads (HR manager -> Dataverse/HR, finance manager -> Business Central settings).
+
+Pester 72 -> **75**. VERSION -> 2.4.201.
 
 ## v2.4.200 -- Approver Matrix: dimensional approver routing + escalation chain
 
