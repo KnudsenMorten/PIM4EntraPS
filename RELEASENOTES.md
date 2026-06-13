@@ -1,9 +1,10 @@
 # Release notes for PIM4EntraPS
 
-## v2.4.209
+## v2.4.210
 
 Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monorepo:
 
+- feat(pim): new engine — EntraRoles provider (PIM directory-role enablement over REST) (c076ab97)
 - feat(pim): NEW REST+SQL engine core (provider model) — replaces legacy CSV engine (5541d06c)
 - chore(pim): add /legacy retirement policy — incremental moves gated on REST write-path + sync coordination (CSV engine still wired, nothing safe to move yet) (13540894)
 - feat(pim): scheduler/job runner — phase-split delta, discovery x3, commit-only triggers + watermark (VM + container) (53cb693e)
@@ -33,7 +34,6 @@ Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monor
 - release: PIM4EntraPS v2.4.188 -- admin-interface epic phase 2 server seam (portal-access + wizard-derive endpoints) (79f8171f)
 - release: PIM4EntraPS v2.4.187 -- admin-interface epic phase 1 (portal-admin scoping + wizard derivation engines) (164d002c)
 - release: PIM4EntraPS v2.4.186 -- nested-membership connector adapter + Dataverse connector (8b49c3e8)
-- release: PIM4EntraPS v2.4.185 -- locked-schema + data conformance preflight (25f4c9b5)
 
 ---
 
@@ -50,6 +50,10 @@ Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monor
 - **`Get-PimMatchingApproverRules` is null-safe**: a null/blank entry in the approver matrix (e.g. when none is configured) no longer crashes `Test-PimCanApprove`. Offline suite back to **77/77**.
 
 VERSION -> 2.4.207.
+
+## v2.4.210 -- new engine: EntraRoles provider (PIM role enablement over REST)
+
+Second scope on the new engine. The **EntraRoles** provider grants/reconciles Entra **directory roles** on the role-assignable PIM groups: desired = `PIM-Assignments-Roles-Groups` (GroupTag + RoleDefinitionName + Eligible/Active + Permanent/expiry); it resolves `GroupTag → GroupName → groupId` (via `PIM-Definitions-Roles` + the REST directory context) and `RoleDefinitionName → roleDefinitionId`, reads live PIM **roleEligibilitySchedules** / **roleAssignmentSchedules**, and applies via **roleEligibilityScheduleRequests** / **roleAssignmentScheduleRequests** (`adminAssign`; Full prunes with `adminRemove`). Permanent → `noExpiration`, else `afterDuration P{days}D`. Pure helpers `New-PimRoleScheduleBody` + `Get-PimEntraRoleKey` are unit-tested; `Test-PimEngineCore.ps1` 23/23, scheduler 27/27, full suite 77/77, import stays module-free. Registered scopes: **Admins, EntraRoles**. VERSION -> 2.4.210.
 
 ## v2.4.209 -- NEW REST+SQL engine core (provider model) replacing the legacy CSV engine
 
