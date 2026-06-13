@@ -1,9 +1,10 @@
 # Release notes for PIM4EntraPS
 
-## v2.4.202
+## v2.4.203
 
 Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monorepo:
 
+- release: PIM4EntraPS v2.4.203 -- PIM-Engine consolidated entrypoint + Community/Pro editions (ff29bb7b)
 - release: PIM4EntraPS v2.4.202 -- prod Azure SQL IaC (private endpoint, MI) + CSV->SQL migration (042bf8b2)
 - release: PIM4EntraPS v2.4.201 -- Approver Matrix layered by scope + persona support-functions (d643e64a)
 - release: PIM4EntraPS v2.4.200 -- Approver Matrix (dimensional routing + escalation chain) (25ed077d)
@@ -33,7 +34,6 @@ Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monor
 - release: PIM4EntraPS v2.4.176 -- MSP+local simulation made real: local-store schema (pim.LocalAdmins/LocalResources Owner=Local, data-layer guardrail CK_LocalAdmins_NoHighPriv = tier-0 rejected at INSERT) + local-seed-demo; pim.CentralAdmins.Owner column (baseline=MSP); Invoke-PimMspSimulation.ps1 (two stores never linked, read each separately, in-memory merge = MSP fleet view + local-IT view + combined apply plan + guardrail proof); activator backend app-only deploy (_PimActivatorAuth cert sign-in path + Deploy-PimActivatorBackend -AppId/-CertificateThumbprint, SP-create retry through replication window). Lab-verified incl. genuine cross-tenant local store in a separate tenant sub (public+single-IP-firewall Entra-only as cross-tenant PE exemption); local-IT folder copy validates clean. VERSION->2.4.176. (f03187aa)
 - release: PIM4EntraPS v2.4.175 -- design: MSP edition LIFECYCLE-GOVERNANCE Sec 19 (one core / pluggable edges / customer-owned control plane): GDAP disqualified to niche (EA/MCA exclusion + no customer-side attribution + weak CA over foreign identity); vary edges never core = pluggable auth profile (B per-tenant cert default / A GDAP CSP-only / on-prem gMSA) + storage profile (Csv/local-SQL/central) behind thin contracts; no-linked-SQL courier (signed baseline bundle pulled+verified in, customer-emitted summary out, no MSP standing access); Owner=MSP|Local disjoint namespaces + delegation bounded by guardrail envelope; per-profile capability/tradeoff table keeps security claims honest; same design for TenantManager; per-tenant cert lifecycle first-class. VERSION 2.4.169->2.4.175 catch-up. PS5.1 regression battery green. (b7caff11)
 - release: PIM4EntraPS v2.4.174 -- mail redirect override ($global:PIM_MailRedirectAllTo: all engine mail -> one mailbox for flow visibility, {RedirectedFrom} token, off by default) + two-plane private-endpoint topology built (admin plane Manager+SQL co-located private-endpoint-only/public-disabled/SQL Entra-only/inbound clamped to jumphost+PAW+SAW; self-service plane separate broad-internal private-endpoint app, signed-requests-only) documented LIFECYCLE-GOVERNANCE 13a incl custom-DNS forwarder caveat + app-only Exchange enablement proven (engine SPN self-grants Exchange.ManageAsApp + Exchange Admin; Graph Mail.Send correctly denied) (050921c7)
-- release: PIM4EntraPS v2.4.173 -- Core/Pro licensing, 100% offline: signed .pimlicense (RSA-SHA256 over payload bytes, embedded public cert, PS5.1-safe raw-bytes X509 load, no call-home/activation ever) + Test-PimProFeature gate (tenant-bound; fan-out skips unlicensed tenants; expiry -> grace -> disable; Core never affected) + Manager Governance License panel (/api/license) + internal-only issuer (INTERNAL/pim-licensing, non-exportable machine-store key) + first gated feature = MSP fan-out. SQL data store deliberately Core (free). 12-assertion PS5.1 battery green incl. tamper + tenant-binding tests. (25b3bb0e)
 
 ---
 
@@ -42,6 +42,15 @@ Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monor
 > **Curated changelog.** The publish workflow auto-prepends recent monorepo commits as a raw activity log; this file is the human-friendly narrative on top.
 
 ---
+
+## v2.4.203 -- PIM-Engine (one entrypoint, drops "CSV") + Community/Pro editions
+
+Toward one engine + two editions, under the current name (the full solution rebrand + folding in the AD module is a coordinated future change, since customers download via the sync config):
+
+- **`engine/PIM-Engine/PIM-Engine.ps1`** -- a single consolidated entrypoint with `-Scope` (All / Admins / EntraRoles / AzRes / AdministrativeUnits / GroupsAssignment / GroupsPolicies / GroupsCreateModifyPolicy / Export) and `-Mode` (Full | Delta). "CSV" is gone from the name. Additive + non-breaking: it dispatches to the existing, proven per-scope engine scripts (legacy dir names keep their `CSV` until the SQL-only cleanup physically renames them), so current schedules keep working.
+- **Community / Pro editions** in `PIM-License.ps1`: the free tier is now surfaced as **Community** (`Get-PimEdition`, `Get-PimLicenseStatusText` -> "Community (free)"); a license maps to **Pro**. The Pro feature catalog now also gates the admin-interface-epic capabilities (Conformance, Rings, ApproverMatrix, PawPolicy, Lifecycle, AzureDiscovery, DefinitionImport, PortalAdmins, PermissionWizard). SQL stays in Community per the standing decision. One engine/manager/activator; Pro just unlocks more.
+
+Pester 75 -> **77**. VERSION -> 2.4.203.
 
 ## v2.4.202 -- prod Azure SQL (private endpoint, MI) IaC + non-destructive CSV->SQL migration
 

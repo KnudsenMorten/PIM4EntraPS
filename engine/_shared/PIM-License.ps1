@@ -38,9 +38,21 @@
 # The PRIVATE key never leaves the maintainer's machine store.
 $script:PimLicensePublicCertB64 = 'MIID+zCCAmOgAwIBAgIQZi8bo4EYqJ9PSvrXsI3orTANBgkqhkiG9w0BAQsFADAgMR4wHAYDVQQDDBVQSU00RW50cmFQUy1MaWNlbnNpbmcwHhcNMjYwNjEyMTY1MzM4WhcNNDEwNjEyMTcwMzM0WjAgMR4wHAYDVQQDDBVQSU00RW50cmFQUy1MaWNlbnNpbmcwggGiMA0GCSqGSIb3DQEBAQUAA4IBjwAwggGKAoIBgQD+YFgQSxRJNuwpv/lc9z6ClbFgEc+9/hpM/TXPg7f3Q40TQfyWf54EgaKzC8Y04JkdS2lNv69NWZ5MJgwyHkwTuyngDx/giBF0aVBbnbW9dLixSY0YaN435uylMgrL9irYB79c+rN+NAWyRZTzFdw3LFLR7zhl4Wor3OexsI7tYHgH/WXegzmbl4R8amVHR2QsAr3ZHBg5WEW3C3DeomDeAuVIny4xMZp/nq6i1VXTqrBx76Cxdms6RJS0cwtystrFQFdCB4e06jqdttuj5m8CCvQbUILEzAhNnzHnFtMXJC/wWWu2vfOqqY/Wy7ORjZCWaI/a/c7bfXWpdiI5H3E4pcZCezSH7lg1VdvSGrq/bbQxOUO4a5FQ5JI5fXZuzQksjm7t0u5AAmdLpvtac86vMQmM8LCTsUoNs9GAhVvNmV+pJtReWyubfqLgzaRmMP4qMp7a6DoR3RKeuYjmSzhjFn5S4lcDmAz35Qc/LO0sEPDr3LL30fQxhX8uSqlFAEkCAwEAAaMxMC8wDgYDVR0PAQH/BAQDAgeAMB0GA1UdDgQWBBS2n3cmD8taKDsdy2debDNeQkv7qzANBgkqhkiG9w0BAQsFAAOCAYEArrFYyp4BQzH803d4htpcqtWbkTgg10tFrdQndJ35tv+ZDGcq7AIHohI7egzH4pDPgbXOGf7GuisIzj8MEJkH63+xqB4wHHBPn+pl9YGYk02XiWY9H0blP+TIlYjderzr/XH/mLn67z2VAm9dGAw1X2xw1zMtc36aPVU7i7bRIZwfxIA5Y1sVJ9bpMRkXDawMhegA39a0inLVriBWcvfku3zz84MtHtB4WLfwUI97QLvDObHPdkQ68w+0+0tmIz33z5Fgu9dtIUf6RROkFhjoc2rC+GcI023SLeDPjHrUHg1RjUeoPJkPQiX8N8lSnX335dJddiHIDAn43OhQn13lITovtz5EHiaJJSXr/DwsaZzyv6UC067KpFeKLc4heYiM0A0Orj7UH/B5f/qEu8MPsl+XdBGl7v0lecn2DbG2bXlOxEucP8JNzIeOnLg609XaneGRdu93dFLUGSsNtUMnrhrSWGjqAwXteWhhGy+aJ/WfUdfUGJ+rf/D9hVOBIpsk'
 
+# Editions: COMMUNITY (free) and PRO (licensed). One engine/manager/activator; Pro
+# unlocks the advanced capabilities below. (The free tier was historically called
+# 'Core'; it is surfaced as 'Community' now -- a license sku of 'Core' still maps
+# to Pro for back-compat.)
+$script:PimCommunityEditionName = 'Community'
+$script:PimProEditionName       = 'Pro'
+
 # Catalog of gateable Pro features. SQL data store is deliberately NOT here --
-# operator decision 2026-06-12: SQL is part of Core.
-$script:PimProFeatureCatalog = @('MspFanout', 'WorkloadConnectors', 'Intake', 'AccessReviews', 'SelfService', 'ContactsRouting')
+# operator decision 2026-06-12: SQL is part of the free (Community) edition.
+$script:PimProFeatureCatalog = @(
+    'MspFanout', 'WorkloadConnectors', 'Intake', 'AccessReviews', 'SelfService', 'ContactsRouting',
+    # advanced capabilities added in the admin-interface epic (v2.4.187+):
+    'Conformance', 'Rings', 'ApproverMatrix', 'PawPolicy', 'Lifecycle', 'AzureDiscovery',
+    'DefinitionImport', 'PortalAdmins', 'PermissionWizard'
+)
 
 $script:PimLicenseCache = $null
 $script:PimLicenseWarned = @{}
@@ -177,13 +189,21 @@ Function Test-PimProFeature {
     return $true
 }
 
+Function Get-PimEdition {
+    # The active EDITION: 'Pro' when a valid (or in-grace) license is present,
+    # else 'Community' (free). Drives feature gating + the manager edition badge.
+    $lic = Get-PimLicense
+    if ($lic.Status -in @('Valid', 'Grace')) { return $script:PimProEditionName }
+    return $script:PimCommunityEditionName
+}
+
 Function Get-PimLicenseStatusText {
     # One-line status for banners / the Manager Governance panel.
     $lic = Get-PimLicense
     switch ($lic.Status) {
-        'Missing' { 'Core (free) -- no Pro license installed' }
+        'Missing' { 'Community (free) -- no Pro license installed' }
         'Valid'   { "Pro -- $($lic.Customer) -- $($lic.Reason)" }
         'Grace'   { "Pro (GRACE) -- $($lic.Customer) -- $($lic.Reason)" }
-        default   { "Core (free) -- license $($lic.Status): $($lic.Reason)" }
+        default   { "Community (free) -- license $($lic.Status): $($lic.Reason)" }
     }
 }
