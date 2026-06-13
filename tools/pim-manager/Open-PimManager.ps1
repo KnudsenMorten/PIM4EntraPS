@@ -131,6 +131,12 @@ if (Test-Path -LiteralPath $_dateExprLib) { . $_dateExprLib }
 $_licenseLib = Join-Path $solutionRoot 'engine\_shared\PIM-License.ps1'
 if (Test-Path -LiteralPath $_licenseLib) { . $_licenseLib }
 
+# Locked-schema + data conformance (engine/_shared/PIM-SchemaConformance.ps1) --
+# the instance-load preflight conforms migrated CSV data to the locked structure
+# (drops deprecated columns like TierLevel, migrates TierLevel->Purpose first).
+$_schemaConfLib = Join-Path $solutionRoot 'engine\_shared\PIM-SchemaConformance.ps1'
+if (Test-Path -LiteralPath $_schemaConfLib) { . $_schemaConfLib }
+
 # One id per Manager session -- groups this session's audit events (phase 6).
 $script:PimManagerSessionId = [guid]::NewGuid().ToString('N')
 
@@ -361,6 +367,14 @@ function Set-PimManagerInstance {
     # Lifecycle columns materialize on first open after an update (blank =
     # default behavior = auto-approval). Idempotent.
     Invoke-PimManagerCsvSchemaUpgrade -Dir $inst.configRoot
+
+    # Locked-schema + data conformance: bring migrated customer data to the
+    # current contract -- drop deprecated columns (TierLevel) + migrate their
+    # data first (TierLevel->Purpose). Idempotent; safe to run every open.
+    if (Get-Command Invoke-PimSchemaConformancePreflight -ErrorAction SilentlyContinue) {
+        try { [void](Invoke-PimSchemaConformancePreflight -ConfigDir $inst.configRoot) }
+        catch { Write-Warning "  [SchemaConf] preflight skipped: $($_.Exception.Message)" }
+    }
 
     # Per-instance state must not leak across customers.
     $script:PimActiveAssignmentsCache          = $null

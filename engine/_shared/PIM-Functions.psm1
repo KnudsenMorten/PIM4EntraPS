@@ -59,6 +59,11 @@ ForEach ($_mod in $_PIM_ModulesToLoad) {
 # mandatory expiry. Own file so the pim-manager dot-sources it standalone.
 . (Join-Path $PSScriptRoot 'PIM-Conformance.ps1')
 
+# Locked-schema + data conformance preflight -- Invoke-PimSchemaConformancePreflight
+# brings migrated customer CSV/SQL data to the locked structure (adds required
+# columns, DROPS deprecated like TierLevel, migrates TierLevel->Purpose first).
+. (Join-Path $PSScriptRoot 'PIM-SchemaConformance.ps1')
+
 function Ensure-DateTime {
     <#
         .SYNOPSIS
