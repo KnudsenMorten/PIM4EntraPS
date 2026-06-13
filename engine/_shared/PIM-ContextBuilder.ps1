@@ -64,11 +64,31 @@ function Build-PimContext {
         throw 'Build-PimContext: $global:PIM_Filters not loaded. Call Initialize-LauncherConfig first (which sources PIM4EntraPS.Filters.locked.ps1).'
     }
 
-    Write-Host '[context] Fetching Entra users + groups + AUs + roles from Graph...'
-    $Global:Users_All_ID  = Get-MgUser -All
-    $Global:Groups_All_ID = Get-MgGroup -All
-    $Global:AU_All_ID     = Get-MgDirectoryAdministrativeUnit -All
-    $Global:Roles_All_ID  = Get-MgRoleManagementDirectoryRoleDefinition
+    # Backend: PURE REST by default (no Graph module -> nothing to Install-Module,
+    # no version drift, no auto-import demanding Connect-MgGraph) so the engine runs
+    # identically on a VM or container. Set $global:PIM_UseGraphSdk = $true to opt
+    # back into the legacy Graph SDK path. REST results are normalized to SDK
+    # property casing so the filters below ($user.UserPrincipalName,
+    # $group.DisplayName, ...) work either way.
+    $useSdk = [bool]$global:PIM_UseGraphSdk
+    if ($useSdk) {
+        Write-Host '[context] Fetching Entra users + groups + AUs + roles from Graph (SDK)...'
+        $Global:Users_All_ID  = Get-MgUser -All
+        $Global:Groups_All_ID = Get-MgGroup -All
+        $Global:AU_All_ID     = Get-MgDirectoryAdministrativeUnit -All
+        $Global:Roles_All_ID  = Get-MgRoleManagementDirectoryRoleDefinition
+    }
+    else {
+        if (-not (Get-Command Invoke-PimGraph -ErrorAction SilentlyContinue)) {
+            $rest = Join-Path (Split-Path -Parent $PSCommandPath) 'PIM-Rest.ps1'
+            if (Test-Path $rest) { . $rest } else { throw 'Build-PimContext: no Graph SDK and PIM-Rest.ps1 not found.' }
+        }
+        Write-Host '[context] Fetching Entra users + groups + AUs + roles from Graph (REST, no modules)...'
+        $Global:Users_All_ID  = @(Invoke-PimGraph -Path "/users?`$select=id,userPrincipalName,displayName,mail,accountEnabled" -All | ConvertTo-PimSdkShape)
+        $Global:Groups_All_ID = @(Invoke-PimGraph -Path "/groups?`$select=id,displayName,groupTypes,securityEnabled,mailNickname,description" -All | ConvertTo-PimSdkShape)
+        $Global:AU_All_ID     = @(Invoke-PimGraph -Path "/directory/administrativeUnits?`$select=id,displayName,visibility" -All | ConvertTo-PimSdkShape)
+        $Global:Roles_All_ID  = @(Invoke-PimGraph -Path "/roleManagement/directory/roleDefinitions?`$select=id,displayName,isBuiltIn,templateId" -All | ConvertTo-PimSdkShape)
+    }
 
     # Filter-key -> (sourceGlobalName, outputGlobalName).
     # Source is the global to filter from; output is where to assign the result.
