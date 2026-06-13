@@ -5,18 +5,27 @@
 # Build context = repo root:
 #   docker build -f SOLUTIONS/PIM4EntraPS/tools/pim-manager/Dockerfile -t <acr>/pim-manager:<tag> .
 #
-# NOTE: the SQL data layer uses System.Data.SqlClient. On Linux/.NET that package
-# must be present; if your image can't load it, switch the base to a Windows
-# container (System.Data.SqlClient ships in-box on Windows PowerShell) OR port
-# New-PimSqlConnection to Microsoft.Data.SqlClient. Graph modules are needed for
-# the live Revoke/refresh endpoints.
+# REST-only: NO PowerShell modules at all (Graph/ARM/Power BI go over REST via
+# PIM-Rest.ps1). The SQL data plane has no REST API, so a TDS driver is unavoidable --
+# but it's a pinned .NET ASSEMBLY, NOT a PowerShell module. Stage 1 uses the .NET SDK to
+# fetch a pinned Microsoft.Data.SqlClient + its dependency closure; stage 2 copies the
+# DLLs into the runtime image and PIM-SqlStore Add-Types them ($env:PIM_SQLCLIENT_DLL).
+# No Install-Module, no gallery, no auto-update -- the version is frozen in the image.
 
+# ---- stage 1: fetch the pinned SQL driver assembly (no PS module) ----
+FROM mcr.microsoft.com/dotnet/sdk:8.0 AS sqldriver
+WORKDIR /drv
+RUN dotnet new classlib -n shim -o shim \
+ && cd shim \
+ && dotnet add package Microsoft.Data.SqlClient --version 5.2.2 \
+ && dotnet publish -c Release -o /drv/out
+
+# ---- stage 2: runtime ----
 FROM mcr.microsoft.com/powershell:7.4-ubuntu-22.04
 
-# Microsoft.Data.SqlClient (Linux-safe SQL) + the Graph modules the live endpoints use.
-RUN pwsh -NoProfile -Command "Set-PSRepository -Name PSGallery -InstallationPolicy Trusted; \
-    Install-Module Microsoft.Graph.Authentication -Scope AllUsers -Force -ErrorAction SilentlyContinue; \
-    Install-Module Az.Accounts -Scope AllUsers -Force -ErrorAction SilentlyContinue"
+# the pinned SQL driver + its dependency closure (assemblies only -- no module)
+COPY --from=sqldriver /drv/out/*.dll /opt/sqlclient/
+ENV PIM_SQLCLIENT_DLL=/opt/sqlclient/Microsoft.Data.SqlClient.dll
 
 WORKDIR /app
 COPY SOLUTIONS/PIM4EntraPS /app/PIM4EntraPS

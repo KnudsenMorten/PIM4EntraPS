@@ -16,17 +16,76 @@
 Set-StrictMode -Off
 Add-Type -AssemblyName System.Data -ErrorAction SilentlyContinue
 
+function Resolve-PimSqlClientType {
+    # The SQL driver is the one unavoidable non-REST dependency. Prefer
+    # Microsoft.Data.SqlClient (cross-platform: Linux/PS7 container) and fall back to
+    # the in-box System.Data.SqlClient (Windows PowerShell 5.1). Order:
+    #   1. Microsoft.Data.SqlClient (already loaded)
+    #   2. System.Data.SqlClient    (in-box on Windows 5.1; null on .NET Core/Linux)
+    #   3. an explicit DLL via $env:PIM_SQLCLIENT_DLL
+    #   4. the SqlServer module (bundles Microsoft.Data.SqlClient w/ managed SNI on Linux)
+    if ($script:PimSqlClientType) { return $script:PimSqlClientType }
+    $t = ('Microsoft.Data.SqlClient.SqlConnection' -as [type])
+    if (-not $t) { $t = ('System.Data.SqlClient.SqlConnection' -as [type]) }   # in-box on Windows PS 5.1
+    # Pinned, BUNDLED assembly (no PowerShell module): $env:PIM_SQLCLIENT_DLL points at
+    # the Microsoft.Data.SqlClient.dll (or its folder). Probe the same folder for the
+    # dependency closure on demand, so we Add-Type one DLL and deps resolve locally.
+    if (-not $t -and $env:PIM_SQLCLIENT_DLL) {
+        $p = $env:PIM_SQLCLIENT_DLL
+        $script:PimSqlDllDir = if (Test-Path -LiteralPath $p -PathType Container) { $p } else { Split-Path -Parent $p }
+        $main = if (Test-Path -LiteralPath $p -PathType Leaf) { $p } else { Join-Path $script:PimSqlDllDir 'Microsoft.Data.SqlClient.dll' }
+        if (Test-Path -LiteralPath $main) {
+            $resolver = [System.ResolveEventHandler]{
+                param($s, $e)
+                $n = ($e.Name -split ',')[0]
+                $cand = Join-Path $script:PimSqlDllDir "$n.dll"
+                if (Test-Path -LiteralPath $cand) { return [System.Reflection.Assembly]::LoadFrom($cand) }
+                return $null
+            }
+            try {
+                [System.AppDomain]::CurrentDomain.add_AssemblyResolve($resolver)
+                Add-Type -Path $main -ErrorAction Stop
+                $t = ('Microsoft.Data.SqlClient.SqlConnection' -as [type])
+            } catch { Write-Verbose "PIM-SqlStore: Add-Type $main failed: $($_.Exception.Message)" }
+        }
+    }
+    if (-not $t) { throw 'No SQL client available. Windows PS 5.1 has System.Data.SqlClient in-box; on Linux/PS7 bundle Microsoft.Data.SqlClient and point $env:PIM_SQLCLIENT_DLL at it (the container image does this).' }
+    $script:PimSqlClientType = $t
+    return $t
+}
+
 function New-PimSqlConnection {
-    # Single place connections are created, so MANAGED IDENTITY (the chosen auth
-    # for Azure SQL) works passwordless: the launcher mints an MI access token for
-    # https://database.windows.net/ into $global:PIM_SqlAccessToken; we set it on
-    # the connection (System.Data.SqlClient supports .AccessToken). No password in
-    # the connection string. Skipped when the CS uses Integrated auth (dev/on-prem)
-    # -- the two are mutually exclusive.
+    # Single place connections are created, so MANAGED IDENTITY (the chosen auth for
+    # Azure SQL) works passwordless: an MI access token for https://database.windows.net/
+    # is set on the connection (.AccessToken). If one isn't pre-minted, mint it via
+    # PIM-Rest (MI / SPN / az) here. No password in the connection string. Skipped when
+    # the CS uses Integrated auth (dev/on-prem) -- the two are mutually exclusive.
     param([Parameter(Mandatory)][string]$ConnectionString)
-    $c = New-Object System.Data.SqlClient.SqlConnection $ConnectionString
-    if ($global:PIM_SqlAccessToken -and $ConnectionString -notmatch '(?i)Integrated\s*Security') {
-        try { $c.AccessToken = "$($global:PIM_SqlAccessToken)" } catch {}
+    $type = Resolve-PimSqlClientType
+    $c = $type::new($ConnectionString)
+    if ($ConnectionString -notmatch '(?i)Integrated\s*Security') {
+        if (-not $global:PIM_SqlAccessToken -and (Get-Command Get-PimRestToken -ErrorAction SilentlyContinue)) {
+            # 0) BREAK-GLASS / emergency edition on a client PC: no MI, no SPN -- the
+            #    operator signs in interactively as THEMSELVES (audited under the human).
+            #    Opt in with $global:PIM_SqlInteractive or $global:PIM_Interactive.
+            if ($global:PIM_SqlInteractive -or $global:PIM_Interactive) {
+                try { $global:PIM_SqlAccessToken = Get-PimRestToken -Resource 'https://database.windows.net' -Interactive } catch { Write-Warning "  [sql] interactive token failed: $($_.Exception.Message)" }
+            }
+            # 1) Managed Identity (App Service $IDENTITY_ENDPOINT / IMDS) when present.
+            if (-not $global:PIM_SqlAccessToken -and ($env:IDENTITY_ENDPOINT -or $global:PIM_UseManagedIdentity)) {
+                try { $global:PIM_SqlAccessToken = Get-PimRestToken -Resource 'https://database.windows.net' -UseManagedIdentity } catch { Write-Warning "  [sql] MI token failed: $($_.Exception.Message)" }
+            }
+            # 2) Fall back to an SPN (PIM_SqlClientId/Secret or PIM_ClientId/Secret, cert, or az)
+            #    -- e.g. when MI isn't wired into the container. Get-PimRestToken resolves the
+            #    configured client-credentials for the database resource.
+            if (-not $global:PIM_SqlAccessToken) {
+                $sqlCid = if ($global:PIM_SqlClientId) { $global:PIM_SqlClientId } else { $global:PIM_ClientId }
+                $sqlSec = if ($global:PIM_SqlClientSecret) { $global:PIM_SqlClientSecret } else { $global:PIM_ClientSecret }
+                try { $global:PIM_SqlAccessToken = Get-PimRestToken -Resource 'https://database.windows.net' -ClientId $sqlCid -ClientSecret $sqlSec } catch { Write-Warning "  [sql] SPN token failed: $($_.Exception.Message)" }
+            }
+        }
+        if ($global:PIM_SqlAccessToken) { try { $c.AccessToken = "$($global:PIM_SqlAccessToken)" } catch { Write-Warning "  [sql] set AccessToken failed: $($_.Exception.Message)" } }
+        else { Write-Warning "  [sql] NO SQL access token acquired (connection would present no credential)" }
     }
     return $c
 }
@@ -61,15 +120,17 @@ function Get-PimSqlConnectionString {
     #   3. KV pointer ($global:PIM_SqlConnStringVault + ...Secret) -> fetch from KV
     #   4. passwordless build from $global:PIM_SqlServer + db (Integrated / AAD-MI)
     # The connection string / secret is NEVER read from a JSON/config file.
-    param([string]$Server, [string]$Database = 'PIM4EntraPS')
+    param([string]$Server, [string]$Database)
+    if (-not $Database) { $Database = if ($global:PIM_SqlDatabase) { "$($global:PIM_SqlDatabase)" } else { 'PIM4EntraPS' } }
     if ($Server) { return "Server=$Server;Database=$Database;Integrated Security=SSPI;Encrypt=False;TrustServerCertificate=True;Connection Timeout=15" }
     if ($global:PIM_SqlConnectionString) { return $global:PIM_SqlConnectionString }
     if ($global:PIM_SqlConnStringVault -and $global:PIM_SqlConnStringSecret) {
         return (Get-PimSqlSecretFromKeyVault -VaultName "$($global:PIM_SqlConnStringVault)" -SecretName "$($global:PIM_SqlConnStringSecret)")
     }
-    $srv = if ($global:PIM_SqlServer) { $global:PIM_SqlServer } else { '.\SQLEXPRESS' }
-    # Passwordless: Integrated (on-prem/Express) or, for Azure SQL, the launcher
-    # sets a token-based CS in $global:PIM_SqlConnectionString instead.
+    $srv = if ($global:PIM_SqlServer) { "$($global:PIM_SqlServer)" } else { '.\SQLEXPRESS' }
+    # Azure SQL (FQDN) -> passwordless token-based CS (MI AccessToken set by
+    # New-PimSqlConnection). On-prem / Express -> Integrated.
+    if ($srv -match '(?i)database\.windows\.net') { return (Get-PimAzureSqlConnectionString -Fqdn $srv -Database $Database) }
     return "Server=$srv;Database=$Database;Integrated Security=SSPI;Encrypt=False;TrustServerCertificate=True;Connection Timeout=15"
 }
 
