@@ -190,6 +190,20 @@ Describe 'Portal-admin scoping (delegated GUI managers)' {
         (Test-PimPortalCanSeeGroup -Profile $null -Facets @{ service='entra'; tier=0; level=0; kind='indirect'; scope='' } -IsSuperAdmin) | Should -BeTrue
         (Test-PimPortalCanManageGroup -Profile $null -Facets @{ service='azure'; tier=0; level=0; kind='direct'; scope='' } -IsSuperAdmin) | Should -BeTrue
     }
+    It 'network zone: tier-0 management requires PAW (even for super-admin) when a zone is supplied' {
+        $t0 = @{ service='entra'; tier=0; level=1; kind='indirect'; scope='' }
+        # super-admin still blocked from tier-0 when the request is not from PAW
+        (Test-PimPortalCanManageGroup -Profile $null -Facets $t0 -IsSuperAdmin -RequestZone 'internal') | Should -BeFalse
+        (Test-PimPortalCanManageGroup -Profile $null -Facets $t0 -IsSuperAdmin -RequestZone 'paw') | Should -BeTrue
+        # tier 1/2 fine from the internal network
+        (Test-PimPortalCanManageGroup -Profile $null -Facets @{ service='azure'; tier=1; level=2; kind='indirect'; scope='' } -IsSuperAdmin -RequestZone 'internal') | Should -BeTrue
+        # no zone supplied (engine/automation) -> network gate skipped
+        (Test-PimPortalCanManageGroup -Profile $null -Facets $t0 -IsSuperAdmin) | Should -BeTrue
+        # pure helper
+        (Test-PimNetworkZoneAllowedForTier -Tier 0 -RequestZone 'internal') | Should -BeFalse
+        (Test-PimNetworkZoneAllowedForTier -Tier 0 -RequestZone 'paw') | Should -BeTrue
+        (Test-PimNetworkZoneAllowedForTier -Tier 2 -RequestZone 'internal') | Should -BeTrue
+    }
     It 'Select-PimPortalVisibleRows filters a row set for the profile' {
         $rows = @(
             [pscustomobject]@{ GroupName='PIM-Entra-ID-GA-L0-T0-CP-ID'; Workload='Entra-ID'; Level='L0'; TierLevel='T0'; Plane='CP' }

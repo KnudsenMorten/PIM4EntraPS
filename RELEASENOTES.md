@@ -1,9 +1,10 @@
 # Release notes for PIM4EntraPS
 
-## v2.4.194
+## v2.4.195
 
 Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monorepo:
 
+- release: PIM4EntraPS v2.4.195 -- network-tiered access: tier-0 management requires PAW (b63d95a9)
 - release: PIM4EntraPS v2.4.194 -- SQL data store (phase 6), proven against real SQL Server (89fee09b)
 - release: PIM4EntraPS v2.4.193 -- portal read-scoping on /api/csv (phase 2 enforcement) (87fb0b57)
 - release: PIM4EntraPS v2.4.192 -- guest invite (cloud-only) + self-service toggle + UserType column (phase 4) (341903b7)
@@ -33,7 +34,6 @@ Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monor
 - release: PIM4EntraPS v2.4.168 -- Install-PimEngineAppRegistration -MachineStore switch: cert created/reused in Cert:\LocalMachine\My (visible in certlm.msc, usable by service/scheduled-task identities, matches platform security design); default stays CurrentUser; docstrings name the selected store. Field cause: operator could not find the cert -- it was in the user store while certlm shows the machine store (3aaa6d09)
 - release: PIM4EntraPS v2.4.167 -- Install-PimEngineAppRegistration re-run fixes: keyCredentials merge now dedupes by thumbprint via CustomKeyIdentifier (Graph returns Key=$null on read -> old first-20-bytes grouping crashed every re-run with null-array index; existing entries win ties preserving KeyId/key material; new credential stamped with GetCertHash); cert auto-reuse of newest still-valid matching-subject store cert (>30d, has private key) instead of minting a duplicate per run (one mgmt-host key for N per-tenant apps = MSP pattern); -ExistingThumbprint still pins. Parse + merge unit test green. Follow-up queued: -MachineStore option for LocalMachine\My (4bfc72b8)
 - release: PIM4EntraPS v2.4.166 -- phase 12a groundwork: sql/platform-schema.sql (platform.Tenants w/ rings, TenantApps w/ thumbprint identifiers, Secrets Always-Encrypted-ready OR KeyVaultUri pointer w/ shape check, pim.CentralAdmins, platform.AuditEvents, pim.vw_AdminTenantTargets implementing engine ring semantics) + platform-seed-demo.sql (fictional 5-tenant/3-admin MSP sim). Deployed + verified on BOTH matrix targets: Azure SQL serverless w/ Entra-only auth (SPN admin, token connections) AND on-prem SQL 2022 Express w/ Windows Integrated; identical fan-out ring0->5, ring1->3, ring2->2 (486fa199)
-- release: PIM4EntraPS v2.4.165 -- phase 12 design: on-prem/hybrid SQL Server first-class alongside Azure SQL/MI. Repository connection profile $global:PIM_SqlConnection w/ AuthMode EntraInteractive|EntraSpn|WindowsIntegrated, TLS enforced, SQL logins disabled in every mode; Azure = Entra MFA+CA at the DB door, classic on-prem AD = Windows Integrated/Kerberos (operator) + gMSA (engine) with the Manager Entra sign-in as the app-layer MFA boundary + subnet scoping, SQL 2022+ Arc = optional Entra-on-prem middle ground; DB roles mirror Reader/Admin/SuperAdmin everywhere (cb3b328b)
 
 ---
 
@@ -42,6 +42,15 @@ Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monor
 > **Curated changelog.** The publish workflow auto-prepends recent monorepo commits as a raw activity log; this file is the human-friendly narrative on top.
 
 ---
+
+## v2.4.195 -- network-tiered access: tier-0 management requires PAW (engine gate)
+
+Realizes the network-tiering model (one portal codebase + one Azure SQL/PE, two Conditional-Access-gated doors: a self-service door from the whole internal network for tier 1/2, a PAW-only door for tier 0). Engine gate added to `PIM-PortalAccess.ps1` (Pester 60 -> **61**):
+
+- **`Test-PimNetworkZoneAllowedForTier`** -- tier-0 actions require the **PAW** zone; tier 1/2 allowed from any internal zone (`Tier0RequiresPaw`, default on).
+- **`Test-PimPortalCanManageGroup`** gains `-RequestZone` (the GUI passes the caller's CA/source-network claim): when supplied, the network gate applies **even to super-admins** -- tier-0 mutations are refused unless from PAW. No zone supplied (engine/automation) -> gate skipped. CA enforces the network per door; this is the app-side defense-in-depth double-check.
+
+VERSION -> 2.4.195.
 
 ## v2.4.194 -- admin-interface epic, phase 6: SQL data store (proven against real SQL Server)
 
