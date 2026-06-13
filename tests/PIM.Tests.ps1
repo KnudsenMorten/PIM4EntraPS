@@ -283,6 +283,46 @@ Describe 'Portal-admin scoping (delegated GUI managers)' {
         (Test-PimApprovalEscalationDue -Request $req -NowUtc ([datetime]'2026-06-14T02:00:00Z') -SlaHours 24) | Should -BeTrue   # 26h
         (Test-PimApprovalEscalationDue -Request $req -NowUtc ([datetime]'2026-06-13T06:00:00Z') -SlaHours 24) | Should -BeFalse  # 6h
     }
+    It 'layered approvers by scope (Defender servers-only vs all-assets) + escalation steps through layers' {
+        $matrix = @(
+            [pscustomobject]@{ workload='Defender'; scope='Servers'; approvers=@('serverteam@contoso.com') }   # specific (scope)
+            [pscustomobject]@{ workload='Defender'; approvers=@('secserviceowner@contoso.com') }                # broad service owner
+        )
+        $srv = @{ workload='Defender'; service='workload'; tier=1; level=3; plane='WDP'; scope='Servers' }
+        # primary (route) = most-specific scope layer; layered (allowed) = both
+        @(Get-PimApproversForResource -Facets $srv -Matrix $matrix) | Should -Be @('serverteam@contoso.com')
+        $all = @(Get-PimAllApproversForResource -Facets $srv -Matrix $matrix)
+        ($all -contains 'serverteam@contoso.com' -and $all -contains 'secserviceowner@contoso.com') | Should -BeTrue
+        (Test-PimCanApprove -Identity 'secserviceowner@contoso.com' -Row ([pscustomobject]@{ Workload='Defender'; Scope='Servers'; TierLevel='T1'; Level='L3'; Plane='WDP' }) -Facets $srv -Matrix $matrix -Profile $null) | Should -BeTrue
+        # layers most-specific first
+        $layers = @(Get-PimApproverLayers -Facets $srv -Matrix $matrix)
+        $layers.Count | Should -Be 2
+        $layers[0].approvers | Should -Contain 'serverteam@contoso.com'
+        $layers[1].approvers | Should -Contain 'secserviceowner@contoso.com'
+        # escalation steps: <24h -> layer 0; 24-48h -> layer 1 (escalated)
+        $rq = New-PimApprovalRequest -Requestor 'r' -TargetAdmin 'c' -GroupTag 'Defender-Servers' -Justification 'x' -NowUtc ([datetime]'2026-06-13T00:00:00Z')
+        (Get-PimEscalationTargetForRequest -Request $rq -Facets $srv -Matrix $matrix -NowUtc ([datetime]'2026-06-13T06:00:00Z') -SlaHours 24).layerIndex | Should -Be 0
+        $esc = Get-PimEscalationTargetForRequest -Request $rq -Facets $srv -Matrix $matrix -NowUtc ([datetime]'2026-06-14T06:00:00Z') -SlaHours 24
+        $esc.layerIndex | Should -Be 1; $esc.isEscalated | Should -BeTrue; $esc.approvers | Should -Contain 'secserviceowner@contoso.com'
+    }
+    It 'Defender scope parsed from the group name (no Scope column)' {
+        # real naming: ...-Scope-Servers-L3... ; Scope column is blank
+        $f = Get-PimGroupFacets -Row ([pscustomobject]@{ GroupName='PIM-Defender-XDR-SecurityOperations-Operator-Scope-Servers-L3-T1-MP-ID'; Workload='Defender-XDR'; Level='L3'; TierLevel='T1'; Plane='MP' })
+        $f.scope | Should -Be 'Servers'
+    }
+    It 'support-function personas (@CISO / @ITManager / @HRManager) resolve from config' {
+        try {
+            $global:PIM_SupportFunctions = @{ CISO=@('ciso@contoso.com'); ITManager=@('itm@contoso.com'); HRManager=@('hrm@contoso.com') }
+            $matrix = @(
+                [pscustomobject]@{ workload='Dataverse'; approvers=@('@HRManager'); escalateTo=@('@ITManager','@CISO') }
+            )
+            $f = @{ workload='Dataverse'; service='workload'; tier=1; level=3; plane='WDP'; scope='' }
+            @(Get-PimApproversForResource -Facets $f -Matrix $matrix) | Should -Be @('hrm@contoso.com')      # @HRManager expanded
+            $escs = @(Get-PimEscalationApprovers -Facets $f -Matrix $matrix)
+            ($escs -contains 'itm@contoso.com' -and $escs -contains 'ciso@contoso.com') | Should -BeTrue   # personas as top escalation
+            (Test-PimCanApprove -Identity 'hrm@contoso.com' -Row ([pscustomobject]@{ Workload='Dataverse'; Level='L3'; TierLevel='T1'; Plane='WDP' }) -Facets $f -Matrix $matrix -Profile $null) | Should -BeTrue
+        } finally { $global:PIM_SupportFunctions = $null }
+    }
     It 'PAW policy: tier-0 + tier-1/MP need PAW; tier-1/WDP L3+ and tier-2 are whole-network' {
         (Get-PimRequiredPawLevel -Tier 0 -Plane 'CP' -Level 1) | Should -Be 1          # tier-0 -> PAW at group level
         (Get-PimRequiredPawLevel -Tier 1 -Plane 'MP' -Level 2) | Should -Be 2          # mgmt plane -> PAW
