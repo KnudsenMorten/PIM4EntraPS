@@ -2609,11 +2609,31 @@ Function Get-PimWorkloadAssignmentPrincipals {
     return @{ id = $id; principals = $principals; displayName = "$($Item.displayName)" }
 }
 
+Function Get-PimWorkloadContainerId {
+    # NESTED-MEMBERSHIP connectors: resolve a GROUP to its container (Dataverse
+    # group-team, Business Central security group, Azure DevOps group) via
+    # api.resolveContainer, so roles can then be attached to the container.
+    # Returns the container id, or $null when the group has no container yet.
+    param([Parameter(Mandatory)][object]$Connector, [Parameter(Mandatory)][hashtable]$Tokens)
+    $op = $Connector.api.resolveContainer
+    if (-not $op) { return $null }
+    $resp = Invoke-PimWorkloadApi -Connector $Connector -Op $op -Tokens $Tokens
+    $items = if ($op.itemsPath) { @(Get-PimNestedProp $resp $op.itemsPath) } else { @($resp) }
+    $first = @($items) | Select-Object -First 1
+    if (-not $first) { return $null }
+    $idf = if ($op.idField) { "$($op.idField)" } else { 'id' }
+    $id = "$(Get-PimNestedProp $first $idf)"
+    if ([string]::IsNullOrWhiteSpace($id)) { return $null }
+    return $id
+}
+
 Function Apply-PimWorkloadAssignments {
     <#
     .SYNOPSIS
         Applies PIM-Assignments-Workloads desired state to the workloads via
         their connector definitions. Idempotent; -WhatIfMode prints the plan.
+        Flat connectors (principal+role assignment objects) and NESTED-MEMBERSHIP
+        connectors (resolve container -> attach role) are both supported.
     #>
     [CmdletBinding()]
     param(
@@ -2677,6 +2697,50 @@ Function Apply-PimWorkloadAssignments {
         if (-not $role) { Write-Host "ERROR: workload '$wid' has no role named '$($row.RoleName)'$(if ($resource) { " on resource '$resource'" }). Valid: $(($roles | ForEach-Object { $_.name }) -join ', ')" -ForegroundColor Red; continue }
 
         $tokens.roleId = $role.id; $tokens.roleName = $role.name
+
+        # --- NESTED-MEMBERSHIP model (Dataverse group-team, Business Central
+        #     security group, Azure DevOps group): resolve the group's CONTAINER,
+        #     then attach/detach the ROLE on that container. There is no flat
+        #     principal+role assignment object, so current-state = role-present-
+        #     on-container. Membership rows are handled here and skip the flat
+        #     path below.
+        if ($conn.membershipModel) {
+            $container = $null
+            try { $container = Get-PimWorkloadContainerId -Connector $conn -Tokens $tokens }
+            catch { Write-Host "ERROR: $wid resolveContainer failed for '$tag': $($_.Exception.Message). Skipping." -ForegroundColor Red; continue }
+            if (-not $container) {
+                Write-Host ("ERROR: {0}: group '{1}' has no {2} container yet (provision it first) -- skipping." -f $conn.name, $tag, $(if ($conn.containerKind) { $conn.containerKind } else { 'membership' })) -ForegroundColor Red; continue
+            }
+            $tokens.container = $container
+            $present = @{}
+            try {
+                $lc = $conn.api.listContainerRoles
+                $cr = Invoke-PimWorkloadApi -Connector $conn -Op $lc -Tokens $tokens
+                $citems = if ($lc.itemsPath) { @(Get-PimNestedProp $cr $lc.itemsPath) } else { @($cr) }
+                foreach ($ci in $citems) { $present["$(Get-PimNestedProp $ci $lc.roleId)".ToLowerInvariant()] = $true }
+            } catch { Write-Host "ERROR: $wid listContainerRoles failed for '$tag': $($_.Exception.Message). Skipping." -ForegroundColor Red; continue }
+            $has = $present.ContainsKey("$($role.id)".ToLowerInvariant())
+            if ($action -ieq 'Assign') {
+                if ($has) { Write-Host ("  [workloads] OK -- {0}: '{1}' already on {2}" -f $conn.name, $role.name, $tag) -ForegroundColor Green; continue }
+                if ($WhatIfMode) { Write-Host ("  [workloads][WHATIF] would attach {0} role '{1}' to {2} ({3})" -f $conn.name, $role.name, $tag, $container) -ForegroundColor Yellow; continue }
+                try {
+                    $body = $null
+                    if ($conn.api.assign.body) { $body = (Expand-PimWorkloadTokens -Text ($conn.api.assign.body | ConvertTo-Json -Depth 8) -Tokens $tokens) | ConvertFrom-Json }
+                    [void](Invoke-PimWorkloadApi -Connector $conn -Op $conn.api.assign -Tokens $tokens -Body $body)
+                    Write-Host ("  [workloads] ATTACHED -- {0}: '{1}' -> {2}" -f $conn.name, $role.name, $tag) -ForegroundColor Cyan
+                } catch { Write-Host ("ERROR: attach failed for {0} '{1}' -> {2}: {3}" -f $conn.name, $role.name, $tag, $_.Exception.Message) -ForegroundColor Red }
+            }
+            elseif ($action -ieq 'Remove') {
+                if (-not $has) { Write-Host ("  [workloads] OK -- {0}: '{1}' not on {2} (nothing to remove)" -f $conn.name, $role.name, $tag) -ForegroundColor Green; continue }
+                if ($WhatIfMode) { Write-Host ("  [workloads][WHATIF] would detach {0} role '{1}' from {2}" -f $conn.name, $role.name, $tag) -ForegroundColor Yellow; continue }
+                try {
+                    [void](Invoke-PimWorkloadApi -Connector $conn -Op $conn.api.remove -Tokens $tokens)
+                    Write-Host ("  [workloads] DETACHED -- {0}: '{1}' from {2}" -f $conn.name, $role.name, $tag) -ForegroundColor Cyan
+                } catch { Write-Host ("ERROR: detach failed for {0} '{1}': {2}" -f $conn.name, $role.name, $tag, $_.Exception.Message) -ForegroundColor Red }
+            }
+            else { Write-Host "WARNING: unknown Action '$action' (expected Assign/Remove). Skipping." -ForegroundColor Yellow }
+            continue
+        }
 
         # Current state: list assignments (per-role when the path needs {roleId}).
         $la = $conn.api.listAssignments

@@ -1,9 +1,10 @@
 # Release notes for PIM4EntraPS
 
-## v2.4.185
+## v2.4.186
 
 Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monorepo:
 
+- release: PIM4EntraPS v2.4.186 -- nested-membership connector adapter + Dataverse connector (8b49c3e8)
 - release: PIM4EntraPS v2.4.185 -- locked-schema + data conformance preflight (25f4c9b5)
 - release: PIM4EntraPS v2.4.184 -- native template versioning + conformance (engine + Manager API + GUI tab) (fc1b3a12)
 - release: PIM4EntraPS v2.4.183 -- entra-approle + azure-rbac connectors + connector status map (22b8a121)
@@ -33,7 +34,6 @@ Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monor
 - release: PIM4EntraPS v2.4.159 -- lifecycle phase 9: resource discovery. Engine Invoke-PimResourceDiscovery (end of run, PIM_ResourceDiscoveryMode Off/Notify default Notify): new Azure subscriptions + Entra role definitions vs output/state/discovery-baseline.json (first run establishes silently; each item audited resource.discovered once, baseline rolls forward). Manager Governance tab Discovered-resources section over the _tenantSync caches with per-instance baseline + Admin-gated Acknowledge (resource.baseline audited); endpoints /api/discovered-resources + /api/discovery-baseline. Auto row-creation = documented follow-up. 14-check harness green PS 5.1 + pwsh 7; node --check green. ALL NINE LIFECYCLE-GOVERNANCE PHASES NOW SHIPPED (v2.4.153-159) (a1944979)
 - release: PIM4EntraPS v2.4.159-pre -- v2.4.158 lifecycle phases 7+8: Manager RBAC Reader/Admin/SuperAdmin (manager-access.custom.json, Windows identity, fail-closed, server-side 403 gates on csv-save/revoke/refresh=Admin + instance/emergency=SuperAdmin, role boot-injected into SPA); Governance tab (role banner, emergency panel, mail-template status, jsonl audit viewer; endpoints /api/access,/api/audit,/api/mail-templates,/api/emergency*); emergency break-glass override (SHA256 passphrase hash in emergency.custom.ps1, constant-time + 15-min lockout; Invoke-PimEmergencyOverride ordered before the template pass: scoped approval disable + owner notification via new emergency-override mail template + same-run auto-restore at TTL expiry with archive + full audit chain). 38-check harness green PS 5.1 + pwsh 7; node --check green (c2739856)
 - release: PIM4EntraPS v2.4.157 -- lifecycle phase 6: unified append-only audit jsonl (output/audit/pim-audit-<yyyyMM>.jsonl; Write-PimAuditEvent best-effort; 13 engine actions wired incl. account/tap/policy/approval/offboard/retire/drift/mail; Manager emits config.csv.save with manager:<windows-identity> actor + session runId) + automatic CSV schema upgrade for existing installs (Invoke-PimCsvSchemaUpgrade at engine start + Manager instance load appends ProvisionDate/TAPLifetimeHours/Template/OffboardDate/DeleteAfterDays + PolicyTemplate/Lifecycle with blank = default = auto-approval; idempotent byte-preserving line-append, quoted-multiline fallback; fixed blank-separator false-multiline + requoted-header re-upgrade loop). 25-check harness green PS 5.1 + pwsh 7 (9d923f67)
-- release: PIM4EntraPS v2.4.157-pre offboarding -- v2.4.156 lifecycle phase 5: OffboardDate/DeleteAfterDays admin offboarding via Invoke-PimAdminOffboarding (reuses Invoke-PimAccountRevoke + session revocation + offboarding-notice mail; offboard-state.json idempotency; WhatIf-aware; create/update loop gates rows past OffboardDate); Lifecycle=Retire group retirement (role assignments + members + delete with PIM- prefix guard; Azure RBAC documented v1 limitation); membership drift cleanup Off/Report/Enforce vs PIM-Assignments-Admins (nested groups report-only); validators PIM-OFF-001/PIM-LC-001 + OffboardDate in PIM-SCHED-001; samples updated. 24-check harness green PS 5.1 + pwsh 7 (e64bc85e)
 
 ---
 
@@ -42,6 +42,16 @@ Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monor
 > **Curated changelog.** The publish workflow auto-prepends recent monorepo commits as a raw activity log; this file is the human-friendly narrative on top.
 
 ---
+
+## v2.4.186 -- nested-membership connector adapter + Dataverse connector
+
+Some workloads have no flat "principal + role" assignment object -- you resolve a **container** from the group, then attach roles to it. The connector framework now supports this natively (Pester **23/23**):
+
+- **Nested-membership adapter** in `Apply-PimWorkloadAssignments`: a connector sets `"membershipModel": true` + a `resolveContainer` op. The engine resolves the group's container (`Get-PimWorkloadContainerId`), lists the container's roles (`listContainerRoles`), and attaches/detaches with the `{container}` token -- current-state is *role-present-on-container*, not principal match. Idempotent, WhatIf-aware; membership rows are handled in their own branch and never touch the flat path.
+- **`dataverse` connector** (new, on the adapter) -- Dynamics 365 / Power Platform in-app **security roles** (the HR org-restructure JIT case): Entra group → **group team** (`teams?$filter=azureactivedirectoryobjectid eq {groupId} and teamtype eq 2`) → roles via `teams({container})/teamroles_association`. Per-environment `baseUrl` uses `{resource}` (the org host; baseUrl token-expansion shipped in v2.4.183). Schema + token-expansion unit-tested; live-validation pending a Dataverse env with the group provisioned as a group team.
+- **Business Central** *fits the same adapter* (container = security group, roles = permission sets) -- not shipped as JSON until the BC Automation API paths are confirmed against a live `$metadata` (no guessed paths). **Azure DevOps** is group *nesting*, not roles, so it is intentionally not a role connector. Both documented in `workloads/connectors/README.md`.
+
+VERSION -> 2.4.186.
 
 ## v2.4.185 -- locked-schema + data conformance preflight (auto-fixes migrated data)
 

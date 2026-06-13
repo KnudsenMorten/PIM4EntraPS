@@ -27,24 +27,32 @@ for every app whose access is an Entra app role. Finance/HR/SecOps JIT use cases
 that need *app-level* access (get into SAP / ServiceNow / a custom app) are
 covered here.
 
-## Needs a nested-membership adapter (documented spec, NOT shipped as flat JSON)
+## Nested-membership adapter (SHIPPED) — container-then-role connectors
 
-These do **not** fit the flat model: there is no assignment object carrying both a
-principal and a role. Instead a container is resolved from the group, then roles
-are attached to the container. A future `nestedMembership` connector mode would
-add a `resolveContainer` step (group → container id) before list/assign/remove.
-The exact REST is captured here so the build is a spec, not a guess:
+Some workloads have no flat assignment object carrying both a principal and a
+role. Instead a **container** is resolved from the group, then roles are attached
+to that container. The engine now supports this natively: a connector sets
+`"membershipModel": true` and adds a `resolveContainer` op (group → container id);
+`Apply-PimWorkloadAssignments` resolves the container, lists its roles
+(`listContainerRoles`), and attaches/detaches via `assign`/`remove` using the
+`{container}` token. (`Get-PimWorkloadContainerId` does the resolve.)
 
-- **Dataverse / Dynamics 365** (HR org-restructure, in-app **security roles**):
-  Entra group → **group team** (`GET /api/data/v9.2/teams?$filter=azureactivedirectoryobjectid eq {groupId} and teamtype eq 2`), then roles via
-  `teams({teamid})/teamroles_association` (`POST .../$ref` with `{"@odata.id":"{baseUrl}/roles({roleId})"}`, `DELETE .../teamroles_association({roleId})/$ref`). Roles: `GET /roles`. Per-environment `baseUrl = https://{org}.crm*.dynamics.com` (token via `$global:PIM_WorkloadTokens['dataverse']`). Note: roles are business-unit scoped — pick the team's BU.
-- **Business Central** (finance chart-of-accounts, **permission sets**): BC
-  Automation API per environment (`baseUrl = https://api.businesscentral.dynamics.com/v2.0/{tenantId}/{environment}/api/...`). Entra security group → permission set. Entity/path names must be read from the environment's `$metadata` first; not assumed here.
-- **Azure DevOps** (org/project access): group **membership**, not roles —
-  `POST https://vssps.dev.azure.com/{org}/_apis/graph/memberships/{subjectDescriptor}/{containerDescriptor}`. Requires resolving subject + container descriptors first.
+- **`dataverse` (SHIPPED on the adapter)** — Dynamics 365 / Power Platform in-app
+  **security roles** (HR org-restructure JIT). Entra group → **group team**
+  (`teams?$filter=azureactivedirectoryobjectid eq {groupId} and teamtype eq 2`) →
+  roles via `teams({container})/teamroles_association`. Per-environment `baseUrl`
+  uses `{resource}` (the org host). Structure built + unit-tested; live-validation
+  pending a Dataverse env with the group provisioned as a group team. Roles are
+  business-unit scoped — pick the team's BU.
+- **Business Central** (finance chart-of-accounts, **permission sets**) — *fits
+  this adapter* (container = security group, roles = permission sets) once the BC
+  Automation API entity/path names are confirmed against a live environment's
+  `$metadata` (`baseUrl = https://api.businesscentral.dynamics.com/v2.0/{tenantId}/{environment}/api/...`). Not shipped as JSON until verified — no guessed paths.
 
-## Cmdlet / portal only (no group-role REST — out of scope for a REST connector)
+## Cmdlet / portal only, or not role-based (no role connector)
 
+- **Azure DevOps** — org/project access is group **nesting**, not roles:
+  `POST https://vssps.dev.azure.com/{org}/_apis/graph/memberships/{subjectDescriptor}/{containerDescriptor}` (resolve subject + container descriptors first). It does not map to the role model, so it is intentionally not a role connector.
 - **Exchange Online RBAC role groups** — `Add-RoleGroupMember` (EXO PowerShell).
   *Exchange admin via Entra directory role* is already covered by `entra-roles`.
 - **Microsoft Purview** compliance role groups — Security & Compliance PowerShell.
