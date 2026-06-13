@@ -1,9 +1,13 @@
 # Release notes for PIM4EntraPS
 
-## v2.4.207
+## v2.4.208
 
 Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monorepo:
 
+- feat(pim): scheduler/job runner — phase-split delta, discovery x3, commit-only triggers + watermark (VM + container) (53cb693e)
+- docs(pim): execution model — in-container scheduler (not Functions/webhooks/Logic Apps); job table; build-status note (job logic exists, runner loop is the remaining piece) (49b1eb81)
+- docs(pim): correct MSP model — 2 SQL DBs (MSP template DB + per-customer LOCAL DB), pull-not-push MSP->local; customer data never leaves tenant; rings drive which template version is pulled (81e9848c)
+- docs(pim): hosting architecture — single-tenant + MSP drawings; no-fragile-deps (pure REST) tenet; SQL seed/bootstrap script (6491433d)
 - feat(pim): engine imports module-free; ARM token via REST; null-safe approver matrix (7a76ed14)
 - feat(pim): REST-only engine proven live (full CRUD, no modules) + REST error surfacing (7dfec006)
 - feat(pim): pure-REST core — engine reads + auth run with no Graph/Az modules (cfe7dd9a)
@@ -30,10 +34,6 @@ Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monor
 - release: PIM4EntraPS v2.4.185 -- locked-schema + data conformance preflight (25f4c9b5)
 - release: PIM4EntraPS v2.4.184 -- native template versioning + conformance (engine + Manager API + GUI tab) (fc1b3a12)
 - release: PIM4EntraPS v2.4.183 -- entra-approle + azure-rbac connectors + connector status map (22b8a121)
-- release: PIM4EntraPS v2.4.182 -- connector framework nested-path fix + per-row resource support (8140d9e3)
-- release: PIM4EntraPS v2.4.181 -- Pester job (all flows rerunnable) + multi-auth connector framework + powerbi connector (a6153dd5)
-- release: PIM4EntraPS v2.4.180 -- entra-roles workload connector (live-tested: 145 directory roles) + activation prereqs (Intune always-on; Defender Unified RBAC = portal activation, no Graph endpoint) + app catalog (120 apps by mechanism) + 100 PIM use-cases (60b72237)
-- release: PIM4EntraPS v2.4.179 -- Manager + scenario functional test suites (68 assertions, rerunnable) (a7d01e49)
 
 ---
 
@@ -50,6 +50,15 @@ Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monor
 - **`Get-PimMatchingApproverRules` is null-safe**: a null/blank entry in the approver matrix (e.g. when none is configured) no longer crashes `Test-PimCanApprove`. Offline suite back to **77/77**.
 
 VERSION -> 2.4.207.
+
+## v2.4.208 -- scheduler / job runner (in-container, VM-capable) + on-demand commit triggers
+
+The job *logic* existed; this adds the **runner** that fires it. `engine/_shared/PIM-Scheduler.ps1`: a pure, tested due-calculation core (`Get-PimDueJobs`/`Test-PimJobDue`/`Get-PimNextRunUtc`), a pluggable handler registry, `Invoke-PimSchedulerTick`, the `Start-PimScheduler` loop, a single-runner SQL lease, **on-demand triggers** and a **change watermark**. Entrypoint `tools/pim-scheduler/Start-PimScheduler.ps1` runs the same on a **VM** (Task Scheduler/service) or in a **container** (sidecar/entrypoint), REST-only, no modules. `tests/Test-PimScheduler.ps1` 27/27; full suite still 77/77.
+
+- **Phase-split delta** — one job per engine `-Scope` (admins · groups-assign · groups-deploy · policies · pim-entra · pim-azure · pim-au · workloads), each on its own cadence so a change commits fast without a whole-tenant pass. A daily `full-reconcile` (`-Scope All`).
+- **Discovery = 3 jobs** — `discovery` scoped to **Entra**, **Azure**, **PowerBI**.
+- **Commit-only trigger** — `Request-PimCommit` (and the SQL **watermark** for out-of-band/MSP-node commits) enqueue an immediate recompute+reconcile, drained off-cadence on the next tick. **Queuing a change triggers nothing** (it only stages rows); the engine recalculates at commit time.
+- Schedule + cadences are config-driven (`JobSchedule`); split finer (per workload, per customer tenant in MSP) without code changes. Engine apply runs in INTENT mode until `$global:PIM_EngineEntryPath` is set (keeps the runner decoupled from the legacy engine being retired). VERSION -> 2.4.208.
 
 ## v2.4.206 -- REST-only engine proven live (full CRUD, no modules) + better REST diagnostics
 

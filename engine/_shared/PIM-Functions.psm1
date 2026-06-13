@@ -113,6 +113,10 @@ If ($global:PIM_UseGraphSdk) {
 # stages + reminder resends; feeds the change queue + templated mail.
 . (Join-Path $PSScriptRoot 'PIM-Lifecycle.ps1')
 
+# Scheduler / job runner -- phase-split delta, queue-apply (commit), reminders,
+# escalations, discovery; on-demand triggers (Request-PimCommit) + change watermark.
+. (Join-Path $PSScriptRoot 'PIM-Scheduler.ps1')
+
 function Ensure-DateTime {
     <#
         .SYNOPSIS
