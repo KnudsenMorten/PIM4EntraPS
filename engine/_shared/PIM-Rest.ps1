@@ -188,11 +188,18 @@ function Invoke-PimRest {
         break
       } catch {
         $code = $null; try { $code = [int]$_.Exception.Response.StatusCode } catch {}
-        if (($code -eq 429 -or $code -ge 500) -and $attempt -lt $MaxRetry) {
-          $wait = [Math]::Min(60, [Math]::Pow(2, $attempt))
+        # surface the API error body (PS7: ErrorDetails.Message; PS5: response stream)
+        $body = $null
+        if ($_.ErrorDetails -and $_.ErrorDetails.Message) { $body = $_.ErrorDetails.Message }
+        else { try { $sr = New-Object System.IO.StreamReader($_.Exception.Response.GetResponseStream()); $body = $sr.ReadToEnd() } catch {} }
+        # retry transient + freshly-created-principal replication (ARM 400 PrincipalNotFound)
+        $isReplDelay = ($code -eq 400 -and "$body" -match 'PrincipalNotFound|does not exist in the directory')
+        if (($code -eq 429 -or $code -ge 500 -or $isReplDelay) -and $attempt -lt $MaxRetry) {
+          $wait = [Math]::Min(60, [Math]::Pow(2, $attempt + 1))
           try { $ra = [int]("$($_.Exception.Response.Headers['Retry-After'])"); if ($ra -gt 0) { $wait = $ra } } catch {}
           Start-Sleep -Seconds $wait; $attempt++; continue
         }
+        if ($body) { throw "$Method $next -> HTTP $code : $body" }
         throw
       }
     }
