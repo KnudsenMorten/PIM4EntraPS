@@ -241,3 +241,64 @@ Describe 'Permission-wizard auto-derivation (reversed create flow)' {
         $d.groupName | Should -BeLike 'PIM-Defender-*-T1-WDP-*'
     }
 }
+
+Describe 'Change queue + full/delta run modes' {
+    It 'Create then Remove on the same key cancels out' {
+        $q = @(
+            New-PimChange -Entity 'PIM-Definitions-Tasks' -Key 'k1' -Op Create -Payload @{ v=1 } -EnqueuedUtc '2026-06-13T10:00:00Z'
+            New-PimChange -Entity 'PIM-Definitions-Tasks' -Key 'k1' -Op Remove -EnqueuedUtc '2026-06-13T10:01:00Z'
+        )
+        @(Get-PimQueueNetChanges -Queue $q).Count | Should -Be 0
+    }
+    It 'Create then Update folds to Create with the latest payload' {
+        $q = @(
+            New-PimChange -Entity 'PIM-Definitions-Tasks' -Key 'k2' -Op Create -Payload @{ v=1 } -EnqueuedUtc '2026-06-13T10:00:00Z'
+            New-PimChange -Entity 'PIM-Definitions-Tasks' -Key 'k2' -Op Update -Payload @{ v=2 } -EnqueuedUtc '2026-06-13T10:05:00Z'
+        )
+        $net = @(Get-PimQueueNetChanges -Queue $q)
+        $net.Count | Should -Be 1; $net[0].op | Should -Be 'Create'; $net[0].payload.v | Should -Be 2
+    }
+    It 'Update then Remove folds to Remove' {
+        $q = @(
+            New-PimChange -Entity 'PIM-Assignments-Admins' -Key 'a1' -Op Update -EnqueuedUtc '2026-06-13T10:00:00Z'
+            New-PimChange -Entity 'PIM-Assignments-Admins' -Key 'a1' -Op Remove -EnqueuedUtc '2026-06-13T10:09:00Z'
+        )
+        $net = @(Get-PimQueueNetChanges -Queue $q)
+        $net.Count | Should -Be 1; $net[0].op | Should -Be 'Remove'
+    }
+    It 'apply plan: definitions before assignments; removes after creates' {
+        $q = @(
+            New-PimChange -Entity 'PIM-Assignments-Admins' -Key 'a' -Op Create -EnqueuedUtc '2026-06-13T10:00:00Z'
+            New-PimChange -Entity 'PIM-Definitions-Tasks' -Key 'd' -Op Create -EnqueuedUtc '2026-06-13T10:00:00Z'
+            New-PimChange -Entity 'PIM-Definitions-Tasks' -Key 'x' -Op Remove -EnqueuedUtc '2026-06-13T10:00:00Z'
+        )
+        $plan = @(Get-PimQueueApplyPlan -Queue $q)
+        "$($plan[0].entity)" | Should -BeLike '*Definitions*'   # definition create first
+        $plan[0].op | Should -Be 'Create'
+        $plan[-1].op | Should -Be 'Remove'                       # removes last
+    }
+    It 'Delta run = queue net plan; Full run = upsert all desired' {
+        $q = @( New-PimChange -Entity 'PIM-Definitions-Tasks' -Key 'k' -Op Create -EnqueuedUtc '2026-06-13T10:00:00Z' )
+        @(Get-PimRunSet -Mode Delta -Queue $q).Count | Should -Be 1
+        $desired = @(
+            [pscustomobject]@{ entity='PIM-Definitions-Tasks'; key='a'; payload=@{} }
+            [pscustomobject]@{ entity='PIM-Definitions-Tasks'; key='b'; payload=@{} }
+        )
+        $full = @(Get-PimRunSet -Mode Full -DesiredItems $desired)
+        $full.Count | Should -Be 2; ($full | Where-Object op -ne 'Update').Count | Should -Be 0
+    }
+    It 'persistence: enqueue -> read -> clear round-trip' {
+        $qf = Join-Path ([System.IO.Path]::GetTempPath()) ("pimq-" + [guid]::NewGuid().ToString('N').Substring(0,8) + '.json')
+        try {
+            $c1 = New-PimChange -Entity 'PIM-Definitions-Tasks' -Key 'k1' -Op Create
+            Add-PimChangeToQueue -QueueFile $qf -Change $c1 | Should -Be 1
+            Add-PimChangeToQueue -QueueFile $qf -Change (New-PimChange -Entity 'PIM-Definitions-Tasks' -Key 'k2' -Op Create) | Should -Be 2
+            @(Read-PimChangeQueue -QueueFile $qf).Count | Should -Be 2
+            Clear-PimChangeQueue -QueueFile $qf -KeepIds @("$($c1.id)") | Should -Be 1
+            @(Read-PimChangeQueue -QueueFile $qf).Count | Should -Be 1
+        } finally { Remove-Item -LiteralPath $qf -Force -ErrorAction SilentlyContinue }
+    }
+    It 'queue SQL DDL is emitted (Phase-6 readiness)' {
+        (Get-PimChangeQueueDdl) | Should -BeLike '*CREATE TABLE pim.ChangeQueue*'
+    }
+}

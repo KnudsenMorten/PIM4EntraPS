@@ -1,9 +1,10 @@
 # Release notes for PIM4EntraPS
 
-## v2.4.188
+## v2.4.189
 
 Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monorepo:
 
+- release: PIM4EntraPS v2.4.189 -- change queue + full/delta run modes (phase 7) (48a909c5)
 - release: PIM4EntraPS v2.4.188 -- admin-interface epic phase 2 server seam (portal-access + wizard-derive endpoints) (79f8171f)
 - release: PIM4EntraPS v2.4.187 -- admin-interface epic phase 1 (portal-admin scoping + wizard derivation engines) (164d002c)
 - release: PIM4EntraPS v2.4.186 -- nested-membership connector adapter + Dataverse connector (8b49c3e8)
@@ -33,7 +34,6 @@ Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monor
 - release: PIM4EntraPS v2.4.162 -- phase 11 design correction: the MANAGER ingests external requests (SNOW -> MID inbox -> Manager verify + approval queue -> pending -> Review & Save -> CSV), the engine never reads external input and stays purely declarative; no lights-out path bypassing operator + CSV (2cc21156)
 - release: PIM4EntraPS v2.4.161 -- design phases 10+11 in docs/LIFECYCLE-GOVERNANCE.md: access reviews as hybrid (Entra review UX, engine-owned schedules with auto-apply OFF + decision sweep; Deny -> engine tombstone suppression layer treated as Action=Remove so the CSV never re-delegates a review-removed member; PIM-REV-001 reconciliation flag) + external request intake via ServiceNow MID Server file-drop inbox (fully internal pull-only, create-only writer ACL, signed typed requests w/ nonce ledger, admin.onboard restricted to template ids, approval-required groups hard-denied, activation out of scope, Manager approval queue default, full audit; Azure Storage queue as no-MID fallback) (7400b94c)
 - release: PIM4EntraPS v2.4.160 + extension v1.6.27 -- dead CA-session tokens self-heal instead of erroring: mid-action staleness (401/token-shaped 403) during Activate / Deactivate / My Access load routes to triggerInteractiveReauth (wipes Graph+ARM tokens = auto sign-out, overlay now names Conditional Access session lifetime, popup reloads straight into interactive sign-in); popup-open dead-refresh-token path already self-healed via tryRefresh cache wipe. node --check + 7 behavioral assertions green. CRX repack on the signing-key box still required to publish 1.6.27 to the fleet (6b31c951)
-- release: PIM4EntraPS v2.4.159 -- lifecycle phase 9: resource discovery. Engine Invoke-PimResourceDiscovery (end of run, PIM_ResourceDiscoveryMode Off/Notify default Notify): new Azure subscriptions + Entra role definitions vs output/state/discovery-baseline.json (first run establishes silently; each item audited resource.discovered once, baseline rolls forward). Manager Governance tab Discovered-resources section over the _tenantSync caches with per-instance baseline + Admin-gated Acknowledge (resource.baseline audited); endpoints /api/discovered-resources + /api/discovery-baseline. Auto row-creation = documented follow-up. 14-check harness green PS 5.1 + pwsh 7; node --check green. ALL NINE LIFECYCLE-GOVERNANCE PHASES NOW SHIPPED (v2.4.153-159) (a1944979)
 
 ---
 
@@ -42,6 +42,17 @@ Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monor
 > **Curated changelog.** The publish workflow auto-prepends recent monorepo commits as a raw activity log; this file is the human-friendly narrative on top.
 
 ---
+
+## v2.4.189 -- admin-interface epic, phase 7: change queue + full/delta run modes
+
+Fixes the "1-2 hours before a change shows up" problem -- commit enqueues only the changed items; the engine drains the queue fast. Pure, storage-agnostic engine `engine/_shared/PIM-ChangeQueue.ps1` (Pester 38 -> **45**):
+
+- **`New-PimChange`** + **`Get-PimQueueNetChanges`** -- fold a raw queue per (entity,key) to its NET op: Create+Remove cancels, Create+Update -> Create(latest payload), Update+Remove -> Remove, Remove+Create -> Update.
+- **`Get-PimQueueApplyPlan`** -- ordered apply: definitions before assignments, creates/updates before removes, assignment-removes before definition-removes (never orphan a binding).
+- **`Get-PimRunSet -Mode Full|Delta`** -- DELTA = just the queue's net plan (the fast commit path); FULL = upsert every desired item (the old full reconcile).
+- Persistence adapter (`Read-/Add-/Clear-PimChangeQueue`, JSON now) + **`Get-PimChangeQueueDdl`** (the `pim.ChangeQueue` SQL table for the Phase-6 SQL-only data layer).
+
+VERSION -> 2.4.189.
 
 ## v2.4.188 -- admin-interface epic, phase 2 (server seam): portal-access + wizard-derive endpoints
 
