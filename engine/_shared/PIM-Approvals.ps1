@@ -27,22 +27,96 @@ function Test-PimIsResourceOwner {
     return ($owners -contains "$Identity".Trim().ToLowerInvariant())
 }
 
+# --- APPROVER MATRIX: dimensional approver routing (workload x tier x level x plane) ---
+# Different people approve different slices: helpdesk mgr -> Entra roles L2; Power BI
+# owner -> Power BI admin L1; etc. A rule:
+#   @{ workload='Entra-ID'; tier=0; level=2; plane='*'; approvers=@('helpdeskmgr@..');
+#      escalateTo=@('itmanager@..'); slaHours=24 }
+# Blank/'*' on a dimension = any. Most-specific matching rule wins. Config key
+# 'ApproverMatrix' (lives in SQL settings / config file seed).
+function Get-PimApproverMatrix {
+    if (Get-Command Get-PimPolicySetting -ErrorAction SilentlyContinue) { return @(Get-PimPolicySetting -Name 'ApproverMatrix' -Default @()) }
+    if ($global:PIM_ApproverMatrix) { return @($global:PIM_ApproverMatrix) }
+    return @()
+}
+
+function Test-PimApproverRuleMatch {
+    # Returns the specificity (count of explicitly-set, matching dimensions) or -1
+    # when the rule does not match these facets.
+    param([Parameter(Mandatory)][object]$Rule, [Parameter(Mandatory)][hashtable]$Facets)
+    $spec = 0
+    $wl = "$($Rule.workload)".Trim()
+    if ($wl -and $wl -ne '*') {
+        if ("$wl" -ine "$($Facets.workload)" -and "$wl" -ine "$($Facets.service)") { return -1 }
+        $spec++
+    }
+    if ($null -ne $Rule.tier -and "$($Rule.tier)" -ne '' -and "$($Rule.tier)" -ne '*') {
+        if ([int]$Rule.tier -ne [int]$Facets.tier) { return -1 }; $spec++
+    }
+    if ($null -ne $Rule.level -and "$($Rule.level)" -ne '' -and "$($Rule.level)" -ne '*') {
+        if ([int]$Rule.level -ne [int]$Facets.level) { return -1 }; $spec++
+    }
+    $pl = "$($Rule.plane)".Trim()
+    if ($pl -and $pl -ne '*') { if ("$pl" -ine "$($Facets.plane)") { return -1 }; $spec++ }
+    return $spec
+}
+
+function Get-PimMatchedApproverRule {
+    # The most-specific matching rule for these facets, or $null.
+    param([Parameter(Mandatory)][hashtable]$Facets, [object[]]$Matrix)
+    if (-not $Matrix) { $Matrix = Get-PimApproverMatrix }
+    $best = $null; $bestSpec = -1
+    foreach ($r in @($Matrix)) {
+        $s = Test-PimApproverRuleMatch -Rule $r -Facets $Facets
+        if ($s -ge 0 -and $s -gt $bestSpec) { $best = $r; $bestSpec = $s }
+    }
+    return $best
+}
+
+function Get-PimApproversForResource {
+    # Union of the matched matrix rule's approvers + the resource's Owners column.
+    param([Parameter(Mandatory)][hashtable]$Facets, [object]$Row, [object[]]$Matrix)
+    $set = New-Object System.Collections.Generic.List[string]
+    $rule = Get-PimMatchedApproverRule -Facets $Facets -Matrix $Matrix
+    if ($rule) { foreach ($a in @($rule.approvers)) { if ("$a".Trim()) { $set.Add("$a") } } }
+    if ($Row) { foreach ($o in @(Get-PimResourceOwners -Row $Row)) { $set.Add("$o") } }
+    return @($set.ToArray() | Select-Object -Unique)
+}
+
+function Get-PimEscalationApprovers {
+    # The next-level (escalateTo) approvers for these facets (e.g. IT manager).
+    param([Parameter(Mandatory)][hashtable]$Facets, [object[]]$Matrix)
+    $rule = Get-PimMatchedApproverRule -Facets $Facets -Matrix $Matrix
+    if ($rule) { return @(@($rule.escalateTo) | Where-Object { "$_".Trim() }) }
+    return @()
+}
+
+function Test-PimApprovalEscalationDue {
+    # Optional escalation: TRUE when the SLA (rule slaHours, default 24) has elapsed
+    # since the request and it is still pending -> notify the escalateTo approvers.
+    param([Parameter(Mandatory)][object]$Request, [Parameter(Mandatory)][datetime]$NowUtc, [int]$SlaHours = 24)
+    if ("$($Request.status)" -ne 'pending') { return $false }
+    $req = [datetime]::MinValue
+    if (-not [datetime]::TryParse("$($Request.requestedUtc)", [ref]$req)) { return $false }
+    return (($NowUtc - $req.ToUniversalTime()).TotalHours -ge $SlaHours)
+}
+
 function Test-PimCanApprove {
     # May $Identity approve assignments to this resource? Super-admin, OR a listed
-    # OWNER of the resource, OR a portal-admin with 'approve-assignment' who can see
-    # the resource (tier/level/service/scope via Test-PimPortalCanSeeGroup).
+    # OWNER, OR an APPROVER from the matrix (workload/tier/level/plane), OR a portal-
+    # admin with 'approve-assignment' who can see the resource.
     param(
         [Parameter(Mandatory)][string]$Identity, [Parameter(Mandatory)][object]$Row,
-        [AllowNull()][object]$Profile, [hashtable]$Facets, [switch]$IsSuperAdmin
+        [AllowNull()][object]$Profile, [hashtable]$Facets, [object[]]$Matrix, [switch]$IsSuperAdmin
     )
     if ($IsSuperAdmin) { return $true }
     if (Test-PimIsResourceOwner -Row $Row -Identity $Identity) { return $true }
+    $f = if ($Facets) { $Facets } else { Get-PimGroupFacets -Row $Row }
+    $approvers = @(Get-PimApproversForResource -Facets $f -Row $Row -Matrix $Matrix | ForEach-Object { "$_".ToLowerInvariant() })
+    if ($approvers -contains "$Identity".Trim().ToLowerInvariant()) { return $true }
     if ($Profile) {
         $caps = @(@($Profile.capabilities) | ForEach-Object { "$_".ToLowerInvariant() })
-        if ($caps -contains 'approve-assignment') {
-            $f = if ($Facets) { $Facets } else { Get-PimGroupFacets -Row $Row }
-            if (Test-PimPortalCanSeeGroup -Profile $Profile -Facets $f) { return $true }
-        }
+        if ($caps -contains 'approve-assignment' -and (Test-PimPortalCanSeeGroup -Profile $Profile -Facets $f)) { return $true }
     }
     return $false
 }
