@@ -1,9 +1,11 @@
 # Release notes for PIM4EntraPS
 
-## v2.4.204
+## v2.4.205
 
 Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monorepo:
 
+- feat(pim): pure-REST core — engine reads + auth run with no Graph/Az modules (cfe7dd9a)
+- test(pim): live delegation lab — workload-owner delegation across 2 subs + Power BI, AU-scoped helpdesk L2 + L2 approver, biz-owner-manages-external-consultant (60c42f21)
 - release: PIM4EntraPS v2.4.204 -- Manager 24/7 hosted (App Service for Containers) + local break-glass (0dabc819)
 - release: PIM4EntraPS v2.4.203 -- PIM-Engine consolidated entrypoint + Community/Pro editions (ff29bb7b)
 - release: PIM4EntraPS v2.4.202 -- prod Azure SQL IaC (private endpoint, MI) + CSV->SQL migration (042bf8b2)
@@ -32,14 +34,24 @@ Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monor
 - release: PIM4EntraPS v2.4.179 -- Manager + scenario functional test suites (68 assertions, rerunnable) (a7d01e49)
 - release: PIM4EntraPS v2.4.178 -- rerunnable functional test suite (40 pass/0 fail/6 live-skip) + cloud-native container engine documented in repo (98ffdb04)
 - release: PIM4EntraPS v2.4.177 -- true local engine + signed baseline courier (private-endpoint) + cross-tenant pull PROVEN + local autonomy (750c2ae0)
-- release: PIM4EntraPS v2.4.176 -- MSP+local simulation made real: local-store schema (pim.LocalAdmins/LocalResources Owner=Local, data-layer guardrail CK_LocalAdmins_NoHighPriv = tier-0 rejected at INSERT) + local-seed-demo; pim.CentralAdmins.Owner column (baseline=MSP); Invoke-PimMspSimulation.ps1 (two stores never linked, read each separately, in-memory merge = MSP fleet view + local-IT view + combined apply plan + guardrail proof); activator backend app-only deploy (_PimActivatorAuth cert sign-in path + Deploy-PimActivatorBackend -AppId/-CertificateThumbprint, SP-create retry through replication window). Lab-verified incl. genuine cross-tenant local store in a separate tenant sub (public+single-IP-firewall Entra-only as cross-tenant PE exemption); local-IT folder copy validates clean. VERSION->2.4.176. (f03187aa)
-- release: PIM4EntraPS v2.4.175 -- design: MSP edition LIFECYCLE-GOVERNANCE Sec 19 (one core / pluggable edges / customer-owned control plane): GDAP disqualified to niche (EA/MCA exclusion + no customer-side attribution + weak CA over foreign identity); vary edges never core = pluggable auth profile (B per-tenant cert default / A GDAP CSP-only / on-prem gMSA) + storage profile (Csv/local-SQL/central) behind thin contracts; no-linked-SQL courier (signed baseline bundle pulled+verified in, customer-emitted summary out, no MSP standing access); Owner=MSP|Local disjoint namespaces + delegation bounded by guardrail envelope; per-profile capability/tradeoff table keeps security claims honest; same design for TenantManager; per-tenant cert lifecycle first-class. VERSION 2.4.169->2.4.175 catch-up. PS5.1 regression battery green. (b7caff11)
 
 ---
 
 # Release notes -- PIM4EntraPS
 
 > **Curated changelog.** The publish workflow auto-prepends recent monorepo commits as a raw activity log; this file is the human-friendly narrative on top.
+
+---
+
+## v2.4.205 -- pure-REST core (no Graph/Az modules): engine reads + auth run 100% on REST
+
+Removes the PowerShell-module dependency from the engine's read + auth path, so it runs identically on Windows PS 5.1, PS 7, a VM, or a Linux container -- nothing to `Install-Module`, no Graph-module version drift, no Azure.Core/Graph clash, no MSAL/IE browser.
+
+- **`engine/_shared/PIM-Rest.ps1`** -- one auth + data-plane core. `Get-PimRestToken` for any resource (graph/arm/powerbi/defender) via **Managed Identity** (App Service `$IDENTITY_ENDPOINT` or VM IMDS), **client secret**, **client certificate** (signed RS256 JWT assertion -- no MSAL; PS 5.1-safe via X509 `GetRSAPrivateKey`), or an `az` session (dev). `Invoke-PimGraph/-PimArm/-PimPowerBI/-PimRest` with `@odata/nextLink` paging (`-All`), 429/5xx + `Retry-After` backoff, and per-resource token caching. `ConvertTo-PimSdkShape` adds PascalCase aliases so REST objects satisfy code written for SDK casing.
+- **`PIM-ContextBuilder.ps1` is now REST-first by default.** `Build-PimContext` fetches users/groups/AUs/roles over Graph REST (no module auto-load). Set `$global:PIM_UseGraphSdk = $true` to opt back into the legacy Graph SDK path. Filters and all `$Global:*_Definitions_ID` consumers are unchanged (SDK-shape normalization).
+- **Validated live, module-free** (`tests/live/Test-PimRestNoModules.ps1`, 14/14): built the real tenant context (888 groups, 145 roles) over REST with **no Graph/Az/EXO module ever loaded**, filters matched, decision core parsed correctly.
+
+**Scope (honest):** this covers the engine's **read + auth + decision** path. The per-scope **write** scripts (`PIM-Baseline-Management-*`), the browser **pim-activator**, and one-time **setup/** scripts still use `Get-Mg*/Az*` and are the next migration step (route them through `PIM-Rest.ps1`). **Exchange Online** keeps a thin optional module adapter for the few ops without Graph/REST parity.
 
 ---
 
