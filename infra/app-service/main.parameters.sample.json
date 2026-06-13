@@ -1,0 +1,16 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#",
+  "contentVersion": "1.0.0.0",
+  "_doc": "Copy to main.parameters.json (gitignored) and fill in. No secrets -- ARM ids + an Entra app (client) id for Easy Auth. The container image is pushed to your ACR first.",
+  "parameters": {
+    "appName":                 { "value": "pim-manager-<org>" },
+    "containerImage":          { "value": "<acr>.azurecr.io/pim-manager:1.0.0" },
+    "acrLoginServer":          { "value": "<acr>.azurecr.io" },
+    "vnetIntegrationSubnetId": { "value": "/subscriptions/<sub>/resourceGroups/<rg>/providers/Microsoft.Network/virtualNetworks/<vnet>/subnets/<appsvc-integration-subnet>" },
+    "privateEndpointSubnetId": { "value": "/subscriptions/<sub>/resourceGroups/<rg>/providers/Microsoft.Network/virtualNetworks/<vnet>/subnets/<pe-subnet>" },
+    "vnetId":                  { "value": "/subscriptions/<sub>/resourceGroups/<rg>/providers/Microsoft.Network/virtualNetworks/<vnet>" },
+    "easyAuthClientId":        { "value": "<entra-app-client-id>" },
+    "sqlServerFqdn":           { "value": "pim4entra-<org>-sql.database.windows.net" },
+    "sqlDatabaseName":         { "value": "PIM4EntraPS" }
+  }
+}

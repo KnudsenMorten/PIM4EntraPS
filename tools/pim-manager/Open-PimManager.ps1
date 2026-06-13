@@ -79,6 +79,15 @@ param(
     [Parameter(ParameterSetName='Server')]
     [int]$Port = 0,
 
+    # HOSTED mode (24/7 on App Service for Containers / Container Apps). Binds all
+    # interfaces (http://+:<PORT>), never self-exits, and trusts the App Service
+    # Easy Auth principal header (X-MS-CLIENT-PRINCIPAL-NAME) for identity instead
+    # of the Windows user. The per-session token is STILL required on /api (kept as
+    # a second factor). Only enable behind Easy Auth + private inbound -- the app
+    # manages tier-0. Also enabled by env PIM_HOSTED=1; port from PORT/WEBSITES_PORT.
+    [Parameter(ParameterSetName='Server')]
+    [switch]$Hosted,
+
     # CLI mode: refresh the tenant-list cache (entra-roles, AUs, PIM groups,
     # azure scopes) by calling Microsoft Graph + Az with the engine SPN, then
     # exit. Does NOT start the server or open a browser. Use this in a
@@ -156,6 +165,23 @@ if (Test-Path -LiteralPath $_sqlLib) { . $_sqlLib }
 # One id per Manager session -- groups this session's audit events (phase 6).
 $script:PimManagerSessionId = [guid]::NewGuid().ToString('N')
 
+# Hosted (24/7 App Service) vs local (loopback) mode. In hosted mode identity is
+# the per-request Easy Auth principal; locally it's the Windows user.
+$script:PimHosted = [bool]$Hosted -or ("$env:PIM_HOSTED" -in @('1','true','yes'))
+$script:CurrentRequestPrincipal = $null
+
+function Get-PimEasyAuthPrincipal {
+    # The Entra-authenticated caller from App Service Easy Auth. ONLY trusted in
+    # hosted mode (App Service injects + strips these headers at the edge; trusting
+    # them locally would let any client spoof identity). Returns '' when absent.
+    param([Parameter(Mandatory)][System.Net.HttpListenerRequest]$Request)
+    if (-not $script:PimHosted) { return '' }
+    foreach ($h in 'X-MS-CLIENT-PRINCIPAL-NAME','X-MS-CLIENT-PRINCIPAL-IDP') {
+        $v = $Request.Headers[$h]; if ("$v".Trim() -and $h -eq 'X-MS-CLIENT-PRINCIPAL-NAME') { return "$v".Trim() }
+    }
+    return ''
+}
+
 # ---------------------------------------------------------------------------
 # Manager RBAC (LIFECYCLE-GOVERNANCE phase 7) -- Reader / Admin / SuperAdmin.
 # Identity = the Windows user running the Manager (it binds to localhost).
@@ -167,9 +193,19 @@ $script:PimManagerSessionId = [guid]::NewGuid().ToString('N')
 # ---------------------------------------------------------------------------
 
 function Get-PimManagerRole {
-    $who = try { [System.Security.Principal.WindowsIdentity]::GetCurrent().Name } catch { $env:USERNAME }
+    # Hosted: the Easy Auth principal captured for THIS request. Local: Windows user.
+    $who = if ($script:PimHosted -and "$script:CurrentRequestPrincipal".Trim()) { "$script:CurrentRequestPrincipal" }
+           else { try { [System.Security.Principal.WindowsIdentity]::GetCurrent().Name } catch { $env:USERNAME } }
+    if ($script:PimHosted -and -not "$who".Trim()) {
+        # hosted with no authenticated principal = no Easy Auth in front -> deny.
+        return @{ role = 'Reader'; identity = '<unauthenticated>'; source = 'hosted: no Easy Auth principal (fail closed)' }
+    }
     $f = Join-Path $script:configRoot 'manager-access.custom.json'
     if (-not (Test-Path -LiteralPath $f)) {
+        # Local single-operator install -> SuperAdmin (backward-compatible). HOSTED
+        # multi-user -> fail closed to Reader (an implicit SuperAdmin for every
+        # authenticated business user would be a tenant-takeover hole).
+        if ($script:PimHosted) { return @{ role = 'Reader'; identity = $who; source = 'hosted: not in manager-access.custom.json (fail closed)' } }
         return @{ role = 'SuperAdmin'; identity = $who; source = 'default (no manager-access.custom.json)' }
     }
     try {
@@ -1687,36 +1723,43 @@ function Invoke-Server {
     Write-Host "PIM4EntraPS Mapper -- starting local editor server ..." -ForegroundColor Cyan
     $token = [Guid]::NewGuid().ToString('N')
 
-    # Pick a free port (try DesiredPort, fall back to random; retry up to 10x on conflict).
     $listener = $null
     $port = 0
-    $maxAttempts = 10
-    for ($attempt = 1; $attempt -le $maxAttempts; $attempt++) {
-        if ($DesiredPort -gt 0 -and $attempt -eq 1) { $candidate = $DesiredPort }
-        else { $candidate = Get-FreeTcpPort }
-        try {
-            $l = New-Object System.Net.HttpListener
-            $l.Prefixes.Add("http://127.0.0.1:$candidate/")
-            $l.Start()
-            $listener = $l
-            $port = $candidate
-            break
-        } catch [System.Net.HttpListenerException] {
-            Write-Warning ("  port {0} unavailable ({1}); retrying ..." -f $candidate, $_.Exception.Message)
-            continue
+    if ($script:PimHosted) {
+        # HOSTED (24/7 business edition): bind all interfaces on the container port
+        # (App Service sets WEBSITES_PORT/PORT). Easy Auth + private inbound sit in
+        # front; the token is still required on /api.
+        $port = if ("$env:WEBSITES_PORT" -match '^\d+$') { [int]$env:WEBSITES_PORT } elseif ("$env:PORT" -match '^\d+$') { [int]$env:PORT } elseif ($DesiredPort -gt 0) { $DesiredPort } else { 8080 }
+        $l = New-Object System.Net.HttpListener
+        $l.Prefixes.Add("http://+:$port/")
+        $l.Start(); $listener = $l
+        Write-Host ("  [HOSTED] 24/7 business edition listening on http://+:{0}/ (Easy Auth identity; token required on /api)" -f $port) -ForegroundColor Green
+    } else {
+        # LOCAL (loopback) edition -- the sanctioned BREAK-GLASS / EMERGENCY path:
+        # run on the box (SuperAdmin) when the hosted app / Easy Auth / network is
+        # unavailable. Pick a free port (DesiredPort first, then random).
+        $maxAttempts = 10
+        for ($attempt = 1; $attempt -le $maxAttempts; $attempt++) {
+            if ($DesiredPort -gt 0 -and $attempt -eq 1) { $candidate = $DesiredPort } else { $candidate = Get-FreeTcpPort }
+            try {
+                $l = New-Object System.Net.HttpListener
+                $l.Prefixes.Add("http://127.0.0.1:$candidate/")
+                $l.Start(); $listener = $l; $port = $candidate; break
+            } catch [System.Net.HttpListenerException] {
+                Write-Warning ("  port {0} unavailable ({1}); retrying ..." -f $candidate, $_.Exception.Message); continue
+            }
         }
+        if (-not $listener) { throw "Failed to bind a localhost port after $maxAttempts attempts." }
+        Write-Host ("  [LOCAL/emergency] loopback listening on http://127.0.0.1:{0}/" -f $port) -ForegroundColor Green
+        Write-Host ("  session token: {0}" -f $token) -ForegroundColor DarkGray
+        Write-Host "  press Ctrl-C to stop (or close the browser tab; server self-exits after 30s of silence)." -ForegroundColor DarkGray
     }
-    if (-not $listener) { throw "Failed to bind a localhost port after $maxAttempts attempts." }
 
-    Write-Host ("  listening on http://127.0.0.1:{0}/" -f $port) -ForegroundColor Green
-    Write-Host ("  session token: {0}" -f $token) -ForegroundColor DarkGray
-    Write-Host "  press Ctrl-C to stop (or close the browser tab; server self-exits after 30s of silence)." -ForegroundColor DarkGray
-
-    $url = "http://127.0.0.1:$port/?token=$token"
-    if (-not $NoLaunch) {
+    $url = if ($script:PimHosted) { "http://localhost:$port/?token=$token" } else { "http://127.0.0.1:$port/?token=$token" }
+    if (-not $NoLaunch -and -not $script:PimHosted) {
         Write-Host "  launching default browser ..." -ForegroundColor Cyan
         Start-Process $url | Out-Null
-    } else {
+    } elseif (-not $script:PimHosted) {
         Write-Host ("  URL: {0}" -f $url) -ForegroundColor Yellow
     }
 
@@ -1738,6 +1781,8 @@ function Invoke-Server {
 
             $started = Get-Date
             $status = 500
+            # Hosted: capture THIS request's Easy Auth principal for role resolution.
+            if ($script:PimHosted) { try { $script:CurrentRequestPrincipal = Get-PimEasyAuthPrincipal -Request $ctx.Request } catch { $script:CurrentRequestPrincipal = $null } }
             try {
                 $status = Handle-Request -Context $ctx -ExpectedToken $token
             } catch {
@@ -1757,11 +1802,13 @@ function Invoke-Server {
             $script:lastHeartbeat = Get-Date
         }
 
-        # Heartbeat check.
-        $idleSeconds = (Get-Date) - $script:lastHeartbeat
-        if ($idleSeconds.TotalSeconds -gt ($heartbeatTimeoutSeconds + $heartbeatGraceSeconds)) {
-            Write-Host ("  heartbeat timeout ({0:N0}s with no client ping) -- shutting down." -f $idleSeconds.TotalSeconds) -ForegroundColor Yellow
-            $stop = $true
+        # Heartbeat self-exit -- LOCAL/emergency only. Hosted runs 24/7 (never self-exits).
+        if (-not $script:PimHosted) {
+            $idleSeconds = (Get-Date) - $script:lastHeartbeat
+            if ($idleSeconds.TotalSeconds -gt ($heartbeatTimeoutSeconds + $heartbeatGraceSeconds)) {
+                Write-Host ("  heartbeat timeout ({0:N0}s with no client ping) -- shutting down." -f $idleSeconds.TotalSeconds) -ForegroundColor Yellow
+                $stop = $true
+            }
         }
     }
 
