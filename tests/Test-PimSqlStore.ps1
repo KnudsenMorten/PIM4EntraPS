@@ -66,6 +66,14 @@ try {
     A (@(Get-PimSqlRows -ConnectionString $cs -Entity $e).Count -eq 2) 'row-set write inserts both rows'
     $r2 = Set-PimSqlEntityRows -ConnectionString $cs -Entity $e -Base $e -Rows @([pscustomobject]@{ GroupTag='G1'; RoleDefinitionName='Reader' })
     A (@(Get-PimSqlRows -ConnectionString $cs -Entity $e).Count -eq 1 -and $r2.removed -eq 1) 'row-set replace deletes the dropped row (full-set semantics)'
+
+    Write-Host "Settings live in SQL (file is seed only)" -ForegroundColor Cyan
+    Set-PimSqlSetting -ConnectionString $cs -Name 'PawEnforcement' -Value $true
+    A ((Get-PimSqlSetting -ConnectionString $cs -Name 'PawEnforcement') -eq $true) 'setting round-trips through pim.Settings'
+    $added = Import-PimSettingsSeed -ConnectionString $cs -Seed @{ PawEnforcement = $false; NewKey = 'x' }
+    A ($added -eq 1) 'seed adds only missing keys (never overwrites managed settings)'
+    A ((Get-PimSqlSetting -ConnectionString $cs -Name 'PawEnforcement') -eq $true) 'existing managed setting NOT overwritten by seed'
+    A ((Get-PimAllSqlSettings -ConnectionString $cs)['NewKey'] -eq 'x') 'all-settings load returns seeded key'
 } finally {
     Write-Host "Dropping $db ..." -ForegroundColor Cyan
     try { [void](Invoke-PimSqlNonQuery -ConnectionString $masterCs -Sql "IF DB_ID('$db') IS NOT NULL BEGIN ALTER DATABASE [$db] SET SINGLE_USER WITH ROLLBACK IMMEDIATE; DROP DATABASE [$db]; END") } catch { Write-Warning "cleanup failed: $($_.Exception.Message)" }

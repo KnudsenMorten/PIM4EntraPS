@@ -392,6 +392,32 @@ function Set-PimManagerInstance {
         catch { Write-Warning "  [SchemaConf] preflight skipped: $($_.Exception.Message)" }
     }
 
+    # Storage backend. SQL is EXPLICIT opt-in (config StorageBackend='sql' or an
+    # explicit connection signal) -- never auto-switch off the bare SQLEXPRESS
+    # default. In SQL mode, SETTINGS live in SQL (pim.Settings): the file seeds them
+    # once, then SQL wins and is loaded over $global:PIM_NamingConventions so a
+    # hacker reading the JSON learns nothing authoritative.
+    $script:PimStorageMode = 'csv'; $script:PimSqlCs = $null
+    if (Get-Command Get-PimSqlConnectionString -ErrorAction SilentlyContinue) {
+        $backend = "$(Get-PimPolicySetting -Name 'StorageBackend' -Default 'csv')".ToLowerInvariant()
+        $hasSig  = [bool]($global:PIM_SqlConnectionString -or $global:PIM_SqlConnStringVault -or $global:PIM_SqlServer -or $env:PIM_SqlConnectionString)
+        if ($backend -eq 'sql' -or $hasSig) {
+            if ($env:PIM_SqlConnectionString -and -not $global:PIM_SqlConnectionString) { $global:PIM_SqlConnectionString = $env:PIM_SqlConnectionString }
+            $cs = $null; try { $cs = Get-PimSqlConnectionString } catch {}
+            if ($cs -and (Test-PimSqlConnectivity -ConnectionString $cs)) {
+                try {
+                    Initialize-PimSqlStore -ConnectionString $cs
+                    if ($global:PIM_NamingConventions -is [hashtable]) { [void](Import-PimSettingsSeed -ConnectionString $cs -Seed $global:PIM_NamingConventions) }
+                    $sqlSettings = Get-PimAllSqlSettings -ConnectionString $cs
+                    if (-not ($global:PIM_NamingConventions -is [hashtable])) { $global:PIM_NamingConventions = @{} }
+                    foreach ($k in @($sqlSettings.Keys)) { $global:PIM_NamingConventions[$k] = $sqlSettings[$k] }
+                    $script:PimSqlCs = $cs; $script:PimStorageMode = 'sql'
+                    Write-Host "  [store] SQL mode (passwordless/KV; settings in SQL, file is seed only)" -ForegroundColor Cyan
+                } catch { Write-Warning "  [store] SQL init failed: $($_.Exception.Message); using CSV." }
+            }
+        }
+    }
+
     # Per-instance state must not leak across customers.
     $script:PimActiveAssignmentsCache          = $null
     $script:PimActiveAssignmentsCacheLoadedUtc = $null
@@ -1807,18 +1833,24 @@ function Handle-Request {
             return 200
         }
 
-        if ($path -match '^/api/csv/([\w\.-]+)$') {
+        if ($path -match '^/api/(?:csv|data)/([\w\.-]+)$') {
             $base = $Matches[1]
             $spec = Get-PimCsvSpec -BaseName $base
             if (-not $spec) {
-                Write-JsonResponse -Response $resp -Status 404 -Body @{ error = "unknown csv base: $base" }
+                Write-JsonResponse -Response $resp -Status 404 -Body @{ error = "unknown entity: $base" }
                 return 404
             }
             $script:lastHeartbeat = Get-Date
+            $sqlMode = ($script:PimStorageMode -eq 'sql' -and $script:PimSqlCs)
 
             if ($method -eq 'GET') {
-                $payload = Read-PimCsvRows -BaseName $base
-                $rows = @($payload.rows)
+                if ($sqlMode) {
+                    $rows = @(Get-PimSqlRows -ConnectionString $script:PimSqlCs -Entity $base)
+                    $payload = [ordered]@{ path = 'sql'; source = 'sql'; header = @($spec.defaultHeader) }
+                } else {
+                    $payload = Read-PimCsvRows -BaseName $base
+                    $rows = @($payload.rows)
+                }
                 # Portal-admin read scoping: a delegated GUI-manager (non-super,
                 # with a portal-admins profile) sees only the rows their tier/
                 # level/service/scope allows. Super-admins + users with no portal
@@ -1842,7 +1874,7 @@ function Handle-Request {
             }
             if ($method -eq 'PUT') {
                 if (-not (Test-PimManagerRoleAtLeast -Minimum 'Admin')) {
-                    Write-JsonResponse -Response $resp -Status 403 -Body @{ error = "Your Manager role is Reader -- saving CSV changes requires Admin. See config/manager-access.custom.json." }
+                    Write-JsonResponse -Response $resp -Status 403 -Body @{ error = "Your Manager role is Reader -- saving changes requires Admin. See config/manager-access.custom.json." }
                     return 403
                 }
                 $body = Read-RequestJson -Request $req
@@ -1850,17 +1882,23 @@ function Handle-Request {
                 if ($body -and $body.rows) { $rowsRaw = @($body.rows) }
                 $rowsOrdered = @($rowsRaw | ForEach-Object { ConvertTo-OrderedRow $_ } | Where-Object { $_ -ne $null })
 
-                # Diff against current on-disk state for the audit log.
-                $current = Read-PimCsvRows -BaseName $base
+                # Diff against current state (SQL or CSV) for the audit log.
+                $current = if ($sqlMode) { @{ rows = @(Get-PimSqlRows -ConnectionString $script:PimSqlCs -Entity $base) } } else { Read-PimCsvRows -BaseName $base }
                 $diff = Compare-PimRowSets -Before $current.rows -After $rowsOrdered
 
-                $written = Write-PimCsvCustom -BaseName $base -Rows $rowsOrdered
+                if ($sqlMode) {
+                    [void](Set-PimSqlEntityRows -ConnectionString $script:PimSqlCs -Entity $base -Base $base -Rows $rowsOrdered)
+                    $writtenPath = 'sql'
+                } else {
+                    $written = Write-PimCsvCustom -BaseName $base -Rows $rowsOrdered
+                    $writtenPath = $written.path
+                }
                 Write-PimMutationLog -BaseName $base -Adds $diff.adds.Count -Removes $diff.removes.Count -Modifies $diff.modifies.Count -NewRowCount $rowsOrdered.Count
 
                 Write-JsonResponse -Response $resp -Status 200 -Body ([ordered]@{
                     ok       = $true
                     base     = $base
-                    path     = $written.path
+                    path     = $writtenPath
                     rowCount = $rowsOrdered.Count
                     adds     = $diff.adds.Count
                     removes  = $diff.removes.Count
@@ -1868,7 +1906,7 @@ function Handle-Request {
                 })
                 return 200
             }
-            if ($method -eq 'POST' -and $path -match '^/api/csv/[\w\.-]+$') {
+            if ($method -eq 'POST' -and $path -match '^/api/(?:csv|data)/[\w\.-]+$') {
                 Write-JsonResponse -Response $resp -Status 405 -Body @{ error = 'method not allowed (did you mean /api/diff/<base>?)' }
                 return 405
             }
