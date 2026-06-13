@@ -100,6 +100,10 @@ ForEach ($_mod in $_PIM_ModulesToLoad) {
 # assignments, gated by Owners column or the approve-assignment/access-review caps.
 . (Join-Path $PSScriptRoot 'PIM-Approvals.ps1')
 
+# Lifecycle calendar -- upcoming expirations, auto-renew, configurable escalation
+# stages + reminder resends; feeds the change queue + templated mail.
+. (Join-Path $PSScriptRoot 'PIM-Lifecycle.ps1')
+
 function Ensure-DateTime {
     <#
         .SYNOPSIS

@@ -324,6 +324,45 @@ Describe 'Permission-wizard auto-derivation (reversed create flow)' {
     }
 }
 
+Describe 'Lifecycle calendar (expirations, escalation, auto-renew)' {
+    BeforeAll { $script:Now = [datetime]::Parse('2026-06-13T12:00:00Z').ToUniversalTime() }
+    It 'resolves expiry from candidate fields + days left' {
+        $i = [pscustomobject]@{ UserName='a'; OffboardDate='2026-06-20T00:00:00Z' }
+        (Get-PimDaysLeft -Item $i -NowUtc $Now) | Should -Be 6
+        ($null -eq (Get-PimDaysLeft -Item ([pscustomobject]@{ UserName='b' }) -NowUtc $Now)) | Should -BeTrue
+    }
+    It 'upcoming expirations: horizon filter + soonest-first' {
+        $items = @(
+            [pscustomobject]@{ UserName='soon'; ExpiresUtc='2026-06-15T00:00:00Z' }   # 1 day
+            [pscustomobject]@{ UserName='far';  ExpiresUtc='2026-09-01T00:00:00Z' }   # >30
+            [pscustomobject]@{ UserName='mid';  ExpiresUtc='2026-06-25T00:00:00Z' }   # 11 days
+        )
+        $up = @(Get-PimUpcomingExpirations -Items $items -NowUtc $Now -HorizonDays 30)
+        $up.Count | Should -Be 2
+        "$($up[0].item.UserName)" | Should -Be 'soon'   # soonest first
+    }
+    It 'escalation: new stage fires; same stage waits for the reminder interval' {
+        # DaysLeft 10 -> crossed 30 + 14, most-urgent = 14
+        (Get-PimDueEscalation -DaysLeft 10 -NowUtc $Now -LastStageAtDays $null).stage | Should -Be 14
+        # already notified at stage 14, 1 day ago -> not due (interval 3)
+        ($null -eq (Get-PimDueEscalation -DaysLeft 10 -NowUtc $Now -LastStageAtDays 14 -LastNotifiedUtc $Now.AddDays(-1).ToString('o'))) | Should -BeTrue
+        # 4 days since last notify -> reminder due
+        (Get-PimDueEscalation -DaysLeft 10 -NowUtc $Now -LastStageAtDays 14 -LastNotifiedUtc $Now.AddDays(-4).ToString('o')).isReminder | Should -BeTrue
+        # before any stage (DaysLeft 45) -> nothing due
+        ($null -eq (Get-PimDueEscalation -DaysLeft 45 -NowUtc $Now -LastStageAtDays $null)) | Should -BeTrue
+        # urgent: DaysLeft 1 -> stage 1, recipients include admin
+        (Get-PimDueEscalation -DaysLeft 1 -NowUtc $Now -LastStageAtDays $null).recipients | Should -Contain 'admin'
+    }
+    It 'auto-renew only AutoExtend items within the window -> renewal change' {
+        $r = Get-PimAutoRenewal -Item ([pscustomobject]@{ UserName='c'; ExpiresUtc='2026-06-17T00:00:00Z'; AutoExtend='true' }) -NowUtc $Now -RenewWithinDays 7 -ExtendDays 90
+        $r.renew | Should -BeTrue
+        ([datetime]$r.newExpiryUtc).ToUniversalTime() -gt $Now | Should -BeTrue
+        ($null -eq (Get-PimAutoRenewal -Item ([pscustomobject]@{ ExpiresUtc='2026-06-17T00:00:00Z'; AutoExtend='false' }) -NowUtc $Now)) | Should -BeTrue   # not AutoExtend
+        ($null -eq (Get-PimAutoRenewal -Item ([pscustomobject]@{ ExpiresUtc='2026-09-01T00:00:00Z'; AutoExtend='true' }) -NowUtc $Now -RenewWithinDays 7)) | Should -BeTrue   # too far
+        (New-PimRenewalChange -Entity 'Account-Definitions-Admins' -Key 'c' -DateField 'ExpiresUtc' -NewExpiryUtc $r.newExpiryUtc).op | Should -Be 'Update'
+    }
+}
+
 Describe 'Change queue + full/delta run modes' {
     It 'Create then Remove on the same key cancels out' {
         $q = @(
