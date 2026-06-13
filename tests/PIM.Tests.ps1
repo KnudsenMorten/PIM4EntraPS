@@ -82,6 +82,27 @@ Describe 'Workload-connector framework' {
 Describe 'Offline feature spot-checks (in-proc)' {
     It 'date expression resolves'      { (Resolve-PimDateExpression -Expression 'FirstWorkdayNextMonth@08:00') | Should -Not -BeNullOrEmpty }
     It 'license status resolves'       { (Get-PimLicense -Refresh).Status | Should -Not -BeNullOrEmpty }
+    It 'edition is Community without a license; Pro catalog includes the new capabilities' {
+        (Get-PimEdition) | Should -Be 'Community'
+        (Get-PimLicenseStatusText) | Should -BeLike 'Community*'
+        # new advanced features are gateable + blocked without a Pro license
+        (Test-PimProFeature -Feature 'ApproverMatrix' -Quiet) | Should -BeFalse
+        (Test-PimProFeature -Feature 'Conformance' -Quiet) | Should -BeFalse
+    }
+    It 'PIM-Engine dispatcher exists + every -Scope target engine script is present' {
+        $engineRoot = Join-Path $Root 'engine'
+        (Test-Path -LiteralPath (Join-Path $engineRoot 'PIM-Engine\PIM-Engine.ps1')) | Should -BeTrue
+        $targets = @{
+            All='PIM-Baseline-Management-CSV'; Admins='PIM-Baseline-Management-CSV-AdminsOnly'
+            EntraRoles='PIM-Baseline-Management-CSV-EntraIDRolesOnly'; AzRes='PIM-Baseline-Management-CSV-AzResOnly'
+            AdministrativeUnits='PIM-Baseline-Management-CSV-AdministrativeUnitsOnly'
+            GroupsAssignment='PIM-Baseline-Management-CSV-PIM4GroupsAssignmentOnly'
+            GroupsPolicies='PIM-Baseline-Management-CSV-PIM4GroupsPoliciesOnly'
+            GroupsCreateModifyPolicy='PIM-Baseline-Management-CSV-PIM4GroupsCreateModifyPolicyOnly'
+            Export='PIM-Assignment-Exporter'
+        }
+        foreach ($d in $targets.Values) { (Test-Path -LiteralPath (Join-Path $engineRoot (Join-Path $d "$d.ps1"))) | Should -BeTrue -Because "$d.ps1 must exist for the dispatcher" }
+    }
     It 'random password has 4 classes' { $p = New-PimRandomPassword; ($p -cmatch '[A-Z]' -and $p -cmatch '[a-z]' -and $p -match '\d') | Should -BeTrue }
     It 'HighPriv name matches marker'  { 'Admin-X-L0-T0-ID' -match '(?i)(^|[-_.])(L0|T0)([-_.]|$)' | Should -BeTrue }
     It 'Day2Day name does not match'   { 'Admin-X-ID' -match '(?i)(^|[-_.])(L0|T0)([-_.]|$)' | Should -BeFalse }
