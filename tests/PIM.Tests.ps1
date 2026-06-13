@@ -260,6 +260,29 @@ Describe 'Portal-admin scoping (delegated GUI managers)' {
         (Resolve-PimAccessReviewDecision -Assignment $rev[0] -Decision remove).change.op | Should -Be 'Remove'
         (Resolve-PimAccessReviewDecision -Assignment $rev[0] -Decision keep).change | Should -BeNullOrEmpty
     }
+    It 'approver matrix: dimensional routing (workload x tier x level) + escalation' {
+        $matrix = @(
+            [pscustomobject]@{ workload='Entra-ID'; tier=0; level=2; approvers=@('helpdeskmgr@contoso.com'); escalateTo=@('itmanager@contoso.com'); slaHours=24 }
+            [pscustomobject]@{ workload='PowerBI'; tier=1; level=1; approvers=@('pbiowner@contoso.com'); escalateTo=@('itmanager@contoso.com') }
+            [pscustomobject]@{ workload='*'; approvers=@('fallback@contoso.com') }
+        )
+        $entraL2 = @{ workload='Entra-ID'; service='entra'; tier=0; level=2; plane='CP' }
+        $pbiL1   = @{ workload='PowerBI';  service='workload'; tier=1; level=1; plane='WDP' }
+        @(Get-PimApproversForResource -Facets $entraL2 -Matrix $matrix) | Should -Be @('helpdeskmgr@contoso.com')
+        @(Get-PimApproversForResource -Facets $pbiL1 -Matrix $matrix) | Should -Be @('pbiowner@contoso.com')
+        # unmatched specific -> wildcard fallback
+        @(Get-PimApproversForResource -Facets @{ workload='Intune'; service='workload'; tier=1; level=5; plane='WDP' } -Matrix $matrix) | Should -Be @('fallback@contoso.com')
+        # escalation (next level = IT manager)
+        @(Get-PimEscalationApprovers -Facets $entraL2 -Matrix $matrix) | Should -Be @('itmanager@contoso.com')
+        # can-approve by matrix
+        $row = [pscustomobject]@{ GroupTag='Entra-ID-A-L2'; Workload='Entra-ID'; Level='L2'; TierLevel='T0'; Plane='CP' }
+        (Test-PimCanApprove -Identity 'helpdeskmgr@contoso.com' -Row $row -Facets $entraL2 -Matrix $matrix -Profile $null) | Should -BeTrue
+        (Test-PimCanApprove -Identity 'pbiowner@contoso.com'   -Row $row -Facets $entraL2 -Matrix $matrix -Profile $null) | Should -BeFalse
+        # SLA escalation due
+        $req = New-PimApprovalRequest -Requestor 'r' -TargetAdmin 'c@contoso.com' -GroupTag 'Entra-ID-A-L2' -Justification 'x' -NowUtc ([datetime]'2026-06-13T00:00:00Z')
+        (Test-PimApprovalEscalationDue -Request $req -NowUtc ([datetime]'2026-06-14T02:00:00Z') -SlaHours 24) | Should -BeTrue   # 26h
+        (Test-PimApprovalEscalationDue -Request $req -NowUtc ([datetime]'2026-06-13T06:00:00Z') -SlaHours 24) | Should -BeFalse  # 6h
+    }
     It 'PAW policy: tier-0 + tier-1/MP need PAW; tier-1/WDP L3+ and tier-2 are whole-network' {
         (Get-PimRequiredPawLevel -Tier 0 -Plane 'CP' -Level 1) | Should -Be 1          # tier-0 -> PAW at group level
         (Get-PimRequiredPawLevel -Tier 1 -Plane 'MP' -Level 2) | Should -Be 2          # mgmt plane -> PAW

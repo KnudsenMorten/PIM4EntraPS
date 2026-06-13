@@ -1,9 +1,10 @@
 # Release notes for PIM4EntraPS
 
-## v2.4.199
+## v2.4.200
 
 Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monorepo:
 
+- release: PIM4EntraPS v2.4.200 -- Approver Matrix (dimensional routing + escalation chain) (25ed077d)
 - release: PIM4EntraPS v2.4.199 -- lifecycle calendar (phase 9): expirations, auto-renew, escalation (2103344a)
 - release: PIM4EntraPS v2.4.198 -- resource approvers/owners (phase 8) (0729974b)
 - release: PIM4EntraPS v2.4.197 -- Manager SQL cutover (/api/data dispatch) + settings in SQL (29164885)
@@ -33,7 +34,6 @@ Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monor
 - release: PIM4EntraPS v2.4.173 -- Core/Pro licensing, 100% offline: signed .pimlicense (RSA-SHA256 over payload bytes, embedded public cert, PS5.1-safe raw-bytes X509 load, no call-home/activation ever) + Test-PimProFeature gate (tenant-bound; fan-out skips unlicensed tenants; expiry -> grace -> disable; Core never affected) + Manager Governance License panel (/api/license) + internal-only issuer (INTERNAL/pim-licensing, non-exportable machine-store key) + first gated feature = MSP fan-out. SQL data store deliberately Core (free). 12-assertion PS5.1 battery green incl. tamper + tenant-binding tests. (25b3bb0e)
 - release: PIM4EntraPS v2.4.172 -- design: LIFECYCLE-GOVERNANCE Sec 17 email routing & people directory (Department link + PIM-Definitions-Contacts + central mail-routing.custom.json override w/ PerAdminWins precedence; Manager "Contacts & email flow" area incl. person-left sweep staging replace-with-successor) + Sec 18 self-service delegation layers (delegation units = templates x group tags x AzScope prefix x quotas x inactivity-disable; intake-based, engine stays sole writer; preferred web tier = Azure App Service w/ Private Endpoint, zero public exposure; engine signInActivity inactivity sweep) (e6559da1)
 - release: PIM4EntraPS v2.4.171 -- Purpose column (Day2Day|HighPriv) makes the two admin naming conventions explicit (Admin-INI-PLAT day2day vs dedicated Admin-INI-L0-T0-PLAT high-priv); TierLevel removed from canonical schema (legacy fallback kept). Engine OU routing keys off Purpose; AdminAccountPatternHighPriv + Purpose-aware PIM-NAME-002; Manager wizard Purpose field replaces Tier/Level/Naming-style, map dots color by Purpose, initials auto-derive bug fixed (pinned at 1 char after first name); admin templates prefill Purpose; pim.CentralAdmins migrated (both DBs); live tenant accounts renamed + LIVE fan-out idempotent re-run green. (1f706eed)
-- release: PIM4EntraPS v2.4.170 -- first LIVE multi-tenant MSP fan-out (Invoke-PimMspFanout.ps1: registry-driven, ring-filtered via pim.vw_AdminTenantTargets, child-process SQL isolation for the SqlServer/Graph Azure.Core conflict, WhatIf default) + engine fixes (modern ForwardMailsToContact/MailForwardAddress columns finally read w/ legacy fallback; EXO connect skipped when no row requests forwarding; replication-404 retry on post-create PATCH) + pim.CentralAdmins account-material columns w/ idempotent upgrade. Verified live: 5 accounts across 2 real test tenants, ring semantics correct, second pass idempotent. (9356c120)
 
 ---
 
@@ -42,6 +42,16 @@ Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monor
 > **Curated changelog.** The publish workflow auto-prepends recent monorepo commits as a raw activity log; this file is the human-friendly narrative on top.
 
 ---
+
+## v2.4.200 -- Approver Matrix: dimensional approver routing + escalation chain
+
+Different people approve different slices of the estate. The **Approver Matrix** (config key `ApproverMatrix`, lives in SQL settings) routes approval/ownership by the dimensions **workload x tier x level x plane** (wildcards allowed), each rule carrying its `approvers` and an optional `escalateTo` (next level, e.g. IT manager) + `slaHours`. Added to `engine/_shared/PIM-Approvals.ps1` (Pester 71 -> **72**):
+
+- **`Get-PimMatchedApproverRule`** -- most-specific matching rule wins (`Test-PimApproverRuleMatch` scores explicit dimensions); **`Get-PimApproversForResource`** -- union of the matched rule's approvers + the resource `Owners` column; **`Get-PimEscalationApprovers`** -- the next-level approvers.
+- **`Test-PimCanApprove`** now also honours matrix approvers (so e.g. the helpdesk manager approves Entra roles at L2, the Power BI service owner approves Power BI at L1, others fall through to a wildcard rule).
+- **`Test-PimApprovalEscalationDue`** -- optional: when a request stays pending past `slaHours`, escalate to `escalateTo` (IT manager). Pure + time-injected.
+
+VERSION -> 2.4.200.
 
 ## v2.4.199 -- admin-interface epic, phase 9: lifecycle calendar (expirations, auto-renew, escalation)
 
