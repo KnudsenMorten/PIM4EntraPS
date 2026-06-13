@@ -16,12 +16,60 @@
 Set-StrictMode -Off
 Add-Type -AssemblyName System.Data -ErrorAction SilentlyContinue
 
+function New-PimSqlConnection {
+    # Single place connections are created, so MANAGED IDENTITY (the chosen auth
+    # for Azure SQL) works passwordless: the launcher mints an MI access token for
+    # https://database.windows.net/ into $global:PIM_SqlAccessToken; we set it on
+    # the connection (System.Data.SqlClient supports .AccessToken). No password in
+    # the connection string. Skipped when the CS uses Integrated auth (dev/on-prem)
+    # -- the two are mutually exclusive.
+    param([Parameter(Mandatory)][string]$ConnectionString)
+    $c = New-Object System.Data.SqlClient.SqlConnection $ConnectionString
+    if ($global:PIM_SqlAccessToken -and $ConnectionString -notmatch '(?i)Integrated\s*Security') {
+        try { $c.AccessToken = "$($global:PIM_SqlAccessToken)" } catch {}
+    }
+    return $c
+}
+
+function Get-PimAzureSqlConnectionString {
+    # Passwordless Azure SQL connection string (no credentials) -- auth is the MI
+    # AccessToken set by New-PimSqlConnection. Launcher builds this + mints the token.
+    param([Parameter(Mandatory)][string]$Fqdn, [string]$Database = 'PIM4EntraPS')
+    return "Server=tcp:$Fqdn,1433;Database=$Database;Encrypt=True;TrustServerCertificate=False;Connection Timeout=30"
+}
+
+function Get-PimSqlSecretFromKeyVault {
+    # Fetch a secret (the connection string, or a password) from Key Vault via the
+    # KV REST API with a Bearer token. Prefers a launcher-pre-minted token
+    # ($global:PIM_KeyVaultToken) to avoid pulling the Az module into a Graph
+    # process; falls back to Get-AzAccessToken only if available. NEVER cached to disk.
+    param([Parameter(Mandatory)][string]$VaultName, [Parameter(Mandatory)][string]$SecretName, [string]$ApiVersion = '7.4')
+    $token = $global:PIM_KeyVaultToken
+    if (-not $token) {
+        $t = (Get-AzAccessToken -ResourceUrl 'https://vault.azure.net' -ErrorAction Stop).Token
+        $token = if ($t -is [securestring]) { [System.Net.NetworkCredential]::new('', $t).Password } else { $t }
+    }
+    $uri = "https://$VaultName.vault.azure.net/secrets/$SecretName" + "?api-version=$ApiVersion"
+    return (Invoke-RestMethod -Method GET -Uri $uri -Headers @{ Authorization = "Bearer $token" } -ErrorAction Stop).value
+}
+
 function Get-PimSqlConnectionString {
-    # Prod: $global:PIM_SqlConnectionString. Otherwise build from server+db
-    # (dev default server .\SQLEXPRESS, integrated auth).
+    # Resolve the connection string WITHOUT persisting any secret to a file.
+    # Priority:
+    #   1. explicit -Server         -> build passwordless (Integrated) [dev/test]
+    #   2. $global:PIM_SqlConnectionString  -> in-memory (launcher-set from KV)
+    #   3. KV pointer ($global:PIM_SqlConnStringVault + ...Secret) -> fetch from KV
+    #   4. passwordless build from $global:PIM_SqlServer + db (Integrated / AAD-MI)
+    # The connection string / secret is NEVER read from a JSON/config file.
     param([string]$Server, [string]$Database = 'PIM4EntraPS')
-    if ($global:PIM_SqlConnectionString -and -not $Server) { return $global:PIM_SqlConnectionString }
-    $srv = if ($Server) { $Server } elseif ($global:PIM_SqlServer) { $global:PIM_SqlServer } else { '.\SQLEXPRESS' }
+    if ($Server) { return "Server=$Server;Database=$Database;Integrated Security=SSPI;Encrypt=False;TrustServerCertificate=True;Connection Timeout=15" }
+    if ($global:PIM_SqlConnectionString) { return $global:PIM_SqlConnectionString }
+    if ($global:PIM_SqlConnStringVault -and $global:PIM_SqlConnStringSecret) {
+        return (Get-PimSqlSecretFromKeyVault -VaultName "$($global:PIM_SqlConnStringVault)" -SecretName "$($global:PIM_SqlConnStringSecret)")
+    }
+    $srv = if ($global:PIM_SqlServer) { $global:PIM_SqlServer } else { '.\SQLEXPRESS' }
+    # Passwordless: Integrated (on-prem/Express) or, for Azure SQL, the launcher
+    # sets a token-based CS in $global:PIM_SqlConnectionString instead.
     return "Server=$srv;Database=$Database;Integrated Security=SSPI;Encrypt=False;TrustServerCertificate=True;Connection Timeout=15"
 }
 
@@ -34,7 +82,7 @@ function Assert-PimSqlIdentifier {
 
 function Invoke-PimSqlQuery {
     param([Parameter(Mandatory)][string]$ConnectionString, [Parameter(Mandatory)][string]$Sql, [hashtable]$Parameters = @{})
-    $c = New-Object System.Data.SqlClient.SqlConnection $ConnectionString
+    $c = New-PimSqlConnection -ConnectionString $ConnectionString
     try {
         $c.Open(); $cmd = $c.CreateCommand(); $cmd.CommandText = $Sql
         foreach ($k in $Parameters.Keys) { [void]$cmd.Parameters.AddWithValue("@$k", $(if ($null -eq $Parameters[$k]) { [DBNull]::Value } else { $Parameters[$k] })) }
@@ -46,7 +94,7 @@ function Invoke-PimSqlQuery {
 
 function Invoke-PimSqlNonQuery {
     param([Parameter(Mandatory)][string]$ConnectionString, [Parameter(Mandatory)][string]$Sql, [hashtable]$Parameters = @{})
-    $c = New-Object System.Data.SqlClient.SqlConnection $ConnectionString
+    $c = New-PimSqlConnection -ConnectionString $ConnectionString
     try {
         $c.Open(); $cmd = $c.CreateCommand(); $cmd.CommandText = $Sql
         foreach ($k in $Parameters.Keys) { [void]$cmd.Parameters.AddWithValue("@$k", $(if ($null -eq $Parameters[$k]) { [DBNull]::Value } else { $Parameters[$k] })) }
@@ -56,7 +104,7 @@ function Invoke-PimSqlNonQuery {
 
 function Invoke-PimSqlScalar {
     param([Parameter(Mandatory)][string]$ConnectionString, [Parameter(Mandatory)][string]$Sql, [hashtable]$Parameters = @{})
-    $c = New-Object System.Data.SqlClient.SqlConnection $ConnectionString
+    $c = New-PimSqlConnection -ConnectionString $ConnectionString
     try {
         $c.Open(); $cmd = $c.CreateCommand(); $cmd.CommandText = $Sql
         foreach ($k in $Parameters.Keys) { [void]$cmd.Parameters.AddWithValue("@$k", $(if ($null -eq $Parameters[$k]) { [DBNull]::Value } else { $Parameters[$k] })) }
@@ -157,6 +205,50 @@ function Invoke-PimSqlCommit {
     }
     [void](Invoke-PimSqlNonQuery -ConnectionString $ConnectionString -Sql "UPDATE pim.ChangeQueue SET Status='applied' WHERE Status='pending'")
     return [pscustomobject]@{ applied = $pending.Count; netChanges = $plan.Count; rowsAffected = $affected }
+}
+
+function Get-PimStoreRowKey {
+    # Natural key per entity/base (matches the manager's row-key convention) so a
+    # row maps to a stable pim.Rows [Key]. Returns '' when no key can be derived.
+    param([Parameter(Mandatory)][string]$Base, [Parameter(Mandatory)][object]$Row)
+    $g = {
+        param($n)
+        if ($Row -is [System.Collections.IDictionary]) { if ($Row.Contains($n)) { "$($Row[$n])" } else { '' } }
+        else { $p = $Row.PSObject.Properties[$n]; if ($p -and $null -ne $p.Value) { "$($p.Value)" } else { '' } }
+    }
+    $k = switch -Wildcard ($Base) {
+        'PIM-Definitions-AU'              { (& $g 'AdministrativeUnitTag') }
+        'PIM-Definitions-*'              { (& $g 'GroupTag') }
+        'Account-Definitions-Admins'     { (& $g 'UserName') }
+        'PIM-Assignments-Admins'         { ((& $g 'Username') + '|' + (& $g 'GroupTag')) }
+        'PIM-Assignments-Groups'         { ((& $g 'TargetGroupTag') + '|' + (& $g 'SourceGroupTag')) }
+        'PIM-Assignments-Roles-Groups'   { ((& $g 'GroupTag') + '|' + (& $g 'RoleDefinitionName')) }
+        'PIM-Assignments-Roles-AUs'      { ((& $g 'GroupTag') + '|' + (& $g 'AdministrativeUnitTag') + '|' + (& $g 'RoleDefinitionName')) }
+        'PIM-Assignments-Azure-Resources'{ ((& $g 'GroupTag') + '|' + (& $g 'AzScope') + '|' + (& $g 'AzScopePermission')) }
+        default                          { $x = (& $g 'GroupTag'); if (-not "$x".Trim()) { $x = (& $g 'GroupName') }; $x }
+    }
+    $k = "$k".Trim()
+    if ($k -eq '' -or $k -eq '|' -or $k -match '^\|+$') { return '' }
+    return $k
+}
+
+function Set-PimSqlEntityRows {
+    # Full-set replace of an entity's rows (matches CSV file-write semantics):
+    # upsert every submitted row by its natural key, delete current keys that are
+    # no longer present. Returns @{ rowCount; removed }.
+    param([Parameter(Mandatory)][string]$ConnectionString, [Parameter(Mandatory)][string]$Entity, [object[]]$Rows = @(), [string]$Base)
+    $base = if ("$Base".Trim()) { $Base } else { $Entity }
+    $submitted = @{}
+    foreach ($r in @($Rows)) {
+        $k = Get-PimStoreRowKey -Base $base -Row $r
+        if (-not $k) { continue }
+        $submitted[$k] = $true
+        Set-PimSqlRow -ConnectionString $ConnectionString -Entity $Entity -Key $k -Data $r
+    }
+    $removed = 0
+    $currentKeys = @(Invoke-PimSqlQuery -ConnectionString $ConnectionString -Sql "SELECT [Key] FROM pim.Rows WHERE Entity=@e" -Parameters @{ e = $Entity } | ForEach-Object { "$($_.Key)" })
+    foreach ($ck in $currentKeys) { if (-not $submitted.ContainsKey($ck)) { Remove-PimSqlRow -ConnectionString $ConnectionString -Entity $Entity -Key $ck; $removed++ } }
+    return @{ rowCount = $submitted.Count; removed = $removed }
 }
 
 function Test-PimSqlConnectivity {

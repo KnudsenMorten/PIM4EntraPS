@@ -19,6 +19,21 @@ Set-StrictMode -Off
 # Capabilities a portal-admin profile may carry.
 $script:PimPortalCapabilities = @('manage-direct','manage-indirect','assign','assign-admin','enable-consultants','invite-guest')
 
+function Get-PimPolicySetting {
+    # EVERYTHING is configurable in the config file. Resolution order:
+    #   1. the loaded config hashtable $global:PIM_NamingConventions[<Name>]
+    #      (set by config/PIM4EntraPS.NamingConventions.locked|custom.ps1)
+    #   2. an individual $global:PIM_<Name> override (runtime / launcher)
+    #   3. the supplied default
+    # So a customer tunes PawEnforcement / PawPolicy / PawSignals / naming /
+    # network zones etc. entirely in the file -- nothing is hardcoded in the engine.
+    param([Parameter(Mandatory)][string]$Name, $Default)
+    if ($global:PIM_NamingConventions -is [hashtable] -and $global:PIM_NamingConventions.ContainsKey($Name)) { return $global:PIM_NamingConventions[$Name] }
+    $g = Get-Variable -Name "PIM_$Name" -Scope Global -ErrorAction SilentlyContinue
+    if ($g -and $null -ne $g.Value) { return $g.Value }
+    return $Default
+}
+
 function Resolve-PimServiceType {
     # Map a Workload/Service token to the coarse service axis used for scoping.
     param([AllowNull()][string]$Workload)
@@ -155,25 +170,94 @@ function Test-PimPortalCanSeeGroup {
     return $true
 }
 
-function Test-PimNetworkZoneAllowedForTier {
-    # Network control: tier-0 actions require the PAW zone (limited network);
-    # tier 1/2 are allowed from any internal zone. CA enforces the network per
-    # door; this is the app-side double-check. $Tier0RequiresPaw default true.
-    param([AllowNull()][int]$Tier, [string]$RequestZone, [bool]$Tier0RequiresPaw = $true)
-    if ($Tier -eq 0 -and $Tier0RequiresPaw) { return ("$RequestZone".Trim().ToLowerInvariant() -eq 'paw') }
-    return $true
+function Resolve-PimDevicePawLevel {
+    # PAW detection is environment-specific (device GROUP MEMBERSHIP, device
+    # extensionAttribute, CA named location, network). The endpoint resolves those
+    # signals upstream and passes them; this returns the device's PAW LEVEL (0/1/2,
+    # 0 = most secure) or $null (not a PAW). Signals: an explicit { pawLevel = N },
+    # or per-level booleans whose key contains 'l0'/'l1'/'l2'; the LOWEST matching
+    # level wins. Trusted-signal set customizable via $global:PIM_PawSignals.
+    param([hashtable]$Signals = @{})
+    $cfgTrust = Get-PimPolicySetting -Name 'PawSignals' -Default @()
+    $trust = if ($cfgTrust) { @(@($cfgTrust) | ForEach-Object { "$_".ToLowerInvariant() }) } else { @() }
+    $best = $null
+    foreach ($k in $Signals.Keys) {
+        if ($trust.Count -gt 0 -and ($trust -notcontains "$k".ToLowerInvariant())) { continue }
+        $kl = "$k".ToLowerInvariant()
+        if ($kl -eq 'pawlevel' -and "$($Signals[$k])" -match '^\d+$') { $lvl = [int]$Signals[$k]; if ($null -eq $best -or $lvl -lt $best) { $best = $lvl }; continue }
+        if (-not [bool]$Signals[$k]) { continue }
+        $m = [regex]::Match($kl, 'l([012])')
+        if ($m.Success) { $lvl = [int]$m.Groups[1].Value; if ($null -eq $best -or $lvl -lt $best) { $best = $lvl } }
+    }
+    return $best
+}
+
+function Get-PimDefaultPawPolicy {
+    # Which (tier, plane, level) require a PAW, and at what level. First match wins;
+    # pawLevel 'group' = the group's own level, 'none' = whole-network OK, or a
+    # fixed int. Unmatched -> no PAW. Fully overridable via $global:PIM_PawPolicy
+    # to fit customer maturity. Default reflects: tier-0 -> PAW; tier-1 management
+    # plane (MP) -> PAW (privileged platform); everything else (tier-1 WDP incl.
+    # level 3+, tier-2) -> whole network.
+    return @(
+        @{ tier = 0;            pawLevel = 'group' }
+        @{ tier = 1; plane = 'MP'; pawLevel = 'group' }
+    )
+}
+
+function Get-PimRequiredPawLevel {
+    # The PAW level a (tier, plane, level) requires, or $null when none is required.
+    param([Parameter(Mandatory)][int]$Tier, [string]$Plane, [int]$Level = 0, [object[]]$Policy)
+    if (-not $Policy) { $Policy = @(Get-PimPolicySetting -Name 'PawPolicy' -Default (Get-PimDefaultPawPolicy)) }
+    foreach ($r in @($Policy)) {
+        if ($null -ne $r.tier -and "$($r.tier)" -ne '' -and [int]$r.tier -ne $Tier) { continue }
+        if ("$($r.plane)".Trim() -and "$($r.plane)" -ine "$Plane") { continue }
+        if ($null -ne $r.minLevel -and "$($r.minLevel)" -ne '' -and $Level -lt [int]$r.minLevel) { continue }
+        if ($null -ne $r.maxLevel -and "$($r.maxLevel)" -ne '' -and $Level -gt [int]$r.maxLevel) { continue }
+        $pl = "$($r.pawLevel)".Trim()
+        if ($pl -ieq 'none') { return $null }
+        if ($pl -eq '' -or $pl -ieq 'group') { return $Level }
+        if ($pl -match '^\d+$') { return [int]$pl }
+        return $Level
+    }
+    return $null
+}
+
+function Test-PimPawAllowed {
+    # PAW gate -- OPT-IN (OFF by default; many customers have no PAW). When enabled
+    # ($global:PIM_PawEnforcement or -Enforce), the group's (tier, plane, level) is
+    # matched to the policy -> a required PAW level (or none). A more-privileged PAW
+    # (lower level) may manage less-privileged work (RequestPawLevel <= required).
+    param([Parameter(Mandatory)][int]$Tier, [string]$Plane, [int]$Level = 0, [Nullable[int]]$RequestPawLevel, [object[]]$Policy, [Nullable[bool]]$Enforce)
+    if ($null -eq $Enforce) { $Enforce = [bool](Get-PimPolicySetting -Name 'PawEnforcement' -Default $false) }
+    if (-not $Enforce) { return $true }
+    $req = Get-PimRequiredPawLevel -Tier $Tier -Plane $Plane -Level $Level -Policy $Policy
+    if ($null -eq $req) { return $true }                 # whole-network OK
+    if ($null -eq $RequestPawLevel) { return $false }    # PAW required, none present
+    return ([int]$RequestPawLevel -le [int]$req)
 }
 
 function Test-PimPortalCanManageGroup {
-    # Can-see AND has the matching manage capability for the group's kind. When a
-    # $RequestZone is supplied (GUI passes it from the CA/source-network claim),
-    # the network gate also applies -- tier-0 management requires PAW even for a
-    # super-admin. No zone supplied (engine/automation context) -> gate skipped.
+    # Can-see AND has the matching manage capability for the group's kind.
+    #
+    # NETWORK GATE: tier-0 management requires the PAW zone -- BUT super-admins are
+    # NOT zone-locked by default (break-glass safety; a misdetected/blank zone must
+    # never lock a super-admin out of tier 0). Set $Tier0RequiresPawForSuperAdmin
+    # (or $global:PIM_Tier0RequiresPawForSuperAdmin) to ALSO gate super-admins.
+    # Regular portal-admins are always zone-gated for tier 0 when a zone is given.
     param(
         [AllowNull()][object]$Profile, [Parameter(Mandatory)][hashtable]$Facets,
-        [switch]$IsSuperAdmin, [string]$RequestZone, [bool]$Tier0RequiresPaw = $true
+        [switch]$IsSuperAdmin, [Nullable[int]]$RequestPawLevel, [Nullable[bool]]$EnforcePaw,
+        [Nullable[bool]]$EnforcePawForSuperAdmin
     )
-    if ("$RequestZone".Trim() -and -not (Test-PimNetworkZoneAllowedForTier -Tier ([int]$Facets.tier) -RequestZone $RequestZone -Tier0RequiresPaw:$Tier0RequiresPaw)) { return $false }
+    $enforce = if ($null -ne $EnforcePaw) { [bool]$EnforcePaw } else { [bool](Get-PimPolicySetting -Name 'PawEnforcement' -Default $false) }
+    if ($enforce) {
+        if ($null -eq $EnforcePawForSuperAdmin) { $EnforcePawForSuperAdmin = [bool](Get-PimPolicySetting -Name 'PawEnforcementForSuperAdmin' -Default $false) }  # default $false: never lock out super-admins
+        $applies = if ($IsSuperAdmin) { [bool]$EnforcePawForSuperAdmin } else { $true }
+        # Policy maps (tier, plane, level) -> required PAW level (helpdesk L2 PAW ->
+        # only L2; consultant L1 -> L1/L2; high-priv L0 -> all; tier-1 WDP L3+ -> none).
+        if ($applies -and -not (Test-PimPawAllowed -Tier ([int]$Facets.tier) -Plane "$($Facets.plane)" -Level ([int]$Facets.level) -RequestPawLevel $RequestPawLevel -Enforce $true)) { return $false }
+    }
     if ($IsSuperAdmin) { return $true }
     if (-not (Test-PimPortalCanSeeGroup -Profile $Profile -Facets $Facets)) { return $false }
     $caps = @(@($Profile.capabilities) | ForEach-Object { "$_".ToLowerInvariant() })

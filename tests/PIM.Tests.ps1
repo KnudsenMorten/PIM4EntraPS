@@ -190,19 +190,61 @@ Describe 'Portal-admin scoping (delegated GUI managers)' {
         (Test-PimPortalCanSeeGroup -Profile $null -Facets @{ service='entra'; tier=0; level=0; kind='indirect'; scope='' } -IsSuperAdmin) | Should -BeTrue
         (Test-PimPortalCanManageGroup -Profile $null -Facets @{ service='azure'; tier=0; level=0; kind='direct'; scope='' } -IsSuperAdmin) | Should -BeTrue
     }
-    It 'network zone: tier-0 management requires PAW (even for super-admin) when a zone is supplied' {
-        $t0 = @{ service='entra'; tier=0; level=1; kind='indirect'; scope='' }
-        # super-admin still blocked from tier-0 when the request is not from PAW
-        (Test-PimPortalCanManageGroup -Profile $null -Facets $t0 -IsSuperAdmin -RequestZone 'internal') | Should -BeFalse
-        (Test-PimPortalCanManageGroup -Profile $null -Facets $t0 -IsSuperAdmin -RequestZone 'paw') | Should -BeTrue
-        # tier 1/2 fine from the internal network
-        (Test-PimPortalCanManageGroup -Profile $null -Facets @{ service='azure'; tier=1; level=2; kind='indirect'; scope='' } -IsSuperAdmin -RequestZone 'internal') | Should -BeTrue
-        # no zone supplied (engine/automation) -> network gate skipped
-        (Test-PimPortalCanManageGroup -Profile $null -Facets $t0 -IsSuperAdmin) | Should -BeTrue
-        # pure helper
-        (Test-PimNetworkZoneAllowedForTier -Tier 0 -RequestZone 'internal') | Should -BeFalse
-        (Test-PimNetworkZoneAllowedForTier -Tier 0 -RequestZone 'paw') | Should -BeTrue
-        (Test-PimNetworkZoneAllowedForTier -Tier 2 -RequestZone 'internal') | Should -BeTrue
+    It 'PAW gate is OPT-IN (off by default); level rule when enabled' {
+        $t0 = @{ service='entra'; tier=0; plane='CP'; level=1; kind='indirect'; scope='' }
+        # DEFAULT (off): allowed regardless of PAW -- nobody locked out
+        (Test-PimPawAllowed -Tier 0 -Plane 'CP' -Level 1 -RequestPawLevel $null) | Should -BeTrue
+        (Test-PimPortalCanManageGroup -Profile $null -Facets $t0 -IsSuperAdmin -RequestPawLevel $null) | Should -BeTrue
+        # ENABLED: tier-0 needs a PAW; PAW level must be <= group level
+        (Test-PimPawAllowed -Tier 0 -Plane 'CP' -Level 1 -RequestPawLevel $null -Enforce $true) | Should -BeFalse
+        (Test-PimPawAllowed -Tier 0 -Plane 'CP' -Level 1 -RequestPawLevel 0 -Enforce $true) | Should -BeTrue
+        (Test-PimPawAllowed -Tier 0 -Plane 'CP' -Level 1 -RequestPawLevel 2 -Enforce $true) | Should -BeFalse   # helpdesk L2 can't do L1
+    }
+    It 'super-admin stays exempt from the PAW gate unless explicitly opted in' {
+        $t0 = @{ service='entra'; tier=0; plane='CP'; level=0; kind='indirect'; scope='' }
+        try {
+            $global:PIM_PawEnforcement = $true
+            (Test-PimPortalCanManageGroup -Profile $null -Facets $t0 -IsSuperAdmin -RequestPawLevel $null) | Should -BeTrue   # exempt by default
+            (Test-PimPortalCanManageGroup -Profile $null -Facets $t0 -IsSuperAdmin -RequestPawLevel $null -EnforcePawForSuperAdmin $true) | Should -BeFalse
+            (Test-PimPortalCanManageGroup -Profile $null -Facets $t0 -IsSuperAdmin -RequestPawLevel 0 -EnforcePawForSuperAdmin $true) | Should -BeTrue
+        } finally { $global:PIM_PawEnforcement = $null }
+    }
+    It 'Resolve-PimDevicePawLevel: pluggable detection -> lowest level wins' {
+        (Resolve-PimDevicePawLevel -Signals @{ pawLevel = 2 }) | Should -Be 2
+        (Resolve-PimDevicePawLevel -Signals @{ deviceGroupPawL1 = $true; deviceGroupPawL2 = $true }) | Should -Be 1   # most-privileged wins
+        ($null -eq (Resolve-PimDevicePawLevel -Signals @{ deviceGroupPawL1 = $false })) | Should -BeTrue
+        try { $global:PIM_PawSignals = @('deviceGroupPawL0')   # only trust this signal
+            ($null -eq (Resolve-PimDevicePawLevel -Signals @{ deviceGroupPawL2 = $true })) | Should -BeTrue
+            (Resolve-PimDevicePawLevel -Signals @{ deviceGroupPawL0 = $true }) | Should -Be 0
+        } finally { $global:PIM_PawSignals = $null }
+    }
+    It 'PAW device: per-level group body, tag body, level detection' {
+        (Get-PimPawGroupName -Level 0) | Should -Be 'PIM-PAW-L0-Devices'
+        $g = New-PimPawGroupBody -Level 1
+        $g.securityEnabled | Should -BeTrue; $g.mailEnabled | Should -BeFalse; $g.displayName | Should -Be 'PIM-PAW-L1-Devices'
+        (New-PimPawDeviceTagBody -ExtensionAttribute 5 -Value 'PAW-L0').extensionAttributes.extensionAttribute5 | Should -Be 'PAW-L0'
+        # level by group membership (lowest wins)
+        $dev = [pscustomobject]@{ id='d1'; transitiveMemberOf=@([pscustomobject]@{ id='g1' }, [pscustomobject]@{ id='g2' }) }
+        (Get-PimDevicePawLevel -Device $dev -PawGroupIds @{ 0='g0'; 1='g1'; 2='g2' }) | Should -Be 1
+        ($null -eq (Get-PimDevicePawLevel -Device ([pscustomobject]@{ id='x'; transitiveMemberOf=@() }) -PawGroupIds @{ 0='g0' })) | Should -BeTrue
+        # level by extensionAttribute
+        $devEa = [pscustomobject]@{ id='d3'; extensionAttributes=[pscustomobject]@{ extensionAttribute5='PAW-L2' } }
+        (Get-PimDevicePawLevel -Device $devEa -ExtensionAttribute 5) | Should -Be 2
+    }
+    It 'PAW groups are protected by a restricted-management AU' {
+        (New-PimPawAuBody).isMemberManagementRestricted | Should -BeTrue
+    }
+    It 'PAW policy: tier-0 + tier-1/MP need PAW; tier-1/WDP L3+ and tier-2 are whole-network' {
+        (Get-PimRequiredPawLevel -Tier 0 -Plane 'CP' -Level 1) | Should -Be 1          # tier-0 -> PAW at group level
+        (Get-PimRequiredPawLevel -Tier 1 -Plane 'MP' -Level 2) | Should -Be 2          # mgmt plane -> PAW
+        ($null -eq (Get-PimRequiredPawLevel -Tier 1 -Plane 'WDP' -Level 3)) | Should -BeTrue   # workload-data plane -> whole network
+        ($null -eq (Get-PimRequiredPawLevel -Tier 2 -Plane 'WDP' -Level 4)) | Should -BeTrue   # tier 2 -> whole network
+        # enforcement off by default
+        (Test-PimPawAllowed -Tier 0 -Plane 'CP' -Level 0 -RequestPawLevel $null) | Should -BeTrue
+        # enabled: MP tier-1 needs a sufficient PAW
+        (Test-PimPawAllowed -Tier 1 -Plane 'MP' -Level 1 -RequestPawLevel $null -Enforce $true) | Should -BeFalse
+        (Test-PimPawAllowed -Tier 1 -Plane 'MP' -Level 1 -RequestPawLevel 0 -Enforce $true) | Should -BeTrue
+        (Test-PimPawAllowed -Tier 1 -Plane 'WDP' -Level 3 -RequestPawLevel $null -Enforce $true) | Should -BeTrue   # WDP L3+ never gated
     }
     It 'Select-PimPortalVisibleRows filters a row set for the profile' {
         $rows = @(

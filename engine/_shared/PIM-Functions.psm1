@@ -92,6 +92,10 @@ ForEach ($_mod in $_PIM_ModulesToLoad) {
 # change queue + fast delta commit. No SqlServer module (no Graph/Azure.Core clash).
 . (Join-Path $PSScriptRoot 'PIM-SqlStore.ps1')
 
+# PAW device tagging + group -- make the PAW group, tag devices, detect PAW
+# membership; feeds the tier-0 network zone gate (PIM-PortalAccess.ps1).
+. (Join-Path $PSScriptRoot 'PIM-PawDevices.ps1')
+
 function Ensure-DateTime {
     <#
         .SYNOPSIS

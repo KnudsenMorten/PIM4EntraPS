@@ -145,6 +145,14 @@ if (Test-Path -LiteralPath $_portalLib) { . $_portalLib }
 $_wizardLib = Join-Path $solutionRoot 'engine\_shared\PIM-PermissionWizard.ps1'
 if (Test-Path -LiteralPath $_wizardLib) { . $_wizardLib }
 
+# SQL-only data layer (engine/_shared/PIM-SqlStore.ps1 + its change-queue dep) --
+# powers the SQL storage backend. Raw ADO.NET; connection string resolved from
+# KV / in-memory, never a file.
+$_queueLib = Join-Path $solutionRoot 'engine\_shared\PIM-ChangeQueue.ps1'
+if (Test-Path -LiteralPath $_queueLib) { . $_queueLib }
+$_sqlLib = Join-Path $solutionRoot 'engine\_shared\PIM-SqlStore.ps1'
+if (Test-Path -LiteralPath $_sqlLib) { . $_sqlLib }
+
 # One id per Manager session -- groups this session's audit events (phase 6).
 $script:PimManagerSessionId = [guid]::NewGuid().ToString('N')
 
