@@ -1,9 +1,10 @@
 # Release notes for PIM4EntraPS
 
-## v2.4.190
+## v2.4.191
 
 Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monorepo:
 
+- release: PIM4EntraPS v2.4.191 -- connector role-definition import (phase 5) (2fcb72db)
 - release: PIM4EntraPS v2.4.190 -- Azure auto-discovery + reconcile (phase 3) (176fcb53)
 - release: PIM4EntraPS v2.4.189 -- change queue + full/delta run modes (phase 7) (48a909c5)
 - release: PIM4EntraPS v2.4.188 -- admin-interface epic phase 2 server seam (portal-access + wizard-derive endpoints) (79f8171f)
@@ -33,7 +34,6 @@ Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monor
 - release: PIM4EntraPS v2.4.164 -- phase 12 / v3.0 design (doc § 16): Manager Entra MFA sign-in (Edge PKCE loopback, amr-claim MFA check, RBAC by Entra UPN, CA applies; protects use-of-Manager not files-on-compromised-host); remote operation interim via -ConfigRoot SMB; SQL data store decision (Azure SQL / SQL MI / on-prem, Entra-only auth = no SQL creds, laptop Manager connects as operator w/ MFA at the DB door, engine as SPN/MSI, DB roles mirror Reader/Admin/SuperAdmin) with migration path: Get-PimRows/Save-PimRows repository abstraction + PIM_DataStore Csv|Sql (Csv supported indefinitely), schema = 15 logical tables + state + audit + intake, idempotent Invoke-PimCsvToDbMigration, nightly CSV snapshot export (25165e36)
 - release: PIM4EntraPS v2.4.163 -- phase 11 design: per-type intake routing (config/intake-routing.custom.json Approve default / Auto) + Invoke-PimIntakeProcessor headless scheduled task (drains the durable MID file-drop inbox every ~10 min; Auto -> verified rows in PIM-Assignments-FromIntake.custom.csv overlay unioned by the engine, no raw input to the engine + no Manager write-race; Approve -> queued + operator nudge mail); MID delivery decoupled from Manager lifetime (files queue in the directory); guardrails non-negotiable (no Auto for approval-required groups, template-only onboarding) (3e4dde55)
 - release: PIM4EntraPS v2.4.162 -- phase 11 design correction: the MANAGER ingests external requests (SNOW -> MID inbox -> Manager verify + approval queue -> pending -> Review & Save -> CSV), the engine never reads external input and stays purely declarative; no lights-out path bypassing operator + CSV (2cc21156)
-- release: PIM4EntraPS v2.4.161 -- design phases 10+11 in docs/LIFECYCLE-GOVERNANCE.md: access reviews as hybrid (Entra review UX, engine-owned schedules with auto-apply OFF + decision sweep; Deny -> engine tombstone suppression layer treated as Action=Remove so the CSV never re-delegates a review-removed member; PIM-REV-001 reconciliation flag) + external request intake via ServiceNow MID Server file-drop inbox (fully internal pull-only, create-only writer ACL, signed typed requests w/ nonce ledger, admin.onboard restricted to template ids, approval-required groups hard-denied, activation out of scope, Manager approval queue default, full audit; Azure Storage queue as no-MID fallback) (7400b94c)
 
 ---
 
@@ -42,6 +42,16 @@ Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monor
 > **Curated changelog.** The publish workflow auto-prepends recent monorepo commits as a raw activity log; this file is the human-friendly narrative on top.
 
 ---
+
+## v2.4.191 -- admin-interface epic, phase 5: connector role-definition import
+
+`engine/_shared/PIM-DefinitionImport.ps1` -- turns connector live roles into PIM permission definitions (Pester 51 -> **55**):
+
+- **`Get-PimDefinitionImportPlan`** -- live roles (from `Get-PimWorkloadRoles`) vs existing definitions -> **existing** (already defined), **autoCreate** (match an auto-import policy), **manual** (need a super-admin click). Each candidate carries its derived groupName/tier/level/plane (via the wizard derivation).
+- **`Test-PimDefinitionAutoImport`** -- policy keyed by **service-type + tier + level** (and an optional workload allowlist): e.g. auto-import entra roles at tier 0 level 1-2, or defender/powerbi workload roles -- so new roles/landing zones become definitions automatically and the business can link roles/tasks/dept/org/processes to them.
+- **`ConvertTo-PimImportQueueChanges`** -- import plan -> change-queue Create records (auto only; `-IncludeManual` for the super-admin "import all latest" action).
+
+VERSION -> 2.4.191.
 
 ## v2.4.190 -- admin-interface epic, phase 3: Azure auto-discovery + reconcile
 
