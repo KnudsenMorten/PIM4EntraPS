@@ -1,0 +1,47 @@
+{
+  "id": "dataverse",
+  "name": "Microsoft Dataverse / Dynamics 365 (security roles via Entra group team)",
+  "auth": "dataverse",
+  "membershipModel": true,
+  "perRowResource": true,
+  "containerKind": "group team",
+  "status": "structure built v2.4.186 -- nested-membership adapter (Entra group -> Dataverse group team -> security role). Live-validation pending a Dataverse environment + the Entra group provisioned as a group team.",
+  "permissionsNeeded": ["Dataverse: a security role with prvReadTeam + prvAssignRole (e.g. System Administrator) for the app user; the Entra group must already exist as a Dataverse GROUP TEAM (teamtype=2)"],
+  "prerequisites": {
+    "perRowResource": "Each row's Resource column = the Dataverse ENVIRONMENT org host, e.g. contoso.crm4.dynamics.com. baseUrl is token-expanded with it.",
+    "tokenAdapter": "auth=dataverse -> the launcher pre-mints $global:PIM_WorkloadTokens['dataverse'] for the row's org (resource audience https://{org}); the engine does not mint per-row.",
+    "groupTeam": "The Entra security group must be provisioned as a Dataverse group team (teamtype=2, azureactivedirectoryobjectid = the group's objectId). resolveContainer finds that team; roles are attached to the team via teamroles_association.",
+    "businessUnit": "Security roles are business-unit scoped -- listRoles returns roles in the org; pick the one in the team's business unit."
+  },
+  "api": {
+    "baseUrl": "https://{resource}/api/data/v9.2",
+    "listRoles": {
+      "method": "GET",
+      "path": "/roles?$select=roleid,name",
+      "itemsPath": "value",
+      "roleId": "roleid",
+      "roleName": "name"
+    },
+    "resolveContainer": {
+      "method": "GET",
+      "path": "/teams?$select=teamid&$filter=azureactivedirectoryobjectid eq {groupId} and teamtype eq 2",
+      "itemsPath": "value",
+      "idField": "teamid"
+    },
+    "listContainerRoles": {
+      "method": "GET",
+      "path": "/teams({container})/teamroles_association?$select=roleid",
+      "itemsPath": "value",
+      "roleId": "roleid"
+    },
+    "assign": {
+      "method": "POST",
+      "path": "/teams({container})/teamroles_association/$ref",
+      "body": { "@odata.id": "https://{resource}/api/data/v9.2/roles({roleId})" }
+    },
+    "remove": {
+      "method": "DELETE",
+      "path": "/teams({container})/teamroles_association({roleId})/$ref"
+    }
+  }
+}

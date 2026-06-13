@@ -56,6 +56,27 @@ Describe 'Workload-connector framework' {
         $roles.Count | Should -Be 4
         ($roles | ForEach-Object { $_.name }) | Should -Contain 'Member'
     }
+    It 'nested-membership connectors declare resolveContainer + listContainerRoles' {
+        $files = Get-ChildItem (Join-Path $Root 'workloads\connectors') -Filter '*.connector.json'
+        foreach ($f in $files) {
+            $c = Get-Content $f.FullName -Raw | ConvertFrom-Json
+            if ($c.membershipModel) {
+                $c.api.resolveContainer   | Should -Not -BeNullOrEmpty -Because "$($f.Name) is membershipModel -> needs resolveContainer"
+                $c.api.listContainerRoles | Should -Not -BeNullOrEmpty -Because "$($f.Name) is membershipModel -> needs listContainerRoles"
+            }
+        }
+    }
+    It 'Get-PimWorkloadContainerId returns null when the connector has no resolveContainer' {
+        Get-PimWorkloadContainerId -Connector ([pscustomobject]@{ api = [pscustomobject]@{} }) -Tokens @{ groupId = 'g' } | Should -Be $null
+    }
+    It 'membership tokens expand into Dataverse container paths + odata body' {
+        $dv = Get-Content (Join-Path $Root 'workloads\connectors\dataverse.connector.json') -Raw | ConvertFrom-Json
+        $tok = @{ groupId = 'GID'; container = 'TEAM1'; roleId = 'ROLE9'; resource = 'org.crm4.dynamics.com' }
+        (Expand-PimWorkloadTokens -Text $dv.api.resolveContainer.path -Tokens $tok) | Should -BeLike '*azureactivedirectoryobjectid eq GID*'
+        (Expand-PimWorkloadTokens -Text $dv.api.listContainerRoles.path -Tokens $tok) | Should -BeLike '*/teams(TEAM1)/teamroles_association*'
+        $body = Expand-PimWorkloadTokens -Text ($dv.api.assign.body | ConvertTo-Json) -Tokens $tok
+        ($body -like '*roles(ROLE9)*' -and $body -like '*org.crm4.dynamics.com*') | Should -BeTrue
+    }
 }
 
 Describe 'Offline feature spot-checks (in-proc)' {
