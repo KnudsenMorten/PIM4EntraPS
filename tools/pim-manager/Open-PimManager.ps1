@@ -137,6 +137,14 @@ if (Test-Path -LiteralPath $_licenseLib) { . $_licenseLib }
 $_schemaConfLib = Join-Path $solutionRoot 'engine\_shared\PIM-SchemaConformance.ps1'
 if (Test-Path -LiteralPath $_schemaConfLib) { . $_schemaConfLib }
 
+# Delegated portal-admin scoping + permission-wizard auto-derivation
+# (engine/_shared/PIM-PortalAccess.ps1, PIM-PermissionWizard.ps1) -- power
+# /api/portal-access and /api/wizard/derive. Self-contained; dot-sourced standalone.
+$_portalLib = Join-Path $solutionRoot 'engine\_shared\PIM-PortalAccess.ps1'
+if (Test-Path -LiteralPath $_portalLib) { . $_portalLib }
+$_wizardLib = Join-Path $solutionRoot 'engine\_shared\PIM-PermissionWizard.ps1'
+if (Test-Path -LiteralPath $_wizardLib) { . $_wizardLib }
+
 # One id per Manager session -- groups this session's audit events (phase 6).
 $script:PimManagerSessionId = [guid]::NewGuid().ToString('N')
 
@@ -2250,6 +2258,56 @@ function Handle-Request {
             } catch {
                 Write-JsonResponse -Response $resp -Status 502 -Body @{ error = "$($_.Exception.Message)" }
                 return 502
+            }
+        }
+
+        # -------------------------------------------------------------------
+        # Delegated portal-admin access (admin-interface epic phase 2).
+        # -------------------------------------------------------------------
+        if ($path -eq '/api/portal-access' -and $method -eq 'GET') {
+            $script:lastHeartbeat = Get-Date
+            $role = Get-PimManagerRole
+            $isSuper = [bool](Test-PimManagerRoleAtLeast -Minimum 'SuperAdmin')
+            $prof = $null
+            if (Get-Command Read-PimPortalProfiles -ErrorAction SilentlyContinue) {
+                $prof = Get-PimPortalProfile -Profiles (Read-PimPortalProfiles -ConfigDir $script:configRoot) -Identity "$($role.identity)"
+            }
+            $profOut = if ($prof) {
+                [ordered]@{
+                    displayName = "$($prof.displayName)"; services = @($prof.services)
+                    tierMax = $prof.tierMax; levelMax = $prof.levelMax; scopes = @($prof.scopes)
+                    capabilities = @($prof.capabilities); managedAdmins = @($prof.managedAdmins)
+                }
+            } else { $null }
+            Write-JsonResponse -Response $resp -Status 200 -Body ([ordered]@{
+                identity = "$($role.identity)"; managerRole = "$($role.role)"; isSuperAdmin = $isSuper
+                portalProfile = $profOut
+            })
+            return 200
+        }
+
+        # Reversed permission-wizard auto-derivation (target -> source -> roles).
+        if ($path -eq '/api/wizard/derive' -and $method -eq 'POST') {
+            $script:lastHeartbeat = Get-Date
+            $b = Read-RequestJson -Request $req
+            $target = "$($b.target)".Trim().ToLowerInvariant()
+            $roles = @(@($b.roles) | ForEach-Object { "$_" } | Where-Object { "$_".Trim() })
+            try {
+                if (-not $roles -or $roles.Count -eq 0) { throw 'at least one role is required' }
+                $d = switch ($target) {
+                    'entra'    { Get-PimEntraDerivation -Roles $roles -AuScope "$($b.auScope)" -BundleName "$($b.bundleName)" }
+                    'azure'    {
+                        $depth = if ("$($b.mgmtGroupDepth)".Trim()) { [int]$b.mgmtGroupDepth } else { 1 }
+                        Get-PimAzureDerivation -ScopeType "$($b.scopeType)" -Roles $roles -ScopePath "$($b.scopePath)" -ScopeName "$($b.scopeName)" -ManagementGroupDepth $depth -BundleName "$($b.bundleName)"
+                    }
+                    'workload' { Get-PimWorkloadDerivation -Workload "$($b.workload)" -Roles $roles -BundleName "$($b.bundleName)" }
+                    default    { throw "unknown target '$target' (expected entra | azure | workload)" }
+                }
+                Write-JsonResponse -Response $resp -Status 200 -Body ([ordered]@{ ok = $true; derivation = $d })
+                return 200
+            } catch {
+                Write-JsonResponse -Response $resp -Status 400 -Body @{ error = "$($_.Exception.Message)" }
+                return 400
             }
         }
 

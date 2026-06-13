@@ -1,9 +1,10 @@
 # Release notes for PIM4EntraPS
 
-## v2.4.187
+## v2.4.188
 
 Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monorepo:
 
+- release: PIM4EntraPS v2.4.188 -- admin-interface epic phase 2 server seam (portal-access + wizard-derive endpoints) (79f8171f)
 - release: PIM4EntraPS v2.4.187 -- admin-interface epic phase 1 (portal-admin scoping + wizard derivation engines) (164d002c)
 - release: PIM4EntraPS v2.4.186 -- nested-membership connector adapter + Dataverse connector (8b49c3e8)
 - release: PIM4EntraPS v2.4.185 -- locked-schema + data conformance preflight (25f4c9b5)
@@ -33,7 +34,6 @@ Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monor
 - release: PIM4EntraPS v2.4.161 -- design phases 10+11 in docs/LIFECYCLE-GOVERNANCE.md: access reviews as hybrid (Entra review UX, engine-owned schedules with auto-apply OFF + decision sweep; Deny -> engine tombstone suppression layer treated as Action=Remove so the CSV never re-delegates a review-removed member; PIM-REV-001 reconciliation flag) + external request intake via ServiceNow MID Server file-drop inbox (fully internal pull-only, create-only writer ACL, signed typed requests w/ nonce ledger, admin.onboard restricted to template ids, approval-required groups hard-denied, activation out of scope, Manager approval queue default, full audit; Azure Storage queue as no-MID fallback) (7400b94c)
 - release: PIM4EntraPS v2.4.160 + extension v1.6.27 -- dead CA-session tokens self-heal instead of erroring: mid-action staleness (401/token-shaped 403) during Activate / Deactivate / My Access load routes to triggerInteractiveReauth (wipes Graph+ARM tokens = auto sign-out, overlay now names Conditional Access session lifetime, popup reloads straight into interactive sign-in); popup-open dead-refresh-token path already self-healed via tryRefresh cache wipe. node --check + 7 behavioral assertions green. CRX repack on the signing-key box still required to publish 1.6.27 to the fleet (6b31c951)
 - release: PIM4EntraPS v2.4.159 -- lifecycle phase 9: resource discovery. Engine Invoke-PimResourceDiscovery (end of run, PIM_ResourceDiscoveryMode Off/Notify default Notify): new Azure subscriptions + Entra role definitions vs output/state/discovery-baseline.json (first run establishes silently; each item audited resource.discovered once, baseline rolls forward). Manager Governance tab Discovered-resources section over the _tenantSync caches with per-instance baseline + Admin-gated Acknowledge (resource.baseline audited); endpoints /api/discovered-resources + /api/discovery-baseline. Auto row-creation = documented follow-up. 14-check harness green PS 5.1 + pwsh 7; node --check green. ALL NINE LIFECYCLE-GOVERNANCE PHASES NOW SHIPPED (v2.4.153-159) (a1944979)
-- release: PIM4EntraPS v2.4.159-pre -- v2.4.158 lifecycle phases 7+8: Manager RBAC Reader/Admin/SuperAdmin (manager-access.custom.json, Windows identity, fail-closed, server-side 403 gates on csv-save/revoke/refresh=Admin + instance/emergency=SuperAdmin, role boot-injected into SPA); Governance tab (role banner, emergency panel, mail-template status, jsonl audit viewer; endpoints /api/access,/api/audit,/api/mail-templates,/api/emergency*); emergency break-glass override (SHA256 passphrase hash in emergency.custom.ps1, constant-time + 15-min lockout; Invoke-PimEmergencyOverride ordered before the template pass: scoped approval disable + owner notification via new emergency-override mail template + same-run auto-restore at TTL expiry with archive + full audit chain). 38-check harness green PS 5.1 + pwsh 7; node --check green (c2739856)
 
 ---
 
@@ -42,6 +42,16 @@ Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monor
 > **Curated changelog.** The publish workflow auto-prepends recent monorepo commits as a raw activity log; this file is the human-friendly narrative on top.
 
 ---
+
+## v2.4.188 -- admin-interface epic, phase 2 (server seam): portal-access + wizard-derive endpoints
+
+Exposes the phase-1 engines to the Manager GUI (Manager endpoint suite 16 -> **19**):
+
+- **`GET /api/portal-access`** -- the current user's effective access: manager role, `isSuperAdmin`, and their resolved portal-admin profile (services / tierMax / levelMax / scopes / capabilities / managedAdmins) from `config/portal-admins.json`. The GUI uses this to show only what the delegated manager may see/do.
+- **`POST /api/wizard/derive`** -- the reversed target-first wizard's live auto-fill: `{ target: entra|azure|workload, roles[], auScope?, scopeType?, scopePath?, scopeName?, mgmtGroupDepth?, workload?, bundleName? }` -> the full derivation (kind, name, level, tier, plane, domain, roleScope). Entra GA -> service/L0/T0/CP; azure sub LZ -> L1/T1/WDP; etc.
+- The Manager dot-sources `PIM-PortalAccess.ps1` + `PIM-PermissionWizard.ps1` standalone.
+
+Remaining phase-2 GUI work (next): reverse the Create wizard UI to call `/api/wizard/derive`, enforce `Select-PimPortalVisibleRows` on `/api/csv` reads + portal scoping on writes, filter the mapper's admins list by `managedAdmins`, and the super-admin schema/data-update + base-version prompt. VERSION -> 2.4.188.
 
 ## v2.4.187 -- admin-interface epic, phase 1: portal-admin scoping + permission-wizard derivation engines
 

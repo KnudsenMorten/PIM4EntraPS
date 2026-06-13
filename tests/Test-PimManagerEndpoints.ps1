@@ -68,13 +68,27 @@ try {
         @{ p='/api/instances';           chk={ param($r) $r -ne $null } },
         @{ p='/api/preflight';           chk={ param($r) $r -ne $null } },
         @{ p='/api/conformance/templates'; chk={ param($r) $r.templates -ne $null } },
-        @{ p='/api/conformance?template=defender-xdr-roles'; chk={ param($r) @($r.keys).Count -ge 1 -and $r.statuses -ne $null } }
+        @{ p='/api/conformance?template=defender-xdr-roles'; chk={ param($r) @($r.keys).Count -ge 1 -and $r.statuses -ne $null } },
+        @{ p='/api/portal-access'; chk={ param($r) "$($r.managerRole)" -ne '' -and $null -ne $r.isSuperAdmin } }
     )) {
         Beat
         $ok = $false
         try { $r = Probe $ep.p; $ok = (& $ep.chk $r) } catch { $ok = $false; Write-Host "      ($($ep.p): $($_.Exception.Message.Split([char]10)[0]))" -ForegroundColor DarkGray }
         T "GET $($ep.p)" $ok
     }
+    Write-Host "POST /api/wizard/derive (reversed wizard auto-fill)" -ForegroundColor Cyan
+    Beat
+    $okEntra = $false; $okAzure = $false
+    try {
+        $de = Invoke-RestMethod -Uri "$base/api/wizard/derive" -Headers $hdr -Method Post -ContentType 'application/json' -TimeoutSec 30 -Body (@{ target='entra'; roles=@('Global Administrator') } | ConvertTo-Json)
+        $okEntra = ($de.ok -and $de.derivation.level -eq 0 -and "$($de.derivation.kind)" -eq 'permission-service' -and "$($de.derivation.groupName)" -like 'PIM-Entra-ID-*-L0-T0-CP-ID')
+    } catch { Write-Host "      (entra derive: $($_.Exception.Message.Split([char]10)[0]))" -ForegroundColor DarkGray }
+    T 'wizard derive entra GA -> service/L0/T0/CP' $okEntra
+    try {
+        $da = Invoke-RestMethod -Uri "$base/api/wizard/derive" -Headers $hdr -Method Post -ContentType 'application/json' -TimeoutSec 30 -Body (@{ target='azure'; scopeType='subscription'; scopeName='lz-corp-prod'; scopePath='/subscriptions/abc'; roles=@('Contributor') } | ConvertTo-Json)
+        $okAzure = ($da.ok -and $da.derivation.level -eq 1 -and $da.derivation.tier -eq 1 -and "$($da.derivation.plane)" -eq 'WDP')
+    } catch { Write-Host "      (azure derive: $($_.Exception.Message.Split([char]10)[0]))" -ForegroundColor DarkGray }
+    T 'wizard derive azure sub LZ -> L1/T1/WDP' $okAzure
 } finally {
     if ($proc -and -not $proc.HasExited) { Stop-Process -Id $proc.Id -Force -EA SilentlyContinue }
     Get-ChildItem "$out*" -EA SilentlyContinue | Remove-Item -Force -EA SilentlyContinue
