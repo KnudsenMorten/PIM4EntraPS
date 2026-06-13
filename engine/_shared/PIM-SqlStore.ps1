@@ -133,6 +133,12 @@ CREATE TABLE pim.Rows (
     UpdatedUtc  DATETIME2     NOT NULL CONSTRAINT DF_Rows_Updated DEFAULT SYSUTCDATETIME(),
     CONSTRAINT PK_pim_Rows PRIMARY KEY (Entity, [Key])
 );
+IF OBJECT_ID('pim.Settings') IS NULL
+CREATE TABLE pim.Settings (
+    Name        NVARCHAR(200) NOT NULL PRIMARY KEY,
+    ValueJson   NVARCHAR(MAX) NULL,
+    UpdatedUtc  DATETIME2     NOT NULL CONSTRAINT DF_Settings_Updated DEFAULT SYSUTCDATETIME()
+);
 "@
     [void](Invoke-PimSqlNonQuery -ConnectionString $ConnectionString -Sql $ddl)
     [void](Invoke-PimSqlNonQuery -ConnectionString $ConnectionString -Sql (Get-PimChangeQueueDdl))
@@ -249,6 +255,48 @@ function Set-PimSqlEntityRows {
     $currentKeys = @(Invoke-PimSqlQuery -ConnectionString $ConnectionString -Sql "SELECT [Key] FROM pim.Rows WHERE Entity=@e" -Parameters @{ e = $Entity } | ForEach-Object { "$($_.Key)" })
     foreach ($ck in $currentKeys) { if (-not $submitted.ContainsKey($ck)) { Remove-PimSqlRow -ConnectionString $ConnectionString -Entity $Entity -Key $ck; $removed++ } }
     return @{ rowCount = $submitted.Count; removed = $removed }
+}
+
+# --- settings live in SQL (protected), not a readable JSON file -----------------
+# A hacker reading the JSON must not learn/modify the naming convention or policy.
+# The file is only an INITIAL SEED; ongoing management is in pim.Settings.
+function Get-PimSqlSetting {
+    param([Parameter(Mandatory)][string]$ConnectionString, [Parameter(Mandatory)][string]$Name)
+    $j = Invoke-PimSqlScalar -ConnectionString $ConnectionString -Sql "SELECT ValueJson FROM pim.Settings WHERE Name=@n" -Parameters @{ n = $Name }
+    if ($null -eq $j -or "$j".Trim() -eq '') { return $null }
+    try { return ($j | ConvertFrom-Json) } catch { return "$j" }
+}
+
+function Set-PimSqlSetting {
+    param([Parameter(Mandatory)][string]$ConnectionString, [Parameter(Mandatory)][string]$Name, [object]$Value)
+    $json = if ($null -ne $Value) { $Value | ConvertTo-Json -Depth 12 -Compress } else { $null }
+    [void](Invoke-PimSqlNonQuery -ConnectionString $ConnectionString -Sql @"
+MERGE pim.Settings AS t USING (SELECT @n AS Name) AS s ON t.Name = s.Name
+WHEN MATCHED THEN UPDATE SET ValueJson=@v, UpdatedUtc=SYSUTCDATETIME()
+WHEN NOT MATCHED THEN INSERT (Name, ValueJson, UpdatedUtc) VALUES (@n, @v, SYSUTCDATETIME());
+"@ -Parameters @{ n = $Name; v = $json })
+}
+
+function Get-PimAllSqlSettings {
+    # All settings as a hashtable Name -> value (JSON-parsed). For loading over the
+    # file seed into $global:PIM_NamingConventions at boot.
+    param([Parameter(Mandatory)][string]$ConnectionString)
+    $out = @{}
+    foreach ($r in @(Invoke-PimSqlQuery -ConnectionString $ConnectionString -Sql "SELECT Name, ValueJson FROM pim.Settings")) {
+        $v = if ("$($r.ValueJson)".Trim()) { try { $r.ValueJson | ConvertFrom-Json } catch { "$($r.ValueJson)" } } else { $null }
+        $out["$($r.Name)"] = $v
+    }
+    return $out
+}
+
+function Import-PimSettingsSeed {
+    # Seed pim.Settings from a setup-file default hashtable -- ONLY keys not already
+    # present (so the SQL store, once managed, is never overwritten by the seed).
+    param([Parameter(Mandatory)][string]$ConnectionString, [hashtable]$Seed = @{})
+    $existing = Get-PimAllSqlSettings -ConnectionString $ConnectionString
+    $added = 0
+    foreach ($k in @($Seed.Keys)) { if (-not $existing.ContainsKey("$k")) { Set-PimSqlSetting -ConnectionString $ConnectionString -Name "$k" -Value $Seed[$k]; $added++ } }
+    return $added
 }
 
 function Test-PimSqlConnectivity {
