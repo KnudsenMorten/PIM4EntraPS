@@ -80,6 +80,10 @@ ForEach ($_mod in $_PIM_ModulesToLoad) {
 # definitions -> create/rename-on-move/orphan plan, feeding the change queue.
 . (Join-Path $PSScriptRoot 'PIM-AzureDiscovery.ps1')
 
+# Connector role-definition import -- connector live roles -> permission
+# definitions (manual super-admin import, or auto by service-type+tier+level).
+. (Join-Path $PSScriptRoot 'PIM-DefinitionImport.ps1')
+
 function Ensure-DateTime {
     <#
         .SYNOPSIS

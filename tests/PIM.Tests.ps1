@@ -360,3 +360,34 @@ Describe 'Azure auto-discovery + reconcile' {
         @($withOrphans | Where-Object op -eq 'Remove').Count | Should -Be 1
     }
 }
+
+Describe 'Connector role-definition import' {
+    It 'entra import: existing skipped, new split into auto (policy) vs manual' {
+        $ga = Get-PimEntraDerivation -Roles @('Global Administrator')
+        $live = @([pscustomobject]@{ name='Global Administrator' }, [pscustomobject]@{ name='User Administrator' }, [pscustomobject]@{ name='Security Reader' })
+        # policy auto-imports entra at tier0, level 1-2 (so L1 roles auto; L0 GA would be manual even if new)
+        $policy = @(@{ serviceType='entra'; maxTierNum=0; minLevel=1; maxLevel=2 })
+        $plan = Get-PimDefinitionImportPlan -ServiceType 'entra' -LiveRoles $live -ExistingGroupNames @("$($ga.groupName)") -Policy $policy
+        @($plan.existing).Count | Should -Be 1                       # GA already defined
+        @($plan.autoCreate | Where-Object role -eq 'User Administrator').Count | Should -Be 1   # L1 -> auto
+        @($plan.autoCreate | Where-Object role -eq 'Security Reader').Count | Should -Be 1      # L1 -> auto
+    }
+    It 'entra L0 role is NOT auto-imported under an L1-2 policy (lands in manual)' {
+        $live = @([pscustomobject]@{ name='Global Administrator' })
+        $plan = Get-PimDefinitionImportPlan -ServiceType 'entra' -LiveRoles $live -Policy @(@{ serviceType='entra'; maxTierNum=0; minLevel=1; maxLevel=2 })
+        @($plan.manual).Count | Should -Be 1; @($plan.autoCreate).Count | Should -Be 0
+    }
+    It 'workload import gated by workload allowlist' {
+        $live = @([pscustomobject]@{ name='Security Operator' })
+        $autoP = Get-PimDefinitionImportPlan -ServiceType 'workload' -Workload 'defender' -LiveRoles $live -Policy @(@{ serviceType='workload'; workloads=@('defender') })
+        @($autoP.autoCreate).Count | Should -Be 1
+        $noP = Get-PimDefinitionImportPlan -ServiceType 'workload' -Workload 'defender' -LiveRoles $live -Policy @(@{ serviceType='workload'; workloads=@('powerbi') })
+        @($noP.manual).Count | Should -Be 1; @($noP.autoCreate).Count | Should -Be 0
+    }
+    It 'import plan -> queue changes (auto only; -IncludeManual adds the rest)' {
+        $live = @([pscustomobject]@{ name='User Administrator' }, [pscustomobject]@{ name='Global Administrator' })
+        $plan = Get-PimDefinitionImportPlan -ServiceType 'entra' -LiveRoles $live -Policy @(@{ serviceType='entra'; maxTierNum=0; minLevel=1; maxLevel=2 })
+        @(ConvertTo-PimImportQueueChanges -Plan $plan).Count | Should -Be 1                 # only UA (auto)
+        @(ConvertTo-PimImportQueueChanges -Plan $plan -IncludeManual).Count | Should -Be 2 # + GA (manual)
+    }
+}
