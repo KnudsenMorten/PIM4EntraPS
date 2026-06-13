@@ -18,7 +18,7 @@
       "levelMax": 0,
       "scopes": ["/subscriptions/11111111-1111-1111-1111-111111111111", "/providers/Microsoft.Management/managementGroups/lz-corp"],
       "capabilities": ["manage-indirect", "manage-direct", "assign"],
-      "managedAdmins": ["Admin-CN1-ID", "Admin-CN2-ID"]
+      "managedAdmins": ["consultant1@contoso.com", "consultant2@contoso.com"]
     },
     {
       "identity": "deptowner@contoso.com",
@@ -27,7 +27,7 @@
       "tierMax": 1,
       "levelMax": 3,
       "capabilities": ["assign", "assign-admin", "enable-consultants"],
-      "managedAdmins": ["Admin-EXT1-ID", "Admin-EXT2-ID"],
+      "managedAdmins": ["consultant1@contoso.com", "consultant2@contoso.com"],
       "managedGroupTags": []
     }
   ]

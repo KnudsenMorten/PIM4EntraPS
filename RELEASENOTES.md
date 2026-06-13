@@ -1,9 +1,10 @@
 # Release notes for PIM4EntraPS
 
-## v2.4.191
+## v2.4.192
 
 Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monorepo:
 
+- release: PIM4EntraPS v2.4.192 -- guest invite (cloud-only) + self-service toggle + UserType column (phase 4) (341903b7)
 - release: PIM4EntraPS v2.4.191 -- connector role-definition import (phase 5) (2fcb72db)
 - release: PIM4EntraPS v2.4.190 -- Azure auto-discovery + reconcile (phase 3) (176fcb53)
 - release: PIM4EntraPS v2.4.189 -- change queue + full/delta run modes (phase 7) (48a909c5)
@@ -33,7 +34,6 @@ Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monor
 - release: PIM4EntraPS v2.4.165 -- phase 12 design: on-prem/hybrid SQL Server first-class alongside Azure SQL/MI. Repository connection profile $global:PIM_SqlConnection w/ AuthMode EntraInteractive|EntraSpn|WindowsIntegrated, TLS enforced, SQL logins disabled in every mode; Azure = Entra MFA+CA at the DB door, classic on-prem AD = Windows Integrated/Kerberos (operator) + gMSA (engine) with the Manager Entra sign-in as the app-layer MFA boundary + subnet scoping, SQL 2022+ Arc = optional Entra-on-prem middle ground; DB roles mirror Reader/Admin/SuperAdmin everywhere (cb3b328b)
 - release: PIM4EntraPS v2.4.164 -- phase 12 / v3.0 design (doc § 16): Manager Entra MFA sign-in (Edge PKCE loopback, amr-claim MFA check, RBAC by Entra UPN, CA applies; protects use-of-Manager not files-on-compromised-host); remote operation interim via -ConfigRoot SMB; SQL data store decision (Azure SQL / SQL MI / on-prem, Entra-only auth = no SQL creds, laptop Manager connects as operator w/ MFA at the DB door, engine as SPN/MSI, DB roles mirror Reader/Admin/SuperAdmin) with migration path: Get-PimRows/Save-PimRows repository abstraction + PIM_DataStore Csv|Sql (Csv supported indefinitely), schema = 15 logical tables + state + audit + intake, idempotent Invoke-PimCsvToDbMigration, nightly CSV snapshot export (25165e36)
 - release: PIM4EntraPS v2.4.163 -- phase 11 design: per-type intake routing (config/intake-routing.custom.json Approve default / Auto) + Invoke-PimIntakeProcessor headless scheduled task (drains the durable MID file-drop inbox every ~10 min; Auto -> verified rows in PIM-Assignments-FromIntake.custom.csv overlay unioned by the engine, no raw input to the engine + no Manager write-race; Approve -> queued + operator nudge mail); MID delivery decoupled from Manager lifetime (files queue in the directory); guardrails non-negotiable (no Auto for approval-required groups, template-only onboarding) (3e4dde55)
-- release: PIM4EntraPS v2.4.162 -- phase 11 design correction: the MANAGER ingests external requests (SNOW -> MID inbox -> Manager verify + approval queue -> pending -> Review & Save -> CSV), the engine never reads external input and stays purely declarative; no lights-out path bypassing operator + CSV (2cc21156)
 
 ---
 
@@ -42,6 +42,17 @@ Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monor
 > **Curated changelog.** The publish workflow auto-prepends recent monorepo commits as a raw activity log; this file is the human-friendly narrative on top.
 
 ---
+
+## v2.4.192 -- admin-interface epic, phase 4: guest invite (cloud-only) + self-service toggle
+
+`engine/_shared/PIM-Onboarding.ps1` (Pester 55 -> **60**):
+
+- **`UserType` column** (Internal | Consultant | OperationPartner/MSP) -- a column on the admin/resource row, set per customer, **never inferred from the name** (each customer has their own naming convention). Internal = internal admins/employees; Consultant + OperationPartner/MSP are external. `Get-PimRowUserType` / `Get-PimRowIsExternal` read it; added to the locked schema (materializes via the conformance preflight, default Internal).
+- **`Resolve-PimOnboardingMode` / `...ForRow`** -- external + cloud -> **B2B guest invite**; external + on-prem -> unsupported (guest invite is cloud-only); internal -> cloud-user / ad-user. **`New-PimGuestInvitationBody`** + `Send-PimGuestInvitation` (Graph `/invitations`).
+- **`Resolve-PimSelfServiceToggle`** (generic) + `New-PimAccountToggleChange` -- a portal-admin (dept/service owner) enables/disables their OWN managed accounts, gated by the `enable-consultants` capability + `managedAdmins`; produces a change-queue Update. Super-admin can toggle any.
+- Fixtures neutralized to generic placeholders (UPN-style) so no specific naming convention is baked into code/tests.
+
+VERSION -> 2.4.192.
 
 ## v2.4.191 -- admin-interface epic, phase 5: connector role-definition import
 

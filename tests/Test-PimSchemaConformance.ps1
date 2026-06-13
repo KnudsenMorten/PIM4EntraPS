@@ -24,7 +24,7 @@ $plan = Get-PimSchemaConformancePlan -ActualColumns @('UserName','DisplayName','
 A ($plan.ToDrop -contains 'TierLevel') 'plan drops deprecated TierLevel'
 A ($plan.ToAdd -contains 'Purpose') 'plan adds missing required Purpose'
 A (-not $plan.Conformant) 'plan reports not conformant'
-$plan2 = Get-PimSchemaConformancePlan -ActualColumns @('UserName','DisplayName','Purpose','ProvisionDate','TAPLifetimeHours','Template','OffboardDate','DeleteAfterDays') -Spec $admSpec
+$plan2 = Get-PimSchemaConformancePlan -ActualColumns @('UserName','DisplayName','Purpose','UserType','ProvisionDate','TAPLifetimeHours','Template','OffboardDate','DeleteAfterDays') -Spec $admSpec
 A ($plan2.Conformant) 'already-locked columns -> conformant'
 
 Write-Host "R: row repair + TierLevel->Purpose migration + drop" -ForegroundColor Cyan
