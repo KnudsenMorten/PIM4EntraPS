@@ -102,7 +102,7 @@ function Get-PimMatchingApproverRules {
     param([Parameter(Mandatory)][hashtable]$Facets, [object[]]$Matrix)
     if (-not $Matrix) { $Matrix = Get-PimApproverMatrix }
     $m = New-Object System.Collections.Generic.List[object]
-    foreach ($r in @($Matrix)) { $s = Test-PimApproverRuleMatch -Rule $r -Facets $Facets; if ($s -ge 0) { $m.Add([pscustomobject]@{ rule = $r; specificity = $s }) } }
+    foreach ($r in @($Matrix)) { if ($null -eq $r) { continue }; $s = Test-PimApproverRuleMatch -Rule $r -Facets $Facets; if ($s -ge 0) { $m.Add([pscustomobject]@{ rule = $r; specificity = $s }) } }
     return @($m.ToArray() | Sort-Object { - $_.specificity })
 }
 

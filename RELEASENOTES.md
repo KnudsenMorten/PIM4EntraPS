@@ -1,9 +1,10 @@
 # Release notes for PIM4EntraPS
 
-## v2.4.206
+## v2.4.207
 
 Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monorepo:
 
+- feat(pim): engine imports module-free; ARM token via REST; null-safe approver matrix (7a76ed14)
 - feat(pim): REST-only engine proven live (full CRUD, no modules) + REST error surfacing (7dfec006)
 - feat(pim): pure-REST core — engine reads + auth run with no Graph/Az modules (cfe7dd9a)
 - test(pim): live delegation lab — workload-owner delegation across 2 subs + Power BI, AU-scoped helpdesk L2 + L2 approver, biz-owner-manages-external-consultant (60c42f21)
@@ -33,7 +34,6 @@ Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monor
 - release: PIM4EntraPS v2.4.181 -- Pester job (all flows rerunnable) + multi-auth connector framework + powerbi connector (a6153dd5)
 - release: PIM4EntraPS v2.4.180 -- entra-roles workload connector (live-tested: 145 directory roles) + activation prereqs (Intune always-on; Defender Unified RBAC = portal activation, no Graph endpoint) + app catalog (120 apps by mechanism) + 100 PIM use-cases (60b72237)
 - release: PIM4EntraPS v2.4.179 -- Manager + scenario functional test suites (68 assertions, rerunnable) (a7d01e49)
-- release: PIM4EntraPS v2.4.178 -- rerunnable functional test suite (40 pass/0 fail/6 live-skip) + cloud-native container engine documented in repo (98ffdb04)
 
 ---
 
@@ -42,6 +42,14 @@ Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monor
 > **Curated changelog.** The publish workflow auto-prepends recent monorepo commits as a raw activity log; this file is the human-friendly narrative on top.
 
 ---
+
+## v2.4.207 -- engine module imports module-free; ARM token via REST; null-safe approver matrix
+
+- **`PIM-Functions.psm1` now imports with ZERO Graph/Az modules** in REST mode. The eager `Import-Module` of 5 Graph SDK modules at load is gated behind `$global:PIM_UseGraphSdk` (default off). Verified: a fresh `Import-Module PIM-Functions.psm1` loads **0** Az/Graph modules.
+- **`Get-AzPimTokenCached` mints the ARM token via `Get-PimRestToken`** (Managed Identity / SPN secret / cert / az) first, falling back to `Get-AzAccessToken` only if REST can't mint -- so the engine's ARM calls need no Az module. PIM-Rest.ps1 is now dot-sourced by the module.
+- **`Get-PimMatchingApproverRules` is null-safe**: a null/blank entry in the approver matrix (e.g. when none is configured) no longer crashes `Test-PimCanApprove`. Offline suite back to **77/77**.
+
+VERSION -> 2.4.207.
 
 ## v2.4.206 -- REST-only engine proven live (full CRUD, no modules) + better REST diagnostics
 
