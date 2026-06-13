@@ -88,6 +88,10 @@ ForEach ($_mod in $_PIM_ModulesToLoad) {
 # consultant enable/disable gated by portal-access. Uses ChangeQueue + PortalAccess.
 . (Join-Path $PSScriptRoot 'PIM-Onboarding.ps1')
 
+# SQL data store (the SQL-only data layer) -- raw ADO.NET row store + SQL-backed
+# change queue + fast delta commit. No SqlServer module (no Graph/Azure.Core clash).
+. (Join-Path $PSScriptRoot 'PIM-SqlStore.ps1')
+
 function Ensure-DateTime {
     <#
         .SYNOPSIS

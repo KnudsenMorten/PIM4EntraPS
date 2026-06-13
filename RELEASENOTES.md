@@ -1,9 +1,10 @@
 # Release notes for PIM4EntraPS
 
-## v2.4.193
+## v2.4.194
 
 Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monorepo:
 
+- release: PIM4EntraPS v2.4.194 -- SQL data store (phase 6), proven against real SQL Server (89fee09b)
 - release: PIM4EntraPS v2.4.193 -- portal read-scoping on /api/csv (phase 2 enforcement) (87fb0b57)
 - release: PIM4EntraPS v2.4.192 -- guest invite (cloud-only) + self-service toggle + UserType column (phase 4) (341903b7)
 - release: PIM4EntraPS v2.4.191 -- connector role-definition import (phase 5) (2fcb72db)
@@ -33,7 +34,6 @@ Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monor
 - release: PIM4EntraPS v2.4.167 -- Install-PimEngineAppRegistration re-run fixes: keyCredentials merge now dedupes by thumbprint via CustomKeyIdentifier (Graph returns Key=$null on read -> old first-20-bytes grouping crashed every re-run with null-array index; existing entries win ties preserving KeyId/key material; new credential stamped with GetCertHash); cert auto-reuse of newest still-valid matching-subject store cert (>30d, has private key) instead of minting a duplicate per run (one mgmt-host key for N per-tenant apps = MSP pattern); -ExistingThumbprint still pins. Parse + merge unit test green. Follow-up queued: -MachineStore option for LocalMachine\My (4bfc72b8)
 - release: PIM4EntraPS v2.4.166 -- phase 12a groundwork: sql/platform-schema.sql (platform.Tenants w/ rings, TenantApps w/ thumbprint identifiers, Secrets Always-Encrypted-ready OR KeyVaultUri pointer w/ shape check, pim.CentralAdmins, platform.AuditEvents, pim.vw_AdminTenantTargets implementing engine ring semantics) + platform-seed-demo.sql (fictional 5-tenant/3-admin MSP sim). Deployed + verified on BOTH matrix targets: Azure SQL serverless w/ Entra-only auth (SPN admin, token connections) AND on-prem SQL 2022 Express w/ Windows Integrated; identical fan-out ring0->5, ring1->3, ring2->2 (486fa199)
 - release: PIM4EntraPS v2.4.165 -- phase 12 design: on-prem/hybrid SQL Server first-class alongside Azure SQL/MI. Repository connection profile $global:PIM_SqlConnection w/ AuthMode EntraInteractive|EntraSpn|WindowsIntegrated, TLS enforced, SQL logins disabled in every mode; Azure = Entra MFA+CA at the DB door, classic on-prem AD = Windows Integrated/Kerberos (operator) + gMSA (engine) with the Manager Entra sign-in as the app-layer MFA boundary + subnet scoping, SQL 2022+ Arc = optional Entra-on-prem middle ground; DB roles mirror Reader/Admin/SuperAdmin everywhere (cb3b328b)
-- release: PIM4EntraPS v2.4.164 -- phase 12 / v3.0 design (doc § 16): Manager Entra MFA sign-in (Edge PKCE loopback, amr-claim MFA check, RBAC by Entra UPN, CA applies; protects use-of-Manager not files-on-compromised-host); remote operation interim via -ConfigRoot SMB; SQL data store decision (Azure SQL / SQL MI / on-prem, Entra-only auth = no SQL creds, laptop Manager connects as operator w/ MFA at the DB door, engine as SPN/MSI, DB roles mirror Reader/Admin/SuperAdmin) with migration path: Get-PimRows/Save-PimRows repository abstraction + PIM_DataStore Csv|Sql (Csv supported indefinitely), schema = 15 logical tables + state + audit + intake, idempotent Invoke-PimCsvToDbMigration, nightly CSV snapshot export (25165e36)
 
 ---
 
@@ -42,6 +42,18 @@ Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monor
 > **Curated changelog.** The publish workflow auto-prepends recent monorepo commits as a raw activity log; this file is the human-friendly narrative on top.
 
 ---
+
+## v2.4.194 -- admin-interface epic, phase 6: SQL data store (proven against real SQL Server)
+
+`engine/_shared/PIM-SqlStore.ps1` -- the SQL-only data layer, **10/10 live integration assertions** (`tests/Test-PimSqlStore.ps1` creates a throwaway DB on a real SQL Server, round-trips, drops it):
+
+- **Raw ADO.NET** (`System.Data.SqlClient`) -- NOT the SqlServer module -- so no module dependency, PS 5.1-safe, and no Azure.Core/Graph clash. Storage-neutral naming (entity/row/store, never "csv").
+- **`Initialize-PimSqlDatabase` / `Initialize-PimSqlStore`** -- idempotent create of the DB + `pim.Rows` (one JSON row per entity+key) + `pim.ChangeQueue`.
+- **Row CRUD** -- `Get-PimSqlRows/Row`, `Set-PimSqlRow` (MERGE upsert), `Remove-PimSqlRow`.
+- **SQL-backed change queue + fast delta commit** -- `Add-PimSqlQueueChange`, `Get-PimSqlQueue`, **`Invoke-PimSqlCommit`** drains the pending queue's NET plan (Phase-7 fold) into `pim.Rows` and marks it applied -- the "hit commit, change populates fast" path, verified incl. create+remove-in-one-commit cancellation.
+- **Connection-string driven** (`Get-PimSqlConnectionString`; `$global:PIM_SqlConnectionString` for prod) -- the SAME code targets local SQL Express (dev) or **Azure SQL over a Private Endpoint** (prod); only the connection string + auth differ.
+
+The manager's read/write cutover from CSV to this store is the remaining piece of phase 6. VERSION -> 2.4.194.
 
 ## v2.4.193 -- admin-interface epic, phase 2 (enforcement): portal read-scoping on /api/csv
 
