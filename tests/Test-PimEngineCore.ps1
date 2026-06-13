@@ -71,5 +71,38 @@ Assert "unknown scope -> ok=false, no crash" (-not $r3.ok -and "$($r3.detail)" -
 $rAll = @(Invoke-PimEngine -Scope All -Mode Delta -WhatIf)
 Assert "Scope All runs registered providers" ($rAll.Count -ge 1 -and ($rAll.scope -contains 'UnitTest'))
 
+# ---- EntraRoles provider (pure helpers + diff, no network) ----
+. "$here\..\engine\_shared\PIM-EngineProviders.ps1"
+Write-Host "`n[EntraRoles provider]" -ForegroundColor Cyan
+# schedule body: permanent -> noExpiration; days -> afterDuration
+$bPerm = New-PimRoleScheduleBody -PrincipalId 'g1' -RoleDefId 'r1' -Permanent
+Assert "permanent -> noExpiration"     ($bPerm.scheduleInfo.expiration.type -eq 'noExpiration' -and $bPerm.action -eq 'adminAssign' -and $bPerm.directoryScopeId -eq '/')
+$bDur = New-PimRoleScheduleBody -PrincipalId 'g1' -RoleDefId 'r1' -Days 365
+Assert "days -> afterDuration P365D"   ($bDur.scheduleInfo.expiration.type -eq 'afterDuration' -and $bDur.scheduleInfo.expiration.duration -eq 'P365D')
+$bRem = New-PimRoleScheduleBody -PrincipalId 'g1' -RoleDefId 'r1' -Action 'adminRemove'
+Assert "remove action set"             ($bRem.action -eq 'adminRemove')
+# uniform key across desired + live shapes
+$dk = Get-PimEntraRoleKey -Row ([pscustomobject]@{ GroupTag='ROLE-Helpdesk'; RoleDefinitionName='Helpdesk Administrator'; AssignmentType='Eligible' })
+$lk = Get-PimEntraRoleKey -Row ([pscustomobject]@{ GroupTag='role-helpdesk'; RoleDefinitionName='helpdesk administrator'; AssignmentType='eligible' })
+Assert "EntraRole key uniform + case-insensitive" ($dk -eq $lk -and $dk -eq 'role-helpdesk|helpdesk administrator|eligible')
+# diff: one desired role-grant missing live -> create; one live not desired -> remove(Full)
+$erKey = { param($r) Get-PimEntraRoleKey -Row $r }
+$erEq  = { param($d,$l) $true }
+$erDes = @(
+    [pscustomobject]@{ GroupTag='ROLE-GA'; RoleDefinitionName='Global Administrator'; AssignmentType='Active' }
+    [pscustomobject]@{ GroupTag='ROLE-Help'; RoleDefinitionName='Helpdesk Administrator'; AssignmentType='Eligible' }   # new
+)
+$erLive = @(
+    [pscustomobject]@{ GroupTag='ROLE-GA'; RoleDefinitionName='Global Administrator'; AssignmentType='Active' }
+    [pscustomobject]@{ GroupTag='ROLE-Old'; RoleDefinitionName='User Administrator'; AssignmentType='Eligible' }        # orphan
+)
+$erDiff = Compare-PimDesiredVsLive -Desired $erDes -Live $erLive -KeyOf $erKey -Equal $erEq -Prune
+Assert "EntraRoles diff: 1 create (Helpdesk eligible)" ($erDiff.create.Count -eq 1 -and $erDiff.create[0].key -eq 'role-help|helpdesk administrator|eligible')
+Assert "EntraRoles diff: 1 nochange (GA active)"        ($erDiff.nochange.Count -eq 1)
+Assert "EntraRoles diff: 1 prune (orphan User Admin)"   ($erDiff.remove.Count -eq 1 -and $erDiff.remove[0].key -eq 'role-old|user administrator|eligible')
+# provider registers
+Register-PimDefaultEngineProviders
+Assert "EntraRoles provider registered" ((Get-PimEngineScopes) -contains 'EntraRoles')
+
 Write-Host ("`n=== RESULT: {0} passed, {1} failed ===" -f $pass,$fail) -ForegroundColor ($(if($fail){'Red'}else{'Green'}))
 if ($fail) { exit 1 }
