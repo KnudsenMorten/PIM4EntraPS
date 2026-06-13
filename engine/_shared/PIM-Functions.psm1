@@ -96,6 +96,10 @@ ForEach ($_mod in $_PIM_ModulesToLoad) {
 # membership; feeds the tier-0 network zone gate (PIM-PortalAccess.ps1).
 . (Join-Path $PSScriptRoot 'PIM-PawDevices.ps1')
 
+# Resource approvers/owners -- approval routing + access reviews over a resource's
+# assignments, gated by Owners column or the approve-assignment/access-review caps.
+. (Join-Path $PSScriptRoot 'PIM-Approvals.ps1')
+
 function Ensure-DateTime {
     <#
         .SYNOPSIS

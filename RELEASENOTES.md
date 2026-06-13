@@ -1,9 +1,10 @@
 # Release notes for PIM4EntraPS
 
-## v2.4.197
+## v2.4.198
 
 Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monorepo:
 
+- release: PIM4EntraPS v2.4.198 -- resource approvers/owners (phase 8) (0729974b)
 - release: PIM4EntraPS v2.4.197 -- Manager SQL cutover (/api/data dispatch) + settings in SQL (29164885)
 - release: PIM4EntraPS v2.4.196 -- PAW levels + policy gate, passwordless/KV connection, config-driven (886dd678)
 - release: PIM4EntraPS v2.4.195 -- network-tiered access: tier-0 management requires PAW (b63d95a9)
@@ -33,7 +34,6 @@ Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monor
 - release: PIM4EntraPS v2.4.171 -- Purpose column (Day2Day|HighPriv) makes the two admin naming conventions explicit (Admin-INI-PLAT day2day vs dedicated Admin-INI-L0-T0-PLAT high-priv); TierLevel removed from canonical schema (legacy fallback kept). Engine OU routing keys off Purpose; AdminAccountPatternHighPriv + Purpose-aware PIM-NAME-002; Manager wizard Purpose field replaces Tier/Level/Naming-style, map dots color by Purpose, initials auto-derive bug fixed (pinned at 1 char after first name); admin templates prefill Purpose; pim.CentralAdmins migrated (both DBs); live tenant accounts renamed + LIVE fan-out idempotent re-run green. (1f706eed)
 - release: PIM4EntraPS v2.4.170 -- first LIVE multi-tenant MSP fan-out (Invoke-PimMspFanout.ps1: registry-driven, ring-filtered via pim.vw_AdminTenantTargets, child-process SQL isolation for the SqlServer/Graph Azure.Core conflict, WhatIf default) + engine fixes (modern ForwardMailsToContact/MailForwardAddress columns finally read w/ legacy fallback; EXO connect skipped when no row requests forwarding; replication-404 retry on post-create PATCH) + pim.CentralAdmins account-material columns w/ idempotent upgrade. Verified live: 5 accounts across 2 real test tenants, ring semantics correct, second pass idempotent. (9356c120)
 - release: PIM4EntraPS v2.4.169 -- Install-PimEngineAppRegistration: MachineStore defaults ON (cert in Cert:\LocalMachine\My unless -MachineStore:$false for ad-hoc per-user testing); operator decision, CurrentUser default was a foot-gun. AzureRbac redo for the first test tenant intentionally skipped (recorded in platform.Tenants notes in both DBs) (55b0bbf9)
-- release: PIM4EntraPS v2.4.168 -- Install-PimEngineAppRegistration -MachineStore switch: cert created/reused in Cert:\LocalMachine\My (visible in certlm.msc, usable by service/scheduled-task identities, matches platform security design); default stays CurrentUser; docstrings name the selected store. Field cause: operator could not find the cert -- it was in the user store while certlm shows the machine store (3aaa6d09)
 
 ---
 
@@ -42,6 +42,16 @@ Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monor
 > **Curated changelog.** The publish workflow auto-prepends recent monorepo commits as a raw activity log; this file is the human-friendly narrative on top.
 
 ---
+
+## v2.4.198 -- admin-interface epic, phase 8: resource approvers/owners (approval routing + access reviews)
+
+`engine/_shared/PIM-Approvals.ps1` (Pester 66 -> **67**): a resource's **Owners** (column) -- or a portal-admin with the new **`approve-assignment` / `access-review`** capabilities in scope -- can approve assignment requests and review existing assignments:
+
+- **`Get-PimResourceOwners` / `Test-PimIsResourceOwner`** -- owners from the Owners column (case-insensitive).
+- **`Test-PimCanApprove`** -- super-admin, OR a listed owner, OR a portal-admin with `approve-assignment` who can see the resource (tier/level/service/scope).
+- **`New-PimApprovalRequest` / `Resolve-PimApprovalDecision`** -- approve -> a change-queue Create on `PIM-Assignments-Admins` (`<admin>|<groupTag>`); reject -> no change; unauthorized -> `ok=$false`.
+- **`Get-PimAccessReviewSet`** -- the assignments an owner must review (those on resources they own); **`Resolve-PimAccessReviewDecision`** -- remove -> a change-queue Remove, keep -> no change.
+- Managing their consultants reuses the self-service toggle (v2.4.192). VERSION -> 2.4.198.
 
 ## v2.4.197 -- Manager SQL cutover: /api/data dispatches to SQL; settings live in SQL
 

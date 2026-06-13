@@ -234,6 +234,32 @@ Describe 'Portal-admin scoping (delegated GUI managers)' {
     It 'PAW groups are protected by a restricted-management AU' {
         (New-PimPawAuBody).isMemberManagementRestricted | Should -BeTrue
     }
+    It 'approvers/owners: ownership, approve routing, access review' {
+        $res = [pscustomobject]@{ GroupTag='Entra-ID-A-L1'; Owners='owner1@contoso.com; owner2@contoso.com'; Workload='Entra-ID'; Level='L1'; TierLevel='T0'; Plane='CP' }
+        @(Get-PimResourceOwners -Row $res).Count | Should -Be 2
+        (Test-PimIsResourceOwner -Row $res -Identity 'OWNER1@contoso.com') | Should -BeTrue   # case-insensitive
+        (Test-PimIsResourceOwner -Row $res -Identity 'nope@contoso.com') | Should -BeFalse
+        # approve: owner yes; stranger no; super yes
+        (Test-PimCanApprove -Identity 'owner1@contoso.com' -Row $res -Profile $null) | Should -BeTrue
+        (Test-PimCanApprove -Identity 'stranger@contoso.com' -Row $res -Profile $null) | Should -BeFalse
+        (Test-PimCanApprove -Identity 'x' -Row $res -Profile $null -IsSuperAdmin) | Should -BeTrue
+        # decision: approve -> Create change; reject -> none; unauthorized -> ok=false
+        $req = New-PimApprovalRequest -Requestor 'r' -TargetAdmin 'consultant1@contoso.com' -GroupTag 'Entra-ID-A-L1' -Justification 'project x'
+        $ap = Resolve-PimApprovalDecision -Request $req -Approver 'owner1@contoso.com' -Decision approve -CanApprove $true
+        $ap.ok | Should -BeTrue; $ap.status | Should -Be 'approved'; $ap.change.op | Should -Be 'Create'; $ap.change.key | Should -Be 'consultant1@contoso.com|Entra-ID-A-L1'
+        (Resolve-PimApprovalDecision -Request $req -Approver 'owner1@contoso.com' -Decision reject -CanApprove $true).change | Should -BeNullOrEmpty
+        (Resolve-PimApprovalDecision -Request $req -Approver 'stranger' -Decision approve -CanApprove $false).ok | Should -BeFalse
+        # access review set: only assignments to owned resources
+        $defs = @($res, [pscustomobject]@{ GroupTag='Entra-ID-B-L1'; Owners='someoneelse@contoso.com' })
+        $asg  = @(
+            [pscustomobject]@{ Username='c1@contoso.com'; GroupTag='Entra-ID-A-L1' }
+            [pscustomobject]@{ Username='c2@contoso.com'; GroupTag='Entra-ID-B-L1' }
+        )
+        $rev = @(Get-PimAccessReviewSet -Assignments $asg -OwnerIdentity 'owner1@contoso.com' -Definitions $defs)
+        $rev.Count | Should -Be 1; "$($rev[0].GroupTag)" | Should -Be 'Entra-ID-A-L1'
+        (Resolve-PimAccessReviewDecision -Assignment $rev[0] -Decision remove).change.op | Should -Be 'Remove'
+        (Resolve-PimAccessReviewDecision -Assignment $rev[0] -Decision keep).change | Should -BeNullOrEmpty
+    }
     It 'PAW policy: tier-0 + tier-1/MP need PAW; tier-1/WDP L3+ and tier-2 are whole-network' {
         (Get-PimRequiredPawLevel -Tier 0 -Plane 'CP' -Level 1) | Should -Be 1          # tier-0 -> PAW at group level
         (Get-PimRequiredPawLevel -Tier 1 -Plane 'MP' -Level 2) | Should -Be 2          # mgmt plane -> PAW
