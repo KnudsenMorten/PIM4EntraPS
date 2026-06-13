@@ -55,6 +55,17 @@ try {
     Add-PimSqlQueueChange -ConnectionString $cs -Change (New-PimChange -Entity 'PIM-Definitions-Tasks' -Key 'k-cancel' -Op Remove -EnqueuedUtc '2026-06-13T10:05:00Z')
     [void](Invoke-PimSqlCommit -ConnectionString $cs)
     A ($null -eq (Get-PimSqlRow -ConnectionString $cs -Entity 'PIM-Definitions-Tasks' -Key 'k-cancel')) 'create+remove in one commit cancels (no row created)'
+
+    Write-Host "Entity row-set replace (the manager PUT semantics)" -ForegroundColor Cyan
+    $e = 'PIM-Assignments-Roles-Groups'
+    A ((Get-PimStoreRowKey -Base $e -Row ([pscustomobject]@{ GroupTag='G1'; RoleDefinitionName='Reader' })) -eq 'G1|Reader') 'natural key composes per base'
+    Set-PimSqlEntityRows -ConnectionString $cs -Entity $e -Base $e -Rows @(
+        [pscustomobject]@{ GroupTag='G1'; RoleDefinitionName='Reader' }
+        [pscustomobject]@{ GroupTag='G2'; RoleDefinitionName='Owner' }
+    ) | Out-Null
+    A (@(Get-PimSqlRows -ConnectionString $cs -Entity $e).Count -eq 2) 'row-set write inserts both rows'
+    $r2 = Set-PimSqlEntityRows -ConnectionString $cs -Entity $e -Base $e -Rows @([pscustomobject]@{ GroupTag='G1'; RoleDefinitionName='Reader' })
+    A (@(Get-PimSqlRows -ConnectionString $cs -Entity $e).Count -eq 1 -and $r2.removed -eq 1) 'row-set replace deletes the dropped row (full-set semantics)'
 } finally {
     Write-Host "Dropping $db ..." -ForegroundColor Cyan
     try { [void](Invoke-PimSqlNonQuery -ConnectionString $masterCs -Sql "IF DB_ID('$db') IS NOT NULL BEGIN ALTER DATABASE [$db] SET SINGLE_USER WITH ROLLBACK IMMEDIATE; DROP DATABASE [$db]; END") } catch { Write-Warning "cleanup failed: $($_.Exception.Message)" }

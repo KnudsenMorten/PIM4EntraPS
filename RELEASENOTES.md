@@ -1,9 +1,10 @@
 # Release notes for PIM4EntraPS
 
-## v2.4.195
+## v2.4.196
 
 Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monorepo:
 
+- release: PIM4EntraPS v2.4.196 -- PAW levels + policy gate, passwordless/KV connection, config-driven (886dd678)
 - release: PIM4EntraPS v2.4.195 -- network-tiered access: tier-0 management requires PAW (b63d95a9)
 - release: PIM4EntraPS v2.4.194 -- SQL data store (phase 6), proven against real SQL Server (89fee09b)
 - release: PIM4EntraPS v2.4.193 -- portal read-scoping on /api/csv (phase 2 enforcement) (87fb0b57)
@@ -33,7 +34,6 @@ Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monor
 - release: PIM4EntraPS v2.4.169 -- Install-PimEngineAppRegistration: MachineStore defaults ON (cert in Cert:\LocalMachine\My unless -MachineStore:$false for ad-hoc per-user testing); operator decision, CurrentUser default was a foot-gun. AzureRbac redo for the first test tenant intentionally skipped (recorded in platform.Tenants notes in both DBs) (55b0bbf9)
 - release: PIM4EntraPS v2.4.168 -- Install-PimEngineAppRegistration -MachineStore switch: cert created/reused in Cert:\LocalMachine\My (visible in certlm.msc, usable by service/scheduled-task identities, matches platform security design); default stays CurrentUser; docstrings name the selected store. Field cause: operator could not find the cert -- it was in the user store while certlm shows the machine store (3aaa6d09)
 - release: PIM4EntraPS v2.4.167 -- Install-PimEngineAppRegistration re-run fixes: keyCredentials merge now dedupes by thumbprint via CustomKeyIdentifier (Graph returns Key=$null on read -> old first-20-bytes grouping crashed every re-run with null-array index; existing entries win ties preserving KeyId/key material; new credential stamped with GetCertHash); cert auto-reuse of newest still-valid matching-subject store cert (>30d, has private key) instead of minting a duplicate per run (one mgmt-host key for N per-tenant apps = MSP pattern); -ExistingThumbprint still pins. Parse + merge unit test green. Follow-up queued: -MachineStore option for LocalMachine\My (4bfc72b8)
-- release: PIM4EntraPS v2.4.166 -- phase 12a groundwork: sql/platform-schema.sql (platform.Tenants w/ rings, TenantApps w/ thumbprint identifiers, Secrets Always-Encrypted-ready OR KeyVaultUri pointer w/ shape check, pim.CentralAdmins, platform.AuditEvents, pim.vw_AdminTenantTargets implementing engine ring semantics) + platform-seed-demo.sql (fictional 5-tenant/3-admin MSP sim). Deployed + verified on BOTH matrix targets: Azure SQL serverless w/ Entra-only auth (SPN admin, token connections) AND on-prem SQL 2022 Express w/ Windows Integrated; identical fan-out ring0->5, ring1->3, ring2->2 (486fa199)
 
 ---
 
@@ -42,6 +42,17 @@ Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monor
 > **Curated changelog.** The publish workflow auto-prepends recent monorepo commits as a raw activity log; this file is the human-friendly narrative on top.
 
 ---
+
+## v2.4.196 -- PAW levels + policy gate, passwordless/KV connection, everything config-driven
+
+Security hardening for the most-critical surface (tenant-takeover risk). All knobs are configurable in the config file via `Get-PimPolicySetting` (config hashtable -> global -> default) -- nothing hardcoded. Pester 61 -> **66** (+ live SQL 13).
+
+- **No secrets in files.** `Get-PimSqlConnectionString` resolves the connection string passwordless-first: **Managed Identity** (Azure SQL via `New-PimSqlConnection` setting the MI `AccessToken`, the chosen auth), Integrated (on-prem/Express), or -- only if a secret is unavoidable -- from **Key Vault** at runtime (`Get-PimSqlSecretFromKeyVault`). Config may hold a KV pointer (vault+secret name), never the secret. `Get-PimAzureSqlConnectionString` builds the credential-free Azure SQL CS.
+- **PAW levels 0/1/2** (L0 high-priv, L1 consultant, L2 helpdesk) -- per-level PAW security groups (`New-PimPawGroup`/`Get-PimDevicePawLevel`), **protected by a restricted-management AU** (`isMemberManagementRestricted`, like the high-priv PIM AUs) so they can't be managed outside this tool. PAW detection is pluggable (device group / extensionAttribute / CA / network -> `Resolve-PimDevicePawLevel`). PAW group/AU names come from the **naming-convention file**.
+- **Policy-driven network gate** (`Get-PimRequiredPawLevel` / `Test-PimPawAllowed`): a configurable `PawPolicy` maps (tier, plane, level) -> required PAW level. Default: tier-0 -> PAW at group level; tier-1 **MP** (management plane) -> PAW; tier-1 **WDP** level 3+ and tier-2 -> whole network. **OPT-IN (off by default)** -- many customers have no PAW yet; turning it on is a maturity choice. A more-privileged PAW (lower level) can manage less-privileged work. **Super-admins are never zone-locked** unless explicitly opted in (break-glass safety).
+- **SQL store cutover helpers**: `Get-PimStoreRowKey` (natural key per entity) + `Set-PimSqlEntityRows` (full-set replace = the manager PUT semantics). Manager dot-sources the SQL libs (read/write dispatch lands next).
+
+VERSION -> 2.4.196.
 
 ## v2.4.195 -- network-tiered access: tier-0 management requires PAW (engine gate)
 
