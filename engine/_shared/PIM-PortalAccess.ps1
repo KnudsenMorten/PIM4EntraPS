@@ -155,9 +155,25 @@ function Test-PimPortalCanSeeGroup {
     return $true
 }
 
+function Test-PimNetworkZoneAllowedForTier {
+    # Network control: tier-0 actions require the PAW zone (limited network);
+    # tier 1/2 are allowed from any internal zone. CA enforces the network per
+    # door; this is the app-side double-check. $Tier0RequiresPaw default true.
+    param([AllowNull()][int]$Tier, [string]$RequestZone, [bool]$Tier0RequiresPaw = $true)
+    if ($Tier -eq 0 -and $Tier0RequiresPaw) { return ("$RequestZone".Trim().ToLowerInvariant() -eq 'paw') }
+    return $true
+}
+
 function Test-PimPortalCanManageGroup {
-    # Can-see AND has the matching manage capability for the group's kind.
-    param([AllowNull()][object]$Profile, [Parameter(Mandatory)][hashtable]$Facets, [switch]$IsSuperAdmin)
+    # Can-see AND has the matching manage capability for the group's kind. When a
+    # $RequestZone is supplied (GUI passes it from the CA/source-network claim),
+    # the network gate also applies -- tier-0 management requires PAW even for a
+    # super-admin. No zone supplied (engine/automation context) -> gate skipped.
+    param(
+        [AllowNull()][object]$Profile, [Parameter(Mandatory)][hashtable]$Facets,
+        [switch]$IsSuperAdmin, [string]$RequestZone, [bool]$Tier0RequiresPaw = $true
+    )
+    if ("$RequestZone".Trim() -and -not (Test-PimNetworkZoneAllowedForTier -Tier ([int]$Facets.tier) -RequestZone $RequestZone -Tier0RequiresPaw:$Tier0RequiresPaw)) { return $false }
     if ($IsSuperAdmin) { return $true }
     if (-not (Test-PimPortalCanSeeGroup -Profile $Profile -Facets $Facets)) { return $false }
     $caps = @(@($Profile.capabilities) | ForEach-Object { "$_".ToLowerInvariant() })
