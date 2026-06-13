@@ -64,6 +64,14 @@ ForEach ($_mod in $_PIM_ModulesToLoad) {
 # columns, DROPS deprecated like TierLevel, migrates TierLevel->Purpose first).
 . (Join-Path $PSScriptRoot 'PIM-SchemaConformance.ps1')
 
+# Portal-admin scoping -- delegated GUI managers (helpdesk/business/dept owners)
+# gated by tier/level/service/scope/capability on top of the flat manager role.
+. (Join-Path $PSScriptRoot 'PIM-PortalAccess.ps1')
+
+# Permission-wizard auto-derivation -- reversed target-first create flow derives
+# kind/name/roleScope/role/level/tier/plane for entra/azure/workload targets.
+. (Join-Path $PSScriptRoot 'PIM-PermissionWizard.ps1')
+
 function Ensure-DateTime {
     <#
         .SYNOPSIS
