@@ -1,9 +1,10 @@
 # Release notes for PIM4EntraPS
 
-## v2.4.189
+## v2.4.190
 
 Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monorepo:
 
+- release: PIM4EntraPS v2.4.190 -- Azure auto-discovery + reconcile (phase 3) (176fcb53)
 - release: PIM4EntraPS v2.4.189 -- change queue + full/delta run modes (phase 7) (48a909c5)
 - release: PIM4EntraPS v2.4.188 -- admin-interface epic phase 2 server seam (portal-access + wizard-derive endpoints) (79f8171f)
 - release: PIM4EntraPS v2.4.187 -- admin-interface epic phase 1 (portal-admin scoping + wizard derivation engines) (164d002c)
@@ -33,7 +34,6 @@ Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monor
 - release: PIM4EntraPS v2.4.163 -- phase 11 design: per-type intake routing (config/intake-routing.custom.json Approve default / Auto) + Invoke-PimIntakeProcessor headless scheduled task (drains the durable MID file-drop inbox every ~10 min; Auto -> verified rows in PIM-Assignments-FromIntake.custom.csv overlay unioned by the engine, no raw input to the engine + no Manager write-race; Approve -> queued + operator nudge mail); MID delivery decoupled from Manager lifetime (files queue in the directory); guardrails non-negotiable (no Auto for approval-required groups, template-only onboarding) (3e4dde55)
 - release: PIM4EntraPS v2.4.162 -- phase 11 design correction: the MANAGER ingests external requests (SNOW -> MID inbox -> Manager verify + approval queue -> pending -> Review & Save -> CSV), the engine never reads external input and stays purely declarative; no lights-out path bypassing operator + CSV (2cc21156)
 - release: PIM4EntraPS v2.4.161 -- design phases 10+11 in docs/LIFECYCLE-GOVERNANCE.md: access reviews as hybrid (Entra review UX, engine-owned schedules with auto-apply OFF + decision sweep; Deny -> engine tombstone suppression layer treated as Action=Remove so the CSV never re-delegates a review-removed member; PIM-REV-001 reconciliation flag) + external request intake via ServiceNow MID Server file-drop inbox (fully internal pull-only, create-only writer ACL, signed typed requests w/ nonce ledger, admin.onboard restricted to template ids, approval-required groups hard-denied, activation out of scope, Manager approval queue default, full audit; Azure Storage queue as no-MID fallback) (7400b94c)
-- release: PIM4EntraPS v2.4.160 + extension v1.6.27 -- dead CA-session tokens self-heal instead of erroring: mid-action staleness (401/token-shaped 403) during Activate / Deactivate / My Access load routes to triggerInteractiveReauth (wipes Graph+ARM tokens = auto sign-out, overlay now names Conditional Access session lifetime, popup reloads straight into interactive sign-in); popup-open dead-refresh-token path already self-healed via tryRefresh cache wipe. node --check + 7 behavioral assertions green. CRX repack on the signing-key box still required to publish 1.6.27 to the fleet (6b31c951)
 
 ---
 
@@ -42,6 +42,18 @@ Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monor
 > **Curated changelog.** The publish workflow auto-prepends recent monorepo commits as a raw activity log; this file is the human-friendly narrative on top.
 
 ---
+
+## v2.4.190 -- admin-interface epic, phase 3: Azure auto-discovery + reconcile
+
+`engine/_shared/PIM-AzureDiscovery.ps1` -- reconciles the discovered Azure tree (management groups / subscriptions / RGs) against existing PIM definitions (Pester 45 -> **51**):
+
+- **`Get-PimAzureStableKey`** -- move-invariant identity (subscription GUID / MG name), so a subscription moved under a new management group is detected as a RENAME, not an orphan+duplicate.
+- **`Get-PimAzureReconcilePlan`** -- discovered vs existing -> **create** (new scope; `autoImport` flagged when it matches a rule, else pending a human decision), **rename** (same stable key, new expected name from depth/plane change), **orphan** (definition whose scope is gone), **unchanged**.
+- **`Get-PimAzureScopeDerivation`** -- scope-only permission-group container name (`PIM-Azure-{ScopeName}-L{}-T{}-{plane}-{domain}`); level from scope depth, tier 0 only at tenant root, CAF plane heuristics.
+- **`Test-PimAutoImport`** -- rule-based auto-import (e.g. "new landing zones on level <= 4 auto-import").
+- **`ConvertTo-PimReconcileQueueChanges`** -- turns the plan into change-queue records (auto-creates -> Create, renames -> Update, orphans -> Remove only with `-IncludeOrphanRemovals`) so a commit applies just the deltas. This is the "auto-rename on Azure re-design instead of leaving orphans" behaviour.
+
+VERSION -> 2.4.190.
 
 ## v2.4.189 -- admin-interface epic, phase 7: change queue + full/delta run modes
 
