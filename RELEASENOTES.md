@@ -1,9 +1,10 @@
 # Release notes for PIM4EntraPS
 
-## v2.4.198
+## v2.4.199
 
 Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monorepo:
 
+- release: PIM4EntraPS v2.4.199 -- lifecycle calendar (phase 9): expirations, auto-renew, escalation (2103344a)
 - release: PIM4EntraPS v2.4.198 -- resource approvers/owners (phase 8) (0729974b)
 - release: PIM4EntraPS v2.4.197 -- Manager SQL cutover (/api/data dispatch) + settings in SQL (29164885)
 - release: PIM4EntraPS v2.4.196 -- PAW levels + policy gate, passwordless/KV connection, config-driven (886dd678)
@@ -33,7 +34,6 @@ Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monor
 - release: PIM4EntraPS v2.4.172 -- design: LIFECYCLE-GOVERNANCE Sec 17 email routing & people directory (Department link + PIM-Definitions-Contacts + central mail-routing.custom.json override w/ PerAdminWins precedence; Manager "Contacts & email flow" area incl. person-left sweep staging replace-with-successor) + Sec 18 self-service delegation layers (delegation units = templates x group tags x AzScope prefix x quotas x inactivity-disable; intake-based, engine stays sole writer; preferred web tier = Azure App Service w/ Private Endpoint, zero public exposure; engine signInActivity inactivity sweep) (e6559da1)
 - release: PIM4EntraPS v2.4.171 -- Purpose column (Day2Day|HighPriv) makes the two admin naming conventions explicit (Admin-INI-PLAT day2day vs dedicated Admin-INI-L0-T0-PLAT high-priv); TierLevel removed from canonical schema (legacy fallback kept). Engine OU routing keys off Purpose; AdminAccountPatternHighPriv + Purpose-aware PIM-NAME-002; Manager wizard Purpose field replaces Tier/Level/Naming-style, map dots color by Purpose, initials auto-derive bug fixed (pinned at 1 char after first name); admin templates prefill Purpose; pim.CentralAdmins migrated (both DBs); live tenant accounts renamed + LIVE fan-out idempotent re-run green. (1f706eed)
 - release: PIM4EntraPS v2.4.170 -- first LIVE multi-tenant MSP fan-out (Invoke-PimMspFanout.ps1: registry-driven, ring-filtered via pim.vw_AdminTenantTargets, child-process SQL isolation for the SqlServer/Graph Azure.Core conflict, WhatIf default) + engine fixes (modern ForwardMailsToContact/MailForwardAddress columns finally read w/ legacy fallback; EXO connect skipped when no row requests forwarding; replication-404 retry on post-create PATCH) + pim.CentralAdmins account-material columns w/ idempotent upgrade. Verified live: 5 accounts across 2 real test tenants, ring semantics correct, second pass idempotent. (9356c120)
-- release: PIM4EntraPS v2.4.169 -- Install-PimEngineAppRegistration: MachineStore defaults ON (cert in Cert:\LocalMachine\My unless -MachineStore:$false for ad-hoc per-user testing); operator decision, CurrentUser default was a foot-gun. AzureRbac redo for the first test tenant intentionally skipped (recorded in platform.Tenants notes in both DBs) (55b0bbf9)
 
 ---
 
@@ -42,6 +42,17 @@ Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monor
 > **Curated changelog.** The publish workflow auto-prepends recent monorepo commits as a raw activity log; this file is the human-friendly narrative on top.
 
 ---
+
+## v2.4.199 -- admin-interface epic, phase 9: lifecycle calendar (expirations, auto-renew, escalation)
+
+`engine/_shared/PIM-Lifecycle.ps1` (Pester 67 -> **71**) -- scheduled/upcoming expirations + auto-renewals across admins, consultants, access reviews, assignments, with configurable escalation + reminders:
+
+- **`Get-PimUpcomingExpirations`** -- items expiring within a horizon (`Resolve-PimExpiryDate` across candidate date fields), annotated with `daysLeft`, soonest first.
+- **Configurable escalation** (`Get-PimEscalationPolicy`, default 30/14/7/1 days with per-stage recipients owner -> +manager -> +admin, `reminderIntervalDays`): **`Get-PimDueEscalation`** decides what's due now -- a new stage fires immediately, the same stage re-fires only after the reminder interval (resend). All overridable in config (`EscalationPolicy`).
+- **Auto-renew** (`Get-PimAutoRenewal`): items flagged `AutoExtend` within the window get a new expiry; **`New-PimRenewalChange`** produces the change-queue Update. Removals/renewals flow through the queue.
+- Pure + time-injected (testable); mail send reuses the existing templated mail.
+
+VERSION -> 2.4.199.
 
 ## v2.4.198 -- admin-interface epic, phase 8: resource approvers/owners (approval routing + access reviews)
 
