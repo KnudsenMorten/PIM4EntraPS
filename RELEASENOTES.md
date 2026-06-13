@@ -1,9 +1,18 @@
 # Release notes for PIM4EntraPS
 
-## v2.4.210
+## v2.4.216
 
 Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monorepo:
 
+- feat(pim): native Windows App Service host + break-glass emergency console (c918ff8a)
+- diag(pim): boot MI self-test (documented IDENTITY_ENDPOINT snippet) for the SQL resource (2d0b02d4)
+- chore(pim): log MI env presence at boot (IDENTITY_ENDPOINT/MSI_ENDPOINT) — diagnose App Service vs ACI MI (913f8a0b)
+- fix(pim): SQL token SPN fallback when MI not wired (PIM_SqlClientId/Secret) — temp workaround (f297578b)
+- fix(pim): MI token supports both App Service conventions (IDENTITY_ENDPOINT + MSI_ENDPOINT) + robust expiry + path logging (b0dd9bd0)
+- fix(pim): force Managed Identity for the SQL token in hosted/MI context (was 'Login failed for user ""') (b495871b)
+- fix(pim): surface real SQL connect error at boot (direct open, not swallowed Test) (e0cf1370)
+- fix(pim): hosted storage is SQL-ONLY (no CSV fallback) — fail loud with the reason (c05f14d9)
+- fix(pim): hosted SQL data path — env-aware settings, cross-platform SQL driver (pinned DLL, no PS module), MI token, Azure CS, loud diagnostics (e7923ce1)
 - feat(pim): new engine — EntraRoles provider (PIM directory-role enablement over REST) (c076ab97)
 - feat(pim): NEW REST+SQL engine core (provider model) — replaces legacy CSV engine (5541d06c)
 - chore(pim): add /legacy retirement policy — incremental moves gated on REST write-path + sync coordination (CSV engine still wired, nothing safe to move yet) (13540894)
@@ -25,15 +34,6 @@ Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monor
 - release: PIM4EntraPS v2.4.197 -- Manager SQL cutover (/api/data dispatch) + settings in SQL (29164885)
 - release: PIM4EntraPS v2.4.196 -- PAW levels + policy gate, passwordless/KV connection, config-driven (886dd678)
 - release: PIM4EntraPS v2.4.195 -- network-tiered access: tier-0 management requires PAW (b63d95a9)
-- release: PIM4EntraPS v2.4.194 -- SQL data store (phase 6), proven against real SQL Server (89fee09b)
-- release: PIM4EntraPS v2.4.193 -- portal read-scoping on /api/csv (phase 2 enforcement) (87fb0b57)
-- release: PIM4EntraPS v2.4.192 -- guest invite (cloud-only) + self-service toggle + UserType column (phase 4) (341903b7)
-- release: PIM4EntraPS v2.4.191 -- connector role-definition import (phase 5) (2fcb72db)
-- release: PIM4EntraPS v2.4.190 -- Azure auto-discovery + reconcile (phase 3) (176fcb53)
-- release: PIM4EntraPS v2.4.189 -- change queue + full/delta run modes (phase 7) (48a909c5)
-- release: PIM4EntraPS v2.4.188 -- admin-interface epic phase 2 server seam (portal-access + wizard-derive endpoints) (79f8171f)
-- release: PIM4EntraPS v2.4.187 -- admin-interface epic phase 1 (portal-admin scoping + wizard derivation engines) (164d002c)
-- release: PIM4EntraPS v2.4.186 -- nested-membership connector adapter + Dataverse connector (8b49c3e8)
 
 ---
 
@@ -42,6 +42,16 @@ Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monor
 > **Curated changelog.** The publish workflow auto-prepends recent monorepo commits as a raw activity log; this file is the human-friendly narrative on top.
 
 ---
+
+## v2.4.216 -- native Windows App Service host + break-glass emergency console (failover)
+
+The hosted Manager moves to a **native Windows App Service** (no container). The Manager is a Windows PowerShell `HttpListener` app; App Service has no native PowerShell stack, so it runs via **`httpPlatformHandler`** (`infra/app-service/web.config`) which launches `powershell.exe` on `Open-PimManager.ps1 -Hosted` and reverse-proxies inbound to the port it assigns. `Invoke-Server` now binds `http://localhost:%HTTP_PLATFORM_PORT%/` on that path. **Why native, not a container:** Windows App Service delivers a working managed-identity token endpoint, so SQL stays **MI-only** (no secret, no SQL user) — the Linux *custom-container* path did not inject that endpoint, which is what blocked the container build. Native also uses the **in-box `System.Data.SqlClient`** (no driver bundling).
+
+- **Break-glass / EMERGENCY edition** — new `tools/pim-manager/Start-PimEmergency.ps1` runs the SAME Manager in **loopback** on a client PC (incl. cloud-only / non-AD) against the SAME Azure SQL database. Auth is **interactive**: the operator signs in as themselves via a dependency-free **PKCE loopback** flow (`Get-PimInteractiveToken` in `PIM-Rest.ps1`; no MSAL/Graph/Az modules), so the action is audited under the human identity, not a shared app. A preflight mints the SQL token + tests the connection before opening the UI. This failover is what lets the hosted edition run SQL-only / MI-only with confidence.
+- **`Get-PimRestToken -Interactive`** and **`New-PimSqlConnection`** gain an interactive break-glass tier (opt-in via `$global:PIM_Interactive` / `$global:PIM_SqlInteractive`), tried before MI/SPN. Engine import stays **module-free**.
+- Removed the container MI self-test diagnostic scaffolding (obsolete after the native pivot). Verified on Windows PowerShell 5.1: functions load, Azure **token-based** connection string built, in-box `System.Data.SqlClient` selected.
+
+VERSION -> 2.4.216.
 
 ## v2.4.207 -- engine module imports module-free; ARM token via REST; null-safe approver matrix
 

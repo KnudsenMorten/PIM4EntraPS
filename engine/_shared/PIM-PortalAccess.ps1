@@ -31,6 +31,9 @@ function Get-PimPolicySetting {
     if ($global:PIM_NamingConventions -is [hashtable] -and $global:PIM_NamingConventions.ContainsKey($Name)) { return $global:PIM_NamingConventions[$Name] }
     $g = Get-Variable -Name "PIM_$Name" -Scope Global -ErrorAction SilentlyContinue
     if ($g -and $null -ne $g.Value) { return $g.Value }
+    # 4. container-friendly: an env var PIM_<Name> (e.g. PIM_StorageBackend=sql)
+    $e = Get-Item -LiteralPath "Env:PIM_$Name" -ErrorAction SilentlyContinue
+    if ($e -and "$($e.Value)".Trim() -ne '') { return $e.Value }
     return $Default
 }
 

@@ -434,23 +434,41 @@ function Set-PimManagerInstance {
     # once, then SQL wins and is loaded over $global:PIM_NamingConventions so a
     # hacker reading the JSON learns nothing authoritative.
     $script:PimStorageMode = 'csv'; $script:PimSqlCs = $null
+    # Container-friendly: surface the SQL env vars (set as App Service app settings) as
+    # the globals the resolver below + Get-PimSqlConnectionString read.
+    if (-not $global:PIM_SqlServer   -and $env:PIM_SqlServer)   { $global:PIM_SqlServer   = $env:PIM_SqlServer }
+    if (-not $global:PIM_SqlDatabase -and $env:PIM_SqlDatabase) { $global:PIM_SqlDatabase = $env:PIM_SqlDatabase }
     if (Get-Command Get-PimSqlConnectionString -ErrorAction SilentlyContinue) {
         $backend = "$(Get-PimPolicySetting -Name 'StorageBackend' -Default 'csv')".ToLowerInvariant()
         $hasSig  = [bool]($global:PIM_SqlConnectionString -or $global:PIM_SqlConnStringVault -or $global:PIM_SqlServer -or $env:PIM_SqlConnectionString)
-        if ($backend -eq 'sql' -or $hasSig) {
+        Write-Host ("  [store] backend='{0}' hasSig={1} server='{2}' db='{3}'" -f $backend, $hasSig, "$($global:PIM_SqlServer)", "$($global:PIM_SqlDatabase)") -ForegroundColor DarkCyan
+        Write-Host ("  [mi-env] IDENTITY_ENDPOINT={0} IDENTITY_HEADER={1} interactive={2}" -f [bool]$env:IDENTITY_ENDPOINT, [bool]$env:IDENTITY_HEADER, [bool]($global:PIM_Interactive -or $global:PIM_SqlInteractive)) -ForegroundColor DarkCyan
+        # SQL-ONLY: no CSV fallback. When SQL is the backend (or signalled), a failure
+        # to reach/init SQL is FATAL -- we throw with the reason rather than silently
+        # serving empty config. (Hosted is always SQL.)
+        $sqlRequired = ($backend -eq 'sql' -or $hasSig -or $script:PimHosted)
+        if ($sqlRequired) {
             if ($env:PIM_SqlConnectionString -and -not $global:PIM_SqlConnectionString) { $global:PIM_SqlConnectionString = $env:PIM_SqlConnectionString }
-            $cs = $null; try { $cs = Get-PimSqlConnectionString } catch {}
-            if ($cs -and (Test-PimSqlConnectivity -ConnectionString $cs)) {
-                try {
-                    Initialize-PimSqlStore -ConnectionString $cs
-                    if ($global:PIM_NamingConventions -is [hashtable]) { [void](Import-PimSettingsSeed -ConnectionString $cs -Seed $global:PIM_NamingConventions) }
-                    $sqlSettings = Get-PimAllSqlSettings -ConnectionString $cs
-                    if (-not ($global:PIM_NamingConventions -is [hashtable])) { $global:PIM_NamingConventions = @{} }
-                    foreach ($k in @($sqlSettings.Keys)) { $global:PIM_NamingConventions[$k] = $sqlSettings[$k] }
-                    $script:PimSqlCs = $cs; $script:PimStorageMode = 'sql'
-                    Write-Host "  [store] SQL mode (passwordless/KV; settings in SQL, file is seed only)" -ForegroundColor Cyan
-                } catch { Write-Warning "  [store] SQL init failed: $($_.Exception.Message); using CSV." }
+            $cs = $null
+            try { $cs = Get-PimSqlConnectionString } catch { throw "[store] SQL-only: connection-string build failed: $($_.Exception.Message)" }
+            if (-not $cs) { throw "[store] SQL-only: no connection string resolved (server='$($global:PIM_SqlServer)' db='$($global:PIM_SqlDatabase)')." }
+            # Direct open so the REAL failure (driver load / MI token / TLS / auth /
+            # network) surfaces, instead of a swallowed false.
+            try {
+                $__tc = New-PimSqlConnection -ConnectionString $cs
+                $__tc.Open(); $__tc.Close()
+                Write-Host "  [store] SQL connect test OK" -ForegroundColor DarkCyan
+            } catch {
+                $__inner = if ($_.Exception.InnerException) { " | inner: $($_.Exception.InnerException.Message)" } else { '' }
+                throw "[store] SQL-only: connect failed [$($_.Exception.GetType().Name)]: $($_.Exception.Message)$__inner"
             }
+            Initialize-PimSqlStore -ConnectionString $cs
+            if ($global:PIM_NamingConventions -is [hashtable]) { [void](Import-PimSettingsSeed -ConnectionString $cs -Seed $global:PIM_NamingConventions) }
+            $sqlSettings = Get-PimAllSqlSettings -ConnectionString $cs
+            if (-not ($global:PIM_NamingConventions -is [hashtable])) { $global:PIM_NamingConventions = @{} }
+            foreach ($k in @($sqlSettings.Keys)) { $global:PIM_NamingConventions[$k] = $sqlSettings[$k] }
+            $script:PimSqlCs = $cs; $script:PimStorageMode = 'sql'
+            Write-Host "  [store] SQL mode (SQL-only; no CSV fallback)" -ForegroundColor Cyan
         }
     }
 
@@ -1725,10 +1743,22 @@ function Invoke-Server {
 
     $listener = $null
     $port = 0
-    if ($script:PimHosted) {
-        # HOSTED (24/7 business edition): bind all interfaces on the container port
-        # (App Service sets WEBSITES_PORT/PORT). Easy Auth + private inbound sit in
-        # front; the token is still required on /api.
+    if ($script:PimHosted -and "$env:HTTP_PLATFORM_PORT" -match '^\d+$') {
+        # HOSTED on a NATIVE Windows App Service (no container). httpPlatformHandler
+        # launches this PS process and reverse-proxies inbound to the port it picks
+        # in %HTTP_PLATFORM_PORT%. We MUST bind loopback (not http://+:) -- binding
+        # all-interfaces needs a URL-ACL/admin we don't have; the handler only ever
+        # forwards to localhost. Easy Auth + private inbound sit in front of the
+        # handler; the token is still required on /api.
+        $port = [int]$env:HTTP_PLATFORM_PORT
+        $l = New-Object System.Net.HttpListener
+        $l.Prefixes.Add("http://localhost:$port/")
+        $l.Start(); $listener = $l
+        Write-Host ("  [HOSTED/native] App Service (httpPlatformHandler) listening on http://localhost:{0}/ (Easy Auth identity; token required on /api)" -f $port) -ForegroundColor Green
+    } elseif ($script:PimHosted) {
+        # HOSTED (24/7 business edition, container): bind all interfaces on the
+        # container port (App Service sets WEBSITES_PORT/PORT). Easy Auth + private
+        # inbound sit in front; the token is still required on /api.
         $port = if ("$env:WEBSITES_PORT" -match '^\d+$') { [int]$env:WEBSITES_PORT } elseif ("$env:PORT" -match '^\d+$') { [int]$env:PORT } elseif ($DesiredPort -gt 0) { $DesiredPort } else { 8080 }
         $l = New-Object System.Net.HttpListener
         $l.Prefixes.Add("http://+:$port/")
