@@ -17,7 +17,7 @@
 Set-StrictMode -Off
 
 # Capabilities a portal-admin profile may carry.
-$script:PimPortalCapabilities = @('manage-direct','manage-indirect','assign','assign-admin','enable-consultants','invite-guest')
+$script:PimPortalCapabilities = @('manage-direct','manage-indirect','assign','assign-admin','enable-consultants','invite-guest','approve-assignment','access-review')
 
 function Get-PimPolicySetting {
     # EVERYTHING is configurable in the config file. Resolution order:
