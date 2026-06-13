@@ -72,6 +72,10 @@ ForEach ($_mod in $_PIM_ModulesToLoad) {
 # kind/name/roleScope/role/level/tier/plane for entra/azure/workload targets.
 . (Join-Path $PSScriptRoot 'PIM-PermissionWizard.ps1')
 
+# Change queue + full/delta run modes -- commit enqueues only changed items; the
+# engine drains the queue fast (delta) instead of a full reconcile sweep.
+. (Join-Path $PSScriptRoot 'PIM-ChangeQueue.ps1')
+
 function Ensure-DateTime {
     <#
         .SYNOPSIS
