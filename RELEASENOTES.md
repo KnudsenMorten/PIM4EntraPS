@@ -1,9 +1,10 @@
 # Release notes for PIM4EntraPS
 
-## v2.4.184
+## v2.4.185
 
 Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monorepo:
 
+- release: PIM4EntraPS v2.4.185 -- locked-schema + data conformance preflight (25f4c9b5)
 - release: PIM4EntraPS v2.4.184 -- native template versioning + conformance (engine + Manager API + GUI tab) (fc1b3a12)
 - release: PIM4EntraPS v2.4.183 -- entra-approle + azure-rbac connectors + connector status map (22b8a121)
 - release: PIM4EntraPS v2.4.182 -- connector framework nested-path fix + per-row resource support (8140d9e3)
@@ -33,7 +34,6 @@ Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monor
 - release: PIM4EntraPS v2.4.159-pre -- v2.4.158 lifecycle phases 7+8: Manager RBAC Reader/Admin/SuperAdmin (manager-access.custom.json, Windows identity, fail-closed, server-side 403 gates on csv-save/revoke/refresh=Admin + instance/emergency=SuperAdmin, role boot-injected into SPA); Governance tab (role banner, emergency panel, mail-template status, jsonl audit viewer; endpoints /api/access,/api/audit,/api/mail-templates,/api/emergency*); emergency break-glass override (SHA256 passphrase hash in emergency.custom.ps1, constant-time + 15-min lockout; Invoke-PimEmergencyOverride ordered before the template pass: scoped approval disable + owner notification via new emergency-override mail template + same-run auto-restore at TTL expiry with archive + full audit chain). 38-check harness green PS 5.1 + pwsh 7; node --check green (c2739856)
 - release: PIM4EntraPS v2.4.157 -- lifecycle phase 6: unified append-only audit jsonl (output/audit/pim-audit-<yyyyMM>.jsonl; Write-PimAuditEvent best-effort; 13 engine actions wired incl. account/tap/policy/approval/offboard/retire/drift/mail; Manager emits config.csv.save with manager:<windows-identity> actor + session runId) + automatic CSV schema upgrade for existing installs (Invoke-PimCsvSchemaUpgrade at engine start + Manager instance load appends ProvisionDate/TAPLifetimeHours/Template/OffboardDate/DeleteAfterDays + PolicyTemplate/Lifecycle with blank = default = auto-approval; idempotent byte-preserving line-append, quoted-multiline fallback; fixed blank-separator false-multiline + requoted-header re-upgrade loop). 25-check harness green PS 5.1 + pwsh 7 (9d923f67)
 - release: PIM4EntraPS v2.4.157-pre offboarding -- v2.4.156 lifecycle phase 5: OffboardDate/DeleteAfterDays admin offboarding via Invoke-PimAdminOffboarding (reuses Invoke-PimAccountRevoke + session revocation + offboarding-notice mail; offboard-state.json idempotency; WhatIf-aware; create/update loop gates rows past OffboardDate); Lifecycle=Retire group retirement (role assignments + members + delete with PIM- prefix guard; Azure RBAC documented v1 limitation); membership drift cleanup Off/Report/Enforce vs PIM-Assignments-Admins (nested groups report-only); validators PIM-OFF-001/PIM-LC-001 + OffboardDate in PIM-SCHED-001; samples updated. 24-check harness green PS 5.1 + pwsh 7 (e64bc85e)
-- release: PIM4EntraPS v2.4.155 -- lifecycle phases 3+4: policy templates (templates/policy: default = no overrides for zero behavior change, approval-required = MFA+justification + Serial approval w/ 4h escalation) linked per definition row via new PolicyTemplate column (7 sample CSVs updated, GA group ships linked as worked example); Invoke-PimPolicyTemplateApply hash-gates re-apply via output/state/policy-state.json through the existing PIM_Policy_Check_Update diff-then-patch core, never disabling approval it did not itself enable; Owners columns become functional approvers (Parallel = native any-one-wins; Serial = first owner + Invoke-PimApprovalEscalation rotating to the next owner past escalationHours w/ approval-escalation mail); validators PIM-POL-001 + PIM-APR-001; engine run hooks both passes. 27-check harness green PS 5.1 + pwsh 7 (61b7ef6f)
 
 ---
 
@@ -42,6 +42,18 @@ Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monor
 > **Curated changelog.** The publish workflow auto-prepends recent monorepo commits as a raw activity log; this file is the human-friendly narrative on top.
 
 ---
+
+## v2.4.185 -- locked-schema + data conformance preflight (auto-fixes migrated data)
+
+When a customer migrates an OLD data set over (CSV or SQL), its shape can predate the current contract -- e.g. it still carries the deprecated `TierLevel` column (routing is name-marker + `Purpose` driven now). New **`engine/_shared/PIM-SchemaConformance.ps1`** brings both schema AND data to the LOCKED structure, **24/24 in `tests/Test-PimSchemaConformance.ps1`**:
+
+- **`Get-PimLockedSchema` / `Get-PimLockedSqlSchema`** -- the single source of truth: per base/table, the `deprecated` columns to drop, `required` columns to ensure, and `migrations` (data moves applied BEFORE a drop).
+- **`Get-PimSchemaConformancePlan`** (pure) -- diff actual columns vs the locked spec -> `ToDrop` / `ToAdd` / `ToMigrate` / `Conformant`.
+- **`Repair-PimRowsToSchema`** (pure) -- migrates first, adds missing (blank), drops deprecated, preserves column order. The flagship migration: **`TierLevel` -> `Purpose`** (Tier 0 / L0 / T0 -> `HighPriv`, else `Day2Day`), only when `Purpose` is blank (never clobbers an explicit value), then the `TierLevel` column is physically removed. Idempotent.
+- **`New-PimSqlConformanceDdl`** (pure) -- emits idempotent, guarded T-SQL for a migrated SQL store: `UPDATE` to migrate `TierLevel`->`Purpose`, then drop the bound default constraint and `DROP COLUMN [TierLevel]`, plus `ADD` for missing required columns -- every statement guarded by `COL_LENGTH(...)` so re-running is a no-op.
+- **`Invoke-PimSchemaConformancePreflight`** -- the orchestrator: conforms every present `<base>.custom.csv` to the locked structure. **Wired into the Manager's instance load** (right after the additive CSV upgrade), so opening a customer instance auto-conforms migrated data; idempotent and logged.
+
+VERSION -> 2.4.185.
 
 ## v2.4.184 -- native template versioning + conformance (engine + Manager API + GUI tab)
 
