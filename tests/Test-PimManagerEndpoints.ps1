@@ -69,7 +69,8 @@ try {
         @{ p='/api/preflight';           chk={ param($r) $r -ne $null } },
         @{ p='/api/conformance/templates'; chk={ param($r) $r.templates -ne $null } },
         @{ p='/api/conformance?template=defender-xdr-roles'; chk={ param($r) @($r.keys).Count -ge 1 -and $r.statuses -ne $null } },
-        @{ p='/api/portal-access'; chk={ param($r) "$($r.managerRole)" -ne '' -and $null -ne $r.isSuperAdmin } }
+        @{ p='/api/portal-access'; chk={ param($r) "$($r.managerRole)" -ne '' -and $null -ne $r.isSuperAdmin } },
+        @{ p='/api/csv/Account-Definitions-Admins'; chk={ param($r) "$($r.base)" -eq 'Account-Definitions-Admins' -and $r.PSObject.Properties['portalFiltered'] } }
     )) {
         Beat
         $ok = $false
