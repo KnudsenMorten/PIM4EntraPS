@@ -144,3 +144,100 @@ Describe 'PIM conformance engine (native template versioning + reconcile)' {
         { Get-PimRollForwardRows -Template ([pscustomobject]@{ templateId='d'; workload='w'; status='draft'; entries=@() }) -TenantRing 2 -NowUtc $Now } | Should -Throw
     }
 }
+
+Describe 'Portal-admin scoping (delegated GUI managers)' {
+    BeforeAll {
+        $script:Profiles = @((Get-Content (Join-Path $Root 'config\portal-admins.sample.json') -Raw | ConvertFrom-Json).portalAdmins)
+        $script:Helpdesk = Get-PimPortalProfile -Profiles $Profiles -Identity 'CONTOSO\helpdesk1'
+        $script:AzDev    = Get-PimPortalProfile -Profiles $Profiles -Identity 'devlead@contoso.com'
+        $script:Dept     = Get-PimPortalProfile -Profiles $Profiles -Identity 'deptowner@contoso.com'
+    }
+    It 'facets from a definition row (columns)' {
+        $f = Get-PimGroupFacets -Row ([pscustomobject]@{ GroupName='PIM-Entra-ID-UserAdmin-L1-T0-CP-ID'; Workload='Entra-ID'; Level='L1'; TierLevel='T0'; Plane='CP'; GroupTag='Entra-ID-UserAdmin-L1' })
+        $f.service | Should -Be 'entra'; $f.tier | Should -Be 0; $f.level | Should -Be 1; $f.kind | Should -Be 'indirect'
+    }
+    It 'facets fall back to parsing the group name' {
+        $f = Get-PimGroupFacets -Row ([pscustomobject]@{ GroupName='PIM-Azure-Sub-Owner-L1-T1-WDP-RES'; GroupTag='Azure-Sub-Owner-L1' })
+        $f.service | Should -Be 'azure'; $f.tier | Should -Be 1; $f.level | Should -Be 1; $f.plane | Should -Be 'WDP'
+    }
+    It 'helpdesk (entra, levelMax 2) sees L2+ entra but not L0/L1, not azure' {
+        $see = { param($svc,$t,$l) Test-PimPortalCanSeeGroup -Profile $Helpdesk -Facets @{ service=$svc; tier=$t; level=$l; kind='indirect'; scope='' } }
+        (& $see 'entra' 0 2) | Should -BeTrue
+        (& $see 'entra' 0 1) | Should -BeFalse
+        (& $see 'entra' 0 0) | Should -BeFalse
+        (& $see 'azure' 1 3) | Should -BeFalse
+    }
+    It 'helpdesk can manage indirect (has cap) but not direct (no cap)' {
+        (Test-PimPortalCanManageGroup -Profile $Helpdesk -Facets @{ service='entra'; tier=0; level=2; kind='indirect'; scope='' }) | Should -BeTrue
+        (Test-PimPortalCanManageGroup -Profile $Helpdesk -Facets @{ service='entra'; tier=0; level=2; kind='direct'; scope='' }) | Should -BeFalse
+    }
+    It 'azure dev is scope-gated + tier-gated' {
+        $base = @{ service='azure'; tier=1; level=1; kind='indirect' }
+        (Test-PimPortalCanSeeGroup -Profile $AzDev -Facets ($base + @{ scope='/subscriptions/11111111-1111-1111-1111-111111111111/resourceGroups/rg1' })) | Should -BeTrue
+        (Test-PimPortalCanSeeGroup -Profile $AzDev -Facets ($base + @{ scope='/subscriptions/99999999-9999-9999-9999-999999999999' })) | Should -BeFalse
+        (Test-PimPortalCanSeeGroup -Profile $AzDev -Facets @{ service='azure'; tier=0; level=0; kind='indirect'; scope='/subscriptions/11111111-1111-1111-1111-111111111111' }) | Should -BeFalse
+        (Test-PimPortalCanSeeGroup -Profile $AzDev -Facets @{ service='entra'; tier=0; level=2; kind='indirect'; scope='' }) | Should -BeFalse
+    }
+    It 'dept owner: assign-only (no manage), assign-admin only for managed consultants, enable own consultants' {
+        (Test-PimPortalCanManageGroup -Profile $Dept -Facets @{ service='entra'; tier=1; level=3; kind='indirect'; scope='' }) | Should -BeFalse
+        (Test-PimPortalCanAssign -Profile $Dept) | Should -BeTrue
+        (Test-PimPortalCanAssignAdmin -Profile $Dept -AdminName 'Admin-EXT1-ID') | Should -BeTrue
+        (Test-PimPortalCanAssignAdmin -Profile $Dept -AdminName 'Admin-OTHER-ID') | Should -BeFalse
+        (Test-PimPortalCanEnableConsultant -Profile $Dept -AdminName 'Admin-EXT2-ID') | Should -BeTrue
+        (Test-PimPortalCanEnableConsultant -Profile $Helpdesk -AdminName 'Admin-EXT2-ID') | Should -BeFalse
+    }
+    It 'SuperAdmin bypasses all scoping' {
+        (Test-PimPortalCanSeeGroup -Profile $null -Facets @{ service='entra'; tier=0; level=0; kind='indirect'; scope='' } -IsSuperAdmin) | Should -BeTrue
+        (Test-PimPortalCanManageGroup -Profile $null -Facets @{ service='azure'; tier=0; level=0; kind='direct'; scope='' } -IsSuperAdmin) | Should -BeTrue
+    }
+    It 'Select-PimPortalVisibleRows filters a row set for the profile' {
+        $rows = @(
+            [pscustomobject]@{ GroupName='PIM-Entra-ID-GA-L0-T0-CP-ID'; Workload='Entra-ID'; Level='L0'; TierLevel='T0'; Plane='CP' }
+            [pscustomobject]@{ GroupName='PIM-Entra-ID-UA-AU-Fin-L2-T0-CP-ID'; Workload='Entra-ID'; Level='L2'; TierLevel='T0'; Plane='CP' }
+        )
+        $vis = @(Select-PimPortalVisibleRows -Profile $Helpdesk -Rows $rows)
+        $vis.Count | Should -Be 1
+        "$($vis[0].GroupName)" | Should -BeLike '*-L2-*'
+    }
+}
+
+Describe 'Permission-wizard auto-derivation (reversed create flow)' {
+    It 'entra single privileged role -> service, L0/T0/CP/ID' {
+        $d = Get-PimEntraDerivation -Roles @('Global Administrator')
+        $d.kind | Should -Be 'permission-service'; $d.level | Should -Be 0; $d.tier | Should -Be 0; $d.plane | Should -Be 'CP'
+        $d.groupName | Should -BeLike 'PIM-Entra-ID-*-L0-T0-CP-ID'
+    }
+    It 'entra single ordinary role -> L1; with AU scope -> L2 + AU segment' {
+        (Get-PimEntraDerivation -Roles @('User Administrator')).level | Should -Be 1
+        $au = Get-PimEntraDerivation -Roles @('User Administrator') -AuScope 'Finance'
+        $au.level | Should -Be 2; $au.au | Should -Be 'Finance'; $au.groupName | Should -BeLike '*-AU-Finance-*'
+    }
+    It 'AU step only when ALL selected roles are AU-scopable' {
+        (Test-PimRolesAuScopable -Roles @('User Administrator','Groups Administrator')) | Should -BeTrue
+        (Test-PimRolesAuScopable -Roles @('User Administrator','Security Reader')) | Should -BeFalse
+        # a non-AU-scopable role ignores AuScope -> stays L1
+        (Get-PimEntraDerivation -Roles @('Security Reader') -AuScope 'Finance').level | Should -Be 1
+    }
+    It 'entra multiple roles -> bundle; any privileged -> L0' {
+        $d = Get-PimEntraDerivation -Roles @('Global Administrator','User Administrator')
+        $d.kind | Should -Be 'permission-bundle'; $d.level | Should -Be 0
+    }
+    It 'azure tenant root -> L0/T0/CP; sub LZ -> L1/T1/WDP' {
+        $root = Get-PimAzureDerivation -ScopeType tenantRoot -Roles @('Owner') -ScopeName 'Tenant Root'
+        $root.level | Should -Be 0; $root.tier | Should -Be 0; $root.plane | Should -Be 'CP'
+        $lz = Get-PimAzureDerivation -ScopeType subscription -Roles @('Contributor') -ScopePath '/subscriptions/abc' -ScopeName 'lz-corp-prod'
+        $lz.level | Should -Be 1; $lz.tier | Should -Be 1; $lz.plane | Should -Be 'WDP'
+    }
+    It 'azure plane heuristics + depth + data domain' {
+        (Get-PimAzureDerivation -ScopeType managementGroup -Roles @('Reader') -ScopeName 'platform-management' -ManagementGroupDepth 1).plane | Should -Be 'MP'
+        (Get-PimAzureDerivation -ScopeType resourceGroup -Roles @('Contributor') -ScopeName 'rg-app').level | Should -Be 2
+        (Get-PimAzureDerivation -ScopeType resource -Roles @('Reader') -ScopeName 'sql-data-prod').domain | Should -Be 'DAT'
+        $b = Get-PimAzureDerivation -ScopeType subscription -Roles @('Owner','Contributor') -ScopeName 'lz-x'
+        $b.kind | Should -Be 'permission-bundle'
+    }
+    It 'workload derivation: defender single -> service, T1/WDP' {
+        $d = Get-PimWorkloadDerivation -Workload 'Defender' -Roles @('Security Operator')
+        $d.kind | Should -Be 'permission-service'; $d.tier | Should -Be 1; $d.plane | Should -Be 'WDP'
+        $d.groupName | Should -BeLike 'PIM-Defender-*-T1-WDP-*'
+    }
+}

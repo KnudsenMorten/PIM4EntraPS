@@ -1,9 +1,10 @@
 # Release notes for PIM4EntraPS
 
-## v2.4.186
+## v2.4.187
 
 Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monorepo:
 
+- release: PIM4EntraPS v2.4.187 -- admin-interface epic phase 1 (portal-admin scoping + wizard derivation engines) (164d002c)
 - release: PIM4EntraPS v2.4.186 -- nested-membership connector adapter + Dataverse connector (8b49c3e8)
 - release: PIM4EntraPS v2.4.185 -- locked-schema + data conformance preflight (25f4c9b5)
 - release: PIM4EntraPS v2.4.184 -- native template versioning + conformance (engine + Manager API + GUI tab) (fc1b3a12)
@@ -33,7 +34,6 @@ Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monor
 - release: PIM4EntraPS v2.4.160 + extension v1.6.27 -- dead CA-session tokens self-heal instead of erroring: mid-action staleness (401/token-shaped 403) during Activate / Deactivate / My Access load routes to triggerInteractiveReauth (wipes Graph+ARM tokens = auto sign-out, overlay now names Conditional Access session lifetime, popup reloads straight into interactive sign-in); popup-open dead-refresh-token path already self-healed via tryRefresh cache wipe. node --check + 7 behavioral assertions green. CRX repack on the signing-key box still required to publish 1.6.27 to the fleet (6b31c951)
 - release: PIM4EntraPS v2.4.159 -- lifecycle phase 9: resource discovery. Engine Invoke-PimResourceDiscovery (end of run, PIM_ResourceDiscoveryMode Off/Notify default Notify): new Azure subscriptions + Entra role definitions vs output/state/discovery-baseline.json (first run establishes silently; each item audited resource.discovered once, baseline rolls forward). Manager Governance tab Discovered-resources section over the _tenantSync caches with per-instance baseline + Admin-gated Acknowledge (resource.baseline audited); endpoints /api/discovered-resources + /api/discovery-baseline. Auto row-creation = documented follow-up. 14-check harness green PS 5.1 + pwsh 7; node --check green. ALL NINE LIFECYCLE-GOVERNANCE PHASES NOW SHIPPED (v2.4.153-159) (a1944979)
 - release: PIM4EntraPS v2.4.159-pre -- v2.4.158 lifecycle phases 7+8: Manager RBAC Reader/Admin/SuperAdmin (manager-access.custom.json, Windows identity, fail-closed, server-side 403 gates on csv-save/revoke/refresh=Admin + instance/emergency=SuperAdmin, role boot-injected into SPA); Governance tab (role banner, emergency panel, mail-template status, jsonl audit viewer; endpoints /api/access,/api/audit,/api/mail-templates,/api/emergency*); emergency break-glass override (SHA256 passphrase hash in emergency.custom.ps1, constant-time + 15-min lockout; Invoke-PimEmergencyOverride ordered before the template pass: scoped approval disable + owner notification via new emergency-override mail template + same-run auto-restore at TTL expiry with archive + full audit chain). 38-check harness green PS 5.1 + pwsh 7; node --check green (c2739856)
-- release: PIM4EntraPS v2.4.157 -- lifecycle phase 6: unified append-only audit jsonl (output/audit/pim-audit-<yyyyMM>.jsonl; Write-PimAuditEvent best-effort; 13 engine actions wired incl. account/tap/policy/approval/offboard/retire/drift/mail; Manager emits config.csv.save with manager:<windows-identity> actor + session runId) + automatic CSV schema upgrade for existing installs (Invoke-PimCsvSchemaUpgrade at engine start + Manager instance load appends ProvisionDate/TAPLifetimeHours/Template/OffboardDate/DeleteAfterDays + PolicyTemplate/Lifecycle with blank = default = auto-approval; idempotent byte-preserving line-append, quoted-multiline fallback; fixed blank-separator false-multiline + requoted-header re-upgrade loop). 25-check harness green PS 5.1 + pwsh 7 (9d923f67)
 
 ---
 
@@ -42,6 +42,16 @@ Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monor
 > **Curated changelog.** The publish workflow auto-prepends recent monorepo commits as a raw activity log; this file is the human-friendly narrative on top.
 
 ---
+
+## v2.4.187 -- admin-interface epic, phase 1: portal-admin scoping + permission-wizard derivation engines
+
+Foundation for the delegated, wizard-driven PIM Manager rework. Two pure engines (no I/O, fully offline-tested -- Pester 23 -> **38**) that the GUI/endpoints will sit on:
+
+- **`engine/_shared/PIM-PortalAccess.ps1`** -- delegated GUI managers (helpdesk / business IT / dept owners) scoped on TOP of the flat Reader/Admin/SuperAdmin role. A super-admin bypasses everything. A portal-admin (`config/portal-admins.json`, super-admin controlled) is gated by **tierMax** (T0=0 most privileged; tierMax=1 excludes T0), **levelMax** (L0=0 most privileged; levelMax=2 excludes L0/L1), **services[]** (entra/azure/workloads), **scopes[]** (azure scope prefixes, multi), **capabilities[]** (manage-direct/-indirect, assign, assign-admin, enable-consultants, invite-guest), **managedAdmins[]**. `Get-PimGroupFacets` extracts service/tier/level/plane/scope/kind from a definition row (or by parsing the locked name grammar); `Test-PimPortalCanSeeGroup` / `Test-PimPortalCanManageGroup` / `Test-PimPortalCanAssignAdmin` / `Test-PimPortalCanEnableConsultant` / `Select-PimPortalVisibleRows` enforce it. This is what lets helpdesk manage only L2+ entra, a dev manage only azure under their scope, a dept owner do assignment-only + enable just their own consultants, and hides T0/L0 from everyone but super-admins.
+- **`engine/_shared/PIM-PermissionWizard.ps1`** -- the reversed target-first create flow's brain. Given target + source + roles it auto-derives **kind** (1 role = permission-service, 2+ = permission-bundle), **name**, **roleScope**, **role**, **level**, **tier**, **plane**: `Get-PimEntraDerivation` (GA/privileged = T0/L0; other entra = T0/L1; +AU scope = T0/L2; AU step offered only when every role is AU-scopable), `Get-PimAzureDerivation` (level by scope depth, tier 0 only at tenant root else 1, plane CP/MP/WDP by CAF naming heuristics, DAT domain for data scopes), `Get-PimWorkloadDerivation`. `New-PimPermissionGroupName` assembles the `PIM-{Service}-{Name}-L{}-T{}-{Code}-{Domain}` grammar.
+- **`config/portal-admins.sample.json`** -- worked examples (helpdesk / azure dev / dept owner). Live `portal-admins.json` gitignored.
+
+Phases next: GUI wizard reversal + portal-access endpoints + filtered admins list; Azure auto-discovery/reconcile queue; guest invite + self-service consultant enable; connector role-definition auto-import. VERSION -> 2.4.187.
 
 ## v2.4.186 -- nested-membership connector adapter + Dataverse connector
 
