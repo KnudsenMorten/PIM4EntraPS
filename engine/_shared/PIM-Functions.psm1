@@ -34,9 +34,14 @@ $_PIM_ModulesToLoad = @(
     'AzLogDcrIngestPS'
 )
 
-ForEach ($_mod in $_PIM_ModulesToLoad) {
-    If (-not (Get-Module -Name $_mod -ErrorAction SilentlyContinue)) {
-        Import-Module $_mod -Global -WarningAction SilentlyContinue -ErrorAction SilentlyContinue
+# REST-first: by default load NO Graph SDK modules (the engine reads/writes over
+# REST via PIM-Rest.ps1). Set $global:PIM_UseGraphSdk = $true to pre-load the legacy
+# Graph SDK for the write scripts that still use Get-Mg*/Update-Mg* cmdlets.
+If ($global:PIM_UseGraphSdk) {
+    ForEach ($_mod in $_PIM_ModulesToLoad) {
+        If (-not (Get-Module -Name $_mod -ErrorAction SilentlyContinue)) {
+            Import-Module $_mod -Global -WarningAction SilentlyContinue -ErrorAction SilentlyContinue
+        }
     }
 }
 
@@ -45,6 +50,10 @@ ForEach ($_mod in $_PIM_ModulesToLoad) {
 # dot-sources it standalone -- engine, GUI and validator must resolve
 # expressions identically.
 . (Join-Path $PSScriptRoot 'PIM-DateExpression.ps1')
+
+# Pure-REST auth + data plane (no Graph/Az modules). Provides Get-PimRestToken /
+# Invoke-PimGraph|Arm|PowerBI so the engine runs module-free on a VM or container.
+. (Join-Path $PSScriptRoot 'PIM-Rest.ps1')
 
 # Offline Pro licensing (Core/Pro split) -- Get-PimLicense / Test-PimProFeature.
 # Own file so the Manager dot-sources it standalone; Core is never gated.
@@ -294,6 +303,20 @@ function Get-AzPimTokenCached {
 
     if (-not $needRefresh) {
         return $script:AzPimTokenCache.Headers
+    }
+
+    # Prefer the pure-REST token core (Managed Identity / SPN secret / cert / az) so
+    # the engine needs NO Az module. Falls back to Get-AzAccessToken below if REST
+    # can't mint (e.g. only an interactive Az session is available).
+    if (Get-Command Get-PimRestToken -ErrorAction SilentlyContinue) {
+        try {
+            $restTok = Get-PimRestToken -Resource 'arm' -Force:$Force
+            if ($restTok) {
+                $headers = @{ 'Content-Type' = 'application/json'; 'Accept' = 'application/json'; 'Authorization' = "Bearer $restTok" }
+                $script:AzPimTokenCache = @{ Headers = $headers; ExpiresOn = (Get-Date).AddMinutes(50); IssuedAt = Get-Date }
+                return $headers
+            }
+        } catch { Write-Verbose "Get-AzPimTokenCached: REST token path failed ($($_.Exception.Message)); falling back to Get-AzAccessToken." }
     }
 
     # Mint a fresh token. Az.Accounts 2.13+ returns PSAccessToken with .Token (string) + .ExpiresOn.
