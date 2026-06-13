@@ -181,10 +181,10 @@ Describe 'Portal-admin scoping (delegated GUI managers)' {
     It 'dept owner: assign-only (no manage), assign-admin only for managed consultants, enable own consultants' {
         (Test-PimPortalCanManageGroup -Profile $Dept -Facets @{ service='entra'; tier=1; level=3; kind='indirect'; scope='' }) | Should -BeFalse
         (Test-PimPortalCanAssign -Profile $Dept) | Should -BeTrue
-        (Test-PimPortalCanAssignAdmin -Profile $Dept -AdminName 'Admin-EXT1-ID') | Should -BeTrue
-        (Test-PimPortalCanAssignAdmin -Profile $Dept -AdminName 'Admin-OTHER-ID') | Should -BeFalse
-        (Test-PimPortalCanEnableConsultant -Profile $Dept -AdminName 'Admin-EXT2-ID') | Should -BeTrue
-        (Test-PimPortalCanEnableConsultant -Profile $Helpdesk -AdminName 'Admin-EXT2-ID') | Should -BeFalse
+        (Test-PimPortalCanAssignAdmin -Profile $Dept -AdminName 'consultant1@contoso.com') | Should -BeTrue
+        (Test-PimPortalCanAssignAdmin -Profile $Dept -AdminName 'someone-else@contoso.com') | Should -BeFalse
+        (Test-PimPortalCanEnableConsultant -Profile $Dept -AdminName 'consultant2@contoso.com') | Should -BeTrue
+        (Test-PimPortalCanEnableConsultant -Profile $Helpdesk -AdminName 'consultant2@contoso.com') | Should -BeFalse
     }
     It 'SuperAdmin bypasses all scoping' {
         (Test-PimPortalCanSeeGroup -Profile $null -Facets @{ service='entra'; tier=0; level=0; kind='indirect'; scope='' } -IsSuperAdmin) | Should -BeTrue
@@ -389,5 +389,43 @@ Describe 'Connector role-definition import' {
         $plan = Get-PimDefinitionImportPlan -ServiceType 'entra' -LiveRoles $live -Policy @(@{ serviceType='entra'; maxTierNum=0; minLevel=1; maxLevel=2 })
         @(ConvertTo-PimImportQueueChanges -Plan $plan).Count | Should -Be 1                 # only UA (auto)
         @(ConvertTo-PimImportQueueChanges -Plan $plan -IncludeManual).Count | Should -Be 2 # + GA (manual)
+    }
+}
+
+Describe 'Onboarding modes + self-service consultant toggle' {
+    It 'onboarding mode: guest invite is cloud-only' {
+        (Resolve-PimOnboardingMode -Cloud $true  -External $true).mode  | Should -Be 'guest-invite'
+        (Resolve-PimOnboardingMode -Cloud $false -External $true).mode  | Should -Be 'unsupported'
+        (Resolve-PimOnboardingMode -Cloud $true  -External $false).mode | Should -Be 'cloud-user'
+        (Resolve-PimOnboardingMode -Cloud $false -External $false).mode | Should -Be 'ad-user'
+        (Resolve-PimOnboardingMode -Cloud $true  -External $false -RequestedType 'guest').mode | Should -Be 'guest-invite'
+    }
+    It 'guest invitation body has required fields + Guest type; throws without email' {
+        $b = New-PimGuestInvitationBody -Email 'ext@partner.com' -DisplayName 'Ext User'
+        $b.invitedUserEmailAddress | Should -Be 'ext@partner.com'
+        $b.invitedUserType | Should -Be 'Guest'
+        $b.inviteRedirectUrl | Should -Not -BeNullOrEmpty
+        { New-PimGuestInvitationBody -Email '' } | Should -Throw
+    }
+    It 'UserType column drives external (Internal/Consultant/OperationPartner/MSP); name never consulted' {
+        (Get-PimRowIsExternal -Row ([pscustomobject]@{ UserName='x'; UserType='Internal' })) | Should -BeFalse
+        (Get-PimRowIsExternal -Row ([pscustomobject]@{ UserName='x'; UserType='Consultant' })) | Should -BeTrue
+        (Get-PimRowIsExternal -Row ([pscustomobject]@{ UserName='x'; UserType='OperationPartner' })) | Should -BeTrue
+        (Get-PimRowIsExternal -Row ([pscustomobject]@{ UserName='x'; UserType='MSP' })) | Should -BeTrue
+        (Get-PimRowIsExternal -Row ([pscustomobject]@{ UserName='x' })) | Should -BeFalse   # blank -> internal
+        # row + cloud -> mode
+        (Resolve-PimOnboardingModeForRow -Row ([pscustomobject]@{ UserType='Consultant' }) -Cloud $true).mode | Should -Be 'guest-invite'
+        (Resolve-PimOnboardingModeForRow -Row ([pscustomobject]@{ UserType='Internal' }) -Cloud $true).mode | Should -Be 'cloud-user'
+        (Resolve-PimOnboardingModeForRow -Row ([pscustomobject]@{ UserType='MSP' }) -Cloud $false).mode | Should -Be 'unsupported'
+    }
+    It 'self-service toggle: allowed only for managed consultants -> queue change' {
+        $profiles = @((Get-Content (Join-Path $Root 'config\portal-admins.sample.json') -Raw | ConvertFrom-Json).portalAdmins)
+        $dept = Get-PimPortalProfile -Profiles $profiles -Identity 'deptowner@contoso.com'
+        $ok = Resolve-PimSelfServiceToggle -Profile $dept -AccountName 'consultant1@contoso.com' -Action disable
+        $ok.allowed | Should -BeTrue; $ok.change.op | Should -Be 'Update'; $ok.change.payload.Enabled | Should -Be $false
+        (Resolve-PimSelfServiceToggle -Profile $dept -AccountName 'someone-else@contoso.com' -Action enable).allowed | Should -BeFalse
+    }
+    It 'SuperAdmin can toggle any managed account' {
+        (Resolve-PimSelfServiceToggle -Profile $null -AccountName 'anyone' -Action enable -IsSuperAdmin).allowed | Should -BeTrue
     }
 }

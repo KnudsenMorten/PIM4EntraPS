@@ -84,6 +84,10 @@ ForEach ($_mod in $_PIM_ModulesToLoad) {
 # definitions (manual super-admin import, or auto by service-type+tier+level).
 . (Join-Path $PSScriptRoot 'PIM-DefinitionImport.ps1')
 
+# Onboarding modes -- guest invite (B2B, cloud-only) vs cloud/AD user; self-service
+# consultant enable/disable gated by portal-access. Uses ChangeQueue + PortalAccess.
+. (Join-Path $PSScriptRoot 'PIM-Onboarding.ps1')
+
 function Ensure-DateTime {
     <#
         .SYNOPSIS
