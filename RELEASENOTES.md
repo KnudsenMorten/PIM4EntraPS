@@ -1,9 +1,10 @@
 # Release notes for PIM4EntraPS
 
-## v2.4.205
+## v2.4.206
 
 Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monorepo:
 
+- feat(pim): REST-only engine proven live (full CRUD, no modules) + REST error surfacing (7dfec006)
 - feat(pim): pure-REST core — engine reads + auth run with no Graph/Az modules (cfe7dd9a)
 - test(pim): live delegation lab — workload-owner delegation across 2 subs + Power BI, AU-scoped helpdesk L2 + L2 approver, biz-owner-manages-external-consultant (60c42f21)
 - release: PIM4EntraPS v2.4.204 -- Manager 24/7 hosted (App Service for Containers) + local break-glass (0dabc819)
@@ -33,7 +34,6 @@ Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monor
 - release: PIM4EntraPS v2.4.180 -- entra-roles workload connector (live-tested: 145 directory roles) + activation prereqs (Intune always-on; Defender Unified RBAC = portal activation, no Graph endpoint) + app catalog (120 apps by mechanism) + 100 PIM use-cases (60b72237)
 - release: PIM4EntraPS v2.4.179 -- Manager + scenario functional test suites (68 assertions, rerunnable) (a7d01e49)
 - release: PIM4EntraPS v2.4.178 -- rerunnable functional test suite (40 pass/0 fail/6 live-skip) + cloud-native container engine documented in repo (98ffdb04)
-- release: PIM4EntraPS v2.4.177 -- true local engine + signed baseline courier (private-endpoint) + cross-tenant pull PROVEN + local autonomy (750c2ae0)
 
 ---
 
@@ -42,6 +42,13 @@ Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monor
 > **Curated changelog.** The publish workflow auto-prepends recent monorepo commits as a raw activity log; this file is the human-friendly narrative on top.
 
 ---
+
+## v2.4.206 -- REST-only engine proven live (full CRUD, no modules) + better REST diagnostics
+
+- **`tests/live/Test-PimRestEngineLive.ps1`** -- runs the engine module-free against the live tenant and **creates real resources via REST**: user, PIM group, group member, AU + AU member, Azure RG, Azure role assignment -- then reads each back, rebuilds `Build-PimContext` (which picks up the new objects), and runs the decision core over them. **13/13 green, 0 errors/warnings**, with `Get-Module` asserting no Graph/Az/EXO module ever loaded. Writes a timestamped run-log under `tests/live/logs/` and self-scans it. `-Cleanup` removes the objects.
+- **`PIM-Rest.ps1`**: `Invoke-PimRest` now surfaces the API error body on failure (was swallowed) and retries the freshly-created-principal ARM replication delay (400 `PrincipalNotFound`) alongside 429/5xx.
+
+VERSION -> 2.4.206.
 
 ## v2.4.205 -- pure-REST core (no Graph/Az modules): engine reads + auth run 100% on REST
 
