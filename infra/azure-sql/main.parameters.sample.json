@@ -1,0 +1,14 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#",
+  "contentVersion": "1.0.0.0",
+  "_doc": "Copy to main.parameters.json (gitignored) and fill in. All ids are ARM resource ids / AAD object ids -- no secrets. sqlServerName must be globally unique + lowercase.",
+  "parameters": {
+    "sqlServerName":          { "value": "pim4entra-<org>-sql" },
+    "databaseName":           { "value": "PIM4EntraPS" },
+    "aadAdminLogin":          { "value": "grp-pim-sql-admins" },
+    "aadAdminObjectId":       { "value": "00000000-0000-0000-0000-000000000000" },
+    "aadAdminPrincipalType":  { "value": "Group" },
+    "privateEndpointSubnetId":{ "value": "/subscriptions/<sub>/resourceGroups/<rg>/providers/Microsoft.Network/virtualNetworks/<vnet>/subnets/<pe-subnet>" },
+    "vnetId":                 { "value": "/subscriptions/<sub>/resourceGroups/<rg>/providers/Microsoft.Network/virtualNetworks/<vnet>" }
+  }
+}

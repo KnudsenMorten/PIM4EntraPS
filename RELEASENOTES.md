@@ -1,9 +1,10 @@
 # Release notes for PIM4EntraPS
 
-## v2.4.201
+## v2.4.202
 
 Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monorepo:
 
+- release: PIM4EntraPS v2.4.202 -- prod Azure SQL IaC (private endpoint, MI) + CSV->SQL migration (042bf8b2)
 - release: PIM4EntraPS v2.4.201 -- Approver Matrix layered by scope + persona support-functions (d643e64a)
 - release: PIM4EntraPS v2.4.200 -- Approver Matrix (dimensional routing + escalation chain) (25ed077d)
 - release: PIM4EntraPS v2.4.199 -- lifecycle calendar (phase 9): expirations, auto-renew, escalation (2103344a)
@@ -33,7 +34,6 @@ Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monor
 - release: PIM4EntraPS v2.4.175 -- design: MSP edition LIFECYCLE-GOVERNANCE Sec 19 (one core / pluggable edges / customer-owned control plane): GDAP disqualified to niche (EA/MCA exclusion + no customer-side attribution + weak CA over foreign identity); vary edges never core = pluggable auth profile (B per-tenant cert default / A GDAP CSP-only / on-prem gMSA) + storage profile (Csv/local-SQL/central) behind thin contracts; no-linked-SQL courier (signed baseline bundle pulled+verified in, customer-emitted summary out, no MSP standing access); Owner=MSP|Local disjoint namespaces + delegation bounded by guardrail envelope; per-profile capability/tradeoff table keeps security claims honest; same design for TenantManager; per-tenant cert lifecycle first-class. VERSION 2.4.169->2.4.175 catch-up. PS5.1 regression battery green. (b7caff11)
 - release: PIM4EntraPS v2.4.174 -- mail redirect override ($global:PIM_MailRedirectAllTo: all engine mail -> one mailbox for flow visibility, {RedirectedFrom} token, off by default) + two-plane private-endpoint topology built (admin plane Manager+SQL co-located private-endpoint-only/public-disabled/SQL Entra-only/inbound clamped to jumphost+PAW+SAW; self-service plane separate broad-internal private-endpoint app, signed-requests-only) documented LIFECYCLE-GOVERNANCE 13a incl custom-DNS forwarder caveat + app-only Exchange enablement proven (engine SPN self-grants Exchange.ManageAsApp + Exchange Admin; Graph Mail.Send correctly denied) (050921c7)
 - release: PIM4EntraPS v2.4.173 -- Core/Pro licensing, 100% offline: signed .pimlicense (RSA-SHA256 over payload bytes, embedded public cert, PS5.1-safe raw-bytes X509 load, no call-home/activation ever) + Test-PimProFeature gate (tenant-bound; fan-out skips unlicensed tenants; expiry -> grace -> disable; Core never affected) + Manager Governance License panel (/api/license) + internal-only issuer (INTERNAL/pim-licensing, non-exportable machine-store key) + first gated feature = MSP fan-out. SQL data store deliberately Core (free). 12-assertion PS5.1 battery green incl. tamper + tenant-binding tests. (25b3bb0e)
-- release: PIM4EntraPS v2.4.172 -- design: LIFECYCLE-GOVERNANCE Sec 17 email routing & people directory (Department link + PIM-Definitions-Contacts + central mail-routing.custom.json override w/ PerAdminWins precedence; Manager "Contacts & email flow" area incl. person-left sweep staging replace-with-successor) + Sec 18 self-service delegation layers (delegation units = templates x group tags x AzScope prefix x quotas x inactivity-disable; intake-based, engine stays sole writer; preferred web tier = Azure App Service w/ Private Endpoint, zero public exposure; engine signInActivity inactivity sweep) (e6559da1)
 
 ---
 
@@ -42,6 +42,15 @@ Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monor
 > **Curated changelog.** The publish workflow auto-prepends recent monorepo commits as a raw activity log; this file is the human-friendly narrative on top.
 
 ---
+
+## v2.4.202 -- prod Azure SQL (private endpoint, MI) IaC + non-destructive CSV->SQL migration
+
+The prod data-store design + the migration to it (you provision in your sub; the migration is proven against SQL Express, **7/7**, and the Bicep compiles clean):
+
+- **`infra/azure-sql/main.bicep`** -- Azure SQL **public access DISABLED**, **AAD-only auth** (no SQL logins), TLS 1.2, **Private Endpoint** + private DNS zone (`privatelink.database.windows.net`) + VNet link + zone group. The Manager/engine authenticate via **Managed Identity** (no secret anywhere). `grant-mi.sql` grants the MI a least-privilege contained DB user; `main.parameters.sample.json` + `README.md` runbook (deploy -> grant MI -> passwordless connect -> migrate). Live `main.parameters.json` gitignored.
+- **`setup/Migrate-PimToSql.ps1`** -- NON-DESTRUCTIVE migration of an instance's `*.custom.csv` config into the SQL store (`pim.Rows`) + seeds `pim.Settings` from the naming-convention config. CSV files are read, never modified; reversible (flip `StorageBackend` back). Idempotent (full-set replace). Same code targets Azure SQL (MI) or local Express.
+
+Once your Azure SQL is provisioned, point the Manager at it (passwordless MI) and run the migration, then it boots in SQL mode (settings authoritative in `pim.Settings`). VERSION -> 2.4.202.
 
 ## v2.4.201 -- Approver Matrix: layered by scope + persona support-functions + escalation steps
 
