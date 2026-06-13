@@ -30,28 +30,26 @@ $global:PIM_UseGraphSdk = $false   # REST-first; no Graph/Az modules
 . "$shared\PIM-ChangeQueue.ps1"       # Get-PimQueueApplyPlan (queue-apply handler)
 . "$shared\PIM-Approvals.ps1"         # escalation logic
 . "$shared\PIM-Lifecycle.ps1"         # reminders / expirations
+. "$shared\PIM-EngineCore.ps1"        # NEW REST+SQL engine (diff + providers)
+. "$shared\PIM-EngineProviders.ps1"
 . "$shared\PIM-Scheduler.ps1"
 
 Initialize-PimDefaultJobHandlers
+Register-PimDefaultEngineProviders     # register the REST scope providers (Admins, ...)
 
-# Optional: wire the real per-scope engine apply when an entrypoint is configured.
-# (Kept decoupled from the legacy engine path so retiring it doesn't break the runner.)
-$engine = $global:PIM_EngineEntryPath
-if ($engine -and (Test-Path $engine)) {
-    $h = {
-        param($job,$now,$whatIf)
-        $scope = if ($job.PSObject.Properties['scope']) { "$($job.scope)" } else { 'All' }
-        $mode  = if ("$($job.type)" -eq 'engine-full') { 'Full' } else { 'Delta' }
-        if ($whatIf) { return [pscustomobject]@{ ran=$true; detail="WhatIf: engine -Scope $scope -Mode $mode" } }
-        & $global:PIM_EngineEntryPath -Scope $scope -Mode $mode
-        [pscustomobject]@{ ran=$true; detail="engine -Scope $scope -Mode $mode" }
-    }
-    Register-PimJobHandler -Type 'engine-delta' -Handler $h
-    Register-PimJobHandler -Type 'engine-full'  -Handler $h
-    Write-Host "[scheduler] real engine handler wired: $engine" -ForegroundColor Cyan
-} else {
-    Write-Host "[scheduler] engine apply runs in INTENT mode (set \$global:PIM_EngineEntryPath to execute)" -ForegroundColor DarkYellow
+# Wire the per-scope engine-delta / engine-full jobs to the NEW REST engine.
+# WhatIf (intent/recalc) -> plan only; otherwise the provider applies via REST.
+$engineHandler = {
+    param($job,$now,$whatIf)
+    $scope = if ($job.PSObject.Properties['scope'] -and "$($job.scope)".Trim()) { "$($job.scope)" } else { 'All' }
+    $mode  = if ("$($job.type)" -eq 'engine-full') { 'Full' } else { 'Delta' }
+    $res = Invoke-PimEngine -Scope $scope -Mode $mode -WhatIf:$whatIf
+    $sum = @($res) | ForEach-Object { "$($_.scope):c$($_.create)/u$($_.update)/r$($_.remove)" }
+    [pscustomobject]@{ ran=$true; detail=("engine $mode [$scope] " + ($sum -join ' ')); whatIf=[bool]$whatIf }
 }
+Register-PimJobHandler -Type 'engine-delta' -Handler $engineHandler
+Register-PimJobHandler -Type 'engine-full'  -Handler $engineHandler
+Write-Host "[scheduler] REST engine wired (scopes: $((Get-PimEngineScopes) -join ', '))" -ForegroundColor Cyan
 
 $iv = if ($IntervalSeconds -gt 0) { $IntervalSeconds } elseif ($env:PIM_SCHED_INTERVAL) { [int]$env:PIM_SCHED_INTERVAL } else { 300 }
 

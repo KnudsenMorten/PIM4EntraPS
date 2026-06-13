@@ -113,6 +113,11 @@ If ($global:PIM_UseGraphSdk) {
 # stages + reminder resends; feeds the change queue + templated mail.
 . (Join-Path $PSScriptRoot 'PIM-Lifecycle.ps1')
 
+# NEW REST+SQL engine -- pure diff core + provider model (replaces the legacy
+# PIM-Baseline-Management-CSV chain). Providers: desired from SQL, live + apply via REST.
+. (Join-Path $PSScriptRoot 'PIM-EngineCore.ps1')
+. (Join-Path $PSScriptRoot 'PIM-EngineProviders.ps1')
+
 # Scheduler / job runner -- phase-split delta, queue-apply (commit), reminders,
 # escalations, discovery; on-demand triggers (Request-PimCommit) + change watermark.
 . (Join-Path $PSScriptRoot 'PIM-Scheduler.ps1')

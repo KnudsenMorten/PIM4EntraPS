@@ -1,9 +1,11 @@
 # Release notes for PIM4EntraPS
 
-## v2.4.208
+## v2.4.209
 
 Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monorepo:
 
+- feat(pim): NEW REST+SQL engine core (provider model) — replaces legacy CSV engine (5541d06c)
+- chore(pim): add /legacy retirement policy — incremental moves gated on REST write-path + sync coordination (CSV engine still wired, nothing safe to move yet) (13540894)
 - feat(pim): scheduler/job runner — phase-split delta, discovery x3, commit-only triggers + watermark (VM + container) (53cb693e)
 - docs(pim): execution model — in-container scheduler (not Functions/webhooks/Logic Apps); job table; build-status note (job logic exists, runner loop is the remaining piece) (49b1eb81)
 - docs(pim): correct MSP model — 2 SQL DBs (MSP template DB + per-customer LOCAL DB), pull-not-push MSP->local; customer data never leaves tenant; rings drive which template version is pulled (81e9848c)
@@ -32,8 +34,6 @@ Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monor
 - release: PIM4EntraPS v2.4.187 -- admin-interface epic phase 1 (portal-admin scoping + wizard derivation engines) (164d002c)
 - release: PIM4EntraPS v2.4.186 -- nested-membership connector adapter + Dataverse connector (8b49c3e8)
 - release: PIM4EntraPS v2.4.185 -- locked-schema + data conformance preflight (25f4c9b5)
-- release: PIM4EntraPS v2.4.184 -- native template versioning + conformance (engine + Manager API + GUI tab) (fc1b3a12)
-- release: PIM4EntraPS v2.4.183 -- entra-approle + azure-rbac connectors + connector status map (22b8a121)
 
 ---
 
@@ -50,6 +50,16 @@ Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monor
 - **`Get-PimMatchingApproverRules` is null-safe**: a null/blank entry in the approver matrix (e.g. when none is configured) no longer crashes `Test-PimCanApprove`. Offline suite back to **77/77**.
 
 VERSION -> 2.4.207.
+
+## v2.4.209 -- NEW REST+SQL engine core (provider model) replacing the legacy CSV engine
+
+First slice of the new engine that supersedes the legacy `PIM-Baseline-Management-CSV` chain. `engine/_shared/PIM-EngineCore.ps1`: a **pure, tested diff** (`Compare-PimDesiredVsLive` → create/update/remove/nochange, case-insensitive keys, null-safe) + a **provider model** (each scope reads DESIRED from SQL, LIVE + apply via REST) + the orchestrator `Invoke-PimEngineScope` / `Invoke-PimEngine` (Delta = create/update; Full = also prune; WhatIf = change-queue PLAN, no writes). `engine/_shared/PIM-EngineProviders.ps1`: the **Admins** scope implemented fully over Graph REST (ensure admin accounts exist + enabled; Full disables — never deletes — orphans), plus the registrar for the remaining scopes (same contract, added incrementally).
+
+- **Wired into the scheduler** — `Start-PimScheduler.ps1` registers the providers and routes the phase-split `engine-delta` / `engine-full` jobs to `Invoke-PimEngine -Scope <scope> -Mode <Delta|Full>`; WhatIf for intent/recalc, apply on commit. No dependency on the legacy engine.
+- **Module-free** — provider live/apply go through `PIM-Rest`; importing `PIM-Functions.psm1` still loads **zero** Graph/Az modules.
+- Tests: `tests/Test-PimEngineCore.ps1` 15/15; scheduler 27/27; full suite 77/77.
+
+Remaining scopes (EntraRoles, AzRes, GroupsAssignment, GroupsPolicies, AdministrativeUnits, Workloads) plug into the same contract and are added next; until registered, those scopes return "no provider" (handled gracefully). VERSION -> 2.4.209.
 
 ## v2.4.208 -- scheduler / job runner (in-container, VM-capable) + on-demand commit triggers
 
