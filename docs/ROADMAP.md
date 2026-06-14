@@ -1,209 +1,268 @@
-# PIM4EntraPS -- roadmap
+# PIM4EntraPS — Roadmap
 
-Backlog captured from real-customer feature requests. Each item is sized
-(**S** = days, **M** = a week, **L** = a couple of weeks, **XL** = a month+),
-tagged with dependencies, and grouped into a release theme. Sequencing
-recommendation at the bottom.
+> Planned & upcoming **features**, grouped by area. A high-level overview — for what is
+> already available see the product's feature catalog. Bug fixes are not listed here.
+>
+> **Auto-generated from the internal backlog at publish time — do not hand-edit.**
 
-Sizing is rough -- "how big does this feel before we start" -- and routinely
-wrong by 2x in either direction.
+## Hosting / Runtime
 
----
+- Host the Manager 24/7, internal-only, no public IP
+- ACA, not App Service
+- az containerapp ... --yaml, not multi-token --command
+- Hub-spoke VNet; Manager co-located with SQL; portal separate
+- Entra GSA / Private Access integration
+- App Service MI token path
+- Cheapest viable tiers; region
+- Consider native .NET 8 / ACA for all roles
+- Local + emergency editions
 
-## ONE big architectural decision first: storage backend
+## Containers
 
-> Several features below collapse or change shape depending on this answer.
-> Decide before committing to the v2.2.x plan.
+- One parameterized engine image; config-driven worker matrix
+- No secrets/customer data in the image
+- Zero-downtime update
+- Internal flavour parity
 
-**Today:** 14 CSVs in `config/`, edited by hand or via PIM Manager. Single
-operator at a time on a given customer VM. Atomic per-file write via
-`.tmp` + `Move-Item -Force`. No locking. No history beyond git.
+## Setup / Deploy
 
-**Limits we'll hit:**
+- One setup-script family: container / VM / MSP / emergency-local
+- Install-PimEngineAppRegistration.ps1
+- Cert reuse + machine-store default
+- Deploy banners
+- Bootstrap: auto-extend .custom, rename legacy CSVs
+- Tenant catalog
 
-- **Multi-operator editing** -- two admins in the Manager UI at the same
-  time can stomp each other's pending changes on commit.
-- **Large customers** -- a tenant with 500 admins / 50 role groups / 5 000
-  permission groups produces a 6 MB Account CSV that Excel still opens
-  fine but the Manager's grid re-render slows.
-- **Audit & compliance** -- "who changed row X on date Y" requires
-  reading the git log; no per-cell history.
-- **MSP scale** -- 50 customer tenants \* 14 CSVs each = 700 files on one
-  MSP-central repo. Still tractable, but not great UX.
+## MSP
 
-**Options:**
+- Two DBs
+- MI + SQL stay tenant-local; image distributed via az acr import
+- Ring-based rollout
+- Signed baseline + revoke kill-switch; local decrypts without the key
+- Remove CK_LocalAdmins_NoHighPriv guardrail
+- Avoid GDAP
+- Support multiple MSP/sync models
+- Side-by-side editions
+- Shared platform/data model with TenantManager
 
-| Option | When it pays off | Cost to migrate |
-|---|---|---|
-| **A: Stay on CSV** | Single-operator orgs, <50 admins, MSPs OK with file-per-tenant | none |
-| **B: Azure Blob + JSON** | Want central state but not relational queries; like the "everything is a file" model. | M -- swap I/O layer, keep schemas |
-| **C: Azure SQL / Postgres** | Multi-operator concurrency, fine-grained audit, joins ("which admins have any direct path to T0 assets"), large customers | L -- schema design, migration tool, all engines rewired to read from SQL |
-| **D: Hybrid** | CSV ships from repo as the baseline; customers opt into SQL via a flag. Both code paths supported. | XL -- everything in C plus parity testing |
+## SQL / Data
 
-**Recommendation: option A for v2.2.x, revisit at v3.0.** Reasons: most
-customers are <30 admins; concurrency can be solved in the Manager with
-optimistic locking ("commit failed -- someone else changed since you
-loaded"); audit is git + the existing `output/pim-manager-mutations.log`;
-the v2.2.x feature list doesn't require relational queries. Plan the SQL
-migration as a separate, paid engagement when a customer hits the wall.
+- CSV→SQL migration + schema upgrade
+- Idempotent schema preflight (MSP + local)
+- DB cutover ceremony gated in the Manager
+- Support Azure + on-prem/hybrid SQL
+- Deploy-validation test scope
+- On-demand recalc on SQL change
 
-Items in this roadmap marked **(needs SQL)** are deferred until the
-backend decision changes.
+## Engine — Core
 
----
+- Re-apply policy on template change
+- Offboarding cleanup
+- PIM v1 direct assignments
+- Hybrid AD provisioning, explicit credential
+- gMSA/sMSA legacy accounts
+- No double Exchange connect
+- Conformance versioning (Pro)
+- sync-automateit job
+- Always run the latest on-disk version
+- Cloud launcher resolves Tenant.KeyVaultName
+- Template state-hash gating (skip-unchanged) in the REST engine
+- PIM-for-Groups policy: Expiration + Notification rules (v1→v2 parity) — LIVE-VERIFY
+- Azure-RBAC (ARM) PIM activation policy — approval/MFA on the Azure scope
+- Directory-role (Entra role) PIM policies — design decision
+- Empty-description guard (Graph 1–1024 char rule)
+- Offboarding Lifecycle=Retire + OffboardDate/DeleteAfterDays + drift-cleanup modes
 
-## Theme 1 -- Manager UX polish (high impact, mostly S/M)
+## Engine — Providers / Connectors
 
-| # | Feature | Size | Notes |
-|---|---|---|---|
-| 1 | Optional metadata columns on `Account-Definitions-Admins` (Company, Notes, Sponsor, ManagerEmail, StartDate) | S | Additive CSV change; Manager wizard exposes them as collapsible "More fields..." section -- **[SHIPPED v2.2.0]** |
-| 2 | Show actual Entra ID permissions behind a role (drill-down from graph node) | M | Hover/click on permission-group node -> side panel lists every concrete permission (rolePermissions[].allowedResourceActions); pulled live from `cache/entra-roles.json` -- **[SHIPPED v2.2.0]** |
-| 3 | Clone a role group / permission group / definition (multi-select target CSVs) | S | Extends today's Clone wizard to bulk + cross-CSV |
-| 4 | Multi-select assign permissions in bulk: pick 10 Entra roles + 10 Azure scopes -> attach to a role/org/task | M | New wizard "Bulk attach"; generates row sets in `Roles-Groups` / `Roles-AUs` / `Azure-Resources` |
-| 5 | Clone Azure subscription RBAC delegations to a different role at same scope (or to N new roles) | S | Extends Clone wizard with "and substitute the role" option |
-| 6 | Disable/enable admins via Manager multi-select on the Grid tab | S | Reuses `AccountStatus` column shipped in v2.1.x -- **[SHIPPED v2.2.0]** |
-| 7 | Multi-select delete of existing PIM assignments/delegations | S | Manager Grid tab; rows go to `pendingChanges.deletes` -- **[SHIPPED v2.2.0]** |
-| 8 | Add new Administrative Units via Manager wizard | S | New wizard variant; writes to `PIM-Definitions-AU` + optional `PIM-Assignments-Roles-AUs` rows |
-| 9 | Import admins via CSV upload (FirstName, LastName, Initials) + link to template | M | File-upload to Manager; rows mapped to selected admin template (see #11) |
-| 10 | Admin templates (internal, external/consultant, contractor) | M | New `config/admin-templates.custom.ps1` with template definitions; Manager wizard offers them as a dropdown; rules for TAP / lifetime / role-group defaults per template |
+- Per-workload connectors (remaining)
+- Wire the workload applier into the pull cycle
+- Nested-membership adapter
+- GroupsCreateModifyPolicy / Workloads-as-provider
+- Auto-load roles when creating a service
+- Generic entra-approle connector
+- Connector build order by demand
+- Each connector enables its RBAC prerequisite
 
-## Theme 2 -- TAP + activation flow
+## Discovery
 
-| # | Feature | Size | Notes |
-|---|---|---|---|
-| 11 | Send TAP password via email / Teams / Slack | M | New PIM-Functions helper `Send-PimAdminTap`; pluggable channels via `$global:PIM_NotificationChannels` config -- **[SHIPPED v2.2.0]** |
-| 12 | Schedule TAP start time (e.g. "in 2 days at 8am") | S | Extends `New-PimTemporaryAccessPass` to honour the existing `TAPStartDate` CSV column (currently passed-through but engine doesn't compute future times). Add `TAPStartTime` column -- **[SHIPPED v2.2.0]** |
-| 13 | Validate minimum auth methods set per admin (MFA Authenticator, passkey, etc.) | M | New validator rule `PIM-AUTH-001` + `PIM-AUTH-002`; uses `userAuthenticationMethod.ReadWrite.All` perm already on engine SPN |
+- Three jobs: Entra / Azure / Power BI (VM + container)
+- Auto-detect new subs/MGs (never auto-map)
+- Reconcile via change-queue, no orphans
+- Auto-detect Power BI workspaces
+- Auto-detect Power Platform environments/workspaces
+- Enumerate services for new built-in roles
+- Delta detection design
 
-## Theme 3 -- Per-row policy + approval
+## Auth / Identity
 
-| # | Feature | Size | Notes |
-|---|---|---|---|
-| 14 | Per-assignment approval requirement (extra CSV columns: `RequiresApproval`, `Approvers`) | L | Per-row override of the global `policies.custom.ps1`. Approvers as semicolon list; parallel approval (first-to-approve wins). Engine writes corresponding Entra PIM policy rule |
-| 15 | Per-assignment notification overrides (`NotifyOnActivation`, `NotificationRecipients`) | S | Similar shape; engine pushes to PIM policy notification rules |
+- Internal vs community SPN
+- Missing-role hint, not hard-fail
+- Weigh SQL vs KV for secret storage
+- MFA-gated Manager login
+- Sign-in prompts for account
+- Inspect AD identity on failure
 
-Notification + approval per-ROW (not per-role) is the right design: the
-same Entra role assigned for different purposes can have different rules.
+## Delegation model
 
-## Theme 4 -- Discovery + auto-detect (Azure + M365)
+- Indirect group dimensions
+- Delegated/portal-admin facets
+- Local self-delegation
+- Layered approvers/escalation
+- PAW device support (opt-in)
+- Reachability-by-classification
 
-| # | Feature | Size | Notes |
-|---|---|---|---|
-| 16 | Auto-detect new Azure subscriptions + management groups | M | New engine `PIM-Discovery-AzureScopes`. Runs Search-AzGraph; appends to `PIM-Definitions-Resources.custom.csv` + `PIM-Assignments-Azure-Resources.custom.csv` -- but **does not auto-assign** any admins (only the row scaffolding). Operator decides who. |
-| 17 | Auto-detect new Power Platform / Power BI workspaces -> create PIM groups | M | Same pattern as #16 but for Power Platform admin API |
-| 18 | Enumerate built-in roles from Intune / Defender XDR / Entra ID; suggest definitions for newly-introduced roles | M | New engine `PIM-Discovery-BuiltInRoles`; diff against `PIM-Definitions-Tasks.custom.csv` |
-| 19 | Detect orphaned Azure scopes (sub/RG/resource no longer exists) | S | New validator rule `PIM-ORPHAN-AZ-001` + Manager Fix-all bucket |
-| 20 | Detect PIM groups never activated in N days -> suggest removal from Entra + CSVs | M | Reads `signInActivity` + PIM activation audit logs; surfaces in Manager Validate tab |
+## GUI / Manager
 
-## Theme 5 -- Webhook / integration
+- Activator branding
+- ~25-tenant config dropdown
+- Grid + graph + side panel
+- Target-first reversed wizard
+- Auto-load roles on new-service
+- Group TAP settings; move admin ring; metadata
+- Portal-admins table (drop separate portal)
+- MFA login; SQL cutover; conformance endpoints
+- Dev "switch admin" personas (auth off)
+- Finalize the half-built Manager freely
 
-| # | Feature | Size | Notes |
-|---|---|---|---|
-| 21 | Inbound webhook endpoint (from ServiceNow etc.) -> create new admin / delegation | L | New `engine/PIM-Webhook-Listener` service that binds an Azure Function / Logic App; mints a row + queues it as a pending change for human approval before engine apply |
-| 22 | Outbound notifications: assignment created / removed / activated | M | New PIM-Functions helper `Send-PimAuditNotification`; channels: SMTP, Teams, Slack, generic webhook |
-| 23 | Daily summary email of PIM changes (new admins, new delegations, removals) | M | Scheduled engine `PIM-Daily-Summary`; reads `output/pim-manager-mutations.log` + audit log diffs |
+## Notifications / Email
 
-## Theme 6 -- Reporting + visibility
+- Daily summary email
+- Tier-0 emails + timed escalation/reminders
+- ServiceNow→Manager intake (inbound only, secure)
+- Tier 0/1 report
+- Welcome/TAP mail to a real mailbox
 
-| # | Feature | Size | Notes |
-|---|---|---|---|
-| 24 | Tier-impact report: every user with any path to T0/T1 (including indirect via nested groups) | M | New engine + Manager view; reuses the graph reach analysis |
-| 25 | Per-role drill-down: see actual permissions delegated | S | Same as #2 but as a report export, not just a graph hover -- **[SHIPPED v2.2.0]** (Manager Graph drill-down; CSV export still pending) |
-| 26 | Log every PIM change to Log Analytics + audit log file | M | New PIM-Functions helper `Send-PimAuditToLogAnalytics`; uses your `AzLogDcrIngestPS` module |
-| 27 | Replace-mode admin move (remove old assignments, add new) | M | Manager wizard; transactional (all-or-nothing within one Commit) |
+## Lifecycle / Governance / Approvals
 
-## Theme 7 -- Lifecycle + governance
+- Scheduled admin creation
+- Scheduled TAP
+- Symbolic time variables
+- Reusable admin templates
+- Per-role policy templates
+- Per-role approval differences
+- Access reviews with feed-back loop
+- Lifecycle calendar
+- Resource approvers/owners (Phase 8)
+- Role sponsor/owner for validation/audit/renewal
+- Account status lifecycle + central kill
+- Approval delivery when Manager is down
+- Auto-approve own commits; require approval for others
+- Full audit logging
+- Emergency break-glass override
+- Access-review tombstone suppression layer
+- Emergency override passphrase via Key Vault
+- Unified append-only jsonl audit schema
 
-| # | Feature | Size | Notes |
-|---|---|---|---|
-| 28 | Role owner / sponsor column on `PIM-Definitions-Roles` for audit + renewal workflow | S | Additive CSV column; engine reads but doesn't enforce yet -- **[SHIPPED v2.2.0]** (data-flow only; v2.3.x will wire enforcement) |
-| 29 | Notify members when their group/role assignment changes | S | Hooks into #22 |
-| 30 | Maintenance job: orphaned scope cleanup (auto-delete assignments + groups for missing Azure scopes) | M | Risky -- gate behind explicit `-ApplyOrphanCleanup` flag + `WhatIfMode` confirmation diff |
-| 31 | Setup Entra Access Package + delegate to PIM group | L | Yes it works; uses `EntitlementManagement.ReadWrite.All` Graph perm. New CSV: `PIM-Assignments-AccessPackages.locked.csv` mapping access packages to PIM groups |
-| 32 | Setup Entra Access Review per PIM group/role (extra column `AccessReviewSchedule`) | M | Quarterly review with owners as reviewers; uses `AccessReview.ReadWrite.All` |
+## Licensing
 
-## Theme 8 -- Multi-operator / concurrency (needs SQL)
+- Core (free) + Pro (paid), one engine
+- Offline signed license
 
-| # | Feature | Size | Notes |
-|---|---|---|---|
-| 33 | Three operators editing in the Manager simultaneously without stomp | **(needs SQL)** L | With CSV: optimistic-lock on commit (server returns 409 if file mtime changed since load; operator must reload + redo). With SQL: per-row locking + change feed |
-| 34 | Per-cell history / who-changed-what | **(needs SQL)** L | Today: git log of CSV; works but coarse. SQL would give per-cell |
+## PIM Activator
 
----
+- MV3 + PKCE (no MSAL)
+- Onboarding wizard
+- One-click bulk activate (all 3 types + nested)
+- Keep transitiveRoleAssignments
+- My Access + favorites + countdown
+- Resolve AU GUIDs to names
+- Managed deployment
+- Deploy-PimActivatorBackend.ps1
+- Per-tenant registry catalog
+- Update script + gh-pages auto-update
+- Repack only from mgmt1 master key
+- Verbose update output
+- Remove legacy config mechanisms
 
-## Sequencing recommendation
+## Naming
 
-**v2.2.0 (next sprint)** -- low-risk wins that compound:
-- #1  Optional admin metadata columns (1 day)
-- #6  Disable/enable via multi-select (1 day)
-- #7  Multi-delete (1 day)
-- #11 Send TAP via email (2-3 days)
-- #12 Scheduled TAP start time (1 day)
-- #25 Per-role drill-down report (1 day)
-- #28 Role sponsor column (1 day)
+- Day-to-day admin = Admin-CCC-ID
+- Patterns
+- Drop "CSV"; single PIM-Engine -Scope
+- No version/stage numbers in names; no "Runner"
+- Routing from UserName markers
 
-Ship in a single release. ~1.5 weeks. Pure additive, no engine API
-changes, no architectural decisions needed.
+## Launchers / Structure
 
-**v2.2.1 -- Manager-side bulk authoring:**
-- #3  Clone any group (extended)
-- #4  Multi-select bulk attach
-- #5  Clone Azure delegations to different roles
-- #8  AU wizard
-- #10 Admin templates
-- #9  Admin CSV import
+- SI-mirror layout
+- Three flavours + banner + transcript
+- Shared module + legacy shim
+- gitignore exception for locked configs
+- Publish strips BOTH internal flavours
+- Dual git tags per release
+- Migrate 3 solutions off v1
 
-~2 weeks.
+## REST migration
 
-**v2.2.2 -- Discovery loop:**
-- #16 Auto-detect Azure subscriptions
-- #17 Auto-detect Power Platform workspaces
-- #18 Enumerate Microsoft built-in roles
-- #19 Orphaned Azure scope detection
+- Write/activator/setup/EXO path
+- Pre-mint workload tokens
 
-~2 weeks.
+## Testing / Validation
 
-**v2.3.0 -- Per-row policy + notifications:**
-- #14 Per-assignment approval rules
-- #15 Per-assignment notification overrides
-- #22 Outbound notifications (channels: SMTP/Teams)
-- #23 Daily summary email
-- #26 Log to Log Analytics
+- Two real test tenants
+- MSP + local simulation w/ deployed SQL
+- Live workload-owner simulation
+- Pester validates Azure roles exist for the sample resources
 
-~3 weeks.
+## Docs
 
-**v2.3.1 -- Governance:**
-- #28 Sponsor/owner
-- #31 Access Package integration
-- #32 Access Review integration
-- #27 Replace-mode admin move
-- #2  Permission drill-down (deep)
-- #24 Tier-impact report
+- README + curated RELEASENOTES + VERSION per release
+- Version banners
+- Session handoff before model switches
+- Document container runtime; remove orphaned code/dead scripts
 
-~3 weeks.
+## Manager authoring / reporting / governance backlog
 
-**v2.4.0 -- Webhook + auth-method validation:**
-- #21 Inbound webhook listener
-- #13 Auth method validator
-- #29 Notify members on assignment change
+- Bulk attach wizard
+- Clone Azure RBAC delegation to a different role at the same scope
+- Bulk / cross-entity clone
+- AU wizard
+- Bulk admin import
+- Admin metadata fields
+- Role-permission drill-down (live)
+- Auth-method validator
+- Per-ROW approval + notification overrides
+- Stale-group detection
+- Outbound notification channels
+- Audit to Log Analytics
+- Replace-mode admin move
+- Tier-impact report
+- Gated orphan-scope cleanup job
+- Entra Access Package integration
+- Multi-operator concurrency
+- Per-cell change history
 
-~2 weeks.
+## Date / TAP / scheduling
 
-**v3.0.0 -- Storage backend re-platform (if needed):**
-- #33 + #34: SQL move
-- Plus migration tool from CSV -> SQL
+- Date-expression grammar + live GUI preview
+- TAPLifetimeHours column
+- TAP deferral lead-window
 
-~4-6 weeks. Skip unless customers hit the multi-operator wall.
+## Mail routing & people directory — no per-admin manager maintenance
 
----
+- Department-linked recipients instead of per-person links
+- Central mail-routing override
+- "Person left" reference sweep
+- "Contacts & email flow" Governance sub-tab
 
-## Items intentionally NOT on the roadmap
+## Self-service delegation layers
 
-- **AI-assisted naming / role suggestions** -- adds vendor dependency,
-  high-noise low-signal in this domain.
-- **Mobile app** -- desktop browser via Manager + Activator extension
-  covers it; mobile would duplicate logic.
-- **Real-time graph collaboration cursors** -- nice but solving a
-  problem nobody's reported.
-- **Built-in chat / commenting** -- ServiceNow / Slack already do this;
-  webhook integration (#21) bridges to them.
+- Delegation units as a data layer
+- Inactivity auto-disable sweep
+- Self-service front end = the §12 intake, not a new trust path
+
+## Two-plane network topology
+
+- Admin plane vs self-service plane as separate networks
+
+## MSP — vary the edges, never the core
+
+- Pluggable auth profiles behind one contract
+- Pluggable storage profiles behind one contract
+- Per-tenant cert lifecycle automation (first-class, not polish)
+- Optional Enforced baseline entries
+- Two separate kinds of approval kept distinct
+- Notification ownership follows the same split
+- One conformance test suite per profile; no speculative profiles
+- Shared substrate with TenantManager via Product

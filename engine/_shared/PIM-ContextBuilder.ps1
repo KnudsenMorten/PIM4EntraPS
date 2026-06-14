@@ -83,9 +83,25 @@ function Build-PimContext {
             $rest = Join-Path (Split-Path -Parent $PSCommandPath) 'PIM-Rest.ps1'
             if (Test-Path $rest) { . $rest } else { throw 'Build-PimContext: no Graph SDK and PIM-Rest.ps1 not found.' }
         }
-        Write-Host '[context] Fetching Entra users + groups + AUs + roles from Graph (REST, no modules)...'
-        $Global:Users_All_ID  = @(Invoke-PimGraph -Path "/users?`$select=id,userPrincipalName,displayName,mail,accountEnabled" -All | ConvertTo-PimSdkShape)
-        $Global:Groups_All_ID = @(Invoke-PimGraph -Path "/groups?`$select=id,displayName,groupTypes,securityEnabled,mailNickname,description" -All | ConvertTo-PimSdkShape)
+        # LEAN context (default for the engine): a real tenant can have 150k+ groups and
+        # 500k+ users -- bulk-listing them to manage a few hundred PIM groups + admins is
+        # unworkable. So: USERS are never bulk-listed (resolved on-demand + cached by
+        # Resolve-PimPrincipalId); GROUPS are fetched with a SERVER-SIDE $filter on the PIM
+        # name prefix (not the whole directory); AUs + role definitions are bounded so they
+        # stay bulk. Set $global:PIM_LeanContext=$false to force the old full-list behaviour.
+        $lean = ($null -eq $global:PIM_LeanContext) -or [bool]$global:PIM_LeanContext
+        $prefix = if ("$($global:PIM_GroupNamePrefix)".Trim()) { "$($global:PIM_GroupNamePrefix)".Trim() } else { 'PIM' }
+        if ($lean) {
+            Write-Host "[context] LEAN fetch (REST): users on-demand; groups startswith '$prefix'; AUs + roles bulk..."
+            $Global:Users_All_ID  = @()   # resolved on-demand (no 500k bulk list)
+            $hdr = @{ ConsistencyLevel = 'eventual' }
+            $Global:Groups_All_ID = @(Invoke-PimGraph -Headers $hdr -Path "/groups?`$filter=startswith(displayName,'$prefix')&`$select=id,displayName,groupTypes,securityEnabled,mailNickname,description&`$count=true&`$top=999" -All | ConvertTo-PimSdkShape)
+        }
+        else {
+            Write-Host '[context] FULL fetch (REST): users + groups + AUs + roles...'
+            $Global:Users_All_ID  = @(Invoke-PimGraph -Path "/users?`$select=id,userPrincipalName,displayName,mail,accountEnabled" -All | ConvertTo-PimSdkShape)
+            $Global:Groups_All_ID = @(Invoke-PimGraph -Path "/groups?`$select=id,displayName,groupTypes,securityEnabled,mailNickname,description" -All | ConvertTo-PimSdkShape)
+        }
         $Global:AU_All_ID     = @(Invoke-PimGraph -Path "/directory/administrativeUnits?`$select=id,displayName,visibility" -All | ConvertTo-PimSdkShape)
         $Global:Roles_All_ID  = @(Invoke-PimGraph -Path "/roleManagement/directory/roleDefinitions?`$select=id,displayName,isBuiltIn,templateId" -All | ConvertTo-PimSdkShape)
     }
@@ -120,6 +136,47 @@ function Build-PimContext {
     }
 
     $Global:PimContextBuiltAt = Get-Date
+}
+
+function Merge-PimCacheItem {
+    # PURE (no globals -> unit-testable): given the current cache array + a raw REST object,
+    # return the NEW array with the object shaped (PascalCase aliases added so resolvers match
+    # on .Id/.DisplayName) and appended, de-duped by id. Inline shaping (no ConvertTo-PimSdkShape
+    # dependency, which can resolve to a different module's copy when PIM-Functions is loaded).
+    param([object[]]$Current = @(), [Parameter(Mandatory)][object]$Object)
+    $cur = @($Current)
+    if (-not $Object) { return $cur }
+    $o = [ordered]@{}
+    foreach ($p in $Object.PSObject.Properties) {
+        $o[$p.Name] = $p.Value
+        if ($p.Name.Length -ge 1) { $pas = $p.Name.Substring(0, 1).ToUpperInvariant() + $p.Name.Substring(1); if (-not $o.Contains($pas)) { $o[$pas] = $p.Value } }
+    }
+    $shaped = [pscustomobject]$o
+    $id = "$($shaped.Id)"; if (-not $id) { $id = "$($shaped.id)" }
+    if ($id -and (@($cur) | Where-Object { "$($_.Id)" -eq $id -or "$($_.id)" -eq $id })) { return $cur }   # already cached
+    $list = New-Object System.Collections.Generic.List[object]
+    foreach ($c in $cur) { $list.Add($c) }
+    $list.Add($shaped)
+    return $list.ToArray()   # NB: no leading-comma return -- a comma-wrapped value gets double-wrapped (nested array) when captured into Set-Variable -Value (...)
+}
+
+function Add-PimContextObject {
+    # INCREMENTAL refresh: append a just-created object to the in-memory cache instead of
+    # re-fetching the whole directory. Thin global wrapper around the pure Merge-PimCacheItem.
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][ValidateSet('Group','User','AU','Role')][string]$Kind,
+        [Parameter(Mandatory)][object]$Object
+    )
+    if (-not $Object) { return }
+    $var = @{ Group = 'Groups_All_ID'; User = 'Users_All_ID'; AU = 'AU_All_ID'; Role = 'Roles_All_ID' }[$Kind]
+    # FLATTEN on read: Get-Variable -ValueOnly wrapped in @() can nest the stored array, and a
+    # prior run may already have nested it -- this loop self-heals to a flat object list.
+    $raw = Get-Variable -Scope Global -Name $var -ValueOnly -ErrorAction SilentlyContinue
+    $flat = New-Object System.Collections.Generic.List[object]
+    foreach ($c in @($raw)) { if ($c -is [System.Array]) { foreach ($x in $c) { $flat.Add($x) } } elseif ($null -ne $c) { $flat.Add($c) } }
+    $merged = Merge-PimCacheItem -Current $flat.ToArray() -Object $Object
+    Set-Variable -Scope Global -Name $var -Value ([object[]]$merged)   # cast => flat array, no @()-wrap nesting
 }
 
 function Get-PimList {

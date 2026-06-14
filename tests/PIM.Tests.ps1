@@ -634,3 +634,127 @@ Describe 'Onboarding modes + self-service consultant toggle' {
         (Resolve-PimSelfServiceToggle -Profile $null -AccountName 'anyone' -Action enable -IsSuperAdmin).allowed | Should -BeTrue
     }
 }
+
+Describe 'NEW REST engine (PIM-EngineCore + providers)' {
+    BeforeAll {
+        $eng = Join-Path $script:Root 'engine\_shared'
+        . (Join-Path $eng 'PIM-Rest.ps1')
+        . (Join-Path $eng 'PIM-ContextBuilder.ps1')
+        . (Join-Path $eng 'PIM-EngineCore.ps1')
+        . (Join-Path $eng 'PIM-EngineProviders.ps1')
+        $global:PIM_TemplateDir = Join-Path $script:Root 'templates\policy'
+    }
+
+    It 'Compare-PimDesiredVsLive classifies create/update/nochange/remove (Full prune)' {
+        $desired = @([pscustomobject]@{ k='a'; v=1 }, [pscustomobject]@{ k='b'; v=2 }, [pscustomobject]@{ k='c'; v=3 })
+        $live    = @([pscustomobject]@{ k='b'; v=2 }, [pscustomobject]@{ k='c'; v=9 }, [pscustomobject]@{ k='d'; v=4 })
+        $diff = Compare-PimDesiredVsLive -Desired $desired -Live $live -KeyOf { param($r) $r.k } -Equal { param($d,$l) $d.v -eq $l.v } -Prune
+        $diff.create.Count   | Should -Be 1   # a (new)
+        $diff.update.Count   | Should -Be 1   # c (value differs)
+        $diff.nochange.Count | Should -Be 1   # b (equal)
+        $diff.remove.Count   | Should -Be 1   # d (live-only, pruned)
+    }
+
+    It 'Merge-PimCacheItem shapes (PascalCase) + de-dups, flat (cache-corruption regression guard)' {
+        $c1 = Merge-PimCacheItem -Current @()  -Object ([pscustomobject]@{ id='g1'; displayName='UNIT-GRP-A' })
+        $c2 = Merge-PimCacheItem -Current $c1  -Object ([pscustomobject]@{ id='g2'; displayName='UNIT-GRP-B' })
+        $c3 = Merge-PimCacheItem -Current $c2  -Object ([pscustomobject]@{ id='g1'; displayName='UNIT-GRP-A' })   # duplicate id
+        @($c3).Count | Should -Be 2                                                              # de-duped + flat (no nested array)
+        @(@($c3) | Where-Object { $_.DisplayName -eq 'UNIT-GRP-A' }).Count | Should -Be 1        # shaped: PascalCase alias present, distinct
+        @(@($c3) | Where-Object { $_.Id -eq 'g2' }).Count                  | Should -Be 1
+    }
+
+    It 'Resolve-PimGroupOwnerIds: pipe-joined Owners, then Department fallback' {
+        $Global:Users_All_ID = @(
+            [pscustomobject]@{ Id='u-mok'; UserPrincipalName='mok@x.com' },
+            [pscustomobject]@{ Id='u-dep'; UserPrincipalName='dep@x.com' })
+        $r1 = Resolve-PimGroupOwnerIds -Row ([pscustomobject]@{ GroupName='G'; Owners='mok@x.com|dep@x.com' }) -Ctx @{}
+        ($r1 -contains 'u-mok' -and $r1 -contains 'u-dep') | Should -BeTrue
+        # no direct owner -> inherit from the group's Department
+        $global:PIM_DesiredRows = @{ 'PIM-Definitions-Departments' = @([pscustomobject]@{ Department='IT'; Owners='dep@x.com' }) }
+        Set-Variable -Scope Script -Name '__pimDeptOwners' -Value $null -ErrorAction SilentlyContinue
+        $r2 = Resolve-PimGroupOwnerIds -Row ([pscustomobject]@{ GroupName='G'; Department='IT' }) -Ctx @{}
+        $r2 | Should -Contain 'u-dep'
+        $global:PIM_DesiredRows = $null
+    }
+
+    It 'Policy templates: approval-required extends default, carries Approval + MFA enablement; default carries none' {
+        $ar = Get-PimEnginePolicyTemplate -Id 'approval-required'
+        $ar | Should -Not -BeNullOrEmpty
+        $ar.rules.ContainsKey('Approval') | Should -BeTrue
+        @($ar.rules['Member_Enablement_EndUser_Assignment_enabledRules']) -contains 'MultiFactorAuthentication' | Should -BeTrue
+        (Get-PimEnginePolicyTemplate -Id 'default').rules.ContainsKey('Approval') | Should -BeFalse
+    }
+
+    # v1->v2 parity: v1 PIM_Policy_Check_Update wrote Expiration + Notification PIM
+    # rules; v2 originally wrote only Approval+Enablement. These assert the pure
+    # rule-body builders that close the gap (offline; the PATCH plumbing is shared).
+    It 'New-PimGroupExpirationRuleBody caps activation duration; blank -> null' {
+        $b = New-PimGroupExpirationRuleBody -MaxDuration 'PT8H'
+        $b.id                   | Should -Be 'Expiration_EndUser_Assignment'
+        $b.isExpirationRequired | Should -BeTrue
+        $b.maximumDuration      | Should -Be 'PT8H'
+        $b.'@odata.type'        | Should -Be '#microsoft.graph.unifiedRoleManagementPolicyExpirationRule'
+        (New-PimGroupExpirationRuleBody -MaxDuration '')  | Should -BeNullOrEmpty
+        (New-PimGroupExpirationRuleBody -MaxDuration '  ') | Should -BeNullOrEmpty
+    }
+
+    It 'New-PimGroupNotificationRuleBody shapes one rule per recipient-type x event' {
+        $b = New-PimGroupNotificationRuleBody -RecipientType 'Approver' -Level 'Assignment' -NotificationLevel 'Critical' -Recipients @('sec@x.com','')
+        $b.id                          | Should -Be 'Notification_Approver_EndUser_Assignment'
+        $b.recipientType               | Should -Be 'Approver'
+        $b.notificationLevel           | Should -Be 'Critical'
+        $b.target.level                | Should -Be 'Assignment'
+        @($b.notificationRecipients).Count | Should -Be 1                # blank entry dropped
+        $b.notificationRecipients[0]   | Should -Be 'sec@x.com'
+        $b.'@odata.type'               | Should -Be '#microsoft.graph.unifiedRoleManagementPolicyNotificationRule'
+        # default recipient-type x level shape
+        (New-PimGroupNotificationRuleBody -RecipientType 'Admin' -Level 'Eligibility').id | Should -Be 'Notification_Admin_EndUser_Eligibility'
+    }
+
+    It 'GroupsPolicies GetDesired carries Expiration/Notification when the template declares them' {
+        $realDir = Join-Path $script:Root 'templates\policy'
+        $tmpDir  = (Join-Path $env:TEMP ("pimtpl-"+[guid]::NewGuid().ToString('N')))
+        try {
+            New-Item -ItemType Directory -Force $tmpDir | Out-Null
+            Set-Content (Join-Path $tmpDir 'default.policytemplate.json') '{ "id":"default", "rules": {} }' -Encoding UTF8
+            @'
+{ "id":"capped", "extends":"default",
+  "rules": { "Approval": { "mode":"Parallel", "approversSource":"Owners" },
+             "Expiration": "PT4H",
+             "Notification": [ { "recipientType":"Admin", "level":"Assignment", "recipients":["ops@x.com"] } ] } }
+'@ | Set-Content (Join-Path $tmpDir 'capped.policytemplate.json') -Encoding UTF8
+            $global:PIM_TemplateDir = $tmpDir
+            $script:__pimTplCache = $null                                  # same scope the dot-sourced provider reads
+            $global:PIM_DesiredRows = @{ 'PIM-Definitions-Roles' = @([pscustomobject]@{ GroupName='PIM-X-L1-T1-CP-ID'; GroupTag='X'; PolicyTemplate='capped'; Owners='o@x.com' }) }
+            $prov = New-PimGroupsPoliciesProvider
+            $desired = & $prov.GetDesired @{}
+            $row = @($desired) | Where-Object { $_.GroupName -eq 'PIM-X-L1-T1-CP-ID' } | Select-Object -First 1
+            $row                | Should -Not -BeNullOrEmpty
+            "$($row.Expiration)" | Should -Be 'PT4H'
+            @($row.Notification).Count | Should -Be 1
+        } finally {
+            # restore the REAL template dir + rebuild the cache so later tests see shipped templates
+            $global:PIM_DesiredRows = $null
+            $global:PIM_TemplateDir = $realDir
+            $script:__pimTplCache = $null
+            Remove-Item $tmpDir -Recurse -Force -EA SilentlyContinue 2>$null
+        }
+    }
+
+    It 'Scopes run in dependency order + commit-queue-fed delta applies ONLY queued (entity,key)' {
+        Register-PimDefaultEngineProviders
+        $scopes = @(Get-PimEngineScopes)
+        $scopes.IndexOf('AdministrativeUnits') | Should -BeLessThan $scopes.IndexOf('Groups')
+        $scopes.IndexOf('Groups')              | Should -BeLessThan $scopes.IndexOf('GroupOwners')
+        Register-PimEngineProvider -Provider @{
+            scope='UnitStub'; entity='Unit-Entity'
+            GetDesired = { param($c) @([pscustomobject]@{ k='x' }, [pscustomobject]@{ k='y' }) }
+            GetLive    = { param($c) @() }
+            KeyOf = { param($r) $r.k }; Equal = { param($d,$l) $true }
+            ApplyCreate = { param($i,$c) $true }
+        }
+        $res = Invoke-PimEngineScope -Scope 'UnitStub' -Mode Delta -WhatIf -Changes @(@{ Entity='Unit-Entity'; Key='x' })
+        $res.create | Should -Be 1   # only the queued key 'x', not 'y'
+    }
+}

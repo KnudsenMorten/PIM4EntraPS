@@ -1,15 +1,23 @@
 # PIM4EntraPS
 
-> **Privileged Identity Management for Entra ID, as code.**
-> Declare your admin model in CSV; let PowerShell + Microsoft Graph apply it.
-> Nest groups properly. Activate in bulk. Visualize the whole thing.
+> **Privileged-access governance for Microsoft Entra, as code.**
+> Model your privileged delegation as nested groups, apply the right PIM
+> policies, and keep everything in sync from a single source of truth —
+> without ever standing up a public endpoint or leaving credentials lying
+> around.
 
-PIM4EntraPS turns a sprawling, click-driven PIM model into a small set of
-CSV files that an engine reads, diffs against the tenant, and applies.
-A typical 30-admin / 200-permission-group tenant becomes a 14-CSV repo
-that a single engine run keeps in sync, a browser-based **PIM Manager**
-GUI to edit + validate the model, and a single Edge extension to let
-the admins bulk-activate from.
+PIM4EntraPS turns a sprawling, click-driven PIM model into a declarative
+model that an engine reads, diffs against the tenant, and applies. A
+typical 30-admin / 200-permission-group tenant becomes a model that a
+single engine run keeps in sync, a browser-based **PIM Manager** GUI to
+edit + validate it, and a **PIM Activator** browser extension the admins
+bulk-activate from.
+
+The engine is **REST-only** (it talks directly to Microsoft's APIs — no
+heavy PowerShell modules to install or keep updated) and reads its model
+from **SQL** (configuration, rules and delegation profiles live in the
+database, not in scattered files). It runs on a plain VM or in a
+lightweight container, and never needs a public IP.
 
 ---
 
@@ -21,33 +29,36 @@ Managing PIM at any non-trivial scale through the Entra portal is painful:
 - "Add a new permission to the Cloud Engineer role" is **M clicks** (one
   per admin who has that role).
 - Drift is invisible: nobody knows what's *actually* assigned vs what was
-  documented in a spreadsheet last quarter.
+  documented last quarter.
 - Audit asks "who can do X" — answering means clicking through every PIM
   blade and Azure RBAC scope.
 
-**PIM4EntraPS replaces the clicks with a declarative model**:
+**PIM4EntraPS replaces the clicks with a declarative model.** The model
+lives in SQL as a small set of related tables — one source of truth instead
+of scattered spreadsheets:
 
-| File | Says |
+| Table | Says |
 |---|---|
-| `Account-Definitions-Admins.custom.csv` | Who the admin accounts are |
-| `PIM-Definitions-Roles.custom.csv` | What *role groups* exist (job functions) |
-| `PIM-Definitions-Tasks/Services/Resources/...custom.csv` | What *permission groups* exist (atomic capabilities) |
-| `PIM-Assignments-Admins.custom.csv` | Which admins are in which role groups (eligible/active) |
-| `PIM-Assignments-Groups.custom.csv` | Which permission groups nest inside which role groups |
-| `PIM-Assignments-Roles-Groups.custom.csv` | What Entra ID roles each permission group grants |
-| `PIM-Assignments-Roles-AUs.custom.csv` | What AU-scoped Entra roles each permission group grants |
-| `PIM-Assignments-Azure-Resources.custom.csv` | What Azure RBAC scopes each permission group grants |
+| Admin definitions | Who the admin accounts are |
+| Role-group definitions | What *role groups* exist (job functions) |
+| Permission-group definitions (tasks / services / resources / …) | What *permission groups* exist (atomic capabilities) |
+| Admin assignments | Which admins are in which role groups (eligible / active) |
+| Group assignments | Which permission groups nest inside which role groups |
+| Entra-role assignments | What Entra ID roles each permission group grants |
+| AU-role assignments | What AU-scoped Entra roles each permission group grants |
+| Azure-resource assignments | What Azure RBAC scopes each permission group grants |
 
-Run the engine → tenant matches the CSV. Edit a row → run again → delta
-applied. Git tracks the history.
+Run the engine → the tenant matches the model. Edit a row → run again → the
+delta is applied. History is tracked. (A CSV import path exists as a
+read-only migration source for getting an existing model into SQL.)
 
 ---
 
-## The core idea: 3-tier group nesting
+## The core idea: group nesting
 
 Don't assign Entra/Azure roles directly to admins. Assign them to
-**permission groups**. Nest permission groups into **role groups** (which
-represent a job function). Assign admins to role groups via PIM:
+**permission groups** (atomic capabilities). Nest permission groups into
+**role groups** (job functions). Assign admins to role groups via PIM:
 
 ```
 Admin                 Role Group              Permission Groups               Target
@@ -56,7 +67,7 @@ Admin                 Role Group              Permission Groups               Ta
 Admin-ABC-ID        --E->  PIM-ROLE-           --E--> PIM-Entra-ID-              --E--> "Application Administrator"
                            CloudEngineer              AppAdmin-L1-T0-CP-ID                   (Entra ID role)
                                                 --A--> PIM-AzDevOps-               --A--> "Build Administrator"
-                                                       TeamsContrib-L2-T1-...                 (AzDevOps role)
+                                                       TeamsContrib-L2-T1-...                 (Azure DevOps role)
                                                 --E--> PIM-AzRes-MP-               --E--> Owner on /subscriptions/{...}
                                                        Platform-L3-T1-...                     (Azure RBAC)
                                                 --E--> PIM-PowerBI-WS-             --E--> Workspace contributor
@@ -67,73 +78,156 @@ Admin-ABC-ID        --E->  PIM-ROLE-           --E--> PIM-Entra-ID-             
 
 **Why nest:**
 
-- Onboarding a new Cloud Engineer = **one** assignment row, not 20.
+- Onboarding a new Cloud Engineer = **one** assignment, not 20.
 - Refactor a permission group's targets → every role group using it gets
   the change for free.
-- Removing an admin = one row deletion; their entire access surface
-  collapses.
-- The graph (admin → role → permission → target) is the audit answer to
+- Removing an admin = one deletion; their entire access surface collapses.
+- The graph (admin → role → permission → target) *is* the audit answer to
   *"who can do X?"* — see the **[PIM Manager](#pim-manager-gui)**.
-- Entra ID enforces a hard cap of **500 role-assignable groups per
-  tenant**. Heavy reuse of permission groups + role groups across many
-  admins keeps you well under the ceiling.
+- Entra enforces a hard cap of **500 role-assignable groups per tenant**.
+  Heavy reuse of permission groups + role groups across many admins keeps
+  you well under the ceiling.
 
-See **[docs/DESIGN.md](docs/DESIGN.md)** for the full philosophy:
-direct vs indirect delegation, naming convention, tier model, lifecycle
-states, the as-code pattern, customer overrides.
+See **[docs/DESIGN.md](docs/DESIGN.md)** for the full philosophy: direct
+vs indirect delegation, naming convention, tier model, lifecycle states,
+the as-code pattern, customer overrides.
 
 ---
 
 ## Features
 
-Comprehensive feature inventory below. Status badges show `[shipped vX.Y.Z]` /
-`[roadmap]` / `[partial]`. Roadmap items + sizing + dependencies live in
-[docs/ROADMAP.md](docs/ROADMAP.md); per-release detail lives in
-[RELEASENOTES.md](RELEASENOTES.md).
+The sections below summarize every delivered feature **area**. For the
+full, customer-friendly catalog of what's built and verified, see
+**[docs/FEATURES.md](docs/FEATURES.md)** — these chapters mirror its
+structure. Items still in progress or planned are tracked in
+**[docs/REQUIREMENTS.md](docs/REQUIREMENTS.md)**; per-release detail lives
+in **[RELEASENOTES.md](RELEASENOTES.md)**.
 
-* browser-based PIM Manager GUI with 5 tabs (Graph / Grid / New & clone / Save / Validate) for editing the whole model without touching CSVs directly **[shipped v2.0.0]** (refined through v2.2.0 and v2.4.2)
-* PIM Activator Edge extension for bulk activation -- pick N PIM groups from a checkbox list, enter justification + duration, one click activates them all **[shipped v2.1.x]**
-* new Revoke tab in PIM Manager for bulk-revoke of active activations **[shipped v2.4.2]**
-* server-side Graph filtering for engine perf (`Get-PimAdminsFiltered` / `Get-PimGroupsFiltered`) -- fetches ~30 admins instead of all 514k on a large tenant **[shipped v2.1.3]**
-* customer-naming-aware Manager wizards driven by per-customer `PIM4EntraPS.NamingConventions.custom.ps1` so suggested names always match the local convention **[shipped v2.1.3]**
-* tenant-wide preload helpers + ARG-based active-assignment fetch to cut per-engine round-trips **[shipped v2.4.0]**
-* `Get-AzPimTokenCached` for token reuse across loops, avoids re-auth churn during long engine runs **[shipped v2.4.0]**
-* MSP variant with `config-msp/` + `Sync-PimMspConfig` for consultancies managing many customer tenants from one engine instance, plus CISO opt-in (per-admin secret in the customer's own Key Vault) gating centrally-issued Disable/Revoke status changes **[shipped earlier v2.x]**
-* `.locked.csv` -> `.custom.csv` consolidation -- single-file customer model, no more dual-file split **[shipped v2.3.0]**
-* validator pre-flight rule engine with 16 rule codes (FK, RA, TIER, NAME, ORPHAN, DUP, STALE, STATUS, DOMAIN, TAP) plus one-click Bulk Fix-all dialog **[shipped v2.0.x+]**
-* notification-channels config + `Send-PimAdminTap` fan-out across SMTP / Teams / Slack **[shipped v2.2.0]**
-* optional fields to allow extra metadata per admin during creation, like company field or notes field **[shipped v2.2.0]** (Company / Notes / ManagerEmail / StartDate columns)
-* ability to send tap password **[shipped v2.2.0]**
-* ability to define tap password start time like in 2 days at 8am **[shipped v2.2.0]** (`+2d 8:00`, `tomorrow`, `next monday 10:00`, full ISO, etc.)
-* ability to show more info behind a role to see actual permissions being delegated **[shipped v2.2.0]** (Manager Graph drill-down; standalone CSV export still roadmap)
-* ability to clone a role **[shipped v2.0.x]** (Clone wizard in Manager)
-* ability to add-detect new subscriptions and management groups in azure to setup pim permissions with fx contribution (define in a custom file). engine must automatically add them into definition + assignment files -- but don't automatically map new subs/MGs to anyone by default **[roadmap]** (ROADMAP #16)
-* ability to multiselect permissions like 10 entra roles and 10 azure permissions to a role/org/task/process type so we can easily setup new permissions **[roadmap]** (ROADMAP #4)
-* ability to clone azure subscription role delegations on an existing scope -- but with another role. maybe ability to clone to N new roles **[roadmap]** (ROADMAP #5)
-* ability to enumerate existing services like intune to detect new built-in roles that should be added. support defender xdr, entra id, intune **[roadmap]** (ROADMAP #18)
-* ability to add new administrative units via wizard **[roadmap]** (ROADMAP #8)
-* ability to delete via multiselect existing pim assignments/delegations **[shipped v2.2.0]** (ROADMAP #7)
-* ability to autodetect new power platform workspaces and create pim groups **[roadmap]** (ROADMAP #17)
-* ability to send a request to a webhook (or other inbound api) fx from servicenow so it can create a delegation for fx. a consultant, either as mapping to existing role or create a new role (fx new external company) **[roadmap]** (ROADMAP #21)
-* ability to send daily summary emails of pim changes (new admins, new delegations, removals, etc) **[roadmap]** (ROADMAP #23)
-* ability to send delegations based on tier model and show all users with tier 0/1 permissions including level permissions **[roadmap]** (ROADMAP #24)
-* ability to support different policies for entra id activations, so some roles require approvals whereas others don't require approval. same with activations, where it should send emails for activations and delegations, typically high-privileged roles (tier 0). these settings must be controllable in a custom file per row. proposed extra columns in the config definitions enforce approval and notifications per row. if possible the approval should be parallel-based so a request is sent to multiple emails at the same time and any one can approve. approvals should be defined on the actual assignment like global admin role -- not on activating the role **[roadmap]** (ROADMAP #14 + #15)
-* ability to validate a minimum set of authentication methods is defined for existing admins like mfa authenticator **[roadmap]** (ROADMAP #13)
-* ability to disable/enable admins using multi-select **[shipped v2.2.0]** (ROADMAP #6)
-* ability to import admins based on csv file (first name, last name, initials) and link to template for admins **[roadmap]** (ROADMAP #9)
-* define an admin template, so we have a rule for tap creation, naming, etc. like one for internal admins and another for externals/consultants **[roadmap]** (ROADMAP #10)
-* ability to clean-up pim groups that haven't been activated in N days -- remove in entra + config files **[roadmap]** (ROADMAP #20)
-* ability to validate pim assignments pointing at orphaned azure scopes that don't exist anymore **[roadmap]** (ROADMAP #19)
-* maintenance job that fixes orphaned azure scopes, orphaned roles (delete assignments + delete groups) **[roadmap]** (ROADMAP #30 + #19)
-* should we change into using another platform than CSV, like an azure storage account or sql server -- to avoid issues with multiple people modifying the csv files; can 3 people run the pim manager gui and modify files at the same time? it must scale to enterprises and we must protect the data very much. if yes, then allow import/migration of existing customers into v2 format in database **[partial]** (SQL backend already exists via the `PIM-Baseline-Management-SQL` engine; multi-writer concurrency on CSV is ROADMAP #33/#34)
-* ability to send info to users in groups/roles, in case they have been assigned new permissions (or changes) **[roadmap]** (ROADMAP #29)
-* ability to move an admin from one role to another role (where it removes old permissions) -- replace-mode **[roadmap]** (ROADMAP #27)
-* ability to log any pim changes in loganalytics + log file for audit compliance purpose **[roadmap]** (ROADMAP #26)
-* ability to define a sponsor/owner of a role for validation/audit/renewal purpose **[partial]** -- shipped v2.2.0 data-flow only; enforcement queued (ROADMAP #28)
-* ability to setup access package in entra and delegate to pim group (extra column) -- yes it works, uses `EntitlementManagement.ReadWrite.All` **[roadmap]** (ROADMAP #31)
-* ability to setup access review for pim group/role (extra column) so owners automatically must approve extensions, except for permissions where auto-extension has been defined **[roadmap]** (ROADMAP #32)
+### 1. Hosting / runtime
+Run it where it fits you: the Manager runs centrally for the whole team, or
+locally on an admin's PC straight against the database — no central web
+server required. A loopback **break-glass** edition runs on a client PC for
+when a hosted plan is unavailable, so senior admins are never locked out.
+No public IP is ever required.
 
-See [RELEASENOTES.md](RELEASENOTES.md) for per-release detail and [docs/ROADMAP.md](docs/ROADMAP.md) for sizing + sequencing of the roadmap items.
+### 2. Containers
+One configurable engine image runs as manager, scheduler, engine,
+connector, queue worker or discovery job — you tell each instance which
+roles to take on. Workers are scoped to their assigned job types, run a
+single pass on demand, or preview changes without applying them. Headless
+and safe by default: managed-identity auth, no interactive prompts, no
+secrets baked into the image.
+
+### 3. Setup / deploy
+Repeatable, script-driven setup (container, VM and MSP variants) so every
+environment comes out the same way. Managed-identity database access is
+wired up passwordless automatically, and each worker identity is granted
+the exact directory permissions the engine needs so it works on first run.
+
+### 4. MSP
+**Pull, never push.** In a managed-service setup the provider never reaches
+into or writes to your tenant — each tenant pulls a signed baseline into
+its own local database. Your data never leaves your tenant, per-tenant
+isolation means no cross-customer visibility, and local IT keeps full
+autonomy. (See [MSP variant](#msp-variant) below.)
+
+### 5. SQL / data
+**Single source of truth in SQL** — configuration, settings, access rules
+and delegation profiles all live in the database, not in scattered files
+or shares. Cloud databases use Entra/managed-identity authentication only
+(no SQL logins or stored passwords); on-prem uses integrated Windows auth.
+The Manager reads and writes through one database-aware layer and lets you
+switch between databases from a dropdown.
+
+### 6. Engine — core
+A modern, dependency-free engine that talks directly to Microsoft's APIs
+and the database. **Fast incremental runs** queue changes and apply only
+what actually changed, scoped to the area you ask for (full reprocessing
+still available on demand). From one run the engine creates the groups,
+delegations, org-group access, time-limited access passes, admin schedules
+and notification emails. Logs are clear and tagged (assign / update /
+extend / remove / OK), errors name the actual resource, and Global-Admin-
+style delegation is automatically configured to require approval.
+
+### 7. Engine — providers / connectors
+Connectors translate one PIM group into the right access across **Entra
+roles, Azure RBAC, Power BI / Fabric, gallery enterprise apps** (SAP,
+ServiceNow, etc.) and **Dataverse / Dynamics 365** — each connector turns
+on its own access prerequisite. The engine covers administrative units,
+groups + owners, admins + their time-limited access passes, Entra roles
+and AU-scoped roles, memberships, Azure resources, group policies and
+access reviews — all via direct API calls. Roles are imported from the
+live service list so you pick real roles instead of risking typos.
+
+### 9. Auth / identity
+**100% direct API, no modules** — runs on a clean VM or container with
+nothing pre-installed. Certificate-based app auth (not a shared secret),
+defaulting to the machine certificate store. No secrets in configuration:
+access uses a managed identity or a Key Vault pointer, and seed files never
+carry secrets.
+
+### 10. Delegation model
+**Two-tier group nesting at the core.** Admins go into direct groups (by
+role, task, process, cross-org or department) which nest into permission
+groups holding the actual roles and scopes. **Everything is a group** — AUs
+and Azure scopes are only the *where*, never the *who*. Every group has an
+owner, resolved automatically from the assignment, sponsor, or
+department-to-owner mapping. **Scoped portal admins** see only the groups
+they own, with the most privileged tiers filtered out; super-admins bypass
+the scoping. Cloud-only guest invite and self-service consultant
+enable/disable are included.
+
+### 11. GUI / Manager
+A browser-based delegation editor — **PIM Manager** — to create, map,
+delete, bulk-edit, revoke and clone delegations through a grid with guided
+wizards. Role tiers (Reader / Admin / Super-Admin / Delegated) with the
+right powers; the system fails closed to read-only if a role can't be
+determined. (See [PIM Manager](#pim-manager-gui) below.)
+
+### 12. Notifications / email
+Built-in, template-driven email — new admin, new role, new permission and
+time-limited-access-pass delivery — rendered from customizable HTML
+templates with simple placeholder tokens. A lab redirect option keeps test
+mail out of real inboxes, and rendering is separated from sending so you
+can preview output. (See [Notifications & scheduled TAP](#notifications--scheduled-tap) below.)
+
+### 14. Scale / performance
+Built for large tenants: the solution never bulk-lists hundreds of
+thousands of users or groups — it looks users up on demand and queries only
+the PIM-managed groups by name prefix server-side, so context builds in
+seconds. Tenant-wide role schedules are read once and indexed. Validate-
+and-skip with smart retries (over-long durations retried shorter down to
+permanent; disallowed nesting skipped cleanly). No artificial caps —
+scaling is empirical.
+
+### 16. PIM Activator (browser extension)
+A Manifest V3 extension for **Edge and Chrome** for **one-click bulk
+activation**: the admin picks the PIM groups they need from a checkbox
+list, enters a justification + duration, and activates them all at once.
+PKCE sign-in (no MSAL bundle), an onboarding wizard, single + bulk
+self-deactivate with expiry countdown, and managed deployment via Intune or
+direct registry. (See [PIM Activator](#pim-activator-browser-extension)
+below.)
+
+### 17. Naming
+All admin, group and resource naming patterns live in configuration with
+per-tenant overrides, using simple tokens for initials, level, tier and
+platform — so you can match your own conventions without touching code.
+(See [Naming conventions](#naming-conventions) below.)
+
+### 19. REST migration
+The core runs entirely on direct API calls, with robust handling of large,
+paged result sets — no reliance on module-specific behavior.
+
+### 20. Testing / validation
+Tested for real, never faked: validation runs against real test tenants —
+actually creating groups, delegations, org-group access, emails,
+time-limited passes and schedules, then verifying and cleaning them up.
+Test data lives in the database under a dedicated marker, so test objects
+never touch production groups. A rerunnable offline suite covers the engine
+and Manager flows.
+
+> Full detail per chapter: **[docs/FEATURES.md](docs/FEATURES.md)**.
 
 ---
 
@@ -141,8 +235,8 @@ See [RELEASENOTES.md](RELEASENOTES.md) for per-release detail and [docs/ROADMAP.
 
 ### Prerequisites
 
-- Windows PowerShell 5.1 (PS7 also works for the engines that don't
-  touch on-prem AD).
+- Windows PowerShell 5.1 (PS7 also works for the engines that don't touch
+  on-prem AD).
 - An Entra app registration (service principal) with:
   - `PrivilegedAccess.ReadWrite.AzureADGroup` (application, admin-consented)
   - `RoleManagement.ReadWrite.Directory`
@@ -151,20 +245,19 @@ See [RELEASENOTES.md](RELEASENOTES.md) for per-release detail and [docs/ROADMAP.
   - `Directory.Read.All` (PIM Manager tenant-list refresh)
   - For AD-syncing engines: domain credentials on the calling host.
 - An authentication method for that SPN. The community launchers support
-  four methods (set in `config\PIM4EntraPS.custom.ps1` — copy the sample
+  three methods (set in `config\PIM4EntraPS.custom.ps1` — copy the sample
   next door first — or in any per-engine `LauncherConfig.custom.ps1`):
   1. **Managed Identity** (`$global:UseManagedIdentity = $true`) —
      recommended for Azure VMs / Arc / Function / Container Apps Job.
-  2. **SPN + Key Vault secret** (`$global:SpnKeyVaultName` + `$global:SpnSecretName`)
+  2. **SPN + certificate** (`$global:SpnCertificateThumbprint` in
+     `Cert:\LocalMachine\My` or `Cert:\CurrentUser\My`) — the engine's
+     default app-auth method.
+  3. **SPN + Key Vault secret** (`$global:SpnKeyVaultName` + `$global:SpnSecretName`)
      — the calling identity needs `Key Vault Secret User` on that vault.
-  3. **SPN + certificate** (`$global:SpnCertificateThumbprint` in
-     `Cert:\LocalMachine\My` or `Cert:\CurrentUser\My`).
-  4. **SPN + plaintext secret** (`$global:SpnClientSecret`) — **TESTING ONLY**.
-- For TAP delivery (optional, v2.2.0+): SMTP relay / Teams webhook /
-  Slack webhook — see `config\PIM4EntraPS.NotificationChannels.custom.sample.ps1`.
+- For TAP delivery (optional): SMTP relay / Teams webhook / Slack webhook —
+  see `config\PIM4EntraPS.NotificationChannels.custom.sample.ps1`.
 
-See `config\PIM4EntraPS.custom.sample.ps1` for a copy-pasteable template
-covering all four methods.
+See `config\PIM4EntraPS.custom.sample.ps1` for a copy-pasteable template.
 
 One-shot SPN installer (creates + permissions + admin-consents):
 `setup\Install-PimEngineAppRegistration.ps1 -DisplayName "PIM4EntraPS-Engine"`.
@@ -187,138 +280,217 @@ foreach ($sample in Get-ChildItem .\config\*.custom.sample.*) {
 #    with your tenant id, app id, KV name.
 ```
 
-The 14 `*.custom.sample.csv` files in `config\` are documented templates
-with worked example rows — including a catalog of ~20 common Entra
-built-in roles in `PIM-Assignments-Roles-Groups.custom.sample.csv` to
-give you a working starting point instead of an empty schema.
+The shipped `config\` templates include documented samples with worked
+example rows — including a catalog of common Entra built-in roles — to give
+you a working starting point instead of an empty schema. CSV is supported
+only as a **read-only migration source**; the running model lives in SQL.
 
-### Run an engine
+### Run the engine
 
-Every engine has 4 launcher flavors — pick the one matching your host:
+Pick the launcher flavor matching your host:
 
 | Flavor | Where it runs |
 |---|---|
 | `community-vm.ps1` | Any VM, no internal dependencies (recommended starting point) |
-| `community-azure.ps1` | Azure Function / Logic App, public modules only |
+| `community-azure.ps1` | Azure Function / Logic App / Container Apps Job, public modules only |
 | `internal-vm.ps1` | Customer VM with internal bootstrap libs |
 | `internal-azure.ps1` | Customer Azure host with internal bootstrap libs |
 
+The REST + SQL engine is driven by scope and mode — run only the area you
+need, full or incremental:
+
 ```powershell
 # WhatIf -- read-only, prints what *would* change:
-.\launcher\PIM-Baseline-Management-CSV\launcher.community-vm.ps1 -WhatIfMode
+.\launcher\PIM-Baseline-Management\launcher.community-vm.ps1 -WhatIfMode
 
-# Apply:
-.\launcher\PIM-Baseline-Management-CSV\launcher.community-vm.ps1
+# Apply a full pass:
+.\launcher\PIM-Baseline-Management\launcher.community-vm.ps1
+
+# Apply only the changed delta for one scope:
+.\launcher\PIM-Baseline-Management\launcher.community-vm.ps1 -Scope EntraRoles -Mode Delta
 ```
 
-Transcript log lands in `logs/`. Engine output (LastApplied snapshots,
-delegation exports) lands in `output/`. Both gitignored.
+Transcript logs land in `logs/`; engine output (state snapshots,
+delegation exports) lands in `output/`. Both are gitignored.
+
+### How a run works
+
+The engine entry point is `tools/pim-engine/Invoke-PimEngineCore.ps1`
+(`-Scope All|<name> -Mode Full|Delta [-FromQueue]`). Identity and targets
+come from the environment / launcher globals — nothing is hardcoded. The
+core is a pure diff (desired-vs-live) plus an orchestrator: each **scope is
+a provider** that knows how to read the desired state (from SQL), read the
+live state (tenant REST), key + compare, and apply Create / Update /
+Remove. Providers run in a fixed dependency order, and a provider can
+request a directory-cache refresh before it runs — so an assignment scope
+sees the groups an earlier scope just created.
+
+**Run modes:**
+
+- **Full** — whole-scope reconcile (create / update). **Prune (removal of
+  live items not in the desired set) is opt-in:** Full alone never deletes;
+  you must add `-Prune`. This is a destructive-safety guard — a partial or
+  non-authoritative desired set must never silently disable real admins. A
+  second guard applies even with `-Prune`: a scope whose desired set is
+  empty is never pruned (an empty desired almost always means "this scope
+  wasn't loaded", not "delete everything live"), and the refusal is logged.
+- **Delta** — create / update everything that differs (no prune).
+- **Delta + `-FromQueue`** — apply only the pending commit-queue changes. A
+  Manager commit enqueues the `(entity, key)` pairs it touched and the
+  engine applies just those.
+
+**Fail-hard preflight.** Before any provider runs, the entry point verifies
+the inputs are real and refuses to proceed otherwise, so a wrong / empty
+store or a bad credential can never silently mass-create (or, in
+Full + Prune, mass-delete) against a live tenant: the desired store must be
+reachable and hold at least one definition / admin row, and a Graph token
+must be minted and the organization resolve. A wrong identity fails here,
+not after a half-applied run.
+
+### Providers / connectors
+
+Each scope is a provider — read desired / read live / key + compare /
+apply. They run in a fixed dependency order so dependent objects exist
+before they're referenced:
+
+| Order | Provider | Creates / binds |
+|---|---|---|
+| 10 | Administrative units | AUs (scope containers only) |
+| 20 | Groups | the PIM groups (+ owners, AU attach) |
+| 30 | Admins | admin accounts |
+| 35 | Admin TAP | Temporary Access Pass for new admins |
+| 40 | Entra roles | directory role → group (tenant scope) |
+| 45 | Roles in AUs | directory role → group, scoped to an AU |
+| 50 | Admin members | admin → eligible / active member of a group |
+| 55 | Group members | group → member of a group (the nesting) |
+| 60 | Azure resources | Azure RBAC role → group, at an Azure scope |
+| 70 | Group policies | per-group PIM policy (approval, MFA, justification) |
+
+Beyond the built-ins, connectors translate one PIM group into the right
+access across **Power BI / Fabric, gallery enterprise apps** (SAP,
+ServiceNow, etc.) and **Dataverse / Dynamics 365** — each connector turns
+on its own access prerequisite. Roles are imported from the live service
+list so you pick real roles instead of risking typos.
+
+**Owners are mandatory.** A group is never created without an owner. Owners
+resolve in order: the definition's `Owners` column → the role's sponsor →
+the group's department contact (department → owner mapping). If none
+resolve, the engine refuses to create the group — surfacing the data gap
+instead of leaving an orphan. Owners are also the approvers for
+approval-required policy templates.
+
+> The earlier **module-based reference engines** (a full pipeline plus
+> narrowed single-dimension variants, and the exporter / wizard /
+> diagnostic helpers) are retained for reference and incremental retirement
+> — see [docs/DESIGN.md §5](docs/DESIGN.md) for the engine taxonomy. New
+> deployments use the REST + SQL engine above.
 
 ---
 
-## Engines (15)
+## Hosting & containers
 
-The full pipeline ships as one big engine plus six narrowed variants for
-faster iteration on a single dimension. Pick the smallest one that does
-what you need:
+Run it where it fits. The Manager can run centrally for the whole team, or
+locally on an admin's PC straight against the database — no central web
+server required. A loopback **break-glass** edition runs on a client PC for
+when a hosted plan is unavailable, so senior admins are never locked out. No
+public IP is ever required.
 
-| Engine | Scope |
-|---|---|
-| **PIM-Baseline-Management-CSV** | Full pipeline: admins, AUs, role groups, permission groups, assignments, policies |
-| PIM-Baseline-Management-CSV-AdminsOnly | Admin accounts only (no group / role processing) |
-| PIM-Baseline-Management-CSV-AdministrativeUnitsOnly | AU definitions + role assignments only |
-| PIM-Baseline-Management-CSV-EntraIDRolesOnly | Permission group → Entra ID role bindings only |
-| PIM-Baseline-Management-CSV-AzResOnly | Permission group → Azure RBAC bindings only |
-| PIM-Baseline-Management-CSV-PIM4GroupsAssignmentOnly | Admin → role group PIM assignments only |
-| PIM-Baseline-Management-CSV-PIM4GroupsCreateModifyPolicyOnly | Create / modify PIM-for-Groups policies only |
-| PIM-Baseline-Management-CSV-PIM4GroupsPoliciesOnly | Apply policies to existing PIM-for-Groups only |
-| **PIM-Baseline-Management-SQL** | Same as CSV variant but reads from Azure SQL instead of files |
-| **PIM-Assignment-Exporter** | Dumps current tenant PIM state to CSV (delegation snapshots) |
-| PIM-Assignment-Exporter-CSV-Only | Faster exporter variant (skip the JSON/HTML outputs) |
-| **PIM-Assignment-Wizard** | Interactive: walk an admin through assigning themselves |
-| **PIM-Assignment-Revoker** | Bulk-revoke active activations |
-| Check-PIM-Groups-IsRoleAssignable | Diagnostic: list groups that are/aren't role-assignable |
-| GetNumberOfROles | Diagnostic: count effective Entra role reach per admin |
+For unattended runs, one configurable engine image runs as manager,
+scheduler, engine, connector, queue worker or discovery job — you tell each
+instance which roles to take on. It is headless and safe by default:
+managed-identity auth, no interactive prompts, no secrets baked into the
+image, and `-WhatIf`-by-default so a misconfigured job plans instead of
+applies.
 
-**Perf:** v2.1.3 added server-side Graph `$filter` for `Get-PimAdminsFiltered`
-+ `Get-PimGroupsFiltered`. On a 514k-user tenant the engine now fetches ~30
-admins instead of all 514k (and ~hundreds of `PIM-*` groups instead of all
-30k) by deriving the literal prefix from `PIM4EntraPS.NamingConventions.custom.ps1`
-and passing `startswith(...)` to Graph.
+What the container does per run:
+
+1. Acquire a Microsoft Graph token for the per-tenant identity.
+2. (MSP mode) pull + verify the signed baseline over a private endpoint —
+   RSA-SHA256 against the embedded public cert, plus expiry + anti-rollback.
+3. Read the tenant's own local store (optional).
+4. Merge and create / maintain the accounts and delegations in this tenant.
+
+Identity is one of **Managed Identity** (recommended — no secret to
+manage), **Certificate** (the entry point builds a client-assertion JWT),
+or **Client Secret** (simplest; rotate regularly), selected by an
+environment variable. The identical entry-point logic also runs on a plain
+Windows VM — same code, different host. Container = zero-VM cloud-native
+option; VM = on-prem option; both first-class.
+
+See **[docs/DESIGN.md §11–12](docs/DESIGN.md)** for the full hosting and
+container topology (two-plane network model, scheduled vs on-demand jobs,
+Container Apps Job cron, on-prem VMware shape).
 
 ---
 
 ## PIM Manager (GUI)
 
-`tools/pim-manager/Open-PimManager.ps1` reads all `*.custom.csv` files and
-serves a five-tab SPA in your default browser:
-
-**v2.4.53 -- brand alignment with the Activator.** The Manager UI is now
-on the same light palette (`#ffffff` body, `#f6f8fa` panels, `#0969da`
-blue accents) as the PIM Activator extension, with a branded blue
-`PIM MANAGER` banner above the tab bar and solid-blue tile cards on the
-New & clone tab. Cytoscape node-kind colours (purple role groups,
-lavender Azure resources, orange Entra roles) are preserved on purpose
--- they're the legend-to-node contract. Pure visual restyle, no
-behaviour changes.
-
+`tools/pim-manager/Open-PimManager.ps1` reads the model from the database
+and serves a five-tab single-page app in your default browser. The Manager
+UI is on the same light palette as the PIM Activator extension, with a
+branded blue `PIM MANAGER` banner above the tab bar. Cytoscape node-kind
+colours (purple role groups, lavender Azure resources, orange Entra roles)
+are preserved on purpose — they're the legend-to-node contract.
 
 | Tab | What it does |
 |---|---|
-| **Graph** | Interactive directed graph: admin → role group → permission group → target. Click-to-highlight neighbourhood. Layer + edge filters. Regex search. Cytoscape.js + dagre layout. ~500 nodes / ~800 edges renders in <2s. |
-| **Grid** | Spreadsheet-style editor per CSV. Add / edit / delete rows. **v2.2.0:** multi-select checkbox per row + sticky action bar; bulk-set `AccountStatus` (Enabled / Disabled / Revoked) or bulk-delete in one click. |
-| **New & clone** | Six multi-step wizards covering the common "create new" flows (admin, role, task, process, service, resource group). Customer-naming-aware: derives the right name prefix from `PIM4EntraPS.NamingConventions.custom.ps1` so wizard suggestions match your convention (`PIM-` / `PIM_` / `grp-e-pim-` etc.). Includes a data-driven Re-add wizard that scans existing rows for the tag prefix → CSV mapping. |
-| **Save** | Per-CSV diff preview before commit. Writes always land in `<base>.custom.csv`. Per-row staging means you can review, then cancel-all without losing other in-progress edits. |
-| **Validate** | Pre-flight rule engine with **16 rule codes** (PIM-FK-001/002/003, PIM-RA-001/002, PIM-TIER-001/002, PIM-NAME-001/002, PIM-ORPHAN-001/002/003, PIM-DUP-001, PIM-STALE-001/002, PIM-STATUS-001, PIM-DOMAIN-001, PIM-TAP-001). One-click **Bulk Fix-all** dialog covers FK-001 / STALE-001 / RA-002. Per-violation inline buttons for FK-001 (Remove + Re-add definition). |
+| **Graph** | Interactive directed graph: admin → role group → permission group → target. Click-to-highlight neighbourhood, layer + edge filters, regex search. Cytoscape.js + dagre layout. ~500 nodes / ~800 edges render in <2s. |
+| **Grid** | Spreadsheet-style editor per table. Add / edit / delete rows, multi-select with a sticky action bar, bulk-set `AccountStatus` (Enabled / Disabled / Revoked) or bulk-delete in one click. |
+| **New & clone** | Multi-step wizards for the common "create new" flows (admin, role, task, process, service, resource group). Customer-naming-aware: derives the right name prefix from your naming convention so wizard suggestions match it. Includes a data-driven Re-add wizard that scans existing rows for the tag-prefix → table mapping. |
+| **Save** | Per-table diff preview before commit, with per-row staging so you can review then cancel-all without losing other in-progress edits. |
+| **Validate** | Pre-flight rule engine with **16 rule codes** (PIM-FK-001/002/003, PIM-RA-001/002, PIM-TIER-001/002, PIM-NAME-001/002, PIM-ORPHAN-001/002/003, PIM-DUP-001, PIM-STALE-001/002, PIM-STATUS-001, PIM-DOMAIN-001, PIM-TAP-001). One-click **Bulk Fix-all** dialog plus per-violation inline fixes. |
 
 ```powershell
 .\tools\pim-manager\Open-PimManager.ps1            # server mode + auto-launch browser
 .\tools\pim-manager\Open-PimManager.ps1 -NoLaunch  # serve only, no browser
 .\tools\pim-manager\Open-PimManager.ps1 -StaticHtml -OutFile pim.html  # offline export
-.\tools\pim-manager\Open-PimManager.ps1 -RefreshTenantLists           # backfill cache/
+.\tools\pim-manager\Open-PimManager.ps1 -RefreshTenantLists           # backfill tenant cache
 ```
 
-**Per-role permission drill-down (v2.2.0):** clicking an `entra-role` /
-`au-role` node in the Graph tab expands the side panel with the actual
-delegated permissions for that directory role (resource actions + data
-actions, +/- prefixes, `(D)` marker for data plane). Pulled from
-`cache/entra-roles.json` (refresh via toolbar button or the inline CTA
-shown when a role isn't in cache yet).
+**Per-role permission drill-down:** clicking an `entra-role` / `au-role`
+node in the Graph tab expands the side panel with the actual delegated
+permissions for that directory role (resource actions + data actions, +/-
+prefixes, `(D)` marker for data plane) — so the graph doubles as the audit
+answer to *"what can this role actually do?"*.
 
-Server-mode endpoints (all bearer-token authed):
-`/api/config`, `/api/csv/<base>`, `/api/diff/<base>`, `/api/heartbeat`,
-`/api/preflight`, `/api/tenant-lists`, `/api/refresh-tenant-lists`,
-`/api/naming-conventions`.
+Server-mode endpoints are all bearer-token authed (`/api/config`,
+`/api/diff/<table>`, `/api/heartbeat`, `/api/preflight`,
+`/api/tenant-lists`, `/api/refresh-tenant-lists`, `/api/naming-conventions`).
+Role tiers (Reader / Admin / Super-Admin / Delegated) gate what each
+operator can do; the system fails closed to read-only if a role can't be
+determined.
+
+See **[tools/pim-manager/README.md](tools/pim-manager/README.md)** for the
+full Manager docs and **[docs/DESIGN.md §11](docs/DESIGN.md)** for the
+per-field UX model and delegated-visibility design.
 
 ---
 
 ## PIM Activator (browser extension)
 
 `tools/pim-activator/` is a Manifest V3 browser extension for **Edge and
-Chrome**. Admin clicks the toolbar icon, picks the PIM groups they need
-from a checkbox list, enters a justification + duration, clicks
-**Activate**. One Graph round-trip per group (the API requires it), but
-the admin sees one click instead of N portal navigations.
+Chrome**. The admin clicks the toolbar icon, picks the PIM groups they
+need from a checkbox list, enters a justification + duration, and clicks
+**Activate** — one click instead of N portal navigations.
 
-Auth uses `chrome.identity.launchWebAuthFlow` + PKCE (no MSAL bundle).
-Extension is hosted on GitHub Pages
-(`https://knudsenmorten.github.io/PIM4EntraPS/updates.xml`); the
-canonical extension id is `eheocihmlppcophaeakmdenhgcookkab` (derived
-from the manifest's `key` field — same id on every fleet, every tenant).
+Auth uses `chrome.identity.launchWebAuthFlow` + PKCE (no MSAL bundle). The
+extension is hosted on GitHub Pages
+(`https://knudsenmorten.github.io/PIM4EntraPS/updates.xml`); the canonical
+extension id is `eheocihmlppcophaeakmdenhgcookkab` (derived from the
+manifest's `key` field — the same id on every fleet, every tenant).
 
 ### Deployment scripts at a glance
 
-The activator ships three scripts in `tools/pim-activator/`. Pick by
-deployment target — the architecture decisions inside each are already
-made for you (single source of truth per registry slot, no IME slot-
-cycling, auto-discover from live Entra, ASCII output for Windows Server
-consoles).
+The activator ships its deploy scripts in `tools/pim-activator/`. Pick by
+deployment target — the architecture decisions inside each are already made
+for you (single source of truth per registry slot, no slot-cycling,
+auto-discover from live Entra, ASCII output for Windows Server consoles).
 
 | Script | Use when | Discovers tenant from |
 |---|---|---|
 | `Deploy-PimActivatorIntune.ps1` | Intune-managed estate (the common case). | Live Entra via `Connect-MgGraph`. |
-| `Deploy-PimActivatorClient.ps1` | Non-Intune-managed box (PAW, jump box, dev box). | Live Entra via `Connect-MgGraph` (v2.4.111+). |
-| `Update-PimActivator-Extension.ps1` | Maintainer's machine. Repacks the CRX from `manifest.json` and publishes to gh-pages. | Master signing key (`%USERPROFILE%\.pim-activator\signing-key.pem` on `mgmt1`). |
+| `Deploy-PimActivatorClient.ps1` | Non-Intune box (PAW, jump box, dev box). | Live Entra via `Connect-MgGraph`. |
+| `Update-PimActivator-Extension.ps1` | Maintainer's machine. Repacks the CRX from `manifest.json` and publishes to GitHub Pages. | The master signing key (held only on the maintainer's machine). |
 
 Two recovery scripts also live alongside, for the rare case Chrome marks
 the extension `DISABLE_CORRUPTED` (binary deleted but Secure Preferences
@@ -326,33 +498,27 @@ registration stuck):
 
 | Script | What it does |
 |---|---|
-| `Fix-PimActivatorStuck.ps1` | One-time, surgical: scrubs the stale `extensions.settings.<id>` + HMAC entries from `Preferences` + `Secure Preferences` across every Chrome / Edge profile on the box. Pure string-surgery brace counting -- no PS 5.1 `ConvertTo-Json` round-trip, can't brick a profile. |
-| `Reset-CorruptedExtensions.ps1` | Generic auto-heal. Scans every profile for entries with `disable_reasons & 1024` (DISABLE_CORRUPTED) and removes them. Schedule as a logon task for a self-healing fleet. |
+| `Fix-PimActivatorStuck.ps1` | One-time, surgical: scrubs the stale `extensions.settings.<id>` + HMAC entries from `Preferences` + `Secure Preferences` across every Chrome / Edge profile on the box. Pure string-surgery brace counting — no fragile JSON round-trip, can't brick a profile. |
+| `Reset-CorruptedExtensions.ps1` | Generic auto-heal. Scans every profile for entries flagged DISABLE_CORRUPTED and removes them. Schedule as a logon task for a self-healing fleet. |
 
 ### Intune deploy (`Deploy-PimActivatorIntune.ps1`)
 
 The Intune deploy creates / updates a Group Policy Configuration profile
-called `[PimActivator] client settings`, carrying **four policies per
-browser**:
+carrying **four policies per browser**:
 
-1. **`ExtensionInstallForcelist`** -- force-install from the gh-pages
-   CRX (eheocih…;updates.xml).
-2. **`ExtensionInstallSources`** -- whitelist `https://knudsenmorten.github.io/*`
-   as a CRX install source.
-3. **`ExtensionSettings`** -- pre-grants `<all_urls>` runtime hosts so
-   the v1.5.11+ permission-expansion gate never fires
+1. **`ExtensionInstallForcelist`** — force-install from the GitHub Pages CRX.
+2. **`ExtensionInstallSources`** — whitelist the GitHub Pages origin as a
+   CRX install source.
+3. **`ExtensionSettings`** — pre-grants `<all_urls>` runtime hosts so the
+   permission-expansion gate never fires
    (`{installation_mode: force_installed, update_url, runtime_allowed_hosts: ['<all_urls>']}`).
-4. **`Tenant catalog`** -- pushes the tenant JSON into
-   `chrome.storage.managed.tenantCatalog` so the popup's
-   *Use centrally deployed* tile lights up on first open.
+4. **Tenant catalog** — pushes the tenant JSON into
+   `chrome.storage.managed.tenantCatalog` so the popup's *Use centrally
+   deployed* tile lights up on first open.
 
-The script also auto-uploads the custom **PIM4EntraPS.PimActivator.admx**
-the first time it runs in a tenant (idempotent -- skips on subsequent
-runs). The ADMX is self-contained (no `<using>` dependencies on
-`Microsoft.Policies.Windows` after v2.4.109), so it lands cleanly on both
-permissive and strict Intune tenants.
-
-#### Zero-arg run
+The script also auto-uploads a self-contained custom ADMX the first time it
+runs in a tenant (idempotent — skips on subsequent runs), so it lands
+cleanly on both permissive and strict Intune tenants.
 
 ```powershell
 .\Deploy-PimActivatorIntune.ps1
@@ -364,22 +530,15 @@ permissive and strict Intune tenants.
 #  the standard "PIM Activator")
 ```
 
-#### Conflict awareness (v2.4.110)
+**Conflict awareness.** Before creating the profile, the script scans
+Settings Catalog + Administrative Templates for any OTHER policy already
+managing `ExtensionInstallForcelist`. If one exists it aborts by default
+(printing the exact `<extId>;<updateUrl>` line to add to the existing
+policy), because mixing forcelist-write mechanisms causes the entry to
+cycle on/off on every sync. `-Force` proceeds but skips the forcelist
+values and prints an `[ACTION REQUIRED]` block instead.
 
-Before creating the profile, the script scans Settings Catalog +
-Administrative Templates for any OTHER policy already managing
-`ExtensionInstallForcelist`. If one exists:
-
-- **Default**: aborts with the exact `<extId>;<updateUrl>` line the
-  operator should add to the existing policy. (IME does not reliably
-  merge forcelist writes across mechanisms; mixing them causes the
-  entry to cycle on/off in HKLM on every sync.)
-- **`-Force`**: proceeds BUT skips the Forcelist definition values --
-  the script writes only Sources + Settings + Tenant catalog. Prints an
-  `[ACTION REQUIRED]` block naming the conflicting policy and the
-  forcelist row the operator must add there.
-
-#### Required Graph scopes
+Required Graph scopes:
 
 ```
 DeviceManagementConfiguration.ReadWrite.All
@@ -390,8 +549,8 @@ Group.Read.All     # only when -AssignToGroupId is supplied
 
 ### Non-Intune deploy (`Deploy-PimActivatorClient.ps1`)
 
-For PAWs, admin jump boxes, dev workstations, and any other box that
-isn't Intune-managed. Writes directly to the Chromium policy keys:
+For PAWs, admin jump boxes, dev workstations, and any other box that isn't
+Intune-managed. Writes directly to the Chromium policy keys:
 
 ```
 HKLM:\SOFTWARE\Policies\Microsoft\Edge\ExtensionInstallForcelist
@@ -400,78 +559,38 @@ HKLM:\SOFTWARE\Policies\Microsoft\Edge\3rdparty\extensions\<id>\policy\tenantCat
 HKLM:\SOFTWARE\Policies\Google\Chrome\...   (same structure)
 ```
 
-`-Scope Machine` (default, HKLM, requires admin) covers every user on
-the box. `-Scope User` writes to HKCU for the current-user only (no
-admin required).
+`-Scope Machine` (default, HKLM, requires admin) covers every user on the
+box. `-Scope User` writes to HKCU for the current-user only (no admin
+required). When `-CatalogJsonPath` is omitted (the common case) the script
+auto-discovers the tenant + PIM Activator app registration from the live
+Graph context — the same logic as the Intune deploy — and logs which source
+it used so it's impossible to silently write a different tenant's data.
 
-#### Tenant catalog auto-discovery (v2.4.111)
+Common server scenarios:
 
-When `-CatalogJsonPath` is omitted (the common case), the script
-auto-discovers the tenant + PIM Activator app registration from the LIVE
-Microsoft Graph context — same logic as `Deploy-PimActivatorIntune.ps1`.
-Connect-MgGraph fires interactively if not already connected.
-
-Every run logs which source is used:
-
-```
-catalog source: live Entra auto-discover  (tenant '<CustomerTenant>' / <tenant-guid>...  clientId b2065373-...)
-```
-
-→ Impossible to silently write a different tenant's data. (v2.4.111
-fixed a regression where the script used to fall back to a sibling
-`discovered-tenant-catalog.json` file. That file is now gitignored.)
-
-#### Common server scenarios
-
-- **Shared admin server (multiple RDPs)** — `-Scope Machine`, run once
-  as admin. Every RDP user gets the extension on next browser launch.
-- **Personal PAW (one admin)** — `-Scope User`, run from the admin's
-  own RDP session. No admin rights needed.
-- **AD-joined fleet via GPO Startup Script** — call the script with
-  `-Scope Machine` from a GPO startup script under
-  `Computer Configuration → Policies → Windows Settings → Scripts → Startup`.
-
-### Activation duration default
-
-Fresh installs default to **8 hours** (one workday). Precedence at
-popup-open time:
-
-`chrome.storage.local.lastDurationHours` (user's last picked value, per
-profile) > managed `defaultDurationHours` (registry) > popup.js fallback.
-
-Override per box via either deploy script's parameter, or for a single
-profile directly in registry:
-
-```powershell
-Set-ItemProperty 'HKCU:\SOFTWARE\Policies\Microsoft\Edge\3rdparty\extensions\eheocihmlppcophaeakmdenhgcookkab\policy' `
-    -Name defaultDurationHours -Value 2 -Force
-```
+- **Shared admin server (multiple RDPs)** — `-Scope Machine`, run once as
+  admin. Every RDP user gets the extension on next browser launch.
+- **Personal PAW (one admin)** — `-Scope User`, run from the admin's own
+  RDP session. No admin rights needed.
+- **AD-joined fleet via GPO Startup Script** — call with `-Scope Machine`
+  from a `Computer Configuration → ... → Scripts → Startup` GPO script.
 
 ### Multi-tenant model
 
 The popup reads its tenant config from two layers, in order:
 
-1. **Manual single-tenant entry** -- `chrome.storage.local.userTenantId`
-   + `userClientId`, written by the popup's onboarding wizard's
-   *Add single tenant* tile. v1.6.25+ this ALWAYS wins, even when
-   managed catalog is present (fixes a "Save loops back to onboarding"
-   regression caused by stale managed catalog overriding manual saves).
-2. **Managed catalog** -- `chrome.storage.managed.tenantCatalog`,
-   pushed by either deploy script. JSON array of
+1. **Manual single-tenant entry** — `chrome.storage.local` values written
+   by the popup's onboarding *Add single tenant* tile. This always wins,
+   even when a managed catalog is present.
+2. **Managed catalog** — `chrome.storage.managed.tenantCatalog`, pushed by
+   either deploy script. A JSON array of
    `{name, tenantId, clientId, defaultJustification, defaultDurationHours, prefix, entraPrefix, azurePrefix}`.
 
 | Catalog size | Popup behaviour |
 |---|---|
 | 0 entries | Onboarding wizard: *Add single tenant* (manual) or *Import JSON* tiles. |
-| 1 entry | Popup uses it silently. Tenant chip in header shows the friendly name. |
-| 2+ entries | Header shows a tenant switcher dropdown. Each admin picks per browser profile (cached in `chrome.storage.local.activeTenantId`). |
-
-The picker, the deployment layer, and the manual-entry path are all
-independent. Adding a tenant later = update the source on whichever
-layer is in play (re-run `Deploy-PimActivatorIntune.ps1` for the
-ADMX-backed profile, re-run `Deploy-PimActivatorClient.ps1` for direct
-registry boxes, or have the user click *Add single tenant* in the
-popup wizard).
+| 1 entry | Used silently; tenant chip in the header shows the friendly name. |
+| 2+ entries | Header shows a tenant switcher dropdown, cached per browser profile. |
 
 ```
 +-------------------------------+      +---------------------------+      +------------------+
@@ -482,64 +601,55 @@ popup wizard).
 | (direct HKLM/HKCU)            |      +---------------------------+      | -> single tenant |
 +-------------------------------+                                         |    (silent)      |
                                                                           | -> 2+ tenants    |
-                                                                          |    (picker)      |
+       silent push                   managed_storage payload              |    (picker)      |
                                                                           | -> 0 tenants OR  |
-                                                                          |    user clicks   |
-                                                                          |    "Add single   |
-                                                                          |    tenant"       |
-                                                                          |    (wizard)      |
+                                                                          |    wizard        |
                                                                           +------------------+
-       silent push                   managed_storage payload                 user-facing UI
 ```
 
-See `tools/pim-activator/README.md` for the full deployment matrix +
-backend (app registration) setup.
+**Activation duration.** Fresh installs default activations to **8 hours**
+(one workday). Precedence at popup-open time: the user's last picked value
+(per profile) > managed `defaultDurationHours` (registry) > built-in
+fallback. Override per box via either deploy script's parameter, or for a
+single profile directly in the registry `policy` key.
 
-```
-+-----------------------+      +---------------------------+      +-----------------+
-| Deploy-PimActivator   | -->  | Chromium policy registry  | -->  | Extension popup |
-| Intune (remediation)  |      | (HKCU/HKLM ...\policy\    |      | (popup.html +   |
-| LocalInstaller (GPO)  |      |  Tenants JSON)            |      |  popup.js)      |
-| Client (direct write) |      |                           |      | -> picker if 2+ |
-+-----------------------+      +---------------------------+      +-----------------+
-       silent push                managed_storage payload            user-facing UI
-```
-
-See `tools/pim-activator/README.md` for the full deployment matrix +
+See **[tools/pim-activator/README.md](tools/pim-activator/README.md)** for
+the full deployment matrix, Intune ADMX rollout, conflict handling, and
 backend (app registration) setup.
 
 ---
 
-## Notifications & scheduled TAP (v2.2.0)
+## Notifications & scheduled TAP
 
-`Send-PimAdminTap` fans new admin Temporary Access Pass codes out to any
-combination of SMTP / Teams / Slack via `PIM4EntraPS.NotificationChannels.custom.ps1`:
+`Send-PimAdminTap` fans new-admin Temporary Access Pass codes out to any
+combination of SMTP / Teams / Slack via
+`PIM4EntraPS.NotificationChannels.custom.ps1`:
 
 ```powershell
 $global:PIM_NotificationChannels = @{
-    Smtp  = @{ Server='smtp.office365.com'; Port=587; UseSsl=$true;
-               From='pim-noreply@contoso.com'; Credential=$smtpCred }
-    Teams = @{ WebhookUrl='https://contoso.webhook.office.com/...' }
-    Slack = @{ WebhookUrl='https://hooks.slack.com/services/T01.../B01.../...' }
+    Smtp  = @{ Server='<smtp-relay-host>'; Port=587; UseSsl=$true;
+               From='<pim-noreply@your-domain>'; Credential=$smtpCred }
+    Teams = @{ WebhookUrl='<your-teams-incoming-webhook-url>' }
+    Slack = @{ WebhookUrl='<your-slack-incoming-webhook-url>' }
 }
 ```
 
-Defaults to an empty hashtable (no channels = no fan-out, account
-creation still proceeds). WhatIfMode-aware: logs `[WHATIF] would send TAP
-to ... via <Channel>` with zero network traffic. Delivery failures
-**never** block account creation (entire call is `Try {} Catch {}`-wrapped).
+It defaults to an empty hashtable (no channels = no fan-out; account
+creation still proceeds). Delivery failures **never** block account
+creation (the whole call is `try {} catch {}`-wrapped), and `-WhatIfMode`
+logs intent (`[WHATIF] would send TAP to … via <Channel>`) with zero
+network traffic.
 
 **Scheduled TAP start time:** `Resolve-PimTapStartDateTime` recognises
-relative phrases in the `TAPStartDate` CSV column in addition to ISO 8601
-/ culture-specific shapes:
+relative phrases in the `TAPStartDate` column in addition to ISO 8601 /
+culture-specific shapes:
 
 - `+2d 8:00`, `+3 days at 8am`, `in 2 days at 9am`, `2 hours`
 - `tomorrow`, `today 14:30`, `next monday 10:00`
 - Full ISO `2026-06-04T08:00:00Z`
-- Anything `CorrelateDateTimeLanguage` / `[datetime]::Parse` handles as last resort
 
-All resolved to UTC. Defaults for relative expressions: hour=09 minute=00
-("next business-day morning" handover convention).
+All resolved to UTC; relative expressions default to 09:00 ("next
+business-day morning" handover convention).
 
 ---
 
@@ -549,35 +659,54 @@ Customer naming styles vary widely (`Admin-` / `X-Admin-` / `adm` / `extadm`
 / `a-{owner}` / `grp-e-pim-` etc.). `PIM4EntraPS.NamingConventions.custom.ps1`
 captures your convention in one place and feeds it to:
 
-1. **Engine perf** — `Get-PimAdminsFiltered` / `Get-PimGroupsFiltered`
-   extract the literal prefix and pass it to Graph `$filter=startswith(...)`,
-   shrinking 514k-user tenant fetches to ~30 admins.
-2. **PIM Manager wizards** — suggest correctly-prefixed names when
-   creating new admin / role / permission groups.
+1. **Engine perf** — the filtered context helpers extract the literal
+   prefix and pass it to Graph `$filter=startswith(...)`, shrinking
+   large-tenant fetches to the handful of PIM-managed objects.
+2. **PIM Manager wizards** — suggest correctly-prefixed names when creating
+   new admin / role / permission groups.
 3. **Validator rules** — `PIM-NAME-001` / `PIM-NAME-002` warn on
    convention drift.
 
-Sample patterns + `AdminAccountPatterns` per-UserType (Internal /
-External / Guest) are documented in
+Sample patterns + `AdminAccountPatterns` per UserType (Internal / External
+/ Guest) are documented in
 `config\PIM4EntraPS.NamingConventions.custom.sample.ps1`.
 
 ---
 
 ## MSP variant
 
-For consultancies managing many customer tenants from a single
-engine instance: set `$global:PIM_ConfigVariant = 'msp'` in the launcher
-and PIM4EntraPS reads from `config-msp/` instead of `config/`. `Sync-PimMspConfig`
-pulls per-tenant config snapshots from a git source you control
-(`config-msp/msp.source.json`), so the engine runs against an
-always-fresh customer-of-record baseline.
+For consultancies managing many customer tenants: each customer tenant
+**pulls** a signed baseline into its own local database — the provider
+never writes to the customer tenant, and customer data never leaves it.
+Set the MSP config variant in the launcher and PIM4EntraPS reads from
+`config-msp/` instead of `config/`. The MSP keeps only the central
+template; each customer has its own isolated data store with no
+cross-customer visibility.
+
+**The acting identity is always local.** Each customer tenant has its own
+engine app + non-exportable certificate, so the customer owns its
+Conditional Access, its audit attribution (actions log as a named app in
+*their* tenant), lifecycle, and instant revocation. There is no GDAP and no
+foreign multi-tenant identity — which is what makes this work for EA/MCA
+enterprises that GDAP can't cover at all, and avoids the "who is this GUID
+from the partner tenant?" audit problem.
+
+**Signed, not encrypted; no secret at the receiver.** The baseline (and the
+license) are signed with a private key held only on the MSP host and
+verified against a public certificate embedded in the product. The customer
+side needs no secret key — it only verifies — and because bundles are
+signed rather than encrypted, the customer can read exactly what the MSP
+ships. Tamper, forge, roll-back and replay are all rejected (RSA-SHA256
+signature, version-monotonic check, validity-window check).
 
 **CISO opt-in for status changes:** the MSP variant gates centrally-issued
 `Disable` / `Revoke` actions behind a per-admin secret in the **customer's**
-Key Vault (not the MSP's). `Test-PimAccountStatusChangeAuthorized` reads
-`$global:PIM_StatusChange_KeyVaultName` + `secretName=pim4entraps-statuschange-<initials>`
-and compares to the `StatusChangeCode` column in the CSV row. No match =
-refuse + warn. Defense in depth against MSP-tenant access misuse.
+Key Vault (not the MSP's). No match = refuse + warn. Defense in depth
+against MSP-tenant access misuse.
+
+See **[docs/DESIGN.md §13](docs/DESIGN.md)** for the full MSP architecture
+(two-DB model, pull-not-push transport, signed-baseline + kill-switch,
+ring-based rollout, why-not-GDAP).
 
 ---
 
@@ -586,73 +715,56 @@ refuse + warn. Defense in depth against MSP-tenant access misuse.
 ```
 PIM4EntraPS/
   engine/
-    <task-name>/<task-name>.ps1                 # 15 engines, one folder each
-    _shared/PIM-Functions.psm1                  # canonical function library (~9000 lines)
-    _shared/PIM-ContextBuilder.ps1              # Build-PimContext / Get-PimList helpers
-  launcher/
-    <task-name>/
-      launcher.community-vm.ps1                 # 4 flavors per task
-      launcher.community-azure.ps1
-      launcher.internal-vm.ps1
-      launcher.internal-azure.ps1
-      LauncherConfig.defaults.ps1               # shipped defaults
-      LauncherConfig.custom.sample.ps1          # template for customer override
-      launcher.manifest.json
-    _lib/
-      Initialize-LauncherConfig.ps1
-      Start-LauncherTranscript.ps1
-      Stop-LauncherTranscript.ps1
-      PIM4EntraPS.shared-defaults.ps1
-  config/
-    *.custom.sample.csv                         # shipped templates w/ worked example rows
-    *.custom.csv                                # gitignored: customer's actual data
-    repository.custom.sample.ps1                # path mappings template
-    policies.custom.sample.ps1                  # PIM policy defaults template
-    PIM4EntraPS.NamingConventions.locked.ps1    # schema definition + defaults
-    PIM4EntraPS.NamingConventions.custom.sample.ps1
-    PIM4EntraPS.NotificationChannels.locked.ps1 # empty hashtable, customer fills custom
-    PIM4EntraPS.NotificationChannels.custom.sample.ps1
-    PIM4EntraPS.Filters.locked.ps1              # default include/exclude filter functions
-    PIM4EntraPS.Filters.custom.sample.ps1
+    _shared/PIM-EngineCore.ps1                  # REST + SQL engine core
+    _shared/PIM-EngineProviders.ps1             # per-scope appliers (connectors)
+    _shared/PIM-Functions.psm1                  # shared function library
   tools/
+    pim-engine/Invoke-PimEngineCore.ps1         # engine entry (-Scope / -Mode)
     pim-manager/                                # browser-based 5-tab SPA editor
       Open-PimManager.ps1                       # HttpListener server + static export
-      pim-manager.html                          # single-file SPA (Cytoscape.js, dagre)
       _validator.ps1                            # 16-rule pre-flight engine
-      _tenantSync.ps1                           # tenant-list cache refresh
-      cache/                                    # gitignored: per-tenant Graph caches
-    pim-activator/                              # Edge MV3 extension (bulk activation)
-  setup/
-    Install-PimEngineAppRegistration.ps1        # one-shot SPN installer
-  docs/
-    DESIGN.md                                   # architecture deep dive
-    ROADMAP.md                                  # ~34 customer-driven features sized + sequenced
-    MANAGER-UX-AUDIT.md                         # per-field UX audit of every CSV column
-  logs/                                         # gitignored: transcript output
-  output/                                       # gitignored: engine state + delegation dumps
+      README.md
+    pim-activator/                              # Edge/Chrome MV3 extension (bulk activation)
+      Deploy-PimActivator*.ps1                  # Intune / client deploy + recovery
+      README.md
+  launcher/
+    <task>/launcher.<flavour>.ps1               # community/internal × vm/azure
+    <task>/LauncherConfig.*.ps1                 # layered config (defaults/locked/custom)
+    _lib/                                        # shared launcher helpers
+  config/        *.custom.sample.* templates (worked rows); *.custom.* gitignored
+  config-msp/    MSP per-customer config + template-pull
+  setup/         Install-PimEngineAppRegistration.ps1, setup-script family
+  sql/           idempotent schema (CREATE + ALTER) + seed
+  infra/         container / hosting deployment
+  legacy/        module-based reference engines (incremental retirement)
+  docs/          FEATURES.md · ROADMAP.md · DESIGN.md (public) · REQUIREMENTS.md · TESTS.md (internal)
+  CLAUDE.md      router + working agreement (auto-loaded)
   VERSION
   README.md
-  RELEASENOTES.md                               # curated changelog
+  RELEASENOTES.md
 ```
 
 ---
 
 ## Documentation
 
+The doc set (public unless marked internal):
+
+- **[docs/FEATURES.md](docs/FEATURES.md)** — public, customer-facing
+  catalog of delivered + verified features, grouped per chapter. The
+  "Features" section above mirrors its structure.
+- **[docs/ROADMAP.md](docs/ROADMAP.md)** — public, high-level planned /
+  upcoming features (auto-generated from the backlog; no bug fixes).
 - **[docs/DESIGN.md](docs/DESIGN.md)** — architectural deep dive: nesting,
-  direct vs indirect delegation, naming convention, tier model, lifecycle,
-  customer overrides.
-- **[docs/ROADMAP.md](docs/ROADMAP.md)** — sized + sequenced feature
-  backlog with `[SHIPPED]` annotations.
-- **[docs/MANAGER-UX-AUDIT.md](docs/MANAGER-UX-AUDIT.md)** — per-field UX
-  audit of every CSV column (dropdown vs free-text, validation rules,
-  wizard exposure).
+  delegation, naming, tier model, hosting, MSP, SQL data model, connectors,
+  lifecycle/governance.
 - **[RELEASENOTES.md](RELEASENOTES.md)** — curated changelog (what changed
   each release + migration notes).
-- **[tools/pim-manager/README.md](tools/pim-manager/README.md)** — Manager
-  GUI docs (if present; otherwise see the PIM Manager section above).
-- **[tools/pim-activator/README.md](tools/pim-activator/README.md)** —
-  activator extension docs incl. Intune rollout.
+- **Internal (not published):** `REQUIREMENTS.md` (open backlog), `TESTS.md`
+  (test suites + results), `CLAUDE.md` (working agreement + router).
+- **[tools/pim-manager/README.md](tools/pim-manager/README.md)** /
+  **[tools/pim-activator/README.md](tools/pim-activator/README.md)** —
+  per-tool deployment docs.
 
 ---
 
@@ -660,13 +772,12 @@ PIM4EntraPS/
 
 Semver-ish: `MAJOR.MINOR.PATCH`.
 
-- `MAJOR` — breaking layout / CSV schema / launcher contract change.
+- `MAJOR` — breaking layout / schema / launcher contract change.
 - `MINOR` — additive engine or tool.
 - `PATCH` — fix / doc / workflow polish.
 
 Each release is tagged twice on the monorepo: `PIM4EntraPS-<x>` (private)
-and `PIM4EntraPS-v<x>` (public — fires the publish workflow to this
-mirror).
+and `PIM4EntraPS-v<x>` (public — fires the publish workflow to the mirror).
 
 ---
 
@@ -675,4 +786,4 @@ mirror).
 Issues + PRs welcome on GitHub. For production-deployment help (PAW
 rollout, AD trust setup, multi-tenant), contact the maintainer.
 
-Author: Morten Knudsen ([@KnudsenMorten](https://github.com/KnudsenMorten))
+Author: see the project's GitHub repository.

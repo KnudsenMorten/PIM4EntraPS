@@ -18,7 +18,7 @@
       Message    : human-readable explanation
       Suggestion : actionable hint (may be $null)
 
-    Reads all 14 CSVs via the existing Read-PimCsvRows helper (so this works
+    Reads all 14 CSVs via the existing Read-PimRows helper (so this works
     against either .custom.csv or .locked.csv, whichever wins).
 
     All rules degrade gracefully when source data is missing: a CSV that does
@@ -128,7 +128,7 @@ function New-PimViolation {
 }
 
 function Get-PimRowValue {
-    # Safe lookup that handles both OrderedDictionary (Read-PimCsvRows output)
+    # Safe lookup that handles both OrderedDictionary (Read-PimRows output)
     # and PSCustomObject (older paths). Returns '' if column missing.
     param([Parameter(Mandatory)][AllowNull()][object]$Row, [Parameter(Mandatory)][string]$Column)
     if ($null -eq $Row) { return '' }
@@ -255,7 +255,7 @@ function Invoke-PimPreflightValidation {
             continue
         }
         try {
-            $loaded[$base] = Read-PimCsvRows -BaseName $base
+            $loaded[$base] = Read-PimRows -BaseName $base
         } catch {
             [void]$violations.Add((New-PimViolation -Severity 'warning' -Code 'PIM-IO-001' -Csv $base -Message "Failed to read CSV: $($_.Exception.Message)"))
             $loaded[$base] = @{ header = @(); rows = @(); source = 'none'; path = $null }

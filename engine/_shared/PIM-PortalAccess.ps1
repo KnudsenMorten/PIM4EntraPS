@@ -113,8 +113,20 @@ function Get-PimGroupFacets {
 }
 
 function Read-PimPortalProfiles {
-    # Load config/portal-admins.json (sample fallback). Returns array of profiles.
+    # Returns the delegated portal-admin profiles (tier/level/service/scope scoping).
+    # SQL-FIRST (hosted, stateless container): the profiles live in SQL settings under
+    # key 'PortalAdmins' (JSON), loaded into $global:PIM_NamingConventions at startup --
+    # so delegation works with NO file share. Falls back to config/portal-admins.json
+    # for local/dev. This keeps the whole config (data, settings, RBAC, delegation) in SQL.
     param([string]$ConfigDir, [string]$ProfilesFile)
+    if (-not $ProfilesFile -and ($global:PIM_NamingConventions -is [hashtable]) -and $global:PIM_NamingConventions['PortalAdmins']) {
+        $raw = $global:PIM_NamingConventions['PortalAdmins']
+        try {
+            $parsed = $raw | ConvertFrom-Json
+            if ($parsed.PSObject.Properties['portalAdmins']) { return @($parsed.portalAdmins) }
+            return @($parsed)
+        } catch { Write-Warning "  [portal] SQL 'PortalAdmins' setting not valid JSON: $($_.Exception.Message)" }
+    }
     $f = $ProfilesFile
     if (-not $f) {
         $f = Join-Path $ConfigDir 'portal-admins.json'

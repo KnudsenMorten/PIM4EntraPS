@@ -68,36 +68,97 @@ function Register-PimEngineProvider {
     $script:PimEngineProviders["$($Provider.scope)".ToLowerInvariant()] = $Provider
 }
 function Get-PimEngineProvider { param([string]$Scope) $script:PimEngineProviders["$Scope".ToLowerInvariant()] }
-function Get-PimEngineScopes { @($script:PimEngineProviders.Values | ForEach-Object { $_.scope }) }
+function Get-PimEngineScopes {
+    # Ordered by provider.order (default 100) so an 'All' run honours dependencies:
+    # AdministrativeUnits -> Groups -> (role/resource/membership) assignments. Ties
+    # break by scope name for determinism.
+    @($script:PimEngineProviders.Values |
+        Sort-Object @{ e = { if ($_.order) { [int]$_.order } else { 100 } } }, @{ e = { "$($_.scope)" } } |
+        ForEach-Object { $_.scope })
+}
 
 # ---- default desired/live helpers -----------------------------------------
 function Get-PimDesiredRows {
     # DESIRED comes from SQL (pim.Rows) when the SQL store is active, else in-memory
     # ($global:PIM_DesiredRows[$entity]) for tests/offline.
+    # NB: Get-PimSqlRows REQUIRES -ConnectionString. It was called without one, so it
+    # errored silently -> 0 desired (the engine appeared to do nothing). Resolve the CS
+    # from the engine CS / in-memory CS / build from $global:PIM_SqlServer+Database.
     param([Parameter(Mandatory)][string]$Entity)
-    if (Get-Command Get-PimSqlRows -ErrorAction SilentlyContinue) { try { return @(Get-PimSqlRows -Entity $Entity) } catch {} }
+    if (Get-Command Get-PimSqlRows -ErrorAction SilentlyContinue) {
+        $cs = if ($global:PIM_EngineSqlCs) { $global:PIM_EngineSqlCs }
+              elseif ($global:PIM_SqlConnectionString) { $global:PIM_SqlConnectionString }
+              elseif ((Get-Command Get-PimSqlConnectionString -ErrorAction SilentlyContinue) -and ($global:PIM_SqlServer -or $global:PIM_SqlConnStringVault)) { Get-PimSqlConnectionString }
+              else { $null }
+        if ($cs) { try { return @(Get-PimSqlRows -ConnectionString $cs -Entity $Entity) } catch { Write-Warning "  [engine] SQL desired read failed for '$Entity': $($_.Exception.Message)" } }
+    }
     if ($global:PIM_DesiredRows -and $global:PIM_DesiredRows.ContainsKey($Entity)) { return @($global:PIM_DesiredRows[$Entity]) }
     return @()
 }
 
 # ---- orchestrator ---------------------------------------------------------
 function Invoke-PimEngineScope {
+    # -Changes feeds a COMMIT-QUEUE-FED delta: when supplied, the scope still diffs
+    # desired-vs-live, but only create/update/remove rows whose (entity,key) is present
+    # in $Changes are acted on. This is how a commit trigger applies just what changed
+    # (vs. -Mode Full = whole-scope reconcile, or -Mode Delta with no -Changes = create/
+    # update everything that differs). Each $Changes item = @{ Entity; Key }.
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)][string]$Scope,
         [ValidateSet('Full','Delta')][string]$Mode = 'Delta',
         [switch]$WhatIf,
-        [hashtable]$Context = @{}
+        [switch]$Prune,                              # destructive: actually remove live-not-in-desired (Full only)
+        [hashtable]$Context = @{},
+        [object[]]$Changes
     )
     $p = Get-PimEngineProvider -Scope $Scope
     if (-not $p) { return [pscustomobject]@{ scope=$Scope; ok=$false; detail="no provider for scope '$Scope'" } }
 
+    # Assignment scopes depend on groups/AUs/admins an earlier scope may have just created.
+    # INCREMENTAL refresh: those creates are appended to the directory cache by
+    # Add-PimContextObject as they happen, so we only need the cache LOADED here -- never a
+    # full Build-PimContext -Refresh (which re-fetched the whole tenant before every scope).
+    # refreshBefore now just guarantees the cache exists.
+    if ($p.refreshBefore -and (Get-Command Build-PimContext -ErrorAction SilentlyContinue) -and -not $Global:PimContextBuiltAt) {
+        try { Build-PimContext | Out-Null } catch { Write-Warning "  [engine] context load before '$Scope' failed: $($_.Exception.Message)" }
+    }
+
     $desired = @(& $p.GetDesired $Context)
     $live    = @(& $p.GetLive    $Context)
-    $diff = Compare-PimDesiredVsLive -Desired $desired -Live $live -KeyOf $p.KeyOf -Equal $p.Equal -Prune:($Mode -eq 'Full')
+    # Destructive prune (remove live items not in desired) is gated TWICE:
+    #   1. -Mode Full AND -Prune must BOTH be set (Full alone reconciles create/update only).
+    #      A partial/non-authoritative desired set must never silently disable real admins.
+    #   2. Never prune a scope whose desired set is EMPTY -- an empty desired is almost always
+    #      "this scope wasn't seeded / wasn't loaded", not "delete everything live".
+    $doPrune = ($Mode -eq 'Full') -and $Prune
+    if ($doPrune -and @($desired).Count -eq 0) {
+        Write-Host ("[engine] {0,-20} prune SKIPPED -- desired set is empty (refusing to remove {1} live items; not authoritative)" -f $Scope, @($live).Count) -ForegroundColor Yellow
+        $doPrune = $false
+    }
+    $diff = Compare-PimDesiredVsLive -Desired $desired -Live $live -KeyOf $p.KeyOf -Equal $p.Equal -Prune:$doPrune
+
+    # Commit-queue-fed delta: restrict the diff to only the queued (entity,key) pairs.
+    if ($PSBoundParameters.ContainsKey('Changes') -and $null -ne $Changes) {
+        $ent = if ($p.entity) { "$($p.entity)" } else { "$Scope" }
+        $allow = @{}
+        foreach ($c in @($Changes)) {
+            $ce = "$(if ($c.Entity) { $c.Entity } else { $c.entity })"
+            $ck = "$(if ($c.Key) { $c.Key } else { $c.key })"
+            if ($ce -and $ce.ToLowerInvariant() -eq $ent.ToLowerInvariant() -and $ck) { $allow[$ck.Trim().ToLowerInvariant()] = $true }
+        }
+        $sel = { param($arr) @($arr | Where-Object { $allow.ContainsKey("$($_.key)".Trim().ToLowerInvariant()) }) }
+        # NB: re-wrap each result in @() at the call site -- `& $sel` unwraps a single-element
+        # array back to a scalar, and `.Count` on a lone PSCustomObject is $null under StrictMode -Off.
+        $diff = [pscustomobject]@{ create = @(& $sel $diff.create); update = @(& $sel $diff.update); remove = @(& $sel $diff.remove); nochange = @($diff.nochange) }
+    }
+
+    # Progress logging (the old engine logged every step; customers expect to see it).
+    $tag = if ($WhatIf) { 'PLAN' } else { 'APPLY' }
+    Write-Host ("[engine] {0,-20} {1} {2}  desired={3} live={4}  create={5} update={6} remove={7} nochange={8}" -f `
+        $Scope, $Mode, $tag, @($desired).Count, @($live).Count, $diff.create.Count, $diff.update.Count, $diff.remove.Count, $diff.nochange.Count) -ForegroundColor Cyan
 
     $plan = New-Object System.Collections.Generic.List[object]
-    $applied = 0; $errors = 0
     $do = {
         param($op,$item,$handlerName)
         $entity = if ($p.entity) { "$($p.entity)" } else { "$Scope" }
@@ -105,31 +166,73 @@ function Invoke-PimEngineScope {
             $payload = if ($op -eq 'Remove') { $item.live } else { $item.desired }
             $plan.Add((New-PimChange -Entity $entity -Key "$($item.key)" -Op $op -By 'engine' -Payload $payload))
         } else { $plan.Add([pscustomobject]@{ entity=$entity; key="$($item.key)"; op=$op }) }
+        $sym = switch ($op) { 'Create' { '+' } 'Update' { '~' } 'Remove' { '-' } default { '?' } }
         if (-not $WhatIf -and $p.$handlerName) {
-            try { & $p.$handlerName $item $Context | Out-Null; $script:__applied++ } catch { $script:__errors++; Write-Warning "engine ${Scope} ${op} $($item.key): $($_.Exception.Message)" }
+            try { & $p.$handlerName $item $Context | Out-Null; $script:__applied++; Write-Host ("    [{0}] {1}" -f $sym, $item.key) -ForegroundColor Green }
+            catch {
+                $em = "$($_.Exception.Message)"
+                # Already-exists / conflict = the desired setting is already in place -> validate-and-skip,
+                # not a failure (idempotent re-run). Mirrors the legacy "RoleAssignmentExists ... skipping".
+                if ($em -match '(?i)RoleAssignmentExists|already exist|references already exist|ConflictingObjects|existing assignment|A conflicting object|RoleAssignmentRequestPolicyValidationFailed.*active|The Role assignment already exists') {
+                    $script:__skipped++; Write-Host ("    [=] {0} (exists -- validated, skipped)" -f $item.key) -ForegroundColor DarkGray
+                } elseif ($em -match '(?i)Nesting is currently not supported') {
+                    # Entra forbids nesting a group INTO a role-assignable group. Not retryable and
+                    # not an engine fault -- the data models an unsupported nesting. Skip + warn.
+                    $script:__skipped++; Write-Host ("    [!] {0} (skipped -- Entra: no group nesting into role-assignable groups; fix the data)" -f $item.key) -ForegroundColor Yellow
+                } else {
+                    $script:__errors++; Write-Host ("    [x] {0} {1} FAILED: {2}" -f $op, $item.key, $em) -ForegroundColor Red
+                }
+            }
+        } else {
+            Write-Host ("    [{0}] {1} (plan)" -f $sym, $item.key) -ForegroundColor DarkGray
         }
     }
-    $script:__applied = 0; $script:__errors = 0
+    $script:__applied = 0; $script:__errors = 0; $script:__skipped = 0
     foreach ($i in $diff.create) { & $do 'Create' $i 'ApplyCreate' }
     foreach ($i in $diff.update) { & $do 'Update' $i 'ApplyUpdate' }
     foreach ($i in $diff.remove) { & $do 'Remove' $i 'ApplyRemove' }   # only present in Full
+    Write-Host ("[engine] {0,-20} done  applied={1} skipped={2} errors={3}" -f $Scope, $script:__applied, $script:__skipped, $script:__errors) -ForegroundColor $(if ($script:__errors) { 'Yellow' } else { 'Green' })
 
     return [pscustomobject]@{
         scope=$Scope; mode=$Mode; whatIf=[bool]$WhatIf
         create=$diff.create.Count; update=$diff.update.Count; remove=$diff.remove.Count; nochange=$diff.nochange.Count
-        applied=$script:__applied; errors=$script:__errors; plan=$plan.ToArray(); ok=($script:__errors -eq 0)
+        applied=$script:__applied; skipped=$script:__skipped; errors=$script:__errors; plan=$plan.ToArray(); ok=($script:__errors -eq 0)
     }
 }
 
+function Get-PimEngineQueueChanges {
+    # Pull PENDING commit-queue rows as {Entity,Key} pairs for a queue-fed delta. Uses
+    # the SQL change queue when available; returns @() otherwise.
+    param([string]$ConnectionString)
+    $cs = if ($ConnectionString) { $ConnectionString }
+          elseif ($global:PIM_EngineSqlCs) { $global:PIM_EngineSqlCs }
+          elseif ($global:PIM_SqlConnectionString) { $global:PIM_SqlConnectionString }
+          elseif (Get-Command Get-PimSqlConnectionString -ErrorAction SilentlyContinue) { Get-PimSqlConnectionString }
+          else { $null }
+    if (-not $cs -or -not (Get-Command Get-PimSqlChangeQueue -ErrorAction SilentlyContinue)) { return @() }
+    try { return @(Get-PimSqlChangeQueue -ConnectionString $cs -Status 'pending' | ForEach-Object { [pscustomobject]@{ Entity = "$($_.Entity)"; Key = "$($_.Key)" } }) }
+    catch { Write-Warning "  [engine] queue read failed: $($_.Exception.Message)"; return @() }
+}
+
 function Invoke-PimEngine {
-    # Run one scope, or all registered scopes (Scope='All'). Mode Full/Delta. WhatIf =
-    # plan only. This is the entrypoint the scheduler/launcher calls.
+    # Run one scope, or all registered scopes (Scope='All').
+    #   -Mode Full           : whole-scope reconcile (create/update; prune ONLY with -Prune)
+    #   -Mode Full -Prune    : also REMOVE live items not in the desired set (destructive,
+    #                          opt-in -- guarded so a partial desired set can't disable real
+    #                          admins; an empty desired scope is never pruned)
+    #   -Mode Delta          : create/update everything that differs (no prune)
+    #   -Mode Delta -FromQueue / -Changes : apply ONLY the queued (entity,key) changes
+    # -WhatIf = plan only. This is the entrypoint the scheduler/launcher calls.
     [CmdletBinding()]
-    param([string]$Scope='All', [ValidateSet('Full','Delta')][string]$Mode='Delta', [switch]$WhatIf, [hashtable]$Context=@{})
+    param([string]$Scope='All', [ValidateSet('Full','Delta')][string]$Mode='Delta', [switch]$WhatIf, [switch]$Prune, [hashtable]$Context=@{}, [object[]]$Changes, [switch]$FromQueue)
+    if ($FromQueue -and -not $PSBoundParameters.ContainsKey('Changes')) { $Changes = Get-PimEngineQueueChanges }
+    $useChanges = ($FromQueue -or $PSBoundParameters.ContainsKey('Changes'))
+    $common = @{ Mode = $Mode; WhatIf = $WhatIf; Prune = $Prune; Context = $Context }
+    if ($useChanges) { $common['Changes'] = @($Changes) }
     if ("$Scope".ToLowerInvariant() -eq 'all') {
         $out = New-Object System.Collections.Generic.List[object]
-        foreach ($s in (Get-PimEngineScopes)) { $out.Add((Invoke-PimEngineScope -Scope $s -Mode $Mode -WhatIf:$WhatIf -Context $Context)) }
+        foreach ($s in (Get-PimEngineScopes)) { $out.Add((Invoke-PimEngineScope -Scope $s @common)) }
         return $out.ToArray()
     }
-    return Invoke-PimEngineScope -Scope $Scope -Mode $Mode -WhatIf:$WhatIf -Context $Context
+    return Invoke-PimEngineScope -Scope $Scope @common
 }

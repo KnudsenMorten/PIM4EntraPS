@@ -65,14 +65,14 @@ function Get-PimManagedIdentityToken {
   if ($env:IDENTITY_ENDPOINT -and $env:IDENTITY_HEADER) {
     $u = "$($env:IDENTITY_ENDPOINT)?resource=$res&api-version=2019-08-01"
     $r = Invoke-RestMethod -Method GET -Uri $u -Headers @{ 'X-IDENTITY-HEADER' = $env:IDENTITY_HEADER }
-    if ("$($r.access_token)") { Write-Host "  [mi] token via IDENTITY_ENDPOINT (len $($r.access_token.Length))" -ForegroundColor DarkGray }
+    if ("$($r.access_token)") { try { [System.Console]::Out.WriteLine("  [mi] token via IDENTITY_ENDPOINT (len $($r.access_token.Length))") } catch {} }  # Console.Out (not Write-Host): headless-safe from any scope (App Service has no console buffer; Write-Host throws there even from module scope)
     return [pscustomobject]@{ token = $r.access_token; expiresUtc = (ConvertTo-PimTokenExpiry $r.expires_on) }
   }
   # App Service (older / some Linux SKUs): MSI_ENDPOINT + MSI_SECRET (api 2017-09-01, header 'Secret')
   if ($env:MSI_ENDPOINT -and $env:MSI_SECRET) {
     $u = "$($env:MSI_ENDPOINT)?resource=$res&api-version=2017-09-01"
     $r = Invoke-RestMethod -Method GET -Uri $u -Headers @{ 'Secret' = $env:MSI_SECRET }
-    if ("$($r.access_token)") { Write-Host "  [mi] token via MSI_ENDPOINT (len $($r.access_token.Length))" -ForegroundColor DarkGray }
+    if ("$($r.access_token)") { try { [System.Console]::Out.WriteLine("  [mi] token via MSI_ENDPOINT (len $($r.access_token.Length))") } catch {} }  # Console.Out: headless-safe from any scope
     return [pscustomobject]@{ token = $r.access_token; expiresUtc = (ConvertTo-PimTokenExpiry $r.expires_on) }
   }
   # IMDS (Azure VM)
@@ -222,7 +222,11 @@ function Get-PimRestToken {
   $tenant = Get-PimTenantId -TenantId $TenantId
   $cid    = if ($ClientId) { $ClientId } elseif ($global:PIM_ClientId) { $global:PIM_ClientId } elseif ($env:AZURE_CLIENT_ID) { $env:AZURE_CLIENT_ID } else { $null }
   $sec    = if ($ClientSecret) { $ClientSecret } elseif ($global:PIM_ClientSecret) { $global:PIM_ClientSecret } elseif ($env:AZURE_CLIENT_SECRET) { $env:AZURE_CLIENT_SECRET } else { $null }
-  $cert   = if ($Certificate) { $Certificate } else { Resolve-PimCertificate -Thumbprint $CertThumbprint }
+  # Cert thumbprint: explicit -CertThumbprint, else the engine SPN global / env. This is
+  # the engine's real app-only auth (SPN + certificate, no secret) -- e.g. the
+  # PIM4EntraPS-Engine cert in LocalMachine\My / CurrentUser\My.
+  $thumb  = if ($CertThumbprint) { $CertThumbprint } elseif ($global:PIM_CertThumbprint) { $global:PIM_CertThumbprint } elseif ($env:PIM_CERT_THUMBPRINT) { $env:PIM_CERT_THUMBPRINT } else { $null }
+  $cert   = if ($Certificate) { $Certificate } else { Resolve-PimCertificate -Thumbprint $thumb }
 
   $res = $null
   # Explicit interactive request (break-glass): sign in as the human up front.

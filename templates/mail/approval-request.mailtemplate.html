@@ -1,17 +1,20 @@
-<!-- subject: Approval needed: {{RequestorUpn}} requests {{RoleName}} -->
+<!-- subject: Delegation approval needed: {{RequestorUpn}} -> {{RoleName}} -->
 <!-- tokens: ApproverName, RequestorUpn, RoleName, GroupName, Justification, RequestedAt, ApprovalUrl -->
-<!-- Sent to an approver when an activation needs their decision. To customize: copy to approval-request.mailtemplate.custom.html and edit. -->
+<!-- Sent to an approver when an admin's DELEGATION (assignment to a delegation / permission group) needs their
+     decision. This is DELEGATION-time approval, handled in our layer (PIM Manager / engine). ACTIVATION approval
+     is a SEPARATE mechanism handled natively by Entra PIM per the group's role-management policy and is NEVER
+     sent by this engine. To customize: copy to approval-request.mailtemplate.custom.html and edit. -->
 <html>
 <body style="font-family:Segoe UI,Arial,sans-serif; color:#24292f; font-size:14px;">
   <p>Hello {{ApproverName}},</p>
-  <p>A privileged activation is waiting for your approval:</p>
+  <p>A privileged <b>delegation</b> is waiting for your approval &mdash; an admin is being assigned to a delegation / permission group:</p>
   <table cellpadding="4" style="border-collapse:collapse; font-size:14px;">
     <tr><td><b>Requestor</b></td><td>{{RequestorUpn}}</td></tr>
     <tr><td><b>Role / group</b></td><td>{{RoleName}} ({{GroupName}})</td></tr>
     <tr><td><b>Justification</b></td><td>{{Justification}}</td></tr>
     <tr><td><b>Requested at</b></td><td>{{RequestedAt}}</td></tr>
   </table>
-  <p><a href="{{ApprovalUrl}}">Open the approval in the Entra portal</a> to approve or deny.</p>
-  <p style="color:#57606a;">Unanswered requests escalate to the next owner per the role's approval policy.</p>
+  <p><a href="{{ApprovalUrl}}">Open the approval request in the PIM Manager</a> to approve or deny.</p>
+  <p style="color:#57606a;">Unanswered requests escalate to the next owner per the delegation approval policy. (This is delegation approval only &mdash; activation of an eligible role is handled separately by Entra PIM.)</p>
 </body>
 </html>

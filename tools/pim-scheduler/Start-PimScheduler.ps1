@@ -51,6 +51,18 @@ Register-PimJobHandler -Type 'engine-delta' -Handler $engineHandler
 Register-PimJobHandler -Type 'engine-full'  -Handler $engineHandler
 Write-Host "[scheduler] REST engine wired (scopes: $((Get-PimEngineScopes) -join ', '))" -ForegroundColor Cyan
 
+# Worker-container scoping: $env:PIM_SCHED_JOBS (comma list of job types) makes this
+# container run only those jobs -- so the SAME image is deployed N times as
+# manager/scheduler/engine/connector/delta-queue/discovery workers, each scoped via env.
+# Unset/empty = all jobs (single all-in-one runner). "Don't know how many" -> config-driven.
+if ("$env:PIM_SCHED_JOBS".Trim()) {
+    $only = "$env:PIM_SCHED_JOBS" -split '[,; ]+' | Where-Object { $_ }
+    $kept = Select-PimJobHandlers -Only $only
+    Write-Host ("[scheduler] job filter PIM_SCHED_JOBS -> running ONLY: {0}" -f ($kept -join ', ')) -ForegroundColor Yellow
+} else {
+    Write-Host ("[scheduler] no job filter -> running ALL: {0}" -f ((Get-PimJobHandlerTypes) -join ', ')) -ForegroundColor DarkCyan
+}
+
 $iv = if ($IntervalSeconds -gt 0) { $IntervalSeconds } elseif ($env:PIM_SCHED_INTERVAL) { [int]$env:PIM_SCHED_INTERVAL } else { 300 }
 
 if ($Once) {
