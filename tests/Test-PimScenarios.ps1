@@ -36,7 +36,11 @@ function Invoke-ScenarioValidation([hashtable]$Files) {
     function global:Get-PimNamingConventions { $global:PIM_NamingConventions }
     function global:Get-PimCsvBases { @('Account-Definitions-Admins','PIM-Assignments-Admins','PIM-Definitions-Roles','PIM-Definitions-Tasks','PIM-Definitions-Services','PIM-Definitions-Processes','PIM-Definitions-Resources','PIM-Definitions-Departments','PIM-Definitions-Organization','PIM-Definitions-AU','PIM-Assignments-Groups','PIM-Assignments-Roles-Groups','PIM-Assignments-Roles-AUs','PIM-Assignments-Azure-Resources','PIM-Assignments-Workloads') | ForEach-Object { [pscustomobject]@{ base=$_ } } }
     function global:Resolve-PimCsvPath { param([string]$BaseName) $p=Join-Path $script:scnDir "$BaseName.custom.csv"; if (Test-Path $p) { $p } else { $null } }
-    function global:Read-PimCsvRows { param([string]$BaseName)
+    # The validator reads every CSV through Read-PimRows (renamed from Read-PimCsvRows
+    # in v2.4.172 "drop Csv from reader name"); stub THAT name or the validator's
+    # try/catch swallows the missing-function error and loads every CSV empty,
+    # silently passing every negative scenario.
+    function global:Read-PimRows { param([string]$BaseName)
         $p = Resolve-PimCsvPath -BaseName $BaseName
         if (-not $p) { return @{ header=@(); rows=@(); source='none'; path=$null } }
         $rows = @(Import-Csv -Path $p -Delimiter ';')

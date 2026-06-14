@@ -98,6 +98,19 @@ function Register-PimJobHandler {
     $script:PimJobHandlers["$Type".ToLowerInvariant()] = $Handler
 }
 function Get-PimJobHandler { param([string]$Type) $script:PimJobHandlers["$Type".ToLowerInvariant()] }
+function Get-PimJobHandlerTypes { @($script:PimJobHandlers.Keys) }
+
+function Select-PimJobHandlers {
+    # Worker-container scoping: keep ONLY the named job types, drop the rest. Lets one
+    # image run as any subset of workers (manager+all-in-one, or split engine /
+    # connector / delta-queue / discovery containers) purely via $env:PIM_SCHED_JOBS.
+    # No filter (empty) = run everything.
+    param([string[]]$Only)
+    $keep = @($Only | Where-Object { "$_".Trim() } | ForEach-Object { "$_".Trim().ToLowerInvariant() })
+    if ($keep.Count -eq 0) { return @($script:PimJobHandlers.Keys) }
+    foreach ($t in @($script:PimJobHandlers.Keys)) { if ($t -notin $keep) { [void]$script:PimJobHandlers.Remove($t) } }
+    return @($script:PimJobHandlers.Keys)
+}
 
 function Initialize-PimDefaultJobHandlers {
     # Wire handlers to the EXISTING logic where it's present; otherwise a clearly

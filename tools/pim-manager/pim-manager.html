@@ -13,7 +13,8 @@
   // MSP multi-instance: { active: 'local', instances: [{name, configRoot}, ...] }.
   // More than one instance -> the header shows an instance switcher.
   window.PIM_INSTANCES_BOOT = __PIM_INSTANCES__;
-  // Manager RBAC (phase 7): { role: 'Reader|Admin|SuperAdmin', identity, source }.
+  // Manager RBAC: { role: 'Reader|Delegated|Admin|SuperAdmin', identity, source }.
+  // Delegated = workload owner; data is scoped server-side to groups they own.
   // The server enforces; this only drives what the UI shows.
   window.PIM_ROLE_BOOT = __PIM_ROLE__;
 </script>
@@ -940,7 +941,9 @@
     const h = [];
     h.push(`<div style="margin-bottom:16px;"><span style="font-size:11px;text-transform:uppercase;letter-spacing:.5px;color:#0969da;font-weight:600;">Your access</span>` +
       `<div style="font-size:13px;margin-top:4px;">Role: <b>${esc(PIM_ROLE)}</b> &mdash; ${esc((window.PIM_ROLE_BOOT && window.PIM_ROLE_BOOT.identity) || '')} <span style="color:#57606a">(${esc((window.PIM_ROLE_BOOT && window.PIM_ROLE_BOOT.source) || '')})</span></div>` +
-      `<div style="color:#57606a;font-size:11.5px;margin-top:2px;">Reader = view only &middot; Admin = stage/commit + revoke &middot; SuperAdmin = instances, emergency override, maintenance. Mapping file: <code>config/manager-access.custom.json</code>.</div></div>`);
+      `<div style="color:#57606a;font-size:11.5px;margin-top:2px;">Reader = view only &middot; Delegated = view only, scoped to the groups you own &middot; Admin = stage/commit + revoke &middot; SuperAdmin = instances, emergency override, maintenance. Mapping: <code>config/manager-access.custom.json</code> or env <code>PIM_DelegatedAdmins</code>.</div>` +
+      (PIM_ROLE === 'Delegated' ? `<div style="margin-top:6px;padding:6px 10px;background:#ddf4ff;border:1px solid #54aeff;border-radius:6px;font-size:12px;">Delegated workload-owner view &mdash; you only see the PIM groups you own and the assignments that reference them.</div>` : '') +
+      `</div>`);
 
     // License panel (offline .pimlicense -- Core is free, Pro features gate)
     if (lic) {

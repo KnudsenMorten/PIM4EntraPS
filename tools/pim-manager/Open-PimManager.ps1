@@ -154,6 +154,12 @@ if (Test-Path -LiteralPath $_portalLib) { . $_portalLib }
 $_wizardLib = Join-Path $solutionRoot 'engine\_shared\PIM-PermissionWizard.ps1'
 if (Test-Path -LiteralPath $_wizardLib) { . $_wizardLib }
 
+# Pure-REST token core (engine/_shared/PIM-Rest.ps1) -- dot-sourced into THIS
+# (script) scope so the MI/SQL token mint runs in the same scope as the storage
+# block + New-PimSqlConnection (and, on Windows headless, the Write-Host shim).
+$_restLib = Join-Path $solutionRoot 'engine\_shared\PIM-Rest.ps1'
+if (Test-Path -LiteralPath $_restLib) { . $_restLib }
+
 # SQL-only data layer (engine/_shared/PIM-SqlStore.ps1 + its change-queue dep) --
 # powers the SQL storage backend. Raw ADO.NET; connection string resolved from
 # KV / in-memory, never a file.
@@ -200,6 +206,24 @@ function Get-PimManagerRole {
         # hosted with no authenticated principal = no Easy Auth in front -> deny.
         return @{ role = 'Reader'; identity = '<unauthenticated>'; source = 'hosted: no Easy Auth principal (fail closed)' }
     }
+    # Hosted role config via env (SQL-only deployments ship NO manager-access file):
+    #   PIM_SuperAdmins / PIM_Admins = comma list of identities (UPN/email)
+    #   PIM_HostedDefaultRole        = role for any OTHER authenticated user (default: Reader)
+    if ($script:PimHosted) {
+        $whoLc  = "$who".ToLowerInvariant()
+        $supers = @("$env:PIM_SuperAdmins" -split '[,;]+' | ForEach-Object { $_.Trim().ToLowerInvariant() } | Where-Object { $_ })
+        $admins = @("$env:PIM_Admins"      -split '[,;]+' | ForEach-Object { $_.Trim().ToLowerInvariant() } | Where-Object { $_ })
+        if ($supers -contains $whoLc) { return @{ role = 'SuperAdmin'; identity = $who; source = 'env PIM_SuperAdmins' } }
+        if ($admins -contains $whoLc) { return @{ role = 'Admin';      identity = $who; source = 'env PIM_Admins' } }
+        # Delegated (workload owner): sees ONLY the groups they own. Identity match here;
+        # the data layer (Read-PimRows) scopes rows to groups whose Owners include them.
+        $delegs = @("$env:PIM_DelegatedAdmins" -split '[,;]+' | ForEach-Object { $_.Trim().ToLowerInvariant() } | Where-Object { $_ })
+        if ($delegs -contains $whoLc) { return @{ role = 'Delegated'; identity = $who; source = 'env PIM_DelegatedAdmins' } }
+        if ("$env:PIM_HostedDefaultRole".Trim()) {
+            $dr = "$env:PIM_HostedDefaultRole".Trim(); if ($dr -notin @('Reader','Admin','SuperAdmin')) { $dr = 'Reader' }
+            return @{ role = $dr; identity = $who; source = 'env PIM_HostedDefaultRole' }
+        }
+    }
     $f = Join-Path $script:configRoot 'manager-access.custom.json'
     if (-not (Test-Path -LiteralPath $f)) {
         # Local single-operator install -> SuperAdmin (backward-compatible). HOSTED
@@ -213,7 +237,7 @@ function Get-PimManagerRole {
         foreach ($e in @($list)) {
             if ("$($e.identity)" -and ("$($e.identity)".ToLowerInvariant() -eq $who.ToLowerInvariant())) {
                 $r = "$($e.role)"
-                if ($r -notin @('Reader', 'Admin', 'SuperAdmin')) { $r = 'Reader' }
+                if ($r -notin @('Reader', 'Admin', 'SuperAdmin', 'Delegated')) { $r = 'Reader' }
                 return @{ role = $r; identity = $who; source = 'manager-access.custom.json' }
             }
         }
@@ -226,7 +250,9 @@ function Get-PimManagerRole {
 
 function Test-PimManagerRoleAtLeast {
     param([Parameter(Mandatory)][ValidateSet('Reader', 'Admin', 'SuperAdmin')][string]$Minimum)
-    $rank = @{ Reader = 0; Admin = 1; SuperAdmin = 2 }
+    # Delegated ranks as Reader for write-gates (read-only); its scope filter limits what
+    # it sees. Elevating Delegated to manage its own groups is a later epic phase.
+    $rank = @{ Reader = 0; Delegated = 0; Admin = 1; SuperAdmin = 2 }
     $rank[(Get-PimManagerRole).role] -ge $rank[$Minimum]
 }
 
@@ -337,7 +363,7 @@ function Invoke-PimManagerCsvSchemaUpgrade {
 #
 # SQL note: when instances move from per-customer CSV folders to per-customer
 # SQL databases, Set-PimManagerInstance is the seam -- the registry entry
-# grows a connection-string field and Read-PimCsvRows/Write-PimCsvCustom get
+# grows a connection-string field and Read-PimRows/Write-PimCsvCustom get
 # a SQL-backed implementation; nothing above this layer changes.
 # ---------------------------------------------------------------------------
 
@@ -398,6 +424,19 @@ function Get-PimManagerInstances {
             Write-Warning "instances.custom.json could not be parsed: $($_.Exception.Message) -- only the 'local' instance is available."
         }
     }
+    # SQL-mode: expose each configured SQL database as a selectable instance, so the
+    # existing GUI instance dropdown doubles as the SQL-DB selector (MSP / multi-DB).
+    # $env:PIM_SqlDatabases = comma list (the active $global:PIM_SqlDatabase is always
+    # included). configRoot points at the solution config so existence checks pass;
+    # the sqlDatabase field is what Set-PimManagerInstance switches.
+    if ($script:PimStorageMode -eq 'sql') {
+        $dbs = New-Object System.Collections.Generic.List[string]
+        if ($global:PIM_SqlDatabase) { $dbs.Add("$($global:PIM_SqlDatabase)") }
+        foreach ($d in ("$env:PIM_SqlDatabases" -split '[,; ]+' | Where-Object { $_ })) { if ($dbs -notcontains $d) { $dbs.Add($d) } }
+        foreach ($db in $dbs) {
+            [void]$list.Add(@{ name = "sql:$db"; configRoot = (Join-Path $solutionRoot 'config'); outputRoot = (Join-Path $solutionRoot 'output'); sqlDatabase = $db })
+        }
+    }
     return ,$list.ToArray()
 }
 
@@ -408,6 +447,23 @@ function Set-PimManagerInstance {
     $inst = $null
     foreach ($i in (Get-PimManagerInstances)) { if ($i.name -eq $Name) { $inst = $i; break } }
     if (-not $inst) { throw "Unknown instance '$Name'. Declare it in $instancesFile." }
+
+    # SQL-DB switch: re-point the active database on the same server (MI token is
+    # server-scoped, so it works across DBs; the MI must be a contained user in each
+    # target DB). Reloads settings from the new DB and clears per-instance caches.
+    if ($inst.sqlDatabase) {
+        $global:PIM_SqlDatabase = "$($inst.sqlDatabase)"
+        $script:PimSqlCs = Get-PimSqlConnectionString
+        $tc = New-PimSqlConnection -ConnectionString $script:PimSqlCs; $tc.Open(); $tc.Close()
+        Initialize-PimSqlStore -ConnectionString $script:PimSqlCs
+        $sqlSettings = Get-PimAllSqlSettings -ConnectionString $script:PimSqlCs
+        if (-not ($global:PIM_NamingConventions -is [hashtable])) { $global:PIM_NamingConventions = @{} }
+        foreach ($k in @($sqlSettings.Keys)) { $global:PIM_NamingConventions[$k] = $sqlSettings[$k] }
+        $script:PimStorageMode = 'sql'; $script:PimInstanceName = $inst.name
+        $script:PimActiveAssignmentsCache = $null; $script:PimActiveAssignmentsCacheLoadedUtc = $null
+        Write-Host "  [store] switched SQL database -> $($global:PIM_SqlDatabase)" -ForegroundColor Cyan
+        return
+    }
     if (-not (Test-Path -LiteralPath $inst.configRoot)) { throw "Instance '$Name': config folder not found: $($inst.configRoot)" }
     if (-not (Test-Path -LiteralPath $inst.outputRoot)) { New-Item -ItemType Directory -Path $inst.outputRoot -Force | Out-Null }
 
@@ -588,9 +644,78 @@ function Resolve-PimCsvPath {
     return $null
 }
 
-function Read-PimCsvRows {
-    # Returns hashtable: @{ header = string[]; rows = ordered[]; source = 'custom'|'locked'|'none'; path = string }
-    param([Parameter(Mandatory)][string]$BaseName)
+# --- Delegated (workload-owner) visibility scoping --------------------------------
+# A 'Delegated' Manager user sees ONLY the groups they own (their identity in the
+# definition's Owners/SponsorUpn) plus the assignment rows that reference those groups
+# (by GroupTag / Target/SourceGroupTag). SuperAdmin/Admin/Reader are unscoped.
+function Get-PimCell { param($Row, [string]$Col)
+    if ($null -eq $Row) { return '' }
+    if ($Row -is [System.Collections.IDictionary]) { if ($Row.Contains($Col)) { return "$($Row[$Col])" }; return '' }
+    $p = $Row.PSObject.Properties[$Col]; if ($p) { return "$($p.Value)" }; return ''
+}
+function Get-PimDelegatedOwnedScope {
+    param([string]$Identity)
+    if (-not "$Identity".Trim()) { return $null }
+    if ($script:PimDelegScopeFor -eq $Identity -and $script:PimDelegScope) { return $script:PimDelegScope }
+    $idLc = $Identity.ToLowerInvariant(); $tags = @{}; $names = @{}
+    # Department -> owner UPNs, so ownership inherited via a group's Department resolves the
+    # same way the engine does (Owners/SponsorUpn direct, else the dept contact).
+    $deptOwners = @{}
+    foreach ($dr in @((Read-PimRows -BaseName 'PIM-Definitions-Departments' -NoScope).rows)) {
+        $dn = (Get-PimCell $dr 'Department'); if (-not $dn) { $dn = (Get-PimCell $dr 'DepartmentName') }
+        $do = (Get-PimCell $dr 'Owners'); if (-not $do) { $do = (Get-PimCell $dr 'ManagerEmail') }
+        if ($dn) { $deptOwners[$dn.ToLowerInvariant()] = @($do -split '[|;,]' | ForEach-Object { $_.Trim().ToLowerInvariant() } | Where-Object { $_ }) }
+    }
+    foreach ($e in @('PIM-Definitions-Roles', 'PIM-Definitions-Services', 'PIM-Definitions-Organization', 'PIM-Definitions-Tasks')) {
+        $res = Read-PimRows -BaseName $e -NoScope
+        foreach ($r in @($res.rows)) {
+            $own = (Get-PimCell $r 'Owners'); $sp = (Get-PimCell $r 'SponsorUpn')
+            $owns = @("$own|$sp" -split '[|;,]' | ForEach-Object { $_.Trim().ToLowerInvariant() } | Where-Object { $_ })
+            $isOwner = ($owns -contains $idLc)
+            if (-not $isOwner) {
+                $dept = (Get-PimCell $r 'Department'); if ($dept -and $deptOwners.ContainsKey($dept.ToLowerInvariant())) { $isOwner = ($deptOwners[$dept.ToLowerInvariant()] -contains $idLc) }
+            }
+            if ($isOwner) {
+                $gn = (Get-PimCell $r 'GroupName'); if ($gn) { $names[$gn.ToLowerInvariant()] = $true }
+                $gt = (Get-PimCell $r 'GroupTag');  if ($gt) { $tags[$gt.ToLowerInvariant()] = $true }
+            }
+        }
+    }
+    $script:PimDelegScopeFor = $Identity; $script:PimDelegScope = @{ tags = $tags; names = $names }
+    return $script:PimDelegScope
+}
+function Test-PimRowInScope {
+    param($Row, $Scope)
+    $gn = (Get-PimCell $Row 'GroupName'); if ($gn -and $Scope.names.ContainsKey($gn.ToLowerInvariant())) { return $true }
+    foreach ($c in @('GroupTag', 'TargetGroupTag', 'SourceGroupTag')) { $v = (Get-PimCell $Row $c); if ($v -and $Scope.tags.ContainsKey($v.ToLowerInvariant())) { return $true } }
+    return $false
+}
+function Limit-PimRowsToScope {
+    param([hashtable]$Result, [string]$BaseName, [switch]$NoScope)
+    if ($NoScope) { return $Result }
+    $role = Get-PimManagerRole
+    if ("$($role.role)" -ne 'Delegated') { return $Result }
+    $scope = Get-PimDelegatedOwnedScope -Identity "$($role.identity)"
+    if (-not $scope) { $Result.rows = @(); return $Result }
+    $Result.rows = @(@($Result.rows) | Where-Object { Test-PimRowInScope -Row $_ -Scope $scope })
+    return $Result
+}
+
+function Read-PimRows {
+    # Returns hashtable: @{ header = string[]; rows = ordered[]; source = 'custom'|'locked'|'none'|'sql'; path = string }
+    # -NoScope bypasses Delegated visibility scoping (used internally to build the scope).
+    param([Parameter(Mandatory)][string]$BaseName, [switch]$NoScope)
+    # SQL-only mode (hosted): rows live in SQL, NOT in CSV files (the image ships no
+    # customer CSVs). Make this the single chokepoint so EVERY caller -- the page
+    # model, diff, validate, commit -- reads from SQL. Falls through to CSV only when
+    # not in SQL mode (local/dev).
+    if ($script:PimStorageMode -eq 'sql' -and $script:PimSqlCs -and (Get-Command Get-PimSqlRows -ErrorAction SilentlyContinue)) {
+        $spec = Get-PimCsvSpec -BaseName $BaseName
+        $hdr  = if ($spec) { @($spec.defaultHeader) } else { @() }
+        $sqlRows = @(Get-PimSqlRows -ConnectionString $script:PimSqlCs -Entity $BaseName)
+        if (($hdr.Count -eq 0) -and $sqlRows.Count -gt 0) { $hdr = @($sqlRows[0].PSObject.Properties.Name) }
+        return (Limit-PimRowsToScope -Result @{ header = $hdr; rows = $sqlRows; source = 'sql'; path = "sql:$BaseName" } -BaseName $BaseName -NoScope:$NoScope)
+    }
     $resolved = Resolve-PimCsvPath -BaseName $BaseName
     $spec = Get-PimCsvSpec -BaseName $BaseName
     if (-not $resolved) {
@@ -632,7 +757,7 @@ function Read-PimCsvRows {
         }
         [void]$rows.Add($obj)
     }
-    return @{ header = $headerCols; rows = $rows.ToArray(); source = $resolved.Source; path = $resolved.Path }
+    return (Limit-PimRowsToScope -Result @{ header = $headerCols; rows = $rows.ToArray(); source = $resolved.Source; path = $resolved.Path } -BaseName $BaseName -NoScope:$NoScope)
 }
 
 function Write-PimCsvCustom {
@@ -644,7 +769,7 @@ function Write-PimCsvCustom {
     )
     $spec = Get-PimCsvSpec -BaseName $BaseName
     if (-not $spec) { throw "Unknown CSV base name: $BaseName" }
-    $current = Read-PimCsvRows -BaseName $BaseName
+    $current = Read-PimRows -BaseName $BaseName
     $header = New-Object System.Collections.ArrayList
     foreach ($h in $current.header) { [void]$header.Add($h) }
     # Add any extra columns the client introduced, append at end (stable order from first occurrence).
@@ -872,22 +997,22 @@ function Get-PimNamingConventions {
 # ---------------------------------------------------------------------------
 
 function Build-PimGraphData {
-    $admins        = (Read-PimCsvRows 'Account-Definitions-Admins').rows
+    $admins        = (Read-PimRows 'Account-Definitions-Admins').rows
 
-    $defRoles      = (Read-PimCsvRows 'PIM-Definitions-Roles').rows
-    $defTasks      = (Read-PimCsvRows 'PIM-Definitions-Tasks').rows
-    $defServices   = (Read-PimCsvRows 'PIM-Definitions-Services').rows
-    $defProcesses  = (Read-PimCsvRows 'PIM-Definitions-Processes').rows
-    $defResources  = (Read-PimCsvRows 'PIM-Definitions-Resources').rows
-    $defDepts      = (Read-PimCsvRows 'PIM-Definitions-Departments').rows
-    $defAUs        = (Read-PimCsvRows 'PIM-Definitions-AU').rows
-    $defOrg        = (Read-PimCsvRows 'PIM-Definitions-Organization').rows
+    $defRoles      = (Read-PimRows 'PIM-Definitions-Roles').rows
+    $defTasks      = (Read-PimRows 'PIM-Definitions-Tasks').rows
+    $defServices   = (Read-PimRows 'PIM-Definitions-Services').rows
+    $defProcesses  = (Read-PimRows 'PIM-Definitions-Processes').rows
+    $defResources  = (Read-PimRows 'PIM-Definitions-Resources').rows
+    $defDepts      = (Read-PimRows 'PIM-Definitions-Departments').rows
+    $defAUs        = (Read-PimRows 'PIM-Definitions-AU').rows
+    $defOrg        = (Read-PimRows 'PIM-Definitions-Organization').rows
 
-    $asgnAdmins    = (Read-PimCsvRows 'PIM-Assignments-Admins').rows
-    $asgnGroups    = (Read-PimCsvRows 'PIM-Assignments-Groups').rows
-    $asgnRolesGrp  = (Read-PimCsvRows 'PIM-Assignments-Roles-Groups').rows
-    $asgnRolesAU   = (Read-PimCsvRows 'PIM-Assignments-Roles-AUs').rows
-    $asgnAzRes     = (Read-PimCsvRows 'PIM-Assignments-Azure-Resources').rows
+    $asgnAdmins    = (Read-PimRows 'PIM-Assignments-Admins').rows
+    $asgnGroups    = (Read-PimRows 'PIM-Assignments-Groups').rows
+    $asgnRolesGrp  = (Read-PimRows 'PIM-Assignments-Roles-Groups').rows
+    $asgnRolesAU   = (Read-PimRows 'PIM-Assignments-Roles-AUs').rows
+    $asgnAzRes     = (Read-PimRows 'PIM-Assignments-Azure-Resources').rows
 
     $nodes = New-Object System.Collections.ArrayList
     $edges = New-Object System.Collections.ArrayList
@@ -1877,7 +2002,8 @@ function Handle-Request {
         })
         $html = [System.IO.File]::ReadAllText($template, [System.Text.UTF8Encoding]::new($true))
         $roleJson = (Get-PimManagerRole | ConvertTo-Json -Compress)
-        $html = $html.Replace('__PIM_DATA__', $json).Replace('__PIM_TOKEN__', $ExpectedToken).Replace('__PIM_MODE__', 'server').Replace('__PIM_NAMING__', $namingJson).Replace('__PIM_TENANT_LISTS__', $tenantJson).Replace('__PIM_INSTANCES__', $instJson).Replace('__PIM_VERSION__', (Get-PimSolutionVersion)).Replace('__PIM_ROLE__', $roleJson)
+        $modeLabel = if ($script:PimStorageMode -eq 'sql') { "SQL: $($global:PIM_SqlDatabase)" } else { 'server' }
+        $html = $html.Replace('__PIM_DATA__', $json).Replace('__PIM_TOKEN__', $ExpectedToken).Replace('__PIM_MODE__', $modeLabel).Replace('__PIM_NAMING__', $namingJson).Replace('__PIM_TENANT_LISTS__', $tenantJson).Replace('__PIM_INSTANCES__', $instJson).Replace('__PIM_VERSION__', (Get-PimSolutionVersion)).Replace('__PIM_ROLE__', $roleJson)
         Write-HtmlResponse -Response $resp -Html $html
         $script:lastHeartbeat = Get-Date
         return 200
@@ -1925,7 +2051,7 @@ function Handle-Request {
                     $rows = @(Get-PimSqlRows -ConnectionString $script:PimSqlCs -Entity $base)
                     $payload = [ordered]@{ path = 'sql'; source = 'sql'; header = @($spec.defaultHeader) }
                 } else {
-                    $payload = Read-PimCsvRows -BaseName $base
+                    $payload = Read-PimRows -BaseName $base
                     $rows = @($payload.rows)
                 }
                 # Portal-admin read scoping: a delegated GUI-manager (non-super,
@@ -1960,7 +2086,7 @@ function Handle-Request {
                 $rowsOrdered = @($rowsRaw | ForEach-Object { ConvertTo-OrderedRow $_ } | Where-Object { $_ -ne $null })
 
                 # Diff against current state (SQL or CSV) for the audit log.
-                $current = if ($sqlMode) { @{ rows = @(Get-PimSqlRows -ConnectionString $script:PimSqlCs -Entity $base) } } else { Read-PimCsvRows -BaseName $base }
+                $current = if ($sqlMode) { @{ rows = @(Get-PimSqlRows -ConnectionString $script:PimSqlCs -Entity $base) } } else { Read-PimRows -BaseName $base }
                 $diff = Compare-PimRowSets -Before $current.rows -After $rowsOrdered
 
                 if ($sqlMode) {
@@ -2325,7 +2451,7 @@ function Handle-Request {
                         foreach ($baseProp in $tpl.rows.PSObject.Properties) {
                             $base = $baseProp.Name
                             if (-not (Get-PimCsvSpec -BaseName $base)) { continue }
-                            $current = Read-PimCsvRows -BaseName $base
+                            $current = Read-PimRows -BaseName $base
                             $existing = @{}
                             foreach ($r in $current.rows) {
                                 $k = Get-PimTemplateRowKey -Base $base -Row ([pscustomobject]$r)
@@ -2731,7 +2857,7 @@ function Handle-Request {
             $rowsRaw = @()
             if ($body -and $body.rows) { $rowsRaw = @($body.rows) }
             $rowsOrdered = @($rowsRaw | ForEach-Object { ConvertTo-OrderedRow $_ } | Where-Object { $_ -ne $null })
-            $current = Read-PimCsvRows -BaseName $base
+            $current = Read-PimRows -BaseName $base
             $diff = Compare-PimRowSets -Before $current.rows -After $rowsOrdered
             Write-JsonResponse -Response $resp -Status 200 -Body ([ordered]@{
                 base     = $base

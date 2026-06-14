@@ -57,11 +57,26 @@ Assert "delta plan: 1 create + 1 update, 0 remove" ($r.create -eq 1 -and $r.upda
 Assert "WhatIf applied nothing"          ($r.applied -eq 0 -and $script:created -eq 0 -and $script:updated -eq 0)
 Assert "plan carries change records"     ($r.plan.Count -eq 2)
 
-# Full + commit -> applies create+update+remove
+# Full WITHOUT -Prune -> create+update only (destructive prune is opt-in)
 $script:created=0; $script:updated=0; $script:removed=0
-$r2 = Invoke-PimEngineScope -Scope 'UnitTest' -Mode Full
-Assert "full commit applied 3 (create+update+remove)" ($r2.applied -eq 3 -and $script:created -eq 1 -and $script:updated -eq 1 -and $script:removed -eq 1)
-Assert "full commit ok, no errors"       ($r2.ok -and $r2.errors -eq 0)
+$rFullNoPrune = Invoke-PimEngineScope -Scope 'UnitTest' -Mode Full
+Assert "full (no -Prune) applies create+update only, no remove" ($rFullNoPrune.applied -eq 2 -and $script:created -eq 1 -and $script:updated -eq 1 -and $script:removed -eq 0)
+Assert "full (no -Prune) reports 0 removals"                    ($rFullNoPrune.remove -eq 0)
+
+# Full + -Prune + commit -> applies create+update+remove (the explicit destructive path)
+$script:created=0; $script:updated=0; $script:removed=0
+$r2 = Invoke-PimEngineScope -Scope 'UnitTest' -Mode Full -Prune
+Assert "full -Prune applied 3 (create+update+remove)" ($r2.applied -eq 3 -and $script:created -eq 1 -and $script:updated -eq 1 -and $script:removed -eq 1)
+Assert "full -Prune ok, no errors"       ($r2.ok -and $r2.errors -eq 0)
+
+# Full + -Prune but EMPTY desired -> refuse to prune (guard: empty desired is not authoritative)
+$script:removedEmpty=0
+Register-PimEngineProvider -Provider @{
+    scope='EmptyDesired'; GetDesired={ param($ctx) @() }; GetLive={ param($ctx) @([pscustomobject]@{ id='x'; val='1' }) }
+    KeyOf=$keyOf; Equal=$equal; ApplyRemove={ param($i,$c) $script:removedEmpty++ }
+}
+$rEmpty = Invoke-PimEngineScope -Scope 'EmptyDesired' -Mode Full -Prune
+Assert "empty-desired Full -Prune removes nothing (guard)" ($rEmpty.remove -eq 0 -and $script:removedEmpty -eq 0)
 
 # unknown scope -> graceful
 $r3 = Invoke-PimEngineScope -Scope 'DoesNotExist'

@@ -1,39 +1,39 @@
 # Release notes for PIM4EntraPS
 
-## v2.4.216
+## v2.4.217
 
 Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monorepo:
 
-- feat(pim): native Windows App Service host + break-glass emergency console (c918ff8a)
-- diag(pim): boot MI self-test (documented IDENTITY_ENDPOINT snippet) for the SQL resource (2d0b02d4)
-- chore(pim): log MI env presence at boot (IDENTITY_ENDPOINT/MSI_ENDPOINT) — diagnose App Service vs ACI MI (913f8a0b)
-- fix(pim): SQL token SPN fallback when MI not wired (PIM_SqlClientId/Secret) — temp workaround (f297578b)
-- fix(pim): MI token supports both App Service conventions (IDENTITY_ENDPOINT + MSI_ENDPOINT) + robust expiry + path logging (b0dd9bd0)
-- fix(pim): force Managed Identity for the SQL token in hosted/MI context (was 'Login failed for user ""') (b495871b)
-- fix(pim): surface real SQL connect error at boot (direct open, not swallowed Test) (e0cf1370)
-- fix(pim): hosted storage is SQL-ONLY (no CSV fallback) — fail loud with the reason (c05f14d9)
-- fix(pim): hosted SQL data path — env-aware settings, cross-platform SQL driver (pinned DLL, no PS module), MI token, Azure CS, loud diagnostics (e7923ce1)
-- feat(pim): new engine — EntraRoles provider (PIM directory-role enablement over REST) (c076ab97)
-- feat(pim): NEW REST+SQL engine core (provider model) — replaces legacy CSV engine (5541d06c)
-- chore(pim): add /legacy retirement policy — incremental moves gated on REST write-path + sync coordination (CSV engine still wired, nothing safe to move yet) (13540894)
-- feat(pim): scheduler/job runner — phase-split delta, discovery x3, commit-only triggers + watermark (VM + container) (53cb693e)
-- docs(pim): execution model — in-container scheduler (not Functions/webhooks/Logic Apps); job table; build-status note (job logic exists, runner loop is the remaining piece) (49b1eb81)
-- docs(pim): correct MSP model — 2 SQL DBs (MSP template DB + per-customer LOCAL DB), pull-not-push MSP->local; customer data never leaves tenant; rings drive which template version is pulled (81e9848c)
-- docs(pim): hosting architecture — single-tenant + MSP drawings; no-fragile-deps (pure REST) tenet; SQL seed/bootstrap script (6491433d)
-- feat(pim): engine imports module-free; ARM token via REST; null-safe approver matrix (7a76ed14)
-- feat(pim): REST-only engine proven live (full CRUD, no modules) + REST error surfacing (7dfec006)
-- feat(pim): pure-REST core — engine reads + auth run with no Graph/Az modules (cfe7dd9a)
-- test(pim): live delegation lab — workload-owner delegation across 2 subs + Power BI, AU-scoped helpdesk L2 + L2 approver, biz-owner-manages-external-consultant (60c42f21)
-- release: PIM4EntraPS v2.4.204 -- Manager 24/7 hosted (App Service for Containers) + local break-glass (0dabc819)
-- release: PIM4EntraPS v2.4.203 -- PIM-Engine consolidated entrypoint + Community/Pro editions (ff29bb7b)
-- release: PIM4EntraPS v2.4.202 -- prod Azure SQL IaC (private endpoint, MI) + CSV->SQL migration (042bf8b2)
-- release: PIM4EntraPS v2.4.201 -- Approver Matrix layered by scope + persona support-functions (d643e64a)
-- release: PIM4EntraPS v2.4.200 -- Approver Matrix (dimensional routing + escalation chain) (25ed077d)
-- release: PIM4EntraPS v2.4.199 -- lifecycle calendar (phase 9): expirations, auto-renew, escalation (2103344a)
-- release: PIM4EntraPS v2.4.198 -- resource approvers/owners (phase 8) (0729974b)
-- release: PIM4EntraPS v2.4.197 -- Manager SQL cutover (/api/data dispatch) + settings in SQL (29164885)
-- release: PIM4EntraPS v2.4.196 -- PAW levels + policy gate, passwordless/KV connection, config-driven (886dd678)
-- release: PIM4EntraPS v2.4.195 -- network-tiered access: tier-0 management requires PAW (b63d95a9)
+- docs(pim): recover gutted public README — restore depth, reconcile to v2.4.217, sanitize (84669fa0)
+- fix(pim engine): re-array commit-queue delta filter; refine two-approval model (64244fbb)
+- docs(pim): reconcile ~33-item request list into REQUIREMENTS backlog (64ecd2dd)
+- fix(pim): approval-request mail is delegation approval, not activation (f699ad95)
+- docs(pim/tests): record honest Full-mode one-tenant deploy timing (small representative set, 2linkit, local SQLEXPRESS) (ec9fc2ca)
+- docs(pim): sanitize public docs for publish-safety + correct v2.4.217 entry (ac6dda42)
+- feat(pim): make the REST+SQL engine deployable+validatable — local SQL store, live deploy validation, prune safety, approval-policy fix (cd7319f6)
+- fix(pim): repair scenario validator test + add v1->v2 PIM-for-Groups policy-rule parity (Expiration + Notification) (2e30b621)
+- license(pim): open-core LICENSE in source + publish ships it (durable) (e70b2952)
+- docs: record verified tenant + subscription IDs and PIM per-tenant cert connection (074561b0)
+- docs(pim): add internal ENGINE-IDENTITY.md (which SPN + cert to use) + CLAUDE pointer (07c83c29)
+- docs: README is synthesized from FEATURES + DESIGN at publish (publish requirement) (b7d59c58)
+- docs: tests are a hard release gate — run autonomously, fix code on red, never ship red (0d8ae74c)
+- docs(pim): ROADMAP in public doc set, TESTS internal, tests-lockstep rule, README listing (a478c16c)
+- test(pim): feature-coverage Pester suite (one test per FEATURES.md feature) + TESTS.md (6d600497)
+- docs: shared 6-doc model — public auto-generated ROADMAP; REQUIREMENTS/TESTS internal (9df50513)
+- docs(pim): reconcile README with canonical docs; add Activator chapter to FEATURES (4f9ec2d4)
+- docs(pim): split delivered features into public FEATURES.md; REQUIREMENTS = open work only (c3ee4559)
+- docs(pim): collapse to 4 canonical docs (REQUIREMENTS/DESIGN/TESTS + CLAUDE) (7c9410f2)
+- docs(pim): merge ROADMAP into REQUIREMENTS; define shared doc model in CLAUDE.md (ca48a55b)
+- docs(pim): expand REQUIREMENTS.md to full detail from complete prompt history (69b32a48)
+- docs(pim): complete REQUIREMENTS.md (22 sections + honest delivery status) + DESIGN 9b-9d + CLAUDE.md working agreement (72c26fca)
+- perf(pim): lean context for large tenants - users on-demand, groups server-side filtered (72b03834)
+- fix(pim): Add-PimContextObject nested-array bug (real fix) - flatten-on-read + [object[]] cast (234410a2)
+- test(pim): 5 Pester tests for the REST engine + extract pure Merge-PimCacheItem (0b9da151)
+- feat(pim): AccessReviews provider (order 80) - engine-managed access reviews, auto-apply OFF (6aed7527)
+- fix(pim): group-membership read is per-group filtered (tenant-wide list now 400s MissingParameters) (3f85d0d8)
+- feat(pim): classify Entra 'no nesting into role-assignable group' as a skip (data constraint, not error) (b044ee35)
+- fix(pim): Add-PimContextObject built a corrupt cache (nested-array element, blank DisplayName) (b611e48e)
+- feat(pim): duration-ladder fallback for schedule creates (policy max-duration) (c81ac813)
 
 ---
 
@@ -42,6 +42,49 @@ Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monor
 > **Curated changelog.** The publish workflow auto-prepends recent monorepo commits as a raw activity log; this file is the human-friendly narrative on top.
 
 ---
+
+## v2.4.217 -- first-time deploy validated on a small representative set + prune safety
+
+The engine ran a first-time deploy end-to-end from a management server against test tenants, using a
+**small, representative dataset (~5-6 groups)**. This validates the deploy path; it is **not** an
+at-scale (e.g. 300-group) run, and at-scale validation against the production store remains pending.
+
+- **Local SQL desired store as a break-glass / on-prem option.** The engine can read its desired set
+  (`pim.Rows`) from a **local SQL instance via Integrated auth** (server defaults to a local SQL
+  Express instance; only the database *name* is required). This is the management-server / on-prem /
+  **break-glass** path — it is **not** the primary store. The production desired store is **Azure
+  SQL** (managed-identity); reading the desired set from Azure SQL **at scale was not validated in
+  this release** (that validation is pending). `Invoke-PimEngineCore.ps1` no longer hard-requires a
+  SQL FQDN.
+- **First-time deploy run live on a small set.** A new self-contained seed (`Seed-PimBaselineDataset.ps1`)
+  writes a small, representative, marker-fenced baseline (~5-6 groups: AUs, role group, permission
+  groups across planes, departments-with-owners, an admin, delegation, group nesting, Entra-role
+  assignments, GA approval-required) into SQL; the engine deployed it into test tenants. A new
+  **deploy-validation Pester suite** (`PIM.DeployValidation.Tests.ps1`) reads the desired set back
+  from SQL and asserts against the live tenant that the seeded groups / AUs / role assignments / admin
+  delegation / approval policy actually exist in PIM. All marker-fenced test objects were then deleted
+  (0 remaining). Scale was **not** exercised by this run.
+- **Approval-required policy live-verified (approval requirement only).** The `GroupsPolicies`
+  approval rule now resolves approvers via the full ownership chain (Owners -> SponsorUpn -> Department
+  contact), so a permission group with a blank Owners column still gets an approver instead of failing
+  `InvalidPolicy`. Two live-PATCH traps are fixed: a `singleUser` approver must carry only
+  `@odata.type` + `userId` (no `description`), and escalation is enabled only when escalation
+  approvers actually resolve. **Scope of verification:** the **approval requirement** (GA / PRA) was
+  live-verified against a real PIM-for-Groups member policy; **full v1 policy parity
+  (duration / MFA / notification / expiration) across all in-scope roles is NOT yet live-verified.**
+- **Destructive-prune safety.** `-Mode Full` now reconciles create/update only; removing live items
+  not in the desired set requires the explicit new **`-Prune`** flag, and a scope whose desired set
+  is empty is never pruned. A partial/half-loaded configuration can no longer disable real admins.
+- **Engine-SPN permission catch-up.** New certificate-only (no device-code, no Graph SDK)
+  `setup/Grant-PimGraphAppRoles.ps1` grants/tops-up the required Graph app roles. Two were missing on
+  the test SPNs and are now documented as required: `RoleManagementPolicy.ReadWrite.AzureADGroup`
+  (the approval policy needs it) and `AccessReview.Read.All` (the AccessReviews provider needs it).
+- **Timing.** On the **small representative set (~5-6 groups)**, the REST engine first-time deploy was
+  ~41 s and an idempotent delta re-run ~8 s. This ~41 s figure is for that small set, **not** a
+  300-group run. (The old "~30 min" figure was the legacy module engine's per-scope ARM cooldown; the
+  REST engine sleeps only on a real 429/5xx and honours `Retry-After`.)
+
+VERSION -> 2.4.217.
 
 ## v2.4.216 -- native Windows App Service host + break-glass emergency console (failover)
 
@@ -1360,8 +1403,8 @@ The engine also now logs the resolved OU on a successful create -- `  -> OU: <Di
 ### Symptom
 
 ```
-Updating AD user Simon Kriegbaum (Admin, Legacy, AD, L0, T0)
-Updating AD user Morten Knudsen (Admin, Legacy, AD, L0, T0)
+Updating AD user Jane Doe (Admin, Legacy, AD, L0, T0)
+Updating AD user John Smith (Admin, Legacy, AD, L0, T0)
 ...
 Creating AD account Kasper Teilbæk (Admin, Legacy, AD)
 Creating AD account Martin Skjøth-Jarecki (Admin, Cloud, AD)
@@ -1424,7 +1467,7 @@ The engine was just never calling it.
 
 - Host must be listed in `PrincipalsAllowedToRetrieveManagedPassword` on the gMSA AD object. Verify:
   ```powershell
-  (Get-ADServiceAccount 'gMSA-AUTM-L1-T0' -Properties PrincipalsAllowedToRetrieveManagedPassword).PrincipalsAllowedToRetrieveManagedPassword
+  (Get-ADServiceAccount 'gMSA-svc-L1-T0' -Properties PrincipalsAllowedToRetrieveManagedPassword).PrincipalsAllowedToRetrieveManagedPassword
   ```
   Expected: the host's computer object (or a group containing it).
 - KV stays simple -- `Legacy-UserName-Internal-Prod` holds `<domain>\<gMSA>$`, `Legacy-Password-Internal-Prod` holds any stub string (it gets thrown away after the DC read).
@@ -1441,7 +1484,7 @@ The engine was just never calling it.
   [OK]    Resolve-PlatformGMSACredentials: 1 gMSA slot(s) refreshed from DC -- Internal.Prod
   [INFO]  AD credential source: $global:Context.Identity.Legacy.Internal.Prod (KV: Legacy-UserName-Internal-Prod + Legacy-Password-Internal-Prod)
   ...
-  Updating AD user Simon Kriegbaum (Admin, Legacy, AD, L0, T0)
+  Updating AD user Jane Doe (Admin, Legacy, AD, L0, T0)
   ```
   (Successful -- no `Authentication failed`, no `Insufficient access`.)
 
@@ -1481,7 +1524,7 @@ The v2.4.117 safety improvements that are NOT reverted:
 ```
 Get-ADUser: Authentication failed, see inner exception.
 
-Creating AD account Simon Kriegbaum (Admin, Legacy, AD, L0, T0)
+Creating AD account Jane Doe (Admin, Legacy, AD, L0, T0)
   -> initial password for Admin-SKR-L0-T0-AD@customer-domain.tld (AD): <generated-password>
      appended to: E:\AutomateIT\SOLUTIONS\PIM4EntraPS\output\admin-passwords-20260611.txt
 ```
@@ -1570,7 +1613,7 @@ When one resolves, the engine logs `[INFO] AD credential source: <which path>` b
 ### KV-side recipe for gMSA tenants
 
 ```
-Legacy-UserName-Internal-Prod  ->  <domain>\<gMSA-name>$    e.g. casa.dk\gMSA-AUTM-L1-T0$
+Legacy-UserName-Internal-Prod  ->  <domain>\<gMSA-name>$    e.g. contoso.local\gMSA-svc-L1-T0$
 Legacy-Password-Internal-Prod  ->  <any non-empty string>   gMSA passwords aren't user-accessible
 ```
 
@@ -1601,7 +1644,7 @@ A customer ran the launcher with a CSV containing both ID rows (cloud admins, e.
 Engine now makes a second call with `-OnlyAD`, gated on:
 
 1. `Get-Command Get-ADUser` resolving (i.e. the ActiveDirectory RSAT module is loadable on this host) -- skips cleanly on cloud-only hosts that have AD rows in the CSV they don't intend to provision here.
-2. `$AD_Credentials` being populated (legacy `Connect_Azure` / `2LINKIT-Functions` are expected to set it).
+2. `$AD_Credentials` being populated (the legacy `Connect_Azure` / legacy functions module are expected to set it).
 
 When either guard fails, the engine prints a yellow `[INFO]` line explaining why the AD branch is being skipped, instead of silently doing nothing. When both guards pass, `CreateUpdate-Accounts-From-file-CSV -OnlyAD -Credentials $AD_Credentials -PathAdmins ... -PathAdminsL0T0 ...` runs and the AD branch processes every CSV row with `TargetPlatform=AD` exactly as it always could -- the gate just never lifted before.
 
@@ -1648,11 +1691,11 @@ Pure documentation -- no script behaviour changes.
 
 ## v2.4.112 + extension v1.6.25 -- popup manual single-tenant entry now always wins over managed catalog (fixes "Save and continue" looping back to onboarding)
 
-Same v2.4.111 cross-tenant-leak incident exposed a second compounding bug: when `chrome.storage.managed.tenantCatalog` (registry-pushed) and the manual single-tenant entry (`chrome.storage.local.userTenantId / userClientId`) BOTH exist, the popup's `loadConfig()` always preferred the managed catalog. So on a box where the bad 2linkIT catalog was still in registry, the user could type the customer tenant's id + clientId in the manual form, click "Save and continue", and:
+Same v2.4.111 cross-tenant-leak incident exposed a second compounding bug: when `chrome.storage.managed.tenantCatalog` (registry-pushed) and the manual single-tenant entry (`chrome.storage.local.userTenantId / userClientId`) BOTH exist, the popup's `loadConfig()` always preferred the managed catalog. So on a box where the bad reference-tenant catalog was still in registry, the user could type the customer tenant's id + clientId in the manual form, click "Save and continue", and:
 
 1. The save succeeded (`userTenantId = <customer tenant>` written to `chrome.storage.local`).
 2. The popup reloaded.
-3. `loadConfig()` saw the managed catalog (2linkIT) first, picked the catalog branch, found no `activeTenantId` matching, returned an empty config -- triggering `renderOnboarding()` to fire AGAIN.
+3. `loadConfig()` saw the managed catalog (the reference tenant) first, picked the catalog branch, found no `activeTenantId` matching, returned an empty config -- triggering `renderOnboarding()` to fire AGAIN.
 4. From the user's perspective: "I saved but it goes back to onboarding -- save isn't working."
 
 **Fix.** `popup.js` `loadConfig()` now checks for an explicitly saved manual single-tenant config (both userTenantId AND userClientId being non-zero GUIDs) BEFORE the catalog branch. When manual is set, the returned config uses manual values + `tenantName: '(manual entry)'`. Catalog still populates so the switcher chip can render if the user wants to swap. This means once you click "Save and continue" with valid GUIDs, your manual config sticks across reloads regardless of what's in managed storage.
@@ -1663,7 +1706,7 @@ Note: this is a popup-level fix. The underlying registry leak should still be cl
 
 ## v2.4.111 -- Deploy-PimActivatorClient.ps1 stops defaulting to the sibling `discovered-tenant-catalog.json` (cross-tenant leak); auto-discovers from live Entra instead
 
-**Incident.** A customer deploy ran `Deploy-PimActivatorClient.ps1` on a customer-tenant box. The script's `-CatalogJsonPath` parameter defaulted to `(scriptDir)\discovered-tenant-catalog.json` -- a sibling file pattern that "worked out of the box on the maintainer's repo layout". That file was untracked but PRESENT on the box (likely transferred along with the script folder from an earlier setup on a 2linkIT-tenant box). The script silently picked it up and wrote **2linkIT's** tenantId + clientId into the customer's `chrome.storage.managed.tenantCatalog` registry path -- cross-tenant data leak. No log line called it out because the file existed and the script saw nothing to warn about.
+**Incident.** A customer deploy ran `Deploy-PimActivatorClient.ps1` on a customer-tenant box. The script's `-CatalogJsonPath` parameter defaulted to `(scriptDir)\discovered-tenant-catalog.json` -- a sibling file pattern that "worked out of the box on the maintainer's repo layout". That file was untracked but PRESENT on the box (likely transferred along with the script folder from an earlier setup on a reference-tenant box). The script silently picked it up and wrote **the reference tenant's** tenantId + clientId into the customer's `chrome.storage.managed.tenantCatalog` registry path -- cross-tenant data leak. No log line called it out because the file existed and the script saw nothing to warn about.
 
 **Fix.** Three parts:
 
@@ -1673,7 +1716,7 @@ Note: this is a popup-level fix. The underlying registry leak should still be cl
 
 3. Each catalog-source path now logs a clear line: `catalog source: -CatalogJsonPath '...'` or `catalog source: live Entra auto-discover  (tenant 'X' / <tenantId>  clientId <appId>)`. The operator sees on every run which tenant's data is about to be written, so a cross-tenant mismatch is impossible to miss.
 
-**Recovery on a contaminated box.** Re-run `Deploy-PimActivatorClient.ps1` after `git pull`. With v2.4.111, it discovers the box's actual tenant and overwrites the bad `tenantCatalog` registry value with the correct one. Verify with `Get-ItemProperty 'HKLM:\SOFTWARE\Policies\Microsoft\Edge\3rdparty\extensions\eheocihmlppcophaeakmdenhgcookkab\policy' -Name tenantCatalog` -- the JSON should contain the box's own tenant id, not 2linkIT's `f0fa27a0-...`.
+**Recovery on a contaminated box.** Re-run `Deploy-PimActivatorClient.ps1` after `git pull`. With v2.4.111, it discovers the box's actual tenant and overwrites the bad `tenantCatalog` registry value with the correct one. Verify with `Get-ItemProperty 'HKLM:\SOFTWARE\Policies\Microsoft\Edge\3rdparty\extensions\eheocihmlppcophaeakmdenhgcookkab\policy' -Name tenantCatalog` -- the JSON should contain the box's own tenant id, not the reference tenant's `<tenant-id>`.
 
 ---
 
@@ -1690,7 +1733,7 @@ Fix: when the pre-flight scan finds a conflict AND `-Force` is supplied, the scr
 
 When no conflict exists, behaviour is unchanged: 8 definition values get written (Forcelist + Sources + Settings + Catalog x Edge + Chrome).
 
-Verified end-to-end on mgmt1 against 2linkit (which has the existing Settings Catalog policy in play): script printed the conflict, the ACTION REQUIRED block, then wrote only the 6 non-forcelist definition values + 2 `[SKIP]` lines naming the row to add upstream.
+Verified end-to-end against the reference tenant (which has the existing Settings Catalog policy in play): script printed the conflict, the ACTION REQUIRED block, then wrote only the 6 non-forcelist definition values + 2 `[SKIP]` lines naming the row to add upstream.
 
 ---
 
@@ -1700,11 +1743,11 @@ Customer-tenant deploy surfaced the actual root cause via the portal's "Import A
 
 > `ADMX file referenced not found NamespaceMissing:Microsoft.Policies.Windows. Please upload it first.`
 
-The ADMX declared `<using prefix="windows" namespace="Microsoft.Policies.Windows" />` but never actually referenced the `windows:` prefix anywhere -- pure dead code. Strict Intune tenants check that every `<using>` target is pre-loaded and reject when it isn't (observed on a strict customer tenant 2026-06-10). Tolerant tenants (2linkit) skipped the check and the ADMX uploaded fine -- which is why this file shipped for months with the latent bug.
+The ADMX declared `<using prefix="windows" namespace="Microsoft.Policies.Windows" />` but never actually referenced the `windows:` prefix anywhere -- pure dead code. Strict Intune tenants check that every `<using>` target is pre-loaded and reject when it isn't (observed on a strict customer tenant 2026-06-10). Tolerant tenants (such as the reference tenant) skipped the check and the ADMX uploaded fine -- which is why this file shipped for months with the latent bug.
 
 Fix: removed the `<using>` declaration. Our ADMX is now fully self-contained -- zero external namespace dependencies -- works on every tenant strictness level.
 
-Verified end-to-end on mgmt1 against the 2linkit tenant (which had been freshly cleaned of all prior ADMX rows): upload succeeded with `status: available` on the first try; subsequent policy-resolution loop found all 4 policies per browser (Forcelist, Sources, Settings, Tenant catalog); all 8 definition values set on `[PimActivator] client settings`; tenant catalog pushed for both Edge + Chrome.
+Verified end-to-end against the reference tenant (which had been freshly cleaned of all prior ADMX rows): upload succeeded with `status: available` on the first try; subsequent policy-resolution loop found all 4 policies per browser (Forcelist, Sources, Settings, Tenant catalog); all 8 definition values set on `[PimActivator] client settings`; tenant catalog pushed for both Edge + Chrome.
 
 (Note: the v2.4.107 `@odata.type` discriminators stay -- still needed by strict tenants for proper deserialization. v2.4.108's `defaultLanguageCode` removal also stays -- Intune still requires that field absent. v2.4.109 is the final piece of the strict-tenant compatibility set.)
 
@@ -1722,7 +1765,7 @@ Net: v2.4.107 fixed the silent null-out by adding @odata.type AND broke the uplo
 
 v2.4.106's full-response diagnostics surfaced the actual rejection: customer tenant accepted the POST and created the `groupPolicyUploadedDefinitionFiles` row, but every field we sent (`targetNamespace`, `targetPrefix`, `content`, `revision`, `languageCodes`, the entire `groupPolicyUploadedLanguageFiles` collection) came back as `null` or `[]`. Only `fileName` and `defaultLanguageCode` stuck. Classic symptom of a Graph beta endpoint with strict type discrimination -- without an explicit `@odata.type` on the entity, Intune's deserializer couldn't bind any of the typed properties, but didn't reject the request either; just silently emitted an empty row + `status=uploadFailed`.
 
-Fix: payload now carries `'@odata.type' = '#microsoft.graph.groupPolicyUploadedDefinitionFile'` on the outer body and `'@odata.type' = '#microsoft.graph.groupPolicyUploadedLanguageFile'` on each inner collection item. Other tenants (2linkit, where v2.4.98-v2.4.106 worked) tolerated the missing type discriminator because the endpoint version they hit had a default type fallback. Now we always set the type so the deploy survives whichever tenant strictness level Intune routes through.
+Fix: payload now carries `'@odata.type' = '#microsoft.graph.groupPolicyUploadedDefinitionFile'` on the outer body and `'@odata.type' = '#microsoft.graph.groupPolicyUploadedLanguageFile'` on each inner collection item. Other tenants (such as the reference tenant, where v2.4.98-v2.4.106 worked) tolerated the missing type discriminator because the endpoint version they hit had a default type fallback. Now we always set the type so the deploy survives whichever tenant strictness level Intune routes through.
 
 Also added an explicit `defaultLanguageCode = 'en-US'` on the outer body (was being auto-populated by Intune on tolerant tenants but missing from the body on strict ones).
 
@@ -1912,7 +1955,7 @@ Idempotent: lookup by display name, wipe + re-write definition values in place w
 - `Get-Presentations` -- separate call for each definition's `/presentations` collection (Graph `$expand` depth-limited)
 - `New-DefValue` -- emits the right body shape for either Text (single string) OR List (string[] wrapped as `{name, value}` pairs, slot-numbered)
 
-Tested end-to-end against 2linkIT tenant: 6 definition values written, profile `33da37a0-1d7e-4e4a-a505-3990cad5d8e9` created. Only remaining manual step: assign to a device group in the portal.
+Tested end-to-end against the reference tenant: 6 definition values written, profile `<id>` created. Only remaining manual step: assign to a device group in the portal.
 
 **Customer flow simplified to 3 commands:**
 ```powershell
@@ -1990,7 +2033,7 @@ Net: the wizard now has exactly two paths and no dead code.
 
 v1.5.8 added a global sentinel that filtered out clientId `e96afaa6-1c00-4320-9a4c-334558138e09` from chrome.storage on every popup load, plus from catalog imports and the onboarding-save handler. The intent was right (stale v1.4.x onboarding had saved that GUID into customer chrome.storage where it didn't belong, producing AADSTS700016). The implementation was wrong.
 
-That GUID is the **legitimate PIM Activator app reg in the dev tenant that owns it** (2linkIT). In a v1.6 catalog where each entry binds `tenantId + clientId` together, the same GUID IS valid in the tenant that hosts it -- a global ban filters legitimate entries out everywhere.
+That GUID is the **legitimate PIM Activator app reg in the dev tenant that owns it** (the reference tenant). In a v1.6 catalog where each entry binds `tenantId + clientId` together, the same GUID IS valid in the tenant that hosts it -- a global ban filters legitimate entries out everywhere.
 
 **Emptied the `KNOWN_BAD_LEGACY_CLIENTIDS` array** (kept as `[]` for back-compat with all the existing call sites, which become no-ops). The catalog model itself prevents the original v1.4.x bug: you can't accidentally onboard "customer tenant X with the dev's clientId" because each entry is one tenant+client pair, validated against each other implicitly when the runtime sign-in fires.
 
@@ -2279,7 +2322,7 @@ Republished CRX + updates.xml to gh-pages as v1.5.6.
 
 Consolidated three quick iterations (v1.5.3 -> v1.5.4 -> v1.5.5) into the final footer:
 
-> **PIM ACTIVATOR**, part of **PIM4EntraPS** -- Developed by **Morten Knudsen**, **Microsoft MVP** | &#128279; **GitHub** | &#128027; **Report bug**
+> **PIM ACTIVATOR**, part of **PIM4EntraPS** -- maintained by the project maintainer | &#128279; **GitHub** | &#128027; **Report bug**
 
 **Changes vs v1.5.2:**
 
@@ -2287,7 +2330,7 @@ Consolidated three quick iterations (v1.5.3 -> v1.5.4 -> v1.5.5) into the final 
 - **Removed:** YouTube chip, `mailto:` email, blog link (`mortenknudsen.net`).
 - **"Microsoft MVP" recoloured** from Red (`#cf222e`) -> Blue (`#0969da`, same as the other footer links). Square brackets dropped: `[Microsoft MVP]` -> `, Microsoft MVP`.
 - **GitHub link** now points to the repo (`https://github.com/KnudsenMorten/PIM4EntraPS`), not the user profile (`https://github.com/KnudsenMorten`).
-- **`manifest.json` `author`** dropped the email -> `"Morten Knudsen (Microsoft MVP)"`.
+- **`manifest.json` `author`** dropped the email -> a name-only author string.
 - **`manifest.json` `homepage_url`** -> `https://github.com/KnudsenMorten/PIM4EntraPS` (was the blog URL); `chrome://extensions` "Visit website" now lands on the repo.
 
 Republished CRX + updates.xml to gh-pages -- customer browsers will fetch v1.5.5 within Chromium's normal auto-update window (~5 min after launch, then every ~5h).
@@ -2331,8 +2374,8 @@ Two surfaces where the extension previously hid the developer + support channels
 **1. `manifest.json` -- now declares `author` + `homepage_url`**
 
 ```json
-"author":       "Morten Knudsen (Microsoft MVP) <mok@mortenknudsen.net>",
-"homepage_url": "https://mortenknudsen.net"
+"author":       "<maintainer name> <maintainer@example.com>",
+"homepage_url": "https://example.com"
 ```
 
 Chrome's `chrome://extensions` detail page surfaces both fields; admins doing extension inventory / supply-chain review can now see who owns the code and where to file issues without unpacking the package.
@@ -2340,15 +2383,15 @@ Chrome's `chrome://extensions` detail page surfaces both fields; admins doing ex
 **2. Popup footer expanded -- 2 lines, all contact channels one click away**
 
 Line 1 (unchanged shape, two new chips):
-- Author link (`aka.ms/morten`)
+- Author link
 - **Microsoft MVP** badge (Red, tooltip "Microsoft Most Valuable Professional")
 - `part of PIM4EntraPS` (links to repo)
 
 Line 2 (new):
-- Direct email: `mok@mortenknudsen.net`
-- Blog: `mortenknudsen.net`
-- GitHub: `KnudsenMorten`
-- YouTube: `@KnudsenMorten`
+- Direct email: maintainer email
+- Blog: maintainer blog
+- GitHub: the project's GitHub
+- YouTube: the project's YouTube
 - Bug report: `PIM4EntraPS/issues`
 
 Visual: matches the same `#0969da` link color the rest of the popup already uses; separators are pale-gray `|`. Total footer height bump is one ~14px row -- still fits the popup window without scrollbar reflow.
@@ -2564,10 +2607,10 @@ Previous PIM banner emitted a `[INFO] PIM4EntraPS <engine> launcher (<flavour>) 
 ========================================================================================
   PIM4EntraPS -- PIM-Baseline-Management-CSV    [internal-vm]   v2.4.71
 
-  Developed by Morten Knudsen -- Microsoft MVP
-  Blog:    https://mortenknudsen.net   (aka.ms/morten)
-  GitHub:  https://github.com/KnudsenMorten
-  Support: GitHub Issues on the public repo, or mok@mortenknudsen.net (internal)
+  Maintained by the project maintainer
+  Blog:    maintainer blog
+  GitHub:  the project's GitHub
+  Support: GitHub Issues on the public repo, or the maintainer email (internal)
 ========================================================================================
 ```
 
@@ -2628,7 +2671,7 @@ AdminAccountPattern   = 'adm_{Owner}'        ->  'Admin-{Owner}'
 AdminAccountPatterns  = (not set)            ->  @('Admin-', 'X-Admin')
 ```
 
-Reflects what every production tenant we've seen actually uses for tier-N admin UPNs (`Admin-Brian-L0-T0-ID@…`, `x-Admin-MOK-L0-T0-ID@…`). The legacy `adm_` default was wrong for everyone -- it caused `Get-PimAdminsFiltered` to query `startswith(userPrincipalName, 'adm_')` and return zero results on every customer, which then cascaded into the cache-miss → false "Owner UPN not found" warning emitted by the engine at every group-owners pass.
+Reflects what every production tenant we've seen actually uses for tier-N admin UPNs (`Admin-ABC-L0-T0-ID@…`, `x-Admin-ABC-L0-T0-ID@…`). The legacy `adm_` default was wrong for everyone -- it caused `Get-PimAdminsFiltered` to query `startswith(userPrincipalName, 'adm_')` and return zero results on every customer, which then cascaded into the cache-miss → false "Owner UPN not found" warning emitted by the engine at every group-owners pass.
 
 Tenants that genuinely use `adm_` (none observed so far) can override in `PIM4EntraPS.NamingConventions.custom.ps1`:
 
@@ -3261,14 +3304,14 @@ Manifest 0.4.24 -> 0.4.27.
 
 ## v2.4.34 -- Footer always visible; only the group list scrolls inside the popup
 
-Previously the entire popup body scrolled, so users had to scroll past the activation footer (Justification + Duration + Activate selected) and past 30+ rows just to reach the bottom attribution footer (Developed by Morten Knudsen + Tenant id). The footer was effectively hidden on first open.
+Previously the entire popup body scrolled, so users had to scroll past the activation footer (Justification + Duration + Activate selected) and past 30+ rows just to reach the bottom attribution footer (maintainer credit + Tenant id). The footer was effectively hidden on first open.
 
 Fix: `body { display:flex; flex-direction:column; height:600px; }` + `#list { flex:1; overflow-y:auto; }`. Now:
 - Header bar pinned at top (blue brand banner).
 - Tab strip + filter + status pinned just below header.
 - Group list scrolls inside its own area only.
 - Activate / Justification / Duration controls pinned just above the footer.
-- "Developed by Morten Knudsen ... Tenant: ..." footer always visible at the bottom.
+- "maintainer credit ... Tenant: ..." footer always visible at the bottom.
 
 Used `:not([hidden])` selectors on `#panel-activate` / `#panel-myaccess` so the `hidden` attribute (used to swap tabs) still suppresses display correctly despite the new `display:flex` rule.
 
@@ -3337,7 +3380,7 @@ v0.4.14+ added role preview lines under each Activate row. Some scopes contain l
 
 - Title is now UPPERCASE bold ("PIM ACTIVATOR") at 17px with 0.5px letter-spacing.
 - Header bar uses blue background (`#0969da`) with white text + translucent white sign-out button -- distinct brand strip vs the white content area below.
-- Discreet footer at the bottom: "Developed by **Morten Knudsen** · part of [PIM4EntraPS](https://github.com/KnudsenMorten/PIM4EntraPS)" (link opens in a new tab).
+- Discreet footer at the bottom: "maintainer credit · part of [PIM4EntraPS](https://github.com/KnudsenMorten/PIM4EntraPS)" (link opens in a new tab).
 - Translucent white version-badge sits next to the title; same info, no longer competing for attention.
 
 Manifest 0.4.17 -> 0.4.20 (four patch bumps in the dev-helper auto-bump path).
@@ -3441,7 +3484,7 @@ Categorisation happens INSTANTLY (regex on group displayName) -- no waiting for 
 
 ### Configurable per customer
 
-Different customers use different naming conventions (2linkit uses `PIM-Entra-*` / `PIM-AzRes-*`; others might use `AAD-Admin-*` / `Az-RBAC-*`; some have no convention at all). Two new optional `chrome.storage.managed` fields control the bucketing:
+Different customers use different naming conventions (one org uses `PIM-Entra-*` / `PIM-AzRes-*`; others might use `AAD-Admin-*` / `Az-RBAC-*`; some have no convention at all). Two new optional `chrome.storage.managed` fields control the bucketing:
 
 - `entraGroupRegex` -- regex (case-insensitive) for the Entra bucket. Default `Entra`.
 - `azureGroupRegex` -- regex (case-insensitive) for the Azure bucket. Default `(AzRes|Azure)`.
@@ -4105,10 +4148,10 @@ Edge's managed-schema validator only accepts `minimum`/`maximum` on `type: integ
 ### Example
 
 ```powershell
-.\Setup-PimActivator.ps1 -TenantId 'f0fa27a0-...' `
+.\Setup-PimActivator.ps1 -TenantId '<tenant-id>' `
     -DeployAzureCrxHost `
-    -AzSubscriptionId '54468121-...' `
-    -AzKeyVaultName 'kv-2linkit-automation-p' `
+    -AzSubscriptionId '<subscription-id>' `
+    -AzKeyVaultName 'kv-contoso-automation-p' `
     -PushPolicy
 ```
 
@@ -4174,11 +4217,11 @@ Cert auth is the security best practice — the cert thumbprint goes in clear (i
 ### Example -- Intune deployment
 
 ```powershell
-.\Setup-PimActivator.ps1 -TenantId 'f0fa27a0-...' `
+.\Setup-PimActivator.ps1 -TenantId '<tenant-id>' `
     -BootstrapSpnAppId 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee' `
     -BootstrapSpnCertificateThumbprint 'ABCDEF0123456789ABCDEF0123456789ABCDEF01' `
     -PushPolicy `
-    -CrxUpdateUrl 'https://stcorp.blob.core.windows.net/pim-activator/updates.xml'
+    -CrxUpdateUrl 'https://<storage-account>.blob.core.windows.net/pim-activator/updates.xml'
 ```
 
 Zero interactive steps. Cert must be installed in `Cert:\LocalMachine\My` on the Intune-managed host (Intune can deploy the PFX as a Win32 dependency).
@@ -4222,14 +4265,14 @@ In v2.4.4 the `key` field was added to `manifest.json` containing a fixed 2048-b
 
 **Developer workstation (sideload manually after script finishes):**
 ```powershell
-.\Setup-PimActivator.ps1 -TenantId 'f0fa27a0-...'
+.\Setup-PimActivator.ps1 -TenantId '<tenant-id>'
 # then in Edge: edge://extensions/ -> Developer mode ON -> Load unpacked -> select tools\pim-activator\
 ```
 
 **Production rollout (Edge auto-installs via policy registry; requires admin shell):**
 ```powershell
-.\Setup-PimActivator.ps1 -TenantId 'f0fa27a0-...' -PushPolicy `
-    -CrxUpdateUrl 'https://stcorp.blob.core.windows.net/pim-activator/updates.xml'
+.\Setup-PimActivator.ps1 -TenantId '<tenant-id>' -PushPolicy `
+    -CrxUpdateUrl 'https://<storage-account>.blob.core.windows.net/pim-activator/updates.xml'
 ```
 
 Re-running the same command in the same tenant is safe -- the underlying `Install-PimActivatorAppRegistration.ps1` updates the existing app reg in place; `config.js` is overwritten with the same values; policy keys are no-op writes.
@@ -4450,7 +4493,7 @@ Pure documentation release; no code changes. README brought up to date with ever
 
 ## v2.3.0 -- Drop `.locked.csv` baselines: PIM4EntraPS is custom-only from day one
 
-The `.locked.csv` / `.custom.csv` dual-file pattern made sense for solutions like SecurityInsight where Anthropic / 2linkit ships a baseline (detection rules, role-tier mappings) that every customer extends. **It never made sense for PIM4EntraPS**: every customer's admin set, role topology, AU layout, and assignments are unique -- there is no shared baseline to ship -- so the `.locked.csv` files were either empty stubs (useless) or had to be overwritten on day one (confusing). In v2.2.0 + v2.2.1, the dual-file pattern also caused a maintainer-tenant data leak when the maintainer's own data accidentally shipped in the .locked.csv role of the project.
+The `.locked.csv` / `.custom.csv` dual-file pattern made sense for solutions like SecurityInsight where the maintainer ships a baseline (detection rules, role-tier mappings) that every customer extends. **It never made sense for PIM4EntraPS**: every customer's admin set, role topology, AU layout, and assignments are unique -- there is no shared baseline to ship -- so the `.locked.csv` files were either empty stubs (useless) or had to be overwritten on day one (confusing). In v2.2.0 + v2.2.1, the dual-file pattern also caused a maintainer-tenant data leak when the maintainer's own data accidentally shipped in the .locked.csv role of the project.
 
 v2.3.0 simplifies the model: **only `.custom.sample.csv` ships** (as schema documentation + worked example rows that operators copy from). Customers always own their config as `.custom.csv` (gitignored) from day one.
 
@@ -4470,8 +4513,8 @@ v2.2.0 inadvertently shipped the maintainer's own admin / role rows in `config\A
 Scrubs applied:
 - `config\Account-Definitions-Admins.locked.csv` -- replaced with header-only (21 columns). Use `Account-Definitions-Admins.custom.sample.csv` for an annotated example row.
 - `config\PIM-Definitions-Roles.locked.csv` -- replaced with header-only (12 columns).
-- `config\PIM4EntraPS.NotificationChannels.custom.sample.ps1` -- KV-name example changed from real-looking `kv-2linkit-pim-p` to generic `kv-contoso-pim-p`.
-- `config\PIM4EntraPS.NamingConventions.custom.sample.ps1` -- "Customer A (current 2linkit default)" relabelled to "Customer A (Admin- / X-Admin- with tier suffix)"; example initials `MOK` / owner `morten` generalised to `ABC` / `john`. Pre-existing pre-v2.2.0 wording -- scrubbed in this hotfix as part of the same sweep.
+- `config\PIM4EntraPS.NotificationChannels.custom.sample.ps1` -- KV-name example changed from a real-looking vault name to a generic `kv-contoso-pim-p`.
+- `config\PIM4EntraPS.NamingConventions.custom.sample.ps1` -- the maintainer-specific "Customer A" label relabelled to "Customer A (Admin- / X-Admin- with tier suffix)"; example initials and owner generalised to `ABC` / `john`. Pre-existing pre-v2.2.0 wording -- scrubbed in this hotfix as part of the same sweep.
 - `docs\ROADMAP.md` -- items #1, #2, #6, #7, #11, #12, #25, #28 now annotated `[SHIPPED v2.2.0]` (#25 + #28 also note what is deferred).
 
 Note: the leaked content remains visible in the v2.2.0 tag's commit history on the public mirror until / unless that history is rewritten. v2.2.1 only stops the leak from re-publishing; it does not retroactively scrub git history. Rewriting public-mirror history is a destructive operation and is left to the maintainer's discretion.
@@ -4957,7 +5000,7 @@ PIM4EntraPS was a flat layout of SCRIPTS/, CUSTOMSCRIPTS/, and LAUNCHERS/. As th
 
 **New: shared module**
 
-- `engine/_shared/PIM-Functions.psm1` -- the canonical function library (~542 KB). All engines import this module instead of relying on the legacy 2LINKIT-Functions.psm1. Customer + community editions ship the same module.
+- `engine/_shared/PIM-Functions.psm1` -- the canonical function library (~542 KB). All engines import this module instead of relying on the legacy functions module. Customer + community editions ship the same module.
 
 **New: config/ folder with .locked / .custom split**
 
@@ -5014,7 +5057,7 @@ The CSVs model a 3-tier group-nesting design:
 
 ```
 Admin                Role group              Permission groups          Target
-ADMIN-MOK-ID  --E->  PIM-ROLE-CloudEngineer  --E--> PIM-Entra-ID-AppAdmin-L1-T0-CP-ID --E--> Entra ID role
+ADMIN-ABC-ID  --E->  PIM-ROLE-CloudEngineer  --E--> PIM-Entra-ID-AppAdmin-L1-T0-CP-ID --E--> Entra ID role
                                              --A--> PIM-AzDevOps-TeamsContrib-...     --A--> AzDevOps
                                              --E--> PIM-AzRes-MP-Platform-...         --E--> Azure SQL VM / Cosmos
                                              --E--> PIM-PowerBI-WS-MyKPIs-...         --E--> Power BI
