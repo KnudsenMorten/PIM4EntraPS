@@ -1,21 +1,27 @@
-MIT License
+PIM4EntraPS License — Open Core
+Copyright (c) 2026 Morten Knudsen. All rights reserved.
 
-Copyright (c) 2026 Morten Knudsen
+PIM4EntraPS is distributed under an "open core" model with two feature tiers, as designated in the
+product documentation (see FEATURES.md and the Licensing section):
 
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
+  - Community (Core) features  - free to use.
+  - Pro (Licensed) features    - require a valid commercial license from the copyright holder.
 
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
+1. GRANT (Community / Core). Permission is hereby granted, free of charge, to any person obtaining a
+   copy of this software, to use, copy, modify, merge, publish, and distribute the software for the
+   purpose of using its Community (Core) features, subject to the conditions below.
 
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
+2. PRO FEATURES. Features designated as "Pro" or "licensed" in the documentation require a valid
+   commercial license. You may not use, enable, unlock, or circumvent the license enforcement of Pro
+   features without a valid license. Pro entitlements are verified offline against a signed license file.
+
+3. CONDITIONS. The above copyright notice and this permission notice shall be included in all copies
+   or substantial portions of the software.
+
+4. NO WARRANTY. THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED,
+   INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+   NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES
+   OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
+   CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+For a Pro license, see https://aka.ms/morten or https://github.com/KnudsenMorten.
