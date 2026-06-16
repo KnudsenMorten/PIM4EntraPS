@@ -10,14 +10,24 @@
     in platform.TenantApps AND whose certificate is present in the local
     machine store (fictional demo tenants drop out of scope automatically):
 
-      1. Connect-MgGraph app-only (per-tenant AppId + the shared mgmt-host
-         certificate from Cert:\LocalMachine\My).
+      1. Authenticate per-tenant app-only over PURE REST (per-tenant AppId +
+         the per-tenant certificate from Cert:\LocalMachine\My) -- no
+         Microsoft.Graph module, no Connect-MgGraph. Auth + the default-domain
+         lookup run through PIM-Rest (Invoke-PimGraph). PS 5.1-safe.
       2. Resolve the tenant's default domain -> $global:DefaultDomainUPN
          (each central admin gets a tenant-local UPN: <UserName>@<domain>).
       3. Build a temp Account-Definitions CSV from pim.CentralAdmins, ring-
          filtered by pim.vw_AdminTenantTargets (admin.Ring <= tenant.Ring).
       4. -WhatIfMode (default ON): print the plan only.
-         Live: run the engine's CreateUpdate-Accounts-From-file-CSV -OnlyID.
+         Live: provision the ID accounts over PURE REST
+         (Invoke-PimRestAccountApply -> New-PimRestAdminAccount, Graph
+         /users create+update). Set $global:PIM_UseGraphSdk = $true to fall
+         back to the legacy Graph-SDK engine path
+         (CreateUpdate-Accounts-From-file-CSV -OnlyID) instead.
+
+    The whole fan-out path -- auth, directory reads AND the live account
+    write -- is now pure REST (no Microsoft.Graph module). REQUIREMENTS.md §19
+    write-path migration item closed for this launcher.
 
     Ring semantics match the engine: a ring-0 admin reaches every tenant; a
     ring-2 consultant only reaches ring-2 (test) tenants.
@@ -49,6 +59,13 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+
+# Pure-REST auth + directory reads + account write (no Microsoft.Graph module).
+# PIM-Rest gives us Get-PimRestToken / Invoke-PimGraph against a per-tenant SPN +
+# certificate; PIM-AccountRest gives us the REST account create/update writer.
+$shared = Join-Path (Split-Path -Parent $PSScriptRoot) 'engine\_shared'
+. (Join-Path $shared 'PIM-Rest.ps1')
+. (Join-Path $shared 'PIM-AccountRest.ps1')
 
 # CRITICAL process-hygiene rule: the SqlServer module (and Az.Accounts) bundle
 # an OLDER Azure.Core than the Microsoft Graph SDK -- loading them into the
@@ -130,20 +147,28 @@ foreach ($grp in $byTenant) {
         continue
     }
 
+    # Pure-REST app-only auth: point PIM-Rest at THIS tenant's SPN + cert and
+    # force a fresh token (the resource cache is keyed by audience only, so it
+    # must be cleared between tenants). No Connect-MgGraph / Microsoft.Graph.
     try {
-        Disconnect-MgGraph -ErrorAction SilentlyContinue | Out-Null
-        Connect-MgGraph -ClientId $t.AppId -TenantId $t.TenantId -CertificateThumbprint $t.CertificateThumbprint -NoWelcome -ErrorAction Stop
-        $ctx = Get-MgContext
-        Write-Host "  connected app-only as $($ctx.AppName) ($($ctx.ClientId))" -ForegroundColor Green
+        $global:PIM_UseGraphSdk      = $false
+        $global:PIM_TenantId         = "$($t.TenantId)"
+        $global:PIM_ClientId         = "$($t.AppId)"
+        $global:PIM_CertThumbprint   = "$($t.CertificateThumbprint)"
+        $global:PIM_UseManagedIdentity = $false
+        $global:PIM_Interactive        = $false
+        # mint (and prove) the token for this tenant before doing any read
+        $null = Get-PimRestToken -Resource graph -TenantId "$($t.TenantId)" -ClientId "$($t.AppId)" -CertThumbprint "$($t.CertificateThumbprint)" -Force
+        Write-Host "  authenticated app-only over REST (clientId $($t.AppId))" -ForegroundColor Green
     } catch {
-        Write-Host "  [fail] app-only connect failed: $($_.Exception.Message)" -ForegroundColor Red
+        Write-Host "  [fail] app-only REST auth failed: $($_.Exception.Message)" -ForegroundColor Red
         $results += [pscustomobject]@{ Tenant = $t.TenantName; Status = 'connect-failed'; Admins = 0 }
         continue
     }
 
     $defaultDomain = $null
     try {
-        $defaultDomain = (Get-MgDomain -All -ErrorAction Stop | Where-Object { $_.IsDefault }).Id
+        $defaultDomain = Get-PimRestDefaultDomain
     } catch { Write-Host "  [warn] default-domain lookup failed: $($_.Exception.Message)" -ForegroundColor Yellow }
     if (-not $defaultDomain) {
         Write-Host "  [fail] cannot resolve the tenant default domain -- skipping tenant." -ForegroundColor Red
@@ -193,28 +218,41 @@ foreach ($grp in $byTenant) {
         continue
     }
 
-    # LIVE: hand the rows to the engine's account function.
-    $tmpCsv = Join-Path $env:TEMP ("pim-fanout-{0}.csv" -f $t.TenantId)
-    $rows | Export-Csv -Path $tmpCsv -Delimiter ';' -Encoding UTF8 -NoTypeInformation
+    # LIVE: provision the ID accounts. Default = pure REST writer
+    # (New-PimRestAdminAccount over Invoke-PimGraph). Opt INTO the legacy
+    # Graph-SDK engine (CreateUpdate-Accounts-From-file-CSV) only when the
+    # caller sets $global:PIM_UseGraphSdk = $true (e.g. to use the EXO
+    # Set-Mailbox forwarding path or the AD/hybrid branch).
     try {
-        if (-not (Get-Command CreateUpdate-Accounts-From-file-CSV -ErrorAction SilentlyContinue)) {
-            Import-Module (Join-Path (Split-Path -Parent $PSScriptRoot) 'engine\_shared\PIM-Functions.psm1') -Force -DisableNameChecking
+        if ($global:PIM_UseGraphSdk) {
+            Write-Host "  [legacy] PIM_UseGraphSdk=$true -- using the Graph-SDK engine path." -ForegroundColor DarkYellow
+            $tmpCsv = Join-Path $env:TEMP ("pim-fanout-{0}.csv" -f $t.TenantId)
+            $rows | Export-Csv -Path $tmpCsv -Delimiter ';' -Encoding UTF8 -NoTypeInformation
+            try {
+                if (-not (Get-Command CreateUpdate-Accounts-From-file-CSV -ErrorAction SilentlyContinue)) {
+                    Import-Module (Join-Path $shared 'PIM-Functions.psm1') -Force -DisableNameChecking
+                }
+                $global:PIM_TenantRing   = [int]$t.TenantRing
+                $global:DefaultDomainUPN = $defaultDomain
+                $global:WhatIfMode       = $false
+                CreateUpdate-Accounts-From-file-CSV -AccountsDefinitionFile $tmpCsv -OnlyID
+            } finally {
+                Remove-Item $tmpCsv -Force -ErrorAction SilentlyContinue
+                $global:DefaultDomainUPN = $null
+            }
+        } else {
+            # pure REST: the UPNs are already resolved on each row above.
+            $applied = @(Invoke-PimRestAccountApply -Rows $rows)
+            $bad = @($applied | Where-Object { "$($_.Action)" -like 'failed:*' })
+            if ($bad.Count) { throw ("{0} of {1} account(s) failed: {2}" -f $bad.Count, $applied.Count, (($bad | ForEach-Object { "$($_.Upn) ($($_.Action))" }) -join '; ')) }
         }
-        # ring gate inside the engine compares admin.Ring <= PIM_TenantRing
-        $global:PIM_TenantRing   = [int]$t.TenantRing
-        $global:DefaultDomainUPN = $defaultDomain
-        $global:WhatIfMode       = $false
-        CreateUpdate-Accounts-From-file-CSV -AccountsDefinitionFile $tmpCsv -OnlyID
         $results += [pscustomobject]@{ Tenant = $t.TenantName; Status = 'applied'; Admins = @($rows).Count }
         if (Get-Command Write-PimAuditEvent -ErrorAction SilentlyContinue) {
             Write-PimAuditEvent -Action 'msp.fanout.apply' -Target $t.TenantName -After @{ tenantId = "$($t.TenantId)"; admins = @($rows | ForEach-Object { $_.UserPrincipalName }) }
         }
     } catch {
-        Write-Host "  [fail] engine pass failed: $($_.Exception.Message)" -ForegroundColor Red
+        Write-Host "  [fail] account provisioning failed: $($_.Exception.Message)" -ForegroundColor Red
         $results += [pscustomobject]@{ Tenant = $t.TenantName; Status = "failed: $($_.Exception.Message)"; Admins = 0 }
-    } finally {
-        Remove-Item $tmpCsv -Force -ErrorAction SilentlyContinue
-        $global:DefaultDomainUPN = $null
     }
 }
 

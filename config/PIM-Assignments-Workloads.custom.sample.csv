@@ -18,3 +18,13 @@ intune;Read Only Operator;PIM-Intune-ReadOnlyOperator-L5-T1-WDP-ID;;Assign;built
 intune;Application Manager;PIM-Intune-ApplicationManager-L3-T1-WDP-ID;;Assign;built-in
 intune;Endpoint Security Manager;PIM-Intune-EndpointSecurityManager-L3-T1-WDP-ID;;Assign;built-in
 intune;Endpoint Privilege Manager;PIM-Intune-EndpointPrivilegeManager-L3-T1-WDP-ID;;Assign;built-in
+# Business Central (membership model): Resource = tenantId/environment; the Entra
+#   group must already be a BC SECURITY GROUP; RoleName = a permission set id.
+#   Engine SPN needs SUPER in the environment.
+# business-central;D365 BUS FULL ACCESS;PIM-BC-FinanceFullAccess-L3-T1-WDP-RES;f0fa27a0-0000-0000-0000-000000000000/PRODUCTION;Assign;finance full access
+# Azure DevOps (membership model = group nesting): Resource = org name; RoleName =
+#   the org/project security group (project-scoped uses '[Project]\\Group').
+# azure-devops;Build Administrators;PIM-AzDevOps-BuildAdmins-L5-T1-WDP-RES;contoso;Assign;org-scoped group
+# Power Platform environment roles: Resource = environment id (from discovery);
+#   RoleName = Environment Admin | Environment Maker. SPN = Power Platform admin.
+# power-platform;Environment Admin;PIM-PowerPlatform-Finance-L3-T1-WDP-RES;Default-f0fa27a0-0000-0000-0000-000000000000;Assign;env admin

@@ -1,0 +1,51 @@
+{
+  "id": "business-central",
+  "name": "Microsoft Dynamics 365 Business Central (permission sets via security group)",
+  "auth": "businesscentral",
+  "membershipModel": true,
+  "perRowResource": true,
+  "containerKind": "security group",
+  "status": "structure built -- nested-membership adapter (Entra security group -> BC security group container -> permission sets). Live-validation pending a BC environment with the Entra group provisioned as a BC security group + the engine SPN registered as a BC app user with SUPER. Automation-API entity/path names follow the v2.0 securityGroups + permissionSets API; confirm against a live environment's $metadata before flipping status to delivered.",
+  "permissionsNeeded": ["Business Central: an app user (the engine SPN) with the SUPER permission set in the target environment; the Entra group must already exist as a BC SECURITY GROUP (linked to the Entra group objectId) so permission sets can be attached to it"],
+  "prerequisites": {
+    "perRowResource": "Each row's Resource column = the BC environment selector 'tenantId/environment', e.g. f0fa27a0-.../PRODUCTION. baseUrl is token-expanded with it so one connector covers every BC environment.",
+    "tokenAdapter": "auth=businesscentral -> token for https://api.businesscentral.dynamics.com supplied via $global:PIM_WorkloadTokens['businesscentral'] (launcher-minted) or Get-AzAccessToken with that resource.",
+    "securityGroup": "BC supports Entra SECURITY GROUPS natively: the Entra group must be added once as a BC security group (Business Central > Security Groups > New, pick the Entra group). resolveContainer finds that BC security-group record by its azureGroupId == the PIM group objectId; permission sets are then attached to it.",
+    "rolesArePermissionSets": "BC 'roles' are PERMISSION SETS (e.g. D365 BUS FULL ACCESS, D365 BASIC, LOCAL). listRoles enumerates the environment's permission sets; pick by displayName/permissionSetId.",
+    "noActivation": "No tenant-wide activation toggle (unlike Defender XDR); the only prerequisites are the app user + the security-group link."
+  },
+  "api": {
+    "baseUrl": "https://api.businesscentral.dynamics.com/v2.0/{resource}/api/microsoft/automation/v2.0",
+    "listRoles": {
+      "method": "GET",
+      "path": "/companies({company})/permissionSets",
+      "itemsPath": "value",
+      "roleId": "id",
+      "roleName": "displayName"
+    },
+    "resolveContainer": {
+      "method": "GET",
+      "path": "/companies({company})/securityGroups?$filter=azureGroupId eq {groupId}",
+      "itemsPath": "value",
+      "idField": "id"
+    },
+    "listContainerRoles": {
+      "method": "GET",
+      "path": "/companies({company})/securityGroups({container})/permissionSets",
+      "itemsPath": "value",
+      "roleId": "permissionSetId"
+    },
+    "assign": {
+      "method": "POST",
+      "path": "/companies({company})/securityGroups({container})/permissionSets",
+      "body": {
+        "permissionSetId": "{roleName}",
+        "displayName": "PIM4EntraPS: {groupTag} -> {roleName}"
+      }
+    },
+    "remove": {
+      "method": "DELETE",
+      "path": "/companies({company})/securityGroups({container})/permissionSets({roleId})"
+    }
+  }
+}

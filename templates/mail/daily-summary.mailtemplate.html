@@ -1,0 +1,26 @@
+<!-- subject: PIM daily summary{{TenantLabel}}: {{TotalChanges}} change(s) ({{Date}}) -->
+<!-- tokens: TenantLabel, WindowStart, WindowEnd, TotalChanges, NewAdminCount, DelegationCount, RemovalCount, NewAdminList, DelegationList, RemovalList, Date -->
+<!-- Daily digest of DELEGATION/ASSIGNMENT lifecycle changes only. Activation events are
+     Entra-PIM-native and are deliberately NOT included (two-approval model). To customize:
+     copy this file to daily-summary.mailtemplate.custom.html and edit. -->
+<html>
+<body style="font-family:Segoe UI,Arial,sans-serif; color:#24292f; font-size:14px;">
+  <p>Hello,</p>
+  <p>Here is the PIM change summary for the last reporting window
+     (<b>{{WindowStart}}</b> &rarr; <b>{{WindowEnd}}</b>). A total of <b>{{TotalChanges}}</b> privileged
+     delegation/assignment change(s) were recorded.</p>
+  <table cellpadding="4" style="border-collapse:collapse; font-size:14px;">
+    <tr><td><b>New privileged admins</b></td><td>{{NewAdminCount}}</td></tr>
+    <tr><td><b>New delegations / assignments</b></td><td>{{DelegationCount}}</td></tr>
+    <tr><td><b>Removals / offboardings</b></td><td>{{RemovalCount}}</td></tr>
+  </table>
+  <h3 style="margin-bottom:2px;">New privileged admins</h3>
+  {{NewAdminList}}
+  <h3 style="margin-bottom:2px;">New delegations / assignments</h3>
+  {{DelegationList}}
+  <h3 style="margin-bottom:2px;">Removals / offboardings</h3>
+  {{RemovalList}}
+  <p style="color:#57606a;">Activation of eligible roles is handled and notified natively by Entra PIM and is
+     intentionally not listed here. Every change above is recorded in the engine audit log.</p>
+</body>
+</html>

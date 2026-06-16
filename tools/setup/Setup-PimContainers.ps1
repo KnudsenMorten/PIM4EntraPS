@@ -37,33 +37,36 @@
 #>
 [CmdletBinding(SupportsShouldProcess)]
 param(
-    # --- target subscription / tenant ---
-    [string]$SubscriptionId = '54468121-98ba-48ba-ba59-ba10a9711ed3',
-    [string]$TenantId       = 'f0fa27a0-8e7c-4f63-9a77-ec94786b7c9e',
-    [string]$Location       = 'westeurope',
+    # --- target subscription / tenant (no real ids baked in; pass your own) ---
+    [Parameter(Mandatory)][string]$SubscriptionId,
+    [Parameter(Mandatory)][string]$TenantId,
+    [string]$Location       = 'westeurope',            # West Europe / Denmark East only (never France)
 
     # --- resource group + networking (spoke VNet peered to hub) ---
-    [string]$ResourceGroup  = 'rg-pim-manager-web',
-    [string]$VnetName       = 'vnet-platform',
-    [string]$VnetResourceGroup = 'rg-platform-connectivity',
+    [Parameter(Mandatory)][string]$ResourceGroup,
+    [Parameter(Mandatory)][string]$VnetName,
+    [Parameter(Mandatory)][string]$VnetResourceGroup,
     [string]$SubnetName     = 'snet-pim-aca',
     [string]$SubnetPrefix   = '10.100.40.0/23',           # /23 dedicated, delegated to ACA
     [string]$EnvName        = 'cae-pim',
 
     # --- container registry + image ---
-    [string]$AcrName        = 'acrsecurityinsight',
+    [Parameter(Mandatory)][string]$AcrName,
     [string]$ImageRepo      = 'pim-manager',
-    [string]$ImageTag       = '1.1.3',
+    [Parameter(Mandatory)][string]$ImageTag,
 
     # --- SQL (MI-only) ---
-    [string]$SqlServerFqdn  = 'sql-pimplatform-we484.database.windows.net',
+    [Parameter(Mandatory)][string]$SqlServerFqdn,
     [string]$SqlDatabase    = 'PimPlatform',
     # SQL AAD-admin SPN (used ONLY here to CREATE the contained MI users; never stored in apps)
     [Parameter(Mandatory)][string]$SqlAdminClientId,
     [Parameter(Mandatory)][string]$SqlAdminClientSecret,
 
-    # --- on-prem/AD DNS (hub clients resolve the env FQDN here) ---
-    [string]$DnsServer      = 'dc1.2linkit.local',
+    # --- on-prem/AD DNS (hub clients resolve the env FQDN here); blank = skip ---
+    [string]$DnsServer      = '',
+    # --- persistent-SQL enforcement (REQUIREMENTS S5): disable serverless auto-pause ---
+    [string]$SqlResourceGroup,                            # RG of the SQL server (for auto-pause assert)
+    [switch]$SkipPersistentSqlCheck,
 
     # --- the worker matrix: deploy as many/few as you want -------------------
     # Each entry: name, ingress ('external'=VNet-private web | 'none'=worker),
@@ -83,6 +86,15 @@ function Step($m){ Write-Host "==> $m" -ForegroundColor Cyan }
 function Note($m){ Write-Host "    $m" -ForegroundColor DarkGray }
 $here = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent $MyInvocation.MyCommand.Path }
 $solRoot = Split-Path -Parent (Split-Path -Parent $here)   # ...\PIM4EntraPS
+
+# Shared setup helpers (banner, region guard, Grant-PimMiSql/Graph, DNS, GSA guidance,
+# Set-PimSqlNoAutoPause) + the engine REST/SQL cores the SQL grant needs.
+. "$here\_PimSetupShared.ps1"
+. "$solRoot\engine\_shared\PIM-Rest.ps1"
+. "$solRoot\engine\_shared\PIM-SqlStore.ps1"
+
+Show-PimSetupBanner -ScriptName 'Setup-PimContainers' -SolutionRoot $solRoot
+$Location = Assert-PimSetupRegion -Location $Location   # West Europe / Denmark East only; refuse France
 
 $image = "$AcrName.azurecr.io/$ImageRepo`:$ImageTag"
 $subnetId = "/subscriptions/$SubscriptionId/resourceGroups/$VnetResourceGroup/providers/Microsoft.Network/virtualNetworks/$VnetName/subnets/$SubnetName"
@@ -126,46 +138,14 @@ $acrU = az acr credential show -n $AcrName --query username -o tsv 2>$null
 $acrP = az acr credential show -n $AcrName --query "passwords[0].value" -o tsv 2>$null
 $acrId = az acr show -n $AcrName --query id -o tsv 2>$null
 
-# --- SQL helper: mint a contained DB user from the MI appId (TYPE=E, SID from appId) ---
-. "$solRoot\engine\_shared\PIM-Rest.ps1"; . "$solRoot\engine\_shared\PIM-SqlStore.ps1"
-function Grant-PimMiSql {
+# SQL contained-DB-user + Graph app-role grants come from _PimSetupShared.ps1
+# (Grant-PimMiSql / Grant-PimMiGraph). A thin local wrapper binds this script's
+# SQL coordinates so the worker loop call stays a one-liner.
+function Grant-PimMiSqlHere {
     param([string]$DbUserName,[string]$MiAppId)
-    $global:PIM_TenantId=$TenantId; $global:PIM_ClientId=$SqlAdminClientId; $global:PIM_ClientSecret=$SqlAdminClientSecret
-    $global:PIM_SqlAccessToken = Get-PimRestToken -Resource 'https://database.windows.net' -ClientId $SqlAdminClientId -ClientSecret $SqlAdminClientSecret -Force
-    $sid = '0x' + ((([guid]$MiAppId).ToByteArray() | ForEach-Object { $_.ToString('X2') }) -join '')
-    $cs  = "Server=tcp:$SqlServerFqdn,1433;Database=$SqlDatabase;Encrypt=True;TrustServerCertificate=False;Connection Timeout=30"
-    $c = New-PimSqlConnection -ConnectionString $cs; $c.Open()
-    $b = @"
-IF EXISTS (SELECT 1 FROM sys.database_principals WHERE name='$DbUserName') DROP USER [$DbUserName];
-CREATE USER [$DbUserName] WITH SID = $sid, TYPE = E;
-ALTER ROLE db_datareader ADD MEMBER [$DbUserName];
-ALTER ROLE db_datawriter ADD MEMBER [$DbUserName];
-ALTER ROLE db_ddladmin   ADD MEMBER [$DbUserName];
-"@
-    $cmd=$c.CreateCommand();$cmd.CommandText=$b;[void]$cmd.ExecuteNonQuery();$c.Close()
-}
-
-# --- Graph helper: grant the MI the directory app-roles the engine needs --------
-# Without these the engine MI 403s on directory reads/writes (Authorization_RequestDenied).
-# Idempotent: "already assigned" is ignored. Requires the runner to be able to assign
-# app roles (Global Admin / Privileged Role Admin / AppRoleAssignment.ReadWrite.All).
-$script:PimGraphAppRoles = @{
-    'Directory.Read.All'                       = '7ab1d382-f21e-4acd-a863-ba3e13f7da61'
-    'User.ReadWrite.All'                       = '741f803b-c850-494e-b5df-cde7c675a1ca'
-    'Group.ReadWrite.All'                      = '62a82d76-70ea-41e2-9197-370581804d09'
-    'RoleManagement.ReadWrite.Directory'       = '9e3f62cf-ca93-4989-b6ce-bf83c28f9fe8'
-    'PrivilegedAccess.ReadWrite.AzureADGroup'  = '618b6020-bca8-4de6-99f6-ef445fa4d857'
-    'RoleManagementPolicy.ReadWrite.Directory' = 'a2611786-80b3-417e-adaa-707d4261a5f0'
-}
-function Grant-PimMiGraph {
-    param([string]$MiObjectId)
-    $gtok = az account get-access-token --resource https://graph.microsoft.com --query accessToken -o tsv 2>$null
-    $gh = @{ Authorization = "Bearer $gtok"; 'Content-Type' = 'application/json' }
-    $graphSp = (Invoke-RestMethod -Headers $gh -Uri "https://graph.microsoft.com/v1.0/servicePrincipals?`$filter=appId eq '00000003-0000-0000-c000-000000000000'").value[0]
-    foreach ($r in $script:PimGraphAppRoles.GetEnumerator()) {
-        try { Invoke-RestMethod -Method POST -Headers $gh -Uri "https://graph.microsoft.com/v1.0/servicePrincipals/$MiObjectId/appRoleAssignments" -Body (@{ principalId=$MiObjectId; resourceId=$graphSp.id; appRoleId=$r.Value } | ConvertTo-Json) -EA Stop | Out-Null }
-        catch { if ("$($_.Exception.Message)" -notmatch 'already') { Write-Warning "  graph role $($r.Key): $($_.Exception.Message)" } }
-    }
+    Grant-PimMiSql -DbUserName $DbUserName -MiAppId $MiAppId `
+        -SqlServerFqdn $SqlServerFqdn -SqlDatabase $SqlDatabase -TenantId $TenantId `
+        -SqlAdminClientId $SqlAdminClientId -SqlAdminClientSecret $SqlAdminClientSecret
 }
 
 $commonEnv = @(
@@ -224,7 +204,7 @@ $envYaml
     # MI -> SQL (SID from appId) + AcrPull + switch registry to MI
     $oid = az containerapp show -g $ResourceGroup -n $w.name --query identity.principalId -o tsv 2>$null
     $appId = az ad sp show --id $oid --query appId -o tsv 2>$null
-    Grant-PimMiSql -DbUserName $w.name -MiAppId $appId
+    Grant-PimMiSqlHere -DbUserName $w.name -MiAppId $appId
     az role assignment create --assignee-object-id $oid --assignee-principal-type ServicePrincipal --role AcrPull --scope $acrId -o none 2>$null
     az containerapp registry set -g $ResourceGroup -n $w.name --server "$AcrName.azurecr.io" --identity system -o none 2>$null
     # Directory app-roles for workers that touch Entra/PIM (everything except a pure
@@ -233,25 +213,34 @@ $envYaml
     Note "MI $appId granted SQL (db user [$($w.name)]) + AcrPull + Graph app-roles"
 }
 
+# --- Persistent SQL compute (REQUIREMENTS S5: no auto-pause / cold starts) -----
+# Assert/disable serverless auto-pause on the hosted Azure SQL so /health + the
+# first post-idle request never cold-start. Needs the SQL server's RG + short name.
+if (-not $SkipPersistentSqlCheck) {
+    $sqlServerShort = ($SqlServerFqdn -split '\.')[0]
+    $sqlRg = if ($SqlResourceGroup) { $SqlResourceGroup } else { $ResourceGroup }
+    Step "SQL persistent compute: assert auto-pause disabled ($sqlServerShort/$SqlDatabase)"
+    try { Set-PimSqlNoAutoPause -ResourceGroup $sqlRg -SqlServerName $sqlServerShort -SqlDatabase $SqlDatabase }
+    catch { Write-Warning "  persistent-SQL assert skipped: $($_.Exception.Message)" }
+}
+
 # --- DNS: register the manager's external FQDN on the AD DNS server -----------
 $mgr = $Workers | Where-Object { $_.entry -eq 'manager' } | Select-Object -First 1
+$mgrFqdn = $null
 if ($mgr) {
     $mgrFqdn = az containerapp ingress show -g $ResourceGroup -n $mgr.name --query fqdn -o tsv 2>$null
-    Step "DNS: $mgrFqdn -> $envStatic on $DnsServer"
-    if ($mgrFqdn -and $PSCmdlet.ShouldProcess($DnsServer,"A $mgrFqdn -> $envStatic")) {
-        $zone = $envDomain   # e.g. nicehill-xxxx.westeurope.azurecontainerapps.io
-        $name = $mgrFqdn.Substring(0, $mgrFqdn.Length - $zone.Length - 1)  # '<app>' label
-        if (-not (Get-DnsServerZone -ComputerName $DnsServer -Name $zone -EA SilentlyContinue)) {
-            Add-DnsServerPrimaryZone -ComputerName $DnsServer -Name $zone -ReplicationScope Forest
-        }
-        foreach ($n in @('*', $name)) {
-            $old = Get-DnsServerResourceRecord -ComputerName $DnsServer -ZoneName $zone -Name $n -RRType A -EA SilentlyContinue
-            if ($old) { Remove-DnsServerResourceRecord -ComputerName $DnsServer -ZoneName $zone -Name $n -RRType A -Force -EA SilentlyContinue }
-            Add-DnsServerResourceRecordA -ComputerName $DnsServer -ZoneName $zone -Name $n -IPv4Address $envStatic -EA SilentlyContinue
-        }
+    if ($mgrFqdn -and $DnsServer) {
+        Step "DNS: $mgrFqdn -> $envStatic on $DnsServer"
+        Write-PimDnsRecord -DnsServer $DnsServer -Fqdn $mgrFqdn -EnvDomain $envDomain -StaticIp $envStatic
         Note "Manager URL: https://$mgrFqdn/"
+    } elseif ($mgrFqdn) {
+        Note "Manager FQDN: $mgrFqdn  (no -DnsServer given; register A '$mgrFqdn' -> $envStatic on your DNS manually)"
     }
 }
 
 Step 'Done.'
-Write-Host "Verify from a hub/VNet client:  curl https://$mgrFqdn/   (expect 200; /api needs the page-embedded token)" -ForegroundColor Green
+if ($mgrFqdn) {
+    Write-Host "Verify from a hub/VNet client:  curl https://$mgrFqdn/   (expect 200; /api needs the page-embedded token)" -ForegroundColor Green
+}
+# GSA / Private Access + private-link / DNS guidance (which zones to add)
+Show-PimGsaPrivateLinkGuidance -ManagerFqdn $mgrFqdn

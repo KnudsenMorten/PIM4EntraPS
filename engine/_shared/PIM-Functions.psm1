@@ -55,6 +55,26 @@ If ($global:PIM_UseGraphSdk) {
 # Invoke-PimGraph|Arm|PowerBI so the engine runs module-free on a VM or container.
 . (Join-Path $PSScriptRoot 'PIM-Rest.ps1')
 
+# Account-disable safety guards + environment-class resolver (incident 2026-06-15,
+# env-aware refinement). Provides Resolve-PimEnvironmentClass /
+# Resolve-PimDestructiveFeatureDefault / Test-PimExplicitFlagValue so the destructive-
+# feature gates (Test-PimAutoDestructiveEnabled below) default ON in a test tenant and
+# OFF in a protected one, with the always-on catastrophe guards (G1/G2).
+. (Join-Path $PSScriptRoot 'PIM-DisableGuard.ps1')
+
+# Approval-gated offboarding + revoke (REQUIREMENTS §27 H3/H4) -- the maker/checker
+# control plane that closes the incident gap: a destructive identity action (offboard/
+# revoke/disable) needs a REQUEST -> a DIFFERENT person's APPROVAL -> a one-time, gated
+# execution. Composes (never bypasses) the DisableGuard circuit breaker + break-glass
+# exclusion. Automatic offboarding stays PROHIBITED. Loaded after PIM-DisableGuard so
+# Test-PimOffboardExecutionAllowed can call Test-PimDisablePassAllowed.
+. (Join-Path $PSScriptRoot 'PIM-ApprovalGate.ps1')
+
+# Auth / Identity diagnostics (§ 9) -- missing-role hint on a 403, account sign-in
+# clarity, AD-failure diagnostics, MFA-gated Manager login. Pure + offline-testable;
+# dot-sourced right after PIM-Rest so it can lean on the Edge PKCE interactive flow.
+. (Join-Path $PSScriptRoot 'PIM-AuthDiagnostics.ps1')
+
 # Offline Pro licensing (Core/Pro split) -- Get-PimLicense / Test-PimProFeature.
 # Own file so the Manager dot-sources it standalone; Core is never gated.
 . (Join-Path $PSScriptRoot 'PIM-License.ps1')
@@ -62,6 +82,13 @@ If ($global:PIM_UseGraphSdk) {
 # Baseline-courier consumer (§ 19) -- Get-PimBaselineBundle / Test-PimBaselineDoc /
 # Set-PimBaselineApplied. The local engine pulls + verifies the signed MSP baseline.
 . (Join-Path $PSScriptRoot 'PIM-Baseline.ps1')
+
+# MSP shared substrate + multiple sync models + signed-baseline kill-switch (§ 4) --
+# Product-keyed registry (TenantManager reuse), Resolve-PimSyncModel (don't force one),
+# Test-PimBaselineSignerAllowed (revoke = kill-switch) + Resolve-PimCentralKill (signed
+# central kill -> AccountStatus flips the engine pipeline already applies). Loaded AFTER
+# PIM-Baseline because the kill manifest reuses Test-PimBaselineDoc's crypto.
+. (Join-Path $PSScriptRoot 'PIM-Substrate.ps1')
 
 # Template versioning + fleet conformance -- Get-PimConformance (gap/exempt/drift/
 # catalog-ahead reconcile), approval gate, ring-driven rollout, exemptions with
@@ -81,6 +108,21 @@ If ($global:PIM_UseGraphSdk) {
 # kind/name/roleScope/role/level/tier/plane for entra/azure/workload targets.
 . (Join-Path $PSScriptRoot 'PIM-PermissionWizard.ps1')
 
+# Manager authoring helpers -- pure row-set builders for the bulk-attach / clone /
+# AU / admin-import / admin-move / multi-delete / role-permission / LA-audit flows.
+. (Join-Path $PSScriptRoot 'PIM-Authoring.ps1')
+
+# Day-to-day naming convention helpers + validation (§ 17) -- Resolve-PimAdminName /
+# Resolve-PimGroupName / Resolve-PimResourceGroup + Test-PimAdminName/GroupName.
+# Pure + offline; engine, GUI validator and the migration planner resolve names
+# identically through $global:PIM_NamingConventions.
+. (Join-Path $PSScriptRoot 'PIM-Naming.ps1')
+
+# v1 -> v2 migration planner (§ 18) -- read a v1 direct-assignment baseline (CSV or
+# Custom-Policies.ps1) and map it onto the v2 group-centric model. PLAN-ONLY: pure,
+# read-only source, no writes to Entra/Azure/SQL/CSV. Needs PIM-Naming (above).
+. (Join-Path $PSScriptRoot 'PIM-Migration.ps1')
+
 # Change queue + full/delta run modes -- commit enqueues only changed items; the
 # engine drains the queue fast (delta) instead of a full reconcile sweep.
 . (Join-Path $PSScriptRoot 'PIM-ChangeQueue.ps1')
@@ -88,6 +130,21 @@ If ($global:PIM_UseGraphSdk) {
 # Azure scope auto-discovery + reconcile -- discovered MGs/subs/RGs vs existing
 # definitions -> create/rename-on-move/orphan plan, feeding the change queue.
 . (Join-Path $PSScriptRoot 'PIM-AzureDiscovery.ps1')
+
+# Power Platform environment auto-discovery + reconcile -- discovered Power Apps /
+# Power Automate / Dataverse environments vs existing definitions -> create (propose,
+# never auto-map by default) / rename / orphan plan, feeding the change queue.
+. (Join-Path $PSScriptRoot 'PIM-PowerPlatformDiscovery.ps1')
+
+# Power BI workspace + service/role discovery, auto-map gate (never auto-map a
+# principal), and delta refinement (surface only not-yet-handled items). REST-only.
+. (Join-Path $PSScriptRoot 'PIM-Discovery.ps1')
+
+# Access Review OVERVIEW (read-only data layer) -- enumerate Entra access reviews
+# relevant to the PIM estate -> normalized, table-ready rows for the Manager GUI tab
+# (GUI queued separately). List/get only, REST-only, no decisions. PURE normalizer
+# + thin live wrapper. Needs AccessReview.Read.All (graceful no-op without it).
+. (Join-Path $PSScriptRoot 'PIM-AccessReviews.ps1')
 
 # Connector role-definition import -- connector live roles -> permission
 # definitions (manual super-admin import, or auto by service-type+tier+level).
@@ -101,6 +158,11 @@ If ($global:PIM_UseGraphSdk) {
 # change queue + fast delta commit. No SqlServer module (no Graph/Azure.Core clash).
 . (Join-Path $PSScriptRoot 'PIM-SqlStore.ps1')
 
+# DB cutover ceremony + on-demand recalc change-detector + persistent-SQL/health
+# guards. Orchestrates PIM-SqlStore + PIM-SchemaConformance: preflight -> upgrade ->
+# transactional import -> set source=SQL -> re-preflight -> explicit finalize.
+. (Join-Path $PSScriptRoot 'PIM-Cutover.ps1')
+
 # PAW device tagging + group -- make the PAW group, tag devices, detect PAW
 # membership; feeds the tier-0 network zone gate (PIM-PortalAccess.ps1).
 . (Join-Path $PSScriptRoot 'PIM-PawDevices.ps1')
@@ -109,9 +171,26 @@ If ($global:PIM_UseGraphSdk) {
 # assignments, gated by Owners column or the approve-assignment/access-review caps.
 . (Join-Path $PSScriptRoot 'PIM-Approvals.ps1')
 
+# Delegation DEPTH -- local self-delegation (full local autonomy, MSP-gated), the
+# two-approval split (engine-owned delegation approval vs Entra-native PEOPLE-only
+# activation approval), and reachability-by-classification. Builds on PortalAccess
+# + Approvals; must load AFTER both.
+. (Join-Path $PSScriptRoot 'PIM-DelegationDepth.ps1')
+
 # Lifecycle calendar -- upcoming expirations, auto-renew, configurable escalation
 # stages + reminder resends; feeds the change queue + templated mail.
 . (Join-Path $PSScriptRoot 'PIM-Lifecycle.ps1')
+
+# Lifecycle / Governance pure helpers (REQUIREMENTS § 13): scheduled creation +
+# TAP due-logic, lifecycle-calendar orchestration, KV-backed break-glass verify,
+# access-review feedback loop. PURE (own file so the Manager dot-sources it too).
+. (Join-Path $PSScriptRoot 'PIM-Governance.ps1')
+
+# Notification batch (REQUIREMENTS §12) -- pure aggregation/render-prep for the daily
+# summary, the Tier 0/1 report, delegation-approval escalation/reminders (serial +
+# parallel), and the secure store-and-forward ServiceNow->Manager intake broker. No
+# network here; the send is the existing channel layer.
+. (Join-Path $PSScriptRoot 'PIM-Notifications.ps1')
 
 # NEW REST+SQL engine -- pure diff core + provider model (replaces the legacy
 # PIM-Baseline-Management-CSV chain). Providers: desired from SQL, live + apply via REST.
@@ -2608,6 +2687,7 @@ Function Get-PimWorkloadToken {
         'powerbi'         { 'https://analysis.windows.net/powerbi/api' }
         'businesscentral' { 'https://api.businesscentral.dynamics.com' }
         'devops'          { '499b84ac-1321-427f-aa17-267ca6975798' }   # Azure DevOps resource
+        'powerplatform'   { 'https://service.powerapps.com/' }         # Power Platform environment roles (BAP admin)
         'dataverse'       { if ($Connector.tokenResource) { "$($Connector.tokenResource)" } else { "$($Connector.api.baseUrl)" } }
         default           { $null }
     }
@@ -2681,6 +2761,22 @@ Function Get-PimWorkloadAssignmentPrincipals {
     return @{ id = $id; principals = $principals; displayName = "$($Item.displayName)" }
 }
 
+Function Select-PimWorkloadContainerItem {
+    # PURE: from a resolveContainer item list, pick the one matching the connector's
+    # resolveContainer descriptor + tokens. CLIENT-SIDE match (e.g. Azure DevOps:
+    # the graph/groups list isn't server-filterable by originId, so pick the item
+    # whose matchField == matchToken's value). Server-filtered connectors (Dataverse
+    # $filter) omit matchField and keep the historical first-item behaviour. Returns
+    # the chosen item or $null. Testable offline (no network).
+    param([Parameter(Mandatory)][object]$Op, [object[]]$Items = @(), [hashtable]$Tokens = @{})
+    $items = @($Items)
+    if ($Op.matchField) {
+        $want = if ($Op.matchToken -and $Tokens.ContainsKey("$($Op.matchToken)")) { "$($Tokens["$($Op.matchToken)"])" } else { '' }
+        $items = @($items | Where-Object { "$(Get-PimNestedProp $_ "$($Op.matchField)")" -ieq $want })
+    }
+    return (@($items) | Select-Object -First 1)
+}
+
 Function Get-PimWorkloadContainerId {
     # NESTED-MEMBERSHIP connectors: resolve a GROUP to its container (Dataverse
     # group-team, Business Central security group, Azure DevOps group) via
@@ -2691,7 +2787,7 @@ Function Get-PimWorkloadContainerId {
     if (-not $op) { return $null }
     $resp = Invoke-PimWorkloadApi -Connector $Connector -Op $op -Tokens $Tokens
     $items = if ($op.itemsPath) { @(Get-PimNestedProp $resp $op.itemsPath) } else { @($resp) }
-    $first = @($items) | Select-Object -First 1
+    $first = Select-PimWorkloadContainerItem -Op $op -Items $items -Tokens $Tokens
     if (-not $first) { return $null }
     $idf = if ($op.idField) { "$($op.idField)" } else { 'id' }
     $id = "$(Get-PimNestedProp $first $idf)"
@@ -5251,6 +5347,27 @@ Function CreateUpdate-Accounts-From-file-CSV
     elseif (-not $_fwdRequested) {
         Write-Output "  [info] no row requests mail forwarding -- skipping Connect-ExchangeOnline (not needed this run)."
     }
+    elseif (-not $global:PIM_UseGraphSdk) {
+        # REST-first (default): the engine sets mailbox forwarding app-only over
+        # the Exchange admin REST endpoint (Set-PimMailboxForwarding in PIM-Rest.ps1)
+        # with the engine SPN + certificate -- no ExchangeOnlineManagement module,
+        # no Connect-ExchangeOnline session, no EXO V3 runspace-state bug. The
+        # token is minted per call for the https://outlook.office365.com audience
+        # (the same Exchange.ManageAsApp consent). Resolve the organization
+        # segment for the InvokeCommand path once here.
+        $exoOrg = $TenantNameOrganization
+        if ([string]::IsNullOrWhiteSpace($exoOrg)) {
+            try {
+                $org = Invoke-PimGraph -Path '/organization?$select=verifiedDomains' -All
+                $initial = @($org)[0].verifiedDomains | Where-Object { $_.isInitial -eq $true } | Select-Object -First 1
+                if ($initial) { $exoOrg = $initial.name }
+            } catch {}
+        }
+        if ([string]::IsNullOrWhiteSpace($exoOrg)) { $exoOrg = $global:PIM_TenantId }
+        $global:PIM_ExoOrganization = $exoOrg
+        Write-Output "  [info] EXO over pure REST (app-only, no module). InvokeCommand organization: $exoOrg"
+        $exoConnected = $true   # logically ready -- token is acquired per Set-Mailbox call
+    }
     else {
 
     $existingExo = $null
@@ -5474,7 +5591,13 @@ Fix (one-time per tenant):
                 continue
             }
 
-            If ($ForwardMails -eq "TRUE")
+            # Forwarding applies ONLY when it is switched on AND a REAL address is
+            # configured. 'FALSE'/blank/'no'/'0' in MailForwardAddress is a "no
+            # address" sentinel -- the engine must never forward to the literal
+            # string 'FALSE'. Test-PimMailForwardAddressIsReal (PIM-Rest.ps1) is
+            # the same predicate the Manager validator uses for PIM-DOMAIN-001, so
+            # validator + engine agree on what counts as a real forward address.
+            If (($ForwardMails -eq "TRUE") -and (Test-PimMailForwardAddressIsReal -Value $MailForwardToAddress))
                 {
                     $ForwardMails = $TRUE
                 }
@@ -5517,7 +5640,11 @@ Fix (one-time per tenant):
 
                             If ($ForwardMails) {
                                 Try {
-                                    Set-Mailbox -Identity $UserPrincipalName -ForwardingSmtpAddress $MailForwardToAddress -DeliverToMailboxAndForward:$false -ErrorAction Stop
+                                    If ($global:PIM_UseGraphSdk) {
+                                        Set-Mailbox -Identity $UserPrincipalName -ForwardingSmtpAddress $MailForwardToAddress -DeliverToMailboxAndForward:$false -ErrorAction Stop
+                                    } Else {
+                                        Set-PimMailboxForwarding -Identity $UserPrincipalName -ForwardingSmtpAddress $MailForwardToAddress -DeliverToMailboxAndForward $false
+                                    }
                                 }
                                 Catch {
                                     write-host ""
@@ -5654,7 +5781,11 @@ Fix (one-time per tenant):
 
                             If ($ForwardMails) {
                                 Try {
-                                    Set-Mailbox -Identity $UserPrincipalName -ForwardingSmtpAddress $MailForwardToAddress -DeliverToMailboxAndForward:$false -ErrorAction SilentlyContinue
+                                    If ($global:PIM_UseGraphSdk) {
+                                        Set-Mailbox -Identity $UserPrincipalName -ForwardingSmtpAddress $MailForwardToAddress -DeliverToMailboxAndForward:$false -ErrorAction SilentlyContinue
+                                    } Else {
+                                        Set-PimMailboxForwarding -Identity $UserPrincipalName -ForwardingSmtpAddress $MailForwardToAddress -DeliverToMailboxAndForward $false
+                                    }
                                 }
                                 Catch {
                                 }
@@ -5697,6 +5828,17 @@ Fix (one-time per tenant):
                         $authMsg = $getAdUserErr.Exception.Message
                         $credName = if ($Credentials -and $Credentials.UserName) { $Credentials.UserName } else { '<no credential>' }
                         Write-Host ("ERROR: Get-ADUser failed for {0} with credential '{1}': {2}. Skipping this AD row -- NOT writing password file." -f $UserPrincipalName, $credName, $authMsg) -ForegroundColor Red
+                        # § 9 AD-failure diagnostics: surface WHY (process identity / Kerberos
+                        # tickets / DC discovery) instead of a bare module error, so the operator
+                        # knows whether to fix the credential, the DC/DNS, or the target ACL.
+                        if (Get-Command Get-PimAdFailureDiagnostic -ErrorAction SilentlyContinue) {
+                            try {
+                                $diag = Get-PimAdFailureDiagnostic -HasExplicitCredential ([bool]$Credentials) -ErrorMessage $authMsg
+                                Write-Host ("  [ad-diag] running as: {0} (looks-like-system={1}); explicit credential={2}; kerberos tickets={3}; DC discovered={4}" -f $diag.ProcessIdentity, $diag.LooksLikeSystem, $diag.HasExplicitCredential, $diag.HasKerberosTickets, $(if ($diag.DiscoveredDc) { $diag.DiscoveredDc } else { '<none>' })) -ForegroundColor DarkYellow
+                                foreach ($c in $diag.Causes) { Write-Host ("  [ad-diag] likely cause: {0}" -f $c) -ForegroundColor DarkYellow }
+                                if ($diag.NextStep) { Write-Host ("  [ad-diag] next step: {0}" -f $diag.NextStep) -ForegroundColor Yellow }
+                            } catch {}
+                        }
                         continue
                     }
 
@@ -10173,6 +10315,46 @@ function Invoke-PimPolicyTemplateApply {
                     PIM_Policy_Check_Update -RuleId Expiration_EndUser_Assignment -RuleType ExpirationRule -Policy $policy -PIM_API MicrosoftGraph `
                         -isExpirationRequired $true -maximumDuration ([string]$val) -caller EndUser -Operations all -Level Assignment -inheritableSettings @() -enforcedSettings @()
                 }
+                'Enablement' {
+                    # v1 parity: structured Enablement object -> MFA/Justification per target
+                    # (EndUser/Assignment + Admin/Eligibility get rules; Admin/Assignment cleared).
+                    foreach ($t in @(
+                        @{ Key='EndUser_Assignment'; Caller='EndUser'; Level='Assignment'  },
+                        @{ Key='Admin_Eligibility';  Caller='Admin';   Level='Eligibility' },
+                        @{ Key='Admin_Assignment';   Caller='Admin';   Level='Assignment'  })) {
+                        $ev = $null; $present = $false
+                        if ($val -is [hashtable]) { if ($val.ContainsKey($t.Key)) { $ev = $val[$t.Key]; $present = $true } }
+                        elseif ($val.PSObject -and $val.PSObject.Properties[$t.Key]) { $ev = $val.$($t.Key); $present = $true }
+                        if (-not $present) { continue }
+                        PIM_Policy_Check_Update -RuleId "Enablement_$($t.Caller)_$($t.Level)" -RuleType EnablementRule -Policy $policy -PIM_API MicrosoftGraph `
+                            -enabledRules @($ev) -caller $t.Caller -Operations all -Level $t.Level -inheritableSettings @() -enforcedSettings @()
+                    }
+                }
+                'Expiration' {
+                    # v1 parity: structured Expiration object -> EndUser/Assignment + Admin/Assignment
+                    # + Admin/Eligibility caps (or a bare string = EndUser/Assignment only).
+                    if ($val -is [string]) {
+                        PIM_Policy_Check_Update -RuleId Expiration_EndUser_Assignment -RuleType ExpirationRule -Policy $policy -PIM_API MicrosoftGraph `
+                            -isExpirationRequired $true -maximumDuration ([string]$val) -caller EndUser -Operations all -Level Assignment -inheritableSettings @() -enforcedSettings @()
+                    } else {
+                        foreach ($t in @(
+                            @{ Key='EndUser_Assignment'; Caller='EndUser'; Level='Assignment'  },
+                            @{ Key='Admin_Assignment';   Caller='Admin';   Level='Assignment'  },
+                            @{ Key='Admin_Eligibility';  Caller='Admin';   Level='Eligibility' })) {
+                            $tv = $null
+                            if ($val -is [hashtable]) { if ($val.ContainsKey($t.Key)) { $tv = $val[$t.Key] } }
+                            elseif ($val.PSObject -and $val.PSObject.Properties[$t.Key]) { $tv = $val.$($t.Key) }
+                            if ($null -eq $tv) { continue }
+                            $dur = if ($tv -is [string]) { [string]$tv } elseif ($tv.PSObject -and $tv.PSObject.Properties['maximumDuration']) { [string]$tv.maximumDuration } elseif ($tv -is [hashtable] -and $tv.ContainsKey('maximumDuration')) { [string]$tv['maximumDuration'] } else { $null }
+                            if (-not "$dur".Trim()) { continue }
+                            $req = $true
+                            if ($tv.PSObject -and $tv.PSObject.Properties['isExpirationRequired']) { $req = [bool]$tv.isExpirationRequired }
+                            elseif ($tv -is [hashtable] -and $tv.ContainsKey('isExpirationRequired')) { $req = [bool]$tv['isExpirationRequired'] }
+                            PIM_Policy_Check_Update -RuleId "Expiration_$($t.Caller)_$($t.Level)" -RuleType ExpirationRule -Policy $policy -PIM_API MicrosoftGraph `
+                                -isExpirationRequired $req -maximumDuration $dur -caller $t.Caller -Operations all -Level $t.Level -inheritableSettings @() -enforcedSettings @()
+                        }
+                    }
+                }
                 default { Write-Warning "  [Policy] template '$tplId' rule '$ruleKey' is not a supported override key -- ignored." }
             }
         }
@@ -10296,6 +10478,46 @@ function Invoke-PimApprovalEscalation {
     }
 }
 
+# --- Automatic-destructive feature gate (operator policy, mass-disable incident) ----
+# After the mass account-disable incident, every AUTOMATIC destructive action that
+# acts on the whole scanned population (offboarding/account-disable+delete, group
+# retirement, membership drift removal) is DISABLED BY DEFAULT and only runs when the
+# operator explicitly opts in via the matching $global:PIM_Enable* flag. This is a
+# kill-switch on the *automatic trigger* -- the controlled, naming-scoped, opt-in
+# reconcile (-Mode Full -Prune) is unaffected. NO automatic offboarding is permitted
+# until an approval flow exists (docs/REQUIREMENTS.md); the flags exist so the path can
+# be re-enabled deliberately once that gate is built, not so it runs silently.
+#
+# Default = OFF for all. To turn one on, set the flag $true in
+# config/PIM4EntraPS.custom.ps1 (persisted per environment), e.g.:
+#   $global:PIM_EnableAutomaticOffboarding   = $true
+#   $global:PIM_EnableGroupRetirement        = $true
+#   $global:PIM_EnableMembershipDriftCleanup = $true
+function Test-PimAutoDestructiveEnabled {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string]$Feature)
+    $flagName = switch ($Feature) {
+        'Offboarding'           { 'PIM_EnableAutomaticOffboarding' }
+        'GroupRetirement'       { 'PIM_EnableGroupRetirement' }
+        'MembershipDriftCleanup'{ 'PIM_EnableMembershipDriftCleanup' }
+        default                 { $null }
+    }
+    if (-not $flagName) { return $false }
+    $val = Get-Variable -Name $flagName -Scope Global -ValueOnly -ErrorAction SilentlyContinue
+    # ENVIRONMENT-AWARE default: an explicit operator setting (true/false) always wins;
+    # otherwise default ON in a test tenant, OFF in a protected one. The catastrophe
+    # guards (empty-desired + mass-disable breaker) stay always-on regardless of env.
+    if (Get-Command Test-PimExplicitFlagValue -ErrorAction SilentlyContinue) {
+        $explicit = Test-PimExplicitFlagValue -Value $val
+        if ($null -ne $explicit) { return [bool]$explicit }
+        if (Get-Command Resolve-PimDestructiveFeatureDefault -ErrorAction SilentlyContinue) {
+            return [bool](Resolve-PimDestructiveFeatureDefault)
+        }
+    }
+    # Fallback (DisableGuard not loaded): preserve the post-incident OFF-by-default.
+    return ("$val".Trim().ToLowerInvariant() -in @('true','1','yes','y','on','enable','enabled'))
+}
+
 # --- Offboarding (LIFECYCLE-GOVERNANCE phase 5) -------------------------------
 # Admins: OffboardDate (date expression) triggers the revoke pipeline (the
 # existing Invoke-PimAccountRevoke does PIM schedule cancellation + group
@@ -10304,6 +10526,10 @@ function Invoke-PimApprovalEscalation {
 # deleted. Groups: Lifecycle=Retire removes role assignments + members and
 # deletes the group (engine-created naming-prefix guard). Drift:
 # $global:PIM_OffboardCleanupMode = Off | Report | Enforce.
+#
+# NOTE: All three are AUTOMATIC whole-population destructive actions and are
+# DISABLED BY DEFAULT behind Test-PimAutoDestructiveEnabled (see above). The
+# engine call site refuses to invoke them unless the operator opts in.
 
 function Get-PimOffboardStateFile {
     $stateDir = Join-Path (Get-PimOutputDir) 'state'
@@ -10558,6 +10784,28 @@ function Write-PimAuditEvent {
             whatIf        = [bool]$global:WhatIfMode
         }
         [System.IO.File]::AppendAllText($f, (($evt | ConvertTo-Json -Depth 6 -Compress) + "`r`n"), (New-Object System.Text.UTF8Encoding($false)))
+
+        # Optional Log Analytics sink (REQUIREMENTS §13/§23 "Audit to Log Analytics").
+        # OFF by default; opt in by setting $global:PIM_AuditLogAnalytics with the DCR
+        # ingestion target. The audit FILE above is always written first (the file is
+        # the source of truth); the LA push is best-effort and never blocks the engine.
+        if ($global:PIM_AuditLogAnalytics -and (Get-Command ConvertTo-PimLaAuditRecord -ErrorAction SilentlyContinue)) {
+            try {
+                $la = $global:PIM_AuditLogAnalytics
+                $rec = ConvertTo-PimLaAuditRecord -Event $evt
+                if (Get-Command Send-PimLaAuditRecord -ErrorAction SilentlyContinue) {
+                    # Custom hook (lets a host inject its own transport / batching).
+                    Send-PimLaAuditRecord -Record $rec -Config $la
+                } elseif (Get-Command Post-AzLogAnalyticsLogIngestCustomLogDcrDce-Output -ErrorAction SilentlyContinue) {
+                    # AzLogDcrIngestPS direct push (the user's own PSGallery module).
+                    Post-AzLogAnalyticsLogIngestCustomLogDcrDce-Output `
+                        -DceUri $la.DceUri -DcrImmutableId $la.DcrImmutableId `
+                        -TableName $la.TableName -Data @($rec) -ErrorAction Stop | Out-Null
+                }
+            } catch {
+                Write-Warning "audit Log Analytics push failed (engine NOT blocked; file audit intact): $($_.Exception.Message)"
+            }
+        }
     } catch {
         Write-Warning "audit write failed (engine NOT blocked): $($_.Exception.Message)"
     }
@@ -10683,6 +10931,15 @@ function Invoke-PimGroupRetirement {
         [string]$GroupNamePrefix = $(if ($global:PIM_GroupPrefix) { $global:PIM_GroupPrefix } else { 'PIM-' })
     )
 
+    # OPERATOR POLICY (mass-disable incident): automatic group retirement is a
+    # whole-population destructive action -- OFF by default. Run only on explicit
+    # opt-in ($global:PIM_EnableGroupRetirement=$true). Defense-in-depth: also gated
+    # at the engine call site.
+    if (-not (Test-PimAutoDestructiveEnabled -Feature 'GroupRetirement')) {
+        Write-Host "  [Retire] SKIPPED -- automatic group retirement is DISABLED (operator policy). Set `$global:PIM_EnableGroupRetirement=`$true to opt in." -ForegroundColor DarkYellow
+        return
+    }
+
     foreach ($base in @('PIM-Definitions-Roles','PIM-Definitions-Tasks','PIM-Definitions-Services','PIM-Definitions-Processes','PIM-Definitions-Resources','PIM-Definitions-Departments','PIM-Definitions-Organization')) {
         $path = $null
         try { $path = Get-PimConfigCsv -Name $base } catch { continue }
@@ -10758,6 +11015,16 @@ function Invoke-PimMembershipDriftCleanup {
     #>
     [CmdletBinding()]
     param()
+
+    # OPERATOR POLICY (mass-disable incident): automatic membership drift cleanup is a
+    # whole-population destructive action -- OFF by default. Run only on explicit opt-in
+    # ($global:PIM_EnableMembershipDriftCleanup=$true). Once enabled, $global:PIM_OffboardCleanupMode
+    # (Off | Report | Enforce) still controls whether it only reports or also removes.
+    # Defense-in-depth: also gated at the engine call site.
+    if (-not (Test-PimAutoDestructiveEnabled -Feature 'MembershipDriftCleanup')) {
+        Write-Host "  [Drift] SKIPPED -- automatic membership drift cleanup is DISABLED (operator policy). Set `$global:PIM_EnableMembershipDriftCleanup=`$true to opt in." -ForegroundColor DarkYellow
+        return
+    }
 
     $mode = if ($global:PIM_OffboardCleanupMode) { "$($global:PIM_OffboardCleanupMode)" } else { 'Report' }
     if ($mode -eq 'Off') { return }
@@ -11655,6 +11922,12 @@ function Write-PimAdminPassword {
     .PARAMETER Platform
         'ID' (Entra) or 'AD' (on-prem AD).
     #>
+    # Legacy non-cloud admin-bootstrap helper: records a just-generated plain-text password
+    # to disk for the rare non-TAP flow; it does NOT authenticate with these params.
+    # Targeted suppression keeps PSAvoidUsingUsernameAndPasswordParams active repo-wide; the
+    # SecureString/PSCredential refactor is tracked in docs/REQUIREMENTS.md
+    # (Testing / Validation — "PSScriptAnalyzer: refactor legacy username/password helpers").
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSAvoidUsingUsernameAndPasswordParams','')]
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)][string]$UserPrincipalName,

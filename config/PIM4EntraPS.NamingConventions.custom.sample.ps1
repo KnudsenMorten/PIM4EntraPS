@@ -22,8 +22,16 @@
 
 .SCHEMA -- the full set of keys the engine + Manager understand
 
-      AdminAccountPatterns           -- hashtable: UserType -> name template
-      AdminAccountPattern            -- legacy fallback (single string); use AdminAccountPatterns if you have internal vs external admins
+      AdminAccountPattern            -- admin name template; default
+                                        '{AdminTypePrefix}Admin-{Initial}{Platform}'  (rendered lower-case, e.g. admin-mok-id)
+      AdminAccountPatternHighPriv    -- dedicated tier-0 template; default
+                                        'Admin-{Initial}-L0-T0{Platform}'             (rendered lower-case, e.g. admin-mok-l0-t0-id)
+      AdminTypePrefixes              -- map admin-type -> name PREFIX
+                                        (internal-adminuser '', external-adminuser 'x-', external-guest '')
+      AdminTypeDefault               -- admin-type used when a row doesn't set one
+      EnvironmentSuffixes            -- map environment -> name SUFFIX (entra '-ID', ad '-AD'); the {Platform} token
+      EnvironmentDefault             -- environment used when a row doesn't set one
+      AdminAccountPatterns           -- prefix list widening the Graph admin-load filter
       AdminAccountUpnSuffix          -- the bit after the @ in admin UPNs (null = tenant default)
       AdminAccountDisplayNameSuffix  -- appended to DisplayName
 
@@ -31,9 +39,8 @@
       PimGroupAuPattern              -- AU-bound group template (tokens: {Role}, {AdminUnit}, ...)
       PimGroupTagRegex               -- optional strict GroupTag regex (null = wide-open)
 
-      TagPrefixToCsv                 -- hashtable: tag prefix -> which PIM-Definitions-*.csv that prefix belongs to (longest match wins)
-
-      ResourceGroupPattern           -- Azure RG name template (token: {Tier})
+      ResourceGroupPattern           -- Azure RG name template; default follows the full PIM convention
+                                        'PIM-{Workload}-{Scope}-{Permission}-L{Level}-T{Tier}-{Plane}-{Platform}'
 
     All templates use {Token} placeholders that the engine + Manager substitute
     at runtime. Unknown tokens are left as-is (visible bug instead of silent
@@ -92,6 +99,24 @@
 #     'adm_'             # legacy short-form (drop if not used)
 # )
 
+# --- Admin name PREFIX (by admin-type) + SUFFIX (by environment) ---
+# The admin name is {AdminTypePrefix} + 'Admin-{Initial}' + {Platform}, rendered
+# lower-case. Override these maps to change the per-type prefix / per-environment
+# suffix. internal-adminuser AND external-guest have NO prefix by default.
+#
+# $global:PIM_NamingConventions.AdminTypePrefixes = [ordered]@{
+#     'internal-adminuser' = ''
+#     'external-adminuser' = 'ext-'     # e.g. ext-admin-vnd-id
+#     'external-guest'     = ''         # default: no prefix (set e.g. 'g-' if you want one)
+# }
+# $global:PIM_NamingConventions.AdminTypeDefault = 'internal-adminuser'
+#
+# $global:PIM_NamingConventions.EnvironmentSuffixes = [ordered]@{
+#     'entra' = '-ID'
+#     'ad'    = '-AD'
+# }
+# $global:PIM_NamingConventions.EnvironmentDefault = 'entra'
+
 # UPN suffix for new admin accounts. Null = use the tenant's default verified
 # domain. Set explicitly when you have a dedicated admin domain (recommended).
 #
@@ -145,42 +170,14 @@
 # $global:PIM_NamingConventions.PimGroupTagRegex = '^[A-Za-z0-9][A-Za-z0-9._-]*-L[0-9]-T[0-2]-(CP|WDP|MP|APP|USER)-(ID|RES|DAT)(-S_AD)?$'
 
 
-# ----- Tag prefix -> Definition CSV map (PIM Manager wizard) --------------
-
-# The Manager's "Re-add missing definition" wizard uses this to pick the
-# right PIM-Definitions-*.csv automatically based on the tag's prefix.
-# Longest-prefix match wins. If empty, the Manager falls back to scanning
-# the customer's existing rows and learning the mapping from observed data
-# (works well once you have a few hundred rows; useful to set explicitly
-# when bootstrapping a fresh tenant).
-#
-# $global:PIM_NamingConventions.TagPrefixToCsv = @{
-#     # Microsoft services -> Tasks (atomic capabilities) or Services
-#     'Entra-ID-'    = 'PIM-Definitions-Tasks'
-#     'Defender-'    = 'PIM-Definitions-Services'
-#     'Intune-'      = 'PIM-Definitions-Services'
-#     'Exchange-'    = 'PIM-Definitions-Services'
-#     'Sharepoint-'  = 'PIM-Definitions-Services'
-#     'Teams-'       = 'PIM-Definitions-Services'
-#     'AzDevOps-'    = 'PIM-Definitions-Services'
-#     'PowerBI-'     = 'PIM-Definitions-Resources'
-#     'Azure-'       = 'PIM-Definitions-Resources'
-#
-#     # On-prem / hybrid
-#     'AD-'          = 'PIM-Definitions-Tasks'
-#
-#     # Role + org structure
-#     'ROLE-'        = 'PIM-Definitions-Roles'
-#     'DEPT-'        = 'PIM-Definitions-Departments'
-#     'ORG-'         = 'PIM-Definitions-Organization'
-#     'PROCESS-'     = 'PIM-Definitions-Processes'
-# }
-
-
 # ----- Azure resource groups ----------------------------------------------
 
-# Azure RG name template when PIM4EntraPS provisions Azure resources.
-# Tokens: {Tier}, {Env}
+# Azure RG name template when PIM4EntraPS provisions Azure resources. The default
+# follows the full PIM naming convention (same token grammar as PimGroupPattern):
+#   'PIM-{Workload}-{Scope}-{Permission}-L{Level}-T{Tier}-{Plane}-{Platform}'
+#   e.g. PIM-AzDevOps-OrgCollectionAdministrators-L2-T1-WDP-ID
+# Tokens: {Workload}, {Scope}, {Permission} (alias {Role}), {Level}, {Tier},
+# {Plane}, {Platform}. A legacy lower-case form still works if you prefer it:
 #
 # $global:PIM_NamingConventions.ResourceGroupPattern = 'rg-prd-pim-tier{Tier}'
 
@@ -250,3 +247,68 @@
 # in the central MSP CSV: 2 -> 1 -> 0. No per-person exceptions needed.
 #
 # $global:PIM_TenantRing = 2
+
+
+# ===========================================================================
+# Delegation depth (engine/_shared/PIM-DelegationDepth.ps1) -- all optional
+# ===========================================================================
+# These keys are read via Get-PimPolicySetting, so you can set them either as
+# $global:PIM_<Name> OR as $global:PIM_NamingConventions.<Name>. All have safe
+# defaults; leave them unset unless you want to change behaviour.
+
+# --- Local self-delegation plane ---
+# 'local' (default) = full local autonomy: local IT may self-delegate any
+#   permission (incl. privileged) with no MSP request.
+# 'msp'             = self-delegation is refused (the customer pulls its
+#   baseline; an MSP admin never self-grants into a customer tenant).
+# Super-admins are NEVER locked out regardless of this setting.
+#
+# $global:PIM_DelegationPlane = 'local'
+
+# --- Enforced baseline keys (opt-in; default = none) ---
+# GroupTags that even a LOCAL admin may NOT self-override (e.g. tier-0). Empty
+# by default = full local autonomy. Case-insensitive.
+#
+# $global:PIM_EnforcedBaselineTags = @('Entra-ID-GA-L0', 'Azure-Root-Owner-L0')
+
+# --- PAW detection / reachability-restriction (OPT-IN; default = OFF) ---
+# PAW (Privileged Access Workstation) detection and the reachability-restriction it
+# drives are OFF by default -- "tight is NOT the default; PAW/tier-0 is opt-in". A
+# fresh/low-maturity tenant is never confined to a PAW segment it may not even have:
+# with detection OFF, EVERY classification resolves to 'whole-network' (no PAW-based
+# deny) and reachability never blocks. Super-admins are never locked out regardless.
+# Turn it ON only when your tenant actually runs PAW/SAW segmentation:
+#
+# $global:PIM_PawDetection = $true       # opt in to PAW detection + reachability
+# (alias: $global:PIM_EnforcePaw = $true is honoured as a synonym, and also drives
+#  the device PAW gate via $global:PIM_PawEnforcement.)
+
+# --- Reachability-by-classification policy (only applies when PawDetection is ON) ---
+# Maps a group's (tier, plane, level) to a network reach class:
+#   'paw-only'      most restricted (only the privileged/PAW segment)
+#   'limited'       a constrained segment
+#   'whole-network' unrestricted within the corp network
+# First match wins; unmatched -> 'whole-network'. Ignored entirely while PawDetection
+# is OFF (the default). When you opt IN, the built-in default is:
+#   tier 0 -> paw-only ; tier 1 + plane MP -> limited ;
+#   tier 1 + plane WDP + level >= 3 -> whole-network ; everything else -> whole-network.
+# Override to fit your own segmentation, e.g. confine all of tier 1 to 'limited':
+#
+# $global:PIM_ReachPolicy = @(
+#     @{ tier = 0;                              reach = 'paw-only' }
+#     @{ tier = 1; plane = 'MP';                reach = 'limited' }
+#     @{ tier = 1; plane = 'WDP'; minLevel = 3; reach = 'whole-network' }
+# )
+
+# --- Named support-function personas (used by approver rules + escalation) ---
+# Reference these in the approver matrix as '@CISO' / '@ITManager' etc. For the
+# Entra-native ACTIVATION policy these are auto-resolved to the underlying PEOPLE
+# (Entra PIM does not accept a department/persona as approver).
+#
+# $global:PIM_SupportFunctions = @{
+#     CISO               = @('ciso@contoso.com')
+#     ITManager          = @('itmanager@contoso.com')
+#     PIMDelegationOwner = @('pim-owners@contoso.com')
+#     HRManager          = @('hr-manager@contoso.com')
+#     BCSettingsOwner    = @('bc-admin@contoso.com')
+# }

@@ -1,0 +1,15 @@
+{
+  "id": "sentinel",
+  "name": "Microsoft Sentinel delegation",
+  "version": 1,
+  "description": "Permission groups for Microsoft Sentinel. These are workload groups: Sentinel uses Azure RBAC roles (Microsoft.SecurityInsights) assigned at the workspace / resource-group scope, so the workload role binds directly to the Entra group (no Entra directory role involved). Ships the standard Sentinel personas - Reader (view), Responder (manage incidents), Contributor (author rules/playbooks), Automation Contributor (manage playbooks), and Playbook Operator (run, no edit).",
+  "rows": {
+    "PIM-Definitions-Services": [
+      { "GroupName": "PIM-Sentinel-Reader-L4-T1-MP-ID", "GroupDescription": "Microsoft Sentinel - Reader (view data, incidents, workbooks; read-only)", "GroupTag": "Sentinel-Reader-L4", "AdministrativeUnitTag": "PIM-L1", "IsRoleAssignable": "FALSE", "Workload": "Sentinel", "Level": "L4", "TierLevel": "T1", "Plane": "MP", "CPPlatform": "ID", "Owners": "" },
+      { "GroupName": "PIM-Sentinel-Responder-L3-T1-MP-ID", "GroupDescription": "Microsoft Sentinel - Responder (manage incidents, run playbooks; no rule authoring)", "GroupTag": "Sentinel-Responder-L3", "AdministrativeUnitTag": "PIM-L1", "IsRoleAssignable": "FALSE", "Workload": "Sentinel", "Level": "L3", "TierLevel": "T1", "Plane": "MP", "CPPlatform": "ID", "Owners": "" },
+      { "GroupName": "PIM-Sentinel-Contributor-L3-T1-MP-ID", "GroupDescription": "Microsoft Sentinel - Contributor (author analytics rules, workbooks, hunting)", "GroupTag": "Sentinel-Contributor-L3", "AdministrativeUnitTag": "PIM-L1", "IsRoleAssignable": "FALSE", "Workload": "Sentinel", "Level": "L3", "TierLevel": "T1", "Plane": "MP", "CPPlatform": "ID", "Owners": "" },
+      { "GroupName": "PIM-Sentinel-AutomationContributor-L3-T1-MP-ID", "GroupDescription": "Microsoft Sentinel - Automation Contributor (create and edit playbooks/automation rules)", "GroupTag": "Sentinel-AutomationContributor-L3", "AdministrativeUnitTag": "PIM-L1", "IsRoleAssignable": "FALSE", "Workload": "Sentinel", "Level": "L3", "TierLevel": "T1", "Plane": "MP", "CPPlatform": "ID", "Owners": "" },
+      { "GroupName": "PIM-Sentinel-PlaybookOperator-L4-T1-MP-ID", "GroupDescription": "Microsoft Sentinel - Playbook Operator (run/attach playbooks; no edit)", "GroupTag": "Sentinel-PlaybookOperator-L4", "AdministrativeUnitTag": "PIM-L1", "IsRoleAssignable": "FALSE", "Workload": "Sentinel", "Level": "L4", "TierLevel": "T1", "Plane": "MP", "CPPlatform": "ID", "Owners": "" }
+    ]
+  }
+}

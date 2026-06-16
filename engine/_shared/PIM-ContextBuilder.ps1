@@ -17,7 +17,7 @@
           $Global:Groups_All_ID                         (raw)
           $Global:AU_All_ID                             (raw)
           $Global:Roles_All_ID                          (raw)
-          $Global:Accounts_Definitions_ID               (AdminCandidate filter)
+          $Global:Accounts_Definitions_ID               (Admins filter; legacy alias: AdminCandidate)
           $Global:PIM_Groups_Definitions_ID             (PimGroup filter)
           $Global:PIM_Groups_Resource_SyncAD_Definitions_ID  (PimGroupResourceSyncAD)
           $Global:PIM_Groups_Service_SyncAD_Definitions_ID   (PimGroupServiceSyncAD)
@@ -111,7 +111,7 @@ function Build-PimContext {
     # Order matters: PimGroupResourceSyncAD/PimGroupServiceSyncAD filter the
     # already-filtered PimGroup result, not raw Groups_All_ID.
     $map = [ordered]@{
-        AdminCandidate           = @('Users_All_ID',                'Accounts_Definitions_ID')
+        Admins                   = @('Users_All_ID',                'Accounts_Definitions_ID')
         PimGroup                 = @('Groups_All_ID',               'PIM_Groups_Definitions_ID')
         PimGroupResourceSyncAD   = @('PIM_Groups_Definitions_ID',   'PIM_Groups_Resource_SyncAD_Definitions_ID')
         PimGroupServiceSyncAD    = @('PIM_Groups_Definitions_ID',   'PIM_Groups_Service_SyncAD_Definitions_ID')
@@ -119,7 +119,12 @@ function Build-PimContext {
     }
 
     foreach ($key in $map.Keys) {
-        if (-not $global:PIM_Filters.$key) {
+        # Resolve the filter scriptblock. 'Admins' is the canonical key; honour the
+        # legacy 'AdminCandidate' key as a back-compat alias if a customer .custom.ps1
+        # still sets it (and 'Admins' isn't set).
+        $filter = $global:PIM_Filters.$key
+        if (-not $filter -and $key -eq 'Admins') { $filter = $global:PIM_Filters.AdminCandidate }
+        if (-not $filter) {
             Write-Verbose ("Build-PimContext: filter '{0}' not defined in `$global:PIM_Filters -- skipping" -f $key)
             continue
         }
@@ -129,7 +134,6 @@ function Build-PimContext {
             Write-Verbose ("Build-PimContext: source `$Global:{0} not set yet (skipping {1})" -f $srcName, $key)
             continue
         }
-        $filter = $global:PIM_Filters.$key
         $filtered = @($source | Where-Object { & $filter $_ })
         Set-Variable -Scope Global -Name $dstName -Value $filtered
         Write-Host ("[context] {0,-26} -> `${1}: {2} item(s)" -f $key, $dstName, $filtered.Count)

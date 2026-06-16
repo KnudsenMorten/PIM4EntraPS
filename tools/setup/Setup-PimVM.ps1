@@ -28,12 +28,13 @@
 #>
 [CmdletBinding(SupportsShouldProcess)]
 param(
-    [string]$SqlServerFqdn = 'sql-pimplatform-we484.database.windows.net',
+    [Parameter(Mandatory)][string]$SqlServerFqdn,
     [string]$SqlDatabase   = 'PimPlatform',
-    [string]$TenantId      = 'f0fa27a0-8e7c-4f63-9a77-ec94786b7c9e',
+    [Parameter(Mandatory)][string]$TenantId,
     [int]$Port             = 8080,
     [string]$RunAsUser     = 'NT AUTHORITY\NETWORK SERVICE',   # or a gMSA / domain svc acct
     [switch]$GrantSql,                                          # also create the VM-MI DB user
+    [string]$VmMiAppId,                                         # the VM system-MI appId (needed for -GrantSql)
     [string]$SqlAdminClientId,
     [string]$SqlAdminClientSecret
 )
@@ -43,6 +44,12 @@ $solRoot = Split-Path -Parent (Split-Path -Parent $here)
 $mgr = Join-Path $solRoot 'tools\pim-manager\Open-PimManager.ps1'
 $sch = Join-Path $solRoot 'tools\pim-scheduler\Start-PimScheduler.ps1'
 function Step($m){ Write-Host "==> $m" -ForegroundColor Cyan }
+
+# Shared setup helpers (banner + Grant-PimMiSql) + engine REST/SQL cores for the grant.
+. "$here\_PimSetupShared.ps1"
+. "$solRoot\engine\_shared\PIM-Rest.ps1"
+. "$solRoot\engine\_shared\PIM-SqlStore.ps1"
+Show-PimSetupBanner -ScriptName 'Setup-PimVM' -SolutionRoot $solRoot
 
 Step "Machine env vars (PIM_HOSTED + SQL coordinates, MI via IMDS)"
 if ($PSCmdlet.ShouldProcess('Machine env','set')) {
@@ -80,14 +87,25 @@ if ($PSCmdlet.ShouldProcess('PIM-Scheduler','register')) {
     Start-ScheduledTask -TaskName 'PIM-Scheduler'
 }
 
-if ($GrantSql -and $SqlAdminClientId -and $SqlAdminClientSecret) {
-    Step "Grant the VM system-MI as a SQL contained DB user"
-    if ($PSCmdlet.ShouldProcess($SqlServerFqdn,'create VM-MI DB user')) {
+if ($GrantSql) {
+    Step "Grant the VM system-MI as a SQL contained DB user (SID-from-appId, TYPE=E)"
+    if (-not ($SqlAdminClientId -and $SqlAdminClientSecret)) {
+        Write-Warning "  -GrantSql needs -SqlAdminClientId + -SqlAdminClientSecret (the SQL AAD-admin SPN). Skipped."
+    } elseif (-not $VmMiAppId) {
         $vmName = $env:COMPUTERNAME
-        $vmMiAppId = (Invoke-RestMethod -Headers @{Metadata='true'} -Uri 'http://169.254.169.254/metadata/instance/compute?api-version=2021-02-01' -TimeoutSec 5).resourceId  # for display
-        Write-Host "  Run the same SID-from-appId grant as Setup-PimContainers.ps1 for the VM MI ($vmName)." -ForegroundColor Yellow
-        Write-Host "  (The VM MI appId is shown in the portal under the VM > Identity; create [<vmname>] WITH SID=<appId bytes>, TYPE=E.)" -ForegroundColor Yellow
+        Write-Warning "  -GrantSql needs -VmMiAppId (the VM system-MI appId, shown under VM > Identity). Skipped for [$vmName]."
+        Write-Warning "  Find it: az vm identity show -g <rg> -n $vmName --query principalId  ->  az ad sp show --id <principalId> --query appId"
+    } else {
+        $vmName = $env:COMPUTERNAME
+        if ($PSCmdlet.ShouldProcess($SqlServerFqdn, "create VM-MI DB user [$vmName]")) {
+            Grant-PimMiSql -DbUserName $vmName -MiAppId $VmMiAppId `
+                -SqlServerFqdn $SqlServerFqdn -SqlDatabase $SqlDatabase -TenantId $TenantId `
+                -SqlAdminClientId $SqlAdminClientId -SqlAdminClientSecret $SqlAdminClientSecret
+            Write-Host "  VM MI [$vmName] granted db_datareader/writer/ddladmin on $SqlDatabase." -ForegroundColor Green
+        }
     }
 }
 
 Step 'Done. Manager on http://<vm-ip>:'"$Port"'/  — reachable from hub/peered clients + GSA.'
+# GSA / Private Access + private-link / DNS guidance (which zones to add)
+Show-PimGsaPrivateLinkGuidance

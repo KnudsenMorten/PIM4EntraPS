@@ -39,6 +39,11 @@
 // global-ban scenario emerges.
 const KNOWN_BAD_LEGACY_CLIENTIDS = []
 
+// Pure config helpers (bulk-activate confirm threshold resolution + bounds).
+// Kept in a separate, DOM/chrome-free module so they are unit-testable under
+// Node; the render path is unchanged.
+import { resolveBulkActivateConfirmThreshold } from './popup-config.js'
+
 // v1.6.0+ multi-tenant catalog support.
 // Catalog entry shape:
 //   {
@@ -93,8 +98,14 @@ async function readMergedCatalog() {
   let managed = []
   let local   = []
   let managedErr = null
+  let managedThreshold = null
   try {
-    const m = await new Promise(r => chrome.storage.managed.get(['tenantCatalog'], r))
+    const m = await new Promise(r => chrome.storage.managed.get(['tenantCatalog', 'bulkActivateConfirmThreshold'], r))
+    if (m && m.bulkActivateConfirmThreshold != null && m.bulkActivateConfirmThreshold !== '') {
+      // Tenant-wide (non-per-entry) managed override. A per-entry value on the
+      // active catalog tenant still wins over this in loadConfig().
+      managedThreshold = m.bulkActivateConfirmThreshold
+    }
     if (m && m.tenantCatalog) {
       let parsed = (typeof m.tenantCatalog === 'string')
         ? JSON.parse(m.tenantCatalog)
@@ -139,6 +150,9 @@ async function readMergedCatalog() {
     localRaw:   local.length,
     managedErr
   }
+  // Tenant-wide managed bulk-activate confirm threshold (per-entry overrides
+  // this in loadConfig). Stashed on the array so loadConfig can read it.
+  merged._managedBulkThreshold = managedThreshold
   return merged
 }
 
@@ -149,7 +163,8 @@ function isGuidStr(s) {
 function emptyConfig() {
   return { tenantId: '', clientId: '', defaultJustification: '', defaultDurationHours: 0,
            groupNameFilter: '', entraGroupRegex: '', azureGroupRegex: '',
-           catalog: [], activeTenantId: '', tenantName: '' }
+           catalog: [], activeTenantId: '', tenantName: '',
+           bulkActivateConfirmThreshold: BULK_ACTIVATE_CONFIRM_THRESHOLD_DEFAULT }
 }
 
 async function loadConfig() {
@@ -202,6 +217,7 @@ async function loadConfig() {
       catalog,
       activeTenantId:       manualTid,
       tenantName:           '(manual entry)',
+      bulkActivateConfirmThreshold: resolveBulkActivateConfirmThreshold(catalog && catalog._managedBulkThreshold),
     }
   }
 
@@ -243,6 +259,10 @@ async function loadConfig() {
           ['refreshToken','accessToken','accessTokenExpiry',
            'armAccessToken','armAccessTokenExpiry','account'], r))
       }
+      // Per-entry threshold wins; else the tenant-wide managed override; else default.
+      const _entryThreshold = (active.bulkActivateConfirmThreshold != null && active.bulkActivateConfirmThreshold !== '')
+        ? active.bulkActivateConfirmThreshold
+        : (catalog && catalog._managedBulkThreshold != null ? catalog._managedBulkThreshold : null)
       return {
         tenantId:             active.tenantId,
         clientId:             active.clientId,
@@ -254,6 +274,7 @@ async function loadConfig() {
         catalog,
         activeTenantId:     String(active.tenantId).toLowerCase(),
         tenantName:         active.name || active.tenantId,
+        bulkActivateConfirmThreshold: resolveBulkActivateConfirmThreshold(_entryThreshold),
       }
     }
     // Catalog exists but no active selection -- caller renders picker.
@@ -272,6 +293,7 @@ async function loadConfig() {
     catalog:              [],
     activeTenantId:     '',
     tenantName:         '',
+    bulkActivateConfirmThreshold: resolveBulkActivateConfirmThreshold(catalog && catalog._managedBulkThreshold),
   }
 }
 
@@ -616,7 +638,7 @@ function renderOnboarding(currentCfg) {
     const justification = (justInput.value || '').trim() || 'Change in infrastructure'
     const durationHours = Math.max(0.5, Math.min(24, Number(durInput.value) || 8))
 
-    if (!isGuid(tenantId)) { showErr('Tenant id must be a GUID (e.g. f0fa27a0-8e7c-4f63-9a77-ec94786b7c9e).'); tenantInput.focus(); return }
+    if (!isGuid(tenantId)) { showErr('Tenant id must be a GUID (e.g. 00000000-0000-0000-0000-000000000000).'); tenantInput.focus(); return }
     if (!isGuid(clientId)) { showErr('Client id must be a GUID. This is the Application (client) id of the PIM Activator app registration in your tenant.'); clientInput.focus(); return }
 
     await new Promise(r => chrome.storage.local.set({
@@ -1189,6 +1211,88 @@ async function hydrateGroupNames(token, groupIds) {
     }
   }
   return out
+}
+
+// ---------------------------------------------------------------------------
+// Nested permission groups (two-tier PIM-for-Groups nesting -- DESIGN.md 3.1).
+// PIM4EntraPS nests a role group (e.g. "PIM-ROLE-CloudEngineer", which the user
+// is eligible for) inside permission groups ("PIM-Entra-ID-...", "PIM-AzRes-...",
+// "PIM-PowerBI-..."). The role-group -> permission-group edge is ITSELF PIM:
+// the role group is an Eligible (or Active) member of each permission group.
+// Once the user is an ACTIVE member of the role group, they are the transitive
+// eligible member of those permission groups and can self-activate each one
+// independently (operator scenario: 08:00 activate Cloud Engineer, 10:00
+// activate Application Administrator only). This already works in the Entra /
+// Azure portals; the Activator replicates the same Graph calls.
+//
+// Discovery cannot use filterByCurrentUser(on='principal') -- that returns only
+// the user's DIRECT eligibilities; the nested eligibilities carry
+// principalId = the ROLE GROUP. So we query each active role group's OWN
+// eligibility + assignment instances. Returns { eligible, active } group lists.
+async function listNestedForParent(token, parentGroupId) {
+  const eligible = []
+  const active   = []
+  async function page(path, sink) {
+    let next = path
+    while (next) {
+      let res
+      try { res = await graph(token, 'GET', next) }
+      catch (e) { break }   // a tenant may restrict reading a group's schedules -- skip this parent
+      for (const x of (res.value || [])) {
+        if (x.accessId && x.accessId !== 'member') continue
+        if (!x.groupId) continue
+        sink.push({ groupId: x.groupId, endDateTime: x.endDateTime })
+      }
+      next = res['@odata.nextLink'] ? res['@odata.nextLink'].replace('https://graph.microsoft.com/v1.0', '') : null
+    }
+  }
+  const enc = encodeURIComponent(`principalId eq '${parentGroupId}'`)
+  await page(`/identityGovernance/privilegedAccess/group/eligibilityScheduleInstances?$filter=${enc}`, eligible)
+  await page(`/identityGovernance/privilegedAccess/group/assignmentScheduleInstances?$filter=${enc}`, active)
+  return { eligible, active }
+}
+
+// Build nested eligibleRows (depth 1) for the permission groups that the given
+// ACTIVE role groups expose. Each row is a normal kind:'group' row (so the
+// existing checkbox / bulk-activate / status / favorites machinery works
+// unchanged -- activation is the SAME selfActivate as any group, with the
+// permission group's id) tagged with parentGroupId so render() folds it out
+// under its parent instead of into the top-level buckets. previewEntraRoles /
+// previewAzureRoles are set to [] so nested rows don't hang on "Loading roles".
+async function discoverNestedRows(token, parentGroupIds) {
+  const parents = [...new Set((parentGroupIds || []).filter(Boolean))]
+  if (!parents.length) return []
+  const eligibleNested  = []          // { groupId, parentGroupId, endDateTime }
+  const activeNestedKeys = new Set()  // `${parentGroupId}|${groupId}`
+  for (const pid of parents) {
+    const nf = await listNestedForParent(token, pid)
+    for (const e of nf.eligible) eligibleNested.push({ groupId: e.groupId, parentGroupId: pid, endDateTime: e.endDateTime })
+    for (const a of nf.active)   activeNestedKeys.add(`${pid}|${a.groupId}`)
+  }
+  if (!eligibleNested.length) return []
+  const needNames = [...new Set(eligibleNested.map(e => e.groupId))]
+  const nestedNames = await hydrateGroupNames(token, needNames)
+  const rows = []
+  for (const e of eligibleNested) {
+    const rowKey = `nested:${e.parentGroupId}:${e.groupId}`   // unique per (parent,child)
+    rows.push({
+      kind: 'group',
+      isNested: true,
+      depth: 1,
+      parentGroupId: e.parentGroupId,
+      id: rowKey,
+      rowKey,
+      groupId: e.groupId,
+      displayName: nestedNames[e.groupId] || e.groupId,
+      accessId: 'member',
+      endDateTime: e.endDateTime,
+      isActive: activeNestedKeys.has(`${e.parentGroupId}|${e.groupId}`),
+      previewEntraRoles: [],
+      previewAzureRoles: [],
+      checked: false
+    })
+  }
+  return rows
 }
 
 async function activateGroup(token, groupId, justification, durationHours) {
@@ -2562,8 +2666,19 @@ function render() {
   // skipped (they already appear at the top) so the same row doesn't show
   // twice. v1.4.2+ -- replaces the per-section favorites pinning that the
   // earlier 1.4.0 ship used.
-  const favRows    = filtered.filter(r => isFavorite(r.rowKey || r.groupId))
-  const nonFavRows = filtered.filter(r => !isFavorite(r.rowKey || r.groupId))
+  // Nested permission-group rows (depth 1) render UNDER their parent role group
+  // via a fold-out, NOT in the top-level buckets. Split them out here and index
+  // them by parent so renderActivateRow can emit them beneath their parent.
+  const topLevel = filtered.filter(r => !r.parentGroupId)
+  const childrenByParent = new Map()
+  for (const r of filtered) {
+    if (!r.parentGroupId) continue
+    if (!childrenByParent.has(r.parentGroupId)) childrenByParent.set(r.parentGroupId, [])
+    childrenByParent.get(r.parentGroupId).push(r)
+  }
+
+  const favRows    = topLevel.filter(r => isFavorite(r.rowKey || r.groupId))
+  const nonFavRows = topLevel.filter(r => !isFavorite(r.rowKey || r.groupId))
 
   // Direct (PIM v1) rows are categorised by their own .kind -- no regex
   // needed because the API tells us directly which surface they came from.
@@ -2582,6 +2697,10 @@ function render() {
     const row = document.createElement('div')
     row.className = r.isActive ? 'row row-active-already' : 'row'
     if (r.isActive) row.style.cssText = 'opacity:0.55;background:#f6f8fa;'
+    // Nested (depth 1) permission-group rows are indented + left-ruled so they
+    // read as children of the role group they fold out from. Set individual
+    // style props (not cssText) so this coexists with the active-row style.
+    if (r.depth) { row.style.marginLeft = '26px'; row.style.borderLeft = '2px solid #d0d7de'; row.style.paddingLeft = '6px' }
     const activeBadge = r.isActive
       ? ' <span style="background:#dafbe1;color:#1a7f37;padding:1px 6px;border-radius:8px;font-size:10.5px;font-weight:600;margin-left:6px;">already active</span>'
       : ''
@@ -2685,6 +2804,35 @@ function render() {
       render()
     }
     els.list.appendChild(row)
+
+    // Fold-out: nested permission groups this role group exposes for self-
+    // activation. Only top-level rows have children; default EXPANDED so the
+    // groups are visible the moment the role group is active (the operator's
+    // "it should fold out" requirement). Each child is a normal activatable row.
+    if (!r.parentGroupId && childrenByParent.has(r.groupId)) {
+      const kids = childrenByParent.get(r.groupId)
+      const foldKey = `nestedfold:${r.groupId}`
+      const collapsed = collapsedRows.has(foldKey)
+      const readyKids = kids.filter(k => !k.isActive).length
+      const hdr = document.createElement('div')
+      hdr.className = 'nested-fold-toggle'
+      hdr.style.cssText = 'margin:2px 0 2px 26px;color:#0969da;font-size:11px;line-height:1.4;cursor:pointer;user-select:none;'
+      hdr.title = 'Eligible permission groups this role group lets you activate. Activate each one independently, when you need it.'
+      hdr.innerHTML = `${collapsed ? '▶' : '▼'} <strong>${kids.length} eligible permission group${kids.length === 1 ? '' : 's'}</strong> <span style="color:#7d8590;">${readyKids} ready to activate · click to ${collapsed ? 'expand' : 'collapse'}</span>`
+      els.list.appendChild(hdr)
+      hdr.onclick = (e) => {
+        e.stopPropagation()
+        if (collapsedRows.has(foldKey)) collapsedRows.delete(foldKey); else collapsedRows.add(foldKey)
+        render()
+      }
+      if (!collapsed) {
+        const sortedKids = kids.slice().sort((a, b) => {
+          if (!!a.isActive !== !!b.isActive) return a.isActive ? 1 : -1
+          return (a.displayName || '').localeCompare(b.displayName || '')
+        })
+        for (const k of sortedKids) renderActivateRow(k)
+      }
+    }
   }
 
   function renderActivateSection(title, members) {
@@ -2750,6 +2898,61 @@ function escapeHtml(s) {
 }
 
 // ---------- Boot ----------
+// One-time, dismissible "getting started" tip on the Activate tab.
+// Shown the first time a freshly-onboarded user lands on a populated Activate
+// list; explains the two things that aren't obvious from the chrome: you can
+// tick several roles and activate them in one click, and the My Access tab is
+// where you see/manage/deactivate what's currently active. Dismiss (X or the
+// "Got it" button) sets gettingStartedTipDismissed so it never reappears.
+// Self-contained: builds its own node, wires its own handlers, no dependency
+// on render() internals.
+async function maybeShowGettingStartedTip(readyCount) {
+  try {
+    if (document.getElementById('getting-started-tip')) return  // already on screen
+    const flag = await getStored(['gettingStartedTipDismissed'])
+    if (flag && flag.gettingStartedTipDismissed) return
+    const panel = els.panelActivate || document.getElementById('panel-activate')
+    const list  = els.list || document.getElementById('list')
+    if (!panel || !list) return
+
+    const tip = document.createElement('div')
+    tip.id = 'getting-started-tip'
+    tip.setAttribute('role', 'note')
+    tip.style.cssText =
+      'position:relative;margin:6px 0 8px 0;padding:9px 30px 9px 11px;' +
+      'background:#eff6ff;border:1px solid #93c5fd;border-radius:6px;' +
+      'font-size:11.5px;line-height:1.5;color:#1e3a5f;'
+    tip.innerHTML =
+      '<div style="font-weight:600;color:#1d4ed8;margin-bottom:3px;">Getting started</div>' +
+      '<div>Tick the roles you need and press <strong>Activate selected</strong> to ' +
+      'elevate them all in one click. See and deactivate what is currently active on ' +
+      'the <strong>My Access</strong> tab.</div>' +
+      '<div style="margin-top:7px;">' +
+        '<button id="getting-started-tip-ok" style="font-size:11px;font-weight:600;' +
+        'background:#2563eb;color:#fff;border:none;border-radius:4px;padding:3px 10px;' +
+        'cursor:pointer;">Got it</button>' +
+      '</div>' +
+      '<button id="getting-started-tip-x" title="Dismiss" aria-label="Dismiss" ' +
+        'style="position:absolute;top:5px;right:6px;background:none;border:none;' +
+        'font-size:15px;line-height:1;color:#64748b;cursor:pointer;">&times;</button>'
+
+    // Insert directly above the group list so it reads as a lead-in, not a modal.
+    panel.insertBefore(tip, list)
+
+    const dismiss = async () => {
+      try { await setStored({ gettingStartedTipDismissed: true }) } catch (e) { /* best effort */ }
+      if (tip && tip.parentNode) tip.parentNode.removeChild(tip)
+    }
+    const okBtn = document.getElementById('getting-started-tip-ok')
+    const xBtn  = document.getElementById('getting-started-tip-x')
+    if (okBtn) okBtn.onclick = dismiss
+    if (xBtn)  xBtn.onclick  = dismiss
+  } catch (e) {
+    // The tip is purely additive; never let it break the popup.
+    console.warn('[PIM Activator] getting-started tip skipped:', e && e.message ? e.message : e)
+  }
+}
+
 async function boot() {
   // Honour the forceInteractive flag set by triggerInteractiveReauth so the
   // "Re-sign in" button triggers OAuth + consent prompt automatically instead
@@ -3000,6 +3203,29 @@ async function loaded(token) {
   hideBootProgress()   // group list is now visible; footer bulk-fetch bar takes over
   updateBadges()
   render()
+
+  // Background: fold out nested permission groups under any role group the user
+  // is ALREADY an active member of (they only surface once the parent is active
+  // -- DESIGN.md 3.1). Kept off the critical load path so the top-level list
+  // paints immediately; re-renders when the nested rows land.
+  ;(async () => {
+    try {
+      const activeParentIds = [...new Set((activeRows || []).map(a => a.groupId).filter(Boolean))]
+      if (!activeParentIds.length) return
+      const nested = await discoverNestedRows(token, activeParentIds)
+      const haveKeys = new Set(eligibleRows.map(r => r.rowKey))
+      const add = nested.filter(n => !haveKeys.has(n.rowKey))
+      if (add.length) { eligibleRows = eligibleRows.concat(add); render() }
+    } catch (e) { console.warn('[PIM Activator] nested discovery failed:', e?.message || e) }
+  })()
+
+  // One-time "getting started" tip. Isolated, self-contained overlay shown the
+  // first time the Activate tab renders with real eligible rows after
+  // onboarding -- points the new user at bulk-activate + the My Access tab,
+  // then never shows again (dismiss flag in chrome.storage.local). Kept out of
+  // the mature render path: a single injected banner above #list, no coupling
+  // to render() internals.
+  maybeShowGettingStartedTip(readyCount)
 
   // ---- Background bulk fetch: roles for every eligible group ----------
   // UI is immediately interactive; rows re-render with role lines as data
@@ -3331,6 +3557,46 @@ async function loaded(token) {
   els.expandAll.onclick = () => { collapsedRows.clear(); render() }
   els.refresh.onclick = () => window.location.reload()
 
+  // ---- Bulk-activate confirmation guard ----------------------------------
+  // Activating many eligible roles in one click is powerful; a fat-finger on a
+  // pre-checked list could elevate far more than intended. Mirror the My Access
+  // bulk-deactivate "click again to confirm" pattern: when the selection is at
+  // or above the threshold, the first click arms a confirm state instead of
+  // firing. A second click within the window proceeds. Small selections (below
+  // the threshold) activate immediately as before -- no behaviour change for
+  // the common 1-3 role case.
+  //
+  // The threshold is configurable per tenant via the managed catalog entry
+  // (bulkActivateConfirmThreshold) or a tenant-wide managed config key -- never
+  // via free-text user entry (security: confirm strength is an admin policy
+  // decision). resolveBulkActivateConfirmThreshold clamps + defaults it; cfg
+  // already carries the resolved number, so just read it here.
+  const BULK_ACTIVATE_CONFIRM_THRESHOLD = resolveBulkActivateConfirmThreshold(
+    (typeof cfg !== 'undefined' && cfg) ? cfg.bulkActivateConfirmThreshold : null)
+  let bulkActivateArmed = false
+  let bulkActivateArmTimer = null
+  const activateOriginalLabel = els.activate.textContent
+  function disarmBulkActivate() {
+    bulkActivateArmed = false
+    if (bulkActivateArmTimer) { clearTimeout(bulkActivateArmTimer); bulkActivateArmTimer = null }
+    els.activate.classList.remove('confirm-armed')
+    // Restore the button label; updateCount() only manages disabled/count state.
+    els.activate.textContent = activateOriginalLabel
+    if (typeof updateCount === 'function') updateCount()
+  }
+
+  // Changing the selection (toggling a row, select-all/none, re-render) must
+  // cancel an armed confirm so the second click always reflects the CURRENT
+  // selection. A delegated listener on the list covers per-row toggles; the
+  // select-all/none/refresh buttons re-render and call updateCount() anyway.
+  if (els.list) {
+    els.list.addEventListener('change', () => { if (bulkActivateArmed) disarmBulkActivate() }, true)
+  }
+  if (els.selectNone) {
+    const _prevSelectNone = els.selectNone.onclick
+    els.selectNone.onclick = (e) => { if (bulkActivateArmed) disarmBulkActivate(); if (_prevSelectNone) return _prevSelectNone(e) }
+  }
+
   els.activate.onclick = async () => {
     const just = els.just.value.trim()
     const dur  = parseFloat(els.dur.value)
@@ -3338,6 +3604,25 @@ async function loaded(token) {
     if (!(dur > 0)) { alert('Duration must be > 0.'); return }
 
     const selected = eligibleRows.filter(r => r.checked)
+    if (selected.length === 0) { return }
+
+    // Two-step confirm for large selections.
+    if (selected.length >= BULK_ACTIVATE_CONFIRM_THRESHOLD && !bulkActivateArmed) {
+      bulkActivateArmed = true
+      els.activate.classList.add('confirm-armed')
+      els.activate.textContent = `Activate ${selected.length} roles — click again to confirm`
+      // Auto-disarm after a short window so a stale armed button can't fire a
+      // later accidental click.
+      bulkActivateArmTimer = setTimeout(disarmBulkActivate, 4000)
+      return
+    }
+    // Proceeding: clear the armed state and restore the button label
+    // (updateCount() only manages disabled/count, not the button text).
+    if (bulkActivateArmTimer) { clearTimeout(bulkActivateArmTimer); bulkActivateArmTimer = null }
+    bulkActivateArmed = false
+    els.activate.classList.remove('confirm-armed')
+    els.activate.textContent = activateOriginalLabel
+
     // Push this justification to the top of the history (dedupe, max 10).
     // Datalist hydrates from this on next popup open.
     const histPrev = await getStored(['justificationHistory'])
@@ -3428,17 +3713,44 @@ async function loaded(token) {
       // Persist the cleared selection so a popup re-open doesn't re-check the
       // groups we just activated.
       await setStored({ selectedIds: eligibleRows.filter(r => r.checked && r.groupId).map(r => r.groupId) })
-      render()   // refresh checkbox state + "N selected" footer count
-      // Auto-switch to My Access tab so the user immediately sees the result
-      // (active groups + the Entra roles they generated) instead of having to
-      // hunt for it. Brief delay lets PendingProvisioning flip to Provisioned
-      // before we query.
-      setActiveTab('myaccess')
-      els.myAccessStatus.textContent = 'Waiting for activation(s) to provision...'
-      await new Promise(r => setTimeout(r, 2500))
-      const fresh = await acquireGraphToken({ interactive: false })
-      const tk = fresh?.accessToken || token
-      await loadMyAccessTab(tk, { force: true })
+
+      // A role group that just activated may expose nested permission groups
+      // for self-activation (DESIGN.md 3.1). Fold them out now so the user can
+      // activate the ones they need (operator scenario: activate Cloud Engineer,
+      // then activate Application Administrator only). Only TOP-LEVEL group
+      // activations probe -- activating a nested permission group itself does
+      // not recurse. Best-effort.
+      let unfolded = 0
+      const activatedParents = selected.filter(r => r.kind === 'group' && !r.isNested).map(r => r.groupId)
+      if (activatedParents.length) {
+        try {
+          const freshN = await acquireGraphToken({ interactive: false })
+          const tkN = freshN?.accessToken || token
+          const nested = await discoverNestedRows(tkN, activatedParents)
+          const haveKeys = new Set(eligibleRows.map(r => r.rowKey))
+          const add = nested.filter(n => !haveKeys.has(n.rowKey))
+          if (add.length) { eligibleRows = eligibleRows.concat(add); unfolded = add.length }
+        } catch (e) { console.warn('[PIM Activator] post-activation nested discovery failed:', e?.message || e) }
+      }
+      render()   // refresh checkbox state + "N selected" footer count + any fold-out
+
+      if (unfolded > 0) {
+        // STAY on the Activate tab so the freshly-folded-out permission groups
+        // are visible + activatable right away (the second PIM tier). Don't
+        // auto-switch to My Access here -- that would hide them.
+        els.status.textContent = `Activated. ${unfolded} eligible permission group${unfolded === 1 ? '' : 's'} folded out below — activate the ones you need.`
+      } else {
+        // Auto-switch to My Access tab so the user immediately sees the result
+        // (active groups + the Entra roles they generated) instead of having to
+        // hunt for it. Brief delay lets PendingProvisioning flip to Provisioned
+        // before we query.
+        setActiveTab('myaccess')
+        els.myAccessStatus.textContent = 'Waiting for activation(s) to provision...'
+        await new Promise(r => setTimeout(r, 2500))
+        const fresh = await acquireGraphToken({ interactive: false })
+        const tk = fresh?.accessToken || token
+        await loadMyAccessTab(tk, { force: true })
+      }
     }
   }
 }

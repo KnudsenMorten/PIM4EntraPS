@@ -1,0 +1,12 @@
+{
+  "name": "pim-scenario-gui",
+  "private": true,
+  "version": "1.0.0",
+  "description": "PIM4EntraPS engine+GUI scenario-simulation Playwright specs (REQUIREMENTS.md §20).",
+  "scripts": {
+    "test": "playwright test"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.44.0"
+  }
+}

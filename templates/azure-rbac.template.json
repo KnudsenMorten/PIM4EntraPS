@@ -1,0 +1,20 @@
+{
+  "id": "azure-rbac",
+  "name": "Azure RBAC delegation",
+  "version": 1,
+  "description": "Permission groups for Azure RBAC at a resource scope (management group / subscription / resource group). Each permission group holds one Azure built-in role at one scope; the engine assigns the Azure role to the Entra group. Ships the three common rungs - Reader (view), Contributor (manage, no RBAC), and Owner (full incl. RBAC) - plus User Access Administrator (delegate RBAC only). The AzScope values below are PLACEHOLDERS (zero-GUID subscription); replace them with your real scope before deploying.",
+  "rows": {
+    "PIM-Definitions-Services": [
+      { "GroupName": "PIM-AzRes-Subscription-Reader-L4-T1-MP-ID", "GroupDescription": "Azure RBAC - Reader at a subscription (view all resources, no changes)", "GroupTag": "AzRes-Subscription-Reader-L4", "AdministrativeUnitTag": "PIM-L1", "IsRoleAssignable": "FALSE", "Workload": "Azure-RBAC", "Level": "L4", "TierLevel": "T1", "Plane": "MP", "CPPlatform": "ID", "Owners": "" },
+      { "GroupName": "PIM-AzRes-Subscription-Contributor-L3-T1-MP-ID", "GroupDescription": "Azure RBAC - Contributor at a subscription (manage resources, cannot grant access)", "GroupTag": "AzRes-Subscription-Contributor-L3", "AdministrativeUnitTag": "PIM-L1", "IsRoleAssignable": "FALSE", "Workload": "Azure-RBAC", "Level": "L3", "TierLevel": "T1", "Plane": "MP", "CPPlatform": "ID", "Owners": "" },
+      { "GroupName": "PIM-AzRes-Subscription-Owner-L2-T1-MP-ID", "GroupDescription": "Azure RBAC - Owner at a subscription (full access including RBAC management)", "GroupTag": "AzRes-Subscription-Owner-L2", "AdministrativeUnitTag": "PIM-L1", "IsRoleAssignable": "FALSE", "Workload": "Azure-RBAC", "Level": "L2", "TierLevel": "T1", "Plane": "MP", "CPPlatform": "ID", "Owners": "" },
+      { "GroupName": "PIM-AzRes-Subscription-UserAccessAdministrator-L2-T1-MP-ID", "GroupDescription": "Azure RBAC - User Access Administrator at a subscription (manage RBAC assignments only)", "GroupTag": "AzRes-Subscription-UserAccessAdministrator-L2", "AdministrativeUnitTag": "PIM-L1", "IsRoleAssignable": "FALSE", "Workload": "Azure-RBAC", "Level": "L2", "TierLevel": "T1", "Plane": "MP", "CPPlatform": "ID", "Owners": "" }
+    ],
+    "PIM-Assignments-Azure-Resources": [
+      { "GroupTag": "AzRes-Subscription-Reader-L4", "AzScope": "/subscriptions/00000000-0000-0000-0000-000000000000", "AzScopePermission": "Reader", "AssignmentType": "Active", "Action": "Assign", "UpdateExisting": "FALSE", "AutoExtend": "TRUE", "NumOfDaysWhenExpire": "365", "Permanent": "FALSE", "CPPlatform": "ID", "Plane": "MP", "TierLevel": "T1", "PermissionScope": "Scoped", "SyncPlatform": "" },
+      { "GroupTag": "AzRes-Subscription-Contributor-L3", "AzScope": "/subscriptions/00000000-0000-0000-0000-000000000000", "AzScopePermission": "Contributor", "AssignmentType": "Eligible", "Action": "Assign", "UpdateExisting": "FALSE", "AutoExtend": "TRUE", "NumOfDaysWhenExpire": "90", "Permanent": "FALSE", "CPPlatform": "ID", "Plane": "MP", "TierLevel": "T1", "PermissionScope": "Scoped", "SyncPlatform": "" },
+      { "GroupTag": "AzRes-Subscription-Owner-L2", "AzScope": "/subscriptions/00000000-0000-0000-0000-000000000000", "AzScopePermission": "Owner", "AssignmentType": "Eligible", "Action": "Assign", "UpdateExisting": "FALSE", "AutoExtend": "TRUE", "NumOfDaysWhenExpire": "90", "Permanent": "FALSE", "CPPlatform": "ID", "Plane": "MP", "TierLevel": "T1", "PermissionScope": "Scoped", "SyncPlatform": "" },
+      { "GroupTag": "AzRes-Subscription-UserAccessAdministrator-L2", "AzScope": "/subscriptions/00000000-0000-0000-0000-000000000000", "AzScopePermission": "User Access Administrator", "AssignmentType": "Eligible", "Action": "Assign", "UpdateExisting": "FALSE", "AutoExtend": "TRUE", "NumOfDaysWhenExpire": "90", "Permanent": "FALSE", "CPPlatform": "ID", "Plane": "MP", "TierLevel": "T1", "PermissionScope": "Scoped", "SyncPlatform": "" }
+    ]
+  }
+}

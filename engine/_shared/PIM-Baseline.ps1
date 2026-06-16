@@ -34,10 +34,16 @@ function Get-PimBaselineStateFile {
 }
 
 function Test-PimBaselineDoc {
-    # Verify the signature + shape of a bundle document. Returns the parsed
-    # payload object on success; throws on any failure.
-    param([Parameter(Mandatory)][object]$Doc)
-    if (-not $Doc.payloadB64 -or -not $Doc.signature) { throw "not a baseline bundle (payloadB64/signature missing)" }
+    # Verify the signature + shape of a signed document. Returns the parsed
+    # payload object on success; throws on any failure. The SAME crypto verifies
+    # any artifact the MSP signs with the baseline key -- the baseline bundle
+    # (default) and the central-kill manifest (-AllowedKind 'central-kill', see
+    # PIM-Substrate.ps1). The signer is always the embedded PUBLIC baseline cert.
+    param(
+        [Parameter(Mandatory)][object]$Doc,
+        [string[]]$AllowedKind = @('baseline')
+    )
+    if (-not $Doc.payloadB64 -or -not $Doc.signature) { throw "not a signed bundle (payloadB64/signature missing)" }
     $payloadBytes = [Convert]::FromBase64String($Doc.payloadB64)
     $sigBytes     = [Convert]::FromBase64String($Doc.signature)
     $cert = [System.Security.Cryptography.X509Certificates.X509Certificate2]::new([Convert]::FromBase64String($script:PimBaselinePublicCertB64))
@@ -45,7 +51,8 @@ function Test-PimBaselineDoc {
     $ok   = $rsa.VerifyData($payloadBytes, $sigBytes, [System.Security.Cryptography.HashAlgorithmName]::SHA256, [System.Security.Cryptography.RSASignaturePadding]::Pkcs1)
     if (-not $ok) { throw "SIGNATURE INVALID -- bundle tampered or not signed by the PIM4EntraPS baseline key" }
     $p = [System.Text.Encoding]::UTF8.GetString($payloadBytes) | ConvertFrom-Json
-    if ("$($p.product)" -ne 'PIM4EntraPS' -or "$($p.kind)" -ne 'baseline') { throw "unexpected bundle product/kind" }
+    if ("$($p.product)" -ne 'PIM4EntraPS') { throw "unexpected bundle product '$($p.product)'" }
+    if (@($AllowedKind) -notcontains "$($p.kind)") { throw "unexpected bundle kind '$($p.kind)' (allowed: $($AllowedKind -join ', '))" }
     $p
 }
 

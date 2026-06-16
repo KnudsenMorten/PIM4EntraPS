@@ -39,6 +39,13 @@
 $_dateExprLib = Join-Path $PSScriptRoot '..\..\engine\_shared\PIM-DateExpression.ps1'
 if (Test-Path -LiteralPath $_dateExprLib) { . $_dateExprLib }
 
+# Warning override / acknowledgement POST-FILTER (REQUIREMENTS §11). Loaded
+# here so the single hook below (one call before the validator returns) can
+# downgrade operator-acknowledged warnings to 'acknowledged' without touching
+# any rule's emit logic. Guarded: missing file -> no overrides applied.
+$_warnOverrideLib = Join-Path $PSScriptRoot '..\..\engine\_shared\PIM-WarningOverrides.ps1'
+if (Test-Path -LiteralPath $_warnOverrideLib) { . $_warnOverrideLib }
+
 # ---------------------------------------------------------------------------
 # Levenshtein (for the "did you mean" suggestion in PIM-FK-001)
 # ---------------------------------------------------------------------------
@@ -114,7 +121,13 @@ function New-PimViolation {
         [AllowNull()][object]$Row = $null,
         [string]$Column,
         [Parameter(Mandatory)][string]$Message,
-        [string]$Suggestion
+        [string]$Suggestion,
+        # Stable per-instance identity for the warning-override post-filter
+        # (REQUIREMENTS §11): the override key is Code + Subject + Target. The
+        # rules an operator most often overrules (PIM-DUP-001, PIM-ORPHAN-001)
+        # stamp these; other rules leave them blank and scope by Csv/Row.
+        [string]$Subject,
+        [string]$Target
     )
     [pscustomobject]@{
         Severity   = $Severity
@@ -124,6 +137,8 @@ function New-PimViolation {
         Column     = $Column
         Message    = $Message
         Suggestion = $Suggestion
+        Subject    = $Subject
+        Target     = $Target
     }
 }
 
@@ -154,6 +169,34 @@ function Test-PimRowIsBlank {
         if ($null -ne $v -and "$v".Length -gt 0) { return $false }
     }
     return $true
+}
+
+function Test-PimMailForwardAddressIsReal {
+    # Decides whether a MailForwardAddress column value is a REAL forwarding
+    # address or just a "no address" sentinel. The schema reuses the literal
+    # string 'FALSE' (and blanks / 'no' / '0') to mean "no forwarding address",
+    # so an address column of 'FALSE' must NOT be treated as a configured
+    # address. Returns $true ONLY for something that looks like an email
+    # address (contains '@' with text either side).
+    #
+    # The engine apply path (PIM-Functions.psm1) calls the same predicate before
+    # invoking Set-PimMailboxForwarding, so validator + engine agree: a sentinel
+    # is never forwarded to, and a real address with forwarding off is the only
+    # genuine misconfiguration.
+    param([AllowNull()][object]$Value)
+    $s = ([string]$Value).Trim()
+    if (-not $s) { return $false }
+    switch ($s.ToUpperInvariant()) {
+        'FALSE' { return $false }
+        'NO'    { return $false }
+        '0'     { return $false }
+        'NONE'  { return $false }
+        'N/A'   { return $false }
+        default {
+            # A real address: text @ text . text (no spaces).
+            return ($s -match '^[^@\s]+@[^@\s]+\.[^@\s]+$')
+        }
+    }
 }
 
 function Get-PimCacheFreshness {
@@ -246,18 +289,26 @@ function Invoke-PimPreflightValidation {
     # ------------------------------------------------------------------
     $bases = Get-PimCsvBases
     $loaded = @{}
+    # SQL-only (hosted) mode: data lives in pim.Rows, NOT in CSV files (the image
+    # ships no customer CSVs). Read-PimRows is the storage-neutral chokepoint --
+    # in SQL mode the on-disk Resolve-PimCsvPath check is meaningless and would
+    # mark all 14 entities "not present", validating an empty model. Gate the
+    # disk check to CSV mode and always read via Read-PimRows.
+    $sqlMode = ($script:PimStorageMode -eq 'sql' -and $script:PimSqlCs)
     foreach ($spec in $bases) {
         $base = $spec.base
-        $resolved = Resolve-PimCsvPath -BaseName $base
-        if (-not $resolved) {
-            [void]$violations.Add((New-PimViolation -Severity 'info' -Code 'PIM-IO-001' -Csv $base -Message "CSV not present on disk (neither .custom.csv nor .locked.csv exists)." -Suggestion "Copy $base.custom.sample.csv -> $base.custom.csv if this tenant uses this CSV; otherwise ignore."))
-            $loaded[$base] = @{ header = @(); rows = @(); source = 'none'; path = $null }
-            continue
+        if (-not $sqlMode) {
+            $resolved = Resolve-PimCsvPath -BaseName $base
+            if (-not $resolved) {
+                [void]$violations.Add((New-PimViolation -Severity 'info' -Code 'PIM-IO-001' -Csv $base -Message "CSV not present on disk (neither .custom.csv nor .locked.csv exists)." -Suggestion "Copy $base.custom.sample.csv -> $base.custom.csv if this tenant uses this CSV; otherwise ignore."))
+                $loaded[$base] = @{ header = @(); rows = @(); source = 'none'; path = $null }
+                continue
+            }
         }
         try {
             $loaded[$base] = Read-PimRows -BaseName $base
         } catch {
-            [void]$violations.Add((New-PimViolation -Severity 'warning' -Code 'PIM-IO-001' -Csv $base -Message "Failed to read CSV: $($_.Exception.Message)"))
+            [void]$violations.Add((New-PimViolation -Severity 'warning' -Code 'PIM-IO-001' -Csv $base -Message "Failed to read rows: $($_.Exception.Message)"))
             $loaded[$base] = @{ header = @(); rows = @(); source = 'none'; path = $null }
         }
     }
@@ -339,9 +390,11 @@ function Invoke-PimPreflightValidation {
         }
     }
 
-    # Tenant cache (entra-roles, aus) for stale checks.
+    # Tenant cache (entra-roles, aus, azure-scopes) for stale / orphan checks.
     $cachedEntraRoleNames = @{}  # lower -> displayName
     $cachedAuNames        = @{}  # lower -> displayName / id
+    $cachedAzureScopes    = @{}  # lower(scopePath|id) -> displayName
+    $cachedAzureScopesPresent = $false
     if (Get-Command Read-PimTenantListCache -ErrorAction SilentlyContinue) {
         try {
             $cache = Read-PimTenantListCache
@@ -354,6 +407,13 @@ function Invoke-PimPreflightValidation {
                 foreach ($it in $cache.aus.items) {
                     if ($it.displayName) { $cachedAuNames[([string]$it.displayName).ToLowerInvariant()] = [string]$it.displayName }
                     if ($it.id) { $cachedAuNames[([string]$it.id).ToLowerInvariant()] = [string]$it.id }
+                }
+            }
+            if ($cache.azureScopes -and $cache.azureScopes.items) {
+                foreach ($it in $cache.azureScopes.items) {
+                    $cachedAzureScopesPresent = $true
+                    if ($it.scopePath) { $cachedAzureScopes[([string]$it.scopePath).ToLowerInvariant()] = [string]$it.displayName }
+                    if ($it.id)        { $cachedAzureScopes[([string]$it.id).ToLowerInvariant()]        = [string]$it.displayName }
                 }
             }
         } catch { }
@@ -623,6 +683,7 @@ function Invoke-PimPreflightValidation {
             if (-not $usedAdmins.ContainsKey($key)) {
                 $a = $adminIndex[$key]
                 [void]$violations.Add((New-PimViolation -Severity 'warning' -Code 'PIM-ORPHAN-001' -Csv 'Account-Definitions-Admins' -Row $a.Row -Column 'UserPrincipalName' `
+                    -Subject $a.Upn `
                     -Message "Admin '$($a.Upn)' has zero rows in PIM-Assignments-Admins -- the account exists but has no PIM reach." `
                     -Suggestion "Either add an admin->role-group assignment, or remove this row from Account-Definitions-Admins."))
             }
@@ -790,6 +851,7 @@ function Invoke-PimPreflightValidation {
                     $upn = ($adminIndex[$admin] | Select-Object -ExpandProperty Upn -ErrorAction SilentlyContinue)
                     if (-not $upn) { $upn = $admin }
                     [void]$violations.Add((New-PimViolation -Severity 'warning' -Code 'PIM-DUP-001' -Csv 'PIM-Assignments-Admins' -Row $rowsHit[$t] -Column 'GroupTag' `
+                        -Subject $upn -Target $t `
                         -Message "Admin '$upn' reaches target '$t' via $($paths.Count) role-group paths: $($paths -join ', ')." `
                         -Suggestion "Pick the canonical role group and drop the others; duplicate paths cause audit confusion and complicate offboarding."))
                 }
@@ -803,7 +865,7 @@ function Invoke-PimPreflightValidation {
     if (-not $cacheRolesPresent) {
         [void]$violations.Add((New-PimViolation -Severity 'warning' -Code 'PIM-STALE-001' -Csv '<global>' `
             -Message "Tenant cache 'entra-roles' is missing or empty. Role-name freshness checks are skipped." `
-            -Suggestion "Run: Open-PimManager.ps1 -RefreshTenantLists  (or click the 'no cache' badge in the UI)."))
+            -Suggestion "The scheduler refreshes this cache automatically (tenant-cache job, every 12h) -- it will populate on the next run. To refresh now: click the 'no cache' badge in the UI, or run Open-PimManager.ps1 -RefreshTenantLists."))
     } else {
         foreach ($csv in @('PIM-Assignments-Roles-Groups','PIM-Assignments-Roles-AUs')) {
             if (-not $loaded.ContainsKey($csv)) { continue }
@@ -869,8 +931,14 @@ function Invoke-PimPreflightValidation {
     }
 
     # ------------------------------------------------------------------
-    # PIM-DOMAIN-001: MailForwardAddress set but ForwardMailsToContact=FALSE.
+    # PIM-DOMAIN-001: a REAL forward address is configured but forwarding is off.
     # ------------------------------------------------------------------
+    # The genuine misconfiguration is: someone typed an actual email address into
+    # MailForwardAddress but left ForwardMailsToContact off, so the engine will
+    # silently ignore the address. It is NOT a misconfiguration when the address
+    # column holds a "no address" sentinel ('FALSE'/''/'no'/'0'/...): both off is
+    # a consistent "no forwarding" state. Test-PimMailForwardAddressIsReal is the
+    # single source of truth shared with the engine apply path.
     if ($loaded.ContainsKey('Account-Definitions-Admins')) {
         $rows = $loaded['Account-Definitions-Admins'].rows
         for ($i = 0; $i -lt $rows.Count; $i++) {
@@ -878,10 +946,10 @@ function Invoke-PimPreflightValidation {
             if (Test-PimRowIsBlank -Row $r) { continue }
             $addr = Get-PimRowValue -Row $r -Column 'MailForwardAddress'
             $fwd  = (Get-PimRowValue -Row $r -Column 'ForwardMailsToContact').ToUpperInvariant()
-            if ($addr -and $fwd -ne 'TRUE') {
+            if ((Test-PimMailForwardAddressIsReal -Value $addr) -and $fwd -ne 'TRUE') {
                 $upn = Get-PimRowValue -Row $r -Column 'UserPrincipalName'
                 [void]$violations.Add((New-PimViolation -Severity 'warning' -Code 'PIM-DOMAIN-001' -Csv 'Account-Definitions-Admins' -Row $i -Column 'MailForwardAddress' `
-                    -Message "MailForwardAddress='$addr' is set for '$upn' but ForwardMailsToContact='$fwd' -- engine will ignore the forward address." `
+                    -Message "MailForwardAddress='$addr' is a real address for '$upn' but ForwardMailsToContact='$fwd' -- engine will ignore the forward address." `
                     -Suggestion "Either set ForwardMailsToContact=TRUE to activate the forward, or clear MailForwardAddress to remove the misleading config."))
             }
         }
@@ -1150,15 +1218,196 @@ function Invoke-PimPreflightValidation {
         }
     }
 
+    # ------------------------------------------------------------------
+    # PIM-ROLE-OWNER-001: a role / org / task definition row should name an
+    # accountable sponsor/owner (Owners or SponsorUpn) -- required for
+    # validation/audit/renewal (REQUIREMENTS §13 "Role sponsor/owner",
+    # §23 "Admin metadata fields" Sponsor). Severity INFO (never blocks Save):
+    # a role with no owner has nobody to recertify it.
+    # ------------------------------------------------------------------
+    foreach ($defBase in @('PIM-Definitions-Roles','PIM-Definitions-Organization','PIM-Definitions-Tasks')) {
+        if (-not $loaded.ContainsKey($defBase)) { continue }
+        $rows = $loaded[$defBase].rows
+        for ($i = 0; $i -lt $rows.Count; $i++) {
+            $r = $rows[$i]
+            if (Test-PimRowIsBlank -Row $r) { continue }
+            $gn = (Get-PimRowValue -Row $r -Column 'GroupName').Trim()
+            if (-not $gn) { continue }
+            $owners  = (Get-PimRowValue -Row $r -Column 'Owners').Trim()
+            $sponsor = (Get-PimRowValue -Row $r -Column 'SponsorUpn').Trim()
+            $dept    = (Get-PimRowValue -Row $r -Column 'Department').Trim()
+            if (-not $owners -and -not $sponsor -and -not $dept) {
+                [void]$violations.Add((New-PimViolation -Severity 'info' -Code 'PIM-ROLE-OWNER-001' -Csv $defBase -Row $i -Column 'Owners' `
+                    -Message "Role/org/task '$gn' has no accountable owner (Owners, SponsorUpn and Department are all empty) -- there is nobody to recertify or renew it in an access review." `
+                    -Suggestion "Set Owners (semicolon-separated UPNs) or SponsorUpn, or assign a Department whose contact owns it. The owner is the renewal/audit contact."))
+            }
+        }
+    }
+
+    # ------------------------------------------------------------------
+    # PIM-AUTH-001 / PIM-AUTH-002: each admin must have the required strong
+    # auth methods (REQUIREMENTS §23 "Auth-method validator", ROADMAP #13).
+    # The live methods come from an optional 'auth-methods' tenant cache
+    # (upn-lower -> @(method-types)); when that cache is absent the check
+    # degrades to a single info (no live data) instead of breaking. The
+    # required set is $global:PIM_RequiredAuthMethods (default: a phishing-
+    # resistant authenticator OR passkey), overridable.
+    #   PIM-AUTH-001 = admin has NONE of the required methods.
+    #   PIM-AUTH-002 = admin has only weak methods (sms/voice) and no strong one.
+    # ------------------------------------------------------------------
+    $authCache = $null
+    if (Get-Command Read-PimTenantListCache -ErrorAction SilentlyContinue) {
+        try {
+            $cacheFile = $null
+            if (Get-Command Get-PimTenantCacheFile -ErrorAction SilentlyContinue) {
+                try { $cacheFile = Get-PimTenantCacheFile -Kind 'auth-methods' } catch { $cacheFile = $null }
+            }
+            if ($cacheFile -and (Test-Path -LiteralPath $cacheFile)) {
+                $raw = [System.IO.File]::ReadAllText($cacheFile, [System.Text.UTF8Encoding]::new($false))
+                if ($raw.Length -gt 0 -and [int][char]$raw[0] -eq 0xFEFF) { $raw = $raw.Substring(1) }
+                $authCache = $raw | ConvertFrom-Json
+            }
+        } catch { $authCache = $null }
+    }
+    if ($adminIndex.Count -gt 0) {
+        $required = if ($global:PIM_RequiredAuthMethods) { @($global:PIM_RequiredAuthMethods) } else { @('microsoftAuthenticator','passkey','fido2','windowsHelloForBusiness','certificate') }
+        $weakOnly = @('sms','voice','phone','email')
+        $reqLc = @($required | ForEach-Object { "$_".ToLowerInvariant() })
+        $weakLc = @($weakOnly | ForEach-Object { "$_".ToLowerInvariant() })
+        if (-not $authCache) {
+            [void]$violations.Add((New-PimViolation -Severity 'info' -Code 'PIM-AUTH-001' -Csv 'Account-Definitions-Admins' `
+                -Message "Admin auth-method validation skipped: no 'auth-methods' tenant cache is present (needs UserAuthenticationMethod.Read.All on the engine SPN + a refresh)." `
+                -Suggestion "Run a tenant-list refresh that includes auth methods to enable PIM-AUTH-001/002 per-admin checks."))
+        } else {
+            # Build a upn-lower -> @(method-type-lower) map from the cache (tolerant of shapes).
+            $methodsByUpn = @{}
+            foreach ($prop in $authCache.PSObject.Properties) {
+                $key = "$($prop.Name)".ToLowerInvariant()
+                $methodsByUpn[$key] = @(@($prop.Value) | ForEach-Object { "$_".ToLowerInvariant() })
+            }
+            foreach ($k in $adminIndex.Keys) {
+                $a = $adminIndex[$k]
+                $methods = @()
+                if ($methodsByUpn.ContainsKey($k)) { $methods = $methodsByUpn[$k] }
+                $hasStrong = $false
+                foreach ($m in $methods) { if ($reqLc -contains $m) { $hasStrong = $true; break } }
+                if (-not $hasStrong) {
+                    if ($methods.Count -gt 0 -and (@($methods | Where-Object { $weakLc -contains $_ }).Count -eq $methods.Count)) {
+                        [void]$violations.Add((New-PimViolation -Severity 'error' -Code 'PIM-AUTH-002' -Csv 'Account-Definitions-Admins' -Row $a.Row -Column 'UserPrincipalName' `
+                            -Message "Admin '$($a.Upn)' has only weak auth methods ($($methods -join ', ')) and no phishing-resistant method. Privileged accounts must use a strong method." `
+                            -Suggestion "Register an authenticator / passkey / FIDO2 / WHfB for this admin (the required set is `$global:PIM_RequiredAuthMethods)."))
+                    } else {
+                        [void]$violations.Add((New-PimViolation -Severity 'error' -Code 'PIM-AUTH-001' -Csv 'Account-Definitions-Admins' -Row $a.Row -Column 'UserPrincipalName' `
+                            -Message "Admin '$($a.Upn)' has none of the required auth methods ($($required -join ', ')). Live methods: $(if ($methods.Count) { $methods -join ', ' } else { '(none registered)' })." `
+                            -Suggestion "Register one of the required methods before granting privileged access."))
+                    }
+                }
+            }
+        }
+    }
+
+    # ------------------------------------------------------------------
+    # PIM-ORPHAN-AZ-001: an Azure-RBAC assignment whose AzScope no longer
+    # exists in the tenant (REQUIREMENTS §23 "Orphaned-Azure-scope validator",
+    # ROADMAP #19). Only runs when an azure-scopes cache is present; otherwise
+    # skips (no false positives without live truth). Scope match is a prefix
+    # match (a row at .../resourceGroups/x is valid if its subscription scope
+    # is cached) so RG/resource rows under a known sub aren't flagged.
+    # ------------------------------------------------------------------
+    if ($cachedAzureScopesPresent -and $loaded.ContainsKey('PIM-Assignments-Azure-Resources')) {
+        $scopeKeys = @($cachedAzureScopes.Keys)
+        $rows = $loaded['PIM-Assignments-Azure-Resources'].rows
+        for ($i = 0; $i -lt $rows.Count; $i++) {
+            $r = $rows[$i]
+            if (Test-PimRowIsBlank -Row $r) { continue }
+            $sc = (Get-PimRowValue -Row $r -Column 'AzScope').Trim()
+            if (-not $sc) { continue }
+            $scLc = $sc.ToLowerInvariant()
+            $found = $false
+            if ($cachedAzureScopes.ContainsKey($scLc)) { $found = $true }
+            else {
+                # Accept the row if any cached scope is a prefix of it (child of a known sub/MG).
+                foreach ($sk in $scopeKeys) { if ($scLc.StartsWith($sk + '/') -or $sk.StartsWith($scLc + '/')) { $found = $true; break } }
+            }
+            if (-not $found) {
+                [void]$violations.Add((New-PimViolation -Severity 'warning' -Code 'PIM-ORPHAN-AZ-001' -Csv 'PIM-Assignments-Azure-Resources' -Row $i -Column 'AzScope' `
+                    -Message "AzScope '$sc' is not present in (and is not a child of) any scope in the azure-scopes tenant cache -- the subscription/RG/resource may have been deleted or moved." `
+                    -Suggestion "Verify the scope still exists; if it was removed, delete this row (or use the Fix-all 'orphaned Azure scope' bucket). Refresh the azure-scopes cache if the resource is new."))
+            }
+        }
+    }
+
+    # ------------------------------------------------------------------
+    # PIM-STALE-003: a PIM permission/role group that has not been activated
+    # in N days (REQUIREMENTS §23 "Stale-group detection", ROADMAP #20).
+    # Activity comes from an optional 'pim-activity' tenant cache
+    # (groupTag-lower -> lastActivatedUtc ISO string). When absent, skip.
+    # Threshold = $global:PIM_StaleGroupDays (default 90).
+    # ------------------------------------------------------------------
+    $activityCache = $null
+    if (Get-Command Get-PimTenantCacheFile -ErrorAction SilentlyContinue) {
+        try {
+            $af = Get-PimTenantCacheFile -Kind 'pim-activity'
+            if ($af -and (Test-Path -LiteralPath $af)) {
+                $raw = [System.IO.File]::ReadAllText($af, [System.Text.UTF8Encoding]::new($false))
+                if ($raw.Length -gt 0 -and [int][char]$raw[0] -eq 0xFEFF) { $raw = $raw.Substring(1) }
+                $activityCache = $raw | ConvertFrom-Json
+            }
+        } catch { $activityCache = $null }
+    }
+    if ($activityCache -and $groupTagIndex.Count -gt 0) {
+        $staleDays = if ($global:PIM_StaleGroupDays) { [int]$global:PIM_StaleGroupDays } else { 90 }
+        $nowUtc = (Get-Date).ToUniversalTime()
+        $actByTag = @{}
+        foreach ($prop in $activityCache.PSObject.Properties) { $actByTag["$($prop.Name)".ToLowerInvariant()] = "$($prop.Value)" }
+        foreach ($key in $groupTagIndex.Keys) {
+            $g = $groupTagIndex[$key]
+            $last = if ($actByTag.ContainsKey($key)) { $actByTag[$key] } else { $null }
+            $ageDays = $null
+            if ($last) { try { $ageDays = ($nowUtc - ([datetime]::Parse($last)).ToUniversalTime()).TotalDays } catch { $ageDays = $null } }
+            if (($null -eq $last) -or ($null -ne $ageDays -and $ageDays -gt $staleDays)) {
+                $detail = if ($null -eq $last) { "never activated" } else { "last activated $([int]$ageDays) days ago" }
+                [void]$violations.Add((New-PimViolation -Severity 'info' -Code 'PIM-STALE-003' -Csv $g.Csv -Row $g.Row -Column 'GroupTag' `
+                    -Message "PIM group '$($g.Tag)' has $detail (stale threshold $staleDays days) -- it may be an unused grant that should be removed from Entra and the data." `
+                    -Suggestion "Confirm the grant is still needed; if not, retire the group (Lifecycle=Retire) and delete its assignment rows. Adjust `$global:PIM_StaleGroupDays to change the threshold."))
+            }
+        }
+    }
+
+    # ------------------------------------------------------------------
+    # WARNING OVERRIDE POST-FILTER (REQUIREMENTS §11). THE single hook: apply
+    # the operator's acknowledgements over the produced finding set. Matched
+    # warnings are DOWNGRADED to 'acknowledged' (kept + annotated, never
+    # dropped); expired overrides resurface their finding as active. Guarded so
+    # the validator never breaks if the module or config is absent/malformed.
+    # ------------------------------------------------------------------
+    $finalViolations = @($violations.ToArray())
+    $ackResult = $null
+    if (Get-Command Apply-PimWarningOverrides -ErrorAction SilentlyContinue) {
+        try {
+            $ovrPath = $null
+            if ($script:configRoot -and (Get-Command Resolve-PimWarningOverridesPath -ErrorAction SilentlyContinue)) {
+                $ovrPath = Resolve-PimWarningOverridesPath -ConfigRoot $script:configRoot
+            }
+            $ackResult = Apply-PimWarningOverrides -Findings $finalViolations -Path $ovrPath
+            if ($ackResult) { $finalViolations = @($ackResult.findings) }
+        } catch { $ackResult = $null }
+    }
+
+    $acknowledged    = if ($ackResult) { [int]$ackResult.acknowledged } else { 0 }
+    $expiredToActive = if ($ackResult) { [int]$ackResult.expiredToActive } else { 0 }
+
     return [ordered]@{
-        violations     = @($violations.ToArray())
+        violations     = @($finalViolations)
         ranAt          = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
         cacheFreshness = $cacheFreshness
         summary        = [ordered]@{
-            errors   = @($violations | Where-Object { $_.Severity -eq 'error'   }).Count
-            warnings = @($violations | Where-Object { $_.Severity -eq 'warning' }).Count
-            infos    = @($violations | Where-Object { $_.Severity -eq 'info'    }).Count
-            total    = $violations.Count
+            errors          = @($finalViolations | Where-Object { $_.Severity -eq 'error'   }).Count
+            warnings        = @($finalViolations | Where-Object { $_.Severity -eq 'warning' }).Count
+            infos           = @($finalViolations | Where-Object { $_.Severity -eq 'info'    }).Count
+            acknowledged    = $acknowledged
+            expiredToActive = $expiredToActive
+            total           = @($finalViolations).Count
         }
     }
 }

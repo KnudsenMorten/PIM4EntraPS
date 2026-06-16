@@ -20,12 +20,15 @@
 
 $global:PIM_Filters = @{
 
-    # ----- Admin candidates --------------------------------------------------
-    # Default mirrors the original engine pattern: UPN starts with 'Admin-' or
-    # 'X-Admin' AND contains '-ID' (Identity-domain admin tier marker).
-    AdminCandidate = {
+    # ----- Admins ------------------------------------------------------------
+    # The set of users PIM4EntraPS treats as managed ADMIN accounts. Default
+    # mirrors the original engine pattern: UPN starts with an admin prefix
+    # ('Admin-' / 'x-Admin' / 'g-Admin') AND contains '-ID' (Entra/Identity env).
+    # (Renamed from 'AdminCandidate' -- the term is just "Admins" now; the old key
+    #  is still honoured as a back-compat alias by Build-PimContext.)
+    Admins = {
         param($user)
-        ($user.UserPrincipalName -like 'Admin-*' -or $user.UserPrincipalName -like 'X-Admin*') `
+        ($user.UserPrincipalName -like 'Admin-*' -or $user.UserPrincipalName -like 'x-Admin*' -or $user.UserPrincipalName -like 'g-Admin*') `
             -and $user.UserPrincipalName -like '*-ID*'
     }
 

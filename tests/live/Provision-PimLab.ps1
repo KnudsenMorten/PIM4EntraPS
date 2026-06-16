@@ -48,12 +48,25 @@ function Invoke-Graph {
   }
   try { Invoke-RestMethod @args }
   catch {
-    $resp = $_.Exception.Response
-    if ($resp) {
-      $sr = New-Object System.IO.StreamReader($resp.GetResponseStream())
-      $txt = $sr.ReadToEnd()
-      throw "Graph $Method $url failed: $txt"
+    $errRec = $_
+    $resp = $errRec.Exception.Response
+    # Edition-agnostic error-body read: PS 7's Invoke-RestMethod uses HttpClient, so
+    # $resp is an HttpResponseMessage (NO GetResponseStream()); PS 5.1 uses
+    # HttpWebRequest, so $resp is an HttpWebResponse (WebResponse API). Both editions
+    # populate $_.ErrorDetails.Message with the body, so prefer that; never mix APIs.
+    $txt = $null
+    if ($errRec.ErrorDetails -and $errRec.ErrorDetails.Message) { $txt = "$($errRec.ErrorDetails.Message)" }
+    elseif ($resp) {
+      try {
+        if ($resp -is [System.Net.Http.HttpResponseMessage]) {
+          $txt = $resp.Content.ReadAsStringAsync().GetAwaiter().GetResult()
+        } else {
+          $sr = New-Object System.IO.StreamReader($resp.GetResponseStream())
+          try { $txt = $sr.ReadToEnd() } finally { $sr.Close() }
+        }
+      } catch { $txt = "$($errRec.Exception.Message)" }
     }
+    if ($txt) { throw "Graph $Method $url failed: $txt" }
     throw
   }
 }

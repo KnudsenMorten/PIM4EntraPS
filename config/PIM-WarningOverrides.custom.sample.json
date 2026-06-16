@@ -1,0 +1,40 @@
+{
+  "//": "PIM Manager validator WARNING OVERRIDES (acknowledgements).",
+  "//1": "Copy to PIM-WarningOverrides.custom.json (gitignored). Each entry DOWNGRADES",
+  "//2": "matched warnings to 'acknowledged' (kept + annotated, NOT dropped -- auditable).",
+  "//3": "Only warnings/infos can be acknowledged; errors are hard gates and never suppressed.",
+  "//4": "Contract: code REQUIRED; reason REQUIRED; expiresOn REQUIRED unless noExpiry:true",
+  "//5": "(exemptions model -- never indefinite by default). Expired overrides STOP suppressing:",
+  "//6": "the finding resurfaces as an active warning. scope keys AND together; omit scope to",
+  "//7": "cover every finding of that code. pattern is a wildcard over subject|target|message.",
+  "//8": "A future GUI 'Overrule' button on the Validate tab writes this same shape.",
+
+  "overrides": [
+    {
+      "code": "PIM-DUP-001",
+      "scope": {
+        "subject": "Admin-PAW-ID@example.onmicrosoft.com",
+        "target": "entra:application developer"
+      },
+      "reason": "PAW high-priv admin is intentionally reachable via both the GlobalRoles bundle and the OperationSecurity role group; reviewed by IT Security.",
+      "createdBy": "operator@example.onmicrosoft.com",
+      "expiresOn": "2026-12-31"
+    },
+    {
+      "code": "PIM-DUP-001",
+      "pattern": "Admin-PAW-*@example.onmicrosoft.com",
+      "reason": "All PAW-segment admins share the standard multi-path bundle layout; accepted as designed for the PAW maturity ring.",
+      "createdBy": "operator@example.onmicrosoft.com",
+      "expiresOn": "2026-09-30"
+    },
+    {
+      "code": "PIM-ORPHAN-001",
+      "scope": {
+        "subject": "break-glass-01@example.onmicrosoft.com"
+      },
+      "reason": "Break-glass account intentionally has no PIM assignment rows; it is directly role-eligible outside the group model.",
+      "createdBy": "operator@example.onmicrosoft.com",
+      "noExpiry": true
+    }
+  ]
+}

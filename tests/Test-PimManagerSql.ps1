@@ -6,11 +6,13 @@
     storage-neutral /api/data/<entity> GET/PUT, verifying rows land in SQL (not
     CSV). Creates + drops the DB. Skips cleanly if no SQL instance is reachable.
 
-        powershell -NoProfile -File .\tests\Test-PimManagerSql.ps1 [-Server .\SQLEXPRESS] [-Port 8811]
+        powershell -NoProfile -File .\tests\Test-PimManagerSql.ps1 [-Server .\SQLEXPRESS]
+    (The Manager binds a free loopback port at runtime -- no fixed port to collide on.)
 #>
-[CmdletBinding()] param([string]$Server = '.\SQLEXPRESS', [int]$Port = 8811)
+[CmdletBinding()] param([string]$Server = '.\SQLEXPRESS', [int]$Port = 0)
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
+. (Join-Path $PSScriptRoot '_shared\PimManagerBoot.ps1')   # -Port 0 => helper allocates a free port (no fixed-port collision)
 . (Join-Path $root 'engine\_shared\PIM-ChangeQueue.ps1')
 . (Join-Path $root 'engine\_shared\PIM-SqlStore.ps1')
 
@@ -23,25 +25,24 @@ if (-not (Test-PimSqlConnectivity -ConnectionString $masterCs)) { Write-Host "SQ
 $db = "pimmgr_" + [guid]::NewGuid().ToString('N').Substring(0,12)
 $cs = Get-PimSqlConnectionString -Server $Server -Database $db
 $mgr = Join-Path $root 'tools\pim-manager\Open-PimManager.ps1'
-$out = Join-Path $env:TEMP "pim-mgrsql-$Port.out"
+$out = Join-Path $env:TEMP ("pim-mgrsql-{0}.out" -f ([guid]::NewGuid().ToString('N').Substring(0,8)))
 if (Test-Path $out) { Remove-Item $out -Force }
 $proc = $null
 try {
     Initialize-PimSqlDatabase -Server $Server -Database $db   # the manager creates the schema, not the DB
     $env:PIM_SqlConnectionString = $cs                         # child process inherits -> SQL mode
-    Write-Host "Booting Manager in SQL mode (db $db) on port $Port ..."
-    $proc = Start-Process powershell.exe -ArgumentList @('-NoProfile','-ExecutionPolicy','Bypass','-File',"`"$mgr`"",'-Server','-NoLaunch','-Port',"$Port") -RedirectStandardOutput $out -RedirectStandardError "$out.err" -PassThru -WindowStyle Hidden
+    Write-Host "Booting Manager in SQL mode (db $db) on a dynamic free port ..."
+    $ctx  = Start-PimManagerForTest -ManagerPath $mgr -StdoutPath $out -TimeoutSec 45
+    $proc = $ctx.Process
 
-    $token = $null
-    for ($i=0; $i -lt 60; $i++) { Start-Sleep -Milliseconds 750
-        if (Test-Path $out) { $m = Select-String -Path $out -Pattern 'session token:\s*([0-9a-fA-F\-]{16,})' -EA SilentlyContinue | Select-Object -First 1; if ($m) { $token = $m.Matches[0].Groups[1].Value; break } }
-        if ($proc.HasExited) { break } }
-    T 'Manager booted in SQL mode' ([bool]$token)
+    $token = $ctx.Token
+    T 'Manager booted in SQL mode' ([bool]$token -and $ctx.Port -gt 0)
     if (-not $token) { Get-Content $out,"$out.err" -EA SilentlyContinue | Select-Object -Last 20 | ForEach-Object { Write-Host "    $_" }; throw 'no token' }
+    Write-Host "  Manager bound port $($ctx.Port)" -ForegroundColor DarkGray
     $sqlMode = (Select-String -Path $out -Pattern '\[store\] SQL mode' -EA SilentlyContinue | Select-Object -First 1)
     T 'Manager reports [store] SQL mode' ([bool]$sqlMode)
 
-    $base = "http://127.0.0.1:$Port"; $hdr = @{ Authorization = "Bearer $token" }
+    $base = $ctx.BaseUrl; $hdr = @{ Authorization = "Bearer $token" }
     function Beat { try { Invoke-RestMethod -Method POST -Uri "$base/api/heartbeat" -Headers $hdr -TimeoutSec 10 | Out-Null } catch {} }
     Beat
 
@@ -56,6 +57,26 @@ try {
     # GET back through the manager
     $getRes = Invoke-RestMethod -Uri "$base/api/data/PIM-Definitions-Tasks" -Headers $hdr -TimeoutSec 30
     T 'GET /api/data returns 2 rows from SQL' (@($getRes.rows).Count -eq 2 -and "$($getRes.source)" -eq 'sql')
+
+    # --- SQL render regression (fix/manager-gui-sql-render) -----------------
+    # The graph model + banner must report SQL as the source, NOT the config
+    # path, and the SPA must render read-WRITE (not 'static (read-only)') when
+    # the store is SQL. Earlier the page wrongly labelled SQL mode static.
+    $cfg = Invoke-RestMethod -Uri "$base/api/config" -Headers $hdr -TimeoutSec 30
+    T '/api/config sourceRoot reports SQL (not config path)' ("$($cfg.sourceRoot)" -like 'SQL:*')
+    T '/api/config storageMode = sql' ("$($cfg.storageMode)" -eq 'sql')
+
+    $spa = Invoke-WebRequest -Uri "$base/" -TimeoutSec 30 -UseBasicParsing
+    $spaHtml = "$($spa.Content)"
+    # The server-rendered <meta name="pim-mode"> must carry the SQL label so the
+    # client treats the page as read-write server mode (isServer = true).
+    $modeMeta = ([regex]::Match($spaHtml, '(?is)<meta[^>]*name=["'']pim-mode["''][^>]*content=["'']([^"'']*)["'']')).Groups[1].Value
+    T '/ render: pim-mode meta = SQL: <db>' ($modeMeta -like 'SQL:*')
+    T '/ render: pim-mode meta is not static' ($modeMeta -ne 'static')
+    # The page must ship a bearer token (server mode), without which the client
+    # forces static/read-only regardless of the mode label.
+    $tokMeta = ([regex]::Match($spaHtml, '(?is)<meta[^>]*name=["'']pim-token["''][^>]*content=["'']([^"'']*)["'']')).Groups[1].Value
+    T '/ render: pim-token meta is present (server/read-write)' ([bool]$tokMeta)
 
     # verify directly in the database (bypassing the manager)
     $direct = @(Get-PimSqlRows -ConnectionString $cs -Entity 'PIM-Definitions-Tasks')

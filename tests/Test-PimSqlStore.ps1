@@ -13,6 +13,7 @@ $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
 . (Join-Path $root 'engine\_shared\PIM-ChangeQueue.ps1')
 . (Join-Path $root 'engine\_shared\PIM-SqlStore.ps1')
+. (Join-Path $root 'engine\_shared\PIM-CommitBackup.ps1')
 
 $fail = New-Object System.Collections.Generic.List[string]; $pass = 0
 function A($cond, $name) { if ($cond) { $script:pass++; Write-Host "  [PASS] $name" -ForegroundColor Green } else { $script:fail.Add($name); Write-Host "  [FAIL] $name" -ForegroundColor Red } }
@@ -66,6 +67,48 @@ try {
     A (@(Get-PimSqlRows -ConnectionString $cs -Entity $e).Count -eq 2) 'row-set write inserts both rows'
     $r2 = Set-PimSqlEntityRows -ConnectionString $cs -Entity $e -Base $e -Rows @([pscustomobject]@{ GroupTag='G1'; RoleDefinitionName='Reader' })
     A (@(Get-PimSqlRows -ConnectionString $cs -Entity $e).Count -eq 1 -and $r2.removed -eq 1) 'row-set replace deletes the dropped row (full-set semantics)'
+
+    Write-Host "Departments persist (no GroupTag -> Department-keyed; the silent-drop defect)" -ForegroundColor Cyan
+    # Departments rows carry NO GroupTag (the §11 grid + scenario seed write {Department;Owners}).
+    # Pre-fix the natural key was blank -> Set-PimSqlEntityRows skipped the row -> grid edits
+    # silently vanished. The key must derive from Department, so the row round-trips.
+    $de = 'PIM-Definitions-Departments'
+    A ((Get-PimStoreRowKey -Base $de -Row ([pscustomobject]@{ Department='IT'; Owners='o@x.com' })) -eq 'IT') 'Departments natural key derives from Department (not blank GroupTag)'
+    Set-PimSqlEntityRows -ConnectionString $cs -Entity $de -Base $de -Rows @(
+        [pscustomobject]@{ Department='IT';       Owners='o1@x.com'; Mode='Serial' }
+        [pscustomobject]@{ Department='Security'; Owners='o2@x.com'; Mode='Parallel' }
+    ) | Out-Null
+    A (@(Get-PimSqlRows -ConnectionString $cs -Entity $de).Count -eq 2) 'both GroupTag-less Departments rows persisted (not dropped)'
+    A ((Get-PimSqlRow -ConnectionString $cs -Entity $de -Key 'Security').Owners -eq 'o2@x.com') 'a Departments row reads back by its Department key'
+
+    Write-Host "Transactional row-set replace + rollback (REQUIREMENTS.md s28 [M1])" -ForegroundColor Cyan
+    $te = 'PIM-Assignments-Roles-Groups'
+    Set-PimSqlEntityRowsTransactional -ConnectionString $cs -Entity $te -Base $te -Rows @(
+        [pscustomobject]@{ GroupTag='T1'; RoleDefinitionName='Reader' }
+        [pscustomobject]@{ GroupTag='T2'; RoleDefinitionName='Owner' }
+    ) | Out-Null
+    A (@(Get-PimSqlRows -ConnectionString $cs -Entity $te).Count -eq 2) 'transactional write inserts both rows'
+    # A mid-loop failure (the -FailAfter seam) must leave pim.Rows EXACTLY as before.
+    $threwTx = $false
+    try { [void](Set-PimSqlEntityRowsTransactional -ConnectionString $cs -Entity $te -Base $te -Rows @([pscustomobject]@{ GroupTag='T9'; RoleDefinitionName='X' }) -FailAfter 1) } catch { $threwTx = $true }
+    A ($threwTx) 'a mid-commit transactional failure throws'
+    $keysNow = @(Get-PimSqlRows -ConnectionString $cs -Entity $te | ForEach-Object { "$($_.GroupTag)" } | Sort-Object)
+    A ($keysNow.Count -eq 2 -and $keysNow -contains 'T1' -and $keysNow -contains 'T2' -and ($keysNow -notcontains 'T9')) 'rollback left the live store EXACTLY unchanged (no half-apply)'
+
+    Write-Host "Backup store round-trip (pim.Backups) + N-retention" -ForegroundColor Cyan
+    Initialize-PimBackupStore -ConnectionString $cs
+    A ($true) 'pim.Backups created (idempotent)'
+    $be = 'PIM-Definitions-Tasks'
+    1..4 | ForEach-Object {
+        $s = New-PimCommitSnapshot -Entity $be -Rows @([pscustomobject]@{ GroupTag=("B$_"); Workload='Entra-ID' }) -Header @('GroupTag','Workload') -By 'tester' -Reason 'unit' -TakenUtc ('2026-06-16T0{0}:00:00Z' -f $_)
+        Save-PimSqlBackupSnapshot -ConnectionString $cs -Snapshot $s
+        Start-Sleep -Milliseconds 2
+    }
+    A (@(Get-PimSqlBackupSnapshots -ConnectionString $cs -Entity $be).Count -eq 4) 'four snapshots persisted + listed'
+    $full = Get-PimSqlBackupSnapshot -ConnectionString $cs -Id (@(Get-PimSqlBackupSnapshots -ConnectionString $cs -Entity $be))[0].id
+    A (@($full.rows).Count -eq 1 -and "$($full.entity)" -eq $be) 'a full snapshot reads back its rows + header'
+    $pruned = Invoke-PimSqlBackupRetention -ConnectionString $cs -Entity $be -Keep 2
+    A (@($pruned).Count -eq 2 -and @(Get-PimSqlBackupSnapshots -ConnectionString $cs -Entity $be).Count -eq 2) 'retention prunes oldest, keeps last N'
 
     Write-Host "Settings live in SQL (file is seed only)" -ForegroundColor Cyan
     Set-PimSqlSetting -ConnectionString $cs -Name 'PawEnforcement' -Value $true

@@ -1,45 +1,102 @@
 # Release notes for PIM4EntraPS
 
-## v2.4.217
+## v2.4.223
 
 Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monorepo:
 
-- docs(pim): recover gutted public README — restore depth, reconcile to v2.4.217, sanitize (84669fa0)
-- fix(pim engine): re-array commit-queue delta filter; refine two-approval model (64244fbb)
-- docs(pim): reconcile ~33-item request list into REQUIREMENTS backlog (64ecd2dd)
-- fix(pim): approval-request mail is delegation approval, not activation (f699ad95)
-- docs(pim/tests): record honest Full-mode one-tenant deploy timing (small representative set, 2linkit, local SQLEXPRESS) (ec9fc2ca)
-- docs(pim): sanitize public docs for publish-safety + correct v2.4.217 entry (ac6dda42)
-- feat(pim): make the REST+SQL engine deployable+validatable — local SQL store, live deploy validation, prune safety, approval-policy fix (cd7319f6)
-- fix(pim): repair scenario validator test + add v1->v2 PIM-for-Groups policy-rule parity (Expiration + Notification) (2e30b621)
-- license(pim): open-core LICENSE in source + publish ships it (durable) (e70b2952)
-- docs: record verified tenant + subscription IDs and PIM per-tenant cert connection (074561b0)
-- docs(pim): add internal ENGINE-IDENTITY.md (which SPN + cert to use) + CLAUDE pointer (07c83c29)
-- docs: README is synthesized from FEATURES + DESIGN at publish (publish requirement) (b7d59c58)
-- docs: tests are a hard release gate — run autonomously, fix code on red, never ship red (0d8ae74c)
-- docs(pim): ROADMAP in public doc set, TESTS internal, tests-lockstep rule, README listing (a478c16c)
-- test(pim): feature-coverage Pester suite (one test per FEATURES.md feature) + TESTS.md (6d600497)
-- docs: shared 6-doc model — public auto-generated ROADMAP; REQUIREMENTS/TESTS internal (9df50513)
-- docs(pim): reconcile README with canonical docs; add Activator chapter to FEATURES (4f9ec2d4)
-- docs(pim): split delivered features into public FEATURES.md; REQUIREMENTS = open work only (c3ee4559)
-- docs(pim): collapse to 4 canonical docs (REQUIREMENTS/DESIGN/TESTS + CLAUDE) (7c9410f2)
-- docs(pim): merge ROADMAP into REQUIREMENTS; define shared doc model in CLAUDE.md (ca48a55b)
-- docs(pim): expand REQUIREMENTS.md to full detail from complete prompt history (69b32a48)
-- docs(pim): complete REQUIREMENTS.md (22 sections + honest delivery status) + DESIGN 9b-9d + CLAUDE.md working agreement (72c26fca)
-- perf(pim): lean context for large tenants - users on-demand, groups server-side filtered (72b03834)
-- fix(pim): Add-PimContextObject nested-array bug (real fix) - flatten-on-read + [object[]] cast (234410a2)
-- test(pim): 5 Pester tests for the REST engine + extract pure Merge-PimCacheItem (0b9da151)
-- feat(pim): AccessReviews provider (order 80) - engine-managed access reviews, auto-apply OFF (6aed7527)
-- fix(pim): group-membership read is per-group filtered (tenant-wide list now 400s MissingParameters) (3f85d0d8)
-- feat(pim): classify Entra 'no nesting into role-assignable group' as a skip (data constraint, not error) (b044ee35)
-- fix(pim): Add-PimContextObject built a corrupt cache (nested-array element, blank DisplayName) (b611e48e)
-- feat(pim): duration-ladder fallback for schedule creates (policy max-duration) (c81ac813)
+- release(pim): v2.4.223 — world-class Manager wave + sanitized notes (publish to public mirror) (7663c4bb)
+- docs(pim): sanitize RELEASENOTES for publish — remove customer AD domain, KV secret names, company refs (ccbf4460)
+- feat(pim manager): feature-flag registry — turn any GUI surface on/off in Settings (gradual rollout) (#118) (633978a5)
+- docs(pim): capture deploy-everything script, customer CSV run, Full+Delta live-must-work (operator 2026-06-16) (562da54b)
+- feat(pim m4): maker/checker second-person approval on sensitive authoring/onboarding (#117) (2d82dc6c)
+- feat(pim providers): finish GroupsCreateModifyPolicy — full idempotent policy reconcile (#116) (9170c7d1)
+- docs(pim): capture generic sync-triggered auto-deploy design (downlink+uplink, master/slave, ring-gated) (38bf149a)
+- feat(pim m3): inline preview/diff for Authoring + Move-admin never drops rows [M3] (#114) (06604015)
+- feat(pim governance): drift view (live vs desired) + gated apply-now [M5] (#113) (7b719577)
+- feat(pim m6): Jobs tab failure history, overdue detection + re-run/acknowledge (#115) (aff72168)
+- docs(pim): README + screenshots must be refreshed on every release (operator directive) (dbab0623)
+- feat(pim m1): safe, reversible Review & Save commits (backup + undo + transactional) (#112) (765c013b)
+- feat(pim engine): generic entra-approle connector (any enterprise-app app role -> PIM group) (#111) (420afc61)
+- docs(pim readme): expand into a reader-first, non-technical guide (#110) (116e070b)
+- docs(pim): restructure public README for readability + add headless GUI screenshots (#109) (3fc7db8c)
+- fix(pim test): make M9 redaction test secret-scan-clean (781e566e)
+- feat(pim m9): Support / diagnostics surface (connectivity+permission, health, sanitized bundle) (#107) (96b36ead)
+- docs(pim readme): close gap with delivered FEATURES catalog (#108) (c67a9a03)
+- docs(pim): nav consolidation DELIVERED — moved §26d → FEATURES §11 (live-verified) (f88de635)
+- feat(pim h9): Role Lookup reverse + typo tolerance + role compare (#106) (69254c08)
+- test(pim): whitelist map-risk/map-search as known server-parity orphans [M8] (d7e205e4)
+- feat(pim m8): Delegation Map search result list + jump + risk overlay (#105) (50a5dac4)
+- feat(pim m7): Settings config surface for expiry/MFA/connection-sanity (#104) (ba92a841)
+- fix(pim manager): keyed Review & Save diff so a reorder is not a change [M2] (#103) (5a4968ac)
+- feat(pim-activator): fold out + activate nested permission groups (two-tier PIM) (#102) (75758b28)
+- fix(pim manager): [H1] Read-PimRows strips BOM/whitespace from quoted CSV headers (#101) (091e210c)
+- docs(pim): nested permission-group activation (two-tier PIM) — REQUIREMENTS §125 (#100) (19bbe85e)
+- release(pim-activator): v1.6.30 — ship tenant-dropdown readability fix to fleet (d606e40c)
+- feat(pim manager): consolidate nav into CISO-friendly menu groups (§26d) + headless nav validator (#99) (5bc2f3e5)
+- docs(pim): record PIM Manager IT-admin investigation findings (REQUIREMENTS §27) (#79) (dc5137fa)
 
 ---
 
 # Release notes -- PIM4EntraPS
 
 > **Curated changelog.** The publish workflow auto-prepends recent monorepo commits as a raw activity log; this file is the human-friendly narrative on top.
+
+---
+
+## World-class IT-admin Manager — a major wave (v2.4.223)
+
+A large release centred on the PIM Manager (the IT-admin web GUI) and the engine:
+
+- **Consolidated, CISO-friendly navigation** — the many tabs are folded into six clear menus (Overview · Provisioning & Access · Change Control · Operations · Governance · Audit & Settings), with a Home dashboard that surfaces what needs your attention.
+- **Turn features on/off in Settings** — every Manager surface can be enabled or disabled, so you can roll capabilities out gradually.
+- **Safer changes** — Review & Save now takes a timestamped backup before every commit, commits all-or-nothing, and lets you undo; the diff is identity-keyed so a reordered row is no longer a false change; sensitive authoring (privileged-role attach, guest-into-privileged-group, disable) now requires a second-person (maker/checker) approval; and every authoring action shows an inline preview before it commits, with "Move admin" guaranteed never to drop rows.
+- **See and act on your estate** — the Delegation Map gains search-with-jump and a risk overlay (orphans / stale / over-privileged); Role Lookup gains reverse lookup, role compare, and typo-tolerant search; a Governance drift view compares live vs desired with a gated "apply now".
+- **Operations** — the Jobs tab shows failure history and overdue detection with re-run / acknowledge; a Support tab runs a connectivity + permission self-check and produces a sanitized diagnostics bundle; operational policy (expiry defaults, MFA-on-activation, connection-sanity, alerting) is configurable in Settings.
+- **Engine & connectors** — a generic enterprise-app app-role connector (assign any application role to a PIM group), a finished group-policy provider (full idempotent PIM-policy reconcile), and more robust CSV reading (Excel / quoted / BOM-prefixed headers no longer render the Delegation Map empty).
+- **PIM Activator** — after activating a role group, the extension folds out the nested eligible permission groups so you can activate each one independently, on its own clock.
+- **Docs** — the README is now a reader-first, illustrated guide with screenshots of the Manager.
+
+Everything is offline-verified; hosted/SQL Manager features are verified live where applicable.
+
+## Customize notification mails in the portal — no image rebuild
+
+Mail templates are now editable straight from the admin portal (**Governance → Mail templates**),
+instead of copying a file and rebuilding the container image:
+
+- **Edit + save in the GUI.** Open any notification template (new-admin, access-pass delivery,
+  approval request/escalation, daily summary, tier report, offboarding, etc.), change the wording,
+  and **Save**. The change is stored centrally in the persistent store the engine reads, so it takes
+  effect immediately and **survives restarts and product updates with no file editing and no rebuild**.
+- **Clear status + one-click reset.** The list shows which templates are still the shipped default and
+  which you have customized; **Reset** restores the original at any time.
+- **File override still works.** A `<type>.mailtemplate.custom.html` file on disk remains a supported
+  fallback (used only when there is no portal customization) for teams that prefer baking it into the image.
+- **Governance tidy-up.** The redundant Audit-trail teaser was removed from the Governance tab — the
+  dedicated **Audit** tab is the single place for the searchable, filterable audit trail.
+
+---
+
+## Admin account naming — variable prefix (by admin-type) + variable suffix (by environment)
+
+Admin account names are now composed from three configurable pieces instead of a fixed shape:
+
+- **Admin-type prefix (variable).** The name prefix follows the account's **admin type**: an internal
+  admin user has **no prefix**, an external admin user gets a configurable prefix (default `x-`), and an
+  external guest gets its own (default `g-`). A new **Admin type** field on the admin model + a per-type
+  prefix map (editable in the Settings naming panel) drive it.
+- **Environment suffix (variable).** The name suffix is now decided by the target **environment** —
+  cloud/Entra accounts end in `-ID`, legacy/AD accounts end in `-AD`. Previously the name always ended
+  in `-ID` regardless of where the account lived; that is fixed. A new **Environment** field + a per-env
+  suffix map drive it.
+- **"Admins", not "candidates".** The internal label that read "admin candidates" is now simply
+  **"Admins"** everywhere it appears — the account filter, the Manager labels/section, and the naming
+  output. A name now reads like `Admin-ABC-ID` (internal, cloud) or `x-Admin-VND-AD` (external admin
+  user, on-prem). Separators are dashes only.
+- **Everywhere it matters.** The create-admin wizard, the Advanced grid, and the guest-invite flow let
+  you pick/see both the Admin type and the Environment (guest invite defaults to external guest + Entra);
+  the Manager previews the resulting name live with the right prefix and suffix; the Settings naming
+  panel manages the per-type prefixes and per-environment suffixes (with sensible defaults auto-created).
+  Existing customer overrides keep working.
 
 ---
 
@@ -1254,8 +1311,8 @@ Resolution order in the engine is now:
 Drop into `config/PIM4EntraPS.NamingConventions.custom.ps1`:
 
 ```powershell
-$global:PIM_NamingConventions.PathAdmins     = 'OU=Admin Accounts,OU=OnPrem Only - No Sync to Cloud,OU=SPECIAL ACCOUNTS,DC=CASA,DC=DK'
-$global:PIM_NamingConventions.PathAdminsL0T0 = 'OU=Admin Accounts,OU=OnPrem Only - No Sync to Cloud,OU=SPECIAL ACCOUNTS,DC=CASA,DC=DK'
+$global:PIM_NamingConventions.PathAdmins     = 'OU=Admin Accounts,OU=OnPrem Only - No Sync to Cloud,OU=SPECIAL ACCOUNTS,DC=CONTOSO,DC=LOCAL'
+$global:PIM_NamingConventions.PathAdminsL0T0 = 'OU=Admin Accounts,OU=OnPrem Only - No Sync to Cloud,OU=SPECIAL ACCOUNTS,DC=CONTOSO,DC=LOCAL'
 ```
 
 Replace the DNs with your tenant's OUs. Tenants that co-mingle high-priv and general admins in one OU point both at the same DN.
@@ -1296,8 +1353,8 @@ Engine now:
 Add to `config/PIM4EntraPS.NamingConventions.custom.ps1` (alongside the `AdminAccountPatterns` block):
 
 ```powershell
-$global:PathAdmins     = 'OU=Admin,OU=AdminAccounts,DC=casa,DC=dk'        # general admin OU
-$global:PathAdminsL0T0 = 'OU=AdminL0T0,OU=AdminAccounts,DC=casa,DC=dk'    # high-priv (L0/T0) OU
+$global:PathAdmins     = 'OU=Admin,OU=AdminAccounts,DC=contoso,DC=local'        # general admin OU
+$global:PathAdminsL0T0 = 'OU=AdminL0T0,OU=AdminAccounts,DC=contoso,DC=local'    # high-priv (L0/T0) OU
 ```
 
 Replace the DN values with the actual OUs in your tenant. The high-priv OU receives any account whose UserName carries an `L0` or `T0` marker (per v2.4.122 routing); everything else lands in the general OU.
@@ -1346,7 +1403,7 @@ The log line on each successful create surfaces the routing decision and the res
 
 ```
 Creating AD account Kasper Teilbæk (Admin, Legacy, AD)
-  -> OU: OU=Admin,OU=AdminAccounts,DC=casa,DC=dk
+  -> OU: OU=Admin,OU=AdminAccounts,DC=contoso,DC=local
 ```
 
 ### Files changed
@@ -1445,7 +1502,7 @@ Fix the CSV TierLevel column on the offending rows (or, if those rows are legiti
 
 ### Why
 
-v2.4.116-v2.4.118 wired up the v2 platform-context credential path, but the resulting `$global:Context.Identity.Legacy.Internal.Prod` PSCredential was built from the raw KV values -- `Legacy-UserName-Internal-Prod` (`<domain>\<gMSA>$`) + `Legacy-Password-Internal-Prod` (a stub string). For a gMSA, that stub password gets rejected by the DC -> `Authentication failed`. This matched the v1 wire pattern but missed the v1 customer's actual code, which detected gMSA SAM names (`*gMSA*` / `*sMSA*`) and called `Get-GMSACredential` to read the **real managed password** from the gMSA's `msDS-ManagedPassword` AD attribute, replacing the stub before the credential ever hit an AD cmdlet.
+v2.4.116-v2.4.118 wired up the v2 platform-context credential path, but the resulting `$global:Context.Identity.Legacy.Internal.Prod` PSCredential was built from the raw KV values -- `Legacy-UserName` (`<domain>\<gMSA>$`) + `Legacy-Password` (a stub string). For a gMSA, that stub password gets rejected by the DC -> `Authentication failed`. This matched the v1 wire pattern but missed the v1 customer's actual code, which detected gMSA SAM names (`*gMSA*` / `*sMSA*`) and called `Get-GMSACredential` to read the **real managed password** from the gMSA's `msDS-ManagedPassword` AD attribute, replacing the stub before the credential ever hit an AD cmdlet.
 
 AutomateITPS.AD already ships:
 
@@ -1470,7 +1527,7 @@ The engine was just never calling it.
   (Get-ADServiceAccount 'gMSA-svc-L1-T0' -Properties PrincipalsAllowedToRetrieveManagedPassword).PrincipalsAllowedToRetrieveManagedPassword
   ```
   Expected: the host's computer object (or a group containing it).
-- KV stays simple -- `Legacy-UserName-Internal-Prod` holds `<domain>\<gMSA>$`, `Legacy-Password-Internal-Prod` holds any stub string (it gets thrown away after the DC read).
+- KV stays simple -- `Legacy-UserName` holds `<domain>\<gMSA>$`, `Legacy-Password` holds any stub string (it gets thrown away after the DC read).
 - gMSA still needs AD write permissions on the admin OUs to actually mutate user objects -- the password swap fixes auth, not authorization.
 
 ### Files changed
@@ -1482,7 +1539,7 @@ The engine was just never calling it.
 - Pull. Make sure the host is in `PrincipalsAllowedToRetrieveManagedPassword` for the gMSA. Rerun the launcher. Expected log additions:
   ```
   [OK]    Resolve-PlatformGMSACredentials: 1 gMSA slot(s) refreshed from DC -- Internal.Prod
-  [INFO]  AD credential source: $global:Context.Identity.Legacy.Internal.Prod (KV: Legacy-UserName-Internal-Prod + Legacy-Password-Internal-Prod)
+  [INFO]  AD credential source: $global:Context.Identity.Legacy.Internal.Prod (KV: Legacy-UserName + Legacy-Password)
   ...
   Updating AD user Jane Doe (Admin, Legacy, AD, L0, T0)
   ```
@@ -1494,7 +1551,7 @@ The engine was just never calling it.
 
 ### Why
 
-v2.4.117 auto-detected gMSA-style credentials (UserName ending in `$`) and dropped `-Credential` from the AD cmdlets, on the assumption the process was running AS the gMSA via a Scheduled Task. In practice the v1 contract -- which customers actually use -- builds a regular `PSCredential` from KV (`Legacy-UserName-Internal-Prod` + `Legacy-Password-Internal-Prod`) and passes it to every AD cmdlet via `-Credential`, regardless of whether the SAM name looks gMSA-shaped. The v2.4.117 detection broke that contract.
+v2.4.117 auto-detected gMSA-style credentials (UserName ending in `$`) and dropped `-Credential` from the AD cmdlets, on the assumption the process was running AS the gMSA via a Scheduled Task. In practice the v1 contract -- which customers actually use -- builds a regular `PSCredential` from KV (`Legacy-UserName` + `Legacy-Password`) and passes it to every AD cmdlet via `-Credential`, regardless of whether the SAM name looks gMSA-shaped. The v2.4.117 detection broke that contract.
 
 Verified on a live customer test: the launcher ran as `NT AUTHORITY\SYSTEM` (Kerberos used the COMPUTER account `azwe-s-autm-p01$`, not the gMSA), so dropping `-Credential` made the AD cmdlets fall through to computer-account auth -- which has read but not write, hence `Set-ADUser: Insufficient access rights`.
 
@@ -1571,7 +1628,7 @@ gMSAs auth via **Kerberos using the calling process token** -- the Scheduled Tas
 
 ### Symptom
 
-After v2.4.115 the customer added `Legacy-UserName-Internal-Prod` + `Legacy-Password-Internal-Prod` to KV, but the engine still printed `[INFO] No AD credential available -- skipping AD-account branch`. `$global:Context.Identity.Legacy.Internal.Prod` was `$null` despite both KV secrets being present.
+After v2.4.115 the customer added `Legacy-UserName` + `Legacy-Password` to KV, but the engine still printed `[INFO] No AD credential available -- skipping AD-account branch`. `$global:Context.Identity.Legacy.Internal.Prod` was `$null` despite both KV secrets being present.
 
 ### Root cause
 
@@ -1591,7 +1648,7 @@ The credential-resolution chain added in v2.4.115 then picks it up and the AD br
 
 ### How to apply
 
-- Pull. KV secrets from v2.4.115 stay as-is. Rerun the launcher -- you should now see `[INFO] AD credential source: $global:Context.Identity.Legacy.Internal.Prod (KV: Legacy-UserName-Internal-Prod + Legacy-Password-Internal-Prod)` followed by `Updating AD user ...` / `Creating AD account ...`.
+- Pull. KV secrets from v2.4.115 stay as-is. Rerun the launcher -- you should now see `[INFO] AD credential source: $global:Context.Identity.Legacy.Internal.Prod (KV: Legacy-UserName + Legacy-Password)` followed by `Updating AD user ...` / `Creating AD account ...`.
 
 ---
 
@@ -1599,7 +1656,7 @@ The credential-resolution chain added in v2.4.115 then picks it up and the AD br
 
 ### Why
 
-v2.4.114 wired the `-OnlyAD` branch but the guard checked only `$AD_Credentials` -- the v1-era global populated by `Connect_Azure.ps1` / `2LINKIT-Functions.psm1`. On hosts running the v2 platform bootstrap chain (Initialize-PlatformAutomationFramework -> Initialize-PlatformLegacyIdentity), the AD/gMSA credential is stashed at `$global:Context.Identity.Legacy.Internal.Prod` instead -- a real `[PSCredential]` built from the KV secrets `Legacy-UserName-Internal-Prod` + `Legacy-Password-Internal-Prod`. The v2.4.114 guard didn't know about that path, so v2-bootstrapped hosts that DO have the KV secrets still saw `[INFO] $AD_Credentials not set ... -- skipping AD-account branch`.
+v2.4.114 wired the `-OnlyAD` branch but the guard checked only `$AD_Credentials` -- the v1-era global populated by `Connect_Azure.ps1` / `Legacy-Functions.psm1`. On hosts running the v2 platform bootstrap chain (Initialize-PlatformAutomationFramework -> Initialize-PlatformLegacyIdentity), the AD/gMSA credential is stashed at `$global:Context.Identity.Legacy.Internal.Prod` instead -- a real `[PSCredential]` built from the KV secrets `Legacy-UserName` + `Legacy-Password`. The v2.4.114 guard didn't know about that path, so v2-bootstrapped hosts that DO have the KV secrets still saw `[INFO] $AD_Credentials not set ... -- skipping AD-account branch`.
 
 ### Fix
 
@@ -1613,8 +1670,8 @@ When one resolves, the engine logs `[INFO] AD credential source: <which path>` b
 ### KV-side recipe for gMSA tenants
 
 ```
-Legacy-UserName-Internal-Prod  ->  <domain>\<gMSA-name>$    e.g. contoso.local\gMSA-svc-L1-T0$
-Legacy-Password-Internal-Prod  ->  <any non-empty string>   gMSA passwords aren't user-accessible
+Legacy-UserName  ->  <domain>\<gMSA-name>$    e.g. contoso.local\gMSA-svc-L1-T0$
+Legacy-Password  ->  <any non-empty string>   gMSA passwords aren't user-accessible
 ```
 
 Process must already be running AS the gMSA (Scheduled Task with the gMSA as Principal). Kerberos handles the actual auth; the PSCredential just satisfies the `-Credential` parameter on `Get-ADUser` / `Set-ADUser` / `New-ADUser`.
@@ -1858,7 +1915,7 @@ Final summary line now reports both numbers: `cached extension folders deleted: 
 
 **Hotfix.** `Deploy-PimActivatorIntune.ps1` in v2.4.98 made `-CatalogJsonPath` mandatory, which broke customer deploys at sites where the operator hadn't hand-crafted a JSON catalog yet (script just prompted at the param input and didn't proceed). This release demotes the parameter to optional and adds two ways to ship a catalog without supplying a file:
 
-- **Default: auto-discover from Entra.** Zero-arg invocation now queries `/organization` for tenant id + display name AND `/applications?$filter=startswith(displayName,'PIM Activator')` for the per-tenant app registration (the SPN that `Deploy-PimActivatorBackend.ps1` creates earlier in the deploy sequence). Catalog is built in-memory from those facts and pushed through the ADMX template into `chrome.storage.managed.tenantCatalog`. `startswith` (not `eq`) so renamed variants like `'[2linkIT] PIM Activator'` or `'PIM Activator (prod)'` still match -- same lookup the popup's onboarding wizard uses.
+- **Default: auto-discover from Entra.** Zero-arg invocation now queries `/organization` for tenant id + display name AND `/applications?$filter=startswith(displayName,'PIM Activator')` for the per-tenant app registration (the SPN that `Deploy-PimActivatorBackend.ps1` creates earlier in the deploy sequence). Catalog is built in-memory from those facts and pushed through the ADMX template into `chrome.storage.managed.tenantCatalog`. `startswith` (not `eq`) so renamed variants like `'[YourOrg] PIM Activator'` or `'PIM Activator (prod)'` still match -- same lookup the popup's onboarding wizard uses.
 - **Manual override with `-ClientId <guid>`.** Skips the `/applications` round-trip when the operator already knows the app's appId from their backend deploy. Tenant id + name still auto-resolved from `/organization`.
 - **`-CatalogJsonPath`** still honored, takes precedence over both flags.
 

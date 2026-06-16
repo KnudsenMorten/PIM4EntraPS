@@ -216,3 +216,93 @@ function Get-PimWorkloadDerivation {
         nameSegment = $roleSeg; groupName = $name
     }
 }
+
+# --- ADMIN derivation (admin-account name) --------------------------------------
+function Get-PimAdminDerivation {
+    # Derive the admin ACCOUNT name from owner + admin-type (prefix) + environment
+    # (suffix), using the §17 naming helpers in PIM-Naming.ps1 (Resolve-PimAdminName).
+    # This is the live name derivation the Create-admin wizard / Advanced grid / guest
+    # invite drive so GUI and engine resolve the SAME name. -HighPriv = the dedicated
+    # L0-T0 form. Returns the resolved UserName plus the inputs that drove it.
+    param(
+        [Parameter(Mandatory)][string]$Owner,
+        [string]$AdminType   = 'internal-adminuser',
+        [string]$Environment = 'entra',
+        [switch]$HighPriv
+    )
+    if (-not (Get-Command Resolve-PimAdminName -ErrorAction SilentlyContinue)) {
+        throw "Get-PimAdminDerivation: PIM-Naming.ps1 is not loaded (Resolve-PimAdminName missing)."
+    }
+    $userName = Resolve-PimAdminName -Owner $Owner -AdminType $AdminType -Environment $Environment -HighPriv:$HighPriv
+    $prefix   = Get-PimAdminTypePrefix  -AdminType   $AdminType
+    $suffix   = Get-PimEnvironmentSuffix -Environment $Environment
+    return [pscustomobject]@{
+        target      = 'admin'
+        owner       = $Owner
+        adminType   = (Resolve-PimAdminTypeKey $AdminType)
+        environment = (Resolve-PimEnvironmentKey $Environment)
+        highPriv    = [bool]$HighPriv
+        prefix      = $prefix
+        suffix      = $suffix
+        userName    = $userName
+        groupName   = $userName   # alias so the GUI's generic "derived name" field works
+        valid       = [bool](Test-PimAdminName -Name $userName -Purpose ($(if ($HighPriv) { 'HighPriv' } else { 'Day2Day' })))
+    }
+}
+
+# --- UNIFIED DISPATCH -----------------------------------------------------------
+function Get-PimWizardDerivation {
+    # The ONE entry-point for the reversed (target-first) wizard: target -> source
+    # -> roles-in-scope, then auto-derive everything. Dispatches to the per-target
+    # brain above so the Manager endpoint (and tests) drive a single function.
+    #   target=entra    : -Roles [-AuScope] [-BundleName]
+    #   target=azure    : -ScopeType -Roles [-ScopePath] [-ScopeName] [-ManagementGroupDepth] [-BundleName]
+    #   target=workload : -Workload -Roles [-Scope] [-Level] [-Tier] [-Plane] [-Domain] [-BundleName]
+    #   target=admin    : -Owner [-AdminType] [-Environment] [-HighPriv]   (admin account name)
+    param(
+        [Parameter(Mandatory)][ValidateSet('entra','azure','workload','admin')][string]$Target,
+        [string[]]$Roles,
+        [string]$AuScope,
+        [string]$ScopeType,
+        [string]$ScopePath,
+        [string]$ScopeName,
+        [int]$ManagementGroupDepth = 1,
+        [string]$Workload,
+        [string]$Scope,
+        [Nullable[int]]$Level,
+        [Nullable[int]]$Tier,
+        [string]$Plane,
+        [string]$Domain,
+        [string]$BundleName,
+        [string]$Owner,
+        [string]$AdminType,
+        [string]$Environment,
+        [switch]$HighPriv
+    )
+    if ($Target -ne 'admin' -and (-not $Roles -or @($Roles).Count -eq 0)) {
+        throw "Get-PimWizardDerivation: at least one role is required for target '$Target'."
+    }
+    switch ($Target) {
+        'admin' {
+            if (-not "$Owner".Trim()) { throw "Get-PimWizardDerivation: -Owner is required for target 'admin'." }
+            $at = if ("$AdminType".Trim())   { $AdminType }   else { 'internal-adminuser' }
+            $ev = if ("$Environment".Trim()) { $Environment } else { 'entra' }
+            return Get-PimAdminDerivation -Owner $Owner -AdminType $at -Environment $ev -HighPriv:$HighPriv
+        }
+        'entra' { return Get-PimEntraDerivation -Roles $Roles -AuScope $AuScope -BundleName $BundleName }
+        'azure' {
+            if (-not "$ScopeType".Trim()) { throw "Get-PimWizardDerivation: -ScopeType is required for target 'azure'." }
+            return Get-PimAzureDerivation -ScopeType $ScopeType -Roles $Roles -ScopePath $ScopePath -ScopeName $ScopeName -ManagementGroupDepth $ManagementGroupDepth -BundleName $BundleName
+        }
+        'workload' {
+            if (-not "$Workload".Trim()) { throw "Get-PimWizardDerivation: -Workload is required for target 'workload'." }
+            $p = @{ Workload = $Workload; Roles = $Roles; Scope = $Scope; BundleName = $BundleName }
+            if ($null -ne $Level)  { $p['Level']  = [int]$Level }
+            if ($null -ne $Tier)   { $p['Tier']   = [int]$Tier }
+            if ("$Plane".Trim())   { $p['Plane']  = $Plane }
+            if ("$Domain".Trim())  { $p['Domain'] = $Domain }
+            return Get-PimWorkloadDerivation @p
+        }
+    }
+    throw "Get-PimWizardDerivation: unknown target '$Target' (expected entra | azure | workload | admin)."
+}

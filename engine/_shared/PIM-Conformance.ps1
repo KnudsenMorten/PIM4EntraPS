@@ -278,6 +278,81 @@ function Set-PimTemplateState {
     return $file
 }
 
+# --- per-SCOPE desired-vs-applied template version (engine + GUI) ---------------
+# The conformance core above tracks ONE template's version per tenant. A PIM run
+# spans MANY scopes (provider areas: Groups, EntraRoles, AzRes, GroupsPolicies,
+# ...), each of which may be governed by a different template version. This seam
+# tracks the desired-vs-applied template version PER SCOPE so the engine (and the
+# Manager conformance heatmap) can show, for one tenant, exactly which scopes are
+# at the current template version and which are Behind / Ahead / NeverApplied.
+#
+# State lives in the SAME local state file as the template stamp, under a distinct
+# "scopeVersions" map keyed "<tenantId>|<scope>" -> { LastAppliedVersion; AppliedUtc;
+# AppliedBy }. Pure matrix builder (Get-PimScopeConformance) takes the desired
+# versions (template-version per scope) + the applied versions (from state) and
+# returns one annotated row per scope. Fully testable; no Graph, no SQL.
+
+function Get-PimScopeAppliedVersion {
+    # Applied template version for ONE scope of ONE tenant; 0 if never applied.
+    param([string]$StateFile, [Parameter(Mandatory)][string]$TenantId, [Parameter(Mandatory)][string]$Scope)
+    $file = Get-PimConfStateFile -StateFile $StateFile
+    if (-not (Test-Path -LiteralPath $file)) { return 0 }
+    try { $all = Get-Content -LiteralPath $file -Raw -Encoding UTF8 | ConvertFrom-Json } catch { return 0 }
+    if (-not $all.PSObject.Properties['scopeVersions']) { return 0 }
+    $p = $all.scopeVersions.PSObject.Properties["$TenantId|$Scope"]
+    if ($p -and $p.Value -and $p.Value.PSObject.Properties['LastAppliedVersion']) { return [int]("$($p.Value.LastAppliedVersion)" -as [int]) }
+    return 0
+}
+
+function Set-PimScopeAppliedVersion {
+    # Stamp the applied template version for ONE scope of ONE tenant (LOCAL state).
+    param(
+        [string]$StateFile, [Parameter(Mandatory)][string]$TenantId, [Parameter(Mandatory)][string]$Scope,
+        [Parameter(Mandatory)][int]$Version, [string]$AppliedBy = "$env:USERNAME", [datetime]$NowUtc = [datetime]::UtcNow
+    )
+    $file = Get-PimConfStateFile -StateFile $StateFile
+    $dir = Split-Path -Parent $file
+    if ($dir -and -not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+    $all = [pscustomobject]@{}
+    if (Test-Path -LiteralPath $file) { try { $all = Get-Content -LiteralPath $file -Raw -Encoding UTF8 | ConvertFrom-Json } catch { $all = [pscustomobject]@{} } }
+    if (-not $all.PSObject.Properties['scopeVersions']) { Set-PimConfProp -Object $all -Name 'scopeVersions' -Value ([pscustomobject]@{}) }
+    Set-PimConfProp -Object $all.scopeVersions -Name "$TenantId|$Scope" -Value ([pscustomobject]@{ LastAppliedVersion = $Version; AppliedUtc = $NowUtc.ToString('o'); AppliedBy = $AppliedBy })
+    $all | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $file -Encoding UTF8
+    return $file
+}
+
+function Get-PimScopeConformance {
+    # PURE: build the per-scope desired-vs-applied matrix for one tenant.
+    #   $DesiredVersions = @{ '<scope>' = <int templateVersion> ; ... }  (what should be applied now)
+    #   $AppliedVersions = @{ '<scope>' = <int> ; ... }                  (what state says is applied)
+    # Status per scope:
+    #   NeverApplied (applied = 0 / absent)
+    #   Behind       (applied < desired)
+    #   UpToDate     (applied == desired)
+    #   Ahead        (applied > desired -- desired template rolled back; flag for review)
+    # Returns @{ TenantId; Rows=@( @{ Scope; DesiredVersion; AppliedVersion; Behind; Status } ); Counts }.
+    param(
+        [Parameter(Mandatory)][hashtable]$DesiredVersions,
+        [hashtable]$AppliedVersions = @{},
+        [string]$TenantId = ''
+    )
+    $rows = New-Object System.Collections.Generic.List[object]
+    foreach ($scope in @($DesiredVersions.Keys | Sort-Object)) {
+        $want = [int]("$($DesiredVersions[$scope])" -as [int])
+        $have = 0
+        if ($AppliedVersions -and $AppliedVersions.ContainsKey($scope)) { $have = [int]("$($AppliedVersions[$scope])" -as [int]) }
+        $status =
+            if ($have -le 0)      { 'NeverApplied' }
+            elseif ($have -lt $want) { 'Behind' }
+            elseif ($have -gt $want) { 'Ahead' }
+            else                  { 'UpToDate' }
+        $rows.Add([pscustomobject]@{ Scope = "$scope"; DesiredVersion = $want; AppliedVersion = $have; Behind = [math]::Max(0, $want - $have); Status = $status })
+    }
+    $counts = @{}
+    foreach ($s in 'NeverApplied','Behind','UpToDate','Ahead') { $counts[$s] = @($rows | Where-Object Status -eq $s).Count }
+    return [pscustomobject]@{ TenantId = $TenantId; Rows = $rows.ToArray(); Counts = $counts }
+}
+
 # --- roll-forward ROWS seam -----------------------------------------------------
 # Converts an APPROVED template into the workload-assignment rows that the
 # existing Apply-PimWorkloadAssignments consumes (Workload;RoleName;GroupTag;

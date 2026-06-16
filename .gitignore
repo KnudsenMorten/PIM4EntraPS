@@ -61,3 +61,20 @@ config-msp/*.custom.json
 *.pimlicense
 
 config-test/
+
+# Headless GUI validator node deps (Test-PimManagerGuiComprehensive.ps1).
+# Installed locally / in the CI gui job via `cd tests/gui-headless ; npm install`;
+# the validator self-skips when absent. The harness .js IS committed.
+tests/gui-headless/node_modules/
+
+# ---------------------------------------------------------------------------
+#  Playwright GUI feature-suite -- deps, reports, traces, and the per-run sidecar
+#  (token + pid) are all regenerated; never commit.
+# ---------------------------------------------------------------------------
+tests/playwright/feature-suite/node_modules/
+tests/playwright/feature-suite/package-lock.json
+tests/playwright/feature-suite/playwright-report/
+tests/playwright/feature-suite/test-results/
+tests/playwright/feature-suite/harness/.manager.json
+tests/playwright/feature-suite/harness/.manager.json.*
+tests/playwright/feature-suite/harness/.*.json

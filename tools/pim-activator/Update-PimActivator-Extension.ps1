@@ -439,6 +439,33 @@ if ($Repack -or $PackOnly) {
         Write-Warn "Node not on PATH -- skipping popup.js syntax check (consider installing Node so future SyntaxErrors get caught before pack)"
     }
 
+    # ---- Pre-flight: source package linter (HARD gate) -------------------
+    # Run the offline package validator before signing. It pins the extension
+    # id (IDLOCK -- a drifted manifest "key" would brick every installed
+    # instance), forbids any device-code auth path, asserts the PKCE loopback
+    # sign-in is still wired, and refuses to ship a CRX with a real tenant /
+    # subscription GUID baked into a shipped file (NOSECRET). This is the
+    # repack/deploy gate called for in REQUIREMENTS.md S16: a drifted id or a
+    # leaked GUID blocks the build BEFORE the master-key sign step runs.
+    Write-Step "Pre-flight: source package linter (Test-PimActivatorPackage)"
+    $validatorPath = Join-Path $SCRIPT_DIR 'Test-PimActivatorPackage.ps1'
+    if (-not (Test-Path -LiteralPath $validatorPath)) {
+        throw "Package validator not found at '$validatorPath' -- cannot gate the repack. Restore Test-PimActivatorPackage.ps1 before repacking."
+    }
+    # Dot-source for the function (the script self-detects dot-source and does
+    # NOT auto-run / exit in that mode), then validate the source folder.
+    . $validatorPath
+    $pkg = Test-PimActivatorPackage -Path $SCRIPT_DIR -Quiet
+    foreach ($f in $pkg.Findings) {
+        if ($f.Ok) { Write-Ok ("[{0}] {1}" -f $f.Check, $f.Message) }
+        elseif ($f.Severity -eq 'Warn') { Write-Warn ("[{0}] {1}" -f $f.Check, $f.Message) }
+        else { Write-Err ("[{0}] {1}" -f $f.Check, $f.Message) }
+    }
+    if (-not $pkg.Ok) {
+        throw "Package validator FAILED (one or more Error-severity findings above). Refusing to repack/sign. Fix the source and re-run."
+    }
+    Write-Ok "Package validator passed -- safe to sign"
+
     # ---- Bump manifest.json version ------------------------------------------
     # Default: increment the last (patch) component. Override with -Version
     # to pin an exact version (used for milestone releases like 1.0.0 where

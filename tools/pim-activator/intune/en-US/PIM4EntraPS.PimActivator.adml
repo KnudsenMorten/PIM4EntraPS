@@ -21,6 +21,13 @@ Each array entry must have the shape:
     "azurePrefix": ["PIM-Azure","PIM-AzRes"]   (optional, string or string array) }
 
 When this policy is Enabled and a value is set, the extension's header tenant switcher lists every entry; admins on this device can pick which tenant is currently active. When Disabled or Not Configured, the extension falls back to chrome.storage.local imports done from the popup wizard.</string>
+      <string id="BulkThreshold_Edge">Bulk-activate confirm threshold -- Microsoft Edge</string>
+      <string id="BulkThreshold_Chrome">Bulk-activate confirm threshold -- Google Chrome</string>
+      <string id="BulkThreshold_Explain">Number of selected roles at or above which the PIM Activator's Activate button requires a second "click again to confirm" before elevating, guarding against an accidental click that elevates far more access than intended.
+
+Lower the value for extra caution; raise it for high-trust tenants that routinely activate many roles at once. Valid range 1-100. When Disabled or Not Configured, the extension uses its built-in default (5).
+
+A per-entry "bulkActivateConfirmThreshold" inside the tenant catalog JSON overrides this tenant-wide value for that specific tenant. This setting is an administrator policy control only and is never exposed for end-user entry inside the popup.</string>
     </stringTable>
     <presentationTable>
       <presentation id="TenantCatalog_Edge_Presentation">
@@ -32,6 +39,12 @@ When this policy is Enabled and a value is set, the extension's header tenant sw
         <textBox refId="TenantCatalog_Chrome_Value">
           <label>Tenant catalog JSON (Chrome):</label>
         </textBox>
+      </presentation>
+      <presentation id="BulkThreshold_Edge_Presentation">
+        <decimalTextBox refId="BulkThreshold_Edge_Value" defaultValue="5" spinStep="1">Confirm threshold (Edge), 1-100:</decimalTextBox>
+      </presentation>
+      <presentation id="BulkThreshold_Chrome_Presentation">
+        <decimalTextBox refId="BulkThreshold_Chrome_Value" defaultValue="5" spinStep="1">Confirm threshold (Chrome), 1-100:</decimalTextBox>
       </presentation>
     </presentationTable>
   </resources>

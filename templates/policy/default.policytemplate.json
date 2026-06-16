@@ -1,6 +1,17 @@
 {
   "id": "default",
   "name": "Default",
-  "description": "The engine's standard policy baseline (MFA + justification on activation, expirations and notifications from policies.custom.ps1). Deliberately carries NO overrides: groups linked to 'default' keep the global pass's settings, and the engine never touches an approval rule it did not itself apply.",
-  "rules": {}
+  "description": "The engine's standard policy baseline brought to v1 parity, applied to the member policy of EVERY managed group (blank PolicyTemplate links here). Expiration: EndUser/activation max P1D, Admin-Assignment max P365D, Admin-Eligibility max P365D, all required. Enablement: MFA + Justification on EndUser-Assignment (activation) AND Admin-Eligibility; none on Admin-Assignment. Notification matches the Entra defaults. Carries NO Approval rule, so the engine never touches an approval rule it did not itself apply.",
+  "rules": {
+    "Expiration": {
+      "EndUser_Assignment": { "maximumDuration": "P1D",   "isExpirationRequired": true },
+      "Admin_Assignment":   { "maximumDuration": "P365D", "isExpirationRequired": true },
+      "Admin_Eligibility":  { "maximumDuration": "P365D", "isExpirationRequired": true }
+    },
+    "Enablement": {
+      "EndUser_Assignment": ["MultiFactorAuthentication", "Justification"],
+      "Admin_Eligibility":  ["MultiFactorAuthentication", "Justification"],
+      "Admin_Assignment":   []
+    }
+  }
 }

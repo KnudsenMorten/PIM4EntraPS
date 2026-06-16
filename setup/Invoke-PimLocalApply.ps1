@@ -10,16 +10,21 @@
     Runs for ONE tenant, using that tenant's per-tenant engine SPN (cert auth):
       1. Read pim.LocalAdmins from the tenant's local SQL store. SQL access
          runs in a CHILD powershell.exe (the SqlServer module's bundled
-         Azure.Core breaks Connect-MgGraph app-only if loaded in-process --
-         same isolation Invoke-PimMspFanout uses).
-      2. Connect-MgGraph app-only with the engine SPN + certificate.
-      3. Resolve the tenant default domain -> per-tenant UPNs.
-      4. Build an Account-Definitions CSV from the local rows and run the real
-         engine (CreateUpdate-Accounts-From-file-CSV -OnlyID).
+         Azure.Core would break app-only Graph auth if loaded in-process).
+      2. Authenticate app-only over PURE REST with the engine SPN +
+         certificate (PIM-Rest / Invoke-PimGraph) -- no Microsoft.Graph module.
+      3. Resolve the tenant default domain over REST -> per-tenant UPNs.
+      4. Provision the ID accounts over PURE REST (Invoke-PimRestAccountApply ->
+         New-PimRestAdminAccount). Set $global:PIM_UseGraphSdk = $true to fall
+         back to the legacy Graph-SDK engine
+         (CreateUpdate-Accounts-From-file-CSV -OnlyID).
 
     Local IT is autonomous: every Owner=Local row provisions, any Purpose
     (incl. HighPriv) -- no MSP request. The MSP baseline is a separate apply
     (the fan-out / pulled bundle); this script is the LOCAL half.
+
+    The parent process is now module-free (pure REST). The SQL read child still
+    uses Az/SqlServer by design (the Azure.Core isolation rule).
 
 .PARAMETER WhatIfMode
     Default ON: connect + plan only. -WhatIfMode:$false provisions for real.
@@ -35,6 +40,11 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+
+# Pure-REST auth + directory reads + account write (no Microsoft.Graph module).
+$shared = Join-Path (Split-Path -Parent $PSScriptRoot) 'engine\_shared'
+. (Join-Path $shared 'PIM-Rest.ps1')
+. (Join-Path $shared 'PIM-AccountRest.ps1')
 
 # Read the local SQL store in a CHILD process (Azure.Core isolation), as the
 # tenant SPN (Entra-only DB auth).
@@ -72,9 +82,16 @@ $rows = @($store.rows)
 Write-Host "  local store: $($store.server) / $LocalSqlDatabase  ($($rows.Count) Owner=Local admin(s))"
 if ($rows.Count -eq 0) { Write-Host "  nothing to apply."; return }
 
-Disconnect-MgGraph -ErrorAction SilentlyContinue | Out-Null
-Connect-MgGraph -ClientId $AppId -TenantId $TenantId -CertificateThumbprint $CertificateThumbprint -NoWelcome -ErrorAction Stop
-$domain = (Get-MgDomain -All | Where-Object { $_.IsDefault }).Id
+# Pure-REST app-only auth: point PIM-Rest at this tenant's SPN + cert.
+$global:PIM_TenantId         = $TenantId
+$global:PIM_ClientId         = $AppId
+$global:PIM_CertThumbprint   = $CertificateThumbprint
+$global:PIM_UseManagedIdentity = $false
+$global:PIM_Interactive        = $false
+$null = Get-PimRestToken -Resource graph -TenantId $TenantId -ClientId $AppId -CertThumbprint $CertificateThumbprint -Force
+Write-Host "  authenticated app-only over REST (clientId $AppId)" -ForegroundColor Green
+$domain = Get-PimRestDefaultDomain
+if (-not $domain) { throw "cannot resolve the tenant default domain over REST." }
 Write-Host "  default domain: $domain"
 
 $csvRows = foreach ($a in $rows) {
@@ -92,21 +109,31 @@ foreach ($r in $csvRows) { Write-Host ("  plan: {0,-22} {1,-9} -> {2}" -f $r.Use
 
 if ($WhatIfMode) { Write-Host "`n  (WhatIf) no changes made." -ForegroundColor Yellow; return }
 
-$tmpCsv = Join-Path $env:TEMP ("pim-localapply-$TenantId.csv")
-$csvRows | Export-Csv -Path $tmpCsv -Delimiter ';' -Encoding UTF8 -NoTypeInformation
-try {
-    if (-not (Get-Command CreateUpdate-Accounts-From-file-CSV -ErrorAction SilentlyContinue)) {
-        Import-Module (Join-Path (Split-Path -Parent $PSScriptRoot) 'engine\_shared\PIM-Functions.psm1') -Force -DisableNameChecking
+# LIVE: provision the ID accounts. Default = pure REST writer; opt into the
+# legacy Graph-SDK engine only when $global:PIM_UseGraphSdk = $true (e.g. for
+# the EXO Set-Mailbox forwarding path or the AD/hybrid branch).
+if ($global:PIM_UseGraphSdk) {
+    Write-Host "  [legacy] PIM_UseGraphSdk=`$true -- using the Graph-SDK engine path." -ForegroundColor DarkYellow
+    $tmpCsv = Join-Path $env:TEMP ("pim-localapply-$TenantId.csv")
+    $csvRows | Export-Csv -Path $tmpCsv -Delimiter ';' -Encoding UTF8 -NoTypeInformation
+    try {
+        if (-not (Get-Command CreateUpdate-Accounts-From-file-CSV -ErrorAction SilentlyContinue)) {
+            Import-Module (Join-Path $shared 'PIM-Functions.psm1') -Force -DisableNameChecking
+        }
+        $global:PIM_TenantRing = 2
+        $global:DefaultDomainUPN = $domain
+        $global:WhatIfMode = $false
+        CreateUpdate-Accounts-From-file-CSV -AccountsDefinitionFile $tmpCsv -OnlyID
+    } finally {
+        Remove-Item $tmpCsv -Force -ErrorAction SilentlyContinue
+        $global:DefaultDomainUPN = $null
     }
-    $global:PIM_TenantRing = 2
-    $global:DefaultDomainUPN = $domain
-    $global:WhatIfMode = $false
-    CreateUpdate-Accounts-From-file-CSV -AccountsDefinitionFile $tmpCsv -OnlyID
-    if (Get-Command Write-PimAuditEvent -ErrorAction SilentlyContinue) {
-        Write-PimAuditEvent -Action 'local.apply' -Target $TenantId -After @{ admins = @($csvRows | ForEach-Object { $_.UserPrincipalName }) }
-    }
-    Write-Host "`n  LIVE local apply done ($($csvRows.Count) account(s))." -ForegroundColor Green
-} finally {
-    Remove-Item $tmpCsv -Force -ErrorAction SilentlyContinue
-    $global:DefaultDomainUPN = $null
+} else {
+    $applied = @(Invoke-PimRestAccountApply -Rows $csvRows)
+    $bad = @($applied | Where-Object { "$($_.Action)" -like 'failed:*' })
+    if ($bad.Count) { throw ("{0} of {1} account(s) failed: {2}" -f $bad.Count, $applied.Count, (($bad | ForEach-Object { "$($_.Upn) ($($_.Action))" }) -join '; ')) }
 }
+if (Get-Command Write-PimAuditEvent -ErrorAction SilentlyContinue) {
+    Write-PimAuditEvent -Action 'local.apply' -Target $TenantId -After @{ admins = @($csvRows | ForEach-Object { $_.UserPrincipalName }) }
+}
+Write-Host "`n  LIVE local apply done ($($csvRows.Count) account(s))." -ForegroundColor Green

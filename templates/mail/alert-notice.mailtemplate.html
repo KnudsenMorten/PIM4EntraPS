@@ -1,0 +1,19 @@
+<!-- subject: [PIM Alert] {{AlertTitle}} -->
+<!-- tokens: AlertTitle, AlertEvent, AlertDetail, AlertTab, TenantName, Instance, WhenUtc -->
+<!-- Sent to the alerting recipients configured in the Manager (Home/Settings -> Alerting) when a subscribed event fires (engine-run failure, drift, expiring access, break-glass use). To customize: copy to alert-notice.mailtemplate.custom.html and edit. -->
+<html>
+<body style="font-family:Segoe UI,Arial,sans-serif; color:#24292f; font-size:14px;">
+  <p>Hello,</p>
+  <p><b>A PIM4EntraPS alert was raised for your privileged-access estate.</b></p>
+  <table cellpadding="4" style="border-collapse:collapse; font-size:14px;">
+    <tr><td><b>Alert</b></td><td>{{AlertTitle}}</td></tr>
+    <tr><td><b>Event type</b></td><td>{{AlertEvent}}</td></tr>
+    <tr><td><b>Details</b></td><td>{{AlertDetail}}</td></tr>
+    <tr><td><b>Tenant</b></td><td>{{TenantName}}</td></tr>
+    <tr><td><b>Instance</b></td><td>{{Instance}}</td></tr>
+    <tr><td><b>When</b></td><td>{{WhenUtc}}</td></tr>
+  </table>
+  <p>Open the PIM Manager and review the <b>{{AlertTab}}</b> view for the full context. Every action is recorded in the engine audit log.</p>
+  <p style="color:#57606a;">You are receiving this because your address is configured as an alert recipient in the PIM Manager. Adjust recipients or which events alert under Home &rarr; Alerting (or the Settings tab).</p>
+</body>
+</html>

@@ -1,0 +1,3 @@
+GroupTag;RoleDefinitionName;AssignmentType;Action;AssignmentName;ScopeTags;MemberScope;TierLevel;Plane;PermissionScope
+Intune-HelpDeskOperator-L2;Help Desk Operator;Active;Assign;PIM4EntraPS - Help Desk Operator;Default;Tagged;T1;WDP;Tagged
+Intune-EndpointSecurityManager-L3;Endpoint Security Manager;Active;Assign;PIM4EntraPS - Endpoint Security Manager;;All;T1;WDP;Tenant

@@ -79,9 +79,14 @@ if (-not $global:PIM_SqlDatabase) { throw "Engine config missing: set PIM_SqlDat
 . "$shared\PIM-Rest.ps1"
 . "$shared\PIM-SqlStore.ps1"
 . "$shared\PIM-ChangeQueue.ps1"
+. "$shared\PIM-PermissionWizard.ps1"      # naming helpers (ConvertTo-PimNameSegment / New-PimPermissionGroupName / scope-depth+plane) for discovery
+. "$shared\PIM-AzureDiscovery.ps1"        # Azure scope reconcile planner (Power BI discovery mirrors its shape)
+. "$shared\PIM-Discovery.ps1"             # Power BI / service-role / auto-map / delta discovery layer (REST-only)
 . "$shared\PIM-ContextBuilder.ps1"
 . "$shared\PIM-EngineCore.ps1"
+. "$shared\PIM-DisableGuard.ps1"                # account-disable circuit breaker (incident 2026-06-15)
 . "$shared\PIM-Notify.ps1"                      # mail notifications (REST sendMail)
+. "$shared\PIM-HybridAd.ps1"                    # on-prem AD/gMSA-sMSA PLANNER + hybrid-worker seam (on-prem write is worker-only)
 . "$shared\PIM-EngineProviders.ps1"
 . "$config\PIM4EntraPS.Filters.locked.ps1"     # $global:PIM_Filters (candidate filters)
 Register-PimDefaultEngineProviders
@@ -124,6 +129,17 @@ if (-not $env:PIM_SkipPreflight) {
 }
 
 $res = Invoke-PimEngine -Scope $Scope -Mode $Mode -WhatIf:$WhatIf -Prune:$Prune -FromQueue:$FromQueue
+
+# --- discovery sweep + per-type auto-create policy (REQUIREMENTS §8) ------------
+# Run on a normal full/delta sweep (NOT a commit-triggered -FromQueue run, which only
+# drains the queue). New resources of a type whose policy = 'auto' are enqueued as a
+# Create on the SAME change queue (applied by the next/commit run); 'pending' stages a
+# desired row for review; 'flag' (the default for every type) only logs the discovery.
+# Best-effort: a discovery failure never fails the engine run.
+if (-not $FromQueue) {
+    try { [void](Invoke-PimEngineDiscoverySweep -WhatIf:$WhatIf -ConnectionString $global:PIM_EngineSqlCs) }
+    catch { Write-Warning "  [discovery] sweep failed (non-fatal): $($_.Exception.Message)" }
+}
 
 $tot = [pscustomobject]@{ create=0; update=0; remove=0; applied=0; skipped=0; errors=0 }
 foreach ($r in @($res)) { $tot.create+=$r.create; $tot.update+=$r.update; $tot.remove+=$r.remove; $tot.applied+=$r.applied; $tot.skipped+=([int]$r.skipped); $tot.errors+=$r.errors }
