@@ -1,0 +1,20 @@
+<!-- subject: Tier 0/1 privileged-access report{{TenantLabel}} ({{Date}}) -->
+<!-- tokens: TenantLabel, T0Count, T1Count, TotalUsers, ReportRows, Date -->
+<!-- Periodic report of every user holding Tier 0 / Tier 1 permissions, with their highest
+     tier, the privilege level(s) they hold and how many grants. To customize: copy this file
+     to tier-report.mailtemplate.custom.html and edit. -->
+<html>
+<body style="font-family:Segoe UI,Arial,sans-serif; color:#24292f; font-size:14px;">
+  <p>Hello,</p>
+  <p>This is the current Tier 0 / Tier 1 privileged-access report. <b>{{TotalUsers}}</b> user(s) hold
+     tier-0 or tier-1 permissions (<b>{{T0Count}}</b> at Tier 0, <b>{{T1Count}}</b> at Tier 1).</p>
+  <table cellpadding="6" style="border-collapse:collapse; font-size:14px; border:1px solid #d0d7de;">
+    <tr style="background:#f6f8fa;">
+      <th align="left">User</th><th align="left">Highest tier</th><th align="left">Level(s)</th><th align="left">Grants</th>
+    </tr>
+    {{ReportRows}}
+  </table>
+  <p style="color:#57606a;">Tier and level are derived from the assigned permission groups. Review any
+     unexpected Tier 0/1 holder with your security operations team.</p>
+</body>
+</html>

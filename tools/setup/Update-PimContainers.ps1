@@ -26,18 +26,48 @@
 [CmdletBinding(SupportsShouldProcess)]
 param(
     [Parameter(Mandatory)][string]$ImageTag,
-    [string]$ResourceGroup = 'rg-pim-manager-web',
-    [string]$AcrName       = 'acrsecurityinsight',
+    [Parameter(Mandatory)][string]$ResourceGroup,
+    [Parameter(Mandatory)][string]$AcrName,
     [string]$ImageRepo     = 'pim-manager',
     [string[]]$Apps        = @('ca-pim-manager','ca-pim-scheduler','ca-pim-engine','ca-pim-connector','ca-pim-deltaqueue','ca-pim-discovery'),
     [switch]$SkipBuild,
-    [string]$Rollback      # revision NAME to reactivate (rollback mode; ignores ImageTag/build)
+    [string]$Rollback,     # revision NAME to reactivate (rollback mode; ignores ImageTag/build)
+    [switch]$SkipSmoke     # opt OUT of the post-deploy GUI smoke gate (NOT recommended)
 )
 $ErrorActionPreference = 'Stop'
 $here = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent $MyInvocation.MyCommand.Path }
+$solRoot = Split-Path -Parent (Split-Path -Parent $here)        # ...\PIM4EntraPS
 $repoRoot = (Resolve-Path (Join-Path $here '..\..\..\..')).Path   # AutomateIT repo root
 $image = "$AcrName.azurecr.io/$ImageRepo`:$ImageTag"
 function Step($m){ Write-Host "==> $m" -ForegroundColor Cyan }
+
+. "$here\_PimSetupShared.ps1"
+Show-PimSetupBanner -ScriptName 'Update-PimContainers' -SolutionRoot $solRoot
+
+# Post-deploy GUI smoke gate. After ca-pim-manager rolls to the new image we run the live
+# hosted smoke (tests/live/Test-PimManagerHostedSmoke.ps1) and FAIL the deploy if the GUI
+# is broken — exactly the symptoms that shipped "green" before: render mode 'static
+# (read-only)' instead of SQL, GET /api/active-assignments 500, empty tenant cache,
+# "Templates need server mode", read-only GUI. A deploy is NOT "done" until this passes.
+# The smoke self-skips cleanly (exit 0) when az is unavailable / not logged in.
+function Invoke-ManagerSmokeGate {
+    param([string]$RepoRoot, [string[]]$RolledApps)
+    if (-not $PSCmdlet.ShouldProcess('ca-pim-manager','post-deploy GUI smoke gate')) { return }  # no live probe under -WhatIf
+    if ($SkipSmoke) { Write-Host "==> -SkipSmoke set: skipping post-deploy GUI smoke gate (NOT recommended)." -ForegroundColor Yellow; return }
+    if ('ca-pim-manager' -notin $RolledApps) { return }  # gate only when the Manager was actually rolled
+    $smoke = Join-Path $RepoRoot 'SOLUTIONS/PIM4EntraPS/tests/live/Test-PimManagerHostedSmoke.ps1'
+    if (-not (Test-Path -LiteralPath $smoke)) {
+        Write-Host "::warning:: post-deploy GUI smoke not found at $smoke -- cannot gate the deploy." -ForegroundColor Yellow
+        return
+    }
+    Step "Post-deploy GUI smoke gate (Test-PimManagerHostedSmoke.ps1)"
+    & $smoke
+    $code = $LASTEXITCODE
+    if ($code -ne 0) {
+        throw "Update-PimContainers: post-deploy GUI smoke FAILED (exit $code). The hosted Manager is broken (render mode / active-assignments / tenant cache / read-write). Roll back with -Rollback <oldRevision>."
+    }
+    Write-Host "==> Post-deploy GUI smoke gate PASSED (or self-skipped cleanly)." -ForegroundColor Green
+}
 
 # only act on apps that actually exist
 $existing = @($Apps | Where-Object { az containerapp show -g $ResourceGroup -n $_ --query name -o tsv 2>$null })
@@ -52,7 +82,10 @@ if ($Rollback) {
             Write-Host "  $app -> $rev (100%)" -ForegroundColor Green
         }
     }
-    Step 'Rollback done.'; return
+    Step 'Rollback done.'
+    # A rollback is only "good" if the rolled-back Manager actually serves a healthy GUI.
+    Invoke-ManagerSmokeGate -RepoRoot $repoRoot -RolledApps $existing
+    return
 }
 
 if (-not $SkipBuild) {
@@ -72,4 +105,11 @@ foreach ($app in $existing) {
         Write-Host "  $app new revision: $rev" -ForegroundColor Green
     }
 }
-Step "Done. All apps on $ImageTag (zero-downtime rolling revisions; rollback with -Rollback <oldRevision>)."
+Step "All apps rolled to $ImageTag (zero-downtime rolling revisions)."
+
+# GATE: a deploy is not "done" until the hosted Manager GUI smoke passes. This FAILS the
+# script (non-zero exit) if the live GUI is broken, so a broken deploy can't be reported
+# as success. Roll back with -Rollback <oldRevision> if it fails.
+Invoke-ManagerSmokeGate -RepoRoot $repoRoot -RolledApps $existing
+
+Step "Done. All apps on $ImageTag and post-deploy GUI smoke gate passed (rollback with -Rollback <oldRevision>)."

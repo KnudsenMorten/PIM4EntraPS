@@ -1,0 +1,24 @@
+<!-- subject: PIM4EntraPS update {{Outcome}} ({{Source}}) -->
+<!--
+  update-outcome mail -- rendered + sent by Send-PimNotifyMail (engine/_shared/PIM-Notify.ps1),
+  the SAME mailer the notifications + synthetic-monitor path uses. Tokens are filled from
+  Get-PimNotifyPlan (engine/_shared/PIM-UpdateLifecycle.ps1). Drop a .custom.html sibling to
+  override the look without touching this file.
+-->
+<div style="font-family:Segoe UI,Arial,sans-serif;font-size:14px;color:#1b1b1b;max-width:640px">
+  <h2 style="margin:0 0 8px 0">PIM4EntraPS update &mdash; {{Outcome}}</h2>
+  <p style="margin:0 0 16px 0;color:#555">Severity: <b>{{Severity}}</b> &middot; Source: <b>{{Source}}</b> &middot; {{TimestampUtc}}</p>
+  <table style="border-collapse:collapse;width:100%">
+    <tr><td style="padding:6px 10px;border:1px solid #e0e0e0;background:#f6f6f6;width:200px"><b>What happened</b></td>
+        <td style="padding:6px 10px;border:1px solid #e0e0e0">{{WhatHappened}}</td></tr>
+    <tr><td style="padding:6px 10px;border:1px solid #e0e0e0;background:#f6f6f6"><b>Image tag</b></td>
+        <td style="padding:6px 10px;border:1px solid #e0e0e0">{{ImageTag}}</td></tr>
+    <tr><td style="padding:6px 10px;border:1px solid #e0e0e0;background:#f6f6f6"><b>GUI update required</b></td>
+        <td style="padding:6px 10px;border:1px solid #e0e0e0">{{GuiUpdate}}</td></tr>
+    <tr><td style="padding:6px 10px;border:1px solid #e0e0e0;background:#f6f6f6"><b>SQL update required</b></td>
+        <td style="padding:6px 10px;border:1px solid #e0e0e0">{{SqlUpdate}}</td></tr>
+    <tr><td style="padding:6px 10px;border:1px solid #e0e0e0;background:#f6f6f6"><b>Error detail</b></td>
+        <td style="padding:6px 10px;border:1px solid #e0e0e0">{{ErrorDetail}}</td></tr>
+  </table>
+  <p style="margin:16px 0 0 0;color:#777;font-size:12px">Automated update-lifecycle notification from the PIM4EntraPS update orchestrator.</p>
+</div>

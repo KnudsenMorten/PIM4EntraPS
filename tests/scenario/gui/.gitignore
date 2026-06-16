@@ -1,0 +1,8 @@
+node_modules/
+package-lock.json
+test-results/
+playwright-report/
+.manager.json
+.mgr-stdout.txt
+.mgr-stderr.txt
+.probe*.json

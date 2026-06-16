@@ -85,14 +85,25 @@ function Get-PimDesiredRows {
     # errored silently -> 0 desired (the engine appeared to do nothing). Resolve the CS
     # from the engine CS / in-memory CS / build from $global:PIM_SqlServer+Database.
     param([Parameter(Mandatory)][string]$Entity)
+    # Resolution tracking: a disable pass must distinguish "desired set is genuinely
+    # empty (resolved, 0 rows)" from "the read FAILED, so we don't actually know the
+    # desired set" -- the latter must never be treated as authoritative. We stamp the
+    # outcome into $global:PIM_DesiredResolved[$Entity] so PIM-DisableGuard can refuse a
+    # disable when the read for an account-disable scope was not positively resolved.
+    if ($null -eq $global:PIM_DesiredResolved -or -not ($global:PIM_DesiredResolved -is [hashtable])) { $global:PIM_DesiredResolved = @{} }
     if (Get-Command Get-PimSqlRows -ErrorAction SilentlyContinue) {
         $cs = if ($global:PIM_EngineSqlCs) { $global:PIM_EngineSqlCs }
               elseif ($global:PIM_SqlConnectionString) { $global:PIM_SqlConnectionString }
               elseif ((Get-Command Get-PimSqlConnectionString -ErrorAction SilentlyContinue) -and ($global:PIM_SqlServer -or $global:PIM_SqlConnStringVault)) { Get-PimSqlConnectionString }
               else { $null }
-        if ($cs) { try { return @(Get-PimSqlRows -ConnectionString $cs -Entity $Entity) } catch { Write-Warning "  [engine] SQL desired read failed for '$Entity': $($_.Exception.Message)" } }
+        if ($cs) {
+            try { $rows = @(Get-PimSqlRows -ConnectionString $cs -Entity $Entity); $global:PIM_DesiredResolved[$Entity] = $true; return $rows }
+            catch { Write-Warning "  [engine] SQL desired read failed for '$Entity': $($_.Exception.Message)"; $global:PIM_DesiredResolved[$Entity] = $false; return @() }
+        }
     }
-    if ($global:PIM_DesiredRows -and $global:PIM_DesiredRows.ContainsKey($Entity)) { return @($global:PIM_DesiredRows[$Entity]) }
+    if ($global:PIM_DesiredRows -and $global:PIM_DesiredRows.ContainsKey($Entity)) { $global:PIM_DesiredResolved[$Entity] = $true; return @($global:PIM_DesiredRows[$Entity]) }
+    # No SQL store AND no in-memory rows for this entity -> we did not positively resolve it.
+    $global:PIM_DesiredResolved[$Entity] = $false
     return @()
 }
 
@@ -131,8 +142,14 @@ function Invoke-PimEngineScope {
     #      A partial/non-authoritative desired set must never silently disable real admins.
     #   2. Never prune a scope whose desired set is EMPTY -- an empty desired is almost always
     #      "this scope wasn't seeded / wasn't loaded", not "delete everything live".
+    #      EXCEPTION: a provider may set allowEmptyDesiredPrune=$true when an EMPTY desired
+    #      is intentional + authoritative AND its GetLive already restricts the live set to
+    #      exactly the items that should be removed (e.g. the AdminOffboarding scope, whose
+    #      live = only the memberships held by explicitly-offboarded admins). Such a scope is
+    #      a remove-only diff by construction, so the "0 desired = wrong store" heuristic
+    #      doesn't apply.
     $doPrune = ($Mode -eq 'Full') -and $Prune
-    if ($doPrune -and @($desired).Count -eq 0) {
+    if ($doPrune -and @($desired).Count -eq 0 -and -not $p.allowEmptyDesiredPrune) {
         Write-Host ("[engine] {0,-20} prune SKIPPED -- desired set is empty (refusing to remove {1} live items; not authoritative)" -f $Scope, @($live).Count) -ForegroundColor Yellow
         $doPrune = $false
     }
@@ -151,6 +168,30 @@ function Invoke-PimEngineScope {
         # NB: re-wrap each result in @() at the call site -- `& $sel` unwraps a single-element
         # array back to a scalar, and `.Count` on a lone PSCustomObject is $null under StrictMode -Off.
         $diff = [pscustomobject]@{ create = @(& $sel $diff.create); update = @(& $sel $diff.update); remove = @(& $sel $diff.remove); nochange = @($diff.nochange) }
+    }
+
+    # --- ACCOUNT-DISABLE CIRCUIT BREAKER (incident 2026-06-15) -----------------------
+    # A provider that disables ACCOUNTS via its remove path (accountEnabled=$false) is
+    # the highest-blast-radius operation in the engine: its GetLive is the whole tenant
+    # user population, so a wrong/empty desired set turns every scanned user into a
+    # "remove" -> mass account disable. Such a provider sets isAccountDisable=$true; we
+    # then gate its removals through PIM-DisableGuard (feature opt-in + positively-
+    # resolved desired set + blast-radius cap). On a trip we DROP every remove for this
+    # scope (disable NOTHING -- never a partial mass-disable), log loudly and alert.
+    # This runs for BOTH plan (WhatIf) and apply so a plan shows the abort too.
+    $script:__disableAborted = $null
+    if ($p.isAccountDisable -and @($diff.remove).Count -gt 0 -and (Get-Command Test-PimDisablePassAllowed -ErrorAction SilentlyContinue)) {
+        $resolvedFlag = $null
+        $ent = if ($p.entity) { "$($p.entity)" } else { "$Scope" }
+        if ($global:PIM_DesiredResolved -is [hashtable] -and $global:PIM_DesiredResolved.ContainsKey($ent)) { $resolvedFlag = [bool]$global:PIM_DesiredResolved[$ent] }
+        $decision = Test-PimDisablePassAllowed -ToDisable (@($diff.remove).Count) -Scanned (@($live).Count) -Desired $desired -DesiredResolved $resolvedFlag -FeatureOverride $p.disableFeatureOverride
+        if (-not $decision.allowed) {
+            if (Get-Command Write-PimDisableAbortAlert -ErrorAction SilentlyContinue) { Write-PimDisableAbortAlert -Scope $Scope -Decision $decision }
+            else { Write-Host ("[engine] {0}: account-disable ABORTED [{1}] -- {2}" -f $Scope, $decision.tripped, $decision.reason) -ForegroundColor Red }
+            # Drop ALL removes for this scope -- the safe outcome is to disable nothing.
+            $diff = [pscustomobject]@{ create = @($diff.create); update = @($diff.update); remove = @(); nochange = @($diff.nochange) }
+            $script:__disableAborted = $decision.tripped
+        }
     }
 
     # Progress logging (the old engine logged every step; customers expect to see it).
@@ -197,6 +238,7 @@ function Invoke-PimEngineScope {
         scope=$Scope; mode=$Mode; whatIf=[bool]$WhatIf
         create=$diff.create.Count; update=$diff.update.Count; remove=$diff.remove.Count; nochange=$diff.nochange.Count
         applied=$script:__applied; skipped=$script:__skipped; errors=$script:__errors; plan=$plan.ToArray(); ok=($script:__errors -eq 0)
+        disableAborted=$script:__disableAborted
     }
 }
 
@@ -212,6 +254,54 @@ function Get-PimEngineQueueChanges {
     if (-not $cs -or -not (Get-Command Get-PimSqlChangeQueue -ErrorAction SilentlyContinue)) { return @() }
     try { return @(Get-PimSqlChangeQueue -ConnectionString $cs -Status 'pending' | ForEach-Object { [pscustomobject]@{ Entity = "$($_.Entity)"; Key = "$($_.Key)" } }) }
     catch { Write-Warning "  [engine] queue read failed: $($_.Exception.Message)"; return @() }
+}
+
+function Invoke-PimEngineDiscoverySweep {
+    # End-of-run discovery sweep (REQUIREMENTS §8): enumerate Azure scopes + Power BI
+    # workspaces (LIVE, best-effort), reconcile against the existing definitions, and run
+    # each reconcile plan through the per-resource-type AUTO-CREATE policy
+    # ($global:PIM_DiscoveryAutoCreate; default 'flag' for every type). Emits
+    # resource.discovered / resource.autocreate run-log lines. 'pending' stages a desired
+    # row for review; 'auto' enqueues a Create on the normal change queue (no prune from
+    # this path). Skipped entirely when every type's policy is 'flag' (nothing to stage)
+    # AND there is nothing to flag -- but we always RUN it so new resources are at least
+    # flagged, matching the legacy resource.discovered behaviour. -WhatIf logs only.
+    [CmdletBinding()]
+    param([switch]$WhatIf, [string]$ConnectionString)
+    if (-not (Get-Command Resolve-PimDiscoveryPolicyPlan -ErrorAction SilentlyContinue)) { return }
+    $cs = if ("$ConnectionString".Trim()) { $ConnectionString }
+          elseif ($global:PIM_EngineSqlCs) { $global:PIM_EngineSqlCs }
+          elseif ($global:PIM_SqlConnectionString) { $global:PIM_SqlConnectionString }
+          else { $null }
+    $policyMap = $global:PIM_DiscoveryAutoCreate
+    Write-Host "[engine] discovery sweep        per-type auto-create policy (default flag)" -ForegroundColor Cyan
+    # Existing resource definitions (for reconcile create/rename/orphan). Best-effort.
+    $existing = @()
+    if ($cs -and (Get-Command Get-PimSqlRows -ErrorAction SilentlyContinue)) {
+        try { $existing = @(Get-PimSqlRows -ConnectionString $cs -Entity 'PIM-Definitions-Resources') } catch {}
+    }
+    # --- Azure subscriptions / management groups ---
+    if (Get-Command Get-PimLiveAzureScopes -ErrorAction SilentlyContinue) {
+        $az = @()
+        try { $az = @(Get-PimLiveAzureScopes -IncludeManagementGroups) } catch { Write-Warning "  [discovery] Azure scope enumeration failed: $($_.Exception.Message)" }
+        if (@($az).Count) {
+            try {
+                $plan = Get-PimAzureReconcilePlan -Discovered $az -Existing $existing
+                [void](Invoke-PimDiscoveryAutoCreate -Plan $plan -PolicyMap $policyMap -DefinitionEntity 'PIM-Definitions-Resources' -ConnectionString $cs -WhatIf:$WhatIf)
+            } catch { Write-Warning "  [discovery] Azure reconcile failed: $($_.Exception.Message)" }
+        }
+    }
+    # --- Power BI workspaces ---
+    if (Get-Command Get-PimLivePowerBiWorkspaces -ErrorAction SilentlyContinue) {
+        $ws = @()
+        try { $ws = @(Get-PimLivePowerBiWorkspaces) } catch { Write-Warning "  [discovery] Power BI enumeration failed: $($_.Exception.Message)" }
+        if (@($ws).Count) {
+            try {
+                $plan = Get-PimPowerBiReconcilePlan -Discovered $ws -Existing $existing
+                [void](Invoke-PimDiscoveryAutoCreate -Plan $plan -PolicyMap $policyMap -ResourceType 'PowerBIWorkspace' -DefinitionEntity 'PIM-Definitions-Resources' -ConnectionString $cs -WhatIf:$WhatIf)
+            } catch { Write-Warning "  [discovery] Power BI reconcile failed: $($_.Exception.Message)" }
+        }
+    }
 }
 
 function Invoke-PimEngine {

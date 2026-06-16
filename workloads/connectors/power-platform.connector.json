@@ -1,0 +1,43 @@
+{
+  "id": "power-platform",
+  "name": "Microsoft Power Platform (environment roles: Environment Admin / Maker)",
+  "auth": "powerplatform",
+  "perRowResource": true,
+  "status": "structure built -- BAP admin API environment roleAssignments (flat model: principal group + role). Pairs with PIM-PowerPlatformDiscovery.ps1 (environment auto-detect -> proposed PIM groups). Live-validation pending a Power Platform tenant where the engine SPN is a Power Platform admin + the BAP roleAssignments role-name/path confirmed against a live environment. In-app Dataverse SECURITY ROLES (a different surface) are covered by the separate 'dataverse' connector; this one is the ENVIRONMENT-level admin/maker grant.",
+  "permissionsNeeded": ["Power Platform: the engine SPN registered as a Power Platform administrator (or Dynamics 365 admin); 'Allow service principals' / tenant-isolation settings must permit SP role management; resource audience https://service.powerapps.com/"],
+  "prerequisites": {
+    "perRowResource": "Each row's Resource column = the Power Platform ENVIRONMENT name (the immutable id from discovery, e.g. 'Default-<tenantGuid>' or a 'xxxxxxxx-...' id). baseUrl/paths are token-expanded with it so one connector covers every environment.",
+    "tokenAdapter": "auth=powerplatform -> token for https://service.powerapps.com/ supplied via $global:PIM_WorkloadTokens['powerplatform'] (launcher-minted) or Get-AzAccessToken with that resource. (The discovery LISTING uses the BAP admin audience https://api.bap.microsoft.com.)",
+    "rolesAreEnvironmentRoles": "Power Platform environment roles are a fixed set (Environment Admin, Environment Maker) -- declared as a static roles array (no per-environment list API for the environment-level roles).",
+    "discoveryCompanion": "New environments are surfaced by PIM-PowerPlatformDiscovery.ps1 (propose-don't-auto-map); once a PIM group exists for the environment, a PIM-Assignments-Workloads row binds it here."
+  },
+  "roles": [
+    { "id": "EnvironmentAdmin", "name": "Environment Admin", "description": "Full administrative control of the environment" },
+    { "id": "EnvironmentMaker", "name": "Environment Maker", "description": "Create apps / flows / connections in the environment" }
+  ],
+  "api": {
+    "baseUrl": "https://api.bap.microsoft.com/providers/Microsoft.BusinessAppPlatform/scopes/admin/environments/{resource}",
+    "listAssignments": {
+      "method": "GET",
+      "path": "/roleAssignments?api-version=2021-04-01",
+      "itemsPath": "value",
+      "assignmentId": "name",
+      "roleId": "properties.roleDefinition.id",
+      "principalIds": "properties.principal.id"
+    },
+    "assign": {
+      "method": "POST",
+      "path": "/roleAssignments?api-version=2021-04-01",
+      "body": {
+        "properties": {
+          "roleDefinition": { "name": "{roleId}" },
+          "principal": { "id": "{groupId}", "type": "Group" }
+        }
+      }
+    },
+    "remove": {
+      "method": "DELETE",
+      "path": "/roleAssignments/{assignmentId}?api-version=2021-04-01"
+    }
+  }
+}

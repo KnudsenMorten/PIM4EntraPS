@@ -1,0 +1,16 @@
+{
+  "name": "pim4entraps-gui-tests",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Playwright browser-automation GUI test suite for the PIM4EntraPS Manager (tools/pim-manager). Drives the real GUI + /api against a LOCAL Manager instance seeded from a local SQLEXPRESS pim.Rows database. Each spec maps to a docs/FEATURES.md feature.",
+  "scripts": {
+    "test": "playwright test",
+    "test:headed": "playwright test --headed",
+    "test:ui": "playwright test --ui",
+    "report": "playwright show-report",
+    "install:browsers": "playwright install chromium"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.48.0"
+  }
+}

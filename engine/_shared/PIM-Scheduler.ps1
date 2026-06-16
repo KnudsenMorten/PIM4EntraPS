@@ -23,7 +23,7 @@ Set-StrictMode -Off
 # monitor detects an already-COMMITTED change in SQL -> 'engine-delta' recomputes +
 # reconciles that scope. **Queuing a change does NOT trigger anything** (it just stages
 # rows in the queue); the engine recalculates only at commit time.
-$script:PimJobTypes    = @('queue-apply','engine-delta','engine-full','msp-pull','reminders','escalations','discovery')
+$script:PimJobTypes    = @('queue-apply','engine-delta','engine-full','msp-pull','reminders','escalations','discovery','scheduled-creation','daily-summary','tier-report','servicenow-intake','sync-automateit','tenant-cache')
 $script:PimJobHandlers = @{}      # type -> scriptblock(job, nowUtc, whatIf)
 $script:PimSchedState  = $null    # in-memory fallback for state
 
@@ -56,8 +56,23 @@ function Get-PimDefaultJobSchedule {
         [pscustomobject]@{ name='discovery-azure';    type='discovery'; scope='Azure';   intervalMinutes=1440; enabled=$true  }
         [pscustomobject]@{ name='discovery-powerbi';  type='discovery'; scope='PowerBI'; intervalMinutes=1440; enabled=$true  }
         [pscustomobject]@{ name='reminders';          type='reminders';       intervalMinutes=720;  enabled=$true  }
+        [pscustomobject]@{ name='scheduled-creation'; type='scheduled-creation'; intervalMinutes=30; enabled=$true  }  # § 13: future-dated admin create + TAP
+        [pscustomobject]@{ name='servicenow-intake';  type='servicenow-intake'; intervalMinutes=10;   enabled=$true  }  # poll the store-and-forward drop store
+        [pscustomobject]@{ name='daily-summary';      type='daily-summary';   intervalMinutes=1440; enabled=$true  }
+        [pscustomobject]@{ name='tier-report';        type='tier-report';     intervalMinutes=1440; enabled=$true  }
+        # Tenant-list cache refresh: pull entra-roles / AUs / PIM-* groups / Azure
+        # scopes + RBAC roles into the per-instance cache so role-name validation,
+        # the autocomplete pickers, and the role-permission drill-down stay fresh
+        # WITHOUT relying on a Manager restart. 12h cadence keeps it inside the
+        # 24h freshness window the GUI badge + validator use. The Manager process
+        # is read-only on this cache; the SCHEDULER owns the refresh.
+        [pscustomobject]@{ name='tenant-cache';       type='tenant-cache';    intervalMinutes=720;  enabled=$true  }
         [pscustomobject]@{ name='full-reconcile';     type='engine-full';  scope='All';      intervalMinutes=1440; enabled=$true  }
         [pscustomobject]@{ name='msp-pull';           type='msp-pull';        intervalMinutes=240;  enabled=$false }  # MSP deployments only
+        # sync-automateit: controlled container auto-update (pull newest released image,
+        # roll safely, health-check, auto-rollback). DISABLED by default -- opt in per
+        # deployment (set enabled=$true in JobSchedule, or run the scheduled task on a VM).
+        [pscustomobject]@{ name='sync-automateit';    type='sync-automateit'; intervalMinutes=1440; enabled=$false }
     )
 }
 function Get-PimJobSchedule {
@@ -118,19 +133,41 @@ function Initialize-PimDefaultJobHandlers {
     # handlers are registered by the launcher/container as the REST engine matures.
     Register-PimJobHandler -Type 'reminders' -Handler {
         param($job,$now,$whatIf)
-        if (Get-Command Get-PimUpcomingExpirations -ErrorAction SilentlyContinue) {
+        if (Get-Command Build-PimLifecycleCalendar -ErrorAction SilentlyContinue) {
             $items = @(); if ($global:PIM_LifecycleItems) { $items = @($global:PIM_LifecycleItems) }
-            $up = @(Get-PimUpcomingExpirations -Items $items -NowUtc $now)
-            return [pscustomobject]@{ ran=$true; detail="upcoming=$($up.Count)"; whatIf=[bool]$whatIf }
+            $cal = Build-PimLifecycleCalendar -Items $items -NowUtc $now -NotifyLog ($(if ($global:PIM_LifecycleNotifyLog) { $global:PIM_LifecycleNotifyLog } else { @{} }))
+            # auto-renew AutoExtend items within the window -> change queue (commit later)
+            $renewals = @($cal.renewals)
+            return [pscustomobject]@{ ran=$true; detail="upcoming=$(@($cal.upcoming).Count) renew=$($renewals.Count)"; calendar=$cal; whatIf=[bool]$whatIf }
         }
-        return [pscustomobject]@{ ran=$false; detail='no-handler:Get-PimUpcomingExpirations' }
+        return [pscustomobject]@{ ran=$false; detail='no-handler:Build-PimLifecycleCalendar' }
     }
     Register-PimJobHandler -Type 'escalations' -Handler {
         param($job,$now,$whatIf)
-        if (Get-Command Get-PimDueEscalation -ErrorAction SilentlyContinue) {
-            return [pscustomobject]@{ ran=$true; detail='escalation-scan'; whatIf=[bool]$whatIf }
+        if (Get-Command Build-PimLifecycleCalendar -ErrorAction SilentlyContinue) {
+            $items = @(); if ($global:PIM_LifecycleItems) { $items = @($global:PIM_LifecycleItems) }
+            $cal = Build-PimLifecycleCalendar -Items $items -NowUtc $now -NotifyLog ($(if ($global:PIM_LifecycleNotifyLog) { $global:PIM_LifecycleNotifyLog } else { @{} }))
+            $due = @($cal.escalations)
+            if ($due.Count -and (Get-Command Send-PimLifecycleEscalations -ErrorAction SilentlyContinue)) {
+                $send = Send-PimLifecycleEscalations -Calendar $cal -RecipientResolver $global:PIM_LifecycleRecipientResolver -NotifyLog ($(if ($global:PIM_LifecycleNotifyLog) { $global:PIM_LifecycleNotifyLog } else { @{} })) -WhatIf:$whatIf
+                $global:PIM_LifecycleNotifyLog = $send.notifyLog
+            }
+            return [pscustomobject]@{ ran=$true; detail="escalations-due=$($due.Count)"; calendar=$cal; whatIf=[bool]$whatIf }
         }
-        return [pscustomobject]@{ ran=$false; detail='no-handler:Get-PimDueEscalation' }
+        return [pscustomobject]@{ ran=$false; detail='no-handler:Build-PimLifecycleCalendar' }
+    }
+    Register-PimJobHandler -Type 'scheduled-creation' -Handler {
+        param($job,$now,$whatIf)
+        # § 13: which future-dated admin rows are due to be created now (+ TAP).
+        # The container/launcher registers the REAL create handler; until then we
+        # compute the due set (pure) and record intent (no tenant write here).
+        if (Get-Command Get-PimDueScheduledCreations -ErrorAction SilentlyContinue) {
+            $rows = @(); if ($global:PIM_ScheduledAdminRows) { $rows = @($global:PIM_ScheduledAdminRows) }
+            $due = @(Get-PimDueScheduledCreations -Rows $rows -NowUtc $now)
+            $tap = @($due | Where-Object { $_.decision.tapDue }).Count
+            return [pscustomobject]@{ ran=$true; detail="create-due=$($due.Count) tap-due=$tap"; due=$due; whatIf=[bool]$whatIf }
+        }
+        return [pscustomobject]@{ ran=$false; detail='no-handler:Get-PimDueScheduledCreations' }
     }
     Register-PimJobHandler -Type 'queue-apply' -Handler {
         param($job,$now,$whatIf)
@@ -138,6 +175,75 @@ function Initialize-PimDefaultJobHandlers {
             return [pscustomobject]@{ ran=$true; detail='queue-apply-plan'; whatIf=[bool]$whatIf }
         }
         return [pscustomobject]@{ ran=$false; detail='no-handler:Get-PimQueueApplyPlan' }
+    }
+    # (1) Daily summary of delegation/assignment changes -- read this month's audit jsonl,
+    # fold into a 24h digest, render + send to the configured digest recipients.
+    Register-PimJobHandler -Type 'daily-summary' -Handler {
+        param($job,$now,$whatIf)
+        if (-not (Get-Command Get-PimDailySummary -ErrorAction SilentlyContinue)) { return [pscustomobject]@{ ran=$false; detail='no-handler:Get-PimDailySummary' } }
+        $events = @()
+        if ($global:PIM_SummaryEvents) { $events = @($global:PIM_SummaryEvents) }   # injected by the launcher; else read audit jsonl below
+        elseif ((Get-Command Get-PimOutputDir -ErrorAction SilentlyContinue)) {
+            try {
+                $f = Join-Path (Join-Path (Get-PimOutputDir) 'audit') ("pim-audit-{0}.jsonl" -f $now.ToString('yyyyMM'))
+                if (Test-Path -LiteralPath $f) { $events = @(Get-Content -LiteralPath $f -Encoding UTF8 | Where-Object { "$_".Trim() } | ForEach-Object { try { $_ | ConvertFrom-Json } catch {} }) }
+            } catch {}
+        }
+        $sum = Get-PimDailySummary -Events $events -NowUtc $now
+        $rcpts = @($global:PIM_DigestRecipients) | Where-Object { "$_".Trim() }
+        if ($rcpts.Count -gt 0 -and (Get-Command Send-PimNotifyMail -ErrorAction SilentlyContinue)) {
+            $tok = ConvertTo-PimDailySummaryTokens -Summary $sum -TenantLabel "$($global:PIM_TenantLabel)"
+            foreach ($r in $rcpts) { Send-PimNotifyMail -Type 'daily-summary' -Tokens $tok -Recipient "$r" -WhatIf:$whatIf | Out-Null }
+        }
+        return [pscustomobject]@{ ran=$true; detail="daily-summary changes=$($sum.totalChanges) recipients=$($rcpts.Count)"; whatIf=[bool]$whatIf }
+    }
+    # (2) Tier 0/1 report -- needs the assignment rows; launcher injects them in
+    # $global:PIM_TierReportAssignments (data query lives in the engine providers).
+    Register-PimJobHandler -Type 'tier-report' -Handler {
+        param($job,$now,$whatIf)
+        if (-not (Get-Command Get-PimTierZeroOneReport -ErrorAction SilentlyContinue)) { return [pscustomobject]@{ ran=$false; detail='no-handler:Get-PimTierZeroOneReport' } }
+        $rows = @(); if ($global:PIM_TierReportAssignments) { $rows = @($global:PIM_TierReportAssignments) }
+        $rep = Get-PimTierZeroOneReport -Assignments $rows
+        $rcpts = @($global:PIM_TierReportRecipients) | Where-Object { "$_".Trim() }
+        if ($rcpts.Count -gt 0 -and (Get-Command Send-PimNotifyMail -ErrorAction SilentlyContinue)) {
+            $tok = ConvertTo-PimTierReportTokens -Report $rep -TenantLabel "$($global:PIM_TenantLabel)"
+            foreach ($r in $rcpts) { Send-PimNotifyMail -Type 'tier-report' -Tokens $tok -Recipient "$r" -WhatIf:$whatIf | Out-Null }
+        }
+        return [pscustomobject]@{ ran=$true; detail="tier-report users=$($rep.Count) recipients=$($rcpts.Count)"; whatIf=[bool]$whatIf }
+    }
+    # (4) ServiceNow intake poll -- read the store-and-forward drop store, route each
+    # pending record (approve -> approval request/mail; auto-apply -> change queue). The
+    # poll itself never mutates; routing decisions are returned for the caller/engine to apply.
+    Register-PimJobHandler -Type 'servicenow-intake' -Handler {
+        param($job,$now,$whatIf)
+        if (-not (Get-Command Invoke-PimIntakePoll -ErrorAction SilentlyContinue)) { return [pscustomobject]@{ ran=$false; detail='no-handler:Invoke-PimIntakePoll' } }
+        $store = "$($global:PIM_IntakeStoreFile)".Trim()
+        if (-not $store) { return [pscustomobject]@{ ran=$false; detail='no PIM_IntakeStoreFile configured' } }
+        $decisions = @(Invoke-PimIntakePoll -StoreFile $store -NowUtc $now)
+        $approve = @($decisions | Where-Object { $_.route -eq 'approve' }).Count
+        $auto    = @($decisions | Where-Object { $_.route -eq 'auto-apply' }).Count
+        $reject  = @($decisions | Where-Object { $_.route -eq 'reject' }).Count
+        return [pscustomobject]@{ ran=$true; detail="intake poll approve=$approve auto-apply=$auto reject=$reject"; decisions=$decisions; whatIf=[bool]$whatIf }
+    }
+    # Tenant-list cache refresh. The real refresher (Invoke-PimTenantListRefresh)
+    # lives in tools/pim-manager/_tenantSync.ps1; the scheduler launcher dot-sources
+    # it so this default handler drives it. When it isn't loaded (e.g. a worker that
+    # doesn't carry the Manager files, or the offline unit tests) the handler is a
+    # clearly-logged no-op -- a tick never crashes and the gap is visible.
+    Register-PimJobHandler -Type 'tenant-cache' -Handler {
+        param($job,$now,$whatIf)
+        if (-not (Get-Command Invoke-PimTenantListRefresh -ErrorAction SilentlyContinue)) {
+            return [pscustomobject]@{ ran=$false; detail='no-handler:Invoke-PimTenantListRefresh (dot-source tools/pim-manager/_tenantSync.ps1)'; whatIf=[bool]$whatIf }
+        }
+        # WhatIf = intent only; the live refresh writes the per-instance cache files.
+        if ($whatIf) { return [pscustomobject]@{ ran=$true; detail='tenant-cache refresh (whatif: no write)'; whatIf=$true } }
+        $r = Invoke-PimTenantListRefresh -Quiet
+        if ($r.ok) {
+            $counts = @()
+            if ($r.results) { foreach ($k in $r.results.Keys) { $counts += ("{0}={1}" -f $k, $(if ($r.results[$k].ok) { $r.results[$k].count } else { 'ERR' })) } }
+            return [pscustomobject]@{ ran=$true; detail=("tenant-cache refreshed " + ($counts -join ' ')); result=$r; whatIf=$false }
+        }
+        return [pscustomobject]@{ ran=$false; detail=("tenant-cache refresh skipped: " + ("$($r.reason)").Trim()); result=$r; whatIf=$false }
     }
     foreach ($t in 'engine-delta','engine-full','msp-pull','discovery') {
         Register-PimJobHandler -Type $t -Handler {
@@ -148,6 +254,39 @@ function Initialize-PimDefaultJobHandlers {
             $scope = if ($job.PSObject.Properties['scope']) { "$($job.scope)" } else { 'All' }
             [pscustomobject]@{ ran=$false; detail="stub:$($job.type) scope=$scope (register a real handler)"; whatIf=[bool]$whatIf }
         }
+    }
+    # sync-automateit stub: the container/launcher wires the REAL handler via
+    # Register-PimSyncAutomateItHandler (it knows the orchestrator path). Until then the
+    # runner records intent only -- it NEVER auto-rolls a deployment from a bare stub.
+    Register-PimJobHandler -Type 'sync-automateit' -Handler {
+        param($job,$now,$whatIf)
+        [pscustomobject]@{ ran=$false; detail='stub:sync-automateit (register the real handler via Register-PimSyncAutomateItHandler)'; whatIf=[bool]$whatIf }
+    }
+}
+
+function Register-PimSyncAutomateItHandler {
+    <#
+      Wire the REAL sync-automateit handler. The container/launcher calls this with the path
+      to Invoke-PimSyncAutomateIT.ps1 so the in-container scheduler can drive the controlled
+      auto-update on its cadence. The handler runs the orchestrator with -Apply (the schedule
+      itself is the gate) and reports the outcome; WhatIf maps to a dry-run (no -Apply).
+        -OrchestratorPath : full path to tools/setup/Invoke-PimSyncAutomateIT.ps1
+    #>
+    param([Parameter(Mandatory)][string]$OrchestratorPath)
+    if (-not (Test-Path $OrchestratorPath)) { throw "sync-automateit orchestrator not found: $OrchestratorPath" }
+    $script:PimSyncOrchestratorPath = $OrchestratorPath
+    Register-PimJobHandler -Type 'sync-automateit' -Handler {
+        param($job,$now,$whatIf)
+        $orch = $script:PimSyncOrchestratorPath
+        if (-not $orch -or -not (Test-Path $orch)) {
+            return [pscustomobject]@{ ran=$false; detail='sync-automateit: orchestrator path not set'; whatIf=[bool]$whatIf }
+        }
+        # The schedule window IS the gate -> pass -Apply unless this is a WhatIf tick.
+        $psArgs = @('-NoProfile','-ExecutionPolicy','Bypass','-File', $orch)
+        if (-not $whatIf) { $psArgs += '-Apply' }
+        & powershell.exe @psArgs | Out-Null
+        $code = $LASTEXITCODE
+        [pscustomobject]@{ ran=$true; detail="sync-automateit run (exit=$code)"; ok=($code -eq 0); whatIf=[bool]$whatIf }
     }
 }
 
@@ -179,6 +318,490 @@ function Save-PimSchedulerState {
     $json = $State | ConvertTo-Json -Depth 8
     if (Get-Command Set-PimSetting -ErrorAction SilentlyContinue) { try { Set-PimSetting -Name 'SchedulerState' -Value $json | Out-Null; return } catch {} }
     if ($global:PIM_SchedulerStatePath) { try { Set-Content -Path $global:PIM_SchedulerStatePath -Value $json -Encoding UTF8 } catch {} }
+}
+
+# ---- run history + per-run logs (SQL settings -> file -> memory) -----------
+# The scheduler keeps a bounded ring of recent runs so the Manager GUI can show
+# "last run + result + log" and mark in-progress jobs. A run record:
+#   { runId; name; type; scope; ok; ran; detail; status(running|completed|failed);
+#     startedUtc; finishedUtc; durationMs; log(string) }
+# Persisted via the SAME store chain as scheduler state (shared across the
+# manager + scheduler processes): SQL pim.Settings 'JobRunHistory', else the JSON
+# sibling of $global:PIM_SchedulerStatePath, else in-memory.
+$script:PimRunHistory     = $null            # in-memory fallback
+$script:PimRunHistoryMax  = 50               # ring size PER job name
+
+function Get-PimRunHistoryPath {
+    if ("$($global:PIM_SchedulerStatePath)".Trim()) {
+        $dir = Split-Path -Parent $global:PIM_SchedulerStatePath
+        if (-not $dir) { $dir = '.' }
+        return (Join-Path $dir 'pim-scheduler-runs.json')
+    }
+    return $null
+}
+function Get-PimJobRunHistory {
+    # Returns an array of run records (newest first). Optional -Name filters to one job.
+    param([string]$Name)
+    $all = $null
+    # NOTE (PS 5.1): assign ConvertFrom-Json to a temp FIRST, then @($tmp). Wrapping the
+    # pipeline directly -- @(... | ConvertFrom-Json) -- collapses a JSON array into a
+    # single Object[] element (count 1) on Windows PowerShell. The temp forces enumeration.
+    if (Get-Command Get-PimSetting -ErrorAction SilentlyContinue) {
+        try { $v = Get-PimSetting -Name 'JobRunHistory'; if ($v) { $tmp = $v | ConvertFrom-Json; $all = @($tmp) } } catch {}
+    }
+    if ($null -eq $all) {
+        $p = Get-PimRunHistoryPath
+        if ($p -and (Test-Path -LiteralPath $p)) { try { $tmp = (Get-Content -LiteralPath $p -Raw -Encoding UTF8) | ConvertFrom-Json; $all = @($tmp) } catch {} }
+    }
+    if ($null -eq $all) { $all = @($script:PimRunHistory) }
+    $all = @(@($all) | Where-Object { $_ })
+    if ("$Name".Trim()) { $all = @($all | Where-Object { "$($_.name)" -eq "$Name" }) }
+    return @($all | Sort-Object { "$($_.startedUtc)" } -Descending)
+}
+function Save-PimJobRunHistory {
+    param([object[]]$Runs = @())
+    $script:PimRunHistory = @($Runs)
+    $json = (@($Runs) | ConvertTo-Json -Depth 8)
+    if ($null -eq $json) { $json = '[]' }
+    if (Get-Command Set-PimSetting -ErrorAction SilentlyContinue) { try { Set-PimSetting -Name 'JobRunHistory' -Value $json | Out-Null; return } catch {} }
+    $p = Get-PimRunHistoryPath
+    if ($p) { try { Set-Content -LiteralPath $p -Value $json -Encoding UTF8 } catch {} }
+}
+function Add-PimJobRunRecord {
+    # Append one finished run to the ring, trimming to $script:PimRunHistoryMax per job.
+    param([Parameter(Mandatory)][object]$Run)
+    $all = @(Get-PimJobRunHistory)
+    # drop any prior 'running' placeholder for the same runId (it's now finished)
+    if ("$($Run.runId)".Trim()) { $all = @($all | Where-Object { "$($_.runId)" -ne "$($Run.runId)" }) }
+    $all = @(@($Run) + $all)
+    # per-job trim
+    $kept = New-Object System.Collections.Generic.List[object]
+    $counts = @{}
+    foreach ($r in @($all | Sort-Object { "$($_.startedUtc)" } -Descending)) {
+        $n = "$($r.name)"; if (-not $counts.ContainsKey($n)) { $counts[$n] = 0 }
+        if ($counts[$n] -lt $script:PimRunHistoryMax) { $kept.Add($r); $counts[$n]++ }
+    }
+    Save-PimJobRunHistory -Runs $kept.ToArray()
+}
+function Get-PimJobRunLog {
+    # Read one run's log text by runId (for the GUI "Logs" button).
+    param([Parameter(Mandatory)][string]$RunId)
+    $rec = @(Get-PimJobRunHistory | Where-Object { "$($_.runId)" -eq "$RunId" }) | Select-Object -First 1
+    if (-not $rec) { return $null }
+    return [pscustomobject]@{ runId="$RunId"; name="$($rec.name)"; type="$($rec.type)"; status="$($rec.status)"; startedUtc="$($rec.startedUtc)"; finishedUtc="$($rec.finishedUtc)"; ok=[bool]$rec.ok; log="$($rec.log)" }
+}
+# ---- [M6] failure history + overdue detection + acknowledge (pure core) -----
+# These three are the Jobs-tab gaps called out in REQUIREMENTS.md s28 [M6]:
+#   * failure history  -- recent runs per job with pass/fail/when (not just the last)
+#   * overdue detection -- a job that SHOULD have fired by now but did not
+#   * acknowledge/clear -- mute a known failure so the operator can clear the signal
+# All are PURE (run records + a now-time injected) so they unit-test offline with no
+# network, no clock dependency, and no store. The Manager/scheduler wrappers below
+# (Get-PimJobFailureHistory / Set-PimRunAcknowledged) bind them to the run-history
+# store; the cores take their inputs as parameters.
+
+function Get-PimRunFailureHistory {
+    # PURE: given an array of run records (any order) for ONE OR MANY jobs, return the
+    # recent runs newest-first with a normalised { ok; failed; when; status } shape, and
+    # the failed subset surfaced. Acknowledged runs are still listed but flagged so the
+    # GUI can dim/hide them. -Take bounds the recent window; -Name filters to one job.
+    param(
+        [object[]]$Runs = @(),
+        [string]$Name,
+        [int]$Take = 10,
+        [string[]]$AcknowledgedRunIds = @()
+    )
+    $ackSet = @{}
+    foreach ($id in @($AcknowledgedRunIds)) { if ("$id".Trim()) { $ackSet["$id"] = $true } }
+    $list = @(@($Runs) | Where-Object { $_ })
+    if ("$Name".Trim()) { $list = @($list | Where-Object { "$($_.name)" -eq "$Name" }) }
+    # Only FINISHED runs count toward history (a 'running' placeholder is not a result).
+    $finished = @($list | Where-Object { "$($_.status)" -ne 'running' -and "$($_.finishedUtc)".Trim() })
+    $sorted = @($finished | Sort-Object { "$($_.startedUtc)" } -Descending)
+    if ($Take -gt 0) { $recent = @($sorted | Select-Object -First $Take) } else { $recent = $sorted }
+    $shaped = New-Object System.Collections.Generic.List[object]
+    foreach ($r in $recent) {
+        $rid = "$($r.runId)"
+        $shaped.Add([pscustomobject]@{
+            runId        = $rid
+            name         = "$($r.name)"
+            type         = "$($r.type)"
+            scope        = "$($r.scope)"
+            ok           = [bool]$r.ok
+            failed       = (-not [bool]$r.ok)
+            status       = "$($r.status)"
+            detail       = "$($r.detail)"
+            startedUtc   = "$($r.startedUtc)"
+            finishedUtc  = "$($r.finishedUtc)"
+            durationMs   = $(if ($r.PSObject.Properties['durationMs']) { [int]$r.durationMs } else { 0 })
+            trigger      = [bool]$r.trigger
+            reason       = "$($r.reason)"
+            acknowledged = [bool]($ackSet.ContainsKey($rid))
+        })
+    }
+    $fails  = @($shaped | Where-Object { $_.failed })
+    $unack  = @($fails | Where-Object { -not $_.acknowledged })
+    $runsArr = @($shaped.ToArray())
+    return [pscustomobject]@{
+        runs            = $runsArr
+        failures        = $fails
+        failureCount    = $fails.Count
+        unackedFailures = $unack.Count
+        total           = $runsArr.Count
+    }
+}
+
+function Get-PimJobOverdueState {
+    # PURE: is ONE job overdue? Overdue = enabled, has a cadence, and its NEXT scheduled
+    # run (last run + interval, or the persisted nextRunUtc) is in the past by more than a
+    # grace margin AND it is not currently running. A never-run job is NOT "overdue" -- it
+    # has simply never fired yet (the GUI surfaces that separately). Inputs are injected so
+    # this is fully testable: -LastRunUtc / -NextRunUtc / -NowUtc.
+    #   GraceMinutes = how late counts as overdue (default = max(1 cadence, 5 min)).
+    param(
+        [Parameter(Mandatory)][object]$Job,
+        [datetime]$NowUtc = [datetime]::UtcNow,
+        [string]$LastRunUtc,
+        [string]$NextRunUtc,
+        [bool]$InProgress = $false,
+        [int]$GraceMinutes = 0
+    )
+    $now = $NowUtc.ToUniversalTime()
+    $en = $true; if ($Job.PSObject.Properties['enabled']) { $en = [bool]$Job.enabled }
+    $iv = 0; if ($Job.PSObject.Properties['intervalMinutes']) { $iv = [int]$Job.intervalMinutes }
+    $result = [pscustomobject]@{ overdue = $false; expectedUtc = $null; overdueByMinutes = 0; reason = '' }
+    if (-not $en)    { $result.reason = 'disabled';  return $result }
+    if ($iv -le 0)   { $result.reason = 'on-demand'; return $result }   # no cadence -> never "overdue"
+    if ($InProgress) { $result.reason = 'running';   return $result }
+    # Resolve the EXPECTED fire time: prefer an explicit nextRunUtc; else last run + interval.
+    $expected = $null
+    $tmp = [datetime]::MinValue
+    if ("$NextRunUtc".Trim() -and [datetime]::TryParse("$NextRunUtc", [ref]$tmp)) {
+        $expected = $tmp.ToUniversalTime()
+    } elseif ("$LastRunUtc".Trim() -and [datetime]::TryParse("$LastRunUtc", [ref]$tmp)) {
+        $expected = $tmp.ToUniversalTime().AddMinutes($iv)
+    }
+    if ($null -eq $expected) { $result.reason = 'never-run'; return $result }   # no basis -> not overdue
+    $grace = if ($GraceMinutes -gt 0) { $GraceMinutes } else { [Math]::Max(5, $iv) }
+    $deadline = $expected.AddMinutes($grace)
+    if ($now -gt $deadline) {
+        $result.overdue = $true
+        $result.expectedUtc = $expected.ToString('o')
+        $result.overdueByMinutes = [int][Math]::Round(($now - $expected).TotalMinutes)
+        $result.reason = "expected by $($expected.ToString('o')), now overdue by $($result.overdueByMinutes)m"
+    } else {
+        $result.expectedUtc = $expected.ToString('o')
+        $result.reason = 'on-time'
+    }
+    return $result
+}
+
+# ---- acknowledge / clear (store-backed) -----------------------------------
+# A bounded set of acknowledged runIds, persisted via the SAME store chain as the run
+# history (SQL pim.Settings 'JobAcknowledgements', else the JSON sibling, else memory).
+# Acknowledging a failed run mutes its signal (failure/overdue badges) WITHOUT deleting
+# the run record, so the audit trail stays intact.
+$script:PimAckRunIds = $null
+
+function Get-PimAckPath {
+    if ("$($global:PIM_SchedulerStatePath)".Trim()) {
+        $dir = Split-Path -Parent $global:PIM_SchedulerStatePath
+        if (-not $dir) { $dir = '.' }
+        return (Join-Path $dir 'pim-scheduler-acks.json')
+    }
+    return $null
+}
+function Get-PimRunAcknowledgements {
+    # Returns an array of acknowledged runIds (strings).
+    $all = $null
+    if (Get-Command Get-PimSetting -ErrorAction SilentlyContinue) {
+        try { $v = Get-PimSetting -Name 'JobAcknowledgements'; if ($v) { $tmp = $v | ConvertFrom-Json; $all = @($tmp) } } catch {}
+    }
+    if ($null -eq $all) {
+        $p = Get-PimAckPath
+        if ($p -and (Test-Path -LiteralPath $p)) { try { $tmp = (Get-Content -LiteralPath $p -Raw -Encoding UTF8) | ConvertFrom-Json; $all = @($tmp) } catch {} }
+    }
+    if ($null -eq $all) { $all = @($script:PimAckRunIds) }
+    return @(@($all) | Where-Object { "$_".Trim() } | ForEach-Object { "$_" })
+}
+function Save-PimRunAcknowledgements {
+    param([string[]]$RunIds = @())
+    $clean = @(@($RunIds) | Where-Object { "$_".Trim() } | Select-Object -Unique | ForEach-Object { "$_" })
+    $script:PimAckRunIds = $clean
+    $json = (@($clean) | ConvertTo-Json -Depth 4)
+    if ($null -eq $json) { $json = '[]' }
+    # ConvertTo-Json on a single-element array yields a scalar; force an array literal.
+    if ($clean.Count -eq 1) { $json = '["' + $clean[0] + '"]' }
+    if (Get-Command Set-PimSetting -ErrorAction SilentlyContinue) { try { Set-PimSetting -Name 'JobAcknowledgements' -Value $json | Out-Null; return } catch {} }
+    $p = Get-PimAckPath
+    if ($p) { try { Set-Content -LiteralPath $p -Value $json -Encoding UTF8 } catch {} }
+}
+function Set-PimRunAcknowledged {
+    # Acknowledge ("clear") one run by runId, or un-acknowledge with -Clear. Acknowledging
+    # an already-acked run is idempotent. Returns the resulting ack set + whether it changed.
+    param([Parameter(Mandatory)][string]$RunId, [switch]$Clear)
+    $rid = "$RunId".Trim()
+    if (-not $rid) { return [pscustomobject]@{ ok = $false; error = 'runId is required' } }
+    $cur = @(Get-PimRunAcknowledgements)
+    $has = ($cur -contains $rid)
+    $changed = $false
+    if ($Clear) {
+        if ($has) { $cur = @($cur | Where-Object { $_ -ne $rid }); $changed = $true }
+    } else {
+        if (-not $has) { $cur = @($cur + $rid); $changed = $true }
+    }
+    # Bound the ack set so it can't grow forever (keep the most recent 500).
+    if ($cur.Count -gt 500) { $cur = @($cur | Select-Object -Last 500) }
+    if ($changed) { Save-PimRunAcknowledgements -RunIds $cur }
+    return [pscustomobject]@{ ok = $true; runId = $rid; acknowledged = (-not [bool]$Clear); changed = $changed; count = $cur.Count }
+}
+function Test-PimRunAcknowledged {
+    param([Parameter(Mandatory)][string]$RunId)
+    return (@(Get-PimRunAcknowledgements) -contains "$RunId".Trim())
+}
+function Get-PimJobFailureHistory {
+    # Store-backed convenience over Get-PimRunFailureHistory: reads the run-history ring +
+    # the ack store, returns the recent runs (newest-first) + the failed subset, with each
+    # run flagged acknowledged. -Name filters to one job; -Take bounds the window.
+    param([string]$Name, [int]$Take = 10)
+    $runs = @(Get-PimJobRunHistory -Name $Name)
+    $acks = @(Get-PimRunAcknowledgements)
+    return (Get-PimRunFailureHistory -Runs $runs -Name $Name -Take $Take -AcknowledgedRunIds $acks)
+}
+
+function Get-PimJobsStatus {
+    # Build the GUI view model: one row per configured job, joined to the latest run
+    # from the run history + the persisted scheduler state (last/next run). In-progress
+    # jobs (a 'running' record with no finishedUtc) sort to the TOP, then the rest by
+    # most-recent activity. Pure read -- never runs a job. -NowUtc lets tests inject time.
+    param([object[]]$Jobs, [datetime]$NowUtc = [datetime]::UtcNow)
+    $now = $NowUtc.ToUniversalTime()
+    $state = Get-PimSchedulerState
+    if (-not $Jobs) {
+        if ($state -and $state.jobs) { $Jobs = @($state.jobs) } else { $Jobs = Get-PimJobSchedule }
+    }
+    # The caller may pass the EFFECTIVE schedule (name/type/enabled/cadence only, no
+    # last/next-run stamps -- e.g. the Manager's /api/jobs). Build a by-name lookup of the
+    # PERSISTED scheduler state so we can fall back to its lastRunUtc/nextRunUtc stamps for
+    # overdue/next-run -- otherwise an effective-schedule row would never look overdue.
+    $stateByName = @{}
+    if ($state -and $state.jobs) { foreach ($sj in @($state.jobs)) { if ("$($sj.name)".Trim()) { $stateByName["$($sj.name)"] = $sj } } }
+    $history = @(Get-PimJobRunHistory)
+    $acks = @(Get-PimRunAcknowledgements)        # [M6] muted runIds (failure/overdue signals cleared)
+    $rows = New-Object System.Collections.Generic.List[object]
+    foreach ($j in @($Jobs)) {
+        $name = "$($j.name)"
+        $sj = $stateByName["$name"]              # persisted-state fallback for this job (may be $null)
+        $runs = @($history | Where-Object { "$($_.name)" -eq $name })
+        $last = $runs | Select-Object -First 1
+        $inProg = @($runs | Where-Object { "$($_.status)" -eq 'running' -or -not "$($_.finishedUtc)".Trim() }) | Select-Object -First 1
+        $en = $true; if ($j.PSObject.Properties['enabled']) { $en = [bool]$j.enabled }
+        $iv = 0; if ($j.PSObject.Properties['intervalMinutes']) { $iv = [int]$j.intervalMinutes }
+        $next = $null
+        if ($j.PSObject.Properties['nextRunUtc'] -and "$($j.nextRunUtc)".Trim()) { $next = "$($j.nextRunUtc)" }
+        elseif ($sj -and $sj.PSObject.Properties['nextRunUtc'] -and "$($sj.nextRunUtc)".Trim()) { $next = "$($sj.nextRunUtc)" }
+        $lastRun = $null
+        if ($last) { $lastRun = "$($last.startedUtc)" }
+        elseif ($j.PSObject.Properties['lastRunUtc'] -and "$($j.lastRunUtc)".Trim()) { $lastRun = "$($j.lastRunUtc)" }
+        elseif ($sj -and $sj.PSObject.Properties['lastRunUtc'] -and "$($sj.lastRunUtc)".Trim()) { $lastRun = "$($sj.lastRunUtc)" }
+        $status = 'idle'
+        if ($inProg) { $status = 'running' }
+        elseif ($last) { $status = "$($last.status)" }
+        # "Never run" = no run-history record AND no persisted lastRunUtc on the job.
+        # This is the normal state on a fresh deployment (or before the scheduler has
+        # ticked once) -- the row must NOT look dead. We synthesize a forward-looking
+        # nextRunUtc (now + cadence) so the GUI can say "no runs yet -- next run <time>"
+        # instead of an empty "-" for BOTH last and next run. The flag lets the GUI
+        # render the explicit message; the synthesized time is clearly marked so it is
+        # never mistaken for a scheduler-persisted next-run.
+        $neverRun = (-not $last -and -not $lastRun)
+        $nextSynth = $false
+        if (-not "$next".Trim() -and $en -and $iv -gt 0) {
+            $next = (Get-PimNextRunUtc -Job $j -FromUtc $now).ToString('o')
+            $nextSynth = $true
+        }
+        # [M6] OVERDUE: did this job miss its scheduled fire window? Compute against the
+        # PERSISTED next-run (job-carried or state-fallback) -- NOT the synthesized one,
+        # so a never-run job is not "overdue", only "never fired".
+        $persistNext = $null
+        if ($j.PSObject.Properties['nextRunUtc'] -and "$($j.nextRunUtc)".Trim()) { $persistNext = "$($j.nextRunUtc)" }
+        elseif ($sj -and $sj.PSObject.Properties['nextRunUtc'] -and "$($sj.nextRunUtc)".Trim()) { $persistNext = "$($sj.nextRunUtc)" }
+        $od = Get-PimJobOverdueState -Job $j -NowUtc $now -LastRunUtc "$lastRun" -NextRunUtc "$persistNext" -InProgress ([bool]$inProg)
+        # [M6] LAST-RUN ACK: is the latest FAILED run muted? + recent failure count.
+        $lastRunId = $(if ($last) { "$($last.runId)" } else { '' })
+        $lastAcked = ($lastRunId -and ($acks -contains $lastRunId))
+        $finishedRuns = @($runs | Where-Object { "$($_.status)" -ne 'running' -and "$($_.finishedUtc)".Trim() })
+        $recentWindow = @($finishedRuns | Sort-Object { "$($_.startedUtc)" } -Descending | Select-Object -First 10)
+        $recentFails  = @($recentWindow | Where-Object { -not [bool]$_.ok })
+        $unackedFails = @($recentFails | Where-Object { -not ($acks -contains "$($_.runId)") })
+        $rows.Add([pscustomobject]@{
+            name            = $name
+            type            = "$($j.type)"
+            scope           = $(if ($j.PSObject.Properties['scope']) { "$($j.scope)" } else { '' })
+            intervalMinutes = $iv
+            cadence         = (Format-PimCadence -IntervalMinutes $iv)
+            enabled         = $en
+            status          = $status
+            inProgress      = [bool]$inProg
+            neverRun        = [bool]$neverRun
+            lastRunUtc      = $lastRun
+            lastResult      = $(if ($last) { "$($last.detail)" } else { '' })
+            lastOk          = $(if ($last) { [bool]$last.ok } else { $null })
+            lastRan         = $(if ($last) { [bool]$last.ran } else { $null })
+            lastDurationMs  = $(if ($last) { [int]$last.durationMs } else { $null })
+            lastRunId       = $lastRunId
+            lastAcknowledged   = [bool]$lastAcked
+            runningRunId    = $(if ($inProg) { "$($inProg.runId)" } else { '' })
+            nextRunUtc      = $next
+            nextRunSynthesized = [bool]$nextSynth
+            overdue            = [bool]$od.overdue
+            overdueByMinutes   = [int]$od.overdueByMinutes
+            expectedRunUtc     = "$($od.expectedUtc)"
+            recentFailureCount = $recentFails.Count
+            unackedFailureCount = $unackedFails.Count
+        })
+    }
+    # in-progress first, then by last activity (newest first), then name
+    $sorted = @($rows | Sort-Object `
+        @{ Expression = { if ($_.inProgress) { 0 } else { 1 } } }, `
+        @{ Expression = { "$($_.lastRunUtc)" }; Descending = $true }, `
+        @{ Expression = { $_.name } })
+    return [pscustomobject]@{
+        jobs       = @($sorted)
+        generatedUtc = $now.ToString('o')
+        runningCount = @($rows | Where-Object { $_.inProgress }).Count
+        overdueCount = @($rows | Where-Object { $_.overdue }).Count
+        failingCount = @($rows | Where-Object { $_.unackedFailureCount -gt 0 }).Count
+        total        = $rows.Count
+    }
+}
+function Format-PimCadence {
+    param([int]$IntervalMinutes)
+    $m = [int]$IntervalMinutes
+    if ($m -le 0)       { return 'on-demand' }
+    if ($m -lt 60)      { return "every $m min" }
+    if ($m -eq 60)      { return 'hourly' }
+    if ($m -lt 1440)    { $h = [Math]::Round($m / 60.0, 1); return "every $h h" }
+    if ($m -eq 1440)    { return 'daily' }
+    $d = [Math]::Round($m / 1440.0, 1); return "every $d d"
+}
+function ConvertTo-PimRunLogText {
+    # Build a readable per-run log from a dispatch result object. Handlers may add a
+    # 'log' (string or string[]); otherwise we synthesize from detail + sub-results.
+    param([object]$Result, [object]$Job, [datetime]$StartedUtc)
+    $lines = New-Object System.Collections.Generic.List[string]
+    $lines.Add(("[{0}] job '{1}' (type={2}{3})" -f $StartedUtc.ToString('o'), "$($Job.name)", "$($Job.type)", $(if ($Job.PSObject.Properties['scope'] -and "$($Job.scope)".Trim()) { " scope=$($Job.scope)" } else { '' })))
+    if ($Result) {
+        $lines.Add("result.ok      = $([bool]$Result.ok)")
+        if ($Result.PSObject.Properties['detail']) { $lines.Add("detail         = $($Result.detail)") }
+        $inner = if ($Result.PSObject.Properties['result']) { $Result.result } else { $null }
+        if ($inner) {
+            if ($inner.PSObject.Properties['ran'])    { $lines.Add("ran            = $([bool]$inner.ran)") }
+            if ($inner.PSObject.Properties['whatIf']) { $lines.Add("whatIf         = $([bool]$inner.whatIf)") }
+            if ($inner.PSObject.Properties['detail'] -and "$($inner.detail)" -ne "$($Result.detail)") { $lines.Add("handler.detail = $($inner.detail)") }
+            if ($inner.PSObject.Properties['log'] -and $inner.log) { foreach ($l in @($inner.log)) { $lines.Add("$l") } }
+        }
+    }
+    return ($lines -join "`n")
+}
+function Write-PimJobRunRecord {
+    # Persist a finished run (called from the tick for every scheduled + trigger run).
+    # 'ran' reflects whether the handler actually did work (vs a logged no-op stub);
+    # 'status' is completed when the dispatch succeeded, failed otherwise.
+    param([Parameter(Mandatory)][object]$Job, [Parameter(Mandatory)][object]$Result, [datetime]$StartedUtc = [datetime]::UtcNow, [switch]$Trigger, [string]$Reason = '')
+    $fin = [datetime]::UtcNow
+    $inner = if ($Result.PSObject.Properties['result']) { $Result.result } else { $null }
+    $ran = $false; if ($inner -and $inner.PSObject.Properties['ran']) { $ran = [bool]$inner.ran }
+    $rec = [pscustomobject]@{
+        runId       = [guid]::NewGuid().ToString('N')
+        name        = "$($Job.name)"
+        type        = "$($Job.type)"
+        scope       = $(if ($Job.PSObject.Properties['scope']) { "$($Job.scope)" } else { '' })
+        ok          = [bool]$Result.ok
+        ran         = $ran
+        status      = $(if ($Result.ok) { 'completed' } else { 'failed' })
+        detail      = "$($Result.detail)"
+        trigger     = [bool]$Trigger
+        reason      = "$Reason"
+        startedUtc  = $StartedUtc.ToUniversalTime().ToString('o')
+        finishedUtc = $fin.ToString('o')
+        durationMs  = [int]([Math]::Max(0, ($fin - $StartedUtc.ToUniversalTime()).TotalMilliseconds))
+        log         = (ConvertTo-PimRunLogText -Result $Result -Job $Job -StartedUtc $StartedUtc.ToUniversalTime())
+    }
+    Add-PimJobRunRecord -Run $rec
+    return $rec
+}
+
+function Invoke-PimJobForceStart {
+    # FORCE-START ("Run now"): run ONE configured job immediately, off-cadence, and
+    # record it in the SAME run-history ring the scheduler + the Manager's /api/jobs
+    # read. Used by the GUI's per-row "Run now" button. Two records are written so the
+    # GUI sees the job MOVE: first a 'running' placeholder (no finishedUtc -> sorts to
+    # the TOP, live-tail-able), then -- after the handler returns -- the finished record
+    # under the SAME runId (Add-PimJobRunRecord drops the prior placeholder by runId).
+    # Resolves the job from the persisted schedule/state by name unless -Job is given.
+    # Honors handlers registered in THIS process; an unregistered type records a clear
+    # no-handler run rather than throwing (the gap stays visible, nothing crashes).
+    param(
+        [Parameter(Mandatory)][string]$Name,
+        [object]$Job,
+        [datetime]$NowUtc = [datetime]::UtcNow,
+        [switch]$WhatIf
+    )
+    $now = $NowUtc.ToUniversalTime()
+    if (-not $Job) {
+        $state = Get-PimSchedulerState
+        $catalog = if ($state -and $state.jobs) { @($state.jobs) } else { @(Get-PimJobSchedule) }
+        $Job = @($catalog | Where-Object { "$($_.name)" -eq "$Name" }) | Select-Object -First 1
+    }
+    if (-not $Job) { return [pscustomobject]@{ ok = $false; error = "no job named '$Name' in the schedule" } }
+    if ($script:PimJobHandlers.Count -eq 0) { Initialize-PimDefaultJobHandlers }
+
+    $runId = [guid]::NewGuid().ToString('N')
+    $started = $now
+    # (1) in-progress placeholder -> GUI shows it move to "running" at the top.
+    $placeholder = [pscustomobject]@{
+        runId       = $runId
+        name        = "$($Job.name)"
+        type        = "$($Job.type)"
+        scope       = $(if ($Job.PSObject.Properties['scope']) { "$($Job.scope)" } else { '' })
+        ok          = $true
+        ran         = $true
+        status      = 'running'
+        detail      = 'force-start: running ...'
+        trigger     = $true
+        reason      = 'force-start'
+        startedUtc  = $started.ToString('o')
+        finishedUtc = ''
+        durationMs  = 0
+        log         = ("[{0}] job '{1}' FORCE-START requested{2}" -f $started.ToString('o'), "$($Job.name)", $(if ($Job.PSObject.Properties['scope'] -and "$($Job.scope)".Trim()) { " scope=$($Job.scope)" } else { '' }))
+    }
+    Add-PimJobRunRecord -Run $placeholder
+
+    # (2) dispatch the real handler, then (3) replace the placeholder with the finished
+    # record under the same runId.
+    $res = Invoke-PimScheduledJob -Job $Job -NowUtc $now -WhatIf:$WhatIf
+    $fin = [datetime]::UtcNow
+    $inner = if ($res.PSObject.Properties['result']) { $res.result } else { $null }
+    $ran = $false; if ($inner -and $inner.PSObject.Properties['ran']) { $ran = [bool]$inner.ran }
+    $rec = [pscustomobject]@{
+        runId       = $runId
+        name        = "$($Job.name)"
+        type        = "$($Job.type)"
+        scope       = $(if ($Job.PSObject.Properties['scope']) { "$($Job.scope)" } else { '' })
+        ok          = [bool]$res.ok
+        ran         = $ran
+        status      = $(if ($res.ok) { 'completed' } else { 'failed' })
+        detail      = "$($res.detail)"
+        trigger     = $true
+        reason      = 'force-start'
+        startedUtc  = $started.ToString('o')
+        finishedUtc = $fin.ToString('o')
+        durationMs  = [int]([Math]::Max(0, ($fin - $started).TotalMilliseconds))
+        log         = (ConvertTo-PimRunLogText -Result $res -Job $Job -StartedUtc $started)
+    }
+    Add-PimJobRunRecord -Run $rec
+    return [pscustomobject]@{ ok = [bool]$res.ok; runId = $runId; name = "$($Job.name)"; type = "$($Job.type)"; status = $rec.status; detail = "$($res.detail)" }
 }
 
 # ---- on-demand triggers + change watermark --------------------------------
@@ -260,15 +883,30 @@ function Invoke-PimSchedulerTick {
         $lastWm = $wm
     }
 
+    # (a-sql) ON-DEMAND RECALC ON SQL CHANGE: read the live SQL data signature and
+    # enqueue an engine-delta when it changed since we last acted. Catches OUT-OF-BAND
+    # SQL writes (another MSP node, a direct SQL edit, the cutover import) that never
+    # bumped the in-process watermark above. No-op unless a SQL store is configured.
+    if (Get-Command Invoke-PimSqlChangeDetector -ErrorAction SilentlyContinue) {
+        $sqlCs = $null
+        if ("$($global:PIM_SqlConnectionString)".Trim()) { $sqlCs = "$($global:PIM_SqlConnectionString)" }
+        elseif ((Get-Command Get-PimSqlConnectionString -ErrorAction SilentlyContinue) -and ("$($global:PIM_SqlServer)".Trim() -or "$($global:PIM_SqlConnStringVault)".Trim())) {
+            try { $sqlCs = Get-PimSqlConnectionString } catch { $sqlCs = $null }
+        }
+        if ($sqlCs) { try { [void](Invoke-PimSqlChangeDetector -ConnectionString $sqlCs -Scope 'All' -Reason 'sql-change') } catch { } }
+    }
+
     # (b) TRIGGERS: run on-demand requests NOW (event-driven), then clear them.
     $triggers = @(Get-PimPendingTriggers)
     if ($triggers.Count) {
         foreach ($tg in $triggers) {
             $tjob = [pscustomobject]@{ name = "trigger:$($tg.type):$($tg.scope)"; type = "$($tg.type)"; scope = "$($tg.scope)"; enabled = $true }
+            $started = [datetime]::UtcNow
             $r = Invoke-PimScheduledJob -Job $tjob -NowUtc $now -WhatIf:$WhatIf
             $r | Add-Member -NotePropertyName trigger -NotePropertyValue $true -Force
             $r | Add-Member -NotePropertyName reason  -NotePropertyValue "$($tg.reason)" -Force
             $results.Add($r)
+            Write-PimJobRunRecord -Job $tjob -Result $r -StartedUtc $started -Trigger -Reason "$($tg.reason)" | Out-Null
         }
         Save-PimJobTriggers -Triggers @()
     }
@@ -276,8 +914,10 @@ function Invoke-PimSchedulerTick {
     # (c) SCHEDULED: run due jobs on their cadence; advance next-run.
     foreach ($j in @($Jobs)) {
         if (Test-PimJobDue -Job $j -NowUtc $now) {
+            $started = [datetime]::UtcNow
             $res = Invoke-PimScheduledJob -Job $j -NowUtc $now -WhatIf:$WhatIf
             $results.Add($res)
+            Write-PimJobRunRecord -Job $j -Result $res -StartedUtc $started | Out-Null
             $nr = (Get-PimNextRunUtc -Job $j -FromUtc $now).ToString('o')
             if ($j.PSObject.Properties['nextRunUtc']) { $j.nextRunUtc = $nr } else { $j | Add-Member -NotePropertyName nextRunUtc -NotePropertyValue $nr -Force }
             if ($j.PSObject.Properties['lastRunUtc']) { $j.lastRunUtc = $now.ToString('o') } else { $j | Add-Member -NotePropertyName lastRunUtc -NotePropertyValue $now.ToString('o') -Force }

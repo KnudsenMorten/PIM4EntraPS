@@ -1,0 +1,3 @@
+GroupTag;RoleDefinitionName;AssignmentType;Action;AssignmentName;DataSources;TierLevel;Plane;PermissionScope
+Defender-XDR-SecurityOperator-L3;Security Operator;Active;Assign;PIM4EntraPS - Security Operator;;T1;WDP;Tenant
+Defender-XDR-SecurityReader-L3;Security Reader;Active;Assign;PIM4EntraPS - Security Reader;;T1;WDP;Tenant

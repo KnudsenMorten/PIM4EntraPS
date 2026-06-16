@@ -1,5 +1,8 @@
 #Requires -Version 5.1
-#Requires -Modules Microsoft.Graph.Applications, Microsoft.Graph.Identity.SignIns, Microsoft.Graph.Authentication
+# NOTE: no #Requires -Modules. The WRITE path is pure Graph REST via PIM-Rest
+# (REQUIREMENTS §19). App-only (cert) deployment is fully module-free; the
+# Microsoft.Graph SDK is only loaded on demand for the interactive break-glass
+# sign-in (see _PimActivatorAuth.ps1) or when $global:PIM_UseGraphSdk is set.
 <#
 .SYNOPSIS
     Create the Entra app registration that the PIM Activator Edge extension
@@ -134,8 +137,29 @@ $script:PimActivatorAppOnly = [bool]($AppId -and $CertificateThumbprint)
 # Edge-forced PKCE sign-in, session probe/heal. One implementation for all
 # pim-activator deploy scripts.
 . (Join-Path $PSScriptRoot '_PimActivatorAuth.ps1')
+# REST-first write helpers (app reg / SPN / consent grant body builders +
+# Invoke-PaGraph routing). The backend's writes go through PIM-Rest by default.
+. (Join-Path $PSScriptRoot '_PimActivatorBackend.ps1')
 
-Show-PimActivatorBanner -ScriptName 'Deploy-PimActivatorBackend' -GraphModules 'Microsoft.Graph.Authentication', 'Microsoft.Graph.Applications', 'Microsoft.Graph.Identity.SignIns'
+# Auth-mode -> Graph data-plane routing (REQUIREMENTS §19):
+#   * App-only (cert): point PIM-Rest at the SPN cert + tenant, run module-free.
+#   * Interactive: keep the SDK session pipeline (Invoke-PaGraph issues raw REST
+#     through it). $global:PIM_UseGraphSdk stays the explicit opt-in fallback.
+if ($script:PimActivatorAppOnly) {
+    $global:PIM_UseGraphSdk    = $false
+    $global:PIM_TenantId       = $TenantId
+    $global:PIM_ClientId       = $AppId
+    $global:PIM_CertThumbprint = $CertificateThumbprint
+    Import-PaRestPlane
+}
+
+# Banner: only assert/load the Graph SDK when we will actually use it (interactive
+# sign-in or the explicit SDK opt-in). App-only REST runs need no Graph modules.
+if ($script:PimActivatorAppOnly -and -not (Test-PaUseGraphSdk)) {
+    Show-PimActivatorBanner -ScriptName 'Deploy-PimActivatorBackend (REST / app-only)'
+} else {
+    Show-PimActivatorBanner -ScriptName 'Deploy-PimActivatorBackend' -GraphModules 'Microsoft.Graph.Authentication', 'Microsoft.Graph.Applications', 'Microsoft.Graph.Identity.SignIns'
+}
 
 # ---------------------------------------------------------------------------
 # Connect (or verify) Microsoft Graph
@@ -147,11 +171,19 @@ $_requiredScopes = @(
     'DelegatedPermissionGrant.ReadWrite.All'
 )
 
-$ctx = Connect-PimActivatorGraph -RequiredScopes $_requiredScopes -TenantId $TenantId -UseEdge:([bool]$UseEdge) -AppId $AppId -CertificateThumbprint $CertificateThumbprint
-$TenantId = $ctx.TenantId
-
-Write-Host "Tenant   : $TenantId"  -ForegroundColor Cyan
-Write-Host "Signed-in: $($ctx.Account)" -ForegroundColor Cyan
+if ($script:PimActivatorAppOnly -and -not (Test-PaUseGraphSdk)) {
+    # Module-free app-only: PIM-Rest mints a cert-signed token; a cheap read
+    # proves the cert/SPN works before any write (parity with the SDK probe).
+    if (-not $TenantId) { throw "App-only sign-in requires -TenantId." }
+    try { Invoke-PaGraph -Method GET -Path '/applications?$top=1&$select=id' | Out-Null }
+    catch { throw "App-only Graph connect (REST) succeeded at token mint but a test read failed: $($_.Exception.Message)" }
+    Write-Host "Connected app-only (REST, no Graph SDK) as appId $AppId in tenant $TenantId." -ForegroundColor Green
+} else {
+    $ctx = Connect-PimActivatorGraph -RequiredScopes $_requiredScopes -TenantId $TenantId -UseEdge:([bool]$UseEdge) -AppId $AppId -CertificateThumbprint $CertificateThumbprint
+    $TenantId = $ctx.TenantId
+    Write-Host "Tenant   : $TenantId"  -ForegroundColor Cyan
+    Write-Host "Signed-in: $($ctx.Account)" -ForegroundColor Cyan
+}
 Write-Host ""
 
 # ---------------------------------------------------------------------------
@@ -258,7 +290,7 @@ function Resolve-FirstPartySp {
 
     function Get-RawSpByAppId([string]$Id) {
         try {
-            Invoke-MgGraphRequest -Method GET -Uri "v1.0/servicePrincipals(appId='$Id')"
+            Invoke-PaGraph -Method GET -Path "/servicePrincipals(appId='$Id')"
         } catch {
             if ("$_" -match 'Request_ResourceNotFound|ResourceNotFound|does not exist|404') { return $null }
             throw
@@ -269,7 +301,7 @@ function Resolve-FirstPartySp {
     if (-not $raw) {
         Write-Host "  $Name service principal not present in tenant -- instantiating it (appId $AppId)..." -ForegroundColor Yellow
         try {
-            Invoke-MgGraphRequest -Method POST -Uri 'v1.0/servicePrincipals' -Body @{ appId = $AppId } | Out-Null
+            Invoke-PaGraph -Method POST -Path '/servicePrincipals' -Body @{ appId = $AppId } | Out-Null
         } catch {
             throw "$Name service principal (appId $AppId) could not be instantiated in tenant ${TenantId}: $($_.Exception.Message)"
         }
@@ -325,12 +357,9 @@ $needed = @(
     # typing the GUID. Read-only is correct here -- we never write app regs.
     'Application.Read.All'
 )
-$scopeMap = @{}
+$scopeMap = Resolve-PaGraphScopeIds -Oauth2PermissionScopes $graphSp.Oauth2PermissionScopes -Names $needed
 foreach ($name in $needed) {
-    $scope = $graphSp.Oauth2PermissionScopes | Where-Object { $_.Value -eq $name }
-    if (-not $scope) { throw "Delegated scope '$name' not found on Microsoft Graph SP." }
-    $scopeMap[$name] = $scope.Id
-    Write-Host ("  resolved {0,-45} -> {1}" -f $name, $scope.Id) -ForegroundColor DarkGray
+    Write-Host ("  resolved {0,-45} -> {1}" -f $name, $scopeMap[$name]) -ForegroundColor DarkGray
 }
 
 # Azure Service Management API (well-known appId 797f4846-...) +
@@ -344,16 +373,11 @@ $asmScope = $asmSp.Oauth2PermissionScopes | Where-Object { $_.Value -eq 'user_im
 if (-not $asmScope) { throw "user_impersonation scope not found on Azure Service Management SP." }
 Write-Host ("  resolved {0,-45} -> {1}" -f 'user_impersonation (ASM)', $asmScope.Id) -ForegroundColor DarkGray
 
-$requiredResourceAccess = @(
-    @{
-        ResourceAppId  = $graphAppId
-        ResourceAccess = $needed | ForEach-Object { @{ Id = $scopeMap[$_]; Type = 'Scope' } }
-    },
-    @{
-        ResourceAppId  = $asmAppId
-        ResourceAccess = @( @{ Id = $asmScope.Id; Type = 'Scope' } )
-    }
-)
+# REST shape (lowercase keys) -- correct for both Invoke-PimGraph and the SDK's
+# raw Invoke-MgGraphRequest body. Built by the unit-tested pure helper.
+$requiredResourceAccess = New-PaRequiredResourceAccess `
+    -GraphAppId $graphAppId -GraphScopeIds $scopeMap `
+    -AsmAppId $asmAppId -AsmScopeId $asmScope.Id
 
 $redirectUri = "https://$ExtensionId.chromiumapp.org/"
 
@@ -361,48 +385,45 @@ $redirectUri = "https://$ExtensionId.chromiumapp.org/"
 # Create or update the app registration
 # ---------------------------------------------------------------------------
 
-$existing = Get-MgApplication -Filter "displayName eq '$DisplayName'" -ConsistencyLevel eventual -CountVariable c -ErrorAction SilentlyContinue
+# Modern Edge / Chrome MV3 extension auth needs BOTH SPA URIs registered:
+#   1. https://<id>.chromiumapp.org/  -- the redirect that
+#      chrome.identity.launchWebAuthFlow listens for + intercepts to extract
+#      the auth code.
+#   2. chrome-extension://<id>/  -- because the popup.js fetch() to the
+#      /oauth2/v2.0/token endpoint sends Origin: chrome-extension://<id>,
+#      and Entra's SPA flow validates the Origin header against registered
+#      redirect URIs. Without this, token redemption fails with AADSTS9002326
+#      ("Cross-origin token redemption is permitted only for the
+#      'Single-Page Application' client-type"). Both must be SPA type (Public
+#      Client type bounces with the same error). The body builder also wipes
+#      any stale Public Client URI a previous install left behind.
+$existingResp = Invoke-PaGraph -Method GET -Path "/applications?`$filter=displayName eq '$DisplayName'&`$select=id,appId" -All
+$existing = @($existingResp)
 if ($existing.Count -gt 1) {
     throw "Multiple app registrations named '$DisplayName' already exist. Disambiguate (rename or specify a different -DisplayName) and re-run."
 }
 
-if ($existing) {
-    Write-Host "Updating existing app registration '$DisplayName' (appId $($existing.AppId))..." -ForegroundColor Yellow
-    # Modern Edge / Chrome MV3 extension auth needs BOTH SPA URIs registered:
-    #   1. https://<id>.chromiumapp.org/  -- the redirect that
-    #      chrome.identity.launchWebAuthFlow listens for + intercepts to extract
-    #      the auth code.
-    #   2. chrome-extension://<id>/  -- because the popup.js fetch() to the
-    #      /oauth2/v2.0/token endpoint sends Origin: chrome-extension://<id>,
-    #      and Entra's SPA flow validates the Origin header against registered
-    #      redirect URIs. Without this, token redemption fails with
-    #      AADSTS9002326 ("Cross-origin token redemption is permitted only for
-    #      the 'Single-Page Application' client-type. Request origin:
-    #      'chrome-extension://<id>'").
-    # Both must be SPA type (Public Client type bounces with the same error).
-    # Wipe any stale Public Client URI a previous install may have left behind.
-    $extensionOrigin = "chrome-extension://$ExtensionId/"
-    Update-MgApplication -ApplicationId $existing.Id `
-        -Spa @{ RedirectUris = @($redirectUri, $extensionOrigin) } `
-        -PublicClient @{ RedirectUris = @() } `
-        -IsFallbackPublicClient:$false `
-        -RequiredResourceAccess $requiredResourceAccess
-    $app = Get-MgApplication -ApplicationId $existing.Id
+if ($existing.Count -eq 1) {
+    $existingApp = $existing[0]
+    Write-Host "Updating existing app registration '$DisplayName' (appId $($existingApp.appId))..." -ForegroundColor Yellow
+    $updateBody = New-PaAppRegistrationBody -DisplayName $DisplayName -ExtensionId $ExtensionId -RequiredResourceAccess $requiredResourceAccess
+    Invoke-PaGraph -Method PATCH -Path "/applications/$($existingApp.id)" -Body $updateBody | Out-Null
+    $app = Invoke-PaGraph -Method GET -Path "/applications/$($existingApp.id)?`$select=id,appId,displayName"
 } else {
     Write-Host "Creating app registration '$DisplayName'..." -ForegroundColor Green
-    $extensionOrigin = "chrome-extension://$ExtensionId/"
-    $app = New-MgApplication `
-        -DisplayName $DisplayName `
-        -SignInAudience 'AzureADMyOrg' `
-        -Spa @{ RedirectUris = @($redirectUri, $extensionOrigin) } `
-        -IsFallbackPublicClient:$false `
-        -RequiredResourceAccess $requiredResourceAccess
+    $createBody = New-PaAppRegistrationBody -DisplayName $DisplayName -ExtensionId $ExtensionId -RequiredResourceAccess $requiredResourceAccess -IncludeDisplayName
+    $app = Invoke-PaGraph -Method POST -Path '/applications' -Body $createBody
 }
+
+# Normalise an id off a Graph object regardless of REST (camelCase) vs SDK
+# (the SDK's Invoke-MgGraphRequest returns a hashtable -- camelCase keys too).
+$appId    = Get-PaProp $app 'appId'
+$appObjId = Get-PaProp $app 'id'
 
 # Ensure the service principal exists in the tenant (creates the enterprise
 # app). Raw requests for the same silent-null reason as Resolve-FirstPartySp.
 $sp = $null
-try { $sp = Invoke-MgGraphRequest -Method GET -Uri "v1.0/servicePrincipals(appId='$($app.AppId)')" }
+try { $sp = Invoke-PaGraph -Method GET -Path "/servicePrincipals(appId='$appId')" }
 catch { if ("$_" -notmatch 'Request_ResourceNotFound|ResourceNotFound|does not exist|404') { throw } }
 if (-not $sp) {
     # A freshly-created application object can take a few seconds to replicate;
@@ -410,7 +431,7 @@ if (-not $sp) {
     # Retry with backoff instead of failing the deploy.
     $sp = $null
     for ($spTry = 1; $spTry -le 6; $spTry++) {
-        try { $sp = Invoke-MgGraphRequest -Method POST -Uri 'v1.0/servicePrincipals' -Body @{ appId = $app.AppId }; break }
+        try { $sp = Invoke-PaGraph -Method POST -Path '/servicePrincipals' -Body @{ appId = $appId }; break }
         catch {
             if ("$_" -match 'NoBackingApplicationObject|does not reference a valid application' -and $spTry -lt 6) {
                 Write-Host "  app object not replicated yet -- retry $spTry/6 in $($spTry * 5)s" -ForegroundColor DarkGray
@@ -418,10 +439,11 @@ if (-not $sp) {
             } else { throw }
         }
     }
-    Write-Host "Created service principal (objectId $($sp.Id))." -ForegroundColor Green
+    Write-Host "Created service principal (objectId $(Get-PaProp $sp 'id'))." -ForegroundColor Green
 } else {
-    Write-Host "Service principal already present (objectId $($sp.Id))." -ForegroundColor DarkGray
+    Write-Host "Service principal already present (objectId $(Get-PaProp $sp 'id'))." -ForegroundColor DarkGray
 }
+$spId = Get-PaProp $sp 'id'
 
 # ---------------------------------------------------------------------------
 # Optional: tenant-wide admin consent for the delegated scopes
@@ -437,28 +459,14 @@ if ($GrantConsent) {
     # workflow whenever the requested scope set isn't fully covered by an
     # existing grant -- and the extension always asks for openid/profile/
     # offline_access. Bake them in so first-run users sign in silently.
-    $scopeString = (($needed + @('openid','profile','offline_access')) -join ' ')
-    $existingGrant = Get-MgOauth2PermissionGrant -Filter "clientId eq '$($sp.Id)' and consentType eq 'AllPrincipals' and resourceId eq '$($graphSp.Id)'" -ErrorAction SilentlyContinue
-    if ($existingGrant) {
-        Update-MgOauth2PermissionGrant -OAuth2PermissionGrantId $existingGrant.Id -Scope $scopeString
-        Write-Host "  updated existing Graph consent grant" -ForegroundColor DarkGray
-    } else {
-        New-MgOauth2PermissionGrant -ClientId $sp.Id -ConsentType 'AllPrincipals' -ResourceId $graphSp.Id -Scope $scopeString | Out-Null
-        Write-Host "  created new Graph consent grant" -ForegroundColor DarkGray
-    }
+    $scopeString = New-PaConsentScopeString -Scopes $needed
+    Set-PaOauth2Grant -ClientSpId $spId -ResourceSpId $graphSp.Id -Scope $scopeString -Label 'Graph'
 
     # Azure Service Management user_impersonation -- mirrors the Graph block
     # above but against the ARM SP. Without admin-consent here, the popup
     # surfaces a yellow "Azure RBAC roles not visible yet" banner until the
     # admin runs through this script with -GrantConsent.
-    $existingAsmGrant = Get-MgOauth2PermissionGrant -Filter "clientId eq '$($sp.Id)' and consentType eq 'AllPrincipals' and resourceId eq '$($asmSp.Id)'" -ErrorAction SilentlyContinue
-    if ($existingAsmGrant) {
-        Update-MgOauth2PermissionGrant -OAuth2PermissionGrantId $existingAsmGrant.Id -Scope 'user_impersonation'
-        Write-Host "  updated existing ARM consent grant" -ForegroundColor DarkGray
-    } else {
-        New-MgOauth2PermissionGrant -ClientId $sp.Id -ConsentType 'AllPrincipals' -ResourceId $asmSp.Id -Scope 'user_impersonation' | Out-Null
-        Write-Host "  created new ARM consent grant" -ForegroundColor DarkGray
-    }
+    Set-PaOauth2Grant -ClientSpId $spId -ResourceSpId $asmSp.Id -Scope 'user_impersonation' -Label 'ARM'
 }
 
 # ---------------------------------------------------------------------------
@@ -471,7 +479,7 @@ Write-Host " PIM Activator app registration ready" -ForegroundColor Green
 Write-Host "==========================================================================" -ForegroundColor Green
 Write-Host ""
 Write-Host "  tenantId    : $TenantId"
-Write-Host "  clientId    : $($app.AppId)"
+Write-Host "  clientId    : $appId"
 Write-Host "  redirectUri : $redirectUri"
 Write-Host ""
 Write-Host "Next steps:" -ForegroundColor Yellow
@@ -488,9 +496,9 @@ Write-Host ""
 
 [pscustomobject]@{
     TenantId    = $TenantId
-    ClientId    = $app.AppId
-    AppObjectId = $app.Id
-    SpObjectId  = $sp.Id
+    ClientId    = $appId
+    AppObjectId = $appObjId
+    SpObjectId  = $spId
     RedirectUri = $redirectUri
     Scopes      = $needed
 }

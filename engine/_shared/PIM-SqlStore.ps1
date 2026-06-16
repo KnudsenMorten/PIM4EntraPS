@@ -283,8 +283,24 @@ function Get-PimStoreRowKey {
         if ($Row -is [System.Collections.IDictionary]) { if ($Row.Contains($n)) { "$($Row[$n])" } else { '' } }
         else { $p = $Row.PSObject.Properties[$n]; if ($p -and $null -ne $p.Value) { "$($p.Value)" } else { '' } }
     }
+    # NB: 'switch -Wildcard' evaluates EVERY matching clause unless 'break' stops it.
+    # The exact 'PIM-Definitions-AU'/'-Departments' patterns ALSO match the generic
+    # 'PIM-Definitions-*' below, so without 'break' both clauses ran and their outputs
+    # concatenated (e.g. 'AU1 GT1'). 'break' makes the specific clause win.
     $k = switch -Wildcard ($Base) {
-        'PIM-Definitions-AU'              { (& $g 'AdministrativeUnitTag') }
+        'PIM-Definitions-AU'              { (& $g 'AdministrativeUnitTag'); break }
+        # Departments are a people/owner-routing entity: rows are identified by the
+        # department NAME, not a GroupTag (the §11 Departments grid + the scenario
+        # seed write { Department; Owners; ... } with NO GroupTag). The generic
+        # 'PIM-Definitions-*' branch below keys on GroupTag -> blank key -> the row
+        # is silently dropped on save. Key on Department/DepartmentName first, then
+        # fall back to GroupTag/GroupName for the shipped-sample shape that carries one.
+        'PIM-Definitions-Departments'    {
+            $d = (& $g 'Department'); if (-not "$d".Trim()) { $d = (& $g 'DepartmentName') }
+            if (-not "$d".Trim()) { $d = (& $g 'GroupTag') }
+            if (-not "$d".Trim()) { $d = (& $g 'GroupName') }
+            $d; break
+        }
         'PIM-Definitions-*'              { (& $g 'GroupTag') }
         'Account-Definitions-Admins'     { (& $g 'UserName') }
         'PIM-Assignments-Admins'         { ((& $g 'Username') + '|' + (& $g 'GroupTag')) }
@@ -316,6 +332,88 @@ function Set-PimSqlEntityRows {
     $currentKeys = @(Invoke-PimSqlQuery -ConnectionString $ConnectionString -Sql "SELECT [Key] FROM pim.Rows WHERE Entity=@e" -Parameters @{ e = $Entity } | ForEach-Object { "$($_.Key)" })
     foreach ($ck in $currentKeys) { if (-not $submitted.ContainsKey($ck)) { Remove-PimSqlRow -ConnectionString $ConnectionString -Entity $Entity -Key $ck; $removed++ } }
     return @{ rowCount = $submitted.Count; removed = $removed }
+}
+
+function Set-PimSqlEntityRowsTransactional {
+    # TRANSACTIONAL full-set replace of an entity's rows (REQUIREMENTS.md s28 [M1]).
+    # Identical SEMANTICS to Set-PimSqlEntityRows -- upsert every submitted row by
+    # its natural key, delete current keys no longer present -- but every upsert AND
+    # delete runs inside ONE SqlTransaction on ONE connection. A failure mid-loop
+    # rolls the WHOLE batch back, so the store is left exactly as before (never a
+    # half-applied row-set, the [M1] defect). Returns @{ rowCount; removed }.
+    #
+    # -FailAfter is a TEST seam only: throw deliberately after applying N statements
+    # to prove the rollback leaves pim.Rows unchanged (the offline tests use it; it
+    # is never set in production).
+    param(
+        [Parameter(Mandatory)][string]$ConnectionString,
+        [Parameter(Mandatory)][string]$Entity,
+        [object[]]$Rows = @(),
+        [string]$Base,
+        [int]$FailAfter = -1
+    )
+    $base = if ("$Base".Trim()) { $Base } else { $Entity }
+    $c = New-PimSqlConnection -ConnectionString $ConnectionString
+    $tx = $null
+    try {
+        $c.Open()
+        $tx = $c.BeginTransaction()
+        $stmts = 0
+
+        $exec = {
+            param($sql, $params)
+            $cmd = $c.CreateCommand()
+            $cmd.Transaction = $tx
+            $cmd.CommandText = $sql
+            foreach ($k in $params.Keys) { [void]$cmd.Parameters.AddWithValue("@$k", $(if ($null -eq $params[$k]) { [DBNull]::Value } else { $params[$k] })) }
+            [void]$cmd.ExecuteNonQuery()
+        }
+
+        $mergeSql = @"
+MERGE pim.Rows AS t USING (SELECT @e AS Entity, @k AS [Key]) AS s
+  ON t.Entity = s.Entity AND t.[Key] = s.[Key]
+WHEN MATCHED THEN UPDATE SET DataJson = @d, UpdatedUtc = SYSUTCDATETIME()
+WHEN NOT MATCHED THEN INSERT (Entity, [Key], DataJson, UpdatedUtc) VALUES (@e, @k, @d, SYSUTCDATETIME());
+"@
+
+        # 1) read current keys (inside the tx for a consistent snapshot).
+        $curCmd = $c.CreateCommand(); $curCmd.Transaction = $tx
+        $curCmd.CommandText = "SELECT [Key] FROM pim.Rows WHERE Entity=@e"
+        [void]$curCmd.Parameters.AddWithValue('@e', $Entity)
+        $rd = $curCmd.ExecuteReader(); $currentKeys = New-Object System.Collections.Generic.List[string]
+        while ($rd.Read()) { $currentKeys.Add("$($rd.GetValue(0))") }
+        $rd.Close()
+
+        # 2) upsert every submitted row.
+        $submitted = @{}
+        foreach ($r in @($Rows)) {
+            $k = Get-PimStoreRowKey -Base $base -Row $r
+            if (-not $k) { continue }
+            $submitted[$k] = $true
+            $json = if ($null -ne $r) { $r | ConvertTo-Json -Depth 12 -Compress } else { '{}' }
+            & $exec $mergeSql @{ e = $Entity; k = $k; d = $json }
+            $stmts++
+            if ($FailAfter -ge 0 -and $stmts -ge $FailAfter) { throw "injected mid-commit failure after $stmts statement(s) (test seam)" }
+        }
+
+        # 3) delete dropped keys.
+        $removed = 0
+        foreach ($ck in $currentKeys) {
+            if (-not $submitted.ContainsKey($ck)) {
+                & $exec "DELETE FROM pim.Rows WHERE Entity=@e AND [Key]=@k" @{ e = $Entity; k = $ck }
+                $removed++; $stmts++
+                if ($FailAfter -ge 0 -and $stmts -ge $FailAfter) { throw "injected mid-commit failure after $stmts statement(s) (test seam)" }
+            }
+        }
+
+        $tx.Commit()
+        return @{ rowCount = $submitted.Count; removed = $removed }
+    } catch {
+        if ($tx) { try { $tx.Rollback() } catch { Write-Warning "  [sql] transaction rollback failed: $($_.Exception.Message)" } }
+        throw
+    } finally {
+        $c.Close()
+    }
 }
 
 # --- settings live in SQL (protected), not a readable JSON file -----------------

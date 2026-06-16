@@ -1,0 +1,16 @@
+{
+  "id": "intune",
+  "name": "Intune / Endpoint Manager delegation",
+  "version": 1,
+  "description": "Permission groups for Microsoft Intune (Endpoint Manager). These are workload groups: Intune assigns its built-in RBAC roles directly to the Entra group (deviceAndAppManagementRoleAssignment), optionally bounded by scope tags - no Entra directory role involved. Ships the standard Intune built-in personas - Help Desk Operator, School Administrator, Application Manager, Endpoint Security Manager, Read Only Operator, and Policy and Profile Manager.",
+  "rows": {
+    "PIM-Definitions-Services": [
+      { "GroupName": "PIM-Intune-HelpDeskOperator-L4-T1-MP-ID", "GroupDescription": "Intune - Help Desk Operator (remote tasks, view configs; day-to-day support)", "GroupTag": "Intune-HelpDeskOperator-L4", "AdministrativeUnitTag": "PIM-L1", "IsRoleAssignable": "FALSE", "Workload": "Intune", "Level": "L4", "TierLevel": "T1", "Plane": "MP", "CPPlatform": "ID", "Owners": "" },
+      { "GroupName": "PIM-Intune-ReadOnlyOperator-L4-T1-MP-ID", "GroupDescription": "Intune - Read Only Operator (view devices, apps, configs; no changes)", "GroupTag": "Intune-ReadOnlyOperator-L4", "AdministrativeUnitTag": "PIM-L1", "IsRoleAssignable": "FALSE", "Workload": "Intune", "Level": "L4", "TierLevel": "T1", "Plane": "MP", "CPPlatform": "ID", "Owners": "" },
+      { "GroupName": "PIM-Intune-ApplicationManager-L3-T1-MP-ID", "GroupDescription": "Intune - Application Manager (manage mobile and managed apps)", "GroupTag": "Intune-ApplicationManager-L3", "AdministrativeUnitTag": "PIM-L1", "IsRoleAssignable": "FALSE", "Workload": "Intune", "Level": "L3", "TierLevel": "T1", "Plane": "MP", "CPPlatform": "ID", "Owners": "" },
+      { "GroupName": "PIM-Intune-PolicyAndProfileManager-L3-T1-MP-ID", "GroupDescription": "Intune - Policy and Profile Manager (compliance, configuration profiles, baselines)", "GroupTag": "Intune-PolicyAndProfileManager-L3", "AdministrativeUnitTag": "PIM-L1", "IsRoleAssignable": "FALSE", "Workload": "Intune", "Level": "L3", "TierLevel": "T1", "Plane": "MP", "CPPlatform": "ID", "Owners": "" },
+      { "GroupName": "PIM-Intune-EndpointSecurityManager-L3-T1-MP-ID", "GroupDescription": "Intune - Endpoint Security Manager (security baselines, EDR, ASR, encryption)", "GroupTag": "Intune-EndpointSecurityManager-L3", "AdministrativeUnitTag": "PIM-L1", "IsRoleAssignable": "FALSE", "Workload": "Intune", "Level": "L3", "TierLevel": "T1", "Plane": "MP", "CPPlatform": "ID", "Owners": "" },
+      { "GroupName": "PIM-Intune-SchoolAdministrator-L3-T1-MP-ID", "GroupDescription": "Intune - School Administrator (Intune for Education device and app management)", "GroupTag": "Intune-SchoolAdministrator-L3", "AdministrativeUnitTag": "PIM-L1", "IsRoleAssignable": "FALSE", "Workload": "Intune", "Level": "L3", "TierLevel": "T1", "Plane": "MP", "CPPlatform": "ID", "Owners": "" }
+    ]
+  }
+}

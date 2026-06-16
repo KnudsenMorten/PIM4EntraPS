@@ -13,6 +13,14 @@
     Connection auth is passwordless: Managed Identity (Azure SQL, via
     $global:PIM_SqlAccessToken) or Integrated (Express). No secret in any file.
 
+    REST-migration note (REQUIREMENTS.md §19): this script is already pure
+    SQL-data-plane -- it makes NO Microsoft.Graph or Az.* SDK calls. It uses
+    SqlServer/ADO.NET via PIM-SqlStore.ps1 (Initialize-PimSqlStore /
+    Set-PimSqlEntityRows / Import-PimSettingsSeed). The only Az touch anywhere
+    underneath is an OPTIONAL Get-AzAccessToken fallback for a Key Vault secret
+    read inside PIM-SqlStore; the primary path is the launcher-minted token. No
+    conversion needed.
+
 .PARAMETER ConfigDir
     The instance config folder (holds <base>.custom.csv + NamingConventions ps1).
 

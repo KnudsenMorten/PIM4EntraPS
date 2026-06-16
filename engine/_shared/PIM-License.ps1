@@ -57,6 +57,33 @@ $script:PimProFeatureCatalog = @(
 $script:PimLicenseCache = $null
 $script:PimLicenseWarned = @{}
 
+Function Get-PimProFeatureCatalog {
+    # The gateable Pro feature names. The SQL data store is deliberately ABSENT
+    # (SQL is part of the free edition -- operator decision 2026-06-12).
+    @($script:PimProFeatureCatalog)
+}
+
+# --- Distribution policy (internal) ----------------------------------------
+# Pro is distributed to customers free of charge. The license MECHANISM
+# (offline signed-license verification + per-feature gate) is retained for
+# internal/audit use, but the default POLICY is "Pro granted to everyone, for
+# free, with no nag". So by default Test-PimProFeature passes silently for any
+# feature regardless of license state -- and emits NO operator-facing message
+# and NO customer-facing nag. Set $global:PIM_EnforceProLicense = $true ONLY in
+# internal verification harnesses to exercise the gate.
+#
+# Invariants that hold REGARDLESS of this switch:
+#   * Core behaviour is NEVER gated.
+#   * Super-admins are NEVER locked out (the -SuperAdmin bypass always wins).
+#   * Verification NEVER blocks startup -- a bad/missing license can never break
+#     a tenant; the worst case is "edition reads Community".
+Function Test-PimProLicenseEnforced {
+    # Internal: is the Pro gate actively enforced this session? Defaults to OFF
+    # (customers get Pro free). Honour the global if an internal harness set it.
+    if ($null -ne $global:PIM_EnforceProLicense) { return [bool]$global:PIM_EnforceProLicense }
+    $false
+}
+
 Function Get-PimLicenseSearchDir {
     if (Get-Command Get-PimConfigDir -ErrorAction SilentlyContinue) {
         try { $d = Get-PimConfigDir; if ($d) { return $d } } catch { }
@@ -65,15 +92,59 @@ Function Get-PimLicenseSearchDir {
     Join-Path (Split-Path -Parent (Split-Path -Parent $PSScriptRoot)) 'config'
 }
 
+Function Test-PimLicenseSignature {
+    <#
+    .SYNOPSIS
+        Pure RSA-SHA256 PKCS#1 signature verify over raw bytes, against a
+        base64-DER public certificate. Returns $true/$false; never throws.
+    .DESCRIPTION
+        Isolated so the verification path can be unit-tested with valid /
+        invalid / tampered fixtures using an ephemeral test keypair, without
+        the maintainer's private key (which only ever exists on mgmt1).
+        PS 5.1-safe: X509Certificate2 from raw bytes + RSACertificateExtensions
+        -- NO RSA.ImportFromPem (PS 7 / .NET Core 3.0+ only).
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][byte[]]$PayloadBytes,
+        [Parameter(Mandatory)][byte[]]$SignatureBytes,
+        [Parameter(Mandatory)][string]$PublicCertB64
+    )
+    try {
+        $cert = [System.Security.Cryptography.X509Certificates.X509Certificate2]::new([Convert]::FromBase64String($PublicCertB64))
+        $rsa  = [System.Security.Cryptography.X509Certificates.RSACertificateExtensions]::GetRSAPublicKey($cert)
+        if (-not $rsa) { return $false }
+        return [bool]$rsa.VerifyData($PayloadBytes, $SignatureBytes, [System.Security.Cryptography.HashAlgorithmName]::SHA256, [System.Security.Cryptography.RSASignaturePadding]::Pkcs1)
+    } catch {
+        return $false
+    }
+}
+
 Function Get-PimLicense {
     <#
     .SYNOPSIS
         Load + verify the customer's .pimlicense (offline). Cached per session.
+    .PARAMETER PublicCertB64
+        Internal/testing override of the trusted public certificate. When
+        omitted, the embedded production licensing cert is used. Tests pass an
+        ephemeral test cert here to exercise valid/invalid/tampered fixtures.
+    .PARAMETER Path
+        Internal/testing override of the license file to load (bypasses the
+        config-dir scan).
     #>
     [CmdletBinding()]
-    param([switch]$Refresh)
+    param(
+        [switch]$Refresh,
+        [string]$PublicCertB64,
+        [string]$Path
+    )
 
-    if ($script:PimLicenseCache -and -not $Refresh) { return $script:PimLicenseCache }
+    # An override (test) load is never cached -- it must not poison the real
+    # session cache, and must always re-evaluate against the supplied inputs.
+    $useOverride = $PublicCertB64 -or $Path
+    if ($script:PimLicenseCache -and -not $Refresh -and -not $useOverride) { return $script:PimLicenseCache }
+
+    $trustedCertB64 = if ($PublicCertB64) { $PublicCertB64 } else { $script:PimLicensePublicCertB64 }
 
     $result = [pscustomobject]@{
         Status     = 'Missing'      # Missing | Invalid | NotYetValid | Expired | Grace | Valid
@@ -89,25 +160,28 @@ Function Get-PimLicense {
         Path       = $null
     }
 
-    $dir = Get-PimLicenseSearchDir
-    $file = $null
-    if ($dir -and (Test-Path -LiteralPath $dir)) {
-        $file = Get-ChildItem -LiteralPath $dir -Filter '*.pimlicense' -File -ErrorAction SilentlyContinue | Sort-Object Name | Select-Object -First 1
+    $licPath = $null
+    if ($Path) {
+        if (Test-Path -LiteralPath $Path) { $licPath = $Path }
+    } else {
+        $dir = Get-PimLicenseSearchDir
+        if ($dir -and (Test-Path -LiteralPath $dir)) {
+            $file = Get-ChildItem -LiteralPath $dir -Filter '*.pimlicense' -File -ErrorAction SilentlyContinue | Sort-Object Name | Select-Object -First 1
+            if ($file) { $licPath = $file.FullName }
+        }
     }
-    if (-not $file) { $script:PimLicenseCache = $result; return $result }
-    $result.Path = $file.FullName
+    if (-not $licPath) { if (-not $useOverride) { $script:PimLicenseCache = $result }; return $result }
+    $result.Path = $licPath
 
     try {
-        $doc = Get-Content -LiteralPath $file.FullName -Raw -Encoding UTF8 | ConvertFrom-Json
+        $doc = Get-Content -LiteralPath $licPath -Raw -Encoding UTF8 | ConvertFrom-Json
         if (-not $doc.payloadB64 -or -not $doc.signature) { throw "file is not a PIM4EntraPS license (payloadB64/signature missing)" }
 
         $payloadBytes = [Convert]::FromBase64String($doc.payloadB64)
         $sigBytes     = [Convert]::FromBase64String($doc.signature)
 
-        $cert = [System.Security.Cryptography.X509Certificates.X509Certificate2]::new([Convert]::FromBase64String($script:PimLicensePublicCertB64))
-        $rsa  = [System.Security.Cryptography.X509Certificates.RSACertificateExtensions]::GetRSAPublicKey($cert)
-        $ok   = $rsa.VerifyData($payloadBytes, $sigBytes, [System.Security.Cryptography.HashAlgorithmName]::SHA256, [System.Security.Cryptography.RSASignaturePadding]::Pkcs1)
-        if (-not $ok) { $result.Status = 'Invalid'; $result.Reason = 'signature verification FAILED (file tampered or not issued by the PIM4EntraPS licensing key)'; $script:PimLicenseCache = $result; return $result }
+        $ok = Test-PimLicenseSignature -PayloadBytes $payloadBytes -SignatureBytes $sigBytes -PublicCertB64 $trustedCertB64
+        if (-not $ok) { $result.Status = 'Invalid'; $result.Reason = 'signature verification FAILED (file tampered or not issued by the PIM4EntraPS licensing key)'; if (-not $useOverride) { $script:PimLicenseCache = $result }; return $result }
 
         $p = [System.Text.Encoding]::UTF8.GetString($payloadBytes) | ConvertFrom-Json
         $result.Customer  = "$($p.customer)"
@@ -130,7 +204,7 @@ Function Get-PimLicense {
         $result.Reason = "license could not be read: $($_.Exception.Message)"
     }
 
-    $script:PimLicenseCache = $result
+    if (-not $useOverride) { $script:PimLicenseCache = $result }
     return $result
 }
 
@@ -145,15 +219,33 @@ Function Test-PimProFeature {
         connected Graph context's tenant is used if resolvable; if no tenant
         can be resolved, the tenant binding is not evaluated here (per-tenant
         call sites pass it explicitly).
+    .PARAMETER SuperAdmin
+        The caller is acting as a super-admin. Super-admins are NEVER locked
+        out -- the gate always returns $true for them, no matter the license
+        state or enforcement policy.
     .PARAMETER Quiet
         Suppress the operator-facing block message.
+    .NOTES
+        By default Pro is granted free (Test-PimProLicenseEnforced = $false), so
+        this returns $true silently with NO nag. The gate only actually blocks
+        when an internal harness sets $global:PIM_EnforceProLicense = $true.
+        Core behaviour is never routed through this gate.
     #>
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)][string]$Feature,
         [string]$TenantId,
+        [switch]$SuperAdmin,
         [switch]$Quiet
     )
+
+    # Super-admins are never locked out.
+    if ($SuperAdmin) { return $true }
+
+    # Default policy: customers get Pro free, with no nag. The verification
+    # mechanism still ran (so Get-PimEdition / audit can report it), but the
+    # gate does not block and emits nothing customer-facing.
+    if (-not (Test-PimProLicenseEnforced)) { return $true }
 
     $lic = Get-PimLicense
     $blockReason = $null

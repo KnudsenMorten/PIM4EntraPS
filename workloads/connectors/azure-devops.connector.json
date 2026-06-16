@@ -1,0 +1,50 @@
+{
+  "id": "azure-devops",
+  "name": "Azure DevOps (org/project security groups via group nesting)",
+  "auth": "devops",
+  "membershipModel": true,
+  "perRowResource": true,
+  "containerKind": "graph subject",
+  "status": "structure built -- nested-membership adapter mapped to the Azure DevOps Graph API. Azure DevOps grants access by NESTING the Entra group into a DevOps SECURITY GROUP (org- or project-scoped), not by a flat role object, so it uses the membership adapter: resolveContainer = the Entra group's DevOps SUBJECT descriptor; the 'roles' are the org/project security groups; assign = PUT memberships/{group}/{subject}. Live-validation pending an Azure DevOps org the engine SPN is an admin of (Project Collection Administrators) + the org connected to the same Entra tenant.",
+  "permissionsNeeded": ["Azure DevOps: the engine SPN added to the org as a member of 'Project Collection Administrators' (or Project Administrators for project-scoped groups); the org must be backed by the same Entra tenant so the Entra group has a DevOps subject descriptor"],
+  "prerequisites": {
+    "perRowResource": "Each row's Resource column = the Azure DevOps organization name (e.g. contoso). baseUrl/paths are token-expanded with it so one connector covers every org.",
+    "tokenAdapter": "auth=devops -> token for the Azure DevOps resource id 499b84ac-1321-427f-aa17-267ca6975798, supplied via $global:PIM_WorkloadTokens['devops'] (launcher-minted) or Get-AzAccessToken with that resource.",
+    "subjectDescriptor": "DevOps identifies principals by opaque 'descriptors', not objectIds. resolveContainer looks up the Entra group's DevOps subject descriptor from its objectId via vssgp/aadgp materialization (Graph users/groups query by originId == the Entra group objectId). If the group has never signed in / been referenced in DevOps it has no descriptor yet -- the row is skipped with a clear message (provision membership once in the portal, then the descriptor exists).",
+    "rolesAreGroups": "The 'roles' for this connector are the org/project SECURITY GROUPS (Project Collection Administrators, Build Administrators, Contributors, Readers, project-level groups). listRoles enumerates them via the Graph groups API; RoleName matches a group's principalName or displayName.",
+    "scopeNote": "Project-scoped groups are listed alongside org-scoped ones; their principalName is namespaced by project ('[ProjectName]\\Contributors'), so RoleName should use the full namespaced name to disambiguate."
+  },
+  "api": {
+    "baseUrl": "https://vssps.dev.azure.com/{resource}",
+    "listRoles": {
+      "method": "GET",
+      "path": "/_apis/graph/groups?api-version=7.1-preview.1",
+      "itemsPath": "value",
+      "roleId": "descriptor",
+      "roleName": "principalName",
+      "roleDescription": "description"
+    },
+    "resolveContainer": {
+      "method": "GET",
+      "path": "/_apis/graph/groups?api-version=7.1-preview.1",
+      "itemsPath": "value",
+      "idField": "descriptor",
+      "matchField": "originId",
+      "matchToken": "groupId"
+    },
+    "listContainerRoles": {
+      "method": "GET",
+      "path": "/_apis/graph/memberships/{container}?direction=up&api-version=7.1-preview.1",
+      "itemsPath": "value",
+      "roleId": "containerDescriptor"
+    },
+    "assign": {
+      "method": "PUT",
+      "path": "/_apis/graph/memberships/{container}/{roleId}?api-version=7.1-preview.1"
+    },
+    "remove": {
+      "method": "DELETE",
+      "path": "/_apis/graph/memberships/{container}/{roleId}?api-version=7.1-preview.1"
+    }
+  }
+}

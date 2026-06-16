@@ -12,17 +12,18 @@
 
     Engines look up names via helper functions in engine/_shared/PIM-Functions.psm1:
 
-      Resolve-PimAdminName      -Owner 'morten'         -> e.g. 'adm_morten'
-      Resolve-PimGroupName      -Role 'GlobalAdmin' -Department 'IT'  -> e.g. 'PIM_GlobalAdmin_IT'
-      Resolve-PimResourceGroup  -Tier 0                 -> e.g. 'rg-pim-t0'
+      Resolve-PimAdminName      -Owner 'mok'            -> e.g. 'admin-mok-id'
+      Resolve-PimGroupName      -Role 'GlobalAdmin' -Department 'IT'  -> e.g. 'PIM-GlobalAdmin-IT'
+      Resolve-PimResourceGroup  -Tier 1 -Workload 'AzDevOps' -Scope 'OrgCollectionAdministrators' -Level 2 -Plane 'WDP' -Platform 'ID'
+                                                        -> e.g. 'PIM-AzDevOps-OrgCollectionAdministrators-L2-T1-WDP-ID'
 
     The helpers read $global:PIM_NamingConventions set by this file (and
     optionally overridden by the .custom.ps1 file loaded after).
 
     The PIM Manager UI (tools/pim-manager/) also reads from this hashtable to
     drive the "Re-add definition" / "Fix-all" wizards -- specifically
-    TagPrefixToCsv and PimGroupTagRegex (see .custom.sample.ps1 for the
-    full schema + per-key documentation).
+    PimGroupTagRegex (see .custom.sample.ps1 for the full schema + per-key
+    documentation).
 
 .NOTES
     Solution     : PIM4EntraPS
@@ -32,16 +33,18 @@
 $global:PIM_NamingConventions = @{
 
     # ----- Admin accounts ---------------------------------------------------
-    # Admin accounts follow TWO DISTINCT naming conventions:
+    # Admin name = {AdminTypePrefix} + 'Admin-{Owner}' + {EnvironmentSuffix}, in
+    # one of TWO purpose conventions (day-2-day vs high-priv). The prefix varies by
+    # admin-type and the suffix varies by environment (see the maps further down).
     #
-    #   Day-2-day admin   -> Admin-{Initials}-{Platform}
-    #     e.g. Admin-ABC-ID (Entra) / Admin-ABC-AD (legacy AD).
-    #     NO level/tier markers in the name: one day-2-day account spans
-    #     multiple level/tier assignments over time (L3-T1 one day, L2-T0
-    #     the next), so a baked-in L#-T# pair would mislead.
+    #   Day-2-day admin   -> {AdminTypePrefix}Admin-{Initial}{Platform}
+    #     e.g. admin-mok-id (internal/Entra) / x-admin-vnd-ad (external-adminuser/AD).
+    #     The rendered name is LOWER-CASED. NO level/tier markers in the name:
+    #     one day-2-day account spans multiple level/tier assignments over time
+    #     (L3-T1 one day, L2-T0 the next), so a baked-in L#-T# pair would mislead.
     #
-    #   High-priv admin   -> Admin-{Initials}-L0-T0-{Platform}
-    #     e.g. Admin-ABC-L0-T0-ID (Entra) / Admin-ABC-L0-T0-AD (legacy AD).
+    #   High-priv admin   -> Admin-{Initial}-L0-T0{Platform}
+    #     e.g. admin-mok-l0-t0-id (Entra) / admin-mok-l0-t0-ad (legacy AD).
     #     A DEDICATED account for the tier-0 boundary. The -L0-T0- markers
     #     in the UserName drive OU/tier routing (see PathAdmins /
     #     PathAdminsL0T0 below); the Account-Definitions-Admins 'Purpose'
@@ -68,12 +71,37 @@ $global:PIM_NamingConventions = @{
     #        multiple prefix conventions (Admin-*, X-Admin*, ...), list
     #        them ALL here so the cache catches them all.
     #
-    # Defaults below assume the 'Admin-' / 'X-Admin' convention observed in
-    # production tenants. Override any key in
-    # PIM4EntraPS.NamingConventions.custom.ps1 if your tenant differs.
-    AdminAccountPattern         = 'Admin-{Owner}'
-    AdminAccountPatternHighPriv = 'Admin-{Owner}-L0-T0-{Platform}'
-    AdminAccountPatterns        = @('Admin-', 'X-Admin')
+    # The admin name is composed from THREE configurable pieces (REQUIREMENTS § 17):
+    #   {AdminTypePrefix}  -- a VARIABLE prefix driven by the row's *admin-type*:
+    #                         internal-adminuser = '' (NO prefix), external-adminuser
+    #                         = 'x-', external-guest = '' (NO prefix)  (all editable
+    #                         below / in the Manager Settings naming panel).
+    #   Admin-{Initial}    -- the fixed core ("Admins", never "candidates"). {Initial}
+    #                         is the initials/owner token ({Owner} is a synonym).
+    #   {Platform}         -- a VARIABLE suffix driven by the target *environment*:
+    #                         cloud/Entra = '-ID', legacy/AD = '-AD'. The suffix is
+    #                         NO LONGER hard-coded to '-ID' -- it follows Environment.
+    # The rendered name is LOWER-CASED. So internal Entra -> 'admin-mok-id';
+    # external-adminuser AD -> 'x-admin-vnd-ad'.
+    AdminAccountPattern         = '{AdminTypePrefix}Admin-{Initial}{Platform}'
+    AdminAccountPatternHighPriv = 'Admin-{Initial}-L0-T0{Platform}'
+    AdminAccountPatterns        = @('Admin-', 'x-Admin', 'g-Admin')
+
+    # Per-admin-type PREFIX map. internal + external-guest = no prefix; only
+    # external-adminuser carries one by default. Edit to fit your tenant.
+    AdminTypePrefixes = [ordered]@{
+        'internal-adminuser' = ''
+        'external-adminuser' = 'x-'
+        'external-guest'     = ''
+    }
+    AdminTypeDefault  = 'internal-adminuser'
+
+    # Per-environment SUFFIX map. Entra/cloud = '-ID', AD/legacy = '-AD'.
+    EnvironmentSuffixes = [ordered]@{
+        'entra' = '-ID'
+        'ad'    = '-AD'
+    }
+    EnvironmentDefault  = 'entra'
 
     # UPN suffix for admin accounts (when creating new ones). Null = use tenant default.
     AdminAccountUpnSuffix = $null
@@ -99,14 +127,6 @@ $global:PIM_NamingConventions = @{
     # match. Default (null) = Manager accepts any alphanumeric tag.
     PimGroupTagRegex = $null
 
-    # ----- Tag-prefix -> Definition CSV map (Manager wizard input) ---------
-    # When the Manager re-adds a missing definition, it uses this map to
-    # pick the right PIM-Definitions-*.csv. Longest-prefix match wins. If
-    # empty, the Manager falls back to scanning the customer's existing
-    # rows to learn which CSV historically holds tags with each prefix.
-    # See .custom.sample.ps1 for a complete worked example.
-    TagPrefixToCsv = @{}
-
     # ----- On-prem AD OU paths ---------------------------------------------
     # Where the PIM-Baseline-Management-CSV engine's AD-Create branch lands
     # new admin accounts (New-ADUser -Path <DN>). Two OUs:
@@ -125,8 +145,13 @@ $global:PIM_NamingConventions = @{
     PathAdminsL0T0 = $null
 
     # ----- Azure resource groups -------------------------------------------
-    # When PIM4EntraPS provisions Azure resources (e.g. AU storage), naming pattern:
-    ResourceGroupPattern = 'rg-pim-{Tier}'
+    # When PIM4EntraPS provisions Azure resources, the RG name follows the FULL
+    # PIM naming convention -- the same token grammar as the group-name resolver:
+    #   PIM-{Workload}-{Scope}-{Permission/Role}-{Level}-{Tier}-{Plane}-{Platform}
+    #   e.g. PIM-AzDevOps-OrgCollectionAdministrators-L2-T1-WDP-ID
+    # ({Role} is honoured as a synonym for {Permission}.) A legacy lower-case
+    # 'rg-pim-{Tier}' pattern still works if you override it.
+    ResourceGroupPattern = 'PIM-{Workload}-{Scope}-{Permission}-L{Level}-T{Tier}-{Plane}-{Platform}'
 
     # ----- Display name suffix conventions (optional polish) ---------------
     AdminAccountDisplayNameSuffix = ' (Admin)'

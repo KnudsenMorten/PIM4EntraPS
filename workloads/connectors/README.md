@@ -20,6 +20,7 @@ portal only**; those are called out below so nothing here is a fake stub.
 | `powerbi` | powerbi | Power BI / Fabric workspace roles | Structure built; pending a Power BI SP with workspace access |
 | `defender-xdr` | graph | Defender XDR Unified RBAC (once portal-activated) | Built; prereq = portal activation (no Graph activation endpoint) |
 | `intune` | graph | Intune RBAC (always-on, 10 built-in roles) | Built |
+| `power-platform` | powerplatform | Power Platform **environment roles** (Environment Admin / Maker) | Structure built; pairs with the environment-discovery planner; live-validation pending a Power Platform admin SP |
 
 `entra-approle` is the high-leverage one: the *catalog* of 100+ Entra-integrated
 apps (`docs/ENTRA-GROUP-APP-CATALOG.md`) collapses to **this single connector**
@@ -44,15 +45,37 @@ to that container. The engine now supports this natively: a connector sets
   uses `{resource}` (the org host). Structure built + unit-tested; live-validation
   pending a Dataverse env with the group provisioned as a group team. Roles are
   business-unit scoped — pick the team's BU.
-- **Business Central** (finance chart-of-accounts, **permission sets**) — *fits
-  this adapter* (container = security group, roles = permission sets) once the BC
-  Automation API entity/path names are confirmed against a live environment's
-  `$metadata` (`baseUrl = https://api.businesscentral.dynamics.com/v2.0/{tenantId}/{environment}/api/...`). Not shipped as JSON until verified — no guessed paths.
+- **`business-central` (SHIPPED on the adapter)** — Dynamics 365 Business Central
+  finance **permission sets** (chart-of-accounts JIT). Entra group → BC **security
+  group** container (`securityGroups?$filter=azureGroupId eq {groupId}`) → permission
+  sets via `securityGroups({container})/permissionSets`. Per-row `Resource =
+  tenantId/environment`; `baseUrl = https://api.businesscentral.dynamics.com/v2.0/{resource}/api/microsoft/automation/v2.0`.
+  Structure built + unit-tested; **live gap:** confirm the Automation-API entity/path
+  names against a live environment's `$metadata` + provision the security group + a
+  SUPER app user before flipping to delivered.
+- **`azure-devops` (SHIPPED on the adapter)** — Azure DevOps org/project access is
+  group **nesting**, not a flat role, so it uses the membership adapter: the "roles"
+  are the org/project **security groups** (`_apis/graph/groups`), resolveContainer =
+  the Entra group's **subject descriptor** (picked client-side where `originId ==
+  groupId` — the new `matchField`/`matchToken` selector), and assign =
+  `PUT _apis/graph/memberships/{subject}/{group}`. Per-row `Resource = org`.
+  Structure built + unit-tested; **live gap:** an Entra-backed org the engine SPN
+  administers (so the group has a subject descriptor).
+
+## Power Platform discovery companion (SHIPPED — planner)
+
+- **`power-platform`** — Power Platform **environment roles** (Environment Admin /
+  Maker): flat `roleAssignments` on the BAP admin environment scope, static roles,
+  per-row `Resource = environment id`. Pairs with **`PIM-PowerPlatformDiscovery.ps1`**
+  (engine `_shared`): a pure planner that derives a `PIM-PowerPlatform-*-T1-WDP-RES`
+  group per discovered environment and reconciles discovered-vs-existing
+  (create+pending / rename-on-displayName-drift / orphan), **propose-don't-auto-map**
+  by default (auto-import only on an explicit rule) — same shape as the Azure scope
+  discovery. **Live gap:** wire the launcher's live BAP environment listing
+  (`api.bap.microsoft.com/.../environments`) + a Power Platform admin SPN.
 
 ## Cmdlet / portal only, or not role-based (no role connector)
 
-- **Azure DevOps** — org/project access is group **nesting**, not roles:
-  `POST https://vssps.dev.azure.com/{org}/_apis/graph/memberships/{subjectDescriptor}/{containerDescriptor}` (resolve subject + container descriptors first). It does not map to the role model, so it is intentionally not a role connector.
 - **Exchange Online RBAC role groups** — `Add-RoleGroupMember` (EXO PowerShell).
   *Exchange admin via Entra directory role* is already covered by `entra-roles`.
 - **Microsoft Purview** compliance role groups — Security & Compliance PowerShell.
@@ -65,6 +88,9 @@ to that container. The engine now supports this natively: a connector sets
 ## Adding a connector
 
 Drop a `*.connector.json` here. Required: `id`, `auth` (graph/arm/powerbi/devops/
-businesscentral/dataverse), `api.assign`, `api.remove`, and either `api.listRoles`
-or a static `roles[]`. Set `perRowResource: true` to require a per-row `Resource`
-column. The Pester suite (`tests/PIM.Tests.ps1`) validates every connector file.
+businesscentral/dataverse/powerplatform), `api.assign`, `api.remove`, and either
+`api.listRoles` or a static `roles[]`. Set `perRowResource: true` to require a per-row
+`Resource` column. For nested-membership connectors set `membershipModel: true` +
+`api.resolveContainer` (+ optional `matchField`/`matchToken` for client-side container
+selection) + `api.listContainerRoles`. The Pester suite (`tests/PIM.Tests.ps1`)
+validates every connector file.

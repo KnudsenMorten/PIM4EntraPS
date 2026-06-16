@@ -26,7 +26,7 @@
       "services": ["*"],
       "tierMax": 1,
       "levelMax": 3,
-      "capabilities": ["assign", "assign-admin", "enable-consultants"],
+      "capabilities": ["assign", "assign-admin", "enable-consultants", "invite-guest"],
       "managedAdmins": ["consultant1@contoso.com", "consultant2@contoso.com"],
       "managedGroupTags": []
     }

@@ -189,6 +189,46 @@ Describe '4. MSP' {
         $platform | Should -Match '(?i)Ring\s+TINYINT'
         $platform | Should -Match '(?i)a\.Ring\s*<=\s*t\.Ring'        # ring 0 = broadest reach
     }
+
+    # FEATURE: image distributed by az acr import (built once centrally -> customer ACR).
+    # REQ §4: "MI + SQL stay tenant-local; image distributed via az acr import".
+    It 'az acr import path exists (builder + Setup-PimMsp wiring)' {
+        script:Fn 'Get-PimAcrImportArgs' | Should -BeTrue
+        script:Fn 'Invoke-PimAcrImport'  | Should -BeTrue
+        (Get-Content (Join-Path $Root 'tools\setup\Setup-PimMsp.ps1') -Raw) | Should -Match '(?i)Invoke-PimAcrImport'
+    }
+
+    # FEATURE: multiple sync models -- don't force one (all local-initiated, invariant-safe).
+    # REQ §4: "Support multiple MSP/sync models".
+    It 'Multiple sync models resolve; the MSP-write / data-leave invariants always hold' {
+        script:Fn 'Resolve-PimSyncModel' | Should -BeTrue
+        (Get-PimSupportedSyncModels).Count | Should -BeGreaterThan 3
+        foreach ($m in Get-PimSupportedSyncModels) {
+            $p = Resolve-PimSyncModel -Model $m
+            $p.MspWritesLocal | Should -BeFalse
+            $p.DataLeaves     | Should -BeFalse
+        }
+    }
+
+    # FEATURE: signed kill-switch -- revoke the signer; signed central-kill manifest.
+    # REQ §4: "Signed baseline + revoke kill-switch; MSP-wide central kill".
+    It 'Kill-switch + signed central-kill manifest path exists' {
+        foreach ($f in 'Test-PimBaselineSignerAllowed','Set-PimRevokedSigners','Resolve-PimCentralKill') {
+            script:Fn $f | Should -BeTrue -Because "$f is the kill-switch contract"
+        }
+        # revoking the signer blocks its bundles
+        Test-PimBaselineSignerAllowed -Thumbprint 'AABB' -Revoked @('aa:bb') | Should -BeFalse
+    }
+
+    # FEATURE: shared substrate -- Product-keyed registry; TenantManager is just another Product.
+    # REQ §4: "Shared platform/data model with TenantManager".
+    It 'Shared substrate is Product-keyed (PIM + TenantManager on the same tables)' {
+        script:Fn 'Get-PimProductTenantQuery' | Should -BeTrue
+        Get-PimSubstrateProducts | Should -Contain 'TenantManager'
+        $pim = Get-PimProductTenantQuery -Product 'PIM'
+        $tm  = Get-PimProductTenantQuery -Product 'TenantManager'
+        ($pim -replace "'PIM'", "'TenantManager'") | Should -Be $tm   # same tables, only Product differs
+    }
 }
 
 # =====================================================================================
@@ -286,7 +326,8 @@ Describe '6. Engine - Core' {
         $ar = Get-PimEnginePolicyTemplate -Id 'approval-required'
         $ar | Should -Not -BeNullOrEmpty
         $ar.rules.ContainsKey('Approval') | Should -BeTrue
-        @($ar.rules['Member_Enablement_EndUser_Assignment_enabledRules']) | Should -Contain 'MultiFactorAuthentication'
+        # MFA+Justification on the activation enablement (structured Enablement object, inherited from default)
+        @($ar.rules['Enablement'].EndUser_Assignment) | Should -Contain 'MultiFactorAuthentication'
         (Get-PimEnginePolicyTemplate -Id 'default').rules.ContainsKey('Approval') | Should -BeFalse
     }
 
@@ -307,7 +348,7 @@ Describe '7. Engine - Providers / Connectors' {
     # REQ §7: every connector JSON is valid, has assign/remove + listRoles-or-static-roles,
     # a known auth adapter, AND declares its RBAC prerequisite.
     It 'Connectors cover the delivered workloads, each with assign/remove + a declared prerequisite' {
-        $known = 'graph','arm','powerbi','devops','businesscentral','dataverse'
+        $known = 'graph','arm','powerbi','devops','businesscentral','dataverse','powerplatform'
         $files = Get-ChildItem (Join-Path $Root 'workloads\connectors') -Filter '*.connector.json'
         @($files).Count | Should -BeGreaterThan 4
         foreach ($f in $files) {
@@ -371,6 +412,36 @@ Describe '9. Auth / Identity' {
     It 'Secrets come from MI / Key Vault pointer, never persisted to a config file' {
         script:Fn 'Get-PimSqlSecretFromKeyVault' | Should -BeTrue
         (Get-Content (Join-Path $Shared 'PIM-SqlStore.ps1') -Raw) | Should -Match '(?i)NEVER cached to disk'
+    }
+
+    # FEATURE: "Tells you exactly which permission is missing" -- a 403 names the role to grant/activate.
+    # REQ §9: missing-role hint, not a hard-fail; maps the failing path to the exact app-role/PIM role.
+    It 'A 403 produces a missing-role hint naming the exact role; a non-403 does not' {
+        script:Fn 'Get-PimMissingRoleHint' | Should -BeTrue
+        (Get-PimMissingRoleHint -Path '/users/x' -StatusCode 403).AppRolesToGrant | Should -Contain 'User.ReadWrite.All'
+        Get-PimMissingRoleHint -Path '/users/x' -StatusCode 500 | Should -BeNullOrEmpty
+    }
+
+    # FEATURE: "Always shows the account picker -- never reuses a stale login silently."
+    # REQ §9: sign-in prompts for the account; force a fresh sign-in on a stale/mismatched account.
+    It 'Interactive sign-in shows the picker by default and forces a fresh prompt on mismatch' {
+        ConvertTo-PimAuthCodePrompt | Should -Be 'select_account'
+        (Get-PimAccountSignInHint -CachedAccount 'old@b.com' -ExpectedAccount 'new@b.com').Prompt | Should -Be 'login'
+    }
+
+    # FEATURE: "Explains on-prem AD failures instead of hiding them."
+    # REQ §9: inspect process identity / Kerberos / DC discovery when AD auth fails.
+    It 'AD-failure diagnostics classify identity / Kerberos / DC and give a next step' {
+        $d = Resolve-PimAdFailureDiagnostic -ProcessIdentity 'NT AUTHORITY\SYSTEM' -DiscoveredDc ''
+        $d.LooksLikeSystem | Should -BeTrue
+        $d.NextStep | Should -Not -BeNullOrEmpty
+    }
+
+    # FEATURE: "MFA-gated admin console (optional)."
+    # REQ §9: MFA gate verifies amr; hosted (Easy Auth) is a no-op; local requires an MFA-proven token.
+    It 'MFA gate is a no-op when hosted (Easy Auth) and requires an MFA token locally' {
+        (Assert-PimManagerMfa -Hosted).Allowed | Should -BeTrue
+        (Assert-PimManagerMfa -Token 'x.y.z').Allowed | Should -BeFalse   # not MFA-proven -> denied
     }
 }
 
@@ -465,6 +536,31 @@ Describe '11. GUI / Manager' {
         $hd = Get-PimPortalProfile -Profiles $profiles -Identity 'CONTOSO\helpdesk1'
         (Test-PimPortalCanManageGroup -Profile $hd -Facets @{ service='entra'; tier=0; level=2; kind='direct'; scope='' }) | Should -BeFalse
     }
+
+    # FEATURE: "Authoring helpers" -- bulk-attach (N roles + N scopes onto one group),
+    # clone (to N tags / Azure-RBAC to a different role), AU wizard, admin CSV import,
+    # replace-mode admin move, multi-select delete, role-permission drill-down formatter,
+    # and the Log-Analytics audit record builder. All PURE row-set builders (no I/O),
+    # surfaced over /api/authoring/* (deeper coverage in Test-PimManagerEndpoints / -Scenarios).
+    # REQ §23: every authoring action computes rows for Review & Save; the engine stays the writer.
+    It 'Authoring row-set builders are wired + pure (bulk-attach / clone / AU / import / move / delete / drill-down / LA)' {
+        foreach ($fn in 'New-PimBulkAttachRows','Copy-PimDefinitionRows','Copy-PimAzureRbacToRole','New-PimAuRows','ConvertFrom-PimAdminImportCsv','New-PimAdminRowsFromImport','New-PimAdminMovePlan','Remove-PimRowsByIndex','Format-PimRolePermissions','ConvertTo-PimLaAuditRecord') {
+            (Get-Command $fn -ErrorAction SilentlyContinue) | Should -Not -BeNullOrEmpty
+        }
+        # bulk-attach fans N roles + N scopes onto exactly one GroupTag
+        $ba = New-PimBulkAttachRows -GroupTag 'PIM-Entra-X-L1-T0-CP-ID' -EntraRoles @('User Administrator','Helpdesk Administrator') -AzureScopes @(@{scope='/subscriptions/s1';permission='Reader'})
+        $ba.totalRows | Should -Be 3
+        @($ba.rolesGroupsRows).Count | Should -Be 2
+        # clone-azure-role substitutes the role, keeps the scope (clone-to-N)
+        $ca = @(Copy-PimAzureRbacToRole -SourceRow ([ordered]@{ GroupTag='PIM-Az'; AzScope='/subscriptions/s1'; AzScopePermission='Reader' }) -NewRoles @('Contributor','Owner'))
+        $ca.Count | Should -Be 2
+        $ca[0].AzScopePermission | Should -Be 'Contributor'
+        $ca[0].AzScope | Should -Be '/subscriptions/s1'
+        # admin move is transactional: only the matched (admin,from) row is replaced
+        $mv = New-PimAdminMovePlan -AssignmentRows @([ordered]@{Username='a1';GroupTag='R-A'}, [ordered]@{Username='a2';GroupTag='R-A'}) -Username 'a1' -FromTag 'R-A' -ToTag 'R-C'
+        $mv.movedCount | Should -Be 1
+        @($mv.rows | Where-Object { $_.Username -eq 'a2' -and $_.GroupTag -eq 'R-A' }).Count | Should -Be 1
+    }
 }
 
 # =====================================================================================
@@ -486,6 +582,75 @@ Describe '12. Notifications / Email' {
         }
         # lab redirect is wired in the sender (asserted by source contract; live send is gated below).
         (Get-Content (Join-Path $Shared 'PIM-Notify.ps1') -Raw) | Should -Match '(?i)PIM_MailRedirectAllTo'
+    }
+
+    # FEATURE: "Daily summary email of PIM changes" -- one digest of new admins,
+    # delegations and removals; activation events are Entra-native and excluded.
+    # REQ §12: Get-PimDailySummary folds audit events in a window; activation/whatif/
+    # out-of-window dropped; tokens render the shipped daily-summary template.
+    It 'Daily summary aggregates delegation/assignment changes (activation excluded)' {
+        $now = [datetime]'2026-06-13T23:00:00Z'
+        $evts = @(
+            [pscustomobject]@{ ts='2026-06-13T10:00:00Z'; action='account.create';         target='Admin-AB-T0'; result='ok' }
+            [pscustomobject]@{ ts='2026-06-13T11:00:00Z'; action='assignment.create';       target='alice->GA';   result='ok' }
+            [pscustomobject]@{ ts='2026-06-13T12:00:00Z'; action='role.activate';           target='alice';       result='ok' }
+            [pscustomobject]@{ ts='2026-06-13T13:00:00Z'; action='account.offboard.revoke'; target='Admin-XY-T1'; result='ok' }
+        )
+        $s = Get-PimDailySummary -Events $evts -NowUtc $now
+        $s.totalChanges | Should -Be 3
+        @($s.admins).Count      | Should -Be 1
+        @($s.delegations).Count | Should -Be 1
+        @($s.removals).Count    | Should -Be 1
+        @($s.admins + $s.delegations + $s.removals) | Where-Object { "$($_.action)" -match 'activat' } | Should -BeNullOrEmpty
+        (Test-Path -LiteralPath (Join-Path $Root 'templates\mail\daily-summary.mailtemplate.html')) | Should -BeTrue
+        $tok = ConvertTo-PimDailySummaryTokens -Summary $s
+        $tok.TotalChanges | Should -Be '3'
+    }
+
+    # FEATURE: "Tier 0/1 access report" -- all users holding T0/T1 permissions incl. level.
+    # REQ §12: Get-PimTierZeroOneReport returns the highest tier + levels per user, T2+ out.
+    It 'Tier 0/1 report lists all T0/T1 holders with level' {
+        $rows = @(
+            [pscustomobject]@{ UserName='alice@x';          GroupTag='PIM-AAD-GA-L1-T0' }
+            [pscustomobject]@{ UserName='alice@x';          GroupTag='PIM-AAD-Helpdesk-L2-T1' }
+            [pscustomobject]@{ UserName='bob@x';            GroupTag='PIM-AAD-App-L3-T2' }
+            [pscustomobject]@{ UserPrincipalName='carol@x'; Tier=1; Level=2 }
+        )
+        $rep = Get-PimTierZeroOneReport -Assignments $rows
+        $rep.Count | Should -Be 2
+        $rep[0].user | Should -Be 'alice@x'
+        $rep[0].highestTier | Should -Be 0
+        @(($rep | Where-Object { $_.user -eq 'alice@x' }).levels) | Should -Contain 2
+        (Test-Path -LiteralPath (Join-Path $Root 'templates\mail\tier-report.mailtemplate.html')) | Should -BeTrue
+    }
+
+    # FEATURE: "Approval escalation + reminders" -- serial owner[1]->owner[2] after
+    # escalationHours; parallel any-one notified together.
+    # REQ §12: Get-PimApprovalEscalationTargets serial steps + parallel fan-out; skips non-pending.
+    It 'Approval escalation: serial steps owners, parallel notifies all' {
+        $req = [pscustomobject]@{ requestor='alice@x'; groupTag='PIM-GA-L1-T0'; requestedUtc='2026-06-12T00:00:00Z'; status='pending' }
+        $ser = Get-PimApprovalEscalationTargets -Request $req -Owners @('o1','o2','o3') -NowUtc ([datetime]'2026-06-14T06:00:00Z') -Mode serial -EscalationHours 24
+        $ser.step | Should -Be 2
+        @($ser.notify) | Should -Be @('o3')
+        $ser.isEscalated | Should -BeTrue
+        $par = Get-PimApprovalEscalationTargets -Request $req -Owners @('o1','o2') -NowUtc ([datetime]'2026-06-12T01:00:00Z') -Mode parallel -EscalationHours 24
+        @($par.notify).Count | Should -Be 2
+    }
+
+    # FEATURE: "Secure ServiceNow intake" -- inbound store-and-forward; never self-create/
+    # self-activate; privileged always routes to approval; only allowlisted non-priv auto-applies.
+    # REQ §12: ConvertTo-PimIntakeRecord sanitises; Test-PimIntakeAccepted blocks activation +
+    # self-target; Resolve-PimIntakeRouting forces T0/1 to approve.
+    It 'ServiceNow intake is inbound + secure (no self-create/self-activate)' {
+        $rec = ConvertTo-PimIntakeRecord -Payload ([pscustomobject]@{ requestType='delegation-request'; requestor='a@x'; targetAdmin='b'; groupTag='PIM-GA-L1-T0'; evilField='x' })
+        $rec.PSObject.Properties['evilField'] | Should -BeNullOrEmpty           # crafted field dropped
+        $rec.status | Should -Be 'received'
+        (Test-PimIntakeAccepted -Record (ConvertTo-PimIntakeRecord -Payload ([pscustomobject]@{ requestType='activation'; requestor='a@x' }))).accepted | Should -BeFalse
+        (Test-PimIntakeAccepted -Record (ConvertTo-PimIntakeRecord -Payload ([pscustomobject]@{ requestType='delegation-request'; requestor='a@x'; targetAdmin='a@x' }))).accepted | Should -BeFalse
+        (Resolve-PimIntakeRouting -Record $rec -AutoApplyTypes @('delegation-request')).route | Should -Be 'approve'  # T0 -> approve even if allowlisted
+        $np = ConvertTo-PimIntakeRecord -Payload ([pscustomobject]@{ requestType='group-add'; requestor='a@x'; targetAdmin='b'; groupTag='PIM-App-L3-T2' })
+        (Resolve-PimIntakeRouting -Record $np -AutoApplyTypes @('group-add')).route | Should -Be 'auto-apply'
+        (Resolve-PimIntakeRouting -Record $np -AutoApplyTypes @()).route | Should -Be 'approve'                       # secure default
     }
 
     # FEATURE (Live): a real app-only Mail.Send via Graph (with lab redirect).
@@ -597,15 +762,27 @@ Describe '17. Naming' {
     # FEATURE: "Naming lives in config, never hardcoded" -- admin/group/resource patterns
     # in config with per-tenant overrides, tokens for initials/level/tier/platform.
     # REQ §17: $global:PIM_NamingConventions ships the patterns; a .custom override file exists;
-    # day-to-day admin = Admin-CCC-ID (no L#-T#), high-priv = Admin-CCC-L0-T0-ID.
-    It 'Naming patterns live in config (tokens, day2day vs high-priv, per-tenant override)' {
+    # the admin name = {AdminTypePrefix} + Admin-CCC (no L#-T# for day2day, L0-T0 for high-priv)
+    # + {EnvironmentSuffix}. internal Entra = Admin-CCC-ID, external-adminuser AD = x-Admin-CCC-AD.
+    It 'Naming patterns live in config (admin-type prefix, environment suffix, day2day vs high-priv, override)' {
         . (Join-Path $Root 'config\PIM4EntraPS.NamingConventions.locked.ps1')
         $nc = $global:PIM_NamingConventions
         $nc | Should -Not -BeNullOrEmpty
-        $nc.AdminAccountPattern         | Should -Be 'Admin-{Owner}'                  # day-2-day: no L#-T#
-        $nc.AdminAccountPatternHighPriv | Should -Be 'Admin-{Owner}-L0-T0-{Platform}' # high-priv markers
+        $nc.AdminAccountPattern         | Should -Be '{AdminTypePrefix}Admin-{Initial}{Platform}'   # day-2-day: no L#-T#, renders admin-mok-id
+        $nc.AdminAccountPatternHighPriv | Should -Be 'Admin-{Initial}-L0-T0{Platform}'             # high-priv markers, renders admin-mok-l0-t0-id
+        # per-admin-type prefix map: internal + external-guest = NO prefix; external-adminuser carries one.
+        "$($nc.AdminTypePrefixes.'internal-adminuser')" | Should -Be ''
+        "$($nc.AdminTypePrefixes.'external-adminuser')" | Should -Not -Be ''
+        $nc.AdminTypePrefixes.Contains('external-guest') | Should -BeTrue
+        "$($nc.AdminTypePrefixes.'external-guest')"      | Should -Be ''
+        # per-environment suffix map: Entra -> -ID, AD -> -AD (suffix driven by environment).
+        "$($nc.EnvironmentSuffixes.entra)" | Should -Be '-ID'
+        "$($nc.EnvironmentSuffixes.ad)"    | Should -Be '-AD'
         $nc.PimGroupPattern             | Should -BeLike 'PIM-*'                       # dash separator, token-based
-        $nc.ResourceGroupPattern        | Should -Be 'rg-pim-{Tier}'
+        # resource group follows the full PIM naming convention now (not rg-pim-{Tier})
+        $nc.ResourceGroupPattern        | Should -Be 'PIM-{Workload}-{Scope}-{Permission}-L{Level}-T{Tier}-{Plane}-{Platform}'
+        # TagPrefixToCsv has been removed from the naming-convention surface
+        $nc.ContainsKey('TagPrefixToCsv') | Should -BeFalse
         # a per-tenant override file ships (sample) so customers can match their convention.
         (Test-Path -LiteralPath (Join-Path $Root 'config\PIM4EntraPS.NamingConventions.custom.sample.ps1')) | Should -BeTrue
     }

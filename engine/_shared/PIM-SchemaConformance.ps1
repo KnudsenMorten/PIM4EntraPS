@@ -41,7 +41,9 @@ function Get-PimLockedSchema {
             deprecated = @('TierLevel')
             # UserType (Internal|External) drives onboarding: External + cloud -> B2B
             # guest invite (PIM-Onboarding.ps1). Blank = Internal.
-            required   = @('Purpose','UserType','ProvisionDate','TAPLifetimeHours','Template','OffboardDate','DeleteAfterDays')
+            # AdminType drives the name prefix (internal-adminuser/external-adminuser/
+            # external-guest); Environment drives the name suffix (entra '-ID' / ad '-AD').
+            required   = @('Purpose','UserType','AdminType','Environment','ProvisionDate','TAPLifetimeHours','Template','OffboardDate','DeleteAfterDays')
             migrations = @(@{ from = 'TierLevel'; to = 'Purpose'; whenTargetBlank = $true; map = { param($v) ConvertTo-PimPurposeFromTier -TierLevel "$v" } })
         }
         'PIM-Definitions-Roles'        = $genericDef

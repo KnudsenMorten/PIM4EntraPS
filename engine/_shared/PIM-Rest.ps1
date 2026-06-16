@@ -27,6 +27,7 @@ $script:PimRestResources = @{
   arm      = 'https://management.azure.com'
   powerbi  = 'https://analysis.windows.net/powerbi/api'
   defender = 'https://api.securitycenter.microsoft.com'
+  exo      = 'https://outlook.office365.com'   # Exchange Online REST admin API (app-only ManageAsApp)
 }
 $script:PimTokenCache = @{}   # resourceKey -> @{ token; expiresUtc }
 
@@ -133,7 +134,11 @@ function Resolve-PimCertificate {
 # the system-default-browser state-mismatch bug; any first-party public client
 # accepts an arbitrary localhost redirect port.
 function Get-PimInteractiveToken {
-  param([Parameter(Mandatory)][string]$Audience,[string]$TenantId,[string]$ClientId)
+  param([Parameter(Mandatory)][string]$Audience,[string]$TenantId,[string]$ClientId,
+        # section 9 account sign-in clarity: force a brand-new credential prompt (prompt=login)
+        # instead of reusing a cached account. -ExpectedAccount, if the cached account
+        # differs, also forces a fresh prompt so a stale account is never used silently.
+        [switch]$ForceFreshAccount,[string]$ExpectedAccount)
   $tenant = if ($TenantId) { $TenantId } elseif (Get-PimTenantId) { Get-PimTenantId } else { 'organizations' }
   # Default to the Microsoft Graph CLI public client (same app Connect-MgGraph uses);
   # it has consent for delegated tokens to Graph/ARM/Azure SQL via .default.
@@ -151,12 +156,20 @@ function Get-PimInteractiveToken {
   $port     = ([System.Net.IPEndPoint]$tcp.LocalEndpoint).Port
   $redirect = "http://localhost:$port/"
 
+  # section 9 prompt clarity: select_account (always show the picker so a stale cached account
+  # is never reused silently) unless a fresh sign-in is forced -> login. ConvertTo-
+  # PimAuthCodePrompt is in PIM-AuthDiagnostics; fall back if it isn't dot-sourced.
+  if (Get-Command ConvertTo-PimAuthCodePrompt -ErrorAction SilentlyContinue) {
+    $prompt = ConvertTo-PimAuthCodePrompt -ForceFresh:$ForceFreshAccount -KnownStaleAccount $ExpectedAccount
+  } else { $prompt = if ($ForceFreshAccount) { 'login' } else { 'select_account' } }
+
   $scope   = "$Audience/.default offline_access openid profile"
   $authUrl = "https://login.microsoftonline.com/$tenant/oauth2/v2.0/authorize" +
              "?client_id=$cid&response_type=code&response_mode=query" +
              "&redirect_uri=$([uri]::EscapeDataString($redirect))" +
              "&scope=$([uri]::EscapeDataString($scope))&state=$state" +
-             "&code_challenge=$challenge&code_challenge_method=S256&prompt=select_account"
+             "&code_challenge=$challenge&code_challenge_method=S256&prompt=$prompt"
+  if ("$ExpectedAccount".Trim()) { $authUrl += "&login_hint=$([uri]::EscapeDataString($ExpectedAccount.Trim()))" }
 
   $edge = @(
     (Join-Path ${env:ProgramFiles(x86)} 'Microsoft\Edge\Application\msedge.exe'),
@@ -304,7 +317,20 @@ function Invoke-PimRest {
           try { $ra = [int]("$($_.Exception.Response.Headers['Retry-After'])"); if ($ra -gt 0) { $wait = $ra } } catch {}
           Start-Sleep -Seconds $wait; $attempt++; continue
         }
-        if ($body) { throw "$Method $next -> HTTP $code : $body" }
+        # section 9 missing-role hint: on a 403 / insufficient-privileges, append the EXACT
+        # Graph app-role to grant (engine SPN, app-only) so the operator isn't left
+        # guessing. Best-effort: only when the hint helper is loaded (PIM-Functions /
+        # PIM-AuthDiagnostics dot-sourced) and the failure is a permissions failure.
+        $hintText = ''
+        if (Get-Command Get-PimMissingRoleHint -ErrorAction SilentlyContinue) {
+            try {
+                $appOnly = -not [bool]$global:PIM_Interactive
+                $h = Get-PimMissingRoleHint -Path $next -StatusCode ([int]("$code")) -ErrorBody "$body" -AppOnly:$appOnly
+                if ($h) { $hintText = "  >> $($h.Hint)" }
+            } catch {}
+        }
+        if ($body) { throw "$Method $next -> HTTP $code : $body$hintText" }
+        if ($hintText) { throw "$Method $next -> HTTP $code$hintText" }
         throw
       }
     }
@@ -353,4 +379,97 @@ function Invoke-PimPowerBI {
   param([string]$Method='GET',[Parameter(Mandatory)][string]$Path,[object]$Body,[switch]$All,[hashtable]$Headers=@{})
   $url = if ($Path -match '^https?://') { $Path } else { "https://api.powerbi.com/v1.0/myorg$Path" }
   Invoke-PimRest -Method $Method -Url $url -Body $Body -Resource 'powerbi' -All:$All -Headers $Headers
+}
+
+# ---- Exchange Online (app-only, pure REST, NO ExchangeOnlineManagement) ----
+# The EXO V3 PowerShell module's "REST-backed cmdlets" are thin wrappers around
+# the Exchange admin REST endpoint:
+#   POST https://outlook.office365.com/adminapi/beta/<tenant>/InvokeCommand
+#   body { CmdletInput: { CmdletName: '<Verb-Noun>', Parameters: { ... } } }
+# authenticated with an app-only token for the https://outlook.office365.com
+# audience (the same Exchange.ManageAsApp consent the module needs). Calling
+# this endpoint directly means the engine sets mailbox forwarding etc. with the
+# engine SPN + certificate over PIM-Rest -- no module to Install-Module, no EXO
+# V3 runspace-state bug, PS 5.1-safe. Anti-affinity routing (X-AnchorMailbox /
+# Prefer) is unnecessary for tenant-admin cmdlets against the beta endpoint.
+#
+# NOTE on feasibility: NOT every EXO cmdlet is reachable this way -- some are
+# session-bound or stream large result sets the InvokeCommand shape doesn't
+# return cleanly. The engine's ONLY runtime EXO need is Set-Mailbox mail
+# forwarding, which is a simple parameterized cmdlet and works over this path.
+# Connect-ExchangeOnline itself becomes a no-op (token-per-call, no session).
+function Get-PimExoTenantSegment {
+  # The InvokeCommand path takes the tenant's *initial* domain or tenant GUID.
+  param([string]$TenantId)
+  $t = if ($TenantId) { $TenantId } elseif ($global:PIM_ExoOrganization) { $global:PIM_ExoOrganization } elseif ($global:PIM_TenantId) { $global:PIM_TenantId } else { Get-PimTenantId }
+  if (-not $t) { throw "Invoke-PimExoCmdlet: no tenant/organization. Set -Organization, `$global:PIM_ExoOrganization (initial .onmicrosoft.com domain) or `$global:PIM_TenantId." }
+  return $t
+}
+function Invoke-PimExoCmdlet {
+  <#
+    Run a single Exchange Online admin cmdlet app-only over REST.
+      Invoke-PimExoCmdlet -CmdletName 'Set-Mailbox' -Parameters @{ Identity='u@x'; ForwardingSmtpAddress='a@b'; DeliverToMailboxAndForward=$false }
+    Returns the cmdlet's .value payload (array) or the raw response.
+  #>
+  [CmdletBinding()]
+  param(
+    [Parameter(Mandatory)][string]$CmdletName,
+    [hashtable]$Parameters = @{},
+    [string]$Organization,
+    [int]$MaxRetry = 5
+  )
+  $seg = Get-PimExoTenantSegment -TenantId $Organization
+  $url = "https://outlook.office365.com/adminapi/beta/$seg/InvokeCommand"
+  $body = @{ CmdletInput = @{ CmdletName = $CmdletName; Parameters = $Parameters } }
+  $resp = Invoke-PimRest -Method POST -Url $url -Body $body -Resource 'exo' -MaxRetry $MaxRetry
+  if ($null -ne $resp -and ($resp.PSObject.Properties.Name -contains 'value')) { return $resp.value }
+  return $resp
+}
+function Test-PimMailForwardAddressIsReal {
+  <#
+    Shared sentinel predicate -- the engine apply path and the Manager validator
+    (tools/pim-manager/_validator.ps1, PIM-DOMAIN-001) MUST agree on what counts
+    as a real forwarding address. The Account-Definitions schema reuses the
+    literal string 'FALSE' (and blanks / 'no' / '0' / 'none' / 'n/a') to mean
+    "no forwarding address", so those values are NOT addresses and must never be
+    forwarded to. Returns $true only for something shaped like an email address.
+  #>
+  [CmdletBinding()]
+  param([AllowNull()][object]$Value)
+  $s = ([string]$Value).Trim()
+  if (-not $s) { return $false }
+  switch ($s.ToUpperInvariant()) {
+    'FALSE' { return $false }
+    'NO'    { return $false }
+    '0'     { return $false }
+    'NONE'  { return $false }
+    'N/A'   { return $false }
+    default { return ($s -match '^[^@\s]+@[^@\s]+\.[^@\s]+$') }
+  }
+}
+
+function Set-PimMailboxForwarding {
+  <#
+    Pure-REST equivalent of the engine's only runtime EXO call:
+      Set-Mailbox -Identity <upn> -ForwardingSmtpAddress <smtp> -DeliverToMailboxAndForward:$false
+    Pass -ForwardingSmtpAddress '' to CLEAR forwarding.
+
+    Safety net: a 'FALSE'/sentinel address is treated as "no address" (clears
+    forwarding) so the engine never forwards mail to the literal string 'FALSE'
+    even if a caller forgets the upstream guard. Aligns with
+    Test-PimMailForwardAddressIsReal in the validator.
+  #>
+  [CmdletBinding()]
+  param(
+    [Parameter(Mandatory)][string]$Identity,
+    [string]$ForwardingSmtpAddress,
+    [bool]$DeliverToMailboxAndForward = $false,
+    [string]$Organization
+  )
+  $p = @{ Identity = $Identity; DeliverToMailboxAndForward = $DeliverToMailboxAndForward }
+  # EXO accepts a null to clear forwarding; an empty string is rejected. A
+  # sentinel ('FALSE'/'no'/'0'/...) is NOT a real address -> clear instead.
+  if (-not (Test-PimMailForwardAddressIsReal -Value $ForwardingSmtpAddress)) { $p['ForwardingSmtpAddress'] = $null }
+  else { $p['ForwardingSmtpAddress'] = $ForwardingSmtpAddress }
+  Invoke-PimExoCmdlet -CmdletName 'Set-Mailbox' -Parameters $p -Organization $Organization | Out-Null
 }

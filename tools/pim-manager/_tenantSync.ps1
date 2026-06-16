@@ -65,7 +65,19 @@ function Get-PimTenantCacheRoot {
     # AU ids / subscription ids must never bleed across customers. 'local'
     # keeps the flat cache/ folder for back-compat with existing installs.
     if ($script:PimInstanceName -and $script:PimInstanceName -ne 'local') {
-        $cacheRoot = Join-Path $cacheRoot $script:PimInstanceName
+        # The instance name becomes a FOLDER name, so it must be a legal path
+        # segment. The SQL-mode synthetic instance label is 'sql:<db>' (set in
+        # Open-PimManager.ps1) -- the ':' is illegal in a Windows path segment,
+        # so Join-Path/New-Item would throw "The given path's format is not
+        # supported" and 500 GET / + /api/preflight. Sanitize every char that
+        # can't live in a path segment (CSV-era code assumed instance names were
+        # already folder-safe). 'sql:<db>' -> 'sql_<db>'; per-instance isolation
+        # is preserved (the mapping is stable + 1:1 for the labels we generate).
+        $safeName = $script:PimInstanceName
+        foreach ($bad in ([System.IO.Path]::GetInvalidFileNameChars())) {
+            $safeName = $safeName.Replace($bad, '_')
+        }
+        $cacheRoot = Join-Path $cacheRoot $safeName
     }
     if (-not (Test-Path -LiteralPath $cacheRoot)) {
         New-Item -ItemType Directory -Path $cacheRoot -Force | Out-Null
@@ -74,7 +86,7 @@ function Get-PimTenantCacheRoot {
 }
 
 function Get-PimTenantCacheFile {
-    param([Parameter(Mandatory)][ValidateSet('entra-roles','aus','pim-groups','azure-scopes','azure-rbac-roles')][string]$Kind)
+    param([Parameter(Mandatory)][ValidateSet('entra-roles','aus','pim-groups','azure-scopes','azure-rbac-roles','auth-methods','pim-activity')][string]$Kind)
     Join-Path (Get-PimTenantCacheRoot) ("{0}.json" -f $Kind)
 }
 
@@ -132,35 +144,64 @@ function Read-PimTenantListCache {
 # Connection / dependency helpers
 # ---------------------------------------------------------------------------
 
+function Test-PimRestTenantAuthAvailable {
+    # True when PIM-Rest.ps1 can mint an app-only token with NO PowerShell module:
+    #   * a managed identity is present (App Service / Functions / IMDS), OR
+    #   * the engine SPN client id + (cert thumbprint | secret) are configured.
+    # This is the hosted-container path (no Graph/Az SDK).
+    if (-not (Get-Command Get-PimRestToken -ErrorAction SilentlyContinue)) { return $false }
+    if ($env:IDENTITY_ENDPOINT -or $env:MSI_ENDPOINT -or $global:PIM_UseManagedIdentity) { return $true }
+    $cid = if ($global:PIM_ClientId) { $global:PIM_ClientId } else { $global:HighPriv_Modern_ApplicationID_Azure }
+    if (-not $cid) { return $false }
+    $hasCred = $global:PIM_CertThumbprint -or $global:PIM_ClientSecret -or
+               $global:HighPriv_Modern_CertificateThumbprint_Azure -or $global:HighPriv_Modern_Secret_Azure
+    return [bool]$hasCred
+}
+
 function Assert-PimTenantConnectionContext {
     # Verify a usable tenant connection context. Accepted, in order:
     #   1. An ALREADY-CONNECTED app-only Graph context (Connect-Platform did the
     #      work in this process -- e.g. launched via -ConnectPlatform). Tenant
-    #      comes from the live context.
-    #   2. Engine SPN globals with a certificate thumbprint (cert auth).
-    #   3. Engine SPN globals with a client secret (secret auth -- what
-    #      Connect-PlatformModern populates on tenants without a Modern cert).
+    #      comes from the live context. (Graph SDK only.)
+    #   2. REST app-only auth (PIM-Rest.ps1): a managed identity, or the engine
+    #      SPN client id + cert/secret. This is the HOSTED container path -- no
+    #      Graph/Az PowerShell module is present, so tokens are minted over REST.
+    #   3. Engine SPN globals with a certificate thumbprint (cert auth).
+    #   4. Engine SPN globals with a client secret (secret auth).
     # Never falls back to interactive sign-in.
     $tenantId = $null
     if     ($global:AzureTenantID) { $tenantId = $global:AzureTenantID }
     elseif ($global:AzureTenantId) { $tenantId = $global:AzureTenantId }
+    elseif ($global:PIM_TenantId)  { $tenantId = $global:PIM_TenantId }
+    elseif ($env:PIM_TenantId)     { $tenantId = $env:PIM_TenantId }
 
-    try {
-        $mg = Get-MgContext -ErrorAction SilentlyContinue
-        if ($mg -and $mg.AuthType -eq 'AppOnly' -and (-not $tenantId -or $mg.TenantId -eq $tenantId)) {
-            return $(if ($tenantId) { $tenantId } else { $mg.TenantId })
-        }
-    } catch { }
+    # (1) live SDK app-only context (only meaningful when the SDK is loaded).
+    if (Get-Command Get-MgContext -ErrorAction SilentlyContinue) {
+        try {
+            $mg = Get-MgContext -ErrorAction SilentlyContinue
+            if ($mg -and $mg.AuthType -eq 'AppOnly' -and (-not $tenantId -or $mg.TenantId -eq $tenantId)) {
+                return $(if ($tenantId) { $tenantId } else { $mg.TenantId })
+            }
+        } catch { }
+    }
+
+    # (2) REST app-only (hosted container / module-less). A managed identity
+    # supplies its own tenant in the token, so PIM_TenantId is optional with MI.
+    if (Test-PimRestTenantAuthAvailable) {
+        if ($tenantId) { return $tenantId }
+        if ($env:IDENTITY_ENDPOINT -or $env:MSI_ENDPOINT -or $global:PIM_UseManagedIdentity) { return '' }  # MI: token carries the tenant
+        throw "PIM Manager tenant access (REST): a credential is present but the tenant id is not. Set PIM_TenantId (app setting / `$global:PIM_TenantId)."
+    }
 
     $missing = New-Object System.Collections.ArrayList
-    if (-not $global:HighPriv_Modern_ApplicationID_Azure) { [void]$missing.Add('$global:HighPriv_Modern_ApplicationID_Azure') }
+    if (-not $global:HighPriv_Modern_ApplicationID_Azure) { [void]$missing.Add('$global:HighPriv_Modern_ApplicationID_Azure (or PIM_ClientId)') }
     if (-not $global:HighPriv_Modern_CertificateThumbprint_Azure -and -not $global:HighPriv_Modern_Secret_Azure) {
-        [void]$missing.Add('$global:HighPriv_Modern_CertificateThumbprint_Azure (or $global:HighPriv_Modern_Secret_Azure)')
+        [void]$missing.Add('$global:HighPriv_Modern_CertificateThumbprint_Azure (or PIM_CertThumbprint / a client secret / a managed identity)')
     }
-    if (-not $tenantId) { [void]$missing.Add('$global:AzureTenantID') }
+    if (-not $tenantId) { [void]$missing.Add('$global:AzureTenantID (or PIM_TenantId)') }
     if ($missing.Count -gt 0) {
         $missingList = $missing -join ', '
-        throw "PIM Manager tenant access requires the engine SPN context. Missing: $missingList. Launch with Open-PimManager.ps1 -ConnectPlatform (recommended), or run any baseline engine first, or source your bootstrap manually."
+        throw "PIM Manager tenant access requires the engine SPN context (or a managed identity). Missing: $missingList. Hosted: set PIM_ClientId + PIM_CertThumbprint + PIM_TenantId app settings, or assign the container a managed identity with the needed Graph/ARM permissions. Local: launch with -ConnectPlatform, or run any baseline engine first."
     }
     return $tenantId
 }
@@ -168,7 +209,10 @@ function Assert-PimTenantConnectionContext {
 function Connect-PimManagerGraph {
     # Reuses an existing matching app-only context when present; otherwise
     # connects via cert thumbprint, else via client secret. Always app-only.
-    param([Parameter(Mandatory)][string]$TenantId)
+    # REST-only (hosted container, no Graph SDK): no-op -- Invoke-PimGraph mints
+    # its own app-only token per call from PIM_* / MI via PIM-Rest.ps1.
+    param([Parameter(Mandatory)][AllowEmptyString()][string]$TenantId)
+    if (-not (Get-Command Connect-MgGraph -ErrorAction SilentlyContinue)) { return }
     $appId  = $global:HighPriv_Modern_ApplicationID_Azure
     $thumb  = $global:HighPriv_Modern_CertificateThumbprint_Azure
     $secret = $global:HighPriv_Modern_Secret_Azure
@@ -216,7 +260,10 @@ function Connect-PimManagerGraph {
 }
 
 function Connect-PimManagerAz {
-    param([Parameter(Mandatory)][string]$TenantId)
+    # REST-only (hosted container, no Az SDK): no-op -- Invoke-PimArm mints its
+    # own app-only token per call from PIM_* / MI via PIM-Rest.ps1.
+    param([Parameter(Mandatory)][AllowEmptyString()][string]$TenantId)
+    if (-not (Get-Command Connect-AzAccount -ErrorAction SilentlyContinue)) { return }
     $appId  = $global:HighPriv_Modern_ApplicationID_Azure
     $thumb  = $global:HighPriv_Modern_CertificateThumbprint_Azure
     $secret = $global:HighPriv_Modern_Secret_Azure
@@ -258,19 +305,31 @@ function Connect-PimManagerAz {
 # ---------------------------------------------------------------------------
 
 function Invoke-PimGraphGetAll {
-    # Pages through a Graph collection URL. Uses Invoke-MgGraphRequest under
-    # the hood so we don't depend on the SDK resource cmdlets being present.
+    # Pages through a Graph collection URL. REST-first: when PIM-Rest.ps1's
+    # Invoke-PimGraph is available (always, in the hosted container) it mints an
+    # app-only token from PIM_* / MI -- no Graph SDK module required. Falls back
+    # to Invoke-MgGraphRequest only when the SDK is loaded and REST is not.
     param([Parameter(Mandatory)][string]$Uri)
-    $all = New-Object System.Collections.ArrayList
-    $next = $Uri
-    while ($next) {
-        $resp = Invoke-MgGraphRequest -Method GET -Uri $next -ErrorAction Stop
-        if ($resp.value) {
-            foreach ($v in $resp.value) { [void]$all.Add($v) }
-        }
-        $next = $resp.'@odata.nextLink'
+    if ((Get-Command Invoke-PimGraph -ErrorAction SilentlyContinue) -and
+        (-not (Get-Command Invoke-MgGraphRequest -ErrorAction SilentlyContinue))) {
+        # REST path (module-less): Invoke-PimGraph -All aggregates @odata.nextLink.
+        return ,@(Invoke-PimGraph -Path $Uri -All)
     }
-    return ,$all.ToArray()
+    if (Get-Command Invoke-MgGraphRequest -ErrorAction SilentlyContinue) {
+        $all = New-Object System.Collections.ArrayList
+        $next = $Uri
+        while ($next) {
+            $resp = Invoke-MgGraphRequest -Method GET -Uri $next -ErrorAction Stop
+            if ($resp.value) { foreach ($v in $resp.value) { [void]$all.Add($v) } }
+            $next = $resp.'@odata.nextLink'
+        }
+        return ,$all.ToArray()
+    }
+    # Last resort: REST even if the SDK is partially present.
+    if (Get-Command Invoke-PimGraph -ErrorAction SilentlyContinue) {
+        return ,@(Invoke-PimGraph -Path $Uri -All)
+    }
+    throw "Invoke-PimGraphGetAll: neither Invoke-PimGraph (REST) nor Invoke-MgGraphRequest (SDK) is available."
 }
 
 # ---------------------------------------------------------------------------
@@ -339,9 +398,36 @@ function Get-PimGroupsFromTenant {
 
 function Get-PimAzureScopesFromTenant {
     # Returns subscriptions + management groups + their full ARM scope paths.
-    # Resource Graph is faster + paginates server-side. We deliberately do not
-    # enumerate resource groups here -- assignments are typically at sub/mg.
+    # REST-first (hosted container, no Az module): the ARM REST API lists both
+    # without any PowerShell module. Falls back to Az cmdlets when present.
     $items = New-Object System.Collections.ArrayList
+    $restArm = (Get-Command Invoke-PimArm -ErrorAction SilentlyContinue) -and -not (Get-Command Get-AzManagementGroup -ErrorAction SilentlyContinue)
+
+    if ($restArm) {
+        # Management groups: GET /providers/Microsoft.Management/managementGroups
+        try {
+            foreach ($m in @(Invoke-PimArm -Path '/providers/Microsoft.Management/managementGroups' -ApiVersion '2020-05-01' -All)) {
+                [void]$items.Add([ordered]@{
+                    id          = "$($m.id)"
+                    displayName = "$($m.properties.displayName)"
+                    type        = 'managementGroup'
+                    scopePath   = "$($m.id)"
+                })
+            }
+        } catch { Write-Warning ("  ARM managementGroups list failed: {0}" -f $_.Exception.Message) }
+        # Subscriptions: GET /subscriptions
+        try {
+            foreach ($s in @(Invoke-PimArm -Path '/subscriptions' -ApiVersion '2020-01-01' -All)) {
+                [void]$items.Add([ordered]@{
+                    id          = "$($s.subscriptionId)"
+                    displayName = "$($s.displayName)"
+                    type        = 'subscription'
+                    scopePath   = "/subscriptions/$($s.subscriptionId)"
+                })
+            }
+        } catch { Write-Warning ("  ARM subscriptions list failed: {0}" -f $_.Exception.Message) }
+        return ,@($items)
+    }
 
     # Management groups via Az cmdlet (Resource Graph has them too, but the
     # Az cmdlet returns the full id including 'tenants/' boundary nicely).
@@ -407,6 +493,30 @@ function Get-PimAzureRbacRolesFromTenant {
     # instead of typing them (spelling errors in AzScopePermission silently
     # break the engine's role assignment).
     $items = New-Object System.Collections.ArrayList
+    $restArm = (Get-Command Invoke-PimArm -ErrorAction SilentlyContinue) -and -not (Get-Command Get-AzRoleDefinition -ErrorAction SilentlyContinue)
+    if ($restArm) {
+        # ARM REST: roleDefinitions are queried at a scope; built-in roles are
+        # identical tenant-wide, so list them at the first subscription scope.
+        # Custom roles are scope-specific -- a full per-scope sweep is a later
+        # increment; built-ins cover the common-role pickers the GUI needs.
+        try {
+            $sub = @(Invoke-PimArm -Path '/subscriptions' -ApiVersion '2020-01-01' -All | Select-Object -First 1)
+            if ($sub.Count -gt 0) {
+                $scope = "/subscriptions/$($sub[0].subscriptionId)"
+                foreach ($d in @(Invoke-PimArm -Path "$scope/providers/Microsoft.Authorization/roleDefinitions" -ApiVersion '2022-04-01' -All)) {
+                    [void]$items.Add([ordered]@{
+                        id          = "$($d.name)"
+                        displayName = "$($d.properties.roleName)"
+                        description = "$($d.properties.description)"
+                        isCustom    = ("$($d.properties.type)" -ne 'BuiltInRole')
+                    })
+                }
+            } else {
+                Write-Warning '  ARM roleDefinitions: no subscription reachable to scope the query.'
+            }
+        } catch { Write-Warning ("  ARM roleDefinitions list failed: {0}" -f $_.Exception.Message) }
+        return ,@($items | Sort-Object { $_.displayName })
+    }
     try {
         Import-Module Az.Resources -ErrorAction SilentlyContinue | Out-Null
         $defs = Get-AzRoleDefinition -ErrorAction Stop

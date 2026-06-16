@@ -1,0 +1,16 @@
+{
+  "id": "exchange-online",
+  "name": "Exchange Online delegation",
+  "version": 1,
+  "description": "Permission groups for Exchange Online. These are workload groups: Exchange Online has its own RBAC (management role groups), so the workload role group binds directly to the Entra group - no Entra directory role involved. Ships the standard built-in Exchange Online role groups - Recipient Management, View-Only Organization Management, Help Desk, Compliance Management, Hygiene Management, and Records Management.",
+  "rows": {
+    "PIM-Definitions-Services": [
+      { "GroupName": "PIM-ExchangeOnline-RecipientManagement-L3-T1-WDP-ID", "GroupDescription": "Exchange Online - Recipient Management (create/manage mailboxes, groups, contacts)", "GroupTag": "ExchangeOnline-RecipientManagement-L3", "AdministrativeUnitTag": "PIM-L1", "IsRoleAssignable": "FALSE", "Workload": "Exchange-Online", "Level": "L3", "TierLevel": "T1", "Plane": "WDP", "CPPlatform": "ID", "Owners": "" },
+      { "GroupName": "PIM-ExchangeOnline-ViewOnlyOrganizationManagement-L4-T1-WDP-ID", "GroupDescription": "Exchange Online - View-Only Organization Management (read-only org config)", "GroupTag": "ExchangeOnline-ViewOnlyOrganizationManagement-L4", "AdministrativeUnitTag": "PIM-L1", "IsRoleAssignable": "FALSE", "Workload": "Exchange-Online", "Level": "L4", "TierLevel": "T1", "Plane": "WDP", "CPPlatform": "ID", "Owners": "" },
+      { "GroupName": "PIM-ExchangeOnline-HelpDesk-L4-T1-WDP-ID", "GroupDescription": "Exchange Online - Help Desk (view recipients, reset basic mailbox settings)", "GroupTag": "ExchangeOnline-HelpDesk-L4", "AdministrativeUnitTag": "PIM-L1", "IsRoleAssignable": "FALSE", "Workload": "Exchange-Online", "Level": "L4", "TierLevel": "T1", "Plane": "WDP", "CPPlatform": "ID", "Owners": "" },
+      { "GroupName": "PIM-ExchangeOnline-ComplianceManagement-L3-T1-WDP-ID", "GroupDescription": "Exchange Online - Compliance Management (retention, journaling, audit, DLP)", "GroupTag": "ExchangeOnline-ComplianceManagement-L3", "AdministrativeUnitTag": "PIM-L1", "IsRoleAssignable": "FALSE", "Workload": "Exchange-Online", "Level": "L3", "TierLevel": "T1", "Plane": "WDP", "CPPlatform": "ID", "Owners": "" },
+      { "GroupName": "PIM-ExchangeOnline-HygieneManagement-L3-T1-WDP-ID", "GroupDescription": "Exchange Online - Hygiene Management (anti-spam, anti-malware, mail flow)", "GroupTag": "ExchangeOnline-HygieneManagement-L3", "AdministrativeUnitTag": "PIM-L1", "IsRoleAssignable": "FALSE", "Workload": "Exchange-Online", "Level": "L3", "TierLevel": "T1", "Plane": "WDP", "CPPlatform": "ID", "Owners": "" },
+      { "GroupName": "PIM-ExchangeOnline-RecordsManagement-L3-T1-WDP-ID", "GroupDescription": "Exchange Online - Records Management (retention policies and tags, message classifications)", "GroupTag": "ExchangeOnline-RecordsManagement-L3", "AdministrativeUnitTag": "PIM-L1", "IsRoleAssignable": "FALSE", "Workload": "Exchange-Online", "Level": "L3", "TierLevel": "T1", "Plane": "WDP", "CPPlatform": "ID", "Owners": "" }
+    ]
+  }
+}

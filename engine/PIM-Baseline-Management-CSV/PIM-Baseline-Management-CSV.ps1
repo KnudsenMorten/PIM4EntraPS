@@ -344,7 +344,7 @@ Write-Output "******************************************************************
         #   2. $global:PIM_NamingConventions.PathAdmins / .PathAdminsL0T0
         #      (canonical v2 shape -- lives in PIM4EntraPS.NamingConventions
         #      .custom.ps1 next to AdminAccountPatterns, PimGroupPattern,
-        #      TagPrefixToCsv etc.)
+        #      ResourceGroupPattern etc.)
         #   3. $global:PathAdmins / $global:PathAdminsL0T0 (v1 back-compat
         #      from the legacy repository.custom.ps1)
         # The engine never had a fallback, so missing config -> $null -> the
@@ -1464,12 +1464,30 @@ Write-Output "******************************************************************
 # role assignments + members removed and the group deleted (naming-prefix
 # guard). Drift cleanup compares live members vs the assignment CSVs --
 # $global:PIM_OffboardCleanupMode = Off | Report (default) | Enforce.
+#
+# OPERATOR POLICY (mass-disable incident): these are AUTOMATIC, whole-population,
+# destructive actions. They are DISABLED BY DEFAULT and run ONLY when the operator
+# explicitly opts in via the matching $global:PIM_Enable* flag (default OFF).
+# Automatic offboarding stays prohibited until an approval flow is built
+# (docs/REQUIREMENTS.md). Each gate logs why it skipped so a run is never silent.
 
-    Invoke-PimAdminOffboarding -AccountsDefinitionFile $AccountsDefinitionFile
+    if (Test-PimAutoDestructiveEnabled -Feature 'Offboarding') {
+        Invoke-PimAdminOffboarding -AccountsDefinitionFile $AccountsDefinitionFile
+    } else {
+        Write-Host "  [Offboard] SKIPPED -- automatic offboarding is DISABLED (operator policy). Set `$global:PIM_EnableAutomaticOffboarding=`$true to opt in (prohibited until an approval flow exists)." -ForegroundColor DarkYellow
+    }
 
-    Invoke-PimGroupRetirement
+    if (Test-PimAutoDestructiveEnabled -Feature 'GroupRetirement') {
+        Invoke-PimGroupRetirement
+    } else {
+        Write-Host "  [Retire] SKIPPED -- automatic group retirement is DISABLED (operator policy). Set `$global:PIM_EnableGroupRetirement=`$true to opt in." -ForegroundColor DarkYellow
+    }
 
-    Invoke-PimMembershipDriftCleanup
+    if (Test-PimAutoDestructiveEnabled -Feature 'MembershipDriftCleanup') {
+        Invoke-PimMembershipDriftCleanup
+    } else {
+        Write-Host "  [Drift] SKIPPED -- automatic membership drift cleanup is DISABLED (operator policy). Set `$global:PIM_EnableMembershipDriftCleanup=`$true to opt in." -ForegroundColor DarkYellow
+    }
 
 ######################################################################################################################
 # Resource discovery | LIFECYCLE-GOVERNANCE phase 9

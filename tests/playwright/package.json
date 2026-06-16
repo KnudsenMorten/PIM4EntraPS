@@ -1,0 +1,16 @@
+{
+  "name": "pim4entraps-manager-gui-validator",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Real-browser (headless chromium) GUI validation for the PIM4EntraPS Manager. Drives every tab against a live local server and asserts render/paint/layout sanity — the things the jsdom structural check cannot see.",
+  "scripts": {
+    "install:browsers": "playwright install chromium",
+    "test": "playwright test --grep @gui --project=desktop",
+    "test:all": "playwright test --grep @gui",
+    "report": "playwright show-report"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.48.0",
+    "typescript": "^5.5.0"
+  }
+}

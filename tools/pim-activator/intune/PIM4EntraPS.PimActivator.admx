@@ -79,5 +79,35 @@
       </elements>
     </policy>
 
+    <!-- Microsoft Edge: writes (REG_DWORD)
+         HKLM\SOFTWARE\Policies\Microsoft\Edge\3rdparty\extensions\eheocihmlppcophaeakmdenhgcookkab\policy\bulkActivateConfirmThreshold -->
+    <policy name="BulkThreshold_Edge"
+            class="Machine"
+            displayName="$(string.BulkThreshold_Edge)"
+            explainText="$(string.BulkThreshold_Explain)"
+            presentation="$(presentation.BulkThreshold_Edge_Presentation)"
+            key="SOFTWARE\Policies\Microsoft\Edge\3rdparty\extensions\eheocihmlppcophaeakmdenhgcookkab\policy">
+      <parentCategory ref="PimActivator_Cat" />
+      <supportedOn    ref="SUPPORTED_W10_Edge_Chrome" />
+      <elements>
+        <decimal id="BulkThreshold_Edge_Value" valueName="bulkActivateConfirmThreshold" minValue="1" maxValue="100" required="false" />
+      </elements>
+    </policy>
+
+    <!-- Google Chrome: writes (REG_DWORD)
+         HKLM\SOFTWARE\Policies\Google\Chrome\3rdparty\extensions\eheocihmlppcophaeakmdenhgcookkab\policy\bulkActivateConfirmThreshold -->
+    <policy name="BulkThreshold_Chrome"
+            class="Machine"
+            displayName="$(string.BulkThreshold_Chrome)"
+            explainText="$(string.BulkThreshold_Explain)"
+            presentation="$(presentation.BulkThreshold_Chrome_Presentation)"
+            key="SOFTWARE\Policies\Google\Chrome\3rdparty\extensions\eheocihmlppcophaeakmdenhgcookkab\policy">
+      <parentCategory ref="PimActivator_Cat" />
+      <supportedOn    ref="SUPPORTED_W10_Edge_Chrome" />
+      <elements>
+        <decimal id="BulkThreshold_Chrome_Value" valueName="bulkActivateConfirmThreshold" minValue="1" maxValue="100" required="false" />
+      </elements>
+    </policy>
+
   </policies>
 </policyDefinitions>

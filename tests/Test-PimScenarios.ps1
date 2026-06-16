@@ -26,12 +26,37 @@ $H = @{
   'PIM-Definitions-Tasks'  = 'GroupName;GroupDescription;GroupTag;AdministrativeUnitTag;IsRoleAssignable;Workload;Level;TierLevel;Plane;CPPlatform;Owners'
   'PIM-Assignments-Groups' = 'TargetGroupTag;SourceGroupTag;AssignmentType;Action;UpdateExisting;AutoExtend;NumOfDaysWhenExpire;Permanent;CPPlatform;Plane;TierLevel;PermissionScope;SyncPlatform'
   'PIM-Assignments-Roles-Groups' = 'GroupTag;RoleDefinitionName;AssignmentType;Action;UpdateExisting;AutoExtend;NumOfDaysWhenExpire;Permanent;CPPlatform;Plane;TierLevel;PermissionScope;SyncPlatform'
+  'PIM-Definitions-Organization' = 'GroupName;GroupDescription;GroupTag;AdministrativeUnitTag;IsRoleAssignable;Workload;Level;TierLevel;Plane;CPPlatform;Owners;SponsorUpn;Department'
+  'PIM-Assignments-Azure-Resources' = 'GroupTag;AzScope;AzScopePermission;AssignmentType;Action;UpdateExisting;AutoExtend;NumOfDaysWhenExpire;Permanent;CPPlatform;Plane;TierLevel;PermissionScope;SyncPlatform'
 }
-function Invoke-ScenarioValidation([hashtable]$Files) {
+function Invoke-ScenarioValidation([hashtable]$Files, [hashtable]$Caches) {
     $dir = Join-Path $env:TEMP "pim-scn-$([guid]::NewGuid().ToString('N'))"
     New-Item -ItemType Directory $dir | Out-Null
     foreach ($b in $Files.Keys) { Set-Content (Join-Path $dir "$b.custom.csv") (@($H[$b]) + $Files[$b]) -Encoding UTF8 }
     $script:scnDir = $dir
+    # Optional tenant-cache stubs so the cache-driven rules (PIM-AUTH-*, PIM-ORPHAN-AZ-*,
+    # PIM-STALE-003) can be exercised offline. When $Caches is $null the rules degrade
+    # (skip) exactly as they do without a live cache -- which is itself a tested behaviour.
+    $script:scnCaches = $Caches
+    if ($Caches) {
+        function global:Get-PimTenantCacheFile { param([string]$Kind) $f = Join-Path $script:scnDir "$Kind.json"; $f }
+        function global:Read-PimTenantListCache {
+            $out = [ordered]@{}
+            foreach ($k in @('entra-roles','aus','pim-groups','azure-scopes','azure-rbac-roles')) {
+                $key = ($k -replace '-([a-z])', { $args[0].Groups[1].Value.ToUpper() }) -replace '-',''
+                $out[$key] = $null
+            }
+            if ($script:scnCaches.ContainsKey('azure-scopes')) { $out['azureScopes'] = @{ refreshedUtc=(Get-Date).ToString('o'); items=@($script:scnCaches['azure-scopes']) } }
+            if ($script:scnCaches.ContainsKey('entra-roles'))  { $out['entraRoles']  = @{ refreshedUtc=(Get-Date).ToString('o'); items=@($script:scnCaches['entra-roles']) } }
+            return $out
+        }
+        # auth-methods / pim-activity are read as raw JSON files by the validator.
+        if ($Caches.ContainsKey('auth-methods')) { ($Caches['auth-methods'] | ConvertTo-Json -Depth 5) | Set-Content (Join-Path $dir 'auth-methods.json') -Encoding UTF8 }
+        if ($Caches.ContainsKey('pim-activity')) { ($Caches['pim-activity'] | ConvertTo-Json -Depth 5) | Set-Content (Join-Path $dir 'pim-activity.json') -Encoding UTF8 }
+    } else {
+        Remove-Item Function:\global:Get-PimTenantCacheFile -EA SilentlyContinue
+        Remove-Item Function:\global:Read-PimTenantListCache -EA SilentlyContinue
+    }
     function global:Get-PimConfigDir { $script:scnDir }
     function global:Get-PimNamingConventions { $global:PIM_NamingConventions }
     function global:Get-PimCsvBases { @('Account-Definitions-Admins','PIM-Assignments-Admins','PIM-Definitions-Roles','PIM-Definitions-Tasks','PIM-Definitions-Services','PIM-Definitions-Processes','PIM-Definitions-Resources','PIM-Definitions-Departments','PIM-Definitions-Organization','PIM-Definitions-AU','PIM-Assignments-Groups','PIM-Assignments-Roles-Groups','PIM-Assignments-Roles-AUs','PIM-Assignments-Azure-Resources','PIM-Assignments-Workloads') | ForEach-Object { [pscustomobject]@{ base=$_ } } }
@@ -109,6 +134,97 @@ $v = Invoke-ScenarioValidation @{
   'PIM-Assignments-Admins' = @("Admin-JD-ID@contoso.com;$roleHdrTag;Eligible;Assign;FALSE;TRUE;365;FALSE;;;;;")
 }
 T 'consistent config -> no error-severity findings' (@($v | Where-Object Severity -eq 'error').Count -eq 0)
+
+Section 'GOVERNANCE / AUTHORING VALIDATOR RULES (new)'
+
+# PIM-ROLE-OWNER-001: org/role row with no Owners/SponsorUpn/Department -> info
+$v = Invoke-ScenarioValidation @{
+  'PIM-Definitions-Organization' = @('PIM-Org-NoOwner-L1-T1-CP-ID;org;ORG-NOOWN-L1-T1-CP-ID;;TRUE;;L1;T1;CP;CP;;;')
+}
+T 'role/org with no owner -> PIM-ROLE-OWNER-001' ((Codes $v) -contains 'PIM-ROLE-OWNER-001')
+
+# same row WITH an owner -> rule must NOT fire
+$v = Invoke-ScenarioValidation @{
+  'PIM-Definitions-Organization' = @('PIM-Org-Owned-L1-T1-CP-ID;org;ORG-OWNED-L1-T1-CP-ID;;TRUE;;L1;T1;CP;CP;owner@contoso.com;;')
+}
+T 'role/org WITH owner -> no PIM-ROLE-OWNER-001' (-not ((Codes $v) -contains 'PIM-ROLE-OWNER-001'))
+
+# PIM-AUTH-001: admin with no strong auth method (auth-methods cache present) -> error
+$v = Invoke-ScenarioValidation -Files @{
+  'Account-Definitions-Admins' = @('Jane;Doe;JD;Day2Day;Cloud;ID;Internal;Admin-JD-ID;Jane;admin-jd-id@contoso.com;US;FALSE;;FALSE;;;2;')
+  'PIM-Assignments-Admins' = @()
+} -Caches @{ 'auth-methods' = @{ 'admin-jd-id@contoso.com' = @('sms') } }
+T 'admin with only weak auth (sms) -> PIM-AUTH-002' ((Codes $v) -contains 'PIM-AUTH-002')
+
+# PIM-AUTH: admin WITH a strong method -> no auth violation
+$v = Invoke-ScenarioValidation -Files @{
+  'Account-Definitions-Admins' = @('Jane;Doe;JD;Day2Day;Cloud;ID;Internal;Admin-JD-ID;Jane;admin-jd-id@contoso.com;US;FALSE;;FALSE;;;2;')
+  'PIM-Assignments-Admins' = @()
+} -Caches @{ 'auth-methods' = @{ 'admin-jd-id@contoso.com' = @('microsoftAuthenticator') } }
+T 'admin with authenticator -> no PIM-AUTH-001/002' (-not (((Codes $v) -match 'PIM-AUTH-00').Count -gt 0 -and ((Codes $v) | Where-Object { $_ -in 'PIM-AUTH-001','PIM-AUTH-002' })))
+
+# PIM-ORPHAN-AZ-001: azure assignment to a scope not in the azure-scopes cache -> warning
+$v = Invoke-ScenarioValidation -Files @{
+  'PIM-Definitions-Roles' = @('PIM-Az-L1-T1-CP-ID;az;AZ-L1-T1-CP-ID;;CP;CP;T1;Global;;TRUE')
+  'PIM-Assignments-Azure-Resources' = @('AZ-L1-T1-CP-ID;/subscriptions/deleted-sub;Reader;Eligible;Assign;FALSE;TRUE;365;FALSE;;;;;')
+} -Caches @{ 'azure-scopes' = @(@{ id='/subscriptions/live-sub'; displayName='Live'; scopePath='/subscriptions/live-sub'; type='subscription' }) }
+T 'azure assignment to missing scope -> PIM-ORPHAN-AZ-001' ((Codes $v) -contains 'PIM-ORPHAN-AZ-001')
+
+# child scope of a cached subscription is NOT orphaned
+$v = Invoke-ScenarioValidation -Files @{
+  'PIM-Definitions-Roles' = @('PIM-Az-L1-T1-CP-ID;az;AZ-L1-T1-CP-ID;;CP;CP;T1;Global;;TRUE')
+  'PIM-Assignments-Azure-Resources' = @('AZ-L1-T1-CP-ID;/subscriptions/live-sub/resourceGroups/rg1;Reader;Eligible;Assign;FALSE;TRUE;365;FALSE;;;;;')
+} -Caches @{ 'azure-scopes' = @(@{ id='/subscriptions/live-sub'; displayName='Live'; scopePath='/subscriptions/live-sub'; type='subscription' }) }
+T 'azure RG under a known sub -> no PIM-ORPHAN-AZ-001' (-not ((Codes $v) -contains 'PIM-ORPHAN-AZ-001'))
+
+Section 'MAIL-FORWARD VALIDATION (PIM-DOMAIN-001 false-positive fix)'
+# Header field order ...UsageLocation;ForwardMailsToContact;MailForwardAddress;CreateTAP;...
+# so each row's "...;US;<fwd>;<addr>;FALSE;;;2;" controls forwarding flag + address.
+
+# both off (ForwardMailsToContact=FALSE + MailForwardAddress=FALSE sentinel) -> consistent "no forwarding" -> NO warning
+$v = Invoke-ScenarioValidation @{
+  'Account-Definitions-Admins' = @('Help;Desk;HD;Day2Day;Cloud;ID;Internal;Admin-Helpdesk-AD;Help Desk;Admin-Helpdesk-AD@contoso.com;US;FALSE;FALSE;FALSE;;;2;')
+}
+T 'both FALSE (sentinel address + forwarding off) -> NO PIM-DOMAIN-001' (-not ((Codes $v) -contains 'PIM-DOMAIN-001'))
+
+# real address + forwarding off -> genuine misconfig -> WARNING
+$v = Invoke-ScenarioValidation @{
+  'Account-Definitions-Admins' = @('Help;Desk;HD;Day2Day;Cloud;ID;Internal;Admin-Helpdesk-AD;Help Desk;Admin-Helpdesk-AD@contoso.com;US;FALSE;contact@contoso.com;FALSE;;;2;')
+}
+T 'real address + forwarding off -> PIM-DOMAIN-001 warning' ((Codes $v) -contains 'PIM-DOMAIN-001')
+
+# real address + forwarding on -> valid -> NO warning
+$v = Invoke-ScenarioValidation @{
+  'Account-Definitions-Admins' = @('Help;Desk;HD;Day2Day;Cloud;ID;Internal;Admin-Helpdesk-AD;Help Desk;Admin-Helpdesk-AD@contoso.com;US;TRUE;contact@contoso.com;FALSE;;;2;')
+}
+T 'real address + forwarding on -> no PIM-DOMAIN-001' (-not ((Codes $v) -contains 'PIM-DOMAIN-001'))
+
+# blank address + forwarding off -> NO warning
+$v = Invoke-ScenarioValidation @{
+  'Account-Definitions-Admins' = @('Help;Desk;HD;Day2Day;Cloud;ID;Internal;Admin-Helpdesk-AD;Help Desk;Admin-Helpdesk-AD@contoso.com;US;FALSE;;FALSE;;;2;')
+}
+T 'blank address + forwarding off -> no PIM-DOMAIN-001' (-not ((Codes $v) -contains 'PIM-DOMAIN-001'))
+
+# 'no' / '0' sentinels + forwarding off -> NO warning
+$v = Invoke-ScenarioValidation @{
+  'Account-Definitions-Admins' = @(
+    'A;One;A1;Day2Day;Cloud;ID;Internal;Admin-A1-ID;A One;Admin-A1-ID@contoso.com;US;FALSE;no;FALSE;;;2;',
+    'B;Two;B2;Day2Day;Cloud;ID;Internal;Admin-B2-ID;B Two;Admin-B2-ID@contoso.com;US;FALSE;0;FALSE;;;2;')
+}
+T "'no'/'0' sentinel addresses + forwarding off -> no PIM-DOMAIN-001" (-not ((Codes $v) -contains 'PIM-DOMAIN-001'))
+
+# the shared sentinel predicate the engine apply path also uses
+T 'Test-PimMailForwardAddressIsReal: FALSE/blank/no/0 -> not real' (
+    (-not (Test-PimMailForwardAddressIsReal -Value 'FALSE')) -and
+    (-not (Test-PimMailForwardAddressIsReal -Value '')) -and
+    (-not (Test-PimMailForwardAddressIsReal -Value $null)) -and
+    (-not (Test-PimMailForwardAddressIsReal -Value 'no')) -and
+    (-not (Test-PimMailForwardAddressIsReal -Value '0'))
+)
+T 'Test-PimMailForwardAddressIsReal: real email -> real' (
+    (Test-PimMailForwardAddressIsReal -Value 'contact@contoso.com') -and
+    (-not (Test-PimMailForwardAddressIsReal -Value 'not-an-address'))
+)
 
 Section 'LIFECYCLE SCENARIOS (create admin with schedule + TAP, etc.)'
 # Scenario: new employee next month -- provision 3 workdays before, TAP at 08:00

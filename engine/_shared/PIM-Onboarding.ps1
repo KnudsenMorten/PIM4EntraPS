@@ -94,15 +94,17 @@ function Send-PimGuestInvitation {
 
 function New-PimAccountToggleChange {
     # Self-service enable/disable of a MANAGED account (consultant / operation
-    # partner / any) -> a change-queue Update on Account-Definitions-Admins
-    # (Enabled bit). GATE at the caller; this only builds the change record.
+    # partner / any) -> a change-queue Update on Account-Definitions-Admins. The
+    # canonical column is AccountStatus (Enabled | Disabled) -- the engine flips the
+    # Entra accountEnabled bit + audits it. GATE at the caller; this only builds the
+    # change record (the engine stays the only writer to Entra).
     param(
         [Parameter(Mandatory)][string]$AccountName,
         [Parameter(Mandatory)][ValidateSet('enable','disable')][string]$Action,
         [string]$By = "$env:USERNAME"
     )
-    $enabled = ($Action -eq 'enable')
-    return New-PimChange -Entity 'Account-Definitions-Admins' -Key "$AccountName" -Op Update -By $By -Payload ([pscustomobject]@{ UserName = "$AccountName"; Enabled = $enabled })
+    $status = if ($Action -eq 'enable') { 'Enabled' } else { 'Disabled' }
+    return New-PimChange -Entity 'Account-Definitions-Admins' -Key "$AccountName" -Op Update -By $By -Payload ([pscustomobject]@{ UserName = "$AccountName"; AccountStatus = $status })
 }
 
 function Resolve-PimSelfServiceToggle {
@@ -119,4 +121,148 @@ function Resolve-PimSelfServiceToggle {
         return [pscustomobject]@{ allowed = $false; change = $null; reason = "not permitted: '$AccountName' is not one of your managed accounts (needs the enable-consultants capability)" }
     }
     return [pscustomobject]@{ allowed = $true; change = (New-PimAccountToggleChange -AccountName $AccountName -Action $Action -By $By); reason = 'ok' }
+}
+
+# --- GUEST INVITE INTO THE DELEGATION MODEL -------------------------------------
+# Inviting an external consultant is not just a B2B invitation -- the consultant
+# must land IN the group-centric delegation model: an Account-Definitions-Admins
+# row (UserType = Consultant, cloud guest) plus, optionally, a delegation into one
+# direct group (PIM-Assignments-Admins membership). The pure planner below builds
+# all three artefacts (invitation body + the two change-queue records) so they go
+# through the normal Review & Save flow; the engine remains the only writer to
+# Entra/Azure and the live invitation send (Send-PimGuestInvitation) is a separate
+# explicit step the operator confirms.
+
+function Test-PimPortalCanInviteGuest {
+    # May this portal-admin invite a guest? Requires the invite-guest capability;
+    # super-admins bypass. (managedAdmins is NOT checked here -- a guest is new, so
+    # there is nothing to match yet; the delegation target group is gated separately
+    # via Test-PimPortalCanManageGroup at the caller when a GroupTag is supplied.)
+    param([AllowNull()][object]$Profile, [switch]$IsSuperAdmin)
+    if ($IsSuperAdmin) { return $true }
+    if ($null -eq $Profile) { return $false }
+    $caps = @(@($Profile.capabilities) | ForEach-Object { "$_".ToLowerInvariant() })
+    return ($caps -contains 'invite-guest')
+}
+
+function New-PimGuestAdminRow {
+    # Build the Account-Definitions-Admins Create change for an invited guest. A
+    # guest is ALWAYS a cloud (Consultant) external account -- never on-prem AD.
+    # Initials/DisplayName are derived when not supplied (mirrors the admin-import
+    # path). UserName/UserPrincipalName default to the invited email.
+    param(
+        [Parameter(Mandatory)][string]$Email,
+        [string]$DisplayName,
+        [string]$FirstName,
+        [string]$LastName,
+        [string]$Company,
+        [string]$Department,
+        [string]$Notes,
+        [string]$By = "$env:USERNAME"
+    )
+    $email = "$Email".Trim()
+    if (-not $email) { throw "New-PimGuestAdminRow: Email is required." }
+    $disp = "$DisplayName".Trim()
+    if (-not $disp) {
+        $fn = "$FirstName".Trim(); $ln = "$LastName".Trim()
+        $disp = (@($fn, $ln) | Where-Object { $_ }) -join ' '
+        if (-not $disp) { $disp = ($email -split '@')[0] }
+    }
+    # Initials: from first+last, else first two alpha chars of the local part.
+    $ini = ''
+    if ("$FirstName".Trim() -and "$LastName".Trim()) {
+        $ini = ("$FirstName".Trim().Substring(0,1) + "$LastName".Trim().Substring(0,1)).ToUpperInvariant()
+    } else {
+        $lp = ($email -split '@')[0] -replace '[^A-Za-z]', ''
+        if ($lp.Length -ge 2) { $ini = $lp.Substring(0,2).ToUpperInvariant() } elseif ($lp) { $ini = $lp.ToUpperInvariant() }
+    }
+    $row = [ordered]@{
+        FirstName     = "$FirstName".Trim()
+        LastName      = "$LastName".Trim()
+        Initials      = $ini
+        TargetUsage   = 'Cloud'
+        TargetPlatform = 'ID'
+        UserType      = 'Consultant'           # external -> guest-eligible
+        AdminType     = 'external-guest'        # guest -> g- name prefix (§17)
+        Environment   = 'entra'                 # guest is always cloud/Entra -> -ID suffix
+        UserName      = $email
+        DisplayName   = $disp
+        UserPrincipalName = $email
+        ForwardMailsToContact = 'FALSE'
+        Company       = "$Company".Trim()
+        Notes         = "$Notes".Trim()
+        AccountStatus = 'Enabled'
+        Purpose       = 'Day2Day'
+    }
+    if ("$Department".Trim()) { $row['Department'] = "$Department".Trim() }
+    return New-PimChange -Entity 'Account-Definitions-Admins' -Key $email -Op Create -By $By -Payload ([pscustomobject]$row)
+}
+
+function New-PimGuestDelegationChange {
+    # Build the PIM-Assignments-Admins Create change that places the invited guest
+    # INTO a direct delegation group (membership = delegation). Eligible by default
+    # (PIM activation, least-privilege). The engine applies it like any membership.
+    param(
+        [Parameter(Mandatory)][string]$Email,
+        [Parameter(Mandatory)][string]$GroupTag,
+        [ValidateSet('Eligible','Active')][string]$AssignmentType = 'Eligible',
+        [int]$NumOfDaysWhenExpire = 0,
+        [string]$By = "$env:USERNAME"
+    )
+    $email = "$Email".Trim()
+    if (-not $email) { throw "New-PimGuestDelegationChange: Email is required." }
+    if (-not "$GroupTag".Trim()) { throw "New-PimGuestDelegationChange: GroupTag is required." }
+    $key = "$email|$($GroupTag.Trim())"
+    $payload = [ordered]@{
+        Username       = $email
+        GroupTag       = "$GroupTag".Trim()
+        AssignmentType = $AssignmentType
+        Action         = 'Add'
+        Permanent      = ($NumOfDaysWhenExpire -le 0)
+    }
+    if ($NumOfDaysWhenExpire -gt 0) { $payload['NumOfDaysWhenExpire'] = $NumOfDaysWhenExpire }
+    return New-PimChange -Entity 'PIM-Assignments-Admins' -Key $key -Op Create -By $By -Payload ([pscustomobject]$payload)
+}
+
+function New-PimGuestOnboardingPlan {
+    # End-to-end PLAN for inviting an external consultant as a guest INTO the
+    # delegation model (cloud only). Returns:
+    #   { ok; mode; invitation; changes[]; reason }
+    # changes[] = the Account-Definitions-Admins Create + (when a GroupTag is given)
+    # the PIM-Assignments-Admins Create -- both for Review & Save. The invitation is
+    # the body for Send-PimGuestInvitation; nothing is written here.
+    param(
+        [Parameter(Mandatory)][string]$Email,
+        [string]$DisplayName,
+        [string]$FirstName,
+        [string]$LastName,
+        [string]$Company,
+        [string]$Department,
+        [string]$Notes,
+        [string]$GroupTag,
+        [ValidateSet('Eligible','Active')][string]$AssignmentType = 'Eligible',
+        [int]$NumOfDaysWhenExpire = 0,
+        [bool]$Cloud = $true,
+        [string]$CustomMessage,
+        [string]$RedirectUrl = 'https://myapplications.microsoft.com',
+        [string]$By = "$env:USERNAME"
+    )
+    $email = "$Email".Trim()
+    if (-not $email) { throw "New-PimGuestOnboardingPlan: Email is required." }
+    $decision = Resolve-PimOnboardingMode -Cloud $Cloud -External $true -RequestedType 'guest'
+    if ($decision.mode -ne 'guest-invite') {
+        return [pscustomobject]@{ ok = $false; mode = $decision.mode; invitation = $null; changes = @(); reason = $decision.reason }
+    }
+    $disp = "$DisplayName".Trim()
+    if (-not $disp) { $disp = (@("$FirstName".Trim(), "$LastName".Trim()) | Where-Object { $_ }) -join ' ' }
+    $invitation = New-PimGuestInvitationBody -Email $email -DisplayName $disp -RedirectUrl $RedirectUrl -CustomMessage $CustomMessage
+    $changes = New-Object System.Collections.Generic.List[object]
+    $changes.Add((New-PimGuestAdminRow -Email $email -DisplayName $DisplayName -FirstName $FirstName -LastName $LastName -Company $Company -Department $Department -Notes $Notes -By $By))
+    if ("$GroupTag".Trim()) {
+        $changes.Add((New-PimGuestDelegationChange -Email $email -GroupTag "$GroupTag" -AssignmentType $AssignmentType -NumOfDaysWhenExpire $NumOfDaysWhenExpire -By $By))
+    }
+    return [pscustomobject]@{
+        ok = $true; mode = 'guest-invite'; invitation = $invitation
+        changes = $changes.ToArray(); reason = 'ok'
+    }
 }

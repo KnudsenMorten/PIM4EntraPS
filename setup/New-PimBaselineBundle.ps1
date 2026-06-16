@@ -14,8 +14,11 @@
     PUBLIC cert (engine/_shared/PIM-Baseline.ps1). The bundle is signed, not
     encrypted -- integrity + authenticity, full transparency.
 
-    SQL + blob are both reached over their private endpoints; no Graph here, so
-    no Azure.Core isolation needed.
+    SQL + blob are both reached over their private endpoints. Tokens (Azure SQL
+    + blob storage) are minted over PURE REST via PIM-Rest (SPN + certificate /
+    Managed Identity), so this script no longer needs Az.Accounts or Az.Storage
+    -- only the SqlServer module for the registry read (SQL data plane). The
+    blob upload uses the REST Put Blob API (Send-PimRestBlob).
 #>
 [CmdletBinding()]
 param(
@@ -28,15 +31,18 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-Import-Module SqlServer -ErrorAction Stop
-Import-Module Az.Storage -ErrorAction Stop
+Import-Module SqlServer -ErrorAction Stop      # SQL data plane only -- no Az.* / Microsoft.Graph
+
+# Pure-REST token acquisition + blob upload (drops Az.Accounts / Az.Storage).
+. (Join-Path (Split-Path -Parent $PSScriptRoot) 'engine\_shared\PIM-Rest.ps1')
+. (Join-Path (Split-Path -Parent $PSScriptRoot) 'engine\_shared\PIM-AccountRest.ps1')
 
 if (-not $CentralServer)  { $CentralServer  = (Get-Content C:\TMP\pim-sqlserver-name.txt -Raw).Trim() + '.database.windows.net' }
 if (-not $StorageAccount) { $StorageAccount = (Get-Content C:\TMP\pim-baseline-storage.txt -Raw).Trim() }
 
 # 1. Read the Owner=MSP baseline rows from the central registry.
-$sqlTok = (Get-AzAccessToken -ResourceUrl 'https://database.windows.net/').Token
-if ($sqlTok -is [securestring]) { $sqlTok = [System.Net.NetworkCredential]::new('', $sqlTok).Password }
+#    Azure SQL access token via REST (SPN cert / MI) -- no Get-AzAccessToken.
+$sqlTok = Get-PimRestToken -Resource 'https://database.windows.net'
 $rows = Invoke-Sqlcmd -ServerInstance $CentralServer -Database $Database -AccessToken $sqlTok -Encrypt Mandatory `
     -Query "SELECT UserName, DisplayName, FirstName, LastName, Initials, UsageLocation, Purpose, Ring, Template FROM pim.CentralAdmins WHERE Owner='MSP' AND Enabled=1 ORDER BY Ring"
 $rowObjs = @($rows | Select-Object UserName, DisplayName, FirstName, LastName, Initials, UsageLocation, Purpose, Ring, Template)
@@ -69,14 +75,15 @@ $doc = [ordered]@{
 }
 $docJson = ($doc | ConvertTo-Json -Depth 3)
 
-# 3. Upload to the private-endpoint blob (versioned + latest).
+# 3. Upload to the private-endpoint blob (versioned + latest) over REST
+#    (Put Blob API, OAuth bearer token) -- no Az.Storage module / account key.
 $tmp = Join-Path $env:TEMP ("baseline-v$version.json")
 [System.IO.File]::WriteAllText($tmp, $docJson, (New-Object System.Text.UTF8Encoding($false)))   # no BOM
-$ctx = New-AzStorageContext -StorageAccountName $StorageAccount -UseConnectedAccount
-foreach ($name in @("baseline-v$version.json", 'baseline-latest.json')) {
-    Set-AzStorageBlobContent -File $tmp -Container $Container -Blob $name -Context $ctx -Force | Out-Null
-    Write-Host "  uploaded $name"
-}
-Remove-Item $tmp -Force -ErrorAction SilentlyContinue
+try {
+    foreach ($name in @("baseline-v$version.json", 'baseline-latest.json')) {
+        Send-PimRestBlob -StorageAccount $StorageAccount -Container $Container -Blob $name -FilePath $tmp
+        Write-Host "  uploaded $name"
+    }
+} finally { Remove-Item $tmp -Force -ErrorAction SilentlyContinue }
 
 Write-Host "BASELINE PUBLISHED: v$version ($($rowObjs.Count) rows, signer $($cert.Thumbprint)) -> https://$StorageAccount.blob.core.windows.net/$Container/baseline-latest.json"
