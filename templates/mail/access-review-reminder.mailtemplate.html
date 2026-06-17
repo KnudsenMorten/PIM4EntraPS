@@ -1,0 +1,16 @@
+<!-- subject: Reminder: access review "{{ReviewName}}" is {{DueStatus}} -->
+<!-- tokens: ReviewerName, ReviewName, ScopeTarget, DueDate, DueStatus, PendingCount, ReviewUrl -->
+<!-- Sent to a reviewer when an access review is due/overdue with pending decisions. To customize: copy to access-review-reminder.mailtemplate.custom.html and edit, or override via the Manager (no rebuild). -->
+<html>
+<body style="font-family:Segoe UI,Arial,sans-serif; color:#24292f; font-size:14px;">
+  <p>Hello {{ReviewerName}},</p>
+  <p>You have an access review awaiting your decision. It is <b>{{DueStatus}}</b> with <b>{{PendingCount}}</b> item(s) still pending.</p>
+  <table cellpadding="4" style="border-collapse:collapse; font-size:14px;">
+    <tr><td><b>Review</b></td><td>{{ReviewName}}</td></tr>
+    <tr><td><b>Scope / target</b></td><td>{{ScopeTarget}}</td></tr>
+    <tr><td><b>Due</b></td><td>{{DueDate}}</td></tr>
+    <tr><td><b>Pending</b></td><td>{{PendingCount}}</td></tr>
+  </table>
+  <p><a href="{{ReviewUrl}}">Open the access review</a> to approve, deny, or recertify each item.</p>
+</body>
+</html>

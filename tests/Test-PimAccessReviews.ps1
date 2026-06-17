@@ -274,5 +274,94 @@ Assert "seed includes a completed review"        (@($attSeed.Overdue | Where-Obj
 Assert "seed evidence has mixed decisions"       ($attSeed.Evidence.Summary.Approved -ge 1 -and $attSeed.Evidence.Summary.Denied -ge 1 -and $attSeed.Evidence.Summary.Pending -ge 1)
 Assert "seed evidence items carry principals"    (@($attSeed.Evidence.Items | Where-Object { $_.PrincipalName }).Count -ge 1)
 
+# ---------------------------------------------------------------------------
+# 12. REVIEWER ASSIGNMENT (§H7) -- spec mapping + PATCH body + audit (pure).
+# ---------------------------------------------------------------------------
+Write-Host "-- reviewer assignment: spec mapping --" -ForegroundColor DarkCyan
+$eUpn = ConvertTo-PimReviewerScopeEntry -Spec 'alice@contoso.test'
+Assert "UPN -> /users/<upn>"                    ($eUpn.query -eq '/users/alice@contoso.test' -and $eUpn.queryType -eq 'MicrosoftGraph')
+$eUid = ConvertTo-PimReviewerScopeEntry -Spec 'user:11111111-1111-1111-1111-111111111111'
+Assert "user:<id> -> /users/<id>"               ($eUid.query -eq '/users/11111111-1111-1111-1111-111111111111')
+$eGrp = ConvertTo-PimReviewerScopeEntry -Spec 'group:22222222-2222-2222-2222-222222222222'
+Assert "group:<id> -> /groups/<id>"             ($eGrp.query -eq '/groups/22222222-2222-2222-2222-222222222222')
+$eMgr = ConvertTo-PimReviewerScopeEntry -Spec 'manager'
+Assert "manager -> managed special"             ($eMgr.special -eq 'manager')
+$threwR = $false; try { ConvertTo-PimReviewerScopeEntry -Spec '   ' | Out-Null } catch { $threwR = $true }
+Assert "blank spec throws (fail-closed)"        ($threwR)
+
+Write-Host "-- reviewer assignment: PATCH body + audit --" -ForegroundColor DarkCyan
+$nowA = [datetime]'2026-06-15T12:00:00Z'
+$pa = New-PimReviewerAssignmentPatch -Reviewers @('alice@contoso.test','group:g1','alice@contoso.test') -NowUtc $nowA -AssignedBy 'admin@x'
+Assert "patch dedups reviewers"                 (@($pa.body.reviewers).Count -eq 2)
+Assert "patch body wire = query+queryType"      ($pa.body.reviewers[0].query -eq '/users/alice@contoso.test' -and $pa.body.reviewers[0].queryType -eq 'MicrosoftGraph')
+Assert "patch audit records who/what/when"      ($pa.audit.action -eq 'access-review.assign-reviewers' -and $pa.audit.count -eq 2 -and $pa.audit.assignedBy -eq 'admin@x' -and $pa.audit.assignedUtc -match '^2026-06-15')
+$threwE = $false; try { New-PimReviewerAssignmentPatch -Reviewers @('',' ') -NowUtc $nowA | Out-Null } catch { $threwE = $true }
+Assert "empty reviewer set throws"              ($threwE)
+# PATCH body must serialize to a JSON LIST of reviewer scopes.
+$paJson = $pa.body | ConvertTo-Json -Depth 8 -Compress
+Assert "patch body serializes to JSON list"     ($paJson -match '"reviewers"' -and $paJson -match '"query"\s*:\s*"/users/alice@contoso.test"')
+
+# Set-PimAccessReviewReviewers -WhatIf must NOT call the network + return audit.
+Write-Host "-- reviewer assignment: Set-...-WhatIf (no network) --" -ForegroundColor DarkCyan
+$wiR = $null; $errR = $null
+try { $wiR = Set-PimAccessReviewReviewers -DefinitionId 'd1' -Reviewers @('alice@contoso.test') -AssignedBy 'admin@x' -WhatIf } catch { $errR = $_ }
+Assert "WhatIf returns skipped-whatif, no throw" ($null -eq $errR -and $wiR.status -eq 'skipped-whatif' -and $wiR.count -eq 1 -and $wiR.audit.action -eq 'access-review.assign-reviewers')
+
+# ---------------------------------------------------------------------------
+# 13. REMINDER due-computation (§H7) -- fires when due, suppressed otherwise. Clock injected.
+# ---------------------------------------------------------------------------
+Write-Host "-- reminders: due computation --" -ForegroundColor DarkCyan
+$refR = [datetime]'2026-06-15T00:00:00Z'
+$defR = [pscustomobject]@{ id='dR'; displayName='PIM4EntraPS review - PIM-Grp'; scope=[pscustomobject]@{ query='/groups/gR/transitiveMembers' } }
+$decPending = @([pscustomobject]@{decision='Approve'};[pscustomobject]@{decision='NotReviewed'})
+
+# Overdue + pending + never-reminded -> DUE.
+$stOver = Get-PimReviewReminderState -Instance ([pscustomobject]@{ id='iO'; status='InProgress'; endDateTime='2026-06-10T00:00:00Z' }) -Definition $defR -Decisions $decPending -NowUtc $refR -RemindWithinDays 7 -RepeatEveryDays 3
+Assert "overdue + pending -> reminder DUE"      ($stOver.due -and $stOver.isOverdue -and $stOver.window -eq 'overdue' -and $stOver.pendingCount -eq 1)
+# Due within window + pending -> DUE (dueSoon).
+$stSoon = Get-PimReviewReminderState -Instance ([pscustomobject]@{ id='iS'; status='InProgress'; endDateTime='2026-06-18T00:00:00Z' }) -Definition $defR -Decisions $decPending -NowUtc $refR -RemindWithinDays 7 -RepeatEveryDays 3
+Assert "due within window + pending -> DUE"      ($stSoon.due -and -not $stSoon.isOverdue -and $stSoon.window -eq 'dueSoon')
+# Far future -> NOT due.
+$stFar = Get-PimReviewReminderState -Instance ([pscustomobject]@{ id='iF'; status='InProgress'; endDateTime='2026-08-01T00:00:00Z' }) -Definition $defR -Decisions $decPending -NowUtc $refR -RemindWithinDays 7 -RepeatEveryDays 3
+Assert "far-future -> NOT due (outside window)"  (-not $stFar.due -and $stFar.window -eq 'none')
+# Completed -> NOT due.
+$stDoneR = Get-PimReviewReminderState -Instance ([pscustomobject]@{ id='iC'; status='Completed'; endDateTime='2026-06-10T00:00:00Z' }) -Definition $defR -Decisions $decPending -NowUtc $refR
+Assert "completed -> NOT due"                    (-not $stDoneR.due -and $stDoneR.reason -match 'completed')
+# No pending decisions -> NOT due.
+$stAllDone = Get-PimReviewReminderState -Instance ([pscustomobject]@{ id='iA'; status='InProgress'; endDateTime='2026-06-10T00:00:00Z' }) -Definition $defR -Decisions @([pscustomobject]@{decision='Approve'}) -NowUtc $refR
+Assert "all attested -> NOT due (nothing to chase)" (-not $stAllDone.due -and $stAllDone.reason -match 'pending')
+# Already reminded within repeat window -> NOT due (no spam).
+$stRecent = Get-PimReviewReminderState -Instance ([pscustomobject]@{ id='iR'; status='InProgress'; endDateTime='2026-06-10T00:00:00Z' }) -Definition $defR -Decisions $decPending -NowUtc $refR -RepeatEveryDays 3 -LastRemindedUtc '2026-06-14T00:00:00Z'
+Assert "reminded 1d ago -> suppressed"          (-not $stRecent.due -and $stRecent.reason -match 'already reminded')
+# Reminded outside the repeat window -> DUE again.
+$stStale = Get-PimReviewReminderState -Instance ([pscustomobject]@{ id='iR2'; status='InProgress'; endDateTime='2026-06-10T00:00:00Z' }) -Definition $defR -Decisions $decPending -NowUtc $refR -RepeatEveryDays 3 -LastRemindedUtc '2026-06-01T00:00:00Z'
+Assert "reminded 14d ago -> DUE again"          ($stStale.due)
+
+Write-Host "-- reminders: token shaping --" -ForegroundColor DarkCyan
+$tk = ConvertTo-PimReviewReminderTokens -Definition $defR -Instance ([pscustomobject]@{ id='iO'; endDateTime='2026-06-10T00:00:00Z' }) -ReminderState $stOver -ReviewerName 'alice@contoso.test' -ReviewUrl 'https://x/review'
+Assert "tokens carry reviewer/name/scope/due"   ($tk.ReviewerName -eq 'alice@contoso.test' -and $tk.ReviewName -eq 'PIM4EntraPS review - PIM-Grp' -and $tk.ScopeTarget -eq 'Group: gR' -and $tk.PendingCount -eq '1' -and $tk.DueStatus -match 'overdue')
+
+# ---------------------------------------------------------------------------
+# 14. Reminder seed (GUI offline preview) -- real reminder-state shaper.
+# ---------------------------------------------------------------------------
+Write-Host "-- reminder seed (GUI fallback) --" -ForegroundColor DarkCyan
+$seed2 = Get-PimAccessReviewAttestationSeed
+Assert "seed has a Reminders preview"           ($null -ne $seed2.Reminders -and @($seed2.Reminders).Count -ge 1)
+Assert "seed includes a DUE reminder"           (@($seed2.Reminders | Where-Object { $_.due }).Count -ge 1)
+Assert "seed due reminder carries recipients"   (@($seed2.Reminders | Where-Object { $_.due -and @($_.recipients).Count -ge 1 }).Count -ge 1)
+Assert "seed includes a NOT-due (completed) reminder" (@($seed2.Reminders | Where-Object { -not $_.due }).Count -ge 1)
+
+# ---------------------------------------------------------------------------
+# 15. Mail template present (the reminder send reuses the existing mail sender).
+# ---------------------------------------------------------------------------
+Write-Host "-- reminder mail template --" -ForegroundColor DarkCyan
+$tplPath = Join-Path $here '..\templates\mail\access-review-reminder.mailtemplate.html'
+Assert "access-review-reminder template exists"  (Test-Path -LiteralPath $tplPath)
+$tplText = if (Test-Path -LiteralPath $tplPath) { Get-Content -LiteralPath $tplPath -Raw } else { '' }
+Assert "template has subject + key tokens"       ($tplText -match '<!--\s*subject:' -and $tplText -match '\{\{ReviewName\}\}' -and $tplText -match '\{\{PendingCount\}\}')
+
+# No bulk reviewer auto-assign / mass-approve sneaked in with the reminder layer.
+Assert "no bulk auto-approve helper exists (still)" ($null -eq (Get-Command -Name 'Approve-PimAllAccessReviews','Set-PimAccessReviewDecisionsBulk' -ErrorAction SilentlyContinue))
+
 Write-Host ("`n=== RESULT: {0} passed, {1} failed ===" -f $pass,$fail) -ForegroundColor ($(if($fail){'Red'}else{'Green'}))
 if ($fail) { exit 1 }

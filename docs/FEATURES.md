@@ -29,6 +29,20 @@ endpoint or leaving credentials lying around.
   a fully unattended environment.
 
 ## 3. Setup / Deploy
+- **One command to stand up — or update — the whole solution.** A single "deploy
+  everything" entry brings up (or updates) the entire solution for an environment in the
+  right order: it makes sure the engine identity and its permissions exist, stands up the
+  hosting (containers or a server host), brings the database schema up to date safely, then
+  builds and deploys the latest app — and finally proves the result with an automated
+  validation. ✅ 2026-06-16
+- **Safe to run again any time.** The same command is both the installer and the updater:
+  anything already in the desired state is skipped, so re-running it only fixes what has
+  drifted. A preview ("what would happen") mode is the default, so you always see the plan
+  before anything changes.
+- **Proves itself, and undoes a bad deploy.** After deploying, it runs a live check of the
+  running app plus a tenant validation; if that fails, it automatically rolls the app back
+  to the previous known-good version and reports exactly what happened. A validation-only
+  mode re-checks an existing environment without changing anything.
 - **Repeatable, script-driven setup.** Deployment runs through setup scripts (container,
   VM, and MSP variants) rather than manual clicking, so every environment comes out the
   same way.
@@ -202,7 +216,22 @@ endpoint or leaving credentials lying around.
   permission, the tool no longer stops at a bare "access denied" — it names the precise
   permission to grant (for the automation identity) or the privileged role you need to
   activate (when you are signed in as yourself), and points at the one script that grants
-  it. No more guessing which consent is missing. *(✅ 2026-06-14)*
+  it. No more guessing which consent is missing. *(✅ 2026-06-14)* The same "name the exact
+  fix" guidance now also covers **Azure resource (RBAC) refusals** — an Azure
+  "AuthorizationFailed" is recognised as a missing **Azure role at the scope** (not a
+  directory consent), so the hint says to grant or activate the right Azure role on the
+  subscription / management group rather than pointing you at the wrong place — and the
+  newer workload connectors (Microsoft Defender XDR, Intune, and granting a group an app
+  role in any enterprise application) each name their own exact permission too. *(✅ 2026-06-17)*
+- **Tells you what to activate BEFORE you act — not after a failure.** When you are signed
+  in as yourself and start a privileged change (for example configuring a PIM policy,
+  managing an administrative unit, or assigning an app role), the tool checks up front
+  whether the directory role that action needs is **currently active** for you. If it is
+  only *eligible* and not yet activated, you get a clear "activate this role in PIM first"
+  prompt **before** the change is attempted — so you activate once and proceed, instead of
+  driving all the way to an "access denied" and then starting over. If the right role is
+  already active you are never interrupted, and an emergency super-admin path is never
+  blocked. *(✅ 2026-06-17)*
 - **Always shows the account picker — never reuses a stale login silently.** Interactive
   sign-in always lets you confirm which account you are using, and forces a fresh sign-in
   when the cached account is not the one you expected, so you can't accidentally act as the
@@ -270,6 +299,10 @@ endpoint or leaving credentials lying around.
   segmentation, and emergency super-admin access is never locked out.
 
 ## 11. GUI / Manager
+
+![PIM Manager — Home / Overview dashboard](img/manager-home.png)
+*The Manager opens on a Home dashboard: red/amber/green attention tiles for engine health, validation findings, break-glass, delegation by tier, gaps/orphans, expiring access and pending reviews.*
+
 - **Turn any Manager feature on or off in Settings — roll out gradually.** ✅ 2026-06-16 — every
   screen in the Manager (each tab and major panel) can be switched on or off from a **Features** panel in
   **Settings**, so you can introduce capabilities to your team **one at a time** rather than all at once.
@@ -287,6 +320,20 @@ endpoint or leaving credentials lying around.
   the underlying screens and carries an attention dot + per-item count, so what needs action is visible
   without opening every tab. The grouping is a pure navigation layer over the existing screens — nothing was
   removed or renamed, and the classic flat tab strip is still there underneath.
+
+  ![The consolidated six-menu navigation with a dropdown open](img/manager-nav.png)
+  *The ~20 flat tabs folded into six clearly-named top-level menus, each with an attention dot and per-item count.*
+
+- **In-context guidance + consistent panel states on every screen.** ✅ 2026-06-17 — every screen now
+  carries a short, collapsible **"what this is & how to use it"** banner at the top, so a first-time admin
+  always knows what a tab is for and the next step to take — no guessing. Across the whole Manager the
+  **loading, empty and error** moments look and read the same: a screen is never left blank, an "empty"
+  result says so in plain language (rather than showing nothing), and a problem is shown as a tidy,
+  readable message instead of a raw technical error. Screens that talk in terms of privilege **tiers and
+  planes** (the delegation map, role lookup and reports) include the same plain-language **tier / plane
+  legend** inline, so the vocabulary is explained right where it's used. The guidance can be collapsed once
+  you know your way around, and it's a presentation layer only — it changes nothing about how the Manager
+  behaves.
 - **Home / Overview — "what needs my attention" at a glance.** ✅ 2026-06-15 — the Manager now
   opens on a **Home** dashboard instead of dropping you straight into the map. It summarises the
   health of your privileged-access estate in clear red/amber/green tiles, each of which you can
@@ -313,6 +360,18 @@ endpoint or leaving credentials lying around.
   configured yet, the panel says so plainly ("configure to enable") and prepares the alert without
   sending — it never silently drops or fakes a notification. A **Send test alert** button confirms
   the wiring end-to-end.
+- **Alerts you can trust — a feed of what was pushed out, with proof of delivery.** ✅ 2026-06-17 —
+  alerting now keeps a durable **Recent alerts** feed: every alert that fired is recorded with **when**
+  it fired, **which event** it was, **who was notified**, and whether it was actually **delivered** or
+  only **prepared** (when no sender mailbox is configured yet). This turns a claim like "the owners were
+  notified when break-glass was used" into something you can **verify** — the feed is the proof. Two
+  more refinements ship with it: **access expiring soon** now actually raises an alert when the Manager
+  finds time-bound access about to lapse (previously it was an option you could tick but nothing fired
+  it), and a **debounce** stops the same recurring condition (for example, the same drift on every run)
+  from emailing you over and over — you get told once, not on a loop. The feed appears on the Home/Settings
+  **Alerting** panel with a one-line "delivered vs not delivered" summary, and a compact "Recent alerts"
+  rollup is on the **Home** dashboard. As with all PIM email, when no sender mailbox is configured the
+  alert is recorded honestly as "prepared, not delivered" — never faked.
 - **Operational policy — configure the defaults from the tool, not out-of-band.** ✅ 2026-06-16 — an
   **Operational policy** panel in **Settings** lets an administrator set the core operational defaults
   in one place, so they no longer have to be applied by hand or left unset:
@@ -326,6 +385,9 @@ endpoint or leaving credentials lying around.
   see in the panel is what the system actually uses. Invalid entries are **rejected or safely clamped
   with an explanation shown in the panel** — never silently dropped — and a sensible secure default is
   always in place (MFA on, conservative durations) even before anything is customised.
+
+  ![Settings — naming conventions and operational policy](img/manager-settings.png)
+  *Settings is where you tune naming conventions, operational-policy defaults, alerting and the per-screen feature toggles — all persisted to the store the engine reads.*
 - **"Who can do what" report — and the reverse.** ✅ 2026-06-16 — a **Reports** tab answers the two
   questions every access audit starts with, instantly and with evidence to hand to security or auditors:
   - **Pick a person → everything they can reach.** See every privileged target the person can
@@ -336,16 +398,48 @@ endpoint or leaving credentials lying around.
     or target, again with the path. It honestly reports zero when nothing grants a role.
   Both views read the live delegation model (the same data the Delegation Map draws), and both are
   **printable and exportable to CSV**.
+
+  ![Reports — "who can do what", showing a person's reachable targets and the exact granting path](img/manager-reports.png)
+  *The Reports tab: pick a person to see every target they can reach (and the exact granting path), or pick a role to see who can activate it.*
+- **Tier-impact report — every user who can reach your most privileged assets.** ✅ 2026-06-17 — a
+  third **Reports** mode answers the question a security review opens with: *who can reach a Tier-0 or
+  Tier-1 target?* It lists **every** user with a path to high-privilege access — and crucially it counts
+  reach **inherited through nested groups**, not just roles assigned to a person directly, so it surfaces
+  the hidden privilege a flat "what roles does this person hold" list misses entirely. Each row shows the
+  user, the **highest tier** they can reach (Tier-0 flagged most strongly), **how many** distinct
+  high-tier targets they reach, the **worst** target, whether they get there **directly or through a
+  nested group**, and the **exact granting path**. The list is sorted most-privileged-first, with a
+  one-line summary (how many of all scanned users can reach Tier-0 vs top out at Tier-1), and a switch to
+  narrow it to **Tier-0 only**. It reads the same live delegation model the Delegation Map and the other
+  reports use — so it is real reachability, never a guess — and is **printable and exportable to CSV** for
+  an audit or a board report. When nothing reaches high tier it says so honestly rather than inventing
+  rows. *(Offline-verified end-to-end against a booted Manager; the hosted Manager GUI smoke is the live
+  gate before publish.)*
 - **Global search — one box, jump to any object.** ✅ 2026-06-16 — a search box in the header finds any
   **person, group, role, scope or tag** across the whole estate and takes you straight to it: a person or
   role result opens the matching "who can do what" report; a group, scope or tag focuses it on the
   Delegation Map. No more hunting through grids to find the object in question.
-- **Export everywhere — CSV and print on every operational view.** ✅ 2026-06-16 — the **Reports**,
-  **Delegation Map**, **Validate**, **Access Review** and **Audit** views each carry an **Export CSV** and
-  **Print** action, so any screen can become evidence for a review, a ticket or a management report without
-  re-keying. Exports are spreadsheet-safe — values that could be misread as formulas are neutralised, so a
-  CSV opened in Excel can never execute injected content. Printing opens a clean, titled, tenant-stamped
-  page (date + row count), not the whole application.
+- **Export everywhere — CSV and print on every operational view.** ✅ 2026-06-16 (Role Lookup + active
+  assignments added ✅ 2026-06-17) — the **Reports**, **Delegation Map**, **Validate**, **Access Review**
+  and **Audit** views each carry an **Export CSV** and **Print** action, so any screen can become evidence
+  for a review, a ticket or a management report without re-keying. The same one-click export now also covers
+  the **Role Lookup** tab — in all four of its modes — and the **Maintenance** "active assignments" list:
+  - **Role permissions for a least-privilege ticket.** From *what a role can do*, export the role's concrete
+    permissions (every allowed and excluded action, with its area) straight into a ticket — no retyping a
+    permission set by hand.
+  - **The narrowest role for an action.** From *find roles by action*, export the ranked, least-privilege-first
+    list of roles that grant an operation (with each role's total permission count and whether it grants the
+    action only through a broad wildcard), so a reviewer can see and justify the tightest fit.
+  - **Who can activate a role — with the path.** From *who can activate a role*, export every person who can
+    reach it together with the exact granting path, as genuine audit evidence.
+  - **A role-vs-role split.** From *compare two roles*, export who can activate both versus only one.
+  - **Who has what is active right now.** From the **Maintenance** view, export the live, currently-active
+    privileged assignments shown (principal, role/group, scope, type, when it was activated and when it
+    expires, and the justification) as a point-in-time "who has access" extract for a review or audit.
+
+  Exports are spreadsheet-safe — values that could be misread as formulas are neutralised, so a CSV opened in
+  Excel can never execute injected content. Printing opens a clean, titled, tenant-stamped page (date + row
+  count), not the whole application.
 - **Browser-based delegation editor — "PIM Manager".** Create, map, delete, bulk-edit,
   revoke and clone delegations through a browser grid with guided wizards.
 - **Role tiers with the right powers.** Reader, Admin, Super-Admin and Delegated roles.
@@ -390,6 +484,10 @@ endpoint or leaving credentials lying around.
   pre-commit snapshots per data set and lets you **roll back to any of them** in one click. The most
   recent backups are kept automatically (older ones are pruned), so the safety net stays tidy. This
   applies whether the Manager is running against the central SQL store or a local file store.
+
+  ![Review & Save — the keyed diff and commit gate](img/manager-review-save.png)
+  *Review & Save: a keyed diff (reordering a row is not a change) and an explicit commit gate — every save is backed up first, all-or-nothing, and reversible.*
+
 - **Authoring panel.** ✅ 2026-06-15 — a dedicated **Authoring** tab puts the bulk-attach, clone,
   admin-import and admin-move helpers behind simple forms. Each action composes the rows for you
   and stages them straight into the pending list, so you finish on the familiar **Review & Save**
@@ -417,6 +515,36 @@ endpoint or leaving credentials lying around.
   you straight to the Approvals tab to raise the request; it uses the **same approval queue and audit
   trail** as the rest of the platform, so there is nothing new to learn. *Why it matters:* the changes
   that could do the most damage can no longer be made by a single person without an independent check.
+- **Approval-gated offboarding — request, approve, then execute.** ✅ 2026-06-17 — disabling or
+  offboarding an account is now a **deliberate, two-person, recorded** flow instead of a single
+  unguarded click. One administrator **raises** an offboard request (with a justification and ticket); a
+  **different** administrator **approves** it on the Approvals tab — **nobody can approve their own
+  request**; and only then can an administrator **execute** it. Executing runs the **guided offboard
+  sequence** — disable the account, revoke its active access, and **schedule** (never immediately
+  perform) deletion — through the platform's existing account-status path, and the request is **consumed
+  once** so it can never run a second time. The flow **cannot run automatically** and refuses to act on
+  an **empty** target outright or on a **bulk / multi-account** target without an explicit extra
+  confirmation; the platform's mass-change safety brake and the protection for break-glass / emergency
+  accounts **still apply and are never overridden** by an approval. *Why it matters:* offboarding is
+  destructive and irreversible enough that it deserves the same human-approved path as onboarding —
+  directly addressing the class of accidental mass-disable incident the safety brake was built to
+  prevent.
+- **Approval-gated bulk revoke — preview, approve, then execute.** ✅ 2026-06-17 — revoking many active
+  privileged assignments at once is the single most destructive thing you can do in the Manager, so it is
+  no longer a raw, one-click action. The tab where it lives is now clearly named **Maintenance & Revoke**
+  (with an up-front warning) so it is never buried behind an innocuous label. Before anything happens you
+  get a **what-if preview** — exactly which assignments would be revoked, which **break-glass / emergency
+  accounts are protected and skipped**, and whether the batch is large enough to need a **second-person
+  approval**. A **small** batch can be revoked after a typed confirmation, as before. A **large** batch
+  (over a configurable safety threshold) is **blocked until a recorded approval exists**: one administrator
+  raises a *revoke* request, a **different** administrator approves it on the Approvals tab — **nobody can
+  approve their own request** — and only then does the revoke run. Every revoke is **audited** (who, what,
+  when, and the business justification, which is mandatory), break-glass accounts are **always excluded**
+  whether or not there is an approval, and an approved large-batch request is **consumed once** so it can
+  never silently run again. *Why it matters:* one click could previously strip live access across the
+  estate with no preview and no record — exactly the class of incident the platform's mass-change safety
+  brake exists to prevent; bulk revoke now gets the same human-approved, fully-recorded treatment as
+  offboarding.
 - **Onboarding panel.** ✅ 2026-06-15 — a dedicated **Onboarding** tab to **invite an external
   consultant as a guest** straight into the delegation model (it prepares the invitation and the
   account + group placement for you to review and commit) and to **enable or disable a managed
@@ -429,13 +557,19 @@ endpoint or leaving credentials lying around.
   anything. When the tenant connection (or directory-read access) isn't available yet, it shows a
   clear "not available yet — connect and retry" message with a one-click **Retry**, rather than a
   technical error.
-- **Role Lookup answers all three role questions — and forgives a typo.** ✅ 2026-06-16 — the
-  Role Lookup tab now does far more than show a role's permissions, with three modes you switch
-  between:
+- **Role Lookup answers every role question — and forgives a typo.** ✅ 2026-06-16
+  (search-by-action added ✅ 2026-06-17) — the Role Lookup tab now does far more than show a role's
+  permissions, with four modes you switch between:
   - **What a role can do** — the permission drill-down above, now **typo-tolerant**: a misspelled
     or partial role name no longer errors out. Instead you get a ranked **"did you mean…"** list of
     the closest real role names; click one to look it up. A name that genuinely matches nothing
     simply shows no suggestions — never a technical error.
+  - **Find roles by action** — the inverse question. When you know the **operation** you need to
+    delegate (for example "update a user's password"), type the action and get **every role that
+    grants it, ranked least-privileged first** (fewest total permissions), each with the matched
+    permission(s). A role that grants the action only through a broad wildcard is flagged "broad" and
+    ranked last, so the narrowest fit is always at the top — exactly what you want for a
+    least-privilege request. A namespace wildcard also works to find every role that touches an area.
   - **Who can activate a role** — the reverse question. Pick a role and see **every person who can
     activate it**, each with the **exact path** that grants it (which role group, through which
     nested groups). It honestly reports "no one" when nothing grants the role. This reads the same
@@ -443,6 +577,9 @@ endpoint or leaving credentials lying around.
   - **Compare two roles** — pick two roles and instantly see **who can activate both** versus **who
     can activate only one**, side by side — ideal for spotting over-lapping privilege or confirming
     a least-privilege split. Everything stays read-only.
+
+  ![Role Lookup — what a role can do, find roles by action, who can activate it, compare two](img/manager-role-lookup.png)
+  *Role Lookup's modes: what a role can do, find the least-privileged role for an action, who can activate a role, and comparing two roles side by side — read-only and typo-tolerant.*
 - **Cutover ceremony panel.** ✅ 2026-06-15 — a guided **Cutover** tab that walks an operator
   through moving the configuration store from files to a database, one gated step at a time
   (check → upgrade → import → switch → re-check → finalise). It shows exactly which step is next,
@@ -450,11 +587,27 @@ endpoint or leaving credentials lying around.
   The source files are only ever read, the final "make it authoritative" step is confirmed
   explicitly, and the system refuses to finalise onto anything other than a production-grade
   database.
+- **Abort a cutover before the point of no return — and a stage audit you can actually read.** ✅ 2026-06-17 —
+  a database cutover is a multi-step ceremony, and until now there was no clean way to change your mind
+  partway through. You can now **abort** a cutover at any time before you finalise it. Aborting puts you
+  back exactly where you started: it returns the configuration source to your existing files (so the
+  Manager reopens on the file store), and because the source files are only ever **read** during a
+  cutover, nothing of yours was changed — the abort is completely safe. The Cutover tab shows, in plain
+  language, exactly what the abort will do before you confirm it. **Finalise is still the point of no
+  return** — once you have made the database authoritative, abort is no longer offered (start a fresh
+  forward migration instead). At the same time, the **per-step audit is now human-readable** rather than a
+  wall of raw technical data: each completed step is summarised in plain sentences (what the pre-check
+  found and what the upgrade will change, how many rows were imported per area, when the source was
+  flipped, and so on), so an admin can read the trail of what the ceremony did at a glance. *(Offline-verified
+  end-to-end against a real local database; the hosted Manager GUI smoke is the live gate before publish.)*
 - **Clearer top banner — you always know which tenant you're working in.** ✅ 2026-06-15 — the
   banner now shows the **connected tenant by name with its ID beside it**, grouped under a clear
   *Tenant* label, and (when you manage more than one) the **instance/environment switcher under its
   own label** — no more jumbled run-on text. The tenant name and ID are read from your real
   connection, and the *mode / source / generated* status reads cleanly on a single line.
+![Delegation Map — admin to role group to permission bundle to target, with the risk overlay on](img/manager-delegation-map.png)
+*The Delegation Map traces admin → role group → permission bundle → target, with a live risk overlay highlighting orphans, stale and over-privileged nodes.*
+
 - **Delegation Map now spells out the actual permissions and their targets.** ✅ 2026-06-15 —
   the Delegation Map's fourth column, **Permissions & Targets**, no longer leaves you guessing.
   Select any capability bundle or role group and you see exactly what it grants, grouped into
@@ -482,6 +635,43 @@ endpoint or leaving credentials lying around.
   not a fixed number, so it stays meaningful whether you have ten delegations or ten thousand. Hover any
   flagged box for the exact reason. Turn the overlay off to return to the plain map. The visual now drives a
   hunt for what to clean up, instead of just showing the estate.
+- **Revoke a grant straight from the Delegation Map.** ✅ 2026-06-17 — the map could already *add* a grant
+  from the visual; now you can also *remove* one. Select a node the risk overlay flagged (or any node that
+  participates in a grant) and choose **Stage removal**, and the Manager works out exactly which assignment
+  rows that revocation touches — the admin's membership, a nested group, or the role/AU/Azure grant that
+  attaches a target — and stages their removal. It is never a one-click delete: the removal goes through the
+  **same safe path as every other change** — a clear preview that shows precisely which rows will be removed
+  (with a loud destructive notice), the second-person approval gate when the grant being revoked is privileged
+  (a *different* administrator must approve it first), and the Review & Save commit with its automatic backup
+  and one-click undo. So you can hunt for over-privileged or orphaned access on the map and act on it right
+  there, without ever leaving the picture, and without any risk of an accidental destructive write.
+- **Template Rollout — a reviewable register of every exemption, with revoke.** ✅ 2026-06-17 — an exemption is
+  a deliberate, time-boxed waiver that stops one missing template item from being flagged as a gap. You could
+  always grant one, but until now you couldn't *see* the ones you had — so they quietly piled up and only ever
+  ended when each lapsed on its own. The Template Rollout screen now shows an **active-exemptions register** for
+  the selected template: every waiver with its item, the reason, who approved it, its expiry, **how many days
+  are left**, and a clear status — **Active**, **Expiring soon** (within 30 days), **Expired**, or **Invalid**
+  (a waiver with no usable expiry, which never suppressed a gap and is surfaced so you can clean it up). The
+  list is sorted soonest-to-lapse first, so what needs attention is at the top, and a one-line summary tells you
+  the totals at a glance. Each row has a **Revoke** button (administrator only) that ends the waiver
+  immediately and re-checks its item on the next reconcile — so exemptions can be reviewed and retired
+  deliberately instead of accumulating out of sight. Every exemption still requires an expiry, exactly as
+  before. *(Offline-verified; the hosted Manager GUI smoke is the live gate before publish.)*
+- **Template Rollout across the whole fleet — see and drive conformance for every tenant from one place.** ✅ 2026-06-17 —
+  the Template Rollout screen used to show only the tenant you were connected to: to check whether ten managed
+  tenants were current you had to switch into each one in turn. It now has a **This tenant / Fleet (all tenants)**
+  switch. The **Fleet** view shows a single **tenants × templates matrix**: one row per managed tenant, one column
+  per approved template, and each cell tells you at a glance whether that tenant is **up to date**, **behind by N
+  versions**, **never deployed**, or **ahead** (on a newer version than the approved one — worth a look). Tenants
+  that need attention sort to the top, and a one-line summary tells you how many tenants are fully current versus
+  behind on at least one template. Underneath, a **ring-wide rollout** view lets you pick a template and see, per
+  **ring band** (rollout wave), how many tenants a wave to that ring would touch and which of them are behind — so
+  you can plan "roll this version to the early ring first, then the rest" instead of guessing. The actual deploy to
+  each tenant still happens through the same proven, ring-gated, dry-run-first path as before (the fleet view is the
+  bird's-eye planner; it never writes to a tenant by itself), and only **approved** templates ever appear as columns
+  (a draft is never rolled out). *Why it matters:* a managed-service provider can finally see template conformance
+  across the entire fleet — and decide where a rollout should go next — from one screen, instead of one tenant at a
+  time. *(Offline-verified end-to-end against a booted Manager; the hosted Manager GUI smoke is the live gate before publish.)*
 - **Delegation Map reads Excel-saved exports correctly — no more "empty map" on a valid file.** ✅ 2026-06-16 —
   when your delegation data comes from a spreadsheet (saved as a semicolon CSV), the column headings are
   often wrapped in quotation marks and the first heading can carry an invisible byte-order mark, and people
@@ -565,6 +755,20 @@ endpoint or leaving credentials lying around.
   Sign-ins to the Manager are now recorded too, so the Logins filter reflects real activity. The
   view is strictly read-only — it reflects the tamper-evident, append-only audit record and never
   changes anything.
+- **Audit you can defend — full history, before/after, and export the whole trail.** ✅ 2026-06-17 —
+  the Audit tab now answers an auditor's hardest questions. **Reach the whole history:** a **window**
+  selector lets you look at the **last 3 months**, the **last 12 months**, or **all history** — every
+  month of activity the system has on record, not just the most recent quarter — and a **From / To date
+  range** narrows to exactly the period you need. **See what changed:** every entry now shows a clear
+  **before → after** summary of the change (for example, *Account enabled: (none) → True*, or
+  *Approval required: No → Yes*), with unchanged details left out and creations and removals labelled, so
+  "show me the before and after" is answered right in the row. **Export the whole trail:** alongside the
+  existing **Export CSV / Print** of the page on screen, a new **Export full trail (CSV)** button downloads
+  **every matching event across the selected window** — honouring your current category, search and date
+  filters — as a spreadsheet that **includes the before/after change column**. The export is Excel-ready
+  (UTF-8, ISO timestamps that read the same on any machine) and hardened against spreadsheet
+  formula-injection, so it is safe to open and to hand to an auditor as ticket evidence or a recertification
+  record. As before, the whole view is strictly read-only.
 - **Support tab — a one-click self-check and a safe bundle to hand off for help.** ✅ 2026-06-16 —
   when something is not working, the **Support** tab now gives you a first-line diagnostics you can run
   yourself. **Run checks** tests the three things the Manager depends on — the **database**, **Microsoft
@@ -590,6 +794,21 @@ endpoint or leaving credentials lying around.
   apply still goes through the normal approval gate and lands in the audit trail. *Why it matters:* drift
   from intent is surfaced instead of going unnoticed, and correcting it is one reviewed click rather than a
   manual hunt-and-fix.
+- **Access Reviews you can actually complete — attest, assign, and chase from the portal.** ✅ 2026-06-17 —
+  the **Access Review** tab is no longer read-only. For each review you can open **Review items** and record a
+  per-person decision — **Approve** (keep access), **Deny** (remove access), or **Recertify / Don't-know** —
+  one at a time, each with a required justification; every decision is written back to the review and lands in
+  the audit trail (who decided what, when). You can **assign the reviewers** for a campaign directly from the
+  same place (by email address, object id, a group, or "manager"), so you decide who is asked to attest without
+  leaving the tool. A **Send reminders** action emails the reviewers of every review that is **overdue or due
+  soon and still has pending items** — it previews exactly who would be contacted before anything is sent,
+  never chases a finished review or one with nothing left to decide, and respects a sensible re-send interval so
+  nobody is spammed. Finally, **Export** produces the **evidence** an auditor needs — the per-person record of
+  who attested what, with the justification and outcome. *Why it matters:* a recertification campaign can be
+  run to completion in one place — assign, attest, remind, and prove it — instead of chasing reviewers across
+  email and the Entra portal. (Recording decisions and assigning reviewers require the Access Review read-write
+  permission on the Manager identity; until it is granted the tool shows an honest "permission not granted yet"
+  message rather than failing, and renders sample data so the surface is never blank.)
 
 ## 12. Notifications / Email
 - **Built-in, template-driven email.** The engine sends notifications (new admin, new role,

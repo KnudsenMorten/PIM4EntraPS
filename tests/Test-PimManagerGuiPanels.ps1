@@ -225,5 +225,65 @@ T "settings: TagPrefixToCsv hidden from naming editor"         ($html -match "NA
 T "server: /api/settings/approvers/import endpoint"            ($ps -match "/api/settings/approvers/import")
 T "server: calls Import-PimApproversFromCsv"                   ($ps -match 'Import-PimApproversFromCsv')
 
+# --- In-context guidance + consistent empty/loading/error states (s28d) -------
+# A thin, consistent UX layer over the existing tabs: every major tab gets a
+# collapsible "what-this-is + how-to" guidance banner, and renderers use shared
+# loading/empty/error helpers so a panel is never blank or shows a raw error.
+# GUI-only -- no new endpoints (Test-PimGuiEngineAlignment stays green).
+# CSS hooks for the guidance banner + the three consistent states are present.
+T "css: .tab-guide guidance banner styled"        ($html -match '\.tab-guide\s*\{')
+T "css: .pim-state base block styled"             ($html -match '\.pim-state\s*\{')
+T "css: .pim-state.loading variant"               ($html -match '\.pim-state\.loading\s*\{')
+T "css: .pim-state.empty variant"                 ($html -match '\.pim-state\.empty\s*\{')
+T "css: .pim-state.error variant"                 ($html -match '\.pim-state\.error\s*\{')
+# The guidance registry + the helpers exist.
+T "guidance registry present (TAB_GUIDANCE)"      ($html -match 'var TAB_GUIDANCE\s*=')
+T "guidance builder present (tabGuidanceHtml)"    ($html -match 'function tabGuidanceHtml\(')
+T "guidance injector present (injectTabGuidance)" ($html -match 'function injectTabGuidance\(')
+T "state helper: stateLoading"                    ($html -match 'function stateLoading\(')
+T "state helper: stateEmpty"                      ($html -match 'function stateEmpty\(')
+T "state helper: stateError"                      ($html -match 'function stateError\(')
+# switchTab injects the guidance banner (so every tab carries it).
+T "switchTab calls injectTabGuidance"             ($html -match 'function switchTab\([\s\S]{0,400}injectTabGuidance\(name\)')
+# Injection is idempotent (re-entering a tab won't duplicate the banner) and is
+# prepended as the panel's first child (survives renderer body rewrites).
+T "injection guards against duplicates"           ($html -match "injectTabGuidance\([\s\S]{0,400}querySelector\(':scope > \.tab-guide'\)")
+T "injection prepends into the panel"             ($html -match 'insertBefore\(node, panel\.firstChild\)')
+# The banner is a collapsible <details> with the what + how-to copy.
+T "banner is a collapsible <details>"             ($html -match "class=`"tab-guide`"")
+T "banner carries a 'what' line (tg-what)"        ($html -match "class='tg-what'|tg-what")
+T "banner carries 'how-to' steps (tg-how)"        ($html -match 'tg-how')
+# Every major tab has a guidance entry in the registry (each is what+how).
+foreach ($tab in 'home','map','new','validate','save','revoke','approvals','accessreview','grid','authoring','onboarding','roleperms','governance','audit','reports','conformance','cutover','jobs','settings','support') {
+    T "guidance entry for tab: $tab" ($html -match ("\b" + [regex]::Escape($tab) + ":\s*\{\s*title:"))
+}
+# Tier/plane legend is reused inside guidance for the tabs that use that
+# vocabulary (Map, Role Lookup, Reports) via the shared homeLegendHtml().
+T "guidance reuses the tier/plane legend"         ($html -match "g\.legend && typeof homeLegendHtml === 'function'")
+T "map guidance flags the legend"                 ($html -match "map:\s*\{[\s\S]{0,400}legend:\s*true")
+T "roleperms guidance flags the legend"           ($html -match "roleperms:\s*\{[\s\S]{0,400}legend:\s*true")
+T "reports guidance flags the legend"             ($html -match "reports:\s*\{[\s\S]{0,400}legend:\s*true")
+# Major renderers route their top-level load failure through the shared
+# stateError() helper (consistent error rendering, no raw error string).
+foreach ($who in 'Failed to load overview','Failed to load templates','Failed to load settings','Could not load approvals','Could not load access reviews','Could not load audit trail','Failed to load cutover state','Failed to load jobs') {
+    T "stateError used for: $who" ($html -match ("stateError\('" + [regex]::Escape($who) + "'"))
+}
+# No retrofitted renderer still emits the old raw-coloured error div for these.
+T "no raw error div left for overview"            (-not ($html -match "color:#cf222e`">Failed to load overview"))
+T "no raw error div left for audit trail"         (-not ($html -match "color:#cf222e`">Could not load audit trail"))
+
+# --- FLEET conformance view (REQUIREMENTS.md s28 [H8]) -------------------------
+# The Template Rollout tab gains a 'This tenant' / 'Fleet (all tenants)' toggle and a
+# tenants x templates matrix + ring-wide rollout view, engine-backed via the two new
+# endpoints. Assert the renderers + their wiring exist (no dead control).
+T "fleet: renderFleetConformance defined"         ($html -match 'function renderFleetConformance')
+T "fleet: confView toggle helper defined"         ($html -match 'function confViewToggle')
+T "fleet: view toggle is wired"                   ($html -match 'function wireConfViewToggle')
+T "fleet: tenant view renders the toggle"         ($html -match "confViewToggle\('tenant'\)")
+T "fleet: matrix calls /api/conformance/fleet"    ($html -match "api\('GET',\s*'/api/conformance/fleet'\)")
+T "fleet: ring plan calls /api/conformance/ring-plan" ($html -match "/api/conformance/ring-plan\?template=")
+T "fleet: matrix load error via stateError"       ($html -match "stateError\('Failed to load the fleet matrix'")
+T "fleet: ring-plan renderer defined"             ($html -match 'function loadFleetRingPlan')
+
 Write-Host ("`n RESULT: {0} pass, {1} fail" -f $pass, $fail) -ForegroundColor $(if ($fail) { 'Red' } else { 'Green' })
 if ($fail) { exit 1 }

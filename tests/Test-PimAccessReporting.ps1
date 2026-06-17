@@ -55,6 +55,12 @@ T 'initGlobalSearch defined + booted'       ($html -match 'function initGlobalSe
 T 'global search calls /api/search'         ($html -match '/api/search\?q=')
 T 'shared CSV export helper defined'        ($html -match 'function downloadCsv\(')
 T 'shared print helper defined'             ($html -match 'function printTable\(')
+# [L5]/[H5] -- Role Lookup (all 4 modes) + Maintenance active-assignments now export.
+T 'role-lookup permissions view exports'    ($html -match "wireExportBar\('rpPerm'")
+T 'role-lookup by-action view exports'       ($html -match "wireExportBar\('baMatch'")
+T 'role-lookup reverse view exports'         ($html -match "wireExportBar\('rvReach'")
+T 'role-lookup compare view exports'         ($html -match "wireExportBar\('cmpCmp'")
+T 'active-assignments view exports'          ($html -match 'id="revExportBar"' -and $html -match 'revExpCsv')
 
 # Server handlers exist (the three §26a read endpoints).
 T 'server handles GET /api/access-report/who-can'  ($srv -match "\`$path -eq '/api/access-report/who-can' -and \`$method -eq 'GET'")

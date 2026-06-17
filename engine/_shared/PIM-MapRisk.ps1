@@ -379,3 +379,241 @@ function Get-PimMapRiskOverlay {
         overprivIds = @($overPriv.ToArray())
     }
 }
+
+# =============================================================================
+# STAGE-A-REMOVAL FROM THE MAP  (REQUIREMENTS §28 [M8] residual)
+# =============================================================================
+# The Delegation Map can already STAGE ADDS (admin->group, role-group nest); the
+# residual is staging a REMOVAL (revoke a grant) directly from a flagged node or
+# edge. This is the PURE core that turns a map selection into the row-level
+# revocation plan -- WHICH assignment rows must be removed, from WHICH base, and
+# the resulting "after" row set for that base. It does NOT write anything: the
+# plan flows into the SAME Review & Save staged-change / keyed-diff / backup-undo
+# / sensitive-maker-checker commit path the rest of the Manager uses (a removal
+# is a 'delete-rows' replace-mode authoring action -- never a one-click bypass).
+#
+# Two selection modes, resolved against the SAME node/edge model the Map renders
+# (Build-PimGraphData output: { nodes; edges }):
+#   * EDGE  -- one concrete grant. The edge carries 'source_csv' (the owning base)
+#              and 'match' (the natural-key fields of its source row). Remove every
+#              row in that base whose key fields equal the edge's match. (A single
+#              grant edge usually maps to exactly one row.)
+#   * NODE  -- a flagged node (orphan target / over-privileged group / etc). Remove
+#              every assignment row that REFERENCES that node id on either end:
+#              admin rows into a group, nesting rows touching a group, and the
+#              role/AU/Azure grant rows attaching a target to its group. Each
+#              affected base gets its own plan entry.
+#
+# Reuses the edge 'match'/'source_csv' the graph builder already emits, and the
+# natural-key shapes Get-PimAuthoringRowKey/Get-PimStoreRowKey use, so the staged
+# removal keys IDENTICALLY to the keyed diff. PS 5.1-safe.
+
+# Map an edge kind / target id to the assignment base it lives in. Cosmetic and
+# non-assignment edges return '' (nothing to remove). Pure lookup.
+function Get-PimMapEdgeBase {
+    param([string]$Kind)
+    switch ("$Kind") {
+        'admin-to-group'        { return 'PIM-Assignments-Admins' }
+        'group-to-group'        { return 'PIM-Assignments-Groups' }
+        'group-to-entra-role'   { return 'PIM-Assignments-Roles-Groups' }
+        'group-to-au-role'      { return 'PIM-Assignments-Roles-AUs' }
+        'group-to-az-resource'  { return 'PIM-Assignments-Azure-Resources' }
+        default                 { return '' }   # au-to-au-role (cosmetic) + unknown
+    }
+}
+
+# The natural-key field list per assignment base. These are EXACTLY the fields the
+# graph builder puts in each edge's 'match' dict and the fields Get-PimStoreRowKey
+# keys on, so an edge match compares against a store row on the same identity.
+function Get-PimMapBaseKeyFields {
+    # Plural by intent (returns the LIST of key fields), matching this lib's
+    # existing Get-PimMapSearchResults naming.
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseSingularNouns', '')]
+    [CmdletBinding()]
+    param([string]$Base)
+    switch ("$Base") {
+        'PIM-Assignments-Admins'          { return @('Username','GroupTag') }
+        'PIM-Assignments-Groups'          { return @('TargetGroupTag','SourceGroupTag') }
+        'PIM-Assignments-Roles-Groups'    { return @('GroupTag','RoleDefinitionName') }
+        'PIM-Assignments-Roles-AUs'       { return @('GroupTag','AdministrativeUnitTag','RoleDefinitionName') }
+        'PIM-Assignments-Azure-Resources' { return @('GroupTag','AzScope','AzScopePermission') }
+        default                           { return @() }
+    }
+}
+
+# TRUE when $Row matches every key field carried in $Match (case-insensitive,
+# trimmed). Only the key fields are compared, so AssignmentType / day-count / other
+# columns differing does NOT prevent a match -- a revocation drops the grant row
+# regardless of its expiry settings. Pure.
+function Test-PimMapRowMatchesEdge {
+    param([Parameter(Mandatory)][string]$Base, [AllowNull()][object]$Row, [AllowNull()][object]$Match)
+    if ($null -eq $Row -or $null -eq $Match) { return $false }
+    $fields = Get-PimMapBaseKeyFields -Base $Base
+    if (@($fields).Count -eq 0) { return $false }
+    foreach ($f in $fields) {
+        $rv = "$(Get-PimMapNodeField -Node $Row -Name $f)".Trim()
+        $mv = "$(Get-PimMapNodeField -Node $Match -Name $f)".Trim()
+        # A blank match value would match everything -- refuse it (over-broad).
+        if ($mv -eq '') { return $false }
+        if ($rv.ToLowerInvariant() -ne $mv.ToLowerInvariant()) { return $false }
+    }
+    return $true
+}
+
+# Does an edge REFERENCE node id $NodeId on EITHER end (after the same column
+# orientation the reach model uses is irrelevant here -- we use the RAW edge ends
+# the graph builder emitted, which point at the real source/target ids)? Pure.
+function Test-PimMapEdgeTouchesNode {
+    param([AllowNull()][object]$Edge, [string]$NodeId)
+    if ($null -eq $Edge -or -not "$NodeId".Trim()) { return $false }
+    $s = "$(Get-PimMapNodeField -Node $Edge -Name 'source')"
+    $t = "$(Get-PimMapNodeField -Node $Edge -Name 'target')"
+    return ($s -eq "$NodeId" -or $t -eq "$NodeId")
+}
+
+function Resolve-PimMapRemovalPlan {
+    <#
+      PURE core for "stage a removal from the Delegation Map" ([M8] residual).
+
+      Given the live graph model ($Data: { nodes; edges } from Build-PimGraphData),
+      the CURRENT store rows per assignment base ($CurrentRows: a hashtable
+      base -> @(rows)), and ONE selection (an -EdgeMatch+-EdgeKind+-EdgeBase for a
+      single grant, OR a -NodeId for a flagged node), return the revocation plan:
+
+        @{
+          ok            # $true when at least one removable row was resolved
+          mode          # 'edge' | 'node'
+          selection     # echo of what was selected (id / edge key)
+          destructive   # ALWAYS $true for a removal (guard: a removal IS destructive)
+          removedCount  # total rows that will be removed across all bases
+          plans = @(    # one entry per affected base
+            @{ base; afterRows; removedRows; removedCount; mode='replace' }
+          )
+          reasons       # human strings (why nothing matched, etc.)
+        }
+
+      The per-base 'afterRows' is the current set MINUS the matched rows -- i.e. a
+      WHOLE-FILE REPLACE set. The caller stages that as a 'delete-rows' replace
+      authoring action, so it routes through Get-PimAuthoringPreview (which reports
+      the dropped rows as keyed REMOVES + a destructive flag), the sensitivity gate
+      (the removed PRIVILEGED rows trip maker/checker), and Review & Save commit +
+      backup/undo. NOTHING here writes; this only computes.
+
+      DESTRUCTIVE GUARD: a removal that resolves to ZERO rows returns ok=$false with
+      a reason (never an empty/over-broad plan). A node selection that would remove
+      EVERY row of a base is reported with its exact count so the operator sees the
+      blast radius before confirming -- it is never silently widened.
+    #>
+    [CmdletBinding(DefaultParameterSetName = 'Edge')]
+    param(
+        [Parameter(Mandatory)]$Data,
+        [Parameter(Mandatory)][hashtable]$CurrentRows,
+
+        # --- EDGE selection (a single concrete grant) ---
+        [Parameter(ParameterSetName = 'Edge')][AllowNull()][object]$EdgeMatch,
+        [Parameter(ParameterSetName = 'Edge')][string]$EdgeKind = '',
+        [Parameter(ParameterSetName = 'Edge')][string]$EdgeBase = '',
+
+        # --- NODE selection (a flagged node -> revoke everything touching it) ---
+        [Parameter(ParameterSetName = 'Node', Mandatory)][string]$NodeId
+    )
+
+    $reasons = New-Object System.Collections.ArrayList
+    $plansByBase = [ordered]@{}     # base -> @{ removedRows[]; }
+    $totalRemoved = 0
+
+    $addRemoval = {
+        param([string]$Base, [object]$Row)
+        if (-not "$Base".Trim() -or $null -eq $Row) { return }
+        if (-not $plansByBase.Contains($Base)) { $plansByBase[$Base] = New-Object System.Collections.ArrayList }
+        [void]$plansByBase[$Base].Add($Row)
+    }
+
+    if ($PSCmdlet.ParameterSetName -eq 'Edge') {
+        $base = "$EdgeBase".Trim()
+        if (-not $base) { $base = Get-PimMapEdgeBase -Kind $EdgeKind }
+        if (-not $base) {
+            return [ordered]@{ ok = $false; mode = 'edge'; selection = "$EdgeKind"; destructive = $true; removedCount = 0; plans = @(); reasons = @("This edge ($EdgeKind) is not a removable assignment grant.") }
+        }
+        $cur = @()
+        if ($CurrentRows.ContainsKey($base)) { $cur = @($CurrentRows[$base]) }
+        foreach ($r in $cur) {
+            if (Test-PimMapRowMatchesEdge -Base $base -Row $r -Match $EdgeMatch) { & $addRemoval $base $r }
+        }
+        if ($plansByBase.Count -eq 0) {
+            [void]$reasons.Add("No row in $base matched the selected grant (it may already be removed).")
+        }
+        $selLabel = "$base"
+    }
+    else {
+        # NODE: walk EVERY edge; any edge that references this node id maps (via its
+        # kind) to an assignment base, and we drop the matching store row(s).
+        $nid = "$NodeId".Trim()
+        $edges = @($Data.edges)
+        $matchedAny = $false
+        foreach ($e in $edges) {
+            $cosmetic = Get-PimMapNodeField -Node $e -Name 'cosmetic'
+            if ($cosmetic -eq 'True' -or $cosmetic -eq $true) { continue }   # cosmetic edges own no row
+            if (-not (Test-PimMapEdgeTouchesNode -Edge $e -NodeId $nid)) { continue }
+            $ek = Get-PimMapNodeField -Node $e -Name 'kind'
+            $base = Get-PimMapEdgeBase -Kind $ek
+            if (-not $base) { continue }
+            $ematch = $null
+            if ($e -is [System.Collections.IDictionary]) { if ($e.Contains('match')) { $ematch = $e['match'] } }
+            else { $mp = $e.PSObject.Properties['match']; if ($mp) { $ematch = $mp.Value } }
+            if ($null -eq $ematch) { continue }
+            $cur = @()
+            if ($CurrentRows.ContainsKey($base)) { $cur = @($CurrentRows[$base]) }
+            foreach ($r in $cur) {
+                if (Test-PimMapRowMatchesEdge -Base $base -Row $r -Match $ematch) { & $addRemoval $base $r; $matchedAny = $true }
+            }
+        }
+        if (-not $matchedAny) {
+            [void]$reasons.Add("No assignment grant references node '$nid' (nothing to revoke).")
+        }
+        $selLabel = $nid
+    }
+
+    # Build the per-base after/removed sets. De-dupe removed rows by reference so a
+    # node touched by two edges into the same row removes it once.
+    $plans = New-Object System.Collections.ArrayList
+    foreach ($base in @($plansByBase.Keys)) {
+        $removed = @($plansByBase[$base])
+        # de-dupe by identity (a row object may have been added twice)
+        $seen = New-Object System.Collections.ArrayList
+        $dedupRemoved = New-Object System.Collections.ArrayList
+        foreach ($r in $removed) {
+            $isNew = $true
+            foreach ($s in $seen) { if ([object]::ReferenceEquals($s, $r)) { $isNew = $false; break } }
+            if ($isNew) { [void]$seen.Add($r); [void]$dedupRemoved.Add($r) }
+        }
+        $removed = @($dedupRemoved.ToArray())
+        $cur = @()
+        if ($CurrentRows.ContainsKey($base)) { $cur = @($CurrentRows[$base]) }
+        $after = New-Object System.Collections.ArrayList
+        foreach ($r in $cur) {
+            $drop = $false
+            foreach ($d in $removed) { if ([object]::ReferenceEquals($d, $r)) { $drop = $true; break } }
+            if (-not $drop) { [void]$after.Add($r) }
+        }
+        $totalRemoved += @($removed).Count
+        [void]$plans.Add([ordered]@{
+            base         = $base
+            mode         = 'replace'
+            afterRows    = @($after.ToArray())
+            removedRows  = @($removed)
+            removedCount = @($removed).Count
+        })
+    }
+
+    $ok = ($totalRemoved -gt 0)
+    return [ordered]@{
+        ok           = $ok
+        mode         = $(if ($PSCmdlet.ParameterSetName -eq 'Edge') { 'edge' } else { 'node' })
+        selection    = "$selLabel"
+        destructive  = $true
+        removedCount = $totalRemoved
+        plans        = @($plans.ToArray())
+        reasons      = @($reasons.ToArray())
+    }
+}

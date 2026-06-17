@@ -90,6 +90,18 @@ ok('access-review view wires its export bar', /wireExportBar\('ar'/.test(html));
 ok('validate view wires its export bar', /wireExportBar\('val'/.test(html));
 ok('delegation map wires its export bar', /wireExportBar\('map'/.test(html));
 
+// Role Lookup export ([L5]/[H5]) -- all four read-only modes now export their
+// who-has-what / role-permission result for a least-privilege ticket / auditor trail.
+ok('role-lookup permissions view wires export', /wireExportBar\('rpPerm'/.test(html));
+ok('role-lookup by-action view wires export', /wireExportBar\('baMatch'/.test(html));
+ok('role-lookup reverse view wires export', /wireExportBar\('rvReach'/.test(html));
+ok('role-lookup compare view wires export', /wireExportBar\('cmpCmp'/.test(html));
+
+// Maintenance / active-assignments export ([H5]) -- the "who has what is active" extract.
+ok('active-assignments export bar present', /id="revExportBar"/.test(html));
+ok('active-assignments export wired (csv)', /revExpCsv/.test(html) && /downloadCsv\(d\.filename/.test(html));
+ok('active-assignments export wired (print)', /revExpPrint/.test(html) && /printTable\(d\.title/.test(html));
+
 // --- summary ----------------------------------------------------------------
 console.log('\n  RESULT: ' + pass + ' pass, ' + fail + ' fail');
 process.exit(fail ? 1 : 0);

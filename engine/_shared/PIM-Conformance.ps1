@@ -144,6 +144,107 @@ function Get-PimActiveExemptionKeys {
     return $keys.ToArray()
 }
 
+# --- exemption REGISTER (PURE) --------------------------------------------------
+# REQUIREMENTS.md s28 [L2]: exemptions must not be write-only. This builds a
+# reviewable list of every stored exemption WITH its per-row state (Active /
+# Expiring / Expired / Invalid), days-remaining and a stable revoke key, so the
+# Manager can show an active-exemptions register and let an operator revoke one
+# before it lapses on its own. Pure + time-injected (NowUtc), PS 5.1-safe.
+function Get-PimExemptionRevokeKey {
+    param([Parameter(Mandatory)][object]$Exemption)
+    # Stable identity for ONE exemption row: tenant|template|item|expiry. Two rows
+    # for the same item with different expiries are distinct (re-issued waiver).
+    return ('{0}|{1}|{2}|{3}' -f "$($Exemption.tenantId)", "$($Exemption.templateId)", "$($Exemption.itemKey)", "$($Exemption.expiresUtc)")
+}
+
+function Get-PimExemptionList {
+    [CmdletBinding()]
+    param(
+        [object[]]$Exemptions = @(),
+        [string]$TenantId = '',
+        [string]$TemplateId = '',
+        [Parameter(Mandatory)][datetime]$NowUtc,
+        [int]$ExpiringWithinDays = 30
+    )
+    $rows = New-Object System.Collections.Generic.List[object]
+    foreach ($x in @($Exemptions)) {
+        if ($null -eq $x) { continue }
+        if ($TenantId   -and "$($x.tenantId)"   -ne "$TenantId")   { continue }
+        if ($TemplateId -and "$($x.templateId)" -ne "$TemplateId") { continue }
+        $v = Test-PimExemptionValid -Exemption $x -NowUtc $NowUtc
+        $daysLeft = $null
+        $state = $v.state                                          # Active | Expired | Invalid
+        $expU = $null
+        if ($v.valid) {
+            $exp = [datetime]::MinValue
+            if ([datetime]::TryParse("$($x.expiresUtc)".Trim(), [ref]$exp)) {
+                $expU = $exp.ToUniversalTime()
+                $daysLeft = [math]::Floor(($expU - $NowUtc).TotalDays)
+                # Active but inside the warning window -> 'Expiring' (still active).
+                if ($v.active -and $daysLeft -le $ExpiringWithinDays) { $state = 'Expiring' }
+            }
+        }
+        $rows.Add([pscustomobject]@{
+            TenantId    = "$($x.tenantId)"
+            TemplateId  = "$($x.templateId)"
+            ItemKey     = "$($x.itemKey)"
+            Reason      = "$($x.reason)"
+            ApprovedBy  = "$($x.approvedBy)"
+            ApprovedUtc = "$($x.approvedUtc)"
+            ExpiresUtc  = if ($expU) { $expU.ToString('o') } else { "$($x.expiresUtc)" }
+            State       = $state                                   # Active|Expiring|Expired|Invalid
+            Active      = [bool]$v.active
+            DaysLeft    = $daysLeft                                # $null when Invalid
+            Detail      = "$($v.detail)"
+            RevokeKey   = Get-PimExemptionRevokeKey -Exemption $x
+        })
+    }
+    # Soonest-to-lapse first so the operator sees what needs attention; Invalid
+    # rows (no usable expiry) sort last.
+    return @($rows | Sort-Object -Property `
+        @{ Expression = { if ($_.State -eq 'Invalid') { 1 } else { 0 } } }, `
+        @{ Expression = { if ($null -eq $_.DaysLeft) { [int]::MaxValue } else { $_.DaysLeft } } })
+}
+
+function Get-PimExemptionSummary {
+    [CmdletBinding()]
+    param([object[]]$List = @())
+    $c = @{ Total = 0; Active = 0; Expiring = 0; Expired = 0; Invalid = 0 }
+    foreach ($r in @($List)) {
+        if ($null -eq $r) { continue }
+        $c.Total++
+        switch ("$($r.State)") {
+            'Active'   { $c.Active++ }
+            'Expiring' { $c.Active++; $c.Expiring++ }
+            'Expired'  { $c.Expired++ }
+            'Invalid'  { $c.Invalid++ }
+        }
+    }
+    return [pscustomobject]$c
+}
+
+# Remove ONE exemption by its stable revoke key (PURE). Returns the kept set; the
+# caller persists it. Never mutates the input array. Idempotent: an unknown key
+# leaves the set unchanged (Removed=0). Defensive: refuses an empty key so a blank
+# request can never wipe rows.
+function Remove-PimExemptionEntry {
+    [CmdletBinding()]
+    param(
+        [object[]]$Exemptions = @(),
+        [Parameter(Mandatory)][string]$RevokeKey
+    )
+    $key = "$RevokeKey".Trim()
+    if (-not $key) { throw 'RevokeKey is required to revoke an exemption.' }
+    $kept = New-Object System.Collections.Generic.List[object]
+    $removed = 0
+    foreach ($x in @($Exemptions)) {
+        if ($null -eq $x) { continue }
+        if ((Get-PimExemptionRevokeKey -Exemption $x) -eq $key) { $removed++; continue }
+        $kept.Add($x)
+    }
+    return [pscustomobject]@{ Kept = $kept.ToArray(); Removed = $removed }
+}
+
 # --- THE RECONCILE CORE (PURE) --------------------------------------------------
 function Get-PimConformance {
     [CmdletBinding()]
@@ -278,6 +379,45 @@ function Set-PimTemplateState {
     return $file
 }
 
+# --- FLEET state read (I/O seam for [H8]) ---------------------------------------
+# Read ONE instance's conformance standing from its local template-state file, for the
+# fleet matrix: every template's last-applied version (keyed "<tenantId>|<templateId>")
+# plus an optional fleet `ring` stamp the deploy writes at the file root. Returns
+# @{ appliedVersions = @{ '<templateId>' = <int> }; ring = <int?> }. Pure-ish (one read);
+# returns empty maps when the file is absent/unparseable so a never-deployed tenant is
+# still a valid fleet row (every cell = NeverApplied). $TenantId selects this instance's
+# rows from a shared state file (the Manager keys state by instance name).
+function Get-PimFleetStateForInstance {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string]$StateFile, [Parameter(Mandatory)][string]$TenantId)
+    $applied = @{}
+    $ring = $null
+    if (-not (Test-Path -LiteralPath $StateFile)) { return @{ appliedVersions = $applied; ring = $ring } }
+    $all = $null
+    try {
+        $raw = [System.IO.File]::ReadAllText($StateFile, [System.Text.UTF8Encoding]::new($false))
+        if ($raw.Length -gt 0 -and [int][char]$raw[0] -eq 0xFEFF) { $raw = $raw.Substring(1) }
+        $all = $raw | ConvertFrom-Json
+    } catch { return @{ appliedVersions = $applied; ring = $ring } }
+    if ($null -eq $all) { return @{ appliedVersions = $applied; ring = $ring } }
+    $prefix = "$TenantId|"
+    foreach ($p in @($all.PSObject.Properties)) {
+        $name = "$($p.Name)"
+        if ($name -eq 'scopeVersions') { continue }            # the per-scope map (different feature)
+        if ($name -eq 'fleetRingByTenant') {                   # optional ring map: { '<tenant>' = <int> }
+            if ($p.Value -and $p.Value.PSObject.Properties[$TenantId]) {
+                $rp = 0; if ([int]::TryParse("$($p.Value.PSObject.Properties[$TenantId].Value)", [ref]$rp)) { $ring = $rp }
+            }
+            continue
+        }
+        if ($name.StartsWith($prefix) -and $p.Value -and $p.Value.PSObject.Properties['LastAppliedVersion']) {
+            $tplId = $name.Substring($prefix.Length)
+            $applied[$tplId] = [int]("$($p.Value.LastAppliedVersion)" -as [int])
+        }
+    }
+    return @{ appliedVersions = $applied; ring = $ring }
+}
+
 # --- per-SCOPE desired-vs-applied template version (engine + GUI) ---------------
 # The conformance core above tracks ONE template's version per tenant. A PIM run
 # spans MANY scopes (provider areas: Groups, EntraRoles, AzRes, GroupsPolicies,
@@ -351,6 +491,228 @@ function Get-PimScopeConformance {
     $counts = @{}
     foreach ($s in 'NeverApplied','Behind','UpToDate','Ahead') { $counts[$s] = @($rows | Where-Object Status -eq $s).Count }
     return [pscustomobject]@{ TenantId = $TenantId; Rows = $rows.ToArray(); Counts = $counts }
+}
+
+# --- FLEET conformance matrix (PURE) -- REQUIREMENTS.md s28 [H8] ----------------
+# The single-tenant cores above answer "how far behind is THIS tenant?". An MSP runs
+# MANY tenants against ONE central set of approved templates and needs the cross-fleet
+# view: one matrix of tenants x templates, each cell carrying behind-by-N + a status,
+# so template conformance can be SEEN and DRIVEN across the whole fleet from one place
+# (instead of one tenant at a time). This is the pure decision core; the Manager's thin
+# live wrapper reads each instance's ring + local applied-version stamp and feeds them in.
+#
+# Per-cell status (mirrors the single-tenant scope vocabulary so the GUI legend is shared):
+#   NeverApplied -- template never deployed to this tenant (appliedVersion <= 0)
+#   Behind       -- appliedVersion < templateVersion (Behind = the version gap)
+#   UpToDate     -- appliedVersion == templateVersion
+#   Ahead        -- appliedVersion > templateVersion (template was rolled back; flag for review)
+# Only APPROVED templates form columns: a draft is never deployable, so it is never a
+# fleet column. A cell's `behind` is max(0, templateVersion - appliedVersion).
+#
+# Inputs (all plain objects / hashtables so the core is fully offline-testable):
+#   $Templates -- approved template docs (templateId, workload, templateVersion[, status])
+#   $Tenants   -- @( @{ tenantId; ring; appliedVersions = @{ '<templateId>' = <int> } } ), one
+#                 per managed instance. `ring` is the tenant's rollout ring (informational
+#                 here -- the per-cell behind is version-based; ring drives WHICH entries
+#                 deploy, surfaced separately by the ring-rollout rollup below).
+function Get-PimFleetConformance {
+    [CmdletBinding()]
+    param(
+        [object[]]$Templates = @(),
+        [object[]]$Tenants   = @()
+    )
+    # Only approved templates are deployable -> only they are fleet columns.
+    $cols = New-Object System.Collections.Generic.List[object]
+    foreach ($t in @($Templates)) {
+        if ($null -eq $t) { continue }
+        if (-not (Test-PimTemplateApproved -Template $t)) { continue }
+        $tv = [int]("$($t.templateVersion)" -as [int]); if ($tv -lt 1) { $tv = 1 }
+        $cols.Add([pscustomobject]@{
+            TemplateId      = "$($t.templateId)"
+            Workload        = "$($t.workload)"
+            TemplateVersion = $tv
+        })
+    }
+    # Stable column order: by templateId so the matrix is deterministic.
+    $cols = @($cols | Sort-Object -Property @{ Expression = { "$($_.TemplateId)" } })
+
+    $rows = New-Object System.Collections.Generic.List[object]
+    foreach ($tn in @($Tenants)) {
+        if ($null -eq $tn) { continue }
+        $tid = "$($tn.tenantId)"
+        $ring = 0
+        if ($null -ne $tn.ring -and "$($tn.ring)" -ne '') {
+            $pr = 0; if ([int]::TryParse("$($tn.ring)", [ref]$pr) -and $pr -ge 0 -and $pr -le 9) { $ring = $pr }
+        }
+        $applied = @{}
+        if ($tn.appliedVersions) {
+            if ($tn.appliedVersions -is [hashtable]) {
+                foreach ($k in @($tn.appliedVersions.Keys)) { $applied["$k"] = [int]("$($tn.appliedVersions[$k])" -as [int]) }
+            } elseif ($tn.appliedVersions.PSObject) {
+                foreach ($p in @($tn.appliedVersions.PSObject.Properties)) { $applied["$($p.Name)"] = [int]("$($p.Value)" -as [int]) }
+            }
+        }
+        $cells = New-Object System.Collections.Generic.List[object]
+        $maxBehind = 0; $behindCount = 0; $upToDate = 0; $never = 0; $ahead = 0
+        foreach ($col in $cols) {
+            $have = 0
+            if ($applied.ContainsKey($col.TemplateId)) { $have = [int]$applied[$col.TemplateId] }
+            $want = [int]$col.TemplateVersion
+            $status =
+                if ($have -le 0)        { 'NeverApplied' }
+                elseif ($have -lt $want) { 'Behind' }
+                elseif ($have -gt $want) { 'Ahead' }
+                else                     { 'UpToDate' }
+            $behind = [math]::Max(0, $want - $have)
+            switch ($status) {
+                'Behind'       { $behindCount++; if ($behind -gt $maxBehind) { $maxBehind = $behind } }
+                'NeverApplied' { $never++;       if ($want   -gt $maxBehind) { $maxBehind = $want } }
+                'UpToDate'     { $upToDate++ }
+                'Ahead'        { $ahead++ }
+            }
+            $cells.Add([pscustomobject]@{
+                TemplateId      = $col.TemplateId
+                TemplateVersion = $want
+                AppliedVersion  = $have
+                Behind          = $behind
+                Status          = $status
+            })
+        }
+        # A tenant is "current" only when every column is UpToDate (no behind, no never, no ahead).
+        $tenantCurrent = (($behindCount + $never + $ahead) -eq 0)
+        $rows.Add([pscustomobject]@{
+            TenantId     = $tid
+            Ring         = $ring
+            Cells        = $cells.ToArray()
+            MaxBehind    = $maxBehind
+            BehindCount  = $behindCount
+            NeverCount   = $never
+            UpToDate     = $upToDate
+            AheadCount   = $ahead
+            Current      = $tenantCurrent
+        })
+    }
+    # Sort tenants worst-first so an MSP sees who needs attention at the top.
+    $rows = @($rows | Sort-Object -Property `
+        @{ Expression = { $_.MaxBehind }; Descending = $true }, `
+        @{ Expression = { $_.NeverCount }; Descending = $true }, `
+        @{ Expression = { "$($_.TenantId)" } })
+
+    # Per-template fleet rollup: across all tenants, how many are up-to-date / behind / never.
+    $perTemplate = New-Object System.Collections.Generic.List[object]
+    foreach ($col in $cols) {
+        $up = 0; $bh = 0; $nv = 0; $ah = 0; $mb = 0
+        foreach ($r in $rows) {
+            $cell = @($r.Cells | Where-Object { $_.TemplateId -eq $col.TemplateId })[0]
+            if (-not $cell) { continue }
+            switch ($cell.Status) {
+                'UpToDate'     { $up++ }
+                'Behind'       { $bh++; if ($cell.Behind -gt $mb) { $mb = $cell.Behind } }
+                'NeverApplied' { $nv++; if ($cell.Behind -gt $mb) { $mb = $cell.Behind } }
+                'Ahead'        { $ah++ }
+            }
+        }
+        $perTemplate.Add([pscustomobject]@{
+            TemplateId      = $col.TemplateId
+            Workload        = $col.Workload
+            TemplateVersion = $col.TemplateVersion
+            UpToDate        = $up
+            BehindCount     = $bh
+            NeverCount      = $nv
+            AheadCount      = $ah
+            MaxBehind       = $mb
+            NeedsRollout    = (($bh + $nv) -gt 0)
+        })
+    }
+
+    $totalTenants = $rows.Count
+    $currentTenants = @($rows | Where-Object { $_.Current }).Count
+    return [pscustomobject]@{
+        Templates       = @($cols)
+        Tenants         = @($rows)
+        PerTemplate     = @($perTemplate.ToArray())
+        TotalTenants    = $totalTenants
+        CurrentTenants  = $currentTenants
+        BehindTenants   = ($totalTenants - $currentTenants)
+    }
+}
+
+# --- RING-WIDE rollout plan (PURE) -- REQUIREMENTS.md s28 [H8] ------------------
+# "Ring-wide deploy" view: for ONE approved template, which tenants would a deploy to
+# a chosen ring touch, and where does each stand? A deploy to ring R reaches every
+# tenant whose rollout ring is >= R (entryRing <= tenantRing is the per-entry rule;
+# here we group tenants by ring so an MSP can drive a wave -- "roll v3 to ring 1 and
+# below" -- and see, per ring band, how many tenants are behind. This is the planning
+# rollup; the actual per-tenant deploy still goes through the proven, ring-gated
+# Get-PimRollForwardRows + Apply-PimWorkloadAssignments path (no second apply).
+#
+# Returns, for the template, one band per distinct tenant ring present in the fleet,
+# each with the tenants in that band + their behind/status, plus a fleet total. A
+# tenant only appears in the band equal to its own ring (bands are exclusive); the
+# "reached by a deploy to ring R" set is every band with ring >= R (the GUI sums them).
+function Get-PimRingRolloutPlan {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][object]$Template,
+        [object[]]$Tenants = @()
+    )
+    $tv = [int]("$($Template.templateVersion)" -as [int]); if ($tv -lt 1) { $tv = 1 }
+    $tid = "$($Template.templateId)"
+    $approved = [bool](Test-PimTemplateApproved -Template $Template)
+
+    # Build the per-tenant standing for THIS template.
+    $perTenant = New-Object System.Collections.Generic.List[object]
+    foreach ($tn in @($Tenants)) {
+        if ($null -eq $tn) { continue }
+        $ring = 0
+        if ($null -ne $tn.ring -and "$($tn.ring)" -ne '') {
+            $pr = 0; if ([int]::TryParse("$($tn.ring)", [ref]$pr) -and $pr -ge 0 -and $pr -le 9) { $ring = $pr }
+        }
+        $have = 0
+        if ($tn.appliedVersions) {
+            if ($tn.appliedVersions -is [hashtable]) {
+                if ($tn.appliedVersions.ContainsKey($tid)) { $have = [int]("$($tn.appliedVersions[$tid])" -as [int]) }
+            } elseif ($tn.appliedVersions.PSObject.Properties[$tid]) {
+                $have = [int]("$($tn.appliedVersions.PSObject.Properties[$tid].Value)" -as [int])
+            }
+        }
+        $status =
+            if ($have -le 0)        { 'NeverApplied' }
+            elseif ($have -lt $tv)  { 'Behind' }
+            elseif ($have -gt $tv)  { 'Ahead' }
+            else                    { 'UpToDate' }
+        $perTenant.Add([pscustomobject]@{
+            TenantId = "$($tn.tenantId)"; Ring = $ring
+            AppliedVersion = $have; Behind = [math]::Max(0, $tv - $have); Status = $status
+        })
+    }
+
+    # Group into exclusive ring bands (ascending ring).
+    $bands = New-Object System.Collections.Generic.List[object]
+    foreach ($ring in @($perTenant | ForEach-Object { $_.Ring } | Sort-Object -Unique)) {
+        $inBand = @($perTenant | Where-Object { $_.Ring -eq $ring } | Sort-Object -Property @{ Expression = { "$($_.TenantId)" } })
+        $bh = @($inBand | Where-Object { $_.Status -eq 'Behind' }).Count
+        $nv = @($inBand | Where-Object { $_.Status -eq 'NeverApplied' }).Count
+        $bands.Add([pscustomobject]@{
+            Ring         = $ring
+            Tenants      = $inBand
+            TenantCount  = $inBand.Count
+            BehindCount  = $bh
+            NeverCount   = $nv
+            NeedsRollout = (($bh + $nv) -gt 0)
+        })
+    }
+
+    $needs = @($perTenant | Where-Object { $_.Status -eq 'Behind' -or $_.Status -eq 'NeverApplied' })
+    return [pscustomobject]@{
+        TemplateId      = $tid
+        Workload        = "$($Template.workload)"
+        TemplateVersion = $tv
+        Approved        = $approved
+        Bands           = @($bands.ToArray())
+        TotalTenants    = $perTenant.Count
+        NeedsRolloutCount = $needs.Count
+    }
 }
 
 # --- roll-forward ROWS seam -----------------------------------------------------

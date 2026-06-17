@@ -431,6 +431,164 @@ function Format-PimRolePermissions {
 }
 
 # ---------------------------------------------------------------------------
+# 7a. SEARCH-BY-ACTION (REQUIREMENTS §28 [H9a])
+#     The INVERSE of Format-PimRolePermissions: given the operation an admin
+#     needs to delegate (a resourceAction, e.g. 'microsoft.directory/users/
+#     password/update'), find WHICH directory roles grant it -- ranked
+#     least-privilege-first (fewest total actions) so the operator can pick the
+#     narrowest role instead of scanning permission sets by hand.
+#
+#     Get-PimRoleActionMatches  -- does one role's allowedResourceActions grant a
+#                                  query action? Honours Entra's '/' wildcard
+#                                  semantics in BOTH directions:
+#                                    * a granted '*' or 'ns/*' covers a concrete
+#                                      query under that namespace, AND
+#                                    * a wildcard QUERY ('ns/*') matches every
+#                                      granted concrete action under that namespace
+#                                  so "which roles touch users at all?" works too.
+#     Find-PimRolesByAction     -- run that over a set of roleDefinition objects
+#                                  (the shape Graph returns), return the matching
+#                                  roles ranked least-privilege-first with the
+#                                  matched actions + total action count.
+#     Both pure, offline, PS 5.1-safe (no ?./??). The live Graph fetch of the
+#     role-definition corpus is the caller's job; this is the testable matcher.
+# ---------------------------------------------------------------------------
+function Test-PimActionPatternMatch {
+    # Does a granted action pattern $Pattern cover a queried action $Query?
+    # Entra resourceActions use '/' segments and a trailing (or namespace) '*'
+    # wildcard. Match is symmetric on wildcards so a wildcard query also works:
+    #   pattern '*'               matches anything
+    #   pattern 'ns/sub/*'        matches 'ns/sub/anything' (prefix up to the '*')
+    #   query   'ns/sub/*'        matches granted 'ns/sub/read' (query is broader)
+    #   exact (case-insensitive)  always matches
+    # Pure; PS 5.1-safe.
+    param([AllowNull()][string]$Pattern, [AllowNull()][string]$Query)
+    $p = "$Pattern".Trim(); $q = "$Query".Trim()
+    if (-not $p -or -not $q) { return $false }
+    $pl = $p.ToLowerInvariant(); $ql = $q.ToLowerInvariant()
+    if ($pl -eq $ql) { return $true }
+    # A '*' anywhere is treated as "everything from here on" -- take the literal
+    # prefix before the first '*' and require the other side to start with it.
+    $prefixOf = {
+        param($s)
+        $i = $s.IndexOf('*')
+        if ($i -lt 0) { return $null }   # no wildcard
+        return $s.Substring(0, $i)
+    }
+    $pp = & $prefixOf $pl
+    $qp = & $prefixOf $ql
+    if ($null -ne $pp) {
+        # granted pattern is a wildcard: query must fall under its prefix.
+        if ($pp -eq '' -or $ql.StartsWith($pp)) { return $true }
+    }
+    if ($null -ne $qp) {
+        # query is a wildcard (broad search): granted action must fall under it.
+        if ($qp -eq '' -or $pl.StartsWith($qp)) { return $true }
+    }
+    return $false
+}
+
+function Get-PimRoleActionList {
+    # Flatten one roleDefinition's allowedResourceActions into a de-duped, sorted
+    # list (reuses Format-PimRolePermissions so the flattening is identical to the
+    # drill-down). Returns @() for a null/shapeless role. Pure.
+    param([AllowNull()][object]$RoleDefinition)
+    if ($null -eq $RoleDefinition) { return @() }
+    $fmt = Format-PimRolePermissions -RoleDefinition $RoleDefinition
+    return @($fmt.actions)
+}
+
+function Get-PimRoleActionMatches {
+    # Which of a role's allowedResourceActions match the query action? Returns the
+    # matched concrete actions (de-duped, sorted) + the role's total action count.
+    # Pure; PS 5.1-safe.
+    param(
+        [AllowNull()][object]$RoleDefinition,
+        [Parameter(Mandatory)][string]$Action
+    )
+    $all = @(Get-PimRoleActionList -RoleDefinition $RoleDefinition)
+    $matched = New-Object System.Collections.ArrayList
+    foreach ($a in $all) {
+        if (Test-PimActionPatternMatch -Pattern $a -Query $Action) { [void]$matched.Add($a) }
+    }
+    return [pscustomobject]@{
+        matched      = @($matched.ToArray() | Sort-Object -Unique)
+        totalActions = $all.Count
+    }
+}
+
+function Get-PimRoleDefinitionName {
+    # Best-effort display name from a roleDefinition (displayName -> name -> id).
+    param([AllowNull()][object]$RoleDefinition)
+    foreach ($n in @('displayName','name','id')) {
+        $v = Get-PimAuthoringCell $RoleDefinition $n
+        if ("$v".Trim()) { return "$v".Trim() }
+    }
+    return ''
+}
+
+function Find-PimRolesByAction {
+    # Search-by-action (§28 [H9a]): given the operation to delegate and the corpus
+    # of directory roleDefinitions, return every role that GRANTS the action,
+    # ranked LEAST-PRIVILEGE FIRST (fewest total resource actions, then name) so an
+    # operator picks the narrowest role. Each hit carries the role name, the
+    # matched action(s), and the role's total action count.
+    #
+    #   $Action          -- the resourceAction to find (exact, or a 'ns/*' wildcard).
+    #   $RoleDefinitions -- roleDefinition objects (Graph shape: .displayName +
+    #                       .rolePermissions[].allowedResourceActions).
+    #   $Max             -- cap the result list (0 = no cap).
+    #
+    # NEVER throws on a blank action / empty corpus -- returns an empty match list
+    # with matched=$false so the GUI can show "no role grants this" honestly.
+    # Pure, offline, PS 5.1-safe.
+    [CmdletBinding()]
+    param(
+        [AllowNull()][AllowEmptyString()][string]$Action,
+        [AllowNull()][object[]]$RoleDefinitions,
+        [int]$Max = 50
+    )
+    $q = "$Action".Trim()
+    $defs = @($RoleDefinitions)
+    if (-not $q) {
+        return [ordered]@{ action = ''; matched = $false; matches = @(); rolesSearched = $defs.Count }
+    }
+    $hits = New-Object System.Collections.ArrayList
+    foreach ($d in $defs) {
+        $m = Get-PimRoleActionMatches -RoleDefinition $d -Action $q
+        if (@($m.matched).Count -gt 0) {
+            # A role that grants the action through a WILDCARD ('*' or 'ns/*') is
+            # broader than its raw action count suggests -- a single '*' grants
+            # everything. Rank such roles LAST (broadest) so the least-privilege
+            # ordering isn't fooled by a tiny wildcard role outranking a precise one.
+            $hasWildcard = $false
+            foreach ($ma in @($m.matched)) { if ("$ma".Contains('*')) { $hasWildcard = $true; break } }
+            [void]$hits.Add([ordered]@{
+                role           = (Get-PimRoleDefinitionName -RoleDefinition $d)
+                matchedActions = @($m.matched)
+                matchedCount   = @($m.matched).Count
+                totalActions   = [int]$m.totalActions
+                viaWildcard    = $hasWildcard
+            })
+        }
+    }
+    # Least-privilege first: precise (non-wildcard) grants before wildcard grants;
+    # within each, fewest total actions wins; tie-break by role name.
+    $ranked = @($hits | Sort-Object `
+        @{ e = { if ($_.viaWildcard) { 1 } else { 0 } } }, `
+        @{ e = { [int]$_.totalActions } }, `
+        @{ e = { "$($_.role)" } })
+    if ($Max -gt 0 -and @($ranked).Count -gt $Max) { $ranked = @($ranked[0..($Max - 1)]) }
+    return [ordered]@{
+        action        = $q
+        matched       = (@($ranked).Count -gt 0)
+        matches       = @($ranked)
+        matchCount    = @($ranked).Count
+        rolesSearched = $defs.Count
+    }
+}
+
+# ---------------------------------------------------------------------------
 # 7b. ROLE LOOKUP MATCHING + COMPARE (REQUIREMENTS §28 [H9])
 #     Pure, offline, PS 5.1-safe helpers behind the Role Lookup tab:
 #       Get-PimStringSimilarity  -- 0..1 closeness of two short strings

@@ -330,3 +330,172 @@ function Add-PimCutoverCompletedStage {
     if ($PSBoundParameters.ContainsKey('Audit')) { $a[$Stage] = $Audit }
     return [pscustomobject]@{ completed = $c.ToArray(); final = ($Stage -eq 'finalize'); audit = $a; updatedUtc = [datetime]::UtcNow.ToString('o') }
 }
+
+# --- ABORT / ROLLBACK (REQUIREMENTS.md s28 [L3]) --------------------------------
+# A cutover that has been STARTED but not yet FINALIZED can be cleanly aborted: the
+# operator decides not to make SQL authoritative after all. Abort is safe by design
+# because the ceremony has not damaged the prior (CSV) store --
+#   * the CSV source is READ-ONLY at every stage (never written back), and
+#   * the only externally-visible state change before finalize is the 'set-source'
+#     flip (StorageBackend = sql); reverting it (-> csv) returns the Manager to the
+#     CSV store on the next boot, exactly where it was.
+# The imported pim.Rows are left in place (harmless once StorageBackend=csv; a later
+# re-attempt re-imports them). FINALIZE is the point of no return: once final, abort
+# is refused (use a fresh forward migration instead).
+
+# PURE GATE: may a not-yet-finalized cutover be aborted given the completed-stages set?
+# Returns @{ allowed; reason }. Abort needs at least one stage started and NOT final.
+function Test-PimCutoverAbortAllowed {
+    param([AllowNull()][string[]]$Completed = @(), [bool]$Final = $false)
+    $done = @{}; foreach ($c in @($Completed)) { if ("$c".Trim()) { $done["$c".ToLowerInvariant()] = $true } }
+    if ($Final -or $done.ContainsKey('finalize')) {
+        return @{ allowed = $false; reason = 'cutover already finalized -- abort is not possible (finalize is the point of no return). Run a fresh forward migration to change the store again.' }
+    }
+    if ($done.Count -eq 0) {
+        return @{ allowed = $false; reason = 'nothing to abort -- no cutover stage has been run yet.' }
+    }
+    return @{ allowed = $true; reason = '' }
+}
+
+# PURE PLAN: what will abort DO, given the completed-stages set? Reports the concrete
+# steps for the operator to confirm BEFORE anything runs (and for the audit). Pure --
+# no IO. Returns @{ revertSource; clearState; steps = [string[]] }.
+function Get-PimCutoverAbortPlan {
+    param([AllowNull()][string[]]$Completed = @())
+    $done = @{}; foreach ($c in @($Completed)) { if ("$c".Trim()) { $done["$c".ToLowerInvariant()] = $true } }
+    $revertSource = $done.ContainsKey('set-source')
+    $steps = New-Object System.Collections.Generic.List[string]
+    if ($revertSource) {
+        $steps.Add('Revert the configuration source to CSV (StorageBackend = csv) -- the Manager returns to the file store on the next boot.')
+    }
+    if ($done.ContainsKey('import')) {
+        $steps.Add('Leave the imported rows in SQL untouched (harmless once the source is CSV; a later re-attempt re-imports them). The CSV source was read-only and is unchanged.')
+    }
+    $steps.Add('Clear the cutover ceremony state so the ceremony returns to its starting point.')
+    return [pscustomobject]@{ revertSource = $revertSource; clearState = $true; steps = $steps.ToArray() }
+}
+
+# Perform the abort against the live store. Reverts StorageBackend -> csv when the
+# set-source flip happened, then clears the persisted CutoverState. Idempotent and
+# refuses a finalized ceremony. Returns @{ ok; revertedSource; clearedState; plan; storageBackend }.
+function Invoke-PimCutoverAbort {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string]$ConnectionString)
+    $state = Get-PimCutoverState -ConnectionString $ConnectionString
+    $gate  = Test-PimCutoverAbortAllowed -Completed @($state.completed) -Final ([bool]$state.final)
+    if (-not $gate.allowed) { throw $gate.reason }
+    $plan = Get-PimCutoverAbortPlan -Completed @($state.completed)
+    $revertedSource = $false
+    if ($plan.revertSource) {
+        Set-PimSqlSetting -ConnectionString $ConnectionString -Name 'StorageBackend' -Value 'csv'
+        $revertedSource = $true
+    }
+    # Clear the ceremony state back to its starting point (idempotent).
+    Set-PimCutoverState -ConnectionString $ConnectionString -State ([pscustomobject]@{ completed = @(); final = $false; audit = @{} })
+    return [pscustomobject]@{
+        ok             = $true
+        revertedSource = $revertedSource
+        clearedState   = $true
+        plan           = $plan
+        storageBackend = $(if ($revertedSource) { 'csv' } else { '(unchanged)' })
+    }
+}
+
+# --- HUMAN-READABLE STAGE AUDIT (REQUIREMENTS.md s28 [L3]) -----------------------
+# The Manager used to dump the per-stage audit as raw JSON. This PURE formatter turns
+# the recorded audit object into plain, admin-readable lines so the GUI (and tooling)
+# render the SAME human summary. Pure over the audit object -- no IO.
+#   Returns an ARRAY of @{ stage; lines = [string[]] }, one block per completed stage,
+#   in canonical ceremony order. Unknown/extra keys fall back to a "key: value" line so
+#   nothing is ever hidden.
+function Format-PimCutoverAudit {
+    param([AllowNull()]$Audit)
+    # Normalize the audit (hashtable OR PSCustomObject) into a name->value lookup.
+    $map = @{}
+    if ($Audit) {
+        if ($Audit -is [hashtable]) { foreach ($k in @($Audit.Keys)) { $map["$k"] = $Audit[$k] } }
+        else { foreach ($p in $Audit.PSObject.Properties) { $map[$p.Name] = $p.Value } }
+    }
+    # Helper: read a property from a hashtable OR PSCustomObject stage-result.
+    $getProp = {
+        param($obj, $name)
+        if ($null -eq $obj) { return $null }
+        if ($obj -is [hashtable]) { if ($obj.ContainsKey($name)) { return $obj[$name] } return $null }
+        $pp = $obj.PSObject.Properties[$name]
+        if ($pp) { return $pp.Value }
+        return $null
+    }
+    $blocks = New-Object System.Collections.Generic.List[object]
+    foreach ($stage in $script:PimCutoverStages) {
+        if (-not $map.ContainsKey($stage)) { continue }
+        $r = $map[$stage]
+        $lines = New-Object System.Collections.Generic.List[string]
+        switch ($stage) {
+            'preflight' {
+                $conn = & $getProp $r 'connectivity'
+                if ($null -ne $conn) { $lines.Add("SQL connectivity: $(if ([bool]$conn) { 'OK' } else { 'FAILED' })") }
+                $nu = & $getProp $r 'needsUpgrade'
+                if ($null -ne $nu) { $lines.Add("Schema upgrade needed: $(if ([bool]$nu) { 'yes' } else { 'no' })") }
+                $ents = & $getProp $r 'entities'
+                foreach ($e in @($ents)) {
+                    if ($null -eq $e) { continue }
+                    $base = & $getProp $e 'base'
+                    $drop = @(& $getProp $e 'toDrop'); $add = @(& $getProp $e 'toAdd'); $mig = @(& $getProp $e 'toMigrate')
+                    $parts = New-Object System.Collections.Generic.List[string]
+                    if ($drop.Count) { $parts.Add("drop " + ($drop -join ', ')) }
+                    if ($add.Count)  { $parts.Add("add " + ($add -join ', ')) }
+                    if ($mig.Count)  { $parts.Add("migrate " + ($mig -join ', ')) }
+                    $detail = if ($parts.Count) { $parts -join '; ' } else { 'conformant (no change)' }
+                    $lines.Add("  $base : $detail")
+                }
+            }
+            'upgrade' {
+                $si = & $getProp $r 'schemaInitialized'
+                $lines.Add("Schema CREATE/ALTER applied (idempotent)" + $(if ($null -ne $si -and -not [bool]$si) { ' -- reported NOT initialized' } else { '' }))
+            }
+            'import' {
+                $wi = & $getProp $r 'whatIf'
+                $tot = & $getProp $r 'total'
+                $verb = if ([bool]$wi) { 'Would import' } else { 'Imported' }
+                $lines.Add("$verb $([int]$tot) row(s) into SQL (CSV source read-only, transactional all-or-nothing).")
+                foreach ($e in @(& $getProp $r 'entities')) {
+                    if ($null -eq $e) { continue }
+                    $base = & $getProp $e 'base'; $rows = & $getProp $e 'rows'
+                    $lines.Add("  $base : $([int]$rows) row(s)")
+                }
+            }
+            'set-source' {
+                $sb = & $getProp $r 'storageBackend'
+                $lines.Add("Configuration source flipped to: $("$sb")")
+            }
+            're-preflight' {
+                $rc = & $getProp $r 'rowCount'
+                if ($null -ne $rc) { $lines.Add("Rows now in SQL store: $([int]$rc)") }
+                $sig = & $getProp $r 'signature'
+                if ("$sig".Trim()) { $lines.Add("Data signature: $("$sig")") }
+                $conn = & $getProp $r 'connectivity'
+                if ($null -ne $conn) { $lines.Add("SQL connectivity: $(if ([bool]$conn) { 'OK' } else { 'FAILED' })") }
+            }
+            'finalize' {
+                $sk = & $getProp $r 'storeKind'
+                $lines.Add("Cutover FINALIZED -- the SQL store ($("$sk")) is now the authoritative source.")
+                $ia = & $getProp $r 'importAudit'
+                $tot = & $getProp $ia 'total'
+                if ($null -ne $tot) { $lines.Add("  Imported total: $([int]$tot) row(s).") }
+            }
+            default {
+                # Unknown stage shape -- surface every key so nothing is hidden.
+                if ($r -is [hashtable]) { foreach ($k in @($r.Keys)) { $lines.Add("$k : $("$($r[$k])")") } }
+                elseif ($r) { foreach ($p in $r.PSObject.Properties) { $lines.Add("$($p.Name) : $("$($p.Value)")") } }
+            }
+        }
+        # Never hide a stage: if a known branch recognised none of the recorded fields
+        # (e.g. an unexpected/extra audit shape), fall back to a key:value dump.
+        if ($lines.Count -eq 0 -and $r) {
+            if ($r -is [hashtable]) { foreach ($k in @($r.Keys)) { $lines.Add("$k : $("$($r[$k])")") } }
+            else { foreach ($p in $r.PSObject.Properties) { $lines.Add("$($p.Name) : $("$($p.Value)")") } }
+        }
+        $blocks.Add([pscustomobject]@{ stage = $stage; lines = $lines.ToArray() })
+    }
+    return $blocks.ToArray()
+}

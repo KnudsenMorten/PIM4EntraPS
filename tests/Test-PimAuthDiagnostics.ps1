@@ -37,6 +37,49 @@ T 'accessReviews -> AccessReview.Read.All'          { (Get-PimMissingRoleHint -P
 T 'interactive hint names the PIM role to activate' { $h = Get-PimMissingRoleHint -Path '/roleManagement/directory/roleAssignmentScheduleRequests' -StatusCode 403 -AppOnly $false; ($h.PimRolesToActivate -contains 'Privileged Role Administrator') -and ($h.Hint -match 'Activate in PIM') }
 T 'unknown path falls back to Directory.Read.All'   { (Get-PimMissingRoleHint -Path '/foo/bar' -StatusCode 403).AppRolesToGrant -contains 'Directory.Read.All' }
 
+Section 'Missing-role hint -- ARM (AuthorizationFailed) plane'
+T 'ARM roleAssignments path -> arm plane + Azure RBAC wording, not Graph' {
+    $h = Get-PimMissingRoleHint -Path '/subscriptions/x/providers/Microsoft.Authorization/roleAssignments/y' -StatusCode 403 -AppOnly $true
+    ($h.Plane -eq 'arm') -and ($h.Hint -match '(?i)Azure RBAC') -and ($h.Hint -notmatch 'Grant-PimGraphAppRoles') }
+T 'ARM AuthorizationFailed body classified as auth failure' { Test-PimIsAuthForbidden -ErrorBody 'AuthorizationFailed: client does not have permission' }
+T 'ARM management.azure.com generic scope -> arm plane' {
+    (Get-PimMissingRoleHint -Path 'https://management.azure.com/subscriptions/x/resourcegroups' -StatusCode 403).Plane -eq 'arm' }
+T 'ARM interactive hint says activate Azure-resource role'  {
+    (Get-PimMissingRoleHint -Path '/subscriptions/x/providers/Microsoft.Authorization/roleEligibilitySchedules' -StatusCode 403 -AppOnly $false).Hint -match '(?i)PIM for Azure resources' }
+T 'Graph path keeps graph plane (regression)'              { (Get-PimMissingRoleHint -Path '/users/x' -StatusCode 403).Plane -eq 'graph' }
+T 'new appRoleAssignedTo -> AppRoleAssignment.ReadWrite.All' { (Get-PimMissingRoleHint -Path '/servicePrincipals/x/appRoleAssignedTo' -StatusCode 403).AppRolesToGrant -contains 'AppRoleAssignment.ReadWrite.All' }
+T 'new deviceManagement roleAssignments -> Intune RBAC role' { (Get-PimMissingRoleHint -Path '/deviceManagement/roleAssignments' -StatusCode 403).AppRolesToGrant -contains 'DeviceManagementRBAC.ReadWrite.All' }
+
+Section 'Token-claims role PRE-FLIGHT (proactive -- before the 403)'
+T 'unknown/benign operation -> not required, allowed'      { $p = Test-PimOperationRolePreflight -Operation '/me' -Token (New-TestJwt @{ wids=@() }); (-not $p.Required) -and $p.Allowed }
+T 'pim-policy with PRA active in wids -> allowed + matched' {
+    $tok = New-TestJwt @{ wids=@('e8611ab8-c189-46e8-94e1-60213ab1f814') }
+    $p = Test-PimOperationRolePreflight -Operation 'pim-policy' -Token $tok
+    $p.Required -and $p.Allowed -and ($p.MatchedRole -eq 'Privileged Role Administrator') }
+T 'pim-policy with NO matching wids -> blocked + activate hint' {
+    $p = Test-PimOperationRolePreflight -Operation 'pim-policy' -Token (New-TestJwt @{ wids=@('fe930be7-5e62-47db-91af-98c3a49a38b1') })
+    $p.Required -and (-not $p.Allowed) -and ($p.Hint -match '(?i)activate.*PIM') -and ($p.MatchedRole -eq '') }
+T 'Global Admin (62e9..) satisfies a user-write op'        {
+    $p = Test-PimOperationRolePreflight -Operation '/users/abc' -Token (New-TestJwt @{ wids=@('62e90394-69f5-4237-9190-012177145e10') })
+    $p.Required -and $p.Allowed -and ($p.MatchedRole -eq 'Global Administrator') }
+T 'absent wids on a privileged op -> fail closed (blocked)' {
+    $p = Test-PimOperationRolePreflight -Operation 'administrative-unit' -Token (New-TestJwt @{ sub='x' })
+    $p.Required -and (-not $p.Allowed) -and ($p.Hint.Length -gt 0) }
+T 'AppOnly engine context -> no-op allowed (no interactive wids)' {
+    $p = Test-PimOperationRolePreflight -Operation 'pim-policy' -AppOnly $true
+    $p.Required -and $p.Allowed -and ($p.Source -match '(?i)app-only') }
+T 'path fragment resolves the op (roleAssignmentSchedule -> PRA)' {
+    (Resolve-PimRequiredRolesForOperation -Operation '/roleManagement/directory/roleAssignmentScheduleRequests') -contains 'Privileged Role Administrator' }
+T 'Resolve active wids ids from claims (lower-cased, empty-dropped)' {
+    $ids = @(Resolve-PimActiveDirectoryRoleTemplateIds -Claims ([pscustomobject]@{ wids=@('E8611AB8-C189-46E8-94E1-60213AB1F814','') }))
+    ($ids.Count -eq 1) -and ($ids -contains 'e8611ab8-c189-46e8-94e1-60213ab1f814') }
+T 'access-review op needs IGA / GA, group-only token blocked' {
+    $p = Test-PimOperationRolePreflight -Operation 'access-review' -Claims ([pscustomobject]@{ wids=@('fdd7a751-b60b-444a-984c-02652fe8fa1c') })
+    (-not $p.Allowed) -and ($p.RequiredRoles -contains 'Identity Governance Administrator') }
+T 'enterprise-app op satisfied by Cloud App Administrator'  {
+    $p = Test-PimOperationRolePreflight -Operation 'enterprise-app' -Claims ([pscustomobject]@{ wids=@('158c047a-c907-4556-b7ef-446551a6b5f7') })
+    $p.Allowed -and ($p.MatchedRole -eq 'Cloud Application Administrator') }
+
 Section 'Account sign-in prompt clarity'
 T 'default select_account; ForceFresh -> login'     { ((ConvertTo-PimAuthCodePrompt) -eq 'select_account') -and ((ConvertTo-PimAuthCodePrompt -ForceFresh) -eq 'login') }
 T 'known stale account -> login'                    { (ConvertTo-PimAuthCodePrompt -KnownStaleAccount 'old@c.com') -eq 'login' }

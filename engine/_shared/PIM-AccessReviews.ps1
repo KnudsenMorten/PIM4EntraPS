@@ -713,6 +713,307 @@ function Get-PimAccessReviewEvidence {
     return ConvertTo-PimReviewEvidencePackage -Definition $def -Instance $instance -Decisions $decisions -NowUtc $now
 }
 
+# ===========================================================================
+# REVIEWER ASSIGNMENT + REMINDERS  (REQUIREMENTS § H7 -- the remaining two
+# actionable surfaces: WHO reviews a campaign, and CHASING them when it is due).
+#
+#   * Reviewer assignment -- set the reviewer scope on an access-review DEFINITION
+#     (who is asked to attest). PURE plan/PATCH builder + live wrapper.
+#   * Reminders            -- compute which review instances are DUE for a reminder
+#     send (first-fire + repeat-every-N-days, never re-firing the same window), and
+#     send via the existing PIM-Notify mail path. PURE due-computation + thin send.
+#
+# Design tenets (mirror the attestation layer's; DESIGN §6/§7, REQUIREMENTS):
+#   * REUSE     -- reminders ride the EXISTING mail sender (Send-PimNotifyMail) and a
+#                  shipped template; reviewer assignment rides Invoke-PimGraph. No new
+#                  notification subsystem, no parallel review store.
+#   * SAFE      -- reviewer assignment is EXPLICIT (one definition, an exact set of
+#                  reviewers) and AUDITED (returns an audit record the caller persists).
+#                  A reminder only fires when DUE (idempotent per window) and records an
+#                  audit record per send.
+#   * WRITE SCOPE -- assigning reviewers PATCHes a definition -> AccessReview.ReadWrite.All
+#                  on the engine SPN (same grant as decisions). Reminders need Mail.Send
+#                  (already used by the daily-summary / approval-escalation mails).
+#   * PS 5.1-safe -- no ?./??/ternary; @() wraps WHOLE pipelines; the SHAPING /
+#                  due-computation helpers are PURE (offline-unit-testable, clock injected).
+# ===========================================================================
+
+# ---------------------------------------------------------------------------
+# Pure reviewer-assignment helpers
+# ---------------------------------------------------------------------------
+
+function ConvertTo-PimReviewerScopeEntry {
+    # Map ONE caller-supplied reviewer spec to a Graph accessReviewReviewerScope
+    # entry { query; queryType }. PURE. Accepts:
+    #   a GUID / objectId                  -> /users/<id>     (a single user reviewer)
+    #   'user:<id>' / 'u:<id>'             -> /users/<id>
+    #   'group:<id>' / 'g:<id>'            -> /groups/<id>
+    #   a UPN (someone@domain)             -> /users/<upn>    (Graph resolves it)
+    #   'manager' / 'self' / 'lastReviewer'-> the managed special (empty query +
+    #                                         queryType=MicrosoftGraph, queryRoot set)
+    # Throws on a blank/garbage spec (fail-closed -- never assign an empty reviewer).
+    param([Parameter(Mandatory)][string]$Spec)
+    $s = "$Spec".Trim()
+    if (-not $s) { throw "ConvertTo-PimReviewerScopeEntry: blank reviewer spec." }
+    if ($s -match '(?i)^(manager|self|lastReviewer)$') {
+        $special = switch -Regex ($s) { '(?i)manager' { 'manager' } '(?i)last' { 'lastReviewer' } default { 'self' } }
+        return [pscustomobject]@{ query = '/v1.0/me'; queryType = 'MicrosoftGraph'; queryRoot = $null; special = $special }
+    }
+    if ($s -match '(?i)^(user|u):(.+)$')  { return [pscustomobject]@{ query = "/users/$($Matches[2].Trim())";  queryType = 'MicrosoftGraph' } }
+    if ($s -match '(?i)^(group|g):(.+)$') { return [pscustomobject]@{ query = "/groups/$($Matches[2].Trim())"; queryType = 'MicrosoftGraph' } }
+    # bare UPN -> user by UPN; anything else (GUID/objectId) -> user by id
+    return [pscustomobject]@{ query = "/users/$s"; queryType = 'MicrosoftGraph' }
+}
+
+function New-PimReviewerAssignmentPatch {
+    # Build the EXACT PATCH body to (re)assign the reviewer scope of an access-review
+    # DEFINITION, plus the audit record the engine persists. PURE -- no network, clock
+    # injected. The Graph contract is:
+    #   PATCH .../definitions/{id}   { "reviewers": [ { query, queryType }, ... ] }
+    # An empty reviewer set is REFUSED (fail-closed -- a review with no reviewer can
+    # never be completed). Duplicate specs are de-duplicated (stable order).
+    param(
+        [Parameter(Mandatory)][string[]]$Reviewers,
+        [datetime]$NowUtc = ([datetime]::UtcNow),
+        [string]$AssignedBy = ''
+    )
+    $seen = New-Object System.Collections.Generic.HashSet[string]
+    $entries = New-Object System.Collections.Generic.List[object]
+    $labels  = New-Object System.Collections.Generic.List[string]
+    foreach ($spec in @($Reviewers)) {
+        $t = "$spec".Trim()
+        if (-not $t) { continue }
+        $key = $t.ToLowerInvariant()
+        if (-not $seen.Add($key)) { continue }
+        $entries.Add((ConvertTo-PimReviewerScopeEntry -Spec $t))
+        $labels.Add($t)
+    }
+    if ($entries.Count -eq 0) { throw "New-PimReviewerAssignmentPatch: at least one reviewer is required (a review with no reviewer can never be completed)." }
+    # Strip our private 'special'/'queryRoot=null' helper fields from the wire body --
+    # Graph only wants query + queryType (+ queryRoot when non-null).
+    $wire = @(@($entries.ToArray()) | ForEach-Object {
+        $e = [ordered]@{ query = "$($_.query)"; queryType = "$($_.queryType)" }
+        $qr = Get-PimArProp -Object $_ -Names @('queryRoot'); if ($null -ne $qr) { $e['queryRoot'] = "$qr" }
+        [pscustomobject]$e
+    })
+    $body  = [ordered]@{ reviewers = $wire }
+    $audit = [pscustomobject]@{
+        action     = 'access-review.assign-reviewers'
+        reviewers  = @($labels.ToArray())
+        count      = $entries.Count
+        assignedBy = "$AssignedBy"
+        assignedUtc = $NowUtc.ToUniversalTime().ToString('o')
+    }
+    return [pscustomobject]@{ body = $body; audit = $audit; entries = @($entries.ToArray()) }
+}
+
+# ---------------------------------------------------------------------------
+# Pure reminder due-computation
+# ---------------------------------------------------------------------------
+
+function Get-PimReviewReminderState {
+    # PURE: decide whether a review INSTANCE is due for a reminder send NOW, given its
+    # status/due-date and the last-reminder bookkeeping the caller passes in. Clock
+    # injected. A reminder is due when the instance is:
+    #   * NOT completed/applied (a finished review needs no chasing), AND
+    #   * within the reminder WINDOW: overdue, OR due within -RemindWithinDays, AND
+    #   * has at least one PENDING decision (nothing to chase if all attested), AND
+    #   * hasn't already been reminded in the current repeat window (computed from
+    #     -RepeatEveryDays and -LastRemindedUtc) -- so reminders don't spam daily.
+    # Returns @{ due; reason; isOverdue; dueInDays; pendingCount; window } -- due=$false
+    # with a reason when not due (so the GUI/log can explain "why no reminder").
+    param(
+        [Parameter(Mandatory)][object]$Instance,
+        [object]$Definition,
+        [object[]]$Decisions,
+        [datetime]$NowUtc = ([datetime]::UtcNow),
+        [int]$RemindWithinDays = 7,
+        [int]$RepeatEveryDays = 3,
+        [string]$LastRemindedUtc = ''
+    )
+    $status = "$(Get-PimArProp -Object $Instance -Names @('status'))"
+    $due    = "$(Get-PimArProp -Object $Instance -Names @('endDateTime'))"
+    $counts = Get-PimAccessReviewDecisionCounts -Decisions @($Decisions)
+    $days   = Get-PimReviewItemDays -DueDateTime $due -NowUtc $NowUtc
+    $completed = ($status -match '(?i)^completed|^applied')
+    $base = [ordered]@{
+        due = $false; reason = ''; isOverdue = $false
+        dueInDays = $days; pendingCount = [int]$counts.pending; window = 'none'
+    }
+    if ($completed) { $base.reason = 'review completed -- no reminder needed';      return [pscustomobject]$base }
+    if ($counts.pending -le 0) { $base.reason = 'no pending decisions -- nothing to chase'; return [pscustomobject]$base }
+    if ($null -eq $days) { $base.reason = 'no due date -- reminder window cannot be computed'; return [pscustomobject]$base }
+    $overdue = ($days -lt 0)
+    $inWindow = ($overdue -or ($days -le $RemindWithinDays))
+    $base.isOverdue = $overdue
+    $base.window = $(if ($overdue) { 'overdue' } elseif ($inWindow) { 'dueSoon' } else { 'none' })
+    if (-not $inWindow) { $base.reason = "not within the $RemindWithinDays-day reminder window ($days days out)"; return [pscustomobject]$base }
+    # Repeat-window guard: skip if we already reminded within RepeatEveryDays.
+    $last = "$LastRemindedUtc".Trim()
+    if ($last) {
+        $parsed = [datetime]::MinValue
+        $ok = [datetime]::TryParse($last, [System.Globalization.CultureInfo]::InvariantCulture, `
+                [System.Globalization.DateTimeStyles]::AdjustToUniversal -bor [System.Globalization.DateTimeStyles]::AssumeUniversal, [ref]$parsed)
+        if ($ok) {
+            $sinceDays = (($NowUtc.ToUniversalTime()) - ($parsed.ToUniversalTime())).TotalDays
+            $every = $(if ($RepeatEveryDays -gt 0) { $RepeatEveryDays } else { 1 })
+            if ($sinceDays -lt $every) {
+                $base.reason = "already reminded $([int][Math]::Floor($sinceDays))d ago (repeat every $every d)"
+                return [pscustomobject]$base
+            }
+        }
+    }
+    $base.due = $true
+    $base.reason = $(if ($overdue) { "overdue by $([Math]::Abs($days)) day(s), $($counts.pending) pending" } else { "due in $days day(s), $($counts.pending) pending" })
+    return [pscustomobject]$base
+}
+
+function ConvertTo-PimReviewReminderTokens {
+    # PURE: a review instance + reminder state + reviewer -> tokens for the
+    # access-review-reminder mail template. Reuses generic token names so a custom
+    # template can reuse the look of the other PIM mails.
+    param(
+        [Parameter(Mandatory)][object]$Definition,
+        [object]$Instance,
+        [Parameter(Mandatory)][object]$ReminderState,
+        [string]$ReviewerName = '',
+        [string]$ReviewUrl = ''
+    )
+    $name  = "$(Get-PimArProp -Object $Definition -Names @('displayName'))"
+    $scope = Get-PimAccessReviewScopeTarget -Scope (Get-PimArProp -Object $Definition -Names @('scope'))
+    $due   = "$(Get-PimArProp -Object $Instance -Names @('endDateTime'))"
+    $days  = $ReminderState.dueInDays
+    $when  = $(if ($ReminderState.isOverdue) { "overdue by $([Math]::Abs([int]$days)) day(s)" } else { "due in $([int]$days) day(s)" })
+    @{
+        ReviewerName  = "$ReviewerName"
+        ReviewName    = $name
+        ScopeTarget   = "$($scope.display)"
+        DueDate       = $due
+        DueStatus     = $when
+        PendingCount  = "$($ReminderState.pendingCount)"
+        ReviewUrl     = "$ReviewUrl"
+    }
+}
+
+# ---------------------------------------------------------------------------
+# Live reviewer-assignment + reminder wrappers (network-touching) -- WRITE / send.
+# ---------------------------------------------------------------------------
+
+function Set-PimAccessReviewReviewers {
+    <#
+      .SYNOPSIS
+        Assign / replace the reviewer scope of an access-review DEFINITION (who is
+        asked to attest). EXPLICIT (one definition, an exact reviewer set), AUDITED
+        (returns an audit record). Needs AccessReview.ReadWrite.All on the engine SPN.
+      .PARAMETER Reviewers
+        One or more reviewer specs (user id / UPN / 'group:<id>' / 'manager'). At
+        least one is required -- an empty set is refused.
+      .NOTES
+        REST-only via Invoke-PimGraph. A 403 surfaces the missing-role hint
+        (AccessReview.*.All + Grant-PimGraphAppRoles).
+    #>
+    [CmdletBinding(SupportsShouldProcess=$true, ConfirmImpact='Medium')]
+    param(
+        [Parameter(Mandatory)][string]$DefinitionId,
+        [Parameter(Mandatory)][string[]]$Reviewers,
+        [string]$AssignedBy = ''
+    )
+    $patch = New-PimReviewerAssignmentPatch -Reviewers $Reviewers -NowUtc ([datetime]::UtcNow) -AssignedBy $AssignedBy
+    $base = "/identityGovernance/accessReviews/definitions/$DefinitionId"
+    if ($PSCmdlet.ShouldProcess($DefinitionId, "Assign $($patch.audit.count) reviewer(s)")) {
+        Invoke-PimGraph -Method PATCH -Path $base -Body $patch.body | Out-Null
+        return [pscustomobject]@{ status = 'assigned'; definitionId = $DefinitionId; count = $patch.audit.count; reviewers = $patch.audit.reviewers; audit = $patch.audit }
+    }
+    return [pscustomobject]@{ status = 'skipped-whatif'; definitionId = $DefinitionId; count = $patch.audit.count; reviewers = $patch.audit.reviewers; audit = $patch.audit }
+}
+
+function Send-PimAccessReviewReminders {
+    <#
+      .SYNOPSIS
+        Send a reminder mail for every CURRENT review instance that is DUE for one
+        (overdue / due-soon with pending decisions, respecting the repeat window).
+        Reuses the existing mail sender (Send-PimNotifyMail) + the
+        'access-review-reminder' template. Returns one result row per evaluated review
+        (sent / skipped + reason) plus an audit record per actual send.
+      .PARAMETER PimManagedOnly
+        Limit to engine-managed reviews (displayName "PIM4EntraPS review - *").
+      .PARAMETER LastReminded
+        Optional hashtable { instanceId -> lastRemindedUtc } so the repeat-window guard
+        works across runs (the caller persists the map; this function does not).
+      .NOTES
+        Read needs AccessReview.Read.All; the send needs Mail.Send + $global:PIM_MailSender.
+        -WhatIf renders without sending (safe to dry-run). NO bulk-approve here -- a
+        reminder only chases reviewers, it never records a decision.
+    #>
+    [CmdletBinding(SupportsShouldProcess=$true)]
+    param(
+        [switch]$PimManagedOnly,
+        [int]$RemindWithinDays = 7,
+        [int]$RepeatEveryDays = 3,
+        [hashtable]$LastReminded,
+        [string]$ReviewUrl = ''
+    )
+    $now = [datetime]::UtcNow
+    $results = New-Object System.Collections.Generic.List[object]
+    try {
+        $defs = @(Invoke-PimGraph -All -Path "/identityGovernance/accessReviews/definitions?`$select=id,displayName,scope,reviewers,status,settings")
+    } catch {
+        Write-Warning "  [AccessReviewReminders] list definitions failed (need AccessReview.Read.All?): $($_.Exception.Message)"
+        return @()
+    }
+    foreach ($def in $defs) {
+        $name = "$(Get-PimArProp -Object $def -Names @('displayName'))"
+        if ($PimManagedOnly -and ($name -notlike 'PIM4EntraPS review - *')) { continue }
+        $did = "$(Get-PimArProp -Object $def -Names @('id'))"
+        if (-not $did) { continue }
+        $instance = $null; $decisions = @()
+        try {
+            $inst = @(Invoke-PimGraph -Path ("/identityGovernance/accessReviews/definitions/$did/instances?`$orderby=startDateTime desc&`$top=1"))
+            if ($inst.Count) {
+                $instance = $inst[0]
+                $iid = "$(Get-PimArProp -Object $instance -Names @('id'))"
+                if ($iid) { $decisions = @(Invoke-PimGraph -All -Path ("/identityGovernance/accessReviews/definitions/$did/instances/$iid/decisions?`$select=decision")) }
+            }
+        } catch {
+            Write-Warning "  [AccessReviewReminders] instance fetch failed for '$name': $($_.Exception.Message)"
+            continue
+        }
+        if (-not $instance) { continue }
+        $iid = "$(Get-PimArProp -Object $instance -Names @('id'))"
+        $last = ''
+        if ($LastReminded -and $LastReminded.ContainsKey($iid)) { $last = "$($LastReminded[$iid])" }
+        $state = Get-PimReviewReminderState -Instance $instance -Definition $def -Decisions $decisions -NowUtc $now `
+                    -RemindWithinDays $RemindWithinDays -RepeatEveryDays $RepeatEveryDays -LastRemindedUtc $last
+        if (-not $state.due) {
+            $results.Add([pscustomobject]@{ definitionId = $did; instanceId = $iid; displayName = $name; sent = $false; reason = $state.reason }); continue
+        }
+        # Resolve reviewer recipients off the definition (flattened display ids/UPNs).
+        $reviewers = @(Get-PimAccessReviewReviewers -Reviewers @(Get-PimArProp -Object $def -Names @('reviewers')))
+        $recipients = @(@($reviewers) | Where-Object { $_ -match '@' })   # only mail-able UPNs are direct recipients
+        $sentCount = 0; $auditRows = New-Object System.Collections.Generic.List[object]
+        if ($recipients.Count -eq 0) {
+            $results.Add([pscustomobject]@{ definitionId = $did; instanceId = $iid; displayName = $name; sent = $false; reason = 'due, but no mail-addressable reviewer (group/self reviewer) -- surface in UI instead' }); continue
+        }
+        foreach ($rcpt in $recipients) {
+            $tokens = ConvertTo-PimReviewReminderTokens -Definition $def -Instance $instance -ReminderState $state -ReviewerName $rcpt -ReviewUrl $ReviewUrl
+            if ($PSCmdlet.ShouldProcess($rcpt, "Send access-review reminder for '$name'")) {
+                $r = Send-PimNotifyMail -Type 'access-review-reminder' -Tokens $tokens -Recipient $rcpt
+                if ($r.sent) { $sentCount++ }
+                $auditRows.Add([pscustomobject]@{ action='access-review.reminder'; definitionId=$did; instanceId=$iid; recipient=$rcpt; sent=[bool]$r.sent; window=$state.window; remindedUtc=$now.ToUniversalTime().ToString('o') })
+            } else {
+                $r = Send-PimNotifyMail -Type 'access-review-reminder' -Tokens $tokens -Recipient $rcpt -WhatIf
+            }
+        }
+        $results.Add([pscustomobject]@{
+            definitionId = $did; instanceId = $iid; displayName = $name
+            sent = ($sentCount -gt 0); recipients = @($recipients); sentCount = $sentCount
+            window = $state.window; reason = $state.reason; remindedUtc = $now.ToUniversalTime().ToString('o')
+            audit = @($auditRows.ToArray())
+        })
+    }
+    return @($results.ToArray())
+}
+
 # ---------------------------------------------------------------------------
 # Seed / demo -- PURE, no network. Exercises the REAL overdue + evidence
 # shapers so the GUI's overdue list + evidence export render meaningful content
@@ -725,7 +1026,8 @@ function Get-PimAccessReviewAttestationSeed {
     [CmdletBinding()] param([datetime]$NowUtc = ([datetime]'2026-06-15T00:00:00Z'))
 
     $defOverdue = [pscustomobject]@{ id='seed-def-1'; displayName='PIM4EntraPS review - PIM-Entra-ID-UserAdmin-L1-T0-CP-ID'
-        scope=[pscustomobject]@{ query='/groups/00000000-0000-0000-0000-000000000a01/transitiveMembers' }; settings=[pscustomobject]@{} }
+        scope=[pscustomobject]@{ query='/groups/00000000-0000-0000-0000-000000000a01/transitiveMembers' }
+        reviewers=@([pscustomobject]@{ query='/users/owner@contoso.test'; queryType='MicrosoftGraph' }); settings=[pscustomobject]@{} }
     $instOverdue = [pscustomobject]@{ id='seed-inst-1'; status='InProgress'; startDateTime='2026-05-20T00:00:00Z'; endDateTime='2026-06-10T00:00:00Z' }
     $decOverdue  = @([pscustomobject]@{decision='Approve'};[pscustomobject]@{decision='NotReviewed'};[pscustomobject]@{decision='NotReviewed'})
 
@@ -760,5 +1062,18 @@ function Get-PimAccessReviewAttestationSeed {
             recommendation='Approve' }
     )
     $evidence = ConvertTo-PimReviewEvidencePackage -Definition $defOverdue -Instance $instOverdue -Decisions $evDecisions -NowUtc $NowUtc
-    return [pscustomobject]@{ Overdue = $overdue.ToArray(); Evidence = $evidence }
+
+    # Reminder preview (real reminder-state + token shapers) so the GUI's "send
+    # reminders" preview is never empty offline: the overdue review IS due (within
+    # window, pending, never reminded); the completed review is NOT.
+    $stOverdue = Get-PimReviewReminderState -Instance $instOverdue -Definition $defOverdue -Decisions $decOverdue -NowUtc $NowUtc -RemindWithinDays 7 -RepeatEveryDays 3
+    $stDone    = Get-PimReviewReminderState -Instance $instDone    -Definition $defDone    -Decisions $decDone    -NowUtc $NowUtc -RemindWithinDays 7 -RepeatEveryDays 3
+    $reminders = New-Object System.Collections.Generic.List[object]
+    $reminders.Add([pscustomobject]@{ definitionId='seed-def-1'; instanceId='seed-inst-1'; displayName=$defOverdue.displayName
+        due=[bool]$stOverdue.due; window=$stOverdue.window; recipients=@('owner@contoso.test'); reason=$stOverdue.reason
+        tokens=(ConvertTo-PimReviewReminderTokens -Definition $defOverdue -Instance $instOverdue -ReminderState $stOverdue -ReviewerName 'owner@contoso.test') })
+    $reminders.Add([pscustomobject]@{ definitionId='seed-def-3'; instanceId='seed-inst-3'; displayName=$defDone.displayName
+        due=[bool]$stDone.due; window=$stDone.window; recipients=@(); reason=$stDone.reason })
+
+    return [pscustomobject]@{ Overdue = $overdue.ToArray(); Evidence = $evidence; Reminders = @($reminders.ToArray()) }
 }

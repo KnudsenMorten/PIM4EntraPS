@@ -64,6 +64,11 @@ $seedRows = @(
 $i = 0
 foreach ($r in $seedRows) {
     $i++
+    # [H6] give the account.create event a real before/after so the change-summary
+    # ('accountEnabled: (none) -> True') is exercised end-to-end through the endpoint
+    # + export; the rest keep the simple seeded after.
+    $before = $null; $after = @{ seeded = $true }
+    if ($r.action -eq 'account.create') { $before = $null; $after = @{ accountEnabled = $true } }
     $evt = [ordered]@{
         ts            = [datetime]::UtcNow.AddMinutes(-$i).ToString('o')
         runId         = $seedMarker
@@ -71,14 +76,24 @@ foreach ($r in $seedRows) {
         actor         = 'engine'
         action        = $r.action
         target        = $r.target
-        before        = $null
-        after         = @{ seeded = $true }
+        before        = $before
+        after         = $after
         result        = $(if ($r.ContainsKey('result')) { $r.result } else { 'ok' })
         whatIf        = $false
     }
     [System.IO.File]::AppendAllText($auditFile, (($evt | ConvertTo-Json -Depth 5 -Compress) + "`r`n"), $utf8NoBom)
 }
-Write-Host "Seeded $($seedRows.Count) audit events (marker $seedMarker) into $auditFile"
+# [H6] Seed one OLDER month (5 months back) so a months=all / full-history read
+# reaches PAST the default 3-month window -- proving the cap is gone.
+$oldMonthStamp = [datetime]::UtcNow.AddMonths(-5).ToString('yyyyMM')
+$oldFile = Join-Path $auditDir ("pim-audit-{0}.jsonl" -f $oldMonthStamp)
+$oldEvt = [ordered]@{
+    ts = [datetime]::UtcNow.AddMonths(-5).ToString('o'); runId = $seedMarker; correlationId = ''
+    actor = 'engine'; action = 'account.create'; target = "$seedMarker-oldmonth"
+    before = $null; after = @{ accountEnabled = $true }; result = 'ok'; whatIf = $false
+}
+[System.IO.File]::AppendAllText($oldFile, (($oldEvt | ConvertTo-Json -Depth 5 -Compress) + "`r`n"), $utf8NoBom)
+Write-Host "Seeded $($seedRows.Count) audit events + 1 older-month event (marker $seedMarker) into $auditFile (+ $oldFile)"
 
 # Governance round-trips write real (gitignored) config files in the default
 # config root; snapshot them so we can restore the pre-test state afterwards.
@@ -141,7 +156,18 @@ try {
         # + the engine-backed model serialised end-to-end).
         @{ p='/api/access-report/who-can?person=nobody@example.test'; chk={ param($r) $r.PSObject.Properties['found'] -and $null -ne $r.count -and $null -ne $r.targets } },
         @{ p='/api/access-report/who-has?role=No%20Such%20Role'; chk={ param($r) $null -ne $r.resolved -and $null -ne $r.count -and $null -ne $r.reachers } },
-        @{ p='/api/search?q=zzz-no-such-thing'; chk={ param($r) $null -ne $r.count -and $r.PSObject.Properties['hits'] } }
+        @{ p='/api/search?q=zzz-no-such-thing'; chk={ param($r) $null -ne $r.count -and $r.PSObject.Properties['hits'] } },
+        # Tier-impact (§23 / ROADMAP #24): the estate-wide report answers with the
+        # right JSON shape (every user with a path to a T0/T1 target). Empty data is
+        # fine offline -- the shape proves routing + the engine-backed reach model
+        # serialised end-to-end; the tier filter (&tier=0) is honoured.
+        @{ p='/api/tier-impact'; chk={ param($r) $null -ne $r.scannedAdmins -and $null -ne $r.impactedCount -and $r.PSObject.Properties['rows'] -and [int]$r.highTierMax -eq 1 } },
+        @{ p='/api/tier-impact?tier=0'; chk={ param($r) [int]$r.highTierMax -eq 0 -and $r.PSObject.Properties['rows'] } },
+        # Alerting (§26c / §28 [H2]): the config + the recorded-alert FEED read with
+        # the right shape (empty feed offline is fine -- the shape proves routing +
+        # the [M5]-residual proof summary serialised end-to-end).
+        @{ p='/api/alerting'; chk={ param($r) $null -ne $r.enabled -and @($r.eventCatalog).Count -ge 4 } },
+        @{ p='/api/alerts';   chk={ param($r) $r.ok -and $null -ne $r.summary -and $r.PSObject.Properties['alerts'] -and @($r.catalog) -contains 'expiring-access' } }
     )) {
         Beat
         $ok = $false
@@ -234,6 +260,35 @@ try {
         $okSt = ($r.ok -and "$($r.change.payload.AccountStatus)" -eq 'Disabled' -and "$($r.change.op)" -eq 'Update')
     } catch { Write-Host "      (self-service: $($_.Exception.Message.Split([char]10)[0]))" -ForegroundColor DarkGray }
     T 'onboarding self-service-toggle -> AccountStatus change' $okSt
+
+    # -------------------------------------------------------------------
+    # Alerting recorded-send PROOF round-trip (§26c / §28 [H2] + [M5] residual).
+    # Configure a recipient, fire a TEST alert through the real notify path, then
+    # confirm the FEED recorded the fire WITH a recorded-send proof entry. Offline
+    # there is no $global:PIM_MailSender, so the proof is 'rendered' (fired but not
+    # delivered) -- which is exactly the honest, recorded state we need to prove.
+    # -------------------------------------------------------------------
+    Write-Host "Alerting feed recorded-send proof ([M5] residual)" -ForegroundColor Cyan
+    Beat
+    $okAlPut=$false; try {
+        $r = Invoke-RestMethod -Uri "$base/api/alerting" -Headers $hdr -Method Put -ContentType 'application/json' -TimeoutSec 30 -Body (@{ recipients=@('alerts@example.test'); events=@{ 'engine-failure'=$true; 'drift'=$true; 'expiring-access'=$true; 'break-glass'=$true } } | ConvertTo-Json -Depth 5)
+        $okAlPut = (@($r.recipients) -contains 'alerts@example.test')
+    } catch { Write-Host "      (alerting put: $($_.Exception.Message.Split([char]10)[0]))" -ForegroundColor DarkGray }
+    T 'alerting PUT -> recipient saved' $okAlPut
+    Beat
+    $okAlTest=$false; try {
+        $r = Invoke-RestMethod -Uri "$base/api/alerting/test" -Headers $hdr -Method Post -TimeoutSec 30
+        # fired + recorded must be true; sent is 0 offline (no sender) -> honest 'not delivered'
+        $okAlTest = ([bool]$r.fired -and [bool]$r.recorded)
+    } catch { Write-Host "      (alerting test: $($_.Exception.Message.Split([char]10)[0]))" -ForegroundColor DarkGray }
+    T 'alerting test -> fired + recorded (proof written)' $okAlTest
+    Beat
+    $okAlFeed=$false; try {
+        $r = Probe '/api/alerts?take=10'
+        $hit = @($r.alerts | Where-Object { "$($_.title)" -match 'test alert' })
+        $okAlFeed = ($r.ok -and $hit.Count -ge 1 -and "$(@($hit)[0].sendState)" -in @('sent','rendered') -and [int]$r.summary.total -ge 1)
+    } catch { Write-Host "      (alerts feed: $($_.Exception.Message.Split([char]10)[0]))" -ForegroundColor DarkGray }
+    T 'alerts feed -> records the fired alert with a send-proof' $okAlFeed
 
     # -------------------------------------------------------------------
     # Validate-tab Overrule / Acknowledge store (REQUIREMENTS s11). Proves the
@@ -376,6 +431,56 @@ try {
         $okPage = ($p1.matchCount -eq $seedRows.Count -and $p1.events.Count -eq 3 -and $p2.events.Count -eq 3 -and [int]$p1.pageCount -eq 4 -and $overlap -eq 0)
     } catch { Write-Host "      (audit paging: $($_.Exception.Message.Split([char]10)[0]))" -ForegroundColor DarkGray }
     T 'audit: paging (pageSize=3) splits seeded rows, no overlap, pageCount=4' $okPage
+
+    # [H6] before/after change summary stamped on the event (account.create -> "(none) -> True").
+    $okChange=$false; try {
+        $r = Probe "/api/audit?q=$seedMarker-acctX&pageSize=200"
+        $cre = @($r.events | Where-Object { "$($_.action)" -eq 'account.create' -and "$($_.target)" -eq "$seedMarker-acctX" })
+        $okChange = ($cre.Count -eq 1 -and "$($cre[0].change)" -like '*accountEnabled: (none) -> True*')
+    } catch { Write-Host "      (audit change: $($_.Exception.Message.Split([char]10)[0]))" -ForegroundColor DarkGray }
+    T 'audit: event carries a before/after change summary' $okChange
+
+    # [H6] default window stays ~3 months (back-compat); months=all reaches the
+    # older-month seed (5 months back) that the old hard cap would have hidden.
+    $okWindow=$false; try {
+        $def = Probe "/api/audit?q=$seedMarker&pageSize=500"                 # default 3-month window
+        $all = Probe "/api/audit?q=$seedMarker&months=all&pageSize=500"      # full history
+        $defHasOld = @($def.events | Where-Object { "$($_.target)" -eq "$seedMarker-oldmonth" }).Count
+        $allHasOld = @($all.events | Where-Object { "$($_.target)" -eq "$seedMarker-oldmonth" }).Count
+        $okWindow = ($defHasOld -eq 0 -and $allHasOld -eq 1 -and [int]$all.monthsTotal -ge 2)
+    } catch { Write-Host "      (audit window: $($_.Exception.Message.Split([char]10)[0]))" -ForegroundColor DarkGray }
+    T 'audit: default window=3mo hides the 5-mo-old event; months=all surfaces it (cap removed)' $okWindow
+
+    # [H6] date-range filter (from/to) narrows by event timestamp.
+    $okRange=$false; try {
+        $todayUtc = [datetime]::UtcNow.ToString('yyyy-MM-dd')
+        $r = Probe "/api/audit?q=$seedMarker&months=all&from=$todayUtc&to=$todayUtc&pageSize=500"
+        $mine = @($r.events | Where-Object { "$($_.target)" -like "$seedMarker*" })
+        # Today's events = the 10 current-month rows; the 5-mo-old one is excluded.
+        $hasOld = @($mine | Where-Object { "$($_.target)" -eq "$seedMarker-oldmonth" }).Count
+        $okRange = ($mine.Count -eq $seedRows.Count -and $hasOld -eq 0)
+    } catch { Write-Host "      (audit range: $($_.Exception.Message.Split([char]10)[0]))" -ForegroundColor DarkGray }
+    T 'audit: from/to date range narrows to in-range events only' $okRange
+
+    # [H6]/[H5] FULL-TRAIL CSV export: text/csv attachment, Change column, before/after
+    # text, covers the full history (incl. the 5-mo-old event), honours the search filter.
+    $okExport=$false; try {
+        $wr = Invoke-WebRequest -Uri "$base/api/audit/export?q=$seedMarker&months=all" -Headers $hdr -TimeoutSec 90 -UseBasicParsing
+        $ct = "$($wr.Headers['Content-Type'])"
+        $cd = "$($wr.Headers['Content-Disposition'])"
+        # -UseBasicParsing returns .Content as a string for text/* but bytes for
+        # some hosts -- accept either.
+        $csv = if ($wr.Content -is [byte[]]) { [System.Text.Encoding]::UTF8.GetString($wr.Content) } else { "$($wr.Content)" }
+        $csv = $csv.TrimStart([char]0xFEFF)   # drop the UTF-8 BOM the download carries
+        $lines = @($csv -split "`r`n" | Where-Object { $_ })
+        $headerOk = ($lines[0] -like 'When (UTC),Actor,Category,Action,Target,Result,Change,*')
+        $hasOldRow = ($csv -like "*$seedMarker-oldmonth*")
+        $hasChange = ($csv -like '*accountEnabled: (none) -> True*')
+        # 10 current-month + 1 old = 11 seeded rows + header.
+        $rowCountOk = ($lines.Count -ge ($seedRows.Count + 1 + 1))
+        $okExport = ($ct -like 'text/csv*' -and $cd -like 'attachment*.csv*' -and $headerOk -and $hasOldRow -and $hasChange -and $rowCountOk)
+    } catch { Write-Host "      (audit export: $($_.Exception.Message.Split([char]10)[0]))" -ForegroundColor DarkGray }
+    T 'audit: GET /api/audit/export streams full-trail CSV (Change column, before/after, full history)' $okExport
 
     # ---- Governance management round-trips (PUT then GET re-read) -----------
     # The dev-local Windows identity resolves to SuperAdmin (no access file), so
@@ -683,6 +788,29 @@ try {
     catch { $badDecide = ([int]$_.Exception.Response.StatusCode -eq 400) }
     T 'POST /api/approvals/decide without id -> 400' $badDecide
 
+    # --- [H3] Approval-gated bulk-revoke over real HTTP -----------------------------
+    # The Maintenance bulk-revoke is no longer raw/immediate: an OVER-THRESHOLD batch
+    # is blocked at commit until an Approved maker/checker 'revoke' request exists.
+    # (1) PREVIEW surfaces approvalRequired; (2) COMMIT of an over-threshold batch with
+    # no approval is refused 409 with gate=no-approval -- NO real revoke runs (these are
+    # synthetic rows with no live assignment behind them; the gate fires before any call).
+    Beat
+    $bigRevRows = @(1..8 | ForEach-Object { @{ id="h3-$_"; principal="h3user$_@test"; principalId="h3pid-$_"; type='entra-role'; roleDefinitionId="rd-$_"; directoryScopeId='/' } })
+    $okRevPrev = $false
+    try {
+        $prev = PostJson '/api/revoke' @{ preview=$true; rows=$bigRevRows }
+        $okRevPrev = ($prev.ok -and $prev.preview -and [int]$prev.toRevokeCount -eq 8 -and $prev.approvalRequired -eq $true)
+    } catch { Write-Host "      (revoke preview: $($_.Exception.Message.Split([char]10)[0]))" -ForegroundColor DarkGray }
+    T 'POST /api/revoke preview flags approvalRequired for an over-threshold batch' $okRevPrev
+
+    $okRevBlocked = $false
+    try { PostJson '/api/revoke' @{ justification='endpoint test'; rows=$bigRevRows; confirmCount=8 } | Out-Null }
+    catch {
+        $code = [int]$_.Exception.Response.StatusCode
+        $okRevBlocked = ($code -eq 409)
+    }
+    T 'POST /api/revoke over-threshold WITHOUT approval -> 409 (needs approval)' $okRevBlocked
+
     # Access-review decision endpoint degrades gracefully (no AccessReview.ReadWrite.All):
     # returns 200 with ok=$false (honest), never a 5xx crash.
     try {
@@ -702,13 +830,26 @@ try {
     if ($null -ne $accessBak)   { [System.IO.File]::WriteAllText($accessFile,   $accessBak,   $enc) } elseif (Test-Path $accessFile)   { Remove-Item $accessFile   -Force -EA SilentlyContinue }
     if ($null -ne $settingsBak) { [System.IO.File]::WriteAllText($settingsFile, $settingsBak, $enc) } elseif (Test-Path $settingsFile) { Remove-Item $settingsFile -Force -EA SilentlyContinue }
     # Remove ONLY our seeded rows from the audit trail (keep any real history).
+    # Scrub both the current-month file and the older-month file we seeded for [H6].
     try {
-        if ($auditFile -and (Test-Path $auditFile)) {
-            $keep = @(Get-Content -LiteralPath $auditFile -Encoding UTF8 | Where-Object { $_ -notmatch [regex]::Escape($seedMarker) })
-            if ($keep.Count -gt 0) { [System.IO.File]::WriteAllText($auditFile, (($keep -join "`r`n") + "`r`n"), $utf8NoBom) }
-            else { Remove-Item -LiteralPath $auditFile -Force -EA SilentlyContinue }
+        foreach ($af in @($auditFile, $oldFile)) {
+            if ($af -and (Test-Path $af)) {
+                $keep = @(Get-Content -LiteralPath $af -Encoding UTF8 | Where-Object { $_ -notmatch [regex]::Escape($seedMarker) })
+                if ($keep.Count -gt 0) { [System.IO.File]::WriteAllText($af, (($keep -join "`r`n") + "`r`n"), $utf8NoBom) }
+                else { Remove-Item -LiteralPath $af -Force -EA SilentlyContinue }
+            }
         }
     } catch { Write-Host "  (audit seed cleanup skipped: $($_.Exception.Message))" -ForegroundColor DarkGray }
+    # Remove ONLY the test-alert rows the [M5]-residual proof test fired (keep any
+    # real recorded alerts) so the run leaves no residue + is rerunnable.
+    try {
+        $alertFeedFile = Join-Path $solRoot 'output\alerts\pim-alerts.jsonl'
+        if (Test-Path -LiteralPath $alertFeedFile) {
+            $keep = @(Get-Content -LiteralPath $alertFeedFile -Encoding UTF8 | Where-Object { $_ -notmatch 'PIM Manager test alert' })
+            if ($keep.Count -gt 0) { [System.IO.File]::WriteAllText($alertFeedFile, (($keep -join "`r`n") + "`r`n"), $utf8NoBom) }
+            else { Remove-Item -LiteralPath $alertFeedFile -Force -EA SilentlyContinue }
+        }
+    } catch { Write-Host "  (alert feed cleanup skipped: $($_.Exception.Message))" -ForegroundColor DarkGray }
 }
 
 Write-Host ("`n RESULT: {0} pass, {1} fail" -f $pass, $fail) -ForegroundColor $(if($fail){'Red'}else{'Green'})

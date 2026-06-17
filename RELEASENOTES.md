@@ -1,9 +1,29 @@
 # Release notes for PIM4EntraPS
 
-## v2.4.223
+## v2.4.224
 
 Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monorepo:
 
+- ci(publish): automatic public-doc sanitization gate + PIM v2.4.224 release notes (191b3c17)
+- feat(pim engine): inactivity sweep decision core (stale-admin hygiene, §25c) (#138) (2f42ffa2)
+- feat(pim manager): tier-impact report -- who can reach Tier-0/Tier-1 (incl. nested) (#137) (83ce9985)
+- feat(pim cutover): abort/rollback before finalize + human-readable stage audit (s28 [L3]) (#136) (83441ba9)
+- feat(pim auth): proactive token-claims role pre-flight + ARM/connector role hints (#135) (81c65cc7)
+- feat(pim manager): export role permissions + active assignments for tickets ([L5]/[H5]) (#134) (16d8f801)
+- feat(pim): approval-gate the over-threshold Maintenance bulk-revoke [H3]/[L4] (#133) (447c42cf)
+- feat(pim manager): alert feed + recorded-send proof + expiring-access dispatch ([H2]/[M5]) (#132) (322828c4)
+- feat(pim): fleet template conformance — tenants×templates matrix + ring-wide rollout [H8] (#131) (2b58c86a)
+- feat(pim manager): active-exemptions register + revoke on Template Rollout (§28 [L2]) (#130) (0a7cad22)
+- feat(pim manager): audit history + before/after + full-trail CSV export ([H6]) (#129) (f740f307)
+- feat(pim manager): Role Lookup search-by-action (§28 [H9a]) (#128) (dcbc810b)
+- feat(pim access reviews): make Access Reviews actionable (attest/assign/remind/export) [H7] (#125) (e7815d58)
+- feat(pim map): stage a removal (revoke a grant) from the Delegation Map [M8] (#126) (c0e1c8d4)
+- feat(pim manager): in-context guidance + consistent empty/loading/error states across tabs (§28d) (#123) (f24d8b4b)
+- feat(pim H4): approval-gated offboarding executor (request -> approve -> execute) (#122) (0099b34e)
+- fix(pim deploy-all): make -StepRunner test seam truly offline (df2fa849)
+- docs(pim): embed Manager screenshots in FEATURES/DESIGN, add screenshot-presence test + publish docs-gate, scrub internal refs (#121) (bb481bfe)
+- feat(sync): generic post-sync auto-deploy hook (phase 1) (#120) (f5a0ec88)
+- feat(pim setup): one-shot "deploy everything" orchestrator + test-tenant validation (#119) (e10edaf8)
 - release(pim): v2.4.223 — world-class Manager wave + sanitized notes (publish to public mirror) (7663c4bb)
 - docs(pim): sanitize RELEASENOTES for publish — remove customer AD domain, KV secret names, company refs (ccbf4460)
 - feat(pim manager): feature-flag registry — turn any GUI surface on/off in Settings (gradual rollout) (#118) (633978a5)
@@ -14,32 +34,30 @@ Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monor
 - feat(pim m3): inline preview/diff for Authoring + Move-admin never drops rows [M3] (#114) (06604015)
 - feat(pim governance): drift view (live vs desired) + gated apply-now [M5] (#113) (7b719577)
 - feat(pim m6): Jobs tab failure history, overdue detection + re-run/acknowledge (#115) (aff72168)
-- docs(pim): README + screenshots must be refreshed on every release (operator directive) (dbab0623)
-- feat(pim m1): safe, reversible Review & Save commits (backup + undo + transactional) (#112) (765c013b)
-- feat(pim engine): generic entra-approle connector (any enterprise-app app role -> PIM group) (#111) (420afc61)
-- docs(pim readme): expand into a reader-first, non-technical guide (#110) (116e070b)
-- docs(pim): restructure public README for readability + add headless GUI screenshots (#109) (3fc7db8c)
-- fix(pim test): make M9 redaction test secret-scan-clean (781e566e)
-- feat(pim m9): Support / diagnostics surface (connectivity+permission, health, sanitized bundle) (#107) (96b36ead)
-- docs(pim readme): close gap with delivered FEATURES catalog (#108) (c67a9a03)
-- docs(pim): nav consolidation DELIVERED — moved §26d → FEATURES §11 (live-verified) (f88de635)
-- feat(pim h9): Role Lookup reverse + typo tolerance + role compare (#106) (69254c08)
-- test(pim): whitelist map-risk/map-search as known server-parity orphans [M8] (d7e205e4)
-- feat(pim m8): Delegation Map search result list + jump + risk overlay (#105) (50a5dac4)
-- feat(pim m7): Settings config surface for expiry/MFA/connection-sanity (#104) (ba92a841)
-- fix(pim manager): keyed Review & Save diff so a reorder is not a change [M2] (#103) (5a4968ac)
-- feat(pim-activator): fold out + activate nested permission groups (two-tier PIM) (#102) (75758b28)
-- fix(pim manager): [H1] Read-PimRows strips BOM/whitespace from quoted CSV headers (#101) (091e210c)
-- docs(pim): nested permission-group activation (two-tier PIM) — REQUIREMENTS §125 (#100) (19bbe85e)
-- release(pim-activator): v1.6.30 — ship tenant-dropdown readability fix to fleet (d606e40c)
-- feat(pim manager): consolidate nav into CISO-friendly menu groups (§26d) + headless nav validator (#99) (5bc2f3e5)
-- docs(pim): record PIM Manager IT-admin investigation findings (REQUIREMENTS §27) (#79) (dc5137fa)
 
 ---
 
 # Release notes -- PIM4EntraPS
 
 > **Curated changelog.** The publish workflow auto-prepends recent monorepo commits as a raw activity log; this file is the human-friendly narrative on top.
+
+---
+
+## Governance, audit & fleet wave + automatic publish-safety (v2.4.224)
+
+A broad wave across the Manager, the engine, and the release pipeline:
+
+- **Actionable Access Reviews** — attest / approve / deny each item, assign reviewers, send reminders, and export evidence, all from the portal (degrades to an honest "permission not granted yet" until the directory role is in place).
+- **Approval-gated offboarding & bulk-revoke** — a privileged disable/offboard or an over-threshold revoke now goes request → second-person approve → execute, with audit, what-if, and break-glass exclusion; the destructive "Maintenance" tab is renamed so it can't be triggered by accident.
+- **Audit you can defend** — the Audit tab reaches all history (not just ~3 months), shows a before → after change summary per row, and exports the whole filtered trail to CSV.
+- **Delegation Map** — revoke a grant straight from the visual (routed through the same backed-up, keyed, approval-gated save path).
+- **Role Lookup** — find which roles grant a given action, ranked least-privilege first; export any lookup for a least-privilege ticket.
+- **Governance & insight** — an active-exemptions register with revoke; an alerts feed with recorded-send proof and proactive expiring-access alerts; a tenant-by-template fleet conformance matrix with ring-wide rollout; a tier-impact report (everyone with a path to Tier-0/1, including via nested groups); an inactivity-sweep decision core for stale-admin hygiene.
+- **Guidance & quality** — every screen carries a short "what this is / how to use it" banner and consistent loading / empty / error states; a proactive token-claims pre-flight tells an admin to activate a role *before* a write would 403.
+- **Cutover** — abort/rollback before finalize, with a human-readable stage audit.
+- **Automatic publish-safety** — every publish now runs an automated sanitization gate over the public docs (README / RELEASENOTES / FEATURES / DESIGN) and refuses to publish if any real customer/company name, tenant/subscription id, Key Vault name, internal host, or secret slips in — so a leak can never reach the public mirror.
+
+Everything is offline-verified; hosted/SQL Manager features remain gated on the live hosted smoke before they are treated as fully delivered.
 
 ---
 
@@ -208,7 +226,7 @@ Removes the PowerShell-module dependency from the engine's read + auth path, so 
 So the business reaches the Manager by browser (no per-machine file distribution), it can run 24/7 on an App Service plan. Two editions of the same code:
 
 - **Hosted edition** (`-Hosted` / `PIM_HOSTED=1`): binds all interfaces on the container port, **never self-exits**, and resolves identity from the App Service **Easy Auth** principal (`X-MS-CLIENT-PRINCIPAL-NAME`, trusted only in hosted mode). The per-session token is **still required on `/api`** (defense in depth). RBAC **fails closed** in hosted mode -- the implicit single-operator SuperAdmin default is OFF; unlisted authenticated users are Reader.
-- **Local/emergency edition** (default, loopback): unchanged -- SuperAdmin, session token, self-exits after 30s. This is the **break-glass** path **if the Azure app plan / Easy Auth / region is down**; on the mgmt box it still reaches the same Azure SQL over the PE (live data), falling back to CSV if SQL is unreachable.
+- **Local/emergency edition** (default, loopback): unchanged -- SuperAdmin, session token, self-exits after 30s. This is the **break-glass** path **if the Azure app plan / Easy Auth / region is down**; on the management host it still reaches the same Azure SQL over the private endpoint (live data), falling back to CSV if SQL is unreachable.
 - **`tools/pim-manager/Dockerfile`** -- the hosted Manager image. **`infra/app-service/main.bicep`** (validated) -- Linux App Service plan (PremiumV3, AlwaysOn), Web App for Containers with system MI, VNet integration (outbound -> SQL PE), **public access disabled + Private Endpoint inbound** (private-only; it manages tier-0), **Entra Easy Auth**. Runbook + params sample included; live params gitignored.
 
 Local-mode regression 20/20; manager parses clean. (SQL-client-on-Linux note flagged in the runbook.) VERSION -> 2.4.204.
@@ -933,7 +951,7 @@ Verified by headless-Chrome E2E on a demo tenant with seeded caches: scope + RBA
 
 The admin-UPN naming check turns the `AdminAccountPattern` template (e.g. `Admin-{Owner}`) into a regex by replacing `{Token}` placeholders with `.+`. But `[regex]::Escape()` escapes `{` and NOT `}` (.NET asymmetry), so the replacement pattern -- which expected both braces escaped -- never matched, the placeholder survived as a literal, and **every legitimate UPN** was warned against the literal string `Admin-{Owner}`. The closing brace is now matched optionally-escaped, so token templates expand correctly and PIM-NAME-002 only fires on genuine mismatches.
 
-Demo tenants on the mgmt box now validate fully clean (0 errors, 0 warnings) after this fix plus demo-data alignment (consistent tiers, naming-convention-conformant role tag, seeded per-instance tenant caches).
+Demo tenants on the management host now validate fully clean (0 errors, 0 warnings) after this fix plus demo-data alignment (consistent tiers, naming-convention-conformant role tag, seeded per-instance tenant caches).
 
 ---
 
@@ -951,7 +969,7 @@ Per operator decision, an invalid `Ring` value is now a **warning** (the Block-S
 
 ### Instance switch retargets the tenant connection
 
-The Manager runs on the mgmt box, which holds credentials for every customer tenant. Registry entries in `instances.custom.json` can now declare the connection per tenant:
+The Manager runs on the management host, which holds credentials for every customer tenant. Registry entries in `instances.custom.json` can now declare the connection per tenant:
 
 - `tenantId` + `appId` + `certThumbprint` -- mgmt-box shape (per-tenant cert in the machine store).
 - `tenantId` + `appId` + `keyVaultName`/`secretName` -- **central Key Vault** shape: one client secret per tenant in one vault, resolved with the current Az context. This is the cloud-portable form -- an Azure App Service port reads the same vault via Managed Identity with zero changes to the resolution logic.
@@ -1050,7 +1068,7 @@ A full read-only load against a production tenant surfaced and fixed four issues
 3. **O(rows x principals) label resolution**: principal/role/AU labels resolved via linear scans per row; now hashtable indexes.
 4. **Cert-only connection contract**: `_tenantSync.ps1` demanded a Modern-SPN certificate thumbprint even when the process already had a working app-only Graph + Az connection. Now it (a) reuses an existing matching app-only context, (b) falls back cert -> client-secret (what `Connect-PlatformModern` populates on tenants without a Modern cert). Never interactive.
 
-New launcher switch: **`-ConnectPlatform`** -- bootstraps the AutomateITPS platform connection (bootstrap cert -> KV -> Modern SPN, app-only) inside the server process, so `.\Open-PimManager.ps1 -ConnectPlatform` is all that's needed to use the Revoke tab on a mgmt box.
+New launcher switch: **`-ConnectPlatform`** -- bootstraps the AutomateITPS platform connection (bootstrap cert -> KV -> Modern SPN, app-only) inside the server process, so `.\Open-PimManager.ps1 -ConnectPlatform` is all that's needed to use the Revoke tab on a management host.
 
 Verified live: 987 active assignments (360 entra-role + 584 azure-rbac + 43 pim-for-groups) loaded with correct principal/role/scope labels; 60s server cache answers repeats in 0.07s; server survives the load. Revoke POST not exercised (read-only verification); the revoke request builders are code-reviewed and the endpoint validates justification + rows.
 
@@ -1063,7 +1081,7 @@ Verified live: 987 active assignments (360 entra-role + 584 azure-rbac + 43 pim-
 
 ### PIM Activator fix -- tenant dropdown readability
 
-With 3 tenants in the header customer-switcher, only the highlighted row was readable; the others rendered white-on-white. Cause: the closed control needs white text on the blue banner, but the OS paints the open option list on white and the options inherited `color:#ffffff`. `popup.html` now gives options explicit colors (`#1a1a1a` on white; selected: white on blue). **Operators must repack + redeploy the extension from mgmt1 to ship this to browsers** -- the repo change alone doesn't update installed extensions.
+With 3 tenants in the header customer-switcher, only the highlighted row was readable; the others rendered white-on-white. Cause: the closed control needs white text on the blue banner, but the OS paints the open option list on white and the options inherited `color:#ffffff`. `popup.html` now gives options explicit colors (`#1a1a1a` on white; selected: white on blue). **Operators must repack + redeploy the extension from the master signing-key host to ship this to browsers** -- the repo change alone doesn't update installed extensions.
 
 ### Files changed
 
@@ -1842,17 +1860,17 @@ The throw message itself now lists the three most-common causes (tenant ADMX cap
 
 **Publish-step fix (script).** `Update-PimActivator-Extension.ps1`'s `-Repack` / `-PackOnly` was silently aborting the gh-pages push step on a CLEAN run. Root cause: git writes informational lines (`Cloning into...`, `From <repo>`, etc.) to stderr even on success. The previous `2>&1 | Out-Null` pipeline routed those into PowerShell's error stream, which the script-wide `$ErrorActionPreference = 'Stop'` then treated as terminating errors. The CRX got packed + validated, but never pushed -- gh-pages stayed on the previous version while the script reported success. Switched to `2>$null 1>$null` + explicit `$LASTEXITCODE` checks so only real git failures abort the step. Also replaced `git pull` with `git fetch + git reset --hard origin/gh-pages` to dodge the shallow-clone "reference already exists" quirk that sometimes corrupts the local ref database.
 
-Verified end-to-end on mgmt1: extension v1.6.24 is live on gh-pages (commit d1b165e), and the popup pre-sign-in screen now shows only the header + sign-in prompt + credit footer (no My Access bleed-through).
+Verified end-to-end on the master signing-key host: extension v1.6.24 is live on gh-pages, and the popup pre-sign-in screen now shows only the header + sign-in prompt + credit footer (no My Access bleed-through).
 
 ---
 
 ## v2.4.104 + extension v1.6.22 -- Update-PimActivator-Extension.ps1 -Repack / -PackOnly works on PS 5.1 (v2.4.98 PEM-based pre-pack guard required PS 7+)
 
-**Reason.** v2.4.98 added a pre-pack signing-key guard that derives the extension id from `signing-key.pem` via `[System.Security.Cryptography.RSA]::Create().ImportFromPem()`. That API is .NET Core 3.0+ / PS 7+ only -- PS 5.1's `RSACryptoServiceProvider` doesn't have it. On mgmt1 (the master signing-key host, which runs PS 5.1 by default), the guard threw `Method invocation failed because [System.Security.Cryptography.RSACryptoServiceProvider] does not contain a method named 'ImportFromPem'` and aborted every repack attempt. v1.6.20 (popup CSS revert) could never reach gh-pages, leaving the fleet stuck on v1.6.19's broken flex-column popup.
+**Reason.** v2.4.98 added a pre-pack signing-key guard that derives the extension id from `signing-key.pem` via `[System.Security.Cryptography.RSA]::Create().ImportFromPem()`. That API is .NET Core 3.0+ / PS 7+ only -- PS 5.1's `RSACryptoServiceProvider` doesn't have it. On the master signing-key host (which runs PS 5.1 by default), the guard threw `Method invocation failed because [System.Security.Cryptography.RSACryptoServiceProvider] does not contain a method named 'ImportFromPem'` and aborted every repack attempt. v1.6.20 (popup CSS revert) could never reach gh-pages, leaving the fleet stuck on v1.6.19's broken flex-column popup.
 
 **Fix.** Pre-pack guard is now best-effort: tries `ImportFromPem`, on any failure prints a `Skipping PEM-based pre-pack check` warning and falls through. A new POST-pack guard then derives the canonical extension id from the freshly-packed CRX's protobuf v3 header (`SHA256(first AsymmetricKeyProof.public_key)` -> first 16 bytes -> remapped 0-15 -> 'a'-'p') using only basic byte operations -- works identically on PS 5.1 and PS 7+. If derived id doesn't match the policy-registered EXT_ID, the local CRX is deleted before any `git push origin gh-pages` runs. End result: wrong-key protection survives on every PS version, and `-Repack` / `-PackOnly` now produce + publish a CRX on PS 5.1 as well as PS 7+.
 
-Verified on mgmt1: clean PackOnly run produced + pushed extension v1.6.22 CRX with `derived id eheocihmlppcophaeakmdenhgcookkab matches policy id` confirmation. The pre-pack PEM check still runs and succeeds when invoked from a PS 7+ console, providing an earlier abort if the wrong key is detected.
+Verified on the master signing-key host: clean PackOnly run produced + pushed extension v1.6.22 CRX with `derived id eheocihmlppcophaeakmdenhgcookkab matches policy id` confirmation. The pre-pack PEM check still runs and succeeds when invoked from a PS 7+ console, providing an earlier abort if the wrong key is detected.
 
 (Pattern note for future scripts: any PEM-key-validation guard should validate the produced output bytes, not the input PEM. PEM parsing in pure .NET Framework 4.x / PS 5.1 is painful -- whereas reading bytes from a produced artifact and parsing protobuf / DER / etc with integer math works on every PS version.)
 

@@ -606,3 +606,311 @@ function Test-PimRevokeExecutionAllowed {
     }
     return [pscustomobject]@{ allowed = $true; gate = 'approved'; reason = "batch of $($need.toRevokeCount) approved by $($appr.approver)"; required = $true; toRevokeCount = $need.toRevokeCount; threshold = $need.threshold; skippedCount = $need.skippedCount; approval = $appr }
 }
+
+# ---- OFFBOARD EXECUTOR (request -> approve -> EXECUTE; once-only) ------------
+# This is the missing wiring half of REQUIREMENTS s27 [H4]: it connects an APPROVED
+# offboard request to the EXISTING account-status-change pipeline. The decision of
+# WHETHER it may run lives entirely in Test-PimOffboardExecutionAllowed (above) --
+# this function NEVER re-implements a gate; it asks that one and refuses on any block.
+#
+# It executes the guided sequence (Get-PimOffboardSequencePlan: disable ->
+# revoke-active -> schedule-delete) by routing the disable/revoke steps through
+# Invoke-PimAccountStatusChange (the SAME pipeline the MSP kill-switch uses --
+# disable=AccountStatus 'Disabled', revoke-active=AccountStatus 'Revoked'). The
+# scheduled-delete step is recorded as a SCHEDULED intent only (never an immediate
+# delete) -- it is staged for a later, separately-approved pass.
+#
+# The action invoker is INJECTABLE (-ActionInvoker) so the offline tests drive a
+# MOCK and NEVER disable a real user; in the engine/Manager the default routes to
+# the real Invoke-PimAccountStatusChange. On a successful run the Approved request
+# is latched Executed (Set-PimApprovalRequestExecuted) so it can never drive a
+# second run.
+
+function Test-PimOffboardTargetIsBulk {
+    # PURE: an offboard request targets exactly ONE principal. A blank/empty target,
+    # or a target carrying a multi-principal separator (',' ';' newline / whitespace
+    # run / a '*' wildcard / an 'all'/'everyone' keyword), is a BULK/empty target that
+    # must NEVER auto-resolve into a population. The executor refuses these unless the
+    # caller explicitly confirms (-ConfirmBulk) AND an approval exists -- bulk offboard
+    # is never a one-click path. Returns @{ bulk; empty; reason }.
+    [CmdletBinding()] param([AllowNull()][string]$Target)
+    $t = "$Target".Trim()
+    if (-not $t) { return [pscustomobject]@{ bulk = $true; empty = $true; reason = 'target is empty -- an empty offboard target must never resolve into a population' } }
+    if ($t -match '[,;]' -or $t -match '\r|\n' -or $t -match '\s{2,}' -or $t -match '\*') {
+        return [pscustomobject]@{ bulk = $true; empty = $false; reason = "target '$t' looks like a multi-principal / wildcard set -- bulk offboarding requires explicit confirmation + approval" }
+    }
+    if ($t.ToLowerInvariant() -in @('all','everyone','any','everybody')) {
+        return [pscustomobject]@{ bulk = $true; empty = $false; reason = "target '$t' is a population keyword -- bulk offboarding requires explicit confirmation + approval" }
+    }
+    return [pscustomobject]@{ bulk = $false; empty = $false; reason = '' }
+}
+
+function Get-PimDefaultOffboardActionInvoker {
+    # The default action invoker: route a sequence step through the EXISTING
+    # account-status-change pipeline. Returns a scriptblock taking ($step,$target):
+    #   step 'disable'         -> Invoke-PimAccountStatusChange ... -AccountStatus Disabled
+    #   step 'revoke-active'   -> Invoke-PimAccountStatusChange ... -AccountStatus Revoked
+    #   step 'schedule-delete' -> recorded as a scheduled intent (no immediate delete).
+    # Each invocation returns @{ ok; detail }. NEVER called by the offline tests
+    # (they inject their own mock) -- this is the live wiring only.
+    return {
+        param($Step, $Target)
+        $s = "$($Step.step)".Trim().ToLowerInvariant()
+        if ($s -eq 'schedule-delete') {
+            return [pscustomobject]@{ ok = $true; detail = "delete SCHEDULED for $($Step.scheduledDeleteUtc) (not executed now)" }
+        }
+        if (-not (Get-Command Invoke-PimAccountStatusChange -ErrorAction SilentlyContinue)) {
+            return [pscustomobject]@{ ok = $false; detail = 'Invoke-PimAccountStatusChange pipeline not loaded' }
+        }
+        $status = if ($s -eq 'disable') { 'Disabled' } elseif ($s -eq 'revoke-active') { 'Revoked' } else { '' }
+        if (-not $status) { return [pscustomobject]@{ ok = $false; detail = "unknown offboard step '$s'" } }
+        try {
+            Invoke-PimAccountStatusChange -UserPrincipalName "$Target" -AccountStatus $status | Out-Null
+            return [pscustomobject]@{ ok = $true; detail = "$s via account-status pipeline (AccountStatus=$status)" }
+        } catch {
+            return [pscustomobject]@{ ok = $false; detail = "$s failed: $($_.Exception.Message)" }
+        }
+    }
+}
+
+function Invoke-PimOffboardExecution {
+    # EXECUTE an APPROVED offboard request -- the once-only request -> approve ->
+    # EXECUTE driver. The full decision (approval present, not automatic, break-glass
+    # excluded, DisableGuard not bypassed, single-not-bulk target) is delegated to the
+    # existing gates; this function executes ONLY when they all allow, runs the guided
+    # sequence through the injectable action invoker, and latches the request Executed.
+    #
+    #   -RequestId     the Approved request to execute (resolved from the store).
+    #   -Requests      (optional) the request set to gate against; defaults to the
+    #                  persisted store (Get-PimApprovalRequests). Tests pass an explicit set.
+    #   -ConfirmBulk   required to proceed on a bulk target (else refused; empty never runs).
+    #   -ActionInvoker injectable { param($Step,$Target) -> @{ ok; detail } }; defaults
+    #                  to the real account-status pipeline. Tests inject a MOCK so no
+    #                  real user is ever disabled.
+    #   -Automatic     refused outright (automatic offboarding is PROHIBITED).
+    #   -DeleteAfterDays / -ToDisable / -Scanned / -Desired / -DesiredResolved /
+    #   -FeatureOverride pass through to the plan + the DisableGuard composite.
+    #
+    # Returns @{ ok; gate; reason; executed; request; target; results[]; approval }.
+    # Idempotent: a request already Executed (or not Approved) does not run; results=@().
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$RequestId,
+        [object[]]$Requests = $null,
+        [switch]$ConfirmBulk,
+        [scriptblock]$ActionInvoker = $null,
+        [switch]$Automatic,
+        [int]$DeleteAfterDays = 30,
+        [int]$ToDisable = 1,
+        [int]$Scanned = 1,
+        [object[]]$Desired = @(),
+        [Nullable[bool]]$DesiredResolved = $null,
+        [object]$FeatureOverride = $null,
+        [object]$AllowSelfApprove = $null,
+        [datetime]$NowUtc = [datetime]::UtcNow
+    )
+    # Resolve the request set (explicit, else the persisted store).
+    if ($null -eq $Requests) { $Requests = @(Get-PimApprovalRequests) }
+    $reqList = @(@($Requests) | Where-Object { $_ })
+    $rec = $null
+    foreach ($r in $reqList) { if ("$($r.id)" -eq "$RequestId") { $rec = $r; break } }
+    if ($null -eq $rec) {
+        return [pscustomobject]@{ ok = $false; gate = 'not-found'; reason = "no approval request with id '$RequestId'"; executed = $false; request = $null; target = ''; results = @(); approval = $null }
+    }
+    if ((Test-PimApprovalAction -Action "$($rec.action)") -ne 'offboard') {
+        return [pscustomobject]@{ ok = $false; gate = 'wrong-action'; reason = "request '$RequestId' is action '$($rec.action)', not 'offboard'"; executed = $false; request = $rec; target = "$($rec.target)"; results = @(); approval = $null }
+    }
+    $target = "$($rec.target)"
+
+    # GUARD A -- single-not-bulk/empty. A bulk target needs explicit confirmation; an
+    # empty target NEVER runs (even WITH -ConfirmBulk -- there is no population).
+    $bulk = Test-PimOffboardTargetIsBulk -Target $target
+    if ($bulk.empty) {
+        return [pscustomobject]@{ ok = $false; gate = 'empty-target'; reason = $bulk.reason; executed = $false; request = $rec; target = $target; results = @(); approval = $null }
+    }
+    if ($bulk.bulk -and -not $ConfirmBulk) {
+        return [pscustomobject]@{ ok = $false; gate = 'bulk-unconfirmed'; reason = $bulk.reason; executed = $false; request = $rec; target = $target; results = @(); approval = $null }
+    }
+
+    # GUARD B -- the composite execution gate (approval present + not automatic +
+    # break-glass excluded + DisableGuard not bypassed). NEVER bypassed.
+    $g = Test-PimOffboardExecutionAllowed -Target $target -Requests $reqList -Automatic:$Automatic `
+            -ToDisable $ToDisable -Scanned $Scanned -Desired $Desired -DesiredResolved $DesiredResolved `
+            -FeatureOverride $FeatureOverride -AllowSelfApprove $AllowSelfApprove -NowUtc $NowUtc
+    if (-not $g.allowed) {
+        return [pscustomobject]@{ ok = $false; gate = "$($g.gate)"; reason = "$($g.reason)"; executed = $false; request = $rec; target = $target; results = @(); approval = $g.approval }
+    }
+
+    # GUARD C -- once-only latch. Claim the request BEFORE executing so a concurrent
+    # caller cannot double-run. Only an Approved request can be latched.
+    $latch = Set-PimApprovalRequestExecuted -Id "$($rec.id)" -NowUtc $NowUtc
+    if (-not $latch.ok) {
+        return [pscustomobject]@{ ok = $false; gate = 'already-executed'; reason = "$($latch.reason)"; executed = $false; request = $latch.request; target = $target; results = @(); approval = $g.approval }
+    }
+
+    # EXECUTE the guided sequence through the (injectable) action invoker.
+    if ($null -eq $ActionInvoker) { $ActionInvoker = Get-PimDefaultOffboardActionInvoker }
+    $plan = @(Get-PimOffboardSequencePlan -Target $target -DeleteAfterDays $DeleteAfterDays -NowUtc $NowUtc)
+    $results = New-Object System.Collections.ArrayList
+    $allOk = $true
+    foreach ($step in $plan) {
+        $r = $null
+        try { $r = & $ActionInvoker $step $target } catch { $r = [pscustomobject]@{ ok = $false; detail = "step '$($step.step)' threw: $($_.Exception.Message)" } }
+        $stepOk = [bool]($r -and $r.ok)
+        if (-not $stepOk) { $allOk = $false }
+        [void]$results.Add([pscustomobject]@{ order = $step.order; step = "$($step.step)"; ok = $stepOk; detail = "$($r.detail)" })
+    }
+
+    try {
+        if (Get-Command Write-PimAuditEvent -ErrorAction SilentlyContinue) {
+            Write-PimAuditEvent -Action 'offboard.executed' -Target $target -After @{ id = "$($rec.id)"; approver = "$($g.approval.approver)"; steps = $results.Count; allOk = $allOk } | Out-Null
+        }
+    } catch {}
+
+    return [pscustomobject]@{
+        ok       = $allOk
+        gate     = 'executed'
+        reason   = if ($allOk) { "offboard executed for $target ($($results.Count) step(s))" } else { "offboard executed for $target with one or more failed steps" }
+        executed = $true
+        request  = $latch.request
+        target   = $target
+        results  = $results.ToArray()
+        approval = $g.approval
+    }
+}
+
+# ---- REVOKE EXECUTOR (request -> approve -> EXECUTE; once-only) --------------
+# This is the missing wiring half of REQUIREMENTS §28 [H3]: it connects an APPROVED
+# over-threshold bulk-revoke request to the EXISTING active-assignment revoke pipeline.
+# It is the EXACT mirror of Invoke-PimOffboardExecution: the decision of WHETHER a
+# batch may run lives entirely in Test-PimRevokeExecutionAllowed (above) -- this
+# function NEVER re-implements a gate; it asks that one and refuses on any block.
+#
+# WHAT-IF + break-glass exclusion + the count split are produced by the SHARED pure
+# Get-PimRevokeGuardPlan (top of this file): break-glass principals are ALWAYS dropped
+# from the executed set (reported in skipped), approval or not. ONLY the post-break-glass
+# rows are revoked, and only when the gate allows. An over-threshold batch with NO
+# Approved revoke request is REFUSED (gate=no-approval); an at/below-threshold batch
+# runs under the interim #81 count-confirm guard (gate=interim-guard).
+#
+# The revoke invoker is INJECTABLE (-RevokeInvoker) so the offline tests drive a MOCK
+# and NEVER revoke a real assignment; in the Manager the default routes to the real
+# Invoke-PimActiveAssignmentRevokeBatch (provided by the Manager host -- this engine
+# library does NOT define it). On a successful, over-threshold (approval-driven) run the
+# Approved request is latched Executed (Set-PimApprovalRequestExecuted) so it can never
+# drive a second run. (An interim-guard batch carries no approval to latch.)
+
+function Get-PimDefaultRevokeInvoker {
+    # The default revoke invoker: route the to-revoke rows through the EXISTING
+    # active-assignment revoke batch the Manager provides. Returns a scriptblock
+    # taking ($rows,$justification) and yielding the per-row result array. NEVER
+    # called by the offline tests (they inject their own mock) -- live wiring only.
+    return {
+        param($Rows, $Justification)
+        if (-not (Get-Command Invoke-PimActiveAssignmentRevokeBatch -ErrorAction SilentlyContinue)) {
+            throw 'Invoke-PimActiveAssignmentRevokeBatch pipeline not loaded'
+        }
+        return @(Invoke-PimActiveAssignmentRevokeBatch -Rows @($Rows) -Justification "$Justification")
+    }
+}
+
+function Invoke-PimRevokeExecution {
+    # EXECUTE a bulk active-assignment revoke through the approval gate -- the mirror
+    # of Invoke-PimOffboardExecution for the Maintenance bulk-revoke surface ([H3]).
+    #
+    # The full decision (break-glass excluded, whether an Approved request is required
+    # for an over-threshold batch, whether one exists + is in-window) is delegated to
+    # Test-PimRevokeExecutionAllowed -- this function NEVER bypasses it. It executes
+    # ONLY the post-break-glass rows, ONLY when the gate allows, and -- when the batch
+    # was over-threshold and thus approval-driven -- latches the Approved request
+    # Executed (once-only) so it can never drive a second over-threshold run.
+    #
+    #   -Rows          the requested revoke rows (each: id, principal, principalId,
+    #                  type, role, scope, ...). Break-glass rows are excluded by the gate.
+    #   -Target        the batch label / scope the approval request was raised for.
+    #   -Justification mandatory business reason recorded with every revoke (audit).
+    #   -Requests      (optional) the request set to gate against; defaults to the
+    #                  persisted store. Tests pass an explicit set.
+    #   -RevokeInvoker injectable { param($Rows,$Justification) -> per-row results[] };
+    #                  defaults to the real Invoke-PimActiveAssignmentRevokeBatch. Tests
+    #                  inject a MOCK so no real assignment is ever revoked.
+    #   -Threshold     the approval threshold (default -> Get-PimRevokeApprovalThreshold).
+    #
+    # Returns @{ ok; gate; reason; executed; required; toRevokeCount; threshold;
+    #   skipped[]; skippedCount; results[]; approval; request }.
+    # Idempotent for the approval-driven path: a request already Executed is refused at
+    # the once-only latch (gate=already-executed) and nothing runs.
+    [CmdletBinding()]
+    param(
+        [object[]]$Rows = @(),
+        [Parameter(Mandatory)][string]$Target,
+        [Parameter(Mandatory)][string]$Justification,
+        [object[]]$Requests = $null,
+        [scriptblock]$RevokeInvoker = $null,
+        [int]$Threshold = -1,
+        [datetime]$NowUtc = [datetime]::UtcNow
+    )
+    # A revoke MUST carry a justification (audit) -- never an unattributed mass change.
+    if ([string]::IsNullOrWhiteSpace($Justification)) {
+        return [pscustomobject]@{ ok = $false; gate = 'no-justification'; reason = 'a justification is required for every bulk revoke'; executed = $false; required = $false; toRevokeCount = 0; threshold = (Get-PimRevokeApprovalThreshold); skipped = @(); skippedCount = 0; results = @(); approval = $null; request = $null }
+    }
+    $reqList = @(@(if ($null -eq $Requests) { Get-PimApprovalRequests } else { $Requests }) | Where-Object { $_ })
+
+    # GATE A -- the composite revoke gate (break-glass split + approval-required +
+    # Approved-request-present). NEVER bypassed. Decides allow/block + carries the plan.
+    $g = Test-PimRevokeExecutionAllowed -Rows $Rows -Target $Target -Requests $reqList -Threshold $Threshold -NowUtc $NowUtc
+    if (-not $g.allowed) {
+        return [pscustomobject]@{ ok = $false; gate = "$($g.gate)"; reason = "$($g.reason)"; executed = $false; required = [bool]$g.required; toRevokeCount = [int]$g.toRevokeCount; threshold = [int]$g.threshold; skipped = @($g.skippedCount); skippedCount = [int]$g.skippedCount; results = @(); approval = $g.approval; request = $g.approval }
+    }
+
+    # Re-derive the post-break-glass to-revoke set + the skipped (break-glass) report
+    # from the SAME shared planner the gate used, so we revoke EXACTLY what was gated.
+    $plan = Get-PimRevokeGuardPlan -Rows $Rows -ConfirmThreshold ($g.threshold)
+    $rowsToRevoke = @($plan.toRevoke)
+    if ($rowsToRevoke.Count -eq 0) {
+        # Everything selected was a protected break-glass account -- nothing to revoke.
+        return [pscustomobject]@{ ok = $true; gate = 'all-break-glass'; reason = 'every selected assignment is a protected break-glass account; nothing revoked'; executed = $false; required = [bool]$g.required; toRevokeCount = 0; threshold = [int]$g.threshold; skipped = @($plan.skipped); skippedCount = [int]$plan.skippedCount; results = @(); approval = $g.approval; request = $g.approval }
+    }
+
+    # GATE B -- once-only latch (approval-driven path ONLY). Claim the Approved request
+    # BEFORE executing so a concurrent caller cannot double-run an over-threshold batch.
+    # An interim-guard (at/below threshold) batch carries no approval and is not latched.
+    if ($g.approval -and "$($g.gate)" -eq 'approved') {
+        $latch = Set-PimApprovalRequestExecuted -Id "$($g.approval.id)" -NowUtc $NowUtc
+        if (-not $latch.ok) {
+            return [pscustomobject]@{ ok = $false; gate = 'already-executed'; reason = "$($latch.reason)"; executed = $false; required = $true; toRevokeCount = [int]$plan.toRevokeCount; threshold = [int]$g.threshold; skipped = @($plan.skipped); skippedCount = [int]$plan.skippedCount; results = @(); approval = $latch.request; request = $latch.request }
+        }
+        $g.approval = $latch.request
+    }
+
+    # EXECUTE the post-break-glass rows through the (injectable) revoke invoker.
+    if ($null -eq $RevokeInvoker) { $RevokeInvoker = Get-PimDefaultRevokeInvoker }
+    $results = @()
+    $execOk = $true
+    try { $results = @(& $RevokeInvoker $rowsToRevoke $Justification) }
+    catch { $execOk = $false; $results = @([pscustomobject]@{ id = $null; ok = $false; error = "revoke batch threw: $($_.Exception.Message)" }) }
+    $okCount  = @($results | Where-Object { $_ -and $_.ok }).Count
+    $errCount = @($results).Count - $okCount
+    if ($errCount -gt 0) { $execOk = $false }
+
+    try {
+        if (Get-Command Write-PimAuditEvent -ErrorAction SilentlyContinue) {
+            Write-PimAuditEvent -Action 'revoke.executed' -Target "$Target" -After @{ approver = "$($g.approval.approver)"; gate = "$($g.gate)"; revoked = $okCount; failed = $errCount; skipped = [int]$plan.skippedCount; justification = "$Justification" } | Out-Null
+        }
+    } catch {}
+
+    return [pscustomobject]@{
+        ok            = $execOk
+        gate          = "$($g.gate)"
+        reason        = if ($execOk) { "revoke executed for '$Target': $okCount revoked, $($plan.skippedCount) break-glass skipped" } else { "revoke executed for '$Target' with $errCount failed step(s)" }
+        executed      = $true
+        required      = [bool]$g.required
+        toRevokeCount = [int]$plan.toRevokeCount
+        threshold     = [int]$g.threshold
+        skipped       = @($plan.skipped)
+        skippedCount  = [int]$plan.skippedCount
+        results       = @($results)
+        approval      = $g.approval
+        request       = $g.approval
+    }
+}
