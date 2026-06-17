@@ -154,6 +154,9 @@ const SEED_INSTANCES = {
   ],
 };
 const SEED_ROLE = { role: 'SuperAdmin', identity: 'tester@contoso.com', source: 'test-harness' };
+// All Manager tabs enabled, so feature-flag gating never hides a tab the per-tab
+// render checks need to reach (the GUI defaults unknown keys to "shown" anyway).
+const SEED_FEATURE_FLAGS = TABS.reduce(function (m, t) { m[t.tab] = true; return m; }, {});
 const SEED_TENANT_LISTS = {
   entraRoles: [{ id: 'HelpdeskAdmin', displayName: 'Helpdesk Administrator' }],
   azScopes: [{ id: '/subscriptions/1111', displayName: 'Sub 1111' }],
@@ -370,6 +373,9 @@ function bootDom(mode, empty) {
     '__PIM_TENANT_LISTS__': JSON.stringify(empty ? {} : SEED_TENANT_LISTS),
     '__PIM_INSTANCES__': JSON.stringify(empty ? { active: 'local', instances: [] } : SEED_INSTANCES),
     '__PIM_ROLE__': JSON.stringify(SEED_ROLE),
+    // Feature flags (gradual rollout) are baked at boot; the harness seeds an
+    // all-enabled map so every tab is reachable for the per-tab render checks.
+    '__PIM_FEATUREFLAGS__': JSON.stringify({ flags: SEED_FEATURE_FLAGS, effective: SEED_FEATURE_FLAGS, catalog: [], warnings: [] }),
   };
   for (const [k, v] of Object.entries(sub)) html = html.split(k).join(v);
 
@@ -437,6 +443,20 @@ async function runPass(mode, empty) {
     // 2. no JS error from rendering this tab.
     const newErrors = errors.slice(before);
     for (const e of newErrors) add('tab-js-error', 'error', t.name, e.slice(0, 300));
+
+    // 2b. in-context guidance banner (REQUIREMENTS §28d): every tab carries a
+    //     collapsible "what-this-is + how-to" guide, prepended as the panel's
+    //     first child and surviving the renderer's body rewrite. It must not be
+    //     duplicated by re-rendering.
+    const guides = panel.querySelectorAll(':scope > .tab-guide');
+    if (guides.length === 0) add('guidance-missing', 'error', t.name, 'tab has no in-context guidance banner (.tab-guide)');
+    else if (guides.length > 1) add('guidance-duplicated', 'error', t.name, 'tab has ' + guides.length + ' guidance banners (injection not idempotent)');
+    else {
+      const g = guides[0];
+      if (g !== panel.firstElementChild) add('guidance-not-first', 'warn', t.name, 'guidance banner is not the panel\'s first child');
+      if (!g.querySelector('summary')) add('guidance-no-summary', 'error', t.name, 'guidance banner is not collapsible (no <summary>)');
+      if (!g.querySelector('.tg-what')) add('guidance-no-what', 'error', t.name, 'guidance banner has no "what this is" line');
+    }
 
     // 3. content vs empty/dead. The STATIC pass only verifies reachability +
     //    no-JS-error (static mode legitimately shows "needs the server"); the

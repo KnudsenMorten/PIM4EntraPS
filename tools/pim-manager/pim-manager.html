@@ -184,6 +184,28 @@
   .pill.E { background:#0969da; color:#fff; }
   .pill.A { background:#9a6700; color:#fff; }
   .empty { color:#57606a; font-style:italic; }
+  /* ---- In-context guidance + consistent panel states (REQUIREMENTS §28d) ----
+     A thin, consistent UX layer applied across every tab: a collapsible
+     "what-this-is + how-to" guide banner, and uniform loading / empty / error
+     renderings so a panel is never blank and never shows a raw error. Behaviour
+     and endpoints are unchanged -- this is presentation only. */
+  .tab-guide { margin:0 0 12px 0; border:1px solid #d0d7de; border-left:4px solid #0969da; border-radius:8px; background:#f6f8fa; padding:8px 12px; }
+  .tab-guide > summary { cursor:pointer; font-size:12.5px; font-weight:600; color:#24292f; user-select:none; list-style:none; outline:none; }
+  .tab-guide > summary::-webkit-details-marker { display:none; }
+  .tab-guide > summary::before { content:'\25B6'; color:#0969da; display:inline-block; width:14px; font-size:9px; transition:transform .12s ease; }
+  .tab-guide[open] > summary::before { transform:rotate(90deg); }
+  .tab-guide .tg-what { font-size:12px; color:#24292f; margin:8px 0 4px 0; }
+  .tab-guide .tg-how { font-size:11.5px; color:#57606a; margin:0; padding-left:16px; }
+  .tab-guide .tg-how li { margin:2px 0; }
+  .tab-guide .tg-legend { margin-top:10px; }
+  .pim-state { border:1px solid #d0d7de; border-radius:8px; padding:16px 18px; margin:6px 0; font-size:12.5px; background:#fff; }
+  .pim-state .pim-state-title { font-weight:600; margin-bottom:3px; }
+  .pim-state .pim-state-sub { color:#57606a; font-size:11.5px; }
+  .pim-state.loading { color:#0969da; border-left:4px solid #0969da; }
+  .pim-state.empty { color:#57606a; border-left:4px solid #8b949e; font-style:normal; }
+  .pim-state.empty .pim-state-title { color:#24292f; }
+  .pim-state.error { color:#cf222e; border-left:4px solid #cf222e; background:#fff8f8; }
+  .pim-state.error .pim-state-title { color:#cf222e; }
   /* Per-role permission drill-down on the Graph detail panel (Roadmap #2 / #25).
      Triggered when a node of kind 'entra-role' or 'au-role' is selected; pulls
      from TENANT_LISTS.entraRoles cache. */
@@ -701,7 +723,7 @@
     <div class="tab" data-tab="map">Delegation Map</div>
     <div class="tab" data-tab="validate">Validate <span id="validateErrBadge" class="badge" style="display:none;background:#cf222e">0</span></div>
     <div class="tab" data-tab="save">Review &amp; Save <span id="saveDirtyBadge" class="badge" style="display:none">0</span></div>
-    <div class="tab" data-tab="revoke">Maintenance <span id="revokeCountBadge" class="badge" style="display:none;background:#cf222e">0</span></div>
+    <div class="tab" data-tab="revoke" title="Revoke live active PIM assignments. Destructive: break-glass accounts are protected and large batches require maker/checker approval.">Maintenance &amp; Revoke <span id="revokeCountBadge" class="badge" style="display:none;background:#cf222e">0</span></div>
     <div class="tab" data-tab="approvals">Approvals <span id="apprPendBadge" class="badge" style="display:none;background:#bc4c00">0</span></div>
     <div class="tab" data-tab="accessreview">Access Review <span id="arOpenBadge" class="badge" style="display:none">0</span></div>
     <div class="tab" data-tab="grid">Advanced View (grid) <span id="gridDirtyBadge" class="badge" style="display:none">0</span></div>
@@ -1042,6 +1064,10 @@
       <span class="rev-type-chip rev-type-p4g"      data-type="pim-for-groups"  title="PIM-for-Groups active assignments">pim-for-groups <span class="n" id="revChipP4g">0</span></span>
       <input type="text" id="revSearch" placeholder="Filter Principal / Role / Scope..." style="min-width:280px">
       <span class="spacer"></span>
+      <span id="revExportBar" style="display:none;">
+        <button id="revExpCsv" class="ghost" title="Export the active assignments shown (who has what) as CSV — ticket / audit evidence">Export CSV</button>
+        <button id="revExpPrint" class="ghost" title="Open a printable view of the active assignments shown">Print</button>
+      </span>
       <span class="rev-loaded-at" id="revLoadedAt"></span>
     </div>
     <div id="revResults">
@@ -1388,9 +1414,82 @@
     });
   }
 
+  // ===================================================================
+  // In-context guidance + consistent panel states (REQUIREMENTS §28d).
+  // A thin, consistent UX layer over the existing tabs -- it changes NO
+  // behaviour and calls NO endpoints. switchTab() prepends a collapsible
+  // "what this is + how to use it" banner (TAB_GUIDANCE) into each panel,
+  // and stateLoading/stateEmpty/stateError() give every renderer the same
+  // never-blank / never-raw-error fallbacks. Some tabs also carry the shared
+  // tier/plane legend (homeLegendHtml) where that vocabulary is used.
+  // ===================================================================
+  var TAB_GUIDANCE = {
+    home:        { title: 'What this is & how to use it', what: 'Your landing overview &mdash; "what needs my attention" aggregated from the engine, validator, scheduler and audit trail.', how: ['Start here each session; red items first, then amber.', 'Click any tile or attention row to jump to the tab that owns the detail.'] },
+    map:         { title: 'What this is & how to use it', what: 'The live delegation map &mdash; who can reach what, through which groups and scopes.', how: ['Pick a person (left) or a permission (right) to collapse the board to their path.', 'Use Risk overlay to flag orphan / stale / over-privileged delegation; export or print for review.'], legend: true },
+    new:         { title: 'What this is & how to use it', what: 'Create delegation from approved templates &mdash; the guided way to add admins, groups and scopes.', how: ['Pick a template, fill the wizard, then review the staged rows on Review &amp; Save before committing.'] },
+    validate:    { title: 'What this is & how to use it', what: 'Validates the pending configuration against the delegation rules before you commit.', how: ['Re-run after edits (it also auto-runs after every commit); fix any errors before Review &amp; Save.'] },
+    save:        { title: 'What this is & how to use it', what: 'Review &amp; Save &mdash; the single commit point. Staged changes here are what the engine applies.', how: ['Review every staged row, then commit; nothing reaches the tenant until you do.'] },
+    revoke:      { title: 'What this is & how to use it', what: 'Maintenance &amp; Revoke &mdash; review and <b>revoke</b> currently-active PIM assignments. This is the most destructive operation in the Manager.', how: ['Refresh to load live active assignments.', 'Revoking is immediate and cannot be undone &mdash; break-glass/emergency accounts are always protected (skipped), and a large batch requires a maker/checker approval (raised + approved on the Approvals tab) before it can run.'] },
+    approvals:   { title: 'What this is & how to use it', what: 'The maker/checker approval queue &mdash; the gate for sensitive changes (approver &ne; requestor).', how: ['Open a request to see the engine-derived plan, then approve or deny; offboarding never runs automatically.'] },
+    accessreview:{ title: 'What this is & how to use it', what: 'Read-only overview of access reviews &mdash; scope, reviewers, recurrence and current status.', how: ['Filter or search to find a review; decisions are recorded in Entra, not here.'] },
+    grid:        { title: 'What this is & how to use it', what: 'Advanced View &mdash; the raw configuration grid for power users.', how: ['Pick a configuration file on the left; edits stage into pending for Review &amp; Save.'] },
+    authoring:   { title: 'What this is & how to use it', what: 'Bulk authoring &mdash; bulk-attach, clone, import or move admins in one step.', how: ['Each action computes a row set staged into pending; review + commit on Review &amp; Save. The engine stays the only writer.'] },
+    onboarding:  { title: 'What this is & how to use it', what: 'Onboarding &mdash; invite a guest into the delegation model or toggle self-service consultant enable.', how: ['Both produce staged change records; the engine applies them on commit.'] },
+    roleperms:   { title: 'What this is & how to use it', what: 'Role Lookup &mdash; read-only drill-down of what a role can do, who can activate it, and role compare.', how: ['Type a role name (typos are tolerated &mdash; pick a "did you mean" candidate); switch sub-mode for reverse / compare.'], legend: true },
+    governance:  { title: 'What this is & how to use it', what: 'Governance &mdash; drift, operational policy, feature flags, alerting and mail-template customization.', how: ['Review drift and policy; edit mail templates in place (Admin only) &mdash; changes persist to the store the engine reads.'] },
+    audit:       { title: 'What this is & how to use it', what: 'The append-only audit trail &mdash; every login, delegation, account, approval, engine and break-glass event.', how: ['Filter by category or free-text search; page through the last 3 months, newest first.'] },
+    reports:     { title: 'What this is & how to use it', what: '"Who can do what" (and the reverse) &mdash; pick a person to see everything they reach, or a role to see who can activate it.', how: ['Choose forward or reverse, run the report, then print or export.'], legend: true },
+    conformance: { title: 'What this is & how to use it', what: 'Template Rollout &mdash; how far each tenant is behind the approved delegation templates, and roll updates forward.', how: ['Review the gap per tenant; rollout is ring-driven and approval-gated.'] },
+    cutover:     { title: 'What this is & how to use it', what: 'The gated CSV &rarr; SQL cutover ceremony, stage by stage.', how: ['Run each gated stage in order (preflight &rarr; upgrade &rarr; import &rarr; set-source &rarr; re-preflight &rarr; finalize); finalize is the point of no return.'] },
+    jobs:        { title: 'What this is & how to use it', what: 'Read-only view of the scheduler job registry and recent runs.', how: ['In-progress jobs sort to the top; open Logs on any row. The Manager never starts jobs &mdash; the scheduler owns execution.'] },
+    settings:    { title: 'What this is & how to use it', what: 'Admin settings &mdash; naming conventions, imports, AD OU placement and platform options.', how: ['Edit a card and Save; imports pull from Entra or a CSV. Changes persist to the store the engine reads.'] },
+    support:     { title: 'What this is & how to use it', what: 'Support &mdash; version and tenant context, plus a pre-filled issue template.', how: ['No tenant connection needed; use it to file an issue with the context already filled in.'] }
+  };
+  function tabGuidanceHtml(name) {
+    var g = TAB_GUIDANCE[name];
+    if (!g) return '';
+    var esc = escapeHtml;
+    var how = (g.how || []).map(function (s) { return '<li>' + s + '</li>'; }).join('');
+    var legend = (g.legend && typeof homeLegendHtml === 'function') ? ('<div class="tg-legend">' + homeLegendHtml() + '</div>') : '';
+    return '<details class="tab-guide" data-guide-for="' + esc(name) + '">' +
+      '<summary>' + esc(g.title || 'What this is & how to use it') + '</summary>' +
+      '<div class="tg-what">' + g.what + '</div>' +
+      (how ? '<ul class="tg-how">' + how + '</ul>' : '') +
+      legend +
+      '</details>';
+  }
+  // Prepend the guidance banner as the FIRST child of the panel so it survives
+  // each renderer rewriting its own body. Idempotent: re-entering a tab won't
+  // duplicate it.
+  function injectTabGuidance(name) {
+    var panel = document.getElementById(name + 'Tab');
+    if (!panel) return;
+    if (panel.querySelector(':scope > .tab-guide')) return;
+    var html = tabGuidanceHtml(name);
+    if (!html) return;
+    var holder = document.createElement('div');
+    holder.innerHTML = html;
+    var node = holder.firstChild;
+    if (node) panel.insertBefore(node, panel.firstChild);
+  }
+  // Consistent panel states (use from any renderer): never a blank panel, never
+  // a raw error. All three return a self-contained block.
+  function stateLoading(msg) {
+    return '<div class="pim-state loading"><div class="pim-state-title">' + escapeHtml(msg || 'Loading…') + '</div></div>';
+  }
+  function stateEmpty(title, sub) {
+    return '<div class="pim-state empty"><div class="pim-state-title">' + escapeHtml(title || 'Nothing to show yet') + '</div>' +
+      (sub ? '<div class="pim-state-sub">' + escapeHtml(sub) + '</div>' : '') + '</div>';
+  }
+  function stateError(title, detail) {
+    return '<div class="pim-state error"><div class="pim-state-title">' + escapeHtml(title || 'Something went wrong') + '</div>' +
+      (detail ? '<div class="pim-state-sub">' + escapeHtml(detail) + '</div>' : '') + '</div>';
+  }
+
   function switchTab(name) {
     document.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t.dataset.tab === name));
     document.querySelectorAll('.tab-panel').forEach(p => p.classList.toggle('active', p.id === name + 'Tab'));
+    injectTabGuidance(name);
     syncNavGroups(name);
     if (name === 'home') renderHome();
     if (name === 'map') renderAccessMap();
@@ -1514,7 +1613,7 @@
     body.innerHTML = '<div style="color:#57606a;font-size:12px;">Loading overview&hellip;</div>';
     let d;
     try { d = await api('GET', '/api/home'); }
-    catch (e) { body.innerHTML = '<div style="color:#cf222e">Failed to load overview: ' + esc(e.message) + '</div>'; return; }
+    catch (e) { body.innerHTML = stateError('Failed to load overview', e.message); return; }
     const t = (d && d.tiles) || {};
     let attn = 0;   // count of things needing attention -> Home badge
     // "What needs my attention" call-out (REQUIREMENTS §26a). Each entry is sourced
@@ -1912,19 +2011,22 @@
   // (mandatory expiry); capability-watch surfaces catalog-ahead roles.
   // ===================================================================
   let confSel = null;
+  let confView = 'tenant';   // 'tenant' (this tenant) | 'fleet' (tenants x templates) -- [H8]
   async function renderConformance() {
+    if (confView === 'fleet') { renderFleetConformance(); return; }
     const body = document.getElementById('confBody');
     if (!isServer) { body.innerHTML = '<div style="color:#57606a">Static mode -- template rollout needs the server.</div>'; return; }
     const esc = escapeHtml;
     let data;
     try { data = await api('GET', '/api/conformance/templates'); }
-    catch (e) { body.innerHTML = '<div style="color:#cf222e">Failed to load templates: ' + esc(e.message) + '</div>'; return; }
+    catch (e) { body.innerHTML = stateError('Failed to load templates', e.message); return; }
     const tpls = data.templates || [];
     if (!confSel && tpls.length) confSel = tpls[0].templateId;
     const opts = tpls.map(t => `<option value="${esc(t.templateId)}" ${t.templateId===confSel?'selected':''}>${esc(t.templateId)} · v${t.templateVersion} [${esc(t.status)}]${t.behind>0?(' · −'+t.behind):''}</option>`).join('');
-    let h = `<div style="margin-bottom:8px;"><span style="font-size:11px;text-transform:uppercase;letter-spacing:.5px;color:#0969da;font-weight:600;">Template Rollout · instance ${esc(data.instance)} · tenant <span title="Ring = the rollout wave this tenant is in. Rings let updates reach a few tenants first, then the rest — only templates whose scope includes this tenant's ring deploy here." style="border-bottom:1px dotted #57606a;cursor:help;">ring ${data.tenantRing}</span></span></div>
+    let h = confViewToggle('tenant') +
+      `<div style="margin-bottom:8px;"><span style="font-size:11px;text-transform:uppercase;letter-spacing:.5px;color:#0969da;font-weight:600;">Template Rollout · instance ${esc(data.instance)} · tenant <span title="Ring = the rollout wave this tenant is in. Rings let updates reach a few tenants first, then the rest — only templates whose scope includes this tenant's ring deploy here." style="border-bottom:1px dotted #57606a;cursor:help;">ring ${data.tenantRing}</span></span></div>
       <div style="margin-bottom:12px;padding:10px 12px;background:#ddf4ff;border:1px solid #54aeff;border-radius:8px;font-size:12.5px;color:#0a3069;">Keep tenants current with the approved delegation templates — see how far behind each tenant is and roll the updates forward.</div>`;
-    if (!tpls.length) { body.innerHTML = h + '<div style="color:#57606a;font-size:12.5px;">No workload templates under <code>workloads/templates/*.template.json</code>.</div>'; return; }
+    if (!tpls.length) { body.innerHTML = h + '<div style="color:#57606a;font-size:12.5px;">No workload templates under <code>workloads/templates/*.template.json</code>.</div>'; wireConfViewToggle(); return; }
     h += `<div style="display:flex;gap:8px;align-items:center;margin-bottom:10px;flex-wrap:wrap;">
       <select id="confTpl" style="padding:5px 8px;">${opts}</select>
       <button id="confReload" class="btn-sec">&#8635; Reload</button>
@@ -1933,6 +2035,7 @@
       <div style="color:#57606a;font-size:11.5px;margin-bottom:8px;">Rollout waves (<span title="Ring = the rollout wave a tenant is in. Only templates whose scope includes this tenant's ring deploy here, so updates reach early rings first." style="border-bottom:1px dotted #57606a;cursor:help;">rings</span>) drive rollout; only <b>approved</b> templates deploy; a required binding that is missing here = <b><span title="Gap = the approved template expects this delegation, but it is not in place on this tenant yet. Deploy rolls it forward to close the gap." style="border-bottom:1px dotted #57606a;cursor:help;">Gap</span></b> unless an active <b><span title="Exemption = a deliberate, time-boxed waiver for one item so it is not flagged as a Gap. Expiry is mandatory — exemptions always lapse, then the item is re-checked." style="border-bottom:1px dotted #57606a;cursor:help;">exemption</span></b> (mandatory expiry) covers it.</div>
       <div style="color:#57606a;font-size:11.5px;margin-bottom:8px;"><b>Behind</b> = how many template versions newer than this tenant's deployed version, i.e. how far behind it is. <b>Deploy</b> rolls the approved template forward to this tenant (dry-run first, then live).</div>
       <div id="confMatrix"></div>
+      <div id="confExemptions" style="margin-top:14px;"></div>
       <div id="confCatalog" style="margin-top:12px;"></div>
       <div style="margin-top:14px;padding:12px;background:#f6f8fa;border:1px solid #d0d7de;border-radius:8px;">
         <b style="font-size:13px;" title="Deploy = roll the approved template forward to this tenant, closing its Gaps and bringing it up to date.">Deploy (roll the updates forward)</b>
@@ -1955,6 +2058,7 @@
     };
     document.getElementById('confDry').onclick = () => confDeploy(true);
     document.getElementById('confLive').onclick = () => { if (confirm('Deploy LIVE (ring-gated) for this instance?')) confDeploy(false); };
+    wireConfViewToggle();
     loadConfMatrix();
   }
 
@@ -1992,6 +2096,59 @@
     document.getElementById('confCatalog').innerHTML = ca.length
       ? `<div style="padding:10px;background:#ddf4ff;border:1px solid #54aeff;border-radius:8px;font-size:12.5px;"><b>Catalog-ahead</b> — live roles no template covers yet (capability-watch): ${ca.map(esc).join(', ')}</div>`
       : '';
+    loadExemptionRegister();
+  }
+
+  // REQUIREMENTS [L2]: the active-exemptions register — every waiver for this
+  // template with its state (Active / Expiring soon / Expired / Invalid), days
+  // left and a Revoke button, so exemptions can be reviewed + ended instead of
+  // accumulating invisibly until they self-lapse. Engine-backed:
+  // GET /api/conformance/exemptions, revoke via POST .../revoke.
+  async function loadExemptionRegister() {
+    const esc = escapeHtml;
+    const host = document.getElementById('confExemptions');
+    if (!host) return;
+    let d;
+    try { d = await api('GET', '/api/conformance/exemptions?template=' + encodeURIComponent(confSel)); }
+    catch (e) { host.innerHTML = '<div style="color:#cf222e;font-size:12px;">Failed to load exemptions: ' + esc(e.message) + '</div>'; return; }
+    const ex = d.exemptions || [], sum = d.summary || {};
+    const stCol = { Active:'#dafbe1;color:#116329', Expiring:'#fff8c5;color:#7d4e00', Expired:'#ffebe9;color:#cf222e', Invalid:'#eaeef2;color:#57606a' };
+    let h = `<div style="padding:12px;background:#fff;border:1px solid #d0d7de;border-radius:8px;">
+      <b style="font-size:13px;" title="Active exemptions register — every time-boxed waiver on this template, with its remaining life. Revoke ends one early; otherwise it lapses on its expiry and the item is re-checked.">Active exemptions register</b>
+      <div style="color:#57606a;font-size:11.5px;margin:4px 0 8px;">${(sum.Total||0)} total · ${(sum.Active||0)} active${(sum.Expiring?(' (' + sum.Expiring + ' expiring &le;30d)'):'')}${(sum.Expired?(' · ' + sum.Expired + ' expired'):'')}${(sum.Invalid?(' · ' + sum.Invalid + ' invalid'):'')}. Exemptions always expire; an expired one no longer suppresses its Gap.</div>`;
+    if (!ex.length) {
+      h += '<div style="color:#57606a;font-size:12.5px;">No exemptions recorded for this template — every in-scope binding is enforced.</div>';
+    } else {
+      h += '<table style="border-collapse:collapse;font-size:12px;width:100%;"><tr>' +
+        '<th style="text-align:left;padding:4px 8px;border-bottom:2px solid #d0d7de;">Item</th>' +
+        '<th style="text-align:left;padding:4px 8px;border-bottom:2px solid #d0d7de;">Reason</th>' +
+        '<th style="padding:4px 8px;border-bottom:2px solid #d0d7de;">State</th>' +
+        '<th style="padding:4px 8px;border-bottom:2px solid #d0d7de;">Expires</th>' +
+        '<th style="padding:4px 8px;border-bottom:2px solid #d0d7de;">Days left</th>' +
+        '<th style="padding:4px 8px;border-bottom:2px solid #d0d7de;"></th></tr>';
+      for (const r of ex) {
+        const dl = (r.DaysLeft === null || r.DaysLeft === undefined) ? '—' : (r.DaysLeft < 0 ? (r.DaysLeft + '') : r.DaysLeft);
+        const exp = r.ExpiresUtc ? esc(('' + r.ExpiresUtc).substring(0, 10)) : '—';
+        h += `<tr><td style="padding:4px 8px;border-bottom:1px solid #eef0f3;"><code>${esc(r.ItemKey)}</code></td>` +
+          `<td style="padding:4px 8px;border-bottom:1px solid #eef0f3;color:#57606a;" title="${esc(r.Reason)}">${esc((r.Reason||'').length>60?(r.Reason.substring(0,60)+'…'):(r.Reason||''))}</td>` +
+          `<td style="padding:4px 8px;border-bottom:1px solid #eef0f3;text-align:center;background:${stCol[r.State]||''};font-weight:600;" title="${esc(r.Detail||'')}">${esc(r.State)}</td>` +
+          `<td style="padding:4px 8px;border-bottom:1px solid #eef0f3;text-align:center;">${exp}</td>` +
+          `<td style="padding:4px 8px;border-bottom:1px solid #eef0f3;text-align:center;">${dl}</td>` +
+          `<td style="padding:4px 8px;border-bottom:1px solid #eef0f3;text-align:center;"><button class="btn-sec confRevoke" data-rk="${esc(r.RevokeKey)}" data-item="${esc(r.ItemKey)}" style="font-size:11px;padding:2px 8px;">revoke</button></td></tr>`;
+      }
+      h += '</table>';
+    }
+    h += '</div>';
+    host.innerHTML = h;
+    host.querySelectorAll('.confRevoke').forEach(b => b.onclick = () => confRevoke(b.dataset.rk, b.dataset.item));
+  }
+
+  async function confRevoke(revokeKey, item) {
+    if (!confirm('Revoke the exemption for "' + item + '" now? Its item will be re-checked as a Gap on the next reconcile.')) return;
+    try {
+      const r = await api('POST', '/api/conformance/exemptions/revoke', { revokeKey });
+      if (r.removed > 0) { loadConfMatrix(); } else { alert('Nothing revoked — the exemption was already gone.'); loadExemptionRegister(); }
+    } catch (e) { alert('Revoke failed: ' + e.message); }
   }
 
   async function confExempt(key) {
@@ -2012,6 +2169,111 @@
       if (whatIf) { document.getElementById('confLive').disabled = false; hint.textContent = 'Dry-run done — "Deploy live" unlocked.'; }
       else { hint.textContent = 'Deployed. Reloading…'; document.getElementById('confLive').disabled = true; loadConfMatrix(); }
     } catch (e) { hint.textContent = 'Failed: ' + e.message; }
+  }
+
+  // ===================================================================
+  // FLEET conformance (REQUIREMENTS [H8]) -- tenants x templates, behind-by-N,
+  // + ring-wide rollout view, so an MSP sees/drives template conformance across
+  // the whole fleet from one place. Engine-backed: GET /api/conformance/fleet
+  // (the matrix) and GET /api/conformance/ring-plan?template= (the ring waves).
+  // ===================================================================
+  function confViewToggle(active) {
+    const esc = escapeHtml;
+    const btn = (id, label, on) => `<button id="${id}" class="${on?'btn':'btn-sec'}" style="font-size:12px;padding:4px 12px;">${esc(label)}</button>`;
+    return `<div style="display:flex;gap:6px;align-items:center;margin-bottom:10px;">
+      ${btn('confViewTenant','This tenant', active==='tenant')}
+      ${btn('confViewFleet','Fleet (all tenants)', active==='fleet')}
+      <span style="color:#57606a;font-size:11.5px;margin-left:6px;">Compare every managed tenant against the approved templates, and roll a version out by ring.</span></div>`;
+  }
+  function wireConfViewToggle() {
+    const t = document.getElementById('confViewTenant'), f = document.getElementById('confViewFleet');
+    if (t) t.onclick = () => { confView = 'tenant'; renderConformance(); };
+    if (f) f.onclick = () => { confView = 'fleet'; renderConformance(); };
+  }
+
+  let fleetRingTpl = null;
+  async function renderFleetConformance() {
+    const body = document.getElementById('confBody');
+    if (!isServer) { body.innerHTML = '<div style="color:#57606a">Static mode -- the fleet view needs the server.</div>'; return; }
+    const esc = escapeHtml;
+    let d;
+    try { d = await api('GET', '/api/conformance/fleet'); }
+    catch (e) { body.innerHTML = confViewToggle('fleet') + stateError('Failed to load the fleet matrix', e.message); wireConfViewToggle(); return; }
+    const cols = d.templates || [], tenants = d.tenants || [], per = d.perTemplate || [];
+    let h = confViewToggle('fleet');
+    h += `<div style="margin-bottom:12px;padding:10px 12px;background:#ddf4ff;border:1px solid #54aeff;border-radius:8px;font-size:12.5px;color:#0a3069;">
+      Fleet template conformance — <b>${d.totalTenants||0}</b> managed tenant${(d.totalTenants===1)?'':'s'}, <b style="color:#116329;">${d.currentTenants||0}</b> fully current, <b style="color:#cf222e;">${d.behindTenants||0}</b> behind on at least one template. Worst-behind tenants are at the top.</div>`;
+    if (!cols.length) { body.innerHTML = h + '<div style="color:#57606a;font-size:12.5px;">No approved workload templates — only approved templates form fleet columns.</div>'; wireConfViewToggle(); return; }
+    if (!tenants.length) { body.innerHTML = h + '<div style="color:#57606a;font-size:12.5px;">No managed tenants registered. Declare instances to see the fleet matrix.</div>'; wireConfViewToggle(); return; }
+    const col = { UpToDate:'#dafbe1;color:#116329', Behind:'#fff8c5;color:#7d4e00', NeverApplied:'#ffebe9;color:#cf222e', Ahead:'#fff1e5;color:#bc4c00' };
+    const gl  = { UpToDate:'✓', Behind:'−', NeverApplied:'✗', Ahead:'▲' };
+    const tip = { UpToDate:'Up to date with the approved template version.', Behind:'Behind — deploy rolls this tenant forward by the shown number of versions.', NeverApplied:'Never deployed to this tenant.', Ahead:'Ahead — the tenant is on a newer version than the approved template (template rolled back); review.' };
+    // Matrix: rows = tenants, columns = templates.
+    h += '<div style="overflow:auto;"><table style="border-collapse:collapse;font-size:12px;"><tr>' +
+      '<th style="text-align:left;padding:6px 10px;border-bottom:2px solid #d0d7de;position:sticky;left:0;background:#fff;">Tenant</th>' +
+      '<th style="padding:6px 10px;border-bottom:2px solid #d0d7de;" title="The tenant\'s rollout ring (wave).">Ring</th>';
+    for (const c of cols) h += `<th style="padding:6px 10px;border-bottom:2px solid #d0d7de;" title="workload ${esc(c.workload)} — current approved version v${c.templateVersion}"><code>${esc(c.templateId)}</code><br><span style="color:#57606a;font-weight:400;">v${c.templateVersion}</span></th>`;
+    h += '</tr>';
+    for (const tn of tenants) {
+      const cellByTpl = {}; (tn.cells||[]).forEach(c => cellByTpl[c.templateId] = c);
+      const nameCol = tn.current ? '#116329' : '#cf222e';
+      h += `<tr><td style="padding:5px 10px;border-bottom:1px solid #eef0f3;position:sticky;left:0;background:#fff;font-weight:600;color:${nameCol};">${esc(tn.tenantId)}</td>` +
+        `<td style="padding:5px 10px;border-bottom:1px solid #eef0f3;text-align:center;color:#57606a;">${tn.ring}</td>`;
+      for (const c of cols) {
+        const cell = cellByTpl[c.templateId] || { status:'NeverApplied', behind:c.templateVersion, appliedVersion:0 };
+        const s = cell.status;
+        const label = (s === 'Behind' || s === 'NeverApplied') && cell.behind > 0 ? (gl[s] + cell.behind) : gl[s];
+        h += `<td style="padding:5px 10px;border-bottom:1px solid #eef0f3;text-align:center;background:${col[s]||''};font-weight:600;cursor:help;" title="${esc(tip[s]||s)} (applied v${cell.appliedVersion} / approved v${c.templateVersion})">${label}</td>`;
+      }
+      h += '</tr>';
+    }
+    h += '</table></div>';
+    // Per-template fleet rollup + ring-plan picker.
+    h += '<div style="margin-top:16px;padding:12px;background:#f6f8fa;border:1px solid #d0d7de;border-radius:8px;">' +
+      '<b style="font-size:13px;">Ring-wide rollout</b>' +
+      '<div style="color:#57606a;font-size:11.5px;margin:4px 0 8px;">Pick a template to see, per ring band, how many tenants a rollout wave would touch and which are behind. Deploy each tenant from its own <b>This tenant</b> view (ring-gated, dry-run first).</div>';
+    const ropts = per.map(p => `<option value="${esc(p.templateId)}" ${p.templateId===fleetRingTpl?'selected':''}>${esc(p.templateId)} · v${p.templateVersion}${p.needsRollout?(' · '+(p.behindCount+p.neverCount)+' behind'):' · all current'}</option>`).join('');
+    h += `<select id="fleetRingTpl" style="padding:5px 8px;">${ropts}</select><div id="fleetRingPlan" style="margin-top:10px;"></div></div>`;
+    body.innerHTML = h;
+    wireConfViewToggle();
+    if (per.length) {
+      if (!fleetRingTpl || !per.find(p => p.templateId === fleetRingTpl)) fleetRingTpl = per[0].templateId;
+      document.getElementById('fleetRingTpl').value = fleetRingTpl;
+      document.getElementById('fleetRingTpl').onchange = (e) => { fleetRingTpl = e.target.value; loadFleetRingPlan(); };
+      loadFleetRingPlan();
+    }
+  }
+
+  async function loadFleetRingPlan() {
+    const esc = escapeHtml;
+    const host = document.getElementById('fleetRingPlan');
+    if (!host || !fleetRingTpl) return;
+    let p;
+    try { p = await api('GET', '/api/conformance/ring-plan?template=' + encodeURIComponent(fleetRingTpl)); }
+    catch (e) { host.innerHTML = '<div style="color:#cf222e;font-size:12px;">Failed to load ring plan: ' + esc(e.message) + '</div>'; return; }
+    const bands = p.bands || [];
+    let h = `<div style="color:#57606a;font-size:11.5px;margin-bottom:6px;">Template <code>${esc(p.templateId)}</code> · approved v${p.templateVersion} · ${p.totalTenants} tenant${p.totalTenants===1?'':'s'} · <b style="color:${p.needsRolloutCount?'#cf222e':'#116329'};">${p.needsRolloutCount}</b> behind/never.${p.approved?'':' <b style="color:#cf222e;">(template not approved — approve before deploying)</b>'}</div>`;
+    if (!bands.length) { host.innerHTML = h + '<div style="color:#57606a;font-size:12px;">No tenants.</div>'; return; }
+    h += '<table style="border-collapse:collapse;font-size:12px;"><tr>' +
+      '<th style="text-align:left;padding:4px 10px;border-bottom:2px solid #d0d7de;" title="Ring band — the wave; a deploy to ring R reaches every band with ring &ge; R.">Ring band</th>' +
+      '<th style="padding:4px 10px;border-bottom:2px solid #d0d7de;">Tenants</th>' +
+      '<th style="padding:4px 10px;border-bottom:2px solid #d0d7de;">Behind</th>' +
+      '<th style="padding:4px 10px;border-bottom:2px solid #d0d7de;">Never</th>' +
+      '<th style="text-align:left;padding:4px 10px;border-bottom:2px solid #d0d7de;">Members</th></tr>';
+    for (const b of bands) {
+      const members = (b.tenants||[]).map(t => {
+        const c = t.status === 'UpToDate' ? '#116329' : (t.status === 'Ahead' ? '#bc4c00' : '#cf222e');
+        const sfx = (t.status === 'Behind' || t.status === 'NeverApplied') && t.behind > 0 ? (' −' + t.behind) : '';
+        return `<span style="color:${c};" title="applied v${t.appliedVersion} / approved v${p.templateVersion} — ${esc(t.status)}">${esc(t.tenantId)}${sfx}</span>`;
+      }).join(', ');
+      h += `<tr><td style="padding:4px 10px;border-bottom:1px solid #eef0f3;font-weight:600;${b.needsRollout?'color:#cf222e;':''}">ring ${b.ring}</td>` +
+        `<td style="padding:4px 10px;border-bottom:1px solid #eef0f3;text-align:center;">${b.tenantCount}</td>` +
+        `<td style="padding:4px 10px;border-bottom:1px solid #eef0f3;text-align:center;">${b.behindCount}</td>` +
+        `<td style="padding:4px 10px;border-bottom:1px solid #eef0f3;text-align:center;">${b.neverCount}</td>` +
+        `<td style="padding:4px 10px;border-bottom:1px solid #eef0f3;">${members}</td></tr>`;
+    }
+    h += '</table>';
+    host.innerHTML = h;
   }
 
   // ===================================================================
@@ -2191,7 +2453,14 @@
     } else {
       h += `<div style="margin-top:8px;font-size:11.5px;color:#57606a;">(read-only &mdash; Admin role required to edit alerting)</div>`;
     }
+
+    // Recent alerts feed -- the durable record of what was actually pushed out, with
+    // the recorded-send proof (delivered vs rendered-only). Read-only for everyone.
+    h += `<div style="font-size:12px;font-weight:600;margin:14px 0 4px;">Recent alerts <span style="font-weight:400;color:#57606a;">(what was pushed out + delivery proof)</span></div>`;
+    h += `<div id="alertFeedBody" style="font-size:12px;color:#57606a;">Loading…</div>`;
+
     host.innerHTML = h;
+    renderAlertFeed();
     if (!canEditAlert) return;
 
     document.getElementById('alertSave').onclick = async () => {
@@ -2206,9 +2475,48 @@
     document.getElementById('alertTest').onclick = async () => {
       const msg = document.getElementById('alertMsg');
       msg.textContent = 'Sending test…'; msg.style.color = '#57606a';
-      try { const r = await api('POST', '/api/alerting/test'); msg.textContent = r.note || (r.ok ? 'Sent ✓' : 'Not sent'); msg.style.color = r.ok ? '#116329' : '#bc4c00'; }
+      try { const r = await api('POST', '/api/alerting/test'); msg.textContent = r.note || (r.ok ? 'Sent ✓' : 'Not sent'); msg.style.color = r.ok ? '#116329' : '#bc4c00'; renderAlertFeed(); }
       catch (e) { msg.textContent = 'Failed: ' + e.message; msg.style.color = '#cf222e'; }
     };
+  }
+
+  // Recent-alerts feed: the durable record of what the alerting layer pushed out,
+  // with the recorded-send proof. Reads GET /api/alerts (read-only for all roles).
+  const PIM_ALERT_SEND_LABELS = { 'sent': 'delivered', 'rendered': 'rendered only', 'suppressed': 'suppressed' };
+  async function renderAlertFeed() {
+    const body = document.getElementById('alertFeedBody');
+    if (!body) return;
+    const esc = escapeHtml;
+    let d;
+    try { d = await api('GET', '/api/alerts?take=25'); }
+    catch (e) { body.innerHTML = '<span style="color:#cf222e">Failed to load alerts: ' + esc(e.message) + '</span>'; return; }
+    const alerts = (d && d.alerts) || [];
+    const sum = (d && d.summary) || {};
+    let h = '';
+    h += `<div style="margin-bottom:6px;">Last 7 days: <b>${esc(String(sum.total || 0))}</b> alert(s) &mdash; ` +
+         `<span style="color:#116329;">${esc(String(sum.sent || 0))} delivered</span>, ` +
+         `<span style="color:#bc4c00;">${esc(String(sum.unsent || 0))} not delivered</span>.</div>`;
+    if (alerts.length === 0) {
+      h += '<div style="color:#57606a;">No alerts recorded yet. Configured events (engine failure, drift, expiring access, break-glass) appear here when they fire, with proof of who was notified.</div>';
+      body.innerHTML = h; return;
+    }
+    h += '<table style="width:100%;border-collapse:collapse;font-size:12px;"><thead><tr style="text-align:left;color:#57606a;">' +
+         '<th style="padding:2px 6px;">When (UTC)</th><th style="padding:2px 6px;">Event</th><th style="padding:2px 6px;">Title</th><th style="padding:2px 6px;">Delivery</th><th style="padding:2px 6px;">Recipients</th></tr></thead><tbody>';
+    alerts.forEach(a => {
+      const state = PIM_ALERT_SEND_LABELS[a.sendState] || a.sendState || '';
+      const color = (a.sendState === 'sent') ? '#116329' : '#bc4c00';
+      const when = ('' + (a.ts || '')).replace('T', ' ').replace(/\.\d+Z?$/, '').replace('Z', '');
+      const rc = (a.recipients || []).join(', ');
+      const proof = (a.sendState === 'sent') ? (esc(String(a.sent || 0)) + ' &check;') : esc(state);
+      h += '<tr style="border-top:1px solid #eaeef2;">' +
+           '<td style="padding:2px 6px;white-space:nowrap;">' + esc(when) + '</td>' +
+           '<td style="padding:2px 6px;">' + esc(String(a.event || '')) + '</td>' +
+           '<td style="padding:2px 6px;">' + esc(String(a.title || '')) + '</td>' +
+           '<td style="padding:2px 6px;color:' + color + ';">' + proof + '</td>' +
+           '<td style="padding:2px 6px;color:#57606a;">' + esc(rc) + '</td></tr>';
+    });
+    h += '</tbody></table>';
+    body.innerHTML = h;
   }
 
   // ===================================================================
@@ -2226,7 +2534,7 @@
     body.innerHTML = '<div style="color:#57606a;font-size:12px;">Loading settings…</div>';
     let s;
     try { s = await api('GET', '/api/settings'); }
-    catch (e) { body.innerHTML = '<div style="color:#cf222e">Failed to load settings: ' + esc(e.message) + '</div>'; return; }
+    catch (e) { body.innerHTML = stateError('Failed to load settings', e.message); return; }
     SETTINGS_DATA = s;
     const ro = canEdit ? '' : ' disabled';
     const seedNote = (flag, what) => flag
@@ -2598,7 +2906,7 @@
     body.innerHTML = '<div style="color:#57606a; font-size:12px;">Loading approval queue&hellip;</div>';
     let data;
     try { data = await api('GET', '/api/approvals'); }
-    catch (e) { body.innerHTML = '<div style="color:#cf222e">Could not load approvals: ' + esc(e.message) + '</div>'; return; }
+    catch (e) { body.innerHTML = stateError('Could not load approvals', e.message); return; }
     _apprData = data || { requests: [] };
     const reqs = _apprData.requests || [];
 
@@ -2684,6 +2992,16 @@
         if (r.status !== 'Pending' && r.approver) {
           h.push(`<div style="font-size:12px;color:#57606a;margin-top:6px;">${esc(r.status)} by <b>${esc(r.approver)}</b> ${fmtDate(r.decidedUtc)}${r.decisionNote ? ' &mdash; ' + esc(r.decisionNote) : ''}</div>`);
         }
+        // Execute control (offboard only; Approved only; Admin+). This is the
+        // request -> approve -> EXECUTE step: it runs the approved guided sequence
+        // through the account-status pipeline, gated + once-only on the server.
+        // Nothing runs automatically -- an administrator clicks Execute deliberately.
+        if (r.action === 'offboard' && r.status === 'Approved' && _apprData.canDecide) {
+          h.push(`<div style="margin-top:10px;display:flex;gap:8px;align-items:center;flex-wrap:wrap;">`);
+          h.push(`<button class="apprExecBtn" data-id="${esc(r.id)}" data-target="${esc(r.target)}" style="background:#cf222e;color:#fff;border:none;border-radius:6px;padding:5px 12px;cursor:pointer;">Execute offboard&hellip;</button>`);
+          h.push(`<span class="apprExecMsg" data-id="${esc(r.id)}" style="font-size:12px;"></span>`);
+          h.push(`</div>`);
+        }
         // Decision controls (checker; Pending only; approver != requestor).
         if (r.status === 'Pending') {
           if (canDecide) {
@@ -2716,6 +3034,7 @@
     // Per-card decision buttons.
     body.querySelectorAll('.apprApproveBtn').forEach(b => b.onclick = () => decideApproval(b.dataset.id, 'approve'));
     body.querySelectorAll('.apprDenyBtn').forEach(b => b.onclick = () => decideApproval(b.dataset.id, 'deny'));
+    body.querySelectorAll('.apprExecBtn').forEach(b => b.onclick = () => executeApproval(b.dataset.id, b.dataset.target));
   }
 
   async function submitApprovalRequest() {
@@ -2749,6 +3068,34 @@
     }
   }
 
+  // request -> approve -> EXECUTE. Runs the APPROVED offboard sequence through the
+  // account-status pipeline (server-side gated + once-only). A bulk/multi-principal
+  // target needs explicit confirmation (confirmBulk); a single-target offboard just
+  // confirms once. A server gate that refuses (no-approval / break-glass / disable
+  // guard / already-executed) comes back as a 409 with the gate that blocked it.
+  async function executeApproval(id, target) {
+    const msgEl = document.querySelector('.apprExecMsg[data-id="' + id + '"]');
+    const t = target || 'this account';
+    const looksBulk = /[,;*\s]/.test(String(target || '').trim()) || ['all', 'everyone', 'any', 'everybody'].includes(String(target || '').trim().toLowerCase());
+    const prompt = looksBulk
+      ? 'BULK offboard: "' + t + '" looks like more than one principal. This will disable + revoke each. Type EXECUTE to confirm.'
+      : 'Execute the approved offboard for "' + t + '"? This disables the account, revokes active access, and schedules deletion. It cannot run again.';
+    if (looksBulk) {
+      const typed = window.prompt(prompt);
+      if (String(typed || '').trim().toUpperCase() !== 'EXECUTE') { if (msgEl) { msgEl.textContent = 'Cancelled.'; msgEl.style.color = '#57606a'; } return; }
+    } else if (!window.confirm(prompt)) {
+      if (msgEl) { msgEl.textContent = 'Cancelled.'; msgEl.style.color = '#57606a'; } return;
+    }
+    if (msgEl) { msgEl.textContent = 'Executing...'; msgEl.style.color = '#57606a'; }
+    try {
+      const r = await api('POST', '/api/approvals/execute', { id, confirmBulk: looksBulk });
+      if (msgEl) { msgEl.textContent = (r && r.ok) ? 'Offboard executed.' : ('Did not run: ' + ((r && (r.reason || r.gate)) || 'blocked')); msgEl.style.color = (r && r.ok) ? '#1a7f37' : '#cf222e'; }
+      await renderApprovals();
+    } catch (e) {
+      if (msgEl) { msgEl.textContent = 'Blocked: ' + e.message; msgEl.style.color = '#cf222e'; }
+    }
+  }
+
   // ===================================================================
   // Access Review tab: read-only overview of Entra Access Reviews relevant
   // to the PIM estate, served by GET /api/access-reviews (engine
@@ -2768,7 +3115,7 @@
     body.innerHTML = '<div style="color:#57606a; font-size:12px;">Loading access reviews&hellip;</div>';
     let data = { rows: [], source: 'seed', note: '', total: 0 };
     try { data = await api('GET', '/api/access-reviews'); }
-    catch (e) { body.innerHTML = '<div style="color:#cf222e">Could not load access reviews: ' + escapeHtml(e.message) + '</div>'; return; }
+    catch (e) { body.innerHTML = stateError('Could not load access reviews', e.message); return; }
     _arRows = (data && data.rows) || [];
     _arSource = (data && data.source) || 'seed';
 
@@ -2811,6 +3158,59 @@
     await loadReviewEvidence(defId);
   }
 
+  // Send reminders to reviewers of every review that is due/overdue with pending
+  // decisions (§H7). Previews first (decides who is due, sends nothing), then on
+  // confirm sends for real. Degrades gracefully (permission/sender not set).
+  async function sendAccessReviewReminders(btn) {
+    const pimOnly = !!(document.getElementById('arPimOnly') && document.getElementById('arPimOnly').checked);
+    if (btn) { btn.disabled = true; btn.textContent = 'Checking...'; }
+    let pv;
+    try { pv = await api('POST', '/api/access-reviews/reminders', { preview: 1, pimManagedOnly: pimOnly ? 1 : 0 }); }
+    catch (e) { window.alert('Could not compute reminders: ' + e.message); if (btn) { btn.disabled = false; btn.textContent = 'Send reminders'; } return; }
+    const due = (pv && pv.dueCount) || 0;
+    if (!due) {
+      window.alert('No access reviews are due for a reminder right now' + (pv && pv.note ? ('\n\n' + pv.note) : '') + '.');
+      if (btn) { btn.disabled = false; btn.textContent = 'Send reminders'; }
+      return;
+    }
+    const names = ((pv.rows || []).filter(r => r.due || r.sent).map(r => '• ' + (r.displayName || r.definitionId) + (r.recipients && r.recipients.length ? (' → ' + r.recipients.join(', ')) : ''))).join('\n');
+    const isSeed = (pv.source === 'seed');
+    if (!window.confirm((isSeed ? '[sample data] ' : '') + 'Send a reminder for ' + due + ' due review(s)?\n\n' + names + (isSeed ? '\n\n(No mail is sent in sample/seed mode.)' : ''))) {
+      if (btn) { btn.disabled = false; btn.textContent = 'Send reminders'; }
+      return;
+    }
+    if (btn) { btn.textContent = 'Sending...'; }
+    let r;
+    try { r = await api('POST', '/api/access-reviews/reminders', { pimManagedOnly: pimOnly ? 1 : 0 }); }
+    catch (e) { window.alert('Reminder send failed: ' + e.message); if (btn) { btn.disabled = false; btn.textContent = 'Send reminders'; } return; }
+    window.alert('Reminders: ' + ((r && r.sentCount) || 0) + ' sent' + (r && r.source === 'seed' ? ' (sample mode — nothing actually emailed; set a mail sender / grant AccessReview.Read.All)' : '') + (r && r.note ? ('\n\n' + r.note) : '') + '.');
+    if (btn) { btn.disabled = false; btn.textContent = 'Send reminders'; }
+    renderAccessReviews();
+  }
+
+  // Assign / replace the reviewer scope of a review definition (§H7). Comma/newline
+  // separated specs: a UPN, an object id, 'group:<id>', or 'manager'.
+  async function assignReviewers(defId, current, btn) {
+    const seed = (current || []).join(', ');
+    const raw = window.prompt('Assign reviewers for this review (comma-separated UPN / object-id / group:<id> / manager):', seed);
+    if (raw === null) return;
+    const list = raw.split(/[,\n;]+/).map(s => s.trim()).filter(Boolean);
+    if (!list.length) { window.alert('At least one reviewer is required.'); return; }
+    if (btn) { btn.disabled = true; btn.textContent = 'Saving...'; }
+    let r;
+    try { r = await api('POST', '/api/access-reviews/reviewers', { definitionId: defId, reviewers: list }); }
+    catch (e) { window.alert('Could not assign reviewers: ' + e.message); if (btn) { btn.disabled = false; btn.textContent = 'Assign reviewers'; } return; }
+    if (r && r.ok === false) {
+      window.alert(r.permissionMissing
+        ? 'Permission not granted yet: AccessReview.ReadWrite.All is required on the Manager identity to assign reviewers. ' + (r.note || '')
+        : ('Could not assign reviewers: ' + (r.note || r.error || 'unknown error')));
+      if (btn) { btn.disabled = false; btn.textContent = 'Assign reviewers'; }
+      return;
+    }
+    window.alert('Assigned ' + ((r && r.count) || list.length) + ' reviewer(s).');
+    renderAccessReviews();
+  }
+
   async function loadReviewEvidence(defId) {
     const host = document.getElementById('arEvidence-' + cssId(defId));
     if (host) host.innerHTML = '<div style="color:#57606a;font-size:12px;">Loading review items&hellip;</div>';
@@ -2836,6 +3236,15 @@
     const canAttest = (PIM_ROLE === 'Admin' || PIM_ROLE === 'SuperAdmin');
     const h = [];
     h.push('<div style="border:1px solid #d0d7de;border-radius:6px;padding:8px;margin-top:6px;background:#f6f8fa;">');
+    // Reviewer assignment (§H7) -- who is asked to attest. Admin+ only.
+    const arRow = (_arRows || []).filter(rr => (rr.Id || '') === defId)[0];
+    const curReviewers = arRow ? asList(arRow.Reviewers).filter(Boolean) : [];
+    if (canAttest) {
+      h.push('<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:8px;padding-bottom:8px;border-bottom:1px solid #d0d7de;">' +
+        `<span style="font-size:11px;color:#57606a;">Reviewers: <b>${curReviewers.length ? esc(curReviewers.join(', ')) : '(none assigned)'}</b></span>` +
+        `<button class="arAssignBtn" data-def="${esc(defId)}" data-reviewers="${esc(curReviewers.join(','))}" style="font-size:11px;padding:2px 8px;cursor:pointer;">Assign reviewers</button>` +
+        '</div>');
+    }
     h.push(`<div style="font-size:11px;color:#57606a;margin-bottom:6px;">Per-principal decisions &mdash; record one at a time, each justified. ${canAttest ? '' : '<span style="color:#bc4c00">(Admin role required to record decisions.)</span>'}</div>`);
     if (!items.length) { h.push('<div style="color:#57606a;font-size:12px;">No decision items in this review instance.</div>'); }
     else {
@@ -2860,6 +3269,7 @@
     }
     host.innerHTML = h.join('');
     host.querySelectorAll('.arAttestBtn').forEach(b => b.onclick = () => attestReviewItem(b.dataset.def, b.dataset.inst, b.dataset.dec, b.dataset.outcome, b));
+    host.querySelectorAll('.arAssignBtn').forEach(b => b.onclick = () => assignReviewers(b.dataset.def, (b.dataset.reviewers || '').split(',').map(s => s.trim()).filter(Boolean), b));
   }
 
   function drawAccessReviews() {
@@ -2934,7 +3344,9 @@
       ['NotStarted', 'InProgress', 'Completed', 'Applied'].map(s => `<option value="${s}"${statusFilter === s ? ' selected' : ''}>${s}</option>`).join('') +
       `</select>` +
       `<label style="font-size:12px;display:flex;align-items:center;gap:4px;"><input type="checkbox" id="arPimOnly"${pimOnly ? ' checked' : ''}> PIM-managed only</label>` +
-      `<span style="margin-left:auto;display:inline-flex;gap:6px;align-items:center;">` + exportBarHtml('ar') + `<button id="arRefresh">Refresh</button></span>` +
+      `<span style="margin-left:auto;display:inline-flex;gap:6px;align-items:center;">` +
+        ((PIM_ROLE === 'Admin' || PIM_ROLE === 'SuperAdmin') ? `<button id="arRemindersBtn" title="Email reviewers of every review that is due/overdue with pending decisions">Send reminders</button>` : '') +
+        exportBarHtml('ar') + `<button id="arRefresh">Refresh</button></span>` +
       `</div>`);
     // Capture the filtered rows for export (REQUIREMENTS §26a -- export everywhere).
     const _arExportRows = rows;
@@ -2980,6 +3392,7 @@
     const sf = document.getElementById('arStatusFilter'); if (sf) { sf.onchange = drawAccessReviews; }
     const po = document.getElementById('arPimOnly'); if (po) { po.onchange = drawAccessReviews; }
     const rf = document.getElementById('arRefresh'); if (rf) { rf.onclick = renderAccessReviews; }
+    const rb = document.getElementById('arRemindersBtn'); if (rb) { rb.onclick = () => sendAccessReviewReminders(rb); }
     // Export the filtered access-review list (REQUIREMENTS §26a -- export everywhere).
     wireExportBar('ar', () => ({
       filename: 'access-reviews.csv', title: 'Access Reviews', subtitle: (_arSource === 'seed' ? 'sample data' : 'live tenant data'),
@@ -3436,23 +3849,31 @@
     { key: 'emergency',   label: 'Emergency override' },
     { key: 'other',       label: 'Other' }
   ];
-  let auditState = { category: 'all', q: '', page: 1, pageSize: 50 };
+  // auditState.months: '3' (default) | '12' | 'all' -- the window selector ([H6]:
+  // the old hard 3-month cap is gone; 'all' reads the whole history server-side).
+  let auditState = { category: 'all', q: '', page: 1, pageSize: 50, months: '3', from: '', to: '' };
   async function renderAudit() {
     const body = document.getElementById('auditBody');
     if (!isServer) { body.innerHTML = '<div style="color:#57606a">Static mode -- the audit trail needs the server.</div>'; return; }
     const esc = escapeHtml;
     body.innerHTML = '<div style="color:#57606a;font-size:12px;">Loading audit trail&hellip;</div>';
     let data;
+    const filterQs = () =>
+      `category=${encodeURIComponent(auditState.category)}&q=${encodeURIComponent(auditState.q)}` +
+      `&months=${encodeURIComponent(auditState.months)}&from=${encodeURIComponent(auditState.from)}&to=${encodeURIComponent(auditState.to)}`;
     try {
-      const qs = `category=${encodeURIComponent(auditState.category)}&q=${encodeURIComponent(auditState.q)}&page=${auditState.page}&pageSize=${auditState.pageSize}`;
+      const qs = filterQs() + `&page=${auditState.page}&pageSize=${auditState.pageSize}`;
       data = await api('GET', '/api/audit?' + qs);
-    } catch (e) { body.innerHTML = `<div style="color:#cf222e">Could not load audit trail: ${esc(e.message)}</div>`; return; }
+    } catch (e) { body.innerHTML = stateError('Could not load audit trail', e.message); return; }
     const counts = data.counts || {};
     const totalAll = data.total || 0;
+    const windowLabel = (auditState.months === 'all') ? 'full history' : ('last ' + auditState.months + ' months');
     const h = [];
     h.push(`<div style="display:flex;align-items:center;margin-bottom:10px;"><span style="font-size:11px;text-transform:uppercase;letter-spacing:.5px;color:#0969da;font-weight:600;">Audit trail</span> ` +
-      `<span style="color:#57606a;font-size:11px;margin-left:6px;">append-only &mdash; ${totalAll} event(s) in the last 3 months, newest first.</span>` +
-      `<span style="flex:1 1 auto;"></span>` + exportBarHtml('audit') + `</div>`);
+      `<span style="color:#57606a;font-size:11px;margin-left:6px;">append-only &mdash; ${totalAll} event(s) in the ${esc(windowLabel)} (${data.monthsTotal || 0} month(s) on file), newest first. Before/after shown per change.</span>` +
+      `<span style="flex:1 1 auto;"></span>` +
+      `<button id="auditExportAll" class="ghost" style="font-size:12px;margin-right:6px;" title="Download the ENTIRE filtered trail (every match, not just this page) as CSV, with before/after">Export full trail (CSV)</button>` +
+      exportBarHtml('audit') + `</div>`);
 
     // Category chips (with counts).
     h.push('<div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px;">');
@@ -3463,11 +3884,16 @@
     }
     h.push('</div>');
 
-    // Search + page size.
+    // Search + window + date range + page size.
     h.push('<div style="display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:10px;">' +
-      `<input type="text" id="auditSearch" placeholder="Search actor / action / target / result..." value="${esc(auditState.q)}" style="flex:1 1 280px;min-width:200px;padding:4px 8px;">` +
+      `<input type="text" id="auditSearch" placeholder="Search actor / action / target / result / change..." value="${esc(auditState.q)}" style="flex:1 1 280px;min-width:200px;padding:4px 8px;">` +
       `<button id="auditSearchBtn">Search</button>` +
-      `<button id="auditClear" style="display:${auditState.q ? '' : 'none'};">Clear</button>` +
+      `<button id="auditClear" style="display:${(auditState.q || auditState.from || auditState.to) ? '' : 'none'};">Clear</button>` +
+      `<label style="font-size:12px;color:#57606a;">Window <select id="auditMonths">` +
+        [['3','Last 3 months'],['12','Last 12 months'],['all','All history']].map(o => `<option value="${o[0]}"${auditState.months === o[0] ? ' selected' : ''}>${o[1]}</option>`).join('') +
+      `</select></label>` +
+      `<label style="font-size:12px;color:#57606a;">From <input type="date" id="auditFrom" value="${esc(auditState.from)}" style="padding:3px 6px;"></label>` +
+      `<label style="font-size:12px;color:#57606a;">To <input type="date" id="auditTo" value="${esc(auditState.to)}" style="padding:3px 6px;"></label>` +
       `<label style="font-size:12px;color:#57606a;">Page size <select id="auditPageSize">` +
         [25, 50, 100, 200].map(n => `<option value="${n}"${auditState.pageSize === n ? ' selected' : ''}>${n}</option>`).join('') +
       `</select></label>` +
@@ -3475,9 +3901,9 @@
 
     const events = data.events || [];
     h.push(`<div style="color:#57606a;font-size:11.5px;margin-bottom:4px;">${data.matchCount || 0} match(es)${(auditState.category !== 'all' || auditState.q) ? ' for the current filter' : ''} &mdash; page ${data.page} of ${data.pageCount}.</div>`);
-    h.push('<table class="grid" style="font-size:11.5px;"><thead><tr><th>When (UTC)</th><th>Actor</th><th>Category</th><th>Action</th><th>Target</th><th>Result</th></tr></thead><tbody>');
+    h.push('<table class="grid" style="font-size:11.5px;"><thead><tr><th>When (UTC)</th><th>Actor</th><th>Category</th><th>Action</th><th>Target</th><th>Result</th><th>Change (before &rarr; after)</th></tr></thead><tbody>');
     if (events.length === 0) {
-      h.push('<tr><td colspan="6" style="color:#57606a;padding:10px;">No events match the current filter.</td></tr>');
+      h.push('<tr><td colspan="7" style="color:#57606a;padding:10px;">No events match the current filter.</td></tr>');
     } else {
       for (const e of events) {
         const res = (e.result || 'ok');
@@ -3489,6 +3915,7 @@
           `<td style="font-family:Consolas,monospace;">${esc(e.action || '')}</td>` +
           `<td>${esc(e.target || '')}</td>` +
           `<td style="color:${resColor};">${esc(res)}</td>` +
+          `<td style="color:#57606a;max-width:340px;">${esc(e.change || '')}</td>` +
         `</tr>`);
       }
     }
@@ -3510,17 +3937,41 @@
     const doSearch = () => { auditState.q = (document.getElementById('auditSearch').value || '').trim(); auditState.page = 1; renderAudit(); };
     const sb = document.getElementById('auditSearchBtn'); if (sb) sb.onclick = doSearch;
     const si = document.getElementById('auditSearch'); if (si) si.onkeydown = (ev) => { if (ev.key === 'Enter') doSearch(); };
-    const cl = document.getElementById('auditClear'); if (cl) cl.onclick = () => { auditState.q = ''; auditState.page = 1; renderAudit(); };
+    const cl = document.getElementById('auditClear'); if (cl) cl.onclick = () => { auditState.q = ''; auditState.from = ''; auditState.to = ''; auditState.page = 1; renderAudit(); };
+    const mo = document.getElementById('auditMonths'); if (mo) mo.onchange = () => { auditState.months = mo.value || '3'; auditState.page = 1; renderAudit(); };
+    const fr = document.getElementById('auditFrom'); if (fr) fr.onchange = () => { auditState.from = fr.value || ''; auditState.page = 1; renderAudit(); };
+    const to = document.getElementById('auditTo'); if (to) to.onchange = () => { auditState.to = to.value || ''; auditState.page = 1; renderAudit(); };
     const ps = document.getElementById('auditPageSize'); if (ps) ps.onchange = () => { auditState.pageSize = parseInt(ps.value, 10) || 50; auditState.page = 1; renderAudit(); };
     const pv = document.getElementById('auditPrev'); if (pv) pv.onclick = () => { if (auditState.page > 1) { auditState.page--; renderAudit(); } };
     const nx = document.getElementById('auditNext'); if (nx) nx.onclick = () => { if (auditState.page < (data.pageCount || 1)) { auditState.page++; renderAudit(); } };
-    // Export this page of the audit trail (REQUIREMENTS §26a -- export everywhere).
+    // Export THIS PAGE (client-side, fast) -- REQUIREMENTS §26a export everywhere.
+    // Now includes the before/after Change column ([H6]).
     wireExportBar('audit', () => ({
       filename: 'audit-' + (auditState.category || 'all') + '.csv',
       title: 'Audit trail', subtitle: 'Category: ' + (auditState.category || 'all') + (auditState.q ? ' | search: ' + auditState.q : ''),
-      headers: ['When (UTC)', 'Actor', 'Category', 'Action', 'Target', 'Result'],
-      rows: (data.events || []).map(e => [(e.ts || '').replace('T', ' ').substring(0, 19), e.actor || '', e.category || 'other', e.action || '', e.target || '', e.result || 'ok'])
+      headers: ['When (UTC)', 'Actor', 'Category', 'Action', 'Target', 'Result', 'Change'],
+      rows: (data.events || []).map(e => [(e.ts || '').replace('T', ' ').substring(0, 19), e.actor || '', e.category || 'other', e.action || '', e.target || '', e.result || 'ok', e.change || ''])
     }));
+    // [H6]/[H5] Export the ENTIRE FILTERED TRAIL (every match across the window,
+    // not just the visible page) with before/after -- streamed from the server
+    // (GET /api/audit/export) so we never page through it client-side. The
+    // browser saves the returned CSV blob; this is a deliberate, click-initiated
+    // download (no auto-open of any render).
+    const exAll = document.getElementById('auditExportAll');
+    if (exAll) exAll.onclick = async () => {
+      exAll.disabled = true; const prev = exAll.textContent; exAll.textContent = 'Preparing…';
+      try {
+        const resp = await fetch('/api/audit/export?' + filterQs(), { headers: { 'Accept': 'text/csv' } });
+        if (!resp.ok) { throw new Error('HTTP ' + resp.status); }
+        const blob = await resp.blob();
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url; a.download = 'pim-audit-full-' + (auditState.category || 'all') + '.csv';
+        document.body.appendChild(a); a.click();
+        setTimeout(() => { document.body.removeChild(a); URL.revokeObjectURL(url); }, 0);
+      } catch (e) { alert('Could not export the full audit trail: ' + (e && e.message ? e.message : e)); }
+      finally { exAll.disabled = false; exAll.textContent = prev; }
+    };
   }
 
   // ===================================================================
@@ -4067,6 +4518,7 @@
       // Sub-mode switch.
       '<div style="display:flex;gap:6px;margin-bottom:12px;flex-wrap:wrap;">' +
         '<button id="rlModePerms"   class="primary" style="font-size:12px;">What a role can do</button>' +
+        '<button id="rlModeByAction" class="ghost"  style="font-size:12px;">Find roles by action</button>' +
         '<button id="rlModeReverse" class="ghost"   style="font-size:12px;">Who can activate a role</button>' +
         '<button id="rlModeCompare" class="ghost"   style="font-size:12px;">Compare two roles</button>' +
       '</div>' +
@@ -4076,16 +4528,19 @@
     let mode = 'perms';
     const setMode = (m) => {
       mode = m;
-      document.getElementById('rlModePerms').className   = (m === 'perms') ? 'primary' : 'ghost';
-      document.getElementById('rlModeReverse').className = (m === 'reverse') ? 'primary' : 'ghost';
-      document.getElementById('rlModeCompare').className = (m === 'compare') ? 'primary' : 'ghost';
+      document.getElementById('rlModePerms').className    = (m === 'perms') ? 'primary' : 'ghost';
+      document.getElementById('rlModeByAction').className = (m === 'byaction') ? 'primary' : 'ghost';
+      document.getElementById('rlModeReverse').className  = (m === 'reverse') ? 'primary' : 'ghost';
+      document.getElementById('rlModeCompare').className  = (m === 'compare') ? 'primary' : 'ghost';
       if (m === 'perms') renderPermsPanel();
+      else if (m === 'byaction') renderByActionPanel();
       else if (m === 'reverse') renderReversePanel();
       else renderComparePanel();
     };
-    document.getElementById('rlModePerms').onclick   = () => setMode('perms');
-    document.getElementById('rlModeReverse').onclick = () => setMode('reverse');
-    document.getElementById('rlModeCompare').onclick = () => setMode('compare');
+    document.getElementById('rlModePerms').onclick    = () => setMode('perms');
+    document.getElementById('rlModeByAction').onclick = () => setMode('byaction');
+    document.getElementById('rlModeReverse').onclick  = () => setMode('reverse');
+    document.getElementById('rlModeCompare').onclick  = () => setMode('compare');
 
     // Render a ranked "did you mean..." block as click-to-search chips. cb(role)
     // is called when a candidate is picked (re-runs the active lookup for it).
@@ -4136,7 +4591,18 @@
         const byNs = perms.byNamespace || perms.ByNamespace || null;
         const flat = perms.actions || perms.Actions || null;
         const total = (perms.totalActions != null) ? perms.totalActions : (Array.isArray(flat) ? flat.length : 0);
-        const h = ['<div style="font-size:13px;margin-bottom:8px;">Role: <b>' + esc((data && data.role) || role) + '</b> <span style="color:#57606a;font-size:11px;">(' + total + ' resource action(s))</span></div>'];
+        const roleLabel = (data && data.role) || role;
+        // Flatten to export rows (Namespace, Action) -- the same shape the engine's
+        // ConvertTo-PimRolePermissionsCsv produces, so the ticket export equals the screen.
+        const expRows = [];
+        if (Array.isArray(byNs) && byNs.length) {
+          for (const g of byNs) for (const a of (g.actions || [])) expRows.push([roleLabel, String(g.namespace || ''), String(a)]);
+        } else if (Array.isArray(flat) && flat.length) {
+          for (const a of flat) { const s = String(a); const i = s.indexOf('/'); expRows.push([roleLabel, i > 0 ? s.slice(0, i) : '', s]); }
+        }
+        const h = ['<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:8px;">' +
+          '<span style="font-size:13px;">Role: <b>' + esc(roleLabel) + '</b> <span style="color:#57606a;font-size:11px;">(' + total + ' resource action(s))</span></span>' +
+          (expRows.length ? exportBarHtml('rpPerm') : '') + '</div>'];
         if (Array.isArray(byNs) && byNs.length) {
           for (const g of byNs) {
             h.push('<div style="margin-bottom:8px;"><div style="font-weight:600;font-size:12px;color:#0969da;word-break:break-all;">' + esc(String(g.namespace || '(root)')) + '</div><ul style="margin:4px 0 0 18px;font-family:Consolas,monospace;font-size:11px;word-break:break-all;">' +
@@ -4148,9 +4614,73 @@
           h.push('<div style="color:#57606a;font-size:12px;">No resource actions returned.</div>');
         }
         out.innerHTML = h.join('');
+        if (expRows.length) wireExportBar('rpPerm', () => ({
+          filename: 'pim-role-permissions-' + String(roleLabel).replace(/[^A-Za-z0-9]+/g, '-') + '.csv',
+          title: 'Role permissions: ' + roleLabel,
+          subtitle: total + ' resource action(s) -- least-privilege ticket evidence',
+          headers: ['Role', 'Namespace', 'Action'], rows: expRows
+        }));
       };
       document.getElementById('rpGo').onclick = () => go();
       document.getElementById('rpRole').addEventListener('keydown', (e) => { if (e.key === 'Enter') go(); });
+    }
+
+    // -------- 1b. BY-ACTION (which roles grant operation X) --------------------
+    // The inverse of "what a role can do" (§28 [H9a]): you know the operation you
+    // need to delegate, this finds the roles that grant it -- ranked least-
+    // privilege first so you can pick the narrowest one for a least-privilege ticket.
+    function renderByActionPanel() {
+      const p = document.getElementById('rlPanel');
+      p.innerHTML =
+        '<div style="color:#57606a;font-size:11px;margin-bottom:8px;">Live Graph read &middot; <b>read-only</b> &mdash; finds every directory role that grants a resource action, <b>ranked least-privilege first</b> (fewest total actions). Supports a <code>namespace/*</code> wildcard.</div>' +
+        '<div style="display:flex;flex-wrap:wrap;gap:8px;align-items:flex-end;max-width:760px;">' +
+          fieldRow('Resource action', '<input id="baAction" type="text" placeholder="microsoft.directory/users/basic/update" style="min-width:380px;">') +
+          '<button id="baGo" class="primary" style="flex:0 0 auto;">Find roles</button>' +
+        '</div><div id="baOut" style="margin-top:12px;"></div>';
+      const go = async () => {
+        const out = document.getElementById('baOut');
+        const action = document.getElementById('baAction').value.trim();
+        if (!action) { out.innerHTML = '<div style="color:#cf222e;font-size:12px;">Enter a resource action (e.g. microsoft.directory/users/basic/update).</div>'; return; }
+        out.innerHTML = '<div style="color:#57606a;font-size:12px;">Searching every role&hellip;</div>';
+        let data;
+        try { data = await api('GET', '/api/role-permissions/by-action?action=' + encodeURIComponent(action)); }
+        catch (e) { out.innerHTML = '<div style="color:#cf222e;font-size:12px;">' + esc(e.message) + '</div>'; return; }
+        const matches = (data && Array.isArray(data.matches)) ? data.matches : [];
+        // Export rows mirror ConvertTo-PimRolesByActionCsv (Rank, Role, TotalActions, Broad, MatchedActions).
+        const baRows = matches.map((mrow, i) => [
+          i + 1, String(mrow.role || ''), (mrow.totalActions != null ? mrow.totalActions : ''),
+          (mrow.viaWildcard ? 'yes' : 'no'), (Array.isArray(mrow.matchedActions) ? mrow.matchedActions : []).join('; ')
+        ]);
+        const h = ['<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:8px;">' +
+          '<span style="font-size:13px;">Action: <b style="font-family:Consolas,monospace;">' + esc(action) + '</b> ' +
+          '<span style="color:#57606a;font-size:11px;">(' + matches.length + ' role(s) grant it &middot; searched ' + ((data && data.rolesSearched) || 0) + ')</span></span>' +
+          (matches.length ? exportBarHtml('baMatch') : '') + '</div>'];
+        if (data && data.hint) { h.push('<div style="font-size:11.5px;color:#54470a;margin-bottom:8px;">' + esc(String(data.hint)) + '</div>'); }
+        if (!matches.length) {
+          h.push('<div style="color:#57606a;font-size:12px;">No role grants this action.</div>');
+        } else {
+          h.push('<table style="border-collapse:collapse;font-size:12px;width:100%;max-width:920px;"><thead><tr style="text-align:left;border-bottom:1px solid #d0d7de;">' +
+            '<th style="padding:4px 8px;">Role (narrowest first)</th><th style="padding:4px 8px;">Total actions</th><th style="padding:4px 8px;">Matched on</th></tr></thead><tbody>');
+          for (const mrow of matches) {
+            const ma = Array.isArray(mrow.matchedActions) ? mrow.matchedActions : [];
+            const wild = mrow.viaWildcard ? ' <span title="Grants this via a wildcard (* / namespace/*) -- broad, not least-privilege" style="font-size:10px;color:#9a6700;font-weight:600;">(broad &mdash; wildcard)</span>' : '';
+            h.push('<tr style="border-bottom:1px solid #eaeef2;">' +
+              '<td style="padding:4px 8px;font-weight:600;">' + esc(String(mrow.role || '')) + wild + '</td>' +
+              '<td style="padding:4px 8px;color:#57606a;">' + (mrow.totalActions != null ? mrow.totalActions : '') + '</td>' +
+              '<td style="padding:4px 8px;font-family:Consolas,monospace;font-size:11px;word-break:break-all;color:#1a1a1a;">' + ma.map(a => esc(String(a))).join('<br>') + '</td></tr>');
+          }
+          h.push('</tbody></table>');
+        }
+        out.innerHTML = h.join('');
+        if (baRows.length) wireExportBar('baMatch', () => ({
+          filename: 'pim-roles-by-action-' + String(action).replace(/[^A-Za-z0-9]+/g, '-') + '.csv',
+          title: 'Roles granting action: ' + action,
+          subtitle: matches.length + ' role(s), least-privilege first',
+          headers: ['Rank', 'Role', 'TotalActions', 'Broad', 'MatchedActions'], rows: baRows
+        }));
+      };
+      document.getElementById('baGo').onclick = go;
+      document.getElementById('baAction').addEventListener('keydown', (e) => { if (e.key === 'Enter') go(); });
     }
 
     // -------- 2. REVERSE (who can activate a role), with path ------------------
@@ -4178,7 +4708,12 @@
         }
         const res = (data && data.result) || {};
         const reachers = Array.isArray(res.reachers) ? res.reachers : [];
-        const h = ['<div style="font-size:13px;margin-bottom:8px;">Role: <b>' + esc(res.role || role) + '</b> <span style="color:#57606a;font-size:11px;">(' + reachers.length + ' principal(s) can activate it)</span></div>'];
+        const roleLabel = res.role || role;
+        // Export rows mirror ConvertTo-PimRoleReachersCsv (Role, Who, Purpose, Path).
+        const rvRows = reachers.map(rc => [roleLabel, String(rc.displayName || rc.person || ''), String(rc.purpose || ''), String(rc.pathText || '')]);
+        const h = ['<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:8px;">' +
+          '<span style="font-size:13px;">Role: <b>' + esc(roleLabel) + '</b> <span style="color:#57606a;font-size:11px;">(' + reachers.length + ' principal(s) can activate it)</span></span>' +
+          (reachers.length ? exportBarHtml('rvReach') : '') + '</div>'];
         if (!reachers.length) {
           h.push('<div style="color:#57606a;font-size:12px;">No one can currently activate this role &mdash; nothing in the delegation model grants it.</div>');
         } else {
@@ -4193,6 +4728,12 @@
           h.push('</tbody></table>');
         }
         out.innerHTML = h.join('');
+        if (rvRows.length) wireExportBar('rvReach', () => ({
+          filename: 'pim-who-can-activate-' + String(roleLabel).replace(/[^A-Za-z0-9]+/g, '-') + '.csv',
+          title: 'Who can activate: ' + roleLabel,
+          subtitle: reachers.length + ' principal(s), with granting path',
+          headers: ['Role', 'Who', 'Purpose', 'Path'], rows: rvRows
+        }));
       };
       document.getElementById('rvGo').onclick = () => go();
       document.getElementById('rvRole').addEventListener('keydown', (e) => { if (e.key === 'Enter') go(); });
@@ -4229,13 +4770,27 @@
         const warn = [];
         if (data && data.resolvedA === 0) warn.push('Role A ("' + esc(a) + '") did not resolve to a delegated target.');
         if (data && data.resolvedB === 0) warn.push('Role B ("' + esc(b) + '") did not resolve to a delegated target.');
+        // Export rows mirror ConvertTo-PimRoleCompareCsv (Bucket, Who).
+        const nm = (x) => String((x && (x.displayName || x.person)) || x || '');
+        const cmpRows = []
+          .concat((c.both || []).map(x => ['Both roles', nm(x)]))
+          .concat((c.onlyA || []).map(x => ['Only ' + a, nm(x)]))
+          .concat((c.onlyB || []).map(x => ['Only ' + b, nm(x)]))
+          .filter(r => r[1]);
         out.innerHTML =
           (warn.length ? '<div style="color:#54470a;font-size:12px;margin-bottom:8px;">' + warn.join('<br>') + '</div>' : '') +
+          (cmpRows.length ? '<div style="margin-bottom:8px;">' + exportBarHtml('cmpCmp') + '</div>' : '') +
           '<div style="display:flex;gap:10px;flex-wrap:wrap;">' +
             col('Both roles', c.both, '#0969da') +
             col('Only ' + esc(a), c.onlyA, '#1a7f37') +
             col('Only ' + esc(b), c.onlyB, '#9a6700') +
           '</div>';
+        if (cmpRows.length) wireExportBar('cmpCmp', () => ({
+          filename: 'pim-role-compare-' + String(a).replace(/[^A-Za-z0-9]+/g, '-') + '-vs-' + String(b).replace(/[^A-Za-z0-9]+/g, '-') + '.csv',
+          title: 'Role comparison: ' + a + ' vs ' + b,
+          subtitle: 'who can activate both / only one',
+          headers: ['Bucket', 'Who'], rows: cmpRows
+        }));
       };
       document.getElementById('cmpGo').onclick = go;
     }
@@ -4255,7 +4810,7 @@
     const esc = escapeHtml;
     let st;
     try { st = await api('GET', '/api/cutover'); }
-    catch (e) { body.innerHTML = '<div style="color:#cf222e">Failed to load cutover state: ' + esc(e.message) + '</div>'; return; }
+    catch (e) { body.innerHTML = stateError('Failed to load cutover state', e.message); return; }
     const stages = st.stages || [];
     const completed = new Set(st.completed || []);
     const next = st.nextStage || '';
@@ -4299,11 +4854,50 @@
         h.push('<div style="margin-top:6px;color:#9a6700;font-size:11.5px;">Finalize is the point of no return &mdash; it makes SQL authoritative. It refuses any non-Azure-SQL (dev-local) store.</div>');
       }
     }
-    if (st.audit && Object.keys(st.audit).length) {
-      h.push('<div style="margin-top:16px;"><span style="font-size:11px;text-transform:uppercase;letter-spacing:.5px;color:#0969da;font-weight:600;">Stage audit</span>' +
-        '<pre style="white-space:pre-wrap;font-size:11px;background:#f6f8fa;border:1px solid #d0d7de;border-radius:6px;padding:8px;margin-top:6px;max-height:240px;overflow:auto;">' + esc(JSON.stringify(st.audit, null, 2)) + '</pre></div>');
+    // Abort / roll back a STARTED-but-not-finalized cutover (REQUIREMENTS.md s28 [L3]).
+    // Only shown while abort is possible and the operator can run a stage.
+    if (st.canAbort && canRun) {
+      h.push('<div style="margin-top:14px;padding:10px 12px;border:1px solid #d4a72c;background:#fff8c5;border-radius:6px;">' +
+        '<div style="font-size:12px;color:#9a6700;font-weight:600;margin-bottom:4px;">Abort / roll back this cutover</div>' +
+        '<div style="font-size:11.5px;color:#57606a;">You can cleanly abort before finalizing &mdash; the CSV source was read-only throughout, so the prior store is intact. Abort will:</div>' +
+        '<ul style="margin:6px 0 8px 18px;padding:0;font-size:11.5px;color:#1a1a1a;">' +
+        (st.abortPlan || []).map(function (s) { return '<li style="margin:2px 0;">' + esc(s) + '</li>'; }).join('') +
+        '</ul>' +
+        '<button id="cutAbort" style="font-size:12px;color:#cf222e;border:1px solid #cf222e;background:#fff;border-radius:5px;padding:5px 12px;cursor:pointer;">Abort cutover</button>' +
+        '<span id="cutAbortMsg" style="font-size:12px;color:#57606a;margin-left:10px;"></span></div>');
+    } else if (!st.canAbort && st.abortReason && !st.final && (st.completed || []).length) {
+      h.push('<div style="margin-top:10px;color:#57606a;font-size:11.5px;">' + esc(st.abortReason) + '</div>');
+    }
+    // Human-readable stage audit (REQUIREMENTS.md s28 [L3] -- no more raw JSON dump).
+    if (st.humanAudit && st.humanAudit.length) {
+      h.push('<div style="margin-top:16px;"><span style="font-size:11px;text-transform:uppercase;letter-spacing:.5px;color:#0969da;font-weight:600;">Stage audit</span>');
+      for (const blk of st.humanAudit) {
+        h.push('<div style="margin-top:8px;background:#f6f8fa;border:1px solid #d0d7de;border-radius:6px;padding:8px 12px;">' +
+          '<div style="font-size:12px;font-weight:600;color:#1a1a1a;text-transform:capitalize;">' + esc(blk.stage) + '</div>' +
+          '<div style="font-size:11.5px;color:#1a1a1a;line-height:1.5;margin-top:3px;">' +
+          (blk.lines || []).map(function (l) { return esc(l); }).join('<br>') + '</div></div>');
+      }
+      h.push('</div>');
     }
     body.innerHTML = h.join('');
+
+    const abortBtn = document.getElementById('cutAbort');
+    if (abortBtn) abortBtn.onclick = async () => {
+      const amsg = document.getElementById('cutAbortMsg');
+      const ok = await showConfirm('Abort cutover',
+        '<p>Abort this cutover and return to the previous store?</p>' +
+        '<ul style="margin:6px 0 0 18px;padding:0;font-size:12px;">' +
+        (st.abortPlan || []).map(function (s) { return '<li style="margin:2px 0;">' + esc(s) + '</li>'; }).join('') +
+        '</ul>', true);
+      if (!ok) return;
+      amsg.style.color = '#57606a'; amsg.textContent = 'aborting...';
+      try {
+        const r = await api('POST', '/api/cutover/abort', {});
+        amsg.style.color = '#1a7f37';
+        amsg.textContent = 'cutover aborted' + (r.revertedSource ? ' (configuration source reverted to CSV)' : '');
+        renderCutover();
+      } catch (e) { amsg.style.color = '#cf222e'; amsg.textContent = e.message; }
+    };
 
     const run = document.getElementById('cutRun');
     if (run) run.onclick = async () => {
@@ -4368,7 +4962,7 @@
     body.innerHTML = '<div style="color:#57606a; font-size:12px;">Loading jobs&hellip;</div>';
     let data;
     try { data = await api('GET', '/api/jobs'); }
-    catch (e) { body.innerHTML = '<div style="color:#cf222e">Failed to load jobs: ' + esc0(e.message) + '</div>'; return; }
+    catch (e) { body.innerHTML = stateError('Failed to load jobs', e.message); return; }
     const jobs = data.jobs || [];
     const running = data.runningCount || 0;
     const overdue = data.overdueCount || 0;     // [M6] jobs that missed their fire window
@@ -5521,7 +6115,7 @@
   // /api/access-report/who-has. Printable + exportable (the shared bar).
   // reportState carries the active mode + last result so export reflects it.
   // ===================================================================
-  const reportState = { mode: 'who-can', subject: '', result: null };
+  const reportState = { mode: 'who-can', subject: '', result: null, tierMax: 1 };
   async function renderReports() {
     const body = document.getElementById('reportsBody');
     if (!isServer) { body.innerHTML = '<div style="color:#57606a;font-size:12px;">Static mode &mdash; reports need the server.</div>'; return; }
@@ -5533,7 +6127,35 @@
     h.push('<div style="display:flex;gap:8px;align-items:center;margin-bottom:10px;flex-wrap:wrap;">' +
       '<button id="rptModeWhoCan" class="' + (reportState.mode === 'who-can' ? '' : 'ghost') + '" style="font-size:12px;">Person &rarr; what they can reach</button>' +
       '<button id="rptModeWhoHas" class="' + (reportState.mode === 'who-has' ? '' : 'ghost') + '" style="font-size:12px;">Role &rarr; who can activate it</button>' +
+      '<button id="rptModeTierImpact" class="' + (reportState.mode === 'tier-impact' ? '' : 'ghost') + '" style="font-size:12px;">Tier impact &mdash; who can reach T0/T1</button>' +
       '</div>');
+    // Tier-impact is an estate-wide report with no subject picker -- it lists
+    // EVERY user with any path (incl. indirect via nested groups) to a
+    // Tier-0/Tier-1 target. Render its own controls and bail out of the
+    // person/role subject-picker layout.
+    if (reportState.mode === 'tier-impact') {
+      h.push('<div style="display:flex;gap:8px;align-items:center;margin-bottom:12px;flex-wrap:wrap;">' +
+        '<label style="font-size:12px;color:#57606a;">Tier ceiling</label>' +
+        '<select id="rptTierMax" style="font-size:12px;padding:4px 8px;">' +
+          '<option value="1"' + (reportState.tierMax === 0 ? '' : ' selected') + '>Tier-0 or Tier-1 (high impact)</option>' +
+          '<option value="0"' + (reportState.tierMax === 0 ? ' selected' : '') + '>Tier-0 only (most privileged)</option>' +
+        '</select>' +
+        '<button id="rptRun" style="font-size:12px;">Run report</button>' +
+        '<span style="flex:1 1 auto;"></span>' +
+        exportBarHtml('rpt') +
+        '</div>');
+      h.push('<div id="rptResults"><div style="color:#57606a;font-size:12px;">Run the report to list every user who can reach a Tier-0/Tier-1 target &mdash; including reach inherited through nested groups, which a flat role list misses.</div></div>');
+      body.innerHTML = h.join('');
+      document.getElementById('rptModeWhoCan').onclick = () => { reportState.mode = 'who-can'; reportState.subject = ''; reportState.result = null; renderReports(); };
+      document.getElementById('rptModeWhoHas').onclick = () => { reportState.mode = 'who-has'; reportState.subject = ''; reportState.result = null; renderReports(); };
+      document.getElementById('rptModeTierImpact').onclick = () => { reportState.mode = 'tier-impact'; reportState.subject = ''; reportState.result = null; renderReports(); };
+      const tmSel = document.getElementById('rptTierMax');
+      if (tmSel) tmSel.onchange = () => { reportState.tierMax = parseInt(tmSel.value, 10); };
+      document.getElementById('rptRun').onclick = () => runReport('tier-impact', '');
+      wireExportBar('rpt', reportExportData);
+      if (reportState.result) renderReportResult(reportState.result);
+      return;
+    }
     // Subject picker (datalist of the people OR roles in the live model).
     const isWhoCan = reportState.mode === 'who-can';
     const people = (PIM_DATA.nodes || []).filter(n => n.kind === 'admin');
@@ -5556,6 +6178,7 @@
 
     document.getElementById('rptModeWhoCan').onclick = () => { reportState.mode = 'who-can'; reportState.subject = ''; reportState.result = null; renderReports(); };
     document.getElementById('rptModeWhoHas').onclick = () => { reportState.mode = 'who-has'; reportState.subject = ''; reportState.result = null; renderReports(); };
+    document.getElementById('rptModeTierImpact').onclick = () => { reportState.mode = 'tier-impact'; reportState.subject = ''; reportState.result = null; renderReports(); };
     const subj = document.getElementById('rptSubject');
     document.getElementById('rptRun').onclick = () => runReport(reportState.mode, (subj.value || '').trim());
     subj.onkeydown = (e) => { if (e.key === 'Enter') runReport(reportState.mode, (subj.value || '').trim()); };
@@ -5566,9 +6189,21 @@
   async function runReport(mode, subject) {
     reportState.mode = mode;
     reportState.subject = subject;
+    const out = document.getElementById('rptResults');
+    // Tier-impact is estate-wide -- no subject needed.
+    if (mode === 'tier-impact') {
+      if (out) out.innerHTML = '<div style="color:#57606a;font-size:12px;">Running report&hellip;</div>';
+      let data;
+      try {
+        data = await api('GET', '/api/tier-impact?tier=' + encodeURIComponent(reportState.tierMax));
+      } catch (e) { if (out) out.innerHTML = '<div style="color:#cf222e;font-size:12px;">Report failed: ' + escapeHtml(e.message) + '</div>'; return; }
+      data._mode = mode;
+      reportState.result = data;
+      renderReportResult(data);
+      return;
+    }
     const subjEl = document.getElementById('rptSubject');
     if (subjEl && subjEl.value !== subject) { subjEl.value = subject; }
-    const out = document.getElementById('rptResults');
     if (!subject) { if (out) out.innerHTML = '<div style="color:#bf8700;font-size:12px;">Enter a ' + (mode === 'who-can' ? 'person' : 'role') + ' first.</div>'; return; }
     if (out) out.innerHTML = '<div style="color:#57606a;font-size:12px;">Running report&hellip;</div>';
     let data;
@@ -5587,6 +6222,28 @@
     const esc = escapeHtml;
     const mode = data._mode || reportState.mode;
     const h = [];
+    if (mode === 'tier-impact') {
+      const rows = data.rows || [];
+      const ceiling = (data.highTierMax === 0) ? 'Tier-0' : 'Tier-0 / Tier-1';
+      h.push('<div style="font-size:12px;color:#24292f;margin-bottom:6px;"><b>' + rows.length + '</b> of <b>' + (data.scannedAdmins || 0) + '</b> user(s) can reach a ' + ceiling + ' target ' +
+        '(<b>' + (data.tier0Count || 0) + '</b> reach Tier-0, <b>' + (data.tier1Count || 0) + '</b> top out at Tier-1).</div>');
+      h.push('<table class="grid" style="font-size:11.5px;"><thead><tr><th>Person</th><th>Purpose</th><th>Highest tier</th><th>High-tier targets</th><th>Worst target</th><th>Via</th><th>Path</th></tr></thead><tbody>');
+      if (!rows.length) {
+        h.push('<tr><td colspan="7" style="color:#57606a;padding:10px;">No user reaches a ' + ceiling + ' target in the model.</td></tr>');
+      } else {
+        for (const r of rows) {
+          const tierColor = (r.highestTierLevel === 0) ? '#cf222e' : '#bf8700';
+          const via = r.viaNested ? 'nested group (indirect)' : 'direct';
+          h.push('<tr><td>' + esc(r.displayName || r.person) + '</td><td>' + esc(r.purpose || '') + '</td>' +
+            '<td><span style="font-weight:600;color:' + tierColor + ';">' + esc(r.highestTier) + '</span></td>' +
+            '<td>' + (r.highTargetCount || 0) + '</td><td>' + esc(r.worstTargetLabel || '') + '</td>' +
+            '<td style="color:#57606a;">' + esc(via) + '</td><td style="color:#57606a;">' + esc(r.pathText || '') + '</td></tr>');
+        }
+      }
+      h.push('</tbody></table>');
+      out.innerHTML = h.join('');
+      return;
+    }
     if (mode === 'who-can') {
       const targets = data.targets || [];
       if (!data.found) {
@@ -5626,6 +6283,12 @@
     const data = reportState.result;
     if (!data) { alert('Run a report first.'); return null; }
     const mode = data._mode || reportState.mode;
+    if (mode === 'tier-impact') {
+      const headers = ['Person', 'Purpose', 'Highest tier', 'High-tier targets', 'Worst target', 'Via', 'Path'];
+      const rows = (data.rows || []).map(r => [r.displayName || r.person, r.purpose || '', r.highestTier || '', r.highTargetCount || 0, r.worstTargetLabel || '', r.viaNested ? 'nested group (indirect)' : 'direct', r.pathText || '']);
+      const ceiling = (data.highTierMax === 0) ? 'Tier-0' : 'Tier-0 / Tier-1';
+      return { filename: 'tier-impact.csv', title: 'Tier impact — who can reach ' + ceiling, subtitle: 'Every user with a path (incl. indirect via nested groups) to a high-tier target', headers, rows };
+    }
     if (mode === 'who-can') {
       const headers = ['Target', 'Type', 'Role / permission', 'Scope / AU', 'Activation', 'Path'];
       const rows = (data.targets || []).map(t => {
@@ -10431,6 +11094,26 @@
     out.push('</tbody></table>');
     results.innerHTML = out.join('');
 
+    // Export bar ([H5]/[L5]): the "who has what is active" extract for a ticket /
+    // auditor trail. Exports the FILTERED (visible) rows so the export equals the
+    // screen; uses the shared injection-safe downloadCsv / printTable helpers.
+    const expBar = document.getElementById('revExportBar');
+    if (expBar) {
+      expBar.style.display = 'inline-flex';
+      const expData = () => {
+        const f = applyRevokeFilter();
+        return {
+          filename: 'pim-active-assignments-' + new Date().toISOString().slice(0, 10) + '.csv',
+          title: 'Active PIM assignments (who has what)',
+          subtitle: f.length + ' active assignment(s)' + (REV.typeFilter && REV.typeFilter !== 'all' ? ' — ' + REV.typeFilter : ''),
+          headers: ['Principal', 'Role / Group', 'Scope', 'Type', 'Activated', 'Expires', 'Justification'],
+          rows: f.map(r => [r.principal || '', r.role || '', r.scope || '', r.type || '', formatRevWhen(r.start), r.end ? formatRevWhen(r.end) : 'no expiration', r.justification || ''])
+        };
+      };
+      const ec = document.getElementById('revExpCsv'); if (ec) ec.onclick = () => { const d = expData(); downloadCsv(d.filename, d.headers, d.rows); };
+      const ep = document.getElementById('revExpPrint'); if (ep) ep.onclick = () => { const d = expData(); printTable(d.title, d.subtitle, d.headers, d.rows); };
+    }
+
     // Wire row checkboxes.
     results.querySelectorAll('tr.rev-row').forEach(tr => {
       const id = tr.dataset.id;
@@ -10565,6 +11248,17 @@
         '</b> below to confirm:</div>' +
         '<input id="revConfirmCount" inputmode="numeric" autocomplete="off" style="margin-top:4px;box-sizing:border-box;width:120px;" placeholder="' + toRevoke + '">' +
         '<div id="revConfirmErr" style="color:#cf222e;font-size:11px;margin-top:4px;min-height:13px;"></div>';
+    }
+    // [H3] APPROVAL gate -- an over-threshold batch additionally needs a maker/checker
+    // 'revoke' approval. Warn up front so the operator knows the commit will be blocked
+    // (409) until a DIFFERENT administrator approves a 'revoke' request on the Approvals
+    // tab. (Nothing destructive happens without that recorded approval.)
+    if (plan && plan.approvalRequired) {
+      confirmExtra +=
+        '<div style="margin-top:8px;padding:8px 10px;background:#ffebe9;border:1px solid #cf222e;border-radius:5px;font-size:11.5px;color:#cf222e;">' +
+        '&#9888; <b>Approval required.</b> This batch is over the approval threshold. It will be <b>blocked</b> until a maker/checker ' +
+        '<b>revoke</b> request (batch <code>maintenance-bulk-revoke</code>) is raised on the <b>Approvals</b> tab and approved by a <b>different</b> administrator. ' +
+        'Separation of duties applies &mdash; you cannot approve your own request.</div>';
     }
 
     const ok = await showRevokeConfirm(
@@ -11255,6 +11949,16 @@
     } else if (isServer && n.kind === 'role-group') {
       d.innerHTML += ' <button id="mapBtnAssign">&#xFF0B; Link capability bundle&hellip;</button>';
     }
+    // [M8] residual -- STAGE A REMOVAL (revoke a grant) straight from the map.
+    // Any node that participates in at least one assignment grant (admin / role
+    // group / permission group / target) can have its grants revoked here. The
+    // removal flows through the SAME preview + maker/checker + Review & Save
+    // backup/undo commit path -- it is opt-in (a confirm + the destructive
+    // banner), never a one-click destructive write. Admin role only.
+    var mapNodeHasGrant = ((m.fwd[id] || []).length > 0) || ((m.back[id] || []).length > 0);
+    if (isServer && roleAtLeast('Admin') && mapNodeHasGrant) {
+      d.innerHTML += ' <button id="mapBtnRemove" title="Stage a removal of the grant(s) touching this node -- routed through preview + approval + Review &amp; Save (never a one-click destructive write)" style="border-color:#cf222e;color:#cf222e;">&minus; Stage removal&hellip;</button>';
+    }
     // PERMISSIONS & TARGETS breakdown -- for a selected capability bundle / role
     // group (or any node that grants targets) enumerate the ACTUAL granted Entra
     // roles, AU-scoped roles and Azure RBAC @ scope from the real delegation rows.
@@ -11275,8 +11979,81 @@
     }
     const ab = document.getElementById('mapBtnAssign');
     if (ab) ab.onclick = () => mapBeginAssign(id);
+    const rb = document.getElementById('mapBtnRemove');
+    if (rb) rb.onclick = () => mapStageRemoval(id);
     const link = d.querySelector('a[data-base]');
     if (link) link.onclick = () => { switchTab('grid'); openGrid(link.dataset.base); };
+  }
+
+  // [M8] residual -- stage a REMOVAL (revoke a grant) directly from the map.
+  // Calls the server, which resolves the row-level revocation plan, runs it
+  // through the SAME keyed preview (replace mode => the dropped grant shows as a
+  // keyed REMOVE + destructive flag) and the [M4] maker/checker sensitivity gate,
+  // and returns the plan. We CONFIRM the destructive preview, honour the gate,
+  // then stage each affected base's "after" set as a normal Review & Save change
+  // (whole-base replace, exactly like move-admin) so commit goes through
+  // backup/undo. NOTHING is written here -- the engine remains the only writer.
+  async function mapStageRemoval(nodeId) {
+    const d = document.getElementById('mapDetail');
+    const m = MAP.model;
+    const n = m && m.byId[nodeId];
+    let r;
+    try {
+      r = await api('POST', '/api/authoring/map-removal', { mode: 'node', nodeId: nodeId });
+    } catch (e) {
+      alert('Could not compute the removal: ' + (e && e.message ? e.message : 'error'));
+      return;
+    }
+    if (!r || !r.ok) {
+      alert('Nothing to revoke.\n\n' + ((r && r.note) ? r.note : 'No grant references this node.'));
+      return;
+    }
+    const plan = r.plan || {};
+    const previews = r.previews || [];
+    // [M4] sensitivity gate FIRST -- a sensitive removal needs a DIFFERENT admin's
+    // approval before it can be committed (same gate the authoring tab uses).
+    const sens = r.sensitivity || {};
+    if (sens.sensitive && !sens.allowed) {
+      const why = (sens.reasons && sens.reasons.length) ? ('\n\n• ' + sens.reasons.join('\n• ')) : '';
+      const go = confirm('Second-person approval required.\n\nRevoking this grant is a SENSITIVE change that needs a DIFFERENT administrator to approve it before it can be committed:' + why +
+        '\n\nNo approval exists yet for:\n' + (sens.target || '') +
+        '\n\nOpen the Approvals tab to raise the request now?');
+      if (go) { try { switchTab('approvals'); } catch (e) {} }
+      return;
+    }
+    // Confirm the keyed removal preview (destructive) per affected base.
+    let totalRem = 0;
+    for (const pv of previews) {
+      const p = pv.preview || {};
+      const ok = await showAuthoringPreviewModal('Revoke grant on ' + (n ? (n.label || n.id) : nodeId) + ' (' + pv.base + ')', p);
+      if (!ok) { return; }   // any cancel aborts the whole removal
+      totalRem += (p.removeCount || 0);
+    }
+    // Stage each affected base's after-set as a whole-base replace.
+    let staged = 0;
+    for (const pl of (plan.plans || [])) {
+      const base = pl.base;
+      const data = await loadCsv(base);
+      ensurePending(base, data.header, data.rows);
+      const p = pendingChanges[base];
+      p.rows = (pl.afterRows || []).map(tr => {
+        const row = {};
+        for (const c of p.header) row[c] = '';
+        for (const k of Object.keys(tr)) { if (!p.header.includes(k)) p.header.push(k); row[k] = String(tr[k] == null ? '' : tr[k]); }
+        return row;
+      });
+      p.deletes = new Set();
+      staged += (pl.removedCount || 0);
+    }
+    markBadges();
+    // Rebuild so the revoked wires disappear from the pending overlay, then keep
+    // the selection + point the operator at Review & Save to commit.
+    renderAccessMap();
+    if (MAP.sel) mapSelect(MAP.sel, true);
+    const dd = document.getElementById('mapDetail');
+    dd.innerHTML += ' &nbsp;<span style="color:#cf222e">&minus; ' + staged + ' grant row(s) staged for removal &mdash; commit on <a id="mapRemSave" style="cursor:pointer;color:#0969da;">Review &amp; Save</a></span>';
+    const go = document.getElementById('mapRemSave');
+    if (go) go.onclick = () => switchTab('save');
   }
 
   function mapApplySearch() {

@@ -179,6 +179,14 @@ if (Test-Path -LiteralPath $_delegLib) { . $_delegLib }
 $_mapRiskLib = Join-Path $solutionRoot 'engine\_shared\PIM-MapRisk.ps1'
 if (Test-Path -LiteralPath $_mapRiskLib) { . $_mapRiskLib }
 
+# Tier-impact report (engine/_shared/PIM-TierImpact.ps1, REQUIREMENTS §23 /
+# ROADMAP #24) -- pure function over the SAME graph model the Map renders:
+# every user with ANY path (incl. indirect via nested groups) to a Tier-0/Tier-1
+# target. Powers /api/tier-impact. Dot-sourced standalone (no SQL); reuses the
+# PIM-MapRisk reach helpers loaded above.
+$_tierImpactLib = Join-Path $solutionRoot 'engine\_shared\PIM-TierImpact.ps1'
+if (Test-Path -LiteralPath $_tierImpactLib) { . $_tierImpactLib }
+
 # Pure-REST token core (engine/_shared/PIM-Rest.ps1) -- dot-sourced into THIS
 # (script) scope so the MI/SQL token mint runs in the same scope as the storage
 # block + New-PimSqlConnection (and, on Windows headless, the Write-Host shim).
@@ -234,6 +242,14 @@ if (Test-Path -LiteralPath $_approvalGateLib) { . $_approvalGateLib }
 # (it calls Test-PimApprovalApprovedFor) and after PIM-Authoring.ps1.
 $_sensAuthLib = Join-Path $solutionRoot 'engine\_shared\PIM-SensitiveAuthoring.ps1'
 if (Test-Path -LiteralPath $_sensAuthLib) { . $_sensAuthLib }
+
+# Alert FEED + recorded-send proof (engine/_shared/PIM-AlertFeed.ps1, REQUIREMENTS
+# §26c / §28 [H2] + the [M5] residual). The PUSH side of the dashboard: every fired
+# alert is recorded (when / which event / who was notified / whether delivery was
+# recorded), so a break-glass "owners notified" claim is verifiable. Pure core +
+# JSONL file adapter; dot-sourced standalone so the feed works without SQL.
+$_alertFeedLib = Join-Path $solutionRoot 'engine\_shared\PIM-AlertFeed.ps1'
+if (Test-Path -LiteralPath $_alertFeedLib) { . $_alertFeedLib }
 
 # Bridge the ApprovalGate persistence chain (Get-/Set-PimSetting) onto the Manager's own
 # settings store (Get-/Set-PimManagerSetting -> SQL pim.Settings when active, else the
@@ -293,6 +309,15 @@ if (Test-Path -LiteralPath $_featureFlagsLib) { . $_featureFlagsLib }
 # PIM-Rest (loaded above), engine stays the writer for the persisted dept list.
 $_discoveryLib = Join-Path $solutionRoot 'engine\_shared\PIM-Discovery.ps1'
 if (Test-Path -LiteralPath $_discoveryLib) { . $_discoveryLib }
+
+# Audit-trail query core (engine/_shared/PIM-AuditQuery.ps1, REQUIREMENTS s28 [H6]
+# "Audit you can defend"). PURE, dependency-free helpers shared by GET /api/audit
+# and GET /api/audit/export so the on-screen view and the export resolve the trail
+# IDENTICALLY: full history (not the old ~3-month cap), a human before/after `change`
+# per event, and an RFC-4180 CSV of the WHOLE filtered trail (not just the page).
+# Read-only -- the audit FILE is the source of truth, nothing here writes.
+$_auditQueryLib = Join-Path $solutionRoot 'engine\_shared\PIM-AuditQuery.ps1'
+if (Test-Path -LiteralPath $_auditQueryLib) { . $_auditQueryLib }
 
 # One id per Manager session -- groups this session's audit events (phase 6).
 $script:PimManagerSessionId = [guid]::NewGuid().ToString('N')
@@ -1746,23 +1771,48 @@ function Set-PimAlertingConfig {
     return (Get-PimAlertingConfig)
 }
 
+# Where the recorded-alert FEED lives for the active instance (the durable
+# send-proof store; JSONL under output/alerts, mirroring the audit JSONL).
+function Get-PimManagerAlertFeedPath {
+    $dir = Join-Path $script:outputRoot 'alerts'
+    return (Join-Path $dir 'pim-alerts.jsonl')
+}
+function Get-PimManagerAlertFeed {
+    # Read the recorded alert feed for the active instance (newest-first). Never throws.
+    if (-not (Get-Command Read-PimAlertFeedFile -ErrorAction SilentlyContinue)) { return @() }
+    try { return @(Read-PimAlertFeedFile -FeedFile (Get-PimManagerAlertFeedPath)) } catch { return @() }
+}
+
 function Send-PimManagerAlert {
     # Fan an alert out to every configured recipient for ONE event type, through the
     # existing Send-PimNotifyMail path (the 'alert-notice' template). Honours the
-    # per-event toggle. Returns @{ event; fired; sent; recipients; reason }.
+    # per-event toggle, debounces identical repeats within a window, and RECORDS the
+    # outcome to the durable feed (the recorded-send proof -- closes the [M5] residual).
+    # Returns @{ event; fired; sent; recipients; reason; recorded; debounced }.
     # NEVER throws -- alerting must not take the Manager down.
     param(
         [Parameter(Mandatory)][string]$Event,
         [string]$Title,
         [string]$Detail,
         [string]$LinkTab,
+        [int]$DebounceMinutes = 60,
         [switch]$WhatIf
     )
     $cfg = Get-PimAlertingConfig
-    $result = [ordered]@{ event = $Event; fired = $false; sent = 0; recipients = @($cfg.recipients); reason = '' }
+    $result = [ordered]@{ event = $Event; fired = $false; sent = 0; recipients = @($cfg.recipients); reason = ''; recorded = $false; debounced = $false }
     if (-not ($cfg.events.ContainsKey($Event) -and $cfg.events[$Event])) { $result.reason = 'event disabled'; return $result }
     if (@($cfg.recipients).Count -eq 0) { $result.reason = 'no recipients configured'; return $result }
     if (-not (Get-Command Send-PimNotifyMail -ErrorAction SilentlyContinue)) { $result.reason = 'notify path not loaded'; return $result }
+    # Debounce an identical (same event/title/detail) alert fired recently, so a
+    # recurring condition (e.g. the same drift every reconcile) does not spam.
+    if ($DebounceMinutes -gt 0 -and (Get-Command Test-PimAlertDebounced -ErrorAction SilentlyContinue)) {
+        try {
+            $key = Get-PimAlertDedupeKey -Event $Event -Title $Title -Detail $Detail
+            if (Test-PimAlertDebounced -Feed (Get-PimManagerAlertFeed) -DedupeKey $key -DebounceMinutes $DebounceMinutes) {
+                $result.debounced = $true; $result.reason = "debounced (identical alert within $DebounceMinutes min)"; return $result
+            }
+        } catch {}
+    }
     $result.fired = $true
     $tenantCtx = try { Get-PimManagerTenantContext } catch { @{ tenantName = ''; tenantId = '' } }
     $tokens = @{
@@ -1784,6 +1834,17 @@ function Send-PimManagerAlert {
     $result.sent = $sent
     if ($sent -eq 0 -and -not $result.reason) { $result.reason = $(if ($lastReason) { $lastReason } else { 'rendered only (no sender / whatif)' }) }
     try { Write-PimManagerAuditEvent -Action 'alert.send' -Target "event:$Event" -After ([ordered]@{ fired = $result.fired; sent = $sent; recipients = @($cfg.recipients).Count; reason = "$($result.reason)" }) -Result $(if ($sent -gt 0) { 'ok' } else { 'noop' }) } catch {}
+    # Record the recorded-send PROOF to the durable feed (the [M5] residual fix): a
+    # break-glass "owners notified" claim is now backed by a feed entry showing
+    # exactly who was notified and whether delivery was recorded.
+    if (Get-Command New-PimAlertRecord -ErrorAction SilentlyContinue) {
+        try {
+            $tenantCtx2 = try { Get-PimManagerTenantContext } catch { @{ tenantName = '' } }
+            $rec = New-PimAlertRecord -Event $Event -Title $Title -Detail $Detail -LinkTab $LinkTab -SendResult $result -TenantName "$($tenantCtx2.tenantName)" -Instance "$($script:PimInstanceName)" -WhatIf:$WhatIf
+            Write-PimAlertFeedFile -FeedFile (Get-PimManagerAlertFeedPath) -Record $rec | Out-Null
+            $result.recorded = $true
+        } catch {}
+    }
     return $result
 }
 
@@ -2510,6 +2571,30 @@ function Get-PimHomeOverview {
         $tiles.approvals = [ordered]@{ ok = $false; pending = 0; error = "$($_.Exception.Message)" }
     }
 
+    # ---- 4c. Recent alerts (the PUSH feed) -- FAST (local JSONL feed). ----------
+    # Surfaces what the alerting layer actually pushed out: total recent alerts, how
+    # many had a RECORDED delivery vs rendered-only (the proof headline), and the
+    # latest one. Deep-links to the Home/Settings alerting panel. (§26c / §28 [H2].)
+    try {
+        if (Get-Command Get-PimAlertFeedSummary -ErrorAction SilentlyContinue) {
+            $feed = Get-PimManagerAlertFeed
+            $sum = Get-PimAlertFeedSummary -Feed $feed -NowUtc $now -WindowHours 168
+            $tiles.alerts = [ordered]@{
+                ok          = $true
+                total       = [int]$sum.total
+                sent        = [int]$sum.sent
+                unsent      = [int]$sum.unsent
+                windowHours = [int]$sum.windowHours
+                byEvent     = $sum.byEvent
+                latest      = $sum.latest
+            }
+        } else {
+            $tiles.alerts = [ordered]@{ ok = $false; total = 0; note = 'alert-feed library not loaded' }
+        }
+    } catch {
+        $tiles.alerts = [ordered]@{ ok = $false; total = 0; error = "$($_.Exception.Message)" }
+    }
+
     # ---- 5. Access reviews (pending) -- heavy/live, opt-in -------------------
     if ($IncludeHeavy) {
         try {
@@ -2546,6 +2631,19 @@ function Get-PimHomeOverview {
                     expiring    = $expiring.Count
                     items       = @($expiring | Sort-Object { try { [datetime]$_.end } catch { $now } } | Select-Object -First 12 | ForEach-Object { [ordered]@{ principal = "$($_.principal)"; role = "$($_.role)"; endUtc = "$($_.end)"; type = "$($_.type)" } })
                     note        = "$($aa.error)"
+                }
+                # Alerting (REQUIREMENTS §26c / §28 [H2]): the 'expiring-access' event was
+                # in the catalog but nothing dispatched it. Fire it (debounced) when the
+                # live read found expiring access, through the existing notify path. The
+                # pure decision lives in Get-PimExpiringAccessAlert; this only dispatches.
+                if ([bool]$aa.ok -and (Get-Command Get-PimExpiringAccessAlert -ErrorAction SilentlyContinue) -and (Get-Command Send-PimManagerAlert -ErrorAction SilentlyContinue)) {
+                    try {
+                        $ea = Get-PimExpiringAccessAlert -Rows $rows -NowUtc $now -WindowDays 14
+                        if ($ea.fire) {
+                            # debounce daily so the same expiring set does not re-alert on every Home load
+                            Send-PimManagerAlert -Event 'expiring-access' -Title 'Active access expiring soon' -Detail "$($ea.detail)" -LinkTab 'home' -DebounceMinutes 1440 | Out-Null
+                        }
+                    } catch {}
                 }
             } else {
                 $tiles.expiring = [ordered]@{ ok = $false; note = 'active-assignments reader not loaded'; expiring = 0 }
@@ -2974,6 +3072,18 @@ function Get-PimRoleReachers {
         tenantName  = $Model.tenantName
         generatedUtc = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
     }
+}
+
+function Get-PimTierImpactReportLive {
+    # Thin Manager wrapper over the pure tier-impact core (PIM-TierImpact.ps1):
+    # read ONE live delegation model (Build-PimGraphData -- SQL in hosted mode, the
+    # desired store otherwise) and compute, for every user, whether they have ANY
+    # path (incl. indirect via nested groups) to a Tier-0/Tier-1 target. No logic
+    # here -- the engine lib does the reach analysis; this just feeds it the model.
+    [CmdletBinding()]
+    param([int]$HighTierMax = 1)
+    $g = Build-PimGraphData
+    return Get-PimTierImpactReport -Data $g -HighTierMax $HighTierMax
 }
 
 function Get-PimGlobalSearch {
@@ -4744,9 +4854,14 @@ function Handle-Request {
         if ($path -eq '/api/audit' -and $method -eq 'GET') {
             # Read-only view over the append-only audit trail (output/audit/
             # pim-audit-<yyyyMM>.jsonl). Powers the Audit tab: server-side
-            # category filter + free-text search + paging, newest first. Reads
-            # the last few monthly files so the trail spans a quarter; the file
-            # is the source of truth (this never writes).
+            # category filter + free-text search + date-range + paging, newest
+            # first. The file is the source of truth (this never writes).
+            #
+            # [H6] "Audit you can defend": the window is no longer hard-capped at
+            # 3 months -- ?months=N selects the most-recent N months, ?months=all
+            # (or 0) reads the WHOLE history; each event carries a before/after
+            # `change` summary. All resolved via the shared PIM-AuditQuery core so
+            # the view + the CSV export (GET /api/audit/export) agree exactly.
             $script:lastHeartbeat = Get-Date
             $q = @{}
             foreach ($pair in ("$($req.Url.Query)".TrimStart('?') -split '&')) {
@@ -4754,54 +4869,89 @@ function Handle-Request {
             }
             $category = if ($q.ContainsKey('category')) { "$($q['category'])".Trim().ToLowerInvariant() } else { '' }
             if ($category -eq 'all') { $category = '' }
-            $search   = if ($q.ContainsKey('q')) { "$($q['q'])".Trim().ToLowerInvariant() } else { '' }
+            $search   = if ($q.ContainsKey('q')) { "$($q['q'])".Trim() } else { '' }
+            $fromUtc  = if ($q.ContainsKey('from')) { "$($q['from'])".Trim() } else { '' }
+            $toUtc    = if ($q.ContainsKey('to'))   { "$($q['to'])".Trim() }   else { '' }
             $page     = if ($q.ContainsKey('page')) { [Math]::Max(1, [int]$q['page']) } else { 1 }
             $pageSize = if ($q.ContainsKey('pageSize')) { [Math]::Min(500, [Math]::Max(1, [int]$q['pageSize'])) } else { 50 }
             # Back-compat: a bare ?limit=N (old Governance call) acts as pageSize.
             if ($q.ContainsKey('limit')) { $pageSize = [Math]::Min(2000, [Math]::Max(1, [int]$q['limit'])) }
+            # Window: default = 3 months (back-compat with the old behaviour);
+            # 'all' / 0 = full history; N = the N most-recent months.
+            $months = 3
+            if ($q.ContainsKey('months')) {
+                $mv = "$($q['months'])".Trim().ToLowerInvariant()
+                if ($mv -eq 'all' -or $mv -eq '0') { $months = 0 } else { $months = [Math]::Max(0, [int]$mv) }
+            }
 
-            $events = New-Object System.Collections.ArrayList
             $auditDir = Join-Path $script:outputRoot 'audit'
-            $months = @(0,1,2 | ForEach-Object { [datetime]::UtcNow.AddMonths(-$_).ToString('yyyyMM') })
-            foreach ($month in $months) {
-                $f = Join-Path $auditDir "pim-audit-$month.jsonl"
-                if (Test-Path -LiteralPath $f) {
-                    foreach ($line in @(Get-Content -LiteralPath $f -Encoding UTF8)) {
-                        if ($line.Trim()) { try { [void]$events.Add(($line | ConvertFrom-Json)) } catch {} }
-                    }
-                }
-            }
-            # Stamp a category on every event (UI also relies on this).
-            foreach ($e in $events) {
-                try { $e | Add-Member -NotePropertyName category -NotePropertyValue (Get-PimAuditCategory -Action "$($e.action)") -Force } catch {}
-            }
+            $events = @(Read-PimAuditEvents -AuditDir $auditDir -Months $months)
             # Category counts BEFORE search/category filtering (chips show totals).
             $counts = @{}
             foreach ($e in $events) { $c = "$($e.category)"; if ($c) { $counts[$c] = ([int]$counts[$c]) + 1 } }
 
-            $filtered = @($events)
-            if ($category) { $filtered = @($filtered | Where-Object { "$($_.category)" -eq $category }) }
-            if ($search) {
-                $filtered = @($filtered | Where-Object {
-                    "$($_.actor)".ToLowerInvariant().Contains($search) -or
-                    "$($_.action)".ToLowerInvariant().Contains($search) -or
-                    "$($_.target)".ToLowerInvariant().Contains($search) -or
-                    "$($_.result)".ToLowerInvariant().Contains($search)
-                })
-            }
-            $sorted = @($filtered | Sort-Object { "$($_.ts)" } -Descending)
+            $sorted = @(Select-PimAuditEvents -Events $events -Category $category -Search $search -FromUtc $fromUtc -ToUtc $toUtc)
             $matchCount = $sorted.Count
             $skip = ($page - 1) * $pageSize
             $pageItems = @($sorted | Select-Object -Skip $skip -First $pageSize)
+            $monthsAvail = @(Get-PimAuditMonthList -AuditDir $auditDir)
             Write-JsonResponse -Response $resp -Status 200 -Body @{
-                events     = $pageItems
-                total      = $events.Count          # all events in window
-                matchCount = $matchCount            # after filter/search
-                page       = $page
-                pageSize   = $pageSize
-                pageCount  = [Math]::Max(1, [Math]::Ceiling($matchCount / [double]$pageSize))
-                category   = $category
-                counts     = $counts
+                events       = $pageItems
+                total        = $events.Count        # all events in the loaded window
+                matchCount   = $matchCount          # after filter/search/date
+                page         = $page
+                pageSize     = $pageSize
+                pageCount    = [Math]::Max(1, [Math]::Ceiling($matchCount / [double]$pageSize))
+                category     = $category
+                counts       = $counts
+                months       = $months              # 0 = full history
+                monthsLoaded = if ($months -eq 0) { $monthsAvail.Count } else { [Math]::Min($months, $monthsAvail.Count) }
+                monthsTotal  = $monthsAvail.Count   # how many monthly files exist on disk
+            }
+            return 200
+        }
+
+        if ($path -eq '/api/audit/export' -and $method -eq 'GET') {
+            # [H6]/[H5] Full-trail CSV export: stream the WHOLE filtered audit trail
+            # (every matching event, NOT just the page on screen) as a CSV download
+            # -- including the before/after Change column. Honours the SAME
+            # category/search/date/months filter the Audit tab is showing, so the
+            # export equals "what I'm looking at, in full". Read-only.
+            $script:lastHeartbeat = Get-Date
+            $q = @{}
+            foreach ($pair in ("$($req.Url.Query)".TrimStart('?') -split '&')) {
+                if ($pair -match '^([^=]+)=(.*)$') { $q[[uri]::UnescapeDataString($Matches[1])] = [uri]::UnescapeDataString($Matches[2]) }
+            }
+            $category = if ($q.ContainsKey('category')) { "$($q['category'])".Trim().ToLowerInvariant() } else { '' }
+            if ($category -eq 'all') { $category = '' }
+            $search  = if ($q.ContainsKey('q'))    { "$($q['q'])".Trim() }    else { '' }
+            $fromUtc = if ($q.ContainsKey('from')) { "$($q['from'])".Trim() } else { '' }
+            $toUtc   = if ($q.ContainsKey('to'))   { "$($q['to'])".Trim() }   else { '' }
+            # Export defaults to the FULL history unless the caller narrows it.
+            $months = 0
+            if ($q.ContainsKey('months')) {
+                $mv = "$($q['months'])".Trim().ToLowerInvariant()
+                if ($mv -ne 'all' -and $mv -ne '0') { $months = [Math]::Max(0, [int]$mv) }
+            }
+            $auditDir = Join-Path $script:outputRoot 'audit'
+            $events = @(Read-PimAuditEvents -AuditDir $auditDir -Months $months)
+            $filtered = @(Select-PimAuditEvents -Events $events -Category $category -Search $search -FromUtc $fromUtc -ToUtc $toUtc)
+            $csv = ConvertTo-PimAuditCsv -Events $filtered
+            $stamp = [datetime]::UtcNow.ToString('yyyyMMdd-HHmmss')
+            $fname = "pim-audit-$stamp.csv"
+            try {
+                $resp.StatusCode  = 200
+                $resp.ContentType = 'text/csv; charset=utf-8'
+                $resp.AddHeader('Content-Disposition', "attachment; filename=`"$fname`"")
+                # UTF-8 BOM so Excel renders non-ASCII correctly (matches the GUI's blob path).
+                $bom = [byte[]](0xEF,0xBB,0xBF)
+                $body = [System.Text.Encoding]::UTF8.GetBytes($csv)
+                $resp.ContentLength64 = ($bom.Length + $body.Length)
+                $resp.OutputStream.Write($bom, 0, $bom.Length)
+                $resp.OutputStream.Write($body, 0, $body.Length)
+                $resp.OutputStream.Close()
+            } catch {
+                Write-Host ("  [net] audit export client gone before response written: {0}" -f $_.Exception.Message) -ForegroundColor DarkGray
             }
             return 200
         }
@@ -4980,6 +5130,55 @@ function Handle-Request {
             }
         }
 
+        # POST /api/approvals/execute -- EXECUTE an APPROVED offboard request (§27 [H4]).
+        # Admin+. Body: { id, confirmBulk?:bool }. This is the request -> approve -> EXECUTE
+        # step: it drives the APPROVED offboard sequence through the EXISTING account-status
+        # pipeline (disable -> revoke-active -> SCHEDULED delete) via Invoke-PimOffboardExecution.
+        # It NEVER runs automatically and NEVER bypasses a gate -- the engine function re-checks
+        # the approval, refuses an empty/bulk target without confirmation, composes the
+        # DisableGuard breaker + break-glass exclusion, and latches the request once-only so it
+        # can never run twice. A blocked execution returns 409 with the gate that refused it.
+        if ($path -eq '/api/approvals/execute' -and $method -eq 'POST') {
+            $script:lastHeartbeat = Get-Date
+            if (-not (Test-PimManagerRoleAtLeast -Minimum 'Admin')) {
+                Write-JsonResponse -Response $resp -Status 403 -Body @{ error = 'Admin role required to execute an approved offboard.' }
+                return 403
+            }
+            if (-not (Get-Command Invoke-PimOffboardExecution -ErrorAction SilentlyContinue)) {
+                Write-JsonResponse -Response $resp -Status 500 -Body @{ error = 'approval-gate library not loaded' }
+                return 500
+            }
+            $body = Read-RequestJson -Request $req
+            $apprId      = "$($body.id)".Trim()
+            $confirmBulk = [bool]($body.confirmBulk)
+            if (-not $apprId) { Write-JsonResponse -Response $resp -Status 400 -Body @{ error = 'id is required' }; return 400 }
+            try {
+                # Resolve the desired set so the DisableGuard composite is positively
+                # satisfied for a real, deliberate single-target offboard (the breaker
+                # exists to stop a mass/empty-desired pass, not a one-by-one approved run).
+                $desired = @()
+                try { if (Get-Command Get-PimDesiredRows -ErrorAction SilentlyContinue) { $desired = @(Get-PimDesiredRows) } } catch {}
+                $res = Invoke-PimOffboardExecution -RequestId $apprId -ConfirmBulk:$confirmBulk `
+                         -Desired $desired -DesiredResolved $true -ToDisable 1 -Scanned ([Math]::Max(1, @($desired).Count))
+                if (-not $res.request) {
+                    Write-JsonResponse -Response $resp -Status 404 -Body @{ ok = $false; error = "$($res.reason)" }
+                    return 404
+                }
+                if (-not $res.executed) {
+                    # A gate refused it (no-approval / bulk-unconfirmed / empty / break-glass /
+                    # disable-guard / automatic / already-executed). 409 with the gate.
+                    Write-JsonResponse -Response $resp -Status 409 -Body ([ordered]@{ ok = $false; gate = "$($res.gate)"; reason = "$($res.reason)" })
+                    return 409
+                }
+                Write-PimManagerAuditEvent -Action 'approval.request.executed' -Target "$($res.target)" -Result $(if ($res.ok) { 'ok' } else { 'partial' }) -After @{ id = "$($res.request.id)"; approver = "$($res.approval.approver)"; steps = @($res.results).Count }
+                Write-JsonResponse -Response $resp -Status 200 -Body ([ordered]@{ ok = [bool]$res.ok; gate = "$($res.gate)"; target = "$($res.target)"; reason = "$($res.reason)"; results = @($res.results) })
+                return 200
+            } catch {
+                Write-JsonResponse -Response $resp -Status 500 -Body @{ error = "$($_.Exception.Message)" }
+                return 500
+            }
+        }
+
         # POST /api/access-reviews/decision -- record ONE attestation decision (Approve /
         # Deny / DontKnow) against a Graph accessReview instance decision item (§H7).
         # Admin+, audited, mandatory justification, one decision at a time (NO bulk
@@ -5032,6 +5231,91 @@ function Handle-Request {
                 })
                 return 200
             }
+        }
+
+        # POST /api/access-reviews/reviewers -- assign / replace the reviewer scope of an
+        # access-review DEFINITION (who is asked to attest) (§H7). Admin+, audited.
+        # DEGRADES GRACEFULLY: needs AccessReview.ReadWrite.All on the Manager MI -- a 403
+        # is surfaced as an honest "permission not granted yet" state (200, ok=$false).
+        if ($path -eq '/api/access-reviews/reviewers' -and $method -eq 'POST') {
+            $script:lastHeartbeat = Get-Date
+            if (-not (Test-PimManagerRoleAtLeast -Minimum 'Admin')) {
+                Write-JsonResponse -Response $resp -Status 403 -Body @{ error = 'Admin role required to assign access-review reviewers.' }
+                return 403
+            }
+            $shared = Join-Path $PSScriptRoot '..\..\engine\_shared\PIM-Functions.psm1'
+            if (-not (Get-Command Set-PimAccessReviewReviewers -ErrorAction SilentlyContinue) -and (Test-Path -LiteralPath $shared)) {
+                Import-Module $shared -Global -Force -WarningAction SilentlyContinue -ErrorAction SilentlyContinue
+            }
+            if (-not (Get-Command Set-PimAccessReviewReviewers -ErrorAction SilentlyContinue)) {
+                Write-JsonResponse -Response $resp -Status 500 -Body @{ error = 'access-review library not loaded' }
+                return 500
+            }
+            $body = Read-RequestJson -Request $req
+            $defId = "$($body.definitionId)".Trim()
+            $reviewers = @(@($body.reviewers) | ForEach-Object { "$_".Trim() } | Where-Object { $_ })
+            if (-not $defId) { Write-JsonResponse -Response $resp -Status 400 -Body @{ error = 'definitionId is required' }; return 400 }
+            if ($reviewers.Count -eq 0) { Write-JsonResponse -Response $resp -Status 400 -Body @{ error = 'at least one reviewer is required (a review with no reviewer can never be completed)' }; return 400 }
+            try {
+                $me = (Get-PimManagerRole).identity
+                Initialize-PimManagerTenantConnection
+                $r = Set-PimAccessReviewReviewers -DefinitionId $defId -Reviewers $reviewers -AssignedBy "$me"
+                Write-PimManagerAuditEvent -Action 'access-review.assign-reviewers' -Target "$defId" -After @{ reviewers = @($r.reviewers); count = [int]$r.count; status = "$($r.status)"; assignedBy = "$me" }
+                Write-JsonResponse -Response $resp -Status 200 -Body ([ordered]@{ ok = $true; status = "$($r.status)"; count = [int]$r.count; reviewers = @($r.reviewers) })
+                return 200
+            } catch {
+                $msg = "$($_.Exception.Message)"
+                $permMissing = ($msg -match '(?i)403|forbidden|AccessReview|Authorization_RequestDenied|insufficient|privileg')
+                Write-JsonResponse -Response $resp -Status 200 -Body ([ordered]@{
+                    ok = $false; permissionMissing = [bool]$permMissing; error = $msg
+                    note = $(if ($permMissing) { 'Assigning access-review reviewers needs AccessReview.ReadWrite.All on the Manager identity, which is not granted yet. Grant it (setup/Grant-PimGraphAppRoles.ps1).' } else { $msg })
+                })
+                return 200
+            }
+        }
+
+        # POST /api/access-reviews/reminders -- send a reminder mail to the reviewers of
+        # every review instance that is DUE for one (overdue/due-soon + pending, repeat
+        # window respected) (§H7). Admin+, audited. Reuses the existing mail sender.
+        # ?preview=1 (or no mail sender) -> dry-run (renders/decides, sends nothing).
+        # Falls back to the seeded reminder preview offline so the button is never dead.
+        if ($path -eq '/api/access-reviews/reminders' -and $method -eq 'POST') {
+            $script:lastHeartbeat = Get-Date
+            if (-not (Test-PimManagerRoleAtLeast -Minimum 'Admin')) {
+                Write-JsonResponse -Response $resp -Status 403 -Body @{ error = 'Admin role required to send access-review reminders.' }
+                return 403
+            }
+            $shared = Join-Path $PSScriptRoot '..\..\engine\_shared\PIM-Functions.psm1'
+            if (-not (Get-Command Send-PimAccessReviewReminders -ErrorAction SilentlyContinue) -and (Test-Path -LiteralPath $shared)) {
+                Import-Module $shared -Global -Force -WarningAction SilentlyContinue -ErrorAction SilentlyContinue
+            }
+            $body = Read-RequestJson -Request $req
+            $preview = $false
+            try { if ("$($body.preview)" -match '(?i)^(1|true|yes)$') { $preview = $true } } catch {}
+            $pimOnly = $false
+            try { if ("$($body.pimManagedOnly)" -match '(?i)^(1|true|yes)$') { $pimOnly = $true } } catch {}
+            $rows = @(); $source = 'seed'; $note = ''
+            if (Get-Command Send-PimAccessReviewReminders -ErrorAction SilentlyContinue) {
+                try {
+                    $me = (Get-PimManagerRole).identity
+                    Initialize-PimManagerTenantConnection
+                    if ($preview) { $rows = @(Send-PimAccessReviewReminders -PimManagedOnly:$pimOnly -WhatIf) }
+                    else          { $rows = @(Send-PimAccessReviewReminders -PimManagedOnly:$pimOnly) }
+                    if (@($rows).Count -gt 0) {
+                        $source = 'live'
+                        foreach ($row in @($rows | Where-Object { $_.sent })) {
+                            Write-PimManagerAuditEvent -Action 'access-review.reminder' -Target "$($row.definitionId)/$($row.instanceId)" -After @{ recipients = @($row.recipients); window = "$($row.window)"; sentBy = "$me" }
+                        }
+                    }
+                } catch { $note = "live reminder send unavailable: $($_.Exception.Message)" }
+            }
+            if (@($rows).Count -eq 0 -and (Get-Command Get-PimAccessReviewAttestationSeed -ErrorAction SilentlyContinue)) {
+                try { $seed = Get-PimAccessReviewAttestationSeed; $rows = @($seed.Reminders); $source = 'seed'; if (-not $note) { $note = 'Showing seeded sample reminder preview (grant AccessReview.Read.All / set a mail sender to send for real).' } } catch {}
+            }
+            $dueCount = @($rows | Where-Object { $_.due -or $_.sent }).Count
+            $sentCount = @($rows | Where-Object { $_.sent }).Count
+            Write-JsonResponse -Response $resp -Status 200 -Body ([ordered]@{ ok = $true; source = $source; note = $note; preview = [bool]$preview; total = @($rows).Count; dueCount = [int]$dueCount; sentCount = [int]$sentCount; rows = @($rows) })
+            return 200
         }
 
         # GET /api/access-reviews/overdue -- read-only "needs attention" list (overdue /
@@ -5464,6 +5748,22 @@ function Handle-Request {
             }
         }
 
+        # Tier-impact report (REQUIREMENTS §23 / ROADMAP #24): every user with ANY
+        # path (incl. indirect via nested groups) to a Tier-0/Tier-1 target.
+        # Optional &tier=0 narrows to Tier-0 only (default = Tier-0 OR Tier-1).
+        if ($path -eq '/api/tier-impact' -and $method -eq 'GET') {
+            $script:lastHeartbeat = Get-Date
+            $hiMax = 1
+            if ($req.Url.Query -match '(\?|&)tier=([0-5])') { $hiMax = [int]$Matches[2] }
+            try {
+                Write-JsonResponse -Response $resp -Status 200 -Body (Get-PimTierImpactReportLive -HighTierMax $hiMax)
+                return 200
+            } catch {
+                Write-JsonResponse -Response $resp -Status 500 -Body @{ error = "$($_.Exception.Message)" }
+                return 500
+            }
+        }
+
         # Global search across people / groups / roles / scopes / tags. ?q=<text>
         if ($path -eq '/api/search' -and $method -eq 'GET') {
             $script:lastHeartbeat = Get-Date
@@ -5561,7 +5861,9 @@ function Handle-Request {
                 return 403
             }
             try {
-                $r = Send-PimManagerAlert -Event 'engine-failure' -Title 'PIM Manager test alert' -Detail 'This is a test alert sent from the Home/Settings alerting panel to confirm delivery.' -LinkTab 'home'
+                # The test alert intentionally bypasses debounce so an operator always
+                # sees a fresh result (and a fresh recorded-send-proof feed entry).
+                $r = Send-PimManagerAlert -Event 'engine-failure' -Title 'PIM Manager test alert' -Detail 'This is a test alert sent from the Home/Settings alerting panel to confirm delivery.' -LinkTab 'home' -DebounceMinutes 0
                 $ok = ($r.sent -gt 0)
                 Write-JsonResponse -Response $resp -Status 200 -Body ([ordered]@{
                     ok         = $ok
@@ -5569,7 +5871,37 @@ function Handle-Request {
                     sent       = [int]$r.sent
                     recipients = @($r.recipients)
                     reason     = "$($r.reason)"
+                    recorded   = [bool]$r.recorded
                     note       = $(if ($ok) { "Test alert sent to $([int]$r.sent) recipient(s)." } else { "Not sent: $($r.reason). Configure a sender mailbox (`$global:PIM_MailSender`) and at least one recipient to enable delivery." })
+                })
+                return 200
+            } catch {
+                Write-JsonResponse -Response $resp -Status 500 -Body @{ ok = $false; error = "$($_.Exception.Message)" }
+                return 500
+            }
+        }
+
+        # ----- Alerts FEED (REQUIREMENTS §26c / §28 [H2] + [M5] residual): the durable,
+        # queryable record of WHAT alerts fired -- when, which event, who was notified,
+        # and whether delivery was recorded (the recorded-send proof). Read-only; any
+        # authenticated viewer may read the feed (it carries no secrets). Optional
+        # filters: ?event=<type> & ?sentOnly=1 & ?take=<n>.
+        if ($path -eq '/api/alerts' -and $method -eq 'GET') {
+            $script:lastHeartbeat = Get-Date
+            try {
+                $feed = Get-PimManagerAlertFeed
+                $evFilter = "$($req.QueryString['event'])".Trim()
+                $sentOnly = ("$($req.QueryString['sentOnly'])".Trim() -in @('1','true','yes'))
+                $take = 100; if ("$($req.QueryString['take'])".Trim() -match '^\d+$') { $take = [int]$req.QueryString['take'] }
+                $rows = if (Get-Command Select-PimAlertFeed -ErrorAction SilentlyContinue) {
+                    Select-PimAlertFeed -Feed $feed -Event $evFilter -SentOnly:$sentOnly -Take $take
+                } else { @() }
+                $summary = if (Get-Command Get-PimAlertFeedSummary -ErrorAction SilentlyContinue) { Get-PimAlertFeedSummary -Feed $feed } else { [ordered]@{ total = @($feed).Count } }
+                Write-JsonResponse -Response $resp -Status 200 -Body ([ordered]@{
+                    ok        = $true
+                    summary   = $summary
+                    alerts    = @($rows)
+                    catalog   = @($script:PimAlertEventCatalog)
                 })
                 return 200
             } catch {
@@ -6536,6 +6868,68 @@ function Handle-Request {
                             target    = "$($g.target)"
                         }); return 200
                     }
+                    '/api/authoring/map-removal' {
+                        # [M8] residual -- STAGE A REMOVAL (revoke a grant) directly
+                        # from the Delegation Map. The GUI sends ONE selection:
+                        #   { mode:'edge', edgeKind, edgeBase?, match:{...} }  -- one grant
+                        #   { mode:'node', nodeId }                            -- a flagged node
+                        # The server resolves the row-level revocation plan against the
+                        # LIVE graph model + current store rows (Resolve-PimMapRemovalPlan,
+                        # pure), then -- per affected base -- runs the resulting after set
+                        # through the SAME keyed preview (replace mode => the dropped grant
+                        # shows as a keyed REMOVE + destructive flag) and classifies the
+                        # REMOVED rows for the maker/checker gate. It RETURNS the plan +
+                        # preview + sensitivity; it does NOT write. The GUI confirms the
+                        # preview, passes the maker/checker gate, and stages the after set
+                        # as a normal Review & Save change (engine stays the only writer;
+                        # commit goes through backup/undo). Never a one-click destructive bypass.
+                        $mode = "$($b.mode)".Trim().ToLowerInvariant()
+                        if ($mode -ne 'edge' -and $mode -ne 'node') {
+                            Write-JsonResponse -Response $resp -Status 400 -Body @{ error = "mode must be 'edge' or 'node'" }; return 400
+                        }
+                        $data = Build-PimGraphData
+                        # Current rows for every assignment base the plan can touch.
+                        $assignBases = @('PIM-Assignments-Admins','PIM-Assignments-Groups','PIM-Assignments-Roles-Groups','PIM-Assignments-Roles-AUs','PIM-Assignments-Azure-Resources')
+                        $current = @{}
+                        foreach ($ab in $assignBases) { try { $current[$ab] = @((Read-PimRows -BaseName $ab).rows) } catch { $current[$ab] = @() } }
+                        if ($mode -eq 'edge') {
+                            $matchObj = ConvertTo-OrderedRow $b.match
+                            $plan = Resolve-PimMapRemovalPlan -Data $data -CurrentRows $current -EdgeMatch $matchObj -EdgeKind "$($b.edgeKind)" -EdgeBase "$($b.edgeBase)"
+                        } else {
+                            $plan = Resolve-PimMapRemovalPlan -Data $data -CurrentRows $current -NodeId "$($b.nodeId)"
+                        }
+                        if (-not $plan.ok) {
+                            Write-JsonResponse -Response $resp -Status 200 -Body ([ordered]@{ ok = $false; plan = $plan; note = (@($plan.reasons) -join ' ') }); return 200
+                        }
+                        # Per-base keyed preview (replace mode) + collect every removed row
+                        # for the single sensitivity decision (a removal of privileged rows
+                        # is sensitive -- the [M4] maker/checker gate applies to removals too).
+                        $previews = New-Object System.Collections.ArrayList
+                        $allRemoved = New-Object System.Collections.ArrayList
+                        foreach ($pl in @($plan.plans)) {
+                            $pvBase = "$($pl.base)"
+                            $pv = Get-PimAuthoringPreview -Base $pvBase -Before @($current[$pvBase]) -After @($pl.afterRows) -Mode 'replace' -Action 'delete-rows'
+                            [void]$previews.Add([ordered]@{ base = $pvBase; preview = $pv })
+                            foreach ($rr in @($pl.removedRows)) { [void]$allRemoved.Add($rr) }
+                        }
+                        # Sensitivity over the removed rows (use the first affected base for
+                        # the gate's target key -- the GUI passes this through unchanged).
+                        $gateBase = if (@($plan.plans).Count -gt 0) { "$(@($plan.plans)[0].base)" } else { '' }
+                        $sens = [ordered]@{ sensitive = $false; allowed = $true; gate = 'lib-missing'; reasons = @(); target = '' }
+                        if (Get-Command Test-PimAuthoringCommitAllowed -ErrorAction SilentlyContinue) {
+                            $reqs = @()
+                            if (Get-Command Get-PimApprovalRequests -ErrorAction SilentlyContinue) { try { $reqs = @(Get-PimApprovalRequests) } catch {} }
+                            $g = Test-PimAuthoringCommitAllowed -Action 'delete-rows' -Base $gateBase -Rows @($allRemoved.ToArray()) -Requests $reqs
+                            $sens = [ordered]@{ sensitive = [bool]$g.sensitive; allowed = [bool]$g.allowed; gate = "$($g.gate)"; reason = "$($g.reason)"; reasons = @($g.reasons); target = "$($g.target)" }
+                        }
+                        Write-JsonResponse -Response $resp -Status 200 -Body ([ordered]@{
+                            ok          = $true
+                            plan        = $plan
+                            previews    = @($previews.ToArray())
+                            sensitivity = $sens
+                            destructive = $true
+                        }); return 200
+                    }
                     default {
                         Write-JsonResponse -Response $resp -Status 404 -Body @{ error = "unknown authoring action: $path" }; return 404
                     }
@@ -6585,6 +6979,53 @@ function Handle-Request {
                     ok = $true; matched = $false; role = $roleName
                     permissions = $null; candidates = @($res.candidates)
                     catalogSize = @($catalog).Count; graphConnected = $hasGraph; hint = $hint
+                }); return 200
+            } catch {
+                Write-JsonResponse -Response $resp -Status 500 -Body @{ ok = $false; error = "$($_.Exception.Message)" }; return 500
+            }
+        }
+
+        # Search-by-action (§28 [H9a]): the INVERSE of the drill-down -- "which
+        # directory roles grant operation X?" Fetches every roleDefinition with its
+        # allowedResourceActions, runs the pure Find-PimRolesByAction matcher, and
+        # returns the roles ranked LEAST-PRIVILEGE FIRST (fewest total actions) so
+        # the operator finds the narrowest role for a least-privilege ticket. A
+        # blank action -> 400; no live Graph / no match -> 200 with an empty list +
+        # an honest hint (never a 5xx for a legitimate "nothing grants this").
+        if ($path -eq '/api/role-permissions/by-action' -and $method -eq 'GET') {
+            $script:lastHeartbeat = Get-Date
+            $action = "$($req.QueryString['action'])".Trim()
+            if (-not $action) { Write-JsonResponse -Response $resp -Status 400 -Body @{ error = "action query parameter is required" }; return 400 }
+            try {
+                $defs = New-Object System.Collections.ArrayList
+                $hasGraph = [bool](Get-Command Invoke-MgGraphRequest -ErrorAction SilentlyContinue)
+                if ($hasGraph) {
+                    # Page through every directory role definition WITH its permissions.
+                    $u = "https://graph.microsoft.com/v1.0/roleManagement/directory/roleDefinitions?`$select=id,displayName,isBuiltIn,rolePermissions&`$top=200"
+                    $guard = 0
+                    while ($u -and $guard -lt 50) {
+                        $guard++
+                        $r = Invoke-MgGraphRequest -Method GET -Uri $u -ErrorAction Stop
+                        foreach ($d in @($r.value)) { [void]$defs.Add($d) }
+                        $u = if ($r.'@odata.nextLink') { "$($r.'@odata.nextLink')" } else { $null }
+                    }
+                }
+                $res = Find-PimRolesByAction -Action $action -RoleDefinitions @($defs.ToArray())
+                $hint = if (@($res.matches).Count -gt 0) {
+                    "{0} role(s) grant '{1}'. The list is ranked least-privilege first -- prefer the narrowest role." -f @($res.matches).Count, $action
+                } elseif (-not $hasGraph -or $defs.Count -eq 0) {
+                    "Role permissions aren't available yet -- connect the Manager to the tenant (the engine SPN needs RoleManagement.Read.Directory), then retry."
+                } else {
+                    "No directory role grants '$action'. Check the action spelling (e.g. microsoft.directory/users/basic/update), or try a 'namespace/*' wildcard."
+                }
+                Write-JsonResponse -Response $resp -Status 200 -Body ([ordered]@{
+                    ok = $true; action = $action
+                    matched = [bool]$res.matched
+                    matches = @($res.matches)
+                    matchCount = [int]$res.matchCount
+                    rolesSearched = [int]$res.rolesSearched
+                    graphConnected = $hasGraph
+                    hint = $hint
                 }); return 200
             } catch {
                 Write-JsonResponse -Response $resp -Status 500 -Body @{ ok = $false; error = "$($_.Exception.Message)" }; return 500
@@ -6739,6 +7180,44 @@ function Handle-Request {
                 return 200
             }
 
+            # REQUIREMENTS.md s28 [L2]: exemptions must be REVIEWABLE, not write-only.
+            # The active-exemptions register -- every stored waiver for THIS instance with
+            # its per-row state (Active/Expiring/Expired/Invalid), days-left and a stable
+            # revoke key (Get-PimExemptionList). Optional ?template= scopes to one template.
+            if ($path -eq '/api/conformance/exemptions' -and $method -eq 'GET') {
+                $tidF = ''
+                if ($req.Url.Query -match '(\?|&)template=([^&]+)') { $tidF = [uri]::UnescapeDataString($Matches[2]) }
+                $now = [datetime]::UtcNow
+                $list = @(Get-PimExemptionList -Exemptions (& $readEx) -TenantId $confTenant -TemplateId $tidF -NowUtc $now -WarningAction SilentlyContinue)
+                $sum  = Get-PimExemptionSummary -List $list
+                Write-JsonResponse -Response $resp -Status 200 -Body ([ordered]@{
+                    instance = $confTenant; tenantRing = $confRing; template = $tidF
+                    summary = $sum; exemptions = @($list)
+                })
+                return 200
+            }
+
+            # Revoke ONE exemption by its stable RevokeKey (no auto-expire wait). SuperAdmin
+            # only -- same gate as approve. Pure Remove-PimExemptionEntry filters the set;
+            # an unknown key is an idempotent no-op (Removed=0). Audited.
+            if ($path -eq '/api/conformance/exemptions/revoke' -and $method -eq 'POST') {
+                if (-not (Test-PimManagerRoleAtLeast -Minimum 'SuperAdmin')) { Write-JsonResponse -Response $resp -Status 403 -Body @{ error = 'SuperAdmin role required' }; return 403 }
+                $b = Read-RequestJson -Request $req
+                $rk = "$($b.revokeKey)".Trim()
+                if (-not $rk) { Write-JsonResponse -Response $resp -Status 400 -Body @{ error = 'revokeKey is required' }; return 400 }
+                $r = Remove-PimExemptionEntry -Exemptions (& $readEx) -RevokeKey $rk
+                if ($r.Removed -gt 0) {
+                    $dir = Split-Path -Parent $confExFile
+                    if ($dir -and -not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+                    @{ exemptions = $r.Kept } | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $confExFile -Encoding UTF8
+                    if (Get-Command Write-PimAuditEvent -ErrorAction SilentlyContinue) {
+                        try { Write-PimAuditEvent -Action 'conformance.exemption.revoke' -Target $rk -After @{ instance = $confTenant; removed = $r.Removed } -Actor 'manager' -WarningAction SilentlyContinue | Out-Null } catch {}
+                    }
+                }
+                Write-JsonResponse -Response $resp -Status 200 -Body @{ ok = $true; removed = $r.Removed; count = @($r.Kept).Count }
+                return 200
+            }
+
             if ($path -eq '/api/conformance/approve' -and $method -eq 'POST') {
                 if (-not (Test-PimManagerRoleAtLeast -Minimum 'SuperAdmin')) { Write-JsonResponse -Response $resp -Status 403 -Body @{ error = 'SuperAdmin role required' }; return 403 }
                 $b = Read-RequestJson -Request $req
@@ -6782,10 +7261,113 @@ function Handle-Request {
                     $connDir = Join-Path $solutionRoot 'workloads\connectors'
                     $out = Apply-PimWorkloadAssignments -WorkloadsAssignmentFile $tmpCsv -ConnectorsDir $connDir -WhatIfMode:$whatIf *>&1 | Out-String
                     Remove-Item -LiteralPath $tmpCsv -Force -ErrorAction SilentlyContinue
-                    if (-not $whatIf) { Set-PimTemplateState -StateFile $confState -TenantId $confTenant -TemplateId "$($tpl.templateId)" -Version ([int]("$($tpl.templateVersion)" -as [int])) -NowUtc ([datetime]::UtcNow) | Out-Null }
+                    if (-not $whatIf) {
+                        Set-PimTemplateState -StateFile $confState -TenantId $confTenant -TemplateId "$($tpl.templateId)" -Version ([int]("$($tpl.templateVersion)" -as [int])) -NowUtc ([datetime]::UtcNow) | Out-Null
+                        # Stamp THIS tenant's rollout ring at the file root so the fleet
+                        # matrix ([H8]) can read the ring of an instance it is not the
+                        # active one for. Best-effort; never blocks the deploy.
+                        try {
+                            $sall = [pscustomobject]@{}
+                            if (Test-Path -LiteralPath $confState) { try { $sall = Get-Content -LiteralPath $confState -Raw -Encoding UTF8 | ConvertFrom-Json } catch { $sall = [pscustomobject]@{} } }
+                            if (-not $sall.PSObject.Properties['fleetRingByTenant']) { Add-Member -InputObject $sall -NotePropertyName 'fleetRingByTenant' -NotePropertyValue ([pscustomobject]@{}) -Force }
+                            Add-Member -InputObject $sall.fleetRingByTenant -NotePropertyName $confTenant -NotePropertyValue ([int]$confRing) -Force
+                            $sall | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $confState -Encoding UTF8
+                        } catch {}
+                    }
                     Write-JsonResponse -Response $resp -Status 200 -Body ([ordered]@{ ok = $true; whatIf = $whatIf; rows = @($rows); log = "$out" })
                     return 200
                 } catch { Write-JsonResponse -Response $resp -Status 502 -Body @{ error = "$($_.Exception.Message)" }; return 502 }
+            }
+
+            # --- FLEET conformance matrix (REQUIREMENTS.md s28 [H8]) -----------------
+            # The single-tenant /api/conformance answers "how far behind is THIS tenant?".
+            # An MSP needs the cross-fleet view: tenants x templates, behind-by-N, in one
+            # place. Builds it by reading EVERY managed instance's local template-state stamp
+            # (per-instance applied version + ring) and feeding them into the pure
+            # Get-PimFleetConformance. The active instance contributes its LIVE ring
+            # (Get-PimTenantRing); other instances use the ring stamped in their state file
+            # (falling back to 0 / production when unstamped). No tenant write, read-only.
+            if ($path -eq '/api/conformance/fleet' -and $method -eq 'GET') {
+                $approved = @(Read-PimApprovedTemplates -SourceDir $confTplDir -WarningAction SilentlyContinue)
+                # Build a tenant descriptor per managed instance.
+                $fleetTenants = New-Object System.Collections.Generic.List[object]
+                foreach ($inst in (Get-PimManagerInstances)) {
+                    $iname = "$($inst.name)"
+                    # SQL-DB pseudo-instances share the solution config/output; skip the
+                    # 'sql:<db>' duplicates so a DB switch doesn't double-count a tenant.
+                    if ($iname -like 'sql:*') { continue }
+                    $iout = if ($inst.outputRoot) { "$($inst.outputRoot)" } else { Join-Path $solutionRoot 'output' }
+                    $istate = Join-Path $iout 'state\template-state.json'
+                    $st = Get-PimFleetStateForInstance -StateFile $istate -TenantId $iname
+                    $iring = $st.ring
+                    if ($iname -eq "$script:PimInstanceName") { $iring = $confRing }   # active = live ring
+                    if ($null -eq $iring) { $iring = 0 }
+                    $fleetTenants.Add(@{ tenantId = $iname; ring = $iring; appliedVersions = $st.appliedVersions })
+                }
+                $fleet = Get-PimFleetConformance -Templates $approved -Tenants $fleetTenants.ToArray()
+                # Serialise to plain ordered objects (Cells nested per tenant).
+                $tenantRows = New-Object System.Collections.ArrayList
+                foreach ($tr in $fleet.Tenants) {
+                    $cellList = New-Object System.Collections.ArrayList
+                    foreach ($c in $tr.Cells) {
+                        [void]$cellList.Add([ordered]@{ templateId = "$($c.TemplateId)"; templateVersion = $c.TemplateVersion; appliedVersion = $c.AppliedVersion; behind = $c.Behind; status = "$($c.Status)" })
+                    }
+                    [void]$tenantRows.Add([ordered]@{
+                        tenantId = "$($tr.TenantId)"; ring = $tr.Ring; current = [bool]$tr.Current
+                        maxBehind = $tr.MaxBehind; behindCount = $tr.BehindCount; neverCount = $tr.NeverCount
+                        upToDate = $tr.UpToDate; aheadCount = $tr.AheadCount; cells = $cellList.ToArray()
+                    })
+                }
+                $colList = New-Object System.Collections.ArrayList
+                foreach ($col in $fleet.Templates) { [void]$colList.Add([ordered]@{ templateId = "$($col.TemplateId)"; workload = "$($col.Workload)"; templateVersion = $col.TemplateVersion }) }
+                $ptList = New-Object System.Collections.ArrayList
+                foreach ($pt in $fleet.PerTemplate) {
+                    [void]$ptList.Add([ordered]@{ templateId = "$($pt.TemplateId)"; workload = "$($pt.Workload)"; templateVersion = $pt.TemplateVersion; upToDate = $pt.UpToDate; behindCount = $pt.BehindCount; neverCount = $pt.NeverCount; aheadCount = $pt.AheadCount; maxBehind = $pt.MaxBehind; needsRollout = [bool]$pt.NeedsRollout })
+                }
+                Write-JsonResponse -Response $resp -Status 200 -Body ([ordered]@{
+                    activeInstance = $confTenant
+                    totalTenants   = $fleet.TotalTenants; currentTenants = $fleet.CurrentTenants; behindTenants = $fleet.BehindTenants
+                    templates      = $colList.ToArray(); perTemplate = $ptList.ToArray(); tenants = $tenantRows.ToArray()
+                })
+                return 200
+            }
+
+            # --- RING-WIDE rollout plan for ONE template (REQUIREMENTS.md s28 [H8]) --
+            # The "ring-wide deploy" planning view: for a chosen approved template, which
+            # tenants a wave to a ring band would reach and where each stands. Read-only
+            # planning rollup (the actual per-tenant deploy still goes through the proven
+            # ring-gated deploy path); ?template= selects the template.
+            if ($path -eq '/api/conformance/ring-plan' -and $method -eq 'GET') {
+                $tid = ''
+                if ($req.Url.Query -match '(\?|&)template=([^&]+)') { $tid = [uri]::UnescapeDataString($Matches[2]) }
+                $tpl = @(Read-PimApprovedTemplates -SourceDir $confTplDir -IncludeDrafts -WarningAction SilentlyContinue | Where-Object { "$($_.templateId)" -eq "$tid" })
+                if (-not $tid -or -not $tpl) { Write-JsonResponse -Response $resp -Status 400 -Body @{ error = 'unknown template' }; return 400 }
+                $tpl = $tpl[0]
+                $fleetTenants = New-Object System.Collections.Generic.List[object]
+                foreach ($inst in (Get-PimManagerInstances)) {
+                    $iname = "$($inst.name)"
+                    if ($iname -like 'sql:*') { continue }
+                    $iout = if ($inst.outputRoot) { "$($inst.outputRoot)" } else { Join-Path $solutionRoot 'output' }
+                    $istate = Join-Path $iout 'state\template-state.json'
+                    $st = Get-PimFleetStateForInstance -StateFile $istate -TenantId $iname
+                    $iring = $st.ring
+                    if ($iname -eq "$script:PimInstanceName") { $iring = $confRing }
+                    if ($null -eq $iring) { $iring = 0 }
+                    $fleetTenants.Add(@{ tenantId = $iname; ring = $iring; appliedVersions = $st.appliedVersions })
+                }
+                $plan = Get-PimRingRolloutPlan -Template $tpl -Tenants $fleetTenants.ToArray()
+                $bandList = New-Object System.Collections.ArrayList
+                foreach ($b in $plan.Bands) {
+                    $tl = New-Object System.Collections.ArrayList
+                    foreach ($t in $b.Tenants) { [void]$tl.Add([ordered]@{ tenantId = "$($t.TenantId)"; ring = $t.Ring; appliedVersion = $t.AppliedVersion; behind = $t.Behind; status = "$($t.Status)" }) }
+                    [void]$bandList.Add([ordered]@{ ring = $b.Ring; tenantCount = $b.TenantCount; behindCount = $b.BehindCount; neverCount = $b.NeverCount; needsRollout = [bool]$b.NeedsRollout; tenants = $tl.ToArray() })
+                }
+                Write-JsonResponse -Response $resp -Status 200 -Body ([ordered]@{
+                    templateId = "$($plan.TemplateId)"; workload = "$($plan.Workload)"; templateVersion = $plan.TemplateVersion
+                    approved = [bool]$plan.Approved; totalTenants = $plan.TotalTenants; needsRolloutCount = $plan.NeedsRolloutCount
+                    bands = $bandList.ToArray()
+                })
+                return 200
             }
 
             Write-JsonResponse -Response $resp -Status 404 -Body @{ error = ("not found: {0} {1}" -f $method, $path) }
@@ -6883,6 +7465,7 @@ function Handle-Request {
                 $st = if ($script:PimSqlCs) { Get-PimCutoverState -ConnectionString $script:PimSqlCs } else { [pscustomobject]@{ completed = @(); final = $false; audit = @{}; updatedUtc = $null } }
                 $cs = $script:PimSqlCs
                 $kind = if ($cs) { Get-PimSqlStoreKind -ConnectionString $cs } else { @{ kind = 'none'; isProduction = $false } }
+                $abortGate = Test-PimCutoverAbortAllowed -Completed @($st.completed) -Final ([bool]$st.final)
                 Write-JsonResponse -Response $resp -Status 200 -Body ([ordered]@{
                     stages       = [string[]]@(Get-PimCutoverStages)
                     completed    = @($st.completed)
@@ -6892,6 +7475,10 @@ function Handle-Request {
                     storeKind    = $kind.kind
                     storeIsProduction = [bool]$kind.isProduction
                     audit        = $st.audit
+                    humanAudit   = @(Format-PimCutoverAudit -Audit $st.audit)
+                    canAbort     = [bool]$abortGate.allowed
+                    abortReason  = "$($abortGate.reason)"
+                    abortPlan    = @((Get-PimCutoverAbortPlan -Completed @($st.completed)).steps)
                 })
                 return 200
             } catch {
@@ -7000,6 +7587,42 @@ function Handle-Request {
                 return 200
             } catch {
                 Write-JsonResponse -Response $resp -Status 500 -Body @{ ok = $false; stage = $reqStage; error = "$($_.Exception.Message)" }
+                return 500
+            }
+        }
+
+        # Abort / roll back a STARTED-but-not-finalized cutover (REQUIREMENTS.md s28 [L3]).
+        # Reverts the StorageBackend flip (-> csv) when set-source ran, then clears the
+        # ceremony state. Refused once finalized (finalize is the point of no return).
+        # The CSV source was read-only throughout, so the prior store is intact.
+        if ($path -eq '/api/cutover/abort' -and $method -eq 'POST') {
+            if (-not (Test-PimManagerRoleAtLeast -Minimum 'Admin')) {
+                Write-JsonResponse -Response $resp -Status 403 -Body @{ error = 'Admin role required to abort a cutover. See config/manager-access.custom.json.' }
+                return 403
+            }
+            $script:lastHeartbeat = Get-Date
+            $actor = "manager:$((Get-PimManagerRole).identity)"
+            $cs = $script:PimSqlCs
+            if (-not $cs -and (Get-Command Get-PimSqlConnectionString -ErrorAction SilentlyContinue)) { try { $cs = Get-PimSqlConnectionString } catch { $cs = $null } }
+            if (-not $cs) { Write-JsonResponse -Response $resp -Status 400 -Body @{ ok = $false; error = 'no SQL connection resolved -- nothing to abort.' }; return 400 }
+            try {
+                $state = Get-PimCutoverState -ConnectionString $cs
+                $gate  = Test-PimCutoverAbortAllowed -Completed @($state.completed) -Final ([bool]$state.final)
+                if (-not $gate.allowed) { Write-JsonResponse -Response $resp -Status 409 -Body @{ ok = $false; error = $gate.reason }; return 409 }
+                $result = Invoke-PimCutoverAbort -ConnectionString $cs
+                if ((Get-Command Write-PimAuditEvent -ErrorAction SilentlyContinue)) {
+                    try { Write-PimAuditEvent -Action 'cutover.abort' -Target "sql:$($global:PIM_SqlDatabase)" -After ([ordered]@{ revertedSource = $result.revertedSource; storageBackend = $result.storageBackend; abortedFrom = @($state.completed) }) -Actor $actor } catch { }
+                }
+                Write-JsonResponse -Response $resp -Status 200 -Body ([ordered]@{
+                    ok             = $true
+                    revertedSource = [bool]$result.revertedSource
+                    storageBackend = "$($result.storageBackend)"
+                    completed      = @()
+                    nextStage      = (Get-PimCutoverNextStage -Completed @())
+                })
+                return 200
+            } catch {
+                Write-JsonResponse -Response $resp -Status 500 -Body @{ ok = $false; error = "$($_.Exception.Message)" }
                 return 500
             }
         }
@@ -7130,11 +7753,15 @@ function Handle-Request {
             $rowsIn = @()
             $preview = $false
             $confirmCount = $null
+            $approvalTarget = ''
             if ($body) {
                 if ($body.justification) { $justification = "$($body.justification)" }
                 if ($body.rows)          { $rowsIn = @($body.rows) }
                 if ($body.preview)       { $preview = [bool]$body.preview }
                 if ($null -ne $body.confirmCount -and "$($body.confirmCount)" -match '^\d+$') { $confirmCount = [int]$body.confirmCount }
+                # [H3] the batch label an over-threshold approval was raised for; defaults
+                # to the stable scope label so the gate can match an Approved revoke request.
+                if ($body.approvalTarget) { $approvalTarget = "$($body.approvalTarget)".Trim() }
             }
             if (-not $rowsIn -or $rowsIn.Count -eq 0) {
                 Write-JsonResponse -Response $resp -Status 400 -Body @{ ok = $false; error = 'at least one row is required' }
@@ -7144,9 +7771,21 @@ function Handle-Request {
             # excluded + large-batch count-confirmation) BEFORE doing anything.
             $plan = Get-PimRevokeGuardPlan -Rows $rowsIn -ConfirmCount $confirmCount
 
+            # [H3] APPROVAL gate (the full approval-gated revoke, on top of the interim
+            # #81 guard above): an over-threshold (post-break-glass) batch requires an
+            # APPROVED maker/checker 'revoke' request for this batch label; at/below the
+            # threshold the interim count-confirm guard suffices. We compute whether an
+            # approval is REQUIRED (and, on commit, whether one EXISTS) without ever
+            # bypassing Test-PimRevokeExecutionAllowed.
+            $apprRequired = $false
+            if (Get-Command Test-PimRevokeApprovalRequired -ErrorAction SilentlyContinue) {
+                try { $apprRequired = [bool]((Test-PimRevokeApprovalRequired -Rows $rowsIn).required) } catch {}
+            }
+
             # PREVIEW (what-if): never executes -- returns exactly what WOULD be
-            # revoked, what is skipped (break-glass), and whether a count
-            # confirmation is required. Justification is not required to preview.
+            # revoked, what is skipped (break-glass), whether a count confirmation is
+            # required, AND whether a maker/checker approval is required ([H3]).
+            # Justification is not required to preview.
             if ($preview) {
                 Write-JsonResponse -Response $resp -Status 200 -Body ([ordered]@{
                     ok               = $true
@@ -7157,6 +7796,7 @@ function Handle-Request {
                     skippedCount     = $plan.skippedCount
                     confirmThreshold = $plan.confirmThreshold
                     confirmRequired  = $plan.confirmRequired
+                    approvalRequired = $apprRequired
                 })
                 return 200
             }
@@ -7179,6 +7819,33 @@ function Handle-Request {
                     skippedCount     = $plan.skippedCount
                 })
                 return 409
+            }
+            # [H3] APPROVAL GATE -- an over-threshold (post-break-glass) batch may only
+            # commit when an APPROVED maker/checker 'revoke' request exists for this batch
+            # label. Composes (NEVER bypasses) Test-PimRevokeExecutionAllowed: break-glass
+            # is always excluded, at/below-threshold runs under the interim guard, and an
+            # over-threshold batch with no Approved request is blocked 409 "needs approval".
+            # The batch label defaults to a stable scope token so the operator raises ONE
+            # approval (action=revoke, target=that label) on the Approvals tab, then re-runs.
+            if ($apprRequired -and (Get-Command Test-PimRevokeExecutionAllowed -ErrorAction SilentlyContinue)) {
+                $batchLabel = if ("$approvalTarget".Trim()) { "$approvalTarget".Trim() } else { 'maintenance-bulk-revoke' }
+                $reqs = @()
+                if (Get-Command Get-PimApprovalRequests -ErrorAction SilentlyContinue) { try { $reqs = @(Get-PimApprovalRequests) } catch {} }
+                $gate = Test-PimRevokeExecutionAllowed -Rows $rowsIn -Target $batchLabel -Requests $reqs
+                if (-not $gate.allowed) {
+                    Write-JsonResponse -Response $resp -Status 409 -Body ([ordered]@{
+                        ok               = $false
+                        gate             = "$($gate.gate)"
+                        error            = ("This batch revokes {0} assignment(s), over the {1} approval threshold. Raise a 'revoke' approval request (Approvals tab) for batch '{2}', have a different administrator approve it, then re-submit." -f $gate.toRevokeCount, $gate.threshold, $batchLabel)
+                        approvalRequired = $true
+                        approvalTarget   = $batchLabel
+                        toRevokeCount    = [int]$gate.toRevokeCount
+                        threshold        = [int]$gate.threshold
+                        skipped          = $plan.skipped
+                        skippedCount     = $plan.skippedCount
+                    })
+                    return 409
+                }
             }
             $rowsToRevoke = @($plan.toRevoke)
             if ($rowsToRevoke.Count -eq 0) {
@@ -7216,6 +7883,19 @@ function Handle-Request {
                     Write-PimManagerAuditEvent -Action 'revoke.skipped.break-glass' `
                         -Target ("{0} | {1}" -f "$($sk.principal)", "$($sk.type)") -Result 'skipped' `
                         -After ([ordered]@{ principal = "$($sk.principal)"; reason = "$($sk.reason)" })
+                }
+                # [H3] once-only latch: if this was an over-threshold, approval-driven
+                # batch, mark the Approved 'revoke' request Executed so it can never drive
+                # a second over-threshold run. (Best-effort; at/below-threshold batches
+                # carry no approval to latch.)
+                if ($apprRequired -and (Get-Command Set-PimApprovalRequestExecuted -ErrorAction SilentlyContinue)) {
+                    try {
+                        $batchLabel2 = if ("$approvalTarget".Trim()) { "$approvalTarget".Trim() } else { 'maintenance-bulk-revoke' }
+                        if (Get-Command Test-PimApprovalApprovedFor -ErrorAction SilentlyContinue) {
+                            $appr2 = Test-PimApprovalApprovedFor -Requests @(Get-PimApprovalRequests) -Action 'revoke' -Target $batchLabel2
+                            if ($appr2) { Set-PimApprovalRequestExecuted -Id "$($appr2.id)" | Out-Null }
+                        }
+                    } catch {}
                 }
                 # Invalidate the active-assignments cache so the next GET re-fetches truth.
                 $script:PimActiveAssignmentsCache          = $null

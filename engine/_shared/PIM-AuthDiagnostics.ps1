@@ -53,12 +53,27 @@ Set-StrictMode -Off
 # SPN needs (granted by setup/Grant-PimGraphAppRoles.ps1) AND the directory role an
 # interactive operator should ACTIVATE in PIM. Ordered most-specific first.
 $script:PimRoleHintByPath = @(
+    # --- Azure Resource Manager (ARM) scopes: an AuthorizationFailed at an ARM path is an
+    #     Azure-RBAC-role-at-scope problem, NOT a Graph app-role one. Listed FIRST (most
+    #     specific) so a `management.azure.com/.../roleAssignments` path is recognised as
+    #     ARM and named the Azure RBAC role to grant at the scope, not a Graph app-role.
+    @{ match = 'providers/Microsoft.Authorization/roleManagementPolic';       plane = 'arm'; appRoles = @('User Access Administrator @ the Azure scope'); pimRoles = @('User Access Administrator (activate at the subscription / management group)') }
+    @{ match = 'providers/Microsoft.Authorization/roleAssignment';            plane = 'arm'; appRoles = @('User Access Administrator @ the Azure scope'); pimRoles = @('User Access Administrator (activate at the subscription / management group)') }
+    @{ match = 'providers/Microsoft.Authorization/roleEligibilitySchedule';   plane = 'arm'; appRoles = @('User Access Administrator @ the Azure scope'); pimRoles = @('User Access Administrator (activate at the subscription / management group)') }
+    @{ match = 'providers/Microsoft.Authorization';                           plane = 'arm'; appRoles = @('Reader (or higher) @ the Azure scope'); pimRoles = @('Reader / Contributor (activate at the scope)') }
+    @{ match = 'management.azure.com';                                        plane = 'arm'; appRoles = @('Reader (or higher) @ the Azure scope'); pimRoles = @('Reader / Contributor (activate at the scope)') }
+    @{ match = '/subscriptions/';                                             plane = 'arm'; appRoles = @('Reader (or higher) @ the Azure scope'); pimRoles = @('Reader / Contributor (activate at the scope)') }
+    # --- Microsoft Graph paths (app-role to grant / directory role to activate).
     @{ match = 'roleManagement/directory/roleAssignmentSchedule';            appRoles = @('RoleManagement.ReadWrite.Directory'); pimRoles = @('Privileged Role Administrator') }
     @{ match = 'roleManagement/directory/roleDefinitions';                    appRoles = @('RoleManagement.ReadWrite.Directory','Directory.Read.All'); pimRoles = @('Privileged Role Administrator') }
+    @{ match = 'roleManagement/defender';                                     appRoles = @('SecurityAdministrator (Defender Unified RBAC, portal-activated per tenant)'); pimRoles = @('Security Administrator') }
+    @{ match = 'deviceManagement/roleAssignments';                           appRoles = @('DeviceManagementRBAC.ReadWrite.All'); pimRoles = @('Intune Administrator') }
+    @{ match = 'deviceManagement/roleDefinitions';                           appRoles = @('DeviceManagementRBAC.ReadWrite.All','DeviceManagementRBAC.Read.All'); pimRoles = @('Intune Administrator') }
     @{ match = 'policies/roleManagementPolic';                                appRoles = @('RoleManagementPolicy.ReadWrite.AzureADGroup','RoleManagementPolicy.ReadWrite.Directory'); pimRoles = @('Privileged Role Administrator') }
     @{ match = 'identityGovernance/privilegedAccess/group';                   appRoles = @('PrivilegedAccess.ReadWrite.AzureADGroup'); pimRoles = @('Privileged Role Administrator') }
     @{ match = 'identityGovernance/accessReviews';                            appRoles = @('AccessReview.Read.All'); pimRoles = @('Identity Governance Administrator') }
     @{ match = 'directory/administrativeUnits';                               appRoles = @('AdministrativeUnit.ReadWrite.All'); pimRoles = @('Privileged Role Administrator') }
+    @{ match = 'appRoleAssignedTo';                                           appRoles = @('AppRoleAssignment.ReadWrite.All'); pimRoles = @('Cloud Application Administrator','Application Administrator') }
     @{ match = 'servicePrincipals/';                                          appRoles = @('Application.ReadWrite.All'); pimRoles = @('Cloud Application Administrator','Application Administrator') }
     @{ match = 'applications';                                                appRoles = @('Application.ReadWrite.All'); pimRoles = @('Application Administrator') }
     @{ match = '/sendMail';                                                   appRoles = @('Mail.Send'); pimRoles = @() }
@@ -116,8 +131,18 @@ function Get-PimMissingRoleHint {
     }
     $appRoles = if ($entry) { @($entry.appRoles) } else { @('Directory.Read.All') }
     $pimRoles = if ($entry) { @($entry.pimRoles) } else { @('Privileged Role Administrator') }
+    $plane    = if ($entry -and $entry.plane) { "$($entry.plane)" } else { 'graph' }
 
-    if ($AppOnly) {
+    if ($plane -eq 'arm') {
+        # ARM (Azure RBAC) failure: the missing thing is an Azure role at the Azure scope,
+        # NOT a Graph app-role / Grant-PimGraphAppRoles consent. Word it accordingly.
+        if ($AppOnly) {
+            $msg = "Access denied (AuthorizationFailed) calling '$Path'. The engine SPN is missing an Azure RBAC role at this scope: $($appRoles -join ', '). Assign it on the subscription / management group (e.g. via the Setup-Pim* deploy or 'az role assignment create') -- this is Azure RBAC, not a Graph app-role consent."
+        } else {
+            $act = if ($pimRoles.Count) { $pimRoles -join ' / ' } else { '(an Azure RBAC role at the scope)' }
+            $msg = "Access denied (AuthorizationFailed) calling '$Path'. Your token lacks an Azure RBAC role at this scope. Activate in PIM for Azure resources: $act -- then retry."
+        }
+    } elseif ($AppOnly) {
         $grant = "setup/Grant-PimGraphAppRoles.ps1 (Permissions includes: $($appRoles -join ', ')) -- then re-consent."
         $msg   = "Access denied calling '$Path'. The engine app (SPN) is missing the Graph application role(s): $($appRoles -join ', '). Grant via $grant"
     } else {
@@ -127,10 +152,199 @@ function Get-PimMissingRoleHint {
     [pscustomobject]@{
         Path           = $Path
         IsAuthFailure  = $true
+        Plane          = $plane
         AppRolesToGrant = $appRoles
         PimRolesToActivate = $pimRoles
         AppOnly        = $AppOnly
         Hint           = $msg
+    }
+}
+
+# ---------------------------------------------------------------------------
+# section 9  Token-claims role PRE-FLIGHT  (proactive -- hint BEFORE the call 403s)
+# ---------------------------------------------------------------------------
+# Get-PimMissingRoleHint above is REACTIVE: it fires only after a privileged write
+# already returned 403. This pre-flight is PROACTIVE: before an interactive operator
+# performs a privileged write, read the OPERATOR'S token claims (`wids` = activated
+# well-known directory-role template ids, and `roles` = app-role values) and, if the
+# directory role the operation needs is NOT active in the token, tell the operator to
+# ACTIVATE it in PIM up front -- so they don't drive all the way to a 403. This mirrors
+# the Activator's `wids`-claim pattern, applied to the engine/Manager operator path.
+#
+# Everything here is PURE (claims in -> decision out). The token was already obtained
+# from Entra over TLS via the Edge PKCE loopback flow (Get-PimInteractiveToken); the
+# claims are used only for an up-front UX hint, never as a security trust anchor (the
+# real enforcement is still Entra at the call).
+
+# Well-known directory-role TEMPLATE ids (stable Microsoft constants) keyed by the role
+# name we hint. `wids` in a token carries the template ids of the roles ACTIVE for the
+# signed-in user (eligible-but-not-activated roles do NOT appear -- exactly what we want
+# to detect "you must activate it in PIM"). Source: Microsoft "Microsoft Entra built-in
+# roles" template ids.
+$script:PimWidsByRoleName = [ordered]@{
+    'Global Administrator'              = '62e90394-69f5-4237-9190-012177145e10'
+    'Privileged Role Administrator'    = 'e8611ab8-c189-46e8-94e1-60213ab1f814'
+    'Privileged Authentication Administrator' = '7be44c8a-adaf-4e2a-84d6-ab2649e08a13'
+    'User Administrator'               = 'fe930be7-5e62-47db-91af-98c3a49a38b1'
+    'Groups Administrator'             = 'fdd7a751-b60b-444a-984c-02652fe8fa1c'
+    'Application Administrator'         = '9b895d92-2cd3-44c7-9d02-a6ac2d5ea5c3'
+    'Cloud Application Administrator'   = '158c047a-c907-4556-b7ef-446551a6b5f7'
+    'Authentication Administrator'      = 'c4e39bd9-1100-46d3-8c65-fb160da0071f'
+    'Identity Governance Administrator' = '45d8d3c5-c802-45c6-b32a-1d70b5e1e86e'
+    'Security Administrator'            = '194ae4cb-b126-40b2-bd5b-6091b380977d'
+    'Intune Administrator'             = '3a2c62db-5318-420d-8d74-23affee5d9d5'
+    'Exchange Administrator'           = '29232cdf-9323-42fd-ade2-1d097af3e4de'
+}
+
+# Map: a privileged OPERATION the operator might perform -> the directory role(s) that
+# operation requires (any ONE of them satisfies it). Operation can be referenced by a
+# short canonical name OR by a Graph/ARM API path fragment (so callers can pass either
+# an operation key or the path they are about to call). Ordered most-specific first.
+$script:PimPreflightOps = @(
+    @{ op = 'pim-role-assignment';  match = 'roleManagement/directory/roleAssignmentSchedule'; roles = @('Privileged Role Administrator','Global Administrator') }
+    @{ op = 'pim-policy';           match = 'policies/roleManagementPolic';                     roles = @('Privileged Role Administrator','Global Administrator') }
+    @{ op = 'pim-policy';           match = 'roleManagementPolic';                              roles = @('Privileged Role Administrator','Global Administrator') }
+    @{ op = 'pim-for-groups';       match = 'identityGovernance/privilegedAccess/group';        roles = @('Privileged Role Administrator','Global Administrator') }
+    @{ op = 'administrative-unit';  match = 'directory/administrativeUnits';                     roles = @('Privileged Role Administrator','Global Administrator') }
+    @{ op = 'access-review';        match = 'identityGovernance/accessReviews';                  roles = @('Identity Governance Administrator','Global Administrator') }
+    @{ op = 'app-role-assignment';  match = 'appRoleAssignedTo';                                 roles = @('Cloud Application Administrator','Application Administrator','Global Administrator') }
+    @{ op = 'enterprise-app';       match = 'servicePrincipals/';                                roles = @('Cloud Application Administrator','Application Administrator','Global Administrator') }
+    @{ op = 'app-registration';     match = 'applications';                                      roles = @('Application Administrator','Cloud Application Administrator','Global Administrator') }
+    @{ op = 'group-write';          match = '/groups';                                           roles = @('Groups Administrator','Global Administrator') }
+    @{ op = 'user-write';           match = '/users';                                            roles = @('User Administrator','Global Administrator') }
+)
+
+function Resolve-PimActiveDirectoryRoleTemplateIds {
+    <#
+    .SYNOPSIS
+        Extract the set of ACTIVE directory-role template ids from a token / its claims.
+    .DESCRIPTION
+        Pure. Reads the `wids` claim (well-known directory-role template ids that are
+        ACTIVE for the signed-in user -- an eligible-but-not-yet-activated PIM role is
+        NOT present, which is exactly the signal we use to say "activate it in PIM").
+        Accepts a raw JWT (-Token) or already-decoded claims (-Claims). Returns a
+        lower-cased string[] of template ids (possibly empty). Never throws.
+    #>
+    [CmdletBinding()]
+    param([string]$Token, [object]$Claims)
+    if (-not $Claims) { if ("$Token".Trim()) { $Claims = ConvertFrom-PimJwtClaims -Token $Token } }
+    if (-not $Claims) { return @() }
+    $ids = New-Object System.Collections.Generic.List[string]
+    try {
+        if ($null -ne $Claims.wids) {
+            foreach ($w in @($Claims.wids)) { $v = "$w".Trim().ToLowerInvariant(); if ($v) { [void]$ids.Add($v) } }
+        }
+    } catch {}
+    return $ids.ToArray()
+}
+
+function Resolve-PimRequiredRolesForOperation {
+    <#
+    .SYNOPSIS
+        Resolve the directory role(s) a privileged operation requires (any one suffices).
+    .DESCRIPTION
+        Pure. Accepts a canonical operation name (e.g. 'pim-policy') OR a Graph/ARM API
+        path fragment the caller is about to invoke (e.g. a roleAssignmentSchedule URL).
+        Returns the ordered list of acceptable role names, or @() when the operation is
+        not a known privileged one (so the caller does NOT pre-flight a benign call).
+    #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string]$Operation)
+    $needle = "$Operation".Trim()
+    if (-not $needle) { return @() }
+    # 1. Exact canonical operation-name match wins.
+    foreach ($e in $script:PimPreflightOps) {
+        if ($e.op -eq $needle) { return @($e.roles) }
+    }
+    # 2. Otherwise treat it as a path and match on the path fragment (most-specific first).
+    foreach ($e in $script:PimPreflightOps) {
+        if ($needle -match [regex]::Escape($e.match)) { return @($e.roles) }
+    }
+    return @()
+}
+
+function Test-PimOperationRolePreflight {
+    <#
+    .SYNOPSIS
+        PROACTIVE pre-flight: is a required directory role ACTIVE in the operator's token
+        BEFORE the privileged write is attempted? If not, hint "activate it in PIM" up front.
+    .DESCRIPTION
+        Pure. Given the operator's token (or decoded claims) and the operation they are
+        about to perform (canonical name OR Graph/ARM path), decide:
+          * Operation not privileged / unknown -> Required=$false, Allowed=$true (don't block).
+          * One of the required roles' template ids is present in `wids` -> Allowed=$true.
+          * None present -> Allowed=$false + an up-front Hint naming the role(s) to ACTIVATE
+            in PIM (and which one is active, if any), so the operator activates first instead
+            of hitting a 403. Conservative: an unreadable/absent `wids` for a privileged
+            operation -> Allowed=$false (fail closed -- hint to activate), NEVER a silent pass.
+
+        This NEVER enforces (Entra does at the call); it only improves the UX by surfacing
+        the missing activation up front. App-only engine contexts have no `wids` and should
+        not pre-flight an interactive activation -- pass -AppOnly $true to make it a no-op
+        (Allowed=$true, Source explains it is an app-only context).
+    .PARAMETER Operation
+        Canonical operation name or the Graph/ARM API path about to be called.
+    .PARAMETER Token
+        The operator's access/id token (optional if -Claims supplied).
+    .PARAMETER Claims
+        Already-decoded claims (optional if -Token supplied).
+    .PARAMETER AppOnly
+        $true = engine/SPN context (no interactive `wids`); pre-flight is a no-op (Allowed).
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$Operation,
+        [string]$Token,
+        [object]$Claims,
+        [bool]$AppOnly = $false
+    )
+    $required = Resolve-PimRequiredRolesForOperation -Operation $Operation
+
+    # Not a known privileged operation -> nothing to pre-flight.
+    if (-not $required -or $required.Count -eq 0) {
+        return [pscustomobject]@{
+            Operation = "$Operation"; Required = $false; Allowed = $true
+            RequiredRoles = @(); ActiveRoleTemplateIds = @(); MatchedRole = ''
+            Source = 'operation is not a known privileged operation -- no activation pre-flight needed'
+            Hint = ''
+        }
+    }
+
+    # App-only engine context: there is no interactive `wids` to read; the engine's
+    # permission model is app-roles, handled reactively by Get-PimMissingRoleHint. The
+    # interactive activation pre-flight is a no-op here (never block an app-only run).
+    if ($AppOnly) {
+        return [pscustomobject]@{
+            Operation = "$Operation"; Required = $true; Allowed = $true
+            RequiredRoles = @($required); ActiveRoleTemplateIds = @(); MatchedRole = ''
+            Source = 'app-only context (no interactive wids) -- activation pre-flight is a no-op; the engine SPN uses app-roles'
+            Hint = ''
+        }
+    }
+
+    $active = @(Resolve-PimActiveDirectoryRoleTemplateIds -Token $Token -Claims $Claims)
+    $matched = ''
+    foreach ($r in $required) {
+        $tid = "$($script:PimWidsByRoleName[$r])".ToLowerInvariant()
+        if ($tid -and ($active -contains $tid)) { $matched = $r; break }
+    }
+
+    if ($matched) {
+        return [pscustomobject]@{
+            Operation = "$Operation"; Required = $true; Allowed = $true
+            RequiredRoles = @($required); ActiveRoleTemplateIds = $active; MatchedRole = $matched
+            Source = "the required role '$matched' is active in your token (wids)"
+            Hint = ''
+        }
+    }
+
+    $roleList = $required -join "' / '"
+    $hint = "Before this action: activate one of these roles in PIM first -- '$roleList' -- then retry. None is currently active in your token, so the call would be denied (403). Activate it in the Entra PIM portal (or the PIM Activator) and sign in again."
+    [pscustomobject]@{
+        Operation = "$Operation"; Required = $true; Allowed = $false
+        RequiredRoles = @($required); ActiveRoleTemplateIds = $active; MatchedRole = ''
+        Source = 'none of the required roles is active in the token wids (fail closed -- activate in PIM up front)'
+        Hint = $hint
     }
 }
 

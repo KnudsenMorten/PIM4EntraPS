@@ -645,20 +645,24 @@ it through the nested groups. Real reachability, printable and CSV-exportable.
 
 Both read the live delegation model and are printable and exportable to CSV.
 
-### Role Lookup — the three questions every admin asks
+### Role Lookup — the questions every admin asks about roles
 
-Role Lookup is a read-only tool that answers the three questions admins ask about
+Role Lookup is a read-only tool that answers the questions admins ask about
 roles, and forgives a typo while doing it.
 
-![Role Lookup — three modes: what a role can do, who can activate it, compare two](docs/img/manager-role-lookup.png)
-*Role Lookup answers the three role questions every admin asks — what a role
-can do, who can activate it, and how two roles compare — typo-tolerant and
-read-only. (Synthetic demo data.)*
+![Role Lookup — what a role can do, find roles by action, who can activate it, compare two](docs/img/manager-role-lookup.png)
+*Role Lookup answers the role questions every admin asks — what a role can do,
+which role to use for an action, who can activate a role, and how two roles
+compare — typo-tolerant and read-only. (Synthetic demo data.)*
 
 - **What a role can do** — a permission drill-down read live from the tenant,
   grouped by area, so you can see exactly what a role grants *before* you delegate
   it. It is **typo-tolerant**: a misspelled or partial name gives a ranked "did
   you mean…" list of the closest real roles rather than an error.
+- **Find roles by action** — type the operation you need to delegate and get
+  every role that grants it, **ranked least-privileged first**, so you can pick the
+  narrowest role for a least-privilege request. A role that only grants it through a
+  broad wildcard is flagged and sorted last.
 - **Who can activate a role** — pick a role and see every person who can activate
   it, each with the exact granting path. It honestly reports "no one" when nothing
   grants the role.

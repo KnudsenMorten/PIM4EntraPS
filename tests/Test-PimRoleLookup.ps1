@@ -107,6 +107,74 @@ $rCap = Resolve-PimRoleQuery -Query 'Administrator' -RoleNames $big -Max 5
 T 'resolve: candidate list honours -Max cap'                  (@($rCap.candidates).Count -le 5)
 
 # ===========================================================================
+# Layer 1c -- SEARCH-BY-ACTION (REQUIREMENTS §28 [H9a]): "which roles grant
+# operation X" -- the INVERSE of the role-permission drill-down. Pure matcher
+# over a seeded roleDefinition corpus (the shape Graph returns).
+# ===========================================================================
+Write-Host "`n-- Layer 1c: search-by-action (§28 [H9a]) --" -ForegroundColor Cyan
+T 'Test-PimActionPatternMatch loaded' ([bool](Get-Command Test-PimActionPatternMatch -ErrorAction SilentlyContinue))
+T 'Find-PimRolesByAction loaded'      ([bool](Get-Command Find-PimRolesByAction -ErrorAction SilentlyContinue))
+
+# --- Test-PimActionPatternMatch: wildcard semantics, both directions ---------
+T 'pattern: exact (case-insensitive) matches'           (Test-PimActionPatternMatch -Pattern 'microsoft.directory/Users/basic/update' -Query 'microsoft.directory/users/basic/update')
+T 'pattern: granted "*" covers anything'                (Test-PimActionPatternMatch -Pattern '*' -Query 'microsoft.directory/users/basic/update')
+T 'pattern: granted "ns/*" covers concrete under it'    (Test-PimActionPatternMatch -Pattern 'microsoft.directory/users/*' -Query 'microsoft.directory/users/basic/update')
+T 'pattern: granted "ns/*" does NOT cover other ns'     (-not (Test-PimActionPatternMatch -Pattern 'microsoft.directory/groups/*' -Query 'microsoft.directory/users/basic/update'))
+T 'pattern: wildcard QUERY matches granted concrete'    (Test-PimActionPatternMatch -Pattern 'microsoft.directory/users/basic/update' -Query 'microsoft.directory/users/*')
+T 'pattern: unrelated do not match'                      (-not (Test-PimActionPatternMatch -Pattern 'microsoft.directory/groups/create' -Query 'microsoft.directory/users/basic/update'))
+T 'pattern: blank pattern/query do not match'           ((-not (Test-PimActionPatternMatch -Pattern '' -Query 'x')) -and (-not (Test-PimActionPatternMatch -Pattern 'x' -Query '')))
+
+# --- Find-PimRolesByAction: ranked least-privilege first ---------------------
+# Seeded corpus (Graph roleDefinition shape): a narrow role (1 action), a medium
+# role (2 actions), Global Administrator ('*'). The query is a concrete user-update
+# action -- the narrow role + the medium role + GA (via '*') all grant it.
+$rd = @(
+    [pscustomobject]@{ displayName = 'Password Administrator'; rolePermissions = @([pscustomobject]@{ allowedResourceActions = @('microsoft.directory/users/password/update') }) }
+    [pscustomobject]@{ displayName = 'User Administrator'; rolePermissions = @([pscustomobject]@{ allowedResourceActions = @('microsoft.directory/users/basic/update','microsoft.directory/users/password/update') }) }
+    [pscustomobject]@{ displayName = 'Groups Administrator'; rolePermissions = @([pscustomobject]@{ allowedResourceActions = @('microsoft.directory/groups/create','microsoft.directory/groups/delete') }) }
+    [pscustomobject]@{ displayName = 'Global Administrator'; rolePermissions = @([pscustomobject]@{ allowedResourceActions = @('*') }) }
+)
+$ba = Find-PimRolesByAction -Action 'microsoft.directory/users/password/update' -RoleDefinitions $rd
+T 'by-action: matched=$true when a role grants it'      ([bool]$ba.matched)
+T 'by-action: Groups Administrator is NOT a match'      (@($ba.matches | Where-Object { $_.role -eq 'Groups Administrator' }).Count -eq 0)
+T 'by-action: Password+User Admin + GA(*) all match'    (@($ba.matches | ForEach-Object { $_.role }) -contains 'Password Administrator' -and (@($ba.matches | ForEach-Object { $_.role }) -contains 'User Administrator') -and (@($ba.matches | ForEach-Object { $_.role }) -contains 'Global Administrator'))
+T 'by-action: ranked LEAST-PRIVILEGE first (narrowest)' ($ba.matches[0].role -eq 'Password Administrator')
+# A wildcard ('*') role is BROADEST -- it must rank LAST despite a tiny raw count.
+T 'by-action: wildcard role (GA "*") ranks last'        ($ba.matches[@($ba.matches).Count - 1].role -eq 'Global Administrator')
+T 'by-action: GA hit is flagged viaWildcard'            ([bool]($ba.matches | Where-Object { $_.role -eq 'Global Administrator' }).viaWildcard)
+T 'by-action: precise role is NOT flagged viaWildcard'  (-not ($ba.matches | Where-Object { $_.role -eq 'Password Administrator' }).viaWildcard)
+# Among the PRECISE (non-wildcard) hits, totalActions is non-decreasing.
+$precise = @($ba.matches | Where-Object { -not $_.viaWildcard })
+$privDesc = $true
+for ($i=1; $i -lt @($precise).Count; $i++) { if ([int]$precise[$i-1].totalActions -gt [int]$precise[$i].totalActions) { $privDesc = $false; break } }
+T 'by-action: precise hits non-decreasing by totalActions' $privDesc
+T 'by-action: each hit carries the matched action(s)'   (@($ba.matches | Where-Object { @($_.matchedActions).Count -ge 1 }).Count -eq @($ba.matches).Count)
+T 'by-action: rolesSearched reflects the corpus size'   ([int]$ba.rolesSearched -eq 4)
+T 'by-action: matchCount equals match list length'      ([int]$ba.matchCount -eq @($ba.matches).Count)
+
+# A wildcard QUERY (broad "which roles touch users at all?") matches every role
+# with any user action -- including GA ('*') and the password/user admins.
+$baWide = Find-PimRolesByAction -Action 'microsoft.directory/users/*' -RoleDefinitions $rd
+T 'by-action: wildcard query finds all user-touching roles' (@($baWide.matches | ForEach-Object { $_.role }) -contains 'Password Administrator' -and (@($baWide.matches | ForEach-Object { $_.role }) -contains 'User Administrator'))
+T 'by-action: wildcard query excludes Groups-only role'     (@($baWide.matches | Where-Object { $_.role -eq 'Groups Administrator' }).Count -eq 0)
+
+# Graceful edges: blank action, empty corpus, genuine miss -- never throw.
+$baBlankThrew = $false; $baBlank = $null
+try { $baBlank = Find-PimRolesByAction -Action '' -RoleDefinitions $rd } catch { $baBlankThrew = $true }
+T 'by-action: blank action does NOT throw'              (-not $baBlankThrew)
+T 'by-action: blank action -> matched=$false, empty'    ((-not $baBlank.matched) -and @($baBlank.matches).Count -eq 0)
+$baEmpty = Find-PimRolesByAction -Action 'microsoft.directory/users/basic/update' -RoleDefinitions @()
+T 'by-action: empty corpus -> empty list, no throw'     ((-not $baEmpty.matched) -and @($baEmpty.matches).Count -eq 0 -and [int]$baEmpty.rolesSearched -eq 0)
+$baMiss = Find-PimRolesByAction -Action 'microsoft.directory/zzz/nope' -RoleDefinitions $rd
+# GA's '*' grants everything, so a real miss only happens against non-wildcard roles.
+$rdNoStar = @($rd | Where-Object { $_.displayName -ne 'Global Administrator' })
+$baTrueMiss = Find-PimRolesByAction -Action 'microsoft.directory/zzz/nope' -RoleDefinitions $rdNoStar
+T 'by-action: genuine miss (no "*" roles) -> empty'     ((-not $baTrueMiss.matched) -and @($baTrueMiss.matches).Count -eq 0)
+# -Max cap honoured.
+$baCap = Find-PimRolesByAction -Action 'microsoft.directory/users/password/update' -RoleDefinitions $rd -Max 2
+T 'by-action: -Max caps the result list'                (@($baCap.matches).Count -le 2)
+
+# ===========================================================================
 # Reverse lookup (reuse Get-PimRoleReachers) over a SEEDED delegation model.
 # ===========================================================================
 Write-Host "`n-- Layer 1b: reverse lookup + compare over a seeded model --" -ForegroundColor Cyan
@@ -201,6 +269,8 @@ Write-Host "`n-- Layer 2: Role Lookup tab + endpoint wiring (static) --" -Foregr
 T 'Role Lookup tab declared'                ($html -match 'data-tab="roleperms"')
 T 'roleperms routes -> renderRolePerms'     ($html -match "name === 'roleperms'\s*\)\s*renderRolePerms")
 T 'tab has three sub-modes (perms/reverse/compare)' ($html -match 'id="rlModePerms"' -and $html -match 'id="rlModeReverse"' -and $html -match 'id="rlModeCompare"')
+T 'tab has the by-action sub-mode (§28 [H9a])'      ($html -match 'id="rlModeByAction"' -and $html -match 'function renderByActionPanel\(')
+T 'GUI calls /api/role-permissions/by-action'       ($html -match '/api/role-permissions/by-action\?action=')
 T 'GUI renders did-you-mean candidates'     ($html -match 'function didYouMean\(')
 T 'GUI handles matched===false (no error)'  ($html -match 'data\.matched === false')
 T 'GUI calls /api/role-permissions'         ($html -match '/api/role-permissions\?role=')
@@ -209,6 +279,8 @@ T 'GUI calls /api/role-lookup/compare'      ($html -match '/api/role-lookup/comp
 
 # Server endpoints.
 T 'server handles GET /api/role-permissions'      ($srv -match "\`$path -eq '/api/role-permissions' -and \`$method -eq 'GET'")
+T 'server handles GET /api/role-permissions/by-action' ($srv -match "\`$path -eq '/api/role-permissions/by-action' -and \`$method -eq 'GET'")
+T 'by-action endpoint reuses Find-PimRolesByAction' ($srv -match 'Find-PimRolesByAction -Action \$action')
 T 'server handles GET /api/role-lookup/reverse'   ($srv -match "\`$path -eq '/api/role-lookup/reverse' -and \`$method -eq 'GET'")
 T 'server handles GET /api/role-lookup/compare'   ($srv -match "\`$path -eq '/api/role-lookup/compare' -and \`$method -eq 'GET'")
 T 'role-permissions near-miss is 200 w/ candidates (NOT 503)' ($srv -match 'Resolve-PimRoleQuery' -and $srv -match "matched = \`$false; role = \`$roleName")
