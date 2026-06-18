@@ -23,7 +23,14 @@ Set-StrictMode -Off
 # monitor detects an already-COMMITTED change in SQL -> 'engine-delta' recomputes +
 # reconciles that scope. **Queuing a change does NOT trigger anything** (it just stages
 # rows in the queue); the engine recalculates only at commit time.
-$script:PimJobTypes    = @('queue-apply','engine-delta','engine-full','msp-pull','reminders','escalations','discovery','scheduled-creation','daily-summary','tier-report','servicenow-intake','sync-automateit','tenant-cache')
+# NOTE (operator correction 2026-06-18): the UPDATE (code / SQL-schema / Manager-GUI roll) is
+# DELIBERATELY NOT a scheduler job type. The engine + scheduler are for engine runs / slave DATA
+# downlink ONLY. The standalone update mechanism -- tools/setup/Invoke-PimUpdate.ps1, run by
+# VisualCron / Task Scheduler (tools/setup/Register-PimSyncSchedule.ps1) or the bootstrap
+# post-sync deploy hook (sync/_SyncDeploy.ps1) -- owns code+schema+GUI updates. Do NOT re-add a
+# 'sync-automateit' / 'update' job type here; that re-couples the update to the scheduler.
+# See docs/REQUIREMENTS.md "Update is SEPARATE from the PIM engine + job-scheduler".
+$script:PimJobTypes    = @('queue-apply','engine-delta','engine-full','msp-pull','reminders','escalations','discovery','scheduled-creation','daily-summary','tier-report','servicenow-intake','tenant-cache')
 $script:PimJobHandlers = @{}      # type -> scriptblock(job, nowUtc, whatIf)
 $script:PimSchedState  = $null    # in-memory fallback for state
 
@@ -69,10 +76,11 @@ function Get-PimDefaultJobSchedule {
         [pscustomobject]@{ name='tenant-cache';       type='tenant-cache';    intervalMinutes=720;  enabled=$true  }
         [pscustomobject]@{ name='full-reconcile';     type='engine-full';  scope='All';      intervalMinutes=1440; enabled=$true  }
         [pscustomobject]@{ name='msp-pull';           type='msp-pull';        intervalMinutes=240;  enabled=$false }  # MSP deployments only
-        # sync-automateit: controlled container auto-update (pull newest released image,
-        # roll safely, health-check, auto-rollback). DISABLED by default -- opt in per
-        # deployment (set enabled=$true in JobSchedule, or run the scheduled task on a VM).
-        [pscustomobject]@{ name='sync-automateit';    type='sync-automateit'; intervalMinutes=1440; enabled=$false }
+        # NOTE: NO 'sync-automateit' / update job here by design (operator correction 2026-06-18).
+        # Code/SQL-schema/Manager-GUI updates are a STANDALONE mechanism run OUTSIDE the engine +
+        # scheduler -- tools/setup/Invoke-PimUpdate.ps1, scheduled by VisualCron / Task Scheduler
+        # (Register-PimSyncSchedule.ps1) or fired by the bootstrap post-sync deploy hook. The
+        # scheduler stays for engine runs / slave data downlink only.
     )
 }
 function Get-PimJobSchedule {
@@ -245,7 +253,7 @@ function Initialize-PimDefaultJobHandlers {
         }
         return [pscustomobject]@{ ran=$false; detail=("tenant-cache refresh skipped: " + ("$($r.reason)").Trim()); result=$r; whatIf=$false }
     }
-    foreach ($t in 'engine-delta','engine-full','msp-pull','discovery') {
+    foreach ($t in 'engine-delta','engine-full','msp-pull') {
         Register-PimJobHandler -Type $t -Handler {
             param($job,$now,$whatIf)
             # The container/launcher registers the real engine handler; until then,
@@ -255,38 +263,119 @@ function Initialize-PimDefaultJobHandlers {
             [pscustomobject]@{ ran=$false; detail="stub:$($job.type) scope=$scope (register a real handler)"; whatIf=[bool]$whatIf }
         }
     }
-    # sync-automateit stub: the container/launcher wires the REAL handler via
-    # Register-PimSyncAutomateItHandler (it knows the orchestrator path). Until then the
-    # runner records intent only -- it NEVER auto-rolls a deployment from a bare stub.
-    Register-PimJobHandler -Type 'sync-automateit' -Handler {
+    # discovery: a default handler that drives the REAL sweep (Invoke-PimDiscoveryJobSweep)
+    # via the seam wired by Register-PimDiscoveryHandler. Until the launcher supplies the
+    # live enumerator + store readers, it is a clearly-logged no-op (never crashes, the
+    # gap is visible) -- mirroring the tenant-cache handler.
+    Register-PimJobHandler -Type 'discovery' -Handler {
         param($job,$now,$whatIf)
-        [pscustomobject]@{ ran=$false; detail='stub:sync-automateit (register the real handler via Register-PimSyncAutomateItHandler)'; whatIf=[bool]$whatIf }
+        $scope = if ($job.PSObject.Properties['scope']) { "$($job.scope)" } else { 'All' }
+        [pscustomobject]@{ ran=$false; detail="no-handler:discovery scope=$scope (call Register-PimDiscoveryHandler with the live enumerator/store seams)"; whatIf=[bool]$whatIf }
+    }
+    # NOTE: NO 'sync-automateit' / update handler is registered here by design (operator
+    # correction 2026-06-18). The UPDATE is a STANDALONE mechanism (tools/setup/Invoke-PimUpdate.ps1)
+    # invoked by VisualCron / Task Scheduler / the bootstrap post-sync deploy hook -- it is NEVER
+    # triggered or run by the engine or the in-container scheduler. The former
+    # Register-PimSyncAutomateItHandler seam (which shelled the update orchestrator with -Apply from
+    # a scheduler tick) was REMOVED to enforce that separation. Do not re-introduce it.
+}
+
+function Register-PimDiscoveryHandler {
+    <#
+      Wire the REAL discovery handler. The container/launcher (which has the live
+      REST enumerators + the desired/definition store reader loaded) calls this with
+      the seams the PURE sweep needs, so the in-container scheduler can run the three
+      'discovery' jobs (Entra / Azure / PowerBI) on their cadence. The handler maps
+      the job's -Scope to Invoke-PimDiscoveryJobSweep (PIM-Discovery.ps1):
+
+        -GetDiscovered  : scriptblock(scope) -> the live enumerated items for a scope
+                          (e.g. Get-PimLiveAzureScopes / Get-PimLivePowerBiWorkspaces)
+        -GetExisting    : scriptblock(scope) -> current definition rows for a scope
+        -EnqueueChange  : scriptblock(change) -> push a fresh change-queue record
+                          (e.g. Add-PimChangeToQueue against the queue file / SQL)
+        -GetAutoImportRules : optional scriptblock(scope) -> Azure auto-import rules
+        -AutoImportPowerBI  : opt PowerBI auto-import on (default OFF -> propose only)
+
+      A WhatIf tick computes + reports but writes nothing (no enqueue, no handled-set).
+      The Entra discovery scope is the role-CATALOG delta (Invoke-PimRoleCatalogJobSweep
+      over Get-PimRoleCatalogDelta) -- a different shape from the scope sweep -- so when
+      a -GetLiveRoles seam is supplied the Entra-scope job catalogs new built-in roles;
+      with no -GetLiveRoles seam it degrades to a clear "scope not wired" no-op (kept
+      explicit rather than silently doing nothing). REQUIREMENTS §8.
+    #>
+    param(
+        [Parameter(Mandatory)][scriptblock]$GetDiscovered,
+        [Parameter(Mandatory)][scriptblock]$GetExisting,
+        [Parameter(Mandatory)][scriptblock]$EnqueueChange,
+        [scriptblock]$GetAutoImportRules,
+        [scriptblock]$GetLiveRoles,
+        [switch]$AutoImportPowerBI
+    )
+    if (-not (Get-Command Invoke-PimDiscoveryJobSweep -ErrorAction SilentlyContinue)) {
+        throw "Invoke-PimDiscoveryJobSweep not loaded (dot-source engine/_shared/PIM-Discovery.ps1 before wiring the discovery handler)."
+    }
+    $script:PimDiscoveryGetDiscovered  = $GetDiscovered
+    $script:PimDiscoveryGetExisting    = $GetExisting
+    $script:PimDiscoveryEnqueueChange  = $EnqueueChange
+    $script:PimDiscoveryGetAutoRules   = $GetAutoImportRules
+    $script:PimDiscoveryGetLiveRoles   = $GetLiveRoles
+    $script:PimDiscoveryAutoImportPbi  = [bool]$AutoImportPowerBI
+    Register-PimJobHandler -Type 'discovery' -Handler {
+        param($job,$now,$whatIf)
+        $scope = if ($job.PSObject.Properties['scope']) { "$($job.scope)" } else { 'All' }
+
+        # ENTRA scope = the role-CATALOG delta (new built-in roles), a different shape
+        # from the Azure/PowerBI scope sweep. Wired only when -GetLiveRoles was supplied.
+        if ($scope -eq 'Entra') {
+            if (-not $script:PimDiscoveryGetLiveRoles) {
+                return [pscustomobject]@{ ran=$false; detail="discovery scope 'Entra' not wired (no -GetLiveRoles seam supplied)"; whatIf=[bool]$whatIf }
+            }
+            $service = if ($job.PSObject.Properties['service'] -and "$($job.service)") { "$($job.service)" } else { 'entra' }
+            $live = @(& $script:PimDiscoveryGetLiveRoles $service)
+            $roleArgs = @{
+                Service       = $service
+                Live          = $live
+                EnqueueChange = $script:PimDiscoveryEnqueueChange
+            }
+            if ($whatIf) { $roleArgs['WhatIf'] = $true }
+            $rr = Invoke-PimRoleCatalogJobSweep @roleArgs
+            return [pscustomobject]@{ ran=$true; detail="$($rr.detail)"; result=$rr; whatIf=[bool]$whatIf }
+        }
+
+        if ($scope -ne 'Azure' -and $scope -ne 'PowerBI') {
+            return [pscustomobject]@{ ran=$false; detail="discovery scope '$scope' not wired (Azure/PowerBI scope-discovery + Entra role-catalog are handled)"; whatIf=[bool]$whatIf }
+        }
+        $discovered = @(& $script:PimDiscoveryGetDiscovered $scope)
+        $existing   = @(& $script:PimDiscoveryGetExisting   $scope)
+        $rules      = @()
+        if ($scope -eq 'Azure' -and $script:PimDiscoveryGetAutoRules) { $rules = @(& $script:PimDiscoveryGetAutoRules $scope) }
+        $sweepArgs = @{
+            Scope         = $scope
+            Discovered    = $discovered
+            Existing      = $existing
+            EnqueueChange = $script:PimDiscoveryEnqueueChange
+        }
+        if ($scope -eq 'Azure')   { $sweepArgs['AutoImportRules'] = $rules }
+        if ($scope -eq 'PowerBI') { $sweepArgs['AutoImport'] = $script:PimDiscoveryAutoImportPbi }
+        if ($whatIf) { $sweepArgs['WhatIf'] = $true }
+        $r = Invoke-PimDiscoveryJobSweep @sweepArgs
+        [pscustomobject]@{ ran=$true; detail="$($r.detail)"; result=$r; whatIf=[bool]$whatIf }
     }
 }
 
-function Register-PimSyncAutomateItHandler {
-    <#
-      Wire the REAL sync-automateit handler. The container/launcher calls this with the path
-      to Invoke-PimSyncAutomateIT.ps1 so the in-container scheduler can drive the controlled
-      auto-update on its cadence. The handler runs the orchestrator with -Apply (the schedule
-      itself is the gate) and reports the outcome; WhatIf maps to a dry-run (no -Apply).
-        -OrchestratorPath : full path to tools/setup/Invoke-PimSyncAutomateIT.ps1
-    #>
-    param([Parameter(Mandatory)][string]$OrchestratorPath)
-    if (-not (Test-Path $OrchestratorPath)) { throw "sync-automateit orchestrator not found: $OrchestratorPath" }
-    $script:PimSyncOrchestratorPath = $OrchestratorPath
-    Register-PimJobHandler -Type 'sync-automateit' -Handler {
-        param($job,$now,$whatIf)
-        $orch = $script:PimSyncOrchestratorPath
-        if (-not $orch -or -not (Test-Path $orch)) {
-            return [pscustomobject]@{ ran=$false; detail='sync-automateit: orchestrator path not set'; whatIf=[bool]$whatIf }
-        }
-        # The schedule window IS the gate -> pass -Apply unless this is a WhatIf tick.
-        $psArgs = @('-NoProfile','-ExecutionPolicy','Bypass','-File', $orch)
-        if (-not $whatIf) { $psArgs += '-Apply' }
-        & powershell.exe @psArgs | Out-Null
-        $code = $LASTEXITCODE
-        [pscustomobject]@{ ran=$true; detail="sync-automateit run (exit=$code)"; ok=($code -eq 0); whatIf=[bool]$whatIf }
+# Map a scheduled job TYPE to the PIM-FeatureCatalog feature key it belongs to, so
+# the scheduler gate (REQUIREMENTS s29) covers "gates everywhere, not just GUI":
+# a disabled feature performs no work no matter how it is triggered (incl. schedule).
+function Get-PimJobFeatureKey {
+    param([Parameter(Mandatory)][string]$Type)
+    switch ("$Type".ToLowerInvariant()) {
+        'discovery'        { return 'discovery.sweep' }
+        'daily-summary'    { return 'alerting.email' }
+        'tier-report'      { return 'alerting.email' }
+        'reminders'        { return 'alerting.email' }
+        'escalations'      { return 'alerting.email' }
+        'msp-pull'         { return 'msp.downlink' }
+        default            { return $null }   # core/engine jobs are not gated by a feature
     }
 }
 
@@ -294,6 +383,18 @@ function Invoke-PimScheduledJob {
     param([Parameter(Mandatory)][object]$Job, [datetime]$NowUtc = [datetime]::UtcNow, [switch]$WhatIf)
     $h = Get-PimJobHandler -Type "$($Job.type)"
     if (-not $h) { return [pscustomobject]@{ name="$($Job.name)"; type="$($Job.type)"; ok=$false; detail='no-handler-registered'; ranUtc=$NowUtc.ToString('o') } }
+    # --- FEATURE GATE (REQUIREMENTS s29) -- a job whose feature is disabled/unlicensed
+    # NO-OPs (no writes/sends), regardless of schedule. The 'scheduler.jobs' feature is
+    # the master switch for ALL scheduled jobs; a per-type feature gates its own job.
+    if (Get-Command Test-PimFeatureAvailable -ErrorAction SilentlyContinue) {
+        if (-not (Test-PimFeatureAvailable -Key 'scheduler.jobs' -Quiet)) {
+            return [pscustomobject]@{ name="$($Job.name)"; type="$($Job.type)"; ok=$true; detail="feature 'scheduler.jobs' disabled -- skipped"; skippedFeature='scheduler.jobs'; ranUtc=$NowUtc.ToString('o') }
+        }
+        $fk = Get-PimJobFeatureKey -Type "$($Job.type)"
+        if ($fk -and -not (Test-PimFeatureAvailable -Key $fk -Quiet)) {
+            return [pscustomobject]@{ name="$($Job.name)"; type="$($Job.type)"; ok=$true; detail="feature '$fk' disabled -- skipped"; skippedFeature=$fk; ranUtc=$NowUtc.ToString('o') }
+        }
+    }
     try {
         $r = & $h $Job $NowUtc.ToUniversalTime() $WhatIf
         return [pscustomobject]@{ name="$($Job.name)"; type="$($Job.type)"; ok=$true; detail="$($r.detail)"; result=$r; ranUtc=$NowUtc.ToString('o') }

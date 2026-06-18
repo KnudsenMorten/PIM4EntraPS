@@ -51,12 +51,13 @@ owns the detail. (Screenshot uses synthetic demo data.)*
   - [Create access the natural way round](#create-access-the-natural-way-round)
   - [Review & Save — see exactly what will change](#review--save--see-exactly-what-will-change)
   - [Reports — "who can do what", and the reverse](#reports--who-can-do-what-and-the-reverse)
-  - [Role Lookup — the three questions every admin asks](#role-lookup--the-three-questions-every-admin-asks)
+  - [Role Lookup — the questions every admin asks about roles](#role-lookup--the-questions-every-admin-asks-about-roles)
   - [Validate — catch problems before they ship](#validate--catch-problems-before-they-ship)
   - [Jobs, Audit and Support](#jobs-audit-and-support)
   - [Settings — your operational policy in one place](#settings--your-operational-policy-in-one-place)
   - [Export everywhere, and a guided database cutover](#export-everywhere-and-a-guided-database-cutover)
 - [The PIM Activator (browser extension)](#the-pim-activator-browser-extension)
+- [Deployment scenarios — pick your topology](#deployment-scenarios--pick-your-topology)
 - [Getting started / install](#getting-started--install)
   - [Community mode — quick start](#community-mode--quick-start)
   - [Internal mode — quick start](#internal-mode--quick-start)
@@ -796,6 +797,52 @@ conflict handling and backend setup).
 
 ---
 
+## Deployment scenarios — pick your topology
+
+PIM4EntraPS recognises a fixed set of **six deployment topologies**. They cover
+the combinations of *who runs it* (a single tenant, an MSP provider's master
+tenant, or an MSP-managed customer tenant), *which edition* you run
+(Internal/AutomateIT or the public Community edition), *where updates come from*,
+*where the GUI and database live*, and *how the acting identity authenticates*.
+Naming them up front means the GUI, the engine, the update path and the deploy
+scripts all resolve the **same** topology instead of guessing.
+
+| # | Who | Edition | Updates from | GUI + database | License |
+|---|-----|---------|--------------|----------------|---------|
+| **S1** | Single tenant | Internal/AutomateIT | internal AutomateIT source | in your tenant | Pro (Design Partner) |
+| **S2** | Single tenant | Community | public GitHub | in your tenant | Community |
+| **S3** | MSP **master** | Internal/AutomateIT | internal AutomateIT source | in the master tenant | Pro (Design Partner) |
+| **S4** | MSP **master** | Community | public GitHub | in the master tenant | Pro *(MSP features need Pro)* |
+| **S5** | MSP **managed** customer | Internal/AutomateIT | from the master, by rollout ring | **centrally**, in the provider tenant | Pro (Design Partner) |
+| **S6** | MSP **managed** customer | Internal/AutomateIT | from the master, by rollout ring | **locally**, in the managed tenant | Pro (Design Partner) |
+
+- **Single tenant (S1 / S2)** is the simplest shape — engine, Manager, database
+  and the governed tenant are all one tenant. S1 and S2 are the *same topology*;
+  they differ only in edition, update source and license.
+- **MSP master (S3 / S4)** adds the provider-side authoring, signing and ring-based
+  rollout control on top of a single-tenant deployment.
+- **MSP managed (S5 / S6)** are customer tenants whose updates and whose
+  administrator + permission set are **pulled from the master, gated by rollout
+  ring** — the provider never pushes into the customer. They differ in *where the
+  GUI and database live* (centrally in the provider tenant for S5, locally in the
+  customer tenant for S6) and in the identity model.
+
+> **Cross-tenant traffic is private only.** For the managed scenarios (S5 / S6),
+> everything that crosses between the master and a managed tenant travels over
+> **private cross-tenant network connectivity** — never the public internet, and
+> never through any publicly reachable storage, webhook or queue. The signed
+> baseline guarantees integrity; the private network is the only transport.
+
+> **Status:** the scenario model, the resolver that maps a scenario onto the
+> engine's settings, the update-source selection and the license gating are built
+> and tested; the managed-tenant downlink/sync runtime (S5 / S6) is designed and
+> wired into the deploy entry points but **not yet verified against a live
+> multi-tenant deployment**, which is the remaining release gate. See
+> **[docs/DESIGN.md §11.8 — Deployment scenarios](docs/DESIGN.md)** for the
+> per-scenario topology and process diagrams.
+
+---
+
 ## Getting started / install
 
 PIM4EntraPS deploys in one of **two modes**. Pick the one that matches you:
@@ -916,7 +963,11 @@ newest". In **community mode** it's a `git pull` plus a guarded update check
 **internal mode** it pulls the released image, rolls the deployment with **zero
 downtime**, applies any schema upgrade, runs the hosted smoke check, and
 **auto-rolls-back on failure**. Every update is a dry-run by default; applying is
-explicit. See **[docs/DESIGN.md §11.6 — Update lifecycle runbook](docs/DESIGN.md)**.
+explicit. The update **source** follows your [deployment
+scenario](#deployment-scenarios--pick-your-topology) — the internal AutomateIT
+source, public GitHub, or (for managed tenants) the master, ring-gated. See
+**[docs/DESIGN.md §11.6 — Update lifecycle runbook](docs/DESIGN.md)** and the
+update/sync process diagram in **[§11.8](docs/DESIGN.md)**.
 
 ---
 
@@ -983,9 +1034,16 @@ push**:
   variant gates centrally-issued `Disable` / `Revoke` actions behind a per-admin
   secret in the **customer's** key vault: no match = refuse and warn.
 
+The MSP shape maps onto the [deployment
+scenarios](#deployment-scenarios--pick-your-topology): the provider runs a
+**master** (S3 / S4) and each customer is a **managed** tenant hosted either
+centrally in the provider tenant (S5) or locally in its own tenant (S6) — with the
+master→managed sync always private and pull-not-push.
+
 See **[docs/DESIGN.md §13](docs/DESIGN.md)** for the full MSP architecture
 (two-DB model, pull-not-push transport, signed-baseline + kill-switch,
-ring-based rollout, why-not-GDAP).
+ring-based rollout, why-not-GDAP) and **[§11.8](docs/DESIGN.md)** for the
+per-scenario topology + downlink-sync process diagrams.
 
 ---
 

@@ -48,6 +48,10 @@
 param(
     [Parameter(Mandatory)][string]$ImageTag,
     [ValidateSet('git-pull','sync-automateit')][string]$Source = 'sync-automateit',
+    # s31: resolve the build source from a deployment SCENARIO (S1..S6). When set it OVERRIDES
+    # -Source: the scenario's resolved build path maps to acr-build (central/hosted => sync-automateit)
+    # or local-build (local/community => git-pull). from-master central=>sync-automateit, local=>git-pull.
+    [ValidateSet('S1','S2','S3','S4','S5','S6')][string]$Scenario,
     [string]$AcrName,
     [string]$ImageRepo  = 'pim-manager',
     [string]$Dockerfile = 'SOLUTIONS/PIM4EntraPS/tools/pim-manager/Dockerfile',
@@ -66,6 +70,18 @@ function Have($cmd){ [bool](Get-Command $cmd -ErrorAction SilentlyContinue) }
 
 # reuse the pure content-hash helper so the post-build marker matches what detection compares.
 . (Join-Path $solRoot 'engine\_shared\PIM-UpdateLifecycle.ps1')
+. (Join-Path $solRoot 'engine\_shared\PIM-ScenarioProfile.ps1')     # s31 scenario -> knob resolver
+
+# ---- s31: a -Scenario maps to the build source the build paths understand ----
+if ($Scenario) {
+    $plan = Get-PimScenarioEntryPlan -Scenario $Scenario
+    $resolvedBuildSource =
+        if ($plan.updateSource -eq 'from-master') { if ($plan.managedHosting -eq 'central') { 'sync-automateit' } else { 'git-pull' } }
+        elseif ($plan.updateSource -eq 'sync-automateit') { 'sync-automateit' }
+        else { 'git-pull' }
+    $Source = $resolvedBuildSource
+    Write-Host ("[scenario] {0} -> build source={1} (edition={2}, hosting={3})" -f $plan.id, $Source, $plan.activeEdition, $plan.hostingLocation) -ForegroundColor Cyan
+}
 
 # best-effort banner (shared by the setup family).
 $bannerShared = Join-Path $here '_PimSetupShared.ps1'
@@ -95,14 +111,55 @@ if ($Source -eq 'sync-automateit') {
     $dfPath = if ([System.IO.Path]::IsPathRooted($Dockerfile)) { $Dockerfile } else { Join-Path $repoRoot $Dockerfile }
     if (-not (Test-Path $dfPath)) { throw "Dockerfile not found: $dfPath" }
 
-    Step "az acr build $ImageRepo`:$ImageTag in $AcrName (context: $repoRoot)"
+    # Build from a CLEAN `git archive` export of HEAD, not the live working tree.
+    # The repo root hosts agent git-worktrees under .claude/worktrees/ + .wt/, each a
+    # full nested repo copy. `az acr build` tars the whole context and STATS every file
+    # BEFORE applying .dockerignore, so a >260-char path inside a worktree (e.g. a deep
+    # SecurityInsight sample, fine in the main tree but over Windows MAX_PATH once the
+    # worktree prefix is added) aborts the tar walk with WinError 3. `git archive` emits
+    # only tracked files in the repo layout the Dockerfile expects — no worktrees, no
+    # untracked junk — so the context is small, deterministic, and walk-safe.
+    Step "az acr build $ImageRepo`:$ImageTag in $AcrName (clean git-archive context of HEAD)"
     if ($PSCmdlet.ShouldProcess("$AcrName/$ImageRepo`:$ImageTag", 'az acr build')) {
-        Push-Location $repoRoot
-        try {
-            az acr build -r $AcrName -t "$ImageRepo`:$ImageTag" -f $Dockerfile . `
-                --build-arg "PIM_MANAGER_CONTENT_HASH=$contentHash"
-            if ($LASTEXITCODE -and $LASTEXITCODE -ne 0) { throw "az acr build failed (exit $LASTEXITCODE)." }
-        } finally { Pop-Location }
+        $haveGit = [bool](Get-Command git  -ErrorAction SilentlyContinue)
+        $haveTar = [bool](Get-Command tar  -ErrorAction SilentlyContinue)
+        if ($haveGit -and $haveTar) {
+            # Short temp ROOT (not %TEMP%\<guid>): keeps extracted paths well under
+            # Windows MAX_PATH. Archive ONLY the paths the image context needs
+            # (.dockerignore whitelists SOLUTIONS/PIM4EntraPS) -- this also keeps the
+            # long-named sample files of OTHER solutions (e.g. SecurityInsight) entirely
+            # out of the context, so neither the tar walk nor extraction can choke.
+            $ctxRoot = Join-Path $env:SystemDrive 'pimbld'
+            New-Item -ItemType Directory -Force $ctxRoot | Out-Null
+            $tmpCtx = Join-Path $ctxRoot ("c" + (Get-Random -Maximum 99999))
+            $tarPath = "$tmpCtx.tar"
+            New-Item -ItemType Directory -Force $tmpCtx | Out-Null
+            try {
+                git -C $repoRoot archive --format=tar -o $tarPath HEAD -- .dockerignore SOLUTIONS/PIM4EntraPS
+                if ($LASTEXITCODE -and $LASTEXITCODE -ne 0) { throw "git archive failed (exit $LASTEXITCODE)." }
+                tar -x -f $tarPath -C $tmpCtx
+                if ($LASTEXITCODE -and $LASTEXITCODE -ne 0) { throw "tar extract of git archive failed (exit $LASTEXITCODE)." }
+                Push-Location $tmpCtx
+                try {
+                    az acr build -r $AcrName -t "$ImageRepo`:$ImageTag" -f $Dockerfile . `
+                        --build-arg "PIM_MANAGER_CONTENT_HASH=$contentHash"
+                    if ($LASTEXITCODE -and $LASTEXITCODE -ne 0) { throw "az acr build failed (exit $LASTEXITCODE)." }
+                } finally { Pop-Location }
+            } finally {
+                Remove-Item $tarPath -Force -ErrorAction SilentlyContinue
+                Remove-Item $tmpCtx  -Recurse -Force -ErrorAction SilentlyContinue
+            }
+        } else {
+            # Fallback (no git/tar): build from the repo root directly. Works when the
+            # tree carries no deep-path worktrees.
+            Warn 'git/tar not found -- falling back to repo-root build context (no clean export).'
+            Push-Location $repoRoot
+            try {
+                az acr build -r $AcrName -t "$ImageRepo`:$ImageTag" -f $Dockerfile . `
+                    --build-arg "PIM_MANAGER_CONTENT_HASH=$contentHash"
+                if ($LASTEXITCODE -and $LASTEXITCODE -ne 0) { throw "az acr build failed (exit $LASTEXITCODE)." }
+            } finally { Pop-Location }
+        }
         Write-Host "  built $AcrName.azurecr.io/$ImageRepo`:$ImageTag (content $contentHash)" -ForegroundColor Green
     }
     Step "Done. Roll it with Update-PimContainers.ps1 -ImageTag $ImageTag (NOT -SkipBuild already covered)."

@@ -859,3 +859,416 @@ function Import-PimApproversFromCsv {
     $rows = @(ConvertFrom-PimApproverCsv -Text $Csv)
     return (Get-PimApproverImportPlan -Rows $rows -Existing $Existing)
 }
+
+# ===========================================================================
+# Scheduled discovery JOB -- the glue that ties the enumerators + reconcile
+# planners + handled-set delta + change-queue enqueue together (REQUIREMENTS
+# §8 "Wire discovery into the scheduler as three discovery jobs").
+#
+# Until now the discovery PIECES existed (enumerators, Get-Pim{Azure,PowerBi}
+# ReconcilePlan, Get-PimDiscoveryDelta, the ConvertTo-Pim*QueueChanges) but
+# nothing ran them on a cadence: the scheduler's 'discovery' handler was a bare
+# stub that only logged intent. This is the missing job body -- a PURE,
+# injectable, offline-testable core (no network, no globals required) that the
+# real scheduler handler calls.
+#
+# Contract per scope (Azure | PowerBI):
+#   1. enumerate live items   (injected -Discovered, or the live enumerator)
+#   2. reconcile vs existing  (Get-Pim{Azure,PowerBi}ReconcilePlan)
+#   3. delta vs handled-set   (Get-PimDiscoveryDelta -- only NOT-yet-handled
+#                              create/rename rows survive, handled set rolls fwd)
+#   4. enqueue ONLY the fresh items (ConvertTo-Pim*QueueChanges; auto-imports ->
+#                              Create, renames -> Update; orphans NEVER removed
+#                              from a scheduled run -- destructive deletes stay a
+#                              deliberate, opted-in human action, never automatic)
+#   5. persist the rolled handled-set (so a handled item never reappears)
+# It is the same "propose-don't-auto-map, never auto-delete" safety the manual
+# discovery path already enforces -- a scheduled run can only ever CREATE empty
+# containers (auto-import rules) + rename in place; it can never strip access.
+# ===========================================================================
+
+function Get-PimDiscoveryHandledPath {
+    # Per-scope handled-set file: output/state/discovery-handled-<scope>.json
+    # (config-dir aware, same resolution as the other engine state files).
+    param([Parameter(Mandatory)][string]$Scope)
+    $dir = if (Get-Command Get-PimConfigDir -ErrorAction SilentlyContinue) { try { Get-PimConfigDir } catch { $null } } else { $null }
+    if (-not $dir) { $dir = Join-Path (Split-Path -Parent (Split-Path -Parent $PSScriptRoot)) 'output\state' }
+    if (-not (Test-Path $dir)) { New-Item -ItemType Directory -Force $dir | Out-Null }
+    $safe = ($Scope -replace '[^A-Za-z0-9_-]', '_').ToLowerInvariant()
+    Join-Path $dir ("discovery-handled-$safe.json")
+}
+
+function Get-PimDiscoveryHandledSet {
+    # Read the previously-handled stable keys for a scope (the array the delta
+    # rolls forward). Missing / unreadable file -> empty set (never throws).
+    param([Parameter(Mandatory)][string]$Scope)
+    $path = Get-PimDiscoveryHandledPath -Scope $Scope
+    if (-not (Test-Path -LiteralPath $path)) { return @() }
+    try {
+        $doc = Get-Content -LiteralPath $path -Raw -Encoding UTF8 | ConvertFrom-Json
+        return @($doc.handled)
+    } catch { return @() }
+}
+
+function Save-PimDiscoveryHandledSet {
+    # Persist the rolled-forward handled set for a scope.
+    param([Parameter(Mandatory)][string]$Scope, [string[]]$Handled = @())
+    $path = Get-PimDiscoveryHandledPath -Scope $Scope
+    $doc  = [pscustomobject]@{ scope = "$Scope"; handled = @($Handled); updatedUtc = ([datetime]::UtcNow).ToString('o') }
+    $doc | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $path -Encoding UTF8
+    return $path
+}
+
+function Select-PimReconcilePlanByKeys {
+    # PURE -- given a reconcile plan and the set of fresh stable keys (from the
+    # delta), return a NEW plan whose create/rename lists are pruned to ONLY the
+    # fresh rows. unchanged is dropped (nothing to do); orphan is carried so the
+    # caller can SEE it but the queue conversion never removes on a scheduled run.
+    param(
+        [Parameter(Mandatory)][object]$Plan,
+        [string[]]$FreshKeys = @()
+    )
+    $fresh = @{}
+    foreach ($k in @($FreshKeys)) { if ("$k") { $fresh["$k".ToLowerInvariant()] = $true } }
+    $create = @(@($Plan.create) | Where-Object { $fresh.ContainsKey("$($_.stableKey)".ToLowerInvariant()) })
+    $rename = @(@($Plan.rename) | Where-Object { $fresh.ContainsKey("$($_.stableKey)".ToLowerInvariant()) })
+    return [pscustomobject]@{
+        create    = $create
+        rename    = $rename
+        orphan    = @($Plan.orphan)
+        unchanged = @()
+        summary   = [ordered]@{ create=@($create).Count; rename=@($rename).Count; orphan=@(@($Plan.orphan)).Count; unchanged=0
+                                autoCreate=@(@($create) | Where-Object { $_.autoImport }).Count }
+    }
+}
+
+function ConvertTo-PimDiscoveryNotifyItem {
+    # PURE: turn a pruned fresh plan (Select-PimReconcilePlanByKeys output) into a flat
+    # list of {action; resourceType; key; name} descriptors -- one per FRESH discovered
+    # item (a create or a rename) -- so the scheduled sweep can emit one audit event +
+    # (opt-in) one notification per fresh item, mirroring the legacy `resource.discovered`
+    # audit on the REST path (REQUIREMENTS §8 "Discovery audit + notify on new items").
+    # No network, no globals. An empty/garbage plan -> empty list (never throws).
+    #   action       = 'create' (a new container to stage) | 'rename' (a drifted name)
+    #   resourceType = AzureSubscription/ManagementGroup/ResourceGroup/PowerBIWorkspace/...
+    #   key          = the stable identity used to dedupe across runs
+    #   name         = the human label (the expected/derived group name)
+    param(
+        [Parameter(Mandatory)][object]$FreshPlan,
+        [string]$Scope = ''
+    )
+    $items = New-Object System.Collections.Generic.List[object]
+    foreach ($c in @($FreshPlan.create)) {
+        $rt = $null
+        if (Get-Command Resolve-PimDiscoveryResourceType -ErrorAction SilentlyContinue) {
+            try { $rt = Resolve-PimDiscoveryResourceType -Create $c } catch { $rt = $null }
+        }
+        if (-not $rt) { $rt = if ("$Scope") { "$Scope" } else { 'Resource' } }
+        $nm = if ($c.expected -and "$($c.expected.groupName)") { "$($c.expected.groupName)" } else { "$($c.stableKey)" }
+        $items.Add([pscustomobject]@{ action='create'; resourceType="$rt"; key="$($c.stableKey)"; name="$nm"; autoImport=[bool]$c.autoImport })
+    }
+    foreach ($r in @($FreshPlan.rename)) {
+        $rt = $null
+        if ($r.expected -and (Get-Command Resolve-PimDiscoveryResourceType -ErrorAction SilentlyContinue)) {
+            try { $rt = Resolve-PimDiscoveryResourceType -Create $r.expected } catch { $rt = $null }
+        }
+        if (-not $rt) { $rt = if ("$Scope") { "$Scope" } else { 'Resource' } }
+        $nm = if ("$($r.to)") { "$($r.to)" } else { "$($r.stableKey)" }
+        $items.Add([pscustomobject]@{ action='rename'; resourceType="$rt"; key="$($r.stableKey)"; name="$nm"; from="$($r.from)" })
+    }
+    return $items.ToArray()
+}
+
+function Send-PimDiscoveryNotices {
+    # Emit one AUDIT event per fresh discovered item (always, best-effort -- mirrors the
+    # legacy `resource.discovered` audit but on the REST/scheduled path) and, when a
+    # recipient is configured ($global:PIM_DiscoveryNotifyRecipients OR -Recipient), ONE
+    # opt-in notification mail covering the fresh batch. Notification is OPT-IN: with no
+    # recipient configured nothing is sent (silent-by-default, like the rest of the
+    # discovery path). Never throws -- audit/notify are best-effort and must not break a
+    # scheduled sweep. Returns @{ audited; notified; recipient; reason; items } for the
+    # caller's summary. PS 5.1-safe.
+    param(
+        [object[]]$Items = @(),
+        [string]$Scope = '',
+        [string]$Recipient,
+        [switch]$NoMail,
+        [switch]$WhatIf
+    )
+    $items = @($Items)
+    $audited = 0
+    if (Get-Command Write-PimAuditEvent -ErrorAction SilentlyContinue) {
+        foreach ($it in $items) {
+            try {
+                Write-PimAuditEvent -Action 'resource.discovered' -Target "$($it.key)" -Result 'ok' -After @{
+                    scope=$Scope; resourceType="$($it.resourceType)"; name="$($it.name)"; via='scheduled-sweep'; discoveryAction="$($it.action)"
+                } | Out-Null
+                $audited++
+            } catch {}
+        }
+    }
+    # -NoMail suppresses ONLY the notification mail (audit above always runs).
+    if ($NoMail) { return [pscustomobject]@{ audited=$audited; notified=$false; recipient=''; reason='mail suppressed'; items=@($items).Count } }
+    # opt-in notification: resolve a recipient (explicit param wins, else the global).
+    $rcpt = if ($PSBoundParameters.ContainsKey('Recipient')) { "$Recipient".Trim() } else { "$($global:PIM_DiscoveryNotifyRecipients)".Trim() }
+    if (-not $rcpt) { return [pscustomobject]@{ audited=$audited; notified=$false; recipient=''; reason='no recipient (opt-in)'; items=@($items).Count } }
+    if (@($items).Count -eq 0) { return [pscustomobject]@{ audited=$audited; notified=$false; recipient=$rcpt; reason='no fresh items'; items=0 } }
+    if (-not (Get-Command Send-PimNotifyMail -ErrorAction SilentlyContinue)) {
+        return [pscustomobject]@{ audited=$audited; notified=$false; recipient=$rcpt; reason='Send-PimNotifyMail not loaded'; items=@($items).Count }
+    }
+    # render a compact item list for the mail body (newest discovery first as listed).
+    $lines = @($items | ForEach-Object { "{0}: {1} ({2})" -f $_.resourceType, $_.name, $_.action })
+    $tokens = @{
+        Scope         = "$Scope"
+        ItemCount     = "$(@($items).Count)"
+        DiscoveredList = ($lines -join '<br>')
+        WhenUtc       = ([datetime]::UtcNow.ToString('u'))
+        TenantName    = "$($global:PIM_TenantName)"
+        Instance      = "$($global:PIM_InstanceId)"
+    }
+    $res = $null
+    try {
+        if ($WhatIf) { $res = Send-PimNotifyMail -Type 'discovery-notice' -Tokens $tokens -Recipient $rcpt -WhatIf }
+        else         { $res = Send-PimNotifyMail -Type 'discovery-notice' -Tokens $tokens -Recipient $rcpt }
+    } catch {
+        return [pscustomobject]@{ audited=$audited; notified=$false; recipient=$rcpt; reason="send failed: $($_.Exception.Message)"; items=@($items).Count }
+    }
+    $sent = $false; $reason = ''
+    if ($res -is [System.Collections.IDictionary]) { $sent = [bool]$res['sent']; $reason = "$($res['reason'])" }
+    return [pscustomobject]@{ audited=$audited; notified=$sent; recipient=$rcpt; reason=$reason; items=@($items).Count }
+}
+
+function Invoke-PimDiscoveryJobSweep {
+    <#
+      PURE-by-injection discovery job body for ONE scope. No network, no global
+      state required: pass the discovered items (or let the real handler supply
+      the live enumerator output), the existing definition rows, the handled-set
+      (read) + a writer, and a change-queue enqueuer. Returns a summary the
+      scheduler logs. Safe to call with -WhatIf (computes + reports, writes
+      nothing -- not the handled set, not the queue).
+
+        -Scope            'Azure' | 'PowerBI'  (drives which reconcile planner +
+                          queue converter + handled-file are used)
+        -Discovered       the enumerated items ({scopeType;scopePath;...} for
+                          Azure; {workspaceId;workspaceName} for PowerBI)
+        -Existing         current definition rows (same shape, + groupName)
+        -AutoImportRules  Azure auto-import rules (Azure scope only)
+        -AutoImport       PowerBI: opt-in auto-import (default OFF -> propose only)
+        -Handled          the previously-handled stable keys (caller reads via
+                          Get-PimDiscoveryHandledSet; omitted -> read here)
+        -EnqueueChange    scriptblock(change) the caller uses to push each fresh
+                          change-queue record (omitted -> records are returned
+                          only, nothing is enqueued -- e.g. WhatIf / dry tests)
+        -SaveHandled      scriptblock([string[]] handled) to persist the rolled
+                          set (omitted -> persisted via Save-PimDiscoveryHandledSet
+                          unless -WhatIf)
+        -WhatIf           compute + report only; no enqueue, no handled-set write
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][ValidateSet('Azure','PowerBI')][string]$Scope,
+        [object[]]$Discovered = @(),
+        [object[]]$Existing = @(),
+        [object[]]$AutoImportRules = @(),
+        [switch]$AutoImport,
+        [object[]]$Handled,
+        [scriptblock]$EnqueueChange,
+        [scriptblock]$SaveHandled,
+        [string]$NotifyRecipient,
+        [switch]$NoNotify,
+        [switch]$WhatIf
+    )
+
+    # 1+2. reconcile the live snapshot against the current definitions
+    if ($Scope -eq 'Azure') {
+        $plan   = Get-PimAzureReconcilePlan -Discovered $Discovered -Existing $Existing -AutoImportRules $AutoImportRules
+        $entity = 'PIM-Definitions-Resources'
+        $by     = 'azure-discovery'
+    } else {
+        $plan   = Get-PimPowerBiReconcilePlan -Discovered $Discovered -Existing $Existing -AutoImport:$AutoImport
+        $entity = 'PIM-Definitions-Services'
+        $by     = 'powerbi-discovery'
+    }
+
+    # the items that COULD produce work this run = create + rename (each carries a
+    # stableKey). unchanged/orphan are not "new things to handle".
+    $candidates = New-Object System.Collections.Generic.List[object]
+    foreach ($c in @($plan.create)) { $candidates.Add($c) }
+    foreach ($r in @($plan.rename)) { $candidates.Add($r) }
+
+    # 3. delta vs the handled-set -> only the NOT-yet-handled candidates survive,
+    #    and the handled set rolls forward (so a handled item never reappears).
+    if (-not $PSBoundParameters.ContainsKey('Handled')) { $Handled = @(Get-PimDiscoveryHandledSet -Scope $Scope) }
+    $delta     = Get-PimDiscoveryDelta -Current $candidates.ToArray() -Handled @($Handled)
+    $freshKeys = @(@($delta.fresh) | ForEach-Object { "$($_.stableKey)" } | Where-Object { $_ })
+
+    # 4. build a plan pruned to only the fresh rows, then convert to queue changes.
+    #    Orphans are CARRIED in the plan for visibility but NEVER removed by a
+    #    scheduled run (no -IncludeOrphanRemovals): destructive deletes stay a
+    #    deliberate human action, matching the manual discovery contract.
+    $freshPlan = Select-PimReconcilePlanByKeys -Plan $plan -FreshKeys $freshKeys
+    if ($Scope -eq 'Azure') {
+        $changes = @(ConvertTo-PimReconcileQueueChanges -Plan $freshPlan -Entity $entity -By $by)
+    } else {
+        $changes = @(ConvertTo-PimPowerBiQueueChanges  -Plan $freshPlan -Entity $entity -By $by)
+    }
+
+    # enqueue the fresh changes (unless WhatIf / no enqueuer supplied).
+    $enqueued = 0
+    if (-not $WhatIf -and $EnqueueChange) {
+        foreach ($ch in $changes) { & $EnqueueChange $ch; $enqueued++ }
+    }
+
+    # 4b. AUDIT + (opt-in) NOTIFY each FRESH item so a new sub/workspace/role is never
+    #     silently staged (REQUIREMENTS §8 "Discovery audit + notify on new items").
+    #     Audit is always written (best-effort); notification is OPT-IN (a recipient must
+    #     be configured) + suppressed under -WhatIf / -NoNotify. Never throws.
+    $notifyItems = @(ConvertTo-PimDiscoveryNotifyItem -FreshPlan $freshPlan -Scope $Scope)
+    $noticeArgs = @{ Items = $notifyItems; Scope = $Scope }
+    if ($PSBoundParameters.ContainsKey('NotifyRecipient')) { $noticeArgs['Recipient'] = $NotifyRecipient }
+    if ($NoNotify) { $noticeArgs['NoMail'] = $true }   # audit still runs; only the mail is suppressed
+    if ($WhatIf)   { $noticeArgs['WhatIf'] = $true }
+    $notice = $null
+    try { $notice = Send-PimDiscoveryNotices @noticeArgs } catch { $notice = $null }
+
+    # 5. persist the rolled handled-set (unless WhatIf). A custom -SaveHandled wins
+    #    (e.g. the SQL settings store); else fall back to the per-scope state file.
+    $handledRolled = @($delta.handled)
+    if (-not $WhatIf) {
+        if ($SaveHandled) { & $SaveHandled $handledRolled }
+        else { Save-PimDiscoveryHandledSet -Scope $Scope -Handled $handledRolled | Out-Null }
+    }
+
+    return [pscustomobject]@{
+        scope         = "$Scope"
+        whatIf        = [bool]$WhatIf
+        discovered    = @($Discovered).Count
+        existing      = @($Existing).Count
+        freshCount    = @($freshKeys).Count
+        enqueued      = $enqueued
+        changes       = @($changes)            # the fresh change-queue records
+        orphanCount   = @($plan.orphan).Count  # surfaced, never auto-removed
+        renameCount   = @($freshPlan.rename).Count
+        createCount   = @($freshPlan.create).Count
+        autoCreate    = @(@($freshPlan.create) | Where-Object { $_.autoImport }).Count
+        handled       = $handledRolled         # the rolled-forward set
+        audited       = $(if ($notice) { [int]$notice.audited } else { 0 })   # fresh items audited (resource.discovered)
+        notified      = $(if ($notice) { [bool]$notice.notified } else { $false })  # opt-in mail sent?
+        notice        = $notice                # @{ audited; notified; recipient; reason; items } or $null
+        detail        = ("discovery[{0}]: discovered={1} fresh={2} enqueued={3} orphans={4} audited={5}{6}" -f `
+                          $Scope, @($Discovered).Count, @($freshKeys).Count, $enqueued, @($plan.orphan).Count, $(if ($notice) { [int]$notice.audited } else { 0 }), $(if ($WhatIf) { ' (whatif)' } else { '' }))
+    }
+}
+
+function Invoke-PimRoleCatalogJobSweep {
+    <#
+      PURE-by-injection discovery job body for the ENTRA scope (and any other service:
+      Defender XDR / Intune as they reach live). Where the Azure/PowerBI sweep catalogs
+      SCOPES, this sweep catalogs new BUILT-IN ROLES for a service: it diffs the live
+      role list against the previously-catalogued (handled) set, enqueues a Create on the
+      service-role catalog for each NOT-yet-known role, audits + (opt-in) notifies each
+      fresh role, and rolls the handled set forward so a known role never reappears
+      (REQUIREMENTS §8 "Enumerate services for new built-in roles" + the Entra-scope job
+      body the scheduler left as a "scope not wired" no-op). No network, no globals
+      required: the live roles, the handled set, the enqueuer + handled-writer are all
+      injected. Safe with -WhatIf (computes + reports, writes nothing).
+
+        -Service        the service whose role catalog is swept ('entra' default; also
+                        'defender' / 'intune' as they go live) -- drives the stable key
+                        + the handled-set file scope ('roles-<service>')
+        -Live           the live role objects ({ id; name }) from the enumerator
+                        (e.g. Get-PimLiveServiceRoles)
+        -Handled        previously-catalogued stable keys (omitted -> read here)
+        -Entity         the change-queue entity for new catalog rows
+                        (default 'PIM-Catalog-ServiceRoles')
+        -EnqueueChange  scriptblock(change) -> push each fresh catalog Create (omitted ->
+                        records returned only, nothing enqueued -- WhatIf / dry tests)
+        -SaveHandled    scriptblock([string[]] handled) (omitted -> per-scope state file)
+        -NotifyRecipient / -NoNotify / -WhatIf  -- same opt-in audit+notify contract as
+                        Invoke-PimDiscoveryJobSweep
+    #>
+    [CmdletBinding()]
+    param(
+        [string]$Service = 'entra',
+        [object[]]$Live = @(),
+        [object[]]$Handled,
+        [string]$Entity = 'PIM-Catalog-ServiceRoles',
+        [scriptblock]$EnqueueChange,
+        [scriptblock]$SaveHandled,
+        [string]$NotifyRecipient,
+        [switch]$NoNotify,
+        [switch]$WhatIf
+    )
+
+    $svc   = if ("$Service".Trim()) { "$Service".Trim().ToLowerInvariant() } else { 'entra' }
+    $scope = "roles-$svc"
+
+    # The previously-catalogued role objects (as {key}) -> Get-PimRoleCatalogDelta takes
+    # role-shaped objects; the handled set is the list of stable keys we've seen. Convert
+    # each handled key into a stub {id} so the delta keys line up (the key IS the id|name).
+    if (-not $PSBoundParameters.ContainsKey('Handled')) { $Handled = @(Get-PimDiscoveryHandledSet -Scope $scope) }
+
+    # The handled set stores the FULL stable key (service|rid). Build a known-key hash
+    # from the handled set + diff the live roles against it (Get-PimRoleCatalogDelta's
+    # same key math, inlined so the handled set drives dedupe directly).
+    $knownKeys = @{}
+    foreach ($h in @($Handled)) { if ("$h") { $knownKeys["$h".ToLowerInvariant()] = $true } }
+    $fresh = New-Object System.Collections.Generic.List[object]
+    foreach ($r in @($Live)) {
+        $rid = "$($r.id)"; $rnm = "$($r.name)"
+        if (-not $rid -and -not $rnm) { $rnm = "$r" }
+        $key = (Get-PimDiscoveredRoleKey -Service $svc -RoleId $rid -RoleName $rnm)
+        if ($knownKeys.ContainsKey($key)) { continue }
+        $knownKeys[$key] = $true   # de-dup within $Live too
+        $fresh.Add([pscustomobject]@{ service=$svc; roleId=$rid; roleName=$rnm; key=$key })
+    }
+    $freshRoles = $fresh.ToArray()
+
+    # enqueue a Create on the catalog for each fresh role (unless WhatIf / no enqueuer).
+    $changes = New-Object System.Collections.Generic.List[object]
+    foreach ($fr in $freshRoles) {
+        $nm = if ($fr.roleName) { "$($fr.roleName)" } else { "$($fr.roleId)" }
+        $changes.Add((New-PimChange -Entity $Entity -Key "$($fr.key)" -Op Create -Payload ([pscustomobject]@{ service=$svc; roleId="$($fr.roleId)"; roleName="$nm" }) -By "$svc-role-discovery"))
+    }
+    $enqueued = 0
+    if (-not $WhatIf -and $EnqueueChange) {
+        foreach ($ch in $changes) { & $EnqueueChange $ch; $enqueued++ }
+    }
+
+    # AUDIT + (opt-in) NOTIFY each fresh role -- same contract as the scope sweep so a new
+    # built-in role is never silently catalogued.
+    $notifyItems = @($freshRoles | ForEach-Object {
+        [pscustomobject]@{ action='create'; resourceType="ServiceRole:$svc"; key="$($_.key)"; name=$(if ($_.roleName) { "$($_.roleName)" } else { "$($_.roleId)" }) }
+    })
+    $noticeArgs = @{ Items = $notifyItems; Scope = "Entra ($svc roles)" }
+    if ($PSBoundParameters.ContainsKey('NotifyRecipient')) { $noticeArgs['Recipient'] = $NotifyRecipient }
+    if ($NoNotify) { $noticeArgs['NoMail'] = $true }   # audit still runs; only the mail is suppressed
+    if ($WhatIf)   { $noticeArgs['WhatIf'] = $true }
+    $notice = $null
+    try { $notice = Send-PimDiscoveryNotices @noticeArgs } catch { $notice = $null }
+
+    # roll the handled set forward = the union of the known keys we've now seen (handled +
+    # this run's live). Persist (unless WhatIf).
+    $handledRolled = @($knownKeys.Keys)
+    if (-not $WhatIf) {
+        if ($SaveHandled) { & $SaveHandled $handledRolled }
+        else { Save-PimDiscoveryHandledSet -Scope $scope -Handled $handledRolled | Out-Null }
+    }
+
+    return [pscustomobject]@{
+        scope         = "Entra"
+        service       = $svc
+        whatIf        = [bool]$WhatIf
+        live          = @($Live).Count
+        freshCount    = @($freshRoles).Count
+        fresh         = $freshRoles
+        enqueued      = $enqueued
+        changes       = @($changes.ToArray())
+        handled       = $handledRolled
+        audited       = $(if ($notice) { [int]$notice.audited } else { 0 })
+        notified      = $(if ($notice) { [bool]$notice.notified } else { $false })
+        notice        = $notice
+        detail        = ("discovery[Entra/{0}]: live={1} fresh={2} enqueued={3} audited={4}{5}" -f `
+                          $svc, @($Live).Count, @($freshRoles).Count, $enqueued, $(if ($notice) { [int]$notice.audited } else { 0 }), $(if ($WhatIf) { ' (whatif)' } else { '' }))
+    }
+}

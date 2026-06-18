@@ -285,5 +285,47 @@ T "fleet: ring plan calls /api/conformance/ring-plan" ($html -match "/api/confor
 T "fleet: matrix load error via stateError"       ($html -match "stateError\('Failed to load the fleet matrix'")
 T "fleet: ring-plan renderer defined"             ($html -match 'function loadFleetRingPlan')
 
+# --- Per-entry ring control (REQUIREMENTS.md s11) ------------------------------
+# The Template Rollout per-entry matrix gains a SuperAdmin ring <select> that
+# drives POST /api/conformance/promote (-> Set-PimEntryRing). Assert the widget,
+# the SuperAdmin gate, the promote call + the revert-on-failure exist (no dead /
+# ungated control, no orphan endpoint).
+T "ring: confPromote defined"                     ($html -match 'function confPromote')
+T "ring: confPromote calls /api/conformance/promote" ($html -match "api\('POST',\s*'/api/conformance/promote'")
+T "ring: matrix has a per-entry ring <select>"    ($html -match "class=`"confRing`"")
+T "ring: ring control SuperAdmin-gated"           ($html -match "roleAtLeast\('SuperAdmin'\)" -and $html -match 'canPromote')
+T "ring: matrix has a Ring column header"          ($html -match '>Ring<')
+T "ring: ring <select> change is wired to confPromote" ($html -match "\.confRing'\)\.forEach\(sel => sel\.onchange")
+T "ring: confPromote reverts dropdown on failure"  ($html -match 'sel\.value = String\(prev\)')
+
+# --- §26d UX polish: a tooltip on EVERY nav tab + responsive nav --------------
+# Every top-level nav tab in the flat #tabs strip must carry a title= tooltip so
+# the control explains itself; the grouped nav copies the flat tab's title onto
+# its menu item (buildNavGroups: `if (tabEl.title) item.title = tabEl.title`), so
+# one tooltip per flat tab covers both navigations. Extract each
+# `<div class="tab" ...>` element and assert it has a non-empty title=.
+$allTabs = 'home','new','map','validate','save','revoke','approvals','accessreview','grid','authoring','onboarding','roleperms','governance','audit','reports','conformance','cutover','jobs','settings','support'
+foreach ($tab in $allTabs) {
+    # The tab <div> for this data-tab, up to its closing '>'. Order of attributes
+    # varies (active/title before or after data-tab), so match the whole opening tag.
+    $tagMatch = [regex]::Match($html, '<div class="tab[^"]*"[^>]*data-tab="' + [regex]::Escape($tab) + '"[^>]*>')
+    if (-not $tagMatch.Success) {
+        # active tab puts class="tab active"; data-tab may precede title -> also try the generic per-line grab.
+        $tagMatch = [regex]::Match($html, '<div class="tab[^>]*data-tab="' + [regex]::Escape($tab) + '"[^>]*>')
+    }
+    $hasTitle = $tagMatch.Success -and ($tagMatch.Value -match 'title="[^"]{8,}"')
+    T "nav tab has a tooltip: $tab" $hasTitle
+}
+# The grouped nav mirrors the flat tab's tooltip onto its dropdown item.
+T "grouped nav copies the flat tab's tooltip" ($html -match 'if \(tabEl\.title\) item\.title = tabEl\.title')
+# Responsive nav: progressive compaction down to phone width. The flat strip and
+# the grouped nav both carry media-query steps; the grouped nav wraps to an
+# accordion at narrow widths and there is an explicit phone (~560px) breakpoint.
+T "responsive: flat strip compacts at <=900px"        ($html -match '@media \(max-width:900px\)')
+T "responsive: grouped nav wraps to accordion <=880px" ($html -match '@media \(max-width:880px\)[\s\S]{0,200}#navGroups \{ flex-wrap:wrap')
+T "responsive: explicit phone breakpoint (<=560px)"   ($html -match '@media \(max-width:560px\)')
+T "responsive: phone nav stacks groups full-width"    ($html -match '@media \(max-width:560px\)[\s\S]{0,400}\.nav-group \{ flex:1 1 100%')
+T "responsive: phone status line wraps (not clipped)" ($html -match '@media \(max-width:560px\)[\s\S]{0,500}#tabRight \{[^}]*white-space:normal')
+
 Write-Host ("`n RESULT: {0} pass, {1} fail" -f $pass, $fail) -ForegroundColor $(if ($fail) { 'Red' } else { 'Green' })
 if ($fail) { exit 1 }

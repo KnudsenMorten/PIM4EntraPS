@@ -11,7 +11,10 @@
     * gate: -RequireGate blocks until the gate is open (scheduled / -Apply)
     * health verdict: healthy only on exit 0 + zero fails
     * rollback plan: roll back on a failed health check to the captured prior revision
-    * scheduler exposes a 'sync-automateit' job type + handler (disabled by default)
+    * SEPARATION (operator correction 2026-06-18): the scheduler exposes NO 'sync-automateit' /
+      update job type or handler, and Register-PimSyncAutomateItHandler is gone -- the update is a
+      standalone mechanism (Invoke-PimUpdate.ps1) run by VisualCron / Task Scheduler / the bootstrap
+      post-sync hook, never triggered by the engine or the in-container scheduler.
 
   Rerunnable, no live tenant. Exits 0 green / 1 on any failure.
 .EXAMPLE
@@ -80,24 +83,31 @@ T 'unhealthy + prev revision -> rollback to it' ($rb.action -eq 'rollback' -and 
 $rb = Get-PimSyncRollbackPlan -Healthy $false -PreviousRevision ''
 T 'unhealthy + no prev revision -> none (manual)' ($rb.action -eq 'none')
 
-# ---- scheduler wiring -----------------------------------------------------
-Write-Host "=== scheduler wiring ===" -ForegroundColor Cyan
+# ---- SEPARATION: the scheduler must NOT own / trigger the update ------------
+# operator correction 2026-06-18: the update (code/SQL-schema/Manager-GUI roll) is a STANDALONE
+# mechanism run by VisualCron / Task Scheduler / the bootstrap post-sync hook -- the engine + the
+# in-container scheduler are for engine runs / slave data downlink only. These assertions LOCK that
+# separation so a future change can't silently re-couple the update to the scheduler.
+Write-Host "=== separation: update NOT a scheduler job ===" -ForegroundColor Cyan
 $sched = @(Get-PimDefaultJobSchedule)
-$syncJob = $sched | Where-Object { $_.type -eq 'sync-automateit' } | Select-Object -First 1
-T 'default schedule has a sync-automateit job' ($null -ne $syncJob)
-T 'sync-automateit disabled by default (opt-in)' ($null -ne $syncJob -and -not $syncJob.enabled)
+$syncJob = $sched | Where-Object { $_.type -eq 'sync-automateit' -or $_.type -eq 'update' } | Select-Object -First 1
+T 'default schedule has NO sync-automateit/update job' ($null -eq $syncJob)
+T "'sync-automateit' is NOT a registered job TYPE" (-not ($script:PimJobTypes -contains 'sync-automateit'))
 
 Initialize-PimDefaultJobHandlers
-T 'sync-automateit handler registered (stub)' ($null -ne (Get-PimJobHandler -Type 'sync-automateit'))
-# a tick over the (disabled) job must not crash and the stub reports intent only.
+T 'NO sync-automateit handler registered' ($null -eq (Get-PimJobHandler -Type 'sync-automateit'))
+T 'Register-PimSyncAutomateItHandler removed (no scheduler->update seam)' ($null -eq (Get-Command Register-PimSyncAutomateItHandler -ErrorAction SilentlyContinue))
+# dispatching the (now-unknown) update type must NOT act -- the scheduler has no handler for it.
 $res = Invoke-PimScheduledJob -Job ([pscustomobject]@{ name='sync'; type='sync-automateit'; enabled=$true }) -NowUtc ([datetime]::UtcNow)
-T 'stub handler runs without acting (ran=false)' ($res.ok -and $res.detail -match 'stub:sync-automateit')
+T 'unknown update job type does not run (no-handler-registered)' ($res.detail -match 'no-handler-registered')
 
-# real handler wiring points at the orchestrator file that ships in this repo.
-$orch = Join-Path $sol 'tools\setup\Invoke-PimSyncAutomateIT.ps1'
-T 'orchestrator script exists' (Test-Path $orch)
-Register-PimSyncAutomateItHandler -OrchestratorPath $orch
-T 'real handler registered after Register-PimSyncAutomateItHandler' ($null -ne (Get-PimJobHandler -Type 'sync-automateit'))
+# the STANDALONE update entry points still exist (they just are not scheduler-driven).
+$orch    = Join-Path $sol 'tools\setup\Invoke-PimSyncAutomateIT.ps1'
+$updEntry = Join-Path $sol 'tools\setup\Invoke-PimUpdate.ps1'
+$vcron    = Join-Path $sol 'tools\setup\Register-PimSyncSchedule.ps1'
+T 'standalone roll orchestrator exists (Invoke-PimSyncAutomateIT.ps1)' (Test-Path $orch)
+T 'standalone update entry exists (Invoke-PimUpdate.ps1)' (Test-Path $updEntry)
+T 'standalone VisualCron/Task-Scheduler registrar exists (Register-PimSyncSchedule.ps1)' (Test-Path $vcron)
 
 Write-Host ("`n RESULT: {0} pass, {1} fail" -f $pass,$fail) -ForegroundColor $(if($fail){'Red'}else{'Green'})
 if ($fail) { exit 1 } else { exit 0 }

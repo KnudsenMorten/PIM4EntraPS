@@ -75,6 +75,38 @@ if (-not $global:PIM_SqlServer) {
 }
 if (-not $global:PIM_SqlDatabase) { throw "Engine config missing: set PIM_SqlDatabase (the desired-store database name, e.g. PimPlatform)." }
 
+# --- §31.3 SCENARIO RESOLUTION (opt-in) ----------------------------------------
+# When a deployment scenario is active ($global:PIM_ActiveScenario / $env:PIM_Scenario),
+# resolve the SPN MODEL so the engine cert-SPN auth targets the RIGHT tenant:
+#   * multi-tenant-spn (S5): the same multi-tenant engine app authenticates AGAINST
+#     the MANAGED tenant id (the central host reaches into the slave) -- set
+#     $global:PIM_TenantId to the managed tenant ($env:PIM_ManagedTenantId).
+#   * local-spn (S1-S4/S6): a local single-tenant SPN against the ambient local tenant
+#     -- no change.
+# PURE resolver (Resolve-PimScenarioSpnAuth) decides; only this block applies it.
+# Default behaviour is unchanged when no scenario is set (Set-PimScenarioContext is
+# only called when a scenario id is present; the SPN tenant override only fires for S5).
+. "$shared\PIM-ScenarioProfile.ps1"
+if (-not $global:PIM_ActiveScenario -and $env:PIM_Scenario) { $global:PIM_ActiveScenario = "$env:PIM_Scenario" }
+if ($global:PIM_ActiveScenario) {
+    try {
+        $scn = Get-PimScenario -Id "$($global:PIM_ActiveScenario)"
+        if ($scn) {
+            [void](Set-PimScenarioContext -Scenario $scn -Quiet)
+            $spnAuth = Resolve-PimScenarioSpnAuth -Scenario $scn -LocalTenantId "$($global:PIM_TenantId)"
+            Write-Host "    Scenario: $($scn.id) ($($scn.role)) -- spnModel=$($spnAuth.spnModel) hosting=$($global:PIM_HostingLocation)" -ForegroundColor DarkCyan
+            if ($spnAuth.multiTenant -and "$($spnAuth.tenantId)".Trim()) {
+                Write-Host "    Auth   : multi-tenant SPN -> authenticating against MANAGED tenant $($spnAuth.tenantId) (was $($global:PIM_TenantId))" -ForegroundColor DarkYellow
+                $global:PIM_TenantId = "$($spnAuth.tenantId)"
+            } elseif ($spnAuth.multiTenant) {
+                Write-Host "    Note   : scenario $($scn.id) is multi-tenant but no managed tenant id (set PIM_ManagedTenantId) -- using ambient tenant." -ForegroundColor DarkYellow
+            }
+        } else {
+            Write-Host "    Note   : PIM_Scenario='$($global:PIM_ActiveScenario)' is not a known scenario id (S1-S6) -- ignoring." -ForegroundColor DarkYellow
+        }
+    } catch { Write-Host "    Note   : scenario resolution skipped: $($_.Exception.Message)" -ForegroundColor DarkYellow }
+}
+
 # --- load the engine (identical chain to the scheduler) ------------------------
 . "$shared\PIM-Rest.ps1"
 . "$shared\PIM-SqlStore.ps1"
@@ -83,6 +115,8 @@ if (-not $global:PIM_SqlDatabase) { throw "Engine config missing: set PIM_SqlDat
 . "$shared\PIM-AzureDiscovery.ps1"        # Azure scope reconcile planner (Power BI discovery mirrors its shape)
 . "$shared\PIM-Discovery.ps1"             # Power BI / service-role / auto-map / delta discovery layer (REST-only)
 . "$shared\PIM-ContextBuilder.ps1"
+. "$shared\PIM-License.ps1"                     # offline Core/Pro edition model (Get-PimEdition)
+. "$shared\PIM-FeatureCatalog.ps1"              # feature catalog + gates (Test-PimFeatureAvailable) -- s29/s30
 . "$shared\PIM-EngineCore.ps1"
 . "$shared\PIM-DisableGuard.ps1"                # account-disable circuit breaker (incident 2026-06-15)
 . "$shared\PIM-Notify.ps1"                      # mail notifications (REST sendMail)
@@ -141,9 +175,14 @@ if (-not $FromQueue) {
     catch { Write-Warning "  [discovery] sweep failed (non-fatal): $($_.Exception.Message)" }
 }
 
-$tot = [pscustomobject]@{ create=0; update=0; remove=0; applied=0; skipped=0; errors=0 }
+$tot = [pscustomobject]@{ kind='pim-engine-summary'; scope=$Scope; mode=$Mode; whatIf=[bool]$WhatIf; create=0; update=0; remove=0; applied=0; skipped=0; errors=0; perScope=@($res) }
 foreach ($r in @($res)) { $tot.create+=$r.create; $tot.update+=$r.update; $tot.remove+=$r.remove; $tot.applied+=$r.applied; $tot.skipped+=([int]$r.skipped); $tot.errors+=$r.errors }
 Write-Host ("==> Done. create={0} update={1} remove={2} applied={3} skipped={4} errors={5}" -f $tot.create,$tot.update,$tot.remove,$tot.applied,$tot.skipped,$tot.errors) -ForegroundColor $(if ($tot.errors) {'Yellow'} else {'Green'})
 Write-Host "    Log    : $logFile"
 if ($script:__transcript) { try { Stop-Transcript | Out-Null } catch {} }
+# Emit the structured run summary to the pipeline so callers (e.g. the scenario-bound
+# runner Invoke-PimScenarioDeploy + the §31 live matrix's idempotency assertion) can
+# capture the REAL create/update/remove counts -- a second pass asserting zero changes
+# needs these numbers, not just a Write-Host. Tagged kind='pim-engine-summary'.
+$tot
 if ($tot.errors) { exit 1 }

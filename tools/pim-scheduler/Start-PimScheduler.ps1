@@ -37,6 +37,11 @@ $global:PIM_UseGraphSdk = $false   # REST-first; no Graph/Az modules
 . "$shared\PIM-DisableGuard.ps1"      # account-disable circuit breaker (incident 2026-06-15)
 . "$shared\PIM-HybridAd.ps1"          # on-prem AD/gMSA-sMSA PLANNER + hybrid-worker seam (on-prem write is worker-only)
 . "$shared\PIM-EngineProviders.ps1"
+. "$shared\PIM-PermissionWizard.ps1"  # Azure scope derivation/depth + group naming (used by the Azure reconcile planner)
+. "$shared\PIM-AzureDiscovery.ps1"    # Get-PimAzureReconcilePlan / ConvertTo-PimReconcileQueueChanges
+. "$shared\PIM-Discovery.ps1"         # discovery enumerators + sweep (Invoke-PimDiscoveryJobSweep)
+. "$shared\PIM-License.ps1"           # offline Core/Pro edition model (Get-PimEdition)
+. "$shared\PIM-FeatureCatalog.ps1"    # feature catalog + gates (Test-PimFeatureAvailable) -- s29/s30
 . "$shared\PIM-Scheduler.ps1"
 
 # State + run-history file location (file-backed VM/local deployments). SQL-backed
@@ -84,6 +89,52 @@ $engineHandler = {
 Register-PimJobHandler -Type 'engine-delta' -Handler $engineHandler
 Register-PimJobHandler -Type 'engine-full'  -Handler $engineHandler
 Write-Host "[scheduler] REST engine wired (scopes: $((Get-PimEngineScopes) -join ', '))" -ForegroundColor Cyan
+
+# Wire the REAL discovery handler (the three discovery jobs: Azure / PowerBI / Entra).
+# It reconciles the live enumerated scopes against the current definitions, surfaces
+# ONLY not-yet-handled items (the handled-set delta, persisted per scope under
+# output/state/discovery-handled-<scope>.json) and enqueues just those fresh items
+# onto the SAME change queue queue-apply drains -- propose-don't-auto-map, never
+# auto-delete (orphans are surfaced, never removed by a scheduled run). The existing
+# definition rows come from $global:PIM_DiscoveryExistingReader (a launcher hook that
+# knows the desired store) when present; absent -> empty (a fresh tenant just sees
+# all-create, still gated by the per-type auto-import rules). The discovered items use
+# the REST enumerators. The change queue file defaults next to the scheduler state.
+$discoQueueFile = if ("$($global:PIM_ChangeQueueFile)".Trim()) { "$($global:PIM_ChangeQueueFile)" }
+                  else { Join-Path (Split-Path -Parent $global:PIM_SchedulerStatePath) 'pim-change-queue.json' }
+Register-PimDiscoveryHandler `
+    -GetDiscovered {
+        param($scope)
+        switch ($scope) {
+            'Azure'   { try { @(Get-PimLiveAzureScopes -IncludeManagementGroups) } catch { @() } }
+            'PowerBI' { try { @(Get-PimLivePowerBiWorkspaces) } catch { @() } }
+            default   { @() }
+        }
+    } `
+    -GetExisting {
+        param($scope)
+        if ($global:PIM_DiscoveryExistingReader) { try { @(& $global:PIM_DiscoveryExistingReader $scope) } catch { @() } } else { @() }
+    } `
+    -GetAutoImportRules {
+        param($scope)
+        if ($global:PIM_DiscoveryAutoImportRules) { @($global:PIM_DiscoveryAutoImportRules) } else { @() }
+    } `
+    -GetLiveRoles {
+        param($service)
+        # ENTRA scope = the role-CATALOG delta (new built-in roles per service). Uses the
+        # REST role-definition enumerator, normalised to { id; name }. Best-effort -> @().
+        $svc = if ("$service".Trim()) { "$service".Trim().ToLowerInvariant() } else { 'entra' }
+        if ($svc -notin @('entra','defender','intune')) { return @() }
+        try { @(Get-PimLiveServiceRoles -Service $svc) } catch { @() }
+    } `
+    -EnqueueChange {
+        param($change)
+        if (Get-Command Add-PimChangeToQueue -ErrorAction SilentlyContinue) {
+            Add-PimChangeToQueue -QueueFile $discoQueueFile -Change $change | Out-Null
+        }
+    } `
+    -AutoImportPowerBI:([bool]$global:PIM_DiscoveryAutoImportPowerBi)
+Write-Host "[scheduler] discovery handler wired (Azure/PowerBI scope-discovery + Entra role-catalog -> change queue: $discoQueueFile)" -ForegroundColor Cyan
 
 # Worker-container scoping: $env:PIM_SCHED_JOBS (comma list of job types) makes this
 # container run only those jobs -- so the SAME image is deployed N times as

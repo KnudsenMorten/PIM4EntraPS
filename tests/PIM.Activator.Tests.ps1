@@ -163,7 +163,8 @@ Describe 'PIM Activator: configurable bulk-activate confirm threshold' {
     }
     It 'popup.js imports the resolver from popup-config.js (single definition, no drift)' {
         $popup = Get-Content -LiteralPath (Join-Path $Activator 'popup.js') -Raw
-        $popup | Should -Match "import\s*\{\s*resolveBulkActivateConfirmThreshold\s*\}\s*from\s*'\./popup-config\.js'"
+        # import may carry additional named symbols (e.g. BULK_ACTIVATE_CONFIRM_THRESHOLD_DEFAULT) alongside the resolver
+        $popup | Should -Match "import\s*\{[^}]*\bresolveBulkActivateConfirmThreshold\b[^}]*\}\s*from\s*'\./popup-config\.js'"
         # The inline copy must be gone -- only the import remains.
         ([regex]::Matches($popup, 'function\s+resolveBulkActivateConfirmThreshold')).Count | Should -Be 0
     }
@@ -199,6 +200,147 @@ console.log(bad===0 ? "ALL-PASS" : ("FAILS="+bad)); process.exit(bad?1:0);
             Should -Be 'bulkActivateConfirmThreshold'
         [xml]$adml = Get-Content -LiteralPath (Join-Path $Activator 'intune\en-US\PIM4EntraPS.PimActivator.adml') -Raw
         ($adml.policyDefinitionResources.resources.stringTable.string.id) | Should -Contain 'BulkThreshold_Explain'
+    }
+}
+
+Describe 'PIM Activator: delegation-load network resilience (v1.6.31 hang fix)' {
+    BeforeDiscovery {
+        $script:HasNode = [bool](Get-Command node -ErrorAction SilentlyContinue)
+    }
+    BeforeAll {
+        $script:Node    = (Get-Command node -ErrorAction SilentlyContinue)
+        $script:NetJs   = Join-Path $Activator 'popup-net.js'
+        $script:NetTest = Join-Path $Activator 'tests\test-network-resilience.js'
+        $script:Popup   = Get-Content -LiteralPath (Join-Path $Activator 'popup.js') -Raw
+    }
+
+    It 'ships the DOM/chrome-free network module popup-net.js' {
+        Test-Path -LiteralPath $script:NetJs | Should -BeTrue
+    }
+    It 'popup.js imports the timeout + watchdog helpers from popup-net.js' {
+        $script:Popup | Should -Match "import\s*\{[^}]*fetchWithTimeout[^}]*\}\s*from\s*'\./popup-net\.js'"
+        $script:Popup | Should -Match "import\s*\{[^}]*withWatchdog[^}]*\}\s*from\s*'\./popup-net\.js'"
+    }
+    It 'every Graph/token/ARM call goes through fetchWithTimeout (no bare fetch except the helper)' {
+        # The only legitimate bare "await fetch(" is inside popup-net.js (the
+        # helper). popup.js itself must use fetchWithTimeout everywhere.
+        ([regex]::Matches($script:Popup, 'await\s+fetch\(')).Count | Should -Be 0
+        ([regex]::Matches($script:Popup, 'fetchWithTimeout\(')).Count | Should -BeGreaterThan 5
+    }
+    It 'the delegation-load bounds EACH eligibility source independently (resilient load, not all-or-nothing)' {
+        # v1.6.7x customer fix ("Loading your PIM assignments did not complete within 75s"):
+        # the load no longer wraps all 6 sources in a single withWatchdog(Promise.all(...)) --
+        # one slow/throttled optional source would trip the whole-path watchdog and wipe the
+        # list. Each source is now bounded on its own (settleWithin + SOURCE_WATCHDOG_MS) and
+        # the load renders whatever succeeded.
+        $script:Popup | Should -Match 'settleWithin\('
+        ([regex]::Matches($script:Popup, 'settleWithin\(')).Count | Should -BeGreaterOrEqual 6
+        $script:Popup | Should -Match 'SOURCE_WATCHDOG_MS'
+        # the all-or-nothing wrapper must be GONE from the load path
+        $script:Popup | Should -Not -Match 'withWatchdog\(Promise\.all\('
+        # group-name resolution is still individually bounded
+        $script:Popup | Should -Match "withWatchdog\(hydrateGroupNames\("
+    }
+    It 'a failed/partial load still captures a per-source diagnostics snapshot' {
+        # The old code captured diagnostics only AFTER a successful Promise.all, so a
+        # timeout left the Diagnostics panel on "no snapshot captured yet". Now per-source
+        # status is recorded before any early return.
+        $script:Popup | Should -Match 'lastLoadStatus'
+        $script:Popup | Should -Match "lastDiagText\s*=\s*'LOAD STATUS"
+    }
+    It 'a load failure renders a visible, actionable error state (never an infinite spinner)' {
+        $script:Popup | Should -Match 'function\s+showLoadFailure'
+        $script:Popup | Should -Match 'showLoadFailure\('
+        # Report-bug affordance + Retry button are part of the error card.
+        $script:Popup | Should -Match 'load-report'
+        $script:Popup | Should -Match 'load-retry'
+    }
+    It 'boot() has a last-resort catch so a rejected boot cannot hang the popup' {
+        $script:Popup | Should -Match 'boot\(\)\.catch\('
+    }
+    It 'ships the offline node test for the resilience primitives' {
+        Test-Path -LiteralPath $script:NetTest | Should -BeTrue
+    }
+    It 'the offline node test passes (timeout / watchdog / network-error logic)' -Skip:(-not $script:HasNode) {
+        Push-Location $Activator
+        try { $out = & $script:Node.Source 'tests/test-network-resilience.js' 2>&1 } finally { Pop-Location }
+        $LASTEXITCODE | Should -Be 0
+        ($out -join "`n") | Should -Match '0 failed'
+    }
+}
+
+Describe 'PIM Activator: Diagnostics environment self-check' {
+    BeforeAll { $script:Popup = Get-Content -LiteralPath (Join-Path $Activator 'popup.js') -Raw }
+    It 'defines the environment-check engine + the endpoints it probes' {
+        $script:Popup | Should -Match 'function\s+runEnvironmentChecks'
+        $script:Popup | Should -Match 'const ENV_CHECK_ENDPOINTS'
+        # probes every endpoint PIMA actually calls (login / graph / arm / update feed)
+        $script:Popup | Should -Match 'login\.microsoftonline\.com'
+        $script:Popup | Should -Match 'graph\.microsoft\.com'
+        $script:Popup | Should -Match 'management\.azure\.com'
+        $script:Popup | Should -Match 'knudsenmorten\.github\.io/PIM4EntraPS/updates\.xml'
+    }
+    It 'checks clock skew + scopes + version + runtime wiring (not just reachability)' {
+        $script:Popup | Should -Match 'Device clock vs Microsoft'
+        $script:Popup | Should -Match 'missingScopes\('
+        $script:Popup | Should -Match 'Extension version'
+        $script:Popup | Should -Match 'chrome\.identity'
+    }
+    It 'each probe is independently bounded (never hangs the popup)' {
+        $script:Popup | Should -Match 'fetchWithTimeout\(ep\.url'
+    }
+    It 'the Run-checks button is wired to runEnvironmentChecks (no dead view) + feeds the copy-able panel' {
+        $script:Popup | Should -Match 'id="pim-diag-check"'
+        $script:Popup | Should -Match 'runEnvironmentChecks\(\)'
+        $script:Popup | Should -Match 'lastEnvChecks'
+        $script:Popup | Should -Match '=== Environment checks ==='
+    }
+}
+
+Describe 'PIM Activator: per-group auto-activate (no chain)' {
+    BeforeAll { $script:Popup = Get-Content -LiteralPath (Join-Path $Activator 'popup.js') -Raw }
+    It 'defines per-group auto-activate opt-in storage (chrome.storage.local, off by default)' {
+        $script:Popup | Should -Match 'function\s+isAutoActivate'
+        $script:Popup | Should -Match 'function\s+toggleAutoActivate'
+        $script:Popup | Should -Match "getStored\(\['autoActivate'\]\)"
+        $script:Popup | Should -Match 'setStored\(\{ autoActivate \}\)'
+    }
+    It 'renders a per-row auto-activate CHECKBOX (labelled, off by default) on DIRECT group rows, wired to toggleAutoActivate' {
+        $script:Popup | Should -Match "canAuto\s*=\s*\(r\.kind === 'group' && !r\.depth\)"
+        # a real labelled checkbox (operator: the bolt icon was unclear) -- not an icon
+        $script:Popup | Should -Match 'type="checkbox" class="auto-cb"'
+        $script:Popup | Should -Match '>auto</label>'   # plain "auto" label (no widening state suffix)
+        # checked ONLY when isAuto -> off by default (autoActivate store starts empty)
+        $script:Popup | Should -Match "isAuto \? 'checked'"
+        $script:Popup | Should -Match 'toggleAutoActivate\(idAttr\)'
+        # no leftover bolt glyph
+        $script:Popup | Should -Not -Match '&#x26A1;'
+    }
+    It 'ticking auto STARTS the activation immediately (this group only) -- not just a next-open preference' {
+        # onchange is async + activates the single group via the normal activateGroup path
+        $script:Popup | Should -Match 'autoCb\.onchange = async'
+        $script:Popup | Should -Match 'if \(autoCb\.checked && !r\.isActive && r\.groupId\)'
+        $script:Popup | Should -Match 'await activateGroup\(tok, r\.groupId'
+        # no chain: it activates r.groupId only (no nested/children expansion in the handler)
+    }
+    It 'the auto label carries NO inline state suffix (avoids horizontal scroll; state shown via badge/propagation)' {
+        $script:Popup | Should -Not -Match 'autoState'
+        $script:Popup | Should -Not -Match "auto<span"
+    }
+    It 'the fun-box waits 10s then shows a RANDOM line every 5s (no immediate repeat)' {
+        $script:Popup | Should -Match 'FUN_START_DELAY_MS\s*=\s*10000'
+        $script:Popup | Should -Match 'FUN_ROTATE_MS\s*=\s*5000'
+        $script:Popup | Should -Match '_funDelay\s*=\s*setTimeout'
+        $script:Popup | Should -Match 'while \(n === _funIdx\) n = Math\.floor\(Math\.random'
+    }
+    It 'on-open sweep activates direct groups only, never chains, runs once, and is hooked into load' {
+        $script:Popup | Should -Match 'function\s+runAutoActivations'
+        $script:Popup | Should -Match 'if \(autoActivateRunDone\) return'
+        # direct + eligible + not-active + not-nested filter (the "no chain" guarantee)
+        $script:Popup | Should -Match "r\.kind === 'group' && !r\.depth && !r\.isNested && !r\.isActive"
+        # activates via the normal single-group path, not any chain/nested expansion
+        $script:Popup | Should -Match 'await activateGroup\(token, r\.groupId'
+        $script:Popup | Should -Match 'runAutoActivations\(token\)'
     }
 }
 

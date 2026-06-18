@@ -64,27 +64,38 @@ function New-PimSqlConnection {
     $type = Resolve-PimSqlClientType
     $c = $type::new($ConnectionString)
     if ($ConnectionString -notmatch '(?i)Integrated\s*Security') {
-        if (-not $global:PIM_SqlAccessToken -and (Get-Command Get-PimRestToken -ErrorAction SilentlyContinue)) {
+        # Acquire a FRESH token on EVERY connection. Get-PimRestToken caches per
+        # resource with an expiry and auto-refreshes when near expiry, so this is
+        # cheap (returns the still-valid cached token) AND it never hands SQL an
+        # expired token. Previously the token was minted once into
+        # $global:PIM_SqlAccessToken and reused forever, so a long-running Manager
+        # (hosted 24/7) failed with "Login failed ... Token is expired" ~1h after
+        # start. Do NOT gate acquisition on the global being empty. (Fix 2026-06-17.)
+        $tok = $null
+        if (Get-Command Get-PimRestToken -ErrorAction SilentlyContinue) {
             # 0) BREAK-GLASS / emergency edition on a client PC: no MI, no SPN -- the
             #    operator signs in interactively as THEMSELVES (audited under the human).
             #    Opt in with $global:PIM_SqlInteractive or $global:PIM_Interactive.
             if ($global:PIM_SqlInteractive -or $global:PIM_Interactive) {
-                try { $global:PIM_SqlAccessToken = Get-PimRestToken -Resource 'https://database.windows.net' -Interactive } catch { Write-Warning "  [sql] interactive token failed: $($_.Exception.Message)" }
+                try { $tok = Get-PimRestToken -Resource 'https://database.windows.net' -Interactive } catch { Write-Warning "  [sql] interactive token failed: $($_.Exception.Message)" }
             }
             # 1) Managed Identity (App Service $IDENTITY_ENDPOINT / IMDS) when present.
-            if (-not $global:PIM_SqlAccessToken -and ($env:IDENTITY_ENDPOINT -or $global:PIM_UseManagedIdentity)) {
-                try { $global:PIM_SqlAccessToken = Get-PimRestToken -Resource 'https://database.windows.net' -UseManagedIdentity } catch { Write-Warning "  [sql] MI token failed: $($_.Exception.Message)" }
+            if (-not $tok -and ($env:IDENTITY_ENDPOINT -or $global:PIM_UseManagedIdentity)) {
+                try { $tok = Get-PimRestToken -Resource 'https://database.windows.net' -UseManagedIdentity } catch { Write-Warning "  [sql] MI token failed: $($_.Exception.Message)" }
             }
-            # 2) Fall back to an SPN (PIM_SqlClientId/Secret or PIM_ClientId/Secret, cert, or az)
-            #    -- e.g. when MI isn't wired into the container. Get-PimRestToken resolves the
-            #    configured client-credentials for the database resource.
-            if (-not $global:PIM_SqlAccessToken) {
+            # 2) Fall back to an SPN (PIM_SqlClientId/Secret or PIM_ClientId/Secret, cert, or az).
+            if (-not $tok) {
                 $sqlCid = if ($global:PIM_SqlClientId) { $global:PIM_SqlClientId } else { $global:PIM_ClientId }
                 $sqlSec = if ($global:PIM_SqlClientSecret) { $global:PIM_SqlClientSecret } else { $global:PIM_ClientSecret }
-                try { $global:PIM_SqlAccessToken = Get-PimRestToken -Resource 'https://database.windows.net' -ClientId $sqlCid -ClientSecret $sqlSec } catch { Write-Warning "  [sql] SPN token failed: $($_.Exception.Message)" }
+                try { $tok = Get-PimRestToken -Resource 'https://database.windows.net' -ClientId $sqlCid -ClientSecret $sqlSec } catch { Write-Warning "  [sql] SPN token failed: $($_.Exception.Message)" }
             }
         }
-        if ($global:PIM_SqlAccessToken) { try { $c.AccessToken = "$($global:PIM_SqlAccessToken)" } catch { Write-Warning "  [sql] set AccessToken failed: $($_.Exception.Message)" } }
+        # Last-resort: an explicitly pre-pinned token (e.g. a caller that minted its own).
+        if (-not $tok -and $global:PIM_SqlAccessToken) { $tok = $global:PIM_SqlAccessToken }
+        if ($tok) {
+            try { $c.AccessToken = "$tok" } catch { Write-Warning "  [sql] set AccessToken failed: $($_.Exception.Message)" }
+            $global:PIM_SqlAccessToken = $tok   # keep the freshest token visible for diagnostics/last-resort
+        }
         else { Write-Warning "  [sql] NO SQL access token acquired (connection would present no credential)" }
     }
     return $c
@@ -124,6 +135,23 @@ function Get-PimSqlConnectionString {
     if (-not $Database) { $Database = if ($global:PIM_SqlDatabase) { "$($global:PIM_SqlDatabase)" } else { 'PIM4EntraPS' } }
     if ($Server) { return "Server=$Server;Database=$Database;Integrated Security=SSPI;Encrypt=False;TrustServerCertificate=True;Connection Timeout=15" }
     if ($global:PIM_SqlConnectionString) { return $global:PIM_SqlConnectionString }
+    # §31.3 HOSTING RESOLUTION (opt-in by scenario). When a deployment scenario is
+    # active AND its resolved hostingLocation names a concrete store (central MSP
+    # Azure SQL for S5 / local SQL for S6), pick that server here instead of relying
+    # only on the ambient $global:PIM_SqlServer. in-tenant (S1-S4) and the
+    # no-scenario case return server='' so the existing ambient logic below wins.
+    # Lowest precedence after the explicit overrides above so nothing already wired
+    # changes; default behaviour is identical when no scenario is set.
+    if ($global:PIM_ActiveScenario -and (Get-Command Resolve-PimScenarioHostingStore -ErrorAction SilentlyContinue)) {
+        try {
+            $hostStore = Resolve-PimScenarioHostingStore -Scenario "$($global:PIM_ActiveScenario)"
+            if ($hostStore -and "$($hostStore.server)".Trim()) {
+                $ssrv2 = "$($hostStore.server)".Trim()
+                if ($ssrv2 -match '(?i)database\.windows\.net') { return (Get-PimAzureSqlConnectionString -Fqdn $ssrv2 -Database $Database) }
+                return "Server=$ssrv2;Database=$Database;Integrated Security=SSPI;Encrypt=False;TrustServerCertificate=True;Connection Timeout=15"
+            }
+        } catch { Write-Verbose "PIM-SqlStore: scenario hosting resolution skipped: $($_.Exception.Message)" }
+    }
     if ($global:PIM_SqlConnStringVault -and $global:PIM_SqlConnStringSecret) {
         return (Get-PimSqlSecretFromKeyVault -VaultName "$($global:PIM_SqlConnStringVault)" -SecretName "$($global:PIM_SqlConnStringSecret)")
     }

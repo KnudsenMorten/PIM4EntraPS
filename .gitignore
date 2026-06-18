@@ -29,6 +29,13 @@ tools/pim-manager/cache/
 tools/pim-manager/instances.custom.json
 
 # ---------------------------------------------------------------------------
+#  Live-test state files -- per-run object ids + tenant/SPN inputs + expected
+#  sets (NO secrets, but tenant ids / object ids); regenerated each run.
+# ---------------------------------------------------------------------------
+tests/live/pimlab-state.json
+tests/live/pimscenario-state.json
+
+# ---------------------------------------------------------------------------
 #  Local IDE / OS noise
 # ---------------------------------------------------------------------------
 .vs/

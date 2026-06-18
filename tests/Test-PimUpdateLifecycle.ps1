@@ -97,6 +97,11 @@ $p = Get-PimUpdateSourceProfile -Source 'git-pull'
 T 'source git-pull => local build / local relaunch / not hosted' ($p.buildMode -eq 'local-build' -and $p.deployMode -eq 'local-relaunch' -and -not $p.isHosted)
 $p = Get-PimUpdateSourceProfile -Source 'sync-automateit'
 T 'source sync-automateit => acr build / aca roll / hosted' ($p.buildMode -eq 'acr-build' -and $p.deployMode -eq 'aca-roll' -and $p.isHosted)
+# s31 S5/S6: MSP managed downlink pulls from-master, ring-gated; build/deploy mirror the managed hosting.
+$p = Get-PimUpdateSourceProfile -Source 'from-master' -ManagedHosting 'central'
+T 'source from-master (central) => acr build / aca roll / hosted / ring-gated' ($p.buildMode -eq 'acr-build' -and $p.deployMode -eq 'aca-roll' -and $p.isHosted -and $p.ringGated)
+$p = Get-PimUpdateSourceProfile -Source 'from-master' -ManagedHosting 'local'
+T 'source from-master (local) => local build / local relaunch / not hosted / ring-gated' ($p.buildMode -eq 'local-build' -and $p.deployMode -eq 'local-relaunch' -and -not $p.isHosted -and $p.ringGated)
 
 # ---- Get-PimBuildPlan -----------------------------------------------------
 $bp = Get-PimBuildPlan -GuiUpdateRequired $true -Source 'sync-automateit' -ImageTag '2.4.220'

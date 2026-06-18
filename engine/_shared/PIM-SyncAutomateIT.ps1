@@ -2,12 +2,19 @@
   PIM4EntraPS -- sync-automateit core (controlled container/VM auto-update).
 
   The PURE, fully-testable decision core behind the container/VM auto-update path
-  (REQUIREMENTS.md sec.1 Hosting/Runtime + sec.2 Containers + sec.6 "sync-automateit job").
+  (REQUIREMENTS.md sec.1 Hosting/Runtime + sec.2 Containers).
   No az calls, no HTTP, no PowerShell modules here -- this file only DECIDES. The thin
-  orchestrators (tools/setup/Invoke-PimSyncAutomateIT.ps1 + the scheduler handler) feed it
-  the facts (current deployed tag, latest released tag, health verdict) and ACT on the plan
-  it returns. That split keeps the risky bits (only update when a NEWER pinned version
-  exists, roll safely, roll back on a failed post-update health check) unit-testable offline.
+  STANDALONE orchestrators (tools/setup/Invoke-PimSyncAutomateIT.ps1 roll-only, and
+  tools/setup/Invoke-PimUpdate.ps1 full lifecycle) feed it the facts (current deployed
+  tag, latest released tag, health verdict) and ACT on the plan it returns. That split
+  keeps the risky bits (only update when a NEWER pinned version exists, roll safely, roll
+  back on a failed post-update health check) unit-testable offline.
+
+  SEPARATION (operator correction 2026-06-18): the update is run by VisualCron / Task
+  Scheduler / the bootstrap post-sync deploy hook -- NOT by the PIM engine or the
+  in-container job scheduler. (The former scheduler 'sync-automateit' job + handler that
+  shelled this orchestrator was removed; this core is now consumed only by the standalone
+  update entries.)
 
   PS 5.1-safe: no ?./??/RSA.ImportFromPem; Set-StrictMode -Off; only built-in cmdlets.
 

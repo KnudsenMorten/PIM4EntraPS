@@ -148,7 +148,7 @@ try {
         @{ p='/api/instances';           chk={ param($r) $r -ne $null } },
         @{ p='/api/preflight';           chk={ param($r) $r -ne $null } },
         @{ p='/api/conformance/templates'; chk={ param($r) $r.templates -ne $null } },
-        @{ p='/api/conformance?template=defender-xdr-roles'; chk={ param($r) @($r.keys).Count -ge 1 -and $r.statuses -ne $null } },
+        @{ p='/api/conformance?template=defender-xdr-roles'; chk={ param($r) @($r.keys).Count -ge 1 -and $r.statuses -ne $null -and $null -ne $r.rings } },
         @{ p='/api/portal-access'; chk={ param($r) "$($r.managerRole)" -ne '' -and $null -ne $r.isSuperAdmin } },
         @{ p='/api/csv/Account-Definitions-Admins'; chk={ param($r) "$($r.base)" -eq 'Account-Definitions-Admins' -and $r.PSObject.Properties['portalFiltered'] } },
         # Visibility & reporting (§26a): the three read endpoints answer with the
@@ -262,6 +262,38 @@ try {
     T 'onboarding self-service-toggle -> AccountStatus change' $okSt
 
     # -------------------------------------------------------------------
+    # Per-entry ring control (§11) -- the Template Rollout tab's ring <select>
+    # drives POST /api/conformance/promote (-> Set-PimEntryRing). Round-trip:
+    # read an entry's current ring from /api/conformance, promote it to a NEW
+    # ring, read back and confirm /api/conformance.rings reflects the change,
+    # then restore the original ring (template file write is reversible here).
+    # Proves the GUI ring widget's endpoint actually persists + reflects.
+    # -------------------------------------------------------------------
+    Write-Host "POST /api/conformance/promote (per-entry ring control)" -ForegroundColor Cyan
+    Beat
+    $okPromote=$false; $okPromoteBad=$false
+    try {
+        $confTpl = 'defender-xdr-roles'
+        $c0 = Probe ('/api/conformance?template=' + $confTpl)
+        $entryKey = @($c0.keys)[0]
+        $origRing = [int]$c0.rings.$entryKey
+        $newRing  = if ($origRing -ge 1) { 0 } else { 1 }   # always a real change, in-range
+        $pr = Invoke-RestMethod -Uri "$base/api/conformance/promote" -Headers $hdr -Method Post -ContentType 'application/json' -TimeoutSec 30 -Body (@{ templateId=$confTpl; key=$entryKey; ring=$newRing } | ConvertTo-Json)
+        $c1 = Probe ('/api/conformance?template=' + $confTpl)
+        $okPromote = ($pr.ok -and [int]$pr.ring -eq $newRing -and [int]$c1.rings.$entryKey -eq $newRing)
+        # restore the original ring so the template file is left unchanged.
+        Invoke-RestMethod -Uri "$base/api/conformance/promote" -Headers $hdr -Method Post -ContentType 'application/json' -TimeoutSec 30 -Body (@{ templateId=$confTpl; key=$entryKey; ring=$origRing } | ConvertTo-Json) | Out-Null
+    } catch { Write-Host "      (promote: $($_.Exception.Message.Split([char]10)[0]))" -ForegroundColor DarkGray }
+    T 'conformance promote -> entry ring persists + reflected in /api/conformance.rings' $okPromote
+    Beat
+    # An unknown entry key must be rejected (400) -- Set-PimEntryRing throws, the
+    # handler maps it to 400; the GUI's confPromote reverts the dropdown on failure.
+    try {
+        Invoke-RestMethod -Uri "$base/api/conformance/promote" -Headers $hdr -Method Post -ContentType 'application/json' -TimeoutSec 30 -Body (@{ templateId='defender-xdr-roles'; key='zzz-no-such-entry'; ring=1 } | ConvertTo-Json) | Out-Null
+    } catch { $okPromoteBad = ([int]$_.Exception.Response.StatusCode -eq 400) }
+    T 'conformance promote unknown entry -> 400' $okPromoteBad
+
+    # -------------------------------------------------------------------
     # Alerting recorded-send PROOF round-trip (§26c / §28 [H2] + [M5] residual).
     # Configure a recipient, fire a TEST alert through the real notify path, then
     # confirm the FEED recorded the fire WITH a recorded-send proof entry. Offline
@@ -275,6 +307,26 @@ try {
         $okAlPut = (@($r.recipients) -contains 'alerts@example.test')
     } catch { Write-Host "      (alerting put: $($_.Exception.Message.Split([char]10)[0]))" -ForegroundColor DarkGray }
     T 'alerting PUT -> recipient saved' $okAlPut
+    Beat
+    # Outbound webhook channel (Teams / generic) -- the §28 [H2] residual. PUT a
+    # SAFE https Teams webhook -> channel enables + kind auto-detected; PUT an
+    # UNSAFE private-IP URL -> channel stays disabled with a reason (SSRF guard).
+    # No real POST happens here (we never call /api/alerting/test against it).
+    $okWhSafe=$false; try {
+        $r = Invoke-RestMethod -Uri "$base/api/alerting" -Headers $hdr -Method Put -ContentType 'application/json' -TimeoutSec 30 -Body (@{ recipients=@('alerts@example.test'); events=@{ 'engine-failure'=$true; 'drift'=$true; 'expiring-access'=$true; 'break-glass'=$true }; webhookUrl='https://contoso.webhook.office.com/webhookb2/abc'; webhookKind='' } | ConvertTo-Json -Depth 5)
+        $okWhSafe = ([bool]$r.webhookEnabled -and "$($r.webhookKind)" -eq 'teams')
+    } catch { Write-Host "      (webhook safe put: $($_.Exception.Message.Split([char]10)[0]))" -ForegroundColor DarkGray }
+    T 'alerting PUT -> safe Teams webhook enables the channel' $okWhSafe
+    Beat
+    $okWhBad=$false; try {
+        $r = Invoke-RestMethod -Uri "$base/api/alerting" -Headers $hdr -Method Put -ContentType 'application/json' -TimeoutSec 30 -Body (@{ recipients=@('alerts@example.test'); events=@{ 'engine-failure'=$true; 'drift'=$true; 'expiring-access'=$true; 'break-glass'=$true }; webhookUrl='http://10.0.0.1/hook'; webhookKind='' } | ConvertTo-Json -Depth 5)
+        $okWhBad = ((-not [bool]$r.webhookEnabled) -and ("$($r.webhookReason)").Length -gt 0)
+    } catch { Write-Host "      (webhook bad put: $($_.Exception.Message.Split([char]10)[0]))" -ForegroundColor DarkGray }
+    T 'alerting PUT -> unsafe webhook URL rejected (disabled + reason)' $okWhBad
+    Beat
+    # Restore mail-only alerting config so the recorded-send proof test below is
+    # unchanged by the webhook (a configured webhook would add a webhook send line).
+    try { Invoke-RestMethod -Uri "$base/api/alerting" -Headers $hdr -Method Put -ContentType 'application/json' -TimeoutSec 30 -Body (@{ recipients=@('alerts@example.test'); events=@{ 'engine-failure'=$true; 'drift'=$true; 'expiring-access'=$true; 'break-glass'=$true }; webhookUrl=''; webhookKind='' } | ConvertTo-Json -Depth 5) | Out-Null } catch {}
     Beat
     $okAlTest=$false; try {
         $r = Invoke-RestMethod -Uri "$base/api/alerting/test" -Headers $hdr -Method Post -TimeoutSec 30

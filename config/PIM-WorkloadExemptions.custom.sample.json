@@ -1,0 +1,31 @@
+{
+  "//": "PIM Manager WORKLOAD-BINDING exemptions (Delegation Map reconciliation).",
+  "//1": "Copy to PIM-WorkloadExemptions.custom.json (gitignored). A desired",
+  "//2": "PIM-Assignments-Workloads row that is NOT live in the crawl shows as",
+  "//3": "'missing' on the Delegation Map -- UNLESS an ACTIVE exemption excuses it,",
+  "//4": "in which case it shows as 'exempted'. Mirrors the exemptions model:",
+  "//5": "reason REQUIRED; expiresOn REQUIRED unless noExpiry:true (never indefinite",
+  "//6": "by default). An EXPIRED exemption stops excusing -- the binding resurfaces",
+  "//7": "as 'missing' and re-enters the next reconcile. Match keys: workload + role",
+  "//8": "must match (case-insensitive); groupTag/scope match only when specified",
+  "//9": "(omit = any). An entry with neither workload nor role is ignored (too broad).",
+
+  "exemptions": [
+    {
+      "workload": "defender-xdr",
+      "role": "PIM-Defender-XDR-SecurityPosture-Operator-L3-T1-MP-ID",
+      "groupTag": "PIM-Defender-XDR-SecurityPosture-Operator-L3-T1-MP-ID",
+      "scope": "/",
+      "reason": "Defender Unified RBAC custom role pending creation in this tenant's change window; binding deferred.",
+      "createdBy": "operator@example.onmicrosoft.com",
+      "expiresOn": "2026-09-30"
+    },
+    {
+      "workload": "intune",
+      "role": "Read Only Operator",
+      "reason": "Read-only Intune delegation is managed manually in this tenant outside the PIM model.",
+      "createdBy": "operator@example.onmicrosoft.com",
+      "noExpiry": true
+    }
+  ]
+}

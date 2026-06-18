@@ -167,6 +167,35 @@ Defaults wired into the script:
 | `-Scope` | `User` (HKCU) | `Machine` for un-managed servers / kiosk boxes |
 | `-Browser` | `Both` | `Edge` or `Chrome` to skip the other |
 
+### Override the org's activation defaults at deploy time (all deploy paths)
+
+The popup pre-fills the Activate form's **justification** and **activation
+length** from the managed tenant catalog. An MSP can set the org's defaults at
+deploy time — opt-in, on **every** tenant entry written — with two parameters
+that work the same way on **all three** deploy scripts
+(`Deploy-PimActivatorClient.ps1`, `Deploy-PimActivatorHybrid.ps1`,
+`Deploy-PimActivatorIntune.ps1`):
+
+| Parameter | Effect |
+|---|---|
+| `-DefaultJustification <text>` | Overwrites `defaultJustification` on every tenant entry written |
+| `-DefaultDurationHours <1..24>` | Overwrites `defaultDurationHours` (whole hours) on every tenant entry |
+
+Both are **additive + opt-in**: omit them and each tenant entry keeps its own
+value (from the catalog file or the auto-discover fallback). When supplied, the
+override is applied to **every** tenant in the catalog — including all up-to-25
+tenants in a multi-tenant Hybrid UNC config — and the script prints the override
+it applied.
+
+```powershell
+# Set the org default justification + 4h activation length across every tenant:
+.\Deploy-PimActivatorHybrid.ps1 -ConfigUncPath \\fs01\pim\tenants.json -Target LocalGpo `
+    -DefaultJustification 'Approved change / incident work' -DefaultDurationHours 4
+
+.\Deploy-PimActivatorIntune.ps1 -CatalogJsonPath .\catalog.json `
+    -DefaultJustification 'Approved change / incident work' -DefaultDurationHours 4
+```
+
 ### Intune managed-policy equivalent (no script)
 
 Microsoft Edge → **Configuration profile** → **Settings catalog** →

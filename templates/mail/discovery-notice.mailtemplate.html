@@ -1,0 +1,19 @@
+<!-- subject: [PIM Discovery] {{ItemCount}} new {{Scope}} item(s) found -->
+<!-- tokens: Scope, ItemCount, DiscoveredList, TenantName, Instance, WhenUtc -->
+<!-- Sent (opt-in) when a scheduled discovery sweep surfaces fresh items (a new subscription / management group / Power BI workspace / built-in role) so they are never silently staged. Opt in by setting the discovery notification recipient in the Manager. To customize: copy to discovery-notice.mailtemplate.custom.html and edit. -->
+<html>
+<body style="font-family:Segoe UI,Arial,sans-serif; color:#24292f; font-size:14px;">
+  <p>Hello,</p>
+  <p><b>A PIM4EntraPS discovery sweep found {{ItemCount}} new item(s) in your privileged-access estate.</b></p>
+  <p>These were staged for review (a new resource is never auto-mapped to a principal). Open the PIM Manager to approve or adjust them.</p>
+  <table cellpadding="4" style="border-collapse:collapse; font-size:14px;">
+    <tr><td><b>Scope</b></td><td>{{Scope}}</td></tr>
+    <tr><td><b>New items</b></td><td>{{ItemCount}}</td></tr>
+    <tr><td><b>Tenant</b></td><td>{{TenantName}}</td></tr>
+    <tr><td><b>Instance</b></td><td>{{Instance}}</td></tr>
+    <tr><td><b>When</b></td><td>{{WhenUtc}}</td></tr>
+  </table>
+  <p><b>Discovered:</b><br>{{DiscoveredList}}</p>
+  <p style="color:#57606a;">You are receiving this because a discovery notification recipient is configured in the PIM Manager. Every discovered item is also recorded in the engine audit log (resource.discovered).</p>
+</body>
+</html>

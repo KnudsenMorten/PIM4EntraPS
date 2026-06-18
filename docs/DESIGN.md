@@ -33,7 +33,7 @@ the alternative was found to fail in practice.
 8. [Scale, performance & resilience (lean context)](#8-scale-performance--resilience-lean-context)
 9. [Delegation model — group-centric, portal-admins, personas](#9-delegation-model)
 10. [Notifications](#10-notifications)
-11. [Hosting & runtime (single-tenant, two-plane topology, execution model, install guide, update lifecycle)](#11-hosting--runtime)
+11. [Hosting & runtime (single-tenant, two-plane topology, execution model, install guide, update lifecycle, deployment scenarios S1–S6)](#11-hosting--runtime)
 12. [Containers](#12-containers)
 13. [MSP architecture (two planes, signed courier, profiles)](#13-msp-architecture)
 14. [SQL / data model](#14-sql--data-model)
@@ -261,6 +261,36 @@ Generated from `$global:PIM_NamingConventions.PimGroupPattern` in
 without a separate lookup; KQL/Log Analytics can `parse displayName` to bucket by
 tier/service/domain; onboarding derives the group name from a worksheet (no
 creative naming, no collisions).
+
+#### Supported substitution tokens + the GUI legend
+
+The name patterns are `{Token}` templates expanded by `Expand-PimNamePattern`
+(`engine/_shared/PIM-Naming.ps1`) — case-insensitive, unknown tokens left
+unchanged. The full supported set the resolvers honour:
+
+| Token | Used by | Meaning |
+|---|---|---|
+| `{Initial}` *(preferred)* | admin account | owner's initials / short owner identifier |
+| `{Owner}` *(synonym)* | admin account | backward-compat alias for `{Initial}` (still honoured) |
+| `{AdminTypePrefix}` | admin account | prefix by admin-type (internal = none, external-adminuser = `x-`) |
+| `{Platform}` ≡ `{EnvironmentSuffix}` | admin account | environment suffix (Entra = `-ID`, AD = `-AD`) |
+| `{Role}` / `{Department}` / `{AdminUnit}` | group | role/service, owning department, AU subset |
+| `{Workload}` / `{Scope}` / `{Permission}` / `{Level}` / `{Tier}` / `{Plane}` | resource group | Azure workload, scope, permission/role, level, tier, plane code |
+
+`Resolve-PimAdminName` wires `{Owner}` and `{Platform}` as synonyms in code
+(both map to the same value as `{Initial}` / `{EnvironmentSuffix}`), so legacy
+customer patterns keep working.
+
+The Manager **shows** this set so operators never guess (REQUIREMENTS §11): the
+Settings → Naming card renders a collapsible legend from an authoritative JS
+catalog (`PIM_NAMING_TOKENS` in `pim-manager.html`) — each token with a one-line
+meaning + example and a **click-to-insert** chip that drops the token at the caret
+of the focused naming **Value** field. The catalog is a 1:1 mirror of the resolver;
+`tests/Test-PimNamingTokenLegend.ps1` fails the build if the two ever drift. The
+Governance → Mail templates editor shows a **per-template** legend derived from the
+shipped body's `{{…}}` placeholders (see §10). Both legends are plain static HTML
+(readable with JS off); the click-to-insert is a JS-only progressive enhancement
+and adds no endpoint.
 
 ### 3.4 Tier model (Microsoft Enterprise Access Model)
 
@@ -831,6 +861,24 @@ existing `POST` still grants) and `POST /api/conformance/exemptions/revoke`
 nothing writes nothing). The Template Rollout tab renders the register under the
 conformance matrix with per-row state colouring and a **Revoke** button; revoking a
 waiver reloads the matrix so the affected item re-shows as a Gap.
+
+### 6.3b Per-entry ring control — promote a template item to a different rollout wave
+
+Each template entry carries a `ring` (default 2, range 0–9; `Get-PimTemplateEntryRing`),
+and an entry deploys to a tenant only when `entryRing <= tenantRing`
+(`Test-PimRingInScope`). `Set-PimEntryRing` (pure — clones the template, sets the
+named entry's `ring`, throws on an unknown key) is the engine primitive; the Manager
+exposes it as `POST /api/conformance/promote` (`{ templateId, key, ring }`,
+SuperAdmin-gated, writes the updated template file, `400` on an unknown entry). To
+make the endpoint observable + drivable from the GUI (the "no dead functionality /
+GUI↔engine alignment" rule), the per-tenant conformance matrix endpoint
+(`GET /api/conformance`) now also returns a `rings` map (entry key → current ring),
+and the **Template Rollout** per-entry grid renders a **Ring** column: a SuperAdmin
+gets a `0–9` `<select>` per row (`confPromote` → `POST /api/conformance/promote`,
+re-reads the matrix on success and snaps the dropdown back to its prior value on
+failure so the GUI never drifts from the saved template); a non-SuperAdmin sees the
+ring read-only. This is distinct from the **admin** ring (per-administrator rollout
+ring, §17.5) — this one is the **template-entry** rollout wave.
 
 ### 6.4 Workload-RBAC providers — Defender XDR & Intune
 
@@ -1446,6 +1494,16 @@ resolves custom-over-locked and routes through `$global:PIM_NotificationChannels
 Mail-template types, token list, subject-line convention, and the
 contacts/email-flow routing layer are detailed in §17.6 / §17.17.
 
+**GUI mail-template editor — supported-tokens legend (REQUIREMENTS §11).** When an
+operator edits a template in Governance → Mail templates, the editor renders a
+**per-template** legend of the `{{token}}` placeholders that template type provides
+at send time. The list is derived (`mailTemplateTokens` in `pim-manager.html`) from
+the **shipped** body returned by `GET /api/mail-template?type=` (and any token
+already in the effective body) — so it is factual per type, never an invented
+superset; tokens the engine isn't given for that mail render empty. Each token is a
+click-to-insert chip that drops `{{Token}}` at the caret of the body textarea. No
+new endpoint — the editor's existing GET already returns the shipped body.
+
 ### 10.1 Notification batch (`PIM-Notifications.ps1`)
 
 The §12 batch lives in `PIM-Notifications.ps1` (dot-sourced by `PIM-Functions.psm1`
@@ -1678,6 +1736,25 @@ Key semantics:
   groups-deploy, policies, pim-entra, pim-azure, pim-au, workloads), each with its
   own cadence, so a change commits fast without a whole-tenant pass.
 - **Discovery = 3 jobs** — `discovery` scoped to **Entra**, **Azure**, **PowerBI**.
+  The scheduled sweep body is `Invoke-PimDiscoveryJobSweep` (`PIM-Discovery.ps1`):
+  a pure, injectable core that (1) enumerates the live items for a scope, (2)
+  reconciles them against the current definitions (`Get-PimAzureReconcilePlan` /
+  `Get-PimPowerBiReconcilePlan`), (3) applies the handled-set **delta**
+  (`Get-PimDiscoveryDelta`) so an item that was already proposed never reappears —
+  the rolled-forward handled set persists per scope under
+  `output/state/discovery-handled-<scope>.json` (`Get-`/`Save-PimDiscoveryHandledSet`),
+  and (4) enqueues **only the fresh items** onto the same change queue `queue-apply`
+  drains (auto-imports → Create, renames → Update). A scheduled run is
+  **propose-don't-auto-map, never auto-delete**: it can only ever create empty
+  permission-group containers (where an auto-import rule applies) and rename in
+  place; orphans are *surfaced* in the result but **never removed** automatically
+  (destructive deletes stay a deliberate human action). `-WhatIf` computes and
+  reports but writes nothing (no enqueue, no handled-set write). The real handler is
+  wired into the scheduler via `Register-PimDiscoveryHandler` (the launcher supplies
+  the live-enumerator / existing-rows / enqueue seams); until it is wired, the
+  `discovery` job degrades to a clearly-logged no-op rather than silently doing
+  nothing. An `Entra`-scope job (built-in-role catalog) degrades to an explicit
+  "scope not wired" no-op for now (the catalog-delta seam is separate).
 - **Commit-only trigger** — `Request-PimCommit` (and the SQL change **watermark**)
   enqueue an immediate recompute+reconcile. **Queuing a change triggers nothing.**
 - **VM + container** — same code; `-IntervalSeconds` / `$env:PIM_SCHED_INTERVAL`,
@@ -1694,7 +1771,7 @@ Key semantics:
 | **Escalations** (approvals aging past SLA) | scheduled (hourly) | scheduler → next approver layer + mail |
 | **Connectors** (workload role discover/apply) | invoked *by* the engine runs | in-process via PIM-Rest (not a separate scheduler) |
 | Azure auto-discovery / reconcile | scheduled | in-container scheduler |
-| **sync-automateit** (controlled image auto-update) | scheduled (opt-in) **+** on-demand `-Apply` | in-container scheduler job / VM scheduled task → version-check → zero-downtime roll → hosted-smoke health check → auto-rollback |
+| **Update** (code → SQL-schema upgrade + Manager-GUI build/roll) | **STANDALONE** — scheduled by VisualCron / Task Scheduler, or fired by the post-sync deploy hook after a sync pull | **NOT the engine/scheduler.** A standalone entry (`Invoke-PimUpdate.ps1`) → detect → build image from pulled code → roll → idempotent schema upgrade → hosted-smoke verify → auto-rollback → notify → ensure-monitor |
 
 **Why not the alternatives (each breaks a constraint):**
 - **Azure Functions** — reaching the *private* SQL needs VNet integration = the
@@ -2085,15 +2162,17 @@ take whatever is newest" risk. The flow is the same shape in both modes —
 decisions live in a **pure, unit-tested core** (`engine/_shared/PIM-SyncAutomateIT.ps1`);
 the orchestrator only gathers facts and acts on the plan the core returns.
 
-> **`Invoke-PimUpdate.ps1`** is the single operator-facing wrapper for this flow.
-> It is being built on the `feat/pim-update-lifecycle` branch; the **intended
-> usage** is documented here so the runbook is ready when it lands. Until then,
-> the same flow is available through its building blocks:
-> `tools/setup/Invoke-PimSyncAutomateIT.ps1` (internal roll + auto-rollback),
-> `tools/setup/Update-PimContainers.ps1` (zero-downtime roll / rollback),
-> `tools/setup/Register-PimSyncSchedule.ps1` (VM scheduled task), and the
-> `sync-automateit` in-container scheduler job. When `Invoke-PimUpdate.ps1` is
-> merged, update this section to fold those calls behind it.
+> **`Invoke-PimUpdate.ps1`** is the single operator-facing, **standalone** entry for
+> this flow. The update is **separate from the PIM engine and the in-container job
+> scheduler** (operator correction 2026-06-18): the engine + scheduler run engine
+> jobs and the slave data downlink only; they never trigger or run a code/schema/GUI
+> update. The update is invoked **out-of-band** — by VisualCron / Task Scheduler
+> (`tools/setup/Register-PimSyncSchedule.ps1`), or fired automatically by the bootstrap
+> **post-sync deploy hook** (`sync/_SyncDeploy.ps1`) after a `sync-automateit` pull.
+> Its building blocks: `tools/setup/Build-PimManagerImage.ps1` (build the image from the
+> pulled code), `tools/setup/Invoke-PimSyncAutomateIT.ps1` (internal roll + auto-rollback),
+> `tools/setup/Update-PimContainers.ps1` (zero-downtime roll / rollback). `Invoke-PimUpdate.ps1`
+> folds these behind one cert-auth, unattended, idempotent entry.
 
 #### 11.6.1 The flow
 
@@ -2104,7 +2183,7 @@ the orchestrator only gathers facts and acts on the plan the core returns.
 | **deploy** | Internal: roll every Container App to the new tag through the **zero-downtime** roller (new revision, traffic shift, min-1 replica; apps pull via their AcrPull MI). Community: the new code is in place after the pull; rebuild the local Manager process. |
 | **verify** | Run the **hosted smoke** (`tests/live/Test-PimManagerHostedSmoke.ps1`) as the health check (community: the offline suite + a local Manager start). |
 | **notify** | Mail the operators the outcome (rolled to `<tag>`, healthy / rolled-back). |
-| **ensure-monitor** | Confirm the always-on health probe + the scheduled `sync-automateit` job/task are in place so the next cycle is covered. |
+| **ensure-monitor** | Confirm the always-on health probe + the **standalone** update schedule (the VisualCron / Task-Scheduler task, or the post-sync deploy hook) are in place so the next cycle is covered. |
 
 **`-DetectOnly` vs `-Apply`:** the lifecycle is **dry-run by default** —
 `-DetectOnly` reports the decision (what's deployed, what's newest, whether a
@@ -2156,12 +2235,21 @@ git pull
    revision reactivate) and fail loudly.
 7. **mail-notify** — mail the operators the result.
 
-**Scheduling.** The in-container scheduler exposes a `sync-automateit` job
-(disabled by default, opt-in) so the always-on container drives the cycle on a
-cadence; on a VM host the same cadence comes from a scheduled task
-(`Register-PimSyncSchedule.ps1`, default 03:00 local), which can drive the
-Container Apps roll or run a local pull on a pure-VM (no-ACA) host. Either way
-the apply only happens inside the maintenance window or on an explicit `-Apply`.
+**Scheduling (standalone — NOT the engine/scheduler).** The update is **never** an
+in-container scheduler job (operator correction 2026-06-18 removed the former
+`sync-automateit` scheduler job + its handler so the engine/scheduler can never
+trigger the update). Two standalone triggers drive the cadence instead:
+- **VisualCron / Windows Task Scheduler** — `Register-PimSyncSchedule.ps1` registers a
+  task (default 03:00 local) that runs `Invoke-PimUpdate.ps1 -Apply` (full lifecycle:
+  schema + GUI build/roll + verify) for the internal or community edition; the exported
+  task XML imports into VisualCron unchanged. `-UpdateMode RollOnly` drives the lighter
+  image-roll path; `-LocalPull` runs a customer pull script on a pure-VM (no-ACA) host.
+- **Post-sync deploy hook** — on the internal edition the bootstrap `sync-automateit` pull
+  fires `Invoke-PimUpdate.ps1 -Apply` automatically after the code is pulled (the
+  per-solution `Deploy` block in `sync/Sync-AutomateIT.json`), so the pull *is* the trigger.
+
+Either way the apply only happens inside the maintenance window or on an explicit `-Apply`,
+and it runs cert-auth + unattended (no prompts).
 
 #### 11.6.4 When is a SQL/schema and/or GUI update required, and how
 
@@ -2223,6 +2311,304 @@ exercised offline without touching Azure/SQL (`tests/PIM.DeployAll.Tests.ps1`). 
 parameterised for any tenant (no baked-in tenant/sub/SQL/RG/KV; cert-auth, unattended). The
 **live deploy + validate against a real test tenant is the release gate** — the offline suite
 is necessary but not sufficient.
+
+### 11.8 Deployment scenarios — the six supported topologies (S1–S6)
+
+PIM4EntraPS supports a fixed, named set of **deployment topologies**: the
+combination of *who runs it* (a single tenant, an MSP master, or an MSP-managed
+customer tenant), *which distribution edition* it is (Internal/AutomateIT vs the
+public Community edition), *where the update comes from*, *where the GUI + SQL
+live*, *which SPN model* authenticates, and *what license tier* the feature
+catalog (§19) gates on. Capturing these as one explicit catalog means the GUI,
+the engine, the update/sync paths, and the deploy scripts all resolve the same
+topology rather than each guessing from ambient signals.
+
+**Status (honest).** The scenario **catalog + the resolver** that maps a scenario
+onto the existing knobs (config variant, update-source profile, ring gating,
+active license edition, hosting location, SPN model) are **built and
+offline-verified**, and the update-source selector + license-tier gating are wired
+end-to-end through the entry points (`-Scenario S1..S6` on `Invoke-PimUpdate` /
+`Invoke-PimDeployAll` / `Build-PimManagerImage`). The **MSP-managed downlink/sync
+runtime (S5/S6)** — the ring-gated pull of the signed baseline *from the master*,
+the master→managed admin/permission sync, hosting-location branching, and SPN-model
+branching — is **plan-surfaced but not yet wired live**. None of S1–S6 is
+"delivered" in the §19 sense until it is verified against a live deployment; the
+**3-tenant materialization** (master = internal, two managed test tenants) is the
+release gate. The diagrams below mark every not-yet-live element with `⧗ pending`.
+
+#### Scenario overview
+
+The scenario is a single descriptor: every scenario sets exactly one value per
+dimension. The dimensions are deliberately **solution-agnostic** (a sibling
+solution can reuse the same descriptor and supply only its own bindings); only the
+*bindings* are PIM-specific.
+
+| Id | Role | Edition (distribution) | Update source | Hosting (GUI+SQL) | SPN model | Sync (master→managed) | License tier |
+|----|------|------------------------|---------------|-------------------|-----------|-----------------------|--------------|
+| **S1** | single tenant | Internal/AutomateIT | internal AutomateIT | in tenant | local SPN | — | Pro (Design Partner) |
+| **S2** | single tenant | Community | GitHub | in tenant | local SPN | — | Community |
+| **S3** | MSP **master** | Internal/AutomateIT | internal AutomateIT | in master tenant | local SPN | — | Pro (Design Partner) |
+| **S4** | MSP **master** | Community | GitHub | in master tenant | local SPN | — | Pro *(MSP/master features need Pro)* |
+| **S5** | MSP **managed** | Internal/AutomateIT | **from master, ring-gated** | **central** (MSP tenant) | **multi-tenant SPN** | admins + permissions | Pro (Design Partner) |
+| **S6** | MSP **managed** | Internal/AutomateIT | **from master, ring-gated** | **local** (managed tenant) | local SPN | admins + permissions | Pro (Design Partner) |
+
+Two distinct axes are easy to conflate and are kept separate on purpose:
+- **Distribution edition** (`Internal/AutomateIT` vs `Community`) — branding +
+  *where updates originate* (the internal AutomateIT source vs public GitHub).
+- **License tier** (`Community` / `Pro` / `Pro Design Partner`) — the commercial
+  gate the §19 feature catalog enforces. S2 runs Community-gated; S4 needs Pro to
+  unlock the MSP/master features; S1/S3/S5/S6 run at the top tier.
+
+How each generic dimension resolves onto the engine's existing knobs:
+
+```
+   scenario  ──► resolver ──► existing knobs the rest of the system already uses
+   ─────────     ────────     ──────────────────────────────────────────────────
+   edition    ─────────────►  distribution-edition flag        (branding/origin)
+   licenseTier ────────────►  active edition the §19 catalog gates on
+   updateSource ───────────►  update-source profile:
+                                internal-automateit → sync-automateit (ACR build → ACA roll)
+                                github              → git-pull        (local build/relaunch)
+                                from-master-by-rings→ from-master     (ring-gated; central⇒ACA roll, local⇒relaunch)
+   role / syncModel ───────►  config variant (msp vs local); managed also runs the
+                                master→managed admin+permission sync (pull-not-push)
+   hostingLocation ────────►  SQL + web resolution (central MSP store vs local store vs in-tenant)
+   spnModel ───────────────►  cert-SPN auth target (multi-tenant SPN for S5; local SPN otherwise)
+   syncFileLocation ───────►  where master→managed sync files are staged (central vs local folders)
+```
+
+#### Topology — single tenant (S1 / S2)
+
+The simple case: GUI, SQL, engine and the governed tenant are all **one tenant**.
+S1 vs S2 differ only in **distribution edition + update source + license tier** —
+the *topology is identical*. No master, no cross-tenant anything.
+
+```
+   INTERNET ─────────────► ✖  no public endpoint  (publicNetworkAccess = Disabled)
+
+ ┌──────────────────────── ONE tenant (S1 internal / S2 community) ──────────────────┐
+ │   ┌───────────────────────────┐        Graph / ARM REST (app-only, cert SPN)        │
+ │   │  PIM Manager (GUI)         │───────────────────────────────────────┐            │
+ │   │   private endpoint only    │                                        ▼            │
+ │   │   Easy Auth sign-in        │                              Entra ID / Azure RBAC  │
+ │   └─────────────┬─────────────┘                              (this tenant's PIM)     │
+ │                 │ MI, private endpoint                                                │
+ │                 ▼                                                                     │
+ │            SQL store (in tenant)  ◄─── engine reads desired / writes run state        │
+ │                 ▲                                                                     │
+ │            local SPN + cert (single-tenant)                                          │
+ └──────────────────────────────────────────────────────────────────────────────────┘
+        UPDATE: S1 ◄── internal AutomateIT source   |   S2 ◄── public GitHub
+        LICENSE: S1 = Pro (Design Partner)          |   S2 = Community
+```
+
+#### Topology — MSP master (S3 / S4)
+
+The **master** tenant holds the central authoritative baseline (the templates,
+rings, fleet/version metadata) and the MSP operator's own Manager + SQL. It is, in
+effect, an S1/S2 deployment *plus* the master-side authoring + signing + rollout
+control. S3 vs S4 again differ only in edition/update-source/license; the master
+**hosts and signs** — it never reaches into a managed tenant (that boundary is the
+managed-tenant pull, below).
+
+```
+ ┌──────────────────────── MSP MASTER tenant (S3 internal / S4 community) ─────────────┐
+ │   ┌───────────────────────────┐                                                      │
+ │   │  PIM Manager (master GUI)  │   authoring: templates · rings · fleet/version       │
+ │   │   private endpoint only    │                                                      │
+ │   └─────────────┬─────────────┘                                                      │
+ │                 │ MI                                                                  │
+ │                 ▼                                                                     │
+ │        Central registry SQL  (Owner=MSP baseline + rings + version metadata)          │
+ │                 │                                                                      │
+ │                 ▼  build + SIGN (private baseline key)                                 │
+ │        Signed baseline bundle  ──► staged for managed tenants to PULL (S5/S6)          │
+ │                                     (the downlink itself lives in the next diagram)    │
+ └──────────────────────────────────────────────────────────────────────────────────┘
+        UPDATE: S3 ◄── internal AutomateIT source  |  S4 ◄── public GitHub
+        LICENSE: S3 = Pro (Design Partner)         |  S4 = Pro (MSP features require Pro)
+        local SPN + cert in the master tenant; master HOSTS + SIGNS, never writes downstream.
+```
+
+#### Topology — MSP managed, CENTRAL hosted, multi-tenant SPN (S5)
+
+A managed/slave customer tenant whose **GUI + SQL live centrally in the MSP
+tenant** and whose acting identity is a **multi-tenant SPN** that authenticates
+*into* the managed tenant. Updates and the admin/permission set are **pulled from
+the master, ring-gated**. Sync files are staged in **central** per-tenant folders
+on the MSP automation server. The pull and the engine apply are the *only* things
+that touch the managed tenant — and that traffic is **private over a cross-tenant
+VNet** (see the hard constraint below).
+
+```
+   MSP (central) tenant                            MANAGED / slave tenant
+ ┌──────────────────────────────────┐            ┌──────────────────────────────────┐
+ │  Central GUI + SQL for THIS       │            │  (no local GUI / SQL — central)    │
+ │  managed tenant  (separate store) │            │                                    │
+ │        ▲                          │            │   Entra ID / Azure RBAC            │
+ │        │ MI                       │  apply via │   (the governed PIM here)          │
+ │  Engine (central)  ──────────────────────────────►  ▲                              │
+ │        ▲   multi-tenant SPN + cert │  PRIVATE  │     │ accounts · groups · scopes   │
+ │        │   (authenticates INTO     │  x-tenant │     │  created from master baseline│
+ │        │    the managed tenant) ⧗  │   VNet    │     │  + ring-approved version     │
+ │  Sync files (CENTRAL folders) ⧗   │            │   └──────────────────────────────┘
+ │  Ring-gated pull FROM master ⧗    │◄═══ private cross-tenant VNet only (never internet)
+ └──────────────────────────────────┘
+   UPDATE: from master, ring-gated  ·  LICENSE: Pro (Design Partner)
+   ⧗ pending = central-hosting / multi-tenant-SPN / sync-file / downlink runtime not yet wired live
+```
+
+#### Topology — MSP managed, LOCAL hosted, local SPN (S6)
+
+Same managed-tenant *intent* as S5 — updates + admins/permissions pulled from the
+master, ring-gated — but the **GUI + SQL live locally in the managed tenant** and a
+**local single-tenant SPN** is the acting identity. Sync files stage in **local**
+folders on the automation server *at the managed tenant*. This is the closest
+managed-tenant shape to the §13 "local plane" model.
+
+```
+   MSP MASTER tenant                               MANAGED / slave tenant (LOCAL hosted)
+ ┌──────────────────────────────┐                ┌──────────────────────────────────────┐
+ │  Central registry SQL         │                │   ┌──────────────────────────────┐    │
+ │  (Owner=MSP baseline + rings) │                │   │ PIM Manager (local GUI)       │    │
+ │        │ build + SIGN         │                │   │  private endpoint only        │    │
+ │        ▼                      │                │   └───────────────┬──────────────┘    │
+ │  Signed baseline (per ring)   │                │       MI          │                    │
+ │        │                      │                │                   ▼                    │
+ └────────┼──────────────────────┘                │            Local SQL store (in tenant) │
+          │                                        │                   ▲                    │
+          │  ring-gated PULL ⧗  (managed reads;    │            local SPN + cert            │
+          ▼  master never writes downstream)       │                   │ apply              │
+   ═══ PRIVATE cross-tenant VNet only ════════════►│                   ▼                    │
+       (never the public internet)                 │       Entra ID / Azure RBAC (this tenant)│
+   Sync files: LOCAL folders ⧗  at the managed     │       ← MSP admins created HERE         │
+   tenant's automation server                      └──────────────────────────────────────┘
+   UPDATE: from master, ring-gated  ·  LICENSE: Pro (Design Partner)
+   ⧗ pending = local-hosting branch / sync-file resolution / downlink runtime not yet wired live
+```
+
+> 🚩 **Hard constraint — cross-tenant sync is PRIVATE, never public internet.**
+> For S5 and S6, *every byte* that crosses between the master and a managed tenant —
+> the ring-gated signed-baseline pull, the master→managed admin/permission sync, and
+> the staged sync files — MUST travel over **private cross-tenant VNet connectivity**
+> (VNet peering / private endpoints, internal addresses only). There is **no
+> publicly-reachable storage account, webhook, function, queue, or blob URL** in the
+> sync-data path (`publicNetworkAccess=Disabled` throughout). The RSA signature on the
+> baseline guarantees *integrity*; the **private VNet is the only transport channel**.
+> (SPN auth to Graph/ARM still uses Microsoft's public service endpoints — that is the
+> identity plane, not our sync-*data* plane; the constraint is that the sync **data**
+> never transits a public-exposed surface of ours.) This extends the standing MSP
+> tenet of *no exposed storage/webhook/function*, and — unlike the general §13.7
+> transport, which permits a *"public-but-signed + IP allowlist"* option for the
+> open-source MSP edition — the **scenario downlink (S5/S6) is private-only**.
+
+#### Process — UPDATE / SYNC flow (detect → build → roll → verify → rollback)
+
+Every scenario updates through the **same controlled lifecycle** (§11.6) —
+*detect → build → deploy → verify → notify → ensure-monitor*, dry-run by default,
+auto-rollback on a failed verify. The scenario only selects the **source** and the
+**build/roll shape**:
+
+```
+                         ┌──────────────── pick update SOURCE by scenario ───────────────┐
+                         │                                                                │
+   S1 / S3  ── internal AutomateIT ──►  sync-automateit:  az acr build ──► roll ACA revision
+   S2 / S4  ── public GitHub ────────►  git-pull:         local build / package ──► relaunch
+   S5 / S6  ── from master (ring) ⧗ ──► from-master:      central ⇒ ACA roll · local ⇒ relaunch
+                         │                                  (never above the tenant's ring)
+                         └────────────────────────────┬───────────────────────────────────┘
+                                                       ▼
+   ┌──────────┐   ┌──────────┐   ┌──────────┐   ┌──────────┐   ┌──────────┐   ┌──────────────┐
+   │ 1 DETECT │──►│ 2 BUILD  │──►│ 3 DEPLOY │──►│ 4 VERIFY │──►│ 5 NOTIFY │──►│ 6 ENSURE-MON │
+   │ newer?   │   │ from the │   │ roll +   │   │ hosted   │   │ outcome  │   │ health probe │
+   │ schema/  │   │ pulled   │   │ guarded  │   │ smoke    │   │ mail     │   │ in place +   │
+   │ GUI delta│   │ code     │   │ SQL DDL  │   │ check    │   │          │   │ fresh        │
+   └──────────┘   └──────────┘   └────┬─────┘   └────┬─────┘   └──────────┘   └──────────────┘
+                                  capture pre-roll    │ healthy ──► keep
+                                  revision (rollback  │ UNHEALTHY ─► AUTO-ROLLBACK to captured
+                                  target)             ▼              pre-roll revision + alert
+                                                  (self-skip of the live smoke = UNVERIFIED,
+                                                   NOT a pass — the gate did not run)
+```
+
+Dry-run is the default (a bare run only decides + reports); `-Apply` is the gated
+path. An unparseable or older tag is **never** treated as newer, so a deployment
+never rolls onto a tag it can't reason about and never re-rolls the tag it is
+already on. The hosted-smoke verify is a **release gate** (CLAUDE-rule §7a): a
+self-skip (no `az` / not logged in / app unreachable) is UNVERIFIED, not green.
+
+#### Process — master → managed DOWNLINK SYNC (S5 / S6, pull-not-push) ⧗ pending
+
+The managed tenant **pulls** the ring-approved, signed baseline from the master,
+verifies the signature, stages the sync files, and the **engine creates the MSP
+admins + permission rows in the managed tenant**. The master **never** writes into,
+or opens a connection into, the managed tenant — it only hosts + signs; the managed
+side reaches out. The whole transport is **private cross-tenant VNet** (the 🚩
+constraint above). This runtime is **plan-surfaced but not yet wired live** —
+marked `⧗ pending` — and the live 3-tenant materialization is the gate.
+
+```
+   MSP MASTER (admin plane)                              MANAGED tenant (initiates the pull)
+ ┌──────────────────────────────┐                      ┌────────────────────────────────────┐
+ │ 1  Author Owner=MSP baseline  │                      │                                      │
+ │    + assign rollout RING      │                      │                                      │
+ │ 2  Build versioned payload    │                      │                                      │
+ │ 3  SIGN (private baseline key)│                      │                                      │
+ │ 4  Stage signed bundle +      │                      │                                      │
+ │    per-tenant sync files      │                      │                                      │
+ │    (central S5 / pull-staged) │                      │                                      │
+ └───────────────┬──────────────┘                      └───────────────┬────────────────────┘
+                 │                                                      │ 5  ring filter: never
+                 │   ══════ PRIVATE cross-tenant VNet only ══════       │     pull a version above
+                 │           (no public internet, ever)                 │     THIS tenant's ring
+                 │                                                      ▼
+                 └───────────────  managed PULLS  ◄──────────  6  GET signed bundle (private)
+                    (master never pushes)                       7  VERIFY signature (embedded
+                                                                   PUBLIC key) · product/kind ·
+                                                                   not expired · anti-rollback
+                                                                8  stage sync files (central S5 /
+                                                                   local S6 folder root)
+                                                                9  ENGINE APPLY in this tenant:
+                                                                   create MSP admins + permission
+                                                                   rows (Owner=MSP); local-owned
+                                                                   rows untouched
+                                                               10  audit locally · emit signed
+                                                                   status summary (counts only)
+```
+
+Provenance, not a permission gate: master-originated rows (Owner=MSP) are refreshed
+on each pull; rows the managed tenant owns locally (Owner=Local) stay autonomous.
+Tamper / forge / roll-back / replay are all rejected by the signature + version +
+expiry checks (§13.10). The managed tenant owns nothing it didn't get from the
+master *for the synced rows* — but keeps full autonomy over its local rows.
+
+#### Process — deploy / stand-up flow (per scenario)
+
+Standing up any scenario runs the **same ordered deploy** (§11.7,
+`Invoke-PimDeployAll -Scenario S1..S6`); the scenario selects the hosting shape and
+the per-step bindings:
+
+```
+   Invoke-PimDeployAll -Scenario S1..S6
+        │  (resolver maps the scenario → config variant · update source · hosting · SPN · license)
+        ▼
+   ┌────────────────┐  ┌────────────────┐  ┌──────────────┐  ┌──────────────┐  ┌──────────┐
+   │ 1 App-reg +    │─►│ 2 Infra / host │─►│ 3 SQL schema │─►│ 4 Build +    │─►│ 5 VERIFY │
+   │   Graph/Az     │  │   S1–S4: in-   │  │   idempotent │  │   deploy code│  │  hosted  │
+   │   grants       │  │   tenant       │  │   guarded DDL│  │   (roll ACA  │  │  smoke + │
+   │                │  │   S5: central  │  │   (non-      │  │   or relaunch│  │  deploy  │
+   │                │  │   S6: local ⧗  │  │   destructive)│ │   per source)│  │  valid.  │
+   └────────────────┘  └────────────────┘  └──────────────┘  └──────────────┘  └────┬─────┘
+        each step runs only when NEEDED (missing/drifted) AND -Apply;                 │
+        an already-current step is a clean skip → a re-run IS the updater.       healthy?─► keep
+        -WhatIf (default) plans only; a failed verify rolls back the CODE step.  no ─► rollback
+```
+
+The deploy script is parameterised for any tenant (no baked-in tenant / subscription
+/ SQL / RG / KV; cert-auth, unattended). For S5/S6 the infra step resolves to the
+central MSP store (S5) vs the local managed-tenant store (S6); that hosting-location
+branch is `⧗ pending` live-wiring. As everywhere, the **live deploy + validate
+against a real test tenant is the release gate**.
 
 ---
 
@@ -2316,13 +2702,15 @@ and acts on the plan the core returns.
   so the deployment never rolls onto a tag it can't reason about, and never re-rolls the
   tag it is already on. A `-PinnedTag` makes the target an explicit, deliberate version
   (still only applied if it is newer than what is deployed).
-- **Gated / scheduled.** By default the orchestrator is **dry-run** (decide + report
-  only). It rolls only when the gate is open — `-Apply` on demand, or the scheduled
-  maintenance window. The in-container scheduler exposes a `sync-automateit` job
-  (disabled by default, opt-in) so the always-on container can drive it on a cadence;
-  on a VM host the same cadence comes from a scheduled task
-  (`tools/setup/Register-PimSyncSchedule.ps1`), which can either drive the Container
-  Apps roll or run a local pull on a pure-VM (no-ACA) host.
+- **Gated / scheduled (standalone — not the engine/scheduler).** By default the
+  orchestrator is **dry-run** (decide + report only). It rolls only when the gate is
+  open — `-Apply` on demand, or the scheduled maintenance window. The cadence comes
+  from a **standalone** host, never the in-container scheduler: a VisualCron / Windows
+  Task-Scheduler task (`tools/setup/Register-PimSyncSchedule.ps1`, `-UpdateMode RollOnly`
+  for this roll-only path), or — on the internal edition — the bootstrap post-sync deploy
+  hook firing the full `Invoke-PimUpdate.ps1` after the pull. (The former in-container
+  `sync-automateit` scheduler job was removed 2026-06-18 so the engine/scheduler can never
+  trigger the update.)
 - **Safe roll (reuse).** When an update is due, the orchestrator captures the manager's
   current revision (the rollback target), then rolls every app to the new tag through
   the existing **zero-downtime** roller (`Update-PimContainers.ps1 -SkipBuild`) — ACA
@@ -3914,6 +4302,7 @@ they are derived from the *assignment* rows that bind a group to a permission:
 | `entra-role` | `PIM-Assignments-Roles-Groups` | `entra-role:<RoleName>` | `roleName` |
 | `au-role` | `PIM-Assignments-Roles-AUs` | `au-role:<AUTag>:<RoleName>` | `roleName`, `auTag` |
 | `az-resource` | `PIM-Assignments-Azure-Resources` | `az-res:<AzScope>:<Perm>` | `roleName`, `scopePath` (full), `scopeType`, `scopeShort` |
+| `workload-target` | `PIM-Assignments-Workloads` | `workload:<id>:<RoleName>:<Scope>` | `workloadId`, `workloadName`, `roleName`, `scopePath`, `scopeType`, `scopeShort` (+ recon `reconStatus`/`reconReason`/`reconCrawledUtc`) |
 
 `scopeType` is humanised from the ARM/path scope by `$azScopeMeta`: a
 `/managementGroups/<x>` path → *Management group*, `/resourceGroups/<x>` →
@@ -3935,6 +4324,33 @@ bare `<perm> @ <last-segment>` labels with a count-only detail panel (the
 user-reported "empty" state); the enrichment + breakdown make the real grant
 legible. Edits are confined to the PERMISSIONS & TARGETS column so the shared
 `pim-manager.html` stays union-mergeable across the Manager agents.
+
+**Workload targets + live-crawl reconciliation.** The fourth target kind,
+`workload-target`, is the same node/edge pattern over `PIM-Assignments-Workloads`
+(workload connector role bindings: Defender XDR / Intune / Power BI / Power
+Platform / Business Central / Azure DevOps / Dataverse / app-roles). The workload
+friendly name is resolved from the connector catalog (`Read-PimWorkloadConnectors`,
+id→name); the scope is humanised by `$workloadScopeMeta` (ARM paths reuse
+`$azScopeMeta`; otherwise labelled by connector kind, with `/`→*Tenant-wide*).
+Because the desired CSV alone can't say whether a binding is actually live, a
+separate **crawl-map** layer (`engine/_shared/PIM-WorkloadMap.ps1`) closes the
+loop: the engine/scheduler runs `Update-PimWorkloadCrawlMap` (the WRITER) which
+calls every connector's `listAssignments`, normalises role+scope+principalIds, and
+persists `workload-crawl-map.json` in the instance cache dir (stamped `crawledUtc`;
+each connector best-effort `{ok,error}`). At map-build time the GUI reads that
+cache (`Read-PimWorkloadCrawlMap`) plus the exemption store
+(`Read-PimWorkloadExemptions`, gitignored `config/PIM-WorkloadExemptions.custom.json`,
+contract mirroring `PIM-WarningOverrides`: mandatory reason + expiry) and stamps
+each `workload-target` with a PURE reconciliation verdict (`Get-PimWorkloadReconStatus`,
+no network): **mapped** (live = desired), **missing** (desired, not live — a
+candidate to push via the connector `assign`), **exempted** (an active exemption
+covers it), or **unknown** (the workload wasn't crawled / its crawl errored — never
+a false *missing*). The verdict drives the col-3 board badge + chip badge + the
+"Workload recon" summary (`GET /api/workload-recon`); admins can trigger a fresh
+sweep with `POST /api/workload-crawl`. The engine remains the only writer; the GUI
+read path is side-effect-free. `GET /api/workload-crawl` is a server-authoritative
+parity read of the raw crawl map (tooling/tests/scheduler), the same pattern as
+`/api/map-risk`.
 
 ### 18.1b Home / Overview tab + Alerting
 
@@ -4035,6 +4451,34 @@ summary + catalog; it is wired into the alerting card's "Recent alerts" view
 lives under the active instance's `output/alerts/pim-alerts.jsonl` (mirrors the audit
 JSONL). The Manager dot-sources `PIM-AlertFeed.ps1` at boot. No real mail is ever sent
 at test time (no `$global:PIM_MailSender` offline → rendered-only).
+
+**Outbound alert CHANNELS — Teams / generic webhook (`engine/_shared/PIM-AlertChannels.ps1`).**
+A SECOND delivery channel beside email, channel-agnostic behind the same
+`Send-PimManagerAlert` (REQUIREMENTS §26c / §28 [H2] residual). The pure, offline core:
+`Test-PimWebhookUrlAllowed` is the SSRF guard — only an **https** URL with a public host
+is accepted; http, loopback/`localhost`, private (10/172.16-31/192.168), link-local
+(169.254, fe80::/10), unique-local (fc00::/7), unspecified, and bare dot-less hostnames
+are rejected with a reason. `Resolve-PimWebhookKind` classifies a URL `teams` (when the
+host is a `*.webhook.office.com` / `office.com` / `logic.azure.com` endpoint) vs
+`generic`, with an explicit override winning. `New-PimWebhookPayload` renders ONE alert
+into the channel body: a legacy **Teams MessageCard** (theme colour by severity —
+break-glass/engine-failure red, drift amber, expiring-access blue — title, detail,
+Event/Tenant/Instance/When facts, and an `OpenUri` deep-link back to the Manager tab) or
+a flat **generic JSON** object (`source`/`event`/`title`/`detail`/`severity`/tenant/
+instance/link/`whenUtc`). `Get-PimAlertChannelConfig` normalises the stored value (the
+same dual hashtable/PSObject/JSON-string tolerance as the rest of the settings) and keeps
+a URL only when it passes the safety check — a bad URL leaves the channel disabled (kept
+verbatim so the operator can read/clear it). The only I/O is the Manager's
+`Send-PimWebhookAlert` (`Open-PimManager.ps1`): it builds the payload, re-checks the URL,
+and `Invoke-RestMethod` POSTs it (REST-only, 20s timeout) — never throws. The webhook
+config rides the SAME `Alerting` settings key (`webhookUrl`, `webhookKind`) and
+`Get-/Set-PimAlertingConfig` + `GET/PUT /api/alerting` carry it. `Send-PimManagerAlert`
+fires the webhook IN ADDITION to mail (and can fire webhook-only when no mailbox is
+configured), counts a delivered webhook into the result `sent` so the same feed record
+reflects it, and writes a two-channel reason line (`Get-PimChannelDedupeNote`, e.g.
+`mail: 2 sent; webhook(teams): delivered`). The Settings alerting card adds the webhook
+URL + format selector (Admin+). No real outbound POST happens at test time (offline tests
+exercise only the pure render/safety + the config round-trip).
 
 **Operational policy (`Get-/Set-PimOperationalPolicy`).** A second Settings config
 surface covers the three operational knobs that the Alerting surface does NOT:
@@ -4899,6 +5343,60 @@ prompts, and never blocks or degrades a feature based on entitlement.
 
 The solution is fully offline and self-contained: no activation server, no public
 endpoint, and no internet connection is required for any feature to work.
+
+### 19a. Feature-customization & license framework
+
+The framework lets a senior administrator decide, **per customer/tenant**, exactly
+which optional capabilities run — and gates them in the engine + jobs, not just the
+GUI, so an off feature is genuinely inert.
+
+**One catalog = source of truth.** `engine/_shared/PIM-FeatureCatalog.ps1` declares
+every customizable capability as a single entry: a stable `key`, display `label`,
+feature `group` (the GUI chapter), `tier` (`core` | `advanced`), `license`
+(`free` | `pro`), `defaultEnabled` (advanced default off), `dependsOn` (other
+keys), and an optional `proFeature` mapping to the existing offline-license Pro
+catalog. **Core** entries are listed (so the GUI can show them) but are never gated.
+The framework **builds on** the two pre-existing layers rather than replacing them:
+`PIM-FeatureFlags.ps1` (GUI surface visibility / gradual rollout) and
+`PIM-License.ps1` (the offline signed Core/Pro edition model).
+
+**Two pure gate functions + a combined one.** `Test-PimFeatureEnabled -Key` reads
+the persisted kill switch (merged over the catalog default); `Test-PimFeatureLicensed
+-Key [-Edition]` compares the feature's license tier to the active edition;
+`Test-PimFeatureAvailable -Key` = enabled **and** licensed (what side-effecting code
+calls). Core always returns available; an unknown key is fail-safe off. All
+PS 5.1-safe, no modules.
+
+**One persisted state drives GUI + engine + jobs.** The kill switches live in the SQL
+settings store under `pim.Settings` key `FeatureGates` (`{ gates: { key: bool } }`,
+only non-default advanced overrides stored); the active edition under key `Edition`
+(`{ edition, grantBasis, note }`). A small reader seam (`Get-PimFeatureStoreValue`)
+resolves state from an in-process hydrated bag, then the Manager's `Get-PimSetting`
+bridge, then a direct SQL read against `$global:PIM_EngineSqlCs` — so the engine and
+scheduler (which have no Manager bridge) read the same persisted state the GUI writes.
+
+**Gates wired everywhere.** A provider that maps to a capability carries a `feature`
+key; `Invoke-PimEngineScope` checks `Test-PimFeatureAvailable` right after resolving
+the provider and **no-ops the whole scope** (no `GetDesired`/`GetLive`, no diff, no
+apply) when off — covering Full/Delta/queue triggers identically. The discovery sweep
+(`Invoke-PimEngineDiscoverySweep`) is gated by `discovery.sweep`, with Power BI gated
+separately by `connectors.powerbi`. The scheduler gates at the central
+`Invoke-PimScheduledJob` dispatch: a master `scheduler.jobs` switch plus a per-type
+map (`Get-PimJobFeatureKey`) so a disabled feature's job never invokes its handler.
+The notify path (`Send-PimNotifyMail`) honours a global email kill switch
+(`$global:PIM_MailKillSwitch`), the `alerting.email` feature gate, a redirect target
+and an allowlist at the one send chokepoint — so every alert/digest/job send is
+covered.
+
+**Editions.** `Get-PimActiveEdition` returns the persisted edition when set, else the
+offline-license-derived edition (`Get-PimEdition`), else `Core`. `Pro` and
+`Pro-DesignPartner` both cover `pro` features; they differ only in the recorded
+`grantBasis`. The Manager exposes it read-write via `GET/PUT /api/settings/edition`,
+the kill switches via `GET/PUT /api/settings/feature-gates`, and email controls via
+`GET/PUT /api/settings/email-controls` (writes SuperAdmin-gated + audited). The
+Settings surface renders the catalog grouped into chapters; a disabled feature is
+dimmed + labelled “Disabled”, an unlicensed one shows a “Requires Pro” lock — never
+hidden. Dependency cross-references are surfaced (`Get-PimFeatureDependencyIssues`).
 
 ---
 

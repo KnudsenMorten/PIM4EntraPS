@@ -126,6 +126,18 @@ function Invoke-PimEngineScope {
     $p = Get-PimEngineProvider -Scope $Scope
     if (-not $p) { return [pscustomobject]@{ scope=$Scope; ok=$false; detail="no provider for scope '$Scope'" } }
 
+    # --- FEATURE GATE (REQUIREMENTS s29/s30) ----------------------------------
+    # A provider that maps to a CUSTOMIZABLE capability carries a `feature` key (a
+    # PIM-FeatureCatalog key). When that feature is disabled (kill switch off) or
+    # unlicensed for the active edition, the scope NO-OPs: no diff, no writes, no
+    # sends -- regardless of trigger (Full/Delta/queue). Core scopes carry no
+    # `feature` key and are never gated. The gate is fail-safe (unknown key => off).
+    if ($p.feature -and (Get-Command Test-PimFeatureAvailable -ErrorAction SilentlyContinue)) {
+        if (-not (Test-PimFeatureAvailable -Key "$($p.feature)")) {
+            return [pscustomobject]@{ scope=$Scope; mode=$Mode; whatIf=[bool]$WhatIf; create=0; update=0; remove=0; nochange=0; applied=0; skipped=0; errors=0; plan=@(); ok=$true; skippedFeature="$($p.feature)" }
+        }
+    }
+
     # Assignment scopes depend on groups/AUs/admins an earlier scope may have just created.
     # INCREMENTAL refresh: those creates are appended to the directory cache by
     # Add-PimContextObject as they happen, so we only need the cache LOADED here -- never a
@@ -269,6 +281,11 @@ function Invoke-PimEngineDiscoverySweep {
     [CmdletBinding()]
     param([switch]$WhatIf, [string]$ConnectionString)
     if (-not (Get-Command Resolve-PimDiscoveryPolicyPlan -ErrorAction SilentlyContinue)) { return }
+    # --- FEATURE GATE (REQUIREMENTS s29) -- discovery sweep is an advanced feature.
+    # Disabled/unlicensed => the whole sweep no-ops (no enumeration, no auto-create).
+    if ((Get-Command Test-PimFeatureAvailable -ErrorAction SilentlyContinue) -and -not (Test-PimFeatureAvailable -Key 'discovery.sweep')) {
+        return
+    }
     $cs = if ("$ConnectionString".Trim()) { $ConnectionString }
           elseif ($global:PIM_EngineSqlCs) { $global:PIM_EngineSqlCs }
           elseif ($global:PIM_SqlConnectionString) { $global:PIM_SqlConnectionString }
@@ -292,7 +309,10 @@ function Invoke-PimEngineDiscoverySweep {
         }
     }
     # --- Power BI workspaces ---
-    if (Get-Command Get-PimLivePowerBiWorkspaces -ErrorAction SilentlyContinue) {
+    # Power BI is its own advanced (Pro) connector feature: skip just this part when
+    # it is disabled/unlicensed even if the overall discovery sweep is on.
+    $pbiOk = (-not (Get-Command Test-PimFeatureAvailable -ErrorAction SilentlyContinue)) -or (Test-PimFeatureAvailable -Key 'connectors.powerbi' -Quiet)
+    if ($pbiOk -and (Get-Command Get-PimLivePowerBiWorkspaces -ErrorAction SilentlyContinue)) {
         $ws = @()
         try { $ws = @(Get-PimLivePowerBiWorkspaces) } catch { Write-Warning "  [discovery] Power BI enumeration failed: $($_.Exception.Message)" }
         if (@($ws).Count) {

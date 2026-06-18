@@ -86,7 +86,19 @@ function T($n,$c){ if($c){Write-Host "  PASS $n" -ForegroundColor Green;$script:
 function S($n,$why){ Write-Host "  SKIP $n -- $why" -ForegroundColor Yellow; $script:skip++ }
 function Have($cmd){ [bool](Get-Command $cmd -ErrorAction SilentlyContinue) }
 
+# EXPECTED version = the contents of SOLUTIONS/PIM4EntraPS/VERSION. The live Manager
+# MUST be serving exactly this (boot log + served HTML header). A live version that
+# is older/different == a deploy that didn't actually roll the image (the "stuck on
+# 2.4.222" case) and is a HARD FAIL below, never a skip.
+$ExpectedVersion = $null
+$verFile = Join-Path (Split-Path -Parent (Split-Path -Parent $PSScriptRoot)) 'VERSION'  # tests/live -> tests -> PIM4EntraPS
+if (Test-Path -LiteralPath $verFile) {
+    try { $ExpectedVersion = ([System.IO.File]::ReadAllText($verFile)).Trim() } catch {}
+}
+
 Write-Host "=== PIM Manager HOSTED post-deploy SMOKE (live: $App) ===" -ForegroundColor Cyan
+if ($ExpectedVersion) { Write-Host ("  expected served version (VERSION): {0}" -f $ExpectedVersion) -ForegroundColor DarkGray }
+else                  { Write-Host  "  WARNING: could not read SOLUTIONS/PIM4EntraPS/VERSION -- version assertion will FAIL" -ForegroundColor Yellow }
 
 # ---- Preconditions: az present + logged in -----------------------------------
 if (-not (Have 'az')) {
@@ -151,6 +163,32 @@ if (-not $logRows -or $logRows.Count -eq 0) {
         $m = [regex]::Match($logText, 'session token:\s*([0-9a-fA-F\-]{16,})')
         if ($m.Success) { $SessionToken = $m.Groups[1].Value }
     }
+
+    # ===== VERSION ASSERTION (boot log) =====================================
+    # The Manager emits a deterministic startup line:
+    #   "[version] PIM Manager v<X.Y.Z> (from VERSION)"
+    # (Open-PimManager.ps1 / Invoke-Server). Assert the LIVE served version EQUALS
+    # the EXPECTED version (SOLUTIONS/PIM4EntraPS/VERSION). A stale/older live
+    # version means the deploy did NOT actually roll the image -- HARD FAIL (the
+    # exact "stuck on 2.4.222" symptom). We take the MOST RECENT version line
+    # (logRows are ordered desc) so an old revision's line never masks the current.
+    $bootVer = $null
+    foreach ($row in $logRows) {
+        $vm = [regex]::Match("$($row.Log_s)", '\[version\]\s*PIM Manager\s*v?([0-9]+\.[0-9]+\.[0-9]+)')
+        if ($vm.Success) { $bootVer = $vm.Groups[1].Value; break }   # first (newest) wins
+    }
+    if (-not $ExpectedVersion) {
+        T 'boot log: served version matches VERSION (could not read VERSION)' $false
+    } elseif (-not $bootVer) {
+        # No version line at all in the lookback window. Treat as a FAIL, not a skip:
+        # a healthy current image ALWAYS emits it at boot, so its absence means the
+        # running image predates this assertion (i.e. it is stale) -- exactly what we
+        # must catch. (If you truly cannot get logs, section A self-skips earlier.)
+        T ("boot log: served version matches VERSION (expected v{0}; NO [version] line found in last {1}m -- stale image?)" -f $ExpectedVersion, $LookbackMinutes) $false
+    } else {
+        Write-Host ("  boot-log served version: v{0} (expected v{1})" -f $bootVer, $ExpectedVersion) -ForegroundColor DarkGray
+        T ("boot log: served Manager version == VERSION (v{0})" -f $ExpectedVersion) ($bootVer -eq $ExpectedVersion)
+    }
 }
 
 # =============================================================================
@@ -198,6 +236,23 @@ if (-not $EasyAuthAud) {
             if ($mm.Success) { $metaMode = $mm.Groups[1].Value }
             T '/ render mode meta = SQL: <db> (carries "SQL:" mode label)' ($metaMode -match 'SQL:\s*\S+')
             T '/ render mode meta is NOT the static (read-only) viewer'    ($metaMode -notmatch '(?i)static')
+
+            # ===== VERSION ASSERTION (served HTML header) ===================
+            # The header renders <span id="versionBadge">v<X.Y.Z></span> from
+            # Get-PimSolutionVersion (which reads VERSION). Assert the SERVED page
+            # advertises the EXPECTED version -- a stale badge means the running
+            # image is older than VERSION. HARD FAIL on mismatch.
+            $servedVer = ''
+            $vb = [regex]::Match($body, 'id="versionBadge"[^>]*>\s*v?([0-9]+\.[0-9]+\.[0-9]+)')
+            if ($vb.Success) { $servedVer = $vb.Groups[1].Value }
+            if (-not $servedVer) {
+                S '/ served version badge present' 'could not parse #versionBadge from the served HTML (page shape changed?) -- boot-log version assertion in section A still gates this'
+            } elseif (-not $ExpectedVersion) {
+                T '/ served versionBadge matches VERSION (could not read VERSION)' $false
+            } else {
+                Write-Host ("  served versionBadge: v{0} (expected v{1})" -f $servedVer, $ExpectedVersion) -ForegroundColor DarkGray
+                T ("/ served versionBadge == VERSION (v{0}, NOT a stale deploy)" -f $ExpectedVersion) ($servedVer -eq $ExpectedVersion)
+            }
         }
 
         # 4: GUI read-WRITE for an admin role.
