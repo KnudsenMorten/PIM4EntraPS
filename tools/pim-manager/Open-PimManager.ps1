@@ -187,6 +187,14 @@ if (Test-Path -LiteralPath $_mapRiskLib) { . $_mapRiskLib }
 $_tierImpactLib = Join-Path $solutionRoot 'engine\_shared\PIM-TierImpact.ps1'
 if (Test-Path -LiteralPath $_tierImpactLib) { . $_tierImpactLib }
 
+# Workload live-crawl map + reconciliation (engine/_shared/PIM-WorkloadMap.ps1) --
+# the engine/scheduler writes a per-instance crawl-map cache; the GUI reads it +
+# reconciles each desired PIM-Assignments-Workloads row (mapped|missing|exempted)
+# for the Delegation Map's workload-target chips. Pure on the read path (no SQL,
+# no network); the crawl WRITER is called only by the discovery/scheduler sweep.
+$_workloadMapLib = Join-Path $solutionRoot 'engine\_shared\PIM-WorkloadMap.ps1'
+if (Test-Path -LiteralPath $_workloadMapLib) { . $_workloadMapLib }
+
 # Pure-REST token core (engine/_shared/PIM-Rest.ps1) -- dot-sourced into THIS
 # (script) scope so the MI/SQL token mint runs in the same scope as the storage
 # block + New-PimSqlConnection (and, on Windows headless, the Write-Host shim).
@@ -251,6 +259,14 @@ if (Test-Path -LiteralPath $_sensAuthLib) { . $_sensAuthLib }
 $_alertFeedLib = Join-Path $solutionRoot 'engine\_shared\PIM-AlertFeed.ps1'
 if (Test-Path -LiteralPath $_alertFeedLib) { . $_alertFeedLib }
 
+# Outbound alert CHANNELS (engine/_shared/PIM-AlertChannels.ps1, REQUIREMENTS §26c
+# "Alerting (email / Teams)" + §28 [H2] residual). A SECOND delivery channel beside
+# email: an outbound webhook (Microsoft Teams Incoming Webhook / generic JSON). Pure
+# render + URL safety here; the HTTPS POST is Send-PimWebhookAlert below. A configured
+# webhook fires IN ADDITION to mail and its outcome is recorded in the same feed.
+$_alertChanLib = Join-Path $solutionRoot 'engine\_shared\PIM-AlertChannels.ps1'
+if (Test-Path -LiteralPath $_alertChanLib) { . $_alertChanLib }
+
 # Bridge the ApprovalGate persistence chain (Get-/Set-PimSetting) onto the Manager's own
 # settings store (Get-/Set-PimManagerSetting -> SQL pim.Settings when active, else the
 # per-instance manager-settings.custom.json), so an approval raised/decided in the Manager
@@ -302,6 +318,24 @@ if (Test-Path -LiteralPath $_opPolicyLib) { . $_opPolicyLib }
 # (Get-/Set-PimFeatureFlags below), so GUI nav state == the persisted flag set.
 $_featureFlagsLib = Join-Path $solutionRoot 'engine\_shared\PIM-FeatureFlags.ps1'
 if (Test-Path -LiteralPath $_featureFlagsLib) { . $_featureFlagsLib }
+
+# Feature catalog + gates (engine/_shared/PIM-FeatureCatalog.ps1, REQUIREMENTS s29/
+# s30) -- the SINGLE source of truth for customizable capabilities (tier core|
+# advanced, license free|pro, group/chapter, kill switch, dependsOn) and the gate
+# functions (Test-PimFeatureEnabled/Licensed/Available) the engine + jobs + this GUI
+# all read. Persisted under pim.Settings 'FeatureGates' + 'Edition' via the same
+# Get-/Set-PimManagerSetting chokepoint, so GUI state == the gates the engine honours.
+$_featureCatalogLib = Join-Path $solutionRoot 'engine\_shared\PIM-FeatureCatalog.ps1'
+if (Test-Path -LiteralPath $_featureCatalogLib) { . $_featureCatalogLib }
+
+# Deployment-scenario descriptor + resolvers (engine/_shared/PIM-ScenarioProfile.ps1,
+# REQUIREMENTS §31). The SINGLE source of truth for the six supported topologies
+# (S1-S6) and the pure resolvers that map a scenario onto the runtime knobs
+# (hosting / SPN model / sync-file location + edition). Powers the Settings
+# "Deployment scenario" card + GET/PUT /api/settings/scenario (persisted under
+# pim.Settings 'Scenario' via the same Get-/Set-PimManagerSetting chokepoint).
+$_scenarioProfileLib = Join-Path $solutionRoot 'engine\_shared\PIM-ScenarioProfile.ps1'
+if (Test-Path -LiteralPath $_scenarioProfileLib) { . $_scenarioProfileLib }
 
 # Discovery layer (engine/_shared/PIM-Discovery.ps1) -- REST enumerators + pure
 # planners. Powers the Settings "Import departments from Entra" action
@@ -1743,20 +1777,35 @@ function Get-PimAlertingConfig {
             }
         }
     }
-    # Alerting is "enabled" only when there is at least one recipient AND a configured
-    # sender mailbox -- otherwise it is a render-only "configure to enable" state.
+    # Outbound webhook channel (Teams / generic JSON) -- normalised from the SAME
+    # stored 'Alerting' value via the shared pure core. A bad/unsafe URL leaves the
+    # channel disabled (never silently posts). This is a SECOND channel beside mail.
+    $chan = $null
+    if (Get-Command Get-PimAlertChannelConfig -ErrorAction SilentlyContinue) {
+        try { $chan = Get-PimAlertChannelConfig -Raw $raw } catch {}
+    }
+    if (-not $chan) { $chan = [ordered]@{ webhookUrl = ''; webhookKind = 'generic'; webhookEnabled = $false; webhookValid = $false; webhookReason = '' } }
+    # Alerting is "enabled" only when there is at least one DELIVERY channel: a
+    # configured sender mailbox (with a recipient) OR a valid outbound webhook --
+    # otherwise it is a render-only "configure to enable" state.
     $hasSender = [bool]("$($global:PIM_MailSender)".Trim())
+    $mailReady = ($recipients.Count -gt 0 -and $hasSender)
     [ordered]@{
-        recipients   = @($recipients)
-        events       = $events
-        eventCatalog = @($script:PimAlertEventCatalog)
-        senderSet    = $hasSender
-        enabled      = ($recipients.Count -gt 0 -and $hasSender)
+        recipients     = @($recipients)
+        events         = $events
+        eventCatalog   = @($script:PimAlertEventCatalog)
+        senderSet      = $hasSender
+        webhookUrl     = $chan.webhookUrl
+        webhookKind    = $chan.webhookKind
+        webhookEnabled = $chan.webhookEnabled
+        webhookValid   = $chan.webhookValid
+        webhookReason  = $chan.webhookReason
+        enabled        = ($mailReady -or [bool]$chan.webhookEnabled)
     }
 }
 
 function Set-PimAlertingConfig {
-    param([string[]]$Recipients, [hashtable]$Events)
+    param([string[]]$Recipients, [hashtable]$Events, [string]$WebhookUrl, [string]$WebhookKind)
     $clean = @()
     foreach ($r in @($Recipients)) {
         $s = "$r".Trim()
@@ -1767,8 +1816,56 @@ function Set-PimAlertingConfig {
     foreach ($e in $script:PimAlertEventCatalog) {
         if ($Events -and $Events.ContainsKey($e)) { $ev[$e] = [bool]$Events[$e] } else { $ev[$e] = $true }
     }
-    Set-PimManagerSetting -Name 'Alerting' -Value ([ordered]@{ recipients = @($clean); events = $ev })
+    # Outbound webhook channel. The URL is stored verbatim (so an operator can read
+    # it back / clear it) but VALIDATED at config-read + send time; a blank URL
+    # disables the channel. The kind is normalised (teams|generic; auto-detected
+    # from a Teams webhook host when left blank).
+    $url = "$WebhookUrl".Trim()
+    $kind = ''
+    if (Get-Command Resolve-PimWebhookKind -ErrorAction SilentlyContinue) { $kind = Resolve-PimWebhookKind -Url $url -Kind $WebhookKind }
+    else { $kind = "$WebhookKind".Trim().ToLowerInvariant(); if ($kind -ne 'teams' -and $kind -ne 'generic') { $kind = 'generic' } }
+    Set-PimManagerSetting -Name 'Alerting' -Value ([ordered]@{ recipients = @($clean); events = $ev; webhookUrl = $url; webhookKind = $kind })
     return (Get-PimAlertingConfig)
+}
+
+function Send-PimWebhookAlert {
+    # Outbound webhook delivery for ONE alert (the channel-layer I/O for the Teams /
+    # generic webhook channel -- mirrors what Send-PimNotifyMail is for the mail
+    # channel). Builds the payload with the pure core, then POSTs it over HTTPS.
+    # Returns @{ attempted; sent; kind; reason }. NEVER throws.
+    param(
+        [Parameter(Mandatory)][string]$Event,
+        [string]$Title,
+        [string]$Detail,
+        [string]$LinkTab,
+        [object]$Config,
+        [switch]$WhatIf
+    )
+    $res = [ordered]@{ attempted = $false; sent = $false; kind = ''; reason = '' }
+    $cfg = $Config; if (-not $cfg) { $cfg = Get-PimAlertingConfig }
+    if (-not [bool]$cfg.webhookEnabled) { $res.reason = $(if ("$($cfg.webhookReason)".Trim()) { "$($cfg.webhookReason)" } else { 'no webhook configured' }); return $res }
+    if (-not (Get-Command New-PimWebhookPayload -ErrorAction SilentlyContinue)) { $res.reason = 'channel core not loaded'; return $res }
+    $kind = "$($cfg.webhookKind)"; if (-not $kind) { $kind = 'generic' }
+    $res.kind = $kind
+    $res.attempted = $true
+    $tenantCtx = try { Get-PimManagerTenantContext } catch { @{ tenantName = '' } }
+    $payload = $null
+    try {
+        $payload = New-PimWebhookPayload -Event $Event -Title $Title -Detail $Detail -LinkTab $LinkTab -TenantName "$($tenantCtx.tenantName)" -Instance "$($script:PimInstanceName)" -Kind $kind
+    } catch { $res.reason = "payload build failed: $($_.Exception.Message)"; return $res }
+    if ($WhatIf) { $res.reason = 'rendered only (whatif)'; return $res }
+    try {
+        $json = $payload | ConvertTo-Json -Depth 8 -Compress
+        # Re-check the URL right before posting (defence-in-depth against a value that
+        # changed shape in the store). Use Invoke-RestMethod (REST-only, no modules).
+        $check = Test-PimWebhookUrlAllowed -Url $cfg.webhookUrl
+        if (-not [bool]$check.allowed) { $res.reason = "blocked: $($check.reason)"; return $res }
+        Invoke-RestMethod -Method Post -Uri $cfg.webhookUrl -ContentType 'application/json; charset=utf-8' -Body $json -TimeoutSec 20 | Out-Null
+        $res.sent = $true
+    } catch {
+        $res.reason = "webhook POST failed: $($_.Exception.Message)"
+    }
+    return $res
 }
 
 # Where the recorded-alert FEED lives for the active instance (the durable
@@ -1799,10 +1896,16 @@ function Send-PimManagerAlert {
         [switch]$WhatIf
     )
     $cfg = Get-PimAlertingConfig
-    $result = [ordered]@{ event = $Event; fired = $false; sent = 0; recipients = @($cfg.recipients); reason = ''; recorded = $false; debounced = $false }
+    $webhookOn = [bool]$cfg.webhookEnabled
+    $result = [ordered]@{ event = $Event; fired = $false; sent = 0; recipients = @($cfg.recipients); reason = ''; recorded = $false; debounced = $false; webhookKind = "$($cfg.webhookKind)"; webhookSent = $false }
     if (-not ($cfg.events.ContainsKey($Event) -and $cfg.events[$Event])) { $result.reason = 'event disabled'; return $result }
-    if (@($cfg.recipients).Count -eq 0) { $result.reason = 'no recipients configured'; return $result }
-    if (-not (Get-Command Send-PimNotifyMail -ErrorAction SilentlyContinue)) { $result.reason = 'notify path not loaded'; return $result }
+    $mailPossible = (@($cfg.recipients).Count -gt 0 -and (Get-Command Send-PimNotifyMail -ErrorAction SilentlyContinue))
+    # The alert can deliver via mail and/or the outbound webhook. Only bail when
+    # NEITHER channel is configured (no recipients/notify path AND no webhook).
+    if (-not $mailPossible -and -not $webhookOn) {
+        $result.reason = $(if (@($cfg.recipients).Count -eq 0) { 'no recipients configured' } else { 'notify path not loaded' })
+        return $result
+    }
     # Debounce an identical (same event/title/detail) alert fired recently, so a
     # recurring condition (e.g. the same drift every reconcile) does not spam.
     if ($DebounceMinutes -gt 0 -and (Get-Command Test-PimAlertDebounced -ErrorAction SilentlyContinue)) {
@@ -1825,15 +1928,34 @@ function Send-PimManagerAlert {
         WhenUtc     = [datetime]::UtcNow.ToString('yyyy-MM-dd HH:mm:ss') + ' UTC'
     }
     $sent = 0; $lastReason = ''
-    foreach ($rcpt in $cfg.recipients) {
-        try {
-            $r = if ($WhatIf) { Send-PimNotifyMail -Type 'alert-notice' -Tokens $tokens -Recipient $rcpt -WhatIf } else { Send-PimNotifyMail -Type 'alert-notice' -Tokens $tokens -Recipient $rcpt }
-            if ($r.sent) { $sent++ } elseif ($r.reason) { $lastReason = "$($r.reason)" }
-        } catch { $lastReason = "$($_.Exception.Message)" }
+    if ($mailPossible) {
+        foreach ($rcpt in $cfg.recipients) {
+            try {
+                $r = if ($WhatIf) { Send-PimNotifyMail -Type 'alert-notice' -Tokens $tokens -Recipient $rcpt -WhatIf } else { Send-PimNotifyMail -Type 'alert-notice' -Tokens $tokens -Recipient $rcpt }
+                if ($r.sent) { $sent++ } elseif ($r.reason) { $lastReason = "$($r.reason)" }
+            } catch { $lastReason = "$($_.Exception.Message)" }
+        }
     }
     $result.sent = $sent
-    if ($sent -eq 0 -and -not $result.reason) { $result.reason = $(if ($lastReason) { $lastReason } else { 'rendered only (no sender / whatif)' }) }
-    try { Write-PimManagerAuditEvent -Action 'alert.send' -Target "event:$Event" -After ([ordered]@{ fired = $result.fired; sent = $sent; recipients = @($cfg.recipients).Count; reason = "$($result.reason)" }) -Result $(if ($sent -gt 0) { 'ok' } else { 'noop' }) } catch {}
+    # SECOND channel: fire the outbound webhook (Teams / generic JSON) when configured.
+    # Independent of mail -- a webhook-only alert is valid. Its outcome folds into the
+    # recorded proof (sent count includes a delivered webhook so the feed reflects it).
+    $webhookState = ''
+    if ($webhookOn -and (Get-Command Send-PimWebhookAlert -ErrorAction SilentlyContinue)) {
+        try {
+            $wr = Send-PimWebhookAlert -Event $Event -Title $Title -Detail $Detail -LinkTab $LinkTab -Config $cfg -WhatIf:$WhatIf
+            if ($wr.attempted) {
+                if ([bool]$wr.sent) { $result.webhookSent = $true; $result.sent = [int]$result.sent + 1; $webhookState = 'delivered' }
+                else { $webhookState = $(if ($WhatIf) { 'rendered' } else { 'failed' }); if (-not $lastReason -and "$($wr.reason)".Trim()) { $lastReason = "$($wr.reason)" } }
+            }
+        } catch { if (-not $lastReason) { $lastReason = "webhook: $($_.Exception.Message)" } }
+    }
+    if ($result.sent -eq 0 -and -not $result.reason) { $result.reason = $(if ($lastReason) { $lastReason } else { 'rendered only (no sender / whatif)' }) }
+    # A clean human note covering BOTH channels for the feed's reason line.
+    if ($webhookOn -and (Get-Command Get-PimChannelDedupeNote -ErrorAction SilentlyContinue)) {
+        try { $result.reason = (Get-PimChannelDedupeNote -MailSent $sent -WebhookKind "$($cfg.webhookKind)" -WebhookState $webhookState) + $(if ("$($result.reason)".Trim() -and $result.sent -eq 0) { " ($($result.reason))" } else { '' }) } catch {}
+    }
+    try { Write-PimManagerAuditEvent -Action 'alert.send' -Target "event:$Event" -After ([ordered]@{ fired = $result.fired; sent = $result.sent; recipients = @($cfg.recipients).Count; webhook = "$($cfg.webhookKind)"; webhookSent = [bool]$result.webhookSent; reason = "$($result.reason)" }) -Result $(if ($result.sent -gt 0) { 'ok' } else { 'noop' }) } catch {}
     # Record the recorded-send PROOF to the durable feed (the [M5] residual fix): a
     # break-glass "owners notified" claim is now backed by a feed entry showing
     # exactly who was notified and whether delivery was recorded.
@@ -1917,6 +2039,127 @@ function Set-PimFeatureFlags {
     $overrides = ConvertTo-PimFeatureFlagOverrides -Raw $Flags
     Set-PimManagerSetting -Name 'FeatureFlags' -Value ([ordered]@{ flags = $overrides })
     return (Get-PimFeatureFlags)
+}
+
+# ---------------------------------------------------------------------------
+# Feature CUSTOMIZATION + LICENSE (REQUIREMENTS s29/s30). The catalog of
+# customizable CAPABILITIES (tier core|advanced, license free|pro, group/chapter,
+# kill switch, dependsOn) + the active EDITION. Persisted in the SAME pim.Settings
+# store the engine + scheduled jobs read at runtime ('FeatureGates' + 'Edition'),
+# so the GUI toggle == the gate the engine/jobs honour. The pure catalog + gates
+# live in the shared engine lib (PIM-FeatureCatalog.ps1).
+# ---------------------------------------------------------------------------
+function Get-PimFeatureGates {
+    # Returns @{ gates; effective; catalog; edition; editions; dependencyIssues;
+    # warnings }. The 'effective' map per feature carries enabled + licensed +
+    # available + tier/license/group so the GUI renders dimmed/locked affordances.
+    $raw = $null
+    try { $raw = Get-PimManagerSetting -Name 'FeatureGates' } catch {}
+    $res = Resolve-PimFeatureGate -Raw $raw
+    $edition = Get-PimActiveEdition
+    $catalog = @(Get-PimFeatureCatalog)
+    $effective = [ordered]@{}
+    foreach ($k in $res.effective.Keys) {
+        $e = $res.effective[$k]
+        $licensed = (Test-PimEditionCoversLicense -License "$($e.license)" -Edition $edition)
+        $available = ([bool]$e.enabled -and $licensed) -or ("$($e.tier)" -eq 'core')
+        $effective[$k] = [ordered]@{
+            key=$e.key; label=$e.label; group=$e.group; tier=$e.tier; license=$e.license
+            defaultEnabled=$e.defaultEnabled; dependsOn=@($e.dependsOn)
+            enabled=[bool]$e.enabled; licensed=[bool]$licensed; available=[bool]$available
+        }
+    }
+    return [ordered]@{
+        gates            = $res.gates
+        effective        = $effective
+        catalog          = $catalog
+        edition          = $edition
+        editions         = @($script:PimEditionNames)
+        dependencyIssues = @(Get-PimFeatureDependencyIssues -GateState $res -Edition $edition)
+        warnings         = @($res.warnings)
+    }
+}
+
+function Set-PimFeatureGates {
+    # Persist a (partial/full) kill-switch map. Reduce to the MINIMAL override set
+    # (only advanced features differing from default; core never stored) then store
+    # under { gates = ... }. Returns the same shape as Get-PimFeatureGates.
+    param([object]$Gates)
+    $overrides = ConvertTo-PimFeatureGateOverrides -Raw $Gates
+    Set-PimManagerSetting -Name 'FeatureGates' -Value ([ordered]@{ gates = $overrides })
+    return (Get-PimFeatureGates)
+}
+
+function Get-PimEditionConfig {
+    # The active edition + recorded grant basis/note (license backend, s30).
+    $raw = $null
+    try { $raw = Get-PimManagerSetting -Name 'Edition' } catch {}
+    $r = Resolve-PimEdition -Raw $raw
+    # When nothing is persisted, surface the offline-license-derived active edition.
+    if (-not ($raw)) { $r.edition = Get-PimActiveEdition }
+    return [ordered]@{ edition=$r.edition; grantBasis=$r.grantBasis; note=$r.note; editions=@($script:PimEditionNames) }
+}
+
+function Set-PimEditionConfig {
+    # Persist the active edition + grant basis (paid|design-partner). Validated/
+    # normalised by Resolve-PimEdition. Returns the same shape as Get-PimEditionConfig.
+    param([object]$Config)
+    $r = Resolve-PimEdition -Raw $Config
+    Set-PimManagerSetting -Name 'Edition' -Value ([ordered]@{ edition=$r.edition; grantBasis=$r.grantBasis; note=$r.note })
+    return (Get-PimEditionConfig)
+}
+
+function Get-PimScenarioConfig {
+    # The active DEPLOYMENT SCENARIO (REQUIREMENTS §31) + its resolved runtime knobs,
+    # for the Settings "Deployment scenario" card. READ-ONLY summary: the card shows
+    # the active topology + what each knob resolves to (hosting / SPN / sync-file /
+    # update-source / edition); it NEVER silently changes behaviour. Persisted under
+    # pim.Settings 'Scenario' (mirrors the Edition backend). Returns the active id +
+    # the full descriptor, the resolved entry-plan, and the catalog (for the picker).
+    $active = $null
+    if (Get-Command Get-PimActiveScenario -ErrorAction SilentlyContinue) {
+        try { $active = Get-PimActiveScenario } catch {}
+    }
+    if (-not $active) { return [ordered]@{ active = ''; scenario = $null; resolved = $null; catalog = @() } }
+    $plan = $null
+    try { $plan = Get-PimScenarioEntryPlan -Scenario $active } catch {}
+    $catalog = @()
+    try { $catalog = @(Get-PimScenarioCatalog | ForEach-Object { [ordered]@{ id = "$($_.id)"; label = "$($_.label)"; role = "$($_.role)"; summary = "$($_.summary)" } }) } catch {}
+    return [ordered]@{
+        active   = "$($active.id)"
+        scenario = [ordered]@{
+            id = "$($active.id)"; label = "$($active.label)"; role = "$($active.role)"
+            edition = "$($active.edition)"; updateSource = "$($active.updateSource)"
+            hostingLocation = "$($active.hostingLocation)"; spnModel = "$($active.spnModel)"
+            syncFileLocation = "$($active.syncFileLocation)"; syncModel = "$($active.syncModel)"
+            licenseTier = "$($active.licenseTier)"; summary = "$($active.summary)"
+        }
+        resolved = $(if ($plan) { [ordered]@{
+            updateSource = "$($plan.updateSource)"; managedHosting = "$($plan.managedHosting)"
+            configVariant = "$($plan.configVariant)"; ringGated = [bool]$plan.ringGated
+            hostingLocation = "$($plan.hostingLocation)"; spnModel = "$($plan.spnModel)"
+            syncFileLocation = "$($plan.syncFileLocation)"; syncAdminsPermissions = [bool]$plan.syncAdminsPermissions
+            activeEdition = "$($plan.activeEdition)"; grantBasis = "$($plan.grantBasis)"
+        } } else { $null })
+        catalog  = @($catalog)
+    }
+}
+
+function Set-PimScenarioConfig {
+    # Persist the active deployment scenario id (S1-S6) under pim.Settings 'Scenario'
+    # + mirror it to $global:PIM_ActiveScenario for THIS process so the resolvers read
+    # it live. Validated against the catalog (unknown id is rejected, not silently
+    # stored). Returns the same shape as Get-PimScenarioConfig.
+    param([object]$Config)
+    $id = ''
+    if ($Config -is [string]) { $id = "$Config".Trim() }
+    else { $id = "$(Get-PimFeatureCatalogValue -Object $Config -Key 'scenario')".Trim(); if (-not $id) { $id = "$(Get-PimFeatureCatalogValue -Object $Config -Key 'id')".Trim() } }
+    $scn = $null
+    if ($id) { $scn = Get-PimScenario -Id $id }
+    if (-not $scn) { throw "Unknown deployment scenario '$id'. Expected one of: $((Get-PimScenarioCatalog | ForEach-Object { $_.id }) -join ', ')." }
+    Set-PimManagerSetting -Name 'Scenario' -Value ([ordered]@{ scenario = "$($scn.id)" })
+    $global:PIM_ActiveScenario = "$($scn.id)"
+    return (Get-PimScenarioConfig)
 }
 
 function Get-PimManagerEffectiveSchedule {
@@ -2147,6 +2390,36 @@ function Build-PimGraphData {
     $asgnRolesGrp  = (Read-PimRows 'PIM-Assignments-Roles-Groups').rows
     $asgnRolesAU   = (Read-PimRows 'PIM-Assignments-Roles-AUs').rows
     $asgnAzRes     = (Read-PimRows 'PIM-Assignments-Azure-Resources').rows
+    $asgnWorkloads = (Read-PimRows 'PIM-Assignments-Workloads').rows
+
+    # Friendly workload names come from the connector catalog (id -> name), so the
+    # map shows "Microsoft Defender XDR" not the bare "defender-xdr" connector id.
+    # Built once per build; missing dir / parse error => empty map (id used as-is).
+    $workloadNames = @{}
+    try {
+        $connDir = Join-Path $solutionRoot 'workloads\connectors'
+        if (Get-Command Read-PimWorkloadConnectors -ErrorAction SilentlyContinue) {
+            foreach ($c in @(Read-PimWorkloadConnectors -ConnectorsDir $connDir)) {
+                if ("$($c.id)".Trim()) { $workloadNames["$($c.id)".Trim().ToLowerInvariant()] = "$($c.name)" }
+            }
+        }
+    } catch { $workloadNames = @{} }
+
+    # Live-crawl reconciliation map (written by the workload-crawl sweep into the
+    # instance cache dir). GUI reads it to badge each desired workload-target as
+    # mapped / missing / exempted. Best-effort: absent/parse-error => no badges.
+    $workloadCrawl = $null
+    try {
+        if (Get-Command Read-PimWorkloadCrawlMap -ErrorAction SilentlyContinue) {
+            $workloadCrawl = Read-PimWorkloadCrawlMap
+        }
+    } catch { $workloadCrawl = $null }
+    $workloadExempt = $null
+    try {
+        if (Get-Command Read-PimWorkloadExemptions -ErrorAction SilentlyContinue) {
+            $workloadExempt = Read-PimWorkloadExemptions -ConfigRoot $configRoot
+        }
+    } catch { $workloadExempt = $null }
 
     $nodes = New-Object System.Collections.ArrayList
     $edges = New-Object System.Collections.ArrayList
@@ -2215,9 +2488,11 @@ function Build-PimGraphData {
     $syntheticTargets = @{}
     # $Extra carries the structured fields the Delegation Map's PERMISSIONS &
     # TARGETS column needs to show a short label + a full tooltip / expand:
-    #   entra-role -> roleName
-    #   au-role    -> roleName, auTag
-    #   az-resource-> roleName, scopePath (FULL ARM/path), scopeType, scopeShort
+    #   entra-role      -> roleName
+    #   au-role         -> roleName, auTag
+    #   az-resource     -> roleName, scopePath (FULL ARM/path), scopeType, scopeShort
+    #   workload-target -> workloadId, workloadName, roleName, scopePath, scopeType,
+    #                      scopeShort  (+ recon: status mapped|missing|exempted)
     $addSyn = {
         param($Id, $Label, $Kind, $Source, $Extra)
         if ($syntheticTargets.ContainsKey($Id)) { return }
@@ -2240,6 +2515,31 @@ function Build-PimGraphData {
         if ($s -match '(?i)app\.powerbi\.com|powerbi|/groups/([0-9a-f-]{36})') { return @{ scopeType = 'Power BI workspace'; scopeShort = (($s -split '/') | Where-Object { $_ } | Select-Object -Last 1) } }
         if ($s -match '(?i)dev\.azure\.com|visualstudio\.com|/_project|/project/') { return @{ scopeType = 'Azure DevOps project'; scopeShort = (($s -split '/') | Where-Object { $_ } | Select-Object -Last 1) } }
         return @{ scopeType = 'scope'; scopeShort = (($s -split '/') | Where-Object { $_ } | Select-Object -Last 1) }
+    }
+
+    # Humanise a workload scope value. Workload scopes are heterogeneous (ARM
+    # paths, Power BI workspace/env ids, BC tenant/environment, DevOps org, or a
+    # tenant-wide "/"). Reuse the ARM humaniser where it applies; otherwise label
+    # by connector kind and show the trailing segment. No live lookup (cheap):
+    # the id is shown as-is when nothing better is known.
+    $workloadScopeMeta = {
+        param($Scope, $WorkloadId)
+        $s = "$Scope".Trim()
+        if (-not $s -or $s -eq '/') { return @{ scopeType = 'Tenant-wide'; scopeShort = 'tenant' } }
+        $arm = & $azScopeMeta $s
+        if ($arm.scopeType -ne 'scope') { return $arm }
+        $wid = "$WorkloadId".Trim().ToLowerInvariant()
+        $kind = switch -Wildcard ($wid) {
+            'power*bi*'          { 'Power BI workspace' }
+            'power-platform'     { 'Power Platform environment' }
+            'business-central'   { 'Business Central environment' }
+            'azure-devops'       { 'Azure DevOps scope' }
+            'dataverse'          { 'Dataverse environment' }
+            'intune'             { 'Intune scope' }
+            'defender*'          { 'Defender scope' }
+            default              { 'Workload scope' }
+        }
+        return @{ scopeType = $kind; scopeShort = (($s -split '/') | Where-Object { $_ } | Select-Object -Last 1) }
     }
 
     foreach ($r in $asgnAdmins) {
@@ -2317,6 +2617,53 @@ function Build-PimGraphData {
         })
     }
 
+    # --- Workload roles & scopes (PIM-Assignments-Workloads) -----------------
+    # The 4th target kind on the Delegation Map: a PIM group bound to a workload
+    # RBAC role at a scope (Defender XDR / Intune / Power BI / Power Platform /
+    # Business Central / Azure DevOps / Dataverse / app-roles). Sourced ONLY from
+    # the desired CSV (never from group names). Edge: capability bundle ->
+    # workload-target, mirroring the az-resource pattern. When a live-crawl map is
+    # present, each target is reconciled (mapped | missing | exempted) for a badge.
+    foreach ($r in $asgnWorkloads) {
+        if (-not $r.Workload -or -not $r.RoleName -or -not $r.GroupTag) { continue }
+        $wid       = "$($r.Workload)".Trim()
+        $widLc     = $wid.ToLowerInvariant()
+        $wName     = if ($workloadNames.ContainsKey($widLc)) { $workloadNames[$widLc] } else { $wid }
+        $wScope    = "$($r.Scope)".Trim()
+        $meta      = & $workloadScopeMeta $wScope $wid
+        $shortScope= if ("$($meta.scopeShort)".Trim()) { "$($meta.scopeShort)" } else { 'tenant' }
+        $targetId  = "workload:$widLc`:$($r.RoleName):$wScope"
+        $label     = "$($r.RoleName) @ $wName"
+        $extra     = @{
+            workloadId   = $wid
+            workloadName = "$wName"
+            roleName     = "$($r.RoleName)"
+            scopePath    = $wScope
+            scopeType    = "$($meta.scopeType)"
+            scopeShort   = "$shortScope"
+        }
+        # Reconciliation status from the live-crawl map + exemptions, per group.
+        if (Get-Command Get-PimWorkloadReconStatus -ErrorAction SilentlyContinue) {
+            try {
+                $recon = Get-PimWorkloadReconStatus -Row $r -CrawlMap $workloadCrawl -Exemptions $workloadExempt
+                if ($recon) {
+                    $extra.reconStatus = "$($recon.status)"
+                    if ("$($recon.reason)".Trim())  { $extra.reconReason  = "$($recon.reason)" }
+                    if ("$($recon.crawledUtc)".Trim()) { $extra.reconCrawledUtc = "$($recon.crawledUtc)" }
+                }
+            } catch { }
+        }
+        & $addSyn $targetId $label 'workload-target' 'PIM-Assignments-Workloads' $extra
+        [void]$edges.Add([ordered]@{
+            source = "group:$($r.GroupTag)"
+            target = $targetId
+            type   = $r.Action
+            kind   = 'group-to-workload'
+            source_csv = 'PIM-Assignments-Workloads'
+            match = [ordered]@{ GroupTag = $r.GroupTag; Workload = $wid; RoleName = $r.RoleName; Scope = $wScope; Action = $r.Action }
+        })
+    }
+
     foreach ($t in $syntheticTargets.Values) { [void]$nodes.Add($t) }
 
     $summary = [ordered]@{
@@ -2325,7 +2672,8 @@ function Build-PimGraphData {
         admins = @($nodes | Where-Object { $_.kind -eq 'admin' }).Count
         roleGroups       = @($nodes | Where-Object { $_.kind -eq 'role-group' }).Count
         permissionGroups = @($nodes | Where-Object { $_.kind -eq 'permission-group' }).Count
-        targets          = @($nodes | Where-Object { $_.kind -in @('entra-role','au-role','az-resource') }).Count
+        targets          = @($nodes | Where-Object { $_.kind -in @('entra-role','au-role','az-resource','workload-target') }).Count
+        workloadTargets  = @($nodes | Where-Object { $_.kind -eq 'workload-target' }).Count
     }
 
     # Report the ACTUAL source the rows came from. In SQL mode the model is
@@ -3403,6 +3751,15 @@ function Write-HtmlResponse {
     try {
         $Response.StatusCode = 200
         $Response.ContentType = 'text/html; charset=utf-8'
+        # The Manager is a single-page app whose menus/JS are inline in this HTML
+        # shell. Without an explicit no-cache directive the browser (and any proxy)
+        # caches the shell, so after a deploy users keep seeing the OLD menus until
+        # a hard refresh. Force a revalidate so every load gets the deployed build.
+        try {
+            $Response.Headers['Cache-Control'] = 'no-cache, no-store, must-revalidate'
+            $Response.Headers['Pragma'] = 'no-cache'
+            $Response.Headers['Expires'] = '0'
+        } catch { Write-Verbose "could not set no-cache headers: $($_.Exception.Message)" }
         $bytes = [System.Text.Encoding]::UTF8.GetBytes($Html)
         $Response.ContentLength64 = $bytes.LongLength
         $Response.OutputStream.Write($bytes, 0, $bytes.Length)
@@ -4256,6 +4613,14 @@ function Invoke-Server {
     param([int]$DesiredPort = 0)
 
     Write-Host "PIM4EntraPS Mapper -- starting local editor server ..." -ForegroundColor Cyan
+    # Deterministic boot-log version line. The post-deploy hosted smoke
+    # (tests/live/Test-PimManagerHostedSmoke.ps1) asserts the LIVE Manager is
+    # serving the EXPECTED version (SOLUTIONS/PIM4EntraPS/VERSION) by matching
+    # this exact phrasing in ContainerAppConsoleLogs_CL -- it is the reliable
+    # signal behind Easy Auth (the served HTML #versionBadge needs an edge token).
+    # Stale here == a deploy that didn't actually roll the image (the "stuck on
+    # 2.4.222" case) and is a HARD FAIL in the smoke.
+    Write-Host ("  [version] PIM Manager {0} (from VERSION)" -f (Get-PimSolutionVersion)) -ForegroundColor Cyan
     $token = [Guid]::NewGuid().ToString('N')
 
     $listener = $null
@@ -5841,9 +6206,12 @@ function Handle-Request {
                     if ($ev.PSObject.Properties[$e]) { $events[$e] = [bool]$ev.PSObject.Properties[$e].Value }
                 }
             }
+            $webhookUrl = ''; $webhookKind = ''
+            if ($body -and $body.PSObject.Properties['webhookUrl'])  { $webhookUrl  = "$($body.webhookUrl)" }
+            if ($body -and $body.PSObject.Properties['webhookKind']) { $webhookKind = "$($body.webhookKind)" }
             try {
-                $cfg = Set-PimAlertingConfig -Recipients $recips -Events $events
-                Write-PimManagerAuditEvent -Action 'alerting.save' -Target 'settings:alerting' -After ([ordered]@{ recipients = @($cfg.recipients).Count; enabled = [bool]$cfg.enabled }) -Result 'ok'
+                $cfg = Set-PimAlertingConfig -Recipients $recips -Events $events -WebhookUrl $webhookUrl -WebhookKind $webhookKind
+                Write-PimManagerAuditEvent -Action 'alerting.save' -Target 'settings:alerting' -After ([ordered]@{ recipients = @($cfg.recipients).Count; enabled = [bool]$cfg.enabled; webhook = "$($cfg.webhookKind)"; webhookEnabled = [bool]$cfg.webhookEnabled }) -Result 'ok'
                 Write-JsonResponse -Response $resp -Status 200 -Body $cfg
                 return 200
             } catch {
@@ -5994,6 +6362,159 @@ function Handle-Request {
                 Write-JsonResponse -Response $resp -Status 500 -Body @{ ok = $false; error = "$($_.Exception.Message)" }
                 return 500
             }
+        }
+
+        # -------------------------------------------------------------------
+        # Feature customization (REQUIREMENTS s29) -- the per-feature kill switch
+        # over the unified capability catalog. GET returns the effective gate map
+        # (defaults + persisted overrides) + the catalog grouped by chapter + the
+        # active edition + dependency issues so the Settings "Feature customization"
+        # card can render every advanced toggle, dim disabled ones, and lock
+        # unlicensed ones. PUT is SuperAdmin (it changes engine/job behaviour). The
+        # SAME persisted state ('FeatureGates') is read by the engine + scheduler at
+        # runtime, so a toggle here makes a disabled feature inert everywhere.
+        # -------------------------------------------------------------------
+        if ($path -eq '/api/settings/feature-gates' -and $method -eq 'GET') {
+            $script:lastHeartbeat = Get-Date
+            try { Write-JsonResponse -Response $resp -Status 200 -Body (Get-PimFeatureGates); return 200 }
+            catch { Write-JsonResponse -Response $resp -Status 500 -Body @{ error = "$($_.Exception.Message)" }; return 500 }
+        }
+
+        if ($path -eq '/api/settings/feature-gates' -and $method -eq 'PUT') {
+            $script:lastHeartbeat = Get-Date
+            if (-not (Test-PimManagerRoleAtLeast -Minimum 'SuperAdmin')) {
+                Write-JsonResponse -Response $resp -Status 403 -Body @{ error = 'SuperAdmin role required to change feature customization. See config/manager-access.custom.json.' }
+                return 403
+            }
+            $body = Read-RequestJson -Request $req
+            $payload = if ($body -and $body.PSObject.Properties['value']) { $body.value } else { $body }
+            try {
+                $cfg = Set-PimFeatureGates -Gates $payload
+                $enabled = @(); foreach ($k in $cfg.gates.Keys) { if ([bool]$cfg.gates[$k]) { $enabled += "$k" } }
+                Write-PimManagerAuditEvent -Action 'settings.feature-gates.save' -Target 'settings:feature-gates' -After ([ordered]@{ enabled = ($enabled -join ',') }) -Result 'ok'
+                Write-JsonResponse -Response $resp -Status 200 -Body $cfg
+                return 200
+            } catch {
+                Write-JsonResponse -Response $resp -Status 500 -Body @{ ok = $false; error = "$($_.Exception.Message)" }
+                return 500
+            }
+        }
+
+        # -------------------------------------------------------------------
+        # License backend (REQUIREMENTS s30) -- set/read the active EDITION
+        # (Core | Pro | Pro-DesignPartner) per tenant + the recorded grant basis
+        # (paid | design-partner). Honoured by the same gates as the kill switch:
+        # a 'pro' feature is only available when the edition covers it. SuperAdmin
+        # on the write. GET is reachable to any signed-in role so the GUI can show
+        # which features the current edition unlocks.
+        # -------------------------------------------------------------------
+        if ($path -eq '/api/settings/edition' -and $method -eq 'GET') {
+            $script:lastHeartbeat = Get-Date
+            try { Write-JsonResponse -Response $resp -Status 200 -Body (Get-PimEditionConfig); return 200 }
+            catch { Write-JsonResponse -Response $resp -Status 500 -Body @{ error = "$($_.Exception.Message)" }; return 500 }
+        }
+
+        if ($path -eq '/api/settings/edition' -and $method -eq 'PUT') {
+            $script:lastHeartbeat = Get-Date
+            if (-not (Test-PimManagerRoleAtLeast -Minimum 'SuperAdmin')) {
+                Write-JsonResponse -Response $resp -Status 403 -Body @{ error = 'SuperAdmin role required to set the edition. See config/manager-access.custom.json.' }
+                return 403
+            }
+            $body = Read-RequestJson -Request $req
+            $payload = if ($body -and $body.PSObject.Properties['value']) { $body.value } else { $body }
+            try {
+                $cfg = Set-PimEditionConfig -Config $payload
+                Write-PimManagerAuditEvent -Action 'settings.edition.save' -Target 'settings:edition' -After ([ordered]@{ edition = "$($cfg.edition)"; grantBasis = "$($cfg.grantBasis)" }) -Result 'ok'
+                Write-JsonResponse -Response $resp -Status 200 -Body $cfg
+                return 200
+            } catch {
+                Write-JsonResponse -Response $resp -Status 500 -Body @{ ok = $false; error = "$($_.Exception.Message)" }
+                return 500
+            }
+        }
+
+        # -------------------------------------------------------------------
+        # Deployment scenario backend (REQUIREMENTS §31.3 c) -- read/set the active
+        # deployment TOPOLOGY (S1-S6) the engine + jobs + this GUI all resolve their
+        # runtime knobs (hosting / SPN model / sync-file location + edition) from.
+        # Mirrors /api/settings/edition: GET is reachable to any signed-in role so the
+        # Settings card can show the active topology + resolved knobs; PUT is
+        # SuperAdmin-only and persists the active scenario to pim.Settings 'Scenario'.
+        # The card is a READ-ONLY summary of the resolved topology -- persisting a new
+        # scenario never silently re-runs anything; it only changes what subsequent
+        # resolutions read (the deploy/engine paths apply it on their next run).
+        # -------------------------------------------------------------------
+        if ($path -eq '/api/settings/scenario' -and $method -eq 'GET') {
+            $script:lastHeartbeat = Get-Date
+            try { Write-JsonResponse -Response $resp -Status 200 -Body (Get-PimScenarioConfig); return 200 }
+            catch { Write-JsonResponse -Response $resp -Status 500 -Body @{ error = "$($_.Exception.Message)" }; return 500 }
+        }
+
+        if ($path -eq '/api/settings/scenario' -and $method -eq 'PUT') {
+            $script:lastHeartbeat = Get-Date
+            if (-not (Test-PimManagerRoleAtLeast -Minimum 'SuperAdmin')) {
+                Write-JsonResponse -Response $resp -Status 403 -Body @{ error = 'SuperAdmin role required to set the deployment scenario. See config/manager-access.custom.json.' }
+                return 403
+            }
+            $body = Read-RequestJson -Request $req
+            $payload = if ($body -and $body.PSObject.Properties['value']) { $body.value } else { $body }
+            try {
+                $cfg = Set-PimScenarioConfig -Config $payload
+                Write-PimManagerAuditEvent -Action 'settings.scenario.save' -Target 'settings:scenario' -After ([ordered]@{ scenario = "$($cfg.active)" }) -Result 'ok'
+                Write-JsonResponse -Response $resp -Status 200 -Body $cfg
+                return 200
+            } catch {
+                Write-JsonResponse -Response $resp -Status 500 -Body @{ ok = $false; error = "$($_.Exception.Message)" }
+                return 500
+            }
+        }
+
+        # -------------------------------------------------------------------
+        # Email controls (REQUIREMENTS s29) -- global kill switch + redirect/override
+        # target + allowlist. Surfaced as gateable settings honoured by the notify
+        # path (Send-PimNotifyMail reads $global:PIM_MailKillSwitch / *RedirectAllTo
+        # / *MailAllowlist). Persisted under pim.Settings 'EmailControls' and mirrored
+        # to the globals so the same process's notify path picks them up live.
+        # -------------------------------------------------------------------
+        if ($path -eq '/api/settings/email-controls' -and $method -eq 'GET') {
+            $script:lastHeartbeat = Get-Date
+            try {
+                $raw = $null; try { $raw = Get-PimManagerSetting -Name 'EmailControls' } catch {}
+                $kill = $false; $redirect = ''; $allow = @()
+                if ($raw) {
+                    $kv = if ($raw -is [System.Collections.IDictionary]) { $raw } else { $raw }
+                    $k = Get-PimFeatureCatalogValue -Object $kv -Key 'killSwitch'; if ($null -ne $k) { $kill = [bool]$k }
+                    $rd = Get-PimFeatureCatalogValue -Object $kv -Key 'redirectAllTo'; if ($null -ne $rd) { $redirect = "$rd".Trim() }
+                    $al = Get-PimFeatureCatalogValue -Object $kv -Key 'allowlist'; if ($null -ne $al) { $allow = @($al | ForEach-Object { "$_".Trim() } | Where-Object { $_ }) }
+                }
+                Write-JsonResponse -Response $resp -Status 200 -Body ([ordered]@{ killSwitch=$kill; redirectAllTo=$redirect; allowlist=@($allow) })
+                return 200
+            } catch { Write-JsonResponse -Response $resp -Status 500 -Body @{ error = "$($_.Exception.Message)" }; return 500 }
+        }
+
+        if ($path -eq '/api/settings/email-controls' -and $method -eq 'PUT') {
+            $script:lastHeartbeat = Get-Date
+            if (-not (Test-PimManagerRoleAtLeast -Minimum 'SuperAdmin')) {
+                Write-JsonResponse -Response $resp -Status 403 -Body @{ error = 'SuperAdmin role required to change email controls.' }
+                return 403
+            }
+            $body = Read-RequestJson -Request $req
+            $payload = if ($body -and $body.PSObject.Properties['value']) { $body.value } else { $body }
+            try {
+                $kill = [bool](Get-PimFeatureCatalogValue -Object $payload -Key 'killSwitch')
+                $redirect = "$(Get-PimFeatureCatalogValue -Object $payload -Key 'redirectAllTo')".Trim()
+                $allowRaw = Get-PimFeatureCatalogValue -Object $payload -Key 'allowlist'
+                $allow = @(); if ($allowRaw) { $allow = @($allowRaw | ForEach-Object { "$_".Trim() } | Where-Object { $_ }) }
+                $val = [ordered]@{ killSwitch=$kill; redirectAllTo=$redirect; allowlist=@($allow) }
+                Set-PimManagerSetting -Name 'EmailControls' -Value $val
+                # Mirror to the globals the notify path reads live.
+                $global:PIM_MailKillSwitch = $kill
+                $global:PIM_MailAllowlist = @($allow)
+                if ($redirect) { $global:PIM_MailRedirectAllTo = $redirect }
+                Write-PimManagerAuditEvent -Action 'settings.email-controls.save' -Target 'settings:email-controls' -After ([ordered]@{ killSwitch=$kill; redirect=$redirect; allowlistCount=$allow.Count }) -Result 'ok'
+                Write-JsonResponse -Response $resp -Status 200 -Body $val
+                return 200
+            } catch { Write-JsonResponse -Response $resp -Status 500 -Body @{ ok=$false; error = "$($_.Exception.Message)" }; return 500 }
         }
 
         if ($path -eq '/api/mail-templates' -and $method -eq 'GET') {
@@ -6631,6 +7152,66 @@ function Handle-Request {
         }
 
         # -------------------------------------------------------------------
+        # Workload crawl map + reconciliation (Delegation Map workload-target).
+        #   GET  /api/workload-crawl  -> the cached live-crawl map (engine writes
+        #        it; GUI reads). Includes crawledUtc + per-connector ok/error.
+        #   POST /api/workload-crawl  -> RUN the crawl sweep NOW (Admin+). The
+        #        engine remains the writer; this just invokes that writer on
+        #        demand (the scheduler/discovery does it on cadence).
+        #   GET  /api/workload-recon  -> reconciliation summary (mapped/missing/
+        #        exempted/unknown) over the desired PIM-Assignments-Workloads rows.
+        # -------------------------------------------------------------------
+        if ($path -eq '/api/workload-crawl' -and $method -eq 'GET') {
+            $script:lastHeartbeat = Get-Date
+            $map = $null
+            if (Get-Command Read-PimWorkloadCrawlMap -ErrorAction SilentlyContinue) {
+                try { $map = Read-PimWorkloadCrawlMap } catch { $map = $null }
+            }
+            Write-JsonResponse -Response $resp -Status 200 -Body ([ordered]@{ crawl = $map })
+            return 200
+        }
+        if ($path -eq '/api/workload-crawl' -and $method -eq 'POST') {
+            $script:lastHeartbeat = Get-Date
+            if (-not (Test-PimManagerRoleAtLeast -Minimum 'Admin')) {
+                Write-JsonResponse -Response $resp -Status 403 -Body @{ error = 'Admin role required to run the workload crawl' }
+                return 403
+            }
+            if (-not (Get-Command Update-PimWorkloadCrawlMap -ErrorAction SilentlyContinue)) {
+                Write-JsonResponse -Response $resp -Status 501 -Body @{ error = 'workload crawl helper not loaded' }
+                return 501
+            }
+            try {
+                $shared = Join-Path $PSScriptRoot '..\..\engine\_shared\PIM-Functions.psm1'
+                if (-not (Get-Command Read-PimWorkloadConnectors -ErrorAction SilentlyContinue) -and (Test-Path -LiteralPath $shared)) {
+                    Import-Module $shared -Global -Force -WarningAction SilentlyContinue -ErrorAction SilentlyContinue
+                }
+                Initialize-PimManagerTenantConnection
+                $dir = Join-Path $solutionRoot 'workloads\connectors'
+                $written = Update-PimWorkloadCrawlMap -ConnectorsDir $dir
+                $map = Read-PimWorkloadCrawlMap
+                Write-PimManagerAuditEvent -Action 'workload.crawl' -Target 'all-connectors' -After @{ crawledUtc = "$($map.crawledUtc)" }
+                Write-JsonResponse -Response $resp -Status 200 -Body ([ordered]@{ ok = $true; crawledUtc = "$($map.crawledUtc)"; crawl = $map })
+                return 200
+            } catch {
+                Write-JsonResponse -Response $resp -Status 502 -Body @{ error = "$($_.Exception.Message)" }
+                return 502
+            }
+        }
+        if ($path -eq '/api/workload-recon' -and $method -eq 'GET') {
+            $script:lastHeartbeat = Get-Date
+            $rows = @((Read-PimRows 'PIM-Assignments-Workloads').rows)
+            $map = $null; $ex = @()
+            if (Get-Command Read-PimWorkloadCrawlMap -ErrorAction SilentlyContinue) { try { $map = Read-PimWorkloadCrawlMap } catch { $map = $null } }
+            if (Get-Command Read-PimWorkloadExemptions -ErrorAction SilentlyContinue) { try { $ex = @(Read-PimWorkloadExemptions -ConfigRoot $script:configRoot) } catch { $ex = @() } }
+            $summary = $null
+            if (Get-Command Get-PimWorkloadReconSummary -ErrorAction SilentlyContinue) {
+                try { $summary = Get-PimWorkloadReconSummary -Rows $rows -CrawlMap $map -Exemptions $ex } catch { $summary = $null }
+            }
+            Write-JsonResponse -Response $resp -Status 200 -Body ([ordered]@{ summary = $summary })
+            return 200
+        }
+
+        # -------------------------------------------------------------------
         # Delegated portal-admin access (admin-interface epic phase 2).
         # -------------------------------------------------------------------
         if ($path -eq '/api/portal-access' -and $method -eq 'GET') {
@@ -7152,10 +7733,15 @@ function Handle-Request {
                 $c = Get-PimConformance -Template $tpl -TenantRing $confRing -TenantId $confTenant -ActiveExemptionKeys $exKeys -LiveCatalog $liveCat -AppliedVersion $applied
                 $statusMap = [ordered]@{}
                 foreach ($r in $c.Rows) { $statusMap["$($r.Key)"] = "$($r.Status)" }
+                # Per-entry rollout ring (default 2) so the Template Rollout tab can render a
+                # per-entry ring selector that drives POST /api/conformance/promote (no more
+                # orphaned promote endpoint). Read straight from each template entry.
+                $ringMap = [ordered]@{}
+                foreach ($e in @($tpl.entries)) { $ringMap["$($e.key)"] = (Get-PimTemplateEntryRing -Entry $e) }
                 Write-JsonResponse -Response $resp -Status 200 -Body ([ordered]@{
                     templateId = "$($tpl.templateId)"; workload = "$($tpl.workload)"; templateVersion = $c.TemplateVersion
                     status = "$($tpl.status)"; tenantRing = $confRing; appliedVersion = $applied; behind = $c.Behind
-                    keys = @(@($tpl.entries) | ForEach-Object { "$($_.key)" }); statuses = $statusMap
+                    keys = @(@($tpl.entries) | ForEach-Object { "$($_.key)" }); statuses = $statusMap; rings = $ringMap
                     counts = $c.Counts; catalogAhead = @($c.CatalogAhead | ForEach-Object { "$($_.Capability)" })
                 })
                 return 200

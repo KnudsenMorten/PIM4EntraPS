@@ -235,14 +235,30 @@ function Get-PimUpdateSourceProfile {
         * 'sync-automateit' : hosted -- the sync-automateit pull. Store is Azure SQL; the Manager
                               runs on Container Apps. Build = az acr build; deploy = roll the ACA
                               revision to the freshly-built image.
-      Returns { source; buildMode; deployMode; isHosted } -- buildMode in {acr-build, local-build},
-      deployMode in {aca-roll, local-relaunch}.
+        * 'from-master'     : MSP MANAGED/SLAVE downlink (s31 S5/S6) -- the managed tenant pulls the
+                              ring's signed template/baseline FROM THE MSP MASTER (pull-not-push;
+                              ring-gated). The CODE update path mirrors the managed tenant's hosting:
+                              CENTRAL-hosted (S5) rolls the central ACA revision (acr-build/aca-roll);
+                              LOCAL-hosted (S6) does a local build/relaunch -- so the caller passes
+                              -ManagedHosting central|local. ringGated is TRUE; the pull only takes
+                              the ring's approved version (never a version above the tenant's ring).
+      Returns { source; buildMode; deployMode; isHosted; ringGated } -- buildMode in {acr-build,
+      local-build}, deployMode in {aca-roll, local-relaunch}.
     #>
-    param([Parameter(Mandatory)][ValidateSet('git-pull','sync-automateit')][string]$Source)
+    param(
+        [Parameter(Mandatory)][ValidateSet('git-pull','sync-automateit','from-master')][string]$Source,
+        [ValidateSet('central','local')][string]$ManagedHosting = 'local'
+    )
     if ($Source -eq 'sync-automateit') {
-        return [pscustomobject]@{ source = 'sync-automateit'; buildMode = 'acr-build'; deployMode = 'aca-roll'; isHosted = $true }
+        return [pscustomobject]@{ source = 'sync-automateit'; buildMode = 'acr-build'; deployMode = 'aca-roll'; isHosted = $true; ringGated = $false }
     }
-    return [pscustomobject]@{ source = 'git-pull'; buildMode = 'local-build'; deployMode = 'local-relaunch'; isHosted = $false }
+    if ($Source -eq 'from-master') {
+        if ($ManagedHosting -eq 'central') {
+            return [pscustomobject]@{ source = 'from-master'; buildMode = 'acr-build'; deployMode = 'aca-roll'; isHosted = $true; ringGated = $true }
+        }
+        return [pscustomobject]@{ source = 'from-master'; buildMode = 'local-build'; deployMode = 'local-relaunch'; isHosted = $false; ringGated = $true }
+    }
+    return [pscustomobject]@{ source = 'git-pull'; buildMode = 'local-build'; deployMode = 'local-relaunch'; isHosted = $false; ringGated = $false }
 }
 
 # ---- build plan (pure) ----------------------------------------------------
@@ -254,23 +270,27 @@ function Get-PimBuildPlan {
       `az acr build` (Build-PimManagerImage.ps1). Community => a local build/package + relaunch.
 
       -GuiUpdateRequired : from Get-PimGuiUpdatePlan.
-      -Source            : 'git-pull' | 'sync-automateit'.
+      -Source            : 'git-pull' | 'sync-automateit' | 'from-master' (MSP managed downlink, S5/S6).
+      -ManagedHosting    : 'central' | 'local' -- only consulted when Source='from-master' (the
+                           managed tenant's hosting: S5 central => ACR build; S6 local => local build).
       -ImageTag          : the tag to build (the orchestrator derives it -- usually the pulled VERSION).
       Returns { BuildRequired; buildMode; imageTag; imageRepo; reason }.
     #>
     param(
         [Parameter(Mandatory)][bool]$GuiUpdateRequired,
-        [Parameter(Mandatory)][ValidateSet('git-pull','sync-automateit')][string]$Source,
+        [Parameter(Mandatory)][ValidateSet('git-pull','sync-automateit','from-master')][string]$Source,
         [string]$ImageTag,
-        [string]$ImageRepo = 'pim-manager'
+        [string]$ImageRepo = 'pim-manager',
+        [ValidateSet('central','local')][string]$ManagedHosting = 'local'
     )
-    $profile = Get-PimUpdateSourceProfile -Source $Source
+    $profile = Get-PimUpdateSourceProfile -Source $Source -ManagedHosting $ManagedHosting
     if (-not $GuiUpdateRequired) {
         return [pscustomobject]@{ BuildRequired = $false; buildMode = $profile.buildMode; imageTag = "$ImageTag"; imageRepo = $ImageRepo;
             reason = 'no GUI update -- nothing to build (SQL-only upgrades do not need an image)' }
     }
+    $ringNote = if ($profile.ringGated) { ' (ring-gated from-master downlink)' } else { '' }
     return [pscustomobject]@{ BuildRequired = $true; buildMode = $profile.buildMode; imageTag = "$ImageTag"; imageRepo = $ImageRepo;
-        reason = $(if ($profile.isHosted) { "GUI update -- build $ImageRepo`:$ImageTag in ACR from the pulled code (az acr build)" } else { 'GUI update -- local build/package + relaunch the local Manager' }) }
+        reason = $(if ($profile.isHosted) { "GUI update -- build $ImageRepo`:$ImageTag in ACR from the pulled code (az acr build)$ringNote" } else { "GUI update -- local build/package + relaunch the local Manager$ringNote" }) }
 }
 
 # ---- the ordered apply plan (pure) ----------------------------------------
@@ -284,7 +304,8 @@ function Get-PimUpdateApplyPlan {
       Inputs:
         -Detection        : Get-PimUpdateDetection result (gui/sql required + details).
         -BuildPlan        : Get-PimBuildPlan result.
-        -Source           : 'git-pull' | 'sync-automateit'.
+        -Source           : 'git-pull' | 'sync-automateit' | 'from-master' (MSP managed downlink, S5/S6).
+        -ManagedHosting   : 'central' | 'local' -- only consulted when Source='from-master'.
         -Apply            : the gate -- $false => detect-only (default-safe).
         -MonitorInPlace   : is the synthetic health monitor already deployed + fresh? (fact)
       Returns { detectOnly; steps = @( {step; action; do; detail} ... ) } in order:
@@ -293,11 +314,12 @@ function Get-PimUpdateApplyPlan {
     param(
         [Parameter(Mandatory)][object]$Detection,
         [Parameter(Mandatory)][object]$BuildPlan,
-        [Parameter(Mandatory)][ValidateSet('git-pull','sync-automateit')][string]$Source,
+        [Parameter(Mandatory)][ValidateSet('git-pull','sync-automateit','from-master')][string]$Source,
         [switch]$Apply,
-        [bool]$MonitorInPlace = $false
+        [bool]$MonitorInPlace = $false,
+        [ValidateSet('central','local')][string]$ManagedHosting = 'local'
     )
-    $profile = Get-PimUpdateSourceProfile -Source $Source
+    $profile = Get-PimUpdateSourceProfile -Source $Source -ManagedHosting $ManagedHosting
     $detectOnly = -not $Apply
     $steps = New-Object System.Collections.Generic.List[object]
 

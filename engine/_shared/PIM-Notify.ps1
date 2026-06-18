@@ -113,10 +113,31 @@ function Send-PimNotifyMail {
     [CmdletBinding()]
     param([Parameter(Mandatory)][string]$Type, [Parameter(Mandatory)][hashtable]$Tokens, [string]$Recipient, [switch]$WhatIf)
     $rcpt = $Recipient
+
+    # --- EMAIL CONTROLS (REQUIREMENTS s29) ------------------------------------
+    # 1) Global email KILL SWITCH: when $global:PIM_MailKillSwitch is set, OR the
+    #    'alerting.email' feature is disabled/unlicensed, EVERY send is a no-op.
+    #    Honoured here so every send path + every job/scheduler is covered at the
+    #    one chokepoint. A disabled feature performs NO sends, no matter the trigger.
+    if ($global:PIM_MailKillSwitch) { return @{ sent = $false; recipient = $rcpt; reason = 'email kill switch on' } }
+    if ((Get-Command Test-PimFeatureAvailable -ErrorAction SilentlyContinue) -and -not (Test-PimFeatureAvailable -Key 'alerting.email' -Quiet)) {
+        return @{ sent = $false; recipient = $rcpt; reason = 'email feature disabled' }
+    }
+    # 2) Override/redirect target -- $global:PIM_MailRedirectAllTo handled below
+    #    (existing behaviour). 3) Allowlist: when $global:PIM_MailAllowlist is a
+    #    non-empty set, a recipient NOT on it (after redirect resolution) is dropped.
     if ($global:PIM_MailRedirectAllTo -and "$($global:PIM_MailRedirectAllTo)".Trim()) {
         $redir = "$($global:PIM_MailRedirectAllTo)".Trim()
         if ($rcpt -and $rcpt -ne $redir) { $Tokens = @{} + $Tokens; $Tokens['RedirectedFrom'] = $rcpt; Write-Host "  [Mail] redirect: '$rcpt' -> $redir" -ForegroundColor DarkYellow }
         $rcpt = $redir
+    }
+    # Allowlist (REQUIREMENTS s29): when configured + non-empty, drop any recipient
+    # not on it (after the redirect resolution above). Empty/unset = no restriction.
+    $allow = @($global:PIM_MailAllowlist | Where-Object { "$_".Trim() })
+    if ($allow.Count -gt 0 -and $rcpt) {
+        $hit = $false
+        foreach ($a in $allow) { if ("$a".Trim().ToLowerInvariant() -eq "$rcpt".Trim().ToLowerInvariant()) { $hit = $true; break } }
+        if (-not $hit) { Write-Host "  [Mail] '$rcpt' not on allowlist -- not sent." -ForegroundColor DarkYellow; return @{ sent = $false; recipient = $rcpt; reason = 'recipient not on allowlist' } }
     }
     $tpl = Get-PimNotifyTemplateText -Type $Type
     if (-not $tpl) { return @{ sent = $false; recipient = $rcpt; reason = "no template '$Type'" } }

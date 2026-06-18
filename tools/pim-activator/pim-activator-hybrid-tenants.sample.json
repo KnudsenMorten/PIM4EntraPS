@@ -1,0 +1,405 @@
+{
+  "_comment": "SYNTHETIC sample for Deploy-PimActivatorHybrid.ps1 -- placeholder GUIDs only, NOT real tenants.",
+  "tenants": [
+    {
+      "name": "Customer 01",
+      "tenantId": "aaaaaaaa-bbbb-cccc-dddd-000000000001",
+      "clientId": "11111111-2222-3333-4444-555555555501",
+      "prefix": "PIM-",
+      "entraPrefix": [
+        "PIM-Entra",
+        "PIM-AAD"
+      ],
+      "azurePrefix": [
+        "PIM-Azure",
+        "PIM-AzRes"
+      ],
+      "defaultJustification": "Change in infrastructure",
+      "defaultDurationHours": 8
+    },
+    {
+      "name": "Customer 02",
+      "tenantId": "aaaaaaaa-bbbb-cccc-dddd-000000000002",
+      "clientId": "11111111-2222-3333-4444-555555555502",
+      "prefix": "PIM-",
+      "entraPrefix": [
+        "PIM-Entra",
+        "PIM-AAD"
+      ],
+      "azurePrefix": [
+        "PIM-Azure",
+        "PIM-AzRes"
+      ],
+      "defaultJustification": "Change in infrastructure",
+      "defaultDurationHours": 8
+    },
+    {
+      "name": "Customer 03",
+      "tenantId": "aaaaaaaa-bbbb-cccc-dddd-000000000003",
+      "clientId": "11111111-2222-3333-4444-555555555503",
+      "prefix": "PIM-",
+      "entraPrefix": [
+        "PIM-Entra",
+        "PIM-AAD"
+      ],
+      "azurePrefix": [
+        "PIM-Azure",
+        "PIM-AzRes"
+      ],
+      "defaultJustification": "Change in infrastructure",
+      "defaultDurationHours": 8
+    },
+    {
+      "name": "Customer 04",
+      "tenantId": "aaaaaaaa-bbbb-cccc-dddd-000000000004",
+      "clientId": "11111111-2222-3333-4444-555555555504",
+      "prefix": "PIM-",
+      "entraPrefix": [
+        "PIM-Entra",
+        "PIM-AAD"
+      ],
+      "azurePrefix": [
+        "PIM-Azure",
+        "PIM-AzRes"
+      ],
+      "defaultJustification": "Change in infrastructure",
+      "defaultDurationHours": 8
+    },
+    {
+      "name": "Customer 05",
+      "tenantId": "aaaaaaaa-bbbb-cccc-dddd-000000000005",
+      "clientId": "11111111-2222-3333-4444-555555555505",
+      "prefix": "PIM-",
+      "entraPrefix": [
+        "PIM-Entra",
+        "PIM-AAD"
+      ],
+      "azurePrefix": [
+        "PIM-Azure",
+        "PIM-AzRes"
+      ],
+      "defaultJustification": "Change in infrastructure",
+      "defaultDurationHours": 8
+    },
+    {
+      "name": "Customer 06",
+      "tenantId": "aaaaaaaa-bbbb-cccc-dddd-000000000006",
+      "clientId": "11111111-2222-3333-4444-555555555506",
+      "prefix": "PIM-",
+      "entraPrefix": [
+        "PIM-Entra",
+        "PIM-AAD"
+      ],
+      "azurePrefix": [
+        "PIM-Azure",
+        "PIM-AzRes"
+      ],
+      "defaultJustification": "Change in infrastructure",
+      "defaultDurationHours": 8
+    },
+    {
+      "name": "Customer 07",
+      "tenantId": "aaaaaaaa-bbbb-cccc-dddd-000000000007",
+      "clientId": "11111111-2222-3333-4444-555555555507",
+      "prefix": "PIM-",
+      "entraPrefix": [
+        "PIM-Entra",
+        "PIM-AAD"
+      ],
+      "azurePrefix": [
+        "PIM-Azure",
+        "PIM-AzRes"
+      ],
+      "defaultJustification": "Change in infrastructure",
+      "defaultDurationHours": 8
+    },
+    {
+      "name": "Customer 08",
+      "tenantId": "aaaaaaaa-bbbb-cccc-dddd-000000000008",
+      "clientId": "11111111-2222-3333-4444-555555555508",
+      "prefix": "PIM-",
+      "entraPrefix": [
+        "PIM-Entra",
+        "PIM-AAD"
+      ],
+      "azurePrefix": [
+        "PIM-Azure",
+        "PIM-AzRes"
+      ],
+      "defaultJustification": "Change in infrastructure",
+      "defaultDurationHours": 8
+    },
+    {
+      "name": "Customer 09",
+      "tenantId": "aaaaaaaa-bbbb-cccc-dddd-000000000009",
+      "clientId": "11111111-2222-3333-4444-555555555509",
+      "prefix": "PIM-",
+      "entraPrefix": [
+        "PIM-Entra",
+        "PIM-AAD"
+      ],
+      "azurePrefix": [
+        "PIM-Azure",
+        "PIM-AzRes"
+      ],
+      "defaultJustification": "Change in infrastructure",
+      "defaultDurationHours": 8
+    },
+    {
+      "name": "Customer 10",
+      "tenantId": "aaaaaaaa-bbbb-cccc-dddd-00000000000a",
+      "clientId": "11111111-2222-3333-4444-55555555550a",
+      "prefix": "PIM-",
+      "entraPrefix": [
+        "PIM-Entra",
+        "PIM-AAD"
+      ],
+      "azurePrefix": [
+        "PIM-Azure",
+        "PIM-AzRes"
+      ],
+      "defaultJustification": "Change in infrastructure",
+      "defaultDurationHours": 8
+    },
+    {
+      "name": "Customer 11",
+      "tenantId": "aaaaaaaa-bbbb-cccc-dddd-00000000000b",
+      "clientId": "11111111-2222-3333-4444-55555555550b",
+      "prefix": "PIM-",
+      "entraPrefix": [
+        "PIM-Entra",
+        "PIM-AAD"
+      ],
+      "azurePrefix": [
+        "PIM-Azure",
+        "PIM-AzRes"
+      ],
+      "defaultJustification": "Change in infrastructure",
+      "defaultDurationHours": 8
+    },
+    {
+      "name": "Customer 12",
+      "tenantId": "aaaaaaaa-bbbb-cccc-dddd-00000000000c",
+      "clientId": "11111111-2222-3333-4444-55555555550c",
+      "prefix": "PIM-",
+      "entraPrefix": [
+        "PIM-Entra",
+        "PIM-AAD"
+      ],
+      "azurePrefix": [
+        "PIM-Azure",
+        "PIM-AzRes"
+      ],
+      "defaultJustification": "Change in infrastructure",
+      "defaultDurationHours": 8
+    },
+    {
+      "name": "Customer 13",
+      "tenantId": "aaaaaaaa-bbbb-cccc-dddd-00000000000d",
+      "clientId": "11111111-2222-3333-4444-55555555550d",
+      "prefix": "PIM-",
+      "entraPrefix": [
+        "PIM-Entra",
+        "PIM-AAD"
+      ],
+      "azurePrefix": [
+        "PIM-Azure",
+        "PIM-AzRes"
+      ],
+      "defaultJustification": "Change in infrastructure",
+      "defaultDurationHours": 8
+    },
+    {
+      "name": "Customer 14",
+      "tenantId": "aaaaaaaa-bbbb-cccc-dddd-00000000000e",
+      "clientId": "11111111-2222-3333-4444-55555555550e",
+      "prefix": "PIM-",
+      "entraPrefix": [
+        "PIM-Entra",
+        "PIM-AAD"
+      ],
+      "azurePrefix": [
+        "PIM-Azure",
+        "PIM-AzRes"
+      ],
+      "defaultJustification": "Change in infrastructure",
+      "defaultDurationHours": 8
+    },
+    {
+      "name": "Customer 15",
+      "tenantId": "aaaaaaaa-bbbb-cccc-dddd-00000000000f",
+      "clientId": "11111111-2222-3333-4444-55555555550f",
+      "prefix": "PIM-",
+      "entraPrefix": [
+        "PIM-Entra",
+        "PIM-AAD"
+      ],
+      "azurePrefix": [
+        "PIM-Azure",
+        "PIM-AzRes"
+      ],
+      "defaultJustification": "Change in infrastructure",
+      "defaultDurationHours": 8
+    },
+    {
+      "name": "Customer 16",
+      "tenantId": "aaaaaaaa-bbbb-cccc-dddd-000000000010",
+      "clientId": "11111111-2222-3333-4444-555555555510",
+      "prefix": "PIM-",
+      "entraPrefix": [
+        "PIM-Entra",
+        "PIM-AAD"
+      ],
+      "azurePrefix": [
+        "PIM-Azure",
+        "PIM-AzRes"
+      ],
+      "defaultJustification": "Change in infrastructure",
+      "defaultDurationHours": 8
+    },
+    {
+      "name": "Customer 17",
+      "tenantId": "aaaaaaaa-bbbb-cccc-dddd-000000000011",
+      "clientId": "11111111-2222-3333-4444-555555555511",
+      "prefix": "PIM-",
+      "entraPrefix": [
+        "PIM-Entra",
+        "PIM-AAD"
+      ],
+      "azurePrefix": [
+        "PIM-Azure",
+        "PIM-AzRes"
+      ],
+      "defaultJustification": "Change in infrastructure",
+      "defaultDurationHours": 8
+    },
+    {
+      "name": "Customer 18",
+      "tenantId": "aaaaaaaa-bbbb-cccc-dddd-000000000012",
+      "clientId": "11111111-2222-3333-4444-555555555512",
+      "prefix": "PIM-",
+      "entraPrefix": [
+        "PIM-Entra",
+        "PIM-AAD"
+      ],
+      "azurePrefix": [
+        "PIM-Azure",
+        "PIM-AzRes"
+      ],
+      "defaultJustification": "Change in infrastructure",
+      "defaultDurationHours": 8
+    },
+    {
+      "name": "Customer 19",
+      "tenantId": "aaaaaaaa-bbbb-cccc-dddd-000000000013",
+      "clientId": "11111111-2222-3333-4444-555555555513",
+      "prefix": "PIM-",
+      "entraPrefix": [
+        "PIM-Entra",
+        "PIM-AAD"
+      ],
+      "azurePrefix": [
+        "PIM-Azure",
+        "PIM-AzRes"
+      ],
+      "defaultJustification": "Change in infrastructure",
+      "defaultDurationHours": 8
+    },
+    {
+      "name": "Customer 20",
+      "tenantId": "aaaaaaaa-bbbb-cccc-dddd-000000000014",
+      "clientId": "11111111-2222-3333-4444-555555555514",
+      "prefix": "PIM-",
+      "entraPrefix": [
+        "PIM-Entra",
+        "PIM-AAD"
+      ],
+      "azurePrefix": [
+        "PIM-Azure",
+        "PIM-AzRes"
+      ],
+      "defaultJustification": "Change in infrastructure",
+      "defaultDurationHours": 8
+    },
+    {
+      "name": "Customer 21",
+      "tenantId": "aaaaaaaa-bbbb-cccc-dddd-000000000015",
+      "clientId": "11111111-2222-3333-4444-555555555515",
+      "prefix": "PIM-",
+      "entraPrefix": [
+        "PIM-Entra",
+        "PIM-AAD"
+      ],
+      "azurePrefix": [
+        "PIM-Azure",
+        "PIM-AzRes"
+      ],
+      "defaultJustification": "Change in infrastructure",
+      "defaultDurationHours": 8
+    },
+    {
+      "name": "Customer 22",
+      "tenantId": "aaaaaaaa-bbbb-cccc-dddd-000000000016",
+      "clientId": "11111111-2222-3333-4444-555555555516",
+      "prefix": "PIM-",
+      "entraPrefix": [
+        "PIM-Entra",
+        "PIM-AAD"
+      ],
+      "azurePrefix": [
+        "PIM-Azure",
+        "PIM-AzRes"
+      ],
+      "defaultJustification": "Change in infrastructure",
+      "defaultDurationHours": 8
+    },
+    {
+      "name": "Customer 23",
+      "tenantId": "aaaaaaaa-bbbb-cccc-dddd-000000000017",
+      "clientId": "11111111-2222-3333-4444-555555555517",
+      "prefix": "PIM-",
+      "entraPrefix": [
+        "PIM-Entra",
+        "PIM-AAD"
+      ],
+      "azurePrefix": [
+        "PIM-Azure",
+        "PIM-AzRes"
+      ],
+      "defaultJustification": "Change in infrastructure",
+      "defaultDurationHours": 8
+    },
+    {
+      "name": "Customer 24",
+      "tenantId": "aaaaaaaa-bbbb-cccc-dddd-000000000018",
+      "clientId": "11111111-2222-3333-4444-555555555518",
+      "prefix": "PIM-",
+      "entraPrefix": [
+        "PIM-Entra",
+        "PIM-AAD"
+      ],
+      "azurePrefix": [
+        "PIM-Azure",
+        "PIM-AzRes"
+      ],
+      "defaultJustification": "Change in infrastructure",
+      "defaultDurationHours": 8
+    },
+    {
+      "name": "Customer 25",
+      "tenantId": "aaaaaaaa-bbbb-cccc-dddd-000000000019",
+      "clientId": "11111111-2222-3333-4444-555555555519",
+      "prefix": "PIM-",
+      "entraPrefix": [
+        "PIM-Entra",
+        "PIM-AAD"
+      ],
+      "azurePrefix": [
+        "PIM-Azure",
+        "PIM-AzRes"
+      ],
+      "defaultJustification": "Change in infrastructure",
+      "defaultDurationHours": 8
+    }
+  ]
+}

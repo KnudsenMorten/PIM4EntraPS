@@ -158,7 +158,10 @@ $KnownNonGui = @{
     # preview / Finish path call POST /api/wizard/derive (Get-PimWizardDerivation)
     # so GUI and engine derive identically. Removed from this allowlist; the
     # alignment check now proves it stays reachable from the front-end.
-    'POST /api/conformance/promote' = 'KNOWN ORPHAN: per-entry ring control (Set-PimEntryRing); Conformance tab has no ring widget yet (REQUIREMENTS.md s11).'
+    # NOTE 2026-06-17: /api/conformance/promote is now WIRED into the GUI -- the
+    # Template Rollout tab's per-entry matrix has a SuperAdmin ring <select> that
+    # calls POST /api/conformance/promote (confPromote -> Set-PimEntryRing). Removed
+    # from this allowlist; the alignment check now proves it stays reachable.
     # The Delegation Map renders CLIENT-SIDE from the baked engine model (PIM_DATA),
     # so its search + risk overlay compute in-page via the JS mirror of PIM-MapRisk.ps1
     # (computeMapRisk/mapSearchResults) for instant interactivity -- same pattern as the
@@ -175,6 +178,14 @@ $KnownNonGui = @{
     # tooling surface (lists current acknowledgements); the GUI reflects ack
     # state from the preflight report itself, so the GET has no GUI caller.
     'GET /api/warning-overrides'   = 'INTENTIONAL GUI-LESS: read-only ack-store listing for tooling/tests; GUI shows ack state from the preflight report. The WRITE (POST) is wired to the Validate-tab Overrule button.'
+    # The Delegation Map workload-target chips badge their recon status from the
+    # BAKED engine model (PIM_DATA, server-stamped reconStatus) -- same pattern as
+    # map-risk/map-search. GET /api/workload-crawl is the server-authoritative
+    # parity read of the raw crawl map for tooling/tests/scheduler; the GUI does
+    # not round-trip it. The GUI DOES call GET /api/workload-recon (summary, wired
+    # to the "Workload recon" map button) and POST /api/workload-crawl (admin
+    # "Re-crawl now"), so those write/summary paths stay proven.
+    'GET /api/workload-crawl'      = 'KNOWN ORPHAN: server-authoritative parity read of the raw workload crawl map; GUI badges from baked PIM_DATA + uses GET /api/workload-recon (summary) and POST /api/workload-crawl (re-crawl).'
     # The Governance "Permission templates" panel reads each pack''s disabled state
     # from the annotated GET /api/templates (which carries a `disabled` field); the
     # dedicated GET /api/template-state is for tooling/tests. The GUI DOES call

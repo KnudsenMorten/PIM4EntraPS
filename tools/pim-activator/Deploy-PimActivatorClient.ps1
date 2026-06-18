@@ -70,6 +70,14 @@
         -Browser Edge
 
 .EXAMPLE
+    # Force the org's activation defaults (justification + duration) for every
+    # tenant entry written -- overrides the auto-discover fallback ('Change in
+    # infrastructure' / 8h) or any value carried in -CatalogJsonPath:
+    .\Deploy-PimActivatorClient.ps1 `
+        -DefaultJustification 'Approved change / incident work' `
+        -DefaultDurationHours 4
+
+.EXAMPLE
     # Uninstall (removes the forcelist entry, the extension self-removes
     # on next launch):
     .\Deploy-PimActivatorClient.ps1 `
@@ -133,6 +141,20 @@ param(
     # a single entry was interpreted as "deny everything else" (2026-06-10).
     [Parameter(ParameterSetName = 'Install')]
     [switch]$WriteAllowlist,
+
+    # Override the per-tenant activation defaults the popup pre-fills.
+    # -DefaultJustification sets the justification text; -DefaultDurationHours
+    # sets the activation length (whole hours). When supplied they OVERWRITE
+    # whatever the resolved catalog carried -- the value from -CatalogJsonPath
+    # or the auto-discover fallback ('Change in infrastructure' / 8h) -- on
+    # EVERY tenant entry written to the registry. Omit them to keep the
+    # catalog's own values. Additive + opt-in: absent => nothing changes.
+    [Parameter(ParameterSetName = 'Install')]
+    [string]$DefaultJustification,
+
+    [Parameter(ParameterSetName = 'Install')]
+    [ValidateRange(1, 24)]
+    [int]$DefaultDurationHours,
 
     [Parameter(Mandatory, ParameterSetName = 'Uninstall')]
     [switch]$Uninstall
@@ -419,6 +441,27 @@ foreach ($root in $policyRoots) {
             }
         }
 
+        # Apply explicit activation-default overrides (-DefaultJustification /
+        # -DefaultDurationHours) onto every resolved tenant entry, whether the
+        # catalog came from -CatalogJsonPath or live auto-discover. The popup
+        # reads these from chrome.storage.managed.tenantCatalog and pre-fills
+        # the Activate form with them. Add-Member -Force overwrites the property
+        # if the entry already carried one. Opt-in: untouched unless passed.
+        if ($catalog -and ($PSBoundParameters.ContainsKey('DefaultJustification') -or $PSBoundParameters.ContainsKey('DefaultDurationHours'))) {
+            foreach ($entry in @($catalog)) {
+                if ($PSBoundParameters.ContainsKey('DefaultJustification')) {
+                    $entry | Add-Member -NotePropertyName defaultJustification -NotePropertyValue $DefaultJustification -Force
+                }
+                if ($PSBoundParameters.ContainsKey('DefaultDurationHours')) {
+                    $entry | Add-Member -NotePropertyName defaultDurationHours -NotePropertyValue $DefaultDurationHours -Force
+                }
+            }
+            $_ovr = @()
+            if ($PSBoundParameters.ContainsKey('DefaultJustification')) { $_ovr += "justification='$DefaultJustification'" }
+            if ($PSBoundParameters.ContainsKey('DefaultDurationHours'))  { $_ovr += "duration=${DefaultDurationHours}h" }
+            Write-Host ("    -> activation defaults overridden on all $(@($catalog).Count) entr$(if(@($catalog).Count -eq 1){'y'}else{'ies'}): $($_ovr -join ', ')") -ForegroundColor DarkGray
+        }
+
         if ($catalog) {
             try {
                 # PS 5.1 unwraps single-element arrays during pipeline -- use
@@ -444,7 +487,9 @@ Write-Host "First-run user experience:" -ForegroundColor Yellow
 Write-Host "  1. Browser auto-installs the extension on next launch."
 Write-Host "  2. User clicks the PIM Activator icon -> onboarding wizard appears."
 Write-Host "  3. User types work email -> sign in once -> tenant + app reg auto-"
-Write-Host "     discovered -> defaults pre-filled (Change in infrastructure / 8h)."
+$_jdefault = if ($PSBoundParameters.ContainsKey('DefaultJustification')) { $DefaultJustification } else { 'Change in infrastructure' }
+$_ddefault = if ($PSBoundParameters.ContainsKey('DefaultDurationHours'))  { "$DefaultDurationHours" } else { '8' }
+Write-Host "     discovered -> defaults pre-filled ($_jdefault / ${_ddefault}h)."
 Write-Host "  4. Click Save and continue -- done. Activate / My Access tabs are live."
 if ($Browser -in @('Edge','Both'))   { Write-Host "Validate force-install: edge://policy   -> search 'ExtensionInstallForcelist' / extension id." -ForegroundColor DarkGray }
 if ($Browser -in @('Chrome','Both')) { Write-Host "Validate force-install: chrome://policy -> search 'ExtensionInstallForcelist' / extension id." -ForegroundColor DarkGray }

@@ -177,7 +177,7 @@ function Test-PimActivatorPackage {
     # ---- NOSECRET (shipped extension files only) -----------------------------
     # Real GUID tenant/subscription ids must never be baked into the extension.
     # Sample/placeholder all-zero or sequential GUIDs are allowed.
-    $shipped = @('popup.js', 'popup-config.js', 'popup.html', 'background.js', 'version-badge.js', 'manifest.json', 'managed-schema.json')
+    $shipped = @('popup.js', 'popup-config.js', 'popup-net.js', 'popup.html', 'background.js', 'version-badge.js', 'manifest.json', 'managed-schema.json')
     $guidRx  = '\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b'
     $secretHits = New-Object System.Collections.Generic.List[string]
     foreach ($f in $shipped) {

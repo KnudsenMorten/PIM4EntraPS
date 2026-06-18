@@ -102,6 +102,15 @@ ok('active-assignments export bar present', /id="revExportBar"/.test(html));
 ok('active-assignments export wired (csv)', /revExpCsv/.test(html) && /downloadCsv\(d\.filename/.test(html));
 ok('active-assignments export wired (print)', /revExpPrint/.test(html) && /printTable\(d\.title/.test(html));
 
+// [H5] residual evidence-producing read views now export too: Jobs run/failure
+// history, Governance -> Drift, and the Template Rollout fleet-conformance matrix.
+ok('jobs view wires its export bar', /wireExportBar\('jobs'/.test(html));
+ok('jobs export bar offered in the jobs header', /exportBarHtml\('jobs'\)/.test(html));
+ok('governance drift wires its export bar', /wireExportBar\('govDrift'/.test(html));
+ok('governance drift export bar offered', /exportBarHtml\('govDrift'\)/.test(html));
+ok('fleet conformance wires its export bar', /wireExportBar\('confFleet'/.test(html));
+ok('fleet conformance export bar offered', /exportBarHtml\('confFleet'\)/.test(html));
+
 // --- summary ----------------------------------------------------------------
 console.log('\n  RESULT: ' + pass + ' pass, ' + fail + ' fail');
 process.exit(fail ? 1 : 0);

@@ -79,7 +79,12 @@
 #>
 [CmdletBinding(SupportsShouldProcess)]
 param(
-    [ValidateSet('git-pull','sync-automateit')][string]$Source = 'sync-automateit',
+    [ValidateSet('git-pull','sync-automateit','from-master')][string]$Source = 'sync-automateit',
+    # s31: resolve the update source + hosting from a deployment SCENARIO (S1..S6). When set, the
+    # scenario's resolved updateSource (git-pull | sync-automateit | from-master) and managedHosting
+    # (central|local) OVERRIDE -Source -- so one knob drives the whole update path.
+    [ValidateSet('S1','S2','S3','S4','S5','S6')][string]$Scenario,
+    [ValidateSet('central','local')][string]$ManagedHosting,   # only used for from-master (S5=central, S6=local); auto-set from -Scenario
     [switch]$DetectOnly,
     [switch]$Apply,
     # hosted deploy targets (passthrough to the existing roller / smoke).
@@ -110,6 +115,7 @@ function Have($cmd){ [bool](Get-Command $cmd -ErrorAction SilentlyContinue) }
 . (Join-Path $solRoot 'engine\_shared\PIM-SyncAutomateIT.ps1')        # semver/sync/health/rollback
 . (Join-Path $solRoot 'engine\_shared\PIM-SchemaConformance.ps1')     # locked-schema + per-table plan
 . (Join-Path $solRoot 'engine\_shared\PIM-UpdateLifecycle.ps1')       # detect/build/notify/monitor core
+. (Join-Path $solRoot 'engine\_shared\PIM-ScenarioProfile.ps1')       # s31 scenario -> knob resolver
 # the mailer (same path as the synthetic-monitor work). Loading PIM-Notify pulls in Send-PimNotifyMail.
 $notifyLib = Join-Path $solRoot 'engine\_shared\PIM-Notify.ps1'
 if (Test-Path $notifyLib) { . $notifyLib }
@@ -117,7 +123,25 @@ if (Test-Path $notifyLib) { . $notifyLib }
 # default-safe: if neither switch is given, DetectOnly wins.
 if (-not $Apply) { $DetectOnly = $true }
 if ($DetectOnly -and $Apply) { throw "Pass either -DetectOnly or -Apply, not both." }
-$profile = Get-PimUpdateSourceProfile -Source $Source
+
+# ---- s31: a -Scenario resolves the update source + managed hosting, overriding -Source ----
+# The build/roll SUB-scripts (Build-PimManagerImage / Update-PimContainers) only know git-pull |
+# sync-automateit, so from-master is mapped to a build source by managed hosting: central => the
+# ACR-build/ACA-roll path (sync-automateit), local => the local build/relaunch path (git-pull).
+$buildSource = $Source
+if ($Scenario) {
+    $plan = Get-PimScenarioEntryPlan -Scenario $Scenario
+    $Source = $plan.updateSource
+    if (-not "$ManagedHosting".Trim() -and "$($plan.managedHosting)".Trim()) { $ManagedHosting = $plan.managedHosting }
+    Write-Host ("[scenario] {0} -> updateSource={1} managedHosting={2} edition={3} hosting={4} spn={5}" -f `
+        $plan.id, $plan.updateSource, $plan.managedHosting, $plan.activeEdition, $plan.hostingLocation, $plan.spnModel) -ForegroundColor Cyan
+}
+if (-not "$ManagedHosting".Trim()) { $ManagedHosting = 'local' }
+# Resolve the build-source the sub-scripts understand.
+if ($Source -eq 'from-master') { $buildSource = if ($ManagedHosting -eq 'central') { 'sync-automateit' } else { 'git-pull' } }
+else { $buildSource = $Source }
+
+$profile = Get-PimUpdateSourceProfile -Source $Source -ManagedHosting $ManagedHosting
 
 Write-Host "=== PIM4EntraPS UPDATE-LIFECYCLE ($Source; $(if($DetectOnly){'DETECT-ONLY'}else{'APPLY'})) ===" -ForegroundColor Cyan
 Info "build mode: $($profile.buildMode); deploy mode: $($profile.deployMode); hosted: $($profile.isHosted)"
@@ -217,9 +241,9 @@ Write-Host ("    GuiUpdateRequired = {0}  ({1})" -f $detection.GuiUpdateRequired
 Write-Host ("    SqlUpdateRequired = {0}  ({1})" -f $detection.SqlUpdateRequired, $sqlPlan.reason)
 Write-Host ""
 
-$buildPlan = Get-PimBuildPlan -GuiUpdateRequired $detection.GuiUpdateRequired -Source $Source -ImageTag $pulledVersion -ImageRepo $ImageRepo
+$buildPlan = Get-PimBuildPlan -GuiUpdateRequired $detection.GuiUpdateRequired -Source $Source -ImageTag $pulledVersion -ImageRepo $ImageRepo -ManagedHosting $ManagedHosting
 $monitorInPlace = Test-MonitorDeployed
-$applyPlan = Get-PimUpdateApplyPlan -Detection $detection -BuildPlan $buildPlan -Source $Source -Apply:$Apply -MonitorInPlace $monitorInPlace
+$applyPlan = Get-PimUpdateApplyPlan -Detection $detection -BuildPlan $buildPlan -Source $Source -Apply:$Apply -MonitorInPlace $monitorInPlace -ManagedHosting $ManagedHosting
 
 Write-Host "  PLAN:" -ForegroundColor Cyan
 foreach ($s in $applyPlan.steps) { Write-Host ("    {0}. {1,-15} [{2}] {3}" -f $s.step, $s.name, $s.action, $s.detail) }
@@ -258,7 +282,7 @@ try {
         Step "2. BUILD ($($buildPlan.buildMode)) -> $ImageRepo`:$($buildPlan.imageTag)"
         $builder = Join-Path $here 'Build-PimManagerImage.ps1'
         if ($PSCmdlet.ShouldProcess("$ImageRepo`:$($buildPlan.imageTag)", 'build from pulled code')) {
-            & $builder -ImageTag $buildPlan.imageTag -Source $Source -AcrName $AcrName -ImageRepo $ImageRepo
+            & $builder -ImageTag $buildPlan.imageTag -Source $buildSource -AcrName $AcrName -ImageRepo $ImageRepo
             if ($LASTEXITCODE -and $LASTEXITCODE -ne 0) { throw "Build-PimManagerImage.ps1 failed (exit $LASTEXITCODE)." }
             $built = $true
         }
@@ -358,7 +382,7 @@ catch {
 # STEP 5 -- NOTIFY (always email the outcome -- success OR failure -- reuse mailer)
 # =============================================================================
 Step "5. NOTIFY (email outcome '$outcome' to $Recipient via Send-PimNotifyMail)"
-$notifyPlan = Get-PimNotifyPlan -Outcome $outcome -Source $Source -Detection $detection `
+$notifyPlan = Get-PimNotifyPlan -Outcome $outcome -Source $buildSource -Detection $detection `
                 -Built $built -Deployed $deployed -SchemaUpgraded $schemaUpgraded `
                 -ImageTag $buildPlan.imageTag -Recipient $Recipient -ErrorDetail $errDetail
 Info "subject: $($notifyPlan.subject)"

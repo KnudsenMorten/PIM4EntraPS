@@ -1625,6 +1625,7 @@ function New-PimDefenderXdrRolesProvider {
         scope  = 'DefenderXdrRoles'
         entity = 'PIM-Assignments-Defender'
         order  = 62   # after AzRes(60), a workload-RBAC delegation surface
+        feature = 'connectors.workload'   # s29/s30: advanced (Pro) workload connector; gated
         refreshBefore = $true
         GetDesired = {
             param($ctx)
@@ -1747,6 +1748,7 @@ function New-PimIntuneRolesProvider {
         scope  = 'IntuneRoles'
         entity = 'PIM-Assignments-Intune'
         order  = 64   # after AzRes(60)/DefenderXdrRoles(62), a workload-RBAC delegation surface
+        feature = 'connectors.workload'   # s29/s30: advanced (Pro) workload connector; gated
         refreshBefore = $true
         GetDesired = {
             param($ctx)
@@ -1935,6 +1937,7 @@ function New-PimEntraAppRoleProvider {
         scope  = 'EntraAppRole'
         entity = 'PIM-Assignments-AppRole'
         order  = 66   # after AzRes(60)/DefenderXdrRoles(62)/IntuneRoles(64), a workload-RBAC delegation surface
+        feature = 'connectors.workload'   # s29/s30: advanced (Pro) workload connector; gated
         refreshBefore = $true
         GetDesired = {
             param($ctx)

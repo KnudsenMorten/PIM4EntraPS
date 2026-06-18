@@ -127,7 +127,15 @@ param(
     # Preferences file. Both are now opt-in and gated behind explicit
     # switches so a casual re-run can never destroy profile data again.
     [switch]$DangerouslyPatchPreferences,   # JSON-rewrite Preferences + Secure Preferences -- CAN BRICK A PROFILE
-    [switch]$DangerouslyWipeServiceWorker   # delete <profile>\Service Worker -- evicts SW registrations for ALL extensions/sites
+    [switch]$DangerouslyWipeServiceWorker,  # delete <profile>\Service Worker -- evicts SW registrations for ALL extensions/sites
+    # Force-remove the extension's (Secure )Preferences registration on EVERY
+    # profile even if it looks healthy. DEFAULT OFF: a healthy registration is
+    # left intact so the reinstall keeps the extension's chrome.storage.local
+    # (cached refresh token + signed-in account) -- otherwise every routine
+    # update logs the user out and forces a full password re-auth. The scrub now
+    # runs automatically only for CORRUPTED/disabled registrations (the case it
+    # was actually meant to heal). Use this switch to force it for a stuck profile.
+    [switch]$ScrubRegistration
 )
 
 $ErrorActionPreference = 'Stop'
@@ -435,8 +443,25 @@ if ($Repack -or $PackOnly) {
             throw "popup.js syntax check failed. Fix the error above and re-run."
         }
         Write-Ok "popup.js parses cleanly"
+
+        # ---- Pre-flight: undefined-constant regression gate ------------------
+        # node --check is SYNTAX-only; it can't catch a CONST_CASE identifier that
+        # is USED but never declared/imported -- exactly the v1.6.31-34
+        # `BULK_ACTIVATE_CONFIRM_THRESHOLD_DEFAULT is not defined` ReferenceError
+        # that crashed the popup boot on every machine. This static check fails
+        # the pack if any such reference exists.
+        $undefTest = Join-Path $SCRIPT_DIR 'tests\test-undefined-consts.js'
+        if (Test-Path -LiteralPath $undefTest) {
+            Write-Step "Pre-flight: undefined-constant regression gate"
+            $uOut = & node $undefTest 2>&1
+            if ($LASTEXITCODE -ne 0) {
+                $uOut | ForEach-Object { Write-Err "  $_" }
+                throw "popup.js references an undeclared/unimported constant (ReferenceError class). Fix before packing."
+            }
+            Write-Ok ("" + ($uOut | Select-Object -Last 1))
+        }
     } else {
-        Write-Warn "Node not on PATH -- skipping popup.js syntax check (consider installing Node so future SyntaxErrors get caught before pack)"
+        Write-Warn "Node not on PATH -- skipping popup.js syntax + undefined-const checks (consider installing Node so future SyntaxErrors/ReferenceErrors get caught before pack)"
     }
 
     # ---- Pre-flight: source package linter (HARD gate) -------------------
@@ -915,6 +940,38 @@ function Remove-JsonExtensionEntry {
     return $removed
 }
 
+# Is THIS extension's registration in the given (Secure )Preferences file in a
+# corrupted/disabled state? Only those need scrubbing (a corrupted registration
+# with disable_reasons=1024 DISABLE_CORRUPTED, or state!=1, makes Chromium refuse
+# the forcelist reinstall). A HEALTHY registration is left alone so the reinstall
+# preserves chrome.storage.local (cached refresh token + account) -- scrubbing it
+# logs the user out. Returns $false when the extension isn't registered at all
+# (nothing to heal; forcelist will install it cleanly).
+function Test-JsonExtensionCorrupted {
+    param([Parameter(Mandatory)][string]$Path)
+    if (-not (Test-Path -LiteralPath $Path)) { return $false }
+    $utf8 = New-Object System.Text.UTF8Encoding($false)
+    $text = [System.IO.File]::ReadAllText($Path, $utf8)
+    $key  = '"' + $EXT_ID + '":'
+    $s = $text.IndexOf($key)
+    if ($s -lt 0) { return $false }
+    $vs = $s + $key.Length
+    while ($vs -lt $text.Length -and [char]::IsWhiteSpace($text[$vs])) { $vs++ }
+    if ($vs -ge $text.Length -or $text[$vs] -ne '{') { return $false }
+    $depth = 1; $i = $vs + 1
+    while ($depth -gt 0 -and $i -lt $text.Length) {
+        $c = $text[$i]
+        if ($c -eq '"') { $i++; while ($i -lt $text.Length -and $text[$i] -ne '"') { if ($text[$i] -eq '\') { $i++ }; $i++ } }
+        elseif ($c -eq '{') { $depth++ } elseif ($c -eq '}') { $depth-- }
+        $i++
+    }
+    $obj = $text.Substring($vs, [Math]::Min($i, $text.Length) - $vs)
+    # Corrupted/disabled markers that block forcelist reinstall.
+    if ($obj -match '"disable_reasons"') { return $true }
+    if ($obj -match '"state"\s*:\s*0')   { return $true }
+    return $false
+}
+
 Write-Step "Deleting cached extension binaries + stale Secure Preferences registration (across ALL profiles)"
 foreach ($b in $browsers) {
     $profiles = @(Get-BrowserProfiles $b.UserDataRoot)
@@ -935,22 +992,30 @@ foreach ($b in $browsers) {
         } else {
             $miss++
         }
-        # 2026-06-10 (v2.4.103): UNCONDITIONAL scrub of stale Preferences +
-        # Secure Preferences registrations -- not gated on whether the on-disk
-        # extension folder was found. The v2.4.100 fix only scrubbed when the
-        # binary was deleted, but the trap shape is the opposite: profiles can
-        # have STALE registration entries WITHOUT a cached binary (Chrome
-        # already self-removed the corrupted folder but kept the registration
-        # with disable_reasons=1024 DISABLE_CORRUPTED, refusing forcelist
-        # retry). Those profiles report 'no Extensions\<id> folder yet' which
-        # looked like 'nothing to do' to v2.4.100 -- but they were exactly the
-        # ones blocking install. Now we always sweep. Pure string surgery,
-        # no JSON round-trip, .bak files written before any rewrite.
+        # 2026-06-10 (v2.4.103): scrub stale Preferences + Secure Preferences
+        # registrations for profiles stuck with disable_reasons=1024
+        # DISABLE_CORRUPTED (Chrome self-removed the binary but kept the
+        # corrupted registration, refusing the forcelist reinstall).
+        #
+        # 2026-06-17: made CONDITIONAL. The unconditional scrub removed the
+        # registration on EVERY run -- including HEALTHY ones -- which made
+        # Chromium treat the extension as uninstalled->fresh-installed and WIPE
+        # its chrome.storage.local (cached refresh token + signed-in account),
+        # logging the user out and forcing a full password re-auth after every
+        # routine update. Now we scrub a file's entry only when it is actually
+        # corrupted/disabled (Test-JsonExtensionCorrupted) -- the case it was
+        # meant to heal -- so a healthy reinstall keeps the user signed in.
+        # -ScrubRegistration forces the old unconditional behaviour for a stuck
+        # profile. Pure string surgery, no JSON round-trip, .bak before rewrite.
         $n = 0
-        $n += (Remove-JsonExtensionEntry -Path (Join-Path $profile.FullName 'Preferences'))
-        $n += (Remove-JsonExtensionEntry -Path (Join-Path $profile.FullName 'Secure Preferences'))
+        foreach ($pf in @('Preferences','Secure Preferences')) {
+            $pfPath = Join-Path $profile.FullName $pf
+            if ($ScrubRegistration -or (Test-JsonExtensionCorrupted -Path $pfPath)) {
+                $n += (Remove-JsonExtensionEntry -Path $pfPath)
+            }
+        }
         if ($n -gt 0) {
-            Write-Ok "$($b.Name) [$($profile.Name)]: cleared $n stale registration entries from (Secure )Preferences"
+            Write-Ok "$($b.Name) [$($profile.Name)]: cleared $n corrupted/forced registration entries from (Secure )Preferences (healthy registrations left intact -- sign-in preserved)"
             $prefsCleared += $n
         }
     }

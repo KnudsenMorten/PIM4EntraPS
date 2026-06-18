@@ -150,6 +150,17 @@
     .nav-group > .nav-group-btn { width:100%; padding:9px 8px; font-size:11px; }
     .nav-group-menu { position:static; box-shadow:none; border:0; border-radius:0; min-width:0; padding:2px 0 8px 12px; }
   }
+  /* Phone (~360px): nav groups stack one-per-row as full-width accordions and
+     every nav item / dropdown menu item is a comfortable tap target, so the
+     whole navigation reads + works on a phone (REQUIREMENTS §26d responsive nav).
+     The status box wraps under the groups instead of being squeezed off-screen. */
+  @media (max-width:560px) {
+    body.js-nav-grouped #navGroups { padding:0 4px; }
+    .nav-group { flex:1 1 100%; }
+    .nav-group > .nav-group-btn { justify-content:space-between; padding:11px 10px; font-size:12px; }
+    .nav-group-item { padding:11px 14px; font-size:12.5px; }
+    #tabRight { flex:1 1 100%; margin-left:0; padding:6px 8px; white-space:normal; text-align:left; }
+  }
 
   /* Tab panels */
   .tab-panel { flex:1 1 auto; overflow:hidden; display:none; }
@@ -308,7 +319,11 @@
   #mapDetail .pt-chip .pt-txt { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
   #mapDetail .pt-chip.exp .pt-txt { white-space:normal; word-break:break-all; }
   #mapDetail .pt-chip .pt-scope { color:#57606a; }
+  #mapDetail .pt-chip .pt-recon { font-weight:700; flex:0 0 auto; cursor:help; }
+  #mapDetail .pt-recon-summary { font-size:9.5px; }
   #mapDetail .pt-empty { color:#57606a; font-style:italic; font-size:11px; }
+  /* Workload reconciliation badge on the col-3 board item */
+  .map-item .pt-recon { font-weight:700; font-size:11px; margin-left:4px; flex:0 0 auto; cursor:help; }
 
   /* Grid tab */
   #gridTab { display:none; }
@@ -718,26 +733,26 @@
        hidden when the grouped nav builds (body.js-nav-grouped) but stays in the
        DOM as the canonical tab/badge/switchTab surface. -->
   <div id="tabs">
-    <div class="tab active" data-tab="home">Home <span id="homeAttnBadge" class="badge" style="display:none;background:#cf222e">0</span></div>
-    <div class="tab" data-tab="new">Create</div>
-    <div class="tab" data-tab="map">Delegation Map</div>
-    <div class="tab" data-tab="validate">Validate <span id="validateErrBadge" class="badge" style="display:none;background:#cf222e">0</span></div>
-    <div class="tab" data-tab="save">Review &amp; Save <span id="saveDirtyBadge" class="badge" style="display:none">0</span></div>
+    <div class="tab active" data-tab="home" title="Your privileged-estate health at a glance — per-tier counts, gaps, orphans, engine/job status, and a &quot;what needs my attention&quot; call-out.">Home <span id="homeAttnBadge" class="badge" style="display:none;background:#cf222e">0</span></div>
+    <div class="tab" data-tab="new" title="Create a new admin or delegation with the target-first wizard — pick what to grant and the name, level, tier and plane are derived for you.">Create</div>
+    <div class="tab" data-tab="map" title="Visualise who can reach what — the live delegation graph (admins → role groups → nested groups → targets), with a risk overlay and per-grant removal.">Delegation Map</div>
+    <div class="tab" data-tab="validate" title="Check the desired store for problems (orphans, naming, ownership, stale roles) before you deploy — each finding has a suggested fix.">Validate <span id="validateErrBadge" class="badge" style="display:none;background:#cf222e">0</span></div>
+    <div class="tab" data-tab="save" title="Review every staged change with a keyed diff, then commit — each save is backed up first, all-or-nothing, and reversible.">Review &amp; Save <span id="saveDirtyBadge" class="badge" style="display:none">0</span></div>
     <div class="tab" data-tab="revoke" title="Revoke live active PIM assignments. Destructive: break-glass accounts are protected and large batches require maker/checker approval.">Maintenance &amp; Revoke <span id="revokeCountBadge" class="badge" style="display:none;background:#cf222e">0</span></div>
-    <div class="tab" data-tab="approvals">Approvals <span id="apprPendBadge" class="badge" style="display:none;background:#bc4c00">0</span></div>
-    <div class="tab" data-tab="accessreview">Access Review <span id="arOpenBadge" class="badge" style="display:none">0</span></div>
-    <div class="tab" data-tab="grid">Advanced View (grid) <span id="gridDirtyBadge" class="badge" style="display:none">0</span></div>
-    <div class="tab" data-tab="authoring">Authoring</div>
-    <div class="tab" data-tab="onboarding">Onboarding</div>
-    <div class="tab" data-tab="roleperms">Role Lookup</div>
-    <div class="tab" data-tab="governance">Governance <span id="govEmergencyBadge" class="badge" style="display:none;background:#cf222e">!</span></div>
-    <div class="tab" data-tab="audit">Audit</div>
+    <div class="tab" data-tab="approvals" title="The maker/checker approval queue — raise an offboard/revoke/sensitive change, approve or deny one (a different admin must approve), and execute an approved request.">Approvals <span id="apprPendBadge" class="badge" style="display:none;background:#bc4c00">0</span></div>
+    <div class="tab" data-tab="accessreview" title="Run access reviews end-to-end — attest (approve / deny / recertify) with justification, assign reviewers, send reminders, and export the evidence.">Access Review <span id="arOpenBadge" class="badge" style="display:none">0</span></div>
+    <div class="tab" data-tab="grid" title="The full editable grid of every desired-state row — for power users who want direct, spreadsheet-style editing across all entities.">Advanced View (grid) <span id="gridDirtyBadge" class="badge" style="display:none">0</span></div>
+    <div class="tab" data-tab="authoring" title="Bulk authoring — move an admin, clone a definition or Azure-RBAC delegation to many targets, bulk-attach, and import admins, each with a preview before commit.">Authoring</div>
+    <div class="tab" data-tab="onboarding" title="Onboard a new admin — derive the name and metadata, place them in the right groups, and (for sensitive grants) route through second-person approval.">Onboarding</div>
+    <div class="tab" data-tab="roleperms" title="Role Lookup answers all role questions — what a role can do, which roles grant an action (least-privilege first), who can activate a role, and compare two roles.">Role Lookup</div>
+    <div class="tab" data-tab="governance" title="Governance — operational policy, drift detection (live vs desired) with one-click remediate, access-review feedback, emergency break-glass, and lifecycle.">Governance <span id="govEmergencyBadge" class="badge" style="display:none;background:#cf222e">!</span></div>
+    <div class="tab" data-tab="audit" title="The audit trail you can defend — filter and search every change by entity, actor or date range, see before → after, and export the whole trail.">Audit</div>
     <div class="tab" data-tab="reports" title="&quot;Who can do what&quot; (and the reverse) — pick a person to see everything they can reach, or pick a role to see who can activate it. Printable + exportable.">Reports</div>
     <div class="tab" data-tab="conformance" title="Keep tenants current with the approved delegation templates — see how far behind each tenant is and roll the updates forward.">Template Rollout</div>
-    <div class="tab" data-tab="cutover">Cutover</div>
-    <div class="tab" data-tab="jobs">Jobs <span id="jobsRunBadge" class="badge" style="display:none;background:#1f883d">0</span></div>
-    <div class="tab" data-tab="settings">Settings</div>
-    <div class="tab" data-tab="support">Support</div>
+    <div class="tab" data-tab="cutover" title="The gated CSV → SQL cutover ceremony — preflight, upgrade, import, switch source, re-preflight, finalize; abortable before the point of no return.">Cutover</div>
+    <div class="tab" data-tab="jobs" title="The scheduler — see each job's cadence, last result and next run, spot overdue or failing runs, re-run on demand, and export the run history.">Jobs <span id="jobsRunBadge" class="badge" style="display:none;background:#1f883d">0</span></div>
+    <div class="tab" data-tab="settings" title="Configure the Manager — naming conventions, feature customization (core vs advanced kill switches), edition/licence, email controls, and instances.">Settings</div>
+    <div class="tab" data-tab="support" title="A one-click connectivity and permission self-check (SQL / Graph / ARM) plus a sanitized diagnostics bundle to hand off when you need help.">Support</div>
     <div id="tabRight">
       mode: <b id="modeLabel"></b>
       &nbsp;|&nbsp; source: <b id="src"></b>
@@ -765,6 +780,7 @@
       <button id="mapClear" style="display:none">Back to overview</button>
       <button id="mapFocusToggle" style="display:none">Show all (dimmed)</button>
       <button id="mapRiskToggle" class="ghost" title="Flag orphans (dead delegation), stale (past review horizon) and over-privileged (reaches Tier-0/1 or unusually many targets) nodes">Risk overlay</button>
+      <button id="mapWorkloadRecon" class="ghost" title="Reconcile the desired workload role bindings (Defender XDR / Intune / Power BI / Power Platform / Business Central / Azure DevOps / Dataverse) against the live crawl: mapped / missing / exempted">Workload recon</button>
       <button id="mapCsv" class="ghost" title="Export the whole delegation map (every admin → target) as CSV">Export CSV</button>
       <button id="mapPrint" class="ghost" title="Open a printable view of the delegation map">Print</button>
       <span class="map-hint" id="mapHint"><b>Step 1:</b> pick a person (left) or a permission (right). <b>Step 2:</b> the board collapses to their transitive path &mdash; who reaches what, through which groups. Every box is a Definitions row; every wire is an Assignments row.</span>
@@ -1149,6 +1165,139 @@
   // page; the tenant lists can be re-pulled at runtime via /api/refresh-tenant-lists.
   const PIM_NAMING = (window.PIM_NAMING_BOOT && typeof window.PIM_NAMING_BOOT === 'object') ? window.PIM_NAMING_BOOT : {};
   let TENANT_LISTS = (window.PIM_TENANT_LISTS_BOOT && typeof window.PIM_TENANT_LISTS_BOOT === 'object') ? window.PIM_TENANT_LISTS_BOOT : {};
+
+  // ===================================================================
+  // Supported substitution tokens for the naming-pattern fields (REQUIREMENTS §11
+  // "GUI must SHOW the supported variables/tokens"). This list is the AUTHORITATIVE
+  // mirror of the engine resolver -- it MUST match the tokens that
+  // engine/_shared/PIM-Naming.ps1 actually expands via Expand-PimNamePattern
+  // (Resolve-PimAdminName / Resolve-PimGroupName / Resolve-PimResourceGroup).
+  // Do NOT invent tokens here; tests/Test-PimNamingTokenLegend.ps1 asserts this
+  // set == the resolver's set. Token replacement is case-INSENSITIVE; unknown
+  // {Tokens} are left as-is (not stripped) by the resolver.
+  const PIM_NAMING_TOKENS = [
+    // --- admin-account name pattern (AdminAccountPattern / ...HighPriv) ---
+    { token: '{Initial}',         meaning: "Owner's initials / short owner identifier (PREFERRED).", example: 'mok', group: 'Admin account' },
+    { token: '{Owner}',           meaning: 'Backward-compat SYNONYM for {Initial} (still honoured).', example: 'mok', group: 'Admin account' },
+    { token: '{AdminTypePrefix}', meaning: 'Prefix by admin-type (internal = none, external-adminuser = x-).', example: 'x-', group: 'Admin account' },
+    { token: '{Platform}',        meaning: 'Environment suffix (Entra = -ID, AD = -AD). Synonym of {EnvironmentSuffix}.', example: '-ID', group: 'Admin account' },
+    { token: '{EnvironmentSuffix}', meaning: 'Environment suffix (Entra = -ID, AD = -AD). Synonym of {Platform}.', example: '-ID', group: 'Admin account' },
+    // --- group name patterns (PimGroupPattern / PimGroupAuPattern) ---
+    { token: '{Role}',       meaning: 'Role / service the group grants.', example: 'Helpdesk', group: 'Group' },
+    { token: '{Department}', meaning: 'Owning department (simple group pattern).', example: 'IT', group: 'Group' },
+    { token: '{AdminUnit}',  meaning: 'Administrative Unit (AU subset pattern).', example: 'Sales', group: 'Group' },
+    // --- resource-group / permission pattern (ResourceGroupPattern) ---
+    { token: '{Workload}',   meaning: 'Azure workload / service.', example: 'AzDevOps', group: 'Resource group' },
+    { token: '{Scope}',      meaning: 'Scope of the assignment.', example: 'OrgCollectionAdmins', group: 'Resource group' },
+    { token: '{Permission}', meaning: 'Permission / role granted (also exposed as {Role}).', example: 'Reader', group: 'Resource group' },
+    { token: '{Level}',      meaning: 'Privilege level marker (L-number).', example: '2', group: 'Resource group' },
+    { token: '{Tier}',       meaning: 'Tier marker (T-number).', example: '1', group: 'Resource group' },
+    { token: '{Plane}',      meaning: 'Plane code (CP / WDP / MP / APP / USER).', example: 'WDP', group: 'Resource group' }
+  ];
+
+  // Build a supported-tokens legend/picker (REQUIREMENTS §11). Progressive
+  // enhancement: the legend is plain static HTML (visible + readable with JS off);
+  // the click-to-insert chip carries data-* attributes that a delegated click
+  // handler (wired once, JS-only) uses to insert the token at the caret of the
+  // associated field. `targetSel` is a CSS selector for the input(s) the tokens
+  // apply to; when several inputs match (e.g. the naming key/value rows) the
+  // insert targets the LAST-focused matching field, falling back to the first.
+  //   tokens   : array of { token, meaning, example, group } (or {token,meaning,example})
+  //   targetSel: selector string for the field(s) to insert into
+  //   opts.title / opts.note : optional heading + sub-note
+  //   opts.open: render the <details> expanded (default collapsed to stay compact)
+  function buildTokenLegend(tokens, targetSel, opts) {
+    opts = opts || {};
+    const esc = escapeHtml;
+    const title = opts.title || 'Supported variables / tokens';
+    const groups = {};
+    const order = [];
+    (tokens || []).forEach(t => {
+      const g = t.group || '';
+      if (!(g in groups)) { groups[g] = []; order.push(g); }
+      groups[g].push(t);
+    });
+    let h = '';
+    h += `<details class="tok-legend"${opts.open ? ' open' : ''} style="margin-top:6px;border:1px solid #d0d7de;border-radius:6px;background:#f6f8fa;">`;
+    h += `<summary style="cursor:pointer;font-size:11.5px;font-weight:600;color:#0969da;padding:5px 8px;list-style:revert;">${esc(title)} <span style="font-weight:400;color:#57606a;">(${(tokens||[]).length})</span></summary>`;
+    h += `<div style="padding:6px 8px;">`;
+    if (opts.note) h += `<div style="font-size:11px;color:#57606a;margin-bottom:6px;">${opts.note}</div>`;
+    order.forEach(g => {
+      if (g) h += `<div style="font-size:10.5px;text-transform:uppercase;letter-spacing:.4px;color:#57606a;margin:4px 0 2px;font-weight:600;">${esc(g)}</div>`;
+      h += `<table style="border-collapse:collapse;font-size:11.5px;width:100%;max-width:560px;"><tbody>`;
+      groups[g].forEach(t => {
+        const ins = targetSel
+          ? `<button type="button" class="tok-insert btn-sec" data-token="${esc(t.token)}" data-target="${esc(targetSel)}" title="Insert ${esc(t.token)} at the cursor" style="font-family:Consolas,monospace;font-size:11px;padding:1px 6px;cursor:pointer;">${esc(t.token)}</button>`
+          : `<code style="font-size:11px;">${esc(t.token)}</code>`;
+        const exa = t.example ? ` <span style="color:#57606a;">e.g. <code style="font-size:10.5px;">${esc(t.example)}</code></span>` : '';
+        h += `<tr><td style="padding:1px 8px 1px 0;white-space:nowrap;vertical-align:top;">${ins}</td>` +
+             `<td style="padding:1px 0;color:#24292f;">${esc(t.meaning || '')}${exa}</td></tr>`;
+      });
+      h += `</tbody></table>`;
+    });
+    if (targetSel) h += `<div style="font-size:10.5px;color:#8c959f;margin-top:5px;">Click a token to insert it where the cursor is. Replacement is case-insensitive.</div>`;
+    h += `</div></details>`;
+    return h;
+  }
+
+  // Extract the supported {{tokens}} for a mail template from its body text. The
+  // SHIPPED default is authoritative (what the engine fills for that mail); we also
+  // include any token already present in the effective body so a saved override that
+  // re-uses a token still lists it. Returns legend rows in first-seen order.
+  function mailTemplateTokens(shipped, effective) {
+    const seen = {};
+    const out = [];
+    const scan = (txt) => {
+      const s = String(txt || '');
+      const re = /\{\{([A-Za-z0-9_]+)\}\}/g;
+      let m;
+      while ((m = re.exec(s)) !== null) {
+        const name = m[1];
+        if (seen[name]) continue;
+        seen[name] = true;
+        out.push({ token: '{{' + name + '}}', meaning: 'Filled by the engine at send time.' });
+      }
+    };
+    scan(shipped);
+    scan(effective);
+    return out;
+  }
+
+  // Track the last token-accepting field that had focus so a click on an insert
+  // chip (which steals focus) still knows where to drop the token.
+  let _lastTokenField = null;
+  document.addEventListener('focusin', function (e) {
+    const el = e.target;
+    if (el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA') && el.dataset && el.dataset.tokenField === '1') {
+      _lastTokenField = el;
+    }
+  });
+  // Delegated click-to-insert: insert the chip's token at the caret of its target
+  // field. Resolves the target as: the last-focused matching field, else the first
+  // matching field. Keeps the caret after the inserted token and fires 'input' so
+  // any live-preview/validation reacts. JS-only enhancement (no-op with JS off).
+  document.addEventListener('click', function (e) {
+    const btn = e.target && e.target.closest ? e.target.closest('.tok-insert') : null;
+    if (!btn) return;
+    e.preventDefault();
+    const token = btn.getAttribute('data-token') || '';
+    const sel = btn.getAttribute('data-target') || '';
+    if (!sel) return;
+    let field = null;
+    const matches = Array.prototype.slice.call(document.querySelectorAll(sel));
+    if (_lastTokenField && matches.indexOf(_lastTokenField) >= 0) { field = _lastTokenField; }
+    if (!field) field = matches[0] || null;
+    if (!field) return;
+    const start = (typeof field.selectionStart === 'number') ? field.selectionStart : field.value.length;
+    const end   = (typeof field.selectionEnd === 'number')   ? field.selectionEnd   : field.value.length;
+    const v = field.value || '';
+    field.value = v.slice(0, start) + token + v.slice(end);
+    const caret = start + token.length;
+    field.focus();
+    try { field.setSelectionRange(caret, caret); } catch (_) {}
+    _lastTokenField = field;
+    field.dispatchEvent(new Event('input', { bubbles: true }));
+  });
 
   // Default naming-convention regex for the GroupTag field. The on-disk
   // `<Tag>-L<n>-T<n>-<Code>-<Domain>[-S_AD]` shape is what the docs describe.
@@ -2052,17 +2201,22 @@
     const appr = document.getElementById('confApprove');
     appr.style.display = meta.approved ? 'none' : '';
     appr.onclick = async () => {
-      if (!confirm('Approve this draft? Only approved templates deploy.')) return;
+      const go = await pimConfirm({ title: 'Approve draft template', body: 'Approve template "' + confSel + '"? Only approved templates deploy to tenants.', okLabel: 'Approve draft' });
+      if (!go) return;
       try { await api('POST', '/api/conformance/approve', { templateId: confSel }); renderConformance(); }
-      catch (e) { alert('Approve failed: ' + e.message); }
+      catch (e) { await pimConfirm({ title: 'Approve failed', body: e.message, okLabel: 'Close' }); }
     };
     document.getElementById('confDry').onclick = () => confDeploy(true);
-    document.getElementById('confLive').onclick = () => { if (confirm('Deploy LIVE (ring-gated) for this instance?')) confDeploy(false); };
+    document.getElementById('confLive').onclick = async () => {
+      const go = await pimConfirm({ title: 'Deploy live', body: 'Deploy template "' + confSel + '" LIVE (ring-gated) for this instance? This rolls the approved template forward to in-scope entries.', okLabel: 'Deploy live', danger: true });
+      if (go) confDeploy(false);
+    };
     wireConfViewToggle();
     loadConfMatrix();
   }
 
   let confLastKeys = [];
+  let confRings = {};
   async function loadConfMatrix() {
     const esc = escapeHtml;
     const m = document.getElementById('confMatrix');
@@ -2082,16 +2236,35 @@
       Exempt:'Exempt — a time-boxed waiver covers this item, so it is not flagged as a Gap (until the exemption expires).',
       DriftExtra:'Drift (extra) — present on the tenant but not in the approved template.',
       OutOfRing:'Out of ring — this entry is not in scope for this tenant\'s rollout ring, so it is not deployed here.' };
-    let html = '<table style="border-collapse:collapse;font-size:12.5px;"><tr><th style="text-align:left;padding:4px 8px;border-bottom:2px solid #d0d7de;">Entry key</th><th style="padding:4px 8px;border-bottom:2px solid #d0d7de;">Status</th><th style="padding:4px 8px;border-bottom:2px solid #d0d7de;">Exempt</th></tr>';
+    // Per-entry ring control (SuperAdmin only) -> POST /api/conformance/promote.
+    // Lower ring = earlier wave; an entry deploys to this tenant only when its ring
+    // <= the tenant's ring. SuperAdmins get a dropdown; everyone else sees the value
+    // read-only. confRings maps entry key -> current ring.
+    confRings = c.rings || {};
+    const canPromote = roleAtLeast('SuperAdmin');
+    const ringTip = 'Ring = the rollout wave this entry is in. Promote it forward (2 -> 1 -> 0) to widen which tenants deploy it; only entries whose ring is at or below a tenant\'s ring deploy there.';
+    let html = '<table style="border-collapse:collapse;font-size:12.5px;"><tr><th style="text-align:left;padding:4px 8px;border-bottom:2px solid #d0d7de;">Entry key</th><th style="padding:4px 8px;border-bottom:2px solid #d0d7de;">Status</th><th style="padding:4px 8px;border-bottom:2px solid #d0d7de;" title="' + esc(ringTip) + '">Ring</th><th style="padding:4px 8px;border-bottom:2px solid #d0d7de;">Exempt</th></tr>';
     for (const k of confLastKeys) {
       const s = (c.statuses||{})[k] || 'OutOfRing';
+      const rg = (confRings[k] === undefined || confRings[k] === null) ? 2 : Number(confRings[k]);
+      let ringCell;
+      if (canPromote) {
+        let optHtml = '';
+        for (let rv = 0; rv <= 9; rv++) { optHtml += `<option value="${rv}" ${rv===rg?'selected':''}>${rv}</option>`; }
+        ringCell = `<select class="confRing" data-k="${esc(k)}" data-cur="${rg}" title="${esc(ringTip)}" style="font-size:11px;padding:2px 4px;">${optHtml}</select>`;
+      } else {
+        ringCell = `<span title="${esc(ringTip)} (SuperAdmin to change)" style="cursor:help;border-bottom:1px dotted #57606a;">${rg}</span>`;
+      }
       html += `<tr><td style="padding:4px 8px;border-bottom:1px solid #eef0f3;"><code>${esc(k)}</code></td>` +
         `<td style="padding:4px 8px;border-bottom:1px solid #eef0f3;text-align:center;background:${col[s]||''};font-weight:600;cursor:help;" title="${esc(tip[s]||s)}">${gl[s]||'·'} ${s}</td>` +
+        `<td style="padding:4px 8px;border-bottom:1px solid #eef0f3;text-align:center;">${ringCell}</td>` +
         `<td style="padding:4px 8px;border-bottom:1px solid #eef0f3;text-align:center;"><button class="btn-sec confExempt" data-k="${esc(k)}" style="font-size:11px;padding:2px 8px;">exempt…</button></td></tr>`;
     }
     html += '</table>';
+    if (canPromote) { html += '<div style="color:#57606a;font-size:11px;margin-top:4px;">Changing an entry\'s ring promotes/pulls back its rollout wave immediately (saved to the template).</div>'; }
     m.innerHTML = html;
     m.querySelectorAll('.confExempt').forEach(b => b.onclick = () => confExempt(b.dataset.k));
+    m.querySelectorAll('.confRing').forEach(sel => sel.onchange = () => confPromote(sel.dataset.k, sel.value, sel));
     const ca = c.catalogAhead || [];
     document.getElementById('confCatalog').innerHTML = ca.length
       ? `<div style="padding:10px;background:#ddf4ff;border:1px solid #54aeff;border-radius:8px;font-size:12.5px;"><b>Catalog-ahead</b> — live roles no template covers yet (capability-watch): ${ca.map(esc).join(', ')}</div>`
@@ -2144,20 +2317,55 @@
   }
 
   async function confRevoke(revokeKey, item) {
-    if (!confirm('Revoke the exemption for "' + item + '" now? Its item will be re-checked as a Gap on the next reconcile.')) return;
+    const go = await pimConfirm({ title: 'Revoke exemption', body: 'Revoke the exemption for "' + item + '" now? Its item will be re-checked as a Gap on the next reconcile.', okLabel: 'Revoke', danger: true });
+    if (!go) return;
     try {
       const r = await api('POST', '/api/conformance/exemptions/revoke', { revokeKey });
-      if (r.removed > 0) { loadConfMatrix(); } else { alert('Nothing revoked — the exemption was already gone.'); loadExemptionRegister(); }
-    } catch (e) { alert('Revoke failed: ' + e.message); }
+      if (r.removed > 0) { loadConfMatrix(); }
+      else { await pimConfirm({ title: 'Nothing revoked', body: 'The exemption was already gone.', okLabel: 'Close' }); loadExemptionRegister(); }
+    } catch (e) { await pimConfirm({ title: 'Revoke failed', body: e.message, okLabel: 'Close' }); }
   }
 
-  async function confExempt(key) {
-    const reason = prompt('Exemption reason for "' + key + '" (required):'); if (!reason) return;
-    const exp = prompt('Expiry date (YYYY-MM-DD) — mandatory, exemptions always expire:'); if (!exp) return;
+  // Per-entry ring promotion (SuperAdmin) -> POST /api/conformance/promote -> Set-PimEntryRing.
+  // Persists the new ring on the template entry. On failure the dropdown reverts to its
+  // previous value (data-cur) so the GUI never drifts from the saved state.
+  async function confPromote(key, ring, sel) {
+    const newRing = parseInt(ring, 10);
+    const prev = sel ? parseInt(sel.dataset.cur, 10) : newRing;
     try {
-      await api('POST', '/api/conformance/exemptions', { templateId: confSel, itemKey: key, reason, expiresUtc: new Date(exp + 'T00:00:00Z').toISOString() });
+      const r = await api('POST', '/api/conformance/promote', { templateId: confSel, key: key, ring: newRing });
+      if (sel) sel.dataset.cur = String(r.ring !== undefined ? r.ring : newRing);
+      confRings[key] = (r.ring !== undefined ? r.ring : newRing);
       loadConfMatrix();
-    } catch (e) { alert('Exemption rejected: ' + e.message); }
+    } catch (e) {
+      if (sel && !isNaN(prev)) sel.value = String(prev);
+      await pimConfirm({ title: 'Ring change failed', body: e.message, okLabel: 'Close' });
+    }
+  }
+
+  // Default expiry +90d (exemptions ALWAYS expire -- mandatory, no indefinite). YYYY-MM-DD.
+  function confDefaultExemptExpiry() {
+    const d = new Date(Date.now() + 90 * 86400000);
+    return d.toISOString().substring(0, 10);
+  }
+  async function confExempt(key) {
+    const vals = await pimFormModal({
+      title: 'Add exemption',
+      intro: 'A time-boxed waiver for "' + key + '" so it is not flagged as a Gap. Expiry is mandatory — exemptions always lapse, then the item is re-checked.',
+      okLabel: 'Add exemption',
+      fields: [
+        { name: 'reason', label: 'Exemption reason', type: 'textarea', required: true, placeholder: 'Why this binding is waived…' },
+        { name: 'expiry', label: 'Expiry date (UTC)', type: 'date', required: true, value: confDefaultExemptExpiry(), hint: 'Mandatory — the exemption stops suppressing the Gap on this date.' }
+      ]
+    });
+    if (!vals) return;
+    let isoExp;
+    try { isoExp = new Date(vals.expiry + 'T00:00:00Z').toISOString(); }
+    catch (e) { await pimConfirm({ title: 'Invalid date', body: 'Could not parse the expiry date.', okLabel: 'Close' }); return; }
+    try {
+      await api('POST', '/api/conformance/exemptions', { templateId: confSel, itemKey: key, reason: vals.reason, expiresUtc: isoExp });
+      loadConfMatrix();
+    } catch (e) { await pimConfirm({ title: 'Exemption rejected', body: e.message, okLabel: 'Close' }); }
   }
 
   async function confDeploy(whatIf) {
@@ -2228,6 +2436,8 @@
       h += '</tr>';
     }
     h += '</table></div>';
+    // [H5] export the fleet conformance matrix (tenants × templates) as evidence.
+    h += '<div style="margin-top:8px;">' + exportBarHtml('confFleet') + '</div>';
     // Per-template fleet rollup + ring-plan picker.
     h += '<div style="margin-top:16px;padding:12px;background:#f6f8fa;border:1px solid #d0d7de;border-radius:8px;">' +
       '<b style="font-size:13px;">Ring-wide rollout</b>' +
@@ -2236,6 +2446,30 @@
     h += `<select id="fleetRingTpl" style="padding:5px 8px;">${ropts}</select><div id="fleetRingPlan" style="margin-top:10px;"></div></div>`;
     body.innerHTML = h;
     wireConfViewToggle();
+    // [H5] export the fleet matrix flattened to one row per tenant×template
+    // (the most usable evidence shape: status + behind-by-N + applied/approved).
+    wireExportBar('confFleet', () => {
+      const rows = [];
+      for (const tn of tenants) {
+        const cellByTpl = {}; (tn.cells || []).forEach(c => cellByTpl[c.templateId] = c);
+        for (const c of cols) {
+          const cell = cellByTpl[c.templateId] || { status: 'NeverApplied', behind: c.templateVersion, appliedVersion: 0 };
+          rows.push([
+            tn.tenantId || '', (tn.ring != null ? tn.ring : ''),
+            c.templateId || '', (c.workload || ''),
+            cell.status || '', (cell.behind != null ? cell.behind : ''),
+            (cell.appliedVersion != null ? cell.appliedVersion : ''), (c.templateVersion != null ? c.templateVersion : '')
+          ]);
+        }
+      }
+      return {
+        filename: 'pim-fleet-conformance-' + new Date().toISOString().replace(/[:.]/g, '-') + '.csv',
+        title: 'PIM Manager — fleet template conformance',
+        subtitle: (d.totalTenants || 0) + ' tenant(s) · ' + (d.currentTenants || 0) + ' current · ' + (d.behindTenants || 0) + ' behind',
+        headers: ['Tenant', 'Ring', 'Template', 'Workload', 'Status', 'BehindByN', 'AppliedVersion', 'ApprovedVersion'],
+        rows: rows
+      };
+    });
     if (per.length) {
       if (!fleetRingTpl || !per.find(p => p.templateId === fleetRingTpl)) fleetRingTpl = per[0].templateId;
       document.getElementById('fleetRingTpl').value = fleetRingTpl;
@@ -2403,6 +2637,257 @@
     };
   }
 
+  // ===================================================================
+  // Edition / license card (REQUIREMENTS s30). Set the active edition + grant
+  // basis; loads via GET /api/settings/edition, saves via PUT. SuperAdmin to edit.
+  // ===================================================================
+  let PIM_EDITION_CACHE = null;
+  async function renderEditionCard(canEdit) {
+    const host = document.getElementById('setEditionBody');
+    if (!host) return;
+    const esc = escapeHtml;
+    let e;
+    try { e = await api('GET', '/api/settings/edition'); }
+    catch (ex) { host.innerHTML = '<div style="color:#cf222e">Failed to load edition: ' + esc(ex.message) + '</div>'; return; }
+    PIM_EDITION_CACHE = e;
+    const editions = e.editions || ['Core','Pro','Pro-DesignPartner'];
+    const dis = canEdit ? '' : ' disabled';
+    const labelFor = (x) => x === 'Pro-DesignPartner' ? 'Pro (Design Partner)' : x;
+    let h = '';
+    h += `<div style="margin-bottom:8px;">Active edition: <b>${esc(labelFor(e.edition || 'Core'))}</b></div>`;
+    h += `<label style="font-size:12px;color:#57606a;">Edition <select id="edSel"${dis} style="margin-left:6px;">`;
+    editions.forEach(x => { h += `<option value="${esc(x)}"${x===e.edition?' selected':''}>${esc(labelFor(x))}</option>`; });
+    h += `</select></label>`;
+    h += ` <label style="font-size:12px;color:#57606a;margin-left:12px;">Grant basis <select id="edGrant"${dis} style="margin-left:6px;">` +
+         `<option value=""${!e.grantBasis?' selected':''}>(none)</option>` +
+         `<option value="paid"${e.grantBasis==='paid'?' selected':''}>Paid</option>` +
+         `<option value="design-partner"${e.grantBasis==='design-partner'?' selected':''}>Design partner</option>` +
+         `</select></label>`;
+    h += `<div style="margin-top:8px;"><input id="edNote" type="text" placeholder="note (optional)" value="${esc(e.note||'')}"${dis} style="width:340px;"></div>`;
+    if (canEdit) {
+      h += `<div style="margin-top:10px;"><button class="btn" id="edSave">Save edition</button> <span class="setMsg" id="edMsg"></span></div>`;
+    } else {
+      h += `<div style="margin-top:8px;font-size:11.5px;color:#57606a;">(read-only &mdash; SuperAdmin role required to edit)</div>`;
+    }
+    host.innerHTML = h;
+    if (!canEdit) return;
+    document.getElementById('edSave').onclick = async () => {
+      const msg = document.getElementById('edMsg'); msg.textContent = 'Saving…'; msg.style.color = '#57606a';
+      const value = { edition: document.getElementById('edSel').value, grantBasis: document.getElementById('edGrant').value, note: document.getElementById('edNote').value };
+      try { await api('PUT', '/api/settings/edition', { value }); msg.textContent = 'Saved ✓'; msg.style.color = '#116329'; renderFeatureGatesCard(canEdit); renderEditionCard(canEdit); }
+      catch (ex) { msg.textContent = 'Failed: ' + ex.message; msg.style.color = '#cf222e'; }
+    };
+  }
+
+  // ===================================================================
+  // Deployment scenario card (REQUIREMENTS §31.3 c). READ-ONLY summary of the active
+  // deployment topology (S1-S6) + the runtime knobs it resolves to (hosting / SPN /
+  // sync-file / update source / edition). Loads via GET /api/settings/scenario; PUT
+  // persists a switch. SuperAdmin to edit. The card never silently changes behaviour:
+  // switching the scenario only changes what subsequent resolutions read.
+  // ===================================================================
+  let PIM_SCENARIO_CACHE = null;
+  async function renderScenarioCard(canEdit) {
+    const host = document.getElementById('setScenarioBody');
+    if (!host) return;
+    const esc = escapeHtml;
+    let s;
+    try { s = await api('GET', '/api/settings/scenario'); }
+    catch (ex) { host.innerHTML = '<div style="color:#cf222e">Failed to load deployment scenario: ' + esc(ex.message) + '</div>'; return; }
+    PIM_SCENARIO_CACHE = s;
+    const sc = s.scenario || null;
+    const rv = s.resolved || null;
+    const catalog = s.catalog || [];
+    const dis = canEdit ? '' : ' disabled';
+    let h = '';
+    if (!sc) {
+      h += `<div style="color:#57606a;font-size:12px;">No deployment scenario is set. The install uses the safe single-tenant default (S1) until one is chosen.</div>`;
+    } else {
+      h += `<div style="margin-bottom:8px;">Active topology: <b>${esc(sc.id)}</b> &mdash; ${esc(sc.label || '')}</div>`;
+      if (sc.summary) { h += `<div style="font-size:11.5px;color:#57606a;margin-bottom:10px;">${esc(sc.summary)}</div>`; }
+      // Read-only resolved-knobs grid.
+      const knob = (label, val) => `<tr><td style="color:#57606a;padding:2px 12px 2px 0;white-space:nowrap;">${esc(label)}</td><td><b>${esc(val == null || val === '' ? '—' : String(val))}</b></td></tr>`;
+      h += `<table class="set-table" style="margin:0;"><tr><th colspan="2" style="text-align:left;">Resolved settings</th></tr>`;
+      h += knob('Role', sc.role);
+      h += knob('Distribution edition', sc.edition);
+      if (rv) {
+        h += knob('Update source', rv.updateSource + (rv.managedHosting ? ' (' + rv.managedHosting + ')' : ''));
+        h += knob('Hosting (GUI + SQL)', rv.hostingLocation);
+        h += knob('Service-principal model', rv.spnModel);
+        h += knob('Sync-file location', rv.syncFileLocation);
+        h += knob('Config variant', rv.configVariant);
+        h += knob('Ring-gated updates', rv.ringGated ? 'yes' : 'no');
+        h += knob('Sync admins + permissions', rv.syncAdminsPermissions ? 'yes' : 'no');
+        h += knob('License edition', rv.activeEdition + (rv.grantBasis ? ' (' + rv.grantBasis + ')' : ''));
+      }
+      h += `</table>`;
+    }
+    // Picker (SuperAdmin) -- switch the active scenario.
+    if (canEdit && catalog.length) {
+      h += `<div style="margin-top:12px;"><label style="font-size:12px;color:#57606a;">Scenario <select id="scnSel" style="margin-left:6px;">`;
+      catalog.forEach(c => { h += `<option value="${esc(c.id)}"${(sc && c.id===sc.id)?' selected':''}>${esc(c.id)} — ${esc(c.label)}</option>`; });
+      h += `</select></label>`;
+      h += `<div style="margin-top:10px;"><button class="btn" id="scnSave">Save scenario</button> <span class="setMsg" id="scnMsg"></span></div></div>`;
+    } else if (!canEdit) {
+      h += `<div style="margin-top:8px;font-size:11.5px;color:#57606a;">(read-only &mdash; SuperAdmin role required to change the deployment scenario)</div>`;
+    }
+    host.innerHTML = h;
+    if (!canEdit) return;
+    const saveBtn = document.getElementById('scnSave');
+    if (saveBtn) saveBtn.onclick = async () => {
+      const msg = document.getElementById('scnMsg'); msg.textContent = 'Saving…'; msg.style.color = '#57606a';
+      const value = { scenario: document.getElementById('scnSel').value };
+      try { await api('PUT', '/api/settings/scenario', { value }); msg.textContent = 'Saved ✓'; msg.style.color = '#116329'; renderScenarioCard(canEdit); renderEditionCard(canEdit); }
+      catch (ex) { msg.textContent = 'Failed: ' + ex.message; msg.style.color = '#cf222e'; }
+    };
+  }
+
+  // ===================================================================
+  // Feature customization card (REQUIREMENTS s29). The per-feature kill switch over
+  // the capability catalog, grouped into CHAPTERS. A disabled feature is shown DIMMED
+  // with a small "Disabled" label; an unlicensed (Pro) feature shows a "Requires Pro"
+  // lock (dimmed, toggle disabled). Nothing is ever hidden -- discoverability. Loads
+  // via GET /api/settings/feature-gates, saves via PUT. SuperAdmin to edit.
+  // ===================================================================
+  async function renderFeatureGatesCard(canEdit) {
+    const host = document.getElementById('setFeatureGatesBody');
+    if (!host) return;
+    const esc = escapeHtml;
+    let p;
+    try { p = await api('GET', '/api/settings/feature-gates'); }
+    catch (ex) { host.innerHTML = '<div style="color:#cf222e">Failed to load feature customization: ' + esc(ex.message) + '</div>'; return; }
+    const eff = p.effective || {};
+    // group by chapter, preserving catalog order
+    const groups = []; const seen = {};
+    (p.catalog || []).forEach(f => { if (!seen[f.group]) { seen[f.group] = []; groups.push(f.group); } seen[f.group].push(f.key); });
+    let h = '';
+    groups.forEach(g => {
+      h += `<div style="margin:10px 0 4px;font-weight:600;font-size:12.5px;color:#24292f;">${esc(g)}</div>`;
+      h += `<table class="set-table" data-group="${esc(g)}"><tr><th>Feature</th><th style="text-align:center;">Enabled</th><th>Status</th></tr>`;
+      seen[g].forEach(key => {
+        const f = eff[key]; if (!f) return;
+        const isCore = f.tier === 'core';
+        const needsPro = (f.license === 'pro' && !f.licensed);
+        const off = !f.enabled && !isCore;
+        const dimmed = (off || needsPro);
+        const rowStyle = dimmed ? ' style="opacity:0.55;"' : '';
+        const toggleDis = (!canEdit || isCore || needsPro) ? ' disabled' : '';
+        const checked = (isCore || f.enabled) ? ' checked' : '';
+        let status = '';
+        if (isCore) status = `<span style="font-size:10.5px;color:#57606a;">always on</span>`;
+        else if (needsPro) status = `<span style="font-size:10.5px;color:#9a6700;">🔒 Requires Pro</span>`;
+        else if (off) status = `<span style="font-size:10.5px;color:#57606a;">Disabled</span>`;
+        else status = `<span style="font-size:10.5px;color:#116329;">Enabled</span>`;
+        h += `<tr${rowStyle}>` +
+          `<td><b>${esc(f.label)}</b> <code style="color:#57606a;font-size:11px;">${esc(f.key)}</code>` +
+          ((f.dependsOn && f.dependsOn.length) ? `<div style="font-size:10.5px;color:#57606a;">needs: ${f.dependsOn.map(esc).join(', ')}</div>` : '') +
+          `</td>` +
+          `<td style="text-align:center;"><input type="checkbox" class="featGateToggle" data-key="${esc(f.key)}"${checked}${toggleDis}></td>` +
+          `<td>${status}</td>` +
+          `</tr>`;
+      });
+      h += `</table>`;
+    });
+    if (p.dependencyIssues && p.dependencyIssues.length) {
+      h += `<div style="margin-top:8px;color:#bc4c00;font-size:11.5px;">` + p.dependencyIssues.map(d => esc(d.message)).join('<br>') + `</div>`;
+    }
+    if (p.warnings && p.warnings.length) {
+      h += `<div style="margin-top:6px;color:#bc4c00;font-size:11.5px;">` + p.warnings.map(esc).join('<br>') + `</div>`;
+    }
+    if (canEdit) {
+      h += `<div style="margin-top:10px;"><button class="btn" id="featGateSave">Save feature customization</button> <span class="setMsg" id="featGateMsg"></span></div>`;
+    } else {
+      h += `<div style="margin-top:8px;font-size:11.5px;color:#57606a;">(read-only &mdash; SuperAdmin role required to edit)</div>`;
+    }
+    host.innerHTML = h;
+    if (!canEdit) return;
+    // --- Dependency cross-reference UX (REQUIREMENTS s29) -----------------
+    // The catalog records dependsOn; the toggle now PROMPTS/BLOCKS at toggle
+    // time so a customer can't silently create a broken combination:
+    //   * Enabling Y whose prerequisite X is off -> prompt to also enable X
+    //     (and auto-check X's editable toggle on confirm); if X cannot be
+    //     enabled here (unlicensed / always-off) -> warn, leave Y enabled.
+    //   * Disabling X while an enabled Y dependsOn X -> warn that Y may break;
+    //     cancel reverts the toggle (re-checks X) so the GUI never drifts.
+    // Pure client logic over the catalog already in the payload -- no new
+    // endpoint; the Save still writes the full editable set as before.
+    const catByKey = {}; (p.catalog || []).forEach(f => { catByKey[f.key] = f; });
+    const labelOf = (k) => (catByKey[k] && catByKey[k].label) ? catByKey[k].label : k;
+    // reverse map: prerequisiteKey -> [keys that depend on it]
+    const dependents = {};
+    (p.catalog || []).forEach(f => { (f.dependsOn || []).forEach(dep => { (dependents[dep] = dependents[dep] || []).push(f.key); }); });
+    const toggleByKey = (k) => document.querySelector('#setFeatureGatesBody .featGateToggle[data-key="' + (window.CSS && CSS.escape ? CSS.escape(k) : k) + '"]');
+    const isEnabledNow = (k) => { const c = catByKey[k]; if (c && c.tier === 'core') return true; const t = toggleByKey(k); return t ? !!t.checked : !!(eff[k] && eff[k].enabled); };
+    document.querySelectorAll('#setFeatureGatesBody .featGateToggle:not(:disabled)').forEach(cb => {
+      cb.onchange = async () => {
+        const key = cb.dataset.key;
+        if (cb.checked) {
+          // ENABLING: ensure each prerequisite is (or becomes) enabled.
+          const f = catByKey[key] || {};
+          const missing = (f.dependsOn || []).filter(dep => !isEnabledNow(dep));
+          for (const dep of missing) {
+            const depToggle = toggleByKey(dep);
+            const depCanEnable = depToggle && !depToggle.disabled;
+            if (depCanEnable) {
+              const go = await pimConfirm({ title: 'Enable a prerequisite?', body: '"' + labelOf(key) + '" needs "' + labelOf(dep) + '", which is currently off. Enable "' + labelOf(dep) + '" too?', okLabel: 'Enable both' });
+              if (go) { depToggle.checked = true; depToggle.dispatchEvent(new Event('change')); }
+            } else {
+              await pimConfirm({ title: 'Prerequisite unavailable', body: '"' + labelOf(key) + '" needs "' + labelOf(dep) + '", which cannot be enabled here (it may require Pro or be unavailable). "' + labelOf(key) + '" will not work until "' + labelOf(dep) + '" is available.', okLabel: 'Understood' });
+            }
+          }
+        } else {
+          // DISABLING: warn if an enabled feature depends on this one.
+          const broken = (dependents[key] || []).filter(d => isEnabledNow(d));
+          if (broken.length) {
+            const list = broken.map(labelOf).join(', ');
+            const go = await pimConfirm({ title: 'Other features depend on this', body: 'Disabling "' + labelOf(key) + '" may break: ' + list + '. Disable it anyway?', okLabel: 'Disable anyway', danger: true });
+            if (!go) { cb.checked = true; return; }
+          }
+        }
+      };
+    });
+    document.getElementById('featGateSave').onclick = async () => {
+      const msg = document.getElementById('featGateMsg'); msg.textContent = 'Saving…'; msg.style.color = '#57606a';
+      const out = {};
+      document.querySelectorAll('#setFeatureGatesBody .featGateToggle:not(:disabled)').forEach(cb => { out[cb.dataset.key] = !!cb.checked; });
+      try { await api('PUT', '/api/settings/feature-gates', { value: { gates: out } }); msg.textContent = 'Saved ✓'; msg.style.color = '#116329'; renderFeatureGatesCard(canEdit); }
+      catch (ex) { msg.textContent = 'Failed: ' + ex.message; msg.style.color = '#cf222e'; }
+    };
+  }
+
+  // ===================================================================
+  // Email controls card (REQUIREMENTS s29). Global kill switch + redirect + allowlist.
+  // Loads via GET /api/settings/email-controls, saves via PUT. SuperAdmin to edit.
+  // ===================================================================
+  async function renderEmailControlsCard(canEdit) {
+    const host = document.getElementById('setEmailControlsBody');
+    if (!host) return;
+    const esc = escapeHtml;
+    let c;
+    try { c = await api('GET', '/api/settings/email-controls'); }
+    catch (ex) { host.innerHTML = '<div style="color:#cf222e">Failed to load email controls: ' + esc(ex.message) + '</div>'; return; }
+    const dis = canEdit ? '' : ' disabled';
+    let h = '';
+    h += `<label style="font-size:12.5px;"><input type="checkbox" id="emKill"${c.killSwitch?' checked':''}${dis}> <b>Email kill switch</b> &mdash; turn ALL outbound email off</label>`;
+    h += `<div style="margin-top:10px;"><label style="font-size:12px;color:#57606a;">Redirect all email to <input id="emRedir" type="text" value="${esc(c.redirectAllTo||'')}" placeholder="(none)"${dis} style="width:280px;margin-left:6px;"></label></div>`;
+    h += `<div style="margin-top:10px;"><div style="font-size:12px;color:#57606a;margin-bottom:4px;">Allowlist (one address per line; empty = no restriction)</div>` +
+         `<textarea id="emAllow" rows="3"${dis} style="width:340px;">${esc((c.allowlist||[]).join('\n'))}</textarea></div>`;
+    if (canEdit) {
+      h += `<div style="margin-top:10px;"><button class="btn" id="emSave">Save email controls</button> <span class="setMsg" id="emMsg"></span></div>`;
+    } else {
+      h += `<div style="margin-top:8px;font-size:11.5px;color:#57606a;">(read-only &mdash; SuperAdmin role required to edit)</div>`;
+    }
+    host.innerHTML = h;
+    if (!canEdit) return;
+    document.getElementById('emSave').onclick = async () => {
+      const msg = document.getElementById('emMsg'); msg.textContent = 'Saving…'; msg.style.color = '#57606a';
+      const allowlist = (document.getElementById('emAllow').value||'').split(/\r?\n/).map(x => x.trim()).filter(Boolean);
+      const value = { killSwitch: document.getElementById('emKill').checked, redirectAllTo: document.getElementById('emRedir').value.trim(), allowlist };
+      try { await api('PUT', '/api/settings/email-controls', { value }); msg.textContent = 'Saved ✓'; msg.style.color = '#116329'; }
+      catch (ex) { msg.textContent = 'Failed: ' + ex.message; msg.style.color = '#cf222e'; }
+    };
+  }
+
   // Alerting card (REQUIREMENTS §27 H2) -- rendered inside Settings and
   // deep-linked from Home. Loads + saves via /api/alerting; sends a test via
   // /api/alerting/test through the real notify path. Admin+ editable. The host
@@ -2446,6 +2931,22 @@
       h += `<label style="display:block;font-size:12.5px;margin:2px 0;"><input type="checkbox" class="alertEv" data-ev="${esc(ev)}"${checked}${ro}> ${esc(PIM_ALERT_EVENT_LABELS[ev] || ev)}</label>`;
     });
 
+    // Outbound webhook channel (Microsoft Teams / generic JSON) -- a SECOND delivery
+    // channel beside email. Fires IN ADDITION to mail; an alert can deliver to Teams
+    // even with no mail sender configured.
+    const whKind = a.webhookKind || 'generic';
+    h += `<div style="font-size:12px;font-weight:600;margin:12px 0 4px;">Outbound webhook <span style="font-weight:400;color:#57606a;">(Microsoft Teams or a generic JSON endpoint &mdash; optional, fires in addition to email)</span></div>`;
+    if (a.webhookEnabled) {
+      h += `<div style="margin-bottom:6px;padding:5px 9px;background:#dafbe1;border:1px solid #4ac26b;border-radius:6px;font-size:11.5px;">Webhook <b>ON</b> &mdash; ${esc(whKind === 'teams' ? 'Microsoft Teams' : 'generic JSON')} channel configured.</div>`;
+    } else if (a.webhookUrl) {
+      h += `<div style="margin-bottom:6px;padding:5px 9px;background:#ffebe9;border:1px solid #ff8182;border-radius:6px;font-size:11.5px;">Webhook URL rejected: ${esc(a.webhookReason || 'invalid')}. Use an <b>https</b> public endpoint.</div>`;
+    }
+    h += `<input type="text" id="alertWebhookUrl"${ro} style="width:420px;font-family:inherit;font-size:12px;" placeholder="https://&lt;your-org&gt;.webhook.office.com/webhookb2/..." value="${esc(a.webhookUrl || '')}">`;
+    h += `<div style="margin-top:4px;font-size:12px;"><label>Format: <select id="alertWebhookKind"${ro} style="font-size:12px;">` +
+         `<option value="teams"${whKind === 'teams' ? ' selected' : ''}>Microsoft Teams (auto-detected for office.com webhooks)</option>` +
+         `<option value="generic"${whKind === 'generic' ? ' selected' : ''}>Generic JSON</option>` +
+         `</select></label></div>`;
+
     if (canEditAlert) {
       h += `<div style="margin-top:10px;"><button class="btn" id="alertSave">Save alerting</button> ` +
            `<button class="btn-sec" id="alertTest">Send test alert</button> ` +
@@ -2469,7 +2970,11 @@
       const recipients = (document.getElementById('alertRecips').value || '').split(/[\r\n,;]+/).map(x => x.trim()).filter(Boolean);
       const evs = {};
       document.querySelectorAll('.alertEv').forEach(c => { evs[c.dataset.ev] = c.checked; });
-      try { await api('PUT', '/api/alerting', { recipients, events: evs }); msg.textContent = 'Saved ✓'; msg.style.color = '#116329'; setTimeout(renderAlertingCard, 500); }
+      const whEl = document.getElementById('alertWebhookUrl');
+      const whKindEl = document.getElementById('alertWebhookKind');
+      const webhookUrl = whEl ? (whEl.value || '').trim() : '';
+      const webhookKind = whKindEl ? whKindEl.value : '';
+      try { await api('PUT', '/api/alerting', { recipients, events: evs, webhookUrl, webhookKind }); msg.textContent = 'Saved ✓'; msg.style.color = '#116329'; setTimeout(renderAlertingCard, 500); }
       catch (e) { msg.textContent = 'Failed: ' + e.message; msg.style.color = '#cf222e'; }
     };
     document.getElementById('alertTest').onclick = async () => {
@@ -2548,9 +3053,13 @@
     // --- Naming conventions (key/value editor) -------------------------
     h += `<div class="set-card"><h3 style="margin:0 0 4px;font-size:14px;">Naming conventions${seedNote(s.namingSeeded,'naming')}</h3>`;
     h += `<div style="color:#57606a;font-size:11.5px;margin-bottom:8px;">Patterns + tokens for admin / group / resource names. ` +
-         `<b><code>{Owner}</code> = the owning person's <u>initials</u></b> (e.g. <code>ABC</code>) — it is the admin account's owner identifier, <b>not</b> a list of approver UPNs. ` +
-         `Other tokens: <code>{Role}</code>, <code>{Department}</code>, <code>{Tier}</code>, <code>{AdminTypePrefix}</code>, <code>{EnvironmentSuffix}</code>.</div>`;
-    h += `<table class="set-table" id="setNamingTbl"><tr><th>Key</th><th>Value</th>${canEdit?'<th></th>':''}</tr>`;
+         `<b><code>{Initial}</code> (preferred) = the owning person's <u>initials</u></b> (e.g. <code>ABC</code>) — it is the admin account's owner identifier, <b>not</b> a list of approver UPNs. ` +
+         `<code>{Owner}</code> is the backward-compat synonym for <code>{Initial}</code>. See the full token list below; click a token to insert it into the focused Value field.</div>`;
+    h += buildTokenLegend(PIM_NAMING_TOKENS, '#setNamingTbl .setNamingVal', {
+      title: 'Supported naming tokens',
+      note: 'These are the variables the engine expands when it generates names. <b>{Initial}</b> is preferred; <b>{Owner}</b> is the backward-compat synonym. <b>{Platform}</b> and <b>{EnvironmentSuffix}</b> both expand to the environment suffix (-ID / -AD). Unknown tokens are left unchanged.'
+    });
+    h += `<table class="set-table" id="setNamingTbl" style="margin-top:8px;"><tr><th>Key</th><th>Value</th>${canEdit?'<th></th>':''}</tr>`;
     const naming = s.naming || {};
     // The admin-type prefix map + environment suffix map have their own dedicated
     // editor below (they are nested maps, not flat strings) -- skip them here.
@@ -2564,7 +3073,7 @@
       if (NAMING_HIDE_KEYS.indexOf(k) >= 0) return;
       const v = naming[k] == null ? '' : (typeof naming[k] === 'object' ? JSON.stringify(naming[k]) : naming[k]);
       h += `<tr><td><input class="setNamingKey" value="${esc(k)}"${ro} style="width:230px"></td>` +
-        `<td><input class="setNamingVal" value="${esc(v)}"${ro} style="width:340px"></td>` +
+        `<td><input class="setNamingVal" data-token-field="1" value="${esc(v)}"${ro} style="width:340px"></td>` +
         (canEdit?`<td><button class="btn-sec setRowDel" title="remove">✕</button></td>`:'') + `</tr>`;
     });
     h += `</table>`;
@@ -2725,6 +3234,32 @@
          `<div style="color:#57606a;font-size:11.5px;margin-bottom:8px;">Turn any Manager feature on or off so you can roll them out gradually. A disabled feature's tab is hidden from the menu on the next reload; enable it when you're ready. Core features are on by default; newer/advanced ones start off.</div>` +
          `<div id="setFeaturesBody"><div style="color:#57606a;font-size:12px;">Loading features&hellip;</div></div></div>`;
 
+    // --- Edition / License (REQUIREMENTS s30): which edition is active + what it
+    // unlocks. Set the edition + record the grant basis. SuperAdmin to change.
+    h += `<div class="set-card" id="setEditionCard"><h3 style="margin:0 0 4px;font-size:14px;">Edition &amp; license</h3>` +
+         `<div style="color:#57606a;font-size:11.5px;margin-bottom:8px;">Choose the active edition for this tenant. <b>Core</b> includes every essential PIM feature for free. <b>Pro</b> (paid) and <b>Pro (Design Partner)</b> (free for engaged design partners) unlock the advanced integrations. Advanced features that need Pro are shown with a &ldquo;Requires Pro&rdquo; lock below until the edition covers them.</div>` +
+         `<div id="setEditionBody"><div style="color:#57606a;font-size:12px;">Loading edition&hellip;</div></div></div>`;
+
+    // --- Deployment scenario (REQUIREMENTS §31): which of the six supported
+    // topologies (S1-S6) this install is. READ-ONLY summary of the active topology +
+    // what each runtime knob (hosting / SPN model / sync-file / update source /
+    // edition) resolves to. SuperAdmin can switch the active scenario; switching only
+    // changes what subsequent resolutions read -- it never silently re-runs anything.
+    h += `<div class="set-card" id="setScenarioCard"><h3 style="margin:0 0 4px;font-size:14px;">Deployment scenario</h3>` +
+         `<div style="color:#57606a;font-size:11.5px;margin-bottom:8px;">The deployment <b>topology</b> this install runs as &mdash; single-tenant or MSP master/managed, internal or community, central or local hosting. The summary below shows the active scenario and what each runtime setting (hosting store, service-principal model, sync-file location, update source, edition) resolves to. Changing it persists the active scenario; the engine, jobs and deploy apply it on their next run (this card never changes behaviour on its own).</div>` +
+         `<div id="setScenarioBody"><div style="color:#57606a;font-size:12px;">Loading deployment scenario&hellip;</div></div></div>`;
+
+    // --- Feature customization (REQUIREMENTS s29): per-feature kill switch over the
+    // capability catalog, grouped into chapters. Disabled = dimmed; unlicensed = lock.
+    h += `<div class="set-card" id="setFeatureGatesCard"><h3 style="margin:0 0 4px;font-size:14px;">Feature customization</h3>` +
+         `<div style="color:#57606a;font-size:11.5px;margin-bottom:8px;">Enable or disable each advanced capability per customer. A disabled feature is completely inert &mdash; the engine, scheduled jobs and integrations all skip it (no writes, no emails) no matter how they are triggered. Newly-shipped advanced features start <b>off</b> so an upgrade never springs a new behaviour on a customer. Core features are always on and shown for reference. Items needing Pro are locked until the edition above covers them.</div>` +
+         `<div id="setFeatureGatesBody"><div style="color:#57606a;font-size:12px;">Loading feature customization&hellip;</div></div></div>`;
+
+    // --- Email controls (REQUIREMENTS s29): global kill switch + redirect + allowlist.
+    h += `<div class="set-card" id="setEmailControlsCard"><h3 style="margin:0 0 4px;font-size:14px;">Email controls</h3>` +
+         `<div style="color:#57606a;font-size:11.5px;margin-bottom:8px;">A global <b>email kill switch</b> stops every outbound email instantly (every alert, digest and notification becomes a no-op). Optionally redirect <b>all</b> mail to one address (for testing), or restrict sending to an allowlist of addresses. Honoured by every send path and every scheduled job.</div>` +
+         `<div id="setEmailControlsBody"><div style="color:#57606a;font-size:12px;">Loading email controls&hellip;</div></div></div>`;
+
     h += `<div class="set-card" id="setOpPolicyCard"><h3 style="margin:0 0 4px;font-size:14px;">Operational policy</h3>` +
          `<div style="color:#57606a;font-size:11.5px;margin-bottom:8px;">Core activation/expiry defaults, whether MFA is required on activation, and the connection-sanity timeouts used to validate the tenant/SQL connection. These persist to the same settings store the engine and scheduled jobs read.</div>` +
          `<div id="setOpPolicyBody"><div style="color:#57606a;font-size:12px;">Loading operational policy&hellip;</div></div></div>`;
@@ -2744,6 +3279,10 @@
     // Operational-policy + Alerting cards load asynchronously (host containers
     // are always present so the rest of Settings paints first).
     renderFeaturesCard(canEdit);
+    renderEditionCard(canEdit);
+    renderScenarioCard(canEdit);
+    renderFeatureGatesCard(canEdit);
+    renderEmailControlsCard(canEdit);
     renderOpPolicyCard(canEdit);
     // Alerting card is editable by Admin+ (separate from the SuperAdmin gate that
     // governs the rest of Settings) -- load + wire it regardless of canEdit.
@@ -3434,11 +3973,15 @@
     const canApply = roleAtLeast('Admin');
     const typeStyle = { missing:'#0969da', changed:'#bc4c00', extra:'#cf222e' };
     const h = [];
-    h.push('<div style="font-size:12.5px;margin-bottom:6px;">Drift found: ' +
+    h.push('<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:6px;">' +
+      '<span style="font-size:12.5px;">Drift found: ' +
       '<b style="color:#0969da;">' + esc(String(d.counts.missing)) + ' missing</b>, ' +
       '<b style="color:#bc4c00;">' + esc(String(d.counts.changed)) + ' changed</b>, ' +
       '<b style="color:#cf222e;">' + esc(String(d.counts.extra)) + ' extra</b>' +
-      ' <span style="color:#57606a;">(as of ' + esc((d.generatedUtc || '').substring(0,16).replace('T',' ')) + ' UTC)</span></div>');
+      ' <span style="color:#57606a;">(as of ' + esc((d.generatedUtc || '').substring(0,16).replace('T',' ')) + ' UTC)</span></span>' +
+      '<span style="flex:1 1 auto;"></span>' +
+      // [H5] export the live-vs-desired drift list as evidence.
+      exportBarHtml('govDrift') + '</div>');
     h.push('<table class="grid" style="font-size:12px;"><thead><tr>' +
       (canApply ? '<th style="width:24px;"><input type="checkbox" id="govDriftAll"></th>' : '') +
       '<th>Scope</th><th>Drift</th><th>Item</th></tr></thead><tbody>');
@@ -3461,6 +4004,16 @@
       h.push('<div style="color:#8c959f;font-size:11.5px;margin-top:6px;">Admin role required to apply remediation.</div>');
     }
     box.innerHTML = h.join('');
+
+    // [H5] export the drift rows (live-vs-desired) for an evidence trail.
+    wireExportBar('govDrift', () => ({
+      filename: 'pim-drift-' + new Date().toISOString().replace(/[:.]/g, '-') + '.csv',
+      title: 'PIM Manager — configuration drift (live vs desired)',
+      subtitle: d.counts.missing + ' missing · ' + d.counts.changed + ' changed · ' + d.counts.extra + ' extra' +
+        (d.generatedUtc ? ' · as of ' + (d.generatedUtc || '').substring(0,16).replace('T',' ') + ' UTC' : ''),
+      headers: ['Scope', 'Drift', 'Item'],
+      rows: items.map(it => [it.scope || '', it.type || '', it.key || ''])
+    }));
 
     const allCb = document.getElementById('govDriftAll');
     if (allCb) allCb.onclick = () => { document.querySelectorAll('.govDriftSel').forEach(c => { c.checked = allCb.checked; }); };
@@ -3807,8 +4360,20 @@
       const eh = [];
       eh.push('<div style="font-size:12px;font-weight:600;color:#24292f;margin-bottom:4px;">Editing <code>' + esc(type) + '</code> mail template' +
         (tpl.source === 'store' ? ' <span style="color:#0969da;">(customized &mdash; saved here)</span>' : (tpl.source === 'file' ? ' <span style="color:#0969da;">(.custom.html file)</span>' : ' <span style="color:#57606a;">(shipped default)</span>')) + '</div>');
-      eh.push('<div style="color:#57606a;font-size:11px;margin-bottom:6px;">Subject comes from the leading <code>&lt;!-- subject: ... --&gt;</code> line. Tokens like <code>{{UserName}}</code> are filled by the engine at send time.</div>');
-      eh.push('<textarea id="govMailBody" spellcheck="false" style="width:100%;min-height:260px;font-family:Consolas,monospace;font-size:12px;box-sizing:border-box;">' + esc(tpl.body || '') + '</textarea>');
+      eh.push('<div style="color:#57606a;font-size:11px;margin-bottom:6px;">Subject comes from the leading <code>&lt;!-- subject: ... --&gt;</code> line. Tokens like <code>{{UserName}}</code> are filled by the engine at send time; unknown <code>{{tokens}}</code> render empty.</div>');
+      // Supported-tokens legend (REQUIREMENTS §11): the tokens this template type
+      // supports are exactly the {{...}} placeholders the SHIPPED default carries
+      // (the engine fills the ones it is given for this notification; others render
+      // empty). Derived from tpl.shipped (+ any extra already in the effective body)
+      // so the list is factual per template, never an invented superset.
+      const mailToks = mailTemplateTokens(tpl.shipped, tpl.body);
+      if (mailToks.length) {
+        eh.push(buildTokenLegend(mailToks, '#govMailBody', {
+          title: 'Supported tokens for this template',
+          note: 'These <code>{{tokens}}</code> are the ones the <b>' + esc(type) + '</b> mail provides at send time (from the shipped template). Click to insert at the cursor.'
+        }));
+      }
+      eh.push('<textarea id="govMailBody" data-token-field="1" spellcheck="false" style="width:100%;min-height:260px;font-family:Consolas,monospace;font-size:12px;box-sizing:border-box;">' + esc(tpl.body || '') + '</textarea>');
       eh.push('<div style="margin-top:6px;display:flex;gap:8px;align-items:center;flex-wrap:wrap;">' +
         '<button id="govMailSave" style="background:#1f883d;color:#fff;border:1px solid #1f883d;border-radius:5px;padding:5px 12px;cursor:pointer;">Save override</button>' +
         '<button id="govMailRevert">Load shipped default into editor</button>' +
@@ -4093,6 +4658,100 @@
       ov.querySelector('#apvCancel').onclick = () => done(false);
       const ok = ov.querySelector('#apvOk'); if (ok) ok.onclick = () => done(true);
       ov.onclick = (e) => { if (e.target === ov) done(false); };
+    });
+  }
+
+  // ===================================================================
+  // Reusable promise-based modals (REQUIREMENTS [L2]) -- replace the raw
+  // browser confirm()/prompt() on the destructive/authoring conformance
+  // actions with a consistent in-app modal (same overlay/keyboard/escape
+  // behaviour as showAuthoringPreviewModal). Pure DOM, no engine call.
+  //   pimConfirm({title, body, okLabel, danger}) -> Promise<bool>
+  //   pimFormModal({title, intro, okLabel, fields:[{name,label,type,
+  //                 placeholder,required,value,hint}]}) -> Promise<values|null>
+  // pimFormModal validates required fields (cannot OK with a blank required
+  // field) and returns null on cancel/escape/backdrop. Escape always cancels.
+  // ===================================================================
+  function pimModalOverlay() {
+    const ov = document.createElement('div');
+    ov.style.cssText = 'position:fixed;inset:0;background:rgba(27,31,36,.45);z-index:9999;display:flex;align-items:flex-start;justify-content:center;padding:6vh 12px;overflow:auto;';
+    return ov;
+  }
+  function pimConfirm(opts) {
+    const esc = escapeHtml;
+    opts = opts || {};
+    const danger = !!opts.danger;
+    return new Promise(resolve => {
+      const ov = pimModalOverlay();
+      ov.innerHTML =
+        '<div role="dialog" aria-modal="true" style="background:#fff;border-radius:10px;max-width:480px;width:100%;box-shadow:0 8px 32px rgba(0,0,0,.25);padding:16px 18px;box-sizing:border-box;">' +
+          '<div style="font-size:14px;font-weight:600;">' + esc(opts.title || 'Confirm') + '</div>' +
+          (opts.body ? ('<div style="color:#57606a;font-size:12.5px;margin-top:8px;line-height:1.5;">' + esc(opts.body) + '</div>') : '') +
+          '<div style="margin-top:16px;display:flex;gap:8px;justify-content:flex-end;">' +
+            '<button id="pcmCancel">Cancel</button>' +
+            '<button id="pcmOk" class="' + (danger ? 'danger' : 'primary') + '">' + esc(opts.okLabel || 'OK') + '</button>' +
+          '</div>' +
+        '</div>';
+      document.body.appendChild(ov);
+      function done(v) { try { document.removeEventListener('keydown', onKey); document.body.removeChild(ov); } catch (e) {} resolve(v); }
+      function onKey(e) { if (e.key === 'Escape') done(false); else if (e.key === 'Enter') done(true); }
+      document.addEventListener('keydown', onKey);
+      ov.querySelector('#pcmCancel').onclick = () => done(false);
+      ov.querySelector('#pcmOk').onclick = () => done(true);
+      ov.onclick = (e) => { if (e.target === ov) done(false); };
+      const ok = ov.querySelector('#pcmOk'); if (ok) ok.focus();
+    });
+  }
+  function pimFormModal(opts) {
+    const esc = escapeHtml;
+    opts = opts || {};
+    const fields = opts.fields || [];
+    return new Promise(resolve => {
+      const ov = pimModalOverlay();
+      const fieldHtml = fields.map((f, i) => {
+        const id = 'pfm_' + i;
+        const req = f.required ? ' <span style="color:#cf222e;">*</span>' : '';
+        const input = (f.type === 'textarea')
+          ? '<textarea id="' + id + '" rows="3" style="width:100%;box-sizing:border-box;padding:6px 8px;font-size:12.5px;" placeholder="' + esc(f.placeholder || '') + '">' + esc(f.value || '') + '</textarea>'
+          : '<input id="' + id + '" type="' + esc(f.type || 'text') + '" value="' + esc(f.value || '') + '" placeholder="' + esc(f.placeholder || '') + '" style="width:100%;box-sizing:border-box;padding:6px 8px;font-size:12.5px;">';
+        return '<div style="margin-top:10px;" data-field="' + i + '">' +
+          '<label for="' + id + '" style="display:block;font-size:11.5px;font-weight:600;color:#24292f;margin-bottom:3px;">' + esc(f.label || f.name) + req + '</label>' +
+          input +
+          (f.hint ? ('<div style="font-size:10.5px;color:#57606a;margin-top:2px;">' + esc(f.hint) + '</div>') : '') +
+          '<div class="pfm-err" style="display:none;font-size:10.5px;color:#cf222e;margin-top:2px;"></div>' +
+          '</div>';
+      }).join('');
+      ov.innerHTML =
+        '<div role="dialog" aria-modal="true" style="background:#fff;border-radius:10px;max-width:520px;width:100%;box-shadow:0 8px 32px rgba(0,0,0,.25);padding:16px 18px;box-sizing:border-box;">' +
+          '<div style="font-size:14px;font-weight:600;">' + esc(opts.title || '') + '</div>' +
+          (opts.intro ? ('<div style="color:#57606a;font-size:11.5px;margin-top:4px;line-height:1.5;">' + esc(opts.intro) + '</div>') : '') +
+          fieldHtml +
+          '<div style="margin-top:16px;display:flex;gap:8px;justify-content:flex-end;">' +
+            '<button id="pfmCancel">Cancel</button>' +
+            '<button id="pfmOk" class="primary">' + esc(opts.okLabel || 'OK') + '</button>' +
+          '</div>' +
+        '</div>';
+      document.body.appendChild(ov);
+      function done(v) { try { document.removeEventListener('keydown', onKey); document.body.removeChild(ov); } catch (e) {} resolve(v); }
+      function onKey(e) { if (e.key === 'Escape') done(null); }
+      document.addEventListener('keydown', onKey);
+      function collect() {
+        const out = {}; let ok = true;
+        fields.forEach((f, i) => {
+          const wrap = ov.querySelector('[data-field="' + i + '"]');
+          const el = ov.querySelector('#pfm_' + i);
+          const errEl = wrap ? wrap.querySelector('.pfm-err') : null;
+          const val = (el && el.value !== undefined) ? String(el.value).trim() : '';
+          if (f.required && !val) { ok = false; if (errEl) { errEl.textContent = (f.label || f.name) + ' is required.'; errEl.style.display = ''; } }
+          else if (errEl) { errEl.style.display = 'none'; }
+          out[f.name] = val;
+        });
+        return ok ? out : null;
+      }
+      ov.querySelector('#pfmCancel').onclick = () => done(null);
+      ov.querySelector('#pfmOk').onclick = () => { const v = collect(); if (v) done(v); };
+      ov.onclick = (e) => { if (e.target === ov) done(null); };
+      const first = ov.querySelector('#pfm_0'); if (first) first.focus();
     });
   }
 
@@ -4979,6 +5638,9 @@
       '<span style="font-size:11px;text-transform:uppercase;letter-spacing:.5px;color:#0969da;font-weight:600;">Scheduled &amp; recent jobs</span>' +
       '<span style="color:#57606a;font-size:11.5px;">' + jobs.length + ' jobs' + (running ? (' &middot; <b style="color:#1a7f37;">' + running + ' running</b>') : '') + '</span>' +
       '<span style="flex:1 1 auto;"></span>' +
+      // [H5] export the run/failure-history snapshot as evidence (jobs healthy?
+      // what ran / failed / when). Only offered when there is at least one job.
+      (jobs.length ? exportBarHtml('jobs') + ' ' : '') +
       '<button id="jobsRefresh" class="ghost" style="font-size:12px;">Refresh</button>' +
       '<label style="font-size:12px;color:#57606a;display:flex;align-items:center;gap:4px;"><input type="checkbox" id="jobsAuto"> auto-refresh</label></div>');
     // [M6] "needs attention" banner: overdue (missed a fire window) and/or failing
@@ -5103,6 +5765,29 @@
     document.querySelectorAll('.jobHistBtn').forEach(b => {
       b.onclick = () => openJobHistory(b.dataset.name);
     });
+
+    // [H5] export the jobs run/failure-history snapshot (evidence: what ran,
+    // its result, when, and how far behind). Reuses the shared injection-safe
+    // CSV / print helpers; built from the same rows the table renders.
+    wireExportBar('jobs', () => ({
+      filename: 'pim-jobs-' + new Date().toISOString().replace(/[:.]/g, '-') + '.csv',
+      title: 'PIM Manager — scheduled & recent jobs',
+      subtitle: jobs.length + ' job(s)' + (overdue ? ' · ' + overdue + ' overdue' : '') + (failing ? ' · ' + failing + ' failing' : ''),
+      headers: ['Job', 'Type', 'Scope', 'Cadence', 'Enabled', 'Status', 'LastRunUtc', 'LastResult', 'LastOk', 'DurationMs', 'NextRunUtc', 'RecentFailures', 'UnackedFailures', 'Overdue'],
+      rows: jobs.map(j => [
+        j.name || '', j.type || '', j.scope || '', j.cadence || '',
+        (j.enabled ? 'yes' : 'no'),
+        (j.inProgress ? 'running' : (j.neverRun ? 'never run' : (j.lastOk === false ? 'failed' : (j.lastOk === true ? 'ok' : 'unknown')))),
+        (j.neverRun ? '' : (j.lastRunUtc || '')),
+        (j.lastResult || ''),
+        (j.lastOk === true ? 'true' : (j.lastOk === false ? 'false' : '')),
+        (j.lastDurationMs != null && j.lastDurationMs >= 0 ? j.lastDurationMs : ''),
+        (j.enabled && j.nextRunUtc ? (j.nextRunSynthesized ? '~' : '') + j.nextRunUtc : ''),
+        (j.recentFailureCount || 0),
+        (j.unackedFailureCount || 0),
+        (j.overdue ? 'yes' : 'no')
+      ])
+    }));
 
     const rf = document.getElementById('jobsRefresh'); if (rf) rf.onclick = () => renderJobs();
     const auto = document.getElementById('jobsAuto');
@@ -5643,6 +6328,7 @@
     'entra-role':       '#db6d28',
     'au-role':          '#9a6700',
     'az-resource':      '#d2a8ff',
+    'workload-target':  '#1f6feb',
     'au':               '#57606a'
   };
   const KIND_SHAPE = {
@@ -5652,6 +6338,7 @@
     'entra-role':       'diamond',
     'au-role':          'diamond',
     'az-resource':      'tag',
+    'workload-target':  'tag',
     'au':               'octagon'
   };
 
@@ -6159,7 +6846,7 @@
     // Subject picker (datalist of the people OR roles in the live model).
     const isWhoCan = reportState.mode === 'who-can';
     const people = (PIM_DATA.nodes || []).filter(n => n.kind === 'admin');
-    const roles = (PIM_DATA.nodes || []).filter(n => ['entra-role', 'au-role', 'az-resource'].includes(n.kind));
+    const roles = (PIM_DATA.nodes || []).filter(n => ['entra-role', 'au-role', 'az-resource', 'workload-target'].includes(n.kind));
     const listId = isWhoCan ? 'rptPeopleList' : 'rptRolesList';
     h.push('<div style="display:flex;gap:8px;align-items:center;margin-bottom:12px;flex-wrap:wrap;">' +
       '<label style="font-size:12px;color:#57606a;">' + (isWhoCan ? 'Person' : 'Role / target') + '</label>' +
@@ -11432,7 +12119,7 @@
       if (n.kind === 'admin') return 0;
       if (n.kind === 'role-group') return 1;
       if (n.kind === 'permission-group') return 2;
-      if (n.kind === 'entra-role' || n.kind === 'au-role' || n.kind === 'az-resource') return 3;
+      if (n.kind === 'entra-role' || n.kind === 'au-role' || n.kind === 'az-resource' || n.kind === 'workload-target') return 3;
       return -1;
     };
     const fwd = {}, back = {};
@@ -11591,7 +12278,32 @@
     return { threshold, summary: { orphan, stale, overpriv, flagged: Object.keys(byNode).length }, nodes: byNode };
   }
 
-  const MAP_DOT = { 'admin': '#0969da', 'role-group': '#8250df', 'permission-group': '#1a7f37', 'entra-role': '#db6d28', 'au-role': '#9a6700', 'az-resource': '#8250df' };
+  const MAP_DOT = { 'admin': '#0969da', 'role-group': '#8250df', 'permission-group': '#1a7f37', 'entra-role': '#db6d28', 'au-role': '#9a6700', 'az-resource': '#8250df', 'workload-target': '#1f6feb' };
+
+  // Workload reconciliation badge: desired-vs-live-crawl status on a
+  // workload-target. mapped (live==desired) / missing (desired, not live ->
+  // candidate to push) / exempted (explicitly excused) / unknown (not yet
+  // crawled). Purely a read of the backend-stamped reconStatus -- the engine
+  // remains the writer; the GUI only surfaces what the crawl found.
+  const MAP_RECON = {
+    mapped:   { icon: '✓', color: '#1a7f37', label: 'Mapped' },
+    missing:  { icon: '⚠', color: '#cf222e', label: 'Missing (not live)' },
+    exempted: { icon: '⊘', color: '#9a6700', label: 'Exempted' },
+    unknown:  { icon: '—', color: '#57606a', label: 'Not yet crawled' }
+  };
+  function mapStampReconBadge(el, n) {
+    const r = MAP_RECON[String(n.reconStatus)] || MAP_RECON.unknown;
+    const b = document.createElement('span');
+    b.className = 'pt-recon recon-' + String(n.reconStatus || 'unknown');
+    b.textContent = r.icon;
+    b.style.color = r.color;
+    let tip = r.label;
+    if (n.reconReason) tip += ' — ' + n.reconReason;
+    if (n.reconCrawledUtc) tip += ' (crawled ' + n.reconCrawledUtc + ')';
+    b.title = tip;
+    const cnt = el.querySelector('.map-count');
+    if (cnt) el.insertBefore(b, cnt); else el.appendChild(b);
+  }
 
   function mapReachCount(m, id) {
     const f = mapBfs(id, m.fwd, 'target');
@@ -11617,7 +12329,7 @@
     // Long Azure scopes / AU-scoped roles: split "<name> @ <scope>" into a
     // bold first line + small muted scope line instead of one truncated mess.
     const full = String(n.label || n.id);
-    const atIx = (n.kind === 'az-resource' || n.kind === 'au-role') ? full.indexOf(' @ ') : -1;
+    const atIx = (n.kind === 'az-resource' || n.kind === 'au-role' || n.kind === 'workload-target') ? full.indexOf(' @ ') : -1;
     if (atIx > 0) {
       lbl.textContent = full.substring(0, atIx);
       const sub = document.createElement('span');
@@ -11685,12 +12397,16 @@
 
     // col 3: targets grouped by kind
     const c3 = document.getElementById('mapCol3'); c3.innerHTML = '';
-    const kindHdr = { 'entra-role': 'Entra ID roles', 'au-role': 'AU-scoped roles', 'az-resource': 'Azure RBAC @ scope' };
-    for (const k of ['entra-role', 'au-role', 'az-resource']) {
+    const kindHdr = { 'entra-role': 'Entra ID roles', 'au-role': 'AU-scoped roles', 'az-resource': 'Azure RBAC @ scope', 'workload-target': 'Workload roles & scopes' };
+    for (const k of ['entra-role', 'au-role', 'az-resource', 'workload-target']) {
       const items = cols[3].filter(n => n.kind === k);
       if (!items.length) continue;
       const h = document.createElement('div'); h.className = 'map-group-hdr'; h.textContent = kindHdr[k]; c3.appendChild(h);
-      for (const n of items) c3.appendChild(mapItem(m, n, '← ' + ((m.back[n.id] || []).length)));
+      for (const n of items) {
+        const el = mapItem(m, n, '← ' + ((m.back[n.id] || []).length));
+        if (k === 'workload-target' && n.reconStatus) { mapStampReconBadge(el, n); }
+        c3.appendChild(el);
+      }
     }
 
     mapApplyRisk();
@@ -11886,38 +12602,57 @@
   // ENTRA ID ROLES / AU-SCOPED ROLES / AZURE RBAC @ SCOPE. Each chip shows a
   // short label, a tooltip with the full scope path / AU / workspace / project,
   // and click-to-expand to reveal that full detail inline.
-  const MAP_PT_DOT = { 'entra-role': '#db6d28', 'au-role': '#9a6700', 'az-resource': '#8250df' };
+  const MAP_PT_DOT = { 'entra-role': '#db6d28', 'au-role': '#9a6700', 'az-resource': '#8250df', 'workload-target': '#1f6feb' };
   function mapTargetBreakdown(m, down) {
-    const groups = { 'entra-role': [], 'au-role': [], 'az-resource': [] };
+    const groups = { 'entra-role': [], 'au-role': [], 'az-resource': [], 'workload-target': [] };
     for (const nid of down.nodes) {
       const t = m.byId[nid];
       if (!t || !(t.kind in groups)) continue;
       groups[t.kind].push(t);
     }
     for (const k in groups) groups[k].sort((a, b) => String(a.label || a.id).localeCompare(String(b.label || b.id)));
-    const total = groups['entra-role'].length + groups['au-role'].length + groups['az-resource'].length;
+    const total = groups['entra-role'].length + groups['au-role'].length + groups['az-resource'].length + groups['workload-target'].length;
     if (!total) return '';
-    const hdr = { 'entra-role': 'Entra ID roles', 'au-role': 'AU-scoped roles', 'az-resource': 'Azure RBAC @ scope' };
+    const hdr = { 'entra-role': 'Entra ID roles', 'au-role': 'AU-scoped roles', 'az-resource': 'Azure RBAC @ scope', 'workload-target': 'Workload roles & scopes' };
     const chip = (t) => {
-      let short, full;
+      let short, full, badge = '';
       if (t.kind === 'entra-role') {
         short = escapeHtml(t.roleName || t.label || '');
         full  = 'Entra directory role: ' + (t.roleName || t.label || '');
       } else if (t.kind === 'au-role') {
         short = escapeHtml(t.roleName || t.label || '') + ' <span class="pt-scope">@ ' + escapeHtml(t.auTag || '') + '</span>';
         full  = (t.roleName || '') + ' scoped to administrative unit: ' + (t.auTag || '');
+      } else if (t.kind === 'workload-target') {
+        const wn = t.workloadName || t.workloadId || '';
+        short = escapeHtml(t.roleName || '') + ' <span class="pt-scope">@ ' + escapeHtml(wn) + (t.scopeShort && t.scopeShort !== 'tenant' ? (' / ' + escapeHtml(t.scopeShort)) : '') + '</span>';
+        full  = (t.roleName || '') + ' on ' + wn + ' @ ' + (t.scopeType || 'scope') + ': ' + (t.scopePath || t.scopeShort || 'tenant-wide');
+        if (t.reconStatus) {
+          const r = MAP_RECON[String(t.reconStatus)] || MAP_RECON.unknown;
+          let rtip = r.label; if (t.reconReason) rtip += ' — ' + t.reconReason;
+          badge = '<span class="pt-recon recon-' + String(t.reconStatus) + '" style="color:' + r.color + '" title="' + escapeHtml(rtip) + '">' + r.icon + '</span>';
+        }
       } else {
         short = escapeHtml(t.roleName || '') + ' <span class="pt-scope">@ ' + escapeHtml(t.scopeShort || t.label || '') + '</span>';
         full  = (t.roleName || '') + ' @ ' + (t.scopeType || 'scope') + ': ' + (t.scopePath || t.scopeShort || '');
       }
       return '<span class="pt-chip" data-full="' + escapeHtml(full) + '" title="' + escapeHtml(full) + ' — click to expand">' +
         '<span class="pt-dot" style="background:' + (MAP_PT_DOT[t.kind] || '#57606a') + '"></span>' +
-        '<span class="pt-txt">' + short + '</span></span>';
+        '<span class="pt-txt">' + short + '</span>' + badge + '</span>';
     };
     let html = '<div class="pt-breakdown">';
-    for (const k of ['entra-role', 'au-role', 'az-resource']) {
+    for (const k of ['entra-role', 'au-role', 'az-resource', 'workload-target']) {
       if (!groups[k].length) continue;
-      html += '<div class="pt-grp"><span class="pt-grp-lbl">' + hdr[k] + ' (' + groups[k].length + ')</span>' +
+      let summ = '';
+      if (k === 'workload-target') {
+        const c = { mapped: 0, missing: 0, exempted: 0, unknown: 0 };
+        for (const t of groups[k]) { const s = String(t.reconStatus || 'unknown'); if (c[s] != null) c[s]++; else c.unknown++; }
+        const parts = [];
+        if (c.mapped)   parts.push(c.mapped + ' mapped');
+        if (c.missing)  parts.push(c.missing + ' missing');
+        if (c.exempted) parts.push(c.exempted + ' exempted');
+        if (parts.length) summ = ' <span class="pt-recon-summary" style="color:#57606a;font-weight:400;">[' + parts.join(', ') + ']</span>';
+      }
+      html += '<div class="pt-grp"><span class="pt-grp-lbl">' + hdr[k] + ' (' + groups[k].length + ')' + summ + '</span>' +
         groups[k].map(chip).join('') + '</div>';
     }
     html += '</div>';
@@ -11934,6 +12669,7 @@
       bits.push('<b>' + escapeHtml(n.label || n.id) + '</b> reaches');
       bits.push(cnt('role-group') + ' role group(s) &rarr; ' + cnt('permission-group') + ' capability bundle(s) &rarr; ' +
         cnt('entra-role') + ' Entra role(s), ' + cnt('au-role') + ' AU-scoped role(s), ' + cnt('az-resource') + ' Azure scope(s)' +
+        (cnt('workload-target') ? ', ' + cnt('workload-target') + ' workload role(s)' : '') +
         (workloads ? ', ' + workloads + ' workload group(s) (app RBAC)' : ''));
     } else {
       bits.push('<b>' + escapeHtml(n.label || n.id) + '</b> <span style="color:#57606a">(' + escapeHtml(n.kind) + ')</span> &mdash; reachable by <b>' + admins + '</b> admin(s)');
@@ -12069,7 +12805,7 @@
   // [M8] Typed, ordered result LIST -- built client-side from the SAME map model
   // (mirrors the engine Get-PimMapSearchResults). Each hit jumps (centers +
   // selects) its node on click.
-  const MAP_TYPE_FOR = { 'admin': 'person', 'role-group': 'group', 'permission-group': 'group', 'au': 'scope', 'entra-role': 'role', 'au-role': 'role', 'az-resource': 'scope' };
+  const MAP_TYPE_FOR = { 'admin': 'person', 'role-group': 'group', 'permission-group': 'group', 'au': 'scope', 'entra-role': 'role', 'au-role': 'role', 'az-resource': 'scope', 'workload-target': 'scope' };
   const MAP_TYPE_RANK = { person: 0, group: 1, role: 2, scope: 3, other: 4 };
   function mapSearchResults(query, limit) {
     limit = limit || 50;
@@ -12146,6 +12882,46 @@
     document.getElementById('mapBoard').classList.toggle('risk-on', MAP.riskOn);
     document.getElementById('mapRiskToggle').classList.toggle('on', MAP.riskOn);
     mapApplyRisk();
+  };
+  // Workload reconciliation: pull the desired-vs-live-crawl summary (engine is
+  // the writer; this reads /api/workload-recon) and show it in the map detail
+  // panel. Admins can trigger a fresh crawl sweep (POST /api/workload-crawl) --
+  // the engine performs the crawl + persists the cache; the page then reloads so
+  // the workload-target chips re-badge from the refreshed baked data.
+  const mapWlBtn = document.getElementById('mapWorkloadRecon');
+  if (mapWlBtn) mapWlBtn.onclick = async () => {
+    const d = document.getElementById('mapDetail');
+    let s = null;
+    try { const r = await api('GET', '/api/workload-recon'); s = r && r.summary; }
+    catch (e) { if (d) d.innerHTML = '<span style="color:#cf222e">Workload recon unavailable: ' + escapeHtml(e && e.message ? e.message : 'error') + '</span>'; return; }
+    if (!s || !s.total) {
+      if (d) d.innerHTML = '<span style="color:#57606a">No desired workload role bindings (PIM-Assignments-Workloads is empty).</span>';
+      return;
+    }
+    const crawled = s.crawledUtc ? (' &middot; crawled ' + escapeHtml(s.crawledUtc)) : ' &middot; <i>not yet crawled</i>';
+    let html = '<b>Workload reconciliation</b> &mdash; ' + s.total + ' desired binding(s): ' +
+      '<span style="color:#1a7f37">&#10003; ' + (s.mapped || 0) + ' mapped</span>, ' +
+      '<span style="color:#cf222e">&#9888; ' + (s.missing || 0) + ' missing</span>, ' +
+      '<span style="color:#9a6700">&#8856; ' + (s.exempted || 0) + ' exempted</span>' +
+      ((s.unknown || 0) ? ', <span style="color:#57606a">&mdash; ' + s.unknown + ' not yet crawled</span>' : '') +
+      crawled;
+    if (isServer && roleAtLeast('Admin')) {
+      html += ' &nbsp;<button id="mapWlCrawl" class="ghost">&#x21bb; Re-crawl now</button>';
+    }
+    if (d) d.innerHTML = html;
+    const cb = document.getElementById('mapWlCrawl');
+    if (cb) cb.onclick = async () => {
+      cb.disabled = true; cb.textContent = 'Crawling...';
+      try {
+        const r = await api('POST', '/api/workload-crawl');
+        cb.textContent = 'Crawled ' + (r && r.crawledUtc ? r.crawledUtc : '');
+        // Reload so the freshly-crawled recon status bakes into PIM_DATA chips.
+        setTimeout(() => { location.reload(); }, 700);
+      } catch (e) {
+        cb.disabled = false; cb.textContent = '↻ Re-crawl now';
+        alert('Crawl failed: ' + (e && e.message ? e.message : 'error'));
+      }
+    };
   };
   document.getElementById('mapClear').onclick = () => { mapClearSel(); };
   document.getElementById('mapFocusToggle').onclick = () => {

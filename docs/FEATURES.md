@@ -198,6 +198,22 @@ endpoint or leaving credentials lying around.
   already-catalogued role never shows up again as "new".
 - **You only ever see what's new.** Each discovery run surfaces only the items you haven't
   handled yet; once an item is acted on it stops reappearing, so the review list stays short.
+- **Discovery runs on its own schedule — and only ever shows you what's new.** ✅ 2026-06-17 — the
+  solution can scan for new Azure scopes (subscriptions and management groups) and new Power BI
+  workspaces on a regular cadence, entirely in the background, so a freshly-created resource becomes
+  ready to delegate without anyone remembering to run a scan. Each scheduled pass is careful in three
+  ways. It **remembers what it has already surfaced**, so an item you've already seen never reappears
+  on the next run — the review list stays short and only genuinely-new resources show up. It is
+  **safe by design**: a scheduled run can only ever *propose* — it creates an empty, correctly-named
+  access-group container for a new resource where you've opted into auto-import, and it renames an
+  existing container in place when a resource is renamed (matched by stable identity, so you never get
+  an orphan plus a duplicate). It **never deletes**: a resource that has disappeared is surfaced for
+  you to look at, but a scheduled run will never remove access on its own — destructive cleanup stays
+  a deliberate, human decision. Everything a scheduled pass decides to do is staged onto the normal
+  change pipeline (the same one your reviewed commits use), so nothing is granted without going through
+  your usual review and approval. A preview ("what would this find") mode reports without changing
+  anything.
+
 - **Import your departments straight from Entra.** ✅ 2026-06-15 — point the solution at a group
   naming convention (for example `ORG-*`) and one click pulls every matching Entra group in as a
   department for approval routing, with each group's owners brought along as the people who
@@ -372,6 +388,20 @@ endpoint or leaving credentials lying around.
   **Alerting** panel with a one-line "delivered vs not delivered" summary, and a compact "Recent alerts"
   rollup is on the **Home** dashboard. As with all PIM email, when no sender mailbox is configured the
   alert is recorded honestly as "prepared, not delivered" — never faked.
+- **Alerts to Microsoft Teams (or any webhook), not just email.** ✅ 2026-06-17 — alerting is no longer
+  email-only. From the same **Alerting** panel you can add an **outbound webhook** so the same events
+  (engine/job failure, configuration drift, access expiring soon, break-glass use) are also pushed to a
+  **Microsoft Teams** channel or a **generic JSON** endpoint of your choice. Paste a Teams *Incoming
+  Webhook* URL and the format is **auto-detected** (a tidy Teams card, colour-coded by severity, with the
+  event, tenant, time and a link back to the Manager); point it at any other endpoint and it sends a clean
+  JSON payload a system like a Logic App or a ticketing tool can act on. The webhook fires **in addition to**
+  email — and an alert can be **Teams-only** even if no mailbox is configured — so a team that lives in Teams
+  gets told there without setting up mail at all. Every webhook send is recorded in the **same Recent alerts
+  feed** as email (delivered vs prepared-only), so the proof covers both channels. The Manager only ever posts
+  to a **public https** endpoint: a mistyped, plain-http, or internal/loopback/private URL is **rejected with
+  a clear reason** and the channel stays off, so an alert can never be sent somewhere unintended. *(Offline-verified
+  end-to-end against a booted Manager — payload rendering, URL safety and the config round-trip; the hosted
+  Manager GUI smoke against a real Teams channel is the live gate before publish.)*
 - **Operational policy — configure the defaults from the tool, not out-of-band.** ✅ 2026-06-16 — an
   **Operational policy** panel in **Settings** lets an administrator set the core operational defaults
   in one place, so they no longer have to be applied by hand or left unset:
@@ -672,6 +702,34 @@ endpoint or leaving credentials lying around.
   (a draft is never rolled out). *Why it matters:* a managed-service provider can finally see template conformance
   across the entire fleet — and decide where a rollout should go next — from one screen, instead of one tenant at a
   time. *(Offline-verified end-to-end against a booted Manager; the hosted Manager GUI smoke is the live gate before publish.)*
+- **Template Rollout — set each template item's rollout wave (ring) right from the grid.** ✅ 2026-06-17 — every
+  template item belongs to a **rollout wave** (ring): a lower number reaches tenants earlier, and an item only
+  deploys to a tenant once its wave is at or below that tenant's ring. Until now you could *see* an item but had
+  no way to change its wave from the Manager — you had to hand-edit the template behind the scenes. The
+  Template Rollout grid now shows a **Ring** column with a per-item selector: an administrator picks the wave
+  (for example, promote an item from a pilot wave to everyone, or pull it back), and the change is saved to the
+  template immediately and reflected back in the grid. The control is **administrator-only** — everyone else sees
+  the ring as a read-only value — and if a change can't be saved the selector snaps back to its previous value so
+  what you see always matches what's stored. *Why it matters:* you can stage a careful, wave-by-wave rollout of
+  individual template items without ever leaving the screen or touching a file. *(Offline-verified end-to-end
+  against a booted Manager — the ring change persists and re-reads correctly; the hosted Manager GUI smoke is the
+  live gate before publish.)*
+- **The Manager main page and the Validate tab work in database mode on a large estate.** ✅ 2026-06-17 — when
+  the Manager runs against the shared SQL database (the hosted and managed-service setup) with a large, richly
+  populated environment, opening the **main page** and the **Validate** tab could fail with a server error, even
+  though the rest of the app worked. The cause was an internal naming detail of the database-backed instance that
+  was being used, unchanged, as part of a folder name — which isn't always a legal folder name. The Manager now
+  cleans that name before using it for its per-instance working folder, so the **main page renders** and the
+  **Validate tab runs its checks** in database mode exactly as they do in file mode, no matter how large the
+  environment. *(Found by the scenario simulation against a rich estate; offline-verified; the hosted Manager GUI
+  smoke is the live gate before publish.)*
+- **Department edits save reliably in database mode.** ✅ 2026-06-17 — in the grid that manages **departments**
+  (used for approval routing), edits made while the Manager was running against the SQL database could silently
+  fail to save — the row looked committed but didn't persist. Departments are identified by their **name**, but
+  the save path was looking for a group tag they don't carry, so it couldn't tell the rows apart and dropped them.
+  The Manager now identifies a department row by its name (falling back sensibly when an older sample shape carries
+  a tag instead), so a committed department edit is **stored and stays put**. *(Found by the scenario simulation;
+  offline-verified with a database round-trip; the hosted Manager GUI smoke is the live gate before publish.)*
 - **Delegation Map reads Excel-saved exports correctly — no more "empty map" on a valid file.** ✅ 2026-06-16 —
   when your delegation data comes from a spreadsheet (saved as a semicolon CSV), the column headings are
   often wrapped in quotation marks and the first heading can carry an invisible byte-order mark, and people
@@ -890,6 +948,13 @@ endpoint or leaving credentials lying around.
   browser policy on non-managed boxes (per-machine or per-user), with automatic updates from
   a published feed and self-healing recovery for the rare case a browser marks the extension
   corrupted.
+- **Set your team's (or every tenant's) activation defaults at deploy time.** ✅ 2026-06-18 Any of the
+  deployment methods — single-machine, on-prem / Group Policy, or managed-policy — can pre-set the
+  justification text and activation length (hours) that the Activate form starts with, so a whole team
+  or tenant opens to your standard defaults instead of the built-in ones. For a managed service provider
+  deploying to many tenants at once, the override applies to **every** tenant in the deployment. It's
+  opt-in — leave it out and the existing defaults are kept — and it applies whether tenant settings
+  come from a published catalog file or are auto-discovered.
 
 ## 17. Naming
 - **Naming lives in config, never hardcoded.** All admin, group and resource naming
@@ -923,6 +988,34 @@ endpoint or leaving credentials lying around.
 ## 21. Docs
 - **Clear documentation set.** A concise design document and this detailed feature catalog
   describe both how the system works and what it does for you.
+
+## 22. Feature customization & editions
+- **Every advanced capability is yours to switch on — nothing happens until you say so.** ✅ 2026-06-17 —
+  a single **Feature customization** panel in **Settings** lists every optional capability (discovery,
+  email & Teams alerting, workload connectors, Power BI, Exchange Online, MSP fan-out, scheduled jobs)
+  grouped into clear chapters. Each one has a simple on/off switch. A newly-shipped advanced feature always
+  starts **off**, so upgrading never springs a new behaviour on your environment — you enable each capability
+  deliberately, per customer, when you're ready. The essential PIM features (reconcile, the delegation map,
+  authoring) are always on and shown for reference.
+- **Off means genuinely off — everywhere, not just hidden in the menu.** ✅ 2026-06-17 — when you disable an
+  advanced feature, the engine, the scheduled jobs and the integrations all skip it completely: no changes
+  are written, no emails are sent, no matter how the work is triggered (a save, a queued change, a schedule
+  or a manual run). A disabled feature is truly inert.
+- **A global email kill switch, redirect and allowlist.** ✅ 2026-06-17 — one switch in Settings turns **all**
+  outbound email off instantly (every alert, digest and notification becomes a no-op). You can also redirect
+  every email to a single address (handy for testing) or restrict sending to an allowlist. These controls are
+  honoured by every send path and every scheduled job.
+- **Editions: Core is free; Pro unlocks the advanced integrations.** ✅ 2026-06-17 — choose the active edition
+  per tenant. **Core** includes every essential PIM capability at no cost. **Pro** unlocks the advanced
+  integrations (workload connectors, Power BI, Exchange Online, MSP fan-out). Design-partner customers receive
+  the full Pro feature set free — recorded against the edition so the commercial basis is clear. In the Feature
+  customization panel, a capability that needs Pro is shown with a small **“Requires Pro”** lock until the
+  edition covers it; a disabled one is shown dimmed and labelled — never hidden, so everything stays
+  discoverable. Changing the edition or any feature switch is restricted to a senior administrator and recorded
+  in the audit trail.
+- **Dependencies are surfaced.** ✅ 2026-06-17 — where one capability builds on another (for example Power BI
+  needs the discovery sweep), the panel shows the prerequisite and warns if you enable a feature whose
+  dependency isn't available yet.
 
 ---
 

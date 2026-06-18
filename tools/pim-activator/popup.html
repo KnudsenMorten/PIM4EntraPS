@@ -12,8 +12,16 @@
      ask. Cap chosen below Chromium's hard 800px so the popup never bumps the
      viewport ceiling on a maxed-out role list. */
   html, body { margin:0; padding:0; width:680px; font-family: -apple-system, "Segoe UI", Roboto, sans-serif; background:#ffffff; color:#1a1a1a; font-size:13px; overflow-x:hidden; }
-  #list, #myaccess-list { max-height:260px; overflow-y:auto; }
-  html, body { max-height:700px; overflow-y:auto; }
+  /* Keep the WHOLE popup within Chromium's ~600px popup-height cap so there is
+     NO outer popup scrollbar -- only the role list scrolls internally, and the
+     Justification / Duration / "Activate selected" bar stays visible without
+     scrolling. (v1.6.37: a 330px list overflowed the cap -> double scrollbar +
+     the action button below the fold. v1.6.45: 250 STILL overflowed by ~45px on
+     the real header/controls/footer heights -> action bar required scrolling;
+     lowered to 185 so the list scrolls internally and the action bar + footer
+     stay in view even with the getting-started tip shown.) */
+  #list, #myaccess-list { max-height:185px; overflow-y:auto; }
+  html, body { max-height:592px; overflow-y:auto; }
   /* Belt-and-braces: every element confined to its parent's width.
      Prevents long unbreakable tokens (scope GUIDs, role names) from making
      rows wider than the popup and triggering horizontal scrollbar. */
@@ -171,7 +179,12 @@
 <div id="tabs" style="display:none">
   <button class="tab-btn active" data-tab="activate" id="tab-btn-activate">Activate <span class="badge" id="badge-activate">0</span></button>
   <button class="tab-btn" data-tab="myaccess" id="tab-btn-myaccess">My Access <span class="badge" id="badge-myaccess">0</span></button>
+  <button id="reload-perms" title="Re-fetch your eligible + active PIM permissions — use after activating/deactivating to pull the latest propagated state" style="margin-left:auto;align-self:center;background:#ffffff;color:#0969da;border:1px solid #0969da;border-radius:5px;padding:3px 9px;font-size:11px;font-weight:600;cursor:pointer;">&#8635; Reload Permissions</button>
 </div>
+
+<!-- A little levity shown ONLY while an ACTIVATION is propagating (popup.js setFunBox).
+     Pure cosmetic; hidden by default + on deactivate/done. -->
+<div id="funBox" hidden style="margin:8px 10px 0;padding:9px 11px;border:1px solid #f0d48a;background:#fff8e1;color:#7a5b00;border-radius:8px;font-size:13px;line-height:1.6;font-style:italic;min-height:2.6em;"></div>
 
 <!-- Onboarding wizard. Shown when chrome.storage.local has no saved tenant
      id / client id. v1.2.0+ has no other config source -- the wizard is
@@ -240,7 +253,7 @@
        the group list renders. Then bulk-fetch bar in the footer takes over. -->
   <div id="activate-boot-progress" class="progress-bar" style="display:none;">
     <div class="progress-row">
-      <span id="activate-boot-progress-label">Loading your PIM delegations...</span>
+      <span id="activate-boot-progress-label">Loading your eligible PIM assignments…</span>
       <span></span>
     </div>
     <div class="progress-track">
@@ -311,12 +324,14 @@
   <!-- Row 1: title + repo + GitHub + Report bug on the LEFT  |  tenant ID on the RIGHT -->
   <div style="display:flex;justify-content:space-between;align-items:baseline;gap:10px;flex-wrap:wrap;">
     <div>
-      <span style="font-weight:700;letter-spacing:0.3px;color:#24292f;">PIM ACTIVATOR</span>,
+      <span style="font-weight:700;letter-spacing:0.3px;color:#24292f;">PIM ACTIVATOR (PIMA)</span>,
       part of <a href="https://github.com/KnudsenMorten/PIM4EntraPS" target="_blank" rel="noopener" style="color:#0969da;text-decoration:none;">PIM4EntraPS</a>
       <span style="color:#d0d7de;margin:0 4px;">|</span>
       <a href="https://github.com/KnudsenMorten/PIM4EntraPS" target="_blank" rel="noopener" title="Source &amp; issues" style="color:#0969da;text-decoration:none;">&#128279; GitHub</a>
       <span style="color:#d0d7de;margin:0 4px;">|</span>
       <a href="https://github.com/KnudsenMorten/PIM4EntraPS/issues" target="_blank" rel="noopener" title="Report a bug" style="color:#0969da;text-decoration:none;">&#128027; Report bug</a>
+      <span style="color:#d0d7de;margin:0 4px;">|</span>
+      <a href="#" id="diag-toggle" title="Show diagnostics (what Graph returned for your account)" style="color:#0969da;text-decoration:none;">&#128269; Diagnostics</a>
     </div>
     <div id="footer-tenant-id" title="" style="font-family:monospace;font-size:10px;color:#57606a;text-align:right;"></div>
   </div>

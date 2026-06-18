@@ -96,6 +96,10 @@
 [CmdletBinding(SupportsShouldProcess)]
 param(
     [ValidateSet('git-pull','sync-automateit')][string]$Source = 'sync-automateit',
+    # s31: stand up the right TOPOLOGY for a deployment SCENARIO (S1..S6). When set, the scenario's
+    # resolved update source + managed hosting drive the deploy path (overrides -Source); it is also
+    # passed through to Invoke-PimUpdate so the from-master (S5/S6) downlink is honoured end-to-end.
+    [ValidateSet('S1','S2','S3','S4','S5','S6')][string]$Scenario,
     [switch]$Apply,
     [switch]$ValidateOnly,
 
@@ -146,10 +150,28 @@ function Have($cmd){ [bool](Get-Command $cmd -ErrorAction SilentlyContinue) }
 . (Join-Path $solRoot 'engine\_shared\PIM-SyncAutomateIT.ps1')
 . (Join-Path $solRoot 'engine\_shared\PIM-UpdateLifecycle.ps1')
 . (Join-Path $solRoot 'engine\_shared\PIM-DeployAll.ps1')
+. (Join-Path $solRoot 'engine\_shared\PIM-ScenarioProfile.ps1')     # s31 scenario -> knob resolver
 
 # default-safe: a bare run is plan-only (-WhatIf). -Apply opens the gate.
 $applyGate = [bool]$Apply
 if ($ValidateOnly) { $applyGate = $true }   # validate-only still "runs" its single step
+
+# ---- s31: a -Scenario resolves the deploy topology, overriding -Source ----
+# The DeployAll CORE (Get-PimDeployAllPlan) + the local fact-probes only model git-pull |
+# sync-automateit (hosted vs community), so from-master is mapped to a PLAN source by managed
+# hosting: central => sync-automateit (ACA/Azure SQL), local => git-pull (local host). The REAL
+# from-master downlink is honoured by passing -Scenario through to Invoke-PimUpdate (below).
+$planSource    = $Source
+$scenarioArgs  = @{}     # splat threaded into Invoke-PimUpdate sub-calls (empty unless -Scenario)
+if ($Scenario) {
+    $sPlan = Get-PimScenarioEntryPlan -Scenario $Scenario
+    $planSource = if ($sPlan.updateSource -eq 'from-master') { if ($sPlan.managedHosting -eq 'central') { 'sync-automateit' } else { 'git-pull' } }
+                  elseif ($sPlan.updateSource -eq 'sync-automateit') { 'sync-automateit' } else { 'git-pull' }
+    $Source = $planSource
+    $scenarioArgs['Scenario'] = $Scenario
+    Write-Host ("[scenario] {0} ({1}) -> updateSource={2} managedHosting={3} planSource={4} hosting={5} spn={6} edition={7}" -f `
+        $sPlan.id, $sPlan.role, $sPlan.updateSource, $sPlan.managedHosting, $planSource, $sPlan.hostingLocation, $sPlan.spnModel, $sPlan.activeEdition) -ForegroundColor Cyan
+}
 $srcProfile = Get-PimUpdateSourceProfile -Source $Source
 $hosted  = [bool]$srcProfile.isHosted
 
@@ -186,7 +208,7 @@ function Test-SchemaConformant {
     if (-not "$SqlConnectionString".Trim()) { return $null }   # cannot read => run schema step
     try {
         $upd = Join-Path $here 'Invoke-PimUpdate.ps1'
-        $det = & $upd -Source $Source -DetectOnly -SqlConnectionString $SqlConnectionString `
+        $det = & $upd -Source $Source @scenarioArgs -DetectOnly -SqlConnectionString $SqlConnectionString `
                     -ResourceGroup $ResourceGroup -ManagerApp $ManagerApp -ImageTag $ImageTag 6>$null
         $last = @($det) | Where-Object { $_ -and ($_.PSObject.Properties.Name -contains 'SqlUpdateRequired') } | Select-Object -Last 1
         if ($last) { return (-not [bool]$last.SqlUpdateRequired) }
@@ -198,7 +220,7 @@ function Test-ManagerImageCurrent {
     # detect-only, read GuiUpdateRequired. Unknown => run the code step.
     try {
         $upd = Join-Path $here 'Invoke-PimUpdate.ps1'
-        $det = & $upd -Source $Source -DetectOnly -SqlConnectionString $SqlConnectionString `
+        $det = & $upd -Source $Source @scenarioArgs -DetectOnly -SqlConnectionString $SqlConnectionString `
                     -ResourceGroup $ResourceGroup -ManagerApp $ManagerApp -ImageTag $ImageTag 6>$null
         $last = @($det) | Where-Object { $_ -and ($_.PSObject.Properties.Name -contains 'GuiUpdateRequired') } | Select-Object -Last 1
         if ($last) { return (-not [bool]$last.GuiUpdateRequired) }
@@ -295,7 +317,7 @@ function Invoke-DefaultStepRunner {
             $upd = Join-Path $here 'Invoke-PimUpdate.ps1'
             if (-not (Test-Path $upd)) { return @{ ok=$false; ran=$true; detail="updater not found: $upd" } }
             if ($PSCmdlet.ShouldProcess($SqlDatabase, 'apply idempotent SQL schema upgrade')) {
-                & $upd -Source $Source -Apply -SqlConnectionString $SqlConnectionString `
+                & $upd -Source $Source @scenarioArgs -Apply -SqlConnectionString $SqlConnectionString `
                     -ResourceGroup $ResourceGroup -ManagerApp $ManagerApp -ImageTag (Get-EffectiveImageTag) `
                     -SkipVerify -SkipNotify
                 $ok = (-not $LASTEXITCODE) -or ($LASTEXITCODE -eq 0)
@@ -308,7 +330,7 @@ function Invoke-DefaultStepRunner {
             $upd = Join-Path $here 'Invoke-PimUpdate.ps1'
             if (-not (Test-Path $upd)) { return @{ ok=$false; ran=$true; detail="updater not found: $upd" } }
             if ($PSCmdlet.ShouldProcess($ManagerApp, 'build + deploy Manager/scheduler/engine code')) {
-                & $upd -Source $Source -Apply -ResourceGroup $ResourceGroup -AcrName $AcrName -ImageRepo $ImageRepo `
+                & $upd -Source $Source @scenarioArgs -Apply -ResourceGroup $ResourceGroup -AcrName $AcrName -ImageRepo $ImageRepo `
                     -ManagerApp $ManagerApp -Apps $Apps -ImageTag (Get-EffectiveImageTag) `
                     -SqlConnectionString $SqlConnectionString -SkipNotify
                 $ok = (-not $LASTEXITCODE) -or ($LASTEXITCODE -eq 0)
@@ -403,9 +425,21 @@ foreach ($s in $plan.steps) {
     Step "$($s.key): RUN -- $($s.name)"
     $res = & $runner $s.key $ctx
     if (-not $res) { $res = @{ ok=$false; ran=$true; detail='runner returned nothing' } }
-    $ok  = [bool]$res.ok
-    $ran = if ($res.ContainsKey('ran')) { [bool]$res.ran } else { $true }
-    Info "  -> ok=$ok ran=$ran $($res.detail)"
+    # A runner may return a hashtable, a PSCustomObject, or (defensively) a scalar.
+    # Read 'ok'/'ran'/'detail' WITHOUT assuming ContainsKey (PSCustomObject/String lack it).
+    $okRaw = $null; $ranRaw = $null; $detail = ''
+    if ($res -is [System.Collections.IDictionary]) {
+        if ($res.Contains('ok'))     { $okRaw  = $res['ok'] }
+        if ($res.Contains('ran'))    { $ranRaw = $res['ran'] }
+        if ($res.Contains('detail')) { $detail = $res['detail'] }
+    } else {
+        if ($res.PSObject.Properties['ok'])     { $okRaw  = $res.ok }
+        if ($res.PSObject.Properties['ran'])    { $ranRaw = $res.ran }
+        if ($res.PSObject.Properties['detail']) { $detail = $res.detail }
+    }
+    $ok  = [bool]$okRaw
+    $ran = if ($null -ne $ranRaw) { [bool]$ranRaw } else { $true }
+    Info "  -> ok=$ok ran=$ran $detail"
     $outcomes.Add([pscustomobject]@{ key=$s.key; ran=$ran; ok=$ok }) | Out-Null
     if ($ran) { $ranKeys.Add($s.key) | Out-Null }
     if ($s.key -eq 'verify') { $verifyResult = $res }

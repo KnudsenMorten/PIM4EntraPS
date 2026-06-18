@@ -42,15 +42,22 @@ T 'breakdown renderer defined (mapTargetBreakdown)' ($html -match 'function mapT
 T 'breakdown groups Entra ID roles'              ($html -match "'entra-role': 'Entra ID roles'")
 T 'breakdown groups AU-scoped roles'             ($html -match "'au-role': 'AU-scoped roles'")
 T 'breakdown groups Azure RBAC @ scope'          ($html -match "'az-resource': 'Azure RBAC @ scope'")
+T 'breakdown groups Workload roles & scopes'     ($html -match "'workload-target': 'Workload roles & scopes'")
 T 'breakdown chips carry full detail (data-full)'($html -match 'data-full=')
 T 'breakdown chips have click-to-expand'         ($html -match "classList.toggle\('exp'\)")
 T 'detail panel calls the breakdown'             ($html -match 'mapTargetBreakdown\(m, down\)')
+T 'workload-target in col grouping'              ($html -match "'entra-role', 'au-role', 'az-resource', 'workload-target'")
+T 'reconciliation badge renderer present'        ($html -match 'function mapStampReconBadge\(')
 # Backend enrichment of the synthetic target nodes.
 $srv = [System.IO.File]::ReadAllText($srvPath)
 T 'backend carries roleName on entra-role'   ($srv -match "roleName = .\$\(\`$r.RoleDefinitionName\)")
 T 'backend carries auTag on au-role'         ($srv -match 'auTag = ')
 T 'backend carries full scopePath on az'     ($srv -match 'scopePath = ')
 T 'backend humanises the Azure scope'        ($srv -match '\$azScopeMeta')
+T 'backend emits workload-target nodes'      ($srv -match "'workload-target'")
+T 'backend reads PIM-Assignments-Workloads'  ($srv -match "Read-PimRows 'PIM-Assignments-Workloads'")
+T 'backend resolves friendly workload name'  ($srv -match '\$workloadNames')
+T 'backend humanises the workload scope'     ($srv -match '\$workloadScopeMeta')
 
 # --- B. Seeded render: real data -> populated, enriched column-3 targets -------
 $seedRoot = Join-Path ([IO.Path]::GetTempPath()) ("pim-pt-seed-{0}" -f ([Guid]::NewGuid().ToString('N').Substring(0, 8)))
@@ -101,6 +108,11 @@ Write-Seed 'PIM-Assignments-Azure-Resources' @(
     'GroupTag;AzScope;AzScopePermission;AssignmentType;Action;UpdateExisting;AutoExtend;NumOfDaysWhenExpire;Permanent;CPPlatform;Plane;TierLevel;PermissionScope;SyncPlatform',
     ('SRV-EntraID;{0};Owner;Active;Assign;FALSE;TRUE;90;FALSE;ID;MP;T1;Scoped;' -f $azScope)
 )
+# 4th target kind: a workload role at a scope (Defender XDR, tenant-wide).
+Write-Seed 'PIM-Assignments-Workloads' @(
+    'Workload;RoleName;GroupTag;Scope;Action;Notes',
+    'defender-xdr;Security Operator;SRV-EntraID;/;Assign;run scans + manage incidents'
+)
 
 # Render the seeded config via -ConfigRoot (ad-hoc instance). This drives the
 # REAL Build-PimGraphData over the seeded rows and bakes PIM_DATA into the HTML.
@@ -125,9 +137,19 @@ try {
             $entra = @($nodes | Where-Object { $_.kind -eq 'entra-role' })
             $au    = @($nodes | Where-Object { $_.kind -eq 'au-role' })
             $az    = @($nodes | Where-Object { $_.kind -eq 'az-resource' })
+            $wl    = @($nodes | Where-Object { $_.kind -eq 'workload-target' })
             T 'column-3 has Entra role target(s)'    (@($entra).Count -ge 1)
             T 'column-3 has AU-scoped role target(s)'(@($au).Count -ge 1)
             T 'column-3 has Azure RBAC target(s)'    (@($az).Count -ge 1)
+            T 'column-3 has Workload target(s)'      (@($wl).Count -ge 1)
+
+            # The workload-target must be populated + enriched (friendly name,
+            # role, scope) from the desired CSV -- never inferred from text.
+            $wt = $wl | Where-Object { "$($_.roleName)" -eq 'Security Operator' } | Select-Object -First 1
+            T 'Workload target carries roleName'   ($wt -and "$($wt.roleName)" -eq 'Security Operator')
+            T 'Workload target carries workloadId' ($wt -and "$($wt.workloadId)" -eq 'defender-xdr')
+            T 'Workload target friendly name'      ($wt -and "$($wt.workloadName)" -like '*Defender*')
+            T 'Workload target scope = tenant-wide'($wt -and "$($wt.scopeType)" -eq 'Tenant-wide')
 
             $ga = $entra | Where-Object { "$($_.roleName)" -eq 'Global Administrator' } | Select-Object -First 1
             T 'Entra target carries roleName' ($ga -and "$($ga.roleName)" -eq 'Global Administrator')
@@ -143,11 +165,14 @@ try {
             # The selected capability bundle (SRV-EntraID) must REACH all three.
             $edges = @($data.edges)
             $fromBundle = @($edges | Where-Object { "$($_.source)" -eq 'group:SRV-EntraID' })
-            T 'bundle edges reach entra/au/az targets' (
+            T 'bundle edges reach entra/au/az/workload targets' (
                 @($fromBundle | Where-Object { "$($_.target)" -like 'entra-role:*' }).Count -ge 1 -and
                 @($fromBundle | Where-Object { "$($_.target)" -like 'au-role:*' }).Count -ge 1 -and
-                @($fromBundle | Where-Object { "$($_.target)" -like 'az-res:*' }).Count -ge 1
+                @($fromBundle | Where-Object { "$($_.target)" -like 'az-res:*' }).Count -ge 1 -and
+                @($fromBundle | Where-Object { "$($_.target)" -like 'workload:*' }).Count -ge 1
             )
+            $wlEdge = @($fromBundle | Where-Object { "$($_.kind)" -eq 'group-to-workload' }) | Select-Object -First 1
+            T 'bundle->workload edge present' ($wlEdge -and "$($wlEdge.target)" -like 'workload:*')
         }
     } else {
         Get-Content $stdout, "$stdout.err" -ErrorAction SilentlyContinue | Select-Object -Last 12 | ForEach-Object { Write-Host "    $_" -ForegroundColor DarkGray }

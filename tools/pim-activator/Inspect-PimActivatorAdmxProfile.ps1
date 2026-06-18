@@ -12,7 +12,9 @@
     Read-only. No writes.
 #>
 Import-Module Microsoft.Graph.Authentication -ErrorAction Stop
-Connect-MgGraph -Scopes 'DeviceManagementConfiguration.Read.All' -UseDeviceCode -NoWelcome | Out-Null
+# Shared matcher: display name CONTAINS '[PimActivator]' (case-sensitive).
+. (Join-Path $PSScriptRoot 'Get-PimActivatorTenantSettings.ps1')
+Connect-MgGraph -Scopes 'DeviceManagementConfiguration.Read.All' -NoWelcome | Out-Null
 $ctx = Get-MgContext
 Write-Host ("Connected: {0} (tenant {1})" -f $ctx.Account, $ctx.TenantId) -ForegroundColor Cyan
 Write-Host ''
@@ -21,7 +23,10 @@ $gpResp = Invoke-MgGraphRequest -Method GET -Uri 'https://graph.microsoft.com/be
 $configs = @($gpResp.value)
 while ($gpResp.'@odata.nextLink') { $gpResp = Invoke-MgGraphRequest -Method GET -Uri $gpResp.'@odata.nextLink'; $configs += $gpResp.value }
 
-$pim = $configs | Where-Object { $_.displayName -match 'PimActivator' }
+# Match ALL ADMX policies whose display name CONTAINS '[PimActivator]' -- a
+# customer can carry more than one (e.g. base settings + an ADMX overrides
+# profile). All are dumped below.
+$pim = @($configs | Where-Object { Test-PimActivatorPolicyName -DisplayName $_.displayName })
 if (-not $pim) { Write-Host "No [PimActivator] client settings profile found" -ForegroundColor Red; exit }
 
 foreach ($p in $pim) {

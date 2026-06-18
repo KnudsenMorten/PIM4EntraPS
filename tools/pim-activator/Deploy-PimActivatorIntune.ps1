@@ -68,6 +68,23 @@
 .EXAMPLE
     .\Deploy-PimActivatorIntune.ps1 -Remove
 
+.EXAMPLE
+    # Force the org's activation defaults (justification + duration) on EVERY
+    # tenant entry in the pushed catalog (file or auto-discovered):
+    .\Deploy-PimActivatorIntune.ps1 -CatalogJsonPath .\catalog.json `
+        -DefaultJustification 'Approved change / incident work' -DefaultDurationHours 4
+
+.PARAMETER DefaultJustification
+    Opt-in. When supplied, OVERWRITES defaultJustification on EVERY tenant entry
+    pushed in the tenantCatalog -- whether the catalog came from -CatalogJsonPath
+    or was auto-discovered from Entra. The extension popup pre-fills the Activate
+    form with it. Omit to keep each entry's own value. Mirrors
+    Deploy-PimActivatorClient.ps1 / Deploy-PimActivatorHybrid.ps1.
+
+.PARAMETER DefaultDurationHours
+    Opt-in. Like -DefaultJustification but for the default activation length
+    (whole hours, 1..24). OVERWRITES defaultDurationHours on every tenant entry.
+
 .NOTES
     Required Graph scopes (delegated):
       - DeviceManagementConfiguration.ReadWrite.All
@@ -123,6 +140,20 @@ param(
     [Parameter(ParameterSetName = 'Install')]
     [string]$TenantName,
 
+    # Opt-in: OVERWRITE the per-tenant activation defaults the popup pre-fills,
+    # on EVERY tenant entry pushed in the tenantCatalog -- whether the catalog
+    # came from -CatalogJsonPath or was auto-discovered from Entra.
+    # -DefaultJustification sets the justification text; -DefaultDurationHours
+    # sets the activation length (whole hours, 1..24). Mirrors the same two
+    # params on Deploy-PimActivatorClient.ps1 / Deploy-PimActivatorHybrid.ps1.
+    # Additive + opt-in: absent => the catalog's own values are kept unchanged.
+    [Parameter(ParameterSetName = 'Install')]
+    [string]$DefaultJustification,
+
+    [Parameter(ParameterSetName = 'Install')]
+    [ValidateRange(1, 24)]
+    [int]$DefaultDurationHours,
+
     # The pre-flight scan finds existing Intune policies that already manage
     # ExtensionInstallForcelist. Default behavior (v2.4.150): the profile is
     # still created, but the forcelist setting for any CONFLICTING browser is
@@ -153,6 +184,11 @@ $ErrorActionPreference = 'Stop'
 # Shared auth machinery: version banner, Graph SDK version-conflict check,
 # Edge-forced PKCE sign-in, session probe/heal.
 . (Join-Path $PSScriptRoot '_PimActivatorAuth.ps1')
+
+# Shared PIM-Activator policy-name matcher (display name CONTAINS '[PimActivator]',
+# case-sensitive). Lets the conflict scan below skip ALL of our own policies --
+# a customer may run a Settings Catalog AND an ADMX '[PimActivator]' profile.
+. (Join-Path $PSScriptRoot 'Get-PimActivatorTenantSettings.ps1')
 
 Show-PimActivatorBanner -ScriptName 'Deploy-PimActivatorIntune' -GraphModules 'Microsoft.Graph.Authentication'
 
@@ -231,7 +267,10 @@ if (-not $Remove) {
         if ($cpResp) { $policies += $cpResp.value }
     }
     foreach ($p in $policies) {
-        if ($p.name -eq $DisplayName) { continue }
+        # Skip ALL of our own policies (any '[PimActivator]' name), not just the
+        # exact $DisplayName -- a tenant may carry a Settings Catalog + an ADMX
+        # '[PimActivator]' profile and neither should flag the other as a conflict.
+        if ($p.name -eq $DisplayName -or (Test-PimActivatorPolicyName -DisplayName ([string]$p.name))) { continue }
         $sResp = Invoke-MgGraphRequest -Method GET -Uri ("https://graph.microsoft.com/beta/deviceManagement/configurationPolicies/{0}/settings" -f $p.id) -ErrorAction SilentlyContinue
         if (-not $sResp) { continue }
         $jsonBlob = ($sResp.value | ConvertTo-Json -Depth 30 -Compress -ErrorAction SilentlyContinue)
@@ -256,7 +295,7 @@ if (-not $Remove) {
         if ($gpResp) { $configs += $gpResp.value }
     }
     foreach ($c in $configs) {
-        if ($c.displayName -eq $DisplayName) { continue }
+        if ($c.displayName -eq $DisplayName -or (Test-PimActivatorPolicyName -DisplayName ([string]$c.displayName))) { continue }
         $dvResp = Invoke-MgGraphRequest -Method GET -Uri ("https://graph.microsoft.com/beta/deviceManagement/groupPolicyConfigurations/{0}/definitionValues?`$expand=definition" -f $c.id) -ErrorAction SilentlyContinue
         if (-not $dvResp) { continue }
         foreach ($dv in @($dvResp.value)) {
@@ -614,6 +653,30 @@ foreach ($entry in $catalog) {
     if (-not $entry.tenantId) { throw "Catalog entry '$($entry.name)' missing 'tenantId'." }
     if (-not $entry.clientId) { throw "Catalog entry '$($entry.name)' missing 'clientId'." }
 }
+
+# ---- 4b. Apply opt-in activation-default overrides -----------------------
+# When -DefaultJustification / -DefaultDurationHours are supplied, OVERWRITE
+# defaultJustification / defaultDurationHours on EVERY tenant entry pushed in
+# the tenantCatalog -- whether the catalog came from -CatalogJsonPath or was
+# auto-discovered from Entra. The extension popup reads these from
+# chrome.storage.managed.tenantCatalog to pre-fill the Activate form.
+# Add-Member -Force overwrites the note property if the entry already carried
+# one (PS 5.1-safe). Opt-in: absent => nothing changes.
+if ($PSBoundParameters.ContainsKey('DefaultJustification') -or $PSBoundParameters.ContainsKey('DefaultDurationHours')) {
+    foreach ($entry in @($catalog)) {
+        if ($PSBoundParameters.ContainsKey('DefaultJustification')) {
+            $entry | Add-Member -NotePropertyName defaultJustification -NotePropertyValue $DefaultJustification -Force
+        }
+        if ($PSBoundParameters.ContainsKey('DefaultDurationHours')) {
+            $entry | Add-Member -NotePropertyName defaultDurationHours -NotePropertyValue $DefaultDurationHours -Force
+        }
+    }
+    $_ovr = @()
+    if ($PSBoundParameters.ContainsKey('DefaultJustification')) { $_ovr += "justification='$DefaultJustification'" }
+    if ($PSBoundParameters.ContainsKey('DefaultDurationHours'))  { $_ovr += "duration=${DefaultDurationHours}h" }
+    Write-Host ("Defaults:      OVERRIDDEN on all $count entr$(if($count -eq 1){'y'}else{'ies'}) -- $($_ovr -join ', ')") -ForegroundColor Yellow
+}
+
 # PS 5.1's ConvertTo-Json drops the outer array brackets when piped a
 # single-element array (PS 7+ has -AsArray to override; 5.1 doesn't).
 # Use -InputObject + @($catalog) to force ConvertTo-Json to see the value

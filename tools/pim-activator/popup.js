@@ -42,7 +42,13 @@ const KNOWN_BAD_LEGACY_CLIENTIDS = []
 // Pure config helpers (bulk-activate confirm threshold resolution + bounds).
 // Kept in a separate, DOM/chrome-free module so they are unit-testable under
 // Node; the render path is unchanged.
-import { resolveBulkActivateConfirmThreshold } from './popup-config.js'
+import { resolveBulkActivateConfirmThreshold, BULK_ACTIVATE_CONFIRM_THRESHOLD_DEFAULT } from './popup-config.js'
+
+// Network resilience primitives (timeout + watchdog). Kept in a separate
+// DOM/chrome-free module so they are unit-testable under Node. A bare fetch()
+// has no timeout, so without these the popup can hang on "Loading..." forever
+// when a Graph/token/ARM request stalls on a locked-down PAW.
+import { LOAD_WATCHDOG_MS, SOURCE_WATCHDOG_MS, fetchWithTimeout, withWatchdog, settleWithin } from './popup-net.js'
 
 // v1.6.0+ multi-tenant catalog support.
 // Catalog entry shape:
@@ -94,13 +100,29 @@ function _prefixToRegex(p, anchorStart) {
 // keyed by tenantId) -- holds { refreshToken, accessToken, accessTokenExpiry,
 // armAccessToken, armAccessTokenExpiry, account } per customer so switching
 // back to a customer signed in earlier in the session is sub-second.
+// chrome.storage.<area>.get wrapped in a per-call timeout. On a non-Intune /
+// locked-down PAW, chrome.storage.managed.get's callback can NEVER fire (the
+// managed-storage provider doesn't respond) -- a bare `await new Promise(r =>
+// chrome.storage.managed.get(...,r))` then hangs FOREVER and the surrounding
+// try/catch can't catch a never-resolving promise. This was the real "Loading..."
+// hang. Race every storage read against a short timeout so a dead provider just
+// yields {} and we fall back to local. (Fix 2026-06-17.)
+function storageGet(area, keys, ms) {
+  if (ms == null) ms = 3000
+  return Promise.race([
+    new Promise(r => { try { chrome.storage[area].get(keys, v => r(v || {})) } catch (_) { r({}) } }),
+    new Promise(r => setTimeout(() => r({ __timedOut: true }), ms))
+  ])
+}
+
 async function readMergedCatalog() {
   let managed = []
   let local   = []
   let managedErr = null
   let managedThreshold = null
   try {
-    const m = await new Promise(r => chrome.storage.managed.get(['tenantCatalog', 'bulkActivateConfirmThreshold'], r))
+    const m = await storageGet('managed', ['tenantCatalog', 'bulkActivateConfirmThreshold'])
+    if (m && m.__timedOut) { managedErr = 'managed storage read timed out (no Intune policy / provider not responding)'; console.warn('[PIM Activator] ' + managedErr) }
     if (m && m.bulkActivateConfirmThreshold != null && m.bulkActivateConfirmThreshold !== '') {
       // Tenant-wide (non-per-entry) managed override. A per-entry value on the
       // active catalog tenant still wins over this in loadConfig().
@@ -124,7 +146,7 @@ async function readMergedCatalog() {
     console.warn('[PIM Activator] managed catalog read/parse failed:', managedErr)
   }
   try {
-    const l = await new Promise(r => chrome.storage.local.get(['tenantCatalog'], r))
+    const l = await storageGet('local', ['tenantCatalog'])
     if (Array.isArray(l.tenantCatalog)) local = l.tenantCatalog
   } catch (e) { /* ignore */ }
   const merged = []
@@ -168,10 +190,10 @@ function emptyConfig() {
 }
 
 async function loadConfig() {
-  const u = await new Promise(r => chrome.storage.local.get(
+  const u = await storageGet('local',
     ['userTenantId','userClientId','userDefaultJustification','userDefaultDurationHours',
      'userGroupNameFilter','userEntraGroupRegex','userAzureGroupRegex',
-     'activeTenantId','tenantTokens'], r))
+     'activeTenantId','tenantTokens'])
 
   // Defensive purge of the known-bad legacy upstream clientId (see comment
   // on KNOWN_BAD_LEGACY_CLIENTIDS above).
@@ -297,7 +319,25 @@ async function loadConfig() {
   }
 }
 
-const cfg = await loadConfig()
+// Top-level await: this runs during module load, BEFORE boot() (and its
+// watchdog) at the bottom of the file. If loadConfig() ever hangs -- e.g.
+// chrome.storage.managed.get not responding on a locked-down/managed PAW, or a
+// legacy-clientId purge/reload edge -- the whole module load stalls and the
+// popup sits on "Loading..." forever, which is exactly the v1.6.30/.31 hang
+// reported on fresh PAW machines. Guard it: config load can NEVER hang the
+// popup; on timeout/failure fall back to an empty config so the UI always
+// becomes interactive (sign-in / add-tenant screen) instead of an endless spinner.
+let cfg
+try {
+  cfg = await withWatchdog(loadConfig(), 12000, 'config-load')
+} catch (e) {
+  const _why = (e && (e.name ? e.name + ': ' : '') + (e.message || e)) || String(e)
+  console.error('[PIM Activator] config load failed: ' + _why)
+  // Surface the ACTUAL error in the popup (not a generic "timed out") so a
+  // failure is diagnosable without DevTools (managed Edge blocks DevTools).
+  try { document.getElementById('status-bar').textContent = 'Settings load failed: ' + _why } catch (_) {}
+  cfg = emptyConfig()
+}
 if (!cfg.tenantId || String(cfg.tenantId).startsWith('00000000') || !cfg.clientId || String(cfg.clientId).startsWith('00000000')) {
   // No active customer config. If the catalog has entries, render the
   // customer-picker first (v1.6.0+ MSP path). Otherwise render the
@@ -817,11 +857,135 @@ const els = {
 
 let currentAccount = null
 let eligibleRows = []        // [{ id (instanceId), groupId, displayName, accessId, endDateTime }]
+let lastNestedDiag = []      // diagnostics: per active-parent nested-discovery result {parent, raw, kept, error}
+let lastActiveRawDiag = []   // diagnostics: raw (pre-filter) active group instances {g, accessId, at, end}
+let lastDiagText = ''        // diagnostics: snapshot from the last load (what Graph returned)
+let lastLoadStatus = []      // diagnostics: per-source load outcome {name, ok, count, timedOut, error}
+let lastEnvChecks = null     // diagnostics: last environment/connectivity self-check results [{label,status,detail}]
+let envChecksRunning = false // diagnostics: a check run is in flight (so the panel shows "running…")
+const sessionLog = []        // diagnostics: timestamped events during THIS popup session (activations, propagation, reloads)
+// Append a timestamped event to the session log + refresh the panel if it's open.
+function logDiag(msg) {
+  try {
+    sessionLog.push(`${new Date().toLocaleTimeString()}  ${msg}`)
+    if (sessionLog.length > 80) sessionLog.shift()
+    // Persist so the history survives a manual refresh (window.location.reload)
+    // / popup reopen -- otherwise the in-memory log is wiped every refresh and
+    // the Diagnostics panel always looks empty.
+    try { chrome.storage.local.set({ diagSessionLog: sessionLog.slice() }) } catch (_) {}
+    refreshDiagnosticsPanel()
+  } catch (_) { /* never let diagnostics logging break a flow */ }
+}
+// Restore the persisted session event log on popup load so Diagnostics shows the
+// full timeline across reloads/reopens (call once at startup).
+async function loadPersistedDiagLog() {
+  try {
+    const s = await getStored(['diagSessionLog'])
+    if (Array.isArray(s.diagSessionLog) && s.diagSessionLog.length && !sessionLog.length) {
+      sessionLog.push(...s.diagSessionLog)
+      refreshDiagnosticsPanel()
+    }
+  } catch (_) {}
+}
+// The full text shown/copied: the latest snapshot + the running session event log.
+function composeDiagText() {
+  const snap = lastDiagText || '(no snapshot captured yet)'
+  let env = ''
+  if (envChecksRunning) {
+    env = '\n\n=== Environment checks ===\nRunning checks…'
+  } else if (lastEnvChecks && lastEnvChecks.length) {
+    const g = s => s === 'ok' ? 'OK  ' : (s === 'warn' ? 'WARN' : 'FAIL')
+    env = '\n\n=== Environment checks ===\n' + lastEnvChecks.map(c => `[${g(c.status)}] ${c.label}: ${c.detail}`).join('\n')
+  }
+  const log  = sessionLog.length ? ('\n\n=== Session events (latest last) ===\n' + sessionLog.join('\n')) : ''
+  return snap + env + log
+}
 
-// My Access tab cache
-const MYACCESS_CACHE_MS = 30 * 1000
+// ---------------------------------------------------------------------------
+// Environment / connectivity self-check (Diagnostics -> "Run checks").
+// A browser extension can't read Windows services/ports directly, but it CAN
+// prove what actually blocks PIMA on a locked-down machine: can it REACH each
+// endpoint it calls over 443 (and how slow -> proxy inspection), is the device
+// clock in sync (token validation fails on skew), is sign-in/scopes healthy, is
+// the runtime wired, and is the extension current. Reachability-to-443 IS the
+// effective "is the port open / is the proxy allowing it" check. Each probe is
+// independently bounded so the check itself never hangs.
+const ENV_CHECK_ENDPOINTS = [
+  { key: 'login', label: 'Sign-in (login.microsoftonline.com:443)',          url: `${AUTHORITY}/v2.0/.well-known/openid-configuration`, readDate: true },
+  { key: 'graph', label: 'Microsoft Graph (graph.microsoft.com:443)',         url: 'https://graph.microsoft.com/v1.0/$metadata' },
+  { key: 'arm',   label: 'Azure Resource Manager (management.azure.com:443)', url: 'https://management.azure.com/subscriptions?api-version=2020-01-01' },
+  { key: 'feed',  label: 'Extension update feed (gh-pages:443)',              url: 'https://knudsenmorten.github.io/PIM4EntraPS/updates.xml', readVersion: true },
+]
+
+async function envProbe(ep) {
+  const t0 = Date.now()
+  try {
+    const r = await fetchWithTimeout(ep.url, { method: 'GET', cache: 'no-store' }, 8000)
+    const ms = Date.now() - t0
+    let dateHeader = null, published = null
+    try { dateHeader = (r.headers && r.headers.get) ? r.headers.get('date') : null } catch (_) {}
+    if (ep.readVersion) { try { const tx = await r.text(); const m = tx.match(/version=['"]([0-9.]+)['"]/); if (m) published = m[1] } catch (_) {} }
+    // ANY HTTP response (even 401/403) proves the host is reachable over 443.
+    const status = ms > 4000 ? 'warn' : 'ok'
+    let detail = `reachable — HTTP ${r.status}, ${ms} ms` + (ms > 4000 ? ' (slow; proxy inspection?)' : '')
+    if (published) detail += ` · feed v${published}`
+    return { key: ep.key, label: ep.label, status, detail, ms, dateHeader, published }
+  } catch (e) {
+    const ms = Date.now() - t0
+    if (e && e.timedOut)     return { key: ep.key, label: ep.label, status: 'fail', detail: `no response in ${Math.round(ms / 1000)}s — blocked by firewall/proxy, or unreachable`, ms }
+    if (e && e.networkError) return { key: ep.key, label: ep.label, status: 'fail', detail: 'cannot connect — DNS/proxy/firewall blocking 443 to this host', ms }
+    return { key: ep.key, label: ep.label, status: 'fail', detail: (e && e.message) ? e.message : String(e), ms }
+  }
+}
+
+async function runEnvironmentChecks() {
+  const out = []
+  const probes = await Promise.all(ENV_CHECK_ENDPOINTS.map(envProbe))
+  for (const p of probes) out.push({ label: p.label, status: p.status, detail: p.detail })
+  // Device clock vs Microsoft (token validation fails on skew) — from any Date header.
+  const withDate = probes.find(p => p.dateHeader)
+  if (withDate) {
+    const skewMs = Math.abs(Date.now() - new Date(withDate.dateHeader).getTime())
+    out.push(skewMs > 300000
+      ? { label: 'Device clock vs Microsoft', status: 'fail', detail: `off by ${Math.round(skewMs / 1000)}s — token validation will fail; fix the device time/timezone` }
+      : { label: 'Device clock vs Microsoft', status: 'ok', detail: `in sync (±${Math.round(skewMs / 1000)}s)` })
+  }
+  // Extension version currency (installed vs what the feed advertises).
+  const feed = probes.find(p => p.key === 'feed')
+  try {
+    const installed = chrome.runtime.getManifest().version
+    if (feed && feed.published) out.push({ label: 'Extension version', status: (feed.published === installed ? 'ok' : 'warn'), detail: `installed v${installed}` + (feed.published === installed ? ' (current)' : `, feed v${feed.published} — relaunch the browser to update`) })
+    else out.push({ label: 'Extension version', status: 'ok', detail: `installed v${installed}` })
+  } catch (_) {}
+  // Runtime wiring.
+  out.push({ label: 'Sign-in API (chrome.identity)',      status: (typeof chrome !== 'undefined' && chrome.identity) ? 'ok' : 'fail', detail: (typeof chrome !== 'undefined' && chrome.identity) ? 'available' : 'missing — cannot sign in' })
+  out.push({ label: 'Extension storage (chrome.storage)', status: (typeof chrome !== 'undefined' && chrome.storage) ? 'ok' : 'fail', detail: (typeof chrome !== 'undefined' && chrome.storage) ? 'available' : 'missing' })
+  try {
+    const managed = await new Promise(res => { try { chrome.storage.managed.get(null, v => res(v || {})) } catch (_) { res({}) } })
+    const n = managed ? Object.keys(managed).length : 0
+    out.push({ label: 'Centrally-managed config (Intune/GPO)', status: 'ok', detail: n ? `${n} managed key(s)` : 'none — per-user onboarding config' })
+  } catch (_) {}
+  // Sign-in token + scopes (silent only — never pops an interactive prompt).
+  try {
+    const tok = await withWatchdog(acquireGraphToken({ interactive: false }), 8000, 'token').catch(() => null)
+    if (tok) { const miss = missingScopes(tok); out.push({ label: 'Sign-in token + scopes', status: miss.length ? 'warn' : 'ok', detail: miss.length ? `missing scope(s): ${miss.join(', ')} — sign in again / admin consent` : 'token valid, all required scopes present' }) }
+    else out.push({ label: 'Sign-in token', status: 'warn', detail: 'no silent token — sign in to validate scopes' })
+  } catch (_) { out.push({ label: 'Sign-in token', status: 'warn', detail: 'not signed in' }) }
+  out.push({ label: 'Browser', status: 'ok', detail: navigator.userAgent })
+  lastEnvChecks = out
+  return out
+}
+
+// My Access tab cache. Short TTL so switching to the tab reflects current state
+// (the user expects a switch to refresh) without hammering on rapid toggles.
+const MYACCESS_CACHE_MS = 10 * 1000
 let myAccessCache = null      // { ts: epochMs, rows: [...] }
 let myAccessLoading = false
+// When the Activate tab's eligible list was last (re)loaded -- a switch to the
+// Activate tab re-fetches if this is older than ACTIVATE_FRESH_MS (same intent
+// as the My Access TTL: switching reflects current state, rapid toggles don't hammer).
+let lastActivateLoadTs = 0
+const ACTIVATE_FRESH_MS = 10 * 1000
 let myAccessLoadedOnce = false
 
 // Tick state for the My Access tab's bulk deactivate. Set of groupIds.
@@ -921,6 +1085,336 @@ function escapeHtmlSafe(s) {
   return String(s == null ? '' : s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))
 }
 
+// ---------- Diagnostics panel (opt-in, hidden from customers) ----------
+// The diagnostics text (lastDiagText) is collected on every load but NEVER shown
+// inline -- it appears only when the user clicks the footer "Diagnostics" button.
+// refreshDiagnosticsPanel() keeps an OPEN panel's text current as background
+// discovery (nested groups) lands; it's a no-op when the panel is closed.
+function refreshDiagnosticsPanel() {
+  const pre = document.getElementById('pim-diag-pre')
+  if (pre) pre.textContent = composeDiagText()
+}
+function toggleDiagnosticsPanel() {
+  const existing = document.getElementById('pim-diag-box')
+  if (existing) { existing.remove(); return }   // second click closes it
+  const panel  = (typeof els !== 'undefined' && els.activatePanel) || document.getElementById('activate-panel') || document.body
+  const listEl = (typeof els !== 'undefined' && els.list) || document.getElementById('list')
+  const box = document.createElement('div')
+  box.id = 'pim-diag-box'
+  box.style.cssText = 'position:relative;margin:4px 0 6px 0;padding:8px 24px 8px 9px;background:#fff8e1;' +
+    'border:1px solid #f0c36d;border-radius:6px;font-size:10.5px;line-height:1.5;color:#5c4400;'
+  box.innerHTML = '<strong>DIAGNOSTICS — what Graph returned for you:</strong>' +
+    ' <button id="pim-diag-check" title="Test connectivity + environment for blockers (network/proxy, clock, scopes, version)" style="background:#fff;border:1px solid #4a8a5f;border-radius:4px;font-size:10px;line-height:1;color:#286b3f;cursor:pointer;padding:2px 7px;margin-left:6px;">Run checks</button>' +
+    '<button id="pim-diag-copy" title="Copy all diagnostics to clipboard" style="position:absolute;top:3px;right:24px;' +
+    'background:#fff;border:1px solid #d0a93e;border-radius:4px;font-size:10px;line-height:1;color:#8a6d00;cursor:pointer;padding:2px 7px;">Copy</button>' +
+    '<button id="pim-diag-x" title="Close" aria-label="Close" style="position:absolute;top:3px;right:5px;' +
+    'background:none;border:none;font-size:14px;line-height:1;color:#8a6d00;cursor:pointer;">&times;</button>' +
+    '<pre id="pim-diag-pre" style="white-space:pre-wrap;word-break:break-word;margin:4px 0 0 0;font-size:10.5px;">' +
+    escapeHtmlSafe(composeDiagText()) + '</pre>'
+  if (listEl && listEl.parentNode) listEl.parentNode.insertBefore(box, listEl)
+  else panel.insertBefore(box, panel.firstChild)
+  const x = document.getElementById('pim-diag-x'); if (x) x.onclick = () => box.remove()
+  const cp = document.getElementById('pim-diag-copy')
+  if (cp) cp.onclick = async () => {
+    const txt = composeDiagText()
+    let ok = false
+    try { await navigator.clipboard.writeText(txt); ok = true } catch (_) { /* fall through */ }
+    if (!ok) {   // fallback for contexts where the async Clipboard API is blocked
+      try {
+        const ta = document.createElement('textarea')
+        ta.value = txt; ta.style.cssText = 'position:fixed;top:0;left:0;opacity:0;'
+        document.body.appendChild(ta); ta.focus(); ta.select()
+        ok = document.execCommand('copy'); ta.remove()
+      } catch (_) { /* give up gracefully */ }
+    }
+    cp.textContent = ok ? 'Copied!' : 'Press Ctrl+C'
+    setTimeout(() => { cp.textContent = 'Copy' }, 1800)
+  }
+  const chk = document.getElementById('pim-diag-check')
+  if (chk) chk.onclick = async () => {
+    if (envChecksRunning) return
+    envChecksRunning = true; chk.disabled = true; chk.textContent = 'Checking…'
+    refreshDiagnosticsPanel()
+    try { await runEnvironmentChecks() }
+    catch (e) { lastEnvChecks = [{ label: 'Environment checks', status: 'fail', detail: (e && e.message) ? e.message : String(e) }] }
+    envChecksRunning = false; chk.disabled = false; chk.textContent = 'Run checks'
+    refreshDiagnosticsPanel()
+  }
+}
+
+// Rebuild the Activate tab (eligible list + active-state badges + folded-out
+// nested permission groups) after an activation OR deactivation, so the list
+// always reflects current state -- e.g. a deactivated parent's nested permission
+// groups disappear, and a freshly-activated role shows as active. Runs loaded()
+// in the background; the Activate tab is current by the time the user switches
+// to it. Best-effort -- a failure just leaves the prior list until next refresh.
+async function reloadActivateTab(token, opts = {}) {
+  // When confirmGroupIds is supplied, POLL Graph until the backend reflects the
+  // change (group PRESENT in my active set after activation / ABSENT after
+  // deactivation) before the final reload. PIM activation/deactivation is not
+  // instant -- a single fixed delay races propagation, so the row would show the
+  // stale state (e.g. activated role still listed as activatable). Polls with
+  // backoff up to maxMs, then reloads regardless so the UI never gets stuck.
+  const targets = new Set((opts.confirmGroupIds || []).filter(Boolean))
+  if (targets.size) {
+    const expectActive = !!opts.expectActive
+    const deadline = opts.maxMs || 45000
+    const startedAt = Date.now()
+    let delay = 1500
+    while ((Date.now() - startedAt) < deadline) {
+      await new Promise(r => setTimeout(r, delay))
+      delay = Math.min(delay + 1000, 5000)
+      try {
+        const fr = await acquireGraphToken({ interactive: false }).catch(() => null)
+        const tk = fr?.accessToken
+        if (!tk) continue
+        const active = await listActiveGroupAssignmentsForMe(tk).catch(() => [])
+        const activeSet = new Set(active.map(a => a.groupId))
+        const satisfied = [...targets].every(g => expectActive ? activeSet.has(g) : !activeSet.has(g))
+        if (satisfied) { await loaded(tk); return }
+      } catch (_) { /* transient -- keep polling */ }
+    }
+  }
+  // In-place reload via loaded() -- NOT window.location.reload(). v1.6.45 used a
+  // full page reload, which WIPED the post-activation nested fold-out: after the
+  // reload the background nested discovery re-ran on a fresh boot and came back
+  // 403/empty, so the folded-out permission groups vanished ("worked 30 min
+  // ago"). loaded() rebuilds in place and preserves the working discovery path.
+  // (The "stale rows" that prompted the full reload were actually a permanent
+  // admin-assigned membership rendering correctly, not a reload bug.) v1.6.47.
+  try {
+    let tk = token
+    if (!tk) { const fr = await acquireGraphToken({ interactive: false }).catch(() => null); tk = fr?.accessToken }
+    if (tk) await loaded(tk)
+  } catch (e) { console.warn('[PIM Activator] Activate reload failed:', e?.message || e) }
+}
+
+// After activating a role group, Entra takes ~1-2 min to propagate the
+// transitive eligibilities it unlocks. Those land in the user's OWN effective
+// eligibility list (listEligibleForMe -> filterByCurrentUser, never 403 -- the
+// group-schedule query does 403, but we don't need it). Poll that list every
+// ~7s and live-update the UI as new groups arrive, with a readiness status, so
+// the user KNOWS when it's ready instead of guessing / manually refreshing.
+// Stops when the count holds steady across 2 polls (settled) or after maxMs.
+// v1.6.47 (operator ask: "poll every 5-10s to see when groups are ready").
+// Prominent "activating" box shown while we wait for Entra propagation. Inserted
+// ABOVE the group list as a sibling, so loaded()/render() rebuilding #list does
+// not remove it. text='' removes it; done=true => green "ready" style (no bar).
+function setActivatingBanner(text, done, pct) {
+  let box = document.getElementById('pim-activating-box')
+  if (!text) { if (box) box.remove(); return }
+  if (!box) {
+    box = document.createElement('div')
+    box.id = 'pim-activating-box'
+    if (els.list && els.list.parentNode) els.list.parentNode.insertBefore(box, els.list)
+    else document.body.insertBefore(box, document.body.firstChild)
+  }
+  box.style.cssText = 'margin:6px 12px;padding:8px 10px;border-radius:6px;font-size:11.5px;line-height:1.45;' +
+    (done ? 'background:#dafbe1;border:1px solid #1a7f37;color:#1a7f37;' : 'background:#fff8e1;border:1px solid #f0c36d;color:#5c4400;')
+  // Bar: determinate fill when a target % is known (X of N from last known
+  // activation) -> a real progress bar; indeterminate stripe when no target yet.
+  let bar = ''
+  if (!done) {
+    if (typeof pct === 'number' && isFinite(pct)) {
+      const p = Math.max(0, Math.min(100, Math.round(pct)))
+      bar = `<div class="progress-track"><div class="progress-fill" style="width:${p}%;"></div></div>`
+    } else {
+      bar = '<div class="progress-track"><div class="progress-fill indeterminate"></div></div>'
+    }
+  }
+  box.innerHTML = '<div style="font-weight:600;' + (done ? '' : 'margin-bottom:5px;') + '">' +
+    (done ? '&#10003; ' : '&#9203; ') + escapeHtmlSafe(text) + '</div>' + bar
+}
+
+// Learned-target memory: remember the SETTLED eligible-group count keyed by the
+// SET of currently-active groups (e.g. active {ITSUPPORT} -> 50, active {} -> 2).
+// Counts only -- no tokens/secrets -- so it changes nothing about security. Used
+// to turn "the list stopped changing" (guess) into "you have X of your usual N"
+// (a real match) from the 2nd time onward.
+async function getPropMemory() {
+  try { const s = await getStored(['propCountByActiveSet']); return (s && s.propCountByActiveSet) || {} } catch (_) { return {} }
+}
+async function setPropMemoryEntry(key, count) {
+  try { const m = await getPropMemory(); m[key] = count; await setStored({ propCountByActiveSet: m }) } catch (_) {}
+}
+// Typical propagation DURATION (ms) per active-set -- learned like the count, used
+// to creep the progress bar smoothly (Entra releases the groups atomically, so a
+// count-based bar would jump 0->100%; a time-based bar moves every poll).
+async function getPropDuration() {
+  try { const s = await getStored(['propDurationByActiveSet']); return (s && s.propDurationByActiveSet) || {} } catch (_) { return {} }
+}
+async function setPropDurationEntry(key, ms) {
+  try { const m = await getPropDuration(); m[key] = ms; await setStored({ propDurationByActiveSet: m }) } catch (_) {}
+}
+
+// Inline propagation status shown ON the in-scope group row(s) (the activated/
+// deactivated group), instead of a top banner. Set by watchPropagation; rendered
+// by renderActivateRow for any row whose groupId is in .ids. v1.6.55.
+let propRowStatus = null   // { ids:Set<groupId>, text, pct:number|null, done:bool }
+let propWatchActive = false // true while a watchPropagation loop is running (guards double-resume)
+// Resume an in-flight propagation watch after a popup close/reopen: the watcher
+// persists {mode, scopeIds, startedAt} to chrome.storage.local; on load we restart
+// it with the ORIGINAL startedAt so the bar/elapsed continue. Cleared on settle.
+async function maybeResumePropWatch() {
+  try {
+    if (propWatchActive) return
+    const s = await getStored(['activePropWatch'])
+    const w = s && s.activePropWatch
+    if (!w || !Array.isArray(w.scopeIds) || !w.scopeIds.length || !w.startedAt) { logDiag('Resume: no in-flight watch to resume'); return }
+    const ageS = Math.round((Date.now() - w.startedAt) / 1000)
+    if (ageS >= 480) { logDiag(`Resume: persisted watch too old (${ageS}s) — clearing`); try { await clearStored(['activePropWatch']) } catch (_) {} ; return }
+    logDiag(`Resume: continuing ${w.mode} watch (${ageS}s elapsed) for [${w.scopeIds.join(',')}]`)
+    // Show an indicator IMMEDIATELY (the first watch poll is ~10s away).
+    setPropRowStatus(w.scopeIds, 'Resuming — re-checking propagation after reopen…', null, false)
+    watchPropagation(w.mode || 'activate', w.scopeIds, w.startedAt)
+  } catch (e) { try { logDiag('Resume error: ' + ((e && e.message) || e)) } catch (_) {} }
+}
+// A little levity during the ACTIVATION wait (operator's idea). Shown ONLY while an
+// activation is propagating; never on deactivate. Pure cosmetic — picks one line per run.
+// Emojis render larger than the body text so they're actually visible (operator
+// feedback: too small at the 13px box size). Static, hard-coded HTML — no injection.
+const _fe = s => `<span style="font-size:1.6em;font-style:normal;vertical-align:-.12em;letter-spacing:1px">${s}</span>`
+const FUN_LINES = [
+  `Dear Microsoft ${_fe('💌')} — the concept of Just-in-Time, Just-Enough permissions is taking a little longer than… Just-in-Time ${_fe('😅⏳')}`,
+  `PIM Activator is on it ${_fe('🦸')} — least privilege at most leisurely speed ${_fe('🐢☕')}`,
+  `Just-in-Time is more of a vibe than a promise right now ${_fe('😎⏳')} Grab a coffee!`,
+  `Granting Just-Enough access… Just-Eventually ${_fe('✨🙃')} Entra's thinking really hard.`,
+  `Your permissions are propagating at the speed of enterprise ${_fe('🏢🐌💨')} Almost there!`,
+  `Somewhere a token is being minted by hand, one bit at a time ${_fe('🪙⌨️')}`,
+  `Counting to "just-in-time" in binary: 0, 1, 10, 11… nearly there ${_fe('🔢⏳')}`,
+  `Your access is in the queue, right behind everyone else's access ${_fe('🎟️😅')}`,
+  `PIM: with great privilege comes great expiry timers ${_fe('⏲️🦸')}`,
+  `Brewing your permissions ${_fe('☕')} — fresh, scoped, and definitely not over-permissioned`,
+  `Entra is shuffling electrons into the right groups ${_fe('🔀⚡')} Hang tight!`,
+  `The privilege fairy is checking your justification twice ${_fe('🧚📝')}`,
+  `Zero Trust says hi ${_fe('👋')} — it'll trust you in just a moment, conditionally ${_fe('🔐')}`,
+]
+// Wait 10s before the fun-box first appears (operator: don't distract immediately --
+// only entertain once a wait is actually happening), THEN show a RANDOM line every 5s
+// (no immediate repeat). Hide cancels both the start-delay and the rotation.
+const FUN_START_DELAY_MS = 10000
+const FUN_ROTATE_MS = 5000
+let _funIdx = 0
+let _funTimer = null
+let _funDelay = null
+function setFunBox(show) {
+  const fb = document.getElementById('funBox')
+  if (!fb) return
+  if (show) {
+    if (_funTimer || _funDelay) return                     // already pending or rotating
+    _funDelay = setTimeout(() => {
+      _funDelay = null
+      _funIdx = Math.floor(Math.random() * FUN_LINES.length)  // random start, then cycle
+      fb.innerHTML = FUN_LINES[_funIdx]
+      fb.hidden = false
+      _funTimer = setInterval(() => {
+        let n = _funIdx
+        if (FUN_LINES.length > 1) { while (n === _funIdx) n = Math.floor(Math.random() * FUN_LINES.length) }
+        _funIdx = n   // random next, never an immediate repeat
+        fb.innerHTML = FUN_LINES[_funIdx]
+      }, FUN_ROTATE_MS)
+    }, FUN_START_DELAY_MS)
+  } else {
+    fb.hidden = true
+    if (_funDelay) { clearTimeout(_funDelay); _funDelay = null }
+    if (_funTimer) { clearInterval(_funTimer); _funTimer = null }
+  }
+}
+
+function setPropRowStatus(scopeIds, text, pct, done) {
+  if (!scopeIds || !scopeIds.length || !text) propRowStatus = null
+  else propRowStatus = { ids: new Set(scopeIds.filter(Boolean)), text, pct: (typeof pct === 'number' ? pct : null), done: !!done }
+  // Two surfaces (NOT the top banner -- it duplicated the row on the Activate tab):
+  //  (1) the inline group row (Activate tab, the "group in scope"), via render();
+  //  (2) the My Access status line (where the user is during a deactivate).
+  try { setActivatingBanner('') } catch (_) {}   // ensure no leftover top banner box
+  try { if (els.myAccessStatus) { els.myAccessStatus.textContent = propRowStatus ? text : ''; els.myAccessStatus.classList.remove('err') } } catch (_) {}
+  try { render() } catch (_) {}
+}
+
+let propagationWatchToken = 0
+async function watchPropagation(mode = 'activate', scopeIds = [], resumeStartedAt = null) {
+  const myRun = ++propagationWatchToken   // newest change wins; older loops exit
+  propWatchActive = true
+  setFunBox(mode === 'activate')   // cheeky "Dear Microsoft…" box — activations only
+  // Persist so the watch survives a popup close/reopen (maybeResumePropWatch
+  // restarts it with the ORIGINAL startedAt). Cleared on settle/end.
+  try { await setStored({ activePropWatch: { mode, scopeIds, startedAt: resumeStartedAt || Date.now() } }) } catch (_) {}
+  // PIM for Groups propagation has been slow lately -> watch up to 5 min, and
+  // don't declare "settled" on a stable count before minWatchMs UNLESS a change
+  // was already observed -- otherwise a late/delayed propagation (the count only
+  // moves at 60-120s) would be missed and we'd wrongly report the pre-change set.
+  // Poll every 10s for up to 8 min. CRITICAL: NEVER settle on a flat count --
+  // PIM for Groups propagation can take 3-5 min (observed: count held at 3 for
+  // ~90s then jumped to 50 at ~5 min). Only settle AFTER the count actually
+  // CHANGES and then HOLDS steady (settleAfterMs); until a change is seen, keep
+  // polling. This fixes the old 90s floor that cached the pre-propagation count.
+  // Works both ways: count climbs on activate, falls on deactivate.
+  const maxMs = 480000, intervalMs = 10000, settleAfterMs = 20000, startedAt = resumeStartedAt || Date.now()
+  // Default the propagation estimate to 4 min so the bar creeps from the FIRST run
+  // (cap 95% while waiting, jump to 100% once done); replaced by the learned
+  // per-active-set duration on subsequent runs.
+  let prev = null, start = null, target = null, activeKey = null, changed = false, lastChangeAt = Date.now(), learnedDur = 240000
+  const mem = await getPropMemory()
+  const durMem = await getPropDuration()
+  const banner = (t, done, pct) => { if (myRun === propagationWatchToken) setPropRowStatus(scopeIds, t, pct, done) }
+  while ((Date.now() - startedAt) < maxMs && myRun === propagationWatchToken) {
+    await new Promise(r => setTimeout(r, intervalMs))
+    if (myRun !== propagationWatchToken) return       // superseded by a newer change
+    const secs = Math.round((Date.now() - startedAt) / 1000)
+    let tk = null
+    try { const fr = await acquireGraphToken({ interactive: false }).catch(() => null); tk = fr?.accessToken } catch (_) {}
+    if (!tk) continue
+    let count = null, activeIds = null
+    try { const e = await listEligibleForMe(tk).catch(() => null); if (e) count = e.length } catch (_) {}
+    try { const a = await listActiveGroupAssignmentsForMe(tk).catch(() => null); if (a) activeIds = a.map(x => x.groupId).filter(Boolean).sort() } catch (_) {}
+    if (count == null) continue
+    if (activeIds) { activeKey = activeIds.join(','); if (mem[activeKey] != null) target = mem[activeKey]; if (durMem[activeKey] != null) learnedDur = durMem[activeKey] }   // learned target + duration for this active-set
+    // Drop a stale cached target the moment the live count clearly overshoots it.
+    if (target != null && ((mode === 'activate' && count > target) || (mode === 'deactivate' && count < target))) target = null
+    if (prev === null) { prev = count; start = count }
+    if (count !== prev) { logDiag(`Propagation: eligible groups ${prev} -> ${count} (${secs}s)`); prev = count; changed = true }
+    // TEXT = the real DELEGATED count (jumps when Entra releases the groups all at
+    // once). BAR = time-based creep (learnedDur, default 4 min) up to 95% while
+    // waiting, 100% on completion.
+    const countLabel = (mode === 'deactivate') ? 'Deactivated Groups' : 'Activated Groups'
+    const workMsg    = (mode === 'deactivate') ? 'removing the permissions' : 'propagating permissions'
+    const everyS     = Math.round(intervalMs / 1000)
+    let frac = '0'
+    if (start != null) {
+      const soFar = Math.max(0, (mode === 'deactivate') ? (start - count) : (count - start))
+      frac = (target != null && target !== start) ? `${Math.min(soFar, Math.abs(target - start))}/${Math.abs(target - start)}` : `${soFar}`
+    }
+    let pct = changed ? 100 : ((learnedDur && learnedDur > 0) ? Math.min(95, Math.round(100 * (Date.now() - startedAt) / learnedDur)) : null)
+    // DONE immediately once the count moves from the start (Entra released the
+    // groups -- the release is atomic) OR it reaches the learned target. No
+    // "confirming it holds" hold; the change IS the completion.
+    if (changed || (target != null && count === target)) {
+      if (activeKey != null) { await setPropMemoryEntry(activeKey, count); if (changed) await setPropDurationEntry(activeKey, Math.max(1000, Date.now() - startedAt)) }
+      try { await clearStored(['activePropWatch']) } catch (_) {}   // done -> nothing to resume
+      propWatchActive = false
+      setFunBox(false)
+      logDiag(`Propagation done at ${count} for active-set [${activeKey}] (${secs}s)`)
+      banner(`✓ ${countLabel}: ${frac} — done. Use Reload Permissions to re-check.`, true, 100)   // jump to 100% NOW...
+      try { await loaded(tk) } catch (_) {}                                                         // ...then refresh the list (the done banner persists across its render)
+      setTimeout(() => { if (myRun === propagationWatchToken) setPropRowStatus(null) }, 12000)
+      return
+    }
+    const pctTxt = (pct != null) ? `${pct}% — ` : ''
+    banner(`${countLabel}: ${frac} ⏳ Auto-refreshing every ${everyS}s [${pctTxt}${secs}s] - Entra PIM is working on ${workMsg}.`, false, pct)
+  }
+  if (myRun === propagationWatchToken) {
+    logDiag(`Propagation watch ended after ${Math.round((Date.now() - startedAt) / 1000)}s at ${prev == null ? '?' : prev} group(s)`)
+    try { await clearStored(['activePropWatch']) } catch (_) {}
+    propWatchActive = false
+    setFunBox(false)
+    try { const fr = await acquireGraphToken({ interactive: false }).catch(() => null); if (fr?.accessToken) await loaded(fr.accessToken) } catch (_) {}
+    if (activeKey != null && prev != null) await setPropMemoryEntry(activeKey, prev)
+    banner(`Auto-refresh stopped after ${Math.round(maxMs / 60000)} min — ${prev == null ? '?' : prev} eligible group(s). Click refresh to re-check.`, true)
+    setTimeout(() => { if (myRun === propagationWatchToken) setPropRowStatus(null) }, 12000)
+  }
+}
+
 // ---------- PKCE helpers ----------
 function base64UrlEncode(bytes) {
   let s = ''
@@ -987,7 +1481,7 @@ function buildAccount(claims) {
 async function exchangeToken(form) {
   // form is a URLSearchParams or plain object of token-endpoint parameters.
   const body = form instanceof URLSearchParams ? form : new URLSearchParams(form)
-  const r = await fetch(TOKEN_URL, {
+  const r = await fetchWithTimeout(TOKEN_URL, {
     method: 'POST',
     headers: { 'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8' },
     body: body.toString()
@@ -1149,8 +1643,9 @@ async function signOut() {
 
 // ---------- Graph ----------
 async function graph(token, method, url, body) {
-  const r = await fetch(`https://graph.microsoft.com/v1.0${url}`, {
+  const r = await fetchWithTimeout(`https://graph.microsoft.com/v1.0${url}`, {
     method,
+    cache: 'no-store',   // never serve a stale cached GET -- the propagation poll must see live counts (else the bar sticks at 95% / count never updates)
     headers: {
       Authorization: `Bearer ${token}`,
       'Content-Type': 'application/json'
@@ -1232,13 +1727,17 @@ async function hydrateGroupNames(token, groupIds) {
 async function listNestedForParent(token, parentGroupId) {
   const eligible = []
   const active   = []
-  async function page(path, sink) {
+  let error = null
+  let rawEligible = 0
+  async function page(path, sink, isEligible) {
     let next = path
     while (next) {
       let res
       try { res = await graph(token, 'GET', next) }
-      catch (e) { break }   // a tenant may restrict reading a group's schedules -- skip this parent
-      for (const x of (res.value || [])) {
+      catch (e) { error = (e && e.message) ? e.message : String(e); break }   // capture (e.g. 403 reading a group's schedules) instead of silent skip
+      const vals = res.value || []
+      if (isEligible) rawEligible += vals.length
+      for (const x of vals) {
         if (x.accessId && x.accessId !== 'member') continue
         if (!x.groupId) continue
         sink.push({ groupId: x.groupId, endDateTime: x.endDateTime })
@@ -1247,9 +1746,9 @@ async function listNestedForParent(token, parentGroupId) {
     }
   }
   const enc = encodeURIComponent(`principalId eq '${parentGroupId}'`)
-  await page(`/identityGovernance/privilegedAccess/group/eligibilityScheduleInstances?$filter=${enc}`, eligible)
-  await page(`/identityGovernance/privilegedAccess/group/assignmentScheduleInstances?$filter=${enc}`, active)
-  return { eligible, active }
+  await page(`/identityGovernance/privilegedAccess/group/eligibilityScheduleInstances?$filter=${enc}`, eligible, true)
+  await page(`/identityGovernance/privilegedAccess/group/assignmentScheduleInstances?$filter=${enc}`, active, false)
+  return { eligible, active, error, rawEligible }
 }
 
 // Build nested eligibleRows (depth 1) for the permission groups that the given
@@ -1264,8 +1763,10 @@ async function discoverNestedRows(token, parentGroupIds) {
   if (!parents.length) return []
   const eligibleNested  = []          // { groupId, parentGroupId, endDateTime }
   const activeNestedKeys = new Set()  // `${parentGroupId}|${groupId}`
+  lastNestedDiag = []                 // for the DIAGNOSTICS panel: why nested = 0?
   for (const pid of parents) {
     const nf = await listNestedForParent(token, pid)
+    lastNestedDiag.push({ parent: pid, raw: nf.rawEligible || 0, kept: (nf.eligible || []).length, error: nf.error || null })
     for (const e of nf.eligible) eligibleNested.push({ groupId: e.groupId, parentGroupId: pid, endDateTime: e.endDateTime })
     for (const a of nf.active)   activeNestedKeys.add(`${pid}|${a.groupId}`)
   }
@@ -1411,7 +1912,7 @@ async function listEligibleDirectAzureRbacForMe(armToken) {
   // 1) List all subscriptions visible to caller
   let subs = []
   try {
-    const subsResp = await fetch('https://management.azure.com/subscriptions?api-version=2020-01-01', {
+    const subsResp = await fetchWithTimeout('https://management.azure.com/subscriptions?api-version=2020-01-01', {
       headers: { Authorization: 'Bearer ' + armToken }
     })
     if (subsResp.ok) {
@@ -1425,7 +1926,7 @@ async function listEligibleDirectAzureRbacForMe(armToken) {
   for (const subId of subs) {
     try {
       const url = `https://management.azure.com/subscriptions/${subId}/providers/Microsoft.Authorization/roleEligibilityScheduleInstances?api-version=${apiVersion}&$filter=asTarget()`
-      const r = await fetch(url, { headers: { Authorization: 'Bearer ' + armToken } })
+      const r = await fetchWithTimeout(url, { headers: { Authorization: 'Bearer ' + armToken } })
       if (!r.ok) continue
       const j = await r.json()
       for (const inst of (j.value || [])) {
@@ -1440,7 +1941,7 @@ async function listActiveDirectAzureRbacForMe(armToken) {
   if (!armToken) return []
   let subs = []
   try {
-    const subsResp = await fetch('https://management.azure.com/subscriptions?api-version=2020-01-01', {
+    const subsResp = await fetchWithTimeout('https://management.azure.com/subscriptions?api-version=2020-01-01', {
       headers: { Authorization: 'Bearer ' + armToken }
     })
     if (subsResp.ok) {
@@ -1453,7 +1954,7 @@ async function listActiveDirectAzureRbacForMe(armToken) {
   for (const subId of subs) {
     try {
       const url = `https://management.azure.com/subscriptions/${subId}/providers/Microsoft.Authorization/roleAssignmentScheduleInstances?api-version=${apiVersion}&$filter=asTarget()`
-      const r = await fetch(url, { headers: { Authorization: 'Bearer ' + armToken } })
+      const r = await fetchWithTimeout(url, { headers: { Authorization: 'Bearer ' + armToken } })
       if (!r.ok) continue
       const j = await r.json()
       for (const inst of (j.value || [])) {
@@ -1489,7 +1990,7 @@ async function activateDirectAzureRbac(armToken, scope, roleDefinitionId, princi
       }
     }
   }
-  const resp = await fetch(url, {
+  const resp = await fetchWithTimeout(url, {
     method: 'PUT',
     headers: { Authorization: 'Bearer ' + armToken, 'Content-Type': 'application/json' },
     body: JSON.stringify(body)
@@ -1513,7 +2014,7 @@ async function deactivateDirectAzureRbac(armToken, scope, roleDefinitionId, prin
       justification: justification || 'User-initiated deactivation from PIM Activator'
     }
   }
-  const resp = await fetch(url, {
+  const resp = await fetchWithTimeout(url, {
     method: 'PUT',
     headers: { Authorization: 'Bearer ' + armToken, 'Content-Type': 'application/json' },
     body: JSON.stringify(body)
@@ -1617,6 +2118,24 @@ function toggleFavorite(rowKey) {
   setStored({ favorites }).catch(() => {})
 }
 
+// Per-group AUTO-ACTIVATE opt-in (operator 2026-06-18). When ON for a DIRECT
+// group, that group is activated automatically when the popup opens -- the group
+// ITSELF only, NO chaining to linked/indirect groups (that's a separate, future
+// feature). Off by default. Stored in chrome.storage.local, keyed by rowKey like
+// favorites. The on-open sweep (runAutoActivations) runs at most once per session.
+let autoActivate = {}            // { rowKey: true }
+let autoActivateRunDone = false
+;(async () => {
+  try { const s = await getStored(['autoActivate']); if (s && s.autoActivate && typeof s.autoActivate === 'object') autoActivate = s.autoActivate } catch (_) {}
+})()
+function isAutoActivate(rowKey) { return !!(rowKey && autoActivate[rowKey]) }
+function toggleAutoActivate(rowKey) {
+  if (!rowKey) return
+  if (autoActivate[rowKey]) delete autoActivate[rowKey]
+  else autoActivate[rowKey] = true
+  setStored({ autoActivate }).catch(() => {})
+}
+
 function recordActivation(groupId) {
   if (!groupId) return
   const e = activationHistory[groupId] || { count: 0, lastActivated: 0 }
@@ -1666,8 +2185,20 @@ async function listActiveGroupAssignmentsForMe(token) {
     out.push(...(res.value || []))
     next = res['@odata.nextLink'] ? res['@odata.nextLink'].replace('https://graph.microsoft.com/v1.0', '') : null
   }
-  // Match the activation flow -- show member access only.
-  return out.filter(x => x.accessId === 'member')
+  // Capture the RAW (pre-filter) shape for the diagnostics panel so we can read
+  // off exactly what Graph returns for THIS account without DevTools.
+  lastActiveRawDiag = out.map(x => ({
+    g: x.groupId, accessId: x.accessId, at: x.assignmentType || '(none)', end: x.endDateTime || '(none)'
+  }))
+  // An ACTIVE, self-deactivatable membership is the one that is TIME-BOUND: it has
+  // a finite endDateTime. That is the real discriminator -- NOT assignmentType.
+  // A permanent/admin-assigned membership has NO endDateTime, so it is excluded
+  // (which is what fixed the earlier selfDeactivate-404 on permanent memberships).
+  // The previous `assignmentType === 'Activated'` test over-filtered: some tenants
+  // return a self-activated PIM-for-Groups membership as assignmentType 'Assigned'
+  // WITH a finite endDateTime, so it was wrongly dropped (My Access showed 0 and
+  // the Activate tab let you re-activate -> 400 "already exists"). Fixed v1.6.41.
+  return out.filter(x => x.accessId === 'member' && !!x.endDateTime)
 }
 
 async function loadRoleDefinitions(token) {
@@ -1765,7 +2296,7 @@ let armSubscriptionsCache = null
 async function listUserSubscriptions(armToken) {
   if (armSubscriptionsCache) return armSubscriptionsCache
   try {
-    const res = await fetch('https://management.azure.com/subscriptions?api-version=2022-12-01', {
+    const res = await fetchWithTimeout('https://management.azure.com/subscriptions?api-version=2022-12-01', {
       headers: { Authorization: `Bearer ${armToken}` }
     })
     if (!res.ok) {
@@ -1816,7 +2347,7 @@ async function bulkLoadEntraRolesForGroups(token, groupIds, onProgress) {
       const url = `https://graph.microsoft.com/v1.0${endpoint}?$filter=principalId eq '${gid}'&$top=999${needHeaders ? '&$count=true' : ''}`
       const headers = { Authorization: `Bearer ${token}` }
       if (needHeaders) headers['ConsistencyLevel'] = 'eventual'
-      const r = await fetch(url, { headers })
+      const r = await fetchWithTimeout(url, { headers })
       if (!r.ok) return null
       return await r.json()
     }
@@ -1865,7 +2396,7 @@ async function bulkLoadAzureRolesForGroups(armToken, groupIds) {
   `.trim()
 
   try {
-    const res = await fetch('https://management.azure.com/providers/Microsoft.ResourceGraph/resources?api-version=2022-10-01', {
+    const res = await fetchWithTimeout('https://management.azure.com/providers/Microsoft.ResourceGraph/resources?api-version=2022-10-01', {
       method: 'POST',
       headers: { Authorization: `Bearer ${armToken}`, 'Content-Type': 'application/json' },
       body: JSON.stringify({ query, options: { resultFormat: 'objectArray' } })
@@ -1905,7 +2436,7 @@ async function listAzureRoleAssignmentsForGroup(armToken, groupId) {
     // Fallback: try the tenant-root query anyway in case the user IS a
     // tenant-level reader. If that 403s, surface a cleaner message.
     const url = `https://management.azure.com/providers/Microsoft.Authorization/roleAssignments?$filter=principalId+eq+%27${groupId}%27&api-version=2022-04-01`
-    const res = await fetch(url, { headers: { Authorization: `Bearer ${armToken}` } })
+    const res = await fetchWithTimeout(url, { headers: { Authorization: `Bearer ${armToken}` } })
     if (!res.ok) {
       const err = new Error('Account lacks Azure read permission at tenant root scope')
       err.status = res.status
@@ -1920,7 +2451,7 @@ async function listAzureRoleAssignmentsForGroup(armToken, groupId) {
   for (const sub of subs) {
     const url = `https://management.azure.com/subscriptions/${sub.id}/providers/Microsoft.Authorization/roleAssignments?$filter=principalId+eq+%27${groupId}%27&api-version=2022-04-01`
     try {
-      const res = await fetch(url, { headers: { Authorization: `Bearer ${armToken}` } })
+      const res = await fetchWithTimeout(url, { headers: { Authorization: `Bearer ${armToken}` } })
       if (!res.ok) continue   // skip subs the user can't list roleAssignments in
       const j = await res.json()
       for (const a of (j.value || [])) {
@@ -1943,7 +2474,7 @@ async function resolveArmRoleName(armToken, roleDefinitionId) {
   if (roleDefinitionId in armRoleNameCache) return armRoleNameCache[roleDefinitionId]
   try {
     const url = `https://management.azure.com${roleDefinitionId}?api-version=2022-04-01`
-    const res = await fetch(url, { headers: { Authorization: `Bearer ${armToken}` } })
+    const res = await fetchWithTimeout(url, { headers: { Authorization: `Bearer ${armToken}` } })
     if (res.ok) {
       const j = await res.json()
       armRoleNameCache[roleDefinitionId] = j?.properties?.roleName || roleDefinitionId
@@ -2027,7 +2558,10 @@ async function loadMyAccessTab(token, { force = false } = {}) {
   }
 
   myAccessLoading = true
-  els.myAccessStatus.textContent = 'Loading active assignments...'
+  // Single loading indicator only -- the progress-bar label below
+  // ('Loading active PIM memberships...') is the one shown; keep this status
+  // line blank so the two don't appear stacked/redundant. 2026-06-17.
+  els.myAccessStatus.textContent = ''
   els.myAccessStatus.classList.remove('err')
   els.myAccessList.innerHTML = ''
 
@@ -2041,7 +2575,7 @@ async function loadMyAccessTab(token, { force = false } = {}) {
   const maBpCnt  = document.getElementById('myaccess-progress-count')
   const maBpBar  = document.getElementById('myaccess-progress-bar')
   if (maBp) maBp.style.display = ''
-  if (maBpLbl) maBpLbl.textContent = 'Loading active PIM memberships...'
+  if (maBpLbl) maBpLbl.textContent = 'Loading active PIM assignments...'
   if (maBpCnt) maBpCnt.textContent = ''
   if (maBpBar) maBpBar.classList.add('indeterminate')
 
@@ -2063,6 +2597,8 @@ async function loadMyAccessTab(token, { force = false } = {}) {
       myAccessCache = { ts: Date.now(), rows: [] }
       els.myAccessStatus.textContent = ''
       els.myAccessList.innerHTML = '<div class="empty">No active PIM assignments right now. Activate one from the Activate tab.</div>'
+      if (maBp) maBp.style.display = 'none'   // hide the "Loading active PIM memberships..." bar (it looked stuck)
+      myAccessLoading = false                 // release the load lock so a later refresh isn't blocked
       updateBadges()
       myAccessLoadedOnce = true
       return
@@ -2337,7 +2873,7 @@ function categoriseGroupByName(nameOrRow) {
 function renderMyAccess(rows) {
   els.myAccessList.innerHTML = ''
   if (!rows.length) {
-    els.myAccessList.innerHTML = '<div class="empty">No active PIM-for-Groups memberships right now. Activate one from the Activate tab.</div>'
+    els.myAccessList.innerHTML = '<div class="empty">No active PIM assignments right now. Activate one from the Activate tab.</div>'
     return
   }
 
@@ -2374,14 +2910,15 @@ function renderMyAccess(rows) {
     azureDirect: 'Azure RBAC role assigned directly to the user at the listed scope.',
     entra:       'Groups that grant Entra admin roles. Roles listed under each row.',
     azure:       'Groups that grant Azure RBAC roles. Roles listed under each row.',
-    workload:    'Group membership itself IS the permission (Defender XDR, Intune, Power BI workspaces, etc.).'
+    workload:    ''
   }
 
   function renderSection(title, help, members) {
     if (!members.length) return
     const sec = document.createElement('div')
     sec.className = 'ma-section'
-    sec.innerHTML = `${escapeHtml(title)} (${members.length}) <span style="font-weight:400;color:#7d8590;font-size:11px;">&mdash; ${escapeHtml(help)}</span>`
+    sec.innerHTML = `${escapeHtml(title)} (${members.length})` +
+      (help ? ` <span style="font-weight:400;color:#7d8590;font-size:11px;">&mdash; ${escapeHtml(help)}</span>` : '')
     els.myAccessList.appendChild(sec)
     for (const r of members) renderOneMyAccessRow(r)
   }
@@ -2397,7 +2934,7 @@ function renderMyAccess(rows) {
   renderSection('Azure RBAC (direct)',                        sectionHelp.azureDirect, azureDirect)
   renderSection('Entra (via PIM group)',                      sectionHelp.entra,       entraGroups)
   renderSection('Azure RBAC (via PIM group)',                 sectionHelp.azure,       azureGroups)
-  renderSection('PIM for Groups (Workload RBAC delegations)', sectionHelp.workload,    workloadGroups)
+  renderSection('PIM for Groups (Workload RBAC)', sectionHelp.workload,    workloadGroups)
 }
 
 function renderOneMyAccessRow(r) {
@@ -2481,23 +3018,41 @@ function renderOneMyAccessRow(r) {
         } else {
           await deactivateGroup(tk, r.groupId, 'User-initiated deactivation from PIM Activator')
         }
+        logDiag('Deactivated: ' + (r.displayName || r.groupName || r.groupId || r.rowKey || '(row)'))
         btn.textContent = 'Deactivated'
         btn.style.background = '#dafbe1'
         btn.style.color = '#1a7f37'
         btn.style.borderColor = '#1a7f37'
-        // Refresh My Access in a moment so the row drops out of the list
+        // Show the "deactivating" box immediately (so the user sees it's working)
+        // and refresh My Access now; then run the propagation watcher to settle
+        // the Activate eligibility count as Entra revokes the unlocked access
+        // (1-3 min). One watcher reflects the change up OR down. 2026-06-17.
+        const scopeIds = r.groupId ? [r.groupId] : []
+        setPropRowStatus(scopeIds, 'Deactivating — waiting for Entra PIM to revoke the permissions…', null, false)
         setTimeout(async () => {
           myAccessCache = null
-          const fr = await acquireGraphToken({ interactive: false })
-          await loadMyAccessTab(fr?.accessToken, { force: true })
-        }, 1200)
+          const fr = await acquireGraphToken({ interactive: false }).catch(() => null)
+          if (fr?.accessToken) await loadMyAccessTab(fr.accessToken, { force: true })
+          watchPropagation('deactivate', scopeIds)
+        }, 800)
       } catch (err) {
         btn.disabled = false
         btn.textContent = 'Deactivate'
         if (err?.stale) {
           return triggerInteractiveReauth(`Your session expired while deactivating (${err.message}).`)
         }
-        alert(`Deactivation failed: ${err?.message || err}`)
+        const m = (err && err.message) ? err.message : String(err)
+        // A 404 "role assignment does not exist" means there is no time-bound
+        // activation to drop -- typically a permanent/admin-assigned membership.
+        // Don't show a scary failure; explain + refresh so the list reconciles.
+        if (/404/.test(m) && /does not exist/i.test(m)) {
+          alert('This assignment is permanent / admin-assigned, so it has no PIM activation to deactivate. To remove it, an administrator must change the assignment. Refreshing the list.')
+          myAccessCache = null
+          const fr2 = await acquireGraphToken({ interactive: false }).catch(() => null)
+          if (fr2?.accessToken) await loadMyAccessTab(fr2.accessToken, { force: true })
+          return
+        }
+        alert(`Deactivation failed: ${m}`)
       }
     })
   }
@@ -2701,7 +3256,12 @@ function render() {
     // read as children of the role group they fold out from. Set individual
     // style props (not cssText) so this coexists with the active-row style.
     if (r.depth) { row.style.marginLeft = '26px'; row.style.borderLeft = '2px solid #d0d7de'; row.style.paddingLeft = '6px' }
-    const activeBadge = r.isActive
+    // While this row's propagation is still in flight, suppress the "already
+    // active" badge -- the membership may be active but its effect hasn't fully
+    // propagated yet; the progress line conveys the real state. Badge returns
+    // once propagation settles (propRowStatus.done) or clears.
+    const propInFlight = propRowStatus && r.groupId && propRowStatus.ids.has(r.groupId) && !propRowStatus.done
+    const activeBadge = (r.isActive && !propInFlight)
       ? ' <span style="background:#dafbe1;color:#1a7f37;padding:1px 6px;border-radius:8px;font-size:10.5px;font-weight:600;margin-left:6px;">already active</span>'
       : ''
     // Only show "ends ..." for rows that are CURRENTLY ACTIVE -- that timer
@@ -2777,12 +3337,33 @@ function render() {
     // Sort uses isFavorite() so favorited rows pin to the top of their section.
     const starColor = isFav ? '#d4a72c' : '#bbb'
     const starChar  = isFav ? '\u2605' : '\u2606'
+    // Auto-activate opt-in (DIRECT groups only -- no chain). A labelled checkbox
+    // (not an icon) so the choice is self-explanatory; UNCHECKED by default.
+    const canAuto = (r.kind === 'group' && !r.depth)
+    const isAuto  = canAuto ? isAutoActivate(idAttr) : false
+    // No state suffix on the 'auto' label -- it widened the row (horizontal scroll) and
+    // the state is already visible (the inline propagation bar for activating, the
+    // "already active" badge for active). Operator 2026-06-18.
+    // Inline propagation indicator ON the in-scope group row (set by
+    // watchPropagation): the X/N (%) + status appears under THIS group's name,
+    // with a determinate bar when a target is known, else an indeterminate stripe.
+    let propHtml = ''
+    if (propRowStatus && r.groupId && propRowStatus.ids.has(r.groupId)) {
+      const ps = propRowStatus
+      const barCol = ps.done ? '#1a7f37' : '#d0a93e'
+      const barHtml = (typeof ps.pct === 'number')
+        ? `<div style="background:#eef0f2;border-radius:3px;height:5px;margin-top:3px;overflow:hidden;"><div style="background:${barCol};height:100%;width:${Math.max(0, Math.min(100, ps.pct))}%;transition:width .3s;"></div></div>`
+        : `<div class="progress-track" style="margin-top:3px;"><div class="progress-fill indeterminate"></div></div>`
+      propHtml = `<div style="font-size:10.5px;font-weight:600;color:${ps.done ? '#1a7f37' : '#8a6d00'};margin-top:3px;">${escapeHtml(ps.text)}</div>${barHtml}`
+    }
     row.innerHTML = `
       <input type="checkbox" data-rk="${escapeHtml(idAttr)}" ${r.checked ? 'checked' : ''} ${r.isActive ? 'disabled' : ''}>
       <span class="fav-toggle" data-fav-rk="${escapeHtml(idAttr)}" title="${isFav ? 'Unfavorite' : 'Favorite -- pins this row to the top of its section'}" style="cursor:pointer;color:${starColor};font-size:15px;line-height:1;margin:1px 4px 0 0;user-select:none;">${starChar}</span>
+      ${canAuto ? `<label class="auto-toggle" title="${isAuto ? 'Auto-activate is ON for this group: it activates automatically when you open PIM Activator (this group only -- NO linked/indirect groups). Untick to turn off.' : 'Tick to auto-activate this group when you open PIM Activator (this group only, no chain). Off by default -- least privilege: only enable for access you need every day.'}" style="display:inline-flex;align-items:center;gap:3px;font-size:10px;color:#57606a;cursor:pointer;margin:2px 6px 0 0;user-select:none;white-space:nowrap;"><input type="checkbox" class="auto-cb" data-auto-rk="${escapeHtml(idAttr)}" ${isAuto ? 'checked' : ''} style="margin:0;width:12px;height:12px;cursor:pointer;">auto</label>` : ''}
       <div class="body">
         <div class="name" title="${escapeHtml(r.displayName || idAttr)}">${escapeHtml(r.displayName || idAttr)}${activeBadge}</div>
         ${endLabel ? `<div class="meta">ends ${escapeHtml(endLabel)}</div>` : ''}
+        ${propHtml}
         ${rolesHtml}
         <div class="status" data-rk-status="${escapeHtml(idAttr)}"></div>
       </div>
@@ -2795,6 +3376,31 @@ function render() {
       e.stopPropagation()
       toggleFavorite(idAttr)
       render() // re-render so the row jumps to the top of its section
+    }
+    const autoCb = row.querySelector('.auto-cb')
+    if (autoCb) autoCb.onchange = async (e) => {
+      e.stopPropagation()
+      toggleAutoActivate(idAttr)   // persist the auto-on-open preference (OFF by default)
+      // Ticking 'auto' STARTS the activation now (operator expectation) -- this group
+      // ONLY, no chain. Unticking just stops auto-on-open; it never deactivates.
+      if (autoCb.checked && !r.isActive && r.groupId) {
+        const just = (els.just && els.just.value && String(els.just.value).trim()) || 'Change in infrastructure'
+        const durRaw = els.dur ? parseInt(els.dur.value, 10) : NaN
+        const dur = (durRaw > 0 && durRaw <= 24) ? durRaw : 8
+        const st = row.querySelector('.status')
+        autoCb.disabled = true
+        try {
+          if (st) st.textContent = 'Activating...'
+          const fr  = await acquireGraphToken({ interactive: false }).catch(() => null)
+          const tok = (fr && fr.accessToken) ? fr.accessToken : null
+          if (!tok) { if (st) st.textContent = 'Sign in first, then tick auto.'; return }
+          await activateGroup(tok, r.groupId, just, dur)
+          if (st) st.textContent = ''
+          try { watchPropagation('activate', [r.groupId]) } catch (_) {}   // inline activating state
+        } catch (err) {
+          if (st) st.textContent = 'Activation failed: ' + ((err && err.message) ? err.message : String(err))
+        } finally { autoCb.disabled = false }
+      }
     }
     const tog = row.querySelector('.role-toggle')
     if (tog) tog.onclick = (e) => {
@@ -2874,7 +3480,7 @@ function render() {
   renderActivateSection('Azure RBAC (direct)',                           buckets.azureDirect)
   renderActivateSection('Entra roles (via PIM Group)',                   buckets.entra)
   renderActivateSection('Azure RBAC (via PIM Group)',                    buckets.azure)
-  renderActivateSection('PIM for Groups (Workload RBAC delegations)',    buckets.workload)
+  renderActivateSection('PIM for Groups (Workload RBAC)',    buckets.workload)
 
   updateCount()
 }
@@ -2918,23 +3524,20 @@ async function maybeShowGettingStartedTip(readyCount) {
     const tip = document.createElement('div')
     tip.id = 'getting-started-tip'
     tip.setAttribute('role', 'note')
+    // Compact single-line tip: keeps the role list + "Activate selected" button
+    // visible without scrolling (v1.6.36 -- the old multi-line + "Got it" block
+    // pushed the activate boxes below the fold on the default popup height).
     tip.style.cssText =
-      'position:relative;margin:6px 0 8px 0;padding:9px 30px 9px 11px;' +
+      'position:relative;margin:4px 0 6px 0;padding:6px 24px 6px 9px;' +
       'background:#eff6ff;border:1px solid #93c5fd;border-radius:6px;' +
-      'font-size:11.5px;line-height:1.5;color:#1e3a5f;'
+      'font-size:11px;line-height:1.4;color:#1e3a5f;'
     tip.innerHTML =
-      '<div style="font-weight:600;color:#1d4ed8;margin-bottom:3px;">Getting started</div>' +
-      '<div>Tick the roles you need and press <strong>Activate selected</strong> to ' +
-      'elevate them all in one click. See and deactivate what is currently active on ' +
-      'the <strong>My Access</strong> tab.</div>' +
-      '<div style="margin-top:7px;">' +
-        '<button id="getting-started-tip-ok" style="font-size:11px;font-weight:600;' +
-        'background:#2563eb;color:#fff;border:none;border-radius:4px;padding:3px 10px;' +
-        'cursor:pointer;">Got it</button>' +
-      '</div>' +
+      '<strong style="color:#1d4ed8;">Getting started:</strong> tick the roles you need, then ' +
+      '<strong>Activate selected</strong>. Manage active ones on <strong>My Access</strong>. ' +
+      '<a id="getting-started-tip-ok" href="#" style="color:#2563eb;font-weight:600;text-decoration:none;">Got it</a>' +
       '<button id="getting-started-tip-x" title="Dismiss" aria-label="Dismiss" ' +
-        'style="position:absolute;top:5px;right:6px;background:none;border:none;' +
-        'font-size:15px;line-height:1;color:#64748b;cursor:pointer;">&times;</button>'
+        'style="position:absolute;top:3px;right:5px;background:none;border:none;' +
+        'font-size:14px;line-height:1;color:#64748b;cursor:pointer;">&times;</button>'
 
     // Insert directly above the group list so it reads as a lead-in, not a modal.
     panel.insertBefore(tip, list)
@@ -2945,11 +3548,69 @@ async function maybeShowGettingStartedTip(readyCount) {
     }
     const okBtn = document.getElementById('getting-started-tip-ok')
     const xBtn  = document.getElementById('getting-started-tip-x')
-    if (okBtn) okBtn.onclick = dismiss
+    if (okBtn) okBtn.onclick = (e) => { if (e && e.preventDefault) e.preventDefault(); dismiss() }
     if (xBtn)  xBtn.onclick  = dismiss
   } catch (e) {
     // The tip is purely additive; never let it break the popup.
     console.warn('[PIM Activator] getting-started tip skipped:', e && e.message ? e.message : e)
+  }
+}
+
+// Render a visible, self-explaining failure state instead of leaving the
+// popup stuck on "Loading...". `phase` is a short tag (token / graph / arm /
+// network / timeout) that classifies what failed so the user (and a support
+// engineer reading a screenshot) can act. Adds a "Report bug" link that opens
+// the GitHub issues page with the diagnostic pre-filled, and dumps the full
+// error to the console so a hang is always diagnosable.
+function showLoadFailure(phase, err, opts = {}) {
+  const msg = (err && err.message) ? err.message : String(err || 'Unknown error')
+  console.error(`[PIM Activator] load failed (${phase}):`, err)
+  try { document.getElementById('activate-boot-progress').style.display = 'none' } catch { /* */ }
+
+  const human = ({
+    token:   'Could not get a sign-in token from Microsoft Entra.',
+    graph:   'Could not load your eligible PIM assignments from Microsoft Graph.',
+    arm:     'Could not load your Azure resource roles.',
+    network: 'Could not reach Microsoft (network / proxy / firewall).',
+    timeout: 'Loading your PIM assignments took too long and was stopped.',
+    consent: 'Admin consent for the required permissions is missing.',
+  })[phase] || 'Something went wrong while loading your PIM assignments.'
+
+  const hint = (err && err.timedOut)
+      ? 'The request did not respond in time. This is usually a network/proxy issue on this device, a Conditional-Access prompt that did not complete, or Microsoft being slow. Try again; if it persists, check connectivity and that login.microsoftonline.com / graph.microsoft.com / management.azure.com are reachable.'
+    : (err && err.networkError)
+      ? 'The browser could not reach the Microsoft endpoint at all. Check internet/VPN/proxy and that the PAW allows login.microsoftonline.com, graph.microsoft.com and management.azure.com.'
+      : 'Open the browser console (F12) for the full error, retry, or report it.'
+
+  if (els.status) {
+    els.status.textContent = `${human}`
+    els.status.classList.add('err')
+  }
+  // Replace the (empty) list area with an actionable error card.
+  if (els.list) {
+    const diag = `phase=${phase}; tenant=${cfg.tenantId || '(none)'}; v=${(chrome.runtime.getManifest && chrome.runtime.getManifest().version) || '?'}; error=${msg}`
+    els.list.innerHTML =
+      '<div style="margin:8px 4px;padding:12px 14px;background:#fff8f0;border:1px solid #f0c08a;border-radius:6px;font-size:12px;line-height:1.5;color:#7a3b00;">' +
+        '<div style="font-weight:700;margin-bottom:6px;">' + escapeHtmlSafe(human) + '</div>' +
+        '<div style="margin-bottom:8px;color:#9a4d10;">' + escapeHtmlSafe(hint) + '</div>' +
+        '<div style="font-family:monospace;font-size:10.5px;color:#8a5a2a;background:#fff;border:1px solid #f0d8b8;border-radius:4px;padding:6px 7px;margin-bottom:10px;word-break:break-word;">' + escapeHtmlSafe(msg) + '</div>' +
+        '<button id="load-retry" class="primary" style="font-size:12px;">Retry</button>' +
+        '<a id="load-report" href="#" style="margin-left:10px;font-size:11.5px;color:#0969da;text-decoration:none;">Report bug</a>' +
+      '</div>'
+    const retry = document.getElementById('load-retry')
+    if (retry) retry.onclick = () => window.location.reload()
+    const report = document.getElementById('load-report')
+    if (report) report.onclick = (e) => {
+      e.preventDefault()
+      const title = encodeURIComponent('[PIM Activator] PIM assignments failed to load (' + phase + ')')
+      const bodyTxt = encodeURIComponent(
+        'What happened: your PIM assignments did not load.\n\n' +
+        'Diagnostic (auto-collected -- contains no secrets):\n' + diag + '\n\n' +
+        'Steps to reproduce / notes:\n')
+      try {
+        window.open('https://github.com/KnudsenMorten/PIM4EntraPS/issues/new?title=' + title + '&body=' + bodyTxt, '_blank')
+      } catch { /* popups blocked -- the console diagnostic above is still available */ }
+    }
   }
 }
 
@@ -3003,12 +3664,44 @@ async function boot() {
   await loaded(result.accessToken)
 }
 
+// On-open auto-activate sweep. Activates each DIRECT group the user opted in
+// (per-row bolt) -- the group ITSELF only, never its linked/indirect groups (no
+// chain). Opt-in, off by default, runs at most once per popup session. Each is a
+// normal single-group activation via the same activateGroup path; failures are
+// per-group and never block the rest or the UI.
+async function runAutoActivations(token) {
+  if (autoActivateRunDone) return
+  autoActivateRunDone = true
+  const targets = (eligibleRows || []).filter(r =>
+    r && r.kind === 'group' && !r.depth && !r.isNested && !r.isActive &&
+    r.groupId && isAutoActivate(r.rowKey || ('group:' + r.groupId)))
+  if (!targets.length) return
+  const just = (els.just && els.just.value && String(els.just.value).trim()) || 'Change in infrastructure'
+  const durRaw = els.dur ? parseInt(els.dur.value, 10) : NaN
+  const dur = (durRaw > 0 && durRaw <= 24) ? durRaw : 8
+  try { setActivatingBanner('Auto-activating ' + targets.length + ' group(s) you marked — this group only, no linked groups…') } catch (_) {}
+  let done = 0
+  for (const r of targets) {
+    try {
+      await activateGroup(token, r.groupId, just, dur)
+      done++
+      try { watchPropagation('activate', [r.groupId]) } catch (_) {}
+    } catch (e) { console.warn('[PIM Activator] auto-activate failed for', r.displayName || r.groupId, e && e.message ? e.message : e) }
+  }
+  try { setActivatingBanner('') } catch (_) {}
+  console.log('[PIM Activator] auto-activated ' + done + '/' + targets.length + ' marked group(s) (no chain)')
+  try { await loaded(token) } catch (_) {}   // refresh so activated rows show active (guard blocks re-sweep)
+}
+
 async function loaded(token) {
   els.signIn.style.display = 'none'
   els.signOut.style.display = ''
   els.signOut.onclick = signOut
   els.me.textContent = currentAccount?.username || ''
-  els.status.textContent = 'Loading your PIM delegations ... Please Wait'
+  // Single loading indicator: keep this status line blank during boot so it
+  // doesn't stack with the boot progress-bar label below ('Loading eligible PIM
+  // delegations...'). 2026-06-17 (matches the My Access de-dupe).
+  els.status.textContent = ''
 
   // Boot-phase progress bar -- indeterminate striped animation until we know
   // total groups. Hidden once the list renders (or on early-return error).
@@ -3036,29 +3729,90 @@ async function loaded(token) {
   // eligibilities + active Azure RBAC. Some sources may 403 / 404 (tenant
   // doesn't use that path, or permission still propagating); each gets its
   // own catch so a single failure cannot wipe the whole list.
-  setBootLabel('Loading eligible PIM delegations from Microsoft Graph + ARM...')
+  setBootLabel('Loading your eligible PIM assignments…')
   let raw, activeRows, directEntra, activeDirectEntra, directAzure, activeDirectAzure
   let armTok = null
   try { armTok = await getArmToken() } catch { /* ARM optional -- Entra still works */ }
-  try {
-    [raw, activeRows, directEntra, activeDirectEntra, directAzure, activeDirectAzure] = await Promise.all([
-      listEligibleForMe(token),
-      listActiveGroupAssignmentsForMe(token).catch(() => []),
-      listEligibleDirectEntraRolesForMe(token).catch(() => []),
-      listActiveDirectEntraRolesForMe(token).catch(() => []),
-      armTok ? listEligibleDirectAzureRbacForMe(armTok).catch(() => []) : Promise.resolve([]),
-      armTok ? listActiveDirectAzureRbacForMe(armTok).catch(() => [])   : Promise.resolve([]),
-    ])
-  } catch (e) {
+  // Each source is bounded INDEPENDENTLY (settleWithin) and the load renders
+  // whatever succeeds. The 5 enrichment sources are optional, so a slow/throttled
+  // one -- e.g. the sequential Azure-RBAC subscription sweep, or a Graph page that
+  // throttles -- degrades to empty instead of tripping a single whole-path
+  // watchdog and wiping the entire list (the v1.6.70 "did not complete within 75s"
+  // customer report). Per-source status is captured for the Diagnostics panel even
+  // when something fails, so a timeout no longer shows "no snapshot captured yet".
+  const _src = await Promise.all([
+    settleWithin(listEligibleForMe(token),                       SOURCE_WATCHDOG_MS, 'PIM-for-Groups eligible'),
+    settleWithin(listActiveGroupAssignmentsForMe(token),         SOURCE_WATCHDOG_MS, 'active group assignments'),
+    settleWithin(listEligibleDirectEntraRolesForMe(token),       SOURCE_WATCHDOG_MS, 'direct Entra eligible'),
+    settleWithin(listActiveDirectEntraRolesForMe(token),         SOURCE_WATCHDOG_MS, 'active direct Entra'),
+    settleWithin(armTok ? listEligibleDirectAzureRbacForMe(armTok) : Promise.resolve([]), SOURCE_WATCHDOG_MS, 'direct Azure RBAC eligible'),
+    settleWithin(armTok ? listActiveDirectAzureRbacForMe(armTok)   : Promise.resolve([]), SOURCE_WATCHDOG_MS, 'active direct Azure RBAC'),
+  ])
+  raw               = _src[0].ok ? _src[0].value : []
+  activeRows        = _src[1].ok ? _src[1].value : []
+  directEntra       = _src[2].ok ? _src[2].value : []
+  activeDirectEntra = _src[3].ok ? _src[3].value : []
+  directAzure       = _src[4].ok ? _src[4].value : []
+  activeDirectAzure = _src[5].ok ? _src[5].value : []
+
+  // Per-source load status -> Diagnostics, captured NOW (before any early return)
+  // so even a failed/partial load produces a copy-able snapshot.
+  lastLoadStatus = _src.map(s => ({ name: s.name, ok: s.ok, count: s.ok ? (s.value || []).length : 0, timedOut: s.timedOut, error: s.ok ? null : (s.error && s.error.message ? s.error.message : String(s.error)) }))
+  lastDiagText = 'LOAD STATUS (per source):\n' + lastLoadStatus.map(s => `  ${s.ok ? 'OK     ' : (s.timedOut ? 'TIMEOUT' : 'FAIL   ')}  ${s.name}: ${s.ok ? s.count + ' item(s)' : s.error}`).join('\n')
+  try { refreshDiagnosticsPanel() } catch (_) {}
+
+  // A stale/rejected token on the PRIMARY Graph source means re-auth, not a data error.
+  const _rawErr = _src[0].ok ? null : _src[0].error
+  if (_rawErr && _rawErr.stale) {
     hideBootProgress()
-    if (e.stale) {
-      els.status.textContent = `Token rejected by Graph; refreshing sign-in...`
-      return triggerInteractiveReauth(`Graph error: ${e.message}`)
-    }
-    els.status.textContent = `Failed to list eligible groups: ${e.message}`
-    els.status.classList.add('err')
+    els.status.textContent = `Token rejected by Graph; refreshing sign-in...`
+    return triggerInteractiveReauth(`Graph error: ${_rawErr.message}`)
+  }
+  // FAIL only when EVERY primary (eligibility) source failed -- i.e. we genuinely
+  // could not read any eligibilities. If at least one primary source returned
+  // (even empty), proceed and render what we have; a failed enrichment source
+  // (active lists / Azure RBAC) just means a few rows aren't decorated.
+  const _primary = [_src[0], _src[2], _src[4]]   // PIM-for-Groups / direct Entra / direct Azure eligibles
+  if (_primary.every(s => !s.ok)) {
+    hideBootProgress()
+    const _errs = _primary.map(s => s.error).filter(Boolean)
+    const phase = _errs.some(e => e && e.timedOut) ? 'timeout' : (_errs.some(e => e && e.networkError) ? 'network' : 'graph')
+    showLoadFailure(phase, _errs[0] || new Error('Loading your PIM assignments did not complete.'))
     return
   }
+
+  // ---- DIAGNOSTICS (v1.6.38) -------------------------------------------------
+  // Temporary, dismissible panel that prints exactly what each Graph/ARM
+  // eligibility query returned for THIS account, so an eligibility-count bug
+  // (e.g. "92 Entra roles I'm not eligible for") can be read off the popup
+  // without DevTools / without tenant access from our side.
+  try {
+    const sample = (arr, nameFn, n = 8) =>
+      (arr || []).slice(0, n).map(nameFn).filter(Boolean).join(', ') + ((arr || []).length > n ? ', ...' : '')
+    const diag =
+      'Snapshot captured: ' + new Date().toLocaleString() + '\n' +
+      'principalId (filter): ' + (currentAccount && currentAccount.localAccountId || '(none)') + '\n' +
+      'account: ' + (currentAccount && currentAccount.username || '(none)') + '\n' +
+      'PIM-for-Groups eligible (raw): ' + (raw || []).length +
+        '  [' + sample(raw, x => x.group?.displayName || x.groupId) + ']\n' +
+      'Active group assignments (kept): ' + (activeRows || []).length + '\n' +
+      'Active group instances (raw, pre-filter): ' + (lastActiveRawDiag || []).length + '\n' +
+        (lastActiveRawDiag || []).slice(0, 8).map(d =>
+          '   - ' + d.g + '  accessId=' + d.accessId + '  assignmentType=' + d.at + '  end=' + d.end).join('\n') +
+        ((lastActiveRawDiag || []).length ? '\n' : '') +
+      'Direct Entra eligible: ' + (directEntra || []).length +
+        '  [' + sample(directEntra, x => x.roleDefinition?.displayName || x.roleDefinitionId) + ']\n' +
+      '  query: GET /roleManagement/directory/roleEligibilityScheduleInstances?$filter=principalId eq \'' +
+        (currentAccount && currentAccount.localAccountId || '') + '\'\n' +
+      'Direct Azure RBAC eligible: ' + (directAzure || []).length +
+        '  [' + sample(directAzure, x => (x.roleName || x.roleDefinitionId) + ' @ ' + (x.scopeName || x.armScope || x.scope || '')) + ']'
+    console.log('[PIM Activator DIAGNOSTICS]\n' + diag)
+    // Store the diagnostics text; do NOT render it inline. Customers see a clean
+    // UI -- the data is revealed only when the user clicks the footer
+    // "Diagnostics" button (toggleDiagnosticsPanel). 2026-06-17.
+    lastDiagText = diag
+    refreshDiagnosticsPanel()   // no-op unless the panel is currently open
+  } catch (e) { console.warn('[PIM Activator] diagnostics block failed:', e && e.message ? e.message : e) }
 
   // Only early-return when ALL three sources are empty -- a user who has
   // zero PIM-for-Groups eligibilities (raw) might still have direct
@@ -3078,7 +3832,19 @@ async function loaded(token) {
 
   const uniqueGroupIds = [...new Set(raw.map(x => x.groupId))]
   setBootLabel(`Resolving ${uniqueGroupIds.length} group name(s)...`)
-  const names = await hydrateGroupNames(token, uniqueGroupIds)
+  let names
+  try {
+    names = await withWatchdog(hydrateGroupNames(token, uniqueGroupIds), LOAD_WATCHDOG_MS, 'Resolving group names')
+  } catch (e) {
+    hideBootProgress()
+    if (e.stale) {
+      els.status.textContent = `Token rejected by Graph; refreshing sign-in...`
+      return triggerInteractiveReauth(`Graph error: ${e.message}`)
+    }
+    const phase = e.timedOut ? 'timeout' : (e.networkError ? 'network' : 'graph')
+    showLoadFailure(phase, e)
+    return
+  }
 
   const filterRe = cfg.groupNameFilter ? new RegExp(cfg.groupNameFilter, 'i') : null
   const stored = await getStored(['selectedIds', 'lastJustification', 'lastDurationHours', 'justificationHistory'])
@@ -3201,8 +3967,10 @@ async function loaded(token) {
   els.footer.style.display = ''
   els.tabs.style.display = 'flex'
   hideBootProgress()   // group list is now visible; footer bulk-fetch bar takes over
+  lastActivateLoadTs = Date.now()   // mark Activate data fresh (drives tab-switch refresh TTL)
   updateBadges()
   render()
+  maybeResumePropWatch()   // if the popup was closed mid-propagation, pick the watch back up
 
   // Background: fold out nested permission groups under any role group the user
   // is ALREADY an active member of (they only surface once the parent is active
@@ -3216,6 +3984,18 @@ async function loaded(token) {
       const haveKeys = new Set(eligibleRows.map(r => r.rowKey))
       const add = nested.filter(n => !haveKeys.has(n.rowKey))
       if (add.length) { eligibleRows = eligibleRows.concat(add); render() }
+      // Surface the nested-discovery result in the DIAGNOSTICS panel so we can see
+      // WHY nested groups did/didn't appear (403 reading the group's schedules vs
+      // genuinely empty vs propagation-not-yet).
+      try {
+        if (lastNestedDiag.length) {
+          const lines = lastNestedDiag.map(d =>
+            '  parent ' + d.parent + ': raw=' + d.raw + ' kept=' + d.kept + (d.error ? ' ERROR: ' + d.error : '')).join('\n')
+          lastDiagText += '\nNested discovery (active parents → permission groups):\n' + lines
+          console.log('[PIM Activator DIAGNOSTICS] nested:\n' + lines)
+          refreshDiagnosticsPanel()   // updates the panel only if it's currently open
+        }
+      } catch (_) {}
     } catch (e) { console.warn('[PIM Activator] nested discovery failed:', e?.message || e) }
   })()
 
@@ -3226,6 +4006,12 @@ async function loaded(token) {
   // the mature render path: a single injected banner above #list, no coupling
   // to render() internals.
   maybeShowGettingStartedTip(readyCount)
+
+  // Auto-activate (operator 2026-06-18): activate -- THIS GROUP ONLY, no chain --
+  // any DIRECT group the user opted in via the per-row bolt toggle. Runs once per
+  // popup open; opt-in + off by default. After the initial render so the list
+  // paints first; fire-and-forget so a slow activation never blocks the UI.
+  runAutoActivations(token)
 
   // ---- Background bulk fetch: roles for every eligible group ----------
   // UI is immediately interactive; rows re-render with role lines as data
@@ -3403,14 +4189,40 @@ async function loaded(token) {
     }
   })()
 
-  // Tab switching -- lazy-load My Access on first click, then re-render from cache.
-  els.tabBtnActivate.onclick = () => setActiveTab('activate')
+  // Tab switching -- switching to a tab REFRESHES its data so it reflects current
+  // state (short TTL avoids hammering on rapid toggles). The user expects a switch
+  // to re-fetch (especially during propagation). 2026-06-17.
+  els.tabBtnActivate.onclick = async () => {
+    setActiveTab('activate')
+    if (Date.now() - lastActivateLoadTs > ACTIVATE_FRESH_MS) {
+      const fresh = await acquireGraphToken({ interactive: false }).catch(() => null)
+      const tk = fresh?.accessToken || token
+      if (tk) await loaded(tk)
+    }
+  }
   els.tabBtnMyAccess.onclick = async () => {
     setActiveTab('myaccess')
-    // Lazy first-load; subsequent toggles served from cache (until expiry / refresh).
+    // loadMyAccessTab serves cache only within MYACCESS_CACHE_MS (10s); older -> re-fetch.
     const fresh = await acquireGraphToken({ interactive: false })
     const tk = fresh?.accessToken || token
     await loadMyAccessTab(tk)
+  }
+  // "Reload Permissions" -- manual full re-fetch of eligible + active PIM (use
+  // after activate/deactivate to pull the latest propagated state). v1.6.57.
+  const reloadBtn = document.getElementById('reload-perms')
+  if (reloadBtn) reloadBtn.onclick = async () => {
+    const orig = reloadBtn.textContent
+    reloadBtn.disabled = true; reloadBtn.textContent = '↻ Reloading…'
+    try {
+      const fresh = await acquireGraphToken({ interactive: false }).catch(() => null)
+      const tk = fresh?.accessToken || token
+      if (tk) {
+        myAccessCache = null
+        await loaded(tk)                                   // re-fetch eligible + active -> Activate tab
+        if (els.panelMyAccess && !els.panelMyAccess.hidden) await loadMyAccessTab(tk, { force: true })
+      }
+    } catch (e) { console.warn('[PIM Activator] Reload Permissions failed:', e?.message || e) }
+    finally { reloadBtn.disabled = false; reloadBtn.textContent = orig }
   }
   // Re-sign in button: unconditionally trigger a fresh interactive sign-in.
   // Previously labelled "Auto-fix permissions" which confused end users (sounds
@@ -3498,6 +4310,7 @@ async function loaded(token) {
       els.myAccessDeactivateSelected.disabled = true
       els.myAccessDeactivateSelected.textContent = `Deactivating ${rows.length}...`
       let ok2 = 0, failed = 0
+      const deactErrs = []
       for (const r of rows) {
         // Reflect per-row status on the button by writing the row name in the toolbar.
         try {
@@ -3514,6 +4327,7 @@ async function loaded(token) {
             await deactivateGroup(tk, r.groupId, 'User-initiated bulk deactivation from PIM Activator')
           }
           ok2++
+          logDiag('Deactivated (bulk): ' + (r.displayName || r.groupName || r.groupId || r.rowKey || '(row)'))
           // Mark the row's per-row button as deactivated for visual feedback.
           // v1.3.0 changed the attribute from data-deact-gid (group only) to
           // data-deact-rk (rowKey) so direct rows also get visual feedback.
@@ -3528,18 +4342,30 @@ async function loaded(token) {
           }
         } catch (e) {
           failed++
-          console.warn(`bulk deactivate failed for ${r.groupId}:`, e?.message || e)
+          const msg = (e && e.message) ? e.message : String(e)
+          deactErrs.push(`${r.tenantName || r.groupName || r.groupId || 'row'}: ${msg}`)
+          console.warn(`bulk deactivate failed for ${r.groupId}:`, msg)
         }
       }
       els.myAccessDeactivateSelected.textContent = `${ok2} deactivated${failed ? `, ${failed} failed` : ''}`
-      // Refresh the tab after a short delay so deactivated rows drop out.
+      // Surface the ACTUAL failure reason(s) -- a bare "N failed" count is not
+      // diagnosable (managed Edge hides DevTools). Show the first few errors.
+      if (deactErrs.length) {
+        alert('Deactivation: ' + ok2 + ' ok, ' + failed + ' failed.\n\n' + deactErrs.slice(0, 5).join('\n'))
+      }
+      // Show the "deactivating" box immediately, refresh My Access now, then run
+      // the propagation watcher to settle the Activate eligibility count as Entra
+      // revokes the unlocked access (1-3 min). 2026-06-17.
+      const scopeIds = rows.filter(x => x.kind === 'group' && x.groupId).map(x => x.groupId)
+      setPropRowStatus(scopeIds, 'Deactivating — waiting for Entra PIM to revoke the permissions…', null, false)
       setTimeout(async () => {
         myAccessSelected.clear()
         myAccessCache = null
-        const fr = await acquireGraphToken({ interactive: false })
-        await loadMyAccessTab(fr?.accessToken, { force: true })
+        const fr = await acquireGraphToken({ interactive: false }).catch(() => null)
+        if (fr?.accessToken) await loadMyAccessTab(fr.accessToken, { force: true })
         updateBulkDeactivateButton()
-      }, 1500)
+        watchPropagation('deactivate', scopeIds)
+      }, 800)
     }
   }
 
@@ -3734,25 +4560,58 @@ async function loaded(token) {
       }
       render()   // refresh checkbox state + "N selected" footer count + any fold-out
 
-      if (unfolded > 0) {
-        // STAY on the Activate tab so the freshly-folded-out permission groups
-        // are visible + activatable right away (the second PIM tier). Don't
-        // auto-switch to My Access here -- that would hide them.
-        els.status.textContent = `Activated. ${unfolded} eligible permission group${unfolded === 1 ? '' : 's'} folded out below — activate the ones you need.`
-      } else {
-        // Auto-switch to My Access tab so the user immediately sees the result
-        // (active groups + the Entra roles they generated) instead of having to
-        // hunt for it. Brief delay lets PendingProvisioning flip to Provisioned
-        // before we query.
-        setActiveTab('myaccess')
-        els.myAccessStatus.textContent = 'Waiting for activation(s) to provision...'
-        await new Promise(r => setTimeout(r, 2500))
-        const fresh = await acquireGraphToken({ interactive: false })
-        const tk = fresh?.accessToken || token
-        await loadMyAccessTab(tk, { force: true })
-      }
+      // ALWAYS stay on the Activate tab. The typical admin flow is to activate a
+      // role group and then activate MORE -- including the nested permission
+      // groups a just-activated role group exposes (the second PIM tier). Auto-
+      // switching to My Access hid those. Instead we RELOAD the eligible groups
+      // (full re-fetch: eligibilities + active memberships + nested discovery)
+      // after a short delay so Entra can propagate the new membership's
+      // transitive eligibilities, so the new permission groups appear in-place.
+      const activatedNames = selected.filter(r => r.kind === 'group').map(r => r.displayName || r.groupId)
+      logDiag('Activated: ' + (activatedNames.join(', ') || '(none)'))
+      els.status.textContent = ''
+      // Show the prominent "activating" box and POLL the user's effective
+      // eligibility list every ~7s, live-updating as Entra propagates the access
+      // the role group unlocks (can be slow), until it settles -- so the user
+      // KNOWS when it's ready instead of guessing / manually refreshing. v1.6.47.
+      // Show the propagation status INLINE on the activated group row(s) (the
+      // "group in scope") + poll until it settles. v1.6.55.
+      const scopeIds = selected.filter(r => r.kind === 'group' && r.groupId).map(r => r.groupId)
+      setPropRowStatus(scopeIds, 'Activating — waiting for Entra PIM to propagate the permissions…', null, false)
+      watchPropagation('activate', scopeIds)
     }
   }
 }
 
-boot()
+// Wire the footer "Diagnostics" button (static markup; DOM is ready because this
+// module is loaded at the end of <body>). Hidden-by-default panel toggles open
+// on click so customers never see raw Graph output during a live demo.
+{
+  const diagBtn = document.getElementById('diag-toggle')
+  if (diagBtn) diagBtn.onclick = (e) => { e.preventDefault(); toggleDiagnosticsPanel() }
+  // Restore the persisted session-event log so Diagnostics shows the full timeline
+  // even after a manual refresh (window.location.reload) wiped the in-memory copy.
+  loadPersistedDiagLog()
+}
+
+// Last-resort net: if boot() ever rejects (an unexpected throw outside the
+// inner try/catches), surface a visible error instead of leaving the popup on
+// "Loading...". Without this, a rejected boot() is a silent unhandled
+// rejection and the user just sees the spinner forever.
+boot().catch((e) => {
+  try { showLoadFailure('graph', e) }
+  catch {
+    const sb = document.getElementById('status-bar')
+    if (sb) { sb.textContent = 'Failed to start: ' + (e && e.message ? e.message : String(e)); sb.classList.add('err') }
+  }
+})
+
+// Global guards so any stray rejected promise / thrown error in an async path
+// (e.g. a background re-render that hits a timeout) is logged with context
+// rather than vanishing -- makes a future hang diagnosable from the console.
+self.addEventListener('unhandledrejection', (ev) => {
+  console.error('[PIM Activator] unhandled promise rejection:', ev.reason)
+})
+self.addEventListener('error', (ev) => {
+  console.error('[PIM Activator] uncaught error:', ev.error || ev.message)
+})

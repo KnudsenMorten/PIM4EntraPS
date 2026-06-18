@@ -89,12 +89,29 @@ if ($Rollback) {
 }
 
 if (-not $SkipBuild) {
-    Step "Build $image from $repoRoot"
-    if ($PSCmdlet.ShouldProcess($image,'az acr build')) {
-        Push-Location $repoRoot
-        try { az acr build -r $AcrName -t "$ImageRepo`:$ImageTag" -f SOLUTIONS/PIM4EntraPS/tools/pim-manager/Dockerfile . }
-        finally { Pop-Location }
+    Step "Build $image via Build-PimManagerImage (clean git-archive context)"
+    if ($PSCmdlet.ShouldProcess($image,'Build-PimManagerImage')) {
+        # Use the dedicated builder, NOT a raw `az acr build . ` of the repo root: the
+        # raw context includes .claude/worktrees and blows MAX_PATH on the hosted build,
+        # so the build FAILED while a missing $LASTEXITCODE check let the roll proceed to
+        # a tag that was never pushed -> ImagePullFailure / ActivationFailed (bit 2.4.227
+        # + 2.4.228, 2026-06-18). Build-PimManagerImage builds from a clean `git archive`
+        # subtree and throws on failure.
+        & (Join-Path $PSScriptRoot 'Build-PimManagerImage.ps1') -ImageTag $ImageTag -AcrName $AcrName -ImageRepo $ImageRepo
+        if ($LASTEXITCODE -ne 0) { throw "Update-PimContainers: image build FAILED (exit $LASTEXITCODE) for $image -- NOT rolling (a roll to an unbuilt tag creates an ImagePullFailure revision). Fix the build and re-run." }
     }
+}
+
+# Pre-roll guard (belt-and-suspenders, runs even with -SkipBuild): NEVER roll to a tag
+# that isn't actually in the registry. A failed/skipped build previously rolled to a
+# missing tag -> the new revision ImagePullFailures + sits ActivationFailed while the old
+# revision keeps serving, so the "deploy" silently does nothing. Fail loudly instead.
+if (-not $WhatIfPreference) {
+    $existingTags = @(az acr repository show-tags -n $AcrName --repository $ImageRepo -o tsv 2>$null)
+    if ($existingTags -notcontains $ImageTag) {
+        throw "Update-PimContainers: image tag '$ImageTag' is NOT present in ACR '$AcrName/$ImageRepo' (tags: $($existingTags -join ', ')) -- refusing to roll (would ImagePullFailure). Build it first (omit -SkipBuild) or pick an existing tag."
+    }
+    Write-Host "  Verified $ImageRepo`:$ImageTag exists in ACR before rolling." -ForegroundColor Green
 }
 
 foreach ($app in $existing) {
