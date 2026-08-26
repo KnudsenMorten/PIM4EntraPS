@@ -17,7 +17,7 @@ Write-Output "PIM Baseline Management"
 Write-Output ""
 Write-Output "Purpose: Onboarding and management of admin accounts, groups and default PIM assignments"
 Write-Output ""
-Write-Output "Support: Morten Knudsen - mok@2linkit.net | 40 178 179"
+Write-Output "Support: GitHub Issues on the public repo, or mok@mortenknudsen.net"
 Write-Output "***********************************************************************************************"
 
 #------------------------------------------------------------------------------------------------------------
@@ -590,7 +590,7 @@ Write-Output "******************************************************************
                                         -isEscalationEnabled $True `
                                         -escalationTimeInMinutes 30 `
                                         -approvalStageTimeOutInDays 3 `
-                                        -primaryApprovers @("mok@2linkit.net") -escalationApprovers @("mok@2linkit.net","x-admin-mok-id@2linkit.net") `
+                                        -primaryApprovers @("admin@contoso.com") -escalationApprovers @("admin@contoso.com","x-admin-id@contoso.com") `
                                         -caller EndUser -Operations All -Level Assignment -inheritableSettings @() -enforcedSettings @()
     #>
 
@@ -768,7 +768,7 @@ Write-Output "******************************************************************
                                     -isEscalationEnabled $True `
                                     -escalationTimeInMinutes 30 `
                                     -approvalStageTimeOutInDays 3 `
-                                    -primaryApprovers @("mok@2linkit.net") -escalationApprovers @("mok@2linkit.net","x-admin-mok-id@2linkit.net") `
+                                    -primaryApprovers @("admin@contoso.com") -escalationApprovers @("admin@contoso.com","x-admin-id@contoso.com") `
                                     -caller EndUser -Operations All -Level Assignment -inheritableSettings @() -enforcedSettings @()
 #>
 
@@ -918,7 +918,7 @@ Write-Output "******************************************************************
                                     -isEscalationEnabled $True `
                                     -escalationTimeInMinutes 30 `
                                     -approvalStageTimeOutInDays 3 `
-                                    -primaryApprovers @("mok@2linkit.net") -escalationApprovers @("mok@2linkit.net","x-admin-mok-id@2linkit.net") `
+                                    -primaryApprovers @("admin@contoso.com") -escalationApprovers @("admin@contoso.com","x-admin-id@contoso.com") `
                                     -caller EndUser -Operations All -Level Assignment -inheritableSettings @() -enforcedSettings @()
 #>
 
@@ -1202,7 +1202,7 @@ Write-Output "******************************************************************
                                             -isEscalationEnabled $True `
                                             -escalationTimeInMinutes 30 `
                                             -approvalStageTimeOutInDays 3 `
-                                            -primaryApprovers @("mok@2linkit.net") -escalationApprovers @("mok@2linkit.net","x-admin-mok-id@2linkit.net") `
+                                            -primaryApprovers @("admin@contoso.com") -escalationApprovers @("admin@contoso.com","x-admin-id@contoso.com") `
                                             -caller EndUser -Operations All -Level Assignment -inheritableSettings @() -enforcedSettings @()
         #>
 

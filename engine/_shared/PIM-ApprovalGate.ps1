@@ -45,6 +45,25 @@
 
 Set-StrictMode -Off
 
+# IMP-03: the one visible way to swallow a non-fatal error (loaded defensively --
+# tests and the Manager dot-source this file standalone).
+if (-not (Get-Command Write-PimSwallowed -ErrorAction SilentlyContinue)) { . (Join-Path $PSScriptRoot 'PIM-Swallow.ps1') }
+
+function Write-PimApprovalAuditMiss {
+    # IMP-03: an audit write that failed on a maker/checker transition. It is CORRECT
+    # not to rethrow -- an audit failure must not undo an approval or mask an abort
+    # (same rule as the disable-guard alert). But this file IS the governance record
+    # for destructive identity actions, so a missing entry must not be invisible:
+    # otherwise the evidence that a human approved an offboard simply is not there,
+    # and nothing ever said so. Never throws.
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string]$Event, [string]$Target = '', [AllowNull()][object]$ErrorRecord = $null)
+    if (Get-Command Write-PimSwallowed -ErrorAction SilentlyContinue) {
+        Write-PimSwallowed -Scope 'approval-audit-write' -ErrorRecord $ErrorRecord `
+            -Consequence ("audit event '{0}' for target '{1}' was NOT recorded -- the action still proceeded, so the audit trail is now incomplete" -f $Event, $Target)
+    }
+}
+
 # ---- break-glass exclusion + interim revoke-guard plan (SHARED, engine-side) -
 # These pure helpers were introduced for the interim #81 Manager revoke guard. They
 # are defined HERE in engine/_shared so the ENGINE (which does not load the Manager)
@@ -373,14 +392,25 @@ function Get-PimApprovalRequests {
     [CmdletBinding()]
     param([string]$Status, [string]$Action, [string]$Target)
     $all = $null
+    # IMP-03: a read that THROWS is remembered and reported only if the whole chain
+    # then yields nothing. An empty approval list is not neutral -- every gate here
+    # fails CLOSED on it, so an unreadable store looks exactly like "this action was
+    # never approved". Failing closed is right; doing it without a trace is not.
+    $readErr = $null
     if (Get-Command Get-PimSetting -ErrorAction SilentlyContinue) {
-        try { $v = Get-PimSetting -Name $script:PimApprovalSettingName; if ($v) { $tmp = if ($v -is [string]) { $v | ConvertFrom-Json } else { $v }; $all = @($tmp) } } catch {}
+        try { $v = Get-PimSetting -Name $script:PimApprovalSettingName; if ($v) { $tmp = if ($v -is [string]) { $v | ConvertFrom-Json } else { $v }; $all = @($tmp) } } catch { $readErr = $_ }
     }
     if ($null -eq $all) {
         $p = Get-PimApprovalStorePath
-        if ($p -and (Test-Path -LiteralPath $p)) { try { $tmp = (Get-Content -LiteralPath $p -Raw -Encoding UTF8) | ConvertFrom-Json; $all = @($tmp) } catch {} }
+        if ($p -and (Test-Path -LiteralPath $p)) { try { $tmp = (Get-Content -LiteralPath $p -Raw -Encoding UTF8) | ConvertFrom-Json; $all = @($tmp) } catch { $readErr = $_ } }
     }
-    if ($null -eq $all) { $all = @($script:PimApprovalRequestsMem) }
+    if ($null -eq $all) {
+        if ($readErr -and (Get-Command Write-PimSwallowed -ErrorAction SilentlyContinue)) {
+            Write-PimSwallowed -Scope 'approval-store-read' -ErrorRecord $readErr `
+                -Consequence 'approval requests fall back to the in-process list -- a persisted approval may be invisible, and every gate fails CLOSED on a missing approval'
+        }
+        $all = @($script:PimApprovalRequestsMem)
+    }
     $all = @(@($all) | Where-Object { $_ })
     if ("$Status".Trim()) { $all = @($all | Where-Object { "$($_.status)" -eq "$Status" }) }
     if ("$Action".Trim()) { $act = Test-PimApprovalAction -Action $Action; $all = @($all | Where-Object { (Test-PimApprovalAction -Action "$($_.action)") -eq $act }) }
@@ -394,12 +424,31 @@ function Save-PimApprovalRequests {
     $script:PimApprovalRequestsMem = @($Requests)
     $json = (@($Requests) | ConvertTo-Json -Depth 12)
     if ($null -eq $json) { $json = '[]' }
-    if (Get-Command Set-PimSetting -ErrorAction SilentlyContinue) { try { Set-PimSetting -Name $script:PimApprovalSettingName -Value $json | Out-Null; return } catch {} }
+    # IMP-03: the SQL write failing and the file write catching it is a working
+    # fallback -- silent by design. BOTH failing is not: the decision then exists
+    # only in this process's memory and dies with it, and the caller is told nothing.
+    $writeErr = $null
+    if (Get-Command Set-PimSetting -ErrorAction SilentlyContinue) { try { Set-PimSetting -Name $script:PimApprovalSettingName -Value $json | Out-Null; return } catch { $writeErr = $_ } }
     $p = Get-PimApprovalStorePath
+    $persisted = $false
     if ($p) {
+        # BUG-07: this New-Item was OUTSIDE the try. Under $ErrorActionPreference='Stop'
+        # (which the Manager and engine set) an uncreatable store directory made
+        # Save-PimApprovalRequests THROW -- and every caller here (Add-, Resolve-, Set-
+        # ...Executed) calls it unguarded, so an approve/deny/execute became an
+        # exception instead of degrading down the documented
+        # "SQL setting -> JSON file -> in-mem last resort" chain. The in-mem last
+        # resort could never be reached, which is the one thing it exists for.
         $dir = Split-Path -Parent $p
-        if ($dir -and -not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
-        try { Set-Content -LiteralPath $p -Value $json -Encoding UTF8 } catch {}
+        try {
+            if ($dir -and -not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Path $dir -Force -ErrorAction Stop | Out-Null }
+            Set-Content -LiteralPath $p -Value $json -Encoding UTF8 -ErrorAction Stop
+            $persisted = $true
+        } catch { $writeErr = $_ }
+    }
+    if (-not $persisted -and (Get-Command Write-PimSwallowed -ErrorAction SilentlyContinue)) {
+        Write-PimSwallowed -Scope 'approval-store-write' -ErrorRecord $writeErr `
+            -Consequence 'approval state kept IN MEMORY ONLY -- it is lost when this process ends, and a granted approval will read as never granted'
     }
 }
 
@@ -423,7 +472,7 @@ function Add-PimApprovalRequest {
         if (Get-Command Write-PimAuditEvent -ErrorAction SilentlyContinue) {
             Write-PimAuditEvent -Action ("approval.request.created") -Target "$Target" -After @{ id = $req.id; action = $req.action; requestor = $Requestor; ticket = $Ticket } | Out-Null
         }
-    } catch {}
+    } catch { Write-PimApprovalAuditMiss -Event 'approval.request.created' -Target "$Target" -ErrorRecord $_ }
     return $req
 }
 
@@ -453,7 +502,7 @@ function Set-PimApprovalDecision {
             if ($res.ok -and (Get-Command Write-PimAuditEvent -ErrorAction SilentlyContinue)) {
                 Write-PimAuditEvent -Action ("approval.request." + $res.request.status.ToLowerInvariant()) -Target "$($res.request.target)" -After @{ id = $res.request.id; approver = $Approver; action = $res.request.action } | Out-Null
             }
-        } catch {}
+        } catch { Write-PimApprovalAuditMiss -Event ('approval.request.' + "$($res.request.status)") -Target "$($res.request.target)" -ErrorRecord $_ }
     }
     return $res
 }
@@ -476,7 +525,7 @@ function Set-PimApprovalRequestExecuted {
     $new.executedUtc = $NowUtc.ToUniversalTime().ToString('o')
     $all[$idx] = $new
     Save-PimApprovalRequests -Requests $all
-    try { if (Get-Command Write-PimAuditEvent -ErrorAction SilentlyContinue) { Write-PimAuditEvent -Action 'approval.request.executed' -Target "$($new.target)" -After @{ id = $new.id; action = $new.action } | Out-Null } } catch {}
+    try { if (Get-Command Write-PimAuditEvent -ErrorAction SilentlyContinue) { Write-PimAuditEvent -Action 'approval.request.executed' -Target "$($new.target)" -After @{ id = $new.id; action = $new.action } | Out-Null } } catch { Write-PimApprovalAuditMiss -Event 'approval.request.executed' -Target "$($new.target)" -ErrorRecord $_ }
     return [pscustomobject]@{ ok = $true; request = $new; reason = 'marked executed' }
 }
 
@@ -546,6 +595,17 @@ function Test-PimOffboardExecutionAllowed {
     if (Get-Command Test-PimDisablePassAllowed -ErrorAction SilentlyContinue) {
         $d = Test-PimDisablePassAllowed -ToDisable $ToDisable -Scanned $Scanned -Desired $Desired -DesiredResolved $DesiredResolved -FeatureOverride $FeatureOverride
         if (-not $d.allowed) {
+            # BUG-01: the breaker tripping must be LOUD on every path, not just the engine's.
+            # This is an execution path (guard B, immediately before the offboard sequence
+            # runs), never a preview -- so the alert fires only on a real attempt that was
+            # stopped. Wrapped: blocking the offboard is the SAFE outcome, so a failing
+            # alert (mail down, audit unwritable) must never turn it into an exception --
+            # telling the operator is best-effort, stopping the offboard is not.
+            try {
+                if (Get-Command Write-PimDisableAbortAlert -ErrorAction SilentlyContinue) {
+                    Write-PimDisableAbortAlert -Scope ("offboard:" + "$Target") -Decision $d
+                }
+            } catch { Write-Warning "offboard gate: abort alert failed to send -- $($_.Exception.Message)" }
             return [pscustomobject]@{ allowed = $false; gate = ("disable-guard:" + "$($d.tripped)"); reason = ("disable safety guard blocked the offboard: " + "$($d.reason)"); approval = $appr }
         }
     }
@@ -765,7 +825,7 @@ function Invoke-PimOffboardExecution {
         if (Get-Command Write-PimAuditEvent -ErrorAction SilentlyContinue) {
             Write-PimAuditEvent -Action 'offboard.executed' -Target $target -After @{ id = "$($rec.id)"; approver = "$($g.approval.approver)"; steps = $results.Count; allOk = $allOk } | Out-Null
         }
-    } catch {}
+    } catch { Write-PimApprovalAuditMiss -Event 'offboard.executed' -Target "$target" -ErrorRecord $_ }
 
     return [pscustomobject]@{
         ok       = $allOk
@@ -897,7 +957,7 @@ function Invoke-PimRevokeExecution {
         if (Get-Command Write-PimAuditEvent -ErrorAction SilentlyContinue) {
             Write-PimAuditEvent -Action 'revoke.executed' -Target "$Target" -After @{ approver = "$($g.approval.approver)"; gate = "$($g.gate)"; revoked = $okCount; failed = $errCount; skipped = [int]$plan.skippedCount; justification = "$Justification" } | Out-Null
         }
-    } catch {}
+    } catch { Write-PimApprovalAuditMiss -Event 'revoke.executed' -Target "$Target" -ErrorRecord $_ }
 
     return [pscustomobject]@{
         ok            = $execOk

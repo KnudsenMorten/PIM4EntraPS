@@ -25,8 +25,9 @@
                                       <server>.database.windows.net:1433.
 
 .PARAMETER SqlServer
-    Azure SQL logical server FQDN. Defaults to $env:PIM_SqlServer or the
-    platform default below.
+    Azure SQL logical server FQDN. Taken from $env:PIM_SqlServer when not passed.
+    REQUIRED -- there is no built-in default (SEC-05): this is break-glass against
+    live data, so the script refuses to start rather than guess a server.
 
 .PARAMETER SqlDatabase
     Database name. Defaults to $env:PIM_SqlDatabase or 'PimPlatform'.
@@ -45,7 +46,11 @@
 #>
 [CmdletBinding()]
 param(
-    [string]$SqlServer  = $(if ($env:PIM_SqlServer)   { $env:PIM_SqlServer }   else { 'sql-pimplatform-we484.database.windows.net' }),
+    # SEC-05: NO built-in server default. This shipped with the author's own platform
+    # server baked in, which both leaked a real infra name into published source and
+    # meant a customer running the break-glass console pointed at someone else's
+    # database unless they happened to override it. Supply it, or set PIM_SqlServer.
+    [string]$SqlServer  = "$env:PIM_SqlServer",
     [string]$SqlDatabase = $(if ($env:PIM_SqlDatabase) { $env:PIM_SqlDatabase } else { 'PimPlatform' }),
     [string]$TenantId   = $(if ($env:PIM_TenantId)    { $env:PIM_TenantId }    else { 'organizations' }),
     [int]$Port = 0
@@ -59,6 +64,18 @@ Write-Host '  ==================================================================
 Write-Host '   PIM4EntraPS -- EMERGENCY / BREAK-GLASS console (loopback, client PC)' -ForegroundColor Red
 Write-Host '  ====================================================================' -ForegroundColor Red
 Write-Host ''
+if (-not "$SqlServer".Trim()) {
+    Write-Host ''
+    Write-Host '   NO SQL SERVER SPECIFIED.' -ForegroundColor Red
+    Write-Host '   This is break-glass against LIVE data, so there is deliberately no' -ForegroundColor Red
+    Write-Host '   built-in default -- pointing at the wrong database in an emergency is' -ForegroundColor Red
+    Write-Host '   worse than not starting. Supply your own platform server:' -ForegroundColor Red
+    Write-Host ''
+    Write-Host '     .\Start-PimEmergency.ps1 -SqlServer <your-server>.database.windows.net' -ForegroundColor Yellow
+    Write-Host '     (or set $env:PIM_SqlServer)' -ForegroundColor Yellow
+    Write-Host ''
+    exit 2
+}
 Write-Host "   SQL   : $SqlServer / $SqlDatabase" -ForegroundColor Yellow
 Write-Host  '   Auth  : INTERACTIVE -- you sign in as yourself (action audited under you).' -ForegroundColor Yellow
 Write-Host  '   Data  : live Azure SQL (same DB as the hosted app; no local copy, no CSV).' -ForegroundColor Yellow

@@ -326,10 +326,32 @@ function Get-PimInactivitySweepDecision {
         }
     }
 
+    # BUG-03: pass the caller's TenantId INTO the guard, so the decision and the reported
+    # environment class describe the same tenant. Previously the guard resolved the tenant
+    # from the ambient global while the report below computed its class from -TenantId --
+    # so a sweep invoked with -TenantId <test> could print environment=test while the guard
+    # had applied the PROTECTED default (or the reverse).
     $verdict = Test-PimDisablePassAllowed -ToDisable $toDisable -Scanned $scanned `
-        -Desired $Desired -DesiredResolved $DesiredResolved -FeatureOverride $FeatureOverride
-    # The guard already factors TenantId via the global; expose the env class for the report.
-    $envClass = if (Get-Command Resolve-PimEnvironmentClass -ErrorAction SilentlyContinue) { Resolve-PimEnvironmentClass -TenantId $TenantId } else { 'protected' }
+        -Desired $Desired -DesiredResolved $DesiredResolved -FeatureOverride $FeatureOverride -TenantId $TenantId
+    # BUG-01: an Enforce sweep that the breaker stops must not return quietly. Without
+    # this the operator sees a sweep that "ran" and disabled nothing, and reasonably
+    # reads that as a clean estate -- when the safety net actually caught a blast-radius
+    # event. Enforce only (Report mode returned above), so this is a real attempt, not a
+    # preview. Wrapped: the abort is the SAFE outcome, so a failing alert (mail down,
+    # audit unwritable) must never turn it into an exception -- telling the operator
+    # is best-effort, stopping the disable is not.
+    if (-not $verdict.allowed) {
+        try {
+            if (Get-Command Write-PimDisableAbortAlert -ErrorAction SilentlyContinue) {
+                Write-PimDisableAbortAlert -Scope 'inactivity-sweep' -Decision $verdict
+            }
+        } catch { Write-Warning "inactivity sweep: abort alert failed to send -- $($_.Exception.Message)" }
+    }
+    # BUG-03: report the class the GUARD used, not a separately-computed one. The guard now
+    # echoes it back, so the readout can no longer disagree with the decision it describes.
+    $envClass = if ($verdict.PSObject.Properties['environment'] -and "$($verdict.environment)".Trim()) { "$($verdict.environment)" }
+                elseif (Get-Command Resolve-PimEnvironmentClass -ErrorAction SilentlyContinue) { Resolve-PimEnvironmentClass -TenantId $TenantId }
+                else { 'protected' }
 
     return [pscustomobject]@{
         mode='Enforce'

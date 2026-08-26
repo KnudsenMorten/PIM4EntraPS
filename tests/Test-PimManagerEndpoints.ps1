@@ -102,6 +102,16 @@ $accessFile   = Join-Path $cfgDir 'manager-access.custom.json'
 $settingsFile = Join-Path $cfgDir 'manager-settings.custom.json'
 $accessBak   = if (Test-Path $accessFile)   { Get-Content -LiteralPath $accessFile   -Raw -Encoding UTF8 } else { $null }
 $settingsBak = if (Test-Path $settingsFile) { Get-Content -LiteralPath $settingsFile -Raw -Encoding UTF8 } else { $null }
+# TEST-06: the per-entry ring round-trip below drives POST /api/conformance/promote,
+# and that endpoint rewrites the whole template file through its serializer -- which
+# does NOT round-trip the curated fields (_doc, versionHistory, approvedBy). Putting
+# the ring value back is therefore not enough: the file still comes out different.
+# A test must not leave a TRACKED source file modified, so snapshot the exact bytes
+# here, restore them straight after the round-trip, and assert at the end of the run
+# that the file is byte-identical. The finally block restores again in case we throw
+# between the promote and the inline restore.
+$confTplFile = Join-Path $solRoot 'workloads\templates\defender-xdr-roles.template.json'
+$confTplBak  = if (Test-Path -LiteralPath $confTplFile) { [System.IO.File]::ReadAllBytes($confTplFile) } else { $null }
 # The running identity must stay SuperAdmin across the access-map write so the
 # server doesn't lock itself out mid-test.
 $me = try { [System.Security.Principal.WindowsIdentity]::GetCurrent().Name } catch { $env:USERNAME }
@@ -266,7 +276,9 @@ try {
     # drives POST /api/conformance/promote (-> Set-PimEntryRing). Round-trip:
     # read an entry's current ring from /api/conformance, promote it to a NEW
     # ring, read back and confirm /api/conformance.rings reflects the change,
-    # then restore the original ring (template file write is reversible here).
+    # then restore the original ring. NOTE (TEST-06): putting the ring back does
+    # NOT leave the file unchanged -- the endpoint re-serializes the whole template
+    # and drops the curated fields -- so we restore the snapshotted BYTES as well.
     # Proves the GUI ring widget's endpoint actually persists + reflects.
     # -------------------------------------------------------------------
     Write-Host "POST /api/conformance/promote (per-entry ring control)" -ForegroundColor Cyan
@@ -281,6 +293,23 @@ try {
         $pr = Invoke-RestMethod -Uri "$base/api/conformance/promote" -Headers $hdr -Method Post -ContentType 'application/json' -TimeoutSec 30 -Body (@{ templateId=$confTpl; key=$entryKey; ring=$newRing } | ConvertTo-Json)
         $c1 = Probe ('/api/conformance?template=' + $confTpl)
         $okPromote = ($pr.ok -and [int]$pr.ring -eq $newRing -and [int]$c1.rings.$entryKey -eq $newRing)
+
+        # BUG-06: a ring promotion must change the RING and nothing else. Measured on the
+        # real file, through the real endpoint, while the new ring is still in place --
+        # this is the assertion the old whole-file re-serialize could never pass.
+        $afterPromote = [System.IO.File]::ReadAllBytes($confTplFile)
+        $sameLen = ($null -ne $confTplBak -and $afterPromote.Length -eq $confTplBak.Length)
+        $diffCount = -1
+        if ($sameLen) {
+            $diffCount = 0
+            for ($bi = 0; $bi -lt $afterPromote.Length; $bi++) { if ($afterPromote[$bi] -ne $confTplBak[$bi]) { $diffCount++ } }
+        }
+        T "BUG-06: promote does not resize the curated template ($($confTplBak.Length) bytes)" $sameLen
+        T "BUG-06: promote changes EXACTLY ONE byte (the ring digit) -- diff=$diffCount" ($diffCount -eq 1)
+        # ...and it must not introduce a UTF-8 BOM: this codebase reads/writes these files
+        # BOM-less, and Set-Content -Encoding UTF8 on WinPS 5.1 used to add one.
+        $hasBom = ($afterPromote.Length -ge 3 -and $afterPromote[0] -eq 0xEF -and $afterPromote[1] -eq 0xBB -and $afterPromote[2] -eq 0xBF)
+        T 'BUG-06: promote does not add a UTF-8 BOM' (-not $hasBom)
         # restore the original ring so the template file is left unchanged.
         Invoke-RestMethod -Uri "$base/api/conformance/promote" -Headers $hdr -Method Post -ContentType 'application/json' -TimeoutSec 30 -Body (@{ templateId=$confTpl; key=$entryKey; ring=$origRing } | ConvertTo-Json) | Out-Null
     } catch { Write-Host "      (promote: $($_.Exception.Message.Split([char]10)[0]))" -ForegroundColor DarkGray }
@@ -292,6 +321,10 @@ try {
         Invoke-RestMethod -Uri "$base/api/conformance/promote" -Headers $hdr -Method Post -ContentType 'application/json' -TimeoutSec 30 -Body (@{ templateId='defender-xdr-roles'; key='zzz-no-such-entry'; ring=1 } | ConvertTo-Json) | Out-Null
     } catch { $okPromoteBad = ([int]$_.Exception.Response.StatusCode -eq 400) }
     T 'conformance promote unknown entry -> 400' $okPromoteBad
+    # TEST-06: both promote calls above are done with the template file -- put the
+    # curated bytes back now, so the rest of the run sees the same input the first
+    # run saw and the tracked file is never left modified.
+    if ($null -ne $confTplBak) { [System.IO.File]::WriteAllBytes($confTplFile, $confTplBak) }
 
     # -------------------------------------------------------------------
     # Alerting recorded-send PROOF round-trip (§26c / §28 [H2] + [M5] residual).
@@ -810,10 +843,30 @@ try {
     try { Invoke-RestMethod -Uri "$base/api/jobs/ack" -Headers $hdr -Method Post -ContentType 'application/json' -TimeoutSec 30 -Body (@{} | ConvertTo-Json) | Out-Null } catch { $okAckBad = ([int]$_.Exception.Response.StatusCode -eq 400) }
     T 'POST /api/jobs/ack without runId -> 400' $okAckBad
 
+    # --- Governance PREVIEW gate over real HTTP (REQUIREMENTS §27 PreviewGate) -------
+    # The two security-sensitive governance surfaces ship OFF by default: while a
+    # preview is disabled its mutating endpoints must short-circuit (409 previewDisabled
+    # -- inert). Prove that, then ENABLE both previews so the rest of the approvals +
+    # conformance endpoint tests below exercise the live (enabled) behaviour.
+    Beat
+    $previewBlocked = $false
+    try { PostJson '/api/approvals' @{ action='offboard'; target='preview-off@test'; justification='x' } | Out-Null }
+    catch { $previewBlocked = ([int]$_.Exception.Response.StatusCode -eq 409) }
+    T 'POST /api/approvals blocked 409 while preview OFF (default)' $previewBlocked
+    try {
+        $gp0 = Probe '/api/settings/governance-preview'
+        T 'governance-preview defaults both OFF' (-not $gp0.flags.approvalsPreview -and -not $gp0.flags.conformancePreview)
+    } catch { T 'governance-preview defaults both OFF' $false }
+    try {
+        $gp1 = PutJson '/api/settings/governance-preview' @{ value = @{ flags = @{ approvalsPreview = $true; conformancePreview = $true } } }
+        T 'enable both governance previews (SuperAdmin PUT)' ($gp1.flags.approvalsPreview -and $gp1.flags.conformancePreview)
+    } catch { T 'enable both governance previews (SuperAdmin PUT)' $false; Write-Host "      ($($_.Exception.Message.Split([char]10)[0]))" -ForegroundColor DarkGray }
+
     # --- Approvals queue (maker/checker) over real HTTP (REQUIREMENTS §13/§27 H3/H4) ---
     # Proves the Approvals endpoints are wired in the live server: raise -> list ->
     # self-approve blocked (separation of duties) -> bad input rejected. (maker!=checker
     # with two distinct identities is exercised in-proc by Test-PimApprovalsGui.ps1.)
+    # (Preview enabled just above, so these reach the live behaviour.)
     Beat
     $apprId = $null
     try {
@@ -873,12 +926,145 @@ try {
     # Overdue read is never dead (seed fallback offline).
     try { $od = Probe '/api/access-reviews/overdue'; T 'GET /api/access-reviews/overdue returns rows (seed fallback)' (@($od.rows).Count -ge 1) }
     catch { T 'GET /api/access-reviews/overdue returns rows (seed fallback)' $false }
+
+    # =======================================================================
+    # BATCH 1 -- server-side enforcement + safety guards (live HTTP).
+    # The endpoint test runs as the local single-operator SuperAdmin, so the new
+    # gates must NOT break the happy path; and the empty-set guard must fire on
+    # the plain PUT for everyone (it is a safety net, not a permission wall).
+    # =======================================================================
+    Write-Host "Batch 1: server-side enforcement + safety guards" -ForegroundColor Cyan
+
+    # FIX 4 happy-path: the audit gate is Admin+; the local operator is SuperAdmin,
+    # so /api/audit + /api/audit/export still return 200 (the gate didn't break the
+    # operator's own access).
+    Beat
+    $okAuditOk = $false
+    try { $r = Probe "/api/audit?q=$seedMarker&pageSize=5"; $okAuditOk = ($null -ne $r -and $r.PSObject.Properties['events']) } catch {}
+    T 'FIX4: GET /api/audit still 200 for the SuperAdmin operator (gate intact, happy path)' $okAuditOk
+    $okExpOk = $false
+    try { $wr = Invoke-WebRequest -Uri "$base/api/audit/export?q=$seedMarker&months=all" -Headers $hdr -TimeoutSec 60 -UseBasicParsing; $okExpOk = ([int]$wr.StatusCode -eq 200) } catch {}
+    T 'FIX4: GET /api/audit/export still 200 for the SuperAdmin operator (happy path)' $okExpOk
+
+    # FIX 5: the empty-set / large-delta guard on the plain PUT, proven live but
+    # WITHOUT leaving repo residue. We PUT to a THROWAWAY entity in an isolated temp
+    # config dir would require a second server; instead we exercise the guard against
+    # a real entity and ALWAYS restore + remove any created .custom.csv in finally.
+    # (a) empty PUT WITHOUT confirm -> 409 (DENY); (b) WITH confirm -> 200 (ALLOW).
+    Beat
+    $guardBase = 'Account-Definitions-Admins'
+    $guardCustomCsv = Join-Path $solRoot ("config\{0}.custom.csv" -f $guardBase)
+    $guardPreExisted = Test-Path -LiteralPath $guardCustomCsv
+    $guardCsvBak = if ($guardPreExisted) { [System.IO.File]::ReadAllText($guardCustomCsv) } else { $null }
+    $script:guardCustomCsv = $guardCustomCsv; $script:guardPreExisted = $guardPreExisted; $script:guardCsvBak = $guardCsvBak
+    $origRows = @()
+    try { $cur = Probe ("/api/csv/$guardBase"); $origRows = @($cur.rows) } catch {}
+    if (@($origRows).Count -ge 2) {
+        $okEmptyBlocked = $false
+        try { PutJson "/api/csv/$guardBase" @{ rows = @() } | Out-Null }
+        catch { if ([int]$_.Exception.Response.StatusCode -eq 409) { $okEmptyBlocked = $true } }
+        T 'FIX5: PUT that empties a populated entity WITHOUT confirm -> 409 (DENY)' $okEmptyBlocked
+
+        $okEmptyConfirm = $false
+        try { $res = PutJson "/api/csv/$guardBase" @{ rows = @(); confirm = $true }; $okEmptyConfirm = ($res.ok -eq $true) }
+        catch { Write-Host "      (confirm empty PUT: $($_.Exception.Message.Split([char]10)[0]))" -ForegroundColor DarkGray }
+        T 'FIX5: the SAME empty PUT WITH confirm=true -> 200 (ALLOW)' $okEmptyConfirm
+
+        # Restore the original rows (small grow -> add-only -> never delta-blocked).
+        # NOTE this commit's PRE-commit snapshot is the EMPTY state we just wrote -- which
+        # is exactly what the restore-to-empty assertion below needs.
+        try { PutJson "/api/csv/$guardBase" @{ rows = $origRows; confirm = $true } | Out-Null } catch {}
+
+        # BUG-05 (2026-08-05) -- RESTORE back to a ZERO-ROW snapshot.
+        # Write-PimCsvCustom is not only the commit writer, it is also the RESTORE script
+        # inside Invoke-PimManagerSafeCommit. Its Mandatory [object[]]$Rows rejected @() at
+        # BINDING time, so undo-to-empty died with "Cannot bind argument to parameter
+        # 'Rows'" and surfaced as a 500 -- the same root cause as the empty commit above,
+        # on a path that had NO test at all. Fixed with [AllowEmptyCollection()].
+        # A refusal here must be a 409 (delta guard), never a 500 (crash).
+        Beat
+        $okRestoreEmpty = $false
+        $restoreEmptyDetail = 'no zero-row snapshot found to restore'
+        try {
+            $bl = Probe "/api/backups/$guardBase"
+            $emptySnap = @($bl.backups | Where-Object { [int]$_.rowCount -eq 0 } | Select-Object -First 1)
+            if (@($emptySnap).Count -eq 1) {
+                $rr = PostJson '/api/backups/restore' @{ id = "$($emptySnap[0].id)"; base = $guardBase; confirm = $true }
+                $okRestoreEmpty = ($rr.ok -eq $true -and [int]$rr.rowCount -eq 0)
+                $restoreEmptyDetail = "restored rowCount=$([int]$rr.rowCount)"
+            }
+        } catch {
+            $restoreEmptyDetail = "HTTP $([int]$_.Exception.Response.StatusCode): $($_.ErrorDetails.Message)"
+        }
+        T "BUG-05: restore to a ZERO-ROW snapshot succeeds (not a 500) -- $restoreEmptyDetail" $okRestoreEmpty
+
+        # Put the original rows back after the restore-to-empty proof.
+        try { PutJson "/api/csv/$guardBase" @{ rows = $origRows; confirm = $true } | Out-Null } catch {}
+    } else {
+        T 'FIX5: PUT delta guard (skipped -- entity not populated enough offline)' $true
+    }
+
+    # -------------------------------------------------------------------
+    # TEST-06 residue gate -- runs LAST, after every endpoint test above.
+    # This suite is the only one that writes a TRACKED source file, and it does
+    # so through a product endpoint whose rewrite is lossy. Assert here that the
+    # working tree is left exactly as we found it. This is not just a check of
+    # the inline restore: it fails if ANY test added later writes to the template
+    # after that restore point, which is how this defect got in unnoticed.
+    # -------------------------------------------------------------------
+    $okTplClean = $false; $tplDetail = 'template not present at snapshot time'
+    if ($null -ne $confTplBak) {
+        $now = if (Test-Path -LiteralPath $confTplFile) { [System.IO.File]::ReadAllBytes($confTplFile) } else { $null }
+        if ($null -eq $now) { $tplDetail = 'file missing after run' }
+        elseif ($now.Length -ne $confTplBak.Length) { $tplDetail = "size $($confTplBak.Length) -> $($now.Length) bytes" }
+        else {
+            $diff = -1
+            for ($i = 0; $i -lt $now.Length; $i++) { if ($now[$i] -ne $confTplBak[$i]) { $diff = $i; break } }
+            if ($diff -ge 0) { $tplDetail = "first byte differs at offset $diff" }
+            else { $okTplClean = $true; $tplDetail = "$($now.Length) bytes, byte-identical" }
+        }
+    }
+    T "TEST-06: tracked template left unmodified by the suite -- $tplDetail" $okTplClean
+
+    # ---- TEST-31: RESTORE the governance-preview flags this suite turned ON -----------
+    # 🔴 WITHOUT THIS THE SUITE ONLY PASSES ON A FIRST RUN. The PUT above enables both
+    # previews and they PERSIST in config/manager-settings.custom.json, so the very next
+    # run finds them ON and fails three assertions that have nothing to do with the code:
+    #   'governance-preview defaults both OFF'
+    #   'POST /api/approvals blocked 409 while preview OFF (default)'
+    #   'audit: from/to date range narrows to in-range events only'
+    # Measured 2026-08-20: 107/3 on a repeat run, 110/0 after resetting the two flags by
+    # hand. That is a test polluting its own precondition -- the failure names governance
+    # and approvals, and the cause is that the previous run of THIS FILE left state behind.
+    # 🪤 It is the nastiest shape of flake: green the first time, red forever after, and it
+    # blames the product. Restore the documented default (both OFF) before leaving.
+    try {
+        $null = PutJson '/api/settings/governance-preview' @{ value = @{ flags = @{ approvalsPreview = $false; conformancePreview = $false } } }
+        $gpZ = Probe '/api/settings/governance-preview'
+        T 'TEST-31: governance previews restored to OFF (the suite is re-runnable)' `
+            (-not $gpZ.flags.approvalsPreview -and -not $gpZ.flags.conformancePreview)
+    } catch { T 'TEST-31: governance previews restored to OFF (the suite is re-runnable)' $false }
 } finally {
     if ($proc -and -not $proc.HasExited) { Stop-Process -Id $proc.Id -Force -EA SilentlyContinue }
     Get-ChildItem "$out*" -EA SilentlyContinue | Remove-Item -Force -EA SilentlyContinue
     # Restore the config files the governance round-trips wrote (or remove them
     # if they didn't exist before this run) so the test leaves no residue.
     $enc = New-Object System.Text.UTF8Encoding($false)
+    # Batch-1 FIX5 proof: restore/remove the Account-Definitions-Admins.custom.csv the
+    # delta-guard PUT proof created or modified, so the run leaves no working-tree residue.
+    try {
+        if ($script:guardCustomCsv) {
+            if ($script:guardPreExisted) { if ($null -ne $script:guardCsvBak) { [System.IO.File]::WriteAllText($script:guardCustomCsv, $script:guardCsvBak, $enc) } }
+            elseif (Test-Path -LiteralPath $script:guardCustomCsv) { Remove-Item -LiteralPath $script:guardCustomCsv -Force -EA SilentlyContinue }
+        }
+    } catch { Write-Host "  (guard csv cleanup skipped: $($_.Exception.Message))" -ForegroundColor DarkGray }
+    # TEST-06: last-resort restore of the tracked conformance template. The inline
+    # restore after the promote round-trip is the normal path; this one covers an
+    # exception thrown between the promote and that restore, which would otherwise
+    # leave generated content committed over the curated template.
+    try {
+        if ($null -ne $confTplBak) { [System.IO.File]::WriteAllBytes($confTplFile, $confTplBak) }
+    } catch { Write-Host "  (template restore skipped: $($_.Exception.Message))" -ForegroundColor DarkGray }
     if ($null -ne $accessBak)   { [System.IO.File]::WriteAllText($accessFile,   $accessBak,   $enc) } elseif (Test-Path $accessFile)   { Remove-Item $accessFile   -Force -EA SilentlyContinue }
     if ($null -ne $settingsBak) { [System.IO.File]::WriteAllText($settingsFile, $settingsBak, $enc) } elseif (Test-Path $settingsFile) { Remove-Item $settingsFile -Force -EA SilentlyContinue }
     # Remove ONLY our seeded rows from the audit trail (keep any real history).

@@ -107,6 +107,14 @@ param(
     [Parameter(ParameterSetName = 'Install')]
     [string]$UpdateUrl = 'https://knudsenmorten.github.io/PIM4EntraPS/updates.xml',
 
+    # Update channel. 'Test' targets the test extension id + updates-test.xml so this
+    # writes the SEPARATE test forcelist + managed catalog (same tenant catalog as
+    # released; only the id/URL differ). 'Released' (default) is unchanged. Mirrors
+    # Update-PimActivator-Extension.ps1 / Deploy-PimActivatorIntune.ps1.
+    [Parameter()]
+    [ValidateSet('Released','Test')]
+    [string]$Channel = 'Released',
+
     [Parameter()]
     [ValidateSet('Machine', 'User')]
     [string]$Scope = 'Machine',
@@ -161,6 +169,13 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+
+# ---- Channel defaults (Test writes the SEPARATE test forcelist + catalog) ----
+if ($Channel -eq 'Test') {
+    if (-not $PSBoundParameters.ContainsKey('ExtensionId')) { $ExtensionId = 'glldnbmjpdkjemcnficagdhgienfdpoo' }
+    if (-not $PSBoundParameters.ContainsKey('UpdateUrl'))   { $UpdateUrl   = 'https://knudsenmorten.github.io/PIM4EntraPS/updates-test.xml' }
+    Write-Host "Channel = TEST -> id $ExtensionId, $UpdateUrl" -ForegroundColor Yellow
+}
 
 # Troubleshooting banner (script + solution + module + PS versions). Guarded:
 # this script is sometimes copied to a client box standalone, without the

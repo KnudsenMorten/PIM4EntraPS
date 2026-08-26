@@ -56,7 +56,26 @@ param(
     [string]$ImageRepo  = 'pim-manager',
     [string]$Dockerfile = 'SOLUTIONS/PIM4EntraPS/tools/pim-manager/Dockerfile',
     [switch]$Relaunch,            # community only: relaunch the local Manager after packaging
-    [string]$RelaunchScript       # community only: path to the local relaunch script
+    [string]$RelaunchScript,      # community only: path to the local relaunch script
+
+    # --- OPTIONAL explicit sign-in (hosted) -----------------------------------------------
+    # By default this script uses whatever az context is already active, which is right when a
+    # human runs it. An UNATTENDED estate run cannot rely on that: the orchestrator runs every
+    # step in its OWN process, so there is no ambient context to inherit -- and worse, on a host
+    # that manages several tenants the ambient context may belong to a DIFFERENT one, which is
+    # the BUG-23 class (a credential path that succeeds while being wrong). Supply these and the
+    # script signs in itself, into an ISOLATED az profile so the host's shared context is never
+    # disturbed.
+    [string]$TenantId,
+    [string]$SubscriptionId,
+    [string]$AdminAppId,
+    # ONE of secret / cert. This was the THIRD place a client secret was structurally required
+    # (after New-PimHostingPrerequisites and Grant-PimMiSql), all found on 2026-08-09 deploying
+    # PIM §34. A cert-only tenant -- every real customer, per the repo-root rule -- could supply
+    # neither, and the only reason this one was not a hard blocker is that it falls back to the
+    # ambient az context.
+    [string]$AdminSecret,
+    [string]$AdminCertPem
 )
 $ErrorActionPreference = 'Stop'
 $here     = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent $MyInvocation.MyCommand.Path }
@@ -66,6 +85,29 @@ $mgrDir   = Join-Path $solRoot 'tools\pim-manager'
 function Step($m){ Write-Host "==> $m" -ForegroundColor Cyan }
 function Info($m){ Write-Host "    $m" -ForegroundColor DarkGray }
 function Warn($m){ Write-Host "    $m" -ForegroundColor Yellow }
+
+# Explicit sign-in, when the caller supplied one. Isolated AZURE_CONFIG_DIR keyed on the
+# registry so concurrent per-environment builds cannot trample each other's profile.
+if ($AdminSecret -and $AdminCertPem) { throw 'pass EITHER -AdminSecret OR -AdminCertPem, not both.' }
+if ($TenantId -and $AdminAppId -and ($AdminSecret -or $AdminCertPem)) {
+    $cfgDir = Join-Path $env:TEMP ("azcfg-build-" + $(if ($AcrName) { $AcrName } else { 'pim' }))
+    New-Item -ItemType Directory -Force $cfgDir | Out-Null
+    $env:AZURE_CONFIG_DIR = $cfgDir
+    if ($AdminCertPem) {
+        if (-not (Test-Path $AdminCertPem)) { throw "certificate PEM not found: $AdminCertPem" }
+        Step "az login (service principal, CERTIFICATE) -> tenant $TenantId"
+        az login --service-principal -u $AdminAppId --certificate $AdminCertPem --tenant $TenantId --only-show-errors -o none
+    } else {
+        Step "az login (service principal, client secret) -> tenant $TenantId"
+        az login --service-principal -u $AdminAppId -p $AdminSecret --tenant $TenantId --only-show-errors -o none
+    }
+    if ($LASTEXITCODE -and $LASTEXITCODE -ne 0) { throw "az login failed for tenant $TenantId (exit $LASTEXITCODE)." }
+    if ($SubscriptionId) {
+        az account set --subscription $SubscriptionId --only-show-errors
+        if ($LASTEXITCODE -and $LASTEXITCODE -ne 0) { throw "az account set failed for subscription $SubscriptionId (exit $LASTEXITCODE)." }
+    }
+    Info "signed in; subscription $(az account show --query id -o tsv --only-show-errors 2>$null)"
+}
 function Have($cmd){ [bool](Get-Command $cmd -ErrorAction SilentlyContinue) }
 
 # reuse the pure content-hash helper so the post-build marker matches what detection compares.
@@ -137,8 +179,26 @@ if ($Source -eq 'sync-automateit') {
             try {
                 git -C $repoRoot archive --format=tar -o $tarPath HEAD -- .dockerignore SOLUTIONS/PIM4EntraPS
                 if ($LASTEXITCODE -and $LASTEXITCODE -ne 0) { throw "git archive failed (exit $LASTEXITCODE)." }
-                tar -x -f $tarPath -C $tmpCtx
-                if ($LASTEXITCODE -and $LASTEXITCODE -ne 0) { throw "tar extract of git archive failed (exit $LASTEXITCODE)." }
+                # Extract with RELATIVE paths, from the directory that holds both the archive
+                # and the context folder.
+                #
+                # This used to pass absolute paths plus --force-local, because GNU tar reads
+                # a Windows path's "C:" as a remote host (host:path) and aborts. That worked
+                # only where `tar` was GNU tar. Windows now ships bsdtar as System32\tar.exe,
+                # which REJECTS the flag outright --
+                #     tar.exe: Option --force-local is not supported
+                # -- so every deploy on such a host died at the build step (observed
+                # 2026-08-07, blocking the whole fleet roll).
+                #
+                # No absolute path means no colon, which means neither tar can mistake the
+                # archive for a remote host -- so the flag is not needed by either. Works
+                # with GNU tar and bsdtar, which is what "runs on the operator's machine"
+                # has to mean.
+                Push-Location $ctxRoot
+                try {
+                    tar -x -f (Split-Path -Leaf $tarPath) -C (Split-Path -Leaf $tmpCtx)
+                    if ($LASTEXITCODE -and $LASTEXITCODE -ne 0) { throw "tar extract of git archive failed (exit $LASTEXITCODE)." }
+                } finally { Pop-Location }
                 Push-Location $tmpCtx
                 try {
                     az acr build -r $AcrName -t "$ImageRepo`:$ImageTag" -f $Dockerfile . `
@@ -161,6 +221,17 @@ if ($Source -eq 'sync-automateit') {
             } finally { Pop-Location }
         }
         Write-Host "  built $AcrName.azurecr.io/$ImageRepo`:$ImageTag (content $contentHash)" -ForegroundColor Green
+        # BUG-40: report the DIGEST the tag now points at. Rebuilding an existing tag moves this
+        # pointer, and that move is invisible in every tag-shaped log line above -- which is how a
+        # rebuild came to be deployed "successfully" while the platform kept the previous image.
+        # Printing it here gives a human the one value that identifies the content, and the deploy
+        # scripts resolve the same value to pin what they roll.
+        if (Get-Command Resolve-PimAcrImageDigest -ErrorAction SilentlyContinue) {
+            try {
+                $builtDigest = Resolve-PimAcrImageDigest -AcrName $AcrName -Repository $ImageRepo -Tag $ImageTag
+                Write-Host "  digest $builtDigest  <- this, not the tag, is what the deploy pins" -ForegroundColor Green
+            } catch { Warn "could not resolve the built image's digest: $($_.Exception.Message)" }
+        }
     }
     Step "Done. Roll it with Update-PimContainers.ps1 -ImageTag $ImageTag (NOT -SkipBuild already covered)."
     return

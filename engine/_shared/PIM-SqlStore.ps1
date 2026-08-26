@@ -54,6 +54,28 @@ function Resolve-PimSqlClientType {
     return $t
 }
 
+function Test-PimManagedIdentityAvailable {
+    # Is a managed identity reachable from THIS process? Answers once and caches, because
+    # the IMDS probe costs a real timeout when there is no MI and connections are frequent.
+    # Order matters: the env-var forms (App Service / Functions) are free to check, so they
+    # answer before anything touches the network. $global:PIM_UseManagedIdentity forces yes.
+    # Set $global:PIM_NoManagedIdentity to force no (offline tests must never probe IMDS).
+    [CmdletBinding()] param([switch]$Force)
+    if ($global:PIM_NoManagedIdentity) { return $false }
+    if ($global:PIM_UseManagedIdentity) { return $true }
+    if ($env:IDENTITY_ENDPOINT -and $env:IDENTITY_HEADER) { return $true }
+    if ($env:MSI_ENDPOINT -and $env:MSI_SECRET) { return $true }
+    if (-not $Force -and $null -ne $script:PimMiAvailable) { return $script:PimMiAvailable }
+    $ok = $false
+    try {
+        $null = Invoke-RestMethod -Method GET -TimeoutSec 3 -Headers @{ Metadata = 'true' } `
+                  -Uri 'http://169.254.169.254/metadata/instance?api-version=2021-02-01'
+        $ok = $true
+    } catch { $ok = $false }
+    $script:PimMiAvailable = $ok
+    return $ok
+}
+
 function New-PimSqlConnection {
     # Single place connections are created, so MANAGED IDENTITY (the chosen auth for
     # Azure SQL) works passwordless: an MI access token for https://database.windows.net/
@@ -79,15 +101,40 @@ function New-PimSqlConnection {
             if ($global:PIM_SqlInteractive -or $global:PIM_Interactive) {
                 try { $tok = Get-PimRestToken -Resource 'https://database.windows.net' -Interactive } catch { Write-Warning "  [sql] interactive token failed: $($_.Exception.Message)" }
             }
-            # 1) Managed Identity (App Service $IDENTITY_ENDPOINT / IMDS) when present.
-            if (-not $tok -and ($env:IDENTITY_ENDPOINT -or $global:PIM_UseManagedIdentity)) {
+            # 1) MANAGED IDENTITY IS PLAN A (operator directive 2026-08-08: "use MI as plan A
+            #    to connect with managed identity"), but ONLY when no SPN is explicitly
+            #    configured. MI was previously gated on $env:IDENTITY_ENDPOINT -- an App
+            #    Service/Functions variable NEVER set on an Azure VM -- so on a VM (mgmt1
+            #    included) MI was silently skipped even though Get-PimManagedIdentityToken had
+            #    handled IMDS all along. The gate, not the capability, was missing.
+            #
+            #    BUG-34: making MI unconditional then broke the CROSS-TENANT case, which is the
+            #    normal one for the test estate. A managed identity can only mint tokens for
+            #    ITS OWN tenant, and MI acquisition SUCCEEDS -- so a valid-but-wrong-tenant
+            #    token was taken and the explicitly configured SPN never got a turn. Azure SQL
+            #    then answers "Login failed for user '<token-identified principal>'. The server
+            #    is not currently configured to accept this token", which reads like a
+            #    permissions problem rather than "you authenticated to the wrong directory".
+            #    Precedence is therefore: an EXPLICIT credential wins over ambient MI. MI stays
+            #    plan A for the in-tenant/hosted case it was asked for (engine in ACA with no
+            #    SPN configured), which is where it is genuinely correct.
+            #    Test-PimManagedIdentityAvailable probes IMDS ONCE per process and caches the
+            #    answer, so a machine with no MI does not pay a timeout on every connection.
+            $sqlCid = if ($global:PIM_SqlClientId)     { $global:PIM_SqlClientId }     else { $global:PIM_ClientId }
+            $sqlSec = if ($global:PIM_SqlClientSecret) { $global:PIM_SqlClientSecret } else { $global:PIM_ClientSecret }
+            $sqlThumb = if ($global:PIM_SqlCertThumbprint) { $global:PIM_SqlCertThumbprint } else { $global:PIM_CertThumbprint }
+            $explicitSpn = [bool]("$sqlCid".Trim()) -and ([bool]("$sqlSec".Trim()) -or [bool]("$sqlThumb".Trim()))
+
+            if (-not $tok -and $explicitSpn) {
+                try { $tok = Get-PimRestToken -Resource 'https://database.windows.net' -ClientId $sqlCid -ClientSecret $sqlSec -CertThumbprint $sqlThumb } catch { Write-Warning "  [sql] SPN token failed: $($_.Exception.Message)" }
+            }
+            if (-not $tok -and (Test-PimManagedIdentityAvailable)) {
                 try { $tok = Get-PimRestToken -Resource 'https://database.windows.net' -UseManagedIdentity } catch { Write-Warning "  [sql] MI token failed: $($_.Exception.Message)" }
             }
-            # 2) Fall back to an SPN (PIM_SqlClientId/Secret or PIM_ClientId/Secret, cert, or az).
-            if (-not $tok) {
-                $sqlCid = if ($global:PIM_SqlClientId) { $global:PIM_SqlClientId } else { $global:PIM_ClientId }
-                $sqlSec = if ($global:PIM_SqlClientSecret) { $global:PIM_SqlClientSecret } else { $global:PIM_ClientSecret }
-                try { $tok = Get-PimRestToken -Resource 'https://database.windows.net' -ClientId $sqlCid -ClientSecret $sqlSec } catch { Write-Warning "  [sql] SPN token failed: $($_.Exception.Message)" }
+            # Last resort: an SPN that was not "explicit" by the test above (e.g. client id
+            # present but credential resolved from the ambient cert store).
+            if (-not $tok -and -not $explicitSpn) {
+                try { $tok = Get-PimRestToken -Resource 'https://database.windows.net' -ClientId $sqlCid -ClientSecret $sqlSec -CertThumbprint $sqlThumb } catch { Write-Warning "  [sql] SPN token failed: $($_.Exception.Message)" }
             }
         }
         # Last-resort: an explicitly pre-pinned token (e.g. a caller that minted its own).
@@ -96,7 +143,17 @@ function New-PimSqlConnection {
             try { $c.AccessToken = "$tok" } catch { Write-Warning "  [sql] set AccessToken failed: $($_.Exception.Message)" }
             $global:PIM_SqlAccessToken = $tok   # keep the freshest token visible for diagnostics/last-resort
         }
-        else { Write-Warning "  [sql] NO SQL access token acquired (connection would present no credential)" }
+        else {
+            # BUG-33: name the CAUSE. The common one is not "auth failed" but "the token provider
+            # was never loaded" -- a caller that dot-sources PIM-SqlStore without PIM-Rest skips
+            # the whole block above, presents no credential, and Azure SQL reports
+            # "Login failed for user ''", which points at permissions and wastes the search there.
+            if (-not (Get-Command Get-PimRestToken -ErrorAction SilentlyContinue)) {
+                Write-Warning "  [sql] NO SQL access token: Get-PimRestToken is NOT LOADED -- dot-source engine/_shared/PIM-Rest.ps1 BEFORE PIM-SqlStore.ps1. (Azure SQL will report: Login failed for user '')"
+            } else {
+                Write-Warning "  [sql] NO SQL access token acquired (MI and SPN both failed; connection would present no credential)"
+            }
+        }
     }
     return $c
 }
@@ -131,9 +188,31 @@ function Get-PimSqlConnectionString {
     #   3. KV pointer ($global:PIM_SqlConnStringVault + ...Secret) -> fetch from KV
     #   4. passwordless build from $global:PIM_SqlServer + db (Integrated / AAD-MI)
     # The connection string / secret is NEVER read from a JSON/config file.
+    #
+    # SEC-03: every local/on-prem path below uses `Encrypt=True;TrustServerCertificate=True`.
+    # It previously used `Encrypt=False`, which put privileged desired-state data and the SQL
+    # session on the wire in CLEAR TEXT. §31 accepts `TrustServerCertificate` "until a real
+    # cert" for hybrid -- but that concession is about not VALIDATING the certificate, not
+    # about dropping encryption entirely. `Encrypt=True;TrustServerCertificate=True` keeps the
+    # wire encrypted while still tolerating a self-signed cert, which is what that note
+    # actually intended. The Azure SQL path (above) stays fully strict:
+    # `Encrypt=True;TrustServerCertificate=False`.
     param([string]$Server, [string]$Database)
     if (-not $Database) { $Database = if ($global:PIM_SqlDatabase) { "$($global:PIM_SqlDatabase)" } else { 'PIM4EntraPS' } }
-    if ($Server) { return "Server=$Server;Database=$Database;Integrated Security=SSPI;Encrypt=False;TrustServerCertificate=True;Connection Timeout=15" }
+    # BUG-30 (2026-08-08): an explicit -Server naming AZURE SQL must get the passwordless
+    # token connection string, exactly like the ambient path below (:170) and the scenario
+    # path (:159) already do. This branch used to return the Integrated string
+    # unconditionally, which cannot work against Azure SQL -- PaaS has no Windows auth, and
+    # New-PimSqlConnection SKIPS token acquisition entirely when the CS matches
+    # /Integrated\s*Security/, so no AAD token was ever minted either. It also silently
+    # downgraded TrustServerCertificate from False to True. Since -Server is the parameter
+    # every harness and PIM-SqlStore.ps1:217 itself use, the ONLY supported store (Azure SQL
+    # PaaS) was unreachable from the explicit path -- which is why every live scenario matrix
+    # so far ran against .\SQLEXPRESS, a store the product does not ship. Test the FQDN first.
+    if ($Server) {
+        if ($Server -match '(?i)database\.windows\.net') { return (Get-PimAzureSqlConnectionString -Fqdn $Server -Database $Database) }
+        return "Server=$Server;Database=$Database;Integrated Security=SSPI;Encrypt=True;TrustServerCertificate=True;Connection Timeout=15"
+    }
     if ($global:PIM_SqlConnectionString) { return $global:PIM_SqlConnectionString }
     # §31.3 HOSTING RESOLUTION (opt-in by scenario). When a deployment scenario is
     # active AND its resolved hostingLocation names a concrete store (central MSP
@@ -148,7 +227,7 @@ function Get-PimSqlConnectionString {
             if ($hostStore -and "$($hostStore.server)".Trim()) {
                 $ssrv2 = "$($hostStore.server)".Trim()
                 if ($ssrv2 -match '(?i)database\.windows\.net') { return (Get-PimAzureSqlConnectionString -Fqdn $ssrv2 -Database $Database) }
-                return "Server=$ssrv2;Database=$Database;Integrated Security=SSPI;Encrypt=False;TrustServerCertificate=True;Connection Timeout=15"
+                return "Server=$ssrv2;Database=$Database;Integrated Security=SSPI;Encrypt=True;TrustServerCertificate=True;Connection Timeout=15"
             }
         } catch { Write-Verbose "PIM-SqlStore: scenario hosting resolution skipped: $($_.Exception.Message)" }
     }
@@ -159,7 +238,7 @@ function Get-PimSqlConnectionString {
     # Azure SQL (FQDN) -> passwordless token-based CS (MI AccessToken set by
     # New-PimSqlConnection). On-prem / Express -> Integrated.
     if ($srv -match '(?i)database\.windows\.net') { return (Get-PimAzureSqlConnectionString -Fqdn $srv -Database $Database) }
-    return "Server=$srv;Database=$Database;Integrated Security=SSPI;Encrypt=False;TrustServerCertificate=True;Connection Timeout=15"
+    return "Server=$srv;Database=$Database;Integrated Security=SSPI;Encrypt=True;TrustServerCertificate=True;Connection Timeout=15"
 }
 
 function Assert-PimSqlIdentifier {
@@ -203,10 +282,20 @@ function Invoke-PimSqlScalar {
 
 function Initialize-PimSqlDatabase {
     # Create the database if missing (connects to master). Idempotent.
+    # BUG-32 (2026-08-08): the guard was `IF DB_ID('<db>') IS NULL`, which is NOT idempotent on
+    # Azure SQL -- the store we actually support. Measured from master as the managed identity:
+    #     DB_ID('PimScenarioTest')            -> NULL
+    #     EXISTS (sys.databases WHERE name=..) -> YES
+    # On Azure SQL, DB_ID() resolves only databases the principal owns/created (metadata
+    # visibility), so for a PRE-PROVISIONED database -- the normal PaaS case, where the DB is
+    # created by IaC and the app is only granted into it -- the guard reads "missing", runs
+    # CREATE DATABASE, and throws "Database '<db>' already exists." Every caller therefore fails
+    # on an existing Azure database, i.e. on every run after the first.
+    # sys.databases lists every database on the logical server and is the correct existence test.
     param([string]$Server, [Parameter(Mandatory)][string]$Database)
     [void](Assert-PimSqlIdentifier -Name $Database)
     $masterCs = Get-PimSqlConnectionString -Server $Server -Database 'master'
-    [void](Invoke-PimSqlNonQuery -ConnectionString $masterCs -Sql "IF DB_ID('$Database') IS NULL CREATE DATABASE [$Database];")
+    [void](Invoke-PimSqlNonQuery -ConnectionString $masterCs -Sql "IF NOT EXISTS (SELECT 1 FROM sys.databases WHERE name = N'$Database') CREATE DATABASE [$Database];")
 }
 
 function Initialize-PimSqlStore {
@@ -331,6 +420,23 @@ function Get-PimStoreRowKey {
         }
         'PIM-Definitions-*'              { (& $g 'GroupTag') }
         'Account-Definitions-Admins'     { (& $g 'UserName') }
+        # TEST-13: neither of these carries a GroupTag/GroupName, so both fell through to
+        # the generic 'default' branch, derived a BLANK key, and every row was dropped on
+        # save with a warning that scrolls past. An offboarding row is identified by the
+        # ACCOUNT it offboards; a discovery row by its tag. Found because the scenario
+        # seeder reported "seeded PIM-Offboarding 0 rows" while TESTS.md said it plants one
+        # -- so every assertion that depended on either entity was passing vacuously.
+        'PIM-Offboarding'                {
+            $o = (& $g 'Username'); if (-not "$o".Trim()) { $o = (& $g 'UserName') }
+            if (-not "$o".Trim()) { $o = (& $g 'UserPrincipalName') }
+            if (-not "$o".Trim()) { $o = (& $g 'Upn') }
+            $o; break
+        }
+        'PIM-Discovery'                  {
+            $d = (& $g 'DiscoveryTag'); if (-not "$d".Trim()) { $d = (& $g 'Tag') }
+            if (-not "$d".Trim()) { $d = (& $g 'GroupTag') }
+            $d; break
+        }
         'PIM-Assignments-Admins'         { ((& $g 'Username') + '|' + (& $g 'GroupTag')) }
         'PIM-Assignments-Groups'         { ((& $g 'TargetGroupTag') + '|' + (& $g 'SourceGroupTag')) }
         'PIM-Assignments-Roles-Groups'   { ((& $g 'GroupTag') + '|' + (& $g 'RoleDefinitionName')) }
@@ -464,6 +570,91 @@ WHEN NOT MATCHED THEN INSERT (Name, ValueJson, UpdatedUtc) VALUES (@n, @v, SYSUT
 "@ -Parameters @{ n = $Name; v = $json })
 }
 
+# --- atomic compare-and-set, for the scheduler's single-runner lease (BUG-36) ----
+# Set-PimSqlSetting above is an unconditional MERGE: read-then-write with it is NOT atomic, so
+# two runners can both read "lease free" and both write, which is the exact double-apply the
+# lease exists to prevent. These two give a real CAS.
+function Get-PimSqlSettingRaw {
+    # The value EXACTLY as stored, unparsed. CAS compares bytes, so it must not round-trip
+    # through ConvertFrom-Json/ConvertTo-Json -- that can change formatting and break the compare.
+    param([Parameter(Mandatory)][string]$ConnectionString, [Parameter(Mandatory)][string]$Name)
+    $j = Invoke-PimSqlScalar -ConnectionString $ConnectionString -Sql "SELECT ValueJson FROM pim.Settings WHERE Name=@n" -Parameters @{ n = $Name }
+    if ($null -eq $j -or $j -is [DBNull]) { return $null }
+    return "$j"
+}
+
+function Set-PimSqlSettingIfUnchanged {
+    <#
+      Write $NewValueJson to $Name ONLY IF the stored value is still $ExpectedValueJson
+      (pass $null to mean "expected absent-or-null"). Returns the number of rows written:
+      1 = we won, 0 = someone else got there first.
+
+      The row is PRIMARY KEY on Name, so two racers taking the insert path collide on the key --
+      that duplicate-key failure IS the correct answer (we lost) and is caught, not thrown.
+
+      🪤 BUG-41 -- READ THIS BEFORE CHANGING THE NULL HANDLING BELOW.
+      These parameters are typed [string], and PowerShell coerces a $null argument to
+      [string]::Empty at the parameter boundary. So `-ExpectedValueJson $null` -- which every
+      caller uses to mean "expected absent" -- arrived here as '', the function's own
+      `$null -ne $ExpectedValueJson` test read TRUE, and it bound @e='' instead of DBNull.
+      `IF @e IS NULL` was then FALSE, so the batch took the ELSE branch and ran
+      `UPDATE ... WHERE ValueJson=@e`, which matches nothing when the row is absent. The INSERT
+      branch -- the ONLY one that can create the row -- was unreachable, so the function returned
+      0 forever and the scheduler lease could never be acquired on a fresh store. Measured live
+      2026-08-09: two ticks 'Succeeded', both logged "another runner holds the lease", and
+      pim.Settings held 0 rows. Nullness is therefore decided with IsNullOrEmpty, NOT with
+      `-ne $null`, and that is not a style choice -- `-ne $null` cannot work through a [string]
+      parameter. (An empty string is not a meaningful stored value here either: a real value is
+      JSON, and Get-PimSqlSettingRaw already returns $null for a NULL column.)
+    #>
+    param(
+        [Parameter(Mandatory)][string]$ConnectionString,
+        [Parameter(Mandatory)][string]$Name,
+        [string]$NewValueJson,
+        [string]$ExpectedValueJson
+    )
+    $sql = @"
+SET NOCOUNT ON;
+DECLARE @affected INT = 0;
+IF @e IS NULL
+BEGIN
+    UPDATE pim.Settings SET ValueJson=@v, UpdatedUtc=SYSUTCDATETIME()
+      WHERE Name=@n AND ValueJson IS NULL;
+    SET @affected = @@ROWCOUNT;
+    IF @affected = 0
+    BEGIN
+        INSERT INTO pim.Settings (Name, ValueJson, UpdatedUtc)
+        SELECT @n, @v, SYSUTCDATETIME()
+          WHERE NOT EXISTS (SELECT 1 FROM pim.Settings WHERE Name=@n);
+        SET @affected = @@ROWCOUNT;
+    END
+END
+ELSE
+BEGIN
+    UPDATE pim.Settings SET ValueJson=@v, UpdatedUtc=SYSUTCDATETIME()
+      WHERE Name=@n AND ValueJson=@e;
+    SET @affected = @@ROWCOUNT;
+END
+SELECT @affected;
+"@
+    try {
+        $r = Invoke-PimSqlScalar -ConnectionString $ConnectionString -Sql $sql -Parameters @{
+            n = $Name
+            # IsNullOrEmpty, not `-ne $null` -- see BUG-41 in the comment block above. `v` gets the
+            # same treatment because Remove-PimSchedulerLease releases by passing -NewValueJson
+            # $null, which by the identical coercion was storing '' instead of NULL.
+            v = $(if ([string]::IsNullOrEmpty($NewValueJson))      { [DBNull]::Value } else { $NewValueJson })
+            e = $(if ([string]::IsNullOrEmpty($ExpectedValueJson)) { [DBNull]::Value } else { $ExpectedValueJson })
+        }
+        if ($null -eq $r -or $r -is [DBNull]) { return 0 }
+        return [int]$r
+    } catch {
+        # Duplicate key = another runner inserted first. That is a LOST RACE, not an error.
+        if ("$($_.Exception.Message)" -match '(?i)duplicate key|PRIMARY KEY') { return 0 }
+        throw
+    }
+}
+
 function Get-PimAllSqlSettings {
     # All settings as a hashtable Name -> value (JSON-parsed). For loading over the
     # file seed into $global:PIM_NamingConventions at boot.
@@ -489,4 +680,67 @@ function Import-PimSettingsSeed {
 function Test-PimSqlConnectivity {
     param([Parameter(Mandatory)][string]$ConnectionString)
     try { return ((Invoke-PimSqlScalar -ConnectionString $ConnectionString -Sql 'SELECT 1') -eq 1) } catch { return $false }
+}
+
+# --- cold-process settings hydration (the GUI-state == actual-behavior fix) -----
+# The Manager hydrates pim.Settings into $global:PIM_NamingConventions at boot, so its
+# OWN process honours GUI-saved EmailControls / JobSchedule. But a COLD-booted scheduler
+# or a one-shot engine/job run never ran that boot path -- so a kill switch set in the
+# GUI would NOT stop a cold scheduled send, and a freshly-booted scheduler would NOT see
+# a changed cadence. Get-PimSqlSettingsConnectionString resolves the store CS the same
+# way the scheduler tick already does (ambient globals only -- never builds a credential
+# out of thin air), and Import-PimSettingsFromStore loads ALL pim.Settings into
+# $global:PIM_NamingConventions so Get-PimPolicySetting (engine/scheduler reader) resolves
+# the persisted values in ANY process. FAIL-SAFE: a read failure leaves whatever was
+# already configured untouched (it never CLEARS an existing kill switch and never
+# fails-open to sending more than configured). REQUIREMENTS s29.
+function Get-PimSqlSettingsConnectionString {
+    # Best-effort store CS for a cold process. Mirrors Invoke-PimSchedulerTick's resolver:
+    # an explicit in-memory CS wins; else build from ambient SQL globals ONLY when one is
+    # actually configured (so a bare default never fabricates a connection). Returns $null
+    # when no store is configured -- the caller then leaves settings as-is (fail-safe).
+    if ("$($global:PIM_SqlConnectionString)".Trim()) { return "$($global:PIM_SqlConnectionString)" }
+    $hasSig = ("$($global:PIM_SqlServer)".Trim() -or "$($global:PIM_SqlConnStringVault)".Trim() -or "$($global:PIM_SqlDatabase)".Trim())
+    if ($hasSig -and (Get-Command Get-PimSqlConnectionString -ErrorAction SilentlyContinue)) {
+        try { return (Get-PimSqlConnectionString) } catch { return $null }
+    }
+    return $null
+}
+
+function Import-PimSettingsFromStore {
+    # Load pim.Settings into $global:PIM_NamingConventions (the engine/scheduler reader
+    # source -- Get-PimPolicySetting reads it first). Additive: existing keys are
+    # overwritten with the persisted value, other globals untouched. Returns the number
+    # of settings loaded, or -1 when no store was reachable (so the caller can tell
+    # "nothing to load" from "couldn't read" -- both are non-fatal / fail-safe).
+    # -ConnectionString overrides the resolver (tests / an already-open CS).
+    param([string]$ConnectionString)
+    $cs = if ("$ConnectionString".Trim()) { $ConnectionString } else { Get-PimSqlSettingsConnectionString }
+    if (-not "$cs".Trim()) { return -1 }
+    $loaded = $null
+    try { $loaded = Get-PimAllSqlSettings -ConnectionString $cs } catch { Write-Warning "  [settings] hydrate from store failed (leaving current settings unchanged): $($_.Exception.Message)"; return -1 }
+    if ($null -eq $loaded) { return -1 }
+    if (-not ($global:PIM_NamingConventions -is [hashtable])) { $global:PIM_NamingConventions = @{} }
+    $n = 0
+    foreach ($k in @($loaded.Keys)) { $global:PIM_NamingConventions[$k] = $loaded[$k]; $n++ }
+    # Apply the EmailControls record to the email globals the notify path reads (the
+    # Manager does this in its PUT handler; do it here too so a cold process is covered).
+    if ((Get-Command Set-PimEmailControlsGlobals -ErrorAction SilentlyContinue) -and $global:PIM_NamingConventions.ContainsKey('EmailControls')) {
+        [void](Set-PimEmailControlsGlobals -EmailControls $global:PIM_NamingConventions['EmailControls'])
+    }
+    # IMP-06a: the SENDER is not part of the EmailControls record, so the projection above could
+    # never carry it -- which is why $global:PIM_MailSender had no persisted path at all and every
+    # hosted environment was mail-mute no matter what onboarding did. Project it here so the
+    # Manager can change the sender without a container redeploy and a cold-booted tick Job still
+    # honours it, overriding the deploy-time env var Invoke-PimEngineCore reads.
+    # 🔒 FAIL-SAFE DIRECTION, and it is the opposite of the kill switch's. A missing or BLANK
+    # stored value must LEAVE an existing sender alone: clearing it would silently mute a working
+    # environment, and muting is the exact failure IMP-06 exists to stop. Only a non-blank value
+    # ever writes here. (The kill switch is fail-safe by staying ON; the sender is fail-safe by
+    # staying SET.)
+    if ($global:PIM_NamingConventions.ContainsKey('MailSender')) {
+        $__sender = "$($global:PIM_NamingConventions['MailSender'])".Trim()
+        if ($__sender) { $global:PIM_MailSender = $__sender }
+    }
+    return $n
 }

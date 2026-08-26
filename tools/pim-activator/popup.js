@@ -834,7 +834,7 @@ const els = {
   signIn: $('sign-in'), signOut: $('sign-out'),
   me: $('me'), status: $('status-bar'),
   list: $('list'), footer: $('footer'), toolbar: $('toolbar'),
-  search: $('search'), selectAll: $('select-all'), selectNone: $('select-none'), collapseAll: $('collapse-all'), expandAll: $('expand-all'), refresh: $('refresh'),
+  search: $('search'), workloadFilter: $('workload-filter'), selectAll: $('select-all'), selectNone: $('select-none'), collapseAll: $('collapse-all'), expandAll: $('expand-all'), refresh: $('refresh'),
   just: $('justification'), dur: $('duration'), count: $('count'), activate: $('activate'),
   // Tabs
   tabs: $('tabs'),
@@ -857,9 +857,9 @@ const els = {
 
 let currentAccount = null
 let eligibleRows = []        // [{ id (instanceId), groupId, displayName, accessId, endDateTime }]
-let lastNestedDiag = []      // diagnostics: per active-parent nested-discovery result {parent, raw, kept, error}
 let lastActiveRawDiag = []   // diagnostics: raw (pre-filter) active group instances {g, accessId, at, end}
 let lastDiagText = ''        // diagnostics: snapshot from the last load (what Graph returned)
+let lastPreviewDiag = ''     // diagnostics: per-source result of the last GROUP role-preview expand
 let lastLoadStatus = []      // diagnostics: per-source load outcome {name, ok, count, timedOut, error}
 let lastEnvChecks = null     // diagnostics: last environment/connectivity self-check results [{label,status,detail}]
 let envChecksRunning = false // diagnostics: a check run is in flight (so the panel shows "running…")
@@ -897,8 +897,9 @@ function composeDiagText() {
     const g = s => s === 'ok' ? 'OK  ' : (s === 'warn' ? 'WARN' : 'FAIL')
     env = '\n\n=== Environment checks ===\n' + lastEnvChecks.map(c => `[${g(c.status)}] ${c.label}: ${c.detail}`).join('\n')
   }
+  const prev = lastPreviewDiag ? ('\n\n=== Last group role-preview (expand) — per source ===\n' + lastPreviewDiag) : ''
   const log  = sessionLog.length ? ('\n\n=== Session events (latest last) ===\n' + sessionLog.join('\n')) : ''
-  return snap + env + log
+  return snap + env + prev + log
 }
 
 // ---------------------------------------------------------------------------
@@ -912,7 +913,7 @@ function composeDiagText() {
 // independently bounded so the check itself never hangs.
 const ENV_CHECK_ENDPOINTS = [
   { key: 'login', label: 'Sign-in (login.microsoftonline.com:443)',          url: `${AUTHORITY}/v2.0/.well-known/openid-configuration`, readDate: true },
-  { key: 'graph', label: 'Microsoft Graph (graph.microsoft.com:443)',         url: 'https://graph.microsoft.com/v1.0/$metadata' },
+  { key: 'graph', label: 'Microsoft Graph (graph.microsoft.com:443)',         url: 'https://graph.microsoft.com/beta/$metadata' },
   { key: 'arm',   label: 'Azure Resource Manager (management.azure.com:443)', url: 'https://management.azure.com/subscriptions?api-version=2020-01-01' },
   { key: 'feed',  label: 'Extension update feed (gh-pages:443)',              url: 'https://knudsenmorten.github.io/PIM4EntraPS/updates.xml', readVersion: true },
 ]
@@ -1293,7 +1294,7 @@ const FUN_LINES = [
 // only entertain once a wait is actually happening), THEN show a RANDOM line every 5s
 // (no immediate repeat). Hide cancels both the start-delay and the rotation.
 const FUN_START_DELAY_MS = 10000
-const FUN_ROTATE_MS = 5000
+const FUN_ROTATE_MS = 8000
 let _funIdx = 0
 let _funTimer = null
 let _funDelay = null
@@ -1340,23 +1341,34 @@ async function watchPropagation(mode = 'activate', scopeIds = [], resumeStartedA
   // Persist so the watch survives a popup close/reopen (maybeResumePropWatch
   // restarts it with the ORIGINAL startedAt). Cleared on settle/end.
   try { await setStored({ activePropWatch: { mode, scopeIds, startedAt: resumeStartedAt || Date.now() } }) } catch (_) {}
-  // PIM for Groups propagation has been slow lately -> watch up to 5 min, and
-  // don't declare "settled" on a stable count before minWatchMs UNLESS a change
-  // was already observed -- otherwise a late/delayed propagation (the count only
-  // moves at 60-120s) would be missed and we'd wrongly report the pre-change set.
-  // Poll every 10s for up to 8 min. CRITICAL: NEVER settle on a flat count --
-  // PIM for Groups propagation can take 3-5 min (observed: count held at 3 for
-  // ~90s then jumped to 50 at ~5 min). Only settle AFTER the count actually
-  // CHANGES and then HOLDS steady (settleAfterMs); until a change is seen, keep
-  // polling. This fixes the old 90s floor that cached the pre-propagation count.
+  // DESIGN RULE (operator 2026-06-25): completion is NEVER a hardcoded timer. The watch POLLS
+  // every 10s and decides only from what each poll OBSERVES. PIM-for-Groups propagation can sit
+  // flat for 1-8 min then JUMP to the full set in one cycle (observed: count held at 3 for ~90s
+  // then jumped to 50). So: keep polling while the count is unchanged (wait for the jump), and
+  // only settle AFTER the count has CHANGED and then been IDENTICAL across STABLE_POLLS
+  // consecutive polls. Never settle on a flat count, never finish on a fixed elapsed time.
   // Works both ways: count climbs on activate, falls on deactivate.
-  const maxMs = 480000, intervalMs = 10000, settleAfterMs = 20000, startedAt = resumeStartedAt || Date.now()
+  // POLL every intervalMs (10s) and decide purely from what each poll OBSERVES — no hardcoded
+  // settle timer. Completion uses STABLE_POLLS: the count must be IDENTICAL across that many
+  // consecutive 10s polls AFTER it has moved (= the jump has fully landed). maxMs is only a
+  // safety backstop so a never-ending propagation can't loop forever.
+  const STABLE_POLLS = 2   // count must be identical across this many consecutive 10s polls (after a move) to settle
+  const maxMs = 480000, intervalMs = 10000, startedAt = resumeStartedAt || Date.now()
   // Default the propagation estimate to 4 min so the bar creeps from the FIRST run
   // (cap 95% while waiting, jump to 100% once done); replaced by the learned
   // per-active-set duration on subsequent runs.
-  let prev = null, start = null, target = null, activeKey = null, changed = false, lastChangeAt = Date.now(), learnedDur = 240000
+  let prev = null, start = null, target = null, activeKey = null, changed = false, stablePolls = 0, learnedDur = 240000
+  // Per-scope DIRECT-vs-INDIRECT classification (operator 2026-06-26). Computed ONCE on the first
+  // poll that has a token: a DIRECT role group settles on the count fan-out; an INDIRECT leaf group
+  // settles on its role landing (it never grows the count). { gid: { indirect, entraRoleIds } }.
+  let classified = null
   const mem = await getPropMemory()
   const durMem = await getPropDuration()
+  // ARM token (best-effort, non-interactive, cached ~1h) so the signal can include DIRECT Azure
+  // RBAC activations (PIM v1 "Azure role to the admin"). Null when Azure isn't consented — the
+  // group counts still cover v2 Azure-via-groups. Acquired once; reused across polls.
+  let armTk = null
+  try { armTk = await getArmToken() } catch (_) { /* ARM optional */ }
   const banner = (t, done, pct) => { if (myRun === propagationWatchToken) setPropRowStatus(scopeIds, t, pct, done) }
   while ((Date.now() - startedAt) < maxMs && myRun === propagationWatchToken) {
     await new Promise(r => setTimeout(r, intervalMs))
@@ -1365,38 +1377,129 @@ async function watchPropagation(mode = 'activate', scopeIds = [], resumeStartedA
     let tk = null
     try { const fr = await acquireGraphToken({ interactive: false }).catch(() => null); tk = fr?.accessToken } catch (_) {}
     if (!tk) continue
+    // Classify the watched scope(s) ONCE now we have a token (operator 2026-06-26): DIRECT role
+    // group (nests child PIM groups -> fans out -> count-settle) vs INDIRECT leaf group (no
+    // fan-out -> completes on its role landing). See classifyWatchedGroup.
+    if (classified === null) {
+      classified = {}
+      if (Array.isArray(scopeIds) && scopeIds.length) {
+        for (const gid of scopeIds) {
+          try { classified[gid] = await classifyWatchedGroup(tk, gid) } catch (_) { classified[gid] = { nesting: true, entraRoleIds: [] } }
+        }
+        try { logDiag(`Propagation classify (${mode}): ` + scopeIds.map(g => { const c = classified[g] || {}; return `${String(g).slice(0,8)}=${c.nesting ? 'nesting' : 'leaf'}[${((c.entraRoleIds||[]).length)} entra]` }).join(', ')) } catch (_) {}
+      }
+    }
     let count = null, activeIds = null
-    try { const e = await listEligibleForMe(tk).catch(() => null); if (e) count = e.length } catch (_) {}
-    try { const a = await listActiveGroupAssignmentsForMe(tk).catch(() => null); if (a) activeIds = a.map(x => x.groupId).filter(Boolean).sort() } catch (_) {}
-    if (count == null) continue
+    // COMBINED permissions signal — PIM v2 group nesting (operator 2026-06-25; see docs/REQUIREMENTS.md
+    // "CRITICAL DESIGN — PIM v2 group nesting"). Activating the DIRECT role group fans out via nesting to
+    // INDIRECT groups that grant permissions across MANY planes — Entra (role-assignable group -> Entra role),
+    // Azure RBAC (SQL VM / Cosmos), and workloads (AzDevOps, Power BI). Every indirect target is itself a GROUP,
+    // so the group counts below capture them ALL regardless of plane. Watching ONLY eligible PIM groups misses
+    // role-granting activations (eligible stays flat). Track the TOTAL of:
+    //   - eligible PIM groups        -> v2 nesting: climbs as you become eligible for the nested (indirect) PIM groups
+    //   - active group assignments   -> the direct role group + any group you activate (v1 "role to a group")
+    //   - active direct Entra roles  -> v1 "Entra role to the admin"
+    //   - active direct Azure RBAC   -> v1 "Azure role to the admin" (when an ARM token is available)
+    // Covers ALL PIM v1 + v2 scenarios (workloads like AzDevOps / Power BI arrive via PIM-for-Groups, i.e. groups,
+    // so they're in the group counts). Entra releases the set in ~one cycle, so this total JUMPS once; we settle on
+    // it (poll-driven, no timer).
+    let eligN = null, actGN = null, actEN = null, actAzN = null
+    try { const e = await listEligibleForMe(tk).catch(() => null); if (e) eligN = e.length } catch (_) {}
+    try { const a = await listActiveGroupAssignmentsForMe(tk).catch(() => null); if (a) { actGN = a.length; activeIds = a.map(x => x.groupId).filter(Boolean).sort() } } catch (_) {}
+    try { const r = await listActiveDirectEntraRolesForMe(tk).catch(() => null); if (r) actEN = r.length } catch (_) {}
+    try { if (armTk) { const z = await listActiveDirectAzureRbacForMe(armTk).catch(() => null); if (z) actAzN = z.length } } catch (_) {}
+    if (eligN == null && actGN == null && actEN == null && actAzN == null) continue
+    count = (eligN || 0) + (actGN || 0) + (actEN || 0) + (actAzN || 0)
     if (activeIds) { activeKey = activeIds.join(','); if (mem[activeKey] != null) target = mem[activeKey]; if (durMem[activeKey] != null) learnedDur = durMem[activeKey] }   // learned target + duration for this active-set
     // Drop a stale cached target the moment the live count clearly overshoots it.
     if (target != null && ((mode === 'activate' && count > target) || (mode === 'deactivate' && count < target))) target = null
+    // Track count movement + WHEN it last moved (for settle detection). The count is the
+    // user's eligible/active group set: it CLIMBS on activate and FALLS on deactivate as the
+    // 40+ transitive (nested) groups/permissions propagate over MINUTES.
     if (prev === null) { prev = count; start = count }
-    if (count !== prev) { logDiag(`Propagation: eligible groups ${prev} -> ${count} (${secs}s)`); prev = count; changed = true }
-    // TEXT = the real DELEGATED count (jumps when Entra releases the groups all at
-    // once). BAR = time-based creep (learnedDur, default 4 min) up to 95% while
-    // waiting, 100% on completion.
+    if (count !== prev) {
+      logDiag(`Propagation: ${mode} groups ${prev} -> ${count} (${secs}s)`)
+      prev = count; changed = true; stablePolls = 0
+      // Reload on each change so the folded-out groups appear/disappear AS they propagate
+      // (the operator's "it never reloads the folded-out groups" complaint).
+      try { await loaded(tk) } catch (_) {}
+    } else {
+      stablePolls++   // this 10s poll saw the SAME count as the last — one more stable poll
+    }
+
     const countLabel = (mode === 'deactivate') ? 'Deactivated Groups' : 'Activated Groups'
-    const workMsg    = (mode === 'deactivate') ? 'removing the permissions' : 'propagating permissions'
+    const workMsg    = (mode === 'deactivate') ? 'removing the permissions' : 'assigning the nested group permissions'
     const everyS     = Math.round(intervalMs / 1000)
     let frac = '0'
     if (start != null) {
       const soFar = Math.max(0, (mode === 'deactivate') ? (start - count) : (count - start))
       frac = (target != null && target !== start) ? `${Math.min(soFar, Math.abs(target - start))}/${Math.abs(target - start)}` : `${soFar}`
     }
-    let pct = changed ? 100 : ((learnedDur && learnedDur > 0) ? Math.min(95, Math.round(100 * (Date.now() - startedAt) / learnedDur)) : null)
-    // DONE immediately once the count moves from the start (Entra released the
-    // groups -- the release is atomic) OR it reaches the learned target. No
-    // "confirming it holds" hold; the change IS the completion.
-    if (changed || (target != null && count === target)) {
+
+    // COMPLETION (operator 2026-06-25). The nested groups/roles normally arrive in ONE cycle:
+    // the COMBINED count (eligible groups + active group assignments + active Entra roles) stays
+    // flat for 1–8 min while Entra works, then JUMPS to the full set (climbs on activate / falls
+    // on deactivate). So: keep polling while the count is unchanged ("poll until released"); once
+    // it HAS moved, confirm it holds for a short window before declaring done (guards against
+    // finishing on a partial mid-jump read). Two extra gates: the directly-activated group(s)
+    // must be in their final state (active on activate / gone on deactivate), and a learned
+    // target lets a repeat finish the instant the count reaches the known full size.
+    // PER-SCOPE completion (operator 2026-06-26). Each watched scope completes by ITS OWN rule, so a
+    // mixed batch can never let one scope prematurely settle another:
+    //   ACTIVATE:
+    //     - a detectable Entra role   -> wait until it is actually ASSIGNED to the user (transitive)
+    //     - else if the group NESTS   -> it fans out; use the locked COUNT-settle (climb + settle)
+    //     - else (true leaf, no role) -> release as soon as the user is a member
+    //   DEACTIVATE (must be FAST — operator 2026-06-26 "deactivation is slow / should not take this
+    //   long"): do NOT wait for the directory to clear the role. Entra role REMOVAL propagates slowly
+    //   (minutes), but once the user's MEMBERSHIP is dropped the access is already being torn down, so
+    //   release immediately. Nesting groups still use the falling COUNT-settle so a fan-out's children
+    //   are confirmed gone; a leaf releases the instant membership is gone.
+    const activeSet = new Set(activeIds || [])
+    // Settled = the count MOVED and has since been identical across STABLE_POLLS consecutive 10s
+    // polls (poll-driven, not a hardcoded duration). The DIRECT / fan-out role-group path.
+    const settledAfterChange = changed && stablePolls >= STABLE_POLLS
+    const reachedTarget = (target != null) && (mode === 'deactivate' ? count <= target : count >= target)
+
+    // Entra "is it assigned to me yet" set — fetched lazily, ACTIVATE-only (deactivation never waits
+    // on role removal), and only when a scope actually has an Entra role to verify.
+    let myEntraSet = undefined
+    const needEntra = (mode !== 'deactivate') && Array.isArray(scopeIds) &&
+      scopeIds.some(g => (classified[g]?.entraRoleIds?.length))
+    if (needEntra) { try { myEntraSet = await listMyActiveEntraRoleDefIdsTransitive(tk) } catch (_) { myEntraSet = null } }
+    const scopeDone = (gid) => {
+      const c = classified[gid] || { nesting: true, entraRoleIds: [] }
+      const ids = c.entraRoleIds || []
+      const member = activeSet.has(gid)
+      if (mode === 'deactivate') {
+        if (member) return false                          // still a member -> not gone yet
+        if (c.nesting) return settledAfterChange || reachedTarget   // fan-out: confirm children fell + settled
+        return true                                       // leaf: membership gone is enough (role clears in bg)
+      }
+      if (!member) return false                           // ACTIVATE: must be an active member first
+      // NESTING role group (incl. azure-via-nesting like an AzRes group) -> the locked COUNT-settle.
+      // Checked BEFORE the Entra path: a nesting group's detected Entra roles can land slowly (or be
+      // incidental to an Azure grant), so gating on them hangs (operator 2026-06-26: azure activation
+      // "still running after 120s"). The count moves fast and IS the fan-out signal.
+      if (c.nesting) return settledAfterChange || reachedTarget
+      // TRUE LEAF that grants an Entra role (e.g. securityadmin) -> verify it actually landed.
+      if (ids.length) return (myEntraSet == null) ? true : ids.every(id => myEntraSet.has(id))
+      return true                                         // leaf, no detectable role -> release on membership
+    }
+    const allScopesDone = (Array.isArray(scopeIds) && scopeIds.length)
+      ? scopeIds.every(scopeDone)
+      : (settledAfterChange || reachedTarget)
+
+    let pct = allScopesDone ? 100
+            : ((learnedDur && learnedDur > 0) ? Math.min(95, Math.round(100 * (Date.now() - startedAt) / learnedDur)) : null)
+    if (allScopesDone) {
       if (activeKey != null) { await setPropMemoryEntry(activeKey, count); if (changed) await setPropDurationEntry(activeKey, Math.max(1000, Date.now() - startedAt)) }
       try { await clearStored(['activePropWatch']) } catch (_) {}   // done -> nothing to resume
       propWatchActive = false
       setFunBox(false)
-      logDiag(`Propagation done at ${count} for active-set [${activeKey}] (${secs}s)`)
-      banner(`✓ ${countLabel}: ${frac} — done. Use Reload Permissions to re-check.`, true, 100)   // jump to 100% NOW...
-      try { await loaded(tk) } catch (_) {}                                                         // ...then refresh the list (the done banner persists across its render)
+      logDiag(`Propagation SETTLED (${mode}) at ${count} for [${activeKey}] (${secs}s) — done=${allScopesDone} changed=${changed} target=${target}`)
+      banner(`✓ ${countLabel}: ${frac} — all permissions ${mode === 'deactivate' ? 'removed' : 'assigned'} (${secs}s).`, true, 100)
+      try { await loaded(tk) } catch (_) {}
       setTimeout(() => { if (myRun === propagationWatchToken) setPropRowStatus(null) }, 12000)
       return
     }
@@ -1643,7 +1746,7 @@ async function signOut() {
 
 // ---------- Graph ----------
 async function graph(token, method, url, body) {
-  const r = await fetchWithTimeout(`https://graph.microsoft.com/v1.0${url}`, {
+  const r = await fetchWithTimeout(`https://graph.microsoft.com/beta${url}`, {
     method,
     cache: 'no-store',   // never serve a stale cached GET -- the propagation poll must see live counts (else the bar sticks at 95% / count never updates)
     headers: {
@@ -1685,7 +1788,7 @@ async function listEligibleForMe(token) {
   while (next) {
     const res = await graph(token, 'GET', next)
     out.push(...(res.value || []))
-    next = res['@odata.nextLink'] ? res['@odata.nextLink'].replace('https://graph.microsoft.com/v1.0', '') : null
+    next = res['@odata.nextLink'] ? res['@odata.nextLink'].replace('https://graph.microsoft.com/beta', '') : null
   }
   return out
 }
@@ -1710,91 +1813,19 @@ async function hydrateGroupNames(token, groupIds) {
 
 // ---------------------------------------------------------------------------
 // Nested permission groups (two-tier PIM-for-Groups nesting -- DESIGN.md 3.1).
-// PIM4EntraPS nests a role group (e.g. "PIM-ROLE-CloudEngineer", which the user
-// is eligible for) inside permission groups ("PIM-Entra-ID-...", "PIM-AzRes-...",
-// "PIM-PowerBI-..."). The role-group -> permission-group edge is ITSELF PIM:
-// the role group is an Eligible (or Active) member of each permission group.
-// Once the user is an ACTIVE member of the role group, they are the transitive
-// eligible member of those permission groups and can self-activate each one
-// independently (operator scenario: 08:00 activate Cloud Engineer, 10:00
-// activate Application Administrator only). This already works in the Entra /
-// Azure portals; the Activator replicates the same Graph calls.
+// PIM4EntraPS nests a role group inside permission groups ("PIM-Entra-ID-...",
+// "PIM-AzRes-...", "PIM-PowerBI-..."). Those second-tier permission groups need
+// NO separate discovery call: once a role group is active the user is the
+// transitive eligible member of its permission groups, and they surface in the
+// user's OWN eligibility list (listEligibleForMe -> filterByCurrentUser, which
+// never 403s) like any other eligible group.
 //
-// Discovery cannot use filterByCurrentUser(on='principal') -- that returns only
-// the user's DIRECT eligibilities; the nested eligibilities carry
-// principalId = the ROLE GROUP. So we query each active role group's OWN
-// eligibility + assignment instances. Returns { eligible, active } group lists.
-async function listNestedForParent(token, parentGroupId) {
-  const eligible = []
-  const active   = []
-  let error = null
-  let rawEligible = 0
-  async function page(path, sink, isEligible) {
-    let next = path
-    while (next) {
-      let res
-      try { res = await graph(token, 'GET', next) }
-      catch (e) { error = (e && e.message) ? e.message : String(e); break }   // capture (e.g. 403 reading a group's schedules) instead of silent skip
-      const vals = res.value || []
-      if (isEligible) rawEligible += vals.length
-      for (const x of vals) {
-        if (x.accessId && x.accessId !== 'member') continue
-        if (!x.groupId) continue
-        sink.push({ groupId: x.groupId, endDateTime: x.endDateTime })
-      }
-      next = res['@odata.nextLink'] ? res['@odata.nextLink'].replace('https://graph.microsoft.com/v1.0', '') : null
-    }
-  }
-  const enc = encodeURIComponent(`principalId eq '${parentGroupId}'`)
-  await page(`/identityGovernance/privilegedAccess/group/eligibilityScheduleInstances?$filter=${enc}`, eligible, true)
-  await page(`/identityGovernance/privilegedAccess/group/assignmentScheduleInstances?$filter=${enc}`, active, false)
-  return { eligible, active, error, rawEligible }
-}
-
-// Build nested eligibleRows (depth 1) for the permission groups that the given
-// ACTIVE role groups expose. Each row is a normal kind:'group' row (so the
-// existing checkbox / bulk-activate / status / favorites machinery works
-// unchanged -- activation is the SAME selfActivate as any group, with the
-// permission group's id) tagged with parentGroupId so render() folds it out
-// under its parent instead of into the top-level buckets. previewEntraRoles /
-// previewAzureRoles are set to [] so nested rows don't hang on "Loading roles".
-async function discoverNestedRows(token, parentGroupIds) {
-  const parents = [...new Set((parentGroupIds || []).filter(Boolean))]
-  if (!parents.length) return []
-  const eligibleNested  = []          // { groupId, parentGroupId, endDateTime }
-  const activeNestedKeys = new Set()  // `${parentGroupId}|${groupId}`
-  lastNestedDiag = []                 // for the DIAGNOSTICS panel: why nested = 0?
-  for (const pid of parents) {
-    const nf = await listNestedForParent(token, pid)
-    lastNestedDiag.push({ parent: pid, raw: nf.rawEligible || 0, kept: (nf.eligible || []).length, error: nf.error || null })
-    for (const e of nf.eligible) eligibleNested.push({ groupId: e.groupId, parentGroupId: pid, endDateTime: e.endDateTime })
-    for (const a of nf.active)   activeNestedKeys.add(`${pid}|${a.groupId}`)
-  }
-  if (!eligibleNested.length) return []
-  const needNames = [...new Set(eligibleNested.map(e => e.groupId))]
-  const nestedNames = await hydrateGroupNames(token, needNames)
-  const rows = []
-  for (const e of eligibleNested) {
-    const rowKey = `nested:${e.parentGroupId}:${e.groupId}`   // unique per (parent,child)
-    rows.push({
-      kind: 'group',
-      isNested: true,
-      depth: 1,
-      parentGroupId: e.parentGroupId,
-      id: rowKey,
-      rowKey,
-      groupId: e.groupId,
-      displayName: nestedNames[e.groupId] || e.groupId,
-      accessId: 'member',
-      endDateTime: e.endDateTime,
-      isActive: activeNestedKeys.has(`${e.parentGroupId}|${e.groupId}`),
-      previewEntraRoles: [],
-      previewAzureRoles: [],
-      checked: false
-    })
-  }
-  return rows
-}
+// The former per-parent discovery (discoverNestedRows -- querying each active
+// role group AS a principal via assignment/eligibilityScheduleInstances) was
+// REMOVED 2026-06-22: for a delegated admin it 403'd on every parent (reading
+// another principal's PIM schedules needs a privileged directory role), so it
+// contributed nothing the eligibility list didn't already carry, and only
+// produced confusing "unauthorized" diagnostics that admins read as a bug.
 
 async function activateGroup(token, groupId, justification, durationHours) {
   // POST assignmentScheduleRequest -- selfActivate, member access, after-MFA per CA policy.
@@ -1850,7 +1881,7 @@ async function listEligibleDirectEntraRolesForMe(token) {
   while (next) {
     const res = await graph(token, 'GET', next)
     out.push(...(res.value || []))
-    next = res['@odata.nextLink'] ? res['@odata.nextLink'].replace('https://graph.microsoft.com/v1.0', '') : null
+    next = res['@odata.nextLink'] ? res['@odata.nextLink'].replace('https://graph.microsoft.com/beta', '') : null
   }
   return out
 }
@@ -1867,9 +1898,100 @@ async function listActiveDirectEntraRolesForMe(token) {
   while (next) {
     const res = await graph(token, 'GET', next)
     out.push(...(res.value || []))
-    next = res['@odata.nextLink'] ? res['@odata.nextLink'].replace('https://graph.microsoft.com/v1.0', '') : null
+    next = res['@odata.nextLink'] ? res['@odata.nextLink'].replace('https://graph.microsoft.com/beta', '') : null
   }
   return out
+}
+
+// The roleDefinitionIds the signed-in user currently holds TRANSITIVELY — i.e.
+// INCLUDING Entra directory roles granted via a GROUP membership (PIM v2 indirect
+// groups), not only roles assigned to the user directly. This is the "is the role
+// actually assigned to me yet?" check the propagation watch uses to release the
+// interface for an INDIRECT-group activation (operator 2026-06-26): an indirect
+// (leaf) group never grows the group COUNT (it just flips eligible -> active), so
+// completion is decided by whether its Entra role has LANDED for the user. Beta
+// transitiveRoleAssignments expands group-derived assignments; it is an advanced
+// query (needs $count=true + ConsistencyLevel:eventual), so it goes via $batch
+// (graph() can't set per-request headers). Returns a Set of roleDefinitionIds, or
+// null if the query could not run (caller then falls back to membership-only).
+async function listMyActiveEntraRoleDefIdsTransitive(token) {
+  const me = currentAccount?.localAccountId
+  if (!me) return null
+  const f = encodeURIComponent(`principalId eq '${me}'`)
+  const req = [{
+    id: 'me::transitiveRoleAssignments',
+    method: 'GET',
+    url: `/roleManagement/directory/transitiveRoleAssignments?$filter=${f}&$top=999&$count=true`,
+    headers: { ConsistencyLevel: 'eventual' }
+  }]
+  const out = new Set()
+  let ok = false
+  for (const resp of await graphBatch(token, req)) {
+    if (resp.status >= 200 && resp.status < 300 && resp.body && Array.isArray(resp.body.value)) {
+      ok = true
+      for (const a of resp.body.value) if (a.roleDefinitionId) out.add(a.roleDefinitionId)
+    }
+  }
+  return ok ? out : null
+}
+
+// Classify a watched group so the propagation watch can pick the right completion rule:
+//   { nesting, entraRoleIds }
+//   - nesting=true  => a "role group" that FANS OUT (nests child PIM groups DOWN, and/or is a member
+//                      of role-bearing groups UP); the group count jumps as the chain propagates ->
+//                      use the locked COUNT-settle.
+//   - nesting=false => a true LEAF that grants a role but nests no further; activating it never grows
+//                      the count -> complete on the role landing (entraRoleIds verified assigned) or,
+//                      when no role is detectable, on membership.
+// (operator 2026-06-26; see docs/REQUIREMENTS.md "INDIRECT-group activation completes on ROLE-LANDED".)
+// entraRoleIds = the Entra role(s) the group grants, enumerated via the Show-Roles fan-out
+// (session-cached). On any query failure we default nesting=true — the SAFE default keeps the locked
+// count-settle and never releases a fan-out early.
+async function classifyWatchedGroup(token, gid) {
+  // "nesting" = the group is part of a group-in-group chain — it CONTAINS child PIM groups
+  // (DOWN, transitiveMembers) OR is a MEMBER OF role-bearing groups (UP, transitiveMemberOf).
+  // EITHER shape means activating it can FAN OUT (more eligible/active group assignments appear
+  // over 1-8 min), so the locked COUNT-settle is the right completion. A group with NO nesting in
+  // EITHER direction is a true LEAF: activating it never grows the count, so it completes on its
+  // role landing / membership. CRITICAL (observed 2026-06-26 in a live tenant): role groups here
+  // fan out UPWARD (Security_Admin = down 0 / up 4), so a DOWN-only check wrongly calls them leaves
+  // and settles them ~10s early -> we MUST check up AND down.
+  // Enumerate the Entra role(s) the group grants via the Show-Roles fan-out FIRST (session-cached).
+  // Side effect: it populates `_previewNestedByParent[gid]` with the RELATED nested-group set it
+  // discovered (down members + up memberOf) — the SAME proven traversal Show Roles uses, which a
+  // standalone probe was found to under-report (553f056b: Show Roles saw 1, a $top=1 probe saw 0).
+  let entraRoleIds = []
+  try {
+    const be = await bulkLoadEntraRolesForGroups(token, [gid])
+    entraRoleIds = [...new Set((be.get(gid) || []).map(x => x.roleDefinitionId).filter(Boolean))]
+  } catch (_) { entraRoleIds = [] }
+  // "nesting" = the group is in a group-in-group chain (CONTAINS child PIM groups [down] OR is a
+  // MEMBER OF role-bearing groups [up]). EITHER shape means it can FAN OUT -> use the locked
+  // COUNT-settle. No nesting = a true LEAF (activating never grows the count). Prefer the fan-out's
+  // related set; fall back to a direct up+down probe when it isn't populated (e.g. role cache hit
+  // after a popup reload). Default = nesting (DIRECT/count-settle) when undeterminable — never
+  // release a fan-out early.
+  let nesting = true
+  const related = _previewNestedByParent[gid]
+  if (Array.isArray(related)) {
+    nesting = related.length > 0
+  } else {
+    try {
+      const reqs = [
+        { id: 'down', method: 'GET', url: `/groups/${gid}/transitiveMembers/microsoft.graph.group?$select=id&$top=999` },
+        { id: 'up',   method: 'GET', url: `/groups/${gid}/transitiveMemberOf/microsoft.graph.group?$select=id&$top=999` },
+      ]
+      let has = false, ok = false
+      for (const resp of await graphBatch(token, reqs)) {
+        if (resp.status >= 200 && resp.status < 300 && resp.body && Array.isArray(resp.body.value)) {
+          ok = true
+          if (resp.body.value.length > 0) has = true
+        }
+      }
+      if (ok) nesting = has
+    } catch (_) { nesting = true }
+  }
+  return { nesting, entraRoleIds }
 }
 
 async function activateDirectEntraRole(token, roleDefinitionId, directoryScopeId, justification, durationHours) {
@@ -1909,63 +2031,47 @@ async function deactivateDirectEntraRole(token, roleDefinitionId, directoryScope
 // not abort the whole list.
 async function listEligibleDirectAzureRbacForMe(armToken) {
   if (!armToken) return []
-  // 1) List all subscriptions visible to caller
-  let subs = []
-  try {
-    const subsResp = await fetchWithTimeout('https://management.azure.com/subscriptions?api-version=2020-01-01', {
-      headers: { Authorization: 'Bearer ' + armToken }
-    })
-    if (subsResp.ok) {
-      const j = await subsResp.json()
-      subs = (j.value || []).map(s => s.subscriptionId).filter(Boolean)
-    }
-  } catch { /* no subs -> no rbac eligibilities */ }
-  const out = []
-  // 2) Per-subscription eligibility query
+  // Reuse the cached subscription list (listUserSubscriptions) instead of
+  // re-listing every load.
+  const subs = (await listUserSubscriptions(armToken)).map(s => s.id).filter(Boolean)
   const apiVersion = '2020-10-01'
-  for (const subId of subs) {
+  // Per-subscription eligibility queries run in PARALLEL. A serial for-loop here
+  // was the dominant load cost on a high-latency host (proxy/Defender/TLS
+  // inspection on a server): N subs x ~700ms-1s serial = ~30s on Win Server 2022
+  // vs ~6s on Win11. Fanning out collapses that to roughly one round-trip wide.
+  // A 403 on a single sub (CA restriction, sub deleted) still degrades to [] for
+  // that sub without aborting the rest.
+  const perSub = await Promise.all(subs.map(async (subId) => {
     try {
       const url = `https://management.azure.com/subscriptions/${subId}/providers/Microsoft.Authorization/roleEligibilityScheduleInstances?api-version=${apiVersion}&$filter=asTarget()`
       const r = await fetchWithTimeout(url, { headers: { Authorization: 'Bearer ' + armToken } })
-      if (!r.ok) continue
+      if (!r.ok) return []
       const j = await r.json()
-      for (const inst of (j.value || [])) {
-        out.push({ ...inst, _subscriptionId: subId })
-      }
-    } catch { /* skip subscription on failure */ }
-  }
-  return out
+      return (j.value || []).map(inst => ({ ...inst, _subscriptionId: subId }))
+    } catch { return [] }
+  }))
+  return perSub.flat()
 }
 
 async function listActiveDirectAzureRbacForMe(armToken) {
   if (!armToken) return []
-  let subs = []
-  try {
-    const subsResp = await fetchWithTimeout('https://management.azure.com/subscriptions?api-version=2020-01-01', {
-      headers: { Authorization: 'Bearer ' + armToken }
-    })
-    if (subsResp.ok) {
-      const j = await subsResp.json()
-      subs = (j.value || []).map(s => s.subscriptionId).filter(Boolean)
-    }
-  } catch { /* */ }
-  const out = []
+  const subs = (await listUserSubscriptions(armToken)).map(s => s.id).filter(Boolean)
   const apiVersion = '2020-10-01'
-  for (const subId of subs) {
+  // Parallel per-subscription sweep (same rationale as the eligible variant).
+  const perSub = await Promise.all(subs.map(async (subId) => {
     try {
       const url = `https://management.azure.com/subscriptions/${subId}/providers/Microsoft.Authorization/roleAssignmentScheduleInstances?api-version=${apiVersion}&$filter=asTarget()`
       const r = await fetchWithTimeout(url, { headers: { Authorization: 'Bearer ' + armToken } })
-      if (!r.ok) continue
+      if (!r.ok) return []
       const j = await r.json()
-      for (const inst of (j.value || [])) {
-        // Only count ACTIVATED rows (PIM "Activated" assignmentType). Permanent
-        // assignments show up too and would clutter the UI.
-        const at = inst.properties?.assignmentType || ''
-        if (at.toLowerCase() === 'activated') out.push({ ...inst, _subscriptionId: subId })
-      }
-    } catch { /* */ }
-  }
-  return out
+      // Only count ACTIVATED rows (PIM "Activated" assignmentType). Permanent
+      // assignments show up too and would clutter the UI.
+      return (j.value || [])
+        .filter(inst => (inst.properties?.assignmentType || '').toLowerCase() === 'activated')
+        .map(inst => ({ ...inst, _subscriptionId: subId }))
+    } catch { return [] }
+  }))
+  return perSub.flat()
 }
 
 async function activateDirectAzureRbac(armToken, scope, roleDefinitionId, principalId, justification, durationHours) {
@@ -2183,7 +2289,7 @@ async function listActiveGroupAssignmentsForMe(token) {
   while (next) {
     const res = await graph(token, 'GET', next)
     out.push(...(res.value || []))
-    next = res['@odata.nextLink'] ? res['@odata.nextLink'].replace('https://graph.microsoft.com/v1.0', '') : null
+    next = res['@odata.nextLink'] ? res['@odata.nextLink'].replace('https://graph.microsoft.com/beta', '') : null
   }
   // Capture the RAW (pre-filter) shape for the diagnostics panel so we can read
   // off exactly what Graph returns for THIS account without DevTools.
@@ -2208,7 +2314,7 @@ async function loadRoleDefinitions(token) {
   while (next) {
     const res = await graph(token, 'GET', next)
     for (const rd of (res.value || [])) idToName[rd.id] = rd.displayName
-    next = res['@odata.nextLink'] ? res['@odata.nextLink'].replace('https://graph.microsoft.com/v1.0', '') : null
+    next = res['@odata.nextLink'] ? res['@odata.nextLink'].replace('https://graph.microsoft.com/beta', '') : null
   }
   roleDefinitionsCache = { idToName }
   return roleDefinitionsCache
@@ -2225,7 +2331,7 @@ async function listRoleAssignmentsForGroup(token, groupId) {
   while (next) {
     const res = await graph(token, 'GET', next)
     out.push(...(res.value || []))
-    next = res['@odata.nextLink'] ? res['@odata.nextLink'].replace('https://graph.microsoft.com/v1.0', '') : null
+    next = res['@odata.nextLink'] ? res['@odata.nextLink'].replace('https://graph.microsoft.com/beta', '') : null
   }
   return out
 }
@@ -2324,50 +2430,196 @@ async function listUserSubscriptions(armToken) {
 // and 50 parallel `eq` queries complete in roughly the time of one batched
 // call thanks to HTTP/2 multiplexing.
 //
-// Progress callback fires per completed query so the popup can show a
-// progress bar. Returns Map<groupId, [{ roleDefinitionId, directoryScopeId }]>.
+// ---- Role-preview cache (survives popup close/reopen) ----------------------
+// An in-memory Map would be wiped every time the popup closes (its JS context is
+// torn down). chrome.storage.session persists for the BROWSER session and auto-
+// clears on browser restart, so re-expanding a group AND closing+reopening the
+// popup both serve instantly, while a restart guarantees fresh data. Falls back to
+// chrome.storage.local, then a module object (tests / no chrome).
+const ROLE_PREVIEW_CACHE_KEY = 'pima_role_preview_cache_v1'
+const ROLE_PREVIEW_CACHE_TTL_MS = 4 * 60 * 60 * 1000   // freshness bound within a session
+const _rolePreviewCacheMem = {}
+// parentGroupId -> [nested (transitive member) group ids], populated by the Entra fan-out so the
+// Azure RBAC + workload passes can query the SAME nested set (PIM v2 group nesting).
+const _previewNestedByParent = {}
+function _roleCacheStore() {
+  try { if (typeof chrome !== 'undefined' && chrome.storage) return chrome.storage.session || chrome.storage.local } catch (_) {}
+  return null
+}
+async function roleCacheRead() {
+  const store = _roleCacheStore()
+  if (store) { try { const o = await store.get(ROLE_PREVIEW_CACHE_KEY); return (o && o[ROLE_PREVIEW_CACHE_KEY]) || {} } catch (_) {} }
+  return { ..._rolePreviewCacheMem }
+}
+async function roleCacheWrite(obj) {
+  const store = _roleCacheStore()
+  if (store) { try { await store.set({ [ROLE_PREVIEW_CACHE_KEY]: obj }); return } catch (_) {} }
+  for (const k in _rolePreviewCacheMem) delete _rolePreviewCacheMem[k]
+  Object.assign(_rolePreviewCacheMem, obj)
+}
+
+// Graph $batch: POST /$batch in chunks of 20 (the per-batch limit); returns a flat
+// array of sub-responses. A whole-chunk failure is surfaced as status:0 responses so
+// callers degrade gracefully instead of throwing.
+async function graphBatch(token, requests) {
+  const all = []
+  for (let i = 0; i < requests.length; i += 20) {
+    const chunk = requests.slice(i, i + 20)
+    try {
+      const res = await graph(token, 'POST', '/$batch', { requests: chunk })
+      if (res && Array.isArray(res.responses)) all.push(...res.responses)
+    } catch (e) {
+      for (const req of chunk) all.push({ id: req.id, status: 0, body: { error: { message: e?.message || String(e) } } })
+    }
+  }
+  return all
+}
+
+// The role-management sub-requests for ONE principal, id-tagged "ownerGid::pid::endpoint"
+// so a batched response routes back to the owning group. $top=999 (no in-batch paging --
+// a single role group never approaches that). transitiveRoleAssignments is BETA-only.
+function roleSubRequests(pid, ownerGid) {
+  const f = encodeURIComponent(`principalId eq '${pid}'`)
+  const mk = (endpoint, { expand = false, advanced = false } = {}) => {
+    const req = {
+      id: `${ownerGid}::${pid}::${endpoint}`,
+      method: 'GET',
+      url: `/roleManagement/directory/${endpoint}?$filter=${f}&$top=999`
+         + (advanced ? '&$count=true' : '')
+         + (expand ? '&$expand=roleDefinition($select=id,displayName)' : ''),
+    }
+    if (advanced) req.headers = { ConsistencyLevel: 'eventual' }
+    return req
+  }
+  return [
+    mk('roleAssignments'),
+    mk('transitiveRoleAssignments', { advanced: true }),
+    mk('roleEligibilityScheduleInstances', { expand: true }),
+    mk('roleAssignmentScheduleInstances', { expand: true }),
+  ]
+}
+
+// Progress callback fires as groups resolve so the popup can show a progress bar.
+// Returns Map<groupId, [{ roleDefinitionId, directoryScopeId, roleName }]>.
+//
+// PERF: role-management queries go through Graph $batch (up to 20 sub-requests per HTTP
+// call) instead of one request per (group x endpoint) -- e.g. 50 groups x 4 endpoints =
+// 200 requests collapse to ~10 batch calls. Results are cached in chrome.storage.session
+// so re-expanding a group, and closing+reopening the popup, serve instantly.
 async function bulkLoadEntraRolesForGroups(token, groupIds, onProgress) {
   const out = new Map()
   if (!groupIds || !groupIds.length) return out
+  const ids = [...new Set(groupIds.filter(Boolean))]
+  const total = ids.length
   let done = 0
-  const total = groupIds.length
 
-  async function fetchOne(gid) {
-    // Use the TRANSITIVE /roleAssignments endpoint by design. PIM4EntraPS
-    // architecture nests role groups inside many task groups, and each
-    // task group carries the actual role assignment. Activating one
-    // role group ("Cloud Engineer") gives the user the union of role
-    // grants from every nested task group beneath it -- the user must
-    // see that union here, otherwise the preview underreports what the
-    // activation will actually grant. v1.4.4 mistakenly dropped this
-    // endpoint; v1.4.5 restores it. Fall back to direct /roleAssignments
-    // when transitive returns 4xx (some tenants restrict it for
-    // non-privileged users).
-    const tryUrl = async (endpoint, needHeaders) => {
-      const url = `https://graph.microsoft.com/v1.0${endpoint}?$filter=principalId eq '${gid}'&$top=999${needHeaders ? '&$count=true' : ''}`
-      const headers = { Authorization: `Bearer ${token}` }
-      if (needHeaders) headers['ConsistencyLevel'] = 'eventual'
-      const r = await fetchWithTimeout(url, { headers })
-      if (!r.ok) return null
-      return await r.json()
+  // SESSION CACHE: serve fresh entries instantly (survives re-expand AND popup
+  // close/reopen within the browser session); fetch only the misses.
+  const cache = await roleCacheRead()
+  const now = Date.now()
+  const toFetch = []
+  for (const gid of ids) {
+    const hit = cache[gid]
+    if (hit && Array.isArray(hit.items) && (now - (hit.ts || 0)) < ROLE_PREVIEW_CACHE_TTL_MS) {
+      out.set(gid, hit.items); done++
+    } else { toFetch.push(gid) }
+  }
+  if (onProgress && done) onProgress(done, total, 'entra')
+  if (!toFetch.length) return out
+
+  // Per-group accumulator (dedup by role+scope).
+  const acc = new Map()
+  for (const gid of toFetch) acc.set(gid, { items: [], seen: new Set() })
+  const addTo = (gid, a) => {
+    if (!a || !a.roleDefinitionId) return
+    const b = acc.get(gid); if (!b) return
+    const k = `${a.roleDefinitionId}|${a.directoryScopeId || ''}`
+    if (b.seen.has(k)) return
+    b.seen.add(k)
+    b.items.push({ roleDefinitionId: a.roleDefinitionId, directoryScopeId: a.directoryScopeId, roleName: (a.roleDefinition && a.roleDefinition.displayName) || null })
+  }
+  const ingest = (responses) => {
+    for (const resp of responses) {
+      const ownerGid = String(resp.id || '').split('::')[0]
+      if (resp.status >= 200 && resp.status < 300 && resp.body && Array.isArray(resp.body.value)) {
+        for (const a of resp.body.value) addTo(ownerGid, a)
+      }
     }
-    let j = null
-    try {
-      j = await tryUrl('/roleManagement/directory/transitiveRoleAssignments', true)
-      if (!j) j = await tryUrl('/roleManagement/directory/roleAssignments', false)
-    } catch (e) {
-      console.warn(`[PIM Activator] role fetch failed for ${gid}:`, e?.message || e)
+  }
+
+  // Diagnostics for a single-group "Show Roles" expand: log per-endpoint + per-direction so an
+  // empty result is explainable, not a mystery (operator 2026-06-25: "log in diag what happens
+  // when people do show roles").
+  const diagGid = (toFetch.length === 1) ? toFetch[0] : null
+  const diag = []
+
+  // FAST PATH: batch the 4 self-queries for EVERY group at once.
+  const fastResp = await graphBatch(token, toFetch.flatMap(gid => roleSubRequests(gid, gid)))
+  ingest(fastResp)
+  if (diagGid) {
+    for (const resp of fastResp) {
+      const p = String(resp.id || '').split('::')
+      if (p[0] === diagGid) diag.push(`self ${p[2]}: HTTP ${resp.status}, ${(resp.body && Array.isArray(resp.body.value)) ? resp.body.value.length : '-'} item(s)`)
     }
-    const items = (j?.value || []).map(a => ({
-      roleDefinitionId: a.roleDefinitionId,
-      directoryScopeId: a.directoryScopeId
-    }))
+    diag.push(`direct roles found: ${acc.get(diagGid).items.length}`)
+  }
+
+  // FAN-OUT (ALWAYS) — traverse group nesting in BOTH directions so the ACTUAL role is found
+  // on the platform (only fall back to the name-guess when the platform truly returns nothing):
+  //   DOWN (transitiveMembers): groups nested INSIDE this group (this group is a container).
+  //   UP   (transitiveMemberOf): role-assignable groups this group is a MEMBER of — this is
+  //         where the granted Entra/Azure role usually lives in PIM v2 (the PIM group is a
+  //         member of the role-bearing group), which the down-only fan-out missed -> the
+  //         "(from group name)" guess fired. We query every related group's roles + MERGE
+  //         (dedup) into the parent. Remember the related set for the Azure + workload passes.
+  // (operator 2026-06-25)
+  {
+    const memReq = []
+    for (const gid of toFetch) {
+      memReq.push({ id: `down::${gid}`, method: 'GET', url: `/groups/${gid}/transitiveMembers/microsoft.graph.group?$select=id&$top=999` })
+      memReq.push({ id: `up::${gid}`,   method: 'GET', url: `/groups/${gid}/transitiveMemberOf/microsoft.graph.group?$select=id&$top=999` })
+    }
+    const relatedByParent = new Map()
+    let dDown = 0, dUp = 0
+    for (const resp of await graphBatch(token, memReq)) {
+      const parts = String(resp.id || '').split('::')
+      const dir = parts[0], parent = parts[1] || parts[0]
+      if (resp.status >= 200 && resp.status < 300 && resp.body && Array.isArray(resp.body.value)) {
+        const set = relatedByParent.get(parent) || new Set()
+        for (const m of resp.body.value) if (m.id && m.id !== parent) set.add(m.id)
+        relatedByParent.set(parent, set)
+        if (diagGid && parent === diagGid) { if (dir === 'down') dDown += resp.body.value.length; else dUp += resp.body.value.length }
+      } else if (diagGid && parent === diagGid) {
+        diag.push(`${dir} member discovery: HTTP ${resp.status} (failed)`)
+      }
+    }
+    const nestedReq = []
+    for (const [parent, set] of relatedByParent) {
+      const kids = [...set]
+      _previewNestedByParent[parent] = kids   // related set for the Azure RBAC + workload passes
+      for (const kid of kids) nestedReq.push(...roleSubRequests(kid, parent))
+    }
+    if (diagGid) diag.push(`fan-out: down members=${dDown}, up memberOf=${dUp}, related groups queried=${(relatedByParent.get(diagGid) || new Set()).size}`)
+    if (nestedReq.length) ingest(await graphBatch(token, nestedReq))
+  }
+
+  // Finalize + persist the cache.
+  for (const gid of toFetch) {
+    const items = acc.get(gid).items
     out.set(gid, items)
+    cache[gid] = { items, ts: now }
     done++
     if (onProgress) onProgress(done, total, 'entra')
   }
+  try { await roleCacheWrite(cache) } catch (_) {}
 
-  await Promise.all(groupIds.map(fetchOne))
+  // Detailed single-group diagnostics (per endpoint + per fan-out direction + total).
+  if (diagGid) {
+    diag.push(`TOTAL Entra roles: ${(out.get(diagGid) || []).length}`)
+    lastPreviewDiag = `SHOW ROLES (Entra) ${diagGid}\n  ` + diag.join('\n  ')
+    try { logDiag(lastPreviewDiag) } catch (_) {}
+    try { refreshDiagnosticsPanel() } catch (_) {}
+  }
   return out
 }
 
@@ -2379,9 +2631,13 @@ async function bulkLoadAzureRolesForGroups(armToken, groupIds) {
   const out = new Map()
   if (!armToken || !groupIds || !groupIds.length) return out
   const inList = groupIds.map(g => `'${g}'`).join(',')
+  // Cover BOTH active role assignments AND PIM-eligible Azure assignments (the design's
+  // indirect links can be "Eligible / Active"), so an Azure role a (nested) group is ELIGIBLE
+  // for shows in Show Roles too — not only active ones. Same property shape (principalId /
+  // roleDefinitionId / scope) across both resource types.
   const query = `
     authorizationresources
-    | where type =~ "microsoft.authorization/roleassignments"
+    | where type in~ ("microsoft.authorization/roleassignments", "microsoft.authorization/roleeligibilityscheduleinstances")
     | extend principalId = tostring(properties.principalId)
     | extend roleDefinitionId = tostring(properties.roleDefinitionId)
     | extend scope = tostring(properties.scope)
@@ -2416,6 +2672,123 @@ async function bulkLoadAzureRolesForGroups(armToken, groupIds) {
     console.warn('[PIM Activator] Azure Resource Graph call failed:', e?.message || e)
   }
   return out
+}
+
+// ---- Plan A: lazy per-group role preview (load ON EXPAND, not at startup) ----
+// Startup used to eagerly fetch the transitive role preview for EVERY eligible
+// group (N Entra roleAssignments calls + role-definitions + an ARG query) and
+// show "Loading roles..." for 10-15s. Those rows are collapsed by default, so
+// the work was wasted until the user expanded a group. Now the previews load
+// per group, on first expand, via loadRolePreviewForGroup().
+let _previewRoleDefs = null   // role-definition id->name map, fetched once, reused
+function buildEntraPreviewLazy(items, roleDefsMap) {
+  const seen = new Set(); const out = []
+  for (const a of (items || [])) {
+    // Prefer the real name from the $expand=roleDefinition enumeration; fall back
+    // to the shared role-def map, then the raw id (last resort).
+    const roleName = a.roleName || (roleDefsMap && roleDefsMap[a.roleDefinitionId]) || a.roleDefinitionId
+    const scopeObj = parseDirectoryScopeSync(a.directoryScopeId)
+    const scopeKey = scopeObj.kind === 'au'     ? `au:${scopeObj.auId}` :
+                     scopeObj.kind === 'tenant' ? 'tenant' :
+                     scopeObj.kind === 'other'  ? `other:${scopeObj.raw}` : 'unknown'
+    const k = `${roleName}|${scopeKey}`
+    if (seen.has(k)) continue
+    seen.add(k)
+    out.push({ roleName, scope: summariseScopes([scopeObj]) })
+  }
+  out.sort((a, b) => (a.roleName || '').localeCompare(b.roleName || '')
+                   || (a.scope || '').localeCompare(b.scope || ''))
+  return out
+}
+function buildAzurePreviewLazy(items, subNameById) {
+  const seen = new Set(); const out = []
+  for (const a of (items || [])) {
+    const roleName = a.roleName || '(unknown role)'
+    const rawScope = a.scope || '/'
+    const k = `${roleName}|${rawScope}`
+    if (seen.has(k)) continue
+    seen.add(k)
+    out.push({ roleName, scope: describeArmScope(rawScope, subNameById) })
+  }
+  out.sort((a, b) => (a.roleName || '').localeCompare(b.roleName || '')
+                   || (a.scope || '').localeCompare(b.scope || ''))
+  return out
+}
+// Fetch ONE group's Entra + Azure transitive role preview, set it on the row,
+// and re-render. Idempotent + guarded: no-op if already loaded or in flight.
+// Fail-soft: on any error the row settles to an empty preview (never stuck).
+async function loadRolePreviewForGroup(r) {
+  if (!r || r.kind !== 'group') return
+  if (r._previewFetching) return
+  if (r.previewEntraRoles !== undefined || r.previewAzureRoles !== undefined) return  // already loaded
+  r._previewFetching = true
+  r._previewError = false
+  let gotAnyToken = false
+  try { render() } catch (_) {}
+  try {
+    // The user explicitly clicked, so an interactive sign-in is acceptable if the
+    // silent refresh has expired -- otherwise the preview would silently come back
+    // empty (a stale/expired token => no roles => blank box, the reported bug).
+    // acquireGraphToken returns an OBJECT { accessToken, account, ... } -- the Graph
+    // helpers want the raw JWT STRING. Passing the object here made every preview
+    // query send "Bearer [object Object]" => 401 "JWT is not well formed (no dots)",
+    // so the row fell back to the name guess. THIS is the regression introduced when
+    // the eager fanout was made lazy. Extract the access-token string (as every other
+    // caller does) before any Graph call.
+    let tokenObj = await acquireGraphToken({ interactive: false }).catch(() => null)
+    if (!tokenObj) tokenObj = await acquireGraphToken({ interactive: true }).catch(() => null)
+    const token = (tokenObj && tokenObj.accessToken) ? tokenObj.accessToken : null
+    if (token) {
+      gotAnyToken = true
+      if (!_previewRoleDefs) {
+        const rd = await loadRoleDefinitions(token).catch(() => ({ idToName: {} }))
+        _previewRoleDefs = rd.idToName || {}
+      }
+      const be = await bulkLoadEntraRolesForGroups(token, [r.groupId]).catch(() => new Map())
+      r.previewEntraRoles = buildEntraPreviewLazy(be.get(r.groupId) || [], _previewRoleDefs)
+    }
+    if (r.previewEntraRoles === undefined) r.previewEntraRoles = []
+    const armToken = await getArmToken().catch(() => null)
+    if (armToken) {
+      gotAnyToken = true
+      // Query Azure RBAC for the group AND its nested (indirect) groups (PIM v2 nesting) — the
+      // nested set was discovered by the Entra fan-out above — so Azure roles granted via a
+      // nested group show too, not only roles assigned to the group directly.
+      const nested = _previewNestedByParent[r.groupId] || []
+      const azIds = [r.groupId, ...nested]
+      const ba = await bulkLoadAzureRolesForGroups(armToken, azIds).catch(() => new Map())
+      const subNameById = Object.fromEntries((armSubscriptionsCache || []).map(s => [s.id, s.name]))
+      const azAll = []
+      for (const id of azIds) for (const x of (ba.get(id) || [])) azAll.push(x)
+      r.previewAzureRoles = buildAzurePreviewLazy(azAll, subNameById)
+      // Azure diagnostics (operator 2026-06-25): make an empty Azure result explainable. Note
+      // Resource Graph indexes role assignments within subscriptions/management groups — an
+      // assignment at TENANT ROOT ("/") scope (e.g. Tenant Root Owner) is NOT indexed there and
+      // is unreadable without access at "/", so a legit 0 there falls back to the name guess.
+      try {
+        logDiag(`SHOW ROLES (Azure) ${r.groupId}\n  ARM token: present`
+          + `\n  subscriptions readable: ${(armSubscriptionsCache || []).length}`
+          + `\n  groups queried (self+nested): ${azIds.length}`
+          + `\n  Azure assignments found: ${azAll.length}`)
+        refreshDiagnosticsPanel()
+      } catch (_) {}
+    } else {
+      try { logDiag(`SHOW ROLES (Azure) ${r.groupId}\n  ARM token: NONE (Azure not consented for this profile) — Azure roles can't be enumerated`); refreshDiagnosticsPanel() } catch (_) {}
+    }
+    if (r.previewAzureRoles === undefined) r.previewAzureRoles = []
+    // Couldn't authenticate to EITHER plane => this is an error, not a genuine
+    // "this group grants nothing". Flagging it lets render() offer a retry
+    // instead of a misleading "no roles" (and never a blank box).
+    if (!gotAnyToken) r._previewError = true
+  } catch (e) {
+    console.warn('[PIM Activator] lazy role preview failed:', e?.message || e)
+    if (r.previewEntraRoles === undefined) r.previewEntraRoles = []
+    if (r.previewAzureRoles === undefined) r.previewAzureRoles = []
+    r._previewError = true
+  } finally {
+    r._previewFetching = false
+    try { render() } catch (_) {}
+  }
 }
 
 async function listAzureRoleAssignmentsForGroup(armToken, groupId) {
@@ -2870,6 +3243,34 @@ function categoriseGroupByName(nameOrRow) {
   return 'workload'   // Defender, Intune, PowerBI, custom apps, or unknown.
 }
 
+// Derive the granted role from the GROUP NAME using the PIM4EntraPS naming
+// convention (e.g. "PIM-Entra-ID-ApplicationAdministrator-L1-T0-CP-ID" ->
+// "Application Administrator"). This is the authoritative fallback when the
+// Graph role query returns nothing -- a role group is usually only ELIGIBLE
+// (not actively assigned) for its directory role via PIM-for-Groups, and that
+// eligibility can be invisible to a non-privileged token; the role it grants is
+// nevertheless encoded in the name by design. Returns null when the name does
+// NOT match the convention (so we never invent a role for an arbitrary group).
+function deriveRoleFromGroupName(name) {
+  const orig = String(name || '').trim()
+  if (!orig) return null
+  // Strip the "PIM-<plane>-" prefix (Entra ID / Entra / AzRes / Azure).
+  let s = orig.replace(/^PIM[-_\s]+(?:Entra[-_\s]*ID|Entra|AzRes|Azure)[-_\s]+/i, '')
+  const stripped = s !== orig
+  // Cut everything from the first tier/level marker (-L1 / -T0 / ...).
+  const cut = s.search(/[-_\s][LT]\d/i)
+  const hasMarker = cut > 0
+  if (!stripped && !hasMarker) return null   // not our convention -- don't guess
+  if (hasMarker) s = s.slice(0, cut)
+  // Hyphens/underscores -> spaces, then split PascalCase into words.
+  s = s.replace(/[-_]+/g, ' ')
+       .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
+       .replace(/([A-Z]+)([A-Z][a-z])/g, '$1 $2')
+       .replace(/\s+/g, ' ')
+       .trim()
+  return s || null
+}
+
 function renderMyAccess(rows) {
   els.myAccessList.innerHTML = ''
   if (!rows.length) {
@@ -3202,13 +3603,28 @@ function updateBadges() {
 function render() {
   els.list.innerHTML = ''
   const filter = els.search.value.trim().toLowerCase()
+  const wl = els.workloadFilter ? els.workloadFilter.value : 'all'   // all|entra|azure|workload
 
-  // Apply free-text filter first, then bucket by naming convention so the
-  // 3 section headers (Entra / Azure / PIM for Groups) show counts of
-  // FILTERED rows, not the unfiltered total.
-  const filtered = eligibleRows.filter(r =>
-    !filter || (r.displayName || '').toLowerCase().includes(filter) || r.groupId.includes(filter)
-  )
+  // The plane a row belongs to: direct (PIM v1) rows carry it in .kind; group
+  // (PIM v2) rows are categorised by naming convention / role data.
+  const rowPlane = (r) =>
+    r.kind === 'entraDirect' ? 'entra' :
+    r.kind === 'azureDirect' ? 'azure' :
+    r.kind === 'group'       ? categoriseGroupByName(r.displayName) : 'workload'
+
+  // Apply the workload + free-text filters first, then bucket by naming
+  // convention so the section headers show counts of FILTERED rows.
+  // BUGFIX 2026-06-20: the old free-text test indexed groupId WITHOUT a null guard,
+  // which THREW on direct (PIM v1) rows that have no groupId -- aborting the whole
+  // .filter() so typing anything (e.g. "az") silently broke the list. Now null-safe
+  // (search displayName + groupId + rowKey), CONTAINS (not startsWith), multi-term.
+  const terms = filter ? filter.split(/\s+/).filter(Boolean) : []
+  const filtered = eligibleRows.filter(r => {
+    if (wl !== 'all' && rowPlane(r) !== wl) return false
+    if (!terms.length) return true
+    const hay = `${r.displayName || ''} ${r.groupId || ''} ${r.rowKey || ''}`.toLowerCase()
+    return terms.every(t => hay.includes(t))
+  })
 
   if (!filtered.length) {
     els.list.innerHTML = `<div class="empty">${eligibleRows.length ? 'No rows match the filter.' : 'No eligible PIM assignments for your account.'}</div>`
@@ -3304,18 +3720,47 @@ function render() {
     const idAttr = r.rowKey || `group:${r.groupId}`
     let rolesHtml = ''
     if (r.kind === 'group') {
-      const stillFetching = r.previewEntraRoles === undefined && r.previewAzureRoles === undefined
-      if (stillFetching) {
-        rolesHtml = `<div style="color:#7d8590;font-size:11px;font-style:italic;">&#x21B3; Loading roles...</div>`
+      // Plan A: three states -- (1) fetching now -> "Loading roles...";
+      // (2) not loaded yet -> a click-to-load affordance (count unknown until
+      // the user expands, since we no longer prefetch); (3) loaded -> the
+      // existing collapsed/expanded role list.
+      const previewLoaded = r.previewEntraRoles !== undefined || r.previewAzureRoles !== undefined
+      if (r._previewFetching) {
+        // Operator: must say "Getting roles..." until collected, never go blank.
+        rolesHtml = `<div style="color:#7d8590;font-size:11px;font-style:italic;">&#x21B3; Getting roles...</div>`
+      } else if (!previewLoaded) {
+        rolesHtml = `<div class="role-toggle" data-toggle-rk="${escapeHtml(idAttr)}" style="color:#0969da;font-size:11px;line-height:1.4;cursor:pointer;user-select:none;" title="Load and show the roles this group grants.">&#x25B6; <strong>Show Roles</strong> <span style="color:#7d8590;">(click to load)</span></div>`
+      } else if (r._previewError) {
+        // Load failed (e.g. token expired / Graph error). NEVER a blank box --
+        // offer a retry. The toggle handler re-fetches a not-loaded row, so we
+        // clear the loaded markers on click (see role-toggle handler).
+        rolesHtml = `<div class="role-toggle role-retry" data-toggle-rk="${escapeHtml(idAttr)}" style="color:#cf222e;font-size:11px;line-height:1.4;cursor:pointer;user-select:none;" title="Couldn't load the roles. Click to try again.">&#x21BB; <strong>Couldn't load roles</strong> <span style="color:#7d8590;">(click to retry)</span></div>`
       } else {
         const totalLines = entraPreview.length + azurePreview.length
         const isCollapsed = collapsedRows.has(idAttr)
         if (totalLines === 0) {
-          rolesHtml = ''
+          // No directly-resolvable Entra/Azure roles. This is NORMAL for a
+          // PIM-for-Groups / workload group: it grants access via GROUP MEMBERSHIP
+          // (Defender/Intune/PowerBI/custom apps), not a directory role or Azure
+          // RBAC role, so the transitive role query is legitimately empty. Label it
+          // by plane (operator: "write RBAC Assignment in Workload") instead of a
+          // blank box or a misleading "no roles".
+          const plane = categoriseGroupByName(r.displayName)
+          const planeLabel = plane === 'azure' ? 'Azure' : (plane === 'entra' ? 'Entra ID' : 'Workload')
+          // The Graph query came back empty, but for an Entra/Azure role group the
+          // granted role is encoded in the name -- show it (e.g. "Application
+          // Administrator") instead of a generic line. Falls through to the plane
+          // label only when the name doesn't match the naming convention.
+          const derivedRole = (plane === 'entra' || plane === 'azure') ? deriveRoleFromGroupName(r.displayName) : null
+          if (derivedRole) {
+            rolesHtml = `<div style="color:#57606a;font-size:11px;line-height:1.4;">&#x21B3; grants <strong>${escapeHtml(derivedRole)}</strong> <span style="color:#7d8590;">(${escapeHtml(planeLabel)} role &mdash; from group name)</span></div>`
+          } else {
+            rolesHtml = `<div style="color:#7d8590;font-size:11px;font-style:italic;">&#x21B3; RBAC Assignment in ${escapeHtml(planeLabel)}</div>`
+          }
         } else if (isCollapsed) {
-          rolesHtml = `<div class="role-toggle" data-toggle-rk="${escapeHtml(idAttr)}" style="color:#0969da;font-size:11px;line-height:1.4;cursor:pointer;user-select:none;" title="Show the transitive roles this group grants.">&#x25B6; <strong>${totalLines} transitive role${totalLines === 1 ? '' : 's'}</strong> <span style="color:#7d8590;">(click to expand)</span></div>`
+          rolesHtml = `<div class="role-toggle" data-toggle-rk="${escapeHtml(idAttr)}" style="color:#0969da;font-size:11px;line-height:1.4;cursor:pointer;user-select:none;" title="Show the roles this group grants.">&#x25B6; <strong>${totalLines} role${totalLines === 1 ? '' : 's'}</strong> <span style="color:#7d8590;">(click to expand)</span></div>`
         } else {
-          const toggle = `<div class="role-toggle" data-toggle-rk="${escapeHtml(idAttr)}" style="color:#0969da;font-size:11px;line-height:1.4;cursor:pointer;user-select:none;" title="Hide the transitive role list.">&#x25BC; <span style="color:#7d8590;">hide ${totalLines} transitive role${totalLines === 1 ? '' : 's'}</span></div>`
+          const toggle = `<div class="role-toggle" data-toggle-rk="${escapeHtml(idAttr)}" style="color:#0969da;font-size:11px;line-height:1.4;cursor:pointer;user-select:none;" title="Hide the role list.">&#x25BC; <span style="color:#7d8590;">hide ${totalLines} role${totalLines === 1 ? '' : 's'}</span></div>`
           rolesHtml = toggle +
             roleLines(entraPreview, entraExtra, 'Entra',      '#0969da') +
             roleLines(azurePreview, azureExtra, 'Azure RBAC', '#0969da')
@@ -3406,6 +3851,27 @@ function render() {
     if (tog) tog.onclick = (e) => {
       e.stopPropagation()
       const rk = tog.dataset.toggleRk
+      // Retry: a prior load errored (row "loaded" with empty arrays + _previewError).
+      // Reset the markers so loadRolePreviewForGroup runs again on this click.
+      if (r.kind === 'group' && r._previewError && !r._previewFetching) {
+        r.previewEntraRoles = undefined
+        r.previewAzureRoles = undefined
+        r._previewError = false
+        collapsedRows.delete(rk)
+        loadRolePreviewForGroup(r)
+        return
+      }
+      // Plan A: first click on a not-yet-loaded group FETCHES its preview
+      // (loadRolePreviewForGroup re-renders: "Getting roles..." -> the roles,
+      // shown expanded). Subsequent clicks just collapse/expand the loaded list.
+      const notLoaded = r.kind === 'group'
+        && r.previewEntraRoles === undefined && r.previewAzureRoles === undefined
+        && !r._previewFetching
+      if (notLoaded) {
+        collapsedRows.delete(rk)          // show expanded once it lands
+        loadRolePreviewForGroup(r)        // fetch + re-render
+        return
+      }
       if (collapsedRows.has(rk)) collapsedRows.delete(rk); else collapsedRows.add(rk)
       render()
     }
@@ -3972,32 +4438,10 @@ async function loaded(token) {
   render()
   maybeResumePropWatch()   // if the popup was closed mid-propagation, pick the watch back up
 
-  // Background: fold out nested permission groups under any role group the user
-  // is ALREADY an active member of (they only surface once the parent is active
-  // -- DESIGN.md 3.1). Kept off the critical load path so the top-level list
-  // paints immediately; re-renders when the nested rows land.
-  ;(async () => {
-    try {
-      const activeParentIds = [...new Set((activeRows || []).map(a => a.groupId).filter(Boolean))]
-      if (!activeParentIds.length) return
-      const nested = await discoverNestedRows(token, activeParentIds)
-      const haveKeys = new Set(eligibleRows.map(r => r.rowKey))
-      const add = nested.filter(n => !haveKeys.has(n.rowKey))
-      if (add.length) { eligibleRows = eligibleRows.concat(add); render() }
-      // Surface the nested-discovery result in the DIAGNOSTICS panel so we can see
-      // WHY nested groups did/didn't appear (403 reading the group's schedules vs
-      // genuinely empty vs propagation-not-yet).
-      try {
-        if (lastNestedDiag.length) {
-          const lines = lastNestedDiag.map(d =>
-            '  parent ' + d.parent + ': raw=' + d.raw + ' kept=' + d.kept + (d.error ? ' ERROR: ' + d.error : '')).join('\n')
-          lastDiagText += '\nNested discovery (active parents → permission groups):\n' + lines
-          console.log('[PIM Activator DIAGNOSTICS] nested:\n' + lines)
-          refreshDiagnosticsPanel()   // updates the panel only if it's currently open
-        }
-      } catch (_) {}
-    } catch (e) { console.warn('[PIM Activator] nested discovery failed:', e?.message || e) }
-  })()
+  // (Nested permission groups need no extra discovery here -- once their parent
+  // role group is active they surface in the user's own eligibility list via
+  // filterByCurrentUser. The former per-parent discoverNestedRows was removed
+  // 2026-06-22; see the note at its old definition site.)
 
   // One-time "getting started" tip. Isolated, self-contained overlay shown the
   // first time the Activate tab renders with real eligible rows after
@@ -4023,6 +4467,13 @@ async function loaded(token) {
   ;(async () => {
     const groupIds = eligibleRows.map(r => r.groupId)
     if (!groupIds.length) return
+    // Plan A (lazy previews): do NOT eagerly fetch the transitive role preview
+    // for every eligible group at startup -- that was the 10-15s "Loading
+    // roles" cost on a list that renders collapsed anyway. Previews now load
+    // per group on first expand via loadRolePreviewForGroup() (see render() +
+    // the role-toggle handler). The eager machinery below is left intact but
+    // unreachable so the diff stays small + easy to revert if needed.
+    return
 
     const cacheKey = `bulkRoles_v4_${currentAccount?.localAccountId || 'anon'}`
     const cached = await getStored([cacheKey])
@@ -4370,6 +4821,7 @@ async function loaded(token) {
   }
 
   els.search.oninput  = render
+  if (els.workloadFilter) els.workloadFilter.onchange = render
   els.selectAll.onclick  = () => { eligibleRows.forEach(r => { if (!r.isActive) r.checked = true }); render() }
   els.selectNone.onclick = () => { eligibleRows.forEach(r => r.checked = false); render() }
   els.collapseAll.onclick = () => {
@@ -4540,25 +4992,13 @@ async function loaded(token) {
       // groups we just activated.
       await setStored({ selectedIds: eligibleRows.filter(r => r.checked && r.groupId).map(r => r.groupId) })
 
-      // A role group that just activated may expose nested permission groups
-      // for self-activation (DESIGN.md 3.1). Fold them out now so the user can
-      // activate the ones they need (operator scenario: activate Cloud Engineer,
-      // then activate Application Administrator only). Only TOP-LEVEL group
-      // activations probe -- activating a nested permission group itself does
-      // not recurse. Best-effort.
-      let unfolded = 0
-      const activatedParents = selected.filter(r => r.kind === 'group' && !r.isNested).map(r => r.groupId)
-      if (activatedParents.length) {
-        try {
-          const freshN = await acquireGraphToken({ interactive: false })
-          const tkN = freshN?.accessToken || token
-          const nested = await discoverNestedRows(tkN, activatedParents)
-          const haveKeys = new Set(eligibleRows.map(r => r.rowKey))
-          const add = nested.filter(n => !haveKeys.has(n.rowKey))
-          if (add.length) { eligibleRows = eligibleRows.concat(add); unfolded = add.length }
-        } catch (e) { console.warn('[PIM Activator] post-activation nested discovery failed:', e?.message || e) }
-      }
-      render()   // refresh checkbox state + "N selected" footer count + any fold-out
+      // Nested permission groups a just-activated role group exposes (DESIGN.md
+      // 3.1) are picked up by the propagation poll below, which re-fetches the
+      // user's own eligibility list (filterByCurrentUser) as Entra propagates the
+      // new membership's transitive eligibilities -- so the new permission groups
+      // appear in-place with no separate per-parent discovery. (The former
+      // discoverNestedRows was removed 2026-06-22; it 403'd for delegated admins.)
+      render()   // refresh checkbox state + "N selected" footer count
 
       // ALWAYS stay on the Activate tab. The typical admin flow is to activate a
       // role group and then activate MORE -- including the nested permission

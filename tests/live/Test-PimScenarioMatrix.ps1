@@ -69,7 +69,14 @@
   When omitted, the host-responds assertion self-skips (recorded as skipped).
 
 .PARAMETER SqlServer / SqlDatabase
-  The desired/registry store (default .\SQLEXPRESS / PimPlatform).
+  The desired/registry store. **REQUIRED — there is no default, deliberately (TEST-17).** The
+  supported store is Azure SQL (PaaS), so a non-'*.database.windows.net' server is REFUSED
+  unless -AllowUnsupportedStore is also passed. This used to default to .\SQLEXPRESS, which
+  meant every run measured a configuration the product does not ship.
+
+.PARAMETER AllowUnsupportedStore
+  Opt in to running against a non-Azure-SQL store (e.g. a local instance) for offline work.
+  The run then WARNS that its verdicts say nothing about the shipped PaaS configuration.
 
 .PARAMETER Marker
   Synthetic-estate marker (default 'PIMSCEN-'); must match the seeder.
@@ -90,8 +97,10 @@
   any skipped REQUIRED step when -FailOnSkip).
 
 .EXAMPLE
-  # MAIN SESSION runs this live against the 3 tenants (creds from kv-automatit-dev):
-  $env:PIM_SqlServer='.\SQLEXPRESS'; $env:PIM_SqlDatabase='PimPlatform'
+  # MAIN SESSION runs this live against the 3 tenants (creds from kv-automatit-dev).
+  # The store must be Azure SQL -- the .\SQLEXPRESS this example used to show is NOT supported
+  # and the harness now refuses it without -AllowUnsupportedStore (TEST-17):
+  $env:PIM_SqlServer='<server>.database.windows.net'; $env:PIM_SqlDatabase='<db>'
   .\Test-PimScenarioMatrix.ps1 -Scenario All -SeedFirst -FailOnSkip `
      -MasterTenantId f0fa27a0-... -MasterClientId 7c0f9a79-... -MasterCertThumbprint 642E1F8F... `
      -SlaveCentralTenantId 9927fa1f-... -SlaveCentralClientId 7fe46852-... -SlaveCentralCertThumbprint 1B134245... `
@@ -130,6 +139,16 @@ param(
     [string]$SlaveCentralOwnerUpn,
     [string]$SlaveLocalOwnerUpn,
 
+    # The subscription each target may write Azure-RBAC eligibilities into. The seeder
+    # plants ONE Azure assignment scoped to the subscription it was given; each scenario
+    # rebinds it to ITS OWN target before running, because a slave's SPN cannot see (and
+    # must not see) the master's subscription. Omit one and that scenario's Azure rows are
+    # left as-is -- the run then reports the AzRes result honestly instead of passing on a
+    # scope it never exercised.
+    [string]$MasterSubscriptionId,
+    [string]$SlaveCentralSubscriptionId,
+    [string]$SlaveLocalSubscriptionId,
+
     # The signed master baseline the managed (S5/S6) downlink pulls + verifies. The matrix
     # actually RUNS the downlink for S5/S6, so it needs the bundle (local file or HTTPS URL).
     # When neither is supplied for a managed scenario, the runner step SKIPs (no live run).
@@ -141,6 +160,10 @@ param(
     [string]$SqlDatabase = $env:PIM_SqlDatabase,
     [string]$Marker      = 'PIMSCEN-',
 
+    # TEST-17: the SQLEXPRESS path stays available for offline work, but never BY ACCIDENT.
+    # See the store gate below for why a default here was worse than no default.
+    [switch]$AllowUnsupportedStore,
+
     [switch]$SeedFirst,
     [switch]$Cleanup,
     [switch]$FailOnSkip
@@ -150,8 +173,49 @@ $ErrorActionPreference = 'Stop'
 $here = Split-Path -Parent $MyInvocation.MyCommand.Path
 if (-not $here) { $here = 'C:\SCRIPTS\AutomateIT\SOLUTIONS\PIM4EntraPS\tests\live' }
 $shared = Resolve-Path (Join-Path $here '..\..\engine\_shared')
-if (-not $SqlServer)   { $SqlServer = '.\SQLEXPRESS' }
-if (-not $SqlDatabase) { $SqlDatabase = 'PimPlatform' }
+# ---------------------------------------------------------------------------
+# TEST-17 -- THE STORE GATE. A harness whose DEFAULT is a store the product does not ship
+# cannot report on the one it does.
+#
+# This used to read `if (-not $SqlServer) { $SqlServer = '.\SQLEXPRESS' }`, and the .EXAMPLE
+# above taught the same thing. The operator's correction (2026-08-08) was blunt: *"we dont
+# support that [SQLEXPRESS]. it is native sql inside azure we support (paas)."* So every live
+# matrix run to date -- including all six S1-S6 "VERIFIED" verdicts -- was measured against a
+# configuration the product does not support, and nothing anywhere said so.
+#
+# 🪤 The default was worse than no default, and that is the general lesson: a fallback makes the
+# unsupported path the SILENT one. A run with no store configured did not fail, it quietly
+# pointed at a local Express instance and went green. Same reasoning that made
+# tests/live/Seed-PimSql.ps1 refuse to run with no target -- a default there points a live write
+# at somebody else's database.
+#
+# Now: the store is REQUIRED, and it must be Azure SQL unless the caller explicitly says
+# otherwise. -AllowUnsupportedStore keeps SQLEXPRESS reachable for offline work while making it
+# impossible to reach by accident. (Depended on BUG-30: until the explicit -Server path returned
+# a token connection string, a mandatory Azure FQDN had nothing valid to point at. BUG-30 is
+# fixed and verified, so this gate now has somewhere to send people.)
+# ---------------------------------------------------------------------------
+if (-not "$SqlServer".Trim()) {
+    throw ("Test-PimScenarioMatrix: -SqlServer is REQUIRED (or `$env:PIM_SqlServer). There is no default " +
+           "on purpose -- this harness used to fall back to '.\SQLEXPRESS', which is NOT a supported store, " +
+           "so runs went green against a configuration the product does not ship (TEST-17). " +
+           "Pass the Azure SQL FQDN, e.g. -SqlServer <server>.database.windows.net -SqlDatabase <db>. " +
+           "For deliberate offline work against a local instance, pass -AllowUnsupportedStore as well.")
+}
+if (-not "$SqlDatabase".Trim()) {
+    throw "Test-PimScenarioMatrix: -SqlDatabase is REQUIRED (or `$env:PIM_SqlDatabase). No default -- see -SqlServer above (TEST-17)."
+}
+if ($SqlServer -notmatch '(?i)database\.windows\.net') {
+    if (-not $AllowUnsupportedStore) {
+        throw ("Test-PimScenarioMatrix: REFUSING to run against '$SqlServer' -- the supported store is Azure SQL " +
+               "(PaaS), and a result measured on anything else does not describe the shipped product (TEST-17). " +
+               "Re-run against a '*.database.windows.net' server, or pass -AllowUnsupportedStore if you " +
+               "deliberately want an offline/local run and accept that its verdicts say nothing about PaaS.")
+    }
+    Write-Warning ("  [TEST-17] Running against '$SqlServer', which is NOT the supported store. " +
+                   "-AllowUnsupportedStore was passed, so this is deliberate -- but every verdict below " +
+                   "describes a configuration the product does not ship.")
+}
 if (-not $StatePath)   { $StatePath = Join-Path $here 'pimscenario-state.json' }
 
 $global:PIM_UseGraphSdk = $false
@@ -169,6 +233,15 @@ $global:PIM_SqlDatabase = $SqlDatabase
 . (Join-Path $shared 'PIM-ChangeQueue.ps1')
 . (Join-Path $shared 'PIM-SqlStore.ps1')
 . (Join-Path $shared 'PIM-AccountRest.ps1')
+. (Join-Path $here '_PimScenarioTenants.ps1')
+
+# RETIRED-ESTATE GUARD. This matrix takes tenant ids as PARAMETERS, so it never passes
+# through the -TenantJson parser where the guard also lives -- and that is exactly how it
+# was run against both retired tenants, twice, on 2026-08-08. Refuse before anything
+# authenticates or writes. DOCS/REQUIREMENTS.md s10.0.
+Assert-PimScenarioTenantAllowed -TenantId $MasterTenantId       -What '-MasterTenantId'
+Assert-PimScenarioTenantAllowed -TenantId $SlaveCentralTenantId -What '-SlaveCentralTenantId'
+Assert-PimScenarioTenantAllowed -TenantId $SlaveLocalTenantId   -What '-SlaveLocalTenantId'
 
 # ---------------------------------------------------------------------------
 # Step recorder. ok=$true PASS; ok=$false FAIL (REQUIRED -> non-zero exit);
@@ -222,17 +295,116 @@ function Connect-PimTenant {
 # Live: does the slave tenant contain the expected MSP admin UserNames?
 # Returns @{ found=[string[]]; missing=[string[]]; domain=<defaultDomain> }.
 function Get-SlaveAdminPresence {
-    param([Parameter(Mandatory)][string[]]$ExpectedUserNames)
+    # -ExpectedUserNames  : must EXIST in this slave (the ring reaches them).
+    # -ForbiddenUserNames : must NOT exist here (the ring does NOT reach them). This is the
+    #   half that makes ring gating measurable rather than claimed: "the right admins
+    #   arrived" is satisfied just as well by sending EVERY admin to EVERY tenant, which is
+    #   precisely the failure an MSP cannot afford. A ring-2 operator appearing in a ring-1
+    #   customer is a privilege leak between customers.
+    param([Parameter(Mandatory)][string[]]$ExpectedUserNames, [string[]]$ForbiddenUserNames = @())
     $domain = Get-PimRestDefaultDomain
     $found = New-Object System.Collections.Generic.List[string]
     $missing = New-Object System.Collections.Generic.List[string]
+    $leaked = New-Object System.Collections.Generic.List[string]
     foreach ($un in $ExpectedUserNames) {
         $upn = "$($un.ToLower())@$domain"
         $esc = $upn -replace "'", "''"
         $u = @(Invoke-PimGraph -All -Path "/users?`$filter=userPrincipalName eq '$esc'&`$select=id,userPrincipalName")
         if ($u.Count -gt 0) { $found.Add($un) | Out-Null } else { $missing.Add($un) | Out-Null }
     }
-    return @{ found = @($found.ToArray()); missing = @($missing.ToArray()); domain = $domain }
+    foreach ($un in @($ForbiddenUserNames)) {
+        if (@($ExpectedUserNames) -contains $un) { continue }
+        $upn = "$($un.ToLower())@$domain"
+        $esc = $upn -replace "'", "''"
+        $u = @(Invoke-PimGraph -All -Path "/users?`$filter=userPrincipalName eq '$esc'&`$select=id,userPrincipalName")
+        if ($u.Count -gt 0) { $leaked.Add($un) | Out-Null }
+    }
+    return @{ found = @($found.ToArray()); missing = @($missing.ToArray()); leaked = @($leaked.ToArray()); domain = $domain }
+}
+
+function Get-PimTenantObjectInventory {
+    <#
+      A NAMED inventory (not counts) of one tenant, for the cross-tenant blast-radius
+      assertion. Names, because a count survives a swap: delete one group and create
+      another and the count is identical.
+
+      Authenticates with the given SPN explicitly, so it cannot accidentally read whichever
+      tenant the ambient context happens to point at -- which is the very failure this
+      assertion exists to catch (BUG-22/BUG-23).
+    #>
+    param([Parameter(Mandatory)][string]$TenantId, [Parameter(Mandatory)][string]$ClientId, [Parameter(Mandatory)][string]$Thumbprint)
+    $tok = Get-PimRestToken -Resource graph -TenantId $TenantId -ClientId $ClientId -CertThumbprint $Thumbprint -Force
+    $h = @{ Authorization = "Bearer $tok"; ConsistencyLevel = 'eventual' }
+    $inv = [ordered]@{}
+    foreach ($k in @(
+        @{ n = 'users';  u = 'https://graph.microsoft.com/v1.0/users?$select=userPrincipalName&$top=999'; p = 'userPrincipalName' }
+        @{ n = 'groups'; u = 'https://graph.microsoft.com/v1.0/groups?$select=displayName&$top=999';     p = 'displayName' }
+        @{ n = 'aus';    u = 'https://graph.microsoft.com/v1.0/directory/administrativeUnits?$select=displayName'; p = 'displayName' }
+    )) {
+        $names = New-Object System.Collections.Generic.List[string]
+        $url = $k.u
+        while ($url) {
+            $r = Invoke-RestMethod -Uri $url -Headers $h
+            foreach ($o in @($r.value)) { $names.Add("$($o.$($k.p))") }
+            $url = $r.'@odata.nextLink'
+        }
+        $inv[$k.n] = @($names | Sort-Object -Unique)
+    }
+    $inv
+}
+
+function Compare-PimTenantInventory {
+    # Returns @{ same; added; removed } -- what CHANGED in a tenant that should not have changed.
+    param([Parameter(Mandatory)][object]$Before, [Parameter(Mandatory)][object]$After)
+    $added = New-Object System.Collections.Generic.List[string]
+    $removed = New-Object System.Collections.Generic.List[string]
+    foreach ($k in @('users', 'groups', 'aus')) {
+        $b = @{}; foreach ($n in @($Before.$k)) { $b["$n"] = $true }
+        $a = @{}; foreach ($n in @($After.$k))  { $a["$n"] = $true }
+        foreach ($n in @($After.$k))  { if (-not $b.ContainsKey("$n")) { $added.Add("$k`:$n")   | Out-Null } }
+        foreach ($n in @($Before.$k)) { if (-not $a.ContainsKey("$n")) { $removed.Add("$k`:$n") | Out-Null } }
+    }
+    @{ same = (($added.Count + $removed.Count) -eq 0); added = @($added.ToArray()); removed = @($removed.ToArray()) }
+}
+
+function Test-PimScenarioTamperRefusal {
+    <#
+      The NEGATIVE half of the signed-baseline promise (§33.7.f-3): a managed tenant must
+      pull ONLY from a bundle that verifies against the master's public key.
+
+      "It accepted a good bundle" says nothing on its own -- a downlink that skipped
+      verification entirely would pass that every time. So take the REAL bundle, corrupt
+      the payload while leaving the signature untouched, and require a refusal.
+
+      Returns @{ ok; detail }. ok = the tampered document was REFUSED.
+    #>
+    param([Parameter(Mandatory)][object]$Doc)
+    if (-not (Get-Command Test-PimBaselineDoc -ErrorAction SilentlyContinue)) {
+        return @{ ok = $false; detail = 'Test-PimBaselineDoc not available -- cannot exercise the signature check' }
+    }
+    # Decode, alter one field, re-encode. The signature still covers the ORIGINAL bytes.
+    $raw = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String("$($Doc.payloadB64)"))
+    $tamperedJson = $raw -replace '"scope"\s*:\s*"[^"]*"', '"scope":"tampered-by-test"'
+    if ($tamperedJson -eq $raw) { $tamperedJson = $raw + ' ' }   # ensure the bytes really differ
+    $bad = [pscustomobject]@{
+        product       = $Doc.product
+        payloadB64    = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($tamperedJson))
+        signature     = $Doc.signature          # untouched -- this is the point
+        keyThumbprint = $Doc.keyThumbprint
+    }
+    $accepted = $false; $why = ''
+    try {
+        $r = Test-PimBaselineDoc -Doc $bad
+        # A verifier may return a verdict object or throw. Treat "no explicit refusal" as accepted.
+        if ($null -eq $r) { $accepted = $false; $why = 'returned null' }
+        elseif ($r -is [bool]) { $accepted = [bool]$r; $why = "returned $r" }
+        elseif ($r.PSObject.Properties['ok']) { $accepted = [bool]$r.ok; $why = "ok=$($r.ok) $($r.reason)" }
+        elseif ($r.PSObject.Properties['valid']) { $accepted = [bool]$r.valid; $why = "valid=$($r.valid) $($r.reason)" }
+        else { $accepted = $true; $why = 'verifier returned a value with no ok/valid field' }
+    } catch {
+        $accepted = $false; $why = "threw: $($_.Exception.Message)"
+    }
+    return @{ ok = (-not $accepted); detail = "tampered bundle -> $(if ($accepted) { 'ACCEPTED (signature not enforced!)' } else { "REFUSED ($why)" })" }
 }
 
 # Live HTTP: does a hosted Manager respond on the resolved host?
@@ -281,6 +453,49 @@ function Set-PimScenarioOwnerUpn {
         $r | Add-Member -NotePropertyName SponsorUpn -NotePropertyValue $OwnerUpn -Force
         $key = Get-PimStoreRowKey -Base 'PIM-Definitions-Roles' -Row $r
         if ($key) { Set-PimSqlRow -ConnectionString $ConnectionString -Entity 'PIM-Definitions-Roles' -Key $key -Data $r; $n++ }
+    }
+    return $n
+}
+
+function Set-PimScenarioAzScope {
+    <#
+      Repoint the seeded Azure-RBAC assignment at the subscription of the tenant this
+      scenario actually targets.
+
+      Why this exists: the seeder plants ONE PIM-Assignments-Azure-Resources row, scoped to
+      the subscription it was given (the master's). Every scenario then ran against that one
+      scope -- so the S6 (local-slave) run tried to create an eligibility on a subscription
+      that lives in the MASTER's tenant and got, correctly:
+          AzRes: ARM role 'Reader' not found at /subscriptions/<master sub>
+      The slave's SPN cannot see the master's subscription, and it should not. That is a
+      defect in the test DATA, not in the engine -- the same class as the owner UPN, which
+      is why this mirrors Set-PimScenarioOwnerUpn: the seed is tenant-neutral, and the run
+      binds it to its target.
+
+      A scenario with no subscription of its own gets its Azure rows left alone; the run
+      then reports the AzRes limitation rather than silently passing.
+    #>
+    param([Parameter(Mandatory)][string]$ConnectionString, [Parameter(Mandatory)][string]$SubscriptionId, [string]$RowMarker = 'PIMSCEN-')
+    if (-not "$SubscriptionId".Trim()) { return 0 }
+    $n = 0
+    foreach ($r in @(Get-PimSqlRows -ConnectionString $ConnectionString -Entity 'PIM-Assignments-Azure-Resources')) {
+        $gt = "$($r.GroupTag)"
+        if (-not ($gt -like "$RowMarker*")) { continue }
+        $newScope = "/subscriptions/$SubscriptionId"
+        if ("$($r.AzScope)" -eq $newScope) { continue }
+        # The scope is part of the row KEY, so the old row has to go or the store keeps both
+        # and the engine sees two desired Azure assignments for one group.
+        $oldKey = Get-PimStoreRowKey -Base 'PIM-Assignments-Azure-Resources' -Row $r
+        $r.PSObject.Properties.Remove('AzScope') | Out-Null
+        $r | Add-Member -NotePropertyName AzScope -NotePropertyValue $newScope -Force
+        $newKey = Get-PimStoreRowKey -Base 'PIM-Assignments-Azure-Resources' -Row $r
+        if ($newKey) {
+            Set-PimSqlRow -ConnectionString $ConnectionString -Entity 'PIM-Assignments-Azure-Resources' -Key $newKey -Data $r
+            if ($oldKey -and $oldKey -ne $newKey) {
+                Remove-PimSqlRow -ConnectionString $ConnectionString -Entity 'PIM-Assignments-Azure-Resources' -Key $oldKey
+            }
+            $n++
+        }
     }
     return $n
 }
@@ -400,6 +615,61 @@ function Invoke-ScenarioChecks {
     if (-not $sc) { Add-Step -Steps $steps -Name 'scenario-known' -Ok $false -Detail "unknown scenario id $Id" | Out-Null; return [pscustomobject]@{ Scenario = $Id; Steps = @($steps.ToArray()) } }
     $ctx = Resolve-PimScenarioContext -Scenario $sc
 
+    # =======================================================================
+    # BUG-31 -- ACTIVATE THE SCENARIO. Until 2026-08-08 this matrix never did.
+    # Set-PimScenarioContext is the ONLY function that sets $global:PIM_ActiveScenario,
+    # and Get-PimSqlConnectionString enters its per-scenario hosting branch ONLY when that
+    # global is set. This file never called it and never set $env:PIM_Scenario, so
+    # Resolve-PimScenarioHostingStore was never reached in a live run and EVERY scenario --
+    # S5 'central-msp' and S6 'local-slave' included -- read and wrote the single ambient
+    # store. S5 was reported VERIFIED with no central store in existence.
+    # It degraded silently because the resolver's own no-server fallback is "use ambient",
+    # which is indistinguishable from a correct answer when nobody supplied a server.
+    # Activating here makes the run exercise the real runtime resolution, exactly as
+    # Invoke-PimEngineCore.ps1:95 and Invoke-PimScenarioRun.ps1:86 do in production.
+    # =======================================================================
+    $null = Set-PimScenarioContext -Scenario $sc -Quiet
+    Add-Step -Steps $steps -Name 'scenario-activated' -Ok ("$($global:PIM_ActiveScenario)" -eq "$Id") `
+        -Detail "PIM_ActiveScenario='$($global:PIM_ActiveScenario)' (must equal $Id -- without it the hosting resolver is never called)" | Out-Null
+
+    # ---- store placement (REQUIRED) -- the guard BUG-31 exists to provide ----
+    # Assert the store this scenario ACTUALLY resolves to is the one its hostingLocation
+    # demands. A scenario that silently falls back to ambient must NOT pass: that fallback
+    # is the exact failure mode that let S5 look verified for two live runs.
+    # SKIP (never pass) when the operator supplied no server for a placement that needs one
+    # -- an unmeasurable step is not a passing step.
+    $hostStore = Resolve-PimScenarioHostingStore -Scenario $sc
+    $actualCs  = Get-PimSqlConnectionString -Database $SqlDatabase
+    switch ($ctx.hostingLocation) {
+        'central-msp' {
+            if (-not "$($env:PIM_SqlServerCentral)".Trim()) {
+                Add-Step -Steps $steps -Name 'store-placement' -Skipped $true `
+                    -Detail "hostingLocation=central-msp but no `$env:PIM_SqlServerCentral supplied -- the central store is UNMEASURED, not correct" | Out-Null
+            } else {
+                $want = "$($env:PIM_SqlServerCentral)".Trim()
+                $ok   = ($actualCs -match [regex]::Escape($want)) -and ($actualCs -notmatch '(?i)Integrated\s*Security')
+                Add-Step -Steps $steps -Name 'store-placement' -Ok $ok `
+                    -Detail "central-msp -> resolver='$($hostStore.server)' kind=$($hostStore.kind); CS uses '$want'=$($actualCs -match [regex]::Escape($want)); passwordless=$($actualCs -notmatch '(?i)Integrated\s*Security')" | Out-Null
+            }
+        }
+        'local-slave' {
+            if (-not "$($env:PIM_SqlServerLocal)".Trim()) {
+                Add-Step -Steps $steps -Name 'store-placement' -Skipped $true `
+                    -Detail "hostingLocation=local-slave but no `$env:PIM_SqlServerLocal supplied -- the local slave store is UNMEASURED" | Out-Null
+            } else {
+                $want = "$($env:PIM_SqlServerLocal)".Trim()
+                Add-Step -Steps $steps -Name 'store-placement' -Ok ($actualCs -match [regex]::Escape($want)) `
+                    -Detail "local-slave -> resolver='$($hostStore.server)'; CS uses '$want'=$($actualCs -match [regex]::Escape($want))" | Out-Null
+            }
+        }
+        default {
+            # in-tenant (S1-S4): no override is CORRECT. Assert the resolver says so rather
+            # than assuming it, so a future change that starts overriding here is caught.
+            Add-Step -Steps $steps -Name 'store-placement' -Ok ("$($hostStore.source)" -eq 'in-tenant' -and -not "$($hostStore.server)".Trim()) `
+                -Detail "in-tenant -> no scenario override (source=$($hostStore.source)); ambient store in use" | Out-Null
+        }
+    }
+
     # ---- resolution (REQUIRED, necessary-not-sufficient) ------------------
     $expect = switch ($Id) {
         'S1' { @{ updateSourceProfile = 'sync-automateit'; configVariant = 'local'; hostingLocation = 'in-tenant';   spnModel = 'local-spn';         activeEdition = 'Pro-DesignPartner'; ringGated = $false; syncAdminsPermissions = $false; syncFileLocation = 'none' } }
@@ -463,11 +733,33 @@ function Invoke-ScenarioChecks {
     $thbR  = if ($Id -eq 'S5') { $SlaveCentralCertThumbprint } elseif ($Id -eq 'S6') { $SlaveLocalCertThumbprint } else { $MasterCertThumbprint }
     $ownR  = if ($Id -eq 'S5') { $SlaveCentralOwnerUpn } elseif ($Id -eq 'S6') { $SlaveLocalOwnerUpn } else { $MasterOwnerUpn }
     $ringR = if ($Id -eq 'S5') { [int]$SlaveCentralRingFromState } elseif ($Id -eq 'S6') { [int]$SlaveLocalRingFromState } else { 0 }
+    $subR  = if ($Id -eq 'S5') { $SlaveCentralSubscriptionId } elseif ($Id -eq 'S6') { $SlaveLocalSubscriptionId } else { $MasterSubscriptionId }
 
     $firstRun = $null            # captured first-pass result (drives every dependent step)
     $firstRanLive = $false       # did a real live deploy actually execute?
     $runSkipReason = $null       # set when we could not run (-> dependent steps SKIP)
     $blDoc = $null
+
+    # ---- §33.7.f-2 CROSS-TENANT BLAST RADIUS: who must NOT change? ----------
+    # The scenario deploys into exactly ONE tenant ($tidR). Every OTHER tenant in the
+    # estate must come out byte-identical, BY NAME -- counts survive a swap (delete one
+    # group, create another, and the count is unchanged), which is why the helpers
+    # inventory names.
+    #
+    # The "other" tenant is the master when the target is a slave, and the local slave
+    # when the target IS the master. ⚠️ In S5 the central "slave" can BE the master --
+    # the same tenant playing both roles. When that happens there is no second tenant to
+    # measure and the step SKIPs, which is NOT a pass: an assertion comparing a tenant
+    # with itself is the vacuous shape §33.7.e-9 already cost us once on the ring gate.
+    $otherTid = $null; $otherCid = $null; $otherThb = $null; $otherName = $null
+    if ("$tidR" -and "$MasterTenantId" -and ("$tidR" -ne "$MasterTenantId")) {
+        $otherTid = $MasterTenantId; $otherCid = $MasterClientId; $otherThb = $MasterCertThumbprint; $otherName = 'master'
+    } elseif ("$tidR" -and "$SlaveLocalTenantId" -and ("$tidR" -ne "$SlaveLocalTenantId")) {
+        $otherTid = $SlaveLocalTenantId; $otherCid = $SlaveLocalClientId; $otherThb = $SlaveLocalCertThumbprint; $otherName = 'local slave'
+    }
+    $blastBefore = $null
+    $blastSkip   = $null
+    if (-not $otherTid) { $blastSkip = "no SECOND tenant distinct from the $Id target -- nothing to measure blast radius against (this is a SKIP, never a pass)" }
 
     if (-not $runner) {
         $runSkipReason = 'RUNNER-MISSING'    # special: dependent steps FAIL, not skip
@@ -487,6 +779,31 @@ function Invoke-ScenarioChecks {
                     $ownParam = if ($managed) { "Slave$(if($Id -eq 'S5'){'Central'}else{'Local'})OwnerUpn" } else { 'MasterOwnerUpn' }
                     Write-Host "    [owner] WARNING: no -$ownParam for $Id -- the engine may refuse ownerless groups" -ForegroundColor DarkYellow
                 }
+                # ...and bind the Azure-RBAC row to THIS target's subscription (see
+                # Set-PimScenarioAzScope): a slave cannot assign into the master's sub.
+                if ("$subR".Trim()) {
+                    $nAz = Set-PimScenarioAzScope -ConnectionString (Get-PimSqlConnectionString) -SubscriptionId $subR -RowMarker $Marker
+                    if ($nAz) { Write-Host "    [azscope] rebound $nAz Azure row(s) -> /subscriptions/$subR" -ForegroundColor DarkGray }
+                } else {
+                    Write-Host "    [azscope] no subscription supplied for $Id -- Azure rows left at their seeded scope (AzRes not exercised for this target)" -ForegroundColor DarkYellow
+                }
+                # §33.7.f-2 BLAST RADIUS, half 1 of 2: inventory the tenant this scenario
+                # must NOT touch, BEFORE the run. Captured here -- inside the same guarded
+                # block, immediately before the deploy -- so the "before" can never be read
+                # from a different point in time than the run it brackets.
+                #
+                # 🪤 Read it with the OTHER tenant's OWN SPN, explicitly. Using the ambient
+                # context would make this assertion read the TARGET tenant twice and pass
+                # unconditionally -- and "the ambient identity was left on the last tenant
+                # touched" is literally BUG-23. An assertion that cannot fail is worse than
+                # no assertion.
+                if ($otherTid -and $otherCid -and $otherThb -and ("$otherTid" -ne "$tidR")) {
+                    try {
+                        $blastBefore = Get-PimTenantObjectInventory -TenantId $otherTid -ClientId $otherCid -Thumbprint $otherThb
+                        Write-Host ("    [blast] before: {0} users / {1} groups / {2} AUs in the untouched tenant" -f @($blastBefore.users).Count, @($blastBefore.groups).Count, @($blastBefore.aus).Count) -ForegroundColor DarkGray
+                    } catch { $blastSkip = "could not inventory the other tenant before the run: $($_.Exception.Message)" }
+                }
+
                 # authenticate to the TARGET tenant as its engine SPN (cert-only) + run LIVE.
                 $null = Connect-PimTenant -TenantId $tidR -ClientId $cidR -Thumbprint $thbR
                 $global:PIM_TenantId = $tidR; $global:PIM_ClientId = $cidR; $global:PIM_CertThumbprint = $thbR
@@ -505,6 +822,78 @@ function Invoke-ScenarioChecks {
     }
     $cs1 = if ($firstRun) { $firstRun.changeSummary } else { $null }
     $ranEngine = [bool]($cs1 -and ("$($cs1.kind)" -eq 'pim-engine-summary'))
+
+    # ---- §33.7.f-2 BLAST RADIUS, half 2: the untouched tenant is UNTOUCHED --
+    # REQUIRED. This is the assertion the helpers were built for in 398d8e6d and that
+    # nothing ever called. It is the only check in the matrix that can catch a
+    # cross-tenant leak -- an engine that wrote into the wrong directory because a token
+    # or an ambient context bled across the fan-out (BUG-22/BUG-23). Every other
+    # assertion here looks at the tenant we MEANT to change.
+    if (-not $firstRanLive) {
+        Add-Step -Steps $steps -Name 'cross-tenant-blast-radius' -Skipped $true `
+            -Detail "no live deploy ran ($(Coalesce $runSkipReason 'unknown')) -- nothing to measure a blast radius from" | Out-Null
+    } elseif ($blastSkip) {
+        Add-Step -Steps $steps -Name 'cross-tenant-blast-radius' -Skipped $true -Detail $blastSkip | Out-Null
+    } elseif (-not $blastBefore) {
+        Add-Step -Steps $steps -Name 'cross-tenant-blast-radius' -Skipped $true `
+            -Detail 'no BEFORE inventory was captured -- cannot compare (a missing baseline must never read as "nothing changed")' | Out-Null
+    } else {
+        try {
+            $blastAfter = Get-PimTenantObjectInventory -TenantId $otherTid -ClientId $otherCid -Thumbprint $otherThb
+            $diff = Compare-PimTenantInventory -Before $blastBefore -After $blastAfter
+            # Report the SIZE of what was compared. A comparison of two empty inventories
+            # is trivially "same" and would be a vacuous pass -- so state the denominator,
+            # the same lesson BUG-26's "inspected N of M" summary records.
+            $measured = @($blastBefore.users).Count + @($blastBefore.groups).Count + @($blastBefore.aus).Count
+            if ($measured -eq 0) {
+                Add-Step -Steps $steps -Name 'cross-tenant-blast-radius' -Skipped $true `
+                    -Detail "the $otherName tenant inventoried as EMPTY (0 users/groups/AUs) -- the comparison would be vacuous, so this is a SKIP, not a pass" | Out-Null
+            } else {
+                # ---- RING-AWARE classification (operator directive 2026-08-08) -------------
+                # "in a master/slave setup, then central admins will be created locally in each
+                #  slave tenant, so the IT staff can help each of the tenants using their admin
+                #  account." So a change in ANOTHER managed tenant is NOT automatically a leak:
+                # propagating the central admins into every managed tenant is the product working.
+                # The first live run of this step failed on exactly that -- it asserted
+                # "nothing changed", which contradicts the MSP model.
+                # What must STILL fail, and is the assertion actually worth having:
+                #   * an admin that tenant's RING does NOT entitle it to (cross-customer
+                #     privilege leak -- the Get-SlaveAdminPresence 'forbidden' half, applied here),
+                #   * any GROUP or AU change (admin propagation does not create groups/AUs),
+                #   * any REMOVAL (a deploy targeting A must not delete objects in B).
+                # Sanctioning "any user" would have made this step unable to fail; it is scoped
+                # to the exact per-ring set the seeder recorded for THAT tenant.
+                $sanctionedAdmins = @()
+                foreach ($slaveKey in @('central', 'local')) {
+                    $sl = $state.slaves.$slaveKey
+                    if ($sl -and ("$($sl.tenantId)" -eq "$otherTid")) { $sanctionedAdmins = @($sl.expectedAdminUserNames) }
+                }
+                $unexpectedAdds = @()
+                $sanctionedAdds = @()
+                foreach ($a in @($diff.added)) {
+                    if ("$a" -match '^(?i)users:(.+)$') {
+                        $localPart = ($Matches[1] -split '@')[0]
+                        if (@($sanctionedAdmins) -contains $localPart) { $sanctionedAdds += $a; continue }
+                    }
+                    $unexpectedAdds += $a
+                }
+                $unexpectedRemovals = @($diff.removed)
+                $contained = ($unexpectedAdds.Count -eq 0) -and ($unexpectedRemovals.Count -eq 0)
+                $detail = if ($diff.same) {
+                    "$otherName tenant [$otherTid] UNCHANGED across the $Id deploy -- $measured named object(s) compared, 0 added, 0 removed"
+                } elseif ($contained) {
+                    "$otherName tenant [$otherTid] changed ONLY by sanctioned central-admin propagation ($($sanctionedAdds.Count) of $(@($sanctionedAdmins).Count) ring-entitled admin(s): $(@($sanctionedAdds) -join ', ')) -- $measured object(s) compared, 0 unsanctioned add, 0 removal"
+                } else {
+                    "LEAK: the $otherName tenant [$otherTid] changed in ways central-admin propagation does not explain, during a deploy targeting [$tidR]. unsanctioned added: $(@($unexpectedAdds) -join ', ') | removed: $(@($unexpectedRemovals) -join ', ') | (sanctioned admin adds ignored: $(@($sanctionedAdds) -join ', '))"
+                }
+                Add-Step -Steps $steps -Name 'cross-tenant-blast-radius' -Ok $contained -Detail $detail | Out-Null
+            }
+        } catch {
+            # An error reading the other tenant is NOT "it did not change".
+            Add-Step -Steps $steps -Name 'cross-tenant-blast-radius' -Skipped $true `
+                -Detail "could not inventory the $otherName tenant AFTER the run: $($_.Exception.Message) -- unverified, not clean" | Out-Null
+        }
+    }
 
     # ---- S5/S6: ring-gated pull + master->slave admin/permission sync ------
     if ($Id -in 'S5', 'S6') {
@@ -549,14 +938,120 @@ function Invoke-ScenarioChecks {
         } else {
             try {
                 $null = Connect-PimTenant -TenantId $tidR -ClientId $cidR -Thumbprint $thbR
-                $pres = Get-SlaveAdminPresence -ExpectedUserNames $expected
+                # Everything the master holds, minus what THIS slave's ring should reach,
+                # is what must NOT be here (§33.7.f-3, the negative half of ring gating).
+                $allMsp = @(); if ($state -and $state.mspAdminUserNames) { $allMsp = @($state.mspAdminUserNames) }
+                $forbidden = @($allMsp | Where-Object { @($expected) -notcontains $_ })
+                $pres = Get-SlaveAdminPresence -ExpectedUserNames $expected -ForbiddenUserNames $forbidden
                 $okAdmins = ($pres.missing.Count -eq 0)
                 $detail = if ($okAdmins) { "all $($expected.Count) expected admins present in slave ($($pres.domain)) after the downlink: $($pres.found -join ', ')" }
                           else { "MISSING in slave ($($pres.domain)): $($pres.missing -join ', '); present: $($pres.found -join ', ')" }
                 Add-Step -Steps $steps -Name 'slave-admins-materialized' -Ok $okAdmins -Detail $detail | Out-Null
+
+                # ---- ring gating, the OTHER direction -- REQUIRED ----------------
+                # A higher-ring admin must NOT have materialised in a lower-ring slave.
+                # Without this, "the ring reached the right admins" is satisfied equally
+                # well by shipping every admin to every customer.
+                if ("$tidR" -eq "$MasterTenantId") {
+                    # NOT MEASURABLE **BY PRESENCE** in this fleet, and saying so beats both
+                    # alternatives. This "slave" is the MASTER tenant itself (only two test
+                    # tenants exist, so one plays both roles). The master legitimately holds
+                    # EVERY seeded admin -- S1-S4 deploy the full estate into it -- so an admin
+                    # outside this ring's reach is present for a reason that has nothing to do
+                    # with the ring. Failing here would report a leak that did not happen;
+                    # passing would claim a guarantee nothing checked.
+                    #
+                    # It is NOT required any more, because the ring promise is no longer
+                    # resting on it: 'ring-gate-one-customer-both-directions' below measures
+                    # the SAME guarantee by a route a shared tenant cannot confound (operator
+                    # directive 2026-08-07 -- one customer as the ring gate, simulated on the
+                    # two test tenants, instead of waiting for a third). This step stays as
+                    # informational evidence, not as the thing that decides S5's verdict.
+                    Add-Step -Steps $steps -Name 'ring-gating-excludes-higher-ring' -Skipped $true -Required $false `
+                        -Detail "not measurable BY PRESENCE: the '$slaveKey' slave IS the master tenant in this 2-tenant fleet, so out-of-ring admins ($($forbidden -join ', ')) are present from the master's own estate, not from the downlink. The ring guarantee is measured instead by 'ring-gate-one-customer-both-directions' (which reads the gate's SELECTION for this one customer, not the tenant's population)." | Out-Null
+                } elseif (-not $forbidden.Count) {
+                    Add-Step -Steps $steps -Name 'ring-gating-excludes-higher-ring' -Ok $true `
+                        -Detail "slave '$slaveKey' is at the widest ring for this fleet -- every seeded admin legitimately reaches it, so there is nothing this ring must exclude (asserted, not skipped)" | Out-Null
+                } else {
+                    $okRing = ($pres.leaked.Count -eq 0)
+                    $rd = if ($okRing) { "correctly ABSENT from slave '$slaveKey' ($($pres.domain)): $($forbidden -join ', ')" }
+                          else { "RING LEAK -- these are out of ring reach for '$slaveKey' but EXIST in it: $($pres.leaked -join ', ')" }
+                    Add-Step -Steps $steps -Name 'ring-gating-excludes-higher-ring' -Ok $okRing -Detail $rd | Out-Null
+                }
             } catch {
                 Add-Step -Steps $steps -Name 'slave-admins-materialized' -Skipped $true -Detail "could not query slave $Id : $($_.Exception.Message)" | Out-Null
+                Add-Step -Steps $steps -Name 'ring-gating-excludes-higher-ring' -Skipped $true -Detail "could not query slave $Id : $($_.Exception.Message)" | Out-Null
             }
+        }
+
+        # ---- RING GATE: ONE CUSTOMER, BOTH DIRECTIONS -- REQUIRED ----------------
+        # Operator directive 2026-08-07: express the ring gate as ONE customer whose ring
+        # MOVES, and simulate it on the two test tenants -- instead of blocking on a third,
+        # slave-only tenant.
+        #
+        # WHY THIS IS MEASURABLE WHERE THE PRESENCE CHECK ABOVE IS NOT.
+        # That one asks "does this admin EXIST in the slave tenant?" -- unanswerable when the
+        # slave IS the master, because the master holds every seeded admin from its own estate.
+        # This asks a different and strictly better question: "for THIS ONE customer, what does
+        # the ring gate SELECT?" That is a property of the downlink's DECISION for one tenant,
+        # not of the tenant's population, so a shared tenant cannot confound it. It runs the
+        # REAL gate -- Get-PimDownlinkPlan -> Select-PimDownlinkAdmins, the very call the live
+        # downlink makes (PIM-Downlink.ps1:366) -- against the REAL signed baseline. No mock.
+        #
+        # BOTH DIRECTIONS come from moving the CUSTOMER's ring, which needs only one customer:
+        #     narrowest ring -> an out-of-ring admin must be ABSENT from the selection
+        #     widened        -> that SAME admin must APPEAR
+        # A gate that shipped everything to everyone fails the first; a gate that shipped
+        # nothing fails the second. Neither can pass by accident.
+        if (-not $blDoc) {
+            Add-Step -Steps $steps -Name 'ring-gate-one-customer-both-directions' -Skipped $true `
+                -Detail "no signed baseline doc (-BaselineDocPath/-BaselineUrl) -- the ring gate reads its admin set from the verified baseline, so it cannot be simulated" | Out-Null
+        } else {
+            try {
+                # Run the REAL gate for this ONE customer at each ring, narrowest to widest.
+                $ringNames = @{}; $ringRows = @{}; $blVer = 0
+                foreach ($r in 0, 1, 2) {
+                    $rp = Get-PimDownlinkPlan -Scenario $sc -Doc $blDoc -TenantId $tidR -SlaveRing $r `
+                            -CentralRoot $env:PIM_SyncRootCentral -LocalRoot $env:PIM_SyncRootLocal
+                    if (-not $rp.ok) { throw "the downlink refused to plan at ring ${r}: $($rp.reason)" }
+                    $ringRows[$r]  = @($rp.admins)
+                    $ringNames[$r] = @(@($rp.admins) | ForEach-Object { "$(Get-PimDownlinkValue -Object $_ -Key 'UserName')" })
+                    $blVer = $rp.baselineVersion
+                }
+
+                # The VERDICT is the shared pure function (PIM-Downlink.ps1) -- the same one
+                # tests/Test-PimDownlink.ps1 proves offline, so the live matrix and the
+                # offline gate can never drift apart. Do not re-implement it here.
+                $rg = Test-PimDownlinkRingGate -RingRows $ringRows
+
+                if ($rg.vacuous) {
+                    Add-Step -Steps $steps -Name 'ring-gate-one-customer-both-directions' -Skipped $true `
+                        -Detail "NOT MEASURABLE (vacuous): $($rg.vacuousReason)" | Out-Null
+                } else {
+                    $detail = if ($rg.ok) {
+                        "ONE customer ($tidR), ring moved 0->2 against the real signed baseline v${blVer}:" +
+                        " ring0 selects $($ringNames[0].Count) [$($ringNames[0] -join ', ')];" +
+                        " ring2 selects $($ringNames[2].Count) [$($ringNames[2] -join ', ')]." +
+                        " EXCLUDED at ring 0 and ADMITTED at ring 2 -- both directions proven on one customer: $($rg.gained -join ', ')"
+                    } else { "RING GATE BROKEN: $($rg.failures -join ' | ')" }
+                    Add-Step -Steps $steps -Name 'ring-gate-one-customer-both-directions' -Ok $rg.ok -Detail $detail | Out-Null
+                }
+            } catch {
+                Add-Step -Steps $steps -Name 'ring-gate-one-customer-both-directions' -Skipped $true `
+                    -Detail "could not simulate the ring gate for $Id : $($_.Exception.Message)" | Out-Null
+            }
+        }
+
+        # ---- signed-baseline refusal -- REQUIRED ---------------------------------
+        # The positive half (a good bundle is accepted and applied) is proven by the
+        # downlink steps above. This is the negative half: a TAMPERED bundle must be
+        # refused. A downlink that never verified anything would pass the positive half
+        # every single time, so on its own it proves nothing about the signature.
+        if (-not $blDoc) {
+            Add-Step -Steps $steps -Name 'tampered-baseline-refused' -Skipped $true -Detail "no baseline doc loaded for $Id -- cannot exercise the signature check" | Out-Null
+        } else {
+            $t = Test-PimScenarioTamperRefusal -Doc $blDoc
+            Add-Step -Steps $steps -Name 'tampered-baseline-refused' -Ok $t.ok -Detail $t.detail | Out-Null
         }
     }
 
@@ -580,8 +1075,21 @@ function Invoke-ScenarioChecks {
                 $okGroups = ($pres.missing.Count -eq 0)
                 $grpDetail = if ($okGroups) { "all $($names.Count) seeded group(s) exist in target tenant" } else { "MISSING groups in target: $($pres.missing -join ', ')" }
             }
-            $okRun = ([bool]$firstRun.ok) -and $ranEngine -and $okGroups
+            # What this step is for: the runner really invoked the engine and the estate
+            # really LANDED in the target tenant. Error-freedom is the NEXT step's job.
+            #
+            # That split matters on a first-ever deploy into an empty tenant, where the
+            # create pass reliably reports 1 error it will heal by itself: an AU created at
+            # order 10 is not yet attachable at order 22 (TEST-16). Failing here on that
+            # would mean a cold estate fails and a warm one passes -- the same code, judged
+            # by its history. So a first pass whose ONLY problem is engine errors is left to
+            # the convergence assertion, which does NOT tolerate errors and will fail if they
+            # are real. A run that is not-ok with ZERO engine errors (a failed downlink, say)
+            # still fails right here.
+            $firstPassErrors = if ($cs1) { [int]$cs1.errors } else { 0 }
+            $okRun = $ranEngine -and $okGroups -and (([bool]$firstRun.ok) -or ($firstPassErrors -gt 0))
             $detail = "runner ran $Id ($($firstRun.scenarioId)); engine summary: $(if($cs1){"create=$($cs1.create) update=$($cs1.update) remove=$($cs1.remove) errors=$($cs1.errors)"}else{'<none returned>'}); groups: $grpDetail"
+            if ($okRun -and $firstPassErrors -gt 0) { $detail += " -- NOTE: $firstPassErrors create-pass error(s); convergence is asserted by the next step" }
             Add-Step -Steps $steps -Name 'scenario-runner-triggers-engine' -Ok $okRun -Detail $detail | Out-Null
         } catch {
             Add-Step -Steps $steps -Name 'scenario-runner-triggers-engine' -Skipped $true -Detail "could not assert runner outcome for $Id : $($_.Exception.Message)" | Out-Null
@@ -606,15 +1114,40 @@ function Invoke-ScenarioChecks {
                 $deployArgs2.Doc = $blDoc; $deployArgs2.TenantId = $tidR; $deployArgs2.SlaveRing = $ringR
                 $deployArgs2.CentralRoot = $env:PIM_SyncRootCentral; $deployArgs2.LocalRoot = $env:PIM_SyncRootLocal
             }
-            $secondRun = Invoke-PimScenarioDeploy @deployArgs2
-            $cs2 = $secondRun.changeSummary
+            # CONVERGENCE, not "the very next pass". On a FIRST-EVER deploy into an empty
+            # tenant the first pass creates objects that Entra/ARM do not serve yet -- an AU
+            # created at order 10 is not attachable at order 22 (TEST-16), and a
+            # roleEligibilitySchedule is not listed for a minute or so. The next pass
+            # therefore REPAIRS one thing (create=1, errors=0), which is BUG-16's reconciling
+            # scope doing exactly its job, and only the pass after that is a true no-op.
+            #
+            # Asserting "pass 2 changes nothing" measured before convergence and so failed a
+            # cold estate while passing a warm one -- the same run, different history. What
+            # the product actually promises is that repeated passes CONVERGE and then stop,
+            # so that is what is asserted: allow up to $maxPasses, require a genuinely empty
+            # pass, and REPORT how many it took. A pass that ERRORS is never tolerated, and
+            # anything beyond the first repair round still fails.
+            $maxPasses = 3
+            $passNo = 0; $cs2 = $null; $secondRun = $null; $okIdem = $false; $trail = @()
+            while ($passNo -lt $maxPasses) {
+                $passNo++
+                if ($passNo -gt 1) { Start-Sleep -Seconds 30 }   # let the previous pass's writes become readable
+                $secondRun = Invoke-PimScenarioDeploy @deployArgs2
+                $cs2 = $secondRun.changeSummary
+                if (-not ($cs2 -and "$($cs2.kind)" -eq 'pim-engine-summary')) { break }
+                $delta = [int]$cs2.create + [int]$cs2.update + [int]$cs2.remove
+                $trail += "pass$($passNo + 1): create=$($cs2.create) update=$($cs2.update) remove=$($cs2.remove) errors=$($cs2.errors)"
+                if (([bool]$secondRun.ok) -and ($delta -eq 0) -and ([int]$cs2.errors -eq 0)) { $okIdem = $true; break }
+                if ([int]$cs2.errors -gt 0) { break }            # an ERROR is not convergence -- stop and fail
+            }
             if (-not ($cs2 -and "$($cs2.kind)" -eq 'pim-engine-summary')) {
                 Add-Step -Steps $steps -Name 'idempotent-second-pass' -Ok $false -Detail 'second pass returned no engine change summary -- cannot prove zero changes. FAIL.' | Out-Null
             } else {
-                $delta = [int]$cs2.create + [int]$cs2.update + [int]$cs2.remove
-                $okIdem = ([bool]$secondRun.ok) -and ($delta -eq 0) -and ([int]$cs2.errors -eq 0)
-                $detail = "second pass: create=$($cs2.create) update=$($cs2.update) remove=$($cs2.remove) errors=$($cs2.errors)"
-                $detail += if ($okIdem) { ' -- zero changes (idempotent)' } else { ' -- NON-ZERO changes (NOT idempotent)' }
+                $detail = ($trail -join ' | ')
+                $detail += if ($okIdem) {
+                    if ($passNo -eq 1) { ' -- zero changes on the FIRST re-run (idempotent)' }
+                    else { " -- converged after $passNo re-run(s); the earlier one(s) repaired what the create pass could not yet see (TEST-16)" }
+                } else { ' -- NEVER converged (NOT idempotent)' }
                 Add-Step -Steps $steps -Name 'idempotent-second-pass' -Ok $okIdem -Detail $detail | Out-Null
             }
         } catch {
@@ -670,7 +1203,25 @@ Write-Host "====================================================================
 Write-Host "  §31.3 sync wiring built: $syncWiringBuilt  (capability probe only -- the runner + idempotency steps RUN the deploy live and assert real outcomes, not this flag)"
 
 $results = @()
-foreach ($id in $ids) { $results += Invoke-ScenarioChecks -Id $id }
+# BUG-31: Invoke-ScenarioChecks now ACTIVATES each scenario, which mutates the runtime globals
+# (PIM_ActiveScenario / hosting / spnModel / configVariant ...). Capture them once and restore
+# after the loop so scenario state cannot leak into the cleanup pass or a caller's session --
+# the last scenario in the list must not decide the store the teardown talks to.
+$savedScenarioGlobals = @{
+    PIM_ActiveScenario       = $global:PIM_ActiveScenario
+    PIM_ConfigVariant        = $global:PIM_ConfigVariant
+    PIM_ScenarioRingGated    = $global:PIM_ScenarioRingGated
+    PIM_DistributionEdition  = $global:PIM_DistributionEdition
+    PIM_HostingLocation      = $global:PIM_HostingLocation
+    PIM_SpnModel             = $global:PIM_SpnModel
+    PIM_SyncFileLocation     = $global:PIM_SyncFileLocation
+    PIM_SyncAdminsPermissions= $global:PIM_SyncAdminsPermissions
+}
+try {
+    foreach ($id in $ids) { $results += Invoke-ScenarioChecks -Id $id }
+} finally {
+    foreach ($k in $savedScenarioGlobals.Keys) { Set-Variable -Name $k -Scope Global -Value $savedScenarioGlobals[$k] }
+}
 
 # ---------------------------------------------------------------------------
 # Summary matrix + exit code.

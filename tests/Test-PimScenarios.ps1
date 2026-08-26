@@ -177,7 +177,14 @@ $v = Invoke-ScenarioValidation -Files @{
 } -Caches @{ 'azure-scopes' = @(@{ id='/subscriptions/live-sub'; displayName='Live'; scopePath='/subscriptions/live-sub'; type='subscription' }) }
 T 'azure RG under a known sub -> no PIM-ORPHAN-AZ-001' (-not ((Codes $v) -contains 'PIM-ORPHAN-AZ-001'))
 
-Section 'MAIL-FORWARD VALIDATION (PIM-DOMAIN-001 false-positive fix)'
+Section 'MAIL-FORWARD VALIDATION (PIM-DOMAIN-001 -- retired columns still carrying an address)'
+# CONTRACT CHANGED 2026-08-12. ForwardMailsToContact / MailForwardAddress are RETIRED: notification
+# and TAP mail is sent FROM the shared mailbox the engine SPN is scoped to, so an admin account
+# needs no mailbox and no Exchange licence, and nothing forwards. PIM-DOMAIN-001 no longer means
+# "you forgot to switch forwarding on" -- it means "a real address is sitting in a retired column
+# and the engine ignores it". The SAFETY PROPERTY is unchanged (never silently ignore configured
+# config) but it now fires REGARDLESS of the flag, so the old "forwarding on -> no warning" case
+# inverts: with both columns retired, forwarding-on is no longer a valid state to be silent about.
 # Header field order ...UsageLocation;ForwardMailsToContact;MailForwardAddress;CreateTAP;...
 # so each row's "...;US;<fwd>;<addr>;FALSE;;;2;" controls forwarding flag + address.
 
@@ -187,17 +194,19 @@ $v = Invoke-ScenarioValidation @{
 }
 T 'both FALSE (sentinel address + forwarding off) -> NO PIM-DOMAIN-001' (-not ((Codes $v) -contains 'PIM-DOMAIN-001'))
 
-# real address + forwarding off -> genuine misconfig -> WARNING
+# real address in the retired column, flag off -> the engine ignores it -> WARNING
 $v = Invoke-ScenarioValidation @{
   'Account-Definitions-Admins' = @('Help;Desk;HD;Day2Day;Cloud;ID;Internal;Admin-Helpdesk-AD;Help Desk;Admin-Helpdesk-AD@contoso.com;US;FALSE;contact@contoso.com;FALSE;;;2;')
 }
-T 'real address + forwarding off -> PIM-DOMAIN-001 warning' ((Codes $v) -contains 'PIM-DOMAIN-001')
+T 'real address in retired column (flag off) -> PIM-DOMAIN-001 warning' ((Codes $v) -contains 'PIM-DOMAIN-001')
 
-# real address + forwarding on -> valid -> NO warning
+# real address + flag ON -> STILL a warning now. Previously this was the "correctly configured"
+# case; with forwarding retired it is the MOST misleading state of all, because the operator has
+# explicitly asked for a forward that will never happen.
 $v = Invoke-ScenarioValidation @{
   'Account-Definitions-Admins' = @('Help;Desk;HD;Day2Day;Cloud;ID;Internal;Admin-Helpdesk-AD;Help Desk;Admin-Helpdesk-AD@contoso.com;US;TRUE;contact@contoso.com;FALSE;;;2;')
 }
-T 'real address + forwarding on -> no PIM-DOMAIN-001' (-not ((Codes $v) -contains 'PIM-DOMAIN-001'))
+T 'real address + flag ON -> PIM-DOMAIN-001 warning (forwarding is retired)' ((Codes $v) -contains 'PIM-DOMAIN-001')
 
 # blank address + forwarding off -> NO warning
 $v = Invoke-ScenarioValidation @{

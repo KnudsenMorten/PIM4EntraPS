@@ -9,6 +9,7 @@
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
 . (Join-Path $root 'engine\_shared\PIM-ChangeQueue.ps1')
+. (Join-Path $root 'engine\_shared\PIM-Rest.ps1')
 . (Join-Path $root 'engine\_shared\PIM-SqlStore.ps1')
 
 $pass=0; $fail=0

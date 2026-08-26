@@ -1,3 +1,6 @@
+# IMP-02: the locale-safe stamp reader. Loaded defensively so this file stays correct
+# when a test dot-sources it on its own (PIM-Functions.psm1 also loads it up front).
+if (-not (Get-Command Get-PimUtcStamp -ErrorAction SilentlyContinue)) { . (Join-Path $PSScriptRoot 'PIM-DateSafe.ps1') }
 <#
   PIM4EntraPS -- ALERT FEED + recorded-send proof (REQUIREMENTS §26c / §28 [H2] +
   the [M5] residual: "stays open until the notify path proves a recorded send").
@@ -130,9 +133,9 @@ function Test-PimAlertDebounced {
         $k = Get-PimAlertDedupeKey -Event $ev -Title $ti -Detail $de
         if ($k -ne $DedupeKey) { continue }
         $tsRaw = (Get-PimAlertFeedField -Item $r -Name 'ts')
-        $ts = [datetime]::MinValue
-        if (-not [datetime]::TryParse("$tsRaw", [ref]$ts)) { continue }
-        if ($ts.ToUniversalTime() -ge $cutoff) { return $true }
+        $ts = Get-PimUtcStamp $tsRaw   # IMP-02
+        if ($null -eq $ts) { continue }
+        if ($ts -ge $cutoff) { return $true }
     }
     return $false
 }
@@ -177,13 +180,15 @@ function Select-PimAlertFeed {
             if ($s -le 0) { continue }
         }
         if ($SinceUtc) {
-            $tsRaw = (Get-PimAlertFeedField -Item $r -Name 'ts'); $ts = [datetime]::MinValue
-            if (-not [datetime]::TryParse("$tsRaw", [ref]$ts)) { continue }
-            if ($ts.ToUniversalTime() -lt ([datetime]$SinceUtc).ToUniversalTime()) { continue }
+            $tsRaw = (Get-PimAlertFeedField -Item $r -Name 'ts')   # IMP-02
+            $ts = Get-PimUtcStamp $tsRaw
+            if ($null -eq $ts) { continue }
+            if ($ts -lt ([datetime]$SinceUtc).ToUniversalTime()) { continue }
         }
         $rows.Add($r)
     }
-    $sorted = @($rows.ToArray() | Sort-Object { $t = [datetime]::MinValue; [void][datetime]::TryParse("$(Get-PimAlertFeedField -Item $_ -Name 'ts')", [ref]$t); $t } -Descending)
+    # IMP-02: an unreadable stamp sorts as MinValue (oldest), never as "now".
+    $sorted = @($rows.ToArray() | Sort-Object { $t = Get-PimUtcStamp (Get-PimAlertFeedField -Item $_ -Name 'ts'); if ($null -eq $t) { [datetime]::MinValue } else { $t } } -Descending)
     if ($Take -gt 0 -and $sorted.Count -gt $Take) { $sorted = @($sorted[0..($Take - 1)]) }
     return @($sorted)
 }
@@ -236,9 +241,8 @@ function Get-PimExpiringAccessAlert {
         if ($null -eq $r) { continue }
         $endRaw = (Get-PimAlertFeedField -Item $r -Name 'end')
         if (-not "$endRaw".Trim()) { continue }
-        $end = [datetime]::MinValue
-        if (-not [datetime]::TryParse("$endRaw", [ref]$end)) { continue }
-        $end = $end.ToUniversalTime()
+        $end = Get-PimUtcStamp $endRaw   # IMP-02
+        if ($null -eq $end) { continue }
         if ($end -lt $now -or $end -gt $soon) { continue }
         $hits.Add([pscustomobject]@{
             principal = (Get-PimAlertFeedField -Item $r -Name 'principal')

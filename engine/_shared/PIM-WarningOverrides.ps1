@@ -1,3 +1,6 @@
+# IMP-02: the locale-safe stamp reader. Loaded defensively so this file stays correct
+# when a test dot-sources it on its own (PIM-Functions.psm1 also loads it up front).
+if (-not (Get-Command Get-PimUtcStamp -ErrorAction SilentlyContinue)) { . (Join-Path $PSScriptRoot 'PIM-DateSafe.ps1') }
 #Requires -Version 5.1
 # PIM-WarningOverrides.ps1 -- validator warning override / acknowledgement
 # POST-FILTER (REQUIREMENTS §11 "Warning override/acknowledge").
@@ -176,8 +179,10 @@ function Test-PimWarningOverrideExpired {
     )
     if ($Override.noExpiry) { return $false }
     if (-not $Override.expiresOn) { return $true }
-    $exp = [datetime]::MinValue
-    if (-not [datetime]::TryParse($Override.expiresOn, [ref]$exp)) { return $true }
+    # IMP-02: locale-safe. This site already failed SAFE (an unreadable expiry treats the
+    # override as EXPIRED, so the warning resurfaces) -- that behaviour is preserved.
+    $exp = Get-PimUtcStamp $Override.expiresOn
+    if ($null -eq $exp) { return $true }
     # expiresOn is an inclusive end-of-day boundary; suppress THROUGH that date.
     $expEnd = $exp.Date.AddDays(1).AddTicks(-1)
     return ($AsOf.ToUniversalTime() -gt $expEnd.ToUniversalTime())

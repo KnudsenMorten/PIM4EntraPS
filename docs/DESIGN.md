@@ -35,7 +35,7 @@ the alternative was found to fail in practice.
 10. [Notifications](#10-notifications)
 11. [Hosting & runtime (single-tenant, two-plane topology, execution model, install guide, update lifecycle, deployment scenarios S1–S6)](#11-hosting--runtime)
 12. [Containers](#12-containers)
-13. [MSP architecture (two planes, signed courier, profiles)](#13-msp-architecture)
+13. [MSP architecture (two planes, signed courier, profiles, ring model)](#13-msp-architecture)
 14. [SQL / data model](#14-sql--data-model)
 15. [Workload connectors](#15-workload-connectors)
 16. [Entra group / app catalog](#16-entra-group--app-catalog)
@@ -726,6 +726,36 @@ apply. They run in a fixed dependency **order**:
 | 90 | AdminOffboarding | `Account-Definitions-Admins` | **removes** an offboarded admin's delegations (see §6.2) |
 | 95 | HybridAdProvisioning | `Account-Definitions-Admins` (AD platform) | **PLANS** on-prem AD accounts + gMSA/sMSA; on-prem write is hybrid-worker-only (see §6.5) |
 
+
+#### `AdminTap` (order 35) — the issuance contract
+The scope hands a new admin a time-boxed Temporary Access Pass so they can sign in once and
+register their own MFA. Four properties define it, and each exists because its absence was a
+real defect (BUG-51, BUG-66):
+1. **The live set is the USABLE passes, not the existing ones.** `GetLive` filters on Entra's own
+   `isUsable`, so an **expired** pass leaves the account out of the live set and it becomes a
+   create candidate. Counting "has a pass" instead classified a dead pass as satisfied — the
+   admin had no route back in and the scope reported success. The read passes **`-All`**, because
+   without it `Invoke-PimRest` returns the response WRAPPER and `@(wrapper).Count` is 1 even for
+   an account with no pass at all.
+2. **An UNREADABLE probe counts as SATISFIED** — deliberately the opposite of every other probe
+   here. Elsewhere "cannot tell" means re-run; here it would mint a fresh credential on every
+   tick for as long as a Graph read kept failing. Failing closed costs a delayed re-issue;
+   failing open mails credentials in a loop.
+3. **Refuse before minting, and refuse before DELETING.** `Test-PimTapMailReady` — the same guard
+   the Manager's re-issue button uses, so the two paths cannot disagree — runs first. Reversed,
+   a tenant that cannot send mail would destroy the existing pass and then decline to replace it,
+   which is strictly worse than doing nothing. Delete-then-create is not a choice: Entra allows
+   exactly **one** pass per user, so without the delete the POST fails on precisely the accounts
+   the scope exists to rescue.
+4. **The send RESULT is inspected.** `Send-PimNotifyMail` never throws for a *refused* send — it
+   returns `sent=$false`. Discarding that (the original `| Out-Null`) meant a mint whose mail
+   failed still reported `applied=1 / ok=True`, over a live credential nobody received, with the
+   old pass already gone. The guard answers *may we issue?*; this answers *did it arrive?* It
+   cannot be undone at that point, so a not-sent mint warns loudly and names the account.
+
+📌 `Equal` is hardcoded `$true` **on purpose**: once a pass is usable there is nothing to compare,
+and the entire replace decision lives in `GetLive`. Proven live 2026-08-21 — a healed account
+reads back as `nochange` on the next plan, so the scope does not re-mint.
 A dedicated `GroupOwners` scope (replication-safe, re-runnable) repairs missing
 owners on existing groups; `Groups` itself is existence-nochange (see §8).
 
@@ -1241,32 +1271,97 @@ templates.
 
 `templates/policy/*.policytemplate.json` (+ `*.policytemplate.custom.json`, custom
 id wins), single-level `extends` merge. A definition's `PolicyTemplate` column
-selects one; **blank = `default`** (every group is linked). Ships ≥2: `default`
-(baseline, no overrides — the engine never touches an approval rule it didn't set)
-and `approval-required` (activation needs MFA + justification + an approval;
-approvers = the group's Owners; Serial = escalate owner[1]→[2]…). See §17.7 for
-the full template/approval mechanics.
+selects one; **blank = `default`** for groups, **blank = `EntraIDRoles_Standard`**
+for directory roles. Four ship today, in two families:
+
+| family | templates | approval | `Admin_Eligibility` |
+|---|---|---|---|
+| **standard** | `default` (groups), `EntraIDRoles_Standard` (directory roles) | none | *empty* |
+| **approval** | `approval-required`, `EntraIDRoles_RequireApproval` | required | `Justification` |
+
+**Activation always requires MFA + justification** — that is the control that
+protects the privilege at the point of use, and it is untouched by everything
+below.
+
+**Why `Admin_Eligibility` is empty on the standard family.** That rule governs what
+an admin must present when *granting* eligibility, and on a standard scope the
+"admin" is the engine's own app-only service principal, whose token can never carry
+an MFA claim. Requiring MFA there is unsatisfiable by anyone and blocks the
+delegation path the product exists to run. A justification rule is no better as a
+control: a grant that omits one is still accepted on the app-only path. On an
+approval scope a human is in the loop by definition, so the rule is enforced and
+earns its place.
+
+### Switching approval off, and policies that stop accepting changes (2026-08-11)
+
+A policy template that declares **no** `Approval` block means *approval must be off*, not
+*leave whatever is there*. Moving a scope to a standard template therefore clears a live
+approval requirement, on directory roles and group policies alike. Previously the engine only
+ever wrote an approval rule its template asked for, so approval was **one-way**: it could be
+switched on and never off.
+
+Two mechanics are worth knowing, because neither is guessable:
+
+- **The "approval off" body must be complete.** Sending only `isApprovalRequired = false` is
+  rejected; the directory wants the whole setting, including a stage carrying an empty approver
+  list.
+- ⚠️ **An explicit recipient list on the *approver notification* rule write-locks the entire
+  policy.** The directory treats that list as the policy's approvers, so once it is set, every
+  later per-rule update is rejected — including updates unrelated to approval, and including the
+  one that would remove the list. The write that causes it is accepted silently. The single
+  supported route back is a whole-policy update that sets the list empty, and the list cannot be
+  put back afterwards: restoring it locks the policy again. The engine detects this state,
+  recovers from it, and names the recipients it had to drop.
+
+  This is why the approval-required template does **not** name the approvers as notification
+  recipients — the stronger guarantee (who-gets-told cannot diverge from who-can-approve) is not
+  available, so the rule keeps the directory's default approver routing instead.
+
+See §17.7 for the full template/approval mechanics.
 
 ---
 
 ## 7. Identity, auth & engine configuration
 
-- **App-only, certificate auth.** The engine signs in as the **PIM4EntraPS-Engine
-  SPN** (or the AutomateIT high-priv SPN) using a **certificate thumbprint**
-  (`$global:PIM_CertThumbprint` / `PIM_CERT_THUMBPRINT`), resolved from the local
-  cert store — **no client secret, no device code, no modules**. In a container it
-  falls back to **managed identity**. **Never create a new SPN** for a run; reuse
-  the engine SPN. Stale/duplicate engine certs are removed from the host.
+- **App-only, as the ENGINE SPN — everywhere, including containers.** The engine signs
+  in as the **PIM4EntraPS-Engine SPN** (or the AutomateIT high-priv SPN). Credential
+  order is **certificate first, client secret as fallback** (operator, 2026-08-12):
+  a **certificate thumbprint** (`$global:PIM_CertThumbprint` / `PIM_CERT_THUMBPRINT`)
+  resolved from the local cert store where one exists, otherwise the SPN's **client
+  secret** read from the environment's own Key Vault (`Modern-AppId` + `Modern-Secret`
+  — the shape the estate uses). **Never create a new SPN** for a run; reuse the engine
+  SPN. Stale/duplicate engine certs are removed from the host.
+  🔴 **The engine does NOT run as a managed identity.** This bullet used to end *"in a
+  container it falls back to managed identity"*, and that sentence was the defect:
+  `Setup-PimContainers` sets only `PIM_SqlServer`/`PIM_SqlDatabase`/`PIM_TenantId`, so
+  the hosted engine took the MI branch and authenticated as the container's
+  system-assigned identity — which is created for SQL and holds **zero Graph
+  app-roles**. Measured in EFIF: the engine SPN holds 100 Graph app-roles, `pim-tick`
+  and `pim-manager` hold 0, and every hosted Graph call returned
+  `403 Authorization_RequestDenied`. **MI stays the identity for SQL only** (see the
+  MI-only SQL bullet below); Graph is always the engine SPN.
+  (`docs/REQUIREMENTS.md` IMP-08.)
 - **Required Graph app-roles** on the engine SPN: `Directory.Read.All`,
   `User.ReadWrite.All`, `Group.ReadWrite.All`, `RoleManagement.ReadWrite.Directory`,
   `PrivilegedAccess.ReadWrite.AzureADGroup`, **`RoleManagementPolicy.ReadWrite.Directory`
   + `RoleManagementPolicy.ReadWrite.AzureADGroup`** (both required for the GroupsPolicies
   approval rule — without the AzureADGroup variant `Get-PimGroupMemberPolicyId` 403s and the
-  apply surfaces as "no member policy"), `AdministrativeUnit.ReadWrite.All`, `Mail.Send`, and
+  apply surfaces as "no member policy"), `AdministrativeUnit.ReadWrite.All`, and
   **`AccessReview.Read.All`** (the AccessReviews provider 403s without it — handled gracefully
   but a no-op until granted). **Azure RBAC**: the SPN needs **Owner / User Access
   Administrator** on each ARM scope used by `AzRes`. Grant/top-up the full set idempotently,
   certificate-only (no device code, no Graph SDK), with `setup/Grant-PimGraphAppRoles.ps1`.
+- 🔒 **`Mail.Send` is NOT in that list, and must not be added back** (operator, 2026-08-12).
+  Sending is granted by the **scoped Exchange RBAC assignment** that
+  `tools/setup/Initialize-PimMailSender.ps1` creates — `New-ServicePrincipal` +
+  `New-ManagementScope` (pinned to the one shared sender mailbox) + `New-ManagementRoleAssignment
+  -App … -Role 'Application Mail.Send' -CustomResourceScope …`. Exchange RBAC for Applications
+  does **not restrict** a tenant-wide Graph consent; it **grants** scoped access in its own right,
+  and a tenant-wide consent sitting beside it keeps winning. Measured in EFIF against a real
+  out-of-scope decoy mailbox: **with** tenant-wide `Mail.Send` the engine SPN could send as ANY
+  mailbox; **without** it the same send returned `ErrorAccessDenied` while the in-scope send
+  succeeded. So granting `Mail.Send` here does not add capability — it removes the restriction.
+  (`docs/REQUIREMENTS.md` IMP-06e.)
 - **Deleting** a provisioned admin *account* (test cleanup / offboarding) needs more than the
   Graph app roles above — user delete is a privileged directory operation requiring an
   appropriate directory role (e.g. the management SPN's GA membership). The engine *creates*
@@ -2115,14 +2210,70 @@ all stay local to the customer; customer data never leaves the customer tenant.
 ```
 
 **E. Identity & access (Easy Auth + private-only).** Put the Manager behind
-**Easy Auth** (Entra interactive sign-in) — the hosted Manager
-(`Open-PimManager.ps1 -Hosted`, or `PIM_HOSTED=1`) trusts the Easy Auth
-principal header for identity and still requires a per-session token on `/api`.
-Keep `publicNetworkAccess=Disabled`, the private endpoint inbound only, and
-inbound access-restricted to the management / PAW / SAW subnets (the
-defense-in-depth layers of §11.1). The Easy Auth principal maps to
-Reader / Admin / SuperAdmin / Delegated; unknown principals fail closed to
-Reader.
+**Easy Auth** (Entra interactive sign-in). Keep `publicNetworkAccess=Disabled`,
+the private endpoint inbound only, and inbound access-restricted to the
+management / PAW / SAW subnets (the defense-in-depth layers of §11.1). The
+authenticated principal maps to Reader / Admin / SuperAdmin / Delegated;
+unknown principals fail closed to Reader.
+
+**The hosted Manager VERIFIES that principal — it does not simply trust the
+header** (`engine/_shared/PIM-HostedAuth.ps1`, added 2026-08-05). Two layers:
+
+- **Layer 1 — edge consistency (always on).** A genuine auth edge injects
+  `X-MS-CLIENT-PRINCIPAL-NAME` *and* the `X-MS-CLIENT-PRINCIPAL` claims blob
+  together and consistently. A name header arriving **without** the companion
+  blob, with a blob that is not valid base64/JSON, or with a blob whose name
+  **disagrees** with the header, is a spoof signature a working edge can never
+  produce → rejected, caller treated as unauthenticated. This layer cannot lock
+  out a correctly-fronted deployment.
+- **Layer 2 — signed token (opt-in, `PIM_HOSTED_REQUIRE_SIGNED_TOKEN=1`).**
+  `X-MS-TOKEN-AAD-ID-TOKEN` is verified properly — RS256 signature against the
+  tenant JWKS (fetched and cached hourly), plus issuer, audience, `exp`/`nbf`
+  — and identity is taken from the **verified token**, not from any header.
+  `alg:none` and HMAC alg-confusion are refused; a missing token or an
+  unavailable JWKS **fails closed**. Opt-in because it requires the auth edge to
+  store tokens; enabling it without that would lock the Manager out.
+
+Be precise about what each layer buys: the `X-MS-CLIENT-PRINCIPAL*` headers
+carry no signature and **cannot** be cryptographically verified by the app —
+they are trustworthy only because the edge strips inbound copies. Layer 1
+therefore blocks spoofing but still *assumes* the edge is in front. Layer 2 is
+what makes spoofing cryptographically impossible. The Manager prints which layer
+is active at startup (`[auth] posture=edge-consistency|signed-token|local`).
+
+**`GET /` requires a trusted principal in hosted mode.** The SPA page embeds the
+`/api` bearer token in its HTML, so serving it unauthenticated made that token
+public — the token was never an independent second factor, and two requests
+(`GET /` for the token, then any `/api` call with a forged principal header)
+reached SuperAdmin. `/health` stays unauthenticated by design so the platform
+liveness probe is unaffected. Local/loopback mode is unchanged: identity is the
+Windows user and the listener binds to loopback.
+
+**A swallowed error on a decision path is reported, not erased**
+(`engine/_shared/PIM-Swallow.ps1`, added 2026-08-05). Much of the codebase
+deliberately does not rethrow: an audit-write failure must not undo the approval
+it was recording, and a `Dispose()` failure must not change an auth verdict.
+That is correct — the problem was that the error then left no trace, so a
+decision taken on **fallback data** was indistinguishable from the same decision
+taken on real data. `Write-PimSwallowed -Scope -Consequence -ErrorRecord` writes
+one line to the host and the warning stream and appends to a bounded (200-entry)
+in-process ring readable via `Get-PimSwallowedErrors`. It never throws and never
+alters control flow — the caller's fallback runs exactly as before; this is
+observability, not behaviour. `-Consequence` carries the operator-useful half:
+*"falling back to built-in defaults, so a persisted toggle is NOT in effect this
+run"* rather than a stack trace.
+
+It is wired to **decision paths only** — feature-gate and edition store reads,
+the approval store's reads/writes/audit events, the disable-abort alert
+(BUG-01's own signal), and the Manager's pre-PUT portal-scope row read — never
+swept across all 218 `catch {}` sites, because a warning on every best-effort
+nicety is how real warnings get ignored. In the two multi-channel readers
+(`Get-PimFeatureStoreValue`, `Get-PimApprovalRequests`) a throw is **remembered,
+not reported**: falling through to a channel that works is normal and stays
+silent, and it reports only when the whole chain then yields nothing — the one
+case where the caller silently proceeds on fallback data. Gate:
+`tests/Test-PimSwallow.ps1` (41), which asserts both the reporting and that no
+fallback moved.
 
 **F. DNS / GSA / private-link.** Each setup script ends by printing **exactly
 which zones to add** so cloud-only admins reach the internal Manager without a
@@ -2222,10 +2373,53 @@ git pull
 1. **`sync-automateit` pull / detect** — resolve the newest valid released tag
    vs the deployed tag (numeric semver; idempotent no-op if already newest).
 2. **build image** — `az acr build` for the new tag (skip when rolling an
-   existing tag).
+   existing tag). The build reports the **digest** the tag now points at, because
+   the tag alone does not identify what was built.
 3. **roll Container App** — capture the manager's current revision as the
    rollback target, then roll every app via `Update-PimContainers.ps1 -SkipBuild`
    (zero-downtime; AcrPull MI, no registry creds at roll time).
+
+   **Deploys are DIGEST-PINNED, not tag-based.** A tag is a mutable pointer:
+   rebuilding `pim-manager:<tag>` moves it to new content while the container's
+   image *field* stays byte-identical — so ARM sees no change, creates no
+   revision, and the platform keeps serving the image it already pulled. Both
+   deploy paths therefore resolve the tag to its digest at deploy time and set
+   `<registry>/<repo>@sha256:…`, so new content is a genuinely changed field.
+   Afterwards each app (and the scheduled tick Job) is read back and the run
+   **fails** unless the running reference carries that digest. A matching *tag*
+   is explicitly not accepted as that evidence — on a rebuilt tag the requested
+   and running tags are the same string while the content is stale, which is how
+   a roll once verified itself green while continuing to run the previous build.
+   The decision logic is the pure `engine/_shared/PIM-ImageRef.ps1`; the registry
+   lookup is `Resolve-PimAcrImageDigest`, which refuses to fall back to the tag
+   (an unresolvable tag means the image is not in the registry, so a tag deploy
+   would fail later and blame the wrong step).
+
+   **The scheduled tick Job is rolled by the same step, off the same digest.** It
+   is a Container Apps *Job*, not an app, and it used to be stamped earlier in the
+   run — before the code step rebuilt the tag it was resolved from — so a single
+   deploy could leave the interface current and the reconciling engine one build
+   behind, durably. The roller now stamps the Job with the identical digest
+   reference the apps were verified on and verifies it the same way. A missing Job
+   is a skip (an always-on deployment has none) and says so; a failed stamp fails
+   the deploy and names it as skewed. A rollback reactivates app *revisions*, which
+   a Job does not have, so that path warns rather than pretending the Job came back
+   with them.
+
+   **A roll that changes DESIRED STATE is refused unless it is asked for.** The
+   image carries the shipped policy templates, so an update meant to change how the
+   product *works* can also change what it *wants* — and the engine then converges
+   every managed scope onto that new baseline within one scheduled run. Before
+   rolling, the shipped templates are fingerprinted
+   (`engine/_shared/PIM-PolicyBaseline.ps1`) and compared against the fingerprint
+   recorded on the deployed resource as the `pim-policy-baseline` tag; a difference
+   **throws**, naming the templates that moved, unless `-AcceptBaselineChange` is
+   passed. The fingerprint parses each template and drops `_`-prefixed annotations
+   and `description`, so comment, key-order and line-ending churn are not baseline
+   changes — a gate that fires on documentation would be routed around. Nothing
+   recorded yet (a first deploy) warns and proceeds rather than blocking, and the
+   fingerprint is written only *after* the roll verifies, so a failed deploy cannot
+   advance the recorded baseline past what was actually shipped.
 4. **schema upgrade** — apply the idempotent CREATE/ALTER if the release needs
    it; additive and re-runnable.
 5. **smoke** — run `tests/live/Test-PimManagerHostedSmoke.ps1`. Healthy = exit 0,
@@ -3160,6 +3354,60 @@ same-AAD **`--registry <resourceId>`** form, or a plain same-tenant import by lo
 server. `Invoke-PimAcrImport` wraps it (honours `-WhatIf`, **redacts the token** in
 all output), and `Setup-PimMsp.ps1 -MspSourceAcr` runs the import **before** the
 container deploy so the destination ACR has the image when the workers start.
+
+### 13.19 Ring model — three axes, and which one the framework owns
+
+⚠️ **"Ring" means three different things around PIM.** They are easy to conflate and
+conflating them produces wrong fixes, so they are named here once. (Not to be confused with
+§13.1's *two planes*, which is about network separation — admin plane vs local plane.)
+
+| # | Axis | Who decides | Selects | Where it lives |
+|---|---|---|---|---|
+| 1 | **Code-version ring** | the **framework operator** | which **version of the solution's code** a customer receives | the framework's central release map; resolved by the sync engine |
+| 2 | **Template-version ring** | a **PIM MSP master** | which **signed baseline/template version** its managed tenants may pull | the MSP master's own store |
+| 3 | **Admin↔tenant ring** | the **MSP master's data** | which **admins reach which tenants** — *no version at all* | `pim.CentralAdmins.Ring` ≤ `platform.Tenants.Ring` (`pim.vw_AdminTenantTargets`) |
+
+**Axis 1 is not PIM's.** It belongs to the **AutomateIT framework layer**, which implements ring +
+capability gating **generically** so every solution shares one mechanism rather than each growing its
+own. The framework layer *is* AutomateIT itself; PIM is an ordinary solution on top of it. The
+decision is made *before PIM's code is even on disk*, so PIM never participates at runtime — it only
+**declares** what it can do, in `solution.deploy.json`.
+
+**The three-owner spine** (the reason it is shaped this way): the **solution** decides *how* (which
+capabilities exist — ships with the code, so changing a deploy contract never touches a customer);
+the **operator** decides *when* (which version + which capabilities are approved for a ring —
+central, one-line promotion); the **customer** decides *whether* (which solutions, and which
+**optional** capabilities). A capability runs only when **all three agree**. Rollout timing and
+product choice are different questions with different owners, so they are two independent gates and
+neither substitutes for the other. PIM declares five capabilities — `code` and `schema` **required**,
+`infra` / `appreg` / `msp-downlink` optional. A customer blocking a *required* one is **refused and
+reported**, never obeyed, because honouring it would leave a broken install.
+
+**Axis 2 uses the same mechanism as axis 1, deliberately as a separate instance.** A PIM customer
+acting as an MSP master runs its **own** downstream fleet; its rollout waves are its business, not
+the AutomateIT operator's, so the two maps are owned by different parties and neither dictates the
+other. What PIM does *not* do is re-implement the decision: `engine/_shared/PIM-RingGate.ps1` is a
+**vendored copy of the platform's pure core**, so plane 2 behaves identically to plane 1 by
+construction. Vendored — not dot-sourced — because the platform core is read from the downloaded
+snapshot **in memory** and never written to a customer's disk, so it does not exist to be imported at
+PIM runtime. The copy is held honest by `tests/Test-PimDeployContract.ps1`, which diffs PIM's verdicts
+against the real platform core whenever it is reachable, and asserts the load-bearing invariants
+directly when it is not.
+
+**Axis 3 is genuinely PIM's and is unchanged.** It scopes *assignments*, not versions: a ring-0 admin
+is broad and reaches every tenant; a ring-2 admin reaches only ring ≥ 2 tenants. RING-1 does not
+replace it — it is the "master-store assignment provider" the framework expects PIM to supply.
+
+**Four outcomes, deliberately distinct.** `Run` · `Held` (the operator has not promoted this) ·
+`Blocked` (the customer opted out) · `Refused` (a block on a required capability, ignored and
+surfaced). `Held` and `Blocked` must never collapse, or a stalled rollout becomes indistinguishable
+from a healthy opt-out. Likewise "no ring restriction" and "nothing approved" are different operator
+intents and are represented differently.
+
+🔒 **The non-breaking rule, inherited and applied twice.** An unassigned target is `track-current` —
+it behaves exactly as it did before ring gating existed. Absence is *not* the broadest ring and is
+*not* an error. PIM applies the same rule inside itself: the managed downlink's version gate is
+**opt-in**, so a caller that supplies no ring plan gets precisely today's behaviour.
 
 ---
 
@@ -4778,8 +5026,8 @@ other inputs, live-previewed).
 | DisplayName | auto-derived | `<First> <Last> (Admin, <Usage>, <Platform>, L<Lvl>, T<Tier>)` | editable |
 | UserPrincipalName | auto-derived | `<UserName>@<DefaultDomainUPN>` | dropdown if multiple domains |
 | UsageLocation | dropdown ISO 3166-1 alpha-2 | tenant default | |
-| ForwardMailsToContact | checkbox → TRUE/FALSE | FALSE | |
-| MailForwardAddress | autocomplete tenant users | — | only shown when Forward=TRUE |
+| ~~ForwardMailsToContact~~ | — | **RETIRED 2026-08-12** | see below |
+| ~~MailForwardAddress~~ | — | **RETIRED 2026-08-12** | see below |
 | Company | text | empty | pushed to Entra `-CompanyName` only when non-empty |
 | Notes | textarea | empty | max 1024 chars; logged as a comment, NOT pushed to Entra |
 | ManagerEmail | autocomplete tenant users | empty | resolved to Graph user id + `manager@odata.bind` after create; silently skips if unresolved |
@@ -4791,6 +5039,25 @@ other inputs, live-previewed).
 
 (Plus the lifecycle columns from §17: `ProvisionDate`, `TAPLifetimeHours`,
 `Template`, `OffboardDate`, `DeleteAfterDays`, `Department`, `Ring`.)
+
+> **🔒 `ForwardMailsToContact` / `MailForwardAddress` are RETIRED (operator, 2026-08-12).**
+> They made the engine call EXO `Set-Mailbox -ForwardingSmtpAddress` on the newly-created admin,
+> which only works if **that admin account itself holds an Exchange licence** — a per-admin cost for
+> what is only a notification. The design now sends notification and TAP mail **from a single shared
+> mailbox that the engine SPN has scoped send rights on**, so an admin account needs **no mailbox and
+> no licence at all**.
+> **The recipient is `ManagerEmail`** — the only column the notify path reads
+> (`PIM-EngineProviders.ps1` `new-admin` and `tap-delivery` sends).
+> Removed from: the authoring header (`PIM-Authoring.ps1`), the Manager grid + onboarding wizard,
+> both shipped admin templates, the onboarding defaults, the sample CSV, and the forwarding branch of
+> `New-PimRestAdminAccount`.
+> **Kept deliberately:** `Set-PimMailboxForwarding` / `Test-PimMailForwardAddressIsReal` in
+> `PIM-Rest.ps1` — the **v1 legacy edition** still calls them; this retirement is scoped to v2.
+> **Migration behaviour:** validator rule **PIM-DOMAIN-001** was repurposed rather than deleted. It
+> now fires when a real address is still present in either retired column — **regardless of the
+> flag** — because an address the operator believes is live while the engine ignores it is the same
+> "misleading config" failure the rule always existed to catch. Its suggestion points at
+> `ManagerEmail`.
 
 #### PIM-Definitions-Roles (role groups)
 
@@ -5464,6 +5731,57 @@ Access tab. It is fully self-contained (builds its own node + handlers, no coupl
 to `render()` internals), wrapped in try/catch so it can never break the popup, and
 sets `gettingStartedTipDismissed` in `chrome.storage.local` on dismiss so it shows
 exactly once. Deliberately additive, leaving the mature render path untouched.
+
+**Propagation watch — poll-driven, never a timer.** PIM returns no completion
+reply: the activation POST is accepted immediately and the nested/transitive
+groups and roles land asynchronously, typically flat for 1–8 minutes and then in
+one jump. `watchPropagation` (in `popup.js`) therefore decides completion purely
+from what each 10-second poll **observes**. The signal is a COMBINED count —
+eligible PIM groups + active group assignments + active direct Entra roles —
+because a role group can carry 40+ transitive assignments; watching eligible
+groups only is wrong. Completion is decided per watched scope from its shape
+`{ nesting, entraRoleIds }`:
+
+| Scope shape | Release condition (activate) |
+|---|---|
+| Detectable Entra role on the group | the role is verified **assigned** to the user (beta `transitiveRoleAssignments?$filter=principalId eq '{me}'`, advanced query), re-checked each poll |
+| `nesting` fan-out group, no enumerable role | count-settle — identical COMBINED count across `STABLE_POLLS` consecutive polls after it moved, or the learned target reached |
+| true leaf, no detectable role | as soon as the user is a member (the grant follows shortly, out of band) |
+
+`nesting` means the group takes part in a group-in-group chain in **either**
+direction — it contains child PIM groups (`transitiveMembers`, DOWN) **or** is a
+member of role-bearing groups (`transitiveMemberOf`, UP). Down-only is wrong: in
+a live tenant the role groups fan out *upward*. It is derived from the Show-Roles
+fan-out's related set with a direct up+down probe as fallback, defaulting to
+`true` on uncertainty so a fan-out is never released early. **Deactivation is
+deliberately asymmetric**: Entra role *removal* propagates over minutes, so once
+membership is dropped the watch releases immediately and never re-verifies role
+removal; nesting groups still use the falling count-settle. The only time bound
+anywhere is an 8-minute safety backstop against a stuck watch — not a normal-path
+delay. Banned reintroductions (all previously shipped as regressions): settling
+the instant the count moves, any fixed settle duration, completing on the direct
+group alone, watching eligible groups only. Guarded by
+`tools/pim-activator/tests/test-watch-poll-driven.js`. Contract: REQUIREMENTS
+§32.4 / §32.5 / §32.5a.
+
+**"Show Roles" preview — all planes, both directions, eligible + active.** Beta
+`transitiveRoleAssignments` on a *group* principal does not traverse the groups
+that group is a member of, so the preview fans out **DOWN** (`transitiveMembers`)
+**and UP** (`transitiveMemberOf`) and merges/dedups the results with the group's
+own roles. Coverage: Entra directory roles — active via `roleAssignments` +
+`transitiveRoleAssignments` + `roleAssignmentScheduleInstances`, eligible via
+`roleEligibilityScheduleInstances`; Azure RBAC via Resource Graph
+(`microsoft.authorization/roleassignments` +
+`…/roleeligibilityscheduleinstances`) for the group and its nested groups;
+workload roles (Defender XDR, Power BI, AzDevOps) arrive through the nested
+fan-out. The fan-out runs **always**, not only when the group's own query is
+empty. `deriveRoleFromGroupName` is a last-resort fallback only — beta
+`transitiveRoleAssignments` needs no extra read permission, so a missing role is
+never an excuse to name-guess. The one legitimate name-guess case is Azure: Azure
+RBAC read is gated on the signed-in account's own Azure permissions (unlike Entra
+roles), so a tenant-root or otherwise unreadable scope genuinely returns nothing.
+Per-endpoint, per-direction diagnostics are emitted on every expand so an empty
+result is explainable from one snapshot. Contract: REQUIREMENTS §32.6a / §32.6b.
 
 **Extension identity is a public contract.** The extension id
 `eheocihmlppcophaeakmdenhgcookkab` is deterministic from the public `key` in

@@ -89,8 +89,8 @@ param(
     [switch]$LocalPull,
     [string]$PullScript,
     # passthrough to the update / roll orchestrator
-    [string]$ResourceGroup = 'rg-pim-manager-web',
-    [string]$AcrName       = 'acrsecurityinsight',
+    [string]$ResourceGroup = "$($env:PIM_ResourceGroup)",
+    [string]$AcrName       = "$($env:PIM_AcrName)",
     [string]$ImageRepo     = 'pim-manager'
 )
 $ErrorActionPreference = 'Stop'

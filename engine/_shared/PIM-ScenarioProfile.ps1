@@ -51,8 +51,21 @@ $script:PimScenarioSettingKey = 'Scenario'
 $script:PimDistributionEditions = @('internal-automateit', 'community')
 
 # ---------------------------------------------------------------------------
-# Generic, SOLUTION-AGNOSTIC dimension contract. Other solutions (SI/CEH) lift
-# THIS verbatim and supply their own catalog. No PIM specifics here.
+# VENDORED from Get-AitGenericScenarioDimensions (sync/_AitScenarios.ps1).
+# PLAT-07 / RING-1 phase 1 item 3: the dimension contract is a PLATFORM primitive
+# and PIM CONSUMES it -- it is no longer PIM's own definition. PIM owns only its
+# CATALOG (which combinations S1-S6 it supports) and its BINDINGS.
+#
+# 🔒 WHY A COPY AND NOT A DOT-SOURCE. Identical to the ring core: sync/ is read
+# out of the zipball IN MEMORY by the sync engine and never lands on a customer's
+# disk, so this file cannot dot-source it at PIM runtime. Parity against the real
+# platform file is asserted by tests/Test-PimDeployContract.ps1 whenever that file
+# is reachable (the monorepo dev tree), and PIM's own suite carries self-standing
+# invariants for the case where it is not -- parity that can only be checked where
+# the platform file exists is not parity everywhere.
+#
+# ⚠️ DO NOT ADD A PIM-SPECIFIC DIMENSION HERE. A dimension describes the shape of
+# ANY solution's install; anything only PIM has belongs in `bindings`.
 # ---------------------------------------------------------------------------
 function Get-PimGenericScenarioDimensions {
     # The reusable descriptor contract: each dimension + its allowed values + what
@@ -470,6 +483,12 @@ function Set-PimScenarioContext {
     # ConfigVariant drives config-msp/ vs config-local/ (existing engine knob).
     $global:PIM_ConfigVariant = $ctx.configVariant
     # Ring gating flag for the managed downlink pull (existing MSP pull reads PIM_Ring).
+    # AutomateIT RING-1: this DECLARES that the scenario consumes a ring plan (plane 2 --
+    # an MSP master gating which template version its managed tenants may pull). It is not
+    # the gate: the decision comes from the vendored platform core in PIM-RingGate.ps1,
+    # which PIM consumes rather than redefines. Do NOT confuse this with the ADMIN ring
+    # (admin.Ring <= tenant.Ring in PIM-Downlink.ps1) -- that is assignment scoping, a
+    # different axis that RING-1 does not replace.
     $global:PIM_ScenarioRingGated = $ctx.ringGated
     # The active scenario id (so subsequent Get-PimActiveScenario is stable in-process).
     $global:PIM_ActiveScenario = "$($ctx.id)"

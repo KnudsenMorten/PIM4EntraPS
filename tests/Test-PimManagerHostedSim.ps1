@@ -87,7 +87,10 @@ T 'SQL database surfaces as a selectable instance named sql:<db>' `
 #     $ConnectPlatform. (Encodes: hosted GET /api/active-assignments works without
 #     launching with -ConnectPlatform.)
 $aaBlock = ''
-$mAA = [regex]::Match($src, "/api/active-assignments\*'[\s\S]{0,800}")
+# Window widened (was 800) so it still reaches Get-PimActiveAssignmentsCached after the
+# Batch-1 role-gate + per-caller scope-filter additions at the top of this handler. The
+# contract is unchanged: NO -ConnectPlatform gate, and the lazy cache call is present.
+$mAA = [regex]::Match($src, "/api/active-assignments\*'[\s\S]{0,2400}")
 if ($mAA.Success) { $aaBlock = $mAA.Value }
 T 'active-assignments handler exists' ([bool]$aaBlock)
 T 'active-assignments handler does NOT require -ConnectPlatform' `
@@ -194,6 +197,7 @@ try {
 #     The §11 Departments grid + the scenario seed write { Department; Owners; ... }
 #     with NO GroupTag, so the old GroupTag-only key was '' -> Set-PimSqlEntityRows
 #     skipped the row -> grid edits silently vanished. Fix keys on Department.
+. (Join-Path $root 'engine\_shared\PIM-Rest.ps1')
 . (Join-Path $root 'engine\_shared\PIM-SqlStore.ps1')
 $deptRow = [pscustomobject]@{ Department='IT'; Owners='owner@contoso.com'; Mode='Serial' }
 T 'Departments row (no GroupTag) yields a non-empty SQL key' `
@@ -224,6 +228,7 @@ T 'other PIM-Definitions-* entities still key on GroupTag' `
 Write-Host "`n-- live boot (SQL-backed loopback + throwaway SQL) --" -ForegroundColor Cyan
 
 . (Join-Path $root 'engine\_shared\PIM-ChangeQueue.ps1')
+. (Join-Path $root 'engine\_shared\PIM-Rest.ps1')
 . (Join-Path $root 'engine\_shared\PIM-SqlStore.ps1')
 
 $masterCs = Get-PimSqlConnectionString -Server $Server -Database 'master'

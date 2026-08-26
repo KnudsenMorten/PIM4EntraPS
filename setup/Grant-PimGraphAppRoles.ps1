@@ -30,11 +30,22 @@ param(
     [Parameter(Mandatory)][string]$AdminClientId,
     [Parameter(Mandatory)][string]$AdminCertThumbprint,
     [Parameter(Mandatory)][string]$EngineAppId,
+    # 🔒 'Mail.Send' IS DELIBERATELY ABSENT (operator, 2026-08-12). Granting it here re-broke the
+    # mail scoping every time this script ran. Measured in EFIF, both directions, with a real
+    # out-of-scope decoy mailbox:
+    #     WITH tenant-wide Mail.Send     in-scope send ACCEPTED, out-of-scope send ACCEPTED  <- unscoped
+    #     WITHOUT it (Exchange RBAC only) in-scope send ACCEPTED, out-of-scope send DENIED    <- scoped
+    # Exchange RBAC for Applications does not RESTRICT a tenant-wide Graph consent -- it GRANTS
+    # scoped access in its own right, and a tenant-wide consent alongside it keeps winning. So the
+    # engine's send right comes from the scoped RBAC assignment that Initialize-PimMailSender.ps1
+    # creates (New-ServicePrincipal + New-ManagementScope + New-ManagementRoleAssignment -App), and
+    # adding Mail.Send back here would silently widen it to send-as-ANY-mailbox tenant-wide.
+    # See docs/REQUIREMENTS.md IMP-06e.
     [string[]]$Permissions = @(
         'Directory.Read.All','User.ReadWrite.All','Group.ReadWrite.All',
         'RoleManagement.ReadWrite.Directory','PrivilegedAccess.ReadWrite.AzureADGroup',
         'RoleManagementPolicy.ReadWrite.Directory','RoleManagementPolicy.ReadWrite.AzureADGroup',
-        'AdministrativeUnit.ReadWrite.All','Mail.Send','AccessReview.Read.All'
+        'AdministrativeUnit.ReadWrite.All','AccessReview.Read.All'
     )
 )
 $ErrorActionPreference = 'Stop'

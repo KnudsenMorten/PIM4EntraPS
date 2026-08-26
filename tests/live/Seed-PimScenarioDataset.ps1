@@ -152,8 +152,59 @@ if (-not $StatePath)   { $StatePath = Join-Path $here 'pimscenario-state.json' }
 $global:PIM_UseGraphSdk = $false
 $global:PIM_SqlServer   = $SqlServer
 $global:PIM_SqlDatabase = $SqlDatabase
+
+# BUG-34 (same class, one layer out): the seeder was given a MASTER identity for Graph but set
+# no identity for the STORE. With none configured, New-PimSqlConnection falls back to the
+# ambient managed identity -- and on mgmt1 that MI belongs to myfamilynetwork, NOT to the
+# tenant hosting an estate store. MI acquisition SUCCEEDS, so a valid token for the WRONG
+# directory is presented and Azure SQL answers "Login failed for user '<token-identified
+# principal>'. The server is not currently configured to accept this token" -- which reads as
+# a permissions problem, not as "you authenticated to the wrong tenant".
+# The store in the central-MSP model lives in the MASTER's tenant, so the master identity is
+# the right one to reach it. Harmless for a local/Integrated store: that path never acquires
+# a token at all.
+if ($MasterClientId)       { $global:PIM_SqlClientId       = $MasterClientId }
+if ($MasterCertThumbprint) { $global:PIM_SqlCertThumbprint = $MasterCertThumbprint }
+if ($MasterTenantId)       { $global:PIM_TenantId          = $MasterTenantId }
+# 🔴 BUG-34 ONE LAYER FURTHER OUT, and it made -StorageAccount dead on arrival. The three lines
+# above give the STORE an identity and set the tenant -- but they never set the identity the REST
+# layer reads. `Get-PimRestToken` authenticates from $global:PIM_ClientId + $global:PIM_CertThumbprint
+# and, with neither set, falls back to `az account get-access-token`, i.e. whatever ambient context
+# the caller happened to leave behind. On mgmt1 that is routinely the BOOTSTRAP SPN, which is Key
+# Vault data-plane only -- so the signed baseline bundle's Put Blob answered
+# `401 Server failed to authenticate the request` no matter which roles were granted.
+# 🪤 IT HAD NEVER FAILED BECAUSE IT HAD NEVER RUN. -StorageAccount is optional and the shipped state
+# file records `baseline: skipped (no -StorageAccount)`, so the publish path -- the whole point of
+# the parameter, since the bundle is what S5/S6 pull -- was exercised for the first time on
+# 2026-08-25. An optional parameter nobody passes is untested code with a name that implies
+# otherwise. Measured: the identical Send-PimRestBlob call succeeds when these globals are set and
+# 401s when they are not, with the same account, container, role assignment and SPN.
+if ($MasterClientId)       { $global:PIM_ClientId          = $MasterClientId }
+if ($MasterCertThumbprint) { $global:PIM_CertThumbprint    = $MasterCertThumbprint }
+# BUG-33: PIM-Rest MUST load before PIM-SqlStore. New-PimSqlConnection acquires the Azure SQL
+# AAD token only inside `if (Get-Command Get-PimRestToken ...)`, so without PIM-Rest that whole
+# block is skipped, the connection presents NO credential, and Azure SQL answers the famously
+# unhelpful "Login failed for user ''". This was invisible for as long as the seeder only ever
+# targeted .\SQLEXPRESS: an Integrated connection string skips token acquisition anyway.
+# It is not optional on the store we actually support.
+. (Join-Path $shared 'PIM-Rest.ps1')
 . (Join-Path $shared 'PIM-ChangeQueue.ps1')
 . (Join-Path $shared 'PIM-SqlStore.ps1')
+# TEST-15: the naming contract (§33.7.e-2). New-PimScenarioName is what makes the two
+# engine-filter traps unrepresentable by hand -- an admin UPN that does not start with a
+# configured admin prefix is INVISIBLE to the Admins scope, and a group name that leads
+# with the marker is invisible to the PimGroup filter. Keep the helper's marker in step
+# with -Marker so a custom marker still produces correctly-shaped names (and so the
+# cleanup sweep, which uses the same predicate, still recognises everything seeded here).
+. (Join-Path $here '_PimScenarioMarker.ps1')
+. (Join-Path $here '_PimScenarioTenants.ps1')
+
+# RETIRED-ESTATE GUARD -- the seeder takes tenant ids as parameters, so it bypasses the
+# -TenantJson parser where the guard also lives. Refuse before it writes. s10.0.
+Assert-PimScenarioTenantAllowed -TenantId $MasterTenantId       -What '-MasterTenantId'
+Assert-PimScenarioTenantAllowed -TenantId $SlaveCentralTenantId -What '-SlaveCentralTenantId'
+Assert-PimScenarioTenantAllowed -TenantId $SlaveLocalTenantId   -What '-SlaveLocalTenantId'
+Set-PimScenarioMarker -Marker ("$Marker".Trim().Trim('-'))
 
 # ---------------------------------------------------------------------------
 # Synthetic estate definition (shared by seed + cleanup + state export).
@@ -167,10 +218,17 @@ $m = $Marker
 #   ring 1 = pilot  (reaches ring >= 1 slaves: the CENTRAL slave + the LOCAL slave)
 #   ring 2 = test   (reaches ONLY ring 2 slaves: the LOCAL slave)
 # UserName carries the naming markers (L0/T0, L1/T1) the routing reads.
+# TEST-15: the UserName must START with a configured admin prefix. The Admins scope
+# builds its live set server-side with startswith(userPrincipalName,'admin-'|'x-admin'|
+# 'g-admin') (PIM-EngineProviders.ps1), so the old '<marker>Admin-MSPCloud-...' shape was
+# invisible to it -- the scope ran desired=0/live=6 and created nothing, and the
+# PIM-Assignments-Admins row that referenced the account then failed with "unresolved
+# principal" on EVERY pass, forever. New-PimScenarioName -Kind admin makes the correct
+# shape (Admin-PIMSCEN-<...>-ID) the only one you can write by accident.
 $mspAdmins = @(
-    @{ UserName = "${m}Admin-MSPGlobal-L0-T0-ID"; FirstName = 'MSP'; LastName = 'Global Operator'; Initials = 'MG'; DisplayName = "${m}Admin MSP Global Operator (L0/T0)"; Ring = 0; Template = 'msp-operator'; Purpose = 'HighPriv'; UsageLocation = 'DK' }
-    @{ UserName = "${m}Admin-MSPCloud-L1-T1-ID";  FirstName = 'MSP'; LastName = 'Cloud Engineer'; Initials = 'MC'; DisplayName = "${m}Admin MSP Cloud Engineer (L1/T1)"; Ring = 1; Template = 'consultant';   Purpose = 'Day2Day'; UsageLocation = 'DK' }
-    @{ UserName = "${m}Admin-MSPHelp-L2-T2-ID";   FirstName = 'MSP'; LastName = 'Helpdesk Tech';  Initials = 'MH'; DisplayName = "${m}Admin MSP Helpdesk Tech (L2/T2)";   Ring = 2; Template = 'consultant';   Purpose = 'Day2Day'; UsageLocation = 'DK' }
+    @{ UserName = (New-PimScenarioName -Kind admin -Suffix 'MSPGlobal-L0-T0'); FirstName = 'MSP'; LastName = 'Global Operator'; Initials = 'MG'; DisplayName = "${m}Admin MSP Global Operator (L0/T0)"; Ring = 0; Template = 'msp-operator'; Purpose = 'HighPriv'; UsageLocation = 'DK' }
+    @{ UserName = (New-PimScenarioName -Kind admin -Suffix 'MSPCloud-L1-T1');  FirstName = 'MSP'; LastName = 'Cloud Engineer'; Initials = 'MC'; DisplayName = "${m}Admin MSP Cloud Engineer (L1/T1)"; Ring = 1; Template = 'consultant';   Purpose = 'Day2Day'; UsageLocation = 'DK' }
+    @{ UserName = (New-PimScenarioName -Kind admin -Suffix 'MSPHelp-L2-T2');   FirstName = 'MSP'; LastName = 'Helpdesk Tech';  Initials = 'MH'; DisplayName = "${m}Admin MSP Helpdesk Tech (L2/T2)";   Ring = 2; Template = 'consultant';   Purpose = 'Day2Day'; UsageLocation = 'DK' }
 )
 
 # Managed/slave tenant registry rows (platform.Tenants + platform.TenantApps).
@@ -203,15 +261,24 @@ $desiredDepartments = @(
     @{ Department = "${m}Security"; OwnersToken = 'MASTER_OWNER'; Mode = 'Serial' }
 )
 # Role groups (Tier-1 job functions, L1).
+# TEST-15 (second half): a group DISPLAY NAME may not LEAD with the marker. The locked
+# PimGroup filter is { $group.DisplayName -like 'PIM-*' } (PIM4EntraPS.Filters.locked.ps1),
+# so 'PIMSCEN-PIM-ROLE-...' fell OUTSIDE it: the live matrix read 85 groups while the
+# filtered context held 79 -- the missing 6 were exactly these. Everything that resolves a
+# group through the filtered context (the GroupTag -> id map AdminMembers uses) therefore
+# could not see them, and AdminMembers failed "unresolved principal/group" on every pass
+# even after the admin ACCOUNT was created correctly. New-PimScenarioName -Kind group
+# produces the visible shape PIM-PIMSCEN-<...>. GroupTags are NOT display names and keep
+# their marker prefix -- no filter reads them.
 $desiredRoles = @(
-    @{ GroupName = "${m}PIM-ROLE-CloudEngineer-L1-T1"; GroupTag = "${m}ROLE-CloudEngineer"; GroupDescription = 'Cloud engineer role group (scenario seed)'; IsRoleAssignable = 'TRUE'; Department = "${m}IT"; SponsorToken = 'MASTER_OWNER'; PolicyTemplate = '' }
+    @{ GroupName = (New-PimScenarioName -Kind group -Suffix 'ROLE-CloudEngineer-L1-T1'); GroupTag = "${m}ROLE-CloudEngineer"; GroupDescription = 'Cloud engineer role group (scenario seed)'; IsRoleAssignable = 'TRUE'; Department = "${m}IT"; SponsorToken = 'MASTER_OWNER'; PolicyTemplate = '' }
 )
 # Permission (service) groups across T0/T1 x L0-L3 with GA/PRA approval on high-priv.
 $desiredServices = @(
-    @{ GroupName = "${m}PIM-Entra-ID-GlobalAdministrator-L0-T0-CP-ID";         GroupTag = "${m}Entra-ID-GlobalAdministrator-L0";        GroupDescription = 'Global Administrator (scenario seed)';          IsRoleAssignable = 'TRUE'; Workload = 'Entra-ID'; Level = 'L0'; Plane = 'CP'; CPPlatform = 'ID'; Department = "${m}Security"; PolicyTemplate = 'approval-required' }
-    @{ GroupName = "${m}PIM-Entra-ID-PrivilegedRoleAdministrator-L1-T0-CP-ID"; GroupTag = "${m}Entra-ID-PrivilegedRoleAdministrator-L1"; GroupDescription = 'Privileged Role Administrator (scenario seed)'; IsRoleAssignable = 'TRUE'; Workload = 'Entra-ID'; Level = 'L1'; Plane = 'CP'; CPPlatform = 'ID'; Department = "${m}Security"; PolicyTemplate = 'approval-required' }
-    @{ GroupName = "${m}PIM-Entra-ID-UserAdministrator-L1-T1-CP-ID";           GroupTag = "${m}Entra-ID-UserAdministrator-L1";          GroupDescription = 'User Administrator (scenario seed)';            IsRoleAssignable = 'TRUE'; Workload = 'Entra-ID'; Level = 'L1'; Plane = 'CP'; CPPlatform = 'ID'; Department = "${m}IT";       PolicyTemplate = '' }
-    @{ GroupName = "${m}PIM-Entra-Helpdesk-L3-T1-CP-ID";                       GroupTag = "${m}Entra-Helpdesk-L3";                      GroupDescription = 'Helpdesk Administrator (scenario seed)';        IsRoleAssignable = 'TRUE'; Workload = 'Entra-ID'; Level = 'L3'; Plane = 'CP'; CPPlatform = 'ID'; AdministrativeUnitTag = 'AU-L2'; Department = "${m}IT"; PolicyTemplate = '' }
+    @{ GroupName = (New-PimScenarioName -Kind group -Suffix 'Entra-ID-GlobalAdministrator-L0-T0-CP-ID');         GroupTag = "${m}Entra-ID-GlobalAdministrator-L0";        GroupDescription = 'Global Administrator (scenario seed)';          IsRoleAssignable = 'TRUE'; Workload = 'Entra-ID'; Level = 'L0'; Plane = 'CP'; CPPlatform = 'ID'; Department = "${m}Security"; PolicyTemplate = 'approval-required' }
+    @{ GroupName = (New-PimScenarioName -Kind group -Suffix 'Entra-ID-PrivilegedRoleAdministrator-L1-T0-CP-ID'); GroupTag = "${m}Entra-ID-PrivilegedRoleAdministrator-L1"; GroupDescription = 'Privileged Role Administrator (scenario seed)'; IsRoleAssignable = 'TRUE'; Workload = 'Entra-ID'; Level = 'L1'; Plane = 'CP'; CPPlatform = 'ID'; Department = "${m}Security"; PolicyTemplate = 'approval-required' }
+    @{ GroupName = (New-PimScenarioName -Kind group -Suffix 'Entra-ID-UserAdministrator-L1-T1-CP-ID');           GroupTag = "${m}Entra-ID-UserAdministrator-L1";          GroupDescription = 'User Administrator (scenario seed)';            IsRoleAssignable = 'TRUE'; Workload = 'Entra-ID'; Level = 'L1'; Plane = 'CP'; CPPlatform = 'ID'; Department = "${m}IT";       PolicyTemplate = '' }
+    @{ GroupName = (New-PimScenarioName -Kind group -Suffix 'Entra-Helpdesk-L3-T1-CP-ID');                       GroupTag = "${m}Entra-Helpdesk-L3";                      GroupDescription = 'Helpdesk Administrator (scenario seed)';        IsRoleAssignable = 'TRUE'; Workload = 'Entra-ID'; Level = 'L3'; Plane = 'CP'; CPPlatform = 'ID'; AdministrativeUnitTag = 'AU-L2'; Department = "${m}IT"; PolicyTemplate = '' }
 )
 $desiredRoleGroupAssignments = @(
     @{ GroupTag = "${m}Entra-ID-GlobalAdministrator-L0";         RoleDefinitionName = 'Global Administrator';          AssignmentType = 'Eligible'; Action = 'Assign'; AutoExtend = 'TRUE'; NumOfDaysWhenExpire = '365'; Permanent = 'FALSE'; Plane = 'CP'; PermissionScope = 'Global' }
@@ -219,16 +286,29 @@ $desiredRoleGroupAssignments = @(
     @{ GroupTag = "${m}Entra-ID-UserAdministrator-L1";           RoleDefinitionName = 'User Administrator';            AssignmentType = 'Eligible'; Action = 'Assign'; AutoExtend = 'TRUE'; NumOfDaysWhenExpire = '365'; Permanent = 'FALSE'; Plane = 'CP'; PermissionScope = 'Global' }
     @{ GroupTag = "${m}Entra-Helpdesk-L3";                       RoleDefinitionName = 'Helpdesk Administrator';        AssignmentType = 'Eligible'; Action = 'Assign'; AutoExtend = 'TRUE'; NumOfDaysWhenExpire = '90';  Permanent = 'FALSE'; Plane = 'CP'; PermissionScope = 'AU' }
 )
+# TEST-15: the ADMIN ACCOUNTS themselves (Account-Definitions-Admins) -- the entity the
+# Admins scope reconciles. Without these the seeder planted an ASSIGNMENT whose principal
+# it never planted: S1-S4 have no master->slave downlink to materialize the pim.CentralAdmins
+# rows, so the account simply never existed and AdminMembers failed every run.
+# No UserPrincipalName on purpose: Admins.ApplyCreate composes it from the target tenant's
+# DEFAULT VERIFIED DOMAIN (the BUG-15 path), which is what makes one seed work in any tenant.
+$desiredAdmins = @(
+    foreach ($a in $mspAdmins) {
+        @{ UserName = $a.UserName; DisplayName = $a.DisplayName; FirstName = $a.FirstName; LastName = $a.LastName
+           Initials = $a.Initials; Purpose = $a.Purpose; UsageLocation = $a.UsageLocation; Template = $a.Template
+           AccountStatus = 'Enabled'; Owner = 'MSP' }
+    }
+)
 # admin -> role-group delegation (the MSP cloud engineer is eligible on the role group)
 $desiredAdminAssignments = @(
-    @{ Username = "${m}Admin-MSPCloud-L1-T1-ID"; GroupTag = "${m}ROLE-CloudEngineer"; AssignmentType = 'Eligible'; Action = 'Assign'; AutoExtend = 'TRUE'; NumOfDaysWhenExpire = '365'; Permanent = 'FALSE' }
+    @{ Username = (New-PimScenarioName -Kind admin -Suffix 'MSPCloud-L1-T1'); GroupTag = "${m}ROLE-CloudEngineer"; AssignmentType = 'Eligible'; Action = 'Assign'; AutoExtend = 'TRUE'; NumOfDaysWhenExpire = '365'; Permanent = 'FALSE' }
 )
 $desiredGroupAssignments = @(
     @{ TargetGroupTag = "${m}Entra-ID-UserAdministrator-L1"; SourceGroupTag = "${m}ROLE-CloudEngineer"; AssignmentType = 'Eligible'; Action = 'Assign'; AutoExtend = 'TRUE'; NumOfDaysWhenExpire = '365'; Permanent = 'FALSE' }
 )
 # one OFFBOARDING row + one DISCOVERY row (synthetic).
 $desiredOffboard = @(
-    @{ Username = "${m}Admin-Offboard-L2-T2-ID"; OffboardDate = (Get-Date).AddDays(-1).ToString('yyyy-MM-dd'); DeleteAfterDays = '30'; AccountStatus = 'Disabled'; Reason = 'scenario-seed offboarding' }
+    @{ Username = (New-PimScenarioName -Kind admin -Suffix 'Offboard-L2-T2'); OffboardDate = (Get-Date).AddDays(-1).ToString('yyyy-MM-dd'); DeleteAfterDays = '30'; AccountStatus = 'Disabled'; Reason = 'scenario-seed offboarding' }
 )
 $desiredDiscovery = @(
     @{ DiscoveryTag = "${m}Discovery-Entra"; Plane = 'Entra'; Scope = 'directory'; Notes = 'scenario-seed discovery row' }
@@ -237,8 +317,8 @@ $desiredDiscovery = @(
 # Entities owned by this seeder in the DESIRED store (a -Clear removes only marked rows here).
 $desiredEntities = @(
     'PIM-Definitions-AU', 'PIM-Definitions-Roles', 'PIM-Definitions-Services',
-    'PIM-Definitions-Departments', 'PIM-Assignments-Admins', 'PIM-Assignments-Groups',
-    'PIM-Assignments-Roles-Groups', 'PIM-Assignments-Azure-Resources',
+    'PIM-Definitions-Departments', 'Account-Definitions-Admins', 'PIM-Assignments-Admins',
+    'PIM-Assignments-Groups', 'PIM-Assignments-Roles-Groups', 'PIM-Assignments-Azure-Resources',
     'PIM-Offboarding', 'PIM-Discovery'
 )
 
@@ -355,21 +435,35 @@ if (-not $slaveRows.Count) { Write-Host "  (no slave tenant params supplied -- r
 # ---- 3) desired estate (local store, marker-fenced) ----------------------
 Write-Host "[3] desired estate in pim.Rows (T0/T1 x L0-L3, GA/PRA approval, offboard + discovery)" -ForegroundColor Cyan
 function Seed-Rows([string]$Entity, [object[]]$Rows, [string]$Base) {
+    # TEST-13/TEST-15: a seeder that quietly plants NOTHING is worse than one that stops.
+    # This used to Write-Warning per unkeyed row and carry on, so "seeded PIM-Offboarding
+    # 0 rows" scrolled past in a 60-line log and every downstream assertion that depended
+    # on those rows passed VACUOUSLY -- green because there was nothing to test, the exact
+    # shape TEST-11 was built to eliminate. Now: asked to plant rows, plant them or THROW.
     $b = if ($Base) { $Base } else { $Entity }
-    $count = 0
+    $count = 0; $skipped = @()
     foreach ($r in $Rows) {
         $obj = [pscustomobject]$r
         $key = Get-PimStoreRowKey -Base $b -Row $obj
-        if (-not $key) { Write-Warning "  no key derived for a $Entity row -- skipped"; continue }
+        if (-not $key) { $skipped += $obj; continue }
         Set-PimSqlRow -ConnectionString $cs -Entity $Entity -Key $key -Data $obj
         $count++
+    }
+    if ($skipped.Count) {
+        throw ("Seed-Rows: {0} of {1} '{2}' row(s) derived NO key from base '{3}' and would have been " +
+               'dropped silently. Give the entity a key basis in Get-PimStoreRowKey (PIM-SqlStore.ps1) ' +
+               'or set the key explicitly. First unkeyed row: {4}') -f `
+               $skipped.Count, @($Rows).Count, $Entity, $b, (($skipped[0] | ConvertTo-Json -Compress -Depth 3))
+    }
+    if (@($Rows).Count -and -not $count) {
+        throw "Seed-Rows: asked to seed '$Entity' but planted 0 rows. Refusing to report a seeded estate that is empty."
     }
     Write-Host ("  seeded {0,-34} {1} rows" -f $Entity, $count) -ForegroundColor Green
 }
 # Azure-RBAC surface (optional): add a group + eligibility at the master sub scope.
 $azGroups = @(); $azAssignments = @()
 if ($MasterSubscriptionId) {
-    $azGroups += @{ GroupName = "${m}PIM-AzRes-Subscription-Reader-L5-T1-MP-RES"; GroupTag = "${m}AzRes-Subscription-Reader-L5"; GroupDescription = 'Azure Reader at subscription (scenario seed)'; IsRoleAssignable = 'FALSE'; Workload = 'Azure'; Level = 'L5'; Plane = 'MP'; CPPlatform = 'RES'; Department = "${m}IT"; PolicyTemplate = '' }
+    $azGroups += @{ GroupName = (New-PimScenarioName -Kind group -Suffix 'AzRes-Subscription-Reader-L5-T1-MP-RES'); GroupTag = "${m}AzRes-Subscription-Reader-L5"; GroupDescription = 'Azure Reader at subscription (scenario seed)'; IsRoleAssignable = 'FALSE'; Workload = 'Azure'; Level = 'L5'; Plane = 'MP'; CPPlatform = 'RES'; Department = "${m}IT"; PolicyTemplate = '' }
     $azAssignments += @{ GroupTag = "${m}AzRes-Subscription-Reader-L5"; AzScope = "/subscriptions/$MasterSubscriptionId"; AzScopePermission = 'Reader'; AssignmentType = 'Eligible'; Action = 'Assign'; Permanent = 'FALSE'; NumOfDaysWhenExpire = '365' }
 }
 
@@ -381,6 +475,7 @@ foreach ($d in $desiredDepartments) {
 Write-Host ("  seeded {0,-34} {1} rows" -f 'PIM-Definitions-Departments', $desiredDepartments.Count) -ForegroundColor Green
 Seed-Rows 'PIM-Definitions-Roles'        $desiredRoles                       'PIM-Definitions-Roles'
 Seed-Rows 'PIM-Definitions-Services'     ($desiredServices + $azGroups)      'PIM-Definitions-Services'
+Seed-Rows 'Account-Definitions-Admins'   $desiredAdmins                      'Account-Definitions-Admins'
 Seed-Rows 'PIM-Assignments-Admins'       $desiredAdminAssignments            'PIM-Assignments-Admins'
 Seed-Rows 'PIM-Assignments-Groups'       $desiredGroupAssignments            'PIM-Assignments-Groups'
 Seed-Rows 'PIM-Assignments-Roles-Groups' $desiredRoleGroupAssignments        'PIM-Assignments-Roles-Groups'

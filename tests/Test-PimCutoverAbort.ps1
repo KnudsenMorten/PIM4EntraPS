@@ -23,6 +23,7 @@ $root = Split-Path -Parent $PSScriptRoot
 $sh   = Join-Path $root 'engine\_shared'
 . (Join-Path $sh 'PIM-SchemaConformance.ps1')
 . (Join-Path $sh 'PIM-ChangeQueue.ps1')
+. (Join-Path $sh 'PIM-Rest.ps1')
 . (Join-Path $sh 'PIM-SqlStore.ps1')
 . (Join-Path $sh 'PIM-Scheduler.ps1')
 . (Join-Path $sh 'PIM-Cutover.ps1')

@@ -267,6 +267,16 @@ Describe 'PIM Activator: delegation-load network resilience (v1.6.31 hang fix)' 
         $LASTEXITCODE | Should -Be 0
         ($out -join "`n") | Should -Match '0 failed'
     }
+    It 'ships the propagation-watch poll-driven LOCK test' {
+        Test-Path -LiteralPath (Join-Path $Activator 'tests\test-watch-poll-driven.js') | Should -BeTrue
+    }
+    It 'the propagation watch stays POLL-DRIVEN (no hardcoded settle timer; combined groups+roles signal)' -Skip:(-not $script:HasNode) {
+        # LOCK (operator 2026-06-25): change-detection must not churn release-to-release.
+        Push-Location $Activator
+        try { $out = & $script:Node.Source 'tests/test-watch-poll-driven.js' 2>&1 } finally { Pop-Location }
+        $LASTEXITCODE | Should -Be 0
+        ($out -join "`n") | Should -Match 'poll-driven'
+    }
 }
 
 Describe 'PIM Activator: Diagnostics environment self-check' {
@@ -327,11 +337,38 @@ Describe 'PIM Activator: per-group auto-activate (no chain)' {
         $script:Popup | Should -Not -Match 'autoState'
         $script:Popup | Should -Not -Match "auto<span"
     }
-    It 'the fun-box waits 10s then shows a RANDOM line every 5s (no immediate repeat)' {
+    It 'the fun-box waits 10s then shows a RANDOM line every 8s (no immediate repeat)' {
         $script:Popup | Should -Match 'FUN_START_DELAY_MS\s*=\s*10000'
-        $script:Popup | Should -Match 'FUN_ROTATE_MS\s*=\s*5000'
+        $script:Popup | Should -Match 'FUN_ROTATE_MS\s*=\s*8000'
         $script:Popup | Should -Match '_funDelay\s*=\s*setTimeout'
         $script:Popup | Should -Match 'while \(n === _funIdx\) n = Math\.floor\(Math\.random'
+    }
+    It 'lazy role preview (Plan A): per-group on expand, not eagerly prefetched at startup' {
+        # The transitive role preview must NOT be eagerly fetched for every
+        # eligible group at boot (the old 10-15s "Loading roles" cost). A
+        # per-group lazy fetch loads it on first expand instead.
+        $script:Popup | Should -Match 'async function loadRolePreviewForGroup'
+        $script:Popup | Should -Match 'Plan A \(lazy previews\)'           # eager prefetch disabled
+        $script:Popup | Should -Match 'Show Roles'                         # click-to-load affordance (renamed from "Show transitive roles")
+        $script:Popup | Should -Match 'loadRolePreviewForGroup\(r\)'       # wired into the expand toggle
+    }
+    It 'lazy role preview never goes blank: Getting roles / no-roles / retry states' {
+        # Operator bug 2026-06-20: clicking the affordance went blank. Must show
+        # "Getting roles..." while fetching, a message (not blank) when empty, and
+        # a retry affordance on error -- never an empty box.
+        $script:Popup | Should -Match 'Getting roles\.\.\.'                # fetching state (renamed from "Loading roles")
+        $script:Popup | Should -Match 'RBAC Assignment in '               # empty preview labelled by plane, never blank
+        $script:Popup | Should -Match "Couldn't load roles"               # error -> retry affordance
+        $script:Popup | Should -Match '_previewError'                     # error state tracked + drives retry
+    }
+    It 'group filter is null-safe, contains-based, multi-term, with a workload dropdown' {
+        # BUGFIX 2026-06-20: the old filter did r.groupId.includes(filter), which
+        # threw on direct (PIM v1) rows with no groupId, breaking the whole list.
+        $script:Popup | Should -Not -Match 'r\.groupId\.includes\(filter\)'  # throwing pattern removed
+        $script:Popup | Should -Match "workload-filter"                      # dropdown element wired
+        $script:Popup | Should -Match 'els\.workloadFilter\.onchange'        # re-renders on change
+        $script:Popup | Should -Match 'const rowPlane ='                     # plane resolver for the workload filter
+        $script:Popup | Should -Match 'terms\.every'                         # multi-term CONTAINS match
     }
     It 'on-open sweep activates direct groups only, never chains, runs once, and is hooked into load' {
         $script:Popup | Should -Match 'function\s+runAutoActivations'
@@ -412,6 +449,19 @@ Describe 'PIM Activator backend: REST write builders' {
         $update.ContainsKey('displayName') | Should -BeFalse
     }
 
+    It 'New-PaAppRegistrationBody MERGES additional + existing redirect URIs (Channel Test -- accept both builds)' {
+        $rel = 'a' * 32; $test = 'b' * 32
+        $existing = @("https://$rel.chromiumapp.org/", "chrome-extension://$rel/")
+        $body = New-PaAppRegistrationBody -DisplayName 'PIM Activator' -ExtensionId $rel -RequiredResourceAccess @() `
+            -AdditionalExtensionIds @($test) -ExistingSpaRedirectUris $existing
+        # both builds' URIs present, nothing dropped, de-duplicated
+        $body.spa.redirectUris | Should -Contain "https://$rel.chromiumapp.org/"
+        $body.spa.redirectUris | Should -Contain "chrome-extension://$rel/"
+        $body.spa.redirectUris | Should -Contain "https://$test.chromiumapp.org/"
+        $body.spa.redirectUris | Should -Contain "chrome-extension://$test/"
+        ($body.spa.redirectUris | Sort-Object -Unique).Count | Should -Be $body.spa.redirectUris.Count
+    }
+
     It 'New-PaConsentScopeString appends OIDC basics + offline_access and de-dups' {
         $s = New-PaConsentScopeString -Scopes @('Group.Read.All','openid','User.Read')
         $parts = $s -split ' '
@@ -465,5 +515,47 @@ Describe 'PIM Activator backend: module-free by construction' {
     It 'introduces no device-code flow (NODEVCODE invariant holds for the new helper)' {
         $txt = Get-Content $script:BackendHelper -Raw
         $txt | Should -Not -Match '(?i)device[\s_-]*code'
+    }
+}
+
+Describe 'PIM Activator: TEST vs RELEASED update channels' {
+    BeforeAll {
+        $script:UpdateScript = Get-Content (Join-Path $script:Activator 'Update-PimActivator-Extension.ps1') -Raw
+    }
+    It 'exposes a -Channel Released|Test parameter (default Released)' {
+        $script:UpdateScript | Should -Match "\[ValidateSet\('Released','Test'\)\]"
+        $script:UpdateScript | Should -Match "\`$Channel\s*=\s*'Released'"
+    }
+    It 'test channel uses a SEPARATE key + artifacts, never the released ones' {
+        $script:UpdateScript | Should -Match 'signing-key-test\.pem'      # separate test key
+        $script:UpdateScript | Should -Match 'pim-activator-test\.crx'    # separate crx
+        $script:UpdateScript | Should -Match 'updates-test\.xml'          # separate update manifest
+        $script:UpdateScript | Should -Match "PIM Activator \(TEST\)"     # distinct name
+        $script:UpdateScript | Should -Match 'default_title'             # toolbar-icon hover tooltip shows (TEST) too
+    }
+    It 'released path stays keyed to the master id + released artifacts' {
+        $script:UpdateScript | Should -Match 'eheocihmlppcophaeakmdenhgcookkab'
+        $script:UpdateScript | Should -Match "ChannelCrxName = 'pim-activator\.crx'"
+        $script:UpdateScript | Should -Match "ChannelXmlName = 'updates\.xml'"
+    }
+    It 'test never mutates the committed manifest.json (packs a temp copy)' {
+        $script:UpdateScript | Should -Match 'committed manifest\.json left untouched'
+        $script:UpdateScript | Should -Match 'pima-test-pack'
+    }
+    It 'Intune deploy supports app-only (SPN cert) passthrough' {
+        $intune = Get-Content (Join-Path $script:Activator 'Deploy-PimActivatorIntune.ps1') -Raw
+        $intune | Should -Match '\[string\]\$AppId'                 # app-only passthrough
+        $intune | Should -Match '\[string\]\$CertificateThumbprint'
+        $intune | Should -Match "ValidateSet\('Released','Test'\)"
+    }
+    It 'no-param flush refreshes BOTH released + test ids' {
+        $script:UpdateScript | Should -Match '\$FlushIds'                          # id set
+        $script:UpdateScript | Should -Match '\$FlushIds \+= \$TEST_EXT_ID'         # default adds test
+        $script:UpdateScript | Should -Match 'foreach \(\$extId in \$FlushIds\)'   # eviction iterates both
+        $script:UpdateScript | Should -Match 'foreach \(\$vt in \$verifyTargets\)' # verify iterates both
+    }
+    It 'test version derivation anchors on updatecheck (not the XML declaration) + floors at released base' {
+        $script:UpdateScript | Should -Match "updatecheck\[\^>\]\*version='"      # not version='1.0' in <?xml?>
+        $script:UpdateScript | Should -Match '\[version\]\$newVer -lt \[version\]\$baseVer'  # no-downgrade floor
     }
 }

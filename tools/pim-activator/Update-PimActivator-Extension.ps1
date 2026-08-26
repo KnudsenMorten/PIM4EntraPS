@@ -114,6 +114,18 @@
 param(
     [switch]$Repack,
     [switch]$PackOnly,
+    # Update channel. 'Released' (default) = the fleet build: master-signed id
+    # eheocihmlppcophaeakmdenhgcookkab, published to pim-activator.crx + updates.xml.
+    # 'Test' = an operator-only side-by-side build signed with a SEPARATE test key
+    # (a DISTINCT extension id), name "PIM Activator (TEST)", published to
+    # pim-activator-test.crx + updates-test.xml on the SAME gh-pages site. The test
+    # build never touches the released artifacts or the committed manifest.json,
+    # so the two channels are fully independent: point your internal-env Intune/GPO
+    # ExtensionInstallForcelist at <test-id>;.../updates-test.xml, leave the fleet on
+    # the released id;.../updates.xml, and you can run BOTH at once. The test signing
+    # key is generated on first use at ~\.pim-activator\signing-key-test.pem (mgmt1).
+    [ValidateSet('Released','Test')]
+    [string]$Channel = 'Released',
     [string]$Version,                # set exact manifest version (e.g. 1.0.0) instead of patch bump
     [ValidateSet('Edge','Chrome','Both')]
     [string]$Browser = 'Both',
@@ -147,6 +159,79 @@ function Write-Step { param([string]$Msg) Write-Host "`n>> $Msg" -ForegroundColo
 function Write-Ok   { param([string]$Msg) Write-Host "   $Msg" -ForegroundColor Green }
 function Write-Warn { param([string]$Msg) Write-Host "   $Msg" -ForegroundColor Yellow }
 function Write-Err  { param([string]$Msg) Write-Host "   $Msg" -ForegroundColor Red }
+
+# Derive a Chromium extension id (+ the manifest "key" base64 SPKI) from a signing
+# key, generating the key on first use. Pure .NET (needs .NET Core 3+/PS7 for
+# ImportFromPem + ExportSubjectPublicKeyInfo); throws a clear message on PS 5.1 so
+# the operator re-runs the test-channel build under pwsh 7 (same requirement as the
+# master-key recovery). The PKCS#8 ("BEGIN PRIVATE KEY") PEM it writes is what the
+# Edge/Chrome extension packer expects.
+function Get-TestPackId {
+    param([Parameter(Mandatory)][string]$KeyPath)
+    $haveCore = $false
+    try { $haveCore = [System.Security.Cryptography.RSA].GetMethod('ImportFromPem') -ne $null } catch { $haveCore = $false }
+    if (-not $haveCore) {
+        throw "The TEST channel needs .NET Core (PowerShell 7). Re-run with pwsh: ``pwsh -File Update-PimActivator-Extension.ps1 -Channel Test -PackOnly``."
+    }
+    if (-not (Test-Path $KeyPath)) {
+        Write-Step "Generating TEST signing key (one-time, mgmt1-only): $KeyPath"
+        $dir = Split-Path -Parent $KeyPath
+        if (-not (Test-Path $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+        $rsaNew = [System.Security.Cryptography.RSA]::Create(2048)
+        $der = $rsaNew.ExportPkcs8PrivateKey()
+        $b64 = [Convert]::ToBase64String($der, [System.Base64FormattingOptions]::InsertLineBreaks)
+        $pem = "-----BEGIN PRIVATE KEY-----`n$b64`n-----END PRIVATE KEY-----`n"
+        Set-Content -LiteralPath $KeyPath -Value $pem -Encoding ascii -NoNewline
+        if (-not (Test-Path $KeyPath)) { throw "Failed to create TEST signing key at $KeyPath." }
+        Write-Ok "TEST signing key created. This is the ONLY key that produces the test extension id; keep it on mgmt1."
+    }
+    $rsa = [System.Security.Cryptography.RSA]::Create()
+    $rsa.ImportFromPem([System.IO.File]::ReadAllText($KeyPath))
+    $pub  = $rsa.ExportSubjectPublicKeyInfo()
+    $hash = [System.Security.Cryptography.SHA256]::Create().ComputeHash($pub)
+    $sb = [System.Text.StringBuilder]::new()
+    foreach ($byte in $hash[0..15]) {
+        $hi = ($byte -shr 4) -band 0xF; $lo = $byte -band 0xF
+        [void]$sb.Append([char](97 + $hi)); [void]$sb.Append([char](97 + $lo))
+    }
+    return [pscustomobject]@{ Id = $sb.ToString(); KeyB64 = [Convert]::ToBase64String($pub) }
+}
+
+# ---- Channel resolution (Released = the fleet; Test = operator side-by-side) ----
+# Released keeps the exact constants above so its path is byte-identical. Test
+# overrides the id / update URL / artifact names / key and packs a temp copy.
+$PAGES_BASE = 'https://knudsenmorten.github.io/PIM4EntraPS'
+$TEST_KEY_B64 = $null
+if ($Channel -eq 'Test') {
+    $ChannelKeyPath = "$env:USERPROFILE\.pim-activator\signing-key-test.pem"
+    if ($Repack -or $PackOnly) {
+        $test = Get-TestPackId -KeyPath $ChannelKeyPath
+        $EXT_ID      = $test.Id
+        $TEST_KEY_B64 = $test.KeyB64
+    }
+    $UPDATE_URL     = "$PAGES_BASE/updates-test.xml"
+    $ChannelCrxName = 'pim-activator-test.crx'
+    $ChannelXmlName = 'updates-test.xml'
+    $ChannelExtName = 'PIM Activator (TEST)'
+    Write-Step ("Channel = TEST  (id {0}; updates-test.xml; name '{1}')" -f $EXT_ID, $ChannelExtName)
+} else {
+    $ChannelKeyPath = "$env:USERPROFILE\.pim-activator\signing-key.pem"
+    $ChannelCrxName = 'pim-activator.crx'
+    $ChannelXmlName = 'updates.xml'
+    $ChannelExtName = 'PIM Activator'
+}
+
+# Extension ids the local-browser FLUSH refreshes. Default (no -Channel / Released)
+# pulls BOTH the released AND the test build, so a no-param run updates both pinned
+# icons in one go; -Channel Test flushes only the test id. (The fast-poll relaunch is
+# browser-wide; evicting both ids' cached binaries forces the re-download for both.)
+$TEST_EXT_ID = 'glldnbmjpdkjemcnficagdhgienfdpoo'
+if ($Channel -eq 'Test') {
+    $FlushIds = @($EXT_ID)
+} else {
+    $FlushIds = @($EXT_ID)
+    if ($TEST_EXT_ID -and ($TEST_EXT_ID -ne $EXT_ID)) { $FlushIds += $TEST_EXT_ID }
+}
 
 # ============================================================================
 # Compliance pre-flight: minimum machine config required for the
@@ -229,6 +314,25 @@ function Test-PimActivatorCompliance {
     } catch {
         $rows += [pscustomobject]@{ Browser='*'; Check='gh-pages updates.xml'; State='FAIL'; Detail="Unreachable: $($_.Exception.Message)" }
         $anyMissing = $true
+    }
+    # 3b) ALWAYS report the latest version on the CDN for BOTH channels (released +
+    #     test), regardless of which channel this run targets -- so you can confirm a
+    #     TEST build actually landed on the CDN without running -Channel Test.
+    $cdnTargets = @(
+        [pscustomobject]@{ Label='CDN released (updates.xml)';  Url="$PAGES_BASE/updates.xml" }
+        [pscustomobject]@{ Label='CDN test (updates-test.xml)'; Url="$PAGES_BASE/updates-test.xml" }
+    )
+    foreach ($t in $cdnTargets) {
+        try {
+            $cr = Invoke-WebRequest -Uri $t.Url -UseBasicParsing -TimeoutSec 10 -Headers @{ 'Cache-Control' = 'no-cache' } -ErrorAction Stop
+            if ($cr.Content -match "<updatecheck\b[^>]*\bversion\s*=\s*['""]([^'""]+)['""]") {
+                $rows += [pscustomobject]@{ Browser='*'; Check=$t.Label; State='INFO'; Detail="latest on CDN: v$($Matches[1])" }
+            } else {
+                $rows += [pscustomobject]@{ Browser='*'; Check=$t.Label; State='WARN'; Detail='reachable, version not parseable' }
+            }
+        } catch {
+            $rows += [pscustomobject]@{ Browser='*'; Check=$t.Label; State='WARN'; Detail="unreachable: $($_.Exception.Message)" }
+        }
     }
     # Render
     $rows | ForEach-Object {
@@ -491,25 +595,68 @@ if ($Repack -or $PackOnly) {
     }
     Write-Ok "Package validator passed -- safe to sign"
 
-    # ---- Bump manifest.json version ------------------------------------------
-    # Default: increment the last (patch) component. Override with -Version
-    # to pin an exact version (used for milestone releases like 1.0.0 where
-    # the auto-bump would land on the wrong number).
+    # ---- Version + pack source (channel-aware) -------------------------------
+    # Default: increment the last (patch) component. Override with -Version.
     $manifestPath = Join-Path $SCRIPT_DIR 'manifest.json'
-    $manifest = Get-Content $manifestPath -Raw | ConvertFrom-Json
-    $oldVer = $manifest.version
-    if ($Version) {
-        Write-Step "Pinning manifest.json version to $Version (overriding auto-bump)"
-        $newVer = $Version
+    if ($Channel -eq 'Test') {
+        # Test NEVER mutates the committed manifest.json or released artifacts. Pack
+        # a TEMP copy with a test name/key and an INDEPENDENT version line (bumped off
+        # whatever updates-test.xml currently advertises; seeded from the released
+        # base on the first test publish). Different id => version may equal released.
+        $baseVer = (Get-Content $manifestPath -Raw | ConvertFrom-Json).version
+        $testVer = $null
+        try {
+            $r = Invoke-WebRequest -Uri $UPDATE_URL -UseBasicParsing -TimeoutSec 10
+            # Anchor on <updatecheck ... version='...'> -- NOT the XML declaration's
+            # version='1.0' (that mis-match once downgraded the test channel to 1.1).
+            if ($r.Content -match "updatecheck[^>]*version='([0-9.]+)'") { $testVer = $Matches[1] }
+        } catch { }
+        if ($Version)     { $newVer = $Version }
+        elseif ($testVer)  { $p = $testVer.Split('.'); $p[-1] = ([int]$p[-1] + 1).ToString(); $newVer = $p -join '.' }
+        else              { $newVer = $baseVer }
+        # Never regress below the released base: Chromium refuses to downgrade, so a
+        # stale/mis-parsed test version would brick the test update path. Floor it at
+        # released-base+1 (this also self-heals the accidental 1.1 publish).
+        try { if ([version]$newVer -lt [version]$baseVer) { $q = $baseVer.Split('.'); $q[-1] = ([int]$q[-1] + 1).ToString(); $newVer = $q -join '.' } } catch { }
+        Write-Step "Test channel version: $newVer (committed manifest.json left untouched)"
+
+        $packDir = Join-Path $env:TEMP 'pima-test-pack'
+        $testCrxSrc = Join-Path $env:TEMP 'pima-test-pack.crx'
+        if (Test-Path $packDir)   { Remove-Item $packDir -Recurse -Force }
+        if (Test-Path $testCrxSrc) { Remove-Item $testCrxSrc -Force }
+        New-Item -ItemType Directory -Path $packDir -Force | Out-Null
+        Copy-Item -Path (Join-Path $SCRIPT_DIR '*') -Destination $packDir -Recurse -Force
+        Get-ChildItem $packDir -Filter *.crx -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
+        $tm = Get-Content (Join-Path $packDir 'manifest.json') -Raw | ConvertFrom-Json
+        $tm.version = $newVer
+        $tm.name    = $ChannelExtName
+        # Toolbar-icon hover tooltip = action.default_title (falls back to name only
+        # if unset). Patch it too so the two PINNED icons are distinguishable on
+        # mouseover, not just in the extensions menu.
+        if ($tm.PSObject.Properties.Name -contains 'action' -and $tm.action) {
+            if ($tm.action.PSObject.Properties.Name -contains 'default_title') { $tm.action.default_title = $ChannelExtName }
+            else { $tm.action | Add-Member -NotePropertyName default_title -NotePropertyValue $ChannelExtName -Force }
+        }
+        if ($tm.PSObject.Properties.Name -contains 'key') { $tm.key = $TEST_KEY_B64 }
+        else { $tm | Add-Member -NotePropertyName key -NotePropertyValue $TEST_KEY_B64 -Force }
+        ($tm | ConvertTo-Json -Depth 20) | Set-Content (Join-Path $packDir 'manifest.json') -Encoding UTF8
     } else {
-        Write-Step "Bumping manifest.json patch version"
-        $parts = $oldVer.Split('.')
-        $parts[-1] = ([int]$parts[-1] + 1).ToString()
-        $newVer = $parts -join '.'
+        $manifest = Get-Content $manifestPath -Raw | ConvertFrom-Json
+        $oldVer = $manifest.version
+        if ($Version) {
+            Write-Step "Pinning manifest.json version to $Version (overriding auto-bump)"
+            $newVer = $Version
+        } else {
+            Write-Step "Bumping manifest.json patch version"
+            $parts = $oldVer.Split('.')
+            $parts[-1] = ([int]$parts[-1] + 1).ToString()
+            $newVer = $parts -join '.'
+        }
+        $manifest.version = $newVer
+        ($manifest | ConvertTo-Json -Depth 20) | Set-Content $manifestPath -Encoding UTF8
+        Write-Ok "Bumped: $oldVer -> $newVer"
+        $packDir = $SCRIPT_DIR
     }
-    $manifest.version = $newVer
-    ($manifest | ConvertTo-Json -Depth 20) | Set-Content $manifestPath -Encoding UTF8
-    Write-Ok "Bumped: $oldVer -> $newVer"
 
     # ---- Repack CRX ---------------------------------------------------------
     Write-Step "Repacking CRX"
@@ -519,7 +666,7 @@ if ($Repack -or $PackOnly) {
     }
     if (-not (Test-Path $edgeExe)) { throw "msedge.exe not found" }
 
-    $keyPath = "$env:USERPROFILE\.pim-activator\signing-key.pem"
+    $keyPath = $ChannelKeyPath
     if (-not (Test-Path $keyPath)) { throw "signing key missing: $keyPath" }
 
     # PRE-PACK GUARD (added 2026-06-10 after the wrong-key CRX bricked
@@ -559,10 +706,10 @@ if ($Repack -or $PackOnly) {
         Write-Host ("   Derived extension id    : {0}" -f $derivedFromLocalKey) -ForegroundColor Cyan
         Write-Host ("   Policy-registered id    : {0}" -f $EXT_ID) -ForegroundColor Cyan
         if ($derivedFromLocalKey -ne $EXT_ID) {
-            Write-Err "WRONG SIGNING KEY -- this key produces id '$derivedFromLocalKey', NOT '$EXT_ID'."
-            Write-Err "Packing with this key and pushing to gh-pages would brick the entire fleet's update path"
+            Write-Err "WRONG SIGNING KEY -- this key produces id '$derivedFromLocalKey', NOT the $Channel id '$EXT_ID'."
+            Write-Err "Packing with this key and pushing to gh-pages would brick this channel's update path"
             Write-Err "(every installed instance is registered against '$EXT_ID' and would silently reject a CRX with any other id)."
-            throw "Pack aborted. The signing key at '$keyPath' is not the master key. Recover the correct '$EXT_ID' key from another machine / backup / Key Vault before re-running -Repack or -PackOnly."
+            throw "Pack aborted. The signing key at '$keyPath' is not the $Channel signing key. Recover the correct '$EXT_ID' key before re-running -Repack or -PackOnly."
         }
         Write-Ok "Local signing key matches the policy-registered extension id. Safe to pack."
     }
@@ -575,10 +722,10 @@ if ($Repack -or $PackOnly) {
     Get-Process msedge -ErrorAction SilentlyContinue | Stop-Process -Force
     Start-Sleep -Seconds 2
 
-    $crxOutput = "$SCRIPT_DIR.crx"
+    $crxOutput = "$packDir.crx"
     if (Test-Path $crxOutput) { Remove-Item $crxOutput -Force }
 
-    $packArgs = @("--pack-extension=$SCRIPT_DIR", "--pack-extension-key=$keyPath")
+    $packArgs = @("--pack-extension=$packDir", "--pack-extension-key=$keyPath")
     Start-Process -FilePath $edgeExe -ArgumentList $packArgs -NoNewWindow -Wait | Out-Null
     Start-Sleep -Seconds 2
 
@@ -736,28 +883,38 @@ if ($Repack -or $PackOnly) {
         } finally { Pop-Location }
     }
 
-    Copy-Item "$SCRIPT_DIR.crx" (Join-Path $GhPagesDir 'pim-activator.crx') -Force
+    Copy-Item $crxOutput (Join-Path $GhPagesDir $ChannelCrxName) -Force
 
     $updatesXml = @"
 <?xml version='1.0' encoding='UTF-8'?>
 <gupdate xmlns='http://www.google.com/update2/response' protocol='2.0'>
   <app appid='$EXT_ID'>
-    <updatecheck codebase='https://knudsenmorten.github.io/PIM4EntraPS/pim-activator.crx' version='$newVer' />
+    <updatecheck codebase='$PAGES_BASE/$ChannelCrxName' version='$newVer' />
   </app>
 </gupdate>
 "@
-    Set-Content (Join-Path $GhPagesDir 'updates.xml') -Value $updatesXml -Encoding UTF8 -NoNewline
+    Set-Content (Join-Path $GhPagesDir $ChannelXmlName) -Value $updatesXml -Encoding UTF8 -NoNewline
 
     Push-Location $GhPagesDir
     try {
-        $rc = Invoke-GitQuiet @('add','pim-activator.crx','updates.xml')
+        $rc = Invoke-GitQuiet @('add',$ChannelCrxName,$ChannelXmlName)
         if ($rc -ne 0) { throw "git add in gh-pages clone failed (exit $rc)." }
-        $rc = Invoke-GitQuiet @('-c','user.email=mok@mortenknudsen.net','-c','user.name=Morten Knudsen','commit','-m',"PIM Activator extension v$newVer (dev iteration)")
+        $rc = Invoke-GitQuiet @('-c','user.email=mok@mortenknudsen.net','-c','user.name=Morten Knudsen','commit','-m',"PIM Activator ($Channel) v$newVer")
         if ($rc -ne 0) { Write-Warn "git commit reported non-zero exit. Continuing to push (may be no-op if nothing changed)." }
         $rc = Invoke-GitQuiet @('push','origin','gh-pages')
         if ($rc -ne 0) { throw "git push to gh-pages failed (exit $rc). Run 'git push origin gh-pages' inside $GhPagesDir to see the error." }
     } finally { Pop-Location }
-    Write-Ok "v$newVer published to https://knudsenmorten.github.io/PIM4EntraPS/"
+    Write-Ok "v$newVer published to $PAGES_BASE/$ChannelXmlName  (channel: $Channel, id: $EXT_ID)"
+
+    # Test: tidy the temp pack dir + crx so nothing test-flavoured lingers next to
+    # the released source. (Released packs in place; nothing to clean here.)
+    if ($Channel -eq 'Test') {
+        if (Test-Path $packDir)  { Remove-Item $packDir -Recurse -Force -ErrorAction SilentlyContinue }
+        if (Test-Path $crxOutput){ Remove-Item $crxOutput -Force -ErrorAction SilentlyContinue }
+        Write-Step "TEST install: add to your internal-env Intune/GPO ExtensionInstallForcelist (NOT the fleet):"
+        Write-Host ("     {0};{1}/{2}" -f $EXT_ID, $PAGES_BASE, $ChannelXmlName) -ForegroundColor White
+        Write-Host  "   The fleet keeps the released id;updates.xml entry -- the two channels coexist." -ForegroundColor Cyan
+    }
 
     if ($PackOnly) {
         Write-Step "PackOnly mode - skipping local browser flush"
@@ -864,6 +1021,10 @@ Start-Sleep -Seconds 3
 # anything destructive. Restore in seconds if the picker comes back
 # empty after relaunch.
 Write-Step "Backing up Local State (profile registry) -- defense-in-depth"
+# Track the backup path + profile count per browser so the pre-relaunch guard
+# below can detect a regressed Local State and restore it BEFORE Chromium gets
+# the chance to persist a single-Default regeneration.
+$lsBackups = @{}
 foreach ($b in $browsers) {
     $localState   = Join-Path $b.UserDataRoot 'Local State'
     if (Test-Path -LiteralPath $localState) {
@@ -871,7 +1032,11 @@ foreach ($b in $browsers) {
         $backup = "$localState.bak.$stamp"
         try {
             Copy-Item -LiteralPath $localState -Destination $backup -Force -ErrorAction Stop
-            Write-Ok "$($b.Name): Local State backed up to Local State.bak.$stamp ($((Get-Item $localState).Length) bytes)"
+            # Count profiles in the backup so we have a known-good baseline.
+            $profCount = 0
+            try { $profCount = @(((Get-Content -LiteralPath $backup -Raw -ErrorAction Stop) | ConvertFrom-Json).profile.info_cache.PSObject.Properties).Count } catch { $profCount = 0 }
+            $lsBackups[$b.Name] = @{ Path = $backup; Count = $profCount }
+            Write-Ok "$($b.Name): Local State backed up to Local State.bak.$stamp ($((Get-Item $localState).Length) bytes, $profCount profile(s))"
         } catch {
             Write-Err "$($b.Name): could NOT back up Local State: $($_.Exception.Message)"
             throw "Aborting -- refusing to proceed without a Local State backup. Fix the error above and rerun."
@@ -888,13 +1053,13 @@ foreach ($b in $browsers) {
 # array, string, or scalar value) plus swallows one comma so the result
 # stays valid JSON. Returns the count of entries removed.
 function Remove-JsonExtensionEntry {
-    param([Parameter(Mandatory)][string]$Path)
+    param([Parameter(Mandatory)][string]$Path, [string]$ExtId = $EXT_ID)
     if (-not (Test-Path -LiteralPath $Path)) { return 0 }
     $utf8 = New-Object System.Text.UTF8Encoding($false)
     $text = [System.IO.File]::ReadAllText($Path, $utf8)
     $orig = $text
     $removed = 0
-    $key = '"' + $EXT_ID + '":'
+    $key = '"' + $ExtId + '":'
     while ($true) {
         $s = $text.IndexOf($key)
         if ($s -lt 0) { break }
@@ -948,11 +1113,11 @@ function Remove-JsonExtensionEntry {
 # logs the user out. Returns $false when the extension isn't registered at all
 # (nothing to heal; forcelist will install it cleanly).
 function Test-JsonExtensionCorrupted {
-    param([Parameter(Mandatory)][string]$Path)
+    param([Parameter(Mandatory)][string]$Path, [string]$ExtId = $EXT_ID)
     if (-not (Test-Path -LiteralPath $Path)) { return $false }
     $utf8 = New-Object System.Text.UTF8Encoding($false)
     $text = [System.IO.File]::ReadAllText($Path, $utf8)
-    $key  = '"' + $EXT_ID + '":'
+    $key  = '"' + $ExtId + '":'
     $s = $text.IndexOf($key)
     if ($s -lt 0) { return $false }
     $vs = $s + $key.Length
@@ -978,19 +1143,19 @@ foreach ($b in $browsers) {
     if (-not $profiles) { Write-Warn "$($b.Name): no profile folders found under $($b.UserDataRoot)"; continue }
     $hit = 0; $miss = 0; $prefsCleared = 0
     foreach ($profile in $profiles) {
-        $path = Join-Path $profile.FullName "Extensions\$EXT_ID"
-        $deletedThisProfile = $false
-        if (Test-Path -LiteralPath $path) {
-            try {
-                Remove-Item -LiteralPath $path -Recurse -Force -ErrorAction Stop
-                Write-Ok "$($b.Name) [$($profile.Name)]: removed cached extension"
-                $hit++
-                $deletedThisProfile = $true
-            } catch {
-                Write-Err "$($b.Name) [$($profile.Name)]: failed - $($_.Exception.Message)"
+        foreach ($extId in $FlushIds) {
+            $path = Join-Path $profile.FullName "Extensions\$extId"
+            if (Test-Path -LiteralPath $path) {
+                try {
+                    Remove-Item -LiteralPath $path -Recurse -Force -ErrorAction Stop
+                    Write-Ok "$($b.Name) [$($profile.Name)]: removed cached extension ($extId)"
+                    $hit++
+                } catch {
+                    Write-Err "$($b.Name) [$($profile.Name)]: failed ($extId) - $($_.Exception.Message)"
+                }
+            } else {
+                $miss++
             }
-        } else {
-            $miss++
         }
         # 2026-06-10 (v2.4.103): scrub stale Preferences + Secure Preferences
         # registrations for profiles stuck with disable_reasons=1024
@@ -1010,8 +1175,10 @@ foreach ($b in $browsers) {
         $n = 0
         foreach ($pf in @('Preferences','Secure Preferences')) {
             $pfPath = Join-Path $profile.FullName $pf
-            if ($ScrubRegistration -or (Test-JsonExtensionCorrupted -Path $pfPath)) {
-                $n += (Remove-JsonExtensionEntry -Path $pfPath)
+            foreach ($extId in $FlushIds) {
+                if ($ScrubRegistration -or (Test-JsonExtensionCorrupted -Path $pfPath -ExtId $extId)) {
+                    $n += (Remove-JsonExtensionEntry -Path $pfPath -ExtId $extId)
+                }
             }
         }
         if ($n -gt 0) {
@@ -1173,6 +1340,46 @@ foreach ($b in $browsers) {
         Write-Warn "$($b.Name): exe not found, skipping launch"
         continue
     }
+
+    # ----------------------------------------------------------------------
+    # RELAUNCH RACE GUARD (2026-06-22 profile-loss incident).
+    # Root cause: relaunching while a previous instance was still shutting
+    # down let two processes race on <UserData>\Local State; the new instance
+    # read a half-written file and Chromium ran its documented "Local State
+    # unparseable -> regenerate with a single Default entry" recovery, wiping
+    # the profile picker (folders intact on disk, just de-listed). Two guards:
+    #   (1) Do NOT launch until ZERO processes of this browser remain, then a
+    #       settle so the OS flushes + releases the Local State write handle.
+    #   (2) If Local State is now missing/unparseable or lists FEWER profiles
+    #       than the pre-flush backup, restore the backup BEFORE launch so the
+    #       fresh instance opens a known-good registry (Chromium then keeps it).
+    # ----------------------------------------------------------------------
+    $exited = $false
+    for ($i = 0; $i -lt 30; $i++) {                     # up to ~15s for full exit
+        if (-not (Get-Process $b.ExeName -ErrorAction SilentlyContinue)) { $exited = $true; break }
+        Start-Sleep -Milliseconds 500
+    }
+    if (-not $exited) {
+        Get-Process $b.ExeName -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+        Start-Sleep -Seconds 2
+    }
+    Start-Sleep -Seconds 2                              # settle: flush + handle release
+
+    $ls = Join-Path $b.UserDataRoot 'Local State'
+    $bk = $lsBackups[$b.Name]
+    if ($bk -and $bk.Count -gt 0) {
+        $curCount = -1
+        try { $curCount = @(((Get-Content -LiteralPath $ls -Raw -ErrorAction Stop) | ConvertFrom-Json).profile.info_cache.PSObject.Properties).Count } catch { $curCount = -1 }
+        if ($curCount -lt $bk.Count) {
+            try {
+                Copy-Item -LiteralPath $bk.Path -Destination $ls -Force -ErrorAction Stop
+                Write-Warn "$($b.Name): Local State regressed before relaunch ($curCount of $($bk.Count) profile(s)) -- restored from backup so the picker stays intact."
+            } catch {
+                Write-Err "$($b.Name): Local State regressed AND restore failed: $($_.Exception.Message). Manually copy '$($bk.Path)' over '$ls' with the browser closed."
+            }
+        }
+    }
+
     Start-Process -FilePath $exe -ArgumentList '--extensions-update-frequency=30' | Out-Null
     Write-Ok "$($b.Name): launched (--extensions-update-frequency=30)"
 }
@@ -1185,65 +1392,76 @@ Write-Step "Verifying extension install across ALL profiles (polling up to 120s 
 # Per-profile verification: report what version is installed in EACH
 # profile folder, so the multi-profile case (where some profiles update
 # fast and others lag) is visible.
-$expectedVersion = $null
-try {
-    $r = Invoke-WebRequest -Uri $UPDATE_URL -UseBasicParsing -TimeoutSec 5 -ErrorAction Stop
-    if ($r.Content -match "<updatecheck\b[^>]*\bversion\s*=\s*['""]([^'""]+)['""]") {
-        $expectedVersion = $Matches[1]
-        Write-Ok "Expected version (per gh-pages updates.xml): $expectedVersion"
-    }
-} catch {}
+# Verify EACH flushed channel (released + test by default) against ITS own
+# updates.xml, so a no-param run confirms both pinned icons reached their version.
+$verifyTargets = @()
+foreach ($vid in $FlushIds) {
+    if ($vid -eq $TEST_EXT_ID) { $verifyTargets += @{ Id=$vid; Url="$PAGES_BASE/updates-test.xml"; Crx='pim-activator-test.crx'; Label='TEST' } }
+    else                      { $verifyTargets += @{ Id=$vid; Url="$PAGES_BASE/updates.xml";     Crx='pim-activator.crx';     Label='released' } }
+}
 
-foreach ($b in $browsers) {
-    $profiles = @(Get-BrowserProfiles $b.UserDataRoot)
-    if (-not $profiles) { Write-Warn "$($b.Name): no profile folders to verify"; continue }
-    Write-Ok "$($b.Name): verifying $($profiles.Count) profile(s) ..."
-    $deadline = (Get-Date).AddSeconds(120)
-    $profileStatus = @{}   # profileName -> installed version (string) or $null
-    foreach ($profile in $profiles) { $profileStatus[$profile.Name] = $null }
+foreach ($vt in $verifyTargets) {
+    Write-Step "Verifying $($vt.Label) channel ($($vt.Id)) across ALL profiles (polling up to 120s per browser)"
+    $expectedVersion = $null
+    try {
+        $r = Invoke-WebRequest -Uri $vt.Url -UseBasicParsing -TimeoutSec 5 -ErrorAction Stop
+        if ($r.Content -match "<updatecheck\b[^>]*\bversion\s*=\s*['""]([^'""]+)['""]") {
+            $expectedVersion = $Matches[1]
+            Write-Ok "Expected $($vt.Label) version (per $($vt.Url)): $expectedVersion"
+        }
+    } catch {}
 
-    while ((Get-Date) -lt $deadline) {
-        $allDone = $true
-        foreach ($profile in $profiles) {
-            if ($profileStatus[$profile.Name] -and ($profileStatus[$profile.Name] -eq $expectedVersion -or -not $expectedVersion)) { continue }
-            $extDir = Join-Path $profile.FullName "Extensions\$EXT_ID"
-            if (Test-Path -LiteralPath $extDir) {
-                $vf = Get-ChildItem -LiteralPath $extDir -Directory -ErrorAction SilentlyContinue |
-                    Sort-Object { try { [version]($_.Name -replace '_\d+$','') } catch { [version]'0.0.0' } } -Descending |
-                    Select-Object -First 1
-                if ($vf) {
-                    $profileStatus[$profile.Name] = ($vf.Name -replace '_\d+$','')
+    foreach ($b in $browsers) {
+        $profiles = @(Get-BrowserProfiles $b.UserDataRoot)
+        if (-not $profiles) { Write-Warn "$($b.Name): no profile folders to verify"; continue }
+        Write-Ok "$($b.Name): verifying $($profiles.Count) profile(s) ..."
+        $deadline = (Get-Date).AddSeconds(120)
+        $profileStatus = @{}   # profileName -> installed version (string) or $null
+        foreach ($profile in $profiles) { $profileStatus[$profile.Name] = $null }
+
+        while ((Get-Date) -lt $deadline) {
+            $allDone = $true
+            foreach ($profile in $profiles) {
+                if ($profileStatus[$profile.Name] -and ($profileStatus[$profile.Name] -eq $expectedVersion -or -not $expectedVersion)) { continue }
+                $extDir = Join-Path $profile.FullName "Extensions\$($vt.Id)"
+                if (Test-Path -LiteralPath $extDir) {
+                    $vf = Get-ChildItem -LiteralPath $extDir -Directory -ErrorAction SilentlyContinue |
+                        Sort-Object { try { [version]($_.Name -replace '_\d+$','') } catch { [version]'0.0.0' } } -Descending |
+                        Select-Object -First 1
+                    if ($vf) {
+                        $profileStatus[$profile.Name] = ($vf.Name -replace '_\d+$','')
+                    }
                 }
+                if (-not $profileStatus[$profile.Name] -or ($expectedVersion -and $profileStatus[$profile.Name] -ne $expectedVersion)) { $allDone = $false }
             }
-            if (-not $profileStatus[$profile.Name] -or ($expectedVersion -and $profileStatus[$profile.Name] -ne $expectedVersion)) { $allDone = $false }
+            if ($allDone) { break }
+            Start-Sleep -Seconds 3
         }
-        if ($allDone) { break }
-        Start-Sleep -Seconds 3
-    }
 
-    # Render per-profile results
-    $upgraded = 0; $stale = 0; $missing = 0
-    foreach ($profile in $profiles) {
-        $installed = $profileStatus[$profile.Name]
-        if (-not $installed) {
-            Write-Warn ("  [{0,-12}] {1,-18} MISSING (no Extensions\<id> folder yet)" -f $b.Name, $profile.Name)
-            $missing++
-        } elseif ($expectedVersion -and $installed -eq $expectedVersion) {
-            Write-Ok   ("  [{0,-12}] {1,-18} v{2}  OK" -f $b.Name, $profile.Name, $installed)
-            $upgraded++
-        } else {
-            Write-Warn ("  [{0,-12}] {1,-18} v{2}  STALE (expected v{3})" -f $b.Name, $profile.Name, $installed, $expectedVersion)
-            $stale++
+        # Render per-profile results
+        $upgraded = 0; $stale = 0; $missing = 0
+        foreach ($profile in $profiles) {
+            $installed = $profileStatus[$profile.Name]
+            if (-not $installed) {
+                Write-Warn ("  [{0,-12}] {1,-18} MISSING (no Extensions\<id> folder yet)" -f $b.Name, $profile.Name)
+                $missing++
+            } elseif ($expectedVersion -and $installed -eq $expectedVersion) {
+                Write-Ok   ("  [{0,-12}] {1,-18} v{2}  OK" -f $b.Name, $profile.Name, $installed)
+                $upgraded++
+            } else {
+                Write-Warn ("  [{0,-12}] {1,-18} v{2}  STALE (expected v{3})" -f $b.Name, $profile.Name, $installed, $expectedVersion)
+                $stale++
+            }
         }
-    }
-    Write-Ok ("$($b.Name): {0} up-to-date, {1} stale, {2} missing (of {3} profile(s))" -f $upgraded, $stale, $missing, $profiles.Count)
+        Write-Ok ("$($b.Name) [$($vt.Label)]: {0} up-to-date, {1} stale, {2} missing (of {3} profile(s))" -f $upgraded, $stale, $missing, $profiles.Count)
 
-    if ($stale -gt 0 -or $missing -gt 0) {
-        $schemeName = if ($b.Name -eq 'Edge') { 'edge' } else { 'chrome' }
-        Write-Warn "$($b.Name): some profiles still not on $expectedVersion. Diagnostics:"
-        Write-Warn "  -> Open $schemeName`://policy and verify ExtensionInstallForcelist shows '$EXT_ID;$UPDATE_URL' (status should be 'OK' not 'Error')."
-        Write-Warn "  -> Open $schemeName`://extensions inside a stale profile, Developer mode ON, click 'Update' to force a poll right now."
-        Write-Warn "  -> Open $schemeName`://net-export to capture the gh-pages CRX download attempt (look for 'pim-activator.crx' in the trace)."
+        if ($stale -gt 0 -or $missing -gt 0) {
+            $schemeName = if ($b.Name -eq 'Edge') { 'edge' } else { 'chrome' }
+            Write-Warn "$($b.Name): some profiles still not on $($vt.Label) $expectedVersion. Diagnostics:"
+            Write-Warn "  -> Open $schemeName`://policy and verify ExtensionInstallForcelist shows '$($vt.Id);$($vt.Url)' (status should be 'OK' not 'Error')."
+            Write-Warn "  -> Open $schemeName`://extensions inside a stale profile, Developer mode ON, click 'Update' to force a poll right now."
+            Write-Warn "  -> Open $schemeName`://net-export to capture the gh-pages CRX download attempt (look for '$($vt.Crx)' in the trace)."
+        }
     }
 }
 

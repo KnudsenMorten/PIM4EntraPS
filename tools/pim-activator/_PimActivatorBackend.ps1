@@ -66,8 +66,31 @@ function Invoke-PaGraph {
         $ver = if ($Beta) { 'beta' } else { 'v1.0' }
         $uri = if ($rel -match '^https?://' -or $rel -match '^(v1\.0|beta)/') { $rel } else { "$ver/$rel" }
         $sdkArgs = @{ Method = $Method; Uri = $uri }
-        if ($null -ne $Body) { $sdkArgs.Body = $Body }
-        return Invoke-MgGraphRequest @sdkArgs
+        if ($null -ne $Body) {
+            # Pass a PRE-SERIALIZED JSON string, not a PS hashtable: Invoke-MgGraphRequest's
+            # serializer chokes on nested PS string arrays ("Self referencing loop detected
+            # ... spa.redirectUris[0].Chars"). A string body is sent verbatim.
+            $sdkArgs.Body = if ($Body -is [string]) { $Body } else { ($Body | ConvertTo-Json -Depth 12) }
+            $sdkArgs.ContentType = 'application/json'
+        }
+        $resp = Invoke-MgGraphRequest @sdkArgs
+        # Normalise to the SAME shape the REST data plane (Invoke-PimGraph) returns: the
+        # SDK wraps a collection as @{ value = @(...); '@odata.nextLink' = ... } whereas
+        # callers (@(Invoke-PaGraph ...), Get-PaProp on the element) expect the items
+        # array. Unwrap it (following nextLink for -All); single resources pass through.
+        if ($resp -is [System.Collections.IDictionary] -and $resp.Contains('value')) {
+            $items = @($resp['value'])
+            if ($All) {
+                $next = $resp['@odata.nextLink']
+                while ($next) {
+                    $page = Invoke-MgGraphRequest -Method GET -Uri $next
+                    $items += @($page['value'])
+                    $next = $page['@odata.nextLink']
+                }
+            }
+            return $items
+        }
+        return $resp
     }
     Import-PaRestPlane
     Invoke-PimGraph -Method $Method -Path $Path -Body $Body -Beta:$Beta -All:$All
@@ -173,13 +196,23 @@ function New-PaAppRegistrationBody {
         [Parameter(Mandatory)][string]$DisplayName,
         [Parameter(Mandatory)][string]$ExtensionId,
         [Parameter(Mandatory)]$RequiredResourceAccess,
+        # Extra extension ids to ALSO register redirect URIs for (e.g. the TEST
+        # channel id alongside the RELEASED id) so one app reg serves multiple
+        # PIM Activator builds side-by-side.
+        [string[]]$AdditionalExtensionIds = @(),
+        # Pre-existing SPA redirect URIs to PRESERVE (union), so updating an app to
+        # "accept this as well" never drops URIs already configured in the tenant.
+        [string[]]$ExistingSpaRedirectUris = @(),
         [switch]$IncludeDisplayName
     )
-    $redirectUri = "https://$ExtensionId.chromiumapp.org/"
-    $extOrigin   = "chrome-extension://$ExtensionId/"
+    # Both forms per id: https://<id>.chromiumapp.org/ (launchWebAuthFlow redirect)
+    # + chrome-extension://<id>/ (Origin for SPA token redemption).
+    $ids = @(@($ExtensionId) + @($AdditionalExtensionIds)) | Where-Object { $_ } | Select-Object -Unique
+    $uris = @($ExistingSpaRedirectUris)
+    foreach ($id in $ids) { $uris += "https://$id.chromiumapp.org/"; $uris += "chrome-extension://$id/" }
     $body = @{
         signInAudience          = 'AzureADMyOrg'
-        spa                     = @{ redirectUris = @($redirectUri, $extOrigin) }
+        spa                     = @{ redirectUris = @($uris | Where-Object { $_ } | Select-Object -Unique) }
         publicClient            = @{ redirectUris = @() }
         isFallbackPublicClient  = $false
         requiredResourceAccess  = $RequiredResourceAccess

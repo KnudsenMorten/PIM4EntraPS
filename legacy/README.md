@@ -18,6 +18,21 @@ So retirement is gated on two things, in order:
 1. the **REST write-path** replacing each `-Scope`'s apply (the de-CSV work), and
 2. **coordination with the sync/rebrand** download path so customers aren't broken.
 
+## Retired so far
+
+| Moved | When | Why it was safe |
+|---|---|---|
+| `config/PIM-SQL-import-export-CSV.locked.ps1` → `legacy/config/` <br> `launcher/PIM-SQL-import-export-CSV/` → `legacy/launcher/` | 2026-08-06 (REQUIREMENTS §33 · **IMP-05**) | A 1,005-line one-time SQL bootstrap helper that built ~24 statements by string interpolation. **Not on the active path** — verified by repo-wide grep: nothing under `engine/`, `tools/`, the scheduler or the tests referenced it; the only references were its own launcher flavours, which moved with it. Its replacement is `PIM-SqlStore.ps1`, which binds every statement with `SqlParameter`. Hardening a file scheduled to leave was the wrong trade. |
+
+⚠️ **`legacy/` still PUBLISHES.** The `publish.yml` strip removes `internal`, `logs`, `staging`,
+`demo` and `output` — **not** `legacy`. Retiring a component moves it out of the active path, not
+out of the customer download, so it must still be clean: `legacy` is included in the
+`$shippedDirs` scanned by `tests/Test-PimSourceSanitization.ps1` for exactly that reason.
+
+`config/SQL-Connect.locked.ps1` (+ `launcher/SQL-Connect/`) is the same one-time SQL-onboarding
+vintage and is the obvious next candidate — **not** moved yet, because unlike the above it has not
+been confirmed unreferenced. Confirm, then move.
+
 ## Retirement order (move each only after its REST replacement is green)
 - [ ] `PIM-Baseline-Management-CSV-AdminsOnly` → REST admins apply
 - [ ] `…-EntraIDRolesOnly` → REST entra PIM apply

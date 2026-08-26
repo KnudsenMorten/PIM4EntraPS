@@ -1,0 +1,91 @@
+{
+  "_comment": "PIM4EntraPS's DEPLOY CONTRACT -- the SOLUTION's third of the AutomateIT RING-1 spine (DOCS/REQUIREMENTS.md). Three owners, three files, no overlap: this file says HOW PIM deploys (ships WITH the solution, so changing the contract never means editing ~30 per-customer manifests); the operator's central sync/release-map.json says WHICH VERSION and which capabilities are approved for a customer's ring; the customer's own local bootstrap\\Sync-AutomateIT.json says WHETHER they take PIM and which OPTIONAL capabilities they want. A capability runs only when all three agree.",
+
+  "_supersedes": "PIM docs/REQUIREMENTS.md sec.1 originally put a per-solution 'Deploy' block in each customer's Sync-AutomateIT.json. Operator decision 2026-08-07 split that: Script is SOLUTION-owned (this file), Args stay CUSTOMER-owned (their local manifest). Invoke-PimUpdate.ps1's ResourceGroup/AcrName/SqlConnectionString ARE per-customer values; the script path and its contract are not.",
+
+  "schema": 1,
+  "solution": "PIM4EntraPS",
+
+  "_needsSchema_comment": "TRUE, and VERIFIED rather than assumed (the RING-1 runbook requires this). PIM owns a relational store and ships its DDL: sql/platform-schema.sql (the MSP/master platform store, incl. platform.Tenants + pim.CentralAdmins + the pim.vw_AdminTenantTargets view) and sql/local-schema.sql (the per-tenant local store). The whole-solution orchestrator carries a dedicated 'schema' step (engine/_shared/PIM-DeployAll.ps1) that runs preflight -> apply -> re-preflight and is NEVER destructive, and pim.LocalAdmins was applied to a live database this way on 2026-08-07. This is the half SecurityInsight's own contract calls out as 'PIM's problem, not a shared one' -- SIA has no relational database at all.",
+  "needsSchema": true,
+
+  "_capabilities_comment": "What KINDS of change a PIM update performs -- named for the kind of change, not for a component, per the RING-1 runbook. Derived from the VERIFIED whole-solution step catalog in engine/_shared/PIM-DeployAll.ps1 (appreg -> prereq -> image -> infra -> schema -> code -> verify), which is load-bearing ORDER: identity/grants before prereq; prereq before image (az acr build targets a registry, it does not create one); image before infra (infra pins the digest of the image before it creates anything); infra before schema; schema before code. BUG-68: prereq and image were added 2026-08-17 because without them the catalog could only UPDATE a tenant a human had already built -- infra needed the image that code produces, and code refuses to roll zero apps, so neither could go first. 'optional' means a customer may switch it off in their local manifest; a REQUIRED capability cannot be blocked -- the block is refused and reported rather than obeyed, so nobody can brick their own install. NOTE 'verify' is deliberately NOT a capability: it makes no change, it is the gate ON one, and it always runs.",
+  "capabilities": [
+    {
+      "name": "code",
+      "optional": false,
+      "description": "The PIM engine, scheduler and Manager -- built from the pulled tree and rolled (hosted = az acr build + ACA revision roll; community/VM = local build + relaunch). This IS PIM4EntraPS; without it there is no solution. The ONLY rollbackable step: a failed verify rolls the revision back to the captured pre-deploy one."
+    },
+    {
+      "name": "schema",
+      "optional": false,
+      "description": "The idempotent SQL schema upgrade (preflight -> apply -> re-preflight, never destructive). REQUIRED on purpose: blocking this while still shipping 'code' is the brick case -- new engine and Manager code running against an old database. A customer who wants schema changes in a controlled window should hold the whole solution at its ring, not run half of it."
+    },
+    {
+      "name": "prereq",
+      "optional": true,
+      "description": "Stands up the hosting PREREQUISITES a first deploy assumes already exist: resource group, spoke VNet + delegated subnet, Log Analytics, the container registry, the AcrPull identity (and its role), and the SQL server + database. Optional for the same reason as 'infra' -- a customer whose platform team provisions infrastructure separately switches it off and PIM uses what it is given, and a VM install needs none of it. BUG-68: before this existed the catalog could only UPDATE a tenant somebody had already built by hand, because nothing in it created any of these."
+    },
+    {
+      "name": "image",
+      "optional": true,
+      "description": "Builds and pushes the Manager container image, and does NOT roll anything. Split out of 'code' deliberately (BUG-68): 'infra' resolves the image digest before it creates anything, while 'code' both builds the image and rolls the apps -- and the roll refuses to roll zero apps -- so on a tenant with no apps yet, infra needed code's image and code needed infra's apps. Building here breaks that cycle; the roll stays in 'code'."
+    },
+    {
+      "name": "infra",
+      "optional": true,
+      "description": "Stands up or refreshes the hosting: the Container Apps environment and the worker matrix (hosted), or the scheduled-task host (community/VM). Optional because the two editions genuinely need different infrastructure and a VM install needs no Container Apps environment at all -- and because a customer whose platform team provisions infrastructure separately can switch this off and still take code and schema."
+    },
+    {
+      "name": "appreg",
+      "optional": true,
+      "description": "Ensures the engine app-registration and its Graph/Azure grants exist. Optional because many organisations forbid automated application-registration creation and pre-create the identity by policy; PIM then uses the identity it is given. Blocking this on a tenant where the app-registration does NOT already exist will make the first engine run fail to authenticate -- that is the customer's deliberate trade, and it is why this is a capability rather than an unconditional step."
+    },
+    {
+      "name": "msp-downlink",
+      "optional": true,
+      "description": "The MSP managed downlink: a managed tenant pulls the signed baseline template version its ring points at from its MSP master, then applies it locally. Only the MSP managed topologies have this; a single-tenant install has no master to pull from. Customer data never leaves the customer tenant -- this is a pull, not a push."
+    }
+  ],
+
+  "_deploy_comment": "Entry point for the capabilities above. Idempotent and safe to re-run daily -- a re-run IS the updater, and every already-current step is a clean no-op. Self-gating: it verifies the deployment (hosted GUI smoke + deploy-validation tests) and AUTO-ROLLS-BACK the 'code' step to the captured pre-deploy revision on a verify failure. Schema is never auto-reverted, because reverting an additive schema change could drop a column that now holds data.",
+
+  "_replaces_comment": "This block is the SOLUTION-OWNED half of the phase-1 'Deploy' block that still sits in the per-customer sync/Sync-AutomateIT.json ({ Script, Args, NeedsSchema, RunWhenChanged }). Script -> deploy.script, Args:['-Apply'] -> deploy.defaultArgs (the MODE is solution-owned; per-customer values are not), NeedsSchema -> the top-level needsSchema, RunWhenChanged -> deploy.runWhenChanged. Once the merge is built, the customer manifest keeps ONLY its own Args and the solution-owned keys are read from here. ⚠️ NOTHING MERGES THEM YET -- see docs/REQUIREMENTS.md sec.33 PLAT-02.",
+  "deploy": {
+    "script": "tools/setup/Invoke-PimUpdate.ps1",
+    "defaultArgs": [ "-Apply" ],
+    "runWhenChanged": true,
+    "appliesTo": [ "code", "schema", "prereq", "image", "infra", "appreg", "msp-downlink" ],
+    "_auth_comment": "App-only certificate auth as the engine SPN -- no interactive sign-in and no client secrets, on any path. The customer's scheduler runs this unattended.",
+    "requiresUnattendedAuth": true,
+    "_customerArgs_comment": "These parameters are CUSTOMER-owned and belong in the customer's local bootstrap\\Sync-AutomateIT.json, never here: ResourceGroup, AcrName, ImageRepo, ManagerApp, Apps, SqlConnectionString, Recipient. They carry per-customer infrastructure names. WARNING: the script's built-in defaults for these are the OPERATOR's own values, so a customer who supplies none of them would target the operator's infrastructure -- see docs/REQUIREMENTS.md sec.33 (BUG-28)."
+  },
+
+  "_coRequisite_comment": "🔒 CAPABILITY PAIRS THAT MUST BE PROMOTED TOGETHER. The customer-block gate REFUSES a block on a required capability, but the OPERATOR's ring allow-list has no such protection -- a required capability CAN be Held by a ring, by design, because the operator must be able to hold anything. Measured against the shipped sync/release-map.sample.json on 2026-08-07: its PIM entry promotes ring 2 with allow:['code'], which resolves to Run:[code] / Held:[schema,...] -- new engine and Manager code deployed against an un-upgraded database. That is the exact skew 'schema' is marked required to prevent, arriving through the operator's gate instead of the customer's. Promoting 'code' to a ring therefore REQUIRES promoting 'schema' to that same ring. Nothing in the platform core enforces this today; PIM's own tests/Test-PimDeployContract.ps1 checks every promotion it can see and REPORTS a violation (it cannot fail on a shared file it does not own). See docs/REQUIREMENTS.md sec.33 PLAT-03.",
+  "coRequisiteCapabilities": [
+    { "capability": "code", "requiresAlso": [ "schema" ], "reason": "engine/Manager code and the database schema move together -- shipping one without the other is the expand/contract skew this contract exists to make deliberate rather than accidental." }
+  ],
+
+  "_readiness_comment": "🔴 DEPLOYED != RUNNING. The framework runs this probe after a deploy and FAILS NON-ZERO if it reports not-ready (framework contract: sync/_AitReadiness.ps1; design: DOCS/REQUIREMENTS.md DEPLOY-2 sec.7). Every check it makes was MEASURED BROKEN on a live managed tenant on 2026-08-13 while reporting success -- gates off (a gate-skip logs ok=True), no sender mailbox, MailSender absent from pim.Settings, no engine identity on the tick job, and synced admins with no credential to sign in with. None of them raised an error, which is the whole argument for asserting the end state instead of trusting the step list. 'required' true means a not-ready verdict BLOCKS the deploy; a probe that could not RUN is also not-ready, because a skip is not a pass.",
+  "readiness": {
+    "script": "tools/setup/Test-PimTenantReady.ps1",
+    "required": true
+  },
+
+  "_vaultIsolation_comment": "PIM's store holds admin accounts, role assignments and engine credentials -- a different classification from any other solution's data, so it must not share a vault with them. The framework REFUSES to deploy a 'dedicated-required' solution pointed at a vault the environment marks 'shared' (framework sec.5.3). This is inexpressible in platform-config.json, whose KeyVaultName is a single scalar for the WHOLE environment -- which is exactly why the platform-deploy.json descriptor exists.",
+  "vaultIsolation": "dedicated-required",
+
+  "_requires_comment": "Provisioning preconditions, per OPTIONAL capability only. A customer who blocks an optional capability needs none of its preconditions -- which is the point of making it blockable. 'code' and 'schema' are required and their preconditions (a reachable store, a built-from-pulled-code path) are part of any PIM install.",
+  "requires": {
+    "infra": [ "azure-container-registry", "container-apps-environment", "azure-sql" ],
+    "image": [ "azure-container-registry" ],
+    "appreg": [ "entra-app-registration" ],
+    "msp-downlink": [ "msp-master-template-store" ]
+  },
+
+  "_dependencies_comment": "PIM runs on the AutomateIT framework layer. Platform* IS AutomateIT itself, not a peer solution; SecurityInsight and PIM4EntraPS are ordinary solutions on top of it. The dependency is also declared in solution.publish.json, matching SecurityInsight.",
+  "dependencies": [ "PlatformConfiguration", "PlatformMonitoring" ],
+
+  "_minPlatformVersion_comment": "NOW DECLARED (2026-08-07, PLAT-01). It was deliberately ABSENT until then, for two INDEPENDENT reasons both verified 2026-08-07: (1) nothing implemented it -- there was no minPlatformVersion comparison anywhere in sync/ or SOLUTIONS/; (2) there was nothing to compare AGAINST -- PlatformConfiguration and PlatformMonitoring shipped no VERSION file, which is why the deployed VERSION.txt listed them with no number while it listed PIM4EntraPS-v2.4.245. Declaring a number nothing could check, against a dependency with no version, would have been fabricated data. BOTH blockers are now cleared: the two Platform* solutions ship VERSION (2.0.0, their first declared version), and sync/_AitRings.ps1 gained Compare-AitVersion / Resolve-AitPlatformVersion / Test-AitPlatformCompatible, wired into Get-AitSyncPlan as a hold with reason 'incompatible-platform'. 2.0.0 is the HONEST value for PIM: it is the platform level PIM is known to run on today (it runs on it right now), NOT an aspiration -- raise it only when PIM starts depending on something a later core adds. The platform version is the LOWEST of the Platform* versions present, because Platform* IS AutomateIT and the core is only as new as its oldest half.",
+  "minPlatformVersion": "2.0.0"
+}

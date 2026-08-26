@@ -155,6 +155,38 @@ try {
     # 2b) explicit -Server still wins (highest precedence, untouched).
     T 'explicit -Server still wins over scenario' ((Get-PimSqlConnectionString -Server 'X\Y' -Database 'D') -match 'Server=X\\Y;')
 
+    # 2b-BUG-30) explicit -Server naming AZURE SQL must produce the PASSWORDLESS token CS.
+    # This is the assertion whose absence hid a 🔴: every existing explicit -Server test used a
+    # LOCAL name (2b's 'X\Y', PIM.Features.Tests' 'localhost\SQLEXPRESS'), so nothing ever
+    # passed an Azure FQDN through the one parameter all ~10 harnesses and PIM-SqlStore.ps1:217
+    # actually use. It returned Integrated Security=SSPI -- unusable against PaaS, and it made
+    # New-PimSqlConnection skip token acquisition altogether. Assert the NEGATIVE (no Integrated,
+    # no TrustServerCertificate=True) as well as the positive, because the failure mode was a
+    # connection string that looked perfectly well-formed.
+    $csAz = Get-PimSqlConnectionString -Server 'sql-explicit.database.windows.net' -Database 'PimScenarioTest'
+    T 'BUG-30: explicit -Server + Azure FQDN -> passwordless token CS (tcp:, port 1433)' (
+        $csAz -match 'Server=tcp:sql-explicit\.database\.windows\.net,1433' -and $csAz -match 'Database=PimScenarioTest')
+    T 'BUG-30: explicit -Server + Azure FQDN -> NO Integrated Security (PaaS has no Windows auth)' (
+        $csAz -notmatch '(?i)Integrated\s*Security')
+    T 'BUG-30: explicit -Server + Azure FQDN -> strict TLS (TrustServerCertificate=False)' (
+        $csAz -match 'Encrypt=True' -and $csAz -match 'TrustServerCertificate=False')
+    T 'BUG-30: the Azure FQDN test is case-insensitive' (
+        (Get-PimSqlConnectionString -Server 'SQL-UPPER.DATABASE.WINDOWS.NET' -Database 'D') -notmatch '(?i)Integrated\s*Security')
+    # And the regression guard in the other direction: a LOCAL explicit server is unchanged.
+    T 'BUG-30: a local explicit -Server still gets the Integrated CS (unchanged)' (
+        (Get-PimSqlConnectionString -Server 'localhost\SQLEXPRESS' -Database 'D') -match '(?i)Integrated Security=SSPI')
+
+    # 2b-MI) Managed identity is PLAN A (operator 2026-08-08). The probe must be decidable
+    # WITHOUT touching the network, so an offline suite never depends on IMDS being reachable.
+    $savedNoMi = $global:PIM_NoManagedIdentity
+    $savedUseMi = $global:PIM_UseManagedIdentity
+    try {
+        $global:PIM_NoManagedIdentity = $true;  $global:PIM_UseManagedIdentity = $null
+        T 'MI plan A: $PIM_NoManagedIdentity forces the probe to NO (offline tests never hit IMDS)' (-not (Test-PimManagedIdentityAvailable))
+        $global:PIM_NoManagedIdentity = $null;  $global:PIM_UseManagedIdentity = $true
+        T 'MI plan A: $PIM_UseManagedIdentity forces the probe to YES without a network call' (Test-PimManagedIdentityAvailable)
+    } finally { $global:PIM_NoManagedIdentity = $savedNoMi; $global:PIM_UseManagedIdentity = $savedUseMi }
+
     # 2c) S6 active + a local server env -> the connection string uses THAT server.
     $global:PIM_ActiveScenario = 'S6'
     $env:PIM_SqlServerLocal    = 'SLAVE\SQLEXPRESS'
@@ -253,6 +285,36 @@ T 'PUT is SuperAdmin-gated'                               ($srv -match 'SuperAdm
 T 'GUI renders the Deployment scenario card'             ($html -match 'renderScenarioCard\(' -and $html -match 'id="setScenarioBody"')
 T 'GUI GETs /api/settings/scenario'                      ($html -match "api\('GET',\s*'/api/settings/scenario'")
 T 'GUI PUTs /api/settings/scenario'                      ($html -match "api\('PUT',\s*'/api/settings/scenario'")
+
+# ===========================================================================
+# TEST-17 -- the LIVE matrix must not default to a store the product does not ship.
+#
+# Asserted from HERE, statically, because Test-PimScenarioMatrix.ps1 is a live script excluded
+# from the offline suite -- so nothing else would ever notice the default coming back. Same
+# approach Test-PimUpdateContainers.ps1 uses for the roller.
+#
+# The defect: `if (-not $SqlServer) { $SqlServer = '.\SQLEXPRESS' }` plus an .EXAMPLE teaching
+# the same. Operator, 2026-08-08: *"we dont support that [SQLEXPRESS]. it is native sql inside
+# azure we support (paas)."* Every S1-S6 "VERIFIED" verdict to date was therefore measured on an
+# unsupported configuration, and the FALLBACK is what made it silent -- a run with no store
+# configured did not fail, it quietly pointed at a local Express instance and went green.
+Write-Host "`n-- TEST-17: the live matrix refuses an unsupported store --" -ForegroundColor Cyan
+$mxPath = Join-Path $script:Root 'tests\live\Test-PimScenarioMatrix.ps1'
+$mx = if (Test-Path -LiteralPath $mxPath) { [System.IO.File]::ReadAllText($mxPath) } else { '' }
+T 'the live matrix script is present to check'            ($mx.Length -gt 0)
+# The load-bearing one: NO silent fallback. Match the ASSIGNMENT, not the word -- the phrase
+# survives legitimately in the comment that explains the defect, and an assertion that fires on
+# its own documentation is a false alarm waiting to happen (the lesson from BUG-09's asserts).
+T 'TEST-17: no silent SQLEXPRESS fallback assignment'     ($mx -notmatch '(?m)^\s*if \(-not \$SqlServer\)\s*\{\s*\$SqlServer\s*=')
+T 'TEST-17: a missing -SqlServer THROWS as required'      ($mx -match '(?m)^\s*throw \("Test-PimScenarioMatrix: -SqlServer is REQUIRED')
+T 'TEST-17: a missing -SqlDatabase THROWS as required'    ($mx -match '(?m)^\s*throw "Test-PimScenarioMatrix: -SqlDatabase is REQUIRED')
+T 'TEST-17: a non-Azure store is REFUSED by default'      ($mx -match 'REFUSING to run against' -and $mx -match "database\\\.windows\\\.net")
+T 'TEST-17: -AllowUnsupportedStore is the explicit escape' ($mx -match '\[switch\]\$AllowUnsupportedStore')
+T 'TEST-17: ...and taking it WARNS that the verdicts do not describe the shipped product' (
+    $mx -match 'NOT the supported store' -and $mx -match 'product does not ship')
+# ...and the docs that TEACH the wrong thing are part of the defect, not separate from it.
+T 'TEST-17: the .EXAMPLE no longer teaches a SQLEXPRESS store' (
+    $mx -notmatch "(?m)^\s*\`$env:PIM_SqlServer='\.\\\\SQLEXPRESS'")
 
 # ===========================================================================
 Write-Host ""

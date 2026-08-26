@@ -488,6 +488,101 @@ Describe '10. Delegation model' {
         } finally { $Global:Users_All_ID = $null; $global:PIM_DesiredRows = $null }
     }
 
+    # An OWNERLESS group must still be CREATED (operator, 2026-08-10). The engine used to THROW,
+    # and that default could not survive contact with the real estate: 239 of the 259 authored
+    # service definitions carry a BLANK Owners column, so a strict engine refuses to (re)create
+    # most of the estate's own groups -- measured live, where all 4 legitimate creates were refused.
+    # Ownership is added LATER by design: the GroupOwners scope reconciles owners every run.
+    It 'Groups: an ownerless create is allowed by DEFAULT, warns, and stays opt-in-strict' {
+        $src = [System.IO.File]::ReadAllText("$PSScriptRoot\..\engine\_shared\PIM-EngineProviders.ps1")
+        # default permissive -- the old line was `$require = $true; if (...)`
+        $src | Should -Match '\$require = \$false; if \(\$null -ne \$global:PIM_RequireGroupOwners\)'
+        # the gap is still surfaced, just not as a blocker
+        $src | Should -Match "creating '\`$gn' with NO owner"
+        # and the strict behaviour is still reachable, in the other direction
+        $src | Should -Match 'PIM_RequireGroupOwners is set'
+    }
+    # The directory-role live read must come from SCHEDULE INSTANCES, not schedules. An unfiltered
+    # enumeration of /roleAssignmentSchedules is INCOMPLETE -- measured live: schedules total=613
+    # (AU-scoped 359) did NOT contain an assignment that the instances collection (total=602,
+    # AU-scoped 346) DID, and that a per-principal $filter on schedules also returned. RolesAUs
+    # therefore re-planned 17 existing assignments as creates on EVERY run and skipped them at
+    # apply, so the scope could never reach a steady state. After the switch: create 17 -> 0
+    # (nochange 178), and EntraRoles nochange 162 -> 166.
+    It 'Directory role live state is read from schedule INSTANCES, not schedules' {
+        $src = [System.IO.File]::ReadAllText("$PSScriptRoot\..\engine\_shared\PIM-EngineProviders.ps1")
+        $src | Should -Match "ep = 'roleEligibilityScheduleInstances'"
+        $src | Should -Match "ep = 'roleAssignmentScheduleInstances'"
+        # the incomplete bulk endpoints must not come back
+        $src | Should -Not -Match "ep = 'roleEligibilitySchedules'"
+        $src | Should -Not -Match "ep = 'roleAssignmentSchedules'"
+    }
+    # The policy engine must define ENTRA DIRECTORY ROLE policy explicitly and enforce it every run
+    # (operator, 2026-08-10): "we have a complete policy engine where we define explicitly how
+    # policies must be set, and it must verify it matches that at every run and set if not set. it
+    # is not ms standard." Until this scope existed the engine's ONLY policy filter was
+    # scopeType eq 'Group', so directory-role policies were never read or written -- they sat at
+    # whatever Entra defaulted to, unverified.
+    It 'EntraRolePolicies: the two named role templates exist and RequireApproval extends Standard' {
+        $dir = "$PSScriptRoot\..\templates\policy"
+        $std = Get-Content "$dir\entraidroles-standard.policytemplate.json" -Raw | ConvertFrom-Json
+        $ra  = Get-Content "$dir\entraidroles-requireapproval.policytemplate.json" -Raw | ConvertFrom-Json
+        $std.id | Should -Be 'EntraIDRoles_Standard'
+        $ra.id  | Should -Be 'EntraIDRoles_RequireApproval'
+        # "the require approval includes the standard but also require approval"
+        $ra.extends | Should -Be 'EntraIDRoles_Standard'
+        $ra.rules.Approval | Should -Not -BeNullOrEmpty
+        $std.rules.PSObject.Properties.Name | Should -Not -Contain 'Approval'
+        # activation is where MFA protects the privilege -- it must be explicit, not inherited luck
+        @($std.rules.Enablement.EndUser_Assignment) | Should -Contain 'MultiFactorAuthentication'
+        # ...and the admin path carries NO MFA (BUG-21: an app-only SPN token can never present an
+        # MFA claim, so requiring one blocks every eligibility the engine creates). MFA ABSENCE is
+        # the INVARIANT and is asserted strictly; the exact value is an operator DECISION that has
+        # now moved three times, so it is asserted exactly and separately -- if it moves again,
+        # exactly one of these two lines fails and it is obvious which kind of change it was.
+        @($std.rules.Enablement.Admin_Eligibility) | Should -Not -Contain 'MultiFactorAuthentication'
+        # STANDARD family is EMPTY (operator 2026-08-11: "admin eligible is blank, no justification
+        # or mfa. app must be able to work"). Justification lives on the APPROVAL template below,
+        # where a human approver is in the loop and the portal actually enforces it.
+        @($std.rules.Enablement.Admin_Eligibility).Count | Should -Be 0
+        @($ra.rules.Enablement.Admin_Eligibility)  | Should -Be @('Justification')
+        @($ra.rules.Enablement.Admin_Eligibility)  | Should -Not -Contain 'MultiFactorAuthentication'
+        @($std.rules.Enablement.Admin_Assignment).Count  | Should -Be 0
+    }
+    It 'EntraRolePolicies: the provider manages DIRECTORY role policies and is registered' {
+        $src = [System.IO.File]::ReadAllText("$PSScriptRoot\..\engine\_shared\PIM-EngineProviders.ps1")
+        $src | Should -Match "scope = 'EntraRolePolicies'"
+        $src | Should -Match "scopeType eq 'DirectoryRole'"
+        $src | Should -Match 'Register-PimEngineProvider -Provider \(New-PimEntraRolePoliciesProvider\)'
+        # a template that demands approval must never be silently applied WITHOUT an approver:
+        # Graph rejects an approver-less approval rule, so skipping it would leave the role unapproved
+        $src | Should -Match 'requires approval for .* but NO approver resolved'
+    }
+    # NESTING DIRECTION. The TARGET group is nested INTO the SOURCE group: Source SUPPLIES the
+    # permission (the service group), Target RECEIVES it and is therefore the MEMBER. This was
+    # inverted, and the symptom was total: desired=206, live=199, nochange=0 -- no desired key could
+    # ever match a live one. Worse than noise, ApplyCreate would have written 206 memberships the
+    # wrong way round, nesting service groups inside role groups. Verified against the live tenant:
+    # PIM-ROLE-Management-IT-OperationSecurity is a MEMBER OF 50 service groups and contains 1.
+    # After the fix: nochange 0 -> 196.
+    It 'GroupMembers: the TARGET group is the MEMBER, the SOURCE group is the CONTAINER' {
+        $src = [System.IO.File]::ReadAllText("$PSScriptRoot\..\engine\_shared\PIM-EngineProviders.ps1")
+        # desired stamps principalId from the TARGET (the member), not the source
+        $src | Should -Match '\$tgtGid = & \$resolve \(Get-PimRowProp -Row \$d -Names @\(.TargetGroupTag.\)\)'
+        $src | Should -Match 'if \(\$tgtGid\) \{ Add-Member -InputObject \$row -NotePropertyName principalId'
+        # the key's container comes from SourceGroupTag (live: GroupTag)
+        $src | Should -Match "Get-PimRowProp -Row \`$r -Names @\('SourceGroupTag', 'GroupTag'\)"
+        # and the create nests member -> container, not the reverse
+        $src | Should -Match 'New-PimGroupMembershipBody -PrincipalId \$memberId -GroupId \$containerId'
+        # the inverted forms must not come back
+        $src | Should -Not -Match 'New-PimGroupMembershipBody -PrincipalId \$sid -GroupId \$gid'
+    }
+    It 'Groups: the unconditional refuse-to-create is GONE' {
+        $src = [System.IO.File]::ReadAllText("$PSScriptRoot\..\engine\_shared\PIM-EngineProviders.ps1")
+        # the old throw fired whenever no owner resolved, regardless of any flag
+        $src | Should -Not -Match "if \(\`$require -and -not \`$ownerIds\.Count\)"
+    }
+
     # FEATURE: "Scoped portal admins" -- a portal profile carries services/tier/level
     # ceilings, scopes and the managed-admin set; workload owners see only owned groups;
     # the admin list hides the most privileged tiers; super-admins bypass scoping.

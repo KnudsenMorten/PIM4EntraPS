@@ -1,7 +1,7 @@
 {
   "id": "default",
   "name": "Default",
-  "description": "The engine's standard policy baseline brought to v1 parity, applied to the member policy of EVERY managed group (blank PolicyTemplate links here). Expiration: EndUser/activation max P1D, Admin-Assignment max P365D, Admin-Eligibility max P365D, all required. Enablement: MFA + Justification on EndUser-Assignment (activation) AND Admin-Eligibility; none on Admin-Assignment. Notification matches the Entra defaults. Carries NO Approval rule, so the engine never touches an approval rule it did not itself apply.",
+  "description": "The engine's STANDARD policy baseline, applied to the member policy of EVERY managed group (blank PolicyTemplate links here). Expiration: EndUser/activation max P1D, Admin-Assignment max P365D, Admin-Eligibility max P365D, all required. Enablement: MFA + Justification on EndUser-Assignment (activation); NOTHING on Admin-Eligibility; nothing on Admin-Assignment. OPERATOR DECISION 2026-08-11 -- Admin-Eligibility is EMPTY on the STANDARD templates: 'admin eligible is blank, no justification or mfa. app must be able to work'. This supersedes the 2026-08-10 decision that put Justification here; that value was never applied to production, so production is unaffected and stays converged. Justification remains on the APPROVAL templates (approval-required, EntraIDRoles_RequireApproval), where a human is in the loop by definition. BUG-21, and this is the load-bearing constraint whatever the value becomes: Admin-Eligibility must NEVER require MultiFactorAuthentication -- the 'admin' making that request is the engine's own app-only certificate SPN, whose token can never carry an MFA claim, so the rule cannot be satisfied by anyone and Entra rejects every eligibility the engine creates with 400 RoleAssignmentRequestPolicyValidationFailed / MfaRule. A/B tested in test tenant test1intr2ig798 on 2026-08-10: MFA+Justification fails, [] and [Justification] both succeed. It removed no risk and blocked the product's core delegation path. Activation MFA (EndUser-Assignment) is untouched -- that is where MFA actually protects anything. The empty Admin-Eligibility value is not a guess: it is what the PRODUCTION tenant's 332 engine-managed PIM- groups actually carry (member Admin_Eligibility=[], EndUser_Assignment=[MFA+Justification], read live 2026-08-06), so this template reproduces the known-good production state rather than something adjacent to it. Notification matches the Entra defaults. Carries NO Approval rule, so the engine never touches an approval rule it did not itself apply.",
   "rules": {
     "Expiration": {
       "EndUser_Assignment": { "maximumDuration": "P1D",   "isExpirationRequired": true },
@@ -10,7 +10,7 @@
     },
     "Enablement": {
       "EndUser_Assignment": ["MultiFactorAuthentication", "Justification"],
-      "Admin_Eligibility":  ["MultiFactorAuthentication", "Justification"],
+      "Admin_Eligibility":  [],
       "Admin_Assignment":   []
     }
   }

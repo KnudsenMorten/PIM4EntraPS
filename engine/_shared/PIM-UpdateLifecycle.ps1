@@ -151,9 +151,24 @@ function Get-PimSqlUpdatePlan {
     $missing = New-Object System.Collections.Generic.List[string]
     $needBecauseCols = $false
 
+    $unknown = New-Object System.Collections.Generic.List[string]
     foreach ($table in @($LockedSqlSchema.Keys)) {
         $spec = $LockedSqlSchema[$table]
         $hasTable = $DeployedColumns.ContainsKey($table)
+        # BUG-24: THREE states, not two. A reader that could not authenticate (or the
+        # server was unreachable) knows NOTHING about this table -- it is neither present
+        # nor absent. Collapsing that into "absent" is what made a login failure surface as
+        #     missing table(s) need create: pim.LocalAdmins
+        # for a table that already existed, which then halted an otherwise-successful
+        # deploy with "still reports drift after upgrade". Unknown is reported as unknown
+        # and never drives an upgrade -- the operator is told to fix the connection, which
+        # is the actual problem.
+        if ($hasTable -and $null -eq $DeployedColumns[$table]) {
+            $unknown.Add("$table") | Out-Null
+            $tablePlans.Add([pscustomobject]@{ table = "$table"; exists = $null; conformant = $null; unknown = $true
+                toAdd = @(); toDrop = @(); toMigrate = @() }) | Out-Null
+            continue
+        }
         if (-not $hasTable) {
             $missing.Add("$table") | Out-Null
             $needBecauseCols = $true
@@ -186,7 +201,9 @@ function Get-PimSqlUpdatePlan {
 
     $required = ($needBecauseCols -or $needBecauseVersion)
     $reason =
-        if ($missing.Count -gt 0 -and $needBecauseVersion) { "missing table(s): $($missing -join ', '); + schema version advanced $DeployedSchemaVersion -> $PulledSchemaVersion" }
+        if ($unknown.Count -gt 0 -and -not $required) { "COULD NOT VERIFY $($unknown.Count) table(s) -- the deployed DB was unreadable (check the connection/identity, not the schema): $($unknown -join ', ')" }
+        elseif ($unknown.Count -gt 0) { "$($unknown.Count) table(s) UNVERIFIABLE ($($unknown -join ', ')) -- treat the verdict below as partial; " + $(if ($needBecauseVersion) { "schema version advanced $DeployedSchemaVersion -> $PulledSchemaVersion" } else { 'column drift detected on the tables that COULD be read' }) }
+        elseif ($missing.Count -gt 0 -and $needBecauseVersion) { "missing table(s): $($missing -join ', '); + schema version advanced $DeployedSchemaVersion -> $PulledSchemaVersion" }
         elseif ($missing.Count -gt 0) { "missing table(s) need create: $($missing -join ', ')" }
         elseif ($needBecauseCols -and $needBecauseVersion) { "column drift detected + schema version advanced $DeployedSchemaVersion -> $PulledSchemaVersion" }
         elseif ($needBecauseCols) { 'column drift detected vs the deployed DB (add/drop/migrate)' }
@@ -198,6 +215,10 @@ function Get-PimSqlUpdatePlan {
         reason                = $reason
         tables                = $tablePlans.ToArray()
         missingTables         = $missing.ToArray()
+        # BUG-24: tables whose state could not be READ. Never folded into missingTables --
+        # a caller that halts on drift must be able to tell "the DB says it needs work"
+        # from "I could not ask the DB".
+        unverifiableTables    = $unknown.ToArray()
         deployedSchemaVersion = "$DeployedSchemaVersion"
         pulledSchemaVersion   = "$PulledSchemaVersion"
     }
@@ -240,8 +261,18 @@ function Get-PimUpdateSourceProfile {
                               ring-gated). The CODE update path mirrors the managed tenant's hosting:
                               CENTRAL-hosted (S5) rolls the central ACA revision (acr-build/aca-roll);
                               LOCAL-hosted (S6) does a local build/relaunch -- so the caller passes
-                              -ManagedHosting central|local. ringGated is TRUE; the pull only takes
-                              the ring's approved version (never a version above the tenant's ring).
+                              -ManagedHosting central|local.
+                              ringGated is TRUE = "this scenario CONSUMES a ring plan" (AutomateIT
+                              RING-1 plane 2 -- see engine/_shared/PIM-RingGate.ps1). It is a
+                              DECLARATION, not the gate itself: the decision is made by the vendored
+                              platform core, never by PIM-private hold/allow logic.
+                              ⚠️ This line previously claimed "the pull only takes the ring's
+                              approved version (never a version above the tenant's ring)". That was
+                              NOT true as built -- the master publishes ONE baseline-latest.json and
+                              the managed tenant always pulled latest, ring-filtering only the ADMIN
+                              SET, never the version. The version gate now exists in
+                              Get-PimDownlinkPlan but is OPT-IN via -RingPlan (inert without it, per
+                              the non-breaking rule). See docs/REQUIREMENTS.md sec.33 BUG-29.
       Returns { source; buildMode; deployMode; isHosted; ringGated } -- buildMode in {acr-build,
       local-build}, deployMode in {aca-roll, local-relaunch}.
     #>

@@ -100,6 +100,15 @@ param(
     [ValidatePattern('^[a-p]{32}$')]   # Chromium extension id format
     [string]$ExtensionId = 'eheocihmlppcophaeakmdenhgcookkab',
 
+    # Which extension ids get redirect URIs registered (always merged, never replacing):
+    #   'Both' (DEFAULT) registers the released id AND the TEST id, so prod + test builds
+    #     both sign in from one run with no extra parameters.
+    #   'Released' registers ONLY the released id — a clean customer-tenant deploy with no
+    #     dev/test id.
+    #   'Test' is kept as an alias of 'Both' for back-compat.
+    [ValidateSet('Both','Released','Test')]
+    [string]$Channel = 'Both',
+
     [string]$DisplayName = 'PIM Activator',
 
     [string]$TenantId,
@@ -151,6 +160,19 @@ if ($script:PimActivatorAppOnly) {
     $global:PIM_ClientId       = $AppId
     $global:PIM_CertThumbprint = $CertificateThumbprint
     Import-PaRestPlane
+}
+else {
+    # INTERACTIVE sign-in: route every Graph write through the authenticated Graph SDK
+    # session that Connect-PimActivatorGraph establishes below. The module-free PIM-Rest
+    # data plane acquires its OWN token (MI / secret / cert / az) and CANNOT see the
+    # interactive Connect-MgGraph session — so without this the writes throw
+    # "could not acquire a token" on any machine that has neither az nor an SPN cert.
+    # (This realizes the documented intent: interactive == SDK session pipeline.)
+    $global:PIM_UseGraphSdk = $true
+    # Belt-and-suspenders: if any path still falls through to PIM-Rest, let it PROMPT the
+    # admin to sign in interactively (MSAL) rather than throwing. Headless/engine runs
+    # never set this, so unattended jobs still fail fast instead of hanging on a browser.
+    $global:PIM_InteractiveFallback = $true
 }
 
 # Banner: only assert/load the Graph SDK when we will actually use it (interactive
@@ -381,6 +403,16 @@ $requiredResourceAccess = New-PaRequiredResourceAccess `
 
 $redirectUri = "https://$ExtensionId.chromiumapp.org/"
 
+# Channel controls which extension ids get their redirect URIs registered on the app
+# (always MERGED with whatever is there — never replaces existing URIs):
+#   Both (DEFAULT) -> released $ExtensionId AND the TEST id, so prod + test builds both
+#                     sign in with one run, no extra parameters (operator 2026-06-22).
+#   Released       -> ONLY $ExtensionId (a clean customer-tenant deploy, no dev/test id).
+#   Test           -> same as Both (kept for back-compat).
+$TEST_EXT_ID = 'glldnbmjpdkjemcnficagdhgienfdpoo'
+$additionalExtIds = if ($Channel -ne 'Released' -and $ExtensionId -ne $TEST_EXT_ID) { @($TEST_EXT_ID) } else { @() }
+if ($additionalExtIds.Count -gt 0) { Write-Host "Channel = $Channel -> also registering redirect URIs for test id $TEST_EXT_ID" -ForegroundColor Yellow }
+
 # ---------------------------------------------------------------------------
 # Create or update the app registration
 # ---------------------------------------------------------------------------
@@ -397,7 +429,7 @@ $redirectUri = "https://$ExtensionId.chromiumapp.org/"
 #      'Single-Page Application' client-type"). Both must be SPA type (Public
 #      Client type bounces with the same error). The body builder also wipes
 #      any stale Public Client URI a previous install left behind.
-$existingResp = Invoke-PaGraph -Method GET -Path "/applications?`$filter=displayName eq '$DisplayName'&`$select=id,appId" -All
+$existingResp = Invoke-PaGraph -Method GET -Path "/applications?`$filter=displayName eq '$DisplayName'&`$select=id,appId,spa" -All
 $existing = @($existingResp)
 if ($existing.Count -gt 1) {
     throw "Multiple app registrations named '$DisplayName' already exist. Disambiguate (rename or specify a different -DisplayName) and re-run."
@@ -406,12 +438,17 @@ if ($existing.Count -gt 1) {
 if ($existing.Count -eq 1) {
     $existingApp = $existing[0]
     Write-Host "Updating existing app registration '$DisplayName' (appId $($existingApp.appId))..." -ForegroundColor Yellow
-    $updateBody = New-PaAppRegistrationBody -DisplayName $DisplayName -ExtensionId $ExtensionId -RequiredResourceAccess $requiredResourceAccess
+    # Preserve whatever SPA redirect URIs are already on the app (union), so this
+    # run ADDS the channel's URIs rather than replacing the tenant's existing set.
+    $existingSpa = @()
+    $spaObj = Get-PaProp $existingApp 'spa'
+    if ($spaObj) { $existingSpa = @(Get-PaProp $spaObj 'redirectUris') | Where-Object { $_ } }
+    $updateBody = New-PaAppRegistrationBody -DisplayName $DisplayName -ExtensionId $ExtensionId -RequiredResourceAccess $requiredResourceAccess -AdditionalExtensionIds $additionalExtIds -ExistingSpaRedirectUris $existingSpa
     Invoke-PaGraph -Method PATCH -Path "/applications/$($existingApp.id)" -Body $updateBody | Out-Null
     $app = Invoke-PaGraph -Method GET -Path "/applications/$($existingApp.id)?`$select=id,appId,displayName"
 } else {
     Write-Host "Creating app registration '$DisplayName'..." -ForegroundColor Green
-    $createBody = New-PaAppRegistrationBody -DisplayName $DisplayName -ExtensionId $ExtensionId -RequiredResourceAccess $requiredResourceAccess -IncludeDisplayName
+    $createBody = New-PaAppRegistrationBody -DisplayName $DisplayName -ExtensionId $ExtensionId -RequiredResourceAccess $requiredResourceAccess -AdditionalExtensionIds $additionalExtIds -IncludeDisplayName
     $app = Invoke-PaGraph -Method POST -Path '/applications' -Body $createBody
 }
 

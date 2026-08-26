@@ -120,6 +120,7 @@ Write-Host "SQL transactional store (fake in-memory ADO.NET) -- all-or-nothing a
 # Drive Set-PimSqlEntityRowsTransactional against a fake connection that mutates an
 # in-memory table only on Commit() and discards on Rollback(). Proves a real
 # mid-loop failure (the -FailAfter test seam) leaves pim.Rows unchanged.
+. (Join-Path $root 'engine\_shared\PIM-Rest.ps1')
 . (Join-Path $root 'engine\_shared\PIM-SqlStore.ps1')
 
 # A fake SqlConnection/Transaction/Command backed by a script-scope table.

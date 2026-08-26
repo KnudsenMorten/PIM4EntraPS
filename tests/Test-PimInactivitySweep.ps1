@@ -125,6 +125,75 @@ T 'Enforce opted-in + within cap -> allowed, willDisable 3' ($vOk.allowed -eq $t
 # cleanup tunables
 $global:PIM_DisableMaxCount = $null; $global:PIM_DisableMaxPercent = $null; $global:PIM_AccountDisableEnabled = $null
 
+# === BUG-01: a blocked Enforce sweep must ALERT, not return quietly ==========
+# The guard behaving correctly is only half the job -- if the breaker stops a
+# sweep and says nothing, the operator sees a sweep that "ran", disabled nothing,
+# and reads the estate as clean. Stub the alert so we record the call instead of
+# writing to the console/audit/mail, then prove it fires exactly on the blocked
+# ENFORCE path (and never on an allowed run or in Report mode).
+Write-Host "`n-- BUG-01: blocked Enforce sweep raises the abort alert --" -ForegroundColor Cyan
+$realAlert = (Get-Command Write-PimDisableAbortAlert -EA SilentlyContinue).ScriptBlock
+$script:alertCalls = @()
+function Write-PimDisableAbortAlert { [CmdletBinding()] param([Parameter(Mandatory)][string]$Scope,[Parameter(Mandatory)][object]$Decision)
+    $script:alertCalls += [pscustomobject]@{ scope = $Scope; decision = $Decision } }
+
+# Blocked by G2 (3 disables against a cap of 2) -> exactly one alert, carrying the
+# scope + the SAME verdict the caller returned (so the alert can't describe a
+# different decision than the one that was made).
+$global:PIM_AccountDisableEnabled = $true; $global:PIM_DisableMaxCount = 2; $global:PIM_DisableMaxPercent = 0
+$script:alertCalls = @()
+$vMass2 = Get-PimInactivitySweepDecision -Plan $enf -Desired @(@{x=1}) -DesiredResolved $true -FeatureOverride $true
+T 'BUG-01: blocked Enforce sweep raises exactly ONE alert' (@($script:alertCalls).Count -eq 1)
+T 'BUG-01: alert scope names the sweep'                    (@($script:alertCalls)[0].scope -eq 'inactivity-sweep')
+T 'BUG-01: alert carries the tripped guard (mass-disable)' ("$(@($script:alertCalls)[0].decision.tripped)" -eq 'mass-disable')
+T 'BUG-01: alert decision matches the returned verdict'    ("$(@($script:alertCalls)[0].decision.reason)" -eq "$($vMass2.reason)")
+T 'BUG-01: the sweep still disables nothing'               ($vMass2.allowed -eq $false -and $vMass2.willDisable -eq 0)
+
+# An ALLOWED run must stay silent -- an alert on a healthy sweep is noise, and
+# noise is how a real breaker trip gets ignored.
+$global:PIM_DisableMaxCount = 10
+$script:alertCalls = @()
+$vOk2 = Get-PimInactivitySweepDecision -Plan $enf -Desired @(@{x=1}) -DesiredResolved $true -FeatureOverride $true
+T 'BUG-01: an ALLOWED Enforce sweep raises NO alert' ($vOk2.allowed -eq $true -and @($script:alertCalls).Count -eq 0)
+
+# Report mode never reaches the guard, so it must never alert either.
+$script:alertCalls = @()
+$null = Get-PimInactivitySweepDecision -Plan $rep
+T 'BUG-01: Report mode raises NO alert' (@($script:alertCalls).Count -eq 0)
+
+# The alert must be BEST-EFFORT: a throwing alert must not turn a safe abort into
+# an exception. Prove the caller still returns its blocked verdict.
+function Write-PimDisableAbortAlert { [CmdletBinding()] param([Parameter(Mandatory)][string]$Scope,[Parameter(Mandatory)][object]$Decision)
+    throw 'simulated alert failure (mail/audit down)' }
+$global:PIM_DisableMaxCount = 2
+$vThrow = $null; $threw = $false
+try { $vThrow = Get-PimInactivitySweepDecision -Plan $enf -Desired @(@{x=1}) -DesiredResolved $true -FeatureOverride $true } catch { $threw = $true }
+T 'BUG-01: a FAILING alert never masks the abort (verdict still returned)' (-not $threw -and $vThrow -and $vThrow.allowed -eq $false -and $vThrow.willDisable -eq 0)
+
+# restore the real alert + cleanup tunables
+if ($realAlert) { Set-Item -Path function:Write-PimDisableAbortAlert -Value $realAlert }
+$global:PIM_DisableMaxCount = $null; $global:PIM_DisableMaxPercent = $null; $global:PIM_AccountDisableEnabled = $null
+
+# === BUG-03: the sweep reports the environment the GUARD decided against =====
+# The sweep used to compute `environment` from its OWN -TenantId while the guard
+# resolved the tenant from the ambient global -- so the readout could say
+# environment=test while the decision had applied the PROTECTED default.
+Write-Host "`n-- BUG-03: reported env matches the decision --" -ForegroundColor Cyan
+$global:PIM_TestTenantIds = @('11111111-1111-1111-1111-111111111111')
+Remove-Variable -Name PIM_TenantId -Scope Global -ErrorAction SilentlyContinue
+$global:PIM_AccountDisableEnabled = $null   # let the ENV default decide, as in production
+$global:PIM_DisableMaxCount = 10; $global:PIM_DisableMaxPercent = 0
+$sTest = Get-PimInactivitySweepDecision -Plan $enf -Desired @(@{x=1}) -DesiredResolved $true -TenantId '11111111-1111-1111-1111-111111111111'
+T 'BUG-03: explicit TEST tenant -> env default ON, sweep allowed' ($sTest.allowed -eq $true)
+T 'BUG-03: sweep reports environment=test'                        ("$($sTest.environment)" -eq 'test')
+$sProt = Get-PimInactivitySweepDecision -Plan $enf -Desired @(@{x=1}) -DesiredResolved $true -TenantId '99999999-9999-9999-9999-999999999999'
+T 'BUG-03: explicit UNKNOWN tenant -> protected default, blocked' ($sProt.allowed -eq $false -and "$($sProt.tripped)" -eq 'feature-off')
+T 'BUG-03: sweep reports environment=protected'                   ("$($sProt.environment)" -eq 'protected')
+# The readout can no longer contradict the decision: allowed and environment move together.
+T 'BUG-03: report and decision agree across both tenants' (($sTest.allowed -ne $sProt.allowed) -and ("$($sTest.environment)" -ne "$($sProt.environment)"))
+$global:PIM_TestTenantIds = $null; $global:PIM_AccountDisableEnabled = $null
+$global:PIM_DisableMaxCount = $null; $global:PIM_DisableMaxPercent = $null
+
 # === empty / robustness =====================================================
 Write-Host "`n-- robustness --" -ForegroundColor Cyan
 $empty = Get-PimInactivitySweepPlan -Admins @() -Now $now

@@ -62,6 +62,51 @@ T 'gate still blocks when enforced; super-admin never blocked' {
     finally { Remove-Variable -Name PIM_EnforceProLicense -Scope Global -ErrorAction SilentlyContinue }
 }
 
+Section 'FULL ACCESS BY DEFAULT -- no licence limitation anywhere (operator 2026-08-07)'
+# 🪤 THERE WERE TWO PARALLEL LICENCE GATES AND THEY DISAGREED. PIM-License.ps1's gate
+# honoured "Pro is free by default"; PIM-FeatureCatalog.ps1's Test-PimFeatureAvailable --
+# which is what SIDE-EFFECTING CODE gates on -- ignored enforcement entirely and gated on
+# EDITION alone. So the engine logged "requires Pro -- skipped" and performed no writes for
+# a feature the licence gate was calling free. These assertions pin the two together.
+# The catalog gates are not exported by PIM-Functions.psm1 -- dot-source the file that
+# owns them, which is also exactly how the engine reaches them.
+. (Join-Path $root 'engine\_shared\PIM-FeatureCatalog.ps1')
+T 'the licence gate is NOT enforced by default' { -not (Test-PimLicenseGateActive) }
+T 'EVERY Pro catalog feature is LICENSED by default' {
+    $ed = 'Community'
+    $bad = @(Get-PimFeatureCatalog | Where-Object { "$($_.tier)" -ne 'core' } |
+             Where-Object { -not (Test-PimFeatureLicensed -Key $_.key -Edition $ed) })
+    @($bad).Count -eq 0
+}
+T 'EVERY enabled-by-default Pro feature is AVAILABLE to the engine (the gate that writes)' {
+    $bad = @(Get-PimFeatureCatalog | Where-Object { "$($_.tier)" -ne 'core' -and [bool]$_.defaultEnabled } |
+             Where-Object { -not (Test-PimFeatureAvailable -Key $_.key -Edition 'Community' -Quiet) })
+    @($bad).Count -eq 0
+}
+T 'no dependency issue is invented by licensing on a Community edition' {
+    @(Get-PimFeatureDependencyIssues -Edition 'Community' | Where-Object { "$($_.message)" -match '(?i)pro|licen' }).Count -eq 0
+}
+# ...and the switch still WORKS when a harness turns it on, or the gate would be dead code.
+T 'turning enforcement ON still restricts (the gate is not removed, only unenforced)' {
+    $global:PIM_EnforceProLicense = $true
+    try {
+        $anyRestricted = @(Get-PimFeatureCatalog | Where-Object { "$($_.tier)" -ne 'core' -and "$($_.license)" -eq 'pro' } |
+                           Where-Object { -not (Test-PimFeatureLicensed -Key $_.key -Edition 'Community') })
+        (Test-PimLicenseGateActive) -and (@($anyRestricted).Count -gt 0)
+    } finally { Remove-Variable -Name PIM_EnforceProLicense -Scope Global -ErrorAction SilentlyContinue }
+}
+# The GUI must not invent a lock the backend does not apply.
+T 'the Manager only shows a Pro lock when enforcement is ON' {
+    $html = Get-Content -Raw (Join-Path $root 'tools\pim-manager\pim-manager.html')
+    ($html -match 'const licEnforced = \(p\.licenseEnforced === true\)') -and
+    ($html -match 'const needsPro = licEnforced &&')
+}
+T 'the Manager API reports licenseEnforced so the two cannot drift' {
+    $srv = Get-Content -Raw (Join-Path $root 'tools\pim-manager\Open-PimManager.ps1')
+    ($srv -match 'licenseEnforced\s*=\s*\[bool\]\$licenseEnforced') -and
+    ($srv -match '\$licensed = \(-not \$licenseEnforced\) -or')
+}
+
 Section 'BASELINE COURIER (signature crypto, offline)'
 $blCert = Get-ChildItem Cert:\LocalMachine\My -EA SilentlyContinue | Where-Object { $_.Subject -eq 'CN=PIM4EntraPS-Baseline' -and $_.HasPrivateKey } | Select-Object -First 1
 if ($blCert -and (Has Test-PimBaselineDoc)) {

@@ -21,18 +21,43 @@
 
 Set-StrictMode -Off
 
-# resource (audience) per logical API
-$script:PimRestResources = @{
-  graph    = 'https://graph.microsoft.com'
-  arm      = 'https://management.azure.com'
-  powerbi  = 'https://analysis.windows.net/powerbi/api'
-  defender = 'https://api.securitycenter.microsoft.com'
-  exo      = 'https://outlook.office365.com'   # Exchange Online REST admin API (app-only ManageAsApp)
+# resource (audience) per logical API. Built by a FUNCTION so any scope can re-seed it --
+# see the trap note in Resolve-PimRestResource: a dot-sourced function's $script: follows
+# the CALLER's scope, so a script that loaded PIM-SqlStore without this file found these
+# tables null and silently ended up with no SQL credential at all.
+function Get-PimRestResourceMap {
+  @{
+    graph    = 'https://graph.microsoft.com'
+    arm      = 'https://management.azure.com'
+    powerbi  = 'https://analysis.windows.net/powerbi/api'
+    defender = 'https://api.securitycenter.microsoft.com'
+    exo      = 'https://outlook.office365.com'   # Exchange Online REST admin API (app-only ManageAsApp)
+  }
 }
-$script:PimTokenCache = @{}   # resourceKey -> @{ token; expiresUtc }
+$script:PimRestResources = Get-PimRestResourceMap
+$script:PimTokenCache = @{}   # "audience|tenant|clientId|credentialKind" -> @{ token; expiresUtc }
+
+function Clear-PimRestTokenCache {
+    <#
+      Drop every cached token. The cache is keyed by full identity (BUG-22), so this is
+      NOT needed to switch tenants any more -- it exists for an explicit "forget
+      everything" (a rotated credential mid-process, or a test).
+    #>
+    [CmdletBinding()] param()
+    $script:PimTokenCache = @{}
+}
 
 function Resolve-PimRestResource {
   param([Parameter(Mandatory)][string]$Resource)
+  # 🪤 $script: IS NOT A CLOSURE FOR A DOT-SOURCED FUNCTION. It binds to the script scope
+  # the function is CALLED from, so when another script dot-sources PIM-SqlStore (or the
+  # downlink) WITHOUT this file, these tables are $null there and `.ContainsKey()` throws
+  # "You cannot call a method on a null-valued expression". New-PimSqlConnection catches
+  # that, tries the next credential, and ends up presenting NO credential -- Azure SQL then
+  # answers "Login failed for user ''", which sends everyone looking at permissions.
+  # Re-seeding here makes the alias table work from any scope; the value is a constant map,
+  # so there is nothing to lose by rebuilding it.
+  if (-not $script:PimRestResources) { $script:PimRestResources = Get-PimRestResourceMap }
   if ($script:PimRestResources.ContainsKey($Resource)) { return $script:PimRestResources[$Resource] }
   return ($Resource -replace '/+$','')   # already a full audience URL
 }
@@ -226,12 +251,10 @@ function Get-PimRestToken {
     [switch]$UseManagedIdentity,[switch]$Interactive,[switch]$Force
   )
   $aud = Resolve-PimRestResource -Resource $Resource
-  $key = $aud.ToLowerInvariant()
-  if (-not $Force -and $script:PimTokenCache.ContainsKey($key)) {
-    $e = $script:PimTokenCache[$key]
-    if ($e.expiresUtc -gt (Get-Date).ToUniversalTime().AddMinutes(2)) { return $e.token }
-  }
 
+  # The identity is resolved BEFORE the cache is consulted, because it is part of the
+  # cache key. See BUG-22 below -- this ordering is the fix, do not move the lookup back
+  # above these lines.
   $tenant = Get-PimTenantId -TenantId $TenantId
   $cid    = if ($ClientId) { $ClientId } elseif ($global:PIM_ClientId) { $global:PIM_ClientId } elseif ($env:AZURE_CLIENT_ID) { $env:AZURE_CLIENT_ID } else { $null }
   $sec    = if ($ClientSecret) { $ClientSecret } elseif ($global:PIM_ClientSecret) { $global:PIM_ClientSecret } elseif ($env:AZURE_CLIENT_SECRET) { $env:AZURE_CLIENT_SECRET } else { $null }
@@ -240,6 +263,34 @@ function Get-PimRestToken {
   # PIM4EntraPS-Engine cert in LocalMachine\My / CurrentUser\My.
   $thumb  = if ($CertThumbprint) { $CertThumbprint } elseif ($global:PIM_CertThumbprint) { $global:PIM_CertThumbprint } elseif ($env:PIM_CERT_THUMBPRINT) { $env:PIM_CERT_THUMBPRINT } else { $null }
   $cert   = if ($Certificate) { $Certificate } else { Resolve-PimCertificate -Thumbprint $thumb }
+
+  # BUG-22 (2026-08-06): this cache was keyed by the AUDIENCE ALONE -- no tenant, no client
+  # id. In any process that touches TWO tenants, the second one silently reused the first
+  # one's token, so every call meant for tenant B went to tenant A. That is precisely the
+  # MSP master->slave fanout this product exists to run, and the failure is invisible: the
+  # calls SUCCEED, against the wrong directory.
+  #
+  # Proven live: an S6 (local-slave) run targeting a tenant with ZERO PIM groups reported
+  # "Groups live=85" -- the MASTER's group count -- and the verifier then found all six
+  # groups missing from the slave it was supposed to be managing. A write-shaped run would
+  # have applied the customer's desired state to the MSP's own tenant.
+  #
+  # The key is now the full identity: audience + tenant + client + credential KIND (and the
+  # cert thumbprint, so rotating a cert re-mints rather than serving the old token). No
+  # secret material goes into the key.
+  $mode = if ($Interactive -or $global:PIM_Interactive) { 'interactive' }
+          elseif ($UseManagedIdentity -or $global:PIM_UseManagedIdentity -or ($env:IDENTITY_ENDPOINT -and -not $cid)) { 'mi' }
+          elseif ($sec) { 'secret' }
+          elseif ($cert) { "cert:$thumb" }
+          else { 'unknown' }
+  $key = ("$aud|$tenant|$cid|$mode").ToLowerInvariant()
+  # same cross-scope guard as Resolve-PimRestResource: an unseeded cache must mean "cache
+  # miss", never a thrown method call that the caller reads as "authentication failed".
+  if (-not $script:PimTokenCache) { $script:PimTokenCache = @{} }
+  if (-not $Force -and $script:PimTokenCache.ContainsKey($key)) {
+    $e = $script:PimTokenCache[$key]
+    if ($e.expiresUtc -gt (Get-Date).ToUniversalTime().AddMinutes(2)) { return $e.token }
+  }
 
   $res = $null
   # Explicit interactive request (break-glass): sign in as the human up front.
@@ -271,10 +322,142 @@ function Get-PimRestToken {
       }
     } catch {}
   }
+  # LAST-RESORT interactive prompt — ONLY when an attended caller opts in via
+  # $global:PIM_InteractiveFallback (the interactive admin tools set this; the engine /
+  # headless cron NEVER does, so an unattended run still fails fast instead of hanging on
+  # a browser prompt). This is what makes the admin deploy scripts "just sign me in" when
+  # no MI/secret/cert/az session is available, rather than throwing.
+  if (-not $res -and $global:PIM_InteractiveFallback) {
+    Write-Host "PIM-Rest: no MI/secret/cert/az token for '$Resource' -- falling back to interactive sign-in..." -ForegroundColor Yellow
+    try { $res = Get-PimInteractiveToken -Audience $aud -TenantId $tenant } catch { Write-Verbose "PIM-Rest interactive fallback failed for ${Resource}: $($_.Exception.Message)" }
+  }
   if (-not $res) { throw "PIM-Rest: could not acquire a token for '$Resource'. Provide MI, ClientId+Secret/Cert (+TenantId), -Interactive (break-glass), or run az login." }
 
   $script:PimTokenCache[$key] = $res
   return $res.token
+}
+
+# ---- REST error reporting (BUG-27) ----------------------------------------
+# A REST failure used to be logged as, verbatim:
+#     PUT https://management.azure.com/.../roleEligibilityScheduleRequests/...
+#         -> HTTP 409 :
+# The colon is where the reason should be. ARM had actually answered
+#     { "error": { "code": "ReadOnlyDisabledSubscription",
+#                  "message": "The subscription '...' is disabled and therefore
+#                              marked as read only." } }
+# and the engine threw it away. Three wrong hypotheses were checked with live ARM
+# queries before replaying the same PUT by hand produced the answer instantly.
+#
+# The whole audit rests on believing what the engine reports: a scope reporting
+# "errors=1" with no cause is indistinguishable from a real code defect. In a
+# customer tenant the same line is a support round-trip instead of a fix.
+# ---------------------------------------------------------------------------
+
+function Get-PimRestErrorBody {
+  <#
+    Read the error body from a terminating REST error, from BOTH sources.
+
+    🪤 The old code was `if (ErrorDetails.Message) {...} else { read the stream }`. On
+    Windows PowerShell 5.1 ErrorDetails.Message is frequently PRESENT BUT EMPTY, so the
+    else-branch never ran and the stream -- which held the real answer -- was never read.
+    Take the LONGER of the two instead of trusting either.
+  #>
+  [CmdletBinding()] param([Parameter(Mandatory)][object]$ErrorRecord)
+  $fromDetails = ''
+  try { if ($ErrorRecord.ErrorDetails) { $fromDetails = "$($ErrorRecord.ErrorDetails.Message)" } } catch {}
+  $fromStream = ''
+  try {
+    $resp = $ErrorRecord.Exception.Response
+    if ($resp) {
+      $stream = $resp.GetResponseStream()
+      if ($stream) {
+        # The stream may already have been consumed; rewind when we are allowed to.
+        try { if ($stream.CanSeek) { $stream.Position = 0 } } catch {}
+        $sr = New-Object System.IO.StreamReader($stream)
+        try { $fromStream = $sr.ReadToEnd() } finally { $sr.Dispose() }
+      }
+    }
+  } catch {}
+  if ("$fromStream".Trim().Length -gt "$fromDetails".Trim().Length) { return $fromStream }
+  return $fromDetails
+}
+
+function Get-PimRestErrorDetail {
+  <#
+    PURE. Turn an ARM/Graph error body into the SHORT reason a human needs.
+
+    Returns "<code> -- <message>", or $null when the body carries nothing usable (the
+    caller must then say so explicitly rather than printing an empty reason).
+
+    🔒 CODE + MESSAGE ONLY, NEVER THE WHOLE BODY. The raw body can carry subscription
+    ids, principal ids and request ids; it is also mostly noise. code+message is the
+    part that ends the diagnosis, so it is the right amount to log.
+
+    Handles the shapes both APIs actually return:
+      ARM      { "error": { "code": ..., "message": ... } }
+      Graph    { "error": { "code": ..., "message": ..., "innerError": {...} } }
+      flat     { "code": ..., "message": ... }
+      odata    { "odata.error": { "code": ..., "message": { "value": ... } } }
+      non-JSON (HTML error pages, plain text) -- returned trimmed + truncated.
+  #>
+  [CmdletBinding()] param([Parameter()][AllowNull()][AllowEmptyString()][string]$Body, [int]$MaxLength = 400)
+
+  $raw = "$Body".Trim()
+  if (-not $raw) { return $null }
+
+  $obj = $null
+  try { $obj = $raw | ConvertFrom-Json } catch { $obj = $null }
+
+  # Property lookup is CASE-INSENSITIVE. `-contains` is not, and Azure is not consistent:
+  # ARM/Graph send "message", some services send "Message". A case-sensitive check would
+  # silently miss those and fall through to printing the raw body.
+  $prop = {
+    param($o, $name)
+    try { foreach ($p in $o.PSObject.Properties) { if ("$($p.Name)" -ieq "$name") { return $p.Value } } } catch {}
+    return $null
+  }
+
+  if ($obj) {
+    $err = $null
+    foreach ($k in @('error', 'odata.error')) {
+      $v = & $prop $obj $k
+      if ($null -ne $v) { $err = $v; break }
+    }
+    if ($null -eq $err) { $err = $obj }          # flat { code, message }
+
+    $code = "$(& $prop $err 'code')".Trim()
+    $m = & $prop $err 'message'
+    $msg = ''
+    if ($null -ne $m) {
+      # odata nests the text one level deeper: message.value
+      if ($m -isnot [string]) {
+        $inner = & $prop $m 'value'
+        $msg = if ($null -ne $inner) { "$inner".Trim() } else { "$m".Trim() }
+      } else { $msg = "$m".Trim() }
+    }
+
+    if ($code -or $msg) {
+      $joined = if ($code -and $msg) { "$code -- $msg" } elseif ($code) { $code } else { $msg }
+      $joined = ($joined -replace '\s+', ' ').Trim()
+      if ($joined.Length -gt $MaxLength) { $joined = $joined.Substring(0, $MaxLength) + '...' }
+      return $joined
+    }
+
+    # Valid JSON that carries no code and no message -- e.g. "{}". Echoing it back would
+    # print "HTTP 409 : {}", which is exactly as useless as the empty colon this whole
+    # function exists to eliminate. Report NOTHING USABLE and let the caller say so.
+    $hasAny = $false
+    try { $hasAny = @($obj.PSObject.Properties).Count -gt 0 } catch {}
+    if (-not $hasAny) { return $null }
+  }
+
+  # Not JSON (HTML error page, plain text), or JSON whose useful part we could not name:
+  # return it trimmed + truncated. Better than nothing, and still bounded -- an error
+  # page must not flood the log.
+  $flat = ($raw -replace '\s+', ' ').Trim()
+  if (-not $flat) { return $null }
+  if ($flat.Length -gt $MaxLength) { $flat = $flat.Substring(0, $MaxLength) + '...' }
+  return $flat
 }
 
 # ---- data plane -----------------------------------------------------------
@@ -298,6 +481,7 @@ function Invoke-PimRest {
     while ($true) {
       try {
         $args = @{ Method = $Method; Uri = $next; Headers = $h }
+        # (see Get-PimRestErrorBody / Get-PimRestErrorDetail above for the failure path)
         if ($null -ne $Body -and $Method -ne 'GET') {
           $args.Body = if ($Body -is [string]) { $Body } else { $Body | ConvertTo-Json -Depth 20 }
           $args.ContentType = 'application/json'
@@ -306,10 +490,11 @@ function Invoke-PimRest {
         break
       } catch {
         $code = $null; try { $code = [int]$_.Exception.Response.StatusCode } catch {}
-        # surface the API error body (PS7: ErrorDetails.Message; PS5: response stream)
-        $body = $null
-        if ($_.ErrorDetails -and $_.ErrorDetails.Message) { $body = $_.ErrorDetails.Message }
-        else { try { $sr = New-Object System.IO.StreamReader($_.Exception.Response.GetResponseStream()); $body = $sr.ReadToEnd() } catch {} }
+        # BUG-27: surface the API error body. Try BOTH sources and keep the longer of the
+        # two -- on 5.1 ErrorDetails.Message is frequently present but EMPTY, and the old
+        # `if/else` took it and never looked at the stream, which is how a real ARM
+        # explanation became the bare log line "-> HTTP 409 :" (note the empty colon).
+        $body = Get-PimRestErrorBody -ErrorRecord $_
         # retry transient + freshly-created-principal replication (ARM 400 PrincipalNotFound)
         $isReplDelay = ($code -eq 400 -and "$body" -match 'PrincipalNotFound|does not exist in the directory')
         if (($code -eq 429 -or $code -ge 500 -or $isReplDelay) -and $attempt -lt $MaxRetry) {
@@ -329,9 +514,16 @@ function Invoke-PimRest {
                 if ($h) { $hintText = "  >> $($h.Hint)" }
             } catch {}
         }
-        if ($body) { throw "$Method $next -> HTTP $code : $body$hintText" }
-        if ($hintText) { throw "$Method $next -> HTTP $code$hintText" }
-        throw
+        # BUG-27: report error.code + error.message, NOT the raw body. The raw body can
+        # carry ids and is usually mostly noise; code+message is the part that ends the
+        # diagnosis. And a body that yields nothing usable must SAY SO -- "HTTP 409 :"
+        # with an empty reason reads as "no reason exists", which sent a whole session
+        # chasing three wrong hypotheses while ARM had the answer all along
+        # ("ReadOnlyDisabledSubscription -- the subscription is disabled and therefore
+        # marked as read only").
+        $detail = Get-PimRestErrorDetail -Body $body
+        if ($detail) { throw "$Method $next -> HTTP $code : $detail$hintText" }
+        throw "$Method $next -> HTTP $code : (no error body returned by the service)$hintText"
       }
     }
     if (-not $All) { return $resp }

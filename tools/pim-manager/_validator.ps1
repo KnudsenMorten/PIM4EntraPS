@@ -1,4 +1,9 @@
 #Requires -Version 5.1
+# IMP-02: the locale-safe stamp reader. Loaded defensively so this file stays correct
+# when it is dot-sourced without the full PIM-Functions module.
+if (-not (Get-Command Get-PimUtcStamp -ErrorAction SilentlyContinue)) {
+    . (Join-Path $PSScriptRoot '..\..\engine\_shared\PIM-DateSafe.ps1')
+}
 <#
 .SYNOPSIS
     Pre-flight validator for PIM Manager.
@@ -220,8 +225,11 @@ function Get-PimCacheFreshness {
                     $raw = [System.IO.File]::ReadAllText($f, [System.Text.UTF8Encoding]::new($false))
                     if ($raw.Length -gt 0 -and [int][char]$raw[0] -eq 0xFEFF) { $raw = $raw.Substring(1) }
                     $parsed = $raw | ConvertFrom-Json
-                    if ($parsed -and $parsed.refreshedUtc) {
-                        $t = [datetime]::Parse($parsed.refreshedUtc).ToUniversalTime()
+                    # IMP-02: was an unguarded [datetime]::Parse -- a malformed stamp threw
+                    # instead of reporting 'stale'. Unreadable now means stale, which is the
+                    # safe reading of "we cannot prove this cache is fresh".
+                    $t = if ($parsed) { Get-PimUtcStamp $parsed.refreshedUtc } else { $null }
+                    if ($null -ne $t) {
                         $ageH = ($now - $t).TotalHours
                         $state = if ($ageH -lt $staleAfterHours) { 'live' } else { 'stale' }
                     } else {
@@ -361,7 +369,7 @@ function Invoke-PimPreflightValidation {
     }
 
     # Admin UPNs (auto-derive if missing per the engine pattern).
-    $adminIndex = @{} # upn-lower -> @{ Row, TierLevel, TargetPlatform, CreateTAP, AccountStatus, StatusChangeCode, ForwardMailsToContact, MailForwardAddress, UserName, Upn }
+    $adminIndex = @{} # upn-lower -> @{ Row, TierLevel, TargetPlatform, CreateTAP, AccountStatus, StatusChangeCode, UserName, Upn }
     $defaultDomain = if ($global:DefaultDomainUPN) { [string]$global:DefaultDomainUPN } else { $null }
     if ($loaded.ContainsKey('Account-Definitions-Admins')) {
         $adminRows = $loaded['Account-Definitions-Admins'].rows
@@ -383,8 +391,6 @@ function Invoke-PimPreflightValidation {
                     CreateTAP       = (Get-PimRowValue -Row $r -Column 'CreateTAP').ToUpperInvariant()
                     AccountStatus   = Get-PimRowValue -Row $r -Column 'AccountStatus'
                     StatusChangeCode= Get-PimRowValue -Row $r -Column 'StatusChangeCode'
-                    ForwardMailsToContact = (Get-PimRowValue -Row $r -Column 'ForwardMailsToContact').ToUpperInvariant()
-                    MailForwardAddress    = Get-PimRowValue -Row $r -Column 'MailForwardAddress'
                 }
             }
         }
@@ -931,27 +937,36 @@ function Invoke-PimPreflightValidation {
     }
 
     # ------------------------------------------------------------------
-    # PIM-DOMAIN-001: a REAL forward address is configured but forwarding is off.
+    # PIM-DOMAIN-001: a RETIRED forward column still carries a real address.
     # ------------------------------------------------------------------
-    # The genuine misconfiguration is: someone typed an actual email address into
-    # MailForwardAddress but left ForwardMailsToContact off, so the engine will
-    # silently ignore the address. It is NOT a misconfiguration when the address
-    # column holds a "no address" sentinel ('FALSE'/''/'no'/'0'/...): both off is
-    # a consistent "no forwarding" state. Test-PimMailForwardAddressIsReal is the
-    # single source of truth shared with the engine apply path.
+    # RETIRED 2026-08-12. This check used to say "you set MailForwardAddress but left
+    # ForwardMailsToContact off -- turn the forward ON". That advice is now WRONG: mail
+    # forwarding required the ADMIN ACCOUNT to hold an Exchange licence, and the design
+    # deliberately removed that -- notification mail is sent FROM a shared mailbox the
+    # engine SPN is scoped to, so an admin needs no mailbox at all.
+    #
+    # The check is repurposed rather than deleted, because the SAFETY PROPERTY still
+    # matters and now applies more widely: a real address sitting in a retired column is
+    # configuration the operator believes is live, and the engine ignores it silently.
+    # That is the same "misleading config" failure, so it must still be surfaced -- only
+    # the remedy changes. Fires regardless of the flag, since BOTH columns are retired.
     if ($loaded.ContainsKey('Account-Definitions-Admins')) {
         $rows = $loaded['Account-Definitions-Admins'].rows
         for ($i = 0; $i -lt $rows.Count; $i++) {
             $r = $rows[$i]
             if (Test-PimRowIsBlank -Row $r) { continue }
             $addr = Get-PimRowValue -Row $r -Column 'MailForwardAddress'
-            $fwd  = (Get-PimRowValue -Row $r -Column 'ForwardMailsToContact').ToUpperInvariant()
-            if ((Test-PimMailForwardAddressIsReal -Value $addr) -and $fwd -ne 'TRUE') {
-                $upn = Get-PimRowValue -Row $r -Column 'UserPrincipalName'
-                [void]$violations.Add((New-PimViolation -Severity 'warning' -Code 'PIM-DOMAIN-001' -Csv 'Account-Definitions-Admins' -Row $i -Column 'MailForwardAddress' `
-                    -Message "MailForwardAddress='$addr' is a real address for '$upn' but ForwardMailsToContact='$fwd' -- engine will ignore the forward address." `
-                    -Suggestion "Either set ForwardMailsToContact=TRUE to activate the forward, or clear MailForwardAddress to remove the misleading config."))
+            if (-not (Test-PimMailForwardAddressIsReal -Value $addr)) { continue }
+            $upn = Get-PimRowValue -Row $r -Column 'UserPrincipalName'
+            $mgr = Get-PimRowValue -Row $r -Column 'ManagerEmail'
+            $msg = "MailForwardAddress='$addr' is set for '$upn', but ForwardMailsToContact/MailForwardAddress are RETIRED -- the engine ignores them and mailbox forwarding is no longer performed."
+            $sug = if ("$mgr".Trim()) {
+                "Clear MailForwardAddress. Notification/TAP mail already goes to ManagerEmail='$mgr'."
+            } else {
+                "Move the address to ManagerEmail (that is where notification/TAP mail is sent) and clear MailForwardAddress."
             }
+            [void]$violations.Add((New-PimViolation -Severity 'warning' -Code 'PIM-DOMAIN-001' -Csv 'Account-Definitions-Admins' -Row $i -Column 'MailForwardAddress' `
+                -Message $msg -Suggestion $sug))
         }
     }
 
@@ -1364,7 +1379,8 @@ function Invoke-PimPreflightValidation {
             $g = $groupTagIndex[$key]
             $last = if ($actByTag.ContainsKey($key)) { $actByTag[$key] } else { $null }
             $ageDays = $null
-            if ($last) { try { $ageDays = ($nowUtc - ([datetime]::Parse($last)).ToUniversalTime()).TotalDays } catch { $ageDays = $null } }
+            # IMP-02: locale-safe; the helper never throws, so the catch is no longer load-bearing.
+            if ($last) { $lastDt = Get-PimUtcStamp $last; if ($null -ne $lastDt) { $ageDays = ($nowUtc - $lastDt).TotalDays } }
             if (($null -eq $last) -or ($null -ne $ageDays -and $ageDays -gt $staleDays)) {
                 $detail = if ($null -eq $last) { "never activated" } else { "last activated $([int]$ageDays) days ago" }
                 [void]$violations.Add((New-PimViolation -Severity 'info' -Code 'PIM-STALE-003' -Csv $g.Csv -Row $g.Row -Column 'GroupTag' `

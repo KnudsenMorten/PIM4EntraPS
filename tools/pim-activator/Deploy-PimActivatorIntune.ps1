@@ -108,6 +108,17 @@ param(
     [Parameter()]
     [string]$DisplayName = '[PimActivator] client settings',
 
+    # Update channel. 'Test' creates a SEPARATE Intune profile for the test build:
+    # targets the test extension id + updates-test.xml + a "[PimActivator] DEV
+    # settings" profile name (each still overridable by the explicit params below).
+    # 'Released' (default) is unchanged. Mirrors Update-PimActivator-Extension.ps1.
+    # The SAME tenant catalog is used for both channels -- pass your usual
+    # -CatalogJsonPath; only the targeted extension id / update URL / profile name
+    # differ, so the test policy can be scoped to your internal/dev device group.
+    [Parameter()]
+    [ValidateSet('Released','Test')]
+    [string]$Channel = 'Released',
+
     [Parameter()]
     [ValidatePattern('^[a-p]{32}$')]
     [string]$ExtensionId = 'eheocihmlppcophaeakmdenhgcookkab',
@@ -176,10 +187,34 @@ param(
     # mechanism as Deploy-PimActivatorBackend.ps1; see _PimActivatorAuth.ps1.
     # Pass -UseEdge:$false to fall back to MSAL's default-browser flow.
     [Parameter()]
-    [switch]$UseEdge = $true
+    [switch]$UseEdge = $true,
+
+    # App-only (certificate) sign-in for headless / SPN automation. Supply
+    # -AppId + -CertificateThumbprint + -SpnTenantId to connect app-only and skip
+    # the interactive Edge flow. The SPN must hold the APPLICATION Graph roles the
+    # run needs (DeviceManagementConfiguration.ReadWrite.All; plus Organization.Read.All
+    # + Application.Read.All for catalog auto-discovery) AND a directory role that
+    # authorizes Intune writes (Intune Administrator / Global Administrator).
+    [Parameter()]
+    [string]$AppId,
+    [Parameter()]
+    [string]$CertificateThumbprint,
+    [Parameter()]
+    [string]$SpnTenantId
 )
 
 $ErrorActionPreference = 'Stop'
+
+# ---- Channel defaults (Test creates a SEPARATE policy) ---------------------
+# When -Channel Test and the operator didn't explicitly override, point the policy
+# at the test extension id + updates-test.xml + a distinct profile name, so it lands
+# as its OWN Intune profile alongside the released one (scope it to your test group).
+if ($Channel -eq 'Test') {
+    if (-not $PSBoundParameters.ContainsKey('ExtensionId')) { $ExtensionId = 'glldnbmjpdkjemcnficagdhgienfdpoo' }
+    if (-not $PSBoundParameters.ContainsKey('UpdateUrl'))   { $UpdateUrl   = 'https://knudsenmorten.github.io/PIM4EntraPS/updates-test.xml' }
+    if (-not $PSBoundParameters.ContainsKey('DisplayName')) { $DisplayName = '[PimActivator] TEST settings' }
+    Write-Host "Channel = TEST -> profile '$DisplayName', id $ExtensionId, $UpdateUrl" -ForegroundColor Yellow
+}
 
 # Shared auth machinery: version banner, Graph SDK version-conflict check,
 # Edge-forced PKCE sign-in, session probe/heal.
@@ -203,7 +238,13 @@ if (-not $Remove -and -not $CatalogJsonPath) {
     $_requiredScopes += 'Organization.Read.All'                      # tenant id + display name via /organization
     if (-not $ClientId) { $_requiredScopes += 'Application.Read.All' }  # auto-discover the app reg by displayName
 }
-$ctx = Connect-PimActivatorGraph -RequiredScopes $_requiredScopes -UseEdge:([bool]$UseEdge)
+$_connectArgs = @{ RequiredScopes = $_requiredScopes; UseEdge = [bool]$UseEdge }
+if ($AppId -and $CertificateThumbprint) {
+    $_connectArgs['AppId'] = $AppId
+    $_connectArgs['CertificateThumbprint'] = $CertificateThumbprint
+    if ($SpnTenantId) { $_connectArgs['TenantId'] = $SpnTenantId }
+}
+$ctx = Connect-PimActivatorGraph @_connectArgs
 Write-Host "Connected to tenant $($ctx.TenantId) as $($ctx.Account)" -ForegroundColor Gray
 
 # Intune authorizes WRITES by directory role, not by the Graph scope --
@@ -371,10 +412,21 @@ if (-not $Remove) {
 # when missing. Previously this was a separate script
 # (Push-PimActivatorADMXToIntune.ps1); folded inline 2026-06-10 to make
 # Deploy-PimActivatorIntune.ps1 the ONLY Intune script the operator runs.
-$admxPath  = Join-Path $PSScriptRoot 'intune\PIM4EntraPS.PimActivator.admx'
-$admlPath  = Join-Path $PSScriptRoot 'intune\en-US\PIM4EntraPS.PimActivator.adml'
-$admxFileName = if (Test-Path -LiteralPath $admxPath) { Split-Path -Leaf $admxPath } else { 'PIM4EntraPS.PimActivator.admx' }
-$admxTargetNamespace = 'MortenKnudsen.PIM4EntraPS.PimActivator'
+# Channel-aware: the TEST channel uses a SEPARATE ADMX (its own extension id in
+# the registry key path + its own namespace/category), ingested as its own
+# uploaded definition file so it never touches the released definitions and the
+# two channels' catalog settings coexist on one device with no conflict.
+if ($Channel -eq 'Test') {
+    $admxPath  = Join-Path $PSScriptRoot 'intune\PIM4EntraPS.PimActivatorTest.admx'
+    $admlPath  = Join-Path $PSScriptRoot 'intune\en-US\PIM4EntraPS.PimActivatorTest.adml'
+    $admxFileName = if (Test-Path -LiteralPath $admxPath) { Split-Path -Leaf $admxPath } else { 'PIM4EntraPS.PimActivatorTest.admx' }
+    $admxTargetNamespace = 'MortenKnudsen.PIM4EntraPS.PimActivatorTest'
+} else {
+    $admxPath  = Join-Path $PSScriptRoot 'intune\PIM4EntraPS.PimActivator.admx'
+    $admlPath  = Join-Path $PSScriptRoot 'intune\en-US\PIM4EntraPS.PimActivator.adml'
+    $admxFileName = if (Test-Path -LiteralPath $admxPath) { Split-Path -Leaf $admxPath } else { 'PIM4EntraPS.PimActivator.admx' }
+    $admxTargetNamespace = 'MortenKnudsen.PIM4EntraPS.PimActivator'
+}
 # v2.4.151: list ALL uploaded definition files and match by fileName OR
 # targetNamespace. A half-removed ghost row can keep OWNING the namespace
 # while no longer matching a fileName filter -- Intune then mangles the new
@@ -605,7 +657,14 @@ if ($CatalogJsonPath) {
     $scopesNeeded = @('DeviceManagementConfiguration.ReadWrite.All', 'Organization.Read.All')
     if (-not $ClientId) { $scopesNeeded += 'Application.Read.All' }
     $missing = $scopesNeeded | Where-Object { $_ -notin (Get-MgContext).Scopes }
-    if ($missing -and (Get-MgContext).TokenCredentialType -ne 'UserProvidedAccessToken') {
+    # Skip the delegated re-connect for APP-ONLY (cert/SPN) sessions: an app-only
+    # token carries APP ROLES (e.g. Organization.ReadWrite.All, which covers the
+    # Read need) that won't string-match the delegated scope names, and a
+    # `Connect-MgGraph -Scopes` here would clobber the app-only session (-> the
+    # "Authentication needed" failure). Also skip for pre-provided access tokens.
+    if ($missing `
+        -and (Get-MgContext).TokenCredentialType -ne 'UserProvidedAccessToken' `
+        -and (Get-MgContext).AuthType -ne 'AppOnly') {
         Connect-MgGraph -Scopes $scopesNeeded -NoWelcome -ErrorAction Stop | Out-Null
     }
 
@@ -708,18 +767,24 @@ $browsersToInclude = switch ($Browser) {
 #               disables every auto-update from a narrower-permission install
 #               and DeveloperToolsAvailability=2 hides the Enable button)
 #   Catalog   : tenant catalog JSON via chrome.storage.managed (custom ADMX)
+# Catalog policy comes from the channel-specific ADMX (released vs TEST), so its
+# displayName + category differ by channel (the TEST ADMX writes the TEST id's
+# registry path under its own category).
+$catCat    = if ($Channel -eq 'Test') { '\PIM4EntraPS (TEST)\PIM Activator TEST' } else { '\PIM4EntraPS\PIM Activator' }
+$catEdge   = if ($Channel -eq 'Test') { 'Tenant catalog (TEST) -- Microsoft Edge' } else { 'Tenant catalog -- Microsoft Edge' }
+$catChrome = if ($Channel -eq 'Test') { 'Tenant catalog (TEST) -- Google Chrome'  } else { 'Tenant catalog -- Google Chrome'  }
 $policyMap = @{
     Edge   = @{
         Forcelist = @{ displayName = 'Control which extensions are installed silently';     categoryPath = '\Microsoft Edge\Extensions' }
         Sources   = @{ displayName = 'Configure extension and user script install sources'; categoryPath = '\Microsoft Edge\Extensions' }
         Settings  = @{ displayName = 'Extension management settings';                       categoryPath = '\Microsoft Edge\Extensions' }
-        Catalog   = @{ displayName = 'Tenant catalog -- Microsoft Edge';                    categoryPath = '\PIM4EntraPS\PIM Activator' }
+        Catalog   = @{ displayName = $catEdge;                                              categoryPath = $catCat }
     }
     Chrome = @{
         Forcelist = @{ displayName = 'Configure the list of force-installed apps and extensions';        categoryPath = '\Google\Google Chrome\Extensions' }
         Sources   = @{ displayName = 'Configure extension, app, and user script install sources';        categoryPath = '\Google\Google Chrome\Extensions' }
         Settings  = @{ displayName = 'Extension management settings';                                    categoryPath = '\Google\Google Chrome\Extensions' }
-        Catalog   = @{ displayName = 'Tenant catalog -- Google Chrome';                                  categoryPath = '\PIM4EntraPS\PIM Activator' }
+        Catalog   = @{ displayName = $catChrome;                                                         categoryPath = $catCat }
     }
 }
 
@@ -737,7 +802,12 @@ $resolved = @{}
 # Forcelist is resolved, because the [SKIP] message prints its exact Intune
 # setting name + category so the operator can configure it manually later.
 # Only the WRITE is skipped (write loop below).
-$policyKeys = @('Forcelist','Sources','Settings','Catalog')
+# TEST channel SKIPS ExtensionSettings: it is a SINGLE-instance Settings-Catalog
+# policy (one JSON for all extensions), so a second profile setting it conflicts
+# with the released profile. The TEST extension doesn't need the <all_urls>
+# runtime pre-grant on a fresh install (the permission-expansion gate only bites
+# on update-from-narrower-host-permissions, which a fresh TEST install isn't).
+$policyKeys = if ($Channel -eq 'Test') { @('Forcelist','Sources','Catalog') } else { @('Forcelist','Sources','Settings','Catalog') }
 foreach ($b in $browsersToInclude) {
     $resolved[$b] = @{}
     foreach ($k in $policyKeys) {
@@ -851,12 +921,18 @@ foreach ($b in $browsersToInclude) {
     # ExtensionSettings: single JSON string. Pre-grants <all_urls> runtime
     # hosts for our ext id so Chrome's permission-expansion gate skips the
     # auto-update silent-disable. Only takes effect for THIS extension id.
-    $defXS = $resolved[$b]['Settings'].Definition
-    $prXS  = $resolved[$b]['Settings'].Presentations | Where-Object { $_.'@odata.type' -match 'TextBox|Text$' } | Select-Object -First 1
-    if (-not $prXS) { $prXS = $resolved[$b]['Settings'].Presentations | Select-Object -First 1 }
-    $bodyXS = (New-DefValue -Definition $defXS -Presentation $prXS -Kind Text -Value $extSettingsJson) | ConvertTo-Json -Depth 20
-    Invoke-MgGraphRequest -Method POST -Uri "https://graph.microsoft.com/beta/deviceManagement/groupPolicyConfigurations/$profileId/definitionValues" -Body $bodyXS -ContentType 'application/json' -ErrorAction Stop | Out-Null
-    Write-Host "  [OK] $b ExtensionSettings set (runtime_allowed_hosts=<all_urls> for $ExtensionId -- bypasses permission-expansion gate)" -ForegroundColor Green
+    # SKIPPED on the TEST channel: it's a single-instance policy that would
+    # conflict with the released profile (see $policyKeys note above).
+    if ($Channel -eq 'Test') {
+        Write-Host "  [SKIP] $b ExtensionSettings -- single-instance policy owned by the released profile; TEST install doesn't need the runtime pre-grant." -ForegroundColor Yellow
+    } else {
+        $defXS = $resolved[$b]['Settings'].Definition
+        $prXS  = $resolved[$b]['Settings'].Presentations | Where-Object { $_.'@odata.type' -match 'TextBox|Text$' } | Select-Object -First 1
+        if (-not $prXS) { $prXS = $resolved[$b]['Settings'].Presentations | Select-Object -First 1 }
+        $bodyXS = (New-DefValue -Definition $defXS -Presentation $prXS -Kind Text -Value $extSettingsJson) | ConvertTo-Json -Depth 20
+        Invoke-MgGraphRequest -Method POST -Uri "https://graph.microsoft.com/beta/deviceManagement/groupPolicyConfigurations/$profileId/definitionValues" -Body $bodyXS -ContentType 'application/json' -ErrorAction Stop | Out-Null
+        Write-Host "  [OK] $b ExtensionSettings set (runtime_allowed_hosts=<all_urls> for $ExtensionId -- bypasses permission-expansion gate)" -ForegroundColor Green
+    }
 
     # Tenant catalog: single JSON string
     $defTC = $resolved[$b]['Catalog'].Definition

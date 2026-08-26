@@ -1,0 +1,28 @@
+{
+  "id": "EntraIDRoles_Standard",
+  "name": "Entra ID roles -- standard",
+  "appliesTo": "DirectoryRole",
+  "description": "The EXPLICIT baseline for an Entra ID DIRECTORY ROLE policy. This is the engine's own definition of how a directory-role policy must be set -- it is deliberately NOT 'whatever Microsoft defaults to'. The engine verifies every managed role against this on every run and PATCHes any drift back. Activation (EndUser-Assignment) requires MFA + Justification and is capped at P8H. Admin-Eligibility and Admin-Assignment carry NO enablement rule, for the BUG-21 reason: the 'admin' performing those operations is the engine's app-only certificate SPN, whose token can never carry an MFA claim, so an MFA rule there is unsatisfiable by anyone and blocks the delegation path the product exists to run -- it removes no risk because activation MFA is what protects the privilege at the point of use. Expiration: eligibility and admin assignment are bounded (P365D, required) so nothing is granted forever. OPERATOR DECISION 2026-08-11 -- Admin-Eligibility is EMPTY on the STANDARD templates: 'admin eligible is blank, no justification or mfa. app must be able to work'. This supersedes the 2026-08-10 decision that briefly put Justification here; it was never applied to the tenant, so nothing in production moved. Justification stays on EntraIDRoles_RequireApproval, where a human approver is in the loop by definition. Carries NO Approval rule -- use EntraIDRoles_RequireApproval for roles that must be approved, so the engine never touches an approval rule it did not itself apply.",
+  "rules": {
+    "Expiration": {
+      "EndUser_Assignment": { "maximumDuration": "PT8H",  "isExpirationRequired": true },
+      "Admin_Assignment":   { "maximumDuration": "P365D", "isExpirationRequired": true },
+      "Admin_Eligibility":  { "maximumDuration": "P365D", "isExpirationRequired": true }
+    },
+    "Enablement": {
+      "EndUser_Assignment": ["MultiFactorAuthentication", "Justification"],
+      "Admin_Eligibility":  [],
+      "Admin_Assignment":   []
+    },
+    "Notification": [
+      {
+        "recipientType": "Admin",
+        "level": "Assignment",
+        "notificationLevel": "All",
+        "defaultRecipientsEnabled": false,
+        "recipientsSource": "NotifyUpns",
+        "_why": "ACTIVATION NOTICES MUST NOT GO TO EVERY GLOBAL ADMINISTRATOR (operator, 2026-08-10). Entra's default recipient set for the Admin notification is the tenant's privileged administrators, so every activation mails all of them -- noise that trains people to ignore PIM mail, and a needless broadcast of who activated what. Measured live: a PIM activation notice for this estate was delivered to an unrelated service mailbox by that default routing. OPT-IN BY DESIGN: recipients come from a NotifyUpns column on the role-assignment row, and the provider SKIPS this rule entirely when NotifyUpns resolves to nothing -- so a role with no declared audience keeps whatever Entra is doing today rather than being silently switched to mailing NOBODY. Only roles WITHOUT custom approvers can do this: on an approval-enabled role Graph rejects isDefaultRecipientsEnabled=false with 400 ActivationCustomApproversNotEmpty (see EntraIDRoles_RequireApproval)."
+      }
+    ]
+  }
+}

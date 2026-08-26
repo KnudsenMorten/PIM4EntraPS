@@ -82,13 +82,23 @@ function Get-PimScenarioSeedSpec {
         @{ Username="${lm}admin-ob-l2-t1-id@$DefaultDomain"; GroupTag="${m}ROLE-CloudEngineer"; AssignmentType='Eligible'; Action='Assign'; AutoExtend='TRUE'; NumOfDaysWhenExpire='90';  Permanent='FALSE' }
     )
 
-    # Group nesting: role group -> permission groups (Tier 2 -> Tier 3).
+    # Group nesting: a role group draws its permissions from permission groups.
+    #
+    # DIRECTION -- this was INVERTED here and the whole scenario suite was asserting
+    # against data no real tenant produces. The shipped contract (docs/DESIGN.md, the
+    # authoring dropdowns and the engine's GroupNesting provider, the last verified
+    # against a live tenant) is:
+    #     TargetGroupTag <- PIM-Definitions-Roles       (the ROLE group)
+    #     SourceGroupTag <- the permission/service group (where the permission comes FROM)
+    # and live, the ROLE group ends up a MEMBER OF each service group. With the columns
+    # swapped the engine dutifully nested service groups inside role groups instead --
+    # a delegation that grants nothing -- and the sim's own (correct) assertions failed.
     $groupAssignments = @(
-        @{ TargetGroupTag="${m}Entra-ID-GlobalAdministrator-L0";         SourceGroupTag="${m}ROLE-SecurityLead";  AssignmentType='Eligible'; Action='Assign'; AutoExtend='TRUE'; NumOfDaysWhenExpire='365'; Permanent='FALSE' }
-        @{ TargetGroupTag="${m}Entra-ID-PrivilegedRoleAdministrator-L0"; SourceGroupTag="${m}ROLE-SecurityLead";  AssignmentType='Eligible'; Action='Assign'; AutoExtend='TRUE'; NumOfDaysWhenExpire='365'; Permanent='FALSE' }
-        @{ TargetGroupTag="${m}Entra-ID-UserAdministrator-L1";           SourceGroupTag="${m}ROLE-CloudEngineer"; AssignmentType='Eligible'; Action='Assign'; AutoExtend='TRUE'; NumOfDaysWhenExpire='365'; Permanent='FALSE' }
-        @{ TargetGroupTag="${m}Entra-Helpdesk-L2";                       SourceGroupTag="${m}ROLE-CloudEngineer"; AssignmentType='Eligible'; Action='Assign'; AutoExtend='TRUE'; NumOfDaysWhenExpire='365'; Permanent='FALSE' }
-        @{ TargetGroupTag="${m}AzRes-Subscription-${AzRoleName}-L5";     SourceGroupTag="${m}ROLE-WorkloadOwner"; AssignmentType='Eligible'; Action='Assign'; AutoExtend='TRUE'; NumOfDaysWhenExpire='365'; Permanent='FALSE' }
+        @{ TargetGroupTag="${m}ROLE-SecurityLead";  SourceGroupTag="${m}Entra-ID-GlobalAdministrator-L0";         AssignmentType='Eligible'; Action='Assign'; AutoExtend='TRUE'; NumOfDaysWhenExpire='365'; Permanent='FALSE' }
+        @{ TargetGroupTag="${m}ROLE-SecurityLead";  SourceGroupTag="${m}Entra-ID-PrivilegedRoleAdministrator-L0"; AssignmentType='Eligible'; Action='Assign'; AutoExtend='TRUE'; NumOfDaysWhenExpire='365'; Permanent='FALSE' }
+        @{ TargetGroupTag="${m}ROLE-CloudEngineer"; SourceGroupTag="${m}Entra-ID-UserAdministrator-L1";           AssignmentType='Eligible'; Action='Assign'; AutoExtend='TRUE'; NumOfDaysWhenExpire='365'; Permanent='FALSE' }
+        @{ TargetGroupTag="${m}ROLE-CloudEngineer"; SourceGroupTag="${m}Entra-Helpdesk-L2";                       AssignmentType='Eligible'; Action='Assign'; AutoExtend='TRUE'; NumOfDaysWhenExpire='365'; Permanent='FALSE' }
+        @{ TargetGroupTag="${m}ROLE-WorkloadOwner"; SourceGroupTag="${m}AzRes-Subscription-${AzRoleName}-L5";     AssignmentType='Eligible'; Action='Assign'; AutoExtend='TRUE'; NumOfDaysWhenExpire='365'; Permanent='FALSE' }
     )
 
     # Entra role -> permission group bindings.

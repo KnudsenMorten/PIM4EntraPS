@@ -73,18 +73,91 @@
 [CmdletBinding()]
 param(
     [string]$App           = $(if ($env:PIM_HOSTED_APP)             { $env:PIM_HOSTED_APP }             else { 'ca-pim-manager' }),
-    [string]$ResourceGroup = $(if ($env:PIM_HOSTED_RG)              { $env:PIM_HOSTED_RG }              else { 'rg-pim-manager-web' }),
-    [string]$WorkspaceId   = $(if ($env:PIM_HOSTED_LA_WORKSPACE)    { $env:PIM_HOSTED_LA_WORKSPACE }    else { '64fe16eb-a9dd-49b6-9ce8-50a7c85f3cec' }),
+    [string]$ResourceGroup = $(if ($env:PIM_HOSTED_RG)              { $env:PIM_HOSTED_RG }              else { '' }),
+    [string]$WorkspaceId   = $(if ($env:PIM_HOSTED_LA_WORKSPACE)    { $env:PIM_HOSTED_LA_WORKSPACE }    else { '' }),
     [string]$Fqdn          = $(if ($env:PIM_HOSTED_FQDN)            { $env:PIM_HOSTED_FQDN }            else { '' }),
     [string]$EasyAuthAud   = $(if ($env:PIM_HOSTED_EASYAUTH_AUD)    { $env:PIM_HOSTED_EASYAUTH_AUD }    else { '' }),
     [string]$SessionToken  = $(if ($env:PIM_HOSTED_SESSION_TOKEN)   { $env:PIM_HOSTED_SESSION_TOKEN }   else { '' }),
-    [int]$LookbackMinutes  = 90
+    [int]$LookbackMinutes  = 90,
+    # TEST-05: run as a RELEASE GATE, where a self-skip is a FAILURE.
+    #
+    # CLAUDE.md §7a says "a self-skip of the live smoke ... is a SKIP, not a pass -- it
+    # means the gate didn't run, so the feature stays undelivered". The script did not
+    # implement that: without an Easy Auth audience it skipped the entire live-HTTP layer
+    # and still exited 0, so `GET /` = 200 and `GET /api/active-assignments` = 200 -- the
+    # two assertions §7a names as the gate -- had NEVER been enforced on a deploy. The
+    # gate reported green for a run in which it did nothing.
+    #
+    # Default OFF so an engineer can still run this ad-hoc on a laptop with no az and get
+    # an honest "skipped". The DEPLOY path passes -AsReleaseGate, so a deploy cannot
+    # inherit a skip as a pass. Env: PIM_HOSTED_SMOKE_REQUIRE=1.
+    [switch]$AsReleaseGate = $([bool]("$($env:PIM_HOSTED_SMOKE_REQUIRE)".Trim() -in @('1','true','yes')))
 )
 $ErrorActionPreference = 'Stop'
 $pass=0; $fail=0; $skip=0
-function T($n,$c){ if($c){Write-Host "  PASS $n" -ForegroundColor Green;$script:pass++}else{Write-Host "  FAIL $n" -ForegroundColor Red;$script:fail++} }
-function S($n,$why){ Write-Host "  SKIP $n -- $why" -ForegroundColor Yellow; $script:skip++ }
+$script:skipReasons = New-Object System.Collections.Generic.List[string]
+$script:naReasons   = New-Object System.Collections.Generic.List[string]
+$script:passedNames = New-Object System.Collections.Generic.HashSet[string]
+function T($n,$c){
+    if($c){ Write-Host "  PASS $n" -ForegroundColor Green; $script:pass++; [void]$script:passedNames.Add("$n") }
+    else  { Write-Host "  FAIL $n" -ForegroundColor Red; $script:fail++ }
+}
+function S($n,$why){
+    $script:skipReasons.Add("$n -- $why")
+    if ($script:AsReleaseGate) { Write-Host "  FAIL $n -- $why (RELEASE GATE: a skip is not a pass)" -ForegroundColor Red; $script:fail++ }
+    else { Write-Host "  SKIP $n -- $why" -ForegroundColor Yellow; $script:skip++ }
+}
+function N($n, $why, [string[]]$CoveredBy) {
+    <#
+      TEST-10 -- "NOT APPLICABLE, and something else already proved it".
+
+      Some probes cannot run BY CONSTRUCTION behind a hosted Easy Auth edge: the edge
+      token and the app's per-session GUID both want the single Authorization header,
+      so a programmatic caller can never get 200 from /api/*. That is not a missing
+      input an operator can supply -- re-running with more flags will never help.
+
+      Note the irony that makes this necessary: these probes used to work only because
+      GET / handed the /api bearer token to any caller, which is precisely the hole
+      SEC-01 closed. The gate's way in WAS the vulnerability.
+
+      This is NOT a loophole back to "a skip is a pass" (TEST-05). The downgrade is
+      CONDITIONAL: it applies only when every named compensating assertion actually RAN
+      and PASSED in this same run. If a compensating assertion is missing or failed,
+      this degrades to S() -- a hard failure in gate mode. So the condition is still
+      proven on every run; only the *route* to proving it changes.
+
+      Never use this for a probe that a flag/credential could make runnable -- that is
+      what S() is for.
+    #>
+    $missing = @($CoveredBy | Where-Object { -not $script:passedNames.Contains("$_") })
+    if ($missing.Count -gt 0) {
+        S $n ("$why -- and its compensating assertion(s) did NOT pass: " + ($missing -join '; '))
+        return
+    }
+    $script:naReasons.Add("$n -- $why (covered by: " + ($CoveredBy -join '; ') + ")")
+    Write-Host ("  N/A  $n -- $why") -ForegroundColor DarkCyan
+    Write-Host ("       covered by: " + ($CoveredBy -join '; ')) -ForegroundColor DarkGray
+}
+function Write-PimSmokeResult {
+    Write-Host ("`n RESULT: {0} pass, {1} fail, {2} skip, {3} n/a" -f $script:pass, $script:fail, $script:skip, $script:naReasons.Count) -ForegroundColor $(if($script:fail){'Red'}else{'Green'})
+    if ($script:naReasons.Count -gt 0) {
+        # Never silent. An N/A is a probe that CANNOT run in this topology, and each one
+        # names the assertion that proved its condition instead (TEST-10).
+        Write-Host "`n NOT APPLICABLE in this topology -- each condition was proven by a passing assertion:" -ForegroundColor DarkCyan
+        foreach ($r in $script:naReasons) { Write-Host "   - $r" -ForegroundColor DarkCyan }
+    }
+    if ($script:AsReleaseGate -and $script:skipReasons.Count -gt 0) {
+        Write-Host "`n RELEASE GATE: the following did not run, and a gate that did not run is NOT a pass:" -ForegroundColor Red
+        foreach ($r in $script:skipReasons) { Write-Host "   - $r" -ForegroundColor Red }
+        Write-Host " Provide the missing inputs (az login / -EasyAuthAud / -Fqdn) and re-run. See CLAUDE.md §7a." -ForegroundColor Red
+    }
+}
 function Have($cmd){ [bool](Get-Command $cmd -ErrorAction SilentlyContinue) }
+
+# PURE, offline-tested served-version helpers (parse + compare + retry decision).
+# Injecting the log-fetcher keeps the version check unit-testable with NO live az
+# (tests/Test-PimSmokeVersionCheck.ps1).
+. (Join-Path $PSScriptRoot '..\_shared\PimSmokeVersion.ps1')
 
 # EXPECTED version = the contents of SOLUTIONS/PIM4EntraPS/VERSION. The live Manager
 # MUST be serving exactly this (boot log + served HTML header). A live version that
@@ -101,15 +174,16 @@ if ($ExpectedVersion) { Write-Host ("  expected served version (VERSION): {0}" -
 else                  { Write-Host  "  WARNING: could not read SOLUTIONS/PIM4EntraPS/VERSION -- version assertion will FAIL" -ForegroundColor Yellow }
 
 # ---- Preconditions: az present + logged in -----------------------------------
+if ($AsReleaseGate) { Write-Host "  MODE: RELEASE GATE -- a self-skip counts as a FAILURE (CLAUDE.md §7a)" -ForegroundColor Yellow }
 if (-not (Have 'az')) {
-    S 'hosted smoke' 'azure CLI (az) not found -- LIVE-only test, skipping cleanly'
-    Write-Host ("`n RESULT: {0} pass, {1} fail, {2} skip" -f $pass,$fail,$skip) -ForegroundColor Green; exit 0
+    S 'hosted smoke' 'azure CLI (az) not found -- LIVE-only test'
+    Write-PimSmokeResult; if ($fail) { exit 1 } else { exit 0 }
 }
 $acct = $null
 try { $acct = az account show -o json 2>$null | ConvertFrom-Json } catch {}
 if (-not $acct) {
-    S 'hosted smoke' 'az not logged in (az login) -- skipping cleanly'
-    Write-Host ("`n RESULT: {0} pass, {1} fail, {2} skip" -f $pass,$fail,$skip) -ForegroundColor Green; exit 0
+    S 'hosted smoke' 'az not logged in (az login)'
+    Write-PimSmokeResult; if ($fail) { exit 1 } else { exit 0 }
 }
 Write-Host ("  az context: {0} / sub {1}" -f $acct.user.name, $acct.id) -ForegroundColor DarkGray
 
@@ -164,31 +238,88 @@ if (-not $logRows -or $logRows.Count -eq 0) {
         if ($m.Success) { $SessionToken = $m.Groups[1].Value }
     }
 
-    # ===== VERSION ASSERTION (boot log) =====================================
-    # The Manager emits a deterministic startup line:
+    # ===== VERSION ASSERTION (LA-lag-resilient) =============================
+    # The Manager emits a deterministic startup line at boot:
     #   "[version] PIM Manager v<X.Y.Z> (from VERSION)"
-    # (Open-PimManager.ps1 / Invoke-Server). Assert the LIVE served version EQUALS
-    # the EXPECTED version (SOLUTIONS/PIM4EntraPS/VERSION). A stale/older live
-    # version means the deploy did NOT actually roll the image -- HARD FAIL (the
-    # exact "stuck on 2.4.222" symptom). We take the MOST RECENT version line
-    # (logRows are ordered desc) so an old revision's line never masks the current.
-    $bootVer = $null
-    foreach ($row in $logRows) {
-        $vm = [regex]::Match("$($row.Log_s)", '\[version\]\s*PIM Manager\s*v?([0-9]+\.[0-9]+\.[0-9]+)')
-        if ($vm.Success) { $bootVer = $vm.Groups[1].Value; break }   # first (newest) wins
+    # (Open-PimManager.ps1). Assert the LIVE served version EQUALS the EXPECTED
+    # version (SOLUTIONS/PIM4EntraPS/VERSION). A stale/older live version means the
+    # deploy did NOT actually roll the image -- HARD FAIL (the "stuck on 2.4.222"
+    # symptom).
+    #
+    # WHY THIS IS NOT JUST A LOG-ANALYTICS READ:
+    #   LA ingestion LAGS. Right after a container roll the new revision is live +
+    #   healthy, but its boot "[version]" line has NOT yet landed in
+    #   ContainerAppConsoleLogs_CL -- so a single LA read returns the PRIOR
+    #   revision's version and FALSE-FAILS a healthy deploy (this happened on the
+    #   2.4.229 roll). The fix:
+    #     1) PRIMARY source = the ACTIVE revision's LIVE console logs via
+    #        `az containerapp logs show --revision <active> --format text` -- NO
+    #        ingestion lag, reflects the ACTUAL running replica.
+    #     2) RETRY WITH BACKOFF so a slow-booting replica that has not logged its
+    #        boot line yet is not a false fail either.
+    #     3) FALLBACK = the LA boot rows already pulled above (still with retry),
+    #        used only when live-log retrieval is unavailable.
+    #   Integrity is preserved: a live container genuinely running the WRONG version
+    #   after all retries STILL FAILS (Resolve-PimSmokeVersionCheck.Ok=$false), and
+    #   absence of any version line is a FAIL, never a silent pass.
+
+    # Discover the ACTIVE revision (100% traffic / running) to scope live logs to it.
+    $activeRev = $null
+    try {
+        $activeRev = az containerapp revision list -n $App -g $ResourceGroup `
+            --query "sort_by([?properties.active && properties.runningState=='Running'], &properties.createdTime)[-1].name" `
+            -o tsv 2>$null
+    } catch {}
+    if ($activeRev) { $activeRev = "$activeRev".Trim() }
+    if (-not $activeRev) {
+        # Fallback discovery: any active revision (older az / different shape).
+        try { $activeRev = (az containerapp revision list -n $App -g $ResourceGroup --query "[?properties.active].name | [0]" -o tsv 2>$null) } catch {}
+        if ($activeRev) { $activeRev = "$activeRev".Trim() }
     }
-    if (-not $ExpectedVersion) {
-        T 'boot log: served version matches VERSION (could not read VERSION)' $false
-    } elseif (-not $bootVer) {
-        # No version line at all in the lookback window. Treat as a FAIL, not a skip:
-        # a healthy current image ALWAYS emits it at boot, so its absence means the
-        # running image predates this assertion (i.e. it is stale) -- exactly what we
-        # must catch. (If you truly cannot get logs, section A self-skips earlier.)
-        T ("boot log: served version matches VERSION (expected v{0}; NO [version] line found in last {1}m -- stale image?)" -f $ExpectedVersion, $LookbackMinutes) $false
+
+    # PRIMARY fetcher: live console logs of the active revision (no ingestion lag).
+    # Returns $null when az can't fetch (then we fall back to LA below).
+    $getLiveLog = {
+        param($attempt)
+        if (-not $activeRev) { return $null }
+        $txt = $null
+        try { $txt = az containerapp logs show -n $App -g $ResourceGroup --revision $activeRev --tail 200 --format text 2>$null } catch {}
+        if ($txt -is [array]) { $txt = ($txt -join "`n") }
+        return $txt
+    }
+    # FALLBACK fetcher: the LA boot rows (re-query each attempt so a late-ingesting
+    # line can still arrive within the retry window).
+    $getLaLog = {
+        param($attempt)
+        if ($attempt -gt 1) {
+            try {
+                $r2 = az monitor log-analytics query --workspace $WorkspaceId --analytics-query $kql -o json 2>$null
+                if ($r2) { $rows2 = @($r2 | ConvertFrom-Json); return (($rows2 | ForEach-Object { "$($_.Log_s)" }) -join "`n") }
+            } catch {}
+        }
+        return $logText   # first attempt reuses rows already pulled in section A
+    }
+
+    # Decide which source to use: prefer live logs if we resolved an active revision
+    # AND a first probe actually returns text; otherwise fall back to LA (with retry).
+    $useLive = $false
+    if ($activeRev) {
+        $probe = $null
+        try { $probe = & $getLiveLog 1 } catch {}
+        if ($probe) { $useLive = $true }
+    }
+
+    if ($useLive) {
+        Write-Host ("  version source: LIVE console logs of active revision '{0}' (no LA lag)" -f $activeRev) -ForegroundColor DarkGray
+        $verRes = Resolve-PimSmokeVersionCheck -GetLogText $getLiveLog -ExpectedVersion $ExpectedVersion -MaxAttempts 5 -DelaySeconds 15
     } else {
-        Write-Host ("  boot-log served version: v{0} (expected v{1})" -f $bootVer, $ExpectedVersion) -ForegroundColor DarkGray
-        T ("boot log: served Manager version == VERSION (v{0})" -f $ExpectedVersion) ($bootVer -eq $ExpectedVersion)
+        $why = if ($activeRev) { "live console logs for revision '$activeRev' unavailable" } else { "could not resolve the active revision" }
+        Write-Host ("  version source: Log Analytics fallback ({0}) -- retrying to absorb ingestion lag" -f $why) -ForegroundColor DarkYellow
+        $verRes = Resolve-PimSmokeVersionCheck -GetLogText $getLaLog -ExpectedVersion $ExpectedVersion -MaxAttempts 5 -DelaySeconds 15
     }
+
+    if ($verRes.Found) { Write-Host ("  served version: v{0} (expected v{1})" -f $verRes.Found, $ExpectedVersion) -ForegroundColor DarkGray }
+    T ("served Manager version == VERSION ({0})" -f $verRes.Reason) ($verRes.Ok)
 }
 
 # =============================================================================
@@ -260,8 +391,16 @@ if (-not $EasyAuthAud) {
         try { $pa = Invoke-RestMethod -Uri "$base/api/portal-access" -Headers $api -TimeoutSec 30 } catch {}
         if ($pa) {
             T 'GUI read-write: managerRole != Reader' (("$($pa.managerRole)" -ne '') -and ("$($pa.managerRole)" -ne 'Reader'))
+        } elseif (-not $SessionToken) {
+            # TEST-10: no session token exists to be had behind Easy Auth (SEC-01 stopped
+            # GET / handing one out). Not an input the operator can supply -> N/A, but only
+            # because the store/render assertions below prove the GUI is in read-write SQL
+            # mode rather than the static read-only viewer.
+            N '/api/portal-access (GUI read-write)' `
+              'browser-only behind hosted Easy Auth: the edge token and the app per-session GUID both want the single Authorization header' `
+              -CoveredBy @('boot log: render/page mode is SQL (not static read-only)', 'boot log shows [store] SQL mode')
         } else {
-            S '/api/portal-access' 'no response (needs the app /api session token via -SessionToken if not in boot log)'
+            S '/api/portal-access' 'a -SessionToken WAS supplied but the endpoint did not respond'
         }
 
         # 3: tenant cache populated -- entra-roles non-empty.
@@ -270,8 +409,14 @@ if (-not $EasyAuthAud) {
         if ($tl) {
             $entra = $tl.entraRoles
             T 'tenant cache populated: entra-roles non-empty' ($null -ne $entra -and @($entra.items).Count -gt 0)
+        } elseif (-not $SessionToken) {
+            # TEST-10: same construction problem. The boot log already asserts the tenant
+            # cache is not "missing or empty", which is the condition this probe tests.
+            N '/api/tenant-lists (tenant cache populated)' `
+              'browser-only behind hosted Easy Auth (see /api/portal-access)' `
+              -CoveredBy @('boot log: tenant-list cache not "missing or empty"')
         } else {
-            S '/api/tenant-lists' 'no response (app /api token?)'
+            S '/api/tenant-lists' 'a -SessionToken WAS supplied but the endpoint did not respond'
         }
 
         # 2: the #47 fix -- /api/active-assignments must resolve the engine-SPN
@@ -323,17 +468,25 @@ if (-not $EasyAuthAud) {
                 $hasHint = [bool](@($errs | Where-Object { "$($_.hint)" -match 'Grant-PimGraphAppRoles|Reader|app-role' }).Count)
                 T 'failing-surface error includes an actionable remediation hint' $hasHint
             }
+        } elseif (-not $SessionToken) {
+            # TEST-10: browser-only behind hosted Easy Auth -- a script cannot present both
+            # the Easy Auth edge token and the app session GUID in one Authorization header.
+            # This was an S() (a hard FAIL under -AsReleaseGate), which meant EVERY deploy
+            # exited non-zero even when the deployment was perfect -- and an always-red gate
+            # is one an operator learns to ignore, the exact failure mode TEST-05 existed to
+            # prevent. It is now N/A, CONDITIONAL on the section-A boot-log assertion that
+            # tests the same thing (#47: the engine-SPN context resolved at startup). If that
+            # assertion did not pass, N() degrades this back to a hard failure.
+            N '/api/active-assignments (#47 engine-SPN context)' `
+              ("browser-only behind hosted Easy Auth -- a programmatic caller cannot satisfy both the Easy Auth edge token and the app per-session GUID in one Authorization header (probe status=$aaStatus). To exercise /api directly, pass a fixed service token via -SessionToken or run against a non-Easy-Auth edge.") `
+              -CoveredBy @('boot log: no "engine SPN context" missing error')
         } else {
-            # Browser-only behind hosted Easy Auth: a script cannot present both the
-            # Easy Auth edge token and the app session GUID in one Authorization
-            # header. This is an EXPLICIT documented skip (NOT a fail). The #47 fix
-            # (engine-SPN context resolves; no 500) is covered by the section-A
-            # boot-log assertion 'no "engine SPN context" missing error'.
             S '/api/active-assignments (#47 engine-SPN context)' `
-              ("browser-only behind hosted Easy Auth -- a programmatic caller cannot satisfy both the Easy Auth edge token and the app per-session GUID in one Authorization header (probe status=$aaStatus). #47 is asserted via the boot-log engine-SPN-context signal in section A. To exercise /api directly, pass a fixed service token via -SessionToken or run against a non-Easy-Auth edge.")
+              ("a -SessionToken WAS supplied but the probe did not return 200 (status=$aaStatus) -- this is a real failure, not the Easy Auth construction problem")
         }
     }
 }
 
-Write-Host ("`n RESULT: {0} pass, {1} fail, {2} skip" -f $pass, $fail, $skip) -ForegroundColor $(if($fail){'Red'}else{'Green'})
+Write-PimSmokeResult
 if ($fail) { exit 1 }
+exit 0   # explicit: without this a green run leaves $LASTEXITCODE at whatever ran last

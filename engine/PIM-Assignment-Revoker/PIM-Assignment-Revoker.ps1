@@ -17,7 +17,7 @@ Write-Output "PIM Assignment Revoker"
 Write-Output ""
 Write-Output "Purpose: Clean-up of Privileged Identity Managemement (PIM) Assignments"
 Write-Output ""
-Write-Output "Support: Morten Knudsen - mok@2linkit.net | 40 178 179"
+Write-Output "Support: GitHub Issues on the public repo, or mok@mortenknudsen.net"
 Write-Output "***********************************************************************************************"
 
 #------------------------------------------------------------------------------------------------------------

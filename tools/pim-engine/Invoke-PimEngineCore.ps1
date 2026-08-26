@@ -35,9 +35,33 @@ param(
     [switch]$WhatIf,
     [switch]$Prune,            # destructive prune of live-not-in-desired (Full only; opt-in)
     [switch]$FromQueue,
-    [string]$LogDir
+    [string]$LogDir,
+
+    # --- RUNTIME CONTEXT AS PARAMETERS (added 2026-08-10) --------------------
+    # Same reason as Start-PimScheduler: an external scheduler passes ARGUMENTS, not environment.
+    # This is the COMMIT-TRIGGERED entry point (`-Mode Delta -FromQueue` applies only the pending
+    # queue entries), so it is precisely the one an external change-trigger invokes -- and it
+    # could not be handed an identity without setting machine-wide environment variables first.
+    # Use-Cfg below already prefers an existing global over the environment, so setting the
+    # globals here makes a supplied parameter win without disturbing the env-driven paths.
+    [string]$TenantId,
+    [string]$ClientId,
+    [string]$CertThumbprint,
+    [string]$SqlServer,
+    [string]$SqlDatabase,
+    [ValidateSet('','sql','file')][string]$StorageBackend = ''
 )
 $ErrorActionPreference = 'Stop'
+
+# Parameters win over the environment. Set as GLOBALS (not env) because Use-Cfg below only fills
+# a global that is still empty -- so a global set here is authoritative, and an omitted parameter
+# leaves the existing env-driven behaviour exactly as it was.
+if ("$TenantId".Trim())       { $global:PIM_TenantId       = $TenantId.Trim() }
+if ("$ClientId".Trim())       { $global:PIM_ClientId       = $ClientId.Trim() }
+if ("$CertThumbprint".Trim()) { $global:PIM_CertThumbprint = $CertThumbprint.Trim() }
+if ("$SqlServer".Trim())      { $global:PIM_SqlServer      = $SqlServer.Trim(); $env:PIM_SqlServer = $SqlServer.Trim() }
+if ("$SqlDatabase".Trim())    { $global:PIM_SqlDatabase    = $SqlDatabase.Trim(); $env:PIM_SqlDatabase = $SqlDatabase.Trim() }
+if ("$StorageBackend".Trim()) { $global:PIM_StorageBackend = $StorageBackend.Trim(); $env:PIM_StorageBackend = $StorageBackend.Trim() }
 $here   = Split-Path -Parent $MyInvocation.MyCommand.Path
 $shared = Resolve-Path "$here\..\..\engine\_shared"
 $config = Resolve-Path "$here\..\..\config"
@@ -60,6 +84,14 @@ Use-Cfg 'PIM_CertThumbprint' 'PIM_CertThumbprint'
 Use-Cfg 'PIM_TenantId'       'PIM_TenantId'
 Use-Cfg 'PIM_SqlServer'      'PIM_SqlServer'
 Use-Cfg 'PIM_SqlDatabase'    'PIM_SqlDatabase'
+# IMP-06a: the mail SENDER had no configuration surface at all -- not here, not in the container
+# env vars Setup-PimContainers sets, and not in the settings hydrate (which projects only the
+# EmailControls record). The consequence was silent: with no sender the notify path RENDERS the
+# mail and returns without sending (PIM-Notify.ps1 L201, warning only), while account creation and
+# TAP minting still report success -- so a mail-mute environment looks completely healthy. Reading
+# it here is the deploy-time half (onboarding bakes the sender into the container); the persisted
+# pim.Settings 'MailSender' key is the runtime half, and it overrides this when present.
+Use-Cfg 'PIM_MailSender'     'PIM_MailSender'
 # DESIRED store: the engine reads pim.Rows from SQL. Two first-class stores are supported
 # (Get-PimSqlConnectionString resolves either):
 #   * Azure SQL  -- $global:PIM_SqlServer is an FQDN (...database.windows.net); auth = MI /

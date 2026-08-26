@@ -79,7 +79,7 @@ $shared = Resolve-Path "$here\..\..\engine\_shared"
 if (-not $SqlServer)   { $SqlServer = '.\SQLEXPRESS' }
 if (-not $SqlDatabase) { throw "Set -SqlDatabase or `$env:PIM_SqlDatabase (e.g. PimScenario)." }
 $global:PIM_UseGraphSdk = $false; $global:PIM_SqlServer = $SqlServer; $global:PIM_SqlDatabase = $SqlDatabase
-. "$shared\PIM-ChangeQueue.ps1"; . "$shared\PIM-SqlStore.ps1"
+. "$shared\PIM-Rest.ps1"; . "$shared\PIM-ChangeQueue.ps1"; . "$shared\PIM-SqlStore.ps1"
 
 Initialize-PimSqlDatabase -Server $SqlServer -Database $SqlDatabase
 $cs = Get-PimSqlConnectionString

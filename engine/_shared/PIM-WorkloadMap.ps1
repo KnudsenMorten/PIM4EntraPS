@@ -1,3 +1,6 @@
+# IMP-02: the locale-safe stamp reader. Loaded defensively so this file stays correct
+# when a test dot-sources it on its own (PIM-Functions.psm1 also loads it up front).
+if (-not (Get-Command Get-PimUtcStamp -ErrorAction SilentlyContinue)) { . (Join-Path $PSScriptRoot 'PIM-DateSafe.ps1') }
 #Requires -Version 5.1
 # PIM-WorkloadMap.ps1 -- live workload-assignment CRAWL MAP + RECONCILIATION.
 #
@@ -238,8 +241,9 @@ function Test-PimWorkloadExemptionActive {
     if (-not $Exemption.reason) { return $false }
     if ($Exemption.noExpiry) { return $true }
     if (-not $Exemption.expiresOn) { return $false }
-    $exp = [datetime]::MinValue
-    if (-not [datetime]::TryParse($Exemption.expiresOn, [ref]$exp)) { return $false }
+    # IMP-02: locale-safe. Fails SAFE as before -- an unreadable expiry grants no exemption.
+    $exp = Get-PimUtcStamp $Exemption.expiresOn
+    if ($null -eq $exp) { return $false }
     $expEnd = $exp.Date.AddDays(1).AddTicks(-1)
     return ($AsOf.ToUniversalTime() -le $expEnd.ToUniversalTime())
 }

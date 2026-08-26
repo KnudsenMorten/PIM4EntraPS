@@ -1,3 +1,6 @@
+# IMP-02: the locale-safe stamp reader. Loaded defensively so this file stays correct
+# when a test dot-sources it on its own (PIM-Functions.psm1 also loads it up front).
+if (-not (Get-Command Get-PimUtcStamp -ErrorAction SilentlyContinue)) { . (Join-Path $PSScriptRoot 'PIM-DateSafe.ps1') }
 <#
   PIM4EntraPS -- notification BATCH logic (REQUIREMENTS §12): pure aggregation +
   render-prep for the four notification features, plus the secure ServiceNow->Manager
@@ -91,9 +94,8 @@ function Get-PimDailySummary {
         $wi = (Get-PimNotifyField -Item $e -Name 'whatIf')
         if ("$wi".Trim().ToLowerInvariant() -in @('true','1','yes')) { continue }
         $tsRaw = (Get-PimNotifyField -Item $e -Name 'ts'); if (-not "$tsRaw".Trim()) { $tsRaw = (Get-PimNotifyField -Item $e -Name 'enqueuedUtc') }
-        $ts = [datetime]::MinValue
-        if (-not [datetime]::TryParse("$tsRaw", [ref]$ts)) { continue }
-        $ts = $ts.ToUniversalTime()
+        $ts = Get-PimUtcStamp $tsRaw   # IMP-02
+        if ($null -eq $ts) { continue }
         if ($ts -lt $start -or $ts -gt $end) { continue }
         $cat = Get-PimSummaryActionCategory -Action (Get-PimNotifyField -Item $e -Name 'action')
         if (-not $cat) { continue }
@@ -287,9 +289,9 @@ function Get-PimApprovalEscalationTargets {
     $status = (Get-PimNotifyField -Item $Request -Name 'status')
     if ($status -and $status -ne 'pending') { return $null }
     $reqRaw = (Get-PimNotifyField -Item $Request -Name 'requestedUtc')
-    $req = [datetime]::MinValue
-    if (-not [datetime]::TryParse("$reqRaw", [ref]$req)) { return $null }
-    $elapsed = ($NowUtc.ToUniversalTime() - $req.ToUniversalTime()).TotalHours
+    $req = Get-PimUtcStamp $reqRaw   # IMP-02
+    if ($null -eq $req) { return $null }
+    $elapsed = ($NowUtc.ToUniversalTime() - $req).TotalHours
     if ($elapsed -lt 0) { $elapsed = 0 }
     $esc = if ($EscalationHours -gt 0) { $EscalationHours } else { 24 }
 

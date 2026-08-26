@@ -1,45 +1,359 @@
 # Release notes for PIM4EntraPS
 
-## v2.4.228
+## v2.4.251
 
 Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monorepo:
 
-- feat(pima): curated 13-line fun-box list, random pick every 5s (10s start delay) (fc9f90c2)
-- fix(pima): fun-box waits 10s before showing; drop the row-widening auto state suffix (761d95b0)
-- feat(pima): ticking "auto" starts the activation immediately (this group only, no chain) (4ded9578)
-- fix(pim): Update-PimContainers must build via Build-PimManagerImage + verify tag before roll (551b50fc)
-- feat(pima): show off/activating/already-active state on auto-marked group rows (6eb7d585)
-- fix(pima): auto-activate control is a labelled checkbox (off by default), not a bolt icon (edfc92fa)
-- chore(pim): VERSION 2.4.228 -- roll Manager with supported-variables legend (fdb1ee00)
-- feat(pima): per-group auto-activate on open (this group only, NO chain) (0548f653)
-- Merge pull request #179 from KnudsenMorten/feat/pim-variables-legend (102940cc)
-- feat(pima): Diagnostics environment/connectivity self-check + robust undefined-const gate (850b4df2)
-- feat(pim manager): show supported variables/tokens legend on naming + mail-template fields (REQUIREMENTS §11) (c485a719)
-- Merge pull request #175 from KnudsenMorten/chore/pim-2.4.227-workload-map-roll (a8baf80e)
-- chore(pim): bump VERSION 2.4.227 to roll Manager with workload-map + reconciliation (961f5383)
-- Merge pull request #173 from KnudsenMorten/feat/pim-workload-map (1c30ddf1)
-- feat(pim map): workload-target nodes + live-crawl reconciliation on the Delegation Map (e1c79f0f)
-- fix(pima): resilient per-source delegation load (customer "did not complete within 75s") (028fd321)
-- Merge pull request #169 from KnudsenMorten/feat/pima-deploy-defaults (d92b0427)
-- feat(pim activator): mirror -DefaultJustification/-DefaultDurationHours into Hybrid + Intune deploy (4c1769e4)
-- docs(pima): capture CISO control model for auto-activate-chain (Entra+Intune, no client SQL) (164fa2aa)
-- feat(pima): rotate activation fun-box every 2s, bigger emojis, PIMA acronym (5ffe01d8)
-- Merge pull request #166 from KnudsenMorten/feat/pim-discovery-audit-rolecatalog (a2650495)
-- feat(pim discovery): audit + opt-in notify on fresh items; wire Entra role-catalog job (59480c74)
-- docs(pim-activator): FEATURES entry for client deploy-time activation defaults (a03c762a)
-- feat(pim-activator): -DefaultJustification / -DefaultDurationHours override on client deploy (d9b8bbc2)
-- chore(pim): VERSION -> 2.4.226 to roll Manager (GUI export/tooltips + update-separation) (d96d826f)
-- Merge pull request #161 from KnudsenMorten/feat/pim-update-separation (9ef86efa)
-- fix(pim-activator): Deploy-PimActivatorHybrid prints usage when run bare (no mandatory prompt) (73191a89)
-- Merge pull request #160 from KnudsenMorten/feat/pim-gui-export-tooltips (d7ae97c9)
-- feat(pim update): separate the UPDATE from the engine + in-container scheduler (standalone) (ee23401d)
-- feat(pim manager): export on Jobs/Drift/Fleet read views + tooltips & phone-responsive nav (5fcd17df)
+- release(PIM) v2.4.251: a managed-tenant job that could never run, and reported success (96c345cd)
+- fix(PIM) BUG-71d + BUG-74: the two half-fixes that make a green deploy a dead engine (9d7f1c52)
+- fix(PIM) BUG-72 + BUG-73: the downlink job gets a real engine credential, and a SAS that is treated as one (dc769fdb)
+- docs(PIM) the cross-tenant blob caveat is no longer a theory: measured 401 on the first real run (434ebc8a)
+- fix(PIM) BUG-71: the downlink deploy created a job that could never run, and reported success (efd9e6a7)
+- docs(PIM) the downlink blob-read was never an open decision: DESIGN.md 13.7 already answered it (8effb2be)
+- docs(PIM) RIDE + HOGYM deleted: the downlink proof count is now zero, not one (ba3a1163)
+- docs(PIM) session-29 handoff, and Microsoft.Storage moves into the script where it belongs (1f9f46b0)
+- docs(PIM) the downlink runbook was missing everything a first real publish needs (dc034d5c)
+- fix(PIM) the scenario seeder never gave the REST layer an identity, so -StorageAccount could not work (554e0eb2)
+- test(PIM) TEST-11 CLOSED: 102/0/0 on standalone + master + slave -- and the driver's own false green (5963409e)
+- test(PIM) the matrix could never pass D4: it guessed the admin population, and the guard was right (9f9810d9)
+- test(PIM) TEST-11 finally RUNS: the live matrix seeded one row backwards, and an estate driver (374367ab)
+- fix(PIM) BUG-69 + BUG-70: the TAP guard refused every admin, and called the refusals a success (07a695b8)
+- fix(PIM) there was never an efif.dk release blocker: the finding read the FEATURE as an INCIDENT (1c5a3674)
+- docs(PIM) the efif.dk release blocker is LIFTED: the operator authorised mailing those testers (c3c34cd7)
+- docs(PIM) ESTATE-07 is done: the live handoff no longer sends a fresh session to chase Arrow (1bb9fbc6)
+- docs(PIM) session-28 handoff: make it internally consistent, and promote the two lessons that were only in the body (a2041d12)
+- fix(PIM) BUG-66 is a RELEASE BLOCKER against EFIF: the fix arms a 15-minute job that mails credentials off-domain (77141fd5)
+- docs(PIM) session-28 handoff: record the commit, the true tree state, and the exact command for the decision it leaves open (a492fd08)
+- fix(PIM) BUG-66 CLOSED: the TAP mint is proven live -- and it found two more ways to lose a credential (274d525a)
+- docs(PIM) session-27 handoff: the gate needs a recipe on this box, and BUG-66 is one command from done (e25b2800)
+- fix(PIM) BUG-66 engine half: an expired TAP is no longer "satisfied" -- and all SIX master admins were holding one (3428c180)
+- feat(PIM) BUG-66 + TEST-30: a button to re-issue an expired TAP, and the four shipped scripts that could never have run on 5.1 (7d2be435)
+- fix(PIM) TEST-28/29 + SEC-11 + BUG-68: the suite could not RUN two of its own tests, and the deploy could never build a tenant (da71dbfe)
+- fix(PIM) SS34.2c + docs BUG-68: the first real greenfield run found two more, one nearly cross-company (f46d0c30)
+- fix(PIM) BUG-67: hosting comes from the DESCRIPTOR, not inferred from the MSP topology (075fbb01)
+- docs(PIM) BUG-67: "local" means two things, and S6 would deploy every managed tenant to a VM (f268148b)
+- docs(PIM): write down the tenant nickname map -- EFIF/RIDE/HOGYM/LEGYM -> slug (81643ec8)
+- feat(framework) DEPLOY-2: the descriptor + the readiness gate -- deployed is not running (1c042e6d)
 
 ---
 
 # Release notes -- PIM4EntraPS
 
 > **Curated changelog.** The publish workflow auto-prepends recent monorepo commits as a raw activity log; this file is the human-friendly narrative on top.
+
+---
+
+## A managed-tenant deployment that could never run — and reported success (v2.4.251)
+
+**Found by inspecting a real deployment, not by a test.** The scheduled job that pulls updates
+into a managed tenant was being created in a state where it could **never execute**, while the
+deployment reported success and exited cleanly. It had sat that way for a day, through a nightly
+schedule that should have run it.
+
+**1. The job was created without an identity that could fetch its own software.** A newly created
+job cannot use its own built-in identity to download its first application image — that identity
+does not exist until the job does. The deployment now picks the right identity automatically, so
+nothing has to be passed by hand; if no suitable identity exists it **refuses to create the job**
+rather than leaving one behind that cannot start. Re-running the deployment now also **repairs** a
+job left in a broken state, instead of quietly doing nothing.
+
+**2. "Deployment succeeded" now means the job can actually run.** The deployment verified that the
+job had been given the right software version — a check that passes even when the job failed to
+start, because it records what was *requested*, not what happened. It now confirms the job
+provisioned successfully and fails loudly if it did not.
+
+**3. The engine inside a container had no usable credential.** The scheduled job ran with no
+application credential at all, and elsewhere a certificate was preferred — which cannot work inside
+a container, as there is no certificate store there. Worse, supplying one suppressed the fallback
+identity too, so the container could end up authenticating as nothing while still deploying green.
+Container deployments now use the credential type that works there, and say so plainly when they
+cannot.
+
+**4. Updates from a managing tenant can now be fetched across organisational boundaries.** Reading
+the signed update bundle from the managing tenant could not be authorised for a managed tenant in a
+different organisation — a platform constraint, not a defect. The deployment now supports a
+time-limited read-only link for that fetch, delivered as a protected secret rather than written
+into the job's definition where it would have been readable by anyone able to view the resource.
+The safety check that blocks credentials from being deployed in the clear has been taught to
+recognise this kind of link, which it previously did not treat as a credential at all.
+
+---
+
+## An update no longer reports a safety check it did not perform, and the desired-state guard now actually works (v2.4.251)
+
+**Both found by running an update against a real deployment rather than by testing.**
+
+**1. The update reported a health check it had skipped.** When the post-deploy interface check was
+skipped — including automatically, when it could not run — the closing summary still said it had
+passed. Four separate paths never run that check, and every one of them claimed success. The
+summary now states what actually happened (`PASSED`, `SKIPPED`, or `NOT RUN`, each with the
+reason), so a deployment can never again report a verification it did not perform.
+
+**2. The v2.4.249 desired-state guard could never fire.** The guard added last release is what
+refuses an update that would silently change your policy settings. It reads a fingerprint recorded
+on your deployment — and that read was broken, so it always answered "I cannot tell" and let the
+update proceed with a warning. Anyone relying on it would have had no protection at all, in the
+branch that looks harmless. Fixed and verified end to end against a live deployment: an update
+carrying a changed policy baseline is now genuinely **refused**, and proceeds only when the change
+is confirmed deliberately.
+
+## A first-ever deployment no longer ends with administrative-unit membership unapplied (v2.4.250)
+
+**Only affects the very first run against a brand-new tenant**, but it made that run look broken.
+
+When the engine creates an administrative unit and then, later in the same run, attaches groups to
+it, the directory has sometimes not finished making the new unit available yet — so the attach came
+back "not found". The run reported an error and left the membership unapplied. It always corrected
+itself on the next run, but a first deployment ending in a red count reads like a failed install.
+
+The engine now recognises this specific case and retries briefly. Deliberately narrow: it retries
+only for a unit **it created in that same run**. A "not found" for any other unit still fails
+straight away, because that one means the unit really is missing — and turning a real error into a
+delayed one would be a worse defect than the one being fixed.
+
+*Also in this release:* the internal deployment-scenario test harness no longer defaults to an
+unsupported local database. It now requires the store to be named explicitly and refuses anything
+other than the supported cloud database unless you opt in — so a test result can no longer describe
+a configuration the product does not ship. No effect on any deployment.
+
+## An update can no longer change your policy settings by accident, and the scheduled engine no longer lags a version behind (v2.4.249)
+
+**Two deployment defects, both silent, both fixed. If you run the scheduler as a container job,
+the second one has been affecting you.**
+
+**1. An update that changes what the product WANTS is now an explicit act.** A container image is
+built from the whole source tree, so an update shipped to fix one thing also carried any changes
+to the shipped *policy baseline* — the templates that define how roles and groups must be
+configured. Once deployed, the engine begins converging every managed scope onto that new
+baseline within one scheduled run. There was nothing in the update path that could tell "this
+changes how the product works" apart from "this changes what the product will do to your
+directory", and the difference is the whole risk.
+
+The update now fingerprints the shipped policy templates, compares that against the fingerprint
+recorded on your deployment, and **refuses to proceed** when it has changed — naming exactly which
+templates moved — unless the change is confirmed deliberately. Comment and formatting changes are
+ignored by design, so the check only fires on a real change of intent. A first update into a
+deployment has nothing to compare against; it says so plainly and proceeds.
+
+**2. The scheduled engine ran one build behind the interface.** In a single update run the
+scheduled job was pinned to the image resolved *before* the new image was built, and only the web
+apps were then rolled. The result: the interface was current and the component that actually
+reconciles your directory was one build behind — durably, and it looked like a clean deploy. It
+self-corrected on the *next* update, which is exactly why it was easy to miss. The scheduled job
+is now rolled by the same step that rolls the apps, from the same verified image, and the update
+fails loudly if the two ever end up out of step. Rollbacks additionally warn that a scheduled job
+cannot be rolled back the way an app can, and print the command to put it back.
+
+## Approval can now be switched OFF again — and a policy that stopped accepting changes can be recovered (v2.4.248)
+
+**If you use approval-required roles, update.** Two related defects are fixed, and one of them could
+silently freeze a role's activation policy.
+
+**1. Approval was one-way.** The v2.4.247 notes recorded this as a known limitation: the product
+could put a role into approval and never take it back out, so moving a role to a standard policy
+left the old approval requirement in place. Moving a scope to a policy that declares no approval now
+actively turns approval **off**, on both directory roles and group policies.
+
+**2. The cause was not what it looked like, and the product was shipping it.** Naming explicit
+recipients on a role's *approver notification* rule makes the directory treat that list as the
+policy's approvers. The write is accepted with no error, and from that moment **every** change to
+that policy is rejected — including changes unrelated to approval, and including the change that
+would undo it. The approval-required template did exactly that, so any role using it with approvers
+listed on its row was one run away from a policy that could no longer be managed. That setting has
+been removed; approver notification now uses the directory's own routing, which is the only
+supported option. Roles already in that state are detected and unlocked automatically on the next
+run — the affected recipients are named in the run output, because they cannot be preserved.
+
+**3. Activation notices no longer have to go to every Global Administrator on approval roles.** That
+control existed for standard roles but had been removed from the approval-required template, on the
+basis of a measurement that turned out to have been taken against a frozen policy. Re-verified, and
+restored: set the notification recipients on the role's row and the notices go there instead. Leave
+it empty and nothing changes.
+
+*No change to any existing policy is implied by this release: verified against a live tenant, all
+managed directory-role and group policies plan to zero updates.*
+
+## Policy baseline: granting eligibility no longer carries an enablement rule on standard scopes (v2.4.247)
+
+The **standard** policy templates now leave the *admin-eligibility* rule empty, while the
+**approval-required** templates keep a justification requirement. Activation is unchanged and still
+requires MFA and a justification — that is the control that protects the privilege at the point of
+use.
+
+The reason for the split is that admin-eligibility governs what an administrator must present when
+*granting* someone eligibility. On a standard scope that "administrator" is the product's own
+automation, whose sign-in can never carry an MFA claim — so an MFA requirement there is
+unsatisfiable by anyone and simply blocks every grant. A justification requirement is not a control
+either: a grant that omits one is still accepted on the automation path. On an approval scope a
+person is in the loop by definition, the requirement is genuinely enforced, and it stays.
+
+- **Known limitation, stated plainly** *(superseded — fixed in v2.4.248 above; the cause described
+  here was also wrong)*: approval is currently **one-way**. Once a role's policy has
+  named approvers, the directory refuses further updates to that policy — including the update that
+  would remove those approvers. The product can put a role into approval and cannot take it back
+  out. To remove it, an administrator must do it in the portal: remove the approver first, then
+  clear "require approval", and save both in one step.
+
+## Scheduled runs could overlap instead of skipping, in every container deployment (v2.4.246)
+
+**If you run the scheduler as a container, this is the reason to update.**
+
+The scheduler takes a single-runner lease so that a run which overruns its own schedule is *skipped*
+rather than started alongside the one still working. That lease identifies each runner by name — and
+in a container it could not. The name was built from a Windows-only environment value that Linux
+containers do not set, combined with a process id that is always the same inside a container, so
+every runner introduced itself with the *same* name. A lease always looks free to the runner that
+already owns it, so each new run was told the lease was its own and started anyway.
+
+The visible symptom was a scheduled job that reported success on every run while getting less and
+less done: with runs piling up on top of each other, work was repeated, contended, and frequently
+never finished. Measured before the fix on a 5-minute schedule, three runs were active at once, each
+taking 12–14 minutes, and all three reported success.
+
+- Runners are now identified by whatever the runtime actually provides — the job-execution name, the
+  replica name, the host name — so two overlapping runs can no longer be mistaken for each other.
+  The job-execution name is preferred because it is the same identifier shown in the platform's own
+  execution list, so a stuck lease points at something you can go and look at.
+- A runner that cannot identify itself at all is **refused the lease** and skips its run, instead of
+  taking a lease that cannot tell anyone apart. Where the runtime offers nothing to identify by, a
+  unique generated id is used and clearly labelled as untraceable — the lease stays correct, and the
+  log says plainly that its holder cannot be traced back.
+- Nothing changes for scheduler runs on a Windows host or VM: those were always named correctly, and
+  the existing behaviour is pinned by tests.
+
+## Multi-tenant correctness: five engine fixes found by testing every supported deployment design (v2.4.245)
+
+The six supported deployment designs — single tenant, service-provider master, and managed tenants hosted
+either centrally or locally — were each stood up and exercised end to end against real tenants for the first
+time. That exercise found five defects that no offline test could reach, because every one of them needed a
+second tenant, a long-running process, or a first-ever deployment to appear. All five are fixed, each with a
+regression test that fails on the old code.
+
+- **A managed tenant could receive another tenant's access token.** Tokens were cached per API, not per
+  tenant, so in a service-provider setup the second tenant in a run silently reused the first tenant's token.
+  Calls then succeeded — against the wrong directory. Tokens are now cached per full identity (API + tenant +
+  application + credential kind). **If you run PIM4EntraPS across more than one tenant from one host, this is
+  the reason to update.**
+- **Work that followed a multi-tenant fan-out could target the wrong tenant.** The fan-out repointed the
+  active identity at each customer in turn and left it there; anything that ran afterwards inherited the last
+  customer it happened to touch. The identity is now restored on every exit path, including failures.
+- **A long-running scheduler acted on a stale picture of the directory.** The directory snapshot was taken
+  once per process and never refreshed, so a container reconciled against the directory as it looked at
+  startup — for as long as it ran. An administrative unit deleted or created outside the tool stayed invisible,
+  and the engine reported "no changes" for objects that were gone. The snapshot is now refreshed at the start
+  of every run.
+- **Assigning an administrator to a group the tool manages could fail permanently.** The standard policy the
+  tool applies to every managed group required multi-factor authentication from the *engine* — an application
+  identity that cannot present it. The engine wrote that rule onto each group it created and was then refused
+  by it. The requirement is removed from the administrative path (it never protected anything, because nobody
+  could satisfy it) and is **unchanged for activation**, where it is the control that matters.
+- **Service-provider deployments could not resolve a central administrator into a managed tenant.** The
+  lookup of the target tenant's default domain never returned a result, so an administrator account created in
+  the managed tenant could not then be assigned anything.
+
+Also fixed: **deployments failed on hosts whose `tar` is the one Windows ships**, stopping the update before
+anything was changed.
+
+## Activator: accurate progress + complete "Show Roles" across Entra & Azure (v2.4.240)
+
+- **Activation/deactivation progress now waits for the WHOLE set.** A role group can grant 40+ permissions
+  through nested groups that land in one batch after a few minutes; the progress now polls until those have
+  actually arrived (or been removed), instead of finishing early or running a fixed timer. Works the same for
+  activate and deactivate.
+- **"Show Roles" now lists what a group really grants** — across Entra ID (including roles inherited through
+  nested groups, both eligible and active) and Azure (subscription and management-group scoped, eligible and
+  active). It reads the real assignments from the platform and only falls back to a name-based best guess when a
+  role genuinely can't be read (e.g. an assignment at a scope your sign-in has no access to). Released CRX **1.6.122**.
+
+## Activator: activation progress now waits for the roles to actually arrive (v2.4.239)
+
+- **Fixed a case where the popup said "already activated" after ~15 seconds even though activation was
+  still running.** For a role delivered via a PIM role-group, your group membership is confirmed almost
+  immediately, but the actual Entra/Azure roles it grants can take several minutes to propagate. A recent
+  change ended the progress watch as soon as the group membership appeared, so it declared success early and
+  stopped refreshing the folded-out groups. The watch now runs the full window and keeps refreshing until the
+  granted roles have genuinely propagated (typically a few minutes) — so the progress and the role list reflect
+  reality. Released CRX **1.6.108**.
+
+## Activator: removed the redundant nested-discovery call (no more "unauthorized" diagnostics) (v2.4.238)
+
+- **The Diagnostics panel no longer shows the confusing nested-discovery lines at all.** Those lines came
+  from a best-effort call that tried to enumerate a role group's *second-tier permission groups* by reading
+  each role group as a principal — something a delegated admin isn't allowed to do, so it always returned
+  "unauthorized". It was redundant: once a role group is active, its permission groups already appear in
+  your own eligibility list, and the role-behind-a-group fold-out is a separate feature that was never
+  affected. The call has been removed entirely, so the panel is clean and there's one less network request
+  per load. No change to which groups you see or can activate, and the fold-out showing the role each group
+  grants is untouched. Released CRX **1.6.107**.
+
+## Activator deploy: relaunch can no longer wipe your Chrome/Edge profile list (v2.4.237)
+
+- **`Update-PimActivator-Extension.ps1` will not de-list your browser profiles anymore.** On a machine
+  with many profiles, relaunching the browser too soon after closing it let the old and new instances
+  race on `Local State` (the profile registry); the new instance could read a half-written file, and
+  Chromium then ran its "registry unreadable → regenerate with a single Default" recovery — so the
+  profile switcher showed only one profile (the profile *folders* were always safe on disk, just
+  de-listed). The relaunch step now (1) waits for the browser to fully exit and settle before
+  launching, and (2) verifies `Local State` still lists at least as many profiles as the backup it
+  just made — and if it regressed, **restores that backup automatically before launch**, so the
+  picker stays intact. The existing timestamped `Local State.bak.<time>` backup remains as a manual
+  fallback.
+
+## Activator: diagnostics no longer report an expected permission limit as an error (v2.4.236)
+
+- **The Diagnostics panel stopped looking like a bug.** Best-effort nested permission-group
+  discovery queries each active role group *as a principal*, which a delegated admin isn't allowed
+  to do — so it returns a `403` ("Attempted to perform an unauthorized operation"), and the panel
+  printed it as `ERROR: 403 …`. That is **expected, not a failure**: the nested permission groups
+  still appear in your *own* eligibility list, so nothing is missing. The panel now labels these
+  lines plainly ("skipped — needs a privileged role …; nested roles still appear via your eligibility
+  list") and a throttled `429` as a transient retry, instead of "ERROR", so admins stop reporting a
+  benign condition as a bug. No behavior change to what you can see or activate. Released CRX **1.6.105**.
+
+## Activator: much faster load on high-latency hosts (v2.4.235)
+
+- **The popup now loads in seconds on servers/locked-down hosts, not ~25 s.** Two parts of the
+  load fanned a separate network request per item out *serially* — the per-subscription Azure-RBAC
+  sweep, and the nested permission-group discovery (one request per active role group). On a fast
+  workstation those round-trips are invisible; behind a proxy / endpoint inspection on a server,
+  each request pays a latency tax, so a dozen serial calls stacked up to ~25 s while a workstation
+  finished the same work in ~6 s. The Azure-RBAC sweep now fans out in parallel and reuses the
+  cached subscription list, and the nested discovery is collapsed into a **single Graph `$batch`
+  round-trip** regardless of how many role groups you have active.
+- **Fewer requests also means far less throttling.** The old serial nested-discovery burst against
+  the (aggressively rate-limited) PIM endpoint produced *429 Too Many Requests*; the single batch
+  call avoids that. A permission limit on reading another group's schedules still degrades that one
+  entry gracefully without affecting the rest of the list. Released CRX **1.6.103**.
+
+## Activator: activation finishes as soon as the role is active (v2.4.234)
+
+- **Activating a role no longer appears to take minutes.** The post-activation propagation
+  watch already polled every 10 s, but it only finished when the aggregate *eligible*-group
+  count changed (nested-eligibility propagation) — so activating a single role whose eligible
+  count didn't move ran the full watch window even though the role was usable in ~10–30 s.
+  The watch now ALSO completes the moment the role(s) you actually activated appear in your
+  active set (checked every 10 s) — unless more nested eligible roles are genuinely still
+  arriving, in which case it keeps showing them. Released CRX **1.6.100**.
+
+## Activator backend deploy: interactive sign-in works without az / a cert (v2.4.233)
+
+- **`Deploy-PimActivatorBackend.ps1` interactive runs now "just sign you in"** on any machine — no Azure CLI and no service-principal certificate required. Previously an interactive run authenticated via the Graph SDK but routed its Graph writes through the module-free REST data plane, which acquired its own token (managed identity / secret / cert / `az` session) and could not see the interactive session — so on a machine without `az` or an SPN cert it failed with *"could not acquire a token for 'graph'."* Interactive runs now route writes through the authenticated Graph SDK session.
+- **SDK data-plane parity:** the SDK write path now sends a pre-serialized JSON body (fixes *"Self referencing loop detected … spa.redirectUris[0].Chars"*) and unwraps the OData `value` collection envelope (so app lookups + updates resolve correctly), matching the REST data plane.
+- **Interactive fallback:** if any path still can't obtain a token, the admin tools now PROMPT for an interactive sign-in instead of throwing. Headless/engine runs never prompt (they still fail fast), so unattended jobs are unaffected.
+- **Permissions reminder (no Global Admin needed):** the deploy needs **Cloud Application Administrator** (app-registration + service-principal management) plus **Privileged Role Administrator** to grant tenant-wide admin consent. With only Cloud Application Administrator, run `-GrantConsent:$false` and have a Privileged Role Admin grant consent afterward.
+
+---
+
+## Activator backend deploy registers released + test sign-in by default (v2.4.231)
+
+- **`Deploy-PimActivatorBackend.ps1` now registers BOTH the released and the test extension's redirect URIs by default** (`-Channel Both`, the new default) — so one run, with no extra parameters, lets both the released and the test build sign in. Both SPA redirect forms per id (the `chromiumapp.org` auth-code redirect and the `chrome-extension://` token-redemption origin) are always registered, merged, never replacing existing URIs. Pass **`-Channel Released`** for a clean deploy that registers only the released extension. (`-Channel Test` is kept as an alias of `Both`.)
+
+---
+
+## Delegation Map clarity + provisioning hardening (v2.4.230)
+
+- **Delegation Map** — selecting an administrator now shows their **direct role groups** (the actual link), with one click to drill from admin → role group → capability bundles → targets. Previously it folded out every transitive role at once, which buried the relationship. Role-group / bundle / target selections are unchanged.
+- **Provisioning & revoke hardening** (rolled up from recent work) — server-side enforcement of the maker/checker and scope rules on the write/revoke paths, an admin → group eligibility resolution fix, and email kill-switch / job-schedule settings now read at engine + scheduler start so the GUI state matches actual behaviour.
 
 ---
 

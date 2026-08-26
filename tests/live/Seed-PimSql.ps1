@@ -10,9 +10,13 @@
 #>
 [CmdletBinding()]
 param(
-  [string]$ServerFqdn = 'sql-pimplatform-we484.database.windows.net',
-  [string]$Database   = 'PimPlatform',
-  [string]$MiUser     = 'app-pim-manager-2lk4175',
+  # SEC-06: these defaulted to the OPERATOR'S REAL server and managed-identity app name,
+  # in a file that ships. Same pattern as BUG-28: read the environment, and let the caller
+  # pass them explicitly. A live seed against the wrong server is not something a default
+  # should ever arrange.
+  [string]$ServerFqdn = "$($env:PIM_SqlServerFqdn)",
+  [string]$Database   = $(if ($env:PIM_SqlDatabase) { $env:PIM_SqlDatabase } else { 'PimPlatform' }),
+  [string]$MiUser     = "$($env:PIM_ManagerMiUser)",
   [string]$ConfigDir
 )
 $ErrorActionPreference = 'Stop'
@@ -21,6 +25,18 @@ if (-not $here) { $here = 'C:\SCRIPTS\AutomateIT\SOLUTIONS\PIM4EntraPS\tests\liv
 if (-not $ConfigDir) { $ConfigDir = (Resolve-Path "$here\..\..\config").Path }
 
 Write-Host "=== PIM SQL bootstrap + seed ===" -ForegroundColor Cyan
+# SEC-06: this script WRITES to a live database. With the operator's real server removed as
+# a default, an unset value must stop it dead rather than let it build a nonsense
+# connection string and fail somewhere less obvious.
+$missingTargets = @()
+if (-not "$ServerFqdn".Trim()) { $missingTargets += '-ServerFqdn (or $env:PIM_SqlServerFqdn)' }
+if (-not "$MiUser".Trim())     { $missingTargets += '-MiUser (or $env:PIM_ManagerMiUser)' }
+if ($missingTargets.Count) {
+    throw ("refusing to seed: no target supplied -- " + ($missingTargets -join ' and ') +
+           ". These name YOUR server and managed identity and deliberately have no default " +
+           '(docs/REQUIREMENTS.md sec.33 SEC-06); a default here would point a live write at ' +
+           "somebody else's database.")
+}
 Write-Host "server $ServerFqdn / db $Database / MI $MiUser" -ForegroundColor DarkGray
 
 $token = (az account get-access-token --resource https://database.windows.net --query accessToken -o tsv 2>$null)

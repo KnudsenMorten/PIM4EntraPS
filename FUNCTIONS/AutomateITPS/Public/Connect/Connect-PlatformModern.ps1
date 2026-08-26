@@ -142,17 +142,79 @@ function Connect-PlatformModern {
 
     # Verify cert is installed locally + valid (cert path is only usable when
     # both conditions hold)
+    #
+    # 2026-08-05: the old warning said "no matching cert ... (or expired)" for EVERY failure,
+    # which sent a real diagnosis down the wrong path. There are four distinct reasons this can
+    # fail and they need completely different fixes:
+    #   1. the cert genuinely is not installed          -> install it
+    #   2. it is installed but EXPIRED                  -> renew it
+    #   3. the store is not READABLE in this context    -> nothing is wrong with the cert
+    #   4. KV holds a thumbprint with stray whitespace  -> fix the KV secret
+    # Case 3 is the nasty one: a process that cannot see Cert:\LocalMachine\My gets an empty
+    # store and an identical "no matching cert" message, so a perfectly valid cert looks missing.
+    # (Observed for real: a sandboxed shell saw 0 certs while the same user in another shell saw 53.)
+    # So report which case it actually is.
     $modernCertUsable = $false
     if ($modernThumb) {
-        foreach ($store in @("Cert:\LocalMachine\My\$modernThumb", "Cert:\CurrentUser\My\$modernThumb")) {
-            $c = Get-Item -LiteralPath $store -ErrorAction SilentlyContinue
-            if ($c -and $c.NotAfter -gt (Get-Date)) {
-                $modernCertUsable = $true
-                break
+        # A thumbprint with stray whitespace/newline from KV can never match a store path.
+        $modernThumb = "$modernThumb".Trim()
+
+        # 2026-08-13: a FIFTH case, and it is the one that actually cost time.
+        # `Get-ChildItem Cert:\...` returns nothing for TWO different reasons: the store really is
+        # empty, or the `Cert:` PROVIDER does not exist in this process. The second happens whenever
+        # a Windows PowerShell 5.1 child inherits a pwsh 7 parent's PSModulePath -- it resolves
+        # Microsoft.PowerShell.Security to the PS7 build, fails to load it, and loses the drive with
+        # it. Measured on the dev host: Cert: drive ABSENT, Get-ChildItem 0, X509Store 121 certs,
+        # same elevated user. The old code called that "stores read as EMPTY ... almost certainly a
+        # context/permission problem", diagnosing a permissions problem that did not exist, and then
+        # fell back to secret auth -- which a cert-only customer does not have, so the run died on
+        # "Missing SPN globals" three layers away from the cause.
+        # Fix: read the store through X509Store when the provider is unavailable, and name the case.
+        $certProviderAvailable = [bool](Get-PSDrive -Name Cert -ErrorAction SilentlyContinue)
+        $storeReadable   = $false
+        $usedX509Fallback = $false
+
+        foreach ($store in @(
+                @{ Root = 'Cert:\LocalMachine\My'; Name = 'My'; Location = 'LocalMachine' },
+                @{ Root = 'Cert:\CurrentUser\My';  Name = 'My'; Location = 'CurrentUser'  })) {
+
+            $all = @()
+            if ($certProviderAvailable) {
+                $all = @(Get-ChildItem -Path $store.Root -ErrorAction SilentlyContinue)
+            }
+            if ($all.Count -eq 0) {
+                # Provider missing, or provider present but this store empty -- either way the
+                # .NET store is the authority. Costs one cheap read and can only ADD certificates.
+                try {
+                    $x509 = New-Object System.Security.Cryptography.X509Certificates.X509Store($store.Name, $store.Location)
+                    $x509.Open('ReadOnly')
+                    $all = @($x509.Certificates)
+                    $x509.Close()
+                    if ($all.Count -gt 0 -and -not $certProviderAvailable) { $usedX509Fallback = $true }
+                } catch {
+                    Write-Verbose ("Connect-PlatformModern: X509Store {0}\{1} unreadable -- {2}" -f $store.Location, $store.Name, $_.Exception.Message)
+                }
+            }
+            if ($all.Count -gt 0) { $storeReadable = $true }
+            $c = $all | Where-Object { $_.Thumbprint -eq $modernThumb } | Select-Object -First 1
+            if ($c) {
+                if ($c.NotAfter -gt (Get-Date)) { $modernCertUsable = $true; break }
+                Write-Warning ("Connect-PlatformModern: cert {0} IS installed in {1} but EXPIRED on {2:yyyy-MM-dd}. Renew it; falling back to secret-based auth meanwhile." -f $modernThumb, $store.Root, $c.NotAfter)
             }
         }
+
+        if ($modernCertUsable -and $usedX509Fallback) {
+            Write-Warning ("Connect-PlatformModern: the 'Cert:' drive is not available in this process (typical when a Windows PowerShell 5.1 child inherits a pwsh 7 parent's PSModulePath), so the certificate stores were read via X509Store instead. Cert {0} WAS found and certificate auth proceeds -- nothing is wrong with the certificate or with this session's permissions." -f $modernThumb)
+        }
+
         if (-not $modernCertUsable) {
-            Write-Warning ("Connect-PlatformModern: KV has Modern-Thumbprint = {0} but no matching cert in Cert:\LocalMachine\My or CurrentUser\My (or expired). Falling back to secret-based auth on this host." -f $modernThumb)
+            if (-not $storeReadable -and -not $certProviderAvailable) {
+                Write-Warning ("Connect-PlatformModern: the 'Cert:' drive is MISSING in this process and X509Store returned no certificates either, so cert {0} could not be checked at all. The drive is normally lost when a Windows PowerShell 5.1 child inherits a pwsh 7 parent's PSModulePath -- set a 5.1 PSModulePath before launching the child. Falling back to secret-based auth." -f $modernThumb)
+            } elseif (-not $storeReadable) {
+                Write-Warning ("Connect-PlatformModern: BOTH certificate stores read as EMPTY in this process (the 'Cert:' drive IS available and X509Store was tried as well), so cert {0} could not be checked at all -- this is almost certainly a context/permission problem (sandboxed, restricted or non-interactive session), NOT a missing certificate. Verify with: Get-ChildItem Cert:\LocalMachine\My. Falling back to secret-based auth." -f $modernThumb)
+            } else {
+                Write-Warning ("Connect-PlatformModern: KV has Modern-Thumbprint = {0} but no certificate with that thumbprint exists in Cert:\LocalMachine\My or Cert:\CurrentUser\My (the stores ARE readable and were searched). Check the KV value matches an installed cert. Falling back to secret-based auth on this host." -f $modernThumb)
+            }
         }
     }
 

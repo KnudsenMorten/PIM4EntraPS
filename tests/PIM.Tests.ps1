@@ -42,6 +42,7 @@ Describe 'Functional suites (child-process, asserted green)' {
     It 'Test-PimLicensing.ps1 exits 0'         { Invoke-Suite 'Test-PimLicensing.ps1'        | Should -Be 0 }  # § 15 Core/Pro split + offline signed-license verify (valid/invalid/tampered fixtures)
     It 'Test-PimNamingMigration.ps1 exits 0'   { Invoke-Suite 'Test-PimNamingMigration.ps1'  | Should -Be 0 }  # § 17 naming helpers/validation + § 18 v1->v2 migration (offline)
     It 'Test-PimScheduler.ps1 exits 0'         { Invoke-Suite 'Test-PimScheduler.ps1'        | Should -Be 0 }  # scheduler/job runner: due-calc, dispatch, lease, triggers + tenant-cache refresh job (offline)
+    It 'Test-PimEmailScheduleHydration.ps1 exits 0' { Invoke-Suite 'Test-PimEmailScheduleHydration.ps1' | Should -Be 0 }  # s29 GUI-state == actual-behavior: a COLD send path / scheduler hydrates EmailControls (kill switch/redirect/allowlist) + JobSchedule from SQL pim.Settings -> a GUI-set kill switch blocks a cold scheduled send (in-process global unset), redirect+allowlist apply, a store-read failure NEVER fails-open (armed kill switch stays armed, Import reports -1 not 0), and a freshly-booted scheduler reads the persisted cadence not the default (offline, stubbed store)
     It 'Test-PimDiscoverySweep.ps1 exits 0'    { Invoke-Suite 'Test-PimDiscoverySweep.ps1'   | Should -Be 0 }  # §8 scheduled discovery job sweep (Azure/PowerBI scope + Entra role-catalog) + audit/opt-in-notify on each FRESH item (resource.discovered) + handled-set delta; scheduler wiring incl. the Entra -GetLiveRoles seam (offline, injected enumerators/audit/notify)
     It 'Test-PimSyncAutomateIT.ps1 exits 0'    { Invoke-Suite 'Test-PimSyncAutomateIT.ps1'   | Should -Be 0 }  # §1/§2/§6 sync-automateit auto-update decision core (offline)
     It 'Test-PimUpdateLifecycle.ps1 exits 0'   { Invoke-Suite 'Test-PimUpdateLifecycle.ps1'  | Should -Be 0 }  # §1/§2/§5/§20 full update-lifecycle decision core: detect/build/deploy/verify/notify/ensure-monitor (offline)
@@ -49,6 +50,7 @@ Describe 'Functional suites (child-process, asserted green)' {
     It 'Test-PimScenarioWiring.ps1 exits 0'    { Invoke-Suite 'Test-PimScenarioWiring.ps1'   | Should -Be 0 }  # §31.3 Phase-1: scenario -> entry-point knob mapping (update-source incl. from-master, hosting, SPN, license tier, sync-file) + per-scenario license gating + entry-point -Scenario param (offline)
     It 'Test-PimScenarioRuntime.ps1 exits 0'   { Invoke-Suite 'Test-PimScenarioRuntime.ps1'  | Should -Be 0 }  # §31.3 RUNTIME RESOLUTION (the remaining ◻ items): pure hosting/SPN/sync-root resolvers (S1-S6) + Get-PimSqlConnectionString hosting thread (default unchanged) + GUI Deployment-scenario card GET/PUT round-trip + static wiring (offline)
     It 'Test-PimDownlink.ps1 exits 0'          { Invoke-Suite 'Test-PimDownlink.ps1'         | Should -Be 0 }  # §31.3 Phase-2: master->managed admin/permission downlink + scenario-bound runner pure cores -- ring filter (admin.Ring<=slave.Ring), signed-baseline verify (valid/tampered/expired/rollback/wrong-key, ephemeral key, no RSA.ImportFromPem), sync-file path resolution (central-msp/local-slave/none), idempotency decision, downlink plan refuse-on-bad-sig, runner topology branch (single/master=engine-apply; managed=downlink-sync->engine-apply); capability-probe names the live matrix Get-Commands (offline)
+    It 'Test-PimDownlinkGui.ps1 exits 0'       { Invoke-Suite 'Test-PimDownlinkGui.ps1'      | Should -Be 0 }  # MSP-2 control #1/#2 MANAGER SURFACE: the tab is reachable (flat strip + NAV_GROUP + panel host + switchTab dispatch + feature-catalog id), the three endpoints exist AND the GUI calls them, and the safety gates hold per-handler (policy write + real run = SuperAdmin, dry-run = any role, both audited, unknown Mode refused not coerced, whatIf defaults true); asserts the GUI RENDERS the plan and never recomputes it (no client-side ring/policy evaluation) so preview and apply cannot disagree; a missing/corrupt baseline is reported rather than read as "nothing projects"; a store-less relationship REFUSES instead of reporting a successful empty run (offline)
     # Hosted-mode SIMULATION gate: source-contract assertions always run (no SQL); the
     # live-boot block self-skips (exit 0) when no SQL is reachable. Exit 0 either way unless
     # the hosted SQL runtime regresses (defaults to local / static / CSV / -ConnectPlatform gate).
@@ -69,9 +71,11 @@ Describe 'Functional suites (child-process, asserted green)' {
     It 'Test-PimAuditQuery.ps1 exits 0'          { Invoke-Suite 'Test-PimAuditQuery.ps1'       | Should -Be 0 }  # §28 [H6]/§26c "Audit you can defend": pure audit-trail query core (PIM-AuditQuery.ps1). Full history (calendar-month window, NOT the old hard 3-month cap; months=0/all reads every monthly file) + a human before/after `change` per event (Get-PimAuditChangeSummary: old->new, create/remove, unchanged omitted) + RFC-4180 full-trail CSV (Change column, formula-injection guard, culture-independent ISO timestamps). Filter (category/search/date-range) + newest-first sort shared by /api/audit + /api/audit/export (offline)
     It 'Test-PimRolePermissionsExport.ps1 exits 0' { Invoke-Suite 'Test-PimRolePermissionsExport.ps1' | Should -Be 0 }  # §28 [L5]/[H5] Role Lookup export: pure CSV core (PIM-RolePermissionsExport.ps1) for all 4 read-only modes -- a role's concrete permissions for a least-privilege ticket (ConvertTo-PimRolePermissionsCsv: allowed/excluded resource+data actions, de-duped, namespace, role-stamped), which-roles-grant-action ranked least-priv-first w/ broad-wildcard flag (ConvertTo-PimRolesByActionCsv), who-can-activate-with-path (ConvertTo-PimRoleReachersCsv), and the both/only-A/only-B compare (ConvertTo-PimRoleCompareCsv). Spreadsheet formula-injection guard (= + - @ /tab -> quoted) + RFC-4180 + CRLF, identical to the audit export + GUI csvCell. Empty input -> header-only, never throws. PS 5.1-safe (.ToArray() not @() on List[object]) (offline)
     It 'Test-PimFeatureFlags.ps1 exits 0'        { Invoke-Suite 'Test-PimFeatureFlags.ps1'     | Should -Be 0 }  # GUI gradual rollout: turn any Manager feature on/off in Settings. Pure catalog + resolver (core ON / advanced OFF defaults; persisted override flips a flag; always-on Home/Audit/Settings can't be disabled; unknown flag ignored+warned; minimal-override reduction) + GUI->store->read round-trip through the SAME pim.Settings store the nav reads at boot (Get-/Set-PimFeatureFlags) + GUI/server wiring (Features card, GET/PUT /api/settings/feature-flags SuperAdmin-gated+audited, boot-injected flags gate the nav, disabled tabs/empty groups hidden) (offline)
+    It 'Test-PimGovernancePreview.ps1 exits 0'   { Invoke-Suite 'Test-PimGovernancePreview.ps1' | Should -Be 0 }  # "Show the surface, safely OFF" preview gate (s27 approval-gated offboarding/revoke + s28 [L2] exemption register on Template Rollout): both default OFF; the surface stays VISIBLE but renders a "preview -- disabled in Settings" banner and its mutating endpoints short-circuit (409) while off; underlying safety gates untouched. Pure resolver (defaults OFF, override flips, minimal-override reduction, unknown-key warn, JSON/PSObject/hashtable shapes, anyEnabled, Test-PimGovernancePreviewEnabled) + static GUI/server wiring (boot-injected GovPreview at both sites, renderApprovals/renderConformance short-circuit to the banner, Settings Governance-preview card, GET/PUT /api/settings/governance-preview SuperAdmin write, the request guard wired into both approvals + conformance mutating endpoints) (offline)
     It 'Test-PimScenarioProfile.ps1 exits 0'     { Invoke-Suite 'Test-PimScenarioProfile.ps1'  | Should -Be 0 }  # §31 deployment-topology scenario descriptor + resolver: generic 8-dimension contract (reusable for SI/CEH), S1-S6 catalog, descriptor invariants, resolution onto existing knobs (configVariant/update-source/ring/edition/hosting/SPN/sync), active-scenario store-read + apply (offline)
     It 'Test-PimFleetConformance.ps1 exits 0'    { Invoke-Suite 'Test-PimFleetConformance.ps1' | Should -Be 0 }  # §28 [H8] FLEET template conformance: pure tenants×templates matrix (only approved templates are columns; per-cell status + behind-by-N; never-deployed=all-NeverApplied; tenant/per-template rollups + totals; worst-behind-first; hashtable OR PSCustomObject appliedVersions) + ring-wide rollout plan (exclusive ring bands, per-band behind/never, draft flagged not-approved) + Get-PimFleetStateForInstance reads applied versions + optional fleetRingByTenant ring stamp from a real state file, tolerates missing/garbage (offline)
     It 'Test-PimFleetEndpoints.ps1 exits 0'      { Invoke-Suite 'Test-PimFleetEndpoints.ps1'   | Should -Be 0 }  # §28 [H8] fleet endpoints (live boot): GET /api/conformance/fleet (401 w/o token; activeInstance+templates+tenants; local tenant present; never-applied cell + not-current; per-template rollup) + GET /api/conformance/ring-plan?template= (templateId echo, ring bands, local behind/never, unknown template -> 400); read-only, restores seeded state
+    It 'Test-PimPrincipalResolveUpnFallback.ps1 exits 0' { Invoke-Suite 'Test-PimPrincipalResolveUpnFallback.ps1' | Should -Be 0 }  # §4 MSP master->slave admin->role-group eligibility: Resolve-PimPrincipalId resolves a BARE central UserName (PIM-Assignments-Admins.Username, e.g. PIMSCEN-Admin-...-ID) by falling back to UserName@<targetTenantDefaultDomain> when the direct UPN lookup 404s -- the default domain is fetched ONCE from /organization verifiedDomains (isDefault) and cached per run. A real UPN/GUID still resolves directly (unchanged); a genuinely-unknown bare name returns $null (no crash, no wrong match). Stubbed Graph, offline
 }
 
 Describe 'Workload-connector framework' {
@@ -289,6 +293,53 @@ Describe 'PIM conformance engine (native template versioning + reconcile)' {
         $promoted = Set-PimEntryRing -Template $Tpl -Key $Preview -Ring 0
         ((@($promoted.entries | Where-Object { "$($_.key)" -eq $Preview }) | ForEach-Object { Get-PimTemplateEntryRing -Entry $_ })) | Should -Be 0
         ((@($Tpl.entries | Where-Object { "$($_.key)" -eq $Preview }) | ForEach-Object { Get-PimTemplateEntryRing -Entry $_ })) | Should -Be 2
+    }
+    It 'BUG-06: a ring promotion edits ONLY the ring, leaving the curated file byte-identical otherwise' {
+        # The object round-trip kept every FIELD (verified: _doc/versionHistory/approvedBy all
+        # survive) but re-serialized the whole file -- 1698 -> 2952 bytes under WinPS 5.1, the
+        # hand-aligned entry columns collapsed, plus a UTF-8 BOM this codebase keeps out.
+        # Set-PimEntryRingInJson edits the original TEXT, so a one-field GUI change stays one field.
+        $file = Join-Path $Root 'workloads\templates\defender-xdr-roles.template.json'
+        $orig = [System.IO.File]::ReadAllText($file, [System.Text.UTF8Encoding]::new($false))
+        $moved = Set-PimEntryRingInJson -Json $orig -Key $Preview -Ring 0
+
+        # the ring really changed, and nothing else in the object model did
+        ((ConvertTo-PimTemplate -Json $moved).entries | Where-Object { "$($_.key)" -eq $Preview } |
+            ForEach-Object { Get-PimTemplateEntryRing -Entry $_ }) | Should -Be 0
+        $before = ConvertTo-PimTemplate -Json $orig
+        $after  = ConvertTo-PimTemplate -Json $moved
+        "$($after._doc)"           | Should -Be "$($before._doc)"
+        "$($after.approvedBy)"     | Should -Be "$($before.approvedBy)"
+        @($after.versionHistory).Count | Should -Be @($before.versionHistory).Count
+        "$($after.templateVersion)" | Should -Be "$($before.templateVersion)"
+
+        # only the ring DIGIT moved: same length, and every other entry keeps its ring
+        $moved.Length | Should -Be $orig.Length
+        (@($after.entries  | Where-Object { "$($_.key)" -ne $Preview } | ForEach-Object { Get-PimTemplateEntryRing -Entry $_ }) -join ',') |
+            Should -Be (@($before.entries | Where-Object { "$($_.key)" -ne $Preview } | ForEach-Object { Get-PimTemplateEntryRing -Entry $_ }) -join ',')
+
+        # and promoting back reproduces the ORIGINAL TEXT exactly -- the strongest statement
+        # available that the write is non-destructive.
+        (Set-PimEntryRingInJson -Json $moved -Key $Preview -Ring 2) | Should -Be $orig
+
+        # unknown key still throws (the endpoint maps it to 400)
+        { Set-PimEntryRingInJson -Json $orig -Key 'zzz-no-such-entry' -Ring 1 } | Should -Throw
+    }
+    It 'BUG-06: an entry with NO ring property gains one without disturbing its siblings' {
+        $json = @'
+{
+  "templateId": "t", "workload": "w", "templateVersion": 1, "status": "approved",
+  "entries": [
+    { "key": "a", "roleName": "A" },
+    { "key": "b", "ring": 1, "roleName": "B" }
+  ]
+}
+'@
+        $out = Set-PimEntryRingInJson -Json $json -Key 'a' -Ring 3
+        $t = ConvertTo-PimTemplate -Json $out
+        (Get-PimTemplateEntryRing -Entry (@($t.entries) | Where-Object { $_.key -eq 'a' })) | Should -Be 3
+        (Get-PimTemplateEntryRing -Entry (@($t.entries) | Where-Object { $_.key -eq 'b' })) | Should -Be 1
+        "$((@($t.entries) | Where-Object { $_.key -eq 'a' }).roleName)" | Should -Be 'A'
     }
     It 'roll-forward rows: approved, ring-gated, exemption-skipped; draft throws' {
         $ex = @([pscustomobject]@{ tenantId='t2'; templateId='defender-xdr-roles'; itemKey='role:Security Reader'; reason='held'; expiresUtc='2026-12-01T00:00:00Z' })
@@ -1500,14 +1551,30 @@ Describe 'NEW REST engine (PIM-EngineCore + providers)' {
         [bool]$exp.EndUser_Assignment.isExpirationRequired | Should -BeTrue
         [bool]$exp.Admin_Assignment.isExpirationRequired   | Should -BeTrue
         [bool]$exp.Admin_Eligibility.isExpirationRequired  | Should -BeTrue
-        # Enablement: MFA+Justification on EndUser-Assignment AND Admin-Eligibility; none on Admin-Assignment
+        # Enablement: MFA + Justification on EndUser-Assignment (activation); NOTHING on
+        # Admin-Eligibility or Admin-Assignment.
+        #
+        # BUG-21 (2026-08-07) changed this expectation, and the old one was WRONG rather
+        # than merely different: it required MultiFactorAuthentication on Admin_Eligibility,
+        # but the "admin" performing that request is the engine's own app-only certificate
+        # SPN, whose token can never carry an MFA claim. The engine wrote that rule onto
+        # every group it created and was then refused by it --
+        #     400 RoleAssignmentRequestPolicyValidationFailed -- MfaRule
+        # -- so the product's core delegation path (an admin made eligible on a PIM group)
+        # could not complete at all. Empty is also what the PRODUCTION tenant's 332
+        # engine-managed PIM- groups actually carry, read live: member Admin_Eligibility=[]
+        # with EndUser_Assignment=[MFA+Justification].
         $def.rules.ContainsKey('Enablement') | Should -BeTrue
         $en = $def.rules['Enablement']
         @($en.EndUser_Assignment) -contains 'MultiFactorAuthentication' | Should -BeTrue
         @($en.EndUser_Assignment) -contains 'Justification'             | Should -BeTrue
-        @($en.Admin_Eligibility)  -contains 'MultiFactorAuthentication' | Should -BeTrue
-        @($en.Admin_Eligibility)  -contains 'Justification'             | Should -BeTrue
-        @($en.Admin_Assignment).Count | Should -Be 0
+        @($en.Admin_Eligibility)  -contains 'MultiFactorAuthentication' | Should -BeFalse
+        # EMPTY again since 2026-08-11 (operator: "admin eligible is blank, no justification or
+        # mfa. app must be able to work"), superseding the 2026-08-10 Justification value, which
+        # never reached the tenant. MFA absence above remains the INVARIANT; this exact value is a
+        # decision and has moved three times, so the two are asserted separately on purpose.
+        @($en.Admin_Eligibility).Count | Should -Be 0
+        @($en.Admin_Assignment).Count  | Should -Be 0
         # baseline is NOT gated on Approval — default carries no Approval rule
         $def.rules.ContainsKey('Approval') | Should -BeFalse
     }
@@ -1686,12 +1753,234 @@ Describe 'NEW REST engine (PIM-EngineCore + providers)' {
         $f['Notification_Admin_EndUser_Assignment'] | Should -Be 'notify|lvl=All|def=True|recips=ops@x.com'
         $f['Approval_EndUser_Assignment']   | Should -Be 'appr|required=true|approvers=u-a,u-b'               # approver set part of the facet
     }
-    It 'Get-PimGroupPolicyDesiredFacets carries no Approval/Notification facet when the template declares none' {
+    # BUG-56 -- CHANGED CONTRACT (2026-08-11). This test previously asserted the OPPOSITE:
+    # that a template with no Approval block produced NO approval facet. That was the defect,
+    # not the spec -- "no Approval block" was read as "don't look", so a live approval the
+    # engine had once applied could never be taken off again and the product was one-way.
+    # A template without an Approval block now means approval must be OFF, and stating that
+    # here is what turns a stranded approval into a detectable drift.
+    # Notification is NOT symmetrical and deliberately so: an undeclared notification rule
+    # stays untouched, because the engine only owns notification rules its template names.
+    It 'Get-PimGroupPolicyDesiredFacets demands approval OFF when the template declares none (BUG-56)' {
         $d = [pscustomobject]@{ GroupName='G'; Expiration='PT4H'; Enablement=$null; EnablementLegacy=$null; Notification=$null; Approval=$null; ApproverIds=@() }
         $f = Get-PimGroupPolicyDesiredFacets -Desired $d
-        $f.ContainsKey('Approval_EndUser_Assignment') | Should -BeFalse
+        $f['Approval_EndUser_Assignment'] | Should -Be 'appr|required=false|approvers='
         @($f.Keys | Where-Object { $_ -like 'Notification_*' }).Count | Should -Be 0
         $f['Expiration_EndUser_Assignment'] | Should -Be 'exp|dur=PT4H|req=True'   # legacy string -> EndUser cap only
+    }
+    It 'approval-off desired facet MATCHES a live policy that has approval off, and DRIFTS from one that has it on (BUG-56)' {
+        # The pair that matters: no false drift on the 325 groups / 96 roles that are already
+        # off (this is why the production WhatIf stayed at update=0), and a real drift on the
+        # one that is stranded on.
+        $d = [pscustomobject]@{ GroupName='G'; Expiration='PT4H'; Approval=$null; ApproverIds=@() }
+        $want = Get-PimGroupPolicyDesiredFacets -Desired $d
+        $liveOff = Get-PimGroupPolicyLiveFacets -Rules @(
+            [pscustomobject]@{ id='Expiration_EndUser_Assignment'; maximumDuration='PT4H'; isExpirationRequired=$true }
+            [pscustomobject]@{ id='Approval_EndUser_Assignment'; setting=[pscustomobject]@{ isApprovalRequired=$false; approvalStages=@([pscustomobject]@{ primaryApprovers=@() }) } })
+        Test-PimGroupPolicyInSync -Desired $want -Live $liveOff | Should -BeTrue
+        $liveOn = Get-PimGroupPolicyLiveFacets -Rules @(
+            [pscustomobject]@{ id='Expiration_EndUser_Assignment'; maximumDuration='PT4H'; isExpirationRequired=$true }
+            [pscustomobject]@{ id='Approval_EndUser_Assignment'; setting=[pscustomobject]@{ isApprovalRequired=$true; approvalStages=@([pscustomobject]@{ primaryApprovers=@([pscustomobject]@{ userId='u-a' }) }) } })
+        Test-PimGroupPolicyInSync -Desired $want -Live $liveOn | Should -BeFalse
+        # ...and a policy that carries NO approval rule at all is ALREADY off -- absence and
+        # required=false are the same state, so this must NOT be reported as drift or the engine
+        # would PATCH every such policy on every run to change nothing.
+        $liveNoRule = Get-PimGroupPolicyLiveFacets -Rules @(
+            [pscustomobject]@{ id='Expiration_EndUser_Assignment'; maximumDuration='PT4H'; isExpirationRequired=$true })
+        $liveNoRule.ContainsKey('Approval_EndUser_Assignment') | Should -BeFalse
+        Test-PimGroupPolicyInSync -Desired $want -Live $liveNoRule | Should -BeTrue
+        # the exemption is NARROW: a missing rule can never satisfy required=TRUE
+        $wantOn = @{ 'Approval_EndUser_Assignment' = 'appr|required=true|approvers=u-a' }
+        Test-PimGroupPolicyInSync -Desired $wantOn -Live $liveNoRule | Should -BeFalse
+    }
+    # BUG-56 -- the approval-OFF body and the write-lock recovery. All measured live in an
+    # isolated test tenant; these pin the shapes so the measurements are not re-derived.
+    It 'New-PimApprovalOffRuleBody is COMPLETE -- the minimal setting-only body is rejected by Graph (BUG-56)' {
+        $b = New-PimApprovalOffRuleBody
+        $b.id | Should -Be 'Approval_EndUser_Assignment'
+        $b.'@odata.type' | Should -Be '#microsoft.graph.unifiedRoleManagementPolicyApprovalRule'
+        $b.setting.isApprovalRequired | Should -BeFalse
+        $b.setting.approvalMode | Should -Be 'NoApproval'
+        # The load-bearing part: a stage MUST be present with an EMPTY approver list. Sending
+        # only { isApprovalRequired = false } returns 400 ArgumentNullException ("Value cannot
+        # be null. Parameter name: source") -- measured, five times, before the cause was known.
+        @($b.setting.approvalStages).Count | Should -Be 1
+        @($b.setting.approvalStages[0].primaryApprovers).Count | Should -Be 0
+        @($b.setting.approvalStages[0].escalationApprovers).Count | Should -Be 0
+        # and it must serialise as a JSON ARRAY, not an object (the 1-element unwrap trap)
+        ($b | ConvertTo-Json -Depth 10 -Compress) | Should -Match '"approvalStages":\['
+    }
+    It 'Test-PimPolicyWriteLocked recognises the lock by code AND by message, and nothing else (BUG-56)' {
+        Test-PimPolicyWriteLocked 'HTTP 400 : ActivationCustomApproversNotEmpty' | Should -BeTrue
+        Test-PimPolicyWriteLocked 'The activation custom approvers should be empty.' | Should -BeTrue
+        # the OTHER 400 this area produces must NOT be treated as a lock -- it is a bad payload,
+        # and retrying it through the whole-policy route would only produce a second error
+        Test-PimPolicyWriteLocked 'ArgumentNullException: Value cannot be null. Parameter name: source' | Should -BeFalse
+        Test-PimPolicyWriteLocked 'InvalidPolicy' | Should -BeFalse
+        Test-PimPolicyWriteLocked '' | Should -BeFalse
+    }
+    # 🪤 These MUST use Pester's Mock, not a `function global:Invoke-PimGraph` override.
+    # PIM-Rest.ps1 is DOT-SOURCED into this Describe's scope, which sits nearer than global,
+    # so a global redefinition is shadowed and the REAL function runs -- the first version of
+    # these tests reached graph.microsoft.com for real and only failed because the fake policy
+    # id was rejected. A unit test that silently talks to Graph is worse than no test.
+    It 'Invoke-PimPolicyRulePatch: per-rule PATCH normally, whole-policy fallback ONLY on the write-lock (BUG-56)' {
+        # happy path -- one per-rule PATCH, no fallback
+        $script:calls = New-Object System.Collections.Generic.List[string]
+        Mock Invoke-PimGraph { $script:calls.Add("$Method $Path") | Out-Null }
+        Invoke-PimPolicyRulePatch -PolicyId 'P1' -Body (New-PimApprovalOffRuleBody)
+        @($script:calls).Count | Should -Be 1
+        $script:calls[0] | Should -Be 'PATCH /policies/roleManagementPolicies/P1/rules/Approval_EndUser_Assignment'
+
+        # write-locked, and no poisoned rule to clear -> the SAME body goes via the whole-policy route
+        $script:calls = New-Object System.Collections.Generic.List[string]
+        Mock Invoke-PimGraph {
+            $script:calls.Add("$Method $Path") | Out-Null
+            if ($Path -like '*expand=rules*') { return [pscustomobject]@{ rules = @() } }
+            if ($Path -like '*/rules/*') { throw 'HTTP 400 : ActivationCustomApproversNotEmpty The activation custom approvers should be empty.' }
+        }
+        $rec = $false
+        Invoke-PimPolicyRulePatch -PolicyId 'P2' -Body (New-PimApprovalOffRuleBody) -Recovered ([ref]$rec)
+        $rec | Should -BeTrue
+        $script:calls[-1] | Should -Be 'PATCH /policies/roleManagementPolicies/P2'   # whole-policy, no /rules/ segment
+
+        # write-locked WITH a poisoned rule -> unlock ALONE, then re-apply the rule normally.
+        # The ORDER is the assertion: repair (whole-policy, no /rules/ segment) must come
+        # before the retry, and the retry is an ordinary per-rule PATCH.
+        $script:calls = New-Object System.Collections.Generic.List[string]
+        $script:firstTry = $true
+        Mock Invoke-PimGraph {
+            $script:calls.Add("$Method $Path") | Out-Null
+            if ($Path -like '*expand=rules*') {
+                return [pscustomobject]@{ rules = @([pscustomobject]@{ id='Notification_Approver_EndUser_Assignment'; notificationLevel='All'; isDefaultRecipientsEnabled=$true; notificationRecipients=@('a@x.com') }) }
+            }
+            if ($Path -like '*/rules/*' -and $script:firstTry) { $script:firstTry = $false; throw 'HTTP 400 : ActivationCustomApproversNotEmpty' }
+        }
+        $rec2 = $false
+        Invoke-PimPolicyRulePatch -PolicyId 'P4' -Body (New-PimApprovalOffRuleBody) -Recovered ([ref]$rec2) 3>$null
+        $rec2 | Should -BeTrue
+        $patches = @($script:calls | Where-Object { $_ -like 'PATCH *' })
+        # note the fixture above has isDefaultRecipientsEnabled=TRUE: the recipient list alone
+        # locks the policy, so the repair must still fire on it.
+        $patches.Count | Should -Be 3
+        $patches[0] | Should -Be 'PATCH /policies/roleManagementPolicies/P4/rules/Approval_EndUser_Assignment'  # the refused first try
+        $patches[1] | Should -Be 'PATCH /policies/roleManagementPolicies/P4'                                    # unlock, ALONE
+        $patches[2] | Should -Be 'PATCH /policies/roleManagementPolicies/P4/rules/Approval_EndUser_Assignment'  # re-applied normally
+
+        # any OTHER failure is re-thrown unchanged -- never retried
+        $script:calls = New-Object System.Collections.Generic.List[string]
+        Mock Invoke-PimGraph { $script:calls.Add("$Method $Path") | Out-Null; throw 'HTTP 400 : InvalidPolicy' }
+        { Invoke-PimPolicyRulePatch -PolicyId 'P3' -Body (New-PimApprovalOffRuleBody) } | Should -Throw -ExpectedMessage '*InvalidPolicy*'
+        @($script:calls).Count | Should -Be 1   # no fallback attempt
+    }
+    It 'Repair-PimWriteLockedPolicy empties the Approver recipient list, alone, and never restores it (BUG-56)' {
+        $script:sentBody = $null
+        $script:restorePatches = @()
+        Mock Invoke-PimGraph {
+            if ($Path -like '*expand=rules*') {
+                return [pscustomobject]@{ rules = @(
+                    # the poisoned rule: defaults OFF *and* explicit recipients
+                    [pscustomobject]@{ id='Notification_Approver_EndUser_Assignment'; notificationLevel='All'; isDefaultRecipientsEnabled=$false; notificationRecipients=@('a@x.com','b@x.com') }
+                    # defaults OFF but NO recipients -- harmless, must be left alone
+                    [pscustomobject]@{ id='Notification_Admin_EndUser_Assignment'; notificationLevel='All'; isDefaultRecipientsEnabled=$false; notificationRecipients=@() }
+                ) }
+            }
+            if ($Path -like '*/rules/*') { $script:restorePatches += $Body; return }
+            $script:sentBody = $Body
+        }
+        $ok = Repair-PimWriteLockedPolicy -PolicyId 'P9' 3>$null
+        $ok | Should -BeTrue
+
+        # THE UNLOCK -- whole-policy, exactly one rule, recipient list EMPTIED. All three are
+        # measured requirements: carrying the caller's rule too is refused, and KEEPING the
+        # recipients is refused (the list alone is the trigger, not the defaults flag).
+        $rules = @($script:sentBody.rules)
+        $rules.Count | Should -Be 1
+        $rules[0].id | Should -Be 'Notification_Approver_EndUser_Assignment'
+        $rules[0].isDefaultRecipientsEnabled | Should -BeTrue
+        @($rules[0].notificationRecipients).Count | Should -Be 0
+        # the ADMIN rule is never a trigger, whatever it carries -- left alone
+        @($rules | Where-Object { $_.id -like 'Notification_Admin_*' }).Count | Should -Be 0
+
+        # ...and NOTHING is patched afterwards to put the recipients back: restoring them
+        # re-locks the policy immediately (observed live). The addresses are warned about
+        # instead, which is why this assertion is zero and not one.
+        @($script:restorePatches).Count | Should -Be 0
+    }
+    # TEST-16 -- a freshly-created AU 404s when the SAME pass attaches its members. The retry is
+    # gated on PROVENANCE, not on the status code: lag resolves itself, a genuinely missing AU
+    # does not, and retrying the second one only delays an accurate error.
+    It 'TEST-16: only an AU created THIS pass is treated as replication lag' {
+        $ctx = @{}
+        Test-PimAuCreatedThisPass -Context $ctx -AuId 'au-1' | Should -BeFalse   # nothing registered yet
+        Register-PimAuCreatedThisPass -Context $ctx -AuId 'au-1' -AuName 'PIMSCEN-AU-A'
+        Test-PimAuCreatedThisPass -Context $ctx -AuId 'au-1' | Should -BeTrue
+        Test-PimAuCreatedThisPass -Context $ctx -AuId 'au-2' | Should -BeFalse   # a pre-existing AU
+        # must not throw on the shapes it will really meet
+        Test-PimAuCreatedThisPass -Context $null -AuId 'au-1' | Should -BeFalse
+        Test-PimAuCreatedThisPass -Context $ctx  -AuId ''     | Should -BeFalse
+        { Register-PimAuCreatedThisPass -Context $null -AuId 'x' -AuName 'y' } | Should -Not -Throw
+        { Register-PimAuCreatedThisPass -Context $ctx -AuId '' -AuName 'y' } | Should -Not -Throw
+        @($ctx['auCreatedThisPass'].Keys).Count | Should -Be 1   # the blank id was not recorded
+    }
+    It 'TEST-16: Test-PimGraphNotFound recognises a 404 by status AND by error code, nothing else' {
+        Test-PimGraphNotFound 'GET https://graph... -> HTTP 404 : Request_ResourceNotFound' | Should -BeTrue
+        Test-PimGraphNotFound 'Request_ResourceNotFound'   | Should -BeTrue
+        Test-PimGraphNotFound 'HTTP 403 : Authorization_RequestDenied' | Should -BeFalse
+        Test-PimGraphNotFound 'HTTP 400 : InvalidPolicy'   | Should -BeFalse
+        Test-PimGraphNotFound ''                            | Should -BeFalse
+    }
+    It 'TEST-16: a 404 on an AU created this pass RETRIES and then succeeds' {
+        $ctx = @{}; Register-PimAuCreatedThisPass -Context $ctx -AuId 'au-new' -AuName 'A'
+        $script:calls = 0
+        $r = Invoke-PimAuReplicationRetry -Context $ctx -AuId 'au-new' -DelaySeconds 0 -MaxAttempts 4 -Action {
+            $script:calls++
+            if ($script:calls -lt 3) { throw 'GET /directory/administrativeUnits/au-new/members -> HTTP 404 : Request_ResourceNotFound' }
+            'members'
+        } 6>$null
+        $script:calls | Should -Be 3      # failed twice, succeeded on the third
+        $r | Should -Be 'members'
+    }
+    It 'TEST-16: a 404 on an AU this pass did NOT create fails IMMEDIATELY (it is a real missing object)' {
+        $ctx = @{}   # nothing registered
+        $script:calls = 0
+        { Invoke-PimAuReplicationRetry -Context $ctx -AuId 'au-old' -DelaySeconds 0 -Action {
+            $script:calls++; throw 'GET ... -> HTTP 404 : Request_ResourceNotFound' } 6>$null } |
+            Should -Throw -ExpectedMessage '*404*'
+        $script:calls | Should -Be 1      # no retry -- the whole point of the provenance gate
+    }
+    It 'TEST-16: a NON-404 failure is never retried, even for an AU created this pass' {
+        $ctx = @{}; Register-PimAuCreatedThisPass -Context $ctx -AuId 'au-new' -AuName 'A'
+        $script:calls = 0
+        { Invoke-PimAuReplicationRetry -Context $ctx -AuId 'au-new' -DelaySeconds 0 -Action {
+            $script:calls++; throw 'HTTP 403 : Authorization_RequestDenied' } 6>$null } |
+            Should -Throw -ExpectedMessage '*403*'
+        $script:calls | Should -Be 1
+    }
+    It 'TEST-16: retries are BOUNDED -- a permanently-404 AU still fails rather than looping' {
+        $ctx = @{}; Register-PimAuCreatedThisPass -Context $ctx -AuId 'au-new' -AuName 'A'
+        $script:calls = 0
+        { Invoke-PimAuReplicationRetry -Context $ctx -AuId 'au-new' -DelaySeconds 0 -MaxAttempts 3 -Action {
+            $script:calls++; throw 'HTTP 404 : Request_ResourceNotFound' } 6>$null } | Should -Throw
+        $script:calls | Should -Be 3      # exactly MaxAttempts, then the real error surfaces
+    }
+    It 'Repair-PimWriteLockedPolicy does NOTHING when no Approver rule actually carries recipients (BUG-56)' {
+        # 🪤 @($null).Count is 1, so an Approver rule with NO notificationRecipients property --
+        # the normal, healthy shape -- would look poisoned and get "repaired" on every write-lock,
+        # clobbering a rule that was never the problem. Blanks must be filtered before counting.
+        $script:sentBody = $null
+        Mock Invoke-PimGraph {
+            if ($Path -like '*expand=rules*') {
+                return [pscustomobject]@{ rules = @(
+                    [pscustomobject]@{ id='Notification_Approver_EndUser_Assignment'; notificationLevel='All'; isDefaultRecipientsEnabled=$true }              # no property at all
+                    [pscustomobject]@{ id='Notification_Approver_EndUser_Eligibility'; notificationLevel='All'; isDefaultRecipientsEnabled=$false; notificationRecipients=@() }  # explicitly empty
+                    [pscustomobject]@{ id='Notification_Approver_EndUser_Assignment2'; notificationLevel='All'; notificationRecipients=@('   ') }               # whitespace only
+                ) }
+            }
+            $script:sentBody = $Body
+        }
+        Repair-PimWriteLockedPolicy -PolicyId 'P10' 3>$null | Should -BeFalse
+        $script:sentBody | Should -BeNullOrEmpty   # nothing was sent at all
     }
     It 'Get-PimGroupPolicyLiveFacets normalises a live rules collection to the same shape (id and @odata.type routed)' {
         $rules = @(
@@ -1857,9 +2146,12 @@ Describe 'NEW REST engine (PIM-EngineCore + providers)' {
         }
         $savedTid = $global:PIM_TestTenantIds; $savedConn = $global:PIM_TenantId
         try {
-            $global:PIM_TestTenantIds = $null   # use the built-in test-tenant list
-            # PROTECTED env (real internal tenant) -> default OFF for every feature
-            $global:PIM_TenantId = 'f0fa27a0-8e7c-4f63-9a77-ec94786b7c9e'
+            # SEC-02: there is no longer a built-in test-tenant list -- the real GUIDs used to
+            # ship in PIM-DisableGuard.ps1 and decided where destructive features default ON.
+            # Name a SYNTHETIC test tenant explicitly, as a real deployment now must.
+            $global:PIM_TestTenantIds = @('bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb')
+            # PROTECTED env (a tenant not on the list) -> default OFF for every feature
+            $global:PIM_TenantId = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa'
             (Test-PimAutoDestructiveEnabled -Feature 'Offboarding')            | Should -BeFalse
             (Test-PimAutoDestructiveEnabled -Feature 'GroupRetirement')        | Should -BeFalse
             (Test-PimAutoDestructiveEnabled -Feature 'MembershipDriftCleanup') | Should -BeFalse
@@ -1868,18 +2160,18 @@ Describe 'NEW REST engine (PIM-EngineCore + providers)' {
             $global:PIM_TenantId = $null
             (Test-PimAutoDestructiveEnabled -Feature 'GroupRetirement')        | Should -BeFalse
             # TEST env (PIM MSP test tenant) -> default ON for every feature
-            $global:PIM_TenantId = '4ff34194-fb38-4949-8e2a-58dac8f096c2'      # PIM MSP test tenant
+            $global:PIM_TenantId = 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb'      # the configured test tenant
             (Test-PimAutoDestructiveEnabled -Feature 'Offboarding')            | Should -BeTrue
             (Test-PimAutoDestructiveEnabled -Feature 'GroupRetirement')        | Should -BeTrue
             (Test-PimAutoDestructiveEnabled -Feature 'MembershipDriftCleanup') | Should -BeTrue
             (Test-PimAutoDestructiveEnabled -Feature 'UnknownFeature')         | Should -BeFalse   # unknown feature is never enabled
             # explicit operator opt-in overrides the env default in BOTH directions
-            $global:PIM_TenantId = 'f0fa27a0-8e7c-4f63-9a77-ec94786b7c9e'      # protected
+            $global:PIM_TenantId = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa'      # protected
             $global:PIM_EnableGroupRetirement = $true
             (Test-PimAutoDestructiveEnabled -Feature 'GroupRetirement')        | Should -BeTrue   # explicit ON beats protected default
             $global:PIM_EnableGroupRetirement = 'yes'
             (Test-PimAutoDestructiveEnabled -Feature 'GroupRetirement')        | Should -BeTrue
-            $global:PIM_TenantId = '4ff34194-fb38-4949-8e2a-58dac8f096c2'      # test
+            $global:PIM_TenantId = 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb'      # test
             $global:PIM_EnableGroupRetirement = $false
             (Test-PimAutoDestructiveEnabled -Feature 'GroupRetirement')        | Should -BeFalse  # explicit OFF beats test default
             # an old 'Report' value is an EXPLICIT (non-empty) setting -> falsy, stays OFF even in test

@@ -104,6 +104,10 @@ const SEED_NODES = [
   { id: 'admin:bob@contoso.com',   label: 'bob (Az Dev)',     kind: 'admin', tier: 'T0', purpose: 'highpriv' },
   { id: 'group:ROLE-HELP', label: 'Helpdesk Role',  kind: 'role-group',       groupTag: 'ROLE-HELP', source: 'PIM-Definitions-Roles' },
   { id: 'group:ROLE-AZ',   label: 'Az Dev Role',    kind: 'role-group',       groupTag: 'ROLE-AZ',   source: 'PIM-Definitions-Roles' },
+  // alice is DIRECTLY assigned to a 2nd role group too, so the admin-breakdown
+  // check can prove the "Direct role groups (2)" count (admin -> direct groups,
+  // not the flat transitive Entra/AU/Azure target dump).
+  { id: 'group:ROLE-AUDIT', label: 'Audit Role',    kind: 'role-group',       groupTag: 'ROLE-AUDIT',source: 'PIM-Definitions-Roles' },
   { id: 'group:PERM-ENTRA',label: 'Entra Perm',     kind: 'permission-group', groupTag: 'PERM-ENTRA',source: 'PIM-Definitions-Entra' },
   { id: 'group:PERM-WL',   label: 'Workload Perm',  kind: 'permission-group', groupTag: 'PERM-WL',   source: 'PIM-Definitions-Workloads' },
   { id: 'group:PERM-AZ',   label: 'Azure Perm',     kind: 'permission-group', groupTag: 'PERM-AZ',   source: 'PIM-Definitions-Azure' },
@@ -113,6 +117,7 @@ const SEED_NODES = [
 ];
 const SEED_EDGES = [
   { source: 'admin:alice@contoso.com', target: 'group:ROLE-HELP', type: 'Eligible' },
+  { source: 'admin:alice@contoso.com', target: 'group:ROLE-AUDIT', type: 'Eligible' },
   { source: 'admin:bob@contoso.com',   target: 'group:ROLE-AZ',   type: 'Eligible' },
   { source: 'group:ROLE-HELP', target: 'group:PERM-ENTRA', type: 'Member' },
   { source: 'group:ROLE-HELP', target: 'group:PERM-WL',    type: 'Member' },
@@ -376,6 +381,10 @@ function bootDom(mode, empty) {
     // Feature flags (gradual rollout) are baked at boot; the harness seeds an
     // all-enabled map so every tab is reachable for the per-tab render checks.
     '__PIM_FEATUREFLAGS__': JSON.stringify({ flags: SEED_FEATURE_FLAGS, effective: SEED_FEATURE_FLAGS, catalog: [], warnings: [] }),
+    // Governance-preview boot flag (PIM_GOVPREVIEW_BOOT) -- a later boot
+    // placeholder the harness must also substitute or the inline boot script
+    // throws a ReferenceError before any tab renders.
+    '__PIM_GOVPREVIEW__': JSON.stringify(empty ? {} : { enabled: false }),
   };
   for (const [k, v] of Object.entries(sub)) html = html.split(k).join(v);
 
@@ -397,6 +406,12 @@ function bootDom(mode, empty) {
         : () => Promise.reject(new Error('static mode -- API not available'));
       // confirm/alert/prompt are no-ops in jsdom but define them to be safe.
       w.confirm = () => true; w.alert = () => {}; w.prompt = () => null;
+      // jsdom does not implement Element.scrollIntoView -- mapSelect() calls it
+      // when focusing a node; stub it so a selection doesn't throw.
+      if (w.Element && !w.Element.prototype.scrollIntoView) { w.Element.prototype.scrollIntoView = function () {}; }
+      // jsdom lacks the CSS interface (mapDrawWires uses CSS.escape for the wire
+      // selectors). Provide a minimal escape so map selection doesn't throw.
+      if (!w.CSS) { w.CSS = { escape: (x) => String(x).replace(/[^a-zA-Z0-9_-]/g, (ch) => '\\' + ch) }; }
     },
   });
   return { dom, errors, callLog };
@@ -607,6 +622,74 @@ function navGroupChecks(win, doc, findings) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// ADMIN DELEGATION-MAP BREAKDOWN check (operator bug fix).
+// Selecting an ADMIN in the Delegation Map must show the admin's DIRECT role
+// groups (the mapper LINK admin -> its role group(s)), NOT a flat transitive
+// dump of every reachable Entra ID / AU-scoped / Azure role chip. Selecting a
+// ROLE GROUP must still show the target breakdown (Entra/AU/Azure chips).
+// Drives the REAL mapSelect / mapRenderDetail over the seeded topology and
+// inspects #mapDetail -- headless, no browser.
+function adminBreakdownCheck(win, doc, findings) {
+  const add = (id, severity, tab, message) => findings.push({ id, severity, tab, message, pass: 'admin-breakdown' });
+  try {
+    win.switchTab('map');
+    const detail = doc.getElementById('mapDetail');
+    if (!detail || typeof win.mapSelect !== 'function') {
+      add('admin-bd-no-detail', 'warn', 'Delegation Map', 'mapDetail / mapSelect not available for verification'); return;
+    }
+    // 1. ADMIN selection -> "Direct role groups (N)" list, NO flat target chips.
+    win.mapSelect('admin:alice@contoso.com');
+    const html = detail.innerHTML;
+    const dgGroup = detail.querySelector('.pt-grp-lbl');
+    const dgLabel = dgGroup ? dgGroup.textContent : '';
+    if (!/Direct role groups \(2\)/.test(dgLabel)) {
+      add('admin-bd-no-direct-groups', 'error', 'Delegation Map',
+        'admin selection did not render "Direct role groups (2)" (got "' + dgLabel + '") -- the admin->direct-role-group mapper link is missing');
+    }
+    const dgChips = detail.querySelectorAll('.map-dg-chip');
+    if (dgChips.length !== 2) {
+      add('admin-bd-chip-count', 'error', 'Delegation Map', 'admin breakdown rendered ' + dgChips.length + ' direct-group chips, expected 2');
+    }
+    // The chips must be the ROLE GROUPS (col 1), each focusable to its role-group node.
+    const gids = [...dgChips].map(c => c.dataset.gid).sort();
+    const wantGids = ['group:ROLE-AUDIT', 'group:ROLE-HELP'];
+    if (JSON.stringify(gids) !== JSON.stringify(wantGids)) {
+      add('admin-bd-wrong-gids', 'error', 'Delegation Map', 'direct-group chips point at ' + JSON.stringify(gids) + ', expected ' + JSON.stringify(wantGids));
+    }
+    // The flat transitive target breakdown headers must NOT appear for an admin.
+    if (/Entra ID roles \(|AU-scoped roles \(|Azure RBAC @ scope \(/.test(html)) {
+      add('admin-bd-flat-dump', 'error', 'Delegation Map',
+        'admin selection STILL shows the flat transitive target breakdown (Entra/AU/Azure chips) -- the over-fold-out bug is back');
+    }
+    // 2. clicking a direct-group chip focuses/selects that role-group node.
+    const helpChip = [...dgChips].find(c => c.dataset.gid === 'group:ROLE-HELP');
+    if (helpChip) {
+      helpChip.click();
+      // mapSelect marks the selected node's board item with .sel -- read the DOM
+      // (MAP is a script-scope const, not on window).
+      const selEl = doc.querySelector('#mapBoard .map-item.sel');
+      const selId = selEl ? selEl.dataset.id : null;
+      if (selId !== 'group:ROLE-HELP') {
+        add('admin-bd-chip-no-focus', 'error', 'Delegation Map', 'clicking a direct-group chip did not focus that role-group node (selected=' + selId + ')');
+      }
+    }
+    // 3. ROLE GROUP selection -> the target breakdown is STILL shown (unchanged
+    //    behaviour for non-admins). bob -> ROLE-AZ -> PERM-AZ -> az target.
+    win.mapSelect('group:ROLE-AZ');
+    const roleHtml = detail.innerHTML;
+    if (!/Azure RBAC @ scope \(/.test(roleHtml)) {
+      add('role-bd-missing-targets', 'error', 'Delegation Map',
+        'role-group selection no longer shows the target breakdown (Azure RBAC @ scope) -- non-admin breakdown regressed');
+    }
+    if (detail.querySelector('.map-dg-chip')) {
+      add('role-bd-shows-direct-groups', 'error', 'Delegation Map', 'role-group selection wrongly shows the admin-only "Direct role groups" chips');
+    }
+  } catch (e) {
+    add('admin-bd-throw', 'error', 'Delegation Map', 'admin breakdown verification threw: ' + (e && e.message));
+  }
+}
+
 function reachCheck(win, findings) {
   const add = (id, severity, tab, message) => findings.push({ id, severity, tab, message, pass: 'reach' });
   try {
@@ -635,6 +718,7 @@ function reachCheck(win, findings) {
     selectionInputChecks(seeded.document, all);
     navGroupChecks(seeded.window, seeded.document, all);   // §26d consolidated nav walk
     reachCheck(seeded.window, all);
+    adminBreakdownCheck(seeded.window, seeded.document, all);  // admin -> DIRECT role groups (not flat dump)
 
     // Pass 3: EMPTY server mode -- explicit empty/error states, no blank panels.
     const emptyPass = await runPass('server', true);

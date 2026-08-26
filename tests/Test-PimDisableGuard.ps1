@@ -32,21 +32,33 @@ Write-Host "=== PIM-DisableGuard (account-disable circuit breaker) ===" -Foregro
 # ---------------------------------------------------------------------------
 
 # --- env classification (operator decision: test vs protected) -------------
-$REAL_TENANT   = 'f0fa27a0-8e7c-4f63-9a77-ec94786b7c9e'   # real internal tenant (protected)
-$TEST_2LK      = '4ff34194-fb38-4949-8e2a-58dac8f096c2'   # PIM MSP test tenant 1
-$TEST_MGDOP    = '9927fa1f-a09b-4244-8aba-60fb9ce7335e'   # PIM MSP test tenant 2
-$global:PIM_TestTenantIds = $null   # use defaults
-Assert "ENV test tenant 1 -> test"       ((Resolve-PimEnvironmentClass -TenantId $TEST_2LK) -eq 'test')
-Assert "ENV test tenant 2 -> test"       ((Resolve-PimEnvironmentClass -TenantId $TEST_MGDOP) -eq 'test')
+# SEC-02: these are SYNTHETIC ids, and the test-tenant list is now configured EXPLICITLY.
+# There is no longer a shipped default list -- the real tenant GUIDs used to be baked into
+# PIM-DisableGuard.ps1 (and copied into this test), which published, in a public mirror, the
+# very list that decides where destructive features default ON. A test tenant must now be
+# named on purpose. These asserts therefore configure the list first.
+$REAL_TENANT   = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa'   # stands in for the real internal tenant (protected)
+$TEST_2LK      = 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb'   # stands in for MSP test tenant 1
+$TEST_MGDOP    = 'cccccccc-cccc-cccc-cccc-cccccccccccc'   # stands in for MSP test tenant 2
+$global:PIM_TestTenantIds = @($TEST_2LK, $TEST_MGDOP)
+Assert "ENV configured test tenant 1 -> test" ((Resolve-PimEnvironmentClass -TenantId $TEST_2LK) -eq 'test')
+Assert "ENV configured test tenant 2 -> test" ((Resolve-PimEnvironmentClass -TenantId $TEST_MGDOP) -eq 'test')
 Assert "ENV real internal tenant -> protected" ((Resolve-PimEnvironmentClass -TenantId $REAL_TENANT) -eq 'protected')
 Assert "ENV unknown tenant -> protected" ((Resolve-PimEnvironmentClass -TenantId '00000000-0000-0000-0000-000000000000') -eq 'protected')
 Assert "ENV absent tenant -> protected"  ((Resolve-PimEnvironmentClass -TenantId '') -eq 'protected')
 Assert "ENV case-insensitive test match" ((Resolve-PimEnvironmentClass -TenantId $TEST_2LK.ToUpper()) -eq 'test')
+# SEC-02 fail-safe: with NO list configured, nothing is a test tenant -- so a deployment that
+# never names one gets the protected (destructive-OFF) default everywhere.
+$global:PIM_TestTenantIds = $null; $prevEnvList = $env:PIM_TestTenantIds; $env:PIM_TestTenantIds = $null
+Assert "SEC-02: no list configured -> the former default tenants are NOT test" ((Resolve-PimEnvironmentClass -TenantId $TEST_2LK) -eq 'protected')
+Assert "SEC-02: no list configured -> the list is empty"                       (@(Get-PimTestTenantIds).Count -eq 0)
+$env:PIM_TestTenantIds = $prevEnvList
 # operator can reclassify via $global:PIM_TestTenantIds (string or array)
 $global:PIM_TestTenantIds = '11111111-1111-1111-1111-111111111111'
-Assert "ENV custom list: real tenant no longer test" ((Resolve-PimEnvironmentClass -TenantId $TEST_2LK) -eq 'protected')
+Assert "ENV custom list: previous test tenant no longer test" ((Resolve-PimEnvironmentClass -TenantId $TEST_2LK) -eq 'protected')
 Assert "ENV custom list: listed id is test"          ((Resolve-PimEnvironmentClass -TenantId '11111111-1111-1111-1111-111111111111') -eq 'test')
-$global:PIM_TestTenantIds = $null
+# Restore the synthetic list for the G3 block below -- with no list, nothing is a test tenant.
+$global:PIM_TestTenantIds = @($TEST_2LK, $TEST_MGDOP)
 
 # G3 -- feature flag is now ENVIRONMENT-AWARE when unset; explicit override always wins.
 $global:PIM_AccountDisableEnabled = $null
@@ -187,8 +199,8 @@ Assert "Delta mode: zero disables (no prune path)" ($script:__disabled -eq 0 -an
 # 06:00 incident shape (empty-desired, whole 53-user tenant). The catastrophe guard
 # (G1 empty-desired) must STILL abort -> ZERO disables, even though env=test => ON.
 $script:__disabled = 0
-$global:PIM_TestTenantIds = $null
-$global:PIM_TenantId = '4ff34194-fb38-4949-8e2a-58dac8f096c2'   # PIM MSP test tenant => env=test
+$global:PIM_TestTenantIds = @($TEST_2LK)                         # SEC-02: named explicitly, no shipped default
+$global:PIM_TenantId = $TEST_2LK                                 # a configured test tenant => env=test
 $global:PIM_AccountDisableEnabled = $null                        # unset => env default (ON in test)
 Register-DisableProvider -Desired @() -Resolved $false -FeatureOverride (Test-PimAccountDisableEnabled)
 $rTestEnv = Invoke-PimEngineScope -Scope 'AdminsTest' -Mode Full -Prune
@@ -205,12 +217,89 @@ Assert "TEST env + wrong-desired: breaker ABORTS, zero disabled (G2 always-on)" 
 # PROTECTED tenant (real internal): feature DEFAULTS OFF -> zero disables even for a
 # single legit removal, no explicit flag needed.
 $script:__disabled = 0
-$global:PIM_TenantId = 'f0fa27a0-8e7c-4f63-9a77-ec94786b7c9e'   # real internal tenant => protected
+$global:PIM_TenantId = $REAL_TENANT                              # not in the list => protected
 $global:PIM_AccountDisableEnabled = $null
 $desired52b = @($tenant | Select-Object -First 52 | ForEach-Object { [pscustomobject]@{ upn=$_.upn; enabled=$true } })
 Register-DisableProvider -Desired $desired52b -Resolved $true -FeatureOverride (Test-PimAccountDisableEnabled)
 $rProt = Invoke-PimEngineScope -Scope 'AdminsTest' -Mode Full -Prune
 Assert "PROTECTED env: feature defaults OFF -> zero disabled" ($script:__disabled -eq 0 -and $rProt.disableAborted -eq 'feature-off')
+
+# === IMP-01: the caps are CLAMPED, and an override is never silent ===========
+# §22 says "Do NOT raise the caps to make a run go through" -- but nothing enforced it,
+# so PIM_DisableMaxCount = 100000 neutered G2 while the guard still reported itself
+# active. A breaker that can be raised without limit is a suggestion, not a breaker.
+Write-Host "`n-- IMP-01: override clamping --" -ForegroundColor Cyan
+$global:PIM_DisableMaxCount = $null; $global:PIM_DisableMaxPercent = $null
+Assert "IMP-01: default count cap is 5"    ((Get-PimDisableMaxCount) -eq 5)
+Assert "IMP-01: default percent cap is 10" ((Get-PimDisableMaxPercent) -eq 10)
+$global:PIM_DisableMaxCount = 100000
+Assert "IMP-01: an absurd count override is CLAMPED to the ceiling" ((Get-PimDisableMaxCount -WarningAction SilentlyContinue) -eq 50)
+$global:PIM_DisableMaxPercent = 100
+Assert "IMP-01: an absurd percent override is CLAMPED to the ceiling" ((Get-PimDisableMaxPercent -WarningAction SilentlyContinue) -eq 25)
+# A modest, legitimate override still works -- clamping must not break a real batch.
+$global:PIM_DisableMaxCount = 12; $global:PIM_DisableMaxPercent = 15
+Assert "IMP-01: a modest count override is honoured"   ((Get-PimDisableMaxCount -WarningAction SilentlyContinue) -eq 12)
+Assert "IMP-01: a modest percent override is honoured" ((Get-PimDisableMaxPercent -WarningAction SilentlyContinue) -eq 15)
+# ...and it WARNS, so an override can never be in effect silently.
+$warns = @(); $null = Get-PimDisableMaxCount -WarningVariable warns -WarningAction SilentlyContinue
+Assert "IMP-01: an override in effect emits a warning" (@($warns).Count -ge 1)
+$warnsClamp = @(); $global:PIM_DisableMaxCount = 100000
+$null = Get-PimDisableMaxCount -WarningVariable warnsClamp -WarningAction SilentlyContinue
+Assert "IMP-01: the clamp warning says CLAMPED" ("$warnsClamp" -match 'CLAMPED')
+# The clamp must actually BITE end-to-end: 100 disables must still abort under an
+# absurd override, because the effective cap is the ceiling, not the requested value.
+$global:PIM_DisableMaxCount = 100000; $global:PIM_DisableMaxPercent = 0
+$clamped = Test-PimMassDisableSafe -ToDisable 100 -Scanned 1000 -WarningAction SilentlyContinue
+Assert "IMP-01: 100 disables STILL abort despite a 100000 override" ($clamped.abort -eq $true)
+Assert "IMP-01: the decision reports the CLAMPED cap, not the requested one" ($clamped.maxCount -eq 50)
+$global:PIM_DisableMaxCount = $null; $global:PIM_DisableMaxPercent = $null
+
+# === BUG-03: the reported environment is the one the guard DECIDED against ====
+# Test-PimDisablePassAllowed had no -TenantId, so it resolved the tenant from the
+# ambient global while callers reported a class computed from their own -TenantId.
+# A safety readout that can disagree with its own decision is worse than none.
+Write-Host "`n-- BUG-03: guard reports the tenant it used --" -ForegroundColor Cyan
+$global:PIM_TestTenantIds = @('11111111-1111-1111-1111-111111111111')
+Remove-Variable -Name PIM_TenantId -Scope Global -ErrorAction SilentlyContinue
+$global:PIM_AccountDisableEnabled = $null   # let the ENV default decide, as in production
+$vTest = Test-PimDisablePassAllowed -ToDisable 1 -Scanned 100 -Desired @(@{x=1}) -DesiredResolved $true -TenantId '11111111-1111-1111-1111-111111111111'
+Assert "BUG-03: explicit TEST tenant -> env default ON, allowed" ($vTest.allowed -eq $true)
+Assert "BUG-03: verdict echoes environment=test"                 ("$($vTest.environment)" -eq 'test')
+Assert "BUG-03: verdict echoes the tenant it decided against"    ("$($vTest.tenantId)" -eq '11111111-1111-1111-1111-111111111111')
+$vProt = Test-PimDisablePassAllowed -ToDisable 1 -Scanned 100 -Desired @(@{x=1}) -DesiredResolved $true -TenantId '99999999-9999-9999-9999-999999999999'
+Assert "BUG-03: explicit UNKNOWN tenant -> protected default OFF" ($vProt.allowed -eq $false -and "$($vProt.tripped)" -eq 'feature-off')
+Assert "BUG-03: verdict echoes environment=protected"             ("$($vProt.environment)" -eq 'protected')
+# The exact disagreement the finding described: same call, two tenants, opposite
+# decisions -- proving the class now follows the decision instead of being computed
+# beside it. Before the fix both calls decided against the ambient tenant.
+Assert "BUG-03: the two tenants genuinely decide differently" ($vTest.allowed -ne $vProt.allowed)
+$global:PIM_TestTenantIds = $null; $global:PIM_AccountDisableEnabled = $null
+
+# === BUG-01: the abort alert is wired on ALL THREE guard-composing paths =====
+# Each path's BEHAVIOUR is proved in its own suite (offboard in Test-PimApprovalGate,
+# sweep in Test-PimInactivitySweep). This is the inventory check that stops a fourth
+# caller -- or a deletion -- from going silent again: the defect was precisely that
+# two of the three composite callers never told anyone.
+Write-Host "`n-- BUG-01: abort-alert wiring across every disable path --" -ForegroundColor Cyan
+$sharedDir = Join-Path (Split-Path -Parent $here) 'engine\_shared'
+$alertCallers = @(
+    @{ file = 'PIM-EngineCore.ps1';      why = 'engine disable pass' },
+    @{ file = 'PIM-ApprovalGate.ps1';    why = 'offboard execution gate (gate 3)' },
+    @{ file = 'PIM-InactivitySweep.ps1'; why = 'Enforce-mode inactivity sweep' }
+)
+foreach ($c in $alertCallers) {
+    $p = Join-Path $sharedDir $c.file
+    $txt = if (Test-Path -LiteralPath $p) { [System.IO.File]::ReadAllText($p) } else { '' }
+    Assert "BUG-01: $($c.file) raises the abort alert ($($c.why))" ($txt -match 'Write-PimDisableAbortAlert\s+-Scope')
+}
+# Every composite caller of the guard must be one of the known alerting callers --
+# a NEW caller that never alerts is the exact regression this finding was about.
+$guardCallers = @(Get-ChildItem -LiteralPath $sharedDir -Filter '*.ps1' -File |
+    Where-Object { ([System.IO.File]::ReadAllText($_.FullName)) -match 'Test-PimDisablePassAllowed\s+-ToDisable' } |
+    ForEach-Object { $_.Name } | Sort-Object)
+$known = @($alertCallers | ForEach-Object { $_.file })
+$unexpected = @($guardCallers | Where-Object { $known -notcontains $_ })
+Assert ("BUG-01: no un-alerted caller of the disable guard" + $(if ($unexpected.Count) { " -- found: $($unexpected -join ', ')" } else { '' })) ($unexpected.Count -eq 0)
 
 # cleanup
 $global:PIM_AccountDisableEnabled = $null

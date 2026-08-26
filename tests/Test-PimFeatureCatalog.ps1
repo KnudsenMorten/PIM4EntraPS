@@ -108,19 +108,35 @@ Set-PimSetting -Name 'FeatureGates' -Value ([ordered]@{ gates = [ordered]@{ 'dis
 T 'persisted override enables a feature' (Test-PimFeatureEnabled -Key 'discovery.sweep')
 T 'enabled free feature is available' (Test-PimFeatureAvailable -Key 'discovery.sweep' -Quiet)
 
-# license gate: a Pro feature under Core is NOT licensed; under Pro it is
+# license gate.
+# ⚠️ POLICY CHANGE 2026-08-07 (operator: "no limitations ... full access default"). The
+# licence gate is now UNENFORCED by default, so an edition restricts NOTHING -- these
+# assertions used to encode the opposite and are updated, not deleted. The gate MECHANISM
+# still has to work, so the restrictive half is now asserted with enforcement explicitly
+# ON. Removing these would leave the gate as dead code nobody could trust if it were ever
+# turned back on.
 Reset-Store
 Set-PimSetting -Name 'FeatureGates' -Value ([ordered]@{ gates = [ordered]@{ 'connectors.workload' = $true } })   # enabled but...
 Set-PimSetting -Name 'Edition' -Value ([ordered]@{ edition = 'Core' })
-T 'Pro feature is enabled but NOT licensed under Core' ((Test-PimFeatureEnabled -Key 'connectors.workload') -and -not (Test-PimFeatureLicensed -Key 'connectors.workload'))
-T 'Pro feature is NOT available under Core (enabled but unlicensed)' (-not (Test-PimFeatureAvailable -Key 'connectors.workload' -Quiet))
-Set-PimSetting -Name 'Edition' -Value ([ordered]@{ edition = 'Pro' })
-T 'Pro feature IS licensed + available under Pro' ((Test-PimFeatureLicensed -Key 'connectors.workload') -and (Test-PimFeatureAvailable -Key 'connectors.workload' -Quiet))
-Set-PimSetting -Name 'Edition' -Value ([ordered]@{ edition = 'Pro-DesignPartner' })
-T 'Pro feature IS available under Pro-DesignPartner too' (Test-PimFeatureAvailable -Key 'connectors.workload' -Quiet)
 
-# -Edition override (what-if for the GUI preview)
-T 'Test-PimFeatureLicensed honours -Edition override' ((Test-PimFeatureLicensed -Key 'connectors.workload' -Edition 'Pro') -and -not (Test-PimFeatureLicensed -Key 'connectors.workload' -Edition 'Core'))
+# --- DEFAULT (unenforced): full access, whatever the edition says ---------
+T 'DEFAULT: the licence gate is not enforced' (-not (Test-PimLicenseGateActive))
+T 'DEFAULT: a Pro feature IS licensed under Core (Pro is free)' (Test-PimFeatureLicensed -Key 'connectors.workload')
+T 'DEFAULT: a Pro feature IS available under Core' (Test-PimFeatureAvailable -Key 'connectors.workload' -Quiet)
+T 'DEFAULT: -Edition Core does not restrict either' (Test-PimFeatureLicensed -Key 'connectors.workload' -Edition 'Core')
+
+# --- ENFORCED: the gate still does exactly what it always did -------------
+$global:PIM_EnforceProLicense = $true
+try {
+    T 'ENFORCED: Pro feature is enabled but NOT licensed under Core' ((Test-PimFeatureEnabled -Key 'connectors.workload') -and -not (Test-PimFeatureLicensed -Key 'connectors.workload'))
+    T 'ENFORCED: Pro feature is NOT available under Core (enabled but unlicensed)' (-not (Test-PimFeatureAvailable -Key 'connectors.workload' -Quiet))
+    T 'ENFORCED: Test-PimFeatureLicensed honours -Edition override' ((Test-PimFeatureLicensed -Key 'connectors.workload' -Edition 'Pro') -and -not (Test-PimFeatureLicensed -Key 'connectors.workload' -Edition 'Core'))
+    Set-PimSetting -Name 'Edition' -Value ([ordered]@{ edition = 'Pro' })
+    T 'ENFORCED: Pro feature IS licensed + available under Pro' ((Test-PimFeatureLicensed -Key 'connectors.workload') -and (Test-PimFeatureAvailable -Key 'connectors.workload' -Quiet))
+    Set-PimSetting -Name 'Edition' -Value ([ordered]@{ edition = 'Pro-DesignPartner' })
+    T 'ENFORCED: Pro feature IS available under Pro-DesignPartner too' (Test-PimFeatureAvailable -Key 'connectors.workload' -Quiet)
+} finally { Remove-Variable -Name PIM_EnforceProLicense -Scope Global -ErrorAction SilentlyContinue }
+Set-PimSetting -Name 'Edition' -Value ([ordered]@{ edition = 'Pro-DesignPartner' })
 
 # dependency issue surfaced: enable connectors.powerbi (needs discovery.sweep) but leave discovery off
 Reset-Store
@@ -162,11 +178,21 @@ $r2 = Invoke-PimEngineScope -Scope 'FakeGated' -Mode Delta -WhatIf
 T 'enabled+licensed provider scope RUNS (GetDesired called)' ($script:__desiredCalled)
 T 'enabled provider plan (WhatIf) makes no real write' (-not $script:__createCalled)
 
-# feature ENABLED but UNLICENSED (Core) -> still inert
+# feature ENABLED but UNLICENSED (Core).
+# DEFAULT (unenforced, 2026-08-07): the edition restricts nothing, so the scope RUNS --
+# this is the whole point of "full access by default", asserted at the level that matters,
+# the one where the engine actually calls a provider.
 $script:__desiredCalled = $false
 Set-PimSetting -Name 'Edition' -Value ([ordered]@{ edition = 'Core' })
 $r3 = Invoke-PimEngineScope -Scope 'FakeGated' -Mode Delta -WhatIf
-T 'enabled-but-unlicensed provider scope NO-OPs (GetDesired not called)' (-not $script:__desiredCalled -and "$($r3.skippedFeature)" -eq 'connectors.workload')
+T 'DEFAULT: enabled Pro provider scope RUNS under Core (no licence limitation)' ($script:__desiredCalled -and -not "$($r3.skippedFeature)")
+# ENFORCED: unchanged -- an unlicensed scope is still inert, and still names why.
+$script:__desiredCalled = $false
+$global:PIM_EnforceProLicense = $true
+try {
+    $r3b = Invoke-PimEngineScope -Scope 'FakeGated' -Mode Delta -WhatIf
+    T 'ENFORCED: enabled-but-unlicensed provider scope NO-OPs (GetDesired not called)' (-not $script:__desiredCalled -and "$($r3b.skippedFeature)" -eq 'connectors.workload')
+} finally { Remove-Variable -Name PIM_EnforceProLicense -Scope Global -ErrorAction SilentlyContinue }
 
 Write-Host "`n== 4. JOB INERTNESS (gated scheduled job no-ops) ==" -ForegroundColor Cyan
 Reset-Store

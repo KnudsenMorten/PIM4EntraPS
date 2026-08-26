@@ -63,6 +63,14 @@ function Get-PimScenarioEngineFiles {
         "$shared\PIM-Rest.ps1","$shared\PIM-SqlStore.ps1","$shared\PIM-ChangeQueue.ps1",
         "$shared\PIM-PermissionWizard.ps1","$shared\PIM-AzureDiscovery.ps1","$shared\PIM-Discovery.ps1",
         "$shared\PIM-ContextBuilder.ps1","$shared\PIM-EngineCore.ps1","$shared\PIM-Notify.ps1",
+        # PIM-DisableGuard.ps1 is NOT optional, and its absence does not look like an
+        # absence: it owns Get-PimAdminAccountPrefixes, and the Admins provider resolves
+        # its live set ONLY when that function exists. Without it every scenario run
+        # died on "no admin naming prefix is configured ... REFUSING to scan the whole
+        # user population" -- the correct fail-closed guard, firing for the wrong
+        # reason. A load list that omits a file the providers hard-depend on turns a
+        # safety net into an outage.
+        "$shared\PIM-DisableGuard.ps1",
         "$shared\PIM-EngineProviders.ps1"
     )
     if (Test-Path "$config\PIM4EntraPS.Filters.locked.ps1") { $files += "$config\PIM4EntraPS.Filters.locked.ps1" }
@@ -70,6 +78,24 @@ function Get-PimScenarioEngineFiles {
     # would clobber same-named caller variables when dot-sourced at the scenario top level).
     $files += @((Join-Path $PSScriptRoot 'PIM-FakeTenant.ps1'),(Join-Path $PSScriptRoot 'PIM-ScenarioSeedSpec.ps1'))
     return $files
+}
+
+# ---------------------------------------------------------------------------
+# The scenario tenant's ADMIN NAMING CONVENTION.
+#
+# The Admins provider limits its live set to accounts whose UPN starts with a
+# configured admin prefix, and it is fail-closed: no prefix = no run. The shipped
+# locked config declares 'Admin-'/'x-Admin'/'g-Admin', but every scenario account is
+# named '<Marker>Admin-...', so with the shipped prefixes the live set came back EMPTY
+# -- and an empty live set is not harmless here: the engine then re-CREATES accounts it
+# already made, and a second pass is no longer idempotent. Declaring the marker as the
+# scenario tenant's convention is the same thing a real customer does in their own
+# config, so this is fidelity, not a workaround.
+# ---------------------------------------------------------------------------
+function Set-PimScenarioNamingConventions {
+    param([string]$Marker = 'PIMSCENARIO-')
+    if (-not $global:PIM_NamingConventions) { $global:PIM_NamingConventions = @{} }
+    $global:PIM_NamingConventions['AdminAccountPatterns'] = @("${Marker}Admin-")
 }
 
 # ---------------------------------------------------------------------------
@@ -84,6 +110,7 @@ function Initialize-PimScenarioStore {
         [Parameter(Mandatory)][string]$DefaultDomain,
         [string]$Marker='PIMSCENARIO-'
     )
+    Set-PimScenarioNamingConventions -Marker $Marker
     Initialize-PimSqlDatabase -Server $SqlServer -Database $SqlDatabase
     $cs = Get-PimSqlConnectionString
     Initialize-PimSqlStore -ConnectionString $cs
@@ -126,7 +153,13 @@ function Remove-PimScenarioStore {
 # state by Get-PimScenarioEngineFiles, so clear them there.
 $script:PimEngineRunCacheVars = @(
     'PimDirSchedAt','PimDirElig','PimDirAct','PimGrpSchedAt','PimGrpElig','PimGrpAct',
-    'PimGrpMemCache'
+    'PimGrpMemCache',
+    # Per-TENANT facts, not just per-run: the MSP pair sim runs the engine against two
+    # different managed tenants in ONE process, and a default domain cached from the
+    # first would build the second tenant's UPNs at the wrong domain (and the negative
+    # cache -Tried would pin a miss forever). The department-owner index is per-store
+    # for the same reason.
+    '__pimTargetDefaultDomain','__pimTargetDefaultDomainTried','__pimDeptOwners'
 )
 function Reset-PimEngineRunCaches {
     # Clear in BOTH the global scope and the caller's scope so it works whether the engine
@@ -145,8 +178,12 @@ function Invoke-PimScenarioEngine {
     if ($FreshProcess) { Reset-PimEngineRunCaches }
     # the engine reads desired from $global:PIM_EngineSqlCs (set by Initialize-PimScenarioStore)
     $res = @(Invoke-PimEngine -Scope $Scope -Mode $Mode -WhatIf:$WhatIf -Prune:$Prune)
-    $tot = [pscustomobject]@{ create=0; update=0; remove=0; applied=0; skipped=0; errors=0; scopes=$res }
-    foreach ($r in $res) { $tot.create+=[int]$r.create; $tot.update+=[int]$r.update; $tot.remove+=[int]$r.remove; $tot.applied+=[int]$r.applied; $tot.skipped+=[int]$r.skipped; $tot.errors+=[int]$r.errors }
+    # `nochange` is carried too: with a faithful live read, an already-correct item is
+    # NOCHANGE (never attempted), not SKIPPED (attempted, rejected as existing). Both mean
+    # "the re-run was safe", and a scenario asserting idempotency must be able to say so
+    # without depending on which of the two the tenant happened to produce.
+    $tot = [pscustomobject]@{ create=0; update=0; remove=0; nochange=0; applied=0; skipped=0; errors=0; scopes=$res }
+    foreach ($r in $res) { $tot.create+=[int]$r.create; $tot.update+=[int]$r.update; $tot.remove+=[int]$r.remove; $tot.nochange+=[int]$r.nochange; $tot.applied+=[int]$r.applied; $tot.skipped+=[int]$r.skipped; $tot.errors+=[int]$r.errors }
     return $tot
 }
 
