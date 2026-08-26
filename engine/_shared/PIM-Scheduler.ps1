@@ -1,3 +1,6 @@
+# IMP-02: the locale-safe stamp reader. Loaded defensively so this file stays correct
+# when a test dot-sources it on its own (PIM-Functions.psm1 also loads it up front).
+if (-not (Get-Command Get-PimUtcStamp -ErrorAction SilentlyContinue)) { . (Join-Path $PSScriptRoot 'PIM-DateSafe.ps1') }
 <#
   PIM4EntraPS -- scheduler / job runner.
 
@@ -51,6 +54,13 @@ function Get-PimDefaultJobSchedule {
     @(
         [pscustomobject]@{ name='queue-apply';        type='queue-apply';  intervalMinutes=5;    enabled=$true  }
         [pscustomobject]@{ name='delta-admins';       type='engine-delta'; scope='Admins';                  intervalMinutes=15;   enabled=$true  }
+        # AdminTap is its OWN provider (order 35), NOT part of the Admins scope -- so without a job
+        # here nothing ever ran it except the daily `full-reconcile` (scope All). Measured in EFIF:
+        # four accounts created at 18:22 with CreateTAP=TRUE all had TAP=none, and would have kept
+        # it until 06:05 the next morning. No error anywhere -- the TAP, and therefore the
+        # tap-delivery mail, just silently did not happen for ~12 hours. Paired with delta-admins'
+        # cadence so a newly-created admin gets its TAP on the next pass, not the next day.
+        [pscustomobject]@{ name='delta-admin-tap';    type='engine-delta'; scope='AdminTap';                intervalMinutes=15;   enabled=$true  }
         [pscustomobject]@{ name='delta-groups-assign';type='engine-delta'; scope='GroupsAssignment';        intervalMinutes=15;   enabled=$true  }
         [pscustomobject]@{ name='delta-groups-deploy';type='engine-delta'; scope='GroupsCreateModifyPolicy';intervalMinutes=30;   enabled=$true  }
         [pscustomobject]@{ name='delta-policies';     type='engine-delta'; scope='GroupsPolicies';          intervalMinutes=60;   enabled=$true  }
@@ -91,6 +101,30 @@ function Get-PimJobSchedule {
     return Get-PimDefaultJobSchedule
 }
 
+# ---- cold-boot settings hydration (GUI-state == actual-behavior fix) -------
+# Get-PimJobSchedule resolves 'JobSchedule' via Get-PimPolicySetting, which reads
+# $global:PIM_NamingConventions. In the MANAGER that bag is hydrated from SQL pim.Settings
+# at boot, so a GUI-saved cadence is honoured. A COLD-booted scheduler / one-shot tick
+# never ran that boot path, so without this it would silently fall back to the DEFAULT
+# schedule and ignore the persisted cadence. Import-PimSchedulerSettingsFromStore loads
+# pim.Settings into $global:PIM_NamingConventions (incl. JobSchedule + EmailControls) once
+# per process so a freshly-booted scheduler honours the persisted source of truth. FAIL-
+# SAFE: a store-read failure leaves the in-process schedule as-is (the default), never
+# crashes a tick. No-op when no SQL store is configured (file/in-memory deployments).
+function Import-PimSchedulerSettingsFromStore {
+    param([switch]$Force)
+    if ($script:PimSchedSettingsHydrated -and -not $Force) { return $false }
+    if (-not (Get-Command Import-PimSettingsFromStore -ErrorAction SilentlyContinue)) { return $false }
+    $n = -1
+    try { $n = Import-PimSettingsFromStore } catch { $n = -1 }
+    if ($n -ge 0) {
+        $script:PimSchedSettingsHydrated = $true
+        if ($n -gt 0) { Write-Host "[scheduler] hydrated $n setting(s) from pim.Settings (JobSchedule/EmailControls honoured from the GUI source of truth)" -ForegroundColor DarkCyan }
+        return $true
+    }
+    return $false   # store unreachable -> keep current/default schedule (fail-safe), retry next boot/tick
+}
+
 # ---- pure due-calculation core (testable) ---------------------------------
 function Get-PimNextRunUtc {
     param([Parameter(Mandatory)][object]$Job, [Parameter(Mandatory)][datetime]$FromUtc)
@@ -103,8 +137,7 @@ function Test-PimJobDue {
     if (-not $en) { return $false }
     $next = $null
     if ($Job.PSObject.Properties['nextRunUtc'] -and "$($Job.nextRunUtc)".Trim()) {
-        $tmp = [datetime]::MinValue
-        if ([datetime]::TryParse("$($Job.nextRunUtc)", [ref]$tmp)) { $next = $tmp.ToUniversalTime() }
+        $next = Get-PimUtcStamp $Job.nextRunUtc   # IMP-02; unreadable -> treated as never scheduled (due)
     }
     if ($null -eq $next) { return $true }                 # never scheduled -> due
     return ($NowUtc.ToUniversalTime() -ge $next)
@@ -403,6 +436,66 @@ function Invoke-PimScheduledJob {
     }
 }
 
+function Get-PimSchedulerStoreVerdict {
+    <#
+      BUG-45 -- decide whether an unreachable store is fatal. PURE: no SQL, no env, no output.
+
+      MEASURED on mfnpr 2026-08-09/10. The tick was given correct SQL coordinates, acquired a
+      managed-identity token, printed "[scheduler] SQL store wired -> ...", and then every single
+      read failed with "Login failed for user '<token-identified principal>'" -- the contained DB
+      user had never been created, because the deploy died before the grant (BUG-44). The tick
+      could not read FeatureGates, fell back to built-in defaults, skipped EVERY job, and
+      **exited 0**. Four consecutive executions reported Succeeded having done nothing at all.
+
+      "Wired" is not "reachable", and that gap is the whole defect: a connection string resolves
+      long before anyone proves a connection opens. So the probe is separate from the wiring, and
+      its verdict is graded rather than boolean:
+
+        fatal -- HOSTED and the store cannot be reached. There is no useful degraded mode here:
+                 scheduler state does not persist (so every job looks due on every tick) and the
+                 single-runner lease (BUG-36) cannot arbitrate between processes. Non-zero exit
+                 is the only signal a cron Job has; taking it away is what made this invisible.
+        warn  -- not hosted (a workstation run). Degrading to a file store is legitimate there.
+        ok    -- reachable, or no SQL configured at all (file store by design).
+
+      Deliberately NOT fatal: "every job was skipped by the feature gate". That is the DESIGNED
+      safe default for a protected environment (SEC-02) and firing on it would make a correctly
+      configured tenant fail forever. The defect is the unreachable store, not the gate.
+    #>
+    [CmdletBinding()]
+    param(
+        [bool]$Hosted,
+        # SQL coordinates were supplied (PIM_SqlServer / PIM_SqlConnectionString).
+        [bool]$SqlConfigured,
+        # A connection string was successfully resolved from them.
+        [bool]$ConnectionStringResolved,
+        # A real read against the store succeeded.
+        [bool]$ProbeOk,
+        [string]$ProbeError = ''
+    )
+    if (-not $SqlConfigured) {
+        if ($Hosted) {
+            return [pscustomobject]@{ level = 'fatal'; reason = 'hosted-no-sql'
+                detail = 'PIM_HOSTED=1 but no PIM_SqlServer/PIM_SqlConnectionString. A hosted tick has no durable store: scheduler state cannot survive the container and the single-runner lease cannot arbitrate between runs.' }
+        }
+        return [pscustomobject]@{ level = 'ok'; reason = 'file-store'; detail = 'no SQL configured -- file store (local run).' }
+    }
+    if (-not $ConnectionStringResolved) {
+        $d = 'SQL coordinates are set but no connection string could be resolved from them.'
+        if ($Hosted) { return [pscustomobject]@{ level = 'fatal'; reason = 'no-connection-string'; detail = $d } }
+        return [pscustomobject]@{ level = 'warn'; reason = 'no-connection-string'; detail = $d }
+    }
+    if (-not $ProbeOk) {
+        $d = "the SQL store was wired but is NOT reachable: $ProbeError"
+        if ($Hosted) {
+            return [pscustomobject]@{ level = 'fatal'; reason = 'store-unreachable'
+                detail = ($d + " A 'Login failed for user <token-identified principal>' here means the identity has no contained DB user in this database -- the deploy's Grant-PimMiSql step did not run or did not succeed. Refusing to report success for a tick that can do no work.") }
+        }
+        return [pscustomobject]@{ level = 'warn'; reason = 'store-unreachable'; detail = $d }
+    }
+    return [pscustomobject]@{ level = 'ok'; reason = 'store-reachable'; detail = 'SQL store reachable.' }
+}
+
 # ---- state persistence (SQL settings -> file -> memory) -------------------
 function Get-PimSchedulerState {
     if (Get-Command Get-PimSetting -ErrorAction SilentlyContinue) {
@@ -534,7 +627,10 @@ function Get-PimRunFailureHistory {
             detail       = "$($r.detail)"
             startedUtc   = "$($r.startedUtc)"
             finishedUtc  = "$($r.finishedUtc)"
-            durationMs   = $(if ($r.PSObject.Properties['durationMs']) { [int]$r.durationMs } else { 0 })
+            # [int64], not [int] -- a >24.9-day duration overflows Int32 and would throw
+            # here even though the record was written correctly (BUG-04; fixing only the
+            # write site left this narrowing cast to re-throw on READ).
+            durationMs   = $(if ($r.PSObject.Properties['durationMs']) { [int64]$r.durationMs } else { [int64]0 })
             trigger      = [bool]$r.trigger
             reason       = "$($r.reason)"
             acknowledged = [bool]($ackSet.ContainsKey($rid))
@@ -576,11 +672,13 @@ function Get-PimJobOverdueState {
     if ($InProgress) { $result.reason = 'running';   return $result }
     # Resolve the EXPECTED fire time: prefer an explicit nextRunUtc; else last run + interval.
     $expected = $null
-    $tmp = [datetime]::MinValue
-    if ("$NextRunUtc".Trim() -and [datetime]::TryParse("$NextRunUtc", [ref]$tmp)) {
-        $expected = $tmp.ToUniversalTime()
-    } elseif ("$LastRunUtc".Trim() -and [datetime]::TryParse("$LastRunUtc", [ref]$tmp)) {
-        $expected = $tmp.ToUniversalTime().AddMinutes($iv)
+    # IMP-02: locale-safe; an unreadable stamp yields no basis -> 'never-run', not overdue.
+    $tmp = Get-PimUtcStamp $NextRunUtc
+    if ($null -ne $tmp) {
+        $expected = $tmp
+    } else {
+        $tmp = Get-PimUtcStamp $LastRunUtc
+        if ($null -ne $tmp) { $expected = $tmp.AddMinutes($iv) }
     }
     if ($null -eq $expected) { $result.reason = 'never-run'; return $result }   # no basis -> not overdue
     $grace = if ($GraceMinutes -gt 0) { $GraceMinutes } else { [Math]::Max(5, $iv) }
@@ -749,7 +847,7 @@ function Get-PimJobsStatus {
             lastResult      = $(if ($last) { "$($last.detail)" } else { '' })
             lastOk          = $(if ($last) { [bool]$last.ok } else { $null })
             lastRan         = $(if ($last) { [bool]$last.ran } else { $null })
-            lastDurationMs  = $(if ($last) { [int]$last.durationMs } else { $null })
+            lastDurationMs  = $(if ($last) { [int64]$last.durationMs } else { $null })   # [int64] -- see BUG-04
             lastRunId       = $lastRunId
             lastAcknowledged   = [bool]$lastAcked
             runningRunId    = $(if ($inProg) { "$($inProg.runId)" } else { '' })
@@ -826,7 +924,16 @@ function Write-PimJobRunRecord {
         reason      = "$Reason"
         startedUtc  = $StartedUtc.ToUniversalTime().ToString('o')
         finishedUtc = $fin.ToString('o')
-        durationMs  = [int]([Math]::Max(0, ($fin - $StartedUtc.ToUniversalTime()).TotalMilliseconds))
+        # [double]0 and [int64] are BOTH load-bearing (audit finding BUG-04).
+        # `[Math]::Max(0, <double>)` binds to the Max(Int32,Int32) OVERLOAD -- the literal
+        # 0 is an Int32, so PowerShell coerces TotalMilliseconds into an Int32 and THROWS
+        # ("Value was either too large or too small for an Int32") once the duration
+        # exceeds Int32.MaxValue ms = ~24.9 days. The outer [int] cast overflowed at the
+        # same threshold. That killed the WHOLE run-record write, so a run was never
+        # recorded at all -- losing Jobs-tab history exactly when something had gone wrong
+        # (a stale 'running' placeholder or clock skew is enough to trigger it).
+        # [double]0 selects Max(Double,Double); [int64] holds the result.
+        durationMs  = [int64][Math]::Max([double]0, ($fin - $StartedUtc.ToUniversalTime()).TotalMilliseconds)
         log         = (ConvertTo-PimRunLogText -Result $Result -Job $Job -StartedUtc $StartedUtc.ToUniversalTime())
     }
     Add-PimJobRunRecord -Run $rec
@@ -898,7 +1005,9 @@ function Invoke-PimJobForceStart {
         reason      = 'force-start'
         startedUtc  = $started.ToString('o')
         finishedUtc = $fin.ToString('o')
-        durationMs  = [int]([Math]::Max(0, ($fin - $started).TotalMilliseconds))
+        # See Write-PimJobRunRecord: [double]0 picks the Max(Double,Double) overload and
+        # [int64] holds a >24.9-day duration. Both are required (BUG-04).
+        durationMs  = [int64][Math]::Max([double]0, ($fin - $started).TotalMilliseconds)
         log         = (ConvertTo-PimRunLogText -Result $res -Job $Job -StartedUtc $started)
     }
     Add-PimJobRunRecord -Run $rec
@@ -959,16 +1068,341 @@ function Test-PimSchedulerLeaseFree {
     param([object]$Lease, [Parameter(Mandatory)][string]$Owner, [Parameter(Mandatory)][datetime]$NowUtc)
     if (-not $Lease -or -not "$($Lease.owner)".Trim()) { return $true }
     if ("$($Lease.owner)" -eq $Owner) { return $true }
+    # BUG-02: a lease that is HELD but whose expiry cannot be UNDERSTOOD must be treated
+    # as HELD, not free. The old code fell through to `return $true` when TryParse failed,
+    # so a truncated / blank / locale-unparseable expiresUtc made EVERY instance believe
+    # the lease was free -- two schedulers then run engine ticks against the same tenant,
+    # the exact double-apply this lease exists to prevent. Fail CLOSED instead: the cost
+    # of a wrongly-held lease is one skipped tick (the next tick retries); the cost of a
+    # wrongly-free lease is a concurrent double-apply.
+    # IMP-02: parse locale-safely. expiresUtc is always written with ToString('o'), so
+    # InvariantCulture is the correct reading of it -- the bare TryParse used ambient
+    # culture, which is why a da-DK host could fail to read a stamp it wrote itself.
     $exp = [datetime]::MinValue
-    if ([datetime]::TryParse("$($Lease.expiresUtc)", [ref]$exp)) { return ($NowUtc.ToUniversalTime() -ge $exp.ToUniversalTime()) }
+    $styles = [System.Globalization.DateTimeStyles]::AdjustToUniversal -bor [System.Globalization.DateTimeStyles]::AssumeUniversal
+    $raw = "$($Lease.expiresUtc)"
+    if ([datetime]::TryParse($raw, [System.Globalization.CultureInfo]::InvariantCulture, $styles, [ref]$exp)) {
+        return ($NowUtc.ToUniversalTime() -ge $exp.ToUniversalTime())
+    }
+    # Last resort before failing closed: the project's own locale-safe parser, for a lease
+    # written by an older build in some other format.
+    if (Get-Command Ensure-DateTime -ErrorAction SilentlyContinue) {
+        $alt = Ensure-DateTime $raw
+        if ($alt -is [datetime]) { return ($NowUtc.ToUniversalTime() -ge $alt.ToUniversalTime()) }
+    }
+    Write-Warning ("scheduler lease held by '{0}' has an UNREADABLE expiry ('{1}') -- treating the lease as HELD (fail-closed). This instance skips the tick." -f "$($Lease.owner)", $raw)
+    return $false
+}
+
+# ---- BUG-36: ACQUIRING the lease, not just checking it --------------------
+# Test-PimSchedulerLeaseFree above has always been correct. What was missing is that NOTHING
+# EVER WROTE A LEASE: the check read $st.lease, found nothing, and returned $true every time.
+# The guard has never once refused a tick. That was invisible while exactly one always-on
+# worker ran, and becomes a live double-apply the moment cron Jobs can overlap.
+#
+# The lease is its OWN setting key, deliberately NOT a field inside SchedulerState:
+# Save-PimSchedulerState rewrites that whole blob, so a lease living inside it would be
+# clobbered by any concurrent state write -- reintroducing the race at a different layer.
+$script:PimLeaseSettingName = 'SchedulerLease'
+$script:PimLeaseMemory      = $null      # in-memory fallback (single-process deployments)
+
+# ---- BUG-54: WHO holds the lease is the whole safety property --------------
+# Two runners are only kept apart if neither can mistake the other's lease for its own.
+# The old owner default, "$($env:COMPUTERNAME)-$PID", is Windows-shaped and COLLAPSES in a
+# Linux container: COMPUTERNAME is not set there and pwsh is normally pid 1, so every
+# container tick took the lease under the literal owner '-1'. Test-PimSchedulerLeaseFree
+# then answers "that lease is yours" to ALL of them, and the guard whose entire job is to
+# make an overrun tick skip waves every one of them through.
+# MEASURED consequence on `ca-pim-tick`: 12 concurrent executions in Running state, each
+# renewing one lease under '-1', none completing, the job reporting healthy throughout --
+# which is also why three sessions could not work out why the engine "never converged".
+#
+# So: resolve the owner from whatever the runtime DOES set, and never hold a lease under an
+# owner whose host half is empty.
+$script:PimSchedulerOwnerKeys = @(
+    # Most specific to THIS execution first. In an ACA Job the two runners that must be told
+    # apart are two OVERLAPPING EXECUTIONS, and the execution name is both unique per
+    # execution and the identifier the operator sees in `az containerapp job execution list`
+    # -- so a stuck lease names something they can go and look at.
+    'CONTAINER_APP_JOB_EXECUTION_NAME'
+    'CONTAINER_APP_REPLICA_NAME'
+    'HOSTNAME'          # k8s/ACA always set this to the pod name; unique per replica
+    'COMPUTERNAME'      # Windows
+)
+# Deliberately NOT in that list: CONTAINER_APP_NAME / CONTAINER_APP_JOB_NAME. They name the
+# APP, not the instance, so every replica would share one owner -- the '-1' bug again with a
+# friendlier spelling.
+
+function Test-PimSchedulerOwnerUsable {
+    <#
+      PURE. Is this string safe to hold a lease under? Safe means IDENTIFYING: no second,
+      unrelated runner may produce the same value. A leading '-' is the structural tell that
+      the host half was empty -- '-1' is exactly what "<unset host>-<pid 1>" collapses to.
+      That leading '-' is the ONLY structural rejection, because ACA replica names
+      legitimately contain '--', so a "no empty segments" rule would refuse good owners.
+    #>
+    [CmdletBinding()]
+    param([string]$Owner)
+    $o = "$Owner".Trim()
+    if (-not $o) { return $false }
+    if ($o.StartsWith('-')) { return $false }
+    return $true
+}
+
+function Get-PimSchedulerOwnerId {
+    <#
+      PURE. Build the owner id from an environment MAP + a pid, so the container case is
+      testable on Windows -- the defect existed precisely because the real environment was
+      only ever read on a machine where COMPUTERNAME happened to be set.
+      Returns '' when nothing identifies the instance and no fallback was supplied; the
+      caller decides what to do about that rather than a silent degenerate value being coined
+      here.
+    #>
+    [CmdletBinding()]
+    param([hashtable]$EnvMap, [int]$ProcessId = 0, [string]$MachineName = '', [string]$FallbackId = '')
+    if (-not $EnvMap) { $EnvMap = @{} }
+    $hostPart = ''
+    foreach ($k in $script:PimSchedulerOwnerKeys) {
+        $v = "$($EnvMap[$k])".Trim()
+        if ($v) { $hostPart = $v; break }
+    }
+    if (-not $hostPart) { $hostPart = "$MachineName".Trim() }
+    if (-not $hostPart) {
+        # No host at all. A GUID is still CORRECT -- uniqueness is what the lease needs, and a
+        # guid never collides -- it is only untraceable, so it is labelled as such rather than
+        # passed off as a hostname.
+        $fb = "$FallbackId".Trim()
+        if (-not $fb) { return '' }
+        return "unidentified-$fb"
+    }
+    if ($ProcessId -gt 0) { return "$hostPart-$ProcessId" }
+    return $hostPart
+}
+
+function Resolve-PimSchedulerOwner {
+    # The one impure step: read the real environment. An explicitly-supplied owner wins.
+    [CmdletBinding()]
+    param([string]$Owner = '')
+    if ("$Owner".Trim()) { return "$Owner".Trim() }
+    $map = @{}
+    foreach ($k in $script:PimSchedulerOwnerKeys) {
+        try { $map[$k] = [System.Environment]::GetEnvironmentVariable($k) } catch { }
+    }
+    $mn = ''; try { $mn = [System.Environment]::MachineName } catch { $mn = '' }
+    $id = Get-PimSchedulerOwnerId -EnvMap $map -ProcessId $PID -MachineName $mn `
+                                  -FallbackId ([guid]::NewGuid().ToString('N'))
+    if ($id -like 'unidentified-*') {
+        Write-Warning ("[scheduler] nothing in this runtime identifies the instance (none of " +
+                       ($script:PimSchedulerOwnerKeys -join '/') + ", no machine name) -- holding the lease as " +
+                       "'$id'. The lease stays UNIQUE and therefore correct, but a stuck lease cannot be traced " +
+                       "back to a container.")
+    }
+    return $id
+}
+
+function New-PimSchedulerLease {
+    # PURE. The lease document, given an owner, a clock and a TTL. No I/O.
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string]$Owner, [Parameter(Mandatory)][datetime]$NowUtc, [int]$TtlMinutes = 15)
+    if ($TtlMinutes -lt 1) { $TtlMinutes = 1 }
+    [pscustomobject]@{
+        owner      = $Owner
+        acquiredUtc= $NowUtc.ToUniversalTime().ToString('o')
+        expiresUtc = $NowUtc.ToUniversalTime().AddMinutes($TtlMinutes).ToString('o')
+    }
+}
+
+function Test-PimSchedulerLeaseRenewDue {
+    <#
+      PURE. Should the holder renew yet? True once we are past HALF the TTL, so a long job
+      refreshes well before expiry but we are not writing to the store every few seconds.
+      A lease we cannot parse is treated as due -- renewing early is harmless; letting an
+      unreadable lease silently lapse while we are still working is not.
+    #>
+    [CmdletBinding()]
+    param([object]$Lease, [Parameter(Mandatory)][datetime]$NowUtc, [int]$TtlMinutes = 15)
+    if (-not $Lease -or -not "$($Lease.expiresUtc)".Trim()) { return $true }
+    # IMP-02, same styles as Test-PimSchedulerLeaseFree: InvariantCulture because expiresUtc is
+    # always written with ToString('o'). NOTE RoundtripKind is NOT usable here -- .NET rejects it
+    # combined with AdjustToUniversal/AssumeUniversal, which throws rather than returning false.
+    $exp = [datetime]::MinValue
+    $styles = [System.Globalization.DateTimeStyles]::AdjustToUniversal -bor [System.Globalization.DateTimeStyles]::AssumeUniversal
+    if (-not [datetime]::TryParse("$($Lease.expiresUtc)", [System.Globalization.CultureInfo]::InvariantCulture, $styles, [ref]$exp)) { return $true }
+    return ($NowUtc.ToUniversalTime() -ge $exp.ToUniversalTime().AddMinutes(-([math]::Max(1, $TtlMinutes / 2))))
+}
+
+function Get-PimSchedulerLeaseStoreCs {
+    # The SQL connection string, when there IS one. Only the SQL path is truly atomic.
+    if ("$($global:PIM_SqlConnectionString)".Trim()) { return "$($global:PIM_SqlConnectionString)" }
+    if ((Get-Command Get-PimSqlConnectionString -ErrorAction SilentlyContinue) -and
+        ("$($global:PIM_SqlServer)".Trim() -or "$($global:PIM_SqlConnStringVault)".Trim())) {
+        try { return (Get-PimSqlConnectionString) } catch { return $null }
+    }
+    return $null
+}
+
+function Get-PimSchedulerLeaseRaw {
+    # Returns @{ Raw = <exact stored json or $null>; Lease = <parsed or $null> }. Raw is what a
+    # compare-and-set must compare against -- re-serialising would change the bytes.
+    $cs = Get-PimSchedulerLeaseStoreCs
+    if ($cs -and (Get-Command Get-PimSqlSettingRaw -ErrorAction SilentlyContinue)) {
+        try {
+            $raw = Get-PimSqlSettingRaw -ConnectionString $cs -Name $script:PimLeaseSettingName
+            $obj = $null; if ("$raw".Trim()) { try { $obj = $raw | ConvertFrom-Json } catch { $obj = $null } }
+            return @{ Raw = $raw; Lease = $obj; Backend = 'sql'; Cs = $cs }
+        } catch { }
+    }
+    $raw = $script:PimLeaseMemory
+    $obj = $null; if ("$raw".Trim()) { try { $obj = $raw | ConvertFrom-Json } catch { $obj = $null } }
+    return @{ Raw = $raw; Lease = $obj; Backend = 'memory'; Cs = $null }
+}
+
+function Request-PimSchedulerLease {
+    <#
+      Try to take the lease. Returns $true only if THIS process now holds it.
+      SQL: a real compare-and-set -- read the exact stored value, decide with the pure
+      Test-PimSchedulerLeaseFree, then write ONLY IF the stored value has not changed since.
+      Losing the race returns $false, which is the correct outcome, not an error.
+    #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string]$Owner, [datetime]$NowUtc = [datetime]::UtcNow, [int]$TtlMinutes = 15)
+    # BUG-54: refuse the lease outright rather than take it under an owner that identifies
+    # nobody. This is the defence-in-depth half -- Resolve-PimSchedulerOwner should never coin
+    # such a value, but ANY caller may pass -Owner, and a caller that computes it the old way
+    # ("$env:COMPUTERNAME-$PID") would otherwise re-create the exact 12-stacked-runners defect
+    # here. Refusing costs one skipped tick; accepting costs a lease that cannot arbitrate.
+    if (-not (Test-PimSchedulerOwnerUsable -Owner $Owner)) {
+        Write-Warning (("[scheduler] REFUSING to take the lease under the non-identifying owner '{0}' (BUG-54). " -f $Owner) +
+                       "An owner with an empty host half is shared by every instance, so the lease could not tell " +
+                       "one runner from another. Pass -Owner explicitly, or let Resolve-PimSchedulerOwner derive it.")
+        return $false
+    }
+    $cur = Get-PimSchedulerLeaseRaw
+    if (-not (Test-PimSchedulerLeaseFree -Lease $cur.Lease -Owner $Owner -NowUtc $NowUtc)) { return $false }
+    $new  = New-PimSchedulerLease -Owner $Owner -NowUtc $NowUtc -TtlMinutes $TtlMinutes
+    $json = $new | ConvertTo-Json -Depth 4 -Compress
+    if ($cur.Backend -eq 'sql') {
+        try {
+            $n = Set-PimSqlSettingIfUnchanged -ConnectionString $cur.Cs -Name $script:PimLeaseSettingName `
+                    -NewValueJson $json -ExpectedValueJson $cur.Raw
+            if ($n -ge 1) { $script:PimLeaseHeld = $json; return $true }
+            # BUG-41: losing the CAS when we had just read the lease as FREE is not a normal
+            # race -- it means the write did not land for some other reason (a store that
+            # cannot be written, or a CAS that cannot express "expected absent"). Say so.
+            # Reporting every $false as contention is what hid a lease that could never be
+            # acquired at all: "another runner holds it" is the one explanation a reader
+            # cannot disprove without inspecting the store by hand.
+            if (-not "$($cur.Raw)".Trim()) {
+                Write-Warning ("[scheduler] lease NOT acquired although the store shows no lease -- the compare-and-set " +
+                               "wrote 0 rows. This is NOT contention; the store rejected or ignored the write.")
+            }
+            return $false
+        } catch {
+            # fail CLOSED: could not prove we own it, so we do not run -- but never silently.
+            Write-Warning "[scheduler] lease acquire FAILED against the SQL store (not contention): $($_.Exception.Message)"
+            return $false
+        }
+    }
+    # No SQL store: single-process deployment (VM / local). Best effort, and NOT atomic --
+    # said plainly rather than implied, because a file/in-memory "lease" cannot arbitrate
+    # between machines. Multi-runner safety requires the SQL store.
+    $script:PimLeaseMemory = $json; $script:PimLeaseHeld = $json
+    return $true
+}
+
+function Update-PimSchedulerLease {
+    # Extend OUR lease. CAS from the exact value we wrote, so a lease stolen after expiry is
+    # not silently taken back mid-run.
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string]$Owner, [datetime]$NowUtc = [datetime]::UtcNow, [int]$TtlMinutes = 15)
+    $cur = Get-PimSchedulerLeaseRaw
+    if (-not $cur.Lease -or "$($cur.Lease.owner)" -ne $Owner) { return $false }
+    $new  = New-PimSchedulerLease -Owner $Owner -NowUtc $NowUtc -TtlMinutes $TtlMinutes
+    $json = $new | ConvertTo-Json -Depth 4 -Compress
+    if ($cur.Backend -eq 'sql') {
+        try {
+            $n = Set-PimSqlSettingIfUnchanged -ConnectionString $cur.Cs -Name $script:PimLeaseSettingName `
+                    -NewValueJson $json -ExpectedValueJson $cur.Raw
+            if ($n -ge 1) { $script:PimLeaseHeld = $json; return $true }
+            return $false
+        } catch { return $false }
+    }
+    $script:PimLeaseMemory = $json; $script:PimLeaseHeld = $json
+    return $true
+}
+
+function Remove-PimSchedulerLease {
+    # Release, so the NEXT run starts immediately instead of waiting out the TTL. Only ever
+    # releases a lease we still own -- never clears someone else's.
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string]$Owner)
+    $cur = Get-PimSchedulerLeaseRaw
+    if (-not $cur.Lease -or "$($cur.Lease.owner)" -ne $Owner) { return $false }
+    if ($cur.Backend -eq 'sql') {
+        try {
+            $n = Set-PimSqlSettingIfUnchanged -ConnectionString $cur.Cs -Name $script:PimLeaseSettingName `
+                    -NewValueJson $null -ExpectedValueJson $cur.Raw
+            $script:PimLeaseHeld = $null
+            return ($n -ge 1)
+        } catch { return $false }
+    }
+    $script:PimLeaseMemory = $null; $script:PimLeaseHeld = $null
     return $true
 }
 
 # ---- one tick + the loop --------------------------------------------------
 function Invoke-PimSchedulerTick {
     # Run every due job once; advance each job's nextRunUtc; persist. Returns results.
-    param([object[]]$Jobs, [datetime]$NowUtc = [datetime]::UtcNow, [switch]$WhatIf)
+    #
+    # BUG-36: the lease is taken HERE, around the TICK, not around the loop in
+    # Start-PimScheduler. The tick is the unit of work that must not run twice, and it is what
+    # an external cron invokes via `-Once` -- so protecting the loop alone would leave every
+    # cron-driven deployment (framework ESTATE-06) completely unguarded. Held for the duration
+    # and released in `finally`, so the next run starts immediately rather than waiting out the
+    # TTL. -NoLease is for offline tests that drive the tick directly.
+    param([object[]]$Jobs, [datetime]$NowUtc = [datetime]::UtcNow, [switch]$WhatIf,
+          [string]$Owner, [int]$LeaseTtlMinutes = 15, [switch]$NoLease)
     $now = $NowUtc.ToUniversalTime()
+    # BUG-54: was "$($env:COMPUTERNAME)-$PID", which is '-1' in every Linux container.
+    if (-not "$Owner".Trim()) { $Owner = Resolve-PimSchedulerOwner }
+    $haveLease = $false
+    if (-not $NoLease) {
+        # BUG-54: say WHICH of the two failures happened. A refused owner and a lost race are
+        # different faults with different fixes, and reporting the second for the first is the
+        # mistake BUG-41 already cost a session over.
+        if (-not (Test-PimSchedulerOwnerUsable -Owner $Owner)) {
+            Write-Host "[scheduler] owner '$Owner' identifies no instance -- skipping tick rather than holding a lease nobody can own (BUG-54)" -ForegroundColor Red
+            return @([pscustomobject]@{ name = 'lease'; type = 'lease'; ok = $false; ran = $false
+                                        detail = "skipped: owner '$Owner' is not identifying -- an empty host half is shared by every instance" })
+        }
+        $haveLease = Request-PimSchedulerLease -Owner $Owner -NowUtc $now -TtlMinutes $LeaseTtlMinutes
+        if (-not $haveLease) {
+            # BUG-41: do not ASSERT contention -- report what was actually observed. The lease
+            # is only "held by another runner" if the store shows a live lease; otherwise the
+            # acquire failed for a different reason, which Request-PimSchedulerLease has just
+            # warned about in detail. Stating the wrong cause here cost a whole session.
+            $seen = $null; try { $seen = (Get-PimSchedulerLeaseRaw).Lease } catch { }
+            if ($seen) {
+                Write-Host "[scheduler] another runner holds the lease (owner '$($seen.owner)'); skipping tick" -ForegroundColor DarkYellow
+                if (-not (Test-PimSchedulerOwnerUsable -Owner "$($seen.owner)")) {
+                    # Named on sight so nobody re-debugs it: a lease owned by '-1' was written by a
+                    # PRE-BUG-54 build. Nothing can release it (no runner answers to that name), so it
+                    # clears when the TTL expires and normal ticks resume by themselves.
+                    Write-Host "[scheduler]   ^ that owner is non-identifying -- a leftover from a pre-BUG-54 build. It expires at its TTL; no action needed." -ForegroundColor DarkYellow
+                }
+                return @([pscustomobject]@{ name = 'lease'; type = 'lease'; ok = $true; ran = $false
+                                            detail = "skipped: lease held by '$($seen.owner)'" })
+            }
+            Write-Host "[scheduler] lease NOT acquired and the store shows NO lease -- skipping tick (this is a store/write fault, not contention)" -ForegroundColor Red
+            return @([pscustomobject]@{ name = 'lease'; type = 'lease'; ok = $false; ran = $false
+                                        detail = 'skipped: lease could not be acquired and no lease is held -- the store did not accept the write' })
+        }
+    }
+    try {
+    # Hydrate JobSchedule + EmailControls from pim.Settings ONCE so even a one-shot
+    # (-Once) cold tick honours the GUI-persisted cadence + email controls, not the
+    # in-process default. Fail-safe / no-op when no store is configured.
+    [void](Import-PimSchedulerSettingsFromStore)
     if (-not $Jobs) {
         $st = Get-PimSchedulerState
         if ($st -and $st.jobs) { $Jobs = @($st.jobs) } else { $Jobs = Get-PimJobSchedule }
@@ -1022,29 +1456,50 @@ function Invoke-PimSchedulerTick {
             $nr = (Get-PimNextRunUtc -Job $j -FromUtc $now).ToString('o')
             if ($j.PSObject.Properties['nextRunUtc']) { $j.nextRunUtc = $nr } else { $j | Add-Member -NotePropertyName nextRunUtc -NotePropertyValue $nr -Force }
             if ($j.PSObject.Properties['lastRunUtc']) { $j.lastRunUtc = $now.ToString('o') } else { $j | Add-Member -NotePropertyName lastRunUtc -NotePropertyValue $now.ToString('o') -Force }
+            # Renew mid-tick: a scheduled run can outlive the TTL (a full reconcile is not
+            # quick), and a lapsed lease would let a second runner start while this one is
+            # still writing. Renewal is half-TTL-gated, so this is not a per-job store write.
+            if ($haveLease -and (Test-PimSchedulerLeaseRenewDue -Lease (Get-PimSchedulerLeaseRaw).Lease -NowUtc ([datetime]::UtcNow) -TtlMinutes $LeaseTtlMinutes)) {
+                [void](Update-PimSchedulerLease -Owner $Owner -NowUtc ([datetime]::UtcNow) -TtlMinutes $LeaseTtlMinutes)
+            }
         }
     }
     Save-PimSchedulerState -State ([pscustomobject]@{ jobs = @($Jobs); lastWatermark = $lastWm; updatedUtc = $now.ToString('o') })
     return $results.ToArray()
+    }
+    finally {
+        # Release even when a job threw. A crash that leaves the lease held would block every
+        # later run until the TTL expires -- for a cron deployment that is silent downtime.
+        if ($haveLease) { [void](Remove-PimSchedulerLease -Owner $Owner) }
+    }
 }
 
 function Start-PimScheduler {
     # The container's job loop. Ticks every IntervalSeconds. MaxTicks>0 bounds it
     # (tests/one-shot); 0 = forever. Honors a single-runner lease.
-    param([int]$IntervalSeconds = 300, [int]$MaxTicks = 0, [string]$Owner = "$([guid]::NewGuid())", [switch]$WhatIf)
+    param([int]$IntervalSeconds = 300, [int]$MaxTicks = 0, [string]$Owner = '',
+          [int]$LeaseTtlMinutes = 15, [switch]$WhatIf)
+    # BUG-54: the default used to be a bare GUID. Unique, so never WRONG -- but it named
+    # nothing, so a lease held by a long-running loop could not be attributed to a replica.
+    # Resolve-PimSchedulerOwner yields <replica-or-host>-<pid> and only falls back to a guid
+    # when the runtime genuinely identifies nothing.
+    $Owner = Resolve-PimSchedulerOwner -Owner $Owner
     if ($script:PimJobHandlers.Count -eq 0) { Initialize-PimDefaultJobHandlers }
+    # Hydrate the persisted JobSchedule + EmailControls from pim.Settings at BOOT so a
+    # freshly-started scheduler honours the GUI-saved cadence + a GUI-set email kill
+    # switch from the first tick (the GUI-state == actual-behavior fix). Fail-safe.
+    [void](Import-PimSchedulerSettingsFromStore)
     Write-Host "[scheduler] starting (interval ${IntervalSeconds}s, owner $Owner)" -ForegroundColor Cyan
     $tick = 0
     while ($true) {
         $now = [datetime]::UtcNow
-        $st = Get-PimSchedulerState
-        $lease = if ($st) { $st.lease } else { $null }
-        if (Test-PimSchedulerLeaseFree -Lease $lease -Owner $Owner -NowUtc $now) {
-            $res = @(Invoke-PimSchedulerTick -NowUtc $now -WhatIf:$WhatIf)
-            foreach ($r in $res) { Write-Host ("[scheduler] {0,-16} {1}" -f $r.name, $r.detail) -ForegroundColor DarkGray }
-        } else {
-            Write-Host "[scheduler] another runner holds the lease; skipping tick" -ForegroundColor DarkYellow
-        }
+        # BUG-36: the lease is acquired INSIDE the tick now, so this loop no longer does its own
+        # check. The old check here read $st.lease from SchedulerState -- a field nothing ever
+        # wrote -- so it found no lease and permitted every tick, unconditionally. Deleting it
+        # rather than leaving it alongside the real one matters: two half-guards read as
+        # defence-in-depth while neither actually arbitrates.
+        $res = @(Invoke-PimSchedulerTick -NowUtc $now -WhatIf:$WhatIf -Owner $Owner -LeaseTtlMinutes $LeaseTtlMinutes)
+        foreach ($r in $res) { Write-Host ("[scheduler] {0,-16} {1}" -f $r.name, $r.detail) -ForegroundColor DarkGray }
         $tick++
         if ($MaxTicks -gt 0 -and $tick -ge $MaxTicks) { break }
         Start-Sleep -Seconds $IntervalSeconds

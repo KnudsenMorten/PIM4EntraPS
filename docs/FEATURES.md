@@ -2,7 +2,7 @@
 
 This is the delivered feature set of **PIM4EntraPS**, written in plain language for IT
 admins and customers. Everything listed here is built and verified. It is grouped by
-area and is safe to share publicly. (Status as of 2026-06-14.)
+area and is safe to share publicly. (Last reviewed 2026-08-06; individual entries carry their own ✅ date.)
 
 PIM4EntraPS is a privileged-access governance solution for Microsoft Entra. It models
 your privileged delegation as nested groups, applies the right PIM policies, and keeps
@@ -222,6 +222,24 @@ endpoint or leaving credentials lying around.
   and confirm the pattern right in Settings before importing.
 
 ## 9. Auth / Identity
+- **An admin whose first-time sign-in pass has expired is rescued automatically.** New admin
+  accounts are handed a time-boxed Temporary Access Pass so they can sign in and register their
+  own MFA. If nobody uses it before it expires, that admin previously had **no way back in at
+  all** — and the system reported everything as healthy, because it only checked whether a pass
+  existed, not whether it still worked. It now checks that the pass is genuinely **usable**, and
+  issues a fresh one to any admin whose pass has lapsed. *(✅ 2026-08-21, verified against a live
+  tenant.)*
+  - **It refuses to issue a pass it cannot deliver.** If the notification mailbox is not set up,
+    the recipient address is missing, or email is switched off, the system **changes nothing** and
+    says why. A sign-in credential that was created but never reached anyone is worse than the
+    expired one it replaced — so it will not create one it cannot hand over. If a pass is issued
+    and the email then fails anyway, that is now reported loudly rather than passing silently.
+  - **It never issues in a loop.** Once an admin holds a working pass the system leaves it alone;
+    and if it cannot read an admin's current state, it deliberately does nothing rather than risk
+    issuing a new credential on every cycle.
+  - **The code only ever appears in the email** — never in a web response, on screen, or in an
+    audit record. Passes can also be re-issued on demand from the Manager by an administrator, to
+    the manager address recorded for that account, and only to that address.
 - **100% direct API, no modules.** Authentication runs entirely over REST, so the solution
   works on a clean VM or container with nothing pre-installed.
 - **Certificate-based app auth.** The engine signs in as an application using a certificate
@@ -939,6 +957,33 @@ endpoint or leaving credentials lying around.
   setup, a short dismissible note explains the two things that save the most time: tick several
   roles and activate them in one click, and use the My Access tab to see and end what is currently
   active. Dismiss it once and it never comes back.
+- **"Show roles" tells you what a group actually grants — before you activate it.** ✅ 2026-06-26
+  Expand any row in the activate list and you see the real permissions behind it, read live from the
+  platform: directory roles (tenant-wide as well as those limited to an administrative unit), Azure
+  resource roles, and workload permissions such as endpoint security or reporting. Both the access that
+  is already active and the access you are eligible for are shown. Because privileged access is usually
+  packaged as a group inside a group, the preview follows those links in **both** directions — the groups
+  nested inside the one you picked, and the groups it is itself a member of — and merges the result, so
+  nothing granted through nesting is hidden. It reports what the platform really says rather than
+  guessing from a group's name; a name-based guess only ever appears for access the signed-in account
+  genuinely has no permission to read.
+- **Activation reports "done" when the access is really there — never on a stopwatch.** ✅ 2026-06-26
+  Privileged access does not arrive instantly: the request is accepted immediately, and the underlying
+  platform then takes anywhere from seconds to several minutes to fan the permissions out through nested
+  groups — often staying flat and then landing all at once. The extension therefore keeps checking what
+  you actually hold and only reports completion once it has *observed* the access: the role verified as
+  assigned to you, or your access counts settled at a steady value across consecutive checks. There is no
+  fixed waiting period, so a fast activation finishes fast, a repeat activation of a set you have used
+  before finishes at once, and a slow one is honestly reported as still in progress instead of being
+  declared done too early. A safety limit only exists to stop a check running forever.
+- **Every shape of privileged access is handled.** ✅ 2026-06-26 Whether you activate the outer group that
+  fans out to many permission groups, an individual permission group nested beneath it, or a plain
+  single-level assignment with no nesting at all, activation completes correctly for each. The list
+  refreshes as access lands, so the extra access that folds out of a nested group appears as it arrives.
+- **Deactivation is quick.** ✅ 2026-06-26 Handing access back no longer leaves you waiting on the
+  directory. Once your membership has been removed the access is already being torn down, so the
+  extension releases you immediately instead of waiting for the platform's slower cleanup to finish;
+  where a group fans out to several others, it still confirms those are gone before reporting done.
 - **Simple, secure sign-in.** Sign-in uses the browser's built-in flow (no extra software to
   bundle), and a first-run onboarding wizard guides setup when nothing is configured yet.
 - **Works for one tenant or many.** Point it at a single tenant for a silent experience, or
@@ -989,7 +1034,7 @@ endpoint or leaving credentials lying around.
 - **Clear documentation set.** A concise design document and this detailed feature catalog
   describe both how the system works and what it does for you.
 
-## 22. Feature customization & editions
+## 29. Feature customization & editions
 - **Every advanced capability is yours to switch on — nothing happens until you say so.** ✅ 2026-06-17 —
   a single **Feature customization** panel in **Settings** lists every optional capability (discovery,
   email & Teams alerting, workload connectors, Power BI, Exchange Online, MSP fan-out, scheduled jobs)
@@ -1005,17 +1050,36 @@ endpoint or leaving credentials lying around.
   outbound email off instantly (every alert, digest and notification becomes a no-op). You can also redirect
   every email to a single address (handy for testing) or restrict sending to an allowlist. These controls are
   honoured by every send path and every scheduled job.
-- **Editions: Core is free; Pro unlocks the advanced integrations.** ✅ 2026-06-17 — choose the active edition
-  per tenant. **Core** includes every essential PIM capability at no cost. **Pro** unlocks the advanced
-  integrations (workload connectors, Power BI, Exchange Online, MSP fan-out). Design-partner customers receive
-  the full Pro feature set free — recorded against the edition so the commercial basis is clear. In the Feature
-  customization panel, a capability that needs Pro is shown with a small **“Requires Pro”** lock until the
-  edition covers it; a disabled one is shown dimmed and labelled — never hidden, so everything stays
-  discoverable. Changing the edition or any feature switch is restricted to a senior administrator and recorded
-  in the audit trail.
+- **Editions: Core is free, and every advanced integration is currently free too.** ✅ 2026-06-17,
+  updated ✅ 2026-08-07 — choose the active edition per tenant. **Core** includes every essential PIM
+  capability at no cost, and **Pro** covers the advanced integrations (workload connectors, Power BI,
+  Exchange Online, MSP fan-out). **Licence enforcement is switched off, so nothing is restricted by your
+  edition: every advanced capability is available to every install at no cost.** The edition is recorded so
+  the commercial basis is clear — design-partner customers receive the full Pro feature set free — but it
+  does not gate anything. A disabled capability is shown dimmed and labelled, never hidden, so everything
+  stays discoverable. Changing the edition or any feature switch is restricted to a senior administrator and
+  recorded in the audit trail.
 - **Dependencies are surfaced.** ✅ 2026-06-17 — where one capability builds on another (for example Power BI
   needs the discovery sweep), the panel shows the prerequisite and warns if you enable a feature whose
   dependency isn't available yet.
+- **Pro is free by default — no nag screens, no blocked features, no phone-home.** ✅ 2026-06-17 — licence
+  enforcement ships **switched off**. With no licence file present at all, every Pro capability simply works
+  and the product reports itself as Core; nothing is degraded, interrupted or hidden while you evaluate it.
+  Turning enforcement on is a deliberate, explicit choice — it is never the default and it is never enabled
+  by an update.
+- **Your senior administrators can never be locked out by licensing.** ✅ 2026-06-17 — even with enforcement
+  switched on and no valid licence, a super-administrator keeps full access. Licensing controls which optional
+  capabilities are available; it can never become the reason you cannot get into your own environment and fix
+  something. This is a hard rule in the product, not a setting.
+- **Your privileged-access data is never behind a licence.** ✅ 2026-06-17 — the store that holds your
+  administrators, assignments and delegation model is part of the free core and is **never** a licensed
+  capability. Whatever happens to a licence, your data stays readable and exportable by you.
+- **Licences are verified offline, and a tampered one is refused.** ✅ 2026-06-17 — a licence is a signed file
+  you hold; checking it needs **no internet connection and no contact with us**, so it works in an isolated or
+  air-gapped environment. The check is cryptographic: a file that has been edited, signed with the wrong key,
+  or is simply not a licence is rejected outright rather than partially trusted. Expiry is handled kindly —
+  a licence past its end date enters a clearly reported **grace period** before it is treated as expired, and
+  one that is not yet valid is reported as such rather than silently accepted.
 
 ---
 

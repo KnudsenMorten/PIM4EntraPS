@@ -113,19 +113,48 @@ Write-Host "  registry: $ServerInstance / $Database"
 Write-Host "  license : $(Get-PimLicenseStatusText)"
 if (-not (Test-PimProFeature 'MspFanout')) { return }
 
-$targets = Get-PimRegistryRows -Query @"
+# The TAP columns (operator decision 2026-08-13, see platform-schema.sql) are selected with the
+# same defensive fallback the bundle producer uses: a registry that predates them still fans out,
+# and the row build below then applies the default (TAP ON) rather than the old hardcoded FALSE.
+$fanoutSelect = @"
 SELECT v.TenantId, v.TenantName, v.TenantRing, v.UserName, v.AdminRing,
        a.AppId, a.CertificateThumbprint,
-       c.DisplayName, c.FirstName, c.LastName, c.Initials, c.Purpose, c.UsageLocation, c.Ring
+       c.DisplayName, c.FirstName, c.LastName, c.Initials, c.Purpose, c.UsageLocation, c.Ring,
+       c.Template{0}
 FROM pim.vw_AdminTenantTargets v
 JOIN platform.TenantApps a ON a.TenantId = v.TenantId AND a.Product = 'PIM'
 JOIN pim.CentralAdmins c   ON c.UserName = v.UserName
 ORDER BY v.TenantRing, v.TenantName, v.AdminRing
 "@
+$targets = $null
+try { $targets = Get-PimRegistryRows -Query ($fanoutSelect -f ', c.CreateTap, c.TapLifetimeHours, c.ManagerEmail') }
+catch {
+    Write-Host "  (no CreateTap/TapLifetimeHours/ManagerEmail in pim.CentralAdmins -- applying the fan-out defaults)" -ForegroundColor DarkGray
+    $targets = Get-PimRegistryRows -Query ($fanoutSelect -f '')
+}
 if (-not $targets) { Write-Host "  nothing to deploy (no tenants with PIM apps + admins in ring reach)." -ForegroundColor Yellow; return }
 
 $byTenant = $targets | Group-Object TenantId
 $results = @()
+
+# BUG-23: this loop REPOINTS the ambient identity ($global:PIM_TenantId / _ClientId /
+# _CertThumbprint) at each customer tenant in turn, and used to leave it wherever the last
+# iteration landed. Anything the caller did afterwards in the same process therefore ran
+# against THE LAST TENANT THE FANOUT HAPPENED TO TOUCH, not the tenant it meant.
+# Observed live 2026-08-06: in the TEST-12 S6 scenario the downlink fanned out (local slave,
+# then central slave) and the engine apply that followed authenticated as the CENTRAL
+# tenant's SPN and reconciled that tenant's estate -- for a run whose target was the local
+# slave. Read-shaped there; a write-shaped one is a cross-tenant write.
+# The identity is captured here and restored in the finally below, so the fanout is
+# transparent to its caller. (Cf. BUG-22: the token cache is now keyed by identity, so a
+# restored ambient context also gets the RIGHT token again.)
+$__prevTenantId   = $global:PIM_TenantId
+$__prevClientId   = $global:PIM_ClientId
+$__prevThumbprint = $global:PIM_CertThumbprint
+$__prevUseMi      = $global:PIM_UseManagedIdentity
+$__prevInteractive= $global:PIM_Interactive
+
+try {
 
 foreach ($grp in $byTenant) {
     $t = $grp.Group[0]
@@ -179,6 +208,17 @@ foreach ($grp in $byTenant) {
 
     # Build the per-tenant Account-Definitions CSV from the registry rows.
     $rows = foreach ($a in $grp.Group) {
+        # TAP intent -- ON unless the registry says otherwise (operator decision 2026-08-13).
+        # Kept byte-for-byte equivalent to the S6 downlink's resolution so the two topologies
+        # cannot drift: a customer must not get a different admin depending on how we reached it.
+        $tapRaw = "$($a.CreateTap)".Trim()
+        $createTap = if ($tapRaw) { if ($tapRaw -match '(?i)^(true|1|yes)$') { 'TRUE' } else { 'FALSE' } } else { 'TRUE' }
+        $life = 0; [void][int]::TryParse("$($a.TapLifetimeHours)".Trim(), [ref]$life)
+        if ($life -le 0) { $life = 8 }
+        $mgr = "$($a.ManagerEmail)".Trim()
+        if ($createTap -eq 'TRUE' -and -not $mgr) {
+            Write-Host "  [warn] $($a.UserName): CreateTAP is ON but the registry carries no ManagerEmail -- the TAP will be minted and delivered NOWHERE (the code is readable only at creation)." -ForegroundColor Yellow
+        }
         [pscustomobject]@{
             FirstName             = "$($a.FirstName)"
             LastName              = "$($a.LastName)"
@@ -195,16 +235,20 @@ foreach ($grp in $byTenant) {
             MailForwardAddress    = ''
             Company               = ''
             Notes                 = "MSP fan-out (central admin ring $($a.AdminRing) -> tenant ring $($t.TenantRing))"
-            ManagerEmail          = ''
+            ManagerEmail          = $mgr
             StartDate             = ''
             ProvisionDate         = ''
-            CreateTAP             = 'FALSE'
+            CreateTAP             = $createTap
             TAPStartDate          = ''
-            TAPLifetimeHours      = ''
+            TAPLifetimeHours      = "$life"
             AccountStatus         = 'Enabled'
             StatusChangeCode      = ''
             Ring                  = "$($a.AdminRing)"
-            Template              = ''
+            # MSP-2: this used to be hardcoded ''. The baseline bundle goes to the trouble of
+            # carrying + SIGNING Template (New-PimBaselineBundle selects it, the downlink stages
+            # it), and the fan-out then threw it away on arrival -- so the value could never
+            # reach the slave no matter what the master published.
+            Template              = "$($a.Template)"
             OffboardDate          = ''
             DeleteAfterDays       = ''
         }
@@ -254,6 +298,18 @@ foreach ($grp in $byTenant) {
         Write-Host "  [fail] account provisioning failed: $($_.Exception.Message)" -ForegroundColor Red
         $results += [pscustomobject]@{ Tenant = $t.TenantName; Status = "failed: $($_.Exception.Message)"; Admins = 0 }
     }
+}
+
+}
+finally {
+    # BUG-23: hand the caller's ambient identity back exactly as we found it, on every
+    # exit path including a throw. Restoring only on success would leave a failed fanout
+    # pointing at a customer tenant, which is the worse half of the bug.
+    $global:PIM_TenantId           = $__prevTenantId
+    $global:PIM_ClientId           = $__prevClientId
+    $global:PIM_CertThumbprint     = $__prevThumbprint
+    $global:PIM_UseManagedIdentity = $__prevUseMi
+    $global:PIM_Interactive        = $__prevInteractive
 }
 
 Write-Host ""

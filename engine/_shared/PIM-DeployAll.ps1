@@ -47,13 +47,46 @@ if ($PSScriptRoot -and -not (Get-Command Get-PimUpdateSourceProfile -ErrorAction
 function Get-PimDeployStepCatalog {
     <#
       The ordered catalog of deploy-all steps (pure data). The orchestrator never hardcodes the
-      order -- it walks THIS list. Order is load-bearing: identity/grants must exist before infra,
+      order -- it walks THIS list. Order is load-bearing: identity/grants before prereq, prereq before
+      the image (az acr build needs the registry), the image before infra (infra pins its digest),
       infra before schema, schema before code, code before verify; rollback is verify-driven.
     #>
     @(
         [pscustomobject]@{ key='appreg';   name='Engine app-registration + Graph/Azure grants'; rollbackable=$false; hostedOnly=$false }
+        # 🔴 BUG-68 (operator decision 2026-08-17) -- THE TWO STEPS THAT MAKE A GREENFIELD TENANT
+        # POSSIBLE. Before these, the catalog could only ever UPDATE something a human had already
+        # built by hand, and it could not say so: `infra` resolves the image DIGEST before creating
+        # anything (the BUG-40 guard), while `code` both BUILDS that image and ROLLS the apps --
+        # and the roll refuses to roll zero apps ("a deploy that rolls zero apps is not a deploy",
+        # Update-PimContainers). So `infra` needed `code`'s image and `code` needed `infra`'s apps:
+        # a CYCLE, not a mis-ordering, which is why no reordering could fix it. Splitting the BUILD
+        # out of `code` breaks it.
+        # 🪤 And the failure message hid the bigger gap: NOTHING in this catalog created the
+        # resource group, VNet, registry, SQL server or AcrPull identity. The only script that does
+        # is New-PimHostingPrerequisites.ps1, which the orchestrator never called -- it only
+        # mentioned it in comments. The estate was really built by a human running these two
+        # scripts in an order they chose; `prereq` + `image` ARE that human, written down.
+        # Both wrap scripts that already existed and were already proven, so no new provisioning
+        # logic was written for either. Both are idempotent and probed, so on an environment that
+        # already stands they report "already current" and skip -- the ~30-customer UPDATE path is
+        # unchanged, which is the property that mattered most in choosing this shape.
+        [pscustomobject]@{ key='prereq';   name='Hosting prerequisites (RG, VNet, ACR, Log Analytics, SQL server, AcrPull identity)'; rollbackable=$false; hostedOnly=$true }
+        [pscustomobject]@{ key='image';    name='Build + push the Manager image (no roll -- infra pins the digest it produces)'; rollbackable=$false; hostedOnly=$true }
         [pscustomobject]@{ key='infra';    name='Infra / containers (ACA) or VM setup';          rollbackable=$false; hostedOnly=$false }
         [pscustomobject]@{ key='schema';   name='Idempotent SQL schema upgrade (preflight->apply->re-preflight)'; rollbackable=$false; hostedOnly=$false }
+        # 🔑 OPERATOR DIRECTIVE 2026-08-13: "we can not have anything that is not running."
+        # These two were real onboarding steps (7 and 8) that existed only as scripts a human
+        # remembered to run. Every tenant deployed without them came up STRUCTURALLY HEALTHY and
+        # FUNCTIONALLY INERT -- and neither state reports an error, which is why both survived
+        # several deploys unnoticed:
+        #   * no sender mailbox  => every notification returns sent=$false, reason='no sender'.
+        #     A TAP is minted and delivered NOWHERE; the code is unrecoverable afterwards.
+        #   * feature gates OFF  => a gate-skip is logged ok=True, so the scheduler reports clean
+        #     runs while performing no work at all (IMP-07).
+        # They sit AFTER schema (both persist into pim.Settings, which needs the store to exist)
+        # and BEFORE code, so the deployed containers boot into an environment already armed.
+        [pscustomobject]@{ key='mailsender'; name='Notification sender mailbox + scoped send right (onboarding step 7)'; rollbackable=$false; hostedOnly=$false }
+        [pscustomobject]@{ key='features';   name='Feature baseline -- turn the shipped gates ON (onboarding step 8)'; rollbackable=$false; hostedOnly=$false }
         [pscustomobject]@{ key='code';     name='Build + deploy Manager/scheduler/engine code';  rollbackable=$true;  hostedOnly=$false }
         [pscustomobject]@{ key='verify';   name='Verify (hosted smoke + deploy-validation tests)';rollbackable=$false; hostedOnly=$false }
     )
@@ -111,8 +144,8 @@ function Get-PimDeployStepDecision {
 function Get-PimDeployAllPlan {
     <#
       Build the WHOLE-SOLUTION ordered plan from the catalog + the gathered per-step facts. This
-      is the heart of the orchestration: it fixes the order (app-reg -> infra -> schema -> code
-      -> verify), applies the gate, and marks each step do/plan/skip with a reason. The
+      is the heart of the orchestration: it fixes the order (app-reg -> prereq -> image -> infra ->
+      schema -> ... -> code -> verify), applies the gate, and marks each step do/plan/skip with a
       orchestrator walks plan.steps in order and invokes the injected runner for each 'do' step.
 
       Inputs:
@@ -132,11 +165,20 @@ function Get-PimDeployAllPlan {
         [Parameter(Mandatory)][ValidateSet('git-pull','sync-automateit')][string]$Source,
         [hashtable]$Facts,
         [switch]$Apply,
-        [switch]$ValidateOnly
+        [switch]$ValidateOnly,
+        # BUG-67: hosting is a property of the ENVIRONMENT, not of the update source. When the
+        # caller has read it from the descriptor (`provides.container-apps-environment`), it passes
+        # the answer in rather than letting this function re-derive a value from the wrong axis.
+        # 🪤 The orchestrator overriding its OWN $hosted was not enough -- this function computed
+        # its own, so the plan and the runner disagreed: the header printed hosted=True while the
+        # plan printed hosted=False and gated `hostedOnly` steps on the stale value. Caught by
+        # Test-PimDeployDescriptor.ps1 before it ever ran against a tenant.
+        [object]$HostedOverride = $null
     )
     if (-not $Facts) { $Facts = @{} }
     $srcProfile = Get-PimUpdateSourceProfile -Source $Source
     $hosted  = [bool]$srcProfile.isHosted
+    if ($null -ne $HostedOverride) { $hosted = [bool]$HostedOverride }
 
     $steps = New-Object System.Collections.Generic.List[object]
     foreach ($step in (Get-PimDeployStepCatalog)) {

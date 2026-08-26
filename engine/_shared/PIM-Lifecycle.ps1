@@ -1,3 +1,6 @@
+# IMP-02: the locale-safe stamp reader. Loaded defensively so this file stays correct
+# when a test dot-sources it on its own (PIM-Functions.psm1 also loads it up front).
+if (-not (Get-Command Get-PimUtcStamp -ErrorAction SilentlyContinue)) { . (Join-Path $PSScriptRoot 'PIM-DateSafe.ps1') }
 # PIM4EntraPS -- lifecycle calendar: upcoming expirations, auto-renew, escalation.
 # Dot-sourced by PIM-Functions.psm1 (uses PIM-ChangeQueue.ps1 + Get-PimPolicySetting)
 # and the pim-manager.
@@ -28,7 +31,7 @@ function Resolve-PimExpiryDate {
         $v = $null
         if ($Item -is [System.Collections.IDictionary]) { if ($Item.Contains($f)) { $v = "$($Item[$f])" } }
         else { $p = $Item.PSObject.Properties[$f]; if ($p) { $v = "$($p.Value)" } }
-        if ("$v".Trim()) { $d = [datetime]::MinValue; if ([datetime]::TryParse("$v", [ref]$d)) { return $d.ToUniversalTime() } }
+        if ("$v".Trim()) { $d = Get-PimUtcStamp $v; if ($null -ne $d) { return $d } }   # IMP-02
     }
     return $null
 }
@@ -101,9 +104,9 @@ function Get-PimDueEscalation {
     }
     $interval = if ($Policy.reminderIntervalDays) { [int]$Policy.reminderIntervalDays } else { 0 }
     if ($interval -gt 0 -and "$LastNotifiedUtc".Trim()) {
-        $last = [datetime]::MinValue
-        if ([datetime]::TryParse("$LastNotifiedUtc", [ref]$last)) {
-            if (($NowUtc - $last.ToUniversalTime()).TotalDays -ge $interval) {
+        $last = Get-PimUtcStamp $LastNotifiedUtc   # IMP-02
+        if ($null -ne $last) {
+            if (($NowUtc - $last).TotalDays -ge $interval) {
                 return [pscustomobject]@{ stage = $cur; recipients = @($current.recipients); isReminder = $true }
             }
         }

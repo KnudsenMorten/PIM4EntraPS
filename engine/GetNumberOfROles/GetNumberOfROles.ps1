@@ -41,7 +41,12 @@ write-host "Entra ID Roles -> $($EntraRoles)"
 
 # Get count of Roles in Azure Resources
 $Headers = Get-AzAccessTokenManagement
-$AzScope = "/providers/Microsoft.Management/managementGroups/f0fa27a0-8e7c-4f63-9a77-ec94786b7c9e"
+# SEC-02: the management-group id is an ENVIRONMENT value, not source. Supply it via
+# $global:PIM_AzRoleCountScope / $env:PIM_AzRoleCountScope (a full scope path, or just the
+# management-group id). Real values live in internal/ -- never in the published tree.
+$AzScopeId = if ("$($global:PIM_AzRoleCountScope)".Trim()) { "$($global:PIM_AzRoleCountScope)".Trim() } else { "$($env:PIM_AzRoleCountScope)".Trim() }
+if (-not $AzScopeId) { throw "GetNumberOfROles: no Azure scope configured. Set `$global:PIM_AzRoleCountScope (or `$env:PIM_AzRoleCountScope) -- see internal/REAL-IDENTIFIERS.md." }
+$AzScope = if ($AzScopeId -like '/*') { $AzScopeId } else { "/providers/Microsoft.Management/managementGroups/$AzScopeId" }
 $AzGraphUri = "https://management.azure.com" + $AzScope + "/providers/Microsoft.Authorization/roleDefinitions?api-version=2022-04-01"
 $Response   = invoke-webrequest -UseBasicParsing -Method GET -Uri $AzGraphUri -Headers $Headers
 $AzureRoles = (($Response.Content | ConvertFrom-Json).value).count

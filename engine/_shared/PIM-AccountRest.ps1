@@ -105,10 +105,20 @@ function New-PimRestAdminAccount {
     A PSCustomObject / hashtable carrying the same column set the engine CSV
     uses: FirstName, LastName, Initials, UserName, DisplayName,
     UserPrincipalName, UsageLocation, Company, Notes, ManagerEmail, StartDate,
-    ForwardMailsToContact, MailForwardAddress, AccountStatus, TargetPlatform.
+    AccountStatus, TargetPlatform.
 
-  .PARAMETER NoMailForward
-    Suppress the mail-forwarding attempt entirely.
+  .NOTES
+    MAIL FORWARDING WAS RETIRED FROM THIS PATH (operator, 2026-08-12).
+    `ForwardMailsToContact` / `MailForwardAddress` used to make this function call
+    EXO `Set-Mailbox -ForwardingSmtpAddress` on the new admin. That only works if the
+    ADMIN ACCOUNT ITSELF has a mailbox, i.e. an Exchange licence per admin -- which is
+    exactly the cost the design now avoids: the engine SPN holds scoped send rights on a
+    single SHARED mailbox and mails *about* an admin from there, so admin accounts need
+    no mailbox and no licence at all. The columns are therefore gone from the v2 admin
+    schema; the notification recipient is `ManagerEmail`.
+    🔒 `Set-PimMailboxForwarding` / `Test-PimMailForwardAddressIsReal` in PIM-Rest.ps1 are
+    deliberately KEPT -- the v1 legacy edition (PIM-Functions.psm1) still calls them, and
+    this retirement is scoped to the v2 path.
 
   .OUTPUTS
     PSCustomObject { Upn; Action = created|updated|whatif|failed; Password }
@@ -116,8 +126,7 @@ function New-PimRestAdminAccount {
   #>
   [CmdletBinding(SupportsShouldProcess)]
   param(
-    [Parameter(Mandatory)][object]$Row,
-    [switch]$NoMailForward
+    [Parameter(Mandatory)][object]$Row
   )
 
   $upn          = Get-PimRowValue $Row 'UserPrincipalName'
@@ -129,11 +138,6 @@ function New-PimRestAdminAccount {
   $company      = Get-PimRowValue $Row 'Company'
   $managerEmail = Get-PimRowValue $Row 'ManagerEmail'
   $jobTitle     = $display      # legacy engine sets JobTitle = DisplayName for ID rows
-  $fwdFlag      = (Get-PimRowValue $Row 'ForwardMailsToContact').Trim()
-  if (-not $fwdFlag) { $fwdFlag = (Get-PimRowValue $Row 'ForwardMails').Trim() }
-  $fwdAddr      = (Get-PimRowValue $Row 'MailForwardAddress').Trim()
-  if (-not $fwdAddr) { $fwdAddr = (Get-PimRowValue $Row 'MailForwardToAddress').Trim() }
-  $wantForward  = (-not $NoMailForward) -and ($fwdFlag -eq 'TRUE') -and $fwdAddr
 
   if (-not $upn) { throw "New-PimRestAdminAccount: row has no UserPrincipalName." }
 
@@ -160,7 +164,6 @@ function New-PimRestAdminAccount {
       passwordPolicies  = 'DisablePasswordExpiration'
     }
     Invoke-PimGraph -Method PATCH -Path "/users/$($existing.id)" -Body $patch | Out-Null
-    if ($wantForward) { Set-PimRestMailForward -UserId $upn -ForwardTo $fwdAddr }
     if (Get-Command Write-PimAuditEvent -ErrorAction SilentlyContinue) {
       Write-PimAuditEvent -Action 'account.update' -Target $upn -After @{ displayName = $display; platform = 'ID'; transport = 'rest' }
     }
@@ -214,8 +217,6 @@ function New-PimRestAdminAccount {
     }
   }
 
-  if ($wantForward) { Set-PimRestMailForward -UserId $upn -ForwardTo $fwdAddr }
-
   # persist the generated password (engine helper when available, else a local note)
   if (Get-Command Write-PimAdminPassword -ErrorAction SilentlyContinue) {
     Write-PimAdminPassword -UserPrincipalName $upn -Password $pw -Platform 'ID'
@@ -228,30 +229,12 @@ function New-PimRestAdminAccount {
   return [pscustomobject]@{ Upn = $upn; Action = 'created'; Password = $pw }
 }
 
-function Set-PimRestMailForward {
-  <#
-  .SYNOPSIS
-    Set mailbox forwarding over PURE REST, delegating to the canonical
-    Set-PimMailboxForwarding (PIM-Rest.ps1) -- the app-only Exchange Online
-    InvokeCommand path that exactly mirrors
-    "Set-Mailbox -ForwardingSmtpAddress <smtp> -DeliverToMailboxAndForward:$false".
-    Best-effort: mail forwarding is informational; a failure (no Exchange
-    license, mailbox not provisioned yet, EXO ManageAsApp not consented) is
-    logged, not fatal -- the account create/update still succeeds.
-  #>
-  [CmdletBinding()]
-  param([Parameter(Mandatory)][string]$UserId,[Parameter(Mandatory)][string]$ForwardTo)
-  if (-not (Get-Command Set-PimMailboxForwarding -ErrorAction SilentlyContinue)) {
-    Write-Host "  [warn] Set-PimMailboxForwarding not available (PIM-Rest not loaded) -- skipping mail forwarding for $UserId." -ForegroundColor Yellow
-    return
-  }
-  try {
-    Set-PimMailboxForwarding -Identity $UserId -ForwardingSmtpAddress $ForwardTo -DeliverToMailboxAndForward $false
-    Write-Host "  mail-forward set for $UserId -> $ForwardTo (EXO REST)" -ForegroundColor DarkGray
-  } catch {
-    Write-Host "  [warn] could not set mail forwarding for $UserId (EXO REST): $($_.Exception.Message). Check Exchange license / mailbox provisioning / Exchange.ManageAsApp consent." -ForegroundColor Yellow
-  }
-}
+# RETIRED 2026-08-12: Set-PimRestMailForward lived here. It set EXO mailbox forwarding on
+# the newly-created ADMIN account, which required that admin to hold an Exchange licence.
+# The design now sends notification mail FROM a shared mailbox the engine SPN is scoped to,
+# so an admin account never needs a mailbox -- the forwarding call, and the two columns that
+# drove it, have no purpose. The canonical Set-PimMailboxForwarding stays in PIM-Rest.ps1
+# for the v1 legacy edition, which still uses it.
 
 function Invoke-PimRestAccountApply {
   <#

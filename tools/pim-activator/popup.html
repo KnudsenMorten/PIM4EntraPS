@@ -239,6 +239,12 @@
 <div role="tabpanel" id="panel-activate" style="display:flex; flex-direction:column; flex:1; min-height:0; overflow:hidden;">
   <div id="toolbar" style="display:none">
     <input id="search" type="search" placeholder="Filter groups...">
+    <select id="workload-filter" title="Filter by workload / plane">
+      <option value="all">all workloads</option>
+      <option value="entra">Entra ID</option>
+      <option value="azure">Azure RBAC</option>
+      <option value="workload">Workload</option>
+    </select>
     <a id="select-all">all</a>
     <a id="select-none">none</a>
     <a id="collapse-all" title="Collapse the transitive-role list under every group row.">collapse all</a>
@@ -324,7 +330,7 @@
   <!-- Row 1: title + repo + GitHub + Report bug on the LEFT  |  tenant ID on the RIGHT -->
   <div style="display:flex;justify-content:space-between;align-items:baseline;gap:10px;flex-wrap:wrap;">
     <div>
-      <span style="font-weight:700;letter-spacing:0.3px;color:#24292f;">PIM ACTIVATOR (PIMA)</span>,
+      <span style="font-weight:700;letter-spacing:0.3px;color:#24292f;">PIM ACTIVATOR</span>,
       part of <a href="https://github.com/KnudsenMorten/PIM4EntraPS" target="_blank" rel="noopener" style="color:#0969da;text-decoration:none;">PIM4EntraPS</a>
       <span style="color:#d0d7de;margin:0 4px;">|</span>
       <a href="https://github.com/KnudsenMorten/PIM4EntraPS" target="_blank" rel="noopener" title="Source &amp; issues" style="color:#0969da;text-decoration:none;">&#128279; GitHub</a>

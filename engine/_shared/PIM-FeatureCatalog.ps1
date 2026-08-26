@@ -1,3 +1,7 @@
+# IMP-03: the one visible way to swallow a non-fatal error (loaded defensively --
+# this file is dot-sourced standalone by tests and by the Manager).
+if (-not (Get-Command Write-PimSwallowed -ErrorAction SilentlyContinue)) { . (Join-Path $PSScriptRoot 'PIM-Swallow.ps1') }
+
 # =============================================================================
 # PIM-FeatureCatalog.ps1 -- the SINGLE source of truth for customizable
 # capabilities + the gate functions (REQUIREMENTS s29 + s30).
@@ -231,21 +235,34 @@ function ConvertTo-PimFeatureGateOverrides {
 # ---------------------------------------------------------------------------
 function Get-PimFeatureStoreValue {
     # Internal: read a named pim.Settings value via the best available channel.
+    #
+    # IMP-03: a channel that THROWS is remembered, not reported immediately --
+    # falling through to a channel that works is normal and must stay silent
+    # (warning on it would be noise on every engine run without the Manager
+    # bridge). It is only reported when the WHOLE chain yields nothing AFTER an
+    # error, because that is the case where the caller silently proceeds on
+    # defaults: the persisted state exists, we just could not read it, and GUI
+    # state then no longer equals actual behaviour with no trace of why.
     param([Parameter(Mandatory)][string]$Name)
+    $chainErr = $null
     # 1) In-process hydrated naming/conventions bag (Manager mirrors settings here).
     if ($global:PIM_NamingConventions -is [System.Collections.IDictionary] -and $global:PIM_NamingConventions.Contains($Name)) {
         return $global:PIM_NamingConventions[$Name]
     }
     # 2) Manager bridge (Get-PimSetting -> Get-PimManagerSetting -> store).
     if (Get-Command Get-PimSetting -ErrorAction SilentlyContinue) {
-        try { $v = Get-PimSetting -Name $Name; if ($null -ne $v) { return $v } } catch {}
+        try { $v = Get-PimSetting -Name $Name; if ($null -ne $v) { return $v } } catch { $chainErr = $_ }
     }
     # 3) Direct SQL read (engine / scheduler process: no Manager bridge present).
     $cs = $null
     if ("$($global:PIM_EngineSqlCs)".Trim()) { $cs = $global:PIM_EngineSqlCs }
     elseif ("$($global:PIM_SqlConnectionString)".Trim()) { $cs = $global:PIM_SqlConnectionString }
     if ($cs -and (Get-Command Get-PimSqlSetting -ErrorAction SilentlyContinue)) {
-        try { return (Get-PimSqlSetting -ConnectionString $cs -Name $Name) } catch {}
+        try { return (Get-PimSqlSetting -ConnectionString $cs -Name $Name) } catch { $chainErr = $_ }
+    }
+    if ($chainErr -and (Get-Command Write-PimSwallowed -ErrorAction SilentlyContinue)) {
+        Write-PimSwallowed -Scope 'feature-store-read' -ErrorRecord $chainErr `
+            -Consequence ("could not read setting '{0}' from any channel -- falling back to built-in defaults, so a persisted toggle/edition is NOT in effect this run" -f $Name)
     }
     return $null
 }
@@ -254,7 +271,15 @@ function Get-PimFeatureGateState {
     # The resolved gate map (defaults + persisted overrides). Cheap to call; reads
     # the store each time so a toggle takes effect on the next engine/job run.
     $raw = $null
-    try { $raw = Get-PimFeatureStoreValue -Name $script:PimFeatureGateSettingKey } catch {}
+    # IMP-03: the reader below already reports a chain that failed outright; this
+    # catch is the belt-and-braces one (it must never throw into a gate check).
+    try { $raw = Get-PimFeatureStoreValue -Name $script:PimFeatureGateSettingKey }
+    catch {
+        if (Get-Command Write-PimSwallowed -ErrorAction SilentlyContinue) {
+            Write-PimSwallowed -Scope 'feature-gate-read' -ErrorRecord $_ `
+                -Consequence 'gate map resolved from DEFAULTS -- advanced features stay off regardless of what is persisted'
+        }
+    }
     return (Resolve-PimFeatureGate -Raw $raw)
 }
 
@@ -288,7 +313,13 @@ function Get-PimActiveEdition {
     # The active edition for this tenant: persisted Edition setting wins; else the
     # offline signed-license edition (Get-PimEdition, mapped Pro/Community); else Core.
     $raw = $null
-    try { $raw = Get-PimFeatureStoreValue -Name $script:PimEditionSettingKey } catch {}
+    try { $raw = Get-PimFeatureStoreValue -Name $script:PimEditionSettingKey }
+    catch {
+        if (Get-Command Write-PimSwallowed -ErrorAction SilentlyContinue) {
+            Write-PimSwallowed -Scope 'edition-read' -ErrorRecord $_ `
+                -Consequence 'active edition falls back to the signed license, then Core -- a persisted Pro edition is NOT in effect this run'
+        }
+    }
     if ($null -ne $raw -and "$raw".Trim() -ne '') {
         $r = Resolve-PimEdition -Raw $raw
         return $r.edition
@@ -298,7 +329,12 @@ function Get-PimActiveEdition {
         try {
             $e = Get-PimEdition
             if ("$e" -eq 'Pro') { return 'Pro' }
-        } catch {}
+        } catch {
+            if (Get-Command Write-PimSwallowed -ErrorAction SilentlyContinue) {
+                Write-PimSwallowed -Scope 'edition-read' -ErrorRecord $_ `
+                    -Consequence 'signed-license edition unreadable -- edition resolves to Core, so Pro capabilities are gated off'
+            }
+        }
     }
     return 'Core'
 }
@@ -334,15 +370,46 @@ function Test-PimFeatureEnabled {
     return [bool]$entry.defaultEnabled
 }
 
+function Test-PimLicenseGateActive {
+    <#
+      Is the Pro licence gate ACTUALLY enforced this session?
+
+      🔒 THE POLICY, and it lives in PIM-License.ps1: Pro is FREE by default -- no nag,
+      no block, no phone-home -- and only an internal verification harness turns
+      enforcement on ($global:PIM_EnforceProLicense).
+
+      ⚠️ THIS FILE USED TO IGNORE THAT ENTIRELY. Test-PimFeatureLicensed gated purely on
+      EDITION, and Test-PimFeatureAvailable is "what side-effecting code gates on" -- so
+      the ENGINE skipped Pro features on a Community edition and logged
+      "requires Pro ... -- skipped", while PIM-License.ps1's own gate was returning
+      "allowed, free" for the same feature. Two parallel licence gates disagreeing, with
+      the restrictive one wired into the engine. Operator directive 2026-08-07:
+      "no limitations ... full access default".
+
+      Resolved here rather than at each call site so there is ONE answer. Falls back to
+      NOT enforced if PIM-License.ps1 is not loaded -- the shipped default, and the
+      direction that cannot lock anyone out of anything.
+    #>
+    if (Get-Command Test-PimProLicenseEnforced -ErrorAction SilentlyContinue) {
+        try { return [bool](Test-PimProLicenseEnforced) } catch { return $false }
+    }
+    if ($null -ne $global:PIM_EnforceProLicense) { return [bool]$global:PIM_EnforceProLicense }
+    return $false
+}
+
 function Test-PimFeatureLicensed {
     # $true if the active edition covers the feature's license tier. Core/free
     # features are always licensed. -Edition overrides the resolved active edition
     # (for what-if / GUI preview).
+    #
+    # When the licence gate is NOT enforced (the shipped default) EVERYTHING is
+    # licensed -- see Test-PimLicenseGateActive above.
     [CmdletBinding()]
     param([Parameter(Mandatory)][string]$Key, [string]$Edition)
     $entry = Get-PimFeatureCatalogEntry -Key $Key
     if (-not $entry) { return $false }
     if ("$($entry.tier)" -eq 'core') { return $true }
+    if (-not (Test-PimLicenseGateActive)) { return $true }
     return (Test-PimEditionCoversLicense -License "$($entry.license)" -Edition $Edition)
 }
 
@@ -380,7 +447,15 @@ function Write-PimFeatureGateLog {
     param([Parameter(Mandatory)][string]$Key, [Parameter(Mandatory)][string]$Reason)
     Write-Host ("[engine] feature '{0}' {1} -- skipped (no writes/sends)" -f $Key, $Reason) -ForegroundColor DarkYellow
     if (Get-Command Write-PimAuditEvent -ErrorAction SilentlyContinue) {
-        try { Write-PimAuditEvent -Action 'feature.skipped' -Target $Key -After @{ reason = $Reason } } catch {}
+        try { Write-PimAuditEvent -Action 'feature.skipped' -Target $Key -After @{ reason = $Reason } }
+        catch {
+            # IMP-03: the console line above already ran, so the skip is not invisible --
+            # but the audit record of WHY work was skipped is what an operator reads later.
+            if (Get-Command Write-PimSwallowed -ErrorAction SilentlyContinue) {
+                Write-PimSwallowed -Scope 'feature-skip-audit' -ErrorRecord $_ `
+                    -Consequence ("the 'feature {0} skipped' audit event was not recorded" -f $Key)
+            }
+        }
     }
 }
 
@@ -401,7 +476,10 @@ function Get-PimFeatureDependencyIssues {
         $key = "$($f.key)"
         if ("$($f.tier)" -eq 'core') { $avail[$key] = $true; continue }
         $en = if ($GateState.gates.Contains($key)) { [bool]$GateState.gates[$key] } else { [bool]$f.defaultEnabled }
-        $lic = (Test-PimEditionCoversLicense -License "$($f.license)" -Edition $ed)
+        # Same rule as Test-PimFeatureLicensed: unenforced => licensed. Otherwise the
+        # dependency report would invent "prerequisite not available" warnings about
+        # features that run perfectly well.
+        $lic = (-not (Test-PimLicenseGateActive)) -or (Test-PimEditionCoversLicense -License "$($f.license)" -Edition $ed)
         $avail[$key] = ($en -and $lic)
     }
     $issues = New-Object System.Collections.Generic.List[object]

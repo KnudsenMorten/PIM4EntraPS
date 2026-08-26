@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="utf-8"?>
+<policyDefinitionResources revision="1.0" schemaVersion="1.0"
+                            xmlns="http://schemas.microsoft.com/GroupPolicy/2006/07/PolicyDefinitions"
+                            xmlns:xsd="http://www.w3.org/2001/XMLSchema"
+                            xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+  <displayName>PIM Activator TEST (PIM4EntraPS)</displayName>
+  <description>Custom ADMX template for the PIM Activator browser extension -- TEST channel (separate extension id).</description>
+  <resources>
+    <stringTable>
+      <string id="SUPPORTED_W10_Edge_Chrome">Microsoft Edge and Google Chrome on Windows 10 and later</string>
+      <string id="PIM4EntraPS_Test_Cat">PIM4EntraPS (TEST)</string>
+      <string id="PimActivatorTest_Cat">PIM Activator TEST</string>
+      <string id="TenantCatalog_EdgeTest">Tenant catalog (TEST) -- Microsoft Edge</string>
+      <string id="TenantCatalog_ChromeTest">Tenant catalog (TEST) -- Google Chrome</string>
+      <string id="TenantCatalog_Explain">JSON array of tenants for the PIM Activator browser extension -- TEST channel build (extension id glldnbmjpdkjemcnficagdhgienfdpoo). The TEST extension reads this via chrome.storage.managed.tenantCatalog on every popup load.
+
+This is the SAME catalog shape as the released channel; it is written to the TEST extension's own 3rdparty policy path so the released and TEST builds can be centrally configured side-by-side on one device with no conflict.</string>
+    </stringTable>
+    <presentationTable>
+      <presentation id="TenantCatalog_EdgeTest_Presentation">
+        <textBox refId="TenantCatalog_EdgeTest_Value">
+          <label>Tenant catalog JSON (Edge, TEST):</label>
+        </textBox>
+      </presentation>
+      <presentation id="TenantCatalog_ChromeTest_Presentation">
+        <textBox refId="TenantCatalog_ChromeTest_Value">
+          <label>Tenant catalog JSON (Chrome, TEST):</label>
+        </textBox>
+      </presentation>
+    </presentationTable>
+  </resources>
+</policyDefinitionResources>

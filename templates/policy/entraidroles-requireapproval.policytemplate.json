@@ -1,0 +1,33 @@
+{
+  "id": "EntraIDRoles_RequireApproval",
+  "name": "Entra ID roles -- approval required (high-privilege)",
+  "appliesTo": "DirectoryRole",
+  "extends": "EntraIDRoles_Standard",
+  "description": "For high-privilege Entra ID directory roles (Global Administrator, Privileged Role Administrator, Security Administrator and similar): inherits the EntraIDRoles_Standard baseline and additionally requires an APPROVAL to activate. Activation therefore needs MFA + Justification AND a named approver -- that combination, not an MFA rule on the admin path, is what actually protects a high-privilege role. Approvers come from the ApproverUpns column on the role-assignment row (pipe/;/, separated); mode Serial means the first approver decides and it escalates to the next after escalationHours, switch to Parallel for any-one-wins. Admin-Eligibility / Admin-Assignment stay empty for the BUG-21 reason recorded in EntraIDRoles_Standard.",
+  "rules": {
+    "Enablement": {
+      "EndUser_Assignment": ["MultiFactorAuthentication", "Justification"],
+      "Admin_Eligibility":  ["Justification"],
+      "Admin_Assignment":   []
+    },
+    "Approval": { "mode": "Serial", "approversSource": "ApproverUpns", "escalationHours": 4 },
+    "Notification": [
+      {
+        "recipientType": "Approver",
+        "level": "Assignment",
+        "notificationLevel": "All",
+        "defaultRecipientsEnabled": true,
+        "_noExplicitApproverRecipients": "🔴 NEVER ADD `recipientsSource` OR `recipients` HERE. AN EXPLICIT APPROVER RECIPIENT WRITE-LOCKS THE WHOLE POLICY, SILENTLY. Measured 2026-08-11 on a throwaway custom role in an isolated test tenant, all four combinations on a clean policy: defaults=true + no recipients -> writeable; defaults=false + no recipients -> writeable; defaults=TRUE + 2 recipients -> LOCKED; defaults=false + 2 recipients -> LOCKED. So the trigger is the NON-EMPTY RECIPIENT LIST ALONE and isDefaultRecipientsEnabled is irrelevant to it. The setting PATCH is ACCEPTED -- nothing fails at the time -- and from then on Entra refuses EVERY per-rule PATCH on that policy with 400 ActivationCustomApproversNotEmpty ('The activation custom approvers should be empty'), including rules that have nothing to do with approval (proven with Expiration_EndUser_Assignment) and including the PATCH that would remove the recipients. Entra treats an explicit Approver-notification recipient list AS the policy's 'activation custom approvers'. Recovery is PATCH /policies/roleManagementPolicies/{policyId} with a `rules` collection setting this rule back to an EMPTY recipient list -- the whole-policy route stays open when every /rules/{ruleId} route is refused. This template previously carried recipientsSource=ApproverUpns, which is precisely what locked a production role's policy (BUG-56) and then made that role the only one of 96 that could not receive template updates. Guarded by tests/Test-PimPolicyTemplateSatisfiable.ps1.",
+        "_why": "This rule therefore does only ONE thing: it keeps Entra's DEFAULT approver routing switched on, so the people who can approve are told there is something to approve. An approval nobody is told about is an outage, not a control. Naming the approvers as EXPLICIT recipients would be the stronger guarantee -- who-gets-told could not then diverge from who-can-approve -- and it is simply not available: see _noExplicitApproverRecipients. Default routing is what Entra offers here, and it is used deliberately rather than by omission."
+      },
+      {
+        "recipientType": "Admin",
+        "level": "Assignment",
+        "notificationLevel": "All",
+        "defaultRecipientsEnabled": false,
+        "recipientsSource": "NotifyUpns",
+        "_restored": "RESTORED 2026-08-11 (operator go-ahead). This rule was dropped from this template on 2026-08-10 because PATCHing Notification_Admin_EndUser_Assignment appeared to be refused with 400 ActivationCustomApproversNotEmpty whenever the role had custom approvers. That measurement was taken on the one production role whose policy was WRITE-LOCKED at the time (BUG-56), and a write-locked policy refuses EVERY rule PATCH -- so the refusal said nothing about this rule. Re-measured on a HEALTHY approval-enabled policy (throwaway custom role with a real custom approver group, isolated test tenant): the identical PATCH was ACCEPTED and the policy stayed writeable afterwards. The operator's 'activation notices must not go to every Global Administrator' rule therefore applies to approval roles too, which is where it matters most. Same opt-in shape as EntraIDRoles_Standard: recipients come from the NotifyUpns column and the provider SKIPS the rule entirely when NotifyUpns resolves to nothing, so a role with no declared audience keeps Entra's current behaviour rather than being switched to mailing nobody. Note this is the ADMIN recipient type -- defaultRecipientsEnabled=false is safe here and is NOT the poisoning pair, which only applies to the APPROVER rule above (measured separately, both directions)."
+      }
+    ]
+  }
+}

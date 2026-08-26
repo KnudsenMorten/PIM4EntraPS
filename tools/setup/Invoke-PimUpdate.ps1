@@ -88,16 +88,31 @@ param(
     [switch]$DetectOnly,
     [switch]$Apply,
     # hosted deploy targets (passthrough to the existing roller / smoke).
-    [string]$ResourceGroup = 'rg-pim-manager-web',
-    [string]$AcrName       = 'acrsecurityinsight',
+    # 🔒 BUG-28 / SEC-02 PATTERN: these used to default to the OPERATOR'S OWN resource
+    # group, registry and mailbox -- real infrastructure names, hard-coded in a file that
+    # SHIPS TO CUSTOMERS. A customer who ran the sync-driven deploy without supplying them
+    # would have aimed at the operator's estate. They now come from the environment, and
+    # the hosted deploy path FAILS LOUDLY if they are missing (see Assert-PimDeployTarget
+    # below) rather than silently substituting somebody else's infrastructure.
+    # ImageRepo/ManagerApp/Apps keep their defaults deliberately: they are PRODUCT names
+    # (what the containers are called), identical in every install, not customer facts.
+    [string]$ResourceGroup = "$($env:PIM_ResourceGroup)",
+    [string]$AcrName       = "$($env:PIM_AcrName)",
     [string]$ImageRepo     = 'pim-manager',
     [string]$ManagerApp    = 'ca-pim-manager',
     [string[]]$Apps        = @('ca-pim-manager','ca-pim-scheduler','ca-pim-engine','ca-pim-connector','ca-pim-deltaqueue','ca-pim-discovery'),
+    # BUG-48: the scheduled tick Job is rolled by Update-PimContainers along with the apps, off the
+    # same resolved digest. Threaded explicitly rather than left to the roller's default -- the
+    # default is correct today, and BUG-46 was a value that was correct at the top of a script and
+    # simply never reached the call.
+    [string]$TickJobName   = 'ca-pim-tick',
     [string]$ImageTag,                                    # override the build/deploy tag (default = pulled VERSION)
     # SQL detection inputs (hosted = Azure SQL; community = SQLEXPRESS/Azure SQL).
     [string]$SqlConnectionString,                         # if set, the orchestrator reads deployed columns to detect drift
     # notify + monitor reuse.
-    [string]$Recipient          = 'mok@mortenknudsen.net',
+    # BUG-28: was an operator mailbox. A missing recipient SKIPS the notification (it is
+    # not the deploy) rather than failing it -- but it never falls back to someone else's.
+    [string]$Recipient          = "$($env:PIM_NotifyRecipient)",
     [string]$MonitorDeployScript,                         # feat/synthetic-monitor deploy entry (reused by interface)
     [int]$MonitorIntervalMinutes = 10,
     [switch]$SkipVerify,                                  # only for a registry with no live hosted Manager
@@ -191,18 +206,56 @@ function Get-DeployedColumns {
     $cols = @{}
     if (-not "$ConnString".Trim()) { return $cols }
     $schema = Get-PimLockedSqlSchema
-    $haveSqlcmd = Have 'sqlcmd'
-    $haveInvoke = Have 'Invoke-Sqlcmd'
-    if (-not ($haveSqlcmd -or $haveInvoke)) { Warn 'no sqlcmd / Invoke-Sqlcmd -- cannot read deployed columns (SQL drift detection limited to missing-table).'; return $cols }
+
+    # BUG-24, part 1 -- AUTHENTICATE THE WAY THE PRODUCT DOES.
+    # This used to hand the connection string straight to Invoke-Sqlcmd with no access
+    # token, so an Azure SQL server with Entra-only auth answered
+    #     Login failed for user ''                       (no auth in the string), or
+    #     Login failed for user '<token-identified principal>'   (whatever the ambient
+    #                                                             credential chain picked)
+    # and the engine's configured SPN + certificate -- the identity that IS the server's
+    # Entra admin -- was never used. Mint the token explicitly and set it on the
+    # connection, exactly as New-PimSqlConnection does for the engine.
+    $sqlToken = $null
+    if ("$ConnString" -notmatch '(?i)Authentication\s*=|Integrated Security|Trusted_Connection|User Id\s*=') {
+        try {
+            $rest = Join-Path (Split-Path -Parent $PSScriptRoot) '..\engine\_shared\PIM-Rest.ps1'
+            $rest = (Resolve-Path -LiteralPath $rest -ErrorAction SilentlyContinue)
+            if ($rest -and -not (Get-Command Get-PimRestToken -ErrorAction SilentlyContinue)) { . $rest }
+            if (Get-Command Get-PimRestToken -ErrorAction SilentlyContinue) {
+                $sqlToken = Get-PimRestToken -Resource 'https://database.windows.net'
+            }
+        } catch { Warn "could not mint a SQL access token: $($_.Exception.Message)" }
+    }
+
     foreach ($table in @($schema.Keys)) {
         $parts = $table -split '\.'; $sch = $parts[0]; $tbl = $parts[-1]
         $q = "SET NOCOUNT ON; SELECT c.name FROM sys.columns c JOIN sys.objects o ON c.object_id=o.object_id JOIN sys.schemas s ON o.schema_id=s.schema_id WHERE s.name='$sch' AND o.name='$tbl';"
         $names = @()
+        $readOk = $false
         try {
-            if ($haveInvoke) { $names = @(Invoke-Sqlcmd -ConnectionString $ConnString -Query $q -ErrorAction Stop | ForEach-Object { $_.name }) }
-            else { $names = @(sqlcmd -C -h -1 -W -Q $q 2>$null | Where-Object { "$_".Trim() -and "$_" -notmatch '^\(' }) }
-        } catch { Warn "could not read columns for $table : $($_.Exception.Message)" }
-        if ($names.Count -gt 0) { $cols[$table] = $names }
+            $conn = New-Object System.Data.SqlClient.SqlConnection $ConnString
+            if ($sqlToken) { $conn.AccessToken = $sqlToken }
+            $conn.Open()
+            try {
+                $cmd = New-Object System.Data.SqlClient.SqlCommand $q, $conn
+                $cmd.CommandTimeout = 60
+                $rdr = $cmd.ExecuteReader()
+                while ($rdr.Read()) { $names += "$($rdr.GetValue(0))" }
+                $rdr.Close()
+                $readOk = $true          # the QUERY ran: an empty result really means "no such table"
+            } finally { $conn.Close() }
+        } catch {
+            Warn "could not read columns for $table : $($_.Exception.Message)"
+        }
+        # BUG-24, part 2 -- and the one that actually misled the operator:
+        # a table we could NOT READ is UNKNOWN, not ABSENT. Reporting the login failure
+        # above as "missing table(s) need create: pim.LocalAdmins" sent the deploy off to
+        # create a table that already existed, then halted the whole roll with
+        # "still reports drift after upgrade" -- while the real problem was authentication.
+        # Marking it unknown keeps a connectivity failure from masquerading as schema drift.
+        if ($readOk) { $cols[$table] = $names }        # may legitimately be empty = absent
+        else         { $cols[$table] = $null }         # unknown -- caller must not call this "missing"
     }
     return $cols
 }
@@ -270,6 +323,26 @@ $prevRev = ''
 $outcome = 'success'; $errDetail = ''
 
 try {
+    # ---- BUG-28: refuse to aim a hosted deploy at nothing ---------------------
+    # Checked HERE, not at parameter-bind time, because the detect-only and community/VM
+    # paths need none of these -- failing them for a value they never use would be a
+    # regression. This is the first point at which a missing target would matter.
+    #
+    # 🔒 An EMPTY resource group or registry is not "use the default": az would either
+    # error obscurely or, with the old hard-coded values, quietly aim at the OPERATOR'S
+    # estate. Fail with the parameter name and the env var that supplies it.
+    if ($profile.isHosted) {
+        $missing = @()
+        if (-not "$ResourceGroup".Trim()) { $missing += '-ResourceGroup (or $env:PIM_ResourceGroup)' }
+        if (-not "$AcrName".Trim())       { $missing += '-AcrName (or $env:PIM_AcrName)' }
+        if ($missing.Count) {
+            throw ("hosted deploy target not configured: supply " + ($missing -join ' and ') + ". " +
+                   'These are per-customer infrastructure names and have NO default -- a default would ' +
+                   "point at somebody else's estate (docs/REQUIREMENTS.md sec.33 BUG-28). On the " +
+                   'sync-driven path they come from the customer manifest Args (PLAT-02).')
+        }
+    }
+
     # ---- capture pre-update revision (rollback target) BEFORE any change -----
     if ($profile.isHosted -and (Have 'az')) {
         try { $prevRev = az containerapp revision list -g $ResourceGroup -n $ManagerApp --query "[?properties.active].name | [0]" -o tsv 2>$null } catch {}
@@ -295,7 +368,7 @@ try {
         if ($profile.isHosted) {
             Info "roll ACA to the freshly-built image $($buildPlan.imageTag) (NOT -SkipBuild -- the image is already built this run, so roll only)"
             if ($PSCmdlet.ShouldProcess("$($Apps -join ', ')", "roll -> $($buildPlan.imageTag)")) {
-                & $roller -ImageTag $buildPlan.imageTag -SkipBuild -ResourceGroup $ResourceGroup -AcrName $AcrName -ImageRepo $ImageRepo -Apps $Apps
+                & $roller -ImageTag $buildPlan.imageTag -SkipBuild -ResourceGroup $ResourceGroup -AcrName $AcrName -ImageRepo $ImageRepo -Apps $Apps -TickJobName $TickJobName
                 if ($LASTEXITCODE -and $LASTEXITCODE -ne 0) { throw "Update-PimContainers.ps1 (roll) failed (exit $LASTEXITCODE)." }
                 $deployed = $true
             }
@@ -381,12 +454,18 @@ catch {
 # =============================================================================
 # STEP 5 -- NOTIFY (always email the outcome -- success OR failure -- reuse mailer)
 # =============================================================================
-Step "5. NOTIFY (email outcome '$outcome' to $Recipient via Send-PimNotifyMail)"
+Step "5. NOTIFY (email outcome '$outcome' to $(if("$Recipient".Trim()){$Recipient}else{'<no recipient configured>'}) via Send-PimNotifyMail)"
 $notifyPlan = Get-PimNotifyPlan -Outcome $outcome -Source $buildSource -Detection $detection `
                 -Built $built -Deployed $deployed -SchemaUpgraded $schemaUpgraded `
                 -ImageTag $buildPlan.imageTag -Recipient $Recipient -ErrorDetail $errDetail
 Info "subject: $($notifyPlan.subject)"
 if ($SkipNotify) { Warn 'notify SKIPPED (-SkipNotify).' }
+# BUG-28: no recipient => SKIP. Notification is not the deploy, so this must not fail a
+# healthy update -- but it must never fall back to an operator mailbox either, which is
+# what the old hard-coded default did.
+elseif (-not "$Recipient".Trim()) {
+    Warn 'notify SKIPPED -- no recipient. Set -Recipient or $env:PIM_NotifyRecipient. (There is deliberately no default: a default would email somebody else.)'
+}
 elseif (-not (Get-Command Send-PimNotifyMail -ErrorAction SilentlyContinue)) {
     Warn 'Send-PimNotifyMail not available (PIM-Notify.ps1 not loaded / no Graph context) -- outcome NOT emailed.'
     Info 'WIRE-UP: this reuses the synthetic-monitor mail path (Send-PimNotifyMail). Configure $global:PIM_MailSender + Graph app-only Mail.Send.'
@@ -424,3 +503,15 @@ if ($monPlan.action -eq 'noop') {
 Write-Host ""
 Step "DONE. outcome=$outcome (built=$built deployed=$deployed schemaUpgraded=$schemaUpgraded verifyHealthy=$verifyHealthy)"
 if ($outcome -eq 'failure' -or $outcome -eq 'rolledback') { exit 1 }
+# BUG-25: SAY SO EXPLICITLY ON SUCCESS.
+# This used to just fall off the end, leaving $LASTEXITCODE at whatever the last native
+# command in this script happened to set -- typically a best-effort `az ... 2>$null` probe
+# that legitimately returned non-zero. Invoke-PimDeployAll infers the step's verdict from
+# exactly that variable, so a COMPLETELY SUCCESSFUL update was read as a failed step:
+#     outcome=success (built=True deployed=True verifyHealthy=True)
+#     -> ok=False ran=True
+#     step 'code' FAILED -- halting the deploy.
+#     ROLLBACK: code -> reactivate prior ACA revision ...
+# It then tried to ROLL BACK A HEALTHY FLEET, and only a missing-parameter bug in the
+# rollback path stopped it. An explicit 0 makes success unambiguous for every caller.
+exit 0

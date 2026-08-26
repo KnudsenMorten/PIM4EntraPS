@@ -1,7 +1,7 @@
 {
   "id": "new-employee-next-month",
   "name": "New Employee Next Month",
-  "description": "Admin provisions 3 days before the first workday of next month (after the person's normal account exists); TAP valid 8h from 08:00 that workday; mail forwarded so the TAP mail lands in the pre-provisioned normal mailbox.",
+  "description": "Admin provisions 3 days before the first workday of next month (after the person's normal account exists); TAP valid 8h from 08:00 that workday; TAP mail sent to the admin's ManagerEmail contact, typically the person's own normal mailbox.",
   "prefill": {
     "Purpose": "Day2Day",
     "TargetUsage": "Cloud",
@@ -9,7 +9,6 @@
     "UserType": "External",
     "UsageLocation": "DK",
     "Ring": "2",
-    "ForwardMailsToContact": "TRUE",
     "ProvisionDate": "FirstWorkdayNextMonth-3d",
     "CreateTAP": "TRUE",
     "TAPStartDate": "FirstWorkdayNextMonth@08:00",

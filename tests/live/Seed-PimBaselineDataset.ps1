@@ -42,7 +42,7 @@ $shared = Resolve-Path "$here\..\..\engine\_shared"
 if (-not $SqlServer)   { $SqlServer = '.\SQLEXPRESS' }
 if (-not $SqlDatabase) { throw "Set -SqlDatabase or `$env:PIM_SqlDatabase (e.g. PimPlatform)." }
 $global:PIM_UseGraphSdk = $false; $global:PIM_SqlServer = $SqlServer; $global:PIM_SqlDatabase = $SqlDatabase
-. "$shared\PIM-ChangeQueue.ps1"; . "$shared\PIM-SqlStore.ps1"
+. "$shared\PIM-Rest.ps1"; . "$shared\PIM-ChangeQueue.ps1"; . "$shared\PIM-SqlStore.ps1"
 
 # ensure DB + schema exist (local store first-time bootstrap)
 Initialize-PimSqlDatabase -Server $SqlServer -Database $SqlDatabase

@@ -25,6 +25,13 @@
   // gates BEFORE first paint -- a toggle in Settings takes effect on reload.
   // Shape: { flags: {home:true,...}, effective: {...}, catalog: [...], warnings: [] }.
   window.PIM_FEATUREFLAGS_BOOT = __PIM_FEATUREFLAGS__;
+  // Governance PREVIEW gate -- the "show the surface, safely OFF" map for the two
+  // security-sensitive governance surfaces (Approvals; Template Rollout exemption
+  // register). Default OFF for both: the surface stays VISIBLE but renders a
+  // "preview -- disabled in Settings" banner and its actions are inert. Resolved
+  // from the SAME pim.Settings store the endpoint guard reads, so GUI == behaviour.
+  // Shape: { flags:{approvalsPreview:false,conformancePreview:false}, anyEnabled, catalog, warnings }.
+  window.PIM_GOVPREVIEW_BOOT = __PIM_GOVPREVIEW__;
 </script>
 <style>
   html, body { margin:0; padding:0; height:100%; font-family: -apple-system, "Segoe UI", Roboto, sans-serif; background:#ffffff; color:#1a1a1a; }
@@ -739,6 +746,7 @@
     <div class="tab" data-tab="validate" title="Check the desired store for problems (orphans, naming, ownership, stale roles) before you deploy — each finding has a suggested fix.">Validate <span id="validateErrBadge" class="badge" style="display:none;background:#cf222e">0</span></div>
     <div class="tab" data-tab="save" title="Review every staged change with a keyed diff, then commit — each save is backed up first, all-or-nothing, and reversible.">Review &amp; Save <span id="saveDirtyBadge" class="badge" style="display:none">0</span></div>
     <div class="tab" data-tab="revoke" title="Revoke live active PIM assignments. Destructive: break-glass accounts are protected and large batches require maker/checker approval.">Maintenance &amp; Revoke <span id="revokeCountBadge" class="badge" style="display:none;background:#cf222e">0</span></div>
+    <div class="tab" data-tab="accounts" title="Admin accounts and their Temporary Access Pass. Re-issue a TAP whose lifetime has expired -- the admin gets a new one by mail.">Accounts &amp; TAP <span id="tapExpiredBadge" class="badge" style="display:none;background:#bc4c00">0</span></div>
     <div class="tab" data-tab="approvals" title="The maker/checker approval queue — raise an offboard/revoke/sensitive change, approve or deny one (a different admin must approve), and execute an approved request.">Approvals <span id="apprPendBadge" class="badge" style="display:none;background:#bc4c00">0</span></div>
     <div class="tab" data-tab="accessreview" title="Run access reviews end-to-end — attest (approve / deny / recertify) with justification, assign reviewers, send reminders, and export the evidence.">Access Review <span id="arOpenBadge" class="badge" style="display:none">0</span></div>
     <div class="tab" data-tab="grid" title="The full editable grid of every desired-state row — for power users who want direct, spreadsheet-style editing across all entities.">Advanced View (grid) <span id="gridDirtyBadge" class="badge" style="display:none">0</span></div>
@@ -749,6 +757,7 @@
     <div class="tab" data-tab="audit" title="The audit trail you can defend — filter and search every change by entity, actor or date range, see before → after, and export the whole trail.">Audit</div>
     <div class="tab" data-tab="reports" title="&quot;Who can do what&quot; (and the reverse) — pick a person to see everything they can reach, or pick a role to see who can activate it. Printable + exportable.">Reports</div>
     <div class="tab" data-tab="conformance" title="Keep tenants current with the approved delegation templates — see how far behind each tenant is and roll the updates forward.">Template Rollout</div>
+    <div class="tab" data-tab="downlink" title="MSP downlink — which of your central admins and roles reach each managed customer, what was held back and why, and the per-relationship projection policy.">MSP Downlink <span id="downlinkUnresBadge" class="badge" style="display:none;background:#bc4c00">0</span></div>
     <div class="tab" data-tab="cutover" title="The gated CSV → SQL cutover ceremony — preflight, upgrade, import, switch source, re-preflight, finalize; abortable before the point of no return.">Cutover</div>
     <div class="tab" data-tab="jobs" title="The scheduler — see each job's cadence, last result and next run, spot overdue or failing runs, re-run on demand, and export the run history.">Jobs <span id="jobsRunBadge" class="badge" style="display:none;background:#1f883d">0</span></div>
     <div class="tab" data-tab="settings" title="Configure the Manager — naming conventions, feature customization (core vs advanced kill switches), edition/licence, email controls, and instances.">Settings</div>
@@ -978,6 +987,20 @@
     </div>
   </div>
 
+  <!-- =========== MSP Downlink tab (control #1/#2, framework MSP-2) =========== -->
+  <!-- Per managed relationship: which central admins and roles PROJECT, which were
+       EXCLUDED (with the policy/ring reason), which are UNRESOLVED, and which groups
+       would be created Owner='MSP' vs deferred to the customer's own. Plus the
+       per-relationship projection policy editor and a dry-run.
+       🔒 The view RENDERS WHAT THE PLAN RETURNS. The projection decision is computed
+       from the SIGNED baseline server-side; the GUI must never recompute a second
+       opinion, or the display and the write could disagree. -->
+  <div id="downlinkTab" class="tab-panel">
+    <div style="flex:1 1 auto; overflow:auto; padding:14px 18px;" id="downlinkBody">
+      <div style="color:#57606a; font-size:12px;">Loading downlink&hellip;</div>
+    </div>
+  </div>
+
   <!-- =========== Jobs tab (scheduled + recent jobs, read-only) =========== -->
   <!-- Lists the REAL scheduler job registry + run history via /api/jobs. In-progress
        jobs sort to the top; each row shows cadence, enabled state, last run + result,
@@ -1052,6 +1075,13 @@
   <!-- =========== Cutover tab (front-end for /api/cutover) =========== -->
   <!-- Gated CSV -> SQL cutover ceremony, stage-by-stage: preflight -> upgrade ->
        import -> set-source -> re-preflight -> finalize. SuperAdmin surface. -->
+
+  <!-- =========== Accounts & TAP tab (BUG-66) =========== -->
+  <div id="accountsTab" class="tab-panel">
+    <div style="flex:1 1 auto; overflow:auto; padding:14px 18px;" id="accountsBody">
+      <div style="color:#57606a; font-size:12px;">Loading admin accounts&hellip;</div>
+    </div>
+  </div>
   <div id="cutoverTab" class="tab-panel">
     <div style="flex:1 1 auto; overflow:auto; padding:14px 18px;" id="cutoverBody">
       <div style="color:#57606a; font-size:12px;">Loading cutover ceremony&hellip;</div>
@@ -1398,6 +1428,35 @@
     });
   }
 
+  // Governance PREVIEW gate (orthogonal to the feature flags above). The two
+  // security-sensitive governance surfaces ship in a "preview -- disabled" state by
+  // default: the tab stays VISIBLE/reachable, but its body shows a preview banner
+  // and its live data + actions do NOT load (the server endpoints also short-
+  // circuit). Maps a GUI surface key -> the preview flag id in the boot map.
+  const PIM_GOVPREVIEW = (window.PIM_GOVPREVIEW_BOOT && window.PIM_GOVPREVIEW_BOOT.flags &&
+    typeof window.PIM_GOVPREVIEW_BOOT.flags === 'object') ? window.PIM_GOVPREVIEW_BOOT.flags : {};
+  const GOVPREVIEW_SURFACE_FLAG = { approvals: 'approvalsPreview', conformance: 'conformancePreview' };
+  // TRUE when this surface is governed by the preview gate AND currently DISABLED
+  // (preview off). A surface not in the map, or with its flag ON, is NOT in preview.
+  function isGovernancePreviewDisabled(surface) {
+    const id = GOVPREVIEW_SURFACE_FLAG[surface];
+    if (!id) return false;                              // not a preview-gated surface
+    if (Object.prototype.hasOwnProperty.call(PIM_GOVPREVIEW, id)) return !PIM_GOVPREVIEW[id];
+    return true;                                        // default: preview OFF -> disabled
+  }
+  // The visible "preview -- disabled in Settings" banner shown in place of a
+  // preview-gated surface's live content. Inert: it loads no data and wires no
+  // destructive control. `what` is a one-line description of the surface.
+  function governancePreviewBanner(what) {
+    return '<div class="gov-preview-banner" data-preview="disabled" role="status" ' +
+      'style="padding:14px 16px;background:#fff8c5;border:1px solid #d4a72c;border-radius:8px;font-size:13px;color:#7d4e00;line-height:1.5;">' +
+      '<b>&#128274; Preview &mdash; disabled in Settings.</b> ' +
+      escapeHtml(what) + ' This surface is shown for review only. It is <b>turned off by default</b> and ' +
+      'takes <b>no action</b> while disabled &mdash; all safety gates stay enforced. ' +
+      'An administrator can enable it under <b>Settings &rarr; Governance preview</b>; the change takes effect on reload.' +
+      '</div>';
+  }
+
   const NAV_GROUPS = [
     { id: 'overview', label: 'Overview',
       title: 'Privileged-estate health at a glance',
@@ -1410,10 +1469,10 @@
       items: ['validate', 'save', 'cutover'] },
     { id: 'operations', label: 'Operations',
       title: 'Day-to-day running: maintenance, approvals, jobs',
-      items: ['revoke', 'approvals', 'jobs'] },
+      items: ['revoke', 'accounts', 'approvals', 'jobs'] },
     { id: 'governance', label: 'Governance',
       title: 'Recertify, keep tenants conformant, prove who-can-do-what',
-      items: ['governance', 'accessreview', 'conformance', 'reports'] },
+      items: ['governance', 'accessreview', 'conformance', 'reports', 'downlink'] },
     { id: 'audit', label: 'Audit & Settings',
       title: 'Audit trail, configuration and help',
       items: ['audit', 'settings', 'support'] },
@@ -1647,6 +1706,7 @@
     if (name === 'save') renderSaveTab();
     if (name === 'validate') openValidateTab();
     if (name === 'revoke') openRevokeTab();
+    if (name === 'accounts') renderAccounts();
     if (name === 'approvals') renderApprovals();
     if (name === 'accessreview') renderAccessReviews();
     if (name === 'authoring') renderAuthoring();
@@ -1656,12 +1716,161 @@
     if (name === 'audit') renderAudit();
     if (name === 'reports') renderReports();
     if (name === 'conformance') renderConformance();
+    if (name === 'downlink') renderDownlink();
     if (name === 'cutover') renderCutover();
     if (name === 'jobs') renderJobs();
     if (name === 'settings') renderSettings();
     if (name === 'support') renderSupport();
   }
 
+
+  // ===================================================================
+  // Accounts & TAP tab -- BUG-66.
+  //
+  // An admin whose Temporary Access Pass has EXPIRED can never get another one
+  // from the engine: the AdminTap scope counts any TAP method as "has a TAP",
+  // so a dead one classifies the account as satisfied and the scope reports
+  // success while minting nothing. Measured live on the master tenant: six
+  // consecutive clean runs, and the admin with no way to obtain a credential.
+  //
+  // This tab is the read-out the engine cannot give (usable vs expired vs none)
+  // plus the one-click recovery: delete the dead pass, mint a fresh one, mail it
+  // to the manager address recorded on the admin row.
+  //
+  // 🔒 The TAP CODE IS NEVER SHOWN HERE. It is mailed and nowhere else -- a
+  // credential rendered in the browser is a credential in a screenshot.
+  // ===================================================================
+  let accountsState = { rows: [], canReset: false, loading: false, busy: '' };
+
+  function tapStatusChip(st, detail) {
+    const map = {
+      usable:  { bg: '#dafbe1', fg: '#116329', label: 'usable' },
+      expired: { bg: '#ffebe9', fg: '#cf222e', label: 'EXPIRED' },
+      none:    { bg: '#fff8c5', fg: '#7d4e00', label: 'no TAP' },
+      unknown: { bg: '#eaeef2', fg: '#57606a', label: 'unknown' }
+    };
+    const c = map[st] || map.unknown;
+    return '<span style="display:inline-block;padding:1px 7px;border-radius:10px;font-size:11px;font-weight:600;' +
+           'background:' + c.bg + ';color:' + c.fg + '">' + escapeHtml(c.label) + '</span>' +
+           (detail ? ' <span style="color:#57606a;font-size:11px;">' + escapeHtml(detail) + '</span>' : '');
+  }
+
+  async function renderAccounts() {
+    const body = document.getElementById('accountsBody');
+    if (!body) return;
+    if (!accountsState.loading && !accountsState.rows.length) {
+      body.innerHTML = stateLoading('Loading admin accounts&hellip;');
+    }
+    accountsState.loading = true;
+    let data = null;
+    try {
+      const r = await fetch('/api/admin-tap');
+      data = await r.json();
+      if (!r.ok) throw new Error((data && data.error) || ('HTTP ' + r.status));
+    } catch (e) {
+      accountsState.loading = false;
+      body.innerHTML = stateError('Could not read admin TAP state', String(e.message || e));
+      return;
+    }
+    accountsState.loading = false;
+    accountsState.rows = (data && data.admins) || [];
+    accountsState.canReset = !!(data && data.canReset);
+
+    const expired = accountsState.rows.filter(a => a.status === 'expired').length;
+    const badge = document.getElementById('tapExpiredBadge');
+    if (badge) { badge.textContent = String(expired); badge.style.display = expired ? '' : 'none'; }
+
+    let h = '';
+    h += '<div style="display:flex;align-items:center;gap:10px;margin-bottom:10px;">' +
+         '<h2 style="margin:0;font-size:16px;">Admin accounts &amp; Temporary Access Pass</h2>' +
+         '<button class="btn-sec" id="tapRefresh">Refresh</button></div>';
+    h += '<div style="color:#57606a;font-size:12px;margin-bottom:12px;max-width:940px;">' +
+         'Accounts with <code>CreateTAP=true</code>, showing the <b>live</b> state of their pass. ' +
+         'An <b>EXPIRED</b> pass is not replaced automatically &mdash; the engine treats any existing pass as ' +
+         '&ldquo;this account has one&rdquo;, so it must be re-issued here. ' +
+         'Re-issuing removes the old pass, creates a new one, and <b>emails it to the manager address on the admin row</b>. ' +
+         'The code is never displayed in this page.</div>';
+
+    if (!accountsState.rows.length) {
+      h += stateEmpty('No admin accounts request a TAP',
+                      'Rows in Account-Definitions-Admins with CreateTAP=true appear here.');
+      body.innerHTML = h;
+      const rf = document.getElementById('tapRefresh'); if (rf) rf.onclick = () => renderAccounts();
+      return;
+    }
+
+    if (!accountsState.canReset) {
+      h += '<div style="background:#eaeef2;border-radius:6px;padding:8px 10px;font-size:12px;color:#57606a;margin-bottom:10px;">' +
+           'You have read-only access here. Re-issuing a Temporary Access Pass requires the <b>Admin</b> role.</div>';
+    }
+
+    h += '<table class="set-table" style="max-width:1100px;"><tr>' +
+         '<th>Admin</th><th>TAP status</th><th>Created</th><th>Mailed to</th><th>Lifetime</th><th></th></tr>';
+    accountsState.rows.forEach(a => {
+      const isBusy = accountsState.busy === a.userPrincipalName;
+      // A row we could not READ must never offer a one-click write: "unknown" is
+      // not "none", and acting on the guess either double-issues or hides a dead pass.
+      const blocked = !accountsState.canReset || !a.mailReady || a.status === 'unknown' || isBusy;
+      let why = '';
+      if (!a.mailReady) why = a.mailReason;
+      else if (a.status === 'unknown') why = 'cannot read this account from the directory';
+      const label = isBusy ? 'Working&hellip;' : (a.status === 'none' ? 'Issue TAP' : 'Reset TAP');
+      h += '<tr>' +
+        '<td><div style="font-weight:600;">' + escapeHtml(a.displayName || a.userPrincipalName) + '</div>' +
+          '<div style="color:#57606a;font-size:11px;">' + escapeHtml(a.userPrincipalName) + '</div></td>' +
+        '<td>' + tapStatusChip(a.status, a.detail) + '</td>' +
+        '<td style="font-size:11.5px;color:#57606a;">' + escapeHtml(a.createdDateTime || '') + '</td>' +
+        '<td style="font-size:11.5px;">' + (a.managerEmail ? escapeHtml(a.managerEmail) : '<span style="color:#cf222e;">none</span>') + '</td>' +
+        '<td style="font-size:11.5px;">' + escapeHtml(String(a.tapLifetimeHours)) + 'h</td>' +
+        '<td><button class="btn tapResetBtn" data-upn="' + escapeHtml(a.userPrincipalName) + '"' +
+          (blocked ? ' disabled' : '') + (why ? ' title="' + escapeHtml(why) + '"' : '') + '>' + label + '</button>' +
+          (why ? '<div style="color:#bc4c00;font-size:10.5px;max-width:230px;">' + escapeHtml(why) + '</div>' : '') +
+        '</td></tr>';
+    });
+    h += '</table>';
+    h += '<div id="tapMsg" style="margin-top:10px;font-size:12px;"></div>';
+    body.innerHTML = h;
+
+    const rf = document.getElementById('tapRefresh'); if (rf) rf.onclick = () => renderAccounts();
+    document.querySelectorAll('.tapResetBtn').forEach(b => { b.onclick = () => resetAdminTap(b.dataset.upn); });
+  }
+
+  async function resetAdminTap(upn) {
+    const row = accountsState.rows.find(a => a.userPrincipalName === upn);
+    if (!row) return;
+    const verb = row.status === 'none' ? 'Issue a Temporary Access Pass for' : 'Re-issue the Temporary Access Pass for';
+    // Confirm explicitly: this mints a sign-in credential and invalidates the old one.
+    if (!confirm(verb + '\n\n  ' + upn + '\n\nThe existing pass (if any) is deleted and a NEW one is mailed to ' +
+                 (row.managerEmail || '(no recipient)') + '.\nThe code is not shown here.')) return;
+    accountsState.busy = upn;
+    renderAccounts();
+    try {
+      const r = await fetch('/api/admin-tap/reset', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ userPrincipalName: upn })
+      });
+      const d = await r.json();
+      accountsState.busy = '';
+      if (!r.ok) {
+        await renderAccounts();
+        const m = document.getElementById('tapMsg');
+        if (m) { m.style.color = '#cf222e'; m.textContent = (d && d.error) || ('HTTP ' + r.status); }
+        return;
+      }
+      await renderAccounts();
+      const m2 = document.getElementById('tapMsg');
+      if (m2) {
+        m2.style.color = d.mailSent ? '#116329' : '#bc4c00';
+        m2.textContent = d.note || 'Done.';
+      }
+    } catch (e) {
+      accountsState.busy = '';
+      await renderAccounts();
+      const m3 = document.getElementById('tapMsg');
+      if (m3) { m3.style.color = '#cf222e'; m3.textContent = String(e.message || e); }
+    }
+  }
   // ===================================================================
   // Home / Overview tab (landing) -- REQUIREMENTS §26a/§27 H2.
   // "What needs my attention" over the live engine/validator/scheduler/audit
@@ -2161,9 +2370,192 @@
   // ===================================================================
   let confSel = null;
   let confView = 'tenant';   // 'tenant' (this tenant) | 'fleet' (tenants x templates) -- [H8]
+  // ---------------------------------------------------------------------------
+  // MSP DOWNLINK (control #1/#2, framework MSP-2).
+  //
+  // 🔒 THIS VIEW RENDERS WHAT THE SERVER'S PLAN RETURNS AND NEVER RECOMPUTES IT.
+  // The projection is decided from the SIGNED baseline by the pure core
+  // (Get-PimDownlinkPlan -> Select-PimProjectedAssignments/Definitions). If the GUI
+  // formed its own opinion, the preview and the apply could disagree -- and the
+  // thing they would disagree about is who holds privilege in a customer tenant.
+  // Every number and reason string below comes straight off /api/downlink.
+  // ---------------------------------------------------------------------------
+  function downlinkPill(text, kind) {
+    const c = { ok: ['#dafbe1', '#1a7f37'], warn: ['#fff8c5', '#7d4e00'], bad: ['#ffebe9', '#cf222e'], mute: ['#f6f8fa', '#57606a'] }[kind] || ['#f6f8fa', '#57606a'];
+    return '<span style="display:inline-block;padding:1px 8px;border-radius:10px;background:' + c[0] + ';color:' + c[1] + ';font-size:11px;font-weight:600;">' + escapeHtml(text) + '</span>';
+  }
+
+  async function renderDownlink() {
+    const body = document.getElementById('downlinkBody');
+    if (!body) return;
+    body.innerHTML = '<div style="color:#57606a;font-size:12px;">Loading downlink&hellip;</div>';
+    let data;
+    try { data = await api('GET', '/api/downlink'); }
+    catch (e) {
+      body.innerHTML = '<div style="padding:14px 16px;background:#ffebe9;border:1px solid #cf222e;border-radius:8px;font-size:13px;color:#cf222e;">' +
+        '<b>Could not load the downlink.</b> ' + escapeHtml((e && e.message) || String(e)) + '</div>';
+      return;
+    }
+    const rels = (data && Array.isArray(data.relationships)) ? data.relationships : [];
+    const canWrite = !!(data && data.canWrite);
+
+    let h = '<h2 style="margin:0 0 4px;font-size:16px;">MSP Downlink</h2>' +
+      '<div style="color:#57606a;font-size:12px;margin-bottom:14px;">' +
+      'Which of your central admins and roles reach each managed customer &mdash; and what was held back, with the reason. ' +
+      'The decision is computed from the <b>signed baseline</b>; this view reports it.' +
+      '</div>';
+
+    if (data && data.baseline) {
+      h += '<div style="margin-bottom:14px;font-size:12px;color:#57606a;">Baseline <b>v' + escapeHtml(String(data.baseline.version || '?')) + '</b>' +
+        (data.baseline.source ? ' &middot; ' + escapeHtml(data.baseline.source) : '') +
+        (data.baseline.verified ? ' &middot; ' + downlinkPill('signature verified', 'ok') : ' &middot; ' + downlinkPill('NOT verified', 'bad')) +
+        '</div>';
+    }
+
+    if (!rels.length) {
+      h += '<div style="padding:14px 16px;background:#f6f8fa;border:1px solid #d0d7de;border-radius:8px;font-size:13px;color:#57606a;">' +
+        '<b>No managed relationships.</b> ' +
+        (data && data.reason ? escapeHtml(data.reason) : 'Register a managed tenant in the platform registry to see it here.') +
+        '</div>';
+      body.innerHTML = h;
+      return;
+    }
+
+    let totalUnres = 0;
+    rels.forEach(r => {
+      const proj = r.projected || [], excl = r.excluded || [], unres = r.unresolved || [];
+      const create = r.groupsToCreate || [], defer = r.groupsDeferred || [];
+      totalUnres += unres.length;
+      h += '<div style="border:1px solid #d0d7de;border-radius:8px;margin-bottom:16px;overflow:hidden;">';
+      h += '<div style="padding:10px 14px;background:#f6f8fa;border-bottom:1px solid #d0d7de;display:flex;align-items:center;gap:10px;flex-wrap:wrap;">' +
+        '<b style="font-size:14px;">' + escapeHtml(r.name || r.tenantId) + '</b>' +
+        '<span style="color:#57606a;font-size:11px;font-family:monospace;">' + escapeHtml(r.tenantId || '') + '</span>' +
+        (r.ring !== undefined && r.ring !== null ? downlinkPill('ring ' + r.ring, 'mute') : '') +
+        downlinkPill(proj.length + ' projected', proj.length ? 'ok' : 'mute') +
+        (excl.length ? downlinkPill(excl.length + ' excluded', 'warn') : '') +
+        (unres.length ? downlinkPill(unres.length + ' UNRESOLVED', 'bad') : '') +
+        '</div><div style="padding:12px 14px;">';
+
+      if (r.error) {
+        h += '<div style="color:#cf222e;font-size:12px;">' + escapeHtml(r.error) + '</div>';
+      } else {
+        h += '<div style="font-size:12px;margin-bottom:8px;"><b>' + r.adminCount + '</b> admin(s) reach this tenant.</div>';
+        if (proj.length) {
+          h += '<table style="width:100%;border-collapse:collapse;font-size:12px;margin-bottom:10px;"><thead><tr>' +
+            '<th style="text-align:left;padding:4px 6px;border-bottom:1px solid #d0d7de;">Admin</th>' +
+            '<th style="text-align:left;padding:4px 6px;border-bottom:1px solid #d0d7de;">Role group</th>' +
+            '<th style="text-align:left;padding:4px 6px;border-bottom:1px solid #d0d7de;">Type</th></tr></thead><tbody>';
+          proj.forEach(p => {
+            h += '<tr><td style="padding:3px 6px;">' + escapeHtml(p.UserName || '') + '</td>' +
+              '<td style="padding:3px 6px;font-family:monospace;">' + escapeHtml(p.GroupTag || '') + '</td>' +
+              '<td style="padding:3px 6px;color:#57606a;">' + escapeHtml(p.AssignmentType || '') + '</td></tr>';
+          });
+          h += '</tbody></table>';
+        }
+        // 🪤 Excluded and unresolved are NOT the same thing and must never be merged:
+        // excluded = policy or ring said no (intended); unresolved = the tenant has no
+        // group with that tag, so the role CANNOT be granted (a problem to fix).
+        if (excl.length) {
+          h += '<div style="font-size:12px;margin-bottom:4px;"><b>Held back</b> &mdash; policy or ring:</div><ul style="margin:0 0 10px 18px;font-size:12px;color:#7d4e00;">';
+          excl.forEach(e => { h += '<li>' + escapeHtml(e.UserName || '') + ' &rarr; <code>' + escapeHtml(e.GroupTag || '') + '</code> &mdash; ' + escapeHtml(e.reason || '') + '</li>'; });
+          h += '</ul>';
+        }
+        if (unres.length) {
+          h += '<div style="font-size:12px;margin-bottom:4px;color:#cf222e;"><b>Unresolved</b> &mdash; the role cannot be granted here:</div><ul style="margin:0 0 10px 18px;font-size:12px;color:#cf222e;">';
+          unres.forEach(e => { h += '<li>' + escapeHtml(e.UserName || '') + ' &rarr; <code>' + escapeHtml(e.GroupTag || '') + '</code> &mdash; ' + escapeHtml(e.reason || '') + '</li>'; });
+          h += '</ul>';
+        }
+        if (create.length || defer.length) {
+          h += '<div style="font-size:12px;margin-bottom:4px;"><b>Groups</b></div><ul style="margin:0 0 10px 18px;font-size:12px;">';
+          create.forEach(g => { h += '<li><code>' + escapeHtml(g) + '</code> &mdash; would be created, owned by the MSP</li>'; });
+          defer.forEach(g => { h += '<li style="color:#57606a;"><code>' + escapeHtml(g) + '</code> &mdash; the customer already has this tag; left untouched</li>'; });
+          h += '</ul>';
+        }
+      }
+
+      // ---- per-relationship projection policy -------------------------------
+      h += '<div style="border-top:1px solid #d0d7de;margin-top:8px;padding-top:10px;">' +
+        '<div style="font-size:12px;margin-bottom:6px;"><b>Projection policy</b> ' +
+        '<span style="color:#57606a;">&mdash; no rules = every role projects. A <code>deny</code> always wins; adding any <code>allow</code> turns it into an allow-list.</span></div>';
+      const rules = r.policy || [];
+      h += '<div id="dlPolicy-' + escapeHtml(r.tenantId) + '" style="font-size:12px;">';
+      if (!rules.length) { h += '<div style="color:#57606a;margin-bottom:6px;">No rules &mdash; everything the master publishes projects here.</div>'; }
+      else {
+        h += '<ul style="margin:0 0 6px 18px;">';
+        rules.forEach(x => { h += '<li>' + downlinkPill(x.Mode, x.Mode === 'deny' ? 'bad' : 'ok') + ' <code>' + escapeHtml(x.GroupTag) + '</code></li>'; });
+        h += '</ul>';
+      }
+      h += '</div>';
+      if (canWrite) {
+        h += '<div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin-top:6px;">' +
+          '<select class="dl-mode" data-tid="' + escapeHtml(r.tenantId) + '" style="font-size:12px;padding:3px;"><option value="deny">deny</option><option value="allow">allow</option></select>' +
+          '<input class="dl-tag" data-tid="' + escapeHtml(r.tenantId) + '" placeholder="group tag (trailing * allowed)" style="font-size:12px;padding:3px;min-width:260px;">' +
+          '<button class="dl-add" data-tid="' + escapeHtml(r.tenantId) + '" style="font-size:12px;">Add rule</button>' +
+          (rules.length ? '<button class="dl-clear" data-tid="' + escapeHtml(r.tenantId) + '" style="font-size:12px;">Clear all rules</button>' : '') +
+          '</div>';
+      }
+      h += '</div>';
+
+      // ---- run -------------------------------------------------------------
+      // 🔴 NO APPLY BUTTON, DELIBERATELY. The master does not write into a managed tenant
+      // (§22, and the pull-not-push tenet). Under the agreed model (framework MSP-3) the
+      // customer PULLS this and their own administrator ACCEPTS it. What an MSP operator
+      // legitimately needs here is the PREVIEW -- "what would they receive" -- so that is
+      // all this offers. An apply button would be the one control that cannot exist here.
+      h += '<div style="border-top:1px solid #d0d7de;margin-top:10px;padding-top:10px;display:flex;gap:8px;align-items:center;flex-wrap:wrap;">' +
+        '<button class="dl-dry" data-tid="' + escapeHtml(r.tenantId) + '" style="font-size:12px;">Preview what they would receive</button>' +
+        '<span style="color:#57606a;font-size:11px;">This tenant <b>pulls</b> the signed baseline and its own administrator accepts it. Nothing is written from here.</span>' +
+        '</div>';
+      h += '<div class="dl-out" data-tid="' + escapeHtml(r.tenantId) + '" style="margin-top:8px;"></div>';
+      h += '</div></div>';
+    });
+
+    body.innerHTML = h;
+
+    const badge = document.getElementById('downlinkUnresBadge');
+    if (badge) { badge.textContent = totalUnres; badge.style.display = totalUnres ? '' : 'none'; }
+
+    const showOut = (tid, ok, text) => {
+      const el = body.querySelector('.dl-out[data-tid="' + tid + '"]');
+      if (!el) return;
+      el.innerHTML = '<div style="padding:8px 10px;border-radius:6px;font-size:12px;background:' + (ok ? '#dafbe1' : '#ffebe9') +
+        ';border:1px solid ' + (ok ? '#1a7f37' : '#cf222e') + ';color:' + (ok ? '#1a7f37' : '#cf222e') + ';white-space:pre-wrap;">' + escapeHtml(text) + '</div>';
+    };
+
+    body.querySelectorAll('.dl-add').forEach(b => b.onclick = async () => {
+      const tid = b.dataset.tid;
+      const mode = body.querySelector('.dl-mode[data-tid="' + tid + '"]').value;
+      const tag = (body.querySelector('.dl-tag[data-tid="' + tid + '"]').value || '').trim();
+      if (!tag) { showOut(tid, false, 'Enter a group tag.'); return; }
+      const next = (rels.find(x => x.tenantId === tid).policy || []).slice();
+      next.push({ Mode: mode, GroupTag: tag });
+      try { await api('PUT', '/api/downlink/policy', { tenantId: tid, policy: next }); renderDownlink(); }
+      catch (e) { showOut(tid, false, (e && e.message) || String(e)); }
+    });
+    body.querySelectorAll('.dl-clear').forEach(b => b.onclick = async () => {
+      const tid = b.dataset.tid;
+      if (!confirm('Remove every projection rule for this relationship?\n\nWith no rules, EVERY role the master publishes will project here.')) return;
+      try { await api('PUT', '/api/downlink/policy', { tenantId: tid, policy: [] }); renderDownlink(); }
+      catch (e) { showOut(tid, false, (e && e.message) || String(e)); }
+    });
+    body.querySelectorAll('.dl-dry').forEach(b => b.onclick = async () => {
+      const tid = b.dataset.tid;
+      showOut(tid, true, 'Running dry run…');
+      try { const r = await api('POST', '/api/downlink/run', { tenantId: tid, whatIf: true }); showOut(tid, !!r.ok, r.detail || JSON.stringify(r)); }
+      catch (e) { showOut(tid, false, (e && e.message) || String(e)); }
+    });
+  }
+
   async function renderConformance() {
-    if (confView === 'fleet') { renderFleetConformance(); return; }
     const body = document.getElementById('confBody');
+    // Governance preview gate: OFF by default. The Template Rollout surface (incl.
+    // the active-exemptions register + revoke) is shown for review but inert -- the
+    // banner replaces all live content and the conformance endpoints short-circuit.
+    if (body && isGovernancePreviewDisabled('conformance')) {
+      body.innerHTML = governancePreviewBanner('Template Rollout & the active-exemptions register: review every time-boxed waiver (state, days-left) and revoke one early, plus roll approved delegation templates forward to tenants.');
+      return;
+    }
+    if (confView === 'fleet') { renderFleetConformance(); return; }
     if (!isServer) { body.innerHTML = '<div style="color:#57606a">Static mode -- template rollout needs the server.</div>'; return; }
     const esc = escapeHtml;
     let data;
@@ -2638,6 +3030,58 @@
   }
 
   // ===================================================================
+  // Governance preview card -- the "show the surface, safely OFF" toggle for the
+  // two security-sensitive governance surfaces. Loads via GET, saves via PUT
+  // /api/settings/governance-preview (SAME pim.Settings store the boot value +
+  // endpoint guard read). SuperAdmin edit. Default OFF for both.
+  // ===================================================================
+  async function renderGovPreviewCard(canEdit) {
+    const host = document.getElementById('setGovPreviewBody');
+    if (!host) return;
+    const esc = escapeHtml;
+    let p;
+    try { p = await api('GET', '/api/settings/governance-preview'); }
+    catch (e) { host.innerHTML = '<div style="color:#cf222e">Failed to load governance preview: ' + esc(e.message) + '</div>'; return; }
+    const catalog = (p && p.catalog) || [];
+    const flags = (p && p.flags) || {};
+    let h = '';
+    h += `<table class="set-table" id="setGovPreviewTbl"><tr><th>Preview surface</th><th style="text-align:center;">Enabled</th><th>Default</th></tr>`;
+    catalog.forEach(f => {
+      const on = Object.prototype.hasOwnProperty.call(flags, f.id) ? !!flags[f.id] : !!f.default;
+      const dis = canEdit ? '' : ' disabled';
+      h += `<tr>` +
+        `<td><b>${esc(f.label)}</b> <code style="color:#57606a;font-size:11px;">${esc(f.id)}</code></td>` +
+        `<td style="text-align:center;"><input type="checkbox" class="setGovPrevToggle" data-id="${esc(f.id)}"${on?' checked':''}${dis}></td>` +
+        `<td style="color:#57606a;font-size:11.5px;">${f.default ? 'on' : 'off (preview)'}</td>` +
+        `</tr>`;
+    });
+    h += `</table>`;
+    if (p && p.warnings && p.warnings.length) {
+      h += `<div style="margin-top:6px;color:#bc4c00;font-size:11.5px;">` + p.warnings.map(esc).join('<br>') + `</div>`;
+    }
+    h += `<div style="margin-top:8px;font-size:11.5px;color:#57606a;">While off, the surface is shown for review only and takes no action. Turning it on enables it normally on the next reload &mdash; all underlying safety gates stay enforced.</div>`;
+    if (canEdit) {
+      h += `<div style="margin-top:10px;"><button class="btn" id="govPrevSave">Save governance preview</button> <span class="setMsg" id="govPrevMsg"></span></div>`;
+    } else {
+      h += `<div style="margin-top:8px;font-size:11.5px;color:#57606a;">(read-only &mdash; SuperAdmin role required to edit)</div>`;
+    }
+    host.innerHTML = h;
+    if (!canEdit) return;
+    document.getElementById('govPrevSave').onclick = async () => {
+      const msg = document.getElementById('govPrevMsg');
+      msg.textContent = 'Saving…'; msg.style.color = '#57606a';
+      const out = {};
+      document.querySelectorAll('#setGovPreviewTbl .setGovPrevToggle').forEach(cb => { out[cb.dataset.id] = !!cb.checked; });
+      try {
+        await api('PUT', '/api/settings/governance-preview', { value: { flags: out } });
+        msg.innerHTML = 'Saved ✓ &mdash; <a href="#" id="govPrevReload">reload</a> to apply';
+        msg.style.color = '#116329';
+        const rl = document.getElementById('govPrevReload'); if (rl) rl.onclick = (e) => { e.preventDefault(); location.reload(); };
+      } catch (e) { msg.textContent = 'Failed: ' + e.message; msg.style.color = '#cf222e'; }
+    };
+  }
+
+  // ===================================================================
   // Edition / license card (REQUIREMENTS s30). Set the active edition + grant
   // basis; loads via GET /api/settings/edition, saves via PUT. SuperAdmin to edit.
   // ===================================================================
@@ -2767,7 +3211,14 @@
       seen[g].forEach(key => {
         const f = eff[key]; if (!f) return;
         const isCore = f.tier === 'core';
-        const needsPro = (f.license === 'pro' && !f.licensed);
+        // Only claim a Pro lock when the gate is ACTUALLY enforced. Enforcement ships
+        // OFF (Pro is free, no nag, no block), so this row used to show a padlock and a
+        // DISABLED toggle on features the engine would have run -- a restriction the
+        // backend never applied. `licenseEnforced` comes from the server so the two can
+        // never drift; when it is absent (older backend) treat it as NOT enforced, which
+        // is the shipped default and the safe direction.
+        const licEnforced = (p.licenseEnforced === true);
+        const needsPro = licEnforced && (f.license === 'pro' && !f.licensed);
         const off = !f.enabled && !isCore;
         const dimmed = (off || needsPro);
         const rowStyle = dimmed ? ' style="opacity:0.55;"' : '';
@@ -3234,10 +3685,18 @@
          `<div style="color:#57606a;font-size:11.5px;margin-bottom:8px;">Turn any Manager feature on or off so you can roll them out gradually. A disabled feature's tab is hidden from the menu on the next reload; enable it when you're ready. Core features are on by default; newer/advanced ones start off.</div>` +
          `<div id="setFeaturesBody"><div style="color:#57606a;font-size:12px;">Loading features&hellip;</div></div></div>`;
 
+    // --- Governance preview ("show the surface, safely OFF"): the two security-
+    // sensitive governance surfaces (Approvals; Template Rollout exemption register)
+    // ship VISIBLE but disabled+inert by default. Turning a preview on un-gates its
+    // endpoints; all underlying safety gates stay enforced. SuperAdmin to edit.
+    h += `<div class="set-card" id="setGovPreviewCard"><h3 style="margin:0 0 4px;font-size:14px;">Governance preview</h3>` +
+         `<div style="color:#57606a;font-size:11.5px;margin-bottom:8px;">Two governance surfaces ship in a <b>preview</b> state: their tab is shown so you can review it, but it is <b>disabled by default</b> and takes <b>no action</b> while off (the screen shows a &ldquo;preview &mdash; disabled&rdquo; banner and the server refuses any change). Turning one on lets it work normally &mdash; every existing safety gate (the account-disable circuit breaker, break-glass protection, and the rule that offboarding is never automatic) stays enforced either way. A change takes effect on the next reload.</div>` +
+         `<div id="setGovPreviewBody"><div style="color:#57606a;font-size:12px;">Loading governance preview&hellip;</div></div></div>`;
+
     // --- Edition / License (REQUIREMENTS s30): which edition is active + what it
     // unlocks. Set the edition + record the grant basis. SuperAdmin to change.
     h += `<div class="set-card" id="setEditionCard"><h3 style="margin:0 0 4px;font-size:14px;">Edition &amp; license</h3>` +
-         `<div style="color:#57606a;font-size:11.5px;margin-bottom:8px;">Choose the active edition for this tenant. <b>Core</b> includes every essential PIM feature for free. <b>Pro</b> (paid) and <b>Pro (Design Partner)</b> (free for engaged design partners) unlock the advanced integrations. Advanced features that need Pro are shown with a &ldquo;Requires Pro&rdquo; lock below until the edition covers them.</div>` +
+         `<div style="color:#57606a;font-size:11.5px;margin-bottom:8px;">Choose the active edition for this tenant. <b>Core</b> includes every essential PIM feature for free. <b>Pro</b> and <b>Pro (Design Partner)</b> cover the advanced integrations. <b>Licence enforcement is currently switched off, so every advanced feature is available at no cost</b> &mdash; the edition below is recorded for the commercial basis only and does not restrict anything. If enforcement is ever turned on, features that need Pro will be shown with a &ldquo;Requires Pro&rdquo; lock until the edition covers them.</div>` +
          `<div id="setEditionBody"><div style="color:#57606a;font-size:12px;">Loading edition&hellip;</div></div></div>`;
 
     // --- Deployment scenario (REQUIREMENTS §31): which of the six supported
@@ -3279,6 +3738,7 @@
     // Operational-policy + Alerting cards load asynchronously (host containers
     // are always present so the rest of Settings paints first).
     renderFeaturesCard(canEdit);
+    renderGovPreviewCard(canEdit);
     renderEditionCard(canEdit);
     renderScenarioCard(canEdit);
     renderFeatureGatesCard(canEdit);
@@ -3441,6 +3901,14 @@
     const body = document.getElementById('apprBody');
     if (!body) return;
     const esc = escapeHtml;
+    // Governance preview gate: OFF by default. Show the surface, but inert -- render
+    // the preview banner and load NOTHING (the /api/approvals* endpoints also short-
+    // circuit while disabled). Hides the pending badge so it can't imply live state.
+    if (isGovernancePreviewDisabled('approvals')) {
+      const badge = document.getElementById('apprPendBadge'); if (badge) badge.style.display = 'none';
+      body.innerHTML = governancePreviewBanner('Approval-gated offboarding & revoke: the maker/checker queue where a destructive identity action is requested, approved by a different admin, then executed once.');
+      return;
+    }
     if (!isServer) { body.innerHTML = '<div style="color:#57606a">Static mode -- the approval queue needs the server.</div>'; return; }
     body.innerHTML = '<div style="color:#57606a; font-size:12px;">Loading approval queue&hellip;</div>';
     let data;
@@ -9344,7 +9812,6 @@
       Purpose:'purpose',
       TierLevel:'tier', Level:'level', TargetUsage:'usage', TargetPlatform:'platform',
       UserType:'userType', UsageLocation:'usageLocation', Ring:'ring',
-      ForwardMailsToContact:'forwardMails', MailForwardAddress:'mailForwardAddr',
       ProvisionDate:'provisionDate', CreateTAP:'createTap',
       TAPStartDate:'tapStartDate', TAPLifetimeHours:'tapLifetimeHours',
       AccountStatus:'status'
@@ -9693,7 +10160,6 @@
       upnSuffix: guessUpnSuffix(),
       userType:'Internal',
       status:'Enabled',
-      forwardMails:'FALSE', mailForwardAddr:'',
       createTap:'TRUE', tapStartDate:'', tapLifetimeHours:'',
       provisionDate:'',
       usageLocation:'DK',
@@ -9945,16 +10411,10 @@
               sub:'Account-Definitions-Admins.UsageLocation',
               onInput:(v)=>{ s.usageLocation=v; }
             }));
-            f.appendChild(wuxField({ id:'wf-fwd', label:'Forward mail to owner?', type:'select', value:s.forwardMails,
-              sub:'Account-Definitions-Admins.ForwardMailsToContact',
-              options:[ { value:'FALSE', label:'No (default)' }, { value:'TRUE', label:'Yes' } ],
-              onInput:(v)=>{ s.forwardMails=v; rerender(); }
-            }));
-            if (s.forwardMails === 'TRUE') {
-              f.appendChild(wuxField({ id:'wf-fwa', label:'Forward to address', value:s.mailForwardAddr, example:'e.g. anna@contoso.com',
-                onInput:(v)=>{ s.mailForwardAddr=v; }
-              }));
-            }
+            // "Forward mail to owner?" + "Forward to address" retired 2026-08-12. They drove EXO
+            // mailbox forwarding on the admin account, which required an Exchange licence PER ADMIN.
+            // Notification + TAP mail is now sent FROM the shared mailbox the engine SPN is scoped
+            // to, so an admin needs no mailbox at all -- the recipient is ManagerEmail.
             return f;
           }
         },
@@ -10079,8 +10539,6 @@
           UserType: s.userType,
           UserName: userName, DisplayName: display, UserPrincipalName: upn,
           UsageLocation: s.usageLocation,
-          ForwardMailsToContact: s.forwardMails,
-          MailForwardAddress: s.forwardMails === 'TRUE' ? s.mailForwardAddr : '',
           ProvisionDate: s.provisionDate.trim(),
           CreateTAP: s.createTap,
           TAPStartDate: s.createTap === 'TRUE' ? s.tapStartDate.trim() : '',
@@ -10197,8 +10655,6 @@
         DisplayName: dispName,
         UserPrincipalName: upn,
         UsageLocation: '',
-        ForwardMailsToContact: 'FALSE',
-        MailForwardAddress: '',
         CreateTAP: body.querySelector('#wzTap').value,
         TAPStartDate: '',
         TAPLifetimeHours: '',
@@ -12603,6 +13059,39 @@
   // short label, a tooltip with the full scope path / AU / workspace / project,
   // and click-to-expand to reveal that full detail inline.
   const MAP_PT_DOT = { 'entra-role': '#db6d28', 'au-role': '#9a6700', 'az-resource': '#8250df', 'workload-target': '#1f6feb' };
+  // [MAP] ADMIN DIRECT ROLE-GROUPS breakdown -- for a selected ADMIN node, the
+  // mapper LINK is "admin -> its DIRECT role group(s)" (the role groups the admin
+  // is *directly* assigned to via PIM-Assignments-Admins), NOT the full transitive
+  // closure of every reachable Entra/AU/Azure target chip (that flat dump was the
+  // operator-reported over-fold-out bug). We take the IMMEDIATE forward neighbours
+  // (one hop on m.fwd) that are role-group nodes -- straight from the real
+  // delegation rows, no fabricated links -- and render them as clickable chips
+  // that focus/select that role-group node so the operator can drill
+  // admin -> group -> that group's bundles/targets via the existing select path.
+  function mapAdminDirectGroups(m, id) {
+    const seen = new Set();
+    const groups = [];
+    for (const e of (m.fwd[id] || [])) {
+      const t = m.byId[e.target];
+      if (!t || t.kind !== 'role-group') continue;
+      if (seen.has(t.id)) continue;            // de-dupe (Eligible + Active to same group)
+      seen.add(t.id);
+      groups.push({ node: t, pending: !!e.pending });
+    }
+    if (!groups.length) return '';
+    groups.sort((a, b) => String(a.node.label || a.node.id).localeCompare(String(b.node.label || b.node.id)));
+    const chip = (g) => {
+      const t = g.node;
+      const dot = g.pending ? '#9a6700' : '#1f883d';
+      return '<span class="pt-chip map-dg-chip" data-gid="' + escapeHtml(t.id) + '"' +
+        ' title="' + escapeHtml((t.label || t.id) + (g.pending ? ' (staged)' : '') + ' -- click to focus this role group') + '">' +
+        '<span class="pt-dot" style="background:' + dot + '"></span>' +
+        '<span class="pt-txt">' + escapeHtml(t.label || t.id) + (g.pending ? ' <span class="pt-scope">(staged)</span>' : '') + '</span></span>';
+    };
+    return '<div class="pt-breakdown"><div class="pt-grp">' +
+      '<span class="pt-grp-lbl">Direct role groups (' + groups.length + ')</span>' +
+      groups.map(chip).join('') + '</div></div>';
+  }
   function mapTargetBreakdown(m, down) {
     const groups = { 'entra-role': [], 'au-role': [], 'az-resource': [], 'workload-target': [] };
     for (const nid of down.nodes) {
@@ -12680,9 +13169,13 @@
     }
     const d = document.getElementById('mapDetail');
     d.innerHTML = bits.join(' &nbsp;&middot;&nbsp; ');
-    if (isServer && n.kind === 'admin') {
+    // Assign is a WRITE (it stages a new grant via Review & Save) -- gate it with
+    // roleAtLeast('Admin'), the SAME gate as the adjacent "Stage removal" button.
+    // The server re-enforces the role + portal scope; this just hides what a Reader
+    // can't do (no dead button for a Reader/Delegated caller).
+    if (isServer && roleAtLeast('Admin') && n.kind === 'admin') {
       d.innerHTML += ' <button id="mapBtnAssign">&#xFF0B; Assign to group&hellip;</button>';
-    } else if (isServer && n.kind === 'role-group') {
+    } else if (isServer && roleAtLeast('Admin') && n.kind === 'role-group') {
       d.innerHTML += ' <button id="mapBtnAssign">&#xFF0B; Link capability bundle&hellip;</button>';
     }
     // [M8] residual -- STAGE A REMOVAL (revoke a grant) straight from the map.
@@ -12695,10 +13188,25 @@
     if (isServer && roleAtLeast('Admin') && mapNodeHasGrant) {
       d.innerHTML += ' <button id="mapBtnRemove" title="Stage a removal of the grant(s) touching this node -- routed through preview + approval + Review &amp; Save (never a one-click destructive write)" style="border-color:#cf222e;color:#cf222e;">&minus; Stage removal&hellip;</button>';
     }
-    // PERMISSIONS & TARGETS breakdown -- for a selected capability bundle / role
-    // group (or any node that grants targets) enumerate the ACTUAL granted Entra
-    // roles, AU-scoped roles and Azure RBAC @ scope from the real delegation rows.
-    if (n.kind !== 'entra-role' && n.kind !== 'au-role' && n.kind !== 'az-resource') {
+    // BREAKDOWN under the summary.
+    // ADMIN selection => the mapper LINK is admin -> its DIRECT role group(s)
+    // (immediate forward neighbours that are role-group nodes), NOT the flat
+    // transitive dump of every reachable Entra/AU/Azure target chip. Clicking a
+    // direct-group chip focuses/selects that role-group node (existing select
+    // path) so the operator drills admin -> group -> bundles/targets.
+    if (n.kind === 'admin') {
+      const bd = mapAdminDirectGroups(m, id);
+      if (bd) {
+        d.innerHTML += bd;
+        d.querySelectorAll('.map-dg-chip').forEach(c => {
+          c.style.cursor = 'pointer';
+          c.onclick = () => { const gid = c.dataset.gid; if (gid && m.byId[gid]) mapSelect(gid); };
+        });
+      }
+    } else if (n.kind !== 'entra-role' && n.kind !== 'au-role' && n.kind !== 'az-resource') {
+      // Non-admin (capability bundle / role group / any target-granting node):
+      // enumerate the ACTUAL granted Entra roles, AU-scoped roles and Azure RBAC
+      // @ scope from the real delegation rows -- unchanged behaviour.
       const bd = mapTargetBreakdown(m, down);
       if (bd) {
         d.innerHTML += bd;

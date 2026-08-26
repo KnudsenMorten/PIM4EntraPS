@@ -70,8 +70,14 @@ $rNoMap = Get-PimWorkloadReconStatus -Row (Row 'defender-xdr' 'Security Operator
 T 'no crawl map -> unknown' ("$($rNoMap.status)" -eq 'unknown')
 
 # --- Exemptions ---------------------------------------------------------------
-$future = (Get-Date).AddYears(1).ToString('yyyy-MM-dd')
-$past   = (Get-Date).AddDays(-1).ToString('yyyy-MM-dd')
+# TEST-08: these MUST be built in UTC, because Test-PimWorkloadExemptionActive
+# compares against [datetime]::UtcNow and treats a date as expiring at end-of-day.
+# Built from local Get-Date, "yesterday" east of UTC is still TODAY in UTC between
+# midnight and the offset -- so `$past` was not actually past, the expired-exemption
+# assertion failed, and the suite went red purely as a function of the clock.
+# Two days of margin covers every real offset (max +/-14h) with room to spare.
+$future = [datetime]::UtcNow.AddYears(1).ToString('yyyy-MM-dd')
+$past   = [datetime]::UtcNow.AddDays(-2).ToString('yyyy-MM-dd')
 
 $exActive = @(Read-PimWorkloadExemptions -Config ([pscustomobject]@{ exemptions = @(
     [pscustomobject]@{ workload = 'defender-xdr'; role = 'Security Reader'; reason = 'manual mgmt'; expiresOn = $future }

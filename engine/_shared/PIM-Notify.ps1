@@ -22,6 +22,54 @@ if ($PSScriptRoot) {
     if ((Test-Path -LiteralPath $__pimNotifBatch) -and -not (Get-Command Get-PimDailySummary -ErrorAction SilentlyContinue)) { . $__pimNotifBatch }
 }
 
+# --- EMAIL CONTROLS authority (the GUI-state == actual-behavior fix) -----------
+# The Manager persists the kill switch / redirect-all / allowlist to SQL pim.Settings
+# under 'EmailControls' and mirrors them to $global:PIM_Mail* so its OWN process honours
+# them live. But a COLD-booted scheduled job (daily-summary / tier-report / escalations)
+# or a one-shot engine run never ran that mirror, so the kill switch would NOT stop the
+# send -- the exact "kill switch that doesn't actually stop sends" gap. The two helpers
+# below make the SEND PATH itself authoritative against the persisted store, so EVERY
+# process honours the GUI-saved controls. FAIL-SAFE throughout: a store-read failure
+# NEVER clears an existing kill switch and never relaxes the allowlist/redirect.
+function Set-PimEmailControlsGlobals {
+    # PURE: apply an EmailControls record { killSwitch; redirectAllTo; allowlist[] } to the
+    # $global:PIM_Mail* the send path reads. Accepts a hashtable, PSCustomObject, or a JSON
+    # string (SQL keeps scalars as text). FAIL-SAFE: an ON kill switch is only ever turned
+    # ON here, never OFF (a malformed/blank record can't silently re-enable sending); the
+    # allowlist/redirect are only set from a well-formed record. Returns the applied shape.
+    param([object]$EmailControls)
+    $rec = $EmailControls
+    if ($rec -is [string]) { $s = "$rec".Trim(); if ($s) { try { $rec = $s | ConvertFrom-Json } catch { $rec = $null } } else { $rec = $null } }
+    $get = {
+        param($obj, $name)
+        if ($null -eq $obj) { return $null }
+        if ($obj -is [System.Collections.IDictionary]) { if ($obj.Contains($name)) { return $obj[$name] } ; return $null }
+        $p = $obj.PSObject.Properties[$name]; if ($p) { return $p.Value } else { return $null }
+    }
+    $kill = & $get $rec 'killSwitch'
+    if ($null -ne $kill -and [bool]$kill) { $global:PIM_MailKillSwitch = $true }   # only ever ARM, never disarm
+    $redir = & $get $rec 'redirectAllTo'
+    if ($null -ne $redir -and "$redir".Trim()) { $global:PIM_MailRedirectAllTo = "$redir".Trim() }
+    $allow = & $get $rec 'allowlist'
+    if ($null -ne $allow) { $global:PIM_MailAllowlist = @(@($allow) | ForEach-Object { "$_".Trim() } | Where-Object { $_ }) }
+    return [pscustomobject]@{ killSwitch = [bool]$global:PIM_MailKillSwitch; redirectAllTo = "$($global:PIM_MailRedirectAllTo)"; allowlist = @($global:PIM_MailAllowlist) }
+}
+function Initialize-PimEmailControlsFromStore {
+    # Make the send path authoritative against SQL pim.Settings: read 'EmailControls'
+    # directly and apply it to the $global:PIM_Mail* globals BEFORE sending, so a cold
+    # scheduled job / engine run honours a GUI-set kill switch / redirect / allowlist.
+    # Hydrates ONCE per process by default (cheap; -Force re-reads). FAIL-SAFE: any read
+    # failure leaves the current globals untouched -- it never clears an armed kill switch
+    # and never opens the allowlist. No-op (returns $false) when no store is configured.
+    param([switch]$Force)
+    if ($script:PimEmailControlsHydrated -and -not $Force) { return $false }
+    if (-not (Get-Command Import-PimSettingsFromStore -ErrorAction SilentlyContinue)) { return $false }
+    $n = -1
+    try { $n = Import-PimSettingsFromStore } catch { $n = -1 }   # applies EmailControls via Set-PimEmailControlsGlobals
+    if ($n -ge 0) { $script:PimEmailControlsHydrated = $true; return $true }
+    return $false   # store unreachable -> leave globals as-is (fail-safe), retry next send
+}
+
 function Get-PimNotifyTemplateDir {
     if ($global:PIM_MailTemplateDir) { return "$($global:PIM_MailTemplateDir)" }
     if ($PSScriptRoot) { return (Join-Path (Resolve-Path "$PSScriptRoot\..\..").Path 'templates\mail') }
@@ -114,6 +162,12 @@ function Send-PimNotifyMail {
     param([Parameter(Mandatory)][string]$Type, [Parameter(Mandatory)][hashtable]$Tokens, [string]$Recipient, [switch]$WhatIf)
     $rcpt = $Recipient
 
+    # --- AUTHORITATIVE EMAIL CONTROLS: hydrate from SQL pim.Settings before sending,
+    # so a COLD-booted scheduled job / engine run honours the GUI-saved kill switch /
+    # redirect / allowlist -- not just the Manager's in-process globals. Fail-safe: a
+    # read failure leaves the current globals untouched (never disarms a kill switch).
+    if (Get-Command Initialize-PimEmailControlsFromStore -ErrorAction SilentlyContinue) { [void](Initialize-PimEmailControlsFromStore) }
+
     # --- EMAIL CONTROLS (REQUIREMENTS s29) ------------------------------------
     # 1) Global email KILL SWITCH: when $global:PIM_MailKillSwitch is set, OR the
     #    'alerting.email' feature is disabled/unlicensed, EVERY send is a no-op.
@@ -149,4 +203,60 @@ function Send-PimNotifyMail {
     $body = @{ message = @{ subject = $r.Subject; body = @{ contentType = 'HTML'; content = $r.BodyHtml }; toRecipients = @(@{ emailAddress = @{ address = $rcpt } }) }; saveToSentItems = $false }
     try { Invoke-PimGraph -Method POST -Path "/users/$sender/sendMail" -Body $body | Out-Null; return @{ sent = $true; recipient = $rcpt; subject = $r.Subject; rendered = $r } }
     catch { Write-Warning "  [Mail] send failed ($Type -> $rcpt): $($_.Exception.Message)"; return @{ sent = $false; recipient = $rcpt; subject = $r.Subject; rendered = $r; reason = "$($_.Exception.Message)" } }
+}
+
+function Test-PimTapMailReady {
+    <#
+      Can a TAP mail actually be DELIVERED to this recipient, right now?
+
+      🪤 THE TRAP THIS FUNCTION EXISTS TO AVOID. The obvious pre-check is to call
+      Send-PimNotifyMail -WhatIf and look at the reason -- and it is WRONG. In
+      PIM-Notify.ps1 the -WhatIf early-return sits BEFORE the 'no sender' and
+      'no recipient' checks, so on a tenant with NO notification sender
+      configured a -WhatIf probe returns reason='whatif' and looks perfectly
+      healthy. That is exactly the tenant this guard is for: the one whose TAP
+      mail was never going to arrive.
+
+      So the sender and the recipient are checked EXPLICITLY here, and -WhatIf
+      is used only for what it can genuinely answer (kill switch, disabled
+      feature, allowlist, missing template).
+
+      Returns @{ ok; reason }. Never throws -- a mail-readiness probe that
+      throws would fail the request for a reason the operator cannot action.
+    #>
+    param([string]$Recipient)
+
+    if (-not "$Recipient".Trim()) {
+        return @{ ok = $false; reason = 'this admin row has no ManagerEmail, so there is nowhere to deliver the TAP' }
+    }
+    # 🔴 HYDRATE BEFORE JUDGING. Measured live on EFIF 2026-08-25: this guard refused ALL SIX admins
+    # with "no notification sender is configured" while pim.Settings held a perfectly good
+    # 'MailSender' (PIM-Engine@<tenant>). The sender was never missing -- it had not been READ yet.
+    # Send-PimNotifyMail hydrates at L169, but this guard runs BEFORE that call and reads the raw
+    # global, so on a cold engine run (the scheduled tick Job is always cold) it saw an empty value
+    # and refused every account. The engine then healed nothing, every run, silently.
+    # 🪤 Same shape as the trap in this function's own docstring: checking a value EARLY is right,
+    # but only if what populates it ran earlier still. An "is it configured?" test that runs before
+    # configuration is loaded does not report the config -- it reports its own ordering.
+    # Fail-safe: Initialize-PimEmailControlsFromStore leaves the globals untouched when the store is
+    # unreachable, so this can only ever ADD a sender, never clear one.
+    if (Get-Command Initialize-PimEmailControlsFromStore -ErrorAction SilentlyContinue) {
+        try { [void](Initialize-PimEmailControlsFromStore) } catch { }
+    }
+    if (-not "$($global:PIM_MailSender)".Trim()) {
+        return @{ ok = $false; reason = 'no notification sender is configured (PIM_MailSender) -- the tenant cannot send mail at all' }
+    }
+    if (-not (Get-Command Send-PimNotifyMail -ErrorAction SilentlyContinue)) {
+        return @{ ok = $false; reason = 'the notification path (Send-PimNotifyMail) is not available in this runtime' }
+    }
+    # Everything the -WhatIf path CAN answer: kill switch, disabled feature,
+    # allowlist, missing template. It renders but never sends.
+    try {
+        $probe = Send-PimNotifyMail -Type 'tap-delivery' -Tokens @{ UserPrincipalName = 'probe'; TapCode = ''; TapExpiresUtc = '' } -Recipient $Recipient -WhatIf
+        $reason = "$($probe.reason)"
+        if ($reason -and $reason -ne 'whatif') { return @{ ok = $false; reason = $reason } }
+    } catch {
+        return @{ ok = $false; reason = "mail pre-check failed: $($_.Exception.Message)" }
+    }
+    return @{ ok = $true; reason = '' }
 }

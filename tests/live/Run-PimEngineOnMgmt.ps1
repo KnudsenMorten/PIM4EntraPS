@@ -51,6 +51,17 @@ if ($TenantId)       { $global:PIM_TenantId = $TenantId }
 . "$shared\PIM-SqlStore.ps1"
 . "$shared\PIM-ChangeQueue.ps1"
 . "$shared\PIM-ContextBuilder.ps1"
+# PIM-Notify IS LOAD-BEARING HERE, and its absence made this rig UNSAFE for the AdminTap scope.
+# The provider reaches the mail path through Get-Command Test-PimTapMailReady / Send-PimNotifyMail,
+# so when PIM-Notify is not loaded BOTH silently no-op: the refuse-before-minting guard never runs,
+# and no mail is ever sent. Before BUG-66 that was harmless -- the scope minted nothing, because an
+# expired pass classified as satisfied. AFTER the fix it is not: a live run through this rig would
+# delete six dead passes, mint six real credentials and deliver none of them. That is "a live
+# credential nobody received and nobody knows exists" -- the exact outcome the guard exists to
+# prevent. Start-PimScheduler.ps1 (the PRODUCT path) has always loaded it; only this dev rig did
+# not, so the rig and production disagreed about whether a credential may be issued at all.
+# Found 2026-08-21 while planning the BUG-66 live mint, BEFORE minting through it.
+. "$shared\PIM-Notify.ps1"
 . "$shared\PIM-EngineCore.ps1"
 . "$shared\PIM-EngineProviders.ps1"
 # Build-PimContext requires $global:PIM_Filters (include/exclude candidate filters).

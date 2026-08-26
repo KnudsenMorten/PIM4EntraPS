@@ -22,18 +22,18 @@ ALTER ROLE loginmanager ADD MEMBER [name@domain.com];
 
 #-------------------
 
-CREATE USER "mok@2linkit.net" FROM EXTERNAL PROVIDER WITH DEFAULT_SCHEMA = dbo;  
+CREATE USER "admin@contoso.com" FROM EXTERNAL PROVIDER WITH DEFAULT_SCHEMA = dbo;  
   
 -- add user to role(s) in db 
-ALTER ROLE db_owner ADD MEMBER "mok@2linkit.net"; 
+ALTER ROLE db_owner ADD MEMBER "admin@contoso.com"; 
 
 
 #-------------------
 
-CREATE USER "2LINKIT - Automation - Azure" FROM EXTERNAL PROVIDER WITH DEFAULT_SCHEMA = dbo;  
+CREATE USER "<your-automation-account>" FROM EXTERNAL PROVIDER WITH DEFAULT_SCHEMA = dbo;  
   
 -- add user to role(s) in db 
-ALTER ROLE db_owner ADD MEMBER "2LINKIT - Automation - Azure"; 
+ALTER ROLE db_owner ADD MEMBER "<your-automation-account>"; 
 
 
 #>
@@ -59,8 +59,11 @@ Set-AzContext -Subscription "1c197240-8add-4b0b-9997-837227d463d9"
 $Path           = "D:\SCRIPTS\DATA\"
 $LogPath        = "D:\SCRIPTS\TEMP"
 $csvDelimiter   = ";"
-$serverName     = "sqlfvfidentitymgmt-p.database.windows.net"
-$databaseName   = "sqldb-identity-management-p"
+# SEC-06: these were a REAL customer's Azure SQL server + database, shipped in a public
+# payload. Read from the environment, with an obvious placeholder as the fallback so the
+# script still reads clearly as an example. This file is LEGACY (v1), kept for reference.
+$serverName     = $(if ($env:PIM_LegacySqlServerFqdn) { $env:PIM_LegacySqlServerFqdn } else { "<your-sql-server>.database.windows.net" })
+$databaseName   = $(if ($env:PIM_LegacySqlDatabase)   { $env:PIM_LegacySqlDatabase }   else { "<your-database>" })
 $tableSchema    = "dbo"
 
 

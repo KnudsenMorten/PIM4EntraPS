@@ -188,7 +188,6 @@ function New-PimGuestAdminRow {
         UserName      = $email
         DisplayName   = $disp
         UserPrincipalName = $email
-        ForwardMailsToContact = 'FALSE'
         Company       = "$Company".Trim()
         Notes         = "$Notes".Trim()
         AccountStatus = 'Enabled'

@@ -1,3 +1,6 @@
+# IMP-02: the locale-safe stamp reader. Loaded defensively so this file stays correct
+# when a test dot-sources it on its own (PIM-Functions.psm1 also loads it up front).
+if (-not (Get-Command Get-PimUtcStamp -ErrorAction SilentlyContinue)) { . (Join-Path $PSScriptRoot 'PIM-DateSafe.ps1') }
 # PIM4EntraPS -- native template versioning + fleet conformance.
 # Dot-sourced by PIM-Functions.psm1 (and standalone by the pim-manager).
 #
@@ -120,9 +123,9 @@ function Test-PimExemptionValid {
     $expRaw = "$($Exemption.expiresUtc)".Trim()
     if (-not $reason) { return @{ valid = $false; active = $false; state = 'Invalid'; detail = 'reason is required' } }
     if (-not $expRaw) { return @{ valid = $false; active = $false; state = 'Invalid'; detail = 'expiresUtc is required (exemptions always expire)' } }
-    $exp = [datetime]::MinValue
-    if (-not [datetime]::TryParse($expRaw, [ref]$exp)) { return @{ valid = $false; active = $false; state = 'Invalid'; detail = "expiresUtc '$expRaw' is not a date" } }
-    $expU = $exp.ToUniversalTime()
+    # IMP-02: an unreadable expiry makes the exemption INVALID (so it grants nothing).
+    $expU = Get-PimUtcStamp $expRaw
+    if ($null -eq $expU) { return @{ valid = $false; active = $false; state = 'Invalid'; detail = "expiresUtc '$expRaw' is not a date" } }
     if ($expU -le $NowUtc) { return @{ valid = $true; active = $false; state = 'Expired'; detail = "expired $($expU.ToString('o'))" } }
     return @{ valid = $true; active = $true; state = 'Active'; detail = "active until $($expU.ToString('o'))" }
 }
@@ -176,9 +179,9 @@ function Get-PimExemptionList {
         $state = $v.state                                          # Active | Expired | Invalid
         $expU = $null
         if ($v.valid) {
-            $exp = [datetime]::MinValue
-            if ([datetime]::TryParse("$($x.expiresUtc)".Trim(), [ref]$exp)) {
-                $expU = $exp.ToUniversalTime()
+            $exp = Get-PimUtcStamp $x.expiresUtc   # IMP-02
+            if ($null -ne $exp) {
+                $expU = $exp
                 $daysLeft = [math]::Floor(($expU - $NowUtc).TotalDays)
                 # Active but inside the warning window -> 'Expiring' (still active).
                 if ($v.active -and $daysLeft -le $ExpiringWithinDays) { $state = 'Expiring' }
@@ -343,6 +346,79 @@ function Set-PimEntryRing {
     foreach ($e in @($t.entries)) { if ("$($e.key)" -ieq "$Key") { Set-PimConfProp -Object $e -Name 'ring' -Value $Ring; $hit = $true } }
     if (-not $hit) { throw "Set-PimEntryRing: template '$($t.templateId)' has no entry '$Key'." }
     return $t
+}
+
+function Set-PimEntryRingInJson {
+    # BUG-06: change ONE entry's ring by editing the ORIGINAL JSON TEXT in place, so a
+    # ring promotion touches only the digits it means to change.
+    #
+    # The object round-trip (ConvertFrom-Json -> Set-PimEntryRing -> ConvertTo-Json) is
+    # lossless for DATA -- verified: _doc, versionHistory and approvedBy all survive -- but
+    # it re-serializes the WHOLE file: the shipped template goes 1698 -> 2952 bytes under
+    # Windows PowerShell 5.1, its hand-aligned entry columns collapse, and
+    # `Set-Content -Encoding UTF8` prepends a UTF-8 BOM to a file the rest of this module
+    # deliberately reads and writes BOM-less (ConvertTo-PimTemplate even strips a leading
+    # BOM defensively). On a customer install the template is not in git, so that rewrite
+    # has no undo. A one-field GUI change must not rewrite a curated file.
+    #
+    # Returns the edited JSON text. Throws the same message as Set-PimEntryRing when the
+    # key is unknown, so the endpoint's 400 behaviour is unchanged.
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$Json,
+        [Parameter(Mandatory)][string]$Key,
+        [Parameter(Mandatory)][ValidateRange(0,9)][int]$Ring
+    )
+    $tpl = ConvertTo-PimTemplate -Json $Json
+    if (-not (@($tpl.entries) | Where-Object { "$($_.key)" -ieq "$Key" })) {
+        throw "Set-PimEntryRing: template '$($tpl.templateId)' has no entry '$Key'."
+    }
+
+    # Walk the raw text and find each entry object that carries this key. Brace counting
+    # skips over string literals so a brace inside a value (e.g. a groupTag) cannot throw
+    # the span off.
+    $text = $Json
+    $escaped = [regex]::Escape(($Key | ConvertTo-Json))   # includes the surrounding quotes
+    $keyRx = [regex]::new('"key"\s*:\s*' + $escaped, 'IgnoreCase')
+    $edited = $false
+    foreach ($m in @($keyRx.Matches($text)) | Sort-Object Index -Descending) {
+        # backwards to this entry object's opening brace
+        $start = -1
+        for ($i = $m.Index; $i -ge 0; $i--) { if ($text[$i] -eq '{') { $start = $i; break } }
+        if ($start -lt 0) { continue }
+        # forwards to its matching closing brace, ignoring braces inside strings
+        $depth = 0; $end = -1; $inStr = $false; $esc = $false
+        for ($i = $start; $i -lt $text.Length; $i++) {
+            $ch = $text[$i]
+            if ($inStr) {
+                if ($esc) { $esc = $false }
+                elseif ($ch -eq '\') { $esc = $true }
+                elseif ($ch -eq '"') { $inStr = $false }
+                continue
+            }
+            if ($ch -eq '"') { $inStr = $true; continue }
+            if ($ch -eq '{') { $depth++ }
+            elseif ($ch -eq '}') { $depth--; if ($depth -eq 0) { $end = $i; break } }
+        }
+        if ($end -lt 0) { continue }
+
+        $span = $text.Substring($start, $end - $start + 1)
+        $ringRx = [regex]::new('("ring"\s*:\s*)(\d+)', 'IgnoreCase')
+        if ($ringRx.IsMatch($span)) {
+            $newSpan = $ringRx.Replace($span, { param($mm) $mm.Groups[1].Value + $Ring }, 1)
+        } else {
+            # No ring property yet (Get-PimTemplateEntryRing defaults such an entry to 2).
+            # Insert one directly after the key pair so the entry keeps its field order.
+            $rel = $m.Index - $start + $m.Length
+            $newSpan = $span.Substring(0, $rel) + ', "ring": ' + $Ring + $span.Substring($rel)
+        }
+        if ($newSpan -ne $span) {
+            $text = $text.Substring(0, $start) + $newSpan + $text.Substring($end + 1)
+            $edited = $true
+        } else { $edited = $true }   # already at the requested ring -- a no-op is still a hit
+    }
+    if (-not $edited) { throw "Set-PimEntryRing: template '$($tpl.templateId)' has no entry '$Key'." }
+    return $text
 }
 
 # --- local applied-version stamp (I/O; version stays LOCAL) ----------------------

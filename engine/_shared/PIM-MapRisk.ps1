@@ -1,4 +1,7 @@
-﻿#Requires -Version 5.1
+﻿# IMP-02: the locale-safe stamp reader. Loaded defensively so this file stays correct
+# when a test dot-sources it on its own (PIM-Functions.psm1 also loads it up front).
+if (-not (Get-Command Get-PimUtcStamp -ErrorAction SilentlyContinue)) { . (Join-Path $PSScriptRoot 'PIM-DateSafe.ps1') }
+#Requires -Version 5.1
 <#
 .SYNOPSIS
     Delegation Map risk overlay + search-result builder -- PURE, offline,
@@ -324,11 +327,11 @@ function Get-PimMapRiskOverlay {
         $lastReviewed = Get-PimMapNodeField -Node $n -Name 'lastReviewedUtc'
         $reviewDays   = Get-PimMapNodeField -Node $n -Name 'reviewDays'
         if ("$lastReviewed".Trim() -and "$reviewDays".Trim()) {
-            [datetime]$dt = [datetime]::MinValue
-            $ok = [datetime]::TryParse("$lastReviewed", [ref]$dt)
+            $dt = Get-PimUtcStamp $lastReviewed   # IMP-02
+            $ok = ($null -ne $dt)
             [int]$days = 0; $okN = [int]::TryParse("$reviewDays", [ref]$days)
             if ($ok -and $okN -and $days -gt 0) {
-                $ageDays = ($now - $dt.ToUniversalTime()).TotalDays
+                $ageDays = ($now - $dt).TotalDays
                 if ($ageDays -gt $days) {
                     [void]$flags.Add('stale')
                     $reasons['stale'] = ("Last reviewed {0:N0} day(s) ago; review horizon is {1} day(s)." -f $ageDays, $days)

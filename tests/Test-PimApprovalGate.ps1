@@ -161,6 +161,41 @@ Assert "offboard blocked on unresolved desired" (-not $gEmpty.allowed -and "$($g
 $gMass = Test-PimOffboardExecutionAllowed -Target 'bob@contoso' -Requests $allowApproved -ToDisable 9999 -Scanned 10000 -Desired $desired -DesiredResolved $true -NowUtc $now
 Assert "offboard blocked by mass-disable breaker" (-not $gMass.allowed -and "$($gMass.gate)" -like 'disable-guard:*')
 
+# (e3) BUG-01: blocking the offboard must be LOUD. Gate 3 returning a blocked verdict
+# silently is how a breaker trip reaches nobody -- this is an execution path (guard B
+# runs immediately before the offboard sequence), so a trip here is a real attempt that
+# was stopped, not a preview. Stub the alert to record instead of writing console/audit/mail.
+$realAlert = (Get-Command Write-PimDisableAbortAlert -EA SilentlyContinue).ScriptBlock
+$script:alertCalls = @()
+function Write-PimDisableAbortAlert { [CmdletBinding()] param([Parameter(Mandatory)][string]$Scope,[Parameter(Mandatory)][object]$Decision)
+    $script:alertCalls += [pscustomobject]@{ scope = $Scope; decision = $Decision } }
+
+$script:alertCalls = @()
+$gMass2 = Test-PimOffboardExecutionAllowed -Target 'bob@contoso' -Requests $allowApproved -ToDisable 9999 -Scanned 10000 -Desired $desired -DesiredResolved $true -NowUtc $now
+Assert "BUG-01: a guard-blocked offboard raises exactly ONE alert" (@($script:alertCalls).Count -eq 1)
+Assert "BUG-01: the alert scope names the offboard target" ("$(@($script:alertCalls)[0].scope)" -eq 'offboard:bob@contoso')
+Assert "BUG-01: the alert carries the tripped guard" ("$(@($script:alertCalls)[0].decision.tripped)" -eq 'mass-disable')
+Assert "BUG-01: the offboard is still blocked" (-not $gMass2.allowed)
+
+# An ALLOWED offboard must stay silent -- alerting on a healthy run is the noise that
+# makes a real trip get ignored.
+$script:alertCalls = @()
+$gOk2 = Test-PimOffboardExecutionAllowed -Target 'bob@contoso' -Requests $allowApproved -ToDisable 1 -Scanned 50 -Desired $desired -DesiredResolved $true -NowUtc $now
+Assert "BUG-01: an ALLOWED offboard raises NO alert" ($gOk2.allowed -and @($script:alertCalls).Count -eq 0)
+
+# A gate that fails EARLIER (no approval) never reached the breaker, so it must not alert.
+$script:alertCalls = @()
+$gNone2 = Test-PimOffboardExecutionAllowed -Target 'bob@contoso' -Requests @() -ToDisable 9999 -Scanned 10000 -Desired $desired -DesiredResolved $true -NowUtc $now
+Assert "BUG-01: a no-approval block raises NO disable-guard alert" (-not $gNone2.allowed -and @($script:alertCalls).Count -eq 0)
+
+# Best-effort: a throwing alert must not turn a safe block into an exception.
+function Write-PimDisableAbortAlert { [CmdletBinding()] param([Parameter(Mandatory)][string]$Scope,[Parameter(Mandatory)][object]$Decision)
+    throw 'simulated alert failure (mail/audit down)' }
+$gThrow = $null; $threwGate = $false
+try { $gThrow = Test-PimOffboardExecutionAllowed -Target 'bob@contoso' -Requests $allowApproved -ToDisable 9999 -Scanned 10000 -Desired $desired -DesiredResolved $true -NowUtc $now } catch { $threwGate = $true }
+Assert "BUG-01: a FAILING alert never masks the block" (-not $threwGate -and $gThrow -and -not $gThrow.allowed)
+if ($realAlert) { Set-Item -Path function:Write-PimDisableAbortAlert -Value $realAlert }
+
 # ---------------------------------------------------------------------------
 # 5. REVOKE-WITH-APPROVAL
 # ---------------------------------------------------------------------------

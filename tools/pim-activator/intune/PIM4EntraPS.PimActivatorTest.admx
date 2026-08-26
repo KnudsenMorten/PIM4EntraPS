@@ -1,0 +1,79 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  PIM Activator (TEST channel) - Custom ADMX template for Intune Settings Catalog.
+
+  SEPARATE from PIM4EntraPS.PimActivator.admx (the released channel). This file
+  exists ONLY so the TEST build's tenant catalog can be pushed to ITS OWN
+  3rdparty extension policy path:
+    HKLM\SOFTWARE\Policies\<browser>\3rdparty\extensions\glldnbmjpdkjemcnficagdhgienfdpoo\policy\tenantCatalog
+
+  Why a separate file (not extra policies in the released ADMX): the released
+  ADMX hardcodes the released extension id, and a single ADMX "Tenant catalog"
+  setting can only be authoritatively set by ONE Intune profile per device. A
+  separate file + namespace + category gives the TEST profile a DISTINCT Intune
+  setting writing a DISTINCT registry path, so a TEST profile and the released
+  profile coexist on the same device with NO conflict. Ingested as its own
+  groupPolicyUploadedDefinitionFile, it never touches the released definitions.
+
+  TEST extension id: glldnbmjpdkjemcnficagdhgienfdpoo (derived from the mgmt1
+  test signing key signing-key-test.pem).
+-->
+<policyDefinitions revision="1.0" schemaVersion="1.0"
+                   xmlns="http://schemas.microsoft.com/GroupPolicy/2006/07/PolicyDefinitions"
+                   xmlns:xsd="http://www.w3.org/2001/XMLSchema"
+                   xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+
+  <policyNamespaces>
+    <target prefix="pimactivatortest" namespace="MortenKnudsen.PIM4EntraPS.PimActivatorTest" />
+  </policyNamespaces>
+
+  <resources minRequiredRevision="1.0" />
+
+  <supportedOn>
+    <definitions>
+      <definition name="SUPPORTED_W10_Edge_Chrome"
+                  displayName="$(string.SUPPORTED_W10_Edge_Chrome)" />
+    </definitions>
+  </supportedOn>
+
+  <categories>
+    <category name="PIM4EntraPS_Test_Cat"  displayName="$(string.PIM4EntraPS_Test_Cat)" />
+    <category name="PimActivatorTest_Cat"  displayName="$(string.PimActivatorTest_Cat)">
+      <parentCategory ref="PIM4EntraPS_Test_Cat" />
+    </category>
+  </categories>
+
+  <policies>
+
+    <!-- Microsoft Edge (TEST id): writes
+         HKLM\SOFTWARE\Policies\Microsoft\Edge\3rdparty\extensions\glldnbmjpdkjemcnficagdhgienfdpoo\policy\tenantCatalog -->
+    <policy name="TenantCatalog_EdgeTest"
+            class="Machine"
+            displayName="$(string.TenantCatalog_EdgeTest)"
+            explainText="$(string.TenantCatalog_Explain)"
+            presentation="$(presentation.TenantCatalog_EdgeTest_Presentation)"
+            key="SOFTWARE\Policies\Microsoft\Edge\3rdparty\extensions\glldnbmjpdkjemcnficagdhgienfdpoo\policy">
+      <parentCategory ref="PimActivatorTest_Cat" />
+      <supportedOn    ref="SUPPORTED_W10_Edge_Chrome" />
+      <elements>
+        <text id="TenantCatalog_EdgeTest_Value" valueName="tenantCatalog" required="true" maxLength="32768" />
+      </elements>
+    </policy>
+
+    <!-- Google Chrome (TEST id): writes
+         HKLM\SOFTWARE\Policies\Google\Chrome\3rdparty\extensions\glldnbmjpdkjemcnficagdhgienfdpoo\policy\tenantCatalog -->
+    <policy name="TenantCatalog_ChromeTest"
+            class="Machine"
+            displayName="$(string.TenantCatalog_ChromeTest)"
+            explainText="$(string.TenantCatalog_Explain)"
+            presentation="$(presentation.TenantCatalog_ChromeTest_Presentation)"
+            key="SOFTWARE\Policies\Google\Chrome\3rdparty\extensions\glldnbmjpdkjemcnficagdhgienfdpoo\policy">
+      <parentCategory ref="PimActivatorTest_Cat" />
+      <supportedOn    ref="SUPPORTED_W10_Edge_Chrome" />
+      <elements>
+        <text id="TenantCatalog_ChromeTest_Value" valueName="tenantCatalog" required="true" maxLength="32768" />
+      </elements>
+    </policy>
+
+  </policies>
+</policyDefinitions>

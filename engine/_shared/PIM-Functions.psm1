@@ -7,6 +7,15 @@
 
 $MaximumFunctionCount = 32768
 
+# IMP-02: the ONE locale-safe reader for machine-written UTC stamps. Loaded FIRST so
+# every _shared file dot-sourced below can use it. Those files also load it defensively
+# themselves, so they stay correct when a test dot-sources one on its own.
+. (Join-Path $PSScriptRoot 'PIM-DateSafe.ps1')
+
+# IMP-03: the ONE visible way to swallow a non-fatal error. Same loading contract as
+# above -- first, and each consuming file also loads it defensively itself.
+. (Join-Path $PSScriptRoot 'PIM-Swallow.ps1')
+
 ######################################################################################################################
 # Strip PowerShell 7 module paths from PSModulePath when running in PS 5.1.
 #
@@ -1182,7 +1191,7 @@ Function Assign-PIM-Group-Resource
     $AssignmentType      = "Eligible"
     $Permanent           = $false
 
-    $AzScope             = "/providers/Microsoft.Management/managementGroups/f0fa27a0-8e7c-4f63-9a77-ec94786b7c9e"
+    $AzScope             = "/providers/Microsoft.Management/managementGroups/11111111-1111-1111-1111-111111111111"
     $AzScopePermission   = "Owner"
 #>
 
@@ -1432,7 +1441,7 @@ Function CreateUpdate-PIM-Group
             Write-host "Checking Group Owners"
             If ($Owners)
                 {
-                    # $Owners = "ADMIN-JT-L0-T0-ID@2linkit.net,x-Admin-MOK-L0-T0-ID@2linkit.net,mok@2linkit.net"
+                    # $Owners = "Admin-AB-L0-T0-ID@contoso.com,x-Admin-ID-L0-T0-ID@contoso.com,admin@contoso.com"
 
                     # Build Owner array
                     $DesiredOwnersUPN = $Owners.Split(",")
@@ -10830,6 +10839,21 @@ function Invoke-PimAdminOffboarding {
 
     Write-Host ""
     Write-Host "Offboarding sweep: $($candidates.Count) row(s) carry an OffboardDate..." -ForegroundColor Cyan
+
+    # G4 -- UNIVERSAL REMOVAL BUDGET (operator directive 2026-08-06). The offboarding
+    # sweep revokes and, with DeleteAfterDays, DELETES accounts. It had no ceiling of any
+    # kind: a bad OffboardDate expression across many rows would work through all of them.
+    # Cap the whole sweep, abort it entirely rather than part-way (a half-run offboarding
+    # is worse than none), and EMAIL the operator.
+    if (Get-Command Test-PimRemoveBudgetAllowed -ErrorAction SilentlyContinue) {
+        $obDecision = Test-PimRemoveBudgetAllowed -ToRemove $candidates.Count -Scope 'AdminOffboarding' -Scanned $rows.Count -Operation 'offboard/delete'
+        if (-not $obDecision.allowed) {
+            if (Get-Command Write-PimRemoveBudgetAlert -ErrorAction SilentlyContinue) { Write-PimRemoveBudgetAlert -Decision $obDecision }
+            else { Write-Host "  [Offboard] ABORTED -- $($obDecision.reason)" -ForegroundColor Red }
+            return
+        }
+    }
+
     $state = Get-PimOffboardState
 
     foreach ($row in $candidates) {
@@ -10947,6 +10971,21 @@ function Invoke-PimGroupRetirement {
         $rows = @()
         try { $rows = Import-Csv -Path $path -Delimiter ';' -Encoding UTF8 } catch { continue }
         $retire = @($rows | Where-Object { $_.GroupName -and $_.PSObject.Properties.Name -contains 'Lifecycle' -and "$($_.Lifecycle)".Trim() -eq 'Retire' })
+
+        # G4 -- UNIVERSAL REMOVAL BUDGET (operator directive 2026-08-06). Retirement
+        # DELETES groups (and strips their members + role assignments first). The naming
+        # -prefix check below guards WHICH groups, never HOW MANY -- a bulk Lifecycle=Retire
+        # edit would delete every one of them. Cap the batch, abort it whole rather than
+        # part-way, and EMAIL the operator.
+        if ($retire.Count -gt 0 -and (Get-Command Test-PimRemoveBudgetAllowed -ErrorAction SilentlyContinue)) {
+            $grDecision = Test-PimRemoveBudgetAllowed -ToRemove $retire.Count -Scope "GroupRetirement:$base" -Scanned $rows.Count -Operation 'delete group'
+            if (-not $grDecision.allowed) {
+                if (Get-Command Write-PimRemoveBudgetAlert -ErrorAction SilentlyContinue) { Write-PimRemoveBudgetAlert -Decision $grDecision }
+                else { Write-Host "  [Retire] ABORTED for '$base' -- $($grDecision.reason)" -ForegroundColor Red }
+                continue
+            }
+        }
+
         foreach ($row in $retire) {
             $gName = "$($row.GroupName)".Trim()
             if (-not $gName.StartsWith($GroupNamePrefix, [System.StringComparison]::OrdinalIgnoreCase)) {

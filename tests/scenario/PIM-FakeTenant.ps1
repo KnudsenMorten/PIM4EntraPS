@@ -45,10 +45,23 @@ function New-PimFakeTenant {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)][string]$OwnerUpn,
-        [string]$OrgName = 'Scenario Tenant'
+        [string]$OrgName = 'Scenario Tenant',
+        # The tenant's DEFAULT verified domain, served from /organization. Defaults to
+        # the owner's domain so every existing caller is unchanged.
+        #
+        # WHY THIS EXISTS. Get-PimTargetDefaultDomain reads it to turn a BARE central
+        # UserName into a slave UPN -- the whole master->slave principal resolution
+        # (PIM-Assignments-Admins rows carry the bare name; the account exists as
+        # <UserName>@<slave default domain>). A fake that served no verifiedDomains
+        # made that path unsimulatable: every synced membership resolved to nothing,
+        # which looks exactly like a broken projection. A fake must be as faithful as
+        # the thing it fakes on the surface under test.
+        [string]$DefaultDomain
     )
+    if (-not $DefaultDomain) { $DefaultDomain = ($OwnerUpn -split '@')[-1] }
     $t = [pscustomobject]@{
         OrgName     = $OrgName
+        DefaultDomain = $DefaultDomain
         Users       = @{}   # id   -> @{ id; userPrincipalName; displayName; accountEnabled }
         UsersByUpn  = @{}   # upn  -> id
         Groups      = @{}   # id   -> @{ id; displayName; mailNickname; isAssignableToRole; description; owners=@(); members=@() }
@@ -100,7 +113,14 @@ function Invoke-PimFakeGraph {
     function AsValue($arr) { if ($All) { return @($arr) } [pscustomobject]@{ value = @($arr) } }
 
     # ----- organization -----
-    if ($pl -like '/organization*') { return AsValue @([pscustomobject]@{ id=[guid]::NewGuid().ToString(); displayName=$T.OrgName }) }
+    if ($pl -like '/organization*') {
+        return AsValue @([pscustomobject]@{
+            id = [guid]::NewGuid().ToString(); displayName = $T.OrgName
+            # shape mirrors Graph exactly: isDefault + isInitial, because
+            # Get-PimTargetDefaultDomain prefers isDefault and falls back to isInitial.
+            verifiedDomains = @([pscustomobject]@{ name = "$($T.DefaultDomain)"; isDefault = $true; isInitial = $true; type = 'Managed' })
+        })
+    }
 
     # ----- users -----
     if ($pl -like '/users*' -and $M -eq 'GET') {
@@ -113,7 +133,21 @@ function Invoke-PimFakeGraph {
             if ($id) { $u=$T.Users[$id]; return [pscustomobject]@{ id=$u.id; userPrincipalName=$u.userPrincipalName; displayName=$u.displayName; accountEnabled=$u.accountEnabled } }
             throw "fake-graph 404: user '$key' not found"
         }
-        return AsValue @($T.Users.Values | ForEach-Object { [pscustomobject]$_ })
+        # SERVER-SIDE $filter, honoured -- not decoration.
+        #
+        # The Admins provider limits its live set with startswith(userPrincipalName,'<prefix>')
+        # and then ASSERTS that nothing non-admin came back (Assert-PimAdminPopulationComparable),
+        # because a filter that silently did nothing is the exact defect that once put ordinary
+        # users into an admin diff. A fake that ignored the filter returned the tenant's owner
+        # too, so the provider correctly refused and no scenario could run the Admins scope.
+        # A fake must be as SCOPED as the thing it fakes.
+        $users = @($T.Users.Values | ForEach-Object { [pscustomobject]$_ })
+        $fm = [regex]::Matches($p, "(?i)startswith\(\s*userPrincipalName\s*,\s*'([^']*)'\s*\)")
+        if ($fm.Count) {
+            $prefixes = @($fm | ForEach-Object { $_.Groups[1].Value.ToLowerInvariant() })
+            $users = @($users | Where-Object { $upn = "$($_.userPrincipalName)".ToLowerInvariant(); @($prefixes | Where-Object { $upn.StartsWith($_) }).Count -gt 0 })
+        }
+        return AsValue $users
     }
     if ($pl -eq '/users' -and $M -eq 'POST') {
         Bump-PimFakeStat $T 'create' 'user'
@@ -177,6 +211,17 @@ function Invoke-PimFakeGraph {
     if ($pl -match '^/groups/[^/]+/members' -and $M -eq 'POST') { Bump-PimFakeStat $T 'create' 'group-member'; return $null }
 
     # ----- administrative units -----
+    # MEMBERS FIRST -- '/directory/administrativeUnits*' also matches the members URL, and
+    # answering it with the AU LIST meant the AU-member live read never saw its members:
+    # every run re-created the same membership and the "re-running is safe" promise was
+    # false for that one scope. A prefix pattern that swallows a sub-resource is a fake
+    # that lies about state, which is worse than one that returns nothing.
+    if ($pl -match '^/directory/administrativeunits/[^/]+/members' -and $M -eq 'GET') {
+        Bump-PimFakeStat $T 'read' 'au-members'
+        $aid = ($p -replace '^/directory/administrativeUnits/','' -replace '(?i)^/directory/administrativeunits/','' -replace '/members.*$','')
+        $mem = if ($T.AUs.ContainsKey($aid)) { $T.AUs[$aid].members } else { @() }
+        return AsValue @($mem | ForEach-Object { [pscustomobject]@{ id = $_; '@odata.type' = '#microsoft.graph.user' } })
+    }
     if ($pl -like '/directory/administrativeunits*' -and $M -eq 'GET') {
         Bump-PimFakeStat $T 'read' 'aus'
         return AsValue @($T.AUs.Values | ForEach-Object { [pscustomobject]@{ id=$_.id; displayName=$_.displayName; visibility=$_.visibility } })
@@ -203,8 +248,20 @@ function Invoke-PimFakeGraph {
     }
 
     # ----- directory-role schedules (read) -----
+    # ...INSTANCES first: '...scheduleInstances' does not match '...schedules*', so these
+    # fell through to the unknown bucket and the engine read an EMPTY current state from
+    # the endpoint that reports what is actually in effect. Same records, instance shape.
+    if ($pl -like '/rolemanagement/directory/roleeligibilityscheduleinstances*' -and $M -eq 'GET') { Bump-PimFakeStat $T 'read' 'dir-elig-inst'; return AsValue @($T.DirElig) }
+    if ($pl -like '/rolemanagement/directory/roleassignmentscheduleinstances*'  -and $M -eq 'GET') { Bump-PimFakeStat $T 'read' 'dir-assign-inst'; return AsValue @($T.DirAssign) }
     if ($pl -like '/rolemanagement/directory/roleeligibilityschedules*' -and $M -eq 'GET') { Bump-PimFakeStat $T 'read' 'dir-elig'; return AsValue @($T.DirElig) }
     if ($pl -like '/rolemanagement/directory/roleassignmentschedules*'  -and $M -eq 'GET') { Bump-PimFakeStat $T 'read' 'dir-assign'; return AsValue @($T.DirAssign) }
+    # Workloads this scenario tenant does not have. An EMPTY role catalog is the honest
+    # answer for a tenant with no Defender/Intune RBAC configured -- and it is a KNOWN
+    # answer, not an unrecognised path, so 'unknown API traffic' keeps meaning something.
+    if (($pl -like '/rolemanagement/defender/*' -or $pl -like '/devicemanagement/*') -and $M -eq 'GET') {
+        Bump-PimFakeStat $T 'read' 'workload-roledefs'
+        return AsValue @()
+    }
     # directory-role schedule requests (write)
     if ($pl -like '/rolemanagement/directory/roleeligibilityschedulerequests*' -and $M -eq 'POST') {
         return Add-PimFakeDirSchedule $T $Body 'Eligible'

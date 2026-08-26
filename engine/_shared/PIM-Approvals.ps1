@@ -1,3 +1,6 @@
+# IMP-02: the locale-safe stamp reader. Loaded defensively so this file stays correct
+# when a test dot-sources it on its own (PIM-Functions.psm1 also loads it up front).
+if (-not (Get-Command Get-PimUtcStamp -ErrorAction SilentlyContinue)) { . (Join-Path $PSScriptRoot 'PIM-DateSafe.ps1') }
 # PIM4EntraPS -- resource approvers/owners: approval routing + access reviews.
 # Dot-sourced by PIM-Functions.psm1 (uses PIM-ChangeQueue.ps1 + PIM-PortalAccess.ps1)
 # and the pim-manager.
@@ -170,8 +173,9 @@ function Get-PimEscalationTargetForRequest {
     )
     $layers = @(Get-PimApproverLayers -Facets $Facets -Row $Row -Matrix $Matrix)
     if ($layers.Count -eq 0) { return $null }
-    $req = [datetime]::MinValue; $elapsed = 0.0
-    if ([datetime]::TryParse("$($Request.requestedUtc)", [ref]$req)) { $elapsed = ($NowUtc - $req.ToUniversalTime()).TotalHours }
+    $elapsed = 0.0   # IMP-02: locale-safe read of a stamp we wrote with ToString('o')
+    $req = Get-PimUtcStamp $Request.requestedUtc
+    if ($null -ne $req) { $elapsed = ($NowUtc - $req).TotalHours }
     $step = if ($SlaHours -gt 0) { [int][math]::Floor($elapsed / $SlaHours) } else { 0 }
     if ($step -ge $layers.Count) { $step = $layers.Count - 1 }
     $L = $layers[$step]
@@ -191,9 +195,10 @@ function Test-PimApprovalEscalationDue {
     # since the request and it is still pending -> notify the escalateTo approvers.
     param([Parameter(Mandatory)][object]$Request, [Parameter(Mandatory)][datetime]$NowUtc, [int]$SlaHours = 24)
     if ("$($Request.status)" -ne 'pending') { return $false }
-    $req = [datetime]::MinValue
-    if (-not [datetime]::TryParse("$($Request.requestedUtc)", [ref]$req)) { return $false }
-    return (($NowUtc - $req.ToUniversalTime()).TotalHours -ge $SlaHours)
+    # IMP-02: an unreadable request stamp must NOT escalate -- fail quiet, not loud.
+    $req = Get-PimUtcStamp $Request.requestedUtc
+    if ($null -eq $req) { return $false }
+    return (($NowUtc - $req).TotalHours -ge $SlaHours)
 }
 
 function Test-PimCanApprove {

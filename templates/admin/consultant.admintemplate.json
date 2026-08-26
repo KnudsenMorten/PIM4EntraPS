@@ -1,7 +1,7 @@
 {
   "id": "consultant",
   "name": "Consultant (time-boxed)",
-  "description": "External consultant admin: provisions on the next engine run, TAP immediately, mail forwarded to the consultant's own mailbox, assignments expire after 90 days.",
+  "description": "External consultant admin: provisions on the next engine run, TAP immediately, TAP mail sent to the admin's ManagerEmail contact, assignments expire after 90 days.",
   "prefill": {
     "Purpose": "Day2Day",
     "TargetUsage": "Cloud",
@@ -9,7 +9,6 @@
     "UserType": "External",
     "UsageLocation": "DK",
     "Ring": "2",
-    "ForwardMailsToContact": "TRUE",
     "ProvisionDate": "Now",
     "CreateTAP": "TRUE",
     "TAPStartDate": "",

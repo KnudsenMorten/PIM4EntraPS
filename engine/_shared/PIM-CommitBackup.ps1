@@ -1,3 +1,6 @@
+# IMP-02: the locale-safe stamp reader. Loaded defensively so this file stays correct
+# when a test dot-sources it on its own (PIM-Functions.psm1 also loads it up front).
+if (-not (Get-Command Get-PimUtcStamp -ErrorAction SilentlyContinue)) { . (Join-Path $PSScriptRoot 'PIM-DateSafe.ps1') }
 # PIM4EntraPS -- safe, reversible commits for Review & Save (REQUIREMENTS.md s28 [M1]).
 # Dot-sourced by the pim-manager (after PIM-SqlStore.ps1, whose row helpers it
 # orchestrates) and standalone by the offline tests.
@@ -35,7 +38,11 @@ function New-PimBackupId {
     # Sortable id: yyyyMMddTHHmmssfffZ + entity + 4 hex. Sorts chronologically as a
     # plain string, which is what the retention planner relies on.
     param([Parameter(Mandatory)][string]$Entity, [string]$TakenUtc)
-    $ts = if ("$TakenUtc".Trim()) { [datetime]::Parse($TakenUtc).ToUniversalTime() } else { [datetime]::UtcNow }
+    # IMP-02: was an unguarded [datetime]::Parse with ambient culture -- inside the
+    # commit-BACKUP path, so a malformed stamp threw and took the safety net with it.
+    # Locale-safe now, and an unreadable value degrades to "now" (a backup with a
+    # slightly-off id still protects the data; no backup at all does not).
+    $ts = (Get-PimUtcStamp $TakenUtc); if ($null -eq $ts) { $ts = [datetime]::UtcNow }
     $stamp = $ts.ToString('yyyyMMddTHHmmssfff') + 'Z'
     $rand  = ([guid]::NewGuid().ToString('N')).Substring(0, 4)
     $safeEntity = ($Entity -replace '[^A-Za-z0-9_\.-]', '_')
@@ -56,7 +63,9 @@ function New-PimCommitSnapshot {
         [string]$TakenUtc
     )
     $base = if ("$Base".Trim()) { $Base } else { $Entity }
-    $taken = if ("$TakenUtc".Trim()) { [datetime]::Parse($TakenUtc).ToUniversalTime().ToString('o') } else { ([datetime]::UtcNow).ToString('o') }
+    # IMP-02: as above -- locale-safe, and never throws inside the backup path.
+    $takenDt = (Get-PimUtcStamp $TakenUtc); if ($null -eq $takenDt) { $takenDt = [datetime]::UtcNow }
+    $taken = $takenDt.ToString('o')
     $rowsArr = @($Rows)
     return [pscustomobject]@{
         id       = (New-PimBackupId -Entity $Entity -TakenUtc $taken)

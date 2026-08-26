@@ -150,9 +150,17 @@ $gates = @{ gates = @{ 'msp.downlink' = $true } }
 $global:PIM_NamingConventions = @{ FeatureGates = $gates }
 $edS2 = (Get-PimScenarioEntryPlan -Scenario 'S2').activeEdition
 $edS4 = (Get-PimScenarioEntryPlan -Scenario 'S4').activeEdition
-T 's30 Test-PimFeatureAvailable(msp.downlink) BLOCKS at S2 edition (Core)'  (-not (Test-PimFeatureAvailable -Key 'msp.downlink' -Edition $edS2 -Quiet))
-T 's30 Test-PimFeatureAvailable(msp.downlink) ALLOWS at S4 edition (Pro)'   (Test-PimFeatureAvailable -Key 'msp.downlink' -Edition $edS4 -Quiet)
-T 's30 super-admin bypass unlocks msp.downlink even at S2 edition'          (Test-PimFeatureAvailable -Key 'msp.downlink' -Edition $edS2 -SuperAdmin -Quiet)
+# ⚠️ POLICY 2026-08-07 (operator: "no limitations ... full access default"): the licence
+# gate is UNENFORCED by default, so the scenario's edition restricts NOTHING. The
+# restrictive assertion is kept but moved under explicit enforcement, so the gate is still
+# proven to work if it is ever turned back on.
+T 's30 DEFAULT: msp.downlink is ALLOWED at the S2 edition (Pro is free)' (Test-PimFeatureAvailable -Key 'msp.downlink' -Edition $edS2 -Quiet)
+$global:PIM_EnforceProLicense = $true
+try {
+    T 's30 ENFORCED: Test-PimFeatureAvailable(msp.downlink) BLOCKS at S2 edition (Core)'  (-not (Test-PimFeatureAvailable -Key 'msp.downlink' -Edition $edS2 -Quiet))
+    T 's30 ENFORCED: Test-PimFeatureAvailable(msp.downlink) ALLOWS at S4 edition (Pro)'   (Test-PimFeatureAvailable -Key 'msp.downlink' -Edition $edS4 -Quiet)
+    T 's30 ENFORCED: super-admin bypass unlocks msp.downlink even at S2 edition'          (Test-PimFeatureAvailable -Key 'msp.downlink' -Edition $edS2 -SuperAdmin -Quiet)
+} finally { Remove-Variable -Name PIM_EnforceProLicense -Scope Global -ErrorAction SilentlyContinue }
 $global:PIM_NamingConventions = $null
 
 # ---------------------------------------------------------------------------
@@ -209,6 +217,65 @@ T 'runner branch: S2 single = engine-apply only; S5 managed = downlink-sync firs
     -not (Get-PimScenarioRunPlan -Scenario 'S2').runDownlink -and
     (Get-PimScenarioRunPlan -Scenario 'S5').runDownlink -and
     (Get-PimScenarioRunPlan -Scenario 'S5').steps[0] -eq 'downlink-sync')
+
+# ---------------------------------------------------------------------------
+# §33.7.f-2 CROSS-TENANT BLAST RADIUS -- structural assertions on the matrix.
+#
+# The helpers Get-PimTenantObjectInventory / Compare-PimTenantInventory were added in
+# 398d8e6d and then sat in the file, called by NOTHING, through two live matrix runs
+# that were reported as fully VERIFIED. A helper nobody calls proves nothing, and the
+# matrix's own output could not reveal that -- there was no step to report. These
+# assertions exist so the wiring cannot silently disappear the same way twice.
+# ---------------------------------------------------------------------------
+$mx = Get-Content -Raw (Join-Path $root 'tests\live\Test-PimScenarioMatrix.ps1')
+T 'matrix HAS a cross-tenant-blast-radius step' ($mx -match "cross-tenant-blast-radius")
+T '  ...and it is REQUIRED (no -Required $false on it)' ($mx -notmatch "cross-tenant-blast-radius'[^\r\n]*-Required \`$false")
+T '  ...it CALLS the inventory helper'   ($mx -match 'Get-PimTenantObjectInventory -TenantId \$otherTid')
+T '  ...it CALLS the compare helper'     ($mx -match 'Compare-PimTenantInventory -Before \$blastBefore')
+T '  ...it captures BEFORE the deploy'   ($mx -match '(?s)\$blastBefore = Get-PimTenantObjectInventory.{0,4000}?\$firstRun = Invoke-PimScenarioDeploy')
+# The vacuity guards. Each of these was a real way for this assertion to pass while
+# measuring nothing -- the D4.a / ring-gate shape the docs already warn about twice.
+T '  ...SKIPS when there is no second tenant'  ($mx -match 'no SECOND tenant distinct from')
+T '  ...SKIPS when the other tenant is EMPTY' ($mx -match 'inventoried as EMPTY')
+T '  ...SKIPS when no BEFORE was captured'    ($mx -match 'no BEFORE inventory was captured')
+T '  ...treats a READ ERROR as unverified, not clean' ($mx -match 'unverified, not clean')
+T '  ...reports the SIZE it compared'         ($mx -match 'named object\(s\) compared')
+# 🪤 The assertion must read the other tenant with the OTHER tenant's OWN SPN. Reading
+# it with the ambient context would inventory the TARGET twice and pass unconditionally
+# -- and a leaked ambient identity is exactly BUG-23, the thing this catches.
+T '  ...reads the other tenant with ITS OWN SPN' ($mx -match 'Get-PimTenantObjectInventory -TenantId \$otherTid -ClientId \$otherCid -Thumbprint \$otherThb')
+
+# --- TEST-20: blast radius must be RING-AWARE, not "nothing changed" ---------------------
+# The MSP model deliberately creates the central admins in every managed tenant, so the old
+# "same or leak" assertion could not pass for S5/S6. It must sanction exactly the admins the
+# other tenant's RING entitles it to -- and nothing else, or the step becomes unable to fail.
+T 'blast radius sanctions ring-entitled central admins' ($mx -match 'sanctionedAdmins')
+T '  ...taken from THAT tenant expected set, not a blanket allow' ($mx -match 'expectedAdminUserNames')
+T '  ...matched per tenantId' ($mx -match '\$sl\.tenantId.*-eq.*\$otherTid')
+T '  ...an unsanctioned ADD still fails' ($mx -match 'unexpectedAdds')
+T '  ...any REMOVAL still fails' ($mx -match 'unexpectedRemovals')
+T '  ...only users can be sanctioned (a group/AU change is never admin propagation)' ($mx -match "\^\(\?i\)users:")
+T '  ...the verdict is the containment flag, not diff.same' ($mx -match "-Name 'cross-tenant-blast-radius' -Ok \`$contained")
+
+# --- BUG-31: the matrix must ACTIVATE each scenario, and prove the store placement -------
+# Structural, for the same reason the blast-radius assertions above are structural: the
+# wiring vanished once already (criterion 2 sat uncalled through two "VERIFIED" runs), and
+# an uncalled mechanism produces no step to report, so only the source can testify.
+T 'matrix ACTIVATES the scenario (calls Set-PimScenarioContext)' ($mx -match 'Set-PimScenarioContext -Scenario \$sc')
+T '  ...and asserts PIM_ActiveScenario actually took' ($mx -match "'scenario-activated'")
+T '  ...as a REQUIRED step' ($mx -notmatch "scenario-activated'[^\r\n]*-Required \`$false")
+T 'matrix HAS a store-placement step' ($mx -match "'store-placement'")
+T '  ...and it is REQUIRED' ($mx -notmatch "store-placement'[^\r\n]*-Required \`$false")
+T '  ...central-msp asserts the CS uses PIM_SqlServerCentral' ($mx -match 'central-msp' -and $mx -match 'env:PIM_SqlServerCentral')
+T '  ...central-msp also asserts the CS is PASSWORDLESS (no Integrated Security)' ($mx -match "passwordless=")
+T '  ...local-slave asserts the CS uses PIM_SqlServerLocal' ($mx -match 'env:PIM_SqlServerLocal')
+# 🪤 The vacuity guard that makes this real: with no server supplied, the resolver falls back
+# to ambient, which is INDISTINGUISHABLE from a correct answer. Such a step must SKIP, never pass.
+T '  ...SKIPS (never passes) when no central server was supplied' ($mx -match 'UNMEASURED, not correct')
+T '  ...SKIPS when no local-slave server was supplied' ($mx -match 'the local slave store is UNMEASURED')
+T '  ...in-tenant asserts NO override is applied' ($mx -match "no scenario override")
+# Scenario activation mutates global runtime knobs; they must not leak past the loop.
+T 'matrix RESTORES the scenario globals after the run' ($mx -match 'savedScenarioGlobals' -and $mx -match 'finally')
 
 Write-Host ""
 Write-Host ("==== Scenario-wiring test: {0} passed, {1} failed ====" -f $script:pass, $script:fail) -ForegroundColor $(if ($script:fail) { 'Red' } else { 'Green' })

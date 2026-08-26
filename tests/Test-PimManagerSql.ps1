@@ -14,6 +14,7 @@ $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
 . (Join-Path $PSScriptRoot '_shared\PimManagerBoot.ps1')   # -Port 0 => helper allocates a free port (no fixed-port collision)
 . (Join-Path $root 'engine\_shared\PIM-ChangeQueue.ps1')
+. (Join-Path $root 'engine\_shared\PIM-Rest.ps1')
 . (Join-Path $root 'engine\_shared\PIM-SqlStore.ps1')
 
 $pass=0; $fail=0
@@ -46,10 +47,21 @@ try {
     function Beat { try { Invoke-RestMethod -Method POST -Uri "$base/api/heartbeat" -Headers $hdr -TimeoutSec 10 | Out-Null } catch {} }
     Beat
 
-    # PUT two rows via the storage-neutral /api/data endpoint
+    # PUT two rows via the storage-neutral /api/data endpoint.
+    #
+    # ⚠️ THESE ROWS MUST STAY NON-PRIVILEGED (L2 / T2 / DP, no PRIV|ADMIN marker).
+    # This suite proves the SQL STORAGE path, nothing else. The §28 [M4] maker/checker
+    # gate classifies any row carrying a T0/T1/L0/L1 tier marker, a control-plane (CP)
+    # scope, or a PRIV/ADMIN name marker as SENSITIVE and refuses the commit with
+    # 409 needs-approval ("a SECOND administrator must approve"). The rows here used to
+    # be L1/T0/CP, which is exactly what that gate is designed to stop -- so this suite
+    # broke when the gate shipped and was quietly dropped from the runner instead of
+    # updated (audit finding TEST-02). The approval gate has its OWN suite
+    # (Test-PimSensitiveAuthoring.ps1); do not re-test it from here, and do not
+    # "restore" T0/CP values to make these look more realistic.
     $putBody = @{ rows = @(
-        @{ GroupName='PIM-Entra-ID-A-L1-T0-CP-ID'; GroupTag='Entra-ID-A-L1'; Workload='Entra-ID'; Level='L1'; TierLevel='T0'; Plane='CP' }
-        @{ GroupName='PIM-Entra-ID-B-L1-T0-CP-ID'; GroupTag='Entra-ID-B-L1'; Workload='Entra-ID'; Level='L1'; TierLevel='T0'; Plane='CP' }
+        @{ GroupName='PIM-Entra-ID-A-L2-T2-DP-ID'; GroupTag='Entra-ID-A-L2'; Workload='Entra-ID'; Level='L2'; TierLevel='T2'; Plane='DP' }
+        @{ GroupName='PIM-Entra-ID-B-L2-T2-DP-ID'; GroupTag='Entra-ID-B-L2'; Workload='Entra-ID'; Level='L2'; TierLevel='T2'; Plane='DP' }
     ) } | ConvertTo-Json -Depth 6
     $putRes = Invoke-RestMethod -Uri "$base/api/data/PIM-Definitions-Tasks" -Headers $hdr -Method Put -Body $putBody -ContentType 'application/json' -TimeoutSec 60
     T 'PUT /api/data persisted (path=sql)' ("$($putRes.path)" -eq 'sql' -and $putRes.rowCount -eq 2)
@@ -81,10 +93,10 @@ try {
     # verify directly in the database (bypassing the manager)
     $direct = @(Get-PimSqlRows -ConnectionString $cs -Entity 'PIM-Definitions-Tasks')
     $tags = @($direct | ForEach-Object { "$($_.GroupTag)" })
-    T 'rows are physically in pim.Rows (SQL, not CSV)' ($direct.Count -eq 2 -and ($tags -contains 'Entra-ID-A-L1'))
+    T 'rows are physically in pim.Rows (SQL, not CSV)' ($direct.Count -eq 2 -and ($tags -contains 'Entra-ID-A-L2'))
 
-    # full-set replace: PUT one row -> the other is deleted
-    $putRes2 = Invoke-RestMethod -Uri "$base/api/data/PIM-Definitions-Tasks" -Headers $hdr -Method Put -ContentType 'application/json' -TimeoutSec 60 -Body (@{ rows=@(@{ GroupName='x'; GroupTag='Entra-ID-A-L1'; Workload='Entra-ID'; Level='L1'; TierLevel='T0'; Plane='CP' }) } | ConvertTo-Json -Depth 6)
+    # full-set replace: PUT one row -> the other is deleted (non-privileged, see above)
+    $putRes2 = Invoke-RestMethod -Uri "$base/api/data/PIM-Definitions-Tasks" -Headers $hdr -Method Put -ContentType 'application/json' -TimeoutSec 60 -Body (@{ rows=@(@{ GroupName='PIM-Entra-ID-A-L2-T2-DP-ID'; GroupTag='Entra-ID-A-L2'; Workload='Entra-ID'; Level='L2'; TierLevel='T2'; Plane='DP' }) } | ConvertTo-Json -Depth 6)
     T 'PUT full-set replace drops the removed row' (@(Get-PimSqlRows -ConnectionString $cs -Entity 'PIM-Definitions-Tasks').Count -eq 1)
 } finally {
     if ($proc -and -not $proc.HasExited) { Stop-Process -Id $proc.Id -Force -EA SilentlyContinue }

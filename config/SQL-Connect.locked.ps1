@@ -22,10 +22,10 @@ ALTER ROLE loginmanager ADD MEMBER [name@domain.com];
 
 #-------------------
 
-CREATE USER "mok@2linkit.net" FROM EXTERNAL PROVIDER WITH DEFAULT_SCHEMA = dbo;  
+CREATE USER "admin@contoso.com" FROM EXTERNAL PROVIDER WITH DEFAULT_SCHEMA = dbo;  
   
 -- add user to role(s) in db 
-ALTER ROLE db_owner ADD MEMBER "mok@2linkit.net"; 
+ALTER ROLE db_owner ADD MEMBER "admin@contoso.com"; 
 
 #>
 
@@ -35,11 +35,20 @@ ALTER ROLE db_owner ADD MEMBER "mok@2linkit.net";
 ###################################################################################################################
 
 import-module sqlserver
-Connect-AzAccount -ManagedService -Subscription "fce4f282-fcc6-43fb-94d8-bf1701b862c3"
+
+# SEC-02: the real subscription id used to be a literal here, in a file that ships to the
+# public mirror. Supply it at runtime instead -- $global:PIM_SqlSubscriptionId or
+# $env:PIM_SqlSubscriptionId. The real value is recorded in internal/ (never published).
+$PimSqlSubscriptionId = if ("$($global:PIM_SqlSubscriptionId)".Trim()) { "$($global:PIM_SqlSubscriptionId)".Trim() } else { "$($env:PIM_SqlSubscriptionId)".Trim() }
+if (-not $PimSqlSubscriptionId) {
+    throw "SQL-Connect: no subscription configured. Set `$global:PIM_SqlSubscriptionId (or `$env:PIM_SqlSubscriptionId) to the SQL subscription id -- see internal/INSTALL-VALUES.md."
+}
+
+Connect-AzAccount -ManagedService -Subscription $PimSqlSubscriptionId
 
 $token = (Get-AzAccessToken -ResourceUrl https://database.windows.net).Token
 
-Set-AzContext -Subscription "fce4f282-fcc6-43fb-94d8-bf1701b862c3"
+Set-AzContext -Subscription $PimSqlSubscriptionId
 
 
 ###################################################################################################################
@@ -48,8 +57,11 @@ Set-AzContext -Subscription "fce4f282-fcc6-43fb-94d8-bf1701b862c3"
 
 $Path           = "C:\SCRIPTS\DATA\"
 $csvDelimiter   = ";"
-$serverName     = "2linkit-sql.database.windows.net"
-$databaseName   = "managedpim"
+# SEC-06: these were a REAL Azure SQL server + database name, shipped in the public
+# payload. Read from the environment (the SEC-02 pattern), with an obvious placeholder
+# fallback so the file still reads as the example it is.
+$serverName     = $(if ($env:PIM_SqlServerFqdn) { $env:PIM_SqlServerFqdn } else { "<your-sql-server>.database.windows.net" })
+$databaseName   = $(if ($env:PIM_SqlDatabase)   { $env:PIM_SqlDatabase }   else { "<your-database>" })
 $tableSchema    = "dbo"
 
 

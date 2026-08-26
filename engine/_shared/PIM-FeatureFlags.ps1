@@ -49,6 +49,10 @@ $script:PimFeatureFlagCatalog = @(
     [ordered]@{ id = 'accessreview';label = 'Access Review';            default = $false; alwaysOn = $false }
     [ordered]@{ id = 'reports';     label = 'Reports';                  default = $false; alwaysOn = $false }
     [ordered]@{ id = 'conformance'; label = 'Template Rollout';         default = $false; alwaysOn = $false }
+    # MSP-2 / control #1+#2. OFF by shipped default like every other advanced surface:
+    # most deployments are single-tenant and have no managed relationships at all, so the
+    # tab would render an empty view. An MSP turns it on deliberately.
+    [ordered]@{ id = 'downlink';    label = 'MSP Downlink';             default = $false; alwaysOn = $false }
 )
 
 function Get-PimFeatureFlagCatalog {

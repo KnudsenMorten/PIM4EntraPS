@@ -1,0 +1,36 @@
+{
+  "_doc": "PIM MSP MASTER -- the TEMPLATE ring map (RING-1 plane 2). Copy to template-ring-map.custom.json (gitignored: it carries real managed-tenant ids) and edit. This is the master's answer to 'which signed baseline TEMPLATE VERSION may each managed tenant pull?'. Read by setup/Invoke-PimDownlinkSync.ps1, resolved by Get-PimTemplateRingPlan (engine/_shared/PIM-RingGate.ps1), and enforced by Get-PimDownlinkPlan's version gate.",
+
+  "schema": 1,
+
+  "_why_this_exists": "BUG-29. Get-PimUpdateSourceProfile documented the from-master pull as 'ringGated -- the pull only takes the ring's approved version (never a version above the tenant's ring)'. NO CODE PATH IMPLEMENTED IT: the master publishes ONE baseline-latest.json containing every admin row, the managed tenant always pulled latest, and the ring was used ONLY to filter the ADMIN SET. Not a breach -- the bundle is signature/expiry/anti-rollback verified and the master controls what it publishes -- but a managed tenant could not REFUSE a version intended for a later ring. This file is the master's half of that gate.",
+
+  "_plane_2_not_plane_1": "⚠️ This is NOT the AutomateIT operator's code-version map (sync/release-map.json, plane 1). Different owner, different question, different file. Plane 1: the AutomateIT operator decides which CODE VERSION a customer's sync installs. Plane 2 (here): a PIM MSP master decides which TEMPLATE VERSION its own managed tenants may pull. Same mechanism, separate instance -- the operator decision recorded in RING-1.",
+
+  "_not_hashed": "🔓 Tenant ids here are PLAIN, deliberately. Plane 1 hashes them because its map travels inside the snapshot EVERY customer downloads, so a plaintext id would disclose the customer list to every other customer. THIS map lives in the MSP master's own store and is never shipped to a third party -- the master already knows its own managed tenants. Hashing it 'for consistency' would only make the master's own map unreadable to its owner.",
+
+  "_assignments_doc": "Which ring each MANAGED TENANT is in, for a given template. A tenant with NO entry is UNASSIGNED and keeps TODAY'S behaviour: it pulls latest exactly as it did before this gate existed. That is the non-breaking rule -- absence is not ring 0, and it is not an error.",
+  "assignments": {
+    "00000000-1111-2222-3333-444444444444": {
+      "_comment": "SAMPLE ONLY -- replace with a real managed tenant id.",
+      "Baseline": { "ring": 2 }
+    }
+  },
+
+  "_default_doc": "Fleet-wide fallback ring for unassigned managed tenants. SHIPPED AS null ON PURPOSE: null means 'keep current behaviour'. Setting it moves every unassigned managed tenant at once.",
+  "default": null,
+
+  "_promotions_doc": "Which baseline VERSION is approved for a ring. The version is the baseline document's own numeric 'version' field (e.g. 2608070846 from baseline-latest.json), NOT a solution tag. ⚠️ An ABSENT ring means nothing is promoted to it: an assigned tenant on that ring HOLDS and pulls NOTHING -- it does not silently fall back to latest. A forgotten promotion must never look like success. FORWARD-ONLY, exactly as plane 1: to pull a bad baseline, publish and promote a NEWER one; never move a ring backward.",
+  "promotions": {
+    "Baseline": {
+      "managed": {
+        "1": { "version": "2608070846" },
+        "2": { "version": "2608070846" }
+      }
+    }
+  },
+
+  "_channel_note": "⚠️ The channel here is 'managed', NOT plane 1's 'internal'. Get-PimTemplateRingPlan defaults to -Channel 'managed' precisely so the two planes cannot be confused by copy-paste: plane 1's channels ('internal' / 'public') describe where the CODE comes from, plane 2's describe the MSP relationship. A map written with 'internal' resolves to HOLD with \"'Baseline' has no 'managed' channel\" -- loud, not silent, which is the intended behaviour.",
+
+  "_capabilities_note": "The 'allow' key from plane 1 is accepted here too and gates the same way, but a baseline template declares no capabilities today, so leaving it out (= unrestricted) is correct. Do not invent capability names for templates just to fill it in."
+}

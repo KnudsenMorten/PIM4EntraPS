@@ -1,12 +1,12 @@
 {
   "id": "approval-required",
   "name": "Approval required (high-privilege)",
-  "description": "For high-privilege groups (Global Administrator role groups, tenant-root owner groups, Privileged Role Administrator): inherits the v1-parity baseline from 'default' (Expiration P1D/P365D/P365D, Enablement MFA + Justification on EndUser-Assignment + Admin-Eligibility) AND additionally requires an approval. Activation requires MFA + Justification AND an approval. Approvers = the definition row's Owners. Serial = first owner decides, escalates to the next after escalationHours; switch mode to 'Parallel' for any-one-of-the-owners-wins.",
+  "description": "For high-privilege groups (Global Administrator role groups, tenant-root owner groups, Privileged Role Administrator): inherits the v1-parity baseline from 'default' (Expiration P1D/P365D/P365D, Enablement MFA + Justification on EndUser-Assignment, Justification only on Admin-Eligibility) AND additionally requires an approval. Activation requires MFA + Justification AND an approval -- unchanged, and that is the control that matters for a high-privilege group. Admin-Eligibility carries Justification but NOT MFA, for the BUG-21 reason recorded in the 'default' template: the admin caller is the engine's app-only certificate SPN and can never present an MFA claim, so requiring one blocks every assignment and prevents nothing. Approvers = the definition row's Owners. Serial = first owner decides, escalates to the next after escalationHours; switch mode to 'Parallel' for any-one-of-the-owners-wins.",
   "extends": "default",
   "rules": {
     "Enablement": {
       "EndUser_Assignment": ["MultiFactorAuthentication", "Justification"],
-      "Admin_Eligibility":  ["MultiFactorAuthentication", "Justification"],
+      "Admin_Eligibility":  ["Justification"],
       "Admin_Assignment":   []
     },
     "Approval": { "mode": "Serial", "approversSource": "Owners", "escalationHours": 4 }

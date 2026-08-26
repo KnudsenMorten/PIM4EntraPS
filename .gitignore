@@ -34,6 +34,9 @@ tools/pim-manager/instances.custom.json
 # ---------------------------------------------------------------------------
 tests/live/pimlab-state.json
 tests/live/pimscenario-state.json
+# TEST-12 scenario tenant map -- REAL tenant/SPN/subscription ids. Never committed:
+# the same class of value SEC-02 removed from shipped source.
+tests/live/scenario-tenants.custom.json
 
 # ---------------------------------------------------------------------------
 #  Local IDE / OS noise

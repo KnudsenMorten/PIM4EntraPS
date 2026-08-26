@@ -135,6 +135,18 @@ $instancesFile = Join-Path $PSScriptRoot 'instances.custom.json'
 $_dateExprLib = Join-Path $solutionRoot 'engine\_shared\PIM-DateExpression.ps1'
 if (Test-Path -LiteralPath $_dateExprLib) { . $_dateExprLib }
 
+# IMP-03: the ONE visible way to swallow a non-fatal error. Loaded early so every
+# decision path below (auth, gating, store reads) can report instead of vanishing.
+$_swallowLib = Join-Path $solutionRoot 'engine\_shared\PIM-Swallow.ps1'
+if (Test-Path -LiteralPath $_swallowLib) { . $_swallowLib }
+
+# HOSTED principal authentication (engine/_shared/PIM-HostedAuth.ps1) -- SEC-01.
+# Verifies that a request's identity actually came from the auth edge instead of
+# trusting the X-MS-CLIENT-PRINCIPAL-NAME header on sight. Pure decision functions;
+# see REQUIREMENTS §33.3 SEC-01 and docs/TESTS.md.
+$_hostedAuthLib = Join-Path $solutionRoot 'engine\_shared\PIM-HostedAuth.ps1'
+if (Test-Path -LiteralPath $_hostedAuthLib) { . $_hostedAuthLib }
+
 # Offline Pro licensing (engine/_shared/PIM-License.ps1) -- powers the
 # Governance license panel (/api/license). Core Manager features never gate.
 $_licenseLib = Join-Path $solutionRoot 'engine\_shared\PIM-License.ps1'
@@ -251,6 +263,18 @@ if (Test-Path -LiteralPath $_approvalGateLib) { . $_approvalGateLib }
 $_sensAuthLib = Join-Path $solutionRoot 'engine\_shared\PIM-SensitiveAuthoring.ps1'
 if (Test-Path -LiteralPath $_sensAuthLib) { . $_sensAuthLib }
 
+# Server-side WRITE GUARDS (engine/_shared/PIM-ManagerWriteGuards.ps1, Batch 1:
+# server-side enforcement + safety guards). PURE decision helpers the write paths
+# call so the GUI is never the only enforcement boundary:
+#   * Test-PimPortalRowsInScope -- re-validate EVERY affected/removed row against
+#     the caller's portal tier/level/service/scope (stops delete-by-omission of an
+#     out-of-scope row); SuperAdmin bypasses scope (as everywhere).
+#   * Test-PimCommitDeltaGuard  -- empty-set / large-delta safety net on commit +
+#     restore (mirrors the engine disable-guard; the 53-user mass-disable precondition).
+# Loads AFTER PIM-PortalAccess.ps1 (it calls Get-PimGroupFacets / Test-PimPortalCan*).
+$_writeGuardLib = Join-Path $solutionRoot 'engine\_shared\PIM-ManagerWriteGuards.ps1'
+if (Test-Path -LiteralPath $_writeGuardLib) { . $_writeGuardLib }
+
 # Alert FEED + recorded-send proof (engine/_shared/PIM-AlertFeed.ps1, REQUIREMENTS
 # §26c / §28 [H2] + the [M5] residual). The PUSH side of the dashboard: every fired
 # alert is recorded (when / which event / who was notified / whether delivery was
@@ -304,6 +328,15 @@ if (Test-Path -LiteralPath $_schedLib) { . $_schedLib }
 $_notifyLib = Join-Path $solutionRoot 'engine\_shared\PIM-Notify.ps1'
 if (Test-Path -LiteralPath $_notifyLib) { . $_notifyLib }
 
+# MSP downlink surface (engine/_shared/PIM-DownlinkManager.ps1) -- powers the
+# MSP Downlink tab: /api/downlink (per-relationship plan), /api/downlink/policy
+# (the per-relationship projection rules) and /api/downlink/run (dry-run + apply).
+# It COMPOSES the pure core (Get-PimDownlinkPlan over the SIGNED baseline) and never
+# decides anything itself, so the preview and the apply cannot disagree about who
+# ends up holding privilege in a managed tenant.
+$_downlinkLib = Join-Path $solutionRoot 'engine\_shared\PIM-DownlinkManager.ps1'
+if (Test-Path -LiteralPath $_downlinkLib) { . $_downlinkLib }
+
 # Operational-policy settings (engine/_shared/PIM-OperationalPolicy.ps1) -- the
 # PURE normalize/validate/clamp helpers behind the Settings config surface
 # (REQUIREMENTS [M7]): expiry-policy defaults, MFA-on-activation toggle, and
@@ -318,6 +351,17 @@ if (Test-Path -LiteralPath $_opPolicyLib) { . $_opPolicyLib }
 # (Get-/Set-PimFeatureFlags below), so GUI nav state == the persisted flag set.
 $_featureFlagsLib = Join-Path $solutionRoot 'engine\_shared\PIM-FeatureFlags.ps1'
 if (Test-Path -LiteralPath $_featureFlagsLib) { . $_featureFlagsLib }
+
+# Governance PREVIEW gate (engine/_shared/PIM-GovernancePreview.ps1) -- "show the
+# surface, safely OFF". The two security-sensitive governance surfaces (s27
+# approval-gated offboarding/revoke; s28 [L2] exemption register on Template
+# Rollout) render VISIBLE but disabled+inert by DEFAULT, so the surface can be
+# reviewed without acting. Persisted under pim.Settings 'GovernancePreview' via the
+# SAME Get-/Set-PimManagerSetting chokepoint, so the boot-injected GUI value == the
+# value the endpoint guard reads (GUI state == actual behaviour). Distinct from the
+# feature-flag registry, which HIDES a disabled surface; this one keeps it shown.
+$_govPreviewLib = Join-Path $solutionRoot 'engine\_shared\PIM-GovernancePreview.ps1'
+if (Test-Path -LiteralPath $_govPreviewLib) { . $_govPreviewLib }
 
 # Feature catalog + gates (engine/_shared/PIM-FeatureCatalog.ps1, REQUIREMENTS s29/
 # s30) -- the SINGLE source of truth for customizable capabilities (tier core|
@@ -366,15 +410,68 @@ $script:PimLoginAudited = @{}
 $script:PimHosted = [bool]$Hosted -or ("$env:PIM_HOSTED" -in @('1','true','yes'))
 $script:CurrentRequestPrincipal = $null
 
+function Get-PimEntraJwks {
+    # Fetch + cache the tenant's signing keys for LAYER 2 (signed-token verification).
+    # Cached for an hour; a fetch failure returns the cached copy when we have one and
+    # $null otherwise -- and $null makes Resolve-PimHostedPrincipal fail CLOSED in strict
+    # mode, which is the correct outcome (never trust a token we cannot verify).
+    [CmdletBinding()] param()
+    $now = [datetime]::UtcNow
+    if ($script:PimJwksCache -and $script:PimJwksFetchedUtc -and ($now -lt $script:PimJwksFetchedUtc.AddHours(1))) {
+        return $script:PimJwksCache
+    }
+    $tenant = "$env:PIM_HOSTED_AUTH_TENANT".Trim()
+    if (-not $tenant) { $tenant = "$($global:PIM_TenantId)".Trim() }
+    if (-not $tenant) { $tenant = 'common' }
+    $uri = "https://login.microsoftonline.com/$tenant/discovery/v2.0/keys"
+    try {
+        $jwks = Invoke-RestMethod -Method GET -Uri $uri -TimeoutSec 15 -ErrorAction Stop
+        if ($jwks -and $jwks.keys) {
+            $script:PimJwksCache = $jwks
+            $script:PimJwksFetchedUtc = $now
+            return $jwks
+        }
+    } catch {
+        Write-Warning "JWKS fetch from $uri failed: $($_.Exception.Message)"
+    }
+    if ($script:PimJwksCache) { return $script:PimJwksCache }   # stale beats nothing
+    return $null
+}
+
 function Get-PimEasyAuthPrincipal {
-    # The Entra-authenticated caller from App Service Easy Auth. ONLY trusted in
-    # hosted mode (App Service injects + strips these headers at the edge; trusting
-    # them locally would let any client spoof identity). Returns '' when absent.
+    # The Entra-authenticated caller, VERIFIED -- not merely asserted by a header (SEC-01).
+    #
+    # The old behaviour returned X-MS-CLIENT-PRINCIPAL-NAME on sight, so any client that
+    # could reach this app could name itself a SuperAdmin from PIM_SuperAdmins. Identity
+    # now goes through Resolve-PimHostedPrincipal:
+    #   LAYER 1 (always) -- the auth-edge headers must be internally consistent; a name
+    #     header without its companion X-MS-CLIENT-PRINCIPAL blob is a spoof signature.
+    #   LAYER 2 (PIM_HOSTED_REQUIRE_SIGNED_TOKEN=1) -- the signed Entra token is verified
+    #     (RS256 signature against the tenant JWKS + issuer/audience/expiry) and identity
+    #     is taken from the VERIFIED token.
+    # Returns '' for anything not positively trusted -- callers already fail closed on ''.
     param([Parameter(Mandatory)][System.Net.HttpListenerRequest]$Request)
     if (-not $script:PimHosted) { return '' }
-    foreach ($h in 'X-MS-CLIENT-PRINCIPAL-NAME','X-MS-CLIENT-PRINCIPAL-IDP') {
-        $v = $Request.Headers[$h]; if ("$v".Trim() -and $h -eq 'X-MS-CLIENT-PRINCIPAL-NAME') { return "$v".Trim() }
+    if (-not (Get-Command Resolve-PimHostedPrincipal -ErrorAction SilentlyContinue)) {
+        # The auth lib is the enforcement boundary -- without it, fail CLOSED rather than
+        # silently reverting to trusting the header.
+        Write-Warning 'PIM-HostedAuth.ps1 not loaded -- refusing to resolve a hosted principal (failing closed).'
+        return ''
     }
+    $strict = Test-PimHostedSignedTokenRequired
+    $jwks = $null
+    if ($strict) { $jwks = Get-PimEntraJwks }
+    $issuers = @("$env:PIM_HOSTED_AUTH_ISSUERS" -split '[,;]+' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+    $auds    = @("$env:PIM_HOSTED_EASYAUTH_AUD" -split '[,;]+' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+    $d = Resolve-PimHostedPrincipal `
+            -PrincipalName "$($Request.Headers['X-MS-CLIENT-PRINCIPAL-NAME'])" `
+            -PrincipalBlob "$($Request.Headers['X-MS-CLIENT-PRINCIPAL'])" `
+            -SignedToken   "$($Request.Headers['X-MS-TOKEN-AAD-ID-TOKEN'])" `
+            -Jwks $jwks -ExpectedIssuers $issuers -ExpectedAudiences $auds
+    if ($d.trusted) { return "$($d.identity)" }
+    # Rejections are security events -- never silent (BUG-01 lesson: a guard that trips
+    # without telling anyone reads as a clean run).
+    Write-Host ("  [auth] REJECTED principal [{0}] -- {1}" -f $d.layer, $d.reason) -ForegroundColor Red
     return ''
 }
 
@@ -444,6 +541,24 @@ function Test-PimManagerRoleAtLeast {
     # it sees. Elevating Delegated to manage its own groups is a later epic phase.
     $rank = @{ Reader = 0; Delegated = 0; Admin = 1; SuperAdmin = 2 }
     $rank[(Get-PimManagerRole).role] -ge $rank[$Minimum]
+}
+
+function Get-PimManagerCallerScope {
+    # Resolve THIS request's enforcement context once, so every write path gates
+    # uniformly: @{ isSuperAdmin; profile; identity }. SuperAdmin -> profile $null
+    # (bypasses scope, as everywhere). A non-super caller's portal-admin profile (or
+    # $null when they have none) is resolved from the SAME store the read path uses.
+    # Best-effort: any resolution failure returns a non-super, no-profile context so
+    # the flat role gate + write guards stay in force (never silently elevates).
+    $isSuper = $false
+    try { $isSuper = [bool](Test-PimManagerRoleAtLeast -Minimum 'SuperAdmin') } catch { $isSuper = $false }
+    $who = ''
+    try { $who = "$((Get-PimManagerRole).identity)" } catch { $who = '' }
+    $prof = $null
+    if (-not $isSuper -and (Get-Command Read-PimPortalProfiles -ErrorAction SilentlyContinue) -and (Get-Command Get-PimPortalProfile -ErrorAction SilentlyContinue)) {
+        try { $prof = Get-PimPortalProfile -Profiles (Read-PimPortalProfiles -ConfigDir $script:configRoot) -Identity "$who" } catch { $prof = $null }
+    }
+    return @{ isSuperAdmin = $isSuper; profile = $prof; identity = $who }
 }
 
 function Write-PimManagerAuditEvent {
@@ -1008,7 +1123,10 @@ if ($ConnectPlatform) {
 # The 14 CSV bases the mapper edits, in stable UI order, with their default
 # headers used when creating a brand-new .custom.csv.
 $script:PimCsvBases = @(
-    [ordered]@{ base = 'Account-Definitions-Admins';      group = 'Definitions';  defaultHeader = @('FirstName','LastName','Initials','Purpose','TargetUsage','TargetPlatform','UserType','UserName','DisplayName','UserPrincipalName','UsageLocation','ForwardMailsToContact','MailForwardAddress','CreateTAP','TAPStartDate','Ring') },
+    # ForwardMailsToContact / MailForwardAddress retired 2026-08-12 -- notification + TAP mail is
+    # sent FROM the shared mailbox the engine SPN is scoped to, so an admin needs no mailbox and
+    # no Exchange licence, and there is nothing to forward. Recipient is ManagerEmail.
+    [ordered]@{ base = 'Account-Definitions-Admins';      group = 'Definitions';  defaultHeader = @('FirstName','LastName','Initials','Purpose','TargetUsage','TargetPlatform','UserType','UserName','DisplayName','UserPrincipalName','UsageLocation','CreateTAP','TAPStartDate','Ring') },
     [ordered]@{ base = 'PIM-Definitions-Roles';           group = 'Definitions';  defaultHeader = @('GroupName','GroupDescription','GroupTag','AdministrativeUnitTag','CPPlatform','Plane','TierLevel','PermissionScope','SyncPlatform','IsRoleAssignable') },
     [ordered]@{ base = 'PIM-Definitions-Tasks';           group = 'Definitions';  defaultHeader = @('GroupName','GroupDescription','GroupTag','AdministrativeUnitTag','IsRoleAssignable','Workload','Level','TierLevel','Plane','CPPlatform','Owners') },
     [ordered]@{ base = 'PIM-Definitions-Services';        group = 'Definitions';  defaultHeader = @('GroupName','GroupDescription','GroupTag','AdministrativeUnitTag','IsRoleAssignable','Workload','Level','TierLevel','Plane','CPPlatform','Owners') },
@@ -1216,9 +1334,22 @@ function Read-PimRows {
 function Write-PimCsvCustom {
     # Atomic write to <base>.custom.csv. Preserves header order; appends new columns at end.
     # Returns hashtable with path + counts.
+    #
+    # [AllowEmptyCollection()] on $Rows is REQUIRED, not cosmetic (audit finding BUG-05).
+    # An EMPTY row-set is a legitimate, product-DOCUMENTED outcome here: the empty-set
+    # guard refuses a wipe with 409 and tells the operator to "re-submit with confirm=true
+    # to proceed if intended" -- and without this attribute a Mandatory [object[]] rejects
+    # @() at BINDING time, so that sanctioned override died with
+    #   "Cannot bind argument to parameter 'Rows' because it is an empty array"
+    # surfacing as a 500. Same wall on the RESTORE path: this function is the restore
+    # script in Invoke-PimManagerSafeCommit, so undoing back to a zero-row snapshot failed
+    # too. The body below already handles zero rows correctly (both loops simply don't run
+    # and a header-only CSV is written). Do not "tidy" this attribute away.
+    # (The SQL writer, Set-PimSqlEntityRowsTransactional, was never affected -- its $Rows
+    # is optional with an @() default -- so this was file/CSV mode only.)
     param(
         [Parameter(Mandatory)][string]$BaseName,
-        [Parameter(Mandatory)][object[]]$Rows
+        [Parameter(Mandatory)][AllowEmptyCollection()][object[]]$Rows
     )
     $spec = Get-PimCsvSpec -BaseName $BaseName
     if (-not $spec) { throw "Unknown CSV base name: $BaseName" }
@@ -1592,21 +1723,61 @@ function Get-PimManagerBackupList {
 
 function Invoke-PimManagerBackupRestore {
     # Operator UNDO: replay a stored snapshot back over its entity (full-set replace,
-    # transactional). Returns @{ ok; entity; rowCount } or throws.
-    param([Parameter(Mandatory)][string]$Id)
-    if ($script:PimStorageMode -eq 'sql' -and $script:PimSqlCs) {
+    # transactional). Returns @{ ok; entity; rowCount; preRestoreSnapshotId } or throws.
+    #
+    # [Fix 5] A restore is itself a destructive write (it REPLACES the live set with the
+    # snapshot's set, so it can drop rows that exist now). It now (a) takes a PRE-RESTORE
+    # snapshot first, so a restore is itself undoable (it previously took none), and (b)
+    # runs the SAME empty-set / large-delta guard the commit path uses -- refusing to
+    # roll back to an empty / much-smaller set unless $Confirm is set.
+    param([Parameter(Mandatory)][string]$Id, [switch]$Confirm)
+    $sqlMode = ($script:PimStorageMode -eq 'sql' -and $script:PimSqlCs)
+    if ($sqlMode) {
         try { Initialize-PimBackupStore -ConnectionString $script:PimSqlCs } catch { }
         $snap = Get-PimSqlBackupSnapshot -ConnectionString $script:PimSqlCs -Id $Id
-        if (-not $snap) { throw "snapshot '$Id' not found" }
-        $plan = Get-PimSnapshotRestorePlan -Snapshot $snap
-        [void](Set-PimSqlEntityRowsTransactional -ConnectionString $script:PimSqlCs -Entity $plan.entity -Base $plan.base -Rows @($plan.rows))
-        return @{ ok = $true; entity = $plan.entity; rowCount = @($plan.rows).Count }
+    } else {
+        $snap = Get-PimFileBackupSnapshot -Id $Id
     }
-    $snap = Get-PimFileBackupSnapshot -Id $Id
     if (-not $snap) { throw "snapshot '$Id' not found" }
     $plan = Get-PimSnapshotRestorePlan -Snapshot $snap
-    [void](Write-PimCsvCustom -BaseName $plan.base -Rows @($plan.rows))
-    return @{ ok = $true; entity = $plan.entity; rowCount = @($plan.rows).Count }
+
+    # Current live rows for this entity (the 'before' of the restore).
+    $curRows = @()
+    try {
+        if ($sqlMode) { $curRows = @(Get-PimSqlRows -ConnectionString $script:PimSqlCs -Entity $plan.entity) }
+        else          { $curRows = @((Read-PimRows -BaseName $plan.base).rows) }
+    } catch { $curRows = @() }
+
+    # [Fix 5] empty-set / large-delta guard on the restore (restore is a full-set
+    # replace; rows in the live set but not in the snapshot are removed).
+    if (Get-Command Test-PimCommitDeltaGuard -ErrorAction SilentlyContinue) {
+        $restoreCount = @($plan.rows).Count
+        $removed = [Math]::Max(0, (@($curRows).Count) - $restoreCount)
+        $g = Test-PimCommitDeltaGuard -BeforeCount (@($curRows).Count) -AfterCount $restoreCount -RemoveCount $removed -Confirm:$Confirm
+        if (-not $g.allowed) {
+            throw "restore refused: $($g.reason)"
+        }
+    }
+
+    # [Fix 5] PRE-RESTORE snapshot so the restore is itself undoable.
+    $preId = ''
+    try {
+        $who = try { [System.Security.Principal.WindowsIdentity]::GetCurrent().Name } catch { $env:USERNAME }
+        $curHeader = @()
+        if (-not $sqlMode) { try { $curHeader = @((Read-PimRows -BaseName $plan.base).header) } catch { $curHeader = @() } }
+        else { $spec = Get-PimCsvSpec -BaseName $plan.entity; if ($spec) { $curHeader = @($spec.defaultHeader) } }
+        $preSnap = New-PimCommitSnapshot -Entity $plan.entity -Base $plan.base -Rows @($curRows) -Header @($curHeader) -By "$who" -Reason ("pre-restore of snapshot $Id")
+        if ($sqlMode) { Save-PimSqlBackupSnapshot -ConnectionString $script:PimSqlCs -Snapshot $preSnap | Out-Null }
+        else          { Save-PimFileBackupSnapshot -Snapshot $preSnap | Out-Null }
+        $preId = "$($preSnap.snapshotId)"
+    } catch { Write-Warning "  [restore] pre-restore snapshot failed (non-fatal): $($_.Exception.Message)" }
+
+    if ($sqlMode) {
+        [void](Set-PimSqlEntityRowsTransactional -ConnectionString $script:PimSqlCs -Entity $plan.entity -Base $plan.base -Rows @($plan.rows))
+    } else {
+        [void](Write-PimCsvCustom -BaseName $plan.base -Rows @($plan.rows))
+    }
+    return @{ ok = $true; entity = $plan.entity; rowCount = @($plan.rows).Count; preRestoreSnapshotId = $preId }
 }
 
 # ---------------------------------------------------------------------------
@@ -1880,6 +2051,113 @@ function Get-PimManagerAlertFeed {
     try { return @(Read-PimAlertFeedFile -FeedFile (Get-PimManagerAlertFeedPath)) } catch { return @() }
 }
 
+
+# ===========================================================================
+# ACCOUNTS & TAP -- read the live TAP state, and re-issue one on request.
+#
+# 🔴 WHY THIS EXISTS (BUG-66, measured live on the master tenant 2026-08-13).
+# An account whose TAP has EXPIRED can never get another one from the engine.
+# The AdminTap scope counts ANY temporaryAccessPassMethods entry as "this
+# account has a TAP" and its Equal is hardcoded $true, so an expired, unusable
+# TAP classifies the account as satisfied: the scope reported ok=True on six
+# consecutive runs while minting nothing, and the admin had no way to obtain a
+# credential ever again. Deleting the dead method by hand re-armed it and the
+# next tick minted a usable TAP within seconds.
+#
+# 🔑 Entra allows exactly ONE TAP per user, so "reset" is necessarily
+# DELETE-then-CREATE. That is what was done by hand to recover the master; this
+# is that recovery, made a first-class, audited, one-click operation.
+#
+# 📌 A BUTTON, NOT AN AUTO-REMINT -- and that distinction is the whole design.
+# BUG-66's fix shape was held for an operator decision because re-minting on
+# expiry would make a tenant that CANNOT SEND MAIL mint a fresh undeliverable
+# credential on every cycle. A human pressing a button is a deliberate,
+# one-at-a-time re-issue, so it carries none of that risk.
+# ===========================================================================
+
+# 📌 Test-PimTapMailReady MOVED to engine/_shared/PIM-Notify.ps1 (2026-08-20), which this file
+# already dot-sources above. It is now shared with the ENGINE's AdminTap provider, which needs the
+# identical refuse-before-minting decision. Two copies of a guard that decides whether a CREDENTIAL
+# is issued would drift, and the drift would be invisible until one of them minted something
+# undeliverable.
+
+function Get-PimAdminTapState {
+    <#
+      Every admin row that asks for a TAP (CreateTAP=true), with the LIVE state
+      of its TAP read from Graph.
+
+      status is one of:
+        usable   -- a TAP exists and Entra reports it usable
+        expired  -- a TAP exists but is NOT usable (the BUG-66 case: the engine
+                    treats this as satisfied and will never replace it)
+        none     -- no TAP exists; the engine will mint one on its next run
+        unknown  -- Graph could not be read for this account. NOT the same as
+                    'none', and it must never be shown as one: acting on a
+                    guess here either double-issues or hides a dead credential.
+    #>
+    $rows = @()
+    try { $rows = @((Read-PimRows 'Account-Definitions-Admins').rows) } catch { $rows = @() }
+    $wanted = @($rows | Where-Object { "$($_.CreateTAP)" -match '(?i)^\s*(true|yes|1)\s*$' })
+
+    $canGraph = [bool](Get-Command Invoke-PimGraph -ErrorAction SilentlyContinue)
+    $out = New-Object System.Collections.Generic.List[object]
+    foreach ($r in $wanted) {
+        $upn = "$($r.UserPrincipalName)".Trim()
+        if (-not $upn) { continue }
+        $mgr = "$($r.ManagerEmail)".Trim()
+        $hrs = 0; [void][int]::TryParse("$($r.TAPLifetimeHours)", [ref]$hrs); if ($hrs -le 0) { $hrs = 4 }
+
+        $mailChk = Test-PimTapMailReady -Recipient $mgr
+        $status = 'unknown'; $detail = ''; $created = ''
+        if ($canGraph) {
+            try {
+                $uid = (Invoke-PimGraph -Path "/users/$upn`?`$select=id").id
+                if (-not "$uid".Trim()) {
+                    $status = 'unknown'; $detail = 'account not found in the directory (not yet created?)'
+                } else {
+                    # -All is LOAD-BEARING here for the same reason as in the engine
+                    # provider (BUG-51): without it this returns the response WRAPPER,
+                    # and @(wrapper).Count is 1 even when the user has NO TAP.
+                    $taps = @(Invoke-PimGraph -All -Path "/users/$uid/authentication/temporaryAccessPassMethods")
+                    if (-not $taps.Count) {
+                        $status = 'none'; $detail = 'no TAP -- the engine mints one on its next run'
+                    } else {
+                        $t = $taps[0]
+                        $created = "$($t.createdDateTime)"
+                        # isUsable is the field BUG-66 turned on: an EXISTING TAP is not
+                        # the same as a USABLE one, and the engine cannot tell them apart.
+                        if ("$($t.isUsable)" -match '(?i)true') {
+                            $status = 'usable'; $detail = 'active'
+                        } else {
+                            $status = 'expired'
+                            $detail = "$($t.methodUsabilityReason)"
+                            if (-not $detail) { $detail = 'not usable' }
+                        }
+                    }
+                }
+            } catch {
+                $status = 'unknown'; $detail = "Graph read failed: $($_.Exception.Message)"
+            }
+        } else {
+            $detail = 'no Graph client in this runtime'
+        }
+
+        [void]$out.Add([ordered]@{
+            userPrincipalName = $upn
+            displayName       = "$($r.DisplayName)"
+            managerEmail      = $mgr
+            tapLifetimeHours  = $hrs
+            status            = $status
+            detail            = $detail
+            createdDateTime   = $created
+            # Surfaced per-row so the UI can disable the button and SAY WHY, rather
+            # than letting the operator press it and collect a 409 they must decode.
+            mailReady         = $mailChk.ok
+            mailReason        = $mailChk.reason
+        })
+    }
+    return $out.ToArray()
+}
 function Send-PimManagerAlert {
     # Fan an alert out to every configured recipient for ONE event type, through the
     # existing Send-PimNotifyMail path (the 'alert-notice' template). Honours the
@@ -2042,6 +2320,32 @@ function Set-PimFeatureFlags {
 }
 
 # ---------------------------------------------------------------------------
+# Governance PREVIEW gate -- the "show the surface, safely OFF" map for the two
+# security-sensitive governance surfaces. Persisted under pim.Settings
+# 'GovernancePreview' through the SAME store every other setting uses, so the
+# boot-injected GUI value == the value the endpoint guard reads. Default OFF for
+# both (Resolve-PimGovernancePreview applies the shipped defaults on an empty
+# store). Read at page boot so a Settings toggle takes effect on the next reload.
+# ---------------------------------------------------------------------------
+function Get-PimGovernancePreview {
+    # Returns @{ flags=<id->bool>; enabled=<...>; catalog=<...>; anyEnabled=<bool>; warnings=<...> }.
+    # Always fully populated (defaults OFF applied) even on an empty store.
+    $raw = $null
+    try { $raw = Get-PimManagerSetting -Name 'GovernancePreview' } catch {}
+    return (Resolve-PimGovernancePreview -Raw $raw)
+}
+
+function Set-PimGovernancePreview {
+    # Persist a (partial/full) preview map. Reduce to the MINIMAL override set
+    # (only flags differing from the OFF default) FIRST, then store under { flags }.
+    # A default install persists {} (stays OFF). Returns the same shape as Get-.
+    param([object]$Flags)
+    $overrides = ConvertTo-PimGovernancePreviewOverrides -Raw $Flags
+    Set-PimManagerSetting -Name 'GovernancePreview' -Value ([ordered]@{ flags = $overrides })
+    return (Get-PimGovernancePreview)
+}
+
+# ---------------------------------------------------------------------------
 # Feature CUSTOMIZATION + LICENSE (REQUIREMENTS s29/s30). The catalog of
 # customizable CAPABILITIES (tier core|advanced, license free|pro, group/chapter,
 # kill switch, dependsOn) + the active EDITION. Persisted in the SAME pim.Settings
@@ -2058,10 +2362,21 @@ function Get-PimFeatureGates {
     $res = Resolve-PimFeatureGate -Raw $raw
     $edition = Get-PimActiveEdition
     $catalog = @(Get-PimFeatureCatalog)
+    # Is the Pro gate actually ENFORCED this session? It ships OFF -- Pro is free, with no
+    # nag and no block -- and only an internal harness turns it on. The GUI used to ignore
+    # this entirely and lock every Pro row on EDITION alone, so an admin saw a "Requires
+    # Pro" padlock, with the toggle DISABLED, on features the backend would have run
+    # happily. The lock was not merely cosmetic: it prevented enabling a working feature.
+    $licenseEnforced = $false
+    if (Get-Command Test-PimProLicenseEnforced -ErrorAction SilentlyContinue) {
+        try { $licenseEnforced = [bool](Test-PimProLicenseEnforced) } catch { $licenseEnforced = $false }
+    }
     $effective = [ordered]@{}
     foreach ($k in $res.effective.Keys) {
         $e = $res.effective[$k]
-        $licensed = (Test-PimEditionCoversLicense -License "$($e.license)" -Edition $edition)
+        # When enforcement is OFF, every feature is licensed -- that IS the shipped policy,
+        # and it now matches Test-PimFeatureAllowed, which returns true for everything.
+        $licensed = (-not $licenseEnforced) -or (Test-PimEditionCoversLicense -License "$($e.license)" -Edition $edition)
         $available = ([bool]$e.enabled -and $licensed) -or ("$($e.tier)" -eq 'core')
         $effective[$k] = [ordered]@{
             key=$e.key; label=$e.label; group=$e.group; tier=$e.tier; license=$e.license
@@ -2074,6 +2389,8 @@ function Get-PimFeatureGates {
         effective        = $effective
         catalog          = $catalog
         edition          = $edition
+        # Surfaced so the GUI can stop inventing a restriction the engine does not apply.
+        licenseEnforced  = [bool]$licenseEnforced
         editions         = @($script:PimEditionNames)
         dependencyIssues = @(Get-PimFeatureDependencyIssues -GateState $res -Edition $edition)
         warnings         = @($res.warnings)
@@ -3597,8 +3914,12 @@ function Invoke-StaticHtml {
     # (the resolver applies the catalog defaults + always-on guard on a null store).
     $featureFlagsJson = '{}'
     try { $featureFlagsJson = ConvertTo-PimJson -Body (Get-PimFeatureFlags) } catch { }
+    # Governance preview gate: static mode has no store, so the resolver bakes the
+    # shipped defaults (both previews OFF) on a null store.
+    $govPreviewJson = '{}'
+    try { $govPreviewJson = ConvertTo-PimJson -Body (Get-PimGovernancePreview) } catch { }
     $html = [System.IO.File]::ReadAllText($template, [System.Text.UTF8Encoding]::new($true))
-    $html = $html.Replace('__PIM_DATA__', $json).Replace('__PIM_TOKEN__', '').Replace('__PIM_MODE__', 'static').Replace('__PIM_NAMING__', $namingJson).Replace('__PIM_TENANT_LISTS__', $tenantJson).Replace('__PIM_INSTANCES__', $instJson).Replace('__PIM_VERSION__', (Get-PimSolutionVersion)).Replace('__PIM_ROLE__', '{"role":"Reader","identity":"static","source":"static mode"}').Replace('__PIM_FEATUREFLAGS__', $featureFlagsJson)
+    $html = $html.Replace('__PIM_DATA__', $json).Replace('__PIM_TOKEN__', '').Replace('__PIM_MODE__', 'static').Replace('__PIM_NAMING__', $namingJson).Replace('__PIM_TENANT_LISTS__', $tenantJson).Replace('__PIM_INSTANCES__', $instJson).Replace('__PIM_VERSION__', (Get-PimSolutionVersion)).Replace('__PIM_ROLE__', '{"role":"Reader","identity":"static","source":"static mode"}').Replace('__PIM_FEATUREFLAGS__', $featureFlagsJson).Replace('__PIM_GOVPREVIEW__', $govPreviewJson)
 
     if (-not $OutHtml) {
         $OutHtml = Join-Path ([IO.Path]::GetTempPath()) ("pim-manager-{0}.html" -f ([Guid]::NewGuid().ToString('N').Substring(0,8)))
@@ -3741,6 +4062,31 @@ function Write-JsonResponse {
     } catch {
         Write-Host ("  [net] client gone before response could be written ({0} bytes, status {1}): {2}" -f $bytes.Length, $Status, $_.Exception.Message) -ForegroundColor DarkGray
     }
+}
+
+# Governance-preview server-side guard. The two security-sensitive governance
+# surfaces are OFF BY DEFAULT (pim.Settings 'GovernancePreview'); while a surface
+# is in preview-disabled state, its MUTATING endpoints must SHORT-CIRCUIT (do
+# nothing, return a 409 "preview disabled" marker) so the GUI-disabled state ==
+# actual behaviour. This is a belt-and-braces backstop in case a request reaches a
+# mutating endpoint despite the GUI banner. Returns $true (and writes the response)
+# when the call is blocked; $false when the surface is enabled and may proceed.
+function Test-PimGovernancePreviewBlocked {
+    param(
+        [Parameter(Mandatory)][System.Net.HttpListenerResponse]$Response,
+        [Parameter(Mandatory)][ValidateSet('approvalsPreview','conformancePreview')][string]$FlagId,
+        [string]$Surface = ''
+    )
+    if (-not (Get-Command Resolve-PimGovernancePreview -ErrorAction SilentlyContinue)) { return $false }
+    $prev = $null
+    try { $prev = Get-PimGovernancePreview } catch { return $false }
+    if (Test-PimGovernancePreviewEnabled -Resolved $prev -Id $FlagId) { return $false }   # enabled -> proceed
+    $what = if ($Surface) { $Surface } else { $FlagId }
+    Write-JsonResponse -Response $Response -Status 409 -Body ([ordered]@{
+        ok = $false; previewDisabled = $true; flag = $FlagId
+        error = "This governance surface ($what) is in PREVIEW and is disabled by default. No action was taken. Enable it under Settings -> Governance preview to use it."
+    })
+    return $true
 }
 
 function Write-HtmlResponse {
@@ -4621,6 +4967,19 @@ function Invoke-Server {
     # Stale here == a deploy that didn't actually roll the image (the "stuck on
     # 2.4.222" case) and is a HARD FAIL in the smoke.
     Write-Host ("  [version] PIM Manager {0} (from VERSION)" -f (Get-PimSolutionVersion)) -ForegroundColor Cyan
+
+    # SEC-01 -- state the AUTHENTICATION POSTURE at boot, loudly, so which layer is
+    # actually protecting this Manager is never a guess. The hosted smoke greps this
+    # line. 'EDGE-CONSISTENCY ONLY' is a real warning, not decoration: it means the app
+    # still assumes the auth edge is in front of it.
+    if (Get-Command Test-PimHostedAuthPosture -ErrorAction SilentlyContinue) {
+        $posture = Test-PimHostedAuthPosture -Hosted ([bool]$script:PimHosted)
+        $pc = 'Green'; if (-not $posture.ok) { $pc = 'Yellow' }
+        Write-Host ("  [auth] posture={0}" -f $posture.level) -ForegroundColor $pc
+        foreach ($ln in ("$($posture.message)" -split "`r?`n")) { Write-Host ("  [auth] " + $ln) -ForegroundColor $pc }
+    } elseif ($script:PimHosted) {
+        Write-Host "  [auth] posture=UNKNOWN -- PIM-HostedAuth.ps1 not loaded; hosted principals will be REFUSED (failing closed)." -ForegroundColor Red
+    }
     $token = [Guid]::NewGuid().ToString('N')
 
     $listener = $null
@@ -4784,6 +5143,20 @@ function Handle-Request {
     # GET / -- serve the SPA. The token is embedded in a <meta> tag so the
     # JS can read it without exposing it on the URL after the first hop.
     if ($path -eq '/' -and $method -eq 'GET') {
+        # SEC-01: this page bakes the /api bearer token into its HTML, so serving it
+        # unauthenticated made that token public -- two requests (GET / for the token,
+        # then any /api call with a forged principal header) reached SuperAdmin. In
+        # HOSTED mode the caller must therefore be a positively-trusted principal
+        # before the page (and with it the token) is handed over. LOCAL mode is
+        # unchanged: the listener binds to loopback and identity is the Windows user.
+        if ($script:PimHosted -and -not "$script:CurrentRequestPrincipal".Trim()) {
+            Write-Host "  [auth] DENIED GET / -- no trusted principal (hosted)" -ForegroundColor Red
+            Write-JsonResponse -Response $resp -Status 401 -Body @{
+                error = 'unauthorized'
+                detail = 'no authenticated principal -- this app must be reached through its authentication edge'
+            }
+            return 401
+        }
         $data = Build-PimGraphData
         $json = ConvertTo-PimJson -Body $data
         # Settings admin area (§11): default-seed naming + filters at first page
@@ -4810,8 +5183,13 @@ function Handle-Request {
         # to an empty object so the resolver applies pure defaults (never nav-less).
         $featureFlagsJson = '{}'
         try { $featureFlagsJson = ConvertTo-PimJson -Body (Get-PimFeatureFlags) } catch { Write-Warning "feature-flags boot skipped: $($_.Exception.Message)" }
+        # Governance preview gate baked at boot so each surface renders its disabled/
+        # preview banner BEFORE first paint, from the SAME store the endpoint guard
+        # reads. Best-effort -> {} so the resolver applies the OFF defaults.
+        $govPreviewJson = '{}'
+        try { $govPreviewJson = ConvertTo-PimJson -Body (Get-PimGovernancePreview) } catch { Write-Warning "governance-preview boot skipped: $($_.Exception.Message)" }
         $modeLabel = if ($script:PimStorageMode -eq 'sql') { "SQL: $($global:PIM_SqlDatabase)" } else { 'server' }
-        $html = $html.Replace('__PIM_DATA__', $json).Replace('__PIM_TOKEN__', $ExpectedToken).Replace('__PIM_MODE__', $modeLabel).Replace('__PIM_NAMING__', $namingJson).Replace('__PIM_TENANT_LISTS__', $tenantJson).Replace('__PIM_INSTANCES__', $instJson).Replace('__PIM_VERSION__', (Get-PimSolutionVersion)).Replace('__PIM_ROLE__', $roleJson).Replace('__PIM_FEATUREFLAGS__', $featureFlagsJson)
+        $html = $html.Replace('__PIM_DATA__', $json).Replace('__PIM_TOKEN__', $ExpectedToken).Replace('__PIM_MODE__', $modeLabel).Replace('__PIM_NAMING__', $namingJson).Replace('__PIM_TENANT_LISTS__', $tenantJson).Replace('__PIM_INSTANCES__', $instJson).Replace('__PIM_VERSION__', (Get-PimSolutionVersion)).Replace('__PIM_ROLE__', $roleJson).Replace('__PIM_FEATUREFLAGS__', $featureFlagsJson).Replace('__PIM_GOVPREVIEW__', $govPreviewJson)
         Write-HtmlResponse -Response $resp -Html $html
         # Record a login the first time this identity opens the Manager (Audit tab
         # "Logins" category). Deduped per identity per session; best-effort.
@@ -4922,6 +5300,9 @@ function Handle-Request {
                 $rowsRaw = @()
                 if ($body -and $body.rows) { $rowsRaw = @($body.rows) }
                 $rowsOrdered = @($rowsRaw | ForEach-Object { ConvertTo-OrderedRow $_ } | Where-Object { $_ -ne $null })
+                # Explicit operator acknowledgement for the empty-set / large-delta guard.
+                $confirmDestructive = $false
+                if ($body -and ($null -ne $body.confirm) -and ("$($body.confirm)" -ieq 'true' -or "$($body.confirm)" -eq '1' -or $body.confirm -eq $true)) { $confirmDestructive = $true }
 
                 # Diff against current state (SQL or CSV) for the audit log AND the
                 # pre-commit snapshot ([M1]). Capture header too, so an undo restores
@@ -4931,6 +5312,70 @@ function Handle-Request {
                     @{ rows = @(Get-PimSqlRows -ConnectionString $script:PimSqlCs -Entity $base); header = $(if ($spec) { @($spec.defaultHeader) } else { @() }) }
                 } else { Read-PimRows -BaseName $base }
                 $diff = Compare-PimRowSets -Before $current.rows -After $rowsOrdered -Base $base
+
+                # -------------------------------------------------------------------
+                # SERVER-SIDE ENFORCEMENT (Batch 1) -- the GUI is NOT the only gate.
+                # The plain Review & Save / Create-wizard / Onboarding PUT is the SAME
+                # write path the authoring endpoints only PREVIEW; gate it here too.
+                # -------------------------------------------------------------------
+                # [Fix 1] MAKER/CHECKER on the general commit path: re-run the SAME gate
+                # the /api/authoring/* endpoints use, so a sensitive change committed via
+                # the plain PUT (bypassing the GUI's sensitivity check) is still blocked
+                # unless a second admin approved it. Non-sensitive -> allowed (idempotent;
+                # safe if the GUI already checked). The keyed diff's removes/adds drive the
+                # classification (a privileged-row removal/attach is sensitive).
+                if (Get-Command Test-PimAuthoringCommitAllowed -ErrorAction SilentlyContinue) {
+                    $gateRows = @()
+                    try { if (Get-Command Get-PimWriteAffectedRows -ErrorAction SilentlyContinue) { $gateRows = @(Get-PimWriteAffectedRows -Diff $diff) } } catch { $gateRows = @() }
+                    if (@($gateRows).Count -eq 0) { $gateRows = @($rowsOrdered) }
+                    $reqs = @()
+                    if (Get-Command Get-PimApprovalRequests -ErrorAction SilentlyContinue) { try { $reqs = @(Get-PimApprovalRequests) } catch {} }
+                    $mc = Test-PimAuthoringCommitAllowed -Action 'review-save' -Base $base -Rows $gateRows -Requests $reqs
+                    if (-not $mc.allowed) {
+                        Write-JsonResponse -Response $resp -Status 409 -Body ([ordered]@{
+                            ok = $false; base = $base; gate = "$($mc.gate)"; error = "$($mc.reason)"
+                            approvalRequired = $true; target = "$($mc.target)"; reasons = @($mc.reasons)
+                        })
+                        return 409
+                    }
+                }
+
+                # [Fix 2] PORTAL SCOPE on writes: a non-SuperAdmin delegated caller may
+                # only create/change/REMOVE rows inside their tier/level/service/scope.
+                # We validate EVERY affected row -- including removes (delete-by-omission
+                # of an out-of-scope row the caller can't see is rejected here).
+                $callerScope = Get-PimManagerCallerScope
+                if (-not $callerScope.isSuperAdmin -and $callerScope.profile -and (Get-Command Test-PimPortalRowsInScope -ErrorAction SilentlyContinue)) {
+                    $affected = @()
+                    try { if (Get-Command Get-PimWriteAffectedRows -ErrorAction SilentlyContinue) { $affected = @(Get-PimWriteAffectedRows -Diff $diff) } } catch { $affected = @() }
+                    $scopeCheck = Test-PimPortalRowsInScope -Profile $callerScope.profile -Rows $affected -Base $base -RequireManage
+                    if (-not $scopeCheck.allowed) {
+                        Write-JsonResponse -Response $resp -Status 403 -Body ([ordered]@{
+                            ok = $false; base = $base; error = "$($scopeCheck.reason)"; denied = @($scopeCheck.denied)
+                        })
+                        return 403
+                    }
+                    # Bound the after-set to what the caller may SEE so a scoped caller can
+                    # never silently introduce/keep rows outside their delegation.
+                    if (Get-Command Select-PimPortalVisibleRows -ErrorAction SilentlyContinue) {
+                        $rowsOrdered = @(Select-PimPortalVisibleRows -Profile $callerScope.profile -Rows $rowsOrdered -Base $base)
+                    }
+                }
+
+                # [Fix 5] EMPTY-SET / LARGE-DELTA guard (mirrors the engine disable-guard;
+                # the 53-user mass-disable precondition was an empty/over-broad desired set).
+                # Refuse a commit that empties the entity or removes more than the safety
+                # threshold of current rows, UNLESS the operator passed confirm=true.
+                if (Get-Command Test-PimCommitDeltaGuard -ErrorAction SilentlyContinue) {
+                    $deltaGuard = Test-PimCommitDeltaGuard -BeforeCount (@($current.rows).Count) -AfterCount (@($rowsOrdered).Count) -RemoveCount (@($diff.removes).Count) -Confirm:$confirmDestructive
+                    if (-not $deltaGuard.allowed) {
+                        Write-JsonResponse -Response $resp -Status 409 -Body ([ordered]@{
+                            ok = $false; base = $base; gate = "$($deltaGuard.rule)"; error = "$($deltaGuard.reason)"
+                            confirmRequired = $true; removeCount = [int]$deltaGuard.removeCount; beforeCount = (@($current.rows).Count); afterCount = (@($rowsOrdered).Count)
+                        })
+                        return 409
+                    }
+                }
 
                 # [M1] SAFE COMMIT: timestamped backup BEFORE the apply, all-or-nothing
                 # transactional apply, automatic rollback-to-snapshot on any failure.
@@ -5227,6 +5672,12 @@ function Handle-Request {
             # (or 0) reads the WHOLE history; each event carries a before/after
             # `change` summary. All resolved via the shared PIM-AuditQuery core so
             # the view + the CSV export (GET /api/audit/export) agree exactly.
+            # [Fix 4] GATE: the audit trail is sensitive (who did what across the whole
+            # tenant) -- require at least Admin (it previously had NO gate, only Bearer).
+            if (-not (Test-PimManagerRoleAtLeast -Minimum 'Admin')) {
+                Write-JsonResponse -Response $resp -Status 403 -Body @{ error = 'Admin role required to view the audit trail. See config/manager-access.custom.json.' }
+                return 403
+            }
             $script:lastHeartbeat = Get-Date
             $q = @{}
             foreach ($pair in ("$($req.Url.Query)".TrimStart('?') -split '&')) {
@@ -5282,6 +5733,12 @@ function Handle-Request {
             # -- including the before/after Change column. Honours the SAME
             # category/search/date/months filter the Audit tab is showing, so the
             # export equals "what I'm looking at, in full". Read-only.
+            # [Fix 4] GATE: full-trail export is sensitive -- require at least Admin
+            # (it previously had NO gate, only the Bearer token).
+            if (-not (Test-PimManagerRoleAtLeast -Minimum 'Admin')) {
+                Write-JsonResponse -Response $resp -Status 403 -Body @{ error = 'Admin role required to export the audit trail. See config/manager-access.custom.json.' }
+                return 403
+            }
             $script:lastHeartbeat = Get-Date
             $q = @{}
             foreach ($pair in ("$($req.Url.Query)".TrimStart('?') -split '&')) {
@@ -5417,6 +5874,7 @@ function Handle-Request {
         # DIFFERENT human must approve before any controlled execution is possible.
         if ($path -eq '/api/approvals' -and $method -eq 'POST') {
             $script:lastHeartbeat = Get-Date
+            if (Test-PimGovernancePreviewBlocked -Response $resp -FlagId 'approvalsPreview' -Surface 'Approvals') { return 409 }
             if (-not (Test-PimManagerRoleAtLeast -Minimum 'Admin')) {
                 Write-JsonResponse -Response $resp -Status 403 -Body @{ error = 'Admin role required to raise an approval request.' }
                 return 403
@@ -5456,6 +5914,7 @@ function Handle-Request {
         # scoped, audited execution becomes possible later (still gated, never automatic).
         if ($path -eq '/api/approvals/decide' -and $method -eq 'POST') {
             $script:lastHeartbeat = Get-Date
+            if (Test-PimGovernancePreviewBlocked -Response $resp -FlagId 'approvalsPreview' -Surface 'Approvals') { return 409 }
             if (-not (Test-PimManagerRoleAtLeast -Minimum 'Admin')) {
                 Write-JsonResponse -Response $resp -Status 403 -Body @{ error = 'Admin role required to approve or deny a request.' }
                 return 403
@@ -5505,6 +5964,7 @@ function Handle-Request {
         # can never run twice. A blocked execution returns 409 with the gate that refused it.
         if ($path -eq '/api/approvals/execute' -and $method -eq 'POST') {
             $script:lastHeartbeat = Get-Date
+            if (Test-PimGovernancePreviewBlocked -Response $resp -FlagId 'approvalsPreview' -Surface 'Approvals') { return 409 }
             if (-not (Test-PimManagerRoleAtLeast -Minimum 'Admin')) {
                 Write-JsonResponse -Response $resp -Status 403 -Body @{ error = 'Admin role required to execute an approved offboard.' }
                 return 403
@@ -6364,6 +6824,44 @@ function Handle-Request {
             }
         }
 
+        # Governance PREVIEW gate -- the "show the surface, safely OFF" toggle for the
+        # two security-sensitive governance surfaces. Default OFF for both. SAME store
+        # the boot value + endpoint guard read, so a toggle here flips the GUI banner
+        # AND un-gates the endpoints on the next reload (GUI state == behaviour).
+        if ($path -eq '/api/settings/governance-preview' -and $method -eq 'GET') {
+            $script:lastHeartbeat = Get-Date
+            try {
+                Write-JsonResponse -Response $resp -Status 200 -Body (Get-PimGovernancePreview)
+                return 200
+            } catch {
+                Write-JsonResponse -Response $resp -Status 500 -Body @{ error = "$($_.Exception.Message)" }
+                return 500
+            }
+        }
+
+        if ($path -eq '/api/settings/governance-preview' -and $method -eq 'PUT') {
+            $script:lastHeartbeat = Get-Date
+            if (-not (Test-PimManagerRoleAtLeast -Minimum 'SuperAdmin')) {
+                Write-JsonResponse -Response $resp -Status 403 -Body @{ error = 'SuperAdmin role required to change the governance preview.' }
+                return 403
+            }
+            $body = Read-RequestJson -Request $req
+            $payload = if ($body -and $body.PSObject.Properties['value']) { $body.value } else { $body }
+            try {
+                $cfg = Set-PimGovernancePreview -Flags $payload
+                $enabledIds = @()
+                foreach ($k in $cfg.flags.Keys) { if ([bool]$cfg.flags[$k]) { $enabledIds += "$k" } }
+                Write-PimManagerAuditEvent -Action 'settings.governance-preview.save' -Target 'settings:governance-preview' -After ([ordered]@{
+                    enabled = ($enabledIds -join ',')
+                }) -Result 'ok'
+                Write-JsonResponse -Response $resp -Status 200 -Body $cfg
+                return 200
+            } catch {
+                Write-JsonResponse -Response $resp -Status 500 -Body @{ ok = $false; error = "$($_.Exception.Message)" }
+                return 500
+            }
+        }
+
         # -------------------------------------------------------------------
         # Feature customization (REQUIREMENTS s29) -- the per-feature kill switch
         # over the unified capability catalog. GET returns the effective gate map
@@ -6614,6 +7112,150 @@ function Handle-Request {
             return 200
         }
 
+        if ($path -eq '/api/admin-tap' -and $method -eq 'GET') {
+            $script:lastHeartbeat = Get-Date
+            # Read-only view of who holds a usable TAP, a dead one, or none. Gated at
+            # Reader like the other read surfaces -- it exposes no credential, only state.
+            $rows = @()
+            try { $rows = @(Get-PimAdminTapState) } catch {
+                Write-JsonResponse -Response $resp -Status 500 -Body @{ error = "could not read admin TAP state: $($_.Exception.Message)" }
+                return 500
+            }
+            Write-JsonResponse -Response $resp -Status 200 -Body @{
+                ok        = $true
+                admins    = $rows
+                canReset  = (Test-PimManagerRoleAtLeast -Minimum 'Admin')
+                mailSender = "$($global:PIM_MailSender)".Trim()
+            }
+            return 200
+        }
+
+        if ($path -eq '/api/admin-tap/reset' -and $method -eq 'POST') {
+            $script:lastHeartbeat = Get-Date
+            # Operator decision 2026-08-19: gated at ADMIN. A TAP is time-boxed and is
+            # delivered ONLY to the ManagerEmail recorded on the admin row, so the blast
+            # radius is bounded; routine "my TAP expired" recovery should not need the
+            # break-glass role. The gate is SERVER-SIDE because that is the only side that
+            # counts -- the button is also hidden client-side, but hiding is not enforcing.
+            if (-not (Test-PimManagerRoleAtLeast -Minimum 'Admin')) {
+                Write-JsonResponse -Response $resp -Status 403 -Body @{ error = 'Admin role required to re-issue a Temporary Access Pass' }
+                return 403
+            }
+            $body = Read-RequestJson -Request $req
+            $upn  = "$($body.userPrincipalName)".Trim()
+            if (-not $upn) {
+                Write-JsonResponse -Response $resp -Status 400 -Body @{ error = 'userPrincipalName is required' }
+                return 400
+            }
+
+            # The row is the AUTHORITY for who may be issued a TAP and where it goes.
+            # Never take the recipient from the request body: that would turn this into
+            # "mail a credential for any admin to any address I name".
+            $row = @(Get-PimAdminTapState | Where-Object { $_.userPrincipalName -eq $upn })
+            if (-not $row.Count) {
+                Write-JsonResponse -Response $resp -Status 404 -Body @{ error = "'$upn' is not an admin row with CreateTAP=true -- refusing to issue a TAP for an account this solution does not manage" }
+                return 404
+            }
+            $row = $row[0]
+            $mgr = "$($row.managerEmail)".Trim()
+
+            # 🔴 REFUSE BEFORE MINTING when the mail cannot be delivered (operator decision
+            # 2026-08-19, and BUG-66's own words: "a re-issue that cannot be delivered should
+            # probably be REFUSED and REPORTED, not repeated"). Minting first and failing to
+            # send leaves a LIVE credential that nobody received and nobody knows exists --
+            # strictly worse than the expired TAP it replaced, which at least did nothing.
+            $mailChk = Test-PimTapMailReady -Recipient $mgr
+            if (-not $mailChk.ok) {
+                Write-PimManagerAuditEvent -Action 'tap.reset.refused' -Target $upn -After @{ reason = $mailChk.reason }
+                Write-JsonResponse -Response $resp -Status 409 -Body @{
+                    error = "refusing to issue a TAP that cannot be delivered: $($mailChk.reason)"
+                    hint  = 'Nothing was changed -- the existing TAP (if any) is untouched. Fix mail delivery, then retry.'
+                }
+                return 409
+            }
+
+            if (-not (Get-Command Invoke-PimGraph -ErrorAction SilentlyContinue)) {
+                Write-JsonResponse -Response $resp -Status 503 -Body @{ error = 'no Graph client in this runtime -- cannot issue a TAP' }
+                return 503
+            }
+
+            try {
+                $uid = (Invoke-PimGraph -Path "/users/$upn`?`$select=id").id
+                if (-not "$uid".Trim()) { throw "account '$upn' not found in the directory" }
+
+                # Entra allows exactly ONE TAP per user, so an existing method -- usable or
+                # dead -- must be removed before a new one can be created. This is the step
+                # that was done by hand to recover the master tenant (BUG-66).
+                $removed = 0
+                $existing = @(Invoke-PimGraph -All -Path "/users/$uid/authentication/temporaryAccessPassMethods")
+                foreach ($e in $existing) {
+                    if (-not "$($e.id)".Trim()) { continue }
+                    Invoke-PimGraph -Method DELETE -Path "/users/$uid/authentication/temporaryAccessPassMethods/$($e.id)" | Out-Null
+                    $removed++
+                }
+
+                $hrs = [int]$row.tapLifetimeHours; if ($hrs -le 0) { $hrs = 4 }
+                $tap = Invoke-PimGraph -Method POST -Path "/users/$uid/authentication/temporaryAccessPassMethods" `
+                            -Body @{ isUsableOnce = $false; lifetimeInMinutes = ($hrs * 60) }
+
+                # Expiry computed the same way the engine's AdminTap provider does it --
+                # {{TapExpiresUtc}} is IN the shipped template, and a time-boxed credential
+                # that arrives without its deadline is missing the one fact it must carry.
+                $mins = 0; [void][int]::TryParse("$($tap.lifetimeInMinutes)", [ref]$mins)
+                $start = $null
+                if ("$($tap.startDateTime)".Trim()) {
+                    try { $start = [datetime]::Parse("$($tap.startDateTime)", [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind).ToUniversalTime() } catch { $start = $null }
+                }
+                if (-not $start) { $start = [datetime]::UtcNow }
+                $expires = if ($mins -gt 0) { $start.AddMinutes($mins).ToString('yyyy-MM-dd HH:mm:ss') + ' UTC' } else { '' }
+
+                $toks = @{
+                    UserPrincipalName  = $upn
+                    TapCode            = "$($tap.temporaryAccessPass)"
+                    TapStartLocal      = "$($tap.startDateTime)"
+                    TapStartUtc        = "$($tap.startDateTime)"
+                    TapLifetimeMinutes = "$($tap.lifetimeInMinutes)"
+                    TapExpiresUtc      = $expires
+                }
+                $mail = Send-PimNotifyMail -Type 'tap-delivery' -Tokens $toks -Recipient $mgr
+
+                # The pre-check passed and the send still failed. Say so loudly and in the
+                # audit trail: a live credential now exists that may not have been received,
+                # and the operator must know to deliver it another way or reset again.
+                $sent = [bool]$mail.sent
+                Write-PimManagerAuditEvent -Action 'tap.reset' -Target $upn -After @{
+                    removedExistingTaps = $removed
+                    lifetimeHours       = $hrs
+                    expiresUtc          = $expires
+                    recipient           = $mgr
+                    mailSent            = $sent
+                    mailReason          = "$($mail.reason)"
+                }
+                try { Send-PimManagerAlert -Event 'tap-reissued' -Title 'Temporary Access Pass re-issued' -Detail ("$upn -- new TAP expires $expires; mailed to $mgr (sent=$sent)") -LinkTab 'accounts' | Out-Null } catch {}
+
+                # 🔒 The TAP CODE ITSELF IS NEVER RETURNED. It goes to the recorded
+                # ManagerEmail and nowhere else -- not to the browser, not to the response,
+                # not into the audit record. A credential in an HTTP response is a credential
+                # in a proxy log, a screenshot and a session history.
+                Write-JsonResponse -Response $resp -Status 200 -Body @{
+                    ok                  = $true
+                    userPrincipalName   = $upn
+                    removedExistingTaps = $removed
+                    expiresUtc          = $expires
+                    lifetimeHours       = $hrs
+                    mailSent            = $sent
+                    mailReason          = "$($mail.reason)"
+                    note                = if ($sent) { "A new TAP was issued and mailed to $mgr. It expires $expires." }
+                                          else { "A new TAP was issued but the mail did NOT send ($($mail.reason)). The code was not displayed -- reset again once mail works." }
+                }
+                return 200
+            } catch {
+                Write-PimManagerAuditEvent -Action 'tap.reset.failed' -Target $upn -After @{ error = "$($_.Exception.Message)" }
+                Write-JsonResponse -Response $resp -Status 500 -Body @{ error = "TAP re-issue failed: $($_.Exception.Message)" }
+                return 500
+            }
+        }
+
         if ($path -eq '/api/emergency-status' -and $method -eq 'GET') {
             $script:lastHeartbeat = Get-Date
             $ovFile = Join-Path $script:configRoot 'emergency-override.custom.json'
@@ -6843,6 +7485,89 @@ function Handle-Request {
         # picks it up; the scheduler/engine hydrate it from SQL settings at boot.
         # GET = any role; PUT = SuperAdmin only.
         # -------------------------------------------------------------------
+        # -------------------------------------------------------------------
+        # MSP DOWNLINK (control #1/#2, framework MSP-2).
+        #   GET  /api/downlink         -- per-relationship plan: projected / excluded /
+        #                                 unresolved / groups, straight off the PURE core.
+        #   PUT  /api/downlink/policy  -- edit the per-relationship projection policy
+        #                                 (SuperAdmin, audited). Master registry rows.
+        #   POST /api/downlink/run     -- dry-run or apply (SuperAdmin for apply, audited).
+        #
+        # 🔒 THE DECISION IS THE ENGINE'S, NOT THE GUI'S. Every one of these composes
+        # Get-PimDownlinkPlan over the SIGNED baseline. The GUI renders what comes back.
+        # A second opinion computed in the browser could disagree with what the apply
+        # then writes -- and the subject of the disagreement is privilege in someone
+        # else's tenant.
+        # -------------------------------------------------------------------
+        if ($path -eq '/api/downlink' -and $method -eq 'GET') {
+            $script:lastHeartbeat = Get-Date
+            try {
+                $dl = Get-PimManagerDownlinkOverview
+                Write-JsonResponse -Response $resp -Status 200 -Body $dl
+                return 200
+            } catch {
+                Write-JsonResponse -Response $resp -Status 500 -Body @{ error = "downlink overview failed: $($_.Exception.Message)" }
+                return 500
+            }
+        }
+
+        if ($path -eq '/api/downlink/policy' -and $method -eq 'PUT') {
+            $script:lastHeartbeat = Get-Date
+            if (-not (Test-PimManagerRoleAtLeast -Minimum 'SuperAdmin')) {
+                Write-JsonResponse -Response $resp -Status 403 -Body @{ error = 'SuperAdmin role required to change a projection policy.' }
+                return 403
+            }
+            $body = Read-RequestJson -Request $req
+            $tid = "$($body.tenantId)".Trim()
+            if (-not $tid) { Write-JsonResponse -Response $resp -Status 400 -Body @{ error = 'tenantId is required.' }; return 400 }
+            $rules = @()
+            foreach ($r in @($body.policy)) {
+                $m = "$($r.Mode)".Trim().ToLowerInvariant()
+                $t = "$($r.GroupTag)".Trim()
+                # Fail CLOSED on a bad mode rather than coercing it: silently turning an
+                # unknown mode into 'allow' would widen a projection nobody asked to widen.
+                if ($m -notin @('allow','deny')) { Write-JsonResponse -Response $resp -Status 400 -Body @{ error = "invalid Mode '$($r.Mode)' -- must be allow or deny." }; return 400 }
+                if (-not $t) { Write-JsonResponse -Response $resp -Status 400 -Body @{ error = 'each rule needs a GroupTag.' }; return 400 }
+                $rules += ,([ordered]@{ Mode = $m; GroupTag = $t })
+            }
+            try {
+                $before = @(Get-PimManagerDownlinkPolicy -TenantId $tid)
+                Set-PimManagerDownlinkPolicy -TenantId $tid -Rules $rules
+                Write-PimManagerAuditEvent -Action 'downlink.policy.save' -Target $tid -Before @{ rules = $before } -After @{ rules = $rules } -Result 'ok'
+                Write-JsonResponse -Response $resp -Status 200 -Body ([ordered]@{ ok = $true; tenantId = $tid; policy = $rules })
+                return 200
+            } catch {
+                Write-JsonResponse -Response $resp -Status 500 -Body @{ error = "could not save the policy: $($_.Exception.Message)" }
+                return 500
+            }
+        }
+
+        if ($path -eq '/api/downlink/run' -and $method -eq 'POST') {
+            $script:lastHeartbeat = Get-Date
+            $body = Read-RequestJson -Request $req
+            $tid = "$($body.tenantId)".Trim()
+            $whatIf = $true
+            if ($null -ne $body.whatIf) { $whatIf = [bool]$body.whatIf }
+            if (-not $tid) { Write-JsonResponse -Response $resp -Status 400 -Body @{ error = 'tenantId is required.' }; return 400 }
+            # A dry run is readable by any role (it changes nothing); an APPLY writes
+            # privilege into a customer tenant and is SuperAdmin-only.
+            if (-not $whatIf -and -not (Test-PimManagerRoleAtLeast -Minimum 'SuperAdmin')) {
+                Write-JsonResponse -Response $resp -Status 403 -Body @{ error = 'SuperAdmin role required to run a downlink sync.' }
+                return 403
+            }
+            try {
+                $r = Invoke-PimManagerDownlinkRun -TenantId $tid -WhatIfMode:$whatIf
+                if (-not $whatIf) {
+                    Write-PimManagerAuditEvent -Action 'downlink.sync.run' -Target $tid -After @{ detail = "$($r.detail)"; ok = [bool]$r.ok } -Result $(if ($r.ok) { 'ok' } else { 'failed' })
+                }
+                Write-JsonResponse -Response $resp -Status 200 -Body $r
+                return 200
+            } catch {
+                Write-JsonResponse -Response $resp -Status 500 -Body @{ error = "downlink run failed: $($_.Exception.Message)" }
+                return 500
+            }
+        }
+
         if ($path -eq '/api/discovery-policy' -and $method -eq 'GET') {
             $script:lastHeartbeat = Get-Date
             # Known types the engine can classify (Resolve-PimDiscoveryResourceType)
@@ -7339,6 +8064,69 @@ function Handle-Request {
             }
             $script:lastHeartbeat = Get-Date
             $b = Read-RequestJson -Request $req
+            # [Fix 2] PORTAL SCOPE on authoring: a non-SuperAdmin delegated caller may
+            # only author against rows inside their tier/level/service/scope. We re-check
+            # the input rows a case operates on (clone source/template, the rows targeted
+            # for delete) so a delegated caller can't COMPUTE an out-of-scope change set
+            # to then save. SuperAdmin / no-profile bypass (the final write PUT re-checks
+            # too -- this just stops the plan being built out of scope). Cases whose input
+            # rows aren't derivable here are still gated at PUT.
+            # SEC-04 (2026-08-06): if the rows CANNOT BE READ, this now returns 403 rather
+            # than skipping the check. "Could not determine scope" is not "in scope".
+            $authScope = Get-PimManagerCallerScope
+            if (-not $authScope.isSuperAdmin -and $authScope.profile -and (Get-Command Test-PimPortalRowsInScope -ErrorAction SilentlyContinue)) {
+                $authRows = New-Object System.Collections.ArrayList
+                $authBase = "$($b.base)"
+                # SEC-04: distinguishes "there is nothing to authorise" from "we could NOT
+                # WORK OUT what to authorise". Only the second denies -- see below.
+                $authScopeUnknown = $false
+                $authScopeUnknownWhy = ''
+                switch ($path) {
+                    '/api/authoring/clone'            { if ($b.templateRow) { [void]$authRows.Add((ConvertTo-OrderedRow $b.templateRow)) } }
+                    '/api/authoring/clone-azure-role' { if ($b.sourceRow)   { [void]$authRows.Add((ConvertTo-OrderedRow $b.sourceRow)) } }
+                    '/api/authoring/delete-rows' {
+                        $dbase = "$($b.base)"; $authBase = $dbase
+                        if ($dbase -and (Get-PimCsvSpec -BaseName $dbase)) {
+                            try {
+                                $cur = @((Read-PimRows -BaseName $dbase).rows)
+                                foreach ($ix in @(@($b.indexes) | ForEach-Object { [int]$_ })) { if ($ix -ge 0 -and $ix -lt $cur.Count) { [void]$authRows.Add($cur[$ix]) } }
+                            } catch {
+                                # SEC-04: this read failing used to leave $authRows EMPTY, which
+                                # skipped the scope check below entirely -- it failed OPEN on a
+                                # delegation boundary. It now fails CLOSED: we cannot tell whether
+                                # the targeted rows are inside this caller's scope, and "don't know"
+                                # must never read as "allowed" on a security boundary.
+                                $authScopeUnknown = $true
+                                $authScopeUnknownWhy = "could not read the target rows for '$dbase'"
+                                if (Get-Command Write-PimSwallowed -ErrorAction SilentlyContinue) {
+                                    Write-PimSwallowed -Scope 'portal-scope-rows-read' -ErrorRecord $_ `
+                                        -Consequence ("could not read rows for '{0}' -- DENYING the request (403): scope cannot be verified" -f $dbase)
+                                }
+                            }
+                        }
+                    }
+                    default { foreach ($rr in @(@($b.rows) | ForEach-Object { ConvertTo-OrderedRow $_ })) { if ($rr) { [void]$authRows.Add($rr) } } }
+                }
+                # SEC-04: fail CLOSED when the scope could not be determined at all. Note
+                # this is NOT the same as an empty row set: a case with genuinely no rows
+                # to authorise (nothing selected, a table that is legitimately empty) still
+                # proceeds and is gated at PUT, exactly as before. Only an ERROR denies.
+                if ($authScopeUnknown) {
+                    Write-JsonResponse -Response $resp -Status 403 -Body ([ordered]@{
+                        ok = $false
+                        error = "portal scope could not be verified -- $authScopeUnknownWhy. Refusing rather than proceeding unchecked."
+                        denied = @()
+                    })
+                    return 403
+                }
+                if ($authRows.Count -gt 0) {
+                    $asr = Test-PimPortalRowsInScope -Profile $authScope.profile -Rows @($authRows.ToArray()) -Base $authBase -RequireManage
+                    if (-not $asr.allowed) {
+                        Write-JsonResponse -Response $resp -Status 403 -Body ([ordered]@{ ok = $false; error = "$($asr.reason)"; denied = @($asr.denied) })
+                        return 403
+                    }
+                }
+            }
             try {
                 switch ($path) {
                     '/api/authoring/bulk-attach' {
@@ -7748,6 +8536,11 @@ function Handle-Request {
             }
 
             if ($path -eq '/api/conformance/exemptions' -and $method -eq 'POST') {
+                # [Fix 4] GATE: ADD-exemption is a governance-bypass write and must require
+                # the SAME role as its siblings (approve / promote / exemptions/revoke), all
+                # SuperAdmin. It previously had NO role gate (only the preview-flag + Bearer).
+                if (-not (Test-PimManagerRoleAtLeast -Minimum 'SuperAdmin')) { Write-JsonResponse -Response $resp -Status 403 -Body @{ error = 'SuperAdmin role required to add a conformance exemption.' }; return 403 }
+                if (Test-PimGovernancePreviewBlocked -Response $resp -FlagId 'conformancePreview' -Surface 'Template Rollout') { return 409 }
                 $b = Read-RequestJson -Request $req
                 $cand = [pscustomobject]@{
                     tenantId = $confTenant; templateId = "$($b.templateId)"; itemKey = "$($b.itemKey)"
@@ -7787,6 +8580,7 @@ function Handle-Request {
             # only -- same gate as approve. Pure Remove-PimExemptionEntry filters the set;
             # an unknown key is an idempotent no-op (Removed=0). Audited.
             if ($path -eq '/api/conformance/exemptions/revoke' -and $method -eq 'POST') {
+                if (Test-PimGovernancePreviewBlocked -Response $resp -FlagId 'conformancePreview' -Surface 'Template Rollout') { return 409 }
                 if (-not (Test-PimManagerRoleAtLeast -Minimum 'SuperAdmin')) { Write-JsonResponse -Response $resp -Status 403 -Body @{ error = 'SuperAdmin role required' }; return 403 }
                 $b = Read-RequestJson -Request $req
                 $rk = "$($b.revokeKey)".Trim()
@@ -7805,6 +8599,7 @@ function Handle-Request {
             }
 
             if ($path -eq '/api/conformance/approve' -and $method -eq 'POST') {
+                if (Test-PimGovernancePreviewBlocked -Response $resp -FlagId 'conformancePreview' -Surface 'Template Rollout') { return 409 }
                 if (-not (Test-PimManagerRoleAtLeast -Minimum 'SuperAdmin')) { Write-JsonResponse -Response $resp -Status 403 -Body @{ error = 'SuperAdmin role required' }; return 403 }
                 $b = Read-RequestJson -Request $req
                 $file = & $findTplFile "$($b.templateId)"
@@ -7822,16 +8617,23 @@ function Handle-Request {
                 $b = Read-RequestJson -Request $req
                 $file = & $findTplFile "$($b.templateId)"
                 if (-not $file) { Write-JsonResponse -Response $resp -Status 400 -Body @{ error = 'unknown template' }; return 400 }
-                $tpl = ConvertTo-PimTemplate -Json ([System.IO.File]::ReadAllText($file, [System.Text.UTF8Encoding]::new($false)))
                 try {
-                    $pr = Set-PimEntryRing -Template $tpl -Key "$($b.key)" -Ring ([int]$b.ring)
-                    $pr | ConvertTo-Json -Depth 30 | Set-Content -LiteralPath $file -Encoding UTF8
+                    # BUG-06: edit the ring IN THE ORIGINAL TEXT rather than re-serializing the
+                    # whole template. The old object round-trip kept every field, but it
+                    # rewrote the entire file (1698 -> 2952 bytes under WinPS 5.1), collapsed
+                    # the curated hand-aligned entry columns, and `Set-Content -Encoding UTF8`
+                    # added a BOM to a file this codebase otherwise keeps BOM-less. On a
+                    # customer install the template is not in git, so there was no undo.
+                    $raw = [System.IO.File]::ReadAllText($file, [System.Text.UTF8Encoding]::new($false))
+                    $out = Set-PimEntryRingInJson -Json $raw -Key "$($b.key)" -Ring ([int]$b.ring)
+                    [System.IO.File]::WriteAllText($file, $out, (New-Object System.Text.UTF8Encoding($false)))
                     Write-JsonResponse -Response $resp -Status 200 -Body @{ ok = $true; key = "$($b.key)"; ring = [int]$b.ring }
                     return 200
                 } catch { Write-JsonResponse -Response $resp -Status 400 -Body @{ error = "$($_.Exception.Message)" }; return 400 }
             }
 
             if ($path -eq '/api/conformance/deploy' -and $method -eq 'POST') {
+                if (Test-PimGovernancePreviewBlocked -Response $resp -FlagId 'conformancePreview' -Surface 'Template Rollout') { return 409 }
                 if (-not (Test-PimManagerRoleAtLeast -Minimum 'SuperAdmin')) { Write-JsonResponse -Response $resp -Status 403 -Body @{ error = 'SuperAdmin role required' }; return 403 }
                 $b = Read-RequestJson -Request $req
                 $tpl = @(Read-PimApprovedTemplates -SourceDir $confTplDir -WarningAction SilentlyContinue | Where-Object { "$($_.templateId)" -eq "$($b.templateId)" })
@@ -8312,6 +9114,14 @@ function Handle-Request {
         # v2.4.2 Revoke tab endpoints
         # -------------------------------------------------------------------
         if ($path -like '/api/active-assignments*' -and $method -eq 'GET') {
+            # [Fix 3] GATE: this returns the WHOLE tenant's privileged active
+            # assignments -- it must require at least Admin (it previously had NO
+            # gate), and a non-SuperAdmin delegated caller must only see assignments
+            # inside their scope. The cache stays tenant-wide; we filter on the way out.
+            if (-not (Test-PimManagerRoleAtLeast -Minimum 'Admin')) {
+                Write-JsonResponse -Response $resp -Status 403 -Body @{ error = 'Admin role required to view active assignments. See config/manager-access.custom.json.' }
+                return 403
+            }
             $script:lastHeartbeat = Get-Date
             $forceRefresh = $false
             try {
@@ -8320,6 +9130,22 @@ function Handle-Request {
             } catch { }
             try {
                 $body = Get-PimActiveAssignmentsCached -Force:$forceRefresh
+                # Per-caller scope filter: a delegated (non-super) caller with a portal
+                # profile sees only the rows whose (derivable) facets are in scope.
+                # Principal-centric rows whose facets aren't derivable are KEPT (the
+                # write-side revoke gate still re-checks); placeable-but-out-of-scope
+                # rows are dropped here so a delegated caller never even enumerates them.
+                $aaScope = Get-PimManagerCallerScope
+                if (-not $aaScope.isSuperAdmin -and $aaScope.profile -and (Get-Command Test-PimPortalRowsInScope -ErrorAction SilentlyContinue)) {
+                    $allRows = @($body.rows)
+                    $kept = New-Object System.Collections.ArrayList
+                    foreach ($row in $allRows) {
+                        $rc = Test-PimPortalRowsInScope -Profile $aaScope.profile -Rows @($row) -Base 'revoke' -RequireManage -SkipUnscopableRows
+                        if ($rc.allowed) { [void]$kept.Add($row) }
+                    }
+                    $body.rows = @($kept.ToArray())
+                    $body['portalFiltered'] = $true
+                }
                 Write-JsonResponse -Response $resp -Status 200 -Body $body
                 return 200
             } catch {
@@ -8352,6 +9178,19 @@ function Handle-Request {
             if (-not $rowsIn -or $rowsIn.Count -eq 0) {
                 Write-JsonResponse -Response $resp -Status 400 -Body @{ ok = $false; error = 'at least one row is required' }
                 return 400
+            }
+            # [Fix 2] PORTAL SCOPE on revoke: a non-SuperAdmin delegated caller may only
+            # revoke assignments whose target group is inside their tier/level/service/
+            # scope. SuperAdmin bypasses (as everywhere). Applies to BOTH preview + commit
+            # so a scoped caller cannot even enumerate out-of-scope revocations.
+            $revokeScope = Get-PimManagerCallerScope
+            if (-not $revokeScope.isSuperAdmin -and $revokeScope.profile -and (Get-Command Test-PimPortalRowsInScope -ErrorAction SilentlyContinue)) {
+                $rowsForScope = @($rowsIn | ForEach-Object { ConvertTo-OrderedRow $_ } | Where-Object { $_ -ne $null })
+                $rs = Test-PimPortalRowsInScope -Profile $revokeScope.profile -Rows $rowsForScope -Base 'revoke' -RequireManage -SkipUnscopableRows
+                if (-not $rs.allowed) {
+                    Write-JsonResponse -Response $resp -Status 403 -Body ([ordered]@{ ok = $false; error = "$($rs.reason)"; denied = @($rs.denied) })
+                    return 403
+                }
             }
             # Bulk-revoke SAFETY NET: compute the what-if plan (break-glass
             # excluded + large-batch count-confirmation) BEFORE doing anything.
@@ -8512,18 +9351,27 @@ function Handle-Request {
             $body = Read-RequestJson -Request $req
             $snapId = if ($body -and $body.id) { "$($body.id)" } else { '' }
             $base   = if ($body -and $body.base) { "$($body.base)" } else { '' }
+            # [Fix 5] explicit operator acknowledgement for the restore delta guard.
+            $confirmRestore = $false
+            if ($body -and ($null -ne $body.confirm) -and ("$($body.confirm)" -ieq 'true' -or "$($body.confirm)" -eq '1' -or $body.confirm -eq $true)) { $confirmRestore = $true }
             if (-not "$snapId".Trim()) {
                 Write-JsonResponse -Response $resp -Status 400 -Body @{ ok = $false; error = "missing snapshot 'id' in body" }
                 return 400
             }
             try {
-                $r = Invoke-PimManagerBackupRestore -Id $snapId
+                $r = Invoke-PimManagerBackupRestore -Id $snapId -Confirm:$confirmRestore
                 if (-not "$base".Trim()) { $base = "$($r.entity)" }
                 $who = try { [System.Security.Principal.WindowsIdentity]::GetCurrent().Name } catch { $env:USERNAME }
                 Write-PimMutationLog -BaseName $base -Adds 0 -Removes 0 -Modifies 0 -NewRowCount ([int]$r.rowCount)
-                Write-JsonResponse -Response $resp -Status 200 -Body ([ordered]@{ ok = $true; base = $base; restoredFrom = $snapId; entity = "$($r.entity)"; rowCount = [int]$r.rowCount; by = "$who" })
+                Write-JsonResponse -Response $resp -Status 200 -Body ([ordered]@{ ok = $true; base = $base; restoredFrom = $snapId; entity = "$($r.entity)"; rowCount = [int]$r.rowCount; preRestoreSnapshotId = "$($r.preRestoreSnapshotId)"; by = "$who" })
                 return 200
             } catch {
+                # [Fix 5] a guard refusal ("restore refused: ...") is a 409 confirm-required,
+                # not a 500 (the store was untouched -- nothing failed, it was prevented).
+                if ("$($_.Exception.Message)" -like 'restore refused:*') {
+                    Write-JsonResponse -Response $resp -Status 409 -Body @{ ok = $false; base = $base; gate = 'delta-guard'; confirmRequired = $true; error = "$($_.Exception.Message)" }
+                    return 409
+                }
                 Write-JsonResponse -Response $resp -Status 500 -Body @{ ok = $false; base = $base; error = "$($_.Exception.Message)" }
                 return 500
             }

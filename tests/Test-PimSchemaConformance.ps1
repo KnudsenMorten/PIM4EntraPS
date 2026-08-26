@@ -24,7 +24,16 @@ $plan = Get-PimSchemaConformancePlan -ActualColumns @('UserName','DisplayName','
 A ($plan.ToDrop -contains 'TierLevel') 'plan drops deprecated TierLevel'
 A ($plan.ToAdd -contains 'Purpose') 'plan adds missing required Purpose'
 A (-not $plan.Conformant) 'plan reports not conformant'
-$plan2 = Get-PimSchemaConformancePlan -ActualColumns @('UserName','DisplayName','Purpose','UserType','ProvisionDate','TAPLifetimeHours','Template','OffboardDate','DeleteAfterDays') -Spec $admSpec
+# The "already conformant" column set must be the FULL current Required set of the locked
+# spec. Hardcoding it drifted once: the spec gained AdminType + Environment, this list did
+# not, the plan then correctly reported "not conformant -- add AdminType, Environment",
+# and the suite was dropped from the runner rather than updated (audit finding TEST-02).
+# Derive it from the spec so it cannot drift again -- and assert the two columns by name
+# as well, so a silent REMOVAL from the spec is still caught (deriving alone would hide it).
+A (@($admSpec.Required) -contains 'AdminType')   'locked spec still requires AdminType'
+A (@($admSpec.Required) -contains 'Environment') 'locked spec still requires Environment'
+$lockedCols = @('UserName','DisplayName') + @($admSpec.Required)
+$plan2 = Get-PimSchemaConformancePlan -ActualColumns $lockedCols -Spec $admSpec
 A ($plan2.Conformant) 'already-locked columns -> conformant'
 
 Write-Host "R: row repair + TierLevel->Purpose migration + drop" -ForegroundColor Cyan

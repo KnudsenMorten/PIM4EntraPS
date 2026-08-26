@@ -36,6 +36,18 @@
 
 # Public certificate of the licensing key (CN=PIM4EntraPS-Licensing).
 # The PRIVATE key never leaves the maintainer's machine store.
+# LIC-1 (2026-08-11) -- AutomateIT framework licensing signer, CN=AutomateIT-Licensing-Service.
+# PIM now accepts BOTH this and its own legacy key below, so licences issued by the framework
+# tool (TOOLS/New-AitLicense.ps1) verify here with no cutover and no reissue.
+#
+# 🔴 WHY THE MIGRATION IS URGENT, not cosmetic: the legacy CN=PIM4EntraPS-Licensing key is marked
+# NON-EXPORTABLE, so backup-job-certificates-automation SKIPS it on every run -- verified absent
+# from all recent backups. If mgmt1 were lost, no further PIM licence could EVER be issued (already
+# issued ones keep verifying, since only the public half ships). The cert is valid to 2041, which
+# makes it look safe; exportability is the thing that actually matters and is invisible unless
+# checked. This key IS backed up.
+$script:AitLicensePublicCertB64 = 'MIIFFzCCAv+gAwIBAgIQNY8l3/KZOoxF7K1nXIXwazANBgkqhkiG9w0BAQsFADAnMSUwIwYDVQQDDBxBdXRvbWF0ZUlULUxpY2Vuc2luZy1TZXJ2aWNlMB4XDTI2MDgxMTEzMDY0NloXDTQ2MDgxMTEzMTE0NlowJzElMCMGA1UEAwwcQXV0b21hdGVJVC1MaWNlbnNpbmctU2VydmljZTCCAiIwDQYJKoZIhvcNAQEBBQADggIPADCCAgoCggIBALuth8WywLfudbaoZ6eR570apvs5LXzOeGfl5Z14z6Nl6DQgvwMLXG/8lZEHOCKsHWVtEnjZOZigsh4c16owJVhuW67OgY0Iy6OjmfeXzu+kcTICSdZ+Qj3ecsGp1Cz6Xo1AjYbgIORdqUBncy4BAuA1bxH0E+V+1zT+ltEk840xpLdWde+m7W8q7BrG9klh+xQl8xJTjeliyV0JN2mvBjI0JwB9t9vL2/luMWWtHp752/ZG4Icd9u6HyqSR/xEmlZIjkZwI7LEPLTICXV1iA3c3nFUEHkLhLlpDW6EQn3cip0Sijr7SVWEBH1fCA8vCo+PxIEgJc3RXaeRhqD4UOwPJIziHtrpy8+9L15zrhXnhIGZv2mUAHKiamUIOmKl9vj31vFp/vJx1chE0XA358T09HGu0jKgSbbC4afKQPKf3v+BHPU42T/xIOPMxDJWuFqKvr4anL7P5PEkTjycBRCkXnIPC5PlrXR/ZZz4oit4WKhbdzONYwb8CKnsF2Z9IVL9yviVJxAIr7kiGqRme9+H0t5A+hzAydxdFMQnop+R8Q02a0sei9WrdtCbwLempVVrXIS6N4hh5kvLqMouDi62b0h645UNk2cWahDIZWTKd/MYdlcdrtRt5muy2LOasHByVxUrZKwH7IetCmv+Kkm1BfMF6Fvi1Jh2Qgz4bo5XJAgMBAAGjPzA9MA4GA1UdDwEB/wQEAwIHgDAMBgNVHRMBAf8EAjAAMB0GA1UdDgQWBBT+IiWP1iqSIwaRLiV1somJAQ+ELjANBgkqhkiG9w0BAQsFAAOCAgEAFiDfl7nhDNIywkCZgu9iw0RtJUyJqiq8y+fXomucqowAQZKPhkpuHftZZjtDe09WM35TqjRgL7hqmJiEgqPlRrAv78FjE41RwMcANN2PVCrdcMcuDVdRbS40rObpp0B6+uVUiWY4+8MW6G8Wv+7CIBUEP8ypo3BhxQJZLpyJDKLNiPqnTVKOmYXe7BivfVz63F2Pg2dNXic1poQ7S6JTi/8FM4AV2Ge/zVQF+LaiIuBDJX3JjHnKXxNf1Zhk8PF6DeWaVSNyXtjESlaUfsz0U2Ue87UUZ8ELIuqjHTpG66HPInblBZme6VvR13n5QxmnvjPXdtmXAJzDzCf+76labSGQu9fMFxUoKwjAwT9vHrdFw8JEStappW7urXj+Oafp1wVafJOXzjd9utr8WT3AhaPeqMx3FYH20e2b7QNCI3owtm0ogHRg36neahe78PikiMe15AUpD3+BD6pKeLV7tsExeXZjxDxhFUSpScD0TrCOUEJdKL2Cfx8rM3ceISSiTTYmuJmU7fznQ122A6GNW58mpSk8miPYb3MzbLW0JFPRrEDiyT8dW1M9s98DL+7VR0z2QxgxhNMKyrVgBM7YgQtbtPLz26NBqAQsqG50rOdn7XmprzvnTmnb+r2PUQuqb6rCTAQFTJ3MjH7BviP3GkwJyvzMZ+S6OnUAGB2Fn3Y='
+
 $script:PimLicensePublicCertB64 = 'MIID+zCCAmOgAwIBAgIQZi8bo4EYqJ9PSvrXsI3orTANBgkqhkiG9w0BAQsFADAgMR4wHAYDVQQDDBVQSU00RW50cmFQUy1MaWNlbnNpbmcwHhcNMjYwNjEyMTY1MzM4WhcNNDEwNjEyMTcwMzM0WjAgMR4wHAYDVQQDDBVQSU00RW50cmFQUy1MaWNlbnNpbmcwggGiMA0GCSqGSIb3DQEBAQUAA4IBjwAwggGKAoIBgQD+YFgQSxRJNuwpv/lc9z6ClbFgEc+9/hpM/TXPg7f3Q40TQfyWf54EgaKzC8Y04JkdS2lNv69NWZ5MJgwyHkwTuyngDx/giBF0aVBbnbW9dLixSY0YaN435uylMgrL9irYB79c+rN+NAWyRZTzFdw3LFLR7zhl4Wor3OexsI7tYHgH/WXegzmbl4R8amVHR2QsAr3ZHBg5WEW3C3DeomDeAuVIny4xMZp/nq6i1VXTqrBx76Cxdms6RJS0cwtystrFQFdCB4e06jqdttuj5m8CCvQbUILEzAhNnzHnFtMXJC/wWWu2vfOqqY/Wy7ORjZCWaI/a/c7bfXWpdiI5H3E4pcZCezSH7lg1VdvSGrq/bbQxOUO4a5FQ5JI5fXZuzQksjm7t0u5AAmdLpvtac86vMQmM8LCTsUoNs9GAhVvNmV+pJtReWyubfqLgzaRmMP4qMp7a6DoR3RKeuYjmSzhjFn5S4lcDmAz35Qc/LO0sEPDr3LL30fQxhX8uSqlFAEkCAwEAAaMxMC8wDgYDVR0PAQH/BAQDAgeAMB0GA1UdDgQWBBS2n3cmD8taKDsdy2debDNeQkv7qzANBgkqhkiG9w0BAQsFAAOCAYEArrFYyp4BQzH803d4htpcqtWbkTgg10tFrdQndJ35tv+ZDGcq7AIHohI7egzH4pDPgbXOGf7GuisIzj8MEJkH63+xqB4wHHBPn+pl9YGYk02XiWY9H0blP+TIlYjderzr/XH/mLn67z2VAm9dGAw1X2xw1zMtc36aPVU7i7bRIZwfxIA5Y1sVJ9bpMRkXDawMhegA39a0inLVriBWcvfku3zz84MtHtB4WLfwUI97QLvDObHPdkQ68w+0+0tmIz33z5Fgu9dtIUf6RROkFhjoc2rC+GcI023SLeDPjHrUHg1RjUeoPJkPQiX8N8lSnX335dJddiHIDAn43OhQn13lITovtz5EHiaJJSXr/DwsaZzyv6UC067KpFeKLc4heYiM0A0Orj7UH/B5f/qEu8MPsl+XdBGl7v0lecn2DbG2bXlOxEucP8JNzIeOnLg609XaneGRdu93dFLUGSsNtUMnrhrSWGjqAwXteWhhGy+aJ/WfUdfUGJ+rf/D9hVOBIpsk'
 
 # Editions: COMMUNITY (free) and PRO (licensed). One engine/manager/activator; Pro
@@ -144,7 +156,11 @@ Function Get-PimLicense {
     $useOverride = $PublicCertB64 -or $Path
     if ($script:PimLicenseCache -and -not $Refresh -and -not $useOverride) { return $script:PimLicenseCache }
 
-    $trustedCertB64 = if ($PublicCertB64) { $PublicCertB64 } else { $script:PimLicensePublicCertB64 }
+    # LIC-1 -- accept EITHER signer. AutomateIT first (the going-forward framework key), then the
+    # legacy PIM key so anything already issued keeps verifying. An explicit -PublicCertB64 still
+    # wins, which is what the negative tests rely on.
+    $trustedCerts = if ($PublicCertB64) { @($PublicCertB64) }
+                    else { @($script:AitLicensePublicCertB64, $script:PimLicensePublicCertB64) }
 
     $result = [pscustomobject]@{
         Status     = 'Missing'      # Missing | Invalid | NotYetValid | Expired | Grace | Valid
@@ -180,7 +196,10 @@ Function Get-PimLicense {
         $payloadBytes = [Convert]::FromBase64String($doc.payloadB64)
         $sigBytes     = [Convert]::FromBase64String($doc.signature)
 
-        $ok = Test-PimLicenseSignature -PayloadBytes $payloadBytes -SignatureBytes $sigBytes -PublicCertB64 $trustedCertB64
+        $ok = $false
+        foreach ($__tc in @($trustedCerts | Where-Object { $_ })) {
+            if (Test-PimLicenseSignature -PayloadBytes $payloadBytes -SignatureBytes $sigBytes -PublicCertB64 $__tc) { $ok = $true; break }
+        }
         if (-not $ok) { $result.Status = 'Invalid'; $result.Reason = 'signature verification FAILED (file tampered or not issued by the PIM4EntraPS licensing key)'; if (-not $useOverride) { $script:PimLicenseCache = $result }; return $result }
 
         $p = [System.Text.Encoding]::UTF8.GetString($payloadBytes) | ConvertFrom-Json

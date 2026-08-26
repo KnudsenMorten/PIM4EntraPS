@@ -192,6 +192,30 @@ function Invoke-PimEngineScope {
     # scope (disable NOTHING -- never a partial mass-disable), log loudly and alert.
     # This runs for BOTH plan (WhatIf) and apply so a plan shows the abort too.
     $script:__disableAborted = $null
+
+    # --- BUG-14 (break-glass) + BUG-13 (multi-domain / unmanaged) --------------------
+    # Runs BEFORE the circuit breaker on purpose: an account that must never be disabled
+    # should not even count toward the blast radius it is measured against. Otherwise a
+    # handful of break-glass and other-domain accounts could trip the breaker and mask a
+    # real problem -- or, worse, be counted as "acceptable" collateral under the cap.
+    if ($p.isAccountDisable -and @($diff.remove).Count -gt 0 -and (Get-Command Select-PimDisableRemovals -ErrorAction SilentlyContinue)) {
+        $sel = Select-PimDisableRemovals -Remove @($diff.remove) -Desired @($desired)
+        if (@($sel.breakGlass).Count -gt 0) {
+            Write-Host ("[engine] {0}: {1} BREAK-GLASS account(s) excluded from the disable set -- never removable: {2}" -f `
+                $Scope, @($sel.breakGlass).Count, (($sel.breakGlass) -join ', ')) -ForegroundColor Yellow
+        }
+        if (@($sel.unmanaged).Count -gt 0) {
+            # Reported, never silent. These are admin accounts the desired set cannot
+            # attribute -- typically a different verified domain (BUG-13). Treating them
+            # as removals is what made Admin-PAW-* and the engine's own account look
+            # disposable.
+            Write-Host ("[engine] {0}: {1} UNMANAGED admin account(s) are NOT in the desired set: {2}" -f `
+                $Scope, @($sel.unmanaged).Count, (($sel.unmanaged) -join ', ')) -ForegroundColor Yellow
+            Write-Host ("[engine] {0}: the desired set is AUTHORITATIVE (MSP model) -- an admin who has left is SUPPOSED to be deprovisioned here, so these remain removable, subject to the disable opt-in, the circuit breaker and the G4 budget. Set `$global:PIM_RemoveUnmanagedAdmins=`$false for report-only." -f $Scope) -ForegroundColor Yellow
+        }
+        $diff = [pscustomobject]@{ create = @($diff.create); update = @($diff.update); remove = @($sel.remove); nochange = @($diff.nochange) }
+    }
+
     if ($p.isAccountDisable -and @($diff.remove).Count -gt 0 -and (Get-Command Test-PimDisablePassAllowed -ErrorAction SilentlyContinue)) {
         $resolvedFlag = $null
         $ent = if ($p.entity) { "$($p.entity)" } else { "$Scope" }
@@ -203,6 +227,23 @@ function Invoke-PimEngineScope {
             # Drop ALL removes for this scope -- the safe outcome is to disable nothing.
             $diff = [pscustomobject]@{ create = @($diff.create); update = @($diff.update); remove = @(); nochange = @($diff.nochange) }
             $script:__disableAborted = $decision.tripped
+        }
+    }
+
+    # --- G4: UNIVERSAL REMOVAL BUDGET (operator directive 2026-08-06) -----------------
+    # The breaker above guards ONE provider class (isAccountDisable = Admins). This caps
+    # removals in EVERY scope, so a -Prune on RolesAUs / GroupMembers / AzRes cannot wipe
+    # the live set (BUG-11) and no scope can quietly remove more than the budget.
+    # ALWAYS ON -- not opt-in, not environment-aware, hard ceiling of 5. A trip drops the
+    # WHOLE remove set for the scope (never a partial mass-removal) and EMAILS the operator.
+    # Runs for plan AND apply, so a -WhatIf plan shows the abort too.
+    if (@($diff.remove).Count -gt 0 -and (Get-Command Test-PimRemoveBudgetAllowed -ErrorAction SilentlyContinue)) {
+        $rb = Test-PimRemoveBudgetAllowed -ToRemove (@($diff.remove).Count) -Scope $Scope -Scanned (@($live).Count) -Operation 'remove'
+        if (-not $rb.allowed) {
+            if (Get-Command Write-PimRemoveBudgetAlert -ErrorAction SilentlyContinue) { Write-PimRemoveBudgetAlert -Decision $rb }
+            else { Write-Host ("[engine] {0}: REMOVAL BUDGET exceeded -- {1}" -f $Scope, $rb.reason) -ForegroundColor Red }
+            $diff = [pscustomobject]@{ create = @($diff.create); update = @($diff.update); remove = @(); nochange = @($diff.nochange) }
+            if (-not $script:__disableAborted) { $script:__disableAborted = 'remove-budget' }
         }
     }
 
@@ -221,7 +262,27 @@ function Invoke-PimEngineScope {
         } else { $plan.Add([pscustomobject]@{ entity=$entity; key="$($item.key)"; op=$op }) }
         $sym = switch ($op) { 'Create' { '+' } 'Update' { '~' } 'Remove' { '-' } default { '?' } }
         if (-not $WhatIf -and $p.$handlerName) {
-            try { & $p.$handlerName $item $Context | Out-Null; $script:__applied++; Write-Host ("    [{0}] {1}" -f $sym, $item.key) -ForegroundColor Green }
+            try {
+                # BUG-35a: a handler that RETURNS WITHOUT ACTING must not be counted as applied.
+                # AdminOffboarding's ApplyRemove does exactly that in the default Report mode --
+                # it prints "would offboard" and returns -- yet the run still summarised
+                # `remove=1 applied=1`, making a dry run indistinguishable from a real change in
+                # the one number an operator reads. A handler now signals this by returning an
+                # object carrying `pimApplied = $false`; anything else (including the API
+                # responses every other handler returns) still counts as applied, so this is
+                # additive and cannot change existing behaviour.
+                $__r = & $p.$handlerName $item $Context
+                $__reported = $false
+                foreach ($__o in @($__r)) {
+                    if ($null -ne $__o -and $__o.PSObject -and ($__o.PSObject.Properties.Name -contains 'pimApplied') -and (-not $__o.pimApplied)) { $__reported = $true }
+                }
+                if ($__reported) {
+                    $script:__skipped++
+                    Write-Host ("    [r] {0} (reported only -- NOT applied)" -f $item.key) -ForegroundColor DarkYellow
+                } else {
+                    $script:__applied++; Write-Host ("    [{0}] {1}" -f $sym, $item.key) -ForegroundColor Green
+                }
+            }
             catch {
                 $em = "$($_.Exception.Message)"
                 # Already-exists / conflict = the desired setting is already in place -> validate-and-skip,
@@ -324,6 +385,56 @@ function Invoke-PimEngineDiscoverySweep {
     }
 }
 
+function Get-PimContextMaxAgeSeconds {
+    # BUG-19: how stale the directory snapshot may be when an engine run STARTS.
+    # Small on purpose: this is a per-run freshness bound, not the 5-minute cache
+    # window Build-PimContext applies to incidental callers. It exists as a knob
+    # only so a caller that fans out one Invoke-PimEngine per scope inside a
+    # single tick does not re-fetch the directory 19 times.
+    $v = $global:PIM_ContextMaxAgeSeconds
+    if ($null -eq $v -or "$v" -eq '') { return 30 }
+    $n = 0; if (-not [int]::TryParse("$v", [ref]$n)) { return 30 }
+    if ($n -lt 0) { return 0 }
+    return $n
+}
+
+function Update-PimEngineRunContext {
+    # BUG-19 -- REFRESH THE DIRECTORY SNAPSHOT AT THE START OF EVERY ENGINE RUN.
+    #
+    # Before this, the ONLY path that ever built the context was
+    # Ensure-PimContextLoaded, whose whole body is
+    #     if (-not $Global:PimContextBuiltAt) { Build-PimContext }
+    # -- no -Refresh, no age check. So the FIRST build in a process was the LAST:
+    # Build-PimContext's own -Refresh/$CacheSeconds were unreachable on this path,
+    # and the scheduler (a while($true) loop that calls Invoke-PimEngine IN-PROCESS
+    # every $IntervalSeconds) kept reconciling against the directory as it looked
+    # when the container started -- for the life of the container.
+    #
+    # What that cost, observed live 2026-08-06: after two AUs were deleted out of
+    # band, five consecutive passes reported "AdministrativeUnits live=18 create=0
+    # nochange=2" for AUs that no longer existed, and every dependent member write
+    # 404'd on the dead ids. "nochange" is the one word an operator reads as
+    # reconciled, so a stale snapshot is worse than a failure.
+    #
+    # Deliberately at the RUN boundary, not per scope: every scope in one run then
+    # shares a single consistent snapshot (a mid-run re-fetch could hand a later
+    # scope a directory that does not contain what an earlier scope just created,
+    # and Entra's list endpoints lag creates by seconds -- see TEST-16).
+    [CmdletBinding()]
+    param([switch]$Quiet)
+    if (-not (Get-Command Build-PimContext -ErrorAction SilentlyContinue)) { return $false }
+    $maxAge = Get-PimContextMaxAgeSeconds
+    try {
+        Build-PimContext -CacheSeconds $maxAge | Out-Null
+        return $true
+    } catch {
+        # Never fail a run because the refresh failed: an older snapshot still
+        # beats no run at all. But SAY so -- silence here is how BUG-19 hid.
+        if (-not $Quiet) { Write-Warning "  [engine] directory-context refresh failed: $($_.Exception.Message) -- continuing on the previous snapshot (age unknown)" }
+        return $false
+    }
+}
+
 function Invoke-PimEngine {
     # Run one scope, or all registered scopes (Scope='All').
     #   -Mode Full           : whole-scope reconcile (create/update; prune ONLY with -Prune)
@@ -335,6 +446,8 @@ function Invoke-PimEngine {
     # -WhatIf = plan only. This is the entrypoint the scheduler/launcher calls.
     [CmdletBinding()]
     param([string]$Scope='All', [ValidateSet('Full','Delta')][string]$Mode='Delta', [switch]$WhatIf, [switch]$Prune, [hashtable]$Context=@{}, [object[]]$Changes, [switch]$FromQueue)
+    # BUG-19: bound how stale the directory snapshot can be at the start of a run.
+    [void](Update-PimEngineRunContext)
     if ($FromQueue -and -not $PSBoundParameters.ContainsKey('Changes')) { $Changes = Get-PimEngineQueueChanges }
     $useChanges = ($FromQueue -or $PSBoundParameters.ContainsKey('Changes'))
     $common = @{ Mode = $Mode; WhatIf = $WhatIf; Prune = $Prune; Context = $Context }

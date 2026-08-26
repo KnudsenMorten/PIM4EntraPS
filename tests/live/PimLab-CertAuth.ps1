@@ -73,7 +73,7 @@ function Get-PimLabKvSecret {
       $null if the read fails (e.g. az context not aligned) so callers can fall
       back to an explicitly-supplied identity.
     #>
-    param([Parameter(Mandatory)][string]$Name, [string]$Vault = 'kv-automatit-dev')
+    param([Parameter(Mandatory)][string]$Name, [string]$Vault = "$($env:PIM_KeyVaultName)")
     try {
         $v = az keyvault secret show --vault-name $Vault --name $Name --query value -o tsv 2>$null
         if ($LASTEXITCODE -eq 0 -and "$v".Trim()) { return "$v".Trim() }

@@ -72,6 +72,16 @@ CREATE TABLE pim.CentralAdmins (
     Purpose       NVARCHAR(20)  NULL
 );
 
+-- MSP-4 (BUG-62): the tenant's TAGS -- the currency artifact targeting is expressed in
+-- ("this role goes to only 5 of the 28"). A semicolon/comma separated list, e.g.
+-- 'retail;vip'. The downlink never reads this table: a managed tenant has no credential
+-- for the master's registry, so the per-tenant tag map is carried IN the signed bundle
+-- (New-PimBaselineBundle -> payload.tenantTags), exactly as the projection policy is and
+-- for the same reason. Signed, so a tenant cannot quietly re-tag itself into scope.
+-- Absent/empty = untagged = matches only '*' targets, which is today's behaviour.
+IF COL_LENGTH('platform.Tenants', 'Tags') IS NULL
+    ALTER TABLE platform.Tenants ADD Tags NVARCHAR(400) NULL;
+
 -- schema upgrade for pre-existing installs (idempotent)
 IF COL_LENGTH('pim.CentralAdmins', 'FirstName') IS NULL
     ALTER TABLE pim.CentralAdmins ADD FirstName NVARCHAR(100) NULL, LastName NVARCHAR(100) NULL, Initials NVARCHAR(10) NULL, UsageLocation CHAR(2) NULL;
@@ -84,6 +94,72 @@ IF COL_LENGTH('pim.CentralAdmins', 'TierLevel') IS NOT NULL
 -- view across both stores can attribute every row.
 IF COL_LENGTH('pim.CentralAdmins', 'Owner') IS NULL
     ALTER TABLE pim.CentralAdmins ADD Owner NVARCHAR(10) NOT NULL CONSTRAINT DF_CentralAdmins_Owner DEFAULT 'MSP';
+
+-- 🔑 OPERATOR DECISION 2026-08-13 -- A SYNCED MSP ADMIN MUST BE ABLE TO SIGN IN.
+-- Both apply paths used to HARDCODE CreateTAP='FALSE' for every downlinked/fanned-out admin,
+-- on the reasoning that a sync must not silently mint a credential in a customer tenant. The
+-- measured consequence was the opposite of safe: the accounts landed in the managed tenant
+-- with no credential and no way to obtain one, so the MSP could not actually administer the
+-- customer it had just been granted access to -- an account that cannot sign in is not a
+-- delivered account. TAP issuance is therefore ON by default and expressed HERE, per admin,
+-- so it stays the MSP's declared intent rather than a constant buried in two code paths.
+--   CreateTap        1 = the managed tenant's own engine mints a TAP for this admin (default ON)
+--   TapLifetimeHours NULL = fall back to the downlink default (8h); the engine floors at 4h
+--   ManagerEmail     where the TAP mail goes. WITHOUT IT THE TAP IS MINTED AND NEVER DELIVERED
+--                    (Send-PimNotifyMail returns reason='no recipient'), which is the silent
+--                    half of this gap -- CreateTAP alone does not produce a usable admin.
+IF COL_LENGTH('pim.CentralAdmins', 'CreateTap') IS NULL
+    ALTER TABLE pim.CentralAdmins ADD
+        CreateTap        BIT           NOT NULL CONSTRAINT DF_CentralAdmins_CreateTap DEFAULT 1,
+        TapLifetimeHours INT           NULL,
+        ManagerEmail     NVARCHAR(320) NULL;
+
+-- MSP-4 (BUG-62): WHICH TENANTS this admin reaches, on top of the ring. Selector syntax is
+-- Test-PimArtifactTarget's: absent or '*' = every managed tenant (so existing rows are
+-- unaffected), a bare word or 'tag:x' = tenants carrying that tag, 'tenant:<guid>' = one
+-- named tenant, a ';'/',' list matches on ANY -- and 'none' means MSP-local, never published,
+-- which wins over anything beside it.
+IF COL_LENGTH('pim.CentralAdmins', 'Target') IS NULL
+    ALTER TABLE pim.CentralAdmins ADD Target NVARCHAR(400) NULL;
+
+-- MSP-2 / control #2: PER-RELATIONSHIP role projection policy.
+--
+-- The downlink reflects a master admin's PIM-group memberships into the managed
+-- tenant, so a synced admin gets their roles through the SAME path a local admin
+-- does (group membership -> PIM-Assignments-Admins -> the engine's AdminMembers
+-- provider). WHICH of those memberships project is a property of the RELATIONSHIP,
+-- not of the admin -- an MSP does not give every customer the same delegation.
+--
+-- The baseline bundle is ONE fleet-wide signed artifact, so it cannot carry a
+-- per-tenant filter; the master publishes what each MSP admin holds and the filter
+-- is applied per tenant at downlink time from this table. That keeps the courier
+-- model (one signed bundle, verified by every tenant) intact.
+--
+-- SEMANTICS (Select-PimProjectedAssignments is the single implementation):
+--   * no rows for a tenant  -> ALLOW ALL (operator decision 2026-08-12). A new
+--     relationship reflects the master's delegation by default; the plan always
+--     reports what projected and what was excluded, so this is never silent.
+--   * any Mode='allow' row  -> ALLOW-LIST: only matching tags project.
+--   * Mode='deny' rows      -> always subtract, and win over an allow match.
+--   * GroupTag supports a trailing * wildcard ('ROLE-*'); matching is case-insensitive.
+IF OBJECT_ID('pim.TenantRoleProjection') IS NULL
+CREATE TABLE pim.TenantRoleProjection (
+    TenantId     UNIQUEIDENTIFIER NOT NULL REFERENCES platform.Tenants(TenantId),
+    Mode         NVARCHAR(10)     NOT NULL,   -- 'allow' | 'deny'
+    GroupTag     NVARCHAR(200)    NOT NULL,   -- exact tag, or a trailing-* prefix
+    Notes        NVARCHAR(1000)   NULL,
+    UpdatedAtUtc DATETIME2        NOT NULL CONSTRAINT DF_TenantRoleProj_Updated DEFAULT SYSUTCDATETIME(),
+    CONSTRAINT PK_TenantRoleProjection PRIMARY KEY (TenantId, Mode, GroupTag),
+    CONSTRAINT CK_TenantRoleProjection_Mode CHECK (Mode IN ('allow','deny'))
+);
+
+-- 🔴 DELIBERATELY NOT HERE: a managed tenant's store server/database.
+-- Added briefly on 2026-08-13 so the Manager could write into a customer's store, then
+-- REMOVED the same day when that whole direction was replaced. Under the agreed model
+-- (framework MSP-3) the managed tenant PULLS and applies with its OWN identity, so the
+-- master has no business holding a customer's store coordinates -- and §22 says customer
+-- data never leaves their tenant. If a future uplink genuinely needs a pointer, it is an
+-- uplink concern, not a column the master reads to reach in.
 
 IF OBJECT_ID('platform.AuditEvents') IS NULL
 CREATE TABLE platform.AuditEvents (

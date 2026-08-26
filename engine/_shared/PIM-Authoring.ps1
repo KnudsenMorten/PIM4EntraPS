@@ -265,7 +265,10 @@ function New-PimAdminRowsFromImport {
         [Parameter(Mandatory)][object[]]$People,
         [object]$Template = $null
     )
-    $hdr = @('FirstName','LastName','Initials','Purpose','TargetUsage','TargetPlatform','UserType','UserName','DisplayName','UserPrincipalName','UsageLocation','ForwardMailsToContact','MailForwardAddress','CreateTAP','TAPStartDate','Ring')
+    # ForwardMailsToContact / MailForwardAddress retired 2026-08-12: notification mail is sent
+    # FROM a shared mailbox the engine SPN is scoped to, so an admin account needs no mailbox and
+    # no Exchange licence, and there is nothing to forward. Recipient is ManagerEmail.
+    $hdr = @('FirstName','LastName','Initials','Purpose','TargetUsage','TargetPlatform','UserType','UserName','DisplayName','UserPrincipalName','UsageLocation','CreateTAP','TAPStartDate','Ring')
     $prefill = @{}
     if ($Template -and $Template.prefill) {
         foreach ($p in $Template.prefill.PSObject.Properties) { $prefill[$p.Name] = "$($p.Value)" }

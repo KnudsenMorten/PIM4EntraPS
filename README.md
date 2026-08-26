@@ -779,6 +779,26 @@ done.
   accidental over-elevation. Small selections activate straight away, and the
   threshold is an **administrator setting per tenant** (lower it for caution,
   raise it for power users), never left to individual users.
+- **"Show roles" — see what a group actually grants before you activate it.**
+  Expand any row and the real permissions behind it are read live from the
+  platform: directory roles (tenant-wide as well as administrative-unit scoped),
+  Azure resource roles, and workload permissions — both what you already hold and
+  what you are eligible for. Because privileged access is usually packaged as a
+  group inside a group, it follows those links in **both** directions — the groups
+  nested inside the one you picked and the groups it is itself a member of — so
+  nothing granted through nesting is hidden.
+- **Activation reports "done" when the access is really there — never on a
+  stopwatch.** Access does not arrive instantly: the request is accepted at once
+  and the platform then fans the permissions out through nested groups, which can
+  take anywhere from seconds to several minutes. The extension keeps checking what
+  you actually hold and reports completion only once it has *observed* the access.
+  A fast activation finishes fast, a repeat of a set you have used before finishes
+  immediately, and a slow one is honestly reported as still in progress rather
+  than declared done too early.
+- **Deactivation is quick.** Once your membership is removed the access is already
+  being torn down, so you are released immediately instead of waiting on the
+  directory's slower cleanup — while a group that fans out to others still
+  confirms those are gone first.
 - **A one-time getting-started tip** points new users at bulk-activate and My
   Access, and never comes back once dismissed.
 - **Simple, secure sign-in** uses the browser's built-in flow — no extra software

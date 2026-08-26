@@ -154,7 +154,13 @@ function Get-PimDownlinkJobEnv {
         [string]$SqlServerFqdn,
         [string]$SqlDatabase = 'PimPlatform',
         [string]$SyncRootCentral = '/sync/central',
-        [string]$SyncRootLocal   = '/sync/local'
+        [string]$SyncRootLocal   = '/sync/local',
+        # BUG-72: the engine's app-only identity. ClientId is NOT secret and goes in as a plain
+        # value; the secret is referenced, never valued (see -EngineSecretRef).
+        [string]$EngineClientId,
+        [string]$EngineSecretRef,
+        # BUG-73: the baseline URL when it carries a SAS -- a credential, so it is referenced too.
+        [string]$BaselineUrlSecretRef
     )
     $placement = Get-PimDownlinkJobPlacement -Scenario $Scenario
     $ev = New-Object System.Collections.Generic.List[string]
@@ -168,6 +174,30 @@ function Get-PimDownlinkJobEnv {
     # Sync-file staging root the scenario uses (central for S5, local for S6).
     if ("$($placement.envScope)" -eq 'central-msp') { $ev.Add("PIM_SyncRootCentral=$SyncRootCentral") | Out-Null }
     else { $ev.Add("PIM_SyncRootLocal=$SyncRootLocal") | Out-Null }
+
+    # 🔴 BUG-72 -- THIS FUNCTION USED TO EMIT NO ENGINE CREDENTIAL AT ALL, so every scheduled
+    # downlink ran as the container's Managed Identity. Measured on the first real execution:
+    #   [downlink-job] [INFO] identity model: Managed Identity (local-spn)
+    # while the deploy script's own header claimed it passed "an SPN cert whose thumbprint/clientId
+    # are read from the store". It did not. MI is fine for SQL (the tick job proves it), but the
+    # engine's Graph work needs the engine SPN.
+    # 🪤 AND THE OBVIOUS FIX IS WRONG: do NOT copy the tick job's PIM_ClientId + PIM_CertThumbprint.
+    # Resolve-PimCertificate (PIM-Rest.ps1) only searches Cert:\CurrentUser\My and
+    # Cert:\LocalMachine\My, which are EMPTY in a Linux container -- and setting PIM_ClientId also
+    # DISABLES the MI branch (Get-PimRestToken takes 'mi' only when IDENTITY_ENDPOINT is set AND
+    # there is no client id). So a cert thumbprint in here would break the working SQL path and
+    # authenticate nothing: measured on the live tick job, which reports Succeeded every 5 minutes
+    # while logging ~15x "SPN token failed: could not acquire a token for database.windows.net".
+    # The container path is CLIENT ID + SECRET (IMP-08, the same shape Setup-PimContainers uses,
+    # whose own comment says "a container has no cert store, so the estate uses the secret path").
+    if ("$EngineClientId".Trim()) {
+        $ev.Add("PIM_ClientId=$EngineClientId") | Out-Null
+        if ("$EngineSecretRef".Trim()) { $ev.Add("AZURE_CLIENT_SECRET=secretref:$EngineSecretRef") | Out-Null }
+    }
+    # BUG-73: a SAS-bearing baseline URL arrives as a secret reference and is read from the env by
+    # downlink-job-entry.ps1 ($BaselineUrl = $env:PIM_BaselineUrl). It is deliberately NOT put on
+    # the command line, where it would be readable in the job definition forever.
+    if ("$BaselineUrlSecretRef".Trim()) { $ev.Add("PIM_BaselineUrl=secretref:$BaselineUrlSecretRef") | Out-Null }
     return @($ev.ToArray())
 }
 
@@ -202,6 +232,140 @@ function Get-PimDownlinkJobEnv {
 # secret parameter). private=$true documents the no-ingress invariant (a Job is not
 # an app; it exposes no endpoint), reinforced by the internal-only env it targets.
 # ---------------------------------------------------------------------------
+function Get-PimDownlinkJobYaml {
+    <#
+      PURE. Render the `az containerapp job --yaml` document for the scheduled downlink Job.
+
+      🪤 BUG-38 -- WHY THIS EXISTS INSTEAD OF `--command`.
+      `az containerapp job create --command pwsh -NoProfile -File <x> -Scenario S5` FAILS with
+      "unrecognized arguments: -NoProfile -File ... -Scenario". The CLI's parser treats ANY
+      '-'-prefixed token as a new OPTION rather than a value, so a command whose arguments carry
+      leading dashes cannot be expressed through --command AT ALL. Every downlink command this
+      module builds is exactly that shape, so the shipped MSP deploy path could never have worked.
+      The worker apps and the ESTATE-06 tick Job already deploy via YAML for this reason; this
+      brings the downlink Job onto the same proven shape -- `command: [pwsh]` + a separate `args`
+      array, where a leading dash is just a string.
+
+      Takes FACTS (location, environmentId) rather than looking them up: the wrapper probes Azure,
+      this stays pure and unit-testable.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$JobName,
+        [Parameter(Mandatory)][string]$Location,
+        [Parameter(Mandatory)][string]$EnvironmentId,
+        [Parameter(Mandatory)][string]$Image,
+        [Parameter(Mandatory)][string]$Cron,
+        [string[]]$Command = @(),
+        [string[]]$EnvVars = @(),
+        [string]$AcrServer,
+        [string]$IdentityResourceId,
+        [switch]$SystemAssigned,
+        [string]$RegistryIdentity = '',   # '' = AUTO: the user-assigned MI if attached, else system (BUG-42)
+        [double]$Cpu = 0.5,
+        [string]$Memory = '1Gi',
+        [int]$ReplicaTimeout = 1800,
+        [int]$ReplicaRetryLimit = 1,
+        # BUG-72/73: ACA secrets as `name=value`; referenced from env as `secretref:<name>`.
+        [string[]]$Secrets = @()
+    )
+    # identity. 🪤 `type` MUST be a QUOTED string: in a YAML flow mapping
+    # `{ type: SystemAssigned, UserAssigned }` parses as `type: SystemAssigned` PLUS a separate
+    # null key `UserAssigned`, so the type silently degrades and ARM rejects the identity ids with
+    # "(InvalidResourceIdentityType)". The comma is part of the VALUE. Learned in Setup-PimContainers.
+    if ("$IdentityResourceId".Trim()) {
+        $idType = 'UserAssigned'
+        if ($SystemAssigned) { $idType = 'SystemAssigned, UserAssigned' }
+        $identityYaml = "identity: { type: `"$idType`", userAssignedIdentities: { `"$IdentityResourceId`": {} } }"
+    } else {
+        $identityYaml = 'identity: { type: SystemAssigned }'
+    }
+    # registry via MANAGED IDENTITY only -- never an inline credential.
+    #
+    # 🪤 BUG-42 -- WHICH identity pulls. `-RegistryIdentity` is '' by default, meaning AUTO:
+    # when a user-assigned MI is attached it does the pull, otherwise the system identity does.
+    # It used to default to the literal 'system' even when a UAMI was supplied, which contradicts
+    # the only reason the UAMI is attached (stated in Build-PimDownlinkJobArgs): a system identity
+    # CANNOT pull the first image, because it does not exist until the job it belongs to does. So
+    # a create with a UAMI told ACA to pull with the one identity that could not -- and nothing
+    # granted AcrPull to the system identity in that branch either.
+    # An EXPLICIT -RegistryIdentity (including 'system') is still honoured verbatim.
+    $registryYaml = ''
+    if ("$AcrServer".Trim()) {
+        $regId = "$RegistryIdentity".Trim()
+        if (-not $regId) {
+            if ("$IdentityResourceId".Trim()) { $regId = "$IdentityResourceId".Trim() } else { $regId = 'system' }
+        }
+        $registryYaml = "    registries: [ { server: $AcrServer, identity: `"$regId`" } ]"
+    }
+    # command[0] is the executable; everything after it is args, where a leading dash is
+    # just a string and not an option. That split IS the fix.
+    $cmdList = @($Command)
+    $exe = 'pwsh'
+    if ($cmdList.Count -gt 0) { $exe = "$($cmdList[0])" }
+    $rest = @()
+    if ($cmdList.Count -gt 1) { $rest = @($cmdList[1..($cmdList.Count - 1)]) }
+    $argsYaml = ''
+    if ($rest.Count -gt 0) {
+        $quoted = foreach ($r in $rest) { '"' + ("$r" -replace '"', '\"') + '"' }
+        $argsYaml = "        args: [" + ($quoted -join ',') + "]"
+    }
+    # env. A value of the form `secretref:<name>` renders as a secretRef, NEVER as a value --
+    # that is the whole mechanism by which the engine secret and a SAS-bearing baseline URL reach
+    # the container without ever appearing as readable text in the job definition. Same convention
+    # as Setup-PimContainers (`AZURE_CLIENT_SECRET=secretref:pim-engine-client-secret`).
+    $envLines = ''
+    if (@($EnvVars).Count -gt 0) {
+        $envLines = "        env:`n" + ((@($EnvVars) | ForEach-Object {
+            $kv = "$_" -split '=', 2
+            $v = ''
+            if ($kv.Count -gt 1) { $v = $kv[1] }
+            if ("$v" -match '^(?i)secretref:(.+)$') {
+                "          - { name: $($kv[0]), secretRef: $($Matches[1]) }"
+            } else {
+                "          - { name: $($kv[0]), value: `"$v`" }"
+            }
+        }) -join "`n")
+    }
+    # secrets block. Items arrive as `name=value`; the VALUE is written into the YAML, so the
+    # caller must treat the rendered document as sensitive and delete it after the deploy.
+    $secretsYaml = ''
+    if (@($Secrets).Count -gt 0) {
+        $items = foreach ($s in @($Secrets)) {
+            $kv = "$s" -split '=', 2
+            $sv = ''
+            if ($kv.Count -gt 1) { $sv = $kv[1] }
+            "{ name: $($kv[0]), value: `"$sv`" }"
+        }
+        $secretsYaml = "    secrets: [ $($items -join ', ') ]"
+    }
+    $lines = New-Object System.Collections.Generic.List[string]
+    $lines.Add("location: $Location")                        | Out-Null
+    $lines.Add($identityYaml)                                | Out-Null
+    $lines.Add('properties:')                                | Out-Null
+    $lines.Add("  environmentId: $EnvironmentId")            | Out-Null
+    $lines.Add('  workloadProfileName: Consumption')         | Out-Null
+    $lines.Add('  configuration:')                           | Out-Null
+    $lines.Add('    triggerType: Schedule')                  | Out-Null
+    $lines.Add("    replicaTimeout: $ReplicaTimeout")        | Out-Null
+    $lines.Add("    replicaRetryLimit: $ReplicaRetryLimit")  | Out-Null
+    $lines.Add('    scheduleTriggerConfig:')                 | Out-Null
+    $lines.Add("      cronExpression: `"$Cron`"")            | Out-Null
+    $lines.Add('      parallelism: 1')                       | Out-Null
+    $lines.Add('      replicaCompletionCount: 1')            | Out-Null
+    if ($secretsYaml)  { $lines.Add($secretsYaml)            | Out-Null }
+    if ($registryYaml) { $lines.Add($registryYaml)           | Out-Null }
+    $lines.Add('  template:')                                | Out-Null
+    $lines.Add('    containers:')                            | Out-Null
+    $lines.Add("      - name: $JobName")                     | Out-Null
+    $lines.Add("        image: $Image")                      | Out-Null
+    $lines.Add("        command: [$exe]")                    | Out-Null
+    if ($argsYaml) { $lines.Add($argsYaml)                   | Out-Null }
+    if ($envLines) { $lines.Add($envLines)                   | Out-Null }
+    $lines.Add("        resources: { cpu: $Cpu, memory: $Memory }") | Out-Null
+    return (($lines.ToArray()) -join "`n")
+}
+
 function Build-PimDownlinkJobArgs {
     param(
         [Parameter(Mandatory)][ValidateSet('create','update','delete','start')][string]$Action,
@@ -215,11 +379,18 @@ function Build-PimDownlinkJobArgs {
         [string[]]$EnvVars = @(),
         [string]$IdentityResourceId,
         [switch]$SystemAssigned,
-        [string]$RegistryIdentity = 'system',
+        [string]$RegistryIdentity = '',   # '' = AUTO: the user-assigned MI if attached, else system (BUG-42)
         [double]$Cpu = 0.5,
         [string]$Memory = '1Gi',
         [int]$ReplicaTimeout = 1800,
-        [int]$ReplicaRetryLimit = 1
+        [int]$ReplicaRetryLimit = 1,
+        # BUG-38: create/update now go through --yaml, because --command cannot express a command
+        # with dashed arguments. The caller supplies the path the wrapper will write the returned
+        # `yaml` text to, plus the two facts only a live probe can know.
+        [string]$YamlPath,
+        [string]$Location,
+        [string]$EnvironmentId,
+        [string[]]$Secrets = @()
     )
     $a = New-Object System.Collections.Generic.List[string]
     $a.Add('containerapp') | Out-Null
@@ -231,7 +402,7 @@ function Build-PimDownlinkJobArgs {
         $a.Add('-g') | Out-Null; $a.Add("$ResourceGroup") | Out-Null
         $a.Add('-n') | Out-Null; $a.Add("$JobName") | Out-Null
         $a.Add('--yes') | Out-Null
-        return @{ ok = $true; reason = "delete (unregister) job $JobName"; action = $Action; args = @($a.ToArray()); private = $true; hasInlineSecret = $false }
+        return @{ ok = $true; reason = "delete (unregister) job $JobName"; action = $Action; args = @($a.ToArray()); private = $true; hasInlineSecret = $false; yaml = '' }
     }
 
     # ---- start (on-demand manual execution, for verification) ----------------
@@ -239,68 +410,70 @@ function Build-PimDownlinkJobArgs {
         $a.Add('start') | Out-Null
         $a.Add('-g') | Out-Null; $a.Add("$ResourceGroup") | Out-Null
         $a.Add('-n') | Out-Null; $a.Add("$JobName") | Out-Null
-        return @{ ok = $true; reason = "start one on-demand execution of job $JobName"; action = $Action; args = @($a.ToArray()); private = $true; hasInlineSecret = $false }
+        return @{ ok = $true; reason = "start one on-demand execution of job $JobName"; action = $Action; args = @($a.ToArray()); private = $true; hasInlineSecret = $false; yaml = '' }
     }
 
     # ---- create / update -----------------------------------------------------
-    if (-not "$EnvName".Trim() -and $Action -eq 'create') { return @{ ok = $false; reason = '-EnvName required for create'; action = $Action; args = @(); private = $true; hasInlineSecret = $false } }
-    if (-not "$Image".Trim())   { return @{ ok = $false; reason = '-Image required'; action = $Action; args = @(); private = $true; hasInlineSecret = $false } }
+    if (-not "$EnvName".Trim() -and $Action -eq 'create') { return @{ ok = $false; reason = '-EnvName required for create'; action = $Action; args = @(); private = $true; hasInlineSecret = $false; yaml = '' } }
+    if (-not "$Image".Trim())   { return @{ ok = $false; reason = '-Image required'; action = $Action; args = @(); private = $true; hasInlineSecret = $false; yaml = '' } }
     $cronCheck = Test-PimDownlinkJobCron -Cron $Cron
-    if (-not $cronCheck.ok) { return @{ ok = $false; reason = "bad cron: $($cronCheck.reason)"; action = $Action; args = @(); private = $true; hasInlineSecret = $false } }
+    if (-not $cronCheck.ok) { return @{ ok = $false; reason = "bad cron: $($cronCheck.reason)"; action = $Action; args = @(); private = $true; hasInlineSecret = $false; yaml = '' } }
+
+    # BUG-38: create/update deploy via YAML, NOT --command. See Get-PimDownlinkJobYaml for the
+    # mechanism; in short, `--command pwsh -NoProfile -File x` is rejected outright by the CLI
+    # parser, so the arg set this function used to return could never have been executed. It was
+    # never caught because the 34 tests asserted the ARGUMENT ARRAY and never that az accepts it.
+    if (-not "$YamlPath".Trim())      { return @{ ok = $false; reason = '-YamlPath required (create/update deploy via --yaml; --command cannot express dashed arguments -- BUG-38)'; action = $Action; args = @(); private = $true; hasInlineSecret = $false; yaml = '' } }
+    if (-not "$Location".Trim())      { return @{ ok = $false; reason = '-Location required for the job YAML'; action = $Action; args = @(); private = $true; hasInlineSecret = $false; yaml = '' } }
+    if (-not "$EnvironmentId".Trim()) { return @{ ok = $false; reason = '-EnvironmentId required for the job YAML (probe it with: az containerapp env show --query id)'; action = $Action; args = @(); private = $true; hasInlineSecret = $false; yaml = '' } }
+
+    # identity: user-assigned MI if supplied, else system-assigned. NO secret.
+    # -SystemAssigned adds the system identity ALONGSIDE a user-assigned one. That combination is
+    # what the scheduler tick Job needs (ESTATE-06): the user-assigned MI holds AcrPull so the
+    # FIRST image pull works -- a system identity cannot, because it does not exist until the job
+    # does -- while the system identity is what gets the SQL contained-DB user and the Graph
+    # app-roles, exactly as the worker apps do. Without it the two would share one broad identity.
+    $yaml = Get-PimDownlinkJobYaml -JobName $JobName -Location $Location -EnvironmentId $EnvironmentId `
+        -Image $Image -Cron $Cron -Command $Command -EnvVars $EnvVars -AcrServer $AcrServer `
+        -IdentityResourceId $IdentityResourceId -SystemAssigned:$SystemAssigned -RegistryIdentity $RegistryIdentity `
+        -Cpu $Cpu -Memory $Memory -ReplicaTimeout $ReplicaTimeout -ReplicaRetryLimit $ReplicaRetryLimit -Secrets $Secrets
 
     $a.Add("$Action") | Out-Null
     $a.Add('-g') | Out-Null; $a.Add("$ResourceGroup") | Out-Null
     $a.Add('-n') | Out-Null; $a.Add("$JobName") | Out-Null
-    if ($Action -eq 'create') {
-        $a.Add('--environment') | Out-Null; $a.Add("$EnvName") | Out-Null
-        # workload-profile Consumption matches the proven worker matrix.
-        $a.Add('--workload-profile-name') | Out-Null; $a.Add('Consumption') | Out-Null
-        # SCHEDULE trigger -- the cloud cron. This is what makes it a scheduled Job.
-        $a.Add('--trigger-type') | Out-Null; $a.Add('Schedule') | Out-Null
-        $a.Add('--cron-expression') | Out-Null; $a.Add("$Cron") | Out-Null
-        $a.Add('--replica-timeout') | Out-Null; $a.Add("$ReplicaTimeout") | Out-Null
-        $a.Add('--replica-retry-limit') | Out-Null; $a.Add("$ReplicaRetryLimit") | Out-Null
-        # identity: user-assigned MI if supplied, else system-assigned. NO secret.
-        if ("$IdentityResourceId".Trim()) {
-            $a.Add('--mi-user-assigned') | Out-Null; $a.Add("$IdentityResourceId") | Out-Null
-        } else {
-            $a.Add('--mi-system-assigned') | Out-Null
-        }
-    } else {
-        # update: keep the cron current (allows re-scheduling on re-deploy).
-        $a.Add('--cron-expression') | Out-Null; $a.Add("$Cron") | Out-Null
-        $a.Add('--replica-timeout') | Out-Null; $a.Add("$ReplicaTimeout") | Out-Null
-        $a.Add('--replica-retry-limit') | Out-Null; $a.Add("$ReplicaRetryLimit") | Out-Null
-    }
-    $a.Add('--image') | Out-Null; $a.Add("$Image") | Out-Null
-    # registry pulled via MANAGED IDENTITY (AcrPull) -- never registry creds inline.
-    if ("$AcrServer".Trim()) {
-        $a.Add('--registry-server') | Out-Null; $a.Add("$AcrServer") | Out-Null
-        $a.Add('--registry-identity') | Out-Null; $a.Add("$RegistryIdentity") | Out-Null
-    }
-    $a.Add('--cpu') | Out-Null; $a.Add("$Cpu") | Out-Null
-    $a.Add('--memory') | Out-Null; $a.Add("$Memory") | Out-Null
-    if (@($EnvVars).Count -gt 0) {
-        $a.Add('--env-vars') | Out-Null
-        foreach ($e in @($EnvVars)) { $a.Add("$e") | Out-Null }
-    }
-    if (@($Command).Count -gt 0) {
-        $a.Add('--command') | Out-Null
-        foreach ($c in @($Command)) { $a.Add("$c") | Out-Null }
-    }
+    $a.Add('--yaml') | Out-Null; $a.Add("$YamlPath") | Out-Null
     $a.Add('-o') | Out-Null; $a.Add('none') | Out-Null
 
     # By construction no element is a raw secret value (identity = MI ref/secret-ref,
     # registry = MI). Assert it for the test: no env entry that looks like an inline
     # secret value (PIM_*_SECRET / *PASSWORD / connection-string with Password=).
+    # 🪤 BUG-73 -- A SAS IS A CREDENTIAL AND THIS GUARD DID NOT KNOW IT. The patterns below used to
+    # stop at `client_secret=` / `accountkey=` / `sharedaccesskey=`. A blob SAS carries neither: it
+    # is `?sv=...&sig=<base64>`, so a SAS-bearing baseline URL could have been pasted straight onto
+    # the command line and this function would have reported hasInlineSecret=$false -- a read
+    # credential for the MASTER's bundle store, readable in the job definition by anyone with
+    # Reader on the slave's resource group, forever, and rotated by nobody.
+    $secretish = '(?i)(password=|pwd=|client[_-]?secret=|accountkey=|sharedaccesskey=|[?&]sig=)'
     $inline = $false
     foreach ($e in @($EnvVars)) {
-        if ("$e" -match '(?i)(password=|pwd=|client[_-]?secret=|accountkey=|sharedaccesskey=)') { $inline = $true }
+        # `secretref:<name>` is the SANCTIONED form -- it names a secret, it does not carry one.
+        if ("$e" -match '(?i)=secretref:') { continue }
+        if ("$e" -match $secretish) { $inline = $true }
     }
     foreach ($x in @($a.ToArray())) {
-        if ("$x" -match '(?i)(password=|pwd=|client[_-]?secret=|accountkey=|sharedaccesskey=)') { $inline = $true }
+        if ("$x" -match $secretish) { $inline = $true }
     }
-    return @{ ok = $true; reason = "$Action scheduled downlink job $JobName (cron '$Cron')"; action = $Action; args = @($a.ToArray()); private = $true; hasInlineSecret = $inline }
+    # The env now travels in the YAML, not on the command line, so the guard MUST read the YAML
+    # too -- otherwise moving to --yaml would have quietly disarmed the very check that stops a
+    # secret being deployed, and the arg scan above would keep reporting "clean" forever.
+    # 🔒 The `secrets:` block is the ONE place a value is allowed to appear -- that is what an ACA
+    # secret IS -- so it is excluded from this scan and nothing else is. Excluding the whole YAML
+    # would disarm the check; not excluding this line would make the sanctioned mechanism
+    # unusable and push callers back to plain env values, which is the outcome the guard exists
+    # to prevent.
+    $yamlToScan = (($yaml -split "`n") | Where-Object { "$_" -notmatch '^\s*secrets:\s*\[' }) -join "`n"
+    if ("$yamlToScan" -match $secretish) { $inline = $true }
+    return @{ ok = $true; reason = "$Action scheduled downlink job $JobName (cron '$Cron')"; action = $Action; args = @($a.ToArray()); private = $true; hasInlineSecret = $inline; yaml = "$yaml" }
 }
 
 # ---------------------------------------------------------------------------
@@ -329,16 +502,46 @@ function Get-PimDownlinkJobDeployPlan {
         [string]$SyncRootCentral = '/sync/central',
         [string]$SyncRootLocal   = '/sync/local',
         [string]$IdentityResourceId,
-        [string]$RegistryIdentity = 'system',
-        [bool]$Exists = $false
+        [string]$RegistryIdentity = '',   # '' = AUTO: the user-assigned MI if attached, else system (BUG-42)
+        [bool]$Exists = $false,
+        # BUG-38: the three facts the YAML deploy needs. Location/EnvironmentId come from the
+        # wrapper's `az containerapp env show` probe -- supplied as facts so this stays pure.
+        [string]$YamlPath,
+        [string]$Location,
+        [string]$EnvironmentId,
+        # BUG-72: the engine's app-only identity for the container (client id + SECRET -- a
+        # container has no cert store, see Get-PimDownlinkJobEnv).
+        [string]$EngineClientId,
+        [string]$EngineClientSecret,
+        # BUG-73: a SAS-bearing baseline URL. Delivered as an ACA secret, never on the command line.
+        [string]$BaselineSasUrl
     )
     $placement = Get-PimDownlinkJobPlacement -Scenario $Scenario
-    $command = Get-PimDownlinkJobCommand -EntryPath $EntryPath -Scenario $Scenario -TenantId $TenantId -SlaveRing $SlaveRing -BaselineUrl $BaselineUrl -BaselineDocPath $BaselineDocPath
-    $envVars = Get-PimDownlinkJobEnv -Scenario $Scenario -TenantId $TenantId -SqlServerFqdn $SqlServerFqdn -SqlDatabase $SqlDatabase -SyncRootCentral $SyncRootCentral -SyncRootLocal $SyncRootLocal
+    # 🔒 BUG-73: when the baseline URL carries a SAS it must NOT reach the command line -- the job
+    # definition is readable by anyone with Reader on the RG, and a SAS there is a standing
+    # credential to the master's bundle store. It travels as an ACA secret and the entrypoint picks
+    # it up from $env:PIM_BaselineUrl, which it already falls back to.
+    $secrets = New-Object System.Collections.Generic.List[string]
+    $engineSecretRef = ''
+    $baselineUrlRef  = ''
+    $cmdBaselineUrl  = $BaselineUrl
+    if ("$BaselineSasUrl".Trim()) {
+        $baselineUrlRef = 'pim-baseline-url'
+        $secrets.Add("$baselineUrlRef=$BaselineSasUrl") | Out-Null
+        $cmdBaselineUrl = ''    # the env carries it instead
+    }
+    if ("$EngineClientId".Trim() -and "$EngineClientSecret".Trim()) {
+        $engineSecretRef = 'pim-engine-client-secret'
+        $secrets.Add("$engineSecretRef=$EngineClientSecret") | Out-Null
+    }
+    $command = Get-PimDownlinkJobCommand -EntryPath $EntryPath -Scenario $Scenario -TenantId $TenantId -SlaveRing $SlaveRing -BaselineUrl $cmdBaselineUrl -BaselineDocPath $BaselineDocPath
+    $envVars = Get-PimDownlinkJobEnv -Scenario $Scenario -TenantId $TenantId -SqlServerFqdn $SqlServerFqdn -SqlDatabase $SqlDatabase -SyncRootCentral $SyncRootCentral -SyncRootLocal $SyncRootLocal `
+        -EngineClientId $EngineClientId -EngineSecretRef $engineSecretRef -BaselineUrlSecretRef $baselineUrlRef
     $action = if ($Exists) { 'update' } else { 'create' }
     $jobArgs = Build-PimDownlinkJobArgs -Action $action -JobName $JobName -ResourceGroup $ResourceGroup `
         -EnvName $EnvName -Image $Image -AcrServer $AcrServer -Cron $Cron `
-        -Command $command -EnvVars $envVars -IdentityResourceId $IdentityResourceId -RegistryIdentity $RegistryIdentity
+        -Command $command -EnvVars $envVars -IdentityResourceId $IdentityResourceId -RegistryIdentity $RegistryIdentity `
+        -YamlPath $YamlPath -Location $Location -EnvironmentId $EnvironmentId -Secrets @($secrets.ToArray())
     return @{
         ok        = [bool]$jobArgs.ok
         reason    = "$($placement.reason); $($jobArgs.reason)"

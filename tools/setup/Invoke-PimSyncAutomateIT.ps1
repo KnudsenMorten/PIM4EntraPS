@@ -56,12 +56,17 @@
 #>
 [CmdletBinding(SupportsShouldProcess)]
 param(
-    [string]$ResourceGroup   = 'rg-pim-manager-web',
-    [string]$AcrName         = 'acrsecurityinsight',
+    [string]$ResourceGroup   = "$($env:PIM_ResourceGroup)",
+    [string]$AcrName         = "$($env:PIM_AcrName)",
     [string]$ImageRepo       = 'pim-manager',
     [string]$ManagerApp      = 'ca-pim-manager',
     [string[]]$Apps          = @('ca-pim-manager','ca-pim-scheduler','ca-pim-engine','ca-pim-connector','ca-pim-deltaqueue','ca-pim-discovery'),
     [string]$PinnedTag,
+    # BUG-48: this is the CUSTOMER auto-update path, so the tick Job has to be re-stamped here
+    # too -- otherwise a customer's GUI advances and their reconciling engine stays on the old
+    # build indefinitely. Inert where it does not apply: the roller SKIPS a Job that does not
+    # exist, which is the normal always-on shape.
+    [string]$TickJobName     = 'ca-pim-tick',
     [switch]$Apply,
     [switch]$SkipHealthCheck
 )
@@ -143,7 +148,7 @@ Info ("pre-update revision: " + $(if ($prevRev) { $prevRev } else { '(unknown --
 $roller = Join-Path $here 'Update-PimContainers.ps1'
 Step "Roll all apps -> $targetTag (zero-downtime, via Update-PimContainers.ps1 -SkipBuild)"
 if ($PSCmdlet.ShouldProcess("$($Apps -join ', ')", "update -> $targetTag")) {
-    & $roller -ImageTag $targetTag -SkipBuild -ResourceGroup $ResourceGroup -AcrName $AcrName -ImageRepo $ImageRepo -Apps $Apps
+    & $roller -ImageTag $targetTag -SkipBuild -ResourceGroup $ResourceGroup -AcrName $AcrName -ImageRepo $ImageRepo -Apps $Apps -TickJobName $TickJobName
     if ($LASTEXITCODE -and $LASTEXITCODE -ne 0) { throw "Update-PimContainers.ps1 failed (exit $LASTEXITCODE)." }
 }
 

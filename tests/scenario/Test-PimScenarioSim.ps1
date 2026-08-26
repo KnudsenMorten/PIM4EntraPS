@@ -139,7 +139,10 @@ try {
     $delta = Invoke-PimScenarioEngine -Scope All -Mode Delta -FreshProcess
     Assert-PimScenario $Ctx 'SYSTEM: Delta re-run applied ZERO new creates' ($delta.applied -eq 0) "applied=$($delta.applied)"
     Assert-PimScenario $Ctx 'SYSTEM: Delta re-run had zero errors' ($delta.errors -eq 0) "errors=$($delta.errors)"
-    Assert-PimScenario $Ctx 'USE-CASE: every already-present item was validated-and-skipped' ($delta.skipped -ge 1) "skipped=$($delta.skipped)"
+    # Validated-and-left-alone, by either route: NOCHANGE (the live read already matched,
+    # so nothing was attempted) or SKIPPED (attempted and rejected as already existing).
+    # The first is the better outcome and is what a correct live read produces.
+    Assert-PimScenario $Ctx 'USE-CASE: every already-present item was validated and left alone' (($delta.nochange + $delta.skipped) -ge 1) "nochange=$($delta.nochange) skipped=$($delta.skipped)"
     Assert-PimScenario $Ctx 'USE-CASE: no duplicate groups created on re-run' ($tenant.Groups.Count -eq $beforeGroups)
     Assert-PimScenario $Ctx 'USE-CASE: no duplicate directory-role schedules on re-run' ($tenant.DirElig.Count -eq $beforeDir)
     Assert-PimScenario $Ctx 'USE-CASE: no duplicate PIM-for-Groups schedules on re-run' ($tenant.GrpElig.Count -eq $beforeGrp)

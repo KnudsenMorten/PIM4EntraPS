@@ -48,6 +48,7 @@ param(
 $ErrorActionPreference = 'Stop'
 $shared = Join-Path (Split-Path -Parent $PSScriptRoot) 'engine\_shared'
 . (Join-Path $shared 'PIM-ChangeQueue.ps1')
+. (Join-Path $shared 'PIM-Rest.ps1')
 . (Join-Path $shared 'PIM-SqlStore.ps1')
 
 if (-not $ConnectionString) { $ConnectionString = Get-PimSqlConnectionString -Server $Server -Database $Database }
