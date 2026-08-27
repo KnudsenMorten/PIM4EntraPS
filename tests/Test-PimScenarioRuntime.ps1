@@ -84,8 +84,17 @@ foreach ($e in $expHost) {
 T 'in-tenant (S1) hosting server is EMPTY (ambient override = none)' ("$((Resolve-PimScenarioHostingStore -Scenario 'S1').server)" -eq '')
 # central-msp with NO central server supplied -> empty server (fall back to ambient), not a throw.
 T 'central-msp with no central server -> empty server (fall back to ambient)' ("$((Resolve-PimScenarioHostingStore -Scenario 'S5' -CentralServer '').server)" -eq '')
-# local-slave with no local server -> the safe .\SQLEXPRESS default.
-T 'local-slave with no local server -> .\SQLEXPRESS default' ((Resolve-PimScenarioHostingStore -Scenario 'S6' -LocalServer '').server -eq '.\SQLEXPRESS')
+# BUG-78: local-slave with NO local server -> EMPTY (fall back to ambient), exactly like
+# central-msp above. This assertion used to demand '.\SQLEXPRESS' and called it "the safe
+# default" -- it was neither safe nor a default: it OUTRANKED an explicitly configured
+# PIM_SqlServer=<...>.database.windows.net, so a managed-tenant container silently connected to a
+# SQL Express instance that does not exist in the image. The resulting Integrated-Security
+# connection string also makes New-PimSqlConnection skip token acquisition, which is why the S6
+# downlink produced no auth diagnostics at all and read as an identity problem for three rebuilds.
+T 'local-slave with no local server -> empty server (fall back to ambient)' ("$((Resolve-PimScenarioHostingStore -Scenario 'S6' -LocalServer '').server)" -eq '')
+T 'local-slave never invents a local instance that outranks ambient config' ((Resolve-PimScenarioHostingStore -Scenario 'S6' -LocalServer '').server -ne '.\SQLEXPRESS')
+# An explicit AZURE local-slave server is reported as azure, not mislabelled local.
+T 'local-slave with an Azure FQDN is kind=azure' ((Resolve-PimScenarioHostingStore -Scenario 'S6' -LocalServer 'sql-x.database.windows.net').kind -eq 'azure')
 
 # --- SPN MODEL ---
 foreach ($id in 'S1','S2','S3','S4','S6') {

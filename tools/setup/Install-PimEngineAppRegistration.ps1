@@ -116,7 +116,13 @@ $graphRoleMap = Get-PimGraphAppRoleMap
 $graphRolesWanted = @(
     'RoleManagement.ReadWrite.Directory','Group.ReadWrite.All','User.ReadWrite.All',
     'Directory.Read.All','AdministrativeUnit.ReadWrite.All','PrivilegedAccess.ReadWrite.AzureADGroup',
-    'RoleManagementPolicy.ReadWrite.Directory','UserAuthenticationMethod.ReadWrite.All'
+    'RoleManagementPolicy.ReadWrite.Directory','UserAuthenticationMethod.ReadWrite.All',
+    # BUG-82: /domains needs Domain.Read.All specifically -- Directory.Read.All does NOT cover it.
+    # The managed-tenant downlink resolves the tenant's default verified domain to build synced
+    # admins' UPNs (IMP-12); without this the engine SPN gets 403 Authorization_RequestDenied and
+    # the downlink refuses to stage any admin rather than guess a domain. Measured on the
+    # greenfield slave, where the engine SPN held 100 app-roles and still could not read /domains.
+    'Domain.Read.All'
 )
 $exoRoleValue = 'Exchange.ManageAsApp'
 

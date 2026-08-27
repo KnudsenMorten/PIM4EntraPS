@@ -211,6 +211,13 @@ $script:PimGraphAppRoles = @{
     'RoleManagementPolicy.ReadWrite.Directory' = 'a2611786-80b3-417e-adaa-707d4261a5f0'
     'AdministrativeUnit.ReadWrite.All'         = '5eb59dd3-1da2-4329-8733-9dabdc435916'
     'UserAuthenticationMethod.ReadWrite.All'   = '50483e42-d915-4231-9639-7fdb7fd190e5'
+    # BUG-82: reading the tenant's default verified domain (/domains) needs its own role -- none of
+    # the eight above covers it, not even Directory.Read.All. The managed-tenant downlink resolves
+    # that domain to build synced admins' UPNs (IMP-12), and without it the engine SPN gets
+    #   GET /v1.0/domains -> 403 Authorization_RequestDenied
+    # so the downlink refuses to stage admins rather than guess a domain -- correct, and fatal to
+    # the whole S6 apply. Id read from the live Graph service principal, not from memory.
+    'Domain.Read.All'                          = 'dbb9058a-0e50-45d7-ae91-66909b5d4664'
 }
 
 function Get-PimGraphAppRoleMap {

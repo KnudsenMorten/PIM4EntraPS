@@ -1798,6 +1798,14 @@ function Invoke-PimScenarioDeploy {
         # nothing -- which is the honest outcome, not a silent one.
         [string]$SlaveStoreConnectionString,
         [string]$SlaveDefaultDomain,
+        # BUG-84: the fallback delivery address for a synced admin's TAP. The AdminTap guard
+        # REFUSES to mint a credential it cannot deliver -- correctly, and by design (BUG-66/69) --
+        # so an admin row with no ManagerEmail produces an account nobody can sign in as. The
+        # downlink already says so ("... pass -DefaultManagerEmail"), and Invoke-PimManagedDownlink
+        # already accepts it; nothing forwarded it, so the advice named a parameter the caller had
+        # no way to supply. Per-admin ManagerEmail from the bundle still WINS -- this is only the
+        # fallback for a master registry that predates the column.
+        [string]$DefaultManagerEmail = '',
         [datetime]$NowUtc = ([datetime]::UtcNow),
         [int64]$LastVersion = 0,
         [switch]$WhatIfMode = $true
@@ -1813,8 +1821,72 @@ function Invoke-PimScenarioDeploy {
             $results.Add([pscustomobject]@{ step = 'downlink-sync'; ok = $false; detail = 'no baseline doc / tenant id supplied' }) | Out-Null
         } else {
             $dlPass = @{}
-            if ("$SlaveStoreConnectionString".Trim()) { $dlPass['SlaveStoreConnectionString'] = $SlaveStoreConnectionString }
+            $__slaveCs = "$SlaveStoreConnectionString".Trim()
+            # 🔴 BUG-79 -- WITHOUT A SLAVE STORE THE PULL STAGES FILES AND THE ENGINE READS SQL, SO
+            # NOTHING EVER ARRIVES. The downlink reported, correctly and uselessly:
+            #     [downlink] admins NOT staged: this is a pull topology and no
+            #                -SlaveStoreConnectionString was supplied (sync files only).
+            # and the engine then refused with "the desired store has NO definition/admin rows"
+            # -- its empty-desired guard doing exactly the right thing over a store nobody filled.
+            # 🔒 WHY DEFAULTING THIS IS **NOT** THE FORBIDDEN PUSH PATH. MSP-3's rule is "no
+            # component ever writes ACROSS A TENANT BOUNDARY", and the handoff rightly warns against
+            # threading a slave connection string through the MASTER's tooling. This is the mirror
+            # image: on `local-slave` the job is running INSIDE the managed tenant, as that tenant's
+            # own identity, and the ambient store IS its own store. A tenant writing to its own
+            # database is the pull model working, not a boundary being crossed.
+            # ⛔ SCOPED TO local-slave ON PURPOSE. On `central-msp` (S5) the ambient store is the
+            # MASTER's, and defaulting there would write a slave's projection into the master's
+            # database -- the precise mistake MSP-3 exists to prevent. So the default is keyed on
+            # the resolved hostingLocation, never on "a store happens to be configured".
+            if (-not $__slaveCs) {
+                $__ctx = $null
+                try { $__ctx = Resolve-PimScenarioContext -Scenario $Scenario } catch { $__ctx = $null }
+                if ("$($__ctx.hostingLocation)".Trim().ToLowerInvariant() -eq 'local-slave' -and
+                    (Get-Command Get-PimSqlConnectionString -ErrorAction SilentlyContinue)) {
+                    try { $__slaveCs = "$(Get-PimSqlConnectionString)".Trim() } catch { $__slaveCs = '' }
+                    if ($__slaveCs) {
+                        Write-Host "[scenario-run] slave store: none supplied -- using this tenant's OWN ambient store (local-slave; the pull model writes into its own database)" -ForegroundColor DarkGray
+                    } else {
+                        Write-Host "[scenario-run] slave store: none supplied and the ambient store could not be resolved -- admins will be staged to FILES ONLY and the engine will find an empty desired set." -ForegroundColor Yellow
+                    }
+                }
+            }
+            if ($__slaveCs) { $dlPass['SlaveStoreConnectionString'] = $__slaveCs }
+            # 🔴 BUG-81 -- THE UPN DOMAIN. The downlink refuses, correctly, to invent one:
+            #     [downlink] admins NOT staged: no slave default domain (-SlaveDefaultDomain, or an
+            #                ambient tenant to read it from). Refusing to build UPNs at a guessed domain.
+            # That refusal is right -- a guessed domain creates admins nobody can sign in as -- but
+            # IMP-12 already says the value is "resolved from the ambient tenant when we are running
+            # inside it; never guessed", and on local-slave we ARE inside it. Nothing was doing that
+            # resolution, so the refusal fired on every run and no admin ever reached the store.
+            # Same boundary rule as the store above: ambient ONLY for local-slave. On central-msp the
+            # ambient tenant is the MASTER, and stamping the master's domain onto a slave's admins
+            # would be silently wrong in a way that looks fine in the log.
+            if (-not "$SlaveDefaultDomain".Trim()) {
+                $__ctx2 = $null
+                try { $__ctx2 = Resolve-PimScenarioContext -Scenario $Scenario } catch { $__ctx2 = $null }
+                if ("$($__ctx2.hostingLocation)".Trim().ToLowerInvariant() -eq 'local-slave' -and
+                    -not (Get-Command Get-PimRestDefaultDomain -ErrorAction SilentlyContinue)) {
+                    # 🪤 Do NOT let a missing helper skip this in silence -- that is exactly how the
+                    # first version of this fix did nothing at all while the log blamed "no ambient
+                    # tenant to read it from".
+                    Write-Host '[scenario-run] slave domain: Get-PimRestDefaultDomain is NOT LOADED, so the domain cannot be resolved (dot-source engine/_shared/PIM-AccountRest.ps1). Admins will not be staged.' -ForegroundColor Yellow
+                }
+                if ("$($__ctx2.hostingLocation)".Trim().ToLowerInvariant() -eq 'local-slave' -and
+                    (Get-Command Get-PimRestDefaultDomain -ErrorAction SilentlyContinue)) {
+                    try {
+                        $__dom = "$(Get-PimRestDefaultDomain)".Trim()
+                        if ($__dom) {
+                            $dlPass['SlaveDefaultDomain'] = $__dom
+                            Write-Host "[scenario-run] slave domain: none supplied -- resolved '$__dom' from this tenant (local-slave; IMP-12)" -ForegroundColor DarkGray
+                        }
+                    } catch {
+                        Write-Host "[scenario-run] slave domain: could not resolve it from this tenant ($($_.Exception.Message)) -- admins will NOT be staged rather than built at a guessed domain." -ForegroundColor Yellow
+                    }
+                }
+            }
             if ("$SlaveDefaultDomain".Trim())         { $dlPass['SlaveDefaultDomain']         = $SlaveDefaultDomain }
+            if ("$DefaultManagerEmail".Trim())        { $dlPass['DefaultManagerEmail']        = $DefaultManagerEmail }
             $dl = Invoke-PimManagedDownlink -Scenario $Scenario -Doc $Doc -PublicKey $PublicKey `
                 -BaselineAdmins $BaselineAdmins -TenantId $TenantId -SlaveRing $SlaveRing `
                 -CentralRoot $CentralRoot -LocalRoot $LocalRoot -SqlServer $SqlServer -SqlDatabase $SqlDatabase `

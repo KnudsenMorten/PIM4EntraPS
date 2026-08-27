@@ -125,17 +125,54 @@ function New-PimSqlConnection {
             $sqlThumb = if ($global:PIM_SqlCertThumbprint) { $global:PIM_SqlCertThumbprint } else { $global:PIM_CertThumbprint }
             $explicitSpn = [bool]("$sqlCid".Trim()) -and ([bool]("$sqlSec".Trim()) -or [bool]("$sqlThumb".Trim()))
 
-            if (-not $tok -and $explicitSpn) {
-                try { $tok = Get-PimRestToken -Resource 'https://database.windows.net' -ClientId $sqlCid -ClientSecret $sqlSec -CertThumbprint $sqlThumb } catch { Write-Warning "  [sql] SPN token failed: $($_.Exception.Message)" }
+            # 🔴 BUG-77 -- SAY WHICH BRANCH RAN AND WHICH IDENTITY IT ASKED FOR, ONCE PER PROCESS.
+            # Every branch below was silent on success and the MI branch is a plain `if`, so being
+            # SKIPPED produced no output at all. The result: "no [mi] line, no [sql] warning, and a
+            # login failure" was equally consistent with MI-skipped, MI-returned-the-wrong-identity,
+            # and SPN-token-minted-from-$env:AZURE_CLIENT_SECRET (which Get-PimRestToken reads on its
+            # own, so the SPN can be used even when $explicitSpn is $false). Those cannot be told
+            # apart from outside, and each guess costs a rebuild. One line ends that.
+            $miAvail = Test-PimManagedIdentityAvailable
+            if (-not $script:PimSqlAuthLogged) {
+                $script:PimSqlAuthLogged = $true
+                $miIdLabel = if ($global:PIM_ManagedIdentityClientId) { "user-assigned $($global:PIM_ManagedIdentityClientId)" }
+                             elseif ($env:PIM_ManagedIdentityClientId) { "user-assigned $($env:PIM_ManagedIdentityClientId)" } else { 'default (system, or the only one attached)' }
+                $credKind = if ("$sqlSec".Trim()) { 'secret' } elseif ("$sqlThumb".Trim()) { "cert $sqlThumb" }
+                            elseif ($env:AZURE_CLIENT_SECRET) { 'secret via $env:AZURE_CLIENT_SECRET (NOT counted by $explicitSpn)' } else { 'none' }
+                Write-Warning ("  [sql] auth plan: explicitSpn={0} sqlClientId='{1}' credential={2} | MI available={3} identity={4}" -f `
+                                $explicitSpn, "$sqlCid", $credKind, $miAvail, $miIdLabel)
             }
-            if (-not $tok -and (Test-PimManagedIdentityAvailable)) {
-                try { $tok = Get-PimRestToken -Resource 'https://database.windows.net' -UseManagedIdentity } catch { Write-Warning "  [sql] MI token failed: $($_.Exception.Message)" }
+            # 🪤 ONCE PER PROCESS, NOT ONCE PER CONNECTION. The first version of this logged the
+            # winning branch on EVERY connection: a single downlink run emitted ~80 identical
+            # "token source: MANAGED IDENTITY" warnings, which is how a diagnostic stops being one.
+            # Noise that drowns the next real warning costs more than the silence it replaced.
+            # The FAILURE paths stay unconditional -- those are rare and each one matters.
+            if (-not $tok -and $explicitSpn) {
+                try { $tok = Get-PimRestToken -Resource 'https://database.windows.net' -ClientId $sqlCid -ClientSecret $sqlSec -CertThumbprint $sqlThumb
+                      if ($tok -and -not $script:PimSqlSourceLogged) { $script:PimSqlSourceLogged = $true; Write-Warning "  [sql] token source: EXPLICIT SPN $sqlCid" } }
+                catch { Write-Warning "  [sql] SPN token failed: $($_.Exception.Message)" }
+            }
+            if (-not $tok -and $miAvail) {
+                try { $tok = Get-PimRestToken -Resource 'https://database.windows.net' -UseManagedIdentity
+                      if ($tok -and -not $script:PimSqlSourceLogged) { $script:PimSqlSourceLogged = $true; Write-Warning '  [sql] token source: MANAGED IDENTITY' } }
+                catch { Write-Warning "  [sql] MI token failed: $($_.Exception.Message)" }
+            }
+            elseif (-not $tok -and -not $miAvail -and -not $script:PimSqlSourceLogged) {
+                $script:PimSqlSourceLogged = $true
+                Write-Warning '  [sql] MI branch SKIPPED (no managed identity detected in this process)'
             }
             # Last resort: an SPN that was not "explicit" by the test above (e.g. client id
             # present but credential resolved from the ambient cert store).
             if (-not $tok -and -not $explicitSpn) {
-                try { $tok = Get-PimRestToken -Resource 'https://database.windows.net' -ClientId $sqlCid -ClientSecret $sqlSec -CertThumbprint $sqlThumb } catch { Write-Warning "  [sql] SPN token failed: $($_.Exception.Message)" }
+                # 🪤 This branch can still authenticate as the SPN even though $explicitSpn said
+                # there was no explicit credential: Get-PimRestToken reads $env:AZURE_CLIENT_SECRET
+                # itself. That is exactly how a container ends up presenting the ENGINE SPN to SQL
+                # while every log line suggests managed identity -- so it names the source too.
+                try { $tok = Get-PimRestToken -Resource 'https://database.windows.net' -ClientId $sqlCid -ClientSecret $sqlSec -CertThumbprint $sqlThumb
+                      if ($tok -and -not $script:PimSqlSourceLogged) { $script:PimSqlSourceLogged = $true; Write-Warning "  [sql] token source: FALLBACK SPN $sqlCid (credential resolved inside Get-PimRestToken, e.g. \$env:AZURE_CLIENT_SECRET)" } }
+                catch { Write-Warning "  [sql] SPN token failed: $($_.Exception.Message)" }
             }
+            if (-not $tok) { Write-Warning '  [sql] NO TOKEN was obtained by any branch -- the connection will present no credential.' }
         }
         # Last-resort: an explicitly pre-pinned token (e.g. a caller that minted its own).
         if (-not $tok -and $global:PIM_SqlAccessToken) { $tok = $global:PIM_SqlAccessToken }
@@ -679,7 +716,18 @@ function Import-PimSettingsSeed {
 
 function Test-PimSqlConnectivity {
     param([Parameter(Mandatory)][string]$ConnectionString)
-    try { return ((Invoke-PimSqlScalar -ConnectionString $ConnectionString -Sql 'SELECT 1') -eq 1) } catch { return $false }
+    # 🔴 BUG-77 -- THIS USED TO BE `catch { return $false }`, WHICH DISCARDED THE ONLY SENTENCE THAT
+    # SAYS WHAT WENT WRONG. Its caller then reports `Preflight FAILED: cannot reach the desired
+    # store: no SELECT 1` -- a message that is true of a firewall block, an expired token, a missing
+    # contained user, a wrong tenant and an unreachable server alike. Three rebuild/redeploy/run
+    # cycles were spent guessing between those on the greenfield slave, because the process was
+    # telling us "no" and refusing to say why. A probe that hides the reason is not a probe.
+    try { return ((Invoke-PimSqlScalar -ConnectionString $ConnectionString -Sql 'SELECT 1') -eq 1) }
+    catch {
+        $script:PimSqlLastError = "$($_.Exception.Message)"
+        Write-Warning "  [sql] connectivity probe FAILED: $($_.Exception.Message)"
+        return $false
+    }
 }
 
 # --- cold-process settings hydration (the GUI-state == actual-behavior fix) -----

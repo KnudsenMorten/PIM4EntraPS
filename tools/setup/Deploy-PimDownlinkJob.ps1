@@ -97,6 +97,20 @@ param(
     # `Modern-AppId` + `Modern-Secret` Key Vault secrets.
     [string]$EngineClientId,
     [string]$EngineClientSecret,
+    # BUG-75: the SQL admin used to create the job identity's contained DB user. Without this the
+    # job's MI has no user, and the engine apply fails on every run with "cannot reach the desired
+    # store" -- an error Azure SQL words as "the server is not currently configured to accept this
+    # token", which sends you looking at permissions instead of at the missing user.
+    [string]$SqlAdminClientId,
+    [string]$SqlAdminClientSecret,
+    [string]$SqlAdminCertThumbprint,
+    # Deliberate escape hatch, e.g. when the contained user is created by another process.
+    [switch]$SkipSqlGrant,
+    # BUG-84: fallback delivery address for a synced admin's Temporary Access Pass. The AdminTap
+    # guard REFUSES to mint a credential it cannot deliver (by design -- BUG-66/69), so a pull into
+    # a tenant whose admin rows carry no ManagerEmail creates accounts nobody can sign in as.
+    # Per-admin ManagerEmail from the bundle still wins; this is only the fallback.
+    [string]$DefaultManagerEmail,
     [string]$SqlServerFqdn,
     [string]$SqlDatabase = 'PimPlatform',
     [string]$SyncRootCentral = '/sync/central',
@@ -316,6 +330,18 @@ if ($exists -and -not $WhatIfPreference -and "$IdentityResourceId".Trim()) {
     }
 }
 
+# --- BUG-76: the container must NAME the identity it wants a token for ----------
+# Container Apps attaches a USER-ASSIGNED identity with no system identity beside it, and the
+# IDENTITY_ENDPOINT token call cannot choose one on its own -- so without this the container gets
+# no token at all and presents no credential to SQL. Resolved here (a live probe) and passed to
+# the pure planner as a fact, which is the same split the rest of this script uses.
+$miClientId = ''
+if (-not $WhatIfPreference -and "$IdentityResourceId".Trim()) {
+    $miClientId = az identity show --ids "$IdentityResourceId" --query clientId -o tsv --only-show-errors 2>$null
+    if ("$miClientId".Trim()) { Note "managed identity client id: $miClientId (BUG-76 -- the token call must ask for it by name)" }
+    else { Warn "could not read the client id of '$IdentityResourceId' -- the container may be unable to obtain a managed-identity token." }
+}
+
 # --- facts the YAML deploy needs (BUG-38) + the digest pin (BUG-40) -------------
 # The Job is deployed via --yaml because `--command pwsh -NoProfile -File x` is rejected outright
 # by the CLI parser (see Get-PimDownlinkJobYaml). YAML needs the environment's ARM id and region,
@@ -343,7 +369,8 @@ $plan = Get-PimDownlinkJobDeployPlan -Scenario $Scenario -TenantId $TenantId -Sl
     -SqlServerFqdn $SqlServerFqdn -SqlDatabase $SqlDatabase -SyncRootCentral $SyncRootCentral -SyncRootLocal $SyncRootLocal `
     -IdentityResourceId $IdentityResourceId -RegistryIdentity $RegistryIdentity -Exists $exists `
     -YamlPath $yamlPath -Location $envLocation -EnvironmentId $envId `
-    -EngineClientId $EngineClientId -EngineClientSecret $EngineClientSecret -BaselineSasUrl $BaselineSasUrl
+    -EngineClientId $EngineClientId -EngineClientSecret $EngineClientSecret -BaselineSasUrl $BaselineSasUrl `
+    -ManagedIdentityClientId $miClientId -DefaultManagerEmail $DefaultManagerEmail
 
 if (-not $plan.ok) { throw "deploy plan invalid: $($plan.reason)" }
 if ($plan.jobArgs.hasInlineSecret) { throw "REFUSED: the arg set contains an inline secret (must use MI / secret-ref only)." }
@@ -416,8 +443,68 @@ if ($plan.action -eq 'create' -and -not $WhatIfPreference -and -not "$IdentityRe
             if ($LASTEXITCODE -eq 0) { Note "granted the Job's system MI AcrPull on $AcrName" }
             else { Warn "AcrPull grant to the Job's system MI FAILED (az exit $LASTEXITCODE) -- the job will not be able to pull." }
         }
-        Warn "SQL: add the Job's MI [$JobName] as a contained DB user on $SqlServerFqdn/$SqlDatabase (Grant-PimMiSql), like the worker matrix, so the engine apply can read pim.Rows."
     } catch { Warn "post-create grant skipped: $($_.Exception.Message)" }
+}
+
+# --- BUG-75: THE JOB'S IDENTITY NEEDS A SQL CONTAINED USER, AND A WARNING IS NOT A GRANT --------
+# 🔴 WHAT ACTUALLY HAPPENS AT RUNTIME, measured on the first successful downlink pull:
+#   * GRAPH authenticates as the engine SPN -- Get-PimRestToken reads $env:AZURE_CLIENT_SECRET.
+#   * SQL does NOT. PIM-SqlStore.ps1 resolves its credential from $global:PIM_ClientSecret, which
+#     is DELIBERATELY never populated from env ("Use-Cfg deliberately has no PIM_ClientSecret
+#     entry" -- Setup-PimContainers' own comment). So $explicitSpn is FALSE, the SPN branch is
+#     skipped, and the connection falls through to MANAGED IDENTITY.
+# The job's MI therefore needs a contained DB user -- and nothing granted it one, so the engine
+# apply died on `Preflight FAILED: cannot reach the desired store: no SELECT 1`. Azure SQL reports
+# that as "the server is not currently configured to accept this token", which BUG-34's comment in
+# that same function already warns "reads like a permissions problem rather than 'you
+# authenticated to the wrong directory'".
+# 🪤 THIS EXACT STEP WAS ALREADY KNOWN AND ONLY WARNED ABOUT: the block above used to print "SQL:
+# add the Job's MI as a contained DB user ... like the worker matrix". Worse, that warning sat in a
+# branch guarded by `-not $IdentityResourceId`, so on the path a fixed deploy now takes it never
+# printed at all. A warning nobody sees, in a branch that does not run, is indistinguishable from
+# having no check -- which is why this is an ACTION, and why it fails loudly instead.
+# 📌 Setup-PimContainers already does exactly this for ca-pim-manager and ca-pim-tick. The downlink
+# job was simply missing it, which is why those two reach SQL and this one never could.
+if (-not $WhatIfPreference -and -not $SkipSqlGrant -and "$SqlServerFqdn".Trim()) {
+    $sqlAdminGiven = "$SqlAdminClientId".Trim() -and ("$SqlAdminClientSecret".Trim() -or "$SqlAdminCertThumbprint".Trim())
+    if (-not $sqlAdminGiven) {
+        throw ("REFUSING to finish: $JobName is configured for SQL ($SqlServerFqdn/$SqlDatabase) but no SQL admin " +
+               'credential was supplied, so its identity cannot be granted a contained DB user -- and without one the ' +
+               'engine apply fails every run with "cannot reach the desired store". Pass -SqlAdminClientId plus ' +
+               '-SqlAdminClientSecret or -SqlAdminCertThumbprint, or -SkipSqlGrant if you are granting it another way.')
+    }
+    # WHICH identity actually connects: the user-assigned MI when one is attached (that is what the
+    # container presents), else the job's system-assigned MI.
+    $miAppId = ''
+    if ("$IdentityResourceId".Trim()) {
+        $miAppId = az identity show --ids "$IdentityResourceId" --query clientId -o tsv --only-show-errors 2>$null
+    } else {
+        $oid2 = az containerapp job show -g $ResourceGroup -n $JobName --query identity.principalId -o tsv --only-show-errors 2>$null
+        # BUG-44: a just-created identity is eventually consistent in the directory; this retries.
+        if ("$oid2".Trim() -and (Get-Command Resolve-PimMiAppId -ErrorAction SilentlyContinue)) {
+            $miAppId = Resolve-PimMiAppId -PrincipalId "$oid2".Trim()
+        }
+    }
+    if (-not "$miAppId".Trim()) { throw "could not resolve the app id of $JobName's managed identity -- cannot grant it SQL, and the job would fail on every run." }
+    # 🪤 BUG-33's lesson, applied before the fact: _PimSetupShared USES New-PimSqlConnection and
+    # Get-PimRestToken but does not load them, and a caller that skips the token provider presents
+    # NO credential -- Azure SQL then reports `Login failed for user ''`, which points at
+    # permissions and wastes the search there. Load them here, and say so if they are missing.
+    foreach ($dep in @('engine\_shared\PIM-Rest.ps1','engine\_shared\PIM-SqlStore.ps1')) {
+        $depPath = Join-Path $solRoot $dep
+        if (-not (Test-Path -LiteralPath $depPath)) { throw "required for the SQL grant and not found: $depPath" }
+        . $depPath
+    }
+    Step "granting $JobName's identity ($miAppId) a contained user on $SqlServerFqdn/$SqlDatabase"
+    $grant = @{
+        DbUserName = $JobName; MiAppId = "$miAppId".Trim()
+        SqlServerFqdn = $SqlServerFqdn; SqlDatabase = $SqlDatabase; TenantId = $TenantId
+        SqlAdminClientId = $SqlAdminClientId
+    }
+    if ("$SqlAdminClientSecret".Trim())    { $grant['SqlAdminClientSecret']   = $SqlAdminClientSecret }
+    elseif ("$SqlAdminCertThumbprint".Trim()) { $grant['SqlAdminCertThumbprint'] = $SqlAdminCertThumbprint }
+    Grant-PimMiSql @grant
+    Note "SQL contained user ensured for $JobName"
 }
 
 # ---- START one on-demand execution (verification) ------------------------------

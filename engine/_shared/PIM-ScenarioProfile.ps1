@@ -381,8 +381,30 @@ function Resolve-PimScenarioHostingStore {
         return @{ source = 'central-msp'; server = $srv; kind = 'azure'; reason = "central MSP Azure SQL store '$srv' (hostingLocation=central-msp)" }
     }
     if ($loc -eq 'local-slave') {
-        $srv = "$LocalServer".Trim(); if (-not $srv) { $srv = '.\SQLEXPRESS' }
-        return @{ source = 'local-slave'; server = $srv; kind = 'local'; reason = "local managed-tenant SQL store '$srv' (hostingLocation=local-slave)" }
+        $srv = "$LocalServer".Trim()
+        # 🔴 BUG-78 -- THIS USED TO DEFAULT TO '.\SQLEXPRESS', AND THAT DEFAULT OVERRODE A CORRECT
+        # AZURE SQL SERVER. The central-msp branch immediately above already does the right thing:
+        # no server supplied => return EMPTY and let ambient resolution win. This branch invented a
+        # local instance instead -- so a managed-tenant container with a perfectly good
+        # PIM_SqlServer=<...>.database.windows.net had it silently replaced by a SQL Express
+        # instance that does not exist in the image.
+        # MEASURED on the greenfield slave 2026-08-27: the S6 downlink job failed every run on
+        # `Preflight FAILED: cannot reach the desired store: no SELECT 1`. The real error, once the
+        # probe stopped swallowing it (BUG-77), was
+        #     (provider: TCP Provider, error: 25 - Connection string is not valid)
+        # -- because Get-PimSqlConnectionString had built `Server=.\SQLEXPRESS;...;Integrated
+        # Security=SSPI`, which ALSO matches the /Integrated\s*Security/ test that makes
+        # New-PimSqlConnection skip token acquisition entirely. That is why no auth diagnostics ever
+        # appeared and why three separate identity fixes changed nothing: the connection was never
+        # an authentication problem at all.
+        # 🪤 BUG-30's own comment already named this: "which is why every live scenario matrix so
+        # far ran against .\SQLEXPRESS, a store the product does not ship". A silent default that
+        # outranks explicit configuration is worse than no default.
+        if (-not $srv) {
+            return @{ source = 'local-slave'; server = ''; kind = 'ambient'; reason = 'local managed-tenant store but no local server supplied (set $env:PIM_SqlServerLocal) -- fall back to ambient' }
+        }
+        $kind = if ($srv -match '(?i)database\.windows\.net') { 'azure' } else { 'local' }
+        return @{ source = 'local-slave'; server = $srv; kind = $kind; reason = "local managed-tenant SQL store '$srv' (hostingLocation=local-slave)" }
     }
     # in-tenant (S1-S4) -- no scenario override; the existing ambient resolution wins.
     return @{ source = 'in-tenant'; server = ''; kind = 'ambient'; reason = 'in-tenant single store -- use ambient connection resolution (no scenario override)' }
