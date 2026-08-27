@@ -160,7 +160,16 @@ function Get-PimDownlinkJobEnv {
         [string]$EngineClientId,
         [string]$EngineSecretRef,
         # BUG-73: the baseline URL when it carries a SAS -- a credential, so it is referenced too.
-        [string]$BaselineUrlSecretRef
+        [string]$BaselineUrlSecretRef,
+        # BUG-76: the USER-ASSIGNED MI's client id. Container Apps attaches a user-assigned
+        # identity with no system identity alongside it, and the IDENTITY_ENDPOINT token call
+        # cannot pick an identity on its own -- so without this the container gets NO token and
+        # presents no credential to SQL.
+        [string]$ManagedIdentityClientId,
+        # BUG-84: fallback TAP delivery address for synced admins. Not a secret -- an address --
+        # so it travels as a plain env value. Absent => the AdminTap guard still refuses, which is
+        # the correct behaviour and not a silent downgrade.
+        [string]$DefaultManagerEmail
     )
     $placement = Get-PimDownlinkJobPlacement -Scenario $Scenario
     $ev = New-Object System.Collections.Generic.List[string]
@@ -198,6 +207,10 @@ function Get-PimDownlinkJobEnv {
     # downlink-job-entry.ps1 ($BaselineUrl = $env:PIM_BaselineUrl). It is deliberately NOT put on
     # the command line, where it would be readable in the job definition forever.
     if ("$BaselineUrlSecretRef".Trim()) { $ev.Add("PIM_BaselineUrl=secretref:$BaselineUrlSecretRef") | Out-Null }
+    # BUG-76: name the identity the IDENTITY_ENDPOINT call must ask for. Not a secret -- a client id.
+    if ("$ManagedIdentityClientId".Trim()) { $ev.Add("PIM_ManagedIdentityClientId=$ManagedIdentityClientId") | Out-Null }
+    # BUG-84: Invoke-PimScenarioRun defaults -DefaultManagerEmail from this env var.
+    if ("$DefaultManagerEmail".Trim()) { $ev.Add("PIM_DefaultManagerEmail=$DefaultManagerEmail") | Out-Null }
     return @($ev.ToArray())
 }
 
@@ -514,7 +527,11 @@ function Get-PimDownlinkJobDeployPlan {
         [string]$EngineClientId,
         [string]$EngineClientSecret,
         # BUG-73: a SAS-bearing baseline URL. Delivered as an ACA secret, never on the command line.
-        [string]$BaselineSasUrl
+        [string]$BaselineSasUrl,
+        # BUG-76: client id of the user-assigned MI the container runs as.
+        [string]$ManagedIdentityClientId,
+        # BUG-84: fallback TAP delivery address for synced admins (plain value, not a secret).
+        [string]$DefaultManagerEmail
     )
     $placement = Get-PimDownlinkJobPlacement -Scenario $Scenario
     # 🔒 BUG-73: when the baseline URL carries a SAS it must NOT reach the command line -- the job
@@ -536,7 +553,8 @@ function Get-PimDownlinkJobDeployPlan {
     }
     $command = Get-PimDownlinkJobCommand -EntryPath $EntryPath -Scenario $Scenario -TenantId $TenantId -SlaveRing $SlaveRing -BaselineUrl $cmdBaselineUrl -BaselineDocPath $BaselineDocPath
     $envVars = Get-PimDownlinkJobEnv -Scenario $Scenario -TenantId $TenantId -SqlServerFqdn $SqlServerFqdn -SqlDatabase $SqlDatabase -SyncRootCentral $SyncRootCentral -SyncRootLocal $SyncRootLocal `
-        -EngineClientId $EngineClientId -EngineSecretRef $engineSecretRef -BaselineUrlSecretRef $baselineUrlRef
+        -EngineClientId $EngineClientId -EngineSecretRef $engineSecretRef -BaselineUrlSecretRef $baselineUrlRef `
+        -ManagedIdentityClientId $ManagedIdentityClientId -DefaultManagerEmail $DefaultManagerEmail
     $action = if ($Exists) { 'update' } else { 'create' }
     $jobArgs = Build-PimDownlinkJobArgs -Action $action -JobName $JobName -ResourceGroup $ResourceGroup `
         -EnvName $EnvName -Image $Image -AcrServer $AcrServer -Cron $Cron `

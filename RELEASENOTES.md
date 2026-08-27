@@ -1,9 +1,28 @@
 # Release notes for PIM4EntraPS
 
-## v2.4.251
+## v2.4.252
 
 Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monorepo:
 
+- release(PIM) v2.4.252: the managed-tenant update path actually works, end to end (8fdc2a9a)
+- docs(PIM) session-30 handoff: the downlink is proven, and the two things that still are not (985a4628)
+- fix(PIM) BUG-85: the TAP mail was fine -- the readiness probe was crying wolf (c8489795)
+- docs(PIM) 3 TAPs minted and verified usable -- the synced admins can actually be signed in as (fb5e33b8)
+- fix(PIM) BUG-84 + quieten my own instrumentation, both found by reading the winning run's log (2c4d7810)
+- docs(PIM) the master->slave downlink is PROVEN END TO END -- admins materialised in the slave (a83b5c19)
+- fix(PIM) BUG-83: the scenario runner had no identity, so it silently became the managed identity (6333a2e6)
+- fix(PIM) BUG-82: the engine SPN had 100 Graph app-roles and still could not read /domains (fd81cfc6)
+- fix(PIM) BUG-81b: my own domain fix was skipped in silence by the very trap it was fixing (9827d4de)
+- fix(PIM) BUG-80 + BUG-81: the downlink's own store reads had no token, and no domain to build UPNs (2afece4b)
+- fix(PIM) BUG-79: the pull staged files while the engine read SQL, so nothing ever arrived (a8369a4d)
+- fix(PIM) BUG-78: a silent .\SQLEXPRESS default outranked the configured Azure SQL server (c7ac4d47)
+- fix(PIM) BUG-77: the SQL auth path now says which branch ran, which identity, and why it failed (0b21eed3)
+- docs(PIM) BUG-77: the SQL token path is unobservable, and that -- not the next theory -- is the blocker (a8167d45)
+- fix(PIM) BUG-76: a user-assigned-only container could not get a managed-identity token at all (fa715b91)
+- fix(PIM) BUG-75: the job identity gets a SQL contained user, because a warning is not a grant (4ebc909a)
+- docs(PIM) BUG-75: the downlink pull now WORKS across tenants; the apply cannot be both identities (dd02692c)
+- fix(PIM) BUG-73b: arming the rotation found three defects that only appear when it runs unattended (2c975757)
+- feat(PIM) BUG-73b: automatic baseline-SAS rotation, built so a missed run cannot break the downlink (2906ba23)
 - release(PIM) v2.4.251: a managed-tenant job that could never run, and reported success (96c345cd)
 - fix(PIM) BUG-71d + BUG-74: the two half-fixes that make a green deploy a dead engine (9d7f1c52)
 - fix(PIM) BUG-72 + BUG-73: the downlink job gets a real engine credential, and a SAS that is treated as one (dc769fdb)
@@ -15,31 +34,55 @@ Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monor
 - docs(PIM) the downlink runbook was missing everything a first real publish needs (dc034d5c)
 - fix(PIM) the scenario seeder never gave the REST layer an identity, so -StorageAccount could not work (554e0eb2)
 - test(PIM) TEST-11 CLOSED: 102/0/0 on standalone + master + slave -- and the driver's own false green (5963409e)
-- test(PIM) the matrix could never pass D4: it guessed the admin population, and the guard was right (9f9810d9)
-- test(PIM) TEST-11 finally RUNS: the live matrix seeded one row backwards, and an estate driver (374367ab)
-- fix(PIM) BUG-69 + BUG-70: the TAP guard refused every admin, and called the refusals a success (07a695b8)
-- fix(PIM) there was never an efif.dk release blocker: the finding read the FEATURE as an INCIDENT (1c5a3674)
-- docs(PIM) the efif.dk release blocker is LIFTED: the operator authorised mailing those testers (c3c34cd7)
-- docs(PIM) ESTATE-07 is done: the live handoff no longer sends a fresh session to chase Arrow (1bb9fbc6)
-- docs(PIM) session-28 handoff: make it internally consistent, and promote the two lessons that were only in the body (a2041d12)
-- fix(PIM) BUG-66 is a RELEASE BLOCKER against EFIF: the fix arms a 15-minute job that mails credentials off-domain (77141fd5)
-- docs(PIM) session-28 handoff: record the commit, the true tree state, and the exact command for the decision it leaves open (a492fd08)
-- fix(PIM) BUG-66 CLOSED: the TAP mint is proven live -- and it found two more ways to lose a credential (274d525a)
-- docs(PIM) session-27 handoff: the gate needs a recipe on this box, and BUG-66 is one command from done (e25b2800)
-- fix(PIM) BUG-66 engine half: an expired TAP is no longer "satisfied" -- and all SIX master admins were holding one (3428c180)
-- feat(PIM) BUG-66 + TEST-30: a button to re-issue an expired TAP, and the four shipped scripts that could never have run on 5.1 (7d2be435)
-- fix(PIM) TEST-28/29 + SEC-11 + BUG-68: the suite could not RUN two of its own tests, and the deploy could never build a tenant (da71dbfe)
-- fix(PIM) SS34.2c + docs BUG-68: the first real greenfield run found two more, one nearly cross-company (f46d0c30)
-- fix(PIM) BUG-67: hosting comes from the DESCRIPTOR, not inferred from the MSP topology (075fbb01)
-- docs(PIM) BUG-67: "local" means two things, and S6 would deploy every managed tenant to a VM (f268148b)
-- docs(PIM): write down the tenant nickname map -- EFIF/RIDE/HOGYM/LEGYM -> slug (81643ec8)
-- feat(framework) DEPLOY-2: the descriptor + the readiness gate -- deployed is not running (1c042e6d)
 
 ---
 
 # Release notes -- PIM4EntraPS
 
 > **Curated changelog.** The publish workflow auto-prepends recent monorepo commits as a raw activity log; this file is the human-friendly narrative on top.
+
+---
+
+## Updates now reach a managed tenant, end to end — and you can control exactly what they carry (v2.4.252)
+
+**This release is the one where the managed-tenant update path actually works.** Everything below
+was found by running it against a real deployment, not by testing in isolation.
+
+**1. A managed tenant now receives its updates.** The full path works and has been verified by
+looking at the resulting accounts, not at a success message: the managing organisation publishes a
+signed update, the managed tenant fetches and verifies it, checks it is approved for its own
+release stage, writes it into its own database, and creates the accounts. Re-running changes
+nothing, as it should.
+
+**2. You can now say who gets what.** Three independent controls were proven working: an
+administrator can be marked **organisation-local so it is never published at all**, pointed at
+**specific tenants**, or matched by **tenant label** — and roles can be **denied per relationship**
+even when the person they belong to is included. Every exclusion is reported in the run summary
+rather than happening silently, so a narrowed update tells you what it left out.
+
+⚠️ **Important limit, stated plainly: narrowing controls what is sent from now on. It does not
+withdraw what was already delivered.** Removing someone from a tenant's scope stops future updates
+reaching them there; it does **not** remove their existing account or access. Withdrawing access is
+a separate, deliberate operation and is not yet available.
+
+**3. Several ways a deployment could look successful while being dead have been closed.** A
+scheduled update job could be created in a state where it could never start, while the deployment
+reported success; a re-run would not repair it; and the check that was supposed to confirm the
+deployment only confirmed what had been *requested*, not what actually came up. Deployments now
+verify that the job can really run, repair a broken one, and refuse to finish where they would
+otherwise leave something that cannot work.
+
+**4. Credentials for new administrators are delivered, or not issued at all.** The safeguard that
+refuses to issue a temporary access pass nobody can receive was working correctly — but nothing
+allowed a fallback delivery address to be configured, so the safeguard blocked every pass. You can
+now set one; a per-person address still takes precedence, and with neither, the safeguard still
+refuses rather than quietly issuing a credential into the void.
+
+**5. Diagnostics that pointed the wrong way.** A connection check discarded the very message that
+explained the failure, reporting only that it "could not connect" — equally true of a firewall, an
+expired credential, a missing permission or a wrong address. A readiness check also reported a
+fault in the notification it was only *simulating*, making a perfectly good credential email look
+broken. Both now report what actually happened.
 
 ---
 

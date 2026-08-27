@@ -65,6 +65,12 @@ param(
     [string]$SqlServer   = $env:PIM_SqlServer,
     [string]$SqlDatabase = $env:PIM_SqlDatabase,
 
+    # BUG-84: fallback TAP delivery address for synced admins. The AdminTap guard refuses to mint a
+    # credential it cannot deliver, so without this a pull creates admin accounts that nobody can
+    # sign in as. Per-admin ManagerEmail from the bundle still wins; absent => the guard still
+    # refuses, which stays the correct behaviour rather than a silent downgrade.
+    [string]$DefaultManagerEmail = $env:PIM_DefaultManagerEmail,
+
     [int64]$LastVersion = 0,
     [switch]$WhatIfMode = $true
 )
@@ -73,6 +79,53 @@ $ErrorActionPreference = 'Stop'
 $shared = Join-Path (Split-Path -Parent $PSScriptRoot) 'engine\_shared'
 . (Join-Path $shared 'PIM-ScenarioProfile.ps1')   # also dot-sources PIM-Downlink.ps1
 . (Join-Path $shared 'PIM-Baseline.ps1')
+# 🔴 BUG-80 -- THE TOKEN PROVIDER WAS MISSING HERE, AND ITS ABSENCE IS SILENT BY DESIGN.
+# New-PimSqlConnection acquires a token only `if (Get-Command Get-PimRestToken ...)`, so a caller
+# that loads PIM-SqlStore (via PIM-Downlink) WITHOUT PIM-Rest skips token acquisition entirely,
+# presents no credential, and Azure SQL answers `Login failed for user ''`. BUG-33 wrote that
+# signature down -- "the common cause is not 'auth failed' but 'the token provider was never
+# loaded'" -- and this runner was doing exactly that.
+# MEASURED on the greenfield slave 2026-08-27: with the slave store finally wired (BUG-79), the
+# downlink's own reads failed as
+#     [downlink] roles: could not read PIM-Assignments-Admins from the slave store:
+#                "Login failed for user ''."
+# while the ENGINE -- a separate process that does load PIM-Rest -- reached the same database
+# perfectly well in the same run. That split is the tell: same store, same identity, two processes,
+# one of them missing a dot-source.
+# PIM-AccountRest.ps1 provides Get-PimRestDefaultDomain, which the local-slave path needs to
+# resolve the managed tenant's UPN domain (IMP-12 / BUG-81). It is loaded here rather than probed
+# for, because the probe was `Get-Command ... -ErrorAction SilentlyContinue` and a missing module
+# therefore SKIPPED the resolution without a word -- so the downlink kept refusing to stage admins
+# and the reason ("no ambient tenant to read it from") pointed away from the real cause. That is
+# the recorded trap: a Get-Command-guarded optional dependency turns a missing file into silently
+# skipped behaviour, not a visible error.
+foreach ($__dep in @('PIM-Rest.ps1','PIM-SqlStore.ps1','PIM-AccountRest.ps1')) {
+    $__p = Join-Path $shared $__dep
+    if (-not (Test-Path -LiteralPath $__p)) { throw "required by the downlink's own store reads and not found: $__p" }
+    . $__p
+}
+
+# 🔴 BUG-83 -- THIS PROCESS HAD NO IDENTITY, SO IT SILENTLY BECAME THE MANAGED IDENTITY.
+# Get-PimRestToken takes the MI branch when `$env:IDENTITY_ENDPOINT` is set AND there is no client
+# id. This runner set neither $global:PIM_ClientId nor $global:PIM_TenantId, so every Graph call it
+# makes -- including the default-domain lookup the local-slave path depends on -- authenticated as
+# the container's managed identity instead of the engine SPN.
+# MEASURED on the greenfield slave 2026-08-27, and the comparison is the proof: the SAME
+# /domains call, with the SAME grant, succeeded from mgmt1 as the engine SPN at 15:16:12 and
+# returned 403 from the container 35 seconds later. Not propagation -- a different identity. The
+# MI holds ZERO Graph app-roles; the engine SPN holds 100. The ENGINE, a separate process that
+# reads these from env, authenticates correctly and prints "Auth : SPN a399691f..." in the same run.
+# Same family as BUG-80: the runner process lacked what the engine process had, and the gap showed
+# up as a permissions error pointing at the wrong principal.
+# The SECRET is deliberately not set here: Get-PimRestToken reads $env:AZURE_CLIENT_SECRET itself,
+# so the credential never has to be copied into a global.
+if ($env:PIM_TenantId -and -not $global:PIM_TenantId) { $global:PIM_TenantId = "$($env:PIM_TenantId)".Trim() }
+if ($env:PIM_ClientId -and -not $global:PIM_ClientId) {
+    $global:PIM_ClientId = "$($env:PIM_ClientId)".Trim()
+    Write-Host "[scenario-run] identity: engine SPN $($global:PIM_ClientId) (Graph calls in THIS process, not the container's managed identity)" -ForegroundColor DarkGray
+} elseif ($env:IDENTITY_ENDPOINT) {
+    Write-Host '[scenario-run] identity: no PIM_ClientId -- Graph calls in this process will use the MANAGED IDENTITY, which may hold no app-roles.' -ForegroundColor Yellow
+}
 
 if (-not $SqlServer)   { $SqlServer = '.\SQLEXPRESS' }
 if (-not $SqlDatabase) { $SqlDatabase = 'PimPlatform' }
@@ -112,7 +165,7 @@ if ($run.runDownlink) {
 $result = Invoke-PimScenarioDeploy -Scenario $sc -EngineScope $EngineScope -EngineMode $EngineMode `
     -Doc $doc -TenantId $TenantId -SlaveRing $SlaveRing `
     -CentralRoot $CentralRoot -LocalRoot $LocalRoot -SqlServer $SqlServer -SqlDatabase $SqlDatabase `
-    -LastVersion $LastVersion -WhatIfMode:$WhatIfMode
+    -LastVersion $LastVersion -DefaultManagerEmail $DefaultManagerEmail -WhatIfMode:$WhatIfMode
 
 Write-Host ""
 $col = if ($result.ok) { 'Green' } else { 'Red' }

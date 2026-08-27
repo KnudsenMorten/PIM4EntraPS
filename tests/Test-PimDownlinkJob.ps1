@@ -468,6 +468,65 @@ Describe 'PIM-DownlinkJob: entrypoint + deploy scripts parse + compose correctly
         $code | Should -Match 'finally'
     }
 
+    # -----------------------------------------------------------------------
+    # BUG-75 -- the job's identity needs a SQL contained user, and a WARNING IS NOT A GRANT.
+    # -----------------------------------------------------------------------
+    It 'BUG-75: the deploy GRANTS the job identity a SQL contained user (not a warning)' {
+        $code = script:Get-PimCodeOnly $script:deploy
+        $code | Should -Match 'Grant-PimMiSql'
+        # the old text was a Warn telling a human to do it by hand; it must not come back
+        $code | Should -Not -Match 'add the Job''s MI \[\$JobName\] as a contained DB user'
+    }
+    It 'BUG-75: it REFUSES to finish when SQL is configured but no admin credential was given' {
+        # A job wired to SQL whose identity has no DB user fails on EVERY run -- that is the
+        # "deployed but dead" outcome, so it must not be reachable by omission.
+        $code = script:Get-PimCodeOnly $script:deploy
+        $code | Should -Match 'REFUSING to finish'
+        $code | Should -Match '\$SkipSqlGrant'
+    }
+    It 'BUG-75: it grants the identity that ACTUALLY connects (user-assigned when attached)' {
+        # PIM-SqlStore falls through to Managed Identity because $global:PIM_ClientSecret is never
+        # populated from env -- so the MI is what presents itself to SQL, not the engine SPN.
+        $code = script:Get-PimCodeOnly $script:deploy
+        $code | Should -Match 'az identity show --ids'
+        $code | Should -Match 'identity\.principalId'
+    }
+    It 'BUG-75: an unresolvable identity THROWS rather than deploying a job that cannot log in' {
+        $code = script:Get-PimCodeOnly $script:deploy
+        $code | Should -Match 'could not resolve the app id'
+    }
+
+    It 'BUG-76: the env NAMES the user-assigned MI so IDENTITY_ENDPOINT can issue a token' {
+        # ACA attaches a user-assigned identity with no system identity beside it. The token call
+        # cannot pick one on its own, so without this the container gets NO token and presents no
+        # credential -- which Azure SQL reports as a login failure, sending the search to grants.
+        $ev = Get-PimDownlinkJobEnv -Scenario S6 -TenantId 't1' -ManagedIdentityClientId 'mi-client-id'
+        (ArgStr $ev) | Should -Match 'PIM_ManagedIdentityClientId=mi-client-id'
+    }
+    It 'BUG-76: with no MI client id the env is unchanged (inert, not a blank var)' {
+        $ev = Get-PimDownlinkJobEnv -Scenario S6 -TenantId 't1'
+        (ArgStr $ev) | Should -Not -Match 'PIM_ManagedIdentityClientId'
+    }
+    It 'BUG-76: the IDENTITY_ENDPOINT branch passes client_id (the IMDS branch always did)' {
+        # The asymmetry between the two branches WAS the defect.
+        $rest = Get-Content (Join-Path $script:sol 'engine\_shared\PIM-Rest.ps1') -Raw
+        $rest | Should -Match '(?s)IDENTITY_ENDPOINT.*?client_id=\$\(\[uri\]::EscapeDataString\(\$miCid\)\)'
+    }
+
+    It 'BUG-84: a default manager email reaches the container as a plain env value' {
+        # The AdminTap guard refuses to mint a TAP it cannot deliver, so a pull into a tenant whose
+        # admin rows carry no ManagerEmail creates accounts nobody can sign in as. Measured live:
+        # "REFUSING to issue a TAP that cannot be delivered ... Nothing was changed" x3.
+        $ev = Get-PimDownlinkJobEnv -Scenario S6 -TenantId 't1' -DefaultManagerEmail 'ops@example.test'
+        (ArgStr $ev) | Should -Match 'PIM_DefaultManagerEmail=ops@example\.test'
+        # an ADDRESS is not a secret -- it must not be forced through a secretRef
+        (ArgStr $ev) | Should -Not -Match 'PIM_DefaultManagerEmail=secretref:'
+    }
+    It 'BUG-84: absent => no env var, so the guard still refuses (no silent downgrade)' {
+        $ev = Get-PimDownlinkJobEnv -Scenario S6 -TenantId 't1'
+        (ArgStr $ev) | Should -Not -Match 'PIM_DefaultManagerEmail'
+    }
+
     It 'the deploy script never emits --ingress for the Job' {
         $txt = Get-Content -LiteralPath $script:deploy -Raw
         $txt | Should -Not -Match "'--ingress'"

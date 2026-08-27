@@ -91,5 +91,28 @@ try {
     $global:PIM_NamingConventions = @{}; $global:PIM_MailTemplateOverrides = $null; Remove-Variable -Name PIM_MailTemplateDir -Scope Global -ErrorAction SilentlyContinue
 }
 
+# --- BUG-85: the mail-READINESS PROBE must carry every token its template uses -------------
+# The probe renders the REAL template with -WhatIf. When its token set is short, the renderer
+# warns "[Mail] unknown token(s): ... rendered empty" -- which reads exactly like a live delivery
+# defect in the mail that carries a credential. Measured 2026-08-27: three admins produced three
+# such warnings during a run whose actual TAP mails were complete, and disproving it cost an
+# image-content investigation. This assert keeps the probe in step with the template so the drift
+# cannot come back silently.
+$__notify = Join-Path (Split-Path -Parent $PSScriptRoot) 'SOLUTIONS\PIM4EntraPS\engine\_shared\PIM-Notify.ps1'
+if (-not (Test-Path -LiteralPath $__notify)) { $__notify = Join-Path (Split-Path -Parent $PSScriptRoot) 'engine\_shared\PIM-Notify.ps1' }
+$__tpl = Join-Path (Split-Path -Parent $PSScriptRoot) 'templates\mail\tap-delivery.mailtemplate.html'
+if ((Test-Path -LiteralPath $__notify) -and (Test-Path -LiteralPath $__tpl)) {
+    $tplTokens = @([regex]::Matches((Get-Content -LiteralPath $__tpl -Raw), '\{\{(\w+)\}\}') |
+                   ForEach-Object { $_.Groups[1].Value } | Select-Object -Unique | Sort-Object)
+    $notifySrc = Get-Content -LiteralPath $__notify -Raw
+    $probeBlock = ''
+    if ($notifySrc -match '(?s)\$probeTokens\s*=\s*@\{(.+?)\}') { $probeBlock = $Matches[1] }
+    $missing = @($tplTokens | Where-Object { $probeBlock -notmatch ('(?m)\b' + [regex]::Escape($_) + '\s*=') })
+    T "readiness probe carries every tap-delivery token ($($tplTokens.Count) in the template)" ($missing.Count -eq 0)
+    if ($missing.Count) { Write-Host ("     missing from the probe: {0}" -f ($missing -join ', ')) -ForegroundColor Red }
+} else {
+    Write-Host "  (skip probe-token check: PIM-Notify.ps1 or the tap-delivery template not found)" -ForegroundColor DarkYellow
+}
+
 Write-Host ("`n=== RESULT: {0} passed, {1} failed ===" -f $pass, $fail) -ForegroundColor $(if ($fail) { 'Red' } else { 'Green' })
 if ($fail) { exit 1 }

@@ -252,7 +252,22 @@ function Test-PimTapMailReady {
     # Everything the -WhatIf path CAN answer: kill switch, disabled feature,
     # allowlist, missing template. It renders but never sends.
     try {
-        $probe = Send-PimNotifyMail -Type 'tap-delivery' -Tokens @{ UserPrincipalName = 'probe'; TapCode = ''; TapExpiresUtc = '' } -Recipient $Recipient -WhatIf
+        # 🪤 BUG-85 -- THE PROBE MUST CARRY EVERY TOKEN THE TEMPLATE USES, OR IT CRIES WOLF.
+        # This token set was missing TapStartLocal / TapStartUtc / TapLifetimeMinutes, so each
+        # readiness check rendered the real template with holes in it and warned
+        #     [Mail] unknown token(s): TapStartLocal, TapStartUtc, TapLifetimeMinutes -- rendered empty.
+        # Measured 2026-08-27: three admins produced three of those warnings during a run whose
+        # ACTUAL TAP mails were complete and correct -- the real send at
+        # PIM-EngineProviders.ps1:2450 passes all six. The warning named a live delivery defect
+        # that did not exist, in the one mail where "valid until when?" is the whole point, and it
+        # cost a full image-content investigation to disprove.
+        # A diagnostic that reports a fault in the thing it is only pretending to do is worse than
+        # no diagnostic. Keep this set in step with templates/mail/tap-delivery.mailtemplate.html.
+        $probeTokens = @{
+            UserPrincipalName = 'probe'; TapCode = ''; TapExpiresUtc = ''
+            TapStartLocal = ''; TapStartUtc = ''; TapLifetimeMinutes = ''
+        }
+        $probe = Send-PimNotifyMail -Type 'tap-delivery' -Tokens $probeTokens -Recipient $Recipient -WhatIf
         $reason = "$($probe.reason)"
         if ($reason -and $reason -ne 'whatif') { return @{ ok = $false; reason = $reason } }
     } catch {

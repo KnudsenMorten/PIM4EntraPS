@@ -90,6 +90,20 @@ function Get-PimManagedIdentityToken {
   # App Service / Functions (current): IDENTITY_ENDPOINT + IDENTITY_HEADER (api 2019-08-01)
   if ($env:IDENTITY_ENDPOINT -and $env:IDENTITY_HEADER) {
     $u = "$($env:IDENTITY_ENDPOINT)?resource=$res&api-version=2019-08-01"
+    # 🔴 BUG-76 -- THIS BRANCH IGNORED THE CONFIGURED MI CLIENT ID, AND THE IMDS BRANCH BELOW DOES
+    # NOT. That asymmetry is the whole defect: with a USER-ASSIGNED-ONLY identity there is nothing
+    # for the endpoint to default to, so no token is issued and the caller ends up presenting no
+    # credential at all. Azure SQL then answers "Login failed for user '<token-identified
+    # principal>'", which reads as a missing database user -- and it is not.
+    # MEASURED on the greenfield slave 2026-08-27: ca-pim-tick carries `SystemAssigned,
+    # UserAssigned` and logs "[mi] token via IDENTITY_ENDPOINT" happily, while ca-pim-downlink-s6
+    # carries UserAssigned ALONE and logs that line NOT AT ALL -- the absence was the clue. Its
+    # engine apply failed every run on `Preflight FAILED: ... no SELECT 1`, which sent the search
+    # to contained users and grants (where a user was duly created, and changed nothing).
+    # Container Apps is exactly the host that attaches a user-assigned identity on its own.
+    $miCid = if ($global:PIM_ManagedIdentityClientId) { "$($global:PIM_ManagedIdentityClientId)".Trim() }
+             elseif ($env:PIM_ManagedIdentityClientId) { "$($env:PIM_ManagedIdentityClientId)".Trim() } else { '' }
+    if ($miCid) { $u += "&client_id=$([uri]::EscapeDataString($miCid))" }
     $r = Invoke-RestMethod -Method GET -Uri $u -Headers @{ 'X-IDENTITY-HEADER' = $env:IDENTITY_HEADER }
     if ("$($r.access_token)") { try { [System.Console]::Out.WriteLine("  [mi] token via IDENTITY_ENDPOINT (len $($r.access_token.Length))") } catch {} }  # Console.Out (not Write-Host): headless-safe from any scope (App Service has no console buffer; Write-Host throws there even from module scope)
     return [pscustomobject]@{ token = $r.access_token; expiresUtc = (ConvertTo-PimTokenExpiry $r.expires_on) }
