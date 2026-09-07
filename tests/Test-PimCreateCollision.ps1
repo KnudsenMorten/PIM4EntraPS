@@ -38,6 +38,7 @@ $shared  = Join-Path $solRoot 'engine\_shared'
 . (Join-Path $shared 'PIM-DateSafe.ps1')
 . (Join-Path $shared 'PIM-EngineCore.ps1')
 . (Join-Path $shared 'PIM-EngineProviders.ps1')
+. (Join-Path $PSScriptRoot '_shared\PimSourceScope.ps1')
 
 Write-Host "=== BUG-18: no duplicate objects from a stale live read ===" -ForegroundColor Cyan
 
@@ -115,20 +116,26 @@ Assert "a genuine create still POSTs"                 (@($script:Posts | Where-O
 Write-Host "`n[the probe must be DIRECT -- never the context cache]" -ForegroundColor Cyan
 # A cache-backed check would be worthless: the cache is exactly what was stale.
 $src = Get-Content -LiteralPath (Join-Path $shared 'PIM-EngineProviders.ps1') -Raw
-$i = $src.IndexOf('function Test-PimNameAlreadyLive')
-$body = $src.Substring($i, [Math]::Min(2500, $src.Length - $i))
+# Scoped to each function's own text rather than a hand-sized Substring window. Those windows
+# were wrong in both directions here: 2500 over a 2247-character probe (so the -notmatch pair
+# below also scanned 253 characters of the NEXT function), and 5000 over New-PimGroupsProvider's
+# 8234 -- which meant "it calls the probe" only ever read the first 60% of it.
+$body = Get-PimSourceFunctionBody -Text $src -Name 'Test-PimNameAlreadyLive'
 Assert "it queries Graph with a displayName filter"   ($body -match 'displayName eq')
 Assert "it does NOT consult `$Global:Groups_All_ID"   ($body -notmatch 'Groups_All_ID')
 Assert "it does NOT consult `$Global:AU_All_ID"       ($body -notmatch 'AU_All_ID')
 Assert "group probe asks for eventual consistency"    ($body -match 'ConsistencyLevel')
 # and the guard is on BOTH create paths
 foreach ($fn in 'New-PimAdministrativeUnitsProvider','New-PimGroupsProvider') {
-    $j = $src.IndexOf("function $fn")
-    $b = $src.Substring($j, [Math]::Min(5000, $src.Length - $j))
+    $b = Get-PimSourceFunctionBody -Text $src -Name $fn
     Assert "$fn calls the probe before creating"      ($b -match 'Test-PimNameAlreadyLive')
 }
 # no sleep/retry crept in as a "fix"
-Assert "no Start-Sleep was added to the create paths" ($src -notmatch '(?s)function New-PimAdministrativeUnitsProvider.{0,4000}Start-Sleep')
+# ...and it now checks BOTH of them, as its name has always claimed -- the old assertion said
+# "the create paths" plural while inspecting only the AU one.
+foreach ($fn in 'New-PimAdministrativeUnitsProvider','New-PimGroupsProvider') {
+    Assert "no Start-Sleep in $fn" ((Get-PimSourceFunctionBody -Text $src -Name $fn) -notmatch 'Start-Sleep')
+}
 
 Write-Host ("`n=== RESULT: {0} passed, {1} failed ===" -f $pass, $fail) -ForegroundColor $(if ($fail) { 'Red' } else { 'Green' })
 if ($fail) { exit 1 }

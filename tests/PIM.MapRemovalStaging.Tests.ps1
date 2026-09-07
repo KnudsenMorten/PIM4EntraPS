@@ -219,6 +219,42 @@ Describe '[M8] removal flows through the SAME Review & Save keyed diff' {
 
 Describe '[M8] removal honours the [M4] maker/checker sensitivity gate' {
 
+    # BUG-107 (2026-08-30): maker/checker is now an OPT-IN feature, DEFAULT OFF. Shipping it
+    # unconditionally left a single-administrator deployment unable to commit ANY privileged
+    # change -- the 409 demands a second administrator, self-approval is refused by design, and
+    # in that tenant no second administrator exists.
+    # This block asserts the gate's behaviour WHEN THE POLICY IS ON, which is still exactly what
+    # must be proven, so it turns the policy on for its own scope. Without this the gate
+    # short-circuits to allowed and (5a)/(5b) assert nothing -- a test that passes because the
+    # feature is off is worse than one that fails.
+    # 🪤 The stub reads a VARIABLE rather than being defined and removed per test. Removing a
+    # global function from inside a Pester `It` does not reliably take effect for the code under
+    # test, so the first cut of the OFF case silently ran with the policy still ON and failed
+    # for a reason that had nothing to do with the product.
+    BeforeAll {
+        $global:PimTestMakerCheckerOn = $true
+        function global:Test-PimFeatureAvailable { param([string]$Key, [switch]$Quiet) return ($Key -eq 'makerchecker' -and $global:PimTestMakerCheckerOn) }
+    }
+    AfterAll {
+        Remove-Item function:\global:Test-PimFeatureAvailable -ErrorAction SilentlyContinue
+        Remove-Variable -Name PimTestMakerCheckerOn -Scope Global -ErrorAction SilentlyContinue
+    }
+
+    It '(5a-off) with the policy OFF (the shipped default) the SAME removal is allowed' {
+        # The half the operator actually hit: a single-administrator deployment must be able to
+        # revoke a privileged grant without a second approver who does not exist.
+        $global:PimTestMakerCheckerOn = $false
+        try {
+            $g = New-SeedGraph; $store = New-SeedStore
+            $plan = Resolve-PimMapRemovalPlan -Data $g -CurrentRows $store -NodeId 'entra-role:Global Administrator'
+            $removed = @(); foreach ($pl in @($plan.plans)) { $removed += @($pl.removedRows) }
+            $gate = Test-PimAuthoringCommitAllowed -Action 'delete-rows' -Base 'PIM-Assignments-Roles-Groups' -Rows $removed -Requests @()
+            $gate.allowed   | Should -BeTrue
+            $gate.gate      | Should -Be 'makerchecker-disabled'
+            $gate.sensitive | Should -BeTrue   # still CLASSIFIED sensitive, and still audited
+        } finally { $global:PimTestMakerCheckerOn = $true }
+    }
+
     It '(5a) revoking a PRIVILEGED grant is sensitive and BLOCKED with no approval' {
         $g = New-SeedGraph; $store = New-SeedStore
         $plan = Resolve-PimMapRemovalPlan -Data $g -CurrentRows $store -NodeId 'entra-role:Global Administrator'

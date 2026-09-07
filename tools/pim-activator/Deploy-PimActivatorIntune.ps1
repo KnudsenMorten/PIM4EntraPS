@@ -125,6 +125,10 @@ param(
 
     [Parameter()]
     [string]$UpdateUrl = 'https://knudsenmorten.github.io/PIM4EntraPS/updates.xml',
+    # Optional floor for ExtensionSettings' minimum_version_required. Omitted = today's behaviour
+    # exactly. 🪤 Only ever name a version you have PUBLISHED and confirmed installable: pointing
+    # this at a version the update URL cannot serve disables the extension across the estate.
+    [string]$MinimumVersion,
 
     [Parameter()]
     [string]$SourcePattern = 'https://knudsenmorten.github.io/*',
@@ -791,11 +795,19 @@ $policyMap = @{
 # ExtensionSettings policy value (single JSON string keyed by extension id).
 # runtime_allowed_hosts=['<all_urls>'] pre-grants the broad scope so Chrome's
 # auto-update doesn't trip the permission-expansion gate.
-$extSettingsJson = (@{ $ExtensionId = @{
+# 🔴 -MinimumVersion (optional, inert when omitted) is the fleet-wide UNSTICK lever. See the
+# matching block in _PimActivatorHybridPolicy.ps1 for the measurement behind it: fresh installs
+# were landing while UPDATES were not, so machines sat on old builds indefinitely -- one on the
+# very 2026-06-10 release the note above says froze the fleet. minimum_version_required makes a
+# stale install DISABLE and update rather than quietly keep running, and it travels as policy,
+# so it reaches the whole estate without touching a single machine.
+$__extCfg = @{
     installation_mode    = 'force_installed'
     update_url           = $UpdateUrl
     runtime_allowed_hosts = @('<all_urls>')
-}} | ConvertTo-Json -Depth 5 -Compress)
+}
+if ("$MinimumVersion".Trim()) { $__extCfg['minimum_version_required'] = "$MinimumVersion".Trim() }
+$extSettingsJson = (@{ $ExtensionId = $__extCfg } | ConvertTo-Json -Depth 5 -Compress)
 
 $resolved = @{}
 # Always resolve all four definitions -- even a conflict-skipped browser's

@@ -174,5 +174,47 @@ if (-not (Test-PimSqlConnectivity -ConnectionString $masterCs)) {
     }
 }
 
+# ===========================================================================
+# BUG-64 -- a triggered run that FAILS must not lose its trigger.
+# ===========================================================================
+# The detector used to persist the new data signature BEFORE arming the trigger, reasoning
+# "a redundant recalc is safe, a missed one is not". The implementation inverted that: once
+# the signature advanced the change counted as HANDLED, so a failed run left nothing to
+# re-fire it. MEASURED ON HOGYM -- a trigger armed at 12:10:22Z, the run died on a 403, and
+# with the identity fixed the engine had NOTHING TO DO; the staged state would have waited
+# ~21 hours for the daily full-reconcile. These are OFFLINE (no SQL): the ordering is read
+# from source, and the retry policy is a pure function.
+$cutSrc = Get-Content -Raw -LiteralPath (Join-Path $sh 'PIM-Cutover.ps1')
+$cutCode = (($cutSrc -split "`r?`n") | Where-Object { $_ -notmatch '^\s*#' }) -join "`n"
+# Order, asserted as ORDER: arm first, advance the signature only after.
+$iArm = $cutCode.IndexOf('Add-PimJobTrigger -Type ''engine-delta''')
+$iSig = $cutCode.IndexOf("Set-PimSqlSetting -ConnectionString `$ConnectionString -Name 'RecalcSignature'")
+T 'BUG-64: the trigger is armed BEFORE the signature advances' ($iArm -ge 0 -and $iSig -gt $iArm)
+# 🔒 The load-bearing half: a failed arm must leave the signature alone, or the change is lost.
+T '  ...and a FAILED arm does not advance the signature (the change stays unhandled)' (
+    $cutCode -match '(?s)catch\s*\{[^}]*could not be armed[^}]*\}' -and
+    $cutCode -match '(?s)if \(\$armed\)\s*\{[^}]*RecalcSignature')
+
+# The other half BUG-64 asked for by name: "a permanently-failing job must not re-fire
+# forever either -- a failure count belongs in the design." Framework SS8 agrees: without a
+# ceiling "a permanently broken deploy retries nightly forever and nobody is told".
+T 'BUG-64: the retry policy is a real function, not a comment' ($null -ne (Get-Command Test-PimTriggerRetryAllowed -ErrorAction SilentlyContinue))
+$rNow = [datetime]::new(2026,8,28,12,0,0,[DateTimeKind]::Utc)
+$r1 = Test-PimTriggerRetryAllowed -FailureCount 0 -NowUtc $rNow
+T '  ...a first failure RETRIES' ($r1.action -eq 'retry' -and $r1.attempt -eq 1)
+$r2 = Test-PimTriggerRetryAllowed -FailureCount 5 -Ceiling 5 -NowUtc $rNow
+T '  ...the ceiling STOPS re-arming' ($r2.action -eq 'exhausted')
+# 🔒 Exhausted is not "give up quietly": silently retrying forever and silently stopping are
+# equally invisible, so this is the point a human is told.
+T '  ...and an exhausted retry is ALERTABLE, not a quiet giving-up' ([bool]$r2.alert -and "$($r2.reason)" -match 'alertable')
+T '  ...a retry under the ceiling is NOT alertable (or the alert means nothing)' (-not [bool]$r1.alert)
+$r3 = Test-PimTriggerRetryAllowed -FailureCount 1 -LastAttemptUtc $rNow.AddMinutes(-2).ToString('o') -BackoffMinutes 15 -NowUtc $rNow
+T '  ...a recent failure BACKS OFF instead of hammering a broken dependency' ($r3.action -eq 'backoff')
+$r4 = Test-PimTriggerRetryAllowed -FailureCount 1 -LastAttemptUtc $rNow.AddMinutes(-60).ToString('o') -BackoffMinutes 15 -NowUtc $rNow
+T '  ...and retries once the window has passed' ($r4.action -eq 'retry')
+# 🪤 An unparseable timestamp must not read as "long ago" -- that would allow an immediate
+# retry every pass, which is exactly the hammering the backoff exists to prevent.
+$r5 = Test-PimTriggerRetryAllowed -FailureCount 1 -LastAttemptUtc 'not-a-date' -NowUtc $rNow
+T '  ...an UNPARSEABLE last-attempt time backs off rather than assuming it is safe' ($r5.action -eq 'backoff')
 Write-Host ("`n RESULT: {0} pass, {1} fail, {2} skip" -f $pass, $fail, $skip) -ForegroundColor $(if($fail){'Red'}else{'Green'})
 if ($fail) { exit 1 } else { exit 0 }

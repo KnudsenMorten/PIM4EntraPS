@@ -234,13 +234,30 @@ function New-PaHybridExtensionSettingsJson {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)][string]$ExtensionId,
-        [Parameter(Mandatory)][string]$UpdateUrl
+        [Parameter(Mandatory)][string]$UpdateUrl,
+        # 🔴 THE FLEET-WIDE UNSTICK LEVER. Optional and INERT when omitted, so every existing
+        # assignment keeps emitting byte-identical JSON.
+        # Measured 2026-09-04: no existing install anywhere had moved to 1.6.124 (published
+        # 26 Jun). A laptop sat on 1.6.25 -- the 2026-06-10 build, i.e. the exact release the
+        # comment below says froze the fleet -- while the TEST extension on the SAME browser was
+        # current, because that one arrived as a FRESH INSTALL rather than an update. Fresh
+        # installs work; updates were not landing.
+        # `minimum_version_required` is Chrome's own answer to that: an install BELOW the minimum
+        # is disabled and pushed to update, instead of quietly sitting on an old build forever.
+        # It is the difference between "we hope the update check runs" and "a stale install cannot
+        # keep running" -- and it ships as POLICY, so it reaches 10,000 machines without touching
+        # one of them.
+        # 🪤 Set it to a version you have ALREADY published and verified installable. Naming a
+        # version that is not downloadable disables the extension fleet-wide with no way forward.
+        [string]$MinimumVersion
     )
-    return (@{ $ExtensionId = @{
+    $__cfg = @{
         installation_mode     = 'force_installed'
         update_url            = $UpdateUrl
         runtime_allowed_hosts = @('<all_urls>')
-    }} | ConvertTo-Json -Depth 5 -Compress)
+    }
+    if ("$MinimumVersion".Trim()) { $__cfg['minimum_version_required'] = "$MinimumVersion".Trim() }
+    return (@{ $ExtensionId = $__cfg } | ConvertTo-Json -Depth 5 -Compress)
 }
 
 function Get-PaHybridRegistryPlan {

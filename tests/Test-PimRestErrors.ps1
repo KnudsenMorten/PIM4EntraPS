@@ -128,6 +128,82 @@ T 'the raw body is no longer interpolated into the throw' ($src -notmatch 'HTTP 
 # The retry heuristic must keep working off the body it now reads.
 T 'the PrincipalNotFound retry still reads the body' ($src -match 'PrincipalNotFound' -and $src -match '\$isReplDelay')
 
+
+# ===========================================================================
+Write-Host "`n=== SEC-12: an explicit identity that cannot be honoured is an ERROR, not a cue to become somebody else ===" -ForegroundColor Cyan
+# ===========================================================================
+# 🔴 MEASURED 2026-08-28, and this suite exists for exactly this class. A caller asked for tenant
+# f0fa27a0 (myfamilynetwork) + the PIM engine client id + its certificate thumbprint, and got back
+# a token for tenant 7825c48b -- ExpertsLiveDK, A DIFFERENT COMPANY -- with a different appid.
+# Nothing in the return value said so. The certificate had failed to resolve, the failure went to
+# Write-Verbose, and the "dev convenience" az fallback minted a token for whatever subscription
+# was the az DEFAULT context.
+# 🔑 The defect was never that a fallback exists. It is that it ran AFTER the caller had named a
+# tenant, a client id and a credential. Answering that with a different principal is WORSE than an
+# error: the token WORKS, so the failure surfaces far away as "Login failed" / "permission denied"
+# and reads like an RBAC problem. Same family as BUG-34, which fixed this shape one layer down in
+# New-PimSqlConnection and left the az branch here standing.
+
+# --- the token inspectors: asking for a tenant is not the same as being GIVEN one -------------
+function New-FakeJwt([string]$tid, [string]$appid) {
+    $claims = @{ tid = $tid; appid = $appid } | ConvertTo-Json -Compress
+    $b64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($claims)).TrimEnd('=').Replace('+','-').Replace('/','_')
+    return "header.$b64.signature"
+}
+T 'SEC-12: Get-PimTokenTenantId is defined'  ($null -ne (Get-Command Get-PimTokenTenantId -ErrorAction SilentlyContinue))
+T 'SEC-12: Get-PimTokenAppId is defined'     ($null -ne (Get-Command Get-PimTokenAppId    -ErrorAction SilentlyContinue))
+$jwt = New-FakeJwt 'AAAA1111-0000-0000-0000-000000000000' 'BBBB2222-0000-0000-0000-000000000000'
+T '  ...it reads the tid a token CLAIMS'     ((Get-PimTokenTenantId -Token $jwt) -eq 'aaaa1111-0000-0000-0000-000000000000')
+T '  ...and the appid'                       ((Get-PimTokenAppId    -Token $jwt) -eq 'bbbb2222-0000-0000-0000-000000000000')
+# 🔒 A sanity check must never be the thing that breaks the caller.
+T '  ...garbage returns empty rather than throwing' ((Get-PimTokenTenantId -Token 'not-a-jwt') -eq '')
+T '  ...and so does an empty string'                ((Get-PimTokenTenantId -Token '') -eq '')
+
+# --- the refusal itself ------------------------------------------------------------------------
+# A thumbprint that cannot resolve to a certificate is the ORIGINAL trigger: the request named a
+# credential, and the credential could not be loaded.
+$sec12msg = ''
+try {
+    [void](Get-PimRestToken -Resource 'https://database.windows.net' `
+            -TenantId '11111111-1111-1111-1111-111111111111' `
+            -ClientId '22222222-2222-2222-2222-222222222222' `
+            -CertThumbprint 'DEADBEEF00000000000000000000000000000000' -Force)
+} catch { $sec12msg = "$($_.Exception.Message)" }
+T 'SEC-12: a named-but-unresolvable certificate THROWS instead of falling back' ([bool]$sec12msg)
+T '  ...refusing the ambient identity in so many words' ($sec12msg -match 'REFUSING to fall back')
+# 🔑 The message has to name the CREDENTIAL. The old failure was unactionable precisely because
+# the one fact that explained everything (this cert did not load) was dropped into Write-Verbose.
+T '  ...naming the certificate that could not be loaded' ($sec12msg -match 'DEADBEEF')
+T '  ...and the identity that was asked for'             ($sec12msg -match '11111111-1111-1111-1111-111111111111' -and $sec12msg -match '22222222-2222-2222-2222-222222222222')
+# 🪤 The explicit-identity test must key on the thumbprint REQUESTED, not the certificate
+# RESOLVED. Keying on the resolved object is precisely how "the cert is missing" became "no
+# explicit identity was asked for" and slid onto the fallback -- the check would evaporate in the
+# one case it exists for.
+$restSrc = Get-Content -LiteralPath (Join-Path $root 'engine\_shared\PIM-Rest.ps1') -Raw
+T '  ...and the check keys on the REQUESTED thumbprint, not the resolved cert object' (
+    $restSrc -match '\$explicitIdentity\s*=\s*\[bool\]\("\$tenant"[\s\S]{0,200}?\$thumb')
+# 🔒 The refusal must come BEFORE the az fallback in the file, or it cannot prevent anything.
+# 🪤 Searched for the literal 'account get-access-token' first and it FAILED against correct
+# code: the call is an args array (@('account','get-access-token',…)), so those words are never
+# contiguous in the source. *When a source assertion fails, suspect the pattern before the code*
+# — this suite's own recorded lesson, earned again.
+$idxRefuse = $restSrc.IndexOf('REFUSING to fall back')
+$idxAz     = $restSrc.IndexOf("'get-access-token'")
+T '  ...and the refusal is placed BEFORE the az fallback (order is the whole guard)' (
+    $idxRefuse -gt 0 -and $idxAz -gt 0 -and $idxRefuse -lt $idxAz)
+
+# --- the fallback, when it legitimately runs ---------------------------------------------------
+# 🔒 Without --tenant, az answers for its DEFAULT context, which on a machine logged into several
+# directories is a coin flip -- and on the dev machine it lands on another company's tenant.
+T 'SEC-12: the az fallback passes --tenant when a tenant is known' (
+    $restSrc -match "azArgs \+= @\('--tenant'")
+# 🔒 ...and verifies what came back. Asking is not receiving.
+T '  ...and DISCARDS a token whose tid is not the tenant that was asked for' (
+    $restSrc -match 'Get-PimTokenTenantId' -and $restSrc -match 'DISCARDED an az token')
+# 🪤 The primary failure reason must be KEPT. It was Write-Verbose only, so the single fact that
+# explained every downstream symptom was thrown away at the moment it was known.
+T '  ...and the primary auth failure reason is retained, not only Write-Verbose''d' (
+    $restSrc -match '\$primaryErr\s*=' -and $restSrc -match 'elseif \(\$primaryErr\)')
 Write-Host ""
 Write-Host ("==== REST error test: {0} passed, {1} failed ====" -f $script:pass, $script:fail) -ForegroundColor $(if ($script:fail) { 'Red' } else { 'Green' })
 if ($script:fail) { exit 1 } else { exit 0 }

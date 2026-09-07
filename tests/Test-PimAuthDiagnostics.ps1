@@ -152,6 +152,191 @@ T 'bundle MASKS the fake full GUID (tail gone)'      { ($bundle.text -notmatch '
 T 'bundle object re-parses (already-masked struct)'  { $null -ne $bundle.object }
 T 'bundle carries the safe-to-share note'            { $bundle.text -match 'Sanitized bundle' }
 
+Section 'SEC-12b: the SQL layer must not silently present a DIFFERENT identity'
+# 🔴 SEC-12 was fixed in PIM-Rest; this is the SAME defect one layer down, and it was still live.
+# BUG-34 fixed the PRECEDENCE (an explicit SPN is tried before ambient MI). It never fixed the
+# FAILURE path: when the explicit SPN's token could not be ACQUIRED, control carried on to the MI
+# branch, and then to a pre-pinned $global:PIM_SqlAccessToken -- either of which is a different
+# principal.
+# 🪤 OBSERVED IN A LIVE RUN, not imagined:
+#       [sql] SPN token failed: ...
+#       [sql] token source: MANAGED IDENTITY
+#   ...then "The SELECT permission was denied on the object 'Tenants'". That reads as an RBAC
+#   problem and is not one -- the connection had authenticated as the machine's managed identity
+#   instead of the SPN that was explicitly configured. Every minute spent on the permission is
+#   wasted, and there is nothing in the error pointing anywhere near the cause.
+$sqlLibPath = Join-Path (Split-Path -Parent $PSScriptRoot) 'engine\_shared\PIM-SqlStore.ps1'
+$restLibPath = Join-Path (Split-Path -Parent $PSScriptRoot) 'engine\_shared\PIM-Rest.ps1'
+. $restLibPath
+. $sqlLibPath
+
+function Invoke-Sec12bProbe {
+    <#
+      Drive New-PimSqlConnection with an EXPLICIT SPN whose credential cannot be acquired, while a
+      pre-pinned token AND (on this machine) a managed identity are both available -- i.e. exactly
+      the state in which the old code silently substituted one of them. Returns the error text, or
+      '' if it did NOT refuse.
+      🔒 Every global is saved and restored: this suite must not leave auth state behind for the
+      suites that run after it in the same process.
+    #>
+    $saved = @{
+        cid   = $global:PIM_SqlClientId;       thumb = $global:PIM_SqlCertThumbprint
+        cid2  = $global:PIM_ClientId;          thumb2 = $global:PIM_CertThumbprint
+        tid   = $global:PIM_TenantId;          tok   = $global:PIM_SqlAccessToken
+        sec   = $global:PIM_SqlClientSecret;   sec2  = $global:PIM_ClientSecret
+    }
+    try {
+        $global:PIM_SqlClientId       = '22222222-2222-2222-2222-222222222222'
+        $global:PIM_SqlCertThumbprint = 'DEADBEEF00000000000000000000000000000000'
+        $global:PIM_TenantId          = '11111111-1111-1111-1111-111111111111'
+        $global:PIM_SqlClientSecret   = $null; $global:PIM_ClientSecret = $null
+        # A token left over from somewhere else -- the last-resort branch the old code would reach.
+        $global:PIM_SqlAccessToken    = 'a-previously-pinned-token-from-somewhere-else'
+        try {
+            [void](New-PimSqlConnection -ConnectionString 'Server=tcp:x.database.windows.net,1433;Database=D;Encrypt=True')
+            return ''
+        } catch { return "$($_.Exception.Message)" }
+    } finally {
+        $global:PIM_SqlClientId = $saved.cid; $global:PIM_SqlCertThumbprint = $saved.thumb
+        $global:PIM_ClientId = $saved.cid2;   $global:PIM_CertThumbprint = $saved.thumb2
+        $global:PIM_TenantId = $saved.tid;    $global:PIM_SqlAccessToken = $saved.tok
+        $global:PIM_SqlClientSecret = $saved.sec; $global:PIM_ClientSecret = $saved.sec2
+    }
+}
+$sec12b = Invoke-Sec12bProbe
+
+T 'SEC-12b: an explicit SPN whose token cannot be acquired REFUSES the connection' { [bool]$sec12b }
+T '  ...naming the SPN that was configured'      { $sec12b -match '22222222-2222-2222-2222-222222222222' }
+T '  ...and saying it will not fall back'        { $sec12b -match 'Refusing to fall back' }
+# 🔒 The two identities it must not silently become, named in the message so the reader knows what
+# was declined on their behalf rather than wondering what changed.
+T '  ...naming the managed identity as a thing it declined to use' { $sec12b -match 'managed identity' }
+T '  ...and the pre-pinned token too'                              { $sec12b -match 'pre-pinned' }
+# 🔑 The message must say how to get ambient auth ON PURPOSE. A refusal with no exit is how a guard
+# gets deleted by the next person who legitimately wants the other behaviour.
+T '  ...and how to opt INTO ambient auth deliberately' { $sec12b -match 'clear \$global:PIM_SqlClientId' }
+
+# 🪤 THE CONTROL. Without this, a guard that broke ALL auth would pass every assertion above --
+# the "test that cannot fail for the right reason" trap this project keeps paying for. With NO
+# explicit SPN configured, the ambient path must still be allowed to run.
+$ambientOk = $false
+$savedC = $global:PIM_SqlClientId; $savedC2 = $global:PIM_ClientId
+$savedT = $global:PIM_SqlCertThumbprint; $savedT2 = $global:PIM_CertThumbprint
+try {
+    $global:PIM_SqlClientId = $null; $global:PIM_ClientId = $null
+    $global:PIM_SqlCertThumbprint = $null; $global:PIM_CertThumbprint = $null
+    try { [void](New-PimSqlConnection -ConnectionString 'Server=tcp:x.database.windows.net,1433;Database=D;Encrypt=True'); $ambientOk = $true }
+    catch { $ambientOk = $false }
+} finally {
+    $global:PIM_SqlClientId = $savedC; $global:PIM_ClientId = $savedC2
+    $global:PIM_SqlCertThumbprint = $savedT; $global:PIM_CertThumbprint = $savedT2
+}
+T '  ...while NO explicit SPN still permits the ambient path (the guard is narrow, not a wall)' { $ambientOk }
+
+# 🔒 ORDER IS THE GUARD. A refusal written after the MI branch prevents nothing at all.
+$sqlSrc = Get-Content -LiteralPath $sqlLibPath -Raw
+# 🪤 STRIP FULL-LINE COMMENTS FIRST, and this suite paid for the lesson on its own first run: the
+# order assert below matched the SEC-12b COMMENT above (which quotes the very log line it looks
+# for) instead of the managed-identity branch, and reported a correctly-ordered guard as RED.
+# Third time in one session that a source assertion met a comment -- twice satisfied by one, once
+# broken by one. *A source-scanning assertion must read CODE*, in both directions.
+$sqlCode = (($sqlSrc -split "`r?`n") | Where-Object { $_ -notmatch '^\s*#' }) -join "`n"
+$iRefuse = $sqlCode.IndexOf('PIM store auth REFUSED')
+$iMi     = $sqlCode.IndexOf('if (-not $tok -and $miAvail)')
+$iPinned = $sqlCode.IndexOf('$global:PIM_SqlAccessToken) { $tok = $global:PIM_SqlAccessToken }')
+T 'SEC-12b: the refusal is placed BEFORE the managed-identity branch' { $iRefuse -gt 0 -and $iMi -gt 0 -and $iRefuse -lt $iMi }
+T '  ...and before the pre-pinned-token last resort'                  { $iRefuse -gt 0 -and $iPinned -gt 0 -and $iRefuse -lt $iPinned }
+# 🪤 The reason must be CARRIED into the refusal. The old branch dropped it into a Write-Warning
+# and moved on, so the one fact that explained the whole downstream symptom was gone by the time
+# anybody read the failure.
+# 🔴 ASSERTED BEHAVIOURALLY, and the first version could NOT fail: it matched `$spnErr` in the
+# SOURCE, so blanking the assignment (`$spnErr = $null`) left the variable name in place and the
+# negative run came back 0 red. Checking that a NAME appears is not checking that a VALUE flows --
+# the same family as the guard that detected a mismatch and lost it in an exception. The probe's
+# underlying failure names the bogus thumbprint, so the outer refusal must repeat it.
+T '  ...and carries the underlying credential error into the refusal' { $sec12b -match 'DEADBEEF' }
+
+Section 'SEC-13: no shipped setup script may make a CLIENT SECRET structurally required'
+# 🔒 Repo-root rule: "authenticate as its SPN using a CERTIFICATE -- never interactively, never with
+# a client secret." A [Parameter(Mandatory)] secret does not merely PREFER a secret, it makes one
+# STRUCTURALLY REQUIRED: an operator whose onboarding SPN is cert-only cannot run the script at all,
+# and the only way forward is to mint the credential the rule forbids.
+# 🔴 THREE INSTANCES, FOUND 2026-08-28 BY SWEEPING RATHER THAN BY LOOKING AT ONE:
+#   Initialize-PimMailSender.ps1, Initialize-PimTenantStore.ps1, Setup-PimMsp.ps1.
+# Grant-PimMiSql had been fixed for exactly this on 2026-08-09 -- and the fix stopped at the
+# function that was in front of somebody. 🪤 Setup-PimMsp is the sharpest case: the script it
+# forwards to (Setup-PimContainers.ps1) had accepted -SqlAdminCertThumbprint all along, and this
+# caller simply never exposed it. The capability existed downstream and nothing could reach it --
+# BUG-78's shape, one level up.
+# ▶ SO THIS ASSERTION NAMES NO SCRIPT. It DISCOVERS every shipped .ps1 under tools\setup\ and
+# setup\ by AST and requires that none of them marks a secret parameter Mandatory. A fourth
+# instance is caught the day it is written, which a hand-written list of three could never do.
+$setupRoots = @(
+    (Join-Path (Split-Path -Parent $PSScriptRoot) 'tools\setup'),
+    (Join-Path (Split-Path -Parent $PSScriptRoot) 'setup')
+) | Where-Object { Test-Path -LiteralPath $_ }
+
+$sec13Files = @()
+foreach ($r in $setupRoots) { $sec13Files += @(Get-ChildItem -LiteralPath $r -Filter '*.ps1' -File -Recurse -ErrorAction SilentlyContinue) }
+# 🪤 A sweep that matches nothing passes silently and proves nothing -- recorded in this project
+# more than once. Assert the sweep found a real population before trusting its verdict.
+T 'SEC-13: the sweep actually finds shipped setup scripts' { @($sec13Files).Count -ge 5 }
+
+$sec13Offenders = New-Object System.Collections.Generic.List[string]
+$sec13Unparsed  = New-Object System.Collections.Generic.List[string]
+foreach ($file in $sec13Files) {
+    $errs = $null
+    $ast = [System.Management.Automation.Language.Parser]::ParseFile($file.FullName, [ref]$null, [ref]$errs)
+    if ($errs -and $errs.Count) {
+        # A file this host cannot parse is one this host cannot audit. 7.0-only scripts are a
+        # legitimate case (they run in a container), so they are recorded, not failed -- but the
+        # skip is PAID FOR below by a textual check, or the sweep would have a blind spot exactly
+        # where somebody could hide a mandatory secret.
+        $sec13Unparsed.Add($file.Name) | Out-Null
+        $txt = Get-Content -LiteralPath $file.FullName -Raw
+        if ($txt -match '(?i)\[Parameter\(Mandatory[^\)]*\)\][^\r\n]*\$\w*(Secret|Password|Pwd)\b') { $sec13Offenders.Add("$($file.Name) (text)") | Out-Null }
+        continue
+    }
+    if (-not $ast.ParamBlock) { continue }
+    foreach ($p in $ast.ParamBlock.Parameters) {
+        $name = "$($p.Name.VariablePath.UserPath)"
+        if ($name -notmatch '(?i)(Secret|Password|Pwd)$') { continue }
+        # 🔑 The KV secret NAME is not a credential. `-SecretName` / `-VaultSecret` name a pointer
+        # to a secret; requiring one is correct and must not be flagged, or the guard becomes noise
+        # and gets switched off.
+        if ($name -match '(?i)(SecretName|SecretUri|SecretId|VaultSecret)') { continue }
+        $mandatory = $false
+        foreach ($a in $p.Attributes) {
+            if ("$($a.TypeName)" -notmatch '(?i)^Parameter$') { continue }
+            foreach ($na in $a.NamedArguments) {
+                if ("$($na.ArgumentName)" -match '(?i)^Mandatory$') {
+                    # `[Parameter(Mandatory)]` has no explicit value; `Mandatory=$true` does.
+                    if ($na.ExpressionOmitted -or "$($na.Argument)" -match '(?i)true') { $mandatory = $true }
+                }
+            }
+        }
+        if ($mandatory) { $sec13Offenders.Add("$($file.Name):`$$name") | Out-Null }
+    }
+}
+$sec13List = @($sec13Offenders.ToArray())
+T 'SEC-13: NO shipped setup script marks a client-secret parameter Mandatory' {
+    if ($sec13List.Count) { Write-Host ("      offenders: " + ($sec13List -join ', ')) -ForegroundColor Yellow }
+    $sec13List.Count -eq 0
+}
+# 🔒 The three that were fixed must offer the certificate ALTERNATIVE, not merely have stopped
+# demanding a secret -- "optional secret and no other way to authenticate" is a worse state than
+# where this started, and it would satisfy the assertion above on its own.
+foreach ($pair in @(
+    @{ f = 'Initialize-PimMailSender.ps1';  p = 'AdminCertThumbprint' }
+    @{ f = 'Initialize-PimTenantStore.ps1'; p = 'AdminCertThumbprint' }
+    @{ f = 'Setup-PimMsp.ps1';              p = 'SqlAdminCertThumbprint' })) {
+    $fp = Join-Path (Split-Path -Parent $PSScriptRoot) "tools\setup\$($pair.f)"
+    $body = if (Test-Path -LiteralPath $fp) { Get-Content -LiteralPath $fp -Raw } else { '' }
+    T "  ...$($pair.f) offers -$($pair.p) instead" { $body -match ('\$' + $pair.p) }
+    # ...and REFUSES both-or-neither, so an ambiguous invocation cannot pick a credential silently.
+    T "  ...and refuses both-or-neither credentials" { $body -match 'pass EITHER' -and $body -match 'is required' }
+}
+
 Write-Host "`n=====================================================" -ForegroundColor Cyan
 Write-Host (" RESULT: {0} pass, {1} fail" -f $script:pass, $script:fail) -ForegroundColor $(if ($script:fail) {'Red'} else {'Green'})
 Write-Host "=====================================================" -ForegroundColor Cyan

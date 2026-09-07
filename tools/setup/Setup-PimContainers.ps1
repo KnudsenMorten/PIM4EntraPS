@@ -191,6 +191,15 @@ param(
 $ErrorActionPreference = 'Stop'
 function Step($m){ Write-Host "==> $m" -ForegroundColor Cyan }
 function Note($m){ Write-Host "    $m" -ForegroundColor DarkGray }
+# 🔴 THIS WAS MISSING, AND IT TOOK DOWN STEP 6 OF EVERY ESTATE DEPLOY THAT PASSED A CERT.
+# Warn is called three times on the engine-identity branch below, and was never defined here --
+# the sibling setup scripts (Build-PimManagerImage.ps1, Deploy-PimDownlinkJob.ps1) each define it
+# and this copy dropped it. The failure mode is the worst possible shape: the branch exists ONLY
+# to say "a container has no cert store, pass -EngineClientSecret instead", so passing the
+# cert-only credential the machine rules mandate killed the deploy with
+# "The term 'Warn' is not recognized" -- the message that would have told you what to do IS the
+# thing that crashed. Measured 2026-09-03 on the EFIF master: steps 1-5 green, step 6 FAILED(1).
+function Warn($m){ Write-Host "    $m" -ForegroundColor Yellow }
 $here = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent $MyInvocation.MyCommand.Path }
 $solRoot = Split-Path -Parent (Split-Path -Parent $here)   # ...\PIM4EntraPS
 
@@ -625,7 +634,11 @@ $envYaml
         resources: { cpu: 0.5, memory: 1Gi }
     scale: { minReplicas: 1, maxReplicas: 1 }
 "@
-            $tmp = Join-Path $env:TEMP "pim-$($w.name).yaml"; Set-Content -LiteralPath $tmp -Value $y -Encoding utf8
+            # 🔴 KEYED BY RESOURCE GROUP + PID -- see the Job yaml below for the measured failure.
+            # The app names are identical in every environment ('ca-pim-manager'), so a bare
+            # "pim-<name>.yaml" is the SAME PATH for every tenant, and the estate orchestrator
+            # deploys 6 environments CONCURRENTLY by default.
+            $tmp = Join-Path $env:TEMP "pim-$($w.name)-$ResourceGroup-$PID.yaml"; Set-Content -LiteralPath $tmp -Value $y -Encoding utf8
             az containerapp create -g $ResourceGroup -n $w.name --yaml $tmp -o none
         }
     } else {
@@ -735,10 +748,30 @@ $envYamlJob
     $jobAction = $(if ($jobExists) { 'update' } else { 'create' })
     Note "job yaml: triggerType=Schedule cron='$TickCron' timeout=${TickReplicaTimeout}s parallelism=1"
     if ($PSCmdlet.ShouldProcess($TickJobName, "$jobAction scheduled job")) {
-        $jobTmp = Join-Path $env:TEMP "pim-$TickJobName.yaml"
+        # 🔴 THIS PATH WAS SHARED BY EVERY ENVIRONMENT, AND IT CORRUPTED A CONCURRENT DEPLOY.
+        # $TickJobName is 'ca-pim-tick' in EVERY tenant, so "pim-$TickJobName.yaml" resolved to the
+        # SAME file for all of them -- while Invoke-PlatformEstateDeployment runs 6 environments
+        # CONCURRENTLY by default. MEASURED 2026-09-03: EFIF (wa678) and RIDE (rj466) deployed in
+        # parallel; EFIF's yaml won the write, RIDE then ran
+        #   az containerapp job create -g rg-automateit-rj466 --yaml <EFIF's yaml>
+        # and Azure refused with "The environment 'cae-pim' in resource group 'rg-automateit-wa678'
+        # was not found" -- an error naming a resource group the failing environment never mentions,
+        # which is why it reads as nonsense.
+        # 🪤 THE CRASH WAS THE LUCKY OUTCOME. It only failed because the two environments are in
+        # DIFFERENT subscriptions, so the foreign environmentId was unresolvable. Two environments
+        # in ONE subscription would have SUCCEEDED and written one tenant's job definition -- image,
+        # identity, SQL server, engine credential -- into the other tenant's resource group.
+        $jobTmp = Join-Path $env:TEMP "pim-$TickJobName-$ResourceGroup-$PID.yaml"
         Set-Content -LiteralPath $jobTmp -Value $jobYaml -Encoding utf8
-        az containerapp job $jobAction -g $ResourceGroup -n $TickJobName --yaml $jobTmp -o none
-        if ($LASTEXITCODE -and $LASTEXITCODE -ne 0) { throw "az containerapp job $jobAction failed (exit $LASTEXITCODE)." }
+        # 🪤 CAPTURE az's OWN ERROR. This used to throw "failed (exit 1)" and nothing else, with
+        # `-o none` swallowing the rest -- so the yaml-collision above surfaced as a bare exit code
+        # and the one sentence that identified it ("the environment 'cae-pim' in resource group
+        # 'rg-automateit-wa678' was not found") never reached the step log at all. An exit code is
+        # not a diagnosis, and this runs unattended where nobody is watching the console.
+        $jobOut = az containerapp job $jobAction -g $ResourceGroup -n $TickJobName --yaml $jobTmp -o none 2>&1
+        if ($LASTEXITCODE -and $LASTEXITCODE -ne 0) {
+            throw "az containerapp job $jobAction failed (exit $LASTEXITCODE): $(($jobOut | Out-String).Trim())"
+        }
         # BUG-40 was MEASURED on this Job: the update succeeded and the next executions still ran
         # the old image. A Job has no revisions to inspect, so the deployed reference is the only
         # thing that can be checked -- which is why it has to be a digest to mean anything.

@@ -145,7 +145,12 @@ Assert "prune carries orphans for visibility"         (@($pruned.orphan).Count -
 Initialize-PimDefaultJobHandlers
 # before wiring: the default discovery handler is a clear no-op
 $noop = Invoke-PimScheduledJob -Job ([pscustomobject]@{ name='d'; type='discovery'; scope='Azure' }) -NowUtc ([datetime]::UtcNow)
-Assert "unwired discovery handler no-ops with a clear message" ($noop.ok -and $noop.result.ran -eq $false -and $noop.result.detail -like 'no-handler:discovery*')
+# BUG-114 (2026-08-31): the message was clear, the recorded OUTCOME was not -- ok=$true +
+# ran=$false recorded as 'completed' and rendered as "no-op". The handler now declares
+# unimplemented=$true. Same intent, stronger assertion: pin the declaration the view reads.
+Assert "unwired discovery handler degrades (ok, no work done)"     ($noop.ok -and $noop.result.ran -eq $false)
+Assert "unwired discovery declares itself UNIMPLEMENTED"           ([bool]$noop.result.unimplemented)
+Assert "unwired discovery names the seam to wire"                  ($noop.result.detail -like 'unimplemented:discovery*' -and $noop.result.detail -like '*Register-PimDiscoveryHandler*')
 
 # Use $global: for the values the injected seam scriptblocks read, so they resolve
 # reliably no matter how deep in the dispatch call stack the seam is invoked from

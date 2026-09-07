@@ -248,8 +248,31 @@ function Get-PimCacheFreshness {
 # ---------------------------------------------------------------------------
 
 function Invoke-PimPreflightValidation {
+    <#
+      🔴 BUG-106 -- -PendingRows.
+
+      This validation BLOCKS the commit ("13 validation error(s) -- Save is blocked"). It read
+      only the SAVED store, so it could only ever describe the state BEFORE the change. The
+      operator staged every available fix, re-ran, and got the same 13 errors:
+
+          errors are in the saved store
+        -> commit is blocked while errors > 0
+        -> the fixes live in pendingChanges, which this function never saw
+        -> the only thing that would clear the errors is the commit they block.
+
+      Reported as "i have tried everything fix all but i cannot commit" -- and clicking every
+      "Set to Eligible" and "Fix all auto-fixable errors" was exactly right and could never
+      have worked.
+
+      🔑 A PRE-FLIGHT CHECK MUST VALIDATE THE STATE THE COMMIT WOULD PRODUCE, not the state it
+      is replacing. Otherwise the gate can only ever refuse the fix.
+
+      -PendingRows is @{ '<entity base>' = @(<row objects>) } and REPLACES that entity's rows
+      for this run. Entities absent from the hashtable are read from the store as before, so an
+      empty/omitted overlay reproduces the old behaviour exactly.
+    #>
     [CmdletBinding()]
-    param()
+    param([hashtable]$PendingRows)
 
     $violations = New-Object System.Collections.ArrayList
     $cacheFreshness = Get-PimCacheFreshness
@@ -318,6 +341,21 @@ function Invoke-PimPreflightValidation {
         } catch {
             [void]$violations.Add((New-PimViolation -Severity 'warning' -Code 'PIM-IO-001' -Csv $base -Message "Failed to read rows: $($_.Exception.Message)"))
             $loaded[$base] = @{ header = @(); rows = @(); source = 'none'; path = $null }
+        }
+        # BUG-106: overlay the operator's UNCOMMITTED rows for this entity, so what is validated
+        # is the state the commit WOULD produce. Done here, at the single load seam, so every
+        # rule below cross-references the pending world consistently -- a partial overlay would
+        # report phantom foreign-key breaks between pending and saved rows, which is worse than
+        # the deadlock it replaces.
+        if ($PendingRows -and $PendingRows.ContainsKey($base)) {
+            $pend = @($PendingRows[$base])
+            $hdr  = @($loaded[$base].header)
+            if (-not $hdr -or $hdr.Count -eq 0) {
+                # No saved header (a brand-new entity): derive it from the pending rows.
+                $hdr = @()
+                foreach ($r in $pend) { foreach ($p in $r.PSObject.Properties.Name) { if ($hdr -notcontains $p) { $hdr += $p } } }
+            }
+            $loaded[$base] = @{ header = $hdr; rows = $pend; source = 'pending'; path = $loaded[$base].path }
         }
     }
 
@@ -453,12 +491,24 @@ function Invoke-PimPreflightValidation {
                     $matches = Get-PimClosestMatches -Needle $val -Haystack $knownTagList -MaxDistance 5 -Top 3
                     if ($matches -and $matches.Count -gt 0) {
                         $list = ($matches | ForEach-Object { "$($_.Value) (distance $($_.Distance))" }) -join ', '
-                        $suggestion = "Add '$val' to one of $(($defGroupBases | Where-Object { $_ -ne 'PIM-Definitions-Roles' }) -join ', '), or change this row to one of: $list."
+                        $suggestion = "Define '$val' in one of $(($defGroupBases | Where-Object { $_ -ne 'PIM-Definitions-Roles' }) -join ', '), or change this row to one of: $list."
                     } else {
-                        $suggestion = "Add '$val' to one of the PIM-Definitions-* CSVs, or delete this row."
+                        $suggestion = "Define '$val' in the matching Definitions entity, or delete this row."
+                    }
+                    # BUG-90: stamp the BUSINESS KEY so the GUI can identify this finding by the
+                    # thing it is about instead of by a row index (a position the user never sees
+                    # and which shifts whenever a row above it is inserted or deleted).
+                    # BUG-91: Target also gives the quick-fix its tag directly, so the action no
+                    # longer regex-parses the Message -- a coupling that silently breaks the
+                    # buttons the moment anyone rewords the message.
+                    $subj = ''
+                    foreach ($idCol in @('Username', 'SourceGroupTag', 'GroupTag', 'AdminUnitTag')) {
+                        $sv = Get-PimRowValue -Row $r -Column $idCol
+                        if ($sv -and $sv -ne $val) { $subj = $sv; break }
                     }
                     [void]$violations.Add((New-PimViolation -Severity 'error' -Code 'PIM-FK-001' -Csv $ref.Csv -Row $i -Column $col `
-                        -Message "$col '$val' referenced here is not defined in any PIM-Definitions-* CSV" -Suggestion $suggestion))
+                        -Subject $subj -Target $val `
+                        -Message "$col '$val' is referenced here but is not defined in any Definitions entity" -Suggestion $suggestion))
                 }
             }
         }
@@ -563,9 +613,13 @@ function Invoke-PimPreflightValidation {
             if (-not $groupTagIndex.ContainsKey($k)) { continue }
             $g = $groupTagIndex[$k]
             if ($g.IsRoleAssignable -and $at -ieq 'Active') {
+                # BUG-90: the admin and the group ARE the identity of this finding -- "row 5"
+                # is not. BUG-91: Subject/Target also feed the per-finding quick-fix.
+                $ra2Admin = Get-PimRowValue -Row $r -Column 'Username'
                 [void]$violations.Add((New-PimViolation -Severity 'error' -Code 'PIM-RA-002' -Csv 'PIM-Assignments-Admins' -Row $i -Column 'AssignmentType' `
+                    -Subject $ra2Admin -Target $tag `
                     -Message "AssignmentType=Active is not supported for direct admin assignment to role-assignable group '$tag'. Entra requires Eligible." `
-                    -Suggestion "Change AssignmentType to 'Eligible' (admin activates JIT). See DESIGN.md section 2 for the structural rule."))
+                    -Suggestion "Change AssignmentType to 'Eligible' (admin activates JIT). Entra will not honour an Active assignment to a role-assignable group -- the admin must activate it just-in-time."))
             }
         }
     }
@@ -1401,11 +1455,20 @@ function Invoke-PimPreflightValidation {
     $ackResult = $null
     if (Get-Command Apply-PimWarningOverrides -ErrorAction SilentlyContinue) {
         try {
-            $ovrPath = $null
-            if ($script:configRoot -and (Get-Command Resolve-PimWarningOverridesPath -ErrorAction SilentlyContinue)) {
-                $ovrPath = Resolve-PimWarningOverridesPath -ConfigRoot $script:configRoot
+            $ackResult = $null
+            if (Get-Command Get-PimManagerWarningOverrides -ErrorAction SilentlyContinue) {
+                # SQL-aware store (hosted + local). Read-PimWarningOverrideConfig
+                # already accepts a pre-parsed -Config, so no shape translation.
+                $ackResult = Apply-PimWarningOverrides -Findings $finalViolations -Config (Get-PimManagerWarningOverrides)
+            } else {
+                # Standalone dot-source (a test loading _validator.ps1 on its own,
+                # with no Manager scope around it) -- fall back to the file path.
+                $ovrPath = $null
+                if ($script:configRoot -and (Get-Command Resolve-PimWarningOverridesPath -ErrorAction SilentlyContinue)) {
+                    $ovrPath = Resolve-PimWarningOverridesPath -ConfigRoot $script:configRoot
+                }
+                $ackResult = Apply-PimWarningOverrides -Findings $finalViolations -Path $ovrPath
             }
-            $ackResult = Apply-PimWarningOverrides -Findings $finalViolations -Path $ovrPath
             if ($ackResult) { $finalViolations = @($ackResult.findings) }
         } catch { $ackResult = $null }
     }

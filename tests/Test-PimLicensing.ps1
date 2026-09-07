@@ -145,6 +145,52 @@ try {
     T 'catalog still includes the expected Pro features' {
         $cat = Get-PimProFeatureCatalog
         ($cat -contains 'MspFanout') -and ($cat -contains 'AccessReviews') -and ($cat -contains 'WorkloadConnectors') }
+
+    Section 'LIC-1 discovery: BOTH .pimlicense and .aitlicense are found'
+    # 🔴 REGRESSION GUARD. The dual-signer work made a FRAMEWORK-issued licence
+    # (TOOLS/New-AitLicense.ps1) verify here "with no cutover and no reissue" -- but that tool
+    # writes `<customer>.aitlicense` while discovery only ever globbed `*.pimlicense`. So a real
+    # framework licence signed correctly, verified correctly, and was NEVER FOUND. Measured
+    # 2026-09-05 with an actually-issued file: .aitlicense -> Status=Missing, .pimlicense ->
+    # Status=Valid, same bytes. The failure reads as "this customer has no licence", which is
+    # exactly the silent unlicensed case LIC-1 makes deliberately quiet -- so nothing would ever
+    # have surfaced it.
+    $discDir = Join-Path $env:TEMP ("pimlic-disc-{0}" -f ([guid]::NewGuid().ToString('N')))
+    New-Item -ItemType Directory -Path $discDir -Force | Out-Null
+    try {
+        $body = Get-Content -Raw -LiteralPath $validFile
+        $ait  = Join-Path $discDir 'Customer.aitlicense'
+        $pim  = Join-Path $discDir 'AAA-Customer.pimlicense'   # sorts FIRST by name on purpose
+
+        # The production search, mirrored: extension filter + .pimlicense-wins ordering.
+        $pick = {
+            (Get-ChildItem -LiteralPath $discDir -File -ErrorAction SilentlyContinue |
+                Where-Object { $_.Extension -in @('.pimlicense', '.aitlicense') } |
+                Sort-Object @{ Expression = { if ($_.Extension -eq '.pimlicense') { 0 } else { 1 } } }, Name |
+                Select-Object -First 1).Name
+        }
+
+        $body | Set-Content -LiteralPath $ait -Encoding UTF8
+        T 'an .aitlicense on its own IS discovered (the bug: it was not)' { (& $pick) -eq 'Customer.aitlicense' }
+
+        $body | Set-Content -LiteralPath $pim -Encoding UTF8
+        T '.pimlicense still WINS when both are present (back-compat)'   { (& $pick) -eq 'AAA-Customer.pimlicense' }
+
+        Remove-Item -LiteralPath $pim -Force
+        T 'removing the .pimlicense falls back to the .aitlicense'       { (& $pick) -eq 'Customer.aitlicense' }
+
+        # An unrelated extension must never be picked up as a licence.
+        Remove-Item -LiteralPath $ait -Force
+        'not a licence' | Set-Content -LiteralPath (Join-Path $discDir 'notes.txt') -Encoding UTF8
+        T 'an unrelated file is NOT treated as a licence'                { -not (& $pick) }
+
+        T 'the production search really does accept both extensions' {
+            $src = Get-Content -Raw -LiteralPath (Join-Path $PSScriptRoot '..\engine\_shared\PIM-License.ps1')
+            ($src -match "'\.pimlicense'\s*,\s*'\.aitlicense'") -or ($src -match "'\.aitlicense'\s*,\s*'\.pimlicense'")
+        }
+    } finally {
+        Remove-Item -LiteralPath $discDir -Recurse -Force -ErrorAction SilentlyContinue
+    }
 }
 finally {
     foreach ($f in $created) { Remove-Item -LiteralPath $f -Force -ErrorAction SilentlyContinue }

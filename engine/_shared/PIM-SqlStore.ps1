@@ -148,9 +148,35 @@ function New-PimSqlConnection {
             # Noise that drowns the next real warning costs more than the silence it replaced.
             # The FAILURE paths stay unconditional -- those are rare and each one matters.
             if (-not $tok -and $explicitSpn) {
+                $spnErr = $null
                 try { $tok = Get-PimRestToken -Resource 'https://database.windows.net' -ClientId $sqlCid -ClientSecret $sqlSec -CertThumbprint $sqlThumb
                       if ($tok -and -not $script:PimSqlSourceLogged) { $script:PimSqlSourceLogged = $true; Write-Warning "  [sql] token source: EXPLICIT SPN $sqlCid" } }
-                catch { Write-Warning "  [sql] SPN token failed: $($_.Exception.Message)" }
+                catch { $spnErr = "$($_.Exception.Message)"; Write-Warning "  [sql] SPN token failed: $spnErr" }
+                # =============================================================================
+                # 🔴 SEC-12b -- SAME DEFECT AS SEC-12, ONE LAYER DOWN, AND IT WAS STILL LIVE.
+                # BUG-34 fixed the PRECEDENCE (an explicit SPN is tried before ambient MI). It did
+                # not fix the FAILURE path: when the explicit SPN's token could not be acquired,
+                # control simply carried on to the MI branch below, and then to a pre-pinned
+                # $global:PIM_SqlAccessToken -- either of which is a DIFFERENT PRINCIPAL.
+                # 🪤 OBSERVED IN THIS SESSION'S OWN LOG, against the live store:
+                #       [sql] SPN token failed: ...
+                #       [sql] token source: MANAGED IDENTITY
+                #    ...followed by "The SELECT permission was denied on the object 'Tenants'".
+                #    That reads as an RBAC problem and is not one: the connection had silently
+                #    authenticated as the machine's managed identity instead of the SPN that was
+                #    explicitly configured. Every minute spent on the permission is wasted.
+                # 🔑 A caller that configured an SPN has said who it wants to be. Presenting a
+                # different identity SUCCEEDS at the connection and fails later, somewhere else,
+                # wearing the wrong error's clothes. Refuse instead -- the failure is then one
+                # line from its cause.
+                # =============================================================================
+                if (-not $tok) {
+                    throw ("PIM store auth REFUSED: an explicit SPN ($sqlCid) is configured for SQL and its token " +
+                           "could not be acquired$(if ($spnErr) { ": $spnErr" } else { '.' }) " +
+                           'Refusing to fall back to the machine managed identity or a pre-pinned token -- that would ' +
+                           'connect as a DIFFERENT principal and surface later as a permissions error. Fix the ' +
+                           'credential, or clear $global:PIM_SqlClientId/$global:PIM_ClientId to use ambient auth on purpose.')
+                }
             }
             if (-not $tok -and $miAvail) {
                 try { $tok = Get-PimRestToken -Resource 'https://database.windows.net' -UseManagedIdentity
@@ -271,9 +297,34 @@ function Get-PimSqlConnectionString {
     if ($global:PIM_SqlConnStringVault -and $global:PIM_SqlConnStringSecret) {
         return (Get-PimSqlSecretFromKeyVault -VaultName "$($global:PIM_SqlConnStringVault)" -SecretName "$($global:PIM_SqlConnStringSecret)")
     }
-    $srv = if ($global:PIM_SqlServer) { "$($global:PIM_SqlServer)" } else { '.\SQLEXPRESS' }
-    # Azure SQL (FQDN) -> passwordless token-based CS (MI AccessToken set by
-    # New-PimSqlConnection). On-prem / Express -> Integrated.
+    # 🔴 NO `.\SQLEXPRESS` FALLBACK. **SQL Express is not used by this product, anywhere**
+    # (operator, 2026-08-28). It was never a supported store -- the BUG-30 note four lines up
+    # already called it "a store the product does not ship" -- and leaving it as the DEFAULT
+    # meant an unconfigured caller did not fail: it quietly connected to whatever local
+    # database happened to exist, with Integrated auth, and read desired state out of it.
+    # 🪤 THAT IS NOT HYPOTHETICAL, AND IT HAS ALREADY COST THIS PROJECT A FALSE GREEN TWICE:
+    #   * BUG-78 -- a `.\SQLEXPRESS` default OVERRODE a correct Azure SQL FQDN, so the live
+    #     scenario matrix had been running against a local database nobody deployed;
+    #   * TEST-32 -- a torn-down tenant could not make the estate matrix fail, because the
+    #     local SQL Express desired state OUTLIVED the teardown. The run was green about a
+    #     directory and false about the claim.
+    # Both are the same shape: a default that cannot fail is a default that cannot be trusted.
+    # An unset store is a CONFIGURATION ERROR, and it must be loud -- "no store" and "a store
+    # with stale rows in it" are the two readings, and only the first is ever right here.
+    $srv = "$($global:PIM_SqlServer)".Trim()
+    if (-not $srv) {
+        # 🪤 ASCII ONLY in this message. The first version used a Unicode ellipsis and Windows
+        # PowerShell 5.1's console rendered it as mojibake, which makes an actionable error look
+        # like an encoding fault and sends the reader hunting the wrong problem.
+        throw ('PIM store is not configured: $global:PIM_SqlServer is empty. Set it to the Azure SQL ' +
+               'server FQDN (<name>.database.windows.net) -- or set $global:PIM_SqlConnectionString / the ' +
+               'KV pointer ($global:PIM_SqlConnStringVault + $global:PIM_SqlConnStringSecret). ' +
+               'There is deliberately NO local default: SQL Express is not a store this product uses, ' +
+               'and defaulting to one turns a missing configuration into a silent read of the wrong data.')
+    }
+    # Azure SQL (FQDN) -> passwordless token-based CS (MI AccessToken set by New-PimSqlConnection).
+    # A non-FQDN server is still buildable (a named on-prem/hybrid instance per §31), but it is
+    # never REACHED BY DEFAULT any more -- somebody has to have named it.
     if ($srv -match '(?i)database\.windows\.net') { return (Get-PimAzureSqlConnectionString -Fqdn $srv -Database $Database) }
     return "Server=$srv;Database=$Database;Integrated Security=SSPI;Encrypt=True;TrustServerCertificate=True;Connection Timeout=15"
 }
@@ -354,6 +405,32 @@ CREATE TABLE pim.Settings (
     ValueJson   NVARCHAR(MAX) NULL,
     UpdatedUtc  DATETIME2     NOT NULL CONSTRAINT DF_Settings_Updated DEFAULT SYSUTCDATETIME()
 );
+-- SEC-16 (§36.2). The Manager's audit trail. It used to be appended to
+-- output/audit/pim-audit-YYYYMM.jsonl on the container filesystem, and the hosted app mounts
+-- NO persistent volume (measured 2026-08-31: volumes=null, mounts=null) -- so every revision
+-- roll destroyed the entire trail. The audit is the one record that must OUTLIVE the thing it
+-- audits: desired state is already in SQL, the tenant cache rebuilds, engine logs are copied to
+-- Log Analytics. "Who granted privileged access" was the only thing with no second home.
+-- ActorSource is here because of the second half of SEC-16: the writer recorded the CONTAINER's
+-- process identity, so every row said the same thing. Storing WHERE the actor came from makes a
+-- future regression of that kind visible in the data instead of invisible.
+IF OBJECT_ID('pim.AuditEvents') IS NULL
+CREATE TABLE pim.AuditEvents (
+    Id            BIGINT IDENTITY(1,1) PRIMARY KEY,
+    Ts            DATETIME2     NOT NULL CONSTRAINT DF_PimAudit_Ts DEFAULT SYSUTCDATETIME(),
+    RunId         NVARCHAR(64)  NULL,
+    CorrelationId NVARCHAR(64)  NULL,
+    Actor         NVARCHAR(200) NOT NULL,
+    ActorSource   NVARCHAR(100) NULL,
+    Action        NVARCHAR(100) NOT NULL,
+    Target        NVARCHAR(400) NOT NULL,
+    BeforeJson    NVARCHAR(MAX) NULL,
+    AfterJson     NVARCHAR(MAX) NULL,
+    Result        NVARCHAR(100) NOT NULL CONSTRAINT DF_PimAudit_Result DEFAULT 'ok',
+    WhatIf        BIT           NOT NULL CONSTRAINT DF_PimAudit_WhatIf DEFAULT 0
+);
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'IX_pim_AuditEvents_Ts')
+CREATE INDEX IX_pim_AuditEvents_Ts ON pim.AuditEvents (Ts DESC);
 "@
     [void](Invoke-PimSqlNonQuery -ConnectionString $ConnectionString -Sql $ddl)
     [void](Invoke-PimSqlNonQuery -ConnectionString $ConnectionString -Sql (Get-PimChangeQueueDdl))
@@ -605,6 +682,105 @@ MERGE pim.Settings AS t USING (SELECT @n AS Name) AS s ON t.Name = s.Name
 WHEN MATCHED THEN UPDATE SET ValueJson=@v, UpdatedUtc=SYSUTCDATETIME()
 WHEN NOT MATCHED THEN INSERT (Name, ValueJson, UpdatedUtc) VALUES (@n, @v, SYSUTCDATETIME());
 "@ -Parameters @{ n = $Name; v = $json })
+}
+
+# --- audit trail in SQL (SEC-16 / §36.2) ----------------------------------------
+# APPEND-ONLY by intent. There is deliberately no update or delete helper here: the value of an
+# audit trail is that it cannot be tidied, and the easiest way to keep a capability from being
+# used by accident is not to write it. Retention is a policy decision for §36.3, not an ad-hoc
+# DELETE somebody reaches for at 2am.
+function Write-PimSqlAuditEvent {
+    param(
+        [Parameter(Mandatory)][string]$ConnectionString,
+        [Parameter(Mandatory)][string]$Actor,
+        [Parameter(Mandatory)][string]$Action,
+        [Parameter(Mandatory)][string]$Target,
+        [string]$ActorSource = '',
+        [string]$RunId = '',
+        [string]$CorrelationId = '',
+        [object]$Before = $null,
+        [object]$After = $null,
+        [string]$Result = 'ok',
+        [bool]$WhatIf = $false,
+        # §36.3 phase 1b -- an IMPORT of the retired file trail must keep each event's ORIGINAL
+        # time. Left unbound, Ts stays on its DF_PimAudit_Ts default (SYSUTCDATETIME()), which is
+        # what every live write wants; binding it to "now" for an import would stamp the whole
+        # imported history with the minute somebody ran the importer and destroy the ordering
+        # that makes the trail evidence. Only the importer passes this.
+        [datetime]$Ts
+    )
+    $b = if ($null -ne $Before) { $Before | ConvertTo-Json -Depth 8 -Compress } else { $null }
+    $a = if ($null -ne $After)  { $After  | ConvertTo-Json -Depth 8 -Compress } else { $null }
+    $cols = 'RunId, CorrelationId, Actor, ActorSource, Action, Target, BeforeJson, AfterJson, Result, WhatIf'
+    $vals = '@run, @corr, @actor, @asrc, @action, @target, @before, @after, @result, @whatif'
+    $p = @{
+        run = $RunId; corr = $CorrelationId; actor = $Actor; asrc = $ActorSource
+        action = $Action; target = $Target; before = $b; after = $a
+        result = $Result; whatif = [int][bool]$WhatIf
+    }
+    if ($PSBoundParameters.ContainsKey('Ts')) {
+        $cols = 'Ts, ' + $cols; $vals = '@ts, ' + $vals; $p['ts'] = $Ts.ToUniversalTime()
+    }
+    [void](Invoke-PimSqlNonQuery -ConnectionString $ConnectionString -Sql @"
+INSERT INTO pim.AuditEvents ($cols)
+VALUES ($vals);
+"@ -Parameters $p)
+}
+
+function Get-PimSqlAuditEvents {
+    <#
+      Read the trail newest-first, shaped EXACTLY like the jsonl reader's records so
+      Select-PimAuditEvents / Get-PimAuditChangeSummary keep working unchanged -- the point of
+      moving the store is not to rewrite the query layer.
+    #>
+    param(
+        [Parameter(Mandatory)][string]$ConnectionString,
+        [datetime]$FromUtc, [datetime]$ToUtc,
+        [int]$Top = 5000
+    )
+    $where = @(); $p = @{}
+    if ($PSBoundParameters.ContainsKey('FromUtc')) { $where += 'Ts >= @f'; $p['f'] = $FromUtc }
+    if ($PSBoundParameters.ContainsKey('ToUtc'))   { $where += 'Ts <= @t'; $p['t'] = $ToUtc }
+    $w = if ($where.Count) { 'WHERE ' + ($where -join ' AND ') } else { '' }
+    if ($Top -lt 1) { $Top = 1 }
+    $rows = @(Invoke-PimSqlQuery -ConnectionString $ConnectionString -Sql @"
+SELECT TOP ($Top) Ts, RunId, CorrelationId, Actor, ActorSource, Action, Target, BeforeJson, AfterJson, Result, WhatIf
+FROM pim.AuditEvents $w ORDER BY Ts DESC, Id DESC;
+"@ -Parameters $p)
+    $out = New-Object System.Collections.Generic.List[object]
+    foreach ($r in $rows) {
+        $before = $null; $after = $null
+        if ("$($r.BeforeJson)".Trim()) { try { $before = $r.BeforeJson | ConvertFrom-Json } catch { $before = "$($r.BeforeJson)" } }
+        if ("$($r.AfterJson)".Trim())  { try { $after  = $r.AfterJson  | ConvertFrom-Json } catch { $after  = "$($r.AfterJson)" } }
+        $out.Add([pscustomobject]@{
+            ts = ([datetime]$r.Ts).ToUniversalTime().ToString('o')
+            runId = "$($r.RunId)"; correlationId = "$($r.CorrelationId)"
+            actor = "$($r.Actor)"; actorSource = "$($r.ActorSource)"
+            action = "$($r.Action)"; target = "$($r.Target)"
+            before = $before; after = $after
+            result = "$($r.Result)"; whatIf = [bool]$r.WhatIf
+        })
+    }
+    # 🪤 `.ToArray()`, NOT `@($out)`. Wrapping a System.Collections.Generic.List in @() throws
+    # "Argument types do not match" in this environment -- on BOTH Windows PowerShell 5.1 and
+    # pwsh 7, and even for a list of plain strings (an ArrayList is unaffected). Nothing else in
+    # this solution hits it because the other List users pipe through Sort-Object/Where-Object and
+    # so wrap a PIPELINE result rather than the list object itself. Measured 2026-08-31.
+    return $out.ToArray()
+}
+
+function Get-PimSqlAuditMonthCount {
+    <#
+      How many distinct calendar months the trail spans. The file-based reader answered this by
+      counting monthly FILES; with SQL there are no files, and "0 months of history" would make
+      the Audit tab's window selector claim the trail is empty when it is not.
+    #>
+    param([Parameter(Mandatory)][string]$ConnectionString)
+    $n = Invoke-PimSqlScalar -ConnectionString $ConnectionString -Sql @"
+SELECT COUNT(*) FROM (SELECT DISTINCT YEAR(Ts) AS y, MONTH(Ts) AS m FROM pim.AuditEvents) AS x;
+"@
+    $i = 0; [void][int]::TryParse("$n", [ref]$i)
+    return $i
 }
 
 # --- atomic compare-and-set, for the scheduler's single-runner lease (BUG-36) ----

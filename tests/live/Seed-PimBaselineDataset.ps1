@@ -44,6 +44,15 @@ if (-not $SqlDatabase) { throw "Set -SqlDatabase or `$env:PIM_SqlDatabase (e.g. 
 $global:PIM_UseGraphSdk = $false; $global:PIM_SqlServer = $SqlServer; $global:PIM_SqlDatabase = $SqlDatabase
 . "$shared\PIM-Rest.ps1"; . "$shared\PIM-ChangeQueue.ps1"; . "$shared\PIM-SqlStore.ps1"
 
+# 🔴 SEC-14 GUARD -- refuse a PRODUCTION tenant before anything authenticates or writes.
+# This harness creates and deletes directory objects. On 2026-06-14 it ran against
+# myfamilynetwork (the operator's live tenant) and left 332 groups + 16 AUs holding 240 Entra
+# directory-role assignments -- Global Administrator among them -- for 77 days. The registry
+# said "status: production, NOT a test tenant" the whole time; no code read it. It does now.
+. (Join-Path $PSScriptRoot '_PimScenarioTenants.ps1')
+Assert-PimTenantIsNotProduction -TenantId "$($global:PIM_TenantId)" -What (Split-Path -Leaf $PSCommandPath)
+Assert-PimScenarioTenantAllowed  -TenantId "$($global:PIM_TenantId)" -What 'tenant'
+
 # ensure DB + schema exist (local store first-time bootstrap)
 Initialize-PimSqlDatabase -Server $SqlServer -Database $SqlDatabase
 $cs = Get-PimSqlConnectionString

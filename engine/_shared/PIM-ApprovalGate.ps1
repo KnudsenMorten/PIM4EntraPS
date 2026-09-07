@@ -384,7 +384,16 @@ function Get-PimApprovalStorePath {
         if (-not $dir) { $dir = '.' }
         return (Join-Path $dir 'pim-approval-requests.json')
     }
-    return (Join-Path $env:TEMP 'pim-approval-requests.json')
+    # 🔴 NOT $env:TEMP -- IT IS EMPTY IN A LINUX CONTAINER, AND Join-Path THROWS ON EMPTY.
+    # This code ships inside the pim-manager image and runs on Linux (the ACA Manager, the tick
+    # Job, the S5/S6 downlink Job). $env:TEMP is a Windows convention; on Linux it is simply not
+    # set, so `Join-Path $env:TEMP 'x'` fails with
+    #     Cannot bind argument to parameter 'Path' because it is an empty string
+    # -- a message that names neither this function nor a temp directory, so it reads as a bug
+    # anywhere but here. [IO.Path]::GetTempPath() is the cross-platform form: it honours TEMP on
+    # Windows and returns /tmp on Linux.
+    $tmp = if ("$env:TEMP".Trim()) { $env:TEMP } else { [System.IO.Path]::GetTempPath() }
+    return (Join-Path $tmp 'pim-approval-requests.json')
 }
 
 function Get-PimApprovalRequests {

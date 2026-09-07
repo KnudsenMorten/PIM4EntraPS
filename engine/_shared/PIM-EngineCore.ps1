@@ -271,6 +271,25 @@ function Invoke-PimEngineScope {
                 # object carrying `pimApplied = $false`; anything else (including the API
                 # responses every other handler returns) still counts as applied, so this is
                 # additive and cannot change existing behaviour.
+                #
+                # 🔒 DO NOT "FIX" THIS BY TREATING A BARE $null AS NOT-APPLIED. That looks like the
+                # obvious repair (a handler that returns nothing surely did nothing), and it is wrong.
+                # SURVEYED, all 30 Apply* handlers in PIM-EngineProviders.ps1, 2026-08-27 -- TWO of
+                # them ACT and legitimately return nothing, so the flip would report real changes as
+                # un-applied, which is the same defect pointing the other way:
+                #   * GroupOwners.ApplyCreate      -- POSTs owners/$ref, pipes it to Out-Null, and its
+                #                                     success path ends on `if (-not $ok) { throw }`.
+                #   * GroupsPolicies.ApplyUpdate   -- every rule goes through Invoke-PimPolicyRulePatch,
+                #     (and its ApplyCreate,           which itself is `... | Out-Null; return`. This is
+                #      which delegates to it)         the hottest handler there is: u112 in one run.
+                # 🪤 The survey also killed the assumption that sent it looking. A Graph 204 (every
+                # PATCH / DELETE / $ref POST -- Admins.ApplyUpdate+ApplyRemove, AuMembers.ApplyCreate,
+                # Defender/Intune/AppRole.ApplyRemove) does NOT come back as $null: Invoke-RestMethod
+                # yields the EMPTY STRING, which is non-null, so those handlers are unaffected either
+                # way. Measured on pwsh 7.6.3 AND Windows PowerShell 5.1 -- both hosts agree.
+                # The correct repair is the one already in use: a handler that does not act SAYS SO
+                # with `pimApplied = $false`. Fixed that way in Admins.ApplyRemove (both guards) and
+                # HybridAdProvisioning.ApplyCreate; AdminOffboarding + AdminTap already did.
                 $__r = & $p.$handlerName $item $Context
                 $__reported = $false
                 foreach ($__o in @($__r)) {

@@ -54,10 +54,37 @@
 param(
     [string]$ResourceGroup = $(if ($env:PIM_HOSTED_RG) { $env:PIM_HOSTED_RG } else { 'rg-pim-manager-web' }),
     [string[]]$Apps = @('ca-pim-manager','ca-pim-scheduler','ca-pim-engine','ca-pim-connector','ca-pim-deltaqueue','ca-pim-discovery'),
+    # 🔴 EVERY az CALL BELOW USED TO RUN AGAINST THE AMBIENT DEFAULT CONTEXT, and on a machine
+    # logged into more than one directory that is a coin flip. On mgmt1 it lands on a DIFFERENT
+    # COMPANY'S subscription (CLAUDE.md: "often the DEFAULT context"), so this gate -- whose entire
+    # job is to notice that nothing was deployed -- would query the wrong tenant, find none of the
+    # apps, and report CANNOT CHECK. Right answer, wrong reason, and one `az account set` away from
+    # being a confidently wrong answer instead. Measured 2026-08-30: it could not report on the
+    # myfamilynetwork fleet at all.
+    # Same family as SEC-12: an ambient identity silently standing in for an explicit one.
+    [string]$SubscriptionId = $(if ($env:PIM_SUBSCRIPTION_ID) { $env:PIM_SUBSCRIPTION_ID } else { '' }),
+    # Container APP JOBS (the tick) are deployed alongside the apps and drift identically -- a
+    # fleet check that reads only the apps can report "no drift" while the job runs last month's
+    # engine. Same BUG-09 shape the app list already guards against.
+    [string[]]$Jobs = @(),
+    # When an app is pinned BY DIGEST rather than by tag there is no tag to read, and the report
+    # correctly says `unknown`. Given an ACR, the digest is resolved back to its tag so the answer
+    # is a version instead of a shrug -- which is the difference between this gate answering the
+    # question and merely declining to.
+    [string]$AcrName = '',
     [int]$MaxAgeDays = 45,
     [switch]$Quiet
 )
 $ErrorActionPreference = 'Stop'
+# Guarded `az` shadow -- see _PimAz.ps1. az writes ordinary WARNINGS to stderr and PowerShell 5.1
+# makes any such write terminating under $ErrorActionPreference='Stop'. A DRIFT check is the worst
+# place to inherit that: it would report "cannot read the deployed image" on a host that is simply
+# noisy, which reads as drift-unknown rather than as a broken probe.
+# 🪤 Assign first. `Join-Path (if (...) {...} else {...}) 'x'` PARSES and then fails at RUNTIME with
+# "The term 'if' is not recognized as a name of a cmdlet" -- the same shape already recorded in
+# Sync-AutomateIT-Engine.ps1. An `if` is a statement, not an argument expression.
+$here = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent $MyInvocation.MyCommand.Path }
+. (Join-Path $here '_PimAz.ps1')
 
 # ---------------------------------------------------------------------------
 # PURE decision core -- no az, no network. This is what the offline suite tests.
@@ -68,6 +95,15 @@ function Get-PimImageTag {
     [CmdletBinding()] param([string]$Image)
     $s = "$Image".Trim()
     if (-not $s) { return '' }
+    # 🔴 A DIGEST IS NOT A TAG, and splitting on the last ':' turns one into the other. An image
+    # pinned as `repo@sha256:f25ba6e4...` was reported as running "tag" f25ba6e4..., i.e. a 64-char
+    # hex string printed where a version belongs -- and then compared against 2.4.252 and called
+    # DRIFT. The verdict happened to be right, which is exactly why nobody noticed: a gate whose
+    # output is unreadable is one nobody reads, and the next digest-pinned deploy could as easily
+    # have produced a confident nonsense answer. Measured on the myfamilynetwork fleet 2026-08-30.
+    # Returning '' here is what lets the caller's registry lookup resolve the real tag, and what
+    # keeps `unknown` reachable when it cannot -- an admitted gap beats an invented version.
+    if ($s -match '@sha256:') { return '' }
     $i = $s.LastIndexOf(':')
     if ($i -lt 0) { return '' }                       # no tag at all (implicit :latest)
     $tag = $s.Substring($i + 1)
@@ -92,7 +128,10 @@ function Get-PimVersionDriftReport {
     foreach ($d in @($Deployed)) {
         if ($null -eq $d) { continue }
         $app = "$($d.app)"
+        # A tag parsed from the image string wins; a digest-pinned image has none, and the caller
+        # may have resolved it against the registry. Still PURE -- the lookup happened outside.
         $tag = Get-PimImageTag -Image "$($d.image)"
+        if (-not $tag -and "$($d.resolvedTag)".Trim()) { $tag = "$($d.resolvedTag)".Trim() }
         $ageDays = $null
         if ("$($d.createdUtc)".Trim()) {
             $c = $null
@@ -157,20 +196,77 @@ if ($LASTEXITCODE -ne 0 -or -not $acct) {
     exit 2
 }
 
+# --- WHICH subscription, said out loud ---------------------------------------------------------
+# 🔑 "Logged in" was never the question. `az account show` succeeding proves only that SOME context
+# exists, and this check used to accept that as readiness -- which is how it ended up ready to
+# query another company's tenant. Every az call below is scoped explicitly instead.
+$subArgs = @()
+if ("$SubscriptionId".Trim()) {
+    $subArgs = @('--subscription', "$SubscriptionId".Trim())
+    Write-Host ("  subscription: {0} (explicit)" -f $SubscriptionId) -ForegroundColor DarkGray
+} else {
+    $ctx = $null
+    try { $ctx = $acct | ConvertFrom-Json } catch { }
+    # NOT a failure -- a single-directory machine has one context and it is the right one. But it
+    # is stated, because an ambient default is a fact about the machine, not about this fleet.
+    Write-Host ("  subscription: AMBIENT DEFAULT '{0}' ({1}) -- pass -SubscriptionId to pin it" -f `
+        "$($ctx.name)", "$($ctx.id)") -ForegroundColor Yellow
+}
+
 $deployed = New-Object System.Collections.Generic.List[object]
 $queryFailed = New-Object System.Collections.Generic.List[string]
-foreach ($app in $Apps) {
-    $json = & az containerapp show -g $ResourceGroup -n $app -o json 2>$null
+
+# A digest -> tag cache, so N apps on one image cost ONE registry call.
+$script:digestTag = @{}
+function Resolve-PimDigestTag {
+    <#
+      An image pinned as repo@sha256:... carries no tag, and the report then says `unknown` --
+      honest, but it declines to answer the only question being asked. Given an ACR we can look
+      the digest up and say which version it actually is.
+      Returns '' when it cannot be resolved -- which keeps `unknown` reachable rather than
+      inventing a tag, because a guessed version is worse than an admitted gap.
+    #>
+    param([string]$Image, [string]$Acr, [string[]]$SubArgs)
+    if (-not "$Acr".Trim()) { return '' }
+    if ("$Image" -notmatch '@(sha256:[0-9a-f]+)$') { return '' }
+    $digest = $Matches[1]
+    if ($script:digestTag.ContainsKey($digest)) { return $script:digestTag[$digest] }
+    $repo = ("$Image" -split '@')[0]; $repo = ($repo -split '/')[-1]
+    $tag = ''
+    try {
+        $t = & az acr manifest list-metadata --registry $Acr --name $repo @SubArgs `
+                --query "[?digest=='$digest'].tags[0]" -o tsv 2>$null
+        if ($LASTEXITCODE -eq 0 -and "$t".Trim()) { $tag = ("$t".Trim() -split "\r?\n")[0] }
+    } catch { }
+    $script:digestTag[$digest] = $tag
+    return $tag
+}
+
+# Apps and JOBS both drift, and both are read here. A fleet check that covers only the apps can
+# report "no drift" while the tick job runs last month's engine -- BUG-09's shape, one resource
+# type over.
+$targets = @()
+foreach ($a in @($Apps)) { $targets += ,@{ name = $a; kind = 'app' } }
+foreach ($j in @($Jobs)) { $targets += ,@{ name = $j; kind = 'job' } }
+
+foreach ($t in $targets) {
+    $app = $t.name
+    if ($t.kind -eq 'job') { $json = & az containerapp job show -g $ResourceGroup -n $app @subArgs -o json 2>$null }
+    else                   { $json = & az containerapp show     -g $ResourceGroup -n $app @subArgs -o json 2>$null }
     if ($LASTEXITCODE -ne 0 -or -not $json) { $queryFailed.Add($app); continue }
     $o = $null
     try { $o = $json | ConvertFrom-Json } catch { $queryFailed.Add($app); continue }
-    $rev = "$($o.properties.latestRevisionName)"
-    $created = ''
-    $rj = & az containerapp revision show -g $ResourceGroup -n $app --revision $rev --query "properties.createdTime" -o tsv 2>$null
-    if ($LASTEXITCODE -eq 0 -and $rj) { $created = "$rj".Trim() }
+    $rev = ''; $created = ''
+    if ($t.kind -eq 'app') {
+        $rev = "$($o.properties.latestRevisionName)"
+        $rj = & az containerapp revision show -g $ResourceGroup -n $app --revision $rev @subArgs --query "properties.createdTime" -o tsv 2>$null
+        if ($LASTEXITCODE -eq 0 -and $rj) { $created = "$rj".Trim() }
+    }
+    $img = "$($o.properties.template.containers[0].image)"
     $deployed.Add([pscustomobject]@{
-        app = $app; image = "$($o.properties.template.containers[0].image)"
-        revision = $rev; createdUtc = $created
+        app = $app; image = $img; revision = $rev; createdUtc = $created
+        # Resolved here rather than inside the pure core, which must stay network-free.
+        resolvedTag = (Resolve-PimDigestTag -Image $img -Acr $AcrName -SubArgs $subArgs)
     })
 }
 

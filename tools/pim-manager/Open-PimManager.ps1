@@ -185,6 +185,21 @@ if (Test-Path -LiteralPath $_approvalsLib) { . $_approvalsLib }
 $_delegLib = Join-Path $solutionRoot 'engine\_shared\PIM-DelegationDepth.ps1'
 if (Test-Path -LiteralPath $_delegLib) { . $_delegLib }
 
+# Standalone sign-in-session revoke guard (engine/_shared/PIM-SessionRevoke.ps1,
+# REQUIREMENTS §35.2) -- the PURE verdict behind POST /api/admin-sessions/revoke.
+# Loaded AFTER PIM-Approvals/ApprovalGate so the real Test-PimRowIsBreakGlass is
+# already defined and the lib's guarded fallback does not shadow it. The lib
+# fails CLOSED if that predicate is missing, so a load-order regression refuses
+# revokes rather than performing unguarded ones.
+$_sessionRevokeLib = Join-Path $solutionRoot 'engine\_shared\PIM-SessionRevoke.ps1'
+if (Test-Path -LiteralPath $_sessionRevokeLib) { . $_sessionRevokeLib }
+
+# Directory-people lookup (engine/_shared/PIM-DirectorySearch.ps1, REQUIREMENTS
+# §35.8) -- the PURE query builder + escaping behind GET /api/directory/people.
+# The data source every people-picker in the Manager needs and none of them had.
+$_dirSearchLib = Join-Path $solutionRoot 'engine\_shared\PIM-DirectorySearch.ps1'
+if (Test-Path -LiteralPath $_dirSearchLib) { . $_dirSearchLib }
+
 # Delegation Map risk overlay + search-result builder (engine/_shared/PIM-MapRisk.ps1,
 # REQUIREMENTS §28 [M8]) -- pure functions over the SAME graph model the Map
 # renders. Power /api/map-risk + /api/map-search. Dot-sourced standalone (no SQL).
@@ -282,6 +297,12 @@ if (Test-Path -LiteralPath $_writeGuardLib) { . $_writeGuardLib }
 # JSONL file adapter; dot-sourced standalone so the feed works without SQL.
 $_alertFeedLib = Join-Path $solutionRoot 'engine\_shared\PIM-AlertFeed.ps1'
 if (Test-Path -LiteralPath $_alertFeedLib) { . $_alertFeedLib }
+# ALERT-01: the job-failure alert layer. Loaded here so Invoke-PimJobRunAlert exists
+# in-process and resolves to Send-PimManagerAlert -- the full path (per-event toggles,
+# debounce, outbound webhook, audit event, recorded-send feed) rather than the lean
+# scheduler sender. Whichever process records the run raises the alert.
+$_jobAlertLib = Join-Path $solutionRoot 'engine\_shared\PIM-JobAlert.ps1'
+if (Test-Path -LiteralPath $_jobAlertLib) { . $_jobAlertLib }
 
 # Outbound alert CHANNELS (engine/_shared/PIM-AlertChannels.ps1, REQUIREMENTS §26c
 # "Alerting (email / Teams)" + §28 [H2] residual). A SECOND delivery channel beside
@@ -408,6 +429,11 @@ $script:PimLoginAudited = @{}
 # Hosted (24/7 App Service) vs local (loopback) mode. In hosted mode identity is
 # the per-request Easy Auth principal; locally it's the Windows user.
 $script:PimHosted = [bool]$Hosted -or ("$env:PIM_HOSTED" -in @('1','true','yes'))
+# SEC-15 / §36.3 phase 2 -- the engine libs are dot-sourced into this process and cannot see
+# $script: scope, so the hosted fact is published globally. Read-PimPortalProfiles uses it to
+# refuse the filesystem fallback for AUTHORIZATION data. Set from the SAME expression above, not
+# re-derived, so the Manager and the libs can never disagree about whether this is hosted.
+$global:PIM_Hosted = $script:PimHosted
 $script:CurrentRequestPrincipal = $null
 
 function Get-PimEntraJwks {
@@ -498,6 +524,33 @@ function Get-PimManagerRole {
     #   PIM_HostedDefaultRole        = role for any OTHER authenticated user (default: Reader)
     if ($script:PimHosted) {
         $whoLc  = "$who".ToLowerInvariant()
+        # 🔒 SEC-15 / §36.3 phase 2 -- SQL is the AUTHORITATIVE home for Manager RBAC.
+        # Before this the hosted chain was env -> default -> **the manager-access.custom.json
+        # FILE**, so a stray file on the container could decide who is SuperAdmin. Same defect as
+        # the portal profiles, and the same fix: SQL first, and hosted never reads the file.
+        # 📌 Env still works and is checked next, because ~every existing deployment is configured
+        # that way -- this ADDS the auditable home, it does not strand the current one. But the
+        # authorization model having two homes is itself recorded as the remaining §36 gap.
+        try {
+            if ($global:PIM_NamingConventions -is [hashtable] -and $global:PIM_NamingConventions['ManagerAccess']) {
+                $raw = $global:PIM_NamingConventions['ManagerAccess']
+                $ma = $null
+                try { $ma = $raw | ConvertFrom-Json } catch {
+                    # Malformed authorization JSON DENIES; it does not degrade to env or file.
+                    Write-Warning "  [rbac] SQL 'ManagerAccess' is not valid JSON -- denying rather than falling back: $($_.Exception.Message)"
+                    return @{ role = 'Reader'; identity = $who; source = 'sql ManagerAccess INVALID (fail closed)' }
+                }
+                $entries = @(if ($ma -and $ma.PSObject.Properties['managerAccess']) { $ma.managerAccess } else { $ma })
+                foreach ($e in $entries) {
+                    if (-not "$($e.identity)".Trim()) { continue }
+                    if ("$($e.identity)".Trim().ToLowerInvariant() -eq $whoLc) {
+                        $r = "$($e.role)".Trim()
+                        if ($r -notin @('Reader','Admin','SuperAdmin','Delegated')) { $r = 'Reader' }
+                        return @{ role = $r; identity = $who; source = 'sql ManagerAccess' }
+                    }
+                }
+            }
+        } catch { Write-Warning "  [rbac] SQL 'ManagerAccess' read failed: $($_.Exception.Message)" }
         $supers = @("$env:PIM_SuperAdmins" -split '[,;]+' | ForEach-Object { $_.Trim().ToLowerInvariant() } | Where-Object { $_ })
         $admins = @("$env:PIM_Admins"      -split '[,;]+' | ForEach-Object { $_.Trim().ToLowerInvariant() } | Where-Object { $_ })
         if ($supers -contains $whoLc) { return @{ role = 'SuperAdmin'; identity = $who; source = 'env PIM_SuperAdmins' } }
@@ -510,6 +563,11 @@ function Get-PimManagerRole {
             $dr = "$env:PIM_HostedDefaultRole".Trim(); if ($dr -notin @('Reader','Admin','SuperAdmin')) { $dr = 'Reader' }
             return @{ role = $dr; identity = $who; source = 'env PIM_HostedDefaultRole' }
         }
+        # 🔒 HOSTED STOPS HERE. It must NOT fall through to manager-access.custom.json below:
+        # a file on the container filesystem deciding who is SuperAdmin is exactly SEC-15, and the
+        # filesystem is ephemeral, unversioned and writable by anything in the image.
+        # Unknown principal on a hosted deployment == Reader. Fail closed.
+        return @{ role = 'Reader'; identity = $who; source = 'hosted: not in SQL ManagerAccess or env (fail closed)' }
     }
     $f = Join-Path $script:configRoot 'manager-access.custom.json'
     if (-not (Test-Path -LiteralPath $f)) {
@@ -561,6 +619,16 @@ function Get-PimManagerCallerScope {
     return @{ isSuperAdmin = $isSuper; profile = $prof; identity = $who }
 }
 
+function Test-PimManagerHostedDeployment {
+    # ONE answer to "is this the hosted app?", shared by the audit writer, the reader and the
+    # month count. It used to be re-derived inline in the WRITER only, so the read side could not
+    # act on it at all -- and §36.3 phase 1b turns entirely on all three agreeing.
+    $hosted = $false
+    try { $hosted = [bool]$script:PimHosted } catch { }
+    if (-not $hosted) { try { $hosted = [bool]("$env:PIM_HOSTED" -match '(?i)^(1|true|yes)$') } catch { } }
+    return $hosted
+}
+
 function Write-PimManagerAuditEvent {
     param(
         [Parameter(Mandatory)][string]$Action,
@@ -568,18 +636,95 @@ function Write-PimManagerAuditEvent {
         [object]$After = $null,
         [string]$Result = 'ok'
     )
+    # 🔴 SEC-16 (§36.2) -- this function had TWO defects, fixed together 2026-08-31.
+    #
+    # (a) IT NAMED THE WRONG ACTOR. It used [WindowsIdentity]::GetCurrent().Name, which on a Linux
+    #     container is the PROCESS user -- so every entry read "manager:<container account>" no
+    #     matter who signed in, and the trail could record WHAT happened but never WHO did it. An
+    #     audit trail that cannot attribute is a log. The signed-in identity was already resolved
+    #     on the same request by every RBAC gate; it simply was not passed in.
+    # (b) IT DID NOT SURVIVE A DEPLOY. It appended to output/audit/*.jsonl and the hosted app
+    #     mounts NO persistent volume (measured: volumes=null, mounts=null), so every revision
+    #     roll destroyed the whole trail.
+    #
+    # 📌 Audit is a STANDARD feature of every topology (operator, 2026-08-31: "audit exist also for
+    # single tenant ... it is a standard feature for all scenarios"), so the table lives in the
+    # per-deployment `pim` schema next to pim.Rows/pim.Settings -- NOT in the MSP-only `platform`
+    # schema. Single-tenant, community and MSP deployments all get it from the same DDL.
+    $who = ''
+    $whoSource = ''
+    try {
+        $r = Get-PimManagerRole
+        if ($r -and "$($r.identity)".Trim()) { $who = "$($r.identity)".Trim(); $whoSource = "$($r.source)" }
+    } catch { }
+    if (-not $who) {
+        # Fall back to the process identity, but SAY SO. Recording it unlabelled is how (a) hid.
+        $who = try { [System.Security.Principal.WindowsIdentity]::GetCurrent().Name } catch { $env:USERNAME }
+        $whoSource = 'process-identity (NO signed-in principal resolved)'
+    }
+
+    $evt = [ordered]@{
+        ts = [datetime]::UtcNow.ToString('o'); runId = "$($script:PimManagerSessionId)"; correlationId = ''
+        actor = $who; actorSource = $whoSource; action = $Action; target = $Target
+        before = $null; after = $After; result = $Result; whatIf = $false
+    }
+
+    # SQL first, wherever a store is configured -- that is every supported topology.
+    $wroteSql = $false
+    $sqlErr = ''
+    try {
+        $cs = $null
+        if (Get-Command Get-PimSqlConnectionString -ErrorAction SilentlyContinue) {
+            try { $cs = Get-PimSqlConnectionString } catch { $cs = $null }
+        }
+        if ($cs -and (Get-Command Write-PimSqlAuditEvent -ErrorAction SilentlyContinue)) {
+            Write-PimSqlAuditEvent -ConnectionString $cs -Actor $who -ActorSource $whoSource `
+                -Action $Action -Target $Target -After $After -Result $Result `
+                -RunId "$($script:PimManagerSessionId)"
+            $wroteSql = $true
+        }
+    } catch { $sqlErr = "$($_.Exception.Message)" }
+
+    if ($wroteSql) { return }
+
+    # 🔴 HOSTED + no SQL audit == the trail is being lost. That must be LOUD. It used to be a
+    # Write-Warning either way, so a privileged action whose audit failed still succeeded silently
+    # -- and on the hosted app the file it fell back to does not survive the next deploy anyway.
+    if (Test-PimManagerHostedDeployment) {
+        # 🔴 §36.3 PHASE 1b -- AND WE STOP HERE. The file is NOT written when hosted.
+        # It looked like a safety net and was the opposite of one, three times over:
+        #   1. It is not persistence. The container mounts no volume, so the "fallback" lives
+        #      only until the next revision roll -- which is the defect SEC-16 is about.
+        #   2. It made the failure look handled. The append returned success, so the ONLY
+        #      signal that the trail had stopped being recorded was this Write-Error.
+        #   3. It wrote a SECOND trail that nothing can read. Get-PimManagerAuditEvents
+        #      deliberately refuses to fall through to the file so partial history is never
+        #      presented as complete -- so every line written here was, by construction,
+        #      write-only. A store with no reader is not a fallback, it is a leak.
+        # Not writing it is strictly more honest. The action is still ALLOWED to succeed --
+        # that decision is unchanged (§36.3 phase 0 item 2) -- but nothing now claims the
+        # audit was recorded somewhere it can be found.
+        Write-Error ("AUDIT NOT RECORDED for '$Action' on '$Target' by '$who'. " +
+                     "This deployment is HOSTED, so the filesystem fallback does not survive a revision roll " +
+                     "and is no longer written at all (§36.3 phase 1b). " +
+                     "SQL audit error: " + $(if ($sqlErr) { $sqlErr } else { 'no SQL store resolved' }))
+        return
+    }
+
+    # NOTE: the READ side is Get-PimManagerAuditEvents below -- writer and reader must agree on
+    # which store answered, or the Audit tab shows a trail that is not the one being written.
+
+    # File fallback -- LOCAL/DEV ONLY, and unreachable when hosted (the branch above returns).
+    # A local instance that later gains a SQL store carries this trail across with
+    # tools/pim-manager/Import-PimAuditFileTrail.ps1; nothing else reads it.
     try {
         $auditDir = Join-Path $script:outputRoot 'audit'
         if (-not (Test-Path -LiteralPath $auditDir)) { New-Item -ItemType Directory -Path $auditDir -Force | Out-Null }
         $auditFile = Join-Path $auditDir ("pim-audit-{0}.jsonl" -f [datetime]::UtcNow.ToString('yyyyMM'))
-        $who = try { [System.Security.Principal.WindowsIdentity]::GetCurrent().Name } catch { $env:USERNAME }
-        $evt = [ordered]@{
-            ts = [datetime]::UtcNow.ToString('o'); runId = "$($script:PimManagerSessionId)"; correlationId = ''
-            actor = "manager:$who"; action = $Action; target = $Target
-            before = $null; after = $After; result = $Result; whatIf = $false
-        }
         [System.IO.File]::AppendAllText($auditFile, (($evt | ConvertTo-Json -Depth 5 -Compress) + "`r`n"), (New-Object System.Text.UTF8Encoding($false)))
-    } catch { Write-Warning "audit write failed: $($_.Exception.Message)" }
+    } catch {
+        Write-Error "audit write failed on BOTH SQL and file for '$Action' on '$Target': $($_.Exception.Message)"
+    }
 }
 
 # ---------------------------------------------------------------------------
@@ -591,6 +736,277 @@ function Write-PimManagerAuditEvent {
 # warning/info count drops. CSV-mode only (the override config lives next to the
 # other config/*.custom.json); SQL mode has no customer config dir.
 # ---------------------------------------------------------------------------
+function Get-PimManagerAuditEvents {
+    <#
+      SEC-16 (§36.2) -- the READ side of the audit trail, mirroring the writer's choice of store.
+      SQL first (every topology has one), file only as the local/dev fallback.
+
+      🔑 Returns events in the SAME shape the jsonl reader produces, and stamps `category` and
+      `change` the same way, so Select-PimAuditEvents / ConvertTo-PimAuditCsv and the Audit tab
+      work unchanged. Moving the store is not a licence to rewrite the query layer.
+    #>
+    param([int]$Months = 0)
+    $cs = $null
+    if (Get-Command Get-PimSqlConnectionString -ErrorAction SilentlyContinue) {
+        try { $cs = Get-PimSqlConnectionString } catch { $cs = $null }
+    }
+    if ($cs -and (Get-Command Get-PimSqlAuditEvents -ErrorAction SilentlyContinue)) {
+        try {
+            $args = @{ ConnectionString = $cs }
+            # Months is a WINDOW, not a page size: N months back from now, 0 = full history.
+            if ($Months -gt 0) { $args['FromUtc'] = [datetime]::UtcNow.AddMonths(-$Months) }
+            $evts = @(Get-PimSqlAuditEvents @args)
+            foreach ($e in $evts) {
+                try { $e | Add-Member -NotePropertyName category -NotePropertyValue (Resolve-PimAuditCategory -Action "$($e.action)") -Force } catch {}
+                try { $e | Add-Member -NotePropertyName change   -NotePropertyValue (Get-PimAuditChangeSummary -Before $e.before -After $e.after) -Force } catch {}
+            }
+            return @($evts)
+        } catch {
+            # Do NOT silently fall through to the file: on a hosted deployment that file is a
+            # different (and shorter-lived) trail, so quietly showing it would present partial
+            # history as complete -- the failure mode this whole chapter is about.
+            Write-Warning "audit read from SQL failed: $($_.Exception.Message)"
+            throw
+        }
+    }
+    # §36.3 phase 1b -- hosted has NO readable file trail, so say so rather than rendering one.
+    # The writer no longer creates it, and any file an earlier revision left behind is a fragment
+    # of a trail that ended at that roll. Showing it as "the audit trail" is the same lie the
+    # SQL-failure branch above already refuses to tell, arrived at by a different route.
+    if (Test-PimManagerHostedDeployment) {
+        throw ("No SQL audit store is configured and this deployment is HOSTED, so there is no " +
+               "readable audit trail (§36.3 phase 1b -- the filesystem trail is local/dev only). " +
+               "Configure the store; do not read the container filesystem.")
+    }
+    $auditDir = Join-Path $script:outputRoot 'audit'
+    return @(Read-PimAuditEvents -AuditDir $auditDir -Months $Months)
+}
+
+function Get-PimEmergencyOverrideStoreName { 'EmergencyOverride' }
+
+function Get-PimManagerEmergencyOverride {
+    <#
+      §36.3 phase 3 -- read the break-glass override from the store the ENGINE reads.
+      🪤 Deliberately does NOT call the engine's Get-PimEmergencyOverride: PIM-Functions.psm1 is
+      imported LAZILY here (by design, "so the Manager works without the engine"), so depending on
+      it at request time silently returns nothing when it happens not to be loaded -- which would
+      make the break-glass tile read "inactive" while an override was live. Caught by
+      Test-PimHomeOverview before it shipped.
+      The two implementations share the SETTING NAME, and a test asserts they agree on it.
+    #>
+    try {
+        if ((Get-Command Get-PimSqlConnectionString -ErrorAction SilentlyContinue) -and
+            (Get-Command Get-PimSqlSetting          -ErrorAction SilentlyContinue)) {
+            $cs = $null
+            try { $cs = Get-PimSqlConnectionString } catch { $cs = $null }
+            if ($cs) {
+                $v = Get-PimSqlSetting -ConnectionString $cs -Name (Get-PimEmergencyOverrideStoreName)
+                if ($v) {
+                    if ($v -is [string]) { try { $v = $v | ConvertFrom-Json } catch { $v = $null } }
+                    if ($v) { return $v }
+                }
+            }
+        }
+    } catch { Write-Warning "  [emergency] SQL override read failed: $($_.Exception.Message)" }
+    $f = Join-Path $script:configRoot 'emergency-override.custom.json'
+    if (-not (Test-Path -LiteralPath $f)) { return $null }
+    try { return (Get-Content -LiteralPath $f -Raw -Encoding UTF8 | ConvertFrom-Json) } catch { return $null }
+}
+
+function Set-PimManagerEmergencyOverride {
+    # Returns 'sql' or 'file'. THROWS if a configured SQL store rejects the write -- an
+    # activation the engine cannot see must fail loudly, not fall back to a file the engine
+    # will never read.
+    param([Parameter(Mandatory)][object]$Override)
+    try {
+        if ((Get-Command Get-PimSqlConnectionString -ErrorAction SilentlyContinue) -and
+            (Get-Command Set-PimSqlSetting          -ErrorAction SilentlyContinue)) {
+            $cs = $null
+            try { $cs = Get-PimSqlConnectionString } catch { $cs = $null }
+            if ($cs) {
+                Set-PimSqlSetting -ConnectionString $cs -Name (Get-PimEmergencyOverrideStoreName) -Value $Override
+                return 'sql'
+            }
+        }
+    } catch {
+        Write-Warning "  [emergency] SQL override write FAILED -- the engine will NOT see this override: $($_.Exception.Message)"
+        throw
+    }
+    $f = Join-Path $script:configRoot 'emergency-override.custom.json'
+    ($Override | ConvertTo-Json -Depth 6) | Set-Content -LiteralPath $f -Encoding UTF8
+    return 'file'
+}
+
+function Get-PimManagerAuditMonthCount {
+    <#
+      SEC-16 -- how many months of history exist, asked of whichever store is answering.
+      The file reader counted monthly FILES; with SQL there are none, so counting files would
+      report "0 months" for a populated trail and the Audit tab's window selector would say the
+      history is empty. Same source-agreement rule as the reader above.
+    #>
+    $cs = $null
+    if (Get-Command Get-PimSqlConnectionString -ErrorAction SilentlyContinue) {
+        try { $cs = Get-PimSqlConnectionString } catch { $cs = $null }
+    }
+    if ($cs -and (Get-Command Get-PimSqlAuditMonthCount -ErrorAction SilentlyContinue)) {
+        # A query failure used to `return 0` silently, which reports "no history" for a populated
+        # trail -- precisely the failure this function's own note says counting files would cause.
+        # Keep returning 0 so the window selector still renders, but do not stay quiet about it.
+        try { return [int](Get-PimSqlAuditMonthCount -ConnectionString $cs) }
+        catch { Write-Warning "audit month count from SQL failed: $($_.Exception.Message)"; return 0 }
+    }
+    # §36.3 phase 1b -- hosted must not count FILES either. Same source rule as the reader: the
+    # writer no longer creates them, so any non-zero count here could only describe a dead
+    # fragment, and the selector would offer months the reader will refuse to load.
+    if (Test-PimManagerHostedDeployment) { return 0 }
+    $auditDir = Join-Path $script:outputRoot 'audit'
+    return @(Get-PimAuditMonthList -AuditDir $auditDir).Count
+}
+
+# ---------------------------------------------------------------------------
+# 36.3 phase 3 -- the last two Manager-owned stores that were files.
+#
+# Both follow the break-glass shape above: SQL first, file only as the local/dev
+# fallback, and a write against a CONFIGURED SQL store that fails THROWS rather
+# than quietly landing in a file. The hosted app mounts no persistent volume, so
+# "the write succeeded" against the container filesystem is not persistence --
+# the next revision roll takes it.
+#
+# LOCK: these two differ from break-glass in WHICH DIRECTION they fail, and that
+# is why they ranked lower -- not because they are cosmetic. Break-glass failed
+# OPEN: a lost override left approval disabled. These fail SAFE: a lost warning
+# override or exemption means a suppressed finding comes BACK. Losing them is
+# noisy rather than dangerous -- but it is still silent data loss, and an
+# operator who acknowledged a finding is entitled to have that stick.
+# ---------------------------------------------------------------------------
+function Get-PimWarningOverrideStoreName      { 'WarningOverrides' }
+function Get-PimConformanceExemptionStoreName { 'ConformanceExemptions' }
+
+function Get-PimManagerSettingObject {
+    # Shared read for both stores: pull one pim.Settings value and normalize it to
+    # an object. A value can come back as a JSON string or already parsed depending
+    # on which writer stored it, so handle both -- same as the break-glass reader.
+    param([Parameter(Mandatory)][string]$Name)
+    if (-not ((Get-Command Get-PimSqlConnectionString -ErrorAction SilentlyContinue) -and
+              (Get-Command Get-PimSqlSetting          -ErrorAction SilentlyContinue))) { return $null }
+    $cs = $null
+    try { $cs = Get-PimSqlConnectionString } catch { $cs = $null }
+    if (-not $cs) { return $null }
+    $v = Get-PimSqlSetting -ConnectionString $cs -Name $Name
+    if (-not $v) { return $null }
+    if ($v -is [string]) { try { $v = $v | ConvertFrom-Json } catch { return $null } }
+    return $v
+}
+
+function Set-PimManagerSettingObject {
+    # Shared write. Returns $true when SQL took it and $false when no SQL store is
+    # configured (the caller then uses its file path). THROWS when a SQL store
+    # exists and rejects the write -- silently demoting to a file is how an
+    # operator ends up believing something persisted that did not.
+    param([Parameter(Mandatory)][string]$Name, [Parameter(Mandatory)][object]$Value)
+    if (-not ((Get-Command Get-PimSqlConnectionString -ErrorAction SilentlyContinue) -and
+              (Get-Command Set-PimSqlSetting          -ErrorAction SilentlyContinue))) { return $false }
+    $cs = $null
+    try { $cs = Get-PimSqlConnectionString } catch { $cs = $null }
+    if (-not $cs) { return $false }
+    Set-PimSqlSetting -ConnectionString $cs -Name $Name -Value $Value
+    return $true
+}
+
+function Get-PimManagerWarningOverrides {
+    <#
+      Read the merged override store. Returns the RAW container object
+      (@{ overrides = @(...) }) so it can be handed straight to the engine's
+      Read-PimWarningOverrideConfig -Config, which already accepts a pre-parsed
+      object. That SQL seam was designed into the library and never wired up --
+      its own comment says "SQL mode has no config dir of customer data --
+      callers may pass an explicit -Path (e.g. read from pim.Settings)".
+    #>
+    try {
+        $v = Get-PimManagerSettingObject -Name (Get-PimWarningOverrideStoreName)
+        if ($v) { return $v }
+    } catch { Write-Warning "  [overrides] SQL read failed: $($_.Exception.Message)" }
+    $path = Get-PimWarningOverrideStorePath
+    if (-not $path -or -not (Test-Path -LiteralPath $path)) { return $null }
+    try {
+        $text = [System.IO.File]::ReadAllText($path, [System.Text.UTF8Encoding]::new($false))
+        if ($text.Length -gt 0 -and [int][char]$text[0] -eq 0xFEFF) { $text = $text.Substring(1) }
+        return ($text | ConvertFrom-Json)
+    } catch { throw "existing override store is not valid JSON: $($_.Exception.Message)" }
+}
+
+function Set-PimManagerWarningOverrides {
+    # Returns 'sql' or 'file'.
+    param([Parameter(Mandatory)][object]$Store)
+    try {
+        if (Set-PimManagerSettingObject -Name (Get-PimWarningOverrideStoreName) -Value $Store) { return 'sql' }
+    } catch {
+        Write-Warning "  [overrides] SQL write FAILED -- the acknowledgement was NOT saved: $($_.Exception.Message)"
+        throw
+    }
+    $path = Get-PimWarningOverrideStorePath
+    if (-not $path) { throw 'No SQL store and no config folder for this instance -- nowhere to persist the override.' }
+    $dir = Split-Path -Parent $path
+    if ($dir -and -not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+    ($Store | ConvertTo-Json -Depth 8) | Set-Content -LiteralPath $path -Encoding UTF8
+    return 'file'
+}
+
+function Get-PimManagerConformanceExemptions {
+    <#
+      SEC-17 -- the conformance waiver register. SQL first, then the PER-INSTANCE
+      exemptions.json.
+
+      TRAP: there is deliberately NO sample fallback here, and removing it IS the
+      fix. This reader used to fall through to config/exemptions.sample.json when
+      the per-instance file was absent -- and that sample is COMMITTED and NOT
+      EMPTY. It carries a real-shaped waiver (defender-xdr-roles /
+      role:Security Administrator) whose expiresUtc had not yet passed, so it was
+      a live waiver that shipped in the box. The POST handler then seeded its list
+      from this same reader before writing the real file, which PROMOTED the
+      sample row into live state the first time anyone added an exemption.
+
+      KEY: no exemptions is the SAFE answer -- every desired binding stays a Gap
+      and re-surfaces on the next deploy. A waiver must be something a human
+      explicitly granted, never a default. exemptions.sample.json stays on disk as
+      documentation of the shape; nothing reads it at runtime. Same resolution
+      SEC-15 reached for portal-admins.sample.json.
+    #>
+    try {
+        $v = Get-PimManagerSettingObject -Name (Get-PimConformanceExemptionStoreName)
+        if ($v) {
+            $inner = $null
+            if ($v -is [System.Collections.IDictionary]) {
+                if ($v.Contains('exemptions')) { $inner = $v['exemptions'] }
+            } elseif ($v.PSObject -and $v.PSObject.Properties['exemptions']) {
+                $inner = $v.exemptions
+            }
+            if ($null -ne $inner) { return @($inner) }
+        }
+    } catch { Write-Warning "  [exemptions] SQL read failed: $($_.Exception.Message)" }
+    if (-not $script:configRoot) { return @() }
+    $f = Join-Path $script:configRoot 'exemptions.json'
+    if (-not (Test-Path -LiteralPath $f)) { return @() }
+    try { return @((Get-Content -LiteralPath $f -Raw -Encoding UTF8 | ConvertFrom-Json).exemptions) } catch { return @() }
+}
+
+function Set-PimManagerConformanceExemptions {
+    # Returns 'sql' or 'file'.
+    param([object[]]$Exemptions = @())
+    $store = @{ exemptions = @($Exemptions) }
+    try {
+        if (Set-PimManagerSettingObject -Name (Get-PimConformanceExemptionStoreName) -Value $store) { return 'sql' }
+    } catch {
+        Write-Warning "  [exemptions] SQL write FAILED -- the exemption was NOT saved: $($_.Exception.Message)"
+        throw
+    }
+    if (-not $script:configRoot) { throw 'No SQL store and no config folder for this instance -- nowhere to persist the exemption.' }
+    $f = Join-Path $script:configRoot 'exemptions.json'
+    $dir = Split-Path -Parent $f
+    if ($dir -and -not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+    ($store | ConvertTo-Json -Depth 8) | Set-Content -LiteralPath $f -Encoding UTF8
+    return 'file'
+}
 function Get-PimWarningOverrideStorePath {
     if (-not $script:configRoot) { return $null }
     if (Get-Command Resolve-PimWarningOverridesPath -ErrorAction SilentlyContinue) {
@@ -615,8 +1031,12 @@ function Add-PimWarningOverrideEntry {
         [string]$Target,
         [string]$CreatedBy
     )
-    $path = Get-PimWarningOverrideStorePath
-    if (-not $path) { throw 'No config folder for this instance (overrides are a CSV-mode feature).' }
+    # 36.3 phase 3: this used to demand a config folder and refuse outright in SQL
+    # mode ("overrides are a CSV-mode feature"). The hosted Manager DOES have a
+    # configRoot -- the container's own copy -- so the refusal did not actually
+    # fire there; the acknowledgement was written to an ephemeral filesystem
+    # instead, and the next revision roll silently un-acknowledged every finding
+    # an operator had reviewed. SQL first now; the folder is only the local path.
     if ("$Code" -ieq '' ) { throw 'code is required.' }
     # Build the entry in the canonical contract shape. A subject/target scope is
     # added only when present so a code-only acknowledgement stays code-wide.
@@ -644,22 +1064,20 @@ function Add-PimWarningOverrideEntry {
         if (-not $NoExpiry -and -not $entry.expiresOn) { throw 'override rejected: missing mandatory expiresOn (and noExpiry is not set)' }
     }
 
-    # Read the existing store (tolerant of missing file / BOM), append, write.
+    # Read the existing store from wherever it lives, append, write it back there.
     $existing = New-Object System.Collections.ArrayList
-    if (Test-Path -LiteralPath $path) {
-        try {
-            $text = [System.IO.File]::ReadAllText($path, [System.Text.UTF8Encoding]::new($false))
-            if ($text.Length -gt 0 -and [int][char]$text[0] -eq 0xFEFF) { $text = $text.Substring(1) }
-            $cur = $text | ConvertFrom-Json
-            $ovr = if ($cur -and $cur.PSObject.Properties['overrides']) { $cur.overrides } else { $null }
-            if ($ovr) { foreach ($o in @($ovr)) { [void]$existing.Add($o) } }
-        } catch { throw "existing override store is not valid JSON: $($_.Exception.Message)" }
+    $cur = Get-PimManagerWarningOverrides
+    if ($cur) {
+        $ovr = $null
+        if ($cur -is [System.Collections.IDictionary]) {
+            if ($cur.Contains('overrides')) { $ovr = $cur['overrides'] }
+        } elseif ($cur.PSObject -and $cur.PSObject.Properties['overrides']) {
+            $ovr = $cur.overrides
+        }
+        if ($ovr) { foreach ($o in @($ovr)) { [void]$existing.Add($o) } }
     }
     [void]$existing.Add($entry)
-    $dir = Split-Path -Parent $path
-    if ($dir -and -not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
-    @{ overrides = $existing.ToArray() } | ConvertTo-Json -Depth 8 |
-        Set-Content -LiteralPath $path -Encoding UTF8
+    [void](Set-PimManagerWarningOverrides -Store @{ overrides = $existing.ToArray() })
     return $existing.Count
 }
 
@@ -1600,27 +2018,21 @@ function Write-PimMutationLog {
     # AppendAllText creates the file if missing, no BOM, UTF-8.
     [System.IO.File]::AppendAllText($mutationLog, ($line + "`r`n"), $utf8NoBom)
 
-    # Phase 6: same event also lands in the unified audit jsonl (one schema
-    # for engine + Manager; actor records the Windows identity driving the
-    # localhost session). Best-effort -- never blocks a save.
+    # 🔴 SEC-16 (second writer, found 2026-08-31). This block used to be a SECOND, INLINE audit
+    # writer: its own jsonl append, its own actor. Two consequences, both bad:
+    #   * it recorded [WindowsIdentity]::GetCurrent().Name -- the CONTAINER's process user on a
+    #     hosted deployment. Its own comment said "the Windows identity driving the localhost
+    #     session", which was true for a local single-operator install and false here;
+    #   * it was file-only, so `config.csv.save` -- the record that SOMEBODY COMMITTED A CHANGE TO
+    #     DESIRED STATE, arguably the most consequential event this product emits -- never reached
+    #     SQL and died with the container on the next revision roll.
+    # 🔑 The first SEC-16 fix repaired the OTHER writer and left this one. Two implementations of
+    # "write an audit event" is the defect; there is now ONE, and this calls it.
     try {
-        $auditDir = Join-Path $script:outputRoot 'audit'
-        if (-not (Test-Path -LiteralPath $auditDir)) { New-Item -ItemType Directory -Path $auditDir -Force | Out-Null }
-        $auditFile = Join-Path $auditDir ("pim-audit-{0}.jsonl" -f [datetime]::UtcNow.ToString('yyyyMM'))
-        $who = try { [System.Security.Principal.WindowsIdentity]::GetCurrent().Name } catch { $env:USERNAME }
-        $evt = [ordered]@{
-            ts            = [datetime]::UtcNow.ToString('o')
-            runId         = "$($script:PimManagerSessionId)"
-            correlationId = ''
-            actor         = "manager:$who"
-            action        = 'config.csv.save'
-            target        = $BaseName
-            before        = $null
-            after         = @{ adds = $Adds; removes = $Removes; modifies = $Modifies; rowCount = $NewRowCount; instance = "$($script:PimInstanceName)" }
-            result        = 'ok'
-            whatIf        = $false
+        Write-PimManagerAuditEvent -Action 'config.csv.save' -Target $BaseName -After @{
+            adds = $Adds; removes = $Removes; modifies = $Modifies
+            rowCount = $NewRowCount; instance = "$($script:PimInstanceName)"
         }
-        [System.IO.File]::AppendAllText($auditFile, (($evt | ConvertTo-Json -Depth 5 -Compress) + "`r`n"), $utf8NoBom)
     } catch {
         Write-Warning "audit write failed (save NOT blocked): $($_.Exception.Message)"
     }
@@ -1693,7 +2105,10 @@ function Invoke-PimManagerSafeCommit {
         [Parameter(Mandatory)][hashtable]$Current,   # @{ rows; header } pre-commit state
         [bool]$SqlMode
     )
-    $who = try { [System.Security.Principal.WindowsIdentity]::GetCurrent().Name } catch { $env:USERNAME }
+    # SEC-16(b) -- the snapshot's `By` is evidence ("who committed this change"), so it must be the
+    # signed-in principal, not the container's process user. Same defect as the audit writer.
+    $who = try { $r = Get-PimManagerRole; if ("$($r.identity)".Trim()) { "$($r.identity)" } else { throw } }
+           catch { try { [System.Security.Principal.WindowsIdentity]::GetCurrent().Name } catch { $env:USERNAME } }
     $snapshot = New-PimCommitSnapshot -Entity $Base -Base $Base -Rows @($Current.rows) -Header @($Current.header) -By "$who" -Reason 'review-and-save commit'
 
     if ($SqlMode) {
@@ -1762,7 +2177,9 @@ function Invoke-PimManagerBackupRestore {
     # [Fix 5] PRE-RESTORE snapshot so the restore is itself undoable.
     $preId = ''
     try {
-        $who = try { [System.Security.Principal.WindowsIdentity]::GetCurrent().Name } catch { $env:USERNAME }
+        # SEC-16(b) -- "who restored" is evidence too.
+        $who = try { $r = Get-PimManagerRole; if ("$($r.identity)".Trim()) { "$($r.identity)" } else { throw } }
+               catch { try { [System.Security.Principal.WindowsIdentity]::GetCurrent().Name } catch { $env:USERNAME } }
         $curHeader = @()
         if (-not $sqlMode) { try { $curHeader = @((Read-PimRows -BaseName $plan.base).header) } catch { $curHeader = @() } }
         else { $spec = Get-PimCsvSpec -BaseName $plan.entity; if ($spec) { $curHeader = @($spec.defaultHeader) } }
@@ -2047,8 +2464,39 @@ function Get-PimManagerAlertFeedPath {
 }
 function Get-PimManagerAlertFeed {
     # Read the recorded alert feed for the active instance (newest-first). Never throws.
+    # 36 phase 4: SQL first, file only for local/dev. Reader and writer must agree on
+    # the store or the Home tile shows a count from one and the tab a list from the other.
+    $cs = Get-PimManagerAlertFeedSqlCs
+    if ($cs -and (Get-Command Read-PimAlertFeedSql -ErrorAction SilentlyContinue)) {
+        try { return @(Read-PimAlertFeedSql -ConnectionString $cs) }
+        catch { Write-Warning "  [alerts] SQL feed read failed: $($_.Exception.Message)"; return @() }
+    }
     if (-not (Get-Command Read-PimAlertFeedFile -ErrorAction SilentlyContinue)) { return @() }
     try { return @(Read-PimAlertFeedFile -FeedFile (Get-PimManagerAlertFeedPath)) } catch { return @() }
+}
+
+function Get-PimManagerAlertFeedSqlCs {
+    # The connection string, or $null when this instance has no SQL store (local/dev).
+    if (-not ((Get-Command Get-PimSqlConnectionString -ErrorAction SilentlyContinue) -and
+              (Get-Command Get-PimSqlSetting          -ErrorAction SilentlyContinue))) { return $null }
+    try { return (Get-PimSqlConnectionString) } catch { return $null }
+}
+
+function Write-PimManagerAlertFeedRecord {
+    # Persist one recorded-send record to whichever store is active. Returns 'sql' or 'file'.
+    # Unlike the authorization stores, a failure here must NOT throw: this is called from the
+    # alert path AFTER the mail has already been sent, so throwing would turn "we notified you
+    # but could not file the proof" into an error on the operation that triggered the alert.
+    # It warns loudly instead -- losing the proof is bad, losing the alert is worse.
+    param([Parameter(Mandatory)][object]$Record)
+    $cs = Get-PimManagerAlertFeedSqlCs
+    if ($cs -and (Get-Command Write-PimAlertFeedSql -ErrorAction SilentlyContinue)) {
+        try { [void](Write-PimAlertFeedSql -ConnectionString $cs -Record $Record); return 'sql' }
+        catch { Write-Warning "  [alerts] SQL feed write FAILED -- the send-proof was NOT recorded: $($_.Exception.Message)" }
+        return 'none'
+    }
+    try { Write-PimAlertFeedFile -FeedFile (Get-PimManagerAlertFeedPath) -Record $Record | Out-Null; return 'file' }
+    catch { Write-Warning "  [alerts] feed write failed: $($_.Exception.Message)"; return 'none' }
 }
 
 
@@ -2241,7 +2689,7 @@ function Send-PimManagerAlert {
         try {
             $tenantCtx2 = try { Get-PimManagerTenantContext } catch { @{ tenantName = '' } }
             $rec = New-PimAlertRecord -Event $Event -Title $Title -Detail $Detail -LinkTab $LinkTab -SendResult $result -TenantName "$($tenantCtx2.tenantName)" -Instance "$($script:PimInstanceName)" -WhatIf:$WhatIf
-            Write-PimAlertFeedFile -FeedFile (Get-PimManagerAlertFeedPath) -Record $rec | Out-Null
+            [void](Write-PimManagerAlertFeedRecord -Record $rec)
             $result.recorded = $true
         } catch {}
     }
@@ -3027,7 +3475,7 @@ function Build-PimGraphData {
 #   - delegation tiers / gaps / orphans  <- Build-PimGraphData (the live model)
 #   - engine & jobs health               <- Get-PimJobsStatus (scheduler)
 #   - validation errors/warnings         <- Invoke-PimPreflightValidation
-#   - break-glass                        <- emergency-override.custom.json
+#   - break-glass                        <- pim.Settings['EmergencyOverride'] (file only local/dev; §36.3 phase 3)
 #   - access reviews                      <- Get-PimAccessReviewOverview/seed
 #   - expiring active assignments         <- Get-PimActiveAssignmentsCached
 # Heavy/live sources (active-assignments, access-reviews) only run when the
@@ -3128,7 +3576,13 @@ function Get-PimHomeOverview {
             $jobs = @($vm.jobs)
             $histCount = 0
             try { if (Get-Command Get-PimJobRunHistory -ErrorAction SilentlyContinue) { $histCount = @(Get-PimJobRunHistory).Count } } catch {}
-            $failed  = @($jobs | Where-Object { $_.lastOk -eq $false })
+            # BUG-113: the SAME split the Jobs view makes, made here too. A last run of
+            # 'no-handler-registered' says this worker has no implementation for the job type --
+            # a deployment/scope question. Counting it in the Overview's FAILED JOBS tile turns
+            # one deployment fact into a red headline the operator cannot act on, and the two
+            # surfaces would then disagree about the same job.
+            $failed     = @($jobs | Where-Object { $_.lastOk -eq $false -and "$($_.lastResult)" -notmatch '^no-handler' })
+            $unrunnable = @($jobs | Where-Object { $_.lastOk -eq $false -and "$($_.lastResult)" -match '^no-handler' })
             $running = @($jobs | Where-Object { $_.inProgress })
             # The most recent completed run across all jobs (for "last run" headline).
             $lastRunJob = @($jobs | Where-Object { "$($_.lastRunUtc)".Trim() } | Sort-Object { "$($_.lastRunUtc)" } -Descending) | Select-Object -First 1
@@ -3163,6 +3617,15 @@ function Get-PimHomeOverview {
                 enabled       = @($jobs | Where-Object { $_.enabled }).Count
                 runningCount  = [int]$vm.runningCount
                 failedCount   = $failed.Count
+                # BUG-92: jobs this worker is deliberately NOT scoped to run are reported
+                # separately from failures. They used to be counted as failed -- six job types
+                # permanently red on a healthy deployment, servicenow-intake among them for a
+                # customer with no ServiceNow.
+                # BUG-113: "this worker has no handler for it" -- reported, but never as a failure.
+                unrunnableCount = $unrunnable.Count
+                unrunnableJobs  = @($unrunnable | ForEach-Object { [ordered]@{ name = "$($_.name)"; type = "$($_.type)"; detail = "$($_.lastResult)" } } | Select-Object -First 12)
+                skippedCount  = @($jobs | Where-Object { "$($_.lastStatus)" -eq 'skipped' }).Count
+                skippedJobs   = @($jobs | Where-Object { "$($_.lastStatus)" -eq 'skipped' } | ForEach-Object { [ordered]@{ name = "$($_.name)"; type = "$($_.type)"; detail = "$($_.lastResult)" } } | Select-Object -First 12)
                 neverRunCount = @($jobs | Where-Object { $_.neverRun }).Count
                 historyCount  = [int]$histCount
                 failedJobs    = @($failed  | ForEach-Object { [ordered]@{ name = "$($_.name)"; type = "$($_.type)"; scope = "$($_.scope)"; lastRunUtc = "$($_.lastRunUtc)"; detail = "$($_.lastResult)"; runId = "$($_.lastRunId)" } } | Select-Object -First 12)
@@ -3201,9 +3664,10 @@ function Get-PimHomeOverview {
 
     # ---- 4. Break-glass (emergency override) ---------------------------------
     try {
-        $ovFile = Join-Path $script:configRoot 'emergency-override.custom.json'
-        if (Test-Path -LiteralPath $ovFile) {
-            $ov = Get-Content -LiteralPath $ovFile -Raw -Encoding UTF8 | ConvertFrom-Json
+        # §36.3 phase 3 -- read the SHARED store, so the tile shows the override the ENGINE will
+        # actually act on. Reading this container's own file would show a different answer.
+        $ov = Get-PimManagerEmergencyOverride
+        if ($ov) {
             $expired = $true
             try { $expired = ($now -ge ([datetime]$ov.expiresAtUtc).ToUniversalTime()) } catch {}
             $tiles.breakGlass = [ordered]@{
@@ -4308,9 +4772,58 @@ function Get-PimManagerLookupCaches {
     $script:PimManager_LookupCachesLoaded = $true
 }
 
+# BUG-98 -- RESOLVE PRINCIPALS BY ID, NOT BY NAMING CONVENTION.
+#
+# The two caches above are built by FILTERED queries: users via /users, groups via
+# startswith(displayName,'<PimGroupPattern prefix>'), and SERVICE PRINCIPALS NOT AT ALL. So the
+# revoke table showed a bare objectId for
+#   * every service principal            (never cached), and
+#   * every group outside the PIM- prefix (filtered out).
+# The operator saw both shapes in one list and asked "i see both, why". Resolved live
+# 2026-08-30: the unresolved ids were groups and servicePrincipals, exactly as above.
+#
+# 🔑 A display-name resolver must NEVER depend on a naming convention being obeyed. This one
+# asks Graph for the ids it actually has, in one batched call, and caches the answers.
+$script:PimManager_ResolvedById = @{}
+
+function Resolve-PimManagerPrincipalIdBatch {
+    # Fill $script:PimManager_ResolvedById for every id not already known. /directoryObjects
+    # /getByIds takes up to 1000 ids per call and returns users, groups AND servicePrincipals,
+    # so ~700 assignment rows collapse to a single request. Best-effort: a failure here leaves
+    # the ids unresolved (the caller still renders the GUID) and never breaks the table.
+    param([string[]]$Ids)
+    $need = @($Ids | Where-Object { $_ -and -not $script:PimManager_ResolvedById.ContainsKey("$_") } |
+                     Select-Object -Unique)
+    if (-not $need -or $need.Count -eq 0) { return }
+    if (-not (Get-Command Invoke-PimGraph -ErrorAction SilentlyContinue)) { return }
+    for ($i = 0; $i -lt $need.Count; $i += 1000) {
+        $chunk = @($need[$i..([Math]::Min($i + 999, $need.Count - 1))])
+        try {
+            $body = @{ ids = $chunk; types = @('user', 'group', 'servicePrincipal') } | ConvertTo-Json -Depth 4
+            $r = Invoke-PimGraph -Path '/directoryObjects/getByIds' -Method POST -Body $body
+            foreach ($o in @($r.value)) {
+                if (-not $o -or -not $o.id) { continue }
+                $kind = ("$($o.'@odata.type')" -replace '#microsoft\.graph\.', '')
+                $label = if ($o.userPrincipalName) { [string]$o.userPrincipalName } else { [string]$o.displayName }
+                if (-not $label) { $label = [string]$o.id }
+                $script:PimManager_ResolvedById["$($o.id)"] = [pscustomobject]@{ label = $label; kind = $kind }
+            }
+        } catch {
+            Write-Warning "  [revoke] principal batch resolve failed: $($_.Exception.Message). Some rows will show a raw object id."
+        }
+        # An id Graph did not return is DELETED (or not visible to us). Record that explicitly:
+        # a role still held by a principal that no longer exists is a FINDING, not a blank.
+        foreach ($id in $chunk) {
+            if (-not $script:PimManager_ResolvedById.ContainsKey("$id")) {
+                $script:PimManager_ResolvedById["$id"] = [pscustomobject]@{ label = '(deleted principal)'; kind = 'deleted' }
+            }
+        }
+    }
+}
+
 function Resolve-PimManagerPrincipalLabel {
-    # Try user UPN first, then group DisplayName, then bare id. Hashtable
-    # lookups -- called once per assignment row (944 rows on a real tenant).
+    # Try user UPN first, then group DisplayName, then the by-id resolver (BUG-98), then the
+    # bare id. Hashtable lookups -- called once per assignment row (944 rows on a real tenant).
     param([Parameter(Mandatory)][AllowEmptyString()][string]$PrincipalId)
     if ([string]::IsNullOrWhiteSpace($PrincipalId)) { return '' }
     if ($script:PimManager_UserById -and $script:PimManager_UserById.ContainsKey($PrincipalId)) {
@@ -4324,7 +4837,24 @@ function Resolve-PimManagerPrincipalLabel {
         if ($g.DisplayName) { return [string]$g.DisplayName }
         return $PrincipalId
     }
+    if ($script:PimManager_ResolvedById -and $script:PimManager_ResolvedById.ContainsKey($PrincipalId)) {
+        $r = $script:PimManager_ResolvedById[$PrincipalId]
+        if ($r -and $r.label) { return [string]$r.label }
+    }
     return $PrincipalId
+}
+
+function Get-PimManagerPrincipalKind {
+    # BUG-98: the GUI shows this as a small chip, so a group or an app is not mistaken for a
+    # person on a screen whose whole job is deciding whose access to revoke.
+    param([Parameter(Mandatory)][AllowEmptyString()][string]$PrincipalId)
+    if ([string]::IsNullOrWhiteSpace($PrincipalId)) { return '' }
+    if ($script:PimManager_UserById  -and $script:PimManager_UserById.ContainsKey($PrincipalId))  { return 'user' }
+    if ($script:PimManager_GroupById -and $script:PimManager_GroupById.ContainsKey($PrincipalId)) { return 'group' }
+    if ($script:PimManager_ResolvedById -and $script:PimManager_ResolvedById.ContainsKey($PrincipalId)) {
+        return [string]$script:PimManager_ResolvedById[$PrincipalId].kind
+    }
+    return ''
 }
 
 function Resolve-PimManagerEntraRoleName {
@@ -4700,6 +5230,29 @@ function Get-PimActiveAssignmentsCached {
             end              = $end
             justification    = $just
         })
+    }
+
+    # ---- BUG-98: second pass -- resolve every principal that the filtered caches missed ----
+    # Done ONCE here rather than per surface: all three row builders have run, so the distinct
+    # id set is complete and ~700 rows collapse into a single /directoryObjects/getByIds call.
+    # Every row also gains principalKind so the GUI can tell a person from a group or an app on
+    # a screen whose whole job is deciding whose access to revoke.
+    try {
+        $unresolved = @($rows | Where-Object { $_.principalId -and ("$($_.principal)" -eq "$($_.principalId)" -or -not $_.principal) } |
+                                ForEach-Object { [string]$_.principalId } | Select-Object -Unique)
+        if ($unresolved.Count -gt 0) {
+            Write-Host ("  [revoke] resolving {0} principal id(s) the name caches did not cover ..." -f $unresolved.Count) -ForegroundColor DarkGray
+            Resolve-PimManagerPrincipalIdBatch -Ids $unresolved
+        }
+        foreach ($row in $rows) {
+            if (-not $row.principalId) { continue }
+            if (-not $row.principal -or "$($row.principal)" -eq "$($row.principalId)") {
+                $row.principal = Resolve-PimManagerPrincipalLabel -PrincipalId ([string]$row.principalId)
+            }
+            $row['principalKind'] = Get-PimManagerPrincipalKind -PrincipalId ([string]$row.principalId)
+        }
+    } catch {
+        Write-Warning "  [revoke] principal second-pass resolve failed: $($_.Exception.Message)"
     }
 
     $sw.Stop()
@@ -5700,8 +6253,7 @@ function Handle-Request {
                 if ($mv -eq 'all' -or $mv -eq '0') { $months = 0 } else { $months = [Math]::Max(0, [int]$mv) }
             }
 
-            $auditDir = Join-Path $script:outputRoot 'audit'
-            $events = @(Read-PimAuditEvents -AuditDir $auditDir -Months $months)
+            $events = @(Get-PimManagerAuditEvents -Months $months)
             # Category counts BEFORE search/category filtering (chips show totals).
             $counts = @{}
             foreach ($e in $events) { $c = "$($e.category)"; if ($c) { $counts[$c] = ([int]$counts[$c]) + 1 } }
@@ -5710,7 +6262,7 @@ function Handle-Request {
             $matchCount = $sorted.Count
             $skip = ($page - 1) * $pageSize
             $pageItems = @($sorted | Select-Object -Skip $skip -First $pageSize)
-            $monthsAvail = @(Get-PimAuditMonthList -AuditDir $auditDir)
+            $monthsTotalCount = [int](Get-PimManagerAuditMonthCount)
             Write-JsonResponse -Response $resp -Status 200 -Body @{
                 events       = $pageItems
                 total        = $events.Count        # all events in the loaded window
@@ -5721,8 +6273,8 @@ function Handle-Request {
                 category     = $category
                 counts       = $counts
                 months       = $months              # 0 = full history
-                monthsLoaded = if ($months -eq 0) { $monthsAvail.Count } else { [Math]::Min($months, $monthsAvail.Count) }
-                monthsTotal  = $monthsAvail.Count   # how many monthly files exist on disk
+                monthsLoaded = if ($months -eq 0) { $monthsTotalCount } else { [Math]::Min($months, $monthsTotalCount) }
+                monthsTotal  = $monthsTotalCount   # months of history in whichever store answered (SEC-16)
             }
             return 200
         }
@@ -5755,8 +6307,7 @@ function Handle-Request {
                 $mv = "$($q['months'])".Trim().ToLowerInvariant()
                 if ($mv -ne 'all' -and $mv -ne '0') { $months = [Math]::Max(0, [int]$mv) }
             }
-            $auditDir = Join-Path $script:outputRoot 'audit'
-            $events = @(Read-PimAuditEvents -AuditDir $auditDir -Months $months)
+            $events = @(Get-PimManagerAuditEvents -Months $months)
             $filtered = @(Select-PimAuditEvents -Events $events -Category $category -Search $search -FromUtc $fromUtc -ToUtc $toUtc)
             $csv = ConvertTo-PimAuditCsv -Events $filtered
             $stamp = [datetime]::UtcNow.ToString('yyyyMMdd-HHmmss')
@@ -6376,15 +6927,36 @@ function Handle-Request {
             $eff = @(Get-PimManagerEffectiveSchedule)
             $job = @($eff | Where-Object { "$($_.name)" -eq $name }) | Select-Object -First 1
             if (-not $job) { Write-JsonResponse -Response $resp -Status 404 -Body @{ error = "unknown job '$name'" }; return 404 }
+
+            # 🔴 BUG-114 (second half, 2026-08-31). "Run now" dispatches through the handlers
+            # registered in THIS process, and the Manager registers NONE for the engine job
+            # types -- the real engine handler is wired by tools/pim-scheduler/Start-PimScheduler.ps1
+            # (the tick / VisualCron), not here. So clicking Run now on full-reconcile could only
+            # ever write a run that did nothing, and then report it.
+            # 🔑 REFUSE, rather than run-and-report-honestly. This is not the Manager being
+            # cautious -- it is §22: THE ENGINE IS THE ONLY WRITER. Registering the real engine
+            # handler in the web process to "make the button work" would turn the Manager into an
+            # engine writer and put tenant writes on an HTTP request thread. The button is the
+            # thing that is wrong, not the reporting.
+            $_engineTypes = @('engine-delta','engine-full','msp-pull')
+            if ("$($job.type)" -in $_engineTypes -and -not (Get-Command Invoke-PimEngine -ErrorAction SilentlyContinue)) {
+                Write-PimManagerAuditEvent -Action 'schedule.job.run.refused' -Target "job:$name" -After @{ type = "$($job.type)"; reason = 'no engine in the Manager process' }
+                Write-JsonResponse -Response $resp -Status 409 -Body @{
+                    error = "'$name' is an engine job ($($job.type)) and the Manager cannot run it -- the engine is wired in the scheduler process, not the web process."
+                    code  = 'not-runnable-here'
+                    hint  = 'Nothing was started and no run was recorded. It runs on its own cadence from the scheduler (ca-pim-tick / VisualCron); to force it, run Start-PimScheduler.ps1 -Once -Jobs ' + "$($job.type)" + ' there.'
+                }
+                return 409
+            }
+
             try {
                 $r = Invoke-PimJobForceStart -Name $name -Job $job
                 Write-PimManagerAuditEvent -Action 'schedule.job.run' -Target "job:$name" -After @{ runId = "$($r.runId)"; status = "$($r.status)" } -Result $(if ($r.ok) { 'ok' } else { 'error' })
-                # Alerting (REQUIREMENTS §27 H2): a job that finished NOT-ok is an
-                # engine-run failure -> fire the engine-failure alert through the
-                # existing notify path. No-op when alerting/sender unconfigured.
-                if (-not $r.ok -and "$($r.status)" -ne 'running') {
-                    try { Send-PimManagerAlert -Event 'engine-failure' -Title "Job '$name' FAILED" -Detail "$($r.detail)" -LinkTab 'jobs' | Out-Null } catch {}
-                }
+                # ALERT-01: engine-failure used to be fired HERE, and ONLY here -- which is
+                # exactly why it never fired for a scheduled run. It now fires from the two
+                # real run-completion points in PIM-Scheduler.ps1, including the force-start
+                # this handler just invoked. Re-adding a call here would double-alert: the
+                # alert is a property of the RUN, not of the endpoint that launched it.
                 Write-JsonResponse -Response $resp -Status 200 -Body ([ordered]@{
                     ok     = [bool]$r.ok
                     name   = $name
@@ -7256,15 +7828,253 @@ function Handle-Request {
             }
         }
 
+        if ($path -eq '/api/admin-accounts' -and $method -eq 'GET') {
+            $script:lastHeartbeat = Get-Date
+            # REQUIREMENTS §35.2 -- the account-operations grid's data source. ONE row per admin
+            # this caller may act on, plus what each verb can do FOR THAT ROW, so the GUI renders
+            # honestly instead of showing a button it will then refuse.
+            #
+            # 🔒 §35.3 IS ENFORCED HERE, NOT IN THE GRID. An admin the caller cannot manage is not
+            # returned at all -- so it cannot appear in the table, and cannot be reached by a
+            # "select all". A grid makes bulk selection trivial, which is exactly the shape of the
+            # 2026-06-15 incident that disabled 53 accounts; the narrowing has to happen where the
+            # data is produced, not where it is drawn.
+            $role    = Get-PimManagerRole
+            $isSuper = [bool](Test-PimManagerRoleAtLeast -Minimum 'SuperAdmin')
+            $isAdmin = [bool](Test-PimManagerRoleAtLeast -Minimum 'Admin')
+            $prof    = $null
+            if (Get-Command Read-PimPortalProfiles -ErrorAction SilentlyContinue) {
+                try { $prof = Get-PimPortalProfile -Profiles (Read-PimPortalProfiles -ConfigDir $script:configRoot) -Identity "$($role.identity)" } catch { $prof = $null }
+            }
+
+            $rows = @()
+            try { $rows = @((Read-PimRows 'Account-Definitions-Admins').rows) } catch { $rows = @() }
+
+            $out = New-Object System.Collections.Generic.List[object]
+            $hidden = 0
+            foreach ($r in $rows) {
+                $upn = "$($r.UserPrincipalName)".Trim()
+                if (-not $upn) { continue }
+                $mayManage = $true
+                if (Get-Command Test-PimPortalCanManageAdmin -ErrorAction SilentlyContinue) {
+                    $mayManage = [bool](Test-PimPortalCanManageAdmin -Profile $prof -AdminName $upn -IsSuperAdmin:$isSuper)
+                }
+                if (-not $mayManage) { $hidden++; continue }
+
+                $status = "$($r.AccountStatus)".Trim()
+                $tapWanted = ("$($r.CreateTAP)" -match '(?i)^\s*(true|yes|1)\s*$')
+                $mgr = "$($r.ManagerEmail)".Trim()
+                $offboard = "$($r.OffboardDate)".Trim()
+                $out.Add([pscustomobject]@{
+                    userPrincipalName = $upn
+                    displayName       = "$($r.DisplayName)".Trim()
+                    userName          = "$($r.UserName)".Trim()
+                    adminType         = "$($r.AdminType)".Trim()
+                    environment       = "$($r.Environment)".Trim()
+                    company           = "$($r.Company)".Trim()
+                    managerEmail      = $mgr
+                    accountStatus     = $(if ($status) { $status } else { 'Enabled' })
+                    createTAP         = $tapWanted
+                    offboardDate      = $offboard
+                    managementMode    = "$($r.ManagementMode)".Trim()
+                    ring              = "$($r.Ring)".Trim()
+                    # Per-row, per-verb. A verb the row itself cannot support is reported with a
+                    # REASON, so the GUI can disable it and say why instead of failing on click.
+                    canResetTap       = [bool]($isAdmin -and $tapWanted -and $mgr)
+                    resetTapWhy       = $(if (-not $isAdmin) { 'Admin role required' } elseif (-not $tapWanted) { 'this row does not request a TAP (CreateTAP is not true)' } elseif (-not $mgr) { 'no ManagerEmail on the row -- a TAP is only ever mailed to that address' } else { '' })
+                    canRevokeSessions = [bool]$isAdmin
+                    alreadyFlagged    = [bool]$offboard
+                })
+            }
+
+            Write-JsonResponse -Response $resp -Status 200 -Body @{
+                admins      = @($out)
+                count       = @($out).Count
+                # Honest about narrowing: the operator should know the list is scoped, not short.
+                hiddenByScope = $hidden
+                scoped      = [bool]($hidden -gt 0)
+                canRevokeSessions = [bool]$isAdmin
+                canFlagDelete     = [bool]$isAdmin
+                canCreate         = [bool]$isAdmin
+                role              = "$($role.role)"
+            }
+            return 200
+        }
+
+        if ($path -eq '/api/directory/people' -and $method -eq 'GET') {
+            $script:lastHeartbeat = Get-Date
+            # REQUIREMENTS §35.8. The directory-people lookup every people-picker needs.
+            # Gated at ADMIN: this ENUMERATES PEOPLE, which is a disclosure surface, and
+            # the fields that consume it (Settings -> Approvers / Departments) are already
+            # Admin-edited. Widening a gate later is safe; narrowing one breaks callers.
+            # ◻ When the §35.1 wizard's principal picker lands it may need Delegated
+            # access -- that is a deliberate decision to take THEN, with §35.3's scoping,
+            # not a default to drift into now.
+            if (-not (Test-PimManagerRoleAtLeast -Minimum 'Admin')) {
+                Write-JsonResponse -Response $resp -Status 403 -Body @{ error = 'Admin role required to search the directory' }
+                return 403
+            }
+
+            # $path is $req.Url.AbsolutePath and never carries the query string, so the
+            # parameters come off $req.Url.Query -- the same shape the other
+            # query-bearing handlers in this file use.
+            $qs = @{}
+            try {
+                foreach ($pair in ("$($req.Url.Query)".TrimStart('?') -split '&')) {
+                    if (-not $pair) { continue }
+                    $kv = $pair -split '=', 2
+                    $qs[[uri]::UnescapeDataString($kv[0])] = if ($kv.Count -gt 1) { [uri]::UnescapeDataString($kv[1]) } else { '' }
+                }
+            } catch {}
+
+            $q = Resolve-PimDirectoryQuery -Query $qs['q'] -Top $qs['top']
+            if (-not $q.ok) {
+                $st = Get-PimDirectorySearchHttpStatus -Code $q.code
+                Write-JsonResponse -Response $resp -Status $st -Body @{ error = $q.reason; code = $q.code }
+                return $st
+            }
+
+            if (-not (Get-Command Invoke-PimGraph -ErrorAction SilentlyContinue)) {
+                # 🔴 An unavailable directory must NOT render as "no people found". An
+                # empty list looks like a definitive answer, and the operator would
+                # conclude the person does not exist. Say the lookup could not run.
+                Write-JsonResponse -Response $resp -Status 503 -Body @{
+                    error = 'no Graph client in this runtime -- the directory could not be searched'
+                    code  = 'graph-unavailable'
+                    hint  = 'This is NOT "no matches" -- the lookup did not run.'
+                }
+                return 503
+            }
+
+            # PRIMARY: $search (matches tokens WITHIN a name, so a surname finds the
+            # person). FALLBACK: $filter/startswith (prefix-only) when $search is not
+            # served. The response reports WHICH mode answered, so a degraded result is
+            # visible rather than silently narrower than the operator expects.
+            $mode = 'search'; $users = $null; $searchErr = ''
+            try {
+                $users = @(Invoke-PimGraph -Path (Get-PimDirectoryPeopleSearchPath -Term $q.term -Top $q.top) -Headers (Get-PimDirectorySearchHeaders) -All)
+            } catch {
+                $searchErr = "$($_.Exception.Message)"
+                $users = $null
+            }
+            if ($null -eq $users) {
+                $mode = 'startswith'
+                try {
+                    $users = @(Invoke-PimGraph -Path (Get-PimDirectoryPeopleFilterPath -Term $q.term -Top $q.top) -All)
+                } catch {
+                    Write-JsonResponse -Response $resp -Status 502 -Body @{
+                        error = "directory search failed: $($_.Exception.Message)"
+                        code  = 'graph-error'
+                        hint  = 'This is NOT "no matches" -- the lookup failed. Both the search and the startswith query errored.'
+                        searchError = $searchErr
+                    }
+                    return 502
+                }
+            }
+
+            $shaped = @(@($users) | ForEach-Object { ConvertTo-PimDirectoryPerson -User $_ } | Where-Object { $null -ne $_ })
+            $page   = Select-PimDirectoryPeoplePage -People $shaped -Top $q.top
+
+            Write-JsonResponse -Response $resp -Status 200 -Body @{
+                query     = $q.term
+                matchMode = $mode
+                count     = @($page.people).Count
+                truncated = [bool]$page.truncated
+                people    = @($page.people)
+                note      = if ($mode -eq 'startswith') { 'Prefix match only -- the tenant did not serve a full search, so a surname may not match.' } else { '' }
+            }
+            return 200
+        }
+
+        if ($path -eq '/api/admin-sessions/revoke' -and $method -eq 'POST') {
+            $script:lastHeartbeat = Get-Date
+            # REQUIREMENTS §35.2. Revoking sign-in sessions is destructive but
+            # RECOVERABLE -- the account survives and the user re-authenticates -- so
+            # it deliberately does NOT carry offboarding's approval ceremony. Gated at
+            # ADMIN, same as the TAP re-issue, and SERVER-SIDE because that is the only
+            # side that counts.
+            #
+            # 🔑 WHY THIS ENDPOINT EXISTS AT ALL: until now this Graph call lived ONLY
+            # inside the offboarding sequence, so the only way to kill a compromised
+            # admin's live tokens was to offboard them. That left the proportionate
+            # response to a suspected token theft unavailable and the irreversible one
+            # as the only option.
+            if (-not (Test-PimManagerRoleAtLeast -Minimum 'Admin')) {
+                Write-JsonResponse -Response $resp -Status 403 -Body @{ error = 'Admin role required to revoke sign-in sessions' }
+                return 403
+            }
+            $body = Read-RequestJson -Request $req
+            $upn  = "$($body.userPrincipalName)".Trim()
+
+            # The PURE guard decides. It is the same verdict the §35.2 grid's bulk path
+            # will use, so the two cannot diverge about who may be revoked.
+            $adminRows = @()
+            try { $adminRows = @((Read-PimRows 'Account-Definitions-Admins').rows) } catch { $adminRows = @() }
+            # §35.3 -- LEVEL SCOPING. Admin alone is not enough: the caller must be permitted to
+            # act on THIS admin's account (manage-account + managedAdmins). Checked BEFORE the
+            # revoke guard so an out-of-scope caller learns nothing about whether the target is
+            # even a managed row -- a 404-vs-403 difference is an enumeration oracle.
+            if (Get-Command Test-PimPortalCanManageAdmin -ErrorAction SilentlyContinue) {
+                $isSuper = [bool](Test-PimManagerRoleAtLeast -Minimum 'SuperAdmin')
+                $prof    = $null
+                if (Get-Command Read-PimPortalProfiles -ErrorAction SilentlyContinue) {
+                    try { $prof = Get-PimPortalProfile -Profiles (Read-PimPortalProfiles -ConfigDir $script:configRoot) -Identity "$((Get-PimManagerRole).identity)" } catch { $prof = $null }
+                }
+                if ($upn -and -not (Test-PimPortalCanManageAdmin -Profile $prof -AdminName $upn -IsSuperAdmin:$isSuper)) {
+                    Write-PimManagerAuditEvent -Action 'sessions.revoke.refused' -Target $upn -After @{ code = 'out-of-scope'; reason = 'caller lacks manage-account for this admin' }
+                    Write-JsonResponse -Response $resp -Status 403 -Body @{
+                        error = "not permitted: the manage-account capability for '$upn' is required (or SuperAdmin)"
+                        code  = 'out-of-scope'
+                    }
+                    return 403
+                }
+            }
+
+            $decision = Get-PimSessionRevokeDecision -UserPrincipalName $upn -AdminRows $adminRows
+            if (-not $decision.allowed) {
+                $st = Get-PimSessionRevokeHttpStatus -Code $decision.code
+                Write-PimManagerAuditEvent -Action 'sessions.revoke.refused' -Target $upn -After @{ code = $decision.code; reason = $decision.reason }
+                Write-JsonResponse -Response $resp -Status $st -Body @{ error = $decision.reason; code = $decision.code }
+                return $st
+            }
+
+            if (-not (Get-Command Invoke-PimGraph -ErrorAction SilentlyContinue)) {
+                Write-JsonResponse -Response $resp -Status 503 -Body @{ error = 'no Graph client in this runtime -- cannot revoke sessions' }
+                return 503
+            }
+
+            try {
+                $uid = (Invoke-PimGraph -Path "/users/$upn`?`$select=id").id
+                if (-not "$uid".Trim()) { throw "account '$upn' not found in the directory" }
+
+                Invoke-PimGraph -Method POST -Path "/users/$uid/revokeSignInSessions" | Out-Null
+
+                Write-PimManagerAuditEvent -Action 'sessions.revoke' -Target $upn -After @{ userId = "$uid" }
+                try { Send-PimManagerAlert -Event 'sessions-revoked' -Title 'Sign-in sessions revoked' -Detail ("$upn -- all refresh tokens invalidated; the user must sign in again") -LinkTab 'accounts' | Out-Null } catch {}
+
+                Write-JsonResponse -Response $resp -Status 200 -Body @{
+                    ok                = $true
+                    userPrincipalName = $upn
+                    note              = "Sign-in sessions revoked for $upn. Existing refresh tokens are invalid and the user must sign in again. The account is NOT disabled and nothing else was changed."
+                }
+                return 200
+            } catch {
+                Write-PimManagerAuditEvent -Action 'sessions.revoke.failed' -Target $upn -After @{ error = "$($_.Exception.Message)" }
+                Write-JsonResponse -Response $resp -Status 500 -Body @{ error = "session revoke failed: $($_.Exception.Message)" }
+                return 500
+            }
+        }
+
         if ($path -eq '/api/emergency-status' -and $method -eq 'GET') {
             $script:lastHeartbeat = Get-Date
-            $ovFile = Join-Path $script:configRoot 'emergency-override.custom.json'
-            if (-not (Test-Path -LiteralPath $ovFile)) {
+            # §36.3 phase 3 -- the SHARED store, so this endpoint answers about the override the
+            # engine will act on rather than about a file only this container can see.
+            $ov = Get-PimManagerEmergencyOverride
+            if (-not $ov) {
                 Write-JsonResponse -Response $resp -Status 200 -Body @{ active = $false }
                 return 200
             }
             try {
-                $ov = Get-Content -LiteralPath $ovFile -Raw -Encoding UTF8 | ConvertFrom-Json
                 $expired = $true
                 try { $expired = ([datetime]::UtcNow -ge ([datetime]$ov.expiresAtUtc).ToUniversalTime()) } catch {}
                 Write-JsonResponse -Response $resp -Status 200 -Body @{
@@ -7302,8 +8112,23 @@ function Handle-Request {
                 reason         = "$($body.reason)"
                 appliedGroups  = @()
             }
-            ($ov | ConvertTo-Json -Depth 4) | Set-Content -LiteralPath (Join-Path $script:configRoot 'emergency-override.custom.json') -Encoding UTF8
-            Write-PimManagerAuditEvent -Action 'emergency.activate' -Target (@($ov.scopeGroupTags) -join ',') -After @{ hours = $hours; reason = "$($body.reason)"; expiresAtUtc = $ov.expiresAtUtc }
+            # 🔴 §36.3 phase 3 -- write where the ENGINE can read it. This used to write a file
+            # into the Manager's own config dir; on a hosted deployment the engine runs elsewhere
+            # (VisualCron on mgmt1, ca-pim-tick) and would never see it -- so break-glass silently
+            # did nothing at the one moment somebody was relying on it.
+            $ovWhere = 'file'
+            try { $ovWhere = Set-PimManagerEmergencyOverride -Override $ov }
+            catch {
+                # Activation that cannot reach the engine must FAIL, not report success. Telling
+                # an operator break-glass is on when it is not is worse than refusing.
+                Write-PimManagerAuditEvent -Action 'emergency.activate.failed' -Target (@($ov.scopeGroupTags) -join ',') -After @{ error = "$($_.Exception.Message)" } -Result 'error'
+                Write-JsonResponse -Response $resp -Status 500 -Body @{
+                    error = "could not record the emergency override: $($_.Exception.Message)"
+                    hint  = 'Nothing was activated. The engine reads the override from the shared store; a write that does not reach it would leave break-glass inert while appearing active.'
+                }
+                return 500
+            }
+            Write-PimManagerAuditEvent -Action 'emergency.activate' -Target (@($ov.scopeGroupTags) -join ',') -After @{ hours = $hours; reason = "$($body.reason)"; expiresAtUtc = $ov.expiresAtUtc; store = $ovWhere }
             # Alerting (REQUIREMENTS §27 H2): break-glass use is a high-signal event ->
             # fire the break-glass alert through the existing notify path.
             try { Send-PimManagerAlert -Event 'break-glass' -Title 'Break-glass (emergency override) ACTIVATED' -Detail ("Activated by $who; scope=$((@($ov.scopeGroupTags) -join ', ')); expires $($ov.expiresAtUtc); reason: $($body.reason)") -LinkTab 'governance' | Out-Null } catch {}
@@ -7317,14 +8142,27 @@ function Handle-Request {
                 Write-JsonResponse -Response $resp -Status 403 -Body @{ error = 'SuperAdmin role required' }
                 return 403
             }
-            $ovFile = Join-Path $script:configRoot 'emergency-override.custom.json'
-            if (Test-Path -LiteralPath $ovFile) {
-                try {
-                    $ov = Get-Content -LiteralPath $ovFile -Raw -Encoding UTF8 | ConvertFrom-Json
+            # §36.3 phase 3 -- expire it in the SHARED store, for the same reason as activate: the
+            # ENGINE is what restores normal policy, and it reads the override from the store, not
+            # from this container's filesystem.
+            # 🔒 A failure here is NOT swallowed. It used to be `catch {}`, which reported "the
+            # engine re-applies normal policy on its next run" whether or not anything had been
+            # written -- telling an operator that emergency access had been wound back when it had
+            # not is the worst possible thing to be wrong about on this endpoint.
+            try {
+                $ov = Get-PimManagerEmergencyOverride
+                if ($ov) {
                     $ov.expiresAtUtc = [datetime]::UtcNow.ToString('o')   # expire NOW; engine restores on next run
-                    ($ov | ConvertTo-Json -Depth 4) | Set-Content -LiteralPath $ovFile -Encoding UTF8
-                    Write-PimManagerAuditEvent -Action 'emergency.restore.requested' -Target (@($ov.scopeGroupTags) -join ',')
-                } catch {}
+                    $w = Set-PimManagerEmergencyOverride -Override $ov
+                    Write-PimManagerAuditEvent -Action 'emergency.restore.requested' -Target (@($ov.scopeGroupTags) -join ',') -After @{ store = $w }
+                }
+            } catch {
+                Write-PimManagerAuditEvent -Action 'emergency.restore.requested.failed' -Target '' -After @{ error = "$($_.Exception.Message)" } -Result 'error'
+                Write-JsonResponse -Response $resp -Status 500 -Body @{
+                    error = "could not expire the emergency override: $($_.Exception.Message)"
+                    hint  = 'The override is UNCHANGED and may still be ACTIVE. Do not assume normal policy was restored.'
+                }
+                return 500
             }
             Write-JsonResponse -Response $resp -Status 200 -Body @{ ok = $true; note = 'Override expired; the engine re-applies the normal approval policy on its next run.' }
             return 200
@@ -7511,6 +8349,34 @@ function Handle-Request {
             }
         }
 
+        # MSP-4 -- THE REACH VIEW: the same data as /api/downlink, transposed by GROUP TAG so the
+        # operator's actual question ("this role goes to only 5 of 28 tenants") is one request
+        # instead of 28. Deliberately READ-ONLY and derived from the very same overview, so the
+        # two views can never disagree: authoring still happens through /api/downlink/policy,
+        # which is SuperAdmin-gated and audited. A second write path into a customer's privilege
+        # is the last thing this surface needs.
+        if ($path -eq '/api/downlink/reach' -and $method -eq 'GET') {
+            $script:lastHeartbeat = Get-Date
+            try {
+                $dlo = Get-PimManagerDownlinkOverview
+                $reach = Get-PimProjectionReach -Relationships @($dlo.relationships)
+                Write-JsonResponse -Response $resp -Status 200 -Body @{
+                    tags        = @($reach)
+                    tenantCount = @($dlo.relationships).Count
+                    baseline    = $dlo.baseline
+                    # MSP-4 write half: the panel shows its authoring control only to a role that
+                    # could actually use it. The GATE is still server-side on the PUT -- this only
+                    # decides whether to render a button a reader would just bounce off.
+                    canWrite    = [bool]$dlo.canWrite
+                    reason      = "$($dlo.reason)"
+                }
+                return 200
+            } catch {
+                Write-JsonResponse -Response $resp -Status 500 -Body @{ error = "downlink reach failed: $($_.Exception.Message)" }
+                return 500
+            }
+        }
+
         if ($path -eq '/api/downlink/policy' -and $method -eq 'PUT') {
             $script:lastHeartbeat = Get-Date
             if (-not (Test-PimManagerRoleAtLeast -Minimum 'SuperAdmin')) {
@@ -7518,8 +8384,45 @@ function Handle-Request {
                 return 403
             }
             $body = Read-RequestJson -Request $req
+
+            # ---- MSP-4, THE WRITE HALF: the same policy, authored along the TAG axis. ----
+            # 🔒 ONE ROUTE, TWO AXES -- NOT TWO ROUTES. The reach panel edits "this role reaches
+            # these N tenants"; the relationship panel edits "this tenant accepts these roles".
+            # They are the same rows transposed, so they get the same SuperAdmin gate, the same
+            # audit trail and the same writer. A second write path into a customer's privilege
+            # is the thing this surface must never grow -- and it is what a `PUT /reach` would
+            # have been, however convenient the URL.
+            # 🔴 REFUSAL IS A 409, NOT A SILENT PARTIAL. Only the `policy` narrowing is writable
+            # from here; a role held out by ring, targeting or a blocked capability cannot be let
+            # in by a rule, and writing one anyway would commit cleanly, change nothing and
+            # report success in a tenant the operator does not own.
+            if ($body -and $body.PSObject.Properties['groupTag'] -and "$($body.groupTag)".Trim()) {
+                $gTag = "$($body.groupTag)".Trim()
+                $wantIds = @(@($body.tenantIds) | ForEach-Object { "$_".Trim() } | Where-Object { $_ })
+                try {
+                    $rr = Set-PimProjectionReach -GroupTag $gTag -TenantIds $wantIds
+                } catch {
+                    Write-JsonResponse -Response $resp -Status 500 -Body @{ error = "reach edit failed: $($_.Exception.Message)" }
+                    return 500
+                }
+                if (-not $rr.wrote -and @($rr.refusals).Count) {
+                    Write-PimManagerAuditEvent -Action 'downlink.reach.refused' -Target $gTag `
+                        -After @{ requested = @($wantIds); refusals = @($rr.refusals) } -Result 'refused'
+                    Write-JsonResponse -Response $resp -Status 409 -Body $rr
+                    return 409
+                }
+                # Audited with the MEASURED outcome, not the intent: `after` is read back off a
+                # re-composed plan, so the trail records what the estate now does.
+                Write-PimManagerAuditEvent -Action 'downlink.reach.save' -Target $gTag `
+                    -Before @{ reach = "$($rr.before)" } `
+                    -After  @{ reach = "$($rr.after)"; requested = @($wantIds); edited = @(@($rr.edits) | ForEach-Object { "$($_.tenantId)" }) } `
+                    -Result $(if ($rr.ok) { 'ok' } else { 'failed' })
+                Write-JsonResponse -Response $resp -Status $(if ($rr.ok) { 200 } else { 500 }) -Body $rr
+                return $(if ($rr.ok) { 200 } else { 500 })
+            }
+
             $tid = "$($body.tenantId)".Trim()
-            if (-not $tid) { Write-JsonResponse -Response $resp -Status 400 -Body @{ error = 'tenantId is required.' }; return 400 }
+            if (-not $tid) { Write-JsonResponse -Response $resp -Status 400 -Body @{ error = 'tenantId or groupTag is required.' }; return 400 }
             $rules = @()
             foreach ($r in @($body.policy)) {
                 $m = "$($r.Mode)".Trim().ToLowerInvariant()
@@ -7954,9 +8857,27 @@ function Handle-Request {
                     capabilities = @($prof.capabilities); managedAdmins = @($prof.managedAdmins)
                 }
             } else { $null }
+            # §35.3 -- the wizard narrows its ROLE pickers to the caller's level ceiling, and it
+            # needs the same role->level classification the engine derives from. Served from the
+            # ENGINE's own functions rather than re-listed in JavaScript: a second copy of "which
+            # roles are privileged" would drift, and it would drift in the direction of showing
+            # Global Administrator to someone who may not have it.
+            $privRoles = @(); $auRoles = @()
+            try { if (Get-Command Get-PimPrivilegedEntraRoles -ErrorAction SilentlyContinue) { $privRoles = @(Get-PimPrivilegedEntraRoles) } } catch {}
+            try { if (Get-Command Get-PimAuScopableRoles     -ErrorAction SilentlyContinue) { $auRoles   = @(Get-PimAuScopableRoles) } } catch {}
+            # SEC-15 / §36.3 phase 2 -- report WHICH store answered. A silent fallback is the
+            # defect; naming the source is what stops it being silent, and it makes
+            # "why can this person suddenly do that?" an answerable question.
+            $profSource = 'unknown'
+            try { if (Get-Command Get-PimPortalProfileSource -ErrorAction SilentlyContinue) { $profSource = Get-PimPortalProfileSource } } catch {}
             Write-JsonResponse -Response $resp -Status 200 -Body ([ordered]@{
                 identity = "$($role.identity)"; managerRole = "$($role.role)"; isSuperAdmin = $isSuper
                 portalProfile = $profOut
+                profileSource = $profSource     # sql | sql-empty | sql-invalid | file | file-invalid | none
+                hosted        = [bool]$script:PimHosted
+                # Level model, as the engine derives it: privileged = L0, AU-scopable = L2,
+                # everything else = L1 (REQUIREMENTS §11 "Entra derives tier/level").
+                roleLevels = [ordered]@{ privileged = @($privRoles); auScopable = @($auRoles) }
             })
             return 200
         }
@@ -8464,16 +9385,13 @@ function Handle-Request {
                 Import-Module $shared -Global -Force -WarningAction SilentlyContinue -ErrorAction SilentlyContinue
             }
             $confTplDir = Join-Path $solutionRoot 'workloads\templates'
-            $confExFile = Join-Path $script:configRoot 'exemptions.json'
             $confState  = Join-Path $script:outputRoot 'state\template-state.json'
             $confTenant = "$script:PimInstanceName"
             $confRing   = Get-PimTenantRing
-            $readEx = {
-                $f = $confExFile
-                if (-not (Test-Path -LiteralPath $f)) { $f = Join-Path $solutionRoot 'config\exemptions.sample.json' }
-                if (-not (Test-Path -LiteralPath $f)) { return @() }
-                try { return @((Get-Content -LiteralPath $f -Raw -Encoding UTF8 | ConvertFrom-Json).exemptions) } catch { return @() }
-            }
+            # SEC-17: reads SQL first, then the PER-INSTANCE file, and NEVER the
+            # shipped sample. See Get-PimManagerConformanceExemptions for why the
+            # sample fallback was a live waiver rather than a convenience.
+            $readEx = { @(Get-PimManagerConformanceExemptions) }
             $findTplFile = {
                 param($Id)
                 if (-not (Test-Path -LiteralPath $confTplDir)) { return $null }
@@ -8552,9 +9470,7 @@ function Handle-Request {
                 $list = New-Object System.Collections.Generic.List[object]
                 foreach ($e in (& $readEx)) { $list.Add($e) }
                 $list.Add($cand)
-                $dir = Split-Path -Parent $confExFile
-                if ($dir -and -not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
-                @{ exemptions = $list.ToArray() } | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $confExFile -Encoding UTF8
+                [void](Set-PimManagerConformanceExemptions -Exemptions $list.ToArray())
                 Write-JsonResponse -Response $resp -Status 200 -Body @{ ok = $true; state = $v.state; count = $list.Count }
                 return 200
             }
@@ -8587,9 +9503,7 @@ function Handle-Request {
                 if (-not $rk) { Write-JsonResponse -Response $resp -Status 400 -Body @{ error = 'revokeKey is required' }; return 400 }
                 $r = Remove-PimExemptionEntry -Exemptions (& $readEx) -RevokeKey $rk
                 if ($r.Removed -gt 0) {
-                    $dir = Split-Path -Parent $confExFile
-                    if ($dir -and -not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
-                    @{ exemptions = $r.Kept } | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $confExFile -Encoding UTF8
+                    [void](Set-PimManagerConformanceExemptions -Exemptions @($r.Kept))
                     if (Get-Command Write-PimAuditEvent -ErrorAction SilentlyContinue) {
                         try { Write-PimAuditEvent -Action 'conformance.exemption.revoke' -Target $rk -After @{ instance = $confTenant; removed = $r.Removed } -Actor 'manager' -WarningAction SilentlyContinue | Out-Null } catch {}
                     }
@@ -8643,7 +9557,11 @@ function Handle-Request {
                 try {
                     $rows = @(Get-PimRollForwardRows -Template $tpl -TenantRing $confRing -TenantId $confTenant -Exemptions (& $readEx) -NowUtc ([datetime]::UtcNow))
                     if (-not $rows.Count) { Write-JsonResponse -Response $resp -Status 200 -Body @{ ok = $true; whatIf = $whatIf; rows = @(); message = 'no in-scope, non-exempt entries for this ring' }; return 200 }
-                    $tmpCsv = Join-Path $env:TEMP ("pim-rollfwd-{0}.csv" -f ([guid]::NewGuid().ToString('N').Substring(0,8)))
+                    # 🔴 NOT $env:TEMP: this Manager runs in a LINUX container, where that variable
+                    # is unset and Join-Path then throws "Cannot bind argument to parameter 'Path'
+                    # because it is an empty string" -- inside a request handler, so it surfaces as
+                    # a 500 with no hint that a temp directory was the problem.
+                    $tmpCsv = Join-Path ([System.IO.Path]::GetTempPath()) ("pim-rollfwd-{0}.csv" -f ([guid]::NewGuid().ToString('N').Substring(0,8)))
                     $rows | Select-Object Workload,RoleName,GroupTag,Scope,Resource,Action | Export-Csv -LiteralPath $tmpCsv -NoTypeInformation -Delimiter ';' -Encoding UTF8
                     Initialize-PimManagerTenantConnection
                     $connDir = Join-Path $solutionRoot 'workloads\connectors'
@@ -8876,8 +9794,11 @@ function Handle-Request {
         }
 
         if ($path -eq '/api/cutover' -and $method -eq 'POST') {
-            if (-not (Test-PimManagerRoleAtLeast -Minimum 'Admin')) {
-                Write-JsonResponse -Response $resp -Status 403 -Body @{ error = 'Admin role required to run a cutover stage. See config/manager-access.custom.json.' }
+            # BUG-96: a one-time, destructive migration is gated to the HIGHEST role, not Admin.
+            # Hiding the menu item is not protection -- this endpoint stays reachable to anyone
+            # who knows the URL, so the refusal has to live HERE, not only in the GUI.
+            if (-not (Test-PimManagerRoleAtLeast -Minimum 'SuperAdmin')) {
+                Write-JsonResponse -Response $resp -Status 403 -Body @{ error = 'SuperAdmin role required to run a cutover stage. See config/manager-access.custom.json.' }
                 return 403
             }
             $script:lastHeartbeat = Get-Date
@@ -8895,6 +9816,33 @@ function Handle-Request {
 
             try {
                 $state = Get-PimCutoverState -ConnectionString $cs
+
+                # BUG-96 -- THE SERVER-SIDE REFUSAL. Measured in prod 2026-08-30: this
+                # environment runs on an Azure SQL PRODUCTION store holding 949 rows, and
+                # pim.Settings held NO 'CutoverState' row at all, so Get-PimCutoverState
+                # returned the empty default and every stage -- including `import` -- was
+                # offered as if the environment were brand new. The rollback path
+                # (PIM-Cutover.ps1 Reset) writes that same empty state, so "never ran" and
+                # "was reset" are indistinguishable from the state alone.
+                # => The STORE'S OWN CONDITION is the safer authority: an Azure SQL production
+                # store has by definition already been cut over. Absence of state must never
+                # read as "safe to start".
+                $storeIsProd = $false
+                if (Get-Command Test-PimStoreIsProduction -ErrorAction SilentlyContinue) {
+                    try { $storeIsProd = [bool](Test-PimStoreIsProduction -ConnectionString $cs) } catch { $storeIsProd = $false }
+                } else {
+                    # Fallback: an azure SQL endpoint is a production store by our definition.
+                    $storeIsProd = ("$cs" -match 'database\.windows\.net')
+                }
+                $noCeremonyRecord = (@($state.completed).Count -eq 0) -and (-not $state.final)
+                if ($storeIsProd -and $noCeremonyRecord) {
+                    Write-JsonResponse -Response $resp -Status 409 -Body @{
+                        ok = $false; done = $true; alreadyMigrated = $true
+                        error = 'This environment is already running on an Azure SQL production store, so the CSV cutover will not run. There is no ceremony record, which is expected for an environment migrated before this gate existed -- it is not a reason to re-import. Re-running would write the old file-based data over the live store.'
+                    }
+                    return 409
+                }
+
                 if (-not $reqStage) { $reqStage = Get-PimCutoverNextStage -Completed @($state.completed) }
                 if (-not $reqStage) { Write-JsonResponse -Response $resp -Status 200 -Body @{ ok = $true; done = $true; message = 'cutover already finalized'; completed = @($state.completed) }; return 200 }
 
@@ -9015,6 +9963,37 @@ function Handle-Request {
             }
         }
 
+        # BUG-106: POST /api/preflight validates the PENDING state -- the body carries
+        # { pending: { '<entity>': [rows...] } } and the report describes what the store WOULD
+        # look like after commit. The GET form (saved state only) is unchanged for callers that
+        # want it, but it must never again be the thing that gates a commit: a pre-flight check
+        # that validates the pre-flight state can only ever refuse the fix.
+        # Deliberately NOT cached -- the cache key is the STORE's change signal, which does not
+        # move when the operator edits pending rows, so a cached answer would be the same
+        # deadlock wearing a different hat.
+        if ($path -eq '/api/preflight' -and $method -eq 'POST') {
+            $script:lastHeartbeat = Get-Date
+            if (-not (Get-Command Invoke-PimPreflightValidation -ErrorAction SilentlyContinue)) {
+                Write-JsonResponse -Response $resp -Status 500 -Body @{ error = 'the validator was not loaded on the server' }
+                return 500
+            }
+            try {
+                $body = Read-RequestJson -Request $req
+                $pending = @{}
+                if ($body -and $body.PSObject.Properties['pending'] -and $body.pending) {
+                    foreach ($p in $body.pending.PSObject.Properties) {
+                        $pending["$($p.Name)"] = @($p.Value)
+                    }
+                }
+                $report = Invoke-PimPreflightValidation -PendingRows $pending
+                $report | Add-Member -NotePropertyName validatedPending -NotePropertyValue @($pending.Keys) -Force
+                Write-JsonResponse -Response $resp -Status 200 -Body $report
+                return 200
+            } catch {
+                Write-JsonResponse -Response $resp -Status 500 -Body @{ error = "$($_.Exception.Message)" }
+                return 500
+            }
+        }
         if ($path -eq '/api/preflight' -and $method -eq 'GET') {
             $script:lastHeartbeat = Get-Date
             if (-not (Get-Command Invoke-PimPreflightValidation -ErrorAction SilentlyContinue)) {
@@ -9066,12 +10045,12 @@ function Handle-Request {
         if ($path -eq '/api/warning-overrides' -and $method -eq 'GET') {
             $script:lastHeartbeat = Get-Date
             try {
-                $p = Get-PimWarningOverrideStorePath
+                $store   = Get-PimManagerWarningOverrides
                 $entries = @()
-                if ($p -and (Get-Command Read-PimWarningOverrideConfig -ErrorAction SilentlyContinue)) {
-                    $entries = @(Read-PimWarningOverrideConfig -Path $p)
+                if (Get-Command Read-PimWarningOverrideConfig -ErrorAction SilentlyContinue) {
+                    $entries = @(Read-PimWarningOverrideConfig -Config $store)
                 }
-                Write-JsonResponse -Response $resp -Status 200 -Body @{ ok = $true; supported = [bool]$p; count = @($entries).Count; overrides = @($entries) }
+                Write-JsonResponse -Response $resp -Status 200 -Body @{ ok = $true; supported = $true; count = @($entries).Count; overrides = @($entries) }
                 return 200
             } catch {
                 Write-JsonResponse -Response $resp -Status 500 -Body @{ ok = $false; error = "$($_.Exception.Message)" }
@@ -9361,7 +10340,9 @@ function Handle-Request {
             try {
                 $r = Invoke-PimManagerBackupRestore -Id $snapId -Confirm:$confirmRestore
                 if (-not "$base".Trim()) { $base = "$($r.entity)" }
-                $who = try { [System.Security.Principal.WindowsIdentity]::GetCurrent().Name } catch { $env:USERNAME }
+                # SEC-16(b) -- the `by` reported back to the caller must name the operator.
+                $who = try { $ro = Get-PimManagerRole; if ("$($ro.identity)".Trim()) { "$($ro.identity)" } else { throw } }
+                       catch { try { [System.Security.Principal.WindowsIdentity]::GetCurrent().Name } catch { $env:USERNAME } }
                 Write-PimMutationLog -BaseName $base -Adds 0 -Removes 0 -Modifies 0 -NewRowCount ([int]$r.rowCount)
                 Write-JsonResponse -Response $resp -Status 200 -Body ([ordered]@{ ok = $true; base = $base; restoredFrom = $snapId; entity = "$($r.entity)"; rowCount = [int]$r.rowCount; preRestoreSnapshotId = "$($r.preRestoreSnapshotId)"; by = "$who" })
                 return 200

@@ -38,6 +38,15 @@ $global:PIM_SqlServer   = $SqlServer
 $global:PIM_SqlDatabase = $SqlDatabase
 . "$shared\PIM-Rest.ps1"
 . "$shared\PIM-SqlStore.ps1"
+
+# 🔴 SEC-14 GUARD -- refuse a PRODUCTION tenant before anything authenticates or writes.
+# This harness creates and deletes directory objects. On 2026-06-14 it ran against
+# myfamilynetwork (the operator's live tenant) and left 332 groups + 16 AUs holding 240 Entra
+# directory-role assignments -- Global Administrator among them -- for 77 days. The registry
+# said "status: production, NOT a test tenant" the whole time; no code read it. It does now.
+. (Join-Path $PSScriptRoot '_PimScenarioTenants.ps1')
+Assert-PimTenantIsNotProduction -TenantId "$($global:PIM_TenantId)" -What (Split-Path -Leaf $PSCommandPath)
+Assert-PimScenarioTenantAllowed  -TenantId "$($global:PIM_TenantId)" -What 'tenant'
 $cs = Get-PimSqlConnectionString
 
 # Group-name lives in these entities; AU-name in PIM-Definitions-AU.
@@ -71,7 +80,34 @@ function Set-Marker {
 
 switch ($PSCmdlet.ParameterSetName) {
     'Apply'  { Write-Host "Marking desired group/AU names with '$Marker' ..." -ForegroundColor Cyan; Set-Marker -Add $true }
-    'Revert' { Write-Host "Stripping '$Marker' from desired group/AU names ..." -ForegroundColor Cyan; Set-Marker -Add $false }
+    'Revert' {
+        # 🔴 SEC-14 ORDERING GUARD -- RevertGuard.
+        # -Revert strips the marker from the SQL rows; -Cleanup deletes the marked TENANT
+        # objects. They are independent, and in 2026-06 only -Revert ran. Because it erased the
+        # marker from SQL it also destroyed the RECORD of what still needed deleting, so 332
+        # privileged objects sat in production for 77 days with nothing left pointing at them.
+        # 🔑 Never remove the evidence before removing the thing. Reverting is refused while
+        # marked tenant objects still exist in the tenant.
+        $stillThere = @()
+        try {
+            $f = [uri]::EscapeDataString("startswith(displayName,'$Marker')")
+            $stillThere = @(Invoke-PimGraph -Path "/groups?`$filter=$f&`$select=id,displayName&`$top=999" -All)
+            $aus = @(Invoke-PimGraph -Path "/directory/administrativeUnits?`$select=id,displayName&`$top=999" -All |
+                     Where-Object { "$($_.displayName)" -like "$Marker*" })
+            $stillThere += $aus
+        } catch {
+            throw ("REFUSING -Revert: could not confirm whether marked tenant objects still exist " +
+                   "($($_.Exception.Message)). Reverting blind is what left 332 objects orphaned in " +
+                   'production (SEC-14). Fix the read, or run -Cleanup first.')
+        }
+        if ($stillThere.Count -gt 0) {
+            throw ("REFUSING -Revert: $($stillThere.Count) object(s) prefixed '$Marker' still exist in the tenant. " +
+                   'Run -Cleanup FIRST -- reverting now strips the marker from SQL and destroys the only ' +
+                   "record of what to delete. That is SEC-14 exactly. First few: " +
+                   (($stillThere | Select-Object -First 5 | ForEach-Object { "$($_.displayName)" }) -join ', '))
+        }
+        Write-Host "Stripping '$Marker' from desired group/AU names ..." -ForegroundColor Cyan; Set-Marker -Add $false
+    }
     'Verify' {
         Write-Host "Verifying tenant objects created with marker '$Marker' ..." -ForegroundColor Cyan
         $grps = @(Invoke-PimGraph -Path "/groups?`$filter=startswith(displayName,'$Marker')&`$select=id,displayName,isAssignableToRole" -All)

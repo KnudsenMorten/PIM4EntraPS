@@ -2719,6 +2719,23 @@ Function Invoke-PimWorkloadApi {
     # Central, Dataverse) can put {resource}/{scope} in the host/path root.
     $uri = (Expand-PimWorkloadTokens -Text "$($Connector.api.baseUrl)" -Tokens $Tokens) + (Expand-PimWorkloadTokens -Text "$($Op.path)" -Tokens $Tokens)
     if ("$($Connector.auth)" -eq 'graph') {
+        # BUG-99. The hosted Manager/engine is REST-only, app-only certificate auth, with NO
+        # PowerShell modules -- so Invoke-MgGraphRequest does not exist there and every
+        # graph-auth connector died with
+        #   502: The term 'Invoke-MgGraphRequest' is not recognized as a name of a cmdlet
+        # which the GUI surfaced as "(roles unavailable)" with Stage assignment permanently
+        # disabled. This was pre-REST code that survived the migration because nothing
+        # exercised it against the hosted runtime.
+        # Invoke-PimGraph is the engine's own REST path and accepts an ABSOLUTE url, so this is
+        # a straight swap. The SDK branch is kept for a workstation session that genuinely has
+        # the module loaded -- prefer REST, fall back to the SDK, never require it.
+        if (Get-Command Invoke-PimGraph -ErrorAction SilentlyContinue) {
+            if ($Body) { return Invoke-PimGraph -Method $Op.method -Path $uri -Body $Body }
+            return Invoke-PimGraph -Method $Op.method -Path $uri
+        }
+        if (-not (Get-Command Invoke-MgGraphRequest -ErrorAction SilentlyContinue)) {
+            throw "Graph connector '$($Connector.id)' cannot run: neither the REST client (Invoke-PimGraph, engine/_shared/PIM-Rest.ps1) nor the Graph PowerShell module is loaded in this process."
+        }
         if ($Body) { return Invoke-MgGraphRequest -Method $Op.method -Uri $uri -Body ($Body | ConvertTo-Json -Depth 8) -ContentType 'application/json' -ErrorAction Stop }
         return Invoke-MgGraphRequest -Method $Op.method -Uri $uri -ErrorAction Stop
     }
@@ -9723,7 +9740,23 @@ $_pimNcCustom = Join-Path $_pimNcRoot 'PIM4EntraPS.NamingConventions.custom.ps1'
 if (Test-Path -LiteralPath $_pimNcLocked) {
     try { . $_pimNcLocked; Write-Host "  [INFO] PIM-Functions: loaded $_pimNcLocked" -ForegroundColor DarkGray } catch { Write-Warning "PIM-Functions: failed loading $_pimNcLocked -- $($_.Exception.Message)" }
 }
-if (Test-Path -LiteralPath $_pimNcCustom) {
+# 🔴 TESTS MUST NOT INHERIT THIS MACHINE'S CUSTOMISATION.
+# `.custom.*` is gitignored PER-DEPLOYMENT config, so whether it exists -- and what is in it --
+# varies per machine. Loading it unconditionally at module init means the SUITE's results depend
+# on the box it runs on. Measured 2026-09-04: creating a real EFIF naming file on mgmt1 turned
+# three suites red (permission-wizard expected `admin-jdo-id`, got `admin-efif-jdo-id`; the
+# endpoints suite lost 3 asserts; DOC-09 then reported a count mismatch as doc rot). Nothing was
+# wrong with the code -- the tests were reading a customer's convention as if it were the
+# product's.
+# PIM_IGNORE_CUSTOM_CONFIG=1 makes a run use ONLY the shipped .locked.* defaults, so a suite means
+# the same thing on every machine and in CI. Absent = today's behaviour, byte for byte.
+# 🪤 It ANNOUNCES the skip. A silently-ignored override is an hour of someone debugging why their
+# customisation "does not apply", which is a worse bug than the one this fixes.
+$_pimIgnoreCustom = ("$($env:PIM_IGNORE_CUSTOM_CONFIG)".Trim() -in @('1','true','yes'))
+if ($_pimIgnoreCustom -and (Test-Path -LiteralPath $_pimNcCustom)) {
+    Write-Host "  [INFO] PIM-Functions: IGNORING $_pimNcCustom (PIM_IGNORE_CUSTOM_CONFIG=1 -- shipped defaults only)" -ForegroundColor DarkYellow
+}
+if ((Test-Path -LiteralPath $_pimNcCustom) -and -not $_pimIgnoreCustom) {
     try { . $_pimNcCustom; Write-Host "  [INFO] PIM-Functions: loaded $_pimNcCustom (custom overrides applied)" -ForegroundColor DarkGray } catch { Write-Warning "PIM-Functions: failed loading $_pimNcCustom -- $($_.Exception.Message)" }
 }
 
@@ -9735,10 +9768,15 @@ $_pimNcCustom2 = Join-Path $_pimNcRoot 'PIM4EntraPS.NotificationChannels.custom.
 if (Test-Path -LiteralPath $_pimNcLocked2) {
     try { . $_pimNcLocked2; Write-Host "  [INFO] PIM-Functions: loaded $_pimNcLocked2" -ForegroundColor DarkGray } catch { Write-Warning "PIM-Functions: failed loading $_pimNcLocked2 -- $($_.Exception.Message)" }
 }
-if (Test-Path -LiteralPath $_pimNcCustom2) {
+# Same rule as the naming block above: notification channels are per-deployment too, so a suite
+# that inherits them is testing this machine rather than the product.
+if ($_pimIgnoreCustom -and (Test-Path -LiteralPath $_pimNcCustom2)) {
+    Write-Host "  [INFO] PIM-Functions: IGNORING $_pimNcCustom2 (PIM_IGNORE_CUSTOM_CONFIG=1 -- shipped defaults only)" -ForegroundColor DarkYellow
+}
+if ((Test-Path -LiteralPath $_pimNcCustom2) -and -not $_pimIgnoreCustom) {
     try { . $_pimNcCustom2; Write-Host "  [INFO] PIM-Functions: loaded $_pimNcCustom2 (custom overrides applied)" -ForegroundColor DarkGray } catch { Write-Warning "PIM-Functions: failed loading $_pimNcCustom2 -- $($_.Exception.Message)" }
 }
-Remove-Variable -Name _pimNcRoot, _pimNcLocked, _pimNcCustom, _pimNcLocked2, _pimNcCustom2 -ErrorAction SilentlyContinue
+Remove-Variable -Name _pimNcRoot, _pimNcLocked, _pimNcCustom, _pimNcLocked2, _pimNcCustom2, _pimIgnoreCustom -ErrorAction SilentlyContinue
 
 function Get-PimConfigDir {
     <#
@@ -10660,10 +10698,75 @@ function Get-PimEmergencyOverrideFile {
     Join-Path (Get-PimConfigDir) 'emergency-override.custom.json'
 }
 
+# 🔴 §36.3 phase 3 -- THE OVERRIDE LIVES IN SQL, because a file cannot reach the reader.
+#
+# This was not merely "sensitive state on a filesystem". The MANAGER writes the override and the
+# ENGINE reads it -- and on a hosted deployment those are different machines: the Manager runs in
+# ca-pim-manager, the engine runs under VisualCron on mgmt1 and in ca-pim-tick. Same path,
+# different filesystem. So activating break-glass wrote a file the engine would never see.
+#
+# The failure is two-sided and both sides lie to the operator:
+#   * engine never sees it  -> approval is never disabled, so break-glass silently DOES NOTHING
+#     at the one moment somebody is relying on it;
+#   * file seen then lost   -> expiresAtUtc is the ONLY record of when to restore, so the scoped
+#     groups keep approval disabled INDEFINITELY while the Manager reports break-glass inactive.
+# The container mounts no persistent volume (measured 2026-08-31), so the second is not theoretical.
+#
+# SQL is the only store both sides can see. The file stays as the local/dev path.
+function Get-PimEmergencyOverrideSqlName { 'EmergencyOverride' }
+
 function Get-PimEmergencyOverride {
+    # SQL first -- it is the only store shared by the Manager and the engine.
+    try {
+        if ((Get-Command Get-PimSqlConnectionString -ErrorAction SilentlyContinue) -and
+            (Get-Command Get-PimSqlSetting          -ErrorAction SilentlyContinue)) {
+            $cs = $null
+            try { $cs = Get-PimSqlConnectionString } catch { $cs = $null }
+            if ($cs) {
+                $v = Get-PimSqlSetting -ConnectionString $cs -Name (Get-PimEmergencyOverrideSqlName)
+                if ($v) {
+                    if ($v -is [string]) { try { $v = $v | ConvertFrom-Json } catch { $v = $null } }
+                    # An explicitly cleared override is stored as {active:false}; that is a real
+                    # answer ("not active"), not an absence, so return it rather than falling through.
+                    if ($v) { return $v }
+                }
+            }
+        }
+    } catch { Write-Warning "  [emergency] SQL override read failed: $($_.Exception.Message)" }
+
     $f = Get-PimEmergencyOverrideFile
     if (-not (Test-Path -LiteralPath $f)) { return $null }
     try { Get-Content -LiteralPath $f -Raw -Encoding UTF8 | ConvertFrom-Json } catch { $null }
+}
+
+function Set-PimEmergencyOverride {
+    <#
+      Write the override where BOTH the Manager and the engine can read it. Used by the Manager's
+      activate/restore endpoints and by the engine's expiry path, so there is exactly one writer
+      shape and the two cannot disagree about the format.
+      Returns the store that answered: 'sql' or 'file'.
+    #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][object]$Override)
+    try {
+        if ((Get-Command Get-PimSqlConnectionString -ErrorAction SilentlyContinue) -and
+            (Get-Command Set-PimSqlSetting          -ErrorAction SilentlyContinue)) {
+            $cs = $null
+            try { $cs = Get-PimSqlConnectionString } catch { $cs = $null }
+            if ($cs) {
+                Set-PimSqlSetting -ConnectionString $cs -Name (Get-PimEmergencyOverrideSqlName) -Value $Override
+                return 'sql'
+            }
+        }
+    } catch {
+        # 🔒 Do NOT silently fall back to the file for an ACTIVATION: the engine would not see it,
+        # so the operator would believe break-glass was in force when it was not. Surface it.
+        Write-Warning "  [emergency] SQL override write FAILED -- the engine will NOT see this override: $($_.Exception.Message)"
+        throw
+    }
+    $f = Get-PimEmergencyOverrideFile
+    ($Override | ConvertTo-Json -Depth 6) | Set-Content -LiteralPath $f -Encoding UTF8
+    return 'file'
 }
 
 function Test-PimEmergencyOverrideActive {
@@ -10707,10 +10810,30 @@ function Invoke-PimEmergencyOverride {
             Write-Host "Emergency override EXPIRED -- restoring normal approval policy on $($scoped.Count) group(s)..." -ForegroundColor Yellow
             foreach ($g in $scoped) { $state[$g].appliedHash = '' }
             Save-PimPolicyState -State $state
-            $archiveDir = Join-Path (Get-PimOutputDir) 'audit'
-            if (-not (Test-Path -LiteralPath $archiveDir)) { New-Item -ItemType Directory -Path $archiveDir -Force | Out-Null }
-            Move-Item -LiteralPath $f -Destination (Join-Path $archiveDir ("emergency-override-{0}.json" -f [datetime]::UtcNow.ToString('yyyyMMdd-HHmmss'))) -Force
-            Write-PimAuditEvent -Action 'emergency.restore' -Target (@($ov.scopeGroupTags) -join ',') -Before @{ activatedBy = "$($ov.activatedBy)"; expiresAtUtc = "$($ov.expiresAtUtc)" } -After @{ restoredGroups = $scoped }
+            # §36.3 phase 3 -- CLEAR the override wherever it actually lives. This used to
+            # Move-Item the FILE into an archive folder, which on a SQL deployment moved nothing
+            # (the override is in pim.Settings) and left the override ACTIVE forever: every
+            # subsequent run would re-read it, see it expired, "restore" again, and never clear
+            # it. Retiring an expired override has to happen in the store that holds it.
+            # The audit event below is the archive -- and it now outlives the container (SEC-16).
+            $cleared = [ordered]@{
+                active = $false; scopeGroupTags = @($ov.scopeGroupTags)
+                activatedBy = "$($ov.activatedBy)"; activatedAtUtc = "$($ov.activatedAtUtc)"
+                expiresAtUtc = "$($ov.expiresAtUtc)"; reason = "$($ov.reason)"
+                appliedGroups = @(); restoredAtUtc = [datetime]::UtcNow.ToString('o')
+            }
+            $where = 'file'
+            try { $where = Set-PimEmergencyOverride -Override $cleared } catch {
+                Write-Warning "  [emergency] could not clear the expired override: $($_.Exception.Message)"
+            }
+            if ($where -eq 'file') {
+                $archiveDir = Join-Path (Get-PimOutputDir) 'audit'
+                if (-not (Test-Path -LiteralPath $archiveDir)) { New-Item -ItemType Directory -Path $archiveDir -Force | Out-Null }
+                if (Test-Path -LiteralPath $f) {
+                    Move-Item -LiteralPath $f -Destination (Join-Path $archiveDir ("emergency-override-{0}.json" -f [datetime]::UtcNow.ToString('yyyyMMdd-HHmmss'))) -Force
+                }
+            }
+            Write-PimAuditEvent -Action 'emergency.restore' -Target (@($ov.scopeGroupTags) -join ',') -Before @{ activatedBy = "$($ov.activatedBy)"; expiresAtUtc = "$($ov.expiresAtUtc)" } -After @{ restoredGroups = $scoped; clearedIn = $where }
         }
         return
     }
@@ -10792,6 +10915,36 @@ function Write-PimAuditEvent {
             result        = $Result
             whatIf        = [bool]$global:WhatIfMode
         }
+
+        # 🔴 SEC-16 (§36.2) -- the ENGINE half. Unlike the Manager's writer this one was not
+        # LOSING data (it runs under VisualCron / the tick, where the filesystem persists) and it
+        # already names a real actor. The defect it shares is different and just as awkward:
+        # 🔑 IT WAS A SECOND TRAIL IN A SECOND PLACE. The Manager wrote one audit file and the
+        # engine wrote another, so "who granted this access?" could not be answered without first
+        # knowing WHICH COMPONENT did it -- and the two were never merged anywhere. One question,
+        # two half-answers, is not an audit trail.
+        # Both now append to the SAME pim.AuditEvents table. SQL first; the file below still runs
+        # so a run with no store configured is never unaudited.
+        $sqlOk = $false
+        try {
+            if ((Get-Command Get-PimSqlConnectionString -ErrorAction SilentlyContinue) -and
+                (Get-Command Write-PimSqlAuditEvent     -ErrorAction SilentlyContinue)) {
+                $cs = $null
+                try { $cs = Get-PimSqlConnectionString } catch { $cs = $null }
+                if ($cs) {
+                    Write-PimSqlAuditEvent -ConnectionString $cs -Actor $Actor -ActorSource 'engine' `
+                        -Action $Action -Target $Target -Before $Before -After $After `
+                        -Result $Result -WhatIf ([bool]$global:WhatIfMode) `
+                        -RunId "$($script:PimAuditRunId)" -CorrelationId $CorrelationId
+                    $sqlOk = $true
+                }
+            }
+        } catch {
+            # Never fail an engine APPLY because the audit sink is down -- but do not hide it
+            # either. The file write below still happens, so the event is not lost.
+            Write-Warning "  [audit] SQL sink failed (the file trail still has it): $($_.Exception.Message)"
+        }
+
         [System.IO.File]::AppendAllText($f, (($evt | ConvertTo-Json -Depth 6 -Compress) + "`r`n"), (New-Object System.Text.UTF8Encoding($false)))
 
         # Optional Log Analytics sink (REQUIREMENTS §13/§23 "Audit to Log Analytics").

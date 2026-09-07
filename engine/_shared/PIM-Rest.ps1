@@ -152,6 +152,45 @@ function Get-PimClientCertToken {
   return [pscustomobject]@{ token = $r.access_token; expiresUtc = (Get-Date).ToUniversalTime().AddSeconds([int]$r.expires_in - 60) }
 }
 
+function Get-PimTokenTenantId {
+    <#
+      SEC-12 -- read the tenant a JWT actually belongs to, from its own claims.
+
+      🔑 ASKING FOR A TENANT IS NOT THE SAME AS BEING GIVEN ONE, and until this existed there was
+      no way to tell the difference: a token for the wrong directory is a perfectly valid string
+      that succeeds at the call site and fails somewhere else as a permissions error. One
+      `Split('.')[1]` turns that into a fact.
+
+      PURE: no network, no validation of the signature (that is the resource's job) -- this only
+      reads what the token SAYS about itself, which is exactly what is needed to catch "you asked
+      for A and something handed you B". Returns the lowercased `tid`, or '' when the string is
+      not a readable JWT -- never throws, because a caller reaching for a sanity check must not be
+      broken BY the sanity check.
+    #>
+    [CmdletBinding()] param([string]$Token)
+    try {
+        $parts = "$Token".Split('.')
+        if ($parts.Count -lt 2) { return '' }
+        $p = $parts[1].Replace('-', '+').Replace('_', '/')
+        while ($p.Length % 4) { $p += '=' }
+        $claims = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($p)) | ConvertFrom-Json
+        return "$($claims.tid)".Trim().ToLowerInvariant()
+    } catch { return '' }
+}
+
+function Get-PimTokenAppId {
+    <# SEC-12 companion: the appid a JWT claims. Same contract as Get-PimTokenTenantId. #>
+    [CmdletBinding()] param([string]$Token)
+    try {
+        $parts = "$Token".Split('.')
+        if ($parts.Count -lt 2) { return '' }
+        $p = $parts[1].Replace('-', '+').Replace('_', '/')
+        while ($p.Length % 4) { $p += '=' }
+        $claims = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($p)) | ConvertFrom-Json
+        return "$($claims.appid)".Trim().ToLowerInvariant()
+    } catch { return '' }
+}
+
 function Resolve-PimCertificate {
   param([string]$Thumbprint)
   $tp = if ($Thumbprint) { $Thumbprint } elseif ($global:PIM_CertThumbprint) { $global:PIM_CertThumbprint } else { $null }
@@ -278,6 +317,14 @@ function Get-PimRestToken {
   $thumb  = if ($CertThumbprint) { $CertThumbprint } elseif ($global:PIM_CertThumbprint) { $global:PIM_CertThumbprint } elseif ($env:PIM_CERT_THUMBPRINT) { $env:PIM_CERT_THUMBPRINT } else { $null }
   $cert   = if ($Certificate) { $Certificate } else { Resolve-PimCertificate -Thumbprint $thumb }
 
+  # 🔴 SEC-12 -- WHAT THE CALLER ASKED FOR, which is NOT the same as what resolution produced.
+  # Deliberately keyed on $thumb (the thumbprint that was REQUESTED), never on $cert (the object
+  # that was RESOLVED): a certificate that was named and could not be loaded is a FAILURE TO
+  # HONOUR the request, not the absence of one. Reading $cert here is exactly how a missing cert
+  # became "no explicit identity was asked for" and slid onto the ambient az fallback below.
+  $explicitIdentity = [bool]("$tenant".Trim()) -and [bool]("$cid".Trim()) -and
+                      ([bool]("$sec".Trim()) -or [bool]("$thumb".Trim()) -or [bool]$Certificate)
+
   # BUG-22 (2026-08-06): this cache was keyed by the AUDIENCE ALONE -- no tenant, no client
   # id. In any process that touches TWO tenants, the second one silently reused the first
   # one's token, so every call meant for tenant B went to tenant A. That is precisely the
@@ -311,6 +358,7 @@ function Get-PimRestToken {
   if ($Interactive -or $global:PIM_Interactive) {
     try { $res = Get-PimInteractiveToken -Audience $aud -TenantId $tenant } catch { Write-Verbose "PIM-Rest interactive auth failed for ${Resource}: $($_.Exception.Message)" }
   }
+  $primaryErr = $null
   if (-not $res) {
     try {
       if ($UseManagedIdentity -or $global:PIM_UseManagedIdentity -or ($env:IDENTITY_ENDPOINT -and -not $cid)) {
@@ -322,17 +370,67 @@ function Get-PimRestToken {
       elseif ($tenant -and $cid -and $cert) {
         $res = Get-PimClientCertToken -TenantId $tenant -ClientId $cid -Certificate $cert -Audience $aud
       }
-    } catch { Write-Verbose "PIM-Rest primary auth failed for ${Resource}: $($_.Exception.Message)" }
+    } catch {
+      # 🔴 SEC-12: KEEP the reason. This was Write-Verbose only, so the one fact that explained
+      # everything downstream was discarded at the moment it was known.
+      $primaryErr = "$($_.Exception.Message)"
+      Write-Verbose "PIM-Rest primary auth failed for ${Resource}: $primaryErr"
+    }
+  }
+
+  # =====================================================================================
+  # 🔴 SEC-12 -- AN EXPLICIT IDENTITY THAT CANNOT BE HONOURED IS AN ERROR, NOT A CUE TO
+  # BECOME SOMEBODY ELSE.
+  #
+  # MEASURED 2026-08-28: a caller asked for tenant f0fa27a0 (myfamilynetwork) + the PIM engine
+  # client id + its certificate thumbprint, and got back a token for tenant 7825c48b
+  # (ExpertsLiveDK -- A DIFFERENT COMPANY) with a different appid. Nothing in the return value
+  # said so. The certificate had failed to resolve, the failure went to Write-Verbose, and the
+  # "dev convenience" az fallback below then minted a token for whatever subscription happened
+  # to be the az DEFAULT context -- which on the dev machine is frequently another tenant
+  # entirely, a hazard CLAUDE.md already documents for hand-typed az commands.
+  #
+  # 🔑 THE POINT IS NOT THAT THE FALLBACK EXISTS. It is that it ran AFTER the caller had named a
+  # tenant, a client id and a credential. That caller has said exactly who it wants to be, and
+  # answering with a different principal is WORSE than answering with an error: the token works,
+  # so the failure surfaces far away as "Login failed" or "permission denied" and reads like an
+  # RBAC problem. It cost a session's time to chase, and the answer was three layers up.
+  #
+  # 📌 Same family as BUG-34, which fixed precisely this shape one layer down in
+  # New-PimSqlConnection ("a valid-but-wrong-tenant token was taken, so the explicitly
+  # configured SPN never got a turn") and left the az branch here standing.
+  # =====================================================================================
+  if (-not $res -and $explicitIdentity) {
+    $why = if ("$thumb".Trim() -and -not $cert) {
+             "certificate '$thumb' was not found in CurrentUser\My or LocalMachine\My, or has no usable private key"
+           } elseif ($primaryErr) { $primaryErr } else { 'the credential was not accepted' }
+    throw ("PIM-Rest: REFUSING to fall back to an ambient identity for '$Resource'. " +
+           "An explicit identity was requested (tenant '$tenant', client '$cid') and could not be honoured: $why. " +
+           'Fix the credential rather than letting the call authenticate as somebody else -- a token for the wrong ' +
+           'principal succeeds and then fails far away as a permissions error.')
   }
 
   if (-not $res) {
-    # dev convenience: reuse an existing az session
+    # dev convenience: reuse an existing az session. Only reached when NO explicit identity was
+    # requested (see the refusal above), so this is genuinely "whoever the operator is".
     try {
-      $j = az account get-access-token --resource $aud -o json 2>$null | ConvertFrom-Json
+      # 🔒 --tenant is not optional. Without it az answers for its DEFAULT context, which on a
+      # machine logged into several directories is a coin flip -- and on this one it lands on a
+      # different company's tenant.
+      $azArgs = @('account','get-access-token','--resource',$aud,'-o','json')
+      if ("$tenant".Trim()) { $azArgs += @('--tenant', "$tenant") }
+      $j = & az @azArgs 2>$null | ConvertFrom-Json
       if ($j.accessToken) {
-        $exp = (Get-Date).ToUniversalTime().AddMinutes(50)
-        try { $exp = ([datetime]$j.expiresOn).ToUniversalTime() } catch {}
-        $res = [pscustomobject]@{ token = $j.accessToken; expiresUtc = $exp }
+        # 🔒 AND VERIFY IT. Asking for a tenant is not the same as being given one; the whole
+        # defect was trusting a token nobody had looked at. A mismatch is discarded, not used.
+        $claimed = Get-PimTokenTenantId -Token "$($j.accessToken)"
+        if ("$tenant".Trim() -and $claimed -and ($claimed -ne "$tenant".Trim().ToLowerInvariant())) {
+          Write-Warning ("  [rest] DISCARDED an az token for '$Resource': it belongs to tenant $claimed, not the requested $tenant.")
+        } else {
+          $exp = (Get-Date).ToUniversalTime().AddMinutes(50)
+          try { $exp = ([datetime]$j.expiresOn).ToUniversalTime() } catch {}
+          $res = [pscustomobject]@{ token = $j.accessToken; expiresUtc = $exp }
+        }
       }
     } catch {}
   }

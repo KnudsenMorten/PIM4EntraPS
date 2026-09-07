@@ -42,18 +42,28 @@ $script:PimFeatureFlagCatalog = @(
     [ordered]@{ id = 'audit';       label = 'Audit';                    default = $true;  alwaysOn = $true  }
     [ordered]@{ id = 'support';     label = 'Support';                  default = $true;  alwaysOn = $false }
     [ordered]@{ id = 'settings';    label = 'Settings';                 default = $true;  alwaysOn = $true  }
+    # ---- Promoted to default ON (operator, 2026-08-31) -------------------------
+    # 🔑 These four shipped OFF "for gradual rollout" and the rollout never happened. The
+    # delegation wizard has existed since 2026-06-15 and was invisible in the operator's own
+    # portal the entire time -- he asked "where is the wizard, as i dont see it in the portal",
+    # and the answer was this line. A surface nobody can see is not a cautious rollout, it is a
+    # feature that was built and then hidden; and the §35 complaint that authoring is cramped
+    # was partly caused by the guided alternative being switched off.
+    # Operator decision: "delegation wizard, onboarding, advanced view grid, reports must be on
+    # by default." An operator who does not want one still turns it off in Settings -> Features.
+    [ordered]@{ id = 'new';         label = 'Create (delegation wizard)'; default = $true;  alwaysOn = $false }
+    [ordered]@{ id = 'onboarding';  label = 'Onboarding';               default = $true;  alwaysOn = $false }
+    [ordered]@{ id = 'grid';        label = 'Advanced View (grid)';     default = $true;  alwaysOn = $false }
+    [ordered]@{ id = 'reports';     label = 'Reports';                  default = $true;  alwaysOn = $false }
     # ---- Newer / advanced surfaces (default OFF -- enabled gradually) ----------
-    [ordered]@{ id = 'new';         label = 'Create (delegation wizard)'; default = $false; alwaysOn = $false }
-    [ordered]@{ id = 'onboarding';  label = 'Onboarding';               default = $false; alwaysOn = $false }
-    [ordered]@{ id = 'grid';        label = 'Advanced View (grid)';     default = $false; alwaysOn = $false }
+    # accessreview stays OFF: it was NOT named in the operator's decision, and promoting a
+    # surface he did not ask for would be exactly the drift this catalog exists to prevent.
     [ordered]@{ id = 'accessreview';label = 'Access Review';            default = $false; alwaysOn = $false }
-    [ordered]@{ id = 'reports';     label = 'Reports';                  default = $false; alwaysOn = $false }
     [ordered]@{ id = 'conformance'; label = 'Template Rollout';         default = $false; alwaysOn = $false }
     # MSP-2 / control #1+#2. OFF by shipped default like every other advanced surface:
     # most deployments are single-tenant and have no managed relationships at all, so the
     # tab would render an empty view. An MSP turns it on deliberately.
-    [ordered]@{ id = 'downlink';    label = 'MSP Downlink';             default = $false; alwaysOn = $false }
-)
+    [ordered]@{ id = 'downlink';    label = 'MSP Downlink';             default = $false; alwaysOn = $false })
 
 function Get-PimFeatureFlagCatalog {
     # Return a fresh COPY of the catalog (ordered hashtables) so a caller can

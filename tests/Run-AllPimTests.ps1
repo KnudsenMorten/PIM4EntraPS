@@ -55,6 +55,19 @@
 $here = $PSScriptRoot
 $exitCode = 0
 
+# 🔒 THE SUITE TESTS THE PRODUCT, NOT THIS MACHINE.
+# `config\*.custom.ps1` is gitignored PER-DEPLOYMENT config, so its presence and contents differ
+# per box -- which meant the suite's result did too. Measured 2026-09-04: adding a real customer
+# naming file on this host turned three suites red (the permission wizard expected `admin-jdo-id`
+# and got `admin-efif-jdo-id`; the endpoints suite lost 3 asserts; DOC-09 then reported the
+# resulting count mismatch as doc rot). The product was fine; the tests were reading a customer's
+# convention as if it were the shipped one.
+# Set for the whole run and INHERITED by every child-process suite and by the headless Manager
+# the GUI suites boot, so one line covers all three buckets.
+# 🪤 Deliberately NOT $env:...=1 only when the file exists: it must be unconditional, or the suite
+# behaves differently on a machine that happens to have customised config -- which is the bug.
+$env:PIM_IGNORE_CUSTOM_CONFIG = '1'
+
 # Belt-and-braces: clear any leftover headless Manager from a prior crashed/aborted run
 # so a zombie never holds a port or leaks a token into a fresh run's stdout.
 . (Join-Path $here '_shared\PimManagerBoot.ps1')
@@ -248,6 +261,8 @@ function Invoke-PimScenarioSuites {
 # these functions now return NOTHING, the child output simply flows through to the host
 # (and to a `*>` redirected log) instead of being captured into a variable.
 $script:PimFailedSuites = New-Object System.Collections.Generic.List[string]
+# DOC-09: <suite leaf name> -> assert count it produced this run. Populated by Invoke-PimSuiteChild.
+$script:PimSuiteTallies = @{}
 
 # ---- TEST-28: run each suite under an interpreter that satisfies its OWN #Requires ----
 #
@@ -308,8 +323,101 @@ function Invoke-PimSuiteChild {
         return
     }
     if ($exe -ne 'powershell.exe') { Write-Host ("   (pwsh 7)") -ForegroundColor DarkGray }
-    & $exe -NoProfile -ExecutionPolicy Bypass -File $Path
-    if ($LASTEXITCODE -ne 0) { [void]$script:PimFailedSuites.Add($Label) }
+    # DOC-09: capture the child's TALLY as it runs, so docs/TESTS.md's claimed assert counts can be
+    # checked against reality without running anything twice.
+    #
+    # 🔴 READ THE `return NOTHING` WARNING ABOVE BEFORE CHANGING THIS LINE. The hazard recorded
+    # there is assigning this function's OUTPUT to a variable -- `$fail = Invoke-...` captured the
+    # child's stdout along with the count, produced a truthy array, and forced exit 1 on a fully
+    # green run while swallowing the output that would have explained it.
+    # `Tee-Object -Variable` is safe precisely because it does NOT change that: the child's output
+    # still flows out of this function to the host (and to a redirected log) exactly as before, and
+    # this function still returns nothing of its own. The capture is a side channel, not a return.
+    & $exe -NoProfile -ExecutionPolicy Bypass -File $Path | Tee-Object -Variable __childOut
+    $code = $LASTEXITCODE
+    $leaf = Split-Path -Leaf $Path
+    $txt  = ($__childOut | Out-String)
+    # Suites print their tally in several shapes; take the LAST match so a per-section count
+    # earlier in the output cannot be mistaken for the total.
+    $m = [regex]::Matches($txt, '(?i)(\d+)\s*(?:passed|pass)\s*[,/]\s*(\d+)\s*(?:failed|fail)')
+    if ($m.Count -gt 0) { $script:PimSuiteTallies[$leaf] = [int]$m[$m.Count - 1].Groups[1].Value }
+    elseif ($txt -match '(?i)ALL\s+(\d+)\s+ASSERTIONS?\s+PASSED') { $script:PimSuiteTallies[$leaf] = [int]$Matches[1] }
+    if ($code -ne 0) { [void]$script:PimFailedSuites.Add($Label) }
+}
+
+function Test-PimDocumentedAssertCounts {
+    <#
+      DOC-09 -- fail the run when docs/TESTS.md's assert counts stop matching the suites.
+
+      DOC-08 put this check inside PIM.Tests.ps1, where it could only see the suites the Pester
+      phase runs as children -- 6 of 34 claims. Pester runs BEFORE the functional suites, so the
+      rest were reported as UNVERIFIED. This is the same check at the level that can actually see
+      everything: after every child suite has run, using the tallies they already produced.
+
+      🔑 Why a machine at all: measured 2026-08-28, FOUR claims in TESTS.md were wrong and one suite
+      was listed twice with two different counts. An assert COUNT is the one field in that table
+      that cannot be re-derived by reading the code, so it is the one field that rots invisibly
+      while still looking authoritative -- and the doc had already recorded this exact rot once
+      before ("192 while the suite was already running 203").
+    #>
+    param([string]$DocPath)
+    if (-not (Test-Path -LiteralPath $DocPath)) {
+        $script:PimInventoryProblems += ("DOC-09: docs/TESTS.md not found at $DocPath")
+        return
+    }
+    # Merge in the tallies PIM.Tests.ps1 captured for the suites IT fanned out. Without this the
+    # two guards each cover part of the doc and a claim can slip between them -- which is how the
+    # first cut reported "28 of 35" while another 6 were being checked somewhere else entirely.
+    try {
+        $sink = Join-Path ([IO.Path]::GetTempPath()) 'pim-suite-tallies.json'
+        if (Test-Path -LiteralPath $sink) {
+            $fromPester = Get-Content -Raw -LiteralPath $sink | ConvertFrom-Json
+            foreach ($prop in $fromPester.PSObject.Properties) {
+                if (-not $script:PimSuiteTallies.ContainsKey($prop.Name)) { $script:PimSuiteTallies[$prop.Name] = [int]$prop.Value }
+            }
+            Remove-Item -LiteralPath $sink -Force -ErrorAction SilentlyContinue
+        }
+    } catch { }   # a missing or unreadable sink just means less coverage, reported below
+
+    $claims = @{}
+    foreach ($line in (Get-Content -LiteralPath $DocPath)) {
+        if ($line -notmatch '`tests/(Test-Pim[A-Za-z0-9]+\.ps1)`') { continue }
+        $suite = $Matches[1]
+        $claim = $null
+        if     ($line -match '\*\*Now (\d+) asserts\*\*') { $claim = [int]$Matches[1] }
+        elseif ($line -match '\*\*(\d+)\s*/\s*0\*\*')     { $claim = [int]$Matches[1] }
+        if ($null -eq $claim) { continue }
+        if (-not $claims.ContainsKey($suite)) { $claims[$suite] = New-Object System.Collections.Generic.List[int] }
+        if ($claims[$suite] -notcontains $claim) { [void]$claims[$suite].Add($claim) }
+    }
+    # A guard that checks nothing passes silently -- the failure this whole family is about.
+    if ($claims.Keys.Count -lt 10) {
+        $script:PimInventoryProblems += ("DOC-09: only $($claims.Keys.Count) assert-count claim(s) found in TESTS.md -- the extractor is probably broken, which would make this check pass while verifying nothing")
+        return
+    }
+    $checked = 0
+    foreach ($kv in $claims.GetEnumerator()) {
+        # The doc contradicting ITSELF is a failure regardless of which number is right.
+        if ($kv.Value.Count -gt 1) {
+            $script:PimInventoryProblems += ("DOC-09: TESTS.md gives $($kv.Key) TWO different counts ($($kv.Value -join ' and ')) -- it cannot be trusted about either")
+            continue
+        }
+        if (-not $script:PimSuiteTallies.ContainsKey($kv.Key)) { continue }
+        $checked++
+        $actual = $script:PimSuiteTallies[$kv.Key]
+        if ($actual -ne $kv.Value[0]) {
+            $script:PimInventoryProblems += ("DOC-09: TESTS.md says $($kv.Key) is $($kv.Value[0]) asserts; it produced $actual")
+        }
+    }
+    $unverified = @($claims.Keys | Where-Object { -not $script:PimSuiteTallies.ContainsKey($_) } | Sort-Object)
+    Write-Host ("`n== DOC-09: {0} of {1} documented assert-count claim(s) verified against this run ==" -f `
+                $checked, $claims.Keys.Count) -ForegroundColor Magenta
+    if ($unverified.Count) {
+        # Visibility, not a gate: a suite may legitimately not run in a given invocation (-Scenario
+        # off, gates skipped). Silence here would let this guard's coverage erode unnoticed, which
+        # is the failure it exists to prevent.
+        Write-Host ("   not verified by this run: {0}" -f ($unverified -join ', ')) -ForegroundColor DarkYellow
+    }
 }
 
 function Invoke-PimStandaloneGates {
@@ -412,6 +520,7 @@ if ($pester) {
     # arriving as an anonymous count.
     if ($Scenario) { Invoke-PimScenarioSuites -Root $here }
     Invoke-PimStandaloneGates -Root $here -Gates $StandaloneGates
+    Test-PimDocumentedAssertCounts -DocPath (Join-Path $solutionRoot 'docs\TESTS.md')
     Write-PimRunSummary -PesterFailed ([int]$r.FailedCount) -InventoryFailed $script:PimInventoryProblems.Count -InventoryReasons $script:PimInventoryProblems
     if ($r.FailedCount -or $script:PimFailedSuites.Count) { $exitCode = 1 }
 } else {
@@ -423,6 +532,7 @@ if ($pester) {
     }
     if ($Scenario) { Invoke-PimScenarioSuites -Root $here }
     Invoke-PimStandaloneGates -Root $here -Gates $StandaloneGates
+    Test-PimDocumentedAssertCounts -DocPath (Join-Path $solutionRoot 'docs\TESTS.md')
     Write-PimRunSummary -InventoryFailed $script:PimInventoryProblems.Count -InventoryReasons $script:PimInventoryProblems
     if ($script:PimFailedSuites.Count) { $exitCode = 1 }
 }

@@ -60,7 +60,10 @@ param(
     [string]$AcrName         = "$($env:PIM_AcrName)",
     [string]$ImageRepo       = 'pim-manager',
     [string]$ManagerApp      = 'ca-pim-manager',
-    [string[]]$Apps          = @('ca-pim-manager','ca-pim-scheduler','ca-pim-engine','ca-pim-connector','ca-pim-deltaqueue','ca-pim-discovery'),
+    [string[]]$Apps          = # empty = DISCOVER (Update-PimContainers.ps1 enumerates the resource group).
+    # The hard-coded six-app list was wrong for every real topology -- only ca-pim-manager
+    # exists -- and it was copy-pasted into FOUR entry points, so fixing one changed nothing.
+    @(),
     [string]$PinnedTag,
     # BUG-48: this is the CUSTOMER auto-update path, so the tick Job has to be re-stamped here
     # too -- otherwise a customer's GUI advances and their reconciling engine stays on the old
@@ -72,6 +75,9 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 $here = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent $MyInvocation.MyCommand.Path }
+# Guarded `az` shadow -- see _PimAz.ps1. az writes ordinary WARNINGS to stderr and PowerShell 5.1
+# makes any such write terminating under $ErrorActionPreference='Stop'. Must precede the first az call.
+. "$here\_PimAz.ps1"
 $solRoot = Split-Path -Parent (Split-Path -Parent $here)        # SOLUTIONS/PIM4EntraPS
 . (Join-Path $solRoot 'engine\_shared\PIM-SyncAutomateIT.ps1')
 

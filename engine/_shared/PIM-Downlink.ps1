@@ -102,6 +102,68 @@ function Get-PimDownlinkValue {
 # Input rows may be hashtables OR PSCustomObjects (UserName + Ring). Returns the
 # filtered subset (same shape) sorted by Ring then UserName for determinism.
 # ---------------------------------------------------------------------------
+function Select-PimUnrecognisableAdmins {
+    <#
+      IMP-13 -- WOULD THE SLAVE'S OWN ENGINE EVEN SEE THE ACCOUNTS THIS SYNC IS ABOUT TO CREATE?
+
+      The Admins provider limits its live set to accounts whose UPN starts with a configured
+      `AdminAccountPatterns` prefix -- fail-closed, and correctly so. A synced MSP admin lands as
+      `<MSP UserName>@<slave domain>`, so if the slave's conventions do not include the MSP's
+      prefix the live set EXCLUDES them, the diff reads "not present", and **every tick tries to
+      create them again**.
+
+      🔴 THE HARM IS NOT THE LOOP, IT IS WHAT THE LOOP LEAVES BEHIND. Each pass creates a
+      PRIVILEGED ACCOUNT in the customer's tenant that the customer's own engine will never manage,
+      never review, and never disable -- an orphan admin, produced by a sync that reported success.
+      Not creating it is strictly safer than creating one nobody owns.
+
+      🔒 AND THE FIX IS *NOT* TO WIDEN THE CUSTOMER'S PATTERNS FROM OUR SIDE. `AdminAccountPatterns`
+      is the customer's own fail-closed scoping control; merging the MSP's prefix into it would be
+      the master editing a customer's security configuration to make its own write succeed. That is
+      exactly what §22 ("MSP never writes to a customer tenant") and the MSP-3 consent model forbid,
+      and it would be indistinguishable from the sync quietly granting itself more reach. So this
+      DETECTS and REPORTS; the operator (or onboarding) fixes the convention, on the customer side.
+
+      Returns @{ checked; unrecognised; recognised; prefixes; reason }.
+      🪤 `checked = $false` when no prefixes are known -- the S5 master-side case, where we simply
+      cannot see the slave's config. That is "we did not look", NOT "it is fine", and the caller must
+      not read an empty `unrecognised` list as a clean bill of health.
+      PURE: no store, no network.
+    #>
+    [CmdletBinding()]
+    param(
+        [AllowEmptyCollection()][string[]]$AdminUserNames = @(),
+        [AllowEmptyCollection()][string[]]$SlaveAdminPrefixes = @()
+    )
+    $pref = @(@($SlaveAdminPrefixes) | ForEach-Object { "$_".Trim() } | Where-Object { $_ })
+    if (-not $pref.Count) {
+        return [ordered]@{
+            checked = $false; unrecognised = @(); recognised = @($AdminUserNames); prefixes = @()
+            reason  = "the slave's admin naming prefixes are not known here, so recognisability was NOT evaluated (this is 'did not look', not 'they are fine')"
+        }
+    }
+    $bad = New-Object System.Collections.Generic.List[string]
+    $ok  = New-Object System.Collections.Generic.List[string]
+    foreach ($u in @($AdminUserNames)) {
+        $n = "$u".Trim()
+        if (-not $n) { continue }
+        $lc = $n.ToLowerInvariant()
+        $hit = $false
+        foreach ($p in $pref) { if ($lc.StartsWith($p.ToLowerInvariant())) { $hit = $true; break } }
+        if ($hit) { $ok.Add($n) | Out-Null } else { $bad.Add($n) | Out-Null }
+    }
+    $badArr = @($bad.ToArray())
+    return [ordered]@{
+        checked      = $true
+        unrecognised = $badArr
+        recognised   = @($ok.ToArray())
+        prefixes     = $pref
+        reason       = $(if ($badArr.Count) {
+                            "$($badArr.Count) admin(s) do not match the slave's admin naming prefixes ($($pref -join ', ')) -- the slave's engine would NOT see them, so each tick would create them again and leave an unmanaged privileged account behind. Add the MSP's prefix to the CUSTOMER's AdminAccountPatterns (their config, their decision), or rename the admins."
+                        } else { '' })
+    }
+}
+
 function Select-PimDownlinkAdmins {
     param(
         [object[]]$Admins = @(),
@@ -480,6 +542,269 @@ function Test-PimDownlinkClassAllowed {
     return @{ allowed = $true; capability = $cap; reason = '' }
 }
 
+function Select-PimCustomerBlockedCapabilities {
+    <#
+      SEC-10 / MSP-3 step 4 -- read the CUSTOMER's opt-outs out of THEIR OWN manifest.
+
+      🔴 WHY THIS EXISTS. The class gate above was built, unit-tested and proven against a
+      real bundle -- and **no runtime path could reach it**. `Get-PimDownlinkPlan` honours
+      `-BlockedCapabilities`, but `Invoke-PimManagedDownlink` did not declare the parameter
+      and the entry script never read the manifest, so in production the customer's list was
+      ALWAYS empty and the customer veto SEC-10 is about did not exist outside the tests.
+      That is BUG-29's shape exactly, one layer further out: the orchestrator's own comment
+      on `-RingPlan` says *"this parameter is the link that was missing -- the gate existed
+      and nothing could reach it"*, and the same sentence had become true of this one.
+
+      PURE on purpose: it takes the ALREADY-PARSED manifest object, so the file read stays in
+      the entry script and this stays offline-testable. Shape is the platform's, not PIM's --
+      `Solutions[]` entries carrying `Name` + `blockCapabilities`, exactly as
+      `SOLUTIONS/PlatformConfiguration/INTERNAL/Sync-AutomateIT-Engine.ps1` parses it. Do not
+      invent a PIM-private consent file: the customer's own bootstrap manifest is the strongest
+      form the customer gate can take (their file, their choice), which is what makes SEC-10
+      closable by ADOPTION rather than invention.
+
+      Absent manifest / absent solution / absent key => @() => nothing blocked => exactly
+      today's behaviour. The gate stays inert until a customer actually opts out.
+    #>
+    param(
+        [Parameter()][AllowNull()][object]$Manifest,
+        [Parameter(Mandatory)][string]$Solution
+    )
+    if ($null -eq $Manifest) { return @() }
+    $want = "$Solution".Trim().ToLowerInvariant()
+    $out = New-Object System.Collections.Generic.List[string]
+    foreach ($s in @($Manifest.Solutions)) {
+        if (-not $s) { continue }
+        if ("$($s.Name)".Trim().ToLowerInvariant() -ne $want) { continue }
+        if (-not ($s.PSObject.Properties.Name -contains 'blockCapabilities')) { continue }
+        foreach ($b in @($s.blockCapabilities)) {
+            $n = "$b".Trim()
+            if ($n -and ($out -notcontains $n)) { [void]$out.Add($n) }
+        }
+    }
+    # .ToArray() -- never a bare @($list) on a List[object]; see the trap note in TESTS.md.
+    return $out.ToArray()
+}
+
+function New-PimAcceptanceRecord {
+    <#
+      MSP-3 step 5 -- THE UPLINK PAYLOAD. Pure.
+
+      MSP-3's ACCEPT step is two gates: the MSP publishes, the customer accepts. Both now exist and
+      are audited (SEC-10b / BUG-78 / BUG-79). **Nothing reported what they DECIDED**, so from the
+      operator's side "the customer declined roles", "the ring held the version" and "that tenant
+      has not run in a week" were the same observation: silence.
+
+      🔒 WHY THE FRAMEWORK INSISTS ON CAPABILITIES, NOT JUST VERSIONS. Framework §8: *"It must report
+      capabilities, not just versions -- otherwise 'held by policy' and 'failed to apply' are
+      identical, which is precisely the ambiguity ring gating introduces."* So this record carries
+      the four-state RING-1 vocabulary, not a boolean: what RAN, what the operator HELD, what the
+      customer BLOCKED, and what was withheld by TARGETING (which is none of the three -- it means
+      the artifact was never offered to this tenant at all).
+
+      🪤 AND THE FIELD THAT MAKES SILENCE VISIBLE IS THE TIMESTAMP, not the outcome. §8 again: *"A
+      customer whose sync never ran sends no email. Absence of failure mail is indistinguishable
+      from health."* `decidedAtUtc` is what lets the operator see a tenant that has stopped
+      reporting, which is the failure no outcome field can express.
+
+      🔒 SCOPE, STATED PLAINLY: this builds the PAYLOAD and nothing else. The TRANSPORT -- the
+      authenticated append-only API in the operator tenant, backed by SQL -- is framework §8.2 and
+      belongs to `SOLUTIONS/PlatformMonitoring`, not to PIM. PIM must not invent a second one: an
+      inbound path from ~30 customers into the operator environment is exactly the decision §8.2
+      already took deliberately, and a PIM-private variant would bypass that reasoning. What PIM
+      owes is a record the transport can carry, and that record existing at all is the half that
+      unblocks the other.
+
+      PURE: no clock (pass -NowUtc), no disk, no network -- so the shape is testable offline and the
+      timestamp is injectable rather than untestable.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][object]$Plan,
+        [Parameter(Mandatory)][string]$TenantId,
+        [object]$RingPlan,
+        [string[]]$BlockedCapabilities = @(),
+        [string]$DecidedBy = '',
+        [datetime]$NowUtc = ([datetime]::UtcNow),
+        [switch]$WhatIfMode
+    )
+    # 🪤 A REFUSAL PLAN IS A DIFFERENT SHAPE. The early returns in Get-PimDownlinkPlan (ring hold,
+    # bad signature, version mismatch) carry only ok/reason/scenarioId/ring/admins/sync/content/
+    # baselineVersion/verify -- no classHeld, no notTargeted, no retracts. And `@($null).Count` is
+    # **1**, not 0 (measured under BUG-70b earlier today), so counting those fields naively would
+    # report a refused run as having held exactly one thing. Every count here goes through this
+    # helper, which treats "the property does not exist" as zero rather than as one phantom item.
+    $countOf = { param($v) if ($null -eq $v) { 0 } else { @($v).Count } }
+    $held    = if ($null -eq $Plan.classHeld)   { @() } else { @($Plan.classHeld) }
+    $skipped = if ($null -eq $Plan.notTargeted) { @() } else { @($Plan.notTargeted) }
+
+    # Which classes actually ran = the ones the downlink carries, minus the ones held. Named
+    # explicitly rather than derived at the far end, because "not mentioned" is not an outcome.
+    $allClasses = @('msp-admins', 'msp-roles', 'msp-groups')
+    $blockedSet = @($BlockedCapabilities | Where-Object { $_ })
+    $heldCaps   = @($blockedSet)   # a class in classHeld is there because the CUSTOMER blocked it
+    $ranCaps    = @($allClasses | Where-Object { $heldCaps -notcontains $_ })
+
+    $ringAction  = if ($RingPlan) { "$($RingPlan.Action)" } else { 'track-current' }
+    $ringNumber  = if ($RingPlan -and $null -ne $RingPlan.Ring) { $RingPlan.Ring } else { $null }
+    $ringVersion = if ($RingPlan -and "$($RingPlan.Version)".Trim()) { "$($RingPlan.Version)" } else { '' }
+
+    return [ordered]@{
+        schema           = 1
+        solution         = 'PIM4EntraPS'
+        kind             = 'msp-downlink-acceptance'
+        tenantId         = "$TenantId"
+        scenarioId       = "$($Plan.scenarioId)"
+        # OUTCOME -- ok=$false is a REFUSAL (bad signature, ring hold, version mismatch), which is a
+        # different thing from "applied nothing because the customer blocked it all".
+        accepted         = [bool]$Plan.ok
+        reason           = "$($Plan.reason)"
+        whatIf           = [bool]$WhatIfMode
+        # WHAT ARRIVED
+        baselineVersion  = $Plan.baselineVersion
+        assignmentRing   = $Plan.ring
+        # THE OPERATOR'S GATE (RING-1 plane 2)
+        ringAction       = $ringAction
+        ring             = $ringNumber
+        ringApprovesVersion = $ringVersion
+        # THE CUSTOMER'S GATE -- the four states, kept distinct on purpose
+        capabilitiesRan     = @($ranCaps)
+        capabilitiesBlocked = @($heldCaps)
+        # counts, so a fleet view can aggregate without parsing prose
+        adminsProjected  = (& $countOf $Plan.admins)
+        rolesProjected   = (& $countOf $Plan.assignments)
+        heldCount        = $held.Count
+        notTargetedCount = $skipped.Count
+        # 🔒 Carried explicitly: a downlink never retracts. Without this the operator cannot tell a
+        # narrowing from a revocation, which is the exact misreading MSP-4 was corrected for.
+        retracts         = [bool]$Plan.retracts
+        decidedBy        = "$DecidedBy"
+        decidedAtUtc     = $NowUtc.ToString('o')
+    }
+}
+
+function Write-PimAcceptanceRecord {
+    <#
+      MSP-3 step 5 -- persist the acceptance record so the state EXISTS before a transport does.
+
+      Written NEXT TO the tenant's sync files, because that folder is already the per-tenant
+      artifact location the downlink owns and the operator already knows to look in. One file per
+      tenant, overwritten each run: this is CURRENT STATE ("where does this tenant stand"), not a
+      log. A history belongs in the §8 SQL backend, which can retain properly; a growing pile of
+      JSON on a customer's disk is not an audit trail, it is litter nobody prunes.
+
+      🔒 BEST-EFFORT BY DESIGN, and this is a deliberate asymmetry worth defending: failing to
+      RECORD what happened must never fail the downlink that already happened. The record is
+      observability; the downlink is the work. Inverting that would let a full disk or a locked
+      file turn a successful, already-applied sync into a reported failure -- and the operator
+      would then "fix" a sync that was never broken.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][object]$Record,
+        [Parameter(Mandatory)][string]$Folder,
+        [switch]$Quiet
+    )
+    try {
+        if (-not (Test-Path -LiteralPath $Folder)) { New-Item -ItemType Directory -Path $Folder -Force | Out-Null }
+        $path = Join-Path $Folder 'acceptance-latest.json'
+        ($Record | ConvertTo-Json -Depth 6) | Set-Content -LiteralPath $path -Encoding UTF8
+        if (-not $Quiet) {
+            Write-Host ("  [uplink] acceptance recorded: {0} (accepted={1}, ran=[{2}], blocked=[{3}])" -f `
+                $path, $Record.accepted, (@($Record.capabilitiesRan) -join ','), (@($Record.capabilitiesBlocked) -join ',')) -ForegroundColor DarkCyan
+        }
+        return $path
+    } catch {
+        Write-Warning ("  [uplink] could not write the acceptance record to '$Folder': $($_.Exception.Message). " +
+                       "The downlink itself is unaffected -- this is observability, not the work.")
+        return $null
+    }
+}
+
+function Resolve-PimCustomerBlockedCapabilities {
+    <#
+      BUG-79 -- the IO half of the customer gate, SHARED by every entry point that can reach the
+      downlink. `Select-PimCustomerBlockedCapabilities` above is the pure decision; this finds the
+      file, reads it, and applies the three-way absent / present / unreadable policy.
+
+      🔑 WHY THIS IS A FUNCTION AND NOT COPIED INTO EACH ENTRY SCRIPT. BUG-79 was first written up
+      as an operator decision -- *"should the scenario-run entry DUPLICATE this resolution, or just
+      accept the answer as pass-through?"* -- and that framing was wrong: the third option is to
+      share it, which is neither. Duplicating it would put the refuse-on-unparseable rule in two
+      places and guarantee they drift; bare pass-through would leave the identical silent hole for
+      anyone who forgets to supply the parameter. One resolver, called by both, has neither defect.
+
+      🔒 THE THREE CASES ARE DELIBERATELY DISTINCT, and collapsing any two is a security bug:
+        * NO manifest      -> @() . The normal single-tenant state. Nothing blocked.
+        * manifest present -> whatever it says, possibly @() ("blocks nothing" IS an answer).
+        * present, UNREADABLE -> THROW. Reading a corrupt opt-out list as "blocked nothing" is
+          consent by parse error; reading it as "blocked everything" strands the downlink on a
+          trailing comma. Neither silent reading is ever discovered; a refusal is fixed in a minute.
+
+      -SolutionRoot is the solution directory (…\SOLUTIONS\PIM4EntraPS); the manifest is resolved
+      two levels above it, which is C:\AutomateIT\bootstrap\Sync-AutomateIT.json on a customer.
+      Returns $null when there is nothing to say, so a caller can tell "no manifest" from "@()" and
+      keep the gate inert rather than forwarding an empty list it never actually read.
+    #>
+    [CmdletBinding()]
+    param(
+        [string]$ManifestPath,
+        [string]$SolutionRoot,
+        [string]$Solution = 'PIM4EntraPS',
+        [switch]$Quiet
+    )
+    $path = "$ManifestPath".Trim()
+    if (-not $path) {
+        if (-not "$SolutionRoot".Trim()) { return $null }
+        # 🔴 THE CONTAINER HAS ONE FEWER DIRECTORY LEVEL THAN A CUSTOMER INSTALL, AND THIS LINE
+        # ASSUMED THE CUSTOMER SHAPE. On a customer the solution sits at
+        # C:\AutomateIT\SOLUTIONS\PIM4EntraPS, so "two levels up" is C:\AutomateIT and the manifest
+        # is beside it. In the pim-manager IMAGE the solution is at /app/PIM4EntraPS -- there is no
+        # SOLUTIONS level -- so two levels up walks off the top of the filesystem, Split-Path
+        # returns EMPTY, and Join-Path threw
+        #     Cannot bind argument to parameter 'Path' because it is an empty string
+        # MEASURED 2026-09-03: this killed RIDE's downlink Job on every run, before a single line
+        # of downlink work, and the message named neither this function nor a manifest -- the same
+        # code plans correctly on Windows, which is why it survived every offline test.
+        # Running out of parents is not an error: it means there is no customer manifest root here,
+        # which is exactly the "nothing to say" case this function already returns $null for.
+        $up1 = Split-Path -Parent $SolutionRoot
+        $up2 = if ("$up1".Trim()) { Split-Path -Parent $up1 } else { '' }
+        if (-not "$up2".Trim()) {
+            if (-not $Quiet) { Write-Host ("  customer gate: no manifest root two levels above '$SolutionRoot' (container layout) -- class gate INERT (the customer blocks nothing)") -ForegroundColor DarkYellow }
+            return $null
+        }
+        # Built with Combine rather than the old 'bootstrap\Sync-AutomateIT.json' literal.
+        # 📌 To be accurate about why: PowerShell's FileSystem provider DOES normalise a backslash
+        # to '/' on Linux -- measured in this same run, where a path built as 'setup\Invoke-...ps1'
+        # resolved and reported back as /app/PIM4EntraPS/setup/Invoke-PimScenarioRun.ps1. So the
+        # separator was NOT the failure here, and an earlier note claiming it would silently miss a
+        # customer manifest was wrong. Combine is used because it states the intent platform-
+        # independently, not because the old form was broken.
+        $path = [System.IO.Path]::Combine($up2, 'bootstrap', 'Sync-AutomateIT.json')
+    }
+    if (-not (Test-Path -LiteralPath $path)) {
+        # Say it out loud. A silent absence is exactly how BUG-29 survived for months.
+        if (-not $Quiet) { Write-Host ("  customer gate: no manifest at $path -- class gate INERT (the customer blocks nothing)") -ForegroundColor DarkYellow }
+        return $null
+    }
+    $blocked = $null
+    try {
+        $manifest = (Get-Content -Raw -LiteralPath $path) | ConvertFrom-Json
+        $blocked = @(Select-PimCustomerBlockedCapabilities -Manifest $manifest -Solution $Solution)
+    } catch {
+        throw ("SEC-10: the customer manifest '$path' exists but could NOT be parsed " +
+               "($($_.Exception.Message)). Refusing to run: an unreadable opt-out list must never " +
+               "be treated as 'the customer blocked nothing'. Fix the JSON, or pass " +
+               "-BlockedCapabilities explicitly to state the intent.")
+    }
+    if (-not $Quiet) {
+        Write-Host ("  customer gate: {0} -> {1}" -f $path,
+            $(if (@($blocked).Count) { "BLOCKS $(@($blocked) -join ', ')" } else { 'blocks nothing' })) -ForegroundColor Cyan
+    }
+    return $blocked
+}
+
 # ---------------------------------------------------------------------------
 # MSP-2 / control #2 -- ROLE PROJECTION (pure).
 #
@@ -529,10 +854,19 @@ function Select-PimProjectedAssignments {
         # pim.TenantRoleProjection rows for THIS tenant: @{ Mode; GroupTag }.
         [object[]]$Policy = @(),
         # Optional: the group tags that actually exist in the slave.
-        [string[]]$SlaveGroupTags
+        [string[]]$SlaveGroupTags,
+        # The admins dropped by the artifact TARGET selector rather than by the ring.
+        # 🔑 WITHOUT THIS, ONE AXIS WEARS ANOTHER'S NAME. Both narrowings remove an admin from
+        # -AdminUserNames, so from in here they are indistinguishable -- and the message said
+        # "ring" for both. MSP-4's whole premise is that the four narrowings stay apart because
+        # each has a DIFFERENT FIX: a ring is raised, a Target is rewritten. Telling an operator
+        # to raise a ring that was never the reason is worse than saying nothing.
+        [string[]]$NotTargetedAdminNames = @()
     )
     $allowed = New-Object System.Collections.Generic.HashSet[string]
     foreach ($u in @($AdminUserNames)) { [void]$allowed.Add("$u".Trim().ToLowerInvariant()) }
+    $notTargetedAdmins = New-Object System.Collections.Generic.HashSet[string]
+    foreach ($u in @($NotTargetedAdminNames)) { [void]$notTargetedAdmins.Add("$u".Trim().ToLowerInvariant()) }
 
     $allowRules = @(@($Policy) | Where-Object { "$(Get-PimDownlinkValue -Object $_ -Key 'Mode')".Trim().ToLowerInvariant() -eq 'allow' })
     $denyRules  = @(@($Policy) | Where-Object { "$(Get-PimDownlinkValue -Object $_ -Key 'Mode')".Trim().ToLowerInvariant() -eq 'deny'  })
@@ -552,7 +886,12 @@ function Select-PimProjectedAssignments {
         if (-not $user -or -not $tag) { & $mark $excluded 'malformed row (missing UserName or GroupTag)'; continue }
         # the admin must have survived the ring gate for this slave
         if ($allowed.Count -and -not $allowed.Contains($user.ToLowerInvariant())) {
-            & $mark $excluded "admin '$user' did not reach this tenant's ring -- their roles do not either"; continue
+            if ($notTargetedAdmins.Contains($user.ToLowerInvariant())) {
+                & $mark $excluded "admin '$user' is not TARGETED at this tenant -- their roles do not project either"
+            } else {
+                & $mark $excluded "admin '$user' did not reach this tenant's ring -- their roles do not either"
+            }
+            continue
         }
         # deny wins over allow, always
         $hitDeny = @($denyRules | Where-Object { Test-PimProjectionTagMatch -Tag $tag -Pattern "$(Get-PimDownlinkValue -Object $_ -Key 'GroupTag')" })
@@ -851,7 +1190,11 @@ function Get-PimDownlinkPlan {
         # tenantTags map when not passed explicitly.
         [string[]]$TenantTags,
         # The customer's own blocked capabilities (RING-1). Absent => nothing blocked.
-        [string[]]$BlockedCapabilities = @()
+        [string[]]$BlockedCapabilities = @(),
+        # IMP-13. The SLAVE's own admin naming prefixes (its AdminAccountPatterns). Absent =>
+        # recognisability is NOT evaluated and the plan says so -- it is never assumed fine.
+        # Available in S6 (the downlink runs inside the slave); typically unknown master-side.
+        [string[]]$SlaveAdminPrefixes = @()
     )
     $ctx = Resolve-PimScenarioContext -Scenario $Scenario
     if (-not [bool]$ctx.syncAdminsPermissions) {
@@ -924,21 +1267,53 @@ function Get-PimDownlinkPlan {
     }
     $targetSkips = New-Object System.Collections.Generic.List[object]
     $classHeld   = New-Object System.Collections.Generic.List[object]
+    # IMP-13. Kept as its OWN list, not merged into the two above: four narrowings with one report
+    # means four possible causes and no way to tell them apart, and this one's fix lives in the
+    # CUSTOMER's naming conventions rather than in a ring or a Target.
+    $unrecognisedAdmins = New-Object System.Collections.Generic.List[object]
 
     # admins: the class gate first (a blocked class means NONE of them, and says so),
     # then per-artifact targeting.
     $adminClass = Test-PimDownlinkClassAllowed -Class 'admins' -BlockedCapabilities $BlockedCapabilities
     if (-not $adminClass.allowed) {
-        foreach ($a in $admins) { $classHeld.Add([ordered]@{ kind = 'admin'; name = "$(Get-PimDownlinkValue -Object $a -Key 'UserName')"; reason = $adminClass.reason }) | Out-Null }
+        foreach ($a in $admins) { $classHeld.Add([ordered]@{ kind = 'admin'; name = "$(Get-PimDownlinkValue -Object $a -Key 'UserName')"; UserName = "$(Get-PimDownlinkValue -Object $a -Key 'UserName')"; GroupTag = ''; reason = $adminClass.reason }) | Out-Null }
         $admins = @()
     } else {
         $keepAdmins = New-Object System.Collections.Generic.List[object]
         foreach ($a in $admins) {
             $tv = Test-PimArtifactTarget -Target "$(Get-PimDownlinkValue -Object $a -Key 'Target')" -TenantId $TenantId -TenantTags $effTags
             if ($tv.match) { $keepAdmins.Add($a) | Out-Null }
-            else { $targetSkips.Add([ordered]@{ kind = 'admin'; name = "$(Get-PimDownlinkValue -Object $a -Key 'UserName')"; reason = $tv.reason }) | Out-Null }
+            # MSP-4: `name` is the human label; `UserName`/`GroupTag` are the FIELDS a consumer
+            # keys on. The reach transpose has to answer "which tenants does THIS TAG reach", and
+            # parsing the tag back out of "user -> tag" is how a display string quietly becomes an
+            # interface. Same reasoning as `retracts` being a field rather than a log sentence.
+            else { $targetSkips.Add([ordered]@{ kind = 'admin'; name = "$(Get-PimDownlinkValue -Object $a -Key 'UserName')"; UserName = "$(Get-PimDownlinkValue -Object $a -Key 'UserName')"; GroupTag = ''; reason = $tv.reason }) | Out-Null }
         }
         $admins = @($keepAdmins.ToArray())
+    }
+
+    # IMP-13 -- WITHHOLD admins the slave's own engine could never see. Applied AFTER the ring and
+    # targeting gates so it reports on what would actually have been created, and kept separate
+    # from them because it has a different fix: this one is repaired in the CUSTOMER's naming
+    # conventions, not in a ring or a Target.
+    # 🔴 Withheld rather than created: an account the slave's Admins provider does not match is
+    # never in its live set, so the diff says "not present" forever -- every tick recreates it and
+    # leaves another unmanaged privileged account in the customer's tenant. Not creating it is
+    # strictly safer than creating one nobody owns.
+    $adminRecog = Select-PimUnrecognisableAdmins -SlaveAdminPrefixes $SlaveAdminPrefixes `
+                    -AdminUserNames @(@($admins) | ForEach-Object { "$(Get-PimDownlinkValue -Object $_ -Key 'UserName')" })
+    if ($adminRecog.checked -and @($adminRecog.unrecognised).Count) {
+        $unrec = New-Object System.Collections.Generic.HashSet[string]
+        foreach ($u in @($adminRecog.unrecognised)) { [void]$unrec.Add("$u".Trim().ToLowerInvariant()) }
+        $keepRecog = New-Object System.Collections.Generic.List[object]
+        foreach ($a in @($admins)) {
+            $un = "$(Get-PimDownlinkValue -Object $a -Key 'UserName')".Trim()
+            if ($unrec.Contains($un.ToLowerInvariant())) {
+                $unrecognisedAdmins.Add([ordered]@{ kind = 'admin'; name = $un; UserName = $un; GroupTag = ''
+                                                    reason = "the slave's admin naming prefixes ($($adminRecog.prefixes -join ', ')) do not match '$un' -- its engine would never see this account, so it would be recreated every tick and left unmanaged" }) | Out-Null
+            } else { $keepRecog.Add($a) | Out-Null }
+        }
+        $admins = @($keepRecog.ToArray())
     }
 
     # 3b) MSP-2 / control #2: project the master's role memberships for exactly the
@@ -954,14 +1329,14 @@ function Get-PimDownlinkPlan {
     $roleClass = Test-PimDownlinkClassAllowed -Class 'roles' -BlockedCapabilities $BlockedCapabilities
     if ($null -ne $srcAssign) {
         if (-not $roleClass.allowed) {
-            foreach ($a in @($srcAssign)) { $classHeld.Add([ordered]@{ kind = 'role'; name = "$(Get-PimDownlinkValue -Object $a -Key 'UserName') -> $(Get-PimDownlinkValue -Object $a -Key 'GroupTag')"; reason = $roleClass.reason }) | Out-Null }
+            foreach ($a in @($srcAssign)) { $classHeld.Add([ordered]@{ kind = 'role'; name = "$(Get-PimDownlinkValue -Object $a -Key 'UserName') -> $(Get-PimDownlinkValue -Object $a -Key 'GroupTag')"; UserName = "$(Get-PimDownlinkValue -Object $a -Key 'UserName')"; GroupTag = "$(Get-PimDownlinkValue -Object $a -Key 'GroupTag')"; reason = $roleClass.reason }) | Out-Null }
             $srcAssign = @()
         } else {
             $keepA = New-Object System.Collections.Generic.List[object]
             foreach ($a in @($srcAssign)) {
                 $tv = Test-PimArtifactTarget -Target "$(Get-PimDownlinkValue -Object $a -Key 'Target')" -TenantId $TenantId -TenantTags $effTags
                 if ($tv.match) { $keepA.Add($a) | Out-Null }
-                else { $targetSkips.Add([ordered]@{ kind = 'role'; name = "$(Get-PimDownlinkValue -Object $a -Key 'UserName') -> $(Get-PimDownlinkValue -Object $a -Key 'GroupTag')"; reason = $tv.reason }) | Out-Null }
+                else { $targetSkips.Add([ordered]@{ kind = 'role'; name = "$(Get-PimDownlinkValue -Object $a -Key 'UserName') -> $(Get-PimDownlinkValue -Object $a -Key 'GroupTag')"; UserName = "$(Get-PimDownlinkValue -Object $a -Key 'UserName')"; GroupTag = "$(Get-PimDownlinkValue -Object $a -Key 'GroupTag')"; reason = $tv.reason }) | Out-Null }
             }
             $srcAssign = @($keepA.ToArray())
         }
@@ -989,6 +1364,12 @@ function Get-PimDownlinkPlan {
             Assignments    = $srcAssign
             AdminUserNames = @(@($admins) | ForEach-Object { "$(Get-PimDownlinkValue -Object $_ -Key 'UserName')" })
             Policy         = $effPolicy
+            # 🔒 DECLARED **AND** FORWARDED. Session 32's one defect shape, four times over, was a
+            # parameter that existed on the callee and was never passed by the caller -- PowerShell
+            # binds only declared names, so nothing errors and the gate simply never sees anything.
+            # The admin target-skips are already in $targetSkips by this point (the admin gate runs
+            # above), so this is the honest set, not an empty placeholder.
+            NotTargetedAdminNames = @($targetSkips.ToArray() | Where-Object { "$($_.kind)" -eq 'admin' } | ForEach-Object { "$($_.UserName)" })
         }
         # BUG-59: with definitions in the bundle, an unknown tag is no longer automatically
         # unresolvable -- we may be about to CREATE that group. So the unresolved check is
@@ -1029,7 +1410,16 @@ function Get-PimDownlinkPlan {
     if ($null -ne $projection) { $contentArgs['Projection'] = $projection }
     $content = New-PimDownlinkSyncContent @contentArgs
 
-    $reason = "downlink plan for $($ctx.id): $($admins.Count) admin(s) reach slave ring $SlaveRing from baseline v$blVersion"
+    # 🔴 "PROJECTED", never "reach" -- and the difference is security-relevant, not stylistic.
+    # This sentence used to read "N admin(s) reach slave ring M". A narrowing run therefore
+    # printed "1 admin(s) reach" while THREE admins still held live access in that tenant:
+    # desired fell 3 -> 2 -> 1, live stayed 3, remove=0 throughout. Target controls FUTURE
+    # PROJECTION, not PRESENT STATE -- un-targeting an admin withholds the next projection, it
+    # does not take anything away. Reading "1 admin(s) reach" as "the other two no longer have
+    # access there" is exactly the misreading to prevent, and the ring-0 Global Administrator is
+    # the account it would most likely be made about. A plan is a statement about what WILL be
+    # sent, so it is worded in the tense it actually has.
+    $reason = "downlink plan for $($ctx.id): $($admins.Count) admin(s) PROJECTED to slave ring $SlaveRing from baseline v$blVersion"
     if ($null -ne $projection) {
         $reason += "; $(@($projection.projected).Count) role assignment(s) projected"
         $nEx = @($projection.excluded).Count; $nUn = @($projection.unresolved).Count
@@ -1046,8 +1436,34 @@ function Get-PimDownlinkPlan {
     # MSP-4: report the two new narrowings SEPARATELY from the policy's. Four different
     # reasons a thing can be absent, four different fixes -- merging them would leave an
     # operator guessing which one applied.
-    if ($targetSkips.Count) { $reason += "; $($targetSkips.Count) artifact(s) not TARGETED at this tenant" }
+    if ($targetSkips.Count) {
+        $reason += "; $($targetSkips.Count) artifact(s) not TARGETED at this tenant"
+        # A withheld ADMIN is the case that gets misread, so it is named as such and the
+        # non-retraction is said in the SAME breath rather than left to be inferred from a
+        # remove=0 further down the log. "Not sent" and "taken away" are the two readings this
+        # line has to keep apart.
+        # 🪤 `.ToArray()`, NOT `@($targetSkips)`. Wrapping THE LIST (rather than its array) in
+        # @() throws "Argument types do not match" -- a message that names no variable and
+        # underlines the whole pipeline. MEASURED in fresh processes on BOTH hosts: this is NOT
+        # a 5.1-vs-7 divergence (pwsh 7.6.3 and Windows PowerShell 5.1 both throw), so it is not
+        # a HOST-1 case. The actual discriminator is how the list was CONSTRUCTED:
+        #   New-Object System.Collections.Generic.List[object]   -> @($list) THROWS   (both hosts)
+        #   [System.Collections.Generic.List[object]]::new()     -> @($list) works    (both hosts)
+        # ...despite both reporting the identical type name. Safe forms either way: pipe it
+        # (`@($list | Where-Object {...})` enumerates fine) or materialise it with .ToArray().
+        # The neighbouring `notTargeted = @($targetSkips.ToArray())` already had the right idiom;
+        # the first version of this line did not copy it.
+        $adminSkips = @($targetSkips.ToArray() | Where-Object { "$($_.kind)" -eq 'admin' })
+        if ($adminSkips.Count) {
+            $reason += " ($($adminSkips.Count) of them ADMIN(S) -- WITHHELD, NOT RETRACTED: whatever access they already hold in this tenant is UNCHANGED by this plan)"
+        }
+    }
     if ($classHeld.Count)   { $reason += "; $($classHeld.Count) HELD -- the customer blocked that capability" }
+    # IMP-13: named in the reason, because the operator cannot fix this one from our side and the
+    # symptom without it (an account recreated on every tick, forever) points nowhere near the cause.
+    if ($unrecognisedAdmins.Count) {
+        $reason += "; $($unrecognisedAdmins.Count) admin(s) WITHHELD -- the slave's admin naming prefixes do not match them, so its engine would never see the accounts and would recreate them every tick (fix the CUSTOMER's AdminAccountPatterns)"
+    }
 
     return @{
         ok              = $true
@@ -1060,7 +1476,20 @@ function Get-PimDownlinkPlan {
         projection      = $projection
         definitions     = $definitionPlan
         notTargeted     = @($targetSkips.ToArray())
+        # A downlink plan NEVER removes access -- it only decides what is SENT. Stated as a
+        # field so a caller can assert it directly instead of inferring it from remove=0, which
+        # is the inference that went wrong. Retraction is a destructive CROSS-TENANT act and
+        # must be its own explicit operation; it must never ride in as a side effect of
+        # narrowing a Target. If this field is ever anything but $false, that decision was made
+        # somewhere it should not have been.
+        retracts        = $false
         classHeld       = @($classHeld.ToArray())
+        # IMP-13. A FIELD, so a caller asserts the property instead of parsing the reason line --
+        # the same rule `retracts` established. `adminRecognitionChecked` is the load-bearing half:
+        # an EMPTY unrecognisedAdmins list means "none" only when this is $true; when it is $false
+        # nobody looked, and the two must never read alike.
+        unrecognisedAdmins      = @($unrecognisedAdmins.ToArray())
+        adminRecognitionChecked = [bool]$adminRecog.checked
         tenantTags      = @($effTags)
         content         = $content
         baselineVersion = $blVersion
@@ -1200,6 +1629,20 @@ function Invoke-PimManagedDownlink {
         [object[]]$ProjectionPolicy = @(),
         [string[]]$SlaveGroupTags,
         [string]$SlaveStoreConnectionString,
+        # SEC-10 / MSP-3 step 4 -- THE CUSTOMER'S OWN VETO, and this parameter is the link
+        # that was missing. Get-PimDownlinkPlan has honoured -BlockedCapabilities since
+        # MSP-4 and the class gate was proven against a real bundle -- but this orchestrator
+        # did not DECLARE the parameter, so the entry path could never pass one and the gate
+        # was unreachable in production. That is BUG-29's shape exactly, one layer out: the
+        # -RingPlan comment above ("the gate existed and nothing could reach it") had become
+        # true of this gate too. Forwarded ONLY when supplied, so an absent list is
+        # byte-identical to previous behaviour.
+        [string[]]$BlockedCapabilities,
+        # IMP-13: the SLAVE's own admin naming prefixes. DECLARED here as well as on the plan,
+        # because PowerShell binds only declared names -- a gate the orchestrator cannot accept is
+        # a gate no entry point can reach, which is this file's most expensive recurring defect
+        # (BUG-29, SEC-10b, BUG-78, BUG-79). Same inert-when-absent rule as the two gates above.
+        [string[]]$SlaveAdminPrefixes,
         # IMP-12: the managed tenant's default verified domain, used to build each synced
         # admin's UPN on the S6 pull path. Omitted => resolved from the ambient tenant when
         # we are running inside it; never guessed.
@@ -1220,12 +1663,34 @@ function Invoke-PimManagedDownlink {
     if ($PSBoundParameters.ContainsKey('BaselineAssignments') -and $null -ne $BaselineAssignments) { $planArgs['BaselineAssignments'] = $BaselineAssignments }
     if ($PSBoundParameters.ContainsKey('SlaveGroupTags') -and $null -ne $SlaveGroupTags) { $planArgs['SlaveGroupTags'] = $SlaveGroupTags }
     if (@($ProjectionPolicy).Count) { $planArgs['ProjectionPolicy'] = $ProjectionPolicy }
+    # SEC-10: same inert-when-absent rule as -RingPlan. Bound-and-empty is forwarded too --
+    # "the customer blocks nothing" is a real answer the plan should report as such, and it
+    # is NOT the same as "nobody ever asked", which is what an unbound parameter means.
+    if ($PSBoundParameters.ContainsKey('BlockedCapabilities') -and $null -ne $BlockedCapabilities) { $planArgs['BlockedCapabilities'] = $BlockedCapabilities }
+    # IMP-13: DECLARED above AND FORWARDED here. Declaring without forwarding is the same defect
+    # wearing a parameter -- the caller supplies it and it dies inside the function.
+    if ($PSBoundParameters.ContainsKey('SlaveAdminPrefixes') -and $null -ne $SlaveAdminPrefixes) { $planArgs['SlaveAdminPrefixes'] = $SlaveAdminPrefixes }
     $plan = Get-PimDownlinkPlan -Scenario $Scenario -Doc $Doc -PublicKey $PublicKey `
         -BaselineAdmins $BaselineAdmins -TenantId $TenantId -SlaveRing $SlaveRing `
         -CentralRoot $CentralRoot -LocalRoot $LocalRoot -NowUtc $NowUtc -LastVersion $LastVersion @planArgs
     if (-not $plan.ok) {
         Write-Host "[downlink] REFUSED: $($plan.reason)" -ForegroundColor Red
-        return ([pscustomobject]@{ ok = $false; reason = $plan.reason; plan = $plan; staged = @(); fanout = $null })
+        # 🔑 A REFUSAL IS THE CASE THE OPERATOR MOST NEEDS TO SEE, so it is recorded on the way out
+        # rather than only on the success path. A ring HOLD, a bad signature or a version mismatch
+        # all land here -- and every one of them otherwise looks, from the operator's side,
+        # identical to a tenant that simply never ran. That indistinguishability is the whole
+        # reason framework §8 exists; a record written only when things go well would reproduce it.
+        # The refusal plan has no staging folder, so this falls back to the resolved local/central
+        # root and still lands somewhere the operator looks.
+        $refFolder = if ($plan.sync -and "$($plan.sync.tenantFolder)".Trim()) { $plan.sync.tenantFolder }
+                     elseif ("$LocalRoot".Trim())   { Join-Path $LocalRoot $TenantId }
+                     elseif ("$CentralRoot".Trim()) { Join-Path $CentralRoot $TenantId }
+                     else { '' }
+        $refRecord = New-PimAcceptanceRecord -Plan $plan -TenantId $TenantId -RingPlan $RingPlan `
+            -BlockedCapabilities $BlockedCapabilities -NowUtc $NowUtc -WhatIfMode:$WhatIfMode
+        $refPath = $null
+        if ("$refFolder".Trim()) { $refPath = Write-PimAcceptanceRecord -Record $refRecord -Folder $refFolder }
+        return ([pscustomobject]@{ ok = $false; reason = $plan.reason; plan = $plan; staged = @(); fanout = $null; acceptance = $refRecord; acceptancePath = $refPath })
     }
     Write-Host "[downlink] $($plan.reason)" -ForegroundColor Cyan
 
@@ -1285,7 +1750,18 @@ function Invoke-PimManagedDownlink {
         $fanoutScript = Join-Path (Split-Path -Parent $PSScriptRoot) '..\setup\Invoke-PimMspFanout.ps1'
         $fanoutScript = (Resolve-Path -LiteralPath $fanoutScript -ErrorAction SilentlyContinue)
         if ($fanoutScript) {
-            $srv = if ("$SqlServer".Trim()) { $SqlServer } elseif ($global:PIM_SqlServer) { "$($global:PIM_SqlServer)" } else { '.\SQLEXPRESS' }
+            # 🔴 NO `.\SQLEXPRESS` FALLBACK (operator 2026-08-28: SQL Express is not used, anywhere).
+            # This is the MSP FAN-OUT -- it writes accounts into managed tenants' stores. An
+            # unconfigured server defaulting to a local database meant the most consequential
+            # write path in the solution could aim itself at whatever happened to be installed on
+            # the box, and report a clean run. Refuse instead: PIM-SqlStore.ps1 records the two
+            # false greens (BUG-78, TEST-32) this default already produced.
+            $srv = if ("$SqlServer".Trim()) { "$SqlServer".Trim() } else { "$($global:PIM_SqlServer)".Trim() }
+            if (-not $srv) {
+                $msg = 'fan-out REFUSED: no SQL server configured (pass -SqlServer or set $global:PIM_SqlServer to the Azure SQL FQDN). There is no local default -- SQL Express is not a store this product uses.'
+                Write-Host "[downlink] $msg" -ForegroundColor Red
+                return ([pscustomobject]@{ ok = $false; reason = $msg; plan = $plan; staged = @($staged.ToArray()); fanout = $null })
+            }
             $db  = if ("$SqlDatabase".Trim()) { $SqlDatabase } elseif ($global:PIM_SqlDatabase) { "$($global:PIM_SqlDatabase)" } else { 'PimPlatform' }
             try {
                 $fanout = & $fanoutScript -ServerInstance $srv -Database $db -WhatIfMode:$WhatIfMode
@@ -1354,7 +1830,18 @@ function Invoke-PimManagedDownlink {
         Write-Host "[downlink] $(@($plan.assignments).Count) role assignment(s) projected but NOT applied: no -SlaveStoreConnectionString supplied (staged to file only)." -ForegroundColor Yellow
     }
 
-    return ([pscustomobject]@{ ok = $true; reason = $plan.reason; plan = $plan; staged = @($staged.ToArray()); fanout = $fanout; admins = $adminApply; definitions = $defApply; assignments = $assignApply })
+    # MSP-3 step 5 -- record what the two gates DECIDED, so the operator can tell a customer who
+    # declined from a ring that held from a tenant that has simply stopped running. Emitted on
+    # every managed run, WhatIf included (a plan is a decision too, and it is flagged as such in
+    # the record). Best-effort: see Write-PimAcceptanceRecord for why this must never fail the run.
+    $acceptance = New-PimAcceptanceRecord -Plan $plan -TenantId $TenantId -RingPlan $RingPlan `
+        -BlockedCapabilities $BlockedCapabilities -NowUtc $NowUtc -WhatIfMode:$WhatIfMode
+    $acceptancePath = $null
+    if ($plan.sync -and "$($plan.sync.tenantFolder)".Trim()) {
+        $acceptancePath = Write-PimAcceptanceRecord -Record $acceptance -Folder $plan.sync.tenantFolder
+    }
+
+    return ([pscustomobject]@{ ok = $true; reason = $plan.reason; plan = $plan; staged = @($staged.ToArray()); fanout = $fanout; admins = $adminApply; definitions = $defApply; assignments = $assignApply; acceptance = $acceptance; acceptancePath = $acceptancePath })
 }
 
 # ---------------------------------------------------------------------------
@@ -1759,6 +2246,16 @@ function Sync-PimMasterToSlave {
         [object[]]$ProjectionPolicy = @(),
         [string[]]$SlaveGroupTags,
         [string]$SlaveStoreConnectionString,
+        # SEC-10: declared here for the reason stated directly above -- PowerShell binds only
+        # DECLARED names, so leaving it out would make this entry point silently drop the
+        # customer's veto while appearing to forward everything. That is the same class of
+        # miss that left the gate unreachable in the first place.
+        [string[]]$BlockedCapabilities,
+        # IMP-13: the SLAVE's own admin naming prefixes. DECLARED here as well as on the plan,
+        # because PowerShell binds only declared names -- a gate the orchestrator cannot accept is
+        # a gate no entry point can reach, which is this file's most expensive recurring defect
+        # (BUG-29, SEC-10b, BUG-78, BUG-79). Same inert-when-absent rule as the two gates above.
+        [string[]]$SlaveAdminPrefixes,
         # IMP-12: the managed tenant's default verified domain, used to build each synced
         # admin's UPN on the S6 pull path. Omitted => resolved from the ambient tenant when
         # we are running inside it; never guessed.
@@ -1797,6 +2294,24 @@ function Invoke-PimScenarioDeploy {
         # downlink step still verifies and stages files, and says out loud that it applied
         # nothing -- which is the honest outcome, not a silent one.
         [string]$SlaveStoreConnectionString,
+        # BOTH downlink gates, declared on the scenario runner because it is the THIRD entry
+        # that reaches Invoke-PimManagedDownlink and a gate only some entries can carry is a
+        # gate you cannot reason about.
+        #   -RingPlan            = the OPERATOR's version gate (BUG-29 / RING-1 plane 2)
+        #   -BlockedCapabilities = the CUSTOMER's class veto (SEC-10 / MSP-3 step 4)
+        # BUG-78: -RingPlan was missing here, so a downlink driven through this runner had NO
+        # version gate at all -- silently, and looking exactly like a clean run. That was the
+        # third instance of one pattern, which is why the fix shipped with the INVENTORY
+        # ASSERTION in tests/Test-PimDownlink.ps1 rather than as a fourth one-off: the guard
+        # walks every function reaching the orchestrator and fails if a gate is undeclared or
+        # unforwarded, so instance four cannot land quietly the way these three did.
+        [object]$RingPlan,
+        [string[]]$BlockedCapabilities,
+        #   -SlaveAdminPrefixes  = the CUSTOMER's admin naming conventions (IMP-13)
+        # Added 2026-08-29 because the gate INVENTORY named this forwarder the moment the gate was
+        # declared -- nobody had to remember that this function existed, which is the whole point
+        # of auditing the chain instead of listing the instances.
+        [string[]]$SlaveAdminPrefixes,
         [string]$SlaveDefaultDomain,
         # BUG-84: the fallback delivery address for a synced admin's TAP. The AdminTap guard
         # REFUSES to mint a credential it cannot deliver -- correctly, and by design (BUG-66/69) --
@@ -1887,6 +2402,12 @@ function Invoke-PimScenarioDeploy {
             }
             if ("$SlaveDefaultDomain".Trim())         { $dlPass['SlaveDefaultDomain']         = $SlaveDefaultDomain }
             if ("$DefaultManagerEmail".Trim())        { $dlPass['DefaultManagerEmail']        = $DefaultManagerEmail }
+            # Both gates forwarded on the same inert-when-absent rule the orchestrator uses:
+            # bound-and-empty IS forwarded ("blocks nothing" is an answer; "nobody asked" is
+            # not), unbound is not forwarded at all.
+            if ($PSBoundParameters.ContainsKey('RingPlan') -and $null -ne $RingPlan) { $dlPass['RingPlan'] = $RingPlan }
+            if ($PSBoundParameters.ContainsKey('BlockedCapabilities') -and $null -ne $BlockedCapabilities) { $dlPass['BlockedCapabilities'] = $BlockedCapabilities }
+            if ($PSBoundParameters.ContainsKey('SlaveAdminPrefixes') -and $null -ne $SlaveAdminPrefixes) { $dlPass['SlaveAdminPrefixes'] = $SlaveAdminPrefixes }
             $dl = Invoke-PimManagedDownlink -Scenario $Scenario -Doc $Doc -PublicKey $PublicKey `
                 -BaselineAdmins $BaselineAdmins -TenantId $TenantId -SlaveRing $SlaveRing `
                 -CentralRoot $CentralRoot -LocalRoot $LocalRoot -SqlServer $SqlServer -SqlDatabase $SqlDatabase `

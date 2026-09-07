@@ -35,6 +35,18 @@ endpoint or leaving credentials lying around.
   hosting (containers or a server host), brings the database schema up to date safely, then
   builds and deploys the latest app — and finally proves the result with an automated
   validation. ✅ 2026-06-16
+- **Several environments can update from one automation host, on the same schedule, safely.**
+  The daily update can be scheduled to the minute, so environments that share an automation
+  host can be spread across an hour instead of all starting together. They also take turns
+  automatically: each run claims the shared code directory before it starts, and a run that
+  cannot claim it **waits, then skips and says so in its log** rather than building from a
+  directory another update is still rewriting. So an update that overruns its slot delays the
+  next one instead of corrupting it. ✅ 2026-09-06
+- **A warning from a supporting tool no longer looks like a failed update.** Command-line
+  tools routinely print advisory notices, and on Windows PowerShell 5.1 those notices could
+  abort an update that had already built and published a correct application image. Updates
+  now judge each step by its actual result, so only a real error stops a deploy — and when one
+  does, the full error text is reported rather than swallowed. ✅ 2026-09-06
 - **Safe to run again any time.** The same command is both the installer and the updater:
   anything already in the desired state is skipped, so re-running it only fixes what has
   drifted. A preview ("what would happen") mode is the default, so you always see the plan

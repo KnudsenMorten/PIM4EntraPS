@@ -95,6 +95,62 @@ Assert "the checker documents WHY it must be scheduled, not deploy-triggered" ($
 Assert "the checker distinguishes 'could not check' (exit 2) from 'no drift' (exit 0)" `
     (($chk -match 'exit 2') -and ($chk -match 'CANNOT CHECK'))
 
+
+# --- TEST-09b: a DIGEST is not a tag, and an AMBIENT subscription is not this fleet -------------
+# 🔴 Both defects were found on 2026-08-30 trying to answer "is prod on latest?" -- the one
+# question this gate exists for -- and it could not.
+#
+# (a) An image pinned as `repo@sha256:f25b...` was parsed by splitting on the last ':', so the
+#     gate reported the DIGEST HEX as the running "tag": a 64-char string printed where a version
+#     belongs, then compared to 2.4.252 and called DRIFT. The verdict was right, which is exactly
+#     why nobody noticed -- a gate whose output is unreadable is one nobody reads.
+Assert "a DIGEST-pinned image yields no tag (not the hex)" (
+    (Get-PimImageTag -Image 'acrpimmfnpr.azurecr.io/pim-manager@sha256:f25ba6e48fbadf96f24aebc38da0f775c99f8027bc240953edd02d10f787e023') -eq '')
+Assert "  ...and a normal tag still parses (the fix is narrow)" (
+    (Get-PimImageTag -Image 'acr.azurecr.io/pim-manager:2.4.251') -eq '2.4.251')
+
+# (b) With no tag to parse, the caller may resolve the digest against the registry. The pure core
+#     accepts that resolved tag -- and MUST NOT let it override a tag the image really carries,
+#     or a stale cache entry could silently rewrite a correct answer.
+$digestImg = 'acr.azurecr.io/pim-manager@sha256:abc123'
+$rowsResolved = (Get-PimVersionDriftReport -Expected '2.4.252' -Deployed @(
+    [pscustomobject]@{ app='ca-pim-manager'; image=$digestImg; revision='r1'; createdUtc=''; resolvedTag='2.4.251' })).rows
+Assert "a resolved digest tag is used when the image carries none" ("$($rowsResolved[0].tag)" -eq '2.4.251')
+Assert "  ...and it reports DRIFT against the expected version" ("$($rowsResolved[0].status)" -eq 'drift')
+$rowsBoth = (Get-PimVersionDriftReport -Expected '2.4.252' -Deployed @(
+    [pscustomobject]@{ app='x'; image='acr/pim-manager:2.4.252'; revision='r'; createdUtc=''; resolvedTag='9.9.9' })).rows
+Assert "  ...but a REAL tag always wins over a resolved one" ("$($rowsBoth[0].tag)" -eq '2.4.252' -and "$($rowsBoth[0].status)" -eq 'ok')
+# 🔒 'unknown' must stay REACHABLE. An admitted gap beats an invented version -- if resolution
+# fails, the gate says so rather than guessing.
+$rowsNone = (Get-PimVersionDriftReport -Expected '2.4.252' -Deployed @(
+    [pscustomobject]@{ app='y'; image=$digestImg; revision='r'; createdUtc=''; resolvedTag='' })).rows
+Assert "  ...and an unresolvable digest is UNKNOWN, never a pass" (
+    "$($rowsNone[0].status)" -eq 'unknown' -and -not (Get-PimVersionDriftReport -Expected '2.4.252' -Deployed @(
+        [pscustomobject]@{ app='y'; image=$digestImg; revision='r'; createdUtc=''; resolvedTag='' })).ok)
+
+# (c) EVERY az call must be SUBSCRIPTION-SCOPED. This gate ran against the ambient default, and on
+#     a machine logged into two directories that is a coin flip -- on mgmt1 it lands on a different
+#     company's subscription, so the gate queried the wrong tenant and found nothing. Same family
+#     as SEC-12: an ambient identity standing in for an explicit one.
+$chkSrc  = Get-Content -LiteralPath $checker -Raw
+$chkCode = (($chkSrc -split "`r?`n") | Where-Object { $_ -notmatch '^\s*#' }) -join "`n"
+Assert "the checker accepts -SubscriptionId" ($chkCode -match '\$SubscriptionId')
+# 🪤 Comment-stripped, because this file argues about subscriptions at length and an assertion
+# reading prose would be satisfied by its own documentation.
+$azCalls  = @([regex]::Matches($chkCode, '&\s+az\s+containerapp[^\r\n]*'))
+$unscoped = @($azCalls | Where-Object { $_.Value -notmatch '@subArgs' })
+Assert "  ...and EVERY containerapp call is scoped with @subArgs" ($azCalls.Count -ge 3 -and $unscoped.Count -eq 0)
+Assert "  ...including the ACR lookup used to resolve a digest" ($chkCode -match 'acr manifest list-metadata[^\r\n]*@SubArgs')
+# (d) Container app JOBS drift too. A fleet check that reads only apps can report "no drift" while
+#     the tick job runs last month's engine -- BUG-09's shape, one resource type over.
+# 🪤 THE FIRST VERSION OF THIS ASSERT COULD NOT FAIL, and only the negative run showed it: it
+# checked that `$Jobs` and `containerapp job show` EXIST in the file. Deleting the line that adds
+# jobs to the work list left both in place -- parameter declared, branch present, and no job ever
+# read. Declared-but-not-wired, which is this codebase's most expensive recurring defect. Assert
+# the WIRING: jobs must actually reach $targets.
+Assert "the checker also reads container app JOBS" (
+    $chkCode -match '\$Jobs' -and $chkCode -match 'containerapp job show' -and
+    $chkCode -match '\$targets\s*\+=\s*,@\{\s*name\s*=\s*\$j')
 Write-Host ""
 Write-Host ("PIM version drift (TEST-09): {0} passed, {1} failed" -f $pass, $fail) -ForegroundColor $(if ($fail) { 'Red' } else { 'Green' })
 if ($fail) { exit 1 }

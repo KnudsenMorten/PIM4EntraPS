@@ -19,6 +19,12 @@
 param([int]$Port = 0)
 
 $ErrorActionPreference = 'Stop'
+# 🔒 Deterministic config, whether this suite is driven by Run-AllPimTests or run on its own.
+# `config\*.custom.ps1` is gitignored per-deployment config; inheriting it makes the RESULT depend
+# on the machine (measured 2026-09-04: a real customer naming file on the dev box turned this
+# suite red on names alone). Default to the shipped .locked.* values; an explicitly-set variable
+# is respected so a developer can still exercise their own config on purpose.
+if (-not "$($env:PIM_IGNORE_CUSTOM_CONFIG)".Trim()) { $env:PIM_IGNORE_CUSTOM_CONFIG = '1' }
 $pass=0; $fail=0
 function T($n,$c){ if($c){Write-Host "  PASS $n" -ForegroundColor Green;$script:pass++}else{Write-Host "  FAIL $n" -ForegroundColor Red;$script:fail++} }
 
@@ -1003,6 +1009,97 @@ try {
     } else {
         T 'FIX5: PUT delta guard (skipped -- entity not populated enough offline)' $true
     }
+
+    # -------------------------------------------------------------------
+    # §35.8 -- GET /api/directory/people, the directory-people lookup, over REAL
+    # HTTP. Offline there is no Graph client, which makes this the ideal place to
+    # prove the property that matters most: an unreachable directory answers 503,
+    # NEVER an empty 200. An empty list reads as "this person does not exist",
+    # which is the confident-wrong answer a picker must never give.
+    # -------------------------------------------------------------------
+    # 🔒 TEST-17 -- ONE request, BOTH answers. DirStatus and DirBody each used to issue their own
+    # Invoke-WebRequest, so the suite asserted a status from one HTTP exchange and then a body from
+    # a SECOND, later call to the same URL. Measured 2026-09-04: one run had 'names its code' PASS
+    # (that body carried graph-error) while a later run's body came back EMPTY -- instrumented
+    # directly, the body printed as nothing at all. Two requests can disagree; one cannot disagree
+    # with itself, and every assertion below now reads the same exchange.
+    function DirCall($qs) {
+        $out = @{ Status = -1; Body = $null }
+        try {
+            $wr = Invoke-WebRequest -Uri "$base/api/directory/people$qs" -Headers $hdr -TimeoutSec 30 -UseBasicParsing
+            $out.Status = [int]$wr.StatusCode
+            $out.Body   = "$($wr.Content)"
+        } catch {
+            if ($_.Exception.Response) { $out.Status = [int]$_.Exception.Response.StatusCode }
+            # 🪤 On an error status, PowerShell 7's Invoke-WebRequest surfaces the body on
+            # $_.ErrorDetails.Message (the Exception.Response is an HttpResponseMessage with
+            # no GetResponseStream). PS 5.1 needs the stream. Try both.
+            $b = "$($_.ErrorDetails.Message)"
+            if ($b) { $out.Body = $b }
+            else {
+                # 🔴 $null, NOT ''. An unreadable body must stay DISTINGUISHABLE from a body that
+                # genuinely lacks the text. Returning '' made "the harness could not read it" fail
+                # as though the ENDPOINT were wrong -- the same conflation BUG-126 suffers between
+                # "the gate could not run" and "the thing under test is broken". Asserted below.
+                try { $s = $_.Exception.Response.GetResponseStream(); $r = New-Object System.IO.StreamReader($s); $out.Body = $r.ReadToEnd() } catch { $out.Body = $null }
+            }
+        }
+        return $out
+    }
+    # Status-only convenience. Still ONE request per call -- the hazard was asserting a status and
+    # a body from two DIFFERENT calls, not making more than one call in the suite.
+    function DirStatus($qs) { (DirCall $qs).Status }
+
+    T 'directory: a BLANK query is 400, not the whole directory' ((DirStatus '?q=') -eq 400)
+    T 'directory: a missing q is 400'                            ((DirStatus '') -eq 400)
+    # One exchange for both the status and the body it is supposed to carry.
+    $short = DirCall '?q=a'
+    T 'directory: a 1-char query is 400 (too short)'             ($short.Status -eq 400)
+    T 'directory: the 400 explains the minimum length'           ("$($short.Body)" -match 'at least 2 characters')
+
+    # THE LOAD-BEARING ASSERT, stated as the PROPERTY rather than as one status
+    # code. Offline this runtime DOES define Invoke-PimGraph (PIM-Rest.ps1 is
+    # dot-sourced into the Manager), so the honest answer is 502 graph-error --
+    # the call was attempted and failed -- not 503 graph-unavailable. Both are
+    # correct; what must never happen is a 200 carrying an empty people[], which
+    # reads as a definitive "this person does not exist".
+    $live       = DirCall '?q=knud'
+    $liveStatus = $live.Status
+    $liveBody   = $live.Body
+    Write-Host "      (directory lookup answered $liveStatus offline)" -ForegroundColor DarkGray
+    T 'directory: a valid query answers 200/502/503 -- a recognised outcome' ($liveStatus -in @(200,502,503))
+    if ($liveStatus -eq 200) {
+        $b = $null; try { $b = $liveBody | ConvertFrom-Json } catch {}
+        T 'directory: a real answer reports which match mode served it' ("$($b.matchMode)" -in @('search','startswith'))
+        T 'directory: a real answer carries the truncated flag'         ($null -ne $b -and $null -ne $b.PSObject.Properties['truncated'])
+    } else {
+        # 🔒 ASSERT READABILITY FIRST. If the harness could not recover the body, every assertion
+        # below is meaningless -- and before TEST-17 they reported that as a defect in the ENDPOINT,
+        # which is how a green endpoint spent runs looking broken. $null here means "unreadable",
+        # '' means "genuinely empty"; only the first is the harness's own failure.
+        T 'directory: the failure body was readable at all (harness, not endpoint)' ($null -ne $liveBody)
+
+        # 🔴 ASSERT ON THE PARSED FIELDS, NEVER ON THE RAW JSON TEXT. The old assertions regexed the
+        # wire bytes, which made them depend on WHICH serializer happened to answer -- and this
+        # Manager has two. Open-PimManager uses a compiled .NET serializer on PowerShell 5.1
+        # (`$script:PimUseCompiledJson = PSEdition -eq 'Desktop'`) and ConvertTo-Json on 7. They
+        # escape differently, and the suite is launched from 7 while the Manager it boots is a
+        # separate 5.1 process, so the 5.1 form is what actually arrives. Measured 2026-09-04:
+        #     "hint": "This is NOT "no matches" -- the lookup failed. ..."
+        # against a pattern of NOT[^a-z]{1,3}no matches -- which cannot match, both because "
+        # is seven characters and because `u` is a lowercase letter. The ENDPOINT WAS ALWAYS RIGHT;
+        # the assertion was testing an implementation detail of JSON encoding.
+        # ConvertFrom-Json decodes " back to a quote, so the parsed value is identical under
+        # either serializer and this can no longer break on a host difference.
+        $lb = $null; try { $lb = "$liveBody" | ConvertFrom-Json } catch { }
+        T 'directory: the failure body is valid JSON'                      ($null -ne $lb)
+        # The whole point: a failed lookup must be DISTINGUISHABLE from "no matches".
+        T 'directory: a failed lookup says it is NOT "no matches"'         ("$($lb.hint)" -match 'NOT\s*"?no matches')
+        T 'directory: a failed lookup names its code, not an empty result' ("$($lb.code)" -match '^graph-(unavailable|error)$')
+        T 'directory: a failed lookup never returns a people[] array'      ($null -eq $lb.PSObject.Properties['people'])
+    }
+    # An absurd top is clamped server-side, not rejected and not honoured.
+    T 'directory: an absurd top is clamped, not a 400' ((DirStatus '?q=knud&top=5000') -in @(200,502,503))
 
     # -------------------------------------------------------------------
     # TEST-06 residue gate -- runs LAST, after every endpoint test above.

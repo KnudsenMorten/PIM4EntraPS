@@ -154,6 +154,54 @@ T 'the probe is NOT in $OutOfTreeSuites (it must never be executed as a suite)' 
 T 'its OFFLINE cover is in the run path (tests\Test-PimTenantReady.ps1)' `
     (Test-Path -LiteralPath (Join-Path $here 'Test-PimTenantReady.ps1'))
 
+Write-Host "`n== TEST-33: no suite may bound a source block with a CRLF-fragile regex ==" -ForegroundColor Cyan
+# WHY THIS IS A RUNNER INVARIANT, not a one-off fix.
+#
+# Test-PimAdminTapReset.ps1 isolated route blocks out of Open-PimManager.ps1 with regexes
+# that bounded a block as "newline + indent + brace", spelled with a bare \n. Against CRLF
+# source `\}\n` cannot match `}\r\n`: the isolated block comes back EMPTY and every ordering
+# assertion built on it fails, reporting "mailIdx=-1 mintIdx=-1" -- which accuses the PRODUCT
+# of an ordering regression when the real fault is a regex that matched nothing.
+#
+# It was one clean checkout from happening on its own: this repo has core.autocrlf=true and
+# no .gitattributes, so git stores LF and hands out CRLF on checkout. The suite passed only
+# because this long-lived working tree happened to hold LF for that file.
+#
+# 🪤 A bare \n is HARMLESS almost everywhere, because "\r\n" CONTAINS "\n". It breaks ONLY
+# when the pattern demands a character IMMEDIATELY before the newline. That narrow shape is
+# why exactly ONE suite of ~107 was affected -- and why this gate looks for that shape
+# specifically instead of banning \n, which would be unfixable noise.
+$crlfRisky = [regex]'(\\[\}\)\]\.\{\(]|[A-Za-z0-9''"`])\\n'
+$crlfHits  = New-Object System.Collections.Generic.List[string]
+$crlfLines = 0
+foreach ($tf in (Get-ChildItem $here -File -Filter '*.ps1' -Recurse |
+                 Where-Object { $_.FullName -notlike '*\node_modules\*' })) {
+    $ln = 0
+    foreach ($line in (Get-Content -LiteralPath $tf.FullName)) {
+        $ln++
+        if ($line -notmatch '-match|-notmatch|regex\]::Match|-replace|-split') { continue }
+        # An explicit opt-out for lines that must CONTAIN the bad shape as a literal --
+        # i.e. this gate's own self-check. Greppable, and it cannot be applied by accident.
+        if ($line -match 'crlf-scan:ignore') { continue }
+        $crlfLines++
+        # Strip character classes first: [^\r\n] is the CORRECT CRLF-safe idiom and is the
+        # only place an \r legitimately sits beside an \n. The first cut of this scan
+        # reported 25 hits and every one was this false positive.
+        $probe = [regex]::Replace($line, '\[[^\]]*\]', '<CC>')
+        if ($probe -match '\\r\?\\n') { continue }
+        if ($crlfRisky.IsMatch($probe)) { [void]$crlfHits.Add(("{0}:{1}" -f $tf.Name, $ln)) }
+    }
+}
+# A gate that scans nothing passes silently -- the failure this whole family is about.
+T "the CRLF scan actually looked at something ($crlfLines regex-bearing lines)" ($crlfLines -gt 500)
+T 'no suite bounds a source block with a CRLF-fragile regex (use \r?\n)' ($crlfHits.Count -eq 0) ($crlfHits -join ' | ')
+# Self-check: the detector must still recognise the shape it exists for. Without this the
+# assertion above could pass because the regex stopped matching anything at all.
+T 'the detector still recognises the shape it was built for' `
+    ($crlfRisky.IsMatch('$m = [regex]::Match($src, "(?s)foo.*?\n        \}\n")'))   # crlf-scan:ignore
+T '   ...and does NOT flag the CRLF-safe forms' `
+    (-not $crlfRisky.IsMatch([regex]::Replace('$src -match ''bar[^\r\n]*baz''', '\[[^\]]*\]', '<CC>')) -and
+     -not $crlfRisky.IsMatch('$src -match ''foo.*?\r?\n\}'''))   # crlf-scan:ignore
 Write-Host ("`n==== test harness (TEST-28): {0} passed, {1} failed ====" -f $script:pass, $script:fail) `
     -ForegroundColor $(if ($script:fail) { 'Red' } else { 'Green' })
 if ($script:fail) { exit 1 }

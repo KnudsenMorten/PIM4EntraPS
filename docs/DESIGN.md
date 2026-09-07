@@ -539,11 +539,13 @@ half-applied run). Bypass only deliberately with `$env:PIM_SkipPreflight=1`.
 **Desired store — two first-class shapes (`Get-PimSqlConnectionString`):**
 - **Azure SQL** — `PIM_SqlServer` is an FQDN (`…database.windows.net`); auth is a managed
   identity / SPN access token. The hosted product path.
-- **Local SQL** — `PIM_SqlServer` is a local instance (e.g. `.\SQLEXPRESS`, the default when
-  no server is set) reached with **Integrated** auth. This is the **development / management-
+- **Local SQL** — `PIM_SqlServer` names a local/hybrid SQL instance, reached with
+  **Integrated** auth. There is **no default** — with no store configured the engine REFUSES rather
+  than connecting to whatever database happens to exist. This is the **development / management-
   server inner-loop** path: the running identity is itself a DB user, so there is **no
   cross-tenant token problem and no "MI is not a DB user" blocker** — the engine reads its
-  desired set directly. Only the database *name* (`PIM_SqlDatabase`) is mandatory. **It is a
+  desired set directly. Both the server and the database *name* (`PIM_SqlDatabase`) must be set
+  explicitly. **It is a
   dev convenience, NOT a production or break-glass store** — Azure SQL is the single
   authoritative store in ALL modes, and **break-glass = a client PC connecting DIRECT to the
   same Azure SQL** (never a local copy). The cutover ceremony enforces this: it refuses to
@@ -570,8 +572,8 @@ mirrored to the append-only audit (`Write-PimAuditEvent`, `cutover.<stage>`):
 5. **re-preflight** — re-run the checks against the now-populated SQL store (data signature +
    row count + connectivity).
 6. **finalize** — **explicit operator confirmation**. Refuses any non-Azure-SQL target
-   (`Get-PimSqlStoreKind.isProduction`): only Azure SQL may become authoritative; SQLEXPRESS /
-   Integrated (`dev-local`) is rejected.
+   (`Get-PimSqlStoreKind.isProduction`): only Azure SQL may become authoritative; any local/
+   Integrated target (`dev-local`) is rejected.
 
 **Abort / rollback (before finalize).** A STARTED-but-not-finalized cutover is cleanly
 reversible. `Invoke-PimCutoverAbort` (gated by the pure `Test-PimCutoverAbortAllowed`, planned by
@@ -2025,7 +2027,7 @@ device-code). The mode only changes *where it runs* and *how it is wired up*.
 | Code source | Public **community edition**, updated via `git pull` | The setup-script family (`Setup-PimContainers`/`Setup-PimVM`/`Setup-PimMsp`) |
 | Host | A management VM (or your own container) you already run | Azure Container Apps, a Windows VM, or per-customer containers |
 | Identity | Engine SPN + cert (`Cert:\…\My`); MI when run in an Azure container/VM | Worker **managed identity** (passwordless) + engine SPN + cert |
-| Store | Azure SQL (SQLEXPRESS for dev only) | Azure SQL, MI-only contained DB users |
+| Store | Azure SQL | Azure SQL, MI-only contained DB users |
 | Manager auth | Local (loopback) / dev switch-admin | Easy Auth (Entra) behind private ingress |
 
 > **Real environment values never live in the published docs.** This guide uses
@@ -2066,9 +2068,8 @@ device-code). The mode only changes *where it runs* and *how it is wired up*.
    one for new work.)*
 3. **A SQL store for the model.** **Azure SQL** (Entra/managed-identity auth
    only — SQL logins disabled) is the single authoritative store in *every*
-   mode and for break-glass. A local **SQLEXPRESS** instance (Integrated auth)
-   is a **development convenience only** — the cutover ceremony (§5.3) refuses
-   to *finalize* onto a local/Integrated store.
+   mode and for break-glass. The cutover ceremony (§5.3) refuses to *finalize*
+   onto any local/Integrated store, so only Azure SQL can ever become authoritative.
 
 The engine entrypoint (`tools/pim-engine/Invoke-PimEngineCore.ps1
 -Scope All|<name> -Mode Full|Delta`) reads its identity + SQL coordinates from
@@ -2100,8 +2101,8 @@ identity.
    ```
 
    Set the engine identity (tenant id / client id / cert thumbprint) and the SQL
-   coordinates (`PIM_SqlServer` FQDN + `PIM_SqlDatabase`; or `.\SQLEXPRESS` for a
-   dev inner loop) in the launcher's `LauncherConfig.custom.ps1`. The shipped
+   coordinates (`PIM_SqlServer` FQDN + `PIM_SqlDatabase`) in the launcher's
+   `LauncherConfig.custom.ps1`. Both are required — there is no local default. The shipped
    `config\` templates carry worked example rows (incl. a catalog of common Entra
    built-in roles) so you start from a working model, not an empty schema.
 
@@ -2461,6 +2462,59 @@ and it runs cert-auth + unattended (no prompts).
 - **Neither** — most engine-only patch releases need no schema or GUI change; the
   detect step reports "code only" and the apply just rolls the image (internal) or
   is a no-op beyond the pull (community).
+
+#### 11.6.5 Surviving an unattended host — the two guards the flow above depends on
+
+The lifecycle in 11.6.1 is only as good as the host it runs on at 4am with nobody
+watching. Two properties of that host, neither visible from an interactive console,
+are handled explicitly.
+
+**a) A native tool's warning must never be read as a failure.** The scheduled task runs
+under **Windows PowerShell 5.1**, and 5.1 turns *any* write to a native command's
+standard-error stream into a terminating error when `$ErrorActionPreference` is `Stop`
+— which the update path uses. The Azure CLI writes ordinary, harmless warnings there
+routinely (extension notices, interpreter hints), so a warning that changes nothing can
+abort a deploy **after** the image has been built and pushed. PowerShell 7 does not
+behave this way, so the fault is invisible on a developer machine.
+
+Every Azure-CLI call in the setup/deploy family therefore goes through one guarded
+invocation (`tools/setup/_PimAz.ps1`), which each entry point loads **before its first
+CLI call**. The guard neutralises the error preference around the native call, restores
+it afterwards, and decides success by the **exit code alone** — so a genuine failure is
+still a failure, and its captured error output is printed in full rather than swallowed.
+Redirection alone (`2>$null`) does not achieve this: it changes where the text goes, not
+whether the record is fatal.
+
+> 🪤 The same environment can pass and fail with identical code, because whether the CLI
+> warns at all depends on its **configuration directory** — an isolated profile with no
+> extensions installed stays silent, a shared profile with extensions does not. A green
+> result on one deployment is not evidence about the next one.
+
+**b) Two deployments must never build from the same tree at once.** One automation host
+commonly updates several deployments, and each of them **pulls into the same synced tree**
+before building an image from it. Two overlapping runs would let one build read a
+directory the other is halfway through rewriting — and it would not fail cleanly, it would
+ship a half-written tree. The scheduler's own "do not run this task twice" setting does not
+help, because these are *different* tasks.
+
+`Register-PimSyncSchedule.ps1` addresses this in two layers:
+
+| layer | what it is | why both |
+|---|---|---|
+| **stagger** | `-AtHour` + `-AtMinute` so several deployments can share an hour without sharing a minute | the plan: with a full build-and-roll measured at 8–10 minutes, 20-minute spacing has real headroom |
+| **run lock** | the generated wrapper takes an **exclusive lock on the shared tree** before the pull, and **skips the run** (distinct exit code) if it cannot get it | the guarantee: a stagger only works while every run finishes inside its slot |
+
+The lock is keyed on the **puller's directory**, so deployments sharing a tree serialise
+while one pulling into a different tree is unaffected. It is an exclusive file handle
+rather than a named mutex: it needs no special privilege, works across accounts, and the
+operating system releases it if the process dies — so an interrupted run cannot wedge every
+following night. A run that skips **says so in its log**; it never proceeds quietly.
+
+> 🔒 **A per-deployment auto-deploy hook is for a single-deployment host.** The post-sync
+> hook (11.6.1) takes its arguments from the local sync manifest, and those arguments name
+> **one** deployment's infrastructure. On a host that updates several, the hook can only ever
+> be right for one of them, so the scheduled task — which carries its own target, credential
+> profile and subscription assertion per deployment — is the correct mechanism there.
 
 ### 11.7 One-shot "deploy everything" + validation
 
@@ -2928,7 +2982,7 @@ that ongoing health monitoring is in place. The **update-lifecycle** is the
 superset that runs after PIM code is pulled and turns a fresh pull into a safe,
 verified, observed deployment — one coherent flow over **both** pull paths:
 
-- **community `git pull`** — local/VM; store is SQLEXPRESS or Azure SQL; the Manager
+- **community `git pull`** — local/VM; store is Azure SQL; the Manager
   runs locally. Build = local docker/podman build, or (no engine) package the pulled
   `tools/pim-manager/` tree for a direct relaunch.
 - **`sync-automateit` pull** — hosted; store is Azure SQL; the Manager runs on
@@ -3379,9 +3433,23 @@ the **operator** decides *when* (which version + which capabilities are approved
 central, one-line promotion); the **customer** decides *whether* (which solutions, and which
 **optional** capabilities). A capability runs only when **all three agree**. Rollout timing and
 product choice are different questions with different owners, so they are two independent gates and
-neither substitutes for the other. PIM declares five capabilities — `code` and `schema` **required**,
-`infra` / `appreg` / `msp-downlink` optional. A customer blocking a *required* one is **refused and
-reported**, never obeyed, because honouring it would leave a broken install.
+neither substitutes for the other. PIM declares ten capabilities — `code` and `schema` **required**,
+and `prereq` / `image` / `infra` / `appreg` / `msp-downlink` / `msp-admins` / `msp-roles` /
+`msp-groups` optional. A customer blocking a *required* one is **refused and reported**, never
+obeyed, because honouring it would leave a broken install.
+
+**The three `msp-*` class capabilities are the CUSTOMER's half of the MSP accept gate.** Blocking
+`msp-downlink` declines the managed downlink outright; the class capabilities are finer, so a
+customer can decline one *kind* of arriving change and still take the rest — `msp-roles` in
+particular is the veto over a projection that could carry Global Administrator into their tenant
+unattended. They are read from the customer's **own** `bootstrap\Sync-AutomateIT.json`, the same file
+and the same `blockCapabilities` key the platform sync already honours: their file, their choice, and
+deliberately **not** a PIM-private consent store, which would be a second place to say the same thing
+and would drift. A blocked class is reported `Held` on the plan with the capability named, never
+silently absent — *"the customer declined roles"* and *"the master published none"* must not produce
+the same report. `msp-policies` is intentionally **not declared**: the downlink does not carry policy
+artifacts, and declaring a capability that gates nothing would advertise a control that does not
+exist.
 
 **Axis 2 uses the same mechanism as axis 1, deliberately as a separate instance.** A PIM customer
 acting as an MSP master runs its **own** downstream fleet; its rollout waves are its business, not
@@ -5533,15 +5601,36 @@ Shipped packs: `defender-xdr`, `sentinel`, `intune`, `exchange-online`, `azure-r
 ### 18.11 Audit tab (read-only view over the append-only trail)
 
 The **Audit** tab is the operator-facing window onto the unified append-only audit
-trail (`output/audit/pim-audit-<yyyyMM>.jsonl`, §18.8 — the file is the source of
-truth, written by both the engine `Write-PimAuditEvent` and the Manager
-`Write-PimManagerAuditEvent`). It promotes what used to be a fixed "latest N events"
+trail, written by both the engine `Write-PimAuditEvent` and the Manager
+`Write-PimManagerAuditEvent`.
+
+> **Where the trail lives.** The store is the database table `pim.AuditEvents`, created
+> by the common store initialiser alongside the desired-state tables — audit is a
+> standard feature of every topology, not an add-on for the largest one. It is
+> append-only by intent: there is a writer and a reader and deliberately no update or
+> delete helper. The monthly `pim-audit-<yyyyMM>.jsonl` files are the **local/dev**
+> store only, for an installation running with no database at all; a hosted deployment
+> neither writes, reads nor counts them, and says so plainly rather than silently
+> recording to a location its own reader will not open. An installation that starts
+> local and later moves to a database carries its existing history across with
+> `Import-PimAuditFileTrail.ps1`, which preserves each event's original timestamp and
+> archives the file it imported so a second run cannot duplicate the trail.
+>
+> The read path resolves the trail through one pair of functions
+> (`Get-PimManagerAuditEvents` / `Get-PimManagerAuditMonthCount`) so the view and the
+> export always agree on which store answered. A failed read **reports the failure**; it
+> never quietly falls back to a different and shorter trail, because presenting partial
+> history as if it were complete is worse than showing none.
+
+It promotes what used to be a fixed "latest N events"
 preview in the Governance tab into a full, filterable, paged view; the Governance tab
 now shows only a 5-row teaser with a link to the Audit tab.
 
-**Read path.** `GET /api/audit` parses one JSON object per line across the selected
-monthly files and returns newest-first. It is strictly read-only — it never writes the
-trail. The read, the filter, the before/after diff and the CSV serialisation all live in
+**Read path.** `GET /api/audit` returns the selected window newest-first. It is strictly
+read-only — it never writes the trail. Both stores return events in the **same shape**, so
+everything downstream of the read is identical either way: moving the store was not a
+licence to rewrite the query layer. The read, the filter, the before/after diff and the
+CSV serialisation all live in
 ONE pure, dependency-free, PS-5.1-safe library — `engine/_shared/PIM-AuditQuery.ps1` —
 so the on-screen view (`/api/audit`) and the export (`/api/audit/export`, below) resolve
 the trail identically. Query parameters:
@@ -5558,8 +5647,10 @@ the trail identically. Query parameters:
 The response carries `events` (the page — each stamped with a `category` and a human
 `change` before/after summary), `total` (events in the loaded window), `matchCount`
 (after filter/search/date), `page`/`pageCount`, `counts` (per-category totals for the
-chip badges), and `months`/`monthsLoaded`/`monthsTotal` (the window in effect vs how
-many monthly files exist on disk).
+chip badges), and `months`/`monthsLoaded`/`monthsTotal` (the window in effect vs how many
+months of history the answering store actually holds — counted from the table on a
+database installation, and from the monthly files only on a local one; counting files
+against a database store would report an empty history for a full one).
 
 **Audit history, before/after, full-trail export ([H6] "Audit you can defend").** The
 window is no longer hard-capped at three months: `Get-PimAuditMonthList` discovers every

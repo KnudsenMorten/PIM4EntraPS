@@ -169,7 +169,15 @@ function Get-PimDownlinkJobEnv {
         # BUG-84: fallback TAP delivery address for synced admins. Not a secret -- an address --
         # so it travels as a plain env value. Absent => the AdminTap guard still refuses, which is
         # the correct behaviour and not a silent downgrade.
-        [string]$DefaultManagerEmail
+        [string]$DefaultManagerEmail,
+        # IMP-13 / operator ruling 2026-09-03: the managed tenant's admin naming prefixes.
+        # 🔴 The recognisability guard (Select-PimUnrecognisableAdmins) is PURE and correct, and the
+        # scheduled Job never passed this -- so it evaluated `checked = $false` on EVERY production
+        # run. That is its "we did not look" state, which its own contract says must NOT be read as
+        # a clean bill of health. The guard existed and was never ARMED on the path that actually
+        # runs: the BUG-29 shape verbatim.
+        # A naming convention is not a secret, so it travels as a plain env value.
+        [AllowEmptyCollection()][string[]]$SlaveAdminPrefixes = @()
     )
     $placement = Get-PimDownlinkJobPlacement -Scenario $Scenario
     $ev = New-Object System.Collections.Generic.List[string]
@@ -211,6 +219,9 @@ function Get-PimDownlinkJobEnv {
     if ("$ManagedIdentityClientId".Trim()) { $ev.Add("PIM_ManagedIdentityClientId=$ManagedIdentityClientId") | Out-Null }
     # BUG-84: Invoke-PimScenarioRun defaults -DefaultManagerEmail from this env var.
     if ("$DefaultManagerEmail".Trim()) { $ev.Add("PIM_DefaultManagerEmail=$DefaultManagerEmail") | Out-Null }
+    # IMP-13: comma-separated, because an ACA env value is a single string.
+    $__pref = @(@($SlaveAdminPrefixes) | ForEach-Object { "$_".Trim() } | Where-Object { $_ })
+    if ($__pref.Count) { $ev.Add("PIM_SlaveAdminPrefixes=$($__pref -join ',')") | Out-Null }
     return @($ev.ToArray())
 }
 
@@ -531,7 +542,10 @@ function Get-PimDownlinkJobDeployPlan {
         # BUG-76: client id of the user-assigned MI the container runs as.
         [string]$ManagedIdentityClientId,
         # BUG-84: fallback TAP delivery address for synced admins (plain value, not a secret).
-        [string]$DefaultManagerEmail
+        [string]$DefaultManagerEmail,
+        # IMP-13: forwarded to the env builder so the recognisability guard is armed on every
+        # scheduled run. Without this hop the parameter stops here and the Job never learns it.
+        [AllowEmptyCollection()][string[]]$SlaveAdminPrefixes = @()
     )
     $placement = Get-PimDownlinkJobPlacement -Scenario $Scenario
     # 🔒 BUG-73: when the baseline URL carries a SAS it must NOT reach the command line -- the job
@@ -554,7 +568,8 @@ function Get-PimDownlinkJobDeployPlan {
     $command = Get-PimDownlinkJobCommand -EntryPath $EntryPath -Scenario $Scenario -TenantId $TenantId -SlaveRing $SlaveRing -BaselineUrl $cmdBaselineUrl -BaselineDocPath $BaselineDocPath
     $envVars = Get-PimDownlinkJobEnv -Scenario $Scenario -TenantId $TenantId -SqlServerFqdn $SqlServerFqdn -SqlDatabase $SqlDatabase -SyncRootCentral $SyncRootCentral -SyncRootLocal $SyncRootLocal `
         -EngineClientId $EngineClientId -EngineSecretRef $engineSecretRef -BaselineUrlSecretRef $baselineUrlRef `
-        -ManagedIdentityClientId $ManagedIdentityClientId -DefaultManagerEmail $DefaultManagerEmail
+        -ManagedIdentityClientId $ManagedIdentityClientId -DefaultManagerEmail $DefaultManagerEmail `
+        -SlaveAdminPrefixes $SlaveAdminPrefixes
     $action = if ($Exists) { 'update' } else { 'create' }
     $jobArgs = Build-PimDownlinkJobArgs -Action $action -JobName $JobName -ResourceGroup $ResourceGroup `
         -EnvName $EnvName -Image $Image -AcrServer $AcrServer -Cron $Cron `

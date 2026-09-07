@@ -6,14 +6,50 @@
     The three functional suites are executed as child processes (clean assembly
     state) and asserted green; the workload-connector framework is tested in-proc.
 #>
+# 🔒 Deterministic config, whether this suite is driven by Run-AllPimTests or run on its own.
+# `config\*.custom.ps1` is gitignored per-deployment config; inheriting it makes the RESULT depend
+# on the machine (measured 2026-09-04: a real customer naming file on the dev box turned this
+# suite red on names alone). Default to the shipped .locked.* values; an explicitly-set variable
+# is respected so a developer can still exercise their own config on purpose.
+if (-not "$($env:PIM_IGNORE_CUSTOM_CONFIG)".Trim()) { $env:PIM_IGNORE_CUSTOM_CONFIG = '1' }
 BeforeAll {
     $script:Root = Split-Path -Parent $PSScriptRoot
     $script:Tests = $PSScriptRoot
     $global:PIM_ConfigVariant = 'test'
     Import-Module (Join-Path $Root 'engine\_shared\PIM-Functions.psm1') -Force -DisableNameChecking
+    # Every child suite's TALLY is captured here, not discarded, so `docs/TESTS.md`'s claimed
+    # assert counts can be CHECKED against reality at the end of the run instead of trusted.
+    # 🔑 WHY THIS IS FREE. The runner already executes every suite; the counts were simply being
+    # thrown away by `| Out-Null`. Re-running them inside a doc test would add ~12 minutes for
+    # numbers we already had. Measured 2026-08-28: FOUR claims in TESTS.md had drifted from
+    # reality (Pester 593 vs 710, ManagerEndpoints 109 vs 111, DisableGuard 70 vs 72,
+    # SetupHosting 210 vs 211) and one suite carried TWO contradicting counts -- and the doc
+    # itself already records this failure once before ("192 while the suite was running 203").
+    # An assert COUNT is the one field in that table that cannot be re-derived by reading the
+    # code, which is exactly why it needs a machine to keep it honest.
+    $script:SuiteTallies = @{}
     function Invoke-Suite([string]$name) {
-        & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $script:Tests $name) | Out-Null
-        $LASTEXITCODE
+        $out = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $script:Tests $name) 2>&1 | Out-String
+        $code = $LASTEXITCODE
+        # Suites print their tally in several shapes; take the LAST match so a per-section
+        # count earlier in the output cannot be mistaken for the total.
+        #   "N passed, M failed" · "N passed / M failed" · "N pass, M fail" · "ALL N ASSERTIONS PASSED"
+        $m = [regex]::Matches($out, '(?i)(\d+)\s*(?:passed|pass)\s*[,/]\s*(\d+)\s*(?:failed|fail)')
+        if ($m.Count -gt 0) {
+            $script:SuiteTallies[$name] = [int]$m[$m.Count - 1].Groups[1].Value
+        } elseif ($out -match '(?i)ALL\s+(\d+)\s+ASSERTIONS?\s+PASSED') {
+            $script:SuiteTallies[$name] = [int]$Matches[1]
+        }
+        # DOC-09: hand these tallies to the RUNNER, which is the only layer that sees every suite.
+        # Pester runs BEFORE the functional suites, so this file's own DOC-08 block can only ever
+        # check the ~6 suites fanned out here -- and the runner's check can only see the ~28 it
+        # launches itself. Two guards each covering part of the doc is how a claim slips between
+        # them. Writing to a known temp file merges both into ONE verdict, across two processes.
+        try {
+            $sink = Join-Path ([IO.Path]::GetTempPath()) 'pim-suite-tallies.json'
+            ($script:SuiteTallies | ConvertTo-Json -Depth 3) | Set-Content -LiteralPath $sink -Encoding UTF8
+        } catch { }   # never let bookkeeping fail a suite
+        $code
     }
 }
 
@@ -29,6 +65,9 @@ Describe 'Functional suites (child-process, asserted green)' {
     It 'Test-PimAuthoringDropdowns.ps1 exits 0' { Invoke-Suite 'Test-PimAuthoringDropdowns.ps1' | Should -Be 0 }  # Authoring tab: every group/role/tag/admin field is a dropdown/combobox from REAL catalog data (no raw free-text path); headless Node executor asserts option lists from a seeded catalog
     It 'Test-PimManagerGuiComprehensive.ps1 exits 0' { Invoke-Suite 'Test-PimManagerGuiComprehensive.ps1' | Should -Be 0 }  # COMPREHENSIVE post-deploy GUI gate: headless jsdom render of all 19 tabs (seeded + empty), no dead/blank panels, no JS errors, no dead controls, banner/dropdown/reach sanity. Self-skips if node/jsdom absent.
     It 'Test-PimMapPermissionsTargets.ps1 exits 0' { Invoke-Suite 'Test-PimMapPermissionsTargets.ps1' | Should -Be 0 }  # Delegation Map PERMISSIONS & TARGETS column: seeded render proves enriched Entra/AU/Azure targets (full scope path) populate from real rows
+    It 'Test-PimJobScopeReporting.ps1 exits 0'  { Invoke-Suite 'Test-PimJobScopeReporting.ps1' | Should -Be 0 }  # BUG-92: a job this worker is NOT scoped to run is recorded as a SKIP, never a FAILURE (390 of 863 prod runs were this, incl. servicenow-intake on a tenant with no ServiceNow) -- while an IN-scope job with no handler still fails loudly, because that was the real signal the noise buried
+    It 'Test-PimHygieneGates.ps1 exits 0'       { Invoke-Suite 'Test-PimHygieneGates.ps1'      | Should -Be 0 }  # BUG-89 / BUG-102 / SEC-14 standing gates: no internal doc name or CSV-as-store in user-visible text; every DEPLOY-PATH az call subscription-scoped with a ratcheted backlog for the provisioning scripts; the three live marker harnesses refuse a PRODUCTION tenant, and -Revert refuses while marked tenant objects still exist
+    It 'Test-PimConfigZoneWiring.ps1 exits 0'  { Invoke-Suite 'Test-PimConfigZoneWiring.ps1' | Should -Be 0 }  # IMP-20: the configuration blocks moved to Settings must still be WIRED -- a jsdom render asserts each control is present AND has a handler attached, which no static check can see (markup, getElementById and endpoints all still exist after a bad move)
     It 'Test-PimMapReach.ps1 exits 0'          { Invoke-Suite 'Test-PimMapReach.ps1'         | Should -Be 0 }  # Delegation Map transitive reach: seeded render proves person->groups->bundles->targets reach is column-oriented (no over-reach via mis-nested groups, no AU-scope duplication)
     It 'Test-PimInactivitySweep.ps1 exits 0'   { Invoke-Suite 'Test-PimInactivitySweep.ps1'  | Should -Be 0 }  # §25c inactivity sweep: pure decision core (PIM-InactivitySweep.ps1) -- last-sign-in days math (string/datetime/null/future), per-unit/global threshold (0/blank = not swept), protected detection (break-glass/super-admin/pattern), plan classification (active/inactive/never-signed-in/not-swept/protected/already-disabled) + Report(flag, default) vs Enforce(disable) action; the Enforce verdict composes the REAL account-disable circuit breaker (G1 empty-desired / G2 mass-disable cap / G3 opt-in) so a sweep can NEVER mass-disable; a protected candidate is surfaced but never counted to disable; NO real destructive write (offline)
     It 'Test-PimManagerHostedSql.ps1 exits 0'  { Invoke-Suite 'Test-PimManagerHostedSql.ps1' | Should -Be 0 }  # hosted+SQL hardening (SQL part self-skips if no instance)
@@ -3113,5 +3152,89 @@ Describe 'MSP substrate / sync models / signed kill-switch (REQUIREMENTS § 4)' 
             $txt | Should -Not -Match 'TOPSECRET'
             $txt | Should -Match '\*\*\*'
         }
+    }
+}
+
+# ---------------------------------------------------------------------------
+# DOC-08 -- docs/TESTS.md's assert counts must MATCH REALITY.
+#
+# 🔴 WHY THIS EXISTS. On 2026-08-28 the operator asked for docs they could trust. Measured
+# rather than reviewed, FOUR numbers in TESTS.md were wrong (Pester 593 vs 710,
+# ManagerEndpoints 109 vs 111, DisableGuard 70 vs 72, SetupHosting 210 vs 211) and
+# `Test-PimScheduler` carried TWO contradicting counts in the same table. The doc had already
+# recorded this exact rot once before -- "the number recorded here read 192 while the suite was
+# already running 203".
+# 🔑 An assert COUNT is the one field in that table that cannot be re-derived by reading the
+# code, so it is the one field that needs a machine to keep it honest. Everything else in a row
+# is prose a reviewer can check; a number silently goes stale and still LOOKS authoritative,
+# which is worse than absent -- it is read as fact.
+#
+# This runs LAST on purpose: it consumes the tallies Invoke-Suite captured above, so it costs
+# nothing beyond what the run already did.
+# ---------------------------------------------------------------------------
+Describe 'DOC-08: docs/TESTS.md assert counts match the suites' {
+    BeforeAll {
+        $script:DocPath = Join-Path (Split-Path -Parent $PSScriptRoot) 'docs\TESTS.md'
+        $script:Claims = @{}          # suite -> list of distinct claimed counts
+        foreach ($line in (Get-Content -LiteralPath $script:DocPath)) {
+            if ($line -notmatch '`tests/(Test-Pim[A-Za-z0-9]+\.ps1)`') { continue }
+            $suite = $Matches[1]
+            $claim = $null
+            if     ($line -match '\*\*Now (\d+) asserts\*\*') { $claim = [int]$Matches[1] }
+            elseif ($line -match '\*\*(\d+)\s*/\s*0\*\*')     { $claim = [int]$Matches[1] }
+            if ($null -eq $claim) { continue }
+            if (-not $script:Claims.ContainsKey($suite)) { $script:Claims[$suite] = New-Object System.Collections.Generic.List[int] }
+            if ($script:Claims[$suite] -notcontains $claim) { [void]$script:Claims[$suite].Add($claim) }
+        }
+    }
+
+    It 'the doc actually makes checkable claims (a guard that checks nothing passes silently)' {
+        @($script:Claims.Keys).Count | Should -BeGreaterThan 10
+    }
+
+    It 'no suite is given TWO different counts in the doc' {
+        # The contradiction case: `Test-PimScheduler` was listed as both 95 and 190. Whichever
+        # is right, a doc that says two things cannot be trusted about either.
+        $bad = @($script:Claims.GetEnumerator() | Where-Object { $_.Value.Count -gt 1 } |
+                 ForEach-Object { "$($_.Key) claims $($_.Value -join ' and ')" })
+        $bad -join '; ' | Should -BeNullOrEmpty
+    }
+
+    It 'every claimed suite file exists' {
+        $missing = @($script:Claims.Keys | Where-Object { -not (Test-Path (Join-Path $PSScriptRoot $_)) })
+        $missing -join ', ' | Should -BeNullOrEmpty
+    }
+
+    It 'every claim matches the count the suite actually produced in THIS run' {
+        # Only suites this run executed as children can be compared; the rest are reported as
+        # UNVERIFIED below rather than silently treated as agreeing.
+        $mismatch = @()
+        foreach ($kv in $script:Claims.GetEnumerator()) {
+            if (-not $script:SuiteTallies.ContainsKey($kv.Key)) { continue }
+            $actual = $script:SuiteTallies[$kv.Key]
+            $claim  = $kv.Value[0]
+            if ($actual -ne $claim) { $mismatch += "$($kv.Key): doc says $claim, suite produced $actual" }
+        }
+        $mismatch -join '; ' | Should -BeNullOrEmpty
+    }
+
+    It 'hands its tallies to the runner, which owns the COVERAGE verdict (DOC-09)' {
+        # 🪤 THIS BLOCK USED TO PRINT ITS OWN "N claim(s) NOT verified" LIST, AND ONCE DOC-09
+        # LANDED THAT LINE BECAME ACTIVELY MISLEADING. Pester runs BEFORE the functional suites,
+        # so DOC-08 can only ever see the ~6 it fans out itself -- it was reporting "29 NOT
+        # verified" moments before the runner reported "36 of 36 verified", about the same doc.
+        # A reader has no way to tell which number to believe, and the alarming one came first.
+        #
+        # 🔑 The fix is ownership, not louder output: ONE component owns the coverage verdict.
+        # DOC-08 keeps the checks that need no suite run at all (the doc contradicting itself, a
+        # claim naming a file that does not exist) and hands its tallies to the runner via the
+        # temp sink; DOC-09 merges both sets and issues the single verdict. Two guards reporting
+        # different coverage for the same document is the very shape -- partial views that look
+        # authoritative -- that DOC-08 and DOC-09 exist to remove.
+        $sink = Join-Path ([IO.Path]::GetTempPath()) 'pim-suite-tallies.json'
+        # Assert the HANDOFF, since that is now this block's contribution to coverage: if the sink
+        # is never written, DOC-09 silently drops back to partial cover and still says "N of N".
+        @($script:SuiteTallies.Keys).Count | Should -BeGreaterThan 0
+        (Test-Path -LiteralPath $sink) | Should -BeTrue
     }
 }

@@ -49,6 +49,45 @@ $script:PimRetiredTenantIds = @{
     '9927fa1f-a09b-4244-8aba-60fb9ce7335e' = 'managedoperation (old test tenant -- RETIRED)'
 }
 
+# 🔴 SEC-14. A PRODUCTION tenant is not a test tenant, and the registry has always said so:
+#    ~/.claude/shared/test-tenants.json -> myfamilynetwork = status "production", "NOT a test
+#    tenant". Nothing in the code read it. On 2026-06-14 a live marker harness ran there and
+#    left 332 groups + 16 administrative units holding 240 Entra directory-role assignments --
+#    Global Administrator among them -- for 77 DAYS, until the operator failed to recognise a
+#    group name in his own tenant.
+# 🔑 The refusal has to live in CODE. A rule that only exists in a registry no script opens is
+#    not a rule, and "read the registry first" is exactly what did not happen.
+$script:PimProductionTenantIds = @{
+    'f0fa27a0-8e7c-4f63-9a77-ec94786b7c9e' = 'myfamilynetwork (PRODUCTION -- the operator''s live tenant, NOT a test tenant)'
+    '7825c48b-861b-41fd-b635-ffab1aff7d13' = 'expertslivedk (a DIFFERENT COMPANY -- CEH only, never PIM)'
+}
+
+function Assert-PimTenantIsNotProduction {
+    <#
+      Throw if a tenant id is a PRODUCTION tenant. Call this from ANY script that CREATES,
+      MARKS or DELETES tenant objects, before it authenticates. Accepts empty input as
+      "nothing to check" so it can be called unconditionally.
+
+      There is deliberately NO environment-variable escape hatch of the
+      PIM_AllowRetiredTenants kind. That switch exists for a retired tenant, where the cost of
+      being wrong is a wasted run. Here the cost of being wrong is 332 privileged objects in a
+      live tenant, and an override would have been set once and then forgotten -- which is the
+      same failure as having no guard at all.
+    #>
+    [CmdletBinding()]
+    param([string]$TenantId, [string]$What = 'live test harness')
+
+    $tid = "$TenantId".Trim()
+    if (-not $tid) { return }
+    $key = $tid.ToLowerInvariant()
+    if (-not $script:PimProductionTenantIds.ContainsKey($key)) { return }
+    throw ("REFUSING to run the $What against '$tid' -- $($script:PimProductionTenantIds[$key]). " +
+           'This harness CREATES and DELETES directory objects. It ran against production once ' +
+           '(SEC-14, 2026-06-14) and left 332 groups + 16 AUs holding 240 directory-role ' +
+           'assignments, including Global Administrator, for 77 days. Point it at a test tenant ' +
+           'from the estate (environments 4-31). There is no override.')
+}
+
 function Assert-PimScenarioTenantAllowed {
     <#
       Throw if a tenant id is one of the retired estate tenants. Call this from ANY live

@@ -53,8 +53,25 @@ param(
     [Parameter(Mandatory)][string]$StorageAccount,
     [string]$Container = 'baselines',
     [string]$Blob      = 'baseline-latest.json',
-    [Parameter(Mandatory)][string]$ResourceGroup,
+    # NOT Mandatory: -MintOnly has no job to write to. Enforced in the body instead, so the
+    # ROTATE path still refuses to run without it.
+    [string]$ResourceGroup,
     [string]$JobName   = 'ca-pim-downlink-s6',
+    # 🔴 THE BOOTSTRAP GAP THIS CLOSES -- found onboarding RIDE under EFIF on 2026-09-03.
+    # Rotation requires a Job that already holds the secret (-ResourceGroup/-JobName), but
+    # Deploy-PimDownlinkJob.ps1 needs a SAS to CREATE that Job in the first place. So onboarding a
+    # slave for the FIRST time had no scripted path to its first credential: the operator had to
+    # hand-mint a SAS with az, which is exactly the undocumented hand-step that makes an onboarding
+    # unrepeatable -- and hand-minting skips the verify in step 2, which is the part that makes
+    # this script trustworthy.
+    # -MintOnly runs steps 1 and 2 (mint, then PROVE it fetches a real signed bundle), touches no
+    # job, and RETURNS the URL on the pipeline:
+    #     $sas = .\Update-PimBaselineSas.ps1 -StorageAccount <master-st> -MintOnly -MasterSubscriptionId <sub>
+    #     .\Deploy-PimDownlinkJob.ps1 -Scenario S6 ... -BaselineSasUrl $sas
+    # Thereafter the normal (rotating) mode owns the credential.
+    # 🪤 The returned value IS a credential. It goes to the PIPELINE, never to the log -- every
+    # other line in this script is written with Note/Step precisely so the URL is not printed.
+    [switch]$MintOnly,
     [string]$SecretName = 'pim-baseline-url',
     [string]$SubscriptionId,
     [ValidateRange(1,365)][int]$ValidDays = 30,
@@ -100,7 +117,18 @@ function Note($m){ Write-Host "    $m" -ForegroundColor DarkGray }
 function Warn($m){ Write-Host "    $m" -ForegroundColor Yellow }
 function Fail($m){ Write-Host "    $m" -ForegroundColor Red }
 
-Step "Baseline SAS rotation -- account=$StorageAccount/$Container/$Blob  job=$JobName (rg $ResourceGroup)"
+if ($MintOnly) {
+    Step "Baseline SAS MINT-ONLY -- account=$StorageAccount/$Container/$Blob  (no job will be touched)"
+} else {
+    # -ResourceGroup stopped being a Mandatory parameter so that -MintOnly could run without one.
+    # The rotate path still requires it, and must say so plainly rather than failing later inside az.
+    if (-not "$ResourceGroup".Trim()) {
+        Fail 'no -ResourceGroup. It is required to ROTATE (the SAS is written into that job''s ACA secret).'
+        Fail '  To mint a FIRST credential for a job that does not exist yet, use -MintOnly.'
+        exit 1
+    }
+    Step "Baseline SAS rotation -- account=$StorageAccount/$Container/$Blob  job=$JobName (rg $ResourceGroup)"
+}
 
 # --- 0) REGISTER the recurring task, then exit. -------------------------------
 # Registration is a SEPARATE action from rotating: doing both in one run would mean the
@@ -204,6 +232,14 @@ foreach ($req in @('payloadB64','signature','keyThumbprint')) {
     }
 }
 Note ("verified: signed bundle fetched ({0})" -f ($names -join ', '))
+
+if ($MintOnly) {
+    # Verified above: it fetched, and it is a signed bundle. Hand it back for
+    # Deploy-PimDownlinkJob.ps1 -BaselineSasUrl. Pipeline only -- never Note/Step.
+    Step "MINT-ONLY: verified SAS returned on the pipeline; no job was touched. Expires $expiry."
+    Write-Output $sasUrl
+    exit 0
+}
 
 if ($CheckOnly) {
     Step 'CHECK-ONLY: nothing was written.'

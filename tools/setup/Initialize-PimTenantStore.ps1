@@ -30,7 +30,12 @@ param(
     [Parameter(Mandatory)][string]$ModernAppId,
     [Parameter(Mandatory)][string]$ModernThumbprint,
     [Parameter(Mandatory)][string]$AdminAppId,        # server's Entra admin (onboarding SPN)
-    [Parameter(Mandatory)][string]$AdminSecret,
+    # ONE of these. 🔴 The secret used to be Mandatory, which made a CLIENT SECRET structurally
+    # required to stand up a tenant store -- against the repo-root rule ("authenticate as its SPN
+    # using a CERTIFICATE, never a client secret") and unsatisfiable where the onboarding SPN is
+    # cert-only. Grant-PimMiSql was fixed for exactly this on 2026-08-09; this script was not.
+    [string]$AdminSecret,
+    [string]$AdminCertThumbprint,
     [string]$Database = 'PimPlatform',
     [string]$DbUserName                                # defaults to AutomateIT-Modern-<token-ish>
 )
@@ -49,9 +54,17 @@ Write-Host "  modern spn : $ModernAppId"
 Write-Host "  db user    : $DbUserName"
 
 # --- admin token for the grants (Entra admin of the server) -------------------
-$adminTok = (Invoke-RestMethod -Method POST -TimeoutSec 30 -Uri "https://login.microsoftonline.com/$TenantId/oauth2/v2.0/token" `
-    -ContentType 'application/x-www-form-urlencoded' `
-    -Body @{ grant_type='client_credentials'; client_id=$AdminAppId; client_secret=$AdminSecret; scope='https://database.windows.net/.default' }).access_token
+# 🔑 Routed through Get-PimRestToken rather than a hand-rolled client_credentials POST. Two
+# reasons, and the second is why it matters beyond cert support:
+#   * it accepts a CERTIFICATE (JWT client assertion), which a raw client_secret POST cannot;
+#   * it is the ONE token path that carries SEC-12's refusal -- an explicit identity that cannot
+#     be honoured throws instead of quietly becoming an ambient one. The hand-rolled call here was
+#     a second implementation that could never gain that, and a duplicate auth path is exactly
+#     where a security fix goes missing.
+if ($AdminSecret -and $AdminCertThumbprint) { throw 'Initialize-PimTenantStore: pass EITHER -AdminSecret OR -AdminCertThumbprint, not both.' }
+if (-not $AdminSecret -and -not $AdminCertThumbprint) { throw 'Initialize-PimTenantStore: one of -AdminSecret / -AdminCertThumbprint is required.' }
+$adminTok = Get-PimRestToken -Resource 'https://database.windows.net' -TenantId $TenantId `
+                -ClientId $AdminAppId -ClientSecret $AdminSecret -CertThumbprint $AdminCertThumbprint -Force
 if (-not $adminTok) { throw 'could not obtain a SQL admin token for the onboarding SPN' }
 $type = Resolve-PimSqlClientType
 

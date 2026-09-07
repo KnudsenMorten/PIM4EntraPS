@@ -118,25 +118,73 @@ function Read-PimPortalProfiles {
     # key 'PortalAdmins' (JSON), loaded into $global:PIM_NamingConventions at startup --
     # so delegation works with NO file share. Falls back to config/portal-admins.json
     # for local/dev. This keeps the whole config (data, settings, RBAC, delegation) in SQL.
-    param([string]$ConfigDir, [string]$ProfilesFile)
+    # 🔴 SEC-15 / §36.3 phase 2 -- THIS IS AN AUTHORIZATION READ, so it fails CLOSED.
+    #
+    # What it used to do: prefer the SQL-hydrated setting, then fall back to
+    # config/portal-admins.json, and then -- if that was missing -- to
+    # config/portal-admins.SAMPLE.json. Three problems, in increasing order of seriousness:
+    #   1. the fallback was silent, so nothing distinguished "the authorization model" from
+    #      "a JSON file someone left on the box";
+    #   2. anyone who can write that file can grant themselves L0 across every service;
+    #   3. it would load the SHIPPED SAMPLE as though it were configuration -- sample identities
+    #      grant nothing in practice, but reading example data on an authorization path is not a
+    #      behaviour to leave in place and hope stays harmless.
+    #
+    # Now: hosted deployments are SQL-ONLY. No file, no sample, ever. If the store has no
+    # profiles the answer is "no profiles" -- which denies every non-SuperAdmin, the safe
+    # direction -- and the SOURCE is recorded so the Manager can say which store answered.
+    param([string]$ConfigDir, [string]$ProfilesFile, [switch]$Hosted)
+
+    $isHosted = [bool]$Hosted
+    if (-not $isHosted) { try { $isHosted = [bool]$global:PIM_Hosted } catch { } }
+    if (-not $isHosted) { try { $isHosted = ("$env:PIM_HOSTED" -in @('1','true','yes','TRUE','Yes')) } catch { } }
+
+    # An explicit -ProfilesFile is a deliberate caller choice (tests, tooling) and still wins.
     if (-not $ProfilesFile -and ($global:PIM_NamingConventions -is [hashtable]) -and $global:PIM_NamingConventions['PortalAdmins']) {
         $raw = $global:PIM_NamingConventions['PortalAdmins']
         try {
             $parsed = $raw | ConvertFrom-Json
+            $script:PimPortalProfileSource = 'sql'
             if ($parsed.PSObject.Properties['portalAdmins']) { return @($parsed.portalAdmins) }
             return @($parsed)
-        } catch { Write-Warning "  [portal] SQL 'PortalAdmins' setting not valid JSON: $($_.Exception.Message)" }
+        } catch {
+            # 🔒 Malformed authorization JSON must NOT degrade to a file. Deny instead.
+            $script:PimPortalProfileSource = 'sql-invalid'
+            Write-Warning "  [portal] SQL 'PortalAdmins' setting is not valid JSON -- DENYING all delegated access rather than falling back to a file: $($_.Exception.Message)"
+            return @()
+        }
     }
+
+    if ($isHosted -and -not $ProfilesFile) {
+        # No SQL profiles on a hosted deployment == there are none. Say so; do not go looking on
+        # a filesystem that is ephemeral, unversioned and writable by anything in the container.
+        $script:PimPortalProfileSource = 'sql-empty'
+        return @()
+    }
+
     $f = $ProfilesFile
     if (-not $f) {
         $f = Join-Path $ConfigDir 'portal-admins.json'
-        if (-not (Test-Path -LiteralPath $f)) {
-            $s = Join-Path $ConfigDir 'portal-admins.sample.json'
-            if (Test-Path -LiteralPath $s) { $f = $s } else { return @() }
-        }
+        # 🔒 The SAMPLE is never authorization data. Removed deliberately (SEC-15).
+        if (-not (Test-Path -LiteralPath $f)) { $script:PimPortalProfileSource = 'none'; return @() }
     }
-    if (-not (Test-Path -LiteralPath $f)) { return @() }
-    try { return @((Get-Content -LiteralPath $f -Raw -Encoding UTF8 | ConvertFrom-Json).portalAdmins) } catch { return @() }
+    if (-not (Test-Path -LiteralPath $f)) { $script:PimPortalProfileSource = 'none'; return @() }
+    try {
+        $r = @((Get-Content -LiteralPath $f -Raw -Encoding UTF8 | ConvertFrom-Json).portalAdmins)
+        $script:PimPortalProfileSource = 'file'
+        return $r
+    } catch { $script:PimPortalProfileSource = 'file-invalid'; return @() }
+}
+
+function Get-PimPortalProfileSource {
+    <#
+      Which store answered the last Read-PimPortalProfiles: sql | sql-empty | sql-invalid |
+      file | file-invalid | none. Surfaced on /api/portal-access so "why can this person suddenly
+      do that?" is answerable -- a silent fallback is the SEC-15 defect, and knowing the source is
+      how it stops being silent.
+    #>
+    if ($script:PimPortalProfileSource) { return "$($script:PimPortalProfileSource)" }
+    return 'unknown'
 }
 
 function Get-PimPortalProfile {
@@ -315,6 +363,53 @@ function Test-PimPortalCanEnableConsultant {
     if ($null -eq $Profile) { return $false }
     $caps = @(@($Profile.capabilities) | ForEach-Object { "$_".ToLowerInvariant() })
     if ($caps -notcontains 'enable-consultants') { return $false }
+    $managed = @(@($Profile.managedAdmins) | ForEach-Object { "$_".ToLowerInvariant() })
+    if ($managed -contains '*') { return $true }
+    return ($managed -contains "$AdminName".ToLowerInvariant())
+}
+
+function Test-PimPortalCanManageAdmin {
+    <#
+      REQUIREMENTS §35.3 -- may this caller perform an ACCOUNT OPERATION on this admin?
+      (enable/disable · reset TAP · flag for deletion · revoke sign-in sessions · modify)
+
+      🔑 WHY THIS IS ITS OWN CAPABILITY, AND NOT `assign-admin`.
+      Before this, the only two gates taking an ADMIN as the subject were
+      Test-PimPortalCanAssignAdmin (`assign-admin`) and Test-PimPortalCanEnableConsultant
+      (`enable-consultants`). Both answer "may this profile GRANT to this person?" --
+      a different authority from "may this profile ACT ON this person's account".
+      Reusing `assign-admin` would have compiled and would have meant that anyone who
+      may grant access may also kill sessions and queue deletions. Those are not the
+      same power, and conflating them is how a permission model quietly stops matching
+      the thing its own documentation claims.
+
+      🔒 DEFAULT-DENY, DELIBERATELY. `manage-account` is a NEW capability, so no existing
+      portal profile holds it and every non-SuperAdmin is refused until an operator adds
+      it explicitly. That is the correct direction to fail for destructive verbs: the
+      alternative -- seeding it into existing profiles so nothing "breaks" -- would grant
+      account-destruction rights to everyone who already had any portal profile, silently.
+      SuperAdmin bypasses, as everywhere else in this file.
+    #>
+    param([AllowNull()][object]$Profile, [Parameter(Mandatory)][string]$AdminName, [switch]$IsSuperAdmin)
+    if ($IsSuperAdmin) { return $true }
+    if ($null -eq $Profile) { return $false }
+    $caps = @(@($Profile.capabilities) | ForEach-Object { "$_".ToLowerInvariant() })
+
+    # 🔒 OPERATOR DECISION 2026-08-31: "grant manage-account (level 0-2)".
+    # The capability shipped default-deny, which meant only SuperAdmin could act on an account
+    # and the §35.2 grid was empty for everyone else. Profiles whose ceiling is L0-L2 -- the
+    # admin/helpdesk tiers that already manage privileged accounts day to day -- now hold it
+    # implicitly. L3+ (business/workload owners) still need it granted explicitly.
+    # 🔑 This is a DELIBERATE relaxation of default-deny, not a default drifting open: it is
+    # scoped by LEVEL, it does not widen WHICH admins are reachable (managedAdmins still
+    # decides that), and an explicit capability list is still honoured.
+    $lvl = $null
+    if ($Profile.PSObject.Properties['levelMax'] -and "$($Profile.levelMax)".Trim() -ne '') {
+        $n = 0; if ([int]::TryParse("$($Profile.levelMax)", [ref]$n)) { $lvl = $n }
+    }
+    $byLevel = ($null -ne $lvl -and $lvl -ge 0 -and $lvl -le 2)
+
+    if (-not ($caps -contains 'manage-account') -and -not $byLevel) { return $false }
     $managed = @(@($Profile.managedAdmins) | ForEach-Object { "$_".ToLowerInvariant() })
     if ($managed -contains '*') { return $true }
     return ($managed -contains "$AdminName".ToLowerInvariant())

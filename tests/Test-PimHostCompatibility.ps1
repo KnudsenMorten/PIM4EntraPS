@@ -53,10 +53,19 @@ T ("the host is Windows PowerShell 5.x (actual: $($PSVersionTable.PSVersion), $(
 # ternary there is correct. Exempted BY PATH, with the reason, never by a blanket rule.
 $ContainerOnly = @('engine\container\Start-PimEngineContainer.ps1')
 
-Write-Host "`n== 1. EVERY SHIPPED .ps1 PARSES ON 5.1 ==" -ForegroundColor Cyan
-$files = @(Get-ChildItem $solRoot -Recurse -Filter *.ps1 -File |
+Write-Host "`n== 1. EVERY SHIPPED .ps1 AND .psm1 PARSES ON 5.1 ==" -ForegroundColor Cyan
+# 🪤 THIS GLOB WAS `-Filter *.ps1`, WHICH EXCLUDES .psm1 -- and .psm1 is where the biggest
+# PowerShell file in the solution lives (engine/_shared/PIM-Functions.psm1, ~11k lines, still
+# imported by the REST engine). On 2026-08-31 an edit stripped that file's UTF-8 BOM; PS 5.1 then
+# read it as ANSI, the non-ASCII characters in its comments became mojibake, quoting broke, and it
+# stopped parsing. **pwsh 7 parsed it fine**, so a pwsh-only check gave an all-clear.
+# The gate that exists precisely to catch this could not see the file. Seven suites failed with
+# ~600ms load errors before anyone looked at the cause.
+$files = @(Get-ChildItem $solRoot -Recurse -File -Include *.ps1, *.psm1 |
            Where-Object { $_.FullName -notlike '*\legacy\*' -and $_.FullName -notlike '*\node_modules\*' })
 T "found a plausible number of scripts to check ($($files.Count))" ($files.Count -gt 100)
+# The whole point of the fix: the module directory must actually be represented.
+T "the scan includes .psm1 files (the 2026-08-31 blind spot)" (@($files | Where-Object { $_.Extension -eq '.psm1' }).Count -ge 1)
 
 $broken = New-Object System.Collections.Generic.List[string]
 $noBom  = 0

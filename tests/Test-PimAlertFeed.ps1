@@ -145,5 +145,67 @@ try {
 }
 
 Write-Host ""
+# === SQL adapter (36 phase 4) ==============================================
+# The feed is the recorded-send PROOF -- what says an operator WAS told that
+# break-glass fired. On a hosted deployment it was appended to a container
+# filesystem with no persistent volume, so every revision roll destroyed the
+# proof while the alerts themselves kept looking fine.
+#
+# Exercised for REAL against stubbed setting accessors rather than source-scanned:
+# the adapter's whole job is round-tripping through Get-/Set-PimSqlSetting, and a
+# regex cannot tell whether it actually does.
+Write-Host "`n-- SQL adapter: the feed survives a container roll --" -ForegroundColor Cyan
+$script:__stubStore = @{}
+function Get-PimSqlSetting { param([string]$ConnectionString, [string]$Name) if ($script:__stubStore.ContainsKey($Name)) { return $script:__stubStore[$Name] } return $null }
+function Set-PimSqlSetting { param([string]$ConnectionString, [string]$Name, $Value) $script:__stubStore[$Name] = $Value }
+
+Assert 'store name is stable' ((Get-PimAlertFeedStoreName) -eq 'AlertFeed')
+Assert 'an empty store reads as an empty feed (never $null)' (@(Read-PimAlertFeedSql -ConnectionString 'stub').Count -eq 0)
+
+$t0 = [datetime]::Parse('2026-08-31T10:00:00Z').ToUniversalTime()
+$r1 = New-PimAlertRecord -Event 'break-glass' -Title 'BG one' -Detail 'd1' -SendResult @{ sent = $true }  -NowUtc $t0
+$r2 = New-PimAlertRecord -Event 'drift'       -Title 'D two'  -Detail 'd2' -SendResult @{ sent = $false } -NowUtc $t0.AddMinutes(5)
+[void](Write-PimAlertFeedSql -ConnectionString 'stub' -Record $r1)
+[void](Write-PimAlertFeedSql -ConnectionString 'stub' -Record $r2)
+$back = @(Read-PimAlertFeedSql -ConnectionString 'stub')
+Assert 'both records round-trip through the store' ($back.Count -eq 2)
+Assert 'newest-first is preserved across the store' ("$($back[0].title)" -eq 'D two')
+
+# The point of migrating: a NEW reader against the same store sees the proof.
+# A file-backed feed on an ephemeral disk is exactly what fails here.
+$back2 = @(Read-PimAlertFeedSql -ConnectionString 'stub')
+Assert 'a fresh reader sees the same feed (survives a roll)' ($back2.Count -eq 2)
+
+# The pure core must keep working on what the store returns -- moving the store
+# is not a licence to rewrite the query layer (the rule set for the audit reader).
+$onlyBg = @(Select-PimAlertFeed -Feed $back2 -Event 'break-glass' -Take 0)
+Assert 'Select-PimAlertFeed still filters store-read records' ($onlyBg.Count -eq 1 -and "$($onlyBg[0].event)" -eq 'break-glass')
+# 🪤 PIN "now" TO THE RECORDS. Get-PimAlertFeedSummary counts only what falls inside
+# -WindowHours (default 168), so calling it without -NowUtc measured the fixed 2026-08-31
+# records against the REAL clock: the assert passed for exactly seven days after it was
+# written and then failed forever. It went red on 2026-09-07, mid-release-check, and the
+# function was right the whole time -- records outside the window are not counted.
+# A test that pins its data must pin its clock too, or it is a timer, not a test.
+$sum = Get-PimAlertFeedSummary -Feed $back2 -NowUtc $t0.AddMinutes(10)
+Assert 'Get-PimAlertFeedSummary still totals store-read records' ([int]$sum.total -eq 2)
+
+# Retention has to hold in SQL too, or the bounded blob grows without limit.
+$script:__stubStore = @{}
+for ($i2 = 0; $i2 -lt 12; $i2++) {
+    [void](Write-PimAlertFeedSql -ConnectionString 'stub' -Record (New-PimAlertRecord -Event 'drift' -Title "t$i2" -Detail 'x' -SendResult @{ sent = $true } -NowUtc $t0.AddHours($i2)) -MaxKeep 5)
+}
+$clamped = @(Read-PimAlertFeedSql -ConnectionString 'stub')
+Assert 'SQL retention clamps to MaxKeep' ($clamped.Count -eq 5)
+Assert '   ...keeping the NEWEST records' ("$($clamped[0].title)" -eq 't11')
+
+# Corrupt / foreign values must degrade to an empty feed, not throw: this runs on
+# the Home tile render path, and a feed read that takes down Home would be a worse
+# failure than a short feed.
+$script:__stubStore = @{ AlertFeed = 'not json at all' }
+$bad = $null; $threw = $false
+try { $bad = @(Read-PimAlertFeedSql -ConnectionString 'stub') } catch { $threw = $true }
+Assert 'an unreadable value degrades to empty, never throws' ((-not $threw) -and $bad.Count -eq 0)
+$script:__stubStore = @{ AlertFeed = @{ somethingElse = 1 } }
+Assert 'a value with no alerts[] reads as empty' (@(Read-PimAlertFeedSql -ConnectionString 'stub').Count -eq 0)
 Write-Host ("RESULT: {0} pass, {1} fail" -f $pass, $fail) -ForegroundColor $(if ($fail) { 'Red' } else { 'Green' })
 if ($fail) { exit 1 }

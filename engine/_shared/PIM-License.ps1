@@ -164,7 +164,7 @@ Function Get-PimLicense {
 
     $result = [pscustomobject]@{
         Status     = 'Missing'      # Missing | Invalid | NotYetValid | Expired | Grace | Valid
-        Reason     = 'no .pimlicense file found'
+        Reason     = 'no .pimlicense / .aitlicense file found'
         Customer   = ''
         Sku        = 'Core'
         Features   = @()
@@ -182,7 +182,27 @@ Function Get-PimLicense {
     } else {
         $dir = Get-PimLicenseSearchDir
         if ($dir -and (Test-Path -LiteralPath $dir)) {
-            $file = Get-ChildItem -LiteralPath $dir -Filter '*.pimlicense' -File -ErrorAction SilentlyContinue | Sort-Object Name | Select-Object -First 1
+            # 🔴 BOTH EXTENSIONS. The dual-signer work above made a FRAMEWORK-issued licence
+            # (TOOLS/New-AitLicense.ps1) verify here "with no cutover and no reissue" -- but that
+            # tool writes `<customer>.aitlicense`, and this search only ever looked for
+            # `*.pimlicense`. So a framework licence signed correctly, verified correctly, and was
+            # NEVER FOUND. Measured 2026-09-05 with a real issued file:
+            #     EFIF-Master.aitlicense -> Status=Missing, "no .pimlicense file found"
+            #     EFIF-Master.pimlicense -> Status=Valid,   Customer=EFIF-Master, Sku=Pro
+            # Same bytes, same signature; only the extension differed. The crypto half of the
+            # migration landed and the discovery half did not, which reads as "the customer has no
+            # licence" rather than as a bug -- indistinguishable from the unlicensed case that LIC-1
+            # deliberately makes silent.
+            # 🪤 .pimlicense is listed FIRST and wins a tie: an existing solution-specific licence
+            # must keep taking precedence, so this cannot change behaviour for anyone who already
+            # has one. LIC-1's licence is framework-wide by design (one format, every solution --
+            # SecurityInsight included), so accepting the framework extension is the direction of
+            # travel; renaming the issuer's output to .pimlicense would make a framework artifact
+            # carry one solution's name.
+            $file = Get-ChildItem -LiteralPath $dir -File -ErrorAction SilentlyContinue |
+                        Where-Object { $_.Extension -in @('.pimlicense', '.aitlicense') } |
+                        Sort-Object @{ Expression = { if ($_.Extension -eq '.pimlicense') { 0 } else { 1 } } }, Name |
+                        Select-Object -First 1
             if ($file) { $licPath = $file.FullName }
         }
     }

@@ -163,9 +163,72 @@ function Select-PimJobHandlers {
     # No filter (empty) = run everything.
     param([string[]]$Only)
     $keep = @($Only | Where-Object { "$_".Trim() } | ForEach-Object { "$_".Trim().ToLowerInvariant() })
-    if ($keep.Count -eq 0) { return @($script:PimJobHandlers.Keys) }
+    if ($keep.Count -eq 0) { $script:PimJobScope = $null; return @($script:PimJobHandlers.Keys) }
+    # BUG-92: REMEMBER the scope, do not just delete the handlers.
+    # Deleting alone left the dispatcher unable to tell "this worker is not supposed to run
+    # that job" from "that job has no implementation" -- both surfaced as
+    # no-handler-registered, which is recorded as status='failed'. On this deployment that put
+    # SIX job types on the Overview permanently in red, including servicenow-intake for a
+    # customer with no ServiceNow: "i see references to failed jobs including servicenow, i
+    # dont have any servicenow". 390 of 863 recorded runs were this.
+    # 🔑 Excluding a job by design and reporting it as broken must not be the same code path.
+    $script:PimJobScope = $keep
     foreach ($t in @($script:PimJobHandlers.Keys)) { if ($t -notin $keep) { [void]$script:PimJobHandlers.Remove($t) } }
     return @($script:PimJobHandlers.Keys)
+}
+
+function Get-PimJobScope {
+    # The job types this worker is scoped to run ($env:PIM_SCHED_JOBS), or $null for "all".
+    if ($script:PimJobScope) { return @($script:PimJobScope) }
+    return $null
+}
+
+# 🔴 BUG-112. The RUNNER knows its scope; the MANAGER renders the Jobs view. They are different
+# processes -- on this deployment, different machines entirely: the jobs run from VisualCron on
+# the management box out of the synced tree, while the GUI is a container. The Manager therefore
+# has no $env:PIM_SCHED_JOBS of its own and could only INFER scope from run history, which is
+# stale for any job whose cadence is 12-24h.
+# So the runner PUBLISHES its scope to the shared store on every tick, and the Manager reads it.
+# A fact, written once by the process that knows it, instead of guessed by the one that does not.
+function Save-PimJobScopeToStore {
+    param([string[]]$Scope)
+    if (-not (Get-Command Set-PimSetting -ErrorAction SilentlyContinue)) { return }
+    try {
+        $payload = [ordered]@{
+            scope      = @($Scope)          # empty array = this worker runs everything
+            owner      = (Resolve-PimSchedulerOwner)
+            updatedUtc = ([datetime]::UtcNow.ToString('o'))
+        }
+        Set-PimSetting -Name 'JobScope' -Value ($payload | ConvertTo-Json -Depth 4 -Compress)
+    } catch {
+        # Never let publishing telemetry break a tick -- the worst case is the GUI keeps
+        # showing what it showed before.
+        Write-Verbose "could not publish job scope: $($_.Exception.Message)"
+    }
+}
+
+function Get-PimPersistedJobScope {
+    # The scope the RUNNER last published, lower-cased. $null = unknown or "runs everything",
+    # which both mean "do not suppress anything" -- the safe direction: a job wrongly shown as
+    # failing is noise, but a REAL failure hidden because we guessed the scope is a defect.
+    if (-not (Get-Command Get-PimSetting -ErrorAction SilentlyContinue)) { return $null }
+    try {
+        $raw = Get-PimSetting -Name 'JobScope'
+        if (-not $raw) { return $null }
+        $o = $raw | ConvertFrom-Json
+        if ($o -is [string]) { $o = $o | ConvertFrom-Json }
+        $s = @($o.scope | Where-Object { "$_".Trim() } | ForEach-Object { "$_".Trim().ToLowerInvariant() })
+        if ($s.Count -eq 0) { return $null }
+        return $s
+    } catch { return $null }
+}
+
+function Test-PimJobInScope {
+    # BUG-92: is this job type this worker's responsibility at all? No scope set = run everything.
+    param([Parameter(Mandatory)][AllowEmptyString()][string]$Type)
+    $scope = Get-PimJobScope
+    if (-not $scope) { return $true }
+    return ("$Type".Trim().ToLowerInvariant() -in $scope)
 }
 
 function Initialize-PimDefaultJobHandlers {
@@ -274,7 +337,8 @@ function Initialize-PimDefaultJobHandlers {
     Register-PimJobHandler -Type 'tenant-cache' -Handler {
         param($job,$now,$whatIf)
         if (-not (Get-Command Invoke-PimTenantListRefresh -ErrorAction SilentlyContinue)) {
-            return [pscustomobject]@{ ran=$false; detail='no-handler:Invoke-PimTenantListRefresh (dot-source tools/pim-manager/_tenantSync.ps1)'; whatIf=[bool]$whatIf }
+            # BUG-114: as above -- declare it, or it records as a completed no-op.
+            return [pscustomobject]@{ ran=$false; unimplemented=$true; detail='unimplemented:tenant-cache (dot-source tools/pim-manager/_tenantSync.ps1 to wire Invoke-PimTenantListRefresh)'; whatIf=[bool]$whatIf }
         }
         # WhatIf = intent only; the live refresh writes the per-instance cache files.
         if ($whatIf) { return [pscustomobject]@{ ran=$true; detail='tenant-cache refresh (whatif: no write)'; whatIf=$true } }
@@ -293,7 +357,14 @@ function Initialize-PimDefaultJobHandlers {
             # the runner records intent (incl. the -Scope phase) rather than touching the
             # legacy entrypoints. Real handler: PIM-Engine -Scope $job.scope -Mode Delta.
             $scope = if ($job.PSObject.Properties['scope']) { "$($job.scope)" } else { 'All' }
-            [pscustomobject]@{ ran=$false; detail="stub:$($job.type) scope=$scope (register a real handler)"; whatIf=[bool]$whatIf }
+            # 🔴 BUG-114 -- `unimplemented` is a FOURTH outcome, and it must say so.
+            # This placeholder returns ran=$false, and the dispatcher sets ok=$true because the
+            # DISPATCH succeeded -- so before this flag the record was status='completed' and the
+            # Jobs view rendered it as amber **"no-op"**. That is the single most misleading word
+            # available: "no-op" means "there was nothing to do", which is the answer an operator
+            # most wants to be true, while the truth is "nobody has implemented this". A daily
+            # full-reconcile said "no-op" for months and looked healthy doing it.
+            [pscustomobject]@{ ran=$false; unimplemented=$true; detail="unimplemented:$($job.type) scope=$scope (no real handler registered on this worker)"; whatIf=[bool]$whatIf }
         }
     }
     # discovery: a default handler that drives the REAL sweep (Invoke-PimDiscoveryJobSweep)
@@ -303,7 +374,10 @@ function Initialize-PimDefaultJobHandlers {
     Register-PimJobHandler -Type 'discovery' -Handler {
         param($job,$now,$whatIf)
         $scope = if ($job.PSObject.Properties['scope']) { "$($job.scope)" } else { 'All' }
-        [pscustomobject]@{ ran=$false; detail="no-handler:discovery scope=$scope (call Register-PimDiscoveryHandler with the live enumerator/store seams)"; whatIf=[bool]$whatIf }
+        # BUG-114: same shape as the engine-* placeholder above -- a registered handler that
+        # cannot do the work still yields ok=$true, so without this flag it recorded as a
+        # completed "no-op" run rather than as an unwired capability.
+        [pscustomobject]@{ ran=$false; unimplemented=$true; detail="unimplemented:discovery scope=$scope (call Register-PimDiscoveryHandler with the live enumerator/store seams)"; whatIf=[bool]$whatIf }
     }
     # NOTE: NO 'sync-automateit' / update handler is registered here by design (operator
     # correction 2026-06-18). The UPDATE is a STANDALONE mechanism (tools/setup/Invoke-PimUpdate.ps1)
@@ -414,20 +488,47 @@ function Get-PimJobFeatureKey {
 
 function Invoke-PimScheduledJob {
     param([Parameter(Mandatory)][object]$Job, [datetime]$NowUtc = [datetime]::UtcNow, [switch]$WhatIf)
-    $h = Get-PimJobHandler -Type "$($Job.type)"
-    if (-not $h) { return [pscustomobject]@{ name="$($Job.name)"; type="$($Job.type)"; ok=$false; detail='no-handler-registered'; ranUtc=$NowUtc.ToString('o') } }
-    # --- FEATURE GATE (REQUIREMENTS s29) -- a job whose feature is disabled/unlicensed
-    # NO-OPs (no writes/sends), regardless of schedule. The 'scheduler.jobs' feature is
-    # the master switch for ALL scheduled jobs; a per-type feature gates its own job.
+    # BUG-92 -- OUT OF SCOPE IS NOT A FAILURE, and it is checked BEFORE the handler lookup.
+    # $env:PIM_SCHED_JOBS scopes a worker to a subset of job types; Select-PimJobHandlers then
+    # removes the other handlers. The SCHEDULE still lists every job, so this dispatcher was
+    # still called for them, found no handler, and returned ok=$false -- recorded as FAILED.
+    # A deployment that had deliberately excluded servicenow-intake, escalations,
+    # scheduled-creation, reminders, daily-summary and tier-report therefore showed all six as
+    # failing forever, and the real signal (a job IN scope with no implementation) was buried
+    # in the noise. Reported as: "i see references to failed jobs including servicenow, i dont
+    # have any servicenow".
+    if (-not (Test-PimJobInScope -Type "$($Job.type)")) {
+        return [pscustomobject]@{ name="$($Job.name)"; type="$($Job.type)"; ok=$true; ran=$false
+                                   outOfScope=$true
+                                   detail="not scheduled on this worker (PIM_SCHED_JOBS = $((Get-PimJobScope) -join ', '))"
+                                   ranUtc=$NowUtc.ToString('o') }
+    }
+    # 🔴 BUG-113 -- ASK "IS IT SWITCHED OFF?" BEFORE "IS IT IMPLEMENTED HERE?"
+    # This gate used to sit BELOW the handler lookup, so a job whose feature is DISABLED but
+    # which has no handler on this worker was recorded as **failed / no-handler-registered**
+    # instead of the truth, "disabled -- skipped". Reported as: *"it should not report failed
+    # if disabled"*.
+    # 🔑 Both questions have an answer, and the order decides which one the operator is told.
+    #    "Switched off" is the one they can act on, and it is the one they already know is true
+    #    -- being told a deliberately-disabled feature FAILED teaches them to distrust the
+    #    column. Scope (above) then disabled (here) then implementation (below) runs from the
+    #    most deliberate cause to the least.
     if (Get-Command Test-PimFeatureAvailable -ErrorAction SilentlyContinue) {
         if (-not (Test-PimFeatureAvailable -Key 'scheduler.jobs' -Quiet)) {
-            return [pscustomobject]@{ name="$($Job.name)"; type="$($Job.type)"; ok=$true; detail="feature 'scheduler.jobs' disabled -- skipped"; skippedFeature='scheduler.jobs'; ranUtc=$NowUtc.ToString('o') }
+            return [pscustomobject]@{ name="$($Job.name)"; type="$($Job.type)"; ok=$true; ran=$false; detail="feature 'scheduler.jobs' disabled -- skipped"; skippedFeature='scheduler.jobs'; ranUtc=$NowUtc.ToString('o') }
         }
         $fk = Get-PimJobFeatureKey -Type "$($Job.type)"
         if ($fk -and -not (Test-PimFeatureAvailable -Key $fk -Quiet)) {
-            return [pscustomobject]@{ name="$($Job.name)"; type="$($Job.type)"; ok=$true; detail="feature '$fk' disabled -- skipped"; skippedFeature=$fk; ranUtc=$NowUtc.ToString('o') }
+            return [pscustomobject]@{ name="$($Job.name)"; type="$($Job.type)"; ok=$true; ran=$false; detail="feature '$fk' disabled -- skipped"; skippedFeature=$fk; ranUtc=$NowUtc.ToString('o') }
         }
     }
+    $h = Get-PimJobHandler -Type "$($Job.type)"
+    # 🔒 STILL NOT SOFTENED TO GREEN. A job that is in scope, ENABLED, and has no implementation
+    # is exactly the signal the BUG-92 noise was hiding -- it stays ok=$false. What changed is
+    # only that it can no longer be reached by a job the operator switched OFF, and that the
+    # Jobs view counts it as "not runnable here" rather than as a failed RUN (see BUG-113 in
+    # Get-PimJobsView): the fault is in the deployment, not in a run that went wrong.
+    if (-not $h) { return [pscustomobject]@{ name="$($Job.name)"; type="$($Job.type)"; ok=$false; ran=$false; noHandler=$true; detail='no-handler-registered'; ranUtc=$NowUtc.ToString('o') } }
     try {
         $r = & $h $Job $NowUtc.ToUniversalTime() $WhatIf
         return [pscustomobject]@{ name="$($Job.name)"; type="$($Job.type)"; ok=$true; detail="$($r.detail)"; result=$r; ranUtc=$NowUtc.ToString('o') }
@@ -826,13 +927,50 @@ function Get-PimJobsStatus {
         if ($j.PSObject.Properties['nextRunUtc'] -and "$($j.nextRunUtc)".Trim()) { $persistNext = "$($j.nextRunUtc)" }
         elseif ($sj -and $sj.PSObject.Properties['nextRunUtc'] -and "$($sj.nextRunUtc)".Trim()) { $persistNext = "$($sj.nextRunUtc)" }
         $od = Get-PimJobOverdueState -Job $j -NowUtc $now -LastRunUtc "$lastRun" -NextRunUtc "$persistNext" -InProgress ([bool]$inProg)
+        # 🔴 BUG-112 -- SCOPE IS A PROPERTY OF THE JOB, NOT OF ITS LAST RUN.
+        # BUG-92 stopped RECORDING an out-of-scope dispatch as a failure, but the Jobs view
+        # still judged each job by its most recent run record. So nine jobs this deployment
+        # never runs sat in `failed / no-handler-registered` from BEFORE that fix, with next
+        # runs 7-17 HOURS away -- they would have stayed red until tomorrow, kept an "Ack"
+        # button, and counted toward "10 failing" the whole time.
+        # 🔑 The last run's status is stale data about a question that no longer applies. The
+        # worker's scope is persisted by the runner (Save-PimJobScopeToStore), so the view can
+        # answer "does this deployment run this job at all?" directly and stop inferring it
+        # from history. Out of scope => never failing, never overdue, never needs attention.
+        $jobScope   = Get-PimPersistedJobScope
+        $outOfScope = $false
+        if ($jobScope -and @($jobScope).Count -gt 0) {
+            $outOfScope = ("$($j.type)".Trim().ToLowerInvariant() -notin @($jobScope))
+        }
+        if ($outOfScope) { $od = [pscustomobject]@{ overdue = $false; expectedUtc = $null; overdueByMinutes = 0; reason = 'not scheduled on this deployment' } }
         # [M6] LAST-RUN ACK: is the latest FAILED run muted? + recent failure count.
         $lastRunId = $(if ($last) { "$($last.runId)" } else { '' })
         $lastAcked = ($lastRunId -and ($acks -contains $lastRunId))
         $finishedRuns = @($runs | Where-Object { "$($_.status)" -ne 'running' -and "$($_.finishedUtc)".Trim() })
         $recentWindow = @($finishedRuns | Sort-Object { "$($_.startedUtc)" } -Descending | Select-Object -First 10)
-        $recentFails  = @($recentWindow | Where-Object { -not [bool]$_.ok })
+        $allNotOk     = @($recentWindow | Where-Object { -not [bool]$_.ok })
+        # 🔴 BUG-113 -- "NO HANDLER HERE" IS NOT A FAILED RUN, IT IS A MISSING CAPABILITY.
+        # Measured in prod 2026-08-30: every single red count in the Jobs view -- tenant-cache 9,
+        # reminders 9, daily-summary 9, tier-report 9, discovery-entra/azure/powerbi 5 each,
+        # full-reconcile 5 -- was `no-handler-registered`, and NOT ONE was a run that went wrong.
+        # tenant-cache's most recent run was a healthy refresh of 146 Entra roles.
+        # 🔑 Nothing about it is per-run: it is one fact about the worker, repeated once per
+        # tick. Counting it per run inflates one deployment fact into "9 failures", attaches an
+        # Ack button to something no acknowledgement can fix, and buries the failures that ARE
+        # runs. It is the same class BUG-92 fixed at RECORD time -- but records already written
+        # live in the history ring for 50 runs, so the view has to answer for them too.
+        $unrunnable   = @($allNotOk | Where-Object { "$($_.detail)" -match '^no-handler' })
+        $recentFails  = @($allNotOk | Where-Object { "$($_.detail)" -notmatch '^no-handler' })
         $unackedFails = @($recentFails | Where-Object { -not ($acks -contains "$($_.runId)") })
+        # BUG-112: a job this deployment does not run has no failures to answer for. Its
+        # history is real and stays readable under History -- but it must not demand an Ack or
+        # be counted as failing, or the operator is asked to acknowledge a bug we already fixed.
+        # 🔴 BUG-114 -- a placeholder handler is NOT a clean run, and it is not a failure either.
+        # These records carry ok=$true (the dispatch worked), so they never reach $allNotOk and
+        # are counted here from their own status. Before this they were indistinguishable from a
+        # real converged run: the view called them "no-op".
+        $unimplemented = @($recentWindow | Where-Object { "$($_.status)" -eq 'unimplemented' })
+        if ($outOfScope) { $recentFails = @(); $unackedFails = @(); $unrunnable = @(); $unimplemented = @() }
         $rows.Add([pscustomobject]@{
             name            = $name
             type            = "$($j.type)"
@@ -846,6 +984,12 @@ function Get-PimJobsStatus {
             lastRunUtc      = $lastRun
             lastResult      = $(if ($last) { "$($last.detail)" } else { '' })
             lastOk          = $(if ($last) { [bool]$last.ok } else { $null })
+            # BUG-92: the GUI needs the THREE-WAY outcome, not just ok/not-ok. Without this
+            # the Overview can only ask "did it fail?", and "not scheduled on this worker"
+            # has no answer to that question except the wrong one.
+            lastStatus      = $(if ($last -and $last.PSObject.Properties['status']) { "$($last.status)" } elseif ($last) { $(if ($last.ok) { 'completed' } else { 'failed' }) } else { '' })
+            # BUG-112: the GUI renders these muted and excludes them from "needs attention".
+            outOfScope      = [bool]$outOfScope
             lastRan         = $(if ($last) { [bool]$last.ran } else { $null })
             lastDurationMs  = $(if ($last) { [int64]$last.durationMs } else { $null })   # [int64] -- see BUG-04
             lastRunId       = $lastRunId
@@ -858,6 +1002,13 @@ function Get-PimJobsStatus {
             expectedRunUtc     = "$($od.expectedUtc)"
             recentFailureCount = $recentFails.Count
             unackedFailureCount = $unackedFails.Count
+            # BUG-113: reported SEPARATELY and rendered muted -- the operator still sees that the
+            # job has no implementation on this worker, but it never shows as a red failed run.
+            unrunnableCount    = $unrunnable.Count
+            # BUG-114: reported separately from BOTH failures and successes. "No handler at all"
+            # (unrunnableCount) and "a handler that is a placeholder" (this) are different
+            # deployment facts, and neither is a run that went wrong.
+            unimplementedCount = $unimplemented.Count
         })
     }
     # in-progress first, then by last activity (newest first), then name
@@ -911,6 +1062,9 @@ function Write-PimJobRunRecord {
     $fin = [datetime]::UtcNow
     $inner = if ($Result.PSObject.Properties['result']) { $Result.result } else { $null }
     $ran = $false; if ($inner -and $inner.PSObject.Properties['ran']) { $ran = [bool]$inner.ran }
+    # BUG-114: the handler declares this about itself; it is never inferred from the detail
+    # string, because a message is prose and prose gets reworded.
+    $unimplemented = $false; if ($inner -and $inner.PSObject.Properties['unimplemented']) { $unimplemented = [bool]$inner.unimplemented }
     $rec = [pscustomobject]@{
         runId       = [guid]::NewGuid().ToString('N')
         name        = "$($Job.name)"
@@ -918,7 +1072,15 @@ function Write-PimJobRunRecord {
         scope       = $(if ($Job.PSObject.Properties['scope']) { "$($Job.scope)" } else { '' })
         ok          = [bool]$Result.ok
         ran         = $ran
-        status      = $(if ($Result.ok) { 'completed' } else { 'failed' })
+        # BUG-92: 'skipped' is a THIRD outcome. Collapsing it into completed would claim work
+        # that never happened; collapsing it into failed is what put six job types
+        # permanently in red on a healthy deployment.
+        # BUG-114: 'unimplemented' is a FOURTH outcome, and it is NOT a clean run. The dispatch
+        # succeeds (ok=$true) whenever a handler is registered, even a placeholder that does
+        # nothing -- so without this the record said 'completed' and the view said "no-op",
+        # i.e. "there was nothing to do". Ordering is deliberate: outOfScope wins, because a job
+        # this deployment does not run has nothing to answer for either way (BUG-112).
+        status      = $(if ($Result.PSObject.Properties['outOfScope'] -and $Result.outOfScope) { 'skipped' } elseif ($unimplemented) { 'unimplemented' } elseif ($Result.ok) { 'completed' } else { 'failed' })
         detail      = "$($Result.detail)"
         trigger     = [bool]$Trigger
         reason      = "$Reason"
@@ -937,6 +1099,14 @@ function Write-PimJobRunRecord {
         log         = (ConvertTo-PimRunLogText -Result $Result -Job $Job -StartedUtc $StartedUtc.ToUniversalTime())
     }
     Add-PimJobRunRecord -Run $rec
+    # ALERT-01: a finished run raises the failure alert HERE. Previously the ONLY
+    # engine-failure producer was the Manager's POST /api/jobs/run handler, so a job
+    # that failed on a SCHEDULED tick raised nothing -- alerting worked when someone
+    # was already watching and was silent when nobody was. Both real completion paths
+    # (this one and Invoke-PimJobForceStart) now go through the same decision.
+    # Guarded + never throws: the run record is already persisted above, and an
+    # alerting fault must not take the tick down or lose run history.
+    if (Get-Command Invoke-PimJobRunAlert -ErrorAction SilentlyContinue) { [void](Invoke-PimJobRunAlert -Run $rec) }
     return $rec
 }
 
@@ -999,7 +1169,7 @@ function Invoke-PimJobForceStart {
         scope       = $(if ($Job.PSObject.Properties['scope']) { "$($Job.scope)" } else { '' })
         ok          = [bool]$res.ok
         ran         = $ran
-        status      = $(if ($res.ok) { 'completed' } else { 'failed' })
+        status      = $(if ($res.PSObject.Properties['outOfScope'] -and $res.outOfScope) { 'skipped' } elseif ($res.ok) { 'completed' } else { 'failed' })   # BUG-92
         detail      = "$($res.detail)"
         trigger     = $true
         reason      = 'force-start'
@@ -1011,6 +1181,14 @@ function Invoke-PimJobForceStart {
         log         = (ConvertTo-PimRunLogText -Result $res -Job $Job -StartedUtc $started)
     }
     Add-PimJobRunRecord -Run $rec
+    # ALERT-01: a finished run raises the failure alert HERE. Previously the ONLY
+    # engine-failure producer was the Manager's POST /api/jobs/run handler, so a job
+    # that failed on a SCHEDULED tick raised nothing -- alerting worked when someone
+    # was already watching and was silent when nobody was. Both real completion paths
+    # (this one and Invoke-PimJobForceStart) now go through the same decision.
+    # Guarded + never throws: the run record is already persisted above, and an
+    # alerting fault must not take the tick down or lose run history.
+    if (Get-Command Invoke-PimJobRunAlert -ErrorAction SilentlyContinue) { [void](Invoke-PimJobRunAlert -Run $rec) }
     return [pscustomobject]@{ ok = [bool]$res.ok; runId = $runId; name = "$($Job.name)"; type = "$($Job.type)"; status = $rec.status; detail = "$($res.detail)" }
 }
 
@@ -1403,6 +1581,10 @@ function Invoke-PimSchedulerTick {
     # (-Once) cold tick honours the GUI-persisted cadence + email controls, not the
     # in-process default. Fail-safe / no-op when no store is configured.
     [void](Import-PimSchedulerSettingsFromStore)
+    # BUG-112: publish THIS worker's job scope so the Manager (a different process, here a
+    # different machine) can show which jobs this deployment actually runs, instead of judging
+    # every job by a last-run record that may be 24h old.
+    Save-PimJobScopeToStore -Scope @(Get-PimJobScope)
     if (-not $Jobs) {
         $st = Get-PimSchedulerState
         if ($st -and $st.jobs) { $Jobs = @($st.jobs) } else { $Jobs = Get-PimJobSchedule }

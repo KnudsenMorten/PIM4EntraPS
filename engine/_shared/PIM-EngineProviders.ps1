@@ -192,7 +192,11 @@ function New-PimAdminsProvider {
             # handler still safe: with the feature OFF, no account is ever disabled.
             if ((Get-Command Test-PimAccountDisableEnabled -ErrorAction SilentlyContinue) -and -not (Test-PimAccountDisableEnabled)) {
                 Write-Host ("    [skip] {0}: account-disable is OFF (opt-in required) -- not disabling" -f $item.key) -ForegroundColor Yellow
-                return
+                # BUG-70 residue: this used to `return` bare. A bare return is $null, and the core's
+                # applied-check treats anything that is not an explicit `pimApplied=$false` as APPLIED
+                # -- so a guard that disabled NOTHING still counted as a removal in the run summary.
+                # Same defect AdminTap's mail refusal had (measured live on EFIF, 2026-08-25).
+                return [pscustomobject]@{ pimApplied = $false; reason = 'account-disable is OFF (opt-in required)' }
             }
             # BUG-14 defense-in-depth: the orchestrator already drops break-glass from the
             # remove set, but this handler can be called directly. A break-glass account
@@ -201,7 +205,10 @@ function New-PimAdminsProvider {
                 $bg = @(Get-PimBreakGlassIdentifiers)
                 if ($bg.Count -gt 0 -and (Test-PimRowIsBreakGlass -Row $item.live -Identifiers $bg)) {
                     Write-Host ("    [skip] {0}: BREAK-GLASS account -- never disabled" -f $item.key) -ForegroundColor Yellow
-                    return
+                    # BUG-70 residue (see above). Reporting a break-glass SKIP as an applied removal is
+                    # the worst instance of the family: the summary would claim the engine disabled the
+                    # one account the whole guard exists to protect.
+                    return [pscustomobject]@{ pimApplied = $false; reason = 'break-glass account -- never disabled' }
                 }
             }
             Invoke-PimGraph -Method PATCH -Path "/users/$($item.live.id)" -Body @{ accountEnabled=$false }
@@ -3371,6 +3378,13 @@ function New-PimHybridAdProvider {
                     Write-Host ("    [hybrid-ad/plan] work package written: {0} (worker applies it with Invoke-PimHybridAdApply -Apply)" -f $pkgPath) -ForegroundColor DarkGray
                 } catch { Write-Verbose "hybrid-ad work package write failed: $($_.Exception.Message)" }
             }
+            # BUG-70 residue. THIS HANDLER NEVER PROVISIONS ANYTHING -- the on-prem write is the hybrid
+            # worker's job (see the header comment), and this scope only plans + logs. It used to end on
+            # the `if` above, returning nothing, and the core counted every planned account as APPLIED:
+            # a run that provisioned ZERO on-prem accounts reported `applied=N`. Worse than the offboard
+            # Report-mode case it mirrors, because there is no Enforce mode here to make it true later.
+            # The work package is written once per RUN, so items 2..N did literally nothing at all.
+            [pscustomobject]@{ pimApplied = $false; reason = 'planned only -- the on-prem write is deferred to the hybrid worker' }
         }
         ApplyUpdate = { param($item,$ctx) & (Get-PimEngineProvider -Scope 'HybridAdProvisioning').ApplyCreate $item $ctx }
     }

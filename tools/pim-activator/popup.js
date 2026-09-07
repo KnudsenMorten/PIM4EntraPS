@@ -1827,6 +1827,75 @@ async function hydrateGroupNames(token, groupIds) {
 // contributed nothing the eligibility list didn't already carry, and only
 // produced confusing "unauthorized" diagnostics that admins read as a bug.
 
+// ---------- BUG-127: the requested duration must respect the target's PIM policy ----------
+// Reported from a live customer on v1.6.124:
+//   POST .../assignmentScheduleRequests -> 400: The following policy rules failed:
+//   ExpirationRule - The duration in the request is greater than maximum allowed duration
+// It read as stale permissions -- it named a "policy rule", it appeared while role permissions
+// were being changed, and the portal activated the same group without complaint.
+//
+// The real cause: this extension never read ANY activation policy. It sent whatever the Duration
+// box said, the box is pre-filled from `lastDurationHours` in storage, and nothing ever expires
+// that value. So once someone activated at 10h against a role whose policy caps at 8h, EVERY
+// later activation of that target failed identically and forever -- and the one input responsible
+// was the one the user never touched. Waiting could not help. The portal succeeds because it
+// clamps to the policy maximum.
+//
+// 🪤 The 400 does NOT say what the maximum is, so it cannot be acted on without opening the
+// portal. That is why this resolves the number rather than just re-wording the error.
+
+// ISO-8601 duration -> hours. Entra returns the cap as e.g. 'PT8H', 'PT8H30M', 'P1D'.
+// Deliberately tolerant: an unparseable value returns null (= "unknown"), never 0, because a 0
+// would clamp every activation to nothing while looking like a successful policy read.
+function parseIsoDurationHours(s) {
+  const m = /^P(?:(\d+)D)?(?:T(?:(\d+(?:\.\d+)?)H)?(?:(\d+(?:\.\d+)?)M)?(?:(\d+(?:\.\d+)?)S)?)?$/.exec(String(s || '').trim())
+  if (!m) return null
+  const d = parseFloat(m[1] || 0), h = parseFloat(m[2] || 0), mi = parseFloat(m[3] || 0), sec = parseFloat(m[4] || 0)
+  const hours = d * 24 + h + mi / 60 + sec / 3600
+  return hours > 0 ? hours : null
+}
+
+// The effective activation cap for one target, or null when it cannot be determined.
+// 🪤 Returning null on ANY doubt is deliberate: a wrong cap silently shortens someone's
+// elevation, which is worse than the error this fixes.
+async function getActivationMaxHours(token, r) {
+  try {
+    let url = null
+    if (r.kind === 'entraDirect') {
+      // Directory roles: policy is assigned at the tenant scope, keyed by role definition.
+      url = `/policies/roleManagementPolicyAssignments?$filter=scopeId eq '/' and scopeType eq 'DirectoryRole' and roleDefinitionId eq '${r.roleDefinitionId}'&$expand=policy($expand=rules)`
+    } else if (r.kind === 'azureDirect') {
+      // Azure RBAC policies live in ARM, not Graph, and need the ARM token. Not resolved here --
+      // the caller reports the requested duration and the policy's own words instead of guessing.
+      return null
+    } else {
+      url = `/policies/roleManagementPolicyAssignments?$filter=scopeId eq '${r.groupId}' and scopeType eq 'Group'&$expand=policy($expand=rules)`
+    }
+    const res = await graph(token, 'GET', url)
+    const assignments = res?.value || []
+    let best = null
+    for (const a of assignments) {
+      for (const rule of (a?.policy?.rules || [])) {
+        // The cap lives on the ENABLEMENT/expiration rule for the assignment being activated.
+        const t = String(rule?.['@odata.type'] || '')
+        if (!/ExpirationRule/i.test(t)) continue
+        const hrs = parseIsoDurationHours(rule?.maximumDuration)
+        if (hrs && (best === null || hrs < best)) best = hrs   // most restrictive wins
+      }
+    }
+    return best
+  } catch {
+    return null   // never let a policy read failure block an activation attempt
+  }
+}
+
+// Is this the specific 400 that means "you asked for too long"?
+function isDurationPolicyError(e) {
+  if (!e || e.status !== 400) return false
+  const msg = String(e.message || '') + ' ' + JSON.stringify(e.body || {})
+  return /ExpirationRule/i.test(msg) && /duration/i.test(msg)
+}
+
 async function activateGroup(token, groupId, justification, durationHours) {
   // POST assignmentScheduleRequest -- selfActivate, member access, after-MFA per CA policy.
   const totalMin = Math.round(durationHours * 60)
@@ -4943,24 +5012,51 @@ async function loaded(token) {
         const tk = fresh?.accessToken || token
 
         let res, statusOk, statusPending
-        if (r.kind === 'entraDirect') {
-          res = await activateDirectEntraRole(tk, r.roleDefinitionId, r.directoryScopeId, just, dur)
-          statusOk      = res?.status === 'Provisioned' || res?.status === 'Granted'
-          statusPending = !statusOk
-        } else if (r.kind === 'azureDirect') {
-          const arm = await getArmToken().catch(() => null)
-          if (!arm) throw new Error('Azure RBAC activation needs an ARM token; re-sign in.')
-          res = await activateDirectAzureRbac(arm, r.armScope, r.roleDefinitionId, r.principalId, just, dur)
-          statusOk      = res?.properties?.status === 'Provisioned'
-          statusPending = !statusOk
-        } else {
-          res = await activateGroup(tk, r.groupId, just, dur)
-          statusOk      = res?.status === 'Provisioned' || res?.status === 'Granted'
-          statusPending = !statusOk
+
+        // BUG-127: one attempt at the requested duration; if the target's policy caps lower,
+        // resolve the cap, clamp, and retry ONCE. See getActivationMaxHours for why.
+        const attempt = async (hours) => {
+          if (r.kind === 'entraDirect') {
+            const x = await activateDirectEntraRole(tk, r.roleDefinitionId, r.directoryScopeId, just, hours)
+            return { res: x, ok: x?.status === 'Provisioned' || x?.status === 'Granted' }
+          } else if (r.kind === 'azureDirect') {
+            const arm = await getArmToken().catch(() => null)
+            if (!arm) throw new Error('Azure RBAC activation needs an ARM token; re-sign in.')
+            const x = await activateDirectAzureRbac(arm, r.armScope, r.roleDefinitionId, r.principalId, just, hours)
+            return { res: x, ok: x?.properties?.status === 'Provisioned' }
+          }
+          const x = await activateGroup(tk, r.groupId, just, hours)
+          return { res: x, ok: x?.status === 'Provisioned' || x?.status === 'Granted' }
         }
 
+        let usedHours = dur
+        let out
+        try {
+          out = await attempt(dur)
+        } catch (e) {
+          if (!isDurationPolicyError(e)) throw e
+          const maxH = await getActivationMaxHours(tk, r)
+          if (!maxH || maxH >= dur) {
+            // Could not resolve the cap (or it is not actually lower). Fail with BOTH numbers
+            // rather than relaying Graph's wording, which names no maximum and so cannot be
+            // acted on without opening the portal.
+            throw new Error(
+              `the policy for this role does not allow ${dur}h` +
+              (maxH ? ` (maximum ${maxH}h)` : ' and its maximum could not be read') +
+              ' - lower the Duration box and try again.')
+          }
+          setStatus(rk, `policy caps this at ${maxH}h - retrying...`, 'pending')
+          out = await attempt(maxH)
+          usedHours = maxH
+        }
+        res = out.res; statusOk = out.ok; statusPending = !out.ok
+
         if (statusOk) {
-          setStatus(rk, `active for ${dur}h - see My Access tab`, 'ok')
+          setStatus(rk,
+            usedHours === dur
+              ? `active for ${dur}h - see My Access tab`
+              : `active for ${usedHours}h (policy maximum; you asked for ${dur}h) - see My Access tab`,
+            'ok')
         } else {
           setStatus(rk, `submitted - check My Access tab in a few seconds`, 'pending')
         }
