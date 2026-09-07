@@ -242,6 +242,76 @@ N 'unrunnable-probe' 'cannot run behind Easy Auth' -CoveredBy @('covering-assert
         ($sText -match 'a -SessionToken WAS supplied but')
 }
 
+# ---------------------------------------------------------------------------
+# TEST-16 -- the boot-log layer must be SCOPED, and must know whether the rows
+#            it read belong to the deploy it is gating.
+#
+# Three defects, all found on the 2.4.259 roll, all of which produced GREEN:
+#   (a) On Windows `az` is az.cmd, and cmd.exe truncates an argument at the first
+#       newline -- so a multi-line --analytics-query reached the service as just
+#       the table name. The window, the app filter, the projection and the row cap
+#       were silently dropped: 119,894 rows of every app in the workspace, asserted
+#       as "this app's last 90 minutes".
+#   (b) The revision filter `runningState=='Running'` matches NOTHING on a healthy
+#       app -- a scaled one reports RunningAtMaxScale.
+#   (c) The two time sources are formatted differently (az carries an offset, LA
+#       does not), so a naive parse put them two hours apart on this machine.
+# (a) and (b) cannot be reproduced offline -- they need cmd.exe and a live app --
+# so those two are asserted as PROPERTIES OF THE SOURCE, while (c) is a pure
+# function of two strings and is tested by actually parsing them.
+# 🪤 Source scans run over COMMENT-STRIPPED text: a previous assertion in this repo
+#    was satisfied by a file's own help text, and another was broken by a comment
+#    quoting an error string. Comments must never be able to answer for the code.
+# ---------------------------------------------------------------------------
+Write-Host "`n-- TEST-16: the boot-log read is scoped, and knows if it read this deploy --" -ForegroundColor Cyan
+if (-not (Test-Path -LiteralPath (Join-Path $PSScriptRoot 'live\Test-PimManagerHostedSmoke.ps1'))) {
+    T 'TEST-16: hosted smoke script present' $false
+} else {
+    $code = (Get-Content -LiteralPath (Join-Path $PSScriptRoot 'live\Test-PimManagerHostedSmoke.ps1') |
+             Where-Object { $_ -notmatch '^\s*#' }) -join "`n"
+
+    # (a) the KQL must be assembled on ONE line -- no here-string, no embedded newline.
+    T 'TEST-16: the KQL is not built as a here-string (cmd.exe truncates it)' `
+        ($code -notmatch '\$kql\s*=\s*@"')
+    $kqlAsm = [regex]::Match($code, '\$kql\s*=\s*\((?s).*?\)\s*(\r?\n)')
+    T 'TEST-16: the KQL is assembled by concatenation on one line' `
+        ($kqlAsm.Success -and $kqlAsm.Value -match 'ContainerAppConsoleLogs_CL' -and $kqlAsm.Value -match 'take 4000')
+    # every stage that was silently lost must still be present in the assembled query
+    foreach ($stage in @('where TimeGenerated > ago', 'ContainerAppName_s ==', 'project TimeGenerated', 'order by TimeGenerated', 'take 4000')) {
+        T ("TEST-16: the query still carries '{0}'" -f $stage) ($kqlAsm.Success -and $kqlAsm.Value -match [regex]::Escape($stage))
+    }
+
+    # (b) no revision query may filter on runningState=='Running' -- it never matches.
+    T "TEST-16: no revision query filters on runningState=='Running'" `
+        ($code -notmatch "runningState\s*==\s*'Running'")
+    T 'TEST-16: the active revision is resolved WITH its createdTime' `
+        ($code -match 'created:properties\.createdTime')
+
+    # (c) the two timestamp formats must both normalise to the SAME instant.
+    $azTime = '2026-08-30T18:34:08+00:00'      # az containerapp revision list
+    $laTime = '08/30/2026 18:52:16'            # Log Analytics TimeGenerated (UTC, unzoned)
+    $azUtc = ([datetimeoffset]::Parse($azTime, [Globalization.CultureInfo]::InvariantCulture)).UtcDateTime
+    $laUtc = [datetime]::Parse($laTime, [Globalization.CultureInfo]::InvariantCulture,
+                ([Globalization.DateTimeStyles]::AssumeUniversal -bor [Globalization.DateTimeStyles]::AdjustToUniversal))
+    T 'TEST-16: az createdTime normalises to 18:34 UTC'    ($azUtc.ToString('HH:mm') -eq '18:34' -and $azUtc.Kind -eq 'Utc')
+    T 'TEST-16: LA TimeGenerated normalises to 18:52 UTC'  ($laUtc.ToString('HH:mm') -eq '18:52')
+    # the whole point: logs 18 minutes AFTER the revision must read as FRESH, not as
+    # ~100 minutes stale, whatever the local offset of the machine running the gate.
+    T 'TEST-16: a log 18 min after the roll is fresh, not stale' `
+        (($azUtc - $laUtc).TotalMinutes -lt 30 -and ($azUtc - $laUtc).TotalMinutes -lt 0)
+    # and a genuinely old row must still trip the guard
+    $oldUtc = [datetime]::Parse('08/10/2026 00:33:43', [Globalization.CultureInfo]::InvariantCulture,
+                ([Globalization.DateTimeStyles]::AssumeUniversal -bor [Globalization.DateTimeStyles]::AdjustToUniversal))
+    T 'TEST-16: a 20-day-old row still trips the staleness guard' (($azUtc - $oldUtc).TotalMinutes -gt 30)
+
+    # the guard must exist in the code, and must be a SKIP (release-gate failure), never a pass
+    T 'TEST-16: stale rows skip the boot-log layer instead of asserting it' `
+        ($code -match "S\s+'boot-log assertions'\s+`"the workspace's newest")
+    # and the workspace must be derivable rather than demanded
+    T 'TEST-16: the workspace is derived from the Container Apps environment when unset' `
+        ($code -match 'appLogsConfiguration\.logAnalyticsConfiguration\.customerId')
+}
+
 Write-Host ("`n RESULT: {0} pass, {1} fail" -f $pass, $fail) -ForegroundColor $(if($fail){'Red'}else{'Green'})
 if ($fail) { exit 1 }
 # Explicit: this suite now SHELLS OUT to the hosted smoke, so a green run would

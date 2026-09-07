@@ -78,7 +78,21 @@ param(
     [string]$AdminCertPem
 )
 $ErrorActionPreference = 'Stop'
+
+# ðŸ”´ SCOPE THE BUILD, DO NOT MUTATE THE MACHINE. -SubscriptionId was only ever applied inside the
+# SPN-login path via z account set, so a caller that was already logged in (the normal case)
+# passed a subscription that was silently ignored -- and z acr build then ran against the
+# ambient default, which on mgmt1 is another company's. Measured: "the resource 'acrpimmfnpr'
+# could not be found in subscription 'ELDK Event Hub'".
+# ðŸ”’ Scoped PER CALL rather than by z account set, because this machine runs ~3 sessions at once
+# and flipping the shared default would break whichever of them is legitimately using the other
+# tenant. A build must not have side effects on somebody else's shell.
+$acrSubArgs = @()
+if ("$SubscriptionId".Trim()) { $acrSubArgs = @('--subscription', "$SubscriptionId".Trim()) }
 $here     = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent $MyInvocation.MyCommand.Path }
+# Guarded `az` shadow -- see _PimAz.ps1. The digest lookup at the end of this script already
+# had to hand-roll half of this (BUG-128); the guard makes it the default for every az call.
+. "$here\_PimAz.ps1"
 $solRoot  = Split-Path -Parent (Split-Path -Parent $here)          # SOLUTIONS/PIM4EntraPS
 $repoRoot = (Resolve-Path (Join-Path $here '..\..\..\..')).Path     # AutomateIT repo root
 $mgrDir   = Join-Path $solRoot 'tools\pim-manager'
@@ -165,7 +179,46 @@ if ($Source -eq 'sync-automateit') {
     if ($PSCmdlet.ShouldProcess("$AcrName/$ImageRepo`:$ImageTag", 'az acr build')) {
         $haveGit = [bool](Get-Command git  -ErrorAction SilentlyContinue)
         $haveTar = [bool](Get-Command tar  -ErrorAction SilentlyContinue)
-        if ($haveGit -and $haveTar) {
+        # 🔴 HAVING git IS NOT THE SAME AS BEING IN A git REPO, and conflating the two is what made
+        # the daily update unbuildable on every CUSTOMER host. Measured 2026-09-04:
+        #     git -C C:\AutomateIT archive ... HEAD  ->  exit 128
+        #     fatal: not a git repository (or any of the parent directories): .git
+        # `C:\AutomateIT` is the SYNCED PROD TREE -- Sync-AutomateIT.ps1 lays down released FILES,
+        # it does not clone -- so it has no .git, while git.exe is obviously still on PATH. The old
+        # gate therefore chose the git-archive path and died, and the repo-root fallback below (the
+        # one that would have worked) was reachable only on a host with no git at all.
+        # 🪤 This is why the nightly pull had nowhere to land: the tree the pull REFRESHES is the one
+        # tree the build could not consume. Only a dev clone ever built, which is exactly the host
+        # where a pull is least needed.
+        # Falling back is SAFE here for the same reason git-archive was chosen: the danger it guards
+        # against is deep agent worktrees + untracked junk under a DEV clone. A synced payload has
+        # neither -- it is already the clean, released file set.
+        # 🪤 PROBE WITHOUT INVOKING git IF POSSIBLE. The first version of this ran
+        #     git -C $repoRoot rev-parse --git-dir 2>&1 | Out-Null
+        # which is fine in PowerShell 7 and THROWS in PowerShell 5.1: `2>&1` turns a native
+        # command's stderr into ErrorRecords, and the update runs with ErrorActionPreference='Stop',
+        # so the probe itself became the fatal error -- reported as the very message it was written
+        # to avoid ("fatal: not a git repository"), from inside the check meant to prevent it.
+        # 🔴 It passed every interactive test because the scheduled task runs powershell.exe (5.1)
+        # while a console here is 7.x. Testing the fix in the wrong host is how it shipped.
+        # Test-Path needs no subprocess, cannot throw, and is version-independent. It is also
+        # correct for both shapes: .git is a directory in a normal clone and a FILE in a worktree.
+        $isRepo = Test-Path -LiteralPath (Join-Path $repoRoot '.git')
+        if (-not $isRepo -and $haveGit) {
+            # Fallback for a nested checkout whose root is elsewhere. Guarded three ways.
+            $prevEA = $ErrorActionPreference
+            try {
+                $ErrorActionPreference = 'Continue'
+                & git -C $repoRoot rev-parse --git-dir 2>$null | Out-Null
+                $isRepo = ($LASTEXITCODE -eq 0)
+            } catch { $isRepo = $false }
+            finally { $ErrorActionPreference = $prevEA; $global:LASTEXITCODE = 0 }
+        }
+        # 🪤 Write-Host, NOT Note: this file defines Step/Warn but NOT Note. Calling an undefined
+        # helper is BUG-117 exactly -- Setup-PimContainers.ps1 shipped a Warn-less script and killed
+        # every estate deploy that reached the line. A log helper must never be the thing that fails.
+        if (-not $isRepo) { Write-Host "    build context: '$repoRoot' is not a git clone (synced/released tree) -- using it directly instead of a git-archive export." -ForegroundColor DarkGray }
+        if ($haveGit -and $haveTar -and $isRepo) {
             # Short temp ROOT (not %TEMP%\<guid>): keeps extracted paths well under
             # Windows MAX_PATH. Archive ONLY the paths the image context needs
             # (.dockerignore whitelists SOLUTIONS/PIM4EntraPS) -- this also keeps the
@@ -201,7 +254,7 @@ if ($Source -eq 'sync-automateit') {
                 } finally { Pop-Location }
                 Push-Location $tmpCtx
                 try {
-                    az acr build -r $AcrName -t "$ImageRepo`:$ImageTag" -f $Dockerfile . `
+                    az acr build @acrSubArgs -r $AcrName -t "$ImageRepo`:$ImageTag" -f $Dockerfile . `
                         --build-arg "PIM_MANAGER_CONTENT_HASH=$contentHash"
                     if ($LASTEXITCODE -and $LASTEXITCODE -ne 0) { throw "az acr build failed (exit $LASTEXITCODE)." }
                 } finally { Pop-Location }
@@ -212,10 +265,14 @@ if ($Source -eq 'sync-automateit') {
         } else {
             # Fallback (no git/tar): build from the repo root directly. Works when the
             # tree carries no deep-path worktrees.
-            Warn 'git/tar not found -- falling back to repo-root build context (no clean export).'
+            # Say WHICH condition sent us here. "git/tar not found" was printed on the synced-tree
+            # path too, where git IS installed -- sending anyone who read the log to diagnose a
+            # missing tool that was never missing.
+            $why = if (-not $isRepo) { "'$repoRoot' is not a git clone" } else { 'git/tar not found' }
+            Warn "$why -- falling back to repo-root build context (no clean export)."
             Push-Location $repoRoot
             try {
-                az acr build -r $AcrName -t "$ImageRepo`:$ImageTag" -f $Dockerfile . `
+                az acr build @acrSubArgs -r $AcrName -t "$ImageRepo`:$ImageTag" -f $Dockerfile . `
                     --build-arg "PIM_MANAGER_CONTENT_HASH=$contentHash"
                 if ($LASTEXITCODE -and $LASTEXITCODE -ne 0) { throw "az acr build failed (exit $LASTEXITCODE)." }
             } finally { Pop-Location }
@@ -228,9 +285,21 @@ if ($Source -eq 'sync-automateit') {
         # scripts resolve the same value to pin what they roll.
         if (Get-Command Resolve-PimAcrImageDigest -ErrorAction SilentlyContinue) {
             try {
-                $builtDigest = Resolve-PimAcrImageDigest -AcrName $AcrName -Repository $ImageRepo -Tag $ImageTag
+                # DECLARED **AND** FORWARDED -- the resolver accepts a subscription and this caller
+                # not passing it is what sent the lookup into another company's tenant.
+                $rdArgs = @{ AcrName = $AcrName; Repository = $ImageRepo; Tag = $ImageTag }
+                if ("$SubscriptionId".Trim()) { $rdArgs['SubscriptionId'] = "$SubscriptionId".Trim() }
+                $builtDigest = Resolve-PimAcrImageDigest @rdArgs
                 Write-Host "  digest $builtDigest  <- this, not the tag, is what the deploy pins" -ForegroundColor Green
-            } catch { Warn "could not resolve the built image's digest: $($_.Exception.Message)" }
+            } catch {
+                Warn "could not resolve the built image's digest: $($_.Exception.Message)"
+                # BUG-128: the digest lookup is NON-FATAL by design -- but the az call inside it
+                # left its failure in $LASTEXITCODE, and Invoke-PimUpdate judges THE BUILD by that
+                # same variable. Swallowing the error without clearing the code reported a
+                # SUCCESSFUL build as "exit -1" and aborted the deploy. A caught error is not an
+                # exit status: clear it, or a warning silently becomes a release failure.
+                $global:LASTEXITCODE = 0
+            }
         }
     }
     Step "Done. Roll it with Update-PimContainers.ps1 -ImageTag $ImageTag (NOT -SkipBuild already covered)."

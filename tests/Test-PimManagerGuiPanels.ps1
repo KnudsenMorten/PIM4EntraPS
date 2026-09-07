@@ -22,6 +22,24 @@ T 'pim-manager.html present' (Test-Path -LiteralPath $htmlPath)
 if ($fail) { Write-Host "`n RESULT: $pass pass, $fail fail" -ForegroundColor Red; exit 1 }
 $html = [System.IO.File]::ReadAllText($htmlPath)
 
+# §37.4 -- the panel-gating assertions below claim things about a RENDERER, so they are scoped to
+# that renderer's own body instead of a window around the first mention of its name.
+# 🪤 The first mention was not the definition. Measured 2026-09-02: renderAuthoring first appears
+# at offset 138963, in switchTab's dispatch table (`if (name === 'authoring') renderAuthoring();`)
+# -- 289387 characters BEFORE its definition. The old windows (400 and 800) therefore described
+# the dispatcher, and the assertion passed on whatever `if (!isServer)` happened to sit nearby.
+# It does still catch a removed gate today (demonstrated), but only because no `if (!isServer)`
+# sits within 400 characters of the dispatcher -- an accident of layout, not a property of the
+# test. Scoping makes it a property of the test.
+. (Join-Path $PSScriptRoot '_shared\PimSourceScope.ps1')
+$jsAuthoring  = Get-PimSourceJsFunctionBody -Text $html -Name 'renderAuthoring'
+$jsOnboarding = Get-PimSourceJsFunctionBody -Text $html -Name 'renderOnboarding'
+$jsCutover    = Get-PimSourceJsFunctionBody -Text $html -Name 'renderCutover'
+$jsAudit      = Get-PimSourceJsFunctionBody -Text $html -Name 'renderAudit'
+$jsRolePerms  = Get-PimSourceJsFunctionBody -Text $html -Name 'renderRolePerms'
+$jsSwitchTab  = Get-PimSourceJsFunctionBody -Text $html -Name 'switchTab'
+$jsInjectTab  = Get-PimSourceJsFunctionBody -Text $html -Name 'injectTabGuidance'
+
 # --- Tabs are declared -------------------------------------------------------
 foreach ($tab in 'authoring','onboarding','roleperms','cutover') {
     T "tab declared: $tab" ($html -match ("data-tab=`"$tab`""))
@@ -58,10 +76,10 @@ T "cutover calls POST /api/cutover" ($html -match "api\('POST',\s*'/api/cutover'
 
 # --- Read-write + role gating: write panels are server+role gated -------------
 # Each write renderer must short-circuit in static mode and gate on role.
-T "authoring gated on isServer"   ($html -match "renderAuthoring[\s\S]{0,400}if \(!isServer\)")
-T "authoring gated on role"       ($html -match "renderAuthoring[\s\S]{0,800}roleAtLeast\('Admin'\)")
-T "onboarding gated on role"      ($html -match "renderOnboarding[\s\S]{0,800}roleAtLeast\('Admin'\)")
-T "cutover gated on isServer"     ($html -match "renderCutover[\s\S]{0,400}if \(!isServer\)")
+T "authoring gated on isServer"   ($jsAuthoring  -match 'if \(!isServer\)')
+T "authoring gated on role"       ($jsAuthoring  -match "roleAtLeast\('Admin'\)")
+T "onboarding gated on role"      ($jsOnboarding -match "roleAtLeast\('Admin'\)")
+T "cutover gated on isServer"     ($jsCutover    -match 'if \(!isServer\)')
 T "roleAtLeast helper present"    ($html -match "function roleAtLeast\(")
 
 # --- Cutover ceremony: shows the gated stage flow ----------------------------
@@ -102,7 +120,7 @@ T "panel container present: auditTab" ($html -match 'id="auditTab"')
 T "switchTab routes audit -> renderAudit" ($html -match "name === 'audit'\s*\)\s*renderAudit")
 T "renderer defined: renderAudit"  ($html -match 'async function renderAudit\(')
 T "audit calls GET /api/audit"     ($html -match "api\('GET',\s*'/api/audit")
-T "audit gated on isServer"        ($html -match "renderAudit[\s\S]{0,400}if \(!isServer\)")
+T "audit gated on isServer"        ($jsAudit -match 'if \(!isServer\)')
 # Category filter chips mirror the server categories (no dead filter).
 foreach ($cat in 'logins','delegations','accounts','approvals','engine','emergency') {
     T "audit category chip: $cat" ($html -match ("key:\s*'$cat'"))
@@ -154,7 +172,7 @@ T "tabRight status line is nowrap"                    ($html -match '#tabRight\s
 # (a) The upgraded tab offers what-a-role-can-do, who-can-activate, and compare.
 T "role lookup has three sub-modes"                  ($html -match 'id="rlModePerms"' -and $html -match 'id="rlModeReverse"' -and $html -match 'id="rlModeCompare"')
 T "role lookup names allowedResourceActions"          ($html -match 'allowedResourceActions')
-T "role lookup states it is read-only"               ($html -match 'renderRolePerms[\s\S]{0,1400}read-only')
+T "role lookup states it is read-only"               ($jsRolePerms -match 'read-only')
 # (b) Typo tolerance: a near-miss is handled as ranked "did you mean..." candidates
 #     (matched===false), NOT a 503/not-connected error panel.
 T "role lookup renders did-you-mean candidates"      ($html -match 'function didYouMean\(')
@@ -244,10 +262,13 @@ T "state helper: stateLoading"                    ($html -match 'function stateL
 T "state helper: stateEmpty"                      ($html -match 'function stateEmpty\(')
 T "state helper: stateError"                      ($html -match 'function stateError\(')
 # switchTab injects the guidance banner (so every tab carries it).
-T "switchTab calls injectTabGuidance"             ($html -match 'function switchTab\([\s\S]{0,400}injectTabGuidance\(name\)')
+T "switchTab calls injectTabGuidance"             ($jsSwitchTab -match 'injectTabGuidance\(name\)')
 # Injection is idempotent (re-entering a tab won't duplicate the banner) and is
 # prepended as the panel's first child (survives renderer body rewrites).
-T "injection guards against duplicates"           ($html -match "injectTabGuidance\([\s\S]{0,400}querySelector\(':scope > \.tab-guide'\)")
+# 🪤 This one was 400 characters over a 410-character function -- nine characters from reaching
+# into the next one. Nobody would have noticed the crossover; the assertion would simply have
+# started proving something about a neighbour.
+T "injection guards against duplicates"           ($jsInjectTab -match "querySelector\(':scope > \.tab-guide'\)")
 T "injection prepends into the panel"             ($html -match 'insertBefore\(node, panel\.firstChild\)')
 # The banner is a collapsible <details> with the what + how-to copy.
 T "banner is a collapsible <details>"             ($html -match "class=`"tab-guide`"")

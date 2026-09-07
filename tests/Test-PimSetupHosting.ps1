@@ -172,10 +172,24 @@ T 'workspace / Easy Auth audience / FQDN are passthrough params defaulting to en
 T 'a missing Easy Auth audience is called out as gate-failing, not passed over in silence' {
     $updSrc -match 'NOT set -- the live-HTTP layer will fail the gate'
 }
-T 'the gate logs via Write-Host, not an undefined Note helper' {
-    # Update-PimContainers defines Step() only. Calling Note() is parse-clean and throws at
-    # RUNTIME, inside the gate, on every deploy -- the same class as the `empties` ReferenceError.
-    ($updSrc -notmatch '(?m)^\s*Note\s') -and ($updSrc -match 'function Step')
+T 'the gate never calls a log helper this script does not define' {
+    # WAS: "defines Step() only, so any Note() call is a defect". That premise expired on
+    # 2026-09-04 -- Update-PimContainers now DEFINES Note() and Warn() on purpose, because a
+    # missing one-line helper is exactly what killed step 6 of every estate deploy that passed a
+    # certificate (BUG-117). Banning the CALL while the definition exists tests the old shape of
+    # the file rather than the property that matters.
+    # The property that matters is unchanged and is now asserted directly: calling a helper this
+    # script does not define is parse-clean and throws at RUNTIME, inside the gate, on every
+    # deploy -- the same class as the `empties` ReferenceError. So: call it if you define it.
+    # This is strictly stronger than the old check (it covers Warn too, and any future helper
+    # added to the pair) and it cannot be satisfied by deleting a useful log line.
+    $callsNote = $updSrc -match '(?m)^\s*Note\s'
+    $defsNote  = $updSrc -match '(?m)^\s*function\s+Note\b'
+    $callsWarn = $updSrc -match '(?m)^\s*Warn\s'
+    $defsWarn  = $updSrc -match '(?m)^\s*function\s+Warn\b'
+    ($updSrc -match 'function Step') -and
+    (-not $callsNote -or $defsNote) -and
+    (-not $callsWarn -or $defsWarn)
 }
 
 Section 'BUG-47 -- Grant-PimMiSql is IDEMPOTENT (a re-run must not try to drop a schema owner)'

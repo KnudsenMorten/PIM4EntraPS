@@ -44,13 +44,31 @@
     {
       "name": "msp-downlink",
       "optional": true,
-      "description": "The MSP managed downlink: a managed tenant pulls the signed baseline template version its ring points at from its MSP master, then applies it locally. Only the MSP managed topologies have this; a single-tenant install has no master to pull from. Customer data never leaves the customer tenant -- this is a pull, not a push."
+      "description": "The MSP managed downlink: a managed tenant pulls the signed baseline template version its ring points at from its MSP master, then applies it locally. Only the MSP managed topologies have this; a single-tenant install has no master to pull from. Customer data never leaves the customer tenant -- this is a pull, not a push. Blocking this declines the downlink OUTRIGHT; the three per-class capabilities below let a customer decline one KIND of change while still taking the rest."
+    },
+
+    {
+      "name": "msp-admins",
+      "optional": true,
+      "description": "SEC-10 / MSP-3 step 4 -- the customer's own half of the ACCEPT gate, at CLASS granularity. Blocking this means the MSP master's admin ACCOUNTS are not staged into this tenant: the arriving admins are reported HELD, with the reason naming this capability, rather than silently not appearing. Optional by definition -- a capability the customer cannot decline is not a consent gate."
+    },
+    {
+      "name": "msp-roles",
+      "optional": true,
+      "description": "SEC-10 / MSP-3 step 4 -- declines the ROLE PROJECTION: the master's admins are still created (unless msp-admins is also blocked) but receive no group memberships here, so no privilege arrives. This is the capability SEC-10 is really about -- a projection can carry a tag bound to Global Administrator, and this is the customer's veto over it landing in their tenant unattended."
+    },
+    {
+      "name": "msp-groups",
+      "optional": true,
+      "description": "SEC-10 / MSP-3 step 4 -- declines the GROUP DEFINITIONS the projection would create in this tenant. A customer whose group estate is governed elsewhere blocks this and still takes admins and roles for groups that already exist."
     }
   ],
 
+  "_capabilities_msp_policies_comment": "'msp-policies' is DELIBERATELY NOT DECLARED YET, and that is the honest state rather than an oversight. Get-PimDownlinkCapabilityName maps the class name and Test-PimDownlinkClassAllowed would honour it, but Get-PimDownlinkPlan gates only admins/roles/groups -- the downlink does not carry policy artifacts today. Declaring it would advertise a consent gate over something that never arrives, which is precisely the BUG-29 family (a gate documented as active while no code path implements it). Declare it in the SAME change that makes the plan carry policies, never before.",
+
   "_deploy_comment": "Entry point for the capabilities above. Idempotent and safe to re-run daily -- a re-run IS the updater, and every already-current step is a clean no-op. Self-gating: it verifies the deployment (hosted GUI smoke + deploy-validation tests) and AUTO-ROLLS-BACK the 'code' step to the captured pre-deploy revision on a verify failure. Schema is never auto-reverted, because reverting an additive schema change could drop a column that now holds data.",
 
-  "_replaces_comment": "This block is the SOLUTION-OWNED half of the phase-1 'Deploy' block that still sits in the per-customer sync/Sync-AutomateIT.json ({ Script, Args, NeedsSchema, RunWhenChanged }). Script -> deploy.script, Args:['-Apply'] -> deploy.defaultArgs (the MODE is solution-owned; per-customer values are not), NeedsSchema -> the top-level needsSchema, RunWhenChanged -> deploy.runWhenChanged. Once the merge is built, the customer manifest keeps ONLY its own Args and the solution-owned keys are read from here. ⚠️ NOTHING MERGES THEM YET -- see docs/REQUIREMENTS.md sec.33 PLAT-02.",
+  "_replaces_comment": "This block is the SOLUTION-OWNED half of the phase-1 'Deploy' block that still sits in the per-customer sync/Sync-AutomateIT.json ({ Script, Args, NeedsSchema, RunWhenChanged }). Script -> deploy.script, Args:['-Apply'] -> deploy.defaultArgs (the MODE is solution-owned; per-customer values are not), NeedsSchema -> the top-level needsSchema, RunWhenChanged -> deploy.runWhenChanged. Once the merge is built, the customer manifest keeps ONLY its own Args and the solution-owned keys are read from here. ✅ THE MERGE IS BUILT (PLAT-02, 2026-08-07): sync/_SyncDeploy.ps1 Merge-AitDeployContract assembles the effective block, and since 2026-09-04 Sync-AutomateIT-Engine.ps1 CALLS it after a sync so a pulled solution is actually applied. Customer keeps ONLY Args -- and note Args REPLACE defaultArgs rather than appending, so a customer block must carry -Apply itself or the update runs detect-only.",
   "deploy": {
     "script": "tools/setup/Invoke-PimUpdate.ps1",
     "defaultArgs": [ "-Apply" ],

@@ -30,6 +30,16 @@ if (-not $here) { $here = 'C:\SCRIPTS\AutomateIT\SOLUTIONS\PIM4EntraPS\tests' }
 . "$here\..\engine\_shared\PIM-ApprovalGate.ps1"
 . "$here\..\engine\_shared\PIM-SensitiveAuthoring.ps1"
 
+# BUG-107 (2026-08-30): maker/checker became an OPT-IN feature, DEFAULT OFF, because shipping
+# it unconditionally made a single-administrator deployment unable to commit any privileged
+# change -- the 409 demands a second administrator, self-approval is refused by design, and in
+# that tenant no second administrator exists.
+# This suite exercises the gate's BEHAVIOUR WHEN THE POLICY IS ON, which is still exactly what
+# must be proven, so it turns the flag on for its own run rather than being weakened. Without
+# this stub the gate short-circuits to allowed and every assertion below tests nothing --
+# a suite that passes because the feature is off is worse than one that fails.
+function Test-PimFeatureAvailable { param([string]$Key, [switch]$Quiet) return ($Key -eq 'makerchecker') }
+
 $pass=0; $fail=0
 function Assert($n,$c){ if($c){ $script:pass++; Write-Host "  PASS  $n" -ForegroundColor Green } else { $script:fail++; Write-Host "  FAIL  $n" -ForegroundColor Red } }
 
@@ -153,6 +163,19 @@ Assert "executed approval cannot drive 2nd commit"     (-not $g3.allowed)
 # ---------------------------------------------------------------------------
 # cleanup + summary
 # ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# BUG-107 -- THE OFF PATH. Everything above proves the gate works WHEN ENABLED. This proves it
+# is genuinely OFF by default, which is the half the operator actually hit: a single-admin
+# deployment must be able to commit a privileged change without a second approver who does not
+# exist. Asserted behaviourally, not by reading the catalog, because the catalog default and
+# the library's honouring of it are two different facts and only the second one blocks a commit.
+function Test-PimFeatureAvailable { param([string]$Key, [switch]$Quiet) return $false }
+$offRows = @([pscustomobject]@{ Username='adm@x'; GroupTag='ORG-IT'; AssignmentType='Active' })
+$off = Test-PimAuthoringCommitAllowed -Action 'review-save' -Base 'PIM-Assignments-Admins' -Rows $offRows -Requests @()
+Assert 'policy OFF: a sensitive change is ALLOWED without a second approver' ([bool]$off.allowed)
+Assert 'policy OFF: the gate says why, and it is still classified as sensitive' (("$($off.gate)" -eq 'makerchecker-disabled') -and ("$($off.reason)" -match 'Settings'))
+
 if (Test-Path -LiteralPath $global:PIM_ApprovalStatePath) { Remove-Item -LiteralPath $global:PIM_ApprovalStatePath -Force -ErrorAction SilentlyContinue }
 $global:PIM_ApprovalStatePath = $null
 

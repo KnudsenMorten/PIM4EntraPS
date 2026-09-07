@@ -361,8 +361,12 @@ function Get-PimScenarioEntryPlan {
 # store the resolved hostingLocation implies:
 #   central-msp (S5) -> the central MSP Azure SQL (server from -CentralServer /
 #                       $env:PIM_SqlServerCentral); 'azure' kind, hosted web.
-#   local-slave (S6) -> the local SQL in the managed tenant (server from
-#                       -LocalServer / $env:PIM_SqlServerLocal, default .\SQLEXPRESS).
+#   local-slave (S6) -> the SQL store in the managed tenant (server from
+#                       -LocalServer / $env:PIM_SqlServerLocal). NO DEFAULT -- see the
+#                       BUG-78 note on the parameter itself; the `.\SQLEXPRESS` default this
+#                       comment used to advertise is exactly what OVERRODE a correct Azure
+#                       SQL FQDN and sent the live matrix at a database nobody deployed.
+#                       SQL Express is not a store this product uses (operator 2026-08-28).
 #   in-tenant   (S1-S4) -> the single-tenant in-tenant store; '' server (let the
 #                       existing ambient resolution in Get-PimSqlConnectionString win).
 # Returns @{ source; server; kind; reason } — server='' means "no scenario override,

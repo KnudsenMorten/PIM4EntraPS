@@ -84,6 +84,10 @@ $global:PIM_UseGraphSdk = $false   # REST-first; no Graph/Az modules
 . "$shared\PIM-Discovery.ps1"         # discovery enumerators + sweep (Invoke-PimDiscoveryJobSweep)
 . "$shared\PIM-License.ps1"           # offline Core/Pro edition model (Get-PimEdition)
 . "$shared\PIM-FeatureCatalog.ps1"    # feature catalog + gates (Test-PimFeatureAvailable) -- s29/s30
+. "$shared\PIM-AlertFeed.ps1"         # ALERT-01: recorded-send proof + the shared SQL feed adapter
+. "$shared\PIM-JobAlert.ps1"          # ALERT-01: a FAILED scheduled run now raises engine-failure.
+                                      # This process already had a mail path (PIM-Notify above) but
+                                      # no alerting logic on top of it, so a 03:00 failure was silent.
 . "$shared\PIM-Scheduler.ps1"
 
 # State + run-history file location (file-backed VM/local deployments). SQL-backed

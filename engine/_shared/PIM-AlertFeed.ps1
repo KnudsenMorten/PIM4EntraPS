@@ -268,6 +268,54 @@ function Get-PimExpiringAccessAlert {
 }
 
 # ---- JSONL file adapter (the only I/O; SQL adapter lands with the data layer) ----
+# ---------------------------------------------------------------------------
+# SQL adapter (§36 phase 4). The feed is the recorded-send PROOF: it is what
+# says an operator WAS notified that break-glass fired, or that a drift alert
+# went out. That is evidence, not telemetry -- and on a hosted deployment it
+# was being appended to a container filesystem with no persistent volume, so
+# every revision roll destroyed the proof while leaving the alerts themselves
+# looking fine.
+#
+# Stored as ONE bounded JSON document in pim.Settings rather than a table: the
+# pure core above already filters, pages and summarises an in-memory array, and
+# Add-PimAlertToFeed clamps the feed to MaxKeep (500). A table would mean
+# reimplementing Select-PimAlertFeed in SQL for no behavioural gain.
+# ---------------------------------------------------------------------------
+function Get-PimAlertFeedStoreName { 'AlertFeed' }
+
+function Read-PimAlertFeedSql {
+    # Returns @() when there is no store, no value, or the value is unreadable.
+    # NEVER throws: the alert feed is a display + proof surface, and a feed read
+    # that takes down the Home tile would be a worse failure than a short feed.
+    param([Parameter(Mandatory)][string]$ConnectionString)
+    $v = Get-PimSqlSetting -ConnectionString $ConnectionString -Name (Get-PimAlertFeedStoreName)
+    if (-not $v) { return @() }
+    if ($v -is [string]) { try { $v = $v | ConvertFrom-Json } catch { return @() } }
+    $inner = $null
+    if ($v -is [System.Collections.IDictionary]) {
+        if ($v.Contains('alerts')) { $inner = $v['alerts'] }
+    } elseif ($v.PSObject -and $v.PSObject.Properties['alerts']) {
+        $inner = $v.alerts
+    }
+    if ($null -eq $inner) { return @() }
+    return @(Select-PimAlertFeed -Feed @($inner) -Take 0)
+}
+
+function Write-PimAlertFeedSql {
+    # Prepend one record and persist the clamped feed. Read-modify-write, which is
+    # correct here: the Manager is the ONLY writer (verified -- no engine, job or
+    # setup path calls the feed writer), and it is a single container app, so there
+    # is no concurrent-append case to lose a record to.
+    param(
+        [Parameter(Mandatory)][string]$ConnectionString,
+        [Parameter(Mandatory)][object]$Record,
+        [int]$MaxKeep = 500
+    )
+    $cur  = @(Read-PimAlertFeedSql -ConnectionString $ConnectionString)
+    $next = @(Add-PimAlertToFeed -Record $Record -Feed $cur -MaxKeep $MaxKeep)
+    Set-PimSqlSetting -ConnectionString $ConnectionString -Name (Get-PimAlertFeedStoreName) -Value @{ alerts = $next }
+    return $next.Count
+}
 function Read-PimAlertFeedFile {
     # Read the alert feed from an append-only JSONL file (one record/line), newest
     # first by ts. Returns @() when the file does not exist.

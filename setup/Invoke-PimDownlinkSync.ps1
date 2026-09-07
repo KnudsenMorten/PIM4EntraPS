@@ -96,6 +96,31 @@ param(
     # defaults the same way so the two planes cannot be confused by copy-paste.
     [string]$TemplateChannel = 'managed',
 
+    # --- SEC-10 / MSP-3 step 4: THE CUSTOMER'S OWN VETO ------------------------
+    # MSP-3's ACCEPT step is TWO gates on purpose -- "the MSP controls what is offered,
+    # the customer controls what lands". The MSP half (the plane-2 ring map above)
+    # decides which VERSION may arrive. This is the other half: which CLASSES the
+    # customer will take at all, read from THEIR OWN bootstrap manifest.
+    # 🔴 Until this was wired, the customer half did not exist outside the tests:
+    # Get-PimDownlinkPlan honoured -BlockedCapabilities, the class gate was proven
+    # against a real bundle, and NO runtime path supplied a value -- so a customer
+    # could write blockCapabilities in their manifest and the downlink would apply
+    # the roles anyway. That is what left SEC-10 open.
+    # 🔒 By DESIGN this reads the customer's file, not a PIM-private one: their file,
+    # their choice, and the standing rule forbids inventing a second consent store.
+    # Defaults to <solution root>\..\..\bootstrap\Sync-AutomateIT.json (i.e.
+    # C:\AutomateIT\bootstrap\... on a customer machine). Absent => nothing blocked =>
+    # exactly today's behaviour, and the run SAYS SO rather than staying silent.
+    [string]$LocalManifestPath,
+    # Explicit override, for an operator proving a customer's block or for tests.
+    # Supplying it SKIPS the manifest read entirely -- one source of truth per run.
+    [string[]]$BlockedCapabilities,
+    # IMP-13. The SLAVE's admin naming prefixes. Normally LEFT UNSET: on this S6 path the downlink
+    # runs inside the slave, so the authority on the customer's naming is the customer's own live
+    # config, and it is read from there below. The parameter exists for the case where it cannot be
+    # (a dry run from elsewhere), and so the gate has an explicit spelling an operator can supply.
+    [string[]]$SlaveAdminPrefixes,
+
     # --- MSP-2 / control #2: reflect the master admins' ROLES into the slave -----
     # The projection itself always runs (it is carried by the signed bundle); these
     # decide whether it is APPLIED. The slave's DESIRED store is a different database
@@ -207,11 +232,62 @@ if ($ringMap) {
     Write-Host "  ring map: none supplied -- version gate INERT (pulls whatever version the master published)" -ForegroundColor DarkYellow
 }
 
+# 1c) SEC-10: the CUSTOMER's half of MSP-3's ACCEPT gate -- which downlink CLASSES
+# this tenant is willing to take, read from THEIR OWN bootstrap manifest. The parsing
+# shape is the platform's (Solutions[] -> Name + blockCapabilities), matched to
+# SOLUTIONS/PlatformConfiguration/INTERNAL/Sync-AutomateIT-Engine.ps1 so the two cannot
+# disagree about what a customer wrote.
+$blockedCaps = $null
+if ($PSBoundParameters.ContainsKey('BlockedCapabilities')) {
+    # Explicit wins outright -- no manifest read, one source of truth per run.
+    $blockedCaps = @($BlockedCapabilities)
+    Write-Host ("  customer gate: {0} (explicit -BlockedCapabilities)" -f `
+        $(if ($blockedCaps.Count) { "blocks $($blockedCaps -join ', ')" } else { 'blocks nothing' })) -ForegroundColor Cyan
+} else {
+    # BUG-79: ONE resolver, shared with Invoke-PimScenarioRun.ps1. This used to be ~25 inline lines
+    # here, and the moment a second entry point needed the same behaviour, copying them would have
+    # put the refuse-on-unparseable rule in two places -- where they drift, silently, and the
+    # security-relevant half is the one nobody re-reads.
+    $blockedCaps = Resolve-PimCustomerBlockedCapabilities -ManifestPath $LocalManifestPath `
+        -SolutionRoot (Split-Path -Parent $PSScriptRoot) -Solution 'PIM4EntraPS'
+}
+
 # 2-5) verify + ring-filter + stage + apply via the orchestrator (prod cert path:
 # no -PublicKey -> Invoke-PimManagedDownlink uses the embedded baseline cert).
 # Splat -RingPlan only when there is one, so the gate stays inert without a map.
 $dlArgs = @{}
 if ($null -ne $ringPlan) { $dlArgs['RingPlan'] = $ringPlan }
+if ($null -ne $blockedCaps) { $dlArgs['BlockedCapabilities'] = $blockedCaps }
+
+# ---------------------------------------------------------------------------------------------
+# IMP-13 -- the SLAVE's own admin naming prefixes, read from the SLAVE's own config.
+#
+# 🔑 THIS IS THE WHOLE DECISION, and it is why the prefixes are READ rather than SUPPLIED. A synced
+# MSP admin lands as `<UserName>@<slave domain>`; if the slave's AdminAccountPatterns do not cover
+# it, the slave's Admins provider never sees the account, the diff says "not present", and every
+# tick creates it again -- leaving another unmanaged privileged account behind each time.
+# 🔒 The tempting fix is to MERGE the MSP's prefix into the customer's conventions. That is the
+# master editing a customer's own fail-closed scoping control so that the master's write succeeds,
+# which §22 ("MSP never writes to a customer tenant") and the MSP-3 consent model both forbid, and
+# which would be indistinguishable from the sync quietly granting itself more reach. So the plan
+# DETECTS and WITHHOLDS; repairing the convention stays the customer's act, on the customer's side.
+# ⚠️ Only meaningful on this S6 path, where the downlink runs INSIDE the slave and
+# $global:PIM_NamingConventions IS the slave's. Left unset otherwise, and the plan then reports
+# recognisability as NOT EVALUATED rather than as fine.
+$slaveAdminPrefixes = @()
+if ($PSBoundParameters.ContainsKey('SlaveAdminPrefixes') -and @($SlaveAdminPrefixes).Count) {
+    # Explicit wins, and says so -- the same precedence the two gates above use.
+    $slaveAdminPrefixes = @($SlaveAdminPrefixes)
+    Write-Host ("  slave admin prefixes: {0} (explicit -SlaveAdminPrefixes)" -f (@($slaveAdminPrefixes) -join ', ')) -ForegroundColor DarkGray
+} elseif (Get-Command Get-PimAdminAccountPrefixes -ErrorAction SilentlyContinue) {
+    try { $slaveAdminPrefixes = @(Get-PimAdminAccountPrefixes) } catch { $slaveAdminPrefixes = @() }
+}
+if (@($slaveAdminPrefixes).Count) {
+    $dlArgs['SlaveAdminPrefixes'] = @($slaveAdminPrefixes)
+    Write-Host ("  slave admin prefixes: {0}" -f (@($slaveAdminPrefixes) -join ', ')) -ForegroundColor DarkGray
+} else {
+    Write-Host "  slave admin prefixes: NOT KNOWN -- admin recognisability will be reported as NOT EVALUATED (IMP-13)" -ForegroundColor Yellow
+}
 
 # --- MSP-2 / control #2 inputs ------------------------------------------------
 # The relationship's role-projection policy is AUTHORED in the master's platform registry

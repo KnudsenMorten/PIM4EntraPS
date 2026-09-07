@@ -67,7 +67,14 @@ T 'audit is always-on'               ([bool](@($cat | Where-Object { $_.id -eq '
 T 'map defaults ON (core)'           ([bool](@($cat | Where-Object { $_.id -eq 'map' })[0].default))
 T 'approvals defaults ON (core)'     ([bool](@($cat | Where-Object { $_.id -eq 'approvals' })[0].default))
 T 'accessreview defaults OFF (adv)'  (-not [bool](@($cat | Where-Object { $_.id -eq 'accessreview' })[0].default))
-T 'reports defaults OFF (advanced)'  (-not [bool](@($cat | Where-Object { $_.id -eq 'reports' })[0].default))
+# Promoted to default ON by the operator 2026-08-31. Pinned INDIVIDUALLY, because "the gradual
+# rollout never happened" is exactly what a default silently re-introduces if a later change
+# moves these back under the OFF block. The delegation wizard shipped 2026-06-15 and was
+# invisible in the operator's own portal until he asked where it was.
+T 'new (delegation wizard) defaults ON' ([bool](@($cat | Where-Object { $_.id -eq 'new' })[0].default))
+T 'onboarding defaults ON'              ([bool](@($cat | Where-Object { $_.id -eq 'onboarding' })[0].default))
+T 'grid (Advanced View) defaults ON'    ([bool](@($cat | Where-Object { $_.id -eq 'grid' })[0].default))
+T 'reports defaults ON'                 ([bool](@($cat | Where-Object { $_.id -eq 'reports' })[0].default))
 T 'conformance defaults OFF (adv)'   (-not [bool](@($cat | Where-Object { $_.id -eq 'conformance' })[0].default))
 # the catalog copy is defensive (mutating it doesn't affect the next read)
 $cat[0].default = -not $cat[0].default
@@ -76,7 +83,9 @@ T 'catalog returns a defensive copy' ([bool]($cat2[0].default) -ne [bool]($cat[0
 
 # DEFAULTS applied on an empty store.
 $r0 = Resolve-PimFeatureFlags -Raw $null
-T 'empty store -> map defaults applied' ([bool]$r0.flags['map'] -eq $true -and [bool]$r0.flags['reports'] -eq $false)
+# accessreview is now the default-OFF exemplar (reports was promoted to ON 2026-08-31).
+T 'empty store -> map defaults applied' ([bool]$r0.flags['map'] -eq $true -and [bool]$r0.flags['accessreview'] -eq $false)
+T 'empty store -> a PROMOTED flag is ON' ([bool]$r0.flags['new'] -eq $true -and [bool]$r0.flags['grid'] -eq $true)
 T 'empty store -> no warnings'          (@($r0.warnings).Count -eq 0)
 T 'effective carries label+default+alwaysOn' ("$($r0.effective['settings'].label)".Trim() -ne '' -and [bool]$r0.effective['settings'].alwaysOn -eq $true)
 
@@ -116,8 +125,15 @@ T 'garbage JSON -> defaults applied'  ([bool]$bad.flags['map'] -eq $true)
 T 'garbage JSON -> warned'            (@($bad.warnings | Where-Object { $_ -match 'not valid JSON' }).Count -ge 1)
 
 # MINIMAL override reduction: only flags differing from default, never always-on.
-$minOv = ConvertTo-PimFeatureFlagOverrides -Raw ([ordered]@{ flags = [ordered]@{ reports = $true; map = $true; settings = $false; approvals = $true } })
-T 'reduction keeps only non-default flag' ($minOv.Contains('reports') -and [bool]$minOv['reports'] -eq $true)
+$minOv = ConvertTo-PimFeatureFlagOverrides -Raw ([ordered]@{ flags = [ordered]@{ accessreview = $true; map = $true; settings = $false; approvals = $true } })
+T 'reduction keeps only non-default flag' ($minOv.Contains('accessreview') -and [bool]$minOv['accessreview'] -eq $true)
+# A promoted flag set to its NEW default must now reduce away -- otherwise every customer store
+# would carry four redundant overrides that pin the old behaviour forever.
+$promOv = ConvertTo-PimFeatureFlagOverrides -Raw ([ordered]@{ flags = [ordered]@{ new = $true; grid = $true; reports = $true } })
+T 'a promoted flag at its new default reduces away' (-not $promOv.Contains('new') -and -not $promOv.Contains('grid') -and -not $promOv.Contains('reports'))
+# ...but an operator who deliberately turns one OFF keeps that override.
+$offOv = ConvertTo-PimFeatureFlagOverrides -Raw ([ordered]@{ flags = [ordered]@{ new = $false } })
+T 'an operator turning a promoted flag OFF is preserved' ($offOv.Contains('new') -and [bool]$offOv['new'] -eq $false)
 T 'reduction drops a flag equal to default' (-not $minOv.Contains('map') -and -not $minOv.Contains('approvals'))
 T 'reduction never stores always-on flags' (-not $minOv.Contains('settings'))
 
@@ -150,7 +166,8 @@ if ($getFn -and $setFn) {
 
     # Empty store -> fully-populated effective map (defaults, never empty).
     $g0 = Get-PimFeatureFlags
-    T 'empty store reads defaults'        ([bool]$g0.flags['map'] -eq $true -and [bool]$g0.flags['reports'] -eq $false)
+    T 'empty store reads defaults'        ([bool]$g0.flags['map'] -eq $true -and [bool]$g0.flags['accessreview'] -eq $false)
+    T 'empty store shows the wizard'      ([bool]$g0.flags['new'] -eq $true)
     T 'GET exposes the catalog'           (@($g0.catalog).Count -ge 15)
 
     # SAVE a GUI selection (the shape the GUI PUTs: { flags: {...} }) ...
@@ -164,7 +181,7 @@ if ($getFn -and $setFn) {
     # the store holds the MINIMAL normalized overrides (no always-on, no defaults).
     $stored = $script:__store['FeatureFlags']
     T 'stored value is minimal (no always-on key)' (-not $stored.flags.Contains('settings'))
-    T 'stored value carries the real override' ([bool]$stored.flags['reports'] -eq $true)
+    T 'stored value carries the real override' ([bool]$stored.flags['accessreview'] -eq $true)
 
     # SAVE an unknown flag -> store stays clean (unknown ignored, no garbage).
     [void](Set-PimFeatureFlags -Flags ([ordered]@{ flags = [ordered]@{ bogus = $true; reports = $true } }))

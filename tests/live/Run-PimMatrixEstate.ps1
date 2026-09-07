@@ -28,7 +28,20 @@
 
 .PARAMETER Environments
   Estate short names, e.g. test1comr2xx391 (standalone), test1mspmstintctrr2wa678 (master),
-  test1mspslvintctrr3rq855 (slave).
+  test2mspslvintctrr3gp185 (slave).
+
+  🔴 TEST-32 -- THE DEFAULT NAMES ONE TENANT PER TOPOLOGY, AND A TORN-DOWN TENANT DOES NOT ANNOUNCE
+  ITSELF HERE. The slave slot defaulted to test1mspslvintctrr3rq855 (HOGYM) until 2026-08-27, and
+  HOGYM's hosting was torn down on 2026-08-26. That did NOT break the run, and that is the entire
+  problem: this driver keeps desired state in a LOCAL SQL Express scratch db and reads the engine
+  identity from the tenant's OWN vault -- both survive a teardown -- so it never touches the
+  tenant's Azure stack, and it would have gone on reporting a green "managed slave verified"
+  against a tenant with no PIM stack on it. The green would have been true about the DIRECTORY and
+  false about the CLAIM, which is the harder kind of wrong to notice.
+  Repointed to test2mspslvintctrr3gp185 (LEGYM) -- the only managed tenant left, and the same
+  scenario slot (msp-slave / internal / centralhosted / ring3).
+  🪤 Before changing a default here, ask what makes that tenant an instance of the topology it is
+  standing in for, and confirm THAT is still true. "The run came back green" does not answer it.
 
 .PARAMETER IncludeDestructive
   Pass through to the matrix: also run the "deliberately ON" half of the destructive family.
@@ -47,7 +60,8 @@
 #>
 [CmdletBinding()]
 param(
-    [string[]]$Environments = @('test1comr2xx391','test1mspmstintctrr2wa678','test1mspslvintctrr3rq855'),
+    # slave slot repointed HOGYM(rq855) -> LEGYM(gp185) 2026-08-27, TEST-32 -- see .PARAMETER Environments.
+    [string[]]$Environments = @('test1comr2xx391','test1mspmstintctrr2wa678','test2mspslvintctrr3gp185'),
     [switch]$IncludeDestructive,
     [switch]$CleanupOnly,
     [switch]$KeepObjects,
@@ -78,6 +92,26 @@ foreach ($e in $Environments) {
         Db = "PimMatrixTest_$tok"
     }
 }
+# ---- TEST-32: every environment must still BE the topology it stands in for ----------------
+# 🔴 THE HAZARD, RESTATED SO IT IS NOT LOST: none of the resolution above touches the tenant's
+# AZURE STACK. Config file, local SQL Express db, the tenant's own vault and an engine cert -- all
+# four outlive a teardown, which is why HOGYM kept reporting a green "managed slave verified" after
+# its hosting was removed. The header note asked a HUMAN to confirm the claim when editing a
+# default; this asserts it every run, from estate-topology.json.
+. (Join-Path $here '_PimEstateTopology.ps1')
+$claims = @(Get-PimEstateTopologyClaims)
+foreach ($t in $targets) {
+    $c = @($claims | Where-Object { "$($_.env)" -eq $t.Env })
+    if (@($c).Count -ne 1) {
+        # An UNDECLARED environment is refused, not waved through. Silently allowing one would
+        # reopen the hole for exactly the tenant nobody wrote a claim for.
+        Write-Host ("TOPOLOGY CLAIM MISSING for '{0}' -- add it to tests\live\estate-topology.json. Refusing: an environment with no declared topology cannot be verified to still be one." -f $t.Env) -ForegroundColor Red
+        exit 2
+    }
+    $t | Add-Member -NotePropertyName Claim -NotePropertyValue $c[0] -Force
+}
+Write-Host ("  topology claims: {0} declared, {1} matched" -f @($claims).Count, @($targets).Count) -ForegroundColor DarkGray
+
 Head "LIVE FUNCTIONAL MATRIX -- $($targets.Count) environment(s)"
 foreach ($t in $targets) { Write-Host ("  {0,-26} tenant={1}  store={2}" -f $t.Env, $t.TenantId, $t.Db) }
 # Narrow by construction: exactly the tenants named, so the matrix cannot be pointed anywhere else.
@@ -98,6 +132,40 @@ foreach ($t in $targets) {
         }
         $common = @{ TenantId = $t.TenantId; ClientId = $cid; CertThumbprint = $thb
                      SqlServer = $SqlServer; SqlDatabase = $t.Db }
+
+        # ---- TEST-32: confirm the CLAIM before believing the results -----------------------
+        # This is the only step that reaches into the tenant's SUBSCRIPTION, which is the thing a
+        # teardown actually removes. Everything above it survived HOGYM's teardown intact.
+        # 🔒 Not-observed is NOT satisfied: if the probe cannot answer, the environment is refused
+        # rather than run. "We did not look" and "we looked and it is fine" must never produce the
+        # same verdict -- the driver already applies that rule to skipped cases (-FailOnSkip).
+        $observed = @{ azureStackPresent = $null; isManaged = $null; publishesBaseline = $null }
+        if ([bool]$t.Claim.requiresAzureStack) {
+            try {
+                if (-not "$($t.SubscriptionId)".Trim()) { throw "no SubscriptionId in this environment's platform-config.json, so the stack cannot be probed" }
+                Set-AzContext -Subscription $t.SubscriptionId -Tenant $t.TenantId -ErrorAction Stop | Out-Null
+                # A PIM deployment is Container Apps + its environment. Presence of ANY container
+                # app in the subscription is the cheap, deploy-shape-agnostic tell; a torn-down
+                # tenant has none. Deliberately not name-matched: names vary per install, and a
+                # name check that misses would fail a healthy tenant.
+                $apps = @(Get-AzResource -ResourceType 'Microsoft.App/containerApps' -ErrorAction Stop)
+                $observed['azureStackPresent'] = (@($apps).Count -gt 0)
+                Write-Host ("  topology: {0} container app(s) found in the subscription" -f @($apps).Count) -ForegroundColor DarkGray
+            } catch {
+                Write-Host ("  topology: could NOT probe the Azure stack -- $($_.Exception.Message)") -ForegroundColor Yellow
+                $observed['azureStackPresent'] = $null      # explicit: unobserved, not false
+            }
+        }
+        $verdict = Test-PimEstateTopologyClaim -Claim $t.Claim -Observed $observed
+        if (-not $verdict.ok) {
+            Write-Host ("  TOPOLOGY CLAIM FAILED for {0} (claims '{1}'):" -f $t.Env, $verdict.topology) -ForegroundColor Red
+            foreach ($f in @($verdict.failures)) { Write-Host ("    - $f") -ForegroundColor Red }
+            $row.Exit = 2; $row.ReqFail = 1
+            $row.Detail = "topology claim failed: $(@($verdict.failures) -join ' | ')"
+            $results += $row
+            continue
+        }
+        Write-Host ("  topology: '{0}' CONFIRMED ({1})" -f $verdict.topology, (@($verdict.checked) -join ', ')) -ForegroundColor Green
 
         # Always start from a clean tenant. A previous run's marked objects would otherwise be read
         # as "already there" and the create cases would assert against someone else's leftovers.

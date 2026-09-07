@@ -77,6 +77,14 @@ param(
     [string]$WorkspaceId   = $(if ($env:PIM_HOSTED_LA_WORKSPACE)    { $env:PIM_HOSTED_LA_WORKSPACE }    else { '' }),
     [string]$Fqdn          = $(if ($env:PIM_HOSTED_FQDN)            { $env:PIM_HOSTED_FQDN }            else { '' }),
     [string]$EasyAuthAud   = $(if ($env:PIM_HOSTED_EASYAUTH_AUD)    { $env:PIM_HOSTED_EASYAUTH_AUD }    else { '' }),
+    # ðŸ”´ SCOPED. This gate reported its own context as sub 772440e1 -- ANOTHER COMPANY'S
+    # subscription -- and then queried Log Analytics there, found no rows for ca-pim-manager, and
+    # failed as "no boot logs". That reads like a broken Manager and is a wrong-tenant lookup.
+    # Third tool in one session with this defect (SEC-12, the TEST-09 drift gate, the deploy
+    # script): an ambient identity standing in for an explicit one. It matters most HERE, because
+    # under 7a a gate that could not RUN blocks the release -- so an unscoped lookup does not just
+    # mislead, it stops the deploy.
+    [string]$SubscriptionId = $(if ($env:PIM_SUBSCRIPTION_ID) { $env:PIM_SUBSCRIPTION_ID } else { '' }),
     [string]$SessionToken  = $(if ($env:PIM_HOSTED_SESSION_TOKEN)   { $env:PIM_HOSTED_SESSION_TOKEN }   else { '' }),
     [int]$LookbackMinutes  = 90,
     # TEST-05: run as a RELEASE GATE, where a self-skip is a FAILURE.
@@ -94,6 +102,19 @@ param(
     [switch]$AsReleaseGate = $([bool]("$($env:PIM_HOSTED_SMOKE_REQUIRE)".Trim() -in @('1','true','yes')))
 )
 $ErrorActionPreference = 'Stop'
+# 🔴 THE GUARDED az SHADOW -- and this file needs it MORE than the deploy scripts do, because
+# here the damage is silent. Under $ErrorActionPreference='Stop' PowerShell 5.1 makes any write to
+# az's stderr terminating, and az writes ordinary WARNINGS there (see _PimAz.ps1). The very first
+# az call below is `try { $acct = az account show ... } catch {}` -- so on a host whose az config
+# dir has extensions installed, a warning would throw, be swallowed, leave $acct null, and this
+# gate would report "az not logged in" and SKIP. 🪤 A SKIP is not a pass (CLAUDE.md §7a), but it is
+# also not a failure, so the deploy would sail past the one check that proves the GUI still works.
+# The internal-prod update runs on exactly such a profile.
+. (Join-Path $PSScriptRoot '..\..\tools\setup\_PimAz.ps1')
+# Spliced into every az invocation below. Empty => ambient, which the banner already prints, so a
+# wrong-tenant run is at least visible rather than silent.
+$smokeSub = @()
+if ("$SubscriptionId".Trim()) { $smokeSub = @('--subscription', "$SubscriptionId".Trim()) }
 $pass=0; $fail=0; $skip=0
 $script:skipReasons = New-Object System.Collections.Generic.List[string]
 $script:naReasons   = New-Object System.Collections.Generic.List[string]
@@ -185,24 +206,94 @@ if (-not $acct) {
     S 'hosted smoke' 'az not logged in (az login)'
     Write-PimSmokeResult; if ($fail) { exit 1 } else { exit 0 }
 }
-Write-Host ("  az context: {0} / sub {1}" -f $acct.user.name, $acct.id) -ForegroundColor DarkGray
+# 🪤 REPORT THE SUBSCRIPTION THE QUERIES ACTUALLY USE, not the ambient one. After the queries were
+# scoped, this banner still printed the AMBIENT context -- so a correct run advertised another
+# company's subscription while quietly reading the right one. A status line that disagrees with
+# what the tool did is worse than no status line: it is the evidence somebody will reason from.
+$ctxSub = if ("$SubscriptionId".Trim()) { "$SubscriptionId".Trim() + ' (explicit)' } else { "$($acct.id) (ambient default)" }
+Write-Host ("  az context: {0} / sub {1}" -f $acct.user.name, $ctxSub) -ForegroundColor DarkGray
 
 # =============================================================================
 # A. Container App OWN boot logs (Log Analytics -- ContainerAppConsoleLogs_CL)
 #    Asserts the startup decisions: [store] SQL mode + render mode = SQL (not static).
 # =============================================================================
+# 🔴 TEST-16 -- THE WORKSPACE WAS AN UNCHECKED GUID, AND THE WRONG ONE READS AS HEALTHY.
+# -WorkspaceId was whatever the caller (or PIM_HOSTED_LA_WORKSPACE) said, with nothing
+# asserting it is the workspace THIS app writes to. Measured on the 2.4.259 roll: the GUID in
+# use pointed at 'workspace-rgautomateitmfnpr…' while the Container Apps environment logs to
+# 'law-pim-mfnpr'. The wrong workspace still returned ca-pim-manager rows -- from OLD revisions
+# -- so all six boot-log assertions PASSED while describing a container that had not run for
+# days, and the version read v2.4.245 on a 2.4.259 deploy.
+# 🔑 THAT is what I first recorded as "Log Analytics lag". It was not lag; it was the wrong
+#    source entirely, and lag was the innocent explanation that fit the symptom.
+# Two consequences, both handled here:
+#   1) DERIVE the workspace from the Container Apps environment when the caller did not pin
+#      one -- the environment's own appLogsConfiguration is the only authority on where these
+#      logs land, and it costs two read-only calls.
+#   2) Judge FRESHNESS against the ACTIVE REVISION (below), so rows that predate this deploy
+#      can never be asserted as if they described it.
+if (-not "$WorkspaceId".Trim()) {
+    try {
+        $envId = az containerapp show @smokeSub -n $App -g $ResourceGroup --query properties.environmentId -o tsv 2>$null
+        if ("$envId".Trim()) {
+            $derivedWs = az containerapp env show --ids "$("$envId".Trim())" `
+                --query properties.appLogsConfiguration.logAnalyticsConfiguration.customerId -o tsv 2>$null
+            if ("$derivedWs".Trim()) {
+                $WorkspaceId = "$derivedWs".Trim()
+                Write-Host ("  workspace derived from the Container Apps environment (authoritative): {0}" -f $WorkspaceId) -ForegroundColor DarkGray
+            }
+        }
+    } catch { }
+}
+# Resolve the ACTIVE revision + when it was created BEFORE reading logs: without it there is no
+# way to tell "this deploy has not logged yet" (ingestion lag, innocent) from "these rows are a
+# different revision's" (wrong workspace, not innocent).
+$activeRev = $null; $activeRevCreated = $null
+try {
+    # 🪤 Filter on `properties.active` ONLY. The obvious-looking extra clause
+    # `&& properties.runningState=='Running'` matches NOTHING on a healthy app: a scaled app
+    # reports **RunningAtMaxScale**, not 'Running'. The version block below has carried that
+    # same filter for months and has been silently living on its `[?properties.active]`
+    # FALLBACK -- which is why nobody noticed. Written this way, my first cut of this guard
+    # resolved no revision, so it never armed, and the wrong workspace still produced six green
+    # ticks. Caught only by deliberately re-running the gate against the WRONG workspace.
+    $revJson = az containerapp revision list @smokeSub -n $App -g $ResourceGroup `
+        --query "sort_by([?properties.active], &properties.createdTime)[-1].{name:name,created:properties.createdTime}" `
+        -o json 2>$null
+    if ($revJson) {
+        $rev = ($revJson | ConvertFrom-Json)
+        if ($rev -and "$($rev.name)".Trim()) { $activeRev = "$($rev.name)".Trim() }
+        if ($rev -and "$($rev.created)".Trim()) {
+            # 🪤 DateTimeOffset -> .UtcDateTime, on BOTH sides of the later comparison. az returns
+            # '…T18:34:08+00:00' and Log Analytics returns '…T18:48:…Z'; parsed with
+            # [datetime]::Parse these land in DIFFERENT kinds, and on this UTC+2 machine that alone
+            # made a fresh deploy look 106 minutes stale -- a timezone bug wearing the costume of
+            # the very defect this guard was written to catch.
+            try { $activeRevCreated = ([datetimeoffset]::Parse("$($rev.created)", [Globalization.CultureInfo]::InvariantCulture)).UtcDateTime } catch { }
+        }
+    }
+} catch { }
 Write-Host "`n-- A. boot logs (LA workspace $WorkspaceId) --" -ForegroundColor Cyan
 $logRows = @()
-$kql = @"
-ContainerAppConsoleLogs_CL
-| where TimeGenerated > ago(${LookbackMinutes}m)
-| where ContainerAppName_s == '$App' or ContainerName_s == '$App'
-| project TimeGenerated, Log_s
-| order by TimeGenerated desc
-| take 4000
-"@
+# 🔴 TEST-16 -- ONE LINE, DELIBERATELY. Do not "tidy" this back into a here-string.
+# On Windows `az` is **az.cmd**, and cmd.exe TRUNCATES an argument at the first newline. A
+# multi-line --analytics-query therefore reached the service as just `ContainerAppConsoleLogs_CL`
+# and every stage after it -- the 90-minute window, the app filter, the projection, the row cap
+# -- was silently DISCARDED. Measured on 2026-08-30: the "last 90 minutes of ca-pim-manager"
+# read returned 119,894 rows spanning the full retention of EVERY app and job in the workspace,
+# with all 24 columns present despite the `project`, and a `take 4000` that plainly did not cap.
+# 🔑 It failed OPEN, not shut: a broader result set still answers, so six assertions went green
+#    over logs that were never scoped to this app or this deploy. A filter that is silently
+#    dropped is worse than one that errors -- nothing in the output looked wrong.
+# The whole query on ONE line survives cmd.exe intact; KQL does not care.
+$kql = ("ContainerAppConsoleLogs_CL" +
+        " | where TimeGenerated > ago(${LookbackMinutes}m)" +
+        " | where ContainerAppName_s == '$App' or ContainerName_s == '$App'" +
+        " | project TimeGenerated, Log_s" +
+        " | order by TimeGenerated desc" +
+        " | take 4000")
 try {
-    $raw = az monitor log-analytics query --workspace $WorkspaceId --analytics-query $kql -o json 2>$null
+    $raw = az monitor log-analytics query @smokeSub --workspace $WorkspaceId --analytics-query $kql -o json 2>$null
     if ($raw) { $logRows = @($raw | ConvertFrom-Json) }
 } catch { }
 $logText = ($logRows | ForEach-Object { "$($_.Log_s)" }) -join "`n"
@@ -211,6 +302,43 @@ if (-not $logRows -or $logRows.Count -eq 0) {
     S 'boot-log assertions' "no ContainerAppConsoleLogs_CL rows for '$App' in last ${LookbackMinutes}m (workspace access? app name? deployed?)"
 } else {
     Write-Host ("  pulled {0} log rows" -f $logRows.Count) -ForegroundColor DarkGray
+    # TEST-16 -- do these rows describe THIS deploy, or an old one?
+    # The separation is the 30-minute threshold: LA ingestion lag is MINUTES, so rows whose
+    # NEWEST entry predates the active revision by more than half an hour are not late -- they
+    # are somebody else's. Lag must stay innocent (failing a healthy deploy is the exact
+    # anti-pattern TEST-15 was raised for), while a wrong workspace must never assert.
+    $bootRowsStale = $false
+    $newestRow = $null
+    try {
+        $newestRow = ($logRows | ForEach-Object {
+            # 🪤 The TWO sources carry time DIFFERENTLY and each needs its own handling:
+            #   az revision createdTime -> '2026-08-30T18:34:08+00:00'  (explicit offset)
+            #   LA TimeGenerated        -> '08/30/2026 18:52:16'        (UTC, but UNZONED)
+            # DateTimeOffset on the unzoned one assumes LOCAL, which on this UTC+2 machine moved
+            # the logs two hours into the past and made a fresh deploy look stale. AssumeUniversal
+            # is what says "this string is already UTC"; AdjustToUniversal keeps it that way.
+            try { [datetime]::Parse("$($_.TimeGenerated)", [Globalization.CultureInfo]::InvariantCulture,
+                    ([Globalization.DateTimeStyles]::AssumeUniversal -bor [Globalization.DateTimeStyles]::AdjustToUniversal)) } catch { }
+        } | Sort-Object -Descending | Select-Object -First 1)
+    } catch { }
+    if ($newestRow -and $activeRevCreated) {
+        $behindMin = [math]::Round(($activeRevCreated - $newestRow).TotalMinutes, 1)
+        Write-Host ("  newest row {0:yyyy-MM-dd HH:mm}Z; active revision '{1}' created {2:yyyy-MM-dd HH:mm}Z" -f $newestRow, $activeRev, $activeRevCreated) -ForegroundColor DarkGray
+        if ($behindMin -gt 30) {
+            $bootRowsStale = $true
+            Write-Host ("  ! the newest row is {0} minutes OLDER than the running revision -- these logs are not this deploy's." -f $behindMin) -ForegroundColor Red
+            Write-Host ("    Almost always the WRONG WORKSPACE: pass -WorkspaceId for the workspace this Container Apps") -ForegroundColor DarkGray
+            Write-Host ("    environment writes to, or omit it and let the gate derive it from the environment.") -ForegroundColor DarkGray
+        }
+    }
+}
+if ($logRows -and $logRows.Count -gt 0 -and $bootRowsStale) {
+    # Not a pass and not a silent skip: the layer did not run, and in -AsReleaseGate mode S()
+    # already converts that into a failure. Asserting these six against another revision's logs
+    # is how a stale source produces six green ticks about a container that is not running.
+    S 'boot-log assertions' "the workspace's newest '$App' row predates the running revision by more than 30 minutes -- these are an older revision's logs (wrong workspace?), so the startup assertions would describe a container that is not running"
+}
+if ($logRows -and $logRows.Count -gt 0 -and -not $bootRowsStale) {
     # 1 + 5: store backend is SQL, no CSV/static fallback.
     T 'boot log shows [store] SQL mode'                 ($logText -match '\[store\]\s*SQL mode')
     T 'boot log does NOT show CSV/static store fallback' ($logText -notmatch '\[store\]\s*CSV mode')
@@ -263,17 +391,14 @@ if (-not $logRows -or $logRows.Count -eq 0) {
     #   after all retries STILL FAILS (Resolve-PimSmokeVersionCheck.Ok=$false), and
     #   absence of any version line is a FAIL, never a silent pass.
 
-    # Discover the ACTIVE revision (100% traffic / running) to scope live logs to it.
-    $activeRev = $null
-    try {
-        $activeRev = az containerapp revision list -n $App -g $ResourceGroup `
-            --query "sort_by([?properties.active && properties.runningState=='Running'], &properties.createdTime)[-1].name" `
-            -o tsv 2>$null
-    } catch {}
-    if ($activeRev) { $activeRev = "$activeRev".Trim() }
+    # The ACTIVE revision was already resolved before section A -- TEST-16's freshness guard
+    # needs it there. Rediscover ONLY if that failed. This block used to carry its own copy of
+    # the query, complete with the `runningState=='Running'` clause that matches nothing on a
+    # scaled app (it reports RunningAtMaxScale); it has therefore been living on the fallback
+    # below for months without anyone noticing, because the fallback works.
     if (-not $activeRev) {
         # Fallback discovery: any active revision (older az / different shape).
-        try { $activeRev = (az containerapp revision list -n $App -g $ResourceGroup --query "[?properties.active].name | [0]" -o tsv 2>$null) } catch {}
+        try { $activeRev = (az containerapp revision list @smokeSub -n $App -g $ResourceGroup --query "[?properties.active].name | [0]" -o tsv 2>$null) } catch {}
         if ($activeRev) { $activeRev = "$activeRev".Trim() }
     }
 
@@ -293,7 +418,7 @@ if (-not $logRows -or $logRows.Count -eq 0) {
         param($attempt)
         if ($attempt -gt 1) {
             try {
-                $r2 = az monitor log-analytics query --workspace $WorkspaceId --analytics-query $kql -o json 2>$null
+                $r2 = az monitor log-analytics query @smokeSub --workspace $WorkspaceId --analytics-query $kql -o json 2>$null
                 if ($r2) { $rows2 = @($r2 | ConvertFrom-Json); return (($rows2 | ForEach-Object { "$($_.Log_s)" }) -join "`n") }
             } catch {}
         }
@@ -319,7 +444,14 @@ if (-not $logRows -or $logRows.Count -eq 0) {
     }
 
     if ($verRes.Found) { Write-Host ("  served version: v{0} (expected v{1})" -f $verRes.Found, $ExpectedVersion) -ForegroundColor DarkGray }
-    T ("served Manager version == VERSION ({0})" -f $verRes.Reason) ($verRes.Ok)
+    # 🔴 TEST-15 -- DO NOT ASSERT HERE. This reading can come from the Log Analytics FALLBACK,
+    # which lags ingestion and has repeatedly returned a version several releases old. On
+    # 2026-08-30 it failed THREE healthy deploys in a row: it reported v2.4.253 while the live
+    # HTTP probe in section B read v2.4.258 off the running app and passed.
+    # 🔑 A STALE SOURCE MUST NOT OVERRULE A LIVE ONE. The verdict is deferred to the end, where
+    # both readings exist, and the LIVE one wins when it was obtained. Section B has not run
+    # yet at this point, so the assertion cannot be made here at all.
+    $script:VerBoot = $verRes
 }
 
 # =============================================================================
@@ -329,17 +461,70 @@ Write-Host "`n-- B. live HTTP (Easy Auth) --" -ForegroundColor Cyan
 
 # Resolve the FQDN if not supplied (Container App ingress).
 if (-not $Fqdn) {
-    try { $Fqdn = (az containerapp show -n $App -g $ResourceGroup --query properties.configuration.ingress.fqdn -o tsv 2>$null) } catch {}
-    if (-not $Fqdn) { try { $Fqdn = (az webapp show -n $App -g $ResourceGroup --query defaultHostName -o tsv 2>$null) } catch {} }
+    # BUG-102: @smokeSub, like every other az call here. Resolving the FQDN from the ambient
+    # context finds the app in whatever directory happens to be default -- or, worse, finds a
+    # SIMILARLY NAMED app in another tenant and probes that instead.
+    try { $Fqdn = (az containerapp show @smokeSub -n $App -g $ResourceGroup --query properties.configuration.ingress.fqdn -o tsv 2>$null) } catch {}
+    if (-not $Fqdn) { try { $Fqdn = (az webapp show @smokeSub -n $App -g $ResourceGroup --query defaultHostName -o tsv 2>$null) } catch {} }
 }
 
-if (-not $EasyAuthAud) {
+# 🔴 BUG-126 -- IS THIS DEPLOYMENT REACHABLE OVER HTTP FROM HERE *BY DESIGN*?
+# PIM's required placement is its own VNet with NO public inbound. On that topology the Container
+# Apps FQDN resolves only INSIDE the VNet, so from a deploy host outside it there is no HTTP probe
+# to make -- and §7a's "a skip is not a pass" turned that into a FAILED nightly update, forever, on
+# a healthy deployment. Measured 2026-09-04 on the master: 7 of 8 assertions passed and the run
+# still exited 1, every night. A gate that cries wolf nightly is one nobody reads, which is the
+# same "emailed and ignored" outcome rule 7b exists to prevent -- reintroduced by a gate.
+#
+# 🔒 THIS IS NOT "A SKIP IS A PASS". Two things are POSITIVELY VERIFIED before the layer is
+# downgraded, and both come from Azure or the network -- never from a probe that merely failed:
+#   1. the Container Apps environment really is vnetConfiguration.internal = true, and
+#   2. the FQDN really does not resolve from this host.
+# Only both together mean "no flag or credential can make this run", which is exactly the bar N()
+# documents for NOT-APPLICABLE. If the environment is EXTERNAL, or the name resolves (i.e. the gate
+# is being run from inside the VNet, which is the right way to run it), nothing changes and an
+# unrunnable probe is still a hard failure below.
+#
+# 🪤 And the downgrade is still conditional: N() degrades to S() -- a hard gate failure -- unless
+# every compensating assertion named here PASSED in this same run. So a genuinely broken Manager
+# still fails the gate; only the ROUTE to proving it changes, never whether it is proven.
+$smokeEnvInternal = $null
+try {
+    $smokeEnvId = (az containerapp show @smokeSub -n $App -g $ResourceGroup --query properties.environmentId -o tsv 2>$null)
+    if ("$smokeEnvId".Trim()) {
+        $smokeEnvInternal = (az containerapp env show @smokeSub --ids "$smokeEnvId" --query properties.vnetConfiguration.internal -o tsv 2>$null)
+    }
+} catch { }
+$smokeFqdnResolves = $false
+if ("$Fqdn".Trim()) {
+    try { $smokeFqdnResolves = ([bool]@([System.Net.Dns]::GetHostAddresses("$Fqdn")).Count) } catch { $smokeFqdnResolves = $false }
+}
+$smokeUnreachableByDesign = (("$smokeEnvInternal".Trim() -ieq 'true') -and (-not $smokeFqdnResolves))
+
+if ($smokeUnreachableByDesign) {
+    N 'live HTTP probes' `
+      "the Container Apps environment is VNet-INTERNAL and '$Fqdn' does not resolve from this host -- PIM's required placement is no public inbound, so no flag or credential can make an HTTP probe reach it from outside the VNet" `
+      -CoveredBy @(
+          'boot log shows [store] SQL mode',
+          'boot log does NOT show CSV/static store fallback',
+          'boot log: render/page mode is SQL (not static read-only)',
+          'boot log: no "engine SPN context" missing error',
+          'boot log: tenant-list cache not "missing or empty"'
+      )
+} elseif (-not $EasyAuthAud) {
     S 'live HTTP probes' 'no Easy Auth audience (-EasyAuthAud / PIM_HOSTED_EASYAUTH_AUD) -- cannot mint a token through Easy Auth'
 } elseif (-not $Fqdn) {
     S 'live HTTP probes' "could not resolve the app FQDN (-Fqdn / PIM_HOSTED_FQDN); is '$App' in '$ResourceGroup'?"
 } else {
     $aadToken = $null
-    try { $aadToken = (az account get-access-token --resource $EasyAuthAud --query accessToken -o tsv 2>$null) } catch {}
+    # BUG-102: @smokeSub, not the ambient context. A token minted from whatever directory az
+    # happens to default to is a token for the WRONG TENANT -- on mgmt1 that is routinely a
+    # different company's -- and it surfaces here as the misleading "is this identity assigned
+    # to the app?", i.e. as an RBAC problem rather than as the targeting problem it is. Same
+    # shape as SEC-12, where an unscoped fallback returned an ExpertsLiveDK token while we
+    # asked for myfamilynetwork. Every other az call in this script was already scoped; this
+    # one was not.
+    try { $aadToken = (az account get-access-token @smokeSub --resource $EasyAuthAud --query accessToken -o tsv 2>$null) } catch {}
     if (-not $aadToken) {
         S 'live HTTP probes' "could not mint an Easy Auth token for '$EasyAuthAud' (is this identity assigned to the app?)"
     } else {
@@ -383,6 +568,10 @@ if (-not $EasyAuthAud) {
             } else {
                 Write-Host ("  served versionBadge: v{0} (expected v{1})" -f $servedVer, $ExpectedVersion) -ForegroundColor DarkGray
                 T ("/ served versionBadge == VERSION (v{0}, NOT a stale deploy)" -f $ExpectedVersion) ($servedVer -eq $ExpectedVersion)
+                # TEST-15: this reading came from the RUNNING APP over HTTP. It is the
+                # authoritative answer to "what version is deployed", and the deferred
+                # boot-log verdict below defers to it.
+                $script:VerLive = [pscustomobject]@{ Found = $servedVer; Ok = ($servedVer -eq $ExpectedVersion) }
             }
         }
 
@@ -484,6 +673,43 @@ if (-not $EasyAuthAud) {
             S '/api/active-assignments (#47 engine-SPN context)' `
               ("a -SessionToken WAS supplied but the probe did not return 200 (status=$aaStatus) -- this is a real failure, not the Easy Auth construction problem")
         }
+    }
+}
+
+# =============================================================================
+# 🔴 TEST-15 -- THE DEFERRED VERSION VERDICT. Two sources, and the LIVE one wins.
+# =============================================================================
+# The boot-log reading (section A) can come from the Log Analytics FALLBACK, which lags
+# ingestion. On 2026-08-30 it FAILED THREE HEALTHY DEPLOYS in a row -- reporting v2.4.253 while
+# the live HTTP probe read v2.4.258 off the running app and passed. A version several releases
+# old is not a deploy failure, it is a stale read, and the gate could not tell the difference.
+# 🔑 A gate that fails a healthy deployment is worse than no gate: it trains the operator to
+# ignore it, and then it cannot warn about the real thing either. That is TEST-09's lesson
+# again, one layer up.
+# Rules, in order:
+#   1. LIVE HTTP reading exists  -> it decides. The boot log is corroboration; a disagreement
+#                                   is reported as INFORMATION (a stale log), never a failure.
+#   2. No live reading           -> fall back to the boot log, which then decides as before.
+#   3. Neither                   -> FAIL. A gate that could not read the version did not run,
+#                                   and a gate that did not run is not a pass (CLAUDE.md s7a).
+if ($ExpectedVersion) {
+    $live = $script:VerLive
+    $boot = $script:VerBoot
+    if ($live) {
+        if ($boot -and $boot.Found -and ("$($boot.Found)" -ne "$($live.Found)")) {
+            Write-Host ("  note: the boot-log/Log-Analytics reading (v{0}) disagrees with the LIVE served version (v{1}). The LIVE reading decides; the log is behind ingestion, which is expected right after a roll and is NOT a deploy failure (TEST-16 has already ruled out the other explanation -- an older revision's rows from the wrong workspace)." -f $boot.Found, $live.Found) -ForegroundColor DarkYellow
+        }
+        T ("deployed version == VERSION (live reading v{0} is authoritative)" -f $live.Found) ([bool]$live.Ok)
+    } elseif ($boot) {
+        Write-Host '  note: no LIVE reading was obtained -- falling back to the boot-log version, which now decides.' -ForegroundColor DarkYellow
+        T ("deployed version == VERSION (boot-log reading, no live probe available: {0})" -f $boot.Reason) ([bool]$boot.Ok)
+    } else {
+        # 🪤 A SELF-SKIP, not a hard failure -- and the difference matters. An ad-hoc run against
+        # an app that does not exist (an engineer poking at it locally) must still exit 0; only
+        # -AsReleaseGate turns a skip into a failure, which is exactly the convention this script
+        # already uses everywhere else. My first cut asserted $false here and broke TEST-05's
+        # "engineers keep the honest skip" -- caught by the suite that guards this very logic.
+        S 'deployed version == VERSION' 'neither a live nor a boot-log reading could be obtained (app unreachable / no workspace / no Easy Auth audience)'
     }
 }
 

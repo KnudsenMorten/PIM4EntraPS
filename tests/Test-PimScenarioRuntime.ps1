@@ -153,13 +153,36 @@ try {
     $global:PIM_SqlConnectionString = $null
     . $sqlLib
 
-    # 2a) NO scenario set -> behaviour is IDENTICAL to before (ambient default = .\SQLEXPRESS).
+    # 2a) NO scenario and NO configured store -> REFUSE. This assertion used to demand the
+    # opposite (`Server=.\SQLEXPRESS;Integrated`), i.e. it PINNED IN PLACE the very default that
+    # produced two false greens -- BUG-78 (a local default overriding a correct Azure SQL FQDN,
+    # so the live matrix ran against a database nobody deployed) and TEST-32 (local desired state
+    # outliving a tenant teardown, so a torn-down tenant still reported green).
+    # 🔑 A test can hold a defect in place as firmly as code can. This one was doing exactly that,
+    # and it was worded as "behaviour is IDENTICAL to before" -- which is a reason to keep a
+    # behaviour only if the behaviour was right. SQL Express is not a store this product uses
+    # (operator, 2026-08-28), so an unconfigured store is a CONFIGURATION ERROR, said out loud.
     $global:PIM_ActiveScenario = $null
     $global:PIM_SqlServer      = $null
     $env:PIM_SqlServerCentral  = $null
     $env:PIM_SqlServerLocal    = $null
-    $csDefault = Get-PimSqlConnectionString -Database 'PimPlatform'
-    T 'no scenario -> default ambient CS (.\SQLEXPRESS, Integrated)' ($csDefault -match 'Server=\.\\SQLEXPRESS;' -and $csDefault -match 'Integrated Security=SSPI')
+    $refused = ''
+    try { [void](Get-PimSqlConnectionString -Database 'PimPlatform') } catch { $refused = "$($_.Exception.Message)" }
+    T 'no scenario + no store -> REFUSES rather than defaulting to a local database' ($refused -ne '')
+    # The message has to be actionable: name the knob, and say why there is no default. A refusal
+    # nobody can act on gets "fixed" by re-adding the default.
+    T '  ...naming the setting to configure' ($refused -match 'PIM_SqlServer')
+    T '  ...and saying plainly that there is no local default' ($refused -match 'no local default|NO local default')
+    # 🔒 And the fallback must be gone from the SOURCE, not merely unreachable on this path.
+    # 🪤 THE FIRST VERSION OF THIS ASSERT COULD NOT FAIL, and the negative run is the only reason
+    # I know: with the fallback restored, four asserts here went red and this one stayed GREEN.
+    # It used `-match "else\s*\{\s*'\.\\\\SQLEXPRESS'\s*\}"` -- and backslash is NOT a string
+    # escape in PowerShell, so `\\\\` reaches the regex engine as TWO literal backslashes and can
+    # never match the one in `.\SQLEXPRESS`. A negated match that never matches is always true.
+    # This project has recorded the same trap pointing the other way (a source assert failing
+    # against CORRECT code for the same reason); use .Contains() for literal text.
+    T '  ...with no .\SQLEXPRESS default assignment left in the resolver' (
+        -not (Get-Content -LiteralPath $sqlLib -Raw).Contains("else { '.\SQLEXPRESS' }"))
 
     # 2b) explicit -Server still wins (highest precedence, untouched).
     T 'explicit -Server still wins over scenario' ((Get-PimSqlConnectionString -Server 'X\Y' -Database 'D') -match 'Server=X\\Y;')
@@ -209,12 +232,22 @@ try {
     $csS5 = Get-PimSqlConnectionString -Database 'PimPlatform'
     T 'S5 active + central FQDN -> passwordless Azure CS (Encrypt=True, no Integrated)' ($csS5 -match 'Server=tcp:sql-central\.database\.windows\.net' -and $csS5 -match 'Encrypt=True' -and $csS5 -notmatch 'Integrated Security')
 
-    # 2e) in-tenant scenario (S1) -> NO override; ambient default again.
+    # 2e) in-tenant scenario (S1) -> NO scenario override, so the AMBIENT store is used.
+    # The point of this case is that S1 does not impose a server of its own; it is asserted with
+    # an ambient server SET, because "no override" and "no store at all" are different claims and
+    # only the first is what S1 means. (It previously asserted the ambient default was
+    # `.\SQLEXPRESS` -- which tested the removed default, not the scenario behaviour.)
     $global:PIM_ActiveScenario = 'S1'
     $env:PIM_SqlServerCentral  = $null
-    $global:PIM_SqlServer      = $null
+    $global:PIM_SqlServer      = 'sql-ambient.database.windows.net'
     $csS1 = Get-PimSqlConnectionString -Database 'PimPlatform'
-    T 'S1 (in-tenant) active -> ambient default (no scenario override)' ($csS1 -match 'Server=\.\\SQLEXPRESS;')
+    T 'S1 (in-tenant) active -> ambient store wins (no scenario override)' ($csS1 -match 'Server=tcp:sql-ambient\.database\.windows\.net')
+    # ...and with nothing ambient either, S1 refuses like every other unconfigured path rather
+    # than inventing a local store.
+    $global:PIM_SqlServer = $null
+    $refusedS1 = ''
+    try { [void](Get-PimSqlConnectionString -Database 'PimPlatform') } catch { $refusedS1 = "$($_.Exception.Message)" }
+    T '  ...and S1 with NO ambient store refuses too (no local invention)' ($refusedS1 -match 'PIM_SqlServer')
 } finally {
     $global:PIM_ActiveScenario      = $savedActive
     $global:PIM_SqlServer           = $savedServer

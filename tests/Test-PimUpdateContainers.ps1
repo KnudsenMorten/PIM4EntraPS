@@ -167,6 +167,141 @@ $dap = Join-Path $here2 'tools\setup\Invoke-PimDeployAll.ps1'
 $dsrc = if (Test-Path -LiteralPath $dap) { [System.IO.File]::ReadAllText($dap) } else { '' }
 Assert "Invoke-PimDeployAll forwards -TickJobName into the code step" ($dsrc -match '\$upd[\s\S]{0,400}?-TickJobName \$TickJobName')
 
+# --- BUG-128: a CAUGHT, non-fatal native failure must not leave a fatal exit code -------
+# The image built fine; the digest lookup after it failed (non-fatal, caught, warned). But the
+# az call inside the lookup left $LASTEXITCODE = -1, and Invoke-PimUpdate judges THE BUILD by
+# that same variable -- so a successful build was reported as "exit -1" and the deploy aborted.
+# Observed on the internal prod environment 2026-09-05 (PIM-Update-mfnpr-internal, lastResult=1).
+Write-Host "=== BUG-128: a warning must not become a release failure ===" -ForegroundColor Cyan
+$bpm  = Join-Path $here2 'tools\setup\Build-PimManagerImage.ps1'
+$bsrc = if (Test-Path -LiteralPath $bpm) { [System.IO.File]::ReadAllText($bpm) } else { '' }
+$ipu  = Join-Path $here2 'tools\setup\Invoke-PimUpdate.ps1'
+$isrc = if (Test-Path -LiteralPath $ipu) { [System.IO.File]::ReadAllText($ipu) } else { '' }
+
+Assert 'Build-PimManagerImage: the digest catch CLEARS $LASTEXITCODE' `
+    ($bsrc -match "could not resolve the built image's digest[\s\S]{0,600}?\`$global:LASTEXITCODE = 0")
+Assert '  ...and the clear sits in the DIGEST catch (warn, comments, then the clear)' `
+    ($bsrc -match "could not resolve the built image's digest[^\r\n]*\r?\n(?:[ \t]*#[^\r\n]*\r?\n)*[ \t]*\`$global:LASTEXITCODE = 0")
+Assert 'Invoke-PimUpdate: clears $LASTEXITCODE BEFORE invoking the builder' `
+    ($isrc -match "\`$global:LASTEXITCODE = 0[\s\S]{0,200}?& \`$builder")
+Assert "  ...and STILL checks the builder's exit code afterwards" `
+    ($isrc -match "& \`$builder[\s\S]{0,300}?LASTEXITCODE -ne 0[\s\S]{0,80}?failed \(exit")
+
+# --- BUG-129: an az WARNING on stderr must not abort the update ---------------------------
+# Same defect CLASS as BUG-128 one step further out. PowerShell 5.1 turns ANY write to a native
+# command's stderr into a NativeCommandError, and the whole update path runs with
+# $ErrorActionPreference='Stop' -- so a warning from az aborts the deploy. Measured on internal
+# prod 2026-09-05: the image built and pushed, then container-app DISCOVERY died on
+#   "...cryptography/hazmat/backends/openssl/backend.py:8: UserWarning: You are using
+#    cryptography on a 32-bit Python on a 64-bit Windows Operating System."
+#   -> outcome=failure (built=True deployed=False)
+# 🪤 `2>$null` does NOT prevent it (all five call shapes were measured throwing), and it only
+# bites hosts whose az config dir has extensions installed -- which is why the two customer
+# environments went green nightly while internal prod could not deploy at all.
+Write-Host ""
+Write-Host "=== BUG-129: an az stderr WARNING must not be fatal ===" -ForegroundColor Cyan
+$azGuard = Join-Path $here2 'tools\setup\_PimAz.ps1'
+Assert 'the guarded az shadow (_PimAz.ps1) ships' (Test-Path -LiteralPath $azGuard)
+$gsrc = if (Test-Path -LiteralPath $azGuard) { [System.IO.File]::ReadAllText($azGuard) } else { '' }
+Assert '  ...it neutralises $ErrorActionPreference around the native call' ($gsrc -match "ErrorActionPreference = 'Continue'")
+Assert '  ...it restores the caller''s preference afterwards'              ($gsrc -match 'finally\s*\{[\s\S]{0,200}?ErrorActionPreference = \$prevEA')
+Assert '  ...and success is still decided by the EXIT CODE alone'          ($gsrc -match '\$global:LASTEXITCODE = \$code')
+# 🪤 The shadow must declare NO parameters: a param()/[CmdletBinding()] makes PowerShell bind
+# az's short flags, and `-o tsv` then dies as "the parameter name 'o' is ambiguous".
+Assert '  ...the shadow declares no parameters (or -o binds as -OutVariable)' `
+    ($gsrc -match '(?m)^function az \{ Invoke-PimAz @args \}')
+Assert '  ...and it resolves the real CLI by -CommandType Application (no recursion)' `
+    ($gsrc -match "-CommandType Application")
+
+# Every entry point that calls az must load the guard BEFORE its first az call.
+foreach ($pair in @(
+    @{ Name = 'Update-PimContainers'; Path = 'tools\setup\Update-PimContainers.ps1' },
+    @{ Name = 'Invoke-PimUpdate';     Path = 'tools\setup\Invoke-PimUpdate.ps1' },
+    @{ Name = 'Build-PimManagerImage';Path = 'tools\setup\Build-PimManagerImage.ps1' },
+    @{ Name = '_PimSetupShared';      Path = 'tools\setup\_PimSetupShared.ps1' },
+    # 🔴 The RELEASE GATE itself. Here the class is worse than a failed deploy: its first az call is
+    # inside `try { } catch {}`, so a swallowed warning leaves the account unread and the gate
+    # reports "az not logged in" and SKIPS -- not a pass, not a failure, and the deploy proceeds
+    # without the one check that proves the hosted GUI still works.
+    @{ Name = 'Test-PimManagerHostedSmoke'; Path = 'tests\live\Test-PimManagerHostedSmoke.ps1' },
+    @{ Name = 'Invoke-PimSyncAutomateIT';   Path = 'tools\setup\Invoke-PimSyncAutomateIT.ps1' },
+    @{ Name = 'Invoke-PimDeployAll';        Path = 'tools\setup\Invoke-PimDeployAll.ps1' },
+    @{ Name = 'Test-PimDeployedVersionDrift'; Path = 'tools\setup\Test-PimDeployedVersionDrift.ps1' }
+)) {
+    $p = Join-Path $here2 $pair.Path
+    $s = if (Test-Path -LiteralPath $p) { [System.IO.File]::ReadAllText($p) } else { '' }
+    # 🪤 Match the FILE NAME, not one quoting style: the entry points use `. "$here\_PimAz.ps1"`
+    # and _PimSetupShared uses `. (Join-Path $PSScriptRoot '_PimAz.ps1')`. The first version of
+    # this assertion hard-coded the single quote and reported three correctly-wired files as
+    # unwired -- a guard that fails on formatting teaches you to ignore it.
+    $loadMatch = [regex]::Match($s, '_PimAz\.ps1')
+    $loadIdx   = if ($loadMatch.Success) { $loadMatch.Index + 1 } else { -1 }
+    # First az call on a CODE line. 🪤 Blank out BLOCK comments too, not just `#` lines: every
+    # one of these files opens with a <# .DESCRIPTION #> that talks about `az acr build` and
+    # `az containerapp update` in prose. Scanning raw text put the "first az call" in the help
+    # header, so three correctly-wired files failed. Replace with newlines so offsets stay true.
+    $sCode = [regex]::Replace($s, '(?s)<#.*?#>', { param($m) ($m.Value -replace '[^\r\n]', ' ') })
+    $firstAz = -1; $offset = 0
+    foreach ($line in ($sCode -split "`n")) {
+        if ($line.TrimStart() -notmatch '^#' -and $line -match '(?<![\w-])az\s+(account|containerapp|acr|tag|login|group|role|ad|deployment|network|sql|monitor|storage|keyvault|extension|version|--version)') {
+            $firstAz = $offset; break
+        }
+        $offset += $line.Length + 1
+    }
+    Assert ("{0}: loads _PimAz.ps1" -f $pair.Name) ($loadIdx -gt 0)
+    Assert ("  ...BEFORE its first az call" -f $pair.Name) ($firstAz -lt 0 -or ($loadIdx -gt 0 -and $loadIdx -lt $firstAz))
+}
+
+# --- and now EXECUTE it. A source match proves the guard is written, not that it works. ------
+# Runs in a CHILD process at $ErrorActionPreference='Stop' with a fake `az` on PATH that writes
+# to stderr and exits 0 -- the exact shape that killed the deploy. No Azure, no network.
+Write-Host "  -- executing the guard against a stderr-writing fake az --" -ForegroundColor DarkGray
+$azProbe = Join-Path ([System.IO.Path]::GetTempPath()) ("pimazprobe-" + [guid]::NewGuid().ToString('N').Substring(0,8))
+try {
+    [void](New-Item -ItemType Directory -Path $azProbe -Force)
+    # A .cmd, because the real az is az.cmd and that is what Get-Command resolves.
+    @'
+@echo off
+echo WARNING: this command has been altered by an extension 1>&2
+echo UserWarning: you are using cryptography on a 32-bit Python 1>&2
+if "%1"=="fail" exit /b 7
+echo ca-pim-manager
+exit /b 0
+'@ | Set-Content -LiteralPath (Join-Path $azProbe 'az.cmd') -Encoding ASCII
+
+    $probe = Join-Path $azProbe 'probe.ps1'
+    @'
+param([string]$Guard)
+$ErrorActionPreference = 'Stop'
+. $Guard
+$ok = 'unset'; $code = 'unset'; $failCode = 'unset'
+try {
+    # the exact discovery shape from Update-PimContainers.ps1
+    $d = @(az containerapp list --query "[].name" -o tsv 2>$null | ForEach-Object { "$_".Trim() } | Where-Object { $_ })
+    $ok = ($d -join ',')
+    $code = $LASTEXITCODE
+} catch { $ok = "THREW: $($_.Exception.Message)" }
+try { $null = az fail -o tsv 2>$null; $failCode = $LASTEXITCODE } catch { $failCode = "THREW: $($_.Exception.Message)" }
+Write-Output ("PROBE " + ([pscustomobject]@{ Out = "$ok"; Code = "$code"; FailCode = "$failCode" } | ConvertTo-Json -Compress))
+'@ | Set-Content -LiteralPath $probe -Encoding UTF8
+
+    $psExe = [System.Diagnostics.Process]::GetCurrentProcess().MainModule.FileName
+    $prevPath = $env:PATH
+    $env:PATH = $azProbe + ';' + $env:PATH        # the fake az must win over the real one
+    $raw = & $psExe -NoProfile -ExecutionPolicy Bypass -File $probe -Guard $azGuard 2>&1
+    $env:PATH = $prevPath
+    $line = @($raw | ForEach-Object { "$_" } | Where-Object { $_ -like 'PROBE {*' }) | Select-Object -Last 1
+    $res  = if ($line) { $line.Substring(6) | ConvertFrom-Json } else { $null }
+
+    Assert 'the guard SURVIVES an az that writes warnings to stderr (executed, not matched)' `
+        ($null -ne $res -and $res.Out -eq 'ca-pim-manager')
+    if ($res -and $res.Out -ne 'ca-pim-manager') { Write-Host ("        got: " + $res.Out) -ForegroundColor DarkYellow }
+    Assert '  ...and reports exit 0 for that call'            ($null -ne $res -and "$($res.Code)" -eq '0')
+    Assert '  ...while a REAL az failure still exits non-zero' ($null -ne $res -and "$($res.FailCode)" -eq '7')
+} finally {
+    Remove-Item -LiteralPath $azProbe -Recurse -Force -ErrorAction SilentlyContinue
+}
+
 Write-Host ""
 Write-Host ("Update-PimContainers honesty (BUG-09): {0} passed, {1} failed" -f $pass, $fail) -ForegroundColor $(if ($fail) { 'Red' } else { 'Green' })
 if ($fail) { exit 1 }

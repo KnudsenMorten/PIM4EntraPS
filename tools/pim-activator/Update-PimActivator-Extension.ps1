@@ -639,6 +639,16 @@ if ($Repack -or $PackOnly) {
         }
         if ($tm.PSObject.Properties.Name -contains 'key') { $tm.key = $TEST_KEY_B64 }
         else { $tm | Add-Member -NotePropertyName key -NotePropertyValue $TEST_KEY_B64 -Force }
+        # 🔴 REWRITE update_url FOR THE TEST CHANNEL TOO -- added with the manifest's update_url
+        # (v1.6.126). Without this the test build ships the RELEASED url, so the TEST extension
+        # would poll updates.xml, whose <app appid> is the RELEASED id. An update manifest that
+        # does not carry your own appid returns no update at all, so the test channel would
+        # silently stop updating -- the exact failure this whole update_url change exists to fix,
+        # reintroduced on the other channel.
+        # $UPDATE_URL is already channel-aware (set to updates-test.xml above), so this stays
+        # correct if either URL ever moves.
+        if ($tm.PSObject.Properties.Name -contains 'update_url') { $tm.update_url = $UPDATE_URL }
+        else { $tm | Add-Member -NotePropertyName update_url -NotePropertyValue $UPDATE_URL -Force }
         ($tm | ConvertTo-Json -Depth 20) | Set-Content (Join-Path $packDir 'manifest.json') -Encoding UTF8
     } else {
         $manifest = Get-Content $manifestPath -Raw | ConvertFrom-Json

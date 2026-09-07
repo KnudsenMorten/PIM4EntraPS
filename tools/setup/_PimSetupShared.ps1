@@ -54,6 +54,13 @@
 # one definition of "what makes a deployed environment reachable and Azure-sighted".
 . (Join-Path (Split-Path -Parent (Split-Path -Parent $PSScriptRoot)) 'engine\_shared\PIM-Reachability.ps1')
 
+# The guarded `az` shadow. Every script that dot-sources this file is az-driven, so the guard
+# belongs here rather than in each of them: az writes ordinary WARNINGS to stderr, and under
+# $ErrorActionPreference='Stop' PowerShell 5.1 makes any such write terminating. See _PimAz.ps1.
+# 🪤 A script that calls az BEFORE dot-sourcing this file is not covered -- Update-PimContainers,
+# Invoke-PimUpdate and Build-PimManagerImage therefore load _PimAz.ps1 themselves, at the top.
+. (Join-Path $PSScriptRoot '_PimAz.ps1')
+
 # Region allow-list. EU-only hosting. France is REFUSED (data-residency).
 # swedencentral added 2026-08-09 (operator decision): the 28-tenant test estate is provisioned
 # there because a FRESH subscription refuses new resources in westeurope/northeurope -- see
@@ -373,15 +380,22 @@ function Resolve-PimAcrImageDigest {
     param(
         [Parameter(Mandatory)][string]$AcrName,
         [Parameter(Mandatory)][string]$Repository,
-        [Parameter(Mandatory)][string]$Tag
+        [Parameter(Mandatory)][string]$Tag,
+        # 🔴 SCOPED, or this resolves against the ambient az context. Measured 2026-08-30: the image
+        # built and pushed fine, then digest resolution looked in another company's subscription, az
+        # prompted for a registry username, and the caller saw "got 'Username:'" -- which reads like
+        # a broken build and is actually a wrong-tenant lookup. The BUG-40 guard below then correctly
+        # refused to deploy by tag, so the failure was SAFE -- but it was diagnosed three layers away
+        # from its cause, which is the cost this parameter removes.
+        [string]$SubscriptionId = $(if ($env:PIM_SUBSCRIPTION_ID) { $env:PIM_SUBSCRIPTION_ID } else { '' })
     )
     $ref = "$Repository`:$Tag"
     # `az acr manifest show-metadata` is the current command; `az acr repository show` is the
     # older one that still ships. Try both before concluding the tag is absent -- an az version
     # difference must not read as "the image was never built".
-    $digest = az acr manifest show-metadata -r $AcrName -n $ref --query digest -o tsv --only-show-errors 2>$null
+    $sa = @(); if ("$SubscriptionId".Trim()) { $sa = @('--subscription', "$SubscriptionId".Trim()) }
     if (-not (Test-PimImageDigest -Digest "$digest".Trim())) {
-        $digest = az acr repository show -n $AcrName --image $ref --query digest -o tsv --only-show-errors 2>$null
+        $digest = az acr repository show @sa -n $AcrName --image $ref --query digest -o tsv --only-show-errors 2>$null
     }
     $digest = "$digest".Trim()
     if (-not (Test-PimImageDigest -Digest $digest)) {

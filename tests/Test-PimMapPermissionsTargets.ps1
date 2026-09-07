@@ -36,7 +36,12 @@ $html = [System.IO.File]::ReadAllText($htmlPath)
 
 # --- A. Static assertions: the column is wired, not a dead view ---------------
 T 'col3 container present (mapCol3)'              ($html -match 'id="mapCol3"')
-T 'col3 header is PERMISSIONS & TARGETS'         ($html -match 'Permissions &amp; Targets')
+# IMP-21 (2026-08-30): the four map headers were renamed to read as one plain sentence
+# ("People -> What they're assigned to -> What that includes -> What it lets them do") because
+# the operator could not read the old product-jargon labels. This assertion tracked the OLD
+# prose; it now tracks the new one. The INTENT is unchanged and still asserted below: the
+# column must be labelled, and its sub-header must still name the concrete target kinds.
+T 'col3 header names what the column answers'    ($html -match 'What it lets them do')
 T 'col3 sub-header lists Entra / AU / Azure'     ($html -match 'Entra &middot; AU &middot; Azure')
 T 'breakdown renderer defined (mapTargetBreakdown)' ($html -match 'function mapTargetBreakdown\(')
 T 'breakdown groups Entra ID roles'              ($html -match "'entra-role': 'Entra ID roles'")
@@ -183,3 +188,17 @@ try {
 
 Write-Host ("`n RESULT: {0} pass, {1} fail" -f $pass, $fail) -ForegroundColor $(if ($fail) { 'Red' } else { 'Green' })
 if ($fail) { exit 1 }
+
+# ---------------------------------------------------------------------------
+# 🔴 REGRESSION GUARD -- v2.4.254 shipped a board with NO VISIBLE LINK LINES.
+# BUG-86 ("wires are stroked over every label") was fixed by moving the wire SVG BEHIND the
+# columns (z-index:0 under a new .map-col z-index:1). The columns are OPAQUE and full-width,
+# so that also hid every wire spanning more than one gutter. The operator opened the release
+# and asked "where are all the link lines". The connections ARE the board.
+# 🔑 Readability is never worth trading the topology for: the wires stay ON TOP, and the noise
+# is handled by faint idle opacity + hover isolation, which hide nothing.
+# These two assertions fail if anyone re-applies that trade.
+$wireCss = ''
+if ($html -match '#mapWires\s*\{[^}]*\}') { $wireCss = $Matches[0] }
+T 'wires render ON TOP of the columns (z-index >= 5)' ($wireCss -match 'z-index:\s*([5-9]|\d{2,})')
+T '.map-col does NOT out-stack the wires'             (-not ($html -match '\.map-col \{[^}]*z-index:'))

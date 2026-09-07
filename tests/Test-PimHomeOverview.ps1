@@ -108,12 +108,21 @@ function Get-FnBody([string]$source, [string]$name) {
 }
 $tierFn = Get-FnBody $srv 'Get-PimDelegationTierLevel'
 $homeFn = Get-FnBody $srv 'Get-PimHomeOverview'
+# §36.3 phase 3 -- the break-glass tile no longer reads a file directly; it goes through the
+# shared-store helper (SQL first, file for local/dev), because the ENGINE reads the override from
+# the store and the Manager must show the same one. Extract that helper too, or the tile silently
+# renders "inactive" here for a reason that has nothing to do with the code under test.
+$emgNameFn = Get-FnBody $srv 'Get-PimEmergencyOverrideStoreName'
+$emgGetFn  = Get-FnBody $srv 'Get-PimManagerEmergencyOverride'
 T 'Get-PimDelegationTierLevel body extracted' ([bool]$tierFn)
 T 'Get-PimHomeOverview body extracted'        ([bool]$homeFn)
+T 'Get-PimManagerEmergencyOverride body extracted' ([bool]$emgGetFn)
 
-if ($tierFn -and $homeFn) {
+if ($tierFn -and $homeFn -and $emgGetFn) {
     Set-StrictMode -Off
     Invoke-Expression $tierFn
+    if ($emgNameFn) { Invoke-Expression $emgNameFn }
+    Invoke-Expression $emgGetFn
     Invoke-Expression $homeFn
 
     # Tier-level parsing from real-shaped signals.

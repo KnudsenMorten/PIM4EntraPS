@@ -60,6 +60,7 @@ foreach ($dep in 'PIM-ApprovalGate.ps1','PIM-Authoring.ps1','PIM-SensitiveAuthor
 
 $src  = [System.IO.File]::ReadAllText($srvPath)
 $html = [System.IO.File]::ReadAllText($htmlPath)
+. (Join-Path $PSScriptRoot '_shared\PimSourceScope.ps1')
 
 # A delegated portal profile: tierMax=1 EXCLUDES Tier-0; manage caps; all services.
 $deleg = [pscustomobject]@{ identity = 'deleg@example.test'; tierMax = 1; services = @('*'); capabilities = @('manage-direct','manage-indirect','assign','assign-admin') }
@@ -188,10 +189,20 @@ if ($addExIdx -ge 0) {
     $addExBlock = $src.Substring($addExIdx, [Math]::Min(700, $src.Length - $addExIdx))
     T 'DENY-path: add-exemption now requires SuperAdmin'        ($addExBlock -match "Test-PimManagerRoleAtLeast -Minimum 'SuperAdmin'")
 }
-# Map "Assign" button gated like the adjacent "Stage removal".
-T 'DENY-path: Map Assign button gated roleAtLeast(Admin) (admin node)'      ($html -match "isServer && roleAtLeast\('Admin'\) && n\.kind === 'admin'")
-T 'DENY-path: Map Assign button gated roleAtLeast(Admin) (role-group node)' ($html -match "isServer && roleAtLeast\('Admin'\) && n\.kind === 'role-group'")
-T 'ALLOW-path: adjacent Stage-removal button keeps its Admin gate (unchanged)' ($html -match "isServer && roleAtLeast\('Admin'\) && mapNodeHasGrant")
+# IMP-17 (2026-08-30): the access map became READ-ONLY. It used to carry "+ Link capability
+# bundle..." and "- Stage removal..." -- write controls on a page whose menu item promises a
+# map -- and these three assertions checked that each of those buttons was Admin-gated.
+# Both buttons are GONE, so the old assertions could only ever fail. The property they existed
+# to protect is now enforced more strongly and is asserted here instead:
+#   1. the map renders NO write control at all (nothing to gate is better than gated),
+#   2. its only action -- the hand-off to the page that owns writes -- is still Admin-gated,
+#   3. that page refuses below Admin, so re-homing the writes did not re-home the gate away.
+# Count is unchanged (3), so the DOC-08/09 assert-count claim for this suite still holds.
+T 'DENY-path: the access map renders NO write control (read-only board)'    (-not ($html -match 'id="mapBtnAssign"') -and -not ($html -match 'id="mapBtnRemove"'))
+T 'DENY-path: the map hand-off to authoring is gated roleAtLeast(Admin)'    ($html -match "isServer && roleAtLeast\('Admin'\) && \(n\.kind === 'admin'")
+# §37.4 -- scoped to renderAuthoring's own body. The old form bounded the reach at 900 characters
+# over a 22633-character function, so it could see 4% of the page it claimed to be about.
+T 'DENY-path: the authoring page (which now owns the writes) refuses below Admin' ((Get-PimSourceJsFunctionBody -Text $html -Name 'renderAuthoring') -match "if \(!roleAtLeast\('Admin'\)\)")
 
 Write-Host ""
 if ($fail) { Write-Host " RESULT: $pass pass, $fail fail" -ForegroundColor Red; exit 1 }

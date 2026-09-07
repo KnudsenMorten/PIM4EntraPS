@@ -29,11 +29,21 @@ T 'pim-manager.html present' (Test-Path -LiteralPath $htmlPath)
 if ($fail) { Write-Host "`n RESULT: $pass pass, $fail fail" -ForegroundColor Red; exit 1 }
 $html = [System.IO.File]::ReadAllText($htmlPath)
 
+# §37.4 -- an assertion about a JS function is scoped to THAT function, never to a guessed window
+# around it. Measured on this file 2026-09-02: the confExempt assertion below carried a
+# 1200-character window over an 1177-character function, so 23 characters of what it "proved"
+# were reading the NEXT function (confDeploy). See tests\_shared\PimSourceScope.ps1.
+. (Join-Path $PSScriptRoot '_shared\PimSourceScope.ps1')
+$jsConfirm = Get-PimSourceJsFunctionBody -Text $html -Name 'pimConfirm'
+$jsForm    = Get-PimSourceJsFunctionBody -Text $html -Name 'pimFormModal'
+$jsExempt  = Get-PimSourceJsFunctionBody -Text $html -Name 'confExempt'
+$jsRevoke  = Get-PimSourceJsFunctionBody -Text $html -Name 'confRevoke'
+
 Write-Host "`n--- Reusable modal helpers ([L2]) ---" -ForegroundColor Cyan
 T "pimConfirm helper defined"                ($html -match 'function pimConfirm\(')
 T "pimFormModal helper defined"              ($html -match 'function pimFormModal\(')
-T "pimConfirm returns a Promise"             ($html -match 'function pimConfirm[\s\S]{0,200}return new Promise')
-T "pimFormModal returns a Promise"           ($html -match 'function pimFormModal[\s\S]{0,200}return new Promise')
+T "pimConfirm returns a Promise"             ($jsConfirm -match 'return new Promise')
+T "pimFormModal returns a Promise"           ($jsForm -match 'return new Promise')
 T "pimFormModal validates required fields"   ($html -match 'f\.required && !val')
 T "pimFormModal cancels on Escape (null)"    ($html -match "e\.key === 'Escape'\) done\(null\)")
 T "pimConfirm supports a danger style"        ($html -match "danger \? 'danger' : 'primary'")
@@ -42,12 +52,12 @@ Write-Host "`n--- Conformance actions use modals, not raw confirm/prompt ([L2]) 
 # The four conformance interactions are wired to the in-app modals.
 T "approve draft uses pimConfirm"            ($html -match "Approve draft template[\s\S]{0,200}/api/conformance/approve")
 T "deploy live uses pimConfirm (danger)"     ($html -match "title: 'Deploy live'[\s\S]{0,260}danger: true")
-T "exempt GRANT uses pimFormModal"           ($html -match "async function confExempt[\s\S]{0,300}pimFormModal\(")
+T "exempt GRANT uses pimFormModal"           ($jsExempt -match 'pimFormModal\(')
 T "exempt modal collects a reason field"     ($html -match "name: 'reason'[\s\S]{0,120}required: true")
 T "exempt modal collects a mandatory expiry" ($html -match "name: 'expiry'[\s\S]{0,160}required: true")
 T "exempt expiry defaults to +90d"           ($html -match 'function confDefaultExemptExpiry\(')
-T "exempt still POSTs /api/conformance/exemptions" ($html -match "async function confExempt[\s\S]{0,1200}api\('POST',\s*'/api/conformance/exemptions'")
-T "revoke exemption uses pimConfirm (danger)" ($html -match "async function confRevoke[\s\S]{0,260}pimConfirm\([\s\S]{0,200}danger: true")
+T "exempt still POSTs /api/conformance/exemptions" ($jsExempt -match "api\('POST',\s*'/api/conformance/exemptions'")
+T "revoke exemption uses pimConfirm (danger)" ($jsRevoke -match '(?s)pimConfirm\(.*danger: true')
 
 # Guard: no raw confirm()/prompt() remain in the conformance functions.
 $confBlock = ''

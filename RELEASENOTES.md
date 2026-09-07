@@ -1,45 +1,192 @@
 # Release notes for PIM4EntraPS
 
-## v2.4.252
+## v2.4.271
 
 Latest 30 commits touching SOLUTIONS/PIM4EntraPS/ in the upstream monorepo monorepo:
 
-- release(PIM) v2.4.252: the managed-tenant update path actually works, end to end (8fdc2a9a)
-- docs(PIM) session-30 handoff: the downlink is proven, and the two things that still are not (985a4628)
-- fix(PIM) BUG-85: the TAP mail was fine -- the readiness probe was crying wolf (c8489795)
-- docs(PIM) 3 TAPs minted and verified usable -- the synced admins can actually be signed in as (fb5e33b8)
-- fix(PIM) BUG-84 + quieten my own instrumentation, both found by reading the winning run's log (2c4d7810)
-- docs(PIM) the master->slave downlink is PROVEN END TO END -- admins materialised in the slave (a83b5c19)
-- fix(PIM) BUG-83: the scenario runner had no identity, so it silently became the managed identity (6333a2e6)
-- fix(PIM) BUG-82: the engine SPN had 100 Graph app-roles and still could not read /domains (fd81cfc6)
-- fix(PIM) BUG-81b: my own domain fix was skipped in silence by the very trap it was fixing (9827d4de)
-- fix(PIM) BUG-80 + BUG-81: the downlink's own store reads had no token, and no domain to build UPNs (2afece4b)
-- fix(PIM) BUG-79: the pull staged files while the engine read SQL, so nothing ever arrived (a8369a4d)
-- fix(PIM) BUG-78: a silent .\SQLEXPRESS default outranked the configured Azure SQL server (c7ac4d47)
-- fix(PIM) BUG-77: the SQL auth path now says which branch ran, which identity, and why it failed (0b21eed3)
-- docs(PIM) BUG-77: the SQL token path is unobservable, and that -- not the next theory -- is the blocker (a8167d45)
-- fix(PIM) BUG-76: a user-assigned-only container could not get a managed-identity token at all (fa715b91)
-- fix(PIM) BUG-75: the job identity gets a SQL contained user, because a warning is not a grant (4ebc909a)
-- docs(PIM) BUG-75: the downlink pull now WORKS across tenants; the apply cannot be both identities (dd02692c)
-- fix(PIM) BUG-73b: arming the rotation found three defects that only appear when it runs unattended (2c975757)
-- feat(PIM) BUG-73b: automatic baseline-SAS rotation, built so a missed run cannot break the downlink (2906ba23)
-- release(PIM) v2.4.251: a managed-tenant job that could never run, and reported success (96c345cd)
-- fix(PIM) BUG-71d + BUG-74: the two half-fixes that make a green deploy a dead engine (9d7f1c52)
-- fix(PIM) BUG-72 + BUG-73: the downlink job gets a real engine credential, and a SAS that is treated as one (dc769fdb)
-- docs(PIM) the cross-tenant blob caveat is no longer a theory: measured 401 on the first real run (434ebc8a)
-- fix(PIM) BUG-71: the downlink deploy created a job that could never run, and reported success (efd9e6a7)
-- docs(PIM) the downlink blob-read was never an open decision: DESIGN.md 13.7 already answered it (8effb2be)
-- docs(PIM) RIDE + HOGYM deleted: the downlink proof count is now zero, not one (ba3a1163)
-- docs(PIM) session-29 handoff, and Microsoft.Storage moves into the script where it belongs (1f9f46b0)
-- docs(PIM) the downlink runbook was missing everything a first real publish needs (dc034d5c)
-- fix(PIM) the scenario seeder never gave the REST layer an identity, so -StorageAccount could not work (554e0eb2)
-- test(PIM) TEST-11 CLOSED: 102/0/0 on standalone + master + slave -- and the driver's own false green (5963409e)
+- fix(PIM) the alert-feed test was a timer, not a test -- it went red exactly 7 days after it was written (25ecc15d)
+- docs(PIM) the S1 runbook assumed mgmt1 was the deploy host; it is not (7a89b7f3)
+- docs(PIM) the S1 onboarding runbook for a v1 CSV customer moving to v2 containers (92cfbb3c)
+- docs(PIM) carry session 40 into the canonical docs, not just the handoff (e88508e6)
+- docs(PIM) session-40 handoff: the nightly update works, and four things were broken at once (b3f96693)
+- fix(PIM) BUG-129 follow-up: the guard worked and the transcript still filled with stack traces (46970056)
+- feat(PIM) the nightly update can now be asked for "4am" without three syncs colliding (77a732f5)
+- fix(PIM) BUG-129: an az WARNING on stderr aborted the update AFTER a perfect build (8d37b645)
+- docs(PIM) session-39 handoff: rewritten around BUG-128 and the VM-hosting correction (f11bcb55)
+- fix(PIM) BUG-128: a caught WARNING became a release failure -- the build succeeded (038b5b39)
+- docs(framework+PIM) DEPLOY-3 ruling + session-39 handoff -- the update runs on a VM, not in the cloud (a423b306)
+- fix(PIM) LIC-1: a framework-issued licence verified perfectly and was never FOUND (bee131d9)
+- docs(pima) case closed -- correct the remediation headers to the PROVEN root cause (6ebda02d)
+- chore(pima) v1.6.127 -- pure version bump, published to both channels as a self-update experiment (d79c554c)
+- feat(pima) v1.6.126 -- give the extension its own update_url (candidate fix for the stuck-update class) (aeebea36)
+- fix(pima) the detection half looked in the wrong place under SYSTEM, and raise the floor to 1.6.125 (5e0741c9)
+- fix(pima) BUG-127 -- clamp the activation duration to the target's PIM policy (v1.6.125) (150db190)
+- feat(pim-scheduler) create the v2 "scheduler tick" VisualCron job by cloning the delta job (9c66359a)
+- docs(pima) BUG-127 -- the Activator requests a duration it never validates against the policy (3db200e6)
+- feat(platform) PLAT-02 delivery: the sync now APPLIES what it pulls -- and the runner never worked (f29bcd83)
+- fix(PIM) the suite tested the MACHINE, not the product -- ALL SUITES GREEN with custom config present (646b43d0)
+- feat(pima) Intune remediation pair for the stuck-extension class -- validated on a stuck machine (af6a9270)
+- feat(pima) -MinimumVersion: the fleet-wide unstick lever, pushed as policy not per machine (126ba876)
+- fix(PIM) BUG-126 -- the release gate could never pass on PIM's own required placement (025bd0eb)
+- fix(PIM) TEST-17 -- the endpoint was always right; the assertion was testing JSON encoding (57dc1ad1)
+- docs(PIM) TEST-17 -- the directory assertions test a different request than the status (4e2e8926)
+- fix(PIM) the suite was red in three places, and the ratchet was right about two of them (e5786e3d)
+- docs(PIM) RELEASENOTES v2.4.262-v2.4.271 (unblocks publish) + BUG-126 + redact my own leak (9dd5f71d)
+- fix(PIM) the is-it-a-git-repo probe threw under PowerShell 5.1 -- the host the task uses (7c738313)
+- fix(PIM) resolve the pull token BEFORE the tenant pre-auth -- the vault is in a different tenant (7fa45a04)
 
 ---
 
 # Release notes -- PIM4EntraPS
 
 > **Curated changelog.** The publish workflow auto-prepends recent monorepo commits as a raw activity log; this file is the human-friendly narrative on top.
+---
+## It stops guessing who you are, and it remembers who did what (v2.4.262 – v2.4.271)
+
+**Where the previous release was found by people using the product, this one was found by asking a
+harder question of the code: when something cannot be read, what does it do instead?** The honest
+answer, in several places, was "carry on with a guess" — fall back to a file, to a shipped example,
+or to whatever the host happened to say. A permission system that guesses is worse than one that
+stops, so all of these now stop.
+
+### Access decisions fail closed
+
+- **The permission check no longer falls back.** If the authorisation data cannot be read, access is
+  refused rather than granted from a local file — or, in one path, from the example file that ships
+  with the product. A read failure is now an answer of "no", not an answer of "probably fine".
+- **The host can no longer promote itself.** Administrator identity is read from your store. A file
+  sitting on the machine that runs the service can no longer decide who holds the highest role.
+- **Emergency access is where the engine can actually read it.** The break-glass override was being
+  written to a location the engine never consulted, which meant it looked applied and did nothing.
+- **The picker now decides, not the box next to it.** Where a screen offered both a chooser and a
+  free-text field, the typed value quietly won. The chooser is now authoritative.
+- **Installing profiles has a supported route.** Previously the only working method was to place
+  files by hand, which is how the example file came to be trusted in the first place.
+
+### The record of what happened survives, and names a person
+
+- **The audit trail is kept in your database.** It used to be written where a redeployment discarded
+  it, so the history of a change could disappear with the next update.
+- **Entries name the operator, not the machine.** Actions were attributed to the component that
+  performed them, which is true and useless when you are asking who approved something.
+- **The first fix was not the whole fix.** A second component was writing audit entries by another
+  route and was missed on the first pass; it now uses the same path.
+- **A store you could write to but never read from is gone.** One fallback accepted entries and had
+  no way to return them, so it looked healthy while answering no question at all.
+- **Suppressions and exceptions live in the database too**, for the same reason: anything that
+  changes behaviour must outlive a deployment.
+
+### Failures are audible
+
+- **A scheduled job that failed used to say nothing at all.** Failures now raise an alert, so a job
+  that stopped working is noticed rather than discovered later.
+- **Two standing checks were added** so that the fallback behaviour corrected here cannot quietly
+  return in a future release.
+
+---
+## The product now speaks your language, and its status means what it says (v2.4.254 – v2.4.261)
+
+**Everything in this release was found by a person using the product, not by a test.** That is worth
+saying plainly, because it shapes what changed: most of these are not crashes, they are places where
+the system was technically correct and practically useless — a screen that answered a question
+nobody asked, a counter that said `0` while it was still working, a red "failed" against something
+you had deliberately switched off.
+
+### The interface talks about your estate, not about our internals
+
+- **Menu names a non-specialist can use.** "Authoring" and "Review & Save" have become plain labels,
+  each with a line saying what is behind it.
+- **Pick a role from a list instead of typing its exact name.** Nobody memorises two thousand role
+  names. Role fields now browse and filter.
+- **People have names again.** Screens that showed long identifiers now resolve and show display
+  names, with a small chip saying whether the entry is a user, a group or an application.
+- **Findings tell you what to do about them.** A validation finding used to name a row number and
+  stop there. Each now offers the action that resolves it.
+- **No internal file names or document sections in the interface.** User-facing text no longer
+  refers to design documents or to the retired file-based store — and a standing check now fails the
+  build if that language returns.
+- **Viewing and changing are separate.** The delegation map is a map; linking and revoking have
+  their own place, and the map hands your current selection across rather than making you re-find it.
+- **The map is readable.** Relationship lines fade when idle and highlight one path on hover; the
+  footer folds its chips by role instead of listing every one.
+- **Authoring asks for names, not keys.** You type the name of the thing you mean; the key is
+  derived and previewed before anything is saved.
+- **Configuration lives in Settings.** The four configuration blocks that had grown into the
+  governance screen are now on the settings page, where you would look for them.
+- **A one-time migration is no longer sitting beside the daily tools.** It is behind settings, needs
+  the highest privilege level, and refuses to run on a store that has already been migrated.
+- **Times are shown in the zone they are labelled with**, and long-running screens now say they are
+  loading instead of reporting an empty result as a finished one.
+
+### Job status stopped crying wolf
+
+- **A job you disabled reports "disabled", not "failed".** The check for "is this switched off?"
+  used to run after the check for "is this implemented here?", so a deliberately-disabled job was
+  reported as a failure. Both statements were true; you were being told the one you cannot act on.
+- **"This worker does not run that job" is no longer counted as a failure per run.** It is one fact
+  about a deployment, and counting it once per tick turned it into a double-digit failure count that
+  buried the failures that were real. It is now reported separately and quietly — still visible, so
+  a genuine gap in your deployment does not disappear, but never dressed as a broken run.
+- **Jobs, their status and the change queue are top-level**, not buried under names that assumed you
+  already knew where to look.
+
+### Safety and honesty
+
+- **A sweep that finds leftovers no filter would show.** A new read-only tool looks for
+  test-harness-style objects across the directory, deliberately looking *outside* your configured
+  naming filters — because anything a filter excludes is exactly what a filter cannot find. It
+  reports the directory roles such objects hold and, importantly, their **owners**, since an owner
+  can add themselves to a privileged group without passing through any approval flow. It only ever
+  reads; removing anything remains a separate, deliberate action.
+- **"No drift" now says what it actually checked.** It reads "every group this system manages
+  matches the desired state", and points at the sweep above for everything it cannot see. The
+  previous wording claimed more than the check could know.
+- **Test harnesses refuse to run against a production directory**, by identifier, with no override.
+- **Saving works when the checks say it should.** Three separate causes could each leave a set of
+  changes permanently un-committable — a validation that re-checked the stored state while ignoring
+  your pending edits, an approval workflow enforcing itself although it was never enabled, and a
+  results view that reported no changes when there were nine.
+
+---
+## Safer by default: a wrong identity is now refused instead of silently substituted (v2.4.253)
+
+**This release is mostly about refusals.** Each item below is a case where the product used to
+carry on with *something* rather than stop — and carrying on is what made the failures expensive,
+because the wrong answer arrived somewhere far away, wearing another problem's clothes.
+
+**1. An explicit identity that cannot be honoured is now an error.** If a caller names a tenant, a
+client id and a certificate, and that credential cannot be used, the product no longer falls back
+to whatever ambient credential happens to be lying around. It refuses, and says which credential
+failed and why. Previously a request for one directory could be answered with a token for a
+completely different one — the call then succeeded and failed later as a permissions error, which
+sends you looking in the wrong place entirely.
+
+**2. The same rule now applies to the database connection.** A configured service principal whose
+token cannot be acquired no longer quietly becomes "the machine's identity" or a leftover token.
+The connection is refused, naming both identities it declined to use, and how to opt into ambient
+authentication deliberately if that is genuinely what you want.
+
+**3. There is no longer a hidden default store.** With no database configured, the product used to
+connect to a local instance if one happened to exist. It now refuses. "No store configured" and
+"a store with stale data in it" are very different situations, and only the first is ever the right
+reading.
+
+**4. Onboarding no longer requires a client secret.** Three setup scripts made a secret structurally
+mandatory, so an organisation whose administrative identity is certificate-only could not run them
+at all. All three now accept a certificate, and refuse ambiguous input rather than guessing.
+
+**5. Role distribution across managed tenants can now be reviewed and edited by role.** The view
+that answers *"which tenants does this role actually reach?"* was counting incorrectly — a tenant
+where two administrators held the same role was counted twice, so a narrowed role could appear
+unrestricted. That is fixed, roles narrowed by targeting are no longer invisible, and the reach can
+now be edited directly, with any change that could not actually be delivered refused by name rather
+than written and reported as done.
+
+**6. A managed tenant that would not recognise the synced accounts is detected before they are
+created.** If the receiving organisation's naming conventions do not cover the administrator
+accounts being sent, its own engine would never see them — and every cycle would create them again,
+leaving unmanaged privileged accounts behind. Those accounts are now withheld and reported, and the
+naming convention stays the receiving organisation's to change.
 
 ---
 

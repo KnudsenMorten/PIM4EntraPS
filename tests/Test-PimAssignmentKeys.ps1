@@ -41,6 +41,7 @@ $shared  = Join-Path $solRoot 'engine\_shared'
 . (Join-Path $shared 'PIM-DateSafe.ps1')
 . (Join-Path $shared 'PIM-EngineCore.ps1')          # Compare-PimDesiredVsLive -- the real diff, not a re-implementation
 . (Join-Path $shared 'PIM-EngineProviders.ps1')
+. (Join-Path $PSScriptRoot '_shared\PimSourceScope.ps1')
 
 Write-Host "=== BUG-11/BUG-17: assignment keys agree, and live is not derived from desired ===" -ForegroundColor Cyan
 
@@ -233,9 +234,15 @@ Assert "scope universe comes from the RESOURCE definitions (BUG-17)" ($liv2.Coun
 # desired". Assert it structurally, by NAME, so a future edit is caught in review.
 Write-Host "`n[structural: no assignment provider may derive live from its own desired rows]" -ForegroundColor Cyan
 $src = Get-Content -LiteralPath (Join-Path $shared 'PIM-EngineProviders.ps1') -Raw
+# Each provider is scoped to its OWN text (tests\_shared\PimSourceScope.ps1). The 6000-character
+# window was wrong for all five: it UNDERSHOT three (New-PimAzResProvider is 8728, so a GetLive
+# late in the body was invisible to it) and OVERSHOT the other two by up to 2440 characters into
+# the NEXT provider. Every provider here has a structurally identical GetLive, so an overshooting
+# window could be satisfied by its NEIGHBOUR's call -- passing while the provider it names is
+# broken. The old $i/-1 guard also fell back to '' on a rename, which no longer needs guarding:
+# the helper THROWS rather than hand back an empty body.
 foreach ($fn in 'New-PimRolesAUsProvider','New-PimGroupMembersProvider','New-PimAdminMembersProvider','New-PimEntraRolesProvider','New-PimAzResProvider') {
-    $i = $src.IndexOf("function $fn")
-    $body = if ($i -ge 0) { $src.Substring($i, [Math]::Min(6000, $src.Length - $i)) } else { '' }
+    $body = Get-PimSourceFunctionBody -Text $src -Name $fn
     $g = $body.IndexOf('GetLive')
     $getLive = if ($g -ge 0) { $body.Substring($g, [Math]::Min(2600, $body.Length - $g)) } else { '' }
     Assert "$fn GetLive calls Get-PimSolutionOwnedGroups" ($getLive -match 'Get-PimSolutionOwnedGroups')

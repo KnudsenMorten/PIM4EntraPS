@@ -38,7 +38,19 @@ param(
     [Parameter(Mandatory)][string]$ResourceGroup,
     [Parameter(Mandatory)][string]$AcrName,
     [string]$ImageRepo     = 'pim-manager',
-    [string[]]$Apps        = @('ca-pim-manager','ca-pim-scheduler','ca-pim-engine','ca-pim-connector','ca-pim-deltaqueue','ca-pim-discovery'),
+    # 🔴 EMPTY = DISCOVER. This used to default to a hard-coded list of SIX apps
+    # (ca-pim-manager, ca-pim-scheduler, ca-pim-engine, ca-pim-connector, ca-pim-deltaqueue,
+    # ca-pim-discovery). Only ca-pim-manager exists in this topology, so a DEFAULT invocation
+    # always failed:
+    #     (ResourceNotFound) The Resource 'Microsoft.App/containerApps/ca-pim-scheduler' ... not found
+    # Recorded as a DEPLOY-3 item on 2026-08-31 -- "the default should be DISCOVERED, not assumed"
+    # -- and every deploy since had to pass -Apps ca-pim-manager by hand. That was survivable while
+    # a human ran it, and stopped being survivable on 2026-09-03 when the DAILY UNATTENDED update
+    # started calling it: the build succeeded, the deploy died on an app that never existed, and
+    # the operator's central fix reached nobody.
+    # Discovery is also correct as the topology grows -- a new worker is picked up without editing
+    # a list here, which is what made the list wrong in the first place.
+    [string[]]$Apps        = @(),
     [switch]$SkipBuild,
     [string]$Rollback,     # revision NAME to reactivate (rollback mode; ignores ImageTag/build)
     [switch]$SkipSmoke,    # opt OUT of the post-deploy GUI smoke gate (NOT recommended)
@@ -77,8 +89,22 @@ param(
     # group policies overnight and nothing alerted. The gate below refuses to roll when the shipped
     # policy baseline differs from the one recorded on the target; this switch is how you say "yes,
     # that baseline change is the point of this deploy".
-    [switch]$AcceptBaselineChange
+    [switch]$AcceptBaselineChange,
+
+    # 🔴 EVERY az CALL IN THIS SCRIPT USED TO RUN AGAINST THE AMBIENT DEFAULT CONTEXT, and this is
+    # the script that WRITES. On a machine logged into more than one directory the default is a
+    # coin flip -- on mgmt1 it is frequently a DIFFERENT COMPANY'S subscription (CLAUDE.md: "often
+    # the DEFAULT context"), which is how `az containerapp update` could be aimed at somebody
+    # else's tenant by an operator who passed exactly the right -ResourceGroup and -AcrName.
+    # Same family as SEC-12 and the TEST-09 drift gate: an ambient identity standing in for an
+    # explicit one. Every invocation below is scoped with @subArgs.
+    [string]$SubscriptionId = $(if ($env:PIM_SUBSCRIPTION_ID) { $env:PIM_SUBSCRIPTION_ID } else { '' })
 )
+
+# Built once, spliced into every az invocation. Empty => ambient (a single-directory machine),
+# which is stated out loud below rather than assumed.
+$subArgs = @()
+if ("$SubscriptionId".Trim()) { $subArgs = @('--subscription', "$SubscriptionId".Trim()) }
 $ErrorActionPreference = 'Stop'
 # BUG-25: -ImageTag is mandatory for a ROLL and meaningless for a ROLLBACK. Enforcing that
 # here (rather than on the parameter) keeps the roll path exactly as strict as it was while
@@ -88,6 +114,12 @@ if (-not $Rollback -and -not "$ImageTag".Trim()) {
     throw "Update-PimContainers: -ImageTag is required unless you are rolling back. Pass -ImageTag <tag> to roll, or -Rollback <revision> to reactivate a prior revision."
 }
 $here = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent $MyInvocation.MyCommand.Path }
+# 🔴 BEFORE THE FIRST az CALL, AND BEFORE _PimSetupShared (which is loaded much further down).
+# Defines a guarded `az` shadow so a WARNING on az's stderr cannot abort this script under
+# $ErrorActionPreference='Stop'. That is not hypothetical: it stopped internal prod deploying
+# a correctly-built image on 2026-09-05. Read the header of _PimAz.ps1 before removing this;
+# in particular, the `2>$null` on the az calls below does NOT prevent it.
+. "$here\_PimAz.ps1"
 $solRoot = Split-Path -Parent (Split-Path -Parent $here)        # ...\PIM4EntraPS
 $repoRoot = (Resolve-Path (Join-Path $here '..\..\..\..')).Path   # AutomateIT repo root
 # BUG-40: the TAG reference is provenance for humans. What is actually rolled is $image, which
@@ -95,6 +127,11 @@ $repoRoot = (Resolve-Path (Join-Path $here '..\..\..\..')).Path   # AutomateIT r
 $imageTagRef = "$AcrName.azurecr.io/$ImageRepo`:$ImageTag"
 $image = $imageTagRef
 function Step($m){ Write-Host "==> $m" -ForegroundColor Cyan }
+# Defined alongside Step deliberately. Setup-PimContainers.ps1 shipped with calls to a `Warn` it
+# never defined, and it killed step 6 of every estate deploy that passed a certificate (BUG-117).
+# A missing one-line helper is not a small bug when it only fires on an uncommon branch.
+function Note($m){ Write-Host "    $m" -ForegroundColor DarkGray }
+function Warn($m){ Write-Host "    $m" -ForegroundColor Yellow }
 
 # BUG-55: the desired-state fingerprint helpers (pure; unit-tested in Test-PimPolicyBaseline.ps1).
 $baselineLib = Join-Path $solRoot 'engine\_shared\PIM-PolicyBaseline.ps1'
@@ -126,8 +163,8 @@ function Get-PimRecordedBaseline {
     # a property by VARIABLE, so the dashes never reach a parser.
     # 🪤 `2>$null` is load-bearing: az on this host emits a cryptography UserWarning on stderr that
     # otherwise contaminates the stream and makes ConvertFrom-Json throw on "D:\a\_work...".
-    $raw = if ($Kind -eq 'job') { az containerapp job show -g $ResourceGroup -n $Name -o json 2>$null }
-           else                 { az containerapp show     -g $ResourceGroup -n $Name -o json 2>$null }
+    $raw = if ($Kind -eq 'job') { az containerapp job show @subArgs -g $ResourceGroup -n $Name -o json 2>$null }
+           else                 { az containerapp show @subArgs     -g $ResourceGroup -n $Name -o json 2>$null }
     if (-not "$raw".Trim()) { return '' }
     $obj = $null
     try { $obj = ($raw | Out-String) | ConvertFrom-Json } catch { return '' }
@@ -145,10 +182,10 @@ function Set-PimRecordedBaseline {
     # Best-effort: failing to RECORD must not fail a roll that already succeeded -- it degrades to
     # "unknown" on the next roll, which warns rather than blocks.
     try {
-        $rid = if ($Kind -eq 'job') { az containerapp job show -g $ResourceGroup -n $Name --query id -o tsv 2>$null }
-               else                 { az containerapp show     -g $ResourceGroup -n $Name --query id -o tsv 2>$null }
+        $rid = if ($Kind -eq 'job') { az containerapp job show @subArgs -g $ResourceGroup -n $Name --query id -o tsv 2>$null }
+               else                 { az containerapp show @subArgs     -g $ResourceGroup -n $Name --query id -o tsv 2>$null }
         if (-not "$rid".Trim()) { Write-Warning "  could not resolve the resource id of $Kind '$Name' -- policy baseline NOT recorded."; return }
-        az tag update --resource-id "$("$rid".Trim())" --operation Merge --tags "$($script:PimBaselineTagName)=$Hash" -o none 2>$null
+        az tag update @subArgs --resource-id "$("$rid".Trim())" --operation Merge --tags "$($script:PimBaselineTagName)=$Hash" -o none 2>$null
         if ($LASTEXITCODE -ne 0) { Write-Warning "  could not record the policy baseline on $Kind '$Name' (az tag update exit $LASTEXITCODE) -- the next roll will report it as UNKNOWN." }
     } catch { Write-Warning "  could not record the policy baseline on $Kind '$Name': $($_.Exception.Message)" }
 }
@@ -255,11 +292,50 @@ function Invoke-ManagerSmokeGate {
     if ("$SmokeWorkspaceId".Trim()) { $smokeArgs['WorkspaceId'] = $SmokeWorkspaceId }
     if ("$SmokeEasyAuthAud".Trim()) { $smokeArgs['EasyAuthAud'] = $SmokeEasyAuthAud }
     if ("$SmokeFqdn".Trim())        { $smokeArgs['Fqdn']        = $SmokeFqdn }
+    # 🔴 BUG-102 -- THE FIFTH TOOL WITH THE UNSCOPED-`az` DEFECT.
+    # Commit 623fc29a scoped "the whole deploy path to an explicit subscription -- four tools,
+    # one defect". This call site was the fifth and was missed, so the release GATE ran against
+    # the ambient default context while the DEPLOY it was gating ran against the explicit one.
+    # Measured on the 2.4.254 roll: the apps rolled correctly against
+    # 54468121-… (myfamilynetwork) and the gate then reported
+    #     az context: … / sub 772440e1-… (ambient default)
+    # -- ExpertsLiveDK, A DIFFERENT COMPANY (CLAUDE.md: "often the DEFAULT context" on mgmt1).
+    # From there it could not read the Log Analytics workspace and could not mint an Easy Auth
+    # token, so BOTH layers self-skipped and the gate failed a HEALTHY deployment.
+    # The smoke script has accepted -SubscriptionId all along; nobody handed it over. Same
+    # missing-passthrough class as BUG-44/46 and the SmokeWorkspaceId fix directly above.
+    if ("$SubscriptionId".Trim())   { $smokeArgs['SubscriptionId'] = "$SubscriptionId".Trim() }
+    # 🔴 TEST-16 -- DERIVE THE EASY AUTH AUDIENCE INSTEAD OF DEMANDING IT.
+    # Without an audience the gate cannot mint a token, so the whole live-HTTP layer self-skips
+    # and -AsReleaseGate turns that into a FAILED DEPLOY -- on every roll where the operator did
+    # not happen to export PIM_HOSTED_EASYAUTH_AUD. That is a gate failing for want of a value
+    # the app itself publishes: `az containerapp auth show` returns the app's own
+    # allowedAudiences, and the app is right there, being deployed by this script.
+    # (The Log Analytics workspace is derived the same way, but inside the smoke script, where
+    # ad-hoc runs benefit from it too.)
+    if (-not $smokeArgs.ContainsKey('EasyAuthAud')) {
+        $subArgs = @(); if ("$SubscriptionId".Trim()) { $subArgs = @('--subscription', "$SubscriptionId".Trim()) }
+        try {
+            $aud = @(az containerapp auth show -n $smokeArgs['App'] -g $ResourceGroup @subArgs `
+                        --query "identityProviders.azureActiveDirectory.validation.allowedAudiences" -o tsv 2>$null) |
+                   Where-Object { "$_".Trim() } | Select-Object -First 1
+            if ("$aud".Trim()) {
+                $smokeArgs['EasyAuthAud'] = "$aud".Trim()
+                Write-Host "    derived Easy Auth audience from the app's own auth config" -ForegroundColor DarkGray
+            }
+        } catch { }
+    }
     # Write-Host, not a Note helper: this script defines only Step(), and calling an undefined
     # helper is parse-clean and throws at RUNTIME -- inside the gate, on every deploy.
-    Write-Host ("    gate inputs: rg=$ResourceGroup workspace=$(if ("$SmokeWorkspaceId".Trim()) {'set'} else {'(from env/default)'}) " +
-                "easyAuthAud=$(if ("$SmokeEasyAuthAud".Trim()) {'set'} else {'(NOT set -- the live-HTTP layer will fail the gate)'}) " +
-                "fqdn=$(if ("$SmokeFqdn".Trim()) {'set'} else {'(derived from az)'})") -ForegroundColor DarkGray
+    # Report what the gate is ACTUALLY given -- read $smokeArgs, not the raw parameters. Printed
+    # from the parameters it announced "easyAuthAud=(NOT set -- the live-HTTP layer will fail the
+    # gate)" on the very line after "derived Easy Auth audience from the app's own auth config",
+    # and then the gate passed. A status line that contradicts the run it describes is worth
+    # exactly nothing to whoever is reading the deploy log at 2am.
+    Write-Host ("    gate inputs: rg=$ResourceGroup " +
+                "workspace=$(if ($smokeArgs.ContainsKey('WorkspaceId')) {'set'} else {'(derived by the gate from the Container Apps environment)'}) " +
+                "easyAuthAud=$(if ($smokeArgs.ContainsKey('EasyAuthAud')) {'set'} else {'(NOT set -- the live-HTTP layer will fail the gate)'}) " +
+                "fqdn=$(if ($smokeArgs.ContainsKey('Fqdn')) {'set'} else {'(derived from az)'})") -ForegroundColor DarkGray
     & $smoke @smokeArgs
     $code = $LASTEXITCODE
     if ($code -ne 0) {
@@ -275,8 +351,23 @@ function Invoke-ManagerSmokeGate {
 # dropped anything misspelled, renamed, in another RG or momentarily unreadable without
 # a word, and the summary still claimed every app was rolled.
 $Apps = Resolve-PimAppList -Apps $Apps
+if (-not $Apps.Count) {
+    # 🔒 DISCOVER, because a hard-coded list is a claim about a topology this script cannot see.
+    # Only apps whose image comes from THIS repo's image repo are candidates -- rolling something
+    # unrelated that happens to live in the same resource group would be worse than rolling
+    # nothing. If discovery finds none, say so plainly rather than proceeding with an empty list
+    # (Get-PimAppRollPlan already refuses "rolled zero apps", and this makes the reason readable).
+    Step "no -Apps given: DISCOVERING container apps in $ResourceGroup"
+    $discovered = @(az containerapp list @subArgs -g $ResourceGroup --query "[].name" -o tsv 2>$null |
+                    ForEach-Object { "$_".Trim() } | Where-Object { $_ })
+    if (-not $discovered.Count) {
+        throw "Update-PimContainers: no container apps found in '$ResourceGroup'. Nothing to roll -- check the resource group and the az context (a context you cannot see returns EMPTY, not an error)."
+    }
+    $Apps = @($discovered)
+    Note ("discovered: " + ($Apps -join ', '))
+}
 Step ("apps requested: " + ($Apps -join ', '))
-$existing = @($Apps | Where-Object { az containerapp show -g $ResourceGroup -n $_ --query name -o tsv 2>$null })
+$existing = @($Apps | Where-Object { az containerapp show @subArgs -g $ResourceGroup -n $_ --query name -o tsv 2>$null })
 
 $plan = Get-PimAppRollPlan -Requested $Apps -Existing $existing -AllowMissing:$AllowMissingApps
 if ($plan.missing.Count -gt 0) {
@@ -294,12 +385,12 @@ if ($Rollback) {
     $rolledBack = New-Object System.Collections.Generic.List[string]
     $noRevision = New-Object System.Collections.Generic.List[string]
     foreach ($app in $existing) {
-        $rev = az containerapp revision list -g $ResourceGroup -n $app --query "[?contains(name,'$Rollback')].name | [0]" -o tsv 2>$null
+        $rev = az containerapp revision list @subArgs -g $ResourceGroup -n $app --query "[?contains(name,'$Rollback')].name | [0]" -o tsv 2>$null
         if (-not $rev) { [void]$noRevision.Add($app); continue }
         if ($PSCmdlet.ShouldProcess($app,"rollback to $rev")) {
-            az containerapp revision activate -g $ResourceGroup -n $app --revision $rev -o none
+            az containerapp revision activate @subArgs -g $ResourceGroup -n $app --revision $rev -o none
             if ($LASTEXITCODE -ne 0) { throw "Update-PimContainers: revision activate FAILED (exit $LASTEXITCODE) for $app -> $rev." }
-            az containerapp ingress traffic set -g $ResourceGroup -n $app --revision-weight "$rev=100" -o none 2>$null
+            az containerapp ingress traffic set @subArgs -g $ResourceGroup -n $app --revision-weight "$rev=100" -o none 2>$null
             Write-Host "  $app -> $rev (100%)" -ForegroundColor Green
             [void]$rolledBack.Add($app)
         }
@@ -318,7 +409,7 @@ if ($Rollback) {
     # stated rather than left for someone to discover from behaviour.
     if (-not $SkipTickJob -and "$TickJobName".Trim()) {
         $jn = "$TickJobName".Trim()
-        $jobImg = az containerapp job show -g $ResourceGroup -n $jn --query "properties.template.containers[0].image" -o tsv 2>$null
+        $jobImg = az containerapp job show @subArgs -g $ResourceGroup -n $jn --query "properties.template.containers[0].image" -o tsv 2>$null
         if ("$jobImg".Trim()) {
             Write-Warning ("  [BUG-48] Rollback reactivated app REVISIONS only. The tick Job '$jn' has no revisions and was NOT rolled back -- " +
                            "it is still on $("$jobImg".Trim()). The engine and the GUI are now on DIFFERENT builds. Put it back explicitly: " +
@@ -342,7 +433,15 @@ if (-not $SkipBuild) {
         # a tag that was never pushed -> ImagePullFailure / ActivationFailed (bit 2.4.227
         # + 2.4.228, 2026-06-18). Build-PimManagerImage builds from a clean `git archive`
         # subtree and throws on failure.
-        & (Join-Path $PSScriptRoot 'Build-PimManagerImage.ps1') -ImageTag $ImageTag -AcrName $AcrName -ImageRepo $ImageRepo
+        # 🔴 -SubscriptionId FORWARDED. The builder has DECLARED it all along and this caller never
+        # passed it, so `az acr build` ran against the ambient default context -- which on mgmt1 is
+        # another company's subscription, and the build died with "the resource 'acrpimmfnpr' could
+        # not be found in subscription 'ELDK Event Hub'". Declared-but-not-forwarded: the exact
+        # shape of BUG-29 / SEC-10b / BUG-78 / BUG-79, and the reason scoping this script's OWN az
+        # calls was not enough -- the one call it delegates was still unscoped.
+        $buildArgs = @{ ImageTag = $ImageTag; AcrName = $AcrName; ImageRepo = $ImageRepo }
+        if ("$SubscriptionId".Trim()) { $buildArgs['SubscriptionId'] = "$SubscriptionId".Trim() }
+        & (Join-Path $PSScriptRoot 'Build-PimManagerImage.ps1') @buildArgs
         if ($LASTEXITCODE -ne 0) { throw "Update-PimContainers: image build FAILED (exit $LASTEXITCODE) for $image -- NOT rolling (a roll to an unbuilt tag creates an ImagePullFailure revision). Fix the build and re-run." }
     }
 }
@@ -352,7 +451,7 @@ if (-not $SkipBuild) {
 # missing tag -> the new revision ImagePullFailures + sits ActivationFailed while the old
 # revision keeps serving, so the "deploy" silently does nothing. Fail loudly instead.
 if (-not $WhatIfPreference) {
-    $existingTags = @(az acr repository show-tags -n $AcrName --repository $ImageRepo -o tsv 2>$null)
+    $existingTags = @(az acr repository show-tags @subArgs -n $AcrName --repository $ImageRepo -o tsv 2>$null)
     if ($existingTags -notcontains $ImageTag) {
         throw "Update-PimContainers: image tag '$ImageTag' is NOT present in ACR '$AcrName/$ImageRepo' (tags: $($existingTags -join ', ')) -- refusing to roll (would ImagePullFailure). Build it first (omit -SkipBuild) or pick an existing tag."
     }
@@ -362,7 +461,12 @@ if (-not $WhatIfPreference) {
     # app's image field identical, so ARM creates no revision and the platform keeps serving the
     # image it already pulled -- measured live 2026-08-09, where the roll reported success and
     # the next executions ran the previous build. Pinning makes new content a changed field.
-    $imageDigest = Resolve-PimAcrImageDigest -AcrName $AcrName -Repository $ImageRepo -Tag $ImageTag
+    # DECLARED **AND** FORWARDED, same as the builder's call: this is the lookup that pins what
+    # actually gets rolled (BUG-40), so resolving it in the wrong subscription is not a cosmetic
+    # failure -- it is the difference between deploying the new image and silently keeping the old.
+    $rdArgs = @{ AcrName = $AcrName; Repository = $ImageRepo; Tag = $ImageTag }
+    if ("$SubscriptionId".Trim()) { $rdArgs['SubscriptionId'] = "$SubscriptionId".Trim() }
+    $imageDigest = Resolve-PimAcrImageDigest @rdArgs
     $image = New-PimImageReference -Registry "$AcrName.azurecr.io" -Repository $ImageRepo -Digest $imageDigest
     Write-Host "  Pinned $ImageRepo`:$ImageTag -> $imageDigest" -ForegroundColor Green
 }
@@ -415,11 +519,11 @@ $rolled = New-Object System.Collections.Generic.List[string]
 foreach ($app in $existing) {
     Step "Roll $app -> $ImageTag"
     if ($PSCmdlet.ShouldProcess($app,"update --image $image")) {
-        az containerapp update -g $ResourceGroup -n $app --image $image -o none
+        az containerapp update @subArgs -g $ResourceGroup -n $app --image $image -o none
         # BUG-09: `az containerapp update` failing was never checked -- a failed roll
         # counted the same as a successful one.
         if ($LASTEXITCODE -ne 0) { throw "Update-PimContainers: 'az containerapp update' FAILED (exit $LASTEXITCODE) for $app -- deploy aborted. Roll back with -Rollback <oldRevision> if a partial roll is a problem." }
-        $rev = az containerapp revision list -g $ResourceGroup -n $app --query "[0].name" -o tsv 2>$null
+        $rev = az containerapp revision list @subArgs -g $ResourceGroup -n $app --query "[0].name" -o tsv 2>$null
         Write-Host "  $app new revision: $rev" -ForegroundColor Green
         [void]$rolled.Add($app)
     }
@@ -437,7 +541,7 @@ foreach ($app in $existing) {
 if (-not $WhatIfPreference -and $rolled.Count -gt 0) {
     $notOnImage = New-Object System.Collections.Generic.List[string]
     foreach ($app in $rolled) {
-        $live = az containerapp show -g $ResourceGroup -n $app --query "properties.template.containers[0].image" -o tsv 2>$null
+        $live = az containerapp show @subArgs -g $ResourceGroup -n $app --query "properties.template.containers[0].image" -o tsv 2>$null
         $v = Test-PimImageDeployed -Expected $image -Running "$live".Trim()
         if (-not $v.ok) { [void]$notOnImage.Add("$app -- $($v.reason)") }
     }
@@ -463,19 +567,19 @@ if (-not $SkipTickJob) {
         Write-Host "  tick Job: -TickJobName is blank -- skipping." -ForegroundColor DarkGray
     }
     else {
-        $jobExists = az containerapp job show -g $ResourceGroup -n $jobName --query name -o tsv 2>$null
+        $jobExists = az containerapp job show @subArgs -g $ResourceGroup -n $jobName --query name -o tsv 2>$null
         if (-not "$jobExists".Trim()) {
             Write-Host "  tick Job '$jobName' does not exist in $ResourceGroup -- nothing to roll (expected in always-on mode)." -ForegroundColor DarkGray
         }
         elseif ($PSCmdlet.ShouldProcess($jobName, "job update --image $image")) {
             Step "Roll tick Job $jobName -> $ImageTag"
-            $jobBefore = az containerapp job show -g $ResourceGroup -n $jobName --query "properties.template.containers[0].image" -o tsv 2>$null
-            az containerapp job update -g $ResourceGroup -n $jobName --image $image -o none
+            $jobBefore = az containerapp job show @subArgs -g $ResourceGroup -n $jobName --query "properties.template.containers[0].image" -o tsv 2>$null
+            az containerapp job update @subArgs -g $ResourceGroup -n $jobName --image $image -o none
             if ($LASTEXITCODE -ne 0) {
                 throw "Update-PimContainers: 'az containerapp job update' FAILED (exit $LASTEXITCODE) for $jobName -- the APPS are already on $ImageTag, so the deploy is now SKEWED (that is BUG-48's exact failure). Re-run this script, or stamp the Job by hand: az containerapp job update -g $ResourceGroup -n $jobName --image $image"
             }
             # Same evidence standard as the apps: a tag match is not proof (BUG-40).
-            $jobLive = az containerapp job show -g $ResourceGroup -n $jobName --query "properties.template.containers[0].image" -o tsv 2>$null
+            $jobLive = az containerapp job show @subArgs -g $ResourceGroup -n $jobName --query "properties.template.containers[0].image" -o tsv 2>$null
             $jv = Test-PimImageDeployed -Expected $image -Running "$jobLive".Trim()
             if (-not $jv.ok) {
                 throw "Update-PimContainers: tick Job '$jobName' post-roll verification FAILED -- $($jv.reason). The apps are on $image but the Job is not; do NOT treat this deploy as done."

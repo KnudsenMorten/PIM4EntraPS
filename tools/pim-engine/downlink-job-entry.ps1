@@ -59,6 +59,12 @@ param(
     [string]$BaselineDocPath = $env:PIM_BaselineDocPath,
     [string]$EngineScope = 'All',
     [ValidateSet('Full','Delta')][string]$EngineMode = 'Delta',
+    # IMP-13 / operator ruling 2026-09-03. Comma-separated in the env because an ACA env value is
+    # one string. 🔴 Without this the scheduled Job never told the plan what the slave's admin
+    # naming convention is, so Select-PimUnrecognisableAdmins returned `checked = $false` on every
+    # production run -- "we did not look", which its own contract says must not be read as "they
+    # are fine". The guard was correct and simply never armed on this path.
+    [string[]]$SlaveAdminPrefixes = @(@("$env:PIM_SlaveAdminPrefixes" -split ',') | ForEach-Object { "$_".Trim() } | Where-Object { $_ }),
     [switch]$WhatIfMode
 )
 
@@ -105,7 +111,14 @@ if (-not "$BaselineUrl".Trim() -and -not "$BaselineDocPath".Trim()) {
     JobLog 'no baseline source: supply -BaselineUrl (private-endpoint blob) or -BaselineDocPath (mounted bundle) / set PIM_BaselineUrl|PIM_BaselineDocPath' 'ERROR'
     exit 2
 }
-if ("$BaselineUrl".Trim()) { JobLog ("baseline source: private URL {0}" -f $BaselineUrl) }
+# 🔴 REDACT THE QUERY STRING. This line used to log $BaselineUrl whole -- and on the cross-tenant
+# path that URL carries a SAS, so its `sig=` landed in Log Analytics in cleartext, readable by
+# anyone with workspace access, for the workspace's whole retention period. MEASURED 2026-09-03 on
+# RIDE's first run. Deploy-PimDownlinkJob is scrupulous about this (it passes the SAS as an ACA
+# secret, and shreds the deploy yaml because it "carried secret values") -- and then the container
+# printed it anyway. The host and path are what a reader needs to diagnose a pull; the credential
+# is not.
+if ("$BaselineUrl".Trim()) { JobLog ("baseline source: private URL {0}" -f ($BaselineUrl -replace '\?.*$', '?<redacted>')) }
 else { JobLog ("baseline source: mounted/pulled file {0}" -f $BaselineDocPath) }
 
 # --- 2) COMPOSE downlink-sync THEN engine apply via the scenario runner --------
@@ -127,6 +140,14 @@ $runArgs = @{
     EngineMode  = $EngineMode
     WhatIfMode  = [bool]$WhatIfMode
 }
+# IMP-13: arm the recognisability guard. Passed ONLY when known -- an empty list would look like
+# an explicit "no prefixes" rather than "not supplied", and the plan distinguishes the two.
+if (@($SlaveAdminPrefixes).Count) {
+    $runArgs['SlaveAdminPrefixes'] = @($SlaveAdminPrefixes)
+    JobLog ("slave admin prefixes: {0} (IMP-13 recognisability guard ARMED)" -f (@($SlaveAdminPrefixes) -join ', '))
+} else {
+    JobLog 'slave admin prefixes: NOT SUPPLIED -- the recognisability guard is INERT for this run, so an admin the slave cannot see would be recreated every tick. Set PIM_SlaveAdminPrefixes (Deploy-PimDownlinkJob -SlaveAdminPrefixes).' 'WARN'
+}
 if ("$BaselineDocPath".Trim()) { $runArgs['BaselineDocPath'] = $BaselineDocPath }
 elseif ("$BaselineUrl".Trim()) {
     $runArgs['BaselineUrl'] = $BaselineUrl
@@ -138,7 +159,22 @@ $result = $null
 try {
     $result = & $runner @runArgs
 } catch {
+    # 🔴 LOG WHERE IT THREW, NOT JUST WHAT IT SAID. This handler used to emit the message alone,
+    # and for a generic PowerShell binding error that is not a diagnosis -- RIDE's first run
+    # reported only "Cannot bind argument to parameter 'Path' because it is an empty string",
+    # which names neither the script, the line, nor the call. This runs UNATTENDED in a container
+    # nobody can attach a debugger to, so the one place the stack could have been captured is
+    # here, and it was being discarded. Reproducing on Windows did not reproduce it (the same
+    # inputs ran clean), so the trace is the only route to the cause.
     JobLog ("scenario run threw: {0}" -f $_.Exception.Message) 'ERROR'
+    JobLog ("  type    : {0}" -f $_.Exception.GetType().FullName) 'ERROR'
+    if ($_.InvocationInfo) {
+        JobLog ("  at      : {0}:{1}" -f $_.InvocationInfo.ScriptName, $_.InvocationInfo.ScriptLineNumber) 'ERROR'
+        JobLog ("  line    : {0}" -f "$($_.InvocationInfo.Line)".Trim()) 'ERROR'
+    }
+    foreach ($f in @("$($_.ScriptStackTrace)" -split "`r?`n")) {
+        if ("$f".Trim()) { JobLog ("  stack   : {0}" -f $f.Trim()) 'ERROR' }
+    }
     exit 4
 }
 

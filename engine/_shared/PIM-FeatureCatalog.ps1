@@ -75,6 +75,20 @@ $script:PimFeatureCatalog = @(
     [ordered]@{ key='engine.reconcile'; label='Engine reconcile';        group='Core PIM';     tier='core';     license='free'; defaultEnabled=$true;  dependsOn=@();                       proFeature='';                  description='Desired-vs-live reconcile of delegation (create/update). The essential engine; never disabled.' }
     [ordered]@{ key='delegation.read';  label='Delegation map (read)';   group='Core PIM';     tier='core';     license='free'; defaultEnabled=$true;  dependsOn=@();                       proFeature='';                  description='Read/search the delegation model. Always available.' }
     [ordered]@{ key='authoring';        label='Authoring / Review & Save';group='Core PIM';    tier='core';     license='free'; defaultEnabled=$true;  dependsOn=@();                       proFeature='';                  description='Author and commit delegation changes. Always available.' }
+    # 🔴 BUG-107. Second-approver (maker/checker) on sensitive changes. ADVANCED + defaultEnabled
+    # =$false, because it requires TWO PEOPLE and shipped ON to deployments that have one.
+    # A single-administrator tenant could not commit ANY privileged change: the 409 demands a
+    # second administrator, self-approval is refused by design (maker != checker), and there is
+    # no second administrator to ask. Reported as "i have not enabled this feature ... that
+    # should not be standard".
+    # 🪤 It MUST live in THIS catalog, not in PIM-FeatureFlags.ps1 (which drives GUI TAB
+    # visibility). Test-PimAuthoringCommitAllowed calls Test-PimFeatureAvailable, which resolves
+    # against Get-PimFeatureCatalogEntry HERE -- a key that is only in the tab list resolves as
+    # "unknown feature key" and returns $false, which looks like the right answer (the gate is
+    # off) for entirely the wrong reason: the operator could then never turn it ON.
+    # tier='advanced' matters too -- a 'core' entry short-circuits to available and is
+    # unswitchable, which would restore the exact bug this fixes.
+    [ordered]@{ key='makerchecker';     label='Second-approver on sensitive changes'; group='Core PIM'; tier='advanced'; license='free'; defaultEnabled=$false; dependsOn=@('authoring');            proFeature='';                  description='Require a SECOND administrator to approve a change that touches privileged access before it can be committed (separation of duties). Needs at least two administrators -- with one, nothing privileged can ever be committed. Off = changes are still classified as sensitive and fully audited, they just do not need a second approver.' }
 
     # ---- Discovery (advanced) -------------------------------------------------
     [ordered]@{ key='discovery.sweep';  label='Discovery sweep';         group='Discovery';    tier='advanced'; license='free'; defaultEnabled=$false; dependsOn=@('engine.reconcile');     proFeature='AzureDiscovery';    description='End-of-run sweep that enumerates Azure scopes + Power BI workspaces and flags/auto-creates new resources. Off = no discovery, no auto-create.' }

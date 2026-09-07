@@ -218,6 +218,48 @@ Invoke-Check -Name 'admins requesting a TAP can receive it' -Body {
 }
 
 # =====================================================================================
+# 7. IMP-06 -- THE ENGINE MUST NOT HOLD *TENANT-WIDE* Graph Mail.Send.
+#
+# 🔴 This is a PRIVILEGE check wearing a readiness check's clothes, and it is here because the
+# other two mail checks cannot see it. "MailSender is persisted" and "the mailbox exists" can both
+# pass on an environment whose engine SPN can mail AS ANYONE IN THE TENANT.
+#
+# 🔑 Why absence is the correct state, measured both directions ~60 minutes apart during IMP-06:
+#     WITH the tenant-wide consent    -- in-scope send ACCEPTED, out-of-scope send ACCEPTED
+#     WITHOUT the tenant-wide consent -- in-scope send ACCEPTED, out-of-scope send DENIED
+# Exchange RBAC does not RESTRICT a tenant-wide Graph consent -- it grants scoped access in its own
+# right, and a tenant-wide consent alongside it keeps winning. So the scoped grant is only actually
+# scoped while this permission is ABSENT.
+#
+# ⚠️ ADVISORY (Required=$false) ON PURPOSE, and this is a decision the operator should revisit.
+# Required checks BLOCK a deploy, and the live state of the estate is not known here: promoting
+# this to required without first measuring ~30 tenants could block deployments on a finding nobody
+# has confirmed yet. It therefore REPORTS loudly and gates nothing. §33 → MSP-5 carries the
+# promote-to-required decision.
+# =====================================================================================
+Invoke-Check -Name 'engine holds NO tenant-wide Graph Mail.Send' -Required $false -Body {
+    $appId = if ($EngineClientId) { $EngineClientId } else { "$($global:PIM_ClientId)" }
+    # 🪤 "Could not tell" is NOT "fine" -- the probe's own contract. An unknown engine identity
+    # makes this unevaluable, which is a failed check with a reason, never a quiet pass.
+    if (-not "$appId".Trim()) { return @{ ok = $false; detail = 'engine client id unknown -- cannot tell whether a tenant-wide send right is held (this is "did not look", not "it is fine")' } }
+    $sp = Invoke-PimGraph -Path "/servicePrincipals(appId='$appId')?`$select=id,displayName"
+    if (-not $sp.id) { return @{ ok = $false; detail = "no service principal found for engine appId '$appId'" } }
+    # 🔒 Resolve the role BY NAME from Graph's own app-role list rather than hard-coding its GUID.
+    # A wrong hard-coded id matches nothing and the check then passes on every tenant forever --
+    # a guard that cannot fail, which this project has now shipped twice and caught twice.
+    $graphSp = Invoke-PimGraph -Path "/servicePrincipals(appId='00000003-0000-0000-c000-000000000000')?`$select=id,appRoles"
+    $role = @(@($graphSp.appRoles) | Where-Object { "$($_.value)" -eq 'Mail.Send' })
+    if (-not $role.Count) { return @{ ok = $false; detail = 'could not resolve the Graph Mail.Send app role -- unable to evaluate' } }
+    $roleId = "$($role[0].id)"
+    $asg = @((Invoke-PimGraph -Path "/servicePrincipals/$($sp.id)/appRoleAssignments").value)
+    $hit = @($asg | Where-Object { "$($_.appRoleId)" -eq $roleId -and "$($_.resourceId)" -eq "$($graphSp.id)" })
+    if ($hit.Count) {
+        return @{ ok = $false; detail = "the engine SPN holds TENANT-WIDE Graph Mail.Send -- the per-mailbox Exchange RBAC scope is defeated by it (measured: with this consent an out-of-scope send is ACCEPTED). Revoke it; the scoped grant is what should carry sending." }
+    }
+    return @{ ok = $true; detail = 'no tenant-wide Graph Mail.Send on the engine SPN (sending is carried by the per-mailbox Exchange RBAC scope)' }
+}
+
+# =====================================================================================
 $failedRequired = @($checks | Where-Object { $_.required -and -not $_.ok })
 $result = @{ ok = ($failedRequired.Count -eq 0); checks = @($checks.ToArray()) }
 

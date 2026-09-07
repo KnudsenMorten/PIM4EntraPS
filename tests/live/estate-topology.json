@@ -1,0 +1,39 @@
+{
+  "_comment": "TEST-32 -- WHAT MAKES EACH ESTATE TENANT AN INSTANCE OF THE TOPOLOGY IT STANDS IN FOR. Until this file existed, that claim lived only in prose in Run-PimMatrixEstate.ps1's header ('ask what makes that tenant an instance of the topology it is standing in for') and in the operator's head, so nothing could check it. HOGYM's hosting was torn down on 2026-08-26 and the matrix kept reporting a green 'managed slave verified' against it, because the driver keeps desired state in LOCAL SQL Express and reads the engine identity from the tenant's OWN vault -- both outlive a teardown, so the run never touches the tenant's Azure stack at all. The green was true about the DIRECTORY and false about the CLAIM.",
+
+  "_howToUse": "Each entry names an environment and the FACTS that must hold for it to be that topology. 'requiresAzureStack' means the run must confirm a live PIM deployment in the tenant's subscription -- that is the fact a teardown removes, and therefore the only one that would have caught HOGYM. Facts are declared here, checked by Test-PimEstateTopologyClaim (pure) against observations the driver gathers, and the driver REFUSES the environment when a claim cannot be confirmed. A claim that cannot be checked is not a claim.",
+
+  "_whyNotJustTrustTheName": "The short names encode the intent (msp-slv, msp-mst, com) and encoding is not verification: a torn-down slave keeps its name. Naming is how you FIND the tenant; this file is how you know the name is still true.",
+
+  "schema": 1,
+  "environments": [
+    {
+      "env": "test1comr2xx391",
+      "topology": "standalone",
+      "scenario": "S1",
+      "why": "A single-tenant install: it pulls from nobody and projects to nobody, so the matrix uses it for the non-MSP cases.",
+      "requiresAzureStack": false,
+      "_requiresAzureStack_why": "A standalone matrix case exercises the engine against the DIRECTORY only -- it needs no hosted PIM stack in the tenant, so demanding one would fail an environment that is genuinely fine. This is the honest asymmetry: the fact only matters where the topology claims hosting.",
+      "mustNotBeManaged": true,
+      "_mustNotBeManaged_why": "If this tenant ever acquires a master relationship it has stopped being the standalone case, and the standalone results would silently be measuring something else."
+    },
+    {
+      "env": "test1mspmstintctrr2wa678",
+      "topology": "msp-master",
+      "scenario": "S3",
+      "why": "The MSP master: it holds the central admin registry and publishes the signed baseline the slaves pull.",
+      "requiresAzureStack": true,
+      "_requiresAzureStack_why": "A master with no PIM stack cannot publish a baseline, so 'master verified' would be a claim about a tenant that cannot perform the role.",
+      "mustPublishBaseline": true
+    },
+    {
+      "env": "test2mspslvintctrr3gp185",
+      "topology": "msp-slave",
+      "scenario": "S6",
+      "why": "The managed/slave tenant: it pulls the master's signed baseline and applies it locally with its own identity.",
+      "requiresAzureStack": true,
+      "_requiresAzureStack_why": "THIS IS THE HOGYM CASE. A slave whose hosting has been torn down still has a directory, still has its vault, and still has an engine cert -- so every check the driver used to run kept passing. Requiring a live stack is the one fact that separates 'this tenant is a managed slave' from 'this tenant used to be one'.",
+      "mustBeManaged": true
+    }
+  ]
+}

@@ -36,6 +36,7 @@ function T($n, $c) { if ($c) { Write-Host "  PASS $n" -ForegroundColor Green; $s
 $root = Split-Path -Parent $PSScriptRoot
 . (Join-Path $root 'engine\_shared\PIM-ScenarioProfile.ps1')   # also dot-sources PIM-Downlink.ps1
 . (Join-Path $root 'engine\_shared\PIM-Baseline.ps1')
+. (Join-Path $PSScriptRoot '_shared\PimSourceScope.ps1')
 
 # ---------------------------------------------------------------------------
 # Helper: sign a baseline payload with an EPHEMERAL RSA key (mirrors
@@ -355,7 +356,10 @@ T 'NO -RingPlan at all is byte-identical to before' ($planS6.ok -and $planS6.adm
 
 # The ORCHESTRATOR must forward the plan -- this is the link that did not exist.
 $dlSrc = Get-Content -Raw (Join-Path $root 'engine\_shared\PIM-Downlink.ps1')
-T 'Invoke-PimManagedDownlink accepts -RingPlan' ($dlSrc -match '(?s)function Invoke-PimManagedDownlink.{0,2000}?\[object\]\$RingPlan')
+# Scoped to the function: this body is 19813 characters and the old window was 2000, so the
+# assertion could only ever see its first tenth -- moving the parameter block further down would
+# have gone red for no real reason.
+T 'Invoke-PimManagedDownlink accepts -RingPlan' ((Get-PimSourceFunctionBody -Text $dlSrc -Name 'Invoke-PimManagedDownlink') -match '\[object\]\$RingPlan')
 T '  ...and forwards it to Get-PimDownlinkPlan' ($dlSrc -match "planArgs\['RingPlan'\]" -and $dlSrc -match '-LastVersion \$LastVersion @planArgs')
 
 # IMP-12: WHICH mechanism creates the accounts is a property of the TOPOLOGY, and the
@@ -761,6 +765,40 @@ T '  ...the MSP-local one is never offered' (@($planPlain.notTargeted | Where-Ob
 T '  ...and the vip-only role is not projected' (@($planPlain.assignments | Where-Object { $_.GroupTag -eq 'ROLE-Special' }).Count -eq 0)
 T '  ...with the plan naming targeting as the cause' ("$($planPlain.reason)" -match 'not TARGETED at this tenant')
 
+# 🔴 NARROWING IS NOT RETRACTION, and the plan's own wording is the only place an operator
+# meets that distinction. A live narrowing run showed desired 3 -> 2 -> 1 while live stayed 3
+# and remove=0 throughout; the sentence "1 admin(s) reach" invited the reading "the other two
+# no longer have access there". These assertions pin the honest wording so it cannot regress
+# into the convenient one.
+T 'NON-RETRACTION: the plan says PROJECTED, not "reach"' (
+    "$($planPlain.reason)" -match 'admin\(s\) PROJECTED to slave ring' -and "$($planPlain.reason)" -notmatch 'admin\(s\) reach')
+T '  ...a WITHHELD admin is named as withheld, not as removed' (
+    "$($planPlain.reason)" -match 'ADMIN\(S\) -- WITHHELD, NOT RETRACTED')
+T '  ...and the plan states the existing access is UNCHANGED' (
+    "$($planPlain.reason)" -match 'UNCHANGED by this plan')
+T '  ...counting exactly the admins targeting withheld (2 of 3), not the role skip' (
+    "$($planPlain.reason)" -match '\(2 of them ADMIN\(S\)' -and
+    @(@($planPlain.notTargeted) | Where-Object { "$($_.kind)" -eq 'admin' }).Count -eq 2)
+T '  ...a downlink plan NEVER retracts, and says so as a FIELD not just prose' (
+    $planPlain.PSObject.Properties.Name -contains 'retracts' -or $planPlain.ContainsKey('retracts'))
+T '  ...and that field is $false' ($false -eq $planPlain.retracts)
+# Noise control: the clause must appear ONLY when an admin was actually withheld, or it stops
+# being read at all -- the same failure mode as BUG-77's 80 identical warnings. Needs its OWN
+# fixture: every admin above is withheld somewhere ('none' never matches any tenant), so no
+# existing plan has an empty admin-skip set to prove silence with.
+$noSkipAdmins = @(
+    [pscustomobject]@{ UserName = 'A-1'; Ring = 2; DisplayName = 'one' }
+    [pscustomobject]@{ UserName = 'A-2'; Ring = 2; DisplayName = 'two' }
+)
+$docNoSkip  = New-TestSignedBaseline -Rows $noSkipAdmins -Signer $rsaSigner
+$planNoSkip = Get-PimDownlinkPlan -Scenario 'S6' -Doc $docNoSkip.doc -PublicKey $rsaSigner -TenantId $tid1 -SlaveRing 2 -LocalRoot $env:TEMP -TenantTags @()
+T '  ...the no-skip control really has both admins and zero skips' (
+    @($planNoSkip.admins).Count -eq 2 -and @($planNoSkip.notTargeted).Count -eq 0)
+T '  ...and the retraction clause is then SILENT (it is a warning, not a banner)' (
+    "$($planNoSkip.reason)" -notmatch 'WITHHELD, NOT RETRACTED')
+T '  ...while still reporting the honest PROJECTED wording' (
+    "$($planNoSkip.reason)" -match 'admin\(s\) PROJECTED to slave ring')
+
 $planVip = Get-PimDownlinkPlan -Scenario 'S6' -Doc $docT.doc -PublicKey $rsaSigner -TenantId $tid1 -SlaveRing 2 -LocalRoot $env:TEMP -TenantTags @('vip')
 T 'a vip tenant additionally gets the vip admin' (@($planVip.admins).Count -eq 2)
 T '  ...and the vip role' (@($planVip.assignments | Where-Object { $_.GroupTag -eq 'ROLE-Special' }).Count -eq 1)
@@ -774,6 +812,309 @@ T '  ...reported as HELD, not as "nothing to do"' ("$($planBlocked.reason)" -mat
 
 # 🪤 the four narrowings must stay distinguishable
 T 'SAFETY: targeting and class-gating are reported SEPARATELY' ($null -ne $planBlocked.notTargeted -and $null -ne $planBlocked.classHeld)
+
+# --- SEC-10 / MSP-3 step 4: the customer veto has to REACH the plan -----------
+# 🔴 Everything above this line passed for weeks while the gate was UNREACHABLE in
+# production: Get-PimDownlinkPlan honoured -BlockedCapabilities, and the orchestrator
+# did not DECLARE the parameter, so the entry path could never pass one. The plan-level
+# assertions could not see that, because they call the plan directly. These pin the CHAIN.
+T 'SEC-10: Invoke-PimManagedDownlink DECLARES -BlockedCapabilities (the link that was missing)' `
+    ((Get-Command Invoke-PimManagedDownlink).Parameters.ContainsKey('BlockedCapabilities'))
+# Sync-PimMasterToSlave splats @PSBoundParameters, and PowerShell binds only DECLARED
+# names -- so an undeclared parameter here would silently drop the veto at that entry.
+T '  ...and so does Sync-PimMasterToSlave, or its splat would silently drop the veto' `
+    ((Get-Command Sync-PimMasterToSlave).Parameters.ContainsKey('BlockedCapabilities'))
+# All THREE entries that reach the orchestrator, because a gate only some entries can carry
+# is a gate you cannot reason about.
+T '  ...and so does the scenario runner Invoke-PimScenarioDeploy' `
+    ((Get-Command Invoke-PimScenarioDeploy).Parameters.ContainsKey('BlockedCapabilities'))
+
+# --- BUG-78: THE INVENTORY ASSERTION -- the guard, not a fourth one-off -------
+# 🔑 THREE TIMES the same defect landed, and it was never "the gate is wrong": the gates are
+# correct and unit-tested. Each time a caller in the chain FAILED TO DECLARE the parameter,
+# and PowerShell binds only DECLARED names -- so the gate went dark SILENTLY and the run
+# looked clean. BUG-29 (-RingPlan on the orchestrator), SEC-10b (-BlockedCapabilities on the
+# orchestrator + entry script), BUG-78 (-RingPlan on the scenario runner).
+# Naming the three instances one at a time cannot stop the fourth. So instead of another
+# hand-written pair of asserts, this DISCOVERS every function that forwards to the
+# orchestrator -- by AST, from the shipped source -- and requires each to declare AND forward
+# every gate. A new forwarder added later is covered the day it is written, by nobody's
+# remembering.
+# 🪤 SCAN WIDTH IS PART OF THE GUARD. The first version parsed PIM-Downlink.ps1 ALONE, which
+# would have been blind to a forwarder added in any other file -- the "sweep too narrow to see
+# the thing it is looking for" failure, which is how a guard quietly becomes decoration. It now
+# walks every shipped .ps1 under engine\ and setup\.
+$dlScanFiles = @(
+    Get-ChildItem -Path (Join-Path $root 'engine'), (Join-Path $root 'setup') -Filter '*.ps1' -File -Recurse -ErrorAction SilentlyContinue
+)
+T 'BUG-78: the inventory scans a non-trivial file set' (@($dlScanFiles).Count -ge 10)
+# 🪤 THIS SUITE RUNS UNDER **WINDOWS POWERSHELL 5.1** IN THE HARNESS (PIM.Tests.ps1's
+# Invoke-Suite shells `powershell.exe`), while a developer runs it under pwsh 7. The first cut
+# of this block asserted that EVERY scanned file parses, which is false on 5.1 by design:
+# engine\container\Start-PimEngineContainer.ps1 declares `#Requires -Version 7.0` and uses the
+# ternary operator, because it runs inside a container. Green on pwsh 7, red in the suite.
+# I quoted session 31's "check BOTH hosts" lesson in this very session and then did not apply
+# it to my own new code -- the citation is not the check.
+#
+# So a 7-only file is SKIPPED rather than failed... which would silently open the exact hole
+# this guard exists to close, since a forwarder hiding in an unparsed file is invisible. The
+# skip is therefore PAID FOR with a cheap TEXT check: a file we could not parse must not so
+# much as MENTION the sink. Any OTHER parse failure stays a hard red.
+$dlParseFails  = @()
+$dlSkipped7    = @()
+$dlHiddenCalls = @()
+$dlAsts = @()
+foreach ($sf in $dlScanFiles) {
+    $perr = $null
+    $a = [System.Management.Automation.Language.Parser]::ParseFile($sf.FullName, [ref]$null, [ref]$perr)
+    if (-not @($perr).Count) { $dlAsts += $a; continue }
+    $src = Get-Content -Raw -LiteralPath $sf.FullName
+    if ($src -match '(?im)^\s*#Requires\s+-Version\s+[7-9]') {
+        $dlSkipped7 += $sf.Name
+        if ($src -match [regex]::Escape('Invoke-PimManagedDownlink')) { $dlHiddenCalls += $sf.Name }
+    } else {
+        $dlParseFails += $sf.Name
+    }
+}
+T '  ...and every file this host CAN parse, parses (an unparsed file is an unaudited file)' `
+    (@($dlParseFails).Count -eq 0)
+T '  ...a file skipped as pwsh-7-only does not reach the orchestrator behind the guard''s back' `
+    (@($dlHiddenCalls).Count -eq 0)
+
+# The gates a forwarder must be able to carry. Add a gate here and every forwarder is
+# audited for it at once -- which is the property the three instances lacked.
+$dlGates = @(
+    @{ Name = 'RingPlan';            What = "the OPERATOR's version gate (RING-1 plane 2)" }
+    @{ Name = 'BlockedCapabilities'; What = "the CUSTOMER's class veto (SEC-10)" }
+    # IMP-13. Adding a NAME to this list audits every forwarder for it at once -- which is the
+    # entire reason the inventory names no function. This gate was added 2026-08-29 and the
+    # assertion below found its way to every forwarder without anyone listing them.
+    @{ Name = 'SlaveAdminPrefixes';  What = "the CUSTOMER's admin naming conventions (IMP-13)" }
+)
+$dlSink = 'Invoke-PimManagedDownlink'
+$dlForwarders = @(
+    foreach ($a in $dlAsts) {
+        $a.FindAll({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] }, $true) |
+        Where-Object {
+            @($_.Body.FindAll({ param($n) $n -is [System.Management.Automation.Language.CommandAst] }, $true) |
+              Where-Object { "$($_.GetCommandName())" -eq $dlSink }).Count -gt 0
+        }
+    })
+# 🪤 The inventory must find something, or it is a tautology that always passes. An empty
+# forwarder set would sail through the loop below reporting nothing wrong -- the same
+# "a sweep that finds nothing proves nothing" failure recorded twice already in this project.
+T "  ...and finds the functions that forward to $dlSink" (@($dlForwarders).Count -ge 2)
+foreach ($fwd in $dlForwarders) {
+    $declared = @()
+    if ($fwd.Body.ParamBlock) { $declared = @($fwd.Body.ParamBlock.Parameters | ForEach-Object { $_.Name.VariablePath.UserPath }) }
+    $body = $fwd.Extent.Text
+    foreach ($g in $dlGates) {
+        T ("  ...{0} DECLARES -{1} ({2})" -f $fwd.Name, $g.Name, $g.What) ($declared -contains $g.Name)
+        # Declaring without forwarding is the same defect wearing a parameter: the caller can
+        # pass it and it dies in the function. Both splat idioms in this file count --
+        # @PSBoundParameters (pass-through) and an explicit $x['Name'] key.
+        # ⚠️ BE HONEST ABOUT WHAT THIS ONE PROVES. The DECLARE check is exact (it reads the AST
+        # param block). This one is TEXTUAL, so it can be fooled -- a function that merely
+        # MENTIONS @PSBoundParameters in a comment passes it for every gate. It is a smoke
+        # alarm, not a proof: it catches the failure that actually keeps happening (nobody
+        # wired the parameter through at all) and does not pretend to verify dataflow. If a
+        # forwarder is ever found that declares and mentions but does not truly pass, this
+        # check is the thing to tighten -- not the thing to trust.
+        T ("  ...{0} FORWARDS -{1} (declaring it is not passing it)" -f $fwd.Name, $g.Name) `
+            (($body -match '@PSBoundParameters') -or ($body -match ("\['" + [regex]::Escape($g.Name) + "'\]")))
+    }
+}
+
+# --- BUG-79: the same audit for ENTRY SCRIPTS, which the function rule cannot cover ----
+# 🔑 The guard above walks FUNCTIONS and demands the exact parameter name. That rule is WRONG for
+# an entry script: a script does not accept a `RingPlan` object, it accepts a ring-MAP path or URL
+# and BUILDS the plan. So entry scripts get a weaker but correct rule -- "does this script expose
+# SOME way to supply this gate?" -- and BUG-79 is what happens without it: for a long time
+# Invoke-PimDownlinkSync.ps1 had both gates while Invoke-PimScenarioRun.ps1, reaching the same
+# orchestrator, had NEITHER. Same engine, same tenant, two safety postures depending on which
+# entry somebody happened to run.
+# 🪤 Discovered, not listed: any script under setup\ that mentions the orchestrator or the scenario
+# runner is audited, so a third entry point is covered the day it is written.
+$dlEntryScripts = @(
+    Get-ChildItem -Path (Join-Path $root 'setup') -Filter '*.ps1' -File -ErrorAction SilentlyContinue |
+    Where-Object {
+        $src = Get-Content -Raw -LiteralPath $_.FullName
+        $src -match 'Invoke-PimManagedDownlink|Invoke-PimScenarioDeploy|Sync-PimMasterToSlave'
+    })
+T 'BUG-79: the entry-script audit finds the scripts that reach the downlink' (@($dlEntryScripts).Count -ge 2)
+# Per gate: the set of parameter names that COUNT as exposing it. More than one is allowed on
+# purpose -- there is no single right spelling for "give me the version gate" on a script.
+$dlEntryGates = @(
+    @{ Name = 'the version gate';  Any = @('RingPlan','TemplateRingMapPath','TemplateRingMapUrl') }
+    @{ Name = 'the customer veto'; Any = @('BlockedCapabilities','LocalManifestPath') }
+    # IMP-13. Both entries expose -SlaveAdminPrefixes. The S6 one ALSO resolves it from the slave's
+    # own live conventions when unset, which is strictly better (the customer's config is the
+    # authority on the customer's naming) -- but the explicit parameter is what the audit checks,
+    # because a PARAMETER is a contract while a function call in a body is an implementation.
+    @{ Name = 'the naming check';  Any = @('SlaveAdminPrefixes') }
+)
+foreach ($es in $dlEntryScripts) {
+    $eerr = $null
+    $east = [System.Management.Automation.Language.Parser]::ParseFile($es.FullName, [ref]$null, [ref]$eerr)
+    if (@($eerr).Count) { T ("  ...{0} parses" -f $es.Name) $false; continue }
+    $eparams = @()
+    if ($east.ParamBlock) { $eparams = @($east.ParamBlock.Parameters | ForEach-Object { $_.Name.VariablePath.UserPath }) }
+    foreach ($g in $dlEntryGates) {
+        $has = @($g.Any | Where-Object { $eparams -contains $_ })
+        T ("  ...{0} exposes {1} ({2})" -f $es.Name, $g.Name, ($g.Any -join ' | ')) (@($has).Count -ge 1)
+    }
+}
+# 🔒 And the resolution must be SHARED, not copied. BUG-79 was first written up as a choice between
+# duplicating the manifest logic and bare pass-through; the answer was neither. If a second copy of
+# the refuse-on-unparseable rule ever appears, the two WILL drift, and the security-relevant half is
+# the one nobody re-reads.
+$dlResolverUsers = @($dlEntryScripts | Where-Object { (Get-Content -Raw -LiteralPath $_.FullName) -match 'Resolve-PimCustomerBlockedCapabilities' })
+T '  ...and every one of them uses the SHARED resolver, not its own copy' (@($dlResolverUsers).Count -eq @($dlEntryScripts).Count)
+$dlOwnCopy = @($dlEntryScripts | Where-Object { (Get-Content -Raw -LiteralPath $_.FullName) -match 'ConvertFrom-Json[\s\S]{0,200}Select-PimCustomerBlockedCapabilities' })
+T '  ...and none re-implements the manifest read inline' (@($dlOwnCopy).Count -eq 0)
+
+# --- MSP-3 step 5: THE UPLINK PAYLOAD -- what the two gates DECIDED --------------
+# Both gates now exist and are audited. Until this, NOTHING reported their decision, so from the
+# operator's side "the customer declined roles", "the ring held the version" and "that tenant has
+# not run in a week" were the same observation: silence.
+$accNow = [datetime]::new(2026, 8, 28, 9, 30, 0, [DateTimeKind]::Utc)
+$accPlan = Get-PimDownlinkPlan -Scenario 'S6' -Doc $docT.doc -PublicKey $rsaSigner -TenantId $tid1 `
+    -SlaveRing 2 -LocalRoot $env:TEMP -TenantTags @('vip') -BlockedCapabilities @('msp-roles')
+$acc = New-PimAcceptanceRecord -Plan $accPlan -TenantId $tid1 -BlockedCapabilities @('msp-roles') -NowUtc $accNow
+T 'MSP-3/5: the acceptance record names the tenant and the baseline version it decided about' (
+    "$($acc.tenantId)" -eq $tid1 -and $acc.baselineVersion -eq $accPlan.baselineVersion)
+# 🔒 The four RING-1 states must stay distinguishable -- a boolean "did it work" would collapse
+# "the customer declined" into "it failed", which is the ambiguity ring gating introduces.
+T '  ...and reports CAPABILITIES, not just a verdict (framework SS8: held-by-policy != failed)' (
+    @($acc.capabilitiesBlocked) -contains 'msp-roles' -and @($acc.capabilitiesRan) -contains 'msp-admins' -and
+    @($acc.capabilitiesRan) -notcontains 'msp-roles')
+T '  ...and a blocked class is NOT reported as a failure (accepted stays true)' ([bool]$acc.accepted)
+# The field that makes SILENCE visible. No outcome value can express "this tenant stopped running".
+T '  ...and carries decidedAtUtc, which is what makes a SILENT tenant visible at all' (
+    "$($acc.decidedAtUtc)" -match '^2026-08-28T09:30:00')
+T '  ...and states retracts=$false explicitly (a narrowing is not a revocation)' ($acc.retracts -eq $false)
+T '  ...and flags a WhatIf decision as such' ((New-PimAcceptanceRecord -Plan $accPlan -TenantId $tid1 -NowUtc $accNow -WhatIfMode).whatIf -eq $true)
+T '  ...and is JSON-serialisable (it has to survive the wire to be an uplink payload)' (
+    $null -ne ($acc | ConvertTo-Json -Depth 6 | ConvertFrom-Json).tenantId)
+
+# 🪤 THE REFUSAL SHAPE, and this is the assertion that earns its place. Get-PimDownlinkPlan's early
+# returns (ring hold / bad signature / version mismatch) carry NO classHeld, notTargeted or
+# retracts -- and `@($null).Count` is 1, not 0 (measured under BUG-70b earlier the same day), so a
+# naive count would report a REFUSED run as having held exactly one phantom thing. A refusal is
+# also the single case the operator most needs to be accurate about.
+$accRefused = @{ ok = $false; reason = 'ring HOLD: nothing approved'; scenarioId = 'S6'; ring = 2
+                 admins = @(); sync = $null; content = $null; baselineVersion = 7; verify = $null }
+$accR = New-PimAcceptanceRecord -Plan $accRefused -TenantId $tid1 -NowUtc $accNow
+T 'MSP-3/5: a REFUSED plan records accepted=$false with its reason' (
+    $accR.accepted -eq $false -and "$($accR.reason)" -match 'ring HOLD')
+T '  ...and counts ZERO held/not-targeted, not one PHANTOM each (@($null).Count is 1)' (
+    $accR.heldCount -eq 0 -and $accR.notTargetedCount -eq 0 -and $accR.adminsProjected -eq 0)
+
+# The writer: current state, one file per tenant, and failure to RECORD must never fail the run.
+$accDir = Join-Path $env:TEMP ("pim-acc-" + [guid]::NewGuid().ToString('N').Substring(0,8))
+try {
+    $accPath = Write-PimAcceptanceRecord -Record $acc -Folder $accDir -Quiet
+    T 'MSP-3/5: the record is written as acceptance-latest.json in the tenant folder' (
+        $null -ne $accPath -and (Test-Path -LiteralPath $accPath) -and (Split-Path -Leaf $accPath) -eq 'acceptance-latest.json')
+    $accBack = Get-Content -Raw -LiteralPath $accPath | ConvertFrom-Json
+    T '  ...and round-trips through disk with its capability lists intact' (
+        @($accBack.capabilitiesBlocked) -contains 'msp-roles')
+    # CURRENT STATE, not a log: a second run overwrites rather than accumulating. A growing pile of
+    # JSON on a customer's disk is not an audit trail, it is litter nobody prunes; history belongs
+    # in the SS8 SQL backend, which can retain properly.
+    [void](Write-PimAcceptanceRecord -Record $accR -Folder $accDir -Quiet)
+    T '  ...and a second run OVERWRITES it (current state, not an ever-growing log)' (
+        @(Get-ChildItem -LiteralPath $accDir -Filter 'acceptance-*.json').Count -eq 1)
+} finally { Remove-Item -LiteralPath $accDir -Recurse -Force -ErrorAction SilentlyContinue }
+# 🔒 Observability must never break the work it observes.
+T 'MSP-3/5: an unwritable location WARNS and returns null -- it never fails the downlink' (
+    $null -eq (Write-PimAcceptanceRecord -Record $acc -Folder ([IO.Path]::Combine('Z:\', 'no-such-drive', 'x')) -Quiet -WarningAction SilentlyContinue))
+
+# 🔒 SCOPE: PIM owes the PAYLOAD. The transport -- an authenticated append-only API in the operator
+# tenant -- is framework SS8.2 and belongs to PlatformMonitoring. A PIM-private transport would
+# bypass the reasoning that made SS8.2 the only inbound path in the estate, so its absence here is
+# deliberate and asserted, not an oversight waiting to be "finished".
+T 'MSP-3/5: PIM does NOT invent a transport (no HTTP POST of the record anywhere in the downlink)' (
+    -not ($dlSrc -match '(?s)New-PimAcceptanceRecord.{0,4000}?Invoke-RestMethod'))
+
+# BEHAVIOURAL, and this is the load-bearing one: drive the REAL orchestrator and prove the
+# veto survives it. A source regex for "dlArgs['BlockedCapabilities']" would stay green if
+# the orchestrator accepted the parameter and then failed to forward it.
+$secWork = Join-Path $env:TEMP ("pim-sec10-" + [guid]::NewGuid().ToString('N').Substring(0,8))
+New-Item -ItemType Directory -Path $secWork -Force | Out-Null
+# 🪤 The catch is NOT decoration. With the parameter undeclared, this call THROWS
+# ("a parameter cannot be found") under $ErrorActionPreference='Stop', which killed the
+# whole suite mid-run during negative verification -- two reds printed and 60 later
+# assertions never ran. A suite that DIES reports less than one that FAILS, so the throw is
+# converted into an explicit red here. It never becomes a pass: the catch fails the
+# assertions outright.
+try {
+    $syncVeto = Invoke-PimManagedDownlink -Scenario 'S6' -Doc $docT.doc -PublicKey $rsaSigner `
+        -TenantId $tid1 -SlaveRing 2 -LocalRoot $secWork `
+        -BlockedCapabilities @('msp-roles') -WhatIfMode
+    T 'SEC-10: the veto SURVIVES the orchestrator -- no roles projected' (@($syncVeto.plan.assignments).Count -eq 0)
+    T '  ...and the orchestrator still reports it as HELD, naming the capability' (
+        @($syncVeto.plan.classHeld).Count -ge 1 -and "$(@($syncVeto.plan.classHeld)[0].reason)" -match 'blocked')
+    # The control. Without it, a broken orchestrator that dropped EVERYTHING would pass the
+    # two assertions above for the wrong reason -- zero roles because zero of anything.
+    $syncOpen = Invoke-PimManagedDownlink -Scenario 'S6' -Doc $docT.doc -PublicKey $rsaSigner `
+        -TenantId $tid1 -SlaveRing 2 -LocalRoot $secWork -WhatIfMode
+    T '  ...CONTROL: the same call WITHOUT a block does project roles' (@($syncOpen.plan.assignments).Count -ge 1)
+} catch {
+    T ("SEC-10: the veto SURVIVES the orchestrator -- no roles projected [THREW: $($_.Exception.Message)]") $false
+    T '  ...and the orchestrator still reports it as HELD, naming the capability [not reached]' $false
+    T '  ...CONTROL: the same call WITHOUT a block does project roles [not reached]' $false
+} finally { Remove-Item -LiteralPath $secWork -Recurse -Force -ErrorAction SilentlyContinue }
+
+# --- SEC-10: reading the customer's OWN manifest (pure) ----------------------
+# Shape is the platform's, matched to SOLUTIONS/PlatformConfiguration/INTERNAL/
+# Sync-AutomateIT-Engine.ps1 -- PIM must not invent a second consent store.
+# Existence first, then the cases -- a call to a missing function THROWS under
+# $ErrorActionPreference='Stop' and takes the rest of the suite with it. Same reason as the
+# try/catch above: during negative verification this block killed the run outright.
+T 'SEC-10: the customer-manifest resolver is defined' ($null -ne (Get-Command Select-PimCustomerBlockedCapabilities -ErrorAction SilentlyContinue))
+if ($null -ne (Get-Command Select-PimCustomerBlockedCapabilities -ErrorAction SilentlyContinue)) {
+$manBlocks = ConvertFrom-Json '{ "Solutions": [ { "Name": "SecurityInsight", "blockCapabilities": ["si-x"] }, { "Name": "PIM4EntraPS", "blockCapabilities": ["msp-roles", "msp-groups"] } ] }'
+$sel = @(Select-PimCustomerBlockedCapabilities -Manifest $manBlocks -Solution 'PIM4EntraPS')
+T 'SEC-10: the customer manifest yields THIS solution blocks' ($sel.Count -eq 2 -and $sel -contains 'msp-roles' -and $sel -contains 'msp-groups')
+T '  ...and never another solution''s' ($sel -notcontains 'si-x')
+T '  ...matching the solution name case-insensitively' (@(Select-PimCustomerBlockedCapabilities -Manifest (ConvertFrom-Json '{ "Solutions": [ { "Name": "pim4entraps", "blockCapabilities": ["msp-roles"] } ] }') -Solution 'PIM4EntraPS').Count -eq 1)
+T '  ...a null manifest blocks nothing (inert, not fail-closed)' (@(Select-PimCustomerBlockedCapabilities -Manifest $null -Solution 'PIM4EntraPS').Count -eq 0)
+T '  ...a manifest with no PIM entry blocks nothing' (@(Select-PimCustomerBlockedCapabilities -Manifest (ConvertFrom-Json '{ "Solutions": [ { "Name": "SecurityInsight" } ] }') -Solution 'PIM4EntraPS').Count -eq 0)
+T '  ...an entry with no blockCapabilities key blocks nothing' (@(Select-PimCustomerBlockedCapabilities -Manifest (ConvertFrom-Json '{ "Solutions": [ { "Name": "PIM4EntraPS" } ] }') -Solution 'PIM4EntraPS').Count -eq 0)
+T '  ...blanks are dropped and duplicates collapse' (@(Select-PimCustomerBlockedCapabilities -Manifest (ConvertFrom-Json '{ "Solutions": [ { "Name": "PIM4EntraPS", "blockCapabilities": ["msp-roles", " ", "msp-roles"] } ] }') -Solution 'PIM4EntraPS').Count -eq 1)
+}
+
+# --- SEC-10: the entry script actually READS it ------------------------------
+T 'SEC-10: the entry script exposes -BlockedCapabilities + -LocalManifestPath' ($syncSrc -match '\$LocalManifestPath' -and $syncSrc -match '\$BlockedCapabilities')
+# 🪤 Backslash is NOT a string escape in PowerShell, so "\\\\" is a TWO-backslash REGEX and
+# can never match a single-backslash path. The first version of this assertion failed against
+# correct code for exactly that reason -- same family as -like treating [pscustomobject] as a
+# character class. When a source assertion fails, suspect the pattern before the code.
+T '  ...reads the CUSTOMER''s own bootstrap manifest, not a PIM-private file' ($syncSrc -match "bootstrap\\Sync-AutomateIT\.json")
+T '  ...through the SHARED resolver, not its own manifest read' ($syncSrc -match 'Resolve-PimCustomerBlockedCapabilities')
+T '  ...and passes it to the orchestrator' ($syncSrc -match "dlArgs\['BlockedCapabilities'\]")
+# 🪤 These three moved from the entry script into the SHARED resolver in PIM-Downlink.ps1 when a
+# second entry point needed them (BUG-79). Asserting them against $syncSrc kept passing right up
+# until the refactor and then failed for the RIGHT reason -- the behaviour had moved, not gone.
+# A source assertion has to name the file the behaviour is IN, or it silently tests the past.
+T '  ...the resolver SAYS SO when there is no manifest (a silent absence is how BUG-29 survived)' ($dlSrc -match 'class gate INERT')
+# 🔒 An unreadable opt-out list must never be read as consent.
+T '  ...and REFUSES the run on a manifest it cannot parse, rather than assuming consent' ($dlSrc -match 'Refusing to run: an unreadable opt-out list')
+
+# --- SEC-10: the capabilities are DECLARED, or the block is silently dropped --
+# Get-PimRingCapabilityDecision iterates DECLARED capabilities only, so a customer
+# blocking an undeclared name produces no Blocked, no Refused and no report at all.
+$secCaps = (Get-Content -Raw (Join-Path $root 'solution.deploy.json') | ConvertFrom-Json).capabilities
+foreach ($c in @('msp-admins','msp-roles','msp-groups')) {
+    $decl = @($secCaps | Where-Object { "$($_.name)" -eq $c })
+    T ("SEC-10: '$c' is DECLARED in solution.deploy.json") ($decl.Count -eq 1)
+    T ("  ...and OPTIONAL (a capability the customer cannot decline is not a consent gate)") ($decl.Count -eq 1 -and [bool]$decl[0].optional)
+}
+# 🪤 Deliberately absent, and asserted absent so nobody "completes the set" by hand: the
+# plan does not gate policies, so declaring msp-policies would advertise a gate that does
+# not exist -- the BUG-29 family. Declare it in the SAME change that gates it.
+T "SEC-10: 'msp-policies' is NOT declared while the plan does not gate it" (@($secCaps | Where-Object { "$($_.name)" -eq 'msp-policies' }).Count -eq 0)
 
 # tags delivered in the SIGNED bundle (a slave cannot read the master's registry)
 $docTags = New-TestSignedBaseline -Rows $tgtAdmins -Signer $rsaSigner -Assignments $tgtAssign -ProjectionPolicy @{}
@@ -847,6 +1188,87 @@ T '  ...but a NON-empty set does withdraw the stale row' ($defLive.removed -eq 1
 
 # clean up the ephemeral keys
 $rsaSigner.Dispose(); $rsaWrong.Dispose()
+
+# ===========================================================================
+Write-Host "`n== IMP-13: an admin the SLAVE's engine could never see must not be created ==" -ForegroundColor Cyan
+# ===========================================================================
+# 🔴 THE DEFECT. The Admins provider limits its live set to accounts matching the slave's own
+# AdminAccountPatterns -- fail-closed, and correctly so. A synced MSP admin lands as
+# `<MSP UserName>@<slave domain>`, so if the slave's conventions do not cover the MSP's prefix the
+# live set EXCLUDES it, the diff reads "not present", and every tick creates it again.
+# 🔑 THE HARM IS NOT THE LOOP, IT IS WHAT THE LOOP LEAVES BEHIND: each pass creates a PRIVILEGED
+# account in the customer's tenant that the customer's own engine will never manage, review or
+# disable. Not creating it is strictly safer than creating one nobody owns.
+# 🔒 AND THE FIX IS NOT TO WIDEN THE CUSTOMER'S PATTERNS FROM OUR SIDE. AdminAccountPatterns is the
+# customer's own fail-closed scoping control; merging the MSP prefix into it would be the master
+# editing a customer's security configuration so that the master's own write succeeds -- exactly
+# what §22 and the MSP-3 consent model forbid. So the plan DETECTS and WITHHOLDS.
+T 'IMP-13: the recognisability core is defined' ($null -ne (Get-Command Select-PimUnrecognisableAdmins -ErrorAction SilentlyContinue))
+$i13 = Select-PimUnrecognisableAdmins -AdminUserNames @('Admin-alice','PIMSCEN-bob','x-Admin-carol') -SlaveAdminPrefixes @('Admin-','x-Admin')
+T '  ...an admin outside the slave''s prefixes is UNRECOGNISED' (@($i13.unrecognised) -contains 'PIMSCEN-bob')
+T '  ...and the ones inside them are not' (
+    @($i13.recognised) -contains 'Admin-alice' -and @($i13.recognised) -contains 'x-Admin-carol' -and @($i13.unrecognised).Count -eq 1)
+T '  ...matching is case-insensitive (a prefix is a convention, not a checksum)' (
+    @((Select-PimUnrecognisableAdmins -AdminUserNames @('ADMIN-dave') -SlaveAdminPrefixes @('Admin-')).unrecognised).Count -eq 0)
+# 🪤 THE LOAD-BEARING DISTINCTION. "No prefixes known" is the S5 master-side case, where we simply
+# cannot see the slave's config. An empty `unrecognised` list then means NOTHING, and a caller that
+# reads it as a clean bill of health has re-created the bug in the reporting layer.
+$i13none = Select-PimUnrecognisableAdmins -AdminUserNames @('PIMSCEN-bob') -SlaveAdminPrefixes @()
+T '  ...with NO prefixes known it reports checked=$false, not "all fine"' (
+    $i13none.checked -eq $false -and @($i13none.unrecognised).Count -eq 0)
+T '  ...and says so in words a reader can act on' ($i13none.reason -match "did not look")
+T '  ...while a known prefix set reports checked=$true' ($i13.checked -eq $true)
+# The reason must name the fix AND whose side it lives on -- an operator cannot repair this from
+# the master, and a message that does not say so sends them looking in the wrong tenant.
+T '  ...the failure names the CUSTOMER''s config as the place to fix it' (
+    $i13.reason -match 'AdminAccountPatterns' -and $i13.reason -match '(?i)customer')
+
+# --- end to end through the real plan ---------------------------------------------------------
+# 🪤 A FRESH SIGNER, and the reason is worth recording: reusing the suite's `$rsaSigner` HERE fails
+# with *"Safe handle has been closed"* -- the ephemeral key has been disposed by the time this
+# block runs at the tail of the file. That surfaces as `baseline verify failed: signature verify
+# threw`, which reads exactly like a signing defect and is not one. A late test must own its key.
+$i13Rsa = [System.Security.Cryptography.RSA]::Create(2048)
+$i13Good = New-TestSignedBaseline -Rows $baselineAdmins -Signer $i13Rsa
+# 🪤 A fixture that proves nothing is this suite's recorded trap, so the CONTROL comes first: the
+# same bundle with matching prefixes must project all three admins. Without it, "0 admins" passes
+# for the most boring possible reason.
+$i13Ctl = Get-PimDownlinkPlan -Scenario 'S6' -Doc $i13Good.doc -PublicKey $i13Rsa `
+    -TenantId $tid -SlaveRing 2 -CentralRoot $cRoot -LocalRoot $lRoot -SlaveAdminPrefixes @('PIMSCEN-')
+T 'IMP-13 CONTROL: with MATCHING prefixes every admin still projects' (
+    $i13Ctl.ok -and @($i13Ctl.admins).Count -eq 3 -and @($i13Ctl.unrecognisedAdmins).Count -eq 0)
+T '  ...and the plan records that it DID check' ($i13Ctl.adminRecognitionChecked -eq $true)
+$i13Bad = Get-PimDownlinkPlan -Scenario 'S6' -Doc $i13Good.doc -PublicKey $i13Rsa `
+    -TenantId $tid -SlaveRing 2 -CentralRoot $cRoot -LocalRoot $lRoot -SlaveAdminPrefixes @('Admin-')
+T 'IMP-13: admins the slave cannot recognise are WITHHELD from the plan' (
+    $i13Bad.ok -and @($i13Bad.admins).Count -eq 0 -and @($i13Bad.unrecognisedAdmins).Count -eq 3)
+T '  ...each carrying the reason and the offending name' (
+    @($i13Bad.unrecognisedAdmins)[0].reason -match 'never see' -and "$(@($i13Bad.unrecognisedAdmins)[0].UserName)".Trim())
+# 🔑 A FIELD, not prose. `retracts` established the rule: a caller asserts the property instead of
+# parsing a log line, and only the field survives someone rewriting the sentence.
+T '  ...and the plan reports it as a FIELD as well as in the reason' (
+    $i13Bad.adminRecognitionChecked -eq $true -and $i13Bad.reason -match 'WITHHELD')
+# 🔒 Inert when not supplied -- the same non-breaking rule as -RingPlan. An existing S5 run that
+# knows nothing about the slave's naming must behave EXACTLY as before.
+$i13Absent = Get-PimDownlinkPlan -Scenario 'S6' -Doc $i13Good.doc -PublicKey $i13Rsa `
+    -TenantId $tid -SlaveRing 2 -CentralRoot $cRoot -LocalRoot $lRoot
+T 'IMP-13: absent prefixes leave the plan byte-identical to before (inert when unset)' (
+    $i13Absent.ok -and @($i13Absent.admins).Count -eq 3 -and @($i13Absent.unrecognisedAdmins).Count -eq 0)
+T '  ...and it reports NOT-CHECKED rather than "none unrecognised"' (
+    $i13Absent.adminRecognitionChecked -eq $false)
+# 🔒 The withholding must NOT be reported as one of the other narrowings -- four causes with one
+# report is four possible fixes and no way to tell them apart, and this one is repaired in the
+# CUSTOMER's naming conventions rather than in a ring or a Target.
+T '  ...and the withheld admins are reported SEPARATELY from targeting and capability holds' (
+    @($i13Bad.notTargeted).Count -eq 0 -and @($i13Bad.classHeld).Count -eq 0)
+# 🔴 THE SECOND HOP, AND THE NEGATIVE RUN IS THE ONLY REASON IT IS HERE. Every behavioural test
+# above calls Get-PimDownlinkPlan DIRECTLY, so deleting the orchestrator's forward to the plan
+# changed NOTHING -- 0 red. That is SEC-10b's exact shape: the gate is declared on the orchestrator,
+# the plan honours it, and the hop between them is unasserted, so it can be removed silently.
+# The gate INVENTORY covers callers OF the orchestrator; this covers what the orchestrator itself
+# passes on, which nothing else does.
+T 'IMP-13: the orchestrator FORWARDS -SlaveAdminPrefixes to the plan (declaring it is not passing it)' (
+    $dlSrc -match "planArgs\['SlaveAdminPrefixes'\]")
 
 Write-Host ""
 Write-Host ("==== Downlink test: {0} passed, {1} failed ====" -f $script:pass, $script:fail) -ForegroundColor $(if ($script:fail) { 'Red' } else { 'Green' })

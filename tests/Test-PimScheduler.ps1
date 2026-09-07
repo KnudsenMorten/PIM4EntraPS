@@ -49,7 +49,14 @@ Assert "tenant-cache cadence inside 24h freshness window" ($tcJob[0].intervalMin
 Initialize-PimDefaultJobHandlers
 Assert "tenant-cache handler registered by default" ((Get-PimJobHandler -Type 'tenant-cache') -ne $null)
 $tcNoop = Invoke-PimScheduledJob -Job ([pscustomobject]@{ name='tc'; type='tenant-cache' }) -NowUtc $now
-Assert "tenant-cache no-ops (logged) without the refresher" ($tcNoop.ok -and $tcNoop.result.ran -eq $false -and $tcNoop.result.detail -like 'no-handler:Invoke-PimTenantListRefresh*')
+# BUG-114 (2026-08-31): this used to assert the handler "no-ops with a clear message". The
+# message was clear; the RECORDED OUTCOME was not -- ok=$true + ran=$false made it status
+# 'completed', which the Jobs view rendered as "no-op", i.e. "there was nothing to do". The
+# handler now DECLARES unimplemented=$true so the record can say what it is. Same intent,
+# stronger assertion: the declaration is what the view reads, so pin that, not the prose.
+Assert "tenant-cache degrades without the refresher (ok, no work done)" ($tcNoop.ok -and $tcNoop.result.ran -eq $false)
+Assert "tenant-cache declares itself UNIMPLEMENTED, not a clean no-op" ([bool]$tcNoop.result.unimplemented)
+Assert "tenant-cache says which seam is missing"    ($tcNoop.result.detail -like 'unimplemented:tenant-cache*' -and $tcNoop.result.detail -like '*_tenantSync*')
 # with a stub refresher present, the handler drives it (and WhatIf writes nothing)
 $script:tcRefreshHits = 0
 function Invoke-PimTenantListRefresh { param([switch]$Quiet) $script:tcRefreshHits++; [ordered]@{ ok=$true; results=@{ 'entra-roles'=@{ ok=$true; count=3 } } } }

@@ -159,15 +159,88 @@ function Invoke-PimSqlChangeDetector {
     $dec  = Test-PimRecalcNeeded -LastSignature "$last" -CurrentSignature $cur
     $triggered = $false
     if ($dec.changed) {
-        # Persist the new signature FIRST so a crash mid-trigger doesn't re-fire forever;
-        # a redundant recalc is safe (idempotent engine), a missed one is not.
-        try { Set-PimSqlSetting -ConnectionString $ConnectionString -Name 'RecalcSignature' -Value $cur } catch { }
+        # 🔴 BUG-64 -- THE OLD ORDER GUARANTEED THE MISS IT WAS TRYING TO AVOID.
+        # This used to persist the signature BEFORE arming the trigger, reasoning that "a redundant
+        # recalc is safe (idempotent engine), a missed one is not". The reasoning is right and the
+        # implementation inverted it: once the signature advanced, the change counted as HANDLED, so
+        # a triggered run that FAILED left nothing to re-fire it.
+        # MEASURED ON HOGYM: a downlink write armed `trigger:engine-delta:All` at 12:10:22Z; that run
+        # died on a 403. With the identity fixed the engine had NOTHING TO DO -- the trigger was long
+        # consumed -- and the staged state would have sat until the daily full-reconcile ~21 hours
+        # later. Re-running the sync (which bumps UpdatedUtc) re-armed it and the next tick applied
+        # everything. So the failure was invisible AND self-healing only by accident.
+        #
+        # The signature now advances only AFTER the trigger is armed, which is the order that
+        # actually delivers "a redundant recalc is safe, a missed one is not": arming twice costs an
+        # idempotent re-run, arming zero times costs a day.
+        $armed = $false
         if (Get-Command Add-PimJobTrigger -ErrorAction SilentlyContinue) {
-            [void](Add-PimJobTrigger -Type 'engine-delta' -Scope $Scope -Reason $Reason)
+            try {
+                [void](Add-PimJobTrigger -Type 'engine-delta' -Scope $Scope -Reason $Reason)
+                $armed = $true
+            } catch {
+                # Do NOT advance the signature: the change is still unhandled, so the next detector
+                # pass must see it again. This is the whole fix.
+                Write-Warning "[cutover] change detected but the trigger could not be armed ($($_.Exception.Message)); the signature is NOT advanced, so the next pass will retry."
+            }
+        }
+        if ($armed) {
+            try { Set-PimSqlSetting -ConnectionString $ConnectionString -Name 'RecalcSignature' -Value $cur } catch { }
             $triggered = $true
         }
     }
     return @{ changed = $dec.changed; signature = $cur; triggered = $triggered }
+}
+
+function Test-PimTriggerRetryAllowed {
+    <#
+      BUG-64's other half, and the reason the fix above was recorded rather than shipped in haste:
+      *"a permanently-failing job must not re-fire forever either -- a failure count belongs in the
+      design."* Framework §8 says the same from the observability side: *"without a ceiling and
+      backoff a permanently broken deploy retries nightly forever and nobody is told, which is the
+      same silence failure wearing different clothes. Exhausting the ceiling is an ALERTABLE event."*
+
+      PURE. Decides whether a failing trigger may be re-armed, given how many times it has already
+      failed. Three outcomes, kept distinct on purpose:
+        retry     -- under the ceiling: re-arm, and say which attempt this is
+        backoff   -- a failure happened too recently; wait rather than hammer a broken dependency
+        exhausted -- at the ceiling: STOP re-arming, and ALERT. Silently retrying forever and
+                     silently giving up are both invisible; this is the point where a human is told.
+
+      🔒 `exhausted` is deliberately NOT "give up quietly". The caller is expected to surface it --
+      an exhausted retry is the strongest signal available that something is broken and unattended,
+      and swallowing it reproduces the exact failure BUG-64 is about one level up.
+    #>
+    [CmdletBinding()]
+    param(
+        [int]$FailureCount = 0,
+        [int]$Ceiling = 5,
+        [AllowNull()][object]$LastAttemptUtc = $null,
+        [int]$BackoffMinutes = 15,
+        [datetime]$NowUtc = ([datetime]::UtcNow)
+    )
+    if ($Ceiling -le 0) { $Ceiling = 5 }
+    if ($FailureCount -ge $Ceiling) {
+        return @{ action = 'exhausted'; attempt = $FailureCount; ceiling = $Ceiling; alert = $true
+                  reason = "the triggered run has failed $FailureCount time(s), reaching the ceiling of $Ceiling. It will NOT be re-armed. This is an alertable event: something is broken and unattended, and continuing to retry silently would hide that as effectively as never retrying." }
+    }
+    if ($null -ne $LastAttemptUtc -and "$LastAttemptUtc".Trim()) {
+        $last = $null
+        try { $last = [datetime]::Parse("$LastAttemptUtc", [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind).ToUniversalTime() } catch { $last = $null }
+        # 🪤 An UNPARSEABLE timestamp must not read as "long ago". Treating it as absent would allow
+        # an immediate retry every pass, which is the hammering the backoff exists to prevent.
+        if ($null -eq $last) {
+            return @{ action = 'backoff'; attempt = $FailureCount; ceiling = $Ceiling; alert = $false
+                      reason = "the last attempt timestamp could not be parsed, so the backoff window cannot be evaluated; waiting rather than assuming it is safe to retry now." }
+        }
+        $mins = ($NowUtc - $last).TotalMinutes
+        if ($mins -lt $BackoffMinutes) {
+            return @{ action = 'backoff'; attempt = $FailureCount; ceiling = $Ceiling; alert = $false
+                      reason = ("the last attempt was {0:N1} minute(s) ago and the backoff window is {1}; waiting." -f $mins, $BackoffMinutes) }
+        }
+    }
+    return @{ action = 'retry'; attempt = ($FailureCount + 1); ceiling = $Ceiling; alert = $false
+              reason = "attempt $($FailureCount + 1) of $Ceiling." }
 }
 
 # --- PERSISTENT-SQL requirement (REQUIREMENTS.md  5 new persistent-SQL req) ------

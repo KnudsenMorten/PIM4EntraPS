@@ -71,6 +71,27 @@ param(
     # refuses, which stays the correct behaviour rather than a silent downgrade.
     [string]$DefaultManagerEmail = $env:PIM_DefaultManagerEmail,
 
+    # --- BUG-79: THE TWO DOWNLINK GATES, on the entry that had NEITHER ---------
+    # This script reaches Invoke-PimManagedDownlink (via Invoke-PimScenarioDeploy) and for a long
+    # time exposed no way to supply either gate -- so a downlink driven through the scenario runner
+    # ran with NO version gate and NO customer veto, silently, while a downlink driven through
+    # Invoke-PimDownlinkSync.ps1 had both. Same engine, same tenant, two different safety postures
+    # depending on which entry point somebody happened to use.
+    # 🔒 The resolution logic is SHARED, not copied: -LocalManifestPath goes through the same
+    # Resolve-PimCustomerBlockedCapabilities the other entry uses, so the refuse-on-unparseable
+    # rule cannot drift between them. Ring map inputs mirror that script's names exactly, for the
+    # same reason -- an operator should not have to learn two vocabularies for one decision.
+    [string]$TemplateRingMapPath,
+    [string]$TemplateRingMapUrl,
+    [string]$TemplateName = 'Baseline',
+    [string]$TemplateChannel = 'managed',
+    [string]$LocalManifestPath,
+    [string[]]$BlockedCapabilities,
+    # IMP-13. The SLAVE's admin naming prefixes, so this entry can supply the same gate the other
+    # one resolves from the slave's own config. Absent => the plan reports admin recognisability as
+    # NOT EVALUATED, which is the honest answer from a runner that may not be inside the slave.
+    [string[]]$SlaveAdminPrefixes,
+
     [int64]$LastVersion = 0,
     [switch]$WhatIfMode = $true
 )
@@ -79,6 +100,12 @@ $ErrorActionPreference = 'Stop'
 $shared = Join-Path (Split-Path -Parent $PSScriptRoot) 'engine\_shared'
 . (Join-Path $shared 'PIM-ScenarioProfile.ps1')   # also dot-sources PIM-Downlink.ps1
 . (Join-Path $shared 'PIM-Baseline.ps1')
+# BUG-79: the vendored platform ring core, for the same reason Invoke-PimDownlinkSync.ps1 loads it.
+# ⚠️ Without this line Get-PimTemplateRingPlan is not merely uncalled, it is UNDEFINED in this
+# process -- which is BUG-29's original shape verbatim ("the gate was not merely called by nobody,
+# its functions were not even DEFINED in any runtime process"). Adding the -TemplateRingMap*
+# parameters without this would have produced a NEW silent no-op while looking like a fix.
+. (Join-Path $shared 'PIM-RingGate.ps1')
 # 🔴 BUG-80 -- THE TOKEN PROVIDER WAS MISSING HERE, AND ITS ABSENCE IS SILENT BY DESIGN.
 # New-PimSqlConnection acquires a token only `if (Get-Command Get-PimRestToken ...)`, so a caller
 # that loads PIM-SqlStore (via PIM-Downlink) WITHOUT PIM-Rest skips token acquisition entirely,
@@ -162,10 +189,66 @@ if ($run.runDownlink) {
     }
 }
 
+# --- BUG-79: resolve BOTH downlink gates before deploying -----------------------
+# Both stay INERT when nothing is supplied, so a run that passes none of these behaves exactly as
+# it did before -- the same non-breaking rule the version gate has carried since BUG-29.
+$srArgs = @{}
+
+# (a) the CUSTOMER's class veto. Explicit wins outright; otherwise the shared resolver reads the
+#     customer's OWN bootstrap manifest (and REFUSES the run if it exists but cannot be parsed).
+if ($PSBoundParameters.ContainsKey('SlaveAdminPrefixes') -and $null -ne $SlaveAdminPrefixes) {
+    $srArgs['SlaveAdminPrefixes'] = @($SlaveAdminPrefixes)
+    Write-Host ("  naming check: slave admin prefixes {0}" -f (@($SlaveAdminPrefixes) -join ', ')) -ForegroundColor Cyan
+}
+if ($PSBoundParameters.ContainsKey('BlockedCapabilities')) {
+    $srArgs['BlockedCapabilities'] = @($BlockedCapabilities)
+    Write-Host ("  customer gate: {0} (explicit -BlockedCapabilities)" -f `
+        $(if (@($BlockedCapabilities).Count) { "blocks $(@($BlockedCapabilities) -join ', ')" } else { 'blocks nothing' })) -ForegroundColor Cyan
+} else {
+    $srBlocked = Resolve-PimCustomerBlockedCapabilities -ManifestPath $LocalManifestPath `
+        -SolutionRoot (Split-Path -Parent $PSScriptRoot) -Solution 'PIM4EntraPS'
+    if ($null -ne $srBlocked) { $srArgs['BlockedCapabilities'] = @($srBlocked) }
+}
+
+# (b) the OPERATOR's version gate (RING-1 plane 2). Same parameter names and same 'managed'
+#     channel default as Invoke-PimDownlinkSync.ps1 -- one decision, one vocabulary.
+$srRingMap = $null
+if ("$TemplateRingMapPath".Trim()) {
+    if (-not (Test-Path -LiteralPath $TemplateRingMapPath)) { throw "template ring map not found: $TemplateRingMapPath" }
+    $srRawMap = Get-Content -LiteralPath $TemplateRingMapPath -Raw
+    $srRingMap = $srRawMap | ConvertFrom-Json
+} elseif ("$TemplateRingMapUrl".Trim()) {
+    $srMapHeaders = @{ 'x-ms-version' = '2021-08-06' }
+    if ("$BaselineAccessToken".Trim()) { $srMapHeaders['Authorization'] = "Bearer $BaselineAccessToken" }
+    $srRawMap = Invoke-RestMethod -Method GET -Uri $TemplateRingMapUrl -Headers $srMapHeaders -ErrorAction Stop
+    if ($srRawMap -is [string]) { $bm = $srRawMap.IndexOf('{'); if ($bm -gt 0) { $srRawMap = $srRawMap.Substring($bm) }; $srRingMap = $srRawMap | ConvertFrom-Json }
+    else { $srRingMap = $srRawMap }
+}
+if ($srRingMap -and "$TenantId".Trim()) {
+    $srPlan = Get-PimTemplateRingPlan -Template $TemplateName -TenantId $TenantId `
+        -Assignments $srRingMap.assignments -Promotions $srRingMap.promotions `
+        -Channel $TemplateChannel -DefaultRing $srRingMap.default
+    $srArgs['RingPlan'] = $srPlan
+    Write-Host ("  ring plan: {0} -> {1}{2}" -f $TemplateName, $srPlan.Action,
+        $(if ("$($srPlan.Version)".Trim()) { " approves v$($srPlan.Version)" } else { '' })) -ForegroundColor Cyan
+} elseif ($run.runDownlink) {
+    # 🪤 `$run.runDownlink` -- NOT `$sc.topology`, which does not exist. The first draft of this
+    # line tested `$sc.topology -eq 'managed'` and would have been silently FALSE on every run:
+    # the descriptor's property is `role` ('msp-managed'), and the canonical "does this scenario
+    # pull a downlink" predicate is `syncAdminsPermissions`, already surfaced here as
+    # `$run.runDownlink`. A comparison against a property that does not exist is $null -ne
+    # 'managed' -- no error, no warning, just a branch that never fires. That is the same silent
+    # class as the gates this whole change is about; caught by printing a descriptor instead of
+    # assuming its shape.
+    # Only worth saying on a run that actually pulls -- S1..S4 never do, so "no ring map" there is
+    # not a gap, and a warning on every single-tenant run would train people to ignore it.
+    Write-Host "  ring map: none supplied -- version gate INERT (pulls whatever version the master published)" -ForegroundColor DarkYellow
+}
+
 $result = Invoke-PimScenarioDeploy -Scenario $sc -EngineScope $EngineScope -EngineMode $EngineMode `
     -Doc $doc -TenantId $TenantId -SlaveRing $SlaveRing `
     -CentralRoot $CentralRoot -LocalRoot $LocalRoot -SqlServer $SqlServer -SqlDatabase $SqlDatabase `
-    -LastVersion $LastVersion -DefaultManagerEmail $DefaultManagerEmail -WhatIfMode:$WhatIfMode
+    -LastVersion $LastVersion -DefaultManagerEmail $DefaultManagerEmail -WhatIfMode:$WhatIfMode @srArgs
 
 Write-Host ""
 $col = if ($result.ok) { 'Green' } else { 'Red' }

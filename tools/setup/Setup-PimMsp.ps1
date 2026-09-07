@@ -45,7 +45,15 @@ param(
     [Parameter(Mandatory)][string]$SqlServerFqdn,           # customer LOCAL sql server
     [string]$SqlDatabase       = 'PimPlatform',
     [Parameter(Mandatory)][string]$SqlAdminClientId,
-    [Parameter(Mandatory)][string]$SqlAdminClientSecret,
+    # ONE of these. 🔴 The secret used to be Mandatory, which made a CLIENT SECRET structurally
+    # required to onboard a customer -- against the repo-root rule ("authenticate as its SPN using
+    # a CERTIFICATE, never a client secret") and impossible to satisfy in a tenant whose admin SPN
+    # is cert-only. 🪤 And the capability was already THERE: Setup-PimContainers.ps1 (the very
+    # script this forwards to) has accepted -SqlAdminCertThumbprint since 2026-08-09, and so has
+    # Grant-PimMiSql beneath it. This caller simply never exposed it -- the same shape as BUG-78,
+    # one level up: the gate exists downstream and nothing can reach it from here.
+    [string]$SqlAdminClientSecret,
+    [string]$SqlAdminCertThumbprint,
     [string]$DnsServer         = '',
 
     # --- image distribution: import the MSP-built image into the customer ACR ---
@@ -73,6 +81,19 @@ param(
     [string]$SyncModel = 'template-pull'
 )
 $ErrorActionPreference = 'Stop'
+
+# EITHER a secret OR a certificate, never both and never neither. Validated HERE, before any
+# resource is touched, because this script deploys a customer's whole topology -- discovering the
+# credential is unusable after the ACR import and the container app is the expensive way to learn
+# it. Mirrors Grant-PimMiSql's contract exactly, so the two cannot drift apart.
+if ($SqlAdminClientSecret -and $SqlAdminCertThumbprint) { throw 'Setup-PimMsp: pass EITHER -SqlAdminClientSecret OR -SqlAdminCertThumbprint, not both.' }
+if (-not $SqlAdminClientSecret -and -not $SqlAdminCertThumbprint) { throw 'Setup-PimMsp: one of -SqlAdminClientSecret / -SqlAdminCertThumbprint is required.' }
+# Splatted so the UNUSED one is ABSENT rather than passed as an empty string: Setup-PimContainers
+# chooses its branch on truthiness, and an empty -SqlAdminClientSecret would look like a supplied
+# credential and silently take the secret path with nothing in it.
+$sqlAdminCred = if ($SqlAdminCertThumbprint) { @{ SqlAdminCertThumbprint = $SqlAdminCertThumbprint } }
+                else                          { @{ SqlAdminClientSecret   = $SqlAdminClientSecret   } }
+
 $here = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent $MyInvocation.MyCommand.Path }
 $solRoot = Split-Path -Parent (Split-Path -Parent $here)
 function Step($m){ Write-Host "==> [MSP:$CustomerName] $m" -ForegroundColor Cyan }
@@ -128,7 +149,7 @@ if ($PSCmdlet.ShouldProcess($CustomerName,'deploy container topology')) {
         -SubnetName $SubnetName -SubnetPrefix $SubnetPrefix -EnvName $EnvName `
         -AcrName $AcrName -ImageRepo $ImageRepo -ImageTag $ImageTag `
         -SqlServerFqdn $SqlServerFqdn -SqlDatabase $SqlDatabase `
-        -SqlAdminClientId $SqlAdminClientId -SqlAdminClientSecret $SqlAdminClientSecret `
+        -SqlAdminClientId $SqlAdminClientId @sqlAdminCred `
         -DnsServer $DnsServer -Workers $workers
 }
 

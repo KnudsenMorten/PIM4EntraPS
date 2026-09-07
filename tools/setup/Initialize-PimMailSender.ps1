@@ -42,7 +42,8 @@
   the finding asked for: there is never a tenant-wide send right to claw back.
 
   🔒 WHICH IDENTITY DOES THE WORK, and why it is not the obvious one.
-  Exchange administration is done by the ONBOARDING SPN (-AdminAppId/-AdminSecret), never by the
+  Exchange administration is done by the ONBOARDING SPN (-AdminAppId plus -AdminSecret OR
+  -AdminCertThumbprint; a certificate is the preferred form), never by the
   engine SPN. The obvious-looking alternative -- grant the engine SPN `Exchange.ManageAsApp` + the
   Exchange Administrator directory role -- hands the LONG-LIVED RUNTIME identity tenant-wide
   Exchange administration in order to create a single mailbox. That is a strictly BIGGER grant than
@@ -75,7 +76,14 @@ param(
     [Parameter(Mandatory)][string]$TenantId,
     # The ONBOARDING SPN -- privileged, provisioning-time. See the identity note above.
     [Parameter(Mandatory)][string]$AdminAppId,
-    [Parameter(Mandatory)][string]$AdminSecret,
+    # ONE of these. 🔴 The secret used to be Mandatory, which made a CLIENT SECRET structurally
+    # required to provision the sender mailbox -- against the repo-root rule ("authenticate as its
+    # SPN using a CERTIFICATE, never a client secret") and unsatisfiable where the onboarding SPN
+    # is cert-only. Grant-PimMiSql was fixed for exactly this on 2026-08-09; this script was not,
+    # and neither were Initialize-PimTenantStore.ps1 or Setup-PimMsp.ps1 -- three instances of one
+    # defect, which is why the offline gate now audits the whole family instead of naming them.
+    [string]$AdminSecret,
+    [string]$AdminCertThumbprint,
     # The engine SPN that will receive scoped Mail.Send. Read from the environment's own Key Vault
     # ('Modern-AppId') when not supplied.
     [string]$EngineAppId,
@@ -101,6 +109,13 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+
+# EITHER a secret OR a certificate, never both and never neither. Checked before anything is
+# provisioned: this script creates a mailbox and grants Exchange rights, and finding out the
+# credential was unusable halfway through leaves a half-configured tenant nobody asked for.
+if ($AdminSecret -and $AdminCertThumbprint) { throw 'Initialize-PimMailSender: pass EITHER -AdminSecret OR -AdminCertThumbprint, not both.' }
+if (-not $AdminSecret -and -not $AdminCertThumbprint) { throw 'Initialize-PimMailSender: one of -AdminSecret / -AdminCertThumbprint is required.' }
+
 $here = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent $MyInvocation.MyCommand.Path }
 $solRoot = Split-Path -Parent (Split-Path -Parent $here)   # ...\SOLUTIONS\PIM4EntraPS
 . (Join-Path $solRoot 'engine\_shared\PIM-Rest.ps1')
@@ -138,6 +153,54 @@ function Fail($reason) {
     exit 1
 }
 
+# =============================================================================================
+# PURE DECISION CORES. Extracted from the step bodies below so they can be TESTED without a
+# tenant -- they were inline, and inline logic in a provisioning script is logic that only ever
+# gets exercised against live infrastructure, one tenant at a time, by somebody watching.
+# These two carry the two traps this whole script exists for, so they are exactly the parts that
+# must not be verified by eye. No network, no state, no Write-Host: data in, decision out.
+# =============================================================================================
+
+function Select-PimExchangeMailboxPlans {
+    <#
+      🪤 THE TRAP THIS ENCODES: `assignedPlans` reporting `exchange = Enabled` is NOT evidence that
+      a mailbox can be created. EXCHANGE_S_FOUNDATION rides along with Entra P2 and reports exactly
+      that while provisioning DIRECTORY OBJECTS ONLY -- `New-Mailbox -Shared` still fails. Measured
+      on a real tenant: the org looked mail-capable and was not, for a reason the status does not
+      hint at.
+      So the signal is an Exchange service plan BEYOND Foundation. Returns the qualifying plan
+      names (sorted, unique); an EMPTY result means "cannot host a mailbox" and is the fatal case.
+      PURE: takes the already-fetched subscribedSkus collection.
+    #>
+    [CmdletBinding()] param([AllowEmptyCollection()][object[]]$SubscribedSkus = @())
+    return @(@($SubscribedSkus).servicePlans |
+        Where-Object { $_.servicePlanName -like '*EXCHANGE*' -and $_.servicePlanName -ne 'EXCHANGE_S_FOUNDATION' } |
+        ForEach-Object { $_.servicePlanName } | Sort-Object -Unique)
+}
+
+function Resolve-PimMailSenderAddress {
+    <#
+      Where the notification mail comes FROM. The domain is the tenant's INITIAL
+      (`onmicrosoft.com`) domain unless -MailDomain overrides it: a freshly-onboarded tenant has no
+      custom domain, and guessing one produces a mailbox nobody can receive from.
+      Returns @{ sender; domain; reason }. `reason` non-empty means it could not be resolved --
+      REPORTED rather than thrown, so the caller decides what is fatal and the decision stays
+      testable.
+      PURE: takes the already-fetched organization object.
+    #>
+    [CmdletBinding()] param($Organization, [string]$MailboxName, [string]$MailDomain)
+    $initial = @(@($Organization.verifiedDomains) | Where-Object { $_.isInitial } | Select-Object -First 1)
+    $initialName = if ($initial.Count) { "$($initial[0].name)".Trim() } else { '' }
+    $domain = if ("$MailDomain".Trim()) { "$MailDomain".Trim() } else { $initialName }
+    $box = "$MailboxName".Trim()
+    if (-not $box)    { return [ordered]@{ sender = ''; domain = $domain; reason = 'no mailbox name was given' } }
+    # 🔒 An unresolved domain is a REFUSAL, not a guess. Inventing one yields a mailbox address
+    # that provisions cleanly and can never receive anything -- the mail-mute failure this script
+    # exists to prevent, arrived at from the other direction.
+    if (-not $domain) { return [ordered]@{ sender = ''; domain = ''; reason = 'could not resolve a mail domain (no initial verified domain on the organization)' } }
+    return [ordered]@{ sender = "$box@$domain"; domain = $domain; reason = '' }
+}
+
 Write-Host ("=" * 78) -ForegroundColor Cyan
 Write-Host " PIM MAIL SENDER (IMP-06)  tenant $TenantId" -ForegroundColor Cyan
 Write-Host ("=" * 78) -ForegroundColor Cyan
@@ -148,7 +211,7 @@ Write-Host ("=" * 78) -ForegroundColor Cyan
 # secret -- it is cert-only -- and this script never gives it one.
 Step 'authenticate (onboarding SPN)'
 try {
-    $graphTok = Get-PimRestToken -Resource 'graph' -TenantId $TenantId -ClientId $AdminAppId -ClientSecret $AdminSecret -Force
+    $graphTok = Get-PimRestToken -Resource 'graph' -TenantId $TenantId -ClientId $AdminAppId -ClientSecret $AdminSecret -CertThumbprint $AdminCertThumbprint -Force
 } catch { Fail "could not acquire a Graph token as the onboarding SPN ($AdminAppId): $($_.Exception.Message)" }
 $GH = @{ Authorization = "Bearer $graphTok"; 'Content-Type' = 'application/json' }
 function Gr {
@@ -187,10 +250,9 @@ try { $skus = @((Gr -Path 'subscribedSkus').value) }
 catch { Fail "could not read subscribedSkus: $($_.Exception.Message)" }
 
 # BEYOND Foundation is the test. Foundation alone = directory objects only, no mailboxes, while
-# assignedPlans still says "exchange = Enabled".
-$exchangePlans = @($skus.servicePlans |
-    Where-Object { $_.servicePlanName -like '*EXCHANGE*' -and $_.servicePlanName -ne 'EXCHANGE_S_FOUNDATION' } |
-    ForEach-Object { $_.servicePlanName } | Sort-Object -Unique)
+# assignedPlans still says "exchange = Enabled". The decision itself is Select-PimExchangeMailboxPlans
+# (pure, tested offline) -- it used to be inline here, where nothing could exercise it.
+$exchangePlans = @(Select-PimExchangeMailboxPlans -SubscribedSkus $skus)
 foreach ($s in $skus) { Note ("sku {0,-28} enabled={1}" -f $s.skuPartNumber, $s.prepaidUnits.enabled) 'DarkGray' }
 
 if (-not $exchangePlans.Count) {
@@ -215,10 +277,10 @@ Add-Result 'precondition' 'ok' ($exchangePlans -join ', ')
 # --- resolve the sender address ------------------------------------------------
 Step 'resolve sender address'
 try { $org = (Gr -Path 'organization').value[0] } catch { Fail "could not read organization: $($_.Exception.Message)" }
-$initialDomain = ($org.verifiedDomains | Where-Object { $_.isInitial } | Select-Object -First 1).name
-$domain = if ("$MailDomain".Trim()) { $MailDomain.Trim() } else { $initialDomain }
-if (-not $domain) { Fail 'could not resolve a mail domain (no initial verified domain on the organization)' }
-$sender = "$MailboxName@$domain"
+$senderPlan = Resolve-PimMailSenderAddress -Organization $org -MailboxName $MailboxName -MailDomain $MailDomain
+if ($senderPlan.reason) { Fail $senderPlan.reason }
+$domain = $senderPlan.domain
+$sender = $senderPlan.sender
 $result.sender = $sender
 Note "sender: $sender" 'Green'
 
@@ -299,7 +361,7 @@ $exoUri = "https://outlook.office365.com/adminapi/beta/$TenantId/InvokeCommand"
 $anchor = "UPN:SystemMailbox{bb558c35-97f1-4cb9-8ff7-d53741dc928c}@$initialDomain"
 function Invoke-Exo {
     param([Parameter(Mandatory)][string]$Cmdlet, [hashtable]$Parameters = @{})
-    $tok = Get-PimRestToken -Resource 'https://outlook.office365.com' -TenantId $TenantId -ClientId $AdminAppId -ClientSecret $AdminSecret -Force
+    $tok = Get-PimRestToken -Resource 'https://outlook.office365.com' -TenantId $TenantId -ClientId $AdminAppId -ClientSecret $AdminSecret -CertThumbprint $AdminCertThumbprint -Force
     $h = @{ Authorization = "Bearer $tok"; 'Content-Type' = 'application/json'
             'X-ResponseFormat' = 'json'; 'X-AnchorMailbox' = $anchor }
     $body = @{ CmdletInput = @{ CmdletName = $Cmdlet; Parameters = $Parameters } } | ConvertTo-Json -Depth 10
@@ -524,7 +586,12 @@ if (-not "$SqlServerFqdn".Trim()) {
     # onboarding SPN is the SQL server's Entra admin, so it is the identity that can write.
     $global:PIM_TenantId     = $TenantId
     $global:PIM_ClientId     = $AdminAppId
-    $global:PIM_ClientSecret = $AdminSecret
+    # Set only the credential that was actually supplied, and CLEAR the other -- a stale
+    # global of the opposite kind would otherwise win inside Get-PimRestToken's chain and
+    # authenticate as something other than what this call asked for. Same reasoning, and the
+    # same two lines, as Grant-PimMiSql.
+    $global:PIM_ClientSecret   = $AdminSecret
+    $global:PIM_CertThumbprint = $AdminCertThumbprint
     $global:PIM_SqlServer    = $SqlServerFqdn
     $global:PIM_SqlDatabase  = $SqlDatabase
     try {

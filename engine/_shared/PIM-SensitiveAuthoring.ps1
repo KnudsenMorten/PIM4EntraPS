@@ -319,6 +319,31 @@ function Test-PimAuthoringCommitAllowed {
     )
     $cls = Get-PimAuthoringSensitivity -Action $Action -Base $Base -Rows $Rows -Preview $Preview
     $target = Get-PimSensitiveAuthoringTarget -Action $Action -Base $Base
+
+    # 🔴 BUG-107 -- THE OPT-IN. Maker/checker is a POLICY CHOICE, not a default.
+    # This gate shipped unconditionally, so a single-administrator deployment could not commit
+    # any privileged change at all: the 409 asks for a SECOND administrator, self-approval is
+    # refused by design, and in that tenant no second administrator exists. The operator hit it
+    # after clearing every other blocker -- "i have not enabled this feature ... that should not
+    # be standard".
+    # 🔑 Enforced in the LIBRARY, not at the four call sites, so no future caller can reintroduce
+    # the unconditional behaviour by forgetting the check. Absent flag machinery => OFF, because
+    # the failure mode of defaulting ON is a deployment nobody can use, while defaulting OFF
+    # merely restores the behaviour every other advanced surface already ships with.
+    $mcOn = $false
+    if (Get-Command Test-PimFeatureAvailable -ErrorAction SilentlyContinue) {
+        try { $mcOn = [bool](Test-PimFeatureAvailable -Key 'makerchecker' -Quiet) } catch { $mcOn = $false }
+    }
+    if (-not $mcOn) {
+        return [pscustomobject]@{
+            allowed = $true; gate = 'makerchecker-disabled'
+            reason = ("second-approver policy is OFF for this deployment (Settings -> features -> " +
+                      "'Second-approver on sensitive changes'); the change is still classified, audited and validated" +
+                      $(if ($cls.sensitive) { " -- flagged sensitive: " + ($cls.reasons -join '; ') } else { '' }))
+            sensitive = [bool]$cls.sensitive; reasons = @($cls.reasons); target = $target; approval = $null
+        }
+    }
+
     if (-not $cls.sensitive) {
         return [pscustomobject]@{
             allowed = $true; gate = 'not-sensitive'
@@ -334,7 +359,16 @@ function Test-PimAuthoringCommitAllowed {
     if (-not $appr) {
         return [pscustomobject]@{
             allowed = $false; gate = 'needs-approval'
-            reason = ("this is a sensitive change (" + ($cls.reasons -join '; ') + ") -- a SECOND administrator must approve it before commit. Raise an 'authoring' approval request for target '" + $target + "'.")
+            # BUG-107: this text is what an admin reads at the moment they are stopped, so it
+            # says WHO must act, WHAT to do, and HOW TO TURN THE POLICY OFF -- the original
+            # named an internal request target and left the reader with no route at all
+            # ("and this is not user friendly").
+            reason = ("Another administrator needs to approve this before it can be committed, " +
+                      "because it changes privileged access (" + ($cls.reasons -join '; ') + "). " +
+                      "Ask a second administrator to approve it on the Approvals page. " +
+                      "If this deployment has only one administrator, turn the second-approver " +
+                      "policy off in Settings -> features -> 'Second-approver on sensitive changes'. " +
+                      "(Approval reference: " + $target + ")")
             sensitive = $true; reasons = @($cls.reasons); target = $target; approval = $null
         }
     }

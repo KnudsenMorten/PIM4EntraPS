@@ -191,6 +191,17 @@ $KnownNonGui = @{
     # dedicated GET /api/template-state is for tooling/tests. The GUI DOES call
     # PUT /api/template-state (the active/disabled toggle), so the write path is wired.
     'GET /api/template-state'      = 'state surfaced via GET /api/templates (disabled field); GUI uses PUT to toggle. Tooling/test reads.'
+    # PENDING-GUI (REQUIREMENTS s35.2): the standalone sign-in-session revoke. The
+    # handler + its pure guard (PIM-SessionRevoke.ps1) exist and are tested; its GUI
+    # is the account-operations GRID, which s35.6 decided on 2026-08-31 and which is
+    # not built yet. Whitelisted DELIBERATELY and TEMPORARILY -- remove this entry the
+    # moment the grid's Revoke sessions button lands, so the check then proves it
+    # stays reachable.
+    'POST /api/admin-sessions/revoke' = 'PENDING-GUI: standalone session revoke (REQUIREMENTS.md s35.2); its surface is the account grid (s35.6, not built yet). Remove this entry when the grid ships.'
+    # NOTE 2026-08-31: /api/directory/people is now WIRED into the GUI -- the Settings
+    # people-pickers (Approvers Identity, Departments Owners chips, Departments Contact)
+    # call it through pimPeopleSource. Removed from this allowlist, as its own entry said
+    # to do; the alignment check now proves the pickers stay reachable.
     # Remaining pending-GUI orphan: handler exists + tested, no GUI surface YET.
     # Has a corresponding (BOX) item in REQUIREMENTS.md s11 to build its panel.
     # NOTE 2026-06-15: cutover (GET+POST), authoring/*, onboarding/*, and

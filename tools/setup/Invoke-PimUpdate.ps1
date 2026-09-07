@@ -100,7 +100,10 @@ param(
     [string]$AcrName       = "$($env:PIM_AcrName)",
     [string]$ImageRepo     = 'pim-manager',
     [string]$ManagerApp    = 'ca-pim-manager',
-    [string[]]$Apps        = @('ca-pim-manager','ca-pim-scheduler','ca-pim-engine','ca-pim-connector','ca-pim-deltaqueue','ca-pim-discovery'),
+    [string[]]$Apps        = # empty = DISCOVER (Update-PimContainers.ps1 enumerates the resource group).
+    # The hard-coded six-app list was wrong for every real topology -- only ca-pim-manager
+    # exists -- and it was copy-pasted into FOUR entry points, so fixing one changed nothing.
+    @(),
     # BUG-48: the scheduled tick Job is rolled by Update-PimContainers along with the apps, off the
     # same resolved digest. Threaded explicitly rather than left to the roller's default -- the
     # default is correct today, and BUG-46 was a value that was correct at the top of a script and
@@ -120,6 +123,8 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 $here    = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent $MyInvocation.MyCommand.Path }
+# Guarded `az` shadow -- see _PimAz.ps1. Must precede the first az call (step 1 DETECT).
+. "$here\_PimAz.ps1"
 $solRoot = Split-Path -Parent (Split-Path -Parent $here)            # SOLUTIONS/PIM4EntraPS
 function Step($m){ Write-Host "==> $m" -ForegroundColor Cyan }
 function Info($m){ Write-Host "    $m" -ForegroundColor DarkGray }
@@ -355,6 +360,10 @@ try {
         Step "2. BUILD ($($buildPlan.buildMode)) -> $ImageRepo`:$($buildPlan.imageTag)"
         $builder = Join-Path $here 'Build-PimManagerImage.ps1'
         if ($PSCmdlet.ShouldProcess("$ImageRepo`:$($buildPlan.imageTag)", 'build from pulled code')) {
+            # BUG-128: $LASTEXITCODE is process-wide and reflects the last NATIVE command, not this
+            # PowerShell script. Clear it first so a stale code from an earlier step cannot be read
+            # back as "the build failed".
+            $global:LASTEXITCODE = 0
             & $builder -ImageTag $buildPlan.imageTag -Source $buildSource -AcrName $AcrName -ImageRepo $ImageRepo
             if ($LASTEXITCODE -and $LASTEXITCODE -ne 0) { throw "Build-PimManagerImage.ps1 failed (exit $LASTEXITCODE)." }
             $built = $true

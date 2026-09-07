@@ -44,6 +44,7 @@
 [CmdletBinding()] param([string]$Server = '.\SQLEXPRESS', [int]$Port = 0)
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
+. (Join-Path $PSScriptRoot '_shared\PimSourceScope.ps1')
 . (Join-Path $PSScriptRoot '_shared\PimManagerBoot.ps1')   # -Port 0 => helper allocates a free port (no fixed-port collision)
 $mgr  = Join-Path $root 'tools\pim-manager\Open-PimManager.ps1'
 
@@ -99,7 +100,7 @@ T 'active-assignments handler does NOT require -ConnectPlatform' `
 # (g) Lazy tenant connect lives in Get-PimActiveAssignmentsCached (calls
 #     Initialize-PimManagerTenantConnection itself) -- so the handler never has to.
 T 'active-assignments resolves the tenant connection lazily (no handler gate)' `
-    ($src -match 'function Get-PimActiveAssignmentsCached[\s\S]{0,1400}Initialize-PimManagerTenantConnection')
+    ((Get-PimSourceFunctionBody -Text $src -Name 'Get-PimActiveAssignmentsCached') -match 'Initialize-PimManagerTenantConnection')
 
 # (h) The engine-SPN connect block runs when the instance carries tenantId (+appId/cert);
 #     i.e. the SQL instance MUST be able to carry connection identity. This is the
@@ -120,7 +121,7 @@ T 'tenant-context assertion emits the "engine SPN context" diagnostic' `
 #     misleading "Cache may be empty -- click Refresh"). It must collect per-surface
 #     errors and report ok=$false + an actionable error. Guard each piece.
 T 'active-assignments builds a per-surface error ledger ($surfaceErrors)' `
-    ($src -match 'function Get-PimActiveAssignmentsCached[\s\S]{0,3000}\$surfaceErrors\s*=\s*New-Object')
+    ((Get-PimSourceFunctionBody -Text $src -Name 'Get-PimActiveAssignmentsCached') -match '\$surfaceErrors\s*=\s*New-Object')
 T 'entra-role fetch failure is recorded, not swallowed' `
     ($src -match "entra-role assignment-schedules load failed[\s\S]{0,260}surface\s*=\s*'entra-role'")
 T 'azure-rbac fetch/scope failure is recorded as a surface error' `

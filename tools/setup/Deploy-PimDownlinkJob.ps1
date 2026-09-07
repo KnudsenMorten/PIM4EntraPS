@@ -111,6 +111,15 @@ param(
     # a tenant whose admin rows carry no ManagerEmail creates accounts nobody can sign in as.
     # Per-admin ManagerEmail from the bundle still wins; this is only the fallback.
     [string]$DefaultManagerEmail,
+    # IMP-13 -- OPERATOR RULING 2026-09-03: "the MSP admin prefix is MANDATORY in a managed tenant;
+    # onboarding refuses a tenant whose naming convention would hide synced admins."
+    # These are the managed tenant's admin naming prefixes, e.g. 'admin-','x-admin'. Required
+    # unless -AllowUncheckedAdminNaming is given.
+    [string[]]$SlaveAdminPrefixes = @(),
+    # 🔒 The deliberate, greppable opt-out. Onboarding a tenant without declaring its convention
+    # leaves the recognisability guard INERT, and the failure that follows is silent and
+    # self-perpetuating -- so it must be an explicit choice someone can find later, not a default.
+    [switch]$AllowUncheckedAdminNaming,
     [string]$SqlServerFqdn,
     [string]$SqlDatabase = 'PimPlatform',
     [string]$SyncRootCentral = '/sync/central',
@@ -361,7 +370,59 @@ if (-not $WhatIfPreference) {
     $envLocation = '<location>'
     Note "WhatIf -- the tag would be resolved to a digest here; plan shows $imageTagRef."
 }
-$yamlPath = Join-Path $env:TEMP "pim-$JobName.yaml"
+# 🔴 KEYED BY RESOURCE GROUP + PID. $JobName defaults per SCENARIO, not per tenant, so every S5
+# slave shares one filename -- and this yaml carries the engine credential and the baseline SAS.
+# Setup-PimContainers had the identical defect and it corrupted a concurrent estate deploy on
+# 2026-09-03 (see the Job-yaml note there). Fixed here at the same time rather than waiting for it
+# to happen a second time on the downlink path, where the file's contents are secrets.
+$yamlPath = Join-Path $env:TEMP "pim-$JobName-$ResourceGroup-$PID.yaml"
+
+# 🔴 REFUSE A SQL-BACKED JOB WITH NO SQL SERVER. Get-PimDownlinkJobEnv emits
+# PIM_StorageBackend=sql and PIM_SqlDatabase UNCONDITIONALLY, but PIM_SqlServer only when one was
+# supplied -- so omitting -SqlServerFqdn produces a Job that declares "my store is SQL", names a
+# database, and never says on which server. The engine then falls back to the local default and
+# the run dies as
+#     Preflight FAILED: cannot reach the desired store (.\SQLEXPRESS/PimPlatform): no SELECT 1
+# which points at SQL Express -- a thing that cannot exist in this container -- instead of at the
+# parameter nobody passed. MEASURED 2026-09-03 onboarding RIDE: the downlink itself succeeded
+# (plan, stage and uplink acceptance all OK) and only the engine apply failed, so the run looked
+# like a store problem rather than a deploy-argument problem.
+# 🪤 It also silently skipped the contained-user grant below, which is guarded on the same value:
+# two consequences, one omission, no warning for either. Session 30 burned three rebuild cycles on
+# exactly this "silent .\SQLEXPRESS default outranking the configured Azure SQL server".
+# 🔒 IMP-13 -- OPERATOR RULING 2026-09-03: the MSP admin prefix is MANDATORY in a managed tenant.
+# THE FAILURE THIS PREVENTS IS SILENT AND SELF-PERPETUATING. A synced MSP admin lands in the
+# customer's tenant as <UserName>@<slave domain>. If the slave's Admins provider scopes on a prefix
+# that does not match, its live set never contains that account -- so the diff says "not present"
+# on EVERY tick, the sync recreates it EVERY tick, and each pass leaves another unmanaged
+# privileged account in a customer's directory. Nothing errors. It just accumulates.
+# 🪤 AND THE GUARD FOR IT ALREADY EXISTED, UNARMED. Select-PimUnrecognisableAdmins withholds those
+# admins rather than creating them, and is careful to report `checked = $false` when no prefixes
+# are known -- "we did not look", explicitly not "they are fine". But the scheduled Job never
+# passed prefixes at all, so every production run took the did-not-look branch. A correct guard
+# that nothing arms is the BUG-29 shape, and it is why this refusal lives at DEPLOY time: that is
+# the last moment a human is present to answer the question.
+if (-not @($SlaveAdminPrefixes | Where-Object { "$_".Trim() }).Count -and -not $AllowUncheckedAdminNaming) {
+    throw ("REFUSING to onboard ${JobName}: -SlaveAdminPrefixes was not supplied, so the IMP-13 " +
+           "recognisability guard would be INERT for every scheduled run. An admin whose name the " +
+           "slave's Admins provider cannot match is never in its live set, so it is recreated on " +
+           "every tick and left unmanaged in the customer's tenant -- silently. " +
+           "Pass -SlaveAdminPrefixes <the managed tenant's admin prefixes, e.g. 'admin-'>, or " +
+           "-AllowUncheckedAdminNaming to accept that risk deliberately.")
+}
+if (@($SlaveAdminPrefixes | Where-Object { "$_".Trim() }).Count) {
+    Note ("IMP-13 admin naming prefixes: {0} (recognisability guard ARMED for every scheduled run)" -f (@($SlaveAdminPrefixes) -join ', '))
+} else {
+    Warn 'IMP-13: -AllowUncheckedAdminNaming given -- the recognisability guard stays INERT for this tenant.'
+}
+
+if (-not "$SqlServerFqdn".Trim()) {
+    throw ("REFUSING to deploy ${JobName}: an S5/S6 downlink Job is SQL-backed by definition " +
+           "(PIM_StorageBackend=sql is always set), but -SqlServerFqdn was not supplied. The Job " +
+           "would name database '$SqlDatabase' with no server, the engine would fall back to " +
+           ".\SQLEXPRESS, and the identity's contained-user grant would be skipped as well. " +
+           "Pass -SqlServerFqdn <the slave's own server>.database.windows.net.")
+}
 
 $plan = Get-PimDownlinkJobDeployPlan -Scenario $Scenario -TenantId $TenantId -SlaveRing $SlaveRing `
     -JobName $JobName -ResourceGroup $ResourceGroup -EnvName $EnvName -Image $image -AcrServer $acrServer `
@@ -370,7 +431,8 @@ $plan = Get-PimDownlinkJobDeployPlan -Scenario $Scenario -TenantId $TenantId -Sl
     -IdentityResourceId $IdentityResourceId -RegistryIdentity $RegistryIdentity -Exists $exists `
     -YamlPath $yamlPath -Location $envLocation -EnvironmentId $envId `
     -EngineClientId $EngineClientId -EngineClientSecret $EngineClientSecret -BaselineSasUrl $BaselineSasUrl `
-    -ManagedIdentityClientId $miClientId -DefaultManagerEmail $DefaultManagerEmail
+    -ManagedIdentityClientId $miClientId -DefaultManagerEmail $DefaultManagerEmail `
+    -SlaveAdminPrefixes $SlaveAdminPrefixes
 
 if (-not $plan.ok) { throw "deploy plan invalid: $($plan.reason)" }
 if ($plan.jobArgs.hasInlineSecret) { throw "REFUSED: the arg set contains an inline secret (must use MI / secret-ref only)." }

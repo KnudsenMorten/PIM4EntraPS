@@ -144,10 +144,35 @@ $ErrorActionPreference = 'Stop'
 $here = Split-Path -Parent $MyInvocation.MyCommand.Path
 if (-not $here) { $here = 'C:\SCRIPTS\AutomateIT\SOLUTIONS\PIM4EntraPS\tests\live' }
 $shared = Resolve-Path (Join-Path $here '..\..\engine\_shared')
+$__sqlServerWasDefaulted = -not "$SqlServer".Trim()
 if (-not $SqlServer)   { $SqlServer = '.\SQLEXPRESS' }
 if (-not $SqlDatabase -and -not $Cleanup) { $SqlDatabase = 'PimPlatform' }
 if (-not $SqlDatabase) { $SqlDatabase = 'PimPlatform' }
 if (-not $StatePath)   { $StatePath = Join-Path $here 'pimscenario-state.json' }
+
+# 🔴 REFUSE TO PUBLISH A FLEET BUNDLE BUILT FROM THE LOCAL SCRATCH DATABASE.
+# Seeding into .\SQLEXPRESS is a legitimate, intended mode -- the offline scenario matrix does
+# exactly that (see the .EXAMPLE above). PUBLISHING is different: -StorageAccount uploads a SIGNED
+# bundle to the blob every managed tenant pulls from, so the store it was built from becomes the
+# fleet's desired state.
+# MEASURED 2026-09-03, seeding a GREENFIELD master: the caller set $global:PIM_SqlServer but this
+# script reads $env:PIM_SqlServer, so the parameter silently fell back to .\SQLEXPRESS. The run
+# then reported success -- "BASELINE PUBLISHED: v2609031347 ... signer EE69B6F6..." -- for a bundle
+# describing a local scratch database that had never seen the master. The only clue was one line,
+# "reading registry from LOCAL SQL .\SQLEXPRESS", among forty lines of green.
+# 🪤 THE GIVEAWAY WAS IN THE OUTPUT AND EASY TO READ PAST: "(no Target column in
+# pim.CentralAdmins)", "(no pim.TenantRoleProjection in this registry)", "(no Tags column in
+# platform.Tenants)" -- the real master store HAS all three (its schema is created by the estate's
+# step 4). Those notes read as "nothing is narrowed", which is a perfectly normal thing for a
+# baseline to say, when they actually meant "you are looking at the wrong database".
+# A signed artifact is exactly the wrong place for a silent default.
+if ($StorageAccount -and $__sqlServerWasDefaulted) {
+    throw ("REFUSING to publish: -StorageAccount '$StorageAccount' was given but no SQL server was " +
+           "specified, so this would build and SIGN a fleet baseline from the local default " +
+           "'$SqlServer'. Pass -SqlServer <the master's server>.database.windows.net (or set " +
+           "`$env:PIM_SqlServer). To seed the local scratch store deliberately, pass " +
+           "-SqlServer '.\SQLEXPRESS' explicitly and it will proceed.")
+}
 
 $global:PIM_UseGraphSdk = $false
 $global:PIM_SqlServer   = $SqlServer

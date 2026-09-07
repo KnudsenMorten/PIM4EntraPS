@@ -48,7 +48,7 @@ T 'the mail-readiness guard exists (shared, in PIM-Notify.ps1)' ((Get-Content -L
 
 # Isolate the reset route so ordering assertions below cannot be satisfied by text elsewhere.
 $resetBlock = ''
-$m = [regex]::Match($srv, "(?s)if \(\`$path -eq '/api/admin-tap/reset'.*?\n        \}\n")
+$m = [regex]::Match($srv, "(?s)if \(\`$path -eq '/api/admin-tap/reset'.*?\r?\n        \}\r?\n")
 if ($m.Success) { $resetBlock = $m.Value }
 T 'the reset route block is isolatable for ordering checks' ([bool]$resetBlock) 'regex did not bound the route'
 
@@ -74,12 +74,12 @@ Write-Host "`n== 4. THE CODE NEVER LEAVES THE MAIL ==" -ForegroundColor Cyan
 # A credential in an HTTP response is a credential in a proxy log, a screenshot and a session
 # history. It goes to the recorded ManagerEmail and nowhere else.
 $respBlock = ''
-$rm = [regex]::Match($resetBlock, '(?s)Write-JsonResponse -Response \$resp -Status 200 -Body @\{.*?\n                \}')
+$rm = [regex]::Match($resetBlock, '(?s)Write-JsonResponse -Response \$resp -Status 200 -Body @\{.*?\r?\n                \}')
 if ($rm.Success) { $respBlock = $rm.Value }
 T 'the 200 response body is isolatable' ([bool]$respBlock)
 T 'the 200 response does NOT carry the TAP code' ($respBlock -notmatch 'temporaryAccessPass|TapCode|\$tap\.temporaryAccessPass')
 $auditBlock = ''
-$am = [regex]::Match($resetBlock, "(?s)Write-PimManagerAuditEvent -Action 'tap\.reset' .*?\n                \}")
+$am = [regex]::Match($resetBlock, "(?s)Write-PimManagerAuditEvent -Action 'tap\.reset' .*?\r?\n                \}")
 if ($am.Success) { $auditBlock = $am.Value }
 T 'the audit record is isolatable' ([bool]$auditBlock)
 T 'the audit record does NOT carry the TAP code' ($auditBlock -notmatch 'temporaryAccessPass|TapCode')
@@ -199,7 +199,7 @@ Write-Host "`n== 9. THE ENGINE PATH -- the scope now HEALS an expired pass (BUG-
 # correct: AdminTap counted ANY pass as satisfied, so a dead one was never replaced.
 $prov = Get-Content -LiteralPath (Join-Path $solRoot 'engine/_shared/PIM-EngineProviders.ps1') -Raw
 $tapProv = ''
-$pm = [regex]::Match($prov, '(?s)function New-PimAdminTapProvider \{.*?\n\}\n')
+$pm = [regex]::Match($prov, '(?s)function New-PimAdminTapProvider \{.*?\r?\n\}\r?\n')
 if ($pm.Success) { $tapProv = $pm.Value }
 T 'the AdminTap provider is isolatable' ([bool]$tapProv)
 

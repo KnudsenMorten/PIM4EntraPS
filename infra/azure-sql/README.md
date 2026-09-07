@@ -3,8 +3,13 @@
 The prod data store: an Azure SQL database reachable **only over a Private
 Endpoint**, **public network access disabled**, **AAD-only auth** (no SQL logins),
 accessed by the Manager/engine via **Managed Identity** (no secret anywhere). The
-same `PIM-SqlStore.ps1` code that runs on local SQL Express targets this by
-connection string alone.
+same `PIM-SqlStore.ps1` code targets any SQL instance by connection string alone.
+
+> **Azure SQL is the store. There is no local default.** `PIM-SqlStore.ps1` used to fall back to
+> `.\SQLEXPRESS` when no server was configured; it no longer does — an unconfigured store is a
+> refusal, not a quiet connection to whatever database happens to be on the machine. That default
+> had already produced two false greens (a live matrix running against a database nobody deployed,
+> and a torn-down tenant still reporting green because local desired state outlived it).
 
 ## Files
 - `main.bicep` — the server (AAD-only, public access disabled, TLS 1.2), database,
