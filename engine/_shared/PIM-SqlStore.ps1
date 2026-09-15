@@ -1,4 +1,4 @@
-# PIM4EntraPS -- SQL data store (the SQL-only data layer).
+﻿# PIM4EntraPS -- SQL data store (the SQL-only data layer).
 # Dot-sourced by PIM-Functions.psm1 (uses PIM-ChangeQueue.ps1 for the commit
 # plan) and the pim-manager.
 #
@@ -125,6 +125,25 @@ function New-PimSqlConnection {
             $sqlThumb = if ($global:PIM_SqlCertThumbprint) { $global:PIM_SqlCertThumbprint } else { $global:PIM_CertThumbprint }
             $explicitSpn = [bool]("$sqlCid".Trim()) -and ([bool]("$sqlSec".Trim()) -or [bool]("$sqlThumb".Trim()))
 
+            # 🔴 §52.18 -- REUSE THE TOKEN, OR EVERY CONNECTION GETS ITS OWN POOL.
+            # ADO.NET pools physical sessions per connection string AND per access token. Minting a
+            # FRESH token for every connection therefore fragments the pool: each token opens its
+            # own set of sessions instead of reusing the ones already there, and they are held for
+            # the pool's lifetime. Against a Basic-tier database (300 sessions) that is a ceiling a
+            # normal import can actually reach -- measured at a live customer 2026-09-09, where a
+            # CSV migration failed halfway with "The session limit for the database is 300 and has
+            # been reached", after the morning's deploys, the Manager and the tick job had each
+            # contributed their own pools.
+            # 🪤 The mint is also not free: every connection paid a token round-trip.
+            # Cached per (identity, resource) for slightly less than the token's own lifetime, so a
+            # long run still refreshes before expiry rather than failing mid-way.
+            $tokKey = "sql|$sqlCid|$($sqlThumb)|$([bool]$sqlSec)"
+            if ($script:PimSqlTokenCache -and
+                $script:PimSqlTokenCache.key -eq $tokKey -and
+                $script:PimSqlTokenCache.expires -gt (Get-Date).ToUniversalTime()) {
+                $tok = $script:PimSqlTokenCache.token
+            }
+
             # 🔴 BUG-77 -- SAY WHICH BRANCH RAN AND WHICH IDENTITY IT ASKED FOR, ONCE PER PROCESS.
             # Every branch below was silent on success and the MI branch is a plain `if`, so being
             # SKIPPED produced no output at all. The result: "no [mi] line, no [sql] warning, and a
@@ -139,8 +158,8 @@ function New-PimSqlConnection {
                              elseif ($env:PIM_ManagedIdentityClientId) { "user-assigned $($env:PIM_ManagedIdentityClientId)" } else { 'default (system, or the only one attached)' }
                 $credKind = if ("$sqlSec".Trim()) { 'secret' } elseif ("$sqlThumb".Trim()) { "cert $sqlThumb" }
                             elseif ($env:AZURE_CLIENT_SECRET) { 'secret via $env:AZURE_CLIENT_SECRET (NOT counted by $explicitSpn)' } else { 'none' }
-                Write-Warning ("  [sql] auth plan: explicitSpn={0} sqlClientId='{1}' credential={2} | MI available={3} identity={4}" -f `
-                                $explicitSpn, "$sqlCid", $credKind, $miAvail, $miIdLabel)
+                Write-Host ("  [sql] auth plan: explicitSpn={0} sqlClientId='{1}' credential={2} | MI available={3} identity={4}" -f `
+                                $explicitSpn, "$sqlCid", $credKind, $miAvail, $miIdLabel) -ForegroundColor DarkGray
             }
             # 🪤 ONCE PER PROCESS, NOT ONCE PER CONNECTION. The first version of this logged the
             # winning branch on EVERY connection: a single downlink run emitted ~80 identical
@@ -150,7 +169,7 @@ function New-PimSqlConnection {
             if (-not $tok -and $explicitSpn) {
                 $spnErr = $null
                 try { $tok = Get-PimRestToken -Resource 'https://database.windows.net' -ClientId $sqlCid -ClientSecret $sqlSec -CertThumbprint $sqlThumb
-                      if ($tok -and -not $script:PimSqlSourceLogged) { $script:PimSqlSourceLogged = $true; Write-Warning "  [sql] token source: EXPLICIT SPN $sqlCid" } }
+                      if ($tok -and -not $script:PimSqlSourceLogged) { $script:PimSqlSourceLogged = $true; Write-Host -ForegroundColor DarkGray "  [sql] token source: EXPLICIT SPN $sqlCid" } }
                 catch { $spnErr = "$($_.Exception.Message)"; Write-Warning "  [sql] SPN token failed: $spnErr" }
                 # =============================================================================
                 # 🔴 SEC-12b -- SAME DEFECT AS SEC-12, ONE LAYER DOWN, AND IT WAS STILL LIVE.
@@ -180,7 +199,7 @@ function New-PimSqlConnection {
             }
             if (-not $tok -and $miAvail) {
                 try { $tok = Get-PimRestToken -Resource 'https://database.windows.net' -UseManagedIdentity
-                      if ($tok -and -not $script:PimSqlSourceLogged) { $script:PimSqlSourceLogged = $true; Write-Warning '  [sql] token source: MANAGED IDENTITY' } }
+                      if ($tok -and -not $script:PimSqlSourceLogged) { $script:PimSqlSourceLogged = $true; Write-Host '  [sql] token source: MANAGED IDENTITY' -ForegroundColor DarkGray } }
                 catch { Write-Warning "  [sql] MI token failed: $($_.Exception.Message)" }
             }
             elseif (-not $tok -and -not $miAvail -and -not $script:PimSqlSourceLogged) {
@@ -195,7 +214,7 @@ function New-PimSqlConnection {
                 # itself. That is exactly how a container ends up presenting the ENGINE SPN to SQL
                 # while every log line suggests managed identity -- so it names the source too.
                 try { $tok = Get-PimRestToken -Resource 'https://database.windows.net' -ClientId $sqlCid -ClientSecret $sqlSec -CertThumbprint $sqlThumb
-                      if ($tok -and -not $script:PimSqlSourceLogged) { $script:PimSqlSourceLogged = $true; Write-Warning "  [sql] token source: FALLBACK SPN $sqlCid (credential resolved inside Get-PimRestToken, e.g. \$env:AZURE_CLIENT_SECRET)" } }
+                      if ($tok -and -not $script:PimSqlSourceLogged) { $script:PimSqlSourceLogged = $true; Write-Host -ForegroundColor DarkGray "  [sql] token source: FALLBACK SPN $sqlCid (credential resolved inside Get-PimRestToken, e.g. \$env:AZURE_CLIENT_SECRET)" } }
                 catch { Write-Warning "  [sql] SPN token failed: $($_.Exception.Message)" }
             }
             if (-not $tok) { Write-Warning '  [sql] NO TOKEN was obtained by any branch -- the connection will present no credential.' }
@@ -203,8 +222,28 @@ function New-PimSqlConnection {
         # Last-resort: an explicitly pre-pinned token (e.g. a caller that minted its own).
         if (-not $tok -and $global:PIM_SqlAccessToken) { $tok = $global:PIM_SqlAccessToken }
         if ($tok) {
-            try { $c.AccessToken = "$tok" } catch { Write-Warning "  [sql] set AccessToken failed: $($_.Exception.Message)" }
-            $global:PIM_SqlAccessToken = $tok   # keep the freshest token visible for diagnostics/last-resort
+            # 🔴 §70 (2026-09-13) -- THE POOL IS KEYED ON THE TOKEN *OBJECT*, NOT ITS TEXT.
+            # This line used to be `$c.AccessToken = "$tok"`. The quotes build a NEW string on every
+            # call, and System.Data.SqlClient then gives every connection its OWN pool -- so §52.18's
+            # token cache (below) never actually shared a session. MEASURED against internal's store,
+            # same token value, 10 open/close each: assigning the cached object -> 1 session; assigning
+            # "$tok" -> 10 sessions. Live effect: the Manager held 223 sleeping sessions after one page
+            # load, the Basic database hit "The session limit for the database is 300", and every query
+            # paid a full TLS + Entra login, which is why Home/Admins took ~3 minutes.
+            # 🔑 So: ONE string instance per token, stored once, and that same instance is assigned
+            # to every connection. Never interpolate, concatenate or re-cast it on the way in.
+            $cacheHit = $script:PimSqlTokenCache -and "$($script:PimSqlTokenCache.key)" -eq "$tokKey" -and
+                        [object]::ReferenceEquals($script:PimSqlTokenCache.token, $tok)
+            if (-not $cacheHit) {
+                # A freshly acquired token: store it ONCE. The expiry is stamped only here -- it used to
+                # be re-stamped on every cache hit, so under steady use the 45-minute refresh never came
+                # and a long-running Manager would eventually present an expired token.
+                # 45 minutes is comfortably inside an Entra token's hour.
+                $script:PimSqlTokenCache = @{ key = "$tokKey"; token = $tok
+                                              expires = (Get-Date).ToUniversalTime().AddMinutes(45) }
+            }
+            try { $c.AccessToken = $script:PimSqlTokenCache.token } catch { Write-Warning "  [sql] set AccessToken failed: $($_.Exception.Message)" }
+            $global:PIM_SqlAccessToken = $script:PimSqlTokenCache.token   # freshest token, for diagnostics/last-resort
         }
         else {
             # BUG-33: name the CAUSE. The common one is not "auth failed" but "the token provider
@@ -345,7 +384,7 @@ function Invoke-PimSqlQuery {
         $rd = $cmd.ExecuteReader(); $rows = New-Object System.Collections.Generic.List[object]
         while ($rd.Read()) { $o = [ordered]@{}; for ($i = 0; $i -lt $rd.FieldCount; $i++) { $o[$rd.GetName($i)] = $(if ($rd.IsDBNull($i)) { $null } else { $rd.GetValue($i) }) }; $rows.Add([pscustomobject]$o) }
         $rd.Close(); return $rows.ToArray()
-    } finally { $c.Close() }
+    } finally { if ($c) { $c.Close(); $c.Dispose() } }   # §52.18: Dispose, not just Close -- see Set-PimSqlEntityRows
 }
 
 function Invoke-PimSqlNonQuery {
@@ -355,7 +394,7 @@ function Invoke-PimSqlNonQuery {
         $c.Open(); $cmd = $c.CreateCommand(); $cmd.CommandText = $Sql
         foreach ($k in $Parameters.Keys) { [void]$cmd.Parameters.AddWithValue("@$k", $(if ($null -eq $Parameters[$k]) { [DBNull]::Value } else { $Parameters[$k] })) }
         return $cmd.ExecuteNonQuery()
-    } finally { $c.Close() }
+    } finally { if ($c) { $c.Close(); $c.Dispose() } }
 }
 
 function Invoke-PimSqlScalar {
@@ -365,7 +404,7 @@ function Invoke-PimSqlScalar {
         $c.Open(); $cmd = $c.CreateCommand(); $cmd.CommandText = $Sql
         foreach ($k in $Parameters.Keys) { [void]$cmd.Parameters.AddWithValue("@$k", $(if ($null -eq $Parameters[$k]) { [DBNull]::Value } else { $Parameters[$k] })) }
         return $cmd.ExecuteScalar()
-    } finally { $c.Close() }
+    } finally { if ($c) { $c.Close(); $c.Dispose() } }
 }
 
 function Initialize-PimSqlDatabase {
@@ -431,9 +470,44 @@ CREATE TABLE pim.AuditEvents (
 );
 IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'IX_pim_AuditEvents_Ts')
 CREATE INDEX IX_pim_AuditEvents_Ts ON pim.AuditEvents (Ts DESC);
+-- 2026-09-13 (SQL-only). The Manager's tenant-list caches (entra-roles, aus, pim-groups,
+-- azure-scopes, azure-rbac-roles, auth-methods, pim-activity, tenant-org) used to be JSON files
+-- under tools/pim-manager/cache/<instance>/. One row per kind; the database IS the instance, so
+-- there is no instance column. RefreshedUtc is the freshness stamp the validator reads.
+IF OBJECT_ID('pim.TenantCache') IS NULL
+CREATE TABLE pim.TenantCache (
+    Kind          NVARCHAR(64)  NOT NULL CONSTRAINT PK_pim_TenantCache PRIMARY KEY,
+    ValueJson     NVARCHAR(MAX) NULL,
+    RefreshedUtc  DATETIME2     NULL,
+    UpdatedUtc    DATETIME2     NOT NULL CONSTRAINT DF_TenantCache_Updated DEFAULT SYSUTCDATETIME()
+);
+-- Schema conformance for a table created by an earlier build: add any column it lacks (additive only).
+IF COL_LENGTH('pim.TenantCache','ValueJson') IS NULL ALTER TABLE pim.TenantCache ADD ValueJson NVARCHAR(MAX) NULL;
+IF COL_LENGTH('pim.TenantCache','RefreshedUtc') IS NULL ALTER TABLE pim.TenantCache ADD RefreshedUtc DATETIME2 NULL;
+IF COL_LENGTH('pim.TenantCache','UpdatedUtc') IS NULL ALTER TABLE pim.TenantCache ADD UpdatedUtc DATETIME2 NOT NULL CONSTRAINT DF_TenantCache_Updated2 DEFAULT SYSUTCDATETIME();
 "@
     [void](Invoke-PimSqlNonQuery -ConnectionString $ConnectionString -Sql $ddl)
     [void](Invoke-PimSqlNonQuery -ConnectionString $ConnectionString -Sql (Get-PimChangeQueueDdl))
+}
+
+# --- tenant-list cache (pim.TenantCache) -------------------------------------------
+function Set-PimSqlTenantCache {
+    # Upsert one cache kind. -Value is the whole document (e.g. @{ refreshedUtc; items }).
+    param([Parameter(Mandatory)][string]$ConnectionString, [Parameter(Mandatory)][string]$Kind, [object]$Value, [datetime]$RefreshedUtc = [datetime]::UtcNow)
+    $json = if ($null -ne $Value) { $Value | ConvertTo-Json -Depth 12 -Compress } else { $null }
+    [void](Invoke-PimSqlNonQuery -ConnectionString $ConnectionString -Sql @"
+MERGE pim.TenantCache AS t USING (SELECT @k AS Kind) AS s ON t.Kind = s.Kind
+WHEN MATCHED THEN UPDATE SET ValueJson=@v, RefreshedUtc=@r, UpdatedUtc=SYSUTCDATETIME()
+WHEN NOT MATCHED THEN INSERT (Kind, ValueJson, RefreshedUtc, UpdatedUtc) VALUES (@k, @v, @r, SYSUTCDATETIME());
+"@ -Parameters @{ k = $Kind; v = $json; r = $RefreshedUtc.ToUniversalTime() })
+}
+
+function Get-PimSqlTenantCache {
+    # One cache kind, parsed; $null when the kind has never been written.
+    param([Parameter(Mandatory)][string]$ConnectionString, [Parameter(Mandatory)][string]$Kind)
+    $j = Invoke-PimSqlScalar -ConnectionString $ConnectionString -Sql "SELECT ValueJson FROM pim.TenantCache WHERE Kind=@k" -Parameters @{ k = $Kind }
+    if ($null -eq $j -or $j -is [System.DBNull] -or "$j".Trim() -eq '') { return $null }
+    return ($j | ConvertFrom-Json)
 }
 
 # --- row CRUD -------------------------------------------------------------------
@@ -469,40 +543,323 @@ function Remove-PimSqlRow {
 
 # --- SQL-backed change queue (mirrors the JSON adapter) -------------------------
 function Add-PimSqlQueueChange {
+    # §65 -- carries Kind/Origin/Justification. Both dimensions default at the DDL level to
+    # DesiredState/Proposal, so a caller built before §65 (or one that passes a bare change record)
+    # enqueues exactly what it always did.
+    # 🔒 Status is hard-coded 'pending'. There is deliberately NO way to enqueue something already
+    # committed -- committing is an operator act on a stored row (§65.7), never a property of the
+    # insert. A caller that could mint a committed entry would bypass the whole review surface.
     param([Parameter(Mandatory)][string]$ConnectionString, [Parameter(Mandatory)][object]$Change)
     $payload = if ($null -ne $Change.payload) { $Change.payload | ConvertTo-Json -Depth 12 -Compress } else { $null }
+    $kind    = if ("$($Change.kind)".Trim())   { "$($Change.kind)" }   else { 'DesiredState' }
+    $origin  = if ("$($Change.origin)".Trim()) { "$($Change.origin)" } else { 'Proposal' }
+    $just    = if ("$($Change.justification)".Trim()) { "$($Change.justification)" } else { $null }
     [void](Invoke-PimSqlNonQuery -ConnectionString $ConnectionString -Sql @"
-INSERT INTO pim.ChangeQueue (Id, Entity, [Key], Op, Payload, EnqueuedUtc, [By], Status)
-VALUES (@id, @e, @k, @op, @p, @enq, @by, 'pending');
-"@ -Parameters @{ id = [guid]$Change.id; e = "$($Change.entity)"; k = "$($Change.key)"; op = "$($Change.op)"; p = $payload; enq = [datetime]$Change.enqueuedUtc; by = "$($Change.by)" })
+INSERT INTO pim.ChangeQueue (Id, Entity, [Key], Op, Payload, EnqueuedUtc, [By], Status, Kind, Origin, Justification)
+VALUES (@id, @e, @k, @op, @p, @enq, @by, 'pending', @kind, @origin, @just);
+"@ -Parameters @{ id = [guid]$Change.id; e = "$($Change.entity)"; k = "$($Change.key)"; op = "$($Change.op)"; p = $payload; enq = [datetime]$Change.enqueuedUtc; by = "$($Change.by)"; kind = $kind; origin = $origin; just = $just })
+}
+
+function Set-PimSqlQueueCommitted {
+    <#
+      §65.7 -- COMMIT THE ENTRIES THE OPERATOR SELECTED. Per-id, never "everything pending".
+
+      🔒 THE TRANSITION IS CONDITIONAL (`WHERE Id=@id AND Status='pending'`), which is what makes
+      this safe with several admins working at once. Two people committing the same entry: the
+      first moves it, the second's UPDATE affects 0 rows and is reported back as 'skipped' with the
+      state it is actually in. The loser is TOLD, never silently ignored -- a commit that appears to
+      succeed twice is how a revoke gets applied twice.
+
+      Returns one record per requested id: @{ id; committed; state; reason }.
+    #>
+    param(
+        [Parameter(Mandatory)][string]$ConnectionString,
+        [Parameter(Mandatory)][string[]]$Ids,
+        [Parameter(Mandatory)][string]$By
+    )
+    $out = New-Object System.Collections.Generic.List[object]
+    foreach ($raw in @($Ids)) {
+        $id = "$raw".Trim()
+        if (-not $id) { continue }
+        $g = [guid]::Empty
+        if (-not [guid]::TryParse($id, [ref]$g)) {
+            $out.Add([pscustomobject]@{ id = $id; committed = $false; state = 'invalid'; reason = 'not a GUID' }); continue
+        }
+        $n = Invoke-PimSqlNonQuery -ConnectionString $ConnectionString -Sql @"
+UPDATE pim.ChangeQueue
+   SET Status='committed', CommittedBy=@by, CommittedUtc=SYSUTCDATETIME()
+ WHERE Id=@id AND Status='pending';
+"@ -Parameters @{ id = $g; by = "$By" }
+        if ([int]$n -eq 1) {
+            $out.Add([pscustomobject]@{ id = $id; committed = $true; state = 'committed'; reason = '' })
+        } else {
+            # Say WHAT it is now. "0 rows" alone cannot distinguish "already committed by a
+            # colleague" from "this id does not exist", and those need different responses.
+            $cur = @(Invoke-PimSqlQuery -ConnectionString $ConnectionString -Sql "SELECT Status FROM pim.ChangeQueue WHERE Id=@id" -Parameters @{ id = $g })
+            $state = if ($cur.Count) { "$($cur[0].Status)" } else { 'missing' }
+            $reason = if ($state -eq 'missing') { 'no such queue entry' } else { "already '$state' -- only a pending entry can be committed" }
+            $out.Add([pscustomobject]@{ id = $id; committed = $false; state = $state; reason = $reason })
+        }
+    }
+    return @($out.ToArray())
+}
+
+function Get-PimDesiredStateSignature {
+    <#
+      A CHEAP change-detector for one entity's desired state, used to invalidate the
+      convergence-verification cache (Get-PimConvergenceScopePlan) without re-reading rows.
+
+      COUNT(*) + MAX(UpdatedUtc) over pim.Rows for the entity: an insert or delete moves the
+      count, any edit moves the timestamp (Set-PimSqlRow stamps UpdatedUtc=SYSUTCDATETIME() on
+      both the MATCHED and NOT MATCHED branch). So any Manager commit touching this entity
+      changes the signature and forces a fresh verification -- which is the property that makes
+      caching safe: a newly-authored delegation is re-verified at once, not on a slow cycle.
+
+      Returns '' when the signature cannot be read. 🪤 The CALLER MUST treat '' as "unknown, so
+      verify" and never as "unchanged" -- reading an error as a negative result is the exact
+      mistake that let BUG-134 hide.
+    #>
+    param([Parameter(Mandatory)][string]$ConnectionString, [Parameter(Mandatory)][string]$Entity)
+    try {
+        $r = @(Invoke-PimSqlQuery -ConnectionString $ConnectionString `
+                -Sql "SELECT COUNT(*) AS N, MAX(UpdatedUtc) AS M FROM pim.Rows WHERE Entity=@e" `
+                -Parameters @{ e = $Entity })
+        if (-not $r.Count) { return '' }
+        $n = "$($r[0].N)"
+        $m = if ($null -ne $r[0].M -and "$($r[0].M)".Trim()) { ([datetime]$r[0].M).ToString('o') } else { 'none' }
+        return "$Entity|$n|$m"
+    } catch { return '' }
 }
 
 function Get-PimSqlQueue {
-    param([Parameter(Mandatory)][string]$ConnectionString, [string]$Status = 'pending')
-    $raw = Invoke-PimSqlQuery -ConnectionString $ConnectionString -Sql "SELECT Id, Entity, [Key], Op, Payload, EnqueuedUtc, [By], Status FROM pim.ChangeQueue WHERE Status=@s ORDER BY EnqueuedUtc" -Parameters @{ s = $Status }
+    <#
+      §65.7 -- THIS IS THE SHARED REVIEW SURFACE, so it returns everything a reviewer needs to judge
+      an entry: who enqueued it, why, who committed it, and what happened on the last attempt.
+      -Status '' returns ALL states (the GUI's default view: a queue that hides its failures is not
+      a review surface).
+    #>
+    param(
+        [Parameter(Mandatory)][string]$ConnectionString,
+        [string]$Status = 'pending',
+        [ValidateSet('','DesiredState','Action')][string]$Kind = ''
+    )
+    $where = New-Object System.Collections.Generic.List[string]
+    $p = @{}
+    if ("$Status".Trim()) { $where.Add('Status=@s'); $p['s'] = $Status }
+    if ("$Kind".Trim())   { $where.Add('Kind=@kd');  $p['kd'] = $Kind }
+    # The discard columns are ADDITIVE (2026-09-12). Select them only when the store has them, so an
+    # engine/drain running against a store the Manager has not migrated yet keeps working unchanged.
+    $hasDiscard = $false
+    try {
+        $colLen = Invoke-PimSqlScalar -ConnectionString $ConnectionString -Sql "SELECT COL_LENGTH('pim.ChangeQueue','DiscardedBy')"
+        $hasDiscard = ($null -ne $colLen -and -not ($colLen -is [System.DBNull]) -and "$colLen".Trim() -ne '')
+    } catch { $hasDiscard = $false }
+    $discardCols = if ($hasDiscard) { ', DiscardedBy, DiscardedUtc, DiscardReason' } else { '' }
+    $sql = "SELECT Id, Entity, [Key], Op, Payload, EnqueuedUtc, [By], Status, Kind, Origin, Justification, CommittedBy, CommittedUtc, Attempts, LastAttemptUtc, LastError, AppliedUtc, AppliedBy$discardCols FROM pim.ChangeQueue"
+    if ($where.Count) { $sql += ' WHERE ' + ($where -join ' AND ') }
+    $sql += ' ORDER BY EnqueuedUtc'
+    $raw = Invoke-PimSqlQuery -ConnectionString $ConnectionString -Sql $sql -Parameters $p
+    $iso = { param($v) if ($null -ne $v -and "$v".Trim()) { ([datetime]$v).ToString('o') } else { '' } }
     return @($raw | ForEach-Object {
         [pscustomobject]@{ id = "$($_.Id)"; entity = "$($_.Entity)"; key = "$($_.Key)"; op = "$($_.Op)"
             payload = $(if ("$($_.Payload)".Trim()) { $_.Payload | ConvertFrom-Json } else { $null })
-            enqueuedUtc = ([datetime]$_.EnqueuedUtc).ToString('o'); by = "$($_.By)"; status = "$($_.Status)" }
+            enqueuedUtc = (& $iso $_.EnqueuedUtc); by = "$($_.By)"; status = "$($_.Status)"
+            kind = "$($_.Kind)"; origin = "$($_.Origin)"; justification = "$($_.Justification)"
+            committedBy = "$($_.CommittedBy)"; committedUtc = (& $iso $_.CommittedUtc)
+            attempts = [int]"$(if ($null -ne $_.Attempts) { $_.Attempts } else { 0 })"
+            lastAttemptUtc = (& $iso $_.LastAttemptUtc); lastError = "$($_.LastError)"
+            appliedUtc = (& $iso $_.AppliedUtc); appliedBy = "$($_.AppliedBy)"
+            discardedBy = $(if ($hasDiscard) { "$($_.DiscardedBy)" } else { '' })
+            discardedUtc = $(if ($hasDiscard) { (& $iso $_.DiscardedUtc) } else { '' })
+            discardReason = $(if ($hasDiscard) { "$($_.DiscardReason)" } else { '' }) }
     })
 }
 
-# --- the fast commit: drain the queue as a DELTA against pim.Rows ----------------
-function Invoke-PimSqlCommit {
-    # Apply the pending queue's NET plan to pim.Rows, then mark the changes applied.
-    # This is the "hit commit -> change populates fast" path (no full sweep).
-    param([Parameter(Mandatory)][string]$ConnectionString)
-    $pending = @(Get-PimSqlQueue -ConnectionString $ConnectionString -Status 'pending')
-    if ($pending.Count -eq 0) { return [pscustomobject]@{ applied = 0; rowsAffected = 0 } }
-    $plan = @(Get-PimQueueApplyPlan -Queue $pending)   # pure fold + ordering (PIM-ChangeQueue.ps1)
-    $affected = 0
-    foreach ($ch in $plan) {
-        if ($ch.op -eq 'Remove') { Remove-PimSqlRow -ConnectionString $ConnectionString -Entity "$($ch.entity)" -Key "$($ch.key)" }
-        else { Set-PimSqlRow -ConnectionString $ConnectionString -Entity "$($ch.entity)" -Key "$($ch.key)" -Data $ch.payload }
-        $affected++
+function Set-PimSqlQueueDiscarded {
+    <#
+      DISCARD selected queue entries (2026-09-12). Operator: a failed test row "cannot be removed".
+
+      🔒 ONLY 'pending' OR 'failed' may be discarded -- never 'committed', 'applying' or 'applied'.
+      A committed entry is authorised work the drain may claim at any moment, and an applying or
+      applied one has (or is having) a real directory effect; hiding those would falsify the record.
+      The transition is CONDITIONAL in SQL (`WHERE Status IN ('pending','failed')`) so a drain that
+      claims the row first wins, and the loser is TOLD the state it is really in.
+
+      🔒 THE ROW IS KEPT (section 65.8 retains history): Status='discarded' + DiscardedBy/Utc/Reason.
+      The drain only ever claims Status='committed', so a discarded entry can never be applied.
+
+      Returns one record per id: @{ id; discarded; state; reason }.
+    #>
+    param(
+        [Parameter(Mandatory)][string]$ConnectionString,
+        [Parameter(Mandatory)][string[]]$Ids,
+        [Parameter(Mandatory)][string]$By,
+        [Parameter(Mandatory)][string]$Reason
+    )
+    if (-not "$Reason".Trim()) { throw 'a discard needs a reason' }
+    $out = New-Object System.Collections.Generic.List[object]
+    foreach ($raw in @($Ids)) {
+        $id = "$raw".Trim()
+        if (-not $id) { continue }
+        $g = [guid]::Empty
+        if (-not [guid]::TryParse($id, [ref]$g)) {
+            $out.Add([pscustomobject]@{ id = $id; discarded = $false; state = 'invalid'; reason = 'not a GUID' }); continue
+        }
+        $n = Invoke-PimSqlNonQuery -ConnectionString $ConnectionString -Sql @"
+UPDATE pim.ChangeQueue
+   SET Status='discarded', DiscardedBy=@by, DiscardedUtc=SYSUTCDATETIME(), DiscardReason=@r
+ WHERE Id=@id AND Status IN ('pending','failed');
+"@ -Parameters @{ id = $g; by = "$By"; r = "$Reason" }
+        if ([int]$n -eq 1) {
+            $out.Add([pscustomobject]@{ id = $id; discarded = $true; state = 'discarded'; reason = '' })
+        } else {
+            $cur = @(Invoke-PimSqlQuery -ConnectionString $ConnectionString -Sql "SELECT Status FROM pim.ChangeQueue WHERE Id=@id" -Parameters @{ id = $g })
+            $state = if ($cur.Count) { "$($cur[0].Status)" } else { 'missing' }
+            $why = if ($state -eq 'missing') { 'no such queue entry' } else { "'$state' -- only a pending or failed entry can be discarded" }
+            $out.Add([pscustomobject]@{ id = $id; discarded = $false; state = $state; reason = $why })
+        }
     }
-    [void](Invoke-PimSqlNonQuery -ConnectionString $ConnectionString -Sql "UPDATE pim.ChangeQueue SET Status='applied' WHERE Status='pending'")
-    return [pscustomobject]@{ applied = $pending.Count; netChanges = $plan.Count; rowsAffected = $affected }
+    return @($out.ToArray())
+}
+
+# --- the drain: apply COMMITTED desired-state entries to pim.Rows ----------------
+function Invoke-PimSqlCommit {
+    <#
+      🔴 BUG-152 -- REWRITTEN. The previous version ended with:
+
+          UPDATE pim.ChangeQueue SET Status='applied' WHERE Status='pending'
+
+      Unbounded by id, so it marked every row that was pending AT THE END OF THE DRAIN -- not the
+      rows it planned. Three defects, all of which §65.8 forbids:
+        1. THE READ->UPDATE RACE. Anything enqueued while the loop ran was marked applied without
+           ever being applied. Silent loss, and the slower the drain the wider the window.
+        2. NO TRANSACTION. The pim.Rows write and the status change were separate statements.
+        3. NO PER-ENTRY OUTCOME, so a failure could not be attributed -- and therefore not retried.
+      It never damaged a customer only because nothing called it (BUG-135).
+
+      🔑 ONLY 'committed' ENTRIES ARE DRAINED. 'pending' means nobody has selected it yet, which is
+      what preserves BUG-135's "propose-don't-auto-map": a discovery proposal sits here forever
+      until an operator commits it.
+
+      🪤 PER-ENTRY, NOT NET-FOLDED -- a DELIBERATE trade. Get-PimQueueApplyPlan folds several
+      changes on one (entity,key) into a single net op, which is faster but destroys attribution:
+      if three entries fold into one write and it fails, no entry can be marked failed and none can
+      be retried. §65.8 requires per-entry outcome, so entries are applied in order instead. The
+      final state is identical (Create-then-Update applied in sequence == the folded result).
+
+      -MaxAttempts: after this many failed attempts an entry becomes 'failed' -- RETAINED and
+      surfaced, never deleted. Without a cap a permanently-broken entry retries every tick forever
+      and stays invisible.
+      -FailAfter: TEST SEAM ONLY (mirrors Set-PimSqlEntityRowsTransactional) -- throw after N
+      applies to prove the per-entry transaction rolls back and the entry stays retryable.
+    #>
+    param(
+        [Parameter(Mandatory)][string]$ConnectionString,
+        [int]$MaxAttempts = 3,
+        [string]$AppliedBy = '',
+        [int]$FailAfter = -1
+    )
+    $committed = @(Get-PimSqlQueue -ConnectionString $ConnectionString -Status 'committed' -Kind 'DesiredState')
+    if ($committed.Count -eq 0) {
+        return [pscustomobject]@{ applied = 0; failed = 0; retrying = 0; rowsAffected = 0; results = @() }
+    }
+    # Definitions before assignments, then enqueue order -- the same ordering the fold used, so a
+    # binding is never applied before the thing it references.
+    $ordered = @($committed | Sort-Object { Get-PimEntityOrderRank $_.entity }, { "$($_.enqueuedUtc)" })
+
+    $who = if ("$AppliedBy".Trim()) { "$AppliedBy" } else { "$env:COMPUTERNAME" }
+    $results = New-Object System.Collections.Generic.List[object]
+    $applied = 0; $failedN = 0; $retrying = 0; $affected = 0; $done = 0; $unrecorded = 0
+
+    foreach ($ch in $ordered) {
+        $id = [guid]"$($ch.id)"
+        $err = ''
+        $c = New-PimSqlConnection -ConnectionString $ConnectionString
+        $tx = $null
+        try {
+            $c.Open()
+            $tx = $c.BeginTransaction()
+            $exec = {
+                param($sql, $params)
+                $cmd = $c.CreateCommand(); $cmd.Transaction = $tx; $cmd.CommandText = $sql
+                foreach ($k in $params.Keys) { [void]$cmd.Parameters.AddWithValue("@$k", $(if ($null -eq $params[$k]) { [DBNull]::Value } else { $params[$k] })) }
+                return $cmd.ExecuteNonQuery()
+            }
+            # 🔒 THE EFFECT AND THE STATUS CHANGE ARE ONE TRANSACTION (§65.8). A crash between them
+            # leaves the entry 'committed' and therefore replayed -- never applied-but-not-done.
+            if ("$($ch.op)" -eq 'Remove') {
+                [void](& $exec "DELETE FROM pim.Rows WHERE Entity=@e AND [Key]=@k" @{ e = "$($ch.entity)"; k = "$($ch.key)" })
+            } else {
+                $json = if ($null -ne $ch.payload) { $ch.payload | ConvertTo-Json -Depth 12 -Compress } else { '{}' }
+                [void](& $exec @"
+MERGE pim.Rows AS t USING (SELECT @e AS Entity, @k AS [Key]) AS s
+  ON t.Entity = s.Entity AND t.[Key] = s.[Key]
+WHEN MATCHED THEN UPDATE SET DataJson = @d, UpdatedUtc = SYSUTCDATETIME()
+WHEN NOT MATCHED THEN INSERT (Entity, [Key], DataJson, UpdatedUtc) VALUES (@e, @k, @d, SYSUTCDATETIME());
+"@ @{ e = "$($ch.entity)"; k = "$($ch.key)"; d = $json })
+            }
+            $done++
+            if ($FailAfter -ge 0 -and $done -gt $FailAfter) { throw "FailAfter=$FailAfter test seam" }
+
+            # Conditional on Status='committed' so a concurrent drain cannot apply the same entry
+            # twice -- the second one's UPDATE affects 0 rows and it rolls back.
+            $n = & $exec @"
+UPDATE pim.ChangeQueue
+   SET Status='applied', AppliedUtc=SYSUTCDATETIME(), AppliedBy=@who,
+       Attempts=Attempts+1, LastAttemptUtc=SYSUTCDATETIME(), LastError=NULL
+ WHERE Id=@id AND Status='committed';
+"@ @{ id = $id; who = $who }
+            if ([int]$n -ne 1) { throw "entry was claimed by another drain (status changed under us)" }
+            $tx.Commit(); $tx = $null
+            $applied++; $affected++
+            $results.Add([pscustomobject]@{ id = "$($ch.id)"; entity = "$($ch.entity)"; key = "$($ch.key)"; outcome = 'applied'; error = '' })
+        } catch {
+            $err = "$($_.Exception.Message)"
+            if ($tx) { try { $tx.Rollback() } catch { } }
+        } finally {
+            if ($c) { $c.Close(); $c.Dispose() }
+        }
+
+        if ($err) {
+            # The row write rolled back, so record the ATTEMPT separately. An entry that has burnt
+            # its attempts becomes 'failed' and is kept; anything else returns to 'committed' and is
+            # retried on the next tick (§65.8 -- "goes into the queue again").
+            $attempts = [int]$ch.attempts + 1
+            $next = if ($attempts -ge $MaxAttempts) { 'failed' } else { 'committed' }
+            # 🔴 THIS BOOKKEEPING WRITE IS NOT OPTIONAL, AND ITS FAILURE IS NOT COSMETIC.
+            # It was first written as `try { ... } catch { }` -- and Test-PimCodeAudit's
+            # SWALLOWED-MUTATION class caught it, correctly: if this UPDATE fails, the entry keeps
+            # its OLD attempt count and NO error text, so it retries forever with nothing on it
+            # explaining why. A drain that reports 'retrying' while failing to record the attempt is
+            # the same "a failed write reports success" shape this whole chapter exists to remove.
+            $bookkept = $false
+            $bookErr = ''
+            try {
+                [void](Invoke-PimSqlNonQuery -ConnectionString $ConnectionString -Sql @"
+UPDATE pim.ChangeQueue
+   SET Status=@st, Attempts=@n, LastAttemptUtc=SYSUTCDATETIME(), LastError=@e
+ WHERE Id=@id;
+"@ -Parameters @{ st = $next; n = $attempts; e = $err; id = $id })
+                $bookkept = $true
+            } catch {
+                $bookErr = "$($_.Exception.Message)"
+            }
+            if (-not $bookkept) {
+                # Counted separately: the action did not apply AND its state could not be recorded,
+                # so the caller must not read this as a clean retry.
+                $unrecorded++
+                $results.Add([pscustomobject]@{ id = "$($ch.id)"; entity = "$($ch.entity)"; key = "$($ch.key)"
+                    outcome = 'unrecorded'
+                    error = "$err -- AND the queue state could not be updated: $bookErr" })
+                continue
+            }
+            if ($next -eq 'failed') { $failedN++ } else { $retrying++ }
+            $results.Add([pscustomobject]@{ id = "$($ch.id)"; entity = "$($ch.entity)"; key = "$($ch.key)"; outcome = $next; error = $err })
+        }
+    }
+
+    return [pscustomobject]@{ applied = $applied; failed = $failedN; retrying = $retrying
+        unrecorded = $unrecorded; rowsAffected = $affected; results = @($results.ToArray()) }
 }
 
 function Get-PimStoreRowKey {
@@ -534,6 +891,8 @@ function Get-PimStoreRowKey {
         }
         'PIM-Definitions-*'              { (& $g 'GroupTag') }
         'Account-Definitions-Admins'     { (& $g 'UserName') }
+        # 68.6 row 35: central admins imported from an MSP master (PIM-Downlink.ps1 Invoke-PimDownlinkAdminApply).
+        'Account-Definitions-Admins-Central' { (& $g 'UserName') }
         # TEST-13: neither of these carries a GroupTag/GroupName, so both fell through to
         # the generic 'default' branch, derived a BLANK key, and every row was dropped on
         # save with a warning that scrolls past. An offboarding row is identified by the
@@ -567,7 +926,8 @@ function Set-PimSqlEntityRows {
     # Full-set replace of an entity's rows (matches CSV file-write semantics):
     # upsert every submitted row by its natural key, delete current keys that are
     # no longer present. Returns @{ rowCount; removed }.
-    param([Parameter(Mandatory)][string]$ConnectionString, [Parameter(Mandatory)][string]$Entity, [object[]]$Rows = @(), [string]$Base)
+    param([Parameter(Mandatory)][string]$ConnectionString, [Parameter(Mandatory)][string]$Entity, [object[]]$Rows = @(), [string]$Base,
+          [switch]$AllowEmpty)
     $base = if ("$Base".Trim()) { $Base } else { $Entity }
     $submitted = @{}
     foreach ($r in @($Rows)) {
@@ -578,6 +938,14 @@ function Set-PimSqlEntityRows {
     }
     $removed = 0
     $currentKeys = @(Invoke-PimSqlQuery -ConnectionString $ConnectionString -Sql "SELECT [Key] FROM pim.Rows WHERE Entity=@e" -Parameters @{ e = $Entity } | ForEach-Object { "$($_.Key)" })
+    # 🔴 Same empty-set wipe as the transactional twin, and MORE dangerous here: there is no
+    # transaction, so a refusal after the deletes had started could not be rolled back. Guard
+    # BEFORE the delete loop. See the long note in Set-PimSqlEntityRowsTransactional.
+    if (-not $submitted.Count -and $currentKeys.Count -and -not $AllowEmpty) {
+        throw ("Set-PimSqlEntityRows: refusing to delete all $($currentKeys.Count) row(s) of '$Entity' " +
+               'because NO rows were submitted -- that is almost always a failed upstream read. ' +
+               'Pass -AllowEmpty if you genuinely mean to empty it.')
+    }
     foreach ($ck in $currentKeys) { if (-not $submitted.ContainsKey($ck)) { Remove-PimSqlRow -ConnectionString $ConnectionString -Entity $Entity -Key $ck; $removed++ } }
     return @{ rowCount = $submitted.Count; removed = $removed }
 }
@@ -598,7 +966,10 @@ function Set-PimSqlEntityRowsTransactional {
         [Parameter(Mandatory)][string]$Entity,
         [object[]]$Rows = @(),
         [string]$Base,
-        [int]$FailAfter = -1
+        [int]$FailAfter = -1,
+        # 🔴 See the empty-set guard below. Deliberately clearing an entity is legitimate; doing it
+        # BY ACCIDENT is a production data wipe, and the two look identical from in here.
+        [switch]$AllowEmpty
     )
     $base = if ("$Base".Trim()) { $Base } else { $Entity }
     $c = New-PimSqlConnection -ConnectionString $ConnectionString
@@ -644,6 +1015,24 @@ WHEN NOT MATCHED THEN INSERT (Entity, [Key], DataJson, UpdatedUtc) VALUES (@e, @
             if ($FailAfter -ge 0 -and $stmts -ge $FailAfter) { throw "injected mid-commit failure after $stmts statement(s) (test seam)" }
         }
 
+        # 🔴 AN EMPTY SUBMISSION AGAINST A NON-EMPTY ENTITY IS A WIPE, AND IT ARRIVES BY ACCIDENT.
+        # -Rows defaults to @(). This is a FULL-SET REPLACE, so "no rows submitted" means "delete
+        # every row of this entity" -- and it would do so transactionally, then return
+        # @{ rowCount = 0; removed = <all of them> } as a SUCCESS.
+        # 🪤 The way that happens is never someone typing "delete everything": it is an upstream
+        # read that failed and returned nothing (a Graph throttle, an empty CSV, a caught exception
+        # yielding @()). Set-PimManagerAccess.ps1 already carries this exact lesson for the access
+        # model -- "A read failure is FATAL, never 'nothing was stored'" -- but the general row
+        # store, which holds every assignment and definition in the product, had no such guard.
+        # 🔒 So: submitting NOTHING while the store holds SOMETHING is refused unless the caller
+        # says it means it. Rolls back, changes nothing, and names the entity. (R8: "dont delete
+        # sql ... this is production".)
+        if (-not $submitted.Count -and $currentKeys.Count -and -not $AllowEmpty) {
+            throw ("Set-PimSqlEntityRowsTransactional: refusing to delete all $($currentKeys.Count) row(s) of " +
+                   "'$Entity' because NO rows were submitted. A full-set replace with an empty set is " +
+                   "almost always a failed upstream read, not an intent to clear the entity. " +
+                   'Pass -AllowEmpty if you genuinely mean to empty it.')
+        }
         # 3) delete dropped keys.
         $removed = 0
         foreach ($ck in $currentKeys) {
@@ -660,7 +1049,14 @@ WHEN NOT MATCHED THEN INSERT (Entity, [Key], DataJson, UpdatedUtc) VALUES (@e, @
         if ($tx) { try { $tx.Rollback() } catch { Write-Warning "  [sql] transaction rollback failed: $($_.Exception.Message)" } }
         throw
     } finally {
-        $c.Close()
+        # 🔴 §52.18 -- DISPOSE, NOT JUST CLOSE. `Close()` returns the connection to the pool;
+        # `Dispose()` is what releases it deterministically instead of waiting for a finalizer.
+        # Across this file there were 8 opens, 6 closes and ZERO disposes, so a run that threw --
+        # or simply ran long -- accumulated sessions. Measured at a live customer 2026-09-09: a
+        # CSV import died halfway with "The session limit for the database is 300 and has been
+        # reached" on a Basic-tier database, after that morning's deploys, the Manager and the
+        # tick job had each left sessions behind.
+        if ($c) { $c.Close(); $c.Dispose() }
     }
 }
 
@@ -677,9 +1073,19 @@ function Get-PimSqlSetting {
 function Set-PimSqlSetting {
     param([Parameter(Mandatory)][string]$ConnectionString, [Parameter(Mandatory)][string]$Name, [object]$Value)
     $json = if ($null -ne $Value) { $Value | ConvertTo-Json -Depth 12 -Compress } else { $null }
+    # 🔴 §70.8 (2026-09-13) -- WRITE ONLY WHAT CHANGED. Every save rewrote the whole value, changed or not.
+    # On internal's Basic database the transaction log write rate is capped, and this MERGE averaged 5.9 s
+    # (max 8 s, 396 runs in ~12 h; LOG_RATE_GOVERNOR the top wait at 2,152 s) -- mostly JobRunHistory
+    # (1.98 MB) plus values such as the 145 KB AzResPolicyMassHold re-saved unchanged every tick.
+    # The compare is BYTE-exact (varbinary): the database collation is case-insensitive and ignores trailing
+    # spaces, so a plain `<>` would silently skip a real change. An unchanged save now writes no log and does
+    # not bump UpdatedUtc (so it also stops looking like a change to anything polling pim.Settings).
     [void](Invoke-PimSqlNonQuery -ConnectionString $ConnectionString -Sql @"
-MERGE pim.Settings AS t USING (SELECT @n AS Name) AS s ON t.Name = s.Name
-WHEN MATCHED THEN UPDATE SET ValueJson=@v, UpdatedUtc=SYSUTCDATETIME()
+MERGE pim.Settings AS t USING (SELECT @n AS Name, @v AS V) AS s ON t.Name = s.Name
+WHEN MATCHED AND (   (t.ValueJson IS NULL AND s.V IS NOT NULL)
+                  OR (t.ValueJson IS NOT NULL AND s.V IS NULL)
+                  OR CAST(t.ValueJson AS VARBINARY(MAX)) <> CAST(s.V AS VARBINARY(MAX)))
+    THEN UPDATE SET ValueJson=s.V, UpdatedUtc=SYSUTCDATETIME()
 WHEN NOT MATCHED THEN INSERT (Name, ValueJson, UpdatedUtc) VALUES (@n, @v, SYSUTCDATETIME());
 "@ -Parameters @{ n = $Name; v = $json })
 }
@@ -753,7 +1159,9 @@ FROM pim.AuditEvents $w ORDER BY Ts DESC, Id DESC;
         if ("$($r.BeforeJson)".Trim()) { try { $before = $r.BeforeJson | ConvertFrom-Json } catch { $before = "$($r.BeforeJson)" } }
         if ("$($r.AfterJson)".Trim())  { try { $after  = $r.AfterJson  | ConvertFrom-Json } catch { $after  = "$($r.AfterJson)" } }
         $out.Add([pscustomobject]@{
-            ts = ([datetime]$r.Ts).ToUniversalTime().ToString('o')
+            # Ts is stored UTC (SYSUTCDATETIME) but comes back Kind=Unspecified, which
+            # ToUniversalTime() treats as LOCAL -- shifting every event by the host's offset.
+            ts = [datetime]::SpecifyKind([datetime]$r.Ts, [System.DateTimeKind]::Utc).ToString('o')
             runId = "$($r.RunId)"; correlationId = "$($r.CorrelationId)"
             actor = "$($r.Actor)"; actorSource = "$($r.ActorSource)"
             action = "$($r.Action)"; target = "$($r.Target)"
@@ -761,11 +1169,18 @@ FROM pim.AuditEvents $w ORDER BY Ts DESC, Id DESC;
             result = "$($r.Result)"; whatIf = [bool]$r.WhatIf
         })
     }
-    # 🪤 `.ToArray()`, NOT `@($out)`. Wrapping a System.Collections.Generic.List in @() throws
-    # "Argument types do not match" in this environment -- on BOTH Windows PowerShell 5.1 and
-    # pwsh 7, and even for a list of plain strings (an ArrayList is unaffected). Nothing else in
-    # this solution hits it because the other List users pipe through Sort-Object/Where-Object and
-    # so wrap a PIPELINE result rather than the list object itself. Measured 2026-08-31.
+    # 🪤 `.ToArray()`, NOT `@($out)`. Wrapping a System.Collections.Generic.List[object] in @()
+    # throws "Argument types do not match" on BOTH Windows PowerShell 5.1 and pwsh 7, empty or
+    # not (an ArrayList is unaffected). Measured 2026-08-31.
+    # 🔑 CORRECTED 2026-09-12 -- this note used to say "and even for a list of plain strings",
+    # which is FALSE and would send a reader to rewrite correct code. Re-measured on both hosts:
+    # List[object] throws; List[string], List[int], List[psobject] and List[hashtable] do not.
+    # It is the declared ELEMENT TYPE that decides, never the contents -- a List[object] holding
+    # only strings still throws, and a List[string] never does.
+    # 🪤 The same note also claimed "nothing else in this solution hits it". It has since been hit
+    # TWICE more (/api/approvals and /api/admin-accounts, the latter a live 500 that took out the
+    # whole Admin accounts screen), which is why the guard is now mechanical:
+    # tests/Test-PimListWrapTrap.ps1 scans every shipped script.
     return $out.ToArray()
 }
 

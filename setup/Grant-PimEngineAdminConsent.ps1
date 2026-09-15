@@ -1,4 +1,4 @@
-#requires -Version 5.1
+﻿#requires -Version 5.1
 <#
 .SYNOPSIS
     DEPRECATED redirect -> Grant-PimGraphAppRoles.ps1 (pure REST, certificate auth).

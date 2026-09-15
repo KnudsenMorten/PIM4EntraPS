@@ -1,4 +1,4 @@
-# PIM4EntraPS -- permission-wizard auto-derivation (reversed create flow).
+﻿# PIM4EntraPS -- permission-wizard auto-derivation (reversed create flow).
 # Dot-sourced by PIM-Functions.psm1 and standalone by the pim-manager.
 #
 # The NEW create flow is target-first: pick the delegation TARGET (entra / azure /

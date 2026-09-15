@@ -1,4 +1,4 @@
-#Requires -Version 5.1
+﻿#Requires -Version 5.1
 <#
 .SYNOPSIS
     Rotate the READ-ONLY SAS that lets a managed (slave) tenant fetch the master's signed
@@ -188,10 +188,13 @@ if ("$MasterSubscriptionId".Trim() -and "$acct".Trim() -ne "$MasterSubscriptionI
     exit 1
 }
 Note "az context verified: subscription $acct"
+# Pin the key read to the subscription just verified, so a context switch after the check cannot
+# redirect it (the master id when given, else the context that was checked).
+$masterSubArgs = @('--subscription', $(if ("$MasterSubscriptionId".Trim()) { "$MasterSubscriptionId".Trim() } else { "$acct".Trim() }))
 
 # --- 1) MINT ------------------------------------------------------------------
 # 🪤 The account key is read, used, and never printed. It stays in this process only.
-$key = az storage account keys list -n $StorageAccount --query "[0].value" -o tsv --only-show-errors 2>$null
+$key = az storage account keys list @masterSubArgs -n $StorageAccount --query "[0].value" -o tsv --only-show-errors 2>$null
 if ($LASTEXITCODE -ne 0 -or -not "$key".Trim()) {
     Fail "could not read the storage account key for '$StorageAccount' -- refusing to rotate. The existing secret is untouched."
     exit 1

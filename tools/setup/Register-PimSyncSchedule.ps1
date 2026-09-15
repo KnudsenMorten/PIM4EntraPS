@@ -1,4 +1,4 @@
-#requires -Version 5.1
+﻿#requires -Version 5.1
 <#
 .SYNOPSIS
     PIM4EntraPS -- register the STANDALONE update on a VisualCron / Windows Task Scheduler
@@ -215,11 +215,15 @@ if ($LocalPull) {
 #    and for the same reason).
 # 3. NO OUTPUT ANYWHERE. No transcript, no redirect. At 03:00 the entire record of a failed fleet
 #    update was a single integer. An unattended job that cannot say what it did is not operable.
-# 🪤 -SubscriptionId is NOT forwarded to the orchestrator: Invoke-PimUpdate.ps1 has no such
-# parameter (checked), and passing one would fail the run with "A parameter cannot be found".
-# The subscription is applied to the az CONTEXT in the wrapper below, which is where it belongs --
-# every az call the update makes then inherits it.
-if ("$Recipient".Trim()) { $arg += " -Recipient `"$Recipient`"" }
+# ✅ -SubscriptionId IS forwarded now (§53.4, 2026-09-10). It previously was not, and the note here
+# said so with "Invoke-PimUpdate.ps1 has no such parameter (checked)" -- true when written, and
+# false the moment the orchestrator gained one to write the in-cloud updater's pin with. The
+# wrapper still sets and ASSERTS the az context below, which remains the belt: this is the braces,
+# so the one az call that targets a named resource group cannot land in an ambient subscription
+# that happens to belong to a different tenant.
+# 🪤 A comment that records "I checked, it does not exist" ages into a reason not to look again.
+if ("$SubscriptionId".Trim()) { $arg += " -SubscriptionId `"$SubscriptionId`"" }
+if ("$Recipient".Trim())      { $arg += " -Recipient `"$Recipient`"" }
 
 # 🔒 A GENERATED WRAPPER SCRIPT, NOT AN INLINE -Command STRING.
 # The first attempt built the wrapper as a nested `powershell -Command "..."` string. It has three

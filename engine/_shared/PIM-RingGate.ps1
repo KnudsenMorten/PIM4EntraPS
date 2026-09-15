@@ -1,4 +1,4 @@
-# =============================================================================
+﻿# =============================================================================
 # PIM-RingGate.ps1 -- PIM's consumer of the AutomateIT RING-1 ring + capability
 # design. PURE: no disk, no network, no SQL, no globals, no side effects.
 #

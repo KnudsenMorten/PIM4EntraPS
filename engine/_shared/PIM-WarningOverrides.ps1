@@ -1,4 +1,4 @@
-# IMP-02: the locale-safe stamp reader. Loaded defensively so this file stays correct
+﻿# IMP-02: the locale-safe stamp reader. Loaded defensively so this file stays correct
 # when a test dot-sources it on its own (PIM-Functions.psm1 also loads it up front).
 if (-not (Get-Command Get-PimUtcStamp -ErrorAction SilentlyContinue)) { . (Join-Path $PSScriptRoot 'PIM-DateSafe.ps1') }
 #Requires -Version 5.1
@@ -22,8 +22,8 @@ if (-not (Get-Command Get-PimUtcStamp -ErrorAction SilentlyContinue)) { . (Join-
 # ---------------------------------------------------------------------------
 # OVERRIDE CONFIG CONTRACT  (a future GUI "Overrule" button writes this shape)
 # ---------------------------------------------------------------------------
-# Customer-specific, gitignored (config/*.custom.json) -- ships only a .sample.
-# File: config/PIM-WarningOverrides.custom.json
+# Stored in SQL pim.Settings['WarningOverrides'] (PIM v2 is SQL-only -- there is no override FILE;
+# the Manager reads the store and hands the parsed document in as -Config).
 #
 #   {
 #     "overrides": [
@@ -66,39 +66,18 @@ if (-not (Get-Command Get-PimUtcStamp -ErrorAction SilentlyContinue)) { . (Join-
 
 Set-StrictMode -Off
 
-function Resolve-PimWarningOverridesPath {
-    <#
-      Resolve the override config file for an instance. CSV-mode lives next to
-      the other config/*.custom.json. SQL mode has no config dir of customer
-      data -- callers may pass an explicit -Path (e.g. read from pim.Settings).
-    #>
-    [CmdletBinding()]
-    param([string]$ConfigRoot)
-    if (-not $ConfigRoot) { return $null }
-    return (Join-Path $ConfigRoot 'PIM-WarningOverrides.custom.json')
-}
-
 function Read-PimWarningOverrideConfig {
     <#
-      Read + parse the override config. Returns an array of normalized override
-      hashtables. Missing file / parse error -> empty array (never throws --
-      a bad override file must never break the validator).
+      Normalize the override document read from SQL pim.Settings['WarningOverrides'].
+      Returns an array of normalized override hashtables. No document -> empty array.
+      There is no file path: the old -Path file read (config/PIM-WarningOverrides.custom.json)
+      was removed with the rest of the v2 file stores.
     #>
     [CmdletBinding()]
     param(
-        [string]$Path,
-        [object]$Config   # already-parsed object (SQL/store path) -- wins over $Path
+        [object]$Config   # the parsed store document
     )
-    $raw = $null
-    if ($Config) {
-        $raw = $Config
-    } elseif ($Path -and (Test-Path -LiteralPath $Path)) {
-        try {
-            $text = [System.IO.File]::ReadAllText($Path, [System.Text.UTF8Encoding]::new($false))
-            if ($text.Length -gt 0 -and [int][char]$text[0] -eq 0xFEFF) { $text = $text.Substring(1) }
-            $raw = $text | ConvertFrom-Json
-        } catch { return @() }
-    }
+    $raw = $Config
     if (-not $raw) { return @() }
 
     # Tolerant field reader -- works for both PSCustomObject (ConvertFrom-Json)
@@ -253,11 +232,8 @@ function Apply-PimWarningOverrides {
         The validator's produced finding objects (PSCustomObjects with at least
         Severity/Code/Csv/Row/Column/Message).
 
-    .PARAMETER Path
-        Path to the override config JSON (CSV mode). Optional.
-
     .PARAMETER Config
-        Already-parsed override config object (SQL/store mode). Wins over -Path.
+        The override document from SQL pim.Settings['WarningOverrides'] (parsed).
 
     .PARAMETER AsOf
         Evaluation time (UTC). Default = now. (Test seam for expiry.)
@@ -273,12 +249,11 @@ function Apply-PimWarningOverrides {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)][AllowEmptyCollection()][object[]]$Findings,
-        [string]$Path,
         [object]$Config,
         [datetime]$AsOf = ([datetime]::UtcNow)
     )
 
-    $overrides = Read-PimWarningOverrideConfig -Path $Path -Config $Config
+    $overrides = Read-PimWarningOverrideConfig -Config $Config
     $invalid = New-Object System.Collections.ArrayList
 
     # Partition into usable (valid) overrides + a parallel "expired" list so an

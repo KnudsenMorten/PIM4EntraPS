@@ -1,16 +1,16 @@
 #Requires -Version 5.1
 <#
 .SYNOPSIS
-    CUSTOMER TEMPLATE / SCHEMA DOC -- copy this file to
-    PIM4EntraPS.NamingConventions.custom.ps1 and edit only the keys you
-    need to override. The .custom.ps1 file is .gitignored and never
-    leaves your VM.
+    SCHEMA DOC for the naming-convention keys.
 
-.HOW IT'S LOADED
-    Initialize-LauncherConfig loads PIM4EntraPS.NamingConventions.locked.ps1
-    FIRST (ships with the repo, sets `$global:PIM_NamingConventions`), then
-    loads your .custom.ps1 SECOND. Anything you set here overwrites the
-    locked defaults; anything you leave unset keeps the locked default.
+.HOW IT'S LOADED (PIM v2 is SQL-only, 2026-09-13)
+    The engine, the scheduler and the Manager load ONLY the shipped
+    PIM4EntraPS.NamingConventions.locked.ps1 as defaults; the customer's values
+    live in SQL pim.Settings and are edited in the Manager (Settings). A
+    PIM4EntraPS.NamingConventions.custom.ps1 is NOT read at runtime (a leftover
+    file is announced and ignored). A pre-v2 instance imports its .custom.ps1
+    into pim.Settings ONCE with setup/Migrate-PimToSql.ps1 -- only keys it
+    changes from the locked default, and never over a key already edited in SQL.
 
 .WHO READS THIS
     - The engines (PIM-Functions.psm1 helpers Resolve-PimAdminName /

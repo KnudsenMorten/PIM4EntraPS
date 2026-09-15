@@ -1,4 +1,4 @@
-<#
+﻿<#
   PIM4EntraPS -- pure-REST admin-account write path (NO Microsoft.Graph / Az.* modules).
 
   This is the REST counterpart of the legacy engine function
@@ -108,17 +108,17 @@ function New-PimRestAdminAccount {
     AccountStatus, TargetPlatform.
 
   .NOTES
-    MAIL FORWARDING WAS RETIRED FROM THIS PATH (operator, 2026-08-12).
-    `ForwardMailsToContact` / `MailForwardAddress` used to make this function call
-    EXO `Set-Mailbox -ForwardingSmtpAddress` on the new admin. That only works if the
-    ADMIN ACCOUNT ITSELF has a mailbox, i.e. an Exchange licence per admin -- which is
-    exactly the cost the design now avoids: the engine SPN holds scoped send rights on a
-    single SHARED mailbox and mails *about* an admin from there, so admin accounts need
-    no mailbox and no licence at all. The columns are therefore gone from the v2 admin
-    schema; the notification recipient is `ManagerEmail`.
+    MAIL FORWARDING IS NOT DONE IN THIS FUNCTION. Retired from this path 2026-08-12 (an
+    admin account usually has no mailbox, i.e. no Exchange licence), and UN-RETIRED
+    2026-09-12 (operator, "Both") with a new meaning and a new home:
+      * `ForwardMailsToContact` + `MailForwardAddress` name the admin OWNER's office user.
+        PIM's own mail about the admin (new-admin, tap-delivery) goes there, from the shared
+        mailbox; `ManagerEmail` is the fallback. One rule: Get-PimAdminMailRecipient (PIM-Rest.ps1).
+      * Where the admin account DOES have a mailbox, the REST engine's Admins provider sets
+        Exchange forwarding to that address -- Invoke-PimAdminMailboxForwarding, best-effort,
+        gated OFF by default ($global:PIM_AdminMailboxForwarding).
     🔒 `Set-PimMailboxForwarding` / `Test-PimMailForwardAddressIsReal` in PIM-Rest.ps1 are
-    deliberately KEPT -- the v1 legacy edition (PIM-Functions.psm1) still calls them, and
-    this retirement is scoped to the v2 path.
+    still used by the v1 legacy edition (PIM-Functions.psm1) too.
 
   .OUTPUTS
     PSCustomObject { Upn; Action = created|updated|whatif|failed; Password }
@@ -205,28 +205,40 @@ function New-PimRestAdminAccount {
     }
   }
 
-  # manager link (best-effort -- never fail the create on a missing manager)
+  # 🔒 BUG-141 -- WE DO **NOT** PUT A MANAGER ON THE PERSON. This block used to
+  # `PUT /users/{upn}/manager/$ref`, writing a named individual onto every admin account it
+  # created, and that is the opposite of the design.
+  #
+  # 🔑 THE RULE, and the reason for it (operator, 2026-09-12): "we dont add a manager on the
+  # person ... as we add a sponsor (dept) ... and whoever is the actual manager of the dept gets
+  # the emails, apprvals etc ... otherwise you are vulnerable for org changes."
+  # Accountability is carried by the DEPARTMENT, not by a person stamped onto the account:
+  #     Owners  ->  SponsorUpn (Roles)  ->  the group's Department contact
+  # (DESIGN.md §1268/§1502, resolved by Get-PimDepartmentOwnerIndex + New-PimRoleGroupOwnerUpns).
+  # A directory `manager` link is a POINT-IN-TIME COPY of an org chart. The next reorg, transfer
+  # or leaver leaves it pointing at someone who no longer has the authority -- and because it is
+  # the link approvals and TAP mail would follow, it fails SILENTLY and it fails on a PRIVILEGED
+  # account. Resolving "who owns this department right now" at send time cannot go stale that way.
+  #
+  # 🪤 Removing the write does NOT strip an existing `manager` from anyone -- it only stops this
+  # path from stamping a new one, so it is safe on environments already carrying links.
+  # `ManagerEmail` is still read from the row and still used as a NOTIFICATION ADDRESS (the TAP
+  # delivery target); what it must never do is become a directory relationship on the account.
   if ($managerEmail) {
-    try {
-      $mgr = Invoke-PimGraph -Path ("/users/{0}?`$select=id" -f [uri]::EscapeDataString($managerEmail))
-      if ($mgr -and $mgr.id) {
-        Invoke-PimGraph -Method PUT -Path "/users/$([uri]::EscapeDataString($upn))/manager/`$ref" -Body @{ '@odata.id' = "https://graph.microsoft.com/v1.0/users/$($mgr.id)" } | Out-Null
-      }
-    } catch {
-      Write-Host "  manager link skipped for $upn -> $managerEmail ($($_.Exception.Message))" -ForegroundColor Yellow
-    }
+    Write-Verbose "  manager/`$ref deliberately NOT written for $upn (sponsor is the department, not a person -- BUG-141)"
   }
 
-  # persist the generated password (engine helper when available, else a local note)
-  if (Get-Command Write-PimAdminPassword -ErrorAction SilentlyContinue) {
-    Write-PimAdminPassword -UserPrincipalName $upn -Password $pw -Platform 'ID'
-  } else {
-    Write-Host "  -> initial password for $upn (ID): $pw" -ForegroundColor Cyan
-  }
+  # 🔴 §70.15 LOG-16 (SEC): this used to hand the plaintext initial password to Write-PimAdminPassword -- which
+  # appends it to output/admin-passwords-<date>.txt AND prints it -- or print it itself, and returned it in the
+  # result the fan-out logged. A privileged account's password in a console log and a text file is a credential
+  # leak. v2 onboards admins with a Temporary Access Pass (AdminTap / the Manager's TAP reset); the random
+  # password nobody knows is never shown, stored or returned -- the same rule New-PimAdminInitialPassword
+  # follows for the engine.
+  $pw = $null
   if (Get-Command Write-PimAuditEvent -ErrorAction SilentlyContinue) {
-    Write-PimAuditEvent -Action 'account.create' -Target $upn -After @{ displayName = $display; platform = 'ID'; transport = 'rest' }
+    Write-PimAuditEvent -Action 'account.create' -Target $upn -After @{ displayName = $display; platform = 'ID'; transport = 'rest'; initialCredential = 'random password, not retained -- issue a Temporary Access Pass' }
   }
-  return [pscustomobject]@{ Upn = $upn; Action = 'created'; Password = $pw }
+  return [pscustomobject]@{ Upn = $upn; Action = 'created'; Password = ''; PasswordSet = $true }
 }
 
 # RETIRED 2026-08-12: Set-PimRestMailForward lived here. It set EXO mailbox forwarding on

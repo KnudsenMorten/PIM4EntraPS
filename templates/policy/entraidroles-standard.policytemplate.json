@@ -14,7 +14,17 @@
       "Admin_Eligibility":  [],
       "Admin_Assignment":   []
     },
+    "_notificationV1": "PARITY AUDIT #5 (2026-09-13): the first NINE entries are v1's notification rules for every directory role, with v1's on/off values (engine/PIM-Baseline-Management-CSV/PIM-Baseline-Management-CSV.ps1 L615-694). Later entries override an earlier one for the same rule id ONLY when they resolve: the NotifyUpns redirect below replaces Admin/EndUser/Assignment for a role that names an audience, and a role without one keeps v1's value (default recipients on).",
     "Notification": [
+      { "recipientType": "Admin",     "caller": "Admin",   "level": "Eligibility", "notificationLevel": "All", "defaultRecipientsEnabled": true },
+      { "recipientType": "Requestor", "caller": "Admin",   "level": "Eligibility", "notificationLevel": "All", "defaultRecipientsEnabled": false },
+      { "recipientType": "Approver",  "caller": "Admin",   "level": "Eligibility", "notificationLevel": "All", "defaultRecipientsEnabled": true },
+      { "recipientType": "Admin",     "caller": "Admin",   "level": "Assignment",  "notificationLevel": "All", "defaultRecipientsEnabled": false },
+      { "recipientType": "Requestor", "caller": "Admin",   "level": "Assignment",  "notificationLevel": "All", "defaultRecipientsEnabled": false },
+      { "recipientType": "Approver",  "caller": "Admin",   "level": "Assignment",  "notificationLevel": "All", "defaultRecipientsEnabled": false },
+      { "recipientType": "Admin",     "caller": "EndUser", "level": "Assignment",  "notificationLevel": "All", "defaultRecipientsEnabled": true },
+      { "recipientType": "Requestor", "caller": "EndUser", "level": "Assignment",  "notificationLevel": "All", "defaultRecipientsEnabled": false },
+      { "recipientType": "Approver",  "caller": "EndUser", "level": "Assignment",  "notificationLevel": "All", "defaultRecipientsEnabled": true },
       {
         "recipientType": "Admin",
         "level": "Assignment",

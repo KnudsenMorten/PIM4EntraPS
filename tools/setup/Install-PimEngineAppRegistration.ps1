@@ -1,4 +1,4 @@
-#requires -Version 5.1
+﻿#requires -Version 5.1
 <#
 .SYNOPSIS
     Create / maintain the Entra app registration (SPN + certificate + Graph app-roles
@@ -98,6 +98,14 @@ param(
     [switch]$GrantConsent,
     [switch]$IncludeExchange,
     [switch]$SkipAzureRbac,
+    # 🔴 §64.5 #3 -- WHICH PRINCIPAL GETS User Access Administrator AT THE ROOT MG.
+    # This script creates the engine APP REGISTRATION, so it naturally assigned root-MG UAA to the
+    # SPN. But in the HOSTED topology the engine runs as the container MANAGED IDENTITY, and the
+    # SPN is not the runtime identity at all (§64.7 trap 1, §63.2) -- which is why internal ended up
+    # with UAA on no principal that needed it. Pass the tick job's MI objectId here and it is
+    # assigned to that instead. Omitted = the SPN (correct for a non-hosted/VM engine), and the
+    # script then says plainly that a hosted deployment still needs the MI granted.
+    [string]$RuntimeMiObjectId,
     [string]$LauncherConfigPath,
     [switch]$NoWriteLauncherConfig
 )
@@ -114,9 +122,14 @@ $exoAppId   = '00000002-0000-0ff1-ce00-000000000000'   # Office 365 Exchange Onl
 $graphRoleMap = Get-PimGraphAppRoleMap
 # The legacy SDK installer requested exactly these eight Graph roles; keep parity.
 $graphRolesWanted = @(
-    'RoleManagement.ReadWrite.Directory','Group.ReadWrite.All','User.ReadWrite.All',
+    # 🔴 BUG-151 -- the BROAD RoleManagement.ReadWrite.Directory was here too, so this script
+    # re-granted it even after the map was narrowed (§65.5). It is the documented HIGHER-PRIVILEGED
+    # alternative to the schedule pair below; v1 used the pair and §64.2 proved it 403-free.
+    'RoleEligibilitySchedule.ReadWrite.Directory','RoleAssignmentSchedule.ReadWrite.Directory',
+    'Group.ReadWrite.All','User.ReadWrite.All',
     'Directory.Read.All','AdministrativeUnit.ReadWrite.All','PrivilegedAccess.ReadWrite.AzureADGroup',
     'RoleManagementPolicy.ReadWrite.Directory','UserAuthenticationMethod.ReadWrite.All',
+    'Policy.Read.All',   # tenant TAP policy (PIM-TapPolicy.ps1), 2026-09-12
     # BUG-82: /domains needs Domain.Read.All specifically -- Directory.Read.All does NOT cover it.
     # The managed-tenant downlink resolves the tenant's default verified domain to build synced
     # admins' UPNs (IMP-12); without this the engine SPN gets 403 Authorization_RequestDenied and
@@ -208,8 +221,33 @@ if ($IncludeExchange) {
 # --- Create / update the app registration ----------------------------------------
 Write-Host ""
 Write-Host "Creating / updating app registration..." -ForegroundColor Cyan
-$existing = (Gr -Path "applications?`$filter=displayName eq '$DisplayName'").value
-if (@($existing).Count -gt 1) { throw "Multiple app regs named '$DisplayName' exist. Disambiguate and re-run." }
+# 🔴 FIND BY A STABLE IDENTIFIER FIRST, NOT BY DISPLAY NAME.
+# A display name is MUTABLE and not unique. Renaming the app -- in the portal, or by us between
+# versions -- makes this filter return nothing, so the block below CREATES A SECOND registration
+# and orphans the first, credentials and consented permissions intact. Proven in two tenants on
+# 2026-09-10 for the Manager registration, which had exactly this lookup.
+# 🔑 identifierUris are unique per tenant and survive renames, so they are the key. The name filter
+# remains only to ADOPT installs that predate this; adoption stamps the stable uri on, so each
+# environment migrates itself once and can never fork again.
+# 🪤 MUST CONTAIN THE TENANT ID. Entra refuses a bare 'api://pim4entraps-engine':
+#     "All newly added URIs must contain a tenant verified domain, tenant id or app id"
+# The tenant id is the only one of those three known before the app exists AND stable across
+# renames, so it is the key. Measured on a live deploy 2026-09-10.
+$tid = "$TenantId".Trim()
+if (-not $tid) { $tid = "$((Gr -Path 'organization').value[0].id)".Trim() }
+$stableEngineUri = "api://$tid/pim4entraps-engine"
+$existing = @()
+try { $existing = @((Gr -Path "applications?`$filter=identifierUris/any(u:u eq '$stableEngineUri')").value) } catch { $existing = @() }
+if (@($existing).Count) {
+    Write-Host "  matched on the stable identifier uri ($stableEngineUri)" -ForegroundColor DarkGray
+} else {
+    $existing = @((Gr -Path "applications?`$filter=displayName eq '$DisplayName'").value)
+    # 🪤 Keep this refusal. More than one app of this name means a fork has ALREADY happened, and
+    # picking one at random would bind the engine to whichever Graph listed first -- silently, and
+    # differently on the next run.
+    if (@($existing).Count -gt 1) { throw "Multiple app regs named '$DisplayName' exist. Disambiguate and re-run." }
+    if (@($existing).Count) { Write-Host "  adopting by name -- stamping $stableEngineUri so this cannot recur" -ForegroundColor Yellow }
+}
 $app = @($existing) | Select-Object -First 1
 
 $keyCred = $null
@@ -224,6 +262,16 @@ if ($cert) {
 
 if ($app) {
     if ($PSCmdlet.ShouldProcess($DisplayName, "update app (appId $($app.appId))")) {
+        # Stamp the stable uri on adoption -- this is the migration, and it must happen on the
+        # UPDATE path or an existing install never gains it and stays forkable forever.
+        # 🪤 identifierUris REPLACES the list, so merge rather than assign: another product may
+        # have added one, and overwriting would take it away.
+        $curIds = @($app.identifierUris) | Where-Object { "$_".Trim() }
+        if (@($curIds) -notcontains $stableEngineUri) {
+            $mergedIds = @(@($curIds) + @($stableEngineUri) | Sort-Object -Unique)
+            try { Gr -Method PATCH -Path "applications/$($app.id)" -Body @{ identifierUris = $mergedIds } | Out-Null }
+            catch { Write-Host "  could not stamp $stableEngineUri (a later deploy may not find this app by id): $($_.Exception.Message)" -ForegroundColor Yellow }
+        }
         Gr -Method PATCH -Path "applications/$($app.id)" -Body @{ requiredResourceAccess = $rra } | Out-Null
         if ($keyCred) { Gr -Method PATCH -Path "applications/$($app.id)" -Body @{ keyCredentials = @($keyCred) } | Out-Null }
         $app = Gr -Path "applications/$($app.id)"
@@ -231,7 +279,8 @@ if ($app) {
     Write-Host "  updated existing app (appId $($app.appId))" -ForegroundColor Yellow
 } else {
     if ($PSCmdlet.ShouldProcess($DisplayName, 'create app registration')) {
-        $body = @{ displayName = $DisplayName; signInAudience = 'AzureADMyOrg'; requiredResourceAccess = $rra }
+        $body = @{ displayName = $DisplayName; signInAudience = 'AzureADMyOrg'; requiredResourceAccess = $rra
+                   identifierUris = @($stableEngineUri) }
         if ($keyCred) { $body.keyCredentials = @($keyCred) }
         $app = Gr -Method POST -Path 'applications' -Body $body
         Write-Host "  created app (appId $($app.appId))" -ForegroundColor Green
@@ -241,27 +290,92 @@ if ($app) {
 }
 
 # Service principal
+# 🪤 ENTRA READ-AFTER-WRITE, MEASURED ON A FRESH TENANT 2026-09-07. An app object created
+# seconds ago is NOT yet visible to the endpoints that consume it, and this script hit that
+# twice in a row on a first run:
+#   1. POST servicePrincipals -> Request_BadRequest / NoBackingApplicationObject
+#      "The appId '...' of the service principal does not reference a valid application object"
+#   2. then every appRoleAssignment -> 404, because the SP was itself seconds old
+# Each cleared by simply re-running, so the script needed THREE passes to onboard one tenant
+# while exiting non-zero on the first two -- which stops any caller that treats exit codes as
+# truth. This is the same class the repo already records for AUs and for a seconds-old user
+# ("a bounded retry fixed it"); it was just never applied here.
+function Wait-Graph {
+    param([scriptblock]$Do, [string]$What, [int]$Attempts = 6, [int]$DelaySeconds = 5)
+    for ($i = 1; $i -le $Attempts; $i++) {
+        try { return & $Do }
+        catch {
+            # 🔴 THE BODY IS NOT IN Exception.Message. Invoke-RestMethod throws
+            # HttpResponseException, whose Message is ONLY the status line --
+            # "Response status code does not indicate success: 400 (Bad Request)." The Graph
+            # error body, and therefore the string 'NoBackingApplicationObject', lands in
+            # $_.ErrorDetails.Message. Reading just the exception message made the FIRST of the
+            # three shapes below dead code: a 400 never matched, so the propagation failure this
+            # retry exists for was never retried at all. Measured on a fresh tenant 2026-09-08.
+            # 🪤 The 404 half worked by accident -- "404 (Not Found)" IS in the status line -- and
+            # that is exactly why this survived its own verification: the fix was proven by
+            # DELETING THE SP, which reproduces the 404 path, not the 400 path. The half that was
+            # broken was the half the test could not reach. Match on both, always.
+            $m = "$($_.Exception.Message) $($_.ErrorDetails.Message)"
+            # Only retry the propagation shapes. A real 403/400 must fail fast and loudly --
+            # retrying a permissions problem just turns a clear error into a slow one.
+            $transient = ($m -match 'NoBackingApplicationObject' -or $m -match '\b404\b' -or $m -match 'Not Found' -or $m -match 'ResourceNotFound')
+            if (-not $transient -or $i -eq $Attempts) { throw }
+            Write-Host ("  ...{0} not visible yet ({1}/{2}) -- Entra propagation, retrying in {3}s" -f $What, $i, $Attempts, $DelaySeconds) -ForegroundColor DarkYellow
+            Start-Sleep -Seconds $DelaySeconds
+        }
+    }
+}
+
 $sp = $null
 if ($app -and $app.appId) {
     $sp = (Gr -Path "servicePrincipals?`$filter=appId eq '$($app.appId)'").value | Select-Object -First 1
     if (-not $sp -and $PSCmdlet.ShouldProcess($app.appId, 'create service principal')) {
-        $sp = Gr -Method POST -Path 'servicePrincipals' -Body @{ appId = $app.appId }
+        $sp = Wait-Graph -What "app $($app.appId)" -Do { Gr -Method POST -Path 'servicePrincipals' -Body @{ appId = $app.appId } }
         Write-Host "  created service principal (objectId $($sp.id))" -ForegroundColor Green
+        # And the SP itself is now seconds old. Block until it is readable, so the consent
+        # loop below does not fire ten POSTs at an object the directory cannot see yet.
+        Wait-Graph -What "service principal $($sp.id)" -Do { Gr -Path "servicePrincipals/$($sp.id)" } | Out-Null
     } elseif ($sp) {
         Write-Host "  service principal present (objectId $($sp.id))" -ForegroundColor DarkGray
     }
 }
 
 # --- Admin consent (app-role assignments) ----------------------------------------
+$script:grantOk   = [System.Collections.Generic.List[string]]::new()
+$script:grantFail = [System.Collections.Generic.List[string]]::new()
 function Grant-AppRole { param($ResourceSpId,$AppRoleId,$Label)
     try {
-        $cur = (Gr -Path "servicePrincipals/$($sp.id)/appRoleAssignments").value |
+        # 🔴 THIS READ IS THE ONE THAT WAS NOT RETRIED, and it cost the first two grants of
+        # every fresh-tenant run. On a seconds-old SP this GET is itself a 404, so the catch
+        # below fired before the retried POST was ever reached: the grant was abandoned with a
+        # [fail] line and NO retry, while grants 3..n succeeded because by then the SP had
+        # propagated. Measured on a fresh tenant 2026-09-08 -- RoleManagement.ReadWrite.Directory
+        # and Group.ReadWrite.All were the two lost, and they are exactly the two a PIM product
+        # cannot run without. Retrying the POST but not the pre-check read is half a fix.
+        $cur = (Wait-Graph -What "appRoleAssignments read for $Label" -Do {
+                    Gr -Path "servicePrincipals/$($sp.id)/appRoleAssignments"
+                }).value |
             Where-Object { $_.resourceId -eq $ResourceSpId -and $_.appRoleId -eq $AppRoleId }
-        if ($cur) { Write-Host "  [skip]  $Label -- already granted" -ForegroundColor DarkGray; return }
-        Gr -Method POST -Path "servicePrincipals/$($sp.id)/appRoleAssignments" `
-            -Body @{ principalId = $sp.id; resourceId = $ResourceSpId; appRoleId = $AppRoleId } | Out-Null
+        if ($cur) { Write-Host "  [skip]  $Label -- already granted" -ForegroundColor DarkGray; $script:grantOk.Add($Label); return }
+        # Retried for the same propagation reason as the SP above: on a fresh tenant every one
+        # of these returned 404 purely because the principal was seconds old.
+        Wait-Graph -What "appRoleAssignment $Label" -Do {
+            Gr -Method POST -Path "servicePrincipals/$($sp.id)/appRoleAssignments" `
+                -Body @{ principalId = $sp.id; resourceId = $ResourceSpId; appRoleId = $AppRoleId }
+        } | Out-Null
         Write-Host "  [ok]    $Label" -ForegroundColor Green
-    } catch { Write-Host "  [fail]  $Label : $($_.Exception.Message)" -ForegroundColor Red }
+        $script:grantOk.Add($Label)
+    } catch {
+        # 🔴 RECORDED, not just printed. This [fail] used to be swallowed entirely: the script
+        # still exited 0 and its summary reported GraphRolesGranted = the list it WANTED, so two
+        # missing core permissions were reported as granted. The onboarding driver treats the
+        # exit code as truth, so it walked straight on to the deploy phase with a
+        # half-permissioned engine. Same family as BUG-130 -- a check that cannot fail is not a
+        # check, and a summary that reports intent instead of outcome is worse than no summary.
+        $script:grantFail.Add($Label)
+        Write-Host "  [fail]  $Label : $($_.Exception.Message)" -ForegroundColor Red
+    }
 }
 if ($GrantConsent -and $sp) {
     Write-Host ""
@@ -293,20 +407,35 @@ if ($IncludeExchange -and $GrantConsent -and $sp) {
 # --- Azure RBAC: User Access Administrator at root MG (default ON) ----------------
 if (-not $SkipAzureRbac -and $sp) {
     Write-Host ""
-    Write-Host "Assigning 'User Access Administrator' at root management group scope..." -ForegroundColor Cyan
+    # 🔴 §64.5 #3 -- ASSIGN IT TO THE PRINCIPAL THAT ACTUALLY RUNS, not to whichever one this
+    # script happens to have created. Hosted = the container MANAGED IDENTITY; non-hosted = the SPN.
+    # Getting this wrong does not fail: the assignment lands on a principal that never calls ARM,
+    # and the engine's Azure half is silently blind (BUG-51, measured as azure-scopes=0).
+    $targetOid  = if ("$RuntimeMiObjectId".Trim()) { "$RuntimeMiObjectId".Trim() } else { $sp.id }
+    $targetWhat = if ("$RuntimeMiObjectId".Trim()) { "the runtime managed identity ($targetOid)" } else { "the engine SPN ($($sp.id))" }
+    Write-Host "Assigning 'User Access Administrator' at root management group scope to $targetWhat..." -ForegroundColor Cyan
     $rootScope = "/providers/Microsoft.Management/managementGroups/$TenantId"
     $uaaRoleId = '18d7d88d-d35e-4fb5-a5c3-7773c20a72d9'   # User Access Administrator (built-in)
     try {
-        $armTok = az account get-access-token --resource https://management.azure.com --query accessToken -o tsv 2>$null
+        $armTok = az account get-access-token --tenant $TenantId --resource https://management.azure.com --query accessToken -o tsv 2>$null
         if (-not $armTok) { throw "no ARM token" }
         $aH = @{ Authorization = "Bearer $armTok"; 'Content-Type' = 'application/json' }
         $raId = [guid]::NewGuid().ToString()
         $uri = "https://management.azure.com$rootScope/providers/Microsoft.Authorization/roleAssignments/$raId`?api-version=2022-04-01"
-        $b = @{ properties = @{ roleDefinitionId = "$rootScope/providers/Microsoft.Authorization/roleDefinitions/$uaaRoleId"; principalId = $sp.id; principalType = 'ServicePrincipal' } }
+        $b = @{ properties = @{ roleDefinitionId = "$rootScope/providers/Microsoft.Authorization/roleDefinitions/$uaaRoleId"; principalId = $targetOid; principalType = 'ServicePrincipal' } }
         if ($PSCmdlet.ShouldProcess($rootScope,'assign User Access Administrator')) {
             try {
                 Invoke-RestMethod -Method PUT -Uri $uri -Headers $aH -Body ($b | ConvertTo-Json -Depth 10) | Out-Null
-                Write-Host "  [ok] User Access Administrator at root MG" -ForegroundColor Green
+                Write-Host "  [ok] User Access Administrator at root MG -> $targetWhat" -ForegroundColor Green
+                if (-not "$RuntimeMiObjectId".Trim()) {
+                    # 🪤 SAY IT WHERE IT WILL BE READ. A hosted deployment's runtime identity is the
+                    # container MI, and it does NOT inherit anything from the SPN -- internal ran
+                    # with UAA on the SPN and an Azure-blind tick until this was found by hand.
+                    Write-Host "  [note] This granted the ENGINE SPN. In a HOSTED deployment the engine runs as the" -ForegroundColor DarkYellow
+                    Write-Host "         container managed identity, which needs this too and inherits NOTHING from the SPN." -ForegroundColor DarkYellow
+                    Write-Host "         Setup-PimContainers.ps1 grants it (-AzureRbacRoles), or re-run this with" -ForegroundColor DarkYellow
+                    Write-Host "         -RuntimeMiObjectId <tick MI objectId>." -ForegroundColor DarkYellow
+                }
             } catch {
                 if ("$($_.Exception.Message)" -match 'RoleAssignmentExists|already exists') { Write-Host "  [skip] already assigned" -ForegroundColor DarkGray }
                 else { throw }
@@ -350,10 +479,22 @@ if (-not $NoWriteLauncherConfig -and $app -and $app.appId) {
 }
 
 # --- Summary ---------------------------------------------------------------------
+# 🔒 The banner reports the OUTCOME, not the intent. It used to say "ready" unconditionally,
+# over a run in which app-role grants had failed. Say plainly which ones did not land -- the
+# operator reads this banner, and a green word here is what stopped anyone looking further.
 Write-Host ""
-Write-Host "==========================================================================" -ForegroundColor Green
-Write-Host " PIM4EntraPS Engine app registration ready" -ForegroundColor Green
-Write-Host "==========================================================================" -ForegroundColor Green
+if ($GrantConsent -and $script:grantFail.Count) {
+    Write-Host "==========================================================================" -ForegroundColor Red
+    Write-Host " PIM4EntraPS Engine app registration INCOMPLETE" -ForegroundColor Red
+    Write-Host "==========================================================================" -ForegroundColor Red
+    Write-Host ("  {0} app-role grant(s) FAILED and are NOT in place:" -f $script:grantFail.Count) -ForegroundColor Red
+    foreach ($f in $script:grantFail) { Write-Host "    - $f" -ForegroundColor Red }
+    Write-Host "  Re-run this script: the grants are idempotent and a second pass repairs them." -ForegroundColor Yellow
+} else {
+    Write-Host "==========================================================================" -ForegroundColor Green
+    Write-Host " PIM4EntraPS Engine app registration ready" -ForegroundColor Green
+    Write-Host "==========================================================================" -ForegroundColor Green
+}
 Write-Host "  tenantId   : $TenantId"
 Write-Host "  clientId   : $(if ($app) { $app.appId } else { '<pending (WhatIf)>' })"
 Write-Host "  spObjectId : $(if ($sp) { $sp.id } else { '<pending (WhatIf)>' })"
@@ -371,7 +512,11 @@ Write-Host ""
     SpObjectId     = if ($sp) { $sp.id } else { $null }
     CertThumbprint = $certThumb
     CertSubject    = $CertSubject
-    GraphRolesGranted   = if ($GrantConsent) { $graphRolesWanted } else { @() }
+    # OUTCOME, not intent. This was $graphRolesWanted -- the list the script MEANT to grant --
+    # so a caller inspecting the returned object saw two permissions listed as granted that had
+    # failed with a 404 minutes earlier. GraphRolesFailed is empty on a clean run.
+    GraphRolesGranted   = if ($GrantConsent) { @($script:grantOk   | Where-Object { $_ -like 'Graph/*' } | ForEach-Object { $_ -replace '^Graph/','' }) } else { @() }
+    GraphRolesFailed    = if ($GrantConsent) { @($script:grantFail | Where-Object { $_ -like 'Graph/*' } | ForEach-Object { $_ -replace '^Graph/','' }) } else { @() }
     ExchangeRoleGranted = if ($GrantConsent -and $IncludeExchange) { 'Exchange.ManageAsApp + Exchange Administrator' } else { '' }
     AzureRbacGranted    = if (-not $SkipAzureRbac) { 'User Access Administrator @ root MG (attempted)' } else { '' }
 }

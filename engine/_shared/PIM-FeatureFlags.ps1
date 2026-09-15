@@ -1,4 +1,4 @@
-# =============================================================================
+﻿# =============================================================================
 # PIM-FeatureFlags.ps1 -- Manager feature-flag registry (REQUIREMENTS [GUI gradual rollout]).
 #
 # A declarative catalog of the Manager's toggleable GUI surfaces (the tabs /
@@ -33,7 +33,6 @@ $script:PimFeatureFlagCatalog = @(
     [ordered]@{ id = 'authoring';   label = 'Authoring';                default = $true;  alwaysOn = $false }
     [ordered]@{ id = 'save';        label = 'Review & Save';            default = $true;  alwaysOn = $false }
     [ordered]@{ id = 'validate';    label = 'Validate';                 default = $true;  alwaysOn = $false }
-    [ordered]@{ id = 'cutover';     label = 'Cutover';                  default = $true;  alwaysOn = $false }
     [ordered]@{ id = 'revoke';      label = 'Maintenance / Revoke';     default = $true;  alwaysOn = $false }
     [ordered]@{ id = 'approvals';   label = 'Approvals';                default = $true;  alwaysOn = $false }
     [ordered]@{ id = 'jobs';        label = 'Jobs';                     default = $true;  alwaysOn = $false }

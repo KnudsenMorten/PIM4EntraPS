@@ -1,149 +1,57 @@
 # PIM-AuditQuery.ps1 -- pure audit-trail query + before/after diff + CSV export
 # (LIFECYCLE / GOVERNANCE -- "Audit you can defend", REQUIREMENTS.md s28 [H6]).
 #
-# The Manager Audit tab historically read only the last THREE monthly files
-# (output/audit/pim-audit-<yyyyMM>.jsonl), never surfaced the before/after of a
-# change, and only exported the page on screen. This shared, dependency-free,
-# PS-5.1-safe library closes all three gaps with ONE decision core that the
-# /api/audit + /api/audit/export endpoints (and the engine, if it ever needs to)
-# share, so the screen, the export and any test resolve the trail identically:
+# The Manager Audit tab reads the trail from SQL pim.AuditEvents (Get-PimSqlAuditEvents).
+# This shared, dependency-free, PS-5.1-safe library is the ONE decision core that the
+# /api/audit + /api/audit/export endpoints share, so the screen, the export and any test
+# resolve the trail identically:
 #
-#   Get-PimAuditMonthList   -- discover the available monthly files (FULL history
-#                              by default; or the most-recent N).
-#   Read-PimAuditEvents     -- read + parse the events across those months.
 #   Get-PimAuditChangeSummary -- render a human "field: old -> new" before/after.
 #   Select-PimAuditEvents   -- filter (category/search/from/to) + sort newest-first.
 #   ConvertTo-PimAuditCsv   -- RFC-4180 CSV (with a formula-injection guard) over
 #                              the FULL filtered set, INCLUDING the change column --
 #                              so an auditor export is the whole trail, not a page.
 #
-# Pure: no module deps, no SQL, no network, no global state. The file on disk is
-# the source of truth; nothing here writes. Category bucketing matches the
-# Manager's Get-PimAuditCategory (kept in sync; this provides a fallback when the
-# function isn't loaded so the lib is standalone-testable).
+# Pure: no module deps, no SQL, no network, no global state, no files. PIM v2 is SQL-only:
+# the old monthly-file reader (Get-PimAuditMonthList / Read-PimAuditEvents over
+# output/audit/pim-audit-<yyyyMM>.jsonl) was removed 2026-09-13; a pre-v2 file trail is
+# imported once with tools/pim-manager/Import-PimAuditFileTrail.ps1. Category bucketing
+# matches the Manager's Get-PimAuditCategory (kept in sync; this provides a fallback when
+# the function isn't loaded so the lib is standalone-testable).
 
 function Get-PimAuditCategoryFallback {
     # Standalone mirror of Open-PimManager.ps1 Get-PimAuditCategory so this lib can
     # be dot-sourced and tested without the Manager. The Manager's own function (if
     # loaded) wins -- see Resolve-PimAuditCategory.
-    param([string]$Action)
+    param([string]$Action, [string]$Target = '')
     $a = "$Action".Trim().ToLowerInvariant()
     if (-not $a) { return 'other' }
+    if ($a -in @('config.save', 'config.csv.save')) {
+        $t = "$Target".Trim()
+        if ($t -match '^(?i)PIM-Assignments-') { return 'delegations' }
+        if ($t -match '^(?i)Account-Definitions-') { return 'accounts' }
+    }
     switch -Regex ($a) {
         '^(manager\.login|login)'           { return 'logins' }
         '^emergency\.'                      { return 'emergency' }
         '^approval\.'                       { return 'approvals' }
         '^(account\.|tap\.)'                { return 'accounts' }
-        '^(membership\.|group\.|local\.apply|msp\.fanout|cutover\.)' { return 'delegations' }
-        '^(policy\.|resource\.|config\.|settings\.|mail\.send|license\.)' { return 'engine' }
+        '^engine\.(groupmembers|adminmembers|entraroles|rolesaus|entrarolesdirect|azres|groupowners|administrativeunitmembers|workloadconnectors|defenderxdrroles|intuneroles|entraapprole)\.' { return 'delegations' }
+        '^queue\.action\.(entra-role-revoke|group-assignment-revoke|azure-rbac-revoke)\.' { return 'delegations' }
+        '^queue\.action\.' { return 'accounts' }
+        '^engine\.(admins|admintap|adminoffboarding)\.' { return 'accounts' }
+        '^(membership\.|group\.|local\.apply|msp\.fanout|cutover\.|revoke\.)' { return 'delegations' }
+        '^(engine\.|policy\.|resource\.|config\.|settings\.|mail\.send|license\.|schedule\.|azres\.policy\.)' { return 'engine' }
         default                             { return 'other' }
     }
 }
 
 function Resolve-PimAuditCategory {
-    param([string]$Action)
+    param([string]$Action, [string]$Target = '')
     if (Get-Command Get-PimAuditCategory -ErrorAction SilentlyContinue) {
-        return (Get-PimAuditCategory -Action $Action)
+        return (Get-PimAuditCategory -Action $Action -Target $Target)
     }
-    return (Get-PimAuditCategoryFallback -Action $Action)
-}
-
-function Get-PimAuditMonthList {
-    <#
-    .SYNOPSIS
-        Discover the audit months available on disk, newest-first.
-    .DESCRIPTION
-        Lists every pim-audit-<yyyyMM>.jsonl in the audit directory and returns the
-        yyyyMM stamps newest-first. With -Months N, returns only the most-recent N
-        months that actually exist; with -Months 0 / 'all' (the default), returns the
-        FULL history -- which is the [H6] fix (the UI used to be capped at 3).
-    .PARAMETER AuditDir
-        The directory holding pim-audit-<yyyyMM>.jsonl files (output/audit).
-    .PARAMETER Months
-        0 (default) = full history (every monthly file on disk). A positive N =
-        the last N CALENDAR months (this month + the N-1 preceding), intersected
-        with what exists -- so the window is wall-clock-based (back-compat with the
-        old now/now-1/now-2 behaviour), NOT "the N newest files that happen to exist".
-    .PARAMETER ReferenceDate
-        'Now' for the calendar-window calculation -- injectable for tests (UTC).
-    #>
-    [CmdletBinding()]
-    param(
-        [Parameter(Mandatory)][string]$AuditDir,
-        [int]$Months = 0,
-        [datetime]$ReferenceDate = [datetime]::UtcNow
-    )
-    if (-not (Test-Path -LiteralPath $AuditDir)) { return @() }
-    $stamps = New-Object System.Collections.Generic.List[string]
-    foreach ($f in @(Get-ChildItem -LiteralPath $AuditDir -Filter 'pim-audit-*.jsonl' -File -ErrorAction SilentlyContinue)) {
-        if ($f.Name -match '^pim-audit-(\d{6})\.jsonl$') { $stamps.Add($Matches[1]) }
-    }
-    # Newest-first (yyyyMM sorts lexically == chronologically).
-    $sorted = @($stamps | Sort-Object -Descending)
-    if ($Months -gt 0) {
-        # The set of calendar-month stamps in the wall-clock window [now-(N-1) .. now].
-        $window = New-Object System.Collections.Generic.HashSet[string]
-        for ($k = 0; $k -lt $Months; $k++) { [void]$window.Add($ReferenceDate.AddMonths(-$k).ToString('yyyyMM')) }
-        $sorted = @($sorted | Where-Object { $window.Contains($_) })
-    }
-    return $sorted
-}
-
-function Read-PimAuditEvents {
-    <#
-    .SYNOPSIS
-        Read + parse audit events across the resolved months (newest month first).
-    .DESCRIPTION
-        Each event keeps its raw fields and gains a stamped `category` (via the
-        Manager's resolver when loaded, else the fallback) and a `change` string
-        (the human before/after summary). A malformed JSON line is skipped, never
-        fatal -- the trail must always render.
-    .PARAMETER AuditDir
-        output/audit directory.
-    .PARAMETER Months
-        0 = full history (default); N = most-recent N existing months.
-    #>
-    [CmdletBinding()]
-    param(
-        [Parameter(Mandatory)][string]$AuditDir,
-        [int]$Months = 0,
-        [datetime]$ReferenceDate = [datetime]::UtcNow
-    )
-    $events = New-Object System.Collections.ArrayList
-    foreach ($m in (Get-PimAuditMonthList -AuditDir $AuditDir -Months $Months -ReferenceDate $ReferenceDate)) {
-        $f = Join-Path $AuditDir "pim-audit-$m.jsonl"
-        if (-not (Test-Path -LiteralPath $f)) { continue }
-        foreach ($line in @(Get-Content -LiteralPath $f -Encoding UTF8)) {
-            if (-not "$line".Trim()) { continue }
-            $evt = $null
-            try { $evt = $line | ConvertFrom-Json } catch { continue }
-            if ($null -eq $evt) { continue }
-            # Normalise ts to an invariant ISO-8601 UTC STRING. ConvertFrom-Json may
-            # have turned the ISO ts into a [datetime] (whose default ToString is the
-            # host's CULTURE-LOCAL format) -- stamping a stable string here keeps the
-            # newest-first sort, the date-range filter and the CSV "When" column
-            # culture-independent (so an export is identical on any machine).
-            try {
-                $tsRaw = $evt.ts
-                $tsIso = ''
-                if ($tsRaw -is [datetime]) {
-                    $tsIso = ([datetime]$tsRaw).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ss.fffZ', [System.Globalization.CultureInfo]::InvariantCulture)
-                } else {
-                    $parsed = $null
-                    if ([datetime]::TryParse("$tsRaw", [System.Globalization.CultureInfo]::InvariantCulture, [System.Globalization.DateTimeStyles]::AssumeUniversal -bor [System.Globalization.DateTimeStyles]::AdjustToUniversal, [ref]$parsed)) {
-                        $tsIso = $parsed.ToString('yyyy-MM-ddTHH:mm:ss.fffZ', [System.Globalization.CultureInfo]::InvariantCulture)
-                    } else {
-                        $tsIso = "$tsRaw"
-                    }
-                }
-                $evt | Add-Member -NotePropertyName ts -NotePropertyValue $tsIso -Force
-            } catch {}
-            try { $evt | Add-Member -NotePropertyName category -NotePropertyValue (Resolve-PimAuditCategory -Action "$($evt.action)") -Force } catch {}
-            try { $evt | Add-Member -NotePropertyName change   -NotePropertyValue (Get-PimAuditChangeSummary -Before $evt.before -After $evt.after) -Force } catch {}
-            [void]$events.Add($evt)
-        }
-    }
-    return @($events)
+    return (Get-PimAuditCategoryFallback -Action $Action -Target $Target)
 }
 
 function ConvertTo-PimAuditFlatMap {
@@ -178,6 +86,98 @@ function ConvertTo-PimAuditFlatMap {
     return $map
 }
 
+function Get-PimAuditRowValue {
+    param([object]$Row, [string]$Name)
+    if ($null -eq $Row) { return '' }
+    if ($Row -is [System.Collections.IDictionary]) { if ($Row.Contains($Name)) { return "$($Row[$Name])".Trim() }; return '' }
+    $p = $Row.PSObject.Properties[$Name]
+    if ($p) { return "$($p.Value)".Trim() }
+    return ''
+}
+
+function Format-PimAuditCommitRow {
+    <#
+      §70.14 (operator 2026-09-13): "log is useless, as I cannot see the change made, like delegation made,
+      who did delegate what to whom" / "cannot be used to detail to a ciso what happened in their env".
+      One configuration row -> one sentence a reviewer can read: WHO gets WHAT, WHERE, and how.
+      PURE. The entity decides the wording; an unknown entity falls back to its identifying columns.
+    #>
+    param([Parameter(Mandatory)][string]$Base, [object]$Row,
+          # §70.22 (operator 2026-09-14: "references to groups are wrong, as it doesnt show prefix ... this group does not
+          # exist"): assignment rows name groups by TAG (Entra-ID-Users-CreateModifyDelete-L1); the group is called
+          # PIM-Entra-ID-Users-CreateModifyDelete-L1. tag (lower-case) -> GroupName from the definitions; a tag no
+          # definition carries says so instead of reading like a real group name.
+          [hashtable]$GroupNameByTag)
+    $g = { param($n) Get-PimAuditRowValue -Row $Row -Name $n }
+    $grp = {
+        param($tag)
+        $t = "$tag".Trim()
+        if (-not $t -or $null -eq $GroupNameByTag) { return "'$t'" }
+        $nm = $GroupNameByTag[$t.ToLowerInvariant()]
+        if ("$nm".Trim()) { return "'$nm'" }
+        return "tag '$t' (no group definition carries this tag)"
+    }
+    $how = @()
+    $t = & $g 'AssignmentType'; if ($t) { $how += $t }
+    if ((& $g 'Permanent') -match '^(?i)true$') { $how += 'permanent' }
+    else { $d = & $g 'NumOfDaysWhenExpire'; if ($d) { $how += "$d days" } }
+    if ((& $g 'Action') -match '^(?i)remove$') { $how += 'Action=Remove' }
+    $howText = if ($how.Count) { ' (' + ($how -join ', ') + ')' } else { '' }
+    switch -Regex ($Base) {
+        '^PIM-Assignments-Admins$'          { return "admin '$(& $g 'Username')' -> member of group $(& $grp (& $g 'GroupTag'))$howText" }
+        # DIRECTION (engine, PIM-EngineProviders Groups provider): the TARGET group is nested INTO the SOURCE group.
+        '^PIM-Assignments-Groups$'          { return "group $(& $grp (& $g 'TargetGroupTag')) -> member of group $(& $grp (& $g 'SourceGroupTag'))$howText" }
+        '^PIM-Assignments-Roles-Groups$'    { return "group $(& $grp (& $g 'GroupTag')) -> Entra role '$(& $g 'RoleDefinitionName')' (tenant-wide)$howText" }
+        '^PIM-Assignments-Roles-AUs$'       { return "group $(& $grp (& $g 'GroupTag')) -> Entra role '$(& $g 'RoleDefinitionName')' in administrative unit '$(& $g 'AdministrativeUnitTag')'$howText" }
+        '^PIM-Assignments-Azure-Resources$' { return "group $(& $grp (& $g 'GroupTag')) -> Azure role '$(& $g 'AzScopePermission')' at '$(& $g 'AzScope')'$howText" }
+        '^PIM-Assignments-Workloads$'       { return "group $(& $grp (& $g 'GroupTag')) -> $(& $g 'Workload') role '$(& $g 'RoleName')' at '$(& $g 'Scope')'$howText" }
+        '^PIM-Definitions-AU$'              { return "administrative unit '$(& $g 'AUDisplayName')' (tag '$(& $g 'AdministrativeUnitTag')')" }
+        '^PIM-Definitions-'                 {
+            $name = & $g 'GroupName'; $tag = & $g 'GroupTag'; $dept = & $g 'Department'
+            $kind = ($Base -replace '^PIM-Definitions-', '').ToLowerInvariant()
+            $label = if ($name -and $tag -and $name -ne $tag) { "'$name' (tag '$tag')" } elseif ($name) { "'$name'" } elseif ($tag) { "'$tag'" } else { "'$dept'" }
+            return "$kind group $label"
+        }
+        '^Account-Definitions-Admins$'      {
+            $u = & $g 'Username'; if (-not $u) { $u = & $g 'UserPrincipalName' }
+            return "admin account '$u'"
+        }
+    }
+    # Fallback: the first identifying, non-empty values -- never a dump of every column.
+    $vals = New-Object System.Collections.Generic.List[string]
+    $names = if ($Row -is [System.Collections.IDictionary]) { @($Row.Keys) } elseif ($null -ne $Row) { @($Row.PSObject.Properties.Name) } else { @() }
+    foreach ($n in $names) { $v = & $g "$n"; if ($v) { $vals.Add("$n=$v") }; if ($vals.Count -ge 4) { break } }
+    return ($vals -join ', ')
+}
+
+function Get-PimAuditCommitChangeLines {
+    <#
+      §70.14 -- the keyed diff of one commit (Compare-PimRowSets: adds / removes / modifies[{before,after,diffCols}])
+      -> ordered sentences: "Added: ...", "Removed: ...", "Changed: ... -- Col: old -> new". Capped at -Max so an
+      import of thousands of rows cannot bloat one audit row; the caller records how many were left out. PURE.
+    #>
+    param([Parameter(Mandatory)][string]$Base, [Parameter(Mandatory)][object]$Diff, [int]$Max = 200, [hashtable]$GroupNameByTag)
+    $lines = New-Object System.Collections.Generic.List[string]
+    $total = 0
+    $field = { param($o, $n) if ($o -is [System.Collections.IDictionary]) { $o[$n] } elseif ($null -ne $o) { $o.PSObject.Properties[$n].Value } }
+    foreach ($r in @(& $field $Diff 'adds'))    { if ($null -eq $r) { continue }; $total++; if ($lines.Count -lt $Max) { $lines.Add('Added: ' + (Format-PimAuditCommitRow -Base $Base -Row $r -GroupNameByTag $GroupNameByTag)) } }
+    foreach ($r in @(& $field $Diff 'removes')) { if ($null -eq $r) { continue }; $total++; if ($lines.Count -lt $Max) { $lines.Add('Removed: ' + (Format-PimAuditCommitRow -Base $Base -Row $r -GroupNameByTag $GroupNameByTag)) } }
+    foreach ($m in @(& $field $Diff 'modifies')) {
+        if ($null -eq $m) { continue }
+        $total++
+        if ($lines.Count -ge $Max) { continue }
+        $b = & $field $m 'before'; $a = & $field $m 'after'
+        $cols = @(& $field $m 'diffCols')
+        $parts = foreach ($c in $cols) {
+            if (-not "$c".Trim()) { continue }
+            $ov = Get-PimAuditRowValue -Row $b -Name "$c"; $nv = Get-PimAuditRowValue -Row $a -Name "$c"
+            "$c`: $(if ($ov) { $ov } else { '(empty)' }) -> $(if ($nv) { $nv } else { '(empty)' })"
+        }
+        $lines.Add('Changed: ' + (Format-PimAuditCommitRow -Base $Base -Row $a -GroupNameByTag $GroupNameByTag) + $(if (@($parts).Count) { ' -- ' + (@($parts) -join '; ') } else { '' }))
+    }
+    return [pscustomobject]@{ lines = @($lines.ToArray()); total = $total; omitted = [Math]::Max(0, $total - $lines.Count) }
+}
+
 function Get-PimAuditChangeSummary {
     <#
     .SYNOPSIS
@@ -195,6 +195,36 @@ function Get-PimAuditChangeSummary {
     #>
     [CmdletBinding()]
     param([object]$Before, [object]$After)
+
+    # §70.14 -- a configuration commit carries readable per-row sentences (`changes`). Show THOSE, one per
+    # line, under the one-line summary -- never "adds: (none) -> 1; rowCount: (none) -> 28; instance: ...".
+    $afterObj = $After
+    if ($afterObj -is [string] -and "$afterObj".TrimStart().StartsWith('{')) { try { $afterObj = $afterObj | ConvertFrom-Json } catch { } }
+    $chg = $null; $sum = ''; $omit = 0
+    if ($afterObj -is [System.Collections.IDictionary]) {
+        if ($afterObj.Contains('changes')) { $chg = $afterObj['changes'] }
+        if ($afterObj.Contains('summary')) { $sum = "$($afterObj['summary'])" }
+        if ($afterObj.Contains('changesOmitted')) { $omit = [int]"$($afterObj['changesOmitted'])" }
+    } elseif ($null -ne $afterObj -and -not ($afterObj -is [string]) -and $afterObj.PSObject.Properties['changes']) {
+        $chg = $afterObj.changes
+        if ($afterObj.PSObject.Properties['summary']) { $sum = "$($afterObj.summary)" }
+        if ($afterObj.PSObject.Properties['changesOmitted']) { $omit = [int]"$($afterObj.changesOmitted)" }
+    }
+    if ($null -ne $chg) {
+        $out = New-Object System.Collections.Generic.List[string]
+        if ($sum) { $out.Add($sum) }
+        foreach ($l in @($chg)) { if ("$l".Trim()) { $out.Add("$l") } }
+        if ($omit -gt 0) { $out.Add("... and $omit more change(s) not listed") }
+        return ($out -join "`n")
+    }
+    # A commit recorded before 2.4.348 has counts only -- say so plainly instead of a field dump.
+    if ($null -ne $afterObj -and -not ($afterObj -is [string])) {
+        $gv = { param($n) if ($afterObj -is [System.Collections.IDictionary]) { if ($afterObj.Contains($n)) { "$($afterObj[$n])" } else { '' } } else { $p = $afterObj.PSObject.Properties[$n]; if ($p) { "$($p.Value)" } else { '' } } }
+        $ad = & $gv 'adds'; $rm = & $gv 'removes'; $md = & $gv 'modifies'
+        if ("$ad$rm$md" -ne '' -and $null -eq $Before -and "$(& $gv 'rowCount')" -ne '') {
+            return ("{0} added, {1} removed, {2} changed ({3} rows now) -- row details were not recorded for commits before v2.4.348" -f $(if ($ad) { $ad } else { 0 }), $(if ($rm) { $rm } else { 0 }), $(if ($md) { $md } else { 0 }), (& $gv 'rowCount'))
+        }
+    }
 
     $b = ConvertTo-PimAuditFlatMap -Value $Before
     $a = ConvertTo-PimAuditFlatMap -Value $After
@@ -237,7 +267,7 @@ function Select-PimAuditEvents {
         SAME filter the operator is looking at. Date bounds are inclusive and
         compared on the event's ISO `ts` (UTC) by string prefix-safe DateTime parse.
     .PARAMETER Events
-        Events from Read-PimAuditEvents (carry .category + .change).
+        Events from Get-PimSqlAuditEvents via the Manager (carry .category + .change).
     .PARAMETER Category
         '' / 'all' = no category filter; else exact category match.
     .PARAMETER Search

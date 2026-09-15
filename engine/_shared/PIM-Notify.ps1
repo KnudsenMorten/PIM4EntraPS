@@ -1,6 +1,6 @@
-<#
+﻿<#
   PIM4EntraPS -- notifications (REST-only, no modules). Renders the shipped mail
-  templates (templates/mail/*.mailtemplate.html, + .custom.html override) and sends via
+  templates (the SQL template store pim.Settings['MailTemplates'], seeded from templates/mail/*.mailtemplate.html) and sends via
   Microsoft Graph /users/<sender>/sendMail (app-only, Mail.Send). Ported from
   Send-PimTemplatedMail / ConvertTo-PimMailRendering in PIM-Functions.psm1.
 
@@ -20,6 +20,9 @@ Set-StrictMode -Off
 if ($PSScriptRoot) {
     $__pimNotifBatch = Join-Path $PSScriptRoot 'PIM-Notifications.ps1'
     if ((Test-Path -LiteralPath $__pimNotifBatch) -and -not (Get-Command Get-PimDailySummary -ErrorAction SilentlyContinue)) { . $__pimNotifBatch }
+    # The ONE mail template store (SQL pim.Settings['MailTemplates']) the send path renders from.
+    $__pimMailStore = Join-Path $PSScriptRoot 'PIM-MailTemplateStore.ps1'
+    if (Test-Path -LiteralPath $__pimMailStore) { . $__pimMailStore }
 }
 
 # --- EMAIL CONTROLS authority (the GUI-state == actual-behavior fix) -----------
@@ -76,61 +79,27 @@ function Get-PimNotifyTemplateDir {
     return $null
 }
 function Get-PimNotifyTemplate {
+    # Path of the SHIPPED template for a type (the store's default), or $null. There is no
+    # <type>.mailtemplate.custom.html any more -- customisation lives in the SQL template store.
     param([Parameter(Mandatory)][string]$Type)
     $dir = Get-PimNotifyTemplateDir; if (-not $dir) { return $null }
-    foreach ($cand in @("$Type.mailtemplate.custom.html", "$Type.mailtemplate.html")) {
-        $p = Join-Path $dir $cand; if (Test-Path -LiteralPath $p) { return $p }
-    }
+    $p = Join-Path $dir "$Type.mailtemplate.html"; if (Test-Path -LiteralPath $p) { return $p }
     return $null
 }
-function Get-PimNotifyStoreOverride {
-    # The persistent-store override for a template type, set GUI-side via the
-    # Manager (SQL pim.Settings 'MailTemplateOverrides' -> hydrated into
-    # $global:PIM_NamingConventions at boot, OR an explicit $global override).
-    # Returns the override HTML string, or $null when there is none. This is what
-    # lets an operator customize a mail WITHOUT copying a file or rebuilding the
-    # container image: the store value travels with the instance and is read here
-    # at send time. PS 5.1-safe (no null-conditional).
-    param([Parameter(Mandatory)][string]$Type)
-    $map = $null
-    if ($global:PIM_NamingConventions -is [hashtable] -and $global:PIM_NamingConventions.ContainsKey('MailTemplateOverrides')) {
-        $map = $global:PIM_NamingConventions['MailTemplateOverrides']
-    } elseif ($null -ne $global:PIM_MailTemplateOverrides) {
-        $map = $global:PIM_MailTemplateOverrides
-    }
-    if ($null -eq $map) { return $null }
-    # The value may arrive as a JSON string (SQL store keeps scalars as text).
-    if ($map -is [string]) {
-        $s = "$map".Trim(); if (-not $s) { return $null }
-        try { $map = $s | ConvertFrom-Json } catch { return $null }
-    }
-    $val = $null
-    if ($map -is [System.Collections.IDictionary]) {
-        if ($map.Contains($Type)) { $val = $map[$Type] }
-    } elseif ($map -is [System.Management.Automation.PSCustomObject]) {
-        $p = $map.PSObject.Properties[$Type]; if ($p) { $val = $p.Value }
-    }
-    if ($null -eq $val) { return $null }
-    $text = "$val"
-    if (-not $text.Trim()) { return $null }
-    return $text
-}
 function Get-PimNotifyTemplateText {
-    # Resolve the EFFECTIVE template body for a type, in precedence order:
-    #   1. persistent-store override (GUI-saved, no rebuild)   <- wins
-    #   2. file-based <type>.mailtemplate.custom.html          (fallback)
-    #   3. shipped <type>.mailtemplate.html                    (default)
-    # Returns @{ text; source } or $null when no template exists at all.
+    # Resolve the EFFECTIVE template body for a type from the ONE template store
+    # (SQL pim.Settings['MailTemplates'], PIM-MailTemplateStore.ps1), else the shipped file for a
+    # type the store has not been seeded with yet. Returns @{ text; source } or $null.
+    # REMOVED 2026-09-13 (operator: one template store in SQL): the MailTemplateOverrides layer and
+    # the <type>.mailtemplate.custom.html file override are not read.
     param([Parameter(Mandatory)][string]$Type)
-    $ov = Get-PimNotifyStoreOverride -Type $Type
-    if ($null -ne $ov) { return @{ text = $ov; source = 'store' } }
-    $dir = Get-PimNotifyTemplateDir
-    if ($dir) {
-        $custom = Join-Path $dir "$Type.mailtemplate.custom.html"
-        if (Test-Path -LiteralPath $custom) { return @{ text = (Get-Content -LiteralPath $custom -Raw -Encoding UTF8); source = 'file' } }
-        $shipped = Join-Path $dir "$Type.mailtemplate.html"
-        if (Test-Path -LiteralPath $shipped) { return @{ text = (Get-Content -LiteralPath $shipped -Raw -Encoding UTF8); source = 'shipped' } }
+    if (Get-Command Get-PimMailTemplateEffective -ErrorAction SilentlyContinue) {
+        $e = Get-PimMailTemplateEffective -Type $Type -TemplateDir (Get-PimNotifyTemplateDir)
+        if ($e) { return @{ text = $e.text; source = $e.source } }
+        return $null
     }
+    $shipped = Get-PimNotifyTemplate -Type $Type
+    if ($shipped) { return @{ text = (Get-Content -LiteralPath $shipped -Raw -Encoding UTF8); source = 'shipped' } }
     return $null
 }
 function ConvertTo-PimNotifyRendering {
@@ -154,6 +123,55 @@ function ConvertTo-PimNotifyRendering {
     $bodyText = (($bodyText -split "`r?`n" | ForEach-Object { $_.TrimEnd() }) -join "`r`n") -replace "(`r`n){3,}", "`r`n`r`n"
     @{ Subject = $subject; BodyHtml = $bodyHtml; BodyText = $bodyText.Trim() }
 }
+function Resolve-PimMailSendIdentity {
+    <#
+      WHICH principal sends the mail (REQUIREMENTS 65.11, operator decision 2026-09-13).
+      Hosted (Container Apps / App Service expose IDENTITY_ENDPOINT or MSI_ENDPOINT) -> the host's
+      MANAGED IDENTITY, even when an engine SPN is also configured: the scoped Exchange
+      'Application Mail.Send' assignment is made for the tick job's managed identity, so sending as
+      the SPN from a container would be refused. Not hosted -> the engine SPN (certificate).
+      Neither -> 'ambient' (a dev session), named as such rather than guessed.
+      Returns { kind = managed-identity|engine-spn|ambient; hosted; clientId; label }. Reads only
+      the environment and the engine globals; no network.
+    #>
+    [CmdletBinding()] param()
+    $hosted = [bool]("$($env:IDENTITY_ENDPOINT)".Trim() -or "$($env:MSI_ENDPOINT)".Trim())
+    if ($hosted) {
+        $miCid = if ("$($global:PIM_ManagedIdentityClientId)".Trim()) { "$($global:PIM_ManagedIdentityClientId)".Trim() }
+                 elseif ("$($env:PIM_ManagedIdentityClientId)".Trim()) { "$($env:PIM_ManagedIdentityClientId)".Trim() } else { '' }
+        $label = if ($miCid) { "managed identity (client id $miCid)" } else { 'managed identity (system-assigned)' }
+        return [pscustomobject]@{ kind = 'managed-identity'; hosted = $true; clientId = $miCid; label = $label }
+    }
+    $cid = "$($global:PIM_ClientId)".Trim()
+    if (-not $cid) { $cid = "$($env:PIM_ClientId)".Trim() }
+    $thumb = "$($global:PIM_CertThumbprint)".Trim()
+    if (-not $thumb) { $thumb = "$($env:PIM_CertThumbprint)".Trim() }
+    if ($cid -and $thumb) {
+        return [pscustomobject]@{ kind = 'engine-spn'; hosted = $false; clientId = $cid; label = "engine SPN $cid (certificate)" }
+    }
+    return [pscustomobject]@{ kind = 'ambient'; hosted = $false; clientId = $cid; label = 'ambient identity (no managed identity and no engine SPN certificate configured)' }
+}
+
+function Get-PimMailSendDenialMessage {
+    <#
+      PURE. Turn a sendMail refusal into a message that NAMES the identity and the fix, or return ''
+      when the error is not an authorization refusal (a throttle or a bad address must not be
+      reported as a missing grant). Mail.Send here is the SCOPED Exchange RBAC assignment, never a
+      tenant-wide Graph consent -- the remedy says so, so nobody "fixes" it by granting the wide one.
+    #>
+    [CmdletBinding()] param([object]$Identity, [string]$Sender, [string]$ErrorText, [string]$ObservedAppId = '')
+    $e = "$ErrorText"
+    if ($e -notmatch '(?i)ErrorAccessDenied|Authorization_RequestDenied|AccessDenied|Access is denied|\b403\b|Forbidden|MailboxNotEnabledForRESTAPI') { return '' }
+    $who = if ($Identity -and "$($Identity.label)".Trim()) { "$($Identity.label)" } else { 'the current identity' }
+    if ("$ObservedAppId".Trim()) { $who = "$who, token appId $ObservedAppId" }
+    $fix = switch ("$($Identity.kind)") {
+        'managed-identity' { "Run tools/setup/Initialize-PimMailSender.ps1 with -ManagedIdentityObjectId <the tick job's managed identity principalId> so Exchange grants that identity 'Application Mail.Send' scoped to '$Sender'." }
+        'engine-spn'       { "Run tools/setup/Initialize-PimMailSender.ps1 with -EngineAppId <engine appId> so Exchange grants the engine SPN 'Application Mail.Send' scoped to '$Sender'." }
+        default            { 'Configure the engine identity (managed identity when hosted, engine SPN certificate otherwise) and give it the scoped Exchange assignment.' }
+    }
+    return ("mail send DENIED as {0}: this identity has no Exchange 'Application Mail.Send' assignment for the sender mailbox '{1}' (sending is granted per mailbox by Exchange RBAC for Applications -- do NOT grant tenant-wide Graph Mail.Send). {2} Error: {3}" -f $who, $Sender, $fix, (($e -split "`n")[0]))
+}
+
 function Send-PimNotifyMail {
     # Render type+tokens and send via Graph sendMail. Returns @{ sent; recipient; subject;
     # rendered; reason }. No send (returns rendered only) when -WhatIf / $global:WhatIfMode,
@@ -201,8 +219,25 @@ function Send-PimNotifyMail {
     if (-not $sender) { Write-Warning "  [Mail] `$global:PIM_MailSender not set -- rendered only, not sent."; return @{ sent = $false; recipient = $rcpt; subject = $r.Subject; rendered = $r; reason = 'no sender' } }
     if (-not $rcpt)   { return @{ sent = $false; subject = $r.Subject; rendered = $r; reason = 'no recipient' } }
     $body = @{ message = @{ subject = $r.Subject; body = @{ contentType = 'HTML'; content = $r.BodyHtml }; toRecipients = @(@{ emailAddress = @{ address = $rcpt } }) }; saveToSentItems = $false }
-    try { Invoke-PimGraph -Method POST -Path "/users/$sender/sendMail" -Body $body | Out-Null; return @{ sent = $true; recipient = $rcpt; subject = $r.Subject; rendered = $r } }
-    catch { Write-Warning "  [Mail] send failed ($Type -> $rcpt): $($_.Exception.Message)"; return @{ sent = $false; recipient = $rcpt; subject = $r.Subject; rendered = $r; reason = "$($_.Exception.Message)" } }
+    $sendAs = Resolve-PimMailSendIdentity
+    # Splat the switch only when it is set: offline suites stub Invoke-PimGraph with a fixed
+    # parameter list, and an unconditional -UseManagedIdentity would break every one of them.
+    $graphArgs = @{ Method = 'POST'; Path = "/users/$sender/sendMail"; Body = $body }
+    if ($sendAs.kind -eq 'managed-identity') { $graphArgs['UseManagedIdentity'] = $true }
+    try { Invoke-PimGraph @graphArgs | Out-Null; return @{ sent = $true; recipient = $rcpt; subject = $r.Subject; rendered = $r; sentAs = $sendAs.kind } }
+    catch {
+        $em = "$($_.Exception.Message) $($_.ErrorDetails.Message)".Trim()
+        $obs = ''
+        try {
+            if ($sendAs.kind -eq 'managed-identity' -and (Get-Command Get-PimTokenAppId -ErrorAction SilentlyContinue)) {
+                $obs = Get-PimTokenAppId -Token (Get-PimRestToken -Resource 'graph' -UseManagedIdentity)
+            }
+        } catch { $obs = '' }
+        $denied = Get-PimMailSendDenialMessage -Identity $sendAs -Sender $sender -ErrorText $em -ObservedAppId $obs
+        $why = if ($denied) { $denied } else { $em }
+        Write-Warning "  [Mail] send failed ($Type -> $rcpt) as $($sendAs.label): $why"
+        return @{ sent = $false; recipient = $rcpt; subject = $r.Subject; rendered = $r; reason = $why; sentAs = $sendAs.kind }
+    }
 }
 
 function Test-PimTapMailReady {
@@ -227,7 +262,7 @@ function Test-PimTapMailReady {
     param([string]$Recipient)
 
     if (-not "$Recipient".Trim()) {
-        return @{ ok = $false; reason = 'this admin row has no ManagerEmail, so there is nowhere to deliver the TAP' }
+        return @{ ok = $false; reason = 'this admin row has no forwarding address (MailForwardAddress) and no ManagerEmail, so there is nowhere to deliver the TAP -- set the forwarding email on the admin row' }
     }
     # 🔴 HYDRATE BEFORE JUDGING. Measured live on EFIF 2026-08-25: this guard refused ALL SIX admins
     # with "no notification sender is configured" while pim.Settings held a perfectly good
@@ -240,7 +275,16 @@ function Test-PimTapMailReady {
     # configuration is loaded does not report the config -- it reports its own ordering.
     # Fail-safe: Initialize-PimEmailControlsFromStore leaves the globals untouched when the store is
     # unreachable, so this can only ever ADD a sender, never clear one.
-    if (Get-Command Initialize-PimEmailControlsFromStore -ErrorAction SilentlyContinue) {
+    # 🪤 ...BUT HYDRATE ONCE, NOT ONCE PER ROW. This guard is called INSIDE a per-admin loop
+    # (Get-PimAdminTapState), so on a tenant with N admins it did N SQL round-trips to read the same
+    # global mail configuration. Measured live 2026-09-12: /api/admin-tap timed out at 120s.
+    # The sender is tenant-wide, so re-reading it per admin cannot change the answer -- it only
+    # costs a round-trip each time.
+    # 🔑 Still fail-safe and still ordered correctly: hydration happens on the FIRST call (the
+    # original defect was that it never happened at all), and is skipped only once a sender is
+    # actually populated. An unset sender re-reads every time, so a store that becomes reachable
+    # mid-run is still picked up.
+    if ((-not "$($global:PIM_MailSender)".Trim()) -and (Get-Command Initialize-PimEmailControlsFromStore -ErrorAction SilentlyContinue)) {
         try { [void](Initialize-PimEmailControlsFromStore) } catch { }
     }
     if (-not "$($global:PIM_MailSender)".Trim()) {

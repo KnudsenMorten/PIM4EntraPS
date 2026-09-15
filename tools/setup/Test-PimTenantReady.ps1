@@ -1,4 +1,4 @@
-#Requires -Version 5.1
+﻿#Requires -Version 5.1
 <#
 .SYNOPSIS
     PIM4EntraPS's READINESS PROBE -- is this environment actually RUNNING, not merely deployed?
@@ -55,6 +55,7 @@ $ErrorActionPreference = 'Continue'
 $sol = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 . (Join-Path $sol 'engine\_shared\PIM-Rest.ps1')
 . (Join-Path $sol 'engine\_shared\PIM-SqlStore.ps1')
+. (Join-Path $PSScriptRoot '_PimMailSenderPlan.ps1')   # pure verdict for the tenant-wide Mail.Send check
 
 $checks = New-Object System.Collections.Generic.List[object]
 function Add-Check {
@@ -238,25 +239,45 @@ Invoke-Check -Name 'admins requesting a TAP can receive it' -Body {
 # promote-to-required decision.
 # =====================================================================================
 Invoke-Check -Name 'engine holds NO tenant-wide Graph Mail.Send' -Required $false -Body {
+    # REQUIREMENTS 65.11 (operator decision 2026-09-13): the hosted engine SENDS as its managed
+    # identity, so the managed identity is checked as well as the engine SPN -- a tenant-wide consent
+    # on EITHER defeats the per-mailbox scope.
+    $spIds = New-Object System.Collections.Generic.List[object]
     $appId = if ($EngineClientId) { $EngineClientId } else { "$($global:PIM_ClientId)" }
-    # 🪤 "Could not tell" is NOT "fine" -- the probe's own contract. An unknown engine identity
-    # makes this unevaluable, which is a failed check with a reason, never a quiet pass.
-    if (-not "$appId".Trim()) { return @{ ok = $false; detail = 'engine client id unknown -- cannot tell whether a tenant-wide send right is held (this is "did not look", not "it is fine")' } }
-    $sp = Invoke-PimGraph -Path "/servicePrincipals(appId='$appId')?`$select=id,displayName"
-    if (-not $sp.id) { return @{ ok = $false; detail = "no service principal found for engine appId '$appId'" } }
+    if ("$appId".Trim()) {
+        $sp = Invoke-PimGraph -Path "/servicePrincipals(appId='$appId')?`$select=id,displayName"
+        if (-not $sp.id) { return @{ ok = $false; detail = "no service principal found for engine appId '$appId'" } }
+        $spIds.Add([pscustomobject]@{ label = "engine SPN $appId"; spId = "$($sp.id)" })
+    }
+    if ($SubscriptionId -and $ResourceGroup) {
+        $arm = Get-PimRestToken -Resource arm
+        $job = Invoke-RestMethod -Headers @{ Authorization = "Bearer $arm" } -Uri "https://management.azure.com/subscriptions/$SubscriptionId/resourceGroups/$ResourceGroup/providers/Microsoft.App/jobs/$TickJobName`?api-version=2024-03-01"
+        $pick = Get-PimJobManagedIdentityPrincipalId -Job $job
+        if ($pick.principalId) { $spIds.Add([pscustomobject]@{ label = "tick job '$TickJobName' managed identity"; spId = $pick.principalId }) }
+    }
+    if ("$($env:IDENTITY_ENDPOINT)".Trim() -or "$($env:MSI_ENDPOINT)".Trim()) {
+        # In-container: this host's own managed identity, from its token's oid claim.
+        try {
+            $tok = Get-PimRestToken -Resource graph -UseManagedIdentity
+            $p = "$tok".Split('.')[1].Replace('-', '+').Replace('_', '/'); while ($p.Length % 4) { $p += '=' }
+            $oid = "$(([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($p)) | ConvertFrom-Json).oid)".Trim()
+            if ($oid -and -not @($spIds | Where-Object { $_.spId -eq $oid }).Count) { $spIds.Add([pscustomobject]@{ label = 'this host''s managed identity'; spId = $oid }) }
+        } catch { }
+    }
+    # 🪤 "Could not tell" is NOT "fine" -- the probe's own contract. No identity resolved makes this
+    # unevaluable, which Get-PimTenantWideMailSendVerdict reports as a failed check with a reason.
+    if (-not $spIds.Count) { $v = Get-PimTenantWideMailSendVerdict -Targets @(); return @{ ok = $v.ok; detail = $v.detail } }
     # 🔒 Resolve the role BY NAME from Graph's own app-role list rather than hard-coding its GUID.
     # A wrong hard-coded id matches nothing and the check then passes on every tenant forever --
     # a guard that cannot fail, which this project has now shipped twice and caught twice.
     $graphSp = Invoke-PimGraph -Path "/servicePrincipals(appId='00000003-0000-0000-c000-000000000000')?`$select=id,appRoles"
     $role = @(@($graphSp.appRoles) | Where-Object { "$($_.value)" -eq 'Mail.Send' })
-    if (-not $role.Count) { return @{ ok = $false; detail = 'could not resolve the Graph Mail.Send app role -- unable to evaluate' } }
-    $roleId = "$($role[0].id)"
-    $asg = @((Invoke-PimGraph -Path "/servicePrincipals/$($sp.id)/appRoleAssignments").value)
-    $hit = @($asg | Where-Object { "$($_.appRoleId)" -eq $roleId -and "$($_.resourceId)" -eq "$($graphSp.id)" })
-    if ($hit.Count) {
-        return @{ ok = $false; detail = "the engine SPN holds TENANT-WIDE Graph Mail.Send -- the per-mailbox Exchange RBAC scope is defeated by it (measured: with this consent an out-of-scope send is ACCEPTED). Revoke it; the scoped grant is what should carry sending." }
-    }
-    return @{ ok = $true; detail = 'no tenant-wide Graph Mail.Send on the engine SPN (sending is carried by the per-mailbox Exchange RBAC scope)' }
+    $roleId = if ($role.Count) { "$($role[0].id)" } else { '' }
+    $targets = @(foreach ($t in $spIds) {
+        [pscustomobject]@{ label = $t.label; spId = $t.spId; assignments = @((Invoke-PimGraph -Path "/servicePrincipals/$($t.spId)/appRoleAssignments").value) }
+    })
+    $v = Get-PimTenantWideMailSendVerdict -Targets $targets -GraphSpId "$($graphSp.id)" -MailSendRoleId $roleId
+    return @{ ok = $v.ok; detail = $v.detail }
 }
 
 # =====================================================================================

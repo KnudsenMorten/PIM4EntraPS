@@ -1,4 +1,4 @@
-# PIM4EntraPS -- onboarding modes (guest invite, cloud-only) + self-service
+﻿# PIM4EntraPS -- onboarding modes (guest invite, cloud-only) + self-service
 # consultant enable/disable. Dot-sourced by PIM-Functions.psm1 (uses
 # PIM-ChangeQueue.ps1 + PIM-PortalAccess.ps1) and the pim-manager.
 #

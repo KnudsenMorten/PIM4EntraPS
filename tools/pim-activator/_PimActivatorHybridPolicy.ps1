@@ -1,4 +1,4 @@
-#Requires -Version 5.1
+﻿#Requires -Version 5.1
 <#
 .SYNOPSIS
     Pure, offline registry-policy/plan BUILDER for the PIM Activator hybrid

@@ -1,4 +1,4 @@
-#requires -Version 5.1
+﻿#requires -Version 5.1
 <#
 .SYNOPSIS
     TEST-09 -- does what is RUNNING match what is MERGED? Reports version drift
@@ -176,7 +176,7 @@ $solRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)     # tools/set
 $dateSafe = Join-Path $solRoot 'engine\_shared\PIM-DateSafe.ps1'
 if (Test-Path -LiteralPath $dateSafe) { . $dateSafe }
 
-Write-Host "=== PIM deployed-version drift (TEST-09) ===" -ForegroundColor Cyan
+Write-Host "=== PIM deployed-version drift ===" -ForegroundColor Cyan
 
 $verFile = Join-Path $solRoot 'VERSION'
 if (-not (Test-Path -LiteralPath $verFile)) {

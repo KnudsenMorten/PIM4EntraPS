@@ -1,4 +1,4 @@
-#requires -Version 5.1
+﻿#requires -Version 5.1
 <#
 .SYNOPSIS
     DEPRECATED redirect -> tools/setup/Install-PimEngineAppRegistration.ps1 (pure REST).

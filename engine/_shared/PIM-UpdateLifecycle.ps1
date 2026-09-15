@@ -1,4 +1,4 @@
-<#
+﻿<#
   PIM4EntraPS -- update-lifecycle core (the PURE, fully-testable decision brain behind the
   full update-lifecycle automation: detect -> build -> deploy -> verify -> notify ->
   ensure-monitor). REQUIREMENTS.md sec.1 (Hosting/Runtime) + sec.2 (Containers) + sec.5
@@ -169,6 +169,18 @@ function Get-PimSqlUpdatePlan {
                 toAdd = @(); toDrop = @(); toMigrate = @() }) | Out-Null
             continue
         }
+        # 🔴 AN EMPTY COLUMN LIST MEANS THE TABLE IS ABSENT. A table cannot exist in SQL Server with
+        # zero columns, so "I read sys.columns successfully and got nothing back" is the reader's way
+        # of saying the table is not there. The contract had drifted between the two halves: the
+        # READER adds a key for every table it LOOKED AT, while this builder read a present key as
+        # "the table EXISTS". A genuinely-absent table therefore came through as exists=$true with
+        # every column missing, and the apply path dutifully emitted ALTER TABLE ... ADD against it:
+        #     Cannot find the object "pim.LocalAdmins" because it does not exist or you do not have
+        #     permissions
+        # Measured at a live customer on a first install, 2026-09-08 -- and only reachable once the
+        # detect path could authenticate at all, which is why it had never been seen: before that
+        # every table came back UNKNOWN (null) and took the branch above.
+        if ($hasTable -and @($DeployedColumns[$table]).Count -eq 0) { $hasTable = $false }
         if (-not $hasTable) {
             $missing.Add("$table") | Out-Null
             $needBecauseCols = $true
@@ -434,7 +446,14 @@ function Get-PimNotifyPlan {
         [bool]$Deployed,
         [bool]$SchemaUpgraded,
         [string]$ImageTag,
-        [string]$Recipient = 'mok@mortenknudsen.net',
+        # 🔴 NO DEFAULT RECIPIENT -- BUG-28, which was fixed at the orchestrator and survived here.
+        # This was the operator's own mailbox, shipping to every customer as the fallback: a
+        # customer's update outcome, tenant name and failure detail addressed to a stranger. The
+        # caller already treats an empty recipient as "skip notification", which is the correct
+        # behaviour -- a notification is not the deploy, and it must never reach somebody else.
+        # 🪤 Found by the structural audit, not by reading: the orchestrator's comment says this
+        # class was dealt with, and the pure core it calls still carried it.
+        [string]$Recipient = '',
         [string]$ErrorDetail
     )
     $sev = switch ($Outcome) { 'success' { 'info' } 'noop' { 'info' } 'rolledback' { 'warning' } 'failure' { 'critical' } default { 'info' } }

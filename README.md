@@ -3,8 +3,7 @@
 > **Privileged-access governance for Microsoft Entra, as code.**
 > Model your privileged delegation as nested groups, apply the right PIM
 > policies, and keep everything in sync from a single source of truth —
-> without ever standing up a public endpoint or leaving credentials lying
-> around.
+> with no unauthenticated endpoint and no credentials lying around.
 
 **PIM4EntraPS** turns a sprawling, click-driven Entra PIM model into a
 **declarative model** that an engine reads, diffs against your tenant, and
@@ -15,7 +14,10 @@ engine run, a browser-based **PIM Manager** GUI to edit and validate it, and a
 **PIM Activator** browser extension admins bulk-activate from. The engine talks
 directly to Microsoft over secure web calls — no heavy PowerShell modules to
 install or keep updated — and reads its model from **one governed database**.
-It runs on a plain VM or in a lightweight container, and never needs a public IP.
+It runs in your own Azure subscription as a small set of Container Apps (a
+Manager that scales to zero and a scheduled engine job) next to an Azure SQL
+database. The Manager is always behind Microsoft Entra sign-in, and can be made
+private-only if your network design calls for it.
 
 ![PIM Manager — Home / Overview dashboard](docs/img/manager-home.png)
 *The PIM Manager opens on a Home / Overview dashboard — red/amber/green tiles
@@ -46,24 +48,33 @@ owns the detail. (Screenshot uses synthetic demo data.)*
   - [Tested for real, never faked](#tested-for-real-never-faked)
 - [The PIM Manager (GUI)](#the-pim-manager-gui)
   - [One clear place to look — the Home dashboard](#one-clear-place-to-look--the-home-dashboard)
-  - [Six menus instead of twenty tabs](#six-menus-instead-of-twenty-tabs)
-  - [See who can do what — the Delegation Map](#see-who-can-do-what--the-delegation-map)
+  - [Six menus, named for what you do](#six-menus-named-for-what-you-do)
+  - [See who can reach what — the Access map](#see-who-can-reach-what--the-access-map)
   - [Create access the natural way round](#create-access-the-natural-way-round)
-  - [Review & Save — see exactly what will change](#review--save--see-exactly-what-will-change)
+  - [Pending changes — one queue, reviewed before commit](#pending-changes--one-queue-reviewed-before-commit)
+  - [Drift — is the tenant what PIM says it should be?](#drift--is-the-tenant-what-pim-says-it-should-be)
+  - [Review standing access](#review-standing-access)
   - [Reports — "who can do what", and the reverse](#reports--who-can-do-what-and-the-reverse)
   - [Role Lookup — the questions every admin asks about roles](#role-lookup--the-questions-every-admin-asks-about-roles)
   - [Validate — catch problems before they ship](#validate--catch-problems-before-they-ship)
-  - [Jobs, Audit and Support](#jobs-audit-and-support)
+  - [Jobs and engine logs](#jobs-and-engine-logs)
+  - [Audit and Support](#audit-and-support)
   - [Settings — your operational policy in one place](#settings--your-operational-policy-in-one-place)
-  - [Export everywhere, and a guided database cutover](#export-everywhere-and-a-guided-database-cutover)
+  - [Export everywhere](#export-everywhere)
 - [The PIM Activator (browser extension)](#the-pim-activator-browser-extension)
 - [Deployment scenarios — pick your topology](#deployment-scenarios--pick-your-topology)
-- [Getting started / install](#getting-started--install)
-  - [Community mode — quick start](#community-mode--quick-start)
-  - [Internal mode — quick start](#internal-mode--quick-start)
-  - [Keeping a deployment up to date](#keeping-a-deployment-up-to-date)
+- [Editions and licensing](#editions-and-licensing)
+- [Getting started — install the community edition](#getting-started--install-the-community-edition)
+  - [What you need](#what-you-need)
+  - [1. Get the code](#1-get-the-code)
+  - [2. Create the deploy identity](#2-create-the-deploy-identity)
+  - [3. Deploy everything with one command](#3-deploy-everything-with-one-command)
+  - [4. Sign in and verify](#4-sign-in-and-verify)
+  - [Keeping it up to date](#keeping-it-up-to-date)
+  - [What it costs to run](#what-it-costs-to-run)
 - [Hosting & containers](#hosting--containers)
 - [MSP variant](#msp-variant)
+- [By the numbers](#by-the-numbers)
 - [Repo layout](#repo-layout)
 - [Documentation](#documentation)
 - [Versioning](#versioning)
@@ -134,11 +145,11 @@ a plain VM or a lightweight container with nothing pre-installed.
 
 ### And two more standouts
 
-- **Run it where it fits — hosted or local.** The Manager can run centrally for
-  the whole team, or locally on an admin's own PC straight against the database.
-  A break-glass edition runs on a client PC for the rare times a hosted plan is
-  unavailable, so senior admins are never locked out. **No public IP is ever
-  required.**
+- **Runs in your own tenant, at close to no cost.** The whole platform deploys
+  into your own Azure subscription with one command: a Manager that scales to
+  zero when nobody is using it, one scheduled engine job, and a small Azure SQL
+  database. Nothing runs on anyone else's infrastructure, the Manager is always
+  behind Microsoft Entra sign-in, and a private-only network design is supported.
 - **MSP: pull, never push.** For consultancies managing many customer tenants,
   each tenant *pulls* a cryptographically signed baseline into its own database.
   The provider never reaches into the customer tenant, customer data never
@@ -214,11 +225,10 @@ Admin-ABC           --E->  Role-              --E--> Entra-ID-                  
   Heavy reuse of permission groups + role groups across many admins keeps
   you well under the ceiling.
 
-![Delegation Map — admin to role group to permission bundle to target, with the risk overlay on](docs/img/manager-delegation-map.png)
-*The Delegation Map renders the nesting as an interactive graph: pick a
-person and the board collapses to their transitive path (who reaches what,
-through which groups). The **risk overlay** flags orphans, stale nodes and
-over-privileged principals. (Synthetic demo data.)*
+![Access map — an admin traced through a role group and its permission groups to the roles they grant](docs/img/manager-access-map.png)
+*The Access map renders the nesting as an interactive graph: pick a person and
+the board collapses to their path — role group, permission groups, and the Entra
+and Azure roles those grant. (Synthetic demo data.)*
 
 See **[docs/DESIGN.md](docs/DESIGN.md)** for the full philosophy: direct
 vs indirect delegation, naming convention, tier model, lifecycle states,
@@ -230,8 +240,7 @@ the as-code pattern, customer overrides.
 
 This section explains every delivered capability in plain language —
 benefit-first, no jargon. For the complete customer-facing catalog, see
-**[docs/FEATURES.md](docs/FEATURES.md)**; work in progress lives in
-**[docs/REQUIREMENTS.md](docs/REQUIREMENTS.md)**; per-release detail is in
+**[docs/FEATURES.md](docs/FEATURES.md)**; per-release detail is in
 **[RELEASENOTES.md](RELEASENOTES.md)**.
 
 ### The single source of truth
@@ -240,16 +249,11 @@ Your entire privileged-access model — configuration, settings, access rules
 and delegation profiles — lives in **one governed database**, not in files or
 shares you have to keep in step. The Manager, the engine and the scheduled
 jobs all read and write the same store, so there is never a question of which
-copy is current. Sign-in to the database is **passwordless**: in the cloud it
-uses a managed identity (no database passwords stored anywhere), and on-prem it
-uses your existing Windows sign-in. The Manager always shows you which database
-you're connected to, and you can switch between databases from a dropdown.
-
-For development and inner-loop work on a management server, the engine can also
-read from a **local database using the signed-in machine** — no cloud
-connection, no separate login. In production (and for break-glass), the cloud
-database is always the single authoritative store; the local instance is a
-developer convenience only.
+copy is current. Settings, the audit trail, mail templates and scheduler state
+live there too — there are no configuration files to keep in step. Sign-in to
+the database is **passwordless**: the Manager and the engine use their managed
+identities, so no database password is stored anywhere. Moving from the older
+spreadsheet-based edition is a one-time import into the database.
 
 The hosted database is kept **awake** so neither the health check nor the first
 request after a quiet period suffers a cold start, and the health check
@@ -260,15 +264,23 @@ rather than taking the service down; only a sustained outage reports unhealthy.
 
 The engine is the part that makes your tenant match your model. It is **modern
 and dependency-free** — it talks directly to Microsoft and to the database with
-no heavy PowerShell modules to install or keep updated, so it runs on a plain VM
-or in a lightweight container.
+no heavy PowerShell modules to install or keep updated — and it runs as a
+scheduled job that wakes every few minutes, does what is due, and stops.
 
 - **From one run, everything gets set up.** Groups, delegations, organisational
   group access, time-limited access passes, admin schedules and notification
   emails — all created in a single pass, with nothing wired up by hand.
-- **Fast incremental runs.** Instead of a one-to-two-hour full sweep every time,
-  the engine queues changes and applies only what actually changed, scoped to
-  the area you ask for. A full reprocess is still available when you want it.
+- **A change runs only what it touches.** When you commit a change, the engine
+  runs just the steps that change needs instead of a full sweep, and — where the
+  Manager is permitted to start the job — it starts right away rather than
+  waiting for the next scheduled tick. Queued actions such as a TAP re-issue or a
+  session revoke are applied between engine steps, not after a long run.
+- **Your policies, identical to v1.** Entra role, Azure resource and PIM for
+  Groups policies (including owner policies and the full notification set) follow
+  your templates. A run that would change many policies at once, or weaken
+  protection, is **held until an administrator approves the exact plan**.
+- **Every change it makes is audited** with real names and the job run that made
+  it; policy changes are recorded rule by rule, before and after.
 - **Clear, readable logs.** Every action is one tagged line (assign / update /
   extend / remove / OK); errors name the actual resource or role, not an opaque
   ID; and a full transcript is kept for each run.
@@ -382,9 +394,11 @@ Security is layered through the whole product, not bolted on:
   to do, it drops to **read-only** rather than assuming the best. The role tiers
   (Reader / Admin / Super-Admin / Delegated) gate exactly what each operator can
   do.
-- **Certificate sign-in, no secrets in configuration.** The engine signs in as
-  an application using a certificate (not a shared secret), and access uses a
-  managed identity or a key-vault pointer — seed files never carry secrets.
+- **No stored passwords.** The hosted Manager and engine authenticate with their
+  own managed identities — to Microsoft Graph, to Azure and to the database — and
+  deployment tooling signs in with certificates. A client secret is used only where
+  the platform itself requires one (the sign-in registration that fronts the
+  Manager), and never lives in a configuration file.
 - **It tells you exactly which permission is missing.** When a call is refused,
   you don't get a bare "access denied" — you get the precise permission to grant
   (for the automation identity) or the privileged role to activate (when you're
@@ -419,9 +433,15 @@ creation:
   it's extended. A removal decision is **remembered**, so the engine never
   silently re-adds someone an owner just removed — the most recent decision
   always wins.
-- **Optional audit to Log Analytics.** On top of the always-on local audit, every
-  change can optionally be forwarded to Azure Log Analytics (off by default, one
-  setting to enable).
+- **Admin lifecycle with v1 parity.** Disabled and revoked admins stay disabled;
+  offboarding runs on its own schedule and resumes if it is interrupted; a Remove
+  row revokes access first; accounts are created when they are due; every cloud
+  admin receives a Temporary Access Pass that honours its start date; and
+  on-premises Active Directory admins are created in AD with an initial password
+  that is mailed, never stored.
+- **Optional audit to Log Analytics.** On top of the audit trail kept in the
+  database, every change can optionally be forwarded to Azure Log Analytics (off
+  by default, one setting to enable).
 
 ### Emergency break-glass
 
@@ -442,8 +462,12 @@ so senior admins are never locked out even if the central console is down.
   keeps test mail out of real inboxes. New-admin access-pass codes can be fanned
   out to any combination of email, Teams and Slack; a delivery failure never
   blocks account creation.
+- **Mail is sent as the environment's own managed identity**, with send rights
+  limited to the sender mailbox. Admin mail and access passes go to the owner's
+  office address (the forwarding address if set, otherwise the manager), and are
+  refused rather than sent somewhere wrong when no valid address exists.
 - **Edit templates in the portal — no rebuild.** Open a template under
-  Governance → Mail templates, change the wording, save — your version is stored
+  Audit & Settings → Mail templates, change the wording, save — your version is stored
   centrally and takes effect immediately, surviving restarts and updates. The
   portal shows which templates are still the shipped default and which you've
   customised, with one-click **Reset** to the original.
@@ -518,240 +542,215 @@ Every tile is backed by real data with an honest empty state — there are no
 decorative or dead tiles — and a red badge shows the total number of items
 needing attention. (See the Home dashboard screenshot at the top of this page.)
 
-### Six menus instead of twenty tabs
+### Six menus, named for what you do
 
-The Manager folds its ~20 underlying screens into **six clearly-named top-level
-menus**, so a security leader or a first-time admin can find anything in
-seconds.
+The Manager folds its screens into **six top-level menus**, each item labelled
+with a plain verb phrase and a one-line description of what it does — and what it
+does not do.
 
-![The consolidated six-menu navigation with a dropdown open](docs/img/manager-nav.png)
-*Six top-level menus — Overview · Provisioning & Access · Change Control ·
-Operations · Governance · Audit & Settings — fold ~20 screens into one
-scannable bar. Each menu carries an attention dot + per-item count.
-(Synthetic demo data.)*
+![The six-menu navigation with the Access menu open](docs/img/manager-nav.png)
+*Six top-level menus — Overview · Access · Pending changes · Jobs · Reviews &
+controls · Audit & Settings — with the Access menu open and each item's
+description. (Synthetic demo data.)*
 
 | Menu | What lives under it |
 |---|---|
 | **Overview** | The Home dashboard and its attention tiles. |
-| **Provisioning & Access** | The Delegation Map, grid editors, the target-first create wizard, ready-made template packs, and the Authoring and Onboarding panels. |
-| **Change Control** | The keyed Review & Save diff preview before commit. |
-| **Operations** | The Jobs panel (scheduled background work, live tail) and the database Cutover ceremony. |
-| **Governance** | Validate, Access Review, Reports ("who can do what"), Role Lookup, and editable mail templates. |
-| **Audit & Settings** | The Audit history, Settings / operational policy, alerting, departments import, AD OU placement and naming. |
+| **Access** | The Access map, Look up a role, Create access (guided wizards), Change existing access, Admin accounts & TAP, Invite a guest or consultant, Departments & owners, and All records. |
+| **Pending changes** | Check for problems (validation) and the Review & commit queue. |
+| **Jobs** | Jobs & status, Engine logs & errors, and the Job schedule. |
+| **Reviews & controls** | Review standing access, Approvals, Drift: live vs desired, Access reviews, Tenant conformance, Reports, and Managed tenants. |
+| **Audit & Settings** | Audit trail, Settings, Newly discovered resources, Manager access & roles, Emergency override (break-glass), Mail templates, and Support. |
 
-The grouping is a **pure navigation layer** — nothing was removed or renamed,
-and the classic flat tab strip is still there underneath. A **global search box**
-in the header jumps to any person, group, role, scope or tag across the whole
-estate: a person or role opens its "who can do what" report; a group, scope or
-tag focuses it on the Delegation Map.
+A **global search box** in the header jumps to any person, group, role, scope or
+tag across the whole estate: a person or role opens its "who can do what" report;
+a group, scope or tag focuses it on the Access map.
 
-### See who can do what — the Delegation Map
+### See who can reach what — the Access map
 
-The Delegation Map renders your nesting as an interactive graph: admin → role
-group → permission group → target (shown above in [The core idea](#the-core-idea-group-nesting)).
+The Access map renders your nesting as an interactive graph: admin → direct group
+→ permission group → target (shown above in [The core idea](#the-core-idea-group-nesting)).
 Pick a person and the board collapses to their transitive path. Beyond the
 graph itself:
 
-- **The fourth column spells out the actual permissions.** Select any capability
-  bundle or role group and **Permissions & Targets** shows exactly what it grants
-  — grouped into Entra ID roles, AU-scoped roles and Azure RBAC at scope — with a
-  short readable label and the full detail (the complete scope path and its kind)
-  on hover or click-to-expand. Everything is read live from your real data.
-- **Search gives a clickable result list and jumps you there.** Typing produces a
-  typed, ordered list (people first, then groups, then roles and scopes); clicking
-  a result centres and selects that object so its full reach lights up. Arrow
-  keys and Enter pick the top hit without the mouse.
-- **A risk overlay shows what to clean up.** A toggle highlights **orphans** (a
-  delegation nobody can reach, or a target nobody reaches), **stale** nodes (past
-  their review horizon, when your data carries a last-reviewed date), and
-  **over-privileged** principals (anyone reaching a Tier-0/Tier-1 target, or an
-  unusually large number of targets). The "unusually large" line is learned from
-  your own estate — not a fixed number — so it stays meaningful whether you have
-  ten delegations or ten thousand. Hover any flagged box for the exact reason.
-  (See the Delegation Map screenshot in [The core idea](#the-core-idea-group-nesting)
-  above, with the risk overlay on.)
-- **It reads spreadsheet exports correctly** — quoted headings, an invisible
-  leading mark, a space after the separator: all cleaned quietly so a perfectly
-  valid export shows your real delegation instead of rendering blank.
+- **The fourth column spells out the actual permissions.** Select any permission
+  group or role group and **Permissions & Targets** shows exactly what it grants
+  — Entra ID roles, AU-scoped roles and Azure RBAC at scope — with a short
+  readable label and the full scope path on hover or click-to-expand.
+- **Departments, organisation, project and cross-organisation groups** appear as
+  direct groups on the map, alongside role and task groups.
+- **Search gives a clickable result list and jumps you there.** People first,
+  then groups, then roles and scopes; clicking a result centres and selects it so
+  its full reach lights up.
+- **A risk overlay shows what to clean up** — orphans, stale nodes and
+  over-privileged principals, with the "unusually large" line learned from your
+  own estate rather than a fixed number. Deleted principals are hidden by default.
 
 ### Create access the natural way round
 
-The Manager turns "author a group by hand" into a guided flow:
+The Manager turns "author a group by hand" into guided flows:
 
-- **Target-first create wizard.** Instead of inventing a group name and guessing
-  its level and tier, you pick **what** you delegate (an Entra service, an Azure
-  scope, or a workload), then **where** (the subscription / management group /
-  administrative unit), then the **roles** you want there. The wizard derives the
-  rest — whether it's a single-role service group or a multi-role bundle, the
-  correct name, and the level, tier and plane (Global-Admin-class roles become the
-  most privileged tier; an Azure subscription sits a tier below the tenant root; an
-  AU-scoped role drops a level). The AU step only appears when every role you
-  picked supports it.
-- **Ready-made template packs.** Adopt a curated, best-practice set of permission
-  groups with one click instead of authoring by hand. Packs cover Microsoft
-  Defender XDR, Microsoft Sentinel, Intune / Endpoint Manager, Exchange Online, a
-  generic Azure RBAC pack, and a common Entra ID role pack — each named and tiered
-  correctly out of the box, with the Manager showing exactly which rows your
-  instance doesn't have yet.
-- **Grid editors and authoring helpers.** A spreadsheet-style editor per table
-  (add / edit / delete, multi-select with bulk actions), plus authoring helpers
-  that turn many clicks into one: bulk-attach several roles/scopes/AUs to a group,
-  clone a role or group onto several new ones, an AU wizard, admin bulk-import
-  (paste a list of people and have each row expanded against a template), and a
-  replace-mode admin move (remove the old grant and add the new one together).
-- **Authoring and Onboarding panels** put these helpers behind simple forms. Both
-  only **prepare** changes — the engine remains the only thing that ever writes to
-  your tenant.
+- **Target-first create wizard.** Pick **what** you delegate (an Entra service,
+  an Azure scope, or a workload), then **where**, then the **roles**. The wizard
+  derives the rest — the name, level, tier and plane — and previews exactly what
+  your naming convention produces. Suggestion lists show every valid value on
+  click, and the role picker hides roles that are already delegated.
+- **Create an administrator** with a future creation date and a Temporary Access
+  Pass start, or build a direct group of any type (role, task, process, project,
+  cross-organisation, department).
+- **Nesting follows Entra's rules.** A group nested into a role-assignable group is
+  always **Eligible** (Entra refuses an Active membership there); an existing Active
+  nesting of that kind is flagged with a one-click "Set to Eligible" fix.
+- **Ready-made template packs** for Microsoft Defender XDR, Microsoft Sentinel,
+  Intune, Exchange Online, Azure RBAC and common Entra ID roles — named and tiered
+  correctly out of the box.
+- **Change existing access** links, moves and removes people in groups and groups
+  in permission groups, and the grid editors cover every record for power users.
+  All of these only **prepare** changes — the engine remains the only thing that
+  ever writes to your tenant.
 
-### Review & Save — see exactly what will change
+### Pending changes — one queue, reviewed before commit
 
-Before anything is committed, Review & Save previews exactly what the change will
-do.
+![Pending changes — a revoke, a TAP re-issue, an add and a change waiting for commit](docs/img/manager-pending-changes.png)
+*Pending changes holds everything waiting to be committed — configuration
+edits, revokes, TAP re-issues and session revokes — with who requested each
+one and why. (Synthetic demo data.)*
 
-![Review & Save — the keyed diff and commit gate](docs/img/manager-review-save.png)
-*Review & Save previews exactly what a commit will do. The diff is keyed by
-each row's natural identity, not its position — so reordering rows correctly
-shows no changes — and validation errors block the commit. (Synthetic demo
-data.)*
+- **One queue for everything.** Configuration edits, access revokes, TAP
+  re-issues and session revokes all wait in the same place and are committed
+  together or individually.
+- **Nothing is lost on a reload.** Staged edits survive a page refresh and a
+  Manager restart.
+- **The badge counts only what needs you**, and a filter shows recent commits.
+- **A diff you can trust.** The preview is keyed by each row's natural identity,
+  not its position — reordering rows correctly shows no change — and validation
+  errors block the commit. A refused commit stays in the queue and lists the
+  blocking errors in place.
 
-The diff is **keyed by each row's natural identity, not its position in the
-list**. So if you simply move rows around — after a spreadsheet round-trip, a
-sort, or an authoring reorder — the preview correctly shows **no changes**
-instead of falsely flagging modifies, removes and adds. A genuine edit shows as
-exactly one modify with the changed columns highlighted, a new row as one add,
-a deleted row as one remove. If two rows can't be told apart by their key, it
-falls back to comparing them by content rather than guessing — so it never
-miscounts. Validation errors block the commit. The result is a diff you can
-trust to say exactly what the commit will do.
+### Drift — is the tenant what PIM says it should be?
+
+![Drift — desired vs live per area, with missing, changed and extra items named](docs/img/manager-drift.png)
+*Drift compares what PIM says should exist with what is live, per area — with
+counts of missing, changed and extra items, each area expandable to the named
+differences. (Synthetic demo data.)*
+
+A background check compares the desired model with the live tenant every four
+hours and stores the result, so the page opens instantly. Each area (admins,
+groups, memberships, roles, administrative units, Azure) shows desired, live and
+in-sync counts; expand a row to see each difference **by name** — for example an
+admin who should be an eligible member of a group — rather than by object id. An
+area that could not be checked says so instead of pretending to be clean. **Check
+now** queues a fresh check.
+
+### Review standing access
+
+![Review standing access — the current assignments snapshot with its timestamp](docs/img/manager-standing-access.png)
+*Review standing access lists who holds privileged access right now — Entra
+roles, Azure RBAC and PIM for Groups — from a snapshot stamped with its time.
+(Synthetic demo data.)*
+
+Standing access, the revoke view and the Home "expiring access" tile read from an
+**active-assignments snapshot** refreshed every two hours, so they open instantly
+even in a large tenant. **Refresh** queues a new read. Revoking is staged through
+Pending changes and the row shows "revoke queued" until the engine has applied it;
+break-glass accounts are protected and large batches require a second approver.
 
 ### Reports — "who can do what", and the reverse
 
-The Reports tab answers the two questions every access audit starts with,
+The Reports view answers the two questions every access audit starts with,
 instantly and with evidence to hand to auditors.
 
 ![Reports — "who can do what", showing a person's reachable targets and the exact granting path](docs/img/manager-reports.png)
-*The Reports tab answers "who can do what" (and the reverse): pick a person
-and see every privileged target they can reach with the exact path that grants
-it through the nested groups. Real reachability, printable and CSV-exportable.
-(Synthetic demo data.)*
+*Reports answers "who can do what" (and the reverse): pick a person and see
+every privileged target they can reach with the exact path that grants it
+through the nested groups. Printable and CSV-exportable. (Synthetic demo data.)*
 
 - **Pick a person → everything they can reach.** Every privileged target they
   can activate — Entra roles, AU-scoped roles and Azure resource roles — and, for
-  each, the **exact path** that grants it through the nested groups. It is real
-  reachability: access inherited through nested groups is followed and shown, not
-  flattened.
+  each, the **exact path** that grants it through the nested groups.
 - **Pick a role → who can activate it.** The reverse view lists everyone who can
   reach that role, again with the path, and honestly reports zero when nothing
   grants it.
 
-Both read the live delegation model and are printable and exportable to CSV.
-
 ### Role Lookup — the questions every admin asks about roles
 
-Role Lookup is a read-only tool that answers the questions admins ask about
-roles, and forgives a typo while doing it.
-
-![Role Lookup — what a role can do, find roles by action, who can activate it, compare two](docs/img/manager-role-lookup.png)
+![Role Lookup — who can activate a role, with the path that grants it](docs/img/manager-role-lookup.png)
 *Role Lookup answers the role questions every admin asks — what a role can do,
 which role to use for an action, who can activate a role, and how two roles
 compare — typo-tolerant and read-only. (Synthetic demo data.)*
 
 - **What a role can do** — a permission drill-down read live from the tenant,
-  grouped by area, so you can see exactly what a role grants *before* you delegate
-  it. It is **typo-tolerant**: a misspelled or partial name gives a ranked "did
-  you mean…" list of the closest real roles rather than an error.
-- **Find roles by action** — type the operation you need to delegate and get
-  every role that grants it, **ranked least-privileged first**, so you can pick the
-  narrowest role for a least-privilege request. A role that only grants it through a
-  broad wildcard is flagged and sorted last.
-- **Who can activate a role** — pick a role and see every person who can activate
-  it, each with the exact granting path. It honestly reports "no one" when nothing
-  grants the role.
-- **Compare two roles** — see who can activate both versus only one, side by side
-  — ideal for spotting overlapping privilege or confirming a least-privilege
-  split.
-
-When the directory connection isn't up yet, it shows a clear "not available yet —
-connect and retry" message rather than a technical error.
+  typo-tolerant ("did you mean…").
+- **Find roles by action** — every role that grants an operation, **ranked
+  least-privileged first**, with broad wildcards flagged and sorted last.
+- **Who can activate a role** — every person, each with the exact granting path.
+- **Compare two roles** — who can activate both versus only one, side by side.
 
 ### Validate — catch problems before they ship
 
-The Validate tab is a pre-flight rule engine that checks your model for problems
-before they reach your tenant. It covers things like broken references,
-tier/naming drift, orphans, stale or never-activated groups, missing
-owners/sponsors, admins without a strong (phishing-resistant) sign-in method,
-and Azure assignments pointing at a subscription, resource group or resource
-that no longer exists. Each finding comes with a **plain-language fix
-suggestion**, and you can apply a one-click **Bulk Fix-all** or per-finding
-inline fixes.
+**Check for problems** is a pre-flight rule engine: broken references,
+tier/naming drift, orphans, stale or never-activated groups, missing owners,
+admins without a phishing-resistant sign-in method, and Azure assignments pointing
+at scopes that no longer exist. Every finding either has a one-click fix (or a
+**Fix all**) or explains why it cannot be fixed automatically.
 
-### Jobs, Audit and Support
+### Jobs and engine logs
 
-- **Jobs** — a read-only view of the scheduled background work that keeps your
-  environment in sync (cache refresh, reminder/escalation checks, per-area
-  reconciliation, daily-summary and Tier 0/1 reports, discovery passes). Anything
-  running now is at the top; everything else shows its schedule, enabled state,
-  last run and result, and next due time, with a **Logs** button and **live tail**
-  for in-progress runs.
-- **Audit** — the full, searchable, append-only history (newest first): when, who,
-  action, target, result. One-click category filters — logins, delegation changes,
-  account and access-pass activity, approvals, engine actions and emergency
-  overrides — each chip showing how many events it holds. Sign-ins to the Manager
-  are recorded too. Strictly read-only; it reflects the tamper-evident record and
-  never changes anything.
-- **Support** — a one-click self-check (**Run checks** tests the database,
-  Microsoft Graph and Azure, with a plain-language fix on each failure) plus a
-  health summary and a **sanitised diagnostics bundle** you can safely attach to a
-  support request — secrets, certificates, tokens, connection-string credentials
-  and full tenant/subscription IDs are all masked out before the file is produced.
+![Jobs — engine logs and errors, with a failed run that later recovered and its log open](docs/img/manager-jobs-logs.png)
+*Engine logs & errors lists every recent run newest first; a job that failed and
+then ran cleanly shows as recovered, and each run's own log opens in place.
+(Synthetic demo data.)*
+
+- **Jobs & status** shows each scheduled job's cadence, last result and next run.
+  **Run now** queues the job for the scheduler, so it runs with the same identity,
+  lease and logging as a scheduled run.
+- **Engine logs & errors** lists every recent run across all jobs: what is failing
+  now and why, failures grouped by cause, and one-click fixes (such as "Remove this
+  row" or "Make it Eligible") that are staged into Pending changes. A failure
+  followed by a clean run is shown as **recovered** instead of failing, and
+  acknowledging a job clears its standing failures.
+- **The log is the run's own output** — the last three runs per job, with a live
+  tail while a run is in progress.
+- **Job schedule** explains, in plain words, when each job runs, which area it
+  covers and whether it is on. The Home banner turns red when the engine itself is
+  refused a permission.
+
+### Audit and Support
+
+- **Audit trail** — the full, searchable, append-only history: when, who, action,
+  target, result, with before → after for changes. Engine actions are recorded with
+  real group and role names and the job run that made them. Read-only and
+  exportable.
+- **Support** — a one-click self-check (database, Microsoft Graph and Azure, with a
+  plain-language fix on each failure) plus a **sanitised diagnostics bundle** —
+  secrets, certificates, tokens and full tenant/subscription ids are masked before
+  the file is produced.
 
 ### Settings — your operational policy in one place
 
-Settings keeps the core operational defaults in one place, saved to the same
-store the engine and jobs read — so what you see in the panel is what the system
-actually uses.
+Settings keeps the operational defaults in one place, saved to the same database
+the engine and jobs read — so what you see is what the system actually uses.
 
-![Settings — naming conventions and operational policy](docs/img/manager-settings.png)
-*Settings keeps the core operational defaults in one place — expiry defaults
-and ceiling, require-MFA-on-activation, connection-sanity, naming conventions,
-departments import and AD OU placement — saved to the same store the engine and
-jobs read. (Synthetic demo data.)*
+![Settings — Manager access and roles, emergency override and naming conventions](docs/img/manager-settings.png)
+*Settings holds Manager access & roles, the emergency override, naming
+conventions, feature customization, template packs and mail templates — all
+stored in the database. (Synthetic demo data.)*
 
-- **Operational policy** — the default and maximum length of a time-bound
-  activation and the ceiling for an eligible assignment; a single **require MFA on
-  activation** toggle; and the connection-sanity timeouts and required checks.
-  Invalid entries are **rejected or safely clamped with an explanation** — never
-  silently dropped — and a secure default (MFA on, conservative durations) is
-  always in place.
-- **Departments and approvers** — import departments from Entra by naming pattern,
-  bulk-import approvers/owners from a simple CSV, and clearer wording that
-  distinguishes the *initials* naming token from the *people* listed as approval
-  owners.
-- **AD OU placement** — read and edit, in place, the on-premises organisational
-  units where new admin accounts are created (one for general admins, one for
-  high-privilege admins) without editing config files.
-- **Alerting** — the panel described under [Notifications and email](#notifications-and-email).
+- **Manager access & roles** — who may read, change or administer the Manager.
+- **Operational policy** — activation and eligibility durations, require-MFA on
+  activation, and connection checks; invalid entries are rejected or clamped with
+  an explanation, never silently dropped.
+- **Naming conventions** with a live preview of what each pattern produces, and a
+  configurable admin word.
+- **Departments and approvers**, **AD OU placement**, **alerting**, **feature
+  customization**, **template packs** and **mail templates**.
 
-### Export everywhere, and a guided database cutover
+### Export everywhere
 
-**Export everywhere.** The Reports, Delegation Map, Validate, Access Review and
-Audit views each carry **Export CSV** and **Print**. Exports are
-spreadsheet-safe — values that could be read as formulas are neutralised, so a
-CSV opened in a spreadsheet can never execute injected content — and print
-produces a clean, titled, date- and tenant-stamped page, not the whole app. The
-Manager also reads spreadsheet-saved (semicolon) CSV correctly.
-
-**Guided database cutover.** Moving an existing file-based instance onto the
-database is a guided, gated ceremony — never a risky one-shot switch. It runs in
-order: a read-only **pre-check** (connectivity plus a report of exactly what the
-upgrade will change), a one-time **schema upgrade**, a **transactional import**
-of your existing configuration (all-or-nothing — a failure leaves the store
-exactly as it was), a **switch** of the configuration source to the database, a
-**re-check** against the now-populated store, and an explicit **Finalize
-Cutover** confirmation. Your existing files are only ever **read** (never written
-back), every imported row count is recorded for audit, and the cutover **refuses
-to finalise onto a development/local database** — only a production-grade
-database may become authoritative.
+Reports, the Access map, Validate, Access reviews and the Audit trail each carry
+**Export CSV** and **Print**. Exports are spreadsheet-safe — values that could be
+read as formulas are neutralised — and print produces a clean, titled, date- and
+tenant-stamped page.
 
 See **[tools/pim-manager/README.md](tools/pim-manager/README.md)** for the full
 Manager docs.
@@ -820,250 +819,249 @@ conflict handling and backend setup).
 ## Deployment scenarios — pick your topology
 
 PIM4EntraPS recognises a fixed set of **six deployment topologies**. They cover
-the combinations of *who runs it* (a single tenant, an MSP provider's master
-tenant, or an MSP-managed customer tenant), *which edition* you run
-(Internal/AutomateIT or the public Community edition), *where updates come from*,
-*where the GUI and database live*, and *how the acting identity authenticates*.
-Naming them up front means the GUI, the engine, the update path and the deploy
-scripts all resolve the **same** topology instead of guessing.
+*who runs it* (a single tenant, an MSP provider's managing tenant, or a managed
+customer tenant), *which edition* you run, and *where updates come from*. In every
+topology the Manager, engine and database run **in the tenant they serve**.
 
-| # | Who | Edition | Updates from | GUI + database | License |
-|---|-----|---------|--------------|----------------|---------|
-| **S1** | Single tenant | Internal/AutomateIT | internal AutomateIT source | in your tenant | Pro (Design Partner) |
-| **S2** | Single tenant | Community | public GitHub | in your tenant | Community |
-| **S3** | MSP **master** | Internal/AutomateIT | internal AutomateIT source | in the master tenant | Pro (Design Partner) |
-| **S4** | MSP **master** | Community | public GitHub | in the master tenant | Pro *(MSP features need Pro)* |
-| **S5** | MSP **managed** customer | Internal/AutomateIT | from the master, by rollout ring | **centrally**, in the provider tenant | Pro (Design Partner) |
-| **S6** | MSP **managed** customer | Internal/AutomateIT | from the master, by rollout ring | **locally**, in the managed tenant | Pro (Design Partner) |
+| # | Who | Edition | Updates from | Manager + database | Licence |
+|---|-----|---------|--------------|--------------------|---------|
+| **S1** | Single tenant | Subscription | the maintainer's release channel | in your tenant | Subscription |
+| **S2** | Single tenant | **Community (this repository)** | **public GitHub** | **in your tenant** | **Free** |
+| **S3** | MSP **managing** tenant | Subscription | the maintainer's release channel | in the managing tenant | Paid (MSP) |
+| **S4** | MSP **managing** tenant | Community | public GitHub | in the managing tenant | Paid (MSP) |
+| **S5** | MSP **managed** customer | Subscription | from the managing tenant, by release stage | in the customer's tenant (managing admins synced in) | Paid (MSP) |
+| **S6** | MSP **managed** customer | Subscription | from the managing tenant, by release stage | in the customer's tenant (standalone) | Paid (MSP) |
 
-- **Single tenant (S1 / S2)** is the simplest shape — engine, Manager, database
-  and the governed tenant are all one tenant. S1 and S2 are the *same topology*;
-  they differ only in edition, update source and license.
-- **MSP master (S3 / S4)** adds the provider-side authoring, signing and ring-based
-  rollout control on top of a single-tenant deployment.
-- **MSP managed (S5 / S6)** are customer tenants whose updates and whose
-  administrator + permission set are **pulled from the master, gated by rollout
-  ring** — the provider never pushes into the customer. They differ in *where the
-  GUI and database live* (centrally in the provider tenant for S5, locally in the
-  customer tenant for S6) and in the identity model.
+- **Single tenant (S1 / S2)** is the simplest shape — engine, Manager, database and
+  the governed tenant are all one tenant. This repository is **S2**: the free
+  community edition, installed and updated from GitHub by you.
+- **MSP managing tenant (S3 / S4)** adds provider-side authoring, signing and
+  staged rollout on top of a single-tenant deployment.
+- **MSP managed tenants (S5 / S6)** are real customer environments with their own
+  full stack. The only thing the managing relationship adds is that the provider's
+  administrators are synced in, **pulled** by the customer's own environment —
+  never pushed. Detaching a managed tenant removes those synced administrators and
+  nothing else; the customer's environment keeps running.
 
-> **Cross-tenant traffic is private only.** For the managed scenarios (S5 / S6),
-> everything that crosses between the master and a managed tenant travels over
-> **private cross-tenant network connectivity** — never the public internet, and
-> never through any publicly reachable storage, webhook or queue. The signed
-> baseline guarantees integrity; the private network is the only transport.
-
-> **Status:** the scenario model, the resolver that maps a scenario onto the
-> engine's settings, the update-source selection and the license gating are built
-> and tested; the managed-tenant downlink/sync runtime (S5 / S6) is designed and
-> wired into the deploy entry points but **not yet verified against a live
-> multi-tenant deployment**, which is the remaining release gate. See
-> **[docs/DESIGN.md §11.8 — Deployment scenarios](docs/DESIGN.md)** for the
-> per-scenario topology and process diagrams.
+See **[docs/DESIGN.md §11.8](docs/DESIGN.md)** for the per-scenario topology and
+process diagrams.
 
 ---
 
-## Getting started / install
+## Editions and licensing
 
-PIM4EntraPS deploys in one of **two modes**. Pick the one that matches you:
+**The community edition in this repository is free for single-tenant use (S2)** —
+install it in your own tenant and use it for your own organisation.
 
-| Mode | Who it's for | What you run | Where it runs |
-|---|---|---|---|
-| **Community** | Anyone running it for their own tenant; smallest footprint | The engine + local Manager from the public **community edition** | A management VM (or your own container) you already have |
-| **Internal** | A 24/7 hosted platform (single-tenant or MSP) | The **setup-script family** (`Setup-PimContainers` / `Setup-PimVM` / `Setup-PimMsp`) | Azure Container Apps, a Windows VM, or per-customer containers |
+**Licensing details for the Pro edition will be published soon.** We can already
+say that the **MSP scenarios** — a managing (master) tenant and the managed customer
+tenants it looks after (S3–S6) — **will be part of the paid edition**; details will
+be shared soon.
 
-Both modes share one engine (no PowerShell modules required), one database
-model, and one identity model (an **engine app authenticating with a
-certificate** — never a client secret, never device-code). The difference is
-only *where it runs* and *how it's wired up*.
+Today the product does not restrict anything by edition: licence enforcement is
+switched off, so every capability works in every install while licensing is
+finalised. The edition an environment runs is recorded so the commercial basis is
+clear. The terms that apply to this code are in **[LICENSE](LICENSE)**.
 
-> **Full deploy detail + the update-lifecycle runbook:**
-> **[docs/DESIGN.md §11.5 — Install & implementation guide](docs/DESIGN.md)**.
-> The quick-starts below get you running; DESIGN has the exhaustive per-mode
-> steps, the Azure topology, and the update lifecycle.
+---
 
-### Shared prerequisites (both modes)
+## Getting started — install the community edition
 
-- **Windows PowerShell 5.1** (PowerShell 7 also works; the engine and setup
-  scripts are 5.1-safe). The hosted container ships its own runtime.
-- **An engine app registration + certificate** with the engine permissions
-  admin-consented, plus **User Access Administrator** at the Azure scope(s) the
-  engine manages. The one-shot installer creates all of it:
+The community edition installs **into your own Azure subscription** with one
+command. What you end up with:
 
-  ```powershell
-  az login        # as Global Administrator or Privileged Role Administrator
-  .\tools\setup\Install-PimEngineAppRegistration.ps1 `
-      -DisplayName "PIM4EntraPS Engine" -GrantConsent
-  ```
+| Component | What it is | Why it is cheap |
+|---|---|---|
+| **PIM Manager** | an Azure Container App behind Microsoft Entra sign-in | scales to **zero** when nobody is using it |
+| **Engine** | one scheduled Container Apps job (every 5 minutes) | runs for seconds, then stops |
+| **Database** | Azure SQL (S0), passwordless (managed identities only) | the one always-on part |
+| **Registry + logs** | Azure Container Registry (Basic) and a Log Analytics workspace | builds the image from your clone |
 
-  It mints (or reuses) a certificate in the machine store, grants the
-  permissions and Azure RBAC, and writes the resolved identity into the launcher
-  config. **No client secret and no device-code flow are used or supported
-  anywhere.**
-- **A database for the model.** A cloud **Azure SQL** database (Entra /
-  managed-identity auth only — no database logins) is the single authoritative
-  store in every mode. A local **SQL Express** instance (integrated Windows auth)
-  is supported as a **development convenience only** — never as a production or
-  break-glass store.
+Everything is created in **one resource group** you name, so removing the
+installation is one resource-group delete.
 
-### Community mode — quick start
+### What you need
 
-Run the engine + local Manager against your own tenant.
+- A **Windows** machine with **PowerShell 7**, run **as Administrator** (the deploy
+  identity's certificate is placed in the machine certificate store), plus
+  **Azure CLI** and **git**.
+- An Azure **subscription** in the tenant you want to govern.
+- A sign-in that is **Global Administrator** (or Privileged Role Administrator +
+  Application Administrator) in the tenant **and Owner** of the subscription. It is
+  used once, in step 2, to create the deploy identity; everything after that runs
+  as that identity with a certificate.
+- The UPN of the person who should administer the Manager.
+
+### 1. Get the code
 
 ```powershell
-# 1. Get the code (community edition). Update later with `git pull`.
 git clone https://github.com/KnudsenMorten/PIM4EntraPS.git
 cd PIM4EntraPS
-
-# 2. Create the engine app + cert (see "Shared prerequisites" above).
-az login
-.\tools\setup\Install-PimEngineAppRegistration.ps1 -DisplayName "PIM4EntraPS Engine" -GrantConsent
-
-# 3. Configure via the gitignored *.custom.* files (your data never leaves the box).
-foreach ($sample in Get-ChildItem .\config\*.custom.sample.*) {
-    $target = $sample.FullName -replace '\.custom\.sample\.', '.custom.'
-    if (-not (Test-Path $target)) { Copy-Item $sample.FullName $target }
-}
-#   Set your database coordinates and the engine identity (tenant / client id /
-#   cert thumbprint) in the launcher's LauncherConfig.custom.ps1.
-
-# 4. Run the engine, driven by scope + mode. Always dry-run first:
-.\tools\pim-engine\Invoke-PimEngineCore.ps1 -Scope All -Mode Full -WhatIf
-#    Apply a full reconcile (create/update only — never deletes without -Prune):
-.\tools\pim-engine\Invoke-PimEngineCore.ps1 -Scope All -Mode Full
-#    Apply just one area, incrementally:
-.\tools\pim-engine\Invoke-PimEngineCore.ps1 -Scope EntraRoles -Mode Delta
-
-# 5. Open the local Manager (browser editor against the same database).
-.\tools\pim-manager\Open-PimManager.ps1
 ```
 
-The shipped `config\` templates include documented samples with worked example
-rows — including a catalog of common Entra built-in roles — so you start from a
-working model, not an empty schema. A spreadsheet import is a **read-only
-migration source**; the running model lives in the database. Transcript logs
-land in `logs/`; engine output in `output/` (both gitignored).
-
-### Internal mode — quick start
-
-Stand up a 24/7 hosted platform with the setup-script family. Containers (Azure
-Container Apps) is the primary path; a Windows VM and an MSP per-customer variant
-share the same model.
+### 2. Create the deploy identity
 
 ```powershell
-az login        # to the target subscription/tenant
+az login --tenant <tenant-id>
+az account set --subscription <subscription-id>
 
-# 1. Engine app registration + cert + grants (as in shared prerequisites).
-.\tools\setup\Install-PimEngineAppRegistration.ps1 -DisplayName "PIM4EntraPS Engine" -GrantConsent
-
-# 2a. Containers (Azure Container Apps) — internal-only env, private ingress.
-.\tools\setup\Setup-PimContainers.ps1 -SubscriptionId <sub> -TenantId <tenant> ...
-
-# 2b. ...or a Windows VM host instead of containers:
-.\tools\setup\Setup-PimVM.ps1 -SqlServerFqdn <server> -SqlDatabase <db> -TenantId <tenant>
-
-# 2c. ...or an MSP per-customer deployment (build-once / import-per-customer):
-.\tools\setup\Setup-PimMsp.ps1 -CustomerName <slug> -SubscriptionId <sub> ...
+$id = .\tools\setup\New-PimDeployIdentity.ps1 -TenantId <tenant-id> -SubscriptionId <subscription-id> -GrantGraph -Apply
 ```
 
-The setup scripts are idempotent and re-runnable. They wire passwordless,
-managed-identity database access, the engine permissions and the Manager DNS
-record. The Manager runs on a **private** address on an internal-only
-environment — never a public endpoint — and should sit behind a sign-in gateway
-with inbound restricted to your management / privileged-workstation subnets. See
-**[docs/DESIGN.md §11–§12](docs/DESIGN.md)** for the full topology and **§11.5**
-for the step-by-step internal runbook.
+This creates an app registration with a **certificate** (never a secret), gives it
+Owner on the subscription, and — with `-GrantGraph` — the three Microsoft Graph
+application permissions the deploy needs to grant the Manager and engine their own
+permissions (`Directory.Read.All`, `AppRoleAssignment.ReadWrite.All`,
+`Application.Read.All`). It proves the identity can sign in and read the directory
+before it returns. It is safe to run again.
 
-### Keeping a deployment up to date
+### 3. Deploy everything with one command
 
-Updates run through a single controlled lifecycle — **detect → build → deploy →
-verify → notify → ensure-monitor** — never an unconditional "take whatever is
-newest". In **community mode** it's a `git pull` plus a guarded update check
-(apply a schema upgrade and rebuild the local Manager only when needed). In
-**internal mode** it pulls the released image, rolls the deployment with **zero
-downtime**, applies any schema upgrade, runs the hosted smoke check, and
-**auto-rolls-back on failure**. Every update is a dry-run by default; applying is
-explicit. The update **source** follows your [deployment
-scenario](#deployment-scenarios--pick-your-topology) — the internal AutomateIT
-source, public GitHub, or (for managed tenants) the master, ring-gated. See
-**[docs/DESIGN.md §11.6 — Update lifecycle runbook](docs/DESIGN.md)** and the
-update/sync process diagram in **[§11.8](docs/DESIGN.md)**.
+```powershell
+.\tools\setup\Invoke-PimDeployAll.ps1 -Scenario S2 -Apply `
+    -TenantId <tenant-id> -SubscriptionId <subscription-id> -Location swedencentral `
+    -AdminAppId $id.AppId -AdminCertPem $id.PemPath `
+    -SqlAdminClientId $id.AppId -SqlAdminCertThumbprint $id.Thumbprint `
+    -PrereqToken <short-name> -PrereqVnetAddressPrefix 10.231.0.0/22 -PrereqSubnetAddressPrefix 10.231.0.0/23 `
+    -ResourceGroup rg-pim -VnetName vnet-pim -VnetResourceGroup rg-pim `
+    -AcrName <globally-unique-acr-name> -EnvName cae-pim -LogAnalyticsWorkspaceName law-pim `
+    -SqlServerFqdn <globally-unique-sql-name>.database.windows.net -SqlDatabase PimPlatform `
+    -SqlConnectionString 'Server=tcp:<globally-unique-sql-name>.database.windows.net,1433;Initial Catalog=PimPlatform;Encrypt=True;TrustServerCertificate=False;Connection Timeout=60;' `
+    -Exposure external -WorkerMode cron -ManagerMinReplicas 0 -AcrSku Basic `
+    -ManagerSuperAdmins <your-upn> -SkipAppReg
+```
+
+Run it **without `-Apply`** first to see the plan — nothing is changed. With
+`-Apply` it runs, in order and idempotently: hosting prerequisites (resource group,
+network, registry, logs, SQL server), the Manager image build from your clone, the
+Container Apps environment with the Manager and the engine job, database access
+and schema, the feature baseline, Entra sign-in in front of the Manager, and the
+Manager administrators. Allowed regions are West Europe, Denmark East and Sweden
+Central. Optional additions:
+
+- `-EasyAuthAllowedPrincipals <upn-or-group>` limits **who may sign in** to the
+  Manager (assignment required) instead of every account in the tenant.
+- `-Exposure internal` builds a **private-only** environment instead; decide this on
+  day one, because an environment's exposure cannot be changed after creation.
+- `-AzureRbacRoles 'User Access Administrator'` lets the engine manage Azure
+  resource PIM, not just read it.
+- `-MailSender <shared-mailbox-upn>` sends notification mail and access passes
+  (requires an Exchange Online plan).
+
+### 4. Sign in and verify
+
+The deploy prints the Manager's address. Open it, sign in with the administrator
+you named, and check that:
+
+- the header shows the **database (SQL) mode** and the version you deployed;
+- **Jobs › Engine logs & errors** shows the engine job's runs completing;
+- **Support › Run checks** is green for the database, Microsoft Graph and Azure.
+
+Then build your model in the Manager (or import an existing one) and commit — the
+engine applies it on its next run.
+
+### Keeping it up to date
+
+A re-run of the same command **is** the updater: every step that is already
+current is skipped, and only what changed is rebuilt and rolled.
+
+```powershell
+git pull
+.\tools\setup\Invoke-PimDeployAll.ps1 -Scenario S2 -Apply ...   # the same parameters as step 3
+```
+
+The database schema is upgraded additively before the new version rolls, and a
+failed health check rolls the Manager back to the previous version. (The unattended
+in-cloud updater used by subscription environments needs a published release feed,
+so the community edition updates on your schedule, from GitHub.)
+
+### What it costs to run
+
+The on-demand shape is deliberately small: the Manager costs nothing while idle
+(scale to zero), and the five-minute engine job normally fits inside Azure Container
+Apps' monthly free grant. The recurring cost is essentially the **Azure SQL S0
+database** and the **Basic container registry** — a few tens of US dollars a month
+at list price, depending on region, plus Log Analytics ingestion. Check current
+prices for your region before you deploy.
 
 ---
 
 ## Hosting & containers
 
-Run it where it fits. The Manager can run centrally for the whole team, or
-locally on an admin's PC straight against the database — no central web server
-required. A loopback **break-glass** edition runs on a client PC for when a
-hosted plan is unavailable, so senior admins are never locked out. **No public
-IP is ever required.**
+**One configurable image** runs as the Manager, the scheduled engine job and any
+maintenance job — you tell each instance which role to take on. It is headless and
+safe by default: managed-identity authentication, no interactive prompts, no
+secrets baked into the image, and it carries no customer data (identity, database
+and configuration are supplied at run time).
 
-For unattended runs, **one configurable engine image** runs as manager,
-scheduler, engine, connector, queue worker or discovery job — you tell each
-instance which roles to take on. It is headless and safe by default:
-managed-identity auth, no interactive prompts, no secrets baked into the image,
-and dry-run-by-default so a misconfigured job plans instead of applies. The
-identical logic also runs on a plain Windows VM — same code, different host.
-Container = zero-VM cloud-native option; VM = on-prem option; both first-class.
+- **On-demand by default.** One scheduled engine job decides on each run what is
+  due (incremental scopes, queued changes, reminders, discovery, the daily full
+  reconcile), and a single-runner lease means an overrunning run is skipped, never
+  doubled. A five-minute schedule reacts faster than an always-on worker would.
+- **Exposure is your choice.** The Manager is always behind Microsoft Entra sign-in
+  and the install verifies that before it finishes. It is internet-reachable by
+  default so it can be opened from anywhere you sign in; an internal-only
+  environment on your own network is supported for private designs.
+- **Passwordless everywhere.** The Manager's and engine's managed identities are
+  granted exactly the database, Microsoft Graph and Azure permissions they need by
+  the deploy itself, and re-granted if an app is ever recreated.
 
-See **[docs/DESIGN.md §11–12](docs/DESIGN.md)** for the full hosting and
-container topology.
+See **[docs/DESIGN.md §11–12](docs/DESIGN.md)** for the full hosting and container
+topology.
 
 ---
 
 ## MSP variant
 
 For consultancies managing many customer tenants, the model is **pull, never
-push**:
+push** (MSP scenarios will be part of the paid edition — see
+[Editions and licensing](#editions-and-licensing)):
 
-- **Each customer pulls a signed baseline** into its own local database — the
-  provider never writes to the customer tenant, and customer data never leaves
-  it. Each customer has its own isolated store with no cross-customer visibility;
-  the provider keeps only the central template.
+- **Each customer pulls a signed baseline** into its own database — the provider
+  never writes to the customer tenant, and customer data never leaves it.
 - **The acting identity is always local.** Each customer tenant has its own
-  engine app and non-exportable certificate, so the customer owns its Conditional
-  Access, its audit attribution (actions log as a named app in *their* tenant),
-  its lifecycle and instant revocation. There is no GDAP and no foreign
-  multi-tenant identity — which is what makes this work for EA/MCA enterprises that
-  GDAP can't cover, and avoids the "who is this GUID from the partner tenant?"
-  audit problem.
-- **Signed, not encrypted; no secret at the receiver.** The baseline (and the
-  license) are signed with a private key held only on the provider host and
-  verified against a public certificate embedded in the product. The customer side
-  needs no secret key — it only verifies — and because bundles are signed rather
-  than encrypted, the customer can read exactly what is shipped. Tamper, forge,
-  roll-back and replay are all rejected.
-- **Choose the sync model that fits your governance.** Pull a signed baseline,
-  pull a versioned template by rollout ring, read the central template read-only at
-  run time, emit a signed status summary back to the provider, or run fully
-  autonomously. **Every** option is initiated by your own tenant.
-- **One image, mirrored into your own registry.** The engine container is built
-  once by the provider and mirrored directly into *your* registry, so nothing is
-  rebuilt per customer and no image bytes pass through an intermediate host. The
-  image carries **no secrets and no customer data** — identity, database and
-  configuration are all supplied locally at run time.
-- **One shared platform for related tools.** Companion tooling (such as tenant
-  management) reuses the exact same registry, authentication and storage model
-  rather than a separate parallel system — fewer moving parts and one consistent
-  security posture.
+  identities, so the customer owns its Conditional Access, its audit attribution,
+  its lifecycle and instant revocation. There is no GDAP and no foreign multi-tenant
+  identity.
+- **Signed, not encrypted; no secret at the receiver.** Baselines are signed with a
+  private key held only by the provider and verified against a public certificate —
+  tamper, forge, roll-back and replay are rejected, and the customer can read
+  exactly what is shipped.
+- **Per-admin sync, tag-scoped.** Each provider administrator states whether, and
+  to which tagged managed tenants, it is synced; the Manager shows each tenant's
+  mode.
 - **Instant kill-switch with CISO opt-in.** A separately signed central-kill
-  instruction lets an authorised owner disable or revoke a specific privileged
-  account across every managed tenant at once — applied locally by your own engine
-  through the same audited path as any other change, never a back-door write. The
-  variant gates centrally-issued `Disable` / `Revoke` actions behind a per-admin
-  secret in the **customer's** key vault: no match = refuse and warn.
+  instruction can disable a specific privileged account across every managed
+  tenant — applied locally by the customer's own engine through the same audited
+  path as any other change.
 
-The MSP shape maps onto the [deployment
-scenarios](#deployment-scenarios--pick-your-topology): the provider runs a
-**master** (S3 / S4) and each customer is a **managed** tenant hosted either
-centrally in the provider tenant (S5) or locally in its own tenant (S6) — with the
-master→managed sync always private and pull-not-push.
+See **[docs/DESIGN.md §13](docs/DESIGN.md)** for the full MSP architecture.
 
-See **[docs/DESIGN.md §13](docs/DESIGN.md)** for the full MSP architecture
-(two-DB model, pull-not-push transport, signed-baseline + kill-switch,
-ring-based rollout, why-not-GDAP) and **[§11.8](docs/DESIGN.md)** for the
-per-scenario topology + downlink-sync process diagrams.
+---
+
+## By the numbers
+
+Counted for version 2.4.359, over the files that ship in this repository:
+
+| | |
+|---|---|
+| Files in the repository | 490 |
+| Lines of code (PowerShell, HTML, JavaScript, SQL, Bicep) | **152,330** |
+| &nbsp;&nbsp;of which PowerShell | 127,224 lines in 338 files |
+| Documentation (Markdown) | 10,752 lines |
+
+| Area | Code files | Lines of code |
+|---|---:|---:|
+| Engine | 115 | 72,727 |
+| PIM Manager | 7 | 32,010 |
+| Setup, deploy and update | 55 | 20,770 |
+| PIM Activator | 30 | 13,266 |
+| v1-compatible launchers and reference engines | 92 | 7,467 |
+| Configuration, templates, connectors and other | 30 | 3,160 |
+| Bundled shared modules | 37 | 2,605 |
+| Database schema | 4 | 325 |
+
+The automated test suites that gate every release (232 test scripts) are maintained upstream and are not part of this repository.
 
 ---
 
@@ -1072,51 +1070,38 @@ per-scenario topology + downlink-sync process diagrams.
 ```
 PIM4EntraPS/
   engine/
-    _shared/PIM-EngineCore.ps1                  # engine core (direct API + database)
-    _shared/PIM-EngineProviders.ps1             # per-scope appliers (connectors)
-    _shared/PIM-Functions.psm1                  # shared function library
+    _shared/                  # engine core, providers, scheduler, store, shared library
   tools/
-    pim-engine/Invoke-PimEngineCore.ps1         # engine entry (-Scope / -Mode)
-    pim-manager/                                # browser SPA — consolidated 6-menu Manager
-      Open-PimManager.ps1                       # server + static export
-      README.md
-    pim-activator/                              # Edge/Chrome extension (bulk activation)
-      Deploy-PimActivator*.ps1                  # Intune / client deploy + recovery
-      README.md
-  launcher/
-    <task>/launcher.<flavour>.ps1               # community/internal × vm/azure
-    <task>/LauncherConfig.*.ps1                 # layered config (defaults/locked/custom)
-  config/        *.custom.sample.* templates (worked rows); *.custom.* gitignored
-  config-msp/    MSP per-customer config + template-pull
-  setup/         Install-PimEngineAppRegistration.ps1, setup-script family
-  sql/           idempotent schema (CREATE + ALTER) + seed
-  infra/         container / hosting deployment
-  legacy/        module-based reference engines (incremental retirement)
-  docs/          FEATURES.md · DESIGN.md (public) · REQUIREMENTS.md · TESTS.md (internal) · img/
-  README.md
-  RELEASENOTES.md
-  VERSION
+    setup/                    # one-shot deploy (Invoke-PimDeployAll), deploy identity, hosting, updates
+    pim-engine/               # engine and job entry points
+    pim-manager/              # the Manager (browser SPA + server) and its container image
+    pim-activator/            # Edge/Chrome extension (bulk activation) + deployment
+    pim-scheduler/            # scheduler helpers
+  setup/                      # engine app registration, v1 import, MSP baseline tooling
+  config/  config-local/  config-msp/   # locked defaults + *.custom.sample.* templates
+  sql/                        # idempotent schema
+  templates/                  # admin, mail and policy templates
+  workloads/                  # workload connector definitions
+  launcher/  legacy/          # v1-compatible launchers and reference engines
+  infra/                      # hosting templates
+  docs/                       # FEATURES.md · DESIGN.md · img/
+  FUNCTIONS/                  # bundled shared PowerShell modules
+  README.md  RELEASENOTES.md  LICENSE  VERSION
 ```
 
 ---
 
 ## Documentation
 
-The doc set (public unless marked internal):
-
-- **[docs/FEATURES.md](docs/FEATURES.md)** — public, customer-facing catalog of
-  delivered + verified features. This README's "what it does for you" section
-  mirrors its structure.
-- **[docs/DESIGN.md](docs/DESIGN.md)** — architectural deep dive: nesting,
-  delegation, naming, tier model, hosting, MSP, data model, connectors,
-  lifecycle/governance.
-- **[RELEASENOTES.md](RELEASENOTES.md)** — curated changelog (what changed each
-  release + migration notes).
+- **[docs/FEATURES.md](docs/FEATURES.md)** — the catalog of delivered features,
+  grouped by area, in plain language.
+- **[docs/DESIGN.md](docs/DESIGN.md)** — how it works: nesting, delegation, naming,
+  tier model, hosting, MSP, data model, connectors, lifecycle and governance.
+- **[RELEASENOTES.md](RELEASENOTES.md)** — what changed in each release, newest
+  first, with upgrade notes.
 - **[tools/pim-manager/README.md](tools/pim-manager/README.md)** /
   **[tools/pim-activator/README.md](tools/pim-activator/README.md)** — per-tool
-  deployment docs.
-- **Internal (not published):** `REQUIREMENTS.md` (open backlog), `TESTS.md`
-  (test suites + results), `CLAUDE.md` (working agreement + router).
+  documentation.
 
 ---
 
@@ -1124,20 +1109,19 @@ The doc set (public unless marked internal):
 
 Semver-ish: `MAJOR.MINOR.PATCH`.
 
-- `MAJOR` — breaking layout / schema / launcher contract change.
+- `MAJOR` — breaking layout / schema / contract change.
 - `MINOR` — additive engine or tool.
 - `PATCH` — fix / doc / workflow polish.
 
-Each release is tagged twice on the monorepo: a private tag and a public tag
-(the public one fires the publish workflow to the mirror).
+Each release of this repository carries a `vX.Y.Z` tag and a GitHub release with a
+zip of the same content.
 
 ---
 
 ## Support / contributing
 
-Issues + PRs welcome on GitHub. For production-deployment help (privileged-
-workstation rollout, AD trust setup, multi-tenant), contact the maintainer.
+Issues and pull requests are welcome on GitHub. For production deployment help
+(privileged-workstation rollout, AD trust setup, multi-tenant), contact the
+maintainer.
 
 Author: see the project's GitHub repository.
-</content>
-</invoke>

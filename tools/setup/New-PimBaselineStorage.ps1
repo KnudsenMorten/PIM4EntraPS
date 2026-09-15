@@ -1,4 +1,4 @@
-#requires -Version 5.1
+﻿#requires -Version 5.1
 <#
 .SYNOPSIS
     Stand up the MASTER's signed-baseline publish target: storage account + `baselines`
@@ -95,22 +95,25 @@ if ("$acct".Trim() -ne "$SubscriptionId".Trim()) {
     throw "az context is subscription '$acct' but the master is '$SubscriptionId' -- refusing to create storage in the wrong subscription. Fix: az account set --subscription $SubscriptionId"
 }
 Note "az context verified: $acct"
+# 🔴 Every call below splats this. It was referenced by the create calls but never DEFINED, so it
+# expanded to nothing and those calls ran in whatever the default context was (2026-09-13).
+$subArgs = @('--subscription', $SubscriptionId)
 
 # --- 1) provider ---------------------------------------------------------------
 Step 'Microsoft.Storage provider registration'
-$state = az provider show -n Microsoft.Storage --query registrationState -o tsv 2>$null
+$state = az provider show @subArgs -n Microsoft.Storage --query registrationState -o tsv 2>$null
 if ("$state" -eq 'Registered') { Note 'already Registered' }
 elseif ($PSCmdlet.ShouldProcess('Microsoft.Storage', 'register provider')) {
     Note "state '$state' -- registering (this can take a minute)"
     az provider register @subArgs -n Microsoft.Storage --wait -o none 2>&1 | Out-Null
-    $state = az provider show -n Microsoft.Storage --query registrationState -o tsv 2>$null
+    $state = az provider show @subArgs -n Microsoft.Storage --query registrationState -o tsv 2>$null
     if ("$state" -ne 'Registered') { throw "Microsoft.Storage did not reach Registered (state '$state'). Every step below would fail as (SubscriptionNotFound)." }
     Note 'Registered'
 }
 
 # --- 2) account + container ----------------------------------------------------
 Step "storage account $StorageAccount"
-$exists = az storage account show -n $StorageAccount -g $ResourceGroup --query name -o tsv 2>$null
+$exists = az storage account show @subArgs -n $StorageAccount -g $ResourceGroup --query name -o tsv 2>$null
 if ("$exists".Trim()) { Note 'account exists (find-or-create)' }
 elseif ($PSCmdlet.ShouldProcess($StorageAccount, 'create storage account')) {
     az storage account create @subArgs -n $StorageAccount -g $ResourceGroup -l $Location `
@@ -118,13 +121,13 @@ elseif ($PSCmdlet.ShouldProcess($StorageAccount, 'create storage account')) {
     if ($LASTEXITCODE -ne 0) { throw "az storage account create failed (exit $LASTEXITCODE)." }
     Note "created ($Location, Standard_LRS, public blob access DISABLED)"
 }
-$saId = az storage account show -n $StorageAccount -g $ResourceGroup --query id -o tsv 2>$null
+$saId = az storage account show @subArgs -n $StorageAccount -g $ResourceGroup --query id -o tsv 2>$null
 if (-not "$saId".Trim()) { throw "could not read the resource id of '$StorageAccount' after create." }
 
 # 🔴 --auth-mode login, NOT an account key. A key would work and would also mean this script
 # handled a credential it never needs: container creation is an RBAC operation for the caller.
 Step "container $Container"
-$hasC = az storage container exists -n $Container --account-name $StorageAccount --auth-mode login --query exists -o tsv 2>$null
+$hasC = az storage container exists @subArgs -n $Container --account-name $StorageAccount --auth-mode login --query exists -o tsv 2>$null
 if ("$hasC" -eq 'true') { Note 'container exists' }
 elseif ($PSCmdlet.ShouldProcess($Container, 'create container')) {
     az storage container create @subArgs -n $Container --account-name $StorageAccount --auth-mode login -o none 2>&1 | Out-Null
@@ -140,7 +143,7 @@ if (-not "$PublisherObjectId".Trim()) {
     Note "publisher appId $PublisherAppId -> objectId $PublisherObjectId"
 }
 Step "'Storage Blob Data Contributor' for $PublisherObjectId"
-$have = az role assignment list --assignee $PublisherObjectId --scope $saId `
+$have = az role assignment list @subArgs --assignee $PublisherObjectId --scope $saId `
         --query "[?roleDefinitionName=='Storage Blob Data Contributor'].id" -o tsv 2>$null
 if ("$have".Trim()) { Note 'already assigned' }
 elseif ($PSCmdlet.ShouldProcess($StorageAccount, 'grant Storage Blob Data Contributor')) {
@@ -160,7 +163,7 @@ Set-Content -LiteralPath $tmp -Value (@{ probe = 'New-PimBaselineStorage'; utc =
 $deadline = (Get-Date).AddMinutes($VerifyTimeoutMinutes)
 $ok = $false; $lastErr = ''; $waited = 0
 while ((Get-Date) -lt $deadline) {
-    $out = az storage blob upload --account-name $StorageAccount -c $Container -n $probe -f $tmp --overwrite --auth-mode login -o none 2>&1
+    $out = az storage blob upload @subArgs --account-name $StorageAccount -c $Container -n $probe -f $tmp --overwrite --auth-mode login -o none 2>&1
     if ($LASTEXITCODE -eq 0) { $ok = $true; break }
     $lastErr = ($out | Out-String).Trim()
     # 🪤 az DOES NOT SAY "403" HERE. The first cut of this matched 401|403|not authorized and threw
@@ -185,7 +188,7 @@ if (-not $ok) {
            "(the bootstrap SPN is Key Vault data-plane only). Last error: $lastErr")
 }
 Note "write OK$(if ($waited) { " after ${waited}s of RBAC propagation" })"
-$read = az storage blob download --account-name $StorageAccount -c $Container -n $probe --file (Join-Path ([System.IO.Path]::GetTempPath()) "pim-probe-read-$PID.json") --auth-mode login -o none 2>&1
+$read = az storage blob download @subArgs --account-name $StorageAccount -c $Container -n $probe --file (Join-Path ([System.IO.Path]::GetTempPath()) "pim-probe-read-$PID.json") --auth-mode login -o none 2>&1
 if ($LASTEXITCODE -ne 0) { throw "wrote the probe but could not read it back: $(($read | Out-String).Trim())" }
 Remove-Item -LiteralPath (Join-Path ([System.IO.Path]::GetTempPath()) "pim-probe-read-$PID.json") -Force -ErrorAction SilentlyContinue
 az storage blob delete @subArgs --account-name $StorageAccount -c $Container -n $probe --auth-mode login -o none 2>&1 | Out-Null

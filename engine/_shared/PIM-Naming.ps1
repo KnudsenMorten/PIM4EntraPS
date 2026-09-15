@@ -1,4 +1,4 @@
-#Requires -Version 5.1
+﻿#Requires -Version 5.1
 # PIM4EntraPS -- day-to-day naming convention helpers + validation (REQUIREMENTS § 17).
 #
 # Pure, offline, PS 5.1-safe. No I/O, no module deps, no live calls. Dot-sourced by
@@ -46,7 +46,8 @@ function Get-PimNamingConvention {
         # Environment (entra -> -ID, ad -> -AD). {Initial} is the owner/initials token
         # ({Owner} is honoured as a synonym). The rendered name is lower-cased, e.g.
         # internal Entra 'mok' -> 'admin-mok-id'; high-priv -> 'admin-mok-l0-t0-id'.
-        AdminAccountPattern           = '{AdminTypePrefix}Admin-{Initial}{Platform}'
+        AdminWord                     = 'Admin'
+        AdminAccountPattern           = '{AdminTypePrefix}{AdminWord}-{Initial}{Platform}'
         AdminAccountPatternHighPriv   = 'Admin-{Initial}-L0-T0{Platform}'
         AdminAccountPatterns          = @('Admin-', 'x-Admin', 'g-Admin')
         # Per-admin-type prefix map (configurable). internal + external-guest = NO prefix.
@@ -219,7 +220,7 @@ function Resolve-PimAdminName {
     )
     $conv = Get-PimNamingConvention
     $pat  = if ($HighPriv) { "$($conv.AdminAccountPatternHighPriv)" } else { "$($conv.AdminAccountPattern)" }
-    if (-not $pat) { $pat = if ($HighPriv) { 'Admin-{Initial}-L0-T0{Platform}' } else { '{AdminTypePrefix}Admin-{Initial}{Platform}' } }
+    if (-not $pat) { $pat = if ($HighPriv) { '{AdminWord}-{Initial}-L0-T0{Platform}' } else { '{AdminTypePrefix}{AdminWord}-{Initial}{Platform}' } }
     # Environment falls back to the legacy -Platform alias (ID/AD) then the default.
     $env = if ("$Environment".Trim()) { $Environment } elseif ("$Platform".Trim()) { $Platform } else { $null }
     $prefix = Get-PimAdminTypePrefix  -AdminType   $AdminType
@@ -232,6 +233,14 @@ function Resolve-PimAdminName {
         EnvironmentSuffix = $suffix
         # {Platform} expands to the SAME environment suffix (e.g. -ID/-AD).
         Platform          = $suffix
+        # 🔑 {AdminWord} -- THE WORD IN THE MIDDLE OF AN ADMIN NAME, and it used to be LITERAL.
+        # Operator, 2026-09-12: "some customer wants to use fx adm others admin - but here i have
+        # not defined the word admin ... we cannot enforce admin in the name". Everything around it
+        # was already a token ({AdminTypePrefix}, {Initial}, {Platform}); only the product's own
+        # opinion was hard-coded, so a customer whose convention says "adm" could not express it
+        # without hand-editing the raw pattern in the advanced key/value table.
+        # Defaults to 'Admin', so every existing tenant renders byte-identical names.
+        AdminWord         = $(if ("$($conv.AdminWord)".Trim()) { "$($conv.AdminWord)".Trim() } else { 'Admin' })
     }
     # collapse any doubled separator a blank token may have left.
     $name = $name -replace '--+', '-'
@@ -368,6 +377,13 @@ function ConvertTo-PimAdminNameRegex {
                 # {Platform} is a synonym for {EnvironmentSuffix} in the admin pattern --
                 # both expand to the configured environment-suffix set (-ID/-AD/...).
                 '^\{(EnvironmentSuffix|Platform)\}$' { [void]$sb.Append($suffixClass) }
+                # 🔴 {AdminWord} (v2.4.333) is ONE configured literal ('Admin' by default, 'adm' where a
+                # customer chose it). It fell through to the generic class below, which accepts dashes --
+                # so 'z-Admin-JDO-ID' matched as a single "word" and a wrong prefix was no longer caught.
+                '^\{AdminWord\}$' {
+                    $aw = if ("$($conv.AdminWord)".Trim()) { "$($conv.AdminWord)".Trim() } else { 'Admin' }
+                    [void]$sb.Append([regex]::Escape($aw))
+                }
                 default                   { [void]$sb.Append('[A-Za-z0-9.\-]+') }
             }
         } else {

@@ -60,8 +60,14 @@ function Build-PimContext {
         return
     }
 
-    if (-not $global:PIM_Filters) {
-        throw 'Build-PimContext: $global:PIM_Filters not loaded. Call Initialize-LauncherConfig first (which sources PIM4EntraPS.Filters.locked.ps1).'
+    # The RAW lists (groups, AUs, role catalog) do not depend on the filters -- only the derived
+    # *_Definitions_ID globals do, and those are read by the v1 module only; no v2 engine code uses
+    # them. Throwing here took the role catalog down with the filters, so the v2 scheduler (which
+    # loads no filters file -- v2 is SQL-only) got "unresolved role" on every Entra role assignment.
+    # No filters is therefore the NORMAL v2 case: load the raw lists, skip the v1 filtered views.
+    $__noFilters = -not $global:PIM_Filters
+    if ($__noFilters) {
+        Write-Verbose 'Build-PimContext: no $global:PIM_Filters (v2) -- raw groups/AUs/roles load; the v1 filtered lists are skipped.'
     }
 
     # Backend: PURE REST by default (no Graph module -> nothing to Install-Module,
@@ -122,6 +128,7 @@ function Build-PimContext {
         # Resolve the filter scriptblock. 'Admins' is the canonical key; honour the
         # legacy 'AdminCandidate' key as a back-compat alias if a customer .custom.ps1
         # still sets it (and 'Admins' isn't set).
+        if ($__noFilters) { continue }
         $filter = $global:PIM_Filters.$key
         if (-not $filter -and $key -eq 'Admins') { $filter = $global:PIM_Filters.AdminCandidate }
         if (-not $filter) {
@@ -181,6 +188,10 @@ function Add-PimContextObject {
     foreach ($c in @($raw)) { if ($c -is [System.Array]) { foreach ($x in $c) { $flat.Add($x) } } elseif ($null -ne $c) { $flat.Add($c) } }
     $merged = Merge-PimCacheItem -Current $flat.ToArray() -Object $Object
     Set-Variable -Scope Global -Name $var -Value ([object[]]$merged)   # cast => flat array, no @()-wrap nesting
+    # §70.22 (live 2026-09-14 07:17Z): Groups created DEPT-testdept1, and AdminMembers in the SAME run failed "unresolved
+    # principal/group" -- Get-PimSolutionOwnedGroups served its 5-minute cache from before the create. A new group
+    # invalidates that cache (a global flag: the two files are dot-sourced into different script scopes).
+    if ($Kind -eq 'Group') { $global:PIM_OwnedGroupsDirty = $true }
 }
 
 function Get-PimList {

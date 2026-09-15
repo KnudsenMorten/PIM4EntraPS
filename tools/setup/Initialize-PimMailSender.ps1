@@ -1,4 +1,4 @@
-#Requires -Version 5.1
+﻿#Requires -Version 5.1
 <#
 .SYNOPSIS
   IMP-06 -- make an environment able to send its own notification mail, UNATTENDED.
@@ -84,9 +84,26 @@ param(
     # defect, which is why the offline gate now audits the whole family instead of naming them.
     [string]$AdminSecret,
     [string]$AdminCertThumbprint,
-    # The engine SPN that will receive scoped Mail.Send. Read from the environment's own Key Vault
-    # ('Modern-AppId') when not supplied.
+    # The engine SPN. It receives the scoped Mail.Send ONLY when no managed identity is named below
+    # (a non-hosted engine sends as the SPN). With a managed identity it is still checked for a
+    # tenant-wide Graph Mail.Send. Read from the environment's own Key Vault ('Modern-AppId') when
+    # not supplied and no managed identity is given.
     [string]$EngineAppId,
+    # 🔒 THE HOSTED SENDER (REQUIREMENTS 65.11, operator decision 2026-09-13): the container sends as
+    # its MANAGED IDENTITY, so the scoped assignment must name that identity -- the tick job's, and
+    # the Manager's when it sends alerts. Service-principal OBJECT ids (the resource's
+    # identity.principalId). A non-managed-identity object is refused.
+    [string[]]$ManagedIdentityObjectId = @(),
+    # Or resolve the tick job's managed identity by ARM REST (read only), by the same rule the
+    # engine's token call uses (PIM_ManagedIdentityClientId -> that user-assigned identity, else
+    # system-assigned).
+    [string]$SubscriptionId,
+    [string]$ResourceGroup,
+    [string]$TickJobName,
+    # EXPLICIT, off by default: also remove the older scoped assignment that names the engine SPN.
+    # Left in place by default -- it is scoped to the same single mailbox, so it widens nothing,
+    # and removing a working send right is the operator's call, not a side effect.
+    [switch]$RemoveEngineSpnAssignment,
     [string]$KeyVaultName,
     [string]$BootstrapAppId,
     [string]$BootstrapThumbprint,
@@ -119,12 +136,13 @@ if (-not $AdminSecret -and -not $AdminCertThumbprint) { throw 'Initialize-PimMai
 $here = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent $MyInvocation.MyCommand.Path }
 $solRoot = Split-Path -Parent (Split-Path -Parent $here)   # ...\SOLUTIONS\PIM4EntraPS
 . (Join-Path $solRoot 'engine\_shared\PIM-Rest.ps1')
+. (Join-Path $here '_PimMailSenderPlan.ps1')          # pure planners (tested offline)
 
 $graphResourceAppId = '00000003-0000-0000-c000-000000000000'   # Microsoft Graph
 $exoResourceAppId   = '00000002-0000-0ff1-ce00-000000000000'   # Office 365 Exchange Online
 
 $result = [ordered]@{
-    ok = $false; sender = ''; tenantId = $TenantId; engineAppId = ''
+    ok = $false; sender = ''; tenantId = $TenantId; engineAppId = ''; sendIdentities = @()
     exchangePlan = ''; mailboxCreated = $false; mailSendGranted = $false
     accessPolicyCreated = $false; steps = @(); reason = ''
 }
@@ -202,7 +220,7 @@ function Resolve-PimMailSenderAddress {
 }
 
 Write-Host ("=" * 78) -ForegroundColor Cyan
-Write-Host " PIM MAIL SENDER (IMP-06)  tenant $TenantId" -ForegroundColor Cyan
+Write-Host " PIM MAIL SENDER  tenant $TenantId" -ForegroundColor Cyan
 Write-Host ("=" * 78) -ForegroundColor Cyan
 
 # --- tokens -------------------------------------------------------------------
@@ -222,6 +240,45 @@ function Gr {
     Invoke-RestMethod @a
 }
 Note "onboarding SPN: $AdminAppId" 'DarkGray'
+
+# 🔴 THE ONBOARDING SPN CANNOT GRANT ITSELF. The header says this script's identity "already
+# elevates itself to Global Administrator + Owner" -- true of the estate's onboarding SPN, and NOT
+# true of a customer deploy SPN created with `az ad sp create-for-rbac --role Owner`, which holds
+# Azure RBAC and nothing in Graph. Every Graph call here uses that SPN's own token, so the two
+# grants below -- Exchange.ManageAsApp and the Exchange Administrator role -- ask the SPN to assign
+# roles TO ITSELF, needing AppRoleAssignment.ReadWrite.All and RoleManagement.ReadWrite.Directory.
+# A create-for-rbac SPN has neither, so the script failed at its own first grant. Measured while
+# preparing a live customer's mail sender, 2026-09-08.
+#
+# The directive this script opens with is "the onboarding scripts must handle this prep unattended",
+# so refusing with an instruction to go and grant it by hand is the wrong answer. Instead: fall back
+# to the AMBIENT az context for the grant only. The operator running onboarding is signed in as a
+# Global Administrator (the identity phase requires it for exactly the same reason), which is the
+# same borrowed-token pattern Install-PimEngineAppRegistration.ps1 already uses.
+#
+# 🔒 Scope of the fallback is deliberately narrow: READS stay on the SPN token, and only these two
+# POSTs may elevate. Anything that is not an authorization failure is rethrown untouched -- a
+# fallback that swallowed a real error would hide the thing it was meant to surface.
+function Invoke-PimGrant {
+    param([Parameter(Mandatory)][string]$Path, [Parameter(Mandatory)][object]$Body, [string]$What = 'grant')
+    try { Gr -Method POST -Path $Path -Body $Body | Out-Null; return 'onboarding SPN' }
+    catch {
+        # BUG-131's lesson: the Graph error body is in ErrorDetails, NOT in Exception.Message.
+        $m = "$($_.Exception.Message) $($_.ErrorDetails.Message)"
+        if ($m -notmatch 'Authorization_RequestDenied|Insufficient privileges|\b403\b|Forbidden') { throw }
+        Note "$What refused for the onboarding SPN (it cannot grant itself) -- retrying with the signed-in az context" 'DarkYellow'
+        $azTok = az account get-access-token --tenant $TenantId --resource https://graph.microsoft.com --query accessToken -o tsv 2>$null
+        if (-not "$azTok".Trim()) {
+            throw ("$What was denied to the onboarding SPN, and no az context is available to fall back to. " +
+                   "Sign in as a Global Administrator (az login) and re-run, or grant $AdminAppId " +
+                   "AppRoleAssignment.ReadWrite.All + RoleManagement.ReadWrite.Directory.")
+        }
+        Invoke-RestMethod -Method POST -Uri "https://graph.microsoft.com/v1.0/$Path" `
+            -Headers @{ Authorization = "Bearer $azTok"; 'Content-Type' = 'application/json' } `
+            -Body ($Body | ConvertTo-Json -Depth 20) | Out-Null
+        return 'signed-in az context'
+    }
+}
 
 function Confirm-Eventually {
     <#
@@ -284,11 +341,31 @@ $sender = $senderPlan.sender
 $result.sender = $sender
 Note "sender: $sender" 'Green'
 
+# --- resolve the SENDING identity (hosted: the tick job's managed identity) -------------
+Step 'resolve the sending identity (managed identity when hosted)'
+$miOids = @($ManagedIdentityObjectId | Where-Object { "$_".Trim() } | ForEach-Object { "$_".Trim() })
+if (-not $miOids.Count -and "$SubscriptionId".Trim() -and "$ResourceGroup".Trim() -and "$TickJobName".Trim()) {
+    try {
+        $armTok = Get-PimRestToken -Resource 'arm' -TenantId $TenantId -ClientId $AdminAppId -ClientSecret $AdminSecret -CertThumbprint $AdminCertThumbprint -Force
+        $job = Invoke-RestMethod -Headers @{ Authorization = "Bearer $armTok" } `
+            -Uri "https://management.azure.com/subscriptions/$SubscriptionId/resourceGroups/$ResourceGroup/providers/Microsoft.App/jobs/$TickJobName`?api-version=2024-03-01"
+    } catch { Fail "could not read tick job '$TickJobName' to resolve its managed identity: $($_.Exception.Message)" }
+    $pick = Get-PimJobManagedIdentityPrincipalId -Job $job
+    if ($pick.reason) { Fail "tick job '$TickJobName': $($pick.reason)" }
+    $miOids = @($pick.principalId)
+    Note "tick job '$TickJobName' sends as its $($pick.kind)-assigned managed identity $($pick.principalId)" 'DarkGray'
+}
+$miSps = @()
+foreach ($oid in $miOids) {
+    try { $miSps += Gr -Path "servicePrincipals/$oid`?`$select=id,appId,displayName,servicePrincipalType" }
+    catch { Fail "managed identity service principal '$oid' not found: $($_.Exception.Message)" }
+}
+
 # --- resolve the engine SPN ----------------------------------------------------
-Step 'resolve the engine SPN (receives the SCOPED Mail.Send)'
-if (-not "$EngineAppId".Trim()) {
+Step 'resolve the engine SPN (receives the SCOPED Mail.Send when no managed identity sends)'
+if (-not "$EngineAppId".Trim() -and -not $miSps.Count) {
     if (-not ("$KeyVaultName".Trim() -and "$BootstrapAppId".Trim() -and "$BootstrapThumbprint".Trim())) {
-        Fail 'no -EngineAppId, and no -KeyVaultName/-BootstrapAppId/-BootstrapThumbprint to read Modern-AppId from'
+        Fail 'no -EngineAppId or -ManagedIdentityObjectId, and no -KeyVaultName/-BootstrapAppId/-BootstrapThumbprint to read Modern-AppId from'
     }
     try {
         $kvTok = Get-PimRestToken -Resource 'https://vault.azure.net' -TenantId $TenantId -ClientId $BootstrapAppId -CertThumbprint $BootstrapThumbprint -Force
@@ -298,9 +375,17 @@ if (-not "$EngineAppId".Trim()) {
 }
 $EngineAppId = "$EngineAppId".Trim()
 $result.engineAppId = $EngineAppId
-$engineSp = (Gr -Path "servicePrincipals?`$filter=appId eq '$EngineAppId'").value | Select-Object -First 1
-if (-not $engineSp) { Fail "engine service principal not found for appId $EngineAppId" }
-Note "engine SPN: $EngineAppId (objectId $($engineSp.id))" 'DarkGray'
+$engineSp = $null
+if ($EngineAppId) {
+    $engineSp = (Gr -Path "servicePrincipals?`$filter=appId eq '$EngineAppId'").value | Select-Object -First 1
+    if (-not $engineSp -and -not $miSps.Count) { Fail "engine service principal not found for appId $EngineAppId" }
+    if ($engineSp) { Note "engine SPN: $EngineAppId (objectId $($engineSp.id))" 'DarkGray' }
+}
+$sendPlan = Resolve-PimMailSendPrincipals -ManagedIdentitySps $miSps -EngineSp $engineSp
+if ($sendPlan.reason) { Fail $sendPlan.reason }
+$sendPrincipals = @($sendPlan.principals)
+$result.sendIdentities = @($sendPrincipals | ForEach-Object { [ordered]@{ kind = $_.kind; appId = $_.appId; objectId = $_.objectId } })
+foreach ($p in $sendPrincipals) { Note "sends as: $($p.kind) appId $($p.appId) (objectId $($p.objectId))" 'Green' }
 
 # Resolve the Graph Mail.Send role now, but DO NOT GRANT IT YET -- see the ordering note at the
 # grant step near the end of this script. Resolving early keeps the failure "this tenant has no
@@ -328,9 +413,10 @@ $hasManage = @((Gr -Path "servicePrincipals/$($adminSp.id)/appRoleAssignments").
 if ($hasManage.Count) { Note 'Exchange.ManageAsApp already held' 'DarkGray' }
 elseif ($PSCmdlet.ShouldProcess($AdminAppId, 'grant Exchange.ManageAsApp')) {
     try {
-        Gr -Method POST -Path "servicePrincipals/$($adminSp.id)/appRoleAssignments" `
-            -Body @{ principalId = $adminSp.id; resourceId = $exoSp.id; appRoleId = $manageAsApp.id } | Out-Null
-        Note 'Exchange.ManageAsApp granted' 'Green'
+        $by = Invoke-PimGrant -Path "servicePrincipals/$($adminSp.id)/appRoleAssignments" `
+                -Body @{ principalId = $adminSp.id; resourceId = $exoSp.id; appRoleId = $manageAsApp.id } `
+                -What 'Exchange.ManageAsApp'
+        Note "Exchange.ManageAsApp granted (via the $by)" 'Green'
     } catch { Fail "could not grant Exchange.ManageAsApp to the onboarding SPN: $($_.Exception.Message)" }
 }
 
@@ -341,9 +427,10 @@ $hasExchAdmin = @((Gr -Path "roleManagement/directory/roleAssignments?`$filter=p
 if ($hasExchAdmin.Count) { Note 'Exchange Administrator already assigned' 'DarkGray' }
 elseif ($PSCmdlet.ShouldProcess($AdminAppId, 'assign Exchange Administrator')) {
     try {
-        Gr -Method POST -Path 'roleManagement/directory/roleAssignments' `
-            -Body @{ principalId = $adminSp.id; roleDefinitionId = $exchAdminRole.id; directoryScopeId = '/' } | Out-Null
-        Note 'Exchange Administrator assigned' 'Green'
+        $by = Invoke-PimGrant -Path 'roleManagement/directory/roleAssignments' `
+                -Body @{ principalId = $adminSp.id; roleDefinitionId = $exchAdminRole.id; directoryScopeId = '/' } `
+                -What 'Exchange Administrator'
+        Note "Exchange Administrator assigned (via the $by)" 'Green'
     } catch { Fail "could not assign Exchange Administrator to the onboarding SPN: $($_.Exception.Message)" }
 }
 
@@ -480,52 +567,49 @@ function Invoke-ExoWhenHydrated {
     }
 }
 
-# 3b. register the engine app inside Exchange
-$exoSpList = $null
-try { $exoSpList = @((Invoke-Exo -Cmdlet 'Get-ServicePrincipal').value) } catch { $exoSpList = @() }
-if (@($exoSpList | Where-Object { "$($_.AppId)" -eq $EngineAppId }).Count) {
-    Note 'engine app already registered in Exchange' 'DarkGray'
-} else {
-    $r = Invoke-ExoWhenHydrated -Cmdlet 'New-ServicePrincipal' -What 'service principal' -Parameters @{
-        AppId = $EngineAppId; ObjectId = $engineSp.id; DisplayName = 'PIM4EntraPS Engine' }
-    if (-not $r.ok) { Add-Result 'exo-sp' 'FAILED' "$($r.error) $($r.detail)"; Fail "could not register the engine app in Exchange: $($r.error)" }
-    Note 'engine app registered in Exchange' 'Green'
-}
-
-# 3c. a recipient scope containing exactly the sender mailbox
+# 3b-3d. PLAN, then execute. What is missing is decided by New-PimMailSenderExoPlan
+#     (_PimMailSenderPlan.ps1, tested offline): New-ServicePrincipal for each SENDING identity,
+#     New-ManagementScope for the sender mailbox, New-ManagementRoleAssignment 'Application Mail.Send'
+#     per identity. An empty plan = already in place; a second run writes nothing.
+# 🔴 THE OLD CHECK MATCHED ROLE + SCOPE ONLY. Once the engine SPN held the assignment, the managed
+#     identity's was reported "already present" and never created -- and the hosted engine, which
+#     sends as that managed identity, was refused with nothing in this log to say why. The plan
+#     matches assignments by ASSIGNEE.
 $scopeName = "PIM4EntraPS-Sender"
-$scopes = $null
+$exoSpList = $null; $scopes = $null; $assigns = $null
+try { $exoSpList = @((Invoke-Exo -Cmdlet 'Get-ServicePrincipal').value) } catch { $exoSpList = @() }
 try { $scopes = @((Invoke-Exo -Cmdlet 'Get-ManagementScope').value) } catch { $scopes = @() }
-if (@($scopes | Where-Object { "$($_.Name)" -eq $scopeName }).Count) {
-    Note "management scope '$scopeName' already present" 'DarkGray'
-} else {
-    $r = Invoke-ExoWhenHydrated -Cmdlet 'New-ManagementScope' -What 'management scope' -Parameters @{
-        Name = $scopeName; RecipientRestrictionFilter = "PrimarySmtpAddress -eq '$sender'" }
-    if (-not $r.ok) { Add-Result 'exo-scope' 'FAILED' "$($r.error) $($r.detail)"; Fail "could not create the management scope: $($r.error)" }
-    Note "management scope '$scopeName' created (-> $sender only)" 'Green'
-}
-
-# 3d. the scoped role assignment. THIS is the control: 'Application Mail.Send' bound to the app and
-#     restricted by the scope above. Its absence is why the Graph grant is withheld until now.
-$assignName = 'PIM4EntraPS-Engine-MailSend'
-$assigns = $null
 try { $assigns = @((Invoke-Exo -Cmdlet 'Get-ManagementRoleAssignment' -Parameters @{ RoleAssigneeType = 'ServicePrincipal' }).value) } catch { $assigns = @() }
-$haveAssign = @($assigns | Where-Object { "$($_.Role)" -eq 'Application Mail.Send' -and "$($_.CustomResourceScope)" -eq $scopeName })
-if ($haveAssign.Count) {
-    Note 'scoped Application Mail.Send assignment already present' 'DarkGray'
+$engineOid = if ($engineSp) { "$($engineSp.id)" } else { '' }
+$exoPlan = @(New-PimMailSenderExoPlan -ExoServicePrincipals $exoSpList -Scopes $scopes -Assignments $assigns `
+    -Principals $sendPrincipals -Sender $sender -ScopeName $scopeName -EngineAppId $EngineAppId -EngineObjectId $engineOid `
+    -RemoveEngineSpnAssignment:$RemoveEngineSpnAssignment)
+if (-not $exoPlan.Count) {
+    Note 'Exchange registration, scope and scoped Application Mail.Send assignment(s) already present' 'DarkGray'
     $result.accessPolicyCreated = $true; Add-Result 'exo-scoped-send' 'already' "$scopeName"
-} else {
-    $r = Invoke-ExoWhenHydrated -Cmdlet 'New-ManagementRoleAssignment' -What 'role assignment' -Parameters @{
-        App = $EngineAppId; Role = 'Application Mail.Send'; CustomResourceScope = $scopeName; Name = $assignName }
-    if (-not $r.ok) { Add-Result 'exo-scoped-send' 'FAILED' "$($r.error) $($r.detail)"; Fail "could not create the scoped Application Mail.Send assignment: $($r.error)" }
-    # Read back -- the whole reason RBAC was chosen over an Application Access Policy.
+}
+foreach ($item in $exoPlan) {
+    $r = Invoke-ExoWhenHydrated -Cmdlet $item.cmdlet -What $item.what -Parameters $item.parameters
+    if (-not $r.ok) { Add-Result "exo:$($item.cmdlet)" 'FAILED' "$($r.error) $($r.detail)"; Fail "could not $($item.what): $($r.error)" }
+    Note "$($item.cmdlet): $($item.what)" 'Green'
+}
+if ($exoPlan.Count) {
+    # Read back -- the whole reason RBAC was chosen over an Application Access Policy. EVERY sending
+    # identity must hold its own assignment, not merely "some" assignment in the scope.
     $confirmedScope = Confirm-Eventually -What 'scoped Mail.Send assignment' -Seconds 120 -Test {
-        @((Invoke-Exo -Cmdlet 'Get-ManagementRoleAssignment' -Parameters @{ RoleAssigneeType = 'ServicePrincipal' }).value |
-            Where-Object { "$($_.Role)" -eq 'Application Mail.Send' -and "$($_.CustomResourceScope)" -eq $scopeName }).Count -gt 0
+        $now = @((Invoke-Exo -Cmdlet 'Get-ManagementRoleAssignment' -Parameters @{ RoleAssigneeType = 'ServicePrincipal' }).value)
+        $spNow = @((Invoke-Exo -Cmdlet 'Get-ServicePrincipal').value)
+        @($sendPrincipals | Where-Object {
+            $ids = Get-PimExoAssigneeIds -ExoServicePrincipals $spNow -AppId $_.appId -ObjectId $_.objectId
+            -not @(Select-PimExoMailSendAssignment -Assignments $now -ScopeName $scopeName -AssigneeIds $ids -AssignmentName $_.assignmentName).Count
+        }).Count -eq 0
     }
-    if (-not $confirmedScope) { Add-Result 'exo-scoped-send' 'FAILED' 'not present on read-back'; Fail 'the scoped Mail.Send assignment was created but is not present on read-back' }
-    Note "scoped Application Mail.Send assignment created (verified): $assignName -> $scopeName" 'Green'
-    $result.accessPolicyCreated = $true; Add-Result 'exo-scoped-send' 'created' "$assignName -> $scopeName"
+    if (-not $confirmedScope) { Add-Result 'exo-scoped-send' 'FAILED' 'not present on read-back'; Fail 'the scoped Mail.Send assignment was created but is not present on read-back for every sending identity' }
+    Note "scoped Application Mail.Send assignment(s) verified for: $((@($sendPrincipals | ForEach-Object { $_.appId })) -join ', ') -> $scopeName" 'Green'
+    $result.accessPolicyCreated = $true; Add-Result 'exo-scoped-send' 'created' "$($exoPlan.Count) change(s) -> $scopeName"
+}
+if ($EngineAppId -and -not $RemoveEngineSpnAssignment -and @($sendPrincipals | Where-Object { $_.kind -eq 'managed-identity' }).Count) {
+    Note "the engine SPN's older scoped assignment (if any) is LEFT in place -- pass -RemoveEngineSpnAssignment to remove it" 'DarkGray'
 }
 
 # --- 2. ENSURE THE ENGINE SPN DOES *NOT* HOLD TENANT-WIDE Mail.Send -------------
@@ -549,26 +633,34 @@ if ($haveAssign.Count) {
 # An EXISTING grant must therefore be REVOKED, not left alone: its mere presence silently defeats the
 # scope, and it is exactly what an earlier run of this very script (and any hand-done IMP-06) would
 # have left behind.
-Step '[2] ensure NO tenant-wide Graph Mail.Send on the engine SPN (it would defeat the scope)'
-$existingGrant = @((Gr -Path "servicePrincipals/$($engineSp.id)/appRoleAssignments").value |
-    Where-Object { $_.resourceId -eq $graphSp.id -and $_.appRoleId -eq $mailSendRole.id })
-if (-not $existingGrant.Count) {
-    Note 'no tenant-wide Mail.Send present -- correct; the scoped RBAC assignment is the grant' 'Green'
-    $result.mailSendGranted = $false; Add-Result 'mail-send-tenantwide' 'absent' 'correct (RBAC grants, scoped)'
-} elseif ($PSCmdlet.ShouldProcess($EngineAppId, 'REVOKE tenant-wide Graph Mail.Send')) {
-    Note "found $($existingGrant.Count) tenant-wide Mail.Send assignment(s) -- REVOKING (they defeat the scope)" 'DarkYellow'
+Step '[2] ensure NO tenant-wide Graph Mail.Send on any sending identity or the engine SPN (it would defeat the scope)'
+# Every identity that can send is checked: the managed identities that now carry the scoped grant,
+# AND the engine SPN -- a tenant-wide consent on either defeats the per-mailbox scope.
+$tenantWideTargets = @()
+foreach ($p in $sendPrincipals) { $tenantWideTargets += [pscustomobject]@{ label = "$($p.kind) $($p.appId)"; spId = $p.objectId } }
+if ($engineSp -and -not @($tenantWideTargets | Where-Object { $_.spId -eq "$($engineSp.id)" }).Count) {
+    $tenantWideTargets += [pscustomobject]@{ label = "engine SPN $EngineAppId"; spId = "$($engineSp.id)" }
+}
+$anyRevoked = $false
+foreach ($tgt in $tenantWideTargets) {
+    $existingGrant = @(Select-PimTenantWideMailSend -Assignments @((Gr -Path "servicePrincipals/$($tgt.spId)/appRoleAssignments").value) -GraphSpId $graphSp.id -MailSendRoleId $mailSendRole.id)
+    if (-not $existingGrant.Count) { Note "no tenant-wide Mail.Send on $($tgt.label) -- correct" 'Green'; continue }
+    if (-not $PSCmdlet.ShouldProcess($tgt.label, 'REVOKE tenant-wide Graph Mail.Send')) { Add-Result 'mail-send-tenantwide' 'whatif' "would revoke on $($tgt.label)"; continue }
+    Note "found $($existingGrant.Count) tenant-wide Mail.Send assignment(s) on $($tgt.label) -- REVOKING (they defeat the scope)" 'DarkYellow'
     foreach ($a in $existingGrant) {
-        try { Gr -Method DELETE -Path "servicePrincipals/$($engineSp.id)/appRoleAssignments/$($a.id)" | Out-Null }
-        catch { Fail "could not revoke tenant-wide Mail.Send ($($a.id)): $($_.Exception.Message)" }
+        try { Gr -Method DELETE -Path "servicePrincipals/$($tgt.spId)/appRoleAssignments/$($a.id)" | Out-Null }
+        catch { Fail "could not revoke tenant-wide Mail.Send ($($a.id)) on $($tgt.label): $($_.Exception.Message)" }
     }
     $revoked = Confirm-Eventually -What 'Mail.Send revocation' -Test {
-        @((Gr -Path "servicePrincipals/$($engineSp.id)/appRoleAssignments").value |
-            Where-Object { $_.resourceId -eq $graphSp.id -and $_.appRoleId -eq $mailSendRole.id }).Count -eq 0
+        @(Select-PimTenantWideMailSend -Assignments @((Gr -Path "servicePrincipals/$($tgt.spId)/appRoleAssignments").value) -GraphSpId $graphSp.id -MailSendRoleId $mailSendRole.id).Count -eq 0
     }
-    if (-not $revoked) { Fail 'tenant-wide Mail.Send was deleted but is still present on read-back -- the send right is NOT scoped' }
-    Note 'tenant-wide Mail.Send revoked (verified by read-back)' 'Green'
-    $result.mailSendGranted = $false; Add-Result 'mail-send-tenantwide' 'revoked' 'removed so the RBAC scope governs'
-} else { Add-Result 'mail-send-tenantwide' 'whatif' 'would revoke' }
+    if (-not $revoked) { Fail "tenant-wide Mail.Send was deleted on $($tgt.label) but is still present on read-back -- the send right is NOT scoped" }
+    Note "tenant-wide Mail.Send revoked on $($tgt.label) (verified by read-back)" 'Green'
+    $anyRevoked = $true
+}
+$result.mailSendGranted = $false
+if ($anyRevoked) { Add-Result 'mail-send-tenantwide' 'revoked' 'removed so the RBAC scope governs' }
+else { Add-Result 'mail-send-tenantwide' 'absent' 'correct (RBAC grants, scoped)' }
 
 # --- 4. PERSIST THE SENDER (IMP-06a runtime half) --------------------------------
 # This is the step that actually makes the environment send. Everything above only made it
@@ -618,8 +710,9 @@ Write-Host ("=" * 78) -ForegroundColor Cyan
 Write-Host " MAIL SENDER READY" -ForegroundColor Green
 Write-Host ("=" * 78) -ForegroundColor Cyan
 Write-Host "  sender        : $sender"
-Write-Host "  send right    : Exchange RBAC '$assignName' -> scope '$scopeName' -> $sender ONLY"
-Write-Host "  engine SPN    : $EngineAppId  (NO tenant-wide Graph Mail.Send -- by design)"
+Write-Host "  send right    : Exchange RBAC 'Application Mail.Send' -> scope '$scopeName' -> $sender ONLY"
+foreach ($p in $sendPrincipals) { Write-Host "  sends as      : $($p.kind) $($p.appId)  (assignment $($p.assignmentName))" }
+Write-Host "  tenant-wide   : NO Graph Mail.Send on any sending identity or the engine SPN -- by design"
 Write-Host "  exchange plan : $($result.exchangePlan)"
 Write-Host ""
 Write-Host "  NEXT: pass -MailSender '$sender' to Setup-PimContainers (Initialize-PlatformEnvironment"
@@ -629,10 +722,10 @@ Write-Host ""
 # that mailbox" while the app was in fact unscoped -- an unverified security claim is worse than
 # none, because it stops anyone from checking.
 Write-Host "  VERIFIED BY READ-BACK: mailbox exists; scoped RBAC assignment exists; no tenant-wide" -ForegroundColor Green
-Write-Host "  Graph Mail.Send is present on the engine SPN." -ForegroundColor Green
+Write-Host "  Graph Mail.Send is present on any sending identity." -ForegroundColor Green
 Write-Host "  🪤 The restriction was proven in EFIF with a second out-of-scope mailbox (in-scope send" -ForegroundColor DarkGray
 Write-Host "     accepted, out-of-scope send ErrorAccessDenied). This script does NOT re-prove it per" -ForegroundColor DarkGray
 Write-Host "     tenant -- that would mean creating a decoy mailbox in a customer tenant. If you need" -ForegroundColor DarkGray
-Write-Host "     that assurance here, do it deliberately and delete the decoy afterwards. (IMP-06e)" -ForegroundColor DarkGray
+Write-Host "     that assurance here, do it deliberately and delete the decoy afterwards." -ForegroundColor DarkGray
 Write-ResultFile
 exit 0

@@ -1,4 +1,4 @@
-<#
+﻿<#
   PIM-SessionRevoke.ps1 -- REQUIREMENTS §35.2
 
   PURE decision core for "revoke this admin's sign-in sessions" as a STANDALONE

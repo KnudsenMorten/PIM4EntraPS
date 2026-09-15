@@ -1,4 +1,4 @@
-# =============================================================================================
+﻿# =============================================================================================
 # PIM-Enrolment.ps1 -- MSP-5, THE SLAVE-ENROLMENT HANDSHAKE ("the slave knocks on the door").
 #
 # The operator's shape: *"basic deployment of a slave with minimum config ... then the slave knock

@@ -1,4 +1,4 @@
-#Requires -Version 5.1
+﻿#Requires -Version 5.1
 <#
 .SYNOPSIS
     Intune DEVICE REMEDIATION -- detection half. Exit 1 when a browser profile on this device

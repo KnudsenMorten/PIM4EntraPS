@@ -131,6 +131,109 @@ function Get-PimAutoRenewal {
     return [pscustomobject]@{ renew = $true; newExpiryUtc = $NowUtc.AddDays($ExtendDays).ToString('o'); daysLeft = $days }
 }
 
+# --- lifecycle items FROM THE STORE (the 'reminders' job's data source) ------------
+# The date-expression resolver is loaded defensively: the scheduler tick does not dot-source
+# PIM-DateExpression.ps1, and without it every OffboardDate expression would be unreadable.
+if (-not (Get-Command Resolve-PimDateExpression -ErrorAction SilentlyContinue) -and $PSScriptRoot) {
+    $__pimDateExpr = Join-Path $PSScriptRoot 'PIM-DateExpression.ps1'
+    if (Test-Path -LiteralPath $__pimDateExpr) { . $__pimDateExpr }
+}
+
+function ConvertTo-PimLifecycleUtc {
+    # A lifecycle cell (date expression or plain date) -> UTC [datetime], or $null.
+    param([string]$Value)
+    $s = "$Value".Trim()
+    if (-not $s) { return $null }
+    if (Get-Command Resolve-PimDateExpression -ErrorAction SilentlyContinue) {
+        try { return ([datetime](Resolve-PimDateExpression -Expression $s)).ToUniversalTime() } catch { }
+    }
+    return (Get-PimUtcStamp $s)
+}
+
+function Get-PimLifecycleItemsFromStore {
+    <#
+      The lifecycle items the calendar works on, read from the DESIRED rows in SQL (pim.Rows via
+      Get-PimDesiredRows) -- the data the 'reminders' job was declared over and never received
+      ($global:PIM_LifecycleItems was never set by anything).
+
+      What v1 had: no reminder job. Its lifecycle dates were acted on, not announced -- OffboardDate
+      (a date expression) triggered the revoke, DeleteAfterDays later the delete (PIM-Functions.psm1
+      ~L10569-10573, ~L11011-11028), and an assignment's live end date drove AutoExtend
+      (~L4647-4677). The dates that live in DESIRED state are the admin ones, so those are the items:
+        * admin-offboard  -- Account-Definitions-Admins.OffboardDate
+        * admin-delete    -- OffboardDate + DeleteAfterDays
+        * <entity>        -- any assignment row that carries an explicit lifecycle date column
+                             (Get-PimLifecycleDateFields). NumOfDaysWhenExpire is a DURATION and the
+                             real end date is only in the live schedule, so it is not guessed here.
+      Rows further than -PastDays in the past are dropped: an admin offboarded months ago is history,
+      not a reminder.
+
+      Returns @{ ok; items; read = @{ entity = count }; unresolved = @(entities); unparseable; error }.
+      ok=$false means the store could not be read -- "cannot answer", never "nothing due".
+    #>
+    [CmdletBinding()]
+    param([datetime]$NowUtc = [datetime]::UtcNow, [int]$PastDays = 30)
+    $out = [ordered]@{ ok = $false; items = @(); read = [ordered]@{}; unresolved = @(); unparseable = 0; error = '' }
+    if (-not (Get-Command Get-PimDesiredRows -ErrorAction SilentlyContinue)) {
+        $out.error = 'the desired-row reader (Get-PimDesiredRows, PIM-EngineCore.ps1) is not loaded in this process'
+        return [pscustomobject]$out
+    }
+    $now = $NowUtc.ToUniversalTime()
+    $floor = $now.AddDays(-[math]::Abs($PastDays))
+    $items = New-Object System.Collections.ArrayList
+    $unresolved = New-Object System.Collections.ArrayList
+    $bad = 0
+    $entities = @('Account-Definitions-Admins','PIM-Assignments-Admins','PIM-Assignments-Groups','PIM-Assignments-Roles-Groups','PIM-Assignments-Roles-AUs','PIM-Assignments-Azure-Resources','PIM-Assignments-Workloads')
+    $dateFields = @(Get-PimLifecycleDateFields | Where-Object { "$_" -notin @('OffboardDate','DeleteDate') })
+    foreach ($ent in $entities) {
+        $rows = @(Get-PimDesiredRows -Entity $ent)
+        $resolved = ($global:PIM_DesiredResolved -is [hashtable]) -and $global:PIM_DesiredResolved.ContainsKey($ent) -and [bool]$global:PIM_DesiredResolved[$ent]
+        if (-not $resolved) { [void]$unresolved.Add($ent); continue }
+        $out.read[$ent] = $rows.Count
+        foreach ($r in $rows) {
+            if ($null -eq $r) { continue }
+            $get = { param($names) foreach ($n in $names) { if ($r -is [System.Collections.IDictionary]) { if ($r.Contains($n) -and "$($r[$n])".Trim()) { return "$($r[$n])".Trim() } } else { $p = $r.PSObject.Properties[$n]; if ($p -and "$($p.Value)".Trim()) { return "$($p.Value)".Trim() } } }; return '' }
+            if ($ent -eq 'Account-Definitions-Admins') {
+                $user = & $get @('UserPrincipalName','UserName')
+                $off = & $get @('OffboardDate')
+                if (-not $off) { continue }
+                $offUtc = ConvertTo-PimLifecycleUtc -Value $off
+                if ($null -eq $offUtc) { $bad++; continue }
+                $mgr = & $get @('ManagerEmail')
+                if ($offUtc -ge $floor) {
+                    [void]$items.Add([pscustomobject]@{ Id = "admin-offboard:$user"; Kind = 'admin-offboard'; UserName = $user; ExpiresUtc = $offUtc.ToString('o'); ManagerEmail = $mgr; Entity = $ent })
+                }
+                $dd = & $get @('DeleteAfterDays')
+                $n = 0
+                if ($dd -and [int]::TryParse($dd, [ref]$n) -and $n -gt 0) {
+                    $delUtc = $offUtc.AddDays($n)
+                    if ($delUtc -ge $floor) {
+                        [void]$items.Add([pscustomobject]@{ Id = "admin-delete:$user"; Kind = 'admin-delete'; UserName = $user; ExpiresUtc = $delUtc.ToString('o'); ManagerEmail = $mgr; Entity = $ent })
+                    }
+                }
+                continue
+            }
+            $dv = & $get $dateFields
+            if (-not $dv) { continue }
+            $du = ConvertTo-PimLifecycleUtc -Value $dv
+            if ($null -eq $du) { $bad++; continue }
+            if ($du -lt $floor) { continue }
+            $who = & $get @('Username','UserName','SourceGroupTag','GroupTag')
+            $what = & $get @('GroupTag','TargetGroupTag','RoleDefinitionName','AzScopePermission','RoleName')
+            [void]$items.Add([pscustomobject]@{ Id = "${ent}:$who|$what"; Kind = $ent; UserName = $who; GroupTag = $what; ExpiresUtc = $du.ToString('o'); AutoExtend = (& $get @('AutoExtend')); Entity = $ent })
+        }
+    }
+    $out.items = $items.ToArray()
+    $out.unresolved = $unresolved.ToArray()
+    $out.unparseable = $bad
+    if ($unresolved.Count -eq $entities.Count) {
+        $out.error = 'no desired-state entity could be read (no SQL store wired, or the read failed)'
+        return [pscustomobject]$out
+    }
+    $out.ok = $true
+    return [pscustomobject]$out
+}
+
 function New-PimRenewalChange {
     # Change-queue Update that extends an item's expiry date field.
     param([Parameter(Mandatory)][string]$Entity, [Parameter(Mandatory)][string]$Key, [Parameter(Mandatory)][string]$DateField, [Parameter(Mandatory)][string]$NewExpiryUtc, [string]$By = 'auto-renew')

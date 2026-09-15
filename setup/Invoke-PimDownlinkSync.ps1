@@ -1,4 +1,4 @@
-#Requires -Version 5.1
+﻿#Requires -Version 5.1
 <#
 .SYNOPSIS
     §31.3 Phase-2 -- the ring-gated master->managed (slave) admin/permission SYNC
@@ -176,7 +176,7 @@ $global:PIM_SqlDatabase = $SqlDatabase
 $global:PIM_UseGraphSdk = $false
 
 Write-Host "==========================================================================" -ForegroundColor Cyan
-Write-Host " PIM4EntraPS §31.3 downlink-sync ($Scenario, tenant $TenantId, ring $SlaveRing) $(if ($WhatIfMode) { '(WHATIF)' } else { '(LIVE)' })" -ForegroundColor Cyan
+Write-Host " PIM4EntraPS downlink-sync ($Scenario, tenant $TenantId, ring $SlaveRing) $(if ($WhatIfMode) { '(WHATIF)' } else { '(LIVE)' })" -ForegroundColor Cyan
 Write-Host "==========================================================================" -ForegroundColor Cyan
 
 # 1) obtain the signed baseline bundle (local file OR HTTPS pull).
@@ -286,7 +286,7 @@ if (@($slaveAdminPrefixes).Count) {
     $dlArgs['SlaveAdminPrefixes'] = @($slaveAdminPrefixes)
     Write-Host ("  slave admin prefixes: {0}" -f (@($slaveAdminPrefixes) -join ', ')) -ForegroundColor DarkGray
 } else {
-    Write-Host "  slave admin prefixes: NOT KNOWN -- admin recognisability will be reported as NOT EVALUATED (IMP-13)" -ForegroundColor Yellow
+    Write-Host "  slave admin prefixes: NOT KNOWN -- admin recognisability will be reported as NOT EVALUATED" -ForegroundColor Yellow
 }
 
 # --- MSP-2 / control #2 inputs ------------------------------------------------

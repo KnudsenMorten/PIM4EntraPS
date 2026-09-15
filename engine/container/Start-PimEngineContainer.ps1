@@ -1,4 +1,4 @@
-#Requires -Version 7.0
+﻿#Requires -Version 7.0
 <#
 .SYNOPSIS
     PIM4EntraPS local-plane engine runtime for a CONTAINER (cloud-native, no VM).
@@ -104,7 +104,13 @@ if ($env:PIM_LOCAL_SQL_SERVER) {
 
 # ---- 4. Merge + create-if-missing ----------------------------------------
 $apply = @()
-foreach ($r in $payload.rows)  { $apply += @{ UserName=$r.UserName; DisplayName=$r.DisplayName; Owner='MSP' } }
+# REQUIREMENTS 68.6 row 35: only an admin the master marks ManagementMode=msp is synced. A row with no
+# ManagementMode field is a pim.CentralAdmins registry row -- MSP by construction (same rule as
+# Test-PimDownlinkAdminSynced in engine/_shared/PIM-Downlink.ps1).
+foreach ($r in $payload.rows)  {
+    if ($r.PSObject.Properties['ManagementMode'] -and "$($r.ManagementMode)".Trim() -ine 'msp') { Log "NOT SYNCED $($r.UserName): ManagementMode is not msp at the master"; continue }
+    $apply += @{ UserName=$r.UserName; DisplayName=$r.DisplayName; Owner='MSP' }
+}
 foreach ($r in $localRows)     { $apply += @{ UserName=$r.UserName; DisplayName=$r.DisplayName; Owner='Local' } }
 foreach ($a in $apply) {
     $upn = "$($a.UserName)@$domain"

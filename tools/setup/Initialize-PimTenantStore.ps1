@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
   Make a tenant's PIM SQL store usable by the environment's own identity. Unattended, idempotent.
 
@@ -25,7 +25,13 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory)][string]$TenantId,
-    [Parameter(Mandatory)][string]$SubscriptionId,
+    # NOT Mandatory, because nothing here reads it. This script talks to Entra and to SQL over
+    # tokens; it never calls az, so there is no subscription to scope. Demanding a value the
+    # script cannot use is a lie in the contract -- it makes callers hunt for a subscription id
+    # to satisfy a parameter that is then discarded. Kept as an accepted parameter so the
+    # existing call sites (which pass it for symmetry with the az-calling scripts) still bind.
+    # audit:unused-ok SubscriptionId
+    [string]$SubscriptionId,
     [Parameter(Mandatory)][string]$SqlServerFqdn,
     [Parameter(Mandatory)][string]$ModernAppId,
     [Parameter(Mandatory)][string]$ModernThumbprint,
@@ -104,7 +110,7 @@ $global:PIM_SqlServer         = $SqlServerFqdn
 $global:PIM_SqlDatabase       = $Database
 
 $cs = Get-PimSqlConnectionString -Server $SqlServerFqdn -Database $Database
-if ($cs -match '(?i)Integrated\s*Security') { throw "got an Integrated connection string for Azure SQL (BUG-30 regression)" }
+if ($cs -match '(?i)Integrated\s*Security') { throw "got an Integrated Security connection string for Azure SQL -- this store is Entra-only and needs a token, not integrated auth" }
 Initialize-PimSqlStore -ConnectionString $cs
 
 # --- VERIFY: read back as the engine identity, not as the admin ---------------

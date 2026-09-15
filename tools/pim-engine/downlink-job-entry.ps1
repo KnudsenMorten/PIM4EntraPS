@@ -1,4 +1,4 @@
-#Requires -Version 5.1
+﻿#Requires -Version 5.1
 <#
 .SYNOPSIS
     §31.3 CLOUD-NATIVE downlink JOB entrypoint -- the command an Azure Container

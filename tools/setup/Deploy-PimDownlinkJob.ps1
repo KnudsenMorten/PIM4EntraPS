@@ -1,4 +1,4 @@
-#Requires -Version 5.1
+﻿#Requires -Version 5.1
 <#
 .SYNOPSIS
     §31.3 CLOUD-NATIVE -- deploy the master->managed (slave) downlink as an Azure
@@ -54,8 +54,8 @@
 .EXAMPLE
     # S5 central (cae-pim exists) -- deploy the cron Job, daily 03:00 UTC:
     .\Deploy-PimDownlinkJob.ps1 -Scenario S5 -TenantId <managed-tenant> -SlaveRing 1 `
-      -EnvName cae-pim -ResourceGroup rg-pim-manager-web -AcrName acrsecurityinsight `
-      -SubscriptionId 54468121-... -SqlServerFqdn sql-...database.windows.net `
+      -EnvName <aca-env> -ResourceGroup <resource-group> -AcrName <acr> `
+      -SubscriptionId <subscription-id> -SqlServerFqdn <sql-server>.database.windows.net `
       -BaselineUrl https://<priv-blob>/baselines/baseline-latest.json -Cron '0 3 * * *'
 
 .EXAMPLE
@@ -188,6 +188,8 @@ function Invoke-Az {
 }
 
 if ("$SubscriptionId".Trim() -and -not $WhatIfPreference) { az account set --subscription $SubscriptionId 2>$null | Out-Null }
+# Scope each call explicitly when a subscription was given (unchanged behaviour when it was not).
+$subArgs = @(); if ("$SubscriptionId".Trim()) { $subArgs = @('--subscription', "$SubscriptionId".Trim()) }
 
 # ---- UNREGISTER (delete) -------------------------------------------------------
 if ($Unregister) {
@@ -225,7 +227,7 @@ $image       = $imageTagRef
 # Existence probe (idempotent: create vs update).
 $exists = $false
 if (-not $WhatIfPreference) {
-    $name = az containerapp job show -g $ResourceGroup -n $JobName --query name -o tsv 2>$null
+    $name = az containerapp job show @subArgs -g $ResourceGroup -n $JobName --query name -o tsv 2>$null
     if ("$name".Trim()) { $exists = $true }
 }
 Note "image=$image  exists=$exists  cron='$Cron'"
@@ -239,7 +241,7 @@ Note "image=$image  exists=$exists  cron='$Cron'"
 # in an operator's head -- it is the difference between a script that repairs an environment and one
 # that needs someone who already knows the answer.
 if ($exists -and -not $WhatIfPreference) {
-    $existingProv = az containerapp job show -g $ResourceGroup -n $JobName --query "properties.provisioningState" -o tsv 2>$null
+    $existingProv = az containerapp job show @subArgs -g $ResourceGroup -n $JobName --query "properties.provisioningState" -o tsv 2>$null
     $existingProv = "$existingProv".Trim()
     if ($existingProv -and $existingProv -ne 'Succeeded') {
         Warn "existing job '$JobName' is provisioningState='$existingProv' -- an update cannot repair that; deleting and recreating it."
@@ -253,7 +255,7 @@ if ($exists -and -not $WhatIfPreference) {
 
 # S6 prereq guard: warn loudly that the slave ACA env must already exist.
 if ($Scenario -eq 'S6' -and -not $WhatIfPreference) {
-    $envOk = az containerapp env show -g $ResourceGroup -n $EnvName --query name -o tsv 2>$null
+    $envOk = az containerapp env show @subArgs -g $ResourceGroup -n $EnvName --query name -o tsv 2>$null
     if (-not "$envOk".Trim()) {
         Warn "S6 PREREQ: the slave ACA env '$EnvName' (RG $ResourceGroup) does not exist."
         Warn "          Stand it up first: Setup-PimContainers.ps1 -SubscriptionId <slave-sub> -TenantId $TenantId -ResourceGroup $ResourceGroup -EnvName $EnvName ... (internal-only, private)."
@@ -287,14 +289,14 @@ if ($Scenario -eq 'S6' -and -not $WhatIfPreference) {
 # exactly like a create: the YAML is a FULL document, so anything it omits is not "left alone",
 # it is REMOVED.
 if (-not "$IdentityResourceId".Trim() -and -not $WhatIfPreference) {
-    $uamiJson = az identity list -g $ResourceGroup --query "[].{id:id,name:name}" -o json 2>$null
+    $uamiJson = az identity list @subArgs -g $ResourceGroup --query "[].{id:id,name:name}" -o json 2>$null
     $uamis = @()
     if ("$uamiJson".Trim()) { try { $uamis = @($uamiJson | ConvertFrom-Json) } catch { $uamis = @() } }
     $pick = @($uamis | Where-Object { "$($_.name)" -like 'id-pim*' })
     if (-not $pick.Count) { $pick = @($uamis) }
     if ($pick.Count -eq 1) {
         $IdentityResourceId = "$($pick[0].id)"
-        Note "identity: auto-resolved the user-assigned MI '$($pick[0].name)' (BUG-71 -- a system identity cannot pull the first image)"
+        Note "identity: auto-resolved the user-assigned MI '$($pick[0].name)' (a system identity cannot pull the first image)"
     }
     elseif ($pick.Count -gt 1) {
         throw ("REFUSING to create $JobName -- $($pick.Count) user-assigned identities in ${ResourceGroup} " +
@@ -327,7 +329,7 @@ if ($exists -and -not $WhatIfPreference -and "$IdentityResourceId".Trim()) {
     # `keys(...)` expression: the backticks a JSON-literal default needs are PowerShell's own
     # escape character, so the query arrives at az malformed and returns nothing -- which this
     # branch would read as "no identity attached" for the wrong reason.
-    $curIdentity = az containerapp job show -g $ResourceGroup -n $JobName --query identity -o json 2>$null
+    $curIdentity = az containerapp job show @subArgs -g $ResourceGroup -n $JobName --query identity -o json 2>$null
     $wantedName  = Split-Path "$IdentityResourceId".Trim() -Leaf
     if (-not ("$curIdentity" -match [regex]::Escape($wantedName))) {
         Warn "existing job '$JobName' does not carry the intended user-assigned identity '$wantedName' -- ACA cannot swap an identity on update; deleting and recreating."
@@ -346,8 +348,8 @@ if ($exists -and -not $WhatIfPreference -and "$IdentityResourceId".Trim()) {
 # the pure planner as a fact, which is the same split the rest of this script uses.
 $miClientId = ''
 if (-not $WhatIfPreference -and "$IdentityResourceId".Trim()) {
-    $miClientId = az identity show --ids "$IdentityResourceId" --query clientId -o tsv --only-show-errors 2>$null
-    if ("$miClientId".Trim()) { Note "managed identity client id: $miClientId (BUG-76 -- the token call must ask for it by name)" }
+    $miClientId = az identity show @subArgs --ids "$IdentityResourceId" --query clientId -o tsv --only-show-errors 2>$null
+    if ("$miClientId".Trim()) { Note "managed identity client id: $miClientId" }
     else { Warn "could not read the client id of '$IdentityResourceId' -- the container may be unable to obtain a managed-identity token." }
 }
 
@@ -357,8 +359,8 @@ if (-not $WhatIfPreference -and "$IdentityResourceId".Trim()) {
 # which only a live probe knows -- so they are gathered HERE and passed to the pure planner.
 $envId = ''; $envLocation = ''
 if (-not $WhatIfPreference) {
-    $envId       = az containerapp env show -g $ResourceGroup -n $EnvName --query id -o tsv 2>$null
-    $envLocation = az containerapp env show -g $ResourceGroup -n $EnvName --query location -o tsv 2>$null
+    $envId       = az containerapp env show @subArgs -g $ResourceGroup -n $EnvName --query id -o tsv 2>$null
+    $envLocation = az containerapp env show @subArgs -g $ResourceGroup -n $EnvName --query location -o tsv 2>$null
     if (-not "$envId".Trim()) { throw "could not read the ACA environment '$EnvName' in RG $ResourceGroup -- cannot build the Job YAML." }
 
     $digest = Resolve-PimAcrImageDigest -AcrName $AcrName -Repository $ImageRepo -Tag $ImageTag
@@ -403,7 +405,7 @@ $yamlPath = Join-Path $env:TEMP "pim-$JobName-$ResourceGroup-$PID.yaml"
 # that nothing arms is the BUG-29 shape, and it is why this refusal lives at DEPLOY time: that is
 # the last moment a human is present to answer the question.
 if (-not @($SlaveAdminPrefixes | Where-Object { "$_".Trim() }).Count -and -not $AllowUncheckedAdminNaming) {
-    throw ("REFUSING to onboard ${JobName}: -SlaveAdminPrefixes was not supplied, so the IMP-13 " +
+    throw ("REFUSING to onboard ${JobName}: -SlaveAdminPrefixes was not supplied, so the " +
            "recognisability guard would be INERT for every scheduled run. An admin whose name the " +
            "slave's Admins provider cannot match is never in its live set, so it is recreated on " +
            "every tick and left unmanaged in the customer's tenant -- silently. " +
@@ -411,9 +413,9 @@ if (-not @($SlaveAdminPrefixes | Where-Object { "$_".Trim() }).Count -and -not $
            "-AllowUncheckedAdminNaming to accept that risk deliberately.")
 }
 if (@($SlaveAdminPrefixes | Where-Object { "$_".Trim() }).Count) {
-    Note ("IMP-13 admin naming prefixes: {0} (recognisability guard ARMED for every scheduled run)" -f (@($SlaveAdminPrefixes) -join ', '))
+    Note ("admin naming prefixes: {0} (recognisability guard ARMED for every scheduled run)" -f (@($SlaveAdminPrefixes) -join ', '))
 } else {
-    Warn 'IMP-13: -AllowUncheckedAdminNaming given -- the recognisability guard stays INERT for this tenant.'
+    Warn '-AllowUncheckedAdminNaming given -- the recognisability guard stays INERT for this tenant.'
 }
 
 if (-not "$SqlServerFqdn".Trim()) {
@@ -468,7 +470,7 @@ finally {
 # BUG-40: VERIFY the deployed reference. A Job has no revisions to inspect, so the image field is
 # the only thing checkable -- which is exactly why it has to be a digest to mean anything.
 if (-not $WhatIfPreference) {
-    $running = az containerapp job show -g $ResourceGroup -n $JobName --query "properties.template.containers[0].image" -o tsv 2>$null
+    $running = az containerapp job show @subArgs -g $ResourceGroup -n $JobName --query "properties.template.containers[0].image" -o tsv 2>$null
     $v = Test-PimImageDeployed -Expected $image -Running "$running".Trim()
     if (-not $v.ok) { throw "job '$JobName': $($v.reason)" }
     Note "image verified: $($v.reason)"
@@ -479,7 +481,7 @@ if (-not $WhatIfPreference) {
     # the field records what ARM was ASKED to run, not what it managed to run. So the deploy printed
     # "image verified", then "Done.", and exited 0 over a job that could never execute.
     # A deploy that cannot say whether the thing it deployed came up is not a deploy gate.
-    $prov = az containerapp job show -g $ResourceGroup -n $JobName --query "properties.provisioningState" -o tsv 2>$null
+    $prov = az containerapp job show @subArgs -g $ResourceGroup -n $JobName --query "properties.provisioningState" -o tsv 2>$null
     $prov = "$prov".Trim()
     if (-not $prov) { throw "job '$JobName': could not read provisioningState -- refusing to report a deploy as successful when its outcome is unknown." }
     if ($prov -ne 'Succeeded') {
@@ -494,14 +496,14 @@ if (-not $WhatIfPreference) {
 # (best-effort) the SQL contained DB user the engine needs. Mirrors Setup-PimContainers.
 if ($plan.action -eq 'create' -and -not $WhatIfPreference -and -not "$IdentityResourceId".Trim()) {
     try {
-        $oid = az containerapp job show -g $ResourceGroup -n $JobName --query identity.principalId -o tsv 2>$null
-        $acrId = az acr show -n $AcrName --query id -o tsv 2>$null
+        $oid = az containerapp job show @subArgs -g $ResourceGroup -n $JobName --query identity.principalId -o tsv 2>$null
+        $acrId = az acr show @subArgs -n $AcrName --query id -o tsv 2>$null
         if ("$oid".Trim() -and "$acrId".Trim()) {
             # 🪤 BUG-71c -- this used to swallow its own failure with `2>$null` and then print
             # "granted ... AcrPull" unconditionally, so the log CLAIMED a grant that had not
             # happened. Measured: the system MI of the broken job held no role on the ACR at all,
             # while the deploy log said otherwise. Report what actually happened.
-            az role assignment create --assignee-object-id $oid --assignee-principal-type ServicePrincipal --role AcrPull --scope $acrId -o none
+            az role assignment create @subArgs --assignee-object-id $oid --assignee-principal-type ServicePrincipal --role AcrPull --scope $acrId -o none
             if ($LASTEXITCODE -eq 0) { Note "granted the Job's system MI AcrPull on $AcrName" }
             else { Warn "AcrPull grant to the Job's system MI FAILED (az exit $LASTEXITCODE) -- the job will not be able to pull." }
         }
@@ -539,9 +541,9 @@ if (-not $WhatIfPreference -and -not $SkipSqlGrant -and "$SqlServerFqdn".Trim())
     # container presents), else the job's system-assigned MI.
     $miAppId = ''
     if ("$IdentityResourceId".Trim()) {
-        $miAppId = az identity show --ids "$IdentityResourceId" --query clientId -o tsv --only-show-errors 2>$null
+        $miAppId = az identity show @subArgs --ids "$IdentityResourceId" --query clientId -o tsv --only-show-errors 2>$null
     } else {
-        $oid2 = az containerapp job show -g $ResourceGroup -n $JobName --query identity.principalId -o tsv --only-show-errors 2>$null
+        $oid2 = az containerapp job show @subArgs -g $ResourceGroup -n $JobName --query identity.principalId -o tsv --only-show-errors 2>$null
         # BUG-44: a just-created identity is eventually consistent in the directory; this retries.
         if ("$oid2".Trim() -and (Get-Command Resolve-PimMiAppId -ErrorAction SilentlyContinue)) {
             $miAppId = Resolve-PimMiAppId -PrincipalId "$oid2".Trim()
@@ -596,11 +598,20 @@ function Get-PimDownlinkJobExecutionStatus {
         [Parameter(Mandatory)][string]$ResourceGroup
     )
     # last execution name + status (newest first).
-    $execName = az containerapp job execution list -g $ResourceGroup -n $JobName --query "reverse(sort_by([],&properties.startTime))[0].name" -o tsv 2>$null
-    $status   = az containerapp job execution list -g $ResourceGroup -n $JobName --query "reverse(sort_by([],&properties.startTime))[0].properties.status" -o tsv 2>$null
+    # 🔴 NO '&' IN A --query, EVER. `az` on Windows is az.cmd, and cmd.exe splits the command line
+    # on '&' even INSIDE the double quotes: the server never sees the expression, az reports
+    # `invalid jmespath_type value: 'reverse(sort_by([],'` and cmd then tries to run the remainder
+    # as a command. Measured 2026-09-08. JMESPath's expression-reference operator (sort_by/max_by/
+    # min_by) is therefore unusable from here -- fetch the rows and sort in PowerShell instead.
+    # Both values come from ONE call now: two calls also meant two chances to disagree.
+    $execs = @()
+    try { $execs = @(az containerapp job execution list @subArgs -g $ResourceGroup -n $JobName -o json 2>$null | ConvertFrom-Json) } catch {}
+    $last     = $execs | Where-Object { $_ } | Sort-Object { try { [datetime]$_.properties.startTime } catch { [datetime]::MinValue } } -Descending | Select-Object -First 1
+    $execName = if ($last) { "$($last.name)" } else { '' }
+    $status   = if ($last) { "$($last.properties.status)" } else { '' }
     $log = ''
     if ("$execName".Trim()) {
-        try { $log = (az containerapp job logs show -g $ResourceGroup -n $JobName --execution "$execName" --tail 200 2>$null) -join "`n" } catch {}
+        try { $log = (az containerapp job logs show @subArgs -g $ResourceGroup -n $JobName --execution "$execName" --tail 200 2>$null) -join "`n" } catch {}
     }
     $verdict = Get-PimDownlinkJobExecutionVerdict -Status "$status" -LogText "$log"
     $verdict['execution'] = "$execName"

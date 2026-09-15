@@ -11,7 +11,17 @@
       "Admin_Assignment":   []
     },
     "Approval": { "mode": "Serial", "approversSource": "ApproverUpns", "escalationHours": 4 },
+    "_notificationV1": "PARITY AUDIT #5 (2026-09-13): this template defines its own Notification list (single-level extends replaces the whole key), so it repeats v1's NINE rules first (CSV L615-694, same on/off values as EntraIDRoles_Standard). The two entries after them override by rule id when they resolve.",
     "Notification": [
+      { "recipientType": "Admin",     "caller": "Admin",   "level": "Eligibility", "notificationLevel": "All", "defaultRecipientsEnabled": true },
+      { "recipientType": "Requestor", "caller": "Admin",   "level": "Eligibility", "notificationLevel": "All", "defaultRecipientsEnabled": false },
+      { "recipientType": "Approver",  "caller": "Admin",   "level": "Eligibility", "notificationLevel": "All", "defaultRecipientsEnabled": true },
+      { "recipientType": "Admin",     "caller": "Admin",   "level": "Assignment",  "notificationLevel": "All", "defaultRecipientsEnabled": false },
+      { "recipientType": "Requestor", "caller": "Admin",   "level": "Assignment",  "notificationLevel": "All", "defaultRecipientsEnabled": false },
+      { "recipientType": "Approver",  "caller": "Admin",   "level": "Assignment",  "notificationLevel": "All", "defaultRecipientsEnabled": false },
+      { "recipientType": "Admin",     "caller": "EndUser", "level": "Assignment",  "notificationLevel": "All", "defaultRecipientsEnabled": true },
+      { "recipientType": "Requestor", "caller": "EndUser", "level": "Assignment",  "notificationLevel": "All", "defaultRecipientsEnabled": false },
+      { "recipientType": "Approver",  "caller": "EndUser", "level": "Assignment",  "notificationLevel": "All", "defaultRecipientsEnabled": true },
       {
         "recipientType": "Approver",
         "level": "Assignment",

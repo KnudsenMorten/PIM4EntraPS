@@ -1,4 +1,4 @@
-#Requires -Version 5.1
+﻿#Requires -Version 5.1
 <#
 .SYNOPSIS
     Baseline-courier PRODUCER (LIFECYCLE-GOVERNANCE § 19): export the MSP's
@@ -76,7 +76,9 @@ $sqlWithTap = "SELECT UserName, DisplayName, FirstName, LastName, Initials, Usag
 # All five are read now; 'PIM-Definitions' stays in the list so an estate already seeded
 # that way is not stranded.
 $defEntities = @('PIM-Definitions-Roles','PIM-Definitions-Services','PIM-Definitions-Organization','PIM-Definitions-Tasks','PIM-Definitions')
-$entityList  = @('PIM-Assignments-Admins','PIM-Assignments-Groups','PIM-Assignments-Roles-Groups') + $defEntities
+# REQUIREMENTS 68.6 row 35: the master's own admin DEFINITIONS are read too -- a row with
+# ManagementMode=msp is a central admin (Ring = which slaves, Target = slave tags).
+$entityList  = @('PIM-Assignments-Admins','PIM-Assignments-Groups','PIM-Assignments-Roles-Groups','Account-Definitions-Admins') + $defEntities
 $sqlAssign = "SELECT Entity, DataJson FROM pim.Rows WHERE Entity IN ('" + ($entityList -join "','") + "')"
 if ($useLocal) {
     # Module-free, same helpers the engine uses (the SqlServer module is deliberately not a
@@ -140,6 +142,24 @@ foreach ($raw in $assignRaw) {
     if ($o) { $byEntity[$e].Add($o) | Out-Null }
 }
 $getEnt = { param($n) if ($byEntity.ContainsKey($n)) { return @($byEntity[$n].ToArray()) } else { return @() } }
+
+# 1a. REQUIREMENTS 68.6 row 35 (operator 2026-09-13): "slaves import admins from central if defined per
+# admins at master". An Account-Definitions-Admins row with ManagementMode=msp is published like a
+# registry row. The registry wins a name clash (it is the explicit MSP list); every row that is NOT
+# published is reported with its reason, so "not synced" never reads as "forgotten".
+. (Join-Path (Split-Path -Parent $PSScriptRoot) 'engine\_shared\PIM-Downlink.ps1')
+$defAdmins = Get-PimCentralAdminsFromDefinitions -Rows @(& $getEnt 'Account-Definitions-Admins')
+$added = 0
+foreach ($d in @($defAdmins.synced)) {
+    $k = "$($d.UserName)".Trim().ToLowerInvariant()
+    if ($adminByLower.ContainsKey($k)) { continue }
+    $rowObjs += [pscustomobject]$d
+    $adminByLower[$k] = "$($d.UserName)".Trim()
+    $added++
+}
+Write-Host ("baseline rows from admin definitions (ManagementMode=msp): +{0}; not synced: {1}; msp without a Ring: {2}; AD-only (never synced): {3}" -f `
+    $added, @($defAdmins.notSynced).Count, @($defAdmins.mspWithoutRing).Count, @($defAdmins.adOnly).Count)
+foreach ($x in @($defAdmins.mspWithoutRing)) { Write-Host "  NOT PUBLISHED $($x.UserName): $($x.reason)" -ForegroundColor Yellow }
 # Every group definition, from whichever entity holds it, stamped with WHERE IT CAME FROM.
 # The slave writes each group back into the same entity (Invoke-PimDownlinkDefinitionApply),
 # so a role group stays a role group there instead of being flattened into one bucket.

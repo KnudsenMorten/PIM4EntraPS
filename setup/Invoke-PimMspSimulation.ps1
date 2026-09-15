@@ -1,4 +1,4 @@
-#Requires -Version 5.1
+﻿#Requires -Version 5.1
 <#
 .SYNOPSIS
     MSP-edition simulation (LIFECYCLE-GOVERNANCE § 19): show the two-store

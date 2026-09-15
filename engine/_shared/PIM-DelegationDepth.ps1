@@ -1,4 +1,4 @@
-# PIM4EntraPS -- delegation DEPTH: local self-delegation, the two-approval split
+﻿# PIM4EntraPS -- delegation DEPTH: local self-delegation, the two-approval split
 # (delegation/assignment approval vs Entra-native activation approval), and
 # reachability-by-classification. Dot-sourced by PIM-Functions.psm1 AFTER
 # PIM-PortalAccess.ps1 + PIM-Approvals.ps1 (it builds on Get-PimGroupFacets,

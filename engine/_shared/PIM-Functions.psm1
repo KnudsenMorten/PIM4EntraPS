@@ -135,6 +135,7 @@ If ($global:PIM_UseGraphSdk) {
 # Change queue + full/delta run modes -- commit enqueues only changed items; the
 # engine drains the queue fast (delta) instead of a full reconcile sweep.
 . (Join-Path $PSScriptRoot 'PIM-ChangeQueue.ps1')
+. (Join-Path $PSScriptRoot 'PIM-QueueActions.ps1')   # §65 -- the ACTION drain. Without this the queue-apply job skips silently and every queued revoke/TAP/session-revoke sits forever (the BUG-134 class).
 
 # Azure scope auto-discovery + reconcile -- discovered MGs/subs/RGs vs existing
 # definitions -> create/rename-on-move/orphan plan, feeding the change queue.
@@ -200,6 +201,8 @@ If ($global:PIM_UseGraphSdk) {
 # parallel), and the secure store-and-forward ServiceNow->Manager intake broker. No
 # network here; the send is the existing channel layer.
 . (Join-Path $PSScriptRoot 'PIM-Notifications.ps1')
+# The ONE mail template store (SQL pim.Settings['MailTemplates'], seeded from templates/mail).
+. (Join-Path $PSScriptRoot 'PIM-MailTemplateStore.ps1')
 
 # NEW REST+SQL engine -- pure diff core + provider model (replaces the legacy
 # PIM-Baseline-Management-CSV chain). Providers: desired from SQL, live + apply via REST.
@@ -9730,15 +9733,21 @@ if (Test-Path -LiteralPath $_pimVerFile) {
     } catch { Write-Warning "PIM-Functions: failed reading VERSION at $_pimVerFile -- $($_.Exception.Message)" }
 }
 
-# Module-init: load naming-convention files into $global:PIM_NamingConventions
-# so the engine helpers (Get-PimAdminsFiltered / Get-PimGroupsFiltered) work
-# regardless of which launcher invoked us. Loads .locked.ps1 first, then
-# .custom.ps1 if present (customer's override wins on every key).
+# Module-init: load the SHIPPED naming-convention defaults (.locked.ps1 -- code, not customer
+# data) into $global:PIM_NamingConventions so the engine helpers (Get-PimAdminsFiltered /
+# Get-PimGroupsFiltered) work regardless of which launcher invoked us.
+# 🔒 SQL-ONLY (2026-09-13): the customer's naming values come from pim.Settings (hydrated by
+# Import-PimSettingsFromStore in the scheduler/engine and by the Manager at boot). The per-machine
+# PIM4EntraPS.NamingConventions.custom.ps1 is NO LONGER a runtime source -- a leftover file is
+# ANNOUNCED and ignored; setup/Migrate-PimToSql.ps1 imports it into pim.Settings once.
 $_pimNcRoot   = Join-Path (Split-Path -Parent (Split-Path -Parent $PSScriptRoot)) 'config'
 $_pimNcLocked = Join-Path $_pimNcRoot 'PIM4EntraPS.NamingConventions.locked.ps1'
 $_pimNcCustom = Join-Path $_pimNcRoot 'PIM4EntraPS.NamingConventions.custom.ps1'
 if (Test-Path -LiteralPath $_pimNcLocked) {
     try { . $_pimNcLocked; Write-Host "  [INFO] PIM-Functions: loaded $_pimNcLocked" -ForegroundColor DarkGray } catch { Write-Warning "PIM-Functions: failed loading $_pimNcLocked -- $($_.Exception.Message)" }
+}
+if (Test-Path -LiteralPath $_pimNcCustom) {
+    Write-Host "  [INFO] PIM-Functions: IGNORING $_pimNcCustom -- naming is read from SQL pim.Settings (PIM v2 is SQL-only; import the file once with setup/Migrate-PimToSql.ps1)" -ForegroundColor DarkYellow
 }
 # 🔴 TESTS MUST NOT INHERIT THIS MACHINE'S CUSTOMISATION.
 # `.custom.*` is gitignored PER-DEPLOYMENT config, so whether it exists -- and what is in it --
@@ -9753,12 +9762,8 @@ if (Test-Path -LiteralPath $_pimNcLocked) {
 # 🪤 It ANNOUNCES the skip. A silently-ignored override is an hour of someone debugging why their
 # customisation "does not apply", which is a worse bug than the one this fixes.
 $_pimIgnoreCustom = ("$($env:PIM_IGNORE_CUSTOM_CONFIG)".Trim() -in @('1','true','yes'))
-if ($_pimIgnoreCustom -and (Test-Path -LiteralPath $_pimNcCustom)) {
-    Write-Host "  [INFO] PIM-Functions: IGNORING $_pimNcCustom (PIM_IGNORE_CUSTOM_CONFIG=1 -- shipped defaults only)" -ForegroundColor DarkYellow
-}
-if ((Test-Path -LiteralPath $_pimNcCustom) -and -not $_pimIgnoreCustom) {
-    try { . $_pimNcCustom; Write-Host "  [INFO] PIM-Functions: loaded $_pimNcCustom (custom overrides applied)" -ForegroundColor DarkGray } catch { Write-Warning "PIM-Functions: failed loading $_pimNcCustom -- $($_.Exception.Message)" }
-}
+# (Naming: nothing to skip -- the .custom.ps1 above is never loaded any more. The switch still
+# governs the notification-channel block below.)
 
 # v2.2.0 (roadmap #11): load notification-channel config into
 # $global:PIM_NotificationChannels so Send-PimAdminTap (+ future
@@ -10881,11 +10886,11 @@ function Invoke-PimEmergencyOverride {
 }
 
 # --- Unified audit (LIFECYCLE-GOVERNANCE phase 6) ------------------------------
-# Every engine transaction emits one JSON line to
-# output/audit/pim-audit-<yyyyMM>.jsonl (append-only, monthly files). The
-# Manager writes the same schema from its own process (actor manager:<user>).
+# Every engine transaction emits one row to SQL pim.AuditEvents -- the SAME table
+# the Manager writes (actor manager:<user>). PIM v2 is SQL-only: there is no
+# output/audit/pim-audit-<yyyyMM>.jsonl trail any more (2026-09-13).
 # Audit writes are best-effort by design -- a logging failure must never
-# break provisioning.
+# break provisioning -- but an unrecorded event is reported, never hidden.
 
 $script:PimAuditRunId = [guid]::NewGuid().ToString('N')   # one id per module load = one engine run
 
@@ -10900,9 +10905,6 @@ function Write-PimAuditEvent {
         [string]$CorrelationId = ''
     )
     try {
-        $dir = Join-Path (Get-PimOutputDir) 'audit'
-        if (-not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
-        $f = Join-Path $dir ("pim-audit-{0}.jsonl" -f [datetime]::UtcNow.ToString('yyyyMM'))
         $evt = [ordered]@{
             ts            = [datetime]::UtcNow.ToString('o')
             runId         = $script:PimAuditRunId
@@ -10923,9 +10925,9 @@ function Write-PimAuditEvent {
         # engine wrote another, so "who granted this access?" could not be answered without first
         # knowing WHICH COMPONENT did it -- and the two were never merged anywhere. One question,
         # two half-answers, is not an audit trail.
-        # Both now append to the SAME pim.AuditEvents table. SQL first; the file below still runs
-        # so a run with no store configured is never unaudited.
+        # Both now append to the SAME pim.AuditEvents table -- and ONLY there (SQL-only, 2026-09-13).
         $sqlOk = $false
+        $sqlErr = ''
         try {
             if ((Get-Command Get-PimSqlConnectionString -ErrorAction SilentlyContinue) -and
                 (Get-Command Write-PimSqlAuditEvent     -ErrorAction SilentlyContinue)) {
@@ -10939,18 +10941,18 @@ function Write-PimAuditEvent {
                     $sqlOk = $true
                 }
             }
-        } catch {
-            # Never fail an engine APPLY because the audit sink is down -- but do not hide it
-            # either. The file write below still happens, so the event is not lost.
-            Write-Warning "  [audit] SQL sink failed (the file trail still has it): $($_.Exception.Message)"
+        } catch { $sqlErr = "$($_.Exception.Message)" }
+        if (-not $sqlOk) {
+            # Never fail an engine APPLY because the audit sink is down -- but do not hide it. There
+            # is no file trail to fall back to (SQL-only), so the event is NOT recorded: say exactly that.
+            Write-Warning ("  [audit] AUDIT NOT RECORDED for '{0}' on '{1}' -- {2}" -f $Action, $Target,
+                $(if ($sqlErr) { "the SQL sink failed: $sqlErr" } else { 'no SQL store is configured (PIM v2 keeps the audit trail in SQL only)' }))
         }
-
-        [System.IO.File]::AppendAllText($f, (($evt | ConvertTo-Json -Depth 6 -Compress) + "`r`n"), (New-Object System.Text.UTF8Encoding($false)))
 
         # Optional Log Analytics sink (REQUIREMENTS §13/§23 "Audit to Log Analytics").
         # OFF by default; opt in by setting $global:PIM_AuditLogAnalytics with the DCR
-        # ingestion target. The audit FILE above is always written first (the file is
-        # the source of truth); the LA push is best-effort and never blocks the engine.
+        # ingestion target. SQL pim.AuditEvents is the source of truth; the LA push is
+        # best-effort and never blocks the engine.
         if ($global:PIM_AuditLogAnalytics -and (Get-Command ConvertTo-PimLaAuditRecord -ErrorAction SilentlyContinue)) {
             try {
                 $la = $global:PIM_AuditLogAnalytics
@@ -10965,7 +10967,7 @@ function Write-PimAuditEvent {
                         -TableName $la.TableName -Data @($rec) -ErrorAction Stop | Out-Null
                 }
             } catch {
-                Write-Warning "audit Log Analytics push failed (engine NOT blocked; file audit intact): $($_.Exception.Message)"
+                Write-Warning "audit Log Analytics push failed (engine NOT blocked; SQL audit unaffected): $($_.Exception.Message)"
             }
         }
     } catch {
@@ -11562,20 +11564,33 @@ function Write-PimAdminTap {
 }
 
 # --- Mail templates (LIFECYCLE-GOVERNANCE phase 2) ---------------------------
-# Every engine-sent mail is a customizable template under templates/mail/:
-#   <type>.mailtemplate.html         shipped default (locked)
-#   <type>.mailtemplate.custom.html  customer override (gitignored, wins)
+# Every engine-sent mail is a template in the ONE SQL template store
+# (pim.Settings['MailTemplates'], PIM-MailTemplateStore.ps1), seeded from the shipped
+#   templates/mail/<type>.mailtemplate.html
+# and edited through the Manager. There is no <type>.mailtemplate.custom.html file
+# override and no MailTemplateOverrides layer any more (2026-09-13).
 # Subject = first '<!-- subject: ... -->' comment; {{Token}} substitution is a
 # straight string replace (no code execution); unknown tokens render empty
 # with a run-log warning.
 
 function Get-PimMailTemplate {
+    # Path of the SHIPPED template for a type (proves the type exists), or $null.
     param([Parameter(Mandatory)][string]$Type)
-    $dir = Join-Path $PSScriptRoot '..\..\templates\mail'
-    foreach ($cand in @("$Type.mailtemplate.custom.html", "$Type.mailtemplate.html")) {
-        $p = Join-Path $dir $cand
-        if (Test-Path -LiteralPath $p) { return $p }
+    $p = Join-Path (Join-Path $PSScriptRoot '..\..\templates\mail') "$Type.mailtemplate.html"
+    if (Test-Path -LiteralPath $p) { return $p }
+    $null
+}
+
+function Get-PimMailTemplateText {
+    # The EFFECTIVE body for a type: the SQL template store entry, else the shipped file.
+    param([Parameter(Mandatory)][string]$Type)
+    if (Get-Command Get-PimMailTemplateEffective -ErrorAction SilentlyContinue) {
+        $e = Get-PimMailTemplateEffective -Type $Type -TemplateDir (Join-Path $PSScriptRoot '..\..\templates\mail')
+        if ($e) { return $e.text }
+        return $null
     }
+    $p = Get-PimMailTemplate -Type $Type
+    if ($p) { return (Get-Content -LiteralPath $p -Raw -Encoding UTF8) }
     $null
 }
 
@@ -11651,13 +11666,13 @@ function Send-PimTemplatedMail {
         $Recipient = $_redir
     }
 
-    $tplPath = Get-PimMailTemplate -Type $Type
-    if (-not $tplPath) {
-        Write-Warning "  [Mail] no template for type '$Type' under templates\mail -- nothing sent."
+    $tplText = Get-PimMailTemplateText -Type $Type
+    if (-not $tplText) {
+        Write-Warning "  [Mail] no template for type '$Type' (template store or templates\mail) -- nothing sent."
         return $result
     }
-    $result.TemplateUsed = $tplPath
-    $rendered = ConvertTo-PimMailRendering -TemplateText (Get-Content -LiteralPath $tplPath -Raw -Encoding UTF8) -Tokens $Tokens
+    $result.TemplateUsed = "$Type (template store)"
+    $rendered = ConvertTo-PimMailRendering -TemplateText $tplText -Tokens $Tokens
     $subject  = $rendered.Subject
 
     $channels = $global:PIM_NotificationChannels
@@ -11872,7 +11887,7 @@ function Send-PimAdminTap {
     # Phase 2: template-based delivery. The shipped
     # templates/mail/tap-delivery.mailtemplate.html mirrors the hardcoded
     # body below (which stays as the last-resort fallback for stripped-down
-    # installs); customers customize via tap-delivery.mailtemplate.custom.html.
+    # installs); customers customize it in the Manager (the SQL template store).
     $tplPath = if (Get-Command Get-PimMailTemplate -ErrorAction SilentlyContinue) { Get-PimMailTemplate -Type 'tap-delivery' } else { $null }
     if ($tplPath) {
         $tmArgs = @{
@@ -13164,6 +13179,26 @@ function Get-AzActiveRoleAssignmentsViaArg {
     }
 
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
+
+    # REQUIREMENTS 67.3: REST FIRST. Search-AzGraph is an Az MODULE cmdlet and the hosted container ships no
+    # modules, so this function used to warn "Search-AzGraph is not recognized" and return NOTHING -- an empty
+    # Azure list that looked like "no assignments". Get-PimArmActiveRoleAssignmentsViaArg (PIM-Rest.ps1, which
+    # this module dot-sources) runs the same authorizationresources query over ARM REST with the role name
+    # joined in, so Get-AzRoleDefinition is not needed either. The Search-AzGraph path below is kept only for
+    # a host that has the Az module and not the REST client.
+    if ((Get-Command Get-PimArmActiveRoleAssignmentsViaArg -ErrorAction SilentlyContinue) -and (Get-Command Invoke-PimArm -ErrorAction SilentlyContinue)) {
+        try {
+            $restRows = @(Get-PimArmActiveRoleAssignmentsViaArg)
+            $script:AzActiveRoleAssignmentsCache          = $restRows
+            $script:AzActiveRoleAssignmentsCacheLoadedUtc = [DateTime]::UtcNow
+            $sw.Stop()
+            Write-Host ("  [perf] Get-AzActiveRoleAssignmentsViaArg: loaded {0} assignment(s) via Resource Graph REST in {1}s" -f $restRows.Count, [math]::Round($sw.Elapsed.TotalSeconds, 2)) -ForegroundColor DarkGray
+            return $restRows
+        } catch {
+            if (-not (Get-Command Search-AzGraph -ErrorAction SilentlyContinue)) { throw }
+            Write-Warning "Get-AzActiveRoleAssignmentsViaArg: Resource Graph REST query failed ($($_.Exception.Message)) -- trying Search-AzGraph."
+        }
+    }
 
     $q = @"
 authorizationresources

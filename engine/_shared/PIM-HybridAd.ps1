@@ -1,4 +1,4 @@
-<#
+﻿<#
   PIM4EntraPS -- Hybrid on-prem AD provisioning + gMSA/sMSA support (REQUIREMENTS § 6).
 
   WHY THIS IS A PLANNER, NOT AN APPLIER
@@ -60,14 +60,69 @@ if (-not (Get-Command Get-PimRowProp -ErrorAction SilentlyContinue)) {
     }
 }
 
+# Customer naming (operator 2026-09-13: "remember to use naming as customer can choose their own
+# naming"). Every admin-name shape on the AD path comes from the naming conventions in pim.Settings
+# (hydrated into $global:PIM_NamingConventions) through the SAME helpers the Entra path and the
+# Manager use -- nothing here hard-codes a '-AD' suffix, an 'Admin-' prefix or a level/tier marker.
+if (-not (Get-Command Get-PimNamingConvention -ErrorAction SilentlyContinue)) {
+    $__pimNamingLib = Join-Path $PSScriptRoot 'PIM-Naming.ps1'
+    if (Test-Path -LiteralPath $__pimNamingLib) { . $__pimNamingLib }
+}
+
 # ---------------------------------------------------------------------------
 # PLAN layer -- pure, offline-testable, NO I/O, runs anywhere.
 # ---------------------------------------------------------------------------
 
-# Marker regex shared with the legacy CSV engine (v2.4.122): a high-priv account
-# carries an -L0- / -T0- marker in the UserName, bounded by - _ . so 'Admin-SKR-L0-T0-AD'
-# matches but 'L01' / 'LT0' do not.
-$script:PimHybridAdHighPrivRegex = '(?i)(^|[-_.])(L0|T0)([-_.]|$)'
+function Test-PimHybridAdRowIsAd {
+    # PURE. An on-premises AD admin is identified by its row: TargetPlatform = AD (v1: `$TargetPlatform
+    # -eq "AD"`, PIM-Functions.psm1 5824). Never by a name shape. A blank platform is NOT AD.
+    param([Parameter(Mandatory)][object]$Row)
+    return ((Get-PimRowProp -Row $Row -Names @('TargetPlatform','Platform')).Trim() -ieq 'AD')
+}
+
+function Get-PimHybridAdNamingValue {
+    # One reader for an AD naming setting (PathAdmins, PathAdminsL0T0, ...): the naming conventions
+    # (pim.Settings, hydrated) first, then v1's $global:<Name> back-compat (PIM-Baseline-Management-CSV.ps1
+    # 341-364 used exactly this order). Returns '' when unset.
+    param([Parameter(Mandatory)][string]$Name)
+    $v = $null
+    if (Get-Command Get-PimNamingConvention -ErrorAction SilentlyContinue) { $v = Get-PimNamingConvention -Key $Name }
+    elseif ($global:PIM_NamingConventions -is [System.Collections.IDictionary] -and $global:PIM_NamingConventions.Contains($Name)) { $v = $global:PIM_NamingConventions[$Name] }
+    if (-not "$v".Trim()) { $v = Get-Variable -Name $Name -Scope Global -ValueOnly -ErrorAction SilentlyContinue }
+    return "$v".Trim()
+}
+
+function Resolve-PimHybridAdIdentity {
+    # PURE. The names an AD admin row is created/maintained under. v1 took UserName / UserPrincipalName /
+    # DisplayName from the row (New-ADUser -Name $UserName, PIM-Functions.psm1 5911), so the ROW wins.
+    # A value the row leaves blank is DERIVED from the customer's naming conventions with the Manager's
+    # own generator (Resolve-PimAdminName -Environment ad), never from a hard-coded shape.
+    param([Parameter(Mandatory)][object]$Row)
+    $userName = (Get-PimRowProp -Row $Row -Names @('UserName','SamAccountName','Username','Name')).Trim()
+    $upn      = (Get-PimRowProp -Row $Row -Names @('UserPrincipalName','UPN','upn')).Trim()
+    $disp     = (Get-PimRowProp -Row $Row -Names @('DisplayName','displayName')).Trim()
+    $derived  = @()
+    if ((-not $userName -or -not $upn) -and (Get-Command Resolve-PimAdminName -ErrorAction SilentlyContinue)) {
+        $owner = (Get-PimRowProp -Row $Row -Names @('Initials','Owner','Initial')).Trim()
+        if ($owner) {
+            $hp = ((Get-PimRowProp -Row $Row -Names @('Purpose')).Trim() -ieq 'HighPriv')
+            $gen = Resolve-PimAdminName -Owner $owner -AdminType (Get-PimRowProp -Row $Row -Names @('AdminType')) -Environment 'ad' -HighPriv:$hp
+            $local = "$gen"; $suffixed = ''
+            if ($local -match '^([^@]+)@(.+)$') { $local = $Matches[1]; $suffixed = "$gen" }
+            if (-not $userName) { $userName = $local; $derived += 'UserName' }
+            if (-not $upn -and $suffixed) { $upn = $suffixed; $derived += 'UserPrincipalName' }
+        }
+    }
+    if (-not $disp) {
+        $fn = (Get-PimRowProp -Row $Row -Names @('FirstName','GivenName')).Trim()
+        $ln = (Get-PimRowProp -Row $Row -Names @('LastName','Surname')).Trim()
+        $suffix = if (Get-Command Get-PimNamingConvention -ErrorAction SilentlyContinue) { "$(Get-PimNamingConvention -Key 'AdminAccountDisplayNameSuffix')" } else { '' }
+        $person = (@($fn, $ln) | Where-Object { $_ }) -join ' '
+        $disp = if ($person) { "$person$suffix" } else { $userName }
+        if ($disp) { $derived += 'DisplayName' }
+    }
+    return [pscustomobject]@{ userName = $userName; userPrincipalName = $upn; displayName = $disp; derived = $derived }
+}
 
 function Get-PimHybridAdRowKind {
     # PURE: classify an admin row -> 'gmsa' | 'smsa' | 'standard'.
@@ -95,6 +150,7 @@ function Get-PimHybridAdAccountName {
     # already-suffixed source name is not double-suffixed.
     param([Parameter(Mandatory)][object]$Row)
     $name = (Get-PimRowProp -Row $Row -Names @('SamAccountName','UserName','Username','Name')).Trim()
+    if (-not $name) { $name = "$((Resolve-PimHybridAdIdentity -Row $Row).userName)".Trim() }
     if (-not $name) { return '' }
     $kind = Get-PimHybridAdRowKind -Row $Row
     if ($kind -eq 'gmsa' -or $kind -eq 'smsa') {
@@ -104,13 +160,24 @@ function Get-PimHybridAdAccountName {
 }
 
 function Test-PimHybridAdHighPriv {
-    # PURE: does this row route to the high-priv OU? Purpose=HighPriv wins; blank
-    # Purpose falls back to the L0/T0 UserName-marker check (legacy v2.4.171 contract).
+    # PURE: does this row route to the high-priv OU? v1 (PIM-Functions.psm1 5900-5903): Purpose=HighPriv
+    # is the selector; a blank Purpose falls back to "does the UserName look like the high-priv admin
+    # convention". v1 hard-coded that look as an L0/T0 marker regex; here it is the CUSTOMER's high-priv
+    # pattern (AdminAccountPatternHighPriv), so a tenant that names its tier-0 admins differently routes
+    # correctly. With the shipped default pattern ('{AdminWord}-{Initial}-L0-T0{Platform}') the result is
+    # the same as v1's marker check. When the high-priv and day-2-day patterns are identical the name
+    # cannot tell them apart, so only Purpose can.
     param([Parameter(Mandatory)][object]$Row)
     $purpose = (Get-PimRowProp -Row $Row -Names @('Purpose')).Trim()
     if ($purpose) { return ($purpose -ieq 'HighPriv') }
-    $name = (Get-PimRowProp -Row $Row -Names @('UserName','SamAccountName','Username','Name'))
-    return [bool]($name -match $script:PimHybridAdHighPrivRegex)
+    $name = "$((Resolve-PimHybridAdIdentity -Row $Row).userName)".Trim()
+    if (-not $name) { return $false }
+    if ($name -match '@') { $name = $name.Split('@')[0] }
+    if (-not (Get-Command ConvertTo-PimAdminNameRegex -ErrorAction SilentlyContinue)) { return $false }
+    $hpPat  = "$(Get-PimNamingConvention -Key 'AdminAccountPatternHighPriv')".Trim()
+    $d2dPat = "$(Get-PimNamingConvention -Key 'AdminAccountPattern')".Trim()
+    if (-not $hpPat -or $hpPat -ieq $d2dPat) { return $false }
+    return [bool]((ConvertTo-PimAdminNameRegex -Pattern $hpPat).IsMatch($name))
 }
 
 function Resolve-PimHybridAdTargetOu {
@@ -161,27 +228,39 @@ function ConvertTo-PimHybridAdDesired {
         [string]$PathAdminsL0T0,
         [string]$Domain
     )
-    $platform = (Get-PimRowProp -Row $Row -Names @('TargetPlatform','Platform')).Trim()
-    if ($platform -and $platform -notmatch '(?i)^ad$') { return $null }
+    # Only TargetPlatform=AD rows are AD-provisioned. A BLANK platform used to count as AD here (the
+    # planner would have handed an Entra admin to the hybrid worker); v1 required "AD" exactly.
+    if (-not (Test-PimHybridAdRowIsAd -Row $Row)) { return $null }
     $action = (Get-PimRowProp -Row $Row -Names @('Action')).Trim()
     if ($action -match '(?i)^remove') { return $null }
 
     $sam  = Get-PimHybridAdAccountName -Row $Row
     if (-not $sam) { return $null }
     $kind = Get-PimHybridAdRowKind -Row $Row
-    $upn  = (Get-PimRowProp -Row $Row -Names @('UserPrincipalName','UPN','upn')).Trim()
-    $disp = (Get-PimRowProp -Row $Row -Names @('DisplayName','displayName')).Trim()
+    $id   = Resolve-PimHybridAdIdentity -Row $Row
+    $upn  = "$($id.userPrincipalName)".Trim()
+    $disp = "$($id.displayName)".Trim()
     if (-not $disp) { $disp = $sam }
     $sr   = Get-PimHybridAdSearchRoot -Row $Row -Domain $Domain
+    # v1: -Description $Description where $Description = $DisplayName (PIM-Functions.psm1 5643, 5881, 5915).
+    # An explicit Description column still wins.
+    $descr = (Get-PimRowProp -Row $Row -Names @('Description')).Trim()
+    if (-not $descr) { $descr = $disp }
+    # Where the initial password is mailed -- the ONE admin-mail recipient rule (office user email,
+    # else manager). An address, not a secret, so it may travel in the work package.
+    $rcpt = ''
+    if (Get-Command Get-PimAdminMailRecipient -ErrorAction SilentlyContinue) { try { $rcpt = "$(Get-PimAdminMailRecipient -Row $Row)".Trim() } catch { $rcpt = '' } }
 
     return @{
         samAccountName    = $sam
         accountKind       = $kind                                   # standard | gmsa | smsa
         userPrincipalName = $upn
+        emailAddress      = $upn                                    # v1: -EmailAddress $UserPrincipalName
         displayName       = $disp
+        mailRecipient     = $rcpt
         givenName         = (Get-PimRowProp -Row $Row -Names @('FirstName','GivenName')).Trim()
         surname           = (Get-PimRowProp -Row $Row -Names @('LastName','Surname')).Trim()
-        description       = (Get-PimRowProp -Row $Row -Names @('Description')).Trim()
+        description       = $descr
         purpose           = (Get-PimRowProp -Row $Row -Names @('Purpose')).Trim()
         isHighPriv        = [bool](Test-PimHybridAdHighPriv -Row $Row)
         targetOu          = (Resolve-PimHybridAdTargetOu -Row $Row -PathAdmins $PathAdmins -PathAdminsL0T0 $PathAdminsL0T0)
@@ -189,6 +268,17 @@ function ConvertTo-PimHybridAdDesired {
         searchRoot        = $sr.searchRoot                          # used by the worker for the gMSA managed-password read
         requiresManagedPassword = ($kind -eq 'gmsa' -or $kind -eq 'smsa')
     }
+}
+
+function Get-PimHybridAdDesiredValue {
+    # PURE: one field of a desired record, whether it is a hashtable (fresh plan) or a PSCustomObject
+    # (a work package round-tripped through JSON / SQL).
+    param([object]$Desired, [Parameter(Mandatory)][string]$Name)
+    if ($null -eq $Desired) { return '' }
+    if ($Desired -is [System.Collections.IDictionary]) { if ($Desired.Contains($Name)) { return "$($Desired[$Name])" }; return '' }
+    $p = $Desired.PSObject.Properties[$Name]
+    if ($p) { return "$($p.Value)" }
+    return ''
 }
 
 function Get-PimHybridAdDesiredKey {
@@ -206,30 +296,39 @@ function Get-PimHybridAdDesiredKey {
 }
 
 function Test-PimHybridAdRecordEqual {
-    # PURE: is the live AD object already at the desired state for the mutable
-    # attributes the engine manages (DisplayName / Description / UPN / Given / Surname)?
-    # gMSA/sMSA accounts are existence-only (their attributes aren't engine-managed).
-    param([Parameter(Mandatory)][hashtable]$Desired, [Parameter(Mandatory)][object]$Live)
-    if ($Desired.accountKind -eq 'gmsa' -or $Desired.accountKind -eq 'smsa') { return $true }
+    # PURE: is the live AD object already at the desired state for the attributes v1 wrote on every
+    # update (Set-ADUser -GivenName -Surname -DisplayName -Description -EmailAddress -UserPrincipalName,
+    # PIM-Functions.psm1 5878-5884)? gMSA/sMSA accounts are existence-only.
+    # Two rules, the same the Entra attribute plan uses (Get-PimAdminAttributePlan):
+    #   * a BLANK desired value is not managed -- the row said nothing about it (v1 cleared the
+    #     attribute; v2 never erases directory data the row did not name);
+    #   * a property the live object does not CARRY was not observed. For a PLAN it is not compared;
+    #     before a WRITE (-UnobservedIsDifferent) "cannot prove equal" means write.
+    param([Parameter(Mandatory)][object]$Desired, [Parameter(Mandatory)][object]$Live, [switch]$UnobservedIsDifferent)
+    $kind = Get-PimHybridAdDesiredValue -Desired $Desired -Name 'accountKind'
+    if ($kind -eq 'gmsa' -or $kind -eq 'smsa') { return $true }
     $get = {
         param($o,$names)
         foreach ($n in $names) {
-            if ($o -is [System.Collections.IDictionary]) { if ($o.Contains($n)) { return "$($o[$n])" } }
-            else { $p = $o.PSObject.Properties[$n]; if ($p) { return "$($p.Value)" } }
+            if ($o -is [System.Collections.IDictionary]) { if ($o.Contains($n)) { return @{ has = $true; v = "$($o[$n])" } } }
+            else { $p = $o.PSObject.Properties[$n]; if ($p) { return @{ has = $true; v = "$($p.Value)" } } }
         }
-        return ''
+        return @{ has = $false; v = '' }
     }
     $pairs = @(
         @('displayName', @('DisplayName','displayName')),
         @('description', @('Description','description')),
         @('userPrincipalName', @('UserPrincipalName','userPrincipalName')),
+        @('emailAddress', @('EmailAddress','emailAddress','mail')),
         @('givenName', @('GivenName','givenName')),
         @('surname', @('Surname','surname'))
     )
     foreach ($pair in $pairs) {
-        $want = "$($Desired[$pair[0]])".Trim()
-        $have = (& $get $Live $pair[1]).Trim()
-        if ($want -ne $have) { return $false }
+        $want = (Get-PimHybridAdDesiredValue -Desired $Desired -Name $pair[0]).Trim()
+        if (-not $want) { continue }
+        $have = & $get $Live $pair[1]
+        if (-not $have.has) { if ($UnobservedIsDifferent) { return $false } else { continue } }
+        if ($want -cne "$($have.v)".Trim()) { return $false }
     }
     return $true
 }
@@ -278,7 +377,7 @@ function New-PimHybridAdWorkItem {
     $reasonSkip = ''
     if ($Op -eq 'Create' -and [string]::IsNullOrWhiteSpace("$($Desired.targetOu)")) {
         $whichPath = if ($Desired.isHighPriv) { 'PathAdminsL0T0' } else { 'PathAdmins' }
-        $reasonSkip = "target OU empty (high-priv=$($Desired.isHighPriv); supply $whichPath in NamingConventions.custom.ps1)"
+        $reasonSkip = "target OU empty (high-priv=$($Desired.isHighPriv); set $whichPath in the naming settings)"
     }
     return [pscustomobject]@{
         op             = $(if ($reasonSkip) { 'Skip' } else { $Op })
@@ -358,6 +457,20 @@ function Export-PimHybridAdWorkPackage {
     return $Path
 }
 
+function ConvertTo-PimHybridAdWorkPackage {
+    # PURE. The same package Export-PimHybridAdWorkPackage writes, as a hashtable -- so the engine
+    # can publish it into SQL (pim.Settings['HybridAdWorkPackage']) instead of a file. v2 is
+    # SQL-only (operator, 2026-09-12); the file functions remain for a worker that is handed one.
+    param([Parameter(Mandatory)][object]$Plan)
+    return @{
+        kind       = 'PimHybridAdWorkPackage'
+        version    = 1
+        createdUtc = ([datetime]::UtcNow.ToString('o'))
+        summary    = $Plan.summary
+        workItems  = @($Plan.workItems)
+    }
+}
+
 function Import-PimHybridAdWorkPackage {
     param([Parameter(Mandatory)][string]$Path)
     if (-not (Test-Path $Path)) { throw "Hybrid-AD work package not found: $Path" }
@@ -384,35 +497,39 @@ function Get-PimDefaultActiveDirectoryAdapter {
         throw 'ActiveDirectory module not available -- Get-PimDefaultActiveDirectoryAdapter is hybrid-worker-only (domain-joined host with RSAT-AD). The cloud engine must export a work package instead.'
     }
     return @{
-        # Read live AD users by sAMAccountName (explicit -Credential, NOT ambient SYSTEM).
+        # Read the live AD user. v1 looked the account up by UPN (Get-ADUser -Filter
+        # 'UserPrincipalName -eq $UserPrincipalName', PIM-Functions.psm1 5849); a row without a UPN
+        # falls back to the sAMAccountName. Explicit -Credential, NOT ambient SYSTEM; -ErrorAction Stop
+        # so an auth/DC fault is an error, never "not found" (v1's hard-fail, 5840-5870).
         GetUser = {
-            param($Sam, $Credential)
-            $p = @{ Filter = "SamAccountName -eq '$Sam'"; Properties = @('DisplayName','Description','UserPrincipalName','GivenName','Surname') }
+            param($Sam, $Credential, $Upn)
+            $props = @('DisplayName','Description','UserPrincipalName','GivenName','Surname','EmailAddress','Enabled')
+            $p = if ("$Upn".Trim()) { @{ Filter = "UserPrincipalName -eq '$("$Upn".Trim().Replace("'", "''"))'"; Properties = $props } }
+                 else { @{ Filter = "SamAccountName -eq '$("$Sam".Replace("'", "''"))'"; Properties = $props } }
             if ($Credential) { $p['Credential'] = $Credential }
             Get-ADUser @p -ErrorAction Stop
         }
-        # Create a standard AD user account in the routed OU with an explicit credential.
+        # Create a standard AD user in the routed OU (v1 New-ADUser, 5911-5922): -Name = the account name,
+        # given/surname/display/description, -AccountPassword, -EmailAddress = UPN, -UserPrincipalName,
+        # -Path, -Enabled. v1 set no PasswordNeverExpires and no ChangePasswordAtLogon; neither does this.
+        # A blank attribute is omitted (New-ADUser rejects an empty string for most of them).
         NewUser = {
             param($Item, $Credential, $AccountPassword)
             $d = $Item.desired
-            $p = @{
-                Name = $d.samAccountName; SamAccountName = $d.samAccountName
-                GivenName = $d.givenName; Surname = $d.surname; DisplayName = $d.displayName
-                Description = $d.description; EmailAddress = $d.userPrincipalName
-                UserPrincipalName = $d.userPrincipalName; Path = $d.targetOu
-                AccountPassword = $AccountPassword; Enabled = $true; ErrorAction = 'Stop'
+            $p = @{ Name = $d.samAccountName; SamAccountName = $d.samAccountName; Path = $d.targetOu; AccountPassword = $AccountPassword; Enabled = $true; ErrorAction = 'Stop' }
+            foreach ($pair in @(@('GivenName','givenName'), @('Surname','surname'), @('DisplayName','displayName'), @('Description','description'), @('EmailAddress','emailAddress'), @('UserPrincipalName','userPrincipalName'))) {
+                $v = "$(Get-PimHybridAdDesiredValue -Desired $d -Name $pair[1])".Trim(); if ($v) { $p[$pair[0]] = $v }
             }
             if ($Credential) { $p['Credential'] = $Credential }
             New-ADUser @p
         }
-        # Update mutable attributes on an existing account.
+        # Update the attributes v1 updated (Set-ADUser, 5878-5884). A blank desired value is not written.
         SetUser = {
             param($Item, $Live, $Credential)
             $d = $Item.desired
-            $p = @{
-                Identity = $Live; GivenName = $d.givenName; Surname = $d.surname
-                DisplayName = $d.displayName; Description = $d.description
-                EmailAddress = $d.userPrincipalName; UserPrincipalName = $d.userPrincipalName; ErrorAction = 'Stop'
+            $p = @{ Identity = $Live; ErrorAction = 'Stop' }
+            foreach ($pair in @(@('GivenName','givenName'), @('Surname','surname'), @('DisplayName','displayName'), @('Description','description'), @('EmailAddress','emailAddress'), @('UserPrincipalName','userPrincipalName'))) {
+                $v = "$(Get-PimHybridAdDesiredValue -Desired $d -Name $pair[1])".Trim(); if ($v) { $p[$pair[0]] = $v }
             }
             if ($Credential) { $p['Credential'] = $Credential }
             Set-ADUser @p
@@ -458,10 +575,32 @@ function Invoke-PimHybridAdApply {
         [hashtable]$ActiveDirectoryAdapter,                  # injected on the worker; fake in tests
         [System.Management.Automation.PSCredential]$Credential,
         [object]$Context,                                    # for gMSA credential resolution on the worker
-        [scriptblock]$NewPassword                            # () -> SecureString for standard-account create
+        [scriptblock]$NewPassword,                           # () -> SecureString for standard-account create (no delivery)
+        # v1 parity for the initial password (AD admins have no TAP -- "password only"). v1 generated a
+        # random password per new account and handed it to the operator (PIM-Functions.psm1 5639-5641,
+        # 5935-5937). v2 stores and logs NOTHING, so the password is MAILED to the admin-mail recipient:
+        #   -DeliverPassword       ($Item, [string]$PlainPassword) -> @{ sent; reason }
+        #   -PasswordDeliveryReady ($Item) -> @{ ok; reason }   checked BEFORE the account is created
+        #   -NewPlainPassword      () -> [string]               default New-PimAdminInitialPassword -Length 24 (v1's length)
+        # When -DeliverPassword is given, a create that cannot deliver its password is HELD (skipped), and a
+        # create whose delivery then fails is reported FAILED -- an account nobody can sign in to is never
+        # reported as a success.
+        [scriptblock]$DeliverPassword,
+        [scriptblock]$PasswordDeliveryReady,
+        [scriptblock]$NewPlainPassword
     )
     $items = @($Plan.workItems)
     $results = New-Object System.Collections.Generic.List[object]
+    $upnOf = { param($it) Get-PimHybridAdDesiredValue -Desired $it.desired -Name 'userPrincipalName' }
+    # Read -> compare -> write only when different (v1 wrote every run; the result is the same state).
+    $maintain = {
+        param($it, $live)
+        if (Test-PimHybridAdRecordEqual -Desired $it.desired -Live $live -UnobservedIsDifferent) {
+            return [pscustomobject]@{ samAccountName=$it.samAccountName; op='Update'; status='nochange'; reason='' }
+        }
+        & $ActiveDirectoryAdapter.SetUser $it $live $Credential | Out-Null
+        return [pscustomobject]@{ samAccountName=$it.samAccountName; op='Update'; status='updated'; reason='' }
+    }
 
     if ($Apply) {
         if (-not $ActiveDirectoryAdapter) { $ActiveDirectoryAdapter = Get-PimDefaultActiveDirectoryAdapter }
@@ -477,6 +616,23 @@ function Invoke-PimHybridAdApply {
 
     foreach ($it in $items) {
         if ($it.op -eq 'Skip') {
+            # v1 (PIM-Baseline-Management-CSV.ps1 373-380): with no OU configured "updates still go
+            # through; only Create needs the OU". A Skip for a missing OU therefore still UPDATES an
+            # account that already exists -- only the create is skipped.
+            if ($Apply -and "$($it.skipReason)" -match '^target OU empty' -and -not $it.requiresManagedPassword) {
+                try {
+                    $liveS = & $ActiveDirectoryAdapter.GetUser $it.samAccountName $Credential (& $upnOf $it)
+                    if ($liveS) {
+                        $rS = & $maintain $it $liveS
+                        $rS.reason = 'no OU configured -- existing account maintained, create skipped'
+                        $results.Add($rS)
+                        continue
+                    }
+                } catch {
+                    $results.Add([pscustomobject]@{ samAccountName=$it.samAccountName; op='Update'; status='failed'; reason=$_.Exception.Message })
+                    continue
+                }
+            }
             $results.Add([pscustomobject]@{ samAccountName=$it.samAccountName; op='Skip'; status='skipped'; reason=$it.skipReason })
             continue
         }
@@ -495,10 +651,34 @@ function Invoke-PimHybridAdApply {
             }
             # Standard account: read live first; a failed read does NOT cascade to create.
             $live = $null
-            try { $live = & $ActiveDirectoryAdapter.GetUser $it.samAccountName $Credential } catch { throw "Get-ADUser failed for $($it.samAccountName) with credential '$($Credential.UserName)': $($_.Exception.Message)" }
+            try { $live = & $ActiveDirectoryAdapter.GetUser $it.samAccountName $Credential (& $upnOf $it) } catch { throw "Get-ADUser failed for $($it.samAccountName) with credential '$($Credential.UserName)': $($_.Exception.Message)" }
             if ($live) {
-                & $ActiveDirectoryAdapter.SetUser $it $live $Credential | Out-Null
-                $results.Add([pscustomobject]@{ samAccountName=$it.samAccountName; op='Update'; status='updated'; reason='' })
+                $results.Add((& $maintain $it $live))
+            } elseif ($DeliverPassword) {
+                if ($PasswordDeliveryReady) {
+                    $ready = & $PasswordDeliveryReady $it
+                    if (-not $ready -or -not $ready.ok) {
+                        $why = if ($ready) { "$($ready.reason)" } else { 'no answer from the delivery check' }
+                        $results.Add([pscustomobject]@{ samAccountName=$it.samAccountName; op='Create'; status='skipped'; reason="create HELD: its initial password could not be delivered -- $why" })
+                        continue
+                    }
+                }
+                $plain = if ($NewPlainPassword) { "$(& $NewPlainPassword)" } elseif (Get-Command New-PimAdminInitialPassword -ErrorAction SilentlyContinue) { New-PimAdminInitialPassword -Length 24 } else { [guid]::NewGuid().ToString('N').Substring(0, 20) + 'Aa9!' }
+                $sec = New-Object System.Security.SecureString
+                foreach ($ch in $plain.ToCharArray()) { $sec.AppendChar($ch) }
+                $sec.MakeReadOnly()
+                try {
+                    & $ActiveDirectoryAdapter.NewUser $it $Credential $sec | Out-Null
+                } catch { $plain = $null; throw }
+                $sent = $null
+                try { $sent = & $DeliverPassword $it $plain } catch { $sent = @{ sent = $false; reason = "$($_.Exception.Message)" } }
+                $plain = $null
+                if ($sent -and "$($sent.sent)" -match '(?i)^true$') {
+                    $results.Add([pscustomobject]@{ samAccountName=$it.samAccountName; op='Create'; status='created'; reason="OU: $($it.targetOu); initial password mailed to the admin-mail recipient" })
+                } else {
+                    $why = if ($sent) { "$($sent.reason)" } else { 'no answer from the delivery' }
+                    $results.Add([pscustomobject]@{ samAccountName=$it.samAccountName; op='Create'; status='failed'; reason="account CREATED in $($it.targetOu), but its initial password could NOT be delivered ($why) -- reset the password in AD" })
+                }
             } else {
                 $pw = $null
                 if ($NewPassword) { $pw = & $NewPassword }
@@ -511,4 +691,206 @@ function Invoke-PimHybridAdApply {
         }
     }
     return [pscustomobject]@{ applied=[bool]$Apply; results=$results.ToArray() }
+}
+
+# ---------------------------------------------------------------------------
+# THE SCHEDULED HYBRID WORKER JOB (#12, 2026-09-12). Until now nothing ever called
+# Invoke-PimHybridAdApply -Apply: the cloud provider planned, and on-prem AD accounts -- which v1
+# created and updated on every CSV-engine run (PIM-Functions.psm1 5824-5938, launcher condition
+# PIM-Baseline-Management-CSV.ps1 367-389) -- were silently never provisioned.
+#
+# The job 'hybrid-ad-apply' runs this on every scheduler worker. v1's condition is kept exactly:
+# it applies only where the ActiveDirectory module AND an AD credential exist. Anywhere else (every
+# container) it does not plan quietly -- it reports that a HYBRID WORKER is required, naming how
+# many AD rows are waiting, so the gap is visible in the Jobs list instead of looking like success.
+# A hybrid worker is a domain-joined Windows host running the scheduler scoped to this job
+# (Start-PimScheduler.ps1 -Jobs hybrid-ad-apply), with its SQL coordinates.
+# ---------------------------------------------------------------------------
+function Resolve-PimHybridAdCredential {
+    # The explicit AD credential, never ambient SYSTEM. Sources, in order:
+    #   1. $global:PIM_HybridAdCredential                     (a PSCredential the worker launcher set)
+    #   2. $global:Context.Identity.Legacy.Internal.Prod      (v1's platform identity on the same host)
+    #   3. Key Vault: settings HybridAdCredentialVault + HybridAdCredentialUserSecret +
+    #      HybridAdCredentialPasswordSecret (v1: Legacy-UserName-Internal-Prod / -Password-), read
+    #      through -SecretReader, $global:PIM_HybridAdSecretReader, or Get-PimSqlSecretFromKeyVault.
+    # Returns @{ credential; source } -- credential $null when none. Never logs a secret.
+    param([scriptblock]$SecretReader)
+    if ($global:PIM_HybridAdCredential -is [System.Management.Automation.PSCredential]) {
+        return [pscustomobject]@{ credential = $global:PIM_HybridAdCredential; source = 'PIM_HybridAdCredential' }
+    }
+    try {
+        $legacy = $global:Context.Identity.Legacy.Internal.Prod
+        if ($legacy -is [System.Management.Automation.PSCredential]) { return [pscustomobject]@{ credential = $legacy; source = 'Context.Identity.Legacy.Internal.Prod' } }
+    } catch { }
+    $get = { param($n) $v = $null; if (Get-Command Get-PimAdminLifecycleSetting -ErrorAction SilentlyContinue) { $v = Get-PimAdminLifecycleSetting -Name $n } else { $v = Get-Variable -Name "PIM_$n" -Scope Global -ValueOnly -ErrorAction SilentlyContinue }; "$v".Trim() }
+    $vault = & $get 'HybridAdCredentialVault'
+    $uSec  = & $get 'HybridAdCredentialUserSecret'
+    $pSec  = & $get 'HybridAdCredentialPasswordSecret'
+    if (-not ($vault -and $uSec -and $pSec)) { return [pscustomobject]@{ credential = $null; source = '' } }
+    $reader = $SecretReader
+    if (-not $reader -and ($global:PIM_HybridAdSecretReader -is [scriptblock])) { $reader = $global:PIM_HybridAdSecretReader }
+    if (-not $reader -and (Get-Command Get-PimSqlSecretFromKeyVault -ErrorAction SilentlyContinue)) { $reader = { param($v, $n) Get-PimSqlSecretFromKeyVault -VaultName $v -SecretName $n } }
+    if (-not $reader) { return [pscustomobject]@{ credential = $null; source = '' } }
+    try {
+        $user = "$(& $reader $vault $uSec)".Trim()
+        $pw   = "$(& $reader $vault $pSec)"
+        if (-not $user -or -not $pw) { return [pscustomobject]@{ credential = $null; source = '' } }
+        $sec = New-Object System.Security.SecureString
+        foreach ($ch in $pw.ToCharArray()) { $sec.AppendChar($ch) }
+        $sec.MakeReadOnly()
+        return [pscustomobject]@{ credential = (New-Object System.Management.Automation.PSCredential($user, $sec)); source = "Key Vault $vault" }
+    } catch {
+        Write-Warning "  [hybrid-ad] the AD credential could not be read from Key Vault '$vault': $($_.Exception.Message)"
+        return [pscustomobject]@{ credential = $null; source = '' }
+    }
+}
+
+function Test-PimHybridAdWorkerCapability {
+    # v1's condition (PIM-Baseline-Management-CSV.ps1 367-372): the ActiveDirectory module AND an
+    # AD credential. -AdModulePresent is the test seam.
+    param([object]$AdModulePresent = $null, [object]$Credential = $null, [scriptblock]$SecretReader)
+    $ad = if ($null -ne $AdModulePresent) { [bool]$AdModulePresent } else { [bool](Get-Command Get-ADUser -ErrorAction SilentlyContinue) }
+    $cred = $Credential; $src = 'supplied'
+    if (-not $cred) { $r = Resolve-PimHybridAdCredential -SecretReader $SecretReader; $cred = $r.credential; $src = $r.source }
+    $reason = ''
+    if (-not $ad) { $reason = 'this host has no ActiveDirectory module (RSAT-AD) -- a container cannot write on-premises AD' }
+    elseif (-not $cred) { $reason = 'no AD credential is available (set PIM_HybridAdCredential on the worker, or the HybridAdCredentialVault / -UserSecret / -PasswordSecret settings)' }
+    return [pscustomobject]@{ ok = ($ad -and [bool]$cred); adModule = $ad; hasCredential = [bool]$cred; credential = $cred; credentialSource = $src; reason = $reason }
+}
+
+function New-PimHybridAdSecurePassword {
+    # A random initial password for a NEW standard AD account, as a SecureString. Never stored,
+    # never logged (v1 wrote it to output/admin-passwords-<date>.txt, 5935-5937).
+    $plain = if (Get-Command New-PimAdminInitialPassword -ErrorAction SilentlyContinue) { New-PimAdminInitialPassword -Length 32 } else { [guid]::NewGuid().ToString('N') + 'Aa9!' + [guid]::NewGuid().ToString('N') }
+    $sec = New-Object System.Security.SecureString
+    foreach ($ch in $plain.ToCharArray()) { $sec.AppendChar($ch) }
+    $plain = $null
+    $sec.MakeReadOnly()
+    return $sec
+}
+
+function Test-PimHybridAdPasswordMailReady {
+    # Can the initial password of a NEW AD admin be mailed right now? Checked BEFORE New-ADUser, so an
+    # account is never created with a password nobody receives. Same checks as the TAP delivery guard
+    # (Test-PimTapMailReady): a recipient, a sender (hydrated from pim.Settings first), the send path and
+    # the template -- asked explicitly, because a -WhatIf probe cannot see a missing sender.
+    param([string]$Recipient)
+    if (-not "$Recipient".Trim()) {
+        return @{ ok = $false; reason = 'the admin row has no office user email (MailForwardAddress with ForwardMailsToContact=TRUE) and no ManagerEmail, so there is nowhere to send the initial password' }
+    }
+    if ((-not "$($global:PIM_MailSender)".Trim()) -and (Get-Command Initialize-PimEmailControlsFromStore -ErrorAction SilentlyContinue)) {
+        try { [void](Initialize-PimEmailControlsFromStore) } catch { }
+    }
+    if (-not "$($global:PIM_MailSender)".Trim()) { return @{ ok = $false; reason = 'no notification sender is configured (MailSender) -- the tenant cannot send mail' } }
+    if (-not (Get-Command Send-PimNotifyMail -ErrorAction SilentlyContinue)) { return @{ ok = $false; reason = 'the notification path (PIM-Notify.ps1) is not loaded on this worker' } }
+    try {
+        $probe = Send-PimNotifyMail -Type 'ad-password-delivery' -Tokens @{ UserPrincipalName = 'probe'; SamAccountName = 'probe'; InitialPassword = '' } -Recipient $Recipient -WhatIf
+        if ("$($probe.reason)" -and "$($probe.reason)" -ne 'whatif') { return @{ ok = $false; reason = "$($probe.reason)" } }
+    } catch { return @{ ok = $false; reason = "mail pre-check failed: $($_.Exception.Message)" } }
+    return @{ ok = $true; reason = '' }
+}
+
+function Send-PimHybridAdPasswordMail {
+    # Mail a new AD admin's initial password (template ad-password-delivery) to the admin-mail recipient.
+    # Returns @{ sent; reason } ONLY -- the rendered message (which contains the password) is dropped here
+    # and never returned, logged or stored.
+    param([Parameter(Mandatory)][object]$Item, [Parameter(Mandatory)][string]$PlainPassword)
+    $rcpt = Get-PimHybridAdDesiredValue -Desired $Item.desired -Name 'mailRecipient'
+    if (-not "$rcpt".Trim()) { return @{ sent = $false; reason = 'no recipient' } }
+    if (-not (Get-Command Send-PimNotifyMail -ErrorAction SilentlyContinue)) { return @{ sent = $false; reason = 'PIM-Notify.ps1 not loaded' } }
+    $toks = @{
+        UserPrincipalName = (Get-PimHybridAdDesiredValue -Desired $Item.desired -Name 'userPrincipalName')
+        SamAccountName    = "$($Item.samAccountName)"
+        InitialPassword   = $PlainPassword
+    }
+    $r = $null
+    try { $r = Send-PimNotifyMail -Type 'ad-password-delivery' -Tokens $toks -Recipient $rcpt } catch { $r = @{ sent = $false; reason = "$($_.Exception.Message)" } }
+    $toks = $null
+    return @{ sent = ("$($r.sent)" -match '(?i)^true$'); reason = "$($r.reason)" }
+}
+
+function Invoke-PimHybridAdWorkerJob {
+    <#
+      The 'hybrid-ad-apply' job. Reads the admin rows from SQL (or -Rows), keeps TargetPlatform=AD
+      rows that are due (ProvisionDate) and not Disabled / Revoked / offboarded, plans, and -- only
+      on a capable host -- applies through Invoke-PimHybridAdApply -Apply.
+      Returns the scheduler handler shape: @{ ran; detail; ...; unimplemented; requiresHybridWorker }.
+      THROWS when an apply failed, so the tick records a failed run.
+    #>
+    param(
+        [datetime]$NowUtc = [datetime]::UtcNow,
+        [switch]$WhatIf,
+        [object[]]$Rows = $null,
+        [hashtable]$ActiveDirectoryAdapter,
+        [System.Management.Automation.PSCredential]$Credential,
+        [object]$AdModulePresent = $null,
+        [scriptblock]$SecretReader,
+        [scriptblock]$DeliverPassword = { param($Item, $PlainPassword) Send-PimHybridAdPasswordMail -Item $Item -PlainPassword $PlainPassword },
+        [scriptblock]$PasswordDeliveryReady = { param($Item) Test-PimHybridAdPasswordMailReady -Recipient (Get-PimHybridAdDesiredValue -Desired $Item.desired -Name 'mailRecipient') }
+    )
+    if ($null -eq $Rows) {
+        if (-not (Get-Command Get-PimDesiredRows -ErrorAction SilentlyContinue)) {
+            return [pscustomobject]@{ ran = $false; unimplemented = $true; detail = 'unimplemented:hybrid-ad-apply -- the engine core (Get-PimDesiredRows) is not loaded on this worker'; whatIf = [bool]$WhatIf }
+        }
+        $Rows = @(Get-PimDesiredRows -Entity 'Account-Definitions-Admins')
+        if ($global:PIM_DesiredResolved -is [hashtable] -and $global:PIM_DesiredResolved.ContainsKey('Account-Definitions-Admins') -and -not $global:PIM_DesiredResolved['Account-Definitions-Admins']) {
+            throw '[hybrid-ad-apply] the admin rows could not be read from the desired store -- nothing was planned'
+        }
+    }
+    $ad = New-Object System.Collections.Generic.List[object]
+    $held = New-Object System.Collections.Generic.List[string]
+    foreach ($r in @($Rows)) {
+        if ($null -eq $r) { continue }
+        if (-not (Test-PimHybridAdRowIsAd -Row $r)) { continue }
+        $name = (Get-PimRowProp -Row $r -Names @('UserName','SamAccountName','UserPrincipalName')).Trim()
+        if (Get-Command Test-PimAdminProvisionDue -ErrorAction SilentlyContinue) {
+            $pd = Test-PimAdminProvisionDue -Row $r -NowUtc $NowUtc
+            if (-not $pd.due) { [void]$held.Add("$name ($($pd.reason))"); continue }
+        }
+        if (Get-Command Get-PimAdminStatusDecision -ErrorAction SilentlyContinue) {
+            $dec = Get-PimAdminStatusDecision -Row $r -NowUtc $NowUtc
+            if ($dec.blocksCreate) { [void]$held.Add("$name ($($dec.reason))"); continue }
+        }
+        [void]$ad.Add($r)
+    }
+    $heldText = if ($held.Count) { "; held back: " + ($held -join ', ') } else { '' }
+    if ($ad.Count -eq 0) {
+        return [pscustomobject]@{ ran = $true; detail = "hybrid-ad-apply: no due TargetPlatform=AD admin rows -- nothing for a hybrid worker to do$heldText"; adRows = 0; whatIf = [bool]$WhatIf }
+    }
+    $cap = Test-PimHybridAdWorkerCapability -AdModulePresent $AdModulePresent -Credential $Credential -SecretReader $SecretReader
+    if (-not $cap.ok) {
+        return [pscustomobject]@{ ran = $false; unimplemented = $true; requiresHybridWorker = $true; adRows = $ad.Count
+            detail = ("hybrid worker required: {0} TargetPlatform=AD admin row(s) are waiting for on-premises AD, and {1}. Run the scheduler on a domain-joined host scoped to this job (Start-PimScheduler.ps1 -Jobs hybrid-ad-apply){2}" -f $ad.Count, $cap.reason, $heldText)
+            whatIf = [bool]$WhatIf }
+    }
+    # The OU paths and every derived name come from the customer's naming conventions in pim.Settings.
+    # A cold worker has not hydrated them yet (the scheduler tick normally has): read them once, fail-safe.
+    if (-not (Get-PimHybridAdNamingValue -Name 'PathAdmins') -and -not (Get-PimHybridAdNamingValue -Name 'PathAdminsL0T0') -and (Get-Command Import-PimSettingsFromStore -ErrorAction SilentlyContinue)) {
+        try { [void](Import-PimSettingsFromStore) } catch { Write-Warning "  [hybrid-ad] naming settings could not be read from the store: $($_.Exception.Message)" }
+    }
+    $plan = Get-PimHybridAdPlan -AdminRows $ad.ToArray() -Live @() -PathAdmins (Get-PimHybridAdNamingValue -Name 'PathAdmins') -PathAdminsL0T0 (Get-PimHybridAdNamingValue -Name 'PathAdminsL0T0') -Domain "$($global:PIM_AdDomain)"
+    if ($WhatIf) {
+        $pr = Invoke-PimHybridAdApply -Plan $plan
+        return [pscustomobject]@{ ran = $true; whatIf = $true; adRows = $ad.Count; results = $pr.results
+            detail = ("hybrid-ad-apply (whatif): {0} AD row(s) planned, {1} skipped{2}" -f @($pr.results | Where-Object { $_.status -eq 'plan' }).Count, @($pr.results | Where-Object { $_.status -eq 'skipped' }).Count, $heldText) }
+    }
+    $applyArgs = @{ Plan = $plan; Apply = $true; Credential = $cap.credential }
+    if ($DeliverPassword) { $applyArgs['DeliverPassword'] = $DeliverPassword; if ($PasswordDeliveryReady) { $applyArgs['PasswordDeliveryReady'] = $PasswordDeliveryReady } }
+    else { $applyArgs['NewPassword'] = { New-PimHybridAdSecurePassword } }
+    if ($ActiveDirectoryAdapter) { $applyArgs['ActiveDirectoryAdapter'] = $ActiveDirectoryAdapter }
+    $res = Invoke-PimHybridAdApply @applyArgs
+    $count = { param($s) @($res.results | Where-Object { $_.status -eq $s }).Count }
+    $failed = @($res.results | Where-Object { $_.status -eq 'failed' })
+    $heldCreates = @($res.results | Where-Object { $_.status -eq 'skipped' -and "$($_.reason)" -match '^create HELD' })
+    $heldCreateText = if ($heldCreates.Count) { "; create held: " + (@($heldCreates | ForEach-Object { "$($_.samAccountName) ($($_.reason -replace '^create HELD: ', ''))" }) -join ', ') } else { '' }
+    $detail = ("hybrid-ad-apply: created={0} updated={1} nochange={2} resolved={3} skipped={4} failed={5} (credential: {6}){7}{8}" -f (& $count 'created'), (& $count 'updated'), (& $count 'nochange'), (& $count 'resolved'), (& $count 'skipped'), $failed.Count, $cap.credentialSource, $heldText, $heldCreateText)
+    foreach ($x in @($res.results | Where-Object { $_.status -eq 'created' -or $_.status -eq 'updated' -or ($_.status -eq 'failed' -and $_.op -eq 'Create' -and "$($_.reason)" -match '^account CREATED') })) {
+        $act = if ($x.status -eq 'failed') { 'account.ad.created' } else { "account.ad.$($x.status)" }
+        $res2 = if ($x.status -eq 'failed') { 'partial' } else { 'ok' }
+        if (Get-Command Write-PimAdminLifecycleAudit -ErrorAction SilentlyContinue) { Write-PimAdminLifecycleAudit -Action $act -Target "$($x.samAccountName)" -After @{ platform = 'AD'; reason = "$($x.reason)" } -Result $res2 }
+    }
+    if ($failed.Count) {
+        throw ("[hybrid-ad-apply] " + $detail + " -- " + (@($failed | ForEach-Object { "$($_.samAccountName): $($_.reason)" }) -join ' | '))
+    }
+    return [pscustomobject]@{ ran = $true; detail = $detail; adRows = $ad.Count; results = $res.results; whatIf = $false }
 }

@@ -1,4 +1,4 @@
-<#
+﻿<#
   PIM4EntraPS -- HOSTED Manager principal authentication (SEC-01).
 
   WHY THIS EXISTS (audit finding SEC-01, REQUIREMENTS §33.3)
@@ -246,6 +246,53 @@ function Get-PimPrincipalNameFromBlob {
     return ''
 }
 
+function Get-PimPrincipalNamesFromBlob {
+    <#
+      EVERY name-like value in the blob, not just the preferred one.
+
+      🔴 WHY THIS EXISTS. The edge-consistency check compared X-MS-CLIENT-PRINCIPAL-NAME against
+      Get-PimPrincipalNameFromBlob, which prefers `preferred_username` -- the UPN. But Easy Auth
+      populates that HEADER from whichever claim the provider designates as its name claim, and for
+      an Entra v2 token that is routinely `name` -- the DISPLAY name. So a completely legitimate
+      sign-in produced:
+          X-MS-CLIENT-PRINCIPAL-NAME ('Morten Knudsen (Admin, Cloud, ID)')
+          disagrees with the principal blob ('x-Admin-MOK-ID@fjernvarmefyn.dk')
+      and every human was locked out of a correctly-deployed Manager. Measured at a customer
+      2026-09-12, on an environment whose sign-in had otherwise completed: "Login completed for
+      'Mo**PII**'. Provider: 'aad'".
+
+      🔑 THE SECURITY INTENT IS UNCHANGED. What the check defends against is a caller setting the
+      NAME header WITHOUT a matching blob (the spoof signature), or with a blob describing someone
+      else. "Do they describe the same principal?" is answered correctly by matching the header
+      against ANY name-like claim the blob carries -- the display name and the UPN are two true
+      names for one person. An attacker still has to produce a consistent blob, which is the same
+      bar as before; nothing is relaxed about what must be present.
+    #>
+    [CmdletBinding()]
+    param([object]$Blob)
+    if ($null -eq $Blob) { return @() }
+    $claims = @()
+    if ($Blob.claims) { $claims = @($Blob.claims) }
+    $wanted = @(
+        'preferred_username',
+        'http://schemas.xmlsoap.org/ws/2005/05/identity/claims/upn',
+        'upn',
+        'http://schemas.xmlsoap.org/ws/2005/05/identity/claims/name',
+        'name',
+        'email',
+        'http://schemas.xmlsoap.org/ws/2005/05/identity/claims/emailaddress'
+    )
+    if ("$($Blob.name_typ)".Trim()) { $wanted = @("$($Blob.name_typ)".Trim()) + $wanted }
+    $out = @()
+    foreach ($c in $claims) {
+        if ($null -eq $c) { continue }
+        $t = "$($c.typ)".Trim(); $v = "$($c.val)".Trim()
+        if (-not $v) { continue }
+        if ($wanted -contains $t) { $out += $v }
+    }
+    return @($out | Select-Object -Unique)
+}
+
 function Test-PimEdgeHeadersConsistent {
     # PURE -- LAYER 1. Given the raw header values, decide whether this request carries a
     # coherent auth-edge identity. Returns @{ trusted; identity; reason }.
@@ -282,11 +329,29 @@ function Test-PimEdgeHeadersConsistent {
     if (-not $blobName) {
         return @{ trusted = $false; identity = ''; reason = 'X-MS-CLIENT-PRINCIPAL carries no name/upn claim (rejected)' }
     }
-    if ($name -and ($blobName.ToLowerInvariant() -ne $name.ToLowerInvariant())) {
-        return @{ trusted = $false; identity = ''; reason = ("X-MS-CLIENT-PRINCIPAL-NAME ('$name') disagrees with the principal blob ('$blobName') -- rejected") }
+    # 🔑 MATCH AGAINST EVERY NAME THE BLOB CARRIES, not only the preferred one. The header is the
+    # provider's designated name claim (often the DISPLAY name); the blob's preferred value is the
+    # UPN. Demanding they be the same string locked every human out of a correctly-fronted Manager
+    # -- see Get-PimPrincipalNamesFromBlob for the measured case. A header that matches NONE of the
+    # blob's names is still rejected, which is the property this check exists for.
+    $blobNames = @(Get-PimPrincipalNamesFromBlob -Blob $decoded)
+    $nameAgrees = $false
+    foreach ($bn in $blobNames) { if ("$bn".ToLowerInvariant() -eq $name.ToLowerInvariant()) { $nameAgrees = $true; break } }
+    if ($name -and -not $nameAgrees) {
+        # List what the blob DID carry -- "disagrees with ('<one value>')" sent the last diagnosis
+        # looking for a tampering that was not there, when the real answer was "the header is the
+        # display name and I was only comparing the UPN".
+        return @{ trusted = $false; identity = ''; reason = ("X-MS-CLIENT-PRINCIPAL-NAME ('$name') matches none of the principal blob's names (" +
+                  (($blobNames | ForEach-Object { "'$_'" }) -join ', ') + ") -- rejected") }
     }
-    $identity = $name
-    if (-not $identity) { $identity = $blobName }
+    # 🔴 THE IDENTITY IS THE UPN, NEVER THE DISPLAY NAME. Everything downstream authorises on UPN --
+    # ManagerAccess, the SuperAdmin list, the audit trail. Returning the header here meant a user
+    # whose NAME header is a display name ('Morten Knudsen (Admin, Cloud, ID)') would authenticate
+    # and then be denied as an unknown principal, or worse be recorded in the audit under a name
+    # that matches no account. Get-PimPrincipalNameFromBlob already prefers preferred_username/upn,
+    # so prefer IT and keep the header only as the fallback for an edge that sends no blob claims.
+    $identity = $blobName
+    if (-not $identity) { $identity = $name }
     return @{ trusted = $true; identity = $identity; reason = 'auth-edge headers consistent' }
 }
 

@@ -1,4 +1,4 @@
-#Requires -Version 5.1
+﻿#Requires -Version 5.1
 # PIM4EntraPS -- v1 -> v2 migration path (REQUIREMENTS § 18 "Migrate ... off v1").
 #
 # Reads a v1 (legacy) PIM baseline -- a flat "this user gets this role, directly" list

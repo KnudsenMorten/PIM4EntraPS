@@ -1,10 +1,10 @@
 {
   "id": "default",
   "name": "Default",
-  "description": "The engine's STANDARD policy baseline, applied to the member policy of EVERY managed group (blank PolicyTemplate links here). Expiration: EndUser/activation max P1D, Admin-Assignment max P365D, Admin-Eligibility max P365D, all required. Enablement: MFA + Justification on EndUser-Assignment (activation); NOTHING on Admin-Eligibility; nothing on Admin-Assignment. OPERATOR DECISION 2026-08-11 -- Admin-Eligibility is EMPTY on the STANDARD templates: 'admin eligible is blank, no justification or mfa. app must be able to work'. This supersedes the 2026-08-10 decision that put Justification here; that value was never applied to production, so production is unaffected and stays converged. Justification remains on the APPROVAL templates (approval-required, EntraIDRoles_RequireApproval), where a human is in the loop by definition. BUG-21, and this is the load-bearing constraint whatever the value becomes: Admin-Eligibility must NEVER require MultiFactorAuthentication -- the 'admin' making that request is the engine's own app-only certificate SPN, whose token can never carry an MFA claim, so the rule cannot be satisfied by anyone and Entra rejects every eligibility the engine creates with 400 RoleAssignmentRequestPolicyValidationFailed / MfaRule. A/B tested in test tenant test1intr2ig798 on 2026-08-10: MFA+Justification fails, [] and [Justification] both succeed. It removed no risk and blocked the product's core delegation path. Activation MFA (EndUser-Assignment) is untouched -- that is where MFA actually protects anything. The empty Admin-Eligibility value is not a guess: it is what the PRODUCTION tenant's 332 engine-managed PIM- groups actually carry (member Admin_Eligibility=[], EndUser_Assignment=[MFA+Justification], read live 2026-08-06), so this template reproduces the known-good production state rather than something adjacent to it. Notification matches the Entra defaults. Carries NO Approval rule, so the engine never touches an approval rule it did not itself apply.",
+  "description": "The engine's STANDARD policy baseline, applied to the member policy of EVERY managed group (blank PolicyTemplate links here). Expiration: EndUser/activation max PT8H (v1 parity 2026-09-13: v1 set PT8H on every group member and owner policy, every directory role and every Azure resource role -- operator: 'policy in v2 must match v1 100%, this way no changes when customer move to v2'; P1D was a v2 drift), Admin-Assignment max P365D, Admin-Eligibility max P365D, all required. Enablement: MFA + Justification on EndUser-Assignment (activation); NOTHING on Admin-Eligibility; nothing on Admin-Assignment. OPERATOR DECISION 2026-08-11 -- Admin-Eligibility is EMPTY on the STANDARD templates: 'admin eligible is blank, no justification or mfa. app must be able to work'. This supersedes the 2026-08-10 decision that put Justification here; that value was never applied to production, so production is unaffected and stays converged. Justification remains on the APPROVAL templates (approval-required, EntraIDRoles_RequireApproval), where a human is in the loop by definition. BUG-21, and this is the load-bearing constraint whatever the value becomes: Admin-Eligibility must NEVER require MultiFactorAuthentication -- the 'admin' making that request is the engine's own app-only certificate SPN, whose token can never carry an MFA claim, so the rule cannot be satisfied by anyone and Entra rejects every eligibility the engine creates with 400 RoleAssignmentRequestPolicyValidationFailed / MfaRule. A/B tested in test tenant test1intr2ig798 on 2026-08-10: MFA+Justification fails, [] and [Justification] both succeed. It removed no risk and blocked the product's core delegation path. Activation MFA (EndUser-Assignment) is untouched -- that is where MFA actually protects anything. The empty Admin-Eligibility value is not a guess: it is what the PRODUCTION tenant's 332 engine-managed PIM- groups actually carry (member Admin_Eligibility=[], EndUser_Assignment=[MFA+Justification], read live 2026-08-06), so this template reproduces the known-good production state rather than something adjacent to it. Notification matches the Entra defaults. Carries NO Approval rule, so the engine never touches an approval rule it did not itself apply.",
   "rules": {
     "Expiration": {
-      "EndUser_Assignment": { "maximumDuration": "P1D",   "isExpirationRequired": true },
+      "EndUser_Assignment": { "maximumDuration": "PT8H",  "isExpirationRequired": true },
       "Admin_Assignment":   { "maximumDuration": "P365D", "isExpirationRequired": true },
       "Admin_Eligibility":  { "maximumDuration": "P365D", "isExpirationRequired": true }
     },
@@ -12,6 +12,42 @@
       "EndUser_Assignment": ["MultiFactorAuthentication", "Justification"],
       "Admin_Eligibility":  [],
       "Admin_Assignment":   []
+    },
+    "_notificationV1": "PARITY AUDIT #5 (2026-09-13): v1 set these NINE notification rules on the member AND owner policy of every PIM-* group and on every directory role (engine/PIM-Baseline-Management-CSV/PIM-Baseline-Management-CSV.ps1 L793-872 member, L943-1022 owner, L615-694 roles), with exactly these on/off values (defaultRecipientsEnabled). caller=Admin = 'members are assigned as eligible/active'; caller=EndUser = 'eligible members activate'. No recipients anywhere: an explicit Approver recipient write-locks a policy (BUG-56).",
+    "Notification": [
+      { "recipientType": "Admin",     "caller": "Admin",   "level": "Eligibility", "notificationLevel": "All", "defaultRecipientsEnabled": true },
+      { "recipientType": "Requestor", "caller": "Admin",   "level": "Eligibility", "notificationLevel": "All", "defaultRecipientsEnabled": false },
+      { "recipientType": "Approver",  "caller": "Admin",   "level": "Eligibility", "notificationLevel": "All", "defaultRecipientsEnabled": true },
+      { "recipientType": "Admin",     "caller": "Admin",   "level": "Assignment",  "notificationLevel": "All", "defaultRecipientsEnabled": false },
+      { "recipientType": "Requestor", "caller": "Admin",   "level": "Assignment",  "notificationLevel": "All", "defaultRecipientsEnabled": false },
+      { "recipientType": "Approver",  "caller": "Admin",   "level": "Assignment",  "notificationLevel": "All", "defaultRecipientsEnabled": false },
+      { "recipientType": "Admin",     "caller": "EndUser", "level": "Assignment",  "notificationLevel": "All", "defaultRecipientsEnabled": true },
+      { "recipientType": "Requestor", "caller": "EndUser", "level": "Assignment",  "notificationLevel": "All", "defaultRecipientsEnabled": false },
+      { "recipientType": "Approver",  "caller": "EndUser", "level": "Assignment",  "notificationLevel": "All", "defaultRecipientsEnabled": true }
+    ],
+    "_ownerV1": "PARITY AUDIT #4 (2026-09-13): the policy for the OWNER role of every managed group -- v1 set it on every PIM-* group (CSV L875-1022, $PIM_Policy[1]); v2 read only the member policy. Values are v1's: activation PT8H + MFA + Justification, eligible assignment P365D required, active assignment P365D NOT required, nothing on the admin path (BUG-21), the same nine notifications. The engine never manages approval on an owner policy (v1 did not).",
+    "Owner": {
+      "Expiration": {
+        "EndUser_Assignment": { "maximumDuration": "PT8H",  "isExpirationRequired": true },
+        "Admin_Assignment":   { "maximumDuration": "P365D", "isExpirationRequired": false },
+        "Admin_Eligibility":  { "maximumDuration": "P365D", "isExpirationRequired": true }
+      },
+      "Enablement": {
+        "EndUser_Assignment": ["MultiFactorAuthentication", "Justification"],
+        "Admin_Eligibility":  [],
+        "Admin_Assignment":   []
+      },
+      "Notification": [
+        { "recipientType": "Admin",     "caller": "Admin",   "level": "Eligibility", "notificationLevel": "All", "defaultRecipientsEnabled": true },
+        { "recipientType": "Requestor", "caller": "Admin",   "level": "Eligibility", "notificationLevel": "All", "defaultRecipientsEnabled": false },
+        { "recipientType": "Approver",  "caller": "Admin",   "level": "Eligibility", "notificationLevel": "All", "defaultRecipientsEnabled": true },
+        { "recipientType": "Admin",     "caller": "Admin",   "level": "Assignment",  "notificationLevel": "All", "defaultRecipientsEnabled": false },
+        { "recipientType": "Requestor", "caller": "Admin",   "level": "Assignment",  "notificationLevel": "All", "defaultRecipientsEnabled": false },
+        { "recipientType": "Approver",  "caller": "Admin",   "level": "Assignment",  "notificationLevel": "All", "defaultRecipientsEnabled": false },
+        { "recipientType": "Admin",     "caller": "EndUser", "level": "Assignment",  "notificationLevel": "All", "defaultRecipientsEnabled": true },
+        { "recipientType": "Requestor", "caller": "EndUser", "level": "Assignment",  "notificationLevel": "All", "defaultRecipientsEnabled": false },
+        { "recipientType": "Approver",  "caller": "EndUser", "level": "Assignment",  "notificationLevel": "All", "defaultRecipientsEnabled": true }
+      ]
     }
   }
 }

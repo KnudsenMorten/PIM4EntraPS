@@ -1,4 +1,4 @@
-# =============================================================================
+﻿# =============================================================================
 # PIM-DownlinkManager.ps1 -- the MANAGER-side glue for the MSP downlink surface
 # (control #1/#2, framework MSP-2). Read the registry, compose the PURE plan over
 # the SIGNED baseline, edit the per-relationship policy, and run a sync.

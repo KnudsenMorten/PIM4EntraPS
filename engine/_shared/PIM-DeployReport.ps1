@@ -1,4 +1,4 @@
-<#
+﻿<#
   PURE core for the deploy report (tools/setup/New-PimDeployReport.ps1).
 
   🪤 IT LIVES HERE, NOT IN THE SCRIPT, because the script RUNS A DEPLOY when executed -- and

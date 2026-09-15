@@ -31,14 +31,17 @@ path** for when this app plan / Easy Auth / region is down.
    ```
    Grant the app's MI `AcrPull` on the ACR and run `../azure-sql/grant-mi.sql` with
    the app's MI display name so it can reach the DB.
-5. **Manager access**: add your business users/roles to `manager-access.custom.json`
-   + the portal-admins / approver-matrix config. In hosted mode the implicit
-   SuperAdmin default is OFF — unlisted authenticated users fail closed to Reader.
+5. **Manager access**: roles are stored in SQL (`pim.Settings` `ManagerAccess`). Grant your
+   business users/roles with `tools/setup/Set-PimManagerAccess.ps1` (delegated portal admins:
+   `tools/setup/Set-PimPortalAdmins.ps1`), or set `PIM_SuperAdmins` on the app for the first
+   administrator. There is no implicit SuperAdmin — unlisted authenticated users fail closed
+   to Reader.
 
 ## Break-glass (app plan down)
-Run the **local** edition on the mgmt box (no `-Hosted`): loopback, SuperAdmin,
-session token. On the VNet it still reaches the same Azure SQL over the PE (so it
-sees live data); if SQL is also unreachable it falls back to CSV/local cache.
+Run the **local** edition on the mgmt box (no `-Hosted`): loopback, session token,
+roles from the same SQL `ManagerAccess` setting. On the VNet it reaches the same Azure SQL
+over the PE (so it sees live data). It needs that SQL store: if SQL is unreachable the
+Manager refuses to start rather than serving anything that is not the live store.
 That's the emergency path — intentionally separate from the hosted business app.
 
 ## Notes

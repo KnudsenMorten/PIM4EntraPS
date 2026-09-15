@@ -8,25 +8,25 @@
 
       Invoke-PimTenantListRefresh   -> connects to the tenant via the engine
                                        SPN, queries Graph + Resource Graph,
-                                       writes JSON cache files under
-                                       tools/pim-manager/cache/.
+                                       writes the caches to SQL
+                                       pim.TenantCache (one row per kind).
 
       Read-PimTenantListCache       -> returns hashtable of the 4 cached
                                        lists for the UI (no live calls).
 
-    Cache file format is stable:
+    Cache document format is stable:
 
         { "refreshedUtc": "<iso>", "items": [ ... ] }
 
-    The four cache files:
+    The cache kinds:
 
-      entra-roles.json     items: { id, displayName, description, isBuiltIn,
+      entra-roles          items: { id, displayName, description, isBuiltIn,
                                     rolePermissions: [
                                         { allowedResourceActions, excludedResourceActions,
                                           allowedDataActions,    excludedDataActions } ] }
-      aus.json             items: { id, displayName, description }
-      pim-groups.json      items: { id, displayName, description }
-      azure-scopes.json    items: { id, displayName, type, scopePath }
+      aus                  items: { id, displayName, description }
+      pim-groups           items: { id, displayName, description }
+      azure-scopes         items: { id, displayName, type, scopePath }
 
     The entra-roles `rolePermissions` field powers the per-role permission
     drill-down in the Manager Graph tab (Roadmap #2 / #25 -- v2.2.0). It is
@@ -51,43 +51,61 @@
 #>
 
 # ---------------------------------------------------------------------------
-# Cache path helpers
+# Cache store -- SQL pim.TenantCache (one row per kind)
 # ---------------------------------------------------------------------------
+# PIM v2 is SQL-only (2026-09-13). The caches used to be JSON files under
+# tools/pim-manager/cache/<instance>/<kind>.json -- lost on every hosted revision roll and
+# invisible to a scheduler running in another container. They are now rows in pim.TenantCache
+# (Set-/Get-PimSqlTenantCache, PIM-SqlStore.ps1). The database IS the instance, so per-tenant
+# isolation holds without an instance folder.
+# Without a store (offline tests, a bare dot-source) the entries live in this process's memory
+# only, and a write SAYS so -- it is never presented as persistence.
+# 'active-assignments' (§70.1b option 2): { refreshedUtc; rows; counts; surfaceErrors; partial; ok; error; durationMs;
+# source; correlationId } -- written by the scheduler job 'active-assignments-snapshot', read by the Manager's
+# GET /api/active-assignments. See engine/_shared/PIM-ActiveAssignments.ps1.
+# 'drift' (Drift page, 2026-09-14): { refreshedUtc; durationSeconds; total; counts; scopesFailed; ok; scopes[...] } -- written
+# by the scheduler job 'drift-snapshot', read by GET /api/drift. See engine/_shared/PIM-DriftSnapshot.ps1.
+$script:PimTenantCacheKinds = @('entra-roles','aus','pim-groups','azure-scopes','azure-rbac-roles','auth-methods','pim-activity','tenant-org','active-assignments','drift')
+$script:PimTenantCacheMem   = @{}
 
-function Get-PimTenantCacheRoot {
-    if (-not $script:PimManagerRoot) {
-        # _tenantSync.ps1 sits next to Open-PimManager.ps1; PSScriptRoot here is the dot-sourcer's path,
-        # so derive from $PSCommandPath instead.
-        $script:PimManagerRoot = Split-Path -Parent $PSCommandPath
+function Get-PimTenantCacheStoreCs {
+    # The store connection string, or $null when this process has no store.
+    if ("$($script:PimSqlCs)".Trim()) { return "$($script:PimSqlCs)" }
+    if ("$($global:PIM_SqlConnectionString)".Trim()) { return "$($global:PIM_SqlConnectionString)" }
+    if (Get-Command Get-PimSqlSettingsConnectionString -ErrorAction SilentlyContinue) {
+        try { $cs = Get-PimSqlSettingsConnectionString; if ("$cs".Trim()) { return "$cs" } } catch { }
     }
-    $cacheRoot = Join-Path $script:PimManagerRoot 'cache'
-    # MSP multi-instance: each instance is a different tenant, so role names /
-    # AU ids / subscription ids must never bleed across customers. 'local'
-    # keeps the flat cache/ folder for back-compat with existing installs.
-    if ($script:PimInstanceName -and $script:PimInstanceName -ne 'local') {
-        # The instance name becomes a FOLDER name, so it must be a legal path
-        # segment. The SQL-mode synthetic instance label is 'sql:<db>' (set in
-        # Open-PimManager.ps1) -- the ':' is illegal in a Windows path segment,
-        # so Join-Path/New-Item would throw "The given path's format is not
-        # supported" and 500 GET / + /api/preflight. Sanitize every char that
-        # can't live in a path segment (CSV-era code assumed instance names were
-        # already folder-safe). 'sql:<db>' -> 'sql_<db>'; per-instance isolation
-        # is preserved (the mapping is stable + 1:1 for the labels we generate).
-        $safeName = $script:PimInstanceName
-        foreach ($bad in ([System.IO.Path]::GetInvalidFileNameChars())) {
-            $safeName = $safeName.Replace($bad, '_')
-        }
-        $cacheRoot = Join-Path $cacheRoot $safeName
-    }
-    if (-not (Test-Path -LiteralPath $cacheRoot)) {
-        New-Item -ItemType Directory -Path $cacheRoot -Force | Out-Null
-    }
-    return $cacheRoot
+    return $null
 }
 
-function Get-PimTenantCacheFile {
-    param([Parameter(Mandatory)][ValidateSet('entra-roles','aus','pim-groups','azure-scopes','azure-rbac-roles','auth-methods','pim-activity')][string]$Kind)
-    Join-Path (Get-PimTenantCacheRoot) ("{0}.json" -f $Kind)
+function Set-PimTenantCacheEntry {
+    # Persist one cache kind (the whole document). Returns 'sql:pim.TenantCache/<kind>' or 'memory:<kind>'.
+    param(
+        [Parameter(Mandatory)][ValidateScript({ $script:PimTenantCacheKinds -contains $_ })][string]$Kind,
+        [Parameter(Mandatory)][AllowNull()][object]$Value
+    )
+    $cs = Get-PimTenantCacheStoreCs
+    if ($cs -and (Get-Command Set-PimSqlTenantCache -ErrorAction SilentlyContinue)) {
+        Set-PimSqlTenantCache -ConnectionString $cs -Kind $Kind -Value $Value
+        return "sql:pim.TenantCache/$Kind"
+    }
+    $script:PimTenantCacheMem[$Kind] = ($Value | ConvertTo-Json -Depth 12 -Compress)
+    Write-Warning ("  [tenant-cache] '{0}' kept in this process only -- no SQL store is configured (PIM v2 is SQL-only)" -f $Kind)
+    return "memory:$Kind"
+}
+
+function Get-PimTenantCacheEntry {
+    # One cache kind, parsed; $null when absent. Never throws (a cache is a convenience, not a gate).
+    param([Parameter(Mandatory)][ValidateScript({ $script:PimTenantCacheKinds -contains $_ })][string]$Kind)
+    $cs = Get-PimTenantCacheStoreCs
+    if ($cs -and (Get-Command Get-PimSqlTenantCache -ErrorAction SilentlyContinue)) {
+        try { return (Get-PimSqlTenantCache -ConnectionString $cs -Kind $Kind) }
+        catch { Write-Warning ("  [tenant-cache] SQL read of '{0}' failed: {1}" -f $Kind, $_.Exception.Message); return $null }
+    }
+    if ($script:PimTenantCacheMem.ContainsKey($Kind)) {
+        try { return ($script:PimTenantCacheMem[$Kind] | ConvertFrom-Json) } catch { return $null }
+    }
+    return $null
 }
 
 function Write-PimTenantCache {
@@ -95,22 +113,16 @@ function Write-PimTenantCache {
         [Parameter(Mandatory)][string]$Kind,
         [Parameter(Mandatory)][AllowEmptyCollection()][object[]]$Items
     )
-    $file = Get-PimTenantCacheFile -Kind $Kind
     $body = [ordered]@{
         refreshedUtc = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
         items        = @($Items)
     }
-    $json = $body | ConvertTo-Json -Depth 10 -Compress
-    $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
-    $tmp = "$file.tmp"
-    [System.IO.File]::WriteAllText($tmp, $json, $utf8NoBom)
-    Move-Item -LiteralPath $tmp -Destination $file -Force
-    return $file
+    return (Set-PimTenantCacheEntry -Kind $Kind -Value $body)
 }
 
 function Read-PimTenantListCache {
     # Returns hashtable: @{ entraRoles=@{refreshedUtc;items}; aus=@{...}; pimGroups=@{...}; azureScopes=@{...} }
-    # Missing files yield $null entries -- UI must tolerate.
+    # A kind never written yields a $null entry -- UI must tolerate.
     $out = [ordered]@{}
     $kinds = @(
         @{ kind = 'entra-roles';      key = 'entraRoles' },
@@ -120,18 +132,12 @@ function Read-PimTenantListCache {
         @{ kind = 'azure-rbac-roles'; key = 'azureRbacRoles' }
     )
     foreach ($k in $kinds) {
-        $f = Get-PimTenantCacheFile -Kind $k.kind
-        if (Test-Path -LiteralPath $f) {
-            try {
-                $raw = [System.IO.File]::ReadAllText($f, [System.Text.UTF8Encoding]::new($false))
-                if ($raw.Length -gt 0 -and [int][char]$raw[0] -eq 0xFEFF) { $raw = $raw.Substring(1) }
-                $parsed = $raw | ConvertFrom-Json
-                $out[$k.key] = @{
-                    refreshedUtc = $parsed.refreshedUtc
-                    items        = @($parsed.items)
-                }
-            } catch {
-                $out[$k.key] = @{ refreshedUtc = $null; items = @(); error = "$($_.Exception.Message)" }
+        $parsed = $null
+        try { $parsed = Get-PimTenantCacheEntry -Kind $k.kind } catch { $parsed = $null }
+        if ($null -ne $parsed) {
+            $out[$k.key] = @{
+                refreshedUtc = $parsed.refreshedUtc
+                items        = @($parsed.items)
             }
         } else {
             $out[$k.key] = $null
@@ -429,25 +435,92 @@ function Get-PimAzureScopesFromTenant {
         return ,@($items)
     }
 
-    # Management groups via Az cmdlet (Resource Graph has them too, but the
-    # Az cmdlet returns the full id including 'tenants/' boundary nicely).
-    try {
-        $mgs = Get-AzManagementGroup -ErrorAction SilentlyContinue
-        foreach ($m in $mgs) {
-            [void]$items.Add([ordered]@{
-                id          = "$($m.Id)"
-                displayName = "$($m.DisplayName)"
-                type        = 'managementGroup'
-                scopePath   = "$($m.Id)"
-            })
+    # Management groups -- PURE ARM REST.
+    #
+    # 🔴 THIS RAN `Get-AzManagementGroup` UNCONDITIONALLY, and the container has no Az modules
+    # (§19: the engine is REST-only). Unlike the subscription and roleDefinition blocks around it,
+    # which already try ARM REST first and return, this one had NO REST path at all -- so in the
+    # hosted Manager it always threw "not recognized", was caught, warned, and the Azure scope list
+    # silently lost every management group.
+    # 🔑 The ARM endpoint returns the same ids, including the tenants/ boundary the old comment
+    # valued, so nothing downstream changes shape.
+    $mgDone = $false
+    if (Get-Command Invoke-PimArm -ErrorAction SilentlyContinue) {
+        try {
+            $resp = Invoke-PimArm -Method GET -Path '/providers/Microsoft.Management/managementGroups' -ApiVersion '2020-05-01' -All
+            foreach ($m in @($resp)) {
+                if (-not "$($m.id)".Trim()) { continue }
+                [void]$items.Add([ordered]@{
+                    id          = "$($m.id)"
+                    displayName = $(if ("$($m.properties.displayName)".Trim()) { "$($m.properties.displayName)" } else { "$($m.name)" })
+                    type        = 'managementGroup'
+                    scopePath   = "$($m.id)"
+                })
+            }
+            $mgDone = $true
+        } catch {
+            Write-Warning ("  ARM managementGroups list failed: {0}" -f $_.Exception.Message)
         }
-    } catch {
-        Write-Warning ("  Get-AzManagementGroup failed: {0}" -f $_.Exception.Message)
+    }
+    if (-not $mgDone) {
+        # Host/dev convenience only -- never reachable in the container.
+        try {
+            $mgs = Get-AzManagementGroup -ErrorAction SilentlyContinue
+            foreach ($m in $mgs) {
+                [void]$items.Add([ordered]@{
+                    id          = "$($m.Id)"
+                    displayName = "$($m.DisplayName)"
+                    type        = 'managementGroup'
+                    scopePath   = "$($m.Id)"
+                })
+            }
+        } catch {
+            Write-Warning ("  Get-AzManagementGroup failed: {0}" -f $_.Exception.Message)
+        }
     }
 
-    # Subscriptions via Resource Graph.
-    $hasArg = Get-Command Search-AzGraph -ErrorAction SilentlyContinue
-    if ($hasArg) {
+    # Subscriptions via Resource Graph -- PURE ARM REST.
+    #
+    # 🔴 THIS USED `Search-AzGraph`, AN Az MODULE CMDLET, AND THE CONTAINER HAS NO Az MODULES.
+    # The engine is REST-only by design (§19), so in the hosted Manager the cmdlet was never found,
+    # the fast path was skipped every time, and the fallback below ran instead -- which is why the
+    # GUI sat on "Loading..." for ~51s and logged
+    #     Get-AzActiveRoleAssignmentsViaArg: Search-AzGraph ... is not recognized
+    # A capability that is ABSENT rather than broken, degrading silently into a slow path: the same
+    # shape as BUG-134, measured here as a hang rather than a wrong answer.
+    # 🔑 Resource Graph has a plain REST endpoint. Invoke-PimArm is the engine's own ARM client and
+    # is always present, so there is no module to install and no fallback to be slow in.
+    $argOk = $false
+    if (Get-Command Invoke-PimArm -ErrorAction SilentlyContinue) {
+        try {
+            $kql  = "resourcecontainers | where type =~ 'microsoft.resources/subscriptions' | project subscriptionId, name, tenantId | order by name asc"
+            $skip = 0
+            do {
+                $body = @{ query = $kql; options = @{ '$top' = 1000; '$skip' = $skip } }
+                $resp = Invoke-PimArm -Method POST -Path '/providers/Microsoft.ResourceGraph/resources' `
+                            -ApiVersion '2021-03-01' -Body $body
+                $rows = @($resp.data)
+                foreach ($s in $rows) {
+                    [void]$items.Add([ordered]@{
+                        id          = "$($s.subscriptionId)"
+                        displayName = "$($s.name)"
+                        type        = 'subscription'
+                        scopePath   = "/subscriptions/$($s.subscriptionId)"
+                    })
+                }
+                $skip += $rows.Count
+                $argOk = $true
+            } while ($rows.Count -ge 1000)
+        } catch {
+            # 🪤 Say it, do not swallow it into the slow path silently -- that is what hid this for
+            # months. The fallback still runs, but the reason is on the record.
+            Write-Warning ("  Resource Graph REST query failed ({0}) -- falling back to a slower enumeration." -f $_.Exception.Message)
+            $argOk = $false
+        }
+    }
+    if ($argOk) { }
+    elseif (Get-Command Search-AzGraph -ErrorAction SilentlyContinue) {
+        # Host/dev convenience only. Never reached in the container, which has no Az modules.
         try {
             $batch = $null
             $skip = 0
@@ -577,7 +650,7 @@ function Invoke-PimTenantListRefresh {
                 $items = & $step.fn
                 $path  = Write-PimTenantCache -Kind $kind -Items $items
                 if (-not $Quiet) {
-                    Write-Host ("    {0,-22} {1,5} items -> {2}" -f $label, @($items).Count, (Split-Path -Leaf $path)) -ForegroundColor DarkGray
+                    Write-Host ("    {0,-22} {1,5} items -> {2}" -f $label, @($items).Count, $path) -ForegroundColor DarkGray
                 }
                 $results[$kind] = @{ ok = $true; count = @($items).Count; path = $path }
             } catch {

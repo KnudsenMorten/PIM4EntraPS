@@ -1,4 +1,4 @@
-# =============================================================================================
+﻿# =============================================================================================
 # PIM-Reconcile.ps1 -- DOES THE v2 SQL STORE ACTUALLY CONTAIN THE v1 DATA?
 #
 # 🔴 WHY THIS EXISTS. On 2026-08-30 the production Delegation Map showed an empty People column.

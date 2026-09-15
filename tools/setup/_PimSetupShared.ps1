@@ -1,4 +1,4 @@
-#requires -Version 5.1
+﻿#requires -Version 5.1
 <#
 .SYNOPSIS
     Shared helpers for the PIM4EntraPS setup/deploy family (container / VM / MSP /
@@ -213,9 +213,86 @@ $script:PimGraphAppRoles = @{
     'Directory.Read.All'                       = '7ab1d382-f21e-4acd-a863-ba3e13f7da61'
     'User.ReadWrite.All'                       = '741f803b-c850-494e-b5df-cde7c675a1ca'
     'Group.ReadWrite.All'                      = '62a82d76-70ea-41e2-9197-370581804d09'
-    'RoleManagement.ReadWrite.Directory'       = '9e3f62cf-ca93-4989-b6ce-bf83c28f9fe8'
-    'PrivilegedAccess.ReadWrite.AzureADGroup'  = '618b6020-bca8-4de6-99f6-ef445fa4d857'
-    'RoleManagementPolicy.ReadWrite.Directory' = 'a2611786-80b3-417e-adaa-707d4261a5f0'
+    # 🔴 BUG-151 -- THE BROAD ROLE WAS REPLACED BY THE NARROW SET THE RUNNING ENGINE ACTUALLY USES.
+    # `RoleManagement.ReadWrite.Directory` (9e3f62cf-…) is the documented HIGHER-PRIVILEGED
+    # ALTERNATIVE to the schedule roles below (MS Learn); v1 used the narrow set, and §64.2 switched
+    # internal to it after verifying an EntraRoles run completed with NO 403. Leaving the broad role
+    # here meant the next deploy silently re-granted it to all four remaining tenants, undoing that.
+    # 🔑 DERIVED FROM THE RUNNING SYSTEM, NOT FROM A LIST: read live from ca-pim-tick 2026-09-12
+    # ($top=999) -- the identity that actually executes the engine (§64.7 trap 1) and is proven
+    # 403-free. Encoding what a PROVEN environment holds is the only safe direction here, because
+    # under-granting does not fail loudly: it 403s inside a provider and reads as an engine bug.
+    # 🪤 The `.Remove.*` roles are NOT redundant with `.ReadWrite.*`. Graph app-roles do not imply
+    # one another, and adminRemove (revoke/prune) is a separate permission -- dropping them would
+    # have made revoke a silent no-op while assignment kept working, which is the hardest
+    # half-broken state to notice.
+    'RoleEligibilitySchedule.ReadWrite.Directory'  = 'fee28b28-e1f3-4841-818e-2704dc62245f'
+    'RoleEligibilitySchedule.Remove.Directory'     = '79c7e69c-0d9f-4eff-97a8-49170a5a08ba'
+    'RoleAssignmentSchedule.ReadWrite.Directory'   = 'dd199f4a-f148-40a4-a2ec-f0069cc799ec'
+    'RoleAssignmentSchedule.Remove.Directory'      = 'd3495511-98b7-4df3-b317-4e35c19f6129'
+    'RoleManagement.Read.All'                      = 'c7fbd983-d9aa-4fa7-84b8-17382c103bc4'
+    'RoleManagementPolicy.Read.Directory'          = 'fdc4c997-9942-4479-bfcb-75a36d1138df'
+    'RoleManagementPolicy.Read.AzureADGroup'       = '69e67828-780e-47fd-b28c-7b27d14864e6'
+    'PrivilegedEligibilitySchedule.Remove.AzureADGroup' = '55745561-7572-4314-a737-a2c2a1b0dd2e'
+    'PrivilegedAssignmentSchedule.Remove.AzureADGroup'  = '55d1104b-3821-413d-b3ca-e2393d333cd3'
+    # 🔴 BUG-148 -- THIS ENTRY WAS MISLABELLED: id 618b6020-… is
+    # PrivilegedEligibilitySchedule.ReadWrite.AzureADGroup, NOT PrivilegedAccess.ReadWrite.AzureADGroup
+    # (2f6817f8-…). Third wrong id in this one map, found by the live name-vs-id check in
+    # tests/Test-PimGraphRoleMap.ps1. The GRANT was harmless -- eligibility-schedule is what
+    # PIM-for-Groups eligible assignment actually needs, which is why nesting works -- but the map
+    # said one thing and did another, so nobody could tell what an environment really held.
+    # Relabelled to the truth; the id is unchanged, so this alters no existing grant.
+    'PrivilegedEligibilitySchedule.ReadWrite.AzureADGroup' = '618b6020-bca8-4de6-99f6-ef445fa4d857'
+    # 🔑 BUG-149 -- THE MAP DID NOT COVER WHAT THE CODE CALLS. Derived 2026-09-12 by enumerating
+    # every `Invoke-PimGraph -Path` in engine/ + tools/ and mapping endpoint -> permission, rather
+    # than trusting either existing list. Each id resolved from the LIVE Graph service principal.
+    # Operator: *"in my opininn you are lacking many pemissions ... i have 20+ permissions in pim v1"*
+    # -- correct: the runtime identity held 9 and the code needs ~16. Without these the provider
+    # named against each one is a permanent, swallowed 403:
+    'PrivilegedAccess.ReadWrite.AzureADGroup'  = '2f6817f8-7b12-4f0f-bc18-eeaf60705a9e'   # group PIM (v1 parity; the SPN list already requires it)
+    'PrivilegedAssignmentSchedule.ReadWrite.AzureADGroup' = '41202f2c-f7ab-45be-b001-85c9728b9d69' # ACTIVE group assignments (/assignmentScheduleRequests)
+    'AppRoleAssignment.ReadWrite.All'          = '06b708a9-e830-4db3-a914-8e69da51d44f'   # EntraAppRole provider -> /servicePrincipals/{id}/appRoleAssignedTo
+    'Application.Read.All'                     = '9a5d68dd-52b0-4cc2-bd40-abcf44ac3a30'   # ...and reading the target servicePrincipal first
+    'RoleManagement.ReadWrite.Defender'        = '8b7e8c0a-7e9d-4049-97ec-04b5e1bcaf05'   # DefenderXdrRoles provider -> /roleManagement/defender/*
+    'DeviceManagementRBAC.ReadWrite.All'       = 'e330c4f0-4170-414e-a55a-2f022ec2b57b'   # IntuneRoles provider -> /deviceManagement/role*
+    # ⚠️ This WIDENS what every deploy grants the container identity. It is deliberate: each role
+    # above is required by a provider that is otherwise inert, and the scheduler now runs those
+    # providers (the workload jobs). AccessReview.ReadWrite.All is still deliberately NOT here --
+    # docs hold it back until live decision recording is wanted (read is enough for the provider).
+    # 🔴 SEC-18 -- THIS ID WAS WRONG, AND IT WAS THE WRONG ROLE ENTIRELY. It read
+    # 'a2611786-80b3-417e-adaa-707d4261a5f0', which is **CallRecord-PstnCalls.Read.All** -- so every
+    # environment granted a privacy-sensitive PSTN call-records permission nobody asked for, and never
+    # got the role-management-policy permission this line is named after. Resolved against the live
+    # Microsoft Graph service principal 2026-09-08; wrong since e29856d5 (2026-06-15).
+    # 🪤 A hardcoded id here is NEVER validated: Install-PimEngineAppRegistration only looks a name up
+    # in the live catalog when this map does NOT contain it, so a wrong entry is authoritative forever
+    # -- the lookup that would have caught this is skipped precisely because the map "already knows".
+    # This table also feeds Grant-PimMiGraph, which grants the CONTAINER MANAGED IDENTITY on every
+    # deploy, so the blast radius was existing environments too, not just new onboardings.
+    # ⚠️ Correcting this does NOT revoke the stray grant where it already landed -- these scripts only
+    # add. Removing CallRecord-PstnCalls.Read.All from principals that already hold it is a separate,
+    # live-tenant change.
+    #
+    # 🔴 BUG-146 -- SEC-18's CORRECTION DELETED THE ENTRY INSTEAD OF FIXING ITS ID, so the role this
+    # whole comment is about was absent from the map entirely: nine entries, and no
+    # RoleManagementPolicy.ReadWrite.AzureADGroup anywhere. The comment survived and reads like a
+    # header for a line that no longer exists, which is why it looked corrected.
+    # 🪤 THE CONSEQUENCE IS THE OPPOSITE OF WHAT SEC-18's NOTE PROMISES. Grant-PimMiGraph grants the
+    # container MANAGED IDENTITY -- the principal that actually calls Graph in the hosted topology --
+    # so with the entry gone, re-running the deploy could never grant it. Measured on internal
+    # 2026-09-12: ca-pim-tick and ca-pim-manager each hold 9 Graph roles and are missing exactly
+    # this one, and every run logs `GroupsPolicies: no member policy for '<group>'` -- a swallowed
+    # 403 -- on every policy-managed group. The documented remedy ("re-run the deploy") was inert.
+    # 🔑 Id resolved from the LIVE Microsoft Graph service principal 2026-09-12, not from memory --
+    # which also re-confirmed SEC-18's story: a2611786-80b3-417e-adaa-707d4261a5f0 really is
+    # CallRecord-PstnCalls.Read.All. Guarded now by tests/Test-PimGraphRoleMap.ps1.
+    'RoleManagementPolicy.ReadWrite.AzureADGroup' = 'b38dcc4d-a239-4ed6-aa84-6c65b284f97c'
+    # 🔴 BUG-147 -- TWO LISTS, ONE CONCEPT. setup/Grant-PimGraphAppRoles.ps1 lists
+    # AccessReview.Read.All as required; this map (the one that grants the RUNTIME identity) omitted
+    # it, so the AccessReviews provider 403s and is a permanent no-op in every hosted environment --
+    # while the doc that calls it required points at the SPN list, which is not what executes.
+    'AccessReview.Read.All'                    = 'd07a8cc0-3d51-4b77-b3b0-32704d1f69fa'
+    'RoleManagementPolicy.ReadWrite.Directory' = '31e08e0a-d3f7-4ca2-ac39-7343fb83e8ad'
     'AdministrativeUnit.ReadWrite.All'         = '5eb59dd3-1da2-4329-8733-9dabdc435916'
     'UserAuthenticationMethod.ReadWrite.All'   = '50483e42-d915-4231-9639-7fdb7fd190e5'
     # BUG-82: reading the tenant's default verified domain (/domains) needs its own role -- none of
@@ -225,11 +302,72 @@ $script:PimGraphAppRoles = @{
     # so the downlink refuses to stage admins rather than guess a domain -- correct, and fatal to
     # the whole S6 apply. Id read from the live Graph service principal, not from memory.
     'Domain.Read.All'                          = 'dbb9058a-0e50-45d7-ae91-66909b5d4664'
+    # 2026-09-12: the tenant's Temporary Access Pass policy (one-time use, lifetime range) is read so a
+    # TAP request conforms to it (PIM-TapPolicy.ps1). Without this the first TAP of every run takes a
+    # 400 "Tenant Policy does not allow multiple use temporary access pass" plus a retry (measured on
+    # internal). Id from the Microsoft Graph permissions reference -- NOT yet read back from the live
+    # Graph service principal the way the ids above were; confirm on the next deploy's grant step.
+    'Policy.Read.All'                          = '246dd0d5-5bd0-4def-940b-0421030a5b68'
+    # 🔴 §70.16 (2026-09-13) -- BUG-151's least-privilege switch REMOVED THE ONE ROLE THAT CREATES ROLE-ASSIGNABLE
+    # GROUPS. It was verified only against an EntraRoles run ("no 403"), and no group was created that day. The
+    # schedule pair covers role ASSIGNMENT; creating a group with isAssignableToRole=true (and managing the members
+    # and owners of one) additionally needs RoleManagement.ReadWrite.Directory -- Group.ReadWrite.All is NOT enough.
+    # Measured on internal: the operator's new PIM-ROLE-test1 (all 26 ROLE-* definitions are role-assignable) ->
+    # POST /v1.0/groups -> 403 Authorization_RequestDenied from ca-pim-tick, and every delegation on it failed after.
+    # Granted to ca-pim-tick 2026-09-13 14:55Z on the operator's order ("ok, add it"); id read from the LIVE Graph SP.
+    'RoleManagement.ReadWrite.Directory'       = '9e3f62cf-ca93-4989-b6ce-bf83c28f9fe8'
+}
+
+# ---------------------------------------------------------------------------
+# 🔒 §65.4 -- THE MANAGER'S SET. READ-ONLY, DELIBERATELY, AND SEPARATE FROM THE ENGINE'S.
+#
+# Operator, 2026-09-12: *"remember to reduce the pim manager permissions to read only"* /
+# *"as the engine/queue must do the actual change"*.
+#
+# 🪤 WHY A SECOND SET AND NOT A FLAG. Grant-PimMiGraph used to apply ONE map to every identity it
+# was handed -- Setup-PimContainers calls it for the Manager app AND for the tick job. So the
+# 26 -> 13 least-privilege narrowing applied by hand to ca-pim-manager on 2026-09-12 would have
+# SILENTLY REVERTED on the next deploy. Least privilege that the tooling undoes is not least
+# privilege; it is a manual step nobody will repeat on 30 customers.
+#
+# 🔑 THIS IS ONLY SAFE BECAUSE THE MANAGER NO LONGER WRITES (§65.1-§65.3). Its five write paths --
+# three revokes, TAP reset, session revoke -- now enqueue, and the ENGINE applies them. Narrowing
+# these roles BEFORE that landed would have turned five working features into silent 403s, which is
+# the failure class §61-§63 exist to end. Order matters; see §65.0.
+#
+# ⚠️ DO NOT ADD A `*.ReadWrite.*` OR `*.Remove.*` ROLE HERE. If the Manager appears to need one,
+# the correct fix is a queued action in PIM-QueueActions.ps1, not a wider grant.
+# tests/Test-PimSetupHosting.ps1 asserts this negatively, because a widening here is invisible:
+# nothing fails, the GUI just quietly regains the ability to write to the directory.
+#
+# Every id resolved from the LIVE Microsoft Graph service principal 2026-09-12 (SEC-18: a
+# hardcoded id is never validated, so a wrong one is authoritative forever).
+# ---------------------------------------------------------------------------
+$script:PimGraphAppRolesManager = @{
+    'Directory.Read.All'                              = '7ab1d382-f21e-4acd-a863-ba3e13f7da61'
+    'Domain.Read.All'                                 = 'dbb9058a-0e50-45d7-ae91-66909b5d4664'
+    'User.Read.All'                                   = 'df021288-bdef-4463-88db-98f22de89214'
+    'Group.Read.All'                                  = '5b567255-7703-4780-807c-7be8301ae99b'
+    'AdministrativeUnit.Read.All'                     = '134fd756-38ce-4afd-ba33-e9623dbe66c2'
+    'Application.Read.All'                            = '9a5d68dd-52b0-4cc2-bd40-abcf44ac3a30'
+    'AccessReview.Read.All'                           = 'd07a8cc0-3d51-4b77-b3b0-32704d1f69fa'
+    'RoleManagement.Read.All'                         = 'c7fbd983-d9aa-4fa7-84b8-17382c103bc4'
+    'RoleManagementPolicy.Read.Directory'             = 'fdc4c997-9942-4479-bfcb-75a36d1138df'
+    'RoleManagementPolicy.Read.AzureADGroup'          = '69e67828-780e-47fd-b28c-7b27d14864e6'
+    'RoleEligibilitySchedule.Read.Directory'          = 'ff278e11-4a33-4d0c-83d2-d01dc58929a5'
+    'RoleAssignmentSchedule.Read.Directory'           = 'd5fe8ce8-684c-4c83-a52c-46e882ce4be1'
+    'PrivilegedAccess.Read.AzureADGroup'              = '01e37dc9-c035-40bd-b438-b2879c4870a6'
+    'PrivilegedEligibilitySchedule.Read.AzureADGroup' = 'edb419d6-7edc-42a3-9345-509bfdf5d87c'
+    'PrivilegedAssignmentSchedule.Read.AzureADGroup'  = 'cd4161cb-f098-48f8-a884-1eda9a42434c'
 }
 
 function Get-PimGraphAppRoleMap {
-    [CmdletBinding()] param()
-    $h = @{}; foreach ($k in $script:PimGraphAppRoles.Keys) { $h[$k] = $script:PimGraphAppRoles[$k] }
+    # -RoleSet Engine (default) = the full set the tick job needs to reconcile the directory.
+    #          Manager          = the read-only set (§65.4).
+    # The default is Engine so every existing caller keeps its current behaviour untouched.
+    [CmdletBinding()] param([ValidateSet('Engine','Manager')][string]$RoleSet = 'Engine')
+    $src = if ($RoleSet -eq 'Manager') { $script:PimGraphAppRolesManager } else { $script:PimGraphAppRoles }
+    $h = @{}; foreach ($k in $src.Keys) { $h[$k] = $src[$k] }
     return $h
 }
 
@@ -246,9 +384,39 @@ function Grant-PimMiGraph {
       'Already exists' remains the ONE tolerated outcome, because re-running the deploy is
       normal and must stay idempotent. Everything else now throws and names the role.
     #>
-    [CmdletBinding()] param([Parameter(Mandatory)][string]$MiObjectId)
-    $gtok = az account get-access-token --resource https://graph.microsoft.com --query accessToken -o tsv 2>$null
+    [CmdletBinding()] param(
+        [Parameter(Mandatory)][string]$MiObjectId,
+        # BUG-150: pin the token's tenant. Both optional so existing callers are unchanged, but a
+        # caller that knows the target SHOULD pass them -- see the refusal below.
+        [string]$SubscriptionId,
+        [string]$ExpectedTenantId,
+        # §65.4 -- WHICH SET this identity gets. Engine (default) = the full reconciling set; Manager =
+        # the read-only set. Defaulting to Engine keeps every pre-§65 caller behaving exactly as before.
+        [ValidateSet('Engine','Manager')][string]$RoleSet = 'Engine'
+    )
+    # 🔴 BUG-150 -- THIS MINTED A GRAPH TOKEN WITH NO TENANT PINNING, AND THEN GRANTED WITH IT.
+    # `az account get-access-token` with no --subscription uses the CLI's DEFAULT context. On a host
+    # that holds logins for more than one tenant -- which the build host does -- that default is
+    # frequently a DIFFERENT COMPANY's tenant (CLAUDE.md records it landing on ExpertsLiveDK, and
+    # SEC-12 is the same failure in the engine's own token path). The best case is a confusing
+    # failure; the worst is issuing app-role grants against the wrong directory.
+    # 🔑 So: pin the subscription when the caller knows it, and ALWAYS decode the token and assert
+    # the tenant before using it. Verification, not hope -- the same rule the engine already follows.
+    $tokArgs = @('account','get-access-token','--resource','https://graph.microsoft.com','-o','json')
+    if ("$SubscriptionId".Trim()) { $tokArgs += @('--subscription', "$SubscriptionId") }
+    $gtokRaw = (& az @tokArgs 2>$null) | ConvertFrom-Json
+    $gtok = "$($gtokRaw.accessToken)"
     if (-not $gtok) { throw "Grant-PimMiGraph: no Graph token (run 'az login' as a role-assigner)." }
+    if ("$ExpectedTenantId".Trim()) {
+        $seg = $gtok.Split('.')[1].Replace('-','+').Replace('_','/')
+        switch ($seg.Length % 4) { 2 { $seg += '==' } 3 { $seg += '=' } }
+        $claims = $null
+        try { $claims = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($seg)) | ConvertFrom-Json } catch { }
+        if (-not $claims -or "$($claims.tid)" -ne "$ExpectedTenantId") {
+            throw ("Grant-PimMiGraph: REFUSING to grant -- the Graph token is for tenant '{0}', expected '{1}'. " -f "$($claims.tid)", "$ExpectedTenantId") +
+                  "Pass -SubscriptionId for the target tenant, or 'az login' to it. (A grant issued against the wrong directory is not recoverable by re-running this.)"
+        }
+    }
     $gh = @{ Authorization = "Bearer $gtok"; 'Content-Type' = 'application/json' }
     $graphSp = (Invoke-RestMethod -Headers $gh -Uri "https://graph.microsoft.com/v1.0/servicePrincipals?`$filter=appId eq '00000003-0000-0000-c000-000000000000'").value[0]
     # 🪤 DO NOT go back to "POST everything and tolerate an 'already exists' error string". Graph
@@ -267,6 +435,11 @@ function Grant-PimMiGraph {
     }
     $have = Get-PimAssignedRoleIds -Headers $gh -Uri $assignUri
     if ($null -eq $have) { $have = @() }
+
+    # §65.4 -- grant THIS identity's set, not "the" set. The Manager gets read-only roles; the
+    # engine gets the full reconciling set. Resolved once here so every loop below agrees.
+    $roles = Get-PimGraphAppRoleMap -RoleSet $RoleSet
+    Write-Host "    role set: $RoleSet ($($roles.Count) app-role(s))" -ForegroundColor DarkGray
 
     $failed = [System.Collections.Generic.List[string]]::new()
     $granted = 0
@@ -336,7 +509,31 @@ function Resolve-PimMiAppId {
         [int]$InitialDelaySeconds  = 2,
         [int]$MaxDelaySeconds      = 30,
         # Default: the real directory read. Returns '' when the SP is not visible yet.
-        [scriptblock]$Lookup = { param($oid) "$(az ad sp show --id $oid --query appId -o tsv 2>$null)".Trim() },
+        # 🔴 IT ALSO RECORDS WHY IT FAILED. The old body ended in `2>$null`, which threw the reason
+        # away and made "the identity has not replicated yet" and "you are not allowed to read the
+        # directory" produce the identical empty string. Measured at a live customer 2026-09-08: a
+        # deploy SPN with Owner but no Graph roles hit "Insufficient privileges to complete the
+        # operation", and this function retried it EIGHT times over 120s before failing with
+        # "a newly-created managed identity is eventually consistent" -- a confident, wrong
+        # diagnosis of a permissions problem. BUG-131 states the rule this broke: retrying a
+        # permissions error just turns a clear failure into a slow one.
+        [scriptblock]$Lookup = {
+            param($oid)
+            $script:PimMiLookupErr = ''
+            $out = & az ad sp show --id $oid --query appId -o tsv 2>&1
+            if ($LASTEXITCODE -ne 0) {
+                # 🪤 $out IS EMPTY UNDER THE az SHADOW, and the shadow is what every setup script
+                # runs with. _PimAz's Invoke-PimAz splits stderr out of its return value (that is
+                # how it stays quiet on success), so `2>&1` here captures nothing and this variable
+                # stayed '' -- which made the refusal check below dead code for exactly the case it
+                # was written for. $global:PimAzLastError is the shadow's published failure text;
+                # $out remains the fallback for a real, unshadowed az.
+                $script:PimMiLookupErr = (@($out) -join ' ').Trim()
+                if (-not $script:PimMiLookupErr) { $script:PimMiLookupErr = "$($global:PimAzLastError)".Trim() }
+                return ''
+            }
+            "$out".Trim()
+        },
         [scriptblock]$Sleep  = { param($sec) Start-Sleep -Seconds $sec }
     )
     if ($MaxAttempts -lt 1) { throw 'Resolve-PimMiAppId: -MaxAttempts must be at least 1.' }
@@ -347,6 +544,17 @@ function Resolve-PimMiAppId {
         if ($appId) {
             if ($attempt -gt 1) { Write-Host "    directory caught up after $waited s ($attempt attempts)" -ForegroundColor DarkGray }
             return $appId
+        }
+        # A REFUSAL IS NOT A DELAY. Waiting cannot grant a permission, so stop immediately and say
+        # what is actually missing. ($script:PimMiLookupErr stays empty for an injected -Lookup, so
+        # the offline tests are unaffected.)
+        if ("$script:PimMiLookupErr" -match 'Insufficient privileges|Authorization_RequestDenied|Forbidden|\b403\b') {
+            throw ("Cannot read the directory to resolve '$What' identity $ObjectId -- the DEPLOYING " +
+                   "identity was REFUSED, not out of date: `"$script:PimMiLookupErr`". Waiting will not fix " +
+                   "this. Grant the deploy identity Microsoft Graph Directory.Read.All (and " +
+                   "AppRoleAssignment.ReadWrite.All, which the next step needs to grant this managed " +
+                   "identity its own Graph roles). An SPN created with 'az ad sp create-for-rbac --role " +
+                   "Owner' holds Azure RBAC and NOTHING in Graph.")
         }
         if ($attempt -eq $MaxAttempts) { break }
         Write-Host "    identity $ObjectId not in the directory yet -- retry in ${delay}s ($attempt/$MaxAttempts)" -ForegroundColor DarkGray
@@ -393,9 +601,9 @@ function Resolve-PimAcrImageDigest {
     # `az acr manifest show-metadata` is the current command; `az acr repository show` is the
     # older one that still ships. Try both before concluding the tag is absent -- an az version
     # difference must not read as "the image was never built".
-    $sa = @(); if ("$SubscriptionId".Trim()) { $sa = @('--subscription', "$SubscriptionId".Trim()) }
+    $acrSubArgs = @(); if ("$SubscriptionId".Trim()) { $acrSubArgs = @('--subscription', "$SubscriptionId".Trim()) }
     if (-not (Test-PimImageDigest -Digest "$digest".Trim())) {
-        $digest = az acr repository show @sa -n $AcrName --image $ref --query digest -o tsv --only-show-errors 2>$null
+        $digest = az acr repository show @acrSubArgs -n $AcrName --image $ref --query digest -o tsv --only-show-errors 2>$null
     }
     $digest = "$digest".Trim()
     if (-not (Test-PimImageDigest -Digest $digest)) {
@@ -411,13 +619,23 @@ function Set-PimSqlNoAutoPause {
     param(
         [Parameter(Mandatory)][string]$ResourceGroup,
         [Parameter(Mandatory)][string]$SqlServerName,
-        [Parameter(Mandatory)][string]$SqlDatabase
+        [Parameter(Mandatory)][string]$SqlDatabase,
+        # Same shape as Resolve-PimImageDigest above: explicit wins, else the deploy's own env var.
+        # Both calls below were bare, and a bare read on a host with two contexts answers about
+        # somebody else's subscription -- here that means "could not read autoPauseDelay", which the
+        # function treats as "probably provisioned compute" and skips. A wrong context would have
+        # silently left serverless auto-pause ON.
+        [string]$SubscriptionId = $(if ($env:PIM_SUBSCRIPTION_ID) { $env:PIM_SUBSCRIPTION_ID } else { '' })
     )
-    $delay = az sql db show -g $ResourceGroup -s $SqlServerName -n $SqlDatabase --query autoPauseDelay -o tsv 2>$null
+    # Named "...sub..." on purpose: that is this codebase's scoping convention, and the hygiene gate
+    # recognises a scoped call by it. A splat called $sa scopes the call correctly and still reads
+    # as unscoped to the gate -- correct code that fails its own guard is a guard that gets muted.
+    $subArgs = @(); if ("$SubscriptionId".Trim()) { $subArgs = @('--subscription', "$SubscriptionId".Trim()) }
+    $delay = az sql db show @subArgs -g $ResourceGroup -s $SqlServerName -n $SqlDatabase --query autoPauseDelay -o tsv 2>$null
     if (-not $delay) { Write-Warning "  could not read autoPauseDelay for $SqlServerName/$SqlDatabase (skip; may be provisioned compute)."; return }
     if ([string]$delay -eq '-1') { Write-Host "  SQL persistent compute already enforced (autoPauseDelay = -1)." -ForegroundColor DarkGray; return }
     if ($PSCmdlet.ShouldProcess("$SqlServerName/$SqlDatabase", 'disable serverless auto-pause (set autoPauseDelay -1)')) {
-        az sql db update -g $ResourceGroup -s $SqlServerName -n $SqlDatabase --auto-pause-delay -1 -o none 2>$null
+        az sql db update @subArgs -g $ResourceGroup -s $SqlServerName -n $SqlDatabase --auto-pause-delay -1 -o none 2>$null
         Write-Host "  SQL auto-pause disabled (autoPauseDelay -1) -- persistent compute enforced." -ForegroundColor Green
     }
 }
@@ -563,7 +781,7 @@ function Set-PimPrivateDnsZone {
     $zoneOk = az network private-dns zone show -g $ResourceGroup -n $plan.zoneName --subscription $SubscriptionId `
                   --query name -o tsv --only-show-errors 2>$null
     if (-not "$zoneOk".Trim()) {
-        throw "could not create or read private DNS zone '$($plan.zoneName)' in $ResourceGroup. Without it the Manager FQDN does not resolve for any client (BUG-49)."
+        throw "could not create or read private DNS zone '$($plan.zoneName)' in $ResourceGroup. Without it the Manager FQDN does not resolve for any client."
     }
 
     foreach ($r in $plan.records) {
@@ -622,7 +840,7 @@ function Set-PimPrivateDnsZone {
     $apex = az network private-dns record-set a show -g $ResourceGroup -z $plan.zoneName -n '@' `
                 --subscription $SubscriptionId --query "aRecords[0].ipv4Address" -o tsv --only-show-errors 2>$null
     if ("$apex".Trim() -ne $plan.staticIp) {
-        throw "private DNS zone '$($plan.zoneName)' apex resolves to '$apex', not $($plan.staticIp). Do NOT assume the records landed (BUG-49)."
+        throw "private DNS zone '$($plan.zoneName)' apex resolves to '$apex', not $($plan.staticIp). Do NOT assume the records landed."
     }
     Write-Host "    zone verified: $($plan.zoneName) apex -> $apex" -ForegroundColor DarkGray
 }
@@ -662,15 +880,15 @@ function Grant-PimMiAzureRbac {
     $failed = New-Object System.Collections.Generic.List[string]
     $granted = 0
     foreach ($a in $plan.assignments) {
-        $have = az role assignment list --assignee $a.principalId --scope $a.scope --role $a.role `
+        $have = az role assignment list --subscription $SubscriptionId --assignee $a.principalId --scope $a.scope --role $a.role `
                     --query "[0].roleDefinitionName" -o tsv --only-show-errors 2>$null
         if ("$have".Trim() -eq $a.role) { continue }
         if (-not $PSCmdlet.ShouldProcess("$($a.principalName) @ $($a.scope)", "grant $($a.role)")) { continue }
-        az role assignment create --assignee-object-id $a.principalId --assignee-principal-type ServicePrincipal `
+        az role assignment create --subscription $SubscriptionId --assignee-object-id $a.principalId --assignee-principal-type ServicePrincipal `
             --role $a.role --scope $a.scope -o none --only-show-errors 2>$null
         # Read back rather than trust the exit code: a duplicate assignment exits non-zero
         # (RoleAssignmentExists) and IS success, and a silent no-op exits zero and is not.
-        $now = az role assignment list --assignee $a.principalId --scope $a.scope --role $a.role `
+        $now = az role assignment list --subscription $SubscriptionId --assignee $a.principalId --scope $a.scope --role $a.role `
                    --query "[0].roleDefinitionName" -o tsv --only-show-errors 2>$null
         if ("$now".Trim() -eq $a.role) { $granted++ }
         else { $failed.Add("$($a.role) @ $($a.scopeKind) $($a.scope)") | Out-Null }

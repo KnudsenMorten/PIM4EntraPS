@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
   Run a PIM deployment (or just collect state) and produce ONE redacted report file that is safe to
   send back to the vendor from a CUSTOMER tenant.
@@ -151,7 +151,7 @@ Add-Section $sb '5. WHAT TO SEND BACK' {
     "If the deploy failed, the useful part is section 2 (the step table + the first error) and"
     "section 4 (the container's own log). Section 3 shows whether the shape is right:"
     "  minReplicas 0 on ca-pim-manager and a ca-pim-tick JOB = the on-demand shape."
-    "  minReplicas 1 on six apps = the always-on matrix, which is ~`$205-230/environment/month."
+    "  minReplicas 1 on six apps = the always-on matrix, which costs materially more."
 }
 
 $final = Get-PimRedactedText -Text $sb.ToString() -Identifiers:$RedactIdentifiers

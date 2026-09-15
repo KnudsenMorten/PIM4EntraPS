@@ -1,4 +1,4 @@
-# PIM-DateExpression.ps1 -- shared date-expression resolver (LIFECYCLE-GOVERNANCE § 1).
+﻿# PIM-DateExpression.ps1 -- shared date-expression resolver (LIFECYCLE-GOVERNANCE § 1).
 # Dot-sourced by engine/_shared/PIM-Functions.psm1 AND by the pim-manager
 # (Open-PimManager.ps1 / _validator.ps1), so the GUI preview, the validator,
 # and the engine all resolve expressions identically. Pure function -- no

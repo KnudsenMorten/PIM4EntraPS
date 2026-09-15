@@ -5,9 +5,15 @@
   (/api/jobs) renders a populated, representative view without a live scheduler loop.
 
 .DESCRIPTION
-  Writes two files next to each other (the same pair the live scheduler writes):
-    * pim-scheduler-state.json  -- the configured schedule with last/next run stamps
-    * pim-scheduler-runs.json   -- a bounded ring of recent run records (incl. logs)
+  Writes the same two documents the live scheduler writes, to the SAME store: SQL
+  pim.Settings 'SchedulerState' (the configured schedule with last/next run stamps) and
+  'JobRunHistory' (a bounded ring of recent run records, incl. logs).
+
+  PIM v2 is SQL-only (2026-09-13): there are no pim-scheduler-state.json /
+  pim-scheduler-runs.json files any more. Pass -ConnectionString to seed a store. Without
+  it the seed lands in the CALLING process's memory only -- dot-source the script
+  (`. .\Seed-PimSchedulerRuns.ps1`) from a test that then reads Get-PimJobsStatus in the
+  same process.
 
   Coverage by design: one IN-PROGRESS run (an engine full-reconcile mid-flight, no
   finishedUtc) so the GUI's "in-progress at the TOP" ordering + live-tail are exercised,
@@ -17,37 +23,37 @@
 
   This is a DEMO / TEST seed, not customer data: no tenant/customer specifics.
 
-.PARAMETER StateDir
-  Directory to write the two JSON files into. Defaults to the solution's
-  output\scheduler dir -- the same location Start-PimScheduler.ps1 and the Manager
-  (/api/jobs) default to, so a seed shows up in the GUI immediately.
+.PARAMETER ConnectionString
+  The SQL store to seed (pim.Settings). Omit to seed the calling process's memory only.
 
 .PARAMETER NowUtc
   Reference "now" (UTC) the relative timestamps are computed from. Defaults to now.
 
 .OUTPUTS
-  The state-file path (string).
+  'sql' or 'memory' -- where the seed was written.
 #>
 [CmdletBinding()]
 param(
-    [string]$StateDir,
+    [string]$ConnectionString,
     [datetime]$NowUtc = [datetime]::UtcNow
 )
 $ErrorActionPreference = 'Stop'
-$here    = Split-Path -Parent $MyInvocation.MyCommand.Path
-if (-not $here) { $here = 'C:\SCRIPTS\AutomateIT\SOLUTIONS\PIM4EntraPS\tools\pim-scheduler' }
+$here    = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent $MyInvocation.MyCommand.Path }
 $shared  = Resolve-Path "$here\..\..\engine\_shared"
 . "$shared\PIM-Scheduler.ps1"
 
-if (-not "$StateDir".Trim()) {
-    $StateDir = Join-Path (Resolve-Path "$here\..\..").Path 'output\scheduler'
+$seedTarget = 'memory'
+if ("$ConnectionString".Trim()) {
+    . "$shared\PIM-SqlStore.ps1"
+    $script:SeedCs = $ConnectionString
+    # The Get-/Set-PimSetting bridge the scheduler library persists through (the Manager and
+    # Start-PimScheduler each define the same pair over their own store).
+    function Get-PimSetting { param([Parameter(Mandatory)][string]$Name) Get-PimSqlSetting -ConnectionString $script:SeedCs -Name $Name }
+    function Set-PimSetting { param([Parameter(Mandatory)][string]$Name, [object]$Value) Set-PimSqlSetting -ConnectionString $script:SeedCs -Name $Name -Value $Value }
+    $seedTarget = 'sql'
 }
-if (-not (Test-Path -LiteralPath $StateDir)) { [void](New-Item -ItemType Directory -Path $StateDir -Force) }
 
 $now = $NowUtc.ToUniversalTime()
-$statePath = Join-Path $StateDir 'pim-scheduler-state.json'
-$global:PIM_SchedulerStatePath = $statePath
-
 # --- build the configured schedule with realistic last/next-run stamps ----------
 $schedule = @(Get-PimDefaultJobSchedule)
 $jobs = New-Object System.Collections.Generic.List[object]
@@ -117,7 +123,5 @@ Seed-Run -Name 'full-reconcile' -Type 'engine-full' -Scope 'All' -Ok $true -Ran 
     -Detail 'engine Full [All] running ...' -Started $now.AddMinutes(-2) -DurMs 0 -Status 'running' `
     -Log @('result.ok      = True','starting full reconcile of all scopes','phase Admins ... done','phase GroupsAssignment ... done','phase EntraRoles ... in progress')
 
-Write-Host ("[seed] wrote scheduler state + run history to {0}" -f $StateDir) -ForegroundColor Green
-Write-Host ("[seed]   state:   {0}" -f $statePath) -ForegroundColor DarkGray
-Write-Host ("[seed]   history: {0} ({1} records, 1 in-progress)" -f (Get-PimRunHistoryPath), @(Get-PimJobRunHistory).Count) -ForegroundColor DarkGray
-return $statePath
+Write-Host ("[seed] wrote scheduler state + run history to {0} ({1} run records, 1 in-progress)" -f $(if ($seedTarget -eq 'sql') { 'SQL pim.Settings (SchedulerState / JobRunHistory)' } else { "this process's memory (no -ConnectionString)" }), @(Get-PimJobRunHistory).Count) -ForegroundColor Green
+return $seedTarget

@@ -1,4 +1,4 @@
-#Requires -Version 5.1
+﻿#Requires -Version 5.1
 <#
 .SYNOPSIS
     §36.3 phase 1b -- ONE-SHOT import of the retired filesystem audit trail
