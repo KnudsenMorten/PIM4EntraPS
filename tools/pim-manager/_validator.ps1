@@ -1,4 +1,4 @@
-#Requires -Version 5.1
+﻿#Requires -Version 5.1
 # IMP-02: the locale-safe stamp reader. Loaded defensively so this file stays correct
 # when it is dot-sourced without the full PIM-Functions module.
 if (-not (Get-Command Get-PimUtcStamp -ErrorAction SilentlyContinue)) {
@@ -23,12 +23,12 @@ if (-not (Get-Command Get-PimUtcStamp -ErrorAction SilentlyContinue)) {
       Message    : human-readable explanation
       Suggestion : actionable hint (may be $null)
 
-    Reads all 14 CSVs via the existing Read-PimRows helper (so this works
-    against either .custom.csv or .locked.csv, whichever wins).
+    Reads all 14 entities from the SQL store via Read-PimRows (SQL-only since
+    2026-09-12 -- there is no file store).
 
-    All rules degrade gracefully when source data is missing: a CSV that does
-    not exist becomes a single PIM-IO-001 info violation, and dependent FK
-    checks for that CSV are skipped.
+    All rules degrade gracefully when source data is missing: an entity whose
+    read FAILS becomes a single PIM-STORE-001 warning, and dependent FK checks
+    for it are skipped. An entity with no rows is simply empty.
 
 .NOTES
     Caches nothing on disk; the 14 CSVs are small enough that a fresh read
@@ -132,7 +132,17 @@ function New-PimViolation {
         # rules an operator most often overrules (PIM-DUP-001, PIM-ORPHAN-001)
         # stamp these; other rules leave them blank and scope by Csv/Row.
         [string]$Subject,
-        [string]$Target
+        [string]$Target,
+        # 🔴 B7 (2026-09-10) -- WHERE THE REMEDY LIVES, when it is NOT on the row that is wrong.
+        # PIM-RA-001 is reported against the ASSIGNMENT row, but the field to change
+        # (IsRoleAssignable) is on the DEFINITION row in a different CSV. The GUI's quick-fix
+        # registry only ever had the finding's own Csv/Row, so it could not offer a button at all
+        # -- the operator got "Open in Grid" and nothing else, and reported "bug: cannot fix this".
+        # Any rule whose fix is elsewhere can now say so, instead of leaving the GUI to guess.
+        [string]$FixCsv,
+        [AllowNull()][object]$FixRow = $null,
+        [string]$FixColumn,
+        [string]$FixValue
     )
     [pscustomobject]@{
         Severity   = $Severity
@@ -144,6 +154,10 @@ function New-PimViolation {
         Suggestion = $Suggestion
         Subject    = $Subject
         Target     = $Target
+        FixCsv     = $FixCsv
+        FixRow     = $FixRow
+        FixColumn  = $FixColumn
+        FixValue   = $FixValue
     }
 }
 
@@ -205,7 +219,7 @@ function Test-PimMailForwardAddressIsReal {
 }
 
 function Get-PimCacheFreshness {
-    # Maps the on-disk cache files to 'live' / 'stale' / 'none' so the UI
+    # Maps the stored tenant caches (SQL pim.TenantCache) to 'live' / 'stale' / 'none' so the UI
     # can decide whether to surface PIM-STALE-* rules.
     $now = (Get-Date).ToUniversalTime()
     $staleAfterHours = 24
@@ -218,13 +232,12 @@ function Get-PimCacheFreshness {
     )
     foreach ($kind in $kinds) {
         $state = 'none'
-        if (Get-Command Get-PimTenantCacheFile -ErrorAction SilentlyContinue) {
-            $f = Get-PimTenantCacheFile -Kind $kind.k
-            if (Test-Path -LiteralPath $f) {
+        # SQL pim.TenantCache (Get-PimTenantCacheEntry, _tenantSync.ps1) -- no cache files (SQL-only).
+        if (Get-Command Get-PimTenantCacheEntry -ErrorAction SilentlyContinue) {
+            $parsed = $null
+            try { $parsed = Get-PimTenantCacheEntry -Kind $kind.k } catch { $parsed = $null }
+            if ($null -ne $parsed) {
                 try {
-                    $raw = [System.IO.File]::ReadAllText($f, [System.Text.UTF8Encoding]::new($false))
-                    if ($raw.Length -gt 0 -and [int][char]$raw[0] -eq 0xFEFF) { $raw = $raw.Substring(1) }
-                    $parsed = $raw | ConvertFrom-Json
                     # IMP-02: was an unguarded [datetime]::Parse -- a malformed stamp threw
                     # instead of reporting 'stale'. Unreadable now means stale, which is the
                     # safe reading of "we cannot prove this cache is fresh".
@@ -285,34 +298,75 @@ function Invoke-PimPreflightValidation {
     if ($naming -and $naming.ContainsKey('PimGroupTagRegex') -and $naming.PimGroupTagRegex) {
         try { $groupTagRegex = [regex]::new([string]$naming.PimGroupTagRegex) } catch { $groupTagRegex = $null }
     }
-    if (-not $groupTagRegex) {
-        $groupTagRegex = [regex]::new('^[A-Za-z0-9][A-Za-z0-9._-]*-L[0-9]-T[0-2]-(CP|WDP|MP|APP|USER)-(ID|RES|DAT)(-S_AD)?$')
+    # 🔴 BUG-145 -- THE VALIDATOR AND THE ENGINE DISAGREED ABOUT WHAT A VALID GROUP NAME IS, and the
+    # validator was the stricter of the two, so it warned about names the engine considers correct.
+    # `Test-PimGroupName` (engine/_shared/PIM-Naming.ps1) accepts TWO shapes:
+    #     (a) the canonical  [PIM-]<...>-L<n>-T<0-2>-<CP|WDP|MP|APP|USER>-<ID|RES|DAT>[-S_*]
+    #     (b) the SIMPLE     PIM-{Role}[-{Department}]   e.g. 'PIM-Helpdesk-IT', 'PIM-ROLE-ciooffice'
+    # This fallback regex only ever accepted (a). Every group named with the simple convention --
+    # which is the convention the Manager's own wizards produce -- therefore drew a false
+    # PIM-NAME-001 warning. Measured 2026-09-12: the operator's internal environment reported
+    # 755 warnings, the great majority of them this rule firing on correctly-named groups.
+    # 🔑 ONE PREDICATE, NOT TWO. The same lesson is already written into REQUIREMENTS §1188 for the
+    # mail-forward sentinel -- "Keep validator + engine on the ONE shared predicate
+    # (Test-PimMailForwardAddressIsReal)". A second, privately-maintained copy of a rule does not
+    # stay in step; it just decides which of the two is wrong. So when the engine's predicate is
+    # loaded we CALL it, and the regex below survives only as the no-engine fallback.
+    # 🪤 An explicitly-configured PimGroupTagRegex still wins over both -- that is the customer
+    # deliberately narrowing the convention, and it must not be silently widened by this change.
+    $groupTagTest = $null
+    if (-not $groupTagRegex -and (Get-Command Test-PimGroupName -ErrorAction SilentlyContinue)) {
+        $groupTagTest = { param($t) try { [bool](Test-PimGroupName -Name "$t") } catch { $true } }
+    }
+    if (-not $groupTagRegex -and -not $groupTagTest) {
+        $groupTagRegex = [regex]::new('^(PIM-)?.+-L[0-9]+-T[0-2]-(CP|WDP|MP|APP|USER)-(ID|RES|DAT)(-S_[A-Za-z0-9]+)?$', 'IgnoreCase')
     }
     # Admin UPN patterns: customer-overridable token-style ('adm_{Owner}'), turned into permissive regexes.
     # v2.4.171: TWO conventions -- AdminAccountPattern (day-2-day, no level/tier
     # markers) and AdminAccountPatternHighPriv (dedicated high-priv accounts,
     # -L0-T0- markers). A row's Purpose column picks which one applies; blank
     # Purpose accepts either.
-    function ConvertTo-PimPatternRegex([string]$tplate) {
+    function ConvertTo-PimPatternRegex([string]$tplate, [string]$adminWord = 'Admin') {
         if (-not $tplate) { return $null }
         try {
-            # Tokens like {Owner} -> .+ ; escape the rest.
-            # NB: [regex]::Escape escapes '{' but NOT '}' (.NET asymmetry), so
-            # the closing brace must be matched optionally-escaped -- the old
-            # pattern ('\\\}') never matched, the token survived as a literal,
-            # and EVERY legitimate UPN got a false PIM-NAME-002 warning.
+            # 🔴 {AdminWord} (v2.4.333) is ONE configured literal, not a wildcard. As `.*` it let 'Adm-MK-AD'
+            # and any other near-miss satisfy the admin convention -- the rule lost its teeth the day
+            # the word became configurable. Substitute the word BEFORE the generic token pass.
+            $aw = if ("$adminWord".Trim()) { "$adminWord".Trim() } else { 'Admin' }
+            $tplate = $tplate -replace '\{AdminWord\}', $aw.Replace('$', '$$')
+            # Tokens like {Owner} -> .* ; escape the rest.
             $reSrc = [regex]::Escape($tplate)
-            $reSrc = $reSrc -replace '\\\{[A-Za-z][A-Za-z0-9]*\\?\}', '.+'
+            # 🔴 BUG-144 -- `.+` PUNISHED THE DEFAULT ADMIN TYPE. A token became `.+` (ONE-or-more),
+            # but `{AdminTypePrefix}` is legitimately EMPTY: PIM-Naming.ps1's AdminTypePrefixes maps
+            # 'internal-adminuser' -> '' and 'external-guest' -> '', and only 'external-adminuser'
+            # carries 'x-'. So `{AdminTypePrefix}Admin-{Initial}{Platform}` compiled to
+            # `^.+Admin-.+.+($|@)`, which REQUIRES at least one character before "Admin-" --
+            # and therefore every ordinary internal admin and every guest got a false
+            # PIM-NAME-002 warning, while an external `x-Admin-...` passed.
+            # Measured 2026-09-12 on the operator's internal environment: 'Admin-Helpdesk-AD@...'
+            # and 'Admin-Helpdesk-ID@...' both flagged, both correct.
+            # 🪤 THIS IS THE SECOND TIME THIS ONE LINE HAS MADE EVERY LEGITIMATE UPN WARN. The
+            # previous round was the `}`-escaping asymmetry noted below; the fix changed how the
+            # token was MATCHED and left the quantifier it expands to unexamined. A rule that can
+            # only ever fire is indistinguishable from a rule that is working, which is why this
+            # now has a regression test over the SHIPPED pattern and all three admin types
+            # (tests/Test-PimNamingConventionRule.ps1).
+            # `.*` keeps this a permissive SHAPE check -- the literal 'Admin-' is still required --
+            # without demanding that an optional token be non-empty.
+            # NB: [regex]::Escape escapes '{' but NOT '}' (.NET asymmetry), so the closing brace
+            # must be matched optionally-escaped -- the old pattern ('\\\}') never matched, the
+            # token survived as a literal, and EVERY legitimate UPN got a false warning then too.
+            $reSrc = $reSrc -replace '\\\{[A-Za-z][A-Za-z0-9]*\\?\}', '.*'
             [regex]::new('^' + $reSrc + '($|@)')
         } catch { $null }
     }
     $adminPatternRegex = $null
     $adminPatternHighPrivRegex = $null
     if ($naming -and $naming.ContainsKey('AdminAccountPattern') -and $naming.AdminAccountPattern) {
-        $adminPatternRegex = ConvertTo-PimPatternRegex ([string]$naming.AdminAccountPattern)
+        $adminPatternRegex = ConvertTo-PimPatternRegex ([string]$naming.AdminAccountPattern) ([string]$naming.AdminWord)
     }
     if ($naming -and $naming.ContainsKey('AdminAccountPatternHighPriv') -and $naming.AdminAccountPatternHighPriv) {
-        $adminPatternHighPrivRegex = ConvertTo-PimPatternRegex ([string]$naming.AdminAccountPatternHighPriv)
+        $adminPatternHighPrivRegex = ConvertTo-PimPatternRegex ([string]$naming.AdminAccountPatternHighPriv) ([string]$naming.AdminWord)
     }
 
     # ------------------------------------------------------------------
@@ -320,26 +374,14 @@ function Invoke-PimPreflightValidation {
     # ------------------------------------------------------------------
     $bases = Get-PimCsvBases
     $loaded = @{}
-    # SQL-only (hosted) mode: data lives in pim.Rows, NOT in CSV files (the image
-    # ships no customer CSVs). Read-PimRows is the storage-neutral chokepoint --
-    # in SQL mode the on-disk Resolve-PimCsvPath check is meaningless and would
-    # mark all 14 entities "not present", validating an empty model. Gate the
-    # disk check to CSV mode and always read via Read-PimRows.
-    $sqlMode = ($script:PimStorageMode -eq 'sql' -and $script:PimSqlCs)
+    # SQL-only (2026-09-12): data lives in pim.Rows. Read-PimRows is the single chokepoint; there is
+    # no on-disk presence check any more (PIM-IO-001 "file not present" is gone with the file store).
     foreach ($spec in $bases) {
         $base = $spec.base
-        if (-not $sqlMode) {
-            $resolved = Resolve-PimCsvPath -BaseName $base
-            if (-not $resolved) {
-                [void]$violations.Add((New-PimViolation -Severity 'info' -Code 'PIM-IO-001' -Csv $base -Message "CSV not present on disk (neither .custom.csv nor .locked.csv exists)." -Suggestion "Copy $base.custom.sample.csv -> $base.custom.csv if this tenant uses this CSV; otherwise ignore."))
-                $loaded[$base] = @{ header = @(); rows = @(); source = 'none'; path = $null }
-                continue
-            }
-        }
         try {
             $loaded[$base] = Read-PimRows -BaseName $base
         } catch {
-            [void]$violations.Add((New-PimViolation -Severity 'warning' -Code 'PIM-IO-001' -Csv $base -Message "Failed to read rows: $($_.Exception.Message)"))
+            [void]$violations.Add((New-PimViolation -Severity 'warning' -Code 'PIM-STORE-001' -Csv $base -Message "Failed to read rows from the SQL store: $($_.Exception.Message)"))
             $loaded[$base] = @{ header = @(); rows = @(); source = 'none'; path = $null }
         }
         # BUG-106: overlay the operator's UNCOMMITTED rows for this entity, so what is validated
@@ -366,7 +408,7 @@ function Invoke-PimPreflightValidation {
     $defGroupBases = @(
         'PIM-Definitions-Roles','PIM-Definitions-Tasks','PIM-Definitions-Services',
         'PIM-Definitions-Processes','PIM-Definitions-Resources','PIM-Definitions-Departments',
-        'PIM-Definitions-Organization'
+        'PIM-Definitions-Organization','PIM-Definitions-Projects','PIM-Definitions-CrossOrg'
     )
     $groupTagIndex = @{} # GroupTag (lower) -> @{ Tag, Csv, Row, IsRoleAssignable, TierLevel, Kind }
     $allGroupTags  = New-Object System.Collections.ArrayList
@@ -386,6 +428,10 @@ function Invoke-PimPreflightValidation {
                     Tag = $tag; Csv = $db; Row = $i; Kind = $kind
                     IsRoleAssignable = ($ira -eq 'TRUE')
                     TierLevel = $tier
+                    # B7: the DISPLAY NAME is what an operator has to find in Entra ID to act on a
+                    # finding. Without it PIM-RA-001 could only say "the group must be recreated"
+                    # without saying WHICH group -- which is a description of a problem, not a remedy.
+                    GroupName = (Get-PimRowValue -Row $r -Column 'GroupName')
                 }
                 [void]$allGroupTags.Add($tag)
             }
@@ -439,9 +485,37 @@ function Invoke-PimPreflightValidation {
     $cachedAuNames        = @{}  # lower -> displayName / id
     $cachedAzureScopes    = @{}  # lower(scopePath|id) -> displayName
     $cachedAzureScopesPresent = $false
+    # 🔴 CERTAINTY, NOT A HEDGE (operator, 2026-09-12: "the stale-002 looks wrong as it must be 100%
+    # sure if it exist in cache or not"). Every cache-driven finding used to say "either it was
+    # removed OR the cache is out of date" -- which tells the operator nothing they can act on. So
+    # each cache now carries WHEN it was read and HOW MANY items it holds:
+    #   * fresh (read within $cacheFreshHours)  -> the rule speaks DEFINITIVELY, naming the time + count;
+    #   * stale / unstamped / absent             -> the rule makes NO per-row claim at all, and emits ONE
+    #                                              info finding saying the check could not run and why.
+    # Same 24h threshold as Get-PimCacheFreshness, so the UI badge and the findings agree.
+    $cacheFreshHours = 24
+    $cacheInfo = @{}   # key (entraRoles|aus|azureScopes) -> @{ fresh; stamp; count; ageText; present }
+    $describeCache = {
+        param($entry)
+        $info = @{ present = $false; fresh = $false; stamp = $null; count = 0; ageText = 'absent' }
+        if ($null -eq $entry) { return $info }
+        $info.present = $true
+        $info.count = @($entry.items | Where-Object { $_ }).Count
+        $t = $null
+        try { $t = Get-PimUtcStamp $entry.refreshedUtc } catch { $t = $null }
+        if ($null -eq $t) { $info.ageText = 'of unknown age (no readable refreshedUtc)'; return $info }
+        $info.stamp = $t
+        $ageH = ((Get-Date).ToUniversalTime() - $t).TotalHours
+        $info.ageText = if ($ageH -lt 1) { '{0:N0} minute(s) old' -f ($ageH * 60) } else { '{0:N1} hour(s) old' -f $ageH }
+        $info.fresh = ($ageH -lt $cacheFreshHours -and $info.count -gt 0)
+        return $info
+    }
     if (Get-Command Read-PimTenantListCache -ErrorAction SilentlyContinue) {
         try {
             $cache = Read-PimTenantListCache
+            $cacheInfo['entraRoles']  = & $describeCache $cache.entraRoles
+            $cacheInfo['aus']         = & $describeCache $cache.aus
+            $cacheInfo['azureScopes'] = & $describeCache $cache.azureScopes
             if ($cache.entraRoles -and $cache.entraRoles.items) {
                 foreach ($it in $cache.entraRoles.items) {
                     if ($it.displayName) { $cachedEntraRoleNames[([string]$it.displayName).ToLowerInvariant()] = [string]$it.displayName }
@@ -460,10 +534,25 @@ function Invoke-PimPreflightValidation {
                     if ($it.id)        { $cachedAzureScopes[([string]$it.id).ToLowerInvariant()]        = [string]$it.displayName }
                 }
             }
-        } catch { }
+        } catch {
+            # 🔴 §49. THIS CATCH USED TO BE EMPTY, AND THAT IS HOW A RULE DISAPPEARS.
+            # Every cache-driven rule below (PIM-ORPHAN-AZ-001, PIM-STALE-*, the AU/role staleness
+            # checks) is gated on "is the cache present?", so a cache read that THROWS is
+            # indistinguishable from a tenant that has no cache: the rules quietly stop running and
+            # the preflight still reports clean. Measured 2026-09-08 -- a broken test stub threw in
+            # here, PIM-ORPHAN-AZ-001 never ran, and the failure looked like a validator defect.
+            # 🪤 An empty catch turns a loud failure into a silent loss of coverage. Keep the
+            # tolerance (a missing cache must never fail a preflight) but never keep the silence.
+            Write-Warning ("tenant-list cache could not be read, so the cache-driven rules " +
+                           "(orphaned Azure scope, stale role/AU) DID NOT RUN: $($_.Exception.Message)")
+        }
     }
     $cacheRolesPresent = $cachedEntraRoleNames.Count -gt 0
     $cacheAUsPresent   = $cachedAuNames.Count -gt 0
+    foreach ($ck in @('entraRoles','aus','azureScopes')) {
+        if (-not $cacheInfo.ContainsKey($ck)) { $cacheInfo[$ck] = @{ present = $false; fresh = $false; stamp = $null; count = 0; ageText = 'absent' } }
+    }
+    $cacheReadAt = { param($ci) if ($ci.stamp) { $ci.stamp.ToString('yyyy-MM-dd HH:mm') + ' UTC' } else { 'an unknown time' } }
 
     # ------------------------------------------------------------------
     # PIM-FK-001: every GroupTag in every assignment CSV must be defined.
@@ -543,7 +632,18 @@ function Invoke-PimPreflightValidation {
             } else {
                 $suggestion = "Add '$u' to Account-Definitions-Admins, or delete this row."
             }
+            # 🔴 §58 -- WITHOUT -Target THIS FINDING HAS NO FIX BUTTONS AT ALL.
+            # The GUI's quick-fix registry is keyed on the code and reads v.Target; FK-001 passed
+            # Subject/Target and got "Remove this assignment" + "Define ...", while FK-002 passed
+            # neither and got prose telling the operator to go and do it by hand. Worse, "Fix all
+            # auto-fixable errors" filtered on FK-001 alone, so clicking it left every FK-002
+            # untouched -- reported as "i have chosen autofix to remove these assignment ... but
+            # they dont dissapear". The finding was right; there was simply nothing behind it.
+            # Target = the principal that is missing a definition, which is what both remedies act
+            # on: remove THIS assignment row, or define THAT principal.
+            $subj = "$(Get-PimRowValue -Row $r -Column 'GroupTag')"
             [void]$violations.Add((New-PimViolation -Severity 'error' -Code 'PIM-FK-002' -Csv 'PIM-Assignments-Admins' -Row $i -Column 'Username' `
+                -Subject $subj -Target $u `
                 -Message "Username '$u' is not defined in Account-Definitions-Admins (UserPrincipalName)." -Suggestion $suggestion))
         }
     }
@@ -569,7 +669,16 @@ function Invoke-PimPreflightValidation {
             } else {
                 $suggestion = "Add '$t' to PIM-Definitions-AU, or delete this row."
             }
+            # 🔴 §58.2 -- THE THIRD MEMBER OF THE SAME FAMILY, AND IT SHIPPED WITHOUT REMEDIES.
+            # FK-001 and FK-002 are "an assignment names something no definition declares", and
+            # both offer the two deterministic fixes: remove THIS row, or define THAT thing.
+            # FK-003 is the identical shape for AU tags and passed NEITHER -Subject NOR -Target,
+            # so the GUI's quick-fix registry (keyed on the code, reading v.Target) had nothing to
+            # render -- exactly the state FK-002 was in when the operator reported that autofix
+            # "left them". Found by the audit's GUI-FINDING-NO-FIX rule.
+            $subj = "$(Get-PimRowValue -Row $r -Column 'GroupTag')"
             [void]$violations.Add((New-PimViolation -Severity 'error' -Code 'PIM-FK-003' -Csv 'PIM-Assignments-Roles-AUs' -Row $i -Column 'AdministrativeUnitTag' `
+                -Subject $subj -Target $t `
                 -Message "AdministrativeUnitTag '$t' is not defined in PIM-Definitions-AU." -Suggestion $suggestion))
         }
     }
@@ -590,9 +699,14 @@ function Invoke-PimPreflightValidation {
             if (-not $groupTagIndex.ContainsKey($k)) { continue }  # already flagged by PIM-FK-001
             $g = $groupTagIndex[$k]
             if (-not $g.IsRoleAssignable) {
+                # 🔴 B7 -- this finding used to offer NO remedy at all: no Subject/Target for the
+                # GUI to key on, and the field to change lives on the DEFINITION row, not this one.
+                # Stamping both makes the quick-fix registry able to stage the real edit.
                 [void]$violations.Add((New-PimViolation -Severity 'error' -Code 'PIM-RA-001' -Csv $csv -Row $i -Column 'GroupTag' `
-                    -Message "GroupTag '$tag' is bound to an Entra ID role but the definition in $($g.Csv) has IsRoleAssignable=FALSE. Entra refuses role assignment to non-role-assignable groups." `
-                    -Suggestion "Set IsRoleAssignable=TRUE in $($g.Csv) row $($g.Row + 1). The Entra group must be RECREATED with isAssignableToRole=true; the flag cannot be added in place."))
+                    -Subject $tag -Target $(if ("$($g.GroupName)".Trim()) { "$($g.GroupName)" } else { $tag }) `
+                    -FixCsv "$($g.Csv)" -FixRow $g.Row -FixColumn 'IsRoleAssignable' -FixValue 'TRUE' `
+                    -Message "The group '$(if ("$($g.GroupName)".Trim()) { "$($g.GroupName)" } else { $tag })' is bound to an Entra ID role but is not role-assignable. Entra refuses role assignment to non-role-assignable groups." `
+                    -Suggestion "Set IsRoleAssignable=TRUE in $($g.Csv) row $($g.Row + 1). Entra CANNOT add this flag to an existing group: delete the group '$($g.GroupName)' in Entra ID and the engine recreates it correctly on the next run (group creation is existence-based)."))
             }
         }
     }
@@ -616,10 +730,46 @@ function Invoke-PimPreflightValidation {
                 # BUG-90: the admin and the group ARE the identity of this finding -- "row 5"
                 # is not. BUG-91: Subject/Target also feed the per-finding quick-fix.
                 $ra2Admin = Get-PimRowValue -Row $r -Column 'Username'
+                # R14 (operator, 2026-09-10): *"no refs to grouptags. use reel groups."* Where a
+                # definition exists, name the REAL group -- the thing the operator can actually find
+                # in Entra ID -- and fall back to the tag only when no GroupName is authored.
+                # 🪤 An FK finding is the OPPOSITE case: nothing defines the tag, so there the tag is
+                # the only identifier that exists and naming it is correct, not a violation of R14.
+                $ra2Group = $(if ("$($g.GroupName)".Trim()) { "$($g.GroupName)" } else { $tag })
                 [void]$violations.Add((New-PimViolation -Severity 'error' -Code 'PIM-RA-002' -Csv 'PIM-Assignments-Admins' -Row $i -Column 'AssignmentType' `
-                    -Subject $ra2Admin -Target $tag `
-                    -Message "AssignmentType=Active is not supported for direct admin assignment to role-assignable group '$tag'. Entra requires Eligible." `
+                    -Subject $ra2Admin -Target $ra2Group `
+                    -Message "AssignmentType=Active is not supported for direct admin assignment to the role-assignable group '$ra2Group'. Entra requires Eligible." `
                     -Suggestion "Change AssignmentType to 'Eligible' (admin activates JIT). Entra will not honour an Active assignment to a role-assignable group -- the admin must activate it just-in-time."))
+            }
+        }
+    }
+    # 🔴 §70.19 (2026-09-13) -- THE SAME RULE FOR A GROUP NESTED INTO A ROLE-ASSIGNABLE GROUP.
+    # PIM-Assignments-Groups: TargetGroupTag becomes a MEMBER of SourceGroupTag (the container).
+    # When the container is role-assignable, Entra refuses an Active membership ("Nesting is currently
+    # not supported"); the engine skipped it silently, so the operator's delegation (made Eligible in
+    # the wizard, written Active by the wizard) never deployed and nothing here said why. Reported as
+    # PIM-RA-002 on this CSV so the existing "Set to Eligible" fix and the Fix-all bucket apply as-is:
+    # both edit AssignmentType on the finding's own Csv/Row.
+    if ($loaded.ContainsKey('PIM-Assignments-Groups')) {
+        $rows = $loaded['PIM-Assignments-Groups'].rows
+        for ($i = 0; $i -lt $rows.Count; $i++) {
+            $r = $rows[$i]
+            if (Test-PimRowIsBlank -Row $r) { continue }
+            $src = Get-PimRowValue -Row $r -Column 'SourceGroupTag'
+            $tgt = Get-PimRowValue -Row $r -Column 'TargetGroupTag'
+            $at  = Get-PimRowValue -Row $r -Column 'AssignmentType'
+            if (-not $src -or -not $at) { continue }
+            $k = $src.ToLowerInvariant()
+            if (-not $groupTagIndex.ContainsKey($k)) { continue }  # FK rules own an undefined tag
+            $g = $groupTagIndex[$k]
+            if ($g.IsRoleAssignable -and $at -ieq 'Active') {
+                $ra2Container = $(if ("$($g.GroupName)".Trim()) { "$($g.GroupName)" } else { $src })
+                $tk = "$tgt".ToLowerInvariant()
+                $ra2Member = $(if ($tgt -and $groupTagIndex.ContainsKey($tk) -and "$($groupTagIndex[$tk].GroupName)".Trim()) { "$($groupTagIndex[$tk].GroupName)" } elseif ($tgt) { $tgt } else { '(no target group)' })
+                [void]$violations.Add((New-PimViolation -Severity 'error' -Code 'PIM-RA-002' -Csv 'PIM-Assignments-Groups' -Row $i -Column 'AssignmentType' `
+                    -Subject $ra2Member -Target $ra2Container `
+                    -Message "AssignmentType=Active is not supported for nesting the group '$ra2Member' into the role-assignable group '$ra2Container'. Entra refuses it, so this delegation can never deploy; Entra requires Eligible." `
+                    -Suggestion "Change AssignmentType to 'Eligible' (members of '$ra2Member' activate '$ra2Container' just-in-time). An Active nesting into a role-assignable group is rejected by Entra on every engine run."))
             }
         }
     }
@@ -692,10 +842,20 @@ function Invoke-PimPreflightValidation {
             if (Test-PimRowIsBlank -Row $r) { continue }
             $tag = Get-PimRowValue -Row $r -Column 'GroupTag'
             if (-not $tag) { continue }
-            if (-not $groupTagRegex.IsMatch($tag)) {
+            # BUG-145: ask the ENGINE's predicate when it is loaded, so the validator cannot be
+            # stricter than the thing that actually applies the convention.
+            # 🔴 A TAG IS NOT A GROUP NAME (operator, 2026-09-12: "this is wrong" -- every ROLE-/ORG- tag
+            # warned). The group NAME is '<prefix>-<tag>' (GroupName 'PIM-ROLE-CloudEngineer' carries tag
+            # 'ROLE-CloudEngineer'), and the name predicate requires the prefix -- so testing the bare tag
+            # flagged every correctly named direct group. Judge the tag as the name it produces; a tag
+            # that already carries the prefix (tiered names) still passes as itself.
+            $gnPrefix = if ($naming -and "$($naming.PimGroupNamePrefix)".Trim()) { "$($naming.PimGroupNamePrefix)".Trim().TrimEnd('-') } else { 'PIM' }
+            $asName   = if ($tag -match "^(?i)$([regex]::Escape($gnPrefix))-") { $tag } else { "$gnPrefix-$tag" }
+            $tagOk = if ($groupTagTest) { [bool](& $groupTagTest $tag) -or [bool](& $groupTagTest $asName) } else { $groupTagRegex.IsMatch($tag) -or $groupTagRegex.IsMatch($asName) }
+            if (-not $tagOk) {
                 [void]$violations.Add((New-PimViolation -Severity 'warning' -Code 'PIM-NAME-001' -Csv $db -Row $i -Column 'GroupTag' `
-                    -Message "GroupTag '$tag' doesn't match the naming-convention regex." `
-                    -Suggestion "Expected shape: <Name>-L<0-9>-T<0-2>-<CP|WDP|MP|APP|USER>-<ID|RES|DAT>[-S_AD] (overridable via PIM_NAMING.PimGroupTagRegex)."))
+                    -Message "GroupTag '$tag' doesn't match the naming convention." `
+                    -Suggestion "Expected either the simple shape PIM-<Role>[-<Department>] (e.g. PIM-Helpdesk-IT) or the tiered shape <Name>-L<0-9>-T<0-2>-<CP|WDP|MP|APP|USER>-<ID|RES|DAT>[-S_AD] (override both via PIM_NAMING.PimGroupTagRegex)."))
             }
         }
     }
@@ -724,7 +884,7 @@ function Invoke-PimPreflightValidation {
                             else { "AdminAccountPattern '$($naming.AdminAccountPattern)' or AdminAccountPatternHighPriv '$($naming.AdminAccountPatternHighPriv)'" }
                 [void]$violations.Add((New-PimViolation -Severity 'warning' -Code 'PIM-NAME-002' -Csv 'Account-Definitions-Admins' -Row $i -Column 'UserPrincipalName' `
                     -Message "UPN '$upn' (Purpose='$purpose') doesn't match $patLabel." `
-                    -Suggestion "Either rename to fit the convention, fix the row's Purpose, or override the pattern in your NamingConventions .custom.ps1."))
+                    -Suggestion "Either rename to fit the convention, fix the row's Purpose, or change the pattern in Settings > Naming (stored in SQL)."))
             }
         }
     }
@@ -740,6 +900,7 @@ function Invoke-PimPreflightValidation {
             if ($u) { $usedAdmins[$u.ToLowerInvariant()] = $true }
         }
         foreach ($key in $adminIndex.Keys) {
+            if ("$($adminIndex[$key].TargetPlatform)".Trim() -ieq 'AD') { continue }   # AD-only admins get no PIM (Entra) reach by design
             if (-not $usedAdmins.ContainsKey($key)) {
                 $a = $adminIndex[$key]
                 [void]$violations.Add((New-PimViolation -Severity 'warning' -Code 'PIM-ORPHAN-001' -Csv 'Account-Definitions-Admins' -Row $a.Row -Column 'UserPrincipalName' `
@@ -910,7 +1071,7 @@ function Invoke-PimPreflightValidation {
                 if ($paths.Count -ge 2) {
                     $upn = ($adminIndex[$admin] | Select-Object -ExpandProperty Upn -ErrorAction SilentlyContinue)
                     if (-not $upn) { $upn = $admin }
-                    [void]$violations.Add((New-PimViolation -Severity 'warning' -Code 'PIM-DUP-001' -Csv 'PIM-Assignments-Admins' -Row $rowsHit[$t] -Column 'GroupTag' `
+                    [void]$violations.Add((New-PimViolation -Severity 'info' -Code 'PIM-DUP-001' -Csv 'PIM-Assignments-Admins' -Row $rowsHit[$t] -Column 'GroupTag' `
                         -Subject $upn -Target $t `
                         -Message "Admin '$upn' reaches target '$t' via $($paths.Count) role-group paths: $($paths -join ', ')." `
                         -Suggestion "Pick the canonical role group and drop the others; duplicate paths cause audit confusion and complicate offboarding."))
@@ -922,11 +1083,16 @@ function Invoke-PimPreflightValidation {
     # ------------------------------------------------------------------
     # PIM-STALE-001/002: cache-relative stale checks.
     # ------------------------------------------------------------------
-    if (-not $cacheRolesPresent) {
-        [void]$violations.Add((New-PimViolation -Severity 'warning' -Code 'PIM-STALE-001' -Csv '<global>' `
-            -Message "Tenant cache 'entra-roles' is missing or empty. Role-name freshness checks are skipped." `
-            -Suggestion "The scheduler refreshes this cache automatically (tenant-cache job, every 12h) -- it will populate on the next run. To refresh now: click the 'no cache' badge in the UI, or run Open-PimManager.ps1 -RefreshTenantLists."))
+    # 🔑 A cache that cannot PROVE the answer produces ONE info finding, never per-row claims.
+    $refreshHint = "The scheduler's tenant-cache job refreshes it automatically; to refresh now click the cache badge in the UI, or run Open-PimManager.ps1 -RefreshTenantLists."
+    $ciRoles = $cacheInfo['entraRoles']
+    if (-not $ciRoles.fresh) {
+        $why = if (-not $cacheRolesPresent) { 'is missing or empty' } else { "is $($ciRoles.ageText)" }
+        [void]$violations.Add((New-PimViolation -Severity 'info' -Code 'PIM-STALE-001' -Csv '<global>' `
+            -Message "Entra role names were NOT checked: the 'entra-roles' tenant cache $why, so it cannot prove whether a role exists. No role row has been judged either way." `
+            -Suggestion $refreshHint))
     } else {
+        $rolesAt = & $cacheReadAt $ciRoles
         foreach ($csv in @('PIM-Assignments-Roles-Groups','PIM-Assignments-Roles-AUs')) {
             if (-not $loaded.ContainsKey($csv)) { continue }
             $rows = $loaded[$csv].rows
@@ -936,34 +1102,68 @@ function Invoke-PimPreflightValidation {
                 $rn = Get-PimRowValue -Row $r -Column 'RoleDefinitionName'
                 if (-not $rn) { continue }
                 if (-not $cachedEntraRoleNames.ContainsKey($rn.ToLowerInvariant())) {
-                    $matches = Get-PimClosestMatches -Needle $rn -Haystack @($cachedEntraRoleNames.Values) -MaxDistance 6 -Top 3
+                    # @() -- on Windows PowerShell 5.1 a SINGLE match unwraps to a bare object with no
+                    # .Count, so the did-you-mean (which the Fix-all uses) silently disappeared there.
+                    $matches = @(Get-PimClosestMatches -Needle $rn -Haystack @($cachedEntraRoleNames.Values) -MaxDistance 6 -Top 3)
                     $suggestion = if ($matches -and $matches.Count -gt 0) {
                         "Did you mean: $((($matches | ForEach-Object { $_.Value }) -join ', '))?"
                     } else {
-                        "Verify the role name is spelled correctly and the tenant cache is up to date (click the cache badge to refresh)."
+                        "Correct the role name to an existing Entra role, or delete this row."
                     }
+                    # ERROR: the engine resolves the role BY NAME; a name the tenant does not have can
+                    # never be applied as written.
                     [void]$violations.Add((New-PimViolation -Severity 'error' -Code 'PIM-STALE-001' -Csv $csv -Row $i -Column 'RoleDefinitionName' `
-                        -Message "RoleDefinitionName '$rn' is not in the entra-roles tenant cache. Either the role was renamed/removed or the cache is out of date." `
+                        -Message "Entra role '$rn' does not exist in the tenant -- checked against the $($ciRoles.count) role definitions read at $rolesAt. This row can never be applied as written." `
                         -Suggestion $suggestion))
                 }
             }
         }
     }
-    if ($cacheAUsPresent) {
-        foreach ($csv in @('PIM-Assignments-Roles-AUs','PIM-Definitions-AU')) {
-            if (-not $loaded.ContainsKey($csv)) { continue }
-            $rows = $loaded[$csv].rows
-            for ($i = 0; $i -lt $rows.Count; $i++) {
-                $r = $rows[$i]
-                if (Test-PimRowIsBlank -Row $r) { continue }
-                $au = Get-PimRowValue -Row $r -Column 'AdministrativeUnitTag'
-                if (-not $au) { continue }
-                # Try both displayName + id forms.
-                if ($cachedAuNames.ContainsKey($au.ToLowerInvariant())) { continue }
-                [void]$violations.Add((New-PimViolation -Severity 'warning' -Code 'PIM-STALE-002' -Csv $csv -Row $i -Column 'AdministrativeUnitTag' `
-                    -Message "AdministrativeUnitTag '$au' is not in the aus tenant cache. Either the AU was renamed/removed or the cache is out of date." `
-                    -Suggestion "Verify the AU exists, or refresh the cache (click the 'aus' cache badge in the UI)."))
+
+    # PIM-STALE-002 -- ADMINISTRATIVE UNITS.
+    # 🔴 THE OLD RULE COMPARED THE WRONG THING. It looked the raw AdministrativeUnitTag up among the
+    # cached AU DISPLAY NAMES -- but a tag is not a display name. The engine resolves
+    # tag -> PIM-Definitions-AU.AUDisplayName -> live AU (Get-PimTagToAuName, PIM-EngineProviders.ps1),
+    # so every AU whose display name differs from its tag drew a false warning: 178 on the operator's
+    # internal environment, 2026-09-12. Now the validator walks the SAME chain the engine walks:
+    #   * assignment row, tag with no PIM-Definitions-AU row -> PIM-FK-003 (error) already says so;
+    #   * definition row with no AUDisplayName               -> ERROR: the engine can neither create nor
+    #                                                          resolve an AU without a name;
+    #   * definition row whose AU is absent (fresh cache)    -> INFO: the AdministrativeUnits scope
+    #                                                          creates it on the next engine run;
+    #   * stale / absent cache                               -> ONE info, no per-row claim.
+    # An assignment row whose tag IS defined never needs its own finding: its AU either exists or is
+    # about to be created, and the definition row carries that finding once, not once per assignment.
+    if ($loaded.ContainsKey('PIM-Definitions-AU')) {
+        $ciAus = $cacheInfo['aus']
+        $defAuRows = $loaded['PIM-Definitions-AU'].rows
+        $ausAt = & $cacheReadAt $ciAus
+        $auNotChecked = $false
+        for ($i = 0; $i -lt $defAuRows.Count; $i++) {
+            $r = $defAuRows[$i]
+            if (Test-PimRowIsBlank -Row $r) { continue }
+            $tag  = (Get-PimRowValue -Row $r -Column 'AdministrativeUnitTag').Trim()
+            $name = (Get-PimRowValue -Row $r -Column 'AUDisplayName').Trim()
+            if (-not $tag -and -not $name) { continue }
+            if (-not $name) {
+                [void]$violations.Add((New-PimViolation -Severity 'error' -Code 'PIM-STALE-002' -Csv 'PIM-Definitions-AU' -Row $i -Column 'AUDisplayName' `
+                    -Subject $tag `
+                    -Message "AU definition '$tag' has no AUDisplayName. The engine creates and finds an AU by its display name, so this AU -- and every role assignment scoped to tag '$tag' -- can never be applied as written." `
+                    -Suggestion "Set AUDisplayName to the AU's name in Entra ID (or the name it should be created with)."))
+                continue
             }
+            if (-not $ciAus.fresh) { $auNotChecked = $true; continue }
+            if ($cachedAuNames.ContainsKey($name.ToLowerInvariant())) { continue }
+            [void]$violations.Add((New-PimViolation -Severity 'info' -Code 'PIM-STALE-002' -Csv 'PIM-Definitions-AU' -Row $i -Column 'AUDisplayName' `
+                -Subject $tag `
+                -Message "AU '$name' (tag '$tag') does not exist in the tenant yet -- checked against the $($ciAus.count) AUs read at $ausAt. The engine creates it on the next engine run." `
+                -Suggestion "Nothing to do if this AU is new. If it should already exist, check the spelling of AUDisplayName against Entra ID."))
+        }
+        if ($auNotChecked) {
+            $why = if (-not $ciAus.present -or $ciAus.count -eq 0) { 'is missing or empty' } else { "is $($ciAus.ageText)" }
+            [void]$violations.Add((New-PimViolation -Severity 'info' -Code 'PIM-STALE-002' -Csv '<global>' `
+                -Message "Administrative units were NOT checked: the 'aus' tenant cache $why, so it cannot prove whether an AU exists. No AU row has been judged either way." `
+                -Suggestion $refreshHint))
         }
     }
 
@@ -991,33 +1191,37 @@ function Invoke-PimPreflightValidation {
     }
 
     # ------------------------------------------------------------------
-    # PIM-DOMAIN-001: a RETIRED forward column still carries a real address.
+    # PIM-DOMAIN-001: the office-user mail pair is HALF configured.
     # ------------------------------------------------------------------
-    # RETIRED 2026-08-12. This check used to say "you set MailForwardAddress but left
-    # ForwardMailsToContact off -- turn the forward ON". That advice is now WRONG: mail
-    # forwarding required the ADMIN ACCOUNT to hold an Exchange licence, and the design
-    # deliberately removed that -- notification mail is sent FROM a shared mailbox the
-    # engine SPN is scoped to, so an admin needs no mailbox at all.
-    #
-    # The check is repurposed rather than deleted, because the SAFETY PROPERTY still
-    # matters and now applies more widely: a real address sitting in a retired column is
-    # configuration the operator believes is live, and the engine ignores it silently.
-    # That is the same "misleading config" failure, so it must still be surfaced -- only
-    # the remedy changes. Fires regardless of the flag, since BOTH columns are retired.
+    # UN-RETIRED 2026-09-12 (operator, "Both"). ForwardMailsToContact + MailForwardAddress
+    # name the admin owner's OFFICE USER: PIM mail about the admin goes there
+    # (Get-PimAdminMailRecipient, ManagerEmail fallback) and, where the account has a
+    # mailbox, Exchange forwarding is set to it (gated). The engine USES the pair again, so
+    # the 2026-08-12 wording ("the engine ignores it") is gone.
+    # What is still misleading is a pair that is half set:
+    #   * a real address with the flag not TRUE -> the address is stored and never used
+    #   * the flag TRUE with no real address    -> mail silently falls back to ManagerEmail
+    # Both-set and both-off are consistent and stay silent. A sentinel ('FALSE'/'no'/'0'/
+    # blank, or a flag value like 'true') is not an address -- Test-PimMailForwardAddressIsReal.
     if ($loaded.ContainsKey('Account-Definitions-Admins')) {
         $rows = $loaded['Account-Definitions-Admins'].rows
         for ($i = 0; $i -lt $rows.Count; $i++) {
             $r = $rows[$i]
             if (Test-PimRowIsBlank -Row $r) { continue }
-            $addr = Get-PimRowValue -Row $r -Column 'MailForwardAddress'
-            if (-not (Test-PimMailForwardAddressIsReal -Value $addr)) { continue }
+            if ((Get-PimRowValue -Row $r -Column 'TargetPlatform').Trim() -ieq 'AD') { continue }   # AD-only: no Entra mailbox forwarding
+            $addr   = Get-PimRowValue -Row $r -Column 'MailForwardAddress'
+            $flagOn = ("$(Get-PimRowValue -Row $r -Column 'ForwardMailsToContact')".Trim() -match '(?i)^(true|yes|1)$')
+            $real   = (Test-PimMailForwardAddressIsReal -Value $addr) -and ("$addr".Trim() -notmatch '(?i)^(true|yes|1)$')
+            if ($real -eq $flagOn) { continue }   # both set, or both off -- consistent
             $upn = Get-PimRowValue -Row $r -Column 'UserPrincipalName'
             $mgr = Get-PimRowValue -Row $r -Column 'ManagerEmail'
-            $msg = "MailForwardAddress='$addr' is set for '$upn', but ForwardMailsToContact/MailForwardAddress are RETIRED -- the engine ignores them and mailbox forwarding is no longer performed."
-            $sug = if ("$mgr".Trim()) {
-                "Clear MailForwardAddress. Notification/TAP mail already goes to ManagerEmail='$mgr'."
+            if ($real) {
+                $msg = "MailForwardAddress='$addr' is set for '$upn' but ForwardMailsToContact is not TRUE -- the office-user address is stored and never used."
+                $sug = "Set ForwardMailsToContact=TRUE to send this admin's mail to '$addr', or clear MailForwardAddress."
             } else {
-                "Move the address to ManagerEmail (that is where notification/TAP mail is sent) and clear MailForwardAddress."
+                $fallback = if ("$mgr".Trim()) { "ManagerEmail='$mgr'" } else { 'nobody (ManagerEmail is empty too)' }
+                $msg = "ForwardMailsToContact=TRUE for '$upn' but MailForwardAddress='$addr' is not an email address -- mail goes to $fallback instead."
+                $sug = "Enter the owner's office user email in MailForwardAddress, or set ForwardMailsToContact=FALSE."
             }
             [void]$violations.Add((New-PimViolation -Severity 'warning' -Code 'PIM-DOMAIN-001' -Csv 'Account-Definitions-Admins' -Row $i -Column 'MailForwardAddress' `
                 -Message $msg -Suggestion $sug))
@@ -1036,6 +1240,7 @@ function Invoke-PimPreflightValidation {
         for ($i = 0; $i -lt $rows.Count; $i++) {
             $r = $rows[$i]
             if (Test-PimRowIsBlank -Row $r) { continue }
+            if ((Get-PimRowValue -Row $r -Column 'TargetPlatform').Trim() -ieq 'AD') { continue }   # AD-only: no Entra tenant rollout
             $ringVal = (Get-PimRowValue -Row $r -Column 'Ring').Trim()
             if (-not $ringVal) { continue }
             if ($ringVal -notin @('0','1','2')) {
@@ -1048,23 +1253,45 @@ function Invoke-PimPreflightValidation {
     }
 
     # ------------------------------------------------------------------
-    # PIM-TAP-001: CreateTAP=TRUE but TargetPlatform=AD (TAP is Entra-only).
+    # PIM-MSP-001 / PIM-MSP-002 (REQUIREMENTS 68.6 row 35): the per-admin MSP downlink definition.
+    #   001 = ManagementMode=msp but no valid Ring -> the admin reaches NO slave (the downlink
+    #         treats a missing ring as not eligible), which is almost never the intent.
+    #   002 = Target is malformed, or names a tag no managed tenant carries. The unknown-tag half is
+    #         only raised when the MSP registry's tag list was actually READ -- never on a guess.
     # ------------------------------------------------------------------
     if ($loaded.ContainsKey('Account-Definitions-Admins')) {
         $rows = $loaded['Account-Definitions-Admins'].rows
+        $mspTags = @{ known = $false; tags = @() }
+        if ($global:PIM_ValidatorKnownTenantTags -is [hashtable]) { $mspTags = $global:PIM_ValidatorKnownTenantTags }
+        elseif (Get-Command Get-PimManagerKnownTenantTags -ErrorAction SilentlyContinue) { try { $mspTags = Get-PimManagerKnownTenantTags } catch { } }
         for ($i = 0; $i -lt $rows.Count; $i++) {
             $r = $rows[$i]
             if (Test-PimRowIsBlank -Row $r) { continue }
-            $tap = (Get-PimRowValue -Row $r -Column 'CreateTAP').ToUpperInvariant()
-            $plat = (Get-PimRowValue -Row $r -Column 'TargetPlatform').ToUpperInvariant()
-            if ($tap -eq 'TRUE' -and $plat -eq 'AD') {
-                $upn = Get-PimRowValue -Row $r -Column 'UserPrincipalName'
-                [void]$violations.Add((New-PimViolation -Severity 'info' -Code 'PIM-TAP-001' -Csv 'Account-Definitions-Admins' -Row $i -Column 'CreateTAP' `
-                    -Message "CreateTAP=TRUE for '$upn' but TargetPlatform=AD. Temporary Access Pass is an Entra-ID-only feature; AD-only admins cannot have a TAP." `
-                    -Suggestion "Set CreateTAP=FALSE for AD-only admins, or change TargetPlatform to ID/Both if the admin should also exist in Entra."))
+            $upn = Get-PimRowValue -Row $r -Column 'UserPrincipalName'
+            $mode = (Get-PimRowValue -Row $r -Column 'ManagementMode').Trim()
+            if ($mode -ieq 'msp' -and (Get-PimRowValue -Row $r -Column 'Ring').Trim() -notin @('0','1','2')) {
+                [void]$violations.Add((New-PimViolation -Severity 'warning' -Code 'PIM-MSP-001' -Csv 'Account-Definitions-Admins' -Row $i -Column 'Ring' `
+                    -Message "'$upn' is ManagementMode=msp (synced to slaves) but has no valid Ring -- the downlink sends it to NO slave." `
+                    -Suggestion "Set Ring 0 / 1 / 2 (which slaves receive it), or set ManagementMode=local if it should not be synced."))
+            }
+            $tgt = (Get-PimRowValue -Row $r -Column 'Target').Trim()
+            if ($tgt -and (Get-Command Test-PimAdminTargetSelector -ErrorAction SilentlyContinue)) {
+                $sel = Test-PimAdminTargetSelector -Target $tgt -KnownTags @($mspTags.tags) -TagsKnown:([bool]$mspTags.known)
+                if (@($sel.malformed).Count -or @($sel.unknownTags).Count) {
+                    $what = @()
+                    if (@($sel.malformed).Count)   { $what += "malformed: $(@($sel.malformed) -join ', ')" }
+                    if (@($sel.unknownTags).Count) { $what += "no managed tenant carries tag(s): $(@($sel.unknownTags) -join ', ')" }
+                    [void]$violations.Add((New-PimViolation -Severity 'warning' -Code 'PIM-MSP-002' -Csv 'Account-Definitions-Admins' -Row $i -Column 'Target' `
+                        -Message "Target '$tgt' for '$upn' -- $($what -join '; '). A tag nobody carries sends the admin to no slave." `
+                        -Suggestion "Pick tags from the managed tenants' tags (use tag:<name>, tenant:<id>, all or none)."))
+                }
             }
         }
     }
+
+    # PIM-TAP-001 (CreateTAP=TRUE on an AD-only admin) was RETIRED 2026-09-13: TAP is enforced for every
+    # admin (operator "enforce tap to true"), CreateTAP is no longer read, and the engine simply issues no
+    # TAP to an AD-only admin -- there is nothing left for the operator to fix.
 
     # ------------------------------------------------------------------
     # PIM-SCHED-* + PIM-TAP-002: scheduling columns (LIFECYCLE-GOVERNANCE
@@ -1092,7 +1319,9 @@ function Invoke-PimPreflightValidation {
                 }
             }
 
-            $tapRaw = (Get-PimRowValue -Row $r -Column 'TAPStartDate').Trim()
+            # AD-only admins hold no TAP (password only): no TAP-schedule findings for them.
+            $adOnlyRow = ((Get-PimRowValue -Row $r -Column 'TargetPlatform').Trim() -ieq 'AD')
+            $tapRaw = if ($adOnlyRow) { '' } else { (Get-PimRowValue -Row $r -Column 'TAPStartDate').Trim() }
             $tapUtc = $null
             if ($tapRaw) {
                 try { $tapUtc = Resolve-PimDateExpression -Expression $tapRaw } catch {
@@ -1108,7 +1337,7 @@ function Invoke-PimPreflightValidation {
                     -Suggestion "Move TAPStartDate to or after ProvisionDate (the operator pattern is: provision a few days early, TAP opens on the start day, e.g. ProvisionDate=FirstWorkdayNextMonth-3d, TAPStartDate=FirstWorkdayNextMonth@08:00)."))
             }
 
-            $lifeRaw = (Get-PimRowValue -Row $r -Column 'TAPLifetimeHours').Trim()
+            $lifeRaw = if ($adOnlyRow) { '' } else { (Get-PimRowValue -Row $r -Column 'TAPLifetimeHours').Trim() }
             if ($lifeRaw) {
                 $lifeNum = 0
                 if (-not [double]::TryParse($lifeRaw, [ref]$lifeNum) -or $lifeNum -lt 1 -or $lifeNum -gt 720) {
@@ -1148,7 +1377,7 @@ function Invoke-PimPreflightValidation {
     # blank or 'Retire' are meaningful; anything else is a typo that
     # silently does nothing.
     # ------------------------------------------------------------------
-    foreach ($defBase in @('PIM-Definitions-Roles','PIM-Definitions-Tasks','PIM-Definitions-Services','PIM-Definitions-Processes','PIM-Definitions-Resources','PIM-Definitions-Departments','PIM-Definitions-Organization')) {
+    foreach ($defBase in @('PIM-Definitions-Roles','PIM-Definitions-Tasks','PIM-Definitions-Services','PIM-Definitions-Processes','PIM-Definitions-Resources','PIM-Definitions-Departments','PIM-Definitions-Organization','PIM-Definitions-Projects','PIM-Definitions-CrossOrg')) {
         if (-not $loaded.ContainsKey($defBase)) { continue }
         $rows = $loaded[$defBase].rows
         for ($i = 0; $i -lt $rows.Count; $i++) {
@@ -1166,21 +1395,21 @@ function Invoke-PimPreflightValidation {
 
     # ------------------------------------------------------------------
     # PIM-POL-001 + PIM-APR-001: policy templates + approvals (LIFECYCLE-
-    # GOVERNANCE phases 3+4). A PolicyTemplate value must reference an
-    # existing templates/policy/<id>.policytemplate[.custom].json; rows whose
+    # GOVERNANCE phases 3+4). A PolicyTemplate value must reference a policy
+    # template in the SQL store (pim.Settings 'PolicyTemplates' -- seeded once from the shipped
+    # templates, no file overrides; operator decisions 2026-09-12); rows whose
     # effective template requires approval need owners (>=2 for Serial, or
     # the escalation has nowhere to go).
     # ------------------------------------------------------------------
     $policyTpls = @{}
     try {
-        $polDir = Join-Path (Split-Path -Parent (Split-Path -Parent $PSScriptRoot)) 'templates\policy'
-        if (Test-Path -LiteralPath $polDir) {
-            $polFiles = @(Get-ChildItem -LiteralPath $polDir -Filter '*.policytemplate.json' -ErrorAction SilentlyContinue) +
-                        @(Get-ChildItem -LiteralPath $polDir -Filter '*.policytemplate.custom.json' -ErrorAction SilentlyContinue)
-            $rawTpls = @{}
-            foreach ($pf in $polFiles) {
-                try { $pj = Get-Content -LiteralPath $pf.FullName -Raw | ConvertFrom-Json; if ($pj.id) { $rawTpls[[string]$pj.id] = $pj } } catch {}
-            }
+        # SQL ONLY: the same store the engine reads (Get-PimEnginePolicyTemplates). The hydrated
+        # setting is used when present; otherwise it is read from the store.
+        $polRaw = $null
+        if ($global:PIM_NamingConventions -is [System.Collections.IDictionary] -and $global:PIM_NamingConventions.Contains('PolicyTemplates')) { $polRaw = $global:PIM_NamingConventions['PolicyTemplates'] }
+        elseif (Get-Command Get-PimManagerSetting -ErrorAction SilentlyContinue) { try { $polRaw = Get-PimManagerSetting -Name 'PolicyTemplates' } catch { $polRaw = $null } }
+        if ((Get-Command ConvertTo-PimPolicyTemplateMap -ErrorAction SilentlyContinue) -and $null -ne $polRaw) {
+            $rawTpls = ConvertTo-PimPolicyTemplateMap -Value $polRaw
             foreach ($tid in @($rawTpls.Keys)) {
                 $pj = $rawTpls[$tid]
                 $apr = $null
@@ -1193,8 +1422,28 @@ function Invoke-PimPreflightValidation {
         }
     } catch { $policyTpls = @{} }
 
+    # TEMPLATE-UPGRADE-AVAILABLE (info): a stored template that was CUSTOMISED is never overwritten by a
+    # newer shipped version (Update-PimPolicyTemplateStore records it in upgradeAvailable). Say so, and
+    # name what the shipped version would change, so the operator can take it deliberately.
+    try {
+        $upg = $null
+        if ($null -ne $polRaw) {
+            $pv = $polRaw; if ($pv -is [string]) { try { $pv = $pv | ConvertFrom-Json } catch { $pv = $null } }
+            if ($pv -is [System.Collections.IDictionary]) { if ($pv.Contains('upgradeAvailable')) { $upg = $pv['upgradeAvailable'] } }
+            elseif ($pv -and $pv.PSObject.Properties['upgradeAvailable']) { $upg = $pv.upgradeAvailable }
+        }
+        foreach ($u in @($upg | Where-Object { $_ })) {
+            $uid = "$($u.id)"; if (-not $uid) { continue }
+            $chg = @(@($u.changes) | Where-Object { "$_".Trim() })
+            $chgText = if ($chg.Count) { ((@($chg | Select-Object -First 10)) -join ', ') + $(if ($chg.Count -gt 10) { " (+$($chg.Count - 10) more)" } else { '' }) } else { 'annotations only' }
+            [void]$violations.Add((New-PimViolation -Severity 'info' -Code 'TEMPLATE-UPGRADE-AVAILABLE' -Csv 'PolicyTemplates' -Row $null -Column 'PolicyTemplate' -Subject $uid -Target "$($u.shippedFingerprint)" `
+                -Message "Policy template '$uid' was customised in the store, so the newer shipped version was NOT applied. The shipped version changes: $chgText." `
+                -Suggestion "Review the difference. To take the shipped version, replace the stored template with it (the next db-init or Manager start keeps it current from then on); to keep yours, no action is needed -- this notice stays until the two match."))
+        }
+    } catch { }
+
     if ($policyTpls.Count -gt 0) {
-        foreach ($defBase in @('PIM-Definitions-Roles','PIM-Definitions-Tasks','PIM-Definitions-Services','PIM-Definitions-Processes','PIM-Definitions-Resources','PIM-Definitions-Departments','PIM-Definitions-Organization')) {
+        foreach ($defBase in @('PIM-Definitions-Roles','PIM-Definitions-Tasks','PIM-Definitions-Services','PIM-Definitions-Processes','PIM-Definitions-Resources','PIM-Definitions-Departments','PIM-Definitions-Organization','PIM-Definitions-Projects','PIM-Definitions-CrossOrg')) {
             if (-not $loaded.ContainsKey($defBase)) { continue }
             $rows = $loaded[$defBase].rows
             for ($i = 0; $i -lt $rows.Count; $i++) {
@@ -1205,7 +1454,7 @@ function Invoke-PimPreflightValidation {
 
                 if ($tplVal -and -not $policyTpls.ContainsKey($tplVal)) {
                     [void]$violations.Add((New-PimViolation -Severity 'error' -Code 'PIM-POL-001' -Csv $defBase -Row $i -Column 'PolicyTemplate' `
-                        -Message "PolicyTemplate '$tplVal' for '$gName' has no matching templates\policy\$tplVal.policytemplate.json -- the engine skips the row's policy apply." `
+                        -Message "PolicyTemplate '$tplVal' for '$gName' is not a policy template in the store -- the engine skips the row's policy apply." `
                         -Suggestion ("Available templates: " + (@($policyTpls.Keys | Sort-Object) -join ', ') + ".")))
                     continue
                 }
@@ -1327,14 +1576,8 @@ function Invoke-PimPreflightValidation {
     $authCache = $null
     if (Get-Command Read-PimTenantListCache -ErrorAction SilentlyContinue) {
         try {
-            $cacheFile = $null
-            if (Get-Command Get-PimTenantCacheFile -ErrorAction SilentlyContinue) {
-                try { $cacheFile = Get-PimTenantCacheFile -Kind 'auth-methods' } catch { $cacheFile = $null }
-            }
-            if ($cacheFile -and (Test-Path -LiteralPath $cacheFile)) {
-                $raw = [System.IO.File]::ReadAllText($cacheFile, [System.Text.UTF8Encoding]::new($false))
-                if ($raw.Length -gt 0 -and [int][char]$raw[0] -eq 0xFEFF) { $raw = $raw.Substring(1) }
-                $authCache = $raw | ConvertFrom-Json
+            if (Get-Command Get-PimTenantCacheEntry -ErrorAction SilentlyContinue) {
+                $authCache = Get-PimTenantCacheEntry -Kind 'auth-methods'   # SQL pim.TenantCache
             }
         } catch { $authCache = $null }
     }
@@ -1356,6 +1599,7 @@ function Invoke-PimPreflightValidation {
             }
             foreach ($k in $adminIndex.Keys) {
                 $a = $adminIndex[$k]
+                if ("$($a.TargetPlatform)".Trim() -ieq 'AD') { continue }   # AD-only: no Entra auth methods exist (password only)
                 $methods = @()
                 if ($methodsByUpn.ContainsKey($k)) { $methods = $methodsByUpn[$k] }
                 $hasStrong = $false
@@ -1383,10 +1627,64 @@ function Invoke-PimPreflightValidation {
     # match (a row at .../resourceGroups/x is valid if its subscription scope
     # is cached) so RG/resource rows under a known sub aren't flagged.
     # ------------------------------------------------------------------
-    if ($cachedAzureScopesPresent -and $loaded.ContainsKey('PIM-Assignments-Azure-Resources')) {
-        $scopeKeys = @($cachedAzureScopes.Keys)
+    # ------------------------------------------------------------------
+    # PIM-AZ-PLACEHOLDER-001: an AzScope that is a TEMPLATE PLACEHOLDER, not a real scope.
+    # 🔴 Measured live 2026-09-12: four rows imported from templates/azure-rbac.template.json still
+    # carried /subscriptions/00000000-0000-0000-0000-000000000000. ARM answers 404
+    # SubscriptionNotFound, so the engine fails those rows on EVERY run (delta-pim-azure, 4 of its 17
+    # failures) -- and the validator called them "may have been deleted or moved", which sends an
+    # operator looking for a subscription that never existed. ERROR: such a row can never be applied.
+    # Needs no cache -- it is a property of the value itself -- so it runs even when the cache is absent.
+    # A subscription id is ALWAYS a GUID; a management-group id is a free-form name, so for MGs only
+    # the all-zero GUID is treated as a placeholder.
+    # ------------------------------------------------------------------
+    $placeholderRows = @{}
+    if ($loaded.ContainsKey('PIM-Assignments-Azure-Resources')) {
+        $zeroGuid = '00000000-0000-0000-0000-000000000000'
         $rows = $loaded['PIM-Assignments-Azure-Resources'].rows
         for ($i = 0; $i -lt $rows.Count; $i++) {
+            $r = $rows[$i]
+            if (Test-PimRowIsBlank -Row $r) { continue }
+            $sc = (Get-PimRowValue -Row $r -Column 'AzScope').Trim()
+            if (-not $sc) { continue }
+            $why = $null
+            if ($sc -match '(?i)^/subscriptions/([^/]*)') {
+                $sid = $Matches[1]
+                $g = [guid]::Empty
+                if ($sid -eq $zeroGuid) { $why = 'the all-zero subscription id is a template placeholder' }
+                elseif (-not [guid]::TryParse($sid, [ref]$g)) { $why = "'$sid' is not a subscription id (a subscription id is always a GUID)" }
+            } elseif ($sc -match "(?i)^/providers/Microsoft\.Management/managementGroups/$zeroGuid(/|$)") {
+                $why = 'the all-zero management-group id is a template placeholder'
+            }
+            if ($why) {
+                $placeholderRows[$i] = $true
+                # Name the ROW, not only the scope: several rows share one placeholder, and four identical
+                # cards gave the operator no way to tell which group/role each one was (2026-09-12).
+                $phTag  = "$(Get-PimRowValue -Row $r -Column 'GroupTag')".Trim()
+                $phRole = "$(Get-PimRowValue -Row $r -Column 'AzScopePermission')".Trim()
+                $phWho  = if ($phTag -or $phRole) { "'$phTag' -> $phRole " } else { '' }
+                [void]$violations.Add((New-PimViolation -Severity 'error' -Code 'PIM-AZ-PLACEHOLDER-001' -Csv 'PIM-Assignments-Azure-Resources' -Row $i -Column 'AzScope' `
+                    -Subject $sc `
+                    -Message "Assignment $($phWho)at AzScope '$sc' is not a real scope: $why. This row can never be applied -- the engine fails it on every run." `
+                    -Suggestion "Replace it with a real subscription id (Azure portal -> Subscriptions) or management-group id, or delete the row."))
+            }
+        }
+    }
+
+    # PIM-ORPHAN-AZ-001 -- definitive when the azure-scopes cache is fresh (ERROR: a scope that does not
+    # exist can never be assigned), silent per row with ONE info finding when it is not.
+    $ciAz = $cacheInfo['azureScopes']
+    if ($cachedAzureScopesPresent -and -not $ciAz.fresh -and $loaded.ContainsKey('PIM-Assignments-Azure-Resources') -and @($loaded['PIM-Assignments-Azure-Resources'].rows).Count -gt 0) {
+        [void]$violations.Add((New-PimViolation -Severity 'info' -Code 'PIM-ORPHAN-AZ-001' -Csv '<global>' `
+            -Message "Azure scopes were NOT checked: the 'azure-scopes' tenant cache is $($ciAz.ageText), so it cannot prove whether a scope exists. No Azure row has been judged either way." `
+            -Suggestion "The scheduler's tenant-cache job refreshes it automatically; to refresh now click the cache badge in the UI, or run Open-PimManager.ps1 -RefreshTenantLists."))
+    }
+    if ($cachedAzureScopesPresent -and $ciAz.fresh -and $loaded.ContainsKey('PIM-Assignments-Azure-Resources')) {
+        $scopeKeys = @($cachedAzureScopes.Keys)
+        $azAt = & $cacheReadAt $ciAz
+        $rows = $loaded['PIM-Assignments-Azure-Resources'].rows
+        for ($i = 0; $i -lt $rows.Count; $i++) {
+            if ($placeholderRows.ContainsKey($i)) { continue }   # already an error with the real reason
             $r = $rows[$i]
             if (Test-PimRowIsBlank -Row $r) { continue }
             $sc = (Get-PimRowValue -Row $r -Column 'AzScope').Trim()
@@ -1399,9 +1697,10 @@ function Invoke-PimPreflightValidation {
                 foreach ($sk in $scopeKeys) { if ($scLc.StartsWith($sk + '/') -or $sk.StartsWith($scLc + '/')) { $found = $true; break } }
             }
             if (-not $found) {
-                [void]$violations.Add((New-PimViolation -Severity 'warning' -Code 'PIM-ORPHAN-AZ-001' -Csv 'PIM-Assignments-Azure-Resources' -Row $i -Column 'AzScope' `
-                    -Message "AzScope '$sc' is not present in (and is not a child of) any scope in the azure-scopes tenant cache -- the subscription/RG/resource may have been deleted or moved." `
-                    -Suggestion "Verify the scope still exists; if it was removed, delete this row (or use the Fix-all 'orphaned Azure scope' bucket). Refresh the azure-scopes cache if the resource is new."))
+                [void]$violations.Add((New-PimViolation -Severity 'error' -Code 'PIM-ORPHAN-AZ-001' -Csv 'PIM-Assignments-Azure-Resources' -Row $i -Column 'AzScope' `
+                    -Subject $sc `
+                    -Message "Azure scope '$sc' does not exist (and is not under any existing scope) -- checked against the $($ciAz.count) management groups/subscriptions read at $azAt. This row can never be applied as written." `
+                    -Suggestion "If the subscription/management group was removed or moved, delete this row; if the scope id is mistyped, correct it."))
             }
         }
     }
@@ -1414,15 +1713,9 @@ function Invoke-PimPreflightValidation {
     # Threshold = $global:PIM_StaleGroupDays (default 90).
     # ------------------------------------------------------------------
     $activityCache = $null
-    if (Get-Command Get-PimTenantCacheFile -ErrorAction SilentlyContinue) {
-        try {
-            $af = Get-PimTenantCacheFile -Kind 'pim-activity'
-            if ($af -and (Test-Path -LiteralPath $af)) {
-                $raw = [System.IO.File]::ReadAllText($af, [System.Text.UTF8Encoding]::new($false))
-                if ($raw.Length -gt 0 -and [int][char]$raw[0] -eq 0xFEFF) { $raw = $raw.Substring(1) }
-                $activityCache = $raw | ConvertFrom-Json
-            }
-        } catch { $activityCache = $null }
+    if (Get-Command Get-PimTenantCacheEntry -ErrorAction SilentlyContinue) {
+        try { $activityCache = Get-PimTenantCacheEntry -Kind 'pim-activity' }   # SQL pim.TenantCache
+        catch { $activityCache = $null }
     }
     if ($activityCache -and $groupTagIndex.Count -gt 0) {
         $staleDays = if ($global:PIM_StaleGroupDays) { [int]$global:PIM_StaleGroupDays } else { 90 }
@@ -1457,18 +1750,12 @@ function Invoke-PimPreflightValidation {
         try {
             $ackResult = $null
             if (Get-Command Get-PimManagerWarningOverrides -ErrorAction SilentlyContinue) {
-                # SQL-aware store (hosted + local). Read-PimWarningOverrideConfig
-                # already accepts a pre-parsed -Config, so no shape translation.
+                # The SQL store (pim.Settings['WarningOverrides']). Read-PimWarningOverrideConfig
+                # accepts the parsed document as -Config, so no shape translation.
                 $ackResult = Apply-PimWarningOverrides -Findings $finalViolations -Config (Get-PimManagerWarningOverrides)
-            } else {
-                # Standalone dot-source (a test loading _validator.ps1 on its own,
-                # with no Manager scope around it) -- fall back to the file path.
-                $ovrPath = $null
-                if ($script:configRoot -and (Get-Command Resolve-PimWarningOverridesPath -ErrorAction SilentlyContinue)) {
-                    $ovrPath = Resolve-PimWarningOverridesPath -ConfigRoot $script:configRoot
-                }
-                $ackResult = Apply-PimWarningOverrides -Findings $finalViolations -Path $ovrPath
             }
+            # Standalone dot-source (a test loading _validator.ps1 with no Manager around it): no store,
+            # so nothing is acknowledged. There is no override FILE to fall back to (SQL-only).
             if ($ackResult) { $finalViolations = @($ackResult.findings) }
         } catch { $ackResult = $null }
     }

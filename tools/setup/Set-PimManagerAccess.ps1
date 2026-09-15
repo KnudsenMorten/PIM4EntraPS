@@ -1,4 +1,4 @@
-#Requires -Version 5.1
+﻿#Requires -Version 5.1
 <#
 .SYNOPSIS
   DEPLOY-3 / SEC-15 -- install Manager RBAC (Reader / Admin / SuperAdmin / Delegated) into the

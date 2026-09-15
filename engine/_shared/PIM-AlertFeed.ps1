@@ -1,4 +1,4 @@
-# IMP-02: the locale-safe stamp reader. Loaded defensively so this file stays correct
+﻿# IMP-02: the locale-safe stamp reader. Loaded defensively so this file stays correct
 # when a test dot-sources it on its own (PIM-Functions.psm1 also loads it up front).
 if (-not (Get-Command Get-PimUtcStamp -ErrorAction SilentlyContinue)) { . (Join-Path $PSScriptRoot 'PIM-DateSafe.ps1') }
 <#
@@ -20,9 +20,9 @@ if (-not (Get-Command Get-PimUtcStamp -ErrorAction SilentlyContinue)) { . (Join-
     - Get-PimAlertFeedSummary: counts for the Home tile (total / unsent / per-event).
     - Get-PimExpiringAccessAlert : PURE evaluation -- expiring rows + now + window ->
                                    { fire; count; detail; items } (no I/O).
-    - Read-/Write-PimAlertFeedFile : the JSONL file adapter (the only I/O; the SQL
-                                   adapter lands with the data layer -- the pure core
-                                   above is storage-agnostic).
+    - Read-/Write-PimAlertFeedSql  : the SQL adapter (pim.Settings['AlertFeed']) -- the only
+                                   I/O; there is no feed FILE (SQL-only). The pure core above
+                                   is storage-agnostic.
 
   The actual mail send stays in the existing channel layer (Send-PimNotifyMail /
   Send-PimManagerAlert). This core RECORDS the outcome that layer returns, so the
@@ -267,7 +267,6 @@ function Get-PimExpiringAccessAlert {
     }
 }
 
-# ---- JSONL file adapter (the only I/O; SQL adapter lands with the data layer) ----
 # ---------------------------------------------------------------------------
 # SQL adapter (§36 phase 4). The feed is the recorded-send PROOF: it is what
 # says an operator WAS notified that break-glass fired, or that a drift alert
@@ -316,40 +315,7 @@ function Write-PimAlertFeedSql {
     Set-PimSqlSetting -ConnectionString $ConnectionString -Name (Get-PimAlertFeedStoreName) -Value @{ alerts = $next }
     return $next.Count
 }
-function Read-PimAlertFeedFile {
-    # Read the alert feed from an append-only JSONL file (one record/line), newest
-    # first by ts. Returns @() when the file does not exist.
-    param([Parameter(Mandatory)][string]$FeedFile)
-    if (-not (Test-Path -LiteralPath $FeedFile)) { return @() }
-    $out = New-Object System.Collections.Generic.List[object]
-    foreach ($line in (Get-Content -LiteralPath $FeedFile -Encoding UTF8)) {
-        if (-not "$line".Trim()) { continue }
-        try { $out.Add(("$line" | ConvertFrom-Json)) } catch {}
-    }
-    return @(Select-PimAlertFeed -Feed $out.ToArray() -Take 0)
-}
 
-function Write-PimAlertFeedFile {
-    # Append one record to the JSONL feed file (UTF8 no-BOM, via .NET so PS 5.1
-    # Set-Content's UTF-16 default never corrupts it). Best-effort retention: when
-    # the file grows past MaxKeep lines it is rewritten newest-first, clamped.
-    param(
-        [Parameter(Mandatory)][string]$FeedFile,
-        [Parameter(Mandatory)][object]$Record,
-        [int]$MaxKeep = 500
-    )
-    $dir = Split-Path -Parent $FeedFile
-    if ($dir -and -not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
-    $enc = New-Object System.Text.UTF8Encoding($false)
-    [System.IO.File]::AppendAllText($FeedFile, (($Record | ConvertTo-Json -Depth 6 -Compress) + "`r`n"), $enc)
-    # Retention: only rewrite when meaningfully over the cap (avoid churn every write).
-    if ($MaxKeep -gt 0) {
-        $all = @(Read-PimAlertFeedFile -FeedFile $FeedFile)
-        if ($all.Count -gt ($MaxKeep + 50)) {
-            $keep = @(Select-PimAlertFeed -Feed $all -Take $MaxKeep)
-            $sb = New-Object System.Text.StringBuilder
-            foreach ($r in $keep) { [void]$sb.Append((($r | ConvertTo-Json -Depth 6 -Compress) + "`r`n")) }
-            [System.IO.File]::WriteAllText($FeedFile, $sb.ToString(), $enc)
-        }
-    }
-}
+# The JSONL file adapter (Read-/Write-PimAlertFeedFile over output/alerts/pim-alerts.jsonl) was removed
+# 2026-09-13: PIM v2 is SQL-only, and the feed is the recorded-send PROOF -- it lives in
+# pim.Settings['AlertFeed'] (the SQL adapter above) and nowhere else.

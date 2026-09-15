@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
   Idempotently grant the PIM engine SPN its required Microsoft Graph application permissions,
   using a CERTIFICATE-authenticated admin SPN over pure Graph REST (no Graph SDK module, no
@@ -41,11 +41,21 @@ param(
     # creates (New-ServicePrincipal + New-ManagementScope + New-ManagementRoleAssignment -App), and
     # adding Mail.Send back here would silently widen it to send-as-ANY-mailbox tenant-wide.
     # See docs/REQUIREMENTS.md IMP-06e.
+    # 🔴 BUG-151 -- THE BROAD ROLE IS REPLACED BY THE NARROW SCHEDULE PAIR, to match the MI map in
+    # tools/setup/_PimSetupShared.ps1. `RoleManagement.ReadWrite.Directory` is the documented
+    # HIGHER-PRIVILEGED ALTERNATIVE to these (MS Learn); v1 used the pair and §64.2 proved it 403-free.
+    # 🪤 THIS LIST AND THE MI MAP MUST NOT DRIFT (§63.3): they are two copies of one concept, and the
+    # last time they disagreed the AccessReviews provider was a permanent 403-no-op in every hosted
+    # environment while the doc that called the role "required" pointed at THIS list -- which is not
+    # the principal that executes. tests/Test-PimGraphRoleMap.ps1 asserts every role required here is
+    # also in the MI map; it is what caught this edit half-done.
     [string[]]$Permissions = @(
         'Directory.Read.All','User.ReadWrite.All','Group.ReadWrite.All',
-        'RoleManagement.ReadWrite.Directory','PrivilegedAccess.ReadWrite.AzureADGroup',
+        'RoleEligibilitySchedule.ReadWrite.Directory','RoleAssignmentSchedule.ReadWrite.Directory',
+        'PrivilegedAccess.ReadWrite.AzureADGroup',
         'RoleManagementPolicy.ReadWrite.Directory','RoleManagementPolicy.ReadWrite.AzureADGroup',
-        'AdministrativeUnit.ReadWrite.All','AccessReview.Read.All'
+        'AdministrativeUnit.ReadWrite.All','AccessReview.Read.All',
+        'Policy.Read.All'   # tenant TAP policy (PIM-TapPolicy.ps1), 2026-09-12
     )
 )
 $ErrorActionPreference = 'Stop'

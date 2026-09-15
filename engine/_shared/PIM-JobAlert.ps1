@@ -248,7 +248,12 @@ function Send-PimJobAlertViaNotify {
             $result = [ordered]@{ event = $Event; fired = $true; sent = $sent; recipients = @($cfg.recipients); reason = "$lastReason" }
             $rec = New-PimAlertRecord -Event $Event -Title $Title -Detail $Detail -LinkTab 'jobs' -SendResult $result -Instance 'scheduler'
             [void](Write-PimAlertFeedSql -ConnectionString $cs -Record $rec)
-        } catch {}
+        } catch {
+            # Same as the Manager's feed write: the alert went out, the record did not. Warn rather
+            # than fail -- turning a delivered alert into an error would be worse -- but do not let
+            # the audit trail disagree with reality in silence.
+            Write-Warning "[jobalert] '$Event' was raised but NOT recorded in the alert feed ($($_.Exception.Message))."
+        }
     }
     return $true
 }

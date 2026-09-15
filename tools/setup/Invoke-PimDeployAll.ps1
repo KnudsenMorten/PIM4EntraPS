@@ -1,4 +1,4 @@
-#requires -Version 5.1
+﻿#requires -Version 5.1
 <#
 .SYNOPSIS
     PIM4EntraPS -- ONE-SHOT "deploy everything" orchestrator: stand up OR update the WHOLE
@@ -122,7 +122,7 @@ param(
     [string]$AcrName,
     # --- COST SHAPE (ESTATE-04). These were MISSING, and their absence was expensive ---------
     # Setup-PimContainers defaults to WorkerMode 'always-on' + ManagerMinReplicas 1: six apps at
-    # ~3 vCPU / 6 GiB running 24/7, ~$205-230 per environment per month. This orchestrator could
+    # ~3 vCPU / 6 GiB running 24/7, materially more per environment per month (never measured; do not quote a figure). This orchestrator could
     # not pass anything else, so "deploy everything" SILENTLY deployed the expensive shape --
     # including to a production tenant -- overriding the operator-approved on-demand design that
     # framework DOCS/REQUIREMENTS.md §10.0d records. Found 2026-08-09 while deploying PIM §34,
@@ -166,6 +166,10 @@ param(
     [string]$SqlAdminClientId,
     [string]$SqlAdminClientSecret,
     [string]$SqlAdminCertThumbprint,
+    # §64.7b -- support access to a customer store is DECLARED at deploy. Setup-PimContainers gained
+    # these two, but this front door never exposed them, so a deploy through it could not declare it.
+    [string]$SupportDbAppId    = "$($env:PIM_SUPPORT_DB_APPID)",
+    [string]$SupportDbUserName = $(if ("$($env:PIM_SUPPORT_DB_USER)".Trim()) { "$($env:PIM_SUPPORT_DB_USER)".Trim() } else { 'PIM4EntraPS-Deploy' }),
     # 🔴 §34.2c -- THE DEPLOY IDENTITY FOR THE `az` DATA PLANE. Setup-PimContainers has always had
     # its own -AdminAppId/-AdminSecret sign-in (into an ISOLATED AZURE_CONFIG_DIR); this
     # orchestrator never passed them, so INFRA alone ran on whatever `az` context happened to be
@@ -199,12 +203,71 @@ param(
     # the prereq script because two environments sharing a CIDR is unrecoverable once peered.
     [int]$PrereqIndex = -1,
     [string]$PrereqAddressBase = '10.220',
+    # §38.1a -- the network shape, for a customer who has their own IP plan and cannot be given a
+    # /21 we picked for them. All optional: unset means the token/index-derived value, so the
+    # estate and every existing environment are unchanged. The NAMES (-ResourceGroup, -AcrName,
+    # -VnetName, -LogAnalyticsWorkspaceName, -SqlServerFqdn) are already parameters of this
+    # orchestrator and are now forwarded to prereq instead of being re-derived there (§38.1b).
+    [string]$PrereqSubnetName,
+    [string]$PrereqVnetAddressPrefix,
+    [string]$PrereqSubnetAddressPrefix,
     # The AcrPull identity the prereq step creates and INFRA consumes. Derived from the token by
     # the script; named here so the fact-probe can test the ROLE (BUG-42/46) rather than guess.
     [string]$PrereqIdentityName,
     # S5 managed tenants use the MASTER's store and must NOT get one of their own -- creating it
     # here would quietly turn S5 into S6 (the prereq script's own words).
     [switch]$PrereqSkipSql,
+    # 'Proxy' for a firewalled environment: Azure SQL's default from inside Azure is 'Redirect',
+    # which reconnects on 11000-11999 after the gateway handshake -- so a firewall allowing only
+    # 1433 yields a connection that authenticates and then hangs. See New-PimHostingPrerequisites.
+    [ValidateSet('Default','Proxy','Redirect')][string]$SqlConnectionPolicy = 'Default',
+    # 🔑 DEFAULTS FROM -Exposure WHEN NOT GIVEN (operator rule, 2026-09-11): PREMIUM for internal,
+    # BASIC for external. Basic and Standard registries have NO network controls at all -- no private
+    # endpoint, no firewall rules -- so "registry with public access disabled" is a Premium-only
+    # state. An INTERNAL deployment whose registry is Basic is publicly reachable in the one place
+    # the whole design says it should not be, and the only way to deploy it into a tenant that
+    # forbids that is a STANDING exemption. External has no such contradiction, and Basic is roughly
+    # a tenth of the cost. Pass -AcrSku explicitly to override; the resolved value is printed.
+    # 🪤 -AcrPublicAccess false means `az acr build` cannot run from outside the VNet.
+    [ValidateSet('Basic','Standard','Premium')][string]$AcrSku,
+    [ValidateSet('Default','true','false')][string]$AcrPublicAccess = 'Default',
+    # A private endpoint cannot live in the ACA subnet (it is delegated to Microsoft.App), so an
+    # internal-only design needs a second subnet. Required when -AcrPublicAccess false and the
+    # subnet does not already exist -- never derived, because it is a range inside the customer's
+    # own VNet. And the agent pool is what lets `az acr build` reach a private registry at all.
+    [string]$PrivateEndpointSubnetName = 'pim-endpoints',
+    [string]$PrivateEndpointSubnetAddressPrefix,
+    [string]$AcrAgentPoolName,
+    # SQL is PaaS: with no public endpoint it is reachable from NOWHERE until this exists. Defaults
+    # ON for -Exposure internal, because an internal design with an unreachable database is not a
+    # configuration anyone wants -- see the resolution below.
+    [switch]$SqlPrivateEndpoint,
+    # 🔴 THE POST-DEPLOY GUI SMOKE GATE, OPTED OUT OF. Read this before using it.
+    # The gate opens the hosted Manager and asserts it actually WORKS (SQL render mode, tenant
+    # cache, read-write, the right version). It is a release gate precisely because a Manager can
+    # be "deployed" and inert, so a skip is NEVER a pass and this flag does not make one.
+    # 🔑 THE ONE LEGITIMATE USE, and the reason this exists: an --internal-only environment has no
+    # route or DNS from a deploy host outside its VNet, so the gate cannot run AT ALL --
+    #     the Container Apps environment is VNet-INTERNAL and '<app>.<env>.azurecontainerapps.io'
+    #     does not resolve from this host
+    # That is not a broken Manager, and it is not something the gate can be given inputs to fix. A
+    # gate that structurally cannot run must be opted out of deliberately and LOUDLY, rather than
+    # left to fail every deploy until someone starts ignoring it -- which is how a real red gets
+    # missed (measured today: an already-red gate could not report a new defect it would have
+    # caught). Verify such an environment from inside the VNet, or in a browser from a peered
+    # client, and say so in the deployment record.
+    [switch]$SkipHostedSmoke,
+    # 🔑 ONE GATE LIST, BOTH PATHS. A disabled gate makes the engine a no-op that logs ok=True, so
+    # this is the difference between "deployed" and "running" -- and there are now two places that
+    # apply it: Set-PimFeatureBaseline from the deploy host (public SQL) and the in-cloud bootstrap
+    # job (private SQL, where this host has no route). Letting each default independently is how the
+    # two topologies quietly end up with different features on. Defaults match
+    # Set-PimFeatureBaseline's own so nothing changes for an existing environment.
+    [string[]]$FeatureGates        = @('scheduler.jobs','alerting.email','msp.downlink'),
+    [string[]]$FeatureGatesDisable = @(),
+    # A genuine VM install (no ACA). Only needed to override the "-Scenario means Container Apps"
+    # rule above -- every S1..S6 scenario in the estate is a Container Apps deployment.
+    [switch]$NotHosted,
     # The user-assigned identity that holds AcrPull, created by New-PimHostingPrerequisites as
     # 'id-pim-<token>'. Setup-PimContainers refuses to create apps without it (the alternative is
     # enabling the ACR admin account, which this design deliberately does not do -- BUG-42 was apps
@@ -229,11 +292,33 @@ param(
     # deployed, healthy-looking, unreachable, Azure-blind environments.
     # They are parameters rather than defaults because only the caller knows which VNet its
     # clients live on; but their ABSENCE is now WARNED about, not passed over.
+    # §38.2a -- forwarded to Setup-PimContainers. A ValidateSet STRING, not [bool]: the onboarding
+    # driver invokes this script with `pwsh -File`, which stringifies every argument, so a [bool]
+    # parameter cannot bind across that boundary at all ("Cannot convert value System.String to
+    # type System.Boolean"). Default 'internal' = today's behaviour for every environment sync
+    # reaches. IMMUTABLE once the environment exists -- see Setup-PimContainers' env-create note.
+    # §38.2b -- default external (operator, 2026-09-10). An internal-only environment cannot be
+    # reached to TEST it, and cannot be opened afterwards: the setting is immutable. Built
+    # external, the Manager can still be locked down with one reversible `ingress update`.
+    [ValidateSet('internal','external')][string]$Exposure = 'external',
     [string]$HubVnetName,
     [string]$HubVnetResourceGroup,
     [string]$HubVnetSubscriptionId,
     [string]$PrivateDnsResourceGroup,
     [switch]$SkipPrivateDns,
+    # Create everything reachability needs EXCEPT the peering itself, which the customer makes with
+    # their own naming standard. The hub is still named, so the private DNS zone is created and
+    # linked -- omitting the hub entirely would lose that too. See Setup-PimContainers -SkipPeering.
+    [switch]$SkipPeering,
+    # §52.1. Forwarded to INFRA, which grants this environment network access to the SQL server
+    # (subnet service endpoint + VNet rule, Azure-services firewall rule verified). Skip ONLY for
+    # a private-endpoint store: without one of those paths the Manager starts, is refused by SQL,
+    # and dies before it can serve -- which is exactly how the first go-live ended.
+    [switch]$SkipSqlNetworkAccess,
+    # The store can live in ANOTHER SUBSCRIPTION (operator, 2026-09-09) -- a central/shared SQL
+    # server is a supported topology. The step searches every subscription the deploy identity can
+    # read, so this is only needed when the server's subscription is not in that list.
+    [string]$SqlSubscriptionId,
     # AD/on-prem DNS (a domain-joined client resolving via AD DNS does NOT see an Azure private
     # zone unless its DNS forwards to 168.63.129.16 -- so this is the second, independent path).
     [string]$DnsServer,
@@ -248,9 +333,55 @@ param(
     # app-roles, so every Graph call returns 403 Authorization_RequestDenied and the environment
     # provisions nothing while looking perfectly deployed.
     # Certificate preferred, client secret as fallback (operator, 2026-08-12).
+    # 🔴 §57 -- WHO CAN ADMINISTER THIS ENVIRONMENT ONCE IT EXISTS.
+    # A hosted Manager FAILS CLOSED: an identity in neither SQL (pim.Settings ManagerAccess) nor
+    # the env vars is a Reader. Nothing in the deploy ever wrote a SuperAdmin, so a freshly-built
+    # environment had nobody who could save a change -- measured at a live customer as "now noone
+    # can make changes to whole platform". Comma-separated UPNs; each becomes a SuperAdmin.
+    # 🔒 Written to SQL, so it survives a CSV import: the import writes pim.Rows, and its only
+    # touch on Settings adds keys that are not already there.
+    [string]$ManagerSuperAdmins = "$($env:PIM_MANAGER_SUPERADMINS)",
     [string]$EngineClientId,
     [string]$EngineCertThumbprint,
     [string]$EngineClientSecret,
+    # ---- what the post-deploy GUI gate needs in order to actually SEE anything -------------
+    # Not infrastructure values (DEPLOY-2 §4): these are inputs to the VERIFICATION, and without
+    # them the gate self-skips its two most important layers and still exits 0. Defaulted from the
+    # same env vars the smoke itself reads, so an operator who exports them once gets a gate that
+    # can see, whichever entry point they run.
+    [string]$LogAnalyticsWorkspaceId = "$($env:PIM_HOSTED_LA_WORKSPACE)",   # boot-log evidence: render mode SQL vs static
+    [string]$EasyAuthAudience        = "$($env:PIM_HOSTED_EASYAUTH_AUD)",   # live HTTP against the served page
+    # Front Easy Auth with an app registration you already control. Empty = the deploy creates one
+    # (a PRODUCT-named registration in the customer's own tenant), which is the normal case.
+    [string]$EasyAuthClientId,
+    # §48.1 -- WHO may sign in. Easy Auth alone only proves the caller holds an account in this
+    # tenant; on a console that mints TAPs and grants tier-0 roles that is not the question. Given
+    # UPNs/groups, the deploy switches the enterprise application to assignment-required and
+    # assigns them. Empty leaves it open to the whole tenant, and says so as a warning.
+    [string[]]$EasyAuthAllowedPrincipals = @(),
+    # §53 -- the nightly updater installed by the `updater` step.
+    [string]$UpdateJobName  = 'ca-pim-update',
+    [string]$UpdateCron     = '0 3 * * *',   # UTC; stagger across an estate so 100 do not roll at once
+    # §55 -- WHERE THIS ENVIRONMENT FETCHES SOURCE, so it can build its own images and never need a
+    # build host. A template with {version} in it; the approved version is substituted at run time.
+    # Produced by tools/setup/Publish-PimSourceArchive.ps1. Without it a fresh install gets an
+    # updater that can only ROLL, which means that customer needs someone else to build for it
+    # forever -- so pass it on every real deployment. Falls back to $env:PIM_UPDATE_SOURCE_URL so an
+    # estate can set it once for the whole run rather than on every command line.
+    [string]$UpdateSourceUrlTemplate = "$($env:PIM_UPDATE_SOURCE_URL)",
+    # 2026-09-13 -- THE UPDATE RING the environment's updater follows (channel.json beside the source
+    # archives). DEFAULT 2 = the safe customer ring: nothing reaches it without the operator's approval.
+    # Internal and test environments pass -UpdateRing 1. Not passing it on a REDEPLOY keeps the ring
+    # the updater already has (never a silent promote/demote). A ring REQUIRES a source: without
+    # -UpdateSourceUrlTemplate / $env:PIM_UPDATE_SOURCE_URL (or one already on the job) the updater
+    # step REFUSES instead of installing an updater that would ignore its ring.
+    [ValidateRange(0,3)][int]$UpdateRing = 2,
+    # The HOST-SIDE ring gate (Update-PimContainers / Setup-PimContainers) refuses to roll an
+    # environment to a version its ring does not approve. This is the only way past it, and it is
+    # printed and audited. -Reason is mandatory with it.
+    [switch]$OverrideRingGate,
+    [string]$Reason,
+    [switch]$SkipUpdater,                    # leaves the environment with NO unattended update path
     [string]$DeployMarker   = 'PIMCOREENGINE-',
 
     # --- app-registration installer passthrough ---
@@ -273,6 +404,62 @@ param(
     [scriptblock]$StepRunner
 )
 $ErrorActionPreference = 'Stop'
+
+# =================================================================================================
+# 🔴 DO NOT LEAVE THE OPERATOR'S az SESSION POINTING AT A SERVICE PRINCIPAL.
+#
+# The step scripts are invoked with `&`, which runs them IN THIS PROCESS -- and this script is
+# normally run straight from the operator's own shell. Setup-PimContainers and
+# Build-PimManagerImage each set $env:AZURE_CONFIG_DIR to an isolated per-registry profile and sign
+# in there as the deploy SPN. That isolation is right, but nothing ever put the variable back, so
+# the setting LEAKED into the caller's shell and survived the run.
+#
+# MEASURED at a customer 2026-09-11, as two symptoms that did not look related: after a failed run
+# the operator had to sign in again (their shell was now reading the SPN's profile directory), and
+# a later run then failed with "Insufficient privileges to complete the operation" because that SPN
+# holds Owner on the SUBSCRIPTION and nothing in Graph. Both were this one leak.
+#
+# Captured here and restored on EVERY exit -- success, throw, or Ctrl-C.
+$script:PimCallerAzureConfigDir    = $env:AZURE_CONFIG_DIR
+$script:PimCallerAzureConfigDirSet = [bool]$env:AZURE_CONFIG_DIR
+function Restore-PimCallerAzContext {
+    if ($script:PimCallerAzureConfigDirSet) { $env:AZURE_CONFIG_DIR = $script:PimCallerAzureConfigDir }
+    elseif (Test-Path Env:\AZURE_CONFIG_DIR) { Remove-Item Env:\AZURE_CONFIG_DIR -ErrorAction SilentlyContinue }
+}
+
+# 🔴 THE PEM IS A PRIVATE KEY, AND IT ONLY EXISTS BECAUSE `az` CANNOT READ A WINDOWS CERT STORE.
+# The certificate itself lives in LocalMachine\My with its key non-exportable-by-policy-or-not; az
+# login --service-principal --certificate insists on a FILE. (PowerShell's Connect-AzAccount
+# -CertificateThumbprint reads the store directly and needs no file -- the toolchain here is az, so
+# the export is unavoidable DURING a run.)
+# It is not unavoidable BETWEEN runs. A key that is re-derivable from the store in a second has no
+# business persisting on a shared host, so one this script materialised is shredded on the way out.
+# A -AdminCertPem the CALLER supplied is never touched: that is their file, not ours.
+$script:PimEphemeralPem = $null
+function Clear-PimEphemeralPem {
+    if (-not $script:PimEphemeralPem) { return }
+    if (Test-Path -LiteralPath $script:PimEphemeralPem) {
+        try {
+            # Overwrite before unlinking. Deleting a file leaves the bytes on disk until reused, and
+            # these bytes are a subscription-Owner key.
+            $len = (Get-Item -LiteralPath $script:PimEphemeralPem).Length
+            if ($len -gt 0) {
+                $junk = [byte[]]::new($len)
+                [System.Security.Cryptography.RandomNumberGenerator]::Fill($junk)
+                [System.IO.File]::WriteAllBytes($script:PimEphemeralPem, $junk)
+            }
+        } catch { }
+        Remove-Item -LiteralPath $script:PimEphemeralPem -Force -ErrorAction SilentlyContinue
+    }
+    $script:PimEphemeralPem = $null
+}
+# Covers the paths a try/finally around the body would miss: a throw from a nested step, and the
+# operator interrupting the run.
+$null = Register-EngineEvent -SourceIdentifier PowerShell.Exiting -SupportEvent -Action { Restore-PimCallerAzContext; Clear-PimEphemeralPem }
+# 🪤 A BARE `throw` INSIDE A TRAP DISCARDS THE ERROR AND RAISES "ScriptHalted", so the one line
+# that says what actually went wrong is replaced by a word that says nothing. Measured at a customer
+# 2026-09-11: an infra failure surfaced only as "ScriptHalted" at this line. Rethrow $_.
+trap { Restore-PimCallerAzContext; Clear-PimEphemeralPem; throw $_ }
 $here    = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent $MyInvocation.MyCommand.Path }
 # Guarded `az` shadow -- see _PimAz.ps1. az writes ordinary WARNINGS to stderr and PowerShell 5.1
 # makes any such write terminating under $ErrorActionPreference='Stop'. Must precede the first az call.
@@ -289,9 +476,97 @@ function Have($cmd){ [bool](Get-Command $cmd -ErrorAction SilentlyContinue) }
 . (Join-Path $solRoot 'engine\_shared\PIM-DeployAll.ps1')
 . (Join-Path $solRoot 'engine\_shared\PIM-ScenarioProfile.ps1')     # s31 scenario -> knob resolver
 
+# ---- the registry SKU follows the EXPOSURE unless the caller said otherwise -------------------
+# Stated rather than silent: this is a cost difference (~10x) and a security posture, so a deploy
+# must never acquire either one without saying so on screen.
+# 🔴 INFRA WAS HANDED AN EMPTY -VnetName AND DIED ON IT, AFTER PREREQ HAD JUST CREATED THE VNET.
+# PREREQ derives every name from -PrereqToken (rg-automateit-<tok>, acrpim<tok>, vnet-pim-<tok>) and
+# the orchestrator forwards the EFFECTIVE names to it -- but it never derived the VNet for ITSELF,
+# so INFRA received "" and Setup-PimContainers refused with "Cannot bind argument to parameter
+# 'VnetName' because it is an empty string". Measured at a customer 2026-09-11: prereq reported
+# "vnet-pim-pk417 / pim-manager -> 10.200.13.0/26 delegated", the image built, and the next step
+# could not name the network that had just been made for it.
+# This is the missing-passthrough class again: the value EXISTS and simply was not carried. Derive
+# it from the same token prereq used, so the two halves cannot disagree; an explicit -VnetName
+# still wins.
+if (-not "$VnetName".Trim() -and "$PrereqToken".Trim()) {
+    $VnetName = "vnet-pim-$PrereqToken"
+    Write-Host "    vnet: $VnetName (derived from -PrereqToken -- the same name prereq creates)" -ForegroundColor DarkGray
+}
+if (-not "$VnetResourceGroup".Trim() -and "$ResourceGroup".Trim()) {
+    # The spoke lives in the environment's own resource group unless told otherwise.
+    $VnetResourceGroup = $ResourceGroup
+}
+
+# An internal environment whose database has no private endpoint has a database it cannot reach --
+# and neither can anything else, since disabling the public endpoint does not create a private one.
+# Stated, never silent: this creates a resource and a DNS zone.
+if (-not $PSBoundParameters.ContainsKey('SqlPrivateEndpoint') -and $Exposure -eq 'internal' -and "$SqlServerFqdn".Trim()) {
+    $SqlPrivateEndpoint = $true
+    Write-Host '    sql: private endpoint ON (from -Exposure internal; SQL is PaaS, so disabling its public endpoint makes it reachable from nowhere without one). Override with -SqlPrivateEndpoint:$false.' -ForegroundColor DarkGray
+}
+
+if (-not $PSBoundParameters.ContainsKey('AcrSku') -or -not "$AcrSku".Trim()) {
+    $AcrSku = $(if ($Exposure -eq 'internal') { 'Premium' } else { 'Basic' })
+    Write-Host ("    registry SKU: $AcrSku (from -Exposure $Exposure" +
+                $(if ($Exposure -eq 'internal') { '; Basic has no private endpoint or firewall rules' } else { '' }) +
+                '). Override with -AcrSku.') -ForegroundColor DarkGray
+}
+
 # default-safe: a bare run is plan-only (-WhatIf). -Apply opens the gate.
 $applyGate = [bool]$Apply
 if ($ValidateOnly) { $applyGate = $true }   # validate-only still "runs" its single step
+
+# =================================================================================================
+# 0. THE DEPLOY IDENTITY -- created here when it was not supplied.
+#
+# 🔴 This step exists because its absence was the ONLY genuinely manual prerequisite left in a
+# one-shot deploy. The prereq step refuses without -AdminAppId plus a credential, and nothing in
+# the toolchain could make one -- so a first deploy into a new customer tenant stopped dead on a
+# portal task, performed by hand, in front of the customer.
+#
+# Supplying -AdminAppId keeps the old behaviour exactly: an operator who has already provisioned a
+# deploy identity out of band is never second-guessed. It is only the ABSENCE that now bootstraps.
+# The helper is idempotent, so a re-run reuses the registration and the certificate rather than
+# stacking duplicates.
+# =================================================================================================
+if (-not "$AdminAppId".Trim() -and -not $ValidateOnly -and -not $StepRunner) {
+    Step '0. deploy identity'
+    if (-not "$TenantId".Trim() -or -not "$SubscriptionId".Trim()) {
+        throw 'no -AdminAppId, and -TenantId/-SubscriptionId are missing -- cannot create a deploy identity either.'
+    }
+    $mk = Join-Path $here 'New-PimDeployIdentity.ps1'
+    if (-not (Test-Path -LiteralPath $mk)) { throw "no -AdminAppId supplied and $mk is missing." }
+    Info 'no -AdminAppId supplied -- ensuring one exists (idempotent; reused if already present).'
+    Info 'this uses YOUR CURRENT az sign-in, which must be able to create an app registration and assign a role.'
+    # When the hub is named, the identity also needs peer rights ON the hub VNet -- Owner on the
+    # PIM subscription covers the spoke side only, and a cross-subscription hub is the common case.
+    $mkArgs = @{ TenantId = $TenantId; SubscriptionId = $SubscriptionId; Apply = $applyGate }
+    if ("$HubVnetName".Trim() -and "$HubVnetResourceGroup".Trim()) {
+        $hubSub = $(if ("$HubVnetSubscriptionId".Trim()) { $HubVnetSubscriptionId } else { $SubscriptionId })
+        $mkArgs['PeerVnetResourceId'] = "/subscriptions/$hubSub/resourceGroups/$HubVnetResourceGroup/providers/Microsoft.Network/virtualNetworks/$HubVnetName"
+    }
+    $ident = & $mk @mkArgs
+    if ($applyGate) {
+        if (-not $ident -or -not "$($ident.AppId)".Trim()) { throw 'the deploy identity could not be created.' }
+        $AdminAppId   = $ident.AppId
+        $AdminCertPem = $ident.PemPath
+        # WE created this key file, so WE shred it when the run ends -- see Clear-PimEphemeralPem.
+        # It is re-derived from the certificate in the store on the next run, in about a second.
+        $script:PimEphemeralPem = $ident.PemPath
+        # The SQL Entra admin defaults to the SAME identity unless one was named. It is already the
+        # subscription Owner, so making it the server's Entra admin adds no privilege it lacks --
+        # and leaving it unset makes the infra step refuse several minutes later.
+        if (-not "$SqlAdminClientId".Trim()) {
+            $SqlAdminClientId = $ident.AppId
+            if (-not "$SqlAdminCertThumbprint".Trim()) { $SqlAdminCertThumbprint = $ident.Thumbprint }
+            Info "SQL Entra admin defaults to the same identity ($($ident.AppId))."
+        }
+        Info "deploy identity: $AdminAppId  (cert $($ident.Thumbprint))"
+    } else {
+        Info 'PLAN: the identity would be created here, and -AdminAppId/-AdminCertPem filled in from it.'
+    }
+}
 
 # ---- s31: a -Scenario resolves the deploy topology, overriding -Source ----
 # The DeployAll CORE (Get-PimDeployAllPlan) + the local fact-probes only model git-pull |
@@ -300,6 +575,54 @@ if ($ValidateOnly) { $applyGate = $true }   # validate-only still "runs" its sin
 # from-master downlink is honoured by passing -Scenario through to Invoke-PimUpdate (below).
 $planSource    = $Source
 $scenarioArgs  = @{}     # splat threaded into Invoke-PimUpdate sub-calls (empty unless -Scenario)
+# 2026-09-13 -- the ring gate's override, threaded into every step that can ROLL an existing
+# environment (infra = Setup-PimContainers, code = Invoke-PimUpdate -> Update-PimContainers). Built
+# once so an audited override cannot be honoured by one step and refused by the next. Empty unless the
+# operator passed -OverrideRingGate; the gate itself runs regardless.
+$ringGateArgs = @{}
+if ($OverrideRingGate) {
+    if (-not "$Reason".Trim()) { throw "Invoke-PimDeployAll: -OverrideRingGate requires -Reason '<why this environment may take a version its ring does not approve>'." }
+    $ringGateArgs = @{ OverrideRingGate = $true; Reason = "$Reason".Trim() }
+}
+# The SQL identity, threaded into EVERY Invoke-PimUpdate sub-call -- the two DETECT calls as well
+# as the schema APPLY. Built once here rather than at each call site: this passthrough has already
+# been forgotten once, and a detect that cannot authenticate reports "unknown" instead of failing,
+# so a second omission would be silent. Empty unless a SQL admin identity was supplied, which keeps
+# every existing caller's behaviour byte-for-byte unchanged.
+# Explicit subscription for this script's OWN az calls. mgmt1 (and any deploy host that has ever
+# signed into two directories) carries more than one context, and the default is not always the one
+# you want -- a bare call then reads somebody else's subscription and answers "not found", which is
+# indistinguishable from "not deployed yet". BUG-102's rule, applied here.
+$azSubArgs = @()
+if ("$SubscriptionId".Trim()) { $azSubArgs = @('--subscription', $SubscriptionId) }
+$sqlAuthArgs   = @{}
+if ("$SqlAdminClientId".Trim()) {
+    $sqlAuthArgs['SqlAdminClientId'] = $SqlAdminClientId
+    if     ("$SqlAdminCertThumbprint".Trim()) { $sqlAuthArgs['SqlAdminCertThumbprint'] = $SqlAdminCertThumbprint }
+    elseif ("$SqlAdminClientSecret".Trim())   { $sqlAuthArgs['SqlAdminClientSecret']   = $SqlAdminClientSecret }
+}
+if ("$TenantId".Trim()) { $sqlAuthArgs['TenantId'] = $TenantId }
+
+# 🔴 THE SAME IDENTITY, IN THE SHAPE THE STORE-WRITING STEPS ASK FOR.
+# Set-PimFeatureBaseline, Set-PimPortalAdmins and Initialize-PimMailSender all take
+# -AdminAppId plus -AdminCertThumbprint / -AdminSecret, and all three REFUSE without one:
+#     RESULT: FAILED -- supply -AdminSecret or -AdminCertThumbprint
+#     Initialize-PimMailSender: one of -AdminSecret / -AdminCertThumbprint is required
+# They were being called with only the server, database and tenant -- so 'features' could never
+# succeed on any deploy, and 'mailsender' could never provision a sender on any deploy. The
+# mailsender step is deliberately non-fatal, which is exactly why nobody noticed: every deploy
+# printed "MAIL SENDER NOT PROVISIONED", which reads like an Exchange timing problem and was in
+# fact a missing argument. Same class as -AcrName, -Apps and the SQL identity above.
+# The SQL admin is the right identity here: it is the one the infra step made the server's Entra
+# admin, so it is the one that can write pim.Settings. -AdminCertPem (this script's other admin
+# credential) is a FILE for `az login` and cannot be used by these scripts, which want a
+# thumbprint in the local store -- passing it would be a different value wearing the same name.
+$storeAdminArgs = @{}
+if ("$SqlAdminClientId".Trim() -and ("$SqlAdminCertThumbprint".Trim() -or "$SqlAdminClientSecret".Trim())) {
+    $storeAdminArgs['AdminAppId'] = $SqlAdminClientId
+    if     ("$SqlAdminCertThumbprint".Trim()) { $storeAdminArgs['AdminCertThumbprint'] = $SqlAdminCertThumbprint }
+    else                                      { $storeAdminArgs['AdminSecret']         = $SqlAdminClientSecret }
+}
 if ($Scenario) {
     $sPlan = Get-PimScenarioEntryPlan -Scenario $Scenario
     $planSource = if ($sPlan.updateSource -eq 'from-master') { if ($sPlan.managedHosting -eq 'central') { 'sync-automateit' } else { 'git-pull' } }
@@ -311,6 +634,31 @@ if ($Scenario) {
 }
 $srcProfile = Get-PimUpdateSourceProfile -Source $Source
 $hosted  = [bool]$srcProfile.isHosted
+
+# 🔴 BUG-67, SECOND HALF: A -Scenario MEANS ACA, AND THE UPDATE SOURCE DOES NOT DECIDE COMPUTE.
+# `Get-PimUpdateSourceProfile` keys isHosted off the update SOURCE. For S5/S6 the source resolves
+# to 'git-pull' (from-master + managedHosting=local), whose profile says isHosted=$false -- so the
+# plan skipped prereq, image, sqlaccess, easyauth, updater and access as "not applicable to the
+# hosted flavour", and on -Apply would have sent INFRA to Setup-PimVM.ps1 instead of
+# Setup-PimContainers.ps1. For EVERY S5/S6 tenant.
+#
+# The existing fix reads `provides.container-apps-environment` from a -Descriptor -- correct, and
+# the right long-term source of truth. But it only runs when a descriptor is supplied, and the
+# estate deploys these scenarios without one, so the wrong inferred value stood. Measured
+# 2026-09-11 planning an S6 rebuild: hosted=False on an environment that runs a container app, two
+# ACA jobs, a managed environment and its own registry.
+#
+# S1..S6 are all Container Apps deployments; where they RUN and whose tenant owns them are separate
+# axes from what compute they use. A supplied -Descriptor still wins (it is read below and
+# overrides this), and -NotHosted remains for a genuine VM install, which is the no-scenario case.
+if ($Scenario -and -not $hosted -and -not $NotHosted) {
+    # 🪤 -f binds TIGHTER than +, so a format string split across a concatenation only formats the
+    # LAST fragment -- the first one printed a literal "{0}". Parenthesise the whole string.
+    Write-Host (("[scenario] hosting: False -> True (-Scenario {0} is a Container Apps deployment; " +
+                 "the update source '{1}' describes where UPDATES come from, not what compute runs them)") -f $Scenario, $Source) -ForegroundColor Yellow
+    $hosted = $true
+}
+if ($NotHosted) { $hosted = $false }
 
 # =============================================================================
 # 🔑 BUG-67 -- THE DESCRIPTOR ANSWERS "WHAT COMPUTE", INSTEAD OF IT BEING INFERRED FROM "WHOSE
@@ -338,7 +686,9 @@ $hosted  = [bool]$srcProfile.isHosted
 $descriptorDoc = $null
 if ($Descriptor) {
     $aitDeploy = Join-Path (Split-Path -Parent (Split-Path -Parent $solRoot)) 'sync\_AitPlatformDeploy.ps1'
-    if (-not (Test-Path -LiteralPath $aitDeploy)) { throw "-Descriptor supplied but the framework reader is missing: $aitDeploy" }
+    # BUG-157: the descriptor reader is part of the AutomateIT framework, which the public community
+    # edition does not include. Say that, instead of naming a path that can never exist there.
+    if (-not (Test-Path -LiteralPath $aitDeploy)) { throw "-Descriptor needs the AutomateIT framework reader ($aitDeploy), which the public community edition does not include. Omit -Descriptor and pass the deployment values as parameters." }
     . $aitDeploy
     $descriptorDoc = Get-AitPlatformDeploy -Path $Descriptor
     if (-not $descriptorDoc) { throw "-Descriptor '$Descriptor' is missing or empty. Refusing to deploy against a descriptor that says nothing -- that is indistinguishable from deploying with no configuration at all." }
@@ -350,7 +700,7 @@ if ($Descriptor) {
     $hasAca = $false
     foreach ($k in $resolved.Provides.Keys) { if ("$k".ToLowerInvariant() -eq 'container-apps-environment') { $hasAca = $true; break } }
     if ($hasAca -ne $hosted) {
-        Write-Host ("[descriptor] hosting: {0} -> {1} (the descriptor {2} declare container-apps-environment; the MSP topology is a SEPARATE axis -- BUG-67)" -f `
+ Write-Host ("[descriptor] hosting: {0} -> {1} (the descriptor {2} declare container-apps-environment; the MSP topology is a SEPARATE axis)" -f `
             $hosted, $hasAca, $(if ($hasAca) { 'DOES' } else { 'does NOT' })) -ForegroundColor Yellow
     }
     $hosted = $hasAca
@@ -399,6 +749,14 @@ Info "hosted=$hosted; tenant=$(if($TenantId){'set'}else{'(not set)'}); sub=$(if(
 function Test-EngineAppRegPresent {
     # present when an app with the engine display name exists AND has a credential. Best-effort
     # via az; unknown (no az / not logged in) => NEEDED=$true (let the idempotent installer run).
+    #
+    # 🪤 THIS ONE IS A PROBE, NOT A LOOKUP -- and the difference matters. Set-PimManagerEasyAuth
+    # used a display-name search to DECIDE WHICH APP TO USE, so a rename made it create a duplicate
+    # (proven in two tenants). Here the answer only decides whether to RUN the idempotent installer:
+    # a miss re-runs a step that is safe to re-run, and never creates a second registration. So the
+    # name search stays, and says so -- an unexplained inconsistency between the two would look like
+    # one of them had been forgotten.
+    # 🔑 The installer downstream is what owns identity, and it is the place to key stably.
     if (-not (Have 'az')) { return $null }
     try {
         $id = az ad app list --display-name $EngineAppDisplayName --query "[0].appId" -o tsv 2>$null
@@ -435,17 +793,17 @@ function Test-HostingPrereqsPresent {
     if (-not $hosted) { return $false }
     if (-not (Have 'az') -or -not "$ResourceGroup".Trim() -or -not "$AcrName".Trim()) { return $null }
     try {
-        $g = az group show -n $ResourceGroup --query name -o tsv 2>$null
+        $g = az group show @azSubArgs -n $ResourceGroup --query name -o tsv 2>$null
         if (-not "$g".Trim()) { return $false }
-        $acrId = az acr show -n $AcrName --query id -o tsv 2>$null
+        $acrId = az acr show @azSubArgs -n $AcrName --query id -o tsv 2>$null
         if (-not "$acrId".Trim()) { return $false }
         # the identity AND its role -- see above.
-        $uamiPrincipal = az identity show -g $ResourceGroup -n $PrereqIdentityName --query principalId -o tsv 2>$null
+        $uamiPrincipal = az identity show @azSubArgs -g $ResourceGroup -n $PrereqIdentityName --query principalId -o tsv 2>$null
         if (-not "$uamiPrincipal".Trim()) {
             Write-Host "  prereq: registry '$AcrName' exists but pull identity '$PrereqIdentityName' does NOT -- half-built; re-running PREREQ." -ForegroundColor Yellow
             return $false
         }
-        $pull = az role assignment list --assignee $uamiPrincipal --scope $acrId --role AcrPull `
+        $pull = az role assignment list @azSubArgs --assignee $uamiPrincipal --scope $acrId --role AcrPull `
                     --query "[0].roleDefinitionName" -o tsv 2>$null
         if (-not "$pull".Trim()) {
             Write-Host "  prereq: '$PrereqIdentityName' exists but holds NO AcrPull on '$AcrName' -- every image pull would fail in INFRA; re-running PREREQ." -ForegroundColor Yellow
@@ -454,10 +812,40 @@ function Test-HostingPrereqsPresent {
         if (-not $PrereqSkipSql) {
             $srv = ("$SqlServerFqdn" -split '\.')[0]
             if ("$srv".Trim()) {
-                $s = az sql server show -g $ResourceGroup -n $srv --query name -o tsv 2>$null
+                $s = az sql server show @azSubArgs -g $ResourceGroup -n $srv --query name -o tsv 2>$null
                 if (-not "$s".Trim()) {
                     Write-Host "  prereq: SQL server '$srv' does NOT exist -- SCHEMA would have nothing to talk to; re-running PREREQ." -ForegroundColor Yellow
                     return $false
+                }
+                # 🔴 -SqlPrivateEndpoint CHANGES WHAT "PREREQ IS CURRENT" MEANS, AND THIS PROBE COULD
+                # NOT SEE IT. An environment first built WITHOUT the switch has a server, an ACR, a
+                # pull identity and its AcrPull -- so every check above passed and prereq was skipped
+                # as "already current". But the private-SQL half had never run: no 'id-pim-sql-<token>',
+                # no private endpoint, and the Entra admin still the DEPLOY SPN. INFRA then threw
+                #     the SQL admin identity was not published by the prereq step
+                # from three scripts down, about a step the plan had just called current. Measured at
+                # a customer on 2026-09-11; it is the same §45.1 rule the header above cites -- a
+                # probe that cannot observe the thing it gates is not a probe.
+                # 🪤 The admin is checked by SID, not by existence. A server whose admin is the deploy
+                # SPN looks identically "administered" to one whose admin is the identity, and only
+                # the second one can be reached from inside the VNet.
+                if ($SqlPrivateEndpoint) {
+                    $sqlUamiName = "id-pim-sql-$PrereqToken"
+                    $sqlUamiOid  = az identity show @azSubArgs -g $ResourceGroup -n $sqlUamiName --query principalId -o tsv 2>$null
+                    if (-not "$sqlUamiOid".Trim()) {
+                        Write-Host "  prereq: -SqlPrivateEndpoint is set but the SQL admin identity '$sqlUamiName' does NOT exist -- nothing inside the environment could create its database users; re-running PREREQ." -ForegroundColor Yellow
+                        return $false
+                    }
+                    $curAdmin = az sql server ad-admin list @azSubArgs -g $ResourceGroup -s $srv --query "[0].sid" -o tsv 2>$null
+                    if ("$curAdmin".Trim() -ne "$sqlUamiOid".Trim()) {
+                        Write-Host "  prereq: the Entra admin on '$srv' is '$curAdmin', not '$sqlUamiName' -- the in-cloud bootstrap would authenticate as an identity with no rights; re-running PREREQ." -ForegroundColor Yellow
+                        return $false
+                    }
+                    $pe = az network private-endpoint show @azSubArgs -g $ResourceGroup -n "pe-$srv" --query id -o tsv 2>$null
+                    if (-not "$pe".Trim()) {
+                        Write-Host "  prereq: no private endpoint 'pe-$srv' -- with its public endpoint disabled the server is reachable from NOWHERE; re-running PREREQ." -ForegroundColor Yellow
+                        return $false
+                    }
                 }
             }
         }
@@ -480,8 +868,19 @@ function Test-ManagerImagePresent {
     try {
         $tag = Get-EffectiveImageTag
         if (-not "$tag".Trim()) { return $null }
-        $d = az acr repository show -n $AcrName --image "$ImageRepo`:$tag" --query digest -o tsv 2>$null
-        return ([bool]"$d".Trim())
+        # 🔴 ASK "WHICH TAGS EXIST", NOT "SHOW ME THIS ONE".
+        # `az acr repository show --image repo:tag` ERRORS when the tag is absent, and absent is the
+        # NORMAL answer here -- this runs before the image for a new version has been built. So the
+        # very first thing a customer saw on every deploy was:
+        #     az exit 3: ERROR: ... the specified tag does not exist. Correlation ID: ...
+        # printed by a probe whose job is to ask a question, on a deploy that then proceeded
+        # perfectly. An error message that appears during correct operation teaches the reader to
+        # ignore error messages.
+        # Listing the tags and matching in PowerShell asks the same question with no error, and
+        # keeps the JMESPath free of characters cmd.exe would eat.
+        $tags = @(az acr repository show-tags @azSubArgs -n $AcrName --repository $ImageRepo -o tsv 2>$null) |
+                Where-Object { "$_".Trim() }
+        return ([bool](@($tags) -contains "$tag".Trim()))
     } catch { return $null }
 }
 function Test-AcaEnvPresent {
@@ -519,13 +918,62 @@ function Test-AcaEnvPresent {
     if (-not $hosted) { return $false }       # non-hosted: infra step is the VM host (handled below)
     if (-not (Have 'az') -or -not "$ResourceGroup".Trim()) { return $null }
     try {
-        $e = az containerapp env show -g $ResourceGroup -n $EnvName --query "name" -o tsv 2>$null
+        $e = az containerapp env show @azSubArgs -g $ResourceGroup -n $EnvName --query "name" -o tsv 2>$null
         if (-not "$e".Trim()) { return $false }
         # The environment exists. Now the part that actually matters: does the MANAGER app exist?
-        $m = az containerapp show -g $ResourceGroup -n $ManagerApp --query "name" -o tsv 2>$null
+        $m = az containerapp show @azSubArgs -g $ResourceGroup -n $ManagerApp --query "name" -o tsv 2>$null
         if (-not "$m".Trim()) {
             Write-Host "  infra: ACA environment '$EnvName' exists but app '$ManagerApp' does NOT -- half-built; re-running INFRA." -ForegroundColor Yellow
             return $false
+        }
+        # 🔴 EXISTING IS NOT PROVISIONED, AND THAT DISTINCTION COST A WHOLE DEPLOY.
+        # An app whose creation FAILED still answers `containerapp show` with its name -- so this
+        # probe said "already current" about an app in provisioningState=Failed with ZERO revisions
+        # and no ingress FQDN. Every re-run then skipped INFRA, the only step that could repair it,
+        # and the deploy died four steps later in easyauth with
+        #     no ingress FQDN on ca-pim-manager -- is ingress enabled?
+        # which points at ingress configuration and is nothing to do with it.
+        # 🔑 THE CAUSE IS WORTH KNOWING because it will recur on every greenfield: the app is created
+        # seconds after its identity is granted AcrPull, and AZURE RBAC HAS NOT PROPAGATED YET --
+        #     unable to pull image using Managed identity id-pim-<token> for registry acrpim<token>
+        # The grant is correct; it is simply not effective yet. Re-running INFRA once the assignment
+        # has landed creates the app cleanly, which is exactly what this probe must allow to happen.
+        # Same §45.1 rule as the comments above: a repair gated on a condition that cannot observe
+        # the thing being repaired is not a repair.
+        $mState = az containerapp show @azSubArgs -g $ResourceGroup -n $ManagerApp --query "properties.provisioningState" -o tsv 2>$null
+        $mFqdn  = az containerapp show @azSubArgs -g $ResourceGroup -n $ManagerApp --query "properties.configuration.ingress.fqdn" -o tsv 2>$null
+        if ("$mState".Trim() -and "$mState".Trim() -notmatch '(?i)^Succeeded$') {
+            Write-Host "  infra: app '$ManagerApp' exists but provisioningState='$mState' (not Succeeded) -- it never came up; re-running INFRA." -ForegroundColor Yellow
+            Write-Host "         On a greenfield this is usually AcrPull RBAC that had not propagated when the app was first created." -ForegroundColor DarkGray
+            return $false
+        }
+        if (-not "$mFqdn".Trim()) {
+            Write-Host "  infra: app '$ManagerApp' has NO ingress FQDN -- Easy Auth and every client need one; re-running INFRA." -ForegroundColor Yellow
+            return $false
+        }
+        # 🔴 WITH PRIVATE SQL, INFRA IS THE ONLY THING THAT CAN APPLY MANAGER ACCESS -- so if the
+        # bootstrap job does not carry the CURRENT SuperAdmin list, infra is NOT current.
+        # The `access` step cannot write to a private store itself; it hands the work to the
+        # bootstrap job, and only INFRA stamps the list onto that job and runs it. Once an
+        # environment converged, infra was skipped, the job kept whatever list it had (or none), and
+        # `access` reported success against a job that had never been told. Measured at a customer
+        # 2026-09-12: a green end-to-end deploy, and no SuperAdmin in the Manager.
+        # 🪤 Being wrong here costs one idempotent re-run of infra. Being wrong the other way costs
+        # the environment its administrators, silently -- the same asymmetry as the BUG-49/51 checks
+        # above, which is why this belongs in the probe and not in a warning.
+        if ($SqlPrivateEndpoint -and "$ManagerSuperAdmins".Trim()) {
+            $wantSa = @("$ManagerSuperAdmins" -split '[,;]+' | ForEach-Object { $_.Trim().ToLowerInvariant() } | Where-Object { $_ })
+            $jobEnv = az containerapp job show @azSubArgs -g $ResourceGroup -n $DbInitJobName `
+                        --query "properties.template.containers[0].env[?name=='PIM_DBINIT_MANAGER_ACCESS'].value" -o tsv 2>$null
+            $haveSa = @()
+            if ("$jobEnv".Trim()) {
+                try { $haveSa = @(("$jobEnv".Trim() | ConvertFrom-Json) | ForEach-Object { "$($_.identity)".Trim().ToLowerInvariant() }) } catch { $haveSa = @() }
+            }
+            $missSa = @($wantSa | Where-Object { $haveSa -notcontains $_ })
+            if ($missSa.Count) {
+                Write-Host "  infra: the bootstrap job '$DbInitJobName' does not carry $($missSa.Count) of the requested SuperAdmin(s) -- nobody could administer this environment; re-running INFRA." -ForegroundColor Yellow
+                return $false
+            }
         }
         # 🔴 THE SAME LESSON AGAIN, ONE ARTEFACT FURTHER OUT (BUG-49/BUG-51).
         # The INFRA step now also peers the spoke VNet, publishes the environment's default
@@ -537,7 +985,7 @@ function Test-AcaEnvPresent {
         if ("$HubVnetName".Trim() -and "$HubVnetResourceGroup".Trim() -and "$VnetName".Trim()) {
             $spokeShort = "$VnetName".ToLowerInvariant(); if ($spokeShort -like 'vnet-*') { $spokeShort = $spokeShort.Substring(5) }
             $hubShort   = "$HubVnetName".ToLowerInvariant(); if ($hubShort -like 'vnet-*') { $hubShort = $hubShort.Substring(5) }
-            $peerState = az network vnet peering show -g $VnetResourceGroup --vnet-name $VnetName -n "$spokeShort-to-$hubShort" --query peeringState -o tsv 2>$null
+            $peerState = az network vnet peering show @azSubArgs -g $VnetResourceGroup --vnet-name $VnetName -n "$spokeShort-to-$hubShort" --query peeringState -o tsv 2>$null
             if ("$peerState".Trim() -ne 'Connected') {
                 Write-Host "  infra: spoke VNet '$VnetName' is NOT peered to '$HubVnetName' (state='$peerState') -- the Manager has no route from any client; re-running INFRA." -ForegroundColor Yellow
                 return $false
@@ -549,7 +997,7 @@ function Test-AcaEnvPresent {
             $rbacOid = $(if ($WorkerMode -eq 'cron') { az containerapp job show -g $ResourceGroup -n $TickJobName --query "identity.principalId" -o tsv 2>$null }
                          else { az containerapp show -g $ResourceGroup -n $ManagerApp --query "identity.principalId" -o tsv 2>$null })
             if ("$rbacOid".Trim()) {
-                $armRoles = az role assignment list --assignee "$rbacOid".Trim() --scope "/subscriptions/$SubscriptionId" --query "length(@)" -o tsv 2>$null
+                $armRoles = @(az role assignment list @azSubArgs --assignee "$rbacOid".Trim() --scope "/subscriptions/$SubscriptionId" --query "[].id" -o tsv 2>$null | Where-Object { "$_".Trim() }).Count
                 if ("$armRoles".Trim() -and [int]"$armRoles".Trim() -eq 0) {
                     Write-Host "  infra: workload identity holds NO Azure role assignment on /subscriptions/$SubscriptionId -- PIM's Azure half is blind (azure-scopes=0); re-running INFRA." -ForegroundColor Yellow
                     return $false
@@ -560,13 +1008,13 @@ function Test-AcaEnvPresent {
         # always-on mode: the worker apps are the workload and the Manager standing means the loop
         # ran. cron mode: the tick Job is the workload, so keep going.
         if ($WorkerMode -ne 'cron') { return $true }
-        $jobOid = az containerapp job show -g $ResourceGroup -n $TickJobName --query "identity.principalId" -o tsv 2>$null
+        $jobOid = az containerapp job show @azSubArgs -g $ResourceGroup -n $TickJobName --query "identity.principalId" -o tsv 2>$null
         if (-not "$jobOid".Trim()) {
             Write-Host "  infra: tick Job '$TickJobName' is missing (or has no identity) -- half-built; re-running INFRA." -ForegroundColor Yellow
             return $false
         }
         # The Job exists. Its GRANTS are the step's real output -- and they are what BUG-44 skipped.
-        $roles = az rest --method get --url "https://graph.microsoft.com/v1.0/servicePrincipals/$jobOid/appRoleAssignments" --query "length(value)" -o tsv 2>$null
+        $roles = @(az rest --method get --url "https://graph.microsoft.com/v1.0/servicePrincipals/$jobOid/appRoleAssignments" --query "value[].id" -o tsv 2>$null | Where-Object { "$_".Trim() }).Count
         if (-not "$roles".Trim() -or [int]"$roles".Trim() -eq 0) {
             Write-Host "  infra: tick Job '$TickJobName' exists but its identity holds NO Graph app-roles -- the grant step never completed; re-running INFRA." -ForegroundColor Yellow
             return $false
@@ -578,9 +1026,13 @@ function Test-SchemaConformant {
     # reuse Invoke-PimUpdate's SQL DETECT (it reads the deployed columns + builds the plan). We do
     # NOT duplicate that logic -- we call the detect-only path and read SqlUpdateRequired.
     if (-not "$SqlConnectionString".Trim()) { return $null }   # cannot read => run schema step
+    # 🪤 A PRIVATE SQL SERVER CANNOT BE PROBED FROM HERE EITHER, and trying costs the full connect
+    # timeout ON EVERY DEPLOY before answering "unknown" -- the same answer this line gives for
+    # free. The schema step itself is owned by the in-cloud bootstrap in this topology.
+    if ($SqlPrivateEndpoint) { return $null }
     try {
         $upd = Join-Path $here 'Invoke-PimUpdate.ps1'
-        $det = & $upd -Source $Source @scenarioArgs -DetectOnly -SqlConnectionString $SqlConnectionString `
+        $det = & $upd -Source $Source @scenarioArgs @sqlAuthArgs -DetectOnly -SqlConnectionString $SqlConnectionString `
                     -ResourceGroup $ResourceGroup -ManagerApp $ManagerApp -ImageTag $ImageTag 6>$null
         $last = @($det) | Where-Object { $_ -and ($_.PSObject.Properties.Name -contains 'SqlUpdateRequired') } | Select-Object -Last 1
         if ($last) { return (-not [bool]$last.SqlUpdateRequired) }
@@ -592,7 +1044,7 @@ function Test-ManagerImageCurrent {
     # detect-only, read GuiUpdateRequired. Unknown => run the code step.
     try {
         $upd = Join-Path $here 'Invoke-PimUpdate.ps1'
-        $det = & $upd -Source $Source @scenarioArgs -DetectOnly -SqlConnectionString $SqlConnectionString `
+        $det = & $upd -Source $Source @scenarioArgs @sqlAuthArgs -DetectOnly -SqlConnectionString $SqlConnectionString `
                     -ResourceGroup $ResourceGroup -ManagerApp $ManagerApp -ImageTag $ImageTag 6>$null
         $last = @($det) | Where-Object { $_ -and ($_.PSObject.Properties.Name -contains 'GuiUpdateRequired') } | Select-Object -Last 1
         if ($last) { return (-not [bool]$last.GuiUpdateRequired) }
@@ -664,7 +1116,10 @@ $facts['verify'] = (-not $SkipVerify)
 # $hosted may have been corrected from the descriptor (BUG-67) -- pass it, or the plan re-derives
 # the stale value from $Source and disagrees with the runner about which infra path to take.
 $planArgs = @{}
-if ($Descriptor) { $planArgs['HostedOverride'] = $hosted }
+# Pass the CORRECTED value whenever anything corrected it -- a descriptor, or the -Scenario rule
+# above. Without this the plan re-derives hosted from the update source and silently disagrees with
+# the steps that already ran against the corrected value.
+if ($Descriptor -or $Scenario -or $NotHosted) { $planArgs['HostedOverride'] = $hosted }
 $plan = Get-PimDeployAllPlan -Source $Source -Facts $facts -Apply:$applyGate -ValidateOnly:$ValidateOnly @planArgs
 
 Write-Host ""
@@ -727,30 +1182,49 @@ function Invoke-DefaultStepRunner {
             if (-not "$PrereqToken".Trim()) {
                 return @{ ok=$false; ran=$true; detail='PREREQ needs -PrereqToken (the estate token, e.g. wa678): every prerequisite name is derived from it.' }
             }
-            if ($PrereqIndex -lt 0) {
-                # Not defaulted on purpose. The index picks the VNet CIDR, and two environments
-                # silently sharing one is unrecoverable once anything is peered -- so a wrong
-                # guess here is far worse than a refusal.
-                return @{ ok=$false; ran=$true; detail='PREREQ needs -PrereqIndex (stable per-environment index -> address space). Refusing to guess: two environments sharing a CIDR cannot be un-peered.' }
+            # An address plan is required, but it can come from EITHER source. A customer with
+            # their own IP range must not be made to invent an estate index whose value is then
+            # discarded -- that is how a meaningless number ends up copied between customers.
+            $haveCidr = ("$PrereqVnetAddressPrefix".Trim() -and "$PrereqSubnetAddressPrefix".Trim())
+            if (-not $haveCidr -and $PrereqIndex -lt 0) {
+                # Still not defaulted, for the original reason: the address range picks the VNet
+                # CIDR, and two environments silently sharing one is unrecoverable once anything
+                # is peered -- so a wrong guess here is far worse than a refusal.
+                return @{ ok=$false; ran=$true; detail=('PREREQ needs an address plan: either -PrereqVnetAddressPrefix + ' +
+                    '-PrereqSubnetAddressPrefix (the customer''s own range, any addresses they like) or -PrereqIndex ' +
+                    '(the estate scheme, <AddressBase>.<Index*8>.0/21). Refusing to guess: two environments sharing a ' +
+                    'CIDR cannot be un-peered.') }
             }
             # 🔴 THE SPLIT-BRAIN GUARD. The prereq script derives names from the token; this
             # orchestrator was given them explicitly. If they disagree, prereq would create a
             # COMPLETE, correct-looking set of resources that infra never touches -- and both
             # halves would report success. Prove agreement BEFORE creating anything.
+            # §38.1b -- THE GUARD NOW COMPARES EFFECTIVE NAMES, AND THE OVERRIDES ARE FORWARDED.
+            # It used to re-derive the names from the token and refuse anything else, which made
+            # an explicit -ResourceGroup structurally unusable: a customer with their own naming
+            # standard could not be onboarded at all. The guard's PURPOSE is unchanged and still
+            # load-bearing -- prereq must never provision under names infra will not read -- but
+            # the way to satisfy it is to give prereq the SAME names infra uses, not to force
+            # everyone onto the estate's.
             $derived = @{
                 ResourceGroup = "rg-automateit-$PrereqToken"
                 AcrName       = ("acrpim$PrereqToken" -replace '[^a-z0-9]','').ToLowerInvariant()
                 VnetName      = "vnet-pim-$PrereqToken"
             }
-            $mismatch = @()
-            if ("$ResourceGroup".Trim() -and $ResourceGroup -ne $derived.ResourceGroup) { $mismatch += "-ResourceGroup '$ResourceGroup' != '$($derived.ResourceGroup)'" }
-            if ("$AcrName".Trim()       -and $AcrName       -ne $derived.AcrName)       { $mismatch += "-AcrName '$AcrName' != '$($derived.AcrName)'" }
-            if ("$VnetName".Trim()      -and $VnetName      -ne $derived.VnetName)      { $mismatch += "-VnetName '$VnetName' != '$($derived.VnetName)'" }
-            if ($mismatch.Count) {
-                return @{ ok=$false; ran=$true; detail=("PREREQ token '$PrereqToken' derives names that disagree with the ones this deploy will use: " +
-                    ($mismatch -join '; ') + ". Refusing -- provisioning under names INFRA never reads is a silent half-deploy.") }
+            $eff = @{
+                ResourceGroup = $(if ("$ResourceGroup".Trim()) { "$ResourceGroup".Trim() } else { $derived.ResourceGroup })
+                AcrName       = $(if ("$AcrName".Trim())       { "$AcrName".Trim() }       else { $derived.AcrName })
+                VnetName      = $(if ("$VnetName".Trim())      { "$VnetName".Trim() }      else { $derived.VnetName })
             }
-            if ($PSCmdlet.ShouldProcess($derived.ResourceGroup, 'create hosting prerequisites (RG, VNet, ACR, Log Analytics, SQL, AcrPull identity)')) {
+            # The VNet may live in its own RG (an existing customer hub/spoke); prereq is told
+            # which RG to build the VNet in, so a -VnetResourceGroup that points elsewhere means
+            # prereq would create a VNet the deploy never uses. That IS still a split brain.
+            if ("$VnetResourceGroup".Trim() -and "$VnetResourceGroup".Trim() -ne $eff.ResourceGroup) {
+                return @{ ok=$false; ran=$true; detail=("PREREQ would create the VNet in '$($eff.ResourceGroup)' but this deploy reads it from " +
+                    "'$VnetResourceGroup'. Refusing -- provisioning under names INFRA never reads is a silent half-deploy. " +
+                    "Either point -VnetResourceGroup at the deploy RG, or pre-create the VNet and skip the prereq step.") }
+            }
+            if ($PSCmdlet.ShouldProcess($eff.ResourceGroup, 'create hosting prerequisites (RG, VNet, ACR, Log Analytics, SQL, AcrPull identity)')) {
                 $prqId = @{}
                 if ($AdminAppId -and $AdminCertPem)   { $prqId['AdminAppId'] = $AdminAppId; $prqId['AdminCertPem'] = $AdminCertPem }
                 elseif ($AdminAppId -and $AdminSecret){ $prqId['AdminAppId'] = $AdminAppId; $prqId['AdminSecret']  = $AdminSecret }
@@ -759,10 +1233,33 @@ function Invoke-DefaultStepRunner {
                     # without a credential), so say so here rather than let it throw from inside.
                     return @{ ok=$false; ran=$true; detail='PREREQ needs a deploy identity: -AdminAppId plus -AdminCertPem (production) or -AdminSecret.' }
                 }
+                # §38.1a/b -- forward the EFFECTIVE names and the network shape. Splatted so an
+                # unsupplied value is genuinely absent and prereq falls back to its own derived
+                # default: passing '' would override the default WITH emptiness.
+                $prqShape = @{
+                    ResourceGroupName = $eff.ResourceGroup
+                    AcrName           = $eff.AcrName
+                    VnetName          = $eff.VnetName
+                }
+                if ("$PrereqSubnetName".Trim())           { $prqShape['SubnetName']          = "$PrereqSubnetName".Trim() }
+                if ("$PrereqVnetAddressPrefix".Trim())    { $prqShape['VnetAddressPrefix']   = "$PrereqVnetAddressPrefix".Trim() }
+                if ("$PrereqSubnetAddressPrefix".Trim())  { $prqShape['SubnetAddressPrefix'] = "$PrereqSubnetAddressPrefix".Trim() }
+                if ("$LogAnalyticsWorkspaceName".Trim())  { $prqShape['LogAnalyticsName']    = "$LogAnalyticsWorkspaceName".Trim() }
+                # The orchestrator carries the SQL server as an FQDN; prereq creates a server by
+                # NAME. Take the first label rather than making the caller pass the same thing twice.
+                if ("$SqlServerFqdn".Trim())              { $prqShape['SqlServerName']       = ("$SqlServerFqdn".Trim() -split '\.')[0] }
                 $global:LASTEXITCODE = 0
-                & $prq @prqId -TenantId $TenantId -SubscriptionId $SubscriptionId -Token $PrereqToken `
+                try {
+                & $prq @prqId @prqShape -TenantId $TenantId -SubscriptionId $SubscriptionId -Token $PrereqToken `
                     -Index $PrereqIndex -Location $Location -AddressBase $PrereqAddressBase `
-                    -SkipSql:$PrereqSkipSql | Out-Host
+                    -SkipSql:$PrereqSkipSql -SqlConnectionPolicy $SqlConnectionPolicy `
+                    -AcrSku $AcrSku -AcrPublicAccess $AcrPublicAccess `
+                    -PrivateEndpointSubnetName $PrivateEndpointSubnetName `
+                    -PrivateEndpointSubnetAddressPrefix $PrivateEndpointSubnetAddressPrefix `
+                    -AcrAgentPoolName $AcrAgentPoolName `
+                    -SqlPrivateEndpoint:$SqlPrivateEndpoint `
+                    -PrivateDnsResourceGroup $PrivateDnsResourceGroup | Out-Host
+                } finally { Restore-PimCallerAzContext }
                 $ok = (-not $LASTEXITCODE) -or ($LASTEXITCODE -eq 0)
                 return @{ ok=$ok; ran=$true; detail=("hosting prerequisites for '$PrereqToken'" + $(if ($PrereqSkipSql) { ' (SQL skipped -- central store)' } else { '' })) }
             }
@@ -781,10 +1278,26 @@ function Invoke-DefaultStepRunner {
                 if ($AdminAppId -and $AdminCertPem)    { $bldId['AdminAppId'] = $AdminAppId; $bldId['AdminCertPem'] = $AdminCertPem }
                 elseif ($AdminAppId -and $AdminSecret) { $bldId['AdminAppId'] = $AdminAppId; $bldId['AdminSecret']  = $AdminSecret }
                 $global:LASTEXITCODE = 0
+                # A registry with no public access can only be built through an agent pool inside
+                # the VNet -- otherwise the build works or fails depending on WHERE it is run, which
+                # is not reproducible.
+                if ("$AcrAgentPoolName".Trim()) { $bldId['AcrAgentPool'] = "$AcrAgentPoolName".Trim() }
+                try {
                 & $bld @bldId -Source $Source -TenantId $TenantId -AcrName $AcrName -ImageRepo $ImageRepo `
                     -ImageTag (Get-EffectiveImageTag) | Out-Host
+                } finally { Restore-PimCallerAzContext }
                 $ok = (-not $LASTEXITCODE) -or ($LASTEXITCODE -eq 0)
-                return @{ ok=$ok; ran=$true; detail="built $AcrName/$ImageRepo`:$(Get-EffectiveImageTag)" }
+                # 🪤 DO NOT NAME AN ACR IMAGE THAT WAS NEVER PUSHED. This line reported
+                #     built acrpim<token>/pim-manager:2.4.324
+                # even when the builder had taken its LOCAL-PACKAGE path and pushed nothing, so the
+                # deploy log said the image existed and infra then failed with "the specified tag
+                # does not exist" -- two lines apart, contradicting each other. The builder
+                # publishes the digest it actually produced; if there is none, say what happened
+                # instead of claiming a registry reference.
+                $builtRef = "$($global:PIM_LastBuiltDigest)".Trim()
+                $detail = if ($builtRef -match '^sha256:') { "built $AcrName/$ImageRepo`:$(Get-EffectiveImageTag) ($builtRef)" }
+                          else { "build step ran but NO image reached '$AcrName' -- a local package is not a registry image" }
+                return @{ ok=$ok; ran=$true; detail=$detail }
             }
             return @{ ok=$true; ran=$false; detail='skipped by ShouldProcess' }
         }
@@ -797,6 +1310,34 @@ function Invoke-DefaultStepRunner {
             elseif ($SqlAdminClientSecret) { $sqlAdminCred['SqlAdminClientSecret'] = $SqlAdminClientSecret }
             elseif ($hosted) {
                 return @{ ok=$false; ran=$true; detail='INFRA needs a SQL Entra admin: pass -SqlAdminClientId plus -SqlAdminCertThumbprint (production) or -SqlAdminClientSecret.' }
+            }
+            # Declared support access (§64.7b): forwarded only when set, so an unset value stays ABSENT.
+            if ("$SupportDbAppId".Trim()) {
+                $sqlAdminCred['SupportDbAppId']    = "$SupportDbAppId".Trim()
+                $sqlAdminCred['SupportDbUserName'] = $SupportDbUserName
+            }
+            # 🔴 THE PULL IDENTITY MUST REACH INFRA EVEN WHEN NOBODY TYPED IT -- the BUG-46 class
+            # again, and it stopped a customer deploy dead on 2026-09-11:
+            #     Registry 'acrpim<token>' has no admin credentials (admin account not enabled), and
+            #     -RegistryIdentityResourceId was not supplied. ... Refusing to create container apps
+            #     that cannot pull.
+            # The refusal is right; the gap is that this orchestrator ALREADY KNOWS the identity.
+            # New-PimHostingPrerequisites creates it as 'id-pim-<token>' and $PrereqIdentityName is
+            # derived from exactly that convention a few hundred lines up -- the value was simply
+            # never forwarded, so every deploy had to pass by hand a resource id the front door could
+            # compute. Worse, it is unforwardable in practice: a resource id typed into Git Bash is
+            # rewritten to a local path by MSYS (see Setup-PimContainers' guard), so the manual
+            # workaround has its own trap.
+            # 🪤 RESOLVED, NOT CONSTRUCTED. Building the id from strings would hand Setup-PimContainers
+            # a well-formed id for an identity that may not exist, turning a clear refusal into an
+            # opaque ACA failure at app-create time. If the read comes back empty we forward nothing
+            # and the existing refusal stands, naming the real problem.
+            if (-not "$RegistryIdentityResourceId".Trim() -and "$PrereqIdentityName".Trim() -and "$ResourceGroup".Trim() -and (Have 'az')) {
+                $derivedPull = az identity show @azSubArgs -g $ResourceGroup -n $PrereqIdentityName --query id -o tsv 2>$null
+                if ("$derivedPull".Trim() -match '^/subscriptions/') {
+                    $RegistryIdentityResourceId = "$derivedPull".Trim()
+                    Write-Host "    pull identity: $PrereqIdentityName (resolved -- no -RegistryIdentityResourceId needed)" -ForegroundColor DarkGray
+                }
             }
             $registryIdentity = @{}
             if ($RegistryIdentityResourceId) { $registryIdentity['RegistryIdentityResourceId'] = $RegistryIdentityResourceId }
@@ -812,16 +1353,30 @@ function Invoke-DefaultStepRunner {
             if ($HubVnetSubscriptionId)      { $reach['HubVnetSubscriptionId']      = $HubVnetSubscriptionId }
             if ($PrivateDnsResourceGroup)    { $reach['PrivateDnsResourceGroup']    = $PrivateDnsResourceGroup }
             if ($SkipPrivateDns)             { $reach['SkipPrivateDns']             = $true }
+            if ($SkipPeering)                { $reach['SkipPeering']                = $true }
+            if ($SkipSqlNetworkAccess)       { $reach['SkipSqlNetworkAccess']       = $true }
             if ($DnsServer)                  { $reach['DnsServer']                  = $DnsServer }
             if ($AzureRbacRoles)             { $reach['AzureRbacRoles']             = $AzureRbacRoles }
             if ($AzureRbacManagementGroupId) { $reach['AzureRbacManagementGroupId'] = $AzureRbacManagementGroupId }
             if ($SkipAzureRbac)              { $reach['SkipAzureRbac']              = $true }
             if ($RequireAzureRbac)           { $reach['RequireAzureRbac']           = $true }
-            if ($hosted -and -not ($HubVnetName -and $HubVnetResourceGroup)) {
+            # §38.2a -- the BUG-49 warning is about an ISOLATED VNet, so it only applies when the
+            # environment is internal-only. Firing it on an external-capable deploy would be
+            # false: that Manager is reachable without any peering, which is the whole point of
+            # asking for external. A warning that is wrong half the time gets ignored the other half.
+            if ($hosted -and $Exposure -eq 'internal' -and -not ($HubVnetName -and $HubVnetResourceGroup)) {
                 # Say it at the FRONT DOOR, before anything is created -- not three scripts deep
                 # where it reads as a detail of the container setup.
                 Warn ("no -HubVnetName/-HubVnetResourceGroup: the PIM spoke VNet will be left ISOLATED and the " +
-                      "Manager unreachable from any client. The deploy will still report success (BUG-49).")
+                      "Manager unreachable from any client. The deploy will still report success (BUG-49). " +
+                      "If this environment is meant to be reachable without peering, deploy it with " +
+                      "-Exposure external -- that choice is IMMUTABLE after the environment is created.")
+            }
+            if ($hosted -and $Exposure -eq 'external') {
+                Warn ("-Exposure external -- the Container Apps environment will have PUBLIC ingress. " +
+                      "Easy Auth must be in front of the Manager, and consider " +
+                      "'az containerapp ingress access-restriction set' to allowlist client IPs. " +
+                      "The environment's exposure cannot be changed later; the APP's ingress can.")
             }
             if ($hosted) {
                 $setup = Join-Path $here 'Setup-PimContainers.ps1'
@@ -831,19 +1386,86 @@ function Invoke-DefaultStepRunner {
                     # §34.2c: pass the deploy identity so INFRA signs itself in to an isolated
                     # AZURE_CONFIG_DIR like every other step, instead of inheriting the ambient
                     # context. Splatted so an omitted identity keeps the previous behaviour.
+                    # 🔴 §38.1a -- INFRA MUST USE THE SUBNET PREREQ ACTUALLY CREATED. Setup-PimContainers
+                    # carries its own defaults (snet-pim-aca / 10.100.40.0/23), and those were being used
+                    # while prereq had just built the customer's real subnet from -PrereqSubnetName /
+                    # -PrereqSubnetAddressPrefix. The two halves then disagreed and ACA refused with
+                    # NetcfgSubnetRangeOutsideVnet -- the estate default range is not inside a customer's
+                    # VNet. Measured at a live customer 2026-09-08: prereq created snet-pim-manager
+                    # 10.200.12.0/26 inside 10.200.12.0/24, infra asked for snet-pim-aca 10.100.40.0/23.
+                    # Same split-brain the name guard above exists to prevent, one level down: forward
+                    # the SAME values to both, never let each side default independently.
+                    $infraSubnet = @{}
+                    if ("$PrereqSubnetName".Trim())          { $infraSubnet['SubnetName']   = "$PrereqSubnetName".Trim() }
+                    if ("$PrereqSubnetAddressPrefix".Trim()) { $infraSubnet['SubnetPrefix'] = "$PrereqSubnetAddressPrefix".Trim() }
+                    # 🔑 WHO CREATES THE DATABASE USERS. With a PRIVATE SQL server this host has no
+                    # route to it at all, so the users are created by a one-shot job inside the
+                    # environment, as the identity prereq made the server's Entra admin. Prereq
+                    # publishes that identity rather than this step re-deriving its name -- the two
+                    # halves disagreeing about which identity administers the database would be a
+                    # deploy that looks complete and a Manager that cannot log in.
+                    $dbInit = @{}
+                    if ($SqlPrivateEndpoint) {
+                        $dbInit['UseInCloudDbInit'] = $true
+                        # The same list the host-side `features` step would have used -- forwarded
+                        # rather than re-defaulted, so both topologies enable the same features.
+                        if (@($FeatureGates).Count)        { $dbInit['FeatureGates']        = @($FeatureGates) }
+                        if (@($FeatureGatesDisable).Count) { $dbInit['FeatureGatesDisable'] = @($FeatureGatesDisable) }
+                        # Same list the host-side `access` step would have written.
+                        $saList = @("$ManagerSuperAdmins" -split '[,;]+' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+                        if ($saList.Count) { $dbInit['ManagerSuperAdmins'] = $saList }
+                        if ("$($global:PIM_SqlAdminIdentityResourceId)".Trim()) { $dbInit['SqlAdminIdentityResourceId'] = "$($global:PIM_SqlAdminIdentityResourceId)".Trim() }
+                        if ("$($global:PIM_SqlAdminIdentityClientId)".Trim())   { $dbInit['SqlAdminIdentityClientId']   = "$($global:PIM_SqlAdminIdentityClientId)".Trim() }
+                        # 🔴 PUBLISHED *OR* RESOLVED -- AND "PREREQ IS CURRENT" IS THE COMMON CASE.
+                        # The globals above are only set when prereq RUNS. Once an environment is
+                        # fully built, prereq correctly reports current and is skipped, so a second
+                        # deploy of an unchanged environment reached this throw:
+                        #     the SQL admin identity was not published by the prereq step
+                        # -- about a step the plan had just, correctly, called current. Measured at a
+                        # customer 2026-09-11, on the very next run after the probe was taught to see
+                        # the private-SQL artefacts. The pull identity had the identical defect and was
+                        # fixed an hour earlier; fixing one half of a symmetry and not the other is how
+                        # this class keeps coming back.
+                        # 🪤 RESOLVED FROM AZURE, NEVER CONSTRUCTED FROM STRINGS. Building the client
+                        # id would be impossible anyway, but even the resource id must be READ: handing
+                        # the bootstrap job a well-formed id for an identity that does not exist turns
+                        # this clear refusal into a container that starts and cannot authenticate.
+                        if (-not $dbInit.ContainsKey('SqlAdminIdentityClientId') -and "$PrereqToken".Trim() -and "$ResourceGroup".Trim() -and (Have 'az')) {
+                            $sqlIdName = "id-pim-sql-$PrereqToken"
+                            $sqlIdRes  = az identity show @azSubArgs -g $ResourceGroup -n $sqlIdName --query id -o tsv 2>$null
+                            $sqlIdCid  = az identity show @azSubArgs -g $ResourceGroup -n $sqlIdName --query clientId -o tsv 2>$null
+                            if ("$sqlIdRes".Trim() -match '^/subscriptions/' -and "$sqlIdCid".Trim()) {
+                                $dbInit['SqlAdminIdentityResourceId'] = "$sqlIdRes".Trim()
+                                $dbInit['SqlAdminIdentityClientId']   = "$sqlIdCid".Trim()
+                                Write-Host "    sql admin identity: $sqlIdName (resolved -- prereq was already current)" -ForegroundColor DarkGray
+                            }
+                        }
+                        if (-not $dbInit.ContainsKey('SqlAdminIdentityClientId')) {
+                            throw ('-SqlPrivateEndpoint is set, so the database users must be created from inside the ' +
+                                   "environment -- but the SQL admin identity 'id-pim-sql-$PrereqToken' could not be found " +
+                                   "in '$ResourceGroup', and prereq did not publish one. Run prereq in the same " +
+                                   'invocation, or pass the identity explicitly. Refusing to create a bootstrap job ' +
+                                   'that would authenticate as the wrong identity.')
+                        }
+                    }
                     $deployId = @{}
                     if ($AdminAppId -and ($AdminSecret -or $AdminCertPem)) {
                         $deployId['AdminAppId'] = $AdminAppId
                         if ($AdminCertPem) { $deployId['AdminCertPem'] = $AdminCertPem } else { $deployId['AdminSecret'] = $AdminSecret }
                     }
+                    try {
                     & $setup @deployId -SubscriptionId $SubscriptionId -TenantId $TenantId -Location $Location `
                         -ResourceGroup $ResourceGroup -VnetName $VnetName -VnetResourceGroup $VnetResourceGroup `
+                        @infraSubnet `
                         -EnvName $EnvName -AcrName $AcrName -ImageRepo $ImageRepo -ImageTag (Get-EffectiveImageTag) `
                         -SqlServerFqdn $SqlServerFqdn -SqlDatabase $SqlDatabase `
                         -WorkerMode $WorkerMode -ManagerMinReplicas $ManagerMinReplicas -TickCron $TickCron `
                         -TickJobName $TickJobName -MailSender $MailSender `
                         -EngineClientId $EngineClientId -EngineCertThumbprint $EngineCertThumbprint -EngineClientSecret $EngineClientSecret `
+                        -Exposure $Exposure `
+                        @dbInit @ringGateArgs -UpdateJobName $UpdateJobName `
                         -SqlAdminClientId $SqlAdminClientId @sqlAdminCred @registryIdentity @reach | Out-Host
+                    } finally { Restore-PimCallerAzContext }
                     $ok = (-not $LASTEXITCODE) -or ($LASTEXITCODE -eq 0)
                     return @{ ok=$ok; ran=$true; detail='ACA infra ensured' }
                 }
@@ -871,13 +1493,99 @@ function Invoke-DefaultStepRunner {
                 $global:LASTEXITCODE = 0
                 $mailArgs = @{ TenantId = $TenantId; SqlServerFqdn = $SqlServerFqdn; SqlDatabase = $SqlDatabase }
                 if ($MailSender) { $mailArgs['MailSender'] = $MailSender }
+                # Without this the script THROWS on its own first line -- "one of -AdminSecret /
+                # -AdminCertThumbprint is required" -- and this step's deliberate
+                # non-fatality turned that into "MAIL SENDER NOT PROVISIONED" on every deploy,
+                # which reads like an Exchange provisioning delay. It was a missing argument.
+                # 🔴 SKIP, DO NOT INVOKE, WHEN THERE IS NO IDENTITY -- because -AdminAppId is a
+                # MANDATORY parameter over there, and PowerShell's answer to a missing mandatory
+                # parameter is to PROMPT:
+                #     cmdlet Initialize-PimMailSender.ps1 at command pipeline position 1
+                #     Supply values for the following parameters:
+                #     AdminAppId:
+                # An unattended deploy then waits there forever. Measured at a live customer
+                # 2026-09-08: the deploy ran cleanly through the schema and stopped dead on a
+                # prompt nobody was there to answer. A missing argument that THROWS is a bug; a
+                # missing argument that PROMPTS is a hang, and a hang in a nightly job is
+                # indistinguishable from a network outage until someone reads the console.
+                if (-not $storeAdminArgs.Count) {
+                    Warn 'mail sender: SKIPPED -- no SQL admin identity was supplied, and this step cannot authenticate without one.'
+                    Warn '  Pass -SqlAdminClientId with -SqlAdminCertThumbprint (or -SqlAdminClientSecret), or run Initialize-PimMailSender.ps1 yourself afterwards.'
+                    Warn '  This environment is MAIL-MUTE until then: TAPs will be minted and delivered nowhere.'
+                    return @{ ok=$true; ran=$false; detail='DEGRADED: mail sender skipped (no admin identity) -- environment is mail-mute' }
+                }
+                $mailArgs += $storeAdminArgs
+                # -EngineAppId is the SPN that RECEIVES the scoped Mail.Send -- a different identity
+                # from the admin that performs the grant, and without it the script gets as far as
+                # resolving the sender and then stops:
+                #   RESULT: FAILED -- no -EngineAppId, and no -KeyVaultName/-BootstrapAppId/
+                #   -BootstrapThumbprint to read Modern-AppId from
+                # Measured at a live customer 2026-09-08. The S1 driver's own 'mail' phase has
+                # always passed it; this step, which does the same job inside the deploy, did not.
+                # 🔴 AN MI-ONLY ENVIRONMENT HAS NO ENGINE APP REGISTRATION, AND THAT IS THE DESIGN.
+                # -EngineClientId is legitimately empty there, so this warned and the step failed --
+                # leaving the environment MAIL-MUTE, which looks like a working "create admin" right
+                # up until the person never receives their TAP. The engine identity IS the Manager's
+                # managed identity; infra resolved its appId while granting it SQL, and now publishes
+                # it. Measured at a customer 2026-09-11.
+                # 🪤 Resolve it here too, for the case where infra was SKIPPED as already-current --
+                # the same gap that broke the pull identity and the SQL admin identity today. An
+                # environment whose infra is up is exactly when this step still has work to do.
+                $engineForMail = "$EngineClientId".Trim()
+                if (-not $engineForMail) { $engineForMail = "$($global:PIM_ManagerMiAppId)".Trim() }
+                if (-not $engineForMail -and "$ResourceGroup".Trim() -and (Have 'az')) {
+                    $mgrOid = az containerapp show @azSubArgs -g $ResourceGroup -n $ManagerApp --query identity.principalId -o tsv 2>$null
+                    if ("$mgrOid".Trim()) {
+                        $mgrApp = az ad sp show --id "$mgrOid".Trim() --query appId -o tsv 2>$null
+                        if ("$mgrApp".Trim() -match '^[0-9a-fA-F-]{36}$') {
+                            $engineForMail = "$mgrApp".Trim()
+                            Write-Host "    mail: scoping the send right to the Manager's managed identity $engineForMail (no engine app registration in this environment)" -ForegroundColor DarkGray
+                        }
+                    }
+                }
+                if ($engineForMail) { $mailArgs['EngineAppId'] = $engineForMail }
+                # 🔒 REQUIREMENTS 65.11 (operator decision 2026-09-13): the HOSTED engine sends as its
+                # MANAGED IDENTITY, so the scoped Exchange assignment must name that identity -- the tick
+                # job's (engine mail: TAP delivery, reminders, alerts) and the Manager's (its alert
+                # notices). Picked by the same rule the token call uses (PIM_ManagedIdentityClientId ->
+                # that user-assigned identity, else system-assigned), in _PimMailSenderPlan.ps1.
+                $mailMiOids = @()
+                if ("$ResourceGroup".Trim() -and (Have 'az')) {
+                    . (Join-Path $here '_PimMailSenderPlan.ps1')
+                    $senderResources = @()
+                    if ($WorkerMode -eq 'cron') { $senderResources += @{ what = "tick job '$TickJobName'"; json = (az containerapp job show @azSubArgs -g $ResourceGroup -n $TickJobName -o json 2>$null) } }
+                    $senderResources += @{ what = "Manager '$ManagerApp'"; json = (az containerapp show @azSubArgs -g $ResourceGroup -n $ManagerApp -o json 2>$null) }
+                    foreach ($res in $senderResources) {
+                        if (-not "$($res.json)".Trim()) { continue }
+                        $pick = $null
+                        try { $pick = Get-PimJobManagedIdentityPrincipalId -Job ((@($res.json) -join "`n") | ConvertFrom-Json) } catch { $pick = $null }
+                        if ($pick -and $pick.principalId) {
+                            if ($mailMiOids -notcontains $pick.principalId) { $mailMiOids += $pick.principalId }
+                            Write-Host "    mail: $($res.what) sends as its $($pick.kind)-assigned managed identity $($pick.principalId)" -ForegroundColor DarkGray
+                        } elseif ($pick) { Warn "mail sender: $($res.what): $($pick.reason)" }
+                    }
+                }
+                if ($mailMiOids.Count) { $mailArgs['ManagedIdentityObjectId'] = $mailMiOids }
+                if (-not $engineForMail -and -not $mailMiOids.Count) { Warn 'mail sender: no engine identity could be resolved (no -EngineClientId, and neither the tick job nor the Manager has a managed identity) -- this step will not be able to finish.' }
                 & $init @mailArgs | Out-Host
                 $ok = (-not $LASTEXITCODE) -or ($LASTEXITCODE -eq 0)
                 # 🪤 Not fatal to the deploy, and deliberately so: a tenant whose Exchange org is
                 # still provisioning (the measured 'Substrate Only Agent' case) would otherwise
                 # block infra that is otherwise fine. But it MUST be loud -- a silent mail-mute
                 # environment is exactly the failure this step was added to end.
-                if (-not $ok) { Warn 'MAIL SENDER NOT PROVISIONED -- this environment is MAIL-MUTE: TAPs will be minted and delivered nowhere. Re-run Initialize-PimMailSender.ps1 once Exchange is ready.' }
+                # 🪤 §52.3 -- "once Exchange is ready" NAMES THE WRONG CAUSE, AND IT WAS MEASURED.
+                # The live run failed with "could not assign Exchange Administrator to the onboarding
+                # SPN: 403 (Forbidden)" -- the SPN cannot grant itself a directory role, and the
+                # fallback (the signed-in az context) is the same SPN. That is a PERMISSION the
+                # tenant has to grant once, not a provisioning delay that will clear on its own, so
+                # an operator who believes this message waits for something that will never happen.
+                if (-not $ok) {
+                    Warn 'MAIL SENDER NOT PROVISIONED -- this environment is MAIL-MUTE: TAPs will be minted and delivered nowhere.'
+                    Warn '  If the failure above was 403/Forbidden assigning "Exchange Administrator": an SPN cannot grant'
+                    Warn '  itself a directory role. Have a Privileged Role Administrator assign Exchange Administrator to'
+                    Warn '  the onboarding SPN once, then re-run Initialize-PimMailSender.ps1 -- it will NOT clear by waiting.'
+                    Warn '  If it was a missing Exchange plan or a mailbox still provisioning, THAT one does clear -- re-run later.'
+                }
                 return @{ ok=$true; ran=$true; detail=$(if ($ok) { 'sender mailbox + send right ensured' } else { 'DEGRADED: mail sender not provisioned (see warning) -- deploy continued' }) }
             }
             return @{ ok=$true; ran=$false; detail='skipped by ShouldProcess' }
@@ -887,11 +1595,86 @@ function Invoke-DefaultStepRunner {
             # ok=True, so this is the difference between "deployed" and "running".
             $fb = Join-Path $here 'Set-PimFeatureBaseline.ps1'
             if (-not (Test-Path $fb)) { return @{ ok=$false; ran=$true; detail="feature baseline not found: $fb" } }
+            # 🔴 PRIVATE SQL: THIS HOST HAS NO ROUTE, AND THIS STEP HALTS THE DEPLOY.
+            # The schema step above defers to the in-cloud bootstrap for exactly this reason; so
+            # must this one. Measured at a customer 2026-09-11 -- the users and schema were created
+            # in-cloud, the deploy walked past a DEGRADED mail sender, and then died here on
+            #     could not read existing FeatureGates: ... A network-related or instance-specific
+            #     error occurred while establishing a connection
+            # which reads like a database problem and is a routing one. The gates are applied by the
+            # bootstrap job, on the connection it already holds, and verified there before the
+            # deploy was allowed past infra.
+            if ($SqlPrivateEndpoint) {
+                return @{ ok=$true; ran=$false; detail=(
+                    'feature gates applied IN-CLOUD by the bootstrap job (private SQL -- this host has no route). ' +
+                    'The job merged them over what was persisted and read them back before the deploy continued.') }
+            }
             if ($PSCmdlet.ShouldProcess($SqlDatabase, 'turn the shipped feature gates ON')) {
                 $global:LASTEXITCODE = 0
-                & $fb -SqlServerFqdn $SqlServerFqdn -SqlDatabase $SqlDatabase -TenantId $TenantId | Out-Host
+                if (-not $storeAdminArgs.Count) {
+                    return @{ ok=$false; ran=$true; detail=(
+                        "the feature baseline needs an identity that can write the store, and none was supplied. " +
+                        "Pass -SqlAdminClientId with -SqlAdminCertThumbprint (or -SqlAdminClientSecret). Refusing " +
+                        "rather than running a step that can only answer 'supply -AdminSecret or -AdminCertThumbprint'.") }
+                }
+                $fbGates = @{}
+                if (@($FeatureGates).Count)        { $fbGates['Gates']   = @($FeatureGates) }
+                if (@($FeatureGatesDisable).Count) { $fbGates['Disable'] = @($FeatureGatesDisable) }
+                & $fb -SqlServerFqdn $SqlServerFqdn -SqlDatabase $SqlDatabase -TenantId $TenantId @storeAdminArgs @fbGates | Out-Host
                 $ok = (-not $LASTEXITCODE) -or ($LASTEXITCODE -eq 0)
                 return @{ ok=$ok; ran=$true; detail='feature gates enabled + verified' }
+            }
+            return @{ ok=$true; ran=$false; detail='skipped by ShouldProcess' }
+        }
+        'sqlaccess' {
+            # §52.10. Always runs (no 'current' fact) -- see the catalog comment in PIM-DeployAll.ps1.
+            $sqlNet = Join-Path $here 'Set-PimSqlNetworkAccess.ps1'
+            if (-not (Test-Path $sqlNet)) { return @{ ok=$false; ran=$true; detail="SQL network-access script not found: $sqlNet" } }
+            if ($SkipSqlNetworkAccess) {
+                Warn 'SQL network access: SKIPPED (-SkipSqlNetworkAccess). Unless the store is reached over a private endpoint, the Manager will crash at boot being refused by the SQL firewall.'
+                return @{ ok=$true; ran=$false; detail='skipped by -SkipSqlNetworkAccess' }
+            }
+            if (-not "$SqlServerFqdn".Trim()) { return @{ ok=$true; ran=$false; detail='no -SqlServerFqdn -- nothing to grant access to' }
+            }
+            if ($PSCmdlet.ShouldProcess($SqlServerFqdn, 'grant this environment network access to the SQL server')) {
+                $global:LASTEXITCODE = 0
+                # The subnet is READ FROM THE ACA ENVIRONMENT by the script itself; the parameter
+                # trio is only its fallback. §38.1a is why: the subnet NAME has already been wrong
+                # in this area once, and the environment is the only authority on its own subnet.
+                $netArgs = @{ SubscriptionId = $SubscriptionId; SqlServerFqdn = $SqlServerFqdn
+                              ResourceGroup = $ResourceGroup; EnvName = $EnvName; VnetName = $VnetName }
+                if ("$VnetResourceGroup".Trim()) { $netArgs['VnetResourceGroup'] = $VnetResourceGroup }
+                if ("$PrereqSubnetName".Trim())  { $netArgs['SubnetName']        = $PrereqSubnetName }
+                if ("$SqlSubscriptionId".Trim()) { $netArgs['SqlSubscriptionId'] = $SqlSubscriptionId }
+                # 🔴 READ THE RESULT OBJECT, NOT $LASTEXITCODE. This script's job is a series of
+                # az PROBES -- `vnet-rule show` on a rule that does not exist yet exits NON-ZERO by
+                # design, and so does `firewall-rule show`. Judging the step by the last exit code
+                # would therefore fail a step that did its work perfectly, halt the deploy, and
+                # roll back a good build. The script returns { ok; vnetRule; firewallRule; reason },
+                # which is the actual verdict.
+                # 🪤 Same class as §51.2: ask for the fact, do not infer it from a side channel.
+                $netRes = & $sqlNet @netArgs 4>&1 5>&1 | ForEach-Object {
+                    if ($_ -is [System.Collections.IDictionary] -and $_.Contains('ok')) { $_ } else { $_ | Out-Host }
+                } | Select-Object -Last 1
+                $global:LASTEXITCODE = 0
+                if (-not $netRes) { return @{ ok=$false; ran=$true; detail='SQL network access: the step returned no verdict' } }
+                $detail = "vnet-rule=$($netRes.vnetRule) firewall=$($netRes.firewallRule) endpoint=$($netRes.serviceEndpoint)"
+                # A store this deploy cannot SEE (central/shared, another subscription) is not a
+                # failure -- nothing tried to configure it before this step existed either. Halting
+                # here would invent a new failure mode for a topology that works.
+                if ($netRes.notApplicable) {
+                    Warn "SQL network access: NOT CONFIGURED -- $($netRes.reason)."
+                    Warn '  If the Manager cannot reach the store, add a VNet rule for its subnet on that server yourself.'
+                    return @{ ok=$true; ran=$false; detail="not applicable: $($netRes.reason)" }
+                }
+                if (-not $netRes.ok) {
+                    return @{ ok=$false; ran=$true; detail=(
+                        "nothing grants this environment network access to $SqlServerFqdn ($detail). The Manager " +
+                        "WILL crash at boot being refused by the SQL firewall. The deploy identity needs SQL Server " +
+                        "Contributor on the server's resource group, or pass -SkipSqlNetworkAccess for a " +
+                        "private-endpoint store. $($netRes.reason)") }
+                }
+                return @{ ok=$true; ran=$true; detail="SQL network access ensured + verified ($detail)" }
             }
             return @{ ok=$true; ran=$false; detail='skipped by ShouldProcess' }
         }
@@ -924,22 +1707,78 @@ function Invoke-DefaultStepRunner {
                 # so nothing failed, it just could never do any work. At 25 tenants this is the
                 # worst possible shape: every environment green, none of them functional.
                 # A hosted deploy therefore REFUSES to claim a schema upgrade it cannot perform.
+                # 🔴 WITH A PRIVATE SQL SERVER THIS HOST CANNOT APPLY THE SCHEMA, AND MUST NOT TRY.
+                # -SqlPrivateEndpoint means the server has no public endpoint, so the connection
+                # below cannot be opened from here at all -- it hangs for the connect timeout and
+                # then fails in a way that reads like a credential problem. The INFRA step above
+                # already applied the shipped schema from INSIDE the environment, on the same
+                # bootstrap job that created the contained users (PIM_DBINIT_SCHEMA), and that job's
+                # result GATES the deploy -- so by the time this step is reached the store is either
+                # created and verified, or the deploy has already stopped.
+                # 🪤 This is a SKIP, not a silent pass: say which component owns the work, because a
+                # step that prints nothing is indistinguishable from a step that did nothing (the
+                # BUG-50 lesson this very step exists to carry).
+                if ($SqlPrivateEndpoint) {
+                    return @{ ok=$true; ran=$false; detail=(
+                        'schema applied IN-CLOUD by the bootstrap job (private SQL -- this host has no route). ' +
+                        'The job verified the pim schema before the deploy was allowed to continue.') }
+                }
                 if (-not "$SqlConnectionString".Trim()) {
                     if ($hosted) {
                         return @{ ok=$false; ran=$true; detail=(
                             "no -SqlConnectionString, so the SQL schema CANNOT be applied -- the updater would only " +
-                            "PRINT the DDL while reporting success (BUG-50). Pass -SqlConnectionString for " +
+                            "PRINT the DDL while reporting success. Pass -SqlConnectionString for " +
                             "$SqlServerFqdn/$SqlDatabase, or apply sql/platform-schema.sql + sql/local-schema.sql " +
                             "with your SQL deploy identity. Refusing to report a schema upgrade that did not happen.") }
                     }
                     Write-Host "  schema: no -SqlConnectionString and not hosted -- DDL plan only." -ForegroundColor Yellow
                 }
+                # 🔴 THE CONNECTION STRING WITHOUT THE IDENTITY IS HALF A PASSTHROUGH.
+                # Azure SQL here is Entra-only, so the string deliberately carries no credential --
+                # the updater has to mint a token, and until this splat existed it had nothing to
+                # mint one WITH on a deploy host. The infra step above sets this very identity as
+                # the server's Entra admin, then this step opened the connection as nobody:
+                # "Login failed for user ''", measured at a live customer 2026-09-08 on the first
+                # deploy that ever got this far. The same missing-passthrough class as -AcrName and
+                # -Apps above -- third time in this one step.
+                # 🔴 §52.12 -- -SchemaOnly. Without it this step ran the updater's WHOLE
+                # detect->build->deploy chain: it BUILT the image and ROLLED the apps, and then the
+                # `code` step below did both again. One deploy, THREE builds of identical source and
+                # TWO rolls of the same version -- about four minutes wasted on every deploy,
+                # measured at a live customer 2026-09-09. -AcrName/-Apps stay because the updater
+                # still validates them, but they are no longer feeding a build that should not run.
                 & $upd -Source $Source @scenarioArgs -Apply -SqlConnectionString $SqlConnectionString `
                     -ResourceGroup $ResourceGroup -ManagerApp $ManagerApp -ImageTag (Get-EffectiveImageTag) `
-                    -AcrName $AcrName -ImageRepo $ImageRepo -Apps $Apps `
-                    -SkipVerify -SkipNotify | Out-Host
+                    -AcrName $AcrName -ImageRepo $ImageRepo -Apps $Apps @sqlAuthArgs `
+                    -SchemaOnly -SkipVerify -SkipNotify | Out-Host
                 $ok = (-not $LASTEXITCODE) -or ($LASTEXITCODE -eq 0)
                 return @{ ok=$ok; ran=$true; detail='schema upgrade applied (preflight->apply->re-preflight)' }
+            }
+            return @{ ok=$true; ran=$false; detail='skipped by ShouldProcess' }
+        }
+        'easyauth' {
+            # §44.5 / §47.3. Fatal on a hosted deploy, deliberately: the alternative is finishing
+            # "successfully" with an unauthenticated privileged-access console on the public
+            # internet, which is the failure this step exists to make impossible. -EasyAuthClientId
+            # lets an operator front it with a registration they already control instead.
+            $ea = Join-Path $here 'Set-PimManagerEasyAuth.ps1'
+            if (-not (Test-Path $ea)) { return @{ ok=$false; ran=$true; detail="Easy Auth setup not found: $ea" } }
+            if ($PSCmdlet.ShouldProcess($ManagerApp, 'put Easy Auth in front of the Manager')) {
+                $global:LASTEXITCODE = 0
+                $eaArgs = @{ App = $ManagerApp; ResourceGroup = $ResourceGroup; TenantId = $TenantId }
+                if ("$SubscriptionId".Trim())      { $eaArgs['SubscriptionId'] = $SubscriptionId }
+                if ("$EasyAuthClientId".Trim())    { $eaArgs['ClientId']       = $EasyAuthClientId }
+                if ($EasyAuthAllowedPrincipals.Count) { $eaArgs['AllowedPrincipals'] = @($EasyAuthAllowedPrincipals) }
+                & $ea @eaArgs | Out-Host
+                $ok = (-not $LASTEXITCODE) -or ($LASTEXITCODE -eq 0)
+                if (-not $ok) {
+                    return @{ ok=$false; ran=$true; detail=(
+                        'Easy Auth could not be configured. The Manager is reachable WITHOUT ' +
+                        'authentication until it is, so this halts the deploy rather than leaving ' +
+                        'a privileged console open. Re-run, or pass -EasyAuthClientId to use an ' +
+                        'app registration you already control.') }
+                }
+                return @{ ok=$true; ran=$true; detail='Easy Auth configured + verified (sign-in required)' }
             }
             return @{ ok=$true; ran=$false; detail='skipped by ShouldProcess' }
         }
@@ -957,11 +1796,159 @@ function Invoke-DefaultStepRunner {
                 # -TickJobName threaded through (BUG-48): the code step is what rebuilds the tag,
                 # so the tick Job must be re-stamped from HERE, off the digest the roll resolves.
                 # INFRA stamped it earlier in this same run, before this rebuild existed.
+                # 🪤 THE AGENT POOL, or this rebuild is refused by the registry's own firewall while
+                # the deploy's `image` step (which DOES pass it) succeeded minutes earlier on the
+                # very same source. Splatted so an environment without a pool is unaffected.
+                $updPool = @{}
+                if ("$AcrAgentPoolName".Trim()) { $updPool['AcrAgentPool'] = "$AcrAgentPoolName".Trim() }
+                # Invoke-PimUpdate expresses the gate opt-out as -SkipVerify (it maps it onto the
+                # roller's -SkipSmoke). Say it loudly here too: the deploy summary is what an
+                # operator reads, and a gate that did not run must not look like one that passed.
+                if ($SkipHostedSmoke) {
+                    $updPool['SkipVerify'] = $true
+                    Warn '  -SkipHostedSmoke: the post-deploy GUI smoke gate will NOT run. This is NOT a pass --'
+                    Warn '  nothing has confirmed the hosted Manager actually works. Verify it from inside the VNet.'
+                }
                 & $upd -Source $Source @scenarioArgs -Apply -ResourceGroup $ResourceGroup -AcrName $AcrName -ImageRepo $ImageRepo `
                     -ManagerApp $ManagerApp -Apps $Apps -ImageTag (Get-EffectiveImageTag) -TickJobName $TickJobName `
-                    -SqlConnectionString $SqlConnectionString -SkipNotify | Out-Host
+                    -SqlConnectionString $SqlConnectionString @sqlAuthArgs @updPool @ringGateArgs -UpdateJobName $UpdateJobName -SkipNotify | Out-Host
                 $ok = (-not $LASTEXITCODE) -or ($LASTEXITCODE -eq 0)
                 return @{ ok=$ok; ran=$true; detail='code built + deployed' }
+            }
+            return @{ ok=$true; ran=$false; detail='skipped by ShouldProcess' }
+        }
+        'updater' {
+            # §53. Installs the nightly Container Apps Job that rolls this environment. Runs after
+            # `code`, so the image it points at is the one just built.
+            $upj = Join-Path $here 'Deploy-PimUpdateJob.ps1'
+            if (-not (Test-Path $upj)) { return @{ ok=$false; ran=$true; detail="update-job deployer not found: $upj" } }
+            # BUG-156: decided by the pure core, so a community install without a feed skips
+            # cleanly instead of failing the step and rolling back a working environment.
+            switch (Get-PimUpdaterStepDecision -Scenario "$Scenario" -SourceUrlTemplate "$UpdateSourceUrlTemplate" -SkipUpdater:$SkipUpdater) {
+                'skip-flag'      { return @{ ok=$true; ran=$false; detail='skipped by -SkipUpdater -- this environment will NOT update itself' } }
+                'skip-community' { return @{ ok=$true; ran=$false; detail="community edition ($Scenario): no published update feed, so no in-cloud updater -- update with 'git pull' and re-run this same command (a re-run is the updater)" } }
+            }
+            if (-not "$AcrName".Trim() -or -not "$EnvName".Trim()) {
+                return @{ ok=$true; ran=$false; detail='no -AcrName/-EnvName -- nightly updater not installed (environment will not update itself)' }
+            }
+            if ($PSCmdlet.ShouldProcess($UpdateJobName, 'install the nightly updater job')) {
+                $global:LASTEXITCODE = 0
+                $tag = Get-EffectiveImageTag
+                $upArgs = @{ SubscriptionId = $SubscriptionId; ResourceGroup = $ResourceGroup; EnvName = $EnvName
+                             AcrName = $AcrName; ImageRepo = $ImageRepo; ImageTag = $tag
+                             JobName = $UpdateJobName; ManagerApp = $ManagerApp; TickJobName = $TickJobName
+                             Cron = $UpdateCron }
+                # Without this the nightly build is refused by a private registry's firewall -- the
+                # one failure in this deploy that nobody would be awake to see.
+                if ("$AcrAgentPoolName".Trim()) { $upArgs['AcrAgentPoolName'] = "$AcrAgentPoolName".Trim() }
+                # The environment it was just deployed to IS the approved target until an operator
+                # publishes a newer one, so the job starts armed and consistent rather than idle.
+                $upArgs['TargetImage'] = "$AcrName.azurecr.io/$ImageRepo" + ':' + $tag
+                # 🔴 §55 -- WITHOUT A SOURCE, A NEW DEPLOYMENT INSTALLS A ROLLER, NOT AN UPDATER.
+                # 🔒 2026-09-13: and a ring without a source is a ring the updater IGNORES. Deploy-
+                # PimUpdateJob now REFUSES that (it resolves -SourceUrlTemplate, then
+                # $env:PIM_UPDATE_SOURCE_URL, then the source the job already carries) -- the old
+                # "degrade to a roller" branch is gone, because a roller does not honour a ring.
+                if ("$UpdateSourceUrlTemplate".Trim()) { $upArgs['SourceUrlTemplate'] = "$UpdateSourceUrlTemplate".Trim() }
+                $upArgs['TargetVersion']    = $tag
+                # This deploy just rolled the environment onto $tag, so that IS what it last built: its
+                # first nightly run rolls instead of rebuilding the same version.
+                $upArgs['LastBuiltVersion'] = $tag
+                # Forwarded ONLY when the operator passed it: an unpassed -UpdateRing must not overwrite
+                # the ring an existing environment already follows.
+                if ($PSBoundParameters.ContainsKey('UpdateRing')) { $upArgs['UpdateRing'] = $UpdateRing }
+                if ("$RegistryIdentityResourceId".Trim()) { $upArgs['RegistryIdentityResourceId'] = $RegistryIdentityResourceId }
+                # 2026-09-13 -- the updater copies the Manager's PIM_SqlServer / PIM_SqlDatabase, and its
+                # identity needs a contained database user for the schema step: the same SQL-admin SPN
+                # and the same private-SQL route (the in-cloud bootstrap job) the INFRA step uses.
+                if ("$TenantId".Trim())               { $upArgs['TenantId']               = "$TenantId".Trim() }
+                if ("$SqlAdminClientId".Trim())       { $upArgs['SqlAdminClientId']       = "$SqlAdminClientId".Trim() }
+                if ("$SqlAdminCertThumbprint".Trim()) { $upArgs['SqlAdminCertThumbprint'] = "$SqlAdminCertThumbprint".Trim() }
+                elseif ("$SqlAdminClientSecret".Trim()) { $upArgs['SqlAdminClientSecret'] = $SqlAdminClientSecret }
+                if ($SqlPrivateEndpoint)              { $upArgs['SqlPrivate']             = $true }
+                if ("$DbInitJobName".Trim())          { $upArgs['DbInitJobName']          = "$DbInitJobName".Trim() }
+                try { & $upj @upArgs | Out-Host }
+                catch { return @{ ok=$false; ran=$true; detail="nightly updater NOT installed: $($_.Exception.Message)" } }
+                $ok = (-not $LASTEXITCODE) -or ($LASTEXITCODE -eq 0)
+                $ringTxt = if ($PSBoundParameters.ContainsKey('UpdateRing')) { "ring $UpdateRing" } else { 'ring kept (or default 2 on a new updater)' }
+                return @{ ok=$ok; ran=$true; detail="nightly updater '$UpdateJobName' installed ($UpdateCron UTC) -- builds its own images, $ringTxt" }
+            }
+            return @{ ok=$true; ran=$false; detail='skipped by ShouldProcess' }
+        }
+        'access' {
+            # §57 -- the environment must have somebody who can administer it.
+            $acc = Join-Path $here 'Set-PimManagerAccess.ps1'
+            if (-not (Test-Path $acc)) { return @{ ok=$false; ran=$true; detail="manager-access tool not found: $acc" } }
+            $who = @("$ManagerSuperAdmins" -split '[,;]+' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+            if (-not $who.Count) {
+                # 🪤 NOT AN ERROR, AND NOT SILENCE. An operator who did not name one gets an
+                # environment that fails closed -- which is correct security and a terrible
+                # surprise. Say exactly what to run, rather than leaving it to be discovered as a
+                # 403 in the GUI later.
+                return @{ ok=$true; ran=$false; detail=("no -ManagerSuperAdmins given -- NOBODY can administer this environment yet. " +
+                          "Grant one with tools/setup/Set-PimManagerAccess.ps1 -AccessJson '{`"managerAccess`":[{`"identity`":`"<upn>`",`"role`":`"SuperAdmin`"}]}'") }
+            }
+            if (-not "$SqlServerFqdn".Trim()) { return @{ ok=$true; ran=$false; detail='no -SqlServerFqdn -- manager access not written' } }
+            # 🔴 PRIVATE SQL -- THIS HOST HAS NO ROUTE, and "not applied" here means nobody can
+            # administer the environment at all. Fourth step in this deploy to need moving inside,
+            # after the users, the schema and the feature gates; the bootstrap job wrote it on the
+            # connection it already holds, refused to leave the model without a SuperAdmin, and read
+            # it back before the deploy was allowed past infra.
+            # 🔴 AND IT MUST VERIFY THAT, NOT ASSERT IT. This used to return "applied IN-CLOUD by the
+            # bootstrap job" unconditionally -- a claim about a DIFFERENT component, made without
+            # looking. The bootstrap job only runs inside INFRA, and INFRA is correctly skipped the
+            # moment an environment is converged, so on every re-run this step reported success while
+            # nothing wrote anything. Measured at a customer 2026-09-12: the deploy said
+            #     -> ok=True ran=False Manager SuperAdmin applied IN-CLOUD by the bootstrap job
+            # and the job did not even CARRY the list (PIM_DBINIT_MANAGER_ACCESS was unset, last run
+            # predating the feature). The operator signed in and had no SuperAdmin -- on an
+            # environment whose deploy had just reported success end to end.
+            # 🔑 "Another component did it" is the one claim a step can never make from the outside.
+            # Read the job back: if it carries the CURRENT list, say so; if it does not, say plainly
+            # that access has NOT been applied and how to apply it, rather than reporting success.
+            if ($SqlPrivateEndpoint) {
+                $jobHasIt = $false
+                if ((Have 'az') -and "$ResourceGroup".Trim()) {
+                    $jobEnv = az containerapp job show @azSubArgs -g $ResourceGroup -n $DbInitJobName `
+                                --query "properties.template.containers[0].env[?name=='PIM_DBINIT_MANAGER_ACCESS'].value" -o tsv 2>$null
+                    if ("$jobEnv".Trim()) {
+                        $parsed = $null
+                        try { $parsed = "$jobEnv".Trim() | ConvertFrom-Json } catch { }
+                        # 🪤 PARSE IT. A value mangled by cmd.exe quote-stripping is present and
+                        # useless -- the job dies in ConvertFrom-Json and the deploy would still have
+                        # called it applied. Measured the same day, twice.
+                        if ($parsed) {
+                            $have = @(@($parsed) | ForEach-Object { "$($_.identity)".Trim().ToLowerInvariant() } | Where-Object { $_ })
+                            $want = @($who | ForEach-Object { "$_".Trim().ToLowerInvariant() })
+                            $missing = @($want | Where-Object { $have -notcontains $_ })
+                            $jobHasIt = (-not $missing.Count)
+                        }
+                    }
+                }
+                if ($jobHasIt) {
+                    return @{ ok=$true; ran=$false; detail=(
+                        "Manager SuperAdmin applied IN-CLOUD by the bootstrap job, verified on the job (private SQL -- this host has no route): " +
+                        ($who -join ', ')) }
+                }
+                return @{ ok=$false; ran=$true; detail=(
+                    "Manager access has NOT been applied. SQL is private so this host cannot write it, and the " +
+                    "bootstrap job '$DbInitJobName' does not carry the current SuperAdmin list -- so NOBODY can " +
+                    "administer this environment. Re-run with the INFRA step (it stamps the list onto the job and " +
+                    "runs it), or set PIM_DBINIT_MANAGER_ACCESS on that job and start it.") }
+            }
+            if (-not "$SqlAdminClientId".Trim()) {
+                return @{ ok=$true; ran=$false; detail='no -SqlAdminClientId -- cannot write pim.Settings ManagerAccess; grant it by hand' }
+            }
+            $json = '{"managerAccess":[' + (($who | ForEach-Object { '{"identity":"' + $_ + '","role":"SuperAdmin"}' }) -join ',') + ']}'
+            if ($PSCmdlet.ShouldProcess(($who -join ', '), 'grant Manager SuperAdmin')) {
+                $global:LASTEXITCODE = 0
+                $accArgs = @{ TenantId = $TenantId; SqlServerFqdn = $SqlServerFqdn; SqlDatabase = $SqlDatabase
+                              AdminAppId = $SqlAdminClientId; AccessJson = $json }
+                if ("$SqlAdminCertThumbprint".Trim()) { $accArgs['AdminCertThumbprint'] = $SqlAdminCertThumbprint }
+                elseif ("$SqlAdminClientSecret".Trim()) { $accArgs['AdminSecret'] = $SqlAdminClientSecret }
+                & $acc @accArgs | Out-Host
+                $ok = (-not $LASTEXITCODE) -or ($LASTEXITCODE -eq 0)
+                return @{ ok=$ok; ran=$true; detail="Manager SuperAdmin: $($who -join ', ')" }
             }
             return @{ ok=$true; ran=$false; detail='skipped by ShouldProcess' }
         }
@@ -979,11 +1966,81 @@ $script:validationExit = 0
 function Invoke-DeployValidation {
     $smokeExit = -1; $valExit = -1            # -1 = did not run (self-skip), not a fail
     $smoke = Join-Path $solRoot 'tests\live\Test-PimManagerHostedSmoke.ps1'
-    if ($hosted -and (Test-Path $smoke)) {
+    # 🔴 -SkipHostedSmoke MUST REACH HERE TOO. It was wired only into the `code` step's updater, so
+    # a deploy that correctly skipped the gate mid-flight then ran it again at the END and rolled
+    # the whole environment back -- an opt-out that half-worked is worse than none, because the
+    # deploy gets all the way to the last step before failing. Measured at a customer 2026-09-11.
+    # 🪤 It suppresses the SMOKE ONLY. The deploy-validation tests below do not need a route to the
+    # Manager, so they still run and still count: skipping what cannot run must not become skipping
+    # what can.
+    if ($SkipHostedSmoke) {
+        Warn 'verify: hosted smoke SKIPPED by -SkipHostedSmoke -- this is NOT a pass. Nothing has'
+        Warn '  confirmed the hosted Manager works; verify it from inside the VNet or a peered client.'
+        $smokeExit = -1
+    }
+    elseif ($hosted -and (Test-Path $smoke)) {
         Info 'verify: hosted smoke (Test-PimManagerHostedSmoke.ps1)'
         if ($PSCmdlet.ShouldProcess($ManagerApp, 'run hosted smoke')) {
+            # 🔴 THE GATE WAS GIVEN THE APP AND NOTHING ELSE, AND THEN BELIEVED.
+            # The smoke takes its evidence from TWO places: the app's boot logs in Log Analytics
+            # (which is where "[store] SQL mode" -- the assertion that matters most -- can be
+            # read at all) and live HTTP behind Easy Auth. Both need inputs this step held and
+            # did not pass: the workspace id, the subscription, the Easy Auth audience. Without
+            # them the smoke SELF-SKIPS those layers and exits 0, and `$smokeExit -le 0` below
+            # reads that as a pass. So `verify ok=True` could mean "everything checked out" or
+            # "nothing was checked", with no way to tell them apart -- which is precisely the
+            # §7a rule ("a skip is not a pass") being broken by the step that enforces it.
+            # Update-PimContainers already forwards all of this to the same script (DOC-06(b));
+            # this step, the one whose verdict decides the deploy, did not.
             $env:PIM_HOSTED_APP = $ManagerApp
-            if ("$ResourceGroup".Trim()) { $env:PIM_HOSTED_RG = $ResourceGroup }
+            if ("$ResourceGroup".Trim())   { $env:PIM_HOSTED_RG = $ResourceGroup }
+            if ("$SubscriptionId".Trim())  { $env:PIM_SUBSCRIPTION_ID = $SubscriptionId }
+            if ("$LogAnalyticsWorkspaceId".Trim()) { $env:PIM_HOSTED_LA_WORKSPACE = $LogAnalyticsWorkspaceId }
+            # 🔴 §52.13b -- DERIVE WHAT THE ROLLER ALREADY DERIVES, instead of running blind.
+            # This step warned "the smoke will run PARTIALLY BLIND -- live HTTP (no
+            # -EasyAuthAudience): the served page CANNOT be checked" on the live run, while
+            # Update-PimContainers' own gate, minutes earlier, had derived that audience from the
+            # app's own auth config and checked the served page with it. The FINAL verdict was
+            # therefore weaker than the gate that ran inside the roll -- the same DOC-06(b) shape
+            # as §44.3: this step, whose result decides the deploy, was given less than its
+            # sibling. Ask the app, exactly as the roller does.
+            if (-not "$EasyAuthAudience".Trim() -and $hosted -and "$ResourceGroup".Trim()) {
+                try {
+                    $derivedAud = @(az containerapp auth show -n $ManagerApp -g $ResourceGroup @azSubArgs `
+                                      --query "identityProviders.azureActiveDirectory.validation.allowedAudiences" -o tsv 2>$null) |
+                                  Where-Object { "$_".Trim() } | Select-Object -First 1
+                    if ("$derivedAud".Trim()) {
+                        $EasyAuthAudience = "$derivedAud".Trim()
+                        Info "verify: derived the Easy Auth audience from the app's own auth config"
+                    }
+                } catch { }
+            }
+            if ("$EasyAuthAudience".Trim()) { $env:PIM_HOSTED_EASYAUTH_AUD = $EasyAuthAudience }
+            # What it could NOT be given is named out loud, so a skip is visible as a gap in
+            # coverage rather than disguised as a clean run.
+            $blind = @()
+            # 🪤 NOT BLIND JUST BECAUSE THE CALLER DID NOT PASS IT. The gate DERIVES the workspace
+            # from the Container Apps environment itself -- it prints "workspace derived from the
+            # Container Apps environment (authoritative)" and then checks all six boot-log
+            # assertions. Warning "render mode SQL-vs-static CANNOT be checked" immediately before
+            # the run that checks it is simply false, and a false warning on every deploy is how
+            # the true one gets ignored. Only claim blindness when the environment cannot answer.
+            $envSubnetProbe = ''
+            if (-not "$LogAnalyticsWorkspaceId".Trim() -and $hosted -and "$ResourceGroup".Trim()) {
+                try {
+                    $envId = az containerapp show @azSubArgs -n $ManagerApp -g $ResourceGroup --query properties.environmentId -o tsv 2>$null
+                    if ("$envId".Trim()) {
+                        $envSubnetProbe = "$(az containerapp env show @azSubArgs --ids "$("$envId".Trim())" --query properties.appLogsConfiguration.logAnalyticsConfiguration.customerId -o tsv 2>$null)".Trim()
+                    }
+                } catch { }
+            }
+            if (-not "$LogAnalyticsWorkspaceId".Trim() -and -not $envSubnetProbe) { $blind += 'boot-log evidence: no -LogAnalyticsWorkspaceId and the environment does not name a workspace, so render mode SQL-vs-static CANNOT be checked' }
+            if (-not "$EasyAuthAudience".Trim())        { $blind += 'live HTTP (no -EasyAuthAudience): the served page CANNOT be checked' }
+            if ($blind.Count) {
+                Warn 'verify: the smoke will run PARTIALLY BLIND --'
+                $blind | ForEach-Object { Warn "  - $_" }
+                Warn '  A pass from a partially-blind gate is not evidence the GUI works.'
+            }
             # BUG-25: `| Out-Host` -- a native child's stdout is SUCCESS-stream output too, so
             # without it the smoke's console text becomes part of this function's return value.
             & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $smoke | Out-Host
@@ -1000,15 +2057,83 @@ function Invoke-DeployValidation {
             $env:PIM_CertThumbprint= $EngineCertThumbprint
             $env:PIM_SqlDatabase   = $SqlDatabase
             $env:PIM_DEPLOY_MARKER = $DeployMarker
+            # 🔴 §52.13 -- A WRONG PESTER VERSION ROLLED BACK A VERIFIED-GOOD DEPLOYMENT.
+            # `-Output Minimal` is Pester 5 syntax. On the Pester 3.x that ships with Windows it is
+            # ambiguous (-OutputXml / -OutputFile / -OutputFormat), so the call THREW, the catch
+            # below set validation=1, `verify` failed, and the deploy tried to roll back a Manager
+            # whose GUI smoke gate had just passed 11/0. Measured at a live customer 2026-09-09.
+            # It only did no damage by luck: the prior revision had already been purged, so the
+            # rollback found nothing to activate. Had it succeeded it would have put the customer
+            # back on the revision that could not reach SQL.
+            # 🪤 A TEST RUNNER THAT CANNOT START IS NOT A FAILING TEST. The catch made "Pester is
+            # the wrong version on this host" indistinguishable from "the deployed system is
+            # broken", and only one of those should ever trigger a rollback. -1 means "did not
+            # run", which the verdict below already treats as UNVERIFIED rather than failed --
+            # loudly, because an unverified deploy still is not a verified one (§7a).
+            $pesterMajor = 0
+            try { $pesterMajor = [int](@(Get-Module -ListAvailable Pester | Sort-Object Version -Descending | Select-Object -First 1).Version.Major) } catch { }
+            # 🪤 THE FIRST FIX FOR THIS CHANGED THE PARAMETERS AND MISSED THE REAL CONSTRAINT.
+            # It detected Pester 3 and called it with 3.x-safe arguments -- and the call then ran
+            # and FAILED, because the TEST FILE is Pester 5 (`BeforeDiscovery`), which Pester 3
+            # cannot even parse:
+            #     CommandNotFoundException: The term 'BeforeDiscovery' is not recognized
+            #     Passed: 0 Failed: 1   ->  validation=1  ->  ROLLBACK
+            # So the second attempt rolled back a verified-good deployment for exactly the reason
+            # the first one did. Measured at a live customer 2026-09-09, twice in one morning.
+            # 🔑 The constraint is not "which arguments does this Pester accept", it is "can this
+            # Pester run THESE TESTS AT ALL". Pester 5 or the layer does not run -- and not running
+            # is UNVERIFIED, never a deployment failure.
+            # 🔴 THE TESTS NEED AN IDENTITY TO QUERY LIVE PIM, AND THIS STEP NEVER GAVE THEM ONE.
+            #     RuntimeException: Tenant identity not set (PIM_TenantId + PIM_ClientId/cert)
+            #     -- cannot query live PIM.
+            # They read it from the ENVIRONMENT (PIM_TenantId / PIM_ClientId / PIM_CertThumbprint /
+            # PIM_SqlServer / PIM_SqlDatabase), and this orchestrator holds every one of those --
+            # it just never exported them, so `verify` failed on a deployment whose GUI smoke had
+            # just passed 11/0. Measured rebuilding a customer master 2026-09-11: 12 of 13 steps
+            # green and the release gate red for want of five variables the caller already had.
+            # Same missing-passthrough class as the pull identity, the SQL admin identity, the
+            # agent pool and the engine identity for mail -- the fifth in one deploy.
+            # 🪤 SET, DO NOT OVERWRITE A CALLER'S. An operator who exported these deliberately
+            # (pointing the validation at a different tenant) must win over our defaults.
+            $prevEnv = @{}
+            $valEnv = @{}
+            if ("$TenantId".Trim())         { $valEnv['PIM_TenantId']      = "$TenantId".Trim() }
+            if ("$EngineClientId".Trim())   { $valEnv['PIM_ClientId']      = "$EngineClientId".Trim() }
+            elseif ("$AdminAppId".Trim())   { $valEnv['PIM_ClientId']      = "$AdminAppId".Trim() }
+            if ("$EngineCertThumbprint".Trim()) { $valEnv['PIM_CertThumbprint'] = "$EngineCertThumbprint".Trim() }
+            if ("$SqlServerFqdn".Trim())    { $valEnv['PIM_SqlServer']     = "$SqlServerFqdn".Trim() }
+            if ("$SqlDatabase".Trim())      { $valEnv['PIM_SqlDatabase']   = "$SqlDatabase".Trim() }
+            foreach ($k in $valEnv.Keys) {
+                $prevEnv[$k] = [Environment]::GetEnvironmentVariable($k)
+                if (-not "$($prevEnv[$k])".Trim()) { [Environment]::SetEnvironmentVariable($k, $valEnv[$k]) }
+            }
             try {
-                if (Have 'Invoke-Pester') {
+                if ($pesterMajor -ge 5) {
                     $r = Invoke-Pester -Path $val -PassThru -Output Minimal
                     $valExit = if ($r.FailedCount -gt 0) { 1 } else { 0 }
                 } else {
-                    & powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "Invoke-Pester -Path '$val' -CI" | Out-Host
-                    $valExit = $LASTEXITCODE
+                    $found = if ($pesterMajor -gt 0) { "Pester $pesterMajor.x" } else { 'no Pester module' }
+                    Warn "deploy-validation tests SKIPPED -- they need Pester 5, and this host has $found."
+                    Warn '  Install-Module Pester -MinimumVersion 5.0 -Scope AllUsers -Force   (then re-run to enable them)'
+                    Warn '  This layer is UNVERIFIED. It is NOT a deployment failure and does NOT roll anything back --'
+                    Warn '  the post-deploy GUI gate above is what proves the Manager works.'
+                    $valExit = -1
                 }
-            } catch { Warn "deploy-validation tests errored: $($_.Exception.Message)"; $valExit = 1 }
+            } catch {
+                # Distinguish a runner that could not start from tests that ran and failed.
+                Warn "deploy-validation tests COULD NOT RUN: $($_.Exception.Message)"
+                Warn "  Pester major version on this host: $pesterMajor. This is a TOOLING problem, not a"
+                Warn '  deployment failure -- it is recorded as UNVERIFIED and does NOT trigger a rollback.'
+                Warn '  A rollback here would replace a Manager whose smoke gate passed with an older revision.'
+                $valExit = -1
+            } finally {
+                # Put the environment back exactly as it was. $env: is process-wide, and this
+                # script is often dot-sourced or called from a longer session -- leaking a tenant
+                # id into a later step is the same class of defect as the AZURE_CONFIG_DIR leak.
+                foreach ($k in $valEnv.Keys) {
+                    if (-not "$($prevEnv[$k])".Trim()) { [Environment]::SetEnvironmentVariable($k, $null) }
+                }
+            }
         }
     } else { Info 'verify: deploy-validation tests not found -- UNVERIFIED' }
 
@@ -1028,10 +2153,32 @@ $ctx = @{ source=$Source; hosted=$hosted; tenantId=$TenantId; resourceGroup=$Res
 # capture pre-deploy rollback target (prior ACA revision) BEFORE any code change.
 # Skipped under the -StepRunner test seam (would hit real az and probe a non-existent RG).
 $prevRev = ''
+$prevImage = ''
 if (-not $StepRunner -and $hosted -and -not $ValidateOnly -and (Have 'az') -and "$ResourceGroup".Trim()) {
-    try { $prevRev = az containerapp revision list -g $ResourceGroup -n $ManagerApp --query "[?properties.active].name | [0]" -o tsv 2>$null } catch { Write-Verbose "active-revision read failed: $($_.Exception.Message)" }
-    if (-not "$prevRev".Trim()) { try { $prevRev = az containerapp revision list -g $ResourceGroup -n $ManagerApp --query "[0].name" -o tsv 2>$null } catch { Write-Verbose "fallback-revision read failed: $($_.Exception.Message)" } }
+    # 🔴 NO PIPE IN A JMESPath ON WINDOWS. `az` is az.cmd, and cmd.exe treats the `|` inside
+    # "[?properties.active].name | [0]" as a SHELL PIPE: it splits the command there and dies with
+    # "-o was unexpected at this time" (exit 255). The read then returns nothing, the rollback
+    # target prints "(unknown)", and the deploy carries on with NO REVISION TO ROLL BACK TO --
+    # silently, because the call swallowed its own stderr. Measured at a live customer 2026-09-08;
+    # it only became visible when Invoke-PimAz started reporting az failures instead of hiding them.
+    # 🪤 This is the third instance tonight of cmd.exe mangling an az argument (the cost-management
+    # --query, the `az rest` JSON body, and now this). The rule: keep JMESPath free of cmd
+    # metacharacters -- | & < > ^ -- and do the list-picking in PowerShell, which never re-parses.
+    try {
+        $prevRev = @(az containerapp revision list @azSubArgs -g $ResourceGroup -n $ManagerApp `
+                        --query "[?properties.active].name" -o tsv 2>$null |
+                     Where-Object { "$_".Trim() }) | Select-Object -First 1
+    } catch { Write-Verbose "active-revision read failed: $($_.Exception.Message)" }
+    if (-not "$prevRev".Trim()) { try { $prevRev = az containerapp revision list @azSubArgs -g $ResourceGroup -n $ManagerApp --query "[0].name" -o tsv 2>$null } catch { Write-Verbose "fallback-revision read failed: $($_.Exception.Message)" } }
     Info "pre-deploy revision (rollback target): $(if($prevRev){$prevRev}else{'(unknown)'})"
+    # §53.6 -- capture the IMAGE too, because the revision may not survive to be rolled back to.
+    # Container Apps garbage-collects inactive revisions; on the internal environment 2026-09-10
+    # the captured target was already gone by the time the rollback ran, and the safety net told
+    # the operator to roll back by hand during a failed deploy. The image is the durable anchor.
+    try {
+        $prevImage = "$(az containerapp show @azSubArgs -g $ResourceGroup -n $ManagerApp --query 'properties.template.containers[0].image' -o tsv 2>$null)".Trim()
+    } catch { Write-Verbose "pre-deploy image read failed: $($_.Exception.Message)" }
+    Info "pre-deploy image (rollback fallback): $(if($prevImage){$prevImage}else{'(unknown)'})"
 }
 
 $outcomes = New-Object System.Collections.Generic.List[object]
@@ -1127,13 +2274,18 @@ if ($needRollback -and $codeRan) {
             $roller = Join-Path $here 'Update-PimContainers.ps1'
             if (-not (Test-Path $roller)) {
                 Warn "AUTO-ROLLBACK COULD NOT RUN: roller not found ($roller). ROLL BACK BY HAND."
-            } elseif (-not "$prevRev".Trim()) {
-                Warn "AUTO-ROLLBACK COULD NOT RUN: the pre-deploy revision was never captured, so there is no target to reactivate. ROLL BACK BY HAND: az containerapp revision list -n $ManagerApp -g $ResourceGroup"
+            } elseif (-not "$prevRev".Trim() -and -not "$prevImage".Trim()) {
+                # §53.6: EITHER anchor is enough. Only when both are missing is there nothing to do.
+                Warn "AUTO-ROLLBACK COULD NOT RUN: neither the pre-deploy revision nor its image was captured, so there is no target at all. ROLL BACK BY HAND: az containerapp revision list -n $ManagerApp -g $ResourceGroup"
             } else {
                 try {
                     if ($PSCmdlet.ShouldProcess($ManagerApp, "rollback to $($a.detail)")) {
                         $global:LASTEXITCODE = 0
-                        & $roller -Rollback ("$prevRev".Trim()) -ResourceGroup $ResourceGroup -AcrName $AcrName -ImageRepo $ImageRepo -Apps $Apps -SkipSmoke | Out-Host
+                        $rbArgs = @{}
+                        if ("$prevImage".Trim()) { $rbArgs['RollbackImage'] = "$prevImage".Trim() }
+                        # An empty -Rollback is legal here: with no surviving revision name, the
+                        # roller goes straight to the image anchor.
+                        & $roller -Rollback ("$prevRev".Trim()) -ResourceGroup $ResourceGroup -AcrName $AcrName -ImageRepo $ImageRepo -Apps $Apps -SkipSmoke @rbArgs | Out-Host
                         if ((-not $LASTEXITCODE) -or ($LASTEXITCODE -eq 0)) {
                             $rolledBack = $true
                         } else {
@@ -1157,6 +2309,60 @@ Write-Host ""
 Step "DONE. status=$($summary.status) healthy=$($summary.healthy) rolledBack=$($summary.rolledBack)"
 foreach ($o in $summary.steps) { Info ("  {0,-8} ran={1} ok={2}" -f $o.key, $o.ran, $o.ok) }
 if ($summary.failedSteps.Count) { Warn "failed steps: $($summary.failedSteps -join ', ')" }
+
+# =============================================================================
+# WHAT TO DO NEXT -- the address, and the commands.
+# 🔴 A DEPLOY THAT DOES NOT TELL YOU THE URL IS NOT FINISHED. The operator's words:
+# "I have no way to find the url to access pim manager gui". Every ingredient was already in this
+# process -- the app name, the resource group, an authenticated az -- and the deploy ended with a
+# step table instead. Whoever runs this then goes hunting in the portal for something the script
+# knew all along.
+if ($hosted -and -not $WhatIfPreference -and $summary.status -eq 'success') {
+    $mgrFqdn = ''
+    try {
+        $mgrFqdn = "$(az containerapp show @azSubArgs -n $ManagerApp -g $ResourceGroup --query properties.configuration.ingress.fqdn -o tsv 2>$null)".Trim()
+    } catch { }
+    Write-Host ''
+    Write-Host '=============================================================================' -ForegroundColor Cyan
+    Write-Host ' PIM4EntraPS is deployed. What you need next:' -ForegroundColor Cyan
+    Write-Host '============================================================================='  -ForegroundColor Cyan
+    if ($mgrFqdn) {
+        Write-Host ''
+        Write-Host '  OPEN THE MANAGER' -ForegroundColor Green
+        Write-Host "      https://$mgrFqdn" -ForegroundColor White
+        Write-Host '      (sign-in required; use a browser -- the API is not reachable from a script)' -ForegroundColor DarkGray
+    } else {
+        Write-Host '  Manager URL: could not read the ingress FQDN. Get it with:' -ForegroundColor Yellow
+        Write-Host "      az containerapp show -g $ResourceGroup -n $ManagerApp --query properties.configuration.ingress.fqdn -o tsv" -ForegroundColor White
+    }
+    Write-Host ''
+    Write-Host '  IMPORT YOUR CSV DATA (v1 file names are taken as they are; nothing to rename)' -ForegroundColor Green
+    Write-Host '      $global:PIM_TenantId          = ''' -NoNewline -ForegroundColor White; Write-Host "$TenantId'" -ForegroundColor White
+    if ("$SqlAdminClientId".Trim()) {
+        Write-Host '      $global:PIM_SqlClientId       = ''' -NoNewline -ForegroundColor White; Write-Host "$SqlAdminClientId'" -ForegroundColor White
+    }
+    if ("$SqlAdminCertThumbprint".Trim()) {
+        Write-Host '      $global:PIM_SqlCertThumbprint = ''' -NoNewline -ForegroundColor White; Write-Host "$SqlAdminCertThumbprint'" -ForegroundColor White
+    }
+    Write-Host "      $solRoot\setup\Migrate-PimToSql.ps1 ``" -ForegroundColor White
+    Write-Host '          -ConfigDir <folder with your CSV files> `' -ForegroundColor White
+    Write-Host ("          -ConnectionString `"{0}`" -WhatIf" -f $(if ("$SqlConnectionString".Trim()) { $SqlConnectionString } else { "Server=tcp:$SqlServerFqdn,1433;Initial Catalog=$SqlDatabase;Encrypt=True;TrustServerCertificate=False;Connection Timeout=60;" })) -ForegroundColor White
+    Write-Host '      Run it with -WhatIf first: it prints the row count per entity, and it REPLACES' -ForegroundColor DarkGray
+    Write-Host '      the full set of rows for every entity it imports. Drop -WhatIf to apply.' -ForegroundColor DarkGray
+    if (-not $EasyAuthAllowedPrincipals.Count) {
+        Write-Host ''
+        Write-Host '  RESTRICT WHO CAN SIGN IN (right now: anyone in the tenant, guests included)' -ForegroundColor Yellow
+        Write-Host "      $here\Set-PimManagerEasyAuth.ps1 -App $ManagerApp -ResourceGroup $ResourceGroup ``" -ForegroundColor White
+        Write-Host "          -TenantId $TenantId -AllowedPrincipals <upn-or-group>[,<upn-or-group>]" -ForegroundColor White
+    }
+    Write-Host ''
+}
+
+# The normal-completion path. The trap and the exiting event cover failure and interrupt; this
+# covers success, which is the case that would otherwise leave the key sitting there after a run
+# that looked perfect.
+Restore-PimCallerAzContext
+Clear-PimEphemeralPem
 
 $summary
 if ($summary.status -eq 'failed' -or $summary.status -eq 'rolledback') { exit 1 }

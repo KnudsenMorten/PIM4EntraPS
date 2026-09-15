@@ -1,4 +1,4 @@
-<#
+﻿<#
   PIM4EntraPS -- approval-gated offboarding + revoke ENGINE (REQUIREMENTS §27 H3/H4).
 
   WHY THIS EXISTS (closes the incident gap)

@@ -30,6 +30,17 @@ ENV PIM_SQLCLIENT_DLL=/opt/sqlclient/Microsoft.Data.SqlClient.dll
 WORKDIR /app
 COPY SOLUTIONS/PIM4EntraPS /app/PIM4EntraPS
 
+# 🔴 §52.12 -- THE BUILD ARG NOTHING DECLARED, SO NOTHING RECEIVED.
+# Build-PimManagerImage passes --build-arg PIM_MANAGER_CONTENT_HASH=<hash> so a later deploy can
+# ask "is the running image already built from this source?" and skip a pointless rebuild. This
+# file never declared the ARG, so Docker discarded it and said so in EVERY build log:
+#     [Warning] One or more build-args [PIM_MANAGER_CONTENT_HASH] were not consumed
+# The hash therefore never reached the image, the parity check could never succeed, and every
+# deploy rebuilt "to be safe" -- forever. A warning that appears in every successful build is one
+# nobody reads, which is exactly why this survived.
+ARG PIM_MANAGER_CONTENT_HASH=""
+ENV PIM_MANAGER_CONTENT_HASH=$PIM_MANAGER_CONTENT_HASH
+
 # Hosted defaults; the platform injects PORT/WEBSITES_PORT + the SQL connection.
 ENV PIM_HOSTED=1
 ENV PORT=8080

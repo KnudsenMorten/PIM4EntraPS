@@ -1,4 +1,4 @@
-# PIM4EntraPS -- Power Platform environment auto-discovery + reconcile.
+﻿# PIM4EntraPS -- Power Platform environment auto-discovery + reconcile.
 # Dot-sourced by PIM-Functions.psm1 (needs PIM-PermissionWizard.ps1 for the
 # name grammar + PIM-ChangeQueue.ps1 for New-PimChange) and standalone by the
 # pim-manager.

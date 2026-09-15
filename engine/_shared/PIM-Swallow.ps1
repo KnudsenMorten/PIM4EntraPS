@@ -1,4 +1,4 @@
-# ---------------------------------------------------------------------------
+﻿# ---------------------------------------------------------------------------
 # IMP-03 -- ONE visible way to swallow a non-fatal error.
 #
 # Shipped source has 218 empty `catch {}` blocks. Most are deliberate best-effort

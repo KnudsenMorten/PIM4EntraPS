@@ -2,12 +2,13 @@
 
 This is the delivered feature set of **PIM4EntraPS**, written in plain language for IT
 admins and customers. Everything listed here is built and verified. It is grouped by
-area and is safe to share publicly. (Last reviewed 2026-08-06; individual entries carry their own ✅ date.)
+area and is safe to share publicly. (Last reviewed 2026-09-14; individual entries carry their own ✅ date.)
 
 PIM4EntraPS is a privileged-access governance solution for Microsoft Entra. It models
 your privileged delegation as nested groups, applies the right PIM policies, and keeps
-everything in sync from a single source of truth — without ever standing up a public
-endpoint or leaving credentials lying around.
+everything in sync from a single source of truth — with no unauthenticated endpoint
+(every visit to the Manager passes Microsoft Entra sign-in, and a private-only
+deployment is a supported choice) and no credentials lying around.
 
 ---
 
@@ -16,6 +17,19 @@ endpoint or leaving credentials lying around.
   locally on an admin's PC straight against the database — no central web server
   required. A break-glass loopback edition runs on a client PC for the times your
   hosted plan is unavailable, so senior admins are never locked out.
+- **Reach the Manager from anywhere, or only from your own network — sign-in is always
+  required.** ✅ 2026-09-10 A new hosted deployment makes the Manager reachable over the
+  internet behind Microsoft Entra sign-in, so admins can open it without a VPN; building it
+  private-only (reachable from your own network only) is a supported choice. Either way
+  sign-in is never optional: the installation creates the sign-in registration, switches
+  authentication on, reads the setting back, and **stops rather than finishing with an
+  unprotected console**. ✅ 2026-09-08
+- **Say exactly who may open the Manager.** ✅ 2026-09-09 Signing in only proves someone has
+  an account in your organisation. You can name the people or groups allowed in as part of
+  the installation: they are assigned first, the assignments are checked, and only then is
+  the Manager switched to "assignment required" — in that order, so it can never lock
+  everyone out. Leave it out and the installation tells you plainly that anyone in the
+  organisation can open it (their role inside the Manager still decides what they can do).
 
 ## 2. Containers
 - **One image, many roles.** A single configurable engine image runs as manager,
@@ -27,6 +41,11 @@ endpoint or leaving credentials lying around.
 - **Headless and safe by default.** Containers authenticate using a managed identity —
   no interactive prompts, no secrets baked into the image, and diagnostics that work in
   a fully unattended environment.
+- **The web console cannot change your directory by itself.** ✅ 2026-09-12 The Manager's own
+  identity holds read-only directory permissions. Everything that changes the tenant — a
+  revoke, a Temporary Access Pass re-issue, a sign-in session revoke, a configuration commit —
+  is queued and carried out by the engine, which holds the write permissions. A compromised
+  browser session or web process therefore cannot write to Entra directly.
 
 ## 3. Setup / Deploy
 - **One command to stand up — or update — the whole solution.** A single "deploy
@@ -60,8 +79,42 @@ endpoint or leaving credentials lying around.
   same way.
 - **Database access without passwords.** When using a managed identity against the
   database, setup wires up the correct passwordless access automatically.
-- **Permissions granted for you.** Setup assigns each worker identity the exact directory
-  permissions the engine needs, so it works on first run instead of failing on access.
+- **The installation grants itself database access, and proves it.** ✅ 2026-09-09 A first
+  installation no longer leaves the Manager unable to reach its own database. On every
+  installation (not only the first) it authorises the environment's network on the database
+  server, reads the rule back, and stops with the real start-up error if access still fails.
+  A switch covers installations that reach the database over a private connection instead.
+- **Support access to the database is declared, not added by hand.** ✅ 2026-09-09 If you want
+  a named support identity to be able to work in the database, you name it at install time and
+  it receives database rights only — never server administration. Leave it out and no support
+  access is granted. Because it is declared, a later re-install keeps it instead of silently
+  removing it.
+- **Someone can administer the new environment from the first minute.** ✅ 2026-09-10 The
+  installation records the senior administrators you name in the Manager's access list in the
+  database, so a freshly built environment is never one nobody is allowed to manage.
+- **Permissions granted for you.** Setup assigns the engine's identity the exact directory
+  permissions it needs, and the Manager's identity a separate read-only set, so both work on
+  first run instead of failing on access — and a re-run cannot quietly widen the Manager. A
+  refused grant stops the installation and names the permission, instead of producing a
+  deployment that looks healthy and cannot work.
+- **Notification mail is set up with the narrowest send right.** ✅ 2026-09-13 The installation
+  provisions the sender mailbox and gives the environment's identity the right to send from
+  that one mailbox only — not from every mailbox in the tenant.
+- **Updates arrive through release rings, and an environment updates itself.** ✅ 2026-09-13
+  Every hosted environment carries a release ring, and customer environments start on the
+  most conservative one. Each night the environment checks which version its ring has
+  approved and moves only to that version — never simply to "the newest". ✅ 2026-09-10 It needs
+  no build machine: it fetches the approved version's source, builds it in its **own**
+  container registry, brings the database up to date **first** (additive changes only, and it
+  refuses to move if the schema cannot be verified), rolls **every** component that runs the
+  product, verifies the result, and rolls back automatically if verification fails. Each
+  nightly run leaves one short status record — from which version, to which, what it did, how
+  long it took, any error — so you can see whether one site is stuck or one release is failing
+  everywhere. If it cannot read what its ring approves, it stays where it is. Tools run by
+  hand obey the same ring and refuse an unapproved version unless an override is given with a
+  logged reason. *(The self-updating job needs a published source feed to pull from. A
+  community installation from the public repository updates by pulling the new version and
+  re-running the same one-command deploy, which is idempotent.)*
 
 ## 4. MSP
 - **Pull, never push.** In a managed-service setup, the provider never reaches into or
@@ -89,14 +142,26 @@ endpoint or leaving credentials lying around.
   revoke a specific privileged account across every managed tenant at once — applied locally
   by your own engine through the same audited, authorized path as any other change (never a
   back-door write from outside).
+- **Each admin says whether it is synced to managed tenants, and to which.** ✅ 2026-09-13 On
+  the managing (master) tenant, an admin is synced to managed tenants only when its own record
+  is marked as MSP-managed, optionally narrowed to tenants carrying particular tags; every other
+  admin stays local. Managed tenants keep their own local admins separately, and a synced admin
+  is governed by the master — including its status and offboarding date, which flow down with
+  it. Admins that are not synced are reported with the reason.
+- **You can always see which mode a tenant runs in.** ✅ 2026-09-13 The Manager header shows the
+  tenant's mode (for example single tenant, managing tenant, or managed tenant), so nobody has
+  to guess whether a change made here is local or arrives from a managing tenant.
 - **One shared platform for related tools.** ✅ 2026-06-15 The tenant/application registry is
   shared and **keyed by product**, so companion tooling (such as tenant management) reuses the
   exact same registry, authentication and storage model rather than a separate parallel
   system — fewer moving parts, one consistent security posture.
 
 ## 5. SQL / Data
-- **Single source of truth in SQL.** Configuration, settings, access rules and delegation
-  profiles all live in the database — no scattered files or shares to keep in sync.
+- **Single source of truth in SQL.** ✅ 2026-09-13 Configuration, settings, access rules,
+  delegation profiles, policy templates, mail templates, the audit trail, scheduler state and
+  tenant caches all live in the database — no scattered configuration files or shares to keep in
+  sync, and nothing of that lost when a container is replaced. The Manager requires
+  the database to start and never falls back to reading files.
 - **Passwordless database auth.** Cloud databases use Entra/managed-identity authentication
   only (no SQL logins or stored passwords); on-prem uses integrated Windows auth.
 - **One consistent data path for the app.** The Manager reads and writes through a single
@@ -108,20 +173,14 @@ endpoint or leaving credentials lying around.
   connection, no separate database login, no token juggling; just point the engine at the
   local instance and run. (The single authoritative store in production — and for break-glass
   — is always the cloud database; the local instance is a developer convenience.)
-- **Guided one-time database cutover.** ✅ 2026-06-14 Moving an existing instance onto the
-  database is a **guided, step-by-step ceremony** in the Manager — never a risky one-shot
-  switch. It runs in order: a read-only **pre-check** (connectivity + a report of exactly what
-  the upgrade will change), a **one-time schema upgrade**, a **transactional import** of your
-  existing configuration (all-or-nothing — a failure leaves the store exactly as it was), a
-  flip of the configuration source to the database, a **re-check** against the now-populated
-  store, and finally an **explicit "Finalize Cutover" confirmation**. Every imported entity
-  and row count is recorded for audit, each step is gated on the previous one, and re-running a
-  step is safe. The cutover **refuses to finalize onto a development/local database** — only
-  the cloud database may become authoritative.
-- **Your existing configuration migrates without being touched.** ✅ 2026-06-14 The migration
-  reads your current configuration **read-only** and brings it up to the current shape on the
-  way in (adding any missing fields, retiring obsolete ones) — your existing files are never
-  modified or written back.
+- **Moving from the file-based edition is a one-time import.** ✅ 2026-09-13 An existing
+  installation that kept its configuration in files is brought into the database once, by an
+  import you run during migration. It reads your files **read-only** (they are never modified
+  or written back), brings each row up to the current shape on the way in, and writes each
+  file's rows inside a single transaction — a file that fails is rolled back whole, named, and
+  makes the import end as a failure rather than "complete". It also carries over the runtime
+  state the old edition kept beside its configuration (alerts, scheduler state, exemptions,
+  audit history and customised mail templates). Re-running it is safe. After the import the database is the only store.
 - **Changes recompute on their own.** ✅ 2026-06-14 When the configuration in the database
   changes — from the Manager, from another management node, or edited directly — the platform
   notices and **automatically schedules a recalculation** so the live environment reconciles to
@@ -139,6 +198,28 @@ endpoint or leaving credentials lying around.
 - **Fast incremental runs.** Instead of a one-to-two-hour full sweep every time, the
   engine queues changes and applies only what actually changed, scoped to the area you
   ask for. Full reprocessing is still available when you want it.
+- **A change runs only the engine steps its data needs.** ✅ 2026-09-14 When you commit a change,
+  the platform works out which kind of data changed and runs only the engine steps that read it —
+  for example an Azure role delegation runs the Azure policy and Azure assignment steps, not
+  every step for the whole tenant. A kind of data the platform does not recognise still runs
+  everything, so a gap can cost time but never a missed change. (The first change after an
+  update runs every step once, because there is nothing yet to compare against.)
+- **Changes start moving right away.** ✅ 2026-09-14 A commit, a queue commit or **Run now** can
+  start the scheduled engine job immediately instead of waiting for its next start — where the
+  Manager's identity has been allowed to start that job. Without that permission the change
+  runs on the next scheduled start (within about five minutes), and the Manager says so. A run
+  that is already in progress picks new commits and queued work up as soon as its current job
+  finishes, instead of waiting for the whole run.
+- **Queued actions do not wait for a long run.** ✅ 2026-09-14 A committed queued action — such as
+  a Temporary Access Pass re-issue or a sign-in session revoke — is applied **between the engine's
+  steps**,
+  so it lands within minutes even while a long reconcile is working through the tenant.
+- **Engine errors name what they are about.** ✅ 2026-09-13 A failing item reads like "group
+  PIM-X → Azure role 'Reader' at management group Y (Active)" or "PIM policy for Azure role
+  'Reader' at management group X (template Y)", with a link to that scope's PIM settings in the
+  Azure portal — never an empty group or an object id. A group that simply has not been created
+  yet is reported as such, and a refused permission is reported as a missing permission, naming
+  it, instead of "not found".
 - **Sets everything up for you.** From one run the engine creates the groups, delegations,
   org-group access, time-limited access passes, admin schedules and notification emails —
   nothing has to be wired up by hand.
@@ -185,6 +266,31 @@ endpoint or leaving credentials lying around.
   has altered a setting in the portal it puts it back to your intended policy. Adding or removing
   an approver is detected and corrected too. Existing settings the engine doesn't manage are left
   untouched.
+- **Azure resource role policies are managed too.** ✅ 2026-09-13 The settings on Azure roles —
+  maximum activation and assignment durations, MFA and justification on activation,
+  notifications, and approval where the template asks for it — follow your policy templates,
+  exactly as for Entra roles and PIM for Groups. A policy that was only partly configured is
+  repaired rule by rule, and approval that is already switched on is never removed.
+- **Group owner policies and the full notification set.** ✅ 2026-09-13 The owner-role policy on
+  each PIM group is managed as well as the member policy, the complete set of notification
+  settings is applied, and every directory role and managed group is checked — not only the ones
+  named in your data.
+- **Moving from v1 changes no PIM policy.** ✅ 2026-09-13 The standard policy templates for Entra
+  roles, Azure resource roles and PIM for Groups (member and owner) carry exactly the values v1
+  used, and a standing check compares every rule with v1's definitions so they cannot drift
+  apart. Templates stored before an update receive new settings automatically, without
+  overwriting anything you changed.
+- **A safety brake on large or weakening policy changes.** ✅ 2026-09-13 If a run would change
+  many PIM policies at once, or weaken protection (for example remove MFA on activation),
+  **nothing is changed**: the plan is held and shown for an administrator to approve on the Jobs
+  page, and the approval covers exactly that plan and nothing else. The brake covers Entra role,
+  Azure resource and PIM for Groups policies in every case. Ordinary drift is still corrected
+  straight away, and applying a template to a brand-new group's untouched default policy is not
+  treated as weakening, so creating new delegations does not trip it.
+- **Only the rules that differ are updated.** ✅ 2026-09-13 A PIM for Groups policy that differs
+  on one rule is updated with one change instead of rewriting every rule (Azure resource policies
+  are likewise repaired rule by rule), which makes large policy alignments many times faster and
+  leaves the rules that were already right untouched.
 - **Full set of building blocks.** The engine covers administrative units, groups and group
   owners, admins and their time-limited access passes, Entra roles and role-scoped
   administrative units, group and admin membership, Azure resources, group policies and
@@ -250,12 +356,29 @@ endpoint or leaving credentials lying around.
     and if it cannot read an admin's current state, it deliberately does nothing rather than risk
     issuing a new credential on every cycle.
   - **The code only ever appears in the email** — never in a web response, on screen, or in an
-    audit record. Passes can also be re-issued on demand from the Manager by an administrator, to
-    the manager address recorded for that account, and only to that address.
+    audit record. Passes can also be re-issued on demand from the Manager by an administrator; the
+    re-issue is queued, applied by the engine, and mailed to the account owner's address (below).
+    If that mail cannot be delivered, the existing pass is left untouched.
+- **Admin mail goes to the person behind the admin account.** ✅ 2026-09-12 An admin account
+  usually has no mailbox of its own, so mail about it — the welcome mail and its Temporary
+  Access Pass — goes to the account owner's everyday office address: the forwarding address
+  recorded on the account when forwarding is switched on, otherwise the manager address. The
+  admin screen shows exactly which address a mail will go to, and a value that is not a real
+  email address is refused rather than used — with no valid address, nothing is issued.
+- **Mail is sent as the environment's own identity, from one mailbox only.** ✅ 2026-09-13 A hosted
+  environment sends notification mail as its managed identity, with the right to send limited to
+  the configured sender mailbox. No tenant-wide send permission is granted, and a refused send
+  names the identity and the exact grant that is missing.
+- **Every cloud admin gets a Temporary Access Pass, on time.** ✅ 2026-09-13 A pass is issued to
+  every cloud admin account (on-premises AD admins cannot hold one), respects the start date you
+  set, is issued once, and follows your tenant's own pass policy (for example one-time use).
 - **100% direct API, no modules.** Authentication runs entirely over REST, so the solution
   works on a clean VM or container with nothing pre-installed.
-- **Certificate-based app auth.** The engine signs in as an application using a certificate
-  (not a shared secret), defaulting to the machine certificate store.
+- **Managed identity or certificate, not shared secrets.** A hosted environment runs the engine
+  and the Manager as the containers' own managed identities, so there is no credential to store or
+  rotate. An engine that runs on a server signs in as an application with a certificate from the
+  machine certificate store. A client secret is accepted only where a platform requires one — for
+  example the Manager's sign-in registration — and grants sign-in only.
 - **No secrets in configuration.** Access uses a managed identity or a Key Vault pointer;
   settings live in the database and seed files never carry secrets.
 - **Tells you exactly which permission is missing.** When a call is refused for lack of
@@ -296,6 +419,18 @@ endpoint or leaving credentials lying around.
   process, cross-org or department) which nest into permission groups that hold the actual
   roles and scopes. This delivers least-privilege access across many apps by reusing group
   nesting and RBAC — and it's the heart of the model.
+- **Nesting into a role-assignable group is always Eligible — and old Active nestings are one click
+  from fixed.** ✅ 2026-09-13 Microsoft Entra refuses an *Active* membership of a group inside a
+  role-assignable group, so such a delegation could never reach the tenant. Every wizard now writes
+  that kind of nesting as **Eligible**, whatever else is chosen, and a delegation made Eligible is
+  written Eligible everywhere. An existing Active nesting of that kind is reported by validation as
+  an error with a one-click **Set to Eligible** fix (staged to Pending changes for you to commit),
+  and the engine lists it under Engine logs & errors instead of skipping it silently.
+- **Direct groups by type, including projects and cross-organisation teams.** ✅ 2026-09-12 A new
+  direct group asks what it is — role, organisation, department, process, project or cross-org —
+  and is stored with the other groups of that type; department and process groups are created by
+  the engine like every other group, and the wizard adds the group type's administrative unit when
+  it is missing.
 - **Everything is a group.** The thing you grant is always a group; administrative units
   and Azure scopes are only the *where*, never the *who*. Delegation is simply group
   membership.
@@ -347,7 +482,7 @@ endpoint or leaving credentials lying around.
 ## 11. GUI / Manager
 
 ![PIM Manager — Home / Overview dashboard](img/manager-home.png)
-*The Manager opens on a Home dashboard: red/amber/green attention tiles for engine health, validation findings, break-glass, delegation by tier, gaps/orphans, expiring access and pending reviews.*
+*The Manager opens on Home: red/amber/green attention tiles for engine health, validation findings, break-glass, delegation by tier, gaps, expiring access and pending reviews. (Synthetic demo data.)*
 
 - **Turn any Manager feature on or off in Settings — roll out gradually.** ✅ 2026-06-16 — every
   screen in the Manager (each tab and major panel) can be switched on or off from a **Features** panel in
@@ -359,16 +494,27 @@ endpoint or leaving credentials lying around.
   Changing the feature set is restricted to a senior administrator and every change is recorded in the audit
   trail. Because the on/off choices are saved in the same place the rest of the Manager reads, what you see
   in the menu always matches what's actually enabled.
-- **CISO-friendly consolidated navigation.** ✅ 2026-06-16 (live-verified on the hosted Manager) — the
-  Manager's ~20 flat tabs are folded into **six clearly-named top-level menus** so a security leader or a
-  first-time admin can find anything in seconds: **Overview** · **Provisioning & Access** · **Change
-  Control** · **Operations** · **Governance** · **Audit & Settings**. Each menu opens a collapsible group of
-  the underlying screens and carries an attention dot + per-item count, so what needs action is visible
-  without opening every tab. The grouping is a pure navigation layer over the existing screens — nothing was
-  removed or renamed, and the classic flat tab strip is still there underneath.
+- **Six menus named after what you came to do.** ✅ 2026-06-16, reorganised ✅ 2026-09-14 — the
+  Manager's screens sit under **six top-level menus** so a security leader or a first-time admin can
+  find anything in seconds:
+  - **Overview** — the Home dashboard.
+  - **Access** — the Access map, role look-up, create access, change existing access, admin accounts
+    and Temporary Access Passes, guest/consultant invitations, departments & owners, and all records.
+  - **Pending changes** — check for problems, and the one review-and-commit queue.
+  - **Jobs** — jobs & status, **Engine logs & errors**, and the **Job schedule**.
+  - **Reviews & controls** — review standing access, approvals, **Drift: live vs desired**, access
+    reviews, tenant conformance, reports and managed tenants.
+  - **Audit & Settings** — the audit trail, Settings, **Newly discovered resources**, and direct links
+    to the Settings sections for Manager access & roles, the emergency override (break-glass) and mail
+    templates, plus Support.
 
-  ![The consolidated six-menu navigation with a dropdown open](img/manager-nav.png)
-  *The ~20 flat tabs folded into six clearly-named top-level menus, each with an attention dot and per-item count.*
+  Every entry says in one line what the screen does, and each menu carries an attention dot and
+  per-item count, so what needs action is visible without opening every screen. The former Daily
+  operations menu is folded into Reviews & controls; permission template packs and mail templates are
+  sections in Settings.
+
+  ![The six-menu navigation with a dropdown open](img/manager-nav.png)
+  *The six top-level menus, each entry described in one line and carrying an attention count. (Synthetic demo data.)*
 
 - **In-context guidance + consistent panel states on every screen.** ✅ 2026-06-17 — every screen now
   carries a short, collapsible **"what this is & how to use it"** banner at the top, so a first-time admin
@@ -395,10 +541,16 @@ endpoint or leaving credentials lying around.
   - **Gaps, orphans & unmanaged** — groups that reach nothing, admins who reach nothing, and
     targets no group manages.
   - **Expiring access (next 14 days)** and **pending access reviews** — what needs renewing,
-    revoking or deciding soon.
+    revoking or deciding soon. ✅ 2026-09-13 Expiring access opens instantly from the scheduler's
+    active-assignments snapshot and shows when that snapshot was taken; pending access reviews, which
+    are still read live, load only when an admin asks for them — so opening Home never slows the
+    Manager down for anyone else.
   Every tile is backed by real engine/job/validation/audit data with an honest empty state — there
   are no decorative or dead tiles. A red badge on the Home tab shows the total number of items
   needing attention.
+- **A missing engine permission is impossible to miss.** ✅ 2026-09-13 When the scheduled engine is
+  refused a permission, the permission banner on Home turns **red** and names what was refused — it
+  checks the engine's identity, not only the Manager's own.
 - **Alerting — get told when something goes wrong.** ✅ 2026-06-15 — choose who is emailed and
   which events raise an alert (an **engine/job run failure**, **configuration drift**, **access
   expiring soon**, or **break-glass use**) from the Home/Settings **Alerting** panel. Alerts are
@@ -429,9 +581,7 @@ endpoint or leaving credentials lying around.
   gets told there without setting up mail at all. Every webhook send is recorded in the **same Recent alerts
   feed** as email (delivered vs prepared-only), so the proof covers both channels. The Manager only ever posts
   to a **public https** endpoint: a mistyped, plain-http, or internal/loopback/private URL is **rejected with
-  a clear reason** and the channel stays off, so an alert can never be sent somewhere unintended. *(Offline-verified
-  end-to-end against a booted Manager — payload rendering, URL safety and the config round-trip; the hosted
-  Manager GUI smoke against a real Teams channel is the live gate before publish.)*
+  a clear reason** and the channel stays off, so an alert can never be sent somewhere unintended.
 - **Operational policy — configure the defaults from the tool, not out-of-band.** ✅ 2026-06-16 — an
   **Operational policy** panel in **Settings** lets an administrator set the core operational defaults
   in one place, so they no longer have to be applied by hand or left unset:
@@ -447,7 +597,7 @@ endpoint or leaving credentials lying around.
   always in place (MFA on, conservative durations) even before anything is customised.
 
   ![Settings — naming conventions and operational policy](img/manager-settings.png)
-  *Settings is where you tune naming conventions, operational-policy defaults, alerting and the per-screen feature toggles — all persisted to the store the engine reads.*
+  *Settings: naming conventions with a preview of the names they produce, operational-policy defaults, alerting and feature toggles, all stored where the engine reads them. (Synthetic demo data.)*
 - **"Who can do what" report — and the reverse.** ✅ 2026-06-16 — a **Reports** tab answers the two
   questions every access audit starts with, instantly and with evidence to hand to security or auditors:
   - **Pick a person → everything they can reach.** See every privileged target the person can
@@ -460,7 +610,7 @@ endpoint or leaving credentials lying around.
   **printable and exportable to CSV**.
 
   ![Reports — "who can do what", showing a person's reachable targets and the exact granting path](img/manager-reports.png)
-  *The Reports tab: pick a person to see every target they can reach (and the exact granting path), or pick a role to see who can activate it.*
+  *Reports: pick a person to see every target they can reach and the exact granting path, or pick a role to see who can activate it. (Synthetic demo data.)*
 - **Tier-impact report — every user who can reach your most privileged assets.** ✅ 2026-06-17 — a
   third **Reports** mode answers the question a security review opens with: *who can reach a Tier-0 or
   Tier-1 target?* It lists **every** user with a path to high-privilege access — and crucially it counts
@@ -473,8 +623,7 @@ endpoint or leaving credentials lying around.
   narrow it to **Tier-0 only**. It reads the same live delegation model the Delegation Map and the other
   reports use — so it is real reachability, never a guess — and is **printable and exportable to CSV** for
   an audit or a board report. When nothing reaches high tier it says so honestly rather than inventing
-  rows. *(Offline-verified end-to-end against a booted Manager; the hosted Manager GUI smoke is the live
-  gate before publish.)*
+  rows.
 - **Global search — one box, jump to any object.** ✅ 2026-06-16 — a search box in the header finds any
   **person, group, role, scope or tag** across the whole estate and takes you straight to it: a person or
   role result opens the matching "who can do what" report; a group, scope or tag focuses it on the
@@ -483,7 +632,7 @@ endpoint or leaving credentials lying around.
   assignments added ✅ 2026-06-17) — the **Reports**, **Delegation Map**, **Validate**, **Access Review**
   and **Audit** views each carry an **Export CSV** and **Print** action, so any screen can become evidence
   for a review, a ticket or a management report without re-keying. The same one-click export now also covers
-  the **Role Lookup** tab — in all four of its modes — and the **Maintenance** "active assignments" list:
+  the **Role Lookup** tab — in all four of its modes — and the "active assignments" list on **Review standing access**:
   - **Role permissions for a least-privilege ticket.** From *what a role can do*, export the role's concrete
     permissions (every allowed and excluded action, with its area) straight into a ticket — no retyping a
     permission set by hand.
@@ -493,7 +642,7 @@ endpoint or leaving credentials lying around.
   - **Who can activate a role — with the path.** From *who can activate a role*, export every person who can
     reach it together with the exact granting path, as genuine audit evidence.
   - **A role-vs-role split.** From *compare two roles*, export who can activate both versus only one.
-  - **Who has what is active right now.** From the **Maintenance** view, export the live, currently-active
+  - **Who has what is active right now.** From **Review standing access**, export the currently-active
     privileged assignments shown (principal, role/group, scope, type, when it was activated and when it
     expires, and the justification) as a point-in-time "who has access" extract for a review or audit.
 
@@ -542,11 +691,30 @@ endpoint or leaving credentials lying around.
   you the commit was reversed — never a half-applied, half-changed state. And if you commit something
   and then change your mind, the new **Backups / Undo** view on the Review & Save tab lists the recent
   pre-commit snapshots per data set and lets you **roll back to any of them** in one click. The most
-  recent backups are kept automatically (older ones are pruned), so the safety net stays tidy. This
-  applies whether the Manager is running against the central SQL store or a local file store.
+  recent backups are kept automatically (older ones are pruned), so the safety net stays tidy.
+- **Pending changes — one queue for everything waiting on you.** ✅ 2026-09-12, refined through
+  ✅ 2026-09-14 — every change that has not reached the tenant yet sits in **one queue** on the
+  **Pending changes** page (where Review & Save now lives): configuration edits, access revokes, Temporary Access Pass re-issues and
+  sign-in session revokes. You select and commit them in one place, and **Commit all** includes the
+  queued actions too.
+  - **Nothing staged is lost.** Edits you have staged but not committed are kept in your browser and
+    put back after a page reload or a Manager restart (for example during an update), applied on top of
+    the current data so a colleague's commit in the meantime is kept. The page asks before you leave it
+    with uncommitted changes, and nothing is ever committed for you.
+  - **The badge counts only what needs you.** The red count on the menu shows pending and failed
+    entries; entries already committed and waiting for the engine show in blue. Pending entries are
+    listed first, entries show real names (not object ids), and changes queued by other administrators
+    appear within a minute.
+  - **See what was committed recently.** A Show filter switches between the open queue and recent
+    commits of configuration, of directory actions, or both. Discarded entries are hidden unless you
+    tick **Show discarded**, which shows who discarded them and why.
+  - **A refused commit explains itself where you are.** Commit re-checks your staged changes first (so a
+    fix you just staged counts); if blocking errors remain, the page stays on Pending changes and lists
+    each error with the rows it concerns and a link to its fix. Informational validation notes no longer
+    raise the warning banner and can be hidden; errors can never be hidden.
 
-  ![Review & Save — the keyed diff and commit gate](img/manager-review-save.png)
-  *Review & Save: a keyed diff (reordering a row is not a change) and an explicit commit gate — every save is backed up first, all-or-nothing, and reversible.*
+  ![Pending changes — the one queue of configuration edits and queued directory actions](img/manager-pending-changes.png)
+  *Pending changes: configuration edits and queued revokes and pass re-issues in one queue, with a keyed diff and one commit. (Synthetic demo data.)*
 
 - **Authoring panel.** ✅ 2026-06-15 — a dedicated **Authoring** tab puts the bulk-attach, clone,
   admin-import and admin-move helpers behind simple forms. Each action composes the rows for you
@@ -591,8 +759,9 @@ endpoint or leaving credentials lying around.
   prevent.
 - **Approval-gated bulk revoke — preview, approve, then execute.** ✅ 2026-06-17 — revoking many active
   privileged assignments at once is the single most destructive thing you can do in the Manager, so it is
-  no longer a raw, one-click action. The tab where it lives is now clearly named **Maintenance & Revoke**
-  (with an up-front warning) so it is never buried behind an innocuous label. Before anything happens you
+  no longer a raw, one-click action. The screen where it lives is clearly named (today **Review standing
+  access**, under Reviews & controls) with an up-front warning, so it is never buried behind an innocuous
+  label. Before anything happens you
   get a **what-if preview** — exactly which assignments would be revoked, which **break-glass / emergency
   accounts are protected and skipped**, and whether the batch is large enough to need a **second-person
   approval**. A **small** batch can be revoked after a typed confirmation, as before. A **large** batch
@@ -605,6 +774,20 @@ endpoint or leaving credentials lying around.
   estate with no preview and no record — exactly the class of incident the platform's mass-change safety
   brake exists to prevent; bulk revoke now gets the same human-approved, fully-recorded treatment as
   offboarding.
+- **Review standing access opens instantly — for everyone.** ✅ 2026-09-13 Reading every active Entra
+  role, Azure and PIM for Groups assignment live takes minutes in a large tenant, and used to hold up
+  every other Manager user while it ran. The scheduler now takes an **active-assignments snapshot every
+  2 hours** (the cadence is editable on the Job schedule page), and **Review standing access**, the
+  revoke list and the Home expiring-access tile open from it at once, showing when it was taken.
+  **Refresh** queues a fresh read for the scheduler instead of reading while you wait, and a completed
+  revoke queues one automatically. A row you revoke is marked **revoke queued** until the next snapshot
+  no longer contains it.
+- **Clean up access held by deleted accounts quickly.** ✅ 2026-09-14 Review standing access hides rows
+  held by principals that no longer exist in the directory by default. Tick **show deleted principals**
+  to list them, and a "deleted" filter selects only those rows for a bulk revoke.
+
+  ![Review standing access — active assignments from the snapshot, with the revoke-queued marker](img/manager-standing-access.png)
+  *Review standing access: who holds active privileged access, read from the scheduler's snapshot, with queued revokes marked. (Synthetic demo data.)*
 - **Onboarding panel.** ✅ 2026-06-15 — a dedicated **Onboarding** tab to **invite an external
   consultant as a guest** straight into the delegation model (it prepares the invitation and the
   account + group placement for you to review and commit) and to **enable or disable a managed
@@ -639,34 +822,27 @@ endpoint or leaving credentials lying around.
     a least-privilege split. Everything stays read-only.
 
   ![Role Lookup — what a role can do, find roles by action, who can activate it, compare two](img/manager-role-lookup.png)
-  *Role Lookup's modes: what a role can do, find the least-privileged role for an action, who can activate a role, and comparing two roles side by side — read-only and typo-tolerant.*
-- **Cutover ceremony panel.** ✅ 2026-06-15 — a guided **Cutover** tab that walks an operator
-  through moving the configuration store from files to a database, one gated step at a time
-  (check → upgrade → import → switch → re-check → finalise). It shows exactly which step is next,
-  what kind of store you are pointing at, and whether that store is safe to make authoritative.
-  The source files are only ever read, the final "make it authoritative" step is confirmed
-  explicitly, and the system refuses to finalise onto anything other than a production-grade
-  database.
-- **Abort a cutover before the point of no return — and a stage audit you can actually read.** ✅ 2026-06-17 —
-  a database cutover is a multi-step ceremony, and until now there was no clean way to change your mind
-  partway through. You can now **abort** a cutover at any time before you finalise it. Aborting puts you
-  back exactly where you started: it returns the configuration source to your existing files (so the
-  Manager reopens on the file store), and because the source files are only ever **read** during a
-  cutover, nothing of yours was changed — the abort is completely safe. The Cutover tab shows, in plain
-  language, exactly what the abort will do before you confirm it. **Finalise is still the point of no
-  return** — once you have made the database authoritative, abort is no longer offered (start a fresh
-  forward migration instead). At the same time, the **per-step audit is now human-readable** rather than a
-  wall of raw technical data: each completed step is summarised in plain sentences (what the pre-check
-  found and what the upgrade will change, how many rows were imported per area, when the source was
-  flipped, and so on), so an admin can read the trail of what the ceremony did at a glance. *(Offline-verified
-  end-to-end against a real local database; the hosted Manager GUI smoke is the live gate before publish.)*
+  *Role Lookup: what a role can do, the least-privileged role for an action, who can activate a role, and two roles side by side. (Synthetic demo data.)*
+- **Role look-up and the delegation wizards help you avoid duplicates.** ✅ 2026-09-13 The Entra role
+  picker in the delegation wizards hides roles that already have a delegation group (one click shows
+  them, marked), so the list shows the gaps. Suggestion lists — workloads, domains, short codes — show
+  **every value in use** when you click the field, and narrow as you type. Role look-up reads directory
+  roles straight from Microsoft Graph, so it answers on the hosted Manager too, and the permission-group
+  wizard no longer offers Department or Organization, which are direct-group types.
 - **Clearer top banner — you always know which tenant you're working in.** ✅ 2026-06-15 — the
   banner now shows the **connected tenant by name with its ID beside it**, grouped under a clear
   *Tenant* label, and (when you manage more than one) the **instance/environment switcher under its
   own label** — no more jumbled run-on text. The tenant name and ID are read from your real
   connection, and the *mode / source / generated* status reads cleanly on a single line.
-![Delegation Map — admin to role group to permission bundle to target, with the risk overlay on](img/manager-delegation-map.png)
-*The Delegation Map traces admin → role group → permission bundle → target, with a live risk overlay highlighting orphans, stale and over-privileged nodes.*
+- **The Access map shows every direct group with what it is linked to.** ✅ 2026-09-14 The Access map
+  (formerly the Delegation Map) places departments, the organisation, projects and cross-org groups with
+  the other direct groups — "what people are assigned to" — so selecting one shows the permissions it is
+  linked to. Names are matched ignoring upper/lower case, so an admin spelled differently in two places
+  still shows their access, and a name that genuinely matches nothing is reported rather than silently
+  dropped. Workload reconciliation only appears when workload bindings exist.
+
+![Access map — admin to direct group to permission group to target, with the risk overlay on](img/manager-access-map.png)
+*The Access map traces admin → direct group → permission group → target, with the risk overlay marking orphaned and over-privileged nodes. (Synthetic demo data.)*
 
 - **Delegation Map now spells out the actual permissions and their targets.** ✅ 2026-06-15 —
   the Delegation Map's fourth column, **Permissions & Targets**, no longer leaves you guessing.
@@ -716,7 +892,7 @@ endpoint or leaving credentials lying around.
   the totals at a glance. Each row has a **Revoke** button (administrator only) that ends the waiver
   immediately and re-checks its item on the next reconcile — so exemptions can be reviewed and retired
   deliberately instead of accumulating out of sight. Every exemption still requires an expiry, exactly as
-  before. *(Offline-verified; the hosted Manager GUI smoke is the live gate before publish.)*
+  before.
 - **Template Rollout across the whole fleet — see and drive conformance for every tenant from one place.** ✅ 2026-06-17 —
   the Template Rollout screen used to show only the tenant you were connected to: to check whether ten managed
   tenants were current you had to switch into each one in turn. It now has a **This tenant / Fleet (all tenants)**
@@ -731,7 +907,7 @@ endpoint or leaving credentials lying around.
   bird's-eye planner; it never writes to a tenant by itself), and only **approved** templates ever appear as columns
   (a draft is never rolled out). *Why it matters:* a managed-service provider can finally see template conformance
   across the entire fleet — and decide where a rollout should go next — from one screen, instead of one tenant at a
-  time. *(Offline-verified end-to-end against a booted Manager; the hosted Manager GUI smoke is the live gate before publish.)*
+  time.
 - **Template Rollout — set each template item's rollout wave (ring) right from the grid.** ✅ 2026-06-17 — every
   template item belongs to a **rollout wave** (ring): a lower number reaches tenants earlier, and an item only
   deploys to a tenant once its wave is at or below that tenant's ring. Until now you could *see* an item but had
@@ -741,53 +917,57 @@ endpoint or leaving credentials lying around.
   template immediately and reflected back in the grid. The control is **administrator-only** — everyone else sees
   the ring as a read-only value — and if a change can't be saved the selector snaps back to its previous value so
   what you see always matches what's stored. *Why it matters:* you can stage a careful, wave-by-wave rollout of
-  individual template items without ever leaving the screen or touching a file. *(Offline-verified end-to-end
-  against a booted Manager — the ring change persists and re-reads correctly; the hosted Manager GUI smoke is the
-  live gate before publish.)*
+  individual template items without ever leaving the screen or touching a file.
 - **The Manager main page and the Validate tab work in database mode on a large estate.** ✅ 2026-06-17 — when
   the Manager runs against the shared SQL database (the hosted and managed-service setup) with a large, richly
   populated environment, opening the **main page** and the **Validate** tab could fail with a server error, even
   though the rest of the app worked. The cause was an internal naming detail of the database-backed instance that
   was being used, unchanged, as part of a folder name — which isn't always a legal folder name. The Manager now
   cleans that name before using it for its per-instance working folder, so the **main page renders** and the
-  **Validate tab runs its checks** in database mode exactly as they do in file mode, no matter how large the
-  environment. *(Found by the scenario simulation against a rich estate; offline-verified; the hosted Manager GUI
-  smoke is the live gate before publish.)*
+  **Validate tab runs its checks** no matter how large the environment.
 - **Department edits save reliably in database mode.** ✅ 2026-06-17 — in the grid that manages **departments**
   (used for approval routing), edits made while the Manager was running against the SQL database could silently
   fail to save — the row looked committed but didn't persist. Departments are identified by their **name**, but
   the save path was looking for a group tag they don't carry, so it couldn't tell the rows apart and dropped them.
   The Manager now identifies a department row by its name (falling back sensibly when an older sample shape carries
-  a tag instead), so a committed department edit is **stored and stays put**. *(Found by the scenario simulation;
-  offline-verified with a database round-trip; the hosted Manager GUI smoke is the live gate before publish.)*
-- **Delegation Map reads Excel-saved exports correctly — no more "empty map" on a valid file.** ✅ 2026-06-16 —
-  when your delegation data comes from a spreadsheet (saved as a semicolon CSV), the column headings are
-  often wrapped in quotation marks and the first heading can carry an invisible byte-order mark, and people
-  sometimes add a space after the separator. The Manager now reads all of those exactly the same way it
-  reads a plain file: it quietly cleans each heading (drops the invisible mark, trims spaces, removes the
-  surrounding quotes) before matching columns, while leaving your actual data values untouched — so a value
-  that legitimately contains a semicolon still comes through intact. The result: the Delegation Map shows
-  your real delegation instead of rendering blank on a perfectly valid export, so you no longer mistake a
-  parsing glitch for "there is nothing to see here."
-- **Jobs panel — see what the automation is doing.** ✅ 2026-06-15 — a new **Jobs** tab lists the
-  scheduled background work that keeps your environment in sync: the tenant-list cache refresh, the
-  reminder/escalation checks, the per-area reconciliation runs, the scheduled daily-summary and
-  Tier 0/1 reports, and the discovery passes. Anything **currently running is shown at the top**;
-  everything else is listed below with its **schedule (how often it runs), whether it's enabled, when
-  it last ran and how that went, and when it's due next**. Each run has a **Logs** button that opens
-  that run's log, and for a job that's in progress you can switch on **live tail** to watch it
-  finish. The panel is read-only — it reflects the real schedule and run history; the background
-  runner does the work.
-- **Jobs tab tells you when a run failed or never fired — and lets you act.** ✅ 2026-06-16 — the
-  Jobs tab no longer just shows the last result. A **"needs attention" banner** at the top calls out
-  any job that is **overdue** (it should have fired by now but didn't — so you can tell a missed run
-  apart from a healthy one) or **failing** (its most recent run failed and hasn't been cleared).
-  Each job shows an **overdue badge** and a **recent-failure count**, and a **History** button opens
-  the recent runs for that job with **pass/fail and when** for each, so you can see whether failures
-  are a one-off or a pattern and open any run's log. For a job that needs attention you can
-  **re-run it now** (it executes immediately and you watch it move running → completed) and, once a
-  failure is understood and handled, **acknowledge** it to clear the alert — the run record is kept
-  for the audit trail; only the warning is muted.
+  a tag instead), so a committed department edit is **stored and stays put**.
+- **Jobs — see what the automation is doing.** ✅ 2026-06-15, updated ✅ 2026-09-14 — **Jobs & status**
+  lists the scheduled background work that keeps your environment in sync: the per-area engine runs, the
+  daily full reconcile, the drift and active-assignments snapshots, the convergence check, the
+  tenant-list cache refresh, reminders and escalations, the daily summary and tier report, and the
+  discovery passes. Anything **currently running is shown at the top**; everything else shows **how often
+  it runs, whether it's enabled, when it last ran and how that went, and when it's due next**. An
+  administrator can switch a job on or off and change how often it runs.
+- **Job schedule on its own page.** ✅ 2026-09-14 **Jobs › Job schedule** shows which job runs when, which
+  area it covers, and the mail jobs, visible by default with a plain-language explanation of every column.
+- **Logs that show what the run actually did.** ✅ 2026-09-14 Each run's **Logs** button shows the run's own
+  output under a short summary — every area the engine checked, what it created or changed, warnings and
+  errors. While an engine job is still running, **live tail** shows its progress as it happens. The last
+  three runs of each job keep their full output; the ten most recent runs per job stay in the history.
+- **Run now hands the job to the scheduler, honestly.** ✅ 2026-09-13 **Run now** on an engine job — and
+  on the convergence check, the drift and active-assignments snapshots and the discovery passes — queues
+  the job for the scheduler and says so ("queued"), instead of reporting a completed run that did nothing.
+  A request made while the scheduler is busy is kept for its next run, and where permitted the scheduled
+  job is started right away (see Engine — Core). Jobs that are running show as running.
+- **Failures you can act on, and recoveries that stop looking like failures.** ✅ 2026-06-16, updated
+  ✅ 2026-09-14 — a **"needs attention" banner** calls out any job that is **overdue** (it should have fired
+  by now but didn't) or **failing**. A job whose failures were followed by a clean run is shown as **failed
+  earlier, recovered** and listed under **History**; only failures that are still standing count as needing
+  attention. **History** shows the recent runs with pass/fail and when, each linked to its log. **Ack**
+  clears every standing failure of a job in one click — the run records stay for the audit trail; only the
+  warning is muted.
+- **Engine logs & errors — what failed, why, and the fix.** ✅ 2026-09-12 **Jobs › Engine logs & errors**
+  lists every recent run across all jobs (failures alone on request) and opens any run's full log. Instead
+  of "17 items failed — see the log", failures are **grouped by cause** — for example ten assignments
+  rejected because the Azure PIM policy allows a shorter duration, and four rows still pointing at a
+  template placeholder subscription. A **Failing now** section lists each item the engine could not apply,
+  why, what to do about it, how long it has been failing and for how many runs. Where the row itself is the
+  problem, the item offers a **one-click fix** — such as *Remove this row* or *Make it Eligible* — which is
+  staged to **Pending changes**; nothing changes until an administrator commits it. A policy change held by
+  the safety brake can be approved from the same page.
+
+  ![Engine logs & errors — failures grouped by cause, and a run's own log output](img/manager-jobs-logs.png)
+  *Engine logs & errors: failures grouped by cause with a one-click fix, and a run's own output in the log view. (Synthetic demo data.)*
 - **One-click "Import departments from Entra" in Settings.** ✅ 2026-06-15 — the Settings →
   Departments area has an **Import** button: set or confirm a group naming pattern (default
   `ORG-*`) and the matching Entra groups are pulled in as departments for approval routing, with
@@ -815,8 +995,8 @@ endpoint or leaving credentials lying around.
   become the most privileged tier; an Azure subscription sits a tier below the tenant root; an
   administrative-unit-scoped role drops a level). The administrative-unit step only appears when
   every role you picked actually supports it, so you are never offered an option that can't apply.
-- **Ready-made delegation template packs.** ✅ 2026-06-15 — the Create tab ships a growing
-  library of best-practice permission packs you can adopt with one click instead of authoring
+- **Ready-made delegation template packs.** ✅ 2026-06-15 — a growing library of best-practice
+  permission packs (today a **Permission template packs** section in Settings) you can adopt with one click instead of authoring
   groups by hand. Each pack is a curated set of permission groups for a Microsoft service, named
   and tiered the right way out of the box, and the Manager shows you exactly which rows your
   instance does not have yet (so a pack that grows later surfaces only the new additions). The
@@ -831,9 +1011,22 @@ endpoint or leaving credentials lying around.
   (phishing-resistant) sign-in method; Azure assignments pointing at a subscription, resource
   group or resource that no longer exists; and PIM groups that have not been activated within
   a configurable number of days. Each finding comes with a plain-language fix suggestion.
-- **Optional audit to Log Analytics.** ✅ 2026-06-14 — in addition to the always-on local
-  audit file, every change can optionally be forwarded to Azure Log Analytics (off by default;
+- **Optional audit to Log Analytics.** ✅ 2026-06-14 — in addition to the always-on audit trail in
+  the database, every change can optionally be forwarded to Azure Log Analytics (off by default;
   enabled with one configuration setting).
+- **One audit trail, in the database.** ✅ 2026-09-13 The Manager and the engine write to the same
+  append-only audit trail in the database — never a local file that disappears with a container — so
+  "who granted this access?" has one answer regardless of which component did it. Audit times are
+  correct on any server time zone.
+- **The engine audits its own changes.** ✅ 2026-09-13 Every membership, role assignment and account
+  change the engine makes — or fails to make — is recorded with the real person, group, role and scope,
+  and carries the id of the job run that made it, so an audit entry leads straight to that run's log.
+  **Policy changes are audited rule by rule**: each rule the engine changed, with its value before and
+  after, the template, and whether an approved safety-brake plan applied it. Revokes, pass resets and
+  sign-in session revokes are audited when they are carried out — who asked, what was done to whom, how
+  it was verified and the outcome — not only when they were requested. Commits are recorded as one
+  readable sentence per changed row, naming the real group rather than its internal tag. Generated
+  initial passwords are never shown, logged or saved.
 - **Audit tab — see who did what, when.** ✅ 2026-06-15 — a dedicated **Audit** tab gives you the
   full, searchable history of activity, newest first: when it happened, who did it, the action,
   what it affected, and the result. Filter by category with one click — **logins, delegation
@@ -863,25 +1056,34 @@ endpoint or leaving credentials lying around.
   Graph** (with the engine's permissions), and **Azure** (only when your delegation includes Azure
   resources) — and shows each as pass or fail with a **plain-language fix** when it fails (for example,
   exactly which permission to grant, or that the database firewall is blocking this host). Alongside the
-  checks you get a **health summary**: whether the store is a database or files, how fresh the tenant
+  checks you get a **health summary**: which database store is in use, how fresh the tenant
   cache is, the outcome of the most recent background run, and which environment you are connected to.
   **Download diagnostics bundle** saves all of that to a single file you can attach to a support request —
   and it is **sanitised**: secrets, certificates, tokens, connection-string credentials and full
   tenant/subscription IDs are masked out before the file is produced, so you can share it safely. The
   existing "Report an issue on GitHub" path stays, now sitting next to a real diagnostics surface instead
   of being the only option.
-- **Drift detection with a gated "Apply now".** ✅ 2026-06-16 — the **Governance** tab now shows a
-  **Drift — live vs desired** view that compares your real, live estate against the desired configuration
-  you defined and lists exactly what has drifted: what is **missing** (defined but not actually live),
-  what has **changed** (live but no longer matches intent), and what is **extra** (live but not in your
-  desired set). When there is no drift it simply says so. When there is, an admin can tick the rows to fix
-  and press **Apply now** — the same proven engine that runs your scheduled reconciles corrects only the
-  rows you selected, so you fix configuration that has drifted from intent without hand-crafting the
-  correction. It is **safe by design**: missing and changed items are created/updated, but removing an
-  **extra** delegation is a deliberate, separate opt-in (it never happens from a single click), and every
-  apply still goes through the normal approval gate and lands in the audit trail. *Why it matters:* drift
-  from intent is surfaced instead of going unnoticed, and correcting it is one reviewed click rather than a
-  manual hunt-and-fix.
+- **Drift: live vs desired — its own page, checked automatically.** ✅ 2026-06-16, reworked
+  ✅ 2026-09-14 — **Reviews & controls › Drift: live vs desired** compares your real, live tenant with the
+  desired configuration and shows what has drifted: what is **missing** (defined but not live), what has
+  **changed** (live but no longer matching intent) and what is **extra** (live but not in your desired
+  set). The scheduler runs the check **every 4 hours** (editable on the Job schedule page) without writing
+  anything, so the page opens instantly with its latest result and the time it was taken. It shows **one
+  row per area** with its desired, live and in-sync counts, and each row expands to the named differences —
+  for example "admin-x@contoso.com → member of group PIM-ROLE-… (Eligible)" or "group A → member of group
+  B"; a principal the directory no longer knows is shown as "unresolved principal" with its group. **Check
+  now** queues a fresh check. When there is no drift it simply says so.
+- **Correct drift from the same page.** ✅ 2026-06-16 An administrator can tick items and press **Apply
+  now**: the same engine that runs your scheduled reconciles corrects only the selected items. Missing and
+  changed items are created or updated; removing an **extra** item needs a deliberate, separate opt-in and
+  never happens from a single click. Every apply keeps the engine's safety guards and lands in the audit
+  trail.
+
+  ![Drift: live vs desired — one row per area, expanded to named differences](img/manager-drift.png)
+  *Drift: live vs desired, one row per area with desired, live and in-sync counts, expanded to the named items that differ. (Synthetic demo data.)*
+- **Newly discovered resources have their own page.** ✅ 2026-09-14 **Audit & Settings › Newly discovered
+  resources** lists the new subscriptions, management groups, resource groups, Power BI workspaces and
+  Entra roles found by discovery, together with the settings that decide what the engine does with them.
 - **Access Reviews you can actually complete — attest, assign, and chase from the portal.** ✅ 2026-06-17 —
   the **Access Review** tab is no longer read-only. For each review you can open **Review items** and record a
   per-person decision — **Approve** (keep access), **Deny** (remove access), or **Recertify / Don't-know** —
@@ -903,13 +1105,17 @@ endpoint or leaving credentials lying around.
   new permission, time-limited access pass delivery) by rendering HTML templates with simple
   placeholder tokens. Templates are fully customizable, and a lab redirect option keeps test
   mail out of real inboxes. Rendering and sending are separated so you can preview output.
-- **Customize mail templates in the portal — no rebuild.** ✅ 2026-06-15 — Edit any
-  notification email directly in the admin portal (Governance → Mail templates): open a
-  template, change the wording, and save. Your version is stored centrally and takes effect
+- **Customize mail templates in the portal — no rebuild.** ✅ 2026-06-15, one store ✅ 2026-09-13 —
+  edit any notification email directly in the Manager (**Settings › Mail templates**): open a
+  template, change the wording, and save. Your version is stored in the database and takes effect
   immediately — it survives restarts and product updates, with no file editing and no
-  container/image rebuild. The portal clearly shows which templates are still the shipped
-  default and which you have customized, and a one-click **Reset** restores the original at
-  any time. (Editing a template file on disk still works for teams that prefer it.)
+  container/image rebuild. The editor shows which templates are still the shipped default and which
+  you have customized, lists the placeholders each template can use, and a one-click **Reset**
+  restores the original at any time. There is exactly one template store: templates are not read
+  from files on disk.
+- **Mail is sent as the environment's identity, to real addresses only.** ✅ 2026-09-13 Hosted
+  environments send as their managed identity with the send right limited to the sender mailbox, and
+  mail about an admin account goes to the account owner's office address — see Auth / Identity.
 
 ## 13. Lifecycle / Governance / Approvals
 - **Scheduled account creation and time-limited access pass.** ✅ 2026-06-14 — Admin
@@ -918,6 +1124,30 @@ endpoint or leaving credentials lying around.
   dates. The access pass is held back until just before it is actually needed (a
   configurable lead window), so a pass scheduled weeks out is not issued early. The
   scheduler checks each cycle which staged accounts have come due and never re-creates one.
+- **The full admin lifecycle, exactly as v1 enforced it.** ✅ 2026-09-13 Moving from v1 never leaves
+  an environment worse off; everything v1 enforced is on by default:
+  - **Accounts are created when due** (future provisioning dates are respected), with name, job title,
+    company and usage location set and kept in step.
+  - **Disabled and revoked admins stay disabled.** An account marked Disabled or Revoked, or past its
+    offboarding date, is disabled — with its sign-in sessions revoked when revoked — and is never
+    switched back on.
+  - **Offboarding runs on its own schedule**: disable, revoke sessions, remove access, notify, and delete
+    after the retention period, with progress kept so an interrupted run resumes where it stopped.
+  - **Remove rows revoke.** Marking a delegation for removal revokes it (eligible and active); the row is
+    then removed so nothing re-applies it. A removal that is held or fails keeps its row, and bulk
+    removals are held for review.
+  - **Changes in your data are carried out.** Switching an assignment between eligible and active, or
+    changing its duration, updates it; assignments marked to auto-extend are extended before they expire.
+  - **Both assignment types are kept unless you say otherwise.** An assignment that exists as both
+    eligible and active (common after years on v1) is not trimmed automatically; turn on the
+    `RemoveTypeLeftovers` setting once you have reviewed what it would remove.
+  - **On-premises AD admins work as in v1.** Admins whose platform is Active Directory are created and
+    kept up to date in AD, in the organisational unit and with the names your naming settings produce.
+    Their initial password is mailed to the owner's office address and is never stored or logged; they
+    are never touched in Entra ID and raise no cloud-only warnings.
+  - **Workload roles** listed in your data (Defender, Intune, enterprise applications, Power BI, Power
+    Platform, Dataverse, Business Central, Azure DevOps, Azure RBAC) are applied, with exemptions, and
+    reminders, the daily summary and the tier report carry real content.
 - **Lifecycle calendar with reminders and auto-renewal.** ✅ 2026-06-14 — A single pass
   produces a calendar of access that is expiring soon (within a configurable horizon,
   soonest first), sends escalating reminders to the right people as the deadline nears
@@ -945,9 +1175,25 @@ endpoint or leaving credentials lying around.
   and indexed, rather than queried over and over.
 - **Validate-and-skip with smart retries.** Anything that already exists is skipped; access
   durations that are too long are retried at shorter durations down to permanent; and
-  nesting that Entra disallows is skipped cleanly instead of erroring.
+  nesting that Entra disallows is reported under Engine logs & errors with its fix, instead of
+  failing the run or being skipped without a trace.
 - **No artificial caps.** Scaling is empirical — measure, adapt, prune — never arbitrary
   "max N" limits that hide real problems.
+- **Fast, stable database access under load.** ✅ 2026-09-13 All database calls share one connection
+  pool, so a busy page uses a handful of database sessions instead of hundreds and other users are not
+  held up; sign-in tokens for the database refresh on time. Scheduled runs write settings only when they
+  actually change, and the job history is kept compact.
+- **Fewer, smarter reads of Microsoft Graph.** ✅ 2026-09-13 Group memberships and group policies are read
+  in batches, and Azure role assignments come from a single query. When Graph asks the engine to slow
+  down, it waits the time Graph requests **once** and then resends the throttled reads together, instead
+  of retrying them one by one. The id of each group's PIM policy is remembered across runs, and
+  membership reads are reused within a run; a revoke and the drift check always work from fresh data.
+- **Routine runs read only the memberships your rows name — and still miss nothing.** ✅ 2026-09-14
+  Instead of reading the memberships of every managed group, routine runs read those of the admins and
+  groups your rows actually name — a few requests instead of hundreds. Because Microsoft Graph's
+  per-person list can leave out some older nestings, anything that list did not return, and every
+  removal, is confirmed with a read of that group, and the full read is used if any part of the faster
+  read fails.
 
 ## 16. PIM Activator (browser extension)
 - **One-click bulk activation.** A browser extension for Edge and Chrome lets an admin pick
@@ -1018,6 +1264,10 @@ endpoint or leaving credentials lying around.
   patterns are defined in configuration with per-tenant overrides, using simple tokens for
   initials, level, tier and platform — so you can match your own conventions without
   touching code.
+- **Preview names and choose your own admin word.** ✅ 2026-09-13 Settings shows what each naming
+  pattern produces before you save it, and the word used for admin accounts ("Admin", "adm", …) is
+  configurable without loosening name validation. Group tags are checked as the group name they
+  produce, so a short tag is not reported as badly named.
 
 ## 18. Launchers / Structure
 - (Delivered items in this area are internal structure/release-engineering; see DESIGN.md.)
@@ -1065,10 +1315,10 @@ endpoint or leaving credentials lying around.
 - **Editions: Core is free, and every advanced integration is currently free too.** ✅ 2026-06-17,
   updated ✅ 2026-08-07 — choose the active edition per tenant. **Core** includes every essential PIM
   capability at no cost, and **Pro** covers the advanced integrations (workload connectors, Power BI,
-  Exchange Online, MSP fan-out). **Licence enforcement is switched off, so nothing is restricted by your
-  edition: every advanced capability is available to every install at no cost.** The edition is recorded so
-  the commercial basis is clear — design-partner customers receive the full Pro feature set free — but it
-  does not gate anything. A disabled capability is shown dimmed and labelled, never hidden, so everything
+  Exchange Online, MSP fan-out). **Licence enforcement is currently switched off, so nothing is restricted
+  by your edition today: every advanced capability is available to every install at no cost.** The edition
+  is recorded so the commercial basis is clear — design-partner customers receive the full Pro feature set
+  free — but it does not gate anything. A disabled capability is shown dimmed and labelled, never hidden, so everything
   stays discoverable. Changing the edition or any feature switch is restricted to a senior administrator and
   recorded in the audit trail.
 - **Dependencies are surfaced.** ✅ 2026-06-17 — where one capability builds on another (for example Power BI
@@ -1092,6 +1342,15 @@ endpoint or leaving credentials lying around.
   or is simply not a licence is rejected outright rather than partially trusted. Expiry is handled kindly —
   a licence past its end date enters a clearly reported **grace period** before it is treated as expired, and
   one that is not yet valid is reported as such rather than silently accepted.
+
+### Licensing
+
+Licensing details for the Pro edition will be published soon. We can already say that the MSP
+scenarios — a managing (master) tenant and the managed customer tenants it looks after — will be part
+of the paid edition; details will follow. Single-tenant use of the community edition is free.
+
+Licence enforcement is currently switched off, so nothing is restricted today: every capability
+described in this catalog is available to every installation.
 
 ---
 

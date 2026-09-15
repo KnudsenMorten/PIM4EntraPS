@@ -1,4 +1,4 @@
-<#
+﻿<#
   PIM-DirectorySearch.ps1 -- REQUIREMENTS §35.8
 
   PURE core for the directory-people lookup that every people-picker in the

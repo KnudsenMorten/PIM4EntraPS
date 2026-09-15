@@ -1,4 +1,4 @@
-#Requires -Version 5.1
+﻿#Requires -Version 5.1
 <#
 .SYNOPSIS
   Mint a self-signed certificate and attach it to an EXISTING engine SPN -- create or rotate.

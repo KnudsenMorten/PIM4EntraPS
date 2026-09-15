@@ -1,4 +1,4 @@
-#requires -Version 5.1
+﻿#requires -Version 5.1
 <#
 .SYNOPSIS
     Leave a usable `az` context for ONE estate tenant, authenticating through the estate's own

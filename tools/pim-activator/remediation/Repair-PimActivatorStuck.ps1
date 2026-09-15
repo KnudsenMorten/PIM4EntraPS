@@ -1,4 +1,4 @@
-#Requires -Version 5.1
+﻿#Requires -Version 5.1
 <#
 .SYNOPSIS
     Intune DEVICE REMEDIATION -- remediation half. Clears the stale PIM Activator entries from a

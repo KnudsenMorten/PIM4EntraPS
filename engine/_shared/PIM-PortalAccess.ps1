@@ -1,10 +1,10 @@
-# PIM4EntraPS -- portal-admin scoping (delegated GUI managers).
+﻿# PIM4EntraPS -- portal-admin scoping (delegated GUI managers).
 # Dot-sourced by PIM-Functions.psm1 and standalone by the pim-manager.
 #
 # The Manager keeps its flat Reader/Admin/SuperAdmin role (manager-access). On
 # TOP of that, portal-admins are delegated GUI managers (helpdesk, business IT,
 # dept owners, workload managers) scoped by tier/level/service/scope/capability,
-# controlled by super-admins via config/portal-admins.json. A SuperAdmin bypasses
+# controlled by super-admins via SQL pim.Settings['PortalAdmins'] (Set-PimPortalAdmins.ps1). A SuperAdmin bypasses
 # ALL of this (sees + manages everything, no validation).
 #
 # Privilege ordering: T0 most privileged (tier int 0), L0 most privileged
@@ -114,72 +114,50 @@ function Get-PimGroupFacets {
 
 function Read-PimPortalProfiles {
     # Returns the delegated portal-admin profiles (tier/level/service/scope scoping).
-    # SQL-FIRST (hosted, stateless container): the profiles live in SQL settings under
-    # key 'PortalAdmins' (JSON), loaded into $global:PIM_NamingConventions at startup --
-    # so delegation works with NO file share. Falls back to config/portal-admins.json
-    # for local/dev. This keeps the whole config (data, settings, RBAC, delegation) in SQL.
+    # 🔒 SQL-ONLY, in every mode (operator, 2026-09-12: "we dont use settings files anymore, sql
+    # only"). The profiles live in pim.Settings['PortalAdmins'] (JSON), written by
+    # tools/setup/Set-PimPortalAdmins.ps1 and hydrated into $global:PIM_NamingConventions at boot.
     # 🔴 SEC-15 / §36.3 phase 2 -- THIS IS AN AUTHORIZATION READ, so it fails CLOSED.
     #
-    # What it used to do: prefer the SQL-hydrated setting, then fall back to
-    # config/portal-admins.json, and then -- if that was missing -- to
-    # config/portal-admins.SAMPLE.json. Three problems, in increasing order of seriousness:
-    #   1. the fallback was silent, so nothing distinguished "the authorization model" from
-    #      "a JSON file someone left on the box";
-    #   2. anyone who can write that file can grant themselves L0 across every service;
-    #   3. it would load the SHIPPED SAMPLE as though it were configuration -- sample identities
-    #      grant nothing in practice, but reading example data on an authorization path is not a
-    #      behaviour to leave in place and hope stays harmless.
-    #
-    # Now: hosted deployments are SQL-ONLY. No file, no sample, ever. If the store has no
-    # profiles the answer is "no profiles" -- which denies every non-SuperAdmin, the safe
-    # direction -- and the SOURCE is recorded so the Manager can say which store answered.
-    param([string]$ConfigDir, [string]$ProfilesFile, [switch]$Hosted)
+    # History: it used to prefer SQL, then fall back to config/portal-admins.json (local/dev), and
+    # before that to the shipped SAMPLE. Anyone able to write that file could grant themselves L0
+    # across every service, and nothing distinguished "the authorization model" from "a JSON file
+    # somebody left on the box". The file branch is now GONE, not merely unreached: no parameter
+    # names a file, and a store with no profiles answers "no profiles" -- which denies every
+    # non-SuperAdmin, the safe direction. The SOURCE is recorded so the Manager can say which
+    # store answered (sql | sql-empty | sql-invalid).
+    # Unit tests inject profiles the same way production does: through the hydrated setting.
+    param()
 
-    $isHosted = [bool]$Hosted
-    if (-not $isHosted) { try { $isHosted = [bool]$global:PIM_Hosted } catch { } }
-    if (-not $isHosted) { try { $isHosted = ("$env:PIM_HOSTED" -in @('1','true','yes','TRUE','Yes')) } catch { } }
-
-    # An explicit -ProfilesFile is a deliberate caller choice (tests, tooling) and still wins.
-    if (-not $ProfilesFile -and ($global:PIM_NamingConventions -is [hashtable]) -and $global:PIM_NamingConventions['PortalAdmins']) {
+    if (($global:PIM_NamingConventions -is [hashtable]) -and $global:PIM_NamingConventions['PortalAdmins']) {
         $raw = $global:PIM_NamingConventions['PortalAdmins']
         try {
-            $parsed = $raw | ConvertFrom-Json
+            # 🔴 B1-class (2026-09-10): the boot hydration returns settings ALREADY JSON-PARSED, so
+            # re-parsing a PSCustomObject stringifies it to `@{portalAdmins=System.Object[]}`, throws,
+            # and this catch DENIES EVERY delegated profile -- reporting 'sql-invalid' about a value
+            # that is perfectly valid. Parse only what is still text. (Fixed with B1 in the Manager's
+            # Get-PimManagerRole; identical shape, identical consequence: authorization silently off.)
+            $parsed = if ($raw -is [string]) { "$raw" | ConvertFrom-Json } else { $raw }
             $script:PimPortalProfileSource = 'sql'
             if ($parsed.PSObject.Properties['portalAdmins']) { return @($parsed.portalAdmins) }
             return @($parsed)
         } catch {
-            # 🔒 Malformed authorization JSON must NOT degrade to a file. Deny instead.
+            # 🔒 Malformed authorization JSON must NOT degrade to anything. Deny instead.
             $script:PimPortalProfileSource = 'sql-invalid'
-            Write-Warning "  [portal] SQL 'PortalAdmins' setting is not valid JSON -- DENYING all delegated access rather than falling back to a file: $($_.Exception.Message)"
+            Write-Warning "  [portal] SQL 'PortalAdmins' setting is not valid JSON -- DENYING all delegated access: $($_.Exception.Message)"
             return @()
         }
     }
 
-    if ($isHosted -and -not $ProfilesFile) {
-        # No SQL profiles on a hosted deployment == there are none. Say so; do not go looking on
-        # a filesystem that is ephemeral, unversioned and writable by anything in the container.
-        $script:PimPortalProfileSource = 'sql-empty'
-        return @()
-    }
-
-    $f = $ProfilesFile
-    if (-not $f) {
-        $f = Join-Path $ConfigDir 'portal-admins.json'
-        # 🔒 The SAMPLE is never authorization data. Removed deliberately (SEC-15).
-        if (-not (Test-Path -LiteralPath $f)) { $script:PimPortalProfileSource = 'none'; return @() }
-    }
-    if (-not (Test-Path -LiteralPath $f)) { $script:PimPortalProfileSource = 'none'; return @() }
-    try {
-        $r = @((Get-Content -LiteralPath $f -Raw -Encoding UTF8 | ConvertFrom-Json).portalAdmins)
-        $script:PimPortalProfileSource = 'file'
-        return $r
-    } catch { $script:PimPortalProfileSource = 'file-invalid'; return @() }
+    # No SQL profiles == there are none. Say so; never go looking on a filesystem.
+    $script:PimPortalProfileSource = 'sql-empty'
+    return @()
 }
 
 function Get-PimPortalProfileSource {
     <#
-      Which store answered the last Read-PimPortalProfiles: sql | sql-empty | sql-invalid |
-      file | file-invalid | none. Surfaced on /api/portal-access so "why can this person suddenly
+      Which store answered the last Read-PimPortalProfiles: sql | sql-empty | sql-invalid
+      (SQL is the only store; there is no file source). Surfaced on /api/portal-access so "why can this person suddenly
       do that?" is answerable -- a silent fallback is the SEC-15 defect, and knowing the source is
       how it stops being silent.
     #>

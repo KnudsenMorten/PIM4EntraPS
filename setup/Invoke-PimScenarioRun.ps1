@@ -1,4 +1,4 @@
-#Requires -Version 5.1
+﻿#Requires -Version 5.1
 <#
 .SYNOPSIS
     §31.3 Phase-2 -- the SCENARIO-BOUND engine runner live wrapper. Thin
@@ -166,7 +166,7 @@ if (-not $sc) { throw "could not resolve scenario '$Scenario'." }
 $null = Set-PimScenarioContext -Scenario $sc   # apply the runtime knobs
 
 Write-Host "==========================================================================" -ForegroundColor Cyan
-Write-Host " PIM4EntraPS §31.3 scenario-run ($($sc.id), $($sc.role)) $(if ($WhatIfMode) { '(WHATIF)' } else { '(LIVE)' })" -ForegroundColor Cyan
+Write-Host " PIM4EntraPS scenario-run ($($sc.id), $($sc.role)) $(if ($WhatIfMode) { '(WHATIF)' } else { '(LIVE)' })" -ForegroundColor Cyan
 Write-Host "==========================================================================" -ForegroundColor Cyan
 
 # managed scenarios need the signed baseline doc loaded (file or HTTPS pull).

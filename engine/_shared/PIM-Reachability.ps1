@@ -1,4 +1,4 @@
-# =============================================================================
+﻿# =============================================================================
 # PIM-Reachability.ps1 -- the PURE, offline-testable plan brain for the three
 # things a deployed environment needs in order to be REACHABLE and NOT
 # AZURE-BLIND, and which the deploy path did not create:

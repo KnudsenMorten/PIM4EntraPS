@@ -1,4 +1,4 @@
-# PIM4EntraPS -- discovery layer (REST-only, module-free) for the NEW engine.
+﻿# PIM4EntraPS -- discovery layer (REST-only, module-free) for the NEW engine.
 #
 # Three discovery jobs (DESIGN §17.13 / scheduler "Discovery = 3 jobs"):
 #   * Entra  -- new built-in directory roles (-> catalog for the import planner)

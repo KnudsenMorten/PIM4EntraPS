@@ -1,4 +1,4 @@
-# IMP-02: the locale-safe stamp reader. Loaded defensively so this file stays correct
+﻿# IMP-02: the locale-safe stamp reader. Loaded defensively so this file stays correct
 # when a test dot-sources it on its own (PIM-Functions.psm1 also loads it up front).
 if (-not (Get-Command Get-PimUtcStamp -ErrorAction SilentlyContinue)) { . (Join-Path $PSScriptRoot 'PIM-DateSafe.ps1') }
 <#
@@ -27,6 +27,391 @@ function Get-PimRowProp {
     return ''
 }
 
+# ===========================================================================
+# ADMIN LIFECYCLE -- v1 parity (operator 2026-09-12: "fix 1-14. all are critical for pim v2 go
+# live" / "we cannot leave customers on pim v1 in a worse situation going to pim v2").
+# Private helpers for the Admins, AdminTap, AdminOffboarding and GroupRetirement providers.
+# PURE unless the name says otherwise; time is injected so each decision is testable offline.
+# v1 references are engine/_shared/PIM-Functions.psm1 line numbers as of 2026-09-12.
+# ===========================================================================
+
+# Date EXPRESSIONS (Now, FirstWorkdayNextMonth-3d@08:00, 2026-10-01@08:00) resolve through the one
+# shared resolver. Neither the REST engine entry point nor the scheduler tick loads it, so without
+# this every ProvisionDate / OffboardDate / TAPStartDate that is not a plain ISO stamp was
+# unreadable to v2 -- and an unreadable OffboardDate never offboards.
+if (-not (Get-Command Resolve-PimDateExpression -ErrorAction SilentlyContinue)) {
+    $__pimDateExprLib = Join-Path $PSScriptRoot 'PIM-DateExpression.ps1'
+    if (Test-Path -LiteralPath $__pimDateExprLib) { . $__pimDateExprLib }
+}
+# TAP requests conformed to the tenant's TAP policy -- shared by AdminTap and the queued tap-reset.
+if (-not (Get-Command Invoke-PimTapCreate -ErrorAction SilentlyContinue)) {
+    $__pimTapPolicyLib = Join-Path $PSScriptRoot 'PIM-TapPolicy.ps1'
+    if (Test-Path -LiteralPath $__pimTapPolicyLib) { . $__pimTapPolicyLib }
+}
+
+function Get-PimAdminLifecycleSetting {
+    # One reader for the lifecycle knobs: $global:PIM_<Name> -> $env:PIM_<Name> -> pim.Settings
+    # (hydrated into $global:PIM_NamingConventions by Import-PimSettingsFromStore) -> default.
+    # v1 read these from a *.custom.ps1 FILE. v2 has no files, so an opt-in a v1 customer relied on
+    # must be settable where v2 keeps its configuration, or it silently stops applying on migration.
+    param([Parameter(Mandatory)][string]$Name, $Default = $null)
+    $g = Get-Variable -Name "PIM_$Name" -Scope Global -ValueOnly -ErrorAction SilentlyContinue
+    if ($null -ne $g -and "$g".Trim() -ne '') { return $g }
+    $e = [Environment]::GetEnvironmentVariable("PIM_$Name", 'Process')
+    if ($null -ne $e -and "$e".Trim() -ne '') { return $e }
+    if ($global:PIM_NamingConventions -is [System.Collections.IDictionary] -and $global:PIM_NamingConventions.Contains($Name)) {
+        $s = $global:PIM_NamingConventions[$Name]
+        if ($null -ne $s -and "$s".Trim() -ne '') { return $s }
+    }
+    return $Default
+}
+
+function ConvertTo-PimAdminLifecycleUtc {
+    # PURE. A lifecycle cell -> @{ set; parsed; utc }. "set but not parsed" is its own answer:
+    # callers decide what an unreadable value means for them (v1 did not treat them alike).
+    param([AllowNull()][object]$Value)
+    $v = "$Value".Trim()
+    if (-not $v) { return [pscustomobject]@{ set = $false; parsed = $false; utc = $null } }
+    $d = $null
+    if (Get-Command Resolve-PimDateExpression -ErrorAction SilentlyContinue) {
+        try { $d = Resolve-PimDateExpression -Expression $v } catch { $d = $null }
+    }
+    if ($null -eq $d -and (Get-Command Get-PimUtcStamp -ErrorAction SilentlyContinue)) { $d = Get-PimUtcStamp $v }
+    if ($null -ne $d) { try { $d = ([datetime]$d).ToUniversalTime() } catch { $d = $null } }
+    return [pscustomobject]@{ set = $true; parsed = ($null -ne $d); utc = $d }
+}
+
+function Get-PimAdminRowKey {
+    # PURE. The Admins diff key for a DESIRED row or a LIVE user -- the UPN local part (BUG-13).
+    # One definition, so the providers that key on an admin cannot drift apart.
+    param([object]$Row)
+    if ($null -eq $Row) { return '' }
+    $upn = Get-PimRowProp -Row $Row -Names @('userPrincipalName','UserPrincipalName','UPN','upn')
+    if (-not $upn) { $upn = Get-PimRowProp -Row $Row -Names @('UserName','Username') }
+    if (Get-Command Get-PimUpnLocalPart -ErrorAction SilentlyContinue) { return (Get-PimUpnLocalPart -Upn "$upn") }
+    $s = "$upn".Trim(); $i = $s.IndexOf('@')
+    if ($i -ge 0) { $s = $s.Substring(0, $i) }
+    return $s.ToLowerInvariant()
+}
+
+function Test-PimAdminValueTrue {
+    # PURE. accountEnabled from Graph is a bool; from a fixture or a JSON round-trip it can be a
+    # string, and [bool]'False' is $true. Read it as text.
+    param([AllowNull()][object]$Value)
+    if ($Value -is [bool]) { return $Value }
+    return ("$Value".Trim() -match '(?i)^(true|1|yes)$')
+}
+
+function Test-PimAdminProvisionDue {
+    # #8 PURE. v1 created a row only once its ProvisionDate was due (v1 5568-5585). Blank = now.
+    # An UNPARSEABLE value is treated as now with a warning, exactly as v1: "create rather than
+    # silently never-create" -- the Manager's PIM-SCHED-001 catches a bad expression before commit.
+    param([Parameter(Mandatory)][object]$Row, [datetime]$NowUtc = [datetime]::UtcNow)
+    $raw = Get-PimRowProp -Row $Row -Names @('ProvisionDate','ProvisionUtc')
+    $p = ConvertTo-PimAdminLifecycleUtc -Value $raw
+    if (-not $p.set)    { return [pscustomobject]@{ due = $true; provisionUtc = $null; reason = 'no ProvisionDate' } }
+    if (-not $p.parsed) { return [pscustomobject]@{ due = $true; provisionUtc = $null; reason = "ProvisionDate '$raw' is not a date expression -- treated as now (v1)" } }
+    # 60 s of tolerance: 'Now' resolves a moment AFTER the caller captured its clock.
+    if ($p.utc -gt $NowUtc.ToUniversalTime().AddSeconds(60)) {
+        return [pscustomobject]@{ due = $false; provisionUtc = $p.utc; reason = ("scheduled -- provisions at {0:yyyy-MM-dd HH:mm} UTC" -f $p.utc) }
+    }
+    return [pscustomobject]@{ due = $true; provisionUtc = $p.utc; reason = 'ProvisionDate reached' }
+}
+
+function Get-PimAdminStatusDecision {
+    # #1 PURE. WHAT STATE SHOULD THIS ADMIN ACCOUNT BE IN? v1 5587-5619 + 12366-12408.
+    #   AccountStatus=Revoked   -> disabled, sign-in sessions revoked, never provisioned
+    #   AccountStatus=Disabled  -> disabled, never provisioned
+    #   OffboardDate passed     -> disabled, never provisioned (v1: "handled by the offboarding
+    #                              sweep, skipping create/update"; the sweep does the rest)
+    #   AccountStatus=Enabled   -> enabled; the ONLY value that may RE-enable a disabled account
+    #   AccountStatus blank     -> created enabled, but a disabled account is left disabled
+    #   anything else           -> v1 warned and skipped the row: nothing is changed or created
+    # 🔴 THE DEFECT THIS REPLACES: Equal compared accountEnabled only and ApplyUpdate PATCHed
+    # accountEnabled=$true, on a job that runs every 5 minutes -- so a Disabled or Revoked admin was
+    # re-enabled within minutes of being switched off.
+    param([Parameter(Mandatory)][object]$Row, [datetime]$NowUtc = [datetime]::UtcNow)
+    $st = (Get-PimRowProp -Row $Row -Names @('AccountStatus')).Trim()
+    $od = ConvertTo-PimAdminLifecycleUtc -Value (Get-PimRowProp -Row $Row -Names @('OffboardDate'))
+    $offDue = ($od.parsed -and $od.utc -le $NowUtc.ToUniversalTime())
+    $mk = {
+        param($status, $enabled, $disable, $may, $sessions, $blocks, $reason, $statusDriven)
+        [pscustomobject]@{ status = $status; desiredEnabled = $enabled; disable = [bool]$disable; mayEnable = [bool]$may
+                           revokeSessions = [bool]$sessions; blocksCreate = [bool]$blocks; statusDriven = [bool]$statusDriven; reason = $reason }
+    }
+    if ($st -ieq 'Revoked')  { return (& $mk 'Revoked'  $false $true $false $true  $true 'AccountStatus=Revoked'  $true) }
+    if ($st -ieq 'Disabled') { return (& $mk 'Disabled' $false $true $false $false $true 'AccountStatus=Disabled' $true) }
+    if ($offDue) { return (& $mk 'Offboarded' $false $true $false $false $true ("OffboardDate {0:yyyy-MM-dd HH:mm} UTC reached" -f $od.utc) $false) }
+    if (-not $st)            { return (& $mk ''        $true $false $false $false $false 'AccountStatus not set' $false) }
+    if ($st -ieq 'Enabled')  { return (& $mk 'Enabled' $true $false $true  $false $false 'AccountStatus=Enabled' $false) }
+    return (& $mk $st $null $false $false $false $true "unknown AccountStatus '$st' (expected Enabled / Disabled / Revoked) -- the account is left as it is" $false)
+}
+
+function Get-PimAdminAttributePlan {
+    # #11 PURE. Which directory attributes differ? Returns an ordered hashtable of ONLY the fields
+    # to PATCH. v1 set them on create (5698-5736) and on every update (5654-5662). Two rules stop
+    # the engine from fighting the tenant:
+    #   * a BLANK desired value is not managed -- the row said nothing about it;
+    #   * a live object that does not CARRY a property was not observed, so it is not compared
+    #     (Graph returns every $select-ed property, null included -- absence means "not read").
+    param([Parameter(Mandatory)][object]$Desired, [Parameter(Mandatory)][object]$Live)
+    $liveProp = {
+        param($name)
+        if ($Live -is [System.Collections.IDictionary]) { if ($Live.Contains($name)) { return @{ has = $true; v = $Live[$name] } }; return @{ has = $false } }
+        $pp = $Live.PSObject.Properties[$name]
+        if ($pp) { return @{ has = $true; v = $pp.Value } }
+        return @{ has = $false }
+    }
+    $want = [ordered]@{
+        givenName     = (Get-PimRowProp -Row $Desired -Names @('FirstName','GivenName','givenName'))
+        surname       = (Get-PimRowProp -Row $Desired -Names @('LastName','Surname','surname'))
+        displayName   = (Get-PimRowProp -Row $Desired -Names @('DisplayName','displayName'))
+        jobTitle      = (Get-PimRowProp -Row $Desired -Names @('JobTitle','jobTitle'))
+        usageLocation = (Get-PimRowProp -Row $Desired -Names @('UsageLocation','usageLocation'))
+        companyName   = (Get-PimRowProp -Row $Desired -Names @('Company','CompanyName','companyName'))
+    }
+    # v1 wrote JobTitle = DisplayName for an Entra ID admin ($Description = $DisplayName, 5643).
+    if (-not "$($want.jobTitle)".Trim()) { $want.jobTitle = $want.displayName }
+    $plan = [ordered]@{}
+    foreach ($k in @($want.Keys)) {
+        $w = "$($want[$k])".Trim()
+        if (-not $w) { continue }
+        $lp = & $liveProp $k
+        if (-not $lp.has) { continue }
+        $have = "$($lp.v)".Trim()
+        $differs = if ($k -eq 'usageLocation') { $w -ne $have } else { $w -cne $have }
+        if ($differs) { $plan[$k] = $w }
+    }
+    $pp = & $liveProp 'passwordPolicies'
+    if ($pp.has) {
+        $cur = "$($pp.v)".Trim()
+        if ($cur -notmatch '(?i)(^|[,\s])DisablePasswordExpiration($|[,\s])') {
+            # Keep whatever else the tenant set (e.g. DisableStrongPassword) -- add, never replace.
+            $plan['passwordPolicies'] = $(if ($cur) { "$cur, DisablePasswordExpiration" } else { 'DisablePasswordExpiration' })
+        }
+    }
+    return $plan
+}
+
+function New-PimAdminInitialPassword {
+    # #11. A strong random initial password that NOBODY is ever shown. v1 wrote the plaintext to
+    # output/admin-passwords-<date>.txt (v1 5779); v2 stores nothing and logs nothing, because the
+    # v2 onboarding route is the Temporary Access Pass (AdminTap, or the Manager's queued TAP reset)
+    # and a password nobody knows cannot leak. forceChangePasswordNextSignIn stays on.
+    param([int]$Length = 32)
+    $sets = @('ABCDEFGHJKLMNPQRSTUVWXYZ', 'abcdefghijkmnpqrstuvwxyz', '23456789', '!@#%^&*-_=+?')
+    $rng = [System.Security.Cryptography.RandomNumberGenerator]::Create()
+    try {
+        $pick = { param([string]$set) $b = New-Object byte[] 4; $rng.GetBytes($b); $set[[int]([BitConverter]::ToUInt32($b, 0) % [uint32]$set.Length)] }
+        $chars = New-Object System.Collections.Generic.List[char]
+        foreach ($s in $sets) { $chars.Add([char](& $pick $s)) }
+        $all = -join $sets
+        while ($chars.Count -lt $Length) { $chars.Add([char](& $pick $all)) }
+        for ($i = $chars.Count - 1; $i -gt 0; $i--) {
+            $b = New-Object byte[] 4; $rng.GetBytes($b)
+            $j = [int]([BitConverter]::ToUInt32($b, 0) % [uint32]($i + 1))
+            $t = $chars[$i]; $chars[$i] = $chars[$j]; $chars[$j] = $t
+        }
+        return (-join $chars.ToArray())
+    } finally { $rng.Dispose() }
+}
+
+function Write-PimAdminLifecycleAudit {
+    # Best-effort audit for lifecycle writes. Never throws: the directory change already happened.
+    param([Parameter(Mandatory)][string]$Action, [Parameter(Mandatory)][string]$Target, [object]$After = $null, [string]$Result = 'ok')
+    try {
+        if (Get-Command Write-PimAuditEvent -ErrorAction SilentlyContinue) {
+            Write-PimAuditEvent -Action $Action -Target $Target -After $After -Result $Result | Out-Null
+            return
+        }
+        $cs = Get-PimAdminLifecycleStoreCs
+        if ($cs -and (Get-Command Write-PimSqlAuditEvent -ErrorAction SilentlyContinue)) {
+            Write-PimSqlAuditEvent -ConnectionString $cs -Actor 'engine' -ActorSource 'engine' -Action $Action -Target $Target -After $After -Result $Result
+        }
+    } catch { Write-Warning ("  [audit] {0} for {1} was NOT recorded: {2}" -f $Action, $Target, $_.Exception.Message) }
+}
+
+function Get-PimAdminLifecycleStoreCs {
+    if ("$($global:PIM_EngineSqlCs)".Trim()) { return "$($global:PIM_EngineSqlCs)" }
+    if ("$($global:PIM_SqlConnectionString)".Trim()) { return "$($global:PIM_SqlConnectionString)" }
+    if (Get-Command Get-PimSqlSettingsConnectionString -ErrorAction SilentlyContinue) { try { return (Get-PimSqlSettingsConnectionString) } catch { } }
+    return $null
+}
+
+function ConvertTo-PimAdminLifecycleMap {
+    # PURE. A stored JSON object / PSCustomObject / hashtable -> hashtable (one level, values too).
+    param([AllowNull()][object]$Value)
+    $h = @{}
+    if ($null -eq $Value) { return $h }
+    $o = $Value
+    if ($o -is [string]) { if (-not $o.Trim()) { return $h }; $o = $o | ConvertFrom-Json }
+    if ($o -is [System.Collections.IDictionary]) { foreach ($k in @($o.Keys)) { $h["$k"] = $o[$k] } }
+    else { foreach ($p in $o.PSObject.Properties) { $h[$p.Name] = $p.Value } }
+    return $h
+}
+
+function Get-PimAdminLifecycleStore {
+    # SQL-only state for lifecycle steps that must happen ONCE (TAP issuance, offboarding progress).
+    # Returns @{ ok; map; reason }. ok=$false = "no persistent store in this process", and every
+    # caller FAILS CLOSED on it: a TAP that cannot be recorded as issued would be issued again by the
+    # next process, and an offboarding whose revoke time is not kept cannot count DeleteAfterDays.
+    param([Parameter(Mandatory)][string]$Name)
+    $raw = $null; $ok = $false; $why = ''
+    try {
+        if (Get-Command Get-PimSetting -ErrorAction SilentlyContinue) { $raw = Get-PimSetting -Name $Name; $ok = $true }
+        else {
+            $cs = Get-PimAdminLifecycleStoreCs
+            if ($cs -and (Get-Command Get-PimSqlSetting -ErrorAction SilentlyContinue)) { $raw = Get-PimSqlSetting -ConnectionString $cs -Name $Name; $ok = $true }
+            else { $why = 'no SQL settings store is wired in this process' }
+        }
+    } catch { $ok = $false; $why = "reading pim.Settings['$Name'] failed: $($_.Exception.Message)" }
+    $map = @{}
+    if ($ok) {
+        try {
+            $top = ConvertTo-PimAdminLifecycleMap -Value $raw
+            foreach ($k in @($top.Keys)) { $map["$k".ToLowerInvariant()] = (ConvertTo-PimAdminLifecycleMap -Value $top[$k]) }
+        } catch { return [pscustomobject]@{ ok = $false; map = @{}; reason = "pim.Settings['$Name'] is not a readable JSON object: $($_.Exception.Message)" } }
+    }
+    return [pscustomobject]@{ ok = $ok; map = $map; reason = $why }
+}
+
+function Save-PimAdminLifecycleStore {
+    # Returns $true only when the write reached the store.
+    param([Parameter(Mandatory)][string]$Name, [Parameter(Mandatory)][hashtable]$Map)
+    try {
+        if (Get-Command Set-PimSetting -ErrorAction SilentlyContinue) { Set-PimSetting -Name $Name -Value $Map | Out-Null; return $true }
+        $cs = Get-PimAdminLifecycleStoreCs
+        if ($cs -and (Get-Command Set-PimSqlSetting -ErrorAction SilentlyContinue)) { Set-PimSqlSetting -ConnectionString $cs -Name $Name -Value $Map; return $true }
+        Write-Warning "  [lifecycle] pim.Settings['$Name'] NOT saved -- no SQL settings store is wired in this process."
+    } catch { Write-Warning "  [lifecycle] pim.Settings['$Name'] NOT saved: $($_.Exception.Message)" }
+    return $false
+}
+
+function Test-PimAdminStatusChangeAuthorized {
+    # #1 -- the MSP kill-switch code check, ported from v1 Test-PimAccountStatusChangeAuthorized
+    # (12265-12364) + its call site (12399-12403). It applies to v2 too: v2 has the MSP variant
+    # ($global:PIM_ConfigVariant='msp', set by Set-PimScenarioContext), central rows are downlinked
+    # into a customer's store (PIM-Downlink.ps1) and a signed central-kill manifest emits
+    # AccountStatus + StatusChangeCode rows (PIM-Substrate.ps1). So in the MSP variant a Disabled /
+    # Revoked row is honoured ONLY when its StatusChangeCode equals the customer's Key Vault secret
+    # pim-status-<upn with @ and . as ->. Default DENY. Outside the MSP variant the customer owns the
+    # rows directly and no code is needed (v1: "local CSV = customer directly in control").
+    # A refusal is an audit event -- v1 wrote a CSV file; v2 writes no files.
+    param([Parameter(Mandatory)][string]$UserPrincipalName, [AllowEmptyString()][string]$ProvidedCode, [scriptblock]$SecretReader)
+    $variant = "$(Get-PimAdminLifecycleSetting -Name 'ConfigVariant' -Default '')".Trim()
+    if ($variant -ine 'msp') { return [pscustomobject]@{ authorized = $true; applies = $false; reason = 'not the MSP variant' } }
+    $deny = {
+        param($why)
+        Write-Warning "  [SECURITY] central status change for $UserPrincipalName REFUSED: $why"
+        Write-PimAdminLifecycleAudit -Action 'account.status.change.denied' -Target $UserPrincipalName -After @{ reason = $why; variant = 'msp' } -Result 'denied'
+        [pscustomobject]@{ authorized = $false; applies = $true; reason = $why }
+    }
+    $vault = "$(Get-PimAdminLifecycleSetting -Name 'StatusChange_KeyVaultName' -Default '')".Trim()
+    if (-not $vault) { return (& $deny 'no StatusChange_KeyVaultName is configured') }
+    if (-not "$ProvidedCode".Trim()) { return (& $deny 'the row carries no StatusChangeCode') }
+    $secretName = 'pim-status-' + ($UserPrincipalName.ToLowerInvariant() -replace '[@.]', '-')
+    $reader = $SecretReader
+    if (-not $reader -and ($global:PIM_StatusChangeSecretReader -is [scriptblock])) { $reader = $global:PIM_StatusChangeSecretReader }
+    if (-not $reader) {
+        $reader = {
+            param($VaultName, $Name)
+            $tok = Get-PimRestToken -Resource 'https://vault.azure.net'
+            $uri = 'https://{0}.vault.azure.net/secrets/{1}?api-version=7.4' -f $VaultName, $Name
+            (Invoke-RestMethod -Method GET -Uri $uri -Headers @{ Authorization = "Bearer $tok" } -ErrorAction Stop).value
+        }
+    }
+    $expected = ''
+    try { $expected = "$(& $reader $vault $secretName)" } catch { return (& $deny "Key Vault secret '$secretName' could not be read (the CISO has not opted in, or the engine cannot reach the vault)") }
+    if (-not $expected.Trim()) { return (& $deny "Key Vault secret '$secretName' is empty") }
+    # Constant-time-ish compare, as v1: length first, then OR of every XOR.
+    if ($expected.Length -ne $ProvidedCode.Length) { return (& $deny 'StatusChangeCode mismatch') }
+    $mismatch = 0
+    for ($i = 0; $i -lt $expected.Length; $i++) { $mismatch = $mismatch -bor ([int][char]$expected[$i] -bxor [int][char]$ProvidedCode[$i]) }
+    if ($mismatch -ne 0) { return (& $deny 'StatusChangeCode mismatch') }
+    return [pscustomobject]@{ authorized = $true; applies = $true; reason = 'StatusChangeCode verified against Key Vault' }
+}
+
+function Update-PimAdminsDisableDecision {
+    # #1. Decide the EXPLICIT disables of one Admins pass ONCE, before any handler runs, through the
+    # account-disable circuit breaker (PIM-DisableGuard.ps1). Handlers only READ this decision.
+    # 🔒 Why here and not in the core: the core's breaker gates the REMOVE bucket, and an explicit
+    # AccountStatus disable is an UPDATE of a desired row -- it would bypass the breaker entirely.
+    param([Parameter(Mandatory)][hashtable]$Context, [object[]]$Live = @(), [datetime]$NowUtc = [datetime]::UtcNow)
+    $all = @($Context['adminsDesiredAll'] | Where-Object { $null -ne $_ })
+    $liveByKey = @{}
+    foreach ($l in @($Live)) { if ($null -ne $l) { $k = Get-PimAdminRowKey -Row $l; if ($k) { $liveByKey[$k] = $l } } }
+    $bg = @(); if (Get-Command Get-PimBreakGlassIdentifiers -ErrorAction SilentlyContinue) { $bg = @(Get-PimBreakGlassIdentifiers) }
+    $cand = @{}; $unauth = @{}; $bgHit = New-Object System.Collections.Generic.List[string]; $leftOff = New-Object System.Collections.Generic.List[string]
+    foreach ($d in $all) {
+        if (-not (Test-PimAdminProvisionDue -Row $d -NowUtc $NowUtc).due) { continue }
+        $k = Get-PimAdminRowKey -Row $d
+        if (-not $k -or -not $liveByKey.ContainsKey($k)) { continue }
+        $l = $liveByKey[$k]
+        $dec = Get-PimAdminStatusDecision -Row $d -NowUtc $NowUtc
+        $on = Test-PimAdminValueTrue $l.accountEnabled
+        if ($dec.disable -and $on) {
+            if ($bg.Count -gt 0 -and (Get-Command Test-PimRowIsBreakGlass -ErrorAction SilentlyContinue) -and (Test-PimRowIsBreakGlass -Row $l -Identifiers $bg)) { [void]$bgHit.Add($k); continue }
+            # 68.6 row 35: a CENTRAL admin's status is decided by the MSP master and arrived in its signed
+            # baseline -- that signature is the authorisation. The slave-side StatusChangeCode check
+            # guards the slave's OWN rows only.
+            if ($dec.statusDriven -and -not ((Get-Command Test-PimAdminRowIsCentral -ErrorAction SilentlyContinue) -and (Test-PimAdminRowIsCentral -Row $d))) {
+                $auth = Test-PimAdminStatusChangeAuthorized -UserPrincipalName "$($l.userPrincipalName)" -ProvidedCode (Get-PimRowProp -Row $d -Names @('StatusChangeCode'))
+                if (-not $auth.authorized) { $unauth[$k] = $auth.reason; continue }
+            }
+            $cand[$k] = $dec.reason
+        } elseif ($dec.desiredEnabled -eq $true -and -not $on -and -not $dec.mayEnable) {
+            [void]$leftOff.Add("$($l.userPrincipalName)")
+        }
+    }
+    $decision = $null
+    if ($cand.Count -gt 0) {
+        $resolved = $null
+        if ($global:PIM_DesiredResolved -is [hashtable] -and $global:PIM_DesiredResolved.ContainsKey('Account-Definitions-Admins')) { $resolved = [bool]$global:PIM_DesiredResolved['Account-Definitions-Admins'] }
+        if (Get-Command Test-PimExplicitDisablePassAllowed -ErrorAction SilentlyContinue) {
+            $decision = Test-PimExplicitDisablePassAllowed -ToDisable $cand.Count -Scanned @($Live).Count -Desired $all -DesiredResolved $resolved
+        } else {
+            # FAIL CLOSED: no breaker loaded means no disable, never an unguarded one.
+            $decision = [pscustomobject]@{ allowed = $false; abort = $true; tripped = 'guard-not-loaded'; reason = 'PIM-DisableGuard.ps1 is not loaded in this process'; toDisable = $cand.Count; scanned = @($Live).Count }
+        }
+        if (-not $decision.allowed) {
+            if (Get-Command Write-PimDisableAbortAlert -ErrorAction SilentlyContinue) { Write-PimDisableAbortAlert -Scope 'Admins (AccountStatus / OffboardDate)' -Decision $decision }
+            else { Write-Host ("[engine] Admins: explicit disables ABORTED [{0}] -- {1}" -f $decision.tripped, $decision.reason) -ForegroundColor Red }
+        } else {
+            Write-Host ("    [admins] {0} account(s) to DISABLE as their row says: {1}" -f $cand.Count, (@($cand.Keys) -join ', ')) -ForegroundColor Yellow
+        }
+    }
+    if ($bgHit.Count) { Write-Host ("    [admins] BREAK-GLASS never disabled, whatever its row says: {0}" -f ($bgHit -join ', ')) -ForegroundColor Yellow }
+    if ($leftOff.Count) { Write-Host ("    [admins] {0} account(s) are DISABLED in the tenant and their AccountStatus is not explicitly 'Enabled' -- left disabled (set AccountStatus=Enabled to re-enable): {1}" -f $leftOff.Count, ($leftOff -join ', ')) -ForegroundColor DarkYellow }
+    $Context['adminsDisable'] = [pscustomobject]@{ candidates = $cand; decision = $decision; unauthorized = $unauth; breakGlass = $bgHit.ToArray() }
+    return $Context['adminsDisable']
+}
+
+function Get-PimScheduledAdminCreationReport {
+    # #8 -- what the 'scheduled-creation' job reports, READ from SQL. It creates nothing: the
+    # Admins provider (job delta-admins, 5 min) creates a row as soon as its ProvisionDate is due,
+    # and AdminTap issues the TAP inside its lead window. The job used to read
+    # $global:PIM_ScheduledAdminRows, which nothing ever set, and reported ran=true over nothing.
+    # Returns @{ ok; reason; pending; next; tapDeferred }.
+    param([datetime]$NowUtc = [datetime]::UtcNow)
+    if (-not (Get-Command Get-PimDesiredRows -ErrorAction SilentlyContinue)) {
+        return [pscustomobject]@{ ok = $false; reason = 'the engine core (Get-PimDesiredRows) is not loaded in this process'; pending = @(); next = $null; tapDeferred = @() }
+    }
+    $rows = @(Get-PimDesiredRows -Entity 'Account-Definitions-Admins')
+    if ($global:PIM_DesiredResolved -is [hashtable] -and $global:PIM_DesiredResolved.ContainsKey('Account-Definitions-Admins') -and -not $global:PIM_DesiredResolved['Account-Definitions-Admins']) {
+        return [pscustomobject]@{ ok = $false; reason = 'the admin rows could not be read from the desired store'; pending = @(); next = $null; tapDeferred = @() }
+    }
+    $pending = New-Object System.Collections.Generic.List[object]
+    foreach ($r in $rows) {
+        if ($null -eq $r) { continue }
+        $pd = Test-PimAdminProvisionDue -Row $r -NowUtc $NowUtc
+        if (-not $pd.due) { [void]$pending.Add([pscustomobject]@{ upn = (Get-PimRowProp -Row $r -Names @('UserPrincipalName','UserName')); provisionUtc = $pd.provisionUtc }) }
+    }
+    $sorted = @($pending.ToArray() | Sort-Object provisionUtc)
+    $tap = Select-PimAdminTapCandidates -Rows $rows -NowUtc $NowUtc
+    $tapDeferred = @($tap.deferred | Where-Object { "$($_.reason)" -match '^TAP DEFERRED' })
+    return [pscustomobject]@{ ok = $true; reason = ''; pending = $sorted; next = $(if ($sorted.Count) { $sorted[0] } else { $null }); tapDeferred = $tapDeferred }
+}
+
 function New-PimAdminsProvider {
     @{
         scope  = 'Admins'
@@ -38,7 +423,31 @@ function New-PimAdminsProvider {
         # removals through PIM-DisableGuard (feature opt-in + positively-resolved desired
         # set + mass-disable circuit breaker) in PIM-EngineCore before any disable runs.
         isAccountDisable = $true
-        GetDesired = { param($ctx) Get-PimDesiredRows -Entity 'Account-Definitions-Admins' }
+        GetDesired = {
+            param($ctx)
+            # #8: a row whose ProvisionDate is still in the future is not created yet (v1 5568-5585).
+            # The FULL set is kept for the circuit breaker's G1 input -- a pass of explicit disables
+            # must be judged against the positively-resolved desired set, not a filtered view of it.
+            $now = [datetime]::UtcNow
+            $all = @(Get-PimDesiredRows -Entity 'Account-Definitions-Admins')
+            $ctx['adminsDesiredAll'] = $all
+            $deferred = @{}
+            $adOnly = @{}
+            $keep = New-Object System.Collections.Generic.List[object]
+            foreach ($r in $all) {
+                if ($null -eq $r) { continue }
+                # AD-only admins do not exist in Entra: not created, updated or disabled here (hybrid-ad-apply owns them).
+                if (Test-PimAdminIsAdOnly -Row $r) { $ak = Get-PimAdminRowKey -Row $r; if ($ak) { $adOnly[$ak] = $true }; continue }
+                $pd = Test-PimAdminProvisionDue -Row $r -NowUtc $now
+                if ($pd.due) { [void]$keep.Add($r); continue }
+                $k = Get-PimAdminRowKey -Row $r
+                if ($k) { $deferred[$k] = $pd }
+                Write-Host ("    [admins] SCHEDULED {0}: {1}" -f (Get-PimRowProp -Row $r -Names @('UserPrincipalName','UserName')), $pd.reason) -ForegroundColor DarkCyan
+            }
+            $ctx['adminsDeferred'] = $deferred
+            $ctx['adminsAdOnly'] = $adOnly
+            $keep.ToArray()
+        }
         GetLive    = {
             param($ctx)
             # BUG-12 (fixed 2026-08-06). This was `/users` with NO filter -- the WHOLE
@@ -99,7 +508,8 @@ function New-PimAdminsProvider {
             $rows = New-Object System.Collections.Generic.List[object]
             foreach ($p in $prefixes) {
                 $esc = "$p".Replace("'", "''")
-                $q = "/users?`$select=id,userPrincipalName,displayName,accountEnabled&`$filter=startswith(userPrincipalName,'$esc')"
+                # #11: the attributes the provider reconciles are read here, or drift is invisible.
+                $q = "/users?`$select=id,userPrincipalName,displayName,accountEnabled,givenName,surname,jobTitle,usageLocation,companyName,passwordPolicies,onPremisesSyncEnabled&`$filter=startswith(userPrincipalName,'$esc')"
                 foreach ($u in @(Invoke-PimGraph -Path $q -All)) {
                     if ($null -eq $u) { continue }
                     $k = "$($u.id)"
@@ -115,6 +525,22 @@ function New-PimAdminsProvider {
                 if (-not $chk.ok) { throw ("Admins scope: " + $chk.reason) }
             }
             Write-Host ("    [admins] live set limited to {0} admin account(s) by prefix: {1}" -f $live.Count, ($prefixes -join ', ')) -ForegroundColor DarkGray
+            # #8: a SCHEDULED admin's existing account (a re-hire, say) is not this run's business
+            # either. Taken out of LIVE as well as desired, it can never become an unmanaged-admin
+            # removal while its row waits for its ProvisionDate.
+            $deferredKeys = if ($ctx['adminsDeferred'] -is [hashtable]) { $ctx['adminsDeferred'] } else { @{} }
+            if ($deferredKeys.Count -gt 0) { $live = @($live | Where-Object { -not $deferredKeys.ContainsKey((Get-PimAdminRowKey -Row $_)) }) }
+            # AD-only admins (TargetPlatform=AD rows) and any account synced from on-premises AD are not Entra
+            # admins this scope manages: out of LIVE too, so they are never updated, disabled or pruned here.
+            # Measured 2026-09-13: 2.4.338 PATCHed givenName/surname/jobTitle/passwordPolicies on three -AD accounts.
+            $adKeys = if ($ctx['adminsAdOnly'] -is [hashtable]) { $ctx['adminsAdOnly'] } else { @{} }
+            $adSkipped = @($live | Where-Object { $adKeys.ContainsKey((Get-PimAdminRowKey -Row $_)) -or "$($_.onPremisesSyncEnabled)" -ieq 'True' })
+            if ($adSkipped.Count -gt 0) {
+                $live = @($live | Where-Object { -not ($adKeys.ContainsKey((Get-PimAdminRowKey -Row $_)) -or "$($_.onPremisesSyncEnabled)" -ieq 'True') })
+                Write-Host ("    [admins] {0} AD-only / on-premises-synced account(s) left to hybrid-ad-apply, not managed in Entra: {1}" -f $adSkipped.Count, (@($adSkipped | ForEach-Object { "$($_.userPrincipalName)" }) -join ', ')) -ForegroundColor DarkGray
+            }
+            # #1: the explicit disables of this pass, decided once through the circuit breaker.
+            [void](Update-PimAdminsDisableDecision -Context $ctx -Live $live)
             $live
         }
         # BUG-13: key on the UPN's LOCAL PART, not the whole UPN. The desired UPN is
@@ -132,10 +558,30 @@ function New-PimAdminsProvider {
             if ($i -ge 0) { $s = $s.Substring(0, $i) }
             $s.ToLowerInvariant()
         }
-        # desired = account should EXIST and be ENABLED. (Equality is against live.)
-        Equal = { param($d,$l) [bool]$l.accountEnabled }
+        # #1 + #11: equal when the account is in the state its row asks for (enabled / disabled per
+        # Get-PimAdminStatusDecision) AND no managed attribute differs. This used to be
+        # `[bool]$l.accountEnabled` -- a disabled account was "unequal", so the update below
+        # re-ENABLED every admin an operator had disabled or revoked, on a 5-minute job.
+        Equal = {
+            param($d,$l)
+            $dec = Get-PimAdminStatusDecision -Row $d
+            $on = Test-PimAdminValueTrue $l.accountEnabled
+            if ($dec.disable -and $on) { return $false }
+            if ($dec.desiredEnabled -eq $true -and -not $on -and $dec.mayEnable) { return $false }
+            return (@((Get-PimAdminAttributePlan -Desired $d -Live $l).Keys).Count -eq 0)
+        }
         ApplyCreate = {
             param($item,$ctx)
+            # #1: a Disabled / Revoked / offboarded (or unknown-status) admin is never provisioned (v1
+            # skipped the row entirely, 5594-5619). #8: nor is one whose ProvisionDate is ahead --
+            # GetDesired already holds those back; this is the handler refusing on its own too.
+            $__dec = Get-PimAdminStatusDecision -Row $item.desired
+            if ($__dec.blocksCreate) {
+                Write-Host ("    [skip] {0}: NOT created -- {1}" -f $item.key, $__dec.reason) -ForegroundColor DarkYellow
+                return [pscustomobject]@{ pimApplied = $false; reason = "not created: $($__dec.reason) -- a disabled, revoked or offboarded admin is never provisioned (remove the row once it is finished)" }
+            }
+            $__due = Test-PimAdminProvisionDue -Row $item.desired
+            if (-not $__due.due) { return [pscustomobject]@{ pimApplied = $false; reason = "not created: $($__due.reason)" } }
             # BUG-15. This read `$upn = "$($item.key)"`. That was correct while KeyOf returned
             # the whole UPN -- but the BUG-13 fix (rightly) changed KeyOf to the UPN LOCAL PART,
             # so the create started POSTing a userPrincipalName with NO DOMAIN and Entra rejected
@@ -163,25 +609,97 @@ function New-PimAdminsProvider {
             $disp = Get-PimRowProp -Row $item.desired -Names @('DisplayName','displayName')
             if (-not $disp) { $disp = $upn }
             $nick = ($upn -split '@')[0]
-            $pw   = ([guid]::NewGuid().ToString('N').Substring(0,12)) + '!Aa9'
-            $u = Invoke-PimGraph -Method POST -Path '/users' -Body @{
+            # #11: the attributes v1 sent on create (5698-5736) -- givenName, surname, jobTitle,
+            # usageLocation, companyName -- plus passwordPolicies=DisablePasswordExpiration IN the
+            # create body (v1 needed a separate PATCH with a replica-lag retry loop for it). Only
+            # non-blank values are sent: Graph rejects an empty usageLocation.
+            # 🔒 The password is random, long, never stored and never logged (see
+            # New-PimAdminInitialPassword): v2 onboards through the TAP, not a handed-over password.
+            $body = @{
                 accountEnabled=$true; displayName=$disp; mailNickname=$nick; userPrincipalName=$upn
-                passwordProfile=@{ forceChangePasswordNextSignIn=$true; password=$pw }
+                passwordProfile=@{ forceChangePasswordNextSignIn=$true; password=(New-PimAdminInitialPassword) }
+                passwordPolicies='DisablePasswordExpiration'
             }
+            $__attrs = Get-PimAdminAttributePlan -Desired $item.desired -Live ([pscustomobject]@{ givenName=''; surname=''; displayName=''; jobTitle=''; usageLocation=''; companyName='' })
+            foreach ($__k in @($__attrs.Keys)) { if ($__k -ne 'displayName') { $body[$__k] = $__attrs[$__k] } }
+            $u = Invoke-PimGraph -Method POST -Path '/users' -Body $body
+            $body = $null
             if (Get-Command Add-PimContextObject -ErrorAction SilentlyContinue) { Add-PimContextObject -Kind User -Object $u }   # incremental cache
-            # new-admin notification (best-effort) -> the admin's manager
+            Write-PimAdminLifecycleAudit -Action 'account.create' -Target $upn -After @{ displayName = $disp; attributes = @($__attrs.Keys); platform = 'ID'; transport = 'rest' }
+            # new-admin notification (best-effort) -> the ONE recipient rule (Get-PimAdminMailRecipient,
+            # PIM-Rest.ps1): the owner's office user when forwarding is TRUE, else the manager. The Manager
+            # shows the same rule as "Sends to", so screen and mail cannot disagree (operator, 2026-09-12).
             if (Get-Command Send-PimNotifyMail -ErrorAction SilentlyContinue) {
-                $mgr = Get-PimRowProp -Row $item.desired -Names @('ManagerEmail')
+                $mgr = Get-PimAdminMailRecipient -Row $item.desired
                 $toks = @{ UserPrincipalName=$upn; DisplayName=$disp; Date=([datetime]::UtcNow.ToString('yyyy-MM-dd'))
-                    TierLevel=(Get-PimRowProp -Row $item.desired -Names @('TargetUsage','Purpose')); Company=(Get-PimRowProp -Row $item.desired -Names @('Company')); ManagerEmail=$mgr }
+                    TierLevel=(Get-PimRowProp -Row $item.desired -Names @('TargetUsage','Purpose')); Company=(Get-PimRowProp -Row $item.desired -Names @('Company')); ManagerEmail=(Get-PimRowProp -Row $item.desired -Names @('ManagerEmail')) }
                 try { Send-PimNotifyMail -Type 'new-admin' -Tokens $toks -Recipient $mgr | Out-Null } catch { Write-Verbose "new-admin mail ($upn): $($_.Exception.Message)" }
+            }
+            # Mailbox forwarding where the account HAS a mailbox -- best-effort, gated OFF by default
+            # ($global:PIM_AdminMailboxForwarding), never fails the create.
+            if (Get-Command Invoke-PimAdminMailboxForwarding -ErrorAction SilentlyContinue) {
+                $null = Invoke-PimAdminMailboxForwarding -Row $item.desired -UserPrincipalName $upn -UserId "$($u.id)"
             }
             $u
         }
         ApplyUpdate = {
             param($item,$ctx)
-            # exists but disabled -> enable
-            Invoke-PimGraph -Method PATCH -Path "/users/$($item.live.id)" -Body @{ accountEnabled=$true }
+            # #1 + #11: PATCH ONLY what differs -- the attributes from Get-PimAdminAttributePlan, plus
+            # accountEnabled when the row's status asks for a change:
+            #   * disable  -> only when this pass's circuit-breaker decision allows it (decided once
+            #                 in GetLive), never a break-glass account, never an MSP status change
+            #                 whose StatusChangeCode did not verify; Revoked also revokes sessions.
+            #   * enable   -> only when AccountStatus is explicitly 'Enabled'.
+            $d = $item.desired; $l = $item.live
+            $dec = Get-PimAdminStatusDecision -Row $d
+            $on = Test-PimAdminValueTrue $l.accountEnabled
+            $attrs = Get-PimAdminAttributePlan -Desired $d -Live $l
+            $body = @{}
+            foreach ($k in @($attrs.Keys)) { $body[$k] = $attrs[$k] }
+            $disabling = $false; $enabling = $false; $blocked = ''
+            $key = "$($item.key)".Trim().ToLowerInvariant()
+            if ($dec.disable -and $on) {
+                $st = $ctx['adminsDisable']
+                if (-not $st) { $blocked = 'no circuit-breaker decision was made for this pass -- refusing to disable (fail closed)' }
+                elseif (@($st.breakGlass) -contains $key) { $blocked = 'BREAK-GLASS account -- never disabled' }
+                elseif ($st.unauthorized -is [hashtable] -and $st.unauthorized.ContainsKey($key)) { $blocked = "MSP status change NOT authorised: $($st.unauthorized[$key])" }
+                elseif (-not $st.decision -or -not $st.decision.allowed) {
+                    $tr = if ($st.decision) { "$($st.decision.tripped)" } else { 'no-decision' }
+                    $rs = if ($st.decision) { "$($st.decision.reason)" } else { 'the account was not a disable candidate when the pass was decided' }
+                    $blocked = "account-disable circuit breaker [$tr]: $rs"
+                }
+                else { $body['accountEnabled'] = $false; $disabling = $true }
+            } elseif ($dec.desiredEnabled -eq $true -and -not $on -and $dec.mayEnable) {
+                $body['accountEnabled'] = $true; $enabling = $true
+            }
+            if ($body.Count -eq 0) {
+                $why = if ($blocked) { "NOT disabled -- $blocked" } else { 'nothing to change' }
+                Write-Host ("    [!] {0}: {1}" -f $item.key, $why) -ForegroundColor Yellow
+                return [pscustomobject]@{ pimApplied = $false; reason = $why }
+            }
+            if ($blocked) { Write-Host ("    [!] {0}: NOT disabled -- {1} (attribute changes still applied)" -f $item.key, $blocked) -ForegroundColor Yellow }
+            $r = Invoke-PimGraph -Method PATCH -Path "/users/$($l.id)" -Body $body
+            $upnA = "$($l.userPrincipalName)"
+            if ($disabling) {
+                Write-Host ("    [-] {0}: accountEnabled=false ({1})" -f $item.key, $dec.reason) -ForegroundColor Yellow
+                Write-PimAdminLifecycleAudit -Action 'account.disable' -Target $upnA -After @{ accountEnabled = $false; reason = $dec.reason; transport = 'rest' }
+                if ($dec.revokeSessions) {
+                    try {
+                        Invoke-PimGraph -Method POST -Path "/users/$($l.id)/revokeSignInSessions" -Body @{} | Out-Null
+                        Write-PimAdminLifecycleAudit -Action 'account.sessions.revoke' -Target $upnA -After @{ reason = $dec.reason }
+                    } catch { Write-Warning ("  [admins] {0}: disabled, but revokeSignInSessions FAILED -- existing sessions may live until their tokens expire: {1}" -f $upnA, $_.Exception.Message) }
+                }
+            }
+            if ($attrs.Count -gt 0) { Write-PimAdminLifecycleAudit -Action 'account.update' -Target $upnA -After @{ fields = @($attrs.Keys); transport = 'rest' } }
+            if ($enabling) { Write-PimAdminLifecycleAudit -Action 'account.enable' -Target $upnA -After @{ accountEnabled = $true; reason = 'AccountStatus=Enabled' } }
+            if ($disabling) { return $r }
+            # Mailbox forwarding follows an enabled account only. Gated OFF by default.
+            if (Get-Command Invoke-PimAdminMailboxForwarding -ErrorAction SilentlyContinue) {
+                $fu = "$(Get-PimRowProp -Row $item.desired -Names @('UserPrincipalName','userPrincipalName'))".Trim()
+                if (-not $fu) { $fu = "$($item.live.userPrincipalName)" }
+                $null = Invoke-PimAdminMailboxForwarding -Row $item.desired -UserPrincipalName $fu -UserId "$($item.live.id)"
+            }
+            $r
         }
         ApplyRemove = {
             param($item,$ctx)
@@ -245,6 +763,339 @@ function Get-PimEntraRoleKey {
     return ("$tag|$role|$type").ToLowerInvariant()
 }
 
+# ===========================================================================
+# v1 -> v2 ASSIGNMENT PARITY (REQUIREMENTS 68.6 rows 24-26), shared by the five assignment
+# scopes (EntraRoles, RolesAUs, AdminMembers, GroupMembers, AzRes).
+#
+# What v1 (PIM-Functions.psm1, the *-From-file-CSV assigners + Assign-Roles-AdministrativeUnits-
+# From-SQL) did per row, and v2 did not:
+#   * Action=Remove      -> AdminRemove of exactly that assignment (v1:3541/3861/4257/4704/5178/6343)
+#   * AutoExtend=TRUE    -> AdminExtend when <= 30 days remain       (v1:3505/3824/4224/4668/5143/6310)
+#   * UpdateExisting=TRUE or Action=Update -> AdminUpdate            (v1:3465/3514/4198/4232/4626/4678/5098/5151/6274/6319)
+# v2 differences, deliberate and safer:
+#   * a write happens only when something is DUE (v1 re-issued AdminUpdate on EVERY run for an
+#     UpdateExisting row). "Due" = permanence or duration differs, or <= 30 days remain (which
+#     keeps v1's effect that an UpdateExisting assignment never lapsed).
+#   * removals go through the engine's G4 removal budget (PIM-EngineCore / PIM-DisableGuard).
+# All helpers below are PURE except the Invoke-* appliers.
+# ===========================================================================
+$script:PimAssignmentRenewWithinDays = 30   # v1's threshold, verbatim
+
+function Test-PimRowIsRemove {
+    param([object]$Row)
+    return ("$(Get-PimRowProp -Row $Row -Names @('Action'))".Trim() -ieq 'Remove')
+}
+
+function Test-PimAssignmentFlag {
+    # v1 compared the string to "TRUE"; also accept the usual truthy spellings from SQL/JSON.
+    param([object]$Value)
+    return ("$Value".Trim() -match '^(?i)(true|1|yes|y)$')
+}
+
+function Get-PimAssignmentIntent {
+    # PURE: what the row asks for. Permanent when Permanent=TRUE or no positive day count -- the
+    # SAME rule the create bodies use (New-PimRoleScheduleBody / New-PimGroupMembershipBody).
+    param([object]$Row)
+    $days = 0
+    [void][int]::TryParse("$(Get-PimRowProp -Row $Row -Names @('NumOfDaysWhenExpire'))".Trim(), [ref]$days)
+    $perm = Test-PimAssignmentFlag (Get-PimRowProp -Row $Row -Names @('Permanent'))
+    $action = "$(Get-PimRowProp -Row $Row -Names @('Action'))".Trim()
+    [pscustomobject]@{
+        permanent      = ($perm -or $days -le 0)
+        days           = $days
+        autoExtend     = (Test-PimAssignmentFlag (Get-PimRowProp -Row $Row -Names @('AutoExtend')))
+        updateExisting = ((Test-PimAssignmentFlag (Get-PimRowProp -Row $Row -Names @('UpdateExisting'))) -or ($action -ieq 'Update'))
+        type           = "$(Get-PimRowProp -Row $Row -Names @('AssignmentType'))".Trim()
+    }
+}
+
+function ConvertTo-PimAssignmentUtc {
+    # PURE: a Graph/ARM date (string, or [datetime] after ConvertFrom-Json) -> UTC [datetime], or $null.
+    param([object]$Value)
+    if ($null -eq $Value) { return $null }
+    if ($Value -is [datetime]) {
+        if ($Value.Kind -eq [DateTimeKind]::Unspecified) { return [datetime]::SpecifyKind($Value, [DateTimeKind]::Utc) }
+        return $Value.ToUniversalTime()
+    }
+    $s = "$Value".Trim(); if (-not $s) { return $null }
+    $d = [datetime]::MinValue
+    $styles = [Globalization.DateTimeStyles]::AdjustToUniversal -bor [Globalization.DateTimeStyles]::AssumeUniversal
+    if ([datetime]::TryParse($s, [Globalization.CultureInfo]::InvariantCulture, $styles, [ref]$d)) { return $d }
+    return $null
+}
+
+function Get-PimTypeNeutralKey {
+    # PURE: "<...>|eligible" / "<...>|active" -> "<...>". A key whose type is neither returns ''
+    # so an untyped row can never be paired with (and remove) a live assignment.
+    param([string]$Key)
+    $k = "$Key".Trim().ToLowerInvariant()
+    if ($k -match '^(.+)\|(eligible|active)$') { return $Matches[1] }
+    return ''
+}
+
+function Select-PimRemoveRows {
+    # The Remove rows a scope can act on. Operator 2026-09-13: a Remove row REVOKES the delegation like
+    # the Manager's revoke -- eligible AND active -- so AssignmentType does not narrow it (the core matches
+    # both types). A type other than Eligible/Active/blank is a typo and is reported, never guessed at.
+    param([object[]]$Rows = @(), [string]$Scope)
+    $out = New-Object System.Collections.Generic.List[object]
+    foreach ($r in @($Rows)) {
+        if ($null -eq $r) { continue }
+        $t = "$(Get-PimRowProp -Row $r -Names @('AssignmentType'))".Trim()
+        if (-not $t -or $t -ieq 'Eligible' -or $t -ieq 'Active') { $out.Add($r); continue }
+        Write-Warning ("  [engine] {0}: a Remove row has AssignmentType '{1}' (not Eligible/Active/blank) -- skipped, nothing revoked; fix the row." -f $Scope, $t)
+    }
+    return $out.ToArray()
+}
+
+function Get-PimLiveScheduleWindow {
+    # PURE: normalise a live assignment row's schedule. Rows built by the assignment GetLive blocks
+    # carry scheduleKnown/startDateTime/endDateTime/expirationType; anything else is 'unknown' and
+    # is never maintained (a maintenance write on a guess is worse than none).
+    param([object]$Live)
+    $unknown = [pscustomobject]@{ known = $false; permanent = $false; startUtc = $null; endUtc = $null; parseable = $false }
+    if ($null -eq $Live -or -not $Live.PSObject.Properties['scheduleKnown'] -or -not $Live.scheduleKnown) { return $unknown }
+    $start = ConvertTo-PimAssignmentUtc $Live.startDateTime
+    $end   = ConvertTo-PimAssignmentUtc $Live.endDateTime
+    $expType = "$($Live.expirationType)".Trim()
+    $rawEnd = "$($Live.endDateTime)".Trim()
+    $perm = ($expType -ieq 'noExpiration') -or (-not $rawEnd -and $expType -notmatch '(?i)afterDuration|afterDateTime')
+    [pscustomobject]@{ known = $true; permanent = [bool]$perm; startUtc = $start; endUtc = $end; parseable = ($perm -or $null -ne $end) }
+}
+
+function Get-PimAssignmentMaintenance {
+    <#
+      PURE. Is an EXISTING assignment due for AdminExtend / AdminUpdate? Returns
+      { action = none|extend|update; reason; daysLeft }.
+      Order is v1's (e.g. v1:3463-3528): permanent live -> only UpdateExisting can change it; an
+      expiring live -> AutoExtend first (<= 30 days), then UpdateExisting.
+      A renewal is only "due" when it moves the end date by more than a day, so a short
+      NumOfDaysWhenExpire (<= 30) cannot turn into a write on every engine tick.
+    #>
+    param([object]$Desired, [object]$Live, [datetime]$NowUtc = [datetime]::UtcNow, [int]$WithinDays = $script:PimAssignmentRenewWithinDays)
+    $now = $NowUtc.ToUniversalTime()
+    $intent = Get-PimAssignmentIntent -Row $Desired
+    $w = Get-PimLiveScheduleWindow -Live $Live
+    if (-not $w.known)     { return [pscustomobject]@{ action = 'none'; reason = 'live schedule not read'; daysLeft = $null } }
+    if (-not $w.parseable) { return [pscustomobject]@{ action = 'none'; reason = 'live expiry unparseable (v1: NoAction)'; daysLeft = $null } }
+    if ($w.permanent) {
+        if ($intent.updateExisting -and -not $intent.permanent) {
+            return [pscustomobject]@{ action = 'update'; reason = "permanence: live is permanent, the row asks for $($intent.days) day(s)"; daysLeft = $null }
+        }
+        return [pscustomobject]@{ action = 'none'; reason = 'permanent'; daysLeft = $null }
+    }
+    $daysLeft = [math]::Round(($w.endUtc - $now).TotalDays, 0)
+    $gain = if ($intent.permanent) { [double]::MaxValue } else { ($now.AddDays($intent.days) - $w.endUtc).TotalDays }
+    if ($daysLeft -le $WithinDays -and $intent.autoExtend -and $gain -gt 1) {
+        return [pscustomobject]@{ action = 'extend'; reason = "AutoExtend: $daysLeft day(s) left"; daysLeft = $daysLeft }
+    }
+    if ($intent.updateExisting) {
+        if ($intent.permanent) { return [pscustomobject]@{ action = 'update'; reason = 'permanence: the row asks for a permanent assignment'; daysLeft = $daysLeft } }
+        if ($null -ne $w.startUtc) {
+            $dur = [math]::Round(($w.endUtc - $w.startUtc).TotalDays, 0)
+            if ([math]::Abs($dur - $intent.days) -gt 1) {
+                return [pscustomobject]@{ action = 'update'; reason = "duration: live $dur day(s), the row asks for $($intent.days)"; daysLeft = $daysLeft }
+            }
+        }
+        if ($daysLeft -le $WithinDays -and $gain -gt 1) {
+            return [pscustomobject]@{ action = 'update'; reason = "UpdateExisting renewal: $daysLeft day(s) left (v1 re-applied UpdateExisting rows on every run, so they never lapsed)"; daysLeft = $daysLeft }
+        }
+    }
+    return [pscustomobject]@{ action = 'none'; reason = "$daysLeft day(s) left"; daysLeft = $daysLeft }
+}
+
+function Test-PimAssignmentAbsentError {
+    # PURE: does this removal failure mean "there was nothing to remove"? That is SUCCESS for a
+    # removal (idempotence) -- v1 logged "Assignment already removed (not found) ... skipping".
+    param([string]$Message)
+    return ("$Message" -match '(?i)RoleAssignmentDoesNotExist|RoleEligibilityScheduleDoesNotExist|ScheduleNotFound|ResourceNotFound|Request_ResourceNotFound|\bHTTP\s*404\b|\b404\b.*not\s*found|does not exist')
+}
+
+function Test-PimAssignmentRetryableError {
+    # PURE: failures a fallback must NOT paper over (permission, throttling, service errors).
+    param([string]$Message)
+    return ("$Message" -match '(?i)\b403\b|Forbidden|AuthorizationFailed|Authorization_RequestDenied|InsufficientPermissions|\b429\b|TooManyRequests|throttl|\bHTTP 5\d\d\b|InternalServerError|ServiceUnavailable')
+}
+
+function Test-PimAssignmentDurationRejected {
+    param([string]$Message)
+    return ("$Message" -match '(?i)greater than (the )?maximum allowed duration|ExpirationRule')
+}
+
+# §70.10 (2026-09-13): how long a group's membership read stays valid IN ONE PROCESS. It was 5 minutes, but a tick's
+# batched read of every owned group takes 4-7 minutes on internal, so the SECOND scope that needs it (GroupMembers
+# after AdminMembers, or a later job in the same tick) often re-read everything. Every write through the engine or the
+# queue drops the affected group at once (Reset-PimAssignmentLiveCaches), and a long-lived host that needs a fresh view
+# (the Manager's drift check) clears the caches explicitly (Clear-PimEngineReadCaches).
+$script:PimGrpMemCacheTtlMinutes = 20
+function Clear-PimEngineReadCaches {
+    # Drop every per-process live-read cache so the next read comes from the tenant. For long-lived hosts (the Manager)
+    # before a drift check; a tick is a fresh process and never needs it. The group POLICY-ID map is NOT cleared: a
+    # group's policy id never changes, and a stale entry removes itself when its policy read fails (§70.10).
+    $script:PimGrpMemCache = $null
+    $script:PimDirSchedAt = $null
+    $script:PimSolutionGroupsAt = $null
+}
+
+function Reset-PimAssignmentLiveCaches {
+    # After a write, the next read of THAT assignment must come from the tenant, not from the
+    # 5-minute preload -- otherwise a just-extended assignment still looks expiring and is
+    # extended again on the next tick, and a just-removed one is removed again.
+    param([string]$GroupId)
+    $script:PimDirSchedAt = $null
+    if ($GroupId -and $script:PimGrpMemCache -is [hashtable]) { $script:PimGrpMemCache.Remove("$GroupId") }
+}
+
+function Invoke-PimAssignmentRemoval {
+    # Run a removal; "already absent" is success (idempotent). Anything else rethrows so the core
+    # records it through PIM-FailureCatalog.
+    param([Parameter(Mandatory)][scriptblock]$Action, [string]$What)
+    try {
+        $r = & $Action
+        return [pscustomobject]@{ removed = $true; alreadyAbsent = $false; response = $r }
+    } catch {
+        $m = "$($_.Exception.Message)"
+        if ($_.ErrorDetails -and "$($_.ErrorDetails.Message)".Trim()) { $m = "$m $($_.ErrorDetails.Message)" }
+        if (Test-PimAssignmentAbsentError $m) {
+            Write-Host ("    [=] {0} (already absent -- nothing to remove)" -f $What) -ForegroundColor DarkGray
+            return [pscustomobject]@{ removed = $false; alreadyAbsent = $true; response = $null }
+        }
+        throw
+    }
+}
+
+function Invoke-PimGraphScheduleMaintenance {
+    <#
+      POST an adminExtend / adminUpdate schedule request (directory role or PIM-for-Groups).
+        extend : duration ladder (lands at the policy max, like the create). If Graph refuses the
+                 EXTEND itself (not a permission/throttle/service error), renew with adminUpdate --
+                 same schedule, same end result, so an assignment is never left to lapse.
+        update : NO ladder. A policy that caps the duration below the row would otherwise be
+                 re-written every run; the refusal is reported (pimApplied=$false), nothing changes.
+    #>
+    param([Parameter(Mandatory)][string]$Path, [Parameter(Mandatory)][hashtable]$Body, [Parameter(Mandatory)][ValidateSet('adminExtend','adminUpdate')][string]$Verb, [string]$What)
+    $Body['action'] = $Verb
+    if ($Verb -eq 'adminExtend') {
+        try { return (Invoke-PimScheduleCreate -Path $Path -Body $Body) }
+        catch {
+            $m = "$($_.Exception.Message)"
+            if (Test-PimAssignmentRetryableError $m) { throw }
+            Write-Host ("    [~] {0}: adminExtend refused ({1}) -- renewing with adminUpdate" -f $What, $m) -ForegroundColor DarkYellow
+            $Body['action'] = 'adminUpdate'
+            try { return (Invoke-PimScheduleCreate -Path $Path -Body $Body) }
+            catch { throw ("AutoExtend of {0} failed: adminExtend: {1} | adminUpdate: {2}" -f $What, $m, $_.Exception.Message) }
+        }
+    }
+    try { return (Invoke-PimGraph -Method POST -Path $Path -Body $Body) }
+    catch {
+        $m = "$($_.Exception.Message)"
+        if (Test-PimAssignmentDurationRejected $m) {
+            Write-Warning ("  [engine] {0}: adminUpdate refused by the PIM policy's maximum duration -- the live assignment is unchanged. Lower NumOfDaysWhenExpire or raise the policy maximum. ({1})" -f $What, $m)
+            return [pscustomobject]@{ pimApplied = $false; reason = "the PIM policy caps the duration below NumOfDaysWhenExpire: $m" }
+        }
+        throw
+    }
+}
+
+function Remove-PimDirRoleAssignment {
+    # adminRemove of ONE directory-role assignment (tenant or AU scope), of the type the live row has.
+    param([Parameter(Mandatory)][object]$Live, [string]$What)
+    $scope = "$($Live.directoryScopeId)"; if (-not $scope) { $scope = '/' }
+    $ep = if ("$($Live.AssignmentType)" -eq 'Active') { 'roleAssignmentScheduleRequests' } else { 'roleEligibilityScheduleRequests' }
+    $body = New-PimRoleScheduleBody -PrincipalId "$($Live.principalId)" -RoleDefId "$($Live.roleDefinitionId)" -Action 'adminRemove' -DirectoryScopeId $scope
+    $r = Invoke-PimAssignmentRemoval -What $What -Action { Invoke-PimGraph -Method POST -Path "/roleManagement/directory/$ep" -Body $body }
+    Reset-PimAssignmentLiveCaches
+    return $r
+}
+
+function Remove-PimGroupScheduleAssignment {
+    # adminRemove of ONE PIM-for-Groups membership (member principal in container group), of the type the live row has.
+    param([Parameter(Mandatory)][object]$Live, [string]$What)
+    $gid = "$($Live.groupId)"
+    if (-not $gid) { throw "PIM-for-Groups removal of '$What': the live row carries no groupId -- refusing to guess the group" }
+    $acc = "$($Live.accessId)"; if (-not $acc) { $acc = 'member' }
+    $ep = if ("$($Live.AssignmentType)" -eq 'Active') { 'assignmentScheduleRequests' } else { 'eligibilityScheduleRequests' }
+    $body = New-PimGroupMembershipBody -PrincipalId "$($Live.principalId)" -GroupId $gid -AccessId $acc -Action 'adminRemove'
+    $r = Invoke-PimAssignmentRemoval -What $What -Action { Invoke-PimGraph -Method POST -Path "/identityGovernance/privilegedAccess/group/$ep" -Body $body }
+    Reset-PimAssignmentLiveCaches -GroupId $gid
+    return $r
+}
+
+function Remove-PimAzResScheduleAssignment {
+    # ARM AdminRemove of ONE Azure PIM assignment at its scope (v1 PIM-Assignment-Revoker:676-703 shape).
+    param([Parameter(Mandatory)][object]$Live, [string]$What)
+    $scope = "$($Live.AzScope)"
+    $rdef = "$($Live.roleDefinitionId)"
+    if (-not $rdef -and "$($Live.RoleId)") { $rdef = "$scope/providers/Microsoft.Authorization/roleDefinitions/$($Live.RoleId)" }
+    if (-not $scope -or -not $rdef -or -not "$($Live.principalId)") { throw "AzRes removal of '$What': the live row lacks scope/role/principal -- refusing to guess" }
+    $ep = if ("$($Live.AssignmentType)" -eq 'Active') { 'roleAssignmentScheduleRequests' } else { 'roleEligibilityScheduleRequests' }
+    $body = @{ properties = @{ principalId = "$($Live.principalId)"; roleDefinitionId = $rdef; requestType = 'AdminRemove'; justification = 'PIM4EntraPS engine: Remove' } }
+    $guid = [guid]::NewGuid().ToString()
+    return (Invoke-PimAssignmentRemoval -What $What -Action { Invoke-PimArm -Method PUT -Path "$scope/providers/Microsoft.Authorization/$ep/$guid" -ApiVersion '2020-10-01-preview' -Body $body })
+}
+
+function Invoke-PimAssignmentMaintenanceApply {
+    <#
+      ApplyUpdate for the five assignment scopes: decide (Get-PimAssignmentMaintenance) and issue
+      adminExtend / adminUpdate against the LIVE assignment, with the schedule the ROW asks for
+      (v1 built the same start=now / end=now+NumOfDaysWhenExpire body for Assign, Extend and Update).
+    #>
+    param([Parameter(Mandatory)][ValidateSet('DirRole','GroupMember','AzRes')][string]$Kind, [Parameter(Mandatory)][object]$Item, [datetime]$NowUtc = [datetime]::UtcNow)
+    $m = Get-PimAssignmentMaintenance -Desired $Item.desired -Live $Item.live -NowUtc $NowUtc
+    if ($m.action -eq 'none') { return [pscustomobject]@{ pimApplied = $false; reason = "nothing due: $($m.reason)" } }
+    $intent = Get-PimAssignmentIntent -Row $Item.desired
+    $l = $Item.live
+    $verb = if ($m.action -eq 'extend') { 'adminExtend' } else { 'adminUpdate' }
+    Write-Host ("    [~] {0}: {1} ({2})" -f $Item.key, $verb, $m.reason) -ForegroundColor Yellow
+    switch ($Kind) {
+        'DirRole' {
+            $scope = "$($l.directoryScopeId)"; if (-not $scope) { $scope = '/' }
+            $body = New-PimRoleScheduleBody -PrincipalId "$($l.principalId)" -RoleDefId "$($l.roleDefinitionId)" -Permanent:$intent.permanent -Days $intent.days -Action $verb -StartUtc ($NowUtc.ToUniversalTime().ToString('o')) -DirectoryScopeId $scope
+            $ep = if ("$($l.AssignmentType)" -eq 'Active') { 'roleAssignmentScheduleRequests' } else { 'roleEligibilityScheduleRequests' }
+            $r = Invoke-PimGraphScheduleMaintenance -Path "/roleManagement/directory/$ep" -Body $body -Verb $verb -What "$($Item.key)"
+            Reset-PimAssignmentLiveCaches
+            return $r
+        }
+        'GroupMember' {
+            $gid = "$($l.groupId)"; if (-not $gid) { throw "PIM-for-Groups $verb of '$($Item.key)': the live row carries no groupId" }
+            $acc = "$($l.accessId)"; if (-not $acc) { $acc = 'member' }
+            $body = New-PimGroupMembershipBody -PrincipalId "$($l.principalId)" -GroupId $gid -AccessId $acc -Permanent:$intent.permanent -Days $intent.days -Action $verb
+            $ep = if ("$($l.AssignmentType)" -eq 'Active') { 'assignmentScheduleRequests' } else { 'eligibilityScheduleRequests' }
+            $r = Invoke-PimGraphScheduleMaintenance -Path "/identityGovernance/privilegedAccess/group/$ep" -Body $body -Verb $verb -What "$($Item.key)"
+            Reset-PimAssignmentLiveCaches -GroupId $gid
+            return $r
+        }
+        'AzRes' {
+            $scope = "$($l.AzScope)"
+            $rdef = "$($l.roleDefinitionId)"; if (-not $rdef) { $rdef = "$scope/providers/Microsoft.Authorization/roleDefinitions/$($l.RoleId)" }
+            $start = $NowUtc.ToUniversalTime()
+            $exp = if ($intent.permanent) { @{ type = 'noExpiration' } } else { @{ type = 'AfterDateTime'; endDateTime = $start.AddDays($intent.days).ToString('o') } }
+            $ep = if ("$($l.AssignmentType)" -eq 'Active') { 'roleAssignmentScheduleRequests' } else { 'roleEligibilityScheduleRequests' }
+            $mk = { param($rt) @{ properties = @{ principalId = "$($l.principalId)"; roleDefinitionId = $rdef; requestType = $rt; justification = "PIM4EntraPS engine: $rt"; scheduleInfo = @{ startDateTime = $start.ToString('o'); expiration = $exp } } } }
+            $put = { param($b) Invoke-PimArm -Method PUT -Path "$scope/providers/Microsoft.Authorization/$ep/$([guid]::NewGuid().ToString())" -ApiVersion '2020-10-01-preview' -Body $b }
+            if ($verb -eq 'adminExtend') {
+                try { return (& $put (& $mk 'AdminExtend')) }
+                catch {
+                    $em = "$($_.Exception.Message)"
+                    if (Test-PimAssignmentRetryableError $em) { throw }
+                    Write-Host ("    [~] {0}: AdminExtend refused ({1}) -- renewing with AdminUpdate" -f $Item.key, $em) -ForegroundColor DarkYellow
+                    try { return (& $put (& $mk 'AdminUpdate')) }
+                    catch { throw ("AutoExtend of {0} failed: AdminExtend: {1} | AdminUpdate: {2}" -f $Item.key, $em, $_.Exception.Message) }
+                }
+            }
+            try { return (& $put (& $mk 'AdminUpdate')) }
+            catch {
+                $em = "$($_.Exception.Message)"
+                if (Test-PimAssignmentDurationRejected $em) {
+                    Write-Warning ("  [engine] {0}: AdminUpdate refused by the PIM policy's maximum duration -- the live assignment is unchanged. ({1})" -f $Item.key, $em)
+                    return [pscustomobject]@{ pimApplied = $false; reason = "the PIM policy caps the duration below NumOfDaysWhenExpire: $em" }
+                }
+                throw
+            }
+        }
+    }
+}
+
 function New-PimEntraRolesProvider {
     @{
         scope  = 'EntraRoles'
@@ -253,13 +1104,18 @@ function New-PimEntraRolesProvider {
         refreshBefore = $true
         GetDesired = {
             param($ctx)
-            @(Get-PimDesiredRows -Entity 'PIM-Assignments-Roles-Groups' | Where-Object { (Get-PimRowProp -Row $_ -Names @('Action')) -ne 'Remove' })
+            $all = @(Get-PimDesiredRows -Entity 'PIM-Assignments-Roles-Groups')
+            # 68.6 row 24: Remove rows are not desired -- they are TARGETED removals (GetRemoveRows).
+            $ctx['removeRows:EntraRoles'] = @($all | Where-Object { Test-PimRowIsRemove $_ })
+            @($all | Where-Object { -not (Test-PimRowIsRemove $_) })
         }
+        GetRemoveRows = { param($ctx) @(Select-PimRemoveRows -Rows @($ctx['removeRows:EntraRoles']) -Scope 'EntraRoles') }
+        TypeKeyOf = { param($r) Get-PimTypeNeutralKey -Key (Get-PimEntraRoleKey -Row $r) }
         GetLive = {
             param($ctx)
-            if (-not $Global:PimContextBuiltAt) { try { Build-PimContext | Out-Null } catch {} }
-            $rolesByName  = @{}; foreach ($r in @($Global:Roles_All_ID))  { $n = "$($r.DisplayName)"; if ($n) { $rolesByName[$n.ToLowerInvariant()]  = "$($r.Id)" } }
-            $ctx['roleNameToId'] = $rolesByName
+            # Was `try { Build-PimContext } catch {}` -- see Get-PimEntraRoleNameMap for why that hid
+            # every EntraRoles failure in the scheduler as "unresolved group/role".
+            $ctx['roleNameToId'] = Get-PimEntraRoleNameMap
             # BUG-17: this used to enumerate ONLY the group tags found in the desired rows,
             # so deleting a desired row also removed its live assignment from view and the
             # prune it should have caused did nothing -- the assignment stayed in the tenant
@@ -274,13 +1130,21 @@ function New-PimEntraRolesProvider {
                 $tag = "$($owned.byId[$gid].tag)"; if (-not $tag) { continue }
                 foreach ($s in (Get-PimLiveDirRoleSchedules -PrincipalId $gid)) {
                     if ("$($s.directoryScopeId)" -ne '/') { continue }   # EntraRoles = tenant-scope only (AU-scoped handled by RolesAUs)
-                    $live.Add([pscustomobject]@{ GroupTag=$tag; RoleDefinitionName=$s.RoleDefinitionName; AssignmentType=$s.AssignmentType; principalId=$gid; roleDefinitionId=$s.roleDefinitionId })
+                    # An ACTIVATION of an eligible assignment is not an Active assignment: never key it
+                    # as one (it would read as "Active exists", be extended, or be removed as a leftover).
+                    if ("$($s.graphAssignmentType)" -ieq 'Activated') { continue }
+                    $live.Add([pscustomobject]@{ GroupTag=$tag; RoleDefinitionName=$s.RoleDefinitionName; AssignmentType=$s.AssignmentType; principalId=$gid; roleDefinitionId=$s.roleDefinitionId
+                                                 directoryScopeId='/'; scheduleKnown=$s.scheduleKnown; startDateTime=$s.startDateTime; endDateTime=$s.endDateTime })
                 }
             }
             $live.ToArray()
         }
         KeyOf = { param($r) Get-PimEntraRoleKey -Row $r }
-        Equal = { param($d,$l) $true }   # existence-based (group already holds the role at the right tier)
+        # 68.6 rows 25-26: an existing assignment is "different" when AutoExtend / UpdateExisting make
+        # it due (Get-PimAssignmentMaintenance). Was `$true` -- every duration, permanence and
+        # expiry change was ignored and AutoExtend assignments lapsed.
+        Equal = { param($d,$l) (Get-PimAssignmentMaintenance -Desired $d -Live $l).action -eq 'none' }
+        ApplyUpdate = { param($item,$ctx) Invoke-PimAssignmentMaintenanceApply -Kind DirRole -Item $item }
         ApplyCreate = {
             param($item,$ctx)
             $d = $item.desired
@@ -298,11 +1162,9 @@ function New-PimEntraRolesProvider {
         }
         ApplyRemove = {
             param($item,$ctx)
-            $l = $item.live
-            $type = "$($l.AssignmentType)"
-            $body = New-PimRoleScheduleBody -PrincipalId "$($l.principalId)" -RoleDefId "$($l.roleDefinitionId)" -Action 'adminRemove'
-            $ep = if ($type -eq 'Active') { 'roleAssignmentScheduleRequests' } else { 'roleEligibilityScheduleRequests' }
-            Invoke-PimGraph -Method POST -Path "/roleManagement/directory/$ep" -Body $body
+            # Prune, targeted Remove row, or the old half of a type change -- one call, "already
+            # absent" is success.
+            Remove-PimDirRoleAssignment -Live $item.live -What "$($item.key)"
         }
     }
 }
@@ -329,13 +1191,62 @@ function Ensure-PimContextLoaded {
     }
 }
 
+function Get-PimEntraRoleNameMap {
+    <#
+      role displayName (lower) -> role definition id, for every provider that resolves an Entra role
+      by NAME. One place, and it FAILS LOUDLY on an empty catalog.
+      🔴 Four providers built this map inline over $Global:Roles_All_ID after a context load that could
+      fail silently (Build-PimContext absent from the scheduler, "command not found" swallowed). An
+      empty map is not "no roles" -- every tenant has ~100 built-in roles -- so an empty catalog must
+      stop the scope with the real reason, never turn into one "unresolved group/role" per item.
+    #>
+    # 🪤 NOT `@($Global:Roles_All_ID).Count`: an UNSET variable makes @($null), whose Count is 1, so
+    # the load was skipped on exactly the cold tick this exists for. Count real items only.
+    if (-not @(@($Global:Roles_All_ID) | Where-Object { $_ }).Count) {
+        if (-not (Get-Command Build-PimContext -ErrorAction SilentlyContinue)) {
+            throw 'the Entra role catalog cannot load: Build-PimContext is not defined in this host (PIM-ContextBuilder.ps1 is not dot-sourced). Every Entra role would resolve as "unresolved".'
+        }
+        Build-PimContext -Refresh:([bool]$Global:PimContextBuiltAt) | Out-Null   # throws with Graph's own reason
+    }
+    $map = @{}
+    foreach ($r in @($Global:Roles_All_ID)) { $n = "$($r.DisplayName)"; if ($n) { $map[$n.ToLowerInvariant()] = "$($r.Id)" } }
+    if ($map.Count -eq 0) {
+        throw 'the Entra role catalog is EMPTY after loading (GET /roleManagement/directory/roleDefinitions returned nothing) -- check the runtime identity''s RoleManagement.Read.Directory permission.'
+    }
+    return $map
+}
+
 function Get-PimGroupDefinitionRows {
     # Every entity that DEFINES a group becomes one create candidate. All share the
     # GroupName/GroupTag/GroupDescription/IsRoleAssignable/AdministrativeUnitTag columns.
+    #
+    # 🔴 THE WIZARD OFFERED GROUP TYPES THE ENGINE NEVER CREATED (operator, 2026-09-12). The Manager's
+    # direct-group wizard writes Department / Process rows to their own entities, but this list only
+    # read Roles/Services/Organization/Tasks -- so those groups were authored, validated, shown on the
+    # map, and never created. Operator decision: "wire them into engine". Project (PROJ-, AU
+    # PIM-PROJECTS) and Cross-org (CORG-, AU PIM-CROSSORG) were added the same day.
+    # 🔒 PIM-Definitions-Departments is ALSO the department/owner store (BUG-142: rows of
+    # Department + Owners, no GroupName). Those rows are NOT groups, and the GroupName guard below is
+    # what keeps them out -- do not loosen it.
+    # ⛔ PIM-Definitions-Resources is DELIBERATELY NOT in this list. Discovery auto-create
+    # (Invoke-PimDiscoveryAutoCreate, PIM-EngineCore.ps1) writes every discovered Azure/Power BI
+    # resource into that entity, so reading it here would start creating every discovered group at
+    # every customer with discovery switched on. The operator DROPPED "Resource" as a direct-group
+    # type for now (2026-09-12: "drop the resources category for now"), so nothing authors a
+    # direct group there any more; the entity remains discovery's.
+    # 68.6 #31 -- Lifecycle=Retire rows are NOT group definitions by default: the Groups provider
+    # would otherwise re-create (and re-describe) a group the GroupRetirement provider is deleting, and
+    # GroupRetirement refuses to act while this function still returns the row. -IncludeRetired is for
+    # the two resolvers that must keep SEEING the group until it is gone (the solution-owned set and
+    # the tag map), so its live assignments are neither orphaned from view nor reported "unresolved".
+    param([switch]$IncludeRetired)
     $list = New-Object System.Collections.Generic.List[object]
-    foreach ($e in @('PIM-Definitions-Roles', 'PIM-Definitions-Services', 'PIM-Definitions-Organization', 'PIM-Definitions-Tasks')) {
+    foreach ($e in @('PIM-Definitions-Roles', 'PIM-Definitions-Services', 'PIM-Definitions-Organization', 'PIM-Definitions-Tasks',
+                     'PIM-Definitions-Departments', 'PIM-Definitions-Processes', 'PIM-Definitions-Projects', 'PIM-Definitions-CrossOrg')) {
         foreach ($r in @(Get-PimDesiredRows -Entity $e)) {
             $gn = Get-PimRowProp -Row $r -Names @('GroupName'); if (-not $gn) { continue }
+            $life = "$(Get-PimRowProp -Row $r -Names @('Lifecycle'))".Trim()
+            if (-not $IncludeRetired -and $life -match '(?i)^retire') { continue }
             $list.Add([pscustomobject]@{
                 GroupName             = $gn
                 GroupTag              = (Get-PimRowProp -Row $r -Names @('GroupTag'))
@@ -347,6 +1258,7 @@ function Get-PimGroupDefinitionRows {
                 Department            = (Get-PimRowProp -Row $r -Names @('Department','DepartmentTag'))
                 PolicyTemplate        = (Get-PimRowProp -Row $r -Names @('PolicyTemplate'))
                 ReviewCycle           = (Get-PimRowProp -Row $r -Names @('ReviewCycle'))
+                Lifecycle             = $life
                 SourceEntity          = $e
             })
         }
@@ -355,7 +1267,7 @@ function Get-PimGroupDefinitionRows {
 }
 
 function Get-PimTagToGroupName {
-    $h = @{}; foreach ($d in (Get-PimGroupDefinitionRows)) { $t = "$($d.GroupTag)"; if ($t) { $h[$t.ToLowerInvariant()] = $d.GroupName } }; $h
+    $h = @{}; foreach ($d in (Get-PimGroupDefinitionRows -IncludeRetired)) { $t = "$($d.GroupTag)"; if ($t) { $h[$t.ToLowerInvariant()] = $d.GroupName } }; $h
 }
 function Get-PimTagToAuName {
     $h = @{}; foreach ($r in @(Get-PimDesiredRows -Entity 'PIM-Definitions-AU')) {
@@ -386,11 +1298,12 @@ function Get-PimSolutionOwnedGroups {
       scheduler process picks up newly-created groups without re-resolving every scope.
     #>
     [CmdletBinding()] param([switch]$Force)
+    if ($global:PIM_OwnedGroupsDirty) { $Force = $true; $global:PIM_OwnedGroupsDirty = $false }   # a group was created since (Add-PimContextObject)
     if (-not $Force -and $script:PimSolutionGroupsAt -and ((Get-Date) - $script:PimSolutionGroupsAt).TotalMinutes -lt 5) {
         return $script:PimSolutionGroups
     }
     $byId = @{}; $byTag = @{}
-    foreach ($d in (Get-PimGroupDefinitionRows)) {
+    foreach ($d in (Get-PimGroupDefinitionRows -IncludeRetired)) {
         $name = "$($d.GroupName)"; if (-not $name) { continue }
         $tag  = "$($d.GroupTag)"
         $gid  = Resolve-PimLiveGroupIdByName $name
@@ -403,7 +1316,7 @@ function Get-PimSolutionOwnedGroups {
     }
     $script:PimSolutionGroups = [pscustomobject]@{ byId = $byId; byTag = $byTag }
     $script:PimSolutionGroupsAt = Get-Date
-    Write-Host ("  [engine] solution-owned groups resolved: {0} of {1} defined" -f $byId.Count, @(Get-PimGroupDefinitionRows).Count) -ForegroundColor DarkGray
+    Write-Host ("  [engine] solution-owned groups resolved: {0} of {1} defined" -f $byId.Count, @(Get-PimGroupDefinitionRows -IncludeRetired).Count) -ForegroundColor DarkGray
     return $script:PimSolutionGroups
 }
 
@@ -642,19 +1555,235 @@ function Get-PimLiveGroupMembership {
     # MissingParameters), so this is a per-group filtered query -- there is no valid bulk
     # preload for PIM-for-Groups (unlike directory roles). Cached per group per run.
     param([Parameter(Mandatory)][string]$GroupId, [string]$GroupTag)
-    if (-not $script:PimGrpMemCache) { $script:PimGrpMemCache = @{} }
-    if ($script:PimGrpMemCache.ContainsKey($GroupId)) {
-        return @($script:PimGrpMemCache[$GroupId] | ForEach-Object { [pscustomobject]@{ principalId = $_.principalId; accessId = $_.accessId; GroupTag = $GroupTag; AssignmentType = $_.AssignmentType } })
+    if (-not ($script:PimGrpMemCache -is [hashtable])) { $script:PimGrpMemCache = @{} }
+    # Entries carry their read time. This cache had NO expiry: in the long-running scheduler a
+    # group's membership was read once per container life, so a removal, an AutoExtend or a new
+    # assignment was never seen again (68.6 rows 24/26 depend on a fresh read). Same 5-minute
+    # bound as the directory-role preload; a write through this file drops the entry at once.
+    $hit = $script:PimGrpMemCache[$GroupId]
+    $ttl = if ($script:PimGrpMemCacheTtlMinutes -gt 0) { $script:PimGrpMemCacheTtlMinutes } else { 20 }
+    if ($hit -is [hashtable] -and $hit.at -and ((Get-Date) - $hit.at).TotalMinutes -lt $ttl) {
+        return @($hit.rows | ForEach-Object { $c = $_ | Select-Object *; $c.GroupTag = $GroupTag; $c })
     }
     $out = New-Object System.Collections.Generic.List[object]
-    foreach ($pair in @(@{ ep = 'eligibilitySchedules'; type = 'Eligible' }, @{ ep = 'assignmentSchedules'; type = 'Active' })) {
+    foreach ($pair in $script:PimGroupSchedulePairs) {
         try {
-            foreach ($s in @(Invoke-PimGraph -All -Path "/identityGovernance/privilegedAccess/group/$($pair.ep)?`$filter=groupId eq '$GroupId'")) {
-                $out.Add([pscustomobject]@{ principalId = "$($s.principalId)"; accessId = "$($s.accessId)"; GroupTag = $GroupTag; AssignmentType = $pair.type })
+            foreach ($s in @(Invoke-PimGraph -All -Path (Get-PimGroupSchedulePath -Endpoint $pair.ep -GroupId $GroupId))) {
+                $out.Add((ConvertTo-PimLiveGroupMembershipRow -Schedule $s -GroupId $GroupId -GroupTag $GroupTag -AssignmentType $pair.type))
             }
         } catch { Write-Verbose "group membership ($GroupTag/$($pair.type)): $($_.Exception.Message)" }
     }
-    $arr = $out.ToArray(); $script:PimGrpMemCache[$GroupId] = $arr; $arr
+    $arr = $out.ToArray(); $script:PimGrpMemCache[$GroupId] = @{ at = (Get-Date); rows = $arr }; $arr
+}
+
+$script:PimGroupSchedulePairs = @(@{ ep = 'eligibilitySchedules'; type = 'Eligible' }, @{ ep = 'assignmentSchedules'; type = 'Active' })
+function Get-PimGroupSchedulePath {
+    param([Parameter(Mandatory)][string]$Endpoint, [Parameter(Mandatory)][string]$GroupId)
+    "/identityGovernance/privilegedAccess/group/$Endpoint`?`$filter=groupId eq '$GroupId'"
+}
+function ConvertTo-PimLiveGroupMembershipRow {
+    # PURE: one PIM-for-Groups schedule -> the uniform live membership row both readers build.
+    param([AllowNull()][object]$Schedule, [string]$GroupId, [string]$GroupTag, [string]$AssignmentType)
+    $s = $Schedule
+    # Schedule window (AutoExtend / UpdateExisting): scheduleInfo.startDateTime + expiration.
+    $si = $s.scheduleInfo
+    $known = ($null -ne $si -and "$($si.startDateTime)".Trim() -ne '')
+    $expType = if ($si -and $si.expiration) { "$($si.expiration.type)" } else { '' }
+    $end = if ($si -and $si.expiration) { $si.expiration.endDateTime } else { $null }
+    if ($known -and -not "$end".Trim() -and $expType -ieq 'afterDuration' -and "$($si.expiration.duration)".Trim()) {
+        try { $end = (ConvertTo-PimAssignmentUtc $si.startDateTime).Add([System.Xml.XmlConvert]::ToTimeSpan("$($si.expiration.duration)")).ToString('o') } catch { $end = $null }
+    }
+    [pscustomobject]@{ principalId = "$($s.principalId)"; accessId = "$($s.accessId)"; GroupTag = $GroupTag; AssignmentType = $AssignmentType
+        groupId = $GroupId; graphAssignmentType = "$($s.assignmentType)"
+        scheduleKnown = $known; startDateTime = $(if ($si) { $si.startDateTime } else { $null }); endDateTime = $end; expirationType = $expType }
+}
+
+function Initialize-PimGroupMembershipCache {
+    <#
+      PERFORMANCE (2026-09-13, internal): AdminMembers and GroupMembers each read every solution-owned group
+      one filtered request at a time -- 342 groups x (eligibility + assignment) = 684 sequential calls, ~7 min
+      per scope, which is most of why a tick took 25-50 minutes. The SAME filtered requests now go through
+      Graph /$batch (20 per round-trip), and the answers land in the cache Get-PimLiveGroupMembership already
+      reads, so its rows are built from identical responses by identical code. Only groups without a fresh
+      entry are read. 'GraphBatchReads' = false restores the one-by-one loop.
+    #>
+    param([Parameter(Mandatory)][hashtable]$GroupTagById)
+    if (-not ($script:PimGrpMemCache -is [hashtable])) { $script:PimGrpMemCache = @{} }
+    if (-not (Get-Command Invoke-PimGraphBatchGet -ErrorAction SilentlyContinue) -or -not (Test-PimGraphBatchReadsEnabled)) { return 0 }
+    $now = Get-Date
+    $ttl = if ($script:PimGrpMemCacheTtlMinutes -gt 0) { $script:PimGrpMemCacheTtlMinutes } else { 20 }
+    $need = New-Object System.Collections.Generic.List[string]
+    foreach ($gid in @($GroupTagById.Keys)) {
+        $hit = $script:PimGrpMemCache["$gid"]
+        if ($hit -is [hashtable] -and $hit.at -and ($now - $hit.at).TotalMinutes -lt $ttl) { continue }
+        $need.Add("$gid")
+    }
+    if ($need.Count -eq 0) { return 0 }
+    $paths = New-Object System.Collections.Generic.List[string]
+    foreach ($gid in $need) { foreach ($pair in $script:PimGroupSchedulePairs) { $paths.Add((Get-PimGroupSchedulePath -Endpoint $pair.ep -GroupId $gid)) } }
+    $res = Invoke-PimGraphBatchGet -Paths $paths.ToArray()
+    $i = 0
+    foreach ($gid in $need) {
+        $tag = "$($GroupTagById[$gid])"
+        $rows = New-Object System.Collections.Generic.List[object]
+        foreach ($pair in $script:PimGroupSchedulePairs) {
+            $r = $res[$i]; $i++
+            if (-not $r -or -not $r.ok) { if ($r) { Write-Verbose "group membership ($tag/$($pair.type)): $($r.error)" }; continue }
+            foreach ($s in @($r.items)) { $rows.Add((ConvertTo-PimLiveGroupMembershipRow -Schedule $s -GroupId $gid -GroupTag $tag -AssignmentType $pair.type)) }
+        }
+        $script:PimGrpMemCache[$gid] = @{ at = (Get-Date); rows = $rows.ToArray() }
+    }
+    Write-Host ("  [perf] group memberships read in batches: {0} group(s), {1} request(s), {2} round-trip(s)" -f $need.Count, $paths.Count, [Math]::Ceiling($paths.Count / 20)) -ForegroundColor DarkGray
+    return $need.Count
+}
+
+function Test-PimNarrowDeltaMembershipReadsEnabled {
+    # Kill switch for the by-principal membership read (pim.Settings / $global:PIM_ / env 'NarrowDeltaMembershipReads').
+    # ON by default; 'false' makes AdminMembers/GroupMembers read every solution-owned group again in every mode.
+    $v = $null
+    if (Get-Command Get-PimPolicySetting -ErrorAction SilentlyContinue) { try { $v = Get-PimPolicySetting -Name 'NarrowDeltaMembershipReads' -Default $null } catch { $v = $null } }
+    elseif ($null -ne $global:PIM_NarrowDeltaMembershipReads) { $v = $global:PIM_NarrowDeltaMembershipReads }
+    elseif ("$env:PIM_NarrowDeltaMembershipReads".Trim()) { $v = $env:PIM_NarrowDeltaMembershipReads }
+    return -not ("$v".Trim() -match '^(?i)(false|0|no|off|disabled?)$')
+}
+
+function Get-PimGroupSchedulePrincipalPath {
+    param([Parameter(Mandatory)][string]$Endpoint, [Parameter(Mandatory)][string]$PrincipalId)
+    "/identityGovernance/privilegedAccess/group/$Endpoint`?`$filter=principalId eq '$PrincipalId'"
+}
+
+function Get-PimLiveGroupMembershipsByPrincipal {
+    <#
+      PERFORMANCE (2026-09-13, internal): a cold tick spent ~4.5 min in AdminMembers (and GroupMembers the same)
+      reading the schedules of all 346 solution-owned groups -- 692 filtered requests, 1,262 of them throttled.
+      That universe exists for BUG-17: a PRUNE must see live memberships whose desired row was deleted.
+      When the scope CANNOT prune (Delta, or Full without -Prune -- Invoke-PimEngineScope sets
+      $Context['__pimLiveNarrow']), every removal Compare-PimDesiredVsLive can produce (type change, type
+      leftover, targeted Remove row) names a principal that a desired or Remove row names. Reading only those
+      principals therefore gives the SAME diff for a fraction of the requests.
+
+      Graph answers `$filter=principalId eq '<id>'` across ALL groups (multi-group filters 400), so this is one
+      request per principal per endpoint. Rows are built by the same PURE ConvertTo-PimLiveGroupMembershipRow;
+      schedules of groups the solution does not own are DROPPED; output is ordered like the per-group reader
+      (owned-group order, Eligible then Active). Nothing is written to $script:PimGrpMemCache -- that cache is
+      per GROUP and must stay complete for the prune path.
+      Returns { rows; principals; requests }.
+    #>
+    param(
+        [AllowEmptyCollection()][AllowNull()][string[]]$PrincipalIds = @(),
+        [Parameter(Mandatory)][object]$Owned,
+        [string]$Scope = '',
+        [string]$Reason = 'no prune'
+    )
+    $ids = New-Object System.Collections.Generic.List[string]
+    $seen = @{}
+    foreach ($p in @($PrincipalIds)) {
+        $v = "$p".Trim(); if (-not $v) { continue }
+        $lk = $v.ToLowerInvariant(); if ($seen.ContainsKey($lk)) { continue }
+        $seen[$lk] = $true; $ids.Add($v)
+    }
+    $ownedByLower = @{}
+    foreach ($g in @($Owned.byId.Keys)) { $ownedByLower["$g".ToLowerInvariant()] = "$g" }
+    $pathIdx = New-Object System.Collections.Generic.List[object]   # { path; principal; pair }
+    foreach ($id in $ids) {
+        foreach ($pair in $script:PimGroupSchedulePairs) {
+            $pathIdx.Add([pscustomobject]@{ path = (Get-PimGroupSchedulePrincipalPath -Endpoint $pair.ep -PrincipalId $id); principal = $id; pair = $pair })
+        }
+    }
+    $answers = New-Object object[] $pathIdx.Count
+    if ($pathIdx.Count -gt 0) {
+        if ((Get-Command Invoke-PimGraphBatchGet -ErrorAction SilentlyContinue) -and (Test-PimGraphBatchReadsEnabled)) {
+            # Invoke-PimGraphBatchGet follows @odata.nextLink per sub-response, retries throttling, falls back to singles.
+            $res = Invoke-PimGraphBatchGet -Paths @($pathIdx | ForEach-Object { $_.path })
+            for ($i = 0; $i -lt $pathIdx.Count; $i++) { $answers[$i] = $res[$i] }
+        } else {
+            for ($i = 0; $i -lt $pathIdx.Count; $i++) {
+                try { $answers[$i] = [pscustomobject]@{ ok = $true; items = @(Invoke-PimGraph -All -Path $pathIdx[$i].path); error = $null } }
+                catch { $answers[$i] = [pscustomobject]@{ ok = $false; items = @(); error = "$($_.Exception.Message)" } }
+            }
+        }
+    }
+    $failedN = 0
+    $bucket = @{}   # "<owned gid>|<type>" -> rows, in answer order
+    for ($i = 0; $i -lt $pathIdx.Count; $i++) {
+        $r = $answers[$i]; $x = $pathIdx[$i]
+        if (-not $r -or -not $r.ok) { $failedN++; if ($r) { Write-Verbose "group membership by principal ($($x.principal)/$($x.pair.type)): $($r.error)" }; continue }
+        foreach ($s in @($r.items)) {
+            if ($null -eq $s) { continue }
+            # Graph returns only this principal's schedules; checked anyway so a host that ignores the filter
+            # cannot hand one principal's rows to another (or duplicate them across principals).
+            $sp = "$($s.principalId)"
+            if ($sp -and $sp -ine $x.principal) { continue }
+            $gk = "$($s.groupId)".ToLowerInvariant()
+            if (-not $gk -or -not $ownedByLower.ContainsKey($gk)) { continue }   # not a solution-owned group
+            $gid = $ownedByLower[$gk]
+            $bk = "$gid|$($x.pair.type)"
+            if (-not $bucket.ContainsKey($bk)) { $bucket[$bk] = New-Object System.Collections.Generic.List[object] }
+            $bucket[$bk].Add((ConvertTo-PimLiveGroupMembershipRow -Schedule $s -GroupId $gid -GroupTag "$($Owned.byId[$gid].tag)" -AssignmentType $x.pair.type))
+        }
+    }
+    $rows = New-Object System.Collections.Generic.List[object]
+    foreach ($gid in @($Owned.byId.Keys)) {
+        foreach ($pair in $script:PimGroupSchedulePairs) {
+            $bk = "$gid|$($pair.type)"
+            if ($bucket.ContainsKey($bk)) { foreach ($row in $bucket[$bk]) { $rows.Add($row) } }
+        }
+    }
+    Write-Host ("  [perf] {0} live read narrowed to {1} principal(s): {2} request(s) ({3})" -f $Scope, $ids.Count, $pathIdx.Count, $Reason) -ForegroundColor DarkGray
+    return [pscustomobject]@{ rows = $rows.ToArray(); principals = $ids.Count; requests = $pathIdx.Count; failed = $failedN }
+}
+
+function Get-PimNarrowConfirmGroupIds {
+    <#
+      PURE. §70.21: which owned groups a narrowed (principal) read must CONFIRM with a per-group read.
+      🔴 Measured on internal 2026-09-13: Graph's principalId-filtered PIM-for-Groups schedule list omits some schedules
+      the groupId-filtered list returns (3 of 61 nestings of one role group, all created 2026-03-02) -- so "not in the
+      principal read" does NOT mean "not live". A desired row the principal read did not answer, and EVERY Remove row
+      (a removal must never read "already absent" from an incomplete list), names a group to re-read by group.
+      -Pairs: { principal; tag; remove }. -LiveRows: the filtered principal-read rows. Returns owned group ids, in order.
+    #>
+    param([object[]]$Pairs = @(), [object[]]$LiveRows = @(), [Parameter(Mandatory)][object]$Owned)
+    $have = @{}
+    foreach ($m in @($LiveRows)) { if ($null -ne $m) { $have[("$($m.principalId)|$($m.groupId)").ToLowerInvariant()] = $true } }
+    $out = New-Object System.Collections.Generic.List[string]; $seen = @{}
+    foreach ($p in @($Pairs)) {
+        if ($null -eq $p) { continue }
+        $t = "$($p.tag)".Trim().ToLowerInvariant(); if (-not $t) { continue }
+        $gid = $Owned.byTag[$t]; if (-not $gid) { continue }   # group not created yet: nothing live to confirm
+        $hit = $have.ContainsKey(("$($p.principal)|$gid").ToLowerInvariant())
+        if ($hit -and -not $p.remove) { continue }
+        if (-not $seen.ContainsKey("$gid")) { $seen["$gid"] = $true; $out.Add("$gid") }
+    }
+    return $out.ToArray()   # callers wrap in @()
+}
+
+function Add-PimConfirmedGroupMemberships {
+    <#
+      §70.21: re-read the groups Get-PimNarrowConfirmGroupIds names BY GROUP (the complete list) and add the membership
+      rows the principal read missed, filtered by the caller's -Keep. Goes through the per-group cache (a per-group read
+      is complete, so caching it is correct). Returns the number of rows added; logs one [perf] line when it re-read.
+    #>
+    param([Parameter(Mandatory)][AllowEmptyCollection()][System.Collections.Generic.List[object]]$Live, [object[]]$Pairs = @(), [Parameter(Mandatory)][object]$Owned,
+          [Parameter(Mandatory)][scriptblock]$Keep, [string]$Scope = '')
+    $gids = @(Get-PimNarrowConfirmGroupIds -Pairs @($Pairs) -LiveRows @($Live.ToArray()) -Owned $Owned)
+    if (-not $gids.Count) { return 0 }
+    $key = { param($m) ("$($m.principalId)|$($m.groupId)|$($m.AssignmentType)|$($m.accessId)|$($m.graphAssignmentType)").ToLowerInvariant() }
+    $seen = @{}; foreach ($m in $Live) { $seen[(& $key $m)] = $true }
+    $tagById = @{}; foreach ($g in $gids) { $tagById[$g] = "$($Owned.byId[$g].tag)" }
+    [void](Initialize-PimGroupMembershipCache -GroupTagById $tagById)
+    $added = 0
+    foreach ($g in $gids) {
+        foreach ($m in @(Get-PimLiveGroupMembership -GroupId $g -GroupTag "$($tagById[$g])")) {
+            if ($null -eq $m) { continue }
+            if (-not "$($m.groupId)") { Add-Member -InputObject $m -NotePropertyName groupId -NotePropertyValue $g -Force }
+            if (-not (& $Keep $m)) { continue }
+            $k = & $key $m
+            if ($seen.ContainsKey($k)) { continue }
+            $seen[$k] = $true; $Live.Add($m); $added++
+        }
+    }
+    Write-Host ("  [perf] {0} confirmed {1} group(s) by group read ({2} membership(s) the principal read did not return)" -f $Scope, $gids.Count, $added) -ForegroundColor DarkGray
+    return $added
 }
 
 function Get-PimDirRoleSchedulePreload {
@@ -697,7 +1826,11 @@ function Get-PimLiveDirRoleSchedules {
     $out = New-Object System.Collections.Generic.List[object]
     foreach ($pair in @(@{ idx = $script:PimDirElig; type = 'Eligible' }, @{ idx = $script:PimDirAct; type = 'Active' })) {
         if ($pair.idx -and $pair.idx.ContainsKey($PrincipalId)) {
-            foreach ($s in $pair.idx[$PrincipalId]) { $out.Add([pscustomobject]@{ principalId = $PrincipalId; RoleDefinitionName = "$($s.roleDefinition.displayName)"; AssignmentType = $pair.type; roleDefinitionId = "$($s.roleDefinitionId)"; directoryScopeId = "$($s.directoryScopeId)" }) }
+            # graphAssignmentType ('Assigned'|'Activated') and the start/end window are ADDITIVE fields
+            # for the assignment scopes (68.6 rows 25-26): an activation is not an assignment, and
+            # AutoExtend needs the live expiry.
+            foreach ($s in $pair.idx[$PrincipalId]) { $out.Add([pscustomobject]@{ principalId = $PrincipalId; RoleDefinitionName = "$($s.roleDefinition.displayName)"; AssignmentType = $pair.type; roleDefinitionId = "$($s.roleDefinitionId)"; directoryScopeId = "$($s.directoryScopeId)"
+                graphAssignmentType = "$($s.assignmentType)"; scheduleKnown = [bool]("$($s.startDateTime)".Trim()); startDateTime = $s.startDateTime; endDateTime = $s.endDateTime }) }
         }
     }
     $out.ToArray()
@@ -706,13 +1839,67 @@ function Get-PimLiveDirRoleSchedules {
 # ---------------------------------------------------------------------------
 # AdministrativeUnits scope -- create the AUs (PIM-Definitions-AU) groups attach to.
 # ---------------------------------------------------------------------------
+function Get-PimLiveAdministrativeUnitsDetailed {
+    # The AU live set WITH description + visibility (the directory cache selects neither
+    # description nor a guaranteed visibility). One list read; on any failure fall back to the
+    # cache, which still supports create -- only the update detection is skipped, and SAID so.
+    $cache = @($Global:AU_All_ID | Where-Object { $_ })
+    if (-not (Get-Command Invoke-PimGraph -ErrorAction SilentlyContinue)) { return $cache }
+    try {
+        $rows = @(Invoke-PimGraph -All -Path "/directory/administrativeUnits?`$select=id,displayName,description,visibility")
+        return @($rows | Where-Object { $_ -and "$($_.displayName)" })
+    } catch {
+        Write-Warning "  [engine] AdministrativeUnits: detailed read failed ($($_.Exception.Message)) -- using the directory cache; description/visibility changes are NOT detected this run."
+        return $cache
+    }
+}
+
+function Get-PimAdministrativeUnitPatch {
+    <#
+      PURE. The PATCH body that brings a live AU to its definition -- description and visibility
+      only; displayName is the key and is never written. A property the live row does not carry
+      (not read) is never compared, and a blank desired value is "not managed" (never clears).
+    #>
+    param([object]$Desired, [object]$Live)
+    $patch = @{}
+    if ($null -eq $Desired -or $null -eq $Live) { return $patch }
+    $dd = "$(Get-PimRowProp -Row $Desired -Names @('AUDescription'))".Trim()
+    if ($dd -and $Live.PSObject.Properties['description'] -and ($dd -cne "$($Live.description)".Trim())) { $patch['description'] = $dd }
+    $dv = "$(Get-PimRowProp -Row $Desired -Names @('Visibility'))".Trim()
+    if ($dv -and $Live.PSObject.Properties['visibility']) {
+        $norm = { param($v) $s = "$v".Trim(); if (-not $s -or $s -ieq 'Public') { 'public' } elseif ($s -match '(?i)^hidden') { 'hiddenmembership' } else { $s.ToLowerInvariant() } }
+        if ((& $norm $dv) -ne (& $norm $Live.visibility)) { $patch['visibility'] = $(if ((& $norm $dv) -eq 'hiddenmembership') { 'HiddenMembership' } elseif ((& $norm $dv) -eq 'public') { 'Public' } else { $dv }) }
+    }
+    return $patch
+}
+
 function New-PimAdministrativeUnitsProvider {
     @{
         scope = 'AdministrativeUnits'; entity = 'PIM-Definitions-AU'; order = 10
         GetDesired = { param($ctx) @(Get-PimDesiredRows -Entity 'PIM-Definitions-AU' | Where-Object { Get-PimRowProp -Row $_ -Names @('AUDisplayName') }) }
-        GetLive    = { param($ctx) Ensure-PimContextLoaded; @($Global:AU_All_ID) }
+        GetLive    = { param($ctx) Ensure-PimContextLoaded; @(Get-PimLiveAdministrativeUnitsDetailed) }
         KeyOf = { param($r) Get-PimRowProp -Row $r -Names @('AUDisplayName', 'DisplayName', 'displayName') }
-        Equal = { param($d, $l) $true }   # existence-based
+        # 68.6 row 27 (b): was existence-only, so an edited AUDescription / Visibility never reached
+        # Entra. The display name is the KEY and is never written by an update.
+        Equal = { param($d, $l) (Get-PimAdministrativeUnitPatch -Desired $d -Live $l).Count -eq 0 }
+        ApplyUpdate = {
+            param($item, $ctx)
+            $patch = Get-PimAdministrativeUnitPatch -Desired $item.desired -Live $item.live
+            if ($patch.Count -eq 0) { return [pscustomobject]@{ pimApplied = $false; reason = 'nothing to update' } }
+            $auId = "$($item.live.id)"; if (-not $auId) { $auId = "$($item.live.Id)" }
+            if (-not $auId) { throw "AdministrativeUnits: cannot update '$($item.key)' -- the live AU has no id" }
+            try { $r = Invoke-PimGraph -Method PATCH -Path "/directory/administrativeUnits/$auId" -Body $patch }
+            catch {
+                # If Entra refuses the VISIBILITY change, still apply the description rather than neither.
+                if (-not ($patch.ContainsKey('visibility') -and "$($_.Exception.Message)" -match '(?i)visibility')) { throw }
+                Write-Warning ("  [engine] AdministrativeUnits: '{0}' visibility change refused by Entra ({1}) -- applying the description only." -f $item.key, $_.Exception.Message)
+                $patch.Remove('visibility')
+                if ($patch.Count -eq 0) { return [pscustomobject]@{ pimApplied = $false; reason = "Entra refused the visibility change: $($_.Exception.Message)" } }
+                $r = Invoke-PimGraph -Method PATCH -Path "/directory/administrativeUnits/$auId" -Body $patch
+            }
+            foreach ($k in @($patch.Keys)) { try { $item.live.$k = $patch[$k] } catch { Write-Verbose "AU cache refresh ($k): $($_.Exception.Message)" } }
+            $r
+        }
         ApplyCreate = {
             param($item, $ctx)
             $d = $item.desired
@@ -819,13 +2006,45 @@ function Invoke-PimAuReplicationRetry {
 # (Roles/Services/Organization/Tasks). isAssignableToRole from IsRoleAssignable;
 # attach to its AU; add owners. Ported from Create-PIM-Group-Role / CreateUpdate-PIM-Group.
 # ---------------------------------------------------------------------------
+function Get-PimGroupDescriptionPatch {
+    <#
+      PURE. @{ description = ... } when the definition's GroupDescription differs from the live
+      group, else @{}. Never displayName / mailNickname (a PIM group is never renamed). Only
+      compared when the live object was READ with its description (objects cached from a
+      by-name probe carry no description property and are never "different"); a blank desired
+      description is not managed (Graph rejects an empty description, and blank never clears).
+    #>
+    param([object]$Desired, [object]$Live)
+    $patch = @{}
+    if ($null -eq $Desired -or $null -eq $Live) { return $patch }
+    $dd = "$(Get-PimRowProp -Row $Desired -Names @('GroupDescription'))".Trim()
+    if (-not $dd -or -not $Live.PSObject.Properties['description']) { return $patch }
+    if ($dd -cne "$($Live.description)".Trim()) { $patch['description'] = $dd }
+    return $patch
+}
+
 function New-PimGroupsProvider {
     @{
         scope = 'Groups'; entity = 'PIM-Definitions'; order = 20
         GetDesired = { param($ctx) $ctx['tagToAuName'] = Get-PimTagToAuName; @(Get-PimGroupDefinitionRows) }
         GetLive    = { param($ctx) Ensure-PimContextLoaded; @($Global:Groups_All_ID) }
         KeyOf = { param($r) Get-PimRowProp -Row $r -Names @('GroupName', 'DisplayName', 'displayName') }
-        Equal = { param($d, $l) $true }   # existence-based (create if absent)
+        # 68.6 row 27 (c): was existence-only, so an edited GroupDescription never reached Entra.
+        # The ONLY property an update writes is description -- a group is NEVER renamed (the name is
+        # the key, and REQUIREMENTS forbids renaming a PIM group).
+        Equal = { param($d, $l) (Get-PimGroupDescriptionPatch -Desired $d -Live $l).Count -eq 0 }
+        ApplyUpdate = {
+            param($item, $ctx)
+            $patch = Get-PimGroupDescriptionPatch -Desired $item.desired -Live $item.live
+            if ($patch.Count -eq 0) { return [pscustomobject]@{ pimApplied = $false; reason = 'nothing to update' } }
+            $gid = "$($item.live.id)"; if (-not $gid) { $gid = "$($item.live.Id)" }
+            if (-not $gid) { throw "Groups: cannot update '$($item.key)' -- the live group has no id" }
+            $r = Invoke-PimGraph -Method PATCH -Path "/groups/$gid" -Body $patch
+            # Keep the in-process directory cache honest, so a second scope pass inside the cache
+            # window does not PATCH the same description again.
+            try { $item.live.description = $patch['description'] } catch { Write-Verbose "group cache refresh: $($_.Exception.Message)" }
+            $r
+        }
         ApplyCreate = {
             param($item, $ctx)
             $d = $item.desired
@@ -899,8 +2118,18 @@ function New-PimGroupsProvider {
                 $auName = $ctx['tagToAuName'][$auTag.ToLowerInvariant()]
                 $au = @($Global:AU_All_ID) | Where-Object { "$($_.DisplayName)" -eq "$auName" } | Select-Object -First 1
                 if ($au) {
+                    # §70.19 (measured on internal 2026-09-13): the attach right after the create answered
+                    # 404 Request_ResourceNotFound for BOTH new groups -- the group had not replicated yet --
+                    # and each logged a WARNING although the AdministrativeUnitMembers pass attached them 9 s
+                    # later. A 404 on a group created milliseconds ago is replication, not a fault: say so
+                    # plainly. (No waiting here -- BUG-18 keeps the create paths free of sleep/retry; the
+                    # reconcile pass right after this scope is the retry.)
                     try { Invoke-PimGraph -Method POST -Path "/directory/administrativeUnits/$($au.Id)/members/`$ref" -Body @{ '@odata.id' = "https://graph.microsoft.com/v1.0/groups/$($g.id)" } | Out-Null }
-                    catch { Write-Warning "  [engine] Groups: AU attach at create time failed for '$gn' -> '$auName' ($($_.Exception.Message)). The AdministrativeUnitMembers scope will reconcile it." }
+                    catch {
+                        $auErr = "$($_.Exception.Message)"
+                        if ($auErr -match '(?i)\b404\b|Request_ResourceNotFound') { Write-Host "    [engine] Groups: '$gn' is not replicated yet for the AU attach (404) -- the AdministrativeUnitMembers scope attaches it to '$auName' in this run." -ForegroundColor DarkGray }
+                        elseif ($auErr -notmatch '(?i)already exist') { Write-Warning "  [engine] Groups: AU attach at create time failed for '$gn' -> '$auName' ($auErr). The AdministrativeUnitMembers scope will reconcile it." }
+                    }
                 } else {
                     Write-Warning "  [engine] Groups: AU '$auName' (tag '$auTag') is not visible yet, so '$gn' was NOT attached at create time. The AdministrativeUnitMembers scope will reconcile it."
                 }
@@ -1000,10 +2229,114 @@ function New-PimAuMembersProvider {
 # members of their PIM group (PIM-for-Groups). This is "admins get access to the
 # org groups". Ported from Assign-User-PIM-PAG-Group / Assign-Groups-Accounts.
 # ---------------------------------------------------------------------------
+function Test-PimAdminIsOut {
+    <#
+      68.6 #31 -- ONE predicate for "this admin is OUT": the membership scopes must not hand access
+      back to an account the lifecycle has switched off. Without it AdminMembers re-added, on its next
+      5-minute pass, every PIM-for-Groups membership the offboarding sweep had just removed.
+      OUT when any of:
+        * AccountStatus Disabled / Revoked, or OffboardDate reached (Get-PimAdminStatusDecision.disable)
+        * Lifecycle=Retire or OffboardDate reached                  (Test-PimAdminOffboarded)
+        * the offboarding sweep has a progress record for the account (pim.Settings['AdminOffboardState']:
+          sessions revoked / memberships removed / deleted) -- UNLESS the row now says
+          AccountStatus=Enabled, the only value that may bring an account back (the Admins rule).
+      PURE given -OffboardState (the store's record for this account, or $null). Returns @{ out; reason }.
+    #>
+    param([Parameter(Mandatory)][object]$Row, [datetime]$NowUtc = [datetime]::UtcNow, [hashtable]$OffboardState)
+    if (Get-Command Get-PimAdminStatusDecision -ErrorAction SilentlyContinue) {
+        $dec = Get-PimAdminStatusDecision -Row $Row -NowUtc $NowUtc
+        if ($dec.disable) { return [pscustomobject]@{ out = $true; reason = "$($dec.reason)" } }
+    }
+    if (Get-Command Test-PimAdminOffboarded -ErrorAction SilentlyContinue) {
+        $f = Test-PimAdminOffboarded -Row $Row -NowUtc $NowUtc
+        if ($f.offboard) { return [pscustomobject]@{ out = $true; reason = "$($f.reason)" } }
+    }
+    if ($OffboardState -is [hashtable] -and $OffboardState.Count) {
+        $st = (Get-PimRowProp -Row $Row -Names @('AccountStatus')).Trim()
+        $done = @(@('revokedAtUtc', 'membershipsRemovedUtc', 'deletedAtUtc') | Where-Object { "$($OffboardState[$_])".Trim() })
+        if ($done.Count -and $st -ine 'Enabled') {
+            return [pscustomobject]@{ out = $true; reason = "offboarding in progress/completed ($($done -join ', ') recorded)" }
+        }
+    }
+    return [pscustomobject]@{ out = $false; reason = '' }
+}
+
+function Get-PimAdminMembersKey {
+    # "<admin principal id>|<group tag>|<type>" -- one shape for desired, Remove and live rows.
+    param([object]$Row)
+    $prinId = Get-PimRowProp -Row $Row -Names @('principalId')
+    if (-not $prinId) { $prinId = Resolve-PimPrincipalId (Get-PimRowProp -Row $Row -Names @('Username')) }
+    $tag = (Get-PimRowProp -Row $Row -Names @('GroupTag')).ToLowerInvariant()
+    $type = (Get-PimRowProp -Row $Row -Names @('AssignmentType')).ToLowerInvariant()
+    "$prinId|$tag|$type"
+}
+
 function New-PimAdminMembersProvider {
     @{
         scope = 'AdminMembers'; entity = 'PIM-Assignments-Admins'; order = 50; refreshBefore = $true
-        GetDesired = { param($ctx) @(Get-PimDesiredRows -Entity 'PIM-Assignments-Admins' | Where-Object { (Get-PimRowProp -Row $_ -Names @('Action')) -ne 'Remove' }) }
+        GetDesired = {
+            param($ctx)
+            $all = @(Get-PimDesiredRows -Entity 'PIM-Assignments-Admins')
+            # 68.6 row 24: Remove rows are TARGETED removals (GetRemoveRows), never desired.
+            $ctx['removeRows:AdminMembers'] = @($all | Where-Object { Test-PimRowIsRemove $_ })
+            # 68.6 #31: an admin who is OUT (Test-PimAdminIsOut) gets no membership created, extended or
+            # updated -- otherwise this scope re-adds what offboarding removed. Their rows simply leave
+            # the desired set; their Remove rows still apply.
+            $now = [datetime]::UtcNow
+            $acct = @{}
+            foreach ($a in @(Get-PimDesiredRows -Entity 'Account-Definitions-Admins')) { if ($a) { $ak = Get-PimAdminRowKey -Row $a; if ($ak) { $acct[$ak] = $a } } }
+            $obMap = @{}
+            if ($acct.Count -and (Get-Command Get-PimAdminLifecycleStore -ErrorAction SilentlyContinue)) {
+                $st = Get-PimAdminLifecycleStore -Name 'AdminOffboardState'
+                if ($st.ok) { foreach ($k in @($st.map.Keys)) { $obMap[(Get-PimAdminRowKey -Row ([pscustomobject]@{ UserPrincipalName = "$k" }))] = $st.map[$k] } }
+            }
+            $keep = New-Object System.Collections.Generic.List[object]
+            $outSeen = @{}
+            foreach ($d in @($all | Where-Object { -not (Test-PimRowIsRemove $_) })) {
+                $ak = Get-PimAdminRowKey -Row ([pscustomobject]@{ UserName = (Get-PimRowProp -Row $d -Names @('Username','UserName','UserPrincipalName')) })
+                $acctRow = if ($ak) { $acct[$ak] } else { $null }
+                if ($acctRow -and (Test-PimAdminIsAdOnly -Row $acctRow)) {
+                    if (-not $outSeen.ContainsKey($ak)) { $outSeen[$ak] = $true; Write-Host ("    [AdminMembers] {0}: AD-only admin -- no Entra group membership (it does not exist in Entra)." -f $ak) -ForegroundColor DarkGray }
+                    continue
+                }
+                if ($acctRow) {
+                    $o = Test-PimAdminIsOut -Row $acctRow -NowUtc $now -OffboardState $obMap[$ak]
+                    if ($o.out) {
+                        if (-not $outSeen.ContainsKey($ak)) { $outSeen[$ak] = $true; Write-Host ("    [AdminMembers] {0}: admin is OUT ({1}) -- memberships are NOT created, extended or updated." -f $ak, $o.reason) -ForegroundColor DarkYellow }
+                        continue
+                    }
+                }
+                $keep.Add($d)
+            }
+            # PERF: no prune possible -> GetLive reads only the admins these rows (and the Remove rows) name.
+            # Resolved exactly like Get-PimAdminMembersKey; an unresolvable admin is skipped (its row is a create).
+            [void]$ctx.Remove('livePrincipals:AdminMembers'); [void]$ctx.Remove('liveConfirm:AdminMembers')
+            if ($ctx['__pimLiveNarrow']) {
+                $__pids = New-Object System.Collections.Generic.List[string]; $__byUser = @{}
+                $__pairs = New-Object System.Collections.Generic.List[object]
+                $__nKeep = $keep.Count; $__i = -1
+                foreach ($__r in @(@($keep.ToArray()) + @($ctx['removeRows:AdminMembers']))) {
+                    $__i++
+                    if ($null -eq $__r) { continue }
+                    # The STAMPED live id (Get-PimRowProp would make it look like a settable column -- Test-PimEntityFieldCoverage).
+                    $__p = if ($__r.PSObject.Properties['principalId']) { "$($__r.principalId)".Trim() } else { '' }
+                    if (-not $__p) {
+                        $__u = Get-PimRowProp -Row $__r -Names @('Username'); if (-not $__u) { continue }
+                        $__uk = $__u.ToLowerInvariant()
+                        if (-not $__byUser.ContainsKey($__uk)) { $__byUser[$__uk] = Resolve-PimPrincipalId $__u }
+                        $__p = $__byUser[$__uk]
+                    }
+                    if ($__p) {
+                        $__pids.Add("$__p")
+                        $__pairs.Add([pscustomobject]@{ principal = "$__p"; tag = (Get-PimRowProp -Row $__r -Names @('GroupTag')); remove = ($__i -ge $__nKeep) })
+                    }
+                }
+                $ctx['livePrincipals:AdminMembers'] = $__pids.ToArray()
+                $ctx['liveConfirm:AdminMembers'] = $__pairs.ToArray()
+            }
+            $keep.ToArray()
+        }
+        GetRemoveRows = { param($ctx) @(Select-PimRemoveRows -Rows @($ctx['removeRows:AdminMembers']) -Scope 'AdminMembers') }
         GetLive = {
             param($ctx)
             Ensure-PimContextLoaded
@@ -1015,6 +2348,26 @@ function New-PimAdminMembersProvider {
             $owned = Get-PimSolutionOwnedGroups
             foreach ($t in @($tagToName.Keys)) { $gid = $owned.byTag[$t]; if ($gid) { $ctx['admTagToGid'][$t] = $gid } }
             $live = New-Object System.Collections.Generic.List[object]
+            # PERF: no prune possible -> read only the admins GetDesired named (Get-PimLiveGroupMembershipsByPrincipal),
+            # then the SAME filters as the full read below.
+            if ($ctx['__pimLiveNarrow'] -and $ctx.ContainsKey('livePrincipals:AdminMembers')) {
+                $__nr = Get-PimLiveGroupMembershipsByPrincipal -PrincipalIds @($ctx['livePrincipals:AdminMembers']) -Owned $owned -Scope 'AdminMembers' -Reason "$($ctx['__pimLiveNarrowReason'])"
+                # §70.21: a narrowed answer that FAILED would hide live memberships (a Remove row would read "already
+                # absent") -- never plan from a partial read; take the full read below instead.
+                if ([int]$__nr.failed -gt 0) { Write-Warning "  [AdminMembers] $($__nr.failed) narrowed read(s) failed -- using the full membership read" }
+                else {
+                    $__keepM = { param($m) (-not $owned.byId.ContainsKey("$($m.principalId)")) -and -not ("$($m.accessId)".Trim() -and "$($m.accessId)".Trim() -ine 'member') -and ("$($m.graphAssignmentType)" -ine 'activated') }
+                    foreach ($m in @($__nr.rows)) { if (& $__keepM $m) { $live.Add($m) } }
+                    # 🔴 §70.21: the principalId-filtered list OMITS some schedules (measured on internal: 3 of 61 nestings of
+                    # one role group, all created 2026-03-02, returned only by the groupId-filtered list). Every desired or
+                    # Remove row the principal read did not answer is CONFIRMED by a per-group read of its group.
+                    [void](Add-PimConfirmedGroupMemberships -Live $live -Pairs @($ctx['liveConfirm:AdminMembers']) -Owned $owned -Keep $__keepM -Scope 'AdminMembers')
+                    return $live.ToArray()
+                }
+            }
+            # One batched read of every owned group's schedules into the membership cache (Initialize-PimGroupMembershipCache).
+            $__tagById = @{}; foreach ($__g in @($owned.byId.Keys)) { $__tagById["$__g"] = "$($owned.byId[$__g].tag)" }
+            [void](Initialize-PimGroupMembershipCache -GroupTagById $__tagById)
             foreach ($gid in @($owned.byId.Keys)) {
                 $tag = "$($owned.byId[$gid].tag)"
                 foreach ($m in (Get-PimLiveGroupMembership -GroupId $gid -GroupTag $tag)) {
@@ -1022,20 +2375,23 @@ function New-PimAdminMembersProvider {
                     # to that scope, not this one. Without this split each scope would see the
                     # other's rows as unowned and, under -Prune, as removals.
                     if ($owned.byId.ContainsKey("$($m.principalId)")) { continue }
+                    # 68.6 rows 24-26: this scope manages MEMBERSHIP. An OWNER schedule (accessId=owner)
+                    # or an ACTIVATION of an eligible membership must not key as a membership -- it
+                    # would be removed, extended or read as "exists" in place of the real one.
+                    if ("$($m.accessId)".Trim() -and "$($m.accessId)".Trim() -ine 'member') { continue }
+                    if ("$($m.graphAssignmentType)" -ieq 'activated') { continue }
+                    if (-not "$($m.groupId)") { Add-Member -InputObject $m -NotePropertyName groupId -NotePropertyValue $gid -Force }
                     $live.Add($m)
                 }
             }
             $live.ToArray()
         }
-        KeyOf = {
-            param($r)
-            $prinId = Get-PimRowProp -Row $r -Names @('principalId')
-            if (-not $prinId) { $prinId = Resolve-PimPrincipalId (Get-PimRowProp -Row $r -Names @('Username')) }
-            $tag = (Get-PimRowProp -Row $r -Names @('GroupTag')).ToLowerInvariant()
-            $type = (Get-PimRowProp -Row $r -Names @('AssignmentType')).ToLowerInvariant()
-            "$prinId|$tag|$type"
-        }
-        Equal = { param($d, $l) $true }
+        KeyOf = { param($r) Get-PimAdminMembersKey -Row $r }
+        TypeKeyOf = { param($r) Get-PimTypeNeutralKey -Key (Get-PimAdminMembersKey -Row $r) }
+        # 68.6 rows 25-26 (was `$true`: AutoExtend / UpdateExisting ignored).
+        Equal = { param($d, $l) (Get-PimAssignmentMaintenance -Desired $d -Live $l).action -eq 'none' }
+        ApplyUpdate = { param($item, $ctx) Invoke-PimAssignmentMaintenanceApply -Kind GroupMember -Item $item }
+        ApplyRemove = { param($item, $ctx) Remove-PimGroupScheduleAssignment -Live $item.live -What "$($item.key)" }
         ApplyCreate = {
             param($item, $ctx)
             $d = $item.desired
@@ -1057,6 +2413,19 @@ function New-PimAdminMembersProvider {
 # GroupMembers scope -- nested PIM-for-Groups (PIM-Assignments-Groups): a SOURCE
 # group becomes an Eligible/Active member of a TARGET group.
 # ---------------------------------------------------------------------------
+function Get-PimGroupMembersKey {
+    # ONE shape both sides produce: <member principal id>|<container tag>|<type>.
+    # The MEMBER is the TARGET group; the CONTAINER is the SOURCE group. On a live row the
+    # container tag arrives as GroupTag (the group whose membership was enumerated).
+    param([object]$Row)
+    $r = $Row
+    $container = (Get-PimRowProp -Row $r -Names @('SourceGroupTag', 'GroupTag')).ToLowerInvariant()
+    $type = (Get-PimRowProp -Row $r -Names @('AssignmentType')).ToLowerInvariant()
+    $member = Get-PimRowProp -Row $r -Names @('principalId')   # live row, and the resolved desired row
+    if (-not $member) { $member = "unresolved:" + (Get-PimRowProp -Row $r -Names @('TargetGroupTag')).ToLowerInvariant() }
+    "$member|$container|$type"
+}
+
 function New-PimGroupMembersProvider {
     @{
         scope = 'GroupMembers'; entity = 'PIM-Assignments-Groups'; order = 55; refreshBefore = $true
@@ -1078,7 +2447,10 @@ function New-PimGroupMembersProvider {
                 return $gid
             }
             $out = New-Object System.Collections.Generic.List[object]
-            foreach ($d in @(Get-PimDesiredRows -Entity 'PIM-Assignments-Groups' | Where-Object { (Get-PimRowProp -Row $_ -Names @('Action')) -ne 'Remove' })) {
+            # 68.6 row 24: Remove rows are resolved EXACTLY like desired rows (so they key like the
+            # live membership they name) but kept apart -- they are targeted removals, never creates.
+            $rmRows = New-Object System.Collections.Generic.List[object]
+            foreach ($d in @(Get-PimDesiredRows -Entity 'PIM-Assignments-Groups')) {
                 # 🔴 DIRECTION: the TARGET group is nested INTO the SOURCE group.
                 # SourceGroupTag is where the permission comes FROM (the service group); the
                 # TargetGroupTag group is the one that RECEIVES it and is therefore the MEMBER.
@@ -1097,10 +2469,32 @@ function New-PimGroupMembersProvider {
                 # makes the desired key identical to the live one. Unresolved (target group not
                 # created yet) keys as unresolved -> a create, which is right on a first deploy.
                 if ($tgtGid) { Add-Member -InputObject $row -NotePropertyName principalId -NotePropertyValue $tgtGid -Force }
-                $out.Add($row)
+                if (Test-PimRowIsRemove $d) { $rmRows.Add($row) } else { $out.Add($row) }
+            }
+            $ctx['removeRows:GroupMembers'] = $rmRows.ToArray()
+            # PERF: no prune possible -> GetLive reads only the MEMBER (TARGET) groups these rows and the Remove
+            # rows resolved to. An unresolved target keys as unresolved (a create) and needs no live read.
+            [void]$ctx.Remove('livePrincipals:GroupMembers'); [void]$ctx.Remove('liveConfirm:GroupMembers')
+            if ($ctx['__pimLiveNarrow']) {
+                $__pids = New-Object System.Collections.Generic.List[string]
+                $__pairs = New-Object System.Collections.Generic.List[object]
+                $__nKeep = $out.Count; $__i = -1
+                foreach ($__r in @(@($out.ToArray()) + @($rmRows.ToArray()))) {
+                    $__i++
+                    if ($null -eq $__r) { continue }
+                    $__p = if ($__r.PSObject.Properties['principalId']) { "$($__r.principalId)".Trim() } else { '' }
+                    if ($__p) {
+                        $__pids.Add("$__p")
+                        # the CONTAINER is the source group: that is the group a confirming per-group read enumerates
+                        $__pairs.Add([pscustomobject]@{ principal = "$__p"; tag = (Get-PimRowProp -Row $__r -Names @('SourceGroupTag')); remove = ($__i -ge $__nKeep) })
+                    }
+                }
+                $ctx['livePrincipals:GroupMembers'] = $__pids.ToArray()
+                $ctx['liveConfirm:GroupMembers'] = $__pairs.ToArray()
             }
             $out.ToArray()
         }
+        GetRemoveRows = { param($ctx) @(Select-PimRemoveRows -Rows @($ctx['removeRows:GroupMembers']) -Scope 'GroupMembers') }
         GetLive = {
             param($ctx)
             Ensure-PimContextLoaded
@@ -1115,6 +2509,29 @@ function New-PimGroupMembersProvider {
             # what made a deleted desired row invisible to prune.
             $owned = Get-PimSolutionOwnedGroups
             $live = New-Object System.Collections.Generic.List[object]
+            # PERF: no prune possible -> read only the target groups GetDesired named (Get-PimLiveGroupMembershipsByPrincipal),
+            # then the SAME filters as the full read below.
+            # 🔴 §70.21 -- measured live on internal 2026-09-13 22:50Z (2.4.353, principal read only): live=171 where the
+            # full read sees 208 -> 37 false creates (all skipped as "exists"); a Remove row naming an unseen nesting would
+            # have read "already absent". Cause (probed read-only): the principalId-filtered list omits some schedules.
+            # Fixed by the per-group CONFIRM below. 'NarrowDeltaGroupMembersReads' = false switches GroupMembers alone off.
+            $__grpNarrowOn = $true
+            if (Get-Command Get-PimPolicySetting -ErrorAction SilentlyContinue) { try { $__grpNarrowOn = -not ("$(Get-PimPolicySetting -Name 'NarrowDeltaGroupMembersReads' -Default $null)".Trim() -match '^(?i)(false|0|no|off|disabled?)$') } catch { $__grpNarrowOn = $true } }
+            elseif ($null -ne $global:PIM_NarrowDeltaGroupMembersReads) { $__grpNarrowOn = -not ("$($global:PIM_NarrowDeltaGroupMembersReads)".Trim() -match '^(?i)(false|0|no|off|disabled?)$') }
+            if ($__grpNarrowOn -and $ctx['__pimLiveNarrow'] -and $ctx.ContainsKey('livePrincipals:GroupMembers')) {
+                $__nr = Get-PimLiveGroupMembershipsByPrincipal -PrincipalIds @($ctx['livePrincipals:GroupMembers']) -Owned $owned -Scope 'GroupMembers' -Reason "$($ctx['__pimLiveNarrowReason'])"
+                if ([int]$__nr.failed -gt 0) { Write-Warning "  [GroupMembers] $($__nr.failed) narrowed read(s) failed -- using the full membership read" }
+                else {
+                    $__keepM = { param($m) $owned.byId.ContainsKey("$($m.principalId)") -and -not ("$($m.accessId)".Trim() -and "$($m.accessId)".Trim() -ine 'member') -and ("$($m.graphAssignmentType)" -ine 'activated') }
+                    foreach ($m in @($__nr.rows)) { if (& $__keepM $m) { $live.Add($m) } }
+                    # §70.21: confirm what the principal read did not answer (see AdminMembers) by a per-group read.
+                    [void](Add-PimConfirmedGroupMemberships -Live $live -Pairs @($ctx['liveConfirm:GroupMembers']) -Owned $owned -Keep $__keepM -Scope 'GroupMembers')
+                    return $live.ToArray()
+                }
+            }
+            # One batched read of every owned group's schedules into the membership cache (Initialize-PimGroupMembershipCache).
+            $__tagById = @{}; foreach ($__g in @($owned.byId.Keys)) { $__tagById["$__g"] = "$($owned.byId[$__g].tag)" }
+            [void](Initialize-PimGroupMembershipCache -GroupTagById $__tagById)
             foreach ($gid in @($owned.byId.Keys)) {
                 $tag = "$($owned.byId[$gid].tag)"
                 foreach ($m in (Get-PimLiveGroupMembership -GroupId $gid -GroupTag $tag)) {
@@ -1125,23 +2542,21 @@ function New-PimGroupMembersProvider {
                     # This mattered only once the keys were fixed: before, nothing matched
                     # anything, so the overlap was invisible.
                     if (-not $owned.byId.ContainsKey("$($m.principalId)")) { continue }
+                    # 68.6 rows 24-26: membership only (not owner schedules), assignments only (not activations).
+                    if ("$($m.accessId)".Trim() -and "$($m.accessId)".Trim() -ine 'member') { continue }
+                    if ("$($m.graphAssignmentType)" -ieq 'activated') { continue }
+                    if (-not "$($m.groupId)") { Add-Member -InputObject $m -NotePropertyName groupId -NotePropertyValue $gid -Force }
                     $live.Add($m)
                 }
             }
             $live.ToArray()
         }
-        KeyOf = {
-            param($r)
-            # ONE shape both sides produce: <member principal id>|<container tag>|<type>.
-            # The MEMBER is the TARGET group; the CONTAINER is the SOURCE group. On a live row the
-            # container tag arrives as GroupTag (the group whose membership was enumerated).
-            $container = (Get-PimRowProp -Row $r -Names @('SourceGroupTag', 'GroupTag')).ToLowerInvariant()
-            $type = (Get-PimRowProp -Row $r -Names @('AssignmentType')).ToLowerInvariant()
-            $member = Get-PimRowProp -Row $r -Names @('principalId')   # live row, and the resolved desired row
-            if (-not $member) { $member = "unresolved:" + (Get-PimRowProp -Row $r -Names @('TargetGroupTag')).ToLowerInvariant() }
-            "$member|$container|$type"
-        }
-        Equal = { param($d, $l) $true }
+        KeyOf = { param($r) Get-PimGroupMembersKey -Row $r }
+        TypeKeyOf = { param($r) Get-PimTypeNeutralKey -Key (Get-PimGroupMembersKey -Row $r) }
+        # 68.6 rows 25-26 (was `$true`: AutoExtend / UpdateExisting ignored).
+        Equal = { param($d, $l) (Get-PimAssignmentMaintenance -Desired $d -Live $l).action -eq 'none' }
+        ApplyUpdate = { param($item, $ctx) Invoke-PimAssignmentMaintenanceApply -Kind GroupMember -Item $item }
+        ApplyRemove = { param($item, $ctx) Remove-PimGroupScheduleAssignment -Live $item.live -What "$($item.key)" }
         ApplyCreate = {
             param($item, $ctx)
             $d = $item.desired
@@ -1168,6 +2583,26 @@ function New-PimGroupMembersProvider {
 # directoryScopeId = /administrativeUnits/<auId>. Ported from
 # Assign-Roles-AdministrativeUnits-From-SQL.
 # ---------------------------------------------------------------------------
+function Get-PimRolesAUsKey {
+    # ONE key shape for both sides: resolved principal + AU id + role + type.
+    # GetDesired stamps principalId/directoryScopeId, so a desired row that
+    # resolves keys identically to its live counterpart.
+    param([object]$Row)
+    $gid = Get-PimRowProp -Row $Row -Names @('principalId')
+    if ($gid) {
+        $scope = Get-PimRowProp -Row $Row -Names @('directoryScopeId'); $au = ($scope -split '/')[-1]
+        $role = (Get-PimRowProp -Row $Row -Names @('RoleDefinitionName')).ToLowerInvariant()
+        $type = (Get-PimRowProp -Row $Row -Names @('AssignmentType')).ToLowerInvariant()
+        return "$gid|$($au.ToLowerInvariant())|$role|$type"
+    }
+    # UNRESOLVED desired row (group or AU not live yet) -> deliberately distinct, so
+    # it becomes a create. It can never collide with a live key because a live row
+    # always carries a principalId.
+    $gt=(Get-PimRowProp -Row $Row -Names @('GroupTag')).ToLowerInvariant(); $at=(Get-PimRowProp -Row $Row -Names @('AdministrativeUnitTag')).ToLowerInvariant()
+    $role=(Get-PimRowProp -Row $Row -Names @('RoleDefinitionName')).ToLowerInvariant(); $type=(Get-PimRowProp -Row $Row -Names @('AssignmentType')).ToLowerInvariant()
+    "unresolved:$gt|autag:$at|$role|$type"
+}
+
 function New-PimRolesAUsProvider {
     @{
         scope = 'RolesAUs'; entity = 'PIM-Assignments-Roles-AUs'; order = 45; refreshBefore = $true
@@ -1184,7 +2619,10 @@ function New-PimRolesAUsProvider {
             $auByName = @{}; foreach ($a in @($Global:AU_All_ID)) { $n = "$($a.DisplayName)"; if ($n) { $auByName[$n.ToLowerInvariant()] = "$($a.Id)" } }
             $ctx['auTagToId'] = @{}; $ctx['rauGid'] = @{}
             $out = New-Object System.Collections.Generic.List[object]
-            foreach ($d in @(Get-PimDesiredRows -Entity 'PIM-Assignments-Roles-AUs' | Where-Object { (Get-PimRowProp -Row $_ -Names @('Action')) -ne 'Remove' })) {
+            # 68.6 row 24: Remove rows are resolved like desired rows (same key as the live
+            # assignment they name) and kept apart as targeted removals.
+            $rmRows = New-Object System.Collections.Generic.List[object]
+            foreach ($d in @(Get-PimDesiredRows -Entity 'PIM-Assignments-Roles-AUs')) {
                 $gt = "$(Get-PimRowProp -Row $d -Names @('GroupTag'))"; $at = "$(Get-PimRowProp -Row $d -Names @('AdministrativeUnitTag'))"
                 $gid = $null; $aid = $null
                 if ($gt) { $gn = $tagToName[$gt.ToLowerInvariant()]; if ($gn) { $gid = Resolve-PimLiveGroupIdByName $gn; if ($gid) { $ctx['rauGid'][$gt.ToLowerInvariant()] = $gid } } }
@@ -1199,15 +2637,15 @@ function New-PimRolesAUsProvider {
                     Add-Member -InputObject $row -NotePropertyName principalId      -NotePropertyValue $gid -Force
                     Add-Member -InputObject $row -NotePropertyName directoryScopeId -NotePropertyValue "/administrativeUnits/$aid" -Force
                 }
-                $out.Add($row)
+                if (Test-PimRowIsRemove $d) { $rmRows.Add($row) } else { $out.Add($row) }
             }
+            $ctx['removeRows:RolesAUs'] = $rmRows.ToArray()
             $out.ToArray()
         }
+        GetRemoveRows = { param($ctx) @(Select-PimRemoveRows -Rows @($ctx['removeRows:RolesAUs']) -Scope 'RolesAUs') }
         GetLive = {
             param($ctx)
-            Ensure-PimContextLoaded
-            $rolesByName = @{}; foreach ($r in @($Global:Roles_All_ID)) { $n = "$($r.DisplayName)"; if ($n) { $rolesByName[$n.ToLowerInvariant()] = "$($r.Id)" } }
-            $ctx['rolesByName'] = $rolesByName
+            $ctx['rolesByName'] = Get-PimEntraRoleNameMap
             # BUG-17: read the AU-scoped role schedules of every group THIS SOLUTION OWNS,
             # not just the groups the desired rows happen to mention. Otherwise deleting a
             # desired row hides its live assignment and the prune it was meant to trigger
@@ -1218,31 +2656,19 @@ function New-PimRolesAUsProvider {
             foreach ($gid in @($owned.byId.Keys)) {
                 foreach ($s in (Get-PimLiveDirRoleSchedules -PrincipalId $gid)) {
                     if ("$($s.directoryScopeId)" -notmatch '(?i)/administrativeUnits/') { continue }   # RolesAUs = AU-scoped only
-                    $live.Add([pscustomobject]@{ principalId=$gid; RoleDefinitionName=$s.RoleDefinitionName; AssignmentType=$s.AssignmentType; directoryScopeId=$s.directoryScopeId })
+                    if ("$($s.graphAssignmentType)" -ieq 'Activated') { continue }                        # an activation is not an assignment
+                    $live.Add([pscustomobject]@{ principalId=$gid; RoleDefinitionName=$s.RoleDefinitionName; AssignmentType=$s.AssignmentType; directoryScopeId=$s.directoryScopeId
+                                                 roleDefinitionId=$s.roleDefinitionId; scheduleKnown=$s.scheduleKnown; startDateTime=$s.startDateTime; endDateTime=$s.endDateTime })
                 }
             }
             $live.ToArray()
         }
-        KeyOf = {
-            param($r)
-            # ONE key shape for both sides: resolved principal + AU id + role + type.
-            # GetDesired stamps principalId/directoryScopeId, so a desired row that
-            # resolves keys identically to its live counterpart.
-            $gid = Get-PimRowProp -Row $r -Names @('principalId')
-            if ($gid) {
-                $scope = Get-PimRowProp -Row $r -Names @('directoryScopeId'); $au = ($scope -split '/')[-1]
-                $role = (Get-PimRowProp -Row $r -Names @('RoleDefinitionName')).ToLowerInvariant()
-                $type = (Get-PimRowProp -Row $r -Names @('AssignmentType')).ToLowerInvariant()
-                return "$gid|$($au.ToLowerInvariant())|$role|$type"
-            }
-            # UNRESOLVED desired row (group or AU not live yet) -> deliberately distinct, so
-            # it becomes a create. It can never collide with a live key because a live row
-            # always carries a principalId.
-            $gt=(Get-PimRowProp -Row $r -Names @('GroupTag')).ToLowerInvariant(); $at=(Get-PimRowProp -Row $r -Names @('AdministrativeUnitTag')).ToLowerInvariant()
-            $role=(Get-PimRowProp -Row $r -Names @('RoleDefinitionName')).ToLowerInvariant(); $type=(Get-PimRowProp -Row $r -Names @('AssignmentType')).ToLowerInvariant()
-            "unresolved:$gt|autag:$at|$role|$type"
-        }
-        Equal = { param($d,$l) $true }
+        KeyOf = { param($r) Get-PimRolesAUsKey -Row $r }
+        TypeKeyOf = { param($r) Get-PimTypeNeutralKey -Key (Get-PimRolesAUsKey -Row $r) }
+        # 68.6 rows 25-26 (was `$true`: AutoExtend / UpdateExisting ignored).
+        Equal = { param($d,$l) (Get-PimAssignmentMaintenance -Desired $d -Live $l).action -eq 'none' }
+        ApplyUpdate = { param($item,$ctx) Invoke-PimAssignmentMaintenanceApply -Kind DirRole -Item $item }
+        ApplyRemove = { param($item,$ctx) Remove-PimDirRoleAssignment -Live $item.live -What "$($item.key)" }
         ApplyCreate = {
             param($item,$ctx)
             $d = $item.desired
@@ -1272,12 +2698,49 @@ function Resolve-PimArmRoleId {
     $k = "$Scope|$($RoleName.ToLowerInvariant())"
     if ($Cache.ContainsKey($k)) { return $Cache[$k] }
     $id = $null
+    # 🔴 A FAILED LOOKUP IS NOT "ROLE NOT FOUND". This swallowed every ARM error and returned $null,
+    # so the caller reported "ARM role 'Owner' not found at /subscriptions/0000..." -- when ARM had
+    # actually answered 404 SubscriptionNotFound (a template placeholder scope; measured live
+    # 2026-09-12, delta-pim-azure). The operator was sent looking for a role that exists. The ARM
+    # error is now kept beside the cached id ("<key>|error") so the caller can say what really
+    # happened; an EMPTY successful result is still the genuine "no role by that name here".
     try {
         $r = @(Invoke-PimArm -Path "$Scope/providers/Microsoft.Authorization/roleDefinitions?`$filter=roleName eq '$RoleName'" -ApiVersion '2022-04-01' -All)
         if ($r.Count) { $id = "$($r[0].name)" }
-    } catch { Write-Verbose "ARM roledef ($RoleName @ $Scope): $($_.Exception.Message)" }
+        $Cache.Remove("$k|error")
+    } catch {
+        $msg = "$($_.Exception.Message)"
+        if ($_.ErrorDetails -and "$($_.ErrorDetails.Message)".Trim()) { $msg = "$($_.ErrorDetails.Message)" }
+        if ($msg -match '(?i)SubscriptionNotFound') { $msg = "subscription not found (ARM SubscriptionNotFound): $msg" }
+        $Cache["$k|error"] = $msg
+        Write-Verbose "ARM roledef ($RoleName @ $Scope): $msg"
+    }
     $Cache[$k] = $id; return $id
 }
+function Get-PimArmRoleLookupError {
+    # The ARM error recorded by Resolve-PimArmRoleId for this scope+role, or '' when the lookup
+    # succeeded (an empty result then genuinely means "no role by that name at this scope").
+    param([string]$Scope, [string]$RoleName, [hashtable]$Cache)
+    if (-not $Cache) { return '' }
+    $k = "$Scope|$("$RoleName".ToLowerInvariant())|error"
+    if ($Cache.ContainsKey($k)) { return "$($Cache[$k])" }
+    return ''
+}
+function Get-PimAzResKey {
+    # ONE shape both sides produce: principal id | scope | role definition guid | type.
+    param([object]$Row)
+    $gid = Get-PimRowProp -Row $Row -Names @('principalId')
+    $scope = Get-PimRowProp -Row $Row -Names @('AzScope')
+    $type = (Get-PimRowProp -Row $Row -Names @('AssignmentType')).ToLowerInvariant()
+    $rid = "$(Get-PimRowProp -Row $Row -Names @('RoleId'))"
+    if ($gid -and $rid) { return "$gid|$($scope.ToLowerInvariant())|rid:$($rid.ToLowerInvariant())|$type" }
+    # UNRESOLVED desired row (group not live yet, or the ARM role name did not resolve
+    # at this scope) -> distinct by construction, so it becomes a create and can never
+    # collide with a live key.
+    $gt=(Get-PimRowProp -Row $Row -Names @('GroupTag')).ToLowerInvariant(); $perm=(Get-PimRowProp -Row $Row -Names @('AzScopePermission')).ToLowerInvariant()
+    "unresolved:$gt|$($scope.ToLowerInvariant())|perm:$perm|$type"
+}
+
 function New-PimAzResProvider {
     @{
         scope = 'AzRes'; entity = 'PIM-Assignments-Azure-Resources'; order = 60; refreshBefore = $true
@@ -1293,7 +2756,9 @@ function New-PimAzResProvider {
             $tagToName = Get-PimTagToGroupName
             if (-not $ctx['azGid']) { $ctx['azGid'] = @{} }
             $out = New-Object System.Collections.Generic.List[object]
-            foreach ($d in @(Get-PimDesiredRows -Entity 'PIM-Assignments-Azure-Resources' | Where-Object { (Get-PimRowProp -Row $_ -Names @('Action')) -ne 'Remove' })) {
+            # 68.6 row 24: Remove rows resolve like desired rows and are kept apart as targeted removals.
+            $rmRows = New-Object System.Collections.Generic.List[object]
+            foreach ($d in @(Get-PimDesiredRows -Entity 'PIM-Assignments-Azure-Resources')) {
                 $gt = "$(Get-PimRowProp -Row $d -Names @('GroupTag'))".ToLowerInvariant()
                 $scope = "$(Get-PimRowProp -Row $d -Names @('AzScope'))"
                 $perm  = "$(Get-PimRowProp -Row $d -Names @('AzScopePermission'))"
@@ -1309,9 +2774,26 @@ function New-PimAzResProvider {
                     Add-Member -InputObject $row -NotePropertyName principalId -NotePropertyValue $gid -Force
                     Add-Member -InputObject $row -NotePropertyName RoleId      -NotePropertyValue $rid -Force
                 }
-                $out.Add($row)
+                if (Test-PimRowIsRemove $d) { $rmRows.Add($row) } else { $out.Add($row) }
             }
+            $ctx['removeRows:AzRes'] = $rmRows.ToArray()
             $out.ToArray()
+        }
+        GetRemoveRows = {
+            param($ctx)
+            # A scope whose live read FAILED cannot prove a Remove row's assignment is absent: skip
+            # those rows loudly rather than report "already absent" for something never read.
+            $failed = $ctx['azLiveFailed']
+            $ok = New-Object System.Collections.Generic.List[object]
+            foreach ($r in @(Select-PimRemoveRows -Rows @($ctx['removeRows:AzRes']) -Scope 'AzRes')) {
+                $s = "$(Get-PimRowProp -Row $r -Names @('AzScope'))".Trim()
+                if ($failed -is [hashtable] -and $failed.ContainsKey($s)) {
+                    Write-Warning ("  [engine] AzRes: Remove row at {0} NOT evaluated -- the live read of that scope failed ({1})." -f $s, $failed[$s])
+                    continue
+                }
+                $ok.Add($r)
+            }
+            $ok.ToArray()
         }
         GetLive = {
             param($ctx)
@@ -1339,6 +2821,7 @@ function New-PimAzResProvider {
                 $s = "$(Get-PimRowProp -Row $d -Names @('AzScope'))".Trim(); if ($s) { $scopes[$s] = $true }
             }
             $live = New-Object System.Collections.Generic.List[object]
+            $ctx['azLiveFailed'] = @{}
             foreach ($scope in @($scopes.Keys)) {
                 foreach ($pair in @(@{ ep='roleAssignmentScheduleInstances'; type='Active' }, @{ ep='roleEligibilityScheduleInstances'; type='Eligible' })) {
                     try {
@@ -1350,29 +2833,23 @@ function New-PimAzResProvider {
                             if (-not $owned.byId.ContainsKey($prin)) { continue }        # not ours -- never a removal candidate
                             $atScope = "$($s.properties.scope)"; if (-not $atScope) { $atScope = $scope }
                             if ($atScope -ne $scope) { continue }                        # inherited from an ancestor; owned there, not here
+                            if ("$($s.properties.assignmentType)" -ieq 'Activated') { continue }   # an activation is not an assignment (68.6 rows 24-26)
                             $rid = ($s.properties.roleDefinitionId -split '/')[-1]
-                            $live.Add([pscustomobject]@{ principalId=$prin; AzScope=$scope; RoleId=$rid; AssignmentType=$pair.type })
+                            $live.Add([pscustomobject]@{ principalId=$prin; AzScope=$scope; RoleId=$rid; AssignmentType=$pair.type
+                                                         roleDefinitionId="$($s.properties.roleDefinitionId)"
+                                                         scheduleKnown=[bool]("$($s.properties.startDateTime)".Trim()); startDateTime=$s.properties.startDateTime; endDateTime=$s.properties.endDateTime })
                         }
-                    } catch { Write-Verbose "AzRes live ($scope/$($pair.ep)): $($_.Exception.Message)" }
+                    } catch { $ctx['azLiveFailed'][$scope] = "$($_.Exception.Message)"; Write-Verbose "AzRes live ($scope/$($pair.ep)): $($_.Exception.Message)" }
                 }
             }
             $live.ToArray()
         }
-        KeyOf = {
-            param($r)
-            # ONE shape both sides produce: principal id | scope | role definition guid | type.
-            $gid = Get-PimRowProp -Row $r -Names @('principalId')
-            $scope = Get-PimRowProp -Row $r -Names @('AzScope')
-            $type = (Get-PimRowProp -Row $r -Names @('AssignmentType')).ToLowerInvariant()
-            $rid = "$(Get-PimRowProp -Row $r -Names @('RoleId'))"
-            if ($gid -and $rid) { return "$gid|$($scope.ToLowerInvariant())|rid:$($rid.ToLowerInvariant())|$type" }
-            # UNRESOLVED desired row (group not live yet, or the ARM role name did not resolve
-            # at this scope) -> distinct by construction, so it becomes a create and can never
-            # collide with a live key.
-            $gt=(Get-PimRowProp -Row $r -Names @('GroupTag')).ToLowerInvariant(); $perm=(Get-PimRowProp -Row $r -Names @('AzScopePermission')).ToLowerInvariant()
-            "unresolved:$gt|$($scope.ToLowerInvariant())|perm:$perm|$type"
-        }
-        Equal = { param($d,$l) $true }
+        KeyOf = { param($r) Get-PimAzResKey -Row $r }
+        TypeKeyOf = { param($r) Get-PimTypeNeutralKey -Key (Get-PimAzResKey -Row $r) }
+        # 68.6 rows 25-26 (was `$true`: AutoExtend / UpdateExisting ignored).
+        Equal = { param($d,$l) (Get-PimAssignmentMaintenance -Desired $d -Live $l).action -eq 'none' }
+        ApplyUpdate = { param($item,$ctx) Invoke-PimAssignmentMaintenanceApply -Kind AzRes -Item $item }
+        ApplyRemove = { param($item,$ctx) Remove-PimAzResScheduleAssignment -Live $item.live -What "$($item.key)" }
         ApplyCreate = {
             param($item,$ctx)
             $d=$item.desired
@@ -1380,7 +2857,11 @@ function New-PimAzResProvider {
             $scope=Get-PimRowProp -Row $d -Names @('AzScope'); $perm=Get-PimRowProp -Row $d -Names @('AzScopePermission')
             if (-not $gid -or -not $scope -or -not $perm) { throw "AzRes: unresolved group/scope/role ($gt / $scope / $perm)" }
             $rid = Resolve-PimArmRoleId -Scope $scope -RoleName $perm -Cache $ctx['armRoleCache']
-            if (-not $rid) { throw "AzRes: ARM role '$perm' not found at $scope" }
+            if (-not $rid) {
+                $armErr = Get-PimArmRoleLookupError -Scope $scope -RoleName $perm -Cache $ctx['armRoleCache']
+                if ($armErr) { throw "AzRes: could not look up ARM role '$perm' at ${scope}: $armErr" }
+                throw "AzRes: ARM role '$perm' not found at $scope"
+            }
             $type=Get-PimRowProp -Row $d -Names @('AssignmentType')
             $permFlag=(Get-PimRowProp -Row $d -Names @('Permanent')) -match '(?i)true'
             $days=[int]("0"+(Get-PimRowProp -Row $d -Names @('NumOfDaysWhenExpire')))
@@ -1401,10 +2882,95 @@ function New-PimAzResProvider {
 # 'approval' marks the group as approval-required; approvers come from Owners.
 # Ported from Set-PimGroupApprovalRule / CreateUpdate-Policies-PIM-Groups.
 # ---------------------------------------------------------------------------
+function Get-PimGroupPolicyAssignmentPath {
+    param([Parameter(Mandatory)][string]$GroupId, [ValidateSet('member', 'owner')][string]$Role = 'member')
+    "/policies/roleManagementPolicyAssignments?`$filter=scopeId eq '$GroupId' and scopeType eq 'Group' and roleDefinitionId eq '$Role'"
+}
+function Get-PimGroupPolicyReadPath { param([Parameter(Mandatory)][string]$PolicyId) "/policies/roleManagementPolicies/$PolicyId`?`$expand=rules" }
+# A group's member/owner policy id never changes for the life of the group, so a FOUND id is kept for
+# 15 minutes (a miss is never cached: a group can be onboarded between reads). The batched GroupsPolicies
+# live read fills it, so the apply that follows does not look the same id up again per item.
+# 🔴 §70.10 (2026-09-13): 15 minutes was shorter than the read that fills it -- on internal the GroupsPolicies read
+# took ~10 minutes, so by the next tick every one of the 706 ids was looked up AGAIN (706 of the 1,412 requests). An id
+# is now kept for 12 hours in the process AND persisted in pim.Settings['GroupPolicyIdMap'], so a fresh tick process
+# starts with every known id. A stale id (the policy read answers not-found) is dropped at once and looked up again.
+$script:PimGrpPolicyIdTtlMinutes = 720
+function Import-PimGroupPolicyIdMap {
+    # Once per process: seed the in-memory cache from pim.Settings['GroupPolicyIdMap'] ({ "<groupId>|<role>": "<policyId>" }).
+    if ($script:PimGrpPolicyIdMapLoaded) { return }
+    $script:PimGrpPolicyIdMapLoaded = $true
+    if (-not ($script:PimGrpPolicyIdCache -is [hashtable])) { $script:PimGrpPolicyIdCache = @{} }
+    if (-not (Get-Command Get-PimSetting -ErrorAction SilentlyContinue)) { return }
+    try {
+        $v = Get-PimSetting -Name 'GroupPolicyIdMap'
+        if ($v -is [string] -and "$v".Trim()) { $v = $v | ConvertFrom-Json }
+        if ($null -eq $v) { return }
+        $now = Get-Date; $n = 0
+        foreach ($p in $v.PSObject.Properties) {
+            if ("$($p.Name)" -match '^[^|]+\|(member|owner)$' -and "$($p.Value)".Trim() -and -not $script:PimGrpPolicyIdCache.ContainsKey("$($p.Name)")) {
+                $script:PimGrpPolicyIdCache["$($p.Name)"] = @{ id = "$($p.Value)"; at = $now }; $n++
+            }
+        }
+        if ($n) { Write-Host "  [perf] group policy ids: $n loaded from pim.Settings['GroupPolicyIdMap']" -ForegroundColor DarkGray }
+    } catch { Write-Verbose "GroupPolicyIdMap load failed: $($_.Exception.Message)" }
+}
+function Save-PimGroupPolicyIdMap {
+    # Persist the known ids when something changed (a new id, or a stale one dropped). The store writes nothing when the
+    # value is identical (§70.8), so a steady-state tick costs no transaction log.
+    if (-not $script:PimGrpPolicyIdMapDirty) { return }
+    if (-not (Get-Command Set-PimSetting -ErrorAction SilentlyContinue)) { return }
+    $map = [ordered]@{}
+    foreach ($k in @($script:PimGrpPolicyIdCache.Keys | Sort-Object)) { $e = $script:PimGrpPolicyIdCache[$k]; if ($e -is [hashtable] -and "$($e.id)".Trim()) { $map["$k"] = "$($e.id)" } }
+    try { Set-PimSetting -Name 'GroupPolicyIdMap' -Value ([pscustomobject]$map) | Out-Null; $script:PimGrpPolicyIdMapDirty = $false }
+    catch { Write-Verbose "GroupPolicyIdMap save failed: $($_.Exception.Message)" }
+}
+function Remove-PimGroupPolicyIdCached {
+    param([Parameter(Mandatory)][string]$GroupId, [Parameter(Mandatory)][string]$Role)
+    if ($script:PimGrpPolicyIdCache -is [hashtable] -and $script:PimGrpPolicyIdCache.ContainsKey("$GroupId|$Role")) {
+        $script:PimGrpPolicyIdCache.Remove("$GroupId|$Role"); $script:PimGrpPolicyIdMapDirty = $true
+    }
+}
+function Get-PimGroupPolicyIdCached {
+    param([Parameter(Mandatory)][string]$GroupId, [Parameter(Mandatory)][string]$Role)
+    Import-PimGroupPolicyIdMap
+    if (-not ($script:PimGrpPolicyIdCache -is [hashtable])) { $script:PimGrpPolicyIdCache = @{} }
+    $ttl = if ($script:PimGrpPolicyIdTtlMinutes -gt 0) { $script:PimGrpPolicyIdTtlMinutes } else { 720 }
+    $hit = $script:PimGrpPolicyIdCache["$GroupId|$Role"]
+    if ($hit -is [hashtable] -and $hit.at -and ((Get-Date) - $hit.at).TotalMinutes -lt $ttl) { return "$($hit.id)" }
+    return $null
+}
+function Set-PimGroupPolicyIdCached {
+    param([Parameter(Mandatory)][string]$GroupId, [Parameter(Mandatory)][string]$Role, [string]$PolicyId)
+    if (-not "$PolicyId".Trim()) { return }
+    if (-not ($script:PimGrpPolicyIdCache -is [hashtable])) { $script:PimGrpPolicyIdCache = @{} }
+    $prev = $script:PimGrpPolicyIdCache["$GroupId|$Role"]
+    if (-not ($prev -is [hashtable]) -or "$($prev.id)" -ne "$PolicyId") { $script:PimGrpPolicyIdMapDirty = $true }
+    $script:PimGrpPolicyIdCache["$GroupId|$Role"] = @{ id = "$PolicyId"; at = (Get-Date) }
+}
 function Get-PimGroupMemberPolicyId {
     param([string]$GroupId)
-    try { $a = @(Invoke-PimGraph -All -Path "/policies/roleManagementPolicyAssignments?`$filter=scopeId eq '$GroupId' and scopeType eq 'Group' and roleDefinitionId eq 'member'"); if ($a.Count) { return "$($a[0].policyId)" } } catch { Write-Verbose "policyId ($GroupId): $($_.Exception.Message)" }
+    $c = Get-PimGroupPolicyIdCached -GroupId "$GroupId" -Role 'member'; if ($c) { return $c }
+    try { $a = @(Invoke-PimGraph -All -Path (Get-PimGroupPolicyAssignmentPath -GroupId "$GroupId" -Role 'member')); if ($a.Count) { Set-PimGroupPolicyIdCached -GroupId "$GroupId" -Role 'member' -PolicyId "$($a[0].policyId)"; return "$($a[0].policyId)" } } catch { Set-PimGroupPolicyLookupError -GroupId "$GroupId" -Role 'member' -Message "$($_.Exception.Message)"; Write-Verbose "policyId ($GroupId): $($_.Exception.Message)" }
     return $null
+}
+
+# Why a group policy lookup returned nothing. Measured 2026-09-13 on four live environments: the engine
+# identity lacked RoleManagementPolicy.ReadWrite.AzureADGroup, Graph refused the read, the refusal was
+# swallowed, and the run reported "no member policy" for groups whose policies exist.
+function Set-PimGroupPolicyLookupError {
+    param([string]$GroupId, [string]$Role, [string]$Message)
+    if (-not ($script:PimGrpPolicyLookupErr -is [hashtable])) { $script:PimGrpPolicyLookupErr = @{} }
+    $script:PimGrpPolicyLookupErr["$GroupId|$Role"] = "$Message"
+}
+function Get-PimGroupPolicyMissingMessage {
+    # PURE-ish. The error to throw when a group's policy id could not be resolved.
+    param([string]$GroupName, [string]$GroupId, [string]$Role)
+    $err = if ($script:PimGrpPolicyLookupErr -is [hashtable]) { "$($script:PimGrpPolicyLookupErr["$GroupId|$Role"])" } else { '' }
+    if ($err -match '(?i)\b(401|403)\b|Forbidden|Authorization_RequestDenied|AccessDenied|insufficient privileges|Unauthorized') {
+        return ("GroupsPolicies: PERMISSION DENIED reading the {0} policy of '{1}' -- the engine identity is missing Graph application role RoleManagementPolicy.ReadWrite.AzureADGroup (grant it: setup/Grant-PimGraphAppRoles.ps1 / Grant-PimMiGraph). The policy itself is not missing. Graph said: {2}" -f $Role, $GroupName, $err)
+    }
+    if ($err) { return ("GroupsPolicies: the {0} policy of '{1}' could not be looked up: {2}" -f $Role, $GroupName, $err) }
+    return ("GroupsPolicies: no {0} policy for '{1}' (Graph returned no policy assignment for this group)" -f $Role, $GroupName)
 }
 
 # ---------------------------------------------------------------------------
@@ -1557,24 +3123,80 @@ function New-PimGroupNotificationRuleBody {
     # One notification rule (Graph requires one rule per recipient-type x event).
     # $RecipientType in Admin|Requestor|Approver; $Level in Eligibility|Assignment;
     # $NotificationLevel in All|Critical; $Recipients = extra email addresses.
+    # $Caller (parity audit #5, 2026-09-13): v1 set NINE notification rules and six of them are on the
+    # ADMIN caller -- Notification_{Admin,Requestor,Approver}_Admin_{Eligibility,Assignment} ("members are
+    # assigned as eligible / active"). This builder always emitted caller=EndUser, so those six could not
+    # be expressed at all. Default stays EndUser, so every existing call is unchanged.
     param(
         [Parameter(Mandatory)][ValidateSet('Admin','Requestor','Approver')][string]$RecipientType,
         [Parameter(Mandatory)][ValidateSet('Eligibility','Assignment')][string]$Level,
         [ValidateSet('All','Critical')][string]$NotificationLevel = 'All',
         [string[]]$Recipients = @(),
-        [bool]$DefaultRecipientsEnabled = $true
+        [bool]$DefaultRecipientsEnabled = $true,
+        [ValidateSet('EndUser','Admin')][string]$Caller = 'EndUser'
     )
-    $id = "Notification_${RecipientType}_EndUser_${Level}"
+    $id = "Notification_${RecipientType}_${Caller}_${Level}"
     @{
         '@odata.type'             = '#microsoft.graph.unifiedRoleManagementPolicyNotificationRule'
         id                        = $id
-        target                    = @{ caller='EndUser'; operations=@('all'); level=$Level; inheritableSettings=@(); enforcedSettings=@() }
+        target                    = @{ caller=$Caller; operations=@('all'); level=$Level; inheritableSettings=@(); enforcedSettings=@() }
         notificationType          = 'Email'
         recipientType             = $RecipientType
         notificationLevel         = $NotificationLevel
         isDefaultRecipientsEnabled= $DefaultRecipientsEnabled
         notificationRecipients    = @($Recipients | Where-Object { $_ })
     }
+}
+function ConvertTo-PimNotificationRuleBody {
+    # PURE: ONE template Notification entry -> its rule body, or $null when the entry is incomplete.
+    # The single place an entry's fields are read, so every provider builds the same id for it
+    # (recipientType, level, optional caller -- default EndUser -- notificationLevel, recipients,
+    # defaultRecipientsEnabled).
+    param([AllowNull()][object]$Entry)
+    if ($null -eq $Entry) { return $null }
+    $get = { param($n) if ($Entry -is [System.Collections.IDictionary]) { $Entry[$n] } elseif ($Entry.PSObject.Properties[$n]) { $Entry.$n } else { $null } }
+    $rt = "$(& $get 'recipientType')"; $lvl = "$(& $get 'level')"
+    if (-not $rt -or -not $lvl) { return $null }
+    $caller = "$(& $get 'caller')".Trim(); if (-not $caller) { $caller = 'EndUser' }
+    $recips = @(@(& $get 'recipients') | Where-Object { "$_".Trim() })
+    $nlvl = "$(& $get 'notificationLevel')"; if (-not $nlvl) { $nlvl = 'All' }
+    $defRaw = & $get 'defaultRecipientsEnabled'
+    $defOn = if ($null -eq $defRaw) { $true } else { [bool]$defRaw }
+    New-PimGroupNotificationRuleBody -RecipientType $rt -Level $lvl -NotificationLevel $nlvl -Recipients $recips -DefaultRecipientsEnabled $defOn -Caller $caller
+}
+function Resolve-PimTemplateNotifications {
+    <#
+      PURE-ish: a template's Notification entries resolved for ONE target, de-duplicated by rule id.
+        * recipientsSource ApproverUpns / NotifyUpns is resolved from the target's row values;
+        * an entry that REDIRECTS (has a recipientsSource) with defaults off and resolves to nobody is
+          SKIPPED -- never silence a notification because a redirect is unconfigured (it is reported
+          through -NoAudience) -- and whatever an EARLIER entry set for that rule id stays;
+        * a plain entry with defaultRecipientsEnabled=false is a deliberate "off" (v1's values) and is kept;
+        * later entries override earlier ones for the same rule id, so a template lists v1's baseline
+          first and its redirects after.
+    #>
+    param([object[]]$Entries, [string]$ApproverUpns = '', [string]$NotifyUpns = '', [System.Collections.Generic.List[string]]$NoAudience, [string]$Label = '')
+    $byId = [ordered]@{}
+    foreach ($n in @($Entries)) {
+        if ($null -eq $n) { continue }
+        $entry = $n | Select-Object *
+        $src = "$(if ($entry.PSObject.Properties['recipientsSource']) { $entry.recipientsSource } else { '' })".Trim()
+        if ($src -eq 'ApproverUpns' -or $src -eq 'NotifyUpns') {
+            $srcVal = if ($src -eq 'ApproverUpns') { $ApproverUpns } else { $NotifyUpns }
+            $ups = @("$srcVal" -split '[|,;]' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+            Add-Member -InputObject $entry -NotePropertyName recipients -NotePropertyValue $ups -Force
+        }
+        $defOn = if ($entry.PSObject.Properties['defaultRecipientsEnabled']) { [bool]$entry.defaultRecipientsEnabled } else { $true }
+        $recipCount = @($entry.recipients | Where-Object { "$_".Trim() }).Count
+        if ($src -and -not $defOn -and $recipCount -eq 0) {
+            if ($null -ne $NoAudience -and $Label) { [void]$NoAudience.Add($Label) }
+            continue
+        }
+        $b = ConvertTo-PimNotificationRuleBody -Entry $entry
+        if (-not $b) { continue }
+        $byId["$($b.id)"] = $entry
+    }
+    @($byId.Values)
 }
 
 # ---------------------------------------------------------------------------
@@ -1689,9 +3311,12 @@ function Repair-PimWriteLockedPolicy {
         if (-not $lost.Count) { continue }
         $lvl = ("$($r.id)" -split '_')[-1]
         if ($lvl -notin @('Assignment','Eligibility')) { continue }
+        # The caller is part of the rule id (Notification_Approver_<Caller>_<Level>): rebuild the SAME rule,
+        # not its EndUser twin, now that the Admin-caller notification rules are managed too (#5).
+        $cl = ("$($r.id)" -split '_')[-2]; if ($cl -notin @('EndUser','Admin')) { $cl = 'EndUser' }
         $nlvl = if ("$($r.notificationLevel)") { "$($r.notificationLevel)" } else { 'All' }
         $send.Add((New-PimGroupNotificationRuleBody -RecipientType 'Approver' -Level $lvl -NotificationLevel $nlvl `
-                    -Recipients @() -DefaultRecipientsEnabled $true)) | Out-Null
+                    -Recipients @() -DefaultRecipientsEnabled $true -Caller $cl)) | Out-Null
         # NAME the addresses being removed. They cannot be kept (restoring them re-locks the
         # policy), so this is the only record that the redirect existed at all.
         Write-Warning ("  [engine] policy $PolicyId was WRITE-LOCKED by $($r.id): Entra treats an explicit " +
@@ -1773,14 +3398,16 @@ function Get-PimGroupPolicyDesiredFacets {
     }
     if ($Desired.Notification) {
         foreach ($n in @($Desired.Notification)) {
-            $rt = "$($n.recipientType)"; $lvl = "$($n.level)"
-            if (-not $rt -or -not $lvl) { continue }
-            $recips = @(); if ($n.recipients) { $recips = @($n.recipients) }
-            $nlvl = if ("$($n.notificationLevel)") { "$($n.notificationLevel)" } else { 'All' }
-            $defOn = if ($n.PSObject -and $n.PSObject.Properties['defaultRecipientsEnabled']) { [bool]$n.defaultRecipientsEnabled } else { $true }
-            $nb = New-PimGroupNotificationRuleBody -RecipientType $rt -Level $lvl -NotificationLevel $nlvl -Recipients $recips -DefaultRecipientsEnabled $defOn
+            $nb = ConvertTo-PimNotificationRuleBody -Entry $n   # honours the entry's caller (#5)
+            if (-not $nb) { continue }
             $f[$nb.id] = "notify|lvl=$($nb.notificationLevel)|def=$($nb.isDefaultRecipientsEnabled)|recips=$(ConvertTo-PimSortedList $nb.notificationRecipients)"
         }
+    }
+    if ($Desired.PSObject -and $Desired.PSObject.Properties['ManageApproval'] -and -not $Desired.ManageApproval) {
+        # #4/#5: a GROUP OWNER policy, or a BASELINE target no row names, is not the engine's to gate --
+        # v1 never touched approval there. No approval facet at all, so live approval is neither
+        # demanded nor turned off.
+        return $f
     }
     if ($Desired.Approval) {
         # Approver identity set (already resolved upstream into ApproverIds) is part of the
@@ -1860,22 +3487,29 @@ function Test-PimGroupPolicyInSync {
     return $true
 }
 
-# Policy templates: templates/policy/*.policytemplate.json (+ *.policytemplate.custom.json,
-# custom id wins), single-level 'extends' merged + a content Hash -- IDENTICAL semantics to
-# Get-PimPolicyTemplates in PIM-Functions.psm1 (the established engine). A definition's
+# Policy templates -- SQL ONLY (operator, 2026-09-12: "move templates to sql"). The templates live in
+# pim.Settings['PolicyTemplates'] (seeded from the shipped templates/policy/*.policytemplate.json by
+# Update-PimPolicyTemplateStore at db-init / Manager boot: unmodified templates follow the shipped version,
+# customised ones are kept and flagged TEMPLATE-UPGRADE-AVAILABLE -- BUG-55 semantics), hydrated into
+# $global:PIM_NamingConventions like every other setting. There is NO file read here and NO
+# *.policytemplate.custom.json override. Single-level 'extends' is merged exactly as before. A definition's
 # PolicyTemplate column selects one; BLANK = 'default' (every group is linked).
-# (PimEngineRoot = the PIM4EntraPS solution root.)
+# $global:PIM_PolicyTemplates is the in-memory injection seam (tests, or a host that has already read the
+# setting) -- the same pattern as $global:PIM_DesiredRows for rows.
 $script:PimEngineRoot = if ($PSScriptRoot) { (Resolve-Path "$PSScriptRoot\..\..").Path } else { $null }
 function Get-PimEnginePolicyTemplates {
-    $dir = if ($global:PIM_TemplateDir) { $global:PIM_TemplateDir } elseif ($script:PimEngineRoot) { Join-Path $script:PimEngineRoot 'templates\policy' } else { $null }
+    $raw = $null
+    if ($null -ne $global:PIM_PolicyTemplates) { $raw = $global:PIM_PolicyTemplates }
+    elseif ($global:PIM_NamingConventions -is [System.Collections.IDictionary] -and $global:PIM_NamingConventions.Contains('PolicyTemplates')) { $raw = $global:PIM_NamingConventions['PolicyTemplates'] }
+    elseif (Get-Command Get-PimSetting -ErrorAction SilentlyContinue) { try { $raw = Get-PimSetting -Name 'PolicyTemplates' } catch { $raw = $null } }
+    if (-not (Get-Command ConvertTo-PimPolicyTemplateMap -ErrorAction SilentlyContinue) -and $PSScriptRoot) {
+        $tsLib = Join-Path $PSScriptRoot 'PIM-PolicyTemplateStore.ps1'
+        if (Test-Path -LiteralPath $tsLib) { . $tsLib }
+    }
     $byId = @{}
-    if ($dir -and (Test-Path -LiteralPath $dir)) {
-        $files = @(Get-ChildItem -LiteralPath $dir -Filter '*.policytemplate.json' -EA SilentlyContinue) +
-                 @(Get-ChildItem -LiteralPath $dir -Filter '*.policytemplate.custom.json' -EA SilentlyContinue)   # custom enumerates last -> same id wins
-        foreach ($f in $files) {
-            try { $j = Get-Content -LiteralPath $f.FullName -Raw -Encoding UTF8 | ConvertFrom-Json; if ($j.id) { $byId["$($j.id)"] = $j } }
-            catch { Write-Warning "  [policy] template '$($f.Name)' unreadable: $($_.Exception.Message)" }
-        }
+    if (Get-Command ConvertTo-PimPolicyTemplateMap -ErrorAction SilentlyContinue) { $byId = ConvertTo-PimPolicyTemplateMap -Value $raw }
+    if ($byId.Count -eq 0) {
+        Write-Warning "  [policy] NO policy templates in the SQL store (pim.Settings 'PolicyTemplates') -- the policy providers have nothing to apply. Seed them with Initialize-PimPolicyTemplateStore (the Manager and the db-init job do this on a fresh store)."
     }
     $out = @{}
     foreach ($id in @($byId.Keys)) {
@@ -1892,7 +3526,151 @@ function Get-PimEnginePolicyTemplate {
     $tid = if ("$Id".Trim()) { "$Id".Trim() } else { 'default' }
     $all = if ($script:__pimTplCache) { $script:__pimTplCache } else { $script:__pimTplCache = Get-PimEnginePolicyTemplates; $script:__pimTplCache }
     if ($all.ContainsKey($tid)) { return $all[$tid] }
-    Write-Warning "  [policy] template '$tid' not found in templates/policy"; return $null
+    Write-Warning "  [policy] template '$tid' not found in the SQL store (pim.Settings 'PolicyTemplates')"; return $null
+}
+
+function Get-PimGroupOwnerPolicyId {
+    # #4: the policy for the OWNER role of a PIM-for-Groups group (roleDefinitionId 'owner'). v1 set it on
+    # every PIM-* group ($PIM_Policy[1], CSV L875-1022); v2 only ever read the member one.
+    param([string]$GroupId)
+    $c = Get-PimGroupPolicyIdCached -GroupId "$GroupId" -Role 'owner'; if ($c) { return $c }
+    try { $a = @(Invoke-PimGraph -All -Path (Get-PimGroupPolicyAssignmentPath -GroupId "$GroupId" -Role 'owner')); if ($a.Count) { Set-PimGroupPolicyIdCached -GroupId "$GroupId" -Role 'owner' -PolicyId "$($a[0].policyId)"; return "$($a[0].policyId)" } } catch { Set-PimGroupPolicyLookupError -GroupId "$GroupId" -Role 'owner' -Message "$($_.Exception.Message)"; Write-Verbose "owner policyId ($GroupId): $($_.Exception.Message)" }
+    return $null
+}
+
+function Test-PimPolicyBaselineEnabled {
+    <#
+      #5 COVERAGE. v1 set its policy baseline on EVERY directory role and EVERY PIM-* group, not only the
+      ones a definition or assignment row names. ON by default (v1 parity); pim.Settings / $global: /
+      env 'PolicyBaselineAllTargets' = false turns it off. A baseline target gets its type's default
+      template and the engine never manages APPROVAL on it (nothing named it, so nothing decided it).
+    #>
+    $v = Get-PimAdminLifecycleSetting -Name 'PolicyBaselineAllTargets' -Default 'true'
+    return -not ("$v".Trim() -match '(?i)^(false|0|no|off|disabled?)$')
+}
+
+function Get-PimBaselineGroupTargets {
+    # #5: live groups carrying the managed name prefix that no definition row names -- v1's target set
+    # (CSV L705-711: security-enabled, not dynamic, not on-prem synced, DisplayName like 'PIM-*'). Read from
+    # the directory cache the scope's refreshBefore loads (the lean context already filters by prefix);
+    # it never forces a tenant read of its own.
+    param([hashtable]$DefinedNames = @{})
+    $prefix = "$(Get-PimAdminLifecycleSetting -Name 'GroupPrefix' -Default 'PIM-')".Trim()
+    if (-not $prefix) { return @() }
+    $out = New-Object System.Collections.Generic.List[object]
+    foreach ($g in @($Global:Groups_All_ID)) {
+        if ($null -eq $g) { continue }
+        $name = "$($g.DisplayName)"; if (-not $name) { $name = "$($g.displayName)" }
+        if (-not $name -or -not $name.StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase)) { continue }
+        if ($DefinedNames.ContainsKey($name.ToLowerInvariant())) { continue }
+        $sec = if ($g.PSObject.Properties['SecurityEnabled']) { $g.SecurityEnabled } else { $g.securityEnabled }
+        if ($null -ne $sec -and -not [bool]$sec) { continue }
+        $types = @($(if ($g.PSObject.Properties['GroupTypes']) { $g.GroupTypes } else { $g.groupTypes }))
+        if ($types -contains 'DynamicMembership') { continue }
+        $sync = if ($g.PSObject.Properties['OnPremisesSyncEnabled']) { $g.OnPremisesSyncEnabled } else { $g.onPremisesSyncEnabled }
+        if ($null -ne $sync -and [bool]$sync) { continue }
+        $id = "$($g.Id)"; if (-not $id) { $id = "$($g.id)" }
+        $out.Add([pscustomobject]@{ GroupName = $name; GroupId = $id })
+    }
+    @($out.ToArray() | Sort-Object GroupName)
+}
+
+function Get-PimGroupsPolicyDesiredSet {
+    <#
+      DESIRED for GroupsPolicies: per managed group its MEMBER policy (as before) and -- when the template
+      carries an Owner block (#4) -- its OWNER policy; plus, with the baseline on (#5), the member and owner
+      policy of every managed-prefix group no definition row names, on the 'default' template with approval
+      unmanaged. Notification entries are resolved per target (caller-aware, de-duplicated by rule id).
+    #>
+    $out = New-Object System.Collections.Generic.List[object]
+    $defined = @{}
+    $addOwner = {
+        param($gn, $gid, $tpl, $isBaseline)
+        if (-not $tpl.rules.ContainsKey('Owner') -or $null -eq $tpl.rules['Owner']) { return }
+        $ob = $tpl.rules['Owner']
+        $pick = { param($k) if ($ob -is [System.Collections.IDictionary]) { $ob[$k] } elseif ($ob.PSObject.Properties[$k]) { $ob.$k } else { $null } }
+        $out.Add([pscustomobject]@{ GroupName=$gn; GroupId=$gid; PolicyRole='owner'; Baseline=[bool]$isBaseline; ManageApproval=$false; Owners=''; ApproverIds=@(); TemplateId=$tpl.id
+            Approval=$null; Enablement=(& $pick 'Enablement'); EnablementLegacy=$null; Expiration=(& $pick 'Expiration')
+            Notification=@(Resolve-PimTemplateNotifications -Entries @(& $pick 'Notification')) })
+    }
+    foreach ($g in (Get-PimGroupDefinitionRows)) {
+        # blank PolicyTemplate -> 'default' (every managed group gets the baseline)
+        $tplId = Get-PimRowProp -Row $g -Names @('PolicyTemplate')
+        $tpl = Get-PimEnginePolicyTemplate -Id $tplId; if (-not $tpl) { continue }
+        $defined["$($g.GroupName)".ToLowerInvariant()] = $true
+        $hasApproval = $tpl.rules.ContainsKey('Approval')
+        $expiration = if ($tpl.rules.ContainsKey('Expiration')) { $tpl.rules['Expiration'] } else { $null }
+        $notify     = if ($tpl.rules.ContainsKey('Notification')) { @(Resolve-PimTemplateNotifications -Entries @($tpl.rules['Notification'])) } else { $null }
+        # Enablement: prefer the structured 'Enablement' object (per-target MFA/Justification);
+        # fall back to the legacy single EndUser/Assignment key for back-compat.
+        $enablement = if ($tpl.rules.ContainsKey('Enablement')) { $tpl.rules['Enablement'] } else { $null }
+        $enLegacy   = if ($tpl.rules.ContainsKey('Member_Enablement_EndUser_Assignment_enabledRules')) { $tpl.rules['Member_Enablement_EndUser_Assignment_enabledRules'] } else { $null }
+        # Approver IDs follow the SAME resolution as group ownership: Owners column ->
+        # SponsorUpn -> the group's Department contact. A service group usually has a BLANK
+        # Owners column and inherits its department's owners; an approval rule with ZERO
+        # approvers is rejected by Graph ('InvalidPolicy'), so resolve through the full chain.
+        $approverIds = if ($hasApproval) { @(Resolve-PimGroupOwnerIds -Row $g | ForEach-Object { $_ }) } else { @() }
+        $out.Add([pscustomobject]@{ GroupName=$g.GroupName; GroupId=''; PolicyRole='member'; Baseline=$false; ManageApproval=$true; Owners=$g.Owners; ApproverIds=$approverIds; TemplateId=$tpl.id; Approval=$(if ($hasApproval) { $tpl.rules['Approval'] } else { $null }); Enablement=$enablement; EnablementLegacy=$enLegacy; Expiration=$expiration; Notification=$notify })
+        & $addOwner $g.GroupName '' $tpl $false
+    }
+    if (Test-PimPolicyBaselineEnabled) {
+        $base = @(Get-PimBaselineGroupTargets -DefinedNames $defined)
+        if ($base.Count) {
+            $tpl = Get-PimEnginePolicyTemplate -Id 'default'
+            if ($tpl) {
+                foreach ($bg in $base) {
+                    $out.Add([pscustomobject]@{ GroupName=$bg.GroupName; GroupId=$bg.GroupId; PolicyRole='member'; Baseline=$true; ManageApproval=$false; Owners=''; ApproverIds=@(); TemplateId=$tpl.id; Approval=$null
+                        Enablement=$(if ($tpl.rules.ContainsKey('Enablement')) { $tpl.rules['Enablement'] } else { $null }); EnablementLegacy=$null
+                        Expiration=$(if ($tpl.rules.ContainsKey('Expiration')) { $tpl.rules['Expiration'] } else { $null })
+                        Notification=$(if ($tpl.rules.ContainsKey('Notification')) { @(Resolve-PimTemplateNotifications -Entries @($tpl.rules['Notification'])) } else { $null }) })
+                    & $addOwner $bg.GroupName $bg.GroupId $tpl $true
+                }
+                Write-Host ("    [engine] GroupsPolicies: baseline covers {0} managed-prefix group(s) no definition row names (template 'default', approval unmanaged)" -f $base.Count) -ForegroundColor DarkGray
+            }
+        }
+    }
+    $out.ToArray()
+}
+
+function Get-PimGroupsPolicyKey {
+    param([object]$Row)
+    $gn = (Get-PimRowProp -Row $Row -Names @('GroupName')).ToLowerInvariant()
+    if ("$(Get-PimRowProp -Row $Row -Names @('PolicyRole'))" -eq 'owner') { return "$gn|owner" }
+    $gn
+}
+
+function Invoke-PimGroupPolicyDriftUpdate {
+    <#
+      ApplyUpdate for an OWNER policy (#4) or a BASELINE group (#5): re-read the policy, PATCH ONLY the rules
+      that drifted from the template (enablement, expiration, notification -- never approval), collect every
+      refusal and fail the item naming all of them (BUG-52). An unreadable policy writes nothing.
+    #>
+    param([Parameter(Mandatory)][object]$Item)
+    $d = $Item.desired; $gn = "$($d.GroupName)"; $role = if ("$($d.PolicyRole)" -eq 'owner') { 'owner' } else { 'member' }
+    $gid = if ("$($d.GroupId)") { "$($d.GroupId)" } else { Resolve-PimLiveGroupIdByName $gn }
+    if (-not $gid) { throw "GroupsPolicies: group '$gn' not found" }
+    $polId = if ($role -eq 'owner') { Get-PimGroupOwnerPolicyId -GroupId $gid } else { Get-PimGroupMemberPolicyId -GroupId $gid }
+    if (-not $polId) { throw (Get-PimGroupPolicyMissingMessage -GroupName $gn -GroupId $gid -Role $role) }
+    $liveRules = $null
+    try { $liveRules = @((Invoke-PimGraph -Path "/policies/roleManagementPolicies/$polId`?`$expand=rules").rules) }
+    catch { throw "GroupsPolicies: the $role policy of '$gn' could not be re-read, so NOTHING was written: $($_.Exception.Message)" }
+    $have = Get-PimGroupPolicyLiveFacets -Rules $liveRules
+    $want = Get-PimGroupPolicyDesiredFacets -Desired $d
+    $drifted = @{}; foreach ($k in @($want.Keys)) { if (-not $have.ContainsKey($k) -or "$($have[$k])" -ne "$($want[$k])") { $drifted[$k] = $true } }
+    if (-not $drifted.Count) { return [pscustomobject]@{ pimApplied = $false; note = 'already in sync on re-read' } }
+    $failures = New-Object System.Collections.Generic.List[string]
+    $bodies = New-Object System.Collections.Generic.List[object]
+    foreach ($b in @(ConvertTo-PimEnablementRuleBodies -Enablement $d.Enablement -LegacyEndUserAssignment $d.EnablementLegacy)) { if ($b) { $bodies.Add($b) } }
+    foreach ($b in @(ConvertTo-PimExpirationRuleBodies -Expiration $d.Expiration)) { if ($b) { $bodies.Add($b) } }
+    foreach ($n in @($d.Notification)) { $b = ConvertTo-PimNotificationRuleBody -Entry $n; if ($b) { $bodies.Add($b) } }
+    $sent = 0
+    foreach ($b in $bodies.ToArray()) {
+        if (-not $drifted.ContainsKey("$($b.id)")) { continue }
+        $sent++
+        try { Invoke-PimPolicyRulePatch -PolicyId $polId -Body $b } catch { $failures.Add("$($b.id): $($_.Exception.Message)") | Out-Null }
+    }
+    Assert-PimGroupPolicyPatchesApplied -GroupName "$gn ($role policy)" -Failures $failures
+    [pscustomobject]@{ group = $gn; role = $role; policyId = $polId; template = "$($d.TemplateId)"; patched = $sent; baseline = [bool]$d.Baseline }
 }
 
 function New-PimGroupsPoliciesProvider {
@@ -1901,55 +3679,92 @@ function New-PimGroupsPoliciesProvider {
         # DESIRED = EVERY managed group's member policy brought to the v1 baseline. The
         # baseline (Expiration + Enablement + Notification) is applied to ALL linked groups
         # (blank PolicyTemplate = 'default'); the Approval rule is applied ONLY when the
-        # template declares one (e.g. 'approval-required'). The engine still never touches an
-        # approval rule it did not itself apply (default-linked groups carry no Approval).
+        # template declares one (e.g. 'approval-required'). #4: plus each group's OWNER policy from the
+        # template's Owner block. #5: plus every managed-prefix group no row names (baseline, default ON).
         GetDesired = {
             param($ctx)
-            $out = New-Object System.Collections.Generic.List[object]
-            foreach ($g in (Get-PimGroupDefinitionRows)) {
-                # blank PolicyTemplate -> 'default' (every managed group gets the baseline)
-                $tplId = Get-PimRowProp -Row $g -Names @('PolicyTemplate')
-                $tpl = Get-PimEnginePolicyTemplate -Id $tplId; if (-not $tpl) { continue }
-                $hasApproval = $tpl.rules.ContainsKey('Approval')
-                $expiration = if ($tpl.rules.ContainsKey('Expiration')) { $tpl.rules['Expiration'] } else { $null }
-                $notify     = if ($tpl.rules.ContainsKey('Notification')) { $tpl.rules['Notification'] } else { $null }
-                # Enablement: prefer the structured 'Enablement' object (per-target MFA/Justification);
-                # fall back to the legacy single EndUser/Assignment key for back-compat.
-                $enablement = if ($tpl.rules.ContainsKey('Enablement')) { $tpl.rules['Enablement'] } else { $null }
-                $enLegacy   = if ($tpl.rules.ContainsKey('Member_Enablement_EndUser_Assignment_enabledRules')) { $tpl.rules['Member_Enablement_EndUser_Assignment_enabledRules'] } else { $null }
-                # Approver IDs follow the SAME resolution as group ownership: Owners column ->
-                # SponsorUpn -> the group's Department contact. A service group usually has a BLANK
-                # Owners column and inherits its department's owners; an approval rule with ZERO
-                # approvers is rejected by Graph ('InvalidPolicy'), so resolve through the full chain.
-                $approverIds = if ($hasApproval) { @(Resolve-PimGroupOwnerIds -Row $g) } else { @() }
-                $out.Add([pscustomobject]@{ GroupName=$g.GroupName; Owners=$g.Owners; ApproverIds=$approverIds; TemplateId=$tpl.id; Approval=$(if ($hasApproval) { $tpl.rules['Approval'] } else { $null }); Enablement=$enablement; EnablementLegacy=$enLegacy; Expiration=$expiration; Notification=$notify })
-            }
-            $out.ToArray()
+            $d = @(Get-PimGroupsPolicyDesiredSet)
+            if ($null -ne $ctx) { $ctx['groupsPolDesired'] = $d }
+            $d
         }
         GetLive = {
             param($ctx)
             Ensure-PimContextLoaded
             $live = New-Object System.Collections.Generic.List[object]
-            foreach ($g in (Get-PimGroupDefinitionRows)) {
-                $tplId = Get-PimRowProp -Row $g -Names @('PolicyTemplate')
-                $tpl = Get-PimEnginePolicyTemplate -Id $tplId; if (-not $tpl) { continue }
-                $gid = Resolve-PimLiveGroupIdByName $g.GroupName; if (-not $gid) { continue }
-                $polId = Get-PimGroupMemberPolicyId -GroupId $gid; if (-not $polId) { continue }
+            $desired = if ($null -ne $ctx -and $ctx.ContainsKey('groupsPolDesired')) { @($ctx['groupsPolDesired']) } else { @(Get-PimGroupsPolicyDesiredSet) }
+            # PERFORMANCE (2026-09-13, internal: 706 policies = 1,412 sequential reads, ~11 min): the SAME two
+            # reads per policy (assignment -> policy id, then the policy with its rules) go through Graph /$batch.
+            if ((Get-Command Invoke-PimGraphBatchGet -ErrorAction SilentlyContinue) -and (Test-PimGraphBatchReadsEnabled)) {
+                $targets = New-Object System.Collections.Generic.List[object]
+                foreach ($g in $desired) {
+                    $gid = if ("$($g.GroupId)") { "$($g.GroupId)" } else { Resolve-PimLiveGroupIdByName $g.GroupName }
+                    if (-not $gid) { continue }
+                    $role = if ("$($g.PolicyRole)" -eq 'owner') { 'owner' } else { 'member' }
+                    $targets.Add([pscustomobject]@{ g = $g; gid = "$gid"; role = $role; polId = (Get-PimGroupPolicyIdCached -GroupId "$gid" -Role $role) })
+                }
+                $needId = @($targets | Where-Object { -not $_.polId })
+                if ($needId.Count) {
+                    $idRes = Invoke-PimGraphBatchGet -Paths @($needId | ForEach-Object { Get-PimGroupPolicyAssignmentPath -GroupId $_.gid -Role $_.role })
+                    for ($i = 0; $i -lt $needId.Count; $i++) {
+                        $r = $idRes[$i]
+                        if (-not $r -or -not $r.ok) { if ($r) { Set-PimGroupPolicyLookupError -GroupId $needId[$i].gid -Role $needId[$i].role -Message "$($r.error)"; Write-Verbose "policyId ($($needId[$i].gid)/$($needId[$i].role)): $($r.error)" }; continue }
+                        $a = @($r.items)
+                        if ($a.Count) { $needId[$i].polId = "$($a[0].policyId)"; Set-PimGroupPolicyIdCached -GroupId $needId[$i].gid -Role $needId[$i].role -PolicyId $needId[$i].polId }
+                    }
+                }
+                $withId = @($targets | Where-Object { $_.polId })
+                $polRes = if ($withId.Count) { Invoke-PimGraphBatchGet -Paths @($withId | ForEach-Object { Get-PimGroupPolicyReadPath -PolicyId $_.polId }) } else { @() }
+                for ($i = 0; $i -lt $withId.Count; $i++) {
+                    $t = $withId[$i]; $r = $polRes[$i]
+                    $rules = @(); $neverMod = $false
+                    if ($r -and $r.ok -and $null -ne $r.body) { $rules = @($r.body.rules); $neverMod = Test-PimGraphPolicyNeverModified -Policy $r.body }
+                    elseif ($r) {
+                        Write-Verbose "policy read ($($t.g.GroupName)/$($t.role)): $($r.error)"
+                        # §70.10: a cached/persisted id whose policy no longer exists must not be trusted again.
+                        if ($r.status -eq 404 -or "$($r.error)" -match '(?i)HTTP 404|not ?found|ResourceNotFound') { Remove-PimGroupPolicyIdCached -GroupId $t.gid -Role $t.role }
+                    }
+                    $live.Add([pscustomobject]@{ GroupName=$t.g.GroupName; PolicyRole=$t.role; PolicyId=$t.polId; Rules=$rules; NeverModified=$neverMod })
+                }
+                Save-PimGroupPolicyIdMap
+                Write-Host ("  [perf] group policies read in batches: {0} policy id lookup(s), {1} policy read(s)" -f $needId.Count, $withId.Count) -ForegroundColor DarkGray
+                # 🔴 §70.6 (2026-09-13) -- THE BATCHED PATH SKIPPED THE MASS-CHANGE BREAKER. This `return` used to
+                # come BEFORE the plan, and batched reads are ON by default, so Invoke-PimGraphPolicyGuardedApply
+                # found no plan and applied every item directly. Measured on internal, 48 h of tick logs:
+                # `[breaker] EntraRolePolicies` 7x, `[breaker] AzResPolicies` 30x, `[breaker] GroupsPolicies` 0x --
+                # while GroupsPolicies applied 78 policy changes unguarded. PLAN FIRST on BOTH read paths.
+                Set-PimGraphPolicyBreakerPlan -Provider 'GroupsPolicies' -Context $ctx -Desired $desired -Live $live.ToArray() `
+                    -KeyOf { param($r) Get-PimGroupsPolicyKey -Row $r } -Label { param($r) if ("$($r.PolicyRole)" -eq 'owner') { "$($r.GroupName) (owner)" } else { "$($r.GroupName)" } }
+                return $live.ToArray()
+            }
+            foreach ($g in $desired) {
+                $gid = if ("$($g.GroupId)") { "$($g.GroupId)" } else { Resolve-PimLiveGroupIdByName $g.GroupName }
+                if (-not $gid) { continue }
+                $role = if ("$($g.PolicyRole)" -eq 'owner') { 'owner' } else { 'member' }
+                $polId = if ($role -eq 'owner') { Get-PimGroupOwnerPolicyId -GroupId $gid } else { Get-PimGroupMemberPolicyId -GroupId $gid }
+                if (-not $polId) { continue }
                 # FULL read-back: the create/modify diff compares EVERY rule the provider
                 # PATCHes (Approval + Expiration x3 + Enablement x3 + Notification), so the
                 # live row carries the whole expanded rules collection (Get-PimGroupPolicyLiveFacets
                 # normalises it in Equal). A group with no readable policy yet is simply absent
                 # from live -> the diff classifies it as a create.
-                $rules = @()
+                $rules = @(); $neverMod = $false
                 try {
                     $pol = Invoke-PimGraph -Path "/policies/roleManagementPolicies/$polId`?`$expand=rules"
-                    $rules = @($pol.rules)
-                } catch { Write-Verbose "policy read ($($g.GroupName)): $($_.Exception.Message)" }
-                $live.Add([pscustomobject]@{ GroupName=$g.GroupName; PolicyId=$polId; Rules=$rules })
+                    $rules = @($pol.rules); $neverMod = Test-PimGraphPolicyNeverModified -Policy $pol
+                } catch {
+                    Write-Verbose "policy read ($($g.GroupName)/$role): $($_.Exception.Message)"
+                    if ("$($_.Exception.Message)" -match '(?i)HTTP 404|not ?found|ResourceNotFound') { Remove-PimGroupPolicyIdCached -GroupId "$gid" -Role $role }
+                }
+                $live.Add([pscustomobject]@{ GroupName=$g.GroupName; PolicyRole=$role; PolicyId=$polId; Rules=$rules; NeverModified=$neverMod })
             }
+            Save-PimGroupPolicyIdMap
+            # PLAN FIRST (mass-change circuit breaker, operator 2026-09-13): the whole change set and the
+            # breaker decision exist before any ApplyUpdate runs.
+            Set-PimGraphPolicyBreakerPlan -Provider 'GroupsPolicies' -Context $ctx -Desired $desired -Live $live.ToArray() `
+                -KeyOf { param($r) Get-PimGroupsPolicyKey -Row $r } -Label { param($r) if ("$($r.PolicyRole)" -eq 'owner') { "$($r.GroupName) (owner)" } else { "$($r.GroupName)" } }
             $live.ToArray()
         }
-        KeyOf = { param($r) (Get-PimRowProp -Row $r -Names @('GroupName')).ToLowerInvariant() }
+        KeyOf = { param($r) Get-PimGroupsPolicyKey -Row $r }
         # nochange ONLY when the live policy already matches the desired baseline across
         # the WHOLE managed rule set: Approval (when the template asks for it, incl. the
         # approver identity set), all three Expiration caps, all three Enablement rules,
@@ -1964,9 +3779,18 @@ function New-PimGroupsPoliciesProvider {
         ApplyCreate = { param($item,$ctx) & (Get-PimEngineProvider -Scope 'GroupsPolicies').ApplyUpdate $item $ctx }
         ApplyUpdate = {
             param($item,$ctx)
+            Invoke-PimGraphPolicyGuardedApply -Provider 'GroupsPolicies' -Item $item -Context $ctx -Apply { param($i, $c) Invoke-PimGroupsPolicyApply -item $i -ctx $c }
+        }
+    }
+}
+
+function Invoke-PimGroupsPolicyApply {
+    # GroupsPolicies' write for ONE policy -- reached only through Invoke-PimGraphPolicyGuardedApply (breaker).
+    param([object]$item, [hashtable]$ctx)
             $d=$item.desired; $gn=$d.GroupName
+            if ("$($d.PolicyRole)" -eq 'owner' -or [bool]$d.Baseline) { return (Invoke-PimGroupPolicyDriftUpdate -Item $item) }
             $gid=Resolve-PimLiveGroupIdByName $gn; if (-not $gid) { throw "GroupsPolicies: group '$gn' not found" }
-            $polId=Get-PimGroupMemberPolicyId -GroupId $gid; if (-not $polId) { throw "GroupsPolicies: no member policy for '$gn'" }
+            $polId=Get-PimGroupMemberPolicyId -GroupId $gid; if (-not $polId) { throw (Get-PimGroupPolicyMissingMessage -GroupName $gn -GroupId $gid -Role 'member') }
             # 🔴 BUG-52 -- A SWALLOWED PATCH FAILURE IS WHY THIS SCOPE COULD NOT BE DIAGNOSED.
             # Every rule PATCH below used to be `try { ... } catch { Write-Verbose ... }`. Graph's
             # refusal therefore went to a stream nobody reads, the item still counted as APPLIED,
@@ -1981,31 +3805,52 @@ function New-PimGroupsPoliciesProvider {
             #     the rest -- a policy half-applied silently is worse than one that fails loudly;
             #   * a run that changes nothing can no longer look identical to one that worked.
             $ruleFailures = New-Object System.Collections.Generic.List[string]
+            # 🔴 §70.7 (2026-09-13) -- PATCH ONLY THE RULES THAT DRIFTED. This path used to PATCH every
+            # enablement, expiration and notification rule of the policy, one Graph call each (~15 per policy),
+            # whether or not it differed: ~1,170 calls for 78 policies on internal, ~10 minutes of the tick.
+            # The owner/baseline path (Invoke-PimGroupPolicyDriftUpdate) and EntraRolePolicies already sent only
+            # drifted rules. The comparison is the SAME facet compare Equal uses, over the live rules this scope
+            # run just read ($item.live). No live rules (a create, or an unreadable policy) => every rule is sent,
+            # exactly as before -- the saving never costs a missed write.
+            $wantFacets = Get-PimGroupPolicyDesiredFacets -Desired $d
+            $liveRules = $null
+            if ($item.live -and $item.live.PSObject.Properties['Rules'] -and @($item.live.Rules).Count) { $liveRules = @($item.live.Rules) }
+            $haveFacets = if ($null -ne $liveRules) { Get-PimGroupPolicyLiveFacets -Rules $liveRules } else { $null }
+            $ruleDrifted = {
+                param([string]$RuleId)
+                if ($null -eq $haveFacets) { return $true }
+                if (-not $wantFacets.ContainsKey($RuleId)) { return $true }
+                return (-not $haveFacets.ContainsKey($RuleId) -or "$($haveFacets[$RuleId])" -ne "$($wantFacets[$RuleId])")
+            }
+            $rulesSent = 0; $rulesSkipped = 0
             # --- v1 baseline: Enablement + Expiration + Notification on EVERY managed group ---
             # Member enablement (MFA / Justification) per target (EndUser/Assignment +
             # Admin/Eligibility get MFA+Justification; Admin/Assignment is cleared) from the template.
             foreach ($enBody in @(ConvertTo-PimEnablementRuleBodies -Enablement $d.Enablement -LegacyEndUserAssignment $d.EnablementLegacy)) {
+                if (-not (& $ruleDrifted "$($enBody.id)")) { $rulesSkipped++; continue }
+                $rulesSent++
                 try { Invoke-PimPolicyRulePatch -PolicyId $polId -Body $enBody } catch { $ruleFailures.Add("enablement/$($enBody.id): $($_.Exception.Message)") | Out-Null }
             }
             # Member expiration (v1 parity: EndUser/activation P1D, Admin/Assignment + Admin/Eligibility
             # P365D, all isExpirationRequired) from the template.
             foreach ($exBody in @(ConvertTo-PimExpirationRuleBodies -Expiration $d.Expiration)) {
+                if (-not (& $ruleDrifted "$($exBody.id)")) { $rulesSkipped++; continue }
+                $rulesSent++
                 try { Invoke-PimPolicyRulePatch -PolicyId $polId -Body $exBody } catch { $ruleFailures.Add("expiration/$($exBody.id): $($_.Exception.Message)") | Out-Null }
             }
-            # Notification rules (v1 parity: extra recipients per recipient-type x event) from the template
+            # Notification rules (v1 parity: the nine rules, caller-aware since #5) from the template
             if ($d.Notification) {
                 foreach ($n in @($d.Notification)) {
-                    $rt = "$($n.recipientType)"; $lvl = "$($n.level)"
-                    if (-not $rt -or -not $lvl) { continue }
-                    $recips = @(); if ($n.recipients) { $recips = @($n.recipients) }
-                    $nlvl = if ("$($n.notificationLevel)") { "$($n.notificationLevel)" } else { 'All' }
-                    $defOn = if ($n.PSObject.Properties['defaultRecipientsEnabled']) { [bool]$n.defaultRecipientsEnabled } else { $true }
                     try {
-                        $nBody = New-PimGroupNotificationRuleBody -RecipientType $rt -Level $lvl -NotificationLevel $nlvl -Recipients $recips -DefaultRecipientsEnabled $defOn
+                        $nBody = ConvertTo-PimNotificationRuleBody -Entry $n
+                        if (-not $nBody) { continue }
+                        if (-not (& $ruleDrifted "$($nBody.id)")) { $rulesSkipped++; continue }
+                        $rulesSent++
                         Invoke-PimPolicyRulePatch -PolicyId $polId -Body $nBody
-                    } catch { $ruleFailures.Add("notification/$rt/${lvl}: $($_.Exception.Message)") | Out-Null }
+                    } catch { $ruleFailures.Add("notification/$($n.recipientType)/$($n.level): $($_.Exception.Message)") | Out-Null }
                 }
             }
+            if ($rulesSkipped) { Write-Verbose "GroupsPolicies '$gn': $rulesSent drifted rule(s) sent, $rulesSkipped already in sync skipped" }
             # --- Approval rule: ONLY when the template declares one (default-linked groups skip) ---
             # 🪤 BUG-52: this early `return` is the DEFAULT path (every default-linked group takes
             # it), so the failure check has to happen HERE as well as at the end -- putting it only
@@ -2053,10 +3898,10 @@ function New-PimGroupsPoliciesProvider {
                     approvalStages=@(@{ approvalStageTimeOutInDays=1; isApproverJustificationRequired=$true; escalationTimeInMinutes=$(if ($escalationOn) { $escMin } else { 0 }); isEscalationEnabled=$escalationOn; primaryApprovers=$approvers; escalationApprovers=$escApprovers }) } }
             # The approval PATCH is deliberately NOT wrapped: an approval rule that fails to apply
             # means the group is not actually approval-gated, which must stop the item outright.
-            Invoke-PimPolicyRulePatch -PolicyId $polId -Body $body
+            # §70.7: skipped only when the live approval facet (required + approver set) already equals the
+            # desired one -- the same facet Equal compares, so this never skips a change Equal would detect.
+            if (& $ruleDrifted 'Approval_EndUser_Assignment') { Invoke-PimPolicyRulePatch -PolicyId $polId -Body $body }
             Assert-PimGroupPolicyPatchesApplied -GroupName $gn -Failures $ruleFailures
-        }
-    }
 }
 
 # ---------------------------------------------------------------------------
@@ -2086,7 +3931,9 @@ function Get-PimManagedRolePolicyTargets {
     <#
       PURE-ish: the distinct set of directory ROLES the solution manages, with the policy template
       each one is linked to. Sources are the role-assignment entities, because a role the engine
-      assigns is a role whose activation policy the engine is responsible for.
+      assigns is a role whose activation policy the engine is responsible for -- group-based, AU-scoped
+      AND direct (#5: PIM-Assignments-Roles-Direct was missing, so a role assigned only directly never
+      had its policy managed).
 
       Template selection: the row's PolicyTemplate column; blank -> 'EntraIDRoles_Standard'.
       CONFLICT RULE: if two rows name the same role with different templates, the one that requires
@@ -2094,7 +3941,7 @@ function Get-PimManagedRolePolicyTargets {
       high-privilege role's approval requirement depend on row order.
     #>
     $byRole = @{}
-    foreach ($ent in @('PIM-Assignments-Roles-Groups','PIM-Assignments-Roles-AUs')) {
+    foreach ($ent in @('PIM-Assignments-Roles-Groups','PIM-Assignments-Roles-AUs','PIM-Assignments-Roles-Direct')) {
         foreach ($r in @(Get-PimDesiredRows -Entity $ent | Where-Object { (Get-PimRowProp -Row $_ -Names @('Action')) -ne 'Remove' })) {
             $rn = "$(Get-PimRowProp -Row $r -Names @('RoleDefinitionName','RoleName'))".Trim()
             if (-not $rn) { continue }
@@ -2123,101 +3970,128 @@ function Get-PimManagedRolePolicyTargets {
     }
     @($byRole.Values)
 }
+
+function Get-PimEntraRolePolicyDesiredSet {
+    <#
+      DESIRED for EntraRolePolicies: every role a row names (template per row), plus -- with the baseline on
+      (#5, v1 parity: v1 set its rule set on EVERY directory role policy, CSV L510-695) -- every other
+      directory role in the tenant on 'EntraIDRoles_Standard' with approval unmanaged. Notifications are
+      resolved per role (caller-aware, redirect-aware, de-duplicated). Returns @{ items; roleIds }.
+    #>
+    $out = New-Object System.Collections.Generic.List[object]
+    $noAudience = New-Object System.Collections.Generic.List[string]
+    $named = @{}
+    $build = {
+        param($rn, $tplId, $approverUpns, $notifyUpns, $isBaseline)
+        $tpl = Get-PimEnginePolicyTemplate -Id $tplId
+        if (-not $tpl) { Write-Warning "  [engine] EntraRolePolicies: unknown PolicyTemplate '$tplId' for role '$rn' -- skipped."; return }
+        $hasApproval = (-not $isBaseline) -and $tpl.rules.ContainsKey('Approval')
+        $approverIds = @()
+        if ($hasApproval) {
+            foreach ($u in ("$approverUpns" -split '[|,;]' | ForEach-Object { $_.Trim() } | Where-Object { $_ })) {
+                $oid = Resolve-PimPrincipalId $u; if ($oid) { $approverIds += $oid }
+            }
+        }
+        # Notification: resolve `recipientsSource` against the row. An approval rule whose approvers are
+        # never NOTIFIED is an outage, not a control. NEVER SILENCE A NOTIFICATION: a redirect that
+        # resolves to nobody is skipped (the earlier baseline entry for that rule id stays) and reported
+        # once per scope. Real addresses come from the row, never from the template (templates ship publicly).
+        $notify = $null
+        if ($tpl.rules.ContainsKey('Notification')) {
+            $notify = @(Resolve-PimTemplateNotifications -Entries @($tpl.rules['Notification']) -ApproverUpns "$approverUpns" -NotifyUpns "$notifyUpns" -NoAudience $noAudience -Label $rn)
+        }
+        $out.Add([pscustomobject]@{
+            GroupName          = $rn          # reuse the facet builders' key field
+            RoleDefinitionName = $rn
+            TemplateId         = $tplId
+            ApproverIds        = $approverIds
+            Approval           = $(if ($hasApproval) { $tpl.rules['Approval'] } else { $null })
+            Enablement         = $(if ($tpl.rules.ContainsKey('Enablement')) { $tpl.rules['Enablement'] } else { $null })
+            Expiration         = $(if ($tpl.rules.ContainsKey('Expiration')) { $tpl.rules['Expiration'] } else { $null })
+            Notification       = $notify
+            ManageApproval     = (-not $isBaseline)
+            Baseline           = [bool]$isBaseline
+        })
+    }
+    foreach ($t in (Get-PimManagedRolePolicyTargets)) {
+        $named[$t.RoleDefinitionName.ToLowerInvariant()] = $true
+        & $build $t.RoleDefinitionName $t.TemplateId $t.ApproverUpns $t.NotifyUpns $false
+    }
+    $roleIds = $null
+    if (Test-PimPolicyBaselineEnabled) {
+        try { $roleIds = Get-PimEntraRoleNameMap } catch { Write-Warning "  [engine] EntraRolePolicies: baseline roles NOT covered this run -- the role catalog did not load: $($_.Exception.Message)" }
+        if ($roleIds) {
+            $extra = 0
+            foreach ($lk in @($roleIds.Keys | Sort-Object)) {
+                if ($named.ContainsKey($lk)) { continue }
+                $disp = @(@($Global:Roles_All_ID) | Where-Object { "$($_.DisplayName)".ToLowerInvariant() -eq $lk } | Select-Object -First 1)
+                $rn = if ($disp.Count) { "$($disp[0].DisplayName)" } else { $lk }
+                & $build $rn 'EntraIDRoles_Standard' '' '' $true
+                $extra++
+            }
+            if ($extra) { Write-Host ("    [engine] EntraRolePolicies: baseline covers {0} directory role(s) no row names (template 'EntraIDRoles_Standard', approval unmanaged)" -f $extra) -ForegroundColor DarkGray }
+        }
+    }
+    if ($noAudience.Count) {
+        $n = $noAudience.Count
+        $sample = ($noAudience | Select-Object -First 3) -join ', '
+        Write-Host ("    [engine] EntraRolePolicies: {0} role(s) have no NotifyUpns, so their activation notices keep the template's baseline (Entra's default recipients). e.g. {1}{2}. Set NotifyUpns on the role's assignment row to redirect them." -f $n, $sample, $(if ($n -gt 3) { ', ...' } else { '' })) -ForegroundColor DarkGray
+    }
+    [pscustomobject]@{ items = $out.ToArray(); roleIds = $roleIds }
+}
+
+function Get-PimDirectoryRolePolicyIndex {
+    # #5: with EVERY directory role in scope, one policy lookup + one policy read PER ROLE is ~260 Graph
+    # calls a tick. v1 read them all in ONE call (CSV L510). Two list calls: the assignments (role id ->
+    # policy id) and the policies with their rules. Returns @{ policyByRole; rulesByPolicy } or $null.
+    try {
+        $asg = @(Invoke-PimGraph -All -Path "/policies/roleManagementPolicyAssignments?`$filter=scopeId eq '/' and scopeType eq 'DirectoryRole'")
+        $pol = @(Invoke-PimGraph -All -Path "/policies/roleManagementPolicies?`$filter=scopeId eq '/' and scopeType eq 'DirectoryRole'&`$expand=rules")
+    } catch { Write-Verbose "directory role policy index: $($_.Exception.Message)"; return $null }
+    $byRole = @{}; foreach ($a in $asg) { if ($a -and "$($a.roleDefinitionId)") { $byRole["$($a.roleDefinitionId)".ToLowerInvariant()] = "$($a.policyId)" } }
+    $rules = @{}; foreach ($p in $pol) { if ($p -and "$($p.id)") { $rules["$($p.id)"] = @($p.rules) } }
+    [pscustomobject]@{ policyByRole = $byRole; rulesByPolicy = $rules }
+}
+
 function New-PimEntraRolePoliciesProvider {
     @{
         scope = 'EntraRolePolicies'; entity = 'PIM-Assignments-Roles-Groups'; order = 75; refreshBefore = $true
         GetDesired = {
             param($ctx)
-            $out = New-Object System.Collections.Generic.List[object]
-            $script:PimRolePolicyNoAudience = New-Object System.Collections.Generic.List[string]
-            foreach ($t in (Get-PimManagedRolePolicyTargets)) {
-                $tpl = Get-PimEnginePolicyTemplate -Id $t.TemplateId
-                if (-not $tpl) { Write-Warning "  [engine] EntraRolePolicies: unknown PolicyTemplate '$($t.TemplateId)' for role '$($t.RoleDefinitionName)' -- skipped."; continue }
-                $hasApproval = $tpl.rules.ContainsKey('Approval')
-                $approverIds = @()
-                if ($hasApproval) {
-                    foreach ($u in ("$($t.ApproverUpns)" -split '[|,;]' | ForEach-Object { $_.Trim() } | Where-Object { $_ })) {
-                        $oid = Resolve-PimPrincipalId $u; if ($oid) { $approverIds += $oid }
-                    }
-                }
-                # Notification: resolve `recipientsSource` against the row. An approval rule whose
-                # approvers are never NOTIFIED is an outage, not a control -- measured live: a real
-                # selfActivate sat in PendingApproval while the approver got no mail, because Entra's
-                # stock rule carries isDefaultRecipientsEnabled=true with an EMPTY explicit list and
-                # relies purely on default routing. Naming the approvers as explicit recipients keeps
-                # who-gets-told from diverging from who-can-approve. Real addresses come from the row,
-                # never from the template (templates ship publicly).
-                $notify = $null
-                if ($tpl.rules.ContainsKey('Notification')) {
-                    $notify = New-Object System.Collections.Generic.List[object]
-                    foreach ($n in @($tpl.rules['Notification'])) {
-                        $entry = $n | Select-Object *
-                        $src = "$(if ($entry.PSObject.Properties['recipientsSource']) { $entry.recipientsSource } else { '' })".Trim()
-                        if ($src -eq 'ApproverUpns') {
-                            $ups = @("$($t.ApproverUpns)" -split '[|,;]' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
-                            Add-Member -InputObject $entry -NotePropertyName recipients -NotePropertyValue $ups -Force
-                        }
-                        elseif ($src -eq 'NotifyUpns') {
-                            # Who should hear about activations of THIS role. Separate from the
-                            # approvers on purpose: plenty of roles need an audience without needing
-                            # an approval gate.
-                            $ups = @("$($t.NotifyUpns)" -split '[|,;]' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
-                            Add-Member -InputObject $entry -NotePropertyName recipients -NotePropertyValue $ups -Force
-                        }
-                        # 🔒 NEVER SILENCE A NOTIFICATION. A rule with defaultRecipientsEnabled=false
-                        # and NO resolved recipients tells Entra to mail nobody -- strictly worse than
-                        # the default fan-out it was meant to replace, and invisible afterwards. When
-                        # the redirect target cannot be resolved, leave the live rule alone.
-                        $defOn = if ($entry.PSObject.Properties['defaultRecipientsEnabled']) { [bool]$entry.defaultRecipientsEnabled } else { $true }
-                        $recipCount = @($entry.recipients | Where-Object { "$_".Trim() }).Count
-                        if (-not $defOn -and $recipCount -eq 0) {
-                            # An unconfigured opt-in is NOT a failure, so it gets ONE summary line at
-                            # the end of the scope rather than a warning per role -- 95 identical
-                            # warnings per run is how real ones get missed.
-                            if ($null -eq $script:PimRolePolicyNoAudience) { $script:PimRolePolicyNoAudience = New-Object System.Collections.Generic.List[string] }
-                            [void]$script:PimRolePolicyNoAudience.Add("$($t.RoleDefinitionName)")
-                            continue
-                        }
-                        $notify.Add($entry)
-                    }
-                    $notify = $notify.ToArray()
-                }
-                $out.Add([pscustomobject]@{
-                    GroupName    = $t.RoleDefinitionName          # reuse the facet builders' key field
-                    RoleDefinitionName = $t.RoleDefinitionName
-                    TemplateId   = $t.TemplateId
-                    ApproverIds  = $approverIds
-                    Approval     = $(if ($hasApproval) { $tpl.rules['Approval'] } else { $null })
-                    Enablement   = $(if ($tpl.rules.ContainsKey('Enablement')) { $tpl.rules['Enablement'] } else { $null })
-                    Expiration   = $(if ($tpl.rules.ContainsKey('Expiration')) { $tpl.rules['Expiration'] } else { $null })
-                    Notification = $notify
-                })
-            }
-            if ($script:PimRolePolicyNoAudience -and $script:PimRolePolicyNoAudience.Count) {
-                $n = $script:PimRolePolicyNoAudience.Count
-                $sample = ($script:PimRolePolicyNoAudience | Select-Object -First 3) -join ', '
-                Write-Host ("    [engine] EntraRolePolicies: {0} role(s) have no NotifyUpns, so their activation " -f $n) -ForegroundColor DarkGray -NoNewline
-                Write-Host ("notices keep Entra's DEFAULT recipients (i.e. the privileged admins). e.g. {0}{1}. " -f $sample, $(if ($n -gt 3) { ', ...' } else { '' })) -ForegroundColor DarkGray -NoNewline
-                Write-Host "Set NotifyUpns on the role's assignment row to redirect them." -ForegroundColor DarkGray
-            }
-            $out.ToArray()
+            $set = Get-PimEntraRolePolicyDesiredSet
+            if ($null -ne $ctx) { $ctx['rolePolDesired'] = @($set.items); if ($set.roleIds) { $ctx['rolePolRoleIds'] = $set.roleIds } }
+            @($set.items)
         }
         GetLive = {
             param($ctx)
-            Ensure-PimContextLoaded
-            $rolesByName = @{}; foreach ($r in @($Global:Roles_All_ID)) { $n = "$($r.DisplayName)"; if ($n) { $rolesByName[$n.ToLowerInvariant()] = "$($r.Id)" } }
-            $ctx['rolePolRoleIds'] = $rolesByName
+            $ctx['rolePolRoleIds'] = Get-PimEntraRoleNameMap
             $live = New-Object System.Collections.Generic.List[object]
-            foreach ($t in (Get-PimManagedRolePolicyTargets)) {
-                $rid = $rolesByName[$t.RoleDefinitionName.ToLowerInvariant()]
+            $targets = if ($ctx.ContainsKey('rolePolDesired')) { @($ctx['rolePolDesired']) } else { @(Get-PimManagedRolePolicyTargets) }
+            # Many roles (the baseline) -> read every directory-role policy in two list calls instead of two per role.
+            $index = if (@($targets | Where-Object { $_.Baseline }).Count) { Get-PimDirectoryRolePolicyIndex } else { $null }
+            foreach ($t in $targets) {
+                # v2.4.336 regression: this read $rolesByName after the map moved to $ctx -- an empty
+                # variable under ErrorActionPreference=Stop, so EntraRolePolicies failed every tick.
+                $rid = $ctx['rolePolRoleIds'][$t.RoleDefinitionName.ToLowerInvariant()]
                 if (-not $rid) { continue }   # role does not exist -> nothing live; the diff makes it a create and ApplyUpdate reports it
-                $polId = Get-PimDirectoryRolePolicyId -RoleDefinitionId $rid
+                $polId = $null; $rules = $null
+                if ($index -and $index.policyByRole.ContainsKey("$rid".ToLowerInvariant())) {
+                    $polId = $index.policyByRole["$rid".ToLowerInvariant()]
+                    if ($index.rulesByPolicy.ContainsKey($polId)) { $rules = @($index.rulesByPolicy[$polId]) }
+                }
+                if (-not $polId) { $polId = Get-PimDirectoryRolePolicyId -RoleDefinitionId $rid }
                 if (-not $polId) { continue }
-                $rules = @()
-                try { $rules = @((Invoke-PimGraph -Path "/policies/roleManagementPolicies/$polId`?`$expand=rules").rules) }
-                catch { Write-Verbose "dir role policy read ($($t.RoleDefinitionName)): $($_.Exception.Message)" }
+                if ($null -eq $rules) {
+                    $rules = @()
+                    try { $rules = @((Invoke-PimGraph -Path "/policies/roleManagementPolicies/$polId`?`$expand=rules").rules) }
+                    catch { Write-Verbose "dir role policy read ($($t.RoleDefinitionName)): $($_.Exception.Message)" }
+                }
                 $live.Add([pscustomobject]@{ GroupName=$t.RoleDefinitionName; PolicyId=$polId; Rules=$rules })
             }
+            # PLAN FIRST (mass-change circuit breaker, operator 2026-09-13).
+            $planDesired = if ($ctx.ContainsKey('rolePolDesired')) { @($ctx['rolePolDesired']) } else { @((Get-PimEntraRolePolicyDesiredSet).items) }
+            Set-PimGraphPolicyBreakerPlan -Provider 'EntraRolePolicies' -Context $ctx -Desired $planDesired -Live $live.ToArray() `
+                -KeyOf { param($r) (Get-PimRowProp -Row $r -Names @('GroupName','RoleDefinitionName')).ToLowerInvariant() } -Label { param($r) "$($r.RoleDefinitionName)" }
             $live.ToArray()
         }
         KeyOf = { param($r) (Get-PimRowProp -Row $r -Names @('GroupName','RoleDefinitionName')).ToLowerInvariant() }
@@ -2232,6 +4106,14 @@ function New-PimEntraRolePoliciesProvider {
         ApplyCreate = { param($item,$ctx) & (Get-PimEngineProvider -Scope 'EntraRolePolicies').ApplyUpdate $item $ctx }
         ApplyUpdate = {
             param($item,$ctx)
+            Invoke-PimGraphPolicyGuardedApply -Provider 'EntraRolePolicies' -Item $item -Context $ctx -Apply { param($i, $c) Invoke-PimEntraRolePolicyApply -item $i -ctx $c }
+        }
+    }
+}
+
+function Invoke-PimEntraRolePolicyApply {
+    # EntraRolePolicies' write for ONE role policy -- reached only through Invoke-PimGraphPolicyGuardedApply (breaker).
+    param([object]$item, [hashtable]$ctx)
             $d = $item.desired; $rn = "$($d.RoleDefinitionName)"
             $rid = $ctx['rolePolRoleIds'][$rn.ToLowerInvariant()]
             if (-not $rid) { throw "EntraRolePolicies: directory role '$rn' not found in this tenant" }
@@ -2263,35 +4145,30 @@ function New-PimEntraRolePoliciesProvider {
             }
             if (-not $drifted.Count) { return [pscustomobject]@{ role=$rn; policyId=$polId; template=$d.TemplateId; note='already in sync' } }
 
+            # #5 / BUG-52: a refused enablement or expiration PATCH used to go to Write-Verbose, so the role
+            # counted as APPLIED while nothing changed. Every refusal is now COLLECTED and fails the item,
+            # naming each rule -- the same contract GroupsPolicies has (Assert-PimGroupPolicyPatchesApplied).
+            $ruleFailures = New-Object System.Collections.Generic.List[string]
             foreach ($enBody in @(ConvertTo-PimEnablementRuleBodies -Enablement $d.Enablement)) {
                 if (-not $drifted.ContainsKey($enBody.id)) { continue }
                 try { Invoke-PimPolicyRulePatch -PolicyId $polId -Body $enBody }
-                catch { Write-Verbose "role enablement patch ($rn/$($enBody.id)): $($_.Exception.Message)" }
+                catch { $ruleFailures.Add("enablement/$($enBody.id): $($_.Exception.Message)") | Out-Null }
             }
             foreach ($exBody in @(ConvertTo-PimExpirationRuleBodies -Expiration $d.Expiration)) {
                 if (-not $drifted.ContainsKey($exBody.id)) { continue }
                 try { Invoke-PimPolicyRulePatch -PolicyId $polId -Body $exBody }
-                catch { Write-Verbose "role expiration patch ($rn/$($exBody.id)): $($_.Exception.Message)" }
+                catch { $ruleFailures.Add("expiration/$($exBody.id): $($_.Exception.Message)") | Out-Null }
             }
             # Notification rules. NOT best-effort for the APPROVER rule: an approval whose approvers
             # are never told about the request is indistinguishable from a broken role.
             foreach ($n in @($d.Notification)) {
-                $rt = "$($n.recipientType)"; $lvl = "$($n.level)"
-                if (-not $rt -or -not $lvl) { continue }
-                if (-not $drifted.ContainsKey("Notification_${rt}_EndUser_${lvl}")) { continue }
-                $recips = @(); if ($n.recipients) { $recips = @($n.recipients) }
-                $nlvl = if ("$($n.notificationLevel)") { "$($n.notificationLevel)" } else { 'All' }
-                $defOn = if ($n.PSObject.Properties['defaultRecipientsEnabled']) { [bool]$n.defaultRecipientsEnabled } else { $true }
-                $nBody = New-PimGroupNotificationRuleBody -RecipientType $rt -Level $lvl -NotificationLevel $nlvl -Recipients $recips -DefaultRecipientsEnabled $defOn
+                $nBody = ConvertTo-PimNotificationRuleBody -Entry $n   # caller-aware (#5)
+                if (-not $nBody) { continue }
+                if (-not $drifted.ContainsKey("$($nBody.id)")) { continue }
                 try { Invoke-PimPolicyRulePatch -PolicyId $polId -Body $nBody }
                 catch {
-                    if ($rt -eq 'Approver') { throw "EntraRolePolicies: could not set the APPROVER notification rule on '$rn' ($($nBody.id)): $($_.Exception.Message). Refusing to leave an approval nobody is told about." }
-                    # NOT Write-Verbose. A swallowed notification failure is how "applied=1, errors=0"
-                    # was reported for a run that changed nothing -- measured: the Admin rule stayed
-                    # at defaultRecipients=True while the engine claimed success. Whoever reads the
-                    # run output must see that the redirect did not take.
-                    Write-Warning ("  [engine] EntraRolePolicies: FAILED to set $($nBody.id) on '$rn' -- the notification " +
-                                   "is UNCHANGED (still whatever Entra had): $($_.Exception.Message)")
+                    if ("$($n.recipientType)" -eq 'Approver' -and $d.Approval) { throw "EntraRolePolicies: could not set the APPROVER notification rule on '$rn' ($($nBody.id)): $($_.Exception.Message). Refusing to leave an approval nobody is told about." }
+                    $ruleFailures.Add("notification/$($nBody.id): $($_.Exception.Message)") | Out-Null
                 }
             }
             $approvalOff = $false
@@ -2319,14 +4196,1304 @@ function New-PimEntraRolePoliciesProvider {
                     # Not best-effort. A role the operator has moved to a standard template but
                     # which still demands an approver is a role nobody can activate through the
                     # engine, so a failure here must stop the item rather than be logged and passed.
+                    # (A BASELINE role carries no approval facet at all, so it never reaches here.)
                     Invoke-PimPolicyRulePatch -PolicyId $polId -Body (New-PimApprovalOffRuleBody)
                     $approvalOff = $true
                 }
             }
+            if ($ruleFailures.Count) {
+                throw ("EntraRolePolicies '$rn': $($ruleFailures.Count) rule PATCH(es) FAILED, so the policy does NOT " +
+                       "match template '$($d.TemplateId)': " + ($ruleFailures -join ' | '))
+            }
             $res = [pscustomobject]@{ role=$rn; policyId=$polId; template=$d.TemplateId }
             if ($approvalOff) { $res | Add-Member -NotePropertyName note -NotePropertyValue 'approval turned OFF' }
             $res
+}
+
+# ---------------------------------------------------------------------------
+# AzResPolicies scope -- the PIM policy on an AZURE RESOURCE ROLE at an ARM scope
+# (Microsoft.Authorization/roleManagementPolicies, api 2020-10-01).
+#
+# WHY THIS EXISTS (operator, 2026-09-12: "pim v1 did that, you must fix immediately" / "they must
+# match the template" / "azure policies must be on like entra and pim for groups. use same settings
+# as current"). Until now v2 wrote PIM policies only through Graph (GroupsPolicies, EntraRolePolicies);
+# nothing wrote the ARM policy, so an Azure role's policy sat at whatever was last saved -- including
+# the partial 11-rule policies a v1 run left on internal on 2026-08-09, and the system default a
+# scope falls back to when its custom policy is deleted (no MFA on activation).
+#
+# WHAT IS PORTED FROM v1, AND WHAT IS NOT.
+#   * WHICH RULES + HOW (v1): v1's CSV engine checked each (scope, role) of
+#     PIM-Assignments-Azure-Resources against the ARM policy the role's policy ASSIGNMENT names
+#     (engine/PIM-Baseline-Management-CSV/PIM-Baseline-Management-CSV.ps1 L1161-1165), rule by rule,
+#     via PIM_Policy_Check_Update -PIM_API AzureARM (engine/_shared/PIM-Functions.psm1 L8847-9657):
+#     Expiration_EndUser_Assignment / _Admin_Eligibility / _Admin_Assignment, Enablement_EndUser_Assignment
+#     and _Admin_Assignment (Admin_Eligibility commented out, L1177-1181), and nine Notification_* rules;
+#     Approval and AuthenticationContext commented out (L1188-1207). THE RULES v1 COMPARED ARE THE
+#     ASSIGNMENT'S `properties.effectiveRules` -- the merged set, including the defaults a partial custom
+#     policy lacks -- and the policy id is `properties.policyId`'s last segment
+#     (PIM-Functions.psm1 L9172-9178; the caller passes the assignment object, CSV L1161-1165). A rule id
+#     NOT in effectiveRules was SKIPPED (L9651-9656); every differing rule was PATCHed ON ITS OWN as
+#     { properties: { rules: [ <that one rule> ] } } to {scope}/providers/Microsoft.Authorization/
+#     roleManagementPolicies/{policyId} (Invoke-AzPimPatch L9068; bodies L9252-9286, L9328-9358,
+#     L9405-9437), with a write cooldown between PATCHes (Wait-PimWriteCooldown L9141). Patching a rule
+#     that is in effectiveRules but missing from the custom policy is what puts it back.
+#     The older SQL variant (CreateUpdate-Policies-PIM-AzResources-SQL, L7493-8027) blind-PATCHed ten rules
+#     with values from config/policies.custom.sample.ps1 ($global:Azres_*, L87-127).
+#   * VALUES (NOT v1): the CURRENT policy template, resolved exactly like EntraRolePolicies resolves a
+#     role's template (Get-PimManagedRolePolicyTargets): the row's PolicyTemplate column, blank ->
+#     'EntraIDRoles_Standard', and approval wins a conflict. That template's values ARE v1's role
+#     values after BUG-21 (PT8H activation, P365D/P365D, MFA+Justification on activation, nothing on
+#     the admin path) -- v1 applied the SAME values to Entra roles and Azure resource roles (CSV engine
+#     L559-612 vs L1171-1225).
+#   * APPROVAL (operator, 2026-09-12: "i believe we have a template where it is [in the] template. that
+#     must be supported"): a template that declares Approval is APPLIED, with the setting values the
+#     EntraRolePolicies approval rule uses. Approvers: the row's ApproverUpns column when present (as
+#     EntraRolePolicies), else the owners of the assigned groups (Owners -> SponsorUpn -> Department, as
+#     GroupsPolicies). Approval is NEVER removed: a live approval the template does not declare is KEPT.
+#
+# MEASURED LIVE ON INTERNAL (2026-09-12), and each one shapes the code below:
+#   * A PATCH carrying SIX rules was rejected as a whole (`HTTP 400 InvalidPolicyRuleId`) over one id.
+#     So NEVER batch: one rule per request, each with its own result, exactly as v1 did; a rule that
+#     fails is reported with ARM's raw error and does not stop the others.
+#   * A read can return HTTP 500 for a scope/role -> recorded as UNREADABLE with the real error;
+#     never guessed, never PATCHed.
+#   * A deleted custom policy falls back to the system default (policy id == role definition GUID).
+#     v1 PATCHed whatever policy id the assignment named (L9178), so this does too; a refusal is
+#     reported with ARM's raw error.
+#   * A managed identity's admin assignment is refused when an Admin_* enablement rule requires MFA
+#     (MfaRule) -> a template asking for that is refused (BUG-21), never written.
+#
+# MASS-CHANGE CIRCUIT BREAKER (operator, 2026-09-12: "build the circuit breaker"). Modelled on the
+# account-disable breaker (PIM-DisableGuard.ps1, Test-PimMassDisableSafe / Test-PimDisablePassAllowed):
+# the WHOLE plan is computed before any PATCH; within thresholds the whole plan applies in this run;
+# over ANY threshold the run writes NOTHING (never a partial mass-change) and records ONE
+# AZ-POLICY-MASS-HOLD item. BUG-55 is why: a template change once rewrote 217 production group
+# policies overnight with nothing to stop it. Release = an approval of that exact plan hash, stored in
+# SQL (pim.Settings), never a file.
+# ---------------------------------------------------------------------------
+$script:PimAzResPolicyStandardRuleIds = @(
+    # The 17 rule ids of a COMPLETE Azure resource PIM policy (v1's ValidateSet, PIM-Functions.psm1 L8864;
+    # measured: complete policies carry these 17, a portal save adds 2 more).
+    'Expiration_Admin_Eligibility','Enablement_Admin_Eligibility','Notification_Admin_Admin_Eligibility',
+    'Notification_Requestor_Admin_Eligibility','Notification_Approver_Admin_Eligibility',
+    'Expiration_Admin_Assignment','Enablement_Admin_Assignment','Notification_Admin_Admin_Assignment',
+    'Notification_Requestor_Admin_Assignment','Notification_Approver_Admin_Assignment',
+    'Expiration_EndUser_Assignment','Enablement_EndUser_Assignment','Approval_EndUser_Assignment',
+    'AuthenticationContext_EndUser_Assignment','Notification_Admin_EndUser_Assignment',
+    'Notification_Requestor_EndUser_Assignment','Notification_Approver_EndUser_Assignment'
+)
+$script:PimAzResPolicyDefaultTemplate = 'EntraIDRoles_Standard'
+# Breaker defaults (pim.Settings 'AzResPolicyBreaker' overrides each key). The percentage only applies
+# once at least this many policies were checked, so a tiny estate is not blocked by a ratio.
+$script:PimAzResPolicyBreakerDefaults = @{ MaxChanges = 25; MaxPercent = 25; MaxWeakening = 3 }
+$script:PimAzResPolicyBreakerMinCheckedForPercent = 8
+$script:PimAzResPolicyApprovalValidHours = 24
+
+function Get-PimAzResPolicyTargets {
+    <#
+      The distinct (scope, role) pairs the solution assigns on Azure resources, each with the policy
+      template it is linked to. Same selection rule as Get-PimManagedRolePolicyTargets: the row's
+      PolicyTemplate column (PIM-Assignments-Azure-Resources has none today, so blank), blank ->
+      'EntraIDRoles_Standard'; two rows naming the same pair with different templates -> the one that
+      requires APPROVAL wins and the conflict is reported. GroupTags = every group assigned the pair
+      (the approver fallback reads their owners).
+    #>
+    $byPair = @{}
+    foreach ($r in @(Get-PimDesiredRows -Entity 'PIM-Assignments-Azure-Resources' | Where-Object { (Get-PimRowProp -Row $_ -Names @('Action')) -ne 'Remove' })) {
+        $scope = "$(Get-PimRowProp -Row $r -Names @('AzScope'))".Trim().TrimEnd('/')
+        $role  = "$(Get-PimRowProp -Row $r -Names @('AzScopePermission'))".Trim()
+        if (-not $scope -or -not $role) { continue }
+        $tpl  = "$(Get-PimRowProp -Row $r -Names @('PolicyTemplate'))".Trim()
+        if (-not $tpl) { $tpl = $script:PimAzResPolicyDefaultTemplate }
+        $appr = "$(Get-PimRowProp -Row $r -Names @('ApproverUpns','Approvers'))".Trim()
+        $noti = "$(Get-PimRowProp -Row $r -Names @('NotifyUpns'))".Trim()
+        $tag  = "$(Get-PimRowProp -Row $r -Names @('GroupTag'))".Trim()
+        $k = "$($scope.ToLowerInvariant())|$($role.ToLowerInvariant())"
+        if (-not $byPair.ContainsKey($k)) {
+            $byPair[$k] = [pscustomobject]@{ AzScope=$scope; RoleName=$role; TemplateId=$tpl; ApproverUpns=$appr; NotifyUpns=$noti; GroupTags=@($(if ($tag) { $tag })) }
+            continue
         }
+        $t = $byPair[$k]
+        if ($tag -and @($t.GroupTags) -notcontains $tag) { $t.GroupTags = @($t.GroupTags) + $tag }
+        if ($t.TemplateId -ne $tpl) {
+            $wantsApproval = { param($x) "$x" -match '(?i)approval' }
+            if ((& $wantsApproval $tpl) -and -not (& $wantsApproval $t.TemplateId)) {
+                Write-Warning "  [engine] AzResPolicies: '$role' @ $scope is linked to BOTH '$($t.TemplateId)' and '$tpl' -- using '$tpl' (approval wins)."
+                $t.TemplateId = $tpl
+                if ($appr) { $t.ApproverUpns = $appr }
+            } else {
+                Write-Warning "  [engine] AzResPolicies: '$role' @ $scope is linked to BOTH '$($t.TemplateId)' and '$tpl' -- using '$($t.TemplateId)'."
+            }
+        }
+        elseif ($appr -and -not $t.ApproverUpns) { $t.ApproverUpns = $appr }
+        if ($noti -and -not $t.NotifyUpns) { $t.NotifyUpns = $noti }
+    }
+    @($byPair.Values | Sort-Object AzScope, RoleName)
+}
+
+function Resolve-PimAzResPolicyApprovers {
+    <#
+      Approver object ids for an approval template on one (scope, role), resolved the way the existing
+      providers resolve them:
+        1. the row's ApproverUpns column (EntraRolePolicies) -- PIM-Assignments-Azure-Resources does not
+           carry it today (Open-PimManager.ps1 defaultHeader), but a row that has it wins;
+        2. otherwise the OWNERS of every group assigned the pair, through GroupsPolicies' chain
+           (Resolve-PimGroupOwnerIds: Owners -> SponsorUpn -> Department owners).
+      UPN -> id with Resolve-PimPrincipalId. Returns @{ ids; source } ; ids is empty when nothing resolves.
+    #>
+    param([Parameter(Mandatory)][object]$Target)
+    $ids = New-Object System.Collections.Generic.List[string]
+    $upns = @("$($Target.ApproverUpns)" -split '[|,;]' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+    if ($upns.Count) {
+        foreach ($u in $upns) { $oid = Resolve-PimPrincipalId $u; if ($oid -and -not $ids.Contains("$oid")) { $ids.Add("$oid") } }
+        return [pscustomobject]@{ ids = $ids.ToArray(); source = 'ApproverUpns' }
+    }
+    $tags = @(@($Target.GroupTags) | Where-Object { "$_".Trim() } | ForEach-Object { "$_".Trim().ToLowerInvariant() })
+    if ($tags.Count) {
+        foreach ($g in @(Get-PimGroupDefinitionRows)) {
+            if ($tags -notcontains "$($g.GroupTag)".Trim().ToLowerInvariant()) { continue }
+            foreach ($oid in @(Resolve-PimGroupOwnerIds -Row $g | ForEach-Object { $_ })) { if ($oid -and -not $ids.Contains("$oid")) { $ids.Add("$oid") } }
+        }
+    }
+    [pscustomobject]@{ ids = $ids.ToArray(); source = 'GroupOwners' }
+}
+
+function Get-PimAzResPolicyDesiredSet {
+    # DESIRED = one row per (scope, role) carrying the template's rule families in the SAME shape
+    # EntraRolePolicies emits, so the shared facet builders (Get-PimGroupPolicyDesiredFacets) apply as-is.
+    $out = New-Object System.Collections.Generic.List[object]
+    foreach ($t in @(Get-PimAzResPolicyTargets)) {
+        $tpl = Get-PimEnginePolicyTemplate -Id $t.TemplateId
+        if (-not $tpl) { Write-Warning "  [engine] AzResPolicies: unknown PolicyTemplate '$($t.TemplateId)' for '$($t.RoleName)' @ $($t.AzScope) -- skipped."; continue }
+        $hasApproval = $tpl.rules.ContainsKey('Approval')
+        $approverIds = @(); $approverSource = ''
+        if ($hasApproval) {
+            $ar = Resolve-PimAzResPolicyApprovers -Target $t
+            $approverIds = @($ar.ids); $approverSource = "$($ar.source)"
+        }
+        # Notification: the SAME resolution EntraRolePolicies applies (recipientsSource ApproverUpns /
+        # NotifyUpns from the row; never silence a notification that has no resolved audience).
+        $notify = $null
+        if ($tpl.rules.ContainsKey('Notification')) {
+            $notify = @(Resolve-PimTemplateNotifications -Entries @($tpl.rules['Notification']) -ApproverUpns "$($t.ApproverUpns)" -NotifyUpns "$($t.NotifyUpns)")
+        }
+        $out.Add([pscustomobject]@{
+            AzScope        = $t.AzScope
+            RoleName       = $t.RoleName
+            TemplateId     = $t.TemplateId
+            ApproverUpns   = $t.ApproverUpns
+            NotifyUpns     = $t.NotifyUpns
+            GroupTags      = @($t.GroupTags)
+            ApproverIds    = $approverIds
+            ApproverSource = $approverSource
+            Approval       = $(if ($hasApproval) { $tpl.rules['Approval'] } else { $null })
+            Enablement     = $(if ($tpl.rules.ContainsKey('Enablement')) { $tpl.rules['Enablement'] } else { $null })
+            Expiration     = $(if ($tpl.rules.ContainsKey('Expiration')) { $tpl.rules['Expiration'] } else { $null })
+            Notification   = $notify
+        })
+    }
+    $out.ToArray()
+}
+
+function Get-PimAzResPolicyKey {
+    param([object]$Row)
+    $s = "$(Get-PimRowProp -Row $Row -Names @('AzScope'))".Trim().TrimEnd('/').ToLowerInvariant()
+    $r = "$(Get-PimRowProp -Row $Row -Names @('RoleName'))".Trim().ToLowerInvariant()
+    if (-not $s -or -not $r) { return '' }
+    "$s|$r"
+}
+
+function Get-PimAzResPolicyLiveApproval {
+    # PURE: an ARM approval rule -> @{ present; required; ids }. An ARM approver is { id, userType, ... }
+    # where Graph's is { userId }.
+    param([object[]]$Rules)
+    foreach ($r in @($Rules)) {
+        if ($null -eq $r -or "$($r.id)" -ne 'Approval_EndUser_Assignment') { continue }
+        $required = $false; $ids = New-Object System.Collections.Generic.List[string]
+        if ($r.setting) {
+            $required = [bool]$r.setting.isApprovalRequired
+            foreach ($st in @($r.setting.approvalStages)) {
+                foreach ($a in @($st.primaryApprovers)) {
+                    if ($null -eq $a) { continue }
+                    $aid = if ("$($a.id)") { "$($a.id)" } else { "$($a.userId)" }
+                    if ($aid -and -not $ids.Contains($aid.ToLowerInvariant())) { $ids.Add($aid.ToLowerInvariant()) }
+                }
+            }
+        }
+        return [pscustomobject]@{ present = $true; required = $required; ids = $ids.ToArray() }
+    }
+    [pscustomobject]@{ present = $false; required = $false; ids = @() }
+}
+
+function Get-PimAzResPolicyLiveFacets {
+    # PURE: the shared live-facet builder, with the approval facet read from the ARM approver shape.
+    param([object[]]$Rules)
+    $f = Get-PimGroupPolicyLiveFacets -Rules $Rules
+    $a = Get-PimAzResPolicyLiveApproval -Rules $Rules
+    if ($a.present) { $f['Approval_EndUser_Assignment'] = "appr|required=$($a.required.ToString().ToLowerInvariant())|approvers=$(ConvertTo-PimSortedList $a.ids)" }
+    $f
+}
+
+function Get-PimAzResPolicyVerdict {
+    <#
+      PURE. THE VERIFICATION: do the EFFECTIVE rules for one (scope, role) match its template?
+        matches        -- every template rule present in effectiveRules holds the template's value
+        kept           -- matches, and live carries an APPROVAL the template does not declare: kept on
+                          purpose (approval is never removed) -- AZ-POLICY-APPROVAL, informational
+        differs        -- some rules differ (diffs: live vs target); each is PATCHed on its own
+        unreadable     -- a read failed (error carries ARM's own message); nothing is inferred
+      A template rule id that is NOT in effectiveRules is SKIPPED (skippedRules), as v1 did -- never PATCHed.
+        no-policy      -- ARM returned no policy assignment for the role at the scope
+        role-not-found -- no ARM role by that name at the scope
+      Each diff carries `target` -- the facet the rule will hold after the write (for approval that is
+      live approvers UNION template approvers: an approver is never removed). A diff is `blocked` when it
+      must not be written: 'no-approver' (the template requires approval and no approver resolved -- the
+      policy is not written half-configured) or 'admin-mfa' (BUG-21: unsatisfiable by the engine).
+    #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][object]$Desired, [AllowNull()][object]$Live)
+    $v = [ordered]@{
+        key = (Get-PimAzResPolicyKey -Row $Desired); scope = "$($Desired.AzScope)"; role = "$($Desired.RoleName)"
+        template = "$($Desired.TemplateId)"; state = ''; policyId = ''; isDefaultPolicy = $false
+        skippedRules = @(); diffs = @(); lowersSecurity = @(); missingStandardRules = @(); approvalKept = $false; notes = @(); error = ''
+    }
+    if ($null -eq $Live) { $v.state = 'unreadable'; $v.error = 'no live read was taken for this pair'; return [pscustomobject]$v }
+    $v.policyId = "$($Live.PolicyId)"; $v.isDefaultPolicy = [bool]$Live.IsDefaultPolicy
+    $ls = "$($Live.State)"
+    if ($ls -ne 'read') { $v.state = $(if ($ls) { $ls } else { 'unreadable' }); $v.error = "$($Live.Error)"; return [pscustomobject]$v }
+
+    $want = Get-PimGroupPolicyDesiredFacets -Desired $Desired
+    $have = Get-PimAzResPolicyLiveFacets -Rules @($Live.Rules)
+    $liveAppr = Get-PimAzResPolicyLiveApproval -Rules @($Live.Rules)
+    $liveIds = @{}; foreach ($r in @($Live.Rules)) { if ($r -and "$($r.id)") { $liveIds["$($r.id)"] = $true } }
+    $v.missingStandardRules = @($script:PimAzResPolicyStandardRuleIds | Where-Object { -not $liveIds.ContainsKey($_) })
+
+    $missing = New-Object System.Collections.Generic.List[string]
+    $diffs = New-Object System.Collections.Generic.List[object]
+    $lowers = New-Object System.Collections.Generic.List[string]
+    $notes = New-Object System.Collections.Generic.List[string]
+    foreach ($k in @($want.Keys | Sort-Object)) {
+        $w = "$($want[$k])"
+        if ($k -eq 'Approval_EndUser_Assignment') {
+            if (-not $Desired.Approval) {
+                # Template declares no approval: never REMOVE one. No rule / not required = nothing to do;
+                # required live = KEPT (reported, not written).
+                if ($liveAppr.present -and $liveAppr.required) {
+                    $v.approvalKept = $true
+                    $notes.Add("AZ-POLICY-APPROVAL: approval is ON live but template '$($Desired.TemplateId)' has none -- KEPT (approval is never removed)")
+                }
+                continue
+            }
+            if (-not $liveAppr.present) { $missing.Add($k); $notes.Add("skipped $k -- not in effectiveRules (v1: 'rule not defined on this policy')"); continue }
+            $tplIds = @(@($Desired.ApproverIds) | Where-Object { "$_".Trim() } | ForEach-Object { "$_".Trim().ToLowerInvariant() })
+            $absent = @($tplIds | Where-Object { @($liveAppr.ids) -notcontains $_ })
+            if ($liveAppr.required -and $tplIds.Count -and -not $absent.Count) {
+                $extra = @(@($liveAppr.ids) | Where-Object { $tplIds -notcontains $_ })
+                if ($extra.Count) { $notes.Add("approval: $($extra.Count) approver(s) live beyond the template -- KEPT (an approver is never removed)") }
+                continue
+            }
+            # The approvers the rule will hold: live UNION template when approval is already in force (never
+            # remove an approver); only the template's when it is not (a not-in-force list grants nothing).
+            $targetIds = New-Object System.Collections.Generic.List[string]
+            if ($liveAppr.required) { foreach ($x in @($liveAppr.ids)) { if (-not $targetIds.Contains($x)) { $targetIds.Add($x) } } }
+            foreach ($x in $tplIds) { if (-not $targetIds.Contains($x)) { $targetIds.Add($x) } }
+            $blocked = if (-not $tplIds.Count) { 'no-approver' } else { '' }
+            $diffs.Add([pscustomobject]@{ ruleId = $k; live = "$($have[$k])"; template = $w; target = "appr|required=true|approvers=$(ConvertTo-PimSortedList $targetIds.ToArray())"; blocked = $blocked; approverIds = $targetIds.ToArray() })
+            continue
+        }
+        if (-not $have.ContainsKey($k)) { $missing.Add($k); $notes.Add("skipped $k -- not in effectiveRules (v1: 'rule not defined on this policy')"); continue }
+        $h = "$($have[$k])"
+        if ($h -eq $w) { continue }
+        $blocked = ''
+        if ($k -in @('Enablement_Admin_Assignment','Enablement_Admin_Eligibility') -and $w -match 'MultiFactorAuthentication') { $blocked = 'admin-mfa' }
+        if ($k -like 'Enablement_*' -and $h -match 'MultiFactorAuthentication' -and $w -notmatch 'MultiFactorAuthentication') { $lowers.Add($k) }
+        $diffs.Add([pscustomobject]@{ ruleId = $k; live = $h; template = $w; target = $w; blocked = $blocked; approverIds = @() })
+    }
+    $v.skippedRules = $missing.ToArray(); $v.diffs = $diffs.ToArray(); $v.lowersSecurity = $lowers.ToArray(); $v.notes = $notes.ToArray()
+    $v.state = if ($diffs.Count) { 'differs' } elseif ($v.approvalKept) { 'kept' } else { 'matches' }
+    [pscustomobject]$v
+}
+
+function Get-PimAzResPolicyDesiredRuleBodies {
+    # PURE: rule id -> the template's rule body (the shared Graph-shaped builders). Only the VALUE
+    # fields are taken from these; id/ruleType/target always come from the live ARM rule.
+    param([Parameter(Mandatory)][object]$Desired)
+    $m = @{}
+    foreach ($b in @(ConvertTo-PimExpirationRuleBodies -Expiration $Desired.Expiration)) { if ($b) { $m["$($b.id)"] = $b } }
+    foreach ($b in @(ConvertTo-PimEnablementRuleBodies -Enablement $Desired.Enablement)) { if ($b) { $m["$($b.id)"] = $b } }
+    foreach ($n in @($Desired.Notification)) {
+        $nb = ConvertTo-PimNotificationRuleBody -Entry $n   # caller-aware (#5)
+        if ($nb) { $m["$($nb.id)"] = $nb }
+    }
+    if ($Desired.Approval) { $m['Approval_EndUser_Assignment'] = @{ id = 'Approval_EndUser_Assignment'; setting = (New-PimAzResPolicyApprovalSetting -Approval $Desired.Approval -ApproverIds @($Desired.ApproverIds)) } }
+    $m
+}
+
+function New-PimAzResPolicyApprovalSetting {
+    <#
+      PURE: the approval `setting` for an ARM approval rule. The VALUES are the ones EntraRolePolicies'
+      ApplyUpdate sends for a template with Approval (isApprovalRequired=true, not for extension,
+      requestor justification, SingleStage, one stage of 1 day with approver justification, escalation
+      minutes = escalationHours*60 when mode is Serial else 0, escalation disabled, no escalation
+      approvers). The ONE shape difference is ARM's approver element: { id, userType, isBackup } where
+      Graph's is { @odata.type: singleUser, userId }. Arrays stay arrays for a single approver.
+    #>
+    param([Parameter(Mandatory)][object]$Approval, [string[]]$ApproverIds = @())
+    $serial = ("$($Approval.mode)" -match '(?i)serial')
+    $escMin = 240; if ($Approval.escalationHours) { $escMin = [int]$Approval.escalationHours * 60 }
+    $approvers = New-Object System.Collections.Generic.List[object]
+    foreach ($oid in @($ApproverIds | Where-Object { "$_".Trim() })) { $approvers.Add([ordered]@{ id = "$oid"; userType = 'User'; isBackup = $false }) }
+    [ordered]@{
+        isApprovalRequired = $true; isApprovalRequiredForExtension = $false; isRequestorJustificationRequired = $true; approvalMode = 'SingleStage'
+        approvalStages = @([ordered]@{ approvalStageTimeOutInDays = 1; isApproverJustificationRequired = $true; escalationTimeInMinutes = $(if ($serial) { $escMin } else { 0 }); isEscalationEnabled = $false; primaryApprovers = $approvers.ToArray(); escalationApprovers = @() })
+    }
+}
+
+function New-PimAzResPolicyRulePatch {
+    <#
+      PURE: ONE rule for the ARM PATCH -- the LIVE rule, verbatim (id, ruleType, target and every field
+      the engine does not manage), with only the template-managed VALUE fields replaced. Keeping target
+      from live is deliberate: v1's SQL variant rebuilt target by hand and got it wrong
+      (CreateUpdate-Policies-PIM-AzResources-SQL, PIM-Functions.psm1 L7653-7671: the activation rule
+      Expiration_EndUser_Assignment sent with caller "Admin", and `level` outside `target`).
+    #>
+    param([Parameter(Mandatory)][object]$LiveRule, [Parameter(Mandatory)][object]$DesiredBody)
+    $h = [ordered]@{}
+    if ($LiveRule -is [System.Collections.IDictionary]) { foreach ($k in @($LiveRule.Keys)) { $h["$k"] = $LiveRule[$k] } }
+    else { foreach ($p in $LiveRule.PSObject.Properties) { $h[$p.Name] = $p.Value } }
+    $id = "$($h['id'])"
+    if ($id -like 'Expiration_*') {
+        $h['isExpirationRequired'] = [bool]$DesiredBody.isExpirationRequired
+        $h['maximumDuration']      = "$($DesiredBody.maximumDuration)"
+    }
+    elseif ($id -like 'Enablement_*') {
+        $h['enabledRules'] = @(@($DesiredBody.enabledRules) | Where-Object { "$_".Trim() })
+    }
+    elseif ($id -like 'Notification_*') {
+        $h['notificationLevel']          = "$($DesiredBody.notificationLevel)"
+        $h['isDefaultRecipientsEnabled'] = [bool]$DesiredBody.isDefaultRecipientsEnabled
+        $h['notificationRecipients']     = @(@($DesiredBody.notificationRecipients) | Where-Object { "$_".Trim() })
+    }
+    elseif ($id -eq 'Approval_EndUser_Assignment') {
+        $h['setting'] = $DesiredBody.setting
+    }
+    else { throw "AzResPolicies: rule '$id' is not a rule this provider writes" }
+    $h
+}
+
+function Get-PimAzResPolicyWeakening {
+    <#
+      PURE: how applying ONE rule change would WEAKEN the policy. Returns plain sentences, empty when
+      the change is not weakening. Weakening =
+        * enabledRules loses MultiFactorAuthentication, Justification or Ticketing;
+        * maximumDuration rises, or isExpirationRequired goes true -> false (an unparseable duration
+          counts as weakening -- a breaker that cannot tell must not assume "safe");
+        * a notification recipient is removed, or default recipients go on -> off.
+      Approval is never weakening here: it is only ever added or widened, never removed.
+    #>
+    param([Parameter(Mandatory)][object]$LiveRule, [Parameter(Mandatory)][object]$DesiredBody)
+    $out = New-Object System.Collections.Generic.List[string]
+    $id = "$($LiveRule.id)"
+    if ($id -like 'Enablement_*') {
+        $liveSet = @(@($LiveRule.enabledRules) | ForEach-Object { "$_" })
+        $desSet  = @(@($DesiredBody.enabledRules) | ForEach-Object { "$_" })
+        foreach ($c in @('MultiFactorAuthentication','Justification','Ticketing')) {
+            if ($liveSet -contains $c -and $desSet -notcontains $c) { $out.Add("removes $c") }
+        }
+    }
+    elseif ($id -like 'Expiration_*') {
+        if ([bool]$LiveRule.isExpirationRequired -and -not [bool]$DesiredBody.isExpirationRequired) { $out.Add('isExpirationRequired true -> false') }
+        $ld = "$($LiveRule.maximumDuration)".Trim(); $dd = "$($DesiredBody.maximumDuration)".Trim()
+        if ($ld -and $ld -ne $dd) {
+            if (-not $dd) { $out.Add("removes maximumDuration $ld") }
+            else {
+                try {
+                    if ([System.Xml.XmlConvert]::ToTimeSpan($dd) -gt [System.Xml.XmlConvert]::ToTimeSpan($ld)) { $out.Add("raises maximumDuration $ld -> $dd") }
+                } catch { $out.Add("maximumDuration $ld -> $dd could not be compared (counted as weakening)") }
+            }
+        }
+    }
+    elseif ($id -like 'Notification_*') {
+        $desR = @(@($DesiredBody.notificationRecipients) | Where-Object { "$_".Trim() } | ForEach-Object { "$_".Trim().ToLowerInvariant() })
+        foreach ($x in @(@($LiveRule.notificationRecipients) | Where-Object { "$_".Trim() } | ForEach-Object { "$_".Trim().ToLowerInvariant() })) {
+            if ($desR -notcontains $x) { $out.Add("removes notification recipient $x") }
+        }
+        if ([bool]$LiveRule.isDefaultRecipientsEnabled -and -not [bool]$DesiredBody.isDefaultRecipientsEnabled) { $out.Add('turns default recipients off') }
+    }
+    $out.ToArray()
+}
+
+function Read-PimAzResPolicyAssignment {
+    <#
+      GET the role's policy ASSIGNMENT at the scope and return { policyId; rules = properties.effectiveRules }.
+      effectiveRules is what v1 compared (PIM-Functions.psm1 L9177): the MERGED rule set, including the
+      default rules a partial custom policy lacks. The policy id is built as v1 built it: the scope plus
+      the last segment of properties.policyId (L9178, L9279). THROWS on a failed read or on an assignment
+      without effectiveRules (callers turn that into a state or an error -- never a guess).
+    #>
+    param([Parameter(Mandatory)][string]$Scope, [Parameter(Mandatory)][string]$RoleId)
+    $roleDefId = "$Scope/providers/Microsoft.Authorization/roleDefinitions/$RoleId"
+    $asg = @(Invoke-PimArm -Path "$Scope/providers/Microsoft.Authorization/roleManagementPolicyAssignments?`$filter=roleDefinitionId eq '$roleDefId'" -ApiVersion '2020-10-01' -All)
+    $asg = @($asg | Where-Object { $null -ne $_ -and "$($_.properties.policyId)" })
+    if (-not $asg.Count) { return $null }
+    $pick = @($asg | Where-Object { "$($_.properties.scope)".TrimEnd('/') -ieq $Scope } | Select-Object -First 1)
+    $a = if ($pick.Count) { $pick[0] } else { $asg[0] }
+    $polGuid = (("$($a.properties.policyId)").TrimEnd('/') -split '/')[-1]
+    $rules = @(@($a.properties.effectiveRules) | Where-Object { $null -ne $_ })
+    if (-not $rules.Count) { throw "the policy assignment for role $RoleId at $Scope returned no effectiveRules" }
+    [pscustomobject]@{ policyId = "$Scope/providers/Microsoft.Authorization/roleManagementPolicies/$polGuid"; policyGuid = $polGuid; rules = $rules }
+}
+
+function Get-PimAzResPolicyLive {
+    <#
+      The live read for ONE (scope, role): the assignment's effectiveRules. Never throws: a failed read is
+      a STATE carrying ARM's own message, so a 500 is reported as unreadable instead of being read as
+      "no policy" or "no rules".
+    #>
+    param([Parameter(Mandatory)][string]$Scope, [Parameter(Mandatory)][string]$RoleName, [hashtable]$RoleCache = @{})
+    $row = [pscustomobject]@{ AzScope=$Scope; RoleName=$RoleName; RoleId=''; State=''; Error=''; PolicyId=''; IsDefaultPolicy=$false; Rules=@() }
+    $rid = Resolve-PimArmRoleId -Scope $Scope -RoleName $RoleName -Cache $RoleCache
+    if (-not $rid) {
+        $err = Get-PimArmRoleLookupError -Scope $Scope -RoleName $RoleName -Cache $RoleCache
+        if ($err) { $row.State = 'unreadable'; $row.Error = "could not look up ARM role '$RoleName' at ${Scope}: $err" }
+        else      { $row.State = 'role-not-found'; $row.Error = "AzResPolicies: ARM role '$RoleName' not found at $Scope" }
+        return $row
+    }
+    $row.RoleId = $rid
+    $a = $null
+    try { $a = Read-PimAzResPolicyAssignment -Scope $Scope -RoleId $rid }
+    catch { $row.State = 'unreadable'; $row.Error = "policy assignment read failed: $($_.Exception.Message)"; return $row }
+    if (-not $a) { $row.State = 'no-policy'; $row.Error = "ARM returned no roleManagementPolicyAssignment for '$RoleName' at $Scope"; return $row }
+    $row.PolicyId = $a.policyId
+    $row.IsDefaultPolicy = ("$($a.policyGuid)" -ieq $rid)
+    $row.Rules = @($a.rules)
+    $row.State = 'read'
+    $row
+}
+
+function Get-PimAzResPolicyChangePlan {
+    <#
+      PURE. PLAN FIRST, WRITE SECOND: everything this run would write, computed before any PATCH.
+        checked (T)   = policies read successfully (matches / kept / differs)
+        changes (N)   = POLICIES that would be PATCHed (each rule is its own PATCH; N counts policies)
+        weakening (W) = RULE changes that weaken a policy (Get-PimAzResPolicyWeakening)
+        planHash      = SHA-256 (lowercase hex) over the ordinally sorted lines
+                        "<policyId lowercase>|<ruleId>|<target facet>" joined with LF -- the exact change
+                        set; any different change set has a different hash.
+      A policy is left out when nothing on it may be written (unreadable, or an approval template with no
+      resolvable approver -- that one is never written half-configured).
+    #>
+    param([object[]]$Desired, [object[]]$Live, [object[]]$Verdicts)
+    $desByKey = @{}; foreach ($x in @($Desired)) { if ($x) { $desByKey[(Get-PimAzResPolicyKey -Row $x)] = $x } }
+    $liveByKey = @{}; foreach ($x in @($Live)) { if ($x) { $liveByKey[(Get-PimAzResPolicyKey -Row $x)] = $x } }
+    $policies = New-Object System.Collections.Generic.List[object]
+    $lines = New-Object System.Collections.Generic.List[string]
+    $weak = New-Object System.Collections.Generic.List[object]
+    $adminAligned = New-Object System.Collections.Generic.List[object]
+    $notifyAligned = New-Object System.Collections.Generic.List[object]
+    $checked = 0
+    foreach ($v in @($Verdicts)) {
+        if ($null -eq $v) { continue }
+        if ($v.state -in @('matches','kept','differs')) { $checked++ }
+        if ($v.state -ne 'differs') { continue }
+        if (@($v.diffs | Where-Object { $_.blocked -eq 'no-approver' }).Count) { continue }
+        $d = $desByKey[$v.key]; $l = $liveByKey[$v.key]
+        if (-not $d -or -not $l) { continue }
+        $bodies = Get-PimAzResPolicyDesiredRuleBodies -Desired $d
+        $liveById = @{}; foreach ($r in @($l.Rules)) { if ($r) { $liveById["$($r.id)"] = $r } }
+        $rules = New-Object System.Collections.Generic.List[object]
+        foreach ($df in @($v.diffs)) {
+            if ($df.blocked) { continue }
+            if (-not $liveById.ContainsKey($df.ruleId) -or -not $bodies.ContainsKey($df.ruleId)) { continue }
+            $w = @()
+            if ($df.ruleId -ne 'Approval_EndUser_Assignment') { $w = @(Get-PimAzResPolicyWeakening -LiveRule $liveById[$df.ruleId] -DesiredBody $bodies[$df.ruleId]) }
+            foreach ($s in $w) {
+                $entry = [pscustomobject]@{ scope = $v.scope; role = $v.role; policyId = $v.policyId; ruleId = $df.ruleId; change = $s }
+                # ADMIN-PATH ALIGNMENT IS NOT WEAKENING (decision 2026-09-13): Enablement_Admin_Assignment /
+                # _Admin_Eligibility gate the ENGINE's own assignment writes; a managed identity can never
+                # satisfy MFA (MfaRule, measured), and v1 cleared exactly these (BUG-21). Counted toward N,
+                # reported as its own category -- visible, never hidden.
+                if ($df.ruleId -in @('Enablement_Admin_Assignment','Enablement_Admin_Eligibility') -and $s -match '^removes (MultiFactorAuthentication|Justification)$') { $adminAligned.Add($entry) }
+                # NOTIFICATION DEFAULTS aligned to the template (decision 2026-09-13) are not weakening either -- a
+                # default-recipient switch; removing a NAMED recipient still is.
+                elseif ($df.ruleId -like 'Notification_*' -and $s -eq 'turns default recipients off') { $notifyAligned.Add($entry) }
+                else { $weak.Add($entry) }
+            }
+            $rules.Add([pscustomobject]@{ ruleId = $df.ruleId; live = $df.live; target = $df.target; weakening = @($w) })
+            $lines.Add(("{0}|{1}|{2}" -f "$($v.policyId)".ToLowerInvariant(), $df.ruleId, $df.target))
+        }
+        if ($rules.Count) { $policies.Add([pscustomobject]@{ key = $v.key; scope = $v.scope; role = $v.role; policyId = $v.policyId; template = $v.template; rules = $rules.ToArray() }) }
+    }
+    $sorted = $lines.ToArray(); [Array]::Sort($sorted, [StringComparer]::Ordinal)
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    try { $bytes = $sha.ComputeHash([System.Text.Encoding]::UTF8.GetBytes(($sorted -join "`n"))) } finally { $sha.Dispose() }
+    $hash = -join ($bytes | ForEach-Object { $_.ToString('x2') })
+    $byKey = @{}; foreach ($p in $policies) { $byKey[$p.key] = $p }
+    [pscustomobject]@{ planHash = $hash; checked = $checked; changes = $policies.Count; weakening = $weak.Count; ruleChanges = $sorted.Count
+                       policies = $policies.ToArray(); weakenings = $weak.ToArray(); byKey = $byKey
+                       adminPathAligned = $adminAligned.ToArray(); notificationDefaultsAligned = $notifyAligned.ToArray() }
+}
+
+function ConvertFrom-PimAzResSettingValue {
+    # A pim.Settings value may come back as a JSON string or an already-parsed object.
+    param($Value)
+    if ($null -eq $Value) { return $null }
+    if ($Value -is [string]) { $s = $Value.Trim(); if (-not $s) { return $null }; return ($s | ConvertFrom-Json) }
+    $Value
+}
+
+function ConvertTo-PimAzResUtc {
+    # A stamp as UTC [datetime], or $null. PS 7's ConvertFrom-Json already turns an ISO-8601 string into a
+    # (local) [datetime], and "$value" would then render it in a culture format that does not parse back.
+    param($Value)
+    if ($null -eq $Value) { return $null }
+    if ($Value -is [datetime]) { return $Value.ToUniversalTime() }
+    $s = "$Value".Trim(); if (-not $s) { return $null }
+    try { return ([datetime]::Parse($s, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind)).ToUniversalTime() } catch { return $null }
+}
+
+# ---------------------------------------------------------------------------
+# POLICY MASS-CHANGE CIRCUIT BREAKER -- ONE core, three providers (operator, 2026-09-13: "add breaker"
+# to GroupsPolicies and EntraRolePolicies, the same design AzResPolicies has). Each provider has its OWN
+# thresholds key, hold record, approval record and failure code, so an approval can never cover another
+# provider's change set. Measured motivation for the Graph providers: the first 2.4.338 run on internal
+# changed 293 of 706 group policies in one tick (owner + notification alignment) with nothing to hold it.
+#   <prefix>Breaker            pim.Settings  {"MaxChanges":n,"MaxPercent":n,"MaxWeakening":n}
+#   <prefix>MassHold           pim.Settings  the held plan (what an approval must match)
+#   <prefix>MassChangeApproval pim.Settings  { planHash, approvedBy, approvedUtc, expiresUtc }
+# ---------------------------------------------------------------------------
+$script:PimPolicyBreakerSpecs = @{
+    'azrespolicies'     = @{ Provider = 'AzResPolicies';     Prefix = 'AzResPolicy';     Code = 'AZ-POLICY-MASS-HOLD';     Audit = 'azres.policy.masschange'
+                             ApproveFn = 'Approve-PimAzResPolicyMassChange'; Noun = 'Azure resource PIM policies'; MailSubject = 'PIM Azure policy mass-change circuit breaker held' }
+    'groupspolicies'    = @{ Provider = 'GroupsPolicies';    Prefix = 'GroupsPolicy';    Code = 'GROUP-POLICY-MASS-HOLD';  Audit = 'groups.policy.masschange'
+                             ApproveFn = 'Approve-PimPolicyMassChange';     Noun = 'PIM for Groups policies';      MailSubject = 'PIM for Groups policy mass-change circuit breaker held' }
+    'entrarolepolicies' = @{ Provider = 'EntraRolePolicies'; Prefix = 'EntraRolePolicy'; Code = 'ENTRA-POLICY-MASS-HOLD';  Audit = 'entrarole.policy.masschange'
+                             ApproveFn = 'Approve-PimPolicyMassChange';     Noun = 'Entra directory role PIM policies'; MailSubject = 'PIM Entra role policy mass-change circuit breaker held' }
+}
+
+function Get-PimPolicyBreakerSpec {
+    param([Parameter(Mandatory)][string]$Provider)
+    $s = $script:PimPolicyBreakerSpecs["$Provider".Trim().ToLowerInvariant()]
+    if (-not $s) { throw "policy breaker: unknown provider '$Provider' (known: AzResPolicies, GroupsPolicies, EntraRolePolicies)" }
+    $s
+}
+
+function Get-PimPolicyBreakerThresholds {
+    <#
+      The breaker thresholds for ONE provider: code defaults (MaxChanges 25, MaxPercent 25, MaxWeakening 3),
+      each key overridable from SQL -- pim.Settings '<prefix>Breaker'. An unreadable or malformed setting
+      falls back to the defaults, and says so.
+    #>
+    [CmdletBinding()] param([Parameter(Mandatory)][string]$Provider)
+    $spec = Get-PimPolicyBreakerSpec -Provider $Provider
+    $key = "$($spec.Prefix)Breaker"
+    $t = [ordered]@{ MaxChanges = [int]$script:PimAzResPolicyBreakerDefaults.MaxChanges; MaxPercent = [double]$script:PimAzResPolicyBreakerDefaults.MaxPercent
+                     MaxWeakening = [int]$script:PimAzResPolicyBreakerDefaults.MaxWeakening; MinCheckedForPercent = $script:PimAzResPolicyBreakerMinCheckedForPercent; source = 'default' }
+    $hasStore = [bool](Get-Command Get-PimSetting -ErrorAction SilentlyContinue)
+    $mirror = ($global:PIM_NamingConventions -is [System.Collections.IDictionary] -and $global:PIM_NamingConventions.Contains($key))
+    if ($hasStore -or $mirror) {
+        try {
+            # pim.Settings through the store bridge, else the hydrated pim.Settings mirror (Import-PimSettingsFromStore)
+            $raw = $null
+            if ($hasStore) { $raw = Get-PimSetting -Name $key }
+            if ($null -eq $raw -and $mirror) { $raw = $global:PIM_NamingConventions[$key] }
+            $o = ConvertFrom-PimAzResSettingValue $raw
+            if ($o) {
+                foreach ($k in @('MaxChanges','MaxPercent','MaxWeakening')) {
+                    $p = $o.PSObject.Properties[$k]
+                    if ($p -and "$($p.Value)" -match '^\d+(\.\d+)?$') { $t[$k] = $(if ($k -eq 'MaxPercent') { [double]$p.Value } else { [int][double]$p.Value }); $t.source = "pim.Settings['$key']" }
+                }
+            }
+        } catch { Write-Warning "  [engine] $($spec.Provider): pim.Settings['$key'] could not be read ($($_.Exception.Message)) -- using the default thresholds." }
+    }
+    [pscustomobject]$t
+}
+
+function Get-PimPolicyMassChangeApproval {
+    # The recorded approval (pim.Settings '<prefix>MassChangeApproval') for ONE provider, or $null.
+    param([Parameter(Mandatory)][string]$Provider)
+    $spec = Get-PimPolicyBreakerSpec -Provider $Provider
+    if (-not (Get-Command Get-PimSetting -ErrorAction SilentlyContinue)) { return $null }
+    try { $o = ConvertFrom-PimAzResSettingValue (Get-PimSetting -Name "$($spec.Prefix)MassChangeApproval") } catch { return $null }
+    if (-not $o -or -not "$($o.planHash)".Trim()) { return $null }
+    $o
+}
+
+function Get-PimPolicyMassHold {
+    <#
+      The CURRENT hold of ONE provider for a UI, or $null. The record lives in pim.Settings '<prefix>MassHold';
+      it is current only while the failing set (pim.Settings 'EngineItemFailures') still carries that
+      provider's hold item for this plan hash -- a later run that did not hold drops that item, so a stale
+      record is never offered for approval.
+    #>
+    [CmdletBinding()] param([Parameter(Mandatory)][string]$Provider)
+    $spec = Get-PimPolicyBreakerSpec -Provider $Provider
+    if (-not (Get-Command Get-PimSetting -ErrorAction SilentlyContinue)) { return $null }
+    $h = $null
+    try { $h = ConvertFrom-PimAzResSettingValue (Get-PimSetting -Name "$($spec.Prefix)MassHold") } catch { return $null }
+    if (-not $h -or -not "$($h.planHash)".Trim()) { return $null }
+    if (Get-Command Get-PimEngineItemFailures -ErrorAction SilentlyContinue) {
+        $live = @(Get-PimEngineItemFailures | Where-Object { "$($_.code)" -eq $spec.Code -and "$($_.message)" -like "*$($h.planHash)*" })
+        if (-not $live.Count) { return $null }
+    }
+    $h
+}
+
+function Approve-PimPolicyMassChange {
+    <#
+      Approve ONE held plan of ONE provider. Refused unless -PlanHash equals the CURRENT recorded hold's hash
+      FOR THAT PROVIDER. Writes pim.Settings '<prefix>MassChangeApproval' = { planHash, approvedBy,
+      approvedUtc, expiresUtc } (default validity 24h). The next run of that provider applies the plan only
+      if its hash is still exactly this one, then clears the approval.
+    #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string]$Provider, [Parameter(Mandatory)][string]$PlanHash, [Parameter(Mandatory)][string]$By, [ValidateRange(1, 168)][int]$ValidHours = 24, [datetime]$NowUtc = [datetime]::UtcNow)
+    $spec = Get-PimPolicyBreakerSpec -Provider $Provider
+    $fn = $spec.ApproveFn
+    if (-not (Get-Command Set-PimSetting -ErrorAction SilentlyContinue)) { throw "${fn}: no SQL settings store (Set-PimSetting) -- an approval is a SQL record, never a file." }
+    $h = "$PlanHash".Trim().ToLowerInvariant()
+    if ($h -notmatch '^[0-9a-f]{64}$') { throw "${fn}: REFUSED -- '$PlanHash' is not a plan hash (64 hex characters)." }
+    if (-not "$By".Trim()) { throw "${fn}: REFUSED -- -By (the approver) is required." }
+    $hold = Get-PimPolicyMassHold -Provider $spec.Provider
+    if (-not $hold) { throw "${fn}: REFUSED -- there is no current $($spec.Code) to approve." }
+    if ("$($hold.planHash)".Trim().ToLowerInvariant() -ne $h) {
+        throw "${fn}: REFUSED -- plan hash $h does not match the recorded hold ($($hold.planHash)). An approval never covers a different change set."
+    }
+    $now = $NowUtc.ToUniversalTime()
+    $rec = [ordered]@{ planHash = $h; approvedBy = "$By".Trim(); approvedUtc = $now.ToString('o'); expiresUtc = $now.AddHours($ValidHours).ToString('o'); changes = [int]$hold.changes; weakening = [int]$hold.weakening }
+    Set-PimSetting -Name "$($spec.Prefix)MassChangeApproval" -Value (ConvertTo-Json -InputObject $rec -Compress)
+    try {
+        if (Get-Command Write-PimAuditEvent -ErrorAction SilentlyContinue) { Write-PimAuditEvent -Action "$($spec.Audit).approved" -Target $spec.Provider -After $rec | Out-Null }
+    } catch { Write-Warning "  $($spec.Provider): the approval was recorded but NOT written to the audit trail: $($_.Exception.Message)" }
+    [pscustomobject]$rec
+}
+
+function Write-PimPolicyMassHoldAlert {
+    # Loud, best-effort -- same pattern as Write-PimDisableAbortAlert. NEVER throws: an alert failure must
+    # not turn the hold (the safe outcome) into something else.
+    param([Parameter(Mandatory)][string]$Provider, [Parameter(Mandatory)][object]$Hold, [Parameter(Mandatory)][string]$Message)
+    $spec = Get-PimPolicyBreakerSpec -Provider $Provider
+    Write-Host ("[engine] {0}: mass-change circuit breaker HELD [{1}] -- N={2} T={3} W={4} planHash={5}. Wrote NOTHING this run." -f $spec.Provider, (@($Hold.tripped) -join ', '), $Hold.changes, $Hold.checked, $Hold.weakening, $Hold.planHash) -ForegroundColor Red
+    try {
+        if (Get-Command Write-PimAuditEvent -ErrorAction SilentlyContinue) {
+            Write-PimAuditEvent -Action "$($spec.Audit).held" -Target $spec.Provider -After @{ planHash = $Hold.planHash; changes = $Hold.changes; checked = $Hold.checked; weakening = $Hold.weakening; tripped = @($Hold.tripped) } | Out-Null
+        }
+    } catch { Write-Warning "  [engine] $($spec.Provider): the mass-change hold was NOT written to the audit trail: $($_.Exception.Message)" }
+    try {
+        $to = if (Get-Command Get-PimSafetyKnob -ErrorAction SilentlyContinue) { "$(Get-PimSafetyKnob -Name 'PIM_AlertRecipient')".Trim() } else { '' }
+        if ($to -and (Get-Command Send-PimNotifyMail -ErrorAction SilentlyContinue)) {
+            Send-PimNotifyMail -Type 'alert' -Tokens @{ Subject = $spec.MailSubject; Body = $Message } -Recipient $to | Out-Null
+        }
+    } catch { Write-Warning "  [engine] $($spec.Provider): the mass-change hold alert mail was NOT sent: $($_.Exception.Message)" }
+}
+
+function Get-PimAzResPolicyBreakerThresholds {
+    <#
+      The breaker thresholds: code defaults (MaxChanges 25, MaxPercent 25, MaxWeakening 3), each key
+      overridable from SQL -- pim.Settings 'AzResPolicyBreaker' = {"MaxChanges":n,"MaxPercent":n,"MaxWeakening":n}.
+      An unreadable or malformed setting falls back to the defaults, and says so.
+    #>
+    [CmdletBinding()] param()
+    Get-PimPolicyBreakerThresholds -Provider 'AzResPolicies'
+}
+
+function Get-PimAzResPolicyMassChangeApproval {
+    # The recorded approval (pim.Settings 'AzResPolicyMassChangeApproval') or $null.
+    Get-PimPolicyMassChangeApproval -Provider 'AzResPolicies'
+}
+
+function Test-PimAzResPolicyBreaker {
+    # AzResPolicies' decision (thresholds default to pim.Settings 'AzResPolicyBreaker'). See Test-PimPolicyBreaker.
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][object]$Plan, [object]$Thresholds = $null, [object]$Approval = $null, [datetime]$NowUtc = [datetime]::UtcNow)
+    if (-not $Thresholds) { $Thresholds = Get-PimAzResPolicyBreakerThresholds }
+    Test-PimPolicyBreaker -Plan $Plan -Thresholds $Thresholds -Approval $Approval -NowUtc $NowUtc
+}
+
+function Test-PimPolicyBreaker {
+    <#
+      PURE. The mass-change circuit breaker -- same decision shape as Test-PimDisablePassAllowed:
+        { allowed; abort (= hold); tripped; reason; ... }
+      Trips when N > MaxChanges, OR (T >= 8 and N/T > MaxPercent %), OR W > MaxWeakening. A trip is a
+      HOLD (write nothing) unless an UNEXPIRED approval carries EXACTLY this plan's hash.
+      -Provider only selects the default thresholds when -Thresholds is not given.
+    #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][object]$Plan, [object]$Thresholds = $null, [object]$Approval = $null, [datetime]$NowUtc = [datetime]::UtcNow, [string]$Provider = 'AzResPolicies')
+    if (-not $Thresholds) { $Thresholds = Get-PimPolicyBreakerThresholds -Provider $Provider }
+    $n = [int]$Plan.changes; $t = [int]$Plan.checked; $w = [int]$Plan.weakening
+    $tripped = New-Object System.Collections.Generic.List[string]
+    $reasons = New-Object System.Collections.Generic.List[string]
+    if ($n -gt [int]$Thresholds.MaxChanges) { $tripped.Add('max-changes'); $reasons.Add("would change $n policies (> cap $($Thresholds.MaxChanges))") }
+    if ($t -ge [int]$Thresholds.MinCheckedForPercent -and $t -gt 0) {
+        $pct = 100.0 * $n / $t
+        if ($pct -gt [double]$Thresholds.MaxPercent) { $tripped.Add('max-percent'); $reasons.Add(("would change {0} of {1} checked policies ({2:N1}% > cap {3}%)" -f $n, $t, $pct, $Thresholds.MaxPercent)) }
+    }
+    if ($w -gt [int]$Thresholds.MaxWeakening) { $tripped.Add('max-weakening'); $reasons.Add("$w weakening change(s) (> cap $($Thresholds.MaxWeakening))") }
+    $base = @{ changes = $n; checked = $t; weakening = $w; planHash = "$($Plan.planHash)"; thresholds = $Thresholds; tripped = $tripped.ToArray() }
+    if (-not $tripped.Count) {
+        return [pscustomobject](@{ allowed = $true; abort = $false; hold = $false; approved = $false; approvedBy = ''; reason = 'within the mass-change thresholds'; approvalNote = '' } + $base)
+    }
+    $why = "circuit breaker: " + ($reasons -join '; ')
+    $note = 'no approval recorded'
+    if ($Approval) {
+        $exp = ConvertTo-PimAzResUtc $Approval.expiresUtc
+        if ("$($Approval.planHash)".Trim().ToLowerInvariant() -ne "$($Plan.planHash)".ToLowerInvariant()) { $note = "the recorded approval is for a DIFFERENT plan ($($Approval.planHash)) -- an approval never covers another change set" }
+        elseif (-not $exp -or $exp -le $NowUtc.ToUniversalTime()) { $note = "the approval for this plan EXPIRED ($($Approval.expiresUtc))" }
+        else {
+            return [pscustomobject](@{ allowed = $true; abort = $false; hold = $false; approved = $true; approvedBy = "$($Approval.approvedBy)"; reason = "$why -- APPROVED by $($Approval.approvedBy) until $($Approval.expiresUtc)"; approvalNote = 'approved' } + $base)
+        }
+    }
+    [pscustomobject](@{ allowed = $false; abort = $true; hold = $true; approved = $false; approvedBy = ''; reason = $why; approvalNote = $note } + $base)
+}
+
+function New-PimAzResPolicyMassHold {
+    # PURE: the hold record (what the GUI shows and what an approval must match).
+    param([Parameter(Mandatory)][object]$Plan, [Parameter(Mandatory)][object]$Decision, [datetime]$NowUtc = [datetime]::UtcNow)
+    $top = @($Plan.policies | Sort-Object @{ e = { @($_.rules).Count }; Descending = $true }, @{ e = { "$($_.key)" } } | Select-Object -First 10)
+    [pscustomobject]@{
+        code = 'AZ-POLICY-MASS-HOLD'; planHash = "$($Plan.planHash)"; heldUtc = $NowUtc.ToUniversalTime().ToString('o')
+        changes = [int]$Plan.changes; checked = [int]$Plan.checked; weakening = [int]$Plan.weakening; ruleChanges = [int]$Plan.ruleChanges
+        tripped = @($Decision.tripped); reason = "$($Decision.reason)"; approvalNote = "$($Decision.approvalNote)"
+        thresholds = [pscustomobject]@{ MaxChanges = $Decision.thresholds.MaxChanges; MaxPercent = $Decision.thresholds.MaxPercent; MaxWeakening = $Decision.thresholds.MaxWeakening; MinCheckedForPercent = $Decision.thresholds.MinCheckedForPercent; source = $Decision.thresholds.source }
+        policies = @($top | ForEach-Object { [pscustomobject]@{ scope = $_.scope; role = $_.role; policyId = $_.policyId; template = $_.template; rules = @($_.rules | ForEach-Object { [pscustomobject]@{ ruleId = $_.ruleId; live = $_.live; target = $_.target } }) } })
+        morePolicies = [Math]::Max(0, [int]$Plan.changes - @($top).Count)
+        weakenings = @($Plan.weakenings)
+        adminPathAligned = @($Plan.adminPathAligned)
+        notificationDefaultsAligned = @($Plan.notificationDefaultsAligned)
+        approveWith = "Approve-PimAzResPolicyMassChange -PlanHash $($Plan.planHash) -By <upn>"
+        approvalValidHours = $script:PimAzResPolicyApprovalValidHours
+    }
+}
+
+function Format-PimAzResPolicyMassHoldMessage {
+    param([Parameter(Mandatory)][object]$Hold)
+    $pol = @($Hold.policies | ForEach-Object { "$($_.role) @ $($_.scope) (" + (@($_.rules | ForEach-Object { $_.ruleId }) -join ', ') + ')' })
+    $wk = @($Hold.weakenings | ForEach-Object { "$($_.role) @ $($_.scope) $($_.ruleId): $($_.change)" })
+    ("AzResPolicies [AZ-POLICY-MASS-HOLD]: HELD by the mass-change circuit breaker [" + (@($Hold.tripped) -join ', ') + "] -- $($Hold.reason). " +
+     "Wrote NOTHING this run. N=$($Hold.changes) policies to change, T=$($Hold.checked) checked, W=$($Hold.weakening) weakening. planHash=$($Hold.planHash). " +
+     "Policies: " + ($pol -join '; ') + $(if ($Hold.morePolicies) { "; and $($Hold.morePolicies) more" } else { '' }) + ". " +
+     "Weakening changes: " + $(if ($wk.Count) { $wk -join '; ' } else { 'none' }) + ". " +
+     "Admin-path enablement aligned to template (engine requirement: its identity cannot present MFA; counted in N, not W): $(@($Hold.adminPathAligned).Count). Notification defaults aligned to template (counted in N, not W): $(@($Hold.notificationDefaultsAligned).Count). " +
+     "Approval: $($Hold.approvalNote). Review the plan, then approve exactly this plan hash (Approve-PimAzResPolicyMassChange, valid $($Hold.approvalValidHours)h); " +
+     "the next run applies it. If the plan changes first, the hash changes and the run holds again.")
+}
+
+function Write-PimAzResPolicyMassHoldAlert {
+    # Loud, best-effort -- same pattern as Write-PimDisableAbortAlert. NEVER throws: an alert failure must
+    # not turn the hold (the safe outcome) into something else.
+    param([Parameter(Mandatory)][object]$Hold, [Parameter(Mandatory)][string]$Message)
+    Write-PimPolicyMassHoldAlert -Provider 'AzResPolicies' -Hold $Hold -Message $Message
+}
+
+function Get-PimAzResPolicyMassHold {
+    <#
+      The CURRENT hold for a UI, or $null. The record lives in pim.Settings 'AzResPolicyMassHold'; it is
+      current only while the failing set (pim.Settings 'EngineItemFailures') still carries its
+      AZ-POLICY-MASS-HOLD item -- a later run that did not hold drops that item, so a stale record is
+      never offered for approval.
+    #>
+    [CmdletBinding()] param()
+    Get-PimPolicyMassHold -Provider 'AzResPolicies'
+}
+
+function Approve-PimAzResPolicyMassChange {
+    <#
+      Approve ONE held plan. Refused unless -PlanHash equals the CURRENT recorded hold's hash. Writes the
+      SQL record pim.Settings 'AzResPolicyMassChangeApproval' = { planHash, approvedBy, approvedUtc,
+      expiresUtc } (default validity 24h). The next run applies the plan only if its hash is still
+      exactly this one, then clears the approval.
+    #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string]$PlanHash, [Parameter(Mandatory)][string]$By, [ValidateRange(1, 168)][int]$ValidHours = 24, [datetime]$NowUtc = [datetime]::UtcNow)
+    Approve-PimPolicyMassChange -Provider 'AzResPolicies' -PlanHash $PlanHash -By $By -ValidHours $ValidHours -NowUtc $NowUtc
+}
+
+# ---- the GRAPH policy providers (GroupsPolicies, EntraRolePolicies) on the same breaker ----------------
+
+function Get-PimPolicyPlanHash {
+    # PURE: SHA-256 (lowercase hex) over the ordinally sorted plan lines joined with LF.
+    param([string[]]$Lines)
+    $sorted = @($Lines); [Array]::Sort($sorted, [StringComparer]::Ordinal)
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    try { $bytes = $sha.ComputeHash([System.Text.Encoding]::UTF8.GetBytes(($sorted -join "`n"))) } finally { $sha.Dispose() }
+    -join ($bytes | ForEach-Object { $_.ToString('x2') })
+}
+
+function Get-PimGraphPolicyDesiredRuleBodies {
+    # PURE: rule id -> the body the provider would send for a desired Graph policy item (no approval).
+    param([Parameter(Mandatory)][object]$Desired)
+    $b = @{}
+    $legacy = if ($Desired.PSObject.Properties['EnablementLegacy']) { $Desired.EnablementLegacy } else { $null }
+    foreach ($x in @(ConvertTo-PimEnablementRuleBodies -Enablement $Desired.Enablement -LegacyEndUserAssignment $legacy)) { if ($x) { $b["$($x.id)"] = $x } }
+    foreach ($x in @(ConvertTo-PimExpirationRuleBodies -Expiration $Desired.Expiration)) { if ($x) { $b["$($x.id)"] = $x } }
+    foreach ($n in @($Desired.Notification)) { if ($null -eq $n) { continue }; $x = ConvertTo-PimNotificationRuleBody -Entry $n; if ($x) { $b["$($x.id)"] = $x } }
+    $b
+}
+
+function Test-PimGraphPolicyNeverModified {
+    <#
+      PURE. $true only when the policy object CARRIES lastModifiedDateTime and it is empty -- i.e. Microsoft's
+      default policy that nobody (no person, not the engine) has ever changed. Measured on internal 2026-09-13:
+      the brand-new PIM-ROLE-test1 policies read lastModifiedDateTime='' / lastModifiedBy {id:null}, while every
+      policy the engine has written reads e.g. '2026-09-13T09:21:08Z' by ca-pim-tick. An object without the
+      property (a trimmed $select) is NOT assumed pristine.
+    #>
+    param([AllowNull()][object]$Policy)
+    if ($null -eq $Policy) { return $false }
+    $p = $Policy.PSObject.Properties['lastModifiedDateTime']
+    if (-not $p) { return $false }
+    return (-not "$($p.Value)".Trim())
+}
+
+function Get-PimGraphPolicyChangePlan {
+    <#
+      PURE. PLAN FIRST for a GRAPH policy provider (GroupsPolicies / EntraRolePolicies): the same shape
+      Get-PimAzResPolicyChangePlan returns, from the same facet compare the provider's Equal uses.
+        checked (T)   = desired policies with a live policy read
+        changes (N)   = policies whose facets drift (the ones ApplyUpdate would PATCH)
+        weakening (W) = rule changes that weaken a policy: Get-PimAzResPolicyWeakening's rules (MFA /
+                        Justification / Ticketing removed, a longer maximum duration, expiration no longer
+                        required, a named notification recipient removed) plus APPROVAL TURNED OFF.
+                        Admin-path enablement alignment and notification-default alignment count in N, not W.
+        planHash      = SHA-256 over "<policyId lowercase>|<ruleId>|<target facet>" -- the exact change set.
+      -Label names a policy for a human (group name + member/owner, or the role name).
+    #>
+    param([object[]]$Desired, [object[]]$Live, [Parameter(Mandatory)][scriptblock]$KeyOf, [scriptblock]$Label)
+    $liveByKey = @{}; foreach ($x in @($Live)) { if ($x) { $liveByKey["$(& $KeyOf $x)".ToLowerInvariant()] = $x } }
+    $policies = New-Object System.Collections.Generic.List[object]
+    $lines = New-Object System.Collections.Generic.List[string]
+    $weak = New-Object System.Collections.Generic.List[object]
+    $adminAligned = New-Object System.Collections.Generic.List[object]
+    $notifyAligned = New-Object System.Collections.Generic.List[object]
+    $defaultAligned = New-Object System.Collections.Generic.List[object]
+    $checked = 0
+    foreach ($d in @($Desired)) {
+        if ($null -eq $d) { continue }
+        $key = "$(& $KeyOf $d)".ToLowerInvariant()
+        $l = $liveByKey[$key]
+        if (-not $l) { continue }
+        $checked++
+        $want = Get-PimGroupPolicyDesiredFacets -Desired $d
+        $have = Get-PimGroupPolicyLiveFacets -Rules @($l.Rules)
+        $name = if ($Label) { "$(& $Label $d)" } else { $key }
+        $role = if ($d.PSObject.Properties['PolicyRole'] -and "$($d.PolicyRole)") { "$($d.PolicyRole)" } else { '' }
+        $liveById = @{}; foreach ($r in @($l.Rules)) { if ($r -and "$($r.id)") { $liveById["$($r.id)"] = $r } }
+        $bodies = $null
+        $rules = New-Object System.Collections.Generic.List[object]
+        foreach ($rid in @($want.Keys | Sort-Object)) {
+            # the SAME exemption Test-PimGroupPolicyInSync makes: no approval rule already means "approval off"
+            if (-not $have.ContainsKey($rid)) {
+                if ($rid -eq 'Approval_EndUser_Assignment' -and "$($want[$rid])" -eq 'appr|required=false|approvers=') { continue }
+            } elseif ("$($have[$rid])" -eq "$($want[$rid])") { continue }
+            $w = @()
+            if ($rid -eq 'Approval_EndUser_Assignment') {
+                if ("$($have[$rid])" -like 'appr|required=true*' -and "$($want[$rid])" -like 'appr|required=false*') { $w = @('turns approval off') }
+            } else {
+                if ($null -eq $bodies) { $bodies = Get-PimGraphPolicyDesiredRuleBodies -Desired $d }
+                if ($bodies.ContainsKey($rid)) {
+                    $lr = if ($liveById.ContainsKey($rid)) { $liveById[$rid] } else { [pscustomobject]@{ id = $rid } }
+                    $w = @(Get-PimAzResPolicyWeakening -LiveRule $lr -DesiredBody $bodies[$rid])
+                }
+            }
+            foreach ($s in $w) {
+                $entry = [pscustomobject]@{ name = $name; role = $role; policyId = "$($l.PolicyId)"; ruleId = $rid; change = $s }
+                if ($rid -in @('Enablement_Admin_Assignment','Enablement_Admin_Eligibility') -and $s -match '^removes (MultiFactorAuthentication|Justification)$') { $adminAligned.Add($entry) }
+                elseif ($rid -like 'Notification_*' -and $s -eq 'turns default recipients off') { $notifyAligned.Add($entry) }
+                # 🔴 §70.19 (2026-09-13, internal): the operator's two new delegations were HELD -- each new group's
+                # member+owner policy is Microsoft's untouched default (P180D, owner expiration required), the
+                # template says P365D / not required, so 2 new groups = 6 "weakening" changes > cap 3, and a new
+                # delegation never got its activation policy. The breaker exists to stop a wrong template from
+                # rewriting policies someone SET; the first template application to a never-modified default policy
+                # is the baseline being established, not a weakening. Counted in N (the change caps still apply).
+                elseif ($l.PSObject.Properties['NeverModified'] -and $l.NeverModified) { $defaultAligned.Add($entry) }
+                else { $weak.Add($entry) }
+            }
+            $rules.Add([pscustomobject]@{ ruleId = $rid; live = $(if ($have.ContainsKey($rid)) { "$($have[$rid])" } else { '(absent)' }); target = "$($want[$rid])"; weakening = @($w) })
+            $lines.Add(("{0}|{1}|{2}" -f "$($l.PolicyId)".ToLowerInvariant(), $rid, "$($want[$rid])"))
+        }
+        if ($rules.Count) { $policies.Add([pscustomobject]@{ key = $key; name = $name; role = $role; policyId = "$($l.PolicyId)"; template = "$($d.TemplateId)"; rules = $rules.ToArray() }) }
+    }
+    $byKey = @{}; foreach ($p in $policies) { $byKey[$p.key] = $p }
+    [pscustomobject]@{ planHash = (Get-PimPolicyPlanHash -Lines $lines.ToArray()); checked = $checked; changes = $policies.Count; weakening = $weak.Count; ruleChanges = $lines.Count
+                       policies = $policies.ToArray(); weakenings = $weak.ToArray(); byKey = $byKey
+                       adminPathAligned = $adminAligned.ToArray(); notificationDefaultsAligned = $notifyAligned.ToArray()
+                       defaultPolicyAligned = $defaultAligned.ToArray() }
+}
+
+function New-PimGraphPolicyMassHold {
+    # PURE: the hold record of a GRAPH policy provider (what the GUI shows and what an approval must match).
+    param([Parameter(Mandatory)][string]$Provider, [Parameter(Mandatory)][object]$Plan, [Parameter(Mandatory)][object]$Decision, [datetime]$NowUtc = [datetime]::UtcNow)
+    $spec = Get-PimPolicyBreakerSpec -Provider $Provider
+    $top = @($Plan.policies | Sort-Object @{ e = { @($_.rules).Count }; Descending = $true }, @{ e = { "$($_.key)" } } | Select-Object -First 10)
+    [pscustomobject]@{
+        code = $spec.Code; provider = $spec.Provider; planHash = "$($Plan.planHash)"; heldUtc = $NowUtc.ToUniversalTime().ToString('o')
+        changes = [int]$Plan.changes; checked = [int]$Plan.checked; weakening = [int]$Plan.weakening; ruleChanges = [int]$Plan.ruleChanges
+        tripped = @($Decision.tripped); reason = "$($Decision.reason)"; approvalNote = "$($Decision.approvalNote)"
+        thresholds = [pscustomobject]@{ MaxChanges = $Decision.thresholds.MaxChanges; MaxPercent = $Decision.thresholds.MaxPercent; MaxWeakening = $Decision.thresholds.MaxWeakening; MinCheckedForPercent = $Decision.thresholds.MinCheckedForPercent; source = $Decision.thresholds.source }
+        policies = @($top | ForEach-Object { [pscustomobject]@{ name = $_.name; role = $_.role; policyId = $_.policyId; template = $_.template; rules = @($_.rules | ForEach-Object { [pscustomobject]@{ ruleId = $_.ruleId; live = $_.live; target = $_.target } }) } })
+        morePolicies = [Math]::Max(0, [int]$Plan.changes - @($top).Count)
+        weakenings = @($Plan.weakenings)
+        adminPathAligned = @($Plan.adminPathAligned)
+        notificationDefaultsAligned = @($Plan.notificationDefaultsAligned)
+        defaultPolicyAligned = @($(if ($Plan.PSObject.Properties['defaultPolicyAligned']) { $Plan.defaultPolicyAligned } else { @() }))
+        approveWith = "Approve-PimPolicyMassChange -Provider $($spec.Provider) -PlanHash $($Plan.planHash) -By <upn>"
+        approvalValidHours = $script:PimAzResPolicyApprovalValidHours
+    }
+}
+
+function Format-PimGraphPolicyMassHoldMessage {
+    param([Parameter(Mandatory)][object]$Hold)
+    $spec = Get-PimPolicyBreakerSpec -Provider "$($Hold.provider)"
+    $pol = @($Hold.policies | ForEach-Object { "$($_.name) (" + (@($_.rules | ForEach-Object { $_.ruleId }) -join ', ') + ')' })
+    $wk = @($Hold.weakenings | ForEach-Object { "$($_.name) $($_.ruleId): $($_.change)" })
+    ("$($spec.Provider) [$($spec.Code)]: HELD by the mass-change circuit breaker [" + (@($Hold.tripped) -join ', ') + "] -- $($Hold.reason). " +
+     "Wrote NOTHING this run. N=$($Hold.changes) policies to change, T=$($Hold.checked) checked, W=$($Hold.weakening) weakening. planHash=$($Hold.planHash). " +
+     "Policies: " + ($pol -join '; ') + $(if ($Hold.morePolicies) { "; and $($Hold.morePolicies) more" } else { '' }) + ". " +
+     "Weakening changes: " + $(if ($wk.Count) { $wk -join '; ' } else { 'none' }) + ". " +
+     "Admin-path enablement aligned to template (engine requirement: its identity cannot present MFA; counted in N, not W): $(@($Hold.adminPathAligned).Count). Notification defaults aligned to template (counted in N, not W): $(@($Hold.notificationDefaultsAligned).Count). " +
+     "First template application to never-modified default policies (counted in N, not W): $(@($(if ($Hold.PSObject.Properties['defaultPolicyAligned']) { $Hold.defaultPolicyAligned } else { @() })).Count). " +
+     "Approval: $($Hold.approvalNote). Review the plan, then approve exactly this plan hash (Approve-PimPolicyMassChange -Provider $($spec.Provider), valid $($Hold.approvalValidHours)h); " +
+     "the next run applies it. If the plan changes first, the hash changes and the run holds again.")
+}
+
+function Set-PimGraphPolicyBreakerPlan {
+    <#
+      Called at the end of a Graph policy provider's GetLive: PLAN FIRST -- the whole change set and the
+      breaker decision exist before any ApplyUpdate runs (context keys '<provider>.plan' / '<provider>.breaker').
+    #>
+    param([Parameter(Mandatory)][string]$Provider, [hashtable]$Context, [object[]]$Desired, [object[]]$Live, [Parameter(Mandatory)][scriptblock]$KeyOf, [scriptblock]$Label)
+    if ($null -eq $Context) { return }
+    $spec = Get-PimPolicyBreakerSpec -Provider $Provider
+    $plan = Get-PimGraphPolicyChangePlan -Desired $Desired -Live $Live -KeyOf $KeyOf -Label $Label
+    $dec = Test-PimPolicyBreaker -Plan $plan -Approval (Get-PimPolicyMassChangeApproval -Provider $spec.Provider) -Provider $spec.Provider
+    $Context["$($spec.Provider).plan"] = $plan; $Context["$($spec.Provider).breaker"] = $dec
+    $Context["$($spec.Provider).breakerState"] = @{ holdRecorded = $false; visited = @{}; approvalCleared = $false }
+    $color = if ($dec.hold) { 'Red' } elseif ($dec.approved) { 'Yellow' } else { 'DarkCyan' }
+    Write-Host ("    [breaker] {0}: N={1} change(s) of T={2} checked, W={3} weakening, planHash={4} -- {5}{6}" -f `
+        $spec.Provider, $plan.changes, $plan.checked, $plan.weakening, $plan.planHash, $(if ($dec.hold) { 'HOLD: ' } elseif ($dec.approved) { 'APPROVED: ' } else { 'apply: ' }), $dec.reason) -ForegroundColor $color
+    if (@($plan.notificationDefaultsAligned).Count) {
+        Write-Host ("    [breaker] {0}: {1} notification default(s) aligned to template -- counted in N, not in W" -f $spec.Provider, @($plan.notificationDefaultsAligned).Count) -ForegroundColor DarkCyan
+    }
+    if (@($plan.adminPathAligned).Count) {
+        Write-Host ("    [breaker] {0}: {1} admin-path enablement change(s) aligned to template -- counted in N, not in W" -f $spec.Provider, @($plan.adminPathAligned).Count) -ForegroundColor DarkCyan
+    }
+    if ($plan.PSObject.Properties['defaultPolicyAligned'] -and @($plan.defaultPolicyAligned).Count) {
+        Write-Host ("    [breaker] {0}: {1} rule change(s) are the FIRST template application to never-modified default policies (new groups/roles) -- counted in N, not in W: {2}" -f $spec.Provider, @($plan.defaultPolicyAligned).Count, ((@($plan.defaultPolicyAligned) | ForEach-Object { $_.name } | Select-Object -Unique) -join ', ')) -ForegroundColor DarkCyan
+    }
+}
+
+function Invoke-PimGraphPolicyGuardedApply {
+    <#
+      ApplyUpdate gate for a GRAPH policy provider, the same contract Invoke-PimAzResPolicyUpdate has:
+        * no plan/decision in the context -> the handler was called DIRECTLY for one item, not by
+          Invoke-PimEngineScope (which always runs GetLive, and so the plan, first). One item is not a mass
+          change, so it applies -- and says so. A scope run can never reach this branch;
+        * HOLD and the item is in the plan -> the FIRST planned item records the hold (SQL), alerts and throws
+          '<CODE>'; the rest are reported held; nothing is written;
+        * otherwise the provider's own apply runs; after the last planned policy of an APPROVED run the
+          approval is cleared.
+      An item NOT in the plan (e.g. a create for a group whose policy could not be found) is unaffected.
+    #>
+    param([Parameter(Mandatory)][string]$Provider, [Parameter(Mandatory)][object]$Item, [hashtable]$Context, [Parameter(Mandatory)][scriptblock]$Apply)
+    $spec = Get-PimPolicyBreakerSpec -Provider $Provider
+    if ($null -eq $Context) { $Context = @{} }
+    $plan = $Context["$($spec.Provider).plan"]; $dec = $Context["$($spec.Provider).breaker"]
+    if (-not $plan -or -not $dec) {
+        Write-Verbose "$($spec.Provider): no breaker plan in the context (a direct single-item call, not a scope run) -- applying '$($Item.key)'"
+        return (& $Apply $Item $Context)
+    }
+    if (-not $Context["$($spec.Provider).breakerState"]) { $Context["$($spec.Provider).breakerState"] = @{ holdRecorded = $false; visited = @{}; approvalCleared = $false } }
+    $st = $Context["$($spec.Provider).breakerState"]
+    $key = "$($Item.key)".Trim().ToLowerInvariant()
+    $pp = if ($plan.byKey.ContainsKey($key)) { $plan.byKey[$key] } else { $null }
+    if ($pp -and $dec.hold) {
+        if (-not $st.holdRecorded) {
+            $st.holdRecorded = $true
+            $hold = New-PimGraphPolicyMassHold -Provider $spec.Provider -Plan $plan -Decision $dec
+            $msg = Format-PimGraphPolicyMassHoldMessage -Hold $hold
+            if (Get-Command Set-PimSetting -ErrorAction SilentlyContinue) {
+                try { Set-PimSetting -Name "$($spec.Prefix)MassHold" -Value (ConvertTo-Json -InputObject $hold -Depth 8 -Compress) }
+                catch { Write-Warning "  [engine] $($spec.Provider): the hold record could NOT be saved (it cannot be approved until a run saves it): $($_.Exception.Message)" }
+            }
+            Write-PimPolicyMassHoldAlert -Provider $spec.Provider -Hold $hold -Message $msg
+            throw $msg
+        }
+        return [pscustomobject]@{ pimApplied = $false; note = "held by the mass-change circuit breaker (planHash $($plan.planHash))" }
+    }
+    # §70.15 LOG-02: the audit of this policy change (Write-PimEngineChangeAudit, after the apply) records WHICH rules
+    # changed from what to what -- the plan already computed it and used to discard it.
+    if ($pp) {
+        try {
+            $Item | Add-Member -NotePropertyName pimAuditDetail -Force -NotePropertyValue ([ordered]@{
+                policy = "$($pp.name)"; policyId = "$($pp.policyId)"; template = "$($pp.template)"; planHash = "$($plan.planHash)"
+                approvedPlan = [bool]$dec.approved
+                rules = @($pp.rules | ForEach-Object { [ordered]@{ ruleId = "$($_.ruleId)"; before = "$($_.live)"; after = "$($_.target)"; weakening = @($_.weakening) } })
+            })
+        } catch { }
+    }
+    try { & $Apply $Item $Context }
+    finally {
+        if ($pp) {
+            $st.visited[$key] = $true
+            if ($dec.approved -and -not $st.approvalCleared -and @($st.visited.Keys).Count -ge @($plan.policies).Count) {
+                $st.approvalCleared = $true
+                if (Get-Command Set-PimSetting -ErrorAction SilentlyContinue) {
+                    try { Set-PimSetting -Name "$($spec.Prefix)MassChangeApproval" -Value ''; Write-Host "    [engine] $($spec.Provider): approved plan $($plan.planHash) applied -- approval cleared" -ForegroundColor Green }
+                    catch { Write-Warning "  [engine] $($spec.Provider): the approval for plan $($plan.planHash) could NOT be cleared: $($_.Exception.Message)" }
+                }
+            }
+        }
+    }
+}
+
+function Write-PimAzResPolicyVerification {
+    # Prints the verification for every pair (plan AND apply) and returns the verdicts.
+    param([object[]]$Desired, [object[]]$Live)
+    $byKey = @{}; foreach ($l in @($Live)) { if ($l) { $byKey[(Get-PimAzResPolicyKey -Row $l)] = $l } }
+    $verdicts = @(foreach ($d in @($Desired)) { if ($d) { Get-PimAzResPolicyVerdict -Desired $d -Live $byKey[(Get-PimAzResPolicyKey -Row $d)] } })
+    $count = { param($s) @($verdicts | Where-Object { $_.state -eq $s }).Count }
+    Write-Host ("    [verify] AzResPolicies: {0} pair(s) -- matches={1} kept={2} differs={3} unreadable={4} no-policy={5} role-not-found={6}" -f `
+        $verdicts.Count, (& $count 'matches'), (& $count 'kept'), (& $count 'differs'), (& $count 'unreadable'), (& $count 'no-policy'), (& $count 'role-not-found')) -ForegroundColor DarkCyan
+    foreach ($v in $verdicts) {
+        $label = "$($v.role) @ $($v.scope)"
+        foreach ($n in @($v.notes)) { Write-Host ("    [verify] {0}: {1}" -f $label, $n) -ForegroundColor DarkYellow }
+        if ($v.state -in @('matches','kept')) { continue }
+        $dflt = if ($v.isDefaultPolicy) { ' [SYSTEM DEFAULT policy]' } else { '' }
+        switch ($v.state) {
+            'differs' {
+                $parts = @($v.diffs | ForEach-Object { "$($_.ruleId) live[$($_.live)] target[$($_.target)]$(if ($_.blocked) { " (NOT written: $($_.blocked))" })" })
+                Write-Host ("    [verify] {0}{1}: DIFFERS from '{2}' -- {3}" -f $label, $dflt, $v.template, ($parts -join '; ')) -ForegroundColor Yellow
+                $adm = @(@($v.lowersSecurity) | Where-Object { $_ -like 'Enablement_Admin_*' })
+                $act = @(@($v.lowersSecurity) | Where-Object { $_ -notlike 'Enablement_Admin_*' })
+                if ($adm.Count) { Write-Host ("    [verify] {0}: admin-path enablement aligned to template (engine requirement: its identity cannot present MFA): MultiFactorAuthentication removed from {1}" -f $label, ($adm -join ', ')) -ForegroundColor DarkCyan }
+                if ($act.Count) { Write-Host ("    [verify] {0}: applying the template REMOVES MultiFactorAuthentication from {1}" -f $label, ($act -join ', ')) -ForegroundColor Yellow }
+                $nda = @(@($v.diffs) | Where-Object { $_.ruleId -like 'Notification_*' -and "$($_.live)" -match '\|def=True\|' -and "$($_.target)" -match '\|def=False\|' } | ForEach-Object { $_.ruleId })
+                if ($nda.Count) { Write-Host ("    [verify] {0}: notification defaults aligned to template: {1}" -f $label, ($nda -join ', ')) -ForegroundColor DarkCyan }
+            }
+            default   { Write-Host ("    [verify] {0}: {1} -- {2}" -f $label, $v.state.ToUpperInvariant(), $v.error) -ForegroundColor Red }
+        }
+    }
+    $verdicts
+}
+
+function Get-PimAzResPolicyConformance {
+    <#
+      READ-ONLY verification report: one verdict per (scope, role) -- matches / kept / differs (which rules,
+      live vs target) / unreadable (the HTTP error) / no-policy / role-not-found, plus skippedRules (template
+      rule ids not in effectiveRules).
+      Uses the provider's own GetDesired + GetLive, so it reports exactly what a run would act on, and
+      writes nothing.
+    #>
+    [CmdletBinding()]
+    param([hashtable]$Context = @{})
+    $p = New-PimAzResPoliciesProvider
+    $d = @(& $p.GetDesired $Context)
+    $l = @(& $p.GetLive $Context)
+    if ($Context.ContainsKey('azResPolVerdicts')) { return @($Context['azResPolVerdicts']) }
+    $byKey = @{}; foreach ($x in $l) { if ($x) { $byKey[(Get-PimAzResPolicyKey -Row $x)] = $x } }
+    @(foreach ($x in $d) { Get-PimAzResPolicyVerdict -Desired $x -Live $byKey[(Get-PimAzResPolicyKey -Row $x)] })
+}
+
+function Invoke-PimAzResPolicyUpdate {
+    <#
+      ApplyUpdate for one (scope, role). In order, and each step refuses rather than guesses:
+        1. a live state other than 'read' -> throw its real error; nothing written
+        2. this run's breaker decision: HOLD -> the first planned policy throws AZ-POLICY-MASS-HOLD (and
+           records the hold), the rest are reported held; nothing is written
+        3. 3 consecutive policies whose every rule PATCH failed -> the rest of the run is deferred
+        4. RE-READ the assignment's effectiveRules -> unreadable = throw, nothing written
+        5. approval template without an approver -> AZ-POLICY-NO-APPROVER; nothing written
+        6. ONE PATCH PER RULE (v1): each PLANNED rule that still differs goes in its own request
+           { properties: { rules: [ <that rule> ] } }, target kept from the effective rule, with a write
+           cooldown between requests. A refused rule is recorded with ARM's raw error and the others
+           still go.
+        7. pause, re-read effectiveRules, and fail unless every accepted rule now holds its target
+        8. any refused rule -> throw AZ-POLICY-RULE-FAILED listing each rule id and its raw error
+        9. a template demanding MFA on the admin path (BUG-21) -> throw, after the writable rules
+      After the last planned policy of an APPROVED run, the approval is cleared.
+    #>
+    param([Parameter(Mandatory)][object]$Item, [hashtable]$Context = @{})
+    if ($null -eq $Context) { $Context = @{} }
+    $d = $Item.desired; $l = $Item.live
+    $label = "$($d.RoleName) @ $($d.AzScope)"
+    if (-not $Context['azResPol']) { $Context['azResPol'] = @{ failStreak = 0; holdRecorded = $false; visited = @{}; approvalCleared = $false } }
+    $st = $Context['azResPol']
+
+    if ($null -eq $l) { throw "AzResPolicies: no live read for $label -- nothing written" }
+    switch ("$($l.State)") {
+        'read'           { }
+        'role-not-found' { throw "$($l.Error)" }
+        'no-policy'      { throw "AzResPolicies: $($l.Error) -- nothing written." }
+        default          { throw "AzResPolicies: policy for $label is UNREADABLE, so it was not verified and NOTHING was written: $($l.Error)" }
+    }
+
+    $plan = $Context['azResPolPlan']; $dec = $Context['azResPolBreaker']
+    if (-not $plan -or -not $dec) { throw "AzResPolicies: no change plan was computed for this run, so NOTHING was written for $label" }
+    $key = Get-PimAzResPolicyKey -Row $d
+    $pp = if ($plan.byKey.ContainsKey($key)) { $plan.byKey[$key] } else { $null }
+
+    if ($pp -and $dec.hold) {
+        if (-not $st.holdRecorded) {
+            $st.holdRecorded = $true
+            $hold = New-PimAzResPolicyMassHold -Plan $plan -Decision $dec
+            $msg = Format-PimAzResPolicyMassHoldMessage -Hold $hold
+            if (Get-Command Set-PimSetting -ErrorAction SilentlyContinue) {
+                try { Set-PimSetting -Name 'AzResPolicyMassHold' -Value (ConvertTo-Json -InputObject $hold -Depth 8 -Compress) }
+                catch { Write-Warning "  [engine] AzResPolicies: the hold record could NOT be saved (it cannot be approved until a run saves it): $($_.Exception.Message)" }
+            }
+            Write-PimAzResPolicyMassHoldAlert -Hold $hold -Message $msg
+            throw $msg
+        }
+        return [pscustomobject]@{ pimApplied = $false; note = "held by the mass-change circuit breaker (planHash $($plan.planHash))" }
+    }
+
+    try {
+        if ($pp -and [int]$st.failStreak -ge 3) {
+            Write-Host ("    [engine] AzResPolicies: {0} consecutive policies failed every rule PATCH -- stopping writes for this run; {1} deferred" -f $st.failStreak, $label) -ForegroundColor Yellow
+            return [pscustomobject]@{ pimApplied = $false; note = 'deferred: consecutive PATCH failures' }
+        }
+
+        $fresh = $null
+        try { $fresh = Read-PimAzResPolicyAssignment -Scope "$($d.AzScope)" -RoleId "$($l.RoleId)" }
+        catch { throw "AzResPolicies: policy for $label is UNREADABLE on re-read, so NOTHING was written: $($_.Exception.Message)" }
+        if (-not $fresh) { throw "AzResPolicies: the policy assignment for $label disappeared before the write -- nothing written." }
+        $l2 = $l.PSObject.Copy(); $l2.Rules = @($fresh.rules); $l2.PolicyId = $fresh.policyId
+        $v = Get-PimAzResPolicyVerdict -Desired $d -Live $l2
+
+        if ($v.state -in @('matches','kept')) { return [pscustomobject]@{ pimApplied = $false; note = "already $($v.state) on re-read" } }
+        if (@($v.diffs | Where-Object { $_.blocked -eq 'no-approver' }).Count) {
+            $where = if ("$($d.ApproverUpns)".Trim()) { 'the ApproverUpns on its assignment row resolve to no user' } else { "set Owners (or SponsorUpn, or the Department's owners) on the group definition(s) of GroupTag $((@($d.GroupTags) -join ', '))" }
+            throw ("AzResPolicies [AZ-POLICY-NO-APPROVER]: template '$($d.TemplateId)' requires APPROVAL for $label but NO approver resolved, so NOTHING was written " +
+                   "(a policy is never left half-configured). To fix: $where.")
+        }
+
+        $bodies = Get-PimAzResPolicyDesiredRuleBodies -Desired $d
+        $liveById = @{}; foreach ($r in @($fresh.rules)) { $liveById["$($r.id)"] = $r }
+        $planned = @{}; if ($pp) { foreach ($pr in @($pp.rules)) { $planned[$pr.ruleId] = $pr } }
+        $todo = New-Object System.Collections.Generic.List[object]
+        foreach ($df in @($v.diffs)) {
+            if ($df.blocked) { continue }
+            # Only what the PLAN (and therefore the breaker, and any approval) covered: a rule that started
+            # to differ between the plan and this re-read waits for the next run's plan.
+            if (-not $planned.ContainsKey($df.ruleId) -or "$($planned[$df.ruleId].target)" -ne "$($df.target)") { continue }
+            if (-not $liveById.ContainsKey($df.ruleId) -or -not $bodies.ContainsKey($df.ruleId)) { continue }
+            $todo.Add($df)
+        }
+        foreach ($rid in @($v.lowersSecurity)) {
+            if (-not @($todo | Where-Object { $_.ruleId -eq $rid }).Count) { continue }
+            Write-Warning ("  [engine] AzResPolicies: {0}: {1} -- REMOVING MultiFactorAuthentication (live has it, template '{2}' does not){3}" -f `
+                $label, $rid, $d.TemplateId, $(if ($rid -like 'Enablement_Admin_*') { '. The engine''s own assignments are refused (MfaRule) while it is set.' } else { '' }))
+        }
+
+        $cool = 3
+        if (Get-Command Get-PimPolicySetting -ErrorAction SilentlyContinue) { $cool = Get-PimPolicySetting -Name 'AzResPolicyPatchCooldownSeconds' -Default 3 }
+        $cs = 3; if (-not [int]::TryParse("$cool", [ref]$cs)) { $cs = 3 }
+        $accepted = New-Object System.Collections.Generic.List[object]
+        $refused = New-Object System.Collections.Generic.List[string]
+        $n = 0
+        foreach ($df in $todo) {
+            if ($n -gt 0 -and $cs -gt 0) { Start-Sleep -Seconds $cs }   # v1 Wait-PimWriteCooldown between PATCHes
+            $n++
+            $body = $bodies[$df.ruleId]
+            if ($df.ruleId -eq 'Approval_EndUser_Assignment') { $body = @{ id = $df.ruleId; setting = (New-PimAzResPolicyApprovalSetting -Approval $d.Approval -ApproverIds @($df.approverIds)) } }
+            $one = New-PimAzResPolicyRulePatch -LiveRule $liveById[$df.ruleId] -DesiredBody $body
+            try {
+                # ONE rule per request -- never batch (a six-rule PATCH was rejected whole over one id).
+                Invoke-PimArm -Method PATCH -Path $fresh.policyId -ApiVersion '2020-10-01' -Body @{ properties = @{ rules = @($one) } } | Out-Null
+                $accepted.Add($df)
+            } catch {
+                $refused.Add(("{0}: {1}" -f $df.ruleId, "$($_.Exception.Message)"))
+            }
+        }
+        if ($todo.Count) {
+            if ($accepted.Count) { $st.failStreak = 0 } else { $st.failStreak = [int]$st.failStreak + 1 }
+        }
+
+        if ($accepted.Count) {
+            $delay = 5
+            if (Get-Command Get-PimPolicySetting -ErrorAction SilentlyContinue) { $delay = Get-PimPolicySetting -Name 'AzResPolicyVerifyDelaySeconds' -Default 5 }
+            $ds = 5; if (-not [int]::TryParse("$delay", [ref]$ds)) { $ds = 5 }
+            if ($ds -gt 0) { Start-Sleep -Seconds $ds }
+            $after = $null
+            try { $after = Read-PimAzResPolicyAssignment -Scope "$($d.AzScope)" -RoleId "$($l.RoleId)" }
+            catch { throw "AzResPolicies: $($accepted.Count) rule PATCH(es) on $label were accepted but the verification re-read of effectiveRules failed, so they are NOT counted as applied: $($_.Exception.Message)" }
+            $have = if ($after) { Get-PimAzResPolicyLiveFacets -Rules @($after.rules) } else { @{} }
+            foreach ($df in $accepted.ToArray()) {
+                if ("$($have[$df.ruleId])" -ne "$($df.target)") { $refused.Add(("{0}: PATCH accepted but the re-read effectiveRules still show [{1}], not [{2}]" -f $df.ruleId, "$($have[$df.ruleId])", $df.target)) }
+            }
+        }
+        $okIds = @($accepted | Where-Object { $id = $_.ruleId; -not @($refused | Where-Object { $_ -like "${id}:*" }).Count } | ForEach-Object { $_.ruleId })
+
+        if ($refused.Count) {
+            throw ("AzResPolicies [AZ-POLICY-RULE-FAILED]: $($refused.Count) of $($todo.Count) rule(s) on $label (policy $($fresh.policyId)$(if ($l.IsDefaultPolicy) { ', the system default policy' })) did not apply" +
+                   $(if ($okIds.Count) { "; applied: $($okIds -join ', ')" } else { '' }) + '. Per rule, ARM said: ' + ($refused -join ' | '))
+        }
+        $mfa = @($v.diffs | Where-Object { $_.blocked -eq 'admin-mfa' })
+        if ($mfa.Count) {
+            $done = if ($okIds.Count) { "Patched $($okIds -join ', '); but " } else { 'Nothing written; ' }
+            throw ("AzResPolicies: ${done}template '$($d.TemplateId)' asks for MultiFactorAuthentication on " + (@($mfa | ForEach-Object { $_.ruleId }) -join ', ') +
+                   " for $label. Refused: the admin making those requests is the engine's own identity, which can never present MFA, so every engine assignment would be rejected.")
+        }
+        if (-not $todo.Count) { return [pscustomobject]@{ pimApplied = $false; note = 'nothing planned for this policy in this run' } }
+        [pscustomobject]@{ scope = "$($d.AzScope)"; role = "$($d.RoleName)"; policyId = "$($fresh.policyId)"; template = "$($d.TemplateId)"; patched = $okIds; isDefaultPolicy = [bool]$l.IsDefaultPolicy; skipped = @($v.skippedRules) }
+    }
+    finally {
+        if ($pp) {
+            $st.visited[$key] = $true
+            if ($dec.approved -and -not $st.approvalCleared -and @($st.visited.Keys).Count -ge @($plan.policies).Count) {
+                $st.approvalCleared = $true
+                if (Get-Command Set-PimSetting -ErrorAction SilentlyContinue) {
+                    try { Set-PimSetting -Name 'AzResPolicyMassChangeApproval' -Value ''; Write-Host "    [engine] AzResPolicies: approved plan $($plan.planHash) applied -- approval cleared" -ForegroundColor Green }
+                    catch { Write-Warning "  [engine] AzResPolicies: the approval for plan $($plan.planHash) could NOT be cleared: $($_.Exception.Message)" }
+                }
+            }
+        }
+    }
+}
+
+function New-PimAzResPoliciesProvider {
+    # Enabled exactly like GroupsPolicies / EntraRolePolicies: no `feature` key (they carry none), always
+    # registered, reached by its own sub-daily engine-delta job (delta-pim-azure-policies).
+    @{
+        scope = 'AzResPolicies'; entity = 'PIM-Assignments-Azure-Resources'; order = 58; refreshBefore = $false
+        GetDesired = {
+            param($ctx)
+            if ($null -eq $ctx) { $ctx = @{} }
+            $ctx['azResPol'] = @{ failStreak = 0; holdRecorded = $false; visited = @{}; approvalCleared = $false }
+            $d = @(Get-PimAzResPolicyDesiredSet)
+            $ctx['azResPolDesired'] = $d
+            $d
+        }
+        GetLive = {
+            param($ctx)
+            if ($null -eq $ctx) { $ctx = @{} }
+            $desired = if ($ctx.ContainsKey('azResPolDesired')) { @($ctx['azResPolDesired']) } else { @(Get-PimAzResPolicyDesiredSet) }
+            if (-not $ctx['azResPolArmRoleCache']) { $ctx['azResPolArmRoleCache'] = @{} }
+            $live = New-Object System.Collections.Generic.List[object]
+            foreach ($d in $desired) { $live.Add((Get-PimAzResPolicyLive -Scope "$($d.AzScope)" -RoleName "$($d.RoleName)" -RoleCache $ctx['azResPolArmRoleCache'])) }
+            $verdicts = @(Write-PimAzResPolicyVerification -Desired $desired -Live $live.ToArray())
+            $ctx['azResPolVerdicts'] = $verdicts
+            # PLAN FIRST: the whole change set and the breaker decision exist before any ApplyUpdate runs.
+            $plan = Get-PimAzResPolicyChangePlan -Desired $desired -Live $live.ToArray() -Verdicts $verdicts
+            $dec = Test-PimAzResPolicyBreaker -Plan $plan -Approval (Get-PimAzResPolicyMassChangeApproval)
+            $ctx['azResPolPlan'] = $plan; $ctx['azResPolBreaker'] = $dec
+            $color = if ($dec.hold) { 'Red' } elseif ($dec.approved) { 'Yellow' } else { 'DarkCyan' }
+            Write-Host ("    [breaker] AzResPolicies: N={0} change(s) of T={1} checked, W={2} weakening, planHash={3} -- {4}{5}" -f `
+                $plan.changes, $plan.checked, $plan.weakening, $plan.planHash, $(if ($dec.hold) { 'HOLD: ' } elseif ($dec.approved) { 'APPROVED: ' } else { 'apply: ' }), $dec.reason) -ForegroundColor $color
+            if (@($plan.notificationDefaultsAligned).Count) {
+                Write-Host ("    [breaker] AzResPolicies: {0} notification default(s) aligned to template -- counted in N, not in W" -f @($plan.notificationDefaultsAligned).Count) -ForegroundColor DarkCyan
+            }
+            if (@($plan.adminPathAligned).Count) {
+                Write-Host ("    [breaker] AzResPolicies: {0} admin-path enablement change(s) aligned to template (engine requirement: its identity cannot present MFA) -- counted in N, not in W: {1}" -f `
+                    @($plan.adminPathAligned).Count, ((@($plan.adminPathAligned | Select-Object -First 5 | ForEach-Object { "$($_.role) @ $($_.scope) $($_.ruleId) $($_.change)" })) -join '; ')) -ForegroundColor DarkCyan
+            }
+            $live.ToArray()
+        }
+        KeyOf = { param($r) Get-PimAzResPolicyKey -Row $r }
+        Equal = { param($d,$l) (Get-PimAzResPolicyVerdict -Desired $d -Live $l).state -in @('matches','kept') }
+        ApplyCreate = { param($item,$ctx) throw "AzResPolicies: no live policy read for '$($item.key)' -- nothing written" }
+        ApplyUpdate = { param($item,$ctx) Invoke-PimAzResPolicyUpdate -Item $item -Context $ctx }
     }
 }
 
@@ -2334,17 +5501,200 @@ function New-PimEntraRolePoliciesProvider {
 # AdminTap scope -- issue a Temporary Access Pass for admin accounts flagged
 # CreateTAP=TRUE (Account-Definitions-Admins). Ported from New-PimTemporaryAccessPass.
 # ---------------------------------------------------------------------------
+
+function Get-PimAdminTapLeadHours {
+    # #10 -- v1 $global:PIM_TapCreateLeadHours, default 48 (v1 11395). Global, env or pim.Settings.
+    $v = "$(Get-PimAdminLifecycleSetting -Name 'TapCreateLeadHours' -Default '')".Trim()
+    $n = 0
+    if ($v -and [int]::TryParse($v, [ref]$n) -and $n -ge 0) { return $n }
+    return 48
+}
+
+function Test-PimAdminIsAdOnly {
+    # PURE. Operator 2026-09-13: "admins with -ad dont exist in entra, ad only ... password only".
+    # A TargetPlatform=AD row is provisioned on-premises by hybrid-ad-apply and is NEVER handled by an
+    # Entra provider (Admins, AdminMembers, AdminTap) and never warned about as if it were an Entra admin.
+    param([object]$Row)
+    if ($null -eq $Row) { return $false }
+    return ("$(Get-PimRowProp -Row $Row -Names @('TargetPlatform','Platform'))".Trim() -ieq 'AD')
+}
+
+function Test-PimAdminTapWanted {
+    # PURE. Operator 2026-09-13: "enforce tap to true" -- every admin is issued a TAP, whatever the
+    # stored CreateTAP says. The one exception is an AD-only admin (TargetPlatform=AD): a TAP is an
+    # Entra credential and cannot exist there. The Manager mirrors this in Test-PimManagerAdminTapWanted
+    # (tests/Test-PimAdminLifecycle.ps1 keeps the two identical).
+    param([object]$Row)
+    if ($null -eq $Row) { return $false }
+    return -not (Test-PimAdminIsAdOnly -Row $Row)
+}
+
+function Select-PimAdminTapCandidates {
+    # #10 + #8 PURE. Which CreateTAP rows may be issued a TAP on THIS run? v1 11384-11400:
+    #   * the account must be due (ProvisionDate) and not Disabled / Revoked / offboarded;
+    #   * TAPStartDate further out than the lead window (default 48 h) is DEFERRED -- "a
+    #     long-pending TAP is a standing credential, and some tenants reject far-future
+    #     startDateTime". A later run inside the window issues it.
+    # Returns @{ issue; deferred; blocked } -- deferred/blocked carry @{ upn; reason }.
+    param([object[]]$Rows = @(), [datetime]$NowUtc = [datetime]::UtcNow, [int]$LeadHours = -1)
+    if ($LeadHours -lt 0) { $LeadHours = Get-PimAdminTapLeadHours }
+    $issue = New-Object System.Collections.Generic.List[object]
+    $deferred = New-Object System.Collections.Generic.List[object]
+    $blocked = New-Object System.Collections.Generic.List[object]
+    foreach ($r in @($Rows)) {
+        if ($null -eq $r) { continue }
+        if (-not (Test-PimAdminTapWanted -Row $r)) { continue }   # enforced for every admin; AD-only cannot hold a TAP
+        $upn = Get-PimRowProp -Row $r -Names @('UserPrincipalName')
+        $pd = Test-PimAdminProvisionDue -Row $r -NowUtc $NowUtc
+        if (-not $pd.due) { [void]$deferred.Add([pscustomobject]@{ upn = $upn; reason = "account $($pd.reason)"; startUtc = $pd.provisionUtc }); continue }
+        $dec = Get-PimAdminStatusDecision -Row $r -NowUtc $NowUtc
+        if ($dec.blocksCreate) { [void]$blocked.Add([pscustomobject]@{ upn = $upn; reason = $dec.reason }); continue }
+        $s = ConvertTo-PimAdminLifecycleUtc -Value (Get-PimRowProp -Row $r -Names @('TAPStartDate','TapStartDate'))
+        if ($s.parsed -and $s.utc -gt $NowUtc.ToUniversalTime().AddHours($LeadHours)) {
+            [void]$deferred.Add([pscustomobject]@{ upn = $upn; reason = ("TAP DEFERRED -- starts {0:yyyy-MM-dd HH:mm} UTC, more than {1} h out; a later run inside the lead window issues it" -f $s.utc, $LeadHours); startUtc = $s.utc })
+            continue
+        }
+        [void]$issue.Add($r)
+    }
+    return [pscustomobject]@{ issue = $issue.ToArray(); deferred = $deferred.ToArray(); blocked = $blocked.ToArray() }
+}
+
+function Get-PimAdminTapStartDateTime {
+    # #10 PURE. The startDateTime to send for a row's TAPStartDate, or '' to start immediately.
+    # v2 sent none, so every TAP started the moment it was minted. A start that is not meaningfully
+    # in the future is omitted (Graph rejects a start in the past); an unreadable one is omitted with
+    # the reason, as v1 did ("TAP will start immediately").
+    param([Parameter(Mandatory)][object]$Row, [datetime]$NowUtc = [datetime]::UtcNow)
+    $raw = Get-PimRowProp -Row $Row -Names @('TAPStartDate','TapStartDate')
+    $s = ConvertTo-PimAdminLifecycleUtc -Value $raw
+    if (-not $s.set) { return [pscustomobject]@{ value = ''; reason = 'no TAPStartDate' } }
+    if (-not $s.parsed) { return [pscustomobject]@{ value = ''; reason = "TAPStartDate '$raw' is not a date expression -- the TAP starts immediately" } }
+    if ($s.utc -le $NowUtc.ToUniversalTime().AddMinutes(2)) { return [pscustomobject]@{ value = ''; reason = 'TAPStartDate is now or past -- starts immediately' } }
+    return [pscustomobject]@{ value = $s.utc.ToString('yyyy-MM-ddTHH:mm:ssZ', [Globalization.CultureInfo]::InvariantCulture); reason = 'TAPStartDate' }
+}
+
+function Get-PimAdminTapChatChannels {
+    # #10 -- v1 also delivered the TAP to every configured Teams / Slack incoming webhook
+    # (Send-PimAdminTap, v1 11774-12095), from $global:PIM_NotificationChannels in a config FILE.
+    # v2 reads the SAME shape from pim.Settings['TapDeliveryChannels'] (or the in-process global):
+    #   { "Teams": { "WebhookUrl": "https://..." }, "Slack": { "WebhookUrl": "https://..." } }
+    # 🔒 Deliberately NOT the alerting webhook (PIM-AlertChannels.ps1): that channel carries
+    # operational alerts to a wide audience and must never carry a credential.
+    $cfg = Get-PimAdminLifecycleSetting -Name 'TapDeliveryChannels'
+    if ($null -eq $cfg -and $global:PIM_NotificationChannels) { $cfg = $global:PIM_NotificationChannels }
+    if ($cfg -is [string]) { try { $cfg = $cfg | ConvertFrom-Json } catch { $cfg = $null } }
+    $out = @()
+    if ($null -eq $cfg) { return $out }
+    foreach ($ch in @('Teams', 'Slack')) {
+        $c = $null
+        if ($cfg -is [System.Collections.IDictionary]) { if ($cfg.Contains($ch)) { $c = $cfg[$ch] } }
+        else { $p = $cfg.PSObject.Properties[$ch]; if ($p) { $c = $p.Value } }
+        if ($null -eq $c) { continue }
+        $url = if ($c -is [System.Collections.IDictionary]) { "$($c['WebhookUrl'])" } else { "$($c.WebhookUrl)" }
+        if ($url.Trim()) { $out += [pscustomobject]@{ channel = $ch; url = $url.Trim() } }
+    }
+    return $out
+}
+
+function Test-PimAdminTapWebhookUrl {
+    # PURE. Only an https URL on a public, dotted host name -- never an IP literal or an intranet
+    # name. Uses the shared SSRF rule when PIM-AlertChannels.ps1 is loaded.
+    param([string]$Url)
+    if (Get-Command Test-PimWebhookUrlAllowed -ErrorAction SilentlyContinue) { return [bool](Test-PimWebhookUrlAllowed -Url $Url).allowed }
+    $u = $null
+    if (-not [System.Uri]::TryCreate("$Url", [System.UriKind]::Absolute, [ref]$u)) { return $false }
+    if ($u.Scheme -ne 'https') { return $false }
+    $h = "$($u.Host)"; $ip = $null
+    if ([System.Net.IPAddress]::TryParse($h, [ref]$ip)) { return $false }
+    return ($h.IndexOf('.') -gt 0 -and $h -notmatch '(?i)(^|\.)localhost$')
+}
+
+function Send-PimAdminTapChatDelivery {
+    # #10 -- best effort, never blocks provisioning, never logs the code. Returns
+    # @{ configured; sent; failed }. -Poster is the test seam ($url, $json).
+    param([Parameter(Mandatory)][string]$UserPrincipalName, [Parameter(Mandatory)][object]$Tap, [string]$ExpiresUtc, [scriptblock]$Poster)
+    $res = [pscustomobject]@{ configured = $false; sent = @(); failed = @() }
+    $chans = @(Get-PimAdminTapChatChannels)
+    if (-not $chans.Count) {
+        Write-Host "  [AdminTap] chat delivery: no Teams/Slack channel is configured (pim.Settings 'TapDeliveryChannels') -- the TAP went by mail only." -ForegroundColor DarkGray
+        return $res
+    }
+    $res.configured = $true
+    if ($global:WhatIfMode) { return $res }
+    $post = $Poster
+    if (-not $post -and ($global:PIM_TapWebhookPoster -is [scriptblock])) { $post = $global:PIM_TapWebhookPoster }
+    if (-not $post) { $post = { param($Url, $Json) Invoke-RestMethod -Uri $Url -Method Post -ContentType 'application/json' -Body $Json -ErrorAction Stop | Out-Null } }
+    $code = "$($Tap.temporaryAccessPass)"; $start = "$($Tap.startDateTime)"; $mins = "$($Tap.lifetimeInMinutes)"
+    $subject = "Your initial PIM admin TAP for $UserPrincipalName"
+    $bt = [string][char]96
+    foreach ($c in $chans) {
+        if (-not (Test-PimAdminTapWebhookUrl -Url $c.url)) {
+            $res.failed += $c.channel
+            Write-Warning "  [AdminTap] $($c.channel) TAP delivery REFUSED for ${UserPrincipalName}: the configured webhook is not an https URL on a public host."
+            continue
+        }
+        try {
+            if ($c.channel -eq 'Teams') {
+                $card = @{ type = 'AdaptiveCard'; '$schema' = 'http://adaptivecards.io/schemas/adaptive-card.json'; version = '1.4'
+                    body = @(
+                        @{ type = 'TextBlock'; size = 'Medium'; weight = 'Bolder'; text = $subject; wrap = $true },
+                        @{ type = 'FactSet'; facts = @(
+                            @{ title = 'Admin UPN'; value = $UserPrincipalName }, @{ title = 'TAP code'; value = $code },
+                            @{ title = 'Valid from'; value = $start }, @{ title = 'Lifetime'; value = "$mins minute(s)" }, @{ title = 'Expires at'; value = $ExpiresUtc }) },
+                        @{ type = 'TextBlock'; wrap = $true; text = 'Use the TAP at https://mysignins.microsoft.com/security-info to register strong credentials (Passkey / Authenticator).' }) }
+                $json = @{ type = 'message'; attachments = @(@{ contentType = 'application/vnd.microsoft.card.adaptive'; contentUrl = $null; content = $card }) } | ConvertTo-Json -Depth 12 -Compress
+            } else {
+                $text = @("*$subject*", "Admin UPN: $bt$UserPrincipalName$bt", "TAP code: $bt$code$bt", "Valid from: $start", "Lifetime: $mins minute(s); expires $ExpiresUtc",
+                          'Register strong credentials at https://mysignins.microsoft.com/security-info.') -join "`n"
+                $json = @{ text = $text } | ConvertTo-Json -Depth 4 -Compress
+            }
+            & $post $c.url $json
+            $res.sent += $c.channel
+        } catch {
+            $res.failed += $c.channel
+            Write-Warning "  [AdminTap] $($c.channel) TAP delivery FAILED for ${UserPrincipalName} (provisioning NOT blocked): $($_.Exception.Message)"
+        }
+    }
+    return $res
+}
+
 function New-PimAdminTapProvider {
     @{
         scope = 'AdminTap'; entity = 'Account-Definitions-Admins'; order = 35; refreshBefore = $true
-        GetDesired = { param($ctx) @(Get-PimDesiredRows -Entity 'Account-Definitions-Admins' | Where-Object { (Get-PimRowProp -Row $_ -Names @('CreateTAP')) -match '(?i)true' }) }
+        GetDesired = {
+            param($ctx)
+            # #8 + #10: only rows whose account is due, not disabled/revoked/offboarded, and whose
+            # TAPStartDate is inside the lead window (Select-PimAdminTapCandidates). The rest wait.
+            $sel = Select-PimAdminTapCandidates -Rows @(Get-PimDesiredRows -Entity 'Account-Definitions-Admins') -NowUtc ([datetime]::UtcNow)
+            foreach ($x in @($sel.deferred)) { Write-Host ("    [AdminTap] {0}: {1}" -f $x.upn, $x.reason) -ForegroundColor DarkCyan }
+            foreach ($x in @($sel.blocked))  { Write-Host ("    [AdminTap] {0}: no TAP -- {1}" -f $x.upn, $x.reason) -ForegroundColor DarkYellow }
+            $ctx['adminTapDesired'] = @($sel.issue)
+            @($sel.issue)
+        }
         GetLive = {
             param($ctx)
             Ensure-PimContextLoaded
-            $desired = @(Get-PimDesiredRows -Entity 'Account-Definitions-Admins' | Where-Object { (Get-PimRowProp -Row $_ -Names @('CreateTAP')) -match '(?i)true' })
+            # @( if ... ) -- an `if` expression unrolls a one-element array, and on PS 5.1 a lone
+            # PSCustomObject has no .Count, which silently skipped the refusal warning below.
+            $desired = @(if ($ctx.ContainsKey('adminTapDesired')) { $ctx['adminTapDesired'] } else { (Select-PimAdminTapCandidates -Rows @(Get-PimDesiredRows -Entity 'Account-Definitions-Admins')).issue })
             $live = New-Object System.Collections.Generic.List[object]
+            # 🔑 #10 ISSUE ONCE (v1 11386-11387 + 11418-11421, tap-state.json -> pim.Settings['AdminTapIssuance']).
+            # An account with an issuance record is SATISFIED for ever: an expired pass is NOT re-issued
+            # automatically. Re-issue is the Manager's queued tap-reset (PIM-QueueActions.ps1), a human
+            # decision. This replaces BUG-66's "mint again whenever the last pass is unusable", which
+            # minted a fresh credential every time one expired for as long as CreateTAP=TRUE.
+            $store = Get-PimAdminLifecycleStore -Name 'AdminTapIssuance'
+            $ctx['adminTapStore'] = $store
+            if (-not $store.ok -and $desired.Count -gt 0) {
+                Write-Warning "  [AdminTap] REFUSING to issue any TAP this run: issuance cannot be recorded ($($store.reason)), so issue-once could not be guaranteed."
+            }
+            $backfill = $false
             foreach ($d in $desired) {
-                $upn = Get-PimRowProp -Row $d -Names @('UserPrincipalName'); $uid = Resolve-PimPrincipalId $upn; if (-not $uid) { continue }
+                $upn = Get-PimRowProp -Row $d -Names @('UserPrincipalName')
+                $upnL = "$upn".Trim().ToLowerInvariant()
+                if (-not $store.ok) { $live.Add([pscustomobject]@{ UserPrincipalName=$upn }); continue }        # fail closed
+                if ($store.map.ContainsKey($upnL)) { $live.Add([pscustomobject]@{ UserPrincipalName=$upn }); continue }   # issued once already
+                $uid = Resolve-PimPrincipalId $upn; if (-not $uid) { continue }
                 # 🔴 -All IS LOAD-BEARING, and its absence made this scope a no-op.
                 # Invoke-PimRest returns the RAW RESPONSE unless -All is passed (`if (-not $All)
                 # { return $resp }`), so without it $taps was the response WRAPPER object, not the
@@ -2365,6 +5715,9 @@ function New-PimAdminTapProvider {
                 # Entra reports usability directly (isUsable / methodUsabilityReason), so filter on
                 # it: a dead pass now leaves the account OUT of the live set, which makes it a
                 # create candidate and ApplyCreate replaces it.
+                # 📌 SUPERSEDED 2026-09-12 by #10 ISSUE ONCE (operator): an unusable pass is now
+                # RECORDED as the one issuance and left alone; re-issue is the Manager's queued
+                # tap-reset. isUsable is still read, to say WHY in the log and the record.
                 # 🪤 An UNREADABLE probe must count as SATISFIED, not as missing. If Graph errors
                 # here, treating the account as "no TAP" would mint a fresh credential on every
                 # tick for as long as the read keeps failing -- the runaway this scope must never
@@ -2373,15 +5726,40 @@ function New-PimAdminTapProvider {
                 try {
                     $taps = @(Invoke-PimGraph -All -Path "/users/$uid/authentication/temporaryAccessPassMethods")
                     $usable = @($taps | Where-Object { "$($_.isUsable)" -match '(?i)true' })
-                    if ($usable.Count) { $live.Add([pscustomobject]@{ UserPrincipalName=$upn }) }
-                    elseif ($taps.Count) {
-                        Write-Host "  [AdminTap] $upn holds a TAP that is NOT usable ($($taps[0].methodUsabilityReason)) -- replacing it." -ForegroundColor Yellow
+                    if ($taps.Count) {
+                        # A pass PIM has no record of: issued before issue-once tracking existed (or by
+                        # hand). It COUNTS as the one issuance -- recorded, never replaced automatically.
+                        $why = if ($usable.Count) { 'pre-existing usable TAP' } else { "pre-existing TAP, not usable ($($taps[0].methodUsabilityReason))" }
+                        $store.map[$upnL] = @{ issuedAtUtc = ''; recordedAtUtc = [datetime]::UtcNow.ToString('o'); source = $why }
+                        $backfill = $true
+                        if (-not $usable.Count) {
+                            Write-Host "  [AdminTap] $upn holds a TAP that is NOT usable ($($taps[0].methodUsabilityReason)) -- NOT re-issued automatically (issue once); re-issue it from the Manager's Accounts & TAP tab." -ForegroundColor Yellow
+                        }
+                        $live.Add([pscustomobject]@{ UserPrincipalName=$upn })
+                        continue
+                    }
+                    # No pass at all. An account that already has a strong sign-in method registered was
+                    # onboarded long ago (a v1 migration: v1 kept its tap-state in a FILE v2 never reads),
+                    # so it must not be handed a fresh credential now. A failed read of the methods is
+                    # not fatal here: the worst case is ONE issuance, which is then recorded.
+                    $strong = @()
+                    try {
+                        $strong = @(Invoke-PimGraph -All -Path "/users/$uid/authentication/methods" | Where-Object {
+                            "$($_.'@odata.type')" -match '(?i)fido2|microsoftAuthenticator|windowsHelloForBusiness|softwareOath|platformCredential|x509Certificate|passkey' })
+                    } catch { Write-Verbose "TAP onboarding probe ($upn): $($_.Exception.Message)" }
+                    if ($strong.Count) {
+                        $store.map[$upnL] = @{ issuedAtUtc = ''; recordedAtUtc = [datetime]::UtcNow.ToString('o'); source = 'already onboarded: a strong sign-in method is registered' }
+                        $backfill = $true
+                        $live.Add([pscustomobject]@{ UserPrincipalName=$upn })
                     }
                 } catch {
                     # fail CLOSED (see above): unreadable => leave it in the live set => no mint.
                     $live.Add([pscustomobject]@{ UserPrincipalName=$upn })
                     Write-Verbose "TAP live ($upn): $($_.Exception.Message) -- treating as satisfied (fail-closed)"
                 }
+            }
+            if ($backfill -and -not (Save-PimAdminLifecycleStore -Name 'AdminTapIssuance' -Map $store.map)) {
+                Write-Warning '  [AdminTap] pre-existing TAPs were found but could not be recorded -- they are still NOT re-issued this run.'
             }
             $live.ToArray()
         }
@@ -2400,7 +5778,11 @@ function New-PimAdminTapProvider {
             # every cycle. Refusing first turns that runaway into one honest warning per run.
             # The guard is the SAME one the Manager's re-issue button uses (PIM-Notify.ps1), so the
             # two paths cannot disagree about whether a credential may be issued.
-            $mgr = Get-PimRowProp -Row $d -Names @('ManagerEmail')
+            # The recipient is the ONE rule the Manager also displays (Get-PimAdminMailRecipient): the
+            # owner's office user (ForwardMailsToContact=TRUE + MailForwardAddress), else ManagerEmail.
+            # It read ManagerEmail directly, while the Manager said the TAP went to the office user --
+            # the screen and the mail disagreed (operator, 2026-09-12).
+            $mgr = Get-PimAdminMailRecipient -Row $d
             if (Get-Command Test-PimTapMailReady -ErrorAction SilentlyContinue) {
                 $mailChk = Test-PimTapMailReady -Recipient $mgr
                 if (-not $mailChk.ok) {
@@ -2423,6 +5805,15 @@ function New-PimAdminTapProvider {
                 }
             }
 
+            # #10 ISSUE ONCE needs somewhere to write the issuance. No store => no mint (fail closed),
+            # and this refusal sits BEFORE the delete below: never destroy what cannot be replaced.
+            $__store = $ctx['adminTapStore']
+            if (-not $__store) { $__store = Get-PimAdminLifecycleStore -Name 'AdminTapIssuance' }
+            if (-not $__store.ok) {
+                Write-Warning "  [AdminTap] $upn -- REFUSING to issue: the issuance cannot be recorded ($($__store.reason)). Nothing was changed."
+                return [pscustomobject]@{ pimApplied = $false; reason = "issuance cannot be recorded: $($__store.reason)" }
+            }
+
             # Entra allows exactly ONE TAP per user, so a dead pass must be REMOVED before a new
             # one can be created. This is the step that was done by hand to recover the master.
             try {
@@ -2433,8 +5824,24 @@ function New-PimAdminTapProvider {
                 }
             } catch { Write-Verbose "TAP delete ($upn): $($_.Exception.Message)" }
 
-            $body=@{ isUsableOnce=$false; lifetimeInMinutes=($hrs*60) }
-            $tap = Invoke-PimGraph -Method POST -Path "/users/$uid/authentication/temporaryAccessPassMethods" -Body $body
+            # #10: TAPStartDate -> startDateTime (v1 11403 + New-PimTemporaryAccessPass 11505-11527).
+            # v2 sent none, so a TAP planned for an admin's first day started -- and began expiring --
+            # the moment it was minted.
+            $__start = Get-PimAdminTapStartDateTime -Row $d
+            # 🔴 The body is built from the TENANT'S TAP POLICY (PIM-TapPolicy.ps1). This sent
+            # a MULTI-use request unconditionally, and a tenant that only allows one-time passes
+            # answered 400 "Tenant Policy does not allow multiple use temporary access pass method"
+            # for every admin (measured live on internal 2026-09-12). The POST itself stays here.
+            $tap = Invoke-PimTapCreate -LifetimeMinutes ($hrs*60) -StartDateTime $__start.value -UserLabel $upn -Poster {
+                param($b) Invoke-PimGraph -Method POST -Path "/users/$uid/authentication/temporaryAccessPassMethods" -Body $b
+            }
+            # Record the issuance BEFORE delivery, as v1 did (11418): a delivery failure must never
+            # cause a second TAP on the next run. The CODE is never stored.
+            $__store.map["$upn".Trim().ToLowerInvariant()] = @{ issuedAtUtc = [datetime]::UtcNow.ToString('o'); startDateTime = "$($tap.startDateTime)"; lifetimeInMinutes = "$($tap.lifetimeInMinutes)"; methodId = "$($tap.id)"; source = 'engine' }
+            if (-not (Save-PimAdminLifecycleStore -Name 'AdminTapIssuance' -Map $__store.map)) {
+                Write-Warning "  [AdminTap] $upn -- a TAP WAS MINTED but its issuance could NOT be recorded; a later run could issue another. Check pim.Settings['AdminTapIssuance']."
+            }
+            Write-PimAdminLifecycleAudit -Action 'tap.create' -Target $upn -After @{ startDateTime = "$($tap.startDateTime)"; lifetimeInMinutes = "$($tap.lifetimeInMinutes)" }
             # deliver the TAP by mail (best-effort) -- to the admin's manager
             if (Get-Command Send-PimNotifyMail -ErrorAction SilentlyContinue) {
                 # $mgr is already resolved above -- the refuse-before-minting guard needs it BEFORE
@@ -2474,6 +5881,15 @@ function New-PimAdminTapProvider {
                     Write-Warning "  [AdminTap] $upn -- a TAP WAS MINTED but the mail to '$mgr' did NOT go out: $why. A live credential now exists that nobody received -- delete it, or re-issue from the Manager's Accounts & TAP tab once mail works."
                 }
             }
+            # #10: Teams / Slack as well, when a TAP delivery channel is configured (v1 11426-11452).
+            # Best effort; says plainly when none is configured.
+            $__chatExp = ''
+            $__cm = 0; [void][int]::TryParse("$($tap.lifetimeInMinutes)", [ref]$__cm)
+            $__cs = $null
+            if ("$($tap.startDateTime)".Trim()) { try { $__cs = [datetime]::Parse("$($tap.startDateTime)", [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind).ToUniversalTime() } catch { $__cs = $null } }
+            if (-not $__cs) { $__cs = [datetime]::UtcNow }
+            if ($__cm -gt 0) { $__chatExp = $__cs.AddMinutes($__cm).ToString('yyyy-MM-dd HH:mm:ss') + ' UTC' }
+            try { [void](Send-PimAdminTapChatDelivery -UserPrincipalName $upn -Tap $tap -ExpiresUtc $__chatExp) } catch { Write-Warning "  [AdminTap] $upn -- chat delivery threw (provisioning NOT blocked): $($_.Exception.Message)" }
             $tap
         }
     }
@@ -2620,7 +6036,20 @@ function New-PimEntraRolesDirectProvider {
         refreshBefore = $true
         GetDesired = {
             param($ctx)
-            $rows = @(Get-PimDesiredRows -Entity 'PIM-Assignments-Roles-Direct' | Where-Object { (Get-PimRowProp -Row $_ -Names @('Action')) -ne 'Remove' -and (Get-PimRowProp -Row $_ -Names @('UserPrincipalName','Username','UPN','upn')) })
+            # 68.6 rows 24-26 (direct): rows are resolved UPN -> user object id and the id is STAMPED, so a
+            # desired row keys like its live assignment (live carries only the id). Before this the two
+            # never matched ("upn|role|type" vs "<id>|role|type"): nothing was ever nochange, and a Remove
+            # row could not have named a live item. Remove rows are resolved the same way and kept apart.
+            $all = @(Get-PimDesiredRows -Entity 'PIM-Assignments-Roles-Direct' | Where-Object { Get-PimRowProp -Row $_ -Names @('UserPrincipalName','Username','UPN','upn') })
+            $stamp = {
+                param($row)
+                $c = $row | Select-Object *
+                $uid = Resolve-PimPrincipalId (Get-PimRowProp -Row $row -Names @('UserPrincipalName','Username','UPN','upn'))
+                if ($uid) { Add-Member -InputObject $c -NotePropertyName principalId -NotePropertyValue $uid -Force }
+                $c
+            }
+            $ctx['removeRows:EntraRolesDirect'] = @($all | Where-Object { Test-PimRowIsRemove $_ } | ForEach-Object { & $stamp $_ })
+            $rows = @($all | Where-Object { -not (Test-PimRowIsRemove $_) } | ForEach-Object { & $stamp $_ })
             if (@($rows).Count) {
                 # DEPRECATION nudge: v2 is group-centric; direct role assignment to a user is a v1 holdover.
                 Write-Host ("  [EntraRolesDirect] {0} DIRECT (v1-style) role assignment(s) to user principals -- supported, but the group model is preferred (assign the role to a PIM group + make the admin a member). See DESIGN 'PIM v1 direct assignments'." -f @($rows).Count) -ForegroundColor DarkYellow
@@ -2629,9 +6058,7 @@ function New-PimEntraRolesDirectProvider {
         }
         GetLive = {
             param($ctx)
-            Ensure-PimContextLoaded
-            $rolesByName = @{}; foreach ($r in @($Global:Roles_All_ID)) { $n = "$($r.DisplayName)"; if ($n) { $rolesByName[$n.ToLowerInvariant()] = "$($r.Id)" } }
-            $ctx['directRoleNameToId'] = $rolesByName; $ctx['directUpnToId'] = @{}
+            $ctx['directRoleNameToId'] = Get-PimEntraRoleNameMap; $ctx['directUpnToId'] = @{}
             $desired = @(Get-PimDesiredRows -Entity 'PIM-Assignments-Roles-Direct')
             $upns = @($desired | ForEach-Object { Get-PimRowProp -Row $_ -Names @('UserPrincipalName','Username','UPN','upn') } | Where-Object { $_ } | Select-Object -Unique)
             $live = New-Object System.Collections.Generic.List[object]
@@ -2640,18 +6067,24 @@ function New-PimEntraRolesDirectProvider {
                 $ctx['directUpnToId'][$upn.ToLowerInvariant()] = $uid
                 foreach ($s in (Get-PimLiveDirRoleSchedules -PrincipalId $uid)) {
                     if ("$($s.directoryScopeId)" -ne '/') { continue }   # tenant-scope direct roles only
-                    $live.Add([pscustomobject]@{ principalId=$uid; UserPrincipalName=$upn; RoleDefinitionName=$s.RoleDefinitionName; AssignmentType=$s.AssignmentType; roleDefinitionId=$s.roleDefinitionId })
+                    if ("$($s.graphAssignmentType)" -ieq 'Activated') { continue }   # an activation is not an assignment (68.6 rows 24-26)
+                    $live.Add([pscustomobject]@{ principalId=$uid; UserPrincipalName=$upn; RoleDefinitionName=$s.RoleDefinitionName; AssignmentType=$s.AssignmentType; roleDefinitionId=$s.roleDefinitionId
+                                                 directoryScopeId='/'; scheduleKnown=$s.scheduleKnown; startDateTime=$s.startDateTime; endDateTime=$s.endDateTime })
                 }
             }
             $live.ToArray()
         }
         KeyOf = { param($r) Get-PimDirectRoleKey -Row $r }
-        Equal = { param($d,$l) $true }   # existence-based (user already holds the role at the right type)
+        GetRemoveRows = { param($ctx) @(Select-PimRemoveRows -Rows @($ctx['removeRows:EntraRolesDirect']) -Scope 'EntraRolesDirect') }
+        TypeKeyOf = { param($r) Get-PimTypeNeutralKey -Key (Get-PimDirectRoleKey -Row $r) }
+        # 68.6 rows 25-26 (was `$true`: AutoExtend / UpdateExisting ignored, a type switch kept both types).
+        Equal = { param($d,$l) (Get-PimAssignmentMaintenance -Desired $d -Live $l).action -eq 'none' }
+        ApplyUpdate = { param($item,$ctx) Invoke-PimAssignmentMaintenanceApply -Kind DirRole -Item $item }
         ApplyCreate = {
             param($item,$ctx)
             $d = $item.desired
             $upn = Get-PimRowProp -Row $d -Names @('UserPrincipalName','Username','UPN','upn')
-            $uid = $ctx['directUpnToId'][$upn.ToLowerInvariant()]; if (-not $uid) { $uid = Resolve-PimPrincipalId $upn }
+            $uid = $ctx['directUpnToId'][$upn.ToLowerInvariant()]; if (-not $uid) { $uid = Get-PimRowProp -Row $d -Names @('principalId') }; if (-not $uid) { $uid = Resolve-PimPrincipalId $upn }
             $rn  = Get-PimRowProp -Row $d -Names @('RoleDefinitionName','RoleName')
             $rid = $ctx['directRoleNameToId'][$rn.ToLowerInvariant()]
             if (-not $uid -or -not $rid) { throw "EntraRolesDirect: unresolved user/role ($upn / $rn)" }
@@ -2664,11 +6097,8 @@ function New-PimEntraRolesDirectProvider {
         }
         ApplyRemove = {
             param($item,$ctx)
-            $l = $item.live
-            $type = "$($l.AssignmentType)"
-            $body = New-PimRoleScheduleBody -PrincipalId "$($l.principalId)" -RoleDefId "$($l.roleDefinitionId)" -Action 'adminRemove'
-            $ep = if ($type -eq 'Active') { 'roleAssignmentScheduleRequests' } else { 'roleEligibilityScheduleRequests' }
-            Invoke-PimGraph -Method POST -Path "/roleManagement/directory/$ep" -Body $body
+            # Prune, targeted Remove row, or the old half of a type change; "already absent" is success.
+            Remove-PimDirRoleAssignment -Live $item.live -What "$($item.key)"
         }
     }
 }
@@ -2687,6 +6117,9 @@ function New-PimEntraRolesDirectProvider {
 #   * runs only under -Mode Full -Prune (the engine's standard destructive gate), AND
 #   * $global:PIM_OffboardCleanupMode controls intent: Off (skip) | Report
 #     (plan only, the default) | Enforce (apply removals). Report/Off never write.
+# 📌 SUPERSEDED 2026-09-12 (#12, v1 parity): the provider is per ADMIN and does v1's whole
+# sequence without -Prune -- see New-PimOffboardingProvider. Test-PimAdminOffboarded and
+# Get-PimOffboardingPlan remain as pure helpers.
 # An admin NOT flagged for offboarding is never touched (only flagged principals
 # contribute live memberships, so the diff can only ever remove their rows).
 # ---------------------------------------------------------------------------
@@ -2750,8 +6183,14 @@ function Get-PimOffboardingPlan {
 # OffboardCleanupMode=Enforce gates. Self-contained here because the REST engine does not
 # load PIM-Functions.psm1. Automatic offboarding stays prohibited in production until an
 # approval flow exists (docs/REQUIREMENTS.md) -- protected env keeps it off by default.
+#
+# 📌 2026-09-12 (#12): the flag is ALSO read from the environment and from pim.Settings
+# (Get-PimAdminLifecycleSetting). v1 took it from a *.custom.ps1 FILE, which v2 never loads -- so a
+# v1 customer who had opted in would have silently lost offboarding on migration. The
+# -Prune + OffboardCleanupMode=Enforce double gate is gone: offboarding is per ADMIN now, runs from
+# its own job, and Enforce is the default once the feature is on (v1 had no second gate).
 function Test-PimAutoOffboardingEnabled {
-    $val = Get-Variable -Name 'PIM_EnableAutomaticOffboarding' -Scope Global -ValueOnly -ErrorAction SilentlyContinue
+    $val = Get-PimAdminLifecycleSetting -Name 'EnableAutomaticOffboarding'
     # Explicit operator setting (true/false) always wins.
     if (Get-Command Test-PimExplicitFlagValue -ErrorAction SilentlyContinue) {
         $explicit = Test-PimExplicitFlagValue -Value $val
@@ -2764,97 +6203,479 @@ function Test-PimAutoOffboardingEnabled {
     return ("$val".Trim().ToLowerInvariant() -in @('true','1','yes','y','on','enable','enabled'))
 }
 
+function Get-PimOffboardMode {
+    # Off | Report | Enforce. UNSET = Enforce: the opt-in is Test-PimAutoOffboardingEnabled, as in
+    # v1 (which had no second gate). An explicit Report still plans without writing.
+    $m = "$(Get-PimAdminLifecycleSetting -Name 'OffboardCleanupMode' -Default '')".Trim()
+    if (-not $m) { return 'Enforce' }
+    return $m
+}
+
+function Get-PimAdminOffboardCandidate {
+    # #12 PURE. Does the offboarding sweep act on this admin row, and how?
+    #   'offboard' -- past OffboardDate or Lifecycle=Retire (Test-PimAdminOffboarded): v1's full
+    #                 sequence (v1 10977-11097): disable, revoke sessions, remove memberships,
+    #                 notice mail, delete after DeleteAfterDays.
+    #   'revoke'   -- AccountStatus=Revoked without offboarding: v1 Invoke-PimAccountRevoke also
+    #                 cancelled PIM-for-Groups schedules and removed direct group memberships
+    #                 (12451-12628). The Admins provider disables + revokes sessions; this adds the
+    #                 membership half.
+    param([Parameter(Mandatory)][object]$Row, [datetime]$NowUtc = [datetime]::UtcNow)
+    $f = Test-PimAdminOffboarded -Row $Row -NowUtc $NowUtc
+    if ($f.offboard) { return [pscustomobject]@{ kind = 'offboard'; reason = $f.reason } }
+    if ((Get-PimRowProp -Row $Row -Names @('AccountStatus')).Trim() -ieq 'Revoked') { return [pscustomobject]@{ kind = 'revoke'; reason = 'AccountStatus=Revoked' } }
+    return $null
+}
+
+function Get-PimAdminOffboardSteps {
+    # #12 PURE. The steps still OWED for one admin, in v1's order. $State is the admin's record in
+    # pim.Settings['AdminOffboardState'] (v1: output/state/offboard-state.json).
+    #   disable      account still enabled
+    #   sessions     not yet recorded as revoked
+    #   memberships  not yet recorded as removed (retried on the next run if a removal failed)
+    #   notice       offboarding-notice mail not yet sent ('offboard' only)
+    #   delete       DeleteAfterDays set, revoked that many days ago, still present, disabled
+    # A missing account owes nothing: it was deleted, by this sweep or by hand.
+    # Delete counts from the RECORDED revoke, so it is never earlier than the run AFTER the revoke
+    # (v1 could delete in the same run when DeleteAfterDays=0).
+    param([Parameter(Mandatory)][string]$Kind, [hashtable]$State = @{}, [bool]$Found = $true, [bool]$AccountEnabled = $false,
+          [AllowEmptyString()][string]$DeleteAfterDays = '', [datetime]$NowUtc = [datetime]::UtcNow)
+    $steps = New-Object System.Collections.Generic.List[string]
+    $note = ''; $dueUtc = $null
+    if (-not $Found) { return [pscustomobject]@{ steps = @(); note = 'the account is not in the tenant'; deleteDueUtc = $null } }
+    $has = { param($k) [bool]("$($State[$k])".Trim()) }
+    if ($Kind -eq 'revoke') {
+        if (-not (& $has 'membershipsRemovedUtc')) { [void]$steps.Add('memberships') }
+        return [pscustomobject]@{ steps = $steps.ToArray(); note = ''; deleteDueUtc = $null }
+    }
+    if ($AccountEnabled) { [void]$steps.Add('disable') }
+    if (-not (& $has 'revokedAtUtc')) { [void]$steps.Add('sessions') }
+    if (-not (& $has 'membershipsRemovedUtc')) { [void]$steps.Add('memberships') }
+    if (-not (& $has 'noticeSentUtc')) { [void]$steps.Add('notice') }
+    $dd = "$DeleteAfterDays".Trim()
+    if ($dd -and (& $has 'revokedAtUtc') -and -not (& $has 'deletedAtUtc')) {
+        $n = 0
+        if ([int]::TryParse($dd, [ref]$n) -and $n -ge 0) {
+            $rv = Get-PimUtcStamp "$($State['revokedAtUtc'])"
+            if ($rv) {
+                $dueUtc = $rv.AddDays($n)
+                if ($NowUtc.ToUniversalTime() -ge $dueUtc -and -not $AccountEnabled) { [void]$steps.Add('delete') }
+            }
+        } else { $note = "DeleteAfterDays '$dd' is not a non-negative integer -- the delete step is skipped" }
+    }
+    return [pscustomobject]@{ steps = $steps.ToArray(); note = $note; deleteDueUtc = $dueUtc }
+}
+
+function Remove-PimAdminGroupMemberships {
+    # #12 -- v1 Invoke-PimAccountRevoke steps 1, 2 and 5 (12509-12587): cancel every eligible and
+    # active PIM-for-Groups schedule the principal holds DIRECTLY, then remove it from the groups it
+    # is a direct member of. Per-principal filters -- never a tenant-wide scan. The filter result is
+    # re-checked, not trusted. Returns @{ removed; errors }.
+    param([Parameter(Mandatory)][string]$PrincipalId)
+    $removed = 0
+    $errors = New-Object System.Collections.Generic.List[string]
+    $gone = '(?i)NotFound|does not exist|ResourceNotFound|404'
+    foreach ($pair in @(@{ list = 'eligibilitySchedules'; req = 'eligibilityScheduleRequests' }, @{ list = 'assignmentSchedules'; req = 'assignmentScheduleRequests' })) {
+        $rows = @()
+        try { $rows = @(Invoke-PimGraph -All -Path ("/identityGovernance/privilegedAccess/group/{0}?`$filter=principalId eq '{1}'" -f $pair.list, $PrincipalId)) }
+        catch { [void]$errors.Add("read $($pair.list): $($_.Exception.Message)"); continue }
+        foreach ($s in $rows) {
+            if ($null -eq $s -or "$($s.principalId)" -ne $PrincipalId) { continue }
+            if ("$($s.memberType)" -match '(?i)^group$') { continue }   # inherited through a nested group
+            $gid = "$($s.groupId)"; if (-not $gid) { continue }
+            $acc = if ("$($s.accessId)".Trim()) { "$($s.accessId)" } else { 'member' }
+            $body = New-PimGroupMembershipBody -PrincipalId $PrincipalId -GroupId $gid -AccessId $acc -Action 'adminRemove' -Justification 'PIM4EntraPS offboarding'
+            try { Invoke-PimGraph -Method POST -Path "/identityGovernance/privilegedAccess/group/$($pair.req)" -Body $body | Out-Null; $removed++ }
+            catch { if ("$($_.Exception.Message)" -notmatch $gone) { [void]$errors.Add("$($pair.req) $gid/$($acc): $($_.Exception.Message)") } }
+        }
+    }
+    try {
+        foreach ($g in @(Invoke-PimGraph -All -Path "/users/$PrincipalId/memberOf/microsoft.graph.group?`$select=id,displayName,groupTypes")) {
+            if ($null -eq $g -or -not "$($g.id)".Trim()) { continue }
+            if (@($g.groupTypes) -contains 'DynamicMembership') { continue }   # a rule decides; nothing to remove
+            try { Invoke-PimGraph -Method DELETE -Path "/groups/$($g.id)/members/$PrincipalId/`$ref" | Out-Null; $removed++ }
+            catch { if ("$($_.Exception.Message)" -notmatch $gone) { [void]$errors.Add("member of $($g.displayName) ($($g.id)): $($_.Exception.Message)") } }
+        }
+    } catch { [void]$errors.Add("read memberOf: $($_.Exception.Message)") }
+    return [pscustomobject]@{ removed = $removed; errors = $errors.ToArray() }
+}
+
+function Invoke-PimAdminOffboardSteps {
+    # #12 -- execute the owed steps for ONE admin, in order, recording progress in SQL after each so
+    # a failure part-way resumes instead of repeating or skipping. Every step is idempotent.
+    # The GATES (feature opt-in, removal budget, circuit breaker, break-glass) were decided for the
+    # whole pass in the provider's GetLive and checked by ApplyUpdate before this is called.
+    param([Parameter(Mandatory)][object]$Live, [object]$Desired, [hashtable]$Context = @{}, [datetime]$NowUtc = [datetime]::UtcNow)
+    $upn = "$($Live.UserPrincipalName)"; $uid = "$($Live.principalId)"; $upnL = $upn.Trim().ToLowerInvariant()
+    $store = $Context['offboardStore']
+    if (-not $store) { $store = Get-PimAdminLifecycleStore -Name 'AdminOffboardState' }
+    if (-not $store.ok) { return [pscustomobject]@{ pimApplied = $false; reason = "offboarding state cannot be kept: $($store.reason)" } }
+    $st = if ($store.map.ContainsKey($upnL)) { $store.map[$upnL] } else { @{} }
+    if (-not ($st -is [hashtable])) { $st = ConvertTo-PimAdminLifecycleMap -Value $st }
+    $now = { [datetime]::UtcNow.ToString('o') }
+    $save = {
+        $st['kind'] = "$($Live.kind)"
+        $store.map[$upnL] = $st
+        if (-not (Save-PimAdminLifecycleStore -Name 'AdminOffboardState' -Map $store.map)) {
+            throw "offboarding state for $upn could not be saved -- stopping here so the next run resumes from what is recorded"
+        }
+    }
+    $steps = @($Live.steps)
+    $done = New-Object System.Collections.Generic.List[string]
+    if ($steps -contains 'disable') {
+        Invoke-PimGraph -Method PATCH -Path "/users/$uid" -Body @{ accountEnabled = $false } | Out-Null   # a failure THROWS: nothing else runs
+        [void]$done.Add('disabled')
+        Write-PimAdminLifecycleAudit -Action 'account.offboard.disable' -Target $upn -After @{ accountEnabled = $false; reason = "$($Live.reason)" }
+    }
+    if ($steps -contains 'sessions') {
+        try { Invoke-PimGraph -Method POST -Path "/users/$uid/revokeSignInSessions" -Body @{} | Out-Null; [void]$done.Add('sessions revoked') }
+        catch { Write-Warning "  [Offboard] $upn -- revokeSignInSessions failed (offboarding continues, as v1): $($_.Exception.Message)" }
+    }
+    if ($steps -contains 'memberships') {
+        $m = Remove-PimAdminGroupMemberships -PrincipalId $uid
+        if (@($m.errors).Count -eq 0) {
+            $st['membershipsRemovedUtc'] = & $now; [void]$done.Add("memberships removed ($($m.removed))")
+        } else {
+            $tries = 0; [void][int]::TryParse("$($st['membershipAttempts'])", [ref]$tries); $tries++
+            $st['membershipAttempts'] = $tries
+            Write-Warning ("  [Offboard] {0} -- {1} membership removal(s) FAILED (attempt {2}): {3}" -f $upn, @($m.errors).Count, $tries, (@($m.errors) -join ' | '))
+            if ($tries -ge 3) {
+                # Stop retrying for ever; the account is disabled and the failures are recorded.
+                $st['membershipsRemovedUtc'] = & $now; $st['membershipErrors'] = (@($m.errors) -join ' | ')
+                Write-Warning "  [Offboard] $upn -- giving up on the remaining memberships after 3 attempts; review them by hand."
+            }
+            if ($m.removed -gt 0) { [void]$done.Add("memberships removed ($($m.removed), with errors)") }
+        }
+    }
+    if ($Live.kind -eq 'offboard' -and -not "$($st['revokedAtUtc'])".Trim() -and ($steps -contains 'sessions' -or $steps -contains 'disable')) {
+        $st['revokedAtUtc'] = & $now
+        $st['offboardDate'] = (Get-PimRowProp -Row $Desired -Names @('OffboardDate'))
+        Write-PimAdminLifecycleAudit -Action 'account.offboard.revoke' -Target $upn -After @{ offboardDate = $st['offboardDate']; deleteAfterDays = (Get-PimRowProp -Row $Desired -Names @('DeleteAfterDays')) }
+    }
+    if ($steps -contains 'disable' -or $steps -contains 'sessions' -or $steps -contains 'memberships') { & $save }
+    if ($steps -contains 'notice') {
+        $dd = (Get-PimRowProp -Row $Desired -Names @('DeleteAfterDays')).Trim()
+        $rcpt = ''
+        if (Get-Command Get-PimAdminMailRecipient -ErrorAction SilentlyContinue) { $rcpt = "$(Get-PimAdminMailRecipient -Row $Desired)".Trim() }
+        if (-not $rcpt) { $rcpt = (Get-PimRowProp -Row $Desired -Names @('ManagerEmail')).Trim() }
+        if (-not $rcpt) {
+            $st['noticeSentUtc'] = 'skipped: no recipient on the row'
+            Write-Host "  [Offboard] $upn -- no offboarding notice: the row has no forwarding address and no ManagerEmail." -ForegroundColor DarkYellow
+        } elseif (-not (Get-Command Send-PimNotifyMail -ErrorAction SilentlyContinue)) {
+            $st['noticeSentUtc'] = 'skipped: the mail library is not loaded in this process'
+        } else {
+            $toks = @{ DisplayName = (Get-PimRowProp -Row $Desired -Names @('DisplayName')); UserPrincipalName = $upn
+                       OffboardDate = (Get-PimRowProp -Row $Desired -Names @('OffboardDate'))
+                       Steps = ('PIM schedules cancelled, group memberships removed, account disabled, sessions revoked' + $(if ($dd) { ", deletion scheduled after $dd day(s)" } else { '' }))
+                       Date = [datetime]::UtcNow.ToString('yyyy-MM-dd') }
+            $res = $null
+            try { $res = Send-PimNotifyMail -Type 'offboarding-notice' -Tokens $toks -Recipient $rcpt } catch { $res = @{ sent = $false; reason = "send threw: $($_.Exception.Message)" } }
+            if ("$($res.sent)" -match '(?i)true') { $st['noticeSentUtc'] = & $now; [void]$done.Add("notice mailed to $rcpt") }
+            elseif ("$($res.reason)" -match '(?i)threw|timeout|429|50\d|temporar') { Write-Warning "  [Offboard] $upn -- offboarding notice to '$rcpt' did NOT go out ($($res.reason)); retried next run." }
+            else {
+                # A refusal that will not change by retrying (kill switch, allowlist, no sender,
+                # no template) is recorded once instead of warned about every hour.
+                $st['noticeSentUtc'] = "skipped: $($res.reason)"
+                Write-Warning "  [Offboard] $upn -- offboarding notice to '$rcpt' NOT sent: $($res.reason)."
+            }
+        }
+        & $save
+    }
+    if ($steps -contains 'delete') {
+        try {
+            Invoke-PimGraph -Method DELETE -Path "/users/$uid" | Out-Null
+            [void]$done.Add('account DELETED')
+            Write-Host "  [Offboard] $upn DELETED (DeleteAfterDays elapsed). Remove the admin row to finish." -ForegroundColor Red
+        } catch {
+            if ("$($_.Exception.Message)" -notmatch '(?i)NotFound|does not exist|404') { throw }
+            [void]$done.Add('account already gone')
+        }
+        $st['deletedAtUtc'] = & $now
+        Write-PimAdminLifecycleAudit -Action 'account.offboard.delete' -Target $upn -After @{ revokedAtUtc = "$($st['revokedAtUtc'])"; deleteAfterDays = (Get-PimRowProp -Row $Desired -Names @('DeleteAfterDays')) }
+        & $save
+    }
+    if ($done.Count -eq 0) { return [pscustomobject]@{ pimApplied = $false; reason = 'no offboarding step completed this run (see the warnings above)' } }
+    Write-Host ("    [offboard] {0}: {1}" -f $upn, ($done -join '; ')) -ForegroundColor Yellow
+    return [pscustomobject]@{ pimApplied = $true; steps = $done.ToArray() }
+}
+
 function New-PimOffboardingProvider {
+    # #12 -- per ADMIN, not per membership, and no -Prune. v2's first version diffed memberships
+    # and removed them only under -Mode Full -Prune plus OffboardCleanupMode=Enforce: no scheduled
+    # job ever passed -Prune, so it never ran; it never disabled, revoked sessions, mailed or
+    # deleted; and a single admin holding six memberships tripped the 5-item removal budget.
+    #   desired = the admin rows the sweep acts on (Get-PimAdminOffboardCandidate)
+    #   live    = one record per such admin: what the tenant + the SQL progress record say is owed
+    #   equal   = nothing owed
+    #   update  = do the owed steps (Invoke-PimAdminOffboardSteps)
+    # GATES, all decided in GetLive for the whole pass: automatic offboarding enabled (env-aware,
+    # v1's gate) -> OffboardCleanupMode (Off / Report / Enforce, default Enforce) -> the offboarding
+    # state store is reachable (else fail closed) -> break-glass excluded -> G4 removal budget over
+    # the admins with destructive steps -> the account-disable circuit breaker over the disables.
     @{
         scope = 'AdminOffboarding'; entity = 'Account-Definitions-Admins'; order = 90; refreshBefore = $true
-        # GetLive already restricts to ONLY offboarded admins' memberships, so an empty
-        # desired is authoritative (remove-only by construction) -- opt out of the
-        # empty-desired prune guard in PIM-EngineCore.
-        allowEmptyDesiredPrune = $true
-        # DESIRED is EMPTY by design: the desired end-state for an offboarded admin's
-        # delegations is "none". GetLive surfaces the memberships an offboarded admin
-        # still holds; with -Prune those become removals. This means the scope ONLY
-        # ever removes (it never creates) -- and only memberships of admins explicitly
-        # flagged Lifecycle=Retire / past OffboardDate.
         GetDesired = {
             param($ctx)
-            $mode = "$($global:PIM_OffboardCleanupMode)"; if (-not $mode) { $mode = 'Report' }
-            $ctx['offboardMode'] = $mode
-            @()
+            $now = [datetime]::UtcNow
+            $all = @(Get-PimDesiredRows -Entity 'Account-Definitions-Admins')
+            $ctx['offboardAll'] = $all
+            $cands = New-Object System.Collections.Generic.List[object]
+            $rows = New-Object System.Collections.Generic.List[object]
+            foreach ($a in $all) {
+                if ($null -eq $a) { continue }
+                $c = Get-PimAdminOffboardCandidate -Row $a -NowUtc $now
+                if (-not $c) { continue }
+                $upn = (Get-PimRowProp -Row $a -Names @('UserPrincipalName','UPN','upn')).Trim()
+                if ($upn -notmatch '@') {
+                    $local = if ($upn) { $upn } else { (Get-PimRowProp -Row $a -Names @('UserName','Username')).Trim() }
+                    $dom = "$($global:DefaultDomainUPN)".Trim(); if (-not $dom) { $dom = "$($global:PIM_DefaultDomainUPN)".Trim() }
+                    if (-not $dom -and $local) { $dom = "$(Get-PimTargetDefaultDomain)".Trim() }
+                    if ($local -and $dom) { $upn = "$local@$dom" }
+                }
+                if ($upn -notmatch '@') { Write-Host "    [AdminOffboarding] a row flagged for offboarding has no resolvable UPN -- skipped." -ForegroundColor Yellow; continue }
+                [void]$cands.Add([pscustomobject]@{ upn = $upn; kind = $c.kind; reason = $c.reason; key = (Get-PimAdminRowKey -Row ([pscustomobject]@{ UserPrincipalName = $upn })) })
+                [void]$rows.Add($a)
+            }
+            $ctx['offboardCandidates'] = $cands.ToArray()
+            $rows.ToArray()
         }
         GetLive = {
             param($ctx)
-            # OPERATOR POLICY: automatic offboarding is OFF by default. Surface nothing
-            # (no removals) unless the operator explicitly opted in.
+            $cands = @($ctx['offboardCandidates'] | Where-Object { $null -ne $_ })
+            if (-not $cands.Count) { return @() }
+            $rec = { param($c, $complete, $note) [pscustomobject]@{ UserPrincipalName = $c.upn; kind = $c.kind; reason = $c.reason; complete = [bool]$complete; steps = @(); note = $note; blocked = '' } }
+            # OPERATOR POLICY: automatic offboarding is env-aware OFF in a protected tenant. One loud
+            # line, no Graph read, nothing owed.
             if (-not (Test-PimAutoOffboardingEnabled)) {
-                Write-Host "    [AdminOffboarding] SKIPPED -- automatic offboarding is DISABLED (operator policy). Set `$global:PIM_EnableAutomaticOffboarding=`$true to opt in (prohibited until an approval flow exists)." -ForegroundColor DarkYellow
-                return @()
+                Write-Host ("    [AdminOffboarding] SKIPPED -- automatic offboarding is DISABLED (operator policy): {0} admin row(s) flagged for offboarding/revoke are NOT processed. Set PIM_EnableAutomaticOffboarding=true (global, env or pim.Settings 'EnableAutomaticOffboarding') to opt in." -f $cands.Count) -ForegroundColor DarkYellow
+                return @($cands | ForEach-Object { & $rec $_ $true 'automatic offboarding disabled' })
+            }
+            $mode = Get-PimOffboardMode
+            $ctx['offboardMode'] = $mode
+            if ($mode -match '(?i)^off') {
+                Write-Host "    [AdminOffboarding] SKIPPED -- OffboardCleanupMode=Off." -ForegroundColor DarkYellow
+                return @($cands | ForEach-Object { & $rec $_ $true 'OffboardCleanupMode=Off' })
             }
             Ensure-PimContextLoaded
-            $mode = "$($ctx['offboardMode'])"; if (-not $mode) { $mode = "$($global:PIM_OffboardCleanupMode)" }; if (-not $mode) { $mode = 'Report' }
-            if ($mode -match '(?i)^off') { return @() }
-            $admins = @(Get-PimDesiredRows -Entity 'Account-Definitions-Admins')
-            # which admins are offboarded?
             $now = [datetime]::UtcNow
-            $offUpnToId = @{}
-            $offAdmins = New-Object System.Collections.Generic.List[object]
-            foreach ($a in $admins) {
-                if ((Test-PimAdminOffboarded -Row $a -NowUtc $now).offboard) {
-                    $upn = Get-PimRowProp -Row $a -Names @('UserPrincipalName','Username','UPN','upn')
-                    $prinId = Resolve-PimPrincipalId $upn
-                    if ($prinId -and $upn) { $offUpnToId[$upn.ToLowerInvariant()] = $prinId; $offAdmins.Add($a) }
-                }
+            $store = Get-PimAdminLifecycleStore -Name 'AdminOffboardState'
+            $ctx['offboardStore'] = $store
+            $ctx['offboardBlocked'] = ''
+            if (-not $store.ok) {
+                $ctx['offboardBlocked'] = "offboarding progress cannot be kept in SQL ($($store.reason)) -- without it DeleteAfterDays cannot be counted and the notice would repeat"
+                Write-Warning "  [AdminOffboarding] REFUSING to offboard: $($ctx['offboardBlocked'])"
             }
-            if (-not $offAdmins.Count) { return @() }
-            # build (principalId -> live group memberships) across the managed groups
-            $tagToName = Get-PimTagToGroupName
-            $liveByPrin = @{}
-            foreach ($prinId in ($offUpnToId.Values | Select-Object -Unique)) { $liveByPrin[$prinId] = New-Object System.Collections.Generic.List[object] }
-            foreach ($tag in @($tagToName.Keys)) {
-                $nm = $tagToName[$tag]; if (-not $nm) { continue }
-                $gid = Resolve-PimLiveGroupIdByName $nm; if (-not $gid) { continue }
-                foreach ($m in (Get-PimLiveGroupMembership -GroupId $gid -GroupTag $tag)) {
-                    $mp = "$($m.principalId)"
-                    if ($liveByPrin.ContainsKey($mp)) { [void]$liveByPrin[$mp].Add($m) }
+            $bg = @(); if (Get-Command Get-PimBreakGlassIdentifiers -ErrorAction SilentlyContinue) { $bg = @(Get-PimBreakGlassIdentifiers) }
+            $rowByKey = @{}; foreach ($a in @($ctx['offboardAll'])) { if ($a) { $rowByKey[(Get-PimAdminRowKey -Row $a)] = $a } }
+            $live = New-Object System.Collections.Generic.List[object]
+            foreach ($c in $cands) {
+                $r = & $rec $c $false ''
+                $u = $null; $found = $false
+                try {
+                    $u = Invoke-PimGraph -Path ("/users/{0}?`$select=id,userPrincipalName,displayName,accountEnabled" -f [uri]::EscapeDataString($c.upn))
+                    $found = [bool]("$($u.id)".Trim())
+                } catch {
+                    if ("$($_.Exception.Message)" -notmatch '(?i)404|ResourceNotFound|does not exist|not found') {
+                        $r.blocked = "the account could not be read: $($_.Exception.Message)"
+                        [void]$live.Add($r); continue
+                    }
                 }
+                $probe = [pscustomobject]@{ userPrincipalName = $c.upn; id = "$($u.id)" }
+                if ($bg.Count -gt 0 -and (Get-Command Test-PimRowIsBreakGlass -ErrorAction SilentlyContinue) -and (Test-PimRowIsBreakGlass -Row $probe -Identifiers $bg)) {
+                    Write-Host "    [AdminOffboarding] $($c.upn) is a BREAK-GLASS account -- never offboarded, whatever its row says." -ForegroundColor Yellow
+                    $r.complete = $true; $r.note = 'break-glass'; [void]$live.Add($r); continue
+                }
+                $stRec = @{}
+                if ($store.ok -and $store.map.ContainsKey($c.upn.ToLowerInvariant())) { $stRec = $store.map[$c.upn.ToLowerInvariant()] }
+                $row = $rowByKey[$c.key]
+                $s = Get-PimAdminOffboardSteps -Kind $c.kind -State $stRec -Found $found -AccountEnabled (Test-PimAdminValueTrue $u.accountEnabled) `
+                        -DeleteAfterDays (Get-PimRowProp -Row $row -Names @('DeleteAfterDays')) -NowUtc $now
+                if ($s.note) { Write-Host "    [AdminOffboarding] $($c.upn): $($s.note)" -ForegroundColor DarkYellow }
+                $r | Add-Member -NotePropertyName principalId -NotePropertyValue "$($u.id)" -Force
+                $r | Add-Member -NotePropertyName deleteDueUtc -NotePropertyValue $s.deleteDueUtc -Force
+                $r.steps = @($s.steps); $r.complete = (@($s.steps).Count -eq 0); $r.note = $s.note
+                [void]$live.Add($r)
             }
-            $map = @{}; foreach ($k in @($liveByPrin.Keys)) { $map[$k] = $liveByPrin[$k].ToArray() }
-            @(Get-PimOffboardingPlan -AdminRows $offAdmins.ToArray() -LiveByPrincipal $map -UpnToId $offUpnToId -NowUtc $now)
+            # BLAST RADIUS, decided once for the whole pass (v1 10997-11009 budgeted the sweep).
+            $destructive = @($live | Where-Object { -not $_.complete -and -not $_.blocked -and (@($_.steps | Where-Object { $_ -ne 'notice' }).Count -gt 0) })
+            $toDisable = @($destructive | Where-Object { $_.steps -contains 'disable' }).Count
+            if (-not $ctx['offboardBlocked'] -and $destructive.Count -gt 0) {
+                if (Get-Command Test-PimRemoveBudgetAllowed -ErrorAction SilentlyContinue) {
+                    $rb = Test-PimRemoveBudgetAllowed -ToRemove $destructive.Count -Scope 'AdminOffboarding' -Scanned @($ctx['offboardAll']).Count -Operation 'offboard/delete'
+                    if (-not $rb.allowed) {
+                        if (Get-Command Write-PimRemoveBudgetAlert -ErrorAction SilentlyContinue) { Write-PimRemoveBudgetAlert -Decision $rb }
+                        $ctx['offboardBlocked'] = "removal budget: $($rb.reason)"
+                    }
+                } else { $ctx['offboardBlocked'] = 'the removal budget (PIM-DisableGuard.ps1) is not loaded -- refusing to offboard (fail closed)' }
+            }
+            if (-not $ctx['offboardBlocked'] -and $toDisable -gt 0) {
+                $resolved = $null
+                if ($global:PIM_DesiredResolved -is [hashtable] -and $global:PIM_DesiredResolved.ContainsKey('Account-Definitions-Admins')) { $resolved = [bool]$global:PIM_DesiredResolved['Account-Definitions-Admins'] }
+                if (Get-Command Test-PimExplicitDisablePassAllowed -ErrorAction SilentlyContinue) {
+                    $dec = Test-PimExplicitDisablePassAllowed -ToDisable $toDisable -Scanned @($ctx['offboardAll']).Count -Desired @($ctx['offboardAll']) -DesiredResolved $resolved
+                    if (-not $dec.allowed) {
+                        if (Get-Command Write-PimDisableAbortAlert -ErrorAction SilentlyContinue) { Write-PimDisableAbortAlert -Scope 'AdminOffboarding' -Decision $dec }
+                        $ctx['offboardBlocked'] = "account-disable circuit breaker [$($dec.tripped)]: $($dec.reason)"
+                    }
+                } else { $ctx['offboardBlocked'] = 'the account-disable circuit breaker (PIM-DisableGuard.ps1) is not loaded -- refusing to offboard (fail closed)' }
+            }
+            $live.ToArray()
         }
-        KeyOf = { param($r) ("$($r.principalId)|$($r.GroupTag)|$($r.AssignmentType)").ToLowerInvariant() }
-        Equal = { param($d,$l) $true }
-        # No ApplyCreate -- desired is always empty so create never fires. Removal only
-        # under -Mode Full -Prune AND OffboardCleanupMode=Enforce (Report logs the plan
-        # but ApplyRemove no-ops).
-        ApplyRemove = {
+        KeyOf = { param($r) Get-PimAdminRowKey -Row $r }
+        Equal = { param($d,$l) [bool]$l.complete }
+        ApplyUpdate = {
             param($item,$ctx)
-            # OPERATOR POLICY: defense-in-depth -- never apply an offboarding removal
-            # unless the operator explicitly opted in (GetLive already returns empty when off).
+            # Defense in depth: the same gates GetLive decided, re-checked where the writes happen.
             if (-not (Test-PimAutoOffboardingEnabled)) {
-                Write-Host "    [AdminOffboarding] removal SKIPPED -- automatic offboarding is DISABLED (operator policy)." -ForegroundColor DarkYellow
-                # BUG-35a: tell the core this was NOT applied, so the summary cannot report a
-                # removal that never left the building.
+                Write-Host "    [AdminOffboarding] SKIPPED -- automatic offboarding is DISABLED (operator policy)." -ForegroundColor DarkYellow
+                # BUG-35a: tell the core this was NOT applied.
                 return [pscustomobject]@{ pimApplied = $false; reason = 'auto-offboarding disabled' }
             }
-            $mode = "$($ctx['offboardMode'])"; if (-not $mode) { $mode = "$($global:PIM_OffboardCleanupMode)" }; if (-not $mode) { $mode = 'Report' }
             $l = $item.live
+            $blocked = "$($ctx['offboardBlocked'])".Trim(); if (-not $blocked) { $blocked = "$($l.blocked)".Trim() }
+            if ($blocked) {
+                Write-Host ("    [!] {0}: offboarding NOT run -- {1}" -f $l.UserPrincipalName, $blocked) -ForegroundColor Yellow
+                return [pscustomobject]@{ pimApplied = $false; reason = $blocked }
+            }
+            $mode = "$($ctx['offboardMode'])"; if (-not $mode) { $mode = Get-PimOffboardMode }
             if ($mode -notmatch '(?i)^enforce') {
-                Write-Host ("    [report] would offboard: {0} -> {1} ({2}, {3})" -f $l.UserPrincipalName, $l.GroupTag, $l.AssignmentType, $l.Reason) -ForegroundColor DarkYellow
+                Write-Host ("    [report] would offboard: {0} -> {1} ({2})" -f $l.UserPrincipalName, (@($l.steps) -join ', '), $l.reason) -ForegroundColor DarkYellow
                 # BUG-35a: REPORT mode changes nothing, so it must not be counted as applied.
-                # The detail line above was always honest ("would offboard"), but the run summary
-                # still said `remove=1 applied=1` -- identical to a run that really revoked. The
-                # summary is the number an operator reads, and a dry run must not look like a
-                # change there. Verified both ways on one tenant: Report -> eligibility unchanged,
-                # Enforce -> eligibility 1 -> 0.
                 return [pscustomobject]@{ pimApplied = $false; reason = "offboardMode=$mode (report only)" }
             }
-            $tagToName = Get-PimTagToGroupName
-            $gid = Resolve-PimLiveGroupIdByName $tagToName["$($l.GroupTag)".ToLowerInvariant()]
-            if (-not $gid) { $gid = Resolve-PimLiveGroupIdByName "$($l.GroupTag)" }
-            if (-not $gid) { throw "AdminOffboarding: group for tag '$($l.GroupTag)' not found" }
-            $body = New-PimGroupMembershipBody -PrincipalId "$($l.principalId)" -GroupId $gid -AccessId "$($l.accessId)" -Action 'adminRemove'
-            $ep = if ("$($l.AssignmentType)" -eq 'Active') { 'assignmentScheduleRequests' } else { 'eligibilityScheduleRequests' }
-            Invoke-PimGraph -Method POST -Path "/identityGovernance/privilegedAccess/group/$ep" -Body $body
+            Invoke-PimAdminOffboardSteps -Live $l -Desired $item.desired -Context $ctx
+        }
+    }
+}
+
+# ---------------------------------------------------------------------------
+# GroupRetirement (#12) -- Lifecycle=Retire on a GROUP definition row, ported from v1
+# Invoke-PimGroupRetirement (v1 11099-11198): remove the directory role assignments the group
+# holds, remove its members, delete the group. v1's gates, kept as they were:
+#   * automatic group retirement is env-aware OFF in a protected tenant (PIM_EnableGroupRetirement;
+#     global, env or pim.Settings 'EnableGroupRetirement' -- v1 read a file);
+#   * only a group matching the engine naming prefix (PIM_GroupPrefix, default 'PIM-') is retired,
+#     so a hand-made group with the same name is never deleted;
+#   * G4 removal budget over the groups in the batch, aborted whole, never part-way.
+# One v2 guard on top: a group the Groups provider still lists as desired would be RE-CREATED by
+# the next groups deploy, so retiring it would flap -- that is refused until Get-PimGroupDefinitionRows
+# stops returning Lifecycle=Retire rows.
+# ---------------------------------------------------------------------------
+function Test-PimGroupRetirementEnabled {
+    $val = Get-PimAdminLifecycleSetting -Name 'EnableGroupRetirement'
+    if (Get-Command Test-PimExplicitFlagValue -ErrorAction SilentlyContinue) {
+        $explicit = Test-PimExplicitFlagValue -Value $val
+        if ($null -ne $explicit) { return [bool]$explicit }
+        if (Get-Command Resolve-PimDestructiveFeatureDefault -ErrorAction SilentlyContinue) { return [bool](Resolve-PimDestructiveFeatureDefault) }
+    }
+    return ("$val".Trim().ToLowerInvariant() -in @('true','1','yes','y','on','enable','enabled'))
+}
+
+function Get-PimGroupRetirementPrefixes {
+    $raw = Get-PimAdminLifecycleSetting -Name 'GroupPrefix' -Default 'PIM-'
+    return @("$raw" -split '[,;]' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+}
+
+function Get-PimRetireGroupRows {
+    # PURE over the desired store: every group DEFINITION row flagged Lifecycle=Retire. The same
+    # entities Get-PimGroupDefinitionRows reads (v1 read the seven definition CSVs).
+    $out = New-Object System.Collections.Generic.List[object]
+    foreach ($e in @('PIM-Definitions-Roles', 'PIM-Definitions-Services', 'PIM-Definitions-Organization', 'PIM-Definitions-Tasks',
+                     'PIM-Definitions-Departments', 'PIM-Definitions-Processes', 'PIM-Definitions-Projects', 'PIM-Definitions-CrossOrg')) {
+        foreach ($r in @(Get-PimDesiredRows -Entity $e)) {
+            if ($null -eq $r) { continue }
+            $gn = (Get-PimRowProp -Row $r -Names @('GroupName')).Trim()
+            if (-not $gn) { continue }
+            if ((Get-PimRowProp -Row $r -Names @('Lifecycle')).Trim() -notmatch '(?i)^retire') { continue }
+            [void]$out.Add([pscustomobject]@{ GroupName = $gn; Entity = $e })
+        }
+    }
+    return $out.ToArray()
+}
+
+function New-PimGroupRetirementProvider {
+    @{
+        scope = 'GroupRetirement'; entity = 'PIM-Definitions'; order = 92; refreshBefore = $true
+        GetDesired = { param($ctx) $rows = @(Get-PimRetireGroupRows); $ctx['retireRows'] = $rows; $rows }
+        GetLive = {
+            param($ctx)
+            $rows = @($ctx['retireRows'] | Where-Object { $null -ne $_ })
+            if (-not $rows.Count) { return @() }
+            $rec = { param($r, $complete, $note) [pscustomobject]@{ GroupName = $r.GroupName; groupId = ''; complete = [bool]$complete; blocked = ''; note = $note } }
+            if (-not (Test-PimGroupRetirementEnabled)) {
+                Write-Host ("    [GroupRetirement] SKIPPED -- automatic group retirement is DISABLED (operator policy): {0} Lifecycle=Retire row(s) not processed. Set PIM_EnableGroupRetirement=true (global, env or pim.Settings 'EnableGroupRetirement') to opt in." -f $rows.Count) -ForegroundColor DarkYellow
+                return @($rows | ForEach-Object { & $rec $_ $true 'group retirement disabled' })
+            }
+            Ensure-PimContextLoaded
+            $prefixes = @(Get-PimGroupRetirementPrefixes)
+            $stillDesired = @{}
+            if (Get-Command Get-PimGroupDefinitionRows -ErrorAction SilentlyContinue) {
+                foreach ($g in @(Get-PimGroupDefinitionRows)) { $n = "$($g.GroupName)".Trim().ToLowerInvariant(); if ($n) { $stillDesired[$n] = $true } }
+            }
+            $live = New-Object System.Collections.Generic.List[object]
+            foreach ($r in $rows) {
+                $x = & $rec $r $false ''
+                $okPrefix = @($prefixes | Where-Object { $r.GroupName.StartsWith($_, [System.StringComparison]::OrdinalIgnoreCase) }).Count -gt 0
+                if (-not $okPrefix) {
+                    Write-Warning "  [GroupRetirement] '$($r.GroupName)' does not match the engine naming prefix ($($prefixes -join ', ')) -- refusing to retire a group the engine may not own."
+                    $x.complete = $true; $x.note = 'not engine-owned (prefix)'; [void]$live.Add($x); continue
+                }
+                $gid = Resolve-PimLiveGroupIdByName $r.GroupName
+                if (-not $gid) { $x.complete = $true; $x.note = 'already gone -- remove the row (or its Retire flag) to finish'; [void]$live.Add($x); continue }
+                $x.groupId = "$gid"
+                if ($stillDesired.ContainsKey($r.GroupName.ToLowerInvariant())) {
+                    $x.blocked = 'the Groups provider still lists this group as desired, so the next groups deploy would re-create it -- retirement refused until Lifecycle=Retire rows are excluded from Get-PimGroupDefinitionRows'
+                }
+                [void]$live.Add($x)
+            }
+            $ctx['retireBlocked'] = ''
+            $pending = @($live | Where-Object { -not $_.complete -and -not $_.blocked })
+            if ($pending.Count -gt 0) {
+                if (Get-Command Test-PimRemoveBudgetAllowed -ErrorAction SilentlyContinue) {
+                    $rb = Test-PimRemoveBudgetAllowed -ToRemove $pending.Count -Scope 'GroupRetirement' -Scanned $rows.Count -Operation 'delete group'
+                    if (-not $rb.allowed) {
+                        if (Get-Command Write-PimRemoveBudgetAlert -ErrorAction SilentlyContinue) { Write-PimRemoveBudgetAlert -Decision $rb }
+                        $ctx['retireBlocked'] = "removal budget: $($rb.reason)"
+                    }
+                } else { $ctx['retireBlocked'] = 'the removal budget (PIM-DisableGuard.ps1) is not loaded -- refusing to delete groups (fail closed)' }
+            }
+            $live.ToArray()
+        }
+        KeyOf = { param($r) "$($r.GroupName)".Trim().ToLowerInvariant() }
+        Equal = { param($d,$l) [bool]$l.complete }
+        ApplyUpdate = {
+            param($item,$ctx)
+            if (-not (Test-PimGroupRetirementEnabled)) { return [pscustomobject]@{ pimApplied = $false; reason = 'group retirement disabled' } }
+            $l = $item.live
+            $blocked = "$($ctx['retireBlocked'])".Trim(); if (-not $blocked) { $blocked = "$($l.blocked)".Trim() }
+            if ($blocked) {
+                Write-Host ("    [!] {0}: NOT retired -- {1}" -f $l.GroupName, $blocked) -ForegroundColor Yellow
+                return [pscustomobject]@{ pimApplied = $false; reason = $blocked }
+            }
+            $gid = "$($l.groupId)"; $gn = "$($l.GroupName)"
+            $warn = New-Object System.Collections.Generic.List[string]
+            # 1. directory role assignments held BY the group (v1 11161-11171)
+            try {
+                foreach ($ra in @(Invoke-PimGraph -All -Path "/roleManagement/directory/roleAssignments?`$filter=principalId eq '$gid'")) {
+                    if ($null -eq $ra -or "$($ra.principalId)" -ne $gid -or -not "$($ra.id)") { continue }
+                    try { Invoke-PimGraph -Method DELETE -Path "/roleManagement/directory/roleAssignments/$($ra.id)" | Out-Null }
+                    catch { [void]$warn.Add("role assignment $($ra.id): $($_.Exception.Message)") }
+                }
+            } catch { [void]$warn.Add("role assignment read: $($_.Exception.Message)") }
+            # 2. members out (v1 11173-11180)
+            try {
+                foreach ($m in @(Invoke-PimGraph -All -Path "/groups/$gid/members?`$select=id")) {
+                    if ($null -eq $m -or -not "$($m.id)") { continue }
+                    try { Invoke-PimGraph -Method DELETE -Path "/groups/$gid/members/$($m.id)/`$ref" | Out-Null }
+                    catch { [void]$warn.Add("member $($m.id): $($_.Exception.Message)") }
+                }
+            } catch { [void]$warn.Add("member read: $($_.Exception.Message)") }
+            foreach ($w in $warn) { Write-Warning "  [GroupRetirement] $gn -- $w" }
+            # 3. the group itself (v1 11182-11195). Azure RBAC held by the group dies with the object.
+            Invoke-PimGraph -Method DELETE -Path "/groups/$gid" | Out-Null
+            Write-Host "  [GroupRetirement] '$gn' DELETED. Remove the definition row to finish." -ForegroundColor Red
+            Write-PimAdminLifecycleAudit -Action 'group.retire' -Target $gn -After @{ groupId = $gid; deleted = $true; warnings = $warn.Count }
+            return [pscustomobject]@{ pimApplied = $true; groupId = $gid }
         }
     }
 }
@@ -3319,6 +7140,159 @@ function New-PimEntraAppRoleProvider {
 }
 
 # ===========================================================================
+# WorkloadConnectors scope (order 67) -- PIM-Assignments-Workloads, applied the way v1 applied it.
+#
+# 🔴 v2 PARITY GAP (operator, 2026-09-12: "we cannot leave customers on pim v1 in a worse situation
+# going to pim v2"). v1 dispatched every PIM-Assignments-Workloads row by its Workload column to a
+# declarative connector (Apply-PimWorkloadAssignments, PIM-Functions.psm1 ~L2825-3004) and the CSV
+# engine ran it whenever the file existed (PIM-Baseline-Management-CSV.ps1 L1426-1436). v2 shipped
+# three hand-written providers over OTHER entities (Defender / Intune / AppRole, above) and nothing
+# that read PIM-Assignments-Workloads -- so every row the migration imported was never applied.
+#
+# This provider is that dispatcher: one row -> the connector named by Workload -> resolve group, role
+# and (nested-membership connectors) the container -> Assign or Remove. Runtime:
+# PIM-WorkloadConnectors.ps1. Behaviour kept from v1:
+#   * Action=Assign creates the binding when it is absent (idempotent).
+#   * Action=Remove removes it when present: a nested-membership role is detached; a FLAT assignment
+#     is deleted only when this tool created it, otherwise it is reported and left for a human.
+#     Remove rows go through the core's TARGETED removal (GetRemoveRows), so they count against the
+#     universal per-run removal budget like every other removal, and an absent binding is "already gone".
+#   * No prune. The live set is built only from desired rows, so -Mode Full -Prune cannot reach an
+#     assignment nobody wrote a row for -- v1 had no prune either.
+# Changed from v1, deliberately:
+#   * A row that cannot be applied (unknown connector, unresolved group, unknown role, no container,
+#     a listing that failed) is a FAILURE ITEM with a catalogued code, not a red console line that
+#     skipped the row. v1 printed "Skipping" and the run looked successful.
+#   * An ACTIVE workload exemption (pim.Settings['WorkloadExemptions'], PIM-WorkloadMap.ps1) excuses a
+#     missing Assign binding: reported, not created. An expired one no longer excuses it.
+# Gate: feature 'connectors.workload', which is effectively ON whenever workload rows exist
+# (PIM-FeatureCatalog.ps1 autoEnableWhenData) -- v1 was on whenever its file existed.
+# ===========================================================================
+foreach ($__pimWlFile in @('PIM-WorkloadConnectors.ps1', 'PIM-WorkloadMap.ps1')) {
+    if ($PSScriptRoot -and (Test-Path -LiteralPath (Join-Path $PSScriptRoot $__pimWlFile))) { . (Join-Path $PSScriptRoot $__pimWlFile) }
+}
+
+function Get-PimWorkloadDesiredBindings {
+    # Desired rows -> normalised bindings, split by Action: 'assign' (the desired set) and 'remove'
+    # (the engine's targeted-removal rows, GetRemoveRows). One row per key within each set. A key in
+    # BOTH sets is left to the engine core, which reports the conflict and removes nothing.
+    # 'rows' = every normalised row (assign + remove + unsupported actions), for live resolution.
+    param([object[]]$Rows = @())
+    $assign = [ordered]@{}; $remove = [ordered]@{}; $other = [ordered]@{}
+    $skipped = 0
+    foreach ($r in @($Rows)) {
+        if ($null -eq $r) { continue }
+        $n = ConvertTo-PimWorkloadRow -Row $r
+        if (-not $n) { $skipped++; continue }
+        $k = Get-PimWorkloadConnectorKey -Row $n
+        $bucket = if ("$($n.Action)" -ieq 'Assign') { $assign } elseif ("$($n.Action)" -ieq 'Remove') { $remove } else { $other }
+        if (-not $bucket.Contains($k)) { $bucket[$k] = $n }
+    }
+    $toArr = { param($d) foreach ($v in $d.Values) { $v } }
+    # An unsupported Action cannot be applied: it rides in the DESIRED set so it surfaces as a failure
+    # item (its binding carries WORKLOAD-ACTION-UNKNOWN), instead of vanishing.
+    $desired = @(& $toArr $assign) + @(& $toArr $other)
+    $removeRows = @(& $toArr $remove)
+    return [pscustomobject]@{ assign = $desired; remove = $removeRows; rows = @($desired + $removeRows); skipped = $skipped }
+}
+
+function New-PimWorkloadConnectorsProvider {
+    @{
+        scope   = 'WorkloadConnectors'
+        entity  = 'PIM-Assignments-Workloads'
+        order   = 67   # after the three dedicated workload providers (62/64/66)
+        feature = 'connectors.workload'
+        refreshBefore = $true
+        GetDesired = {
+            param($ctx)
+            $d = Get-PimWorkloadDesiredBindings -Rows @(Get-PimDesiredRows -Entity 'PIM-Assignments-Workloads')
+            if ($d.skipped) { Write-Host ("  [WorkloadConnectors] {0} row(s) lack Workload / RoleName / GroupTag and are not bindings -- ignored" -f $d.skipped) -ForegroundColor DarkGray }
+            $ctx['wlcSets'] = $d
+            @($d.assign)
+        }
+        # Action=Remove rows: the engine core removes EXACTLY the live item each one keys to, in every
+        # mode, through the universal removal budget; an absent item is reported as already gone.
+        GetRemoveRows = {
+            param($ctx)
+            $d = if ($ctx['wlcSets']) { $ctx['wlcSets'] } else { Get-PimWorkloadDesiredBindings -Rows @(Get-PimDesiredRows -Entity 'PIM-Assignments-Workloads') }
+            @($d.remove)
+        }
+        GetLive = {
+            param($ctx)
+            $d = if ($ctx['wlcSets']) { $ctx['wlcSets'] } else { Get-PimWorkloadDesiredBindings -Rows @(Get-PimDesiredRows -Entity 'PIM-Assignments-Workloads') }
+            $ctx['wlcSets'] = $d
+            $rows = @($d.rows)
+            $ctx['wlcBind'] = @{}
+            if (-not $rows.Count) { return @() }
+            Ensure-PimContextLoaded
+            $connectors = Get-PimWorkloadConnectorCatalog
+            $tagToName = @{}
+            try { $tagToName = Get-PimTagToGroupName } catch { Write-Warning ("  [WorkloadConnectors] tag map unavailable, resolving GroupTag by name only: {0}" -f $_.Exception.Message) }
+            $exemptions = @()
+            if (Get-Command Read-PimWorkloadExemptions -ErrorAction SilentlyContinue) {
+                try { $exemptions = @(Read-PimWorkloadExemptions) } catch { Write-Warning ("  [WorkloadConnectors] workload exemptions could not be read -- none applied this run: {0}" -f $_.Exception.Message) }
+            }
+            $cache = @{}
+            $live = New-Object System.Collections.Generic.List[object]
+            $seen = @{}
+            $assignKeys = @{}; foreach ($a in @($d.assign)) { $assignKeys[(Get-PimWorkloadConnectorKey -Row $a)] = $true }
+            foreach ($r in $rows) {
+                $b = Resolve-PimWorkloadBinding -Row $r -Connectors $connectors -TagToName $tagToName -Cache $cache
+                $isRemove = ("$($r.Action)" -ieq 'Remove')
+                $bk = if ($isRemove) { 'remove|' } else { 'assign|' }
+                $ctx['wlcBind'][$bk + $b.key] = $b
+                $o = [ordered]@{ Workload = $r.Workload; GroupTag = $r.GroupTag; Resource = $r.Resource; Scope = $r.Scope; RoleName = $r.RoleName; wlcState = '' }
+                if ($b.error) {
+                    # Assign: no live item -> Create -> ApplyCreate raises the error as a failure item.
+                    # Remove: an 'error' live item -> targeted removal -> ApplyRemove raises it the same
+                    # way. Without it the core would read the row as "already absent" and succeed.
+                    if ($isRemove -and -not $seen.ContainsKey($b.key) -and -not $assignKeys.ContainsKey($b.key)) { $o.wlcState = 'error'; $o['wlcError'] = $b.error; $live.Add([pscustomobject]$o); $seen[$b.key] = $true }
+                    continue
+                }
+                if ($b.present) {
+                    if ($seen.ContainsKey($b.key)) { continue }
+                    $o.wlcState = 'present'
+                    if ($b.existing) { $o['assignmentId'] = "$($b.existing.id)"; $o['displayName'] = "$($b.existing.displayName)" }
+                    if ($b.container) { $o['container'] = "$($b.container)" }
+                    $live.Add([pscustomobject]$o); $seen[$b.key] = $true
+                    continue
+                }
+                if ($isRemove) { continue }   # nothing live: the core reports it as already absent
+                foreach ($e in $exemptions) {
+                    if ((Test-PimWorkloadExemptionMatches -Exemption $e -Row $r) -and (Test-PimWorkloadExemptionActive -Exemption $e)) {
+                        $o.wlcState = 'exempted'; $o['exemptionReason'] = "$($e.reason)"
+                        Write-Host ("    [workloads] exempted -- {0} (not created: {1})" -f $b.key, $e.reason) -ForegroundColor DarkYellow
+                        if (-not $seen.ContainsKey($b.key)) { $live.Add([pscustomobject]$o); $seen[$b.key] = $true }
+                        break
+                    }
+                }
+            }
+            $live.ToArray()
+        }
+        KeyOf = { param($r) Get-PimWorkloadConnectorKey -Row $r }
+        # Existence-based: the binding is in place (or excused by an active exemption).
+        Equal = { param($d, $l) ("$($l.wlcState)" -eq 'present' -or "$($l.wlcState)" -eq 'exempted') }
+        ApplyCreate = {
+            param($item, $ctx)
+            $b = $null; if ($ctx['wlcBind']) { $b = $ctx['wlcBind']['assign|' + (Get-PimWorkloadConnectorKey -Row $item.desired)] }
+            if (-not $b) { throw ("WorkloadConnectors: binding '{0}' was not resolved in this run" -f $item.key) }
+            if ($b.error) { throw $b.error }
+            Invoke-PimWorkloadBindingAssign -Binding $b
+        }
+        ApplyRemove = {
+            param($item, $ctx)
+            if ("$($item.live.wlcError)".Trim()) { throw "$($item.live.wlcError)" }
+            $b = $null; if ($ctx['wlcBind']) { $b = $ctx['wlcBind']['remove|' + (Get-PimWorkloadConnectorKey -Row $item.live)] }
+            # Only a Remove ROW removes. The live set is built from rows alone, so a prune has nothing
+            # else to reach -- but if one ever did, it is refused rather than acted on.
+            if (-not $b) { return [pscustomobject]@{ pimApplied = $false; reason = 'no Action=Remove row names this binding -- workload bindings are removed only by an explicit Remove row' } }
+            if ($b.error) { throw $b.error }
+            Invoke-PimWorkloadBindingRemove -Binding $b
+        }
+    }
+}
+
+# ===========================================================================
 # HybridAdProvisioning scope (order 95) -- on-prem AD account + gMSA/sMSA support
 # (REQUIREMENTS § 6). CLOUD-ONLY ENGINE CONSTRAINT: this provider is a PLANNER. It
 # computes WHAT on-prem AD objects should exist for the AD-platform admin rows and
@@ -3366,17 +7340,19 @@ function New-PimHybridAdProvider {
             $d = $item.desired
             $kind = "$($d.accountKind)"
             Write-Host ("    [hybrid-ad/plan] would provision on worker: {0} (kind={1}, ou={2}) -- on-prem write deferred to hybrid worker" -f $d.samAccountName, $kind, $(if ($d.targetOu) { $d.targetOu } else { '<unset>' })) -ForegroundColor DarkCyan
-            # Best-effort: emit the work package once per run so a worker can pick it up.
-            if (-not $ctx['hybridAdPackageWritten'] -and $ctx['hybridAdPlan'] -and (Get-Command Export-PimHybridAdWorkPackage -ErrorAction SilentlyContinue)) {
+            # Best-effort: publish the work package once per run so a worker can see the plan.
+            # 🔒 #12 (2026-09-12): into SQL pim.Settings['HybridAdWorkPackage'], NOT a file under
+            # output/state -- v2 is SQL-only, and a file written inside a container is gone with the
+            # replica. The worker does not need it to apply: the 'hybrid-ad-apply' job plans from
+            # pim.Rows itself (Invoke-PimHybridAdWorkerJob).
+            if (-not $ctx['hybridAdPackageWritten'] -and $ctx['hybridAdPlan'] -and (Get-Command ConvertTo-PimHybridAdWorkPackage -ErrorAction SilentlyContinue)) {
                 try {
-                    $outDir = if ($global:PIM_OutputDir) { $global:PIM_OutputDir } else { Join-Path (Get-Location) 'output' }
-                    $stateDir = Join-Path $outDir 'state'
-                    if (-not (Test-Path $stateDir)) { New-Item -ItemType Directory -Path $stateDir -Force | Out-Null }
-                    $pkgPath = Join-Path $stateDir 'hybrid-ad-workpackage.json'
-                    Export-PimHybridAdWorkPackage -Plan $ctx['hybridAdPlan'] -Path $pkgPath | Out-Null
+                    $pkg = ConvertTo-PimHybridAdWorkPackage -Plan $ctx['hybridAdPlan']
+                    if (Save-PimAdminLifecycleStore -Name 'HybridAdWorkPackage' -Map $pkg) {
+                        Write-Host "    [hybrid-ad/plan] work package published to pim.Settings['HybridAdWorkPackage'] (the hybrid-ad-apply job on a hybrid worker applies the plan)" -ForegroundColor DarkGray
+                    }
                     $ctx['hybridAdPackageWritten'] = $true
-                    Write-Host ("    [hybrid-ad/plan] work package written: {0} (worker applies it with Invoke-PimHybridAdApply -Apply)" -f $pkgPath) -ForegroundColor DarkGray
-                } catch { Write-Verbose "hybrid-ad work package write failed: $($_.Exception.Message)" }
+                } catch { Write-Verbose "hybrid-ad work package publish failed: $($_.Exception.Message)" }
             }
             # BUG-70 residue. THIS HANDLER NEVER PROVISIONS ANYTHING -- the on-prem write is the hybrid
             # worker's job (see the header comment), and this scope only plans + logs. It used to end on
@@ -3404,13 +7380,16 @@ function Register-PimDefaultEngineProviders {
     Register-PimEngineProvider -Provider (New-PimEntraRolesDirectProvider)      # order 48 (PIM v1 direct)
     Register-PimEngineProvider -Provider (New-PimAdminMembersProvider)          # order 50
     Register-PimEngineProvider -Provider (New-PimGroupMembersProvider)          # order 55
+    Register-PimEngineProvider -Provider (New-PimAzResPoliciesProvider)         # order 58 -- Azure resource role policies (ARM), before AzRes assigns
     Register-PimEngineProvider -Provider (New-PimAzResProvider)                 # order 60
     Register-PimEngineProvider -Provider (New-PimDefenderXdrRolesProvider)      # order 62 (workload RBAC: Defender XDR)
     Register-PimEngineProvider -Provider (New-PimIntuneRolesProvider)           # order 64 (workload RBAC: Intune + scope tags)
     Register-PimEngineProvider -Provider (New-PimEntraAppRoleProvider)          # order 66 (generic enterprise-app app-role)
+    Register-PimEngineProvider -Provider (New-PimWorkloadConnectorsProvider)    # order 67 (PIM-Assignments-Workloads, v1 connector dispatch)
     Register-PimEngineProvider -Provider (New-PimGroupsPoliciesProvider)        # order 70
     Register-PimEngineProvider -Provider (New-PimAccessReviewsProvider)         # order 80
-    Register-PimEngineProvider -Provider (New-PimOffboardingProvider)           # order 90 (delegation removal; -Prune + Enforce gated)
+    Register-PimEngineProvider -Provider (New-PimOffboardingProvider)           # order 90 (per-admin offboarding: disable, sessions, memberships, notice, delete -- gated; job admin-offboarding)
+    Register-PimEngineProvider -Provider (New-PimGroupRetirementProvider)       # order 92 (Lifecycle=Retire groups -- gated OFF in protected tenants, as v1)
     if (Get-Command New-PimHybridAdProvider -ErrorAction SilentlyContinue) {
         Register-PimEngineProvider -Provider (New-PimHybridAdProvider)          # order 95 (on-prem AD/gMSA PLANNER; on-prem write = hybrid worker [ ])
     }

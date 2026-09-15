@@ -1,4 +1,4 @@
-# =============================================================================
+﻿# =============================================================================
 # PIM-Downlink.ps1 -- the PURE, offline-testable decision brain for the §31.3
 # master->managed (slave) admin/permission SYNC (downlink) + the scenario-bound
 # engine runner. Phase 2 of the §31 hosting/edition scenario matrix (S1-S6).
@@ -164,6 +164,84 @@ function Select-PimUnrecognisableAdmins {
     }
 }
 
+# ---------------------------------------------------------------------------
+# Is this admin synced to slaves at all? (pure) -- REQUIREMENTS 68.6 row 35.
+# Operator 2026-09-13: "slaves import admins from central if defined per admins at master".
+# The master's admin row decides: ManagementMode=msp syncs; blank or 'local' does not.
+# A row that carries NO ManagementMode field at all is a pim.CentralAdmins registry row (the
+# bundle shape before 2026-09-13). That registry holds MSP admins only, so it is msp by
+# construction -- treating it as 'local' would retract every existing MSP admin on update.
+# ---------------------------------------------------------------------------
+function Test-PimDownlinkAdminSynced {
+    param([object]$Admin)
+    if ($null -eq $Admin) { return @{ synced = $false; reason = 'no admin row' } }
+    $has = $false
+    if ($Admin -is [System.Collections.IDictionary]) { $has = $Admin.Contains('ManagementMode') }
+    else { $has = [bool]$Admin.PSObject.Properties['ManagementMode'] }
+    if (-not $has) { return @{ synced = $true; reason = 'central registry row (MSP by construction)' } }
+    $mode = "$(Get-PimDownlinkValue -Object $Admin -Key 'ManagementMode')".Trim()
+    if ($mode -ieq 'msp') { return @{ synced = $true; reason = 'ManagementMode=msp at the master' } }
+    $shown = if ($mode) { $mode } else { '(blank)' }
+    return @{ synced = $false; reason = "ManagementMode=$shown at the master -- only msp admins are synced to slaves" }
+}
+
+# ---------------------------------------------------------------------------
+# MASTER SIDE (pure): which of the master's own Account-Definitions-Admins rows are CENTRAL
+# admins to publish -- REQUIREMENTS 68.6 row 35. The row is the definition: ManagementMode=msp
+# (sync on/off), Ring (which slaves), Target (tags that narrow the ring; blank = every slave in
+# the ring). Names are taken from the row as the customer's naming produced them -- nothing is
+# derived or reshaped here. Every row that is NOT published is reported with its reason.
+# Returns @{ synced; notSynced; mspWithoutRing; adOnly } -- synced rows carry ManagementMode='msp'
+# so the slave-side gate (Test-PimDownlinkAdminSynced) reads the master's decision, plus the
+# governance fields (AccountStatus / OffboardDate) that must flow down from the source.
+# ---------------------------------------------------------------------------
+function Get-PimCentralAdminsFromDefinitions {
+    param([object[]]$Rows = @())
+    $synced = New-Object System.Collections.Generic.List[object]
+    $notSynced = New-Object System.Collections.Generic.List[object]
+    $noRing = New-Object System.Collections.Generic.List[object]
+    $adOnly = New-Object System.Collections.Generic.List[object]
+    foreach ($r in @($Rows)) {
+        if ($null -eq $r) { continue }
+        $un = "$(Get-PimDownlinkValue -Object $r -Key 'UserName')".Trim()
+        if (-not $un) { $upn = "$(Get-PimDownlinkValue -Object $r -Key 'UserPrincipalName')".Trim(); if ($upn) { $un = ($upn -split '@')[0] } }
+        if (-not $un) { continue }
+        $mode = "$(Get-PimDownlinkValue -Object $r -Key 'ManagementMode')".Trim()
+        if ($mode -ine 'msp') {
+            $notSynced.Add([ordered]@{ UserName = $un; reason = "ManagementMode=$(if ($mode) { $mode } else { '(blank)' }) -- not synced" }) | Out-Null
+            continue
+        }
+        if ("$(Get-PimDownlinkValue -Object $r -Key 'TargetPlatform')".Trim() -ieq 'AD') {
+            $adOnly.Add([ordered]@{ UserName = $un; reason = 'TargetPlatform=AD -- an on-premises-only admin does not exist in a slave (Entra) tenant' }) | Out-Null
+            continue
+        }
+        $ring = "$(Get-PimDownlinkValue -Object $r -Key 'Ring')".Trim()
+        if ($ring -notmatch '^\d+$') {
+            $noRing.Add([ordered]@{ UserName = $un; reason = "ManagementMode=msp but Ring='$ring' -- no ring reaches no slave (set Ring 0/1/2)" }) | Out-Null
+            continue
+        }
+        $tapLife = "$(Get-PimDownlinkValue -Object $r -Key 'TAPLifetimeHours')".Trim()
+        $synced.Add([ordered]@{
+            UserName         = $un
+            DisplayName      = "$(Get-PimDownlinkValue -Object $r -Key 'DisplayName')"
+            FirstName        = "$(Get-PimDownlinkValue -Object $r -Key 'FirstName')"
+            LastName         = "$(Get-PimDownlinkValue -Object $r -Key 'LastName')"
+            Initials         = "$(Get-PimDownlinkValue -Object $r -Key 'Initials')"
+            UsageLocation    = "$(Get-PimDownlinkValue -Object $r -Key 'UsageLocation')"
+            Purpose          = "$(Get-PimDownlinkValue -Object $r -Key 'Purpose')"
+            Ring             = [int]$ring
+            Template         = "$(Get-PimDownlinkValue -Object $r -Key 'Template')"
+            Target           = "$(Get-PimDownlinkValue -Object $r -Key 'Target')".Trim()
+            ManagerEmail     = "$(Get-PimDownlinkValue -Object $r -Key 'ManagerEmail')"
+            TapLifetimeHours = $tapLife
+            AccountStatus    = "$(Get-PimDownlinkValue -Object $r -Key 'AccountStatus')".Trim()
+            OffboardDate     = "$(Get-PimDownlinkValue -Object $r -Key 'OffboardDate')".Trim()
+            ManagementMode   = 'msp'
+        }) | Out-Null
+    }
+    return @{ synced = $synced.ToArray(); notSynced = $notSynced.ToArray(); mspWithoutRing = $noRing.ToArray(); adOnly = $adOnly.ToArray() }
+}
+
 function Select-PimDownlinkAdmins {
     param(
         [object[]]$Admins = @(),
@@ -172,6 +250,7 @@ function Select-PimDownlinkAdmins {
     $keep = New-Object System.Collections.Generic.List[object]
     foreach ($a in @($Admins)) {
         if ($null -eq $a) { continue }
+        if (-not (Test-PimDownlinkAdminSynced -Admin $a).synced) { continue }   # row 35: the master's row must say msp
         $ringRaw = Get-PimDownlinkValue -Object $a -Key 'Ring'
         if ($null -eq $ringRaw -or "$ringRaw".Trim() -eq '') { continue }   # no ring => not eligible (fail-safe)
         $ring = [int]$ringRaw
@@ -466,6 +545,47 @@ function Resolve-PimDownlinkSyncPath {
 # Returns @{ match; reason } -- reason is always populated, including on a match, so
 # "why did this arrive / not arrive" is answerable from the plan alone.
 # ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# AUTHORING CHECK (pure) for an admin row's Target -- REQUIREMENTS 68.6 row 35. The same grammar
+# Test-PimArtifactTarget reads (tag:<t> / bare tag / tenant:<guid> / all / * / none, ; or ,
+# separated). -KnownTags is the MSP registry's tenant tag list; -TagsKnown says whether that list
+# was actually read. An unknown tag is only reported when the list is KNOWN -- "not checked" must
+# never read as "fine" or as "wrong".
+# Returns @{ ok; tokens; tags; unknownTags; malformed; checkedTags; normalized }.
+# ---------------------------------------------------------------------------
+function Test-PimAdminTargetSelector {
+    param([AllowEmptyString()][string]$Target, [string[]]$KnownTags = @(), [switch]$TagsKnown)
+    $t = "$Target".Trim()
+    $known = New-Object System.Collections.Generic.HashSet[string]
+    foreach ($k in @($KnownTags)) { if ("$k".Trim()) { [void]$known.Add("$k".Trim().ToLowerInvariant()) } }
+    $tokens = @($t -split '[;,]' | ForEach-Object { "$_".Trim() } | Where-Object { $_ })
+    $tags = New-Object System.Collections.Generic.List[string]
+    $unknown = New-Object System.Collections.Generic.List[string]
+    $bad = New-Object System.Collections.Generic.List[string]
+    $norm = New-Object System.Collections.Generic.List[string]
+    foreach ($tok in $tokens) {
+        $l = $tok.ToLowerInvariant()
+        if ($l -in @('*', 'all', 'none')) { $norm.Add($l); continue }
+        if ($l -like 'tenant:*') {
+            if ($l.Substring(7).Trim() -match '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$') { $norm.Add($l); continue }
+            $bad.Add($tok); continue
+        }
+        $tag = if ($l -like 'tag:*') { $tok.Substring(4).Trim() } else { $tok }
+        if (-not $tag -or $tag -notmatch '^[A-Za-z0-9._-]+$') { $bad.Add($tok); continue }
+        $tags.Add($tag); $norm.Add("tag:$tag")
+        if ($TagsKnown -and -not $known.Contains($tag.ToLowerInvariant())) { $unknown.Add($tag) }
+    }
+    return @{
+        ok          = ($bad.Count -eq 0 -and $unknown.Count -eq 0)
+        tokens      = $tokens
+        tags        = $tags.ToArray()
+        unknownTags = $unknown.ToArray()
+        malformed   = $bad.ToArray()
+        checkedTags = [bool]$TagsKnown
+        normalized  = ($norm.ToArray() -join ';')
+    }
+}
+
 function Test-PimArtifactTarget {
     param(
         [string]$Target,
@@ -793,7 +913,7 @@ function Resolve-PimCustomerBlockedCapabilities {
         $manifest = (Get-Content -Raw -LiteralPath $path) | ConvertFrom-Json
         $blocked = @(Select-PimCustomerBlockedCapabilities -Manifest $manifest -Solution $Solution)
     } catch {
-        throw ("SEC-10: the customer manifest '$path' exists but could NOT be parsed " +
+        throw ("the customer manifest '$path' exists but could NOT be parsed " +
                "($($_.Exception.Message)). Refusing to run: an unreadable opt-out list must never " +
                "be treated as 'the customer blocked nothing'. Fix the JSON, or pass " +
                "-BlockedCapabilities explicitly to state the intent.")
@@ -1248,7 +1368,17 @@ function Get-PimDownlinkPlan {
     if ($PSBoundParameters.ContainsKey('BaselineAdmins') -and $null -ne $BaselineAdmins) { $src = @($BaselineAdmins) }
     else { $src = @(Get-PimDownlinkValue -Object $payload -Key 'rows') }
 
-    # 3) ring-gate to admin.Ring <= slave.Ring.
+    # 3) ring-gate to admin.Ring <= slave.Ring -- after the row-35 mode gate, whose skips are
+    #    REPORTED (never silent): an admin the master no longer marks msp is not sent, and the
+    #    slave-side apply withdraws it only inside the retraction budget.
+    $notSynced = New-Object System.Collections.Generic.List[object]
+    foreach ($a in @($src)) {
+        $ms = Test-PimDownlinkAdminSynced -Admin $a
+        if (-not $ms.synced) {
+            $un = "$(Get-PimDownlinkValue -Object $a -Key 'UserName')"
+            $notSynced.Add([ordered]@{ kind = 'admin'; name = $un; UserName = $un; GroupTag = ''; reason = $ms.reason }) | Out-Null
+        }
+    }
     $admins = @(Select-PimDownlinkAdmins -Admins $src -SlaveRing $SlaveRing)
 
     # 3a) MSP-4 TARGETING + CLASS GATING.
@@ -1458,6 +1588,7 @@ function Get-PimDownlinkPlan {
             $reason += " ($($adminSkips.Count) of them ADMIN(S) -- WITHHELD, NOT RETRACTED: whatever access they already hold in this tenant is UNCHANGED by this plan)"
         }
     }
+    if ($notSynced.Count)   { $reason += "; $($notSynced.Count) admin(s) NOT SYNCED -- their row at the master is not ManagementMode=msp (a slave that still holds them withdraws them only inside its retraction budget)" }
     if ($classHeld.Count)   { $reason += "; $($classHeld.Count) HELD -- the customer blocked that capability" }
     # IMP-13: named in the reason, because the operator cannot fix this one from our side and the
     # symptom without it (an account recreated on every tick, forever) points nowhere near the cause.
@@ -1476,6 +1607,8 @@ function Get-PimDownlinkPlan {
         projection      = $projection
         definitions     = $definitionPlan
         notTargeted     = @($targetSkips.ToArray())
+        # Row 35: admins the master does not mark ManagementMode=msp. A FIELD, like notTargeted.
+        notSynced       = @($notSynced.ToArray())
         # A downlink plan NEVER removes access -- it only decides what is SENT. Stated as a
         # field so a caller can assert it directly instead of inferring it from remove=0, which
         # is the inference that went wrong. Retraction is a destructive CROSS-TENANT act and
@@ -2133,17 +2266,47 @@ function Invoke-PimDownlinkAdminApply {
         [switch]$AllowFullPrune,
         [switch]$WhatIfMode = $true
     )
-    $entity = 'Account-Definitions-Admins'
+    # 🔑 REQUIREMENTS 68.6 row 35 (operator 2026-09-13): "slaves ... have their own admins.
+    # separate table." Central admins imported from the master live in their OWN entity; the
+    # slave's Account-Definitions-Admins holds only the slave's own admins. The engine reads both
+    # (Get-PimDesiredRows unions them, central rows stamped AdminSource=central) and governs each
+    # by its SOURCE. Keep this name identical to PIM-EngineCore.ps1 Get-PimCentralAdminEntityName.
+    $localEntity = 'Account-Definitions-Admins'
+    $entity = 'Account-Definitions-Admins-Central'
     $existing = @()
+    $localRows = @()
     try { $existing = @(Get-PimSqlRows -ConnectionString $ConnectionString -Entity $entity) }
     catch { return @{ ok = $false; created = 0; updated = 0; removed = 0; skippedForeign = 0; detail = "could not read $entity from the slave store: $($_.Exception.Message)" } }
+    try { $localRows = @(Get-PimSqlRows -ConnectionString $ConnectionString -Entity $localEntity) }
+    catch { return @{ ok = $false; created = 0; updated = 0; removed = 0; skippedForeign = 0; detail = "could not read $localEntity from the slave store: $($_.Exception.Message)" } }
+
+    # ONE-TIME MIGRATION: before this change the sync wrote central admins INTO the slave's own
+    # entity, stamped Owner=$Owner. Move exactly those (copy first, then remove -- a failure in
+    # between leaves a duplicate, never a lost admin). Unstamped / Local rows stay where they are.
+    $migrated = 0
+    $existingKeys = @{}
+    foreach ($e in $existing) { $existingKeys["$(Get-PimDownlinkValue -Object $e -Key 'UserName')"] = $true }
+    $mig = New-Object System.Collections.Generic.List[object]
+    foreach ($lr in $localRows) {
+        if ("$(Get-PimDownlinkValue -Object $lr -Key 'Owner')" -ne $Owner) { continue }
+        $mk = "$(Get-PimDownlinkValue -Object $lr -Key 'UserName')"
+        if (-not $mk) { continue }
+        if (-not $WhatIfMode) {
+            if (-not $existingKeys.ContainsKey($mk)) { Set-PimSqlRow -ConnectionString $ConnectionString -Entity $entity -Key $mk -Data $lr }
+            Remove-PimSqlRow -ConnectionString $ConnectionString -Entity $localEntity -Key $mk
+        }
+        if (-not $existingKeys.ContainsKey($mk)) { $mig.Add($lr) | Out-Null; $existingKeys[$mk] = $true }
+        $migrated++
+    }
+    $existing = @($existing) + @($mig.ToArray())
 
     $ownedKeys = @{}
     foreach ($e in $existing) {
         if ("$(Get-PimDownlinkValue -Object $e -Key 'Owner')" -ne $Owner) { continue }
         $ownedKeys["$(Get-PimDownlinkValue -Object $e -Key 'UserName')"] = $true
     }
-    $foreign = @($existing).Count - $ownedKeys.Count
+    # the slave's OWN admins: everything in its own entity that this sync did not plant
+    $foreign = @($localRows | Where-Object { "$(Get-PimDownlinkValue -Object $_ -Key 'Owner')" -ne $Owner }).Count
 
     $created = 0; $updated = 0; $desired = @{}; $tapOn = 0; $tapNoRecipient = 0
     foreach ($a in @($Admins)) {
@@ -2190,11 +2353,16 @@ function Invoke-PimDownlinkAdminApply {
             CreateTAP             = $createTap
             TAPStartDate          = ''
             TAPLifetimeHours      = "$life"
-            AccountStatus         = 'Enabled'
+            # Governance follows the SOURCE (row 35): the master's status and offboarding decision
+            # flow down with the row. A bundle that predates these fields means Enabled / none.
+            AccountStatus         = $(if ("$(Get-PimDownlinkValue -Object $a -Key 'AccountStatus')".Trim()) { "$(Get-PimDownlinkValue -Object $a -Key 'AccountStatus')".Trim() } else { 'Enabled' })
             StatusChangeCode      = ''
             Ring                  = "$(Get-PimDownlinkValue -Object $a -Key 'Ring')"
+            Target                = "$(Get-PimDownlinkValue -Object $a -Key 'Target')".Trim()
+            ManagementMode        = 'msp'
+            AdminSource           = 'central'
             Template              = "$(Get-PimDownlinkValue -Object $a -Key 'Template')"
-            OffboardDate          = ''
+            OffboardDate          = "$(Get-PimDownlinkValue -Object $a -Key 'OffboardDate')".Trim()
             DeleteAfterDays       = ''
             Owner                 = $Owner
         }
@@ -2205,9 +2373,17 @@ function Invoke-PimDownlinkAdminApply {
     # same empty-desired guard as the membership apply: "published nothing" and
     # "withdrew everyone" are indistinguishable here, and the safe reading is the first.
     $stale = @($ownedKeys.Keys | Where-Object { -not $desired.ContainsKey($_) })
-    $removed = 0; $wouldPrune = @()
+    $removed = 0; $wouldPrune = @(); $retractHeld = @()
+    # Row 35: an admin the master stops marking msp (or narrows away) is WITHDRAWN here -- a
+    # cross-tenant retraction. It rides the same removal budget as every other removal
+    # (PIM_RemoveMaxCount, default 5): over budget, NOTHING is withdrawn and the run says why.
+    $budget = 5
+    if (Get-Command Get-PimSafetyKnob -ErrorAction SilentlyContinue) {
+        $kb = 0; if ([int]::TryParse("$(Get-PimSafetyKnob -Name 'PIM_RemoveMaxCount')", [ref]$kb) -and $kb -ge 0) { $budget = $kb }
+    }
     if ($stale.Count) {
         if (@($Admins).Count -eq 0 -and -not $AllowFullPrune) { $wouldPrune = $stale }
+        elseif ($stale.Count -gt $budget -and -not $AllowFullPrune) { $retractHeld = $stale }
         else {
             foreach ($k in $stale) {
                 if (-not $WhatIfMode) { Remove-PimSqlRow -ConnectionString $ConnectionString -Entity $entity -Key $k }
@@ -2215,13 +2391,15 @@ function Invoke-PimDownlinkAdminApply {
             }
         }
     }
-    $detail = "${entity}: +$created ~$updated -$removed (left $foreign local admin row(s) untouched); TAP on for $tapOn"
+    $detail = "${entity}: +$created ~$updated -$removed (left $foreign of the slave's own admin row(s) untouched); TAP on for $tapOn"
+    if ($migrated) { $detail += "; MIGRATED $migrated central admin row(s) out of $localEntity into $entity (one-time)" }
+    if ($retractHeld.Count) { $detail += "; HELD: would withdraw $($retractHeld.Count) central admin(s), over the retraction budget of $budget -- NOTHING withdrawn (check the master's ManagementMode / Ring / Target, then re-run with -AllowFullPrune or raise PIM_RemoveMaxCount)" }
     # Surfaced, never swallowed: a TAP with no recipient is minted, mailed nowhere, and the code
     # is unrecoverable afterwards. That must read as a WARNING in the sync output, not as success.
     if ($tapNoRecipient) { $detail += "; WARNING $tapNoRecipient admin(s) have CreateTAP=TRUE but NO ManagerEmail -- their TAP would be minted and never delivered (pass -DefaultManagerEmail)" }
     if ($wouldPrune.Count) { $detail += "; REFUSED to prune $($wouldPrune.Count) synced admin(s) on an EMPTY baseline -- pass -AllowFullPrune" }
     if ($WhatIfMode) { $detail = "[whatif] $detail" }
-    return @{ ok = $true; created = $created; updated = $updated; removed = $removed; skippedForeign = $foreign; wouldPrune = $wouldPrune; tapEnabled = $tapOn; tapWithoutRecipient = $tapNoRecipient; detail = $detail }
+    return @{ ok = $true; created = $created; updated = $updated; removed = $removed; skippedForeign = $foreign; wouldPrune = $wouldPrune; retractHeld = $retractHeld; migrated = $migrated; entity = $entity; tapEnabled = $tapOn; tapWithoutRecipient = $tapNoRecipient; detail = $detail }
 }
 
 # Sync-PimMasterToSlave -- alias-style entry the matrix also probes for. Thin
@@ -2393,7 +2571,7 @@ function Invoke-PimScenarioDeploy {
                         $__dom = "$(Get-PimRestDefaultDomain)".Trim()
                         if ($__dom) {
                             $dlPass['SlaveDefaultDomain'] = $__dom
-                            Write-Host "[scenario-run] slave domain: none supplied -- resolved '$__dom' from this tenant (local-slave; IMP-12)" -ForegroundColor DarkGray
+                            Write-Host "[scenario-run] slave domain: none supplied -- resolved '$__dom' from this tenant (local-slave)" -ForegroundColor DarkGray
                         }
                     } catch {
                         Write-Host "[scenario-run] slave domain: could not resolve it from this tenant ($($_.Exception.Message)) -- admins will NOT be staged rather than built at a guessed domain." -ForegroundColor Yellow

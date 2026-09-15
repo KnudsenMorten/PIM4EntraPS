@@ -1,4 +1,4 @@
-# ---------------------------------------------------------------------------
+﻿# ---------------------------------------------------------------------------
 # IMP-02 -- ONE locale-safe way to read a UTC timestamp this product wrote.
 #
 # §22 requires "locale-safe date parsing (US dates on da-DK)", and Ensure-DateTime

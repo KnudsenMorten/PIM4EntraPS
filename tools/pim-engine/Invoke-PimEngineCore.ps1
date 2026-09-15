@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
   PIM4EntraPS engine entrypoint -- runs the NEW REST + SQL engine (PIM-EngineCore +
   providers). This IS the engine the scheduler, container worker and VM call; it is not
@@ -143,18 +143,22 @@ if ($global:PIM_ActiveScenario) {
 . "$shared\PIM-Rest.ps1"
 . "$shared\PIM-SqlStore.ps1"
 . "$shared\PIM-ChangeQueue.ps1"
+. "$shared\PIM-QueueActions.ps1"   # §65 -- the ACTION drain (see PIM-Functions.psm1)
 . "$shared\PIM-PermissionWizard.ps1"      # naming helpers (ConvertTo-PimNameSegment / New-PimPermissionGroupName / scope-depth+plane) for discovery
 . "$shared\PIM-AzureDiscovery.ps1"        # Azure scope reconcile planner (Power BI discovery mirrors its shape)
 . "$shared\PIM-Discovery.ps1"             # Power BI / service-role / auto-map / delta discovery layer (REST-only)
 . "$shared\PIM-ContextBuilder.ps1"
 . "$shared\PIM-License.ps1"                     # offline Core/Pro edition model (Get-PimEdition)
 . "$shared\PIM-FeatureCatalog.ps1"              # feature catalog + gates (Test-PimFeatureAvailable) -- s29/s30
+. "$shared\PIM-FailureCatalog.ps1"              # classified item failures (cause/remedy/auto-fix)
 . "$shared\PIM-EngineCore.ps1"
 . "$shared\PIM-DisableGuard.ps1"                # account-disable circuit breaker (incident 2026-06-15)
 . "$shared\PIM-Notify.ps1"                      # mail notifications (REST sendMail)
 . "$shared\PIM-HybridAd.ps1"                    # on-prem AD/gMSA-sMSA PLANNER + hybrid-worker seam (on-prem write is worker-only)
 . "$shared\PIM-EngineProviders.ps1"
-. "$config\PIM4EntraPS.Filters.locked.ps1"     # $global:PIM_Filters (candidate filters)
+# 🔒 No filters FILE (operator, 2026-09-12: "we dont support files in pim v2" -- "we support filters,
+# but from sql"). The v1 Filters.locked.ps1 only fed filtered lists no v2 code reads; v2 filters live in
+# pim.Settings['Filters'], and Build-PimContext loads the raw groups/AUs/role catalog without it.
 Register-PimDefaultEngineProviders
 $global:PIM_EngineSqlCs = Get-PimSqlConnectionString
 

@@ -1,4 +1,4 @@
-# _PimActivatorBackend.ps1 -- REST-first write helpers for the PIM Activator
+﻿# _PimActivatorBackend.ps1 -- REST-first write helpers for the PIM Activator
 # backend deploy (app registration + service principal + delegated admin-consent
 # grants). Dot-source from Deploy-PimActivatorBackend.ps1; defines functions only
 # (no side effects on load).

@@ -1,4 +1,4 @@
-#Requires -Version 5.1
+﻿#Requires -Version 5.1
 <#
 .SYNOPSIS
     Local-plane engine apply (LIFECYCLE-GOVERNANCE § 19): read the customer's

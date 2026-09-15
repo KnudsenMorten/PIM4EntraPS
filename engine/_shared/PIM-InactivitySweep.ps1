@@ -1,4 +1,4 @@
-#Requires -Version 5.1
+﻿#Requires -Version 5.1
 <#
 .SYNOPSIS
     Inactivity sweep for privileged admins (REQUIREMENTS §25c "Inactivity

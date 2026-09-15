@@ -1,4 +1,4 @@
-#Requires -Version 5.1
+﻿#Requires -Version 5.1
 <#
 .SYNOPSIS
     Unstick the PIM Activator extension on a laptop that's pinned to an
@@ -51,7 +51,24 @@
       trips the JSON, so that can't happen.
 
 .PARAMETER ExtensionId
-    Chrome/Edge extension id. Default 'eheocihmlppcophaeakmdenhgcookkab'.
+    Chrome/Edge extension id(s) to purge. DEFAULT: BOTH channels --
+    'eheocihmlppcophaeakmdenhgcookkab' (Released) AND
+    'glldnbmjpdkjemcnficagdhgienfdpoo' (Test).
+
+    🔑 BOTH BY DEFAULT, BECAUSE A MACHINE CAN CARRY BOTH AND THE SYMPTOM IS IDENTICAL.
+    This script used to purge the RELEASED id only. On any machine that had ever run the Test
+    channel -- which is every development and pilot laptop, and the two channels install side by
+    side on purpose -- the stale TEST registration was left behind, so the exact symptom the script
+    exists to clear ("All forced extensions seem to be installed", stuck at an old version) came
+    straight back for that channel. The operator then reasonably concludes the fix does not work.
+    Purging an id that is not present costs nothing: Remove-JsonProperty reports 0 removals and
+    moves on, so defaulting to both is strictly safer than defaulting to one.
+
+    Pass -ExtensionId explicitly to narrow it, or -Channel Released / -Channel Test.
+
+.PARAMETER Channel
+    'Both' (default), 'Released', or 'Test' -- a readable way to pick the id(s) without typing
+    them. Ignored when -ExtensionId is given explicitly.
 
 .PARAMETER Browser
     'Both' (default), 'Edge', or 'Chrome' -- which browser's profiles to clean.
@@ -70,7 +87,11 @@
 #>
 [CmdletBinding()]
 param(
-    [string]$ExtensionId = 'eheocihmlppcophaeakmdenhgcookkab',
+    # Empty by default so -Channel can fill it in; an explicit value always wins.
+    [string[]]$ExtensionId = @(),
+
+    [ValidateSet('Both','Released','Test')]
+    [string]$Channel = 'Both',
 
     [ValidateSet('Both','Edge','Chrome')]
     [string]$Browser = 'Both',
@@ -79,6 +100,32 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+
+# ---- Which extension id(s) ------------------------------------------------------------------
+# The two channels install SIDE BY SIDE and get stuck in exactly the same way, so the default
+# clears both. These ids are the same everywhere (each is derived from its signing key), and they
+# are the values Deploy-PimActivatorClient.ps1 / Deploy-PimActivatorIntune.ps1 deploy.
+$PIM_ACTIVATOR_IDS = [ordered]@{
+    Released = 'eheocihmlppcophaeakmdenhgcookkab'
+    Test     = 'glldnbmjpdkjemcnficagdhgienfdpoo'
+}
+if (-not @($ExtensionId | Where-Object { "$_".Trim() }).Count) {
+    $ExtensionId = switch ($Channel) {
+        'Released' { @($PIM_ACTIVATOR_IDS.Released) }
+        'Test'     { @($PIM_ACTIVATOR_IDS.Test) }
+        default    { @($PIM_ACTIVATOR_IDS.Released, $PIM_ACTIVATOR_IDS.Test) }
+    }
+}
+$ExtensionId = @($ExtensionId | ForEach-Object { "$_".Trim() } | Where-Object { $_ })
+# 🪤 A TYPO'D ID SILENTLY PURGES NOTHING and reports "no stale entries found", which reads as "your
+# profile is clean" -- the one conclusion that sends the operator looking somewhere else. Chrome
+# ids are exactly 32 chars from a-p, so a wrong one is cheap to catch here.
+foreach ($id in $ExtensionId) {
+    if ($id -notmatch '^[a-p]{32}$') {
+        throw ("'$id' is not a Chrome/Edge extension id (32 characters, a-p only). Nothing was changed. " +
+               "Released = $($PIM_ACTIVATOR_IDS.Released); Test = $($PIM_ACTIVATOR_IDS.Test).")
+    }
+}
 
 # --- Helpers ----------------------------------------------------------------
 
@@ -222,13 +269,16 @@ if (-not $NoBrowserKill) {
 
 # --- 2. Walk profile folders + purge ----------------------------------------
 
-Write-Step "Purging stale '$ExtensionId' entries from every profile"
+Write-Step ("Purging stale entries from every profile for " + @($ExtensionId).Count + " extension id(s): " + (@($ExtensionId) -join ', '))
 $roots = @()
 if ($Browser -in @('Both','Chrome')) { $roots += "$env:LOCALAPPDATA\Google\Chrome\User Data" }
 if ($Browser -in @('Both','Edge'))   { $roots += "$env:LOCALAPPDATA\Microsoft\Edge\User Data" }
 
 $totalRemoved = 0
 $profilesScanned = 0
+# Per-id counts, so the report says WHICH channel was actually stuck rather than a single total
+# that cannot distinguish "Test was stale" from "Released was stale".
+$perId = @{}
 foreach ($root in $roots) {
     if (-not (Test-Path -LiteralPath $root)) {
         Write-Warn "$root not present -- browser never run by this user"
@@ -240,8 +290,13 @@ foreach ($root in $roots) {
         $profilesScanned++
         foreach ($prefName in 'Preferences','Secure Preferences') {
             $prefPath = Join-Path $pd.FullName $prefName
-            $n = Remove-JsonProperty -Path $prefPath -PropertyName $ExtensionId
-            $totalRemoved += $n
+            # Every id, every file. An id that is not in this profile removes 0 and costs one
+            # string scan -- which is why purging both channels by default is safe.
+            foreach ($id in $ExtensionId) {
+                $n = Remove-JsonProperty -Path $prefPath -PropertyName $id
+                if ($n) { $perId[$id] = [int]$perId[$id] + $n }
+                $totalRemoved += $n
+            }
         }
     }
 }
@@ -251,6 +306,13 @@ foreach ($root in $roots) {
 Write-Step "Done"
 Write-Ok  "Profiles scanned       : $profilesScanned"
 Write-Ok  "Total entries removed  : $totalRemoved"
+foreach ($id in $ExtensionId) {
+    $label = @($PIM_ACTIVATOR_IDS.Keys | Where-Object { $PIM_ACTIVATOR_IDS[$_] -eq $id })
+    $name  = if ($label.Count) { $label[0] } else { 'custom' }
+    $n     = [int]$perId[$id]
+    if ($n) { Write-Ok   ("  {0,-8} {1} : {2} removed" -f $name, $id, $n) }
+    else    { Write-Warn ("  {0,-8} {1} : none found" -f $name, $id) }
+}
 if ($totalRemoved -eq 0) {
     Write-Warn "No stale entries found. The stuck-version symptom is something else (could be CDN caching, policy not applied, or signing key mismatch). Check chrome://policy for ExtensionInstallForcelist + ExtensionSettings status."
 } else {

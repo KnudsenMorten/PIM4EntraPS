@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
   PIM4EntraPS scheduler/job runner entrypoint. Runs the in-process job engine
   (PIM-Scheduler.ps1) that fires the phase-split delta, queue-apply, reminders and
@@ -69,41 +69,73 @@ $global:PIM_UseGraphSdk = $false   # REST-first; no Graph/Az modules
 . "$shared\PIM-Rest.ps1"
 . "$shared\PIM-PortalAccess.ps1"      # Get-PimPolicySetting (config-driven schedule)
 . "$shared\PIM-ChangeQueue.ps1"       # Get-PimQueueApplyPlan (queue-apply handler)
+# 🔴 §65 -- WITHOUT THIS THE QUEUE IS A BLACK HOLE. queue-apply gates on
+# Invoke-PimQueueActionDrain; if the file that defines it is not loaded here the gate simply skips,
+# the job reports what it drained (nothing), and every queued revoke / TAP reset / session revoke
+# sits in the queue for ever. That is the BUG-134 failure class exactly -- a capability that is
+# absent rather than broken, so nothing errors. Caught by Test-PimScheduler's
+# "every gated capability is DEFINED IN A FILE THE TICK LOADS" assertion, which exists for this.
+. "$shared\PIM-QueueActions.ps1"      # Invoke-PimQueueActionDrain (the ACTION half of queue-apply)
 . "$shared\PIM-SqlStore.ps1"          # SQL store (signature read for the change-detector)
 . "$shared\PIM-Cutover.ps1"           # Invoke-PimSqlChangeDetector (on-demand recalc on SQL change)
 . "$shared\PIM-Approvals.ps1"         # escalation logic
 . "$shared\PIM-DelegationDepth.ps1"   # two-approval split + reachability + self-deleg
 . "$shared\PIM-Lifecycle.ps1"         # reminders / expirations
 . "$shared\PIM-Notify.ps1"            # mail notifications (REST sendMail) -- so the daily-summary / tier-report / escalation jobs can actually send AND the send path hydrates EmailControls (kill switch / redirect / allowlist) from pim.Settings for this cold scheduler process
+. "$shared\PIM-MailTemplateStore.ps1"  # the ONE mail template store (pim.Settings MailTemplates); merged/seeded at wiring below
+. "$shared\PIM-FailureCatalog.ps1"    # classified item failures (cause/remedy/auto-fix), persisted in SQL
 . "$shared\PIM-EngineCore.ps1"        # NEW REST+SQL engine (diff + providers)
 . "$shared\PIM-DisableGuard.ps1"      # account-disable circuit breaker (incident 2026-06-15)
 . "$shared\PIM-HybridAd.ps1"          # on-prem AD/gMSA-sMSA PLANNER + hybrid-worker seam (on-prem write is worker-only)
 . "$shared\PIM-EngineProviders.ps1"
+# 🔴 THE ENTRA ROLE CATALOG WAS NEVER LOADED IN THE TICK (found 2026-09-12). Invoke-PimEngineCore.ps1
+# loads PIM-ContextBuilder.ps1 + the filters; this runner -- which is what actually runs every
+# scheduled job in the cloud -- loaded neither. Build-PimContext therefore did not exist, the
+# providers' `try { Build-PimContext } catch {}` swallowed "command not found", $Global:Roles_All_ID
+# and $Global:AU_All_ID stayed empty, and EVERY EntraRoles create failed as "unresolved group/role"
+# (136 identical failures on internal since 2026-09-10; every attempt since 2026-08-19), while the
+# same run resolved all 342 groups. AU attach-at-create silently skipped for the same reason.
+# 🔒 NO FILE IS LOADED FOR THIS (operator, 2026-09-12: "we dont use files in pim v2 -- we use only
+# sql"). The role catalog and AUs come from Graph; the v1 filters file only feeds filtered lists
+# that no v2 engine code reads, and Build-PimContext no longer requires it.
+. "$shared\PIM-ContextBuilder.ps1"
 . "$shared\PIM-PermissionWizard.ps1"  # Azure scope derivation/depth + group naming (used by the Azure reconcile planner)
 . "$shared\PIM-AzureDiscovery.ps1"    # Get-PimAzureReconcilePlan / ConvertTo-PimReconcileQueueChanges
 . "$shared\PIM-Discovery.ps1"         # discovery enumerators + sweep (Invoke-PimDiscoveryJobSweep)
 . "$shared\PIM-License.ps1"           # offline Core/Pro edition model (Get-PimEdition)
 . "$shared\PIM-FeatureCatalog.ps1"    # feature catalog + gates (Test-PimFeatureAvailable) -- s29/s30
 . "$shared\PIM-AlertFeed.ps1"         # ALERT-01: recorded-send proof + the shared SQL feed adapter
+# 🔴 TWO SCHEDULED JOBS WERE PERMANENTLY INERT BECAUSE THIS LINE WAS MISSING.
+# 'escalations' and 'scheduled-creation' are registered, scheduled and enabled -- and both are
+# capability-gated on a function from THIS file (Build-PimLifecycleCalendar,
+# Get-PimDueScheduledCreations). It was never dot-sourced here, so every tick in every deployment
+# found the function absent and reported `no-op` / `no-handler:Build-PimLifecycleCalendar` --
+# forever, and truthfully, which is why nobody chased it: a job that says "no-op" looks like a job
+# with nothing to do. Reported 2026-09-10: "why does these 2 say no-op".
+# 🪤 The capability gate is right (a worker without the feature must not fail); what was wrong is
+# that the capability was never present ANYWHERE. A gate on something nothing loads is a switch
+# with no wire behind it.
+. "$shared\PIM-Governance.ps1"        # lifecycle calendar + due scheduled creations (escalations / scheduled-creation)
+. "$shared\PIM-Notifications.ps1"     # daily-summary / tier-report / servicenow intake poll
+. "$shared\PIM-DateSafe.ps1"          # Get-PimUtcStamp, gated on by several handlers
+. "$shared\PIM-ArmContainerApps.ps1"  # §56.5 the ARM roller (Set-PimAcaJobImage) the watchdog repairs with
+. "$shared\PIM-UpdateWatchdog.ps1"    # §56.5 restore the updater when it adopts a build it cannot run
 . "$shared\PIM-JobAlert.ps1"          # ALERT-01: a FAILED scheduled run now raises engine-failure.
                                       # This process already had a mail path (PIM-Notify above) but
                                       # no alerting logic on top of it, so a 03:00 failure was silent.
 . "$shared\PIM-Scheduler.ps1"
+# §70.1b option 2: the active-assignments LIVE READ (Entra-role / Azure-RBAC / PIM-for-Groups) that used to freeze
+# the Manager's single request loop for 140-170 s. Job 'active-assignments-snapshot' runs it here and stores it in
+# pim.TenantCache; the Manager only reads that row. Needs _tenantSync.ps1 (below) for the store + connection helpers.
+. "$shared\PIM-ActiveAssignments.ps1"
+# Drift page (2026-09-14): the live-vs-desired plan that used to run inside the Manager's GET /api/drift. Job
+# 'drift-snapshot' runs it here and stores pim.TenantCache kind 'drift'; the Manager only reads that row.
+. "$shared\PIM-DriftSnapshot.ps1"
 
-# State + run-history file location (file-backed VM/local deployments). SQL-backed
-# deployments persist via pim.Settings and ignore this. Default to the solution's
-# output\scheduler dir so the Manager's Jobs tab (/api/jobs) reads the SAME state +
-# run history this runner writes. Override with $global:PIM_SchedulerStatePath /
-# $env:PIM_SCHED_STATE_PATH before launch.
-if (-not "$($global:PIM_SchedulerStatePath)".Trim()) {
-    if ("$env:PIM_SCHED_STATE_PATH".Trim()) {
-        $global:PIM_SchedulerStatePath = "$env:PIM_SCHED_STATE_PATH"
-    } else {
-        $_schedDir = Join-Path (Resolve-Path "$here\..\..").Path 'output\scheduler'
-        if (-not (Test-Path -LiteralPath $_schedDir)) { try { [void](New-Item -ItemType Directory -Path $_schedDir -Force) } catch {} }
-        $global:PIM_SchedulerStatePath = Join-Path $_schedDir 'pim-scheduler-state.json'
-    }
-}
+# Scheduler state + run history + acknowledgements live in SQL pim.Settings (SchedulerState /
+# JobRunHistory / JobAcknowledgements) -- the SAME store the Manager's Jobs tab reads. The old
+# file location ($global:PIM_SchedulerStatePath / $env:PIM_SCHED_STATE_PATH ->
+# output\scheduler\pim-scheduler-state.json) is gone: PIM v2 is SQL-only (2026-09-13).
 
 # Tenant-list cache refresher (Invoke-PimTenantListRefresh + cache read/write/path
 # helpers) lives with the Manager. Dot-source it so the scheduler's 'tenant-cache'
@@ -192,6 +224,14 @@ if ($_schedSqlConfigured) {
         } catch {
             $_schedProbeErr = "$($_.Exception.Message)"
         }
+        # The ONE mail template store: make sure the retired MailTemplateOverrides are merged in
+        # before anything this process sends reads the store (idempotent; once per store).
+        if ($_schedProbeOk -and (Get-Command Update-PimMailTemplateStore -ErrorAction SilentlyContinue)) {
+            try {
+                $_mt = Update-PimMailTemplateStore -ConnectionString $global:PIM_SqlConnectionString -TemplateDir (Join-Path (Resolve-Path "$here\..\..").Path 'templates\mail') -Actor 'scheduler'
+                Write-Host "[scheduler] mail templates: $($_mt.count) in SQL ($($_mt.reason))" -ForegroundColor DarkGray
+            } catch { Write-Warning "[scheduler] mail template store could NOT be updated: $($_.Exception.Message)" }
+        }
     }
 }
 # The verdict itself is a pure decision (Get-PimSchedulerStoreVerdict) so it is provable offline
@@ -209,6 +249,13 @@ switch ($_schedVerdict.level) {
 
 Initialize-PimDefaultJobHandlers
 Register-PimDefaultEngineProviders     # register the REST scope providers (Admins, ...)
+# §70.1b option 2: the REAL 'active-assignments-snapshot' handler. Registered ONLY here -- the default handler
+# declares itself unimplemented, so the Manager (which also initialises the default handlers) can never run it.
+Register-PimActiveAssignmentsSnapshotHandler
+Write-Host "[scheduler] active-assignments snapshot wired (pim.TenantCache/active-assignments; the Manager reads it)" -ForegroundColor Cyan
+# Drift page: the REAL 'drift-snapshot' handler -- registered ONLY here, after the defaults (which declare it unimplemented).
+Register-PimDriftSnapshotHandler
+Write-Host "[scheduler] drift snapshot wired (pim.TenantCache/drift; the Manager's Drift page reads it)" -ForegroundColor Cyan
 
 # Wire the per-scope engine-delta / engine-full jobs to the NEW REST engine.
 # WhatIf (intent/recalc) -> plan only; otherwise the provider applies via REST.
@@ -217,11 +264,174 @@ $engineHandler = {
     $scope = if ($job.PSObject.Properties['scope'] -and "$($job.scope)".Trim()) { "$($job.scope)" } else { 'All' }
     $mode  = if ("$($job.type)" -eq 'engine-full') { 'Full' } else { 'Delta' }
     $res = Invoke-PimEngine -Scope $scope -Mode $mode -WhatIf:$whatIf
+    # 🔴 BUG-134 -- A SCOPE NO PROVIDER SERVES IS A NO-OP THAT REPORTS SUCCESS, FOR EVER.
+    # Invoke-PimEngineScope answers an unknown scope with { ok=$false; detail="no provider for
+    # scope '<x>'" } and NO create/update/remove. This handler ignored `ok` and formatted the
+    # missing counts anyway, so the tick logged
+    #     delta-groups-assign  engine Delta [GroupsAssignment] GroupsAssignment:c/u/r
+    # and the job was recorded SUCCEEDED. Every other scope printed real numbers
+    # (AdministrativeUnits:c16/u0/r0), so the blank one read as "nothing to do".
+    # 🔑 MEASURED ON THE INTERNAL ENVIRONMENT 2026-09-12. Two of the five scheduled jobs --
+    # 'GroupsAssignment' and 'GroupsCreateModifyPolicy' -- are LEGACY CSV-ENGINE scope names that
+    # the REST engine does not register. GroupsAssignment is what nests a role group into its
+    # permission groups, so a delegation authored in the Manager was created, committed, shown
+    # correctly on the Access map, and NEVER APPLIED to Entra. The operator's report was exactly
+    # that: "i created this delegation but it hasnt added the pim-role to the 2 permission groups".
+    # The provider that does this work is registered as 'GroupMembers'; nothing ever called it.
+    # 🪤 An unserved scope is a CONFIGURATION error, not an empty result, and the two must not look
+    # alike. Fail the job so it surfaces as a failed tick instead of a silent success.
+    # 🔑 `ok` is FALSE in two distinct situations, and they need DIFFERENT operator actions:
+    #   (a) the scope bound to no provider          -> a configuration error (BUG-134)
+    #   (b) the scope ran but item applies FAILED   -> errors>0, e.g. Graph throttling that
+    #       survived all 5 retries, or a genuine permission/data problem.
+    # (b) is the one that decides whether a delegation can be TRUSTED as deployed: without this,
+    # a run whose applies all failed reported `Succeeded` and the operator had no signal at all.
+    # Invoke-PimEngineScope sets ok=($errors -eq 0), so both land here -- but the message must
+    # say which, or the next reader debugs the wrong thing.
+    $bad = @(@($res) | Where-Object { $_ -and $_.PSObject.Properties['ok'] -and -not $_.ok })
+    if ($bad.Count) {
+        $unbound = @($bad | Where-Object { "$($_.detail)" -match 'no provider for scope' })
+        $failed  = @($bad | Where-Object { [int]$_.errors -gt 0 })
+        $parts = @()
+        if ($unbound.Count) {
+            $known = @()
+            try { $known = @(Get-PimEngineScopes) } catch { }
+            $parts += ("scope '$scope' is bound to NO PROVIDER (" +
+                       (@($unbound | ForEach-Object { "$($_.detail)" }) -join '; ') +
+                       "). This job is a no-op. Registered scopes: " + ($known -join ', '))
+        }
+        if ($failed.Count) {
+            $n = (@($failed) | Measure-Object -Property errors -Sum).Sum
+            # 🔴 The old message pointed the reader at per-item log lines in a container log the Manager cannot show (operator,
+            # 2026-09-12: "the eror msg was useless"). Say WHAT failed, grouped by cause, and where the
+            # per-item detail and fixes are.
+            $__items = @($failed | ForEach-Object { if ($_.PSObject.Properties['failures']) { @($_.failures) } })
+            $__summary = if ($__items.Count -and (Get-Command Format-PimFailureSummary -ErrorAction SilentlyContinue)) { Format-PimFailureSummary -Failures $__items } else { '' }
+            if ($__summary) {
+                $parts += ("[" + (@($failed | ForEach-Object { "$($_.scope)" }) -join ', ') + "] " + $__summary)
+            } else {
+                $parts += ("$n item(s) FAILED to apply in [" +
+                           (@($failed | ForEach-Object { "$($_.scope):errors=$($_.errors)" }) -join ', ') +
+                           "]. The desired state is NOT deployed for those items.")
+            }
+        }
+        if (-not $parts.Count) { $parts += (@($bad | ForEach-Object { "$($_.detail)" }) -join '; ') }
+        throw ("[scheduler] engine job '$($job.name)' FAILED: " + ($parts -join ' | '))
+    }
     $sum = @($res) | ForEach-Object { "$($_.scope):c$($_.create)/u$($_.update)/r$($_.remove)" }
     [pscustomobject]@{ ran=$true; detail=("engine $mode [$scope] " + ($sum -join ' ')); whatIf=[bool]$whatIf }
 }
 Register-PimJobHandler -Type 'engine-delta' -Handler $engineHandler
 Register-PimJobHandler -Type 'engine-full'  -Handler $engineHandler
+
+# --- THE TRUST JOB: prove DESIRED == LIVE, cheaply, and keep proving it ---------
+# Operator, 2026-09-12: "it is critical that we can trust that the delegation is actual deployed
+# into the platform - otherwise customer will not trust it. how do you control this desired state
+# ... so it matches the actual delegation in pim".
+#
+# 🔑 Every other job makes a FAILURE visible. This one makes SUCCESS PROVABLE, which is a
+# different claim -- BUG-134 is precisely a case where nothing errored and nothing was deployed.
+# The measurement is taken FROM THE TENANT: `-Mode Full -WhatIf` re-reads live via Graph, diffs
+# against desired in pim.Rows, and returns create = desired-but-not-live. WhatIf writes nothing.
+#
+# CACHING (operator: "cache the result, so you dont have to run every hour all checks"): each
+# scope is skipped while its DESIRED SIGNATURE is unchanged AND its last result was clean AND the
+# cache is younger than the backstop. Hashing the desired side is what makes the cache safe --
+# an age-only cache would be stale exactly in the minutes after a commit, when the truth matters
+# most. An unconverged scope is ALWAYS re-checked; that is the one we are waiting to see go green.
+$convScopes = @(
+    @{ scope = 'GroupMembers';      entity = 'PIM-Assignments-Groups' }            # delegation nesting
+    @{ scope = 'AdminMembers';      entity = 'PIM-Assignments-Admins' }            # admin -> PIM group
+    @{ scope = 'EntraRoles';        entity = 'PIM-Assignments-Roles-Groups' }      # role -> group
+    @{ scope = 'RolesAUs';          entity = 'PIM-Assignments-Roles-AUs' }         # role scoped to an AU
+    @{ scope = 'AzRes';             entity = 'PIM-Assignments-Azure-Resources' }   # Azure resource roles
+)
+Register-PimJobHandler -Type 'verify-convergence' -Handler {
+    param($job,$now,$whatIf)
+    $cs = "$($global:PIM_EngineSqlCs)"; if (-not $cs) { $cs = "$($global:PIM_SqlConnectionString)" }
+    # State lives beside the scheduler's other state so it survives a scale-to-zero replica.
+    $cache = @{}; $seen = @{}
+    try {
+        $cs0 = Get-PimConvergenceState
+        $cache = ConvertTo-PimPlainMap $cs0.cache
+        $seen  = ConvertTo-PimPlainMap $cs0.firstSeen
+    } catch { }
+
+    # 1. What needs verifying this cycle?
+    $sig = @()
+    foreach ($s in $convScopes) {
+        $h = ''
+        if ($cs -and (Get-Command Get-PimDesiredStateSignature -ErrorAction SilentlyContinue)) {
+            $h = Get-PimDesiredStateSignature -ConnectionString $cs -Entity $s.entity
+        }
+        # '' = signature UNKNOWN. Make it unique per run so it can never compare equal to the
+        # cached value -- an unreadable signature must force a verify, never imply "unchanged".
+        if (-not "$h".Trim()) { $h = "unknown-$([guid]::NewGuid())" }
+        $sig += [pscustomobject]@{ scope = $s.scope; desiredHash = $h }
+    }
+    $plan = @(Get-PimConvergenceScopePlan -Scopes $sig -Cache $cache -NowUtc $now)
+
+    # 2. Verify the ones that need it; carry the rest from cache.
+    $unconverged = New-Object System.Collections.Generic.List[string]
+    $unverifiable = New-Object System.Collections.Generic.List[string]
+    $checked = 0; $fromCache = 0
+    foreach ($p in $plan) {
+        $hash = @($sig | Where-Object { $_.scope -eq $p.scope })[0].desiredHash
+        if (-not $p.verify) {
+            # 🔑 INVARIANT: a scope is only skipped when its cached result was CLEAN
+            # (Get-PimConvergenceScopePlan always re-verifies unconverged>0), so it has no
+            # outstanding findings to carry. Contributing nothing here is therefore correct --
+            # and is ONLY correct because of that rule. If the skip condition is ever widened,
+            # this must start carrying the scope's findings forward like the failure path below.
+            $fromCache++
+            continue
+        }
+        $checked++
+        try {
+            # Plan-only: reads live, writes nothing. `create` = desired but NOT present live.
+            $r = @(Invoke-PimEngine -Scope $p.scope -Mode Full -WhatIf)
+            $n = 0
+            foreach ($x in $r) {
+                $n += [int]$x.create
+                foreach ($pl in @($x.plan)) { if ("$($pl.op)" -eq 'Create') { $unconverged.Add("$($p.scope)|$($pl.key)") } }
+            }
+            $cache[$p.scope] = @{ desiredHash = "$hash"; checkedUtc = $now.ToUniversalTime().ToString('o'); unconverged = $n }
+            $col = if ($n) { 'Yellow' } else { 'DarkGray' }
+            Write-Host ("[verify] {0,-16} unconverged={1}  ({2})" -f $p.scope, $n, $p.reason) -ForegroundColor $col
+        } catch {
+            # 🔴 A VERIFICATION THAT FAILED PROVES NOTHING -- and must not be recorded as either
+            # outcome. Two separate mistakes are avoided here:
+            #   1. it must not be CACHED AS CLEAN (that would be an error read as a good result --
+            #      the exact conflation behind BUG-134), so the cache entry is dropped; and
+            #   2. it must not RESET THE AGE CLOCK of findings this scope already had. Dropping
+            #      them from the verdict's input would do precisely that, because a key absent
+            #      from $Unconverged falls out of the state. Repeated Graph throttling is the
+            #      likeliest cause of a failed verification, so that is exactly the situation
+            #      where the clocks must keep running -- otherwise an environment that can never
+            #      complete a verification would never raise a convergence failure either.
+            $cache.Remove($p.scope)
+            foreach ($k in @($seen.Keys)) { if ("$k".StartsWith("$($p.scope)|")) { $unverifiable.Add("$k") } }
+            Write-Warning "[verify] $($p.scope) could not be verified (findings keep their age): $($_.Exception.Message)"
+        }
+    }
+
+    # 3. Age the findings. New != broken; persistent == broken.
+    $verdict = Get-PimConvergenceVerdict -Unconverged @($unconverged.ToArray()) -Previous $seen -NowUtc $now `
+                   -Unverifiable @($unverifiable.ToArray())
+    [void](Save-PimConvergenceState -Cache $cache -FirstSeen $verdict.state)
+
+    $detail = "verify scopes checked=$checked cached=$fromCache unconverged=$($verdict.total) (new=$($verdict.new) persistent=$($verdict.persistent))"
+    if (-not $verdict.ok) {
+        $top = @($verdict.items | Where-Object { [int]$_.ageMinutes -ge 60 } | Select-Object -First 10 |
+                 ForEach-Object { "$($_.key) (unapplied $($_.ageMinutes)m)" })
+        throw ("[scheduler] CONVERGENCE FAILURE -- $($verdict.persistent) delegation/assignment(s) exist in the " +
+               "Manager but NOT in the tenant, and have stayed that way past the grace window. " +
+               "The desired state is NOT deployed: " + ($top -join '; ') +
+               ". Run tools/setup/Repair-PimJobBindingBacklog.ps1 to quantify and clear the backlog.")
+    }
+    [pscustomobject]@{ ran=$true; detail=$detail; unconverged=$verdict.total; whatIf=[bool]$whatIf }
+}
+Write-Host "[scheduler] convergence verification wired (scopes: $(($convScopes | ForEach-Object { $_.scope }) -join ', '))" -ForegroundColor Cyan
 Write-Host "[scheduler] REST engine wired (scopes: $((Get-PimEngineScopes) -join ', '))" -ForegroundColor Cyan
 
 # Wire the REAL discovery handler (the three discovery jobs: Azure / PowerBI / Entra).
@@ -235,7 +445,7 @@ Write-Host "[scheduler] REST engine wired (scopes: $((Get-PimEngineScopes) -join
 # all-create, still gated by the per-type auto-import rules). The discovered items use
 # the REST enumerators. The change queue file defaults next to the scheduler state.
 $discoQueueFile = if ("$($global:PIM_ChangeQueueFile)".Trim()) { "$($global:PIM_ChangeQueueFile)" }
-                  else { Join-Path (Split-Path -Parent $global:PIM_SchedulerStatePath) 'pim-change-queue.json' }
+                  else { Join-Path (Join-Path (Resolve-Path "$here\..\..").Path 'output\scheduler') 'pim-change-queue.json' }
 Register-PimDiscoveryHandler `
     -GetDiscovered {
         param($scope)
@@ -301,8 +511,35 @@ $iv = if ($IntervalSeconds -gt 0) { $IntervalSeconds } elseif ($env:PIM_SCHED_IN
 # when a full reconcile can run long -- PIM_SCHED_LEASE_TTL, minutes.
 $ttl = if ($LeaseTtlMinutes -gt 0) { $LeaseTtlMinutes } elseif ($env:PIM_SCHED_LEASE_TTL) { [int]$env:PIM_SCHED_LEASE_TTL } else { 15 }
 
+# §56.5 -- WATCH THE UPDATER, BECAUSE THE UPDATER CANNOT WATCH ITSELF.
+# `ca-pim-update` stamps itself onto each new image after the MANAGER has proved healthy on it --
+# but the Manager and the updater are different entry points in the SAME image, so an image can
+# boot the Manager perfectly and still be unable to run the updater (measured: 2.4.296-2.4.301).
+# An updater that adopts such an image fails every night and CANNOT REPAIR ITSELF: the thing that
+# would fix it is the broken thing. Recovery would need a human inside the customer's tenant.
+#
+# 🔑 THIS tick is the right place, and the only place available: it runs every five minutes, from
+# the same image, and it keeps running when the update job does not.
+#
+# 🔒 It NEVER throws at the tick. The tick's real job is engine reconciliation; a watchdog that can
+# break what it rides on is worse than no watchdog. Off unless the environment says where it is.
+function Invoke-PimUpdaterWatchdogIfConfigured {
+    $wsub = "$($env:PIM_SubscriptionId)".Trim()
+    $wrg  = "$($env:PIM_ResourceGroup)".Trim()
+    if (-not $wsub -or -not $wrg) { return }
+    if ("$($env:PIM_UPDATE_WATCHDOG)".Trim() -eq '0') { return }   # explicit opt-out
+    if (-not (Get-Command Invoke-PimUpdateWatchdog -ErrorAction SilentlyContinue)) { return }
+    $stale = if ("$($env:PIM_UPDATE_STALE_HOURS)".Trim()) { [double]"$($env:PIM_UPDATE_STALE_HOURS)".Trim() } else { 48 }
+    $jn    = if ("$($env:PIM_UpdateJobName)".Trim()) { "$($env:PIM_UpdateJobName)".Trim() } else { 'ca-pim-update' }
+    try {
+        [void](Invoke-PimUpdateWatchdog -SubscriptionId $wsub -ResourceGroup $wrg -JobName $jn `
+                 -StaleAfterHours $stale -Log { param($m, $c) Write-Host $m -ForegroundColor $c })
+    } catch { Write-Host "  [watchdog] skipped: $($_.Exception.Message)" -ForegroundColor Yellow }
+}
+
 if ($Once) {
     @(Invoke-PimSchedulerTick -WhatIf:$WhatIf -LeaseTtlMinutes $ttl) | ForEach-Object { Write-Host ("  {0,-20} {1}" -f $_.name, $_.detail) }
+    if (-not $WhatIf) { Invoke-PimUpdaterWatchdogIfConfigured }
     return
 }
 Start-PimScheduler -IntervalSeconds $iv -LeaseTtlMinutes $ttl -WhatIf:$WhatIf

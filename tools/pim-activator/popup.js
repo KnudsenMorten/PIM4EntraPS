@@ -1353,7 +1353,17 @@ async function watchPropagation(mode = 'activate', scopeIds = [], resumeStartedA
   // consecutive 10s polls AFTER it has moved (= the jump has fully landed). maxMs is only a
   // safety backstop so a never-ending propagation can't loop forever.
   const STABLE_POLLS = 2   // count must be identical across this many consecutive 10s polls (after a move) to settle
-  const maxMs = 480000, intervalMs = 10000, startedAt = resumeStartedAt || Date.now()
+  // 🔴 THE BACKSTOP WAS SHORTER THAN THE THING IT WAS BACKING OFF. maxMs was 480000 -- EXACTLY 8
+  // minutes -- and the operator measured Microsoft's backend taking 8-10 minutes to grant the roles
+  // behind a group. So on a normal slow activation the watch gave up while the user was still
+  // waiting: the progress row cleared, the fun box closed, and the popup went quiet at precisely
+  // the moment it had something useful to say. Reported with a screenshot 2026-09-12:
+  // "it stays here for long ... i expected some % timer counting when it is released".
+  // 🔑 20 minutes is a BACKSTOP, not an estimate -- the watch still settles the instant the poll
+  // OBSERVES the roles land (usually well under 4), and the design rule above is unchanged:
+  // completion is never a hardcoded timer. This only stops us abandoning a propagation that is
+  // still legitimately in flight.
+  const maxMs = 1200000, intervalMs = 10000, startedAt = resumeStartedAt || Date.now()
   // Default the propagation estimate to 4 min so the bar creeps from the FIRST run
   // (cap 95% while waiting, jump to 100% once done); replaced by the learned
   // per-active-set duration on subsequent runs.
@@ -1503,8 +1513,15 @@ async function watchPropagation(mode = 'activate', scopeIds = [], resumeStartedA
       setTimeout(() => { if (myRun === propagationWatchToken) setPropRowStatus(null) }, 12000)
       return
     }
+    // 🔑 SAY THAT A LONG WAIT IS NORMAL, BECAUSE IT IS. Microsoft's backend routinely takes several
+    // minutes to grant the roles behind a group, and the operator measured 8-10. Without saying so,
+    // a bar creeping past the learned estimate reads as "stuck" and the user starts clicking things
+    // -- which is what the % was added to prevent. Past ~4 min, name the cause.
     const pctTxt = (pct != null) ? `${pct}% — ` : ''
-    banner(`${countLabel}: ${frac} ⏳ Auto-refreshing every ${everyS}s [${pctTxt}${secs}s] - Entra PIM is working on ${workMsg}.`, false, pct)
+    const slowNote = (secs >= 240)
+      ? ` Microsoft's backend can take 8-10 min to release these; this keeps watching and will say when they land.`
+      : ''
+    banner(`${countLabel}: ${frac} ⏳ Auto-refreshing every ${everyS}s [${pctTxt}${secs}s] - Entra PIM is working on ${workMsg}.${slowNote}`, false, pct)
   }
   if (myRun === propagationWatchToken) {
     logDiag(`Propagation watch ended after ${Math.round((Date.now() - startedAt) / 1000)}s at ${prev == null ? '?' : prev} group(s)`)
@@ -1513,8 +1530,15 @@ async function watchPropagation(mode = 'activate', scopeIds = [], resumeStartedA
     setFunBox(false)
     try { const fr = await acquireGraphToken({ interactive: false }).catch(() => null); if (fr?.accessToken) await loaded(fr.accessToken) } catch (_) {}
     if (activeKey != null && prev != null) await setPropMemoryEntry(activeKey, prev)
-    banner(`Auto-refresh stopped after ${Math.round(maxMs / 60000)} min — ${prev == null ? '?' : prev} eligible group(s). Click refresh to re-check.`, true)
-    setTimeout(() => { if (myRun === propagationWatchToken) setPropRowStatus(null) }, 12000)
+    // 🪤 GIVING UP IS NOT THE SAME AS FINISHING, and the old message read like finishing:
+    // "Auto-refresh stopped ... Click refresh to re-check" says nothing about whether the roles
+    // ever landed. If we reach the backstop the honest statement is that the permissions were NOT
+    // observed to arrive -- so say that, and leave the row showing it rather than wiping it after
+    // 12 seconds as the success path does.
+    banner(`⚠ Still not propagated after ${Math.round(maxMs / 60000)} min — the permissions have NOT been seen to land yet. ` +
+           `Microsoft's backend is still working; reopen the popup or click refresh to resume watching.`, true)
+    // Deliberately NO auto-clear here: the success path clears after 12s because the news is good
+    // and short-lived. An unfinished propagation is exactly the state the user must still see.
   }
 }
 
@@ -4215,17 +4239,34 @@ async function runAutoActivations(token) {
   const durRaw = els.dur ? parseInt(els.dur.value, 10) : NaN
   const dur = (durRaw > 0 && durRaw <= 24) ? durRaw : 8
   try { setActivatingBanner('Auto-activating ' + targets.length + ' group(s) you marked — this group only, no linked groups…') } catch (_) {}
+  // 🔴 ONE WATCH FOR THE WHOLE SET, STARTED AFTER THE LOOP. Calling watchPropagation per group
+  // inside the loop starts N watches, and its first line is `++propagationWatchToken` -- "newest
+  // change wins; older loops exit". So activating three groups silently CANCELLED the first two
+  // watches and only monitored the last, while the user watched a row that was not the one still
+  // propagating. The bulk "Activate selected" path already does this correctly (one call with all
+  // scopeIds); this path did not.
   let done = 0
+  const watched = []
   for (const r of targets) {
     try {
       await activateGroup(token, r.groupId, just, dur)
       done++
-      try { watchPropagation('activate', [r.groupId]) } catch (_) {}
+      watched.push(r.groupId)
     } catch (e) { console.warn('[PIM Activator] auto-activate failed for', r.displayName || r.groupId, e && e.message ? e.message : e) }
   }
   try { setActivatingBanner('') } catch (_) {}
   console.log('[PIM Activator] auto-activated ' + done + '/' + targets.length + ' marked group(s) (no chain)')
   try { await loaded(token) } catch (_) {}   // refresh so activated rows show active (guard blocks re-sweep)
+  // 🪤 AFTER loaded(), NOT BEFORE. loaded() re-renders the whole list, which wipes any per-row
+  // status written before it -- so a watch started first would paint its progress onto rows that
+  // are about to be replaced, and the user would see nothing. The bulk path gets this right by
+  // calling render() before it starts the watch; this path has to wait for the reload to finish.
+  if (watched.length) {
+    try {
+      setPropRowStatus(watched, 'Activating — waiting for Entra PIM to propagate the permissions…', null, false)
+      watchPropagation('activate', watched)
+    } catch (_) {}
+  }
 }
 
 async function loaded(token) {

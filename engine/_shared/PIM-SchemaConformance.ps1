@@ -46,6 +46,9 @@ function Get-PimLockedSchema {
             required   = @('Purpose','UserType','AdminType','Environment','ProvisionDate','TAPLifetimeHours','Template','OffboardDate','DeleteAfterDays')
             migrations = @(@{ from = 'TierLevel'; to = 'Purpose'; whenTargetBlank = $true; map = { param($v) ConvertTo-PimPurposeFromTier -TierLevel "$v" } })
         }
+        # 68.6 row 35: the central admins an MSP slave imports, kept apart from its own admins. Written only by
+        # the downlink (UserName-keyed, same row shape); nothing to migrate or drop.
+        'Account-Definitions-Admins-Central' = @{ key = 'UserName'; deprecated = @(); required = @(); migrations = @() }
         'PIM-Definitions-Roles'        = $genericDef
         'PIM-Definitions-Tasks'        = $genericDef
         'PIM-Definitions-Services'     = $genericDef
@@ -53,6 +56,8 @@ function Get-PimLockedSchema {
         'PIM-Definitions-Resources'    = $genericDef
         'PIM-Definitions-Departments'  = $genericDef
         'PIM-Definitions-Organization' = $genericDef
+        'PIM-Definitions-Projects'     = $genericDef   # direct-group type Project (PROJ-), 2026-09-12
+        'PIM-Definitions-CrossOrg'     = $genericDef   # direct-group type Cross-org (CORG-), 2026-09-12
         'PIM-Definitions-AU'           = $genericDef
         'PIM-Assignments-Admins'          = $genericDef
         'PIM-Assignments-Groups'          = $genericDef

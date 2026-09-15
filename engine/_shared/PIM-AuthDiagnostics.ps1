@@ -1,4 +1,4 @@
-#Requires -Version 5.1
+﻿#Requires -Version 5.1
 <#
 .SYNOPSIS
     Auth / Identity diagnostics for PIM4EntraPS (REQUIREMENTS.md / FEATURES.md section 9).
@@ -64,8 +64,13 @@ $script:PimRoleHintByPath = @(
     @{ match = 'management.azure.com';                                        plane = 'arm'; appRoles = @('Reader (or higher) @ the Azure scope'); pimRoles = @('Reader / Contributor (activate at the scope)') }
     @{ match = '/subscriptions/';                                             plane = 'arm'; appRoles = @('Reader (or higher) @ the Azure scope'); pimRoles = @('Reader / Contributor (activate at the scope)') }
     # --- Microsoft Graph paths (app-role to grant / directory role to activate).
-    @{ match = 'roleManagement/directory/roleAssignmentSchedule';            appRoles = @('RoleManagement.ReadWrite.Directory'); pimRoles = @('Privileged Role Administrator') }
-    @{ match = 'roleManagement/directory/roleDefinitions';                    appRoles = @('RoleManagement.ReadWrite.Directory','Directory.Read.All'); pimRoles = @('Privileged Role Administrator') }
+    # 🔑 BUG-151 -- NAME THE ROLE WE ACTUALLY GRANT. The deploy now grants the narrow schedule pair,
+    # not the broad RoleManagement.ReadWrite.Directory, so a hint naming only the broad role sends
+    # the reader to grant a permission the tooling will never add -- a hint that cannot be acted on
+    # is the §58 "a finding is only as good as its remedy" defect in the diagnostics themselves.
+    # The broad role is kept as the documented alternative for tenants still on it.
+    @{ match = 'roleManagement/directory/roleAssignmentSchedule';            appRoles = @('RoleAssignmentSchedule.ReadWrite.Directory','RoleEligibilitySchedule.ReadWrite.Directory (or the broader RoleManagement.ReadWrite.Directory)'); pimRoles = @('Privileged Role Administrator') }
+    @{ match = 'roleManagement/directory/roleDefinitions';                    appRoles = @('RoleManagement.Read.All','Directory.Read.All'); pimRoles = @('Privileged Role Administrator') }
     @{ match = 'roleManagement/defender';                                     appRoles = @('SecurityAdministrator (Defender Unified RBAC, portal-activated per tenant)'); pimRoles = @('Security Administrator') }
     @{ match = 'deviceManagement/roleAssignments';                           appRoles = @('DeviceManagementRBAC.ReadWrite.All'); pimRoles = @('Intune Administrator') }
     @{ match = 'deviceManagement/roleDefinitions';                           appRoles = @('DeviceManagementRBAC.ReadWrite.All','DeviceManagementRBAC.Read.All'); pimRoles = @('Intune Administrator') }

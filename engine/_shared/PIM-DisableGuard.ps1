@@ -1,4 +1,4 @@
-<#
+﻿<#
   PIM4EntraPS -- account-disable SAFETY GUARDS (circuit breaker).
 
   WHY THIS EXISTS (incident 2026-06-15)
@@ -211,7 +211,7 @@ function Get-PimDisableMaxCount {
     if ($null -ne $v -and "$v" -match '^\d+$') {
         $req = [int]$v
         if ($req -gt $script:PimDisableMaxCountCeiling) {
-            Write-Warning ("PIM_DisableMaxCount={0} exceeds the hard ceiling {1} -- CLAMPED to {1}. The mass-disable breaker cannot be raised past its ceiling (REQUIREMENTS §22)." -f $req, $script:PimDisableMaxCountCeiling)
+            Write-Warning ("PIM_DisableMaxCount={0} exceeds the hard ceiling {1} -- CLAMPED to {1}. The mass-disable breaker cannot be raised past its ceiling." -f $req, $script:PimDisableMaxCountCeiling)
             return $script:PimDisableMaxCountCeiling
         }
         Write-Warning ("PIM_DisableMaxCount override IN EFFECT: {0} (default 5). The mass-disable breaker is running wider than standard." -f $req)
@@ -227,7 +227,7 @@ function Get-PimDisableMaxPercent {
     if ($null -ne $v -and "$v" -match '^\d+(\.\d+)?$') {
         $req = [double]$v
         if ($req -gt $script:PimDisableMaxPercentCeiling) {
-            Write-Warning ("PIM_DisableMaxPercent={0} exceeds the hard ceiling {1} -- CLAMPED to {1} (REQUIREMENTS §22)." -f $req, $script:PimDisableMaxPercentCeiling)
+            Write-Warning ("PIM_DisableMaxPercent={0} exceeds the hard ceiling {1} -- CLAMPED to {1}." -f $req, $script:PimDisableMaxPercentCeiling)
             return [double]$script:PimDisableMaxPercentCeiling
         }
         Write-Warning ("PIM_DisableMaxPercent override IN EFFECT: {0} (default 10)." -f $req)
@@ -341,6 +341,50 @@ function Test-PimDisablePassAllowed {
         return [pscustomobject]@{ allowed=$false; abort=$true; tripped='mass-disable'; reason=("circuit breaker: " + $mass.reason); toDisable=$ToDisable; scanned=$Scanned; maxCount=$mass.maxCount; maxPercent=$mass.maxPercent; tenantId=$TenantId; environment=$envUsed }
     }
     return [pscustomobject]@{ allowed=$true; abort=$false; tripped=$null; reason='ok'; toDisable=$ToDisable; scanned=$Scanned; maxCount=$mass.maxCount; maxPercent=$mass.maxPercent; tenantId=$TenantId; environment=$envUsed }
+}
+
+# =============================================================================
+# EXPLICIT per-row disables (v1 parity, operator 2026-09-12: "we cannot leave customers on
+# pim v1 in a worse situation going to pim v2").
+#
+# The guards above were built for the INFERRED disable: "this live admin is not in my desired
+# set, so disable it" -- the path that disabled 53 users on 2026-06-15. A row that SAYS
+# AccountStatus=Disabled / Revoked, or carries a past OffboardDate, is a different thing: the
+# operator asked for it, by name, on that row. v1 honoured it on every run with no opt-in, and a
+# kill switch that is OFF by default is not a kill switch -- a revoked admin would stay usable.
+#
+# So an explicit disable keeps G1 (the desired set must be positively resolved) and G2's
+# ABSOLUTE cap (a bulk "set AccountStatus" edit across many rows still trips it), but:
+#   * G3 defaults ON for it. An EXPLICIT PIM_AccountDisableEnabled=false still wins (SEC-07: a
+#     switch that can be ignored is not a switch), so an operator can still turn it off.
+#   * G2's PERCENTAGE dimension is not applied. It measures "share of the scanned population",
+#     which is the right signal for an inferred removal and the wrong one here: in an 8-admin
+#     tenant disabling ONE named admin is 12.5% and would trip the 10% cap on every run.
+# =============================================================================
+function Resolve-PimExplicitDisableOverride {
+    # $true when the account-disable knob is UNSET (explicit per-row disables are on by
+    # default); $null when the operator set it either way, so G3 reads their value.
+    [CmdletBinding()] param()
+    $explicit = Test-PimExplicitFlagValue -Value (Get-PimSafetyKnob -Name 'PIM_AccountDisableEnabled')
+    if ($null -eq $explicit) { return $true }
+    return $null
+}
+
+function Test-PimExplicitDisablePassAllowed {
+    # The decision for a pass of EXPLICIT per-row disables (kill switch, offboarding). Same
+    # return shape as Test-PimDisablePassAllowed -- it IS that function, with the two
+    # differences documented above.
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][int]$ToDisable,
+        [Parameter(Mandatory)][int]$Scanned,
+        [object[]]$Desired = @(),
+        [Nullable[bool]]$DesiredResolved = $null,
+        [int]$MaxCount = -1,
+        [string]$TenantId = $null
+    )
+    return (Test-PimDisablePassAllowed -ToDisable $ToDisable -Scanned $Scanned -Desired $Desired -DesiredResolved $DesiredResolved `
+                -FeatureOverride (Resolve-PimExplicitDisableOverride) -MaxCount $MaxCount -MaxPercent 0 -TenantId $TenantId)
 }
 
 # =============================================================================

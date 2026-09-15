@@ -1,4 +1,4 @@
-# IMP-03: the one visible way to swallow a non-fatal error (loaded defensively --
+﻿# IMP-03: the one visible way to swallow a non-fatal error (loaded defensively --
 # this file is dot-sourced standalone by tests and by the Manager).
 if (-not (Get-Command Write-PimSwallowed -ErrorAction SilentlyContinue)) { . (Join-Path $PSScriptRoot 'PIM-Swallow.ps1') }
 
@@ -98,7 +98,12 @@ $script:PimFeatureCatalog = @(
     [ordered]@{ key='alerting.webhook'; label='Teams / webhook alerting';group='Notifications';tier='advanced'; license='free'; defaultEnabled=$false; dependsOn=@('alerting.email');       proFeature='';                  description='Post alerts to a Microsoft Teams / generic webhook in addition to email. Off = no webhook POST.' }
 
     # ---- Workload connectors / integrations (advanced, Pro) -------------------
-    [ordered]@{ key='connectors.workload'; label='Workload connectors (app-role)'; group='Integrations'; tier='advanced'; license='pro'; defaultEnabled=$false; dependsOn=@('engine.reconcile'); proFeature='WorkloadConnectors'; description='Enterprise-app app-role + workload-RBAC connectors (Defender XDR, Intune, generic app-role, Azure DevOps, Dataverse, Business Central, Power Platform). Off = these providers no-op.' }
+    # 🔴 v1 PARITY: v1 applied workload bindings whenever its PIM-Assignments-Workloads file existed
+    # (PIM-Baseline-Management-CSV.ps1 L1426-1436) -- there was no switch. Shipped v2 defaulted this OFF
+    # and no deploy step turned it on, so a migrated customer's workload rows were imported and never
+    # applied. autoEnableWhenData makes it EFFECTIVELY ON while any of these entities has rows, with no
+    # deploy step and no GUI action; a deliberately stored `false` still wins (see Test-PimFeatureEnabled).
+    [ordered]@{ key='connectors.workload'; label='Workload connectors (app-role)'; group='Integrations'; tier='advanced'; license='pro'; defaultEnabled=$false; dependsOn=@('engine.reconcile'); proFeature='WorkloadConnectors'; autoEnableWhenData=@('PIM-Assignments-Workloads','PIM-Assignments-Defender','PIM-Assignments-Intune','PIM-Assignments-AppRole'); description='Enterprise-app app-role + workload-RBAC connectors (Defender XDR, Intune, generic app-role, Azure RBAC, Power BI, Azure DevOps, Dataverse, Business Central, Power Platform). On automatically while workload assignment rows exist; off = these providers no-op.' }
     [ordered]@{ key='connectors.powerbi';  label='Power BI integration';            group='Integrations'; tier='advanced'; license='pro'; defaultEnabled=$false; dependsOn=@('discovery.sweep');   proFeature='WorkloadConnectors'; description='Power BI workspace discovery + role reconcile. Off = Power BI is skipped by the discovery sweep.' }
     [ordered]@{ key='connectors.exo';      label='Exchange Online integration';     group='Integrations'; tier='advanced'; license='pro'; defaultEnabled=$false; dependsOn=@('engine.reconcile');  proFeature='WorkloadConnectors'; description='Exchange Online role-group delegation (ManageAsApp). Off = EXO delegation is not applied.' }
 
@@ -115,6 +120,7 @@ function Get-PimFeatureCatalog {
     $out = New-Object System.Collections.Generic.List[object]
     foreach ($f in $script:PimFeatureCatalog) {
         $deps = @(); if ($f.dependsOn) { foreach ($d in @($f.dependsOn)) { if ("$d".Trim()) { $deps += "$d" } } }
+        $auto = @(); if ($f.Contains('autoEnableWhenData') -and $f.autoEnableWhenData) { foreach ($e in @($f.autoEnableWhenData)) { if ("$e".Trim()) { $auto += "$e" } } }
         $out.Add([ordered]@{
             key            = "$($f.key)"
             label          = "$($f.label)"
@@ -125,6 +131,8 @@ function Get-PimFeatureCatalog {
             dependsOn      = @($deps)
             proFeature     = "$($f.proFeature)"
             description    = "$($f.description)"
+            # Entities whose rows switch this feature on when nothing is stored for it (v1 parity).
+            autoEnableWhenData = @($auto)
         })
     }
     # PS 5.1: .ToArray() not @()-wrap -- @(List[object] of hashtables) throws
@@ -196,6 +204,9 @@ function Resolve-PimFeatureGate {
 
     $gates = [ordered]@{}
     $effective = [ordered]@{}
+    # Which advanced features carry a STORED value (as opposed to riding the catalog default). Needed by
+    # autoEnableWhenData: only a feature nobody decided about is switched on by the presence of data.
+    $explicit = @{}
     foreach ($f in $catalog) {
         $key = "$($f.key)"
         $isCore = ("$($f.tier)" -eq 'core')
@@ -207,7 +218,7 @@ function Resolve-PimFeatureGate {
             $enabled = $true
         } else {
             $ov = Get-PimFeatureCatalogValue -Object $overrideContainer -Key $key
-            if ($null -ne $ov) { $enabled = [bool]$ov }
+            if ($null -ne $ov) { $enabled = [bool]$ov; $explicit[$key] = $true }
         }
         $gates[$key] = $enabled
         $effective[$key] = [ordered]@{
@@ -221,7 +232,7 @@ function Resolve-PimFeatureGate {
             enabled        = $enabled
         }
     }
-    return @{ gates = $gates; effective = $effective; warnings = @($warnings.ToArray()) }
+    return @{ gates = $gates; effective = $effective; warnings = @($warnings.ToArray()); explicit = $explicit }
 }
 
 function ConvertTo-PimFeatureGateOverrides {
@@ -380,8 +391,61 @@ function Test-PimFeatureEnabled {
     if (-not $entry) { return $false }
     if ("$($entry.tier)" -eq 'core') { return $true }
     $state = Get-PimFeatureGateState
-    if ($state.gates.Contains("$($entry.key)")) { return [bool]$state.gates["$($entry.key)"] }
+    $k = "$($entry.key)"
+    # v1 PARITY (autoEnableWhenData): a feature that nobody has stored a value for, and whose
+    # entities hold rows, is ON -- the customer's data is the decision, exactly as v1's file was.
+    # A STORED value always wins: `true` is on regardless, and a deliberately stored `false` (the
+    # feature baseline's -Disable list, or a hand-set store) keeps it off even with rows present.
+    # The Manager's save only ever stores values that DIFFER from the catalog default, so saving the
+    # Features card with this toggle showing off never records a `false` that would defeat this.
+    $isExplicit = ($state.explicit -is [hashtable]) -and $state.explicit.ContainsKey($k)
+    if (-not $isExplicit -and @($entry.autoEnableWhenData).Count -gt 0) {
+        if (Test-PimFeatureDataPresent -Entities @($entry.autoEnableWhenData)) { return $true }
+    }
+    if ($state.gates.Contains($k)) { return [bool]$state.gates[$k] }
     return [bool]$entry.defaultEnabled
+}
+
+function Test-PimFeatureDataPresent {
+    <#
+      Does ANY of these desired-state entities hold at least one row? The data half of
+      autoEnableWhenData. Channels, first that can answer wins:
+        1. $global:PIM_FeatureDataPresence  -- entity -> bool (tests; a host that already knows)
+        2. SQL pim.Rows, one cheap TOP 1 query (engine / scheduler / Manager with a SQL store)
+        3. $global:PIM_DesiredRows          -- the engine's in-memory desired seam (offline runs)
+      Returns $false when nothing can answer: "cannot tell" must never switch a writer on. A SQL
+      read that FAILS is reported (Write-PimSwallowed), because then persisted rows exist and the
+      feature is off for a reason nobody would otherwise see.
+    #>
+    [CmdletBinding()]
+    param([string[]]$Entities = @())
+    $ents = @($Entities | Where-Object { "$_".Trim() } | ForEach-Object { "$_".Trim() })
+    if (-not $ents.Count) { return $false }
+    if ($global:PIM_FeatureDataPresence -is [System.Collections.IDictionary]) {
+        foreach ($e in $ents) { if ($global:PIM_FeatureDataPresence.Contains($e) -and [bool]$global:PIM_FeatureDataPresence[$e]) { return $true } }
+        return $false
+    }
+    $cs = $null
+    if ("$($global:PIM_EngineSqlCs)".Trim()) { $cs = "$($global:PIM_EngineSqlCs)" }
+    elseif ("$($global:PIM_SqlConnectionString)".Trim()) { $cs = "$($global:PIM_SqlConnectionString)" }
+    if ($cs -and (Get-Command Invoke-PimSqlScalar -ErrorAction SilentlyContinue)) {
+        try {
+            $p = @{}; $names = @()
+            for ($i = 0; $i -lt $ents.Count; $i++) { $p["e$i"] = $ents[$i]; $names += "@e$i" }
+            $v = Invoke-PimSqlScalar -ConnectionString $cs -Sql ("SELECT TOP 1 1 FROM pim.Rows WHERE Entity IN ({0})" -f ($names -join ',')) -Parameters $p
+            return ("$v" -eq '1')
+        } catch {
+            if (Get-Command Write-PimSwallowed -ErrorAction SilentlyContinue) {
+                Write-PimSwallowed -Scope 'feature-data-presence' -ErrorRecord $_ `
+                    -Consequence ("could not check whether {0} hold rows -- the features they switch on stay OFF this run" -f ($ents -join ', '))
+            }
+            return $false
+        }
+    }
+    if ($global:PIM_DesiredRows -is [System.Collections.IDictionary]) {
+        foreach ($e in $ents) { if ($global:PIM_DesiredRows.Contains($e) -and @(@($global:PIM_DesiredRows[$e]) | Where-Object { $null -ne $_ }).Count -gt 0) { return $true } }
+    }
+    return $false
 }
 
 function Test-PimLicenseGateActive {

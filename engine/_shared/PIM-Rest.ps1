@@ -1,4 +1,4 @@
-<#
+﻿<#
   PIM4EntraPS -- pure-REST auth + data plane (NO Graph/Az/MSAL modules).
 
   One place the whole solution gets tokens and calls Microsoft REST APIs, so the
@@ -582,9 +582,15 @@ function Invoke-PimRest {
     [string]$Resource = 'graph',
     [hashtable]$Headers = @{},
     [switch]$All,                # follow @odata.nextLink / nextLink, aggregate .value
-    [int]$MaxRetry = 5
+    [int]$MaxRetry = 5,
+    # Authenticate THIS call as the host's managed identity even when an engine SPN is configured
+    # (mail send, operator decision 2026-09-13: the hosted engine sends as its managed identity).
+    [switch]$UseManagedIdentity
   )
-  $token = Get-PimRestToken -Resource $Resource
+  # Keep a scheduler lease alive through a long live read (minutes of paged calls). No-op outside
+  # a leased tick; time-gated in Invoke-PimSchedulerLeaseHeartbeat (PIM-Scheduler.ps1).
+  if ($global:PIM_LeaseHeartbeat -and (Get-Command Invoke-PimSchedulerLeaseHeartbeat -ErrorAction SilentlyContinue)) { [void](Invoke-PimSchedulerLeaseHeartbeat) }
+  $token = if ($UseManagedIdentity) { Get-PimRestToken -Resource $Resource -UseManagedIdentity } else { Get-PimRestToken -Resource $Resource }
   $h = @{ Authorization = "Bearer $token" } + $Headers
   $agg = New-Object System.Collections.Generic.List[object]
   $next = $Url
@@ -668,11 +674,195 @@ function ConvertTo-PimSdkShape {
 }
 
 function Invoke-PimGraph {
-  param([string]$Method='GET',[Parameter(Mandatory)][string]$Path,[object]$Body,[switch]$All,[switch]$Beta,[hashtable]$Headers=@{})
+  param([string]$Method='GET',[Parameter(Mandatory)][string]$Path,[object]$Body,[switch]$All,[switch]$Beta,[hashtable]$Headers=@{},[switch]$UseManagedIdentity)
   $base = if ($Beta) { 'https://graph.microsoft.com/beta' } else { 'https://graph.microsoft.com/v1.0' }
   $url = if ($Path -match '^https?://') { $Path } else { "$base$Path" }
-  Invoke-PimRest -Method $Method -Url $url -Body $Body -Resource 'graph' -All:$All -Headers $Headers
+  Invoke-PimRest -Method $Method -Url $url -Body $Body -Resource 'graph' -All:$All -Headers $Headers -UseManagedIdentity:$UseManagedIdentity
 }
+function Test-PimGraphBatchReadsEnabled {
+  # Kill switch for the batched live reads (pim.Settings / $global:PIM_ / env 'GraphBatchReads').
+  # ON by default; 'false' makes every caller take its original one-request-per-path loop.
+  $v = $null
+  if (Get-Command Get-PimPolicySetting -ErrorAction SilentlyContinue) { try { $v = Get-PimPolicySetting -Name 'GraphBatchReads' -Default $null } catch { $v = $null } }
+  elseif ($null -ne $global:PIM_GraphBatchReads) { $v = $global:PIM_GraphBatchReads }
+  elseif ("$env:PIM_GraphBatchReads".Trim()) { $v = $env:PIM_GraphBatchReads }
+  return -not ("$v".Trim() -match '^(?i)(false|0|no|off|disabled?)$')
+}
+
+function Invoke-PimGraphBatchGet {
+  <#
+    Run many Graph GETs through /$batch (20 per round-trip, Graph's maximum) and return ONE result per
+    input path, IN INPUT ORDER: { path; ok; status; items; body; error }.
+      items  = what `Invoke-PimGraph -All -Path <path>` returns: the aggregated .value across every
+               @odata.nextLink page, or the body itself when it carries no .value.
+      body   = what `Invoke-PimGraph -Path <path>` returns (the first page / the single object).
+    A sub-request that is throttled (429), failed server-side (5xx) or came back missing is collected; the
+    largest Retry-After is waited ONCE (max 30 s) and the collected items are sent again as a batch, up to 3
+    rounds (§70.9). Only what is still unanswered after that is re-run on its own through Invoke-PimGraph,
+    which owns the retry/backoff -- so a batch never loses a read that the sequential loop would have got.
+    $script:PimBatchStats holds the counters of the last call. Any other 4xx is a final failure (ok=$false, error set), exactly
+    what the sequential loop's `try { Invoke-PimGraph ... } catch { }` produced.
+    A $batch response without `responses` (a proxy, a stub, a host that does not batch) falls back to
+    the sequential path for that slice.
+  #>
+  param([Parameter(Mandatory)][AllowEmptyCollection()][string[]]$Paths, [ValidateRange(1, 20)][int]$BatchSize = 20)
+  $n = @($Paths).Count
+  $results = New-Object object[] $n
+  if ($n -eq 0) { return ,$results }
+  $single = {
+    param([string]$p)
+    try {
+      $first = Invoke-PimGraph -Path $p
+      $items = New-Object System.Collections.Generic.List[object]
+      $pg = $first
+      while ($null -ne $pg) {
+        if ($pg.PSObject -and $pg.PSObject.Properties['value']) { foreach ($v in @($pg.value)) { $items.Add($v) } } else { $items.Add($pg) }
+        $nl = $null; if ($pg.PSObject -and $pg.PSObject.Properties['@odata.nextLink']) { $nl = "$($pg.'@odata.nextLink')" }
+        if (-not $nl) { break }
+        $pg = Invoke-PimGraph -Path $nl
+      }
+      [pscustomobject]@{ path = $p; ok = $true; status = 200; items = $items.ToArray(); body = $first; error = $null }
+    } catch {
+      [pscustomobject]@{ path = $p; ok = $false; status = 0; items = @(); body = $null; error = "$($_.Exception.Message)" }
+    }
+  }
+  # 🔴 §70.9 (2026-09-13) -- THROTTLED ITEMS ARE WAITED OUT AND RE-BATCHED, NOT FIRED ONE BY ONE.
+  # A 429 / 5xx sub-response used to be re-run IMMEDIATELY as its own single request, ignoring the Retry-After the
+  # sub-response carried -- so under throttling a 20-item round-trip became up to 20 more calls into the same
+  # throttle, each backing off on its own (2/4/8/16/32 s). Measured on internal: ~10 s per round-trip on the
+  # group-membership read (35 round-trips, ~6 min) and the policy read (~570 s), with the cause invisible because
+  # nothing counted the throttling. Now: collect the throttled items, wait the largest Retry-After once (bounded),
+  # send them again AS A BATCH (up to 3 rounds), and only then fall back to the single-request path. Every call that
+  # was throttled or slow says so in one [graph-batch] line.
+  $sw = [System.Diagnostics.Stopwatch]::StartNew()
+  $script:PimBatchStats = @{ roundTrips = 0; throttled = 0; serverErrors = 0; retryRounds = 0; waitedSeconds = 0; singles = 0 }
+  $sendBatch = {
+    param([int[]]$Indexes)
+    $pending = New-Object System.Collections.Generic.List[int]   # throttled / missing -> retry
+    $maxRetryAfter = 0
+    $requests = New-Object System.Collections.Generic.List[object]
+    foreach ($i in $Indexes) {
+      $rel = ("$($Paths[$i])" -replace '^https://graph\.microsoft\.com/(v1\.0|beta)', '')
+      $requests.Add(@{ id = "$i"; method = 'GET'; url = $rel })
+    }
+    $resp = $null
+    $script:PimBatchStats.roundTrips++
+    try { $resp = Invoke-PimGraph -Method POST -Path 'https://graph.microsoft.com/v1.0/$batch' -Body @{ requests = $requests.ToArray() } } catch { $resp = $null }
+    $subs = $null
+    if ($null -ne $resp -and $resp.PSObject -and $resp.PSObject.Properties['responses']) { $subs = @($resp.responses) }
+    if ($null -eq $subs) { return [pscustomobject]@{ pending = @(); maxRetryAfter = 0; batched = $false } }   # no batch support -> singles
+    $want = @{}; foreach ($i in $Indexes) { $want[$i] = $true }
+    foreach ($br in $subs) {
+        if ($null -eq $br) { continue }
+        $idx = -1; if (-not [int]::TryParse("$($br.id)", [ref]$idx)) { continue }
+        if (-not $want.ContainsKey($idx)) { continue }
+        $status = 0; [void][int]::TryParse("$($br.status)", [ref]$status)
+        if ($status -eq 429 -or $status -ge 500) {
+          if ($status -eq 429) { $script:PimBatchStats.throttled++ } else { $script:PimBatchStats.serverErrors++ }
+          $ra = 0
+          try { if ($br.headers) { foreach ($hp in $br.headers.PSObject.Properties) { if ("$($hp.Name)" -ieq 'Retry-After') { [void][int]::TryParse("$($hp.Value)", [ref]$ra) } } } } catch { }
+          if ($ra -gt $maxRetryAfter) { $maxRetryAfter = $ra }
+          $pending.Add($idx)
+          continue
+        }
+        $body = $br.body
+        if ($status -ge 200 -and $status -lt 300) {
+          $items = New-Object System.Collections.Generic.List[object]
+          $pg = $body; $ok = $true; $err = $null
+          while ($null -ne $pg) {
+            if ($pg.PSObject -and $pg.PSObject.Properties['value']) { foreach ($v in @($pg.value)) { $items.Add($v) } } else { $items.Add($pg) }
+            $nl = $null; if ($pg.PSObject -and $pg.PSObject.Properties['@odata.nextLink']) { $nl = "$($pg.'@odata.nextLink')" }
+            if (-not $nl) { break }
+            try { $pg = Invoke-PimGraph -Path $nl } catch { $ok = $false; $err = "$($_.Exception.Message)"; break }
+          }
+          $results[$idx] = [pscustomobject]@{ path = $Paths[$idx]; ok = $ok; status = $status; items = @(if ($ok) { $items.ToArray() }); body = $body; error = $err }
+        } else {
+          $code = ''; $msg = ''
+          if ($body -and $body.PSObject -and $body.PSObject.Properties['error'] -and $body.error) { $code = "$($body.error.code)"; $msg = "$($body.error.message)" }
+          $results[$idx] = [pscustomobject]@{ path = $Paths[$idx]; ok = $false; status = $status; items = @(); body = $null
+            error = ("GET {0} -> HTTP {1} : {2}{3}" -f $Paths[$idx], $status, $code, $(if ($msg) { " -- $msg" } else { '' })) }
+        }
+    }
+    # an id Graph did not answer at all is retried like a throttled one
+    foreach ($i in $Indexes) { if ($null -eq $results[$i] -and -not $pending.Contains($i)) { $pending.Add($i) } }
+    return [pscustomobject]@{ pending = @($pending.ToArray()); maxRetryAfter = $maxRetryAfter; batched = $true }
+  }
+  $retryQueue = New-Object System.Collections.Generic.List[int]
+  $maxRa = 0
+  for ($ofs = 0; $ofs -lt $n; $ofs += $BatchSize) {
+    $last = [Math]::Min($ofs + $BatchSize, $n) - 1
+    $r = & $sendBatch -Indexes @($ofs..$last)
+    foreach ($p in @($r.pending)) { $retryQueue.Add([int]$p) }
+    if ($r.maxRetryAfter -gt $maxRa) { $maxRa = $r.maxRetryAfter }
+  }
+  # Up to 3 rounds: wait out the throttle ONCE for the whole queue, then send the queue again in batches.
+  $round = 0
+  while ($retryQueue.Count -gt 0 -and $round -lt 3) {
+    $round++
+    $script:PimBatchStats.retryRounds = $round
+    $wait = [Math]::Min(30, [Math]::Max($maxRa, [int][Math]::Pow(2, $round)))
+    $script:PimBatchStats.waitedSeconds += $wait
+    if ($script:PimBatchSleep -is [scriptblock]) { & $script:PimBatchSleep $wait } else { Start-Sleep -Seconds $wait }   # test seam
+    $queue = @($retryQueue.ToArray() | Where-Object { $null -eq $results[$_] })
+    $retryQueue.Clear(); $maxRa = 0
+    for ($o = 0; $o -lt $queue.Count; $o += $BatchSize) {
+      $slice = @($queue[$o..([Math]::Min($o + $BatchSize, $queue.Count) - 1)])
+      $r = & $sendBatch -Indexes $slice
+      foreach ($p in @($r.pending)) { $retryQueue.Add([int]$p) }
+      if ($r.maxRetryAfter -gt $maxRa) { $maxRa = $r.maxRetryAfter }
+    }
+  }
+  # Anything still unanswered (still throttled after the rounds, or a host that does not batch): the single-request
+  # path, which owns its own Retry-After/backoff -- so a batch never loses a read the sequential loop would have got.
+  for ($i = 0; $i -lt $n; $i++) { if ($null -eq $results[$i]) { $script:PimBatchStats.singles++; $results[$i] = & $single $Paths[$i] } }
+  $sw.Stop()
+  $st = $script:PimBatchStats
+  if ($st.throttled -or $st.serverErrors -or $st.singles -or $sw.Elapsed.TotalSeconds -ge 20) {
+    Write-Host ("  [graph-batch] {0} path(s), {1} round-trip(s), {2} throttled (429), {3} server error(s), {4} retry round(s) waiting {5}s, {6} single fallback(s), {7:N1}s" -f `
+      $n, $st.roundTrips, $st.throttled, $st.serverErrors, $st.retryRounds, $st.waitedSeconds, $st.singles, $sw.Elapsed.TotalSeconds) -ForegroundColor DarkGray
+  }
+  return ,$results
+}
+
+function Get-PimArmActiveRoleAssignmentsViaArg {
+  <#
+    EVERY Azure RBAC role assignment visible to the engine identity, in ONE Azure Resource Graph query
+    (POST /providers/Microsoft.ResourceGraph/resources, paged by $skipToken) -- management groups,
+    subscriptions, resource groups and resources alike, with the role NAME joined in the same query.
+    REST only: no Az module (REQUIREMENTS 67.3). Throws when the query fails, so a caller can say so
+    and fall back instead of rendering an empty list as "no assignments".
+    Output: { Id; Name; Scope; PrincipalId; PrincipalType; RoleDefinitionId (GUID); RoleDefinitionName }.
+  #>
+  param([int]$PageSize = 1000)
+  $kql = @(
+    'authorizationresources'
+    '| where type =~ ''microsoft.authorization/roleassignments'''
+    '| extend roleGuid = tolower(extract(''([^/]+)$'', 1, tostring(properties.roleDefinitionId)))'
+    '| project id, name, scope = tostring(properties.scope), principalId = tostring(properties.principalId), principalType = tostring(properties.principalType), roleDefinitionId = tostring(properties.roleDefinitionId), roleGuid'
+    '| join kind=leftouter (authorizationresources | where type =~ ''microsoft.authorization/roledefinitions'' | extend roleGuid = tolower(name) | summarize roleName = any(tostring(properties.roleName)) by roleGuid) on roleGuid'
+    '| project id, name, scope, principalId, principalType, roleDefinitionId, roleGuid, roleName'
+  ) -join ' '
+  $out = New-Object System.Collections.Generic.List[object]
+  $skipToken = $null
+  do {
+    $opts = @{ '$top' = $PageSize; resultFormat = 'objectArray' }
+    if ($skipToken) { $opts['$skipToken'] = $skipToken }
+    $resp = Invoke-PimArm -Method POST -Path '/providers/Microsoft.ResourceGraph/resources' -ApiVersion '2021-03-01' -Body @{ query = $kql; options = $opts }
+    foreach ($r in @($resp.data)) {
+      if ($null -eq $r) { continue }
+      $guid = "$($r.roleGuid)"; if (-not $guid) { $guid = ("$($r.roleDefinitionId)" -split '/')[-1] }
+      $out.Add([pscustomobject]@{
+        Id = "$($r.id)"; Name = "$($r.name)"; Scope = "$($r.scope)"; PrincipalId = "$($r.principalId)"; PrincipalType = "$($r.principalType)"
+        RoleDefinitionId = $guid; RoleDefinitionName = $(if ("$($r.roleName)".Trim()) { "$($r.roleName)" } else { $null })
+      })
+    }
+    $skipToken = $null
+    if ($resp -and $resp.PSObject.Properties['$skipToken'] -and "$($resp.'$skipToken')".Trim()) { $skipToken = "$($resp.'$skipToken')" }
+  } while ($skipToken)
+  # Unrolled on purpose: `@(Get-PimArmActiveRoleAssignmentsViaArg | ForEach-Object ...)` must see ROWS, not one array.
+  return $out.ToArray()
+}
+
 function Invoke-PimArm {
   param([string]$Method='GET',[Parameter(Mandatory)][string]$Path,[object]$Body,[string]$ApiVersion='2022-04-01',[switch]$All,[hashtable]$Headers=@{})
   $url = if ($Path -match '^https?://') { $Path } else { "https://management.azure.com$Path" }
@@ -749,6 +939,142 @@ function Test-PimMailForwardAddressIsReal {
     'NONE'  { return $false }
     'N/A'   { return $false }
     default { return ($s -match '^[^@\s]+@[^@\s]+\.[^@\s]+$') }
+  }
+}
+
+function Get-PimAdminMailRecipient {
+  <#
+    THE ONE RECIPIENT RULE for mail PIM sends about an admin account (new-admin, tap-delivery).
+    Shared by the engine (PIM-EngineProviders.ps1) and the Manager (Get-PimAdminTapRecipient), so
+    the screen's "Sends to" is exactly the address the engine mails.
+
+      ForwardMailsToContact = TRUE  AND  MailForwardAddress is a real address  -> MailForwardAddress
+      else ManagerEmail, if it is a real address                               -> ManagerEmail
+      else                                                                     -> ''  (caller refuses)
+
+    🔑 Operator, 2026-09-12 ("Both"): MailForwardAddress is the admin OWNER's office user. An admin
+    account has no mailbox of its own, so PIM's own mail goes to that office user; and where the admin
+    account DOES have a mailbox, the engine also sets Exchange forwarding to it (gated, see
+    Invoke-PimAdminMailboxForwarding). The columns were retired 2026-08-12 and are un-retired with
+    this meaning.
+    🪤 An address that is not an address ('FALSE'/'true' -- measured as live v1 data on internal) is
+    NOT a recipient. Test-PimMailForwardAddressIsReal is the shared predicate; 'true' fails its
+    address shape and is rejected here explicitly as well.
+  #>
+  [CmdletBinding()]
+  param([AllowNull()][object]$Row)
+  if ($null -eq $Row) { return '' }
+  $get = {
+    param($name)
+    if ($Row -is [System.Collections.IDictionary]) { return "$($Row[$name])".Trim() }
+    $p = $Row.PSObject.Properties[$name]
+    if ($p) { return "$($p.Value)".Trim() }
+    return ''
+  }
+  $isAddr = { param($v) ("$v" -notmatch '(?i)^(true|yes|1)$') -and (Test-PimMailForwardAddressIsReal -Value $v) }
+  $fwdOn = ((& $get 'ForwardMailsToContact') -match '(?i)^(true|yes|1)$')
+  $fwd   = & $get 'MailForwardAddress'
+  if ($fwdOn -and (& $isAddr $fwd)) { return $fwd }
+  $mgr = & $get 'ManagerEmail'
+  if (& $isAddr $mgr) { return $mgr }
+  return ''
+}
+
+function Test-PimAdminMailboxForwardingEnabled {
+  <#
+    Opt-in gate for setting Exchange mailbox forwarding on admin accounts. DEFAULT OFF, so rolling an
+    image changes nothing until an operator turns it on: it needs an Exchange app permission
+    (Exchange.ManageAsApp + an EXO role) whose grant model is still unresolved (§65.11).
+    $global:PIM_AdminMailboxForwarding first, then $env:PIM_AdminMailboxForwarding (SEC-07 order,
+    so a container-app setting is honoured). Only an explicit true/1/yes enables it.
+  #>
+  [CmdletBinding()]
+  param([object]$Override = $null)
+  $v = if ($null -ne $Override) { $Override }
+       elseif ($null -ne $global:PIM_AdminMailboxForwarding -and "$($global:PIM_AdminMailboxForwarding)".Trim()) { $global:PIM_AdminMailboxForwarding }
+       else { $env:PIM_AdminMailboxForwarding }
+  return ("$v".Trim() -match '(?i)^(true|1|yes|on)$')
+}
+
+function Invoke-PimAdminMailboxForwarding {
+  <#
+    BEST-EFFORT, INERT-SAFE mailbox forwarding for ONE admin account. Never throws -- an admin
+    apply must not fail because forwarding could not be set.
+
+      gate OFF                                  -> 'disabled'   (no call at all)
+      account has no mailbox                    -> 'no-mailbox' (Verbose only -- the NORMAL case:
+                                                                 admin accounts usually hold no licence)
+      flag TRUE + real address                  -> forward to it, DeliverToMailboxAndForward=$false
+      flag not TRUE, mailbox currently forwards -> clear it
+      flag not TRUE, nothing forwarded          -> 'nochange'
+      401/403 from Graph or EXO                 -> ONE warning per run naming the permission, 'forbidden'
+
+    -GraphInvoker / -ExoInvoker exist for offline tests; production uses Invoke-PimGraph and
+    Set-PimMailboxForwarding / Invoke-PimExoCmdlet.
+  #>
+  [CmdletBinding()]
+  param(
+    [Parameter(Mandatory)][AllowNull()][object]$Row,
+    [Parameter(Mandatory)][string]$UserPrincipalName,
+    [string]$UserId,
+    [object]$Enabled = $null,
+    [scriptblock]$GraphInvoker,
+    [scriptblock]$ExoInvoker
+  )
+  try {
+    if (-not (Test-PimAdminMailboxForwardingEnabled -Override $Enabled)) { return 'disabled' }
+    $id = if ("$UserId".Trim()) { "$UserId".Trim() } else { $UserPrincipalName }
+    $isForbidden = { param($err) ("$err" -match '(?i)\b(401|403)\b|Forbidden|Unauthorized|AccessDenied|Authorization_RequestDenied') }
+    $warnOnce = {
+      param($what)
+      if (-not $script:PimAdminFwdForbiddenWarned) {
+        $script:PimAdminFwdForbiddenWarned = $true
+        Write-Warning ("  [AdminForwarding] $what was refused (401/403). Mailbox forwarding needs the Exchange " +
+          "application permission Exchange.ManageAsApp plus an Exchange role (e.g. Mail Recipients) for the identity " +
+          "the engine runs as. Skipping forwarding for every admin this run; nothing else is affected.")
+      }
+    }
+    # 1. Does the account have a mailbox? (cheap: one GET, and the answer is usually "no")
+    try {
+      $null = if ($GraphInvoker) { & $GraphInvoker 'GET' "/users/$id/mailboxSettings" }
+              else { Invoke-PimGraph -Method GET -Path "/users/$id/mailboxSettings" }
+    } catch {
+      $m = "$($_.Exception.Message) $($_.ErrorDetails.Message)"
+      if ($m -match '(?i)MailboxNotEnabledForRESTAPI|MailboxNotFound|ResourceNotFound|\b404\b|not found') {
+        Write-Verbose "  [AdminForwarding] $UserPrincipalName has no mailbox -- nothing to forward."
+        return 'no-mailbox'
+      }
+      if (& $isForbidden $m) { & $warnOnce 'Reading mailboxSettings'; return 'forbidden' }
+      Write-Verbose "  [AdminForwarding] $UserPrincipalName mailbox probe failed: $m"
+      return 'error'
+    }
+    # 2. Apply or clear.
+    $flagOn = ("$(if ($Row -is [System.Collections.IDictionary]) { $Row['ForwardMailsToContact'] } else { $Row.ForwardMailsToContact })".Trim() -match '(?i)^(true|yes|1)$')
+    $addr   = "$(if ($Row -is [System.Collections.IDictionary]) { $Row['MailForwardAddress'] } else { $Row.MailForwardAddress })".Trim()
+    $exo = {
+      param($cmd, $params)
+      if ($ExoInvoker) { return (& $ExoInvoker $cmd $params) }
+      return (Invoke-PimExoCmdlet -CmdletName $cmd -Parameters $params)
+    }
+    try {
+      if ($flagOn -and (Test-PimMailForwardAddressIsReal -Value $addr) -and ($addr -notmatch '(?i)^(true|yes|1)$')) {
+        & $exo 'Set-Mailbox' @{ Identity = $UserPrincipalName; ForwardingSmtpAddress = $addr; DeliverToMailboxAndForward = $false } | Out-Null
+        return 'forwarded'
+      }
+      $cur = @(& $exo 'Get-Mailbox' @{ Identity = $UserPrincipalName })
+      $curFwd = if ($cur.Count) { "$($cur[0].ForwardingSmtpAddress)".Trim() } else { '' }
+      if (-not $curFwd) { return 'nochange' }
+      & $exo 'Set-Mailbox' @{ Identity = $UserPrincipalName; ForwardingSmtpAddress = $null; DeliverToMailboxAndForward = $false } | Out-Null
+      return 'cleared'
+    } catch {
+      $m = "$($_.Exception.Message) $($_.ErrorDetails.Message)"
+      if (& $isForbidden $m) { & $warnOnce 'Set-Mailbox'; return 'forbidden' }
+      Write-Warning "  [AdminForwarding] $UserPrincipalName -- forwarding could not be set: $m (the admin account itself was applied)."
+      return 'error'
+    }
+  } catch {
+    Write-Verbose "  [AdminForwarding] $UserPrincipalName -- unexpected: $($_.Exception.Message)"
+    return 'error'
   }
 }
 

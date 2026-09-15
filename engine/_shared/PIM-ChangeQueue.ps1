@@ -1,4 +1,4 @@
-# PIM4EntraPS -- change queue + full/delta run modes.
+﻿# PIM4EntraPS -- change queue + full/delta run modes.
 # Dot-sourced by PIM-Functions.psm1 and standalone by the pim-manager.
 #
 # Problem: today a run reconciles EVERYTHING (1-2 hours before a single change
@@ -28,18 +28,35 @@ function Get-PimEntityOrderRank {
 }
 
 function New-PimChange {
+    <#
+      §65 -- Kind/Origin default to the ORIGINAL behaviour (DesiredState + Proposal) so every
+      existing caller keeps its exact semantics without being touched. A caller that means
+      something else must say so, which is the point: an imperative action or an operator-authorised
+      entry is never produced by accident.
+
+      🔒 status ALWAYS starts 'pending'. Nothing here can mint a pre-committed entry -- committing
+      is an operator act on a stored row (§65.7), not a property of construction. If this ever grows
+      a -Status parameter, the commit gate has been bypassed.
+    #>
     param(
         [Parameter(Mandatory)][string]$Entity,
         [Parameter(Mandatory)][string]$Key,
         [Parameter(Mandatory)][ValidateSet('Create','Update','Remove')][string]$Op,
         [object]$Payload,
         [string]$By = "$env:USERNAME",
-        [string]$EnqueuedUtc
+        [string]$EnqueuedUtc,
+        [ValidateSet('DesiredState','Action')][string]$Kind = 'DesiredState',
+        [ValidateSet('Proposal','Authorised')][string]$Origin = 'Proposal',
+        # Why the operator asked for it. Carried for revokes because the Graph call already demands
+        # one, and an audit trail that loses it is worse than the synchronous call it replaced.
+        [string]$Justification = ''
     )
     if (-not $EnqueuedUtc) { $EnqueuedUtc = ([datetime]::UtcNow).ToString('o') }
     return [pscustomobject]@{
         id = [guid]::NewGuid().ToString(); entity = "$Entity"; key = "$Key"; op = "$Op"
         payload = $Payload; enqueuedUtc = "$EnqueuedUtc"; by = "$By"; status = 'pending'
+        kind = "$Kind"; origin = "$Origin"; justification = "$Justification"
+        committedBy = ''; committedUtc = ''; attempts = 0; lastError = ''; appliedUtc = ''
     }
 }
 
@@ -143,6 +160,29 @@ function Clear-PimChangeQueue {
 
 # SQL queue table DDL (Phase-6 SQL-only data layer will create this).
 function Get-PimChangeQueueDdl {
+    <#
+      §65 -- THE QUEUE IS A SHARED REVIEW SURFACE, not an internal staging buffer.
+
+      Two dimensions the original table could not express, and one lifecycle:
+
+        Kind   DesiredState : Payload IS a pim.Rows row (today's behaviour)
+               Action       : Payload is an imperative directory operation (revoke, TAP reset,
+                              session revoke) that is NEVER written to pim.Rows
+        Origin Proposal     : discovery proposed it
+               Authorised   : an operator action in the GUI created it
+
+      🔒 ORIGIN DOES NOT GRANT THE RIGHT TO APPLY -- THE COMMIT DOES (§65.7). Only Status='committed'
+      is drained, which is what keeps BUG-135's "propose-don't-auto-map" rule intact: a discovery
+      proposal is never applied because nobody committed it, not because the queue refuses its kind.
+
+      🔒 EVERY DEFAULT PRESERVES TODAY'S BEHAVIOUR. An existing row backfills to
+      DesiredState + Proposal + pending, so nothing already queued starts draining because this
+      shipped. Asserted in tests/Test-PimChangeQueue.ps1, not reasoned about.
+
+      🪤 THE COLUMNS BELOW ARE WHY BUG-152 WAS UNFIXABLE IN PLACE. With one Status for the whole
+      batch and no per-entry outcome, "retry what failed" had nothing to retry FROM -- see
+      Invoke-PimSqlCommit's old blanket `UPDATE ... WHERE Status='pending'`.
+    #>
     return @"
 IF SCHEMA_ID('pim') IS NULL EXEC ('CREATE SCHEMA pim');
 IF OBJECT_ID('pim.ChangeQueue') IS NULL
@@ -156,7 +196,69 @@ CREATE TABLE pim.ChangeQueue (
     [By]         NVARCHAR(200)  NULL,
     Status       NVARCHAR(20)   NOT NULL CONSTRAINT DF_ChangeQueue_Status DEFAULT 'pending'
 );
+-- §65 columns, added idempotently so an EXISTING store (internal already has this table) migrates
+-- in place. A NOT NULL column with a DEFAULT backfills every existing row, which is what makes the
+-- "nothing already queued starts draining" guarantee true rather than aspirational.
+IF COL_LENGTH('pim.ChangeQueue','Kind') IS NULL
+    ALTER TABLE pim.ChangeQueue ADD Kind NVARCHAR(20) NOT NULL
+        CONSTRAINT DF_ChangeQueue_Kind DEFAULT 'DesiredState';
+IF COL_LENGTH('pim.ChangeQueue','Origin') IS NULL
+    ALTER TABLE pim.ChangeQueue ADD Origin NVARCHAR(20) NOT NULL
+        CONSTRAINT DF_ChangeQueue_Origin DEFAULT 'Proposal';
+IF COL_LENGTH('pim.ChangeQueue','Justification') IS NULL
+    ALTER TABLE pim.ChangeQueue ADD Justification NVARCHAR(1000) NULL;
+IF COL_LENGTH('pim.ChangeQueue','CommittedBy') IS NULL
+    ALTER TABLE pim.ChangeQueue ADD CommittedBy NVARCHAR(200) NULL;
+IF COL_LENGTH('pim.ChangeQueue','CommittedUtc') IS NULL
+    ALTER TABLE pim.ChangeQueue ADD CommittedUtc DATETIME2 NULL;
+IF COL_LENGTH('pim.ChangeQueue','Attempts') IS NULL
+    ALTER TABLE pim.ChangeQueue ADD Attempts INT NOT NULL
+        CONSTRAINT DF_ChangeQueue_Attempts DEFAULT 0;
+IF COL_LENGTH('pim.ChangeQueue','LastAttemptUtc') IS NULL
+    ALTER TABLE pim.ChangeQueue ADD LastAttemptUtc DATETIME2 NULL;
+IF COL_LENGTH('pim.ChangeQueue','LastError') IS NULL
+    ALTER TABLE pim.ChangeQueue ADD LastError NVARCHAR(MAX) NULL;
+IF COL_LENGTH('pim.ChangeQueue','AppliedUtc') IS NULL
+    ALTER TABLE pim.ChangeQueue ADD AppliedUtc DATETIME2 NULL;
+-- The applying identity, so a drain can be attributed to ca-pim-tick vs a host run (§64.7 trap 1:
+-- the runtime identity is the one fact every wrong diagnosis this month started by assuming).
+IF COL_LENGTH('pim.ChangeQueue','AppliedBy') IS NULL
+    ALTER TABLE pim.ChangeQueue ADD AppliedBy NVARCHAR(200) NULL;
+-- DISCARD (2026-09-12): an operator removes a stale pending/failed entry from the open work WITHOUT
+-- deleting it (section 65.8 retains history). Additive + nullable, so an unmigrated store is unaffected.
+IF COL_LENGTH('pim.ChangeQueue','DiscardedBy') IS NULL
+    ALTER TABLE pim.ChangeQueue ADD DiscardedBy NVARCHAR(200) NULL;
+IF COL_LENGTH('pim.ChangeQueue','DiscardedUtc') IS NULL
+    ALTER TABLE pim.ChangeQueue ADD DiscardedUtc DATETIME2 NULL;
+IF COL_LENGTH('pim.ChangeQueue','DiscardReason') IS NULL
+    ALTER TABLE pim.ChangeQueue ADD DiscardReason NVARCHAR(1000) NULL;
+
 IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name='IX_ChangeQueue_Pending' AND object_id=OBJECT_ID('pim.ChangeQueue'))
     CREATE INDEX IX_ChangeQueue_Pending ON pim.ChangeQueue (Status, EnqueuedUtc);
+-- The drain's own predicate (Status + Kind), so claiming work does not scan the whole queue.
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name='IX_ChangeQueue_Drain' AND object_id=OBJECT_ID('pim.ChangeQueue'))
+    CREATE INDEX IX_ChangeQueue_Drain ON pim.ChangeQueue (Status, Kind, EnqueuedUtc);
 "@
+}
+
+# The queue's vocabulary, in ONE place so a typo cannot invent a state. Every consumer -- the GUI,
+# the drain, the gates -- validates against these rather than matching strings inline.
+function Get-PimQueueVocabulary {
+    return [pscustomobject]@{
+        Kinds    = @('DesiredState','Action')
+        Origins  = @('Proposal','Authorised')
+        # pending   -> nobody has committed it yet; NEVER drained (this is BUG-135's rule)
+        # committed -> an operator selected it; the drain will claim it
+        # applying  -> CLAIMED by a drain and in flight. Only ACTIONS reach this state: a directory
+        #              call cannot be rolled back the way a pim.Rows write can, so the claim happens
+        #              BEFORE the effect. A row stuck here means a drain died mid-action -- which is
+        #              exactly what you want to be able to see, rather than having a second drain
+        #              silently re-issue the same revoke.
+        # applied   -> the effect was re-read and CONFIRMED (§65.8: not "the POST returned 200")
+        # failed    -> attempts exhausted, or terminal; RETAINED and surfaced, never deleted
+        # discarded -> an operator took a pending/failed entry OUT of the open work, with a reason;
+        #              RETAINED (never deleted) and never drained -- the drain only claims 'committed'
+        Statuses = @('pending','committed','applying','applied','failed','discarded')
+        Terminal = @('applied','failed','discarded')
+    }
 }

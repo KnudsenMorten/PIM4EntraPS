@@ -1,4 +1,4 @@
-#Requires -Version 5.1
+﻿#Requires -Version 5.1
 <#
   BUG-55 -- a deploy that changes what the engine WANTS is a different act from a deploy that
   changes how the engine WORKS, and the tooling could not tell them apart.
@@ -40,10 +40,20 @@ function Get-PimPolicyTemplateHash {
           becomes noise and gets bypassed. This session edited exactly those fields on a shipped
           template and it must read as no-change.
     #>
-    [CmdletBinding()] param([Parameter(Mandatory)][string]$Path)
+    [CmdletBinding(DefaultParameterSetName = 'Path')] param(
+        [Parameter(Mandatory, ParameterSetName = 'Path')][string]$Path,
+        # 2026-09-12: templates live in SQL -- hash an already-parsed template (the SQL copy) with the
+        # SAME normalisation, so a stored template and the file it was seeded from hash identically.
+        [Parameter(Mandatory, ParameterSetName = 'Object')][object]$Template
+    )
 
-    $raw = Get-Content -LiteralPath $Path -Raw -Encoding UTF8
-    $obj = $raw | ConvertFrom-Json
+    $obj = if ($PSCmdlet.ParameterSetName -eq 'Object') {
+        # Round-trip through JSON so a hashtable, a PSCustomObject from ConvertFrom-Json and a value
+        # hydrated from pim.Settings all normalise to the same PSCustomObject shape as a file read.
+        ($Template | ConvertTo-Json -Depth 30 -Compress) | ConvertFrom-Json
+    } else {
+        (Get-Content -LiteralPath $Path -Raw -Encoding UTF8) | ConvertFrom-Json
+    }
     $stripped = Remove-PimTemplateAnnotation -Node $obj
     # Depth 30: the deepest shipped template nests rules -> Notification[] -> object.
     $canon = $stripped | ConvertTo-Json -Depth 30 -Compress
@@ -86,20 +96,40 @@ function Get-PimPolicyBaselineFingerprint {
       A missing/empty directory yields hash '' and count 0 rather than throwing: "no templates
       here" is a legitimate state for a non-hosted caller, and a gate that crashes gets disabled.
     #>
-    [CmdletBinding()] param([Parameter(Mandatory)][string]$TemplateDir)
+    [CmdletBinding(DefaultParameterSetName = 'Dir')] param(
+        [Parameter(Mandatory, ParameterSetName = 'Dir')][string]$TemplateDir,
+        # 2026-09-12 -- the SQL copy: id -> template object (pim.Settings['PolicyTemplates']). Each is
+        # keyed '<id>.policytemplate.json' so the fingerprint of a store seeded from a directory EQUALS
+        # the fingerprint of that directory -- one comparable value across files and SQL.
+        [Parameter(Mandatory, ParameterSetName = 'Templates')][AllowEmptyCollection()][hashtable]$Templates
+    )
 
     $result = @{ hash = ''; templates = @{}; count = 0 }
-    if (-not (Test-Path -LiteralPath $TemplateDir)) { return $result }
-
-    $files = @(Get-ChildItem -LiteralPath $TemplateDir -Filter '*.policytemplate.json' -File -ErrorAction SilentlyContinue |
-               Sort-Object Name)
-    if (-not $files.Count) { return $result }
-
     $parts = New-Object System.Collections.Generic.List[string]
-    foreach ($f in $files) {
-        $h = Get-PimPolicyTemplateHash -Path $f.FullName
-        $result.templates[$f.Name] = $h
-        [void]$parts.Add("$($f.Name):$h")
+    if ($PSCmdlet.ParameterSetName -eq 'Templates') {
+        # A key that is already a file name is used as-is; a bare id gets the file suffix.
+        $nameOf = @{}
+        foreach ($k in @($Templates.Keys)) { $nameOf["$k"] = $(if ("$k" -like '*.policytemplate.json') { "$k" } else { "$k.policytemplate.json" }) }
+        $names = @($nameOf.Keys | Sort-Object { $nameOf[$_] })
+        if (-not $names.Count) { return $result }
+        foreach ($id in $names) {
+            $name = $nameOf[$id]
+            $h = Get-PimPolicyTemplateHash -Template $Templates[$id]
+            $result.templates[$name] = $h
+            [void]$parts.Add("${name}:$h")
+        }
+        $count = $names.Count
+    } else {
+        if (-not (Test-Path -LiteralPath $TemplateDir)) { return $result }
+        $files = @(Get-ChildItem -LiteralPath $TemplateDir -Filter '*.policytemplate.json' -File -ErrorAction SilentlyContinue |
+                   Where-Object { $_.Name -notmatch '\.custom\.' } | Sort-Object Name)
+        if (-not $files.Count) { return $result }
+        foreach ($f in $files) {
+            $h = Get-PimPolicyTemplateHash -Path $f.FullName
+            $result.templates[$f.Name] = $h
+            [void]$parts.Add("$($f.Name):$h")
+        }
+        $count = $files.Count
     }
     $sha = [System.Security.Cryptography.SHA256]::Create()
     try {
@@ -108,7 +138,7 @@ function Get-PimPolicyBaselineFingerprint {
         # needlessly long there. 16 hex chars over a set this small is not a collision risk.
         $result.hash = ((($sha.ComputeHash($bytes) | ForEach-Object { $_.ToString('x2') }) -join '')).Substring(0,16)
     } finally { $sha.Dispose() }
-    $result.count = $files.Count
+    $result.count = $count
     return $result
 }
 

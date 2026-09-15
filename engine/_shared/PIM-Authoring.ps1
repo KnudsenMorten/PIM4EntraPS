@@ -1,4 +1,4 @@
-# PIM4EntraPS -- Manager authoring / governance helpers (pure, testable).
+﻿# PIM4EntraPS -- Manager authoring / governance helpers (pure, testable).
 # Dot-sourced by PIM-Functions.psm1 and standalone by the pim-manager
 # (same pattern as PIM-PermissionWizard.ps1: no I/O, fully unit-testable).
 #
@@ -265,9 +265,11 @@ function New-PimAdminRowsFromImport {
         [Parameter(Mandatory)][object[]]$People,
         [object]$Template = $null
     )
-    # ForwardMailsToContact / MailForwardAddress retired 2026-08-12: notification mail is sent
-    # FROM a shared mailbox the engine SPN is scoped to, so an admin account needs no mailbox and
-    # no Exchange licence, and there is nothing to forward. Recipient is ManagerEmail.
+    # ForwardMailsToContact / MailForwardAddress: retired 2026-08-12, UN-RETIRED 2026-09-12 (operator,
+    # "Both") as the owner's OFFICE USER -- PIM mail about the admin goes there (Get-PimAdminMailRecipient,
+    # ManagerEmail is the fallback), and mailbox forwarding is set where the account has a mailbox
+    # (gated, $global:PIM_AdminMailboxForwarding). The bulk import does not prefill them: they are set
+    # per admin with Edit in the Manager, and a blank pair falls back to ManagerEmail.
     $hdr = @('FirstName','LastName','Initials','Purpose','TargetUsage','TargetPlatform','UserType','UserName','DisplayName','UserPrincipalName','UsageLocation','CreateTAP','TAPStartDate','Ring')
     $prefill = @{}
     if ($Template -and $Template.prefill) {

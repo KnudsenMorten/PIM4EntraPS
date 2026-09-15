@@ -1,4 +1,4 @@
-#requires -Version 5.1
+﻿#requires -Version 5.1
 <#
 .SYNOPSIS
     PIM4EntraPS -- sync-automateit: controlled container auto-update with safe roll +
@@ -70,9 +70,17 @@ param(
     # build indefinitely. Inert where it does not apply: the roller SKIPS a Job that does not
     # exist, which is the normal always-on shape.
     [string]$TickJobName     = 'ca-pim-tick',
+    # Scopes every az call to this subscription. Optional (unchanged behaviour when blank), and
+    # defaults to the deploy's own env var like _PimSetupShared.ps1 does.
+    [string]$SubscriptionId  = $(if ($env:PIM_SUBSCRIPTION_ID) { $env:PIM_SUBSCRIPTION_ID } else { '' }),
     [switch]$Apply,
-    [switch]$SkipHealthCheck
+    [switch]$SkipHealthCheck,
+    # 2026-09-13 -- the roller refuses to move an environment on ring >= 2 to a version its ring does not
+    # approve. The override is audited and needs a reason; it is forwarded to the roller unchanged.
+    [switch]$OverrideRingGate,
+    [string]$Reason
 )
+$subArgs = @(); if ("$SubscriptionId".Trim()) { $subArgs = @('--subscription', "$SubscriptionId".Trim()) }
 $ErrorActionPreference = 'Stop'
 $here = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent $MyInvocation.MyCommand.Path }
 # Guarded `az` shadow -- see _PimAz.ps1. az writes ordinary WARNINGS to stderr and PowerShell 5.1
@@ -102,7 +110,7 @@ Info ("az context: {0} / sub {1}" -f $acct.user.name, $acct.id)
 Step "Resolve candidate image tag in ACR ($AcrName / $ImageRepo)"
 $latestTag = ''
 try {
-    $tags = az acr repository show-tags -n $AcrName --repository $ImageRepo -o tsv 2>$null
+    $tags = az acr repository show-tags @subArgs -n $AcrName --repository $ImageRepo -o tsv 2>$null
     $tagList = @(($tags -split "`r?`n") | Where-Object { "$_".Trim() })
     if ($tagList.Count) {
         # pick the newest VALID semver tag via the PURE comparer (numeric, not string).
@@ -122,7 +130,7 @@ Info ("newest released tag: " + $(if ($latestTag) { $latestTag } else { '(none f
 Step "Resolve currently-deployed tag on $ManagerApp"
 $currentTag = ''
 try {
-    $img = az containerapp show -g $ResourceGroup -n $ManagerApp --query "properties.template.containers[0].image" -o tsv 2>$null
+    $img = az containerapp show @subArgs -g $ResourceGroup -n $ManagerApp --query "properties.template.containers[0].image" -o tsv 2>$null
     if ("$img".Trim()) { $currentTag = ("$img" -split ':')[-1] }
 } catch {}
 if (-not "$currentTag".Trim()) { Warn "could not read the deployed image tag for $ManagerApp (is it deployed in $ResourceGroup?). Nothing done."; return }
@@ -146,15 +154,24 @@ $targetTag = $decision.targetTag
 # ---- 4. capture pre-update revision (rollback target) ---------------------
 Step "Capture $ManagerApp current revision (rollback target)"
 $prevRev = ''
-try { $prevRev = az containerapp revision list -g $ResourceGroup -n $ManagerApp --query "[?properties.active].name | [0]" -o tsv 2>$null } catch {}
-if (-not "$prevRev".Trim()) { try { $prevRev = az containerapp revision list -g $ResourceGroup -n $ManagerApp --query "[0].name" -o tsv 2>$null } catch {} }
+try { $prevRev = @(az containerapp revision list @subArgs -g $ResourceGroup -n $ManagerApp --query "[?properties.active].name" -o tsv 2>$null) | Select-Object -First 1 } catch {}
+if (-not "$prevRev".Trim()) { try { $prevRev = az containerapp revision list @subArgs -g $ResourceGroup -n $ManagerApp --query "[0].name" -o tsv 2>$null } catch {} }
 Info ("pre-update revision: " + $(if ($prevRev) { $prevRev } else { '(unknown -- auto-rollback will be unavailable)' }))
+# 🔴 §53.6 -- the revision name is not a durable anchor: Container Apps prunes inactive revisions,
+# so the target captured here can be gone by the time the health check fails. This path runs
+# unattended against customer environments, which is precisely where "ROLL BACK BY HAND" is the
+# least useful sentence available. The IMAGE survives in ACR; roll to it when the revision is gone.
+$prevImage = ''
+try { $prevImage = "$(az containerapp show -g $ResourceGroup -n $ManagerApp --query 'properties.template.containers[0].image' -o tsv 2>$null)".Trim() } catch { Write-Verbose "pre-update image read failed: $($_.Exception.Message)" }
+Info ("pre-update image: " + $(if ($prevImage) { $prevImage } else { '(unknown)' }))
 
 # ---- 5. roll to the new tag via the existing zero-downtime roller ----------
 $roller = Join-Path $here 'Update-PimContainers.ps1'
 Step "Roll all apps -> $targetTag (zero-downtime, via Update-PimContainers.ps1 -SkipBuild)"
 if ($PSCmdlet.ShouldProcess("$($Apps -join ', ')", "update -> $targetTag")) {
-    & $roller -ImageTag $targetTag -SkipBuild -ResourceGroup $ResourceGroup -AcrName $AcrName -ImageRepo $ImageRepo -Apps $Apps -TickJobName $TickJobName
+    $ringGateArgs = @{}
+    if ($OverrideRingGate) { $ringGateArgs = @{ OverrideRingGate = $true; Reason = $Reason } }
+    & $roller -ImageTag $targetTag -SkipBuild -ResourceGroup $ResourceGroup -AcrName $AcrName -ImageRepo $ImageRepo -Apps $Apps -TickJobName $TickJobName @ringGateArgs
     if ($LASTEXITCODE -and $LASTEXITCODE -ne 0) { throw "Update-PimContainers.ps1 failed (exit $LASTEXITCODE)." }
 }
 
@@ -183,11 +200,23 @@ if ($rb.action -eq 'rollback') {
     Warn $rb.reason
     Step "AUTO-ROLLBACK -> $($rb.revision)"
     if ($PSCmdlet.ShouldProcess($ManagerApp, "rollback to $($rb.revision)")) {
-        & $roller -Rollback $rb.revision -ResourceGroup $ResourceGroup -AcrName $AcrName -ImageRepo $ImageRepo -Apps $Apps
+        # §53.6: the image anchor rides along; the roller uses it only if the revision is gone.
+        $rbArgs = @{}; if ("$prevImage".Trim()) { $rbArgs['RollbackImage'] = "$prevImage".Trim() }
+        & $roller -Rollback $rb.revision -ResourceGroup $ResourceGroup -AcrName $AcrName -ImageRepo $ImageRepo -Apps $Apps @rbArgs
     }
     throw "sync-automateit: post-update health check FAILED -- rolled back to $($rb.revision)."
 } elseif ($rb.action -eq 'none' -and -not $healthy) {
-    throw "sync-automateit: post-update health check FAILED and no rollback target was captured -- MANUAL rollback required (az containerapp revision list -n $ManagerApp -g $ResourceGroup)."
+    # §53.6: no revision name -- but the pre-update IMAGE is a rollback target in its own right,
+    # and this is an unattended customer run. Try it before declaring a manual rollback.
+    if ("$prevImage".Trim()) {
+        Warn "no pre-update revision was captured, but the pre-update IMAGE was -- rolling back to it."
+        Step "AUTO-ROLLBACK (image) -> $prevImage"
+        if ($PSCmdlet.ShouldProcess($ManagerApp, "rollback to image $prevImage")) {
+            & $roller -RollbackImage "$prevImage".Trim() -ResourceGroup $ResourceGroup -AcrName $AcrName -ImageRepo $ImageRepo -Apps $Apps
+        }
+        throw "sync-automateit: post-update health check FAILED -- rolled back to the pre-update image $prevImage."
+    }
+    throw "sync-automateit: post-update health check FAILED and NEITHER a rollback revision nor a pre-update image was captured -- MANUAL rollback required (az containerapp revision list -n $ManagerApp -g $ResourceGroup)."
 }
 
 Step "Done. Rolled to $targetTag and health check PASSED (kept the new revision)."

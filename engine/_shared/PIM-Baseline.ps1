@@ -1,4 +1,4 @@
-#Requires -Version 5.1
+﻿#Requires -Version 5.1
 <#
 .SYNOPSIS
     Baseline-courier CONSUMER (LIFECYCLE-GOVERNANCE § 19): pull the MSP's signed

@@ -1,4 +1,4 @@
-#Requires -Version 5.1
+﻿#Requires -Version 5.1
 <#
 .SYNOPSIS
   IMP-07 -- give a newly-deployed environment an EXPLICIT feature-gate baseline, so it is not inert.
@@ -79,7 +79,7 @@ function Write-ResultFile {
 }
 
 Write-Host ("=" * 78) -ForegroundColor Cyan
-Write-Host " PIM FEATURE BASELINE (IMP-07)  $SqlServerFqdn/$SqlDatabase" -ForegroundColor Cyan
+Write-Host " PIM FEATURE BASELINE  $SqlServerFqdn/$SqlDatabase" -ForegroundColor Cyan
 Write-Host ("=" * 78) -ForegroundColor Cyan
 
 # An EXPLICIT credential must beat ambient managed identity: mgmt1 has an MI of its own, and an MI

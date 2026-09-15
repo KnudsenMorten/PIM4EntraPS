@@ -1,4 +1,4 @@
-# PIM4EntraPS -- Access Review OVERVIEW (read-only DATA/PROVIDER layer).
+﻿# PIM4EntraPS -- Access Review OVERVIEW (read-only DATA/PROVIDER layer).
 #
 # Supplies the normalized, table-ready data the Manager's "Access Reviews" GUI tab
 # will later render (the GUI tab is queued separately -- this file is data-only and
@@ -139,6 +139,15 @@ function Get-PimAccessReviewDecisionCounts {
     param([object[]]$Decisions)
     $c = [ordered]@{ total = 0; pending = 0; approved = 0; denied = 0; dontKnow = 0 }
     foreach ($d in @($Decisions)) {
+        # 🔴 `@($null)` IS AN ARRAY OF ONE NULL ELEMENT, NOT AN EMPTY ARRAY. With no -Decisions at
+        # all this loop ran once and counted a decision that does not exist, so a review with
+        # nothing to decide reported "1 decision, 1 pending".
+        # 🪤 That is not cosmetic. `pending` drives the reminder path -- reviewers are mailed about
+        # reviews that are "due/overdue WITH PENDING DECISIONS" -- so an empty review could generate
+        # reminder mail about a phantom item, repeatedly, to real people. It also inflates the
+        # overview counts and the evidence export, which are what an auditor reads.
+        # Caught by an existing assertion ("no decisions -> zero counts") that was already red.
+        if ($null -eq $d) { continue }
         $c.total++
         $val = "$(Get-PimArProp -Object $d -Names @('decision'))"
         switch -Regex ($val) {

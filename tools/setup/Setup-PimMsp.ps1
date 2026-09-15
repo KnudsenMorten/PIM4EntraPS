@@ -1,4 +1,4 @@
-#requires -Version 5.1
+﻿#requires -Version 5.1
 <#
 .SYNOPSIS
     PIM4EntraPS — MSP per-customer deployment (container topology + pull-not-push sync).
@@ -81,6 +81,7 @@ param(
     [string]$SyncModel = 'template-pull'
 )
 $ErrorActionPreference = 'Stop'
+$subArgs = @('--subscription', $SubscriptionId)   # every az call is scoped to the customer subscription
 
 # EITHER a secret OR a certificate, never both and never neither. Validated HERE, before any
 # resource is touched, because this script deploys a customer's whole topology -- discovering the
@@ -162,14 +163,28 @@ if ($syncJobs -contains 'template-pull' -or $SyncModel -eq 'local-reads-msp') {
         # Store the MSP template conn as a secret + reference it; set the ring. The
         # sync job (PIM-Scheduler) copies/reads ONLY the ring's template rows into the
         # customer LOCAL DB. Customer data is never read by / sent to the MSP.
-        az containerapp secret set -g $ResourceGroup -n ca-pim-scheduler --secrets "msp-template-conn=$MspTemplateConn" -o none
-        az containerapp update -g $ResourceGroup -n ca-pim-scheduler `
+        # 🔴 B9 (2026-09-10) -- az is az.cmd, so cmd.exe CUTS THIS VALUE AT THE FIRST '&', with no
+        # error and no non-zero exit. A SQL connection string separates with ';' so it is usually
+        # safe -- but an '&' in the PASSWORD is entirely legal, and the result would be a secret
+        # that looks stored, authenticates as nobody, and breaks the MSP template pull at 03:00
+        # with a message about SQL rather than about this line. That exact failure shape (a value
+        # silently truncated at '&') is what left a customer a release behind on 2026-09-10.
+        # 🔑 Refuse loudly rather than store a broken secret. A rotated password is a two-minute
+        # fix; a silently half-written credential is a night of debugging the wrong subsystem.
+        if ("$MspTemplateConn".Contains('&')) {
+            throw ("The MSP template connection string contains '&', which the az CLI silently " +
+                   "truncates on Windows (az.cmd -> cmd.exe treats & as a command separator). " +
+                   "The secret would be stored INCOMPLETE and fail to authenticate. " +
+                   "Use a password without '&', or set this secret through the Azure portal/ARM REST.")
+        }
+        az containerapp secret set @subArgs -g $ResourceGroup -n ca-pim-scheduler --secrets "msp-template-conn=$MspTemplateConn" -o none
+        az containerapp update @subArgs -g $ResourceGroup -n ca-pim-scheduler `
             --set-env-vars "PIM_MspTemplateConn=secretref:msp-template-conn" "PIM_Ring=$Ring" "PIM_SyncModel=$SyncModel" -o none
     }
 } else {
     Step "Sync model '$SyncModel' needs no MSP template conn (no MSP->LOCAL copy); setting PIM_SyncModel only"
     if ($PSCmdlet.ShouldProcess('ca-pim-scheduler','set PIM_SyncModel')) {
-        az containerapp update -g $ResourceGroup -n ca-pim-scheduler --set-env-vars "PIM_SyncModel=$SyncModel" -o none
+        az containerapp update @subArgs -g $ResourceGroup -n ca-pim-scheduler --set-env-vars "PIM_SyncModel=$SyncModel" -o none
     }
 }
 

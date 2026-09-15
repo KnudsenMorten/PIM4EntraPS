@@ -421,20 +421,61 @@ function Set-PimEntryRingInJson {
     return $text
 }
 
-# --- local applied-version stamp (I/O; version stays LOCAL) ----------------------
-function Get-PimConfStateFile {
-    param([string]$StateFile)
-    if ($StateFile) { return $StateFile }
-    if ($global:PIM_TemplateStateFile) { return $global:PIM_TemplateStateFile }
-    $base = if ($global:PIM_OutputRoot) { $global:PIM_OutputRoot } else { Join-Path $PSScriptRoot '..\..\output' }
-    return (Join-Path $base 'state\template-state.json')
+# --- local applied-version stamp (SQL pim.Settings['ConformanceTemplateState']; version stays LOCAL) ------
+# SQL-ONLY (2026-09-13). The applied-version stamps used to live in output/state/template-state.json.
+# They are now ONE document in pim.Settings['ConformanceTemplateState'] with the same shape:
+#   { "<tenantId>|<templateId>": { LastAppliedVersion; AppliedUtc; AppliedBy },
+#     "scopeVersions":     { "<tenantId>|<scope>": { LastAppliedVersion; AppliedUtc; AppliedBy } },
+#     "fleetRingByTenant": { "<tenantId>": <int> } }
+# Read/written through the Get-/Set-PimSetting bridge the Manager and the scheduler both define.
+# Without a bridge (offline tests, a bare dot-source) the document lives in this process's memory
+# only, and a save says so -- it is never presented as persistence.
+$script:PimTemplateStateMem = $null
+
+function Get-PimTemplateStateStoreName { 'ConformanceTemplateState' }
+
+function ConvertTo-PimTemplateStateDocument {
+    # Normalize a stored value (JSON text, parsed object or dictionary) to a PSCustomObject.
+    param([object]$Value)
+    if ($null -eq $Value) { return [pscustomobject]@{} }
+    if ($Value -is [string]) {
+        if (-not "$Value".Trim()) { return [pscustomobject]@{} }
+        try { $Value = $Value | ConvertFrom-Json } catch { return [pscustomobject]@{} }
+        if ($Value -is [string]) { try { $Value = $Value | ConvertFrom-Json } catch { return [pscustomobject]@{} } }
+    }
+    if ($Value -is [System.Collections.IDictionary]) {
+        try { $Value = ($Value | ConvertTo-Json -Depth 8 | ConvertFrom-Json) } catch { return [pscustomobject]@{} }
+    }
+    if ($null -eq $Value -or -not $Value.PSObject) { return [pscustomobject]@{} }
+    return $Value
+}
+
+function Get-PimTemplateStateDocument {
+    # The whole state document. Never throws; absent -> an empty object.
+    if (Get-Command Get-PimSetting -ErrorAction SilentlyContinue) {
+        try { return (ConvertTo-PimTemplateStateDocument (Get-PimSetting -Name (Get-PimTemplateStateStoreName))) }
+        catch { Write-Warning "  [conformance] TemplateState read failed: $($_.Exception.Message)"; return [pscustomobject]@{} }
+    }
+    if ($null -ne $script:PimTemplateStateMem) { return (ConvertTo-PimTemplateStateDocument $script:PimTemplateStateMem) }
+    return [pscustomobject]@{}
+}
+
+function Save-PimTemplateStateDocument {
+    # Persist the whole document. Returns 'sql' or 'memory'. A store that rejects the write THROWS.
+    param([Parameter(Mandatory)][object]$Document)
+    $json = $Document | ConvertTo-Json -Depth 8 -Compress
+    if (Get-Command Set-PimSetting -ErrorAction SilentlyContinue) {
+        Set-PimSetting -Name (Get-PimTemplateStateStoreName) -Value $json | Out-Null
+        return 'sql'
+    }
+    $script:PimTemplateStateMem = $json
+    Write-Warning "  [conformance] TemplateState kept in this process only -- no SQL settings store (Set-PimSetting) is wired (PIM v2 is SQL-only)."
+    return 'memory'
 }
 
 function Get-PimTemplateState {
-    param([string]$StateFile, [Parameter(Mandatory)][string]$TenantId, [Parameter(Mandatory)][string]$TemplateId)
-    $file = Get-PimConfStateFile -StateFile $StateFile
-    if (-not (Test-Path -LiteralPath $file)) { return $null }
-    try { $all = Get-Content -LiteralPath $file -Raw -Encoding UTF8 | ConvertFrom-Json } catch { return $null }
+    param([Parameter(Mandatory)][string]$TenantId, [Parameter(Mandatory)][string]$TemplateId)
+    $all = Get-PimTemplateStateDocument
     $p = $all.PSObject.Properties["$TenantId|$TemplateId"]
     if ($p) { return $p.Value }
     return $null
@@ -442,39 +483,38 @@ function Get-PimTemplateState {
 
 function Set-PimTemplateState {
     param(
-        [string]$StateFile, [Parameter(Mandatory)][string]$TenantId, [Parameter(Mandatory)][string]$TemplateId,
+        [Parameter(Mandatory)][string]$TenantId, [Parameter(Mandatory)][string]$TemplateId,
         [Parameter(Mandatory)][int]$Version, [string]$AppliedBy = "$env:USERNAME", [datetime]$NowUtc = [datetime]::UtcNow
     )
-    $file = Get-PimConfStateFile -StateFile $StateFile
-    $dir = Split-Path -Parent $file
-    if ($dir -and -not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
-    $all = [pscustomobject]@{}
-    if (Test-Path -LiteralPath $file) { try { $all = Get-Content -LiteralPath $file -Raw -Encoding UTF8 | ConvertFrom-Json } catch { $all = [pscustomobject]@{} } }
+    $all = Get-PimTemplateStateDocument
     Set-PimConfProp -Object $all -Name "$TenantId|$TemplateId" -Value ([pscustomobject]@{ LastAppliedVersion = $Version; AppliedUtc = $NowUtc.ToString('o'); AppliedBy = $AppliedBy })
-    $all | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $file -Encoding UTF8
-    return $file
+    return (Save-PimTemplateStateDocument -Document $all)
+}
+
+function Set-PimTemplateStateRing {
+    # Stamp a tenant's rollout ring in the state document (fleetRingByTenant) so the fleet matrix
+    # ([H8]) can read the ring of an instance it is not the active one for.
+    param([Parameter(Mandatory)][string]$TenantId, [Parameter(Mandatory)][int]$Ring)
+    $all = Get-PimTemplateStateDocument
+    if (-not $all.PSObject.Properties['fleetRingByTenant']) { Set-PimConfProp -Object $all -Name 'fleetRingByTenant' -Value ([pscustomobject]@{}) }
+    Set-PimConfProp -Object $all.fleetRingByTenant -Name $TenantId -Value $Ring
+    return (Save-PimTemplateStateDocument -Document $all)
 }
 
 # --- FLEET state read (I/O seam for [H8]) ---------------------------------------
-# Read ONE instance's conformance standing from its local template-state file, for the
+# Read ONE instance's conformance standing from the template-state document, for the
 # fleet matrix: every template's last-applied version (keyed "<tenantId>|<templateId>")
-# plus an optional fleet `ring` stamp the deploy writes at the file root. Returns
-# @{ appliedVersions = @{ '<templateId>' = <int> }; ring = <int?> }. Pure-ish (one read);
-# returns empty maps when the file is absent/unparseable so a never-deployed tenant is
-# still a valid fleet row (every cell = NeverApplied). $TenantId selects this instance's
-# rows from a shared state file (the Manager keys state by instance name).
+# plus an optional fleet `ring` stamp (fleetRingByTenant). Returns
+# @{ appliedVersions = @{ '<templateId>' = <int> }; ring = <int?> }. Returns empty maps when
+# the document is absent or unreadable so a never-deployed tenant is still a valid fleet row
+# (every cell = NeverApplied). -State supplies the document (tests / a caller that already has
+# it); omitted -> read from the store. $TenantId selects this instance's rows.
 function Get-PimFleetStateForInstance {
     [CmdletBinding()]
-    param([Parameter(Mandatory)][string]$StateFile, [Parameter(Mandatory)][string]$TenantId)
+    param([object]$State, [Parameter(Mandatory)][string]$TenantId)
     $applied = @{}
     $ring = $null
-    if (-not (Test-Path -LiteralPath $StateFile)) { return @{ appliedVersions = $applied; ring = $ring } }
-    $all = $null
-    try {
-        $raw = [System.IO.File]::ReadAllText($StateFile, [System.Text.UTF8Encoding]::new($false))
-        if ($raw.Length -gt 0 -and [int][char]$raw[0] -eq 0xFEFF) { $raw = $raw.Substring(1) }
-        $all = $raw | ConvertFrom-Json
-    } catch { return @{ appliedVersions = $applied; ring = $ring } }
+    $all = if ($PSBoundParameters.ContainsKey('State')) { ConvertTo-PimTemplateStateDocument $State } else { Get-PimTemplateStateDocument }
     if ($null -eq $all) { return @{ appliedVersions = $applied; ring = $ring } }
     $prefix = "$TenantId|"
     foreach ($p in @($all.PSObject.Properties)) {
@@ -502,18 +542,16 @@ function Get-PimFleetStateForInstance {
 # Manager conformance heatmap) can show, for one tenant, exactly which scopes are
 # at the current template version and which are Behind / Ahead / NeverApplied.
 #
-# State lives in the SAME local state file as the template stamp, under a distinct
-# "scopeVersions" map keyed "<tenantId>|<scope>" -> { LastAppliedVersion; AppliedUtc;
-# AppliedBy }. Pure matrix builder (Get-PimScopeConformance) takes the desired
-# versions (template-version per scope) + the applied versions (from state) and
-# returns one annotated row per scope. Fully testable; no Graph, no SQL.
+# State lives in the SAME document as the template stamp (pim.Settings['ConformanceTemplateState']),
+# under a distinct "scopeVersions" map keyed "<tenantId>|<scope>" -> { LastAppliedVersion;
+# AppliedUtc; AppliedBy }. Pure matrix builder (Get-PimScopeConformance) takes the desired
+# versions (template-version per scope) + the applied versions (from state) and returns one
+# annotated row per scope. Fully testable; no Graph.
 
 function Get-PimScopeAppliedVersion {
     # Applied template version for ONE scope of ONE tenant; 0 if never applied.
-    param([string]$StateFile, [Parameter(Mandatory)][string]$TenantId, [Parameter(Mandatory)][string]$Scope)
-    $file = Get-PimConfStateFile -StateFile $StateFile
-    if (-not (Test-Path -LiteralPath $file)) { return 0 }
-    try { $all = Get-Content -LiteralPath $file -Raw -Encoding UTF8 | ConvertFrom-Json } catch { return 0 }
+    param([Parameter(Mandatory)][string]$TenantId, [Parameter(Mandatory)][string]$Scope)
+    $all = Get-PimTemplateStateDocument
     if (-not $all.PSObject.Properties['scopeVersions']) { return 0 }
     $p = $all.scopeVersions.PSObject.Properties["$TenantId|$Scope"]
     if ($p -and $p.Value -and $p.Value.PSObject.Properties['LastAppliedVersion']) { return [int]("$($p.Value.LastAppliedVersion)" -as [int]) }
@@ -523,18 +561,13 @@ function Get-PimScopeAppliedVersion {
 function Set-PimScopeAppliedVersion {
     # Stamp the applied template version for ONE scope of ONE tenant (LOCAL state).
     param(
-        [string]$StateFile, [Parameter(Mandatory)][string]$TenantId, [Parameter(Mandatory)][string]$Scope,
+        [Parameter(Mandatory)][string]$TenantId, [Parameter(Mandatory)][string]$Scope,
         [Parameter(Mandatory)][int]$Version, [string]$AppliedBy = "$env:USERNAME", [datetime]$NowUtc = [datetime]::UtcNow
     )
-    $file = Get-PimConfStateFile -StateFile $StateFile
-    $dir = Split-Path -Parent $file
-    if ($dir -and -not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
-    $all = [pscustomobject]@{}
-    if (Test-Path -LiteralPath $file) { try { $all = Get-Content -LiteralPath $file -Raw -Encoding UTF8 | ConvertFrom-Json } catch { $all = [pscustomobject]@{} } }
+    $all = Get-PimTemplateStateDocument
     if (-not $all.PSObject.Properties['scopeVersions']) { Set-PimConfProp -Object $all -Name 'scopeVersions' -Value ([pscustomobject]@{}) }
     Set-PimConfProp -Object $all.scopeVersions -Name "$TenantId|$Scope" -Value ([pscustomobject]@{ LastAppliedVersion = $Version; AppliedUtc = $NowUtc.ToString('o'); AppliedBy = $AppliedBy })
-    $all | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $file -Encoding UTF8
-    return $file
+    return (Save-PimTemplateStateDocument -Document $all)
 }
 
 function Get-PimScopeConformance {

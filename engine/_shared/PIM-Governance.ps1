@@ -1,4 +1,4 @@
-# PIM4EntraPS -- lifecycle / governance pure helpers (REQUIREMENTS § 13).
+﻿# PIM4EntraPS -- lifecycle / governance pure helpers (REQUIREMENTS § 13).
 #
 # Dot-sourced by engine/_shared/PIM-Functions.psm1 AND standalone by the
 # pim-manager + the scheduler, so the GUI, the validator, the engine and the

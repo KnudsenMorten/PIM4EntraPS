@@ -1,4 +1,4 @@
-# IMP-02: the locale-safe stamp reader. Loaded defensively so this file stays correct
+﻿# IMP-02: the locale-safe stamp reader. Loaded defensively so this file stays correct
 # when a test dot-sources it on its own (PIM-Functions.psm1 also loads it up front).
 if (-not (Get-Command Get-PimUtcStamp -ErrorAction SilentlyContinue)) { . (Join-Path $PSScriptRoot 'PIM-DateSafe.ps1') }
 <#
@@ -69,6 +69,36 @@ function Get-PimSummaryActionCategory {
     return $null
 }
 
+function Expand-PimSummaryCommitEvent {
+    # PURE. One audit event -> the event(s) the summary categorises. Only a 'config.csv.save' on an
+    # admin or assignment entity is expanded (adds -> new admin / delegation, modifies -> delegation,
+    # removes -> removal); every other event passes through unchanged.
+    param([Parameter(Mandatory)][object]$AuditEvent)
+    $action = Get-PimNotifyField -Item $AuditEvent -Name 'action'
+    $target = Get-PimNotifyField -Item $AuditEvent -Name 'target'
+    # §70.14: the action is 'config.save' from v2.4.348; 'config.csv.save' is how older commits were recorded.
+    if ("$action" -notin @('config.save', 'config.csv.save') -or "$target" -notmatch '^(Account-Definitions-Admins|PIM-Assignments-.+)$') { return @($AuditEvent) }
+    $after = $null
+    if ($AuditEvent -is [System.Collections.IDictionary]) { if ($AuditEvent.Contains('after')) { $after = $AuditEvent['after'] } }
+    else { $p = $AuditEvent.PSObject.Properties['after']; if ($p) { $after = $p.Value } }
+    if ($after -is [string]) { try { $after = $after | ConvertFrom-Json } catch { $after = $null } }
+    $num = { param($n) $v = 0; if ($null -ne $after) { [void][int]::TryParse("$(Get-PimNotifyField -Item $after -Name $n)", [ref]$v) }; $v }
+    $adds = & $num 'adds'; $removes = & $num 'removes'; $mods = & $num 'modifies'
+    $base = @{ ts = (Get-PimNotifyField -Item $AuditEvent -Name 'ts'); actor = (Get-PimNotifyField -Item $AuditEvent -Name 'actor'); result = (Get-PimNotifyField -Item $AuditEvent -Name 'result'); whatIf = (Get-PimNotifyField -Item $AuditEvent -Name 'whatIf') }
+    $out = New-Object System.Collections.ArrayList
+    $isAdmin = ("$target" -eq 'Account-Definitions-Admins')
+    if ($adds -gt 0) {
+        $o = @{} + $base; $o['action'] = $(if ($isAdmin) { 'account.create' } else { 'assign.commit' }); $o['target'] = ("{0} (+{1} row(s))" -f $target, $adds); [void]$out.Add([pscustomobject]$o)
+    }
+    if ($mods -gt 0 -and -not $isAdmin) {
+        $o = @{} + $base; $o['action'] = 'assign.commit.update'; $o['target'] = ("{0} ({1} row(s) changed)" -f $target, $mods); [void]$out.Add([pscustomobject]$o)
+    }
+    if ($removes -gt 0) {
+        $o = @{} + $base; $o['action'] = 'remove.commit'; $o['target'] = ("{0} (-{1} row(s))" -f $target, $removes); [void]$out.Add([pscustomobject]$o)
+    }
+    return $out.ToArray()
+}
+
 function Get-PimDailySummary {
     # PURE: fold a set of audit events into a one-day summary of DELEGATION/ASSIGNMENT
     # lifecycle changes. Events are objects/hashtables with at least: ts (ISO), action,
@@ -87,7 +117,15 @@ function Get-PimDailySummary {
     $dele   = New-Object System.Collections.Generic.List[object]
     $rem    = New-Object System.Collections.Generic.List[object]
     $byActor = @{}
+    # A Manager COMMIT is audited as ONE 'config.csv.save' per entity (adds/removes/modifies), whose
+    # action name matches no category -- so a digest over the SQL audit trail would miss every
+    # delegation an operator committed. Expand those into per-category events first.
+    $expanded = New-Object System.Collections.ArrayList
     foreach ($e in @($Events)) {
+        if ($null -eq $e) { continue }
+        foreach ($x in @(Expand-PimSummaryCommitEvent -AuditEvent $e)) { [void]$expanded.Add($x) }
+    }
+    foreach ($e in $expanded.ToArray()) {
         if ($null -eq $e) { continue }
         $res = (Get-PimNotifyField -Item $e -Name 'result')
         if ($res -and $res -ne 'ok') { continue }
@@ -261,6 +299,162 @@ function ConvertTo-PimTierReportTokens {
         ReportRows  = ConvertTo-PimTierReportHtmlRows -Report $rep
         Date        = (Get-Date).ToString('yyyy-MM-dd')
     }
+}
+
+# ---------------------------------------------------------------------------
+# DATA SOURCES for the daily-summary / tier-report JOBS -- SQL, not globals or files.
+# Both jobs reported ran=true over inputs nothing supplied: $global:PIM_TierReportAssignments and
+# $global:PIM_DigestRecipients were never set by anything, and the daily summary read an audit
+# JSONL FILE the hosted runtime never writes (the trail is pim.AuditEvents since SEC-16).
+# A launcher that still injects the globals wins, so an existing wiring keeps working.
+# ---------------------------------------------------------------------------
+function Get-PimNotifySqlConnectionString {
+    if ("$($global:PIM_SqlConnectionString)".Trim()) { return "$($global:PIM_SqlConnectionString)" }
+    if ("$($global:PIM_EngineSqlCs)".Trim()) { return "$($global:PIM_EngineSqlCs)" }
+    if (Get-Command Get-PimSqlSettingsConnectionString -ErrorAction SilentlyContinue) {
+        try { $cs = Get-PimSqlSettingsConnectionString; if ("$cs".Trim()) { return "$cs" } } catch { }
+    }
+    return ''
+}
+
+function Get-PimDailySummaryEventsFromStore {
+    <#
+      The audit events for the daily summary window, from pim.AuditEvents (Get-PimSqlAuditEvents).
+      Returns @{ ok; events; source; error }. ok=$false = the trail could not be read.
+    #>
+    [CmdletBinding()]
+    param([datetime]$NowUtc = [datetime]::UtcNow, [int]$WindowHours = 24)
+    if ($null -ne $global:PIM_SummaryEvents) {
+        return [pscustomobject]@{ ok = $true; events = @($global:PIM_SummaryEvents); source = 'injected'; error = '' }
+    }
+    if (-not (Get-Command Get-PimSqlAuditEvents -ErrorAction SilentlyContinue)) {
+        return [pscustomobject]@{ ok = $false; events = @(); source = ''; error = 'the SQL audit reader (Get-PimSqlAuditEvents, PIM-SqlStore.ps1) is not loaded in this process' }
+    }
+    $cs = Get-PimNotifySqlConnectionString
+    if (-not $cs) { return [pscustomobject]@{ ok = $false; events = @(); source = ''; error = 'no SQL connection string in this process, so the audit trail cannot be read' } }
+    $end = $NowUtc.ToUniversalTime()
+    try {
+        $ev = @(Get-PimSqlAuditEvents -ConnectionString $cs -FromUtc $end.AddHours(-[math]::Abs($WindowHours)) -ToUtc $end -Top 5000)
+        return [pscustomobject]@{ ok = $true; events = $ev; source = 'sql:pim.AuditEvents'; error = '' }
+    } catch {
+        return [pscustomobject]@{ ok = $false; events = @(); source = ''; error = "audit trail read failed: $($_.Exception.Message)" }
+    }
+}
+
+function Get-PimDigestRecipients {
+    <#
+      Who receives a digest. pim.Settings['Alerting'] -- the SAME document the Manager's Alerting card
+      saves and the scheduler's job alerts read -- gives the recipients: 'digestRecipients' (daily
+      summary) or 'tierReportRecipients' (tier report) when present, else the alerting 'recipients'.
+      An injected global ($global:PIM_DigestRecipients / PIM_TierReportRecipients) still wins.
+      Returns @{ recipients; source }.
+    #>
+    [CmdletBinding()]
+    param([ValidateSet('daily-summary','tier-report')][string]$Kind = 'daily-summary')
+    $g = if ($Kind -eq 'tier-report') { $global:PIM_TierReportRecipients } else { $global:PIM_DigestRecipients }
+    $inj = @(@($g) | Where-Object { "$_".Trim() } | ForEach-Object { "$_".Trim() })
+    if ($inj.Count) { return [pscustomobject]@{ recipients = $inj; source = 'injected' } }
+    $raw = $null
+    if (Get-Command Get-PimSetting -ErrorAction SilentlyContinue) {
+        try { $raw = Get-PimSetting -Name 'Alerting' } catch { $raw = $null }
+    } else {
+        $cs = Get-PimNotifySqlConnectionString
+        if ($cs -and (Get-Command Get-PimSqlSetting -ErrorAction SilentlyContinue)) { try { $raw = Get-PimSqlSetting -ConnectionString $cs -Name 'Alerting' } catch { $raw = $null } }
+    }
+    for ($i = 0; $i -lt 2 -and $raw -is [string]; $i++) { if ("$raw".Trim()) { try { $raw = $raw | ConvertFrom-Json } catch { $raw = $null } } else { $raw = $null } }
+    if ($null -eq $raw) { return [pscustomobject]@{ recipients = @(); source = 'none' } }
+    $specific = if ($Kind -eq 'tier-report') { 'tierReportRecipients' } else { 'digestRecipients' }
+    foreach ($name in @($specific, 'recipients')) {
+        $v = $null
+        if ($raw -is [System.Collections.IDictionary]) { if ($raw.Contains($name)) { $v = $raw[$name] } }
+        else { $p = $raw.PSObject.Properties[$name]; if ($p) { $v = $p.Value } }
+        $list = @(@($v) | Where-Object { "$_".Trim() } | ForEach-Object { "$_".Trim() })
+        if ($list.Count) { return [pscustomobject]@{ recipients = $list; source = "sql:Alerting.$name" } }
+    }
+    return [pscustomobject]@{ recipients = @(); source = 'sql:Alerting (no recipients)' }
+}
+
+function Get-PimTierReportAssignmentsFromStore {
+    <#
+      The tier-report input from SQL: every admin -> PIM group assignment (PIM-Assignments-Admins,
+      Action != Remove), with the group's tier and level taken from the row, else from the group's
+      DEFINITION row (TierLevel / Level), else from the name markers Get-PimRowTier reads.
+
+      LIVE: the verify-convergence job records, per desired admin membership, whether Entra holds it
+      (pim.Settings['ConvergenceState']). Each grant is marked:
+        verified      -- the AdminMembers scope was last verified with nothing unconverged
+        not-deployed  -- this grant is listed as desired-but-not-live
+        unverified    -- no verification result to go on
+      Returns @{ ok; rows; read; live = @{ checkedUtc; unconverged }; error }.
+    #>
+    [CmdletBinding()]
+    param()
+    if (-not (Get-Command Get-PimDesiredRows -ErrorAction SilentlyContinue)) {
+        return [pscustomobject]@{ ok = $false; rows = @(); read = 0; live = $null; error = 'the desired-row reader (Get-PimDesiredRows, PIM-EngineCore.ps1) is not loaded in this process' }
+    }
+    $asg = @(Get-PimDesiredRows -Entity 'PIM-Assignments-Admins')
+    $resolved = ($global:PIM_DesiredResolved -is [hashtable]) -and $global:PIM_DesiredResolved.ContainsKey('PIM-Assignments-Admins') -and [bool]$global:PIM_DesiredResolved['PIM-Assignments-Admins']
+    if (-not $resolved) {
+        return [pscustomobject]@{ ok = $false; rows = @(); read = 0; live = $null; error = 'PIM-Assignments-Admins could not be read (no SQL store wired, or the read failed)' }
+    }
+    # tag -> definition (tier / level / name)
+    $defs = @{}
+    foreach ($e in @('PIM-Definitions-Roles','PIM-Definitions-Services','PIM-Definitions-Organization','PIM-Definitions-Tasks','PIM-Definitions-Departments','PIM-Definitions-Processes','PIM-Definitions-Projects','PIM-Definitions-CrossOrg','PIM-Definitions-Resources')) {
+        foreach ($d in @(Get-PimDesiredRows -Entity $e)) {
+            if ($null -eq $d) { continue }
+            $t = Get-PimNotifyField -Item $d -Name 'GroupTag'
+            if ("$t".Trim() -and -not $defs.ContainsKey("$t".Trim().ToLowerInvariant())) { $defs["$t".Trim().ToLowerInvariant()] = $d }
+        }
+    }
+    # live verification (ConvergenceState, written by verify-convergence)
+    $conv = $null
+    if (Get-Command Get-PimSetting -ErrorAction SilentlyContinue) { try { $conv = Get-PimSetting -Name 'ConvergenceState' } catch { $conv = $null } }
+    for ($i = 0; $i -lt 2 -and $conv -is [string]; $i++) { if ("$conv".Trim()) { try { $conv = $conv | ConvertFrom-Json } catch { $conv = $null } } else { $conv = $null } }
+    $adminCache = $null; $pending = @()
+    if ($null -ne $conv) {
+        $cache = $conv.cache; if ($null -ne $cache) { $adminCache = $cache.AdminMembers }
+        $fs = $conv.firstSeen
+        if ($null -ne $fs) { $pending = @($fs.PSObject.Properties | Where-Object { "$($_.Name)" -like 'AdminMembers|*' } | ForEach-Object { "$($_.Name)".ToLowerInvariant() }) }
+    }
+    $verified = ($null -ne $adminCache) -and ("$($adminCache.unconverged)" -eq '0')
+    $rows = New-Object System.Collections.ArrayList
+    foreach ($r in $asg) {
+        if ($null -eq $r) { continue }
+        if ((Get-PimNotifyField -Item $r -Name 'Action') -eq 'Remove') { continue }
+        $user = Get-PimNotifyField -Item $r -Name 'Username'; if (-not "$user".Trim()) { $user = Get-PimNotifyField -Item $r -Name 'UserName' }
+        $tag = Get-PimNotifyField -Item $r -Name 'GroupTag'
+        if (-not "$user".Trim() -or -not "$tag".Trim()) { continue }
+        $def = $defs["$tag".Trim().ToLowerInvariant()]
+        $tier = Get-PimNotifyField -Item $r -Name 'TierLevel'
+        if (-not "$tier".Trim() -and $def) { $tier = Get-PimNotifyField -Item $def -Name 'TierLevel' }
+        $level = Get-PimNotifyField -Item $r -Name 'Level'
+        if (-not "$level".Trim() -and $def) { $level = Get-PimNotifyField -Item $def -Name 'Level' }
+        $type = Get-PimNotifyField -Item $r -Name 'AssignmentType'
+        $live = if ($verified) { 'verified' } else { 'unverified' }
+        if ($pending.Count) {
+            $suffix = ("|{0}|{1}" -f "$tag".Trim(), "$type".Trim()).ToLowerInvariant()
+            $hits = @($pending | Where-Object { $_.EndsWith($suffix) })
+            if ($hits.Count) {
+                $live = 'unverified'
+                if (Get-Command Resolve-PimPrincipalId -ErrorAction SilentlyContinue) {
+                    try {
+                        $pid2 = Resolve-PimPrincipalId $user
+                        if ($pid2 -and ($hits -contains ("adminmembers|{0}{1}" -f "$pid2".ToLowerInvariant(), $suffix))) { $live = 'not-deployed' }
+                    } catch { }
+                }
+            }
+        }
+        $row = [ordered]@{ UserName = "$user".Trim(); GroupTag = "$tag".Trim(); AssignmentType = "$type"; Live = $live }
+        if ("$tier".Trim())  { $row['TierLevel'] = "$tier".Trim() }
+        if ("$level".Trim()) { $row['Level'] = "$level".Trim() }
+        if ($def) { $row['GroupName'] = (Get-PimNotifyField -Item $def -Name 'GroupName') }
+        [void]$rows.Add([pscustomobject]$row)
+    }
+    $liveInfo = [pscustomobject]@{
+        checkedUtc  = $(if ($adminCache) { "$($adminCache.checkedUtc)" } else { '' })
+        unconverged = $(if ($adminCache) { "$($adminCache.unconverged)" } else { '' })
+    }
+    return [pscustomobject]@{ ok = $true; rows = $rows.ToArray(); read = $asg.Count; live = $liveInfo; error = '' }
 }
 
 # ---------------------------------------------------------------------------

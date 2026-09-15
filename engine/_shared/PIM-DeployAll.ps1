@@ -1,4 +1,4 @@
-<#
+﻿<#
   PIM4EntraPS -- "deploy everything" core (the PURE, fully-testable decision brain behind the
   ONE-SHOT full-solution stand-up/update orchestrator tools/setup/Invoke-PimDeployAll.ps1).
   REQUIREMENTS.md sec.3 (Setup / Deploy) -- the "one-shot deploy everything" item.
@@ -73,6 +73,21 @@ function Get-PimDeployStepCatalog {
         [pscustomobject]@{ key='prereq';   name='Hosting prerequisites (RG, VNet, ACR, Log Analytics, SQL server, AcrPull identity)'; rollbackable=$false; hostedOnly=$true }
         [pscustomobject]@{ key='image';    name='Build + push the Manager image (no roll -- infra pins the digest it produces)'; rollbackable=$false; hostedOnly=$true }
         [pscustomobject]@{ key='infra';    name='Infra / containers (ACA) or VM setup';          rollbackable=$false; hostedOnly=$false }
+        # 🔴 §52.10 -- AND IT DELIBERATELY HAS NO "CURRENT" FACT, SO IT RUNS ON EVERY DEPLOY.
+        # The Manager could not reach its own database: nothing had ever granted this environment
+        # network access to the SQL server, and the container died at boot being refused by the
+        # firewall (§52.1). The FIRST fix for that went inside Setup-PimContainers -- which IS the
+        # `infra` step above -- and infra is skipped as "already current" the moment the ACA
+        # environment exists. So on the one environment that needed the repair it never executed,
+        # and the next deploy failed identically. Measured at a live customer 2026-09-09.
+        # 🪤 This repo had already written the rule, in §45.1, about a schema repair gated on a
+        # branch that could not observe the tables it repaired: **a repair gated on a condition
+        # that cannot observe the thing being repaired is not a repair.** A step with no entry in
+        # -Facts is always `needed`, which is exactly the property this one requires -- the same
+        # shape `easyauth` already relies on. Every read it does is cheap and every write is
+        # idempotent, so running it always costs a few seconds and buys the deploy its store.
+        # It sits BEFORE schema because everything downstream of it needs the store reachable.
+        [pscustomobject]@{ key='sqlaccess'; name='SQL network access for this environment (subnet service endpoint + VNet rule; firewall verified)'; rollbackable=$false; hostedOnly=$true }
         [pscustomobject]@{ key='schema';   name='Idempotent SQL schema upgrade (preflight->apply->re-preflight)'; rollbackable=$false; hostedOnly=$false }
         # 🔑 OPERATOR DIRECTIVE 2026-08-13: "we can not have anything that is not running."
         # These two were real onboarding steps (7 and 8) that existed only as scripts a human
@@ -87,7 +102,41 @@ function Get-PimDeployStepCatalog {
         # and BEFORE code, so the deployed containers boot into an environment already armed.
         [pscustomobject]@{ key='mailsender'; name='Notification sender mailbox + scoped send right (onboarding step 7)'; rollbackable=$false; hostedOnly=$false }
         [pscustomobject]@{ key='features';   name='Feature baseline -- turn the shipped gates ON (onboarding step 8)'; rollbackable=$false; hostedOnly=$false }
+        # 🔴 §44.5 / §47.3 -- AUTHENTICATION IN FRONT OF THE MANAGER, as a step rather than advice.
+        # Nothing in the setup configured Easy Auth; Setup-PimContainers printed a warning telling
+        # the operator to do it "before anyone opens it", and the deploy finished. With external
+        # ingress -- what a first install uses, because an internal-only environment cannot be
+        # reached from the machine doing the deploying -- that leaves a privileged-access control
+        # plane publicly reachable with NO authentication for as long as it takes someone to
+        # remember. It also made a green deploy impossible: the release gate mints a token through
+        # Easy Auth, and with no provider there is no audience to mint for, so the gate failed a
+        # healthy environment (correctly -- an unauthenticated Manager SHOULD fail a release gate).
+        # It sits BEFORE code, so the containers that step rolls are behind auth from their first
+        # request, and hostedOnly because a VM install fronts the Manager differently.
+        [pscustomobject]@{ key='easyauth'; name='Easy Auth in front of the Manager (sign-in required)'; rollbackable=$false; hostedOnly=$true }
         [pscustomobject]@{ key='code';     name='Build + deploy Manager/scheduler/engine code';  rollbackable=$true;  hostedOnly=$false }
+        # 🔴 §53 -- THE NIGHTLY UPDATER, INSTALLED BY THE DEPLOY ITSELF.
+        # Until this step existed, nothing in a customer environment updated it: PIM v2 is 100%
+        # cloud, so there is no Windows host for a scheduled task and no sync running on customer
+        # infrastructure to fire a post-sync hook. Every environment moved only when a human ran
+        # the deploy -- which is why a live customer sat several versions behind, and why an estate
+        # of 100 cannot be maintained at all.
+        # 🪤 It goes AFTER code deliberately: the updater's own image is the one code just built,
+        # so installing it earlier would point the job at an image that does not exist yet.
+        # hostedOnly because it deploys a Container Apps Job.
+        [pscustomobject]@{ key='updater';  name='Nightly updater (Container Apps Job, cron; rolls this environment over ARM REST)'; rollbackable=$false; hostedOnly=$true }
+        # 🔴 §57 -- SOMEBODY MUST BE ABLE TO ADMINISTER THE THING THAT WAS JUST DEPLOYED.
+        # Manager RBAC lives in SQL (pim.Settings ManagerAccess) and a hosted deployment FAILS
+        # CLOSED: an identity in neither SQL nor the env vars is Reader. Nothing in the deploy ever
+        # wrote a SuperAdmin, so a freshly-built environment had NOBODY who could save a change --
+        # and the 403 pointed at a config file that the hosted path deliberately never reads.
+        # Measured at a live customer 2026-09-10: "now noone can make changes to whole platform".
+        # 🪤 It goes AFTER schema (the table must exist) and after code (the Manager must be able
+        # to read it back), and it is NOT rollbackable: revoking the only administrator during a
+        # rollback would lock the environment out in exactly the state someone needs to fix it.
+        # 🔒 Survives a CSV import by construction: the import writes pim.Rows, and its only touch
+        # on Settings adds keys that do not already exist.
+        [pscustomobject]@{ key='access';   name='Manager access (SuperAdmin in SQL, so the environment can be administered)'; rollbackable=$false; hostedOnly=$true }
         [pscustomobject]@{ key='verify';   name='Verify (hosted smoke + deploy-validation tests)';rollbackable=$false; hostedOnly=$false }
     )
 }
@@ -342,4 +391,28 @@ function Get-PimDeploySummary {
         steps       = $outcomes
         failedSteps = $failed
     }
+}
+function Get-PimUpdaterStepDecision {
+    <#
+      BUG-156 -- PURE. What the deploy's 'updater' step does.
+        'skip-flag'      -SkipUpdater was passed.
+        'skip-community' a COMMUNITY scenario (S2/S4) with no published source feed: the in-cloud
+                         updater reads a maintainer-published source archive + release channel that a
+                         public GitHub install does not have, so installing it could only fail -- and
+                         a failed step used to HALT the deploy and roll back a working environment.
+                         Community installs update by `git pull` + re-running the deploy (the re-run
+                         is the updater).
+        'install'        everything else, including a community install that DOES supply a feed.
+      A non-community scenario with no feed still returns 'install' on purpose: Deploy-PimUpdateJob
+      refuses a ring without a source, loudly, and that refusal must stay visible there.
+    #>
+    [CmdletBinding()]
+    param(
+        [AllowEmptyString()][string]$Scenario,
+        [AllowEmptyString()][string]$SourceUrlTemplate,
+        [switch]$SkipUpdater
+    )
+    if ($SkipUpdater) { return 'skip-flag' }
+    if (("$Scenario".Trim().ToUpperInvariant() -in @('S2', 'S4')) -and -not "$SourceUrlTemplate".Trim()) { return 'skip-community' }
+    return 'install'
 }

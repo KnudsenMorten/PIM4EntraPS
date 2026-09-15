@@ -1,4 +1,4 @@
-# PIM4EntraPS -- DB cutover ceremony + on-demand recalc change-detector.
+﻿# PIM4EntraPS -- DB cutover ceremony + on-demand recalc change-detector.
 # Dot-sourced by PIM-Functions.psm1 (after PIM-SqlStore.ps1 + PIM-SchemaConformance.ps1,
 # whose functions it orchestrates) and standalone by the pim-manager.
 #
@@ -128,6 +128,109 @@ function Get-PimSqlDataSignature {
     }
 }
 
+# --- PER-ENTITY signatures: WHICH part of the desired store changed ---------------
+# The global signature above answers "did anything change". A trigger armed on that alone has to
+# be scope 'All', and on internal (2026-09-13) a trigger:All run took 13-26 minutes for a commit
+# that changed ONE Azure role delegation (AzRes alone takes ~1 minute). These read the same two
+# aggregates GROUPED BY Entity, so the detector can arm a trigger for exactly the scopes the changed
+# entities feed. Fail-OPEN: $null on any error -- the caller then arms 'All', today's behaviour.
+function Get-PimSqlEntitySignatures {
+    param([Parameter(Mandatory)][string]$ConnectionString)
+    try {
+        $rows = @(Invoke-PimSqlQuery -ConnectionString $ConnectionString -Sql "SELECT Entity, COUNT(*) AS c, CONVERT(VARCHAR(33), MAX(UpdatedUtc), 126) AS m FROM pim.Rows GROUP BY Entity")
+        $map = @{}
+        foreach ($r in $rows) {
+            if ($null -eq $r) { continue }
+            $e = "$($r.Entity)".Trim(); if (-not $e) { continue }
+            $map[$e] = (New-PimDataSignature -RowCount ([int]$r.c) -MaxUpdatedUtc "$($r.m)")
+        }
+        return $map
+    } catch {
+        return $null
+    }
+}
+
+# PURE. Normalise a stored/parsed entity-signature map (hashtable, ordered dictionary, the
+# PSCustomObject ConvertFrom-Json yields, or a JSON string) to a plain hashtable. $null when the
+# input is absent or cannot be read -- the caller treats that as "no usable baseline".
+function ConvertTo-PimEntitySignatureMap {
+    param([AllowNull()][object]$Value)
+    if ($null -eq $Value) { return $null }
+    $v = $Value
+    if ($v -is [string]) {
+        if (-not "$v".Trim()) { return $null }
+        try { $v = $v | ConvertFrom-Json } catch { return $null }
+        if ($null -eq $v) { return $null }
+    }
+    $map = @{}
+    if ($v -is [System.Collections.IDictionary]) {
+        foreach ($k in @($v.Keys)) { if ("$k".Trim()) { $map["$k"] = "$($v[$k])" } }
+        return $map
+    }
+    if ($v -is [System.Management.Automation.PSCustomObject]) {
+        foreach ($p in @($v.PSObject.Properties)) { if ("$($p.Name)".Trim()) { $map["$($p.Name)"] = "$($p.Value)" } }
+        return $map
+    }
+    return $null
+}
+
+# PURE. Entities added, removed or whose signature changed between two maps. Sorted, de-duplicated.
+# A $null -Last means "no baseline": every current entity counts as changed.
+function Get-PimChangedEntities {
+    param([AllowNull()][object]$Last, [AllowNull()][object]$Current)
+    $l = ConvertTo-PimEntitySignatureMap -Value $Last
+    $c = ConvertTo-PimEntitySignatureMap -Value $Current
+    if ($null -eq $l) { $l = @{} }
+    if ($null -eq $c) { $c = @{} }
+    $out = @{}
+    foreach ($k in @($c.Keys)) { if (-not $l.ContainsKey($k) -or "$($l[$k])" -ne "$($c[$k])") { $out["$k"] = $true } }
+    foreach ($k in @($l.Keys)) { if (-not $c.ContainsKey($k)) { $out["$k"] = $true } }
+    return [string[]]@(@($out.Keys) | Sort-Object)
+}
+
+# PURE. Changed entities -> the engine scopes that consume them, as one comma-separated scope
+# list (Resolve-PimEngineScope accepts it) or 'All'. EXPLICIT and CONSERVATIVE: an entity that is
+# not named here -- or a new one nobody mapped yet -- widens the whole trigger to 'All', so a gap in
+# this table costs a slow run, never a missed apply. Each target was checked against the provider
+# that reads the entity (Get-PimDesiredRows -Entity ... in PIM-EngineProviders.ps1):
+#   * AdminMembers joins Account-Definitions-Admins as well as PIM-Assignments-Admins.
+#   * EntraRolePolicies reads every role-assignment entity (Roles-Groups AND Roles-AUs).
+#   * AzRes reads PIM-Definitions-Resources for its scope universe -- that entity is NOT a group
+#     definition (Get-PimGroupDefinitionRows deliberately excludes it), so it maps to the Azure pair.
+#   * AdministrativeUnitMembers and RolesAUs resolve AU tags from PIM-Definitions-AU.
+# Deliberately NOT reached from here (daily/destructive/plan-only, owned by their own jobs):
+# AdminOffboarding, GroupRetirement, AccessReviews, HybridAdProvisioning.
+$script:PimEntityScopeMap = [ordered]@{
+    'Account-Definitions-Admins'         = @('Admins','AdminTap','AdminMembers')
+    'Account-Definitions-Admins-Central' = @('Admins','AdminTap','AdminMembers')
+    'PIM-Assignments-Admins'             = @('AdminMembers')
+    'PIM-Assignments-Groups'             = @('GroupMembers')
+    'PIM-Assignments-Roles-Groups'       = @('EntraRoles','EntraRolePolicies')
+    'PIM-Assignments-Roles-AUs'          = @('RolesAUs','EntraRolePolicies')
+    'PIM-Assignments-Azure-Resources'    = @('AzResPolicies','AzRes')
+    'PIM-Definitions-Resources'          = @('AzResPolicies','AzRes')
+    'PIM-Definitions-AU'                 = @('AdministrativeUnits','AdministrativeUnitMembers','RolesAUs')
+}
+$script:PimGroupDefinitionScopes = @('Groups','AdministrativeUnitMembers','GroupOwners','GroupsPolicies')
+
+function Get-PimEntityScopeMap { return $script:PimEntityScopeMap }
+
+function Resolve-PimEngineScopesForEntities {
+    param([AllowNull()][string[]]$Entities)
+    $ents = @(@($Entities) | ForEach-Object { "$_".Trim() } | Where-Object { $_ })
+    if ($ents.Count -eq 0) { return 'All' }
+    $seen = @{}; $list = New-Object System.Collections.Generic.List[string]
+    foreach ($e in $ents) {
+        $targets = $null
+        foreach ($k in @($script:PimEntityScopeMap.Keys)) { if ($k -ieq $e) { $targets = @($script:PimEntityScopeMap[$k]); break } }
+        if ($null -eq $targets -and $e -like 'PIM-Definitions-*') { $targets = @($script:PimGroupDefinitionScopes) }
+        if ($null -eq $targets) { return 'All' }   # unmapped entity: never guess a narrower scope
+        foreach ($t in $targets) { $tk = "$t".ToLowerInvariant(); if (-not $seen.ContainsKey($tk)) { $seen[$tk] = $true; $list.Add("$t") } }
+    }
+    if ($list.Count -eq 0) { return 'All' }
+    return ($list.ToArray() -join ',')
+}
+
 # PURE recalc decision: has the data changed since the last signature we acted on?
 # Returns @{ changed; signature }. A blank/absent last-signature counts as changed
 # (first run after boot should recalc once).
@@ -158,6 +261,25 @@ function Invoke-PimSqlChangeDetector {
     $cur  = Get-PimSqlDataSignature -ConnectionString $ConnectionString
     $dec  = Test-PimRecalcNeeded -LastSignature "$last" -CurrentSignature $cur
     $triggered = $false
+    $armScope = $Scope; $armReason = $Reason; $entities = @(); $curEntities = $null
+    if ($dec.changed -and "$Scope".Trim() -ieq 'All') {
+        # SCOPED TRIGGER. Read the per-entity signatures AFTER the global one: a write landing between
+        # the two reads is then in the entity map we compare (so its scope is included) and makes the
+        # next pass see a global change with no entity change -- which arms 'All', redundant but safe.
+        # The reverse order could arm a scope list that misses the entity of that write.
+        try { $curEntities = Get-PimSqlEntitySignatures -ConnectionString $ConnectionString } catch { $curEntities = $null }
+        $lastEntities = $null
+        try { $lastEntities = ConvertTo-PimEntitySignatureMap -Value (Get-PimSqlSetting -ConnectionString $ConnectionString -Name 'RecalcEntitySignatures') } catch { $lastEntities = $null }
+        if ($null -ne $curEntities -and $null -ne $lastEntities -and @($lastEntities.Keys).Count -gt 0) {
+            $entities = @(Get-PimChangedEntities -Last $lastEntities -Current $curEntities)
+            $armScope = Resolve-PimEngineScopesForEntities -Entities $entities
+            if ($entities.Count) {
+                $armReason = "$Reason`:" + ($entities -join ',')
+                if ($armReason.Length -gt 200) { $armReason = $armReason.Substring(0, 197) + '...' }
+            }
+        }
+        # no baseline (first pass after this build, or unreadable) or no entity read -> 'All', as before
+    }
     if ($dec.changed) {
         # 🔴 BUG-64 -- THE OLD ORDER GUARANTEED THE MISS IT WAS TRYING TO AVOID.
         # This used to persist the signature BEFORE arming the trigger, reasoning that "a redundant
@@ -176,7 +298,7 @@ function Invoke-PimSqlChangeDetector {
         $armed = $false
         if (Get-Command Add-PimJobTrigger -ErrorAction SilentlyContinue) {
             try {
-                [void](Add-PimJobTrigger -Type 'engine-delta' -Scope $Scope -Reason $Reason)
+                [void](Add-PimJobTrigger -Type 'engine-delta' -Scope $armScope -Reason $armReason)
                 $armed = $true
             } catch {
                 # Do NOT advance the signature: the change is still unhandled, so the next detector
@@ -185,11 +307,24 @@ function Invoke-PimSqlChangeDetector {
             }
         }
         if ($armed) {
-            try { Set-PimSqlSetting -ConnectionString $ConnectionString -Name 'RecalcSignature' -Value $cur } catch { }
+            # 🪤 The block above deliberately does NOT advance the signature when arming fails, so
+            # the change is seen again -- correct. But the ADVANCE failing was silent, which has
+            # the same effect for a different reason: the detector re-fires this change on every
+            # pass, forever, and nothing says why.
+            try { Set-PimSqlSetting -ConnectionString $ConnectionString -Name 'RecalcSignature' -Value $cur }
+            catch { Write-Warning "[cutover] the trigger was armed but RecalcSignature did NOT advance ($($_.Exception.Message)); this change will be detected again on every pass." }
+            # The per-entity baseline advances with it (same BUG-64 rule: only after the arm). A failure here
+            # only costs precision -- the next change then finds a stale/absent baseline and arms 'All'.
+            if ($null -ne $curEntities) {
+                $ordered = [ordered]@{}
+                foreach ($ek in @(@($curEntities.Keys) | Sort-Object)) { $ordered["$ek"] = "$($curEntities[$ek])" }
+                try { Set-PimSqlSetting -ConnectionString $ConnectionString -Name 'RecalcEntitySignatures' -Value $ordered }
+                catch { Write-Warning "[cutover] RecalcEntitySignatures did NOT advance ($($_.Exception.Message)); the next change arms scope 'All'." }
+            }
             $triggered = $true
         }
     }
-    return @{ changed = $dec.changed; signature = $cur; triggered = $triggered }
+    return @{ changed = $dec.changed; signature = $cur; triggered = $triggered; scope = $armScope; entities = @($entities) }
 }
 
 function Test-PimTriggerRetryAllowed {
@@ -301,7 +436,10 @@ function Invoke-PimCutoverImport {
     param(
         [Parameter(Mandatory)][string]$ConfigDir,
         [Parameter(Mandatory)][string]$ConnectionString,
-        [switch]$WhatIf
+        [switch]$WhatIf,
+        # See the empty-source guard in the import loop: a wholesale replace fed by an empty file
+        # deletes the entity. Clearing one on purpose stays possible, but has to be SAID.
+        [switch]$AllowEmptyEntities
     )
     if (-not (Get-Command Get-PimStoreRowKey -ErrorAction SilentlyContinue)) {
         throw 'Invoke-PimCutoverImport requires PIM-SqlStore.ps1 (Get-PimStoreRowKey).'
@@ -326,6 +464,20 @@ function Invoke-PimCutoverImport {
         foreach ($f in $files) {
             $base = $f.BaseName -replace '\.custom$', ''
             $rows = @(Import-Csv -Path $f.FullName -Delimiter ';' -Encoding UTF8)   # READ-ONLY source
+            # 🔴 AN EMPTY SOURCE FILE MUST NOT EMPTY THE ENTITY (audit: DESTRUCTIVE-SQL, 2026-09-10).
+            # This is a wholesale replace: DELETE every row of the entity, then insert what the CSV
+            # holds. A file that is empty, truncated, or failed to parse therefore DELETES THE
+            # ENTITY and commits -- and the import reports success, because zero rows in produced
+            # zero rows out. This is a v1->v2 cutover, so the entity being replaced is the
+            # customer's live assignment data.
+            # 🔑 Same guard, same reasoning as Set-PimSqlEntityRows*: submitting nothing is nearly
+            # always a broken read, not an intent to clear. Deliberately importing an empty entity
+            # is legitimate but rare, so it must be stated rather than assumed. (R8.)
+            if (-not $rows.Count -and -not $AllowEmptyEntities) {
+                throw ("Cutover import: '$($f.Name)' contains NO rows. Importing it would DELETE every " +
+                       "existing row of '$base'. Refusing -- an empty source file is nearly always a bad " +
+                       'export or a truncated copy. Re-export it, or pass -AllowEmptyEntities to clear it deliberately.')
+            }
             # Replace this entity's rows wholesale, inside the shared transaction.
             $delCmd = $conn.CreateCommand(); $delCmd.Transaction = $tx
             $delCmd.CommandText = "DELETE FROM pim.Rows WHERE Entity = @e"

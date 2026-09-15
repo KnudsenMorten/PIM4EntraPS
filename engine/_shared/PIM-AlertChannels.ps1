@@ -1,4 +1,4 @@
-<#
+﻿<#
   PIM4EntraPS -- OUTBOUND ALERT CHANNELS (REQUIREMENTS §26c "Alerting (email /
   Teams)" + §28 [H2] residual: "the Teams/webhook channel -- only the email
   channel is wired today; the feed + dispatch are channel-agnostic so a Teams

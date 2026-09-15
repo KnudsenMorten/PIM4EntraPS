@@ -21,8 +21,17 @@ if (-not (Get-Command Get-PimUtcStamp -ErrorAction SilentlyContinue)) { . (Join-
 #     called by the scheduler/discovery; the GUI only READS the cache + reconciles.
 #   * No live calls happen on the GUI read path -- reconciliation is pure over the
 #     cached crawl + the desired row + the exemption list.
-#   * PS 5.1-safe: no ?./??, no RSA.ImportFromPem; ConvertFrom-Json + Set-Content
-#     UTF-8-no-BOM only. Never throws on a bad/absent cache or exemption file.
+#   * PS 5.1-safe: no ?./??, no RSA.ImportFromPem. Never throws on a bad/absent value.
+#
+# STORAGE -- SQL ONLY (operator, 2026-09-12: "we dont use settings files anymore, sql only").
+#   Both documents used to be FILES: the crawl map in the instance cache dir
+#   (workload-crawl-map.json) and the exemptions in config/PIM-WorkloadExemptions.custom.json.
+#   A hosted deployment has no persistent volume, so the crawl vanished on every revision roll,
+#   and exemptions could only be set by editing a file on the server. They now live in
+#   pim.Settings['WorkloadCrawlMap'] and pim.Settings['WorkloadExemptions'], read and written
+#   through the Get-/Set-PimSetting bridge the Manager and the scheduler both provide (or a
+#   direct SQL read when only a connection string exists). The -CacheDir / -ConfigRoot / -Path
+#   parameters are still ACCEPTED so existing callers bind, and are IGNORED.
 #
 # CACHE SHAPE (JSON, written by Update-PimWorkloadCrawlMap):
 #   {
@@ -37,35 +46,58 @@ if (-not (Get-Command Get-PimUtcStamp -ErrorAction SilentlyContinue)) { . (Join-
 #     }
 #   }
 #
-# EXEMPTION STORE (config/PIM-WorkloadExemptions.custom.json, gitignored):
+# EXEMPTION STORE (pim.Settings['WorkloadExemptions']):
 #   { "exemptions": [ { "workload","role","groupTag"?,"scope"?,
 #                       "reason"(REQ),"createdBy"?,"expiresOn"(REQ unless noExpiry),
 #                       "noExpiry"? } ] }
+#   Honoured by the ENGINE too (WorkloadConnectors scope): an active exemption excuses a missing
+#   Assign binding, so it is reported and not created.
 
 Set-StrictMode -Off
+# Setting names are literals at each use, not $script: variables: in a dot-sourced function
+# $script: binds to the CALLER's script scope, where they would be $null.
 
 # ---------------------------------------------------------------------------
-# Cache path
+# Store seam (SQL pim.Settings)
 # ---------------------------------------------------------------------------
 
-function Get-PimWorkloadCrawlMapPath {
-    <#
-      Resolve the crawl-map cache file. Prefers the Manager instance cache dir
-      (Get-PimTenantCacheRoot, per-tenant in MSP mode); callers may override with
-      -CacheDir for tests / out-of-Manager engine sweeps.
-    #>
-    [CmdletBinding()]
-    param([string]$CacheDir)
-    if (-not $CacheDir) {
-        if (Get-Command Get-PimTenantCacheRoot -ErrorAction SilentlyContinue) {
-            try { $CacheDir = Get-PimTenantCacheRoot } catch { $CacheDir = $null }
+function Get-PimWorkloadStoreValue {
+    # Read a pim.Settings value: the Get-PimSetting bridge, else a direct SQL read. $null when
+    # absent or unreadable. A JSON string is parsed (the store keeps scalars as text).
+    param([Parameter(Mandatory)][string]$Name)
+    $v = $null
+    if (Get-Command Get-PimSetting -ErrorAction SilentlyContinue) {
+        try { $v = Get-PimSetting -Name $Name } catch { $v = $null }
+    } else {
+        $cs = if ("$($global:PIM_EngineSqlCs)".Trim()) { "$($global:PIM_EngineSqlCs)" } elseif ("$($global:PIM_SqlConnectionString)".Trim()) { "$($global:PIM_SqlConnectionString)" } else { '' }
+        if ($cs -and (Get-Command Get-PimSqlSetting -ErrorAction SilentlyContinue)) {
+            try { $v = Get-PimSqlSetting -ConnectionString $cs -Name $Name } catch { $v = $null }
         }
     }
-    if (-not $CacheDir) { return $null }
-    if (-not (Test-Path -LiteralPath $CacheDir)) {
-        try { New-Item -ItemType Directory -Path $CacheDir -Force | Out-Null } catch { return $null }
+    for ($i = 0; $i -lt 2 -and $v -is [string]; $i++) {
+        $s = "$v".Trim()
+        if (-not $s) { return $null }
+        try { $v = $s | ConvertFrom-Json } catch { return $null }
     }
-    return (Join-Path $CacheDir 'workload-crawl-map.json')
+    return $v
+}
+
+function Set-PimWorkloadStoreValue {
+    # Write a pim.Settings value as JSON. Throws when no store is wired: these documents have no
+    # other home, and "saved nowhere" must not read as saved.
+    param([Parameter(Mandatory)][string]$Name, [Parameter(Mandatory)][object]$Value)
+    $json = if ($Value -is [string]) { $Value } else { ConvertTo-Json -InputObject $Value -Depth 12 -Compress }
+    if (Get-Command Set-PimSetting -ErrorAction SilentlyContinue) { Set-PimSetting -Name $Name -Value $json | Out-Null; return $true }
+    $cs = if ("$($global:PIM_EngineSqlCs)".Trim()) { "$($global:PIM_EngineSqlCs)" } elseif ("$($global:PIM_SqlConnectionString)".Trim()) { "$($global:PIM_SqlConnectionString)" } else { '' }
+    if ($cs -and (Get-Command Set-PimSqlSetting -ErrorAction SilentlyContinue)) { Set-PimSqlSetting -ConnectionString $cs -Name $Name -Value $json | Out-Null; return $true }
+    throw ("no SQL settings store is wired in this process -- '{0}' is stored in pim.Settings only." -f $Name)
+}
+
+function Get-PimWorkloadCrawlMapPath {
+    # RETIRED (SQL only). Kept so an old caller binds; there is no file path any more.
+    [CmdletBinding()]
+    param([string]$CacheDir)
+    return $null
 }
 
 # ---------------------------------------------------------------------------
@@ -89,10 +121,30 @@ function Get-PimWorkloadCrawlAssignments {
     )
     $la = $Connector.api.listAssignments
     if (-not $la) { return @() }
-    $resp  = Invoke-PimWorkloadApi -Connector $Connector -Op $la -Tokens $Tokens
-    $items = if ($la.itemsPath) { @(Get-PimNestedProp $resp $la.itemsPath) } else { @($resp) }
+    # v2 REST runtime (PIM-WorkloadConnectors.ps1) when loaded; the v1 module helpers otherwise.
+    $v2 = [bool](Get-Command Invoke-PimWorkloadConnectorApi -ErrorAction SilentlyContinue)
+    if ($v2) {
+        $resp  = Invoke-PimWorkloadConnectorApi -Connector $Connector -Op $la -Tokens $Tokens
+        $items = @(Get-PimWorkloadConnectorItems -Response $resp -Op $la)
+    } else {
+        $resp  = Invoke-PimWorkloadApi -Connector $Connector -Op $la -Tokens $Tokens
+        $items = if ($la.itemsPath) { @(Get-PimNestedProp $resp $la.itemsPath) } else { @($resp) }
+    }
     $out = New-Object System.Collections.ArrayList
     foreach ($it in @($items)) {
+        if ($v2) {
+            $pv = if ($la.principalIds) { Get-PimWorkloadConnectorProp -Object $it -Path "$($la.principalIds)" } else { $null }
+            $norm = @{ principals = @(@($pv) | Where-Object { $null -ne $_ } | ForEach-Object { "$_" }); displayName = "$(Get-PimWorkloadConnectorProp -Object $it -Path 'displayName')" }
+            $rid  = "$(Get-PimWorkloadConnectorProp -Object $it -Path "$($la.roleId)")"
+            $out.Add([ordered]@{
+                roleId       = "$rid"
+                roleName     = $(if ($rid -and $RoleNameById.ContainsKey("$rid")) { "$($RoleNameById["$rid"])" } else { '' })
+                scope        = $(if ($la.scope) { "$(Get-PimWorkloadConnectorProp -Object $it -Path "$($la.scope)")" } elseif ($it.PSObject.Properties['directoryScopeIds']) { "$(@($it.directoryScopeIds) | Select-Object -First 1)" } else { '' })
+                principalIds = @($norm.principals)
+                displayName  = "$($norm.displayName)"
+            }) | Out-Null
+            continue
+        }
         $norm = Get-PimWorkloadAssignmentPrincipals -Connector $Connector -Item $it
         $rid  = "$(Get-PimNestedProp $it $la.roleId)"
         $scope = ''
@@ -114,22 +166,24 @@ function Update-PimWorkloadCrawlMap {
     <#
     .SYNOPSIS
         WRITER. Crawl every connector's live assignments and persist the result
-        as the per-instance workload-crawl-map cache. Called by the scheduler /
-        discovery sweep -- NOT on the GUI read path. Each connector is best-effort:
-        a 403/throw is recorded as { ok=false; error } and never aborts the sweep.
+        in pim.Settings['WorkloadCrawlMap']. Called by the scheduler / discovery
+        sweep / the Manager's "run crawl" action -- NOT on the GUI read path. Each
+        connector is best-effort: a 403/throw is recorded as { ok=false; error } and
+        never aborts the sweep.
     .OUTPUTS
-        The path written (or $null if no cache dir).
+        'sql:WorkloadCrawlMap' when written. Throws when no SQL settings store is wired.
     #>
     [CmdletBinding()]
     param(
-        [Parameter(Mandatory)][string]$ConnectorsDir,
-        [string]$CacheDir,
+        [string]$ConnectorsDir,
+        [string]$CacheDir,          # ignored -- SQL only
         [hashtable]$Tokens = @{}
     )
-    $path = Get-PimWorkloadCrawlMapPath -CacheDir $CacheDir
-    if (-not $path) { return $null }
     $connectors = @()
-    if (Get-Command Read-PimWorkloadConnectors -ErrorAction SilentlyContinue) {
+    if (Get-Command Get-PimWorkloadConnectorCatalog -ErrorAction SilentlyContinue) {
+        $cat = Get-PimWorkloadConnectorCatalog -Directory $ConnectorsDir
+        $connectors = @($cat.Keys | Sort-Object | ForEach-Object { $cat[$_] })
+    } elseif ((Get-Command Read-PimWorkloadConnectors -ErrorAction SilentlyContinue) -and "$ConnectorsDir".Trim()) {
         $connectors = @(Read-PimWorkloadConnectors -ConnectorsDir $ConnectorsDir)
     }
     $wl = [ordered]@{}
@@ -139,7 +193,8 @@ function Update-PimWorkloadCrawlMap {
         try {
             $roleMap = @{}
             try {
-                foreach ($r in @(Get-PimWorkloadRoles -Connector $c -Tokens $Tokens)) {
+                $roles = if (Get-Command Get-PimWorkloadConnectorRoles -ErrorAction SilentlyContinue) { @(Get-PimWorkloadConnectorRoles -Connector $c -Tokens $Tokens) } else { @(Get-PimWorkloadRoles -Connector $c -Tokens $Tokens) }
+                foreach ($r in $roles) {
                     if ("$($r.id)".Trim()) { $roleMap["$($r.id)"] = "$($r.name)" }
                 }
             } catch { $roleMap = @{} }
@@ -153,12 +208,8 @@ function Update-PimWorkloadCrawlMap {
         crawledUtc = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
         workloads  = $wl
     }
-    $json = $body | ConvertTo-Json -Depth 12
-    $utf8 = New-Object System.Text.UTF8Encoding($false)
-    $tmp = "$path.tmp"
-    [System.IO.File]::WriteAllText($tmp, $json, $utf8)
-    Move-Item -LiteralPath $tmp -Destination $path -Force
-    return $path
+    [void](Set-PimWorkloadStoreValue -Name 'WorkloadCrawlMap' -Value $body)
+    return 'sql:WorkloadCrawlMap'
 }
 
 # ---------------------------------------------------------------------------
@@ -167,40 +218,44 @@ function Update-PimWorkloadCrawlMap {
 
 function Read-PimWorkloadCrawlMap {
     <#
-      Read + parse the crawl-map cache. Absent / parse error -> $null (GUI then
-      simply shows no recon badges). Never throws.
+      Read the crawl map from pim.Settings['WorkloadCrawlMap']. Absent / unreadable -> $null
+      (the GUI then shows no recon badges). Never throws. -CacheDir is ignored (SQL only).
     #>
     [CmdletBinding()]
     param([string]$CacheDir)
-    $path = Get-PimWorkloadCrawlMapPath -CacheDir $CacheDir
-    if (-not $path -or -not (Test-Path -LiteralPath $path)) { return $null }
-    try {
-        $raw = [System.IO.File]::ReadAllText($path, [System.Text.UTF8Encoding]::new($false))
-        if ($raw.Length -gt 0 -and [int][char]$raw[0] -eq 0xFEFF) { $raw = $raw.Substring(1) }
-        return ($raw | ConvertFrom-Json)
-    } catch { return $null }
+    try { return (Get-PimWorkloadStoreValue -Name 'WorkloadCrawlMap') } catch { return $null }
+}
+
+function Save-PimWorkloadExemptions {
+    <#
+      Persist the workload-exemption list to pim.Settings['WorkloadExemptions']. Only well-formed
+      entries are kept (workload or role, a reason, and expiresOn unless noExpiry) -- the same
+      contract the reader enforces, applied at the door so a bad entry is refused, not stored.
+      Returns the normalised list written. Throws when no SQL store is wired.
+    #>
+    [CmdletBinding()]
+    param([object[]]$Exemptions = @())
+    $norm = @(Read-PimWorkloadExemptions -Config ([pscustomobject]@{ exemptions = @($Exemptions) }))
+    $keep = @($norm | Where-Object { ($_.workload -or $_.role) -and $_.reason -and ($_.noExpiry -or $_.expiresOn) })
+    [void](Set-PimWorkloadStoreValue -Name 'WorkloadExemptions' -Value ([ordered]@{ exemptions = @($keep) }))
+    return $keep
 }
 
 function Read-PimWorkloadExemptions {
     <#
-      Read + normalize the workload-exemption store. Mirrors the
-      PIM-WarningOverrides contract: reason MANDATORY; expiresOn MANDATORY unless
-      noExpiry:true; an expired entry does NOT exempt (the binding resurfaces as
-      missing). Returns an array of normalized hashtables (never throws).
+      Read + normalize the workload-exemption store (pim.Settings['WorkloadExemptions']). Mirrors
+      the PIM-WarningOverrides contract: reason MANDATORY; expiresOn MANDATORY unless
+      noExpiry:true; an expired entry does NOT exempt (the binding resurfaces as missing).
+      -Config supplies the document directly (tests / a caller that already has it).
+      -ConfigRoot / -Path are ignored: there is no exemptions FILE in v2.
+      Returns an array of normalized hashtables (never throws).
     #>
     [CmdletBinding()]
     param([string]$ConfigRoot, [string]$Path, [object]$Config)
     $raw = $null
     if ($Config) { $raw = $Config }
     else {
-        if (-not $Path -and $ConfigRoot) { $Path = Join-Path $ConfigRoot 'PIM-WorkloadExemptions.custom.json' }
-        if ($Path -and (Test-Path -LiteralPath $Path)) {
-            try {
-                $text = [System.IO.File]::ReadAllText($Path, [System.Text.UTF8Encoding]::new($false))
-                if ($text.Length -gt 0 -and [int][char]$text[0] -eq 0xFEFF) { $text = $text.Substring(1) }
-                $raw = $text | ConvertFrom-Json
-            } catch { return @() }
-        }
+        try { $raw = Get-PimWorkloadStoreValue -Name 'WorkloadExemptions' } catch { $raw = $null }
     }
     if (-not $raw) { return @() }
 
@@ -210,6 +265,10 @@ function Read-PimWorkloadExemptions {
         $p = $obj.PSObject.Properties[$name]; if ($p) { return $p.Value }; return $null
     }
     $list = _wexField $raw 'exemptions'
+    # An EMPTY exemptions array comes back from _wexField as $null (PowerShell unrolls it), which used to
+    # fall into the bare-list branch and return the wrapper document itself as one blank exemption.
+    $hasExProp = if ($raw -is [System.Collections.IDictionary]) { $raw.Contains('exemptions') } elseif ($raw -isnot [string] -and $raw -isnot [System.Array]) { [bool]$raw.PSObject.Properties['exemptions'] } else { $false }
+    if ($null -eq $list -and $hasExProp) { return @() }
     if ($null -eq $list) {
         if ($raw -is [System.Collections.IEnumerable] -and $raw -isnot [string]) { $list = $raw } else { $list = @($raw) }
     }

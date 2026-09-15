@@ -1,4 +1,4 @@
-# =============================================================================
+﻿# =============================================================================
 # PIM-ScenarioProfile.ps1 -- the SINGLE source of truth for the supported
 # deployment TOPOLOGIES (REQUIREMENTS s31): the {tenancy} x {edition} x
 # {update-source} x {license} x {hosting + sync-file location} x {SPN model}
@@ -243,6 +243,37 @@ function Get-PimActiveScenario {
     }
     # Safest default: single tenant, internal edition, no MSP, no ring pull.
     return (Get-PimScenario -Id 'S1')
+}
+
+# ---------------------------------------------------------------------------
+# REQUIREMENTS 68.6 row 36 (operator 2026-09-13: "gui must show which mode tenant is running, like
+# single, msp master etc"). PURE. The mode named by ROLE and HOSTING -- never the internal S1-S6
+# codes. Derived from the same descriptor the engine resolves (role + hostingLocation).
+# Returns @{ key; label; role; hosting; masterName; slaveCount; detail }.
+#   key: single | msp-master | slave-local | slave-central
+# ---------------------------------------------------------------------------
+function Get-PimTenantModeLabel {
+    param([Parameter(Mandatory)][object]$Scenario, [string]$MasterName = '', [int]$SlaveCount = -1)
+    $s = $Scenario
+    if ($s -is [string]) { $s = Get-PimScenario -Id $s }
+    if (-not $s) { throw 'Get-PimTenantModeLabel: unknown scenario.' }
+    $role = "$($s.role)"; $host_ = "$($s.hostingLocation)"
+    $key = 'single'; $label = 'Single'; $hosting = ''
+    switch ($role) {
+        'msp-master'  { $key = 'msp-master'; $label = 'MSP Master' }
+        'msp-managed' {
+            if ($host_ -eq 'central-msp') { $key = 'slave-central'; $label = 'Slave (centrally hosted)'; $hosting = 'central' }
+            else { $key = 'slave-local'; $label = 'Slave (locally hosted)'; $hosting = 'local' }
+        }
+        default       { $key = 'single'; $label = 'Single' }
+    }
+    $detail = ''
+    if ($key -like 'slave-*') {
+        $detail = if ("$MasterName".Trim()) { "managed by the MSP master '$("$MasterName".Trim())'" } else { 'managed by an MSP master (master name not recorded on this tenant)' }
+    } elseif ($key -eq 'msp-master') {
+        $detail = if ($SlaveCount -ge 0) { "$SlaveCount managed slave tenant(s)" } else { 'managed slave count unknown (registry not readable)' }
+    } else { $detail = 'one tenant, no MSP relationship' }
+    return [pscustomobject]@{ key = $key; label = $label; role = $role; hosting = $hosting; masterName = "$MasterName".Trim(); slaveCount = $SlaveCount; detail = $detail }
 }
 
 # ---------------------------------------------------------------------------

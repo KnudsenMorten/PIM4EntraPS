@@ -1,4 +1,4 @@
-# =============================================================================
+﻿# =============================================================================
 # PIM-DownlinkJob.ps1 -- the PURE, offline-testable plan brain for the §31.3
 # CLOUD-NATIVE master->managed (slave) downlink as an Azure Container Apps JOB
 # with a CRON schedule (operator directive 2026-06-17: "all run in cloud only

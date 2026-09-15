@@ -1,4 +1,4 @@
-# IMP-02: the locale-safe stamp reader. Loaded defensively so this file stays correct
+﻿# IMP-02: the locale-safe stamp reader. Loaded defensively so this file stays correct
 # when a test dot-sources it on its own (PIM-Functions.psm1 also loads it up front).
 if (-not (Get-Command Get-PimUtcStamp -ErrorAction SilentlyContinue)) { . (Join-Path $PSScriptRoot 'PIM-DateSafe.ps1') }
 # PIM4EntraPS -- resource approvers/owners: approval routing + access reviews.
@@ -222,7 +222,20 @@ function Test-PimCanApprove {
     return $false
 }
 
-function New-PimApprovalRequest {
+# 🔴 §53.8 -- RENAMED OUT OF A COLLISION (was New-PimApprovalRequest / Resolve-PimApprovalDecision).
+# These two names were ALSO defined, with DIFFERENT SIGNATURES, in PIM-ApprovalGate.ps1. Dot-sourcing
+# is last-one-wins, so the winner depended on which host loaded which file last -- and the two hosts
+# disagreed:
+#     PIM-Functions.psm1     loads ApprovalGate (l.80) then Approvals (l.181)  -> PORTAL won
+#     Open-PimManager.ps1    loads Approvals (l.183) then ApprovalGate (l.268) -> GATE won
+# One name, two behaviours, decided by load order. This already broke the change queue once
+# (2026-06-15, recorded in REQUIREMENTS §25), and the fix taken then only made the GATE's INTERNAL
+# callers immune by giving them private names -- the public names kept colliding, so the next
+# caller to use the documented name would hit it again, in exactly one of the two hosts.
+# 🔑 Two different contracts deserve two different names. The portal's assignment-request flow
+# (-TargetAdmin/-GroupTag) is now explicitly the PORTAL one; the gate keeps the unqualified name
+# for its maker/checker control plane (-Action/-Target). Nothing shadows anything.
+function New-PimPortalApprovalRequest {
     # An assignment request awaiting an owner/approver decision.
     param(
         [Parameter(Mandatory)][string]$Requestor, [Parameter(Mandatory)][string]$TargetAdmin,
@@ -234,7 +247,7 @@ function New-PimApprovalRequest {
     }
 }
 
-function Resolve-PimApprovalDecision {
+function Resolve-PimPortalApprovalDecision {
     # Decide an approval. $CanApprove is the gate result (Test-PimCanApprove).
     # approve -> status approved + a change-queue Create on PIM-Assignments-Admins;
     # reject -> status rejected, no change; not authorised -> ok=$false.

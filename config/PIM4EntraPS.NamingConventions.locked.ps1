@@ -1,4 +1,4 @@
-#Requires -Version 5.1
+﻿#Requires -Version 5.1
 <#
 .SYNOPSIS
     Default naming conventions for admin accounts, PIM groups, and resource
@@ -83,8 +83,11 @@ $global:PIM_NamingConventions = @{
     #                         NO LONGER hard-coded to '-ID' -- it follows Environment.
     # The rendered name is LOWER-CASED. So internal Entra -> 'admin-mok-id';
     # external-adminuser AD -> 'x-admin-vnd-ad'.
-    AdminAccountPattern         = '{AdminTypePrefix}Admin-{Initial}{Platform}'
-    AdminAccountPatternHighPriv = 'Admin-{Initial}-L0-T0{Platform}'
+    # {AdminWord} = the word in the middle. Set it to 'adm' (or anything) and every admin name
+    # follows; the default 'Admin' renders exactly what this file produced before.
+    AdminWord                   = 'Admin'
+    AdminAccountPattern         = '{AdminTypePrefix}{AdminWord}-{Initial}{Platform}'
+    AdminAccountPatternHighPriv = '{AdminWord}-{Initial}-L0-T0{Platform}'
     AdminAccountPatterns        = @('Admin-', 'x-Admin', 'g-Admin')
 
     # Per-admin-type PREFIX map. internal + external-guest = no prefix; only

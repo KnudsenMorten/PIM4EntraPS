@@ -1,0 +1,293 @@
+﻿#Requires -Version 5.1
+<#
+.SYNOPSIS
+    Fetch the SOURCE for an approved version, so the environment can build its own image. §55.
+
+.DESCRIPTION
+    The nightly updater needs the source of the version it has been told to move to. Where that
+    comes from is the ONE thing that differs per deployment scenario -- and rather than teach the
+    updater six sources, it is given ONE URL with the version substituted into it:
+
+        S1 / S3  private   https://<store>/pim-src/pim-src-{version}.tar.gz?<read-sas>
+        S2 / S4  community https://<public-host>/pim-src-{version}.tar.gz
+        S6       managed   whatever its MSP master publishes for its ring
+        S5       central   -- no registry of its own; nothing to fetch
+
+    🔑 WHY A URL AND NOT A CREDENTIAL. The alternative was distributing IMAGES between registries,
+    which needs a cross-tenant registry credential provisioned and rotated in every customer
+    tenant. A read-scoped URL to ONE object needs none: nothing that can read the whole repository
+    ever lands in a tenant we do not own, and the same mechanism serves a public host, a SAS'd
+    blob and an MSP master without the updater knowing which it is.
+
+    🪤 THE ARCHIVE MUST BE REPO-ROOT SHAPED. The Dockerfile does `COPY SOLUTIONS/PIM4EntraPS`, so
+    the context root must be the repository root -- exactly what
+    `git archive HEAD -- .dockerignore SOLUTIONS/PIM4EntraPS` produces, which is what the existing
+    build has always uploaded. An archive with a single wrapping folder (what a GitHub tag tarball
+    gives you) builds nothing and fails at COPY, minutes in. Test-PimUpdateSourceArchive checks the
+    shape BEFORE a build is scheduled, so that failure arrives in seconds with a reason.
+
+.NOTES
+    PS 5.1-safe. No modules. TLS 1.2 forced -- 5.1 still defaults lower on some hosts and the
+    failure reads as a connection reset rather than a protocol refusal.
+#>
+
+function Resolve-PimUpdateSourceUrl {
+    <#
+      Substitute the approved version into the configured URL template.
+      Accepts {version} and {tag}; a template with no placeholder is used as-is, which is how a
+      "always fetch latest" endpoint would be configured.
+    #>
+    param(
+        [Parameter(Mandatory)][string]$Template,
+        [Parameter(Mandatory)][string]$Version
+    )
+    $u = "$Template".Trim()
+    if (-not $u) { return '' }
+    $v = "$Version".Trim()
+    $u = $u.Replace('{version}', $v).Replace('{VERSION}', $v).Replace('{tag}', $v).Replace('{TAG}', $v)
+    $u
+}
+
+function Get-PimUpdateSourceArchive {
+    <#
+      Download the build context to a local file. Returns @{ ok; path; bytes; reason }.
+
+      🔴 A TRUNCATED OR HTML RESPONSE IS NOT A BUILD CONTEXT. A SAS that has expired, or a private
+      URL behind a sign-in page, answers 200 with HTML -- and an HTML file uploaded as a build
+      context fails inside the registry, minutes later, as a tar error. The gzip magic number is
+      two bytes and settles it here instead.
+    #>
+    param(
+        [Parameter(Mandatory)][string]$Url,
+        [Parameter(Mandatory)][string]$OutFile,
+        [int]$TimeoutSeconds = 300
+    )
+    try {
+        [System.Net.ServicePointManager]::SecurityProtocol =
+            [System.Net.SecurityProtocolType]::Tls12 -bor [System.Net.ServicePointManager]::SecurityProtocol
+    } catch { }
+    $dir = Split-Path -Parent $OutFile
+    if ($dir -and -not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Force -Path $dir | Out-Null }
+    try {
+        # -UseBasicParsing: 5.1 otherwise wants IE's engine, which does not exist in a container.
+        Invoke-WebRequest -Uri $Url -OutFile $OutFile -UseBasicParsing -TimeoutSec $TimeoutSeconds
+    } catch {
+        return @{ ok = $false; path = ''; bytes = 0; reason = "download failed: $($_.Exception.Message)" }
+    }
+    if (-not (Test-Path -LiteralPath $OutFile)) {
+        return @{ ok = $false; path = ''; bytes = 0; reason = 'download produced no file' }
+    }
+    $len = (Get-Item -LiteralPath $OutFile).Length
+    if ($len -lt 64) {
+        return @{ ok = $false; path = $OutFile; bytes = $len; reason = "downloaded only $len byte(s) -- not an archive" }
+    }
+    $magic = New-Object byte[] 2
+    $fs = [System.IO.File]::OpenRead($OutFile)
+    try { [void]$fs.Read($magic, 0, 2) } finally { $fs.Close(); $fs.Dispose() }
+    if ($magic[0] -ne 0x1f -or $magic[1] -ne 0x8b) {
+        return @{ ok = $false; path = $OutFile; bytes = $len
+                  reason = 'the downloaded file is not gzip -- an expired link or a sign-in page answers 200 with HTML' }
+    }
+    @{ ok = $true; path = $OutFile; bytes = $len; reason = '' }
+}
+
+function Get-PimUpdateSourcePlan {
+    <#
+      PURE. Decide what an updater run should do about building, given what it is told and what it
+      last built. Returns @{ action; version; image; reason }.
+
+        action = 'roll'   -- no source configured, or already built this version: just roll
+                 'build'  -- fetch + build, then roll
+                 'none'   -- nothing approved
+
+      🔒 'roll' IS THE SAFE DEFAULT, AND DELIBERATELY SO. An environment with no source configured
+      behaves EXACTLY as it does today -- it rolls to whatever image someone else put in its
+      registry. That is what lets this ship without touching the three environments that already
+      work every night.
+
+      🪤 THE SHORT-CIRCUIT COMPARES WHAT WAS LAST BUILT, NOT WHAT IS DEPLOYED. A deployed container
+      is usually pinned by DIGEST, so its image string never equals a tag and a "is it already
+      deployed?" test would rebuild every single night -- and every rebuild produces a new digest,
+      which would then roll every container in the estate nightly for no reason at all.
+    #>
+    param(
+        [string]$TargetVersion,      # the approved version, e.g. '2.4.307'
+        [string]$SourceUrlTemplate,  # empty => roll-only (today's behaviour)
+        [string]$LastBuiltVersion,   # what this updater last built here
+        [string]$LoginServer,        # e.g. acrx.azurecr.io
+        [string]$Repository = 'pim-manager'
+    )
+    $v = "$TargetVersion".Trim()
+    if (-not $v) { return @{ action = 'none'; version = ''; image = ''; reason = 'no approved version for this ring' } }
+
+    $img = if ("$LoginServer".Trim()) { "$("$LoginServer".Trim())/$Repository" + ':' + $v } else { '' }
+
+    if (-not "$SourceUrlTemplate".Trim()) {
+        return @{ action = 'roll'; version = $v; image = $img
+                  reason = 'no source configured -- rolling to an image the registry already holds' }
+    }
+    if ("$LastBuiltVersion".Trim() -eq $v) {
+        return @{ action = 'roll'; version = $v; image = $img
+                  reason = "already built $v here -- nothing to rebuild" }
+    }
+    @{ action = 'build'; version = $v; image = $img; reason = "building $v from source" }
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# §60 -- RING RELEASE, PULLED RATHER THAN PUSHED.
+# The pin is the ring enforcement point and always has been: an environment moves only to the
+# version it is pinned to. What did not exist was a central place saying what each ring approves --
+# so "release to ring 2" meant editing the pin on every ring-2 environment, which is the same
+# 1000-customer problem the source credential had.
+# 🔑 Invert it: one small file next to the source archives, read by each environment with the
+# credential it ALREADY holds. Approving a ring becomes editing one file, exactly as extending
+# access became one policy change.
+#   { "ring0": { "version": "2.4.320" },
+#     "ring2": { "version": "2.4.314", "minFrom": "2.4.302" } }
+
+function Get-PimUpdateChannelUrl {
+    <#
+      The channel file lives beside the archives, so its URL is the source template with the blob
+      name swapped. Derived rather than configured: an operator who had to supply BOTH would
+      eventually supply one that points somewhere else, and a channel from the wrong feed is worse
+      than no channel at all.
+      🪤 The query string is the SAS -- keep it exactly, it is what authorises the read.
+    #>
+    param([string]$SourceTemplate, [string]$FileName = 'channel.json')
+    $t = "$SourceTemplate".Trim()
+    if (-not $t) { return '' }
+    $q = ''
+    $qi = $t.IndexOf('?')
+    if ($qi -ge 0) { $q = $t.Substring($qi); $t = $t.Substring(0, $qi) }
+    $si = $t.LastIndexOf('/')
+    if ($si -lt 0) { return '' }
+    $t.Substring(0, $si + 1) + $FileName + $q
+}
+
+function Get-PimRingVersion {
+    <#
+      PURE. Which version this ring is approved for. Returns @{ version; reason }.
+
+      🔒 AN UNKNOWN RING APPROVES NOTHING. Falling back to "newest", or to another ring's version,
+      would let a ring-2 customer take a build that was only ever tested in ring 0 -- the precise
+      thing rings exist to prevent. No entry means no approved version, which the updater reports
+      and then does nothing.
+      🪤 minFrom is a FLOOR, not a target: an environment further behind than the floor must not
+      jump the gap unattended, because the schema steps between are what it would be skipping.
+    #>
+    param([object]$Channel, [string]$Ring, [string]$CurrentVersion)
+    $r = "$Ring".Trim()
+    if (-not $r) { return @{ version = ''; reason = 'no ring configured for this environment' } }
+    if ($r -notmatch '^(?i)ring') { $r = "ring$r" }          # accept '2' or 'ring2'
+    if (-not $Channel) { return @{ version = ''; reason = 'no channel document' } }
+
+    $entry = $null
+    foreach ($p in $Channel.PSObject.Properties) {
+        if ("$($p.Name)".Trim().ToLowerInvariant() -eq $r.ToLowerInvariant()) { $entry = $p.Value; break }
+    }
+    if (-not $entry) { return @{ version = ''; reason = "the channel names no '$r' -- nothing approved for this ring" } }
+    $v = "$($entry.version)".Trim()
+    if (-not $v) { return @{ version = ''; reason = "'$r' has no version -- nothing approved" } }
+
+    $floor = "$($entry.minFrom)".Trim()
+    if ($floor -and "$CurrentVersion".Trim()) {
+        $cv = $null; $fv = $null
+        if ([version]::TryParse(($CurrentVersion -replace '^v',''), [ref]$cv) -and
+            [version]::TryParse(($floor -replace '^v',''), [ref]$fv) -and $cv -lt $fv) {
+            return @{ version = ''
+                      reason  = "this environment is on $CurrentVersion, below '$r' minFrom $floor -- refusing to jump the gap unattended" }
+        }
+    }
+    @{ version = $v; reason = "'$r' approves $v" }
+}
+
+# ---- 2026-09-13 -- DOES THE UPDATER REACH THIS ENVIRONMENT'S STORE? ------------------------------
+# 🔴 MEASURED ON FOUR LIVE ENVIRONMENTS: ca-pim-update carried no PIM_SqlServer / PIM_SqlDatabase
+# (ca-pim-manager and ca-pim-tick do), so every nightly schema step printed
+#     schema: no store connection resolved -- skipping (this environment has no local store)
+# about environments whose Manager runs on Azure SQL. The sentence was false and it read as a clean
+# skip -- so a release carrying a schema change would have rolled a container expecting columns
+# nobody had added. "I could not look" must never be worded as "there is nothing to look at".
+
+function Get-PimAcaStoreSettings {
+    <#
+      PURE. The SQL store a container app or job is configured with, read from its env across EVERY
+      container (ARM GET shape, or the `az ... show -o json` shape). Returns
+        { known; hasStore; server; database; via }
+      known=$false when the object is $null or carries no template: an unreadable Manager is NEVER
+      evidence of a store-less environment.
+    #>
+    param([object]$Resource)
+    $out = [ordered]@{ known = $false; hasStore = $false; server = ''; database = ''; via = '' }
+    if ($null -eq $Resource) { return [pscustomobject]$out }
+    $tpl = $null
+    if ($Resource.PSObject.Properties['properties'] -and $Resource.properties -and $Resource.properties.PSObject.Properties['template']) { $tpl = $Resource.properties.template }
+    elseif ($Resource.PSObject.Properties['template']) { $tpl = $Resource.template }
+    if (-not $tpl) { return [pscustomobject]$out }
+    $out.known = $true
+    $other = ''
+    foreach ($c in @($tpl.containers | Where-Object { $_ })) {
+        foreach ($e in @($c.env | Where-Object { $_ })) {
+            $n = "$($e.name)"; $v = "$($e.value)".Trim()
+            $ref = ''
+            if ($e.PSObject.Properties['secretRef']) { $ref = "$($e.secretRef)".Trim() }
+            if ($n -ceq 'PIM_SqlServer' -and $v -and -not $out.server) { $out.server = $v }
+            elseif ($n -ceq 'PIM_SqlDatabase' -and $v -and -not $out.database) { $out.database = $v }
+            elseif (($n -ceq 'PIM_SqlConnectionString' -or $n -ceq 'PIM_SqlConnStringVault') -and ($v -or $ref) -and -not $other) { $other = $n }
+        }
+    }
+    if ($out.server) { $out.hasStore = $true; $out.via = 'PIM_SqlServer' }
+    elseif ($other)  { $out.hasStore = $true; $out.via = $other }
+    [pscustomobject]$out
+}
+
+function Get-PimUpdateSchemaStoreDecision {
+    <#
+      PURE. What the nightly updater's schema step may do, before any container moves.
+        check      -- the updater resolved a store connection: run the additive schema step.
+        storeless  -- neither the updater NOR the Manager names a store. The ONLY case that may skip
+                      with "this environment has no local store".
+        unverified -- the Manager has a store and the updater does not, but the roll stays on the
+                      version already running, so it carries no schema change: roll, loudly.
+        refuse     -- the Manager has a store (or could not be read), the updater does not, and the roll
+                      MOVES to another version whose DDL cannot be verified: do NOT roll.
+      🔒 Store-less must be PROVEN from the Manager's own settings. An unreadable Manager, or a version
+      that cannot be read off its image (a digest-only reference), is treated as a move -- refuse.
+    #>
+    param(
+        [AllowEmptyString()][string]$UpdaterConnection,
+        [object]$ManagerStore,
+        [AllowEmptyString()][string]$CurrentVersion,
+        [AllowEmptyString()][string]$TargetVersion,
+        [string]$UpdateJobName = 'ca-pim-update',
+        [string]$ManagerApp = 'ca-pim-manager'
+    )
+    if ("$UpdaterConnection".Trim()) {
+        return [pscustomobject]@{ mode = 'check'; message = 'store connection resolved -- checking the schema'; detail = ''; errorText = '' }
+    }
+    $known = ($null -ne $ManagerStore) -and [bool]$ManagerStore.known
+    if ($known -and -not [bool]$ManagerStore.hasStore) {
+        return [pscustomobject]@{ mode = 'storeless'
+            message = "schema: no store connection resolved -- skipping (this environment has no local store: neither $UpdateJobName nor $ManagerApp names one)."
+            detail = ''; errorText = '' }
+    }
+    $cur = ("$CurrentVersion".Trim() -replace '^(?i)v', '')
+    $tgt = ("$TargetVersion".Trim() -replace '^(?i)v', '')
+    $head = 'updater has no PIM_SqlServer -- schema NOT checked; re-run Deploy-PimUpdateJob'
+    $why = if ($known) {
+               $where = if ("$($ManagerStore.server)".Trim()) { "$($ManagerStore.server)" } else { "$($ManagerStore.via)" }
+               "$ManagerApp uses a SQL store ($where) but $UpdateJobName has no PIM_SqlServer"
+           } else {
+               "$ManagerApp could not be read, so this environment cannot be proven store-less"
+           }
+    if ($cur -and $tgt -and $cur -ieq $tgt) {
+        return [pscustomobject]@{ mode = 'unverified'; message = $head
+            detail = "$why. The roll stays on $tgt, which is already running, so it carries no schema change -- proceeding. Fix the updater before the next release."
+            errorText = '' }
+    }
+    $from = if ($cur) { $cur } else { 'an unreadable version' }
+    $to   = if ($tgt) { $tgt } else { 'an unresolved version' }
+    return [pscustomobject]@{ mode = 'refuse'; message = $head
+        detail = "$why. Moving $from -> $to may need DDL that cannot be verified from here -- NOT rolling."
+        errorText = "$head (roll $from -> $to refused: its schema could not be verified)" }
+}

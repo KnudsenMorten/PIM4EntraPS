@@ -1,4 +1,4 @@
-#Requires -Version 5.1
+﻿#Requires -Version 5.1
 # NOTE: no #Requires -Modules. The WRITE path is pure Graph REST via PIM-Rest
 # (REQUIREMENTS §19). App-only (cert) deployment is fully module-free; the
 # Microsoft.Graph SDK is only loaded on demand for the interactive break-glass
