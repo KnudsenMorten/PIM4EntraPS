@@ -78,14 +78,22 @@ param(
     [string]$SqlAdminClientId,
     [string]$SqlAdminCertThumbprint,
     [string]$SqlAdminClientSecret,
+    # 71.33: grant the updater's database user as the SIGNED-IN az user (a member of the SQL admin group).
+    [switch]$UseSignedInAccount,
     [switch]$SqlPrivate,
     [string]$DbInitJobName = 'ca-pim-dbinit',
-    [switch]$SkipRoleAssignment
+    [switch]$SkipRoleAssignment,
+    # 2026-09-15 -- THE SQL ADMIN GROUP. When this group is the SQL server's Entra admin, the updater's
+    # identity is made a member of it on every run, so its schema step can log in without a contained user.
+    # Never creates the group and never moves the admin -- that is Initialize-PimSqlAdminGroup.ps1.
+    [string]$SqlAdminGroupName = 'grp-pim-sql-admins',
+    [switch]$SkipSqlAdminGroup
 )
 $ErrorActionPreference = 'Stop'
 $here = Split-Path -Parent $PSCommandPath
 . (Join-Path $here '_PimAz.ps1')                        # the guarded az shadow
 . (Join-Path $here '_PimUpdateRing.ps1')                # ring + source enforcement, ARM-safe env writes
+. (Join-Path $here '_PimSqlAdminGroup.ps1')             # the SQL admin group: membership for the updater identity
 
 function Step($m) { Write-Host "==> $m" -ForegroundColor Cyan }
 function Note($m) { Write-Host "    $m" -ForegroundColor DarkGray }
@@ -212,6 +220,8 @@ $envVars = @(
     "PIM_HOSTED=1"
 )
 if ("$AcrAgentPoolName".Trim()) { $envVars += "PIM_ACR_AGENT_POOL=$("$AcrAgentPoolName".Trim())" }
+# The updater names this group when its identity is refused by SQL; only written when it is not the default.
+if ("$SqlAdminGroupName".Trim() -and "$SqlAdminGroupName".Trim() -ne 'grp-pim-sql-admins') { $envVars += "PIM_SqlAdminGroupName=$("$SqlAdminGroupName".Trim())" }
 if ("$TargetImage".Trim()) { $envVars += "PIM_UPDATE_TARGET_IMAGE=$("$TargetImage".Trim())" }
 # §55. A bare version is the modern pin: ONE value, identical in every environment, instead of a
 # registry-qualified reference that has to be rewritten per site. -TargetImage still works and
@@ -520,8 +530,38 @@ if (-not $SkipRoleAssignment -and -not $WhatIfPreference) {
 # updater correctly turns into "NOT ROLLING", every night. Same helpers as the tick (Setup-PimContainers):
 # Resolve-PimMiAppId, then Grant-PimMiSql on public SQL, or the in-cloud bootstrap job on private SQL.
 $sqlGrantProblem = ''
+# ---- 2b. 2026-09-15 -- THE SQL ADMIN GROUP: the updater identity joins it -------------------------
+# 🔑 Where the server's Entra admin is the SQL admin group, membership IS the database access -- no
+# contained user, no SQL connection from this host, and it works the same on public and private SQL.
+# Measured live 2026-09-15 on two tenants: a managed identity that is a member of the admin group logs in
+# and runs the schema DDL. MEMBERS ONLY: this never creates the group or moves the admin, so running it
+# against an environment still on a single-principal admin changes nothing (it says so).
+$groupMember = $false
+if (-not $WhatIfPreference -and -not $SkipSqlAdminGroup -and $storePlan.hasStore -and $storePlan.writes.Contains('PIM_SqlServer')) {
+    Step "SQL admin group '$SqlAdminGroupName' -- the updater identity"
+    try {
+        $inv = New-PimSqlAdminGroupInvokers -SubscriptionId $SubscriptionId
+        $srvRes = Resolve-PimSqlServerFromFqdn -Arm $inv.Arm -SubscriptionId $SubscriptionId -Server "$($storePlan.writes['PIM_SqlServer'])"
+        if (-not $srvRes) { throw "SQL server '$($storePlan.writes['PIM_SqlServer'])' is not in subscription $SubscriptionId." }
+        $gr = Invoke-PimSqlAdminGroupStep -Graph $inv.Graph -Arm $inv.Arm -TenantId $inv.TenantId -SubscriptionId $SubscriptionId `
+                  -ResourceGroup $ResourceGroup -SqlResourceGroup $srvRes.resourceGroup -SqlServerName $srvRes.name `
+                  -GroupName $SqlAdminGroupName -UpdateJobName $JobName -Mode membersOnly -NoDiscovery
+        Write-PimSqlAdminGroupReport -Result $gr
+        if ($gr.ok -and -not $gr.blocked) {
+            $groupMember = $true
+            Note "the updater identity is a member of '$SqlAdminGroupName', the Entra admin of $($srvRes.name) -- its schema step can log in"
+        } elseif ($gr.ok) {
+            Note 'not on the group model -- the updater reaches SQL through its contained database user (next step)'
+        } else {
+            Warn "could not make the updater identity a member of '$SqlAdminGroupName' -- the contained-user step below still runs"
+        }
+    } catch {
+        Warn "SQL admin group step skipped: $($_.Exception.Message) -- the contained-user step below still runs"
+    }
+}
 if (-not $WhatIfPreference -and $storePlan.hasStore) {
     $haveCred = [bool]("$SqlAdminClientId".Trim() -and "$TenantId".Trim() -and ("$SqlAdminCertThumbprint".Trim() -or "$SqlAdminClientSecret".Trim()))
+    if ($UseSignedInAccount -and "$TenantId".Trim()) { $haveCred = $true }   # 71.33
     $dbInitExists = $false
     if ($SqlPrivate) {
         $dbInitExists = [bool](@(az containerapp job list @sub -g $ResourceGroup --query "[].name" -o tsv 2>$null) |
@@ -530,7 +570,10 @@ if (-not $WhatIfPreference -and $storePlan.hasStore) {
     $grantPlan = Get-PimUpdaterSqlGrantPlan -HasStore $true -SqlPrivate ([bool]$SqlPrivate) -HaveAdminCredential $haveCred `
                     -DbInitJobExists $dbInitExists -UpdateJobName $JobName -DbInitJobName $DbInitJobName
     Step "database user for $JobName ($($grantPlan.action))"
-    if ($grantPlan.action -in @('infra', 'manual')) {
+    if ($grantPlan.action -in @('infra', 'manual') -and $groupMember) {
+        # Group membership already gives the updater its database access; a contained user is not needed.
+        Note "no contained user granted from here ($($grantPlan.action)) -- not needed: the updater is a member of '$SqlAdminGroupName'"
+    } elseif ($grantPlan.action -in @('infra', 'manual')) {
         $sqlGrantProblem = $grantPlan.message
         Write-Host "    $($grantPlan.message)" -ForegroundColor Red
     } elseif (-not $storePlan.writes.Contains('PIM_SqlServer')) {
@@ -550,10 +593,15 @@ if (-not $WhatIfPreference -and $storePlan.hasStore) {
                 $solRootG = Split-Path -Parent (Split-Path -Parent $here)
                 . (Join-Path $solRootG 'engine\_shared\PIM-Rest.ps1')      # Get-PimRestToken
                 . (Join-Path $solRootG 'engine\_shared\PIM-SqlStore.ps1')  # New-PimSqlConnection
+                if ($UseSignedInAccount) {
+                    Grant-PimMiSql -DbUserName $JobName -MiAppId $updAppId -SqlServerFqdn "$($storePlan.writes['PIM_SqlServer'])" `
+                        -SqlDatabase "$($storePlan.writes['PIM_SqlDatabase'])" -TenantId $TenantId -UseSignedInAccount
+                } else {
                 $cred = if ("$SqlAdminCertThumbprint".Trim()) { @{ SqlAdminCertThumbprint = $SqlAdminCertThumbprint } }
                         else { @{ SqlAdminClientSecret = $SqlAdminClientSecret } }
                 Grant-PimMiSql -DbUserName $JobName -MiAppId $updAppId -SqlServerFqdn "$($storePlan.writes['PIM_SqlServer'])" `
                     -SqlDatabase "$($storePlan.writes['PIM_SqlDatabase'])" -TenantId $TenantId -SqlAdminClientId $SqlAdminClientId @cred
+                }
                 Note "database user [$JobName] granted (MI appId $updAppId)"
             } else {
                 $dbPath = "/subscriptions/$SubscriptionId/resourceGroups/$ResourceGroup/providers/Microsoft.App/jobs/$DbInitJobName"

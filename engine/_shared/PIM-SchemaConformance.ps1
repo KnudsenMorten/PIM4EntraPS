@@ -38,13 +38,30 @@ function Get-PimLockedSchema {
     return @{
         'Account-Definitions-Admins' = @{
             key = 'UserName'
-            deprecated = @('TierLevel')
+            # 🔴 71.23 -- OffboardDate is DEPRECATED in favour of AutoDisableDate, and the
+            # migration below is how an existing store moves: copy OffboardDate into
+            # AutoDisableDate when AutoDisableDate is blank, THEN drop OffboardDate. One
+            # idempotent preflight pass migrates a whole store, and afterwards a row cannot
+            # carry both names at all. A row that reaches a READER with both set and different
+            # (an import, a hand-edit, an older bundle) is REFUSED, never guessed --
+            # Get-PimAdminAutoDisableDate (PIM-DateSafe.ps1).
+            # 🔴 71.21 (operator 2026-09-16, second decision: "nobody uses it yet, so dont worry about
+            # deleteafterdays, as i dont want it to be shown as it confuses" / "i might enable it later,
+            # but now i dont support it"). DeleteAfterDays is DROPPED here, by the same idempotent pass.
+            # Dropping the COLUMN rather than blanking the value was the reversible choice: re-adding
+            # support later is one entry in `required` and nothing else -- no data migration, because a
+            # column that does not exist has no values to reconcile. Until then a row that still carries
+            # the value is accepted in SILENCE (no error, no warning) and simply loses the column here.
+            deprecated = @('TierLevel','OffboardDate','DeleteAfterDays')
             # UserType (Internal|External) drives onboarding: External + cloud -> B2B
             # guest invite (PIM-Onboarding.ps1). Blank = Internal.
             # AdminType drives the name prefix (internal-adminuser/external-adminuser/
             # external-guest); Environment drives the name suffix (entra '-ID' / ad '-AD').
-            required   = @('Purpose','UserType','AdminType','Environment','ProvisionDate','TAPLifetimeHours','Template','OffboardDate','DeleteAfterDays')
-            migrations = @(@{ from = 'TierLevel'; to = 'Purpose'; whenTargetBlank = $true; map = { param($v) ConvertTo-PimPurposeFromTier -TierLevel "$v" } })
+            required   = @('Purpose','UserType','AdminType','Environment','ProvisionDate','TAPLifetimeHours','Template','AutoDisableDate')
+            migrations = @(
+                @{ from = 'TierLevel';    to = 'Purpose';         whenTargetBlank = $true; map = { param($v) ConvertTo-PimPurposeFromTier -TierLevel "$v" } }
+                @{ from = 'OffboardDate'; to = 'AutoDisableDate'; whenTargetBlank = $true }
+            )
         }
         # 68.6 row 35: the central admins an MSP slave imports, kept apart from its own admins. Written only by
         # the downlink (UserName-keyed, same row shape); nothing to migrate or drop.
@@ -130,7 +147,9 @@ function Repair-PimRowsToSchema {
             if ($null -eq $srcVal -or "$srcVal".Trim() -eq '') { continue }
             $tgtVal = & $get $m.to
             if ($m.whenTargetBlank -and "$tgtVal".Trim() -ne '') { continue }   # don't clobber an explicit value
-            $migrated[$m.to] = (& $m.map $srcVal)
+            # 71.23: `map` is OPTIONAL. A pure RENAME (OffboardDate -> AutoDisableDate) carries the
+            # value across unchanged; only a semantic move (TierLevel -> Purpose) needs a mapper.
+            $migrated[$m.to] = if ($m.map) { (& $m.map $srcVal) } else { $srcVal }
         }
         $obj = [ordered]@{}
         foreach ($c in $finalCols) {

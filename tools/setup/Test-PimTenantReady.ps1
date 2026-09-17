@@ -203,14 +203,30 @@ Invoke-Check -Name 'desired admin accounts exist and are enabled' -Body {
 #    rather than "holds a TAP", because a TAP is consumed on first use: asserting its
 #    presence would fail correctly-onboarded admins forever after.
 # =====================================================================================
-Invoke-Check -Name 'admins requesting a TAP can receive it' -Body {
+Invoke-Check -Name 'every Entra admin can receive its TAP' -Body {
     if (-not $cs) { return @{ ok = $false; detail = 'store unreachable' } }
+    # 71.17 TAP IS ON FOR ALL: every Entra admin gets a TAP whatever CreateTAP says; only an AD-only admin cannot hold one.
     $rows = @(Get-PimSqlRows -ConnectionString $cs -Entity 'Account-Definitions-Admins' |
-        Where-Object { "$($_.CreateTAP)" -match '(?i)^(true|1|yes)$' })
-    if (-not $rows.Count) { return @{ ok = $true; detail = 'no admin requests a TAP' } }
-    $noMgr = @($rows | Where-Object { -not "$($_.ManagerEmail)".Trim() })
+        Where-Object { "$($_.TargetPlatform)".Trim() -ine 'AD' })
+    if (-not $rows.Count) { return @{ ok = $true; detail = 'no Entra admin rows' } }
+    # 71.19: the recipient is the admin's SPONSOR DEPARTMENT's owners (per-admin override first, ManagerEmail legacy) --
+    # the same resolver the engine and the Manager use, fed with this store's department rows.
+    $deptIdx = @{}
+    foreach ($dr in @(Get-PimSqlRows -ConnectionString $cs -Entity 'PIM-Definitions-Departments')) {
+        $dn = ''; foreach ($k in @('Department', 'DepartmentName', 'Name')) { $v = "$($dr.$k)".Trim(); if ($v) { $dn = $v; break } }
+        if (-not $dn) { continue }
+        $dow = ''; foreach ($k in @('Owners', 'DeptOwner', 'DepartmentOwner', 'ManagerEmail')) { $v = "$($dr.$k)".Trim(); if ($v) { $dow = $v; break } }
+        $deptIdx[$dn.ToLowerInvariant()] = $dow
+    }
+    $plans = @($rows | ForEach-Object { Get-PimAdminMailRecipientPlan -Row $_ -DepartmentOwners $deptIdx })
+    $noMgr = @($plans | Where-Object { "$($_.source)" -eq 'none' })
+    $legacy = @($plans | Where-Object { "$($_.source)" -eq 'manager-legacy' })
     if ($noMgr.Count) {
-        return @{ ok = $false; detail = "$($noMgr.Count)/$($rows.Count) admin(s) have CreateTAP=TRUE but NO ManagerEmail -- their TAP is minted and delivered NOWHERE, and the code is readable only at creation" }
+        return @{ ok = $false; detail = ("$($noMgr.Count)/$($rows.Count) Entra admin(s) have NO recipient -- a TAP is enforced for every Entra admin and the engine refuses to issue one it cannot deliver, so they cannot sign in. " +
+                                         "Set each admin's Department and set Owners on that department (PIM-Definitions-Departments). First: $(@($noMgr | Select-Object -First 1).reason)") }
+    }
+    if ($legacy.Count) {
+        Write-Host "    [note] $($legacy.Count)/$($rows.Count) Entra admin(s) still resolve through the legacy ManagerEmail -- move them to their sponsor department's owners." -ForegroundColor DarkYellow
     }
     $sender = ''
     if ($settings) { $sender = "$($settings['MailSender'])".Trim().Trim('"') }

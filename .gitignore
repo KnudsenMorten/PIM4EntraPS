@@ -70,6 +70,14 @@ config-msp/*.custom.json
 # Customer license files -- delivered offline, never tracked anywhere
 *.pimlicense
 
+# Release-feed secret -- ONE line: the source feed URL template plus its
+# stored-access-policy SAS. This is the file the operator distributes with a
+# licence, and the file tools/setup/Invoke-PimMspBuild.ps1 reads via
+# -UpdateSourceUrlFile / $env:PIM_UPDATE_SOURCE_URL_FILE. Same rule as
+# *.pimlicense: delivered offline, never tracked anywhere. A committed one is a
+# live read credential over every published source archive.
+*.pimfeed
+
 config-test/
 
 # Headless GUI validator node deps (Test-PimManagerGuiComprehensive.ps1).

@@ -36,7 +36,10 @@ param(
     # whose value is then thrown away. Supply EITHER -Index (estate) OR the two explicit CIDRs
     # (customer). The either/or is enforced below -- neither means no addressing at all.
     [int]$Index = -1,
-    [Parameter(Mandatory)][string]$AdminAppId,     # SPN used to create things (Owner on the sub)
+    [string]$AdminAppId,                           # SPN used to create things (Owner on the sub) -- or -UseSignedInAccount
+    # 71.33: create everything as the SIGNED-IN az user (asserted: a user in -TenantId for -SubscriptionId). No SPN login,
+    # no isolated profile; the user becomes the create-time SQL Entra admin and a member of the SQL admin group.
+    [switch]$UseSignedInAccount,
     # ONE of these two. The estate's throwaway tenants onboard with a secret; a REAL tenant must
     # not -- the repo-root rule is "authenticate as its SPN using a CERTIFICATE, never a client
     # secret". Cert auth was added 2026-08-09 for the myfamilynetwork PRODUCTION build (PIM §34),
@@ -119,9 +122,18 @@ param(
     [string]$AcrName,
     [string]$LogAnalyticsName,
     [string]$SqlServerName,
-    [switch]$SkipSql
+    [switch]$SkipSql,
+    # ---- 2026-09-15 THE SQL ADMIN GROUP ------------------------------------------------------------
+    # The SQL server's Entra admin converges on this security group, holding the environment identity,
+    # the SQL identity (private SQL), this deploy identity, the troubleshooting identity and whoever was
+    # admin before. Same model on public and private SQL. -SkipSqlAdminGroup keeps the single-principal
+    # admin of earlier versions.
+    [string]$SqlAdminGroupName = 'grp-pim-sql-admins',
+    [string]$TroubleshootingAppId,
+    [switch]$SkipSqlAdminGroup
 )
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot '_PimSqlAdminGroup.ps1')     # the SQL admin group (plan + converge + read-back)
 
 function Get-PimEffective { param([string]$Override,[string]$Derived)
     if ("$Override".Trim()) { "$Override".Trim() } else { $Derived }
@@ -195,6 +207,15 @@ Write-Host "  location     : $Location"
 Write-Host "  vnet/subnet  : $vnet $vnetCidr  /  $subnet $subnetCidr"
 Write-Host "  acr / law    : $acr / $law"
 
+$signedIn = $null
+if ($UseSignedInAccount) {
+    if ("$AdminAppId".Trim() -or $AdminSecret -or $AdminCertPem) { throw '-UseSignedInAccount cannot be combined with -AdminAppId / -AdminSecret / -AdminCertPem -- pick ONE identity.' }
+    . (Join-Path $PSScriptRoot '_PimSignedIn.ps1')
+    $signedIn = Get-PimSignedInIdentity -TenantId $TenantId -SubscriptionId $SubscriptionId
+    if (-not $signedIn.ok) { throw "REFUSED: $($signedIn.reason)" }
+    Write-Host "  auth         : SIGNED-IN user $($signedIn.userName) ($($signedIn.objectId))" -ForegroundColor DarkGray
+} else {
+if (-not "$AdminAppId".Trim()) { throw 'give -AdminAppId with -AdminCertPem (or -AdminSecret), or -UseSignedInAccount.' }
 # isolated az profile so the shared context on this host is never disturbed
 $cfg = Join-Path $env:TEMP "azcfg-$Token"
 New-Item -ItemType Directory -Force $cfg | Out-Null
@@ -220,6 +241,7 @@ if ($AdminCertPem) {
 }
 if ($LASTEXITCODE -and $LASTEXITCODE -ne 0) { throw "az login failed for $AdminAppId in $TenantId." }
 az account set --subscription $SubscriptionId --only-show-errors
+}
 # Every az call below is scoped explicitly as well: on a host with two logins the default context can
 # change under a long run (another shell's `az account set`), and a bare call then acts in that one.
 $subArgs = @('--subscription', $SubscriptionId)
@@ -488,16 +510,61 @@ if ($SkipSql) {
     # The takeover therefore happens ONLY where the in-cloud path is the one being used -- i.e.
     # where SQL is private and no deploy host has a route to it.
     $sqlUami = $null; $sqlUamiId = $null; $sqlUamiOid = $null; $sqlUamiCid = $null
+    $spOid  = if ($signedIn) { $signedIn.objectId } else { az ad sp show --id $AdminAppId --query id -o tsv --only-show-errors }
+    $deployWho = if ($signedIn) { "(signed-in user $($signedIn.userName))" } else { "$AdminAppId" }
+    # ---- 6a-group. 2026-09-15 -- converge the Entra admin onto the SQL ADMIN GROUP ---------------------
+    # 🔑 A single-principal admin could administer the database alone; every other identity that must --
+    # the unattended updater's schema step, the operator's troubleshooting identity -- needed a contained
+    # user made by that one principal, and an environment whose admin could not be used unattended was
+    # stuck (EFIF/RIDE refused every release for two nights). A group holding all of them is the model on
+    # public AND private SQL. Converged AFTER the server exists (a group admin is not a create-time option
+    # here) and read back; the previous admin is always kept as a member.
+    # 🪤 Graph may refuse the deploy identity (a customer's least-privilege deploy identity holds no group
+    # rights). That is NOT fatal: the single-principal admin of earlier versions stays, and the exact
+    # command to converge later with a privileged identity is printed. Any OTHER failure stops the run --
+    # a half-moved admin is not a state to build on.
+    $sqlAdminGroupOk = $false
+    $sqlAdminGroupSkipped = ''
+    function Invoke-PimPrereqSqlAdminGroup {
+        param([object[]]$ExtraMembers)
+        if ($SkipSqlAdminGroup) { $script:sqlAdminGroupSkipped = '-SkipSqlAdminGroup'; return }
+        Write-Host "    [6a] sql admin GROUP '$SqlAdminGroupName' ..." -ForegroundColor Yellow
+        $inv = $null
+        try { $inv = New-PimSqlAdminGroupInvokers -SubscriptionId $SubscriptionId -TenantId $TenantId }
+        catch {
+            $script:sqlAdminGroupSkipped = "no Graph/ARM token for the group step ($($_.Exception.Message))"
+            Write-Warning "the SQL admin group step could not start: $($_.Exception.Message) -- the server keeps its current admin."
+            return
+        }
+        $r = Invoke-PimSqlAdminGroupStep -Graph $inv.Graph -Arm $inv.Arm -TenantId $inv.TenantId -SubscriptionId $SubscriptionId `
+                -ResourceGroup $rg -SqlServerName $sqlSrv -GroupName $SqlAdminGroupName -NoDiscovery -UpdateJobName 'ca-pim-update' `
+                -TroubleshootingAppId $TroubleshootingAppId -ExtraMembers $ExtraMembers -Mode converge
+        Write-PimSqlAdminGroupReport -Result $r -Indent '         '
+        if ($r.ok) { $script:sqlAdminGroupOk = $true; return }
+        if ($r.permissionDenied) {
+            $script:sqlAdminGroupSkipped = 'the deploy identity was refused by Microsoft Graph'
+            Write-Warning ("the SQL admin group could not be converged with this deploy identity -- the server keeps its current admin. " +
+                           "Converge it with an identity that holds the Graph group rights: tools/setup/Initialize-PimSqlAdminGroup.ps1 " +
+                           "-SubscriptionId $SubscriptionId -ResourceGroup $rg -SqlServerName $sqlSrv -TenantId $TenantId -ClientId <app id> -CertThumbprint <thumbprint>")
+            return
+        }
+        throw ("the SQL admin group '$SqlAdminGroupName' was NOT converged on $sqlSrv -- see [FAIL] above. The Entra admin is left " +
+               "as it was; fix the cause and re-run (every step is idempotent).")
+    }
     if (-not $SqlPrivateEndpoint) {
-        Write-Host "    [6a] sql admin: the DEPLOY SPN (external/public SQL -- the deploy host administers it)" -ForegroundColor Yellow
-        $spOid  = az ad sp show --id $AdminAppId --query id -o tsv --only-show-errors
-        $spName = az ad sp show --id $AdminAppId --query displayName -o tsv --only-show-errors
+        Write-Host "    [6a] sql admin: the DEPLOY SPN at create, then the SQL admin group (external/public SQL)" -ForegroundColor Yellow
+        $spName = if ($signedIn) { $signedIn.userName } else { az ad sp show --id $AdminAppId --query displayName -o tsv --only-show-errors }
         $sqlId = az sql server show @subArgs -g $rg -n $sqlSrv --query id -o tsv --only-show-errors 2>$null
         if (-not $sqlId) {
             az sql server create @subArgs -g $rg -n $sqlSrv -l $Location `
-                --enable-ad-only-auth --external-admin-principal-type Application `
+                --enable-ad-only-auth --external-admin-principal-type $(if ($signedIn) { 'User' } else { 'Application' }) `
                 --external-admin-name $spName --external-admin-sid $spOid --only-show-errors -o none
         }
+        # The deploy identity stays able to administer the database through the group -- it is what
+        # creates the contained users and applies the schema from this host on public SQL.
+        Invoke-PimPrereqSqlAdminGroup -ExtraMembers @(
+            [pscustomobject]@{ objectId = "$uamiPrincipal".Trim(); label = "environment identity $uami" }
+            [pscustomobject]@{ objectId = "$spOid".Trim();         label = "deploy identity $deployWho" })
     } else {
 
     $sqlUami = "id-pim-sql-$Token"
@@ -521,22 +588,35 @@ if ($SkipSql) {
         az sql server create @subArgs -g $rg -n $sqlSrv -l $Location `
             --enable-ad-only-auth --external-admin-principal-type Application `
             --external-admin-name $sqlUami --external-admin-sid $sqlUamiOid --only-show-errors -o none
+    }
+    # The SQL identity MUST be a member: the in-cloud bootstrap job administers the database as it.
+    Invoke-PimPrereqSqlAdminGroup -ExtraMembers @(
+        [pscustomobject]@{ objectId = "$sqlUamiOid".Trim();    label = "SQL identity $sqlUami" }
+        [pscustomobject]@{ objectId = "$uamiPrincipal".Trim(); label = "environment identity $uami" }
+        [pscustomobject]@{ objectId = "$spOid".Trim();         label = "deploy identity $deployWho" })
+    $adminNowSid   = "$(az sql server ad-admin list @subArgs -g $rg -s $sqlSrv --query "[0].sid" -o tsv --only-show-errors 2>$null)".Trim()
+    $adminNowLogin = "$(az sql server ad-admin list @subArgs -g $rg -s $sqlSrv --query "[0].login" -o tsv --only-show-errors 2>$null)".Trim()
+    if ($sqlAdminGroupOk) {
+        Write-Host "         Entra admin verified: the SQL admin group '$SqlAdminGroupName' (holds $sqlUami)"
+    } elseif ($adminNowLogin -and $adminNowLogin -ieq "$SqlAdminGroupName".Trim()) {
+        # 🔴 NEVER MOVE A GROUP ADMIN BACK TO THE IDENTITY. The group was converged earlier (by a
+        # privileged identity) and this run simply could not read its members -- moving the admin to the
+        # UAMI here would remove the updater and the troubleshooting identity from the database.
+        Write-Warning "         the Entra admin is the SQL admin group '$SqlAdminGroupName' -- kept; its members were NOT verified by this run ($sqlAdminGroupSkipped)."
     } else {
-        # Existing server: move the admin to the identity, so a re-run converges on the design
-        # rather than leaving whatever the first deploy happened to set.
-        $curAdmin = az sql server ad-admin list @subArgs -g $rg -s $sqlSrv --query "[0].sid" -o tsv --only-show-errors 2>$null
-        if ("$curAdmin".Trim() -ne "$sqlUamiOid".Trim()) {
-            Write-Host "         moving the Entra admin to $sqlUami (was $curAdmin)"
+        # Legacy single-principal design (no group rights, or -SkipSqlAdminGroup): the SQL identity is the admin.
+        if ($adminNowSid -ne "$sqlUamiOid".Trim()) {
+            Write-Host "         moving the Entra admin to $sqlUami (was $adminNowSid)"
             az sql server ad-admin create @subArgs -g $rg -s $sqlSrv --display-name $sqlUami --object-id $sqlUamiOid --only-show-errors -o none 2>$null | Out-Null
+            $adminNowSid = "$(az sql server ad-admin list @subArgs -g $rg -s $sqlSrv --query "[0].sid" -o tsv --only-show-errors 2>$null)".Trim()
         }
+        if ($adminNowSid -ne "$sqlUamiOid".Trim()) {
+            throw ("the SQL Entra admin is '$adminNowSid', not '$sqlUamiOid' ($sqlUami) or the SQL admin group. Nothing inside the " +
+                   "environment could then create database users, and the deploy does not connect to SQL " +
+                   "at all by design -- so this must be right before anything else runs.")
+        }
+        Write-Host "         Entra admin verified: $sqlUami (single-principal admin: $sqlAdminGroupSkipped)"
     }
-    $adminNow = az sql server ad-admin list @subArgs -g $rg -s $sqlSrv --query "[0].sid" -o tsv --only-show-errors 2>$null
-    if ("$adminNow".Trim() -ne "$sqlUamiOid".Trim()) {
-        throw ("the SQL Entra admin is '$adminNow', not '$sqlUamiOid' ($sqlUami). Nothing inside the " +
-               "environment could then create database users, and the deploy does not connect to SQL " +
-               "at all by design -- so this must be right before anything else runs.")
-    }
-    Write-Host "         Entra admin verified: $sqlUami"
     }   # end of the private-SQL branch
     az sql db create @subArgs -g $rg -s $sqlSrv -n $sqlDb --service-objective $SqlServiceObjective `
         --tags purpose=automateit estate=$Token --only-show-errors -o none 2>$null | Out-Null
@@ -651,6 +731,8 @@ Chk 'acrpull grant'  ($pullOk -eq 'AcrPull') "$uami -> AcrPull on $acr"
 if (-not $SkipSql) {
     $dbOk = az sql db show @subArgs -g $rg -s $sqlSrv -n $sqlDb --query status -o tsv --only-show-errors 2>$null
     Chk 'sql database' ($dbOk -eq 'Online') "$sqlSrv/$sqlDb ($dbOk)"
+    $adminLoginNow = "$(az sql server ad-admin list @subArgs -g $rg -s $sqlSrv --query "[0].login" -o tsv --only-show-errors 2>$null)".Trim()
+    Chk 'sql entra admin' ([bool]$adminLoginNow) $(if ($sqlAdminGroupOk) { "$adminLoginNow (SQL admin group, members read back)" } else { "$adminLoginNow (single-principal admin: $sqlAdminGroupSkipped)" })
 
     # 🔴 A DATABASE THAT IS "Online" IS NOT A DATABASE THIS HOST CAN REACH, and until now nothing
     # here noticed the difference. The two firewall-rule creates above swallow their errors, and

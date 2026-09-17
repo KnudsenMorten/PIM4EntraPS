@@ -949,9 +949,15 @@ function Get-PimAdminMailRecipient {
     the screen's "Sends to" is exactly the address the engine mails.
 
       ForwardMailsToContact = TRUE  AND  MailForwardAddress is a real address  -> MailForwardAddress
-      else ManagerEmail, if it is a real address                               -> ManagerEmail
+      else the admin's SPONSOR DEPARTMENT's Owners                             -> all of them
+      else ManagerEmail, if it is a real address                               -> LEGACY ONLY
       else                                                                     -> ''  (caller refuses)
 
+    🔑 The rule, and the reason for each step, live on Get-PimAdminMailRecipientPlan below -- this is
+    only the string-returning wrapper. Read that comment before changing anything here. In particular
+    the sponsor is a DEPARTMENT, not a person (operator, 2026-09-16), and ManagerEmail survives solely
+    so existing data keeps working; it is reported as 'manager-legacy' so callers can say "move this
+    to the department".
     🔑 Operator, 2026-09-12 ("Both"): MailForwardAddress is the admin OWNER's office user. An admin
     account has no mailbox of its own, so PIM's own mail goes to that office user; and where the admin
     account DOES have a mailbox, the engine also sets Exchange forwarding to it (gated, see
@@ -960,10 +966,55 @@ function Get-PimAdminMailRecipient {
     🪤 An address that is not an address ('FALSE'/'true' -- measured as live v1 data on internal) is
     NOT a recipient. Test-PimMailForwardAddressIsReal is the shared predicate; 'true' fails its
     address shape and is rejected here explicitly as well.
+    🪤 This wrapper returns only the FIRST recipient. Anything that mails a department (which can have
+    several owners) must call Get-PimAdminMailRecipientPlan and use .recipients.
   #>
   [CmdletBinding()]
-  param([AllowNull()][object]$Row)
-  if ($null -eq $Row) { return '' }
+  param([AllowNull()][object]$Row, [hashtable]$DepartmentOwners)
+  $plan = if ($PSBoundParameters.ContainsKey('DepartmentOwners')) { Get-PimAdminMailRecipientPlan -Row $Row -DepartmentOwners $DepartmentOwners }
+          else { Get-PimAdminMailRecipientPlan -Row $Row }
+  return "$($plan.recipient)"
+}
+
+function Split-PimMailRecipients {
+  # PURE. A recipient list as the model writes it (pipe-joined UPNs per the Manager UX; ';' and ',' accepted too) --
+  # the SAME parsing the group-owner path uses (Split-PimOwners), so an admin's department owners and a group's owners
+  # can never be read differently.
+  param([AllowNull()][string]$Raw)
+  @("$Raw" -split '[|;,]' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+}
+
+function Get-PimAdminMailRecipientPlan {
+  <#
+    🔑 71.19 -- THE SPONSOR IS A DEPARTMENT, NOT A PERSON (operator, 2026-09-16: *"the logic is that an admin is linked
+    to a dept (sponsor) and the dept has owners ... change the code, as i think logic is wrong"*; REQUIREMENTS §62:
+    *"we dont add a manager on the person"*, *"whoever is the actual manager of the dept gets the emails, approvals
+    etc"*, *"otherwise you are vulnerable for org changes"*).
+
+    Who receives PIM's mail about an admin account (new-admin notice, TAP delivery), in order:
+
+      1. ForwardMailsToContact = TRUE AND MailForwardAddress is a real address
+         -> that address. The deliberate PER-ADMIN OVERRIDE (operator 2026-09-12 "Both": the admin owner's office
+            user). Kept because it is an explicit statement on the row, not a person-as-manager guess.
+      2. the admin's SPONSOR DEPARTMENT's owners: Account-Definitions-Admins.Department -> the
+         PIM-Definitions-Departments row for that department -> its Owners (pipe/;/,-joined UPNs)
+         -> ALL of them. This is the rule.
+      3. ManagerEmail, if it is a real address -> LEGACY ONLY, so existing data keeps working. It is reported as
+         'manager-legacy' so the validator, the Manager and the readiness check can say "move this to the department".
+      4. nothing -> '' and a reason that names the admin, its department and what to set.
+
+    The department index is INJECTED (-DepartmentOwners: department name in lower case -> owners string) because this
+    file is the transport layer and must not read the store; the engine passes Get-PimDepartmentOwnerIndex, the Manager
+    and the validator pass their own. Without it, step 2 is skipped and the reason says the index was not supplied --
+    never silently "no department".
+
+    Returns @{ recipients = @(all); recipient = <first>; source = forward|department|manager-legacy|none;
+               department; reason; legacy = [bool] }.
+  #>
+  [CmdletBinding()]
+  param([AllowNull()][object]$Row, [hashtable]$DepartmentOwners = $null)
+  $out = [ordered]@{ recipients = @(); recipient = ''; source = 'none'; department = ''; reason = ''; legacy = $false }
+  if ($null -eq $Row) { $out['reason'] = 'no admin row'; return $out }
   $get = {
     param($name)
     if ($Row -is [System.Collections.IDictionary]) { return "$($Row[$name])".Trim() }
@@ -972,12 +1023,51 @@ function Get-PimAdminMailRecipient {
     return ''
   }
   $isAddr = { param($v) ("$v" -notmatch '(?i)^(true|yes|1)$') -and (Test-PimMailForwardAddressIsReal -Value $v) }
+  $who = & $get 'UserPrincipalName'; if (-not $who) { $who = & $get 'UserName' }
+  $dept = & $get 'Department'
+  # When the caller did not inject one, use the engine's own index if this process has it loaded (the engine and the
+  # Manager both do). Wrapped: a store read that fails must leave the reason "not supplied", never pretend "no owners".
+  if ($null -eq $DepartmentOwners -and (Get-Command Get-PimDepartmentOwnerIndex -ErrorAction SilentlyContinue)) {
+    try { $DepartmentOwners = Get-PimDepartmentOwnerIndex } catch { $DepartmentOwners = $null }
+  }
+  $out['department'] = $dept
+
   $fwdOn = ((& $get 'ForwardMailsToContact') -match '(?i)^(true|yes|1)$')
   $fwd   = & $get 'MailForwardAddress'
-  if ($fwdOn -and (& $isAddr $fwd)) { return $fwd }
+  if ($fwdOn -and (& $isAddr $fwd)) {
+    $out['recipients'] = @($fwd); $out['recipient'] = $fwd; $out['source'] = 'forward'
+    $out['reason'] = "per-admin override: ForwardMailsToContact=TRUE + MailForwardAddress on $who"
+    return $out
+  }
+
+  if ($dept) {
+    if ($null -eq $DepartmentOwners) {
+      $out['reason'] = "the department owner index was not supplied to this call, so '$dept' could not be resolved (load the store / pass -DepartmentOwners)"
+    } else {
+      $key = $dept.ToLowerInvariant()
+      if ($DepartmentOwners.ContainsKey($key)) {
+        $owners = @(Split-PimMailRecipients ("$($DepartmentOwners[$key])")) | Where-Object { & $isAddr $_ }
+        if (@($owners).Count) {
+          $out['recipients'] = @($owners); $out['recipient'] = @($owners)[0]; $out['source'] = 'department'
+          $out['reason'] = "sponsor department '$dept' owner(s): $(@($owners) -join ', ')"
+          return $out
+        }
+        $out['reason'] = "the sponsor department '$dept' of $who has no usable Owners -- set Owners on that department (PIM-Definitions-Departments)"
+      } else {
+        $out['reason'] = "$who names department '$dept', but there is no PIM-Definitions-Departments row for it -- add the department (with Owners), or correct the admin's Department"
+      }
+    }
+  } else {
+    $out['reason'] = "$who has no Department -- an admin's mail goes to its SPONSOR DEPARTMENT's owners, so set the admin's Department and give that department Owners"
+  }
+
   $mgr = & $get 'ManagerEmail'
-  if (& $isAddr $mgr) { return $mgr }
-  return ''
+  if (& $isAddr $mgr) {
+    $out['recipients'] = @($mgr); $out['recipient'] = $mgr; $out['source'] = 'manager-legacy'; $out['legacy'] = $true
+    $out['reason'] = "LEGACY: using ManagerEmail ($mgr) on $who. The rule is the sponsor department's owners -- $($out['reason'])"
+    return $out
+  }
+  return $out
 }
 
 function Test-PimAdminMailboxForwardingEnabled {

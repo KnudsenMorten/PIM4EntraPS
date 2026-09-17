@@ -1,6 +1,13 @@
 ﻿# IMP-02: the locale-safe stamp reader. Loaded defensively so this file stays correct
 # when a test dot-sources it on its own (PIM-Functions.psm1 also loads it up front).
-if (-not (Get-Command Get-PimUtcStamp -ErrorAction SilentlyContinue)) { . (Join-Path $PSScriptRoot 'PIM-DateSafe.ps1') }
+# 🪤 PROBE EVERY FUNCTION THIS FILE NEEDS FROM THAT LIBRARY, NOT JUST THE FIRST ONE.
+# The guard used to ask only for Get-PimUtcStamp. In a host where that name was already defined by
+# some other load (PIM-Functions.psm1, an earlier dot-source), the guard short-circuited and
+# PIM-DateSafe.ps1 was never sourced -- so 71.23's Get-PimAdminAutoDisableDate was missing and
+# Test-PimAdminOffboarded threw CommandNotFoundException at runtime, in a host the offline suites
+# actually use. A one-name probe for a multi-function library is a fail-OPEN.
+if (-not (Get-Command Get-PimUtcStamp -ErrorAction SilentlyContinue) -or
+    -not (Get-Command Get-PimAdminAutoDisableDate -ErrorAction SilentlyContinue)) { . (Join-Path $PSScriptRoot 'PIM-DateSafe.ps1') }
 <#
   PIM4EntraPS -- NEW engine scope providers (REST + SQL). Each provider plugs into
   PIM-EngineCore.ps1. Add a scope by registering a provider here.
@@ -37,8 +44,8 @@ function Get-PimRowProp {
 
 # Date EXPRESSIONS (Now, FirstWorkdayNextMonth-3d@08:00, 2026-10-01@08:00) resolve through the one
 # shared resolver. Neither the REST engine entry point nor the scheduler tick loads it, so without
-# this every ProvisionDate / OffboardDate / TAPStartDate that is not a plain ISO stamp was
-# unreadable to v2 -- and an unreadable OffboardDate never offboards.
+# this every ProvisionDate / AutoDisableDate / TAPStartDate that is not a plain ISO stamp was
+# unreadable to v2 -- and an unreadable AutoDisableDate never disables.
 if (-not (Get-Command Resolve-PimDateExpression -ErrorAction SilentlyContinue)) {
     $__pimDateExprLib = Join-Path $PSScriptRoot 'PIM-DateExpression.ps1'
     if (Test-Path -LiteralPath $__pimDateExprLib) { . $__pimDateExprLib }
@@ -122,8 +129,10 @@ function Get-PimAdminStatusDecision {
     # #1 PURE. WHAT STATE SHOULD THIS ADMIN ACCOUNT BE IN? v1 5587-5619 + 12366-12408.
     #   AccountStatus=Revoked   -> disabled, sign-in sessions revoked, never provisioned
     #   AccountStatus=Disabled  -> disabled, never provisioned
-    #   OffboardDate passed     -> disabled, never provisioned (v1: "handled by the offboarding
-    #                              sweep, skipping create/update"; the sweep does the rest)
+    #   AutoDisableDate passed  -> disabled, never provisioned (the auto-disable sweep does the
+    #                              rest). 71.23: the column used to be called OffboardDate; the
+    #                              old name is still READ (Get-PimAdminAutoDisableDate), and a row
+    #                              carrying both names with DIFFERENT values is refused, not guessed.
     #   AccountStatus=Enabled   -> enabled; the ONLY value that may RE-enable a disabled account
     #   AccountStatus blank     -> created enabled, but a disabled account is left disabled
     #   anything else           -> v1 warned and skipped the row: nothing is changed or created
@@ -132,7 +141,12 @@ function Get-PimAdminStatusDecision {
     # re-enabled within minutes of being switched off.
     param([Parameter(Mandatory)][object]$Row, [datetime]$NowUtc = [datetime]::UtcNow)
     $st = (Get-PimRowProp -Row $Row -Names @('AccountStatus')).Trim()
-    $od = ConvertTo-PimAdminLifecycleUtc -Value (Get-PimRowProp -Row $Row -Names @('OffboardDate'))
+    $add = Get-PimAdminAutoDisableDate -Row $Row
+    $od = ConvertTo-PimAdminLifecycleUtc -Value $add.value
+    # A CONFLICT (both column names, different dates) never disables: value is '' above, so
+    # $offDue is false and the row is left exactly as it is. The refusal is reported by the
+    # sweep and by the validator -- silently picking one of the two dates is the one outcome
+    # that must not happen.
     $offDue = ($od.parsed -and $od.utc -le $NowUtc.ToUniversalTime())
     $mk = {
         param($status, $enabled, $disable, $may, $sessions, $blocks, $reason, $statusDriven)
@@ -141,7 +155,7 @@ function Get-PimAdminStatusDecision {
     }
     if ($st -ieq 'Revoked')  { return (& $mk 'Revoked'  $false $true $false $true  $true 'AccountStatus=Revoked'  $true) }
     if ($st -ieq 'Disabled') { return (& $mk 'Disabled' $false $true $false $false $true 'AccountStatus=Disabled' $true) }
-    if ($offDue) { return (& $mk 'Offboarded' $false $true $false $false $true ("OffboardDate {0:yyyy-MM-dd HH:mm} UTC reached" -f $od.utc) $false) }
+    if ($offDue) { return (& $mk 'AutoDisabled' $false $true $false $false $true ("AutoDisableDate {0:yyyy-MM-dd HH:mm} UTC reached" -f $od.utc) $false) }
     if (-not $st)            { return (& $mk ''        $true $false $false $false $false 'AccountStatus not set' $false) }
     if ($st -ieq 'Enabled')  { return (& $mk 'Enabled' $true $false $true  $false $false 'AccountStatus=Enabled' $false) }
     return (& $mk $st $null $false $false $false $true "unknown AccountStatus '$st' (expected Enabled / Disabled / Revoked) -- the account is left as it is" $false)
@@ -254,7 +268,7 @@ function Get-PimAdminLifecycleStore {
     # SQL-only state for lifecycle steps that must happen ONCE (TAP issuance, offboarding progress).
     # Returns @{ ok; map; reason }. ok=$false = "no persistent store in this process", and every
     # caller FAILS CLOSED on it: a TAP that cannot be recorded as issued would be issued again by the
-    # next process, and an offboarding whose revoke time is not kept cannot count DeleteAfterDays.
+    # next process, and an offboarding whose revoke time is not kept cannot repeat its notice safely.
     param([Parameter(Mandatory)][string]$Name)
     $raw = $null; $ok = $false; $why = ''
     try {
@@ -374,7 +388,7 @@ function Update-PimAdminsDisableDecision {
             $decision = [pscustomobject]@{ allowed = $false; abort = $true; tripped = 'guard-not-loaded'; reason = 'PIM-DisableGuard.ps1 is not loaded in this process'; toDisable = $cand.Count; scanned = @($Live).Count }
         }
         if (-not $decision.allowed) {
-            if (Get-Command Write-PimDisableAbortAlert -ErrorAction SilentlyContinue) { Write-PimDisableAbortAlert -Scope 'Admins (AccountStatus / OffboardDate)' -Decision $decision }
+            if (Get-Command Write-PimDisableAbortAlert -ErrorAction SilentlyContinue) { Write-PimDisableAbortAlert -Scope 'Admins (AccountStatus / AutoDisableDate)' -Decision $decision }
             else { Write-Host ("[engine] Admins: explicit disables ABORTED [{0}] -- {1}" -f $decision.tripped, $decision.reason) -ForegroundColor Red }
         } else {
             Write-Host ("    [admins] {0} account(s) to DISABLE as their row says: {1}" -f $cand.Count, (@($cand.Keys) -join ', ')) -ForegroundColor Yellow
@@ -417,11 +431,14 @@ function New-PimAdminsProvider {
         scope  = 'Admins'
         entity = 'Account-Definitions-Admins'
         order  = 30
-        # ACCOUNT-DISABLE scope: its ApplyRemove sets accountEnabled=$false and its
-        # GetLive is the WHOLE tenant user population, so a wrong/empty desired set could
-        # disable everything it scans (incident 2026-06-15). isAccountDisable routes its
-        # removals through PIM-DisableGuard (feature opt-in + positively-resolved desired
-        # set + mass-disable circuit breaker) in PIM-EngineCore before any disable runs.
+        # ACCOUNT-DISABLE scope: its GetLive is the WHOLE tenant user population, so a
+        # wrong/empty desired set could once have disabled everything it scans (incident
+        # 2026-06-15). isAccountDisable routes its removals through PIM-DisableGuard
+        # (feature opt-in + positively-resolved desired set + mass-disable circuit breaker)
+        # in PIM-EngineCore before any disable runs.
+        # 🔴 71.22 -- and its ApplyRemove now disables NOTHING at all: an account absent from
+        # the desired set is REPORTED, never acted on. The disable paths that remain are the
+        # row's own AccountStatus / AutoDisableDate (ApplyUpdate) and the auto-disable sweep.
         isAccountDisable = $true
         GetDesired = {
             param($ctx)
@@ -630,7 +647,10 @@ function New-PimAdminsProvider {
             # PIM-Rest.ps1): the owner's office user when forwarding is TRUE, else the manager. The Manager
             # shows the same rule as "Sends to", so screen and mail cannot disagree (operator, 2026-09-12).
             if (Get-Command Send-PimNotifyMail -ErrorAction SilentlyContinue) {
-                $mgr = Get-PimAdminMailRecipient -Row $item.desired
+                # 71.19: the sponsor DEPARTMENT's owners (all of them) -- see Get-PimAdminMailRecipientPlan.
+                $__np = Get-PimAdminMailRecipientPlan -Row $item.desired -DepartmentOwners (Get-PimDepartmentOwnerIndex)
+                $mgr = (@($__np.recipients) -join ';')
+                if (-not "$mgr".Trim()) { Write-Host "  [Admins] $upn -- no new-admin notice: $($__np.reason)" -ForegroundColor DarkYellow }
                 $toks = @{ UserPrincipalName=$upn; DisplayName=$disp; Date=([datetime]::UtcNow.ToString('yyyy-MM-dd'))
                     TierLevel=(Get-PimRowProp -Row $item.desired -Names @('TargetUsage','Purpose')); Company=(Get-PimRowProp -Row $item.desired -Names @('Company')); ManagerEmail=(Get-PimRowProp -Row $item.desired -Names @('ManagerEmail')) }
                 try { Send-PimNotifyMail -Type 'new-admin' -Tokens $toks -Recipient $mgr | Out-Null } catch { Write-Verbose "new-admin mail ($upn): $($_.Exception.Message)" }
@@ -672,6 +692,18 @@ function New-PimAdminsProvider {
             } elseif ($dec.desiredEnabled -eq $true -and -not $on -and $dec.mayEnable) {
                 $body['accountEnabled'] = $true; $enabling = $true
             }
+            # 🔴 71.20 -- A DISABLE THAT CAME FROM THE MSP MASTER MUST NEVER BE DROPPED QUIETLY (operator 2026-09-16:
+            # "if an master admin is synced and he is disabled in master, then that state must also be synced out to
+            # slaves"). A guard refusal on a CENTRAL row leaves the customer's directory with an account the MSP has
+            # already decided to disable, so it is a FAILED ITEM (job red, alert raised by the guard above), naming the
+            # admin and the guard. A LOCAL row keeps the previous report-only behaviour -- that is the slave's own data
+            # and its own decision.
+            $__central = (Get-Command Test-PimAdminRowIsCentral -ErrorAction SilentlyContinue) -and (Test-PimAdminRowIsCentral -Row $d)
+            if ($blocked -and $__central) {
+                throw ("MSP-DISABLE-BLOCKED: the MSP master has this admin as $($dec.reason), but this tenant did NOT disable " +
+                       "$($item.key): $blocked. The account is still ENABLED here. Fix the guard condition (or approve the pass) " +
+                       "and re-run; the master's decision is not applied until this succeeds.")
+            }
             if ($body.Count -eq 0) {
                 $why = if ($blocked) { "NOT disabled -- $blocked" } else { 'nothing to change' }
                 Write-Host ("    [!] {0}: {1}" -f $item.key, $why) -ForegroundColor Yellow
@@ -703,33 +735,26 @@ function New-PimAdminsProvider {
         }
         ApplyRemove = {
             param($item,$ctx)
-            # Full reconcile: disable (never delete) an admin account not in desired.
-            # DEFENSE-IN-DEPTH: the orchestrator already runs the disable circuit breaker
-            # (feature opt-in + resolved-desired + blast-radius cap) before this is ever
-            # called. This final per-account opt-in check makes a direct call to this
-            # handler still safe: with the feature OFF, no account is ever disabled.
-            if ((Get-Command Test-PimAccountDisableEnabled -ErrorAction SilentlyContinue) -and -not (Test-PimAccountDisableEnabled)) {
-                Write-Host ("    [skip] {0}: account-disable is OFF (opt-in required) -- not disabling" -f $item.key) -ForegroundColor Yellow
-                # BUG-70 residue: this used to `return` bare. A bare return is $null, and the core's
-                # applied-check treats anything that is not an explicit `pimApplied=$false` as APPLIED
-                # -- so a guard that disabled NOTHING still counted as a removal in the run summary.
-                # Same defect AdminTap's mail refusal had (measured live on EFIF, 2026-08-25).
-                return [pscustomobject]@{ pimApplied = $false; reason = 'account-disable is OFF (opt-in required)' }
-            }
-            # BUG-14 defense-in-depth: the orchestrator already drops break-glass from the
-            # remove set, but this handler can be called directly. A break-glass account
-            # must never be disabled by ANY route.
-            if (Get-Command Get-PimBreakGlassIdentifiers -ErrorAction SilentlyContinue) {
-                $bg = @(Get-PimBreakGlassIdentifiers)
-                if ($bg.Count -gt 0 -and (Test-PimRowIsBreakGlass -Row $item.live -Identifiers $bg)) {
-                    Write-Host ("    [skip] {0}: BREAK-GLASS account -- never disabled" -f $item.key) -ForegroundColor Yellow
-                    # BUG-70 residue (see above). Reporting a break-glass SKIP as an applied removal is
-                    # the worst instance of the family: the summary would claim the engine disabled the
-                    # one account the whole guard exists to protect.
-                    return [pscustomobject]@{ pimApplied = $false; reason = 'break-glass account -- never disabled' }
-                }
-            }
-            Invoke-PimGraph -Method PATCH -Path "/users/$($item.live.id)" -Body @{ accountEnabled=$false }
+            # 🔴 71.22 -- THIS HANDLER NO LONGER DISABLES ANYTHING. Operator, 2026-09-16: "i dont
+            # like flow 3 and that should be removed." An admin account being absent from the
+            # desired set is a REPORT, never an instruction: Select-PimDisableRemovals now returns
+            # an empty remove set, so the orchestrator never reaches here at all.
+            # This refusal is the second half, and it is the important half -- the orchestrator's
+            # filter is behind a `Get-Command Select-PimDisableRemovals` probe, so in a host where
+            # the guard library failed to load, every "removal" would have flowed straight through
+            # to this handler. That is a fail-OPEN, and it is exactly how a capability that was
+            # "removed" comes back. Refusing here needs no library to be loaded.
+            # Disabling an admin is still fully supported -- through its ROW (AccountStatus=Disabled
+            # / Revoked, or an AutoDisableDate that has passed), which is ApplyUpdate, not this.
+            Write-Host ("    [report] {0}: live admin account NOT in the desired set -- reported, NOT disabled (71.22: absence is never a disable instruction). Set AccountStatus=Disabled or an AutoDisableDate on its row to disable it." -f $item.key) -ForegroundColor Yellow
+            return [pscustomobject]@{ pimApplied = $false; reason = 'not in the desired set -- reported only; PIM never disables an account because it is absent (71.22)' }
+            # NOTE ON WHAT WAS DELETED HERE, so it is not "restored" by someone who thinks it was
+            # lost: the old body ran the account-disable opt-in check, the break-glass check, and
+            # then PATCHed accountEnabled=$false. Those two guards were the ONLY thing standing
+            # between "absent from the desired set" and a disabled account. They are not needed
+            # any more because nothing disables from absence at all -- and they still guard the
+            # paths that DO disable (ApplyUpdate, the offboarding sweep, the MSP status change),
+            # where they live in Test-PimDisablePassAllowed / Get-PimBreakGlassIdentifiers.
         }
     }
 }
@@ -3593,7 +3618,7 @@ function Get-PimGroupsPolicyDesiredSet {
             Approval=$null; Enablement=(& $pick 'Enablement'); EnablementLegacy=$null; Expiration=(& $pick 'Expiration')
             Notification=@(Resolve-PimTemplateNotifications -Entries @(& $pick 'Notification')) })
     }
-    foreach ($g in (Get-PimGroupDefinitionRows)) {
+    foreach ($g in (Get-PimGroupPolicyDefinitionRows)) {
         # blank PolicyTemplate -> 'default' (every managed group gets the baseline)
         $tplId = Get-PimRowProp -Row $g -Names @('PolicyTemplate')
         $tpl = Get-PimEnginePolicyTemplate -Id $tplId; if (-not $tpl) { continue }
@@ -3630,6 +3655,44 @@ function Get-PimGroupsPolicyDesiredSet {
         }
     }
     $out.ToArray()
+}
+
+function Get-PimGroupPolicyDefinitionRows {
+    <#
+      🔴 71.25 -- the rows whose `PolicyTemplate` the GROUPS-POLICY provider honours.
+      Operator, 2026-09-16: *"i think we are missing the default policy for a permission (indirect)
+      delegation in the wizards. I need to be able to select from the available templates for policies
+      including Use default, approval policy template."*
+
+      This is `Get-PimGroupDefinitionRows` PLUS `PIM-Definitions-Resources`, and the difference is
+      deliberate and narrow. `Get-PimGroupDefinitionRows` is the GROUP-CREATION source, and Resources
+      is excluded from it on purpose: discovery auto-create writes every discovered Azure/Power BI
+      resource into that entity, so creating a group per row would create one at every customer with
+      discovery on. That reason is about CREATING groups — it says nothing about POLICY.
+
+      Reading Resources HERE changes behaviour for exactly one kind of row: a Resources row whose
+      PolicyTemplate is set. A blank PolicyTemplate resolves to the 'default' template, which is the
+      same policy the baseline sweep (Get-PimBaselineGroupTargets) already applies to every managed
+      group with no definition row — so every existing row keeps behaving byte-for-byte as before, and
+      the only new outcome is the one the operator asked for: a Resource permission group can be given
+      an approval template from the wizard.
+
+      A row with no GroupName is not a group (the same guard the creation source uses).
+    #>
+    [CmdletBinding()] param()
+    $list = New-Object System.Collections.Generic.List[object]
+    foreach ($r in @(Get-PimGroupDefinitionRows)) { if ($r) { [void]$list.Add($r) } }
+    $seen = @{}
+    foreach ($r in $list) { $n = "$(Get-PimRowProp -Row $r -Names @('GroupName'))".Trim(); if ($n) { $seen[$n.ToLowerInvariant()] = $true } }
+    foreach ($r in @(Get-PimDesiredRows -Entity 'PIM-Definitions-Resources')) {
+        if ($null -eq $r) { continue }
+        $gn = "$(Get-PimRowProp -Row $r -Names @('GroupName'))".Trim(); if (-not $gn) { continue }
+        $life = "$(Get-PimRowProp -Row $r -Names @('Lifecycle'))".Trim()
+        if ($life -match '(?i)^retire') { continue }        # being deleted -- do not re-police it
+        if ($seen.ContainsKey($gn.ToLowerInvariant())) { continue }
+        [void]$list.Add($r)
+    }
+    return $list.ToArray()
 }
 
 function Get-PimGroupsPolicyKey {
@@ -5782,9 +5845,11 @@ function New-PimAdminTapProvider {
             # owner's office user (ForwardMailsToContact=TRUE + MailForwardAddress), else ManagerEmail.
             # It read ManagerEmail directly, while the Manager said the TAP went to the office user --
             # the screen and the mail disagreed (operator, 2026-09-12).
-            $mgr = Get-PimAdminMailRecipient -Row $d
+            # 71.19: ALL the sponsor department's owners (';'-joined -> one mail, several toRecipients).
+            $__tp = Get-PimAdminMailRecipientPlan -Row $d -DepartmentOwners (Get-PimDepartmentOwnerIndex)
+            $mgr = (@($__tp.recipients) -join ';')
             if (Get-Command Test-PimTapMailReady -ErrorAction SilentlyContinue) {
-                $mailChk = Test-PimTapMailReady -Recipient $mgr
+                $mailChk = Test-PimTapMailReady -Recipient $mgr -Reason "$($__tp.reason)"
                 if (-not $mailChk.ok) {
                     # Not a throw: one unreachable admin must not fail the whole scope. Reported
                     # loudly, and NOTHING is created -- the existing (dead) pass is left untouched,
@@ -6124,21 +6189,29 @@ function New-PimEntraRolesDirectProvider {
 # contribute live memberships, so the diff can only ever remove their rows).
 # ---------------------------------------------------------------------------
 function Test-PimAdminOffboarded {
-    # PURE: is this admin row flagged for offboarding as of $NowUtc?
-    #   Lifecycle=Retire  -> yes (immediate)
-    #   OffboardDate (a date expression / ISO) at or before NowUtc -> yes
-    # Returns @{ offboard=[bool]; reason=<text> }.
+    # PURE: is this admin row due for AUTO-DISABLE as of $NowUtc?
+    #   Lifecycle=Retire     -> yes (immediate)
+    #   AutoDisableDate (a date expression / ISO) at or before NowUtc -> yes
+    # 🔴 71.23 -- "Retire" here means the SAME disable-only path as a date that has passed:
+    # disable, revoke sessions, remove memberships/eligibilities, notice, audit, stop. It has
+    # never meant "delete the account", and since 71.21 nothing in the product does.
+    # The legacy column name OffboardDate is still read (Get-PimAdminAutoDisableDate); a row
+    # carrying both names with different values is REFUSED (reason returned, offboard=$false).
+    # Returns @{ offboard=[bool]; reason=<text>; conflict=[bool] }.
     param([Parameter(Mandatory)][object]$Row, [datetime]$NowUtc = [datetime]::UtcNow)
     $life = (Get-PimRowProp -Row $Row -Names @('Lifecycle')).Trim()
-    if ($life -match '(?i)^retire') { return @{ offboard = $true; reason = 'Lifecycle=Retire' } }
-    $od = (Get-PimRowProp -Row $Row -Names @('OffboardDate')).Trim()
+    if ($life -match '(?i)^retire') { return @{ offboard = $true; reason = 'Lifecycle=Retire'; conflict = $false } }
+    $add = Get-PimAdminAutoDisableDate -Row $Row
+    if ($add.conflict) { return @{ offboard = $false; reason = "AutoDisableDate CONFLICT -- $($add.reason)"; conflict = $true } }
+    $od = "$($add.value)".Trim()
     if ($od) {
         $when = $null
         if (Get-Command Resolve-PimDateExpression -ErrorAction SilentlyContinue) { try { $when = Resolve-PimDateExpression -Expression $od } catch { $when = $null } }
-        if (-not $when) { $when = Get-PimUtcStamp $od }   # IMP-02: unreadable -> no offboard
-        if ($when -and $when -le $NowUtc) { return @{ offboard = $true; reason = "OffboardDate $($when.ToString('yyyy-MM-dd')) reached" } }
+        if (-not $when) { $when = Get-PimUtcStamp $od }   # IMP-02: unreadable -> no auto-disable
+        $lbl = if ($add.source -eq 'legacy') { 'OffboardDate (legacy name for AutoDisableDate)' } else { 'AutoDisableDate' }
+        if ($when -and $when -le $NowUtc) { return @{ offboard = $true; reason = "$lbl $($when.ToString('yyyy-MM-dd')) reached"; conflict = $false } }
     }
-    return @{ offboard = $false; reason = '' }
+    return @{ offboard = $false; reason = ''; conflict = $false }
 }
 function Get-PimOffboardingPlan {
     # PURE: given the admin definition rows + a (principalId -> live memberships)
@@ -6215,7 +6288,7 @@ function Get-PimAdminOffboardCandidate {
     # #12 PURE. Does the offboarding sweep act on this admin row, and how?
     #   'offboard' -- past OffboardDate or Lifecycle=Retire (Test-PimAdminOffboarded): v1's full
     #                 sequence (v1 10977-11097): disable, revoke sessions, remove memberships,
-    #                 notice mail, delete after DeleteAfterDays.
+    #                 notice mail. 71.21: NO delete -- the account is KEPT, disabled, for ever.
     #   'revoke'   -- AccountStatus=Revoked without offboarding: v1 Invoke-PimAccountRevoke also
     #                 cancelled PIM-for-Groups schedules and removed direct group memberships
     #                 (12451-12628). The Admins provider disables + revokes sessions; this adds the
@@ -6234,12 +6307,20 @@ function Get-PimAdminOffboardSteps {
     #   sessions     not yet recorded as revoked
     #   memberships  not yet recorded as removed (retried on the next run if a removal failed)
     #   notice       offboarding-notice mail not yet sent ('offboard' only)
-    #   delete       DeleteAfterDays set, revoked that many days ago, still present, disabled
-    # A missing account owes nothing: it was deleted, by this sweep or by hand.
-    # Delete counts from the RECORDED revoke, so it is never earlier than the run AFTER the revoke
-    # (v1 could delete in the same run when DeleteAfterDays=0).
+    # A missing account owes nothing: a human deleted it by hand in Entra.
+    #
+    # 🔴 71.21 -- THERE IS NO 'delete' STEP. PIM NEVER DELETES A USER ACCOUNT (operator, 2026-09-16:
+    # "we will newer delete an accounnt, if that is in the code, then turn if off in the code, as I
+    # will not allow that"). This used to add a 'delete' step once DeleteAfterDays had elapsed, and
+    # Invoke-PimAdminOffboardSteps then issued DELETE /users/<id>. Both are GONE -- not gated behind
+    # a flag, removed: an offboarded account stays in the tenant, disabled, sessions revoked,
+    # memberships and eligibilities removed, for ever, unless a human deletes it by hand in Entra.
+    # The retention field went with it (operator: "nobody uses it yet, so dont worry about
+    # deleteafterdays, as i dont want it to be shown as it confuses") -- there is no -DeleteAfterDays
+    # parameter, no column and no warning. A stored row that still carries the value is ignored in
+    # silence. tests/Test-PimNoAccountDelete.ps1 fails the suite if either comes back.
     param([Parameter(Mandatory)][string]$Kind, [hashtable]$State = @{}, [bool]$Found = $true, [bool]$AccountEnabled = $false,
-          [AllowEmptyString()][string]$DeleteAfterDays = '', [datetime]$NowUtc = [datetime]::UtcNow)
+          [datetime]$NowUtc = [datetime]::UtcNow)
     $steps = New-Object System.Collections.Generic.List[string]
     $note = ''; $dueUtc = $null
     if (-not $Found) { return [pscustomobject]@{ steps = @(); note = 'the account is not in the tenant'; deleteDueUtc = $null } }
@@ -6252,17 +6333,6 @@ function Get-PimAdminOffboardSteps {
     if (-not (& $has 'revokedAtUtc')) { [void]$steps.Add('sessions') }
     if (-not (& $has 'membershipsRemovedUtc')) { [void]$steps.Add('memberships') }
     if (-not (& $has 'noticeSentUtc')) { [void]$steps.Add('notice') }
-    $dd = "$DeleteAfterDays".Trim()
-    if ($dd -and (& $has 'revokedAtUtc') -and -not (& $has 'deletedAtUtc')) {
-        $n = 0
-        if ([int]::TryParse($dd, [ref]$n) -and $n -ge 0) {
-            $rv = Get-PimUtcStamp "$($State['revokedAtUtc'])"
-            if ($rv) {
-                $dueUtc = $rv.AddDays($n)
-                if ($NowUtc.ToUniversalTime() -ge $dueUtc -and -not $AccountEnabled) { [void]$steps.Add('delete') }
-            }
-        } else { $note = "DeleteAfterDays '$dd' is not a non-negative integer -- the delete step is skipped" }
-    }
     return [pscustomobject]@{ steps = $steps.ToArray(); note = $note; deleteDueUtc = $dueUtc }
 }
 
@@ -6349,24 +6419,28 @@ function Invoke-PimAdminOffboardSteps {
     }
     if ($Live.kind -eq 'offboard' -and -not "$($st['revokedAtUtc'])".Trim() -and ($steps -contains 'sessions' -or $steps -contains 'disable')) {
         $st['revokedAtUtc'] = & $now
-        $st['offboardDate'] = (Get-PimRowProp -Row $Desired -Names @('OffboardDate'))
-        Write-PimAdminLifecycleAudit -Action 'account.offboard.revoke' -Target $upn -After @{ offboardDate = $st['offboardDate']; deleteAfterDays = (Get-PimRowProp -Row $Desired -Names @('DeleteAfterDays')) }
+        $st['offboardDate'] = "$((Get-PimAdminAutoDisableDate -Row $Desired).value)"   # 71.23: AutoDisableDate (legacy OffboardDate still read)
+        Write-PimAdminLifecycleAudit -Action 'account.offboard.revoke' -Target $upn -After @{ offboardDate = $st['offboardDate']; accountKept = $true }
     }
     if ($steps -contains 'disable' -or $steps -contains 'sessions' -or $steps -contains 'memberships') { & $save }
     if ($steps -contains 'notice') {
-        $dd = (Get-PimRowProp -Row $Desired -Names @('DeleteAfterDays')).Trim()
-        $rcpt = ''
-        if (Get-Command Get-PimAdminMailRecipient -ErrorAction SilentlyContinue) { $rcpt = "$(Get-PimAdminMailRecipient -Row $Desired)".Trim() }
-        if (-not $rcpt) { $rcpt = (Get-PimRowProp -Row $Desired -Names @('ManagerEmail')).Trim() }
+        $rcpt = ''; $rcptWhy = ''
+        if (Get-Command Get-PimAdminMailRecipientPlan -ErrorAction SilentlyContinue) {
+            # 71.19: sponsor department owners (ManagerEmail only as the legacy fallback, inside the plan).
+            $__op = Get-PimAdminMailRecipientPlan -Row $Desired -DepartmentOwners (Get-PimDepartmentOwnerIndex)
+            $rcpt = (@($__op.recipients) -join ';'); $rcptWhy = "$($__op.reason)"
+        }
         if (-not $rcpt) {
-            $st['noticeSentUtc'] = 'skipped: no recipient on the row'
-            Write-Host "  [Offboard] $upn -- no offboarding notice: the row has no forwarding address and no ManagerEmail." -ForegroundColor DarkYellow
+            $st['noticeSentUtc'] = 'skipped: no recipient resolved'
+            Write-Host "  [Offboard] $upn -- no offboarding notice: $rcptWhy" -ForegroundColor DarkYellow
         } elseif (-not (Get-Command Send-PimNotifyMail -ErrorAction SilentlyContinue)) {
             $st['noticeSentUtc'] = 'skipped: the mail library is not loaded in this process'
         } else {
             $toks = @{ DisplayName = (Get-PimRowProp -Row $Desired -Names @('DisplayName')); UserPrincipalName = $upn
-                       OffboardDate = (Get-PimRowProp -Row $Desired -Names @('OffboardDate'))
-                       Steps = ('PIM schedules cancelled, group memberships removed, account disabled, sessions revoked' + $(if ($dd) { ", deletion scheduled after $dd day(s)" } else { '' }))
+                       OffboardDate = "$((Get-PimAdminAutoDisableDate -Row $Desired).value)"   # 71.23: the mail token keeps its name; the value is AutoDisableDate
+                       AutoDisableDate = "$((Get-PimAdminAutoDisableDate -Row $Desired).value)"
+                       # 71.21: no "deletion scheduled" sentence -- PIM never deletes the account.
+                       Steps = 'PIM schedules cancelled, group memberships removed, account disabled, sessions revoked. The account itself is KEPT (disabled); PIM never deletes an account -- delete it by hand in Entra if that is wanted.'
                        Date = [datetime]::UtcNow.ToString('yyyy-MM-dd') }
             $res = $null
             try { $res = Send-PimNotifyMail -Type 'offboarding-notice' -Tokens $toks -Recipient $rcpt } catch { $res = @{ sent = $false; reason = "send threw: $($_.Exception.Message)" } }
@@ -6381,19 +6455,9 @@ function Invoke-PimAdminOffboardSteps {
         }
         & $save
     }
-    if ($steps -contains 'delete') {
-        try {
-            Invoke-PimGraph -Method DELETE -Path "/users/$uid" | Out-Null
-            [void]$done.Add('account DELETED')
-            Write-Host "  [Offboard] $upn DELETED (DeleteAfterDays elapsed). Remove the admin row to finish." -ForegroundColor Red
-        } catch {
-            if ("$($_.Exception.Message)" -notmatch '(?i)NotFound|does not exist|404') { throw }
-            [void]$done.Add('account already gone')
-        }
-        $st['deletedAtUtc'] = & $now
-        Write-PimAdminLifecycleAudit -Action 'account.offboard.delete' -Target $upn -After @{ revokedAtUtc = "$($st['revokedAtUtc'])"; deleteAfterDays = (Get-PimRowProp -Row $Desired -Names @('DeleteAfterDays')) }
-        & $save
-    }
+    # 🔴 71.21 -- THE ACCOUNT-DELETE STEP IS GONE. There is no branch here that deletes a user, and
+    # no setting that can bring one back (operator, 2026-09-16). An offboarded admin ends as a
+    # disabled account with no sessions, no memberships and no eligibilities, and stays that way.
     if ($done.Count -eq 0) { return [pscustomobject]@{ pimApplied = $false; reason = 'no offboarding step completed this run (see the warnings above)' } }
     Write-Host ("    [offboard] {0}: {1}" -f $upn, ($done -join '; ')) -ForegroundColor Yellow
     return [pscustomobject]@{ pimApplied = $true; steps = $done.ToArray() }
@@ -6423,6 +6487,16 @@ function New-PimOffboardingProvider {
             $rows = New-Object System.Collections.Generic.List[object]
             foreach ($a in $all) {
                 if ($null -eq $a) { continue }
+                # 🔴 71.23 -- a row that carries BOTH AutoDisableDate and the legacy OffboardDate with
+                # DIFFERENT dates is REFUSED, loudly, and never guessed. It is reported here (once per
+                # run, naming the admin and both values) rather than in the candidate test, because a
+                # conflicting row is not a candidate at all and would otherwise vanish silently.
+                $__add = Get-PimAdminAutoDisableDate -Row $a
+                if ($__add.conflict) {
+                    $__who = (Get-PimRowProp -Row $a -Names @('UserPrincipalName','UserName','Username')).Trim()
+                    Write-Warning ("  [AdminOffboarding] {0}: NOT auto-disabled -- {1}" -f $__who, $__add.reason)
+                    continue
+                }
                 $c = Get-PimAdminOffboardCandidate -Row $a -NowUtc $now
                 if (-not $c) { continue }
                 $upn = (Get-PimRowProp -Row $a -Names @('UserPrincipalName','UPN','upn')).Trim()
@@ -6462,7 +6536,7 @@ function New-PimOffboardingProvider {
             $ctx['offboardStore'] = $store
             $ctx['offboardBlocked'] = ''
             if (-not $store.ok) {
-                $ctx['offboardBlocked'] = "offboarding progress cannot be kept in SQL ($($store.reason)) -- without it DeleteAfterDays cannot be counted and the notice would repeat"
+                $ctx['offboardBlocked'] = "offboarding progress cannot be kept in SQL ($($store.reason)) -- without it the revoke time is lost and the notice would repeat every run"
                 Write-Warning "  [AdminOffboarding] REFUSING to offboard: $($ctx['offboardBlocked'])"
             }
             $bg = @(); if (Get-Command Get-PimBreakGlassIdentifiers -ErrorAction SilentlyContinue) { $bg = @(Get-PimBreakGlassIdentifiers) }
@@ -6488,8 +6562,7 @@ function New-PimOffboardingProvider {
                 $stRec = @{}
                 if ($store.ok -and $store.map.ContainsKey($c.upn.ToLowerInvariant())) { $stRec = $store.map[$c.upn.ToLowerInvariant()] }
                 $row = $rowByKey[$c.key]
-                $s = Get-PimAdminOffboardSteps -Kind $c.kind -State $stRec -Found $found -AccountEnabled (Test-PimAdminValueTrue $u.accountEnabled) `
-                        -DeleteAfterDays (Get-PimRowProp -Row $row -Names @('DeleteAfterDays')) -NowUtc $now
+                $s = Get-PimAdminOffboardSteps -Kind $c.kind -State $stRec -Found $found -AccountEnabled (Test-PimAdminValueTrue $u.accountEnabled) -NowUtc $now
                 if ($s.note) { Write-Host "    [AdminOffboarding] $($c.upn): $($s.note)" -ForegroundColor DarkYellow }
                 $r | Add-Member -NotePropertyName principalId -NotePropertyValue "$($u.id)" -Force
                 $r | Add-Member -NotePropertyName deleteDueUtc -NotePropertyValue $s.deleteDueUtc -Force
@@ -6501,7 +6574,7 @@ function New-PimOffboardingProvider {
             $toDisable = @($destructive | Where-Object { $_.steps -contains 'disable' }).Count
             if (-not $ctx['offboardBlocked'] -and $destructive.Count -gt 0) {
                 if (Get-Command Test-PimRemoveBudgetAllowed -ErrorAction SilentlyContinue) {
-                    $rb = Test-PimRemoveBudgetAllowed -ToRemove $destructive.Count -Scope 'AdminOffboarding' -Scanned @($ctx['offboardAll']).Count -Operation 'offboard/delete'
+                    $rb = Test-PimRemoveBudgetAllowed -ToRemove $destructive.Count -Scope 'AdminOffboarding' -Scanned @($ctx['offboardAll']).Count -Operation 'auto-disable'
                     if (-not $rb.allowed) {
                         if (Get-Command Write-PimRemoveBudgetAlert -ErrorAction SilentlyContinue) { Write-PimRemoveBudgetAlert -Decision $rb }
                         $ctx['offboardBlocked'] = "removal budget: $($rb.reason)"

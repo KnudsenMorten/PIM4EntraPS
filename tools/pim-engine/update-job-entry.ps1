@@ -338,8 +338,30 @@ foreach ($sqlName in @('PIM_SqlServer', 'PIM_SqlDatabase')) {
     if ($ev -and -not $gv) { Set-Variable -Name $sqlName -Scope Global -Value $ev }
 }
 
+# 🔴 2026-09-15 (UPD-15) -- SELF-HEAL THE STORE SETTINGS FROM THE MANAGER, DO NOT ASK A HUMAN.
+# EFIF and RIDE refused every release for two nights with "updater has no PIM_SqlServer ... re-run
+# Deploy-PimUpdateJob" while ca-pim-manager, which this run has ALREADY read ($app, above), named the
+# store. The job now takes the Manager's values for this run and records them on its own env for the
+# next one. Recording is best-effort: a failed note for tomorrow never fails tonight's update.
+# 🔒 Only a copyable value is copied (a server name). An unreadable Manager, or one on a secret / vault
+# pointer, resolves to 'none' and the decision below keeps refusing exactly as before.
+$sqlAdminGroup = $(if ("$($env:PIM_SqlAdminGroupName)".Trim()) { "$($env:PIM_SqlAdminGroupName)".Trim() } else { 'grp-pim-sql-admins' })
+$storeHeal = Resolve-PimUpdaterStoreSettings -JobServer "$($global:PIM_SqlServer)" -JobDatabase "$($global:PIM_SqlDatabase)" `
+                -ManagerStore (Get-PimAcaStoreSettings -Resource $app) -ManagerApp $managerApp
+if ($storeHeal.source -eq 'manager') {
+    Set-Variable -Name 'PIM_SqlServer' -Scope Global -Value "$($storeHeal.server)"
+    if ("$($storeHeal.database)".Trim()) { Set-Variable -Name 'PIM_SqlDatabase' -Scope Global -Value "$($storeHeal.database)" }
+    Say "  store self-heal: $($storeHeal.reason)" 'Yellow'
+    $saved = Save-PimUpdaterStoreSettings -SubscriptionId $sub -ResourceGroup $rg -JobName $selfJob -Writes $storeHeal.persist
+    if ($saved.ok) { Say "  store settings recorded on $selfJob ($(@($saved.written) -join ', ')) -- the next run needs no copy" 'DarkGray' }
+    else { Say "  NOTE: could not record the store settings on $selfJob ($($saved.reason)); this run continues with the copied values and the next run copies them again." 'Yellow' }
+} elseif ($storeHeal.source -eq 'job' -and "$($storeHeal.database)".Trim() -and -not "$($global:PIM_SqlDatabase)".Trim()) {
+    Set-Variable -Name 'PIM_SqlDatabase' -Scope Global -Value "$($storeHeal.database)"
+}
+
 $schemaOk = $true
 $schemaRefused = $null
+$schemaLoginRefusal = $null
 try {
     $csUpd = $null
     try { $csUpd = Get-PimSqlConnectionString } catch { $csUpd = $null }
@@ -364,23 +386,45 @@ try {
         Say 'applying schema updates BEFORE rolling any container (additive-only)'
         Initialize-PimSqlStore -ConnectionString $csUpd
         $locked  = Get-PimLockedSqlSchema
+        # 🔴 2026-09-15 -- THE SHIPPED SCHEMA FILES RUN ON EVERY STORE, NOT ONLY WHEN A TABLE IS ABSENT.
+        # They were gated on a LOCKED table being absent. pim.CentralAdmins is not locked, so 2.4.360's
+        # guarded `ADD Replicate` never reached EFIF or RIDE -- while this step logged "schema up to date"
+        # and the release rolled. Every guarded addition in these files is now applied to every existing
+        # store, BEFORE the conformance plan, all files checked BEFORE any runs (a refusal applies nothing).
+        # 🔒 Store-aware destructive guard (Get-PimSchemaFileApplyPlan): no DROP TABLE / TRUNCATE / DELETE /
+        # UPDATE, and a DROP COLUMN only when it is guarded AND that column is absent here (inert). A file
+        # that errors throws -- the schema step fails and nothing rolls.
+        $colProbe = {
+            param([string]$Table, [string]$Column)
+            $rows = @(Invoke-PimSqlQuery -ConnectionString $csUpd -Sql 'SELECT CASE WHEN COL_LENGTH(@t, @c) IS NULL THEN 0 ELSE 1 END AS e' `
+                          -Parameters @{ t = $Table; c = $Column })
+            if (-not $rows.Count) { throw "no answer for COL_LENGTH($Table, $Column)" }
+            ([int]"$($rows[0].e)") -eq 1
+        }
+        $schemaFiles = @()
+        foreach ($rel in @('sql/platform-schema.sql', 'sql/local-schema.sql')) {
+            $sf = Join-Path $solRoot $rel
+            if (-not (Test-Path -LiteralPath $sf)) { throw "base schema file '$rel' is missing from this payload." }
+            $sqlText = [IO.File]::ReadAllText($sf)
+            $fPlan = Get-PimSchemaFileApplyPlan -Sql $sqlText -Name $rel -ColumnExists $colProbe
+            if (-not $fPlan.ok) {
+                throw ("shipped schema file '$rel' REFUSED for unattended apply: " + (@($fPlan.violations) -join '; ') +
+                       '. Nothing from the schema files was applied.')
+            }
+            $schemaFiles += @{ rel = $rel; sql = $sqlText; drops = @($fPlan.guardedDrops) }
+        }
+        foreach ($s in $schemaFiles) {
+            Invoke-PimJobSqlDdl -ConnectionString $csUpd -Sql $s.sql
+            $inert = @($s.drops | ForEach-Object { "$($_.table).$($_.column)" })
+            Say ("  applied $($s.rel) (idempotent; guarded additions reach existing stores$(if ($inert.Count) { "; inert guarded drops: $($inert -join ', ')" }))") 'DarkGray'
+        }
+        # CREATE before ALTER -- planned AFTER the files, against what is now really in the database.
         $depCols = Get-PimJobDeployedColumns -ConnectionString $csUpd
         $sPlan   = Get-PimSqlUpdatePlan -DeployedColumns $depCols -LockedSqlSchema $locked `
                         -PulledSchemaVersion "$($plan.version)" -DeployedSchemaVersion "$($plan.version)"
-        # CREATE before ALTER -- a missing table cannot be brought into conformance. Both shipped
-        # files guard every object with IF OBJECT_ID(...) IS NULL and contain no DROP/TRUNCATE, so
-        # applying them to a populated database is a no-op.
         $absentT = @($sPlan.tables | Where-Object { $_.exists -eq $false })
         if ($absentT.Count) {
-            Say ("  base schema: {0} table(s) absent -- applying the shipped schema first" -f $absentT.Count) 'DarkGray'
-            foreach ($rel in @('sql/platform-schema.sql', 'sql/local-schema.sql')) {
-                $sf = Join-Path $solRoot $rel
-                if (-not (Test-Path -LiteralPath $sf)) { throw "base schema file '$rel' is missing from this payload." }
-                Invoke-PimJobSqlDdl -ConnectionString $csUpd -Sql ([IO.File]::ReadAllText($sf))
-            }
-            $depCols = Get-PimJobDeployedColumns -ConnectionString $csUpd
-            $sPlan   = Get-PimSqlUpdatePlan -DeployedColumns $depCols -LockedSqlSchema $locked `
-                            -PulledSchemaVersion "$($plan.version)" -DeployedSchemaVersion "$($plan.version)"
+            throw ("the shipped schema was applied but these table(s) are still absent: " + (@($absentT | ForEach-Object { $_.table }) -join ', '))
         }
         foreach ($tp in @($sPlan.tables | Where-Object { $_.exists -and -not $_.conformant })) {
             $actual = @(if ($depCols.ContainsKey($tp.table)) { $depCols[$tp.table] } else { @() })
@@ -401,12 +445,35 @@ try {
     }
 } catch {
     $schemaOk = $false
-    Say "  SCHEMA STEP FAILED: $($_.Exception.Message)" 'Red'
+    $schemaErr = "$($_.Exception.Message)"
+    Say "  SCHEMA STEP FAILED: $schemaErr" 'Red'
+    # 🔑 A LOGIN FAILURE NAMES THE PRINCIPAL AND THE FIX. The token SQL refused is the one this process
+    # presented, so its oid is exactly who to add; the job's own identity is the fallback.
+    $who = Get-PimJwtPrincipal -Token $global:PIM_SqlAccessToken
+    $whoOid = "$($who.oid)"
+    if (-not $whoOid -and $schemaErr -match '(?i)Login failed|18456|token-identified') {
+        try {
+            $selfIdObj = Invoke-PimArm -Method GET -ApiVersion $script:PimAcaApi `
+                            -Path "/subscriptions/$sub/resourceGroups/$rg/providers/Microsoft.App/jobs/$selfJob"
+            $whoOid = "$($selfIdObj.identity.principalId)"
+        } catch { }
+    }
+    $schemaLoginRefusal = Get-PimUpdateSchemaLoginRefusal -ErrorText $schemaErr -PrincipalObjectId $whoOid -PrincipalAppId "$($who.appid)" `
+                              -SqlServer "$($global:PIM_SqlServer)" -GroupName $sqlAdminGroup -UpdateJobName $selfJob
+    if ($schemaLoginRefusal) {
+        Say "  $($schemaLoginRefusal.message)" 'Red'
+        Say "  $($schemaLoginRefusal.detail)" 'Red'
+    }
 }
 if ($schemaRefused) {
     Say 'NOT ROLLING: this release may need schema changes, and this updater cannot reach the store to' 'Red'
-    Say "             verify them. Re-run tools/setup/Deploy-PimUpdateJob.ps1 (it copies $managerApp's SQL settings)." 'Red'
+    Say "             verify them: $managerApp could not be read, or names its store through a secret or vault pointer." 'Red'
     Send-PimUpdateOutcome -Action 'schema' -Outcome 'failed' -ToVersion "$($plan.version)" -ErrorText "$($schemaRefused.errorText)"
+    exit 1
+}
+if ($schemaLoginRefusal) {
+    Say "NOT ROLLING: the schema could not be verified -- add the updater's identity to the SQL admin group '$sqlAdminGroup'." 'Red'
+    Send-PimUpdateOutcome -Action 'schema' -Outcome 'failed' -ToVersion "$($plan.version)" -ErrorText "$($schemaLoginRefusal.errorText)"
     exit 1
 }
 if (-not $schemaOk) {

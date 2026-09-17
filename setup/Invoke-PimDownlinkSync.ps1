@@ -137,14 +137,18 @@ param(
     # TAP intent for the synced admins (operator decision 2026-08-13 -- ON by default, because a
     # synced admin who cannot sign in is not a delivered admin). Per-admin values from the
     # master's registry win; these apply only where the bundle carries none.
-    # 🪤 -DefaultManagerEmail is not optional in practice: with no manager address the TAP is
-    # minted and mailed nowhere, and the code cannot be recovered afterwards.
+    # 🔴 71.19: -DefaultManagerEmail is GONE. An admin's TAP goes to its SPONSOR DEPARTMENT's owners, which the managed
+    # tenant resolves from the department rows the bundle carries -- a fleet-wide fallback address was hiding a missing
+    # department link (REQUIREMENTS §62: the sponsor is a department, never a person).
     [ValidateSet('TRUE','FALSE')][string]$CreateTapDefault = 'TRUE',
     [int]$TapLifetimeHoursDefault = 8,
-    [string]$DefaultManagerEmail = '',
     # The decouple switch: withdraw previously-synced roles even when the master
     # currently projects none. Off by default -- see the mass-revoke guard.
     [switch]$AllowFullPrune,
+    # §71 (framework MSP-4 SURFACE item 8): withdraw synced rows that no longer reach this tenant.
+    # Off by default -- without it they are REPORTED as 'would remove' and nothing is taken away; with
+    # it they are withdrawn inside the removal budget (PIM_RemoveMaxCount).
+    [switch]$AllowRetraction,
 
     [switch]$WhatIfMode = $true
 )
@@ -325,6 +329,7 @@ if ("$SlaveSqlServer".Trim()) {
     $slaveCs = Get-PimSqlConnectionString -Server $SlaveSqlServer -Database $SlaveSqlDatabase
     $dlArgs['SlaveStoreConnectionString'] = $slaveCs
     if ($AllowFullPrune) { $dlArgs['AllowFullPrune'] = $true }
+    if ($AllowRetraction) { $dlArgs['AllowRetraction'] = $true }
     # Which group tags actually EXIST in the slave. A projected tag with no group
     # there cannot be granted, and is reported instead of staged to fail at apply.
     try {
@@ -361,7 +366,6 @@ if ("$SlaveSqlServer".Trim()) {
 if ("$SlaveDefaultDomain".Trim()) { $dlArgs['SlaveDefaultDomain'] = "$SlaveDefaultDomain".Trim() }
 $dlArgs['CreateTapDefault']       = $CreateTapDefault
 $dlArgs['TapLifetimeHoursDefault'] = $TapLifetimeHoursDefault
-if ("$DefaultManagerEmail".Trim()) { $dlArgs['DefaultManagerEmail'] = "$DefaultManagerEmail".Trim() }
 $result = Invoke-PimManagedDownlink -Scenario $Scenario -Doc $doc `
     -TenantId $TenantId -SlaveRing $SlaveRing `
     -CentralRoot $CentralRoot -LocalRoot $LocalRoot `

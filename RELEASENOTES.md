@@ -14,6 +14,309 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 
 <!-- next release entry goes here -->
 
+## v2.4.367 — MSP: the provider publishes from the cloud, managed tenants read a signed baseline over the network, and both sides can be deployed by a signed-in administrator
+
+This release changes how a managed-service provider gets its signed baseline to its managed tenants.
+Nothing changes for a single-tenant installation.
+
+- **The provider's baseline is published by a job in the provider's own cloud environment, not by a
+  management server.** A scheduled container job (daily, and on demand) reads the provider's store, builds
+  the baseline and signs it with a **non-exportable key in the provider's key vault**. The job runs as its
+  own managed identity and holds no certificate, secret or storage key; it may use only that signing key
+  and write only to the baseline container. Before uploading it verifies the signature with the same
+  verifier a managed tenant uses, and after uploading it reads the baseline back the way a managed tenant
+  does and verifies it again — the run succeeds only if all of that happened. There is no management host,
+  scheduled task or machine certificate left in the publish path.
+
+- **Managed tenants pin the provider's signing key.** A baseline signed by the key vault key carries its
+  public key, and that is not what makes it trusted: each managed tenant is configured with the key's
+  identifier (given by the provider when the key is created) and refuses a baseline signed by any other
+  key. More than one key can be pinned at a time, so the provider can change keys without breaking any
+  tenant. Baselines signed the previous way (the product certificate) still verify, so an existing
+  provider can move over without a gap.
+
+- **No expiring read link any more.** Managed tenants used to read the baseline through a time-limited
+  link that had to be renewed on a schedule with credentials from both sides. The baseline is now a
+  **signed file reached over the network**, and the path depends on how the two environments are
+  connected: where the provider's and the managed tenant's private networks are connected, the tenant
+  reads it through a **private endpoint** and the storage has no public access at all; where they are not
+  connected, the storage allows anonymous read of the baseline file only (no listing) from the networks it
+  explicitly names. Either way trust comes from the signature, never from the network, and nothing in the
+  access path expires.
+
+- **A private-only deployment is a supported shape on both sides.** Provider and managed tenant can each
+  run with a network-internal application environment and no public entry point, with the baseline store
+  reachable only through the private endpoint. The name the store is reached by is published in each
+  side's own private DNS, so neither side has to be given rights in the other's network. The database
+  keeps no public entry point either: the build opens a time-boxed window for the deploying machine and
+  closes it again when it is done.
+
+- **Deploy as a signed-in administrator.** The one-command build can now run on an administrator's own
+  sign-in instead of a deployment application with a certificate: leave the deployment identity out of
+  the build configuration. Before anything is changed it checks that the sign-in is a person in the right
+  tenant and subscription and that no application credential is lying around in the session, and every
+  step then runs on that sign-in. The certificate mode is unchanged.
+
+- **The one-command build completes on a new pair.** Several defects found by building a provider and a
+  managed tenant from nothing are fixed: the build now requires and forwards a network address plan (it
+  used to stop at its second step), passes the right connection details to the database schema step,
+  keeps single-value lists as lists, loads its store helpers where later steps can see them, and reports
+  cloud errors instead of an internal "command not recognized" message. **Upgrade note:** a brand-new
+  provider + managed tenant pair needs two small preparation steps before the two builds (each side needs
+  one value the other side creates); the build guide lists them.
+
+- **The provider's Manager says why a baseline is not verified.** The provider view's baseline banner now
+  shows which key signed the baseline and, when it is not verified, the reason — for example that the
+  Manager itself does not pin that key — instead of a bare "NOT verified". Certificate-signed baselines
+  verify as before.
+
+- **A tenant read that has no directory rights is reported as not checked, not as a failure.** The role
+  map check used to report a red result when the identity it ran under simply could not read the
+  directory; it now says so plainly and skips.
+
+**Upgrade note (MSP only):** move the managed tenants first. Every managed tenant must run this version
+and pin the provider's key **before** the provider's first cloud publish replaces the certificate-signed
+baseline; a managed tenant on an older version refuses the new baseline and keeps its last applied state
+until it is updated. The baseline pull job and the publish job are not rolled by the automatic updater in
+this version — redeploy them with this version's image when you update a managed tenant.
+
+## v2.4.366 — The MSP pair test can be pointed at any pair
+
+- **The end-to-end test that proves an MSP master and its managed tenant work together is no longer tied
+  to one specific pair.** It had two particular environments written into it, so it could not be used to
+  verify a pair you had just built — which is precisely when you most want it. It now accepts a small
+  configuration file naming the pair to check; anything the file leaves out keeps the previous default,
+  so existing use is unchanged. A configuration file that cannot be found is an error rather than a
+  quiet fall-back to the old pair, the run states which pair it checked, and the safety checks that keep
+  this test away from production environments are applied to whatever pair is named.
+
+## v2.4.365 — An activation policy for permission delegations, and the delegation table has a name
+
+- **Permission delegations can now be given an activation policy in the wizard.** When you create a
+  permission group (Entra ID or Azure), you can pick the activation policy it should use — including
+  one that makes activation need **approval** — instead of that only being settable on roles. The list
+  is the set of templates **your own tenant has**, including any you added or edited, and each is
+  labelled with what it does. **"Use default" is the first choice and changes nothing**: a group
+  created without touching the field behaves exactly as it did before. The four permission-group
+  record types gained the column that stores it, and resource records gained the replication fields
+  the other record types already had.
+
+- **The delegation table has a name in the menu.** Changing an existing delegation — an eligibility
+  from 90 to 365 days, or its policy to one that needs approval — was always possible in the records
+  table, but that table was called *All records*, which describes the data rather than the job, so the
+  one person who needed it could not find it. Access now has **"Delegations — edit in a table"**, which
+  opens the same table narrowed to delegation records, with the same edit-then-commit flow. *All
+  records* is still there as the raw view, and the narrowed list says it is narrowed and offers one
+  click back.
+
+## v2.4.364 — PIM never deletes an account, and the date that disables one is now called what it does
+
+This release removes two ways an administrator account could be switched off or removed that the product
+should never have had, and renames the date column that switches one off so it says what it does.
+
+- **🔴 PIM never deletes a user account. Anywhere.** The offboarding sweep used to delete the account once
+  a retention period had passed. That capability is **gone from the product** — not switched off, not
+  hidden behind a setting, removed: there is no code path that deletes a user, in a single tenant, on an
+  MSP master or on a managed tenant, whatever the data says. Offboarding keeps everything else — the
+  account is disabled, its sign-in sessions are revoked, its privileged access and group memberships are
+  removed, the notice is sent and every step is recorded — and then it **stops**. The account stays in the
+  directory, disabled, until a person deletes it by hand. A test in the standard suite fails the build if a
+  user-object delete ever reappears in the product.
+  - **`DeleteAfterDays` is removed and no longer supported.** It is gone from the admin record, the
+    Manager, the baseline sent to managed tenants, the samples and the docs — there is no field, no
+    setting and no disabled switch left behind. Existing data needs nothing from you: a record that
+    still carries the value is **accepted silently** and the column is removed the next time the
+    schema preflight runs. (If the capability is ever wanted again it will be added back deliberately,
+    with its own opt-in and approval step.)
+  - The guided offboard sequence is now two steps (disable, then revoke access) instead of three; the third
+    step used to schedule a deletion.
+  - In the Manager, **"Flag for deletion" is now "Mark for manual removal"**, and the confirmation says in
+    as many words that PIM never deletes the account.
+
+- **🔴 An account is never disabled just because it is missing from your definitions.** Until now, a live
+  admin account that matched your admin naming but was absent from the definitions was treated as something
+  to deprovision — throttled by an opt-in, a circuit breaker and a removal budget, but still a disable.
+  Every one of those guards limits *how many* accounts are switched off, not *whether the reason is sound*,
+  and a half-loaded definition set looks exactly like "they left". The capability is removed, along with its
+  setting. The **report stays**: each run still names every live admin account that is not in your
+  definitions, so you can see them. Disabling one is your decision, made on its row. Group and membership
+  clean-up is a separate mechanism and is unchanged.
+
+- **`OffboardDate` is now `AutoDisableDate`, and the sweep only disables.** The old name promised more than
+  the product does. On the date you set, PIM disables the account, revokes its sessions, removes its
+  privileged access, sends the notice — and keeps the account. `Lifecycle = Retire` means exactly the same
+  disable-only path.
+  - **The date is now on the Admin accounts screen**, in its own column and editable per admin, with the
+    effect spelled out, a flag when a date has already passed or falls within the next 14 days, and a flag
+    when a row still uses the old column name.
+  - **Upgrade note — your data migrates itself, and nothing is guessed.** Rows using `OffboardDate` keep
+    working: it is still read. The schema preflight copies the value into `AutoDisableDate` and then removes
+    the old column, in one idempotent pass. A row that somehow carries **both names with different dates**
+    is **refused, not guessed** — the engine skips that admin entirely and the Manager shows an error naming
+    both dates, because silently picking one is how an account gets disabled on a date nobody chose. Editing
+    the date in the Manager clears the old column for you.
+  - **Upgrade note — MSP master and managed tenants must both be on 2.4.364 or newer.** The baseline now
+    carries `AutoDisableDate` instead of `OffboardDate`; a managed tenant on an older build would not
+    recognise it.
+
+- **Mail about an administrator now goes to their sponsor department's owners.** PIM's mail about an
+  administrator account — the new-account notice and the Temporary Access Pass — is addressed to the
+  **owners of the department that sponsors that administrator**, all of them. Previously it fell back to a
+  manager address recorded on the person, which goes stale the moment somebody changes job; a department
+  outlives a reorganisation. Two exceptions are deliberate: an explicit forwarding address on the
+  administrator still wins, because it is a decision written on that record; and a manager address on an
+  existing record is still honoured so nothing stops working, but it is now reported as **legacy** in the
+  Manager, the validator and the readiness check so you can move it to the department. When none of them
+  resolves, PIM **refuses to send** and names what to set — the administrator's department, or that
+  department's owners — instead of silently mailing nobody.
+
+- **You can see each admin's sponsor department on the Admin accounts screen.** The department that sponsors
+  an administrator decides who approves for them and where their mail — including their Temporary Access
+  Pass — is delivered, and it was only visible by opening the admin. It now has its own column, with the
+  department's owners shown on hover. Two gaps are called out separately, because they are fixed in
+  different places: an admin with **no department** (fix the admin), and a department with **no owners**
+  (fix the department). If the owner list could not be read at all, the column says *owners not checked*
+  rather than claiming there are none.
+
+## v2.4.363 — One command builds an MSP master or a managed tenant, and every admin gets a TAP
+
+- **New: a one-shot build for an MSP master and for a managed tenant.** `tools/setup/Invoke-PimMspBuild.ps1 -Role
+  Master|Slave -ConfigPath <file>` runs every step in order, from a machine-local file that holds ids and names only (a
+  file that contains anything resembling a credential is refused). It covers:
+  - hosting (the existing full deployment, with managed identities only);
+  - the SQL admin group, now including the scheduler and Manager identities;
+  - the scheduler's and the Manager's directory permissions, and the Manager's right to start the scheduler immediately;
+  - the deployment scenario;
+  - on the master: the registry, the baseline store, registering each managed tenant, publishing the signed baseline and
+    a daily re-publish;
+  - on a managed tenant: minting the read link, the pull job, and the weekly certificate-only link rotation.
+
+  It signs in with certificates only and removes its temporary sign-in files when it ends. It shows the plan unless
+  `-Apply` is given, can resume from any step with `-From`, and finishes by printing the steps that need a person —
+  such as the first approval of policy changes, which is deliberately not automated.
+- **New commands the build uses, also usable on their own:**
+  - `Register-PimManagedTenant.ps1`: registers a managed tenant on the master with its ring and tags (it replaces a manual
+    database step);
+  - `Set-PimScenario.ps1`: sets the deployment scenario;
+  - `Initialize-PimHostingAccess.ps1`: brings the directory permissions and the start-now right up to date on an
+    existing environment;
+  - `Register-PimBaselinePublish.ps1`: schedules the signed baseline publish.
+
+  Each one checks the result after writing it and records the change in the audit trail.
+- **A Temporary Access Pass is enforced for every Entra admin — on a single tenant, an MSP master and a managed tenant
+  alike.** The "create TAP" setting can no longer turn a TAP off anywhere:
+  - managed tenants store it as on, and it is no longer carried in the signed baseline;
+  - the MSP fan-out and the central-admin registry command ignore a "no";
+  - the validator reports a "no" as having no effect and offers a one-click fix;
+  - the readiness check now requires every Entra admin to have a delivery address.
+- **Fixed: a deployment could give the Manager's read-only identity the engine's full write permissions.** The
+  permission grant used the engine's list whatever list was asked for. The Manager now receives only its read-only set.
+- **Fixed: the full deployment ignored the SQL admin group name and the troubleshooting identity**, and on a private
+  database its access step looked up a setup job with an empty name. Both values are now passed through.
+- **The deployment identity can now create and fill the SQL admin group**, so that step runs without manual help.
+
+**Upgrade note:** to build an MSP pair, build the master first, then each managed tenant. The phased onboarding script
+used before this release is superseded.
+
+## v2.4.362 — The managed-tenant pull job needs no secret, and every retraction is reported first
+
+- **A policy change held for approval is no longer a failed job.** When the policy mass-change safety check
+  holds a set of policy changes, the job that ran into it is now recorded as **needs approval** — shown amber on
+  the Jobs page, counted under "needs attention" on the Jobs page and the Home page, and raised as an operator
+  alert that names the policy area, the number of changes and the exact approval command. It is never shown as
+  passed and never as failed. This applies to the scheduler's engine jobs and to a managed tenant's pull job
+  alike (the pull now ends "held" instead of "failed"). A genuine error in the same run still fails the job.
+- **Admin lifecycle settings reach managed tenants as the master defines them.** An MSP admin's "create TAP"
+  setting, provisioning date, TAP start date and delete-after-offboarding days now travel with the admin to
+  each managed tenant. Previously a managed tenant filled these in with its own defaults (for example
+  "create TAP" on), whatever the master said. Dates keep their exact value on every host.
+- **A managed tenant's pull job can be allowed to remove what no longer reaches it — explicitly, and off by
+  default.** `Deploy-PimDownlinkJob.ps1 -AllowRetraction` sets `PIM_DOWNLINK_ALLOW_RETRACTION=true` on the job;
+  only an explicit true value turns it on, a mistyped value is reported and treated as off, and removals stay
+  within the removal limit. Without it, retraction remains report-only.
+- **The weekly baseline read-link rotation signs in with certificates only.** `Update-PimBaselineSas.ps1
+  -CertLoginConfig <file>` logs in to the master and the managed tenant with each identity's certificate from
+  the machine store (the file may hold only tenant, client, certificate thumbprint and subscription ids; any
+  other field is refused) and removes its temporary sign-in profile when the run ends. Registering the weekly
+  task now carries every sign-in input into the task; previously they were dropped, so a registered task could
+  not sign in.
+- **The managed tenant's scheduled pull job now runs without a client secret.** When no engine credential is
+  supplied, `tools/setup/Deploy-PimDownlinkJob.ps1` runs the job's work as the job's own system-assigned managed
+  identity — the same shape as the scheduler job. The deploy grants that identity the engine's directory
+  permissions and adds it to the SQL admin group, so it can read the tenant's own domain, write its own store
+  and apply the result. The user-assigned identity stays attached only to pull the container image.
+  Previously a job without a secret ran as an identity with no directory permissions and could stage nothing.
+- **Admins that stop reaching a managed tenant are reported, not removed.** When the master re-targets an
+  administrator away from a tenant, that tenant's pull now reports the admin as "would remove" — exactly like
+  groups and memberships already were — and removes it only when the removal is explicitly allowed, inside the
+  removal limit. The list is kept in the pull's acceptance record.
+- **Joining the SQL admin group waits for the directory.** A member that was just added is no longer reported
+  as missing because the directory had not listed it yet; the read-back retries for a short, bounded time.
+- Fixed: re-deploying the pull job with the system identity could fail on an internal parameter name.
+
+**Upgrade note:** re-run `Deploy-PimDownlinkJob.ps1` for each managed tenant without `-EngineClientSecret`
+to move an existing pull job onto its system identity (the job is recreated once, because an identity change
+cannot be applied in place). A job deployed with an engine secret keeps working unchanged. A re-deploy without
+`-AllowRetraction` leaves (or returns) the job report-only. To move a registered weekly read-link rotation off
+secrets, re-register it with `-CertLoginConfig`.
+
+## v2.4.361 — The nightly updater repairs its own database settings, and the database is administered by a group
+
+- **The nightly updater no longer stops because its own database settings are missing.** If the updater job
+  carries no database server, it now takes the server and database the Manager is already using, checks the
+  schema with them, and records them on itself for the next night. Previously it refused every release and
+  asked for the updater to be redeployed.
+- **When the updater cannot sign in to the database, it says exactly who and what to do.** The message names
+  the updater's managed identity (its object id) and the SQL admin group to add it to, instead of a generic
+  sign-in error. As before, it never rolls a release whose database changes it could not check.
+- **New: the database is administered by a security group.** `tools/setup/Initialize-PimSqlAdminGroup.ps1`
+  makes a group (default `grp-pim-sql-admins`) the database server's Microsoft Entra administrator, with the
+  environment's managed identities, the nightly updater, an optional troubleshooting identity and the previous
+  administrator as members. It is safe to run again (a second run changes nothing), reads every change back,
+  keeps Entra-only authentication on, keeps existing database users, and offers `-PlanOnly` to preview.
+- **New deployments set this up automatically**, for public and private database servers. If the deploy
+  identity is not allowed to manage groups, the deployment keeps the previous administrator and prints the
+  command to run later.
+- **Redeploying the nightly updater adds its identity to the group** when the group is the database
+  administrator. It never creates the group or changes the administrator on its own.
+- **Fixed: database additions shipped in a release now reach existing installations.** The nightly updater applied
+  the shipped database schema only to a new database, so a column added by a release (for example the replication
+  setting added in v2.4.360) could be missing on an existing installation while the update reported the schema as up
+  to date. It now applies the shipped schema on every run, and refuses the update if a statement would remove data.
+
+**Upgrade note:** nothing is required. To move an existing environment onto the group model, run
+`Initialize-PimSqlAdminGroup.ps1 -PlanOnly` with a certificate identity that can manage groups, review the plan,
+then run it again without `-PlanOnly`.
+
+## v2.4.360 — MSP master: choose per admin and per group which managed tenants receive it
+
+- **Replication targeting on the MSP master.** Every admin, membership, direct group (role, organisation,
+  department, project, cross-org), permission group, nesting and role binding can now say whether it replicates
+  to managed tenants — **No**, **Yes** or **Follow** (only when something that replicates needs it) — and to which
+  ones, by **ring** and by **target**: tenant tags such as `tag:region:eu`, tags a tenant must carry together such
+  as `tag:tier:gold+finance`, or named tenants. Ring and target combine: a tenant must be admitted by both.
+- **Set it where you author.** Each Create wizard has a Replication section on its Review step, and the grid has
+  the same fields with pickers. Both show **"This will reach: N of M tenants"** (names on hover), computed by the
+  same logic the managed tenants run, plus a warning when a group is sent to a tenant only because something that
+  replicates there needs it. The section and the columns appear only on the MSP master.
+- **MSP sync settings appear only where they mean something.** A single tenant no longer shows "Sync to slaves",
+  management mode, ring or slave tags on admin accounts, in the admin wizard or in the grid. A managed tenant shows
+  only which admins it received from its MSP master, read-only. The Manager also refuses these settings when the
+  tenant is not the MSP master.
+- **Nothing changes for existing data.** With the new fields left blank, what is published and what each managed
+  tenant receives is exactly as before.
+- **Fixed: department, project and cross-org groups were not sent with the memberships that need them**, so a
+  managed tenant received a membership into a group it could not create.
+- **Fixed: an admin or group marked as local to the MSP could still be included in the signed baseline.** It is
+  now left out entirely unless something that replicates depends on it.
+- **Fixed: the master's view of which admin reaches which tenant ignored targets and tags**, so it listed more
+  tenants than the admin actually reaches.
+- **Fixed: admin assignments had no Target column in the grid**, although the baseline reads it.
+- **Removing replicated rows is now reported first.** When a row stops reaching a managed tenant, the sync reports
+  it as "would remove" and removes it only when you run it with `-AllowRetraction`, within the removal limit.
+  **Upgrade note:** a managed tenant's sync that relied on stale replicated rows being pruned automatically must now
+  add `-AllowRetraction`.
+
 ## v2.4.359 — Install the community edition from GitHub into your own tenant
 
 - **The public GitHub edition now installs end to end.** Clone the repository, create the deploy identity,

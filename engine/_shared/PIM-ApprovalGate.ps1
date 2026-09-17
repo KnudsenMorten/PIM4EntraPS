@@ -540,18 +540,21 @@ function Set-PimApprovalRequestExecuted {
 
 # ---- OFFBOARDING-WITH-APPROVAL ----------------------------------------------
 function Get-PimOffboardSequencePlan {
-    # PURE: the guided offboard sequence for ONE target -- disable -> revoke active ->
-    # schedule delete. Returns an ordered step list (each: order, step, description).
-    # This is the PLAN only; nothing executes here. The delete step is SCHEDULED
-    # (DeleteAfterDays from NowUtc), never immediate.
+    # PURE: the guided offboard sequence for ONE target -- disable -> revoke active.
+    # Returns an ordered step list (each: order, step, description). This is the PLAN
+    # only; nothing executes here.
+    #
+    # 🔴 71.21 -- THE THIRD STEP ('schedule-delete') IS GONE. PIM never deletes a user account
+    # (operator, 2026-09-16), so a plan that ends with "Schedule object delete for <date>" promised
+    # something the product must not do. The sequence now ENDS at revoke-active: the account stays,
+    # disabled and stripped, until a human deletes it by hand in Entra.
+    # The -DeleteAfterDays parameter went with it (operator: "nobody uses it yet ... i dont want it
+    # to be shown as it confuses") -- no parameter, no dead flag, nothing to explain.
     [CmdletBinding()]
-    param([Parameter(Mandatory)][string]$Target, [int]$DeleteAfterDays = 30, [datetime]$NowUtc = [datetime]::UtcNow)
-    if ($DeleteAfterDays -lt 0) { $DeleteAfterDays = 0 }
-    $deleteOn = $NowUtc.ToUniversalTime().AddDays($DeleteAfterDays).ToString('yyyy-MM-dd')
+    param([Parameter(Mandatory)][string]$Target, [datetime]$NowUtc = [datetime]::UtcNow)
     return @(
         [pscustomobject]@{ order = 1; step = 'disable';         target = "$Target"; description = "Set accountEnabled=`$false for $Target (sign-out everywhere)" }
-        [pscustomobject]@{ order = 2; step = 'revoke-active';    target = "$Target"; description = "Revoke every active/eligible PIM activation + direct group membership for $Target" }
-        [pscustomobject]@{ order = 3; step = 'schedule-delete';  target = "$Target"; description = "Schedule object delete for $deleteOn ($DeleteAfterDays day(s) after offboard)"; scheduledDeleteUtc = $deleteOn }
+        [pscustomobject]@{ order = 2; step = 'revoke-active';    target = "$Target"; description = "Revoke every active/eligible PIM activation + direct group membership for $Target. The account itself is KEPT, disabled -- PIM never deletes an account." }
     )
 }
 
@@ -683,11 +686,10 @@ function Test-PimRevokeExecutionAllowed {
 # this function NEVER re-implements a gate; it asks that one and refuses on any block.
 #
 # It executes the guided sequence (Get-PimOffboardSequencePlan: disable ->
-# revoke-active -> schedule-delete) by routing the disable/revoke steps through
-# Invoke-PimAccountStatusChange (the SAME pipeline the MSP kill-switch uses --
-# disable=AccountStatus 'Disabled', revoke-active=AccountStatus 'Revoked'). The
-# scheduled-delete step is recorded as a SCHEDULED intent only (never an immediate
-# delete) -- it is staged for a later, separately-approved pass.
+# revoke-active) by routing both steps through Invoke-PimAccountStatusChange (the
+# SAME pipeline the MSP kill-switch uses -- disable=AccountStatus 'Disabled',
+# revoke-active=AccountStatus 'Revoked'). 71.21: there is no delete step of any
+# kind -- PIM never deletes a user account.
 #
 # The action invoker is INJECTABLE (-ActionInvoker) so the offline tests drive a
 # MOCK and NEVER disable a real user; in the engine/Manager the default routes to
@@ -719,14 +721,16 @@ function Get-PimDefaultOffboardActionInvoker {
     # account-status-change pipeline. Returns a scriptblock taking ($step,$target):
     #   step 'disable'         -> Invoke-PimAccountStatusChange ... -AccountStatus Disabled
     #   step 'revoke-active'   -> Invoke-PimAccountStatusChange ... -AccountStatus Revoked
-    #   step 'schedule-delete' -> recorded as a scheduled intent (no immediate delete).
     # Each invocation returns @{ ok; detail }. NEVER called by the offline tests
     # (they inject their own mock) -- this is the live wiring only.
     return {
         param($Step, $Target)
         $s = "$($Step.step)".Trim().ToLowerInvariant()
-        if ($s -eq 'schedule-delete') {
-            return [pscustomobject]@{ ok = $true; detail = "delete SCHEDULED for $($Step.scheduledDeleteUtc) (not executed now)" }
+        # 71.21: a 'schedule-delete' step can only come from a plan stored BEFORE this version.
+        # It is a no-op, and it says so -- PIM never deletes a user account, so an old stored
+        # plan must neither delete nor fail the whole sequence.
+        if ($s -eq 'schedule-delete') {   # 71.21-allow: recognises an OLD stored plan in order to REFUSE it; deletes nothing
+            return [pscustomobject]@{ ok = $true; detail = 'IGNORED: PIM never deletes an account. The account stays, disabled -- delete it by hand in Entra if that is wanted.' }
         }
         if (-not (Get-Command Invoke-PimAccountStatusChange -ErrorAction SilentlyContinue)) {
             return [pscustomobject]@{ ok = $false; detail = 'Invoke-PimAccountStatusChange pipeline not loaded' }
@@ -757,7 +761,7 @@ function Invoke-PimOffboardExecution {
     #                  to the real account-status pipeline. Tests inject a MOCK so no
     #                  real user is ever disabled.
     #   -Automatic     refused outright (automatic offboarding is PROHIBITED).
-    #   -DeleteAfterDays / -ToDisable / -Scanned / -Desired / -DesiredResolved /
+    #   -ToDisable / -Scanned / -Desired / -DesiredResolved /
     #   -FeatureOverride pass through to the plan + the DisableGuard composite.
     #
     # Returns @{ ok; gate; reason; executed; request; target; results[]; approval }.
@@ -769,7 +773,6 @@ function Invoke-PimOffboardExecution {
         [switch]$ConfirmBulk,
         [scriptblock]$ActionInvoker = $null,
         [switch]$Automatic,
-        [int]$DeleteAfterDays = 30,
         [int]$ToDisable = 1,
         [int]$Scanned = 1,
         [object[]]$Desired = @(),
@@ -819,7 +822,7 @@ function Invoke-PimOffboardExecution {
 
     # EXECUTE the guided sequence through the (injectable) action invoker.
     if ($null -eq $ActionInvoker) { $ActionInvoker = Get-PimDefaultOffboardActionInvoker }
-    $plan = @(Get-PimOffboardSequencePlan -Target $target -DeleteAfterDays $DeleteAfterDays -NowUtc $NowUtc)
+    $plan = @(Get-PimOffboardSequencePlan -Target $target -NowUtc $NowUtc)
     $results = New-Object System.Collections.ArrayList
     $allOk = $true
     foreach ($step in $plan) {

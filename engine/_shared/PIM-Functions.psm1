@@ -10574,8 +10574,9 @@ function Test-PimAutoDestructiveEnabled {
 # Admins: OffboardDate (date expression) triggers the revoke pipeline (the
 # existing Invoke-PimAccountRevoke does PIM schedule cancellation + group
 # removal + disable, with its own audit CSV) plus sign-in session revocation
-# and the offboarding-notice mail; DeleteAfterDays later the account is
-# deleted. Groups: Lifecycle=Retire removes role assignments + members and
+# and the offboarding-notice mail. 🔴 71.21: the ACCOUNT IS KEPT, disabled --
+# PIM never deletes a user account, in v1 or v2.
+# Groups: Lifecycle=Retire removes role assignments + members and
 # deletes the group (engine-created naming-prefix guard). Drift:
 # $global:PIM_OffboardCleanupMode = Off | Report | Enforce.
 #
@@ -10623,7 +10624,7 @@ $script:PimCsvSchemaAdditions = @{
     # column (a day-2-day account spans multiple tier assignments). Blank =
     # legacy fallback (UserName -L0-T0- marker check). TierLevel is no longer
     # part of the canonical schema; existing files keep it harmlessly.
-    'Account-Definitions-Admins'   = @('ProvisionDate', 'TAPLifetimeHours', 'Template', 'OffboardDate', 'DeleteAfterDays', 'Purpose')
+    'Account-Definitions-Admins'   = @('ProvisionDate', 'TAPLifetimeHours', 'Template', 'AutoDisableDate', 'Purpose')
     'PIM-Definitions-Roles'        = @('PolicyTemplate', 'Lifecycle')
     'PIM-Definitions-Tasks'        = @('PolicyTemplate', 'Lifecycle')
     'PIM-Definitions-Services'     = @('PolicyTemplate', 'Lifecycle')
@@ -10978,8 +10979,9 @@ function Write-PimAuditEvent {
 function Invoke-PimAdminOffboarding {
     <#
     .SYNOPSIS
-        Date-driven admin offboarding: revoke at OffboardDate, delete
-        DeleteAfterDays later. Idempotent via offboard-state.json.
+        Date-driven admin offboarding: revoke at OffboardDate. The account is KEPT,
+        disabled -- 71.21: PIM never deletes a user account. Idempotent via
+        offboard-state.json.
     #>
     [CmdletBinding()]
     param(
@@ -10996,12 +10998,12 @@ function Invoke-PimAdminOffboarding {
     Write-Host "Offboarding sweep: $($candidates.Count) row(s) carry an OffboardDate..." -ForegroundColor Cyan
 
     # G4 -- UNIVERSAL REMOVAL BUDGET (operator directive 2026-08-06). The offboarding
-    # sweep revokes and, with DeleteAfterDays, DELETES accounts. It had no ceiling of any
-    # kind: a bad OffboardDate expression across many rows would work through all of them.
+    # sweep revokes and disables accounts (71.21: it no longer deletes any). It had no ceiling of
+    # any kind: a bad OffboardDate expression across many rows would work through all of them.
     # Cap the whole sweep, abort it entirely rather than part-way (a half-run offboarding
     # is worse than none), and EMAIL the operator.
     if (Get-Command Test-PimRemoveBudgetAllowed -ErrorAction SilentlyContinue) {
-        $obDecision = Test-PimRemoveBudgetAllowed -ToRemove $candidates.Count -Scope 'AdminOffboarding' -Scanned $rows.Count -Operation 'offboard/delete'
+        $obDecision = Test-PimRemoveBudgetAllowed -ToRemove $candidates.Count -Scope 'AdminOffboarding' -Scanned $rows.Count -Operation 'auto-disable'
         if (-not $obDecision.allowed) {
             if (Get-Command Write-PimRemoveBudgetAlert -ErrorAction SilentlyContinue) { Write-PimRemoveBudgetAlert -Decision $obDecision }
             else { Write-Host "  [Offboard] ABORTED -- $($obDecision.reason)" -ForegroundColor Red }
@@ -11041,7 +11043,8 @@ function Invoke-PimAdminOffboarding {
                         DisplayName       = "$($row.DisplayName)"
                         UserPrincipalName = $upn
                         OffboardDate      = "$($row.OffboardDate)"
-                        Steps             = 'PIM schedules cancelled, group memberships removed, account disabled, sessions revoked' + $(if ("$($row.DeleteAfterDays)".Trim()) { ", deletion scheduled after $($row.DeleteAfterDays) day(s)" } else { '' })
+                        # 71.21: no "deletion scheduled" sentence -- PIM never deletes the account.
+                        Steps             = 'PIM schedules cancelled, group memberships removed, account disabled, sessions revoked. The account itself is KEPT (disabled); PIM never deletes an account -- delete it by hand in Entra if that is wanted.'
                         Date              = (Get-Date).ToString('yyyy-MM-dd')
                     } | Out-Null
                 } catch { Write-Warning "  [Offboard] notice mail failed (offboarding NOT blocked): $($_.Exception.Message)" }
@@ -11050,50 +11053,21 @@ function Invoke-PimAdminOffboarding {
                 $state[$upn] = @{ revokedAtUtc = [datetime]::UtcNow.ToString('o'); offboardDate = "$($row.OffboardDate)" }
                 Save-PimOffboardState -State $state
                 if (Get-Command Write-PimAuditEvent -ErrorAction SilentlyContinue) {
-                    Write-PimAuditEvent -Action 'account.offboard.revoke' -Target $upn -After @{ offboardDate = "$($row.OffboardDate)"; deleteAfterDays = "$($row.DeleteAfterDays)" }
+                    Write-PimAuditEvent -Action 'account.offboard.revoke' -Target $upn -After @{ offboardDate = "$($row.OffboardDate)"; accountKept = $true }
                 }
             }
             $st = $state[$upn]
         }
 
-        # Step 2: delete after the retention window (only when configured).
-        $delDaysRaw = if ($row.PSObject.Properties.Name -contains 'DeleteAfterDays') { "$($row.DeleteAfterDays)".Trim() } else { '' }
-        if ($st -and $st.revokedAtUtc -and -not $st.deletedAtUtc -and $delDaysRaw) {
-            $delDays = 0
-            if ([int]::TryParse($delDaysRaw, [ref]$delDays) -and $delDays -ge 0) {
-                $dueUtc = ([datetime]$st.revokedAtUtc).ToUniversalTime().AddDays($delDays)
-                if ([datetime]::UtcNow -ge $dueUtc) {
-                    if ($global:WhatIfMode) {
-                        Write-Host "  [WHATIF] would DELETE $upn (revoked $($st.revokedAtUtc), retention $delDays day(s) elapsed)" -ForegroundColor Yellow
-                    } else {
-                        try {
-                            $usr = Get-MgUser -UserId $upn -ErrorAction Stop
-                            Remove-MgUser -UserId $usr.Id -ErrorAction Stop
-                            Write-Host "  [Offboard] $upn DELETED (retention $delDays day(s) elapsed). Remove the CSV row to finish." -ForegroundColor Red
-                            $st | Add-Member -NotePropertyName deletedAtUtc -NotePropertyValue ([datetime]::UtcNow.ToString('o')) -Force
-                            $state[$upn] = $st
-                            Save-PimOffboardState -State $state
-                            if (Get-Command Write-PimAuditEvent -ErrorAction SilentlyContinue) {
-                                Write-PimAuditEvent -Action 'account.offboard.delete' -Target $upn -Before @{ revokedAtUtc = "$($st.revokedAtUtc)" } -After @{ retentionDays = $delDays }
-                            }
-                        } catch {
-                            if ("$_" -match 'Request_ResourceNotFound|does not exist') {
-                                Write-Host "  [Offboard] $upn already gone from the tenant." -ForegroundColor DarkGray
-                                $st | Add-Member -NotePropertyName deletedAtUtc -NotePropertyValue ([datetime]::UtcNow.ToString('o')) -Force
-                                $state[$upn] = $st
-                                Save-PimOffboardState -State $state
-                            } else {
-                                Write-Warning "  [Offboard] delete of $upn failed: $($_.Exception.Message)"
-                            }
-                        }
-                    }
-                } else {
-                    Write-Host "  [Offboard] $upn revoked; deletion due $($dueUtc.ToString('yyyy-MM-dd')) UTC." -ForegroundColor Gray
-                }
-            } else {
-                Write-Warning "  [Offboard] DeleteAfterDays '$delDaysRaw' for $upn is not a non-negative integer -- delete step skipped."
-            }
-        }
+        # 🔴 71.21 -- STEP 2 ("delete after the retention window") IS GONE FROM v1 TOO.
+        # Operator, 2026-09-16: "we will newer delete an accounnt, if that is in the code, then turn
+        # if off in the code, as I will not allow that". v1 called Remove-MgUser here once
+        # DeleteAfterDays had elapsed. Removed, not gated: v1 and v2 read the SAME definition rows,
+        # so leaving the capability in the legacy edition would mean the same CSV that is inert under
+        # v2 still deletes accounts under v1 -- the worst possible split.
+        # The retention field is gone with it (operator: "nobody uses it yet ... i dont want it to be
+        # shown as it confuses"), so there is nothing to read and nothing to report here: the admin is
+        # revoked and left DISABLED, and stays that way.
     }
 }
 

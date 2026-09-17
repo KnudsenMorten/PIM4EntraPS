@@ -273,12 +273,19 @@ function Get-PimUpdateSchemaStoreDecision {
     }
     $cur = ("$CurrentVersion".Trim() -replace '^(?i)v', '')
     $tgt = ("$TargetVersion".Trim() -replace '^(?i)v', '')
-    $head = 'updater has no PIM_SqlServer -- schema NOT checked; re-run Deploy-PimUpdateJob'
+    # 2026-09-15 (UPD-15): "re-run Deploy-PimUpdateJob" is no longer the advice. The updater now copies
+    # the Manager's PIM_SqlServer itself (Resolve-PimUpdaterStoreSettings), so the only runs that still
+    # reach here are the two it genuinely cannot self-heal -- an unreadable Manager, or a Manager that
+    # names its store through a secret or vault pointer -- and the detail says which.
+    $head = 'updater has no PIM_SqlServer -- schema NOT checked'
     $why = if ($known) {
-               $where = if ("$($ManagerStore.server)".Trim()) { "$($ManagerStore.server)" } else { "$($ManagerStore.via)" }
-               "$ManagerApp uses a SQL store ($where) but $UpdateJobName has no PIM_SqlServer"
+               if ("$($ManagerStore.server)".Trim()) {
+                   "$ManagerApp uses a SQL store ($($ManagerStore.server)) but $UpdateJobName has no PIM_SqlServer"
+               } else {
+                   "$ManagerApp names its store through $($ManagerStore.via) (a secret or vault pointer the updater cannot copy), and $UpdateJobName has no PIM_SqlServer. Set PIM_SqlServer + PIM_SqlDatabase on $ManagerApp or on $UpdateJobName"
+               }
            } else {
-               "$ManagerApp could not be read, so this environment cannot be proven store-less"
+               "$ManagerApp could not be read, so this environment cannot be proven store-less and its store cannot be copied"
            }
     if ($cur -and $tgt -and $cur -ieq $tgt) {
         return [pscustomobject]@{ mode = 'unverified'; message = $head
@@ -290,4 +297,235 @@ function Get-PimUpdateSchemaStoreDecision {
     return [pscustomobject]@{ mode = 'refuse'; message = $head
         detail = "$why. Moving $from -> $to may need DDL that cannot be verified from here -- NOT rolling."
         errorText = "$head (roll $from -> $to refused: its schema could not be verified)" }
+}
+
+# ---- 2026-09-15 (UPD-15) -- THE UPDATER HEALS ITS OWN STORE SETTINGS ----------------------------
+# MEASURED on EFIF and RIDE: both updaters failed every night from 2026-09-13 with
+#     updater has no PIM_SqlServer -- schema NOT checked; re-run Deploy-PimUpdateJob ... NOT rolling
+# The Manager app in the same resource group named the store the whole time. "Re-run the deploy" is an
+# instruction to a human, at 03:00, for a value this job can read itself with the identity it already
+# holds (it GETs the Manager to find its registry). So it copies the Manager's PIM_SqlServer /
+# PIM_SqlDatabase for THIS run and records them on its own env for the next one.
+# The rule that does NOT relax: only a value that CAN be copied is copied. A Manager that cannot be read,
+# or names its store through a secret / vault pointer, still refuses -- guessing a store is worse than
+# not rolling.
+
+function Resolve-PimUpdaterStoreSettings {
+    <#
+      PURE. Which SQL store this updater run uses, and whether it came from the job or the Manager.
+        -JobServer / -JobDatabase : the updater's own PIM_SqlServer / PIM_SqlDatabase (env or globals)
+        -ManagerStore             : Get-PimAcaStoreSettings of the Manager app
+      Returns { server; database; source = job|manager|none; persist (ordered writes for the job's env);
+                reason }.
+        job      -- the job carries PIM_SqlServer: used as-is (a missing database is taken from the
+                    Manager only when the Manager names the SAME server).
+        manager  -- the job carries none and the Manager names a server: copied, and persist says what
+                    to write back onto the job.
+        none     -- nothing copyable: the Manager is unreadable, store-less, or reaches its store
+                    through a secret / vault pointer. The schema decision then refuses or skips.
+    #>
+    param(
+        [AllowEmptyString()][string]$JobServer,
+        [AllowEmptyString()][string]$JobDatabase,
+        [object]$ManagerStore,
+        [string]$ManagerApp = 'ca-pim-manager'
+    )
+    $js = "$JobServer".Trim(); $jd = "$JobDatabase".Trim()
+    $persist = [ordered]@{}
+    $known = ($null -ne $ManagerStore) -and [bool]$ManagerStore.known
+    $ms = if ($known) { "$($ManagerStore.server)".Trim() } else { '' }
+    $md = if ($known) { "$($ManagerStore.database)".Trim() } else { '' }
+    if ($js) {
+        $db = $jd
+        $why = 'the updater carries PIM_SqlServer'
+        if (-not $db -and $md -and $ms -and ($ms -ieq $js)) { $db = $md; $why = "the updater carries PIM_SqlServer; PIM_SqlDatabase taken from $ManagerApp (same server)" }
+        return [pscustomobject]@{ server = $js; database = $db; source = 'job'; persist = $persist; reason = $why }
+    }
+    if (-not $known) {
+        return [pscustomobject]@{ server = ''; database = $jd; source = 'none'; persist = $persist
+            reason = "the updater carries no PIM_SqlServer and $ManagerApp could not be read -- nothing to copy" }
+    }
+    if (-not [bool]$ManagerStore.hasStore) {
+        return [pscustomobject]@{ server = ''; database = $jd; source = 'none'; persist = $persist
+            reason = "neither the updater nor $ManagerApp names a SQL store" }
+    }
+    if (-not $ms) {
+        return [pscustomobject]@{ server = ''; database = $jd; source = 'none'; persist = $persist
+            reason = "$ManagerApp reaches its store through $($ManagerStore.via), a secret or vault pointer the updater does not copy" }
+    }
+    $persist['PIM_SqlServer'] = $ms
+    $db = if ($md) { $md } else { $jd }
+    if ($md) { $persist['PIM_SqlDatabase'] = $md }
+    [pscustomobject]@{ server = $ms; database = $db; source = 'manager'; persist = $persist
+        reason = "the updater carries no PIM_SqlServer -- using $ManagerApp's store ($ms$(if ($db) { " / $db" })) for this run and recording it on the updater" }
+}
+
+function Save-PimUpdaterStoreSettings {
+    <#
+      Best-effort: write the self-healed PIM_SqlServer / PIM_SqlDatabase onto the updater job's own env,
+      then READ THEM BACK. NEVER throws -- the update this run is doing must not fail because a note for
+      the next run could not be written. Returns { ok; written; reason }.
+      Uses Set-PimAcaJobEnvValue (ARM read-modify-write, the same call that records PIM_UPDATE_LAST_BUILT)
+      and waits out the HTTP 409 an in-flight operation on the job returns.
+      -Sleep is a test seam.
+    #>
+    param(
+        [Parameter(Mandatory)][string]$SubscriptionId,
+        [Parameter(Mandatory)][string]$ResourceGroup,
+        [Parameter(Mandatory)][string]$JobName,
+        [System.Collections.IDictionary]$Writes,
+        [int[]]$RetryDelays = @(10, 20, 40),
+        [scriptblock]$Sleep = { param([int]$Seconds) Start-Sleep -Seconds $Seconds }
+    )
+    $written = New-Object System.Collections.Generic.List[string]
+    if ($null -eq $Writes -or -not $Writes.Count) { return [pscustomobject]@{ ok = $true; written = @(); reason = 'nothing to record' } }
+    try {
+        foreach ($k in @($Writes.Keys)) {
+            $done = $false; $last = ''
+            foreach ($d in @(@(0) + @($RetryDelays))) {
+                if ($d) { & $Sleep $d }
+                try {
+                    [void](Set-PimAcaJobEnvValue -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -JobName $JobName `
+                              -VariableName "$k" -Value "$($Writes[$k])")
+                    $done = $true; break
+                } catch {
+                    $last = "$($_.Exception.Message)"
+                    if ($last -notmatch '(?i)\b409\b|OperationInProgress|active provisioning operation') { break }
+                }
+            }
+            if (-not $done) { return [pscustomobject]@{ ok = $false; written = @($written.ToArray()); reason = "could not write $k`: $last" } }
+            [void]$written.Add("$k")
+        }
+        $job = Invoke-PimArm -Method GET -ApiVersion $script:PimAcaApi `
+                   -Path "/subscriptions/$SubscriptionId/resourceGroups/$ResourceGroup/providers/Microsoft.App/jobs/$JobName"
+        $back = Get-PimAcaStoreSettings -Resource $job
+        foreach ($k in @($Writes.Keys)) {
+            $want = "$($Writes[$k])"
+            $got = if ("$k" -ceq 'PIM_SqlServer') { "$($back.server)" } elseif ("$k" -ceq 'PIM_SqlDatabase') { "$($back.database)" } else { $want }
+            if ($got -cne $want) {
+                return [pscustomobject]@{ ok = $false; written = @($written.ToArray()); reason = "$k read back as '$got', not '$want'" }
+            }
+        }
+        return [pscustomobject]@{ ok = $true; written = @($written.ToArray()); reason = 'written and read back' }
+    } catch {
+        return [pscustomobject]@{ ok = $false; written = @($written.ToArray()); reason = "$($_.Exception.Message)" }
+    }
+}
+
+# ---- 2026-09-15 -- THE SHIPPED SCHEMA FILES REACH EVERY EXISTING STORE ---------------------------
+# MEASURED on EFIF + RIDE after 2.4.360: the updater logged "schema up to date" and rolled, and
+# pim.CentralAdmins.Replicate -- added by a guarded ALTER in sql/platform-schema.sql -- was MISSING on
+# both stores. The updater applied the shipped files only when a LOCKED table was absent, and
+# pim.CentralAdmins is not in the locked conformance schema, so every guarded addition in those files
+# was silently lost on every existing environment while the step reported success.
+# The files are now applied on EVERY run that resolved a store, BEFORE the conformance plan -- behind a
+# store-aware destructive guard, because they are not purely additive: sql/platform-schema.sql carries
+#     IF COL_LENGTH('pim.CentralAdmins','TierLevel') IS NOT NULL ALTER TABLE pim.CentralAdmins DROP COLUMN TierLevel;
+# which is inert on a store without that column and a real data loss on one that has it.
+
+function Get-PimSchemaFileApplyPlan {
+    <#
+      PURE (the column probe is injected). May this shipped schema file run UNATTENDED against this store?
+      Returns { ok; violations; guardedDrops = @{ table; column; exists } }.
+        REFUSED always : DROP TABLE / SCHEMA / DATABASE, TRUNCATE, DELETE FROM, UPDATE, MERGE, sp_rename,
+                         BACKUP / RESTORE -- none belongs in a shipped schema file.
+        DROP COLUMN    : allowed ONLY when guarded by `IF COL_LENGTH('<table>','<column>') IS NOT NULL`
+                         AND -ColumnExists says the column is ABSENT from this store (the statement is
+                         then inert). An unguarded drop, an existing column, or no way to check => refused.
+        Allowed        : CREATE / ALTER ADD, DROP VIEW / CONSTRAINT / INDEX (no rows live in them), INSERT seeds.
+      Comments are stripped first, so prose that says "drop" never trips it.
+      -ColumnExists : scriptblock param([string]$Table, [string]$Column) -> $true / $false (throws = unknown).
+    #>
+    param(
+        [AllowEmptyString()][string]$Sql,
+        [string]$Name = 'schema file',
+        [scriptblock]$ColumnExists
+    )
+    $code = "$Sql" -replace '(?s)/\*.*?\*/', ' ' -replace '(?m)--.*$', ' '
+    $v = New-Object System.Collections.Generic.List[string]
+    $bad = @(
+        @{ rx = '(?i)\bDROP\s+TABLE\b';    why = 'DROP TABLE' }
+        @{ rx = '(?i)\bDROP\s+SCHEMA\b';   why = 'DROP SCHEMA' }
+        @{ rx = '(?i)\bDROP\s+DATABASE\b'; why = 'DROP DATABASE' }
+        @{ rx = '(?i)\bTRUNCATE\b';        why = 'TRUNCATE' }
+        @{ rx = '(?i)\bDELETE\s+FROM\b';   why = 'DELETE' }
+        @{ rx = '(?i)\bUPDATE\s+\w';       why = 'UPDATE' }
+        @{ rx = '(?i)\bMERGE\s+\w';        why = 'MERGE' }
+        @{ rx = '(?i)\bsp_rename\b';       why = 'sp_rename' }
+        @{ rx = '(?i)\bBACKUP\s+(DATABASE|LOG)\b|\bRESTORE\s+DATABASE\b'; why = 'BACKUP/RESTORE' }
+    )
+    foreach ($b in $bad) { if ($code -match $b.rx) { [void]$v.Add("$($b.why) (never allowed in a shipped schema file)") } }
+    $drops = New-Object System.Collections.Generic.List[object]
+    $strip = { param($s) ("$s" -replace '[\[\]]', '').Trim().ToLowerInvariant() }
+    foreach ($m in [regex]::Matches($code, '(?is)ALTER\s+TABLE\s+([\w\.\[\]]+)\s+DROP\s+COLUMN\s+([\w\[\]]+)\s*(,?)')) {
+        $t = & $strip $m.Groups[1].Value; $c = & $strip $m.Groups[2].Value
+        if ($m.Groups[3].Value -eq ',') { [void]$v.Add("DROP COLUMN $t.$c is a multi-column drop (not allowed unattended)"); continue }
+        $before = $code.Substring(0, $m.Index)
+        $g = [regex]::Match($before, "(?is)IF\s+COL_LENGTH\(\s*'([^']+)'\s*,\s*'([^']+)'\s*\)\s+IS\s+NOT\s+NULL\s*$")
+        if (-not $g.Success -or (& $strip $g.Groups[1].Value) -ne $t -or (& $strip $g.Groups[2].Value) -ne $c) {
+            [void]$v.Add("DROP COLUMN $t.$c is not guarded by IF COL_LENGTH('$t','$c') IS NOT NULL"); continue
+        }
+        $exists = $null
+        if ($ColumnExists) { try { $exists = [bool](& $ColumnExists $t $c) } catch { $exists = $null } }
+        [void]$drops.Add([pscustomobject]@{ table = $t; column = $c; exists = $exists })
+        if ($null -eq $exists) { [void]$v.Add("DROP COLUMN $t.$c could not be checked against this store") }
+        elseif ($exists) { [void]$v.Add("DROP COLUMN $t.$c would REMOVE an existing column and its data -- an unattended update never destroys data") }
+    }
+    [pscustomobject]@{ ok = ($v.Count -eq 0); name = $Name; violations = @($v.ToArray()); guardedDrops = @($drops.ToArray()) }
+}
+
+function Get-PimJwtPrincipal {
+    <#
+      PURE. The principal a bearer token was issued to: { oid; appid; tid; idtyp }. Never throws; an
+      unreadable token returns empty strings. Used to NAME the identity that failed to log in to SQL --
+      the token is exactly what SQL saw, so it cannot name the wrong principal.
+    #>
+    param([AllowEmptyString()][AllowNull()][object]$Token)
+    $out = [ordered]@{ oid = ''; appid = ''; tid = ''; idtyp = '' }
+    try {
+        $t = "$Token"
+        $parts = $t.Split('.')
+        if ($parts.Count -lt 2) { return [pscustomobject]$out }
+        $p = $parts[1].Replace('-', '+').Replace('_', '/')
+        while ($p.Length % 4) { $p += '=' }
+        $c = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($p)) | ConvertFrom-Json
+        foreach ($n in @('oid', 'appid', 'tid', 'idtyp')) { if ($c.PSObject.Properties[$n]) { $out[$n] = "$($c.$n)" } }
+        if (-not $out.appid -and $c.PSObject.Properties['azp']) { $out.appid = "$($c.azp)" }
+    } catch { }
+    [pscustomobject]$out
+}
+
+function Get-PimUpdateSchemaLoginRefusal {
+    <#
+      PURE. When the schema step failed because the updater's identity could not LOG IN to SQL, the
+      refusal must say WHO and WHAT TO DO -- not "SCHEMA STEP FAILED: Login failed for user
+      '<token-identified principal>'", which names nobody and reads like a permissions puzzle.
+      Returns $null when -ErrorText is not a login failure; otherwise { message; detail; errorText }.
+      The fix it names is the environment's SQL admin group: every environment's store is administered by
+      a group holding its managed identities and the troubleshooting identity (framework DOCS/REQUIREMENTS
+      4.5), so adding the updater's identity to that group is the one step that makes it able to verify.
+    #>
+    param(
+        [AllowEmptyString()][string]$ErrorText,
+        [AllowEmptyString()][string]$PrincipalObjectId,
+        [AllowEmptyString()][string]$PrincipalAppId,
+        [AllowEmptyString()][string]$SqlServer,
+        [string]$GroupName = 'grp-pim-sql-admins',
+        [string]$UpdateJobName = 'ca-pim-update'
+    )
+    $e = "$ErrorText"
+    if ($e -notmatch '(?i)Login failed for user|\b18456\b|token-identified principal|not currently configured to accept this token|Cannot open server .* requested by the login') { return $null }
+    $g = if ("$GroupName".Trim()) { "$GroupName".Trim() } else { 'grp-pim-sql-admins' }
+    $oid = "$PrincipalObjectId".Trim()
+    $who = if ($oid) { "$UpdateJobName's managed identity (object id $oid$(if ("$PrincipalAppId".Trim()) { ", app id $("$PrincipalAppId".Trim())" }))" }
+           else { "$UpdateJobName's managed identity (object id not readable here -- az containerapp job show -n $UpdateJobName --query identity.principalId)" }
+    $srv = if ("$SqlServer".Trim()) { "$SqlServer".Trim() } else { 'the SQL server' }
+    $msg = "the updater's identity cannot log in to $srv -- schema NOT checked"
+    $detail = ("$who was refused by $srv. Add it to the SQL admin group '$g' (tools/setup/Initialize-PimSqlAdminGroup.ps1, " +
+               "or re-run tools/setup/Deploy-PimUpdateJob.ps1, which ensures the membership when '$g' is the server's Entra admin). NOT rolling.")
+    [pscustomobject]@{
+        message   = $msg
+        detail    = $detail
+        errorText = "updater identity $(if ($oid) { $oid } else { '<unknown>' }) cannot log in to $srv -- add it to SQL admin group '$g' (roll refused: schema not verified)"
+    }
 }

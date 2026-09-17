@@ -1843,7 +1843,19 @@
         // is Owners -> SponsorUpn -> the Department contact), so they belong where access is
         // granted, not buried in Settings. Deep-links to the existing Settings section.
         { tab: 'settings',   label: 'Departments & owners', anchor: 'setDeptsTbl', desc: 'Who sponsors a delegation, and who therefore receives its approvals and mail. A department, not a named person, so it survives reorganisations' },
-        { tab: 'grid',       label: 'All records',           desc: 'The raw records behind every screen, in a table' },
+        // 🔴 71.26 -- THE DELEGATION GRID, WITH A NAME THAT SAYS WHAT IT IS FOR (operator 2026-09-16:
+        // *"i am missing the grid overview (maybe it is in there, so i quickly can change an existing
+        // delegation like eligibility from 90 to 365 or change the policy to approval. i dont see that
+        // grid overview somewhere in the menu."*). It WAS in there -- as "All records", which names the
+        // DATA and not the JOB, so the one operator who needed it could not find it. Same table, same
+        // queue-then-commit, narrowed to the assignment entities and labelled with the task.
+        { tab: 'grid', gridScope: 'delegations', label: 'Delegations — edit in a table',
+          // 🪤 The word "queue" is deliberately NOT in this description. Test-PimQueueCounterAndTap
+          // asserts that exactly ONE menu entry leads to the pending-changes queue, by looking for
+          // that word across the nav -- and a second entry that merely MENTIONS it reads, to that
+          // check and to a person scanning the menu, as a second way to the same list.
+          desc: 'Every existing delegation in one table: change an eligibility from 90 to 365 days, or switch its policy to one that needs approval. Edits are staged in Pending changes like any other.' },
+        { tab: 'grid', gridScope: '',            label: 'All records',           desc: 'The raw records behind every screen, in a table' },
       ] },
     { id: 'change', label: 'Pending changes',
       title: 'Check, review and commit what is waiting',
@@ -1925,7 +1937,9 @@
   function navItemSpec(it) {
     return (typeof it === 'string')
       ? { tab: it, label: null, desc: '', anchor: null }
-      : { tab: it.tab, label: it.label || null, desc: it.desc || '', anchor: it.anchor || null };
+      // 71.26: gridScope opens the records table narrowed to one family of entities (the
+      // delegation grid entry). It is carried like nchor -- a deliberate, marked deep-link.
+      : { tab: it.tab, label: it.label || null, desc: it.desc || '', anchor: it.anchor || null, gridScope: it.gridScope || null };
   }
 
   // Scroll a tab's section into view after the tab has rendered. Tabs render asynchronously, so
@@ -2002,6 +2016,7 @@
         // A section deep-link is marked in the DOM so the nav audit can tell a DELIBERATE
         // cross-link from an accidentally duplicated view (see render-and-check.js rule 4).
         if (spec.anchor) { item.dataset.anchor = spec.anchor; }
+        if (spec.gridScope) { item.dataset.gridScope = spec.gridScope; }
         if (tabEl.title) item.title = tabEl.title;
         // IMP-16: plain label, plus the description ON the item so a reader who does not know
         // the product can tell what is behind it without hovering anything.
@@ -2010,7 +2025,7 @@
             '<span class="nav-item-badge" aria-hidden="true"></span>' +
           '</span>' +
           (spec.desc ? '<span class="nav-item-desc">' + escapeHtml(spec.desc) + '</span>' : '');
-        item.addEventListener('click', () => { switchTab(tabKey); closeAllNavGroups(); navScrollToAnchor(spec.anchor); });
+        item.addEventListener('click', () => { if (spec.gridScope !== undefined) setGridScope(spec.gridScope); switchTab(tabKey); closeAllNavGroups(); navScrollToAnchor(spec.anchor); });
         menu.appendChild(item);
         wired++;
         groupItems++;
@@ -2284,6 +2299,8 @@
     catch (e) { container.innerHTML = stateError('Could not read admin accounts', String(e.message || e)); return; }
     acctGridState.rows = (d && d.admins) || [];
     acctGridState.meta = d;
+    await pimTenantMode();   // §71 / operator 2026-09-15: sync surfaces follow the tenant mode
+    const syncCol = pimIsMspMaster() ? 'master' : (pimIsMspManaged() ? 'managed' : '');
 
     const f = String(acctGridState.filter || '').trim().toLowerCase();
     const rows = f ? acctGridState.rows.filter(a =>
@@ -2323,7 +2340,20 @@
     }
 
     h += '<table class="set-table" style="max-width:1180px;"><tr>' +
-         '<th>Admin</th><th>Type</th><th>Status</th><th>TAP</th><th>Mail forward</th><th>Manager</th><th>Sync to slaves</th><th style="min-width:300px;">Actions</th></tr>';
+         '<th>Admin</th><th>Type</th>' +
+         // 🔴 71.24 (operator 2026-09-16: "in the admin overview i need to see which sponsor dept an
+         // admin is linked to. this is considered the dept that sponsor him and define approval for
+         // example if he must be enabled/disabled"). The department is not a label — it decides who
+         // approves for this admin and where its mail (including its TAP) is delivered.
+         '<th title="The department that sponsors this admin. Its OWNERS approve for this admin and receive its mail, including its Temporary Access Pass. Hover a department to see them.">Sponsor dept</th>' +
+         '<th>Status</th>' +
+         // 🔴 71.23 (operator 2026-09-16: "i need to have this field on the admin overview so i cna
+         // devine an AutoDisableDate"). The date the engine disables this account -- and nothing more
+         // than disable: PIM never deletes an account.
+         '<th title="On this date the engine DISABLES the account, revokes its sessions and removes its PIM access. PIM never deletes accounts.">Auto-disable</th>' +
+         '<th>TAP</th><th>Mail forward</th><th>Manager</th>' +
+         (syncCol === 'master' ? '<th>Sync to slaves</th>' : (syncCol === 'managed' ? '<th>From MSP master</th>' : '')) +
+         '<th style="min-width:300px;">Actions</th></tr>';
     rows.forEach(a => {
       const busy = acctGridState.busy === a.userPrincipalName;
       const st = String(a.accountStatus || 'Enabled');
@@ -2336,22 +2366,32 @@
           '<div style="color:#57606a;font-size:11px;font-family:ui-monospace,monospace;">' + escapeHtml(a.userPrincipalName) + '</div></td>' +
         '<td style="font-size:11.5px;">' + escapeHtml(a.adminType || '') +
           (a.environment ? '<div style="color:#57606a;font-size:10.5px;">' + escapeHtml(a.environment) + '</div>' : '') + '</td>' +
+        '<td style="font-size:11.5px;" class="acctDeptCell">' + acctSponsorDeptCell(a) + '</td>' +
         '<td style="font-size:11.5px;color:' + stColor + ';font-weight:600;">' + escapeHtml(st) +
-          (flagged ? '<div style="color:#bc4c00;font-size:10.5px;font-weight:400;">flagged for deletion ' + escapeHtml(a.offboardDate) + '</div>' : '') + '</td>' +
+          // 71.21: never the word "deletion" -- PIM keeps the account, disabled, for ever.
+          (flagged ? '<div style="color:#bc4c00;font-size:10.5px;font-weight:400;" title="Offboarding disables the account, revokes its sessions and removes its PIM access. PIM never deletes the account itself.">marked for manual removal</div>' : '') + '</td>' +
+        '<td style="font-size:11.5px;" class="acctAutoDisableCell">' + acctAutoDisableCell(a) + '</td>' +
         '<td style="font-size:11.5px;">' + (a.createTAP ? 'enforced' : '<span style="color:#8c959f;" title="TargetPlatform=AD: a TAP is Entra-only">n/a (AD only)</span>') + '</td>' +
         // Operator, 2026-09-12: "mail forward must be shown above in the list" -- where this admin's
         // mail goes should be readable in the grid, not only inside Edit.
         '<td style="font-size:11.5px;">' + acctMailForwardCell(a) + '</td>' +
         '<td style="font-size:11.5px;">' + (a.managerEmail ? escapeHtml(a.managerEmail) : '<span style="color:#cf222e;">none</span>') + '</td>' +
-        '<td style="font-size:11.5px;" class="acctSyncCell">' + acctSyncCell(a) + '</td>' +
+        (syncCol === 'master' ? '<td style="font-size:11.5px;" class="acctSyncCell">' + acctSyncCell(a) + '</td>' :
+         syncCol === 'managed' ? '<td style="font-size:11.5px;" class="acctFromMaster">' + (a.source === 'central'
+            ? '<span style="color:#8250df;" title="Received from the MSP master -- read-only here">received from the MSP master (read-only)</span>'
+            : '<span style="color:#8c959f;">this tenant&rsquo;s own admin</span>') + '</td>' : '') +
         '<td>' +
           '<button class="btn-sec acctTap"    data-upn="' + escapeHtml(a.userPrincipalName) + '"' + dis(a.canResetTap) +
             (a.resetTapWhy ? ' title="' + escapeHtml(a.resetTapWhy) + '"' : '') + ' style="font-size:11px;">Reset TAP</button> ' +
           '<button class="btn-sec acctRevoke" data-upn="' + escapeHtml(a.userPrincipalName) + '"' + dis(a.canRevokeSessions) +
             ' title="Invalidate every refresh token. The account is NOT disabled; the user simply signs in again." style="font-size:11px;">Revoke sessions</button> ' +
-          '<button class="btn-sec acctFlag"   data-upn="' + escapeHtml(a.userPrincipalName) + '"' + dis(acctGridState.meta.canFlagDelete && !flagged && !a.readOnly) +
-            ' title="Raise an offboard request. A DIFFERENT administrator must approve it before anything happens." style="font-size:11px;color:#bc4c00;">' +
-            (flagged ? 'Flagged' : 'Flag for deletion') + '</button> ' +
+          // 🔴 71.21 -- THE BUTTON NO LONGER SAYS "DELETION" (operator, 2026-09-16: "we will newer delete an
+          // accounnt"). It stages the RETIRE/OFFBOARD path only: disable, revoke sessions, strip PIM access.
+          // The account object itself is never deleted by PIM -- a person removes it by hand in Entra if they
+          // want it gone, which is exactly what "Mark for manual removal" means.
+          '<button class="btn-sec acctRetire" data-upn="' + escapeHtml(a.userPrincipalName) + '"' + dis((acctGridState.meta.canRetire || acctGridState.meta.canFlagDelete) && !flagged && !a.readOnly) +
+            ' title="Raise an offboard request: disable the account, revoke its sessions and remove its PIM access. PIM NEVER deletes the account — a person removes it by hand in Entra. A DIFFERENT administrator must approve the request before anything happens." style="font-size:11px;color:#bc4c00;">' +
+            (flagged ? 'Marked' : 'Mark for manual removal') + '</button> ' +
           // §62.8 -- EDIT BELONGS HERE, with the other per-admin verbs (operator: "edit button is
           // wrong place, it must be per user in the top"). It was on the TAP table below, which is
           // a different, TAP-only list -- so the one place an operator manages an admin did not
@@ -2362,7 +2402,7 @@
             ' title="Give this admin access — opens the delegation wizard for this person." style="font-size:11px;">Give access →</button>' +
         '</td></tr>' +
         // The inline editor for THIS admin, collapsed until Edit is pressed.
-        '<tr class="acctEditRowTop" id="acctEditTop-' + escapeHtml(a.userPrincipalName) + '" hidden><td colspan="8" style="background:#f6f8fa;padding:10px 12px;">' +
+        '<tr class="acctEditRowTop" id="acctEditTop-' + escapeHtml(a.userPrincipalName) + '" hidden><td colspan="' + (syncCol ? 10 : 9) + '" style="background:#f6f8fa;padding:10px 12px;">' +
           '<div style="display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end;">' +
           acctEditFieldsHtml(a) +
           '<button class="btn acctEditSaveTop" data-upn="' + escapeHtml(a.userPrincipalName) + '">Save</button>' +
@@ -2417,8 +2457,19 @@
       '</select>');
     h += lbl('Manager email (fallback)',
       '<input class="acctEditFldTop" data-k="managerEmail" type="email" placeholder="manager@company.com" value="' + esc(a.managerEmail || '') + '" style="width:200px;">');
+    // 🔴 71.23 -- AUTO-DISABLE DATE, editable right here (operator: "i need to have this field on the
+    // admin overview so i cna devine an AutoDisableDate"). The effect is spelled out under the field,
+    // because "auto-disable" has to be unambiguous: it disables, and PIM never deletes an account.
+    const add = String(a.autoDisableDate || a.offboardDate || '').trim();
+    h += lbl('Auto-disable date',
+      '<input class="acctEditFldTop" data-k="autoDisableDate" type="text" placeholder="yyyy-mm-dd" value="' + esc(add.length > 10 ? add.slice(0, 10) : add) + '" style="width:130px;">' +
+      '<div style="color:#57606a;font-size:10.5px;max-width:240px;">On this date the account is <b>disabled</b>, its sessions revoked and its PIM access removed. <b>PIM never deletes accounts.</b> Leave blank for none.</div>' +
+      (a.autoDisableConflict ? '<div style="color:#cf222e;font-size:10.5px;max-width:240px;">This row also carries the old <code>OffboardDate</code> with a different date, so the engine refuses it. Saving here clears the old column.</div>' : ''));
     // REQUIREMENTS 68.6 row 35 -- MSP downlink, defined on the admin: sync on/off (ManagementMode),
     // which slaves (Ring), narrowed by slave tags (Target; none ticked = every slave in the ring).
+    // Only on the MSP master (operator 2026-09-15): in Single mode there are no slaves, and a managed tenant never
+    // edits what the master sends. The server refuses these fields off the master as well.
+    if (!pimIsMspMaster()) return h;
     const mode = String(a.managementMode || '').trim().toLowerCase();
     const ring = String(a.ring || '').trim();
     h += lbl('Sync to slaves (MSP)',
@@ -2441,6 +2492,184 @@
     if (!_mspTagsPromise) _mspTagsPromise = api('GET', '/api/msp/tenant-tags').catch(() => ({ known: false, tags: [] }));
     return _mspTagsPromise;
   }
+  // ===================================================================
+  // §71 -- MSP REPLICATION TARGETING (framework MSP-4 SURFACE). Per row: Replicate (No / Yes / Follow),
+  // Ring, Target (tag:<key:value> any-of, tag:a+b all-of, tenant:<id>). MSP MASTER ONLY: the context
+  // endpoint says whether this tenant is the master, and nothing below renders when it is not. The reach
+  // ("this will reach: N tenants") is ALWAYS the server's plan (POST /api/msp/replication/reach) -- the
+  // browser never estimates reach, because an estimate could disagree with what the tenants receive.
+  // ===================================================================
+  // 🔒 THE ONE TENANT-MODE SOURCE for every MSP sync / replication surface (operator 2026-09-15: "it should show in
+  // msp master/slave mode ... not relevant for single mode"). It is the SAME answer the header mode badge shows --
+  // GET /api/settings/scenario -> mode.key (single | msp-master | slave-local | slave-central) -- not a second guess.
+  //   master  -> the surfaces are shown and editable
+  //   managed -> authoring is hidden; at most a read-only "received from the MSP master" indicator
+  //   single  -> hidden entirely
+  // Fail CLOSED: an unreadable mode is 'single', which hides every sync surface. The server refuses the writes too.
+  let _pimModePromise = null;
+  let _pimModeKey = null;
+  function pimTenantMode() {
+    if (!_pimModePromise) {
+      _pimModePromise = (isServer ? api('GET', '/api/settings/scenario') : Promise.resolve(null))
+        .then(s => { _pimModeKey = (s && s.mode && s.mode.key) ? String(s.mode.key) : 'single'; return _pimModeKey; })
+        .catch(() => { _pimModeKey = 'single'; return _pimModeKey; });
+    }
+    return _pimModePromise;
+  }
+  function pimIsMspMaster()  { return _pimModeKey === 'msp-master'; }
+  function pimIsMspManaged() { return /^slave/.test(String(_pimModeKey || '')); }
+  let _mspReplCtxPromise = null;
+  let _mspReplCtx = null;   // resolved context, or null until loaded
+  const REPL_KIND = {
+    'Account-Definitions-Admins':'admin', 'PIM-Assignments-Admins':'membership',
+    'PIM-Definitions-Roles':'group', 'PIM-Definitions-Organization':'group', 'PIM-Definitions-Departments':'group',
+    'PIM-Definitions-Projects':'group', 'PIM-Definitions-CrossOrg':'group', 'PIM-Definitions-Processes':'group',
+    'PIM-Definitions-Tasks':'group', 'PIM-Definitions-Services':'group',
+    'PIM-Assignments-Groups':'nesting', 'PIM-Assignments-Roles-Groups':'binding',
+    'PIM-Assignments-Roles-AUs':'resource', 'PIM-Assignments-Azure-Resources':'resource', 'PIM-Assignments-Workloads':'resource'
+  };
+  function mspReplicationContext() {
+    if (!_mspReplCtxPromise) {
+      // master only when BOTH the tenant mode (the badge's source) and the server's replication context say so
+      _mspReplCtxPromise = pimTenantMode().then(key => {
+        if (key !== 'msp-master') { _mspReplCtx = { master: false, mode: key, tenants: [], tags: [] }; return _mspReplCtx; }
+        return api('GET', '/api/msp/replication/context')
+          .then(d => { _mspReplCtx = (d && typeof d === 'object') ? Object.assign({}, d, { master: !!d.master, mode: key }) : { master: false, mode: key, tenants: [], tags: [] }; return _mspReplCtx; })
+          .catch(() => { _mspReplCtx = { master: false, mode: key, tenants: [], tags: [] }; return _mspReplCtx; });
+      });
+    }
+    return _mspReplCtxPromise;
+  }
+  function replIsMaster() { return !!(_mspReplCtx && _mspReplCtx.master); }
+  // A column the grid must not show on a tenant that is not the master (the server strips it too).
+  function replHiddenCol(base, col) {
+    const kind = REPL_KIND[base];
+    if (!kind || replIsMaster()) return false;
+    // not the master: no Replicate / Ring / Target anywhere, and no ManagementMode (the admin's sync switch)
+    return col === 'Replicate' || col === 'Ring' || col === 'Target' || (kind === 'admin' && col === 'ManagementMode');
+  }
+  // Target <-> picker state. Unknown terms (all, *, bare words kept as tags) round-trip untouched.
+  function replParseTarget(t) {
+    const st = { tags: [], allOf: false, tenants: [], keep: [] };
+    String(t || '').split(/[;,]/).map(x => x.trim()).filter(Boolean).forEach(tok => {
+      if (/^tenant:/i.test(tok)) { st.tenants.push(tok.slice(7).trim()); return; }
+      if (/^(all|\*|none)$/i.test(tok)) { st.keep.push(tok.toLowerCase()); return; }
+      const tag = tok.replace(/^tag:/i, '').trim();
+      if (tag.indexOf('+') >= 0) { st.allOf = true; tag.split('+').map(x => x.trim()).filter(Boolean).forEach(p => { if (st.tags.indexOf(p) < 0) st.tags.push(p); }); }
+      else if (st.tags.indexOf(tag) < 0) st.tags.push(tag);
+    });
+    return st;
+  }
+  function replTargetString(st) {
+    const out = (st.keep || []).slice();
+    const tags = (st.tags || []).filter(Boolean);
+    if (tags.length) { if (st.allOf && tags.length > 1) out.push('tag:' + tags.join('+')); else tags.forEach(t => out.push('tag:' + t)); }
+    (st.tenants || []).filter(Boolean).forEach(id => out.push('tenant:' + id));
+    return out.join(',');
+  }
+  // Grammar only (mirrors Test-PimAdminTargetSelector's malformed check); the server re-validates.
+  function replTargetValid(t) {
+    const guid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+    return String(t || '').split(/[;,]/).map(x => x.trim()).filter(Boolean).every(tok => {
+      if (/^(all|\*|none)$/i.test(tok)) return true;
+      if (/^tenant:/i.test(tok)) return guid.test(tok.slice(7).trim());
+      const tag = tok.replace(/^tag:/i, '').trim();
+      return !!tag && tag.split('+').every(p => /^[A-Za-z0-9._:-]+$/.test(p.trim()));
+    });
+  }
+  function replModeOptions(kind) {
+    if (kind === 'admin') return [ { value:'No', label:'No -- not replicated (local)' }, { value:'Yes', label:'Yes -- replicated to slaves (msp)' } ];
+    const blank = kind === 'resource' ? '(blank) -- not replicated (tenant-scoped resource)' : '(blank) -- Follow (default)';
+    return [ { value:'', label: blank }, { value:'Follow', label:'Follow -- only when a replicated row needs it' },
+             { value:'Yes', label:'Yes -- replicate on its own' }, { value:'No', label:'No -- never replicate (MSP-local)' } ];
+  }
+  // Server reach for draft rows: [{ entity, row }] -> response. Debounced per caller key.
+  const _replReachTimers = {};
+  function replRequestReach(key, body, cb) {
+    clearTimeout(_replReachTimers[key]);
+    _replReachTimers[key] = setTimeout(() => {
+      api('POST', '/api/msp/replication/reach', body).then(cb).catch(e => cb({ error: (e && e.message) || 'reach failed' }));
+    }, 250);
+  }
+  // The wizard "Replication" section. opts: { entity, kind, row: () => draft row (without the §71 fields) }.
+  // Renders NOTHING unless this tenant is the MSP master. State lives on s.repl so a re-render keeps it.
+  function wuxReplicationSection(s, opts) {
+    const host = document.createElement('div');
+    host.className = 'wiz-repl';
+    host.style.cssText = 'display:none; border-top:1px solid #d0d7de; margin-top:12px; padding-top:10px; font-size:12px;';
+    mspReplicationContext().then(ctx => {
+      if (!ctx || !ctx.master) { host.remove(); return; }
+      const kind = opts.kind || REPL_KIND[opts.entity] || 'group';
+      if (!s.repl) {
+        const cur = replParseTarget(opts.initialTarget || '');
+        s.repl = { used: false, replicate: opts.initialReplicate || (kind === 'admin' ? (s.managementMode === 'msp' ? 'Yes' : 'No') : ''),
+                   ring: opts.initialRing != null ? String(opts.initialRing) : (kind === 'admin' ? String(s.ring || '') : ''),
+                   tags: cur.tags, allOf: cur.allOf, tenants: cur.tenants, keep: cur.keep };
+      }
+      const r = s.repl;
+      const tags = (ctx.tags || []).slice();
+      r.tags.forEach(t => { if (!tags.some(x => x.toLowerCase() === t.toLowerCase())) tags.push(t); });
+      const tenants = ctx.tenants || [];
+      host.style.display = '';
+      host.innerHTML =
+        '<div style="font-weight:600;color:#24292f;margin-bottom:4px;">Replication to managed tenants <span style="font-weight:400;color:#57606a;">(MSP master)</span></div>' +
+        '<div style="color:#57606a;margin-bottom:6px;">Reaches a tenant when Replicate is not No <b>and</b> the ring admits it <b>and</b> the target matches. A group another replicated row needs is included anyway, with a warning.</div>' +
+        '<label style="margin-right:12px;">Replicate <select class="repl-mode">' + replModeOptions(kind).map(o => '<option value="' + escapeHtml(o.value) + '"' + (o.value === r.replicate ? ' selected' : '') + '>' + escapeHtml(o.label) + '</option>').join('') + '</select></label>' +
+        '<label>Ring <select class="repl-ring">' + ['', '0', '1', '2'].map(v => '<option value="' + v + '"' + (v === r.ring ? ' selected' : '') + '>' + (v === '' ? (kind === 'admin' ? '-- none --' : '(blank) -- every ring') : 'Ring ' + v) + '</option>').join('') + '</select></label>' +
+        '<div style="margin-top:6px;">Tags <span style="color:#57606a;">(none ticked = every tenant the ring admits)</span> ' +
+          '<label style="margin-left:8px;white-space:nowrap;"><input type="checkbox" class="repl-allof"' + (r.allOf ? ' checked' : '') + '> tenant must carry ALL ticked tags</label></div>' +
+        '<div class="repl-tags">' + (tags.length ? tags.map(t => '<label style="margin-right:10px;white-space:nowrap;"><input type="checkbox" class="repl-tag" value="' + escapeHtml(t) + '"' + (r.tags.some(x => x.toLowerCase() === t.toLowerCase()) ? ' checked' : '') + '> ' + escapeHtml(t) + '</label>').join('') : '<span style="color:#8c959f;">no managed tenant carries a tag yet</span>') + '</div>' +
+        '<div style="margin-top:6px;">Specific tenants</div>' +
+        '<div class="repl-tenants">' + (tenants.length ? tenants.map(t => '<label style="margin-right:10px;white-space:nowrap;" title="ring ' + escapeHtml(String(t.ring)) + (t.tags && t.tags.length ? ' -- ' + escapeHtml(t.tags.join(', ')) : '') + '"><input type="checkbox" class="repl-tenant" value="' + escapeHtml(t.tenantId) + '"' + (r.tenants.some(x => x.toLowerCase() === String(t.tenantId).toLowerCase()) ? ' checked' : '') + '> ' + escapeHtml(t.name) + '</label>').join('') : '<span style="color:#8c959f;">no managed tenants registered</span>') + '</div>' +
+        '<div class="repl-target" style="margin-top:6px;color:#57606a;"></div>' +
+        '<div class="repl-reach" style="margin-top:6px;font-weight:600;">This will reach: …</div>' +
+        '<ul class="repl-warn" style="margin:4px 0 0 16px;padding:0;color:#9a6700;"></ul>';
+      const q = (sel) => host.querySelector(sel);
+      const refresh = () => {
+        r.used = true;
+        r.replicate = q('.repl-mode').value; r.ring = q('.repl-ring').value; r.allOf = q('.repl-allof').checked;
+        r.tags = Array.from(host.querySelectorAll('.repl-tag')).filter(c => c.checked).map(c => c.value);
+        r.tenants = Array.from(host.querySelectorAll('.repl-tenant')).filter(c => c.checked).map(c => c.value);
+        if (kind === 'admin') { s.managementMode = (r.replicate === 'Yes') ? 'msp' : 'local'; if (r.ring !== '') s.ring = r.ring; }
+        const tgt = replTargetString(r);
+        q('.repl-target').textContent = 'Target: ' + (tgt || '(blank -- every tenant the ring admits)');
+        const row = Object.assign({}, (opts.row && opts.row()) || {}, wuxReplicationFields(s, kind, true));
+        replRequestReach('wiz', { draft: [ { entity: opts.entity, row } ] }, (d) => {
+          const reachEl = q('.repl-reach'), warnEl = q('.repl-warn');
+          if (!reachEl) return;
+          if (!d || d.error || d.master === false) { reachEl.textContent = 'This will reach: ' + ((d && d.error) ? 'unknown (' + d.error + ')' : 'n/a'); return; }
+          const one = (d.rows || []).filter(x => x.source === 'draft')[0] || null;
+          if (!one) { reachEl.textContent = 'This will reach: 0 tenant(s)'; return; }
+          reachEl.textContent = 'This will reach: ' + one.count + ' of ' + one.tenantCount + ' tenant(s)';
+          reachEl.title = (one.tenants || []).join(', ') || 'no tenant';
+          // only the warnings about THIS row: its own group, or a dependent that names this row
+          const dTag = String(row.GroupTag || row.TargetGroupTag || '').toLowerCase();
+          const dUser = String(row.UserName || row.Username || '').split('@')[0].toLowerCase();
+          const mine = (d.warnings || []).filter(w => (dTag && (String(w.GroupTag || '').toLowerCase() === dTag || String(w.dependent || '').toLowerCase().indexOf(dTag) >= 0)) ||
+                                                   (dUser && String(w.dependent || '').toLowerCase().indexOf(dUser) >= 0));
+          const msgs = [].concat((one.errors || []).map(e => 'Refused: ' + e), (one.fieldWarnings || []), mine.map(w => w.reason));
+          warnEl.innerHTML = msgs.map(m => '<li>' + escapeHtml(m) + '</li>').join('');
+        });
+      };
+      host.querySelectorAll('select, input').forEach(el => { el.onchange = refresh; });
+      refresh();
+    });
+    return host;
+  }
+  // The §71 fields to stage. {} on a tenant that is not the master, or when the section was never shown.
+  function wuxReplicationFields(s, kind, forPreview) {
+    if (!replIsMaster() || !s || !s.repl || (!s.repl.used && !forPreview)) return {};
+    const r = s.repl;
+    const tgt = replTargetString(r);
+    if (kind === 'admin') {
+      const mode = (s.managementMode === 'msp') ? 'Yes' : 'No';
+      const o = { Replicate: mode, Ring: String(s.ring || r.ring || '') };
+      if (mode === 'Yes') o.Target = tgt;
+      return o;
+    }
+    return { Replicate: r.replicate || '', Ring: r.ring || '', Target: tgt };
+  }
+
   // Tokens of a Target selector that are NOT tags (tenant:<id>, all, none) are kept as they are; only tags are ticked.
   function acctTargetTokens(t) {
     return String(t || '').split(/[;,]/).map(x => x.trim()).filter(Boolean);
@@ -2486,6 +2715,61 @@
     const tags = acctTargetTags(a.target);
     return 'msp &middot; ring ' + escapeHtml(ring) + ' &middot; ' + (tags.length ? 'tags: ' + escapeHtml(tags.join(', ')) : 'all slaves in the ring');
   }
+  // 🔴 71.24 -- the Sponsor department cell (§62: "SPONSOR IS A DEPARTMENT, NOT A PERSON").
+  // Two DIFFERENT gaps, shown differently because they are fixed in different places:
+  //   * no department on the admin      -> fix the ADMIN's row (Edit, here)
+  //   * department with no owners       -> fix the DEPARTMENT (Access > Departments & owners)
+  // And a third state that is not a gap at all: the owner index could not be read, in which case
+  // the cell says "not checked". Reporting a gap that was never measured is how a screen gets
+  // ignored — the same failure the TAP "Sends to" column had before §71.19.
+  function acctSponsorDeptCell(a) {
+    const esc = escapeHtml;
+    const dept = String(a.department || '').trim();
+    if (!dept) {
+      return '<span style="color:#cf222e;font-weight:600;" title="No sponsor department. Nobody is defined to approve for this admin, and its mail (including its TAP) has no recipient. Set it with Edit.">none</span>';
+    }
+    const owners = Array.isArray(a.departmentOwners) ? a.departmentOwners.filter(o => String(o || '').trim()) : [];
+    let sub = '';
+    if (!a.departmentKnown) {
+      sub = '<div style="color:#8c959f;font-size:10.5px;">owners not checked</div>';
+    } else if (!owners.length) {
+      sub = '<div style="color:#cf222e;font-size:10.5px;" title="This department has no Owners, so there is nobody to approve for this admin and nowhere to deliver its mail. Set Owners on the department under Access &rarr; Departments &amp; owners.">no owners &mdash; set them on the department</div>';
+    } else {
+      const shown = owners.slice(0, 3).join(', ') + (owners.length > 3 ? ', +' + (owners.length - 3) + ' more' : '');
+      sub = '<div style="color:#57606a;font-size:10.5px;" title="' + esc(owners.join('\n')) + '">' + esc(owners.length) + ' owner' + (owners.length === 1 ? '' : 's') + ': ' + esc(shown) + '</div>';
+    }
+    return '<span style="font-weight:600;">' + esc(dept) + '</span>' + sub;
+  }
+
+  // 🔴 71.23 -- the Auto-disable cell. Operator, 2026-09-16: "flow 2 i need to have this field on
+  // the admin overview so i cna devine an AutoDisableDate (instead of OffboardDate). As we will not
+  // offboard but disable only for now."
+  // What it has to make obvious, at a glance, without opening anything:
+  //   * the date, if there is one, and that the effect is DISABLE (never delete);
+  //   * that a date already in the past should have taken effect -- so if the account is still
+  //     Enabled, something refused, and the operator can go look;
+  //   * a date landing soon, so it is not a surprise;
+  //   * a row still using the OLD column name, so it gets renamed;
+  //   * a row carrying BOTH names with different dates -- which the engine refuses outright, and
+  //     which would otherwise look exactly like a normal scheduled date.
+  function acctAutoDisableCell(a) {
+    const esc = escapeHtml;
+    if (a.autoDisableConflict) {
+      return '<span style="color:#cf222e;font-weight:600;" title="' + esc(a.autoDisableWhy || '') + '">conflict &mdash; not applied</span>' +
+             '<div style="color:#cf222e;font-size:10.5px;">two different dates (AutoDisableDate + OffboardDate). Clear one.</div>';
+    }
+    const d = String(a.autoDisableDate || a.offboardDate || '').trim();
+    if (!d) return '<span style="color:#8c959f;" title="No auto-disable date. This account stays enabled until someone sets a date or changes its status.">&mdash;</span>';
+    const short = d.length > 10 ? d.slice(0, 10) : d;
+    let colour = '#57606a', note = '';
+    if (a.autoDisablePast) { colour = '#cf222e'; note = 'in the past &mdash; the engine should have disabled this account'; }
+    else if (a.autoDisableSoon) { colour = '#bc4c00'; note = 'due within 14 days'; }
+    let h = '<span style="color:' + colour + ';font-weight:600;" title="On this date the engine disables the account, revokes its sessions and removes its PIM access. PIM never deletes accounts.">' + esc(short) + '</span>';
+    if (note) h += '<div style="color:' + colour + ';font-size:10.5px;font-weight:400;">' + note + '</div>';
+    if (a.autoDisableLegacy) h += '<div style="color:#bc4c00;font-size:10.5px;" title="' + esc(a.autoDisableWhy || '') + '">from the old column OffboardDate &mdash; rename it</div>';
+    return h;
+  }
+
   function acctMailForwardCell(a) {
     const on = /^\s*(true|yes|1)\s*$/i.test(String(a.forwardMailsToContact || ''));
     const addr = String(a.mailForwardAddress || '').trim();
@@ -2584,7 +2868,7 @@
     if (nw) nw.onclick = () => { wizardAdmin(); };
     document.querySelectorAll('.acctRevoke').forEach(b => { b.onclick = () => acctRevokeSessions(b.dataset.upn); });
     document.querySelectorAll('.acctTap').forEach(b => { b.onclick = () => resetAdminTap(b.dataset.upn); });
-    document.querySelectorAll('.acctFlag').forEach(b => { b.onclick = () => acctFlagForDeletion(b.dataset.upn); });
+    document.querySelectorAll('.acctRetire').forEach(b => { b.onclick = () => acctMarkForManualRemoval(b.dataset.upn); });
     // §35.6: two surfaces, ONE workflow. This jump is what stops the grid and the wizard from
     // being two disconnected tools -- without it the operator leaves here, finds the wizard, and
     // re-identifies the same person by hand.
@@ -2609,14 +2893,15 @@
     renderAccounts();
   }
 
-  async function acctFlagForDeletion(upn) {
+  async function acctMarkForManualRemoval(upn) {
     const msg = document.getElementById('acctMsg');
     // Deliberately says what this does NOT do. Offboarding is never automatic (§27): this raises
     // a request, and a DIFFERENT administrator has to approve it before anything happens.
-    if (!confirm('Flag ' + upn + ' for deletion?\n\nThis RAISES AN OFFBOARD REQUEST. Nothing is disabled or deleted now.\nA different administrator must approve it on the Approvals tab first.')) return;
+    // 🔴 71.21: and it never deletes the account — the confirm has to match the button.
+    if (!confirm('Mark ' + upn + ' for manual removal?\n\nThis RAISES AN OFFBOARD REQUEST. Nothing happens now.\n\nWhen a different administrator approves it on the Approvals tab, PIM disables the account, revokes its sessions and removes its PIM access.\n\nPIM NEVER DELETES THE ACCOUNT. It stays in Entra, disabled, until a person deletes it by hand.')) return;
     if (msg) { msg.textContent = 'Raising offboard request for ' + upn + '…'; msg.style.color = '#57606a'; }
     try {
-      await api('POST', '/api/approvals', { action: 'offboard', target: upn, reason: 'flagged for deletion from the account grid' });
+      await api('POST', '/api/approvals', { action: 'offboard', target: upn, reason: 'marked for manual removal from the account grid (PIM never deletes the account)' });
       if (msg) { msg.textContent = 'Offboard request raised for ' + upn + ' — it now needs a second administrator to approve it on Approvals.'; msg.style.color = '#bc4c00'; }
     } catch (e) {
       if (msg) { msg.textContent = 'Could not raise the request: ' + String(e.message || e); msg.style.color = '#cf222e'; }
@@ -2725,7 +3010,16 @@
           '<div style="color:#57606a;font-size:11px;">' + escapeHtml(upn) + '</div></td>' +
         '<td>' + (checking ? '<span style="color:#57606a;font-size:11.5px;">Checking… please wait</span>' : tapStatusChip(a.status, a.detail)) + '</td>' +
         '<td style="font-size:11.5px;color:#57606a;">' + escapeHtml(a.createdDateTime || '') + '</td>' +
-        '<td style="font-size:11.5px;">' + (a.managerEmail ? escapeHtml(a.managerEmail) : '<span style="color:#cf222e;">no office user email</span>') + '</td>' +
+        // 71.19: an admin's mail goes to its SPONSOR DEPARTMENT's owners. Show where it goes AND why that is the
+        // address -- a legacy ManagerEmail is flagged amber so it gets moved to the department, and "none" says
+        // exactly what to set instead of "no office user email".
+        '<td style="font-size:11.5px;">' + (a.managerEmail
+            ? (escapeHtml(a.managerEmail.split(';').join(', ')) +
+               '<div style="color:' + (a.recipientSource === 'manager-legacy' ? '#9a6700' : '#57606a') + ';font-size:10.5px;" title="' + escapeHtml(a.recipientReason || '') + '">' +
+               (a.recipientSource === 'department' ? 'sponsor department' + (a.department ? ' &ldquo;' + escapeHtml(a.department) + '&rdquo;' : '') + ' owner(s)'
+                : a.recipientSource === 'forward' ? 'per-admin forwarding address'
+                : a.recipientSource === 'manager-legacy' ? 'legacy ManagerEmail &mdash; move it to the sponsor department' : '') + '</div>')
+            : '<span style="color:#cf222e;">none</span><div style="color:#57606a;font-size:10.5px;" title="' + escapeHtml(a.recipientReason || '') + '">set the admin&#39;s Department and give that department Owners</div>') + '</td>' +
         '<td style="font-size:11.5px;">' + escapeHtml(String(a.tapLifetimeHours)) + 'h</td>' +
         '<td><button class="' + (unchecked ? 'btn' : 'btn-sec') + ' tapCheckBtn" data-upn="' + escapeHtml(upn) + '"' + (checking ? ' disabled' : '') +
           ' title="Read this admin&#39;s live Temporary Access Pass state from Entra.">' + (unchecked ? 'Check' : 'Re-check') + '</button> ' +
@@ -3012,6 +3306,8 @@
       // BUG-92: only real failures raise attention. A job this worker is not scoped to run is
       // reported separately and NEVER as red -- it is a deployment decision, not a fault.
       if (j.failedCount > 0) { attn += j.failedCount; homeAddAttn('red', j.failedCount + ' job(s) FAILED: ' + esc((j.failedJobs || []).map(f => f.name).slice(0, 3).join(', ')), 'jobs'); }
+      // 71.13: a standing policy HOLD is AMBER attention (needs an approval) -- never red, never hidden.
+      if (j.heldCount > 0) { attn += j.heldCount; homeAddAttn('amber', j.heldCount + ' job(s) NEED APPROVAL (a safety breaker held a change set): ' + esc((j.heldJobs || []).map(f => f.name).slice(0, 3).join(', ')), 'jobs'); }
       if (j.skippedCount > 0) { homeAddAttn('info', j.skippedCount + ' job(s) not scheduled on this deployment (by design): ' + esc((j.skippedJobs || []).map(f => f.name).slice(0, 3).join(', ')), 'jobs'); }
       const lines = [];
       if (j.lastRun) lines.push('Last: <b>' + esc(j.lastRun.name) + '</b> ' + (j.lastRun.ok ? '<span style="color:#1f883d">ok</span>' : '<span style="color:#cf222e">failed</span>') + ' ' + esc(homeFmtWhen(j.lastRun.whenUtc)));
@@ -3620,6 +3916,8 @@
       h += '<div style="margin-bottom:14px;font-size:12px;color:#57606a;">Baseline <b>v' + escapeHtml(String(data.baseline.version || '?')) + '</b>' +
         (data.baseline.source ? ' &middot; ' + escapeHtml(data.baseline.source) : '') +
         (data.baseline.verified ? ' &middot; ' + downlinkPill('signature verified', 'ok') : ' &middot; ' + downlinkPill('NOT verified', 'bad')) +
+        (data.baseline.signer === 'key' && data.baseline.keyId ? ' &middot; Key Vault key <code>' + escapeHtml(String(data.baseline.keyId)) + '</code>' : '') +
+        (!data.baseline.verified && data.baseline.verifyReason ? '<div style="margin-top:4px;color:#cf222e;">' + escapeHtml(String(data.baseline.verifyReason)) + '</div>' : '') +
         '</div>';
     }
 
@@ -5515,7 +5813,8 @@
     const looksBulk = /[,;*\s]/.test(String(target || '').trim()) || ['all', 'everyone', 'any', 'everybody'].includes(String(target || '').trim().toLowerCase());
     const prompt = looksBulk
       ? 'BULK offboard: "' + t + '" looks like more than one principal. The Manager marks each for offboarding in Pending changes; the engine performs it on its next run. Type EXECUTE to confirm.'
-      : 'Queue the approved offboard for "' + t + '"?\n\nThe Manager does not change the directory itself: it marks the admin for offboarding (OffboardDate) as a change in Pending changes. After you commit it, the engine disables the account, revokes sessions and memberships, sends the notice and schedules deletion on its next run. This approval cannot be used again.';
+      // 71.21 + 71.23: the column is AutoDisableDate, and nothing is ever deleted.
+      : 'Queue the approved offboard for "' + t + '"?\n\nThe Manager does not change the directory itself: it sets the admin\'s AutoDisableDate to now, as a change in Pending changes. After you commit it, the engine disables the account, revokes its sessions and memberships and sends the notice on its next run.\n\nThe account itself is KEPT, disabled — PIM never deletes an account. This approval cannot be used again.';
     if (looksBulk) {
       const typed = window.prompt(prompt);
       if (String(typed || '').trim().toUpperCase() !== 'EXECUTE') { if (msgEl) { msgEl.textContent = 'Cancelled.'; msgEl.style.color = '#57606a'; } return; }
@@ -8108,6 +8407,9 @@
     // BUG-114: "no-op" means "there was nothing to do" -- the answer an operator most wants to
     // be true. A placeholder handler must not borrow it. This says what is actually the case.
     else if (j.status === 'unimplemented') { bg = '#fff1d6'; fg = '#9a6700'; label = 'not implemented'; }
+    // 71.13: a safety breaker HELD a change set -- amber "needs approval". Never green (the approval would be hidden),
+    // never red "failed" (nothing broke).
+    else if (j.status === 'held') { bg = '#fff1d6'; fg = '#9a6700'; label = 'needs approval'; }
     else if (j.status === 'failed') { bg = '#ffebe9'; fg = '#cf222e'; label = 'failed'; }
     else if (j.status === 'completed') { bg = (j.lastRan ? '#dafbe1' : '#fff8c5'); fg = (j.lastRan ? '#1a7f37' : '#9a6700'); label = (j.lastRan ? 'ok' : 'no-op'); }
     let html = '<span style="display:inline-block;padding:1px 8px;border-radius:10px;font-size:11px;font-weight:600;background:' + bg + ';color:' + fg + ';">' + esc0(label) + '</span>';
@@ -8451,6 +8753,7 @@
     const running = data.runningCount || 0;
     const overdue = data.overdueCount || 0;     // [M6] jobs that missed their fire window
     const failing = data.failingCount || 0;     // [M6] jobs with an unacknowledged failure
+    const held = data.heldCount || 0;           // 71.13 jobs with a standing policy HOLD (needs approval)
     const canRun = !!data.canRun;            // Admin+ -> per-row controls are live
     const histCount = (data.historyCount != null) ? data.historyCount : null;
     window._jobsCanRun = canRun;
@@ -8471,11 +8774,13 @@
     // [M6] "needs attention" banner: overdue (missed a fire window) and/or failing
     // (an unacknowledged failed run). Tells the admin a scheduled run FAILED or never
     // fired -- the exact gap [M6] called out -- without opening each row.
-    if (overdue > 0 || failing > 0) {
+    if (overdue > 0 || failing > 0 || held > 0) {
       const parts = [];
       if (overdue > 0) parts.push('<b style="color:#9a6700;">' + overdue + ' overdue</b> (a scheduled run did not fire on time)');
       if (failing > 0) parts.push('<b style="color:#cf222e;">' + failing + ' failing</b> (an unacknowledged failed run)');
-      h.push('<div style="padding:10px 12px;margin-bottom:12px;border:1px solid #cf6679;background:#ffebe9;border-radius:6px;color:#7d1a1a;font-size:12px;">' +
+      if (held > 0) parts.push('<b style="color:#9a6700;">' + held + ' need approval</b> (a safety breaker held a change set -- approve the plan named in the job result)');
+      const attnRed = (failing > 0);
+      h.push('<div style="padding:10px 12px;margin-bottom:12px;border:1px solid ' + (attnRed ? '#cf6679' : '#d4a72c') + ';background:' + (attnRed ? '#ffebe9' : '#fff8c5') + ';border-radius:6px;color:' + (attnRed ? '#7d1a1a' : '#7d4e00') + ';font-size:12px;">' +
         '&#9888; <b>Needs attention:</b> ' + parts.join(' &middot; ') + '. ' +
         (canRun ? 'Use <b>Run now</b> to re-run, <b>History</b> to see recent runs, and <b>Ack</b> to clear a known failure.' : 'Recent runs are visible via <b>History</b>; clearing requires the Admin role.') +
         '</div>');
@@ -8558,7 +8863,11 @@
             : ((j.unimplementedCount > 0)
               ? (' <span title="a placeholder handler is registered for this job type but does no work -- the capability is not implemented on this worker. Not a failed run, and not a run that found nothing to do." style="color:#9a6700;">(not implemented ×' + j.unimplementedCount + ')</span>')
               : ''));
-        const histBtn = '<button class="ghost jobHistBtn" data-name="' + esc0(j.name) + '" style="font-size:11px;">History</button>' + failBadge;
+        // 71.13: a standing HOLD gets its own amber badge (the job result carries the plan and the approve command).
+        const heldBadge = j.needsApproval
+          ? (' <span class="jobHeldBadge" title="' + esc0(j.heldDetail || 'a safety breaker held a change set -- it needs an operator approval') + '" style="display:inline-block;padding:1px 6px;border-radius:10px;font-size:11px;font-weight:600;background:#fff1d6;color:#9a6700;">needs approval</span>')
+          : '';
+        const histBtn = '<button class="ghost jobHistBtn" data-name="' + esc0(j.name) + '" style="font-size:11px;">History</button>' + failBadge + heldBadge;
         // [M6] Ack button -> clear the unacknowledged-failure signal for the latest failed run.
         // 2026-09-14: Ack clears EVERY failure still standing (unackedFailureRunIds), offered whenever there is one --
         // it used to need the LAST run to be the failure, so a job whose last run was a placeholder could never be cleared.
@@ -8567,7 +8876,7 @@
         const ackBtn = (canRun && j.unackedFailureCount > 0 && ackIds.length)
           ? ('<button class="ghost jobAckBtn" data-runid="' + esc0(ackIds.join(',')) + '" data-name="' + esc0(j.name) + '" title="acknowledge the ' + ackIds.length + ' standing failure(s) (keeps the run records)" style="font-size:11px;color:#9a6700;">Ack</button>')
           : '';
-        h.push('<tr style="border-bottom:1px solid #eaeef2;' + rowBg + (j.overdue ? 'box-shadow:inset 3px 0 0 #d4a72c;' : (j.unackedFailureCount > 0 ? 'box-shadow:inset 3px 0 0 #cf222e;' : '')) + '">' +
+        h.push('<tr style="border-bottom:1px solid #eaeef2;' + rowBg + (j.overdue ? 'box-shadow:inset 3px 0 0 #d4a72c;' : (j.unackedFailureCount > 0 ? 'box-shadow:inset 3px 0 0 #cf222e;' : (j.needsApproval ? 'box-shadow:inset 3px 0 0 #d4a72c;' : ''))) + '">' +
           '<td style="padding:6px 8px;"><b>' + esc0(j.name) + '</b>' + scope + '<div style="color:#8c959f;font-size:11px;">' + esc0(j.type) + '</div></td>' +
           '<td style="padding:6px 8px;">' + cadenceCell + '</td>' +
           '<td style="padding:6px 8px;">' + enabledCell + '</td>' +
@@ -8621,7 +8930,7 @@
       rows: jobs.map(j => [
         j.name || '', j.type || '', j.scope || '', j.cadence || '',
         (j.enabled ? 'yes' : 'no'),
-        (j.inProgress ? 'running' : (j.neverRun ? 'never run' : (j.lastOk === false ? 'failed' : (j.lastOk === true ? 'ok' : 'unknown')))),
+        (j.inProgress ? 'running' : (j.neverRun ? 'never run' : (j.status === 'held' ? 'needs approval' : (j.lastOk === false ? 'failed' : (j.lastOk === true ? 'ok' : 'unknown'))))),
         (j.neverRun ? '' : (j.lastRunUtc || '')),
         (j.lastResult || ''),
         (j.lastOk === true ? 'true' : (j.lastOk === false ? 'false' : '')),
@@ -8720,7 +9029,9 @@
     // Render as a compact HTML list inside the (normally <pre>) body element.
     const rows = runs.map(r => {
       const ok = !!r.ok;
-      const badge = ok
+      const badge = (r.status === 'held')
+        ? '<span style="color:#9a6700;font-weight:600;">HELD &mdash; needs approval</span>'
+        : ok
         ? '<span style="color:#1a7f37;font-weight:600;">PASS</span>'
         : ('<span style="color:#cf222e;font-weight:600;">FAIL</span>' + (r.acknowledged ? ' <span style="color:#8c959f;">(ack&rsquo;d)</span>' : ''));
       const when = jobTimeAgo(r.startedUtc || r.finishedUtc);
@@ -9335,6 +9646,31 @@
   // Returns null if the column isn't a known dropdown target, otherwise
   // an object: { options: [{value,label,sub}], allowCustom: true, listKey, badge }.
   function getDropdownSpec(base, col) {
+    // §71.5 -- the replication fields, as pickers with the same rule the wizard and the server use.
+    // Only reachable on the MSP master: replHiddenCol() removes the columns everywhere else.
+    if (REPL_KIND[base] && col === 'Replicate') {
+      const kind = REPL_KIND[base];
+      return {
+        listKey: null, allowCustom: false, allowBlank: kind !== 'admin',
+        options: replModeOptions(kind).filter(o => o.value !== ''),
+        validate: (v) => v === '' || (kind === 'admin' ? /^(yes|no)$/i.test(v) : /^(yes|no|follow)$/i.test(v)),
+        // an admin's Replicate must agree with its ManagementMode (msp <-> Yes), or it is refused on save
+        validateRow: (v, row) => {
+          if (v === '') return true;
+          if (kind !== 'admin') return /^(yes|no|follow)$/i.test(v);
+          const mm = String((row && row.ManagementMode) || '').trim().toLowerCase();
+          return (/^yes$/i.test(v) && mm === 'msp') || (/^no$/i.test(v) && mm !== 'msp');
+        },
+        invalidHint: kind === 'admin' ? 'Replicate must match ManagementMode: msp = Yes, local = No' : 'Replicate must be No, Yes or Follow'
+      };
+    }
+    if (REPL_KIND[base] && REPL_KIND[base] !== 'admin' && col === 'Ring') {
+      return {
+        listKey: null, allowCustom: false, allowBlank: true,
+        options: [ { value: '0', label: '0 — every ring' }, { value: '1', label: '1 — pilot + test tenants' }, { value: '2', label: '2 — test tenants only' } ],
+        validate: (v) => v === '' || /^[0-2]$/.test(v), invalidHint: 'Ring must be blank, 0, 1 or 2'
+      };
+    }
     // Deployment ring (MSP rollout staging): 0 = all tenants, 1 = pilot+test,
     // 2 = test tenants only. Blank = 0. The engine provisions the admin in a
     // tenant only when admin.Ring <= that tenant's $global:PIM_TenantRing.
@@ -10631,9 +10967,32 @@
   // ===================================================================
   let currentGridBase = null;
 
+  // 🔴 71.26 -- which family of entities the records table is showing.
+  // '' = every entity ("All records", the raw view, unchanged). 'delegations' = the ASSIGNMENT
+  // entities only, which is what an operator means by "the delegation grid": the rows that say who
+  // gets what, for how long, under which policy. It is a FILTER over the same table and the same
+  // pending-changes queue -- not a second grid, because a second grid would be a second place for an
+  // edit to go missing.
+  let gridScope = '';
+  function setGridScope(scope) {
+    const next = String(scope || '');
+    if (next === gridScope) return;
+    gridScope = next;
+    // Landing on a scope must LAND somewhere: opening an empty rail would look broken. If the
+    // current entity is not in the new scope, open the first one that is.
+    const bases = (PIM_DATA.csvBases || []).filter(b => gridScopeMatches(b));
+    if (bases.length && !bases.some(b => b.base === currentGridBase)) { openGrid(bases[0].base); }
+    else { renderGridList(); }
+  }
+  function gridScopeMatches(b) {
+    if (!gridScope) return true;
+    if (gridScope === 'delegations') return String(b.group || '') === 'Assignments';
+    return true;
+  }
+
   function renderGridList() {
     const list = document.getElementById('gridList');
-    const bases = PIM_DATA.csvBases || [];
+    const bases = (PIM_DATA.csvBases || []).filter(b => gridScopeMatches(b));
     // Group bases by their group ('Definitions' / 'Assignments').
     const groups = {};
     for (const b of bases) {
@@ -10654,6 +11013,18 @@
       renderGridList();
     };
     list.appendChild(tog);
+    // 71.26: SAY when the list is narrowed, and offer the way back in the same breath. A filtered
+    // rail with nothing explaining it reads as "these are the only entities there are".
+    if (gridScope === 'delegations') {
+      const sc = document.createElement('div');
+      sc.className = 'group-hdr';
+      sc.id = 'gridScopeNote';
+      sc.style.cssText = 'color:#0969da;font-weight:600;';
+      sc.innerHTML = 'Delegations only <a href="#" id="gridScopeAll" style="font-weight:400;">show all records</a>';
+      list.appendChild(sc);
+      const a = sc.querySelector('#gridScopeAll');
+      if (a) a.onclick = (e) => { e.preventDefault(); setGridScope(''); };
+    }
     for (const g of Object.keys(groups)) {
       const h = document.createElement('div');
       h.className = 'group-hdr';
@@ -10682,6 +11053,33 @@
     renderGrid(base);
   }
 
+  // §71.5 -- per-row "reach" in the grid: the server's plan over the grid's PENDING rows for this entity.
+  const _replGridCache = { sig: '', rows: null };
+  function replFillGridReach(base, p, main) {
+    const live = [];
+    p.rows.forEach((r, i) => { if (!p.deletes.has(i)) live.push({ i, r }); });
+    const sig = base + '|' + JSON.stringify(live.map(x => x.r));
+    const paint = (rows) => {
+      const byPos = {};
+      (rows || []).filter(x => x.source === 'pending' && x.entity === base).forEach(x => { byPos[x.index] = x; });
+      live.forEach((x, pos) => {
+        const cell = main.querySelector('td.repl-reach-cell[data-idx="' + x.i + '"]');
+        const one = byPos[pos];
+        if (!cell) return;
+        if (!one) { cell.textContent = '—'; return; }
+        cell.textContent = one.count + ' / ' + one.tenantCount;
+        cell.title = (one.tenants || []).length ? 'Reaches: ' + one.tenants.join(', ') : 'Reaches no managed tenant';
+        if ((one.warnings || []).length) { cell.textContent += ' ⚠'; cell.title += '\n' + one.warnings.map(w => w.reason).join('\n'); }
+      });
+    };
+    if (_replGridCache.sig === sig && _replGridCache.rows) { paint(_replGridCache.rows); return; }
+    const pending = {}; pending[base] = live.map(x => x.r);
+    replRequestReach('grid', { pending }, (d) => {
+      if (!d || d.error) { main.querySelectorAll('td.repl-reach-cell').forEach(c => { c.textContent = '?'; c.title = (d && d.error) || 'reach unavailable'; }); return; }
+      _replGridCache.sig = sig; _replGridCache.rows = d.rows || [];
+      if (currentGridBase === base) paint(_replGridCache.rows);
+    });
+  }
   function renderGrid(base) {
     const main = document.getElementById('gridMain');
     const p = pendingChanges[base];
@@ -10697,6 +11095,11 @@
     }
     const selCount  = p.selection ? p.selection.size : 0;
     const isAdmins  = (base === 'Account-Definitions-Admins');
+    // §71.5 -- the replication columns are the MSP master's alone. The server already strips them from a
+    // non-master's header; this is the same rule client-side, so a stale pending header cannot show them.
+    if (REPL_KIND[base] && !_mspReplCtx) { mspReplicationContext().then(() => { if (currentGridBase === base) renderGrid(base); }); }
+    const visHeader = header.filter(c => !replHiddenCol(base, c));
+    const replReach = !!(REPL_KIND[base] && replIsMaster());
 
     // Compute which columns are dropdown-backed + which tenant-list keys feed them.
     const colSpecs = {};
@@ -10742,8 +11145,10 @@
         '<option value="Revoked">Revoked</option>' +
         '</select>');
       html.push('<button id="gabApplyStatus">Apply</button>');
+    }
+    if (isAdmins && !replHiddenCol(base, 'Ring')) {
       // Ring moves as a first-class action (LIFECYCLE-GOVERNANCE phase 1):
-      // promote 2 -> 1 -> 0 (or pull back) without hand-editing the column.
+      // promote 2 -> 1 -> 0 (or pull back) without hand-editing the column. MSP master only (§71).
       html.push('<span class="gab-label">Move to ring:</span>');
       html.push('<select id="gabRing">' +
         '<option value="2">2 (test tenants)</option>' +
@@ -10763,7 +11168,8 @@
     html.push('<table class="grid"><thead><tr>');
     // Header checkbox: tri-state (none / some / all visible-selectable rows).
     html.push('<th class="grid-sel-col"><input type="checkbox" id="gridSelectAll" title="Select / clear all visible rows"></th>');
-    for (const col of header) html.push(`<th>${escapeHtml(col)}</th>`);
+    for (const col of visHeader) html.push(`<th>${escapeHtml(col)}</th>`);
+    if (replReach) html.push('<th title="How many managed tenants this row will reach -- computed by the same plan every managed tenant runs">Reach</th>');
     html.push('<th></th></tr></thead><tbody>');
     // Pull all PIM-FK-001 (orphan) violations for THIS csv from the live
     // validator report so we can paint the matching rows red.
@@ -10791,16 +11197,25 @@
       const selDis = deleted ? ' disabled' : '';
       const selChk = isSel   ? ' checked'  : '';
       html.push(`<td class="grid-sel-col"><input type="checkbox" class="grid-row-sel"${selChk}${selDis}></td>`);
-      for (const col of header) {
+      for (const col of visHeader) {
         const v = row[col] || '';
         const spec = colSpecs[col];
         let invalid = false;
-        if (spec && spec.validate && !spec.validate(v)) invalid = true;
+        if (spec && spec.validateRow) { if (!spec.validateRow(v, row)) invalid = true; }
+        else if (spec && spec.validate && !spec.validate(v)) invalid = true;
+        // §71.5 -- Target on a replicable entity (master): the grammar check + a tag/tenant picker.
+        if (replReach && col === 'Target' && !deleted) {
+          const bad = !replTargetValid(v);
+          html.push(`<td class="${bad ? 'cell-bad cell-bad-tip' : ''}" data-col="Target"${bad ? ' title="Target must be tag:&lt;key:value&gt;, tag:a+b, tenant:&lt;id&gt; (comma separated), or blank"' : ''}><span class="repl-target-val">${escapeHtml(v)}</span> <button class="repl-target-pick" data-idx="${idx}" title="Pick tags / tenants">tags…</button></td>`);
+          continue;
+        }
         const tdCls = invalid ? 'cell-bad cell-bad-tip' : '';
         const tdTitle = invalid ? `title="${escapeHtml(spec.invalidHint || 'Invalid value')}"` : '';
         if (spec && !deleted) {
           // Render a native <select> with the cached options + "Custom value..." escape hatch.
-          const optHtml = ['<option value="" disabled' + (v === '' ? ' selected' : '') + '>(empty)</option>'];
+          const optHtml = [spec.allowBlank
+            ? '<option value=""' + (v === '' ? ' selected' : '') + '>(blank)</option>'
+            : '<option value="" disabled' + (v === '' ? ' selected' : '') + '>(empty)</option>'];
           let matched = false;
           for (const o of spec.options) {
             const sel = (o.value === v);
@@ -10816,6 +11231,7 @@
           html.push(`<td class="${tdCls}" contenteditable="${deleted ? 'false' : 'true'}" data-col="${escapeHtml(col)}" ${tdTitle}>${escapeHtml(v)}</td>`);
         }
       }
+      if (replReach) html.push(`<td class="repl-reach-cell" data-idx="${idx}" style="white-space:nowrap;color:#57606a;">${deleted ? '' : '…'}</td>`);
       const actHtml = deleted
         ? '<button data-act="undelete" title="restore">&#x21ba;</button>'
         : '<button data-act="clone" class="row-clone" title="clone this row">+1</button> <button data-act="delete" title="mark deleted">&#x2715;</button>';
@@ -10827,6 +11243,33 @@
 
     // Cache-age badges.
     renderCacheBadges(main);
+
+    // §71.5 -- the Target picker and the per-row reach (MSP master only).
+    if (replReach) {
+      main.querySelectorAll('button.repl-target-pick').forEach(btn => {
+        btn.onclick = async () => {
+          const idx = parseInt(btn.dataset.idx, 10);
+          const cur = replParseTarget(p.rows[idx].Target || '');
+          const ctx = _mspReplCtx || { tags: [], tenants: [] };
+          const tags = (ctx.tags || []).slice(); cur.tags.forEach(t => { if (!tags.some(x => x.toLowerCase() === t.toLowerCase())) tags.push(t); });
+          const body = '<div style="font-size:12px;">' +
+            '<div><b>Tags</b> <span style="color:#57606a;">(none ticked = every tenant the ring admits)</span></div>' +
+            (tags.length ? tags.map(t => '<label style="margin-right:10px;white-space:nowrap;"><input type="checkbox" class="repl-pk-tag" value="' + escapeHtml(t) + '"' + (cur.tags.some(x => x.toLowerCase() === t.toLowerCase()) ? ' checked' : '') + '> ' + escapeHtml(t) + '</label>').join('') : '<span style="color:#8c959f;">no managed tenant carries a tag yet</span>') +
+            '<div style="margin-top:6px;"><label><input type="checkbox" class="repl-pk-allof"' + (cur.allOf ? ' checked' : '') + '> tenant must carry ALL ticked tags</label></div>' +
+            '<div style="margin-top:8px;"><b>Specific tenants</b></div>' +
+            ((ctx.tenants || []).length ? ctx.tenants.map(tn => '<label style="margin-right:10px;white-space:nowrap;"><input type="checkbox" class="repl-pk-tenant" value="' + escapeHtml(tn.tenantId) + '"' + (cur.tenants.some(x => x.toLowerCase() === String(tn.tenantId).toLowerCase()) ? ' checked' : '') + '> ' + escapeHtml(tn.name) + '</label>').join('') : '<span style="color:#8c959f;">no managed tenants registered</span>') +
+            '</div>';
+          await showConfirm('Replication target -- ' + base, body, false);
+          const mb = document.getElementById('modalBody');
+          const st = { keep: cur.keep, allOf: !!(mb.querySelector('.repl-pk-allof') || {}).checked,
+                       tags: Array.from(mb.querySelectorAll('.repl-pk-tag')).filter(c => c.checked).map(c => c.value),
+                       tenants: Array.from(mb.querySelectorAll('.repl-pk-tenant')).filter(c => c.checked).map(c => c.value) };
+          const nv = replTargetString(st);
+          if ((p.rows[idx].Target || '') !== nv) { p.rows[idx].Target = nv; markBadges(); renderGrid(base); }
+        };
+      });
+      replFillGridReach(base, p, main);
+    }
 
     // Wire cell edits (contenteditable cells).
     main.querySelectorAll('td[contenteditable=true]').forEach(td => {
@@ -11539,8 +11982,19 @@
       'PIM-AUTH-001':   'Nothing is wrong with your data: the auth-methods tenant cache is missing. Grant UserAuthenticationMethod.Read.All to the engine SPN, then refresh the tenant cache.',
       'PIM-AUTH-002':   'This is a fact about the ACCOUNT in Entra, not about a field here. The admin must register a phishing-resistant method (FIDO2 / Windows Hello / certificate).',
       'PIM-DOMAIN-001': 'The domain must exist and be verified in the tenant. Add it in Entra ID, or correct the UPN suffix on the row.',
+      'PIM-MAIL-001':   'An admin&rsquo;s mail and Temporary Access Pass go to its SPONSOR DEPARTMENT&rsquo;s owners, so a department (never a person) survives reorganisations. Which department sponsors this admin is a decision only you can make: set Department on the admin, and Owners on that department under Departments &amp; owners.',
+      // 71.23. Neither of these gets a button, and that is the point: both are about WHICH DATE
+      // disables a privileged account, and the tool must not pick one. PIM-OFF-002 exists precisely
+      // because the engine refuses to guess; offering a one-click "keep the new one" here would do
+      // the guessing the engine declined to do, in the one place where being wrong means an account
+      // is switched off on a date nobody chose.
+      'PIM-OFF-002':    'This row carries an <b>Auto-disable date</b> AND the old <code>OffboardDate</code>, with different dates, so the engine refuses to disable this admin at all. Which date is the right one is a decision only you can make: put it in Auto-disable date (Edit on the admin, Access &rarr; Admin accounts) and clear the old column. Saving the date there clears the old column for you.',
+      'PIM-OFF-003':    'Nothing is broken &mdash; the old column name <code>OffboardDate</code> is still read. The column is now <b>Auto-disable date</b>, because the sweep only DISABLES the account (PIM never deletes an account). Re-enter the date in Auto-disable date with Edit on the admin (Access &rarr; Admin accounts) and the old column is cleared for you; the schema preflight also migrates it on its next pass.',
       'PIM-MSP-001':    'Which slaves receive this admin is a decision only you can make. Set its Ring (Edit on the admin), or set Management mode to local if it should not be synced.',
       'PIM-MSP-002':    'Pick the slave tags on the admin (Edit on the admin). A tag no managed tenant carries sends the admin to no slave.',
+      'PIM-MSP-003':    'Replicate must be No, Yes or Follow, and on an admin it must match Management mode (msp = Yes, local = No). Which one is right is your decision -- fix the row in the grid or the wizard.',
+      'PIM-MSP-004':    'Replication is authored only on the MSP master. Clear Replicate / Ring / Target on this tenant; the master decides what reaches it.',
+      'PIM-MSP-005':    'Which tenants a group-model row should reach is your decision. Set its Ring to 0, 1 or 2, or leave it blank.',
       'PIM-DUP-001':    'Multiple paths to the same target may be deliberate. Remove whichever role-group path you do not want — the tool cannot know which one that is.',
       'PIM-STORE-001':  'The entity could not be read from the SQL store. Check the store connection on the Support tab, then run validation again.',
       'PIM-NAME-001':   'A replacement tag has to be chosen by a human and stays referenced elsewhere. Rename it in the grid; the naming regex is in your naming-conventions config.',
@@ -11644,11 +12098,13 @@
         case 'PIM-TAP-002':
           inner = btn('primary', 'clear-field', 'Clear (use tenant default)', ' data-col="TAPLifetimeHours"');
           break;
-        case 'PIM-OFF-001':
-          inner = btn('primary', 'clear-field', 'Clear (no scheduled delete)', ' data-col="DeleteAfterDays"');
+        // 71.21: PIM-OFF-001 is GONE, and so is its one-click clear. The retention field is no longer
+        // supported anywhere in the product, so there is no finding to fix and nothing to offer.
+        // 71.17 "tap is on for all": CreateTAP=FALSE on an Entra admin is ignored by the engine, so TRUE is the only
+        // value that says what actually happens -- derivable, not a guess.
+        case 'PIM-TAP-003':
+          inner = btn('primary', 'set-true', 'Set TRUE (TAP is enforced)', ' data-col="CreateTAP"');
           break;
-        // CreateTAP=TRUE on an AD-only admin cannot be honoured at all -- a TAP is Entra-only.
-        // FALSE is the only value consistent with TargetPlatform=AD, so it is derivable, not a guess.
         default: {
           // No deterministic remedy -- but say WHY, and what to do instead. Silence here is what
           // made 27 findings read as "the tool is broken".
@@ -11859,6 +12315,7 @@
     };
     fieldFix('clear-field', '',      'Cleared (commit on Review & Save)');
     fieldFix('set-false',   'FALSE', 'Staged: FALSE (commit on Review & Save)');
+    fieldFix('set-true',    'TRUE',  'Staged: TRUE (commit on Review & Save)');
     // B7 / RA-001. 🪤 singleFix builds its violation from data-csv/data-row, which for this code
     // are the ASSIGNMENT row -- the wrong target. This one carries its own FixCsv/FixRow, so it
     // binds directly rather than reusing that helper's assumption.
@@ -13522,6 +13979,59 @@
     return [];
   }
 
+  // 🔴 71.25 -- THE POLICY TEMPLATE PICKER FOR AN INDIRECT PERMISSION DELEGATION.
+  // Operator, 2026-09-16: "i think we are missing the default policy for a permission (indirect)
+  // delegation in the wizards. I need to be able to select from the available templates for policies
+  // including Use default, approval policy template."
+  // The engine has always read `PolicyTemplate` from EVERY group-definition row (Roles, Services,
+  // Tasks, Processes, ... — Get-PimGroupDefinitionRows feeds Get-PimGroupsPolicyDesired), so the gap
+  // was never in the engine: only the Roles wizard offered the field, and the other four entities did
+  // not even carry the column. Nothing about the ENGINE changes here.
+  // 🔑 The list comes from the SAME store the engine reads (pim.Settings 'PolicyTemplates', surfaced
+  // as catalogs.policyTemplate), never from the shipped template files — a customer may have edited
+  // or added templates, and offering the shipped set would be confidently wrong.
+  let pimPolicyTplCache = null, pimPolicyTplLoading = false;
+  function pimPolicyTemplates(onLoaded) {
+    if (pimPolicyTplCache) return pimPolicyTplCache;
+    if (pimPolicyTplLoading || !isServer) return null;
+    pimPolicyTplLoading = true;
+    api('GET', '/api/settings/operational-policy').then(p => {
+      const c = (p && p.catalogs && p.catalogs.policyTemplate) || [];
+      pimPolicyTplCache = c.length ? c : [{ id: '', label: 'Use default', hint: 'the tenant baseline', approval: false }];
+      pimPolicyTplLoading = false;
+      if (onLoaded) onLoaded();
+    }).catch(() => { pimPolicyTplLoading = false; });
+    return null;
+  }
+  // The field itself. `s.policyTemplate` is '' for "Use default" — the engine reads a BLANK column as
+  // the 'default' template, so "Use default" must stage NOTHING rather than the literal id. That is
+  // what keeps this change byte-for-byte invisible to every existing row and every operator who does
+  // not touch the field.
+  function wuxPolicyTemplateField(s, rerender) {
+    const tpls = pimPolicyTemplates(rerender);
+    const opts = [{ value: '', label: 'Use default — the tenant baseline (what happens today)' }];
+    (tpls || []).forEach(t => {
+      const id = String(t.id || '');
+      if (!id || id === 'default') return;                 // 'default' IS "Use default" — never listed twice
+      const bits = [];
+      if (t.approval) bits.push('activation needs APPROVAL');
+      if (t.hint && !t.approval) bits.push(t.hint);
+      opts.push({ value: id, label: id + (bits.length ? ' — ' + bits.join('; ') : '') });
+    });
+    // A value already chosen that the store no longer offers is KEPT and marked, never silently
+    // dropped to "Use default": that would change what the row means without saying so.
+    const cur = String(s.policyTemplate || '');
+    if (cur && !opts.some(o => o.value === cur)) opts.push({ value: cur, label: cur + ' — not in this tenant’s template store' });
+    return wuxField({
+      id: 'wpg-tpl', label: 'Activation policy for this permission group', type: 'select', value: cur, options: opts,
+      sub: 'how long an activation lasts, whether it needs MFA/justification, and whether it needs approval',
+      hint: tpls
+        ? 'Leave on <b>Use default</b> to keep today’s behaviour exactly. Pick a template with <b>APPROVAL</b> to make activation need a second person.'
+        : 'Loading the templates this tenant has…',
+      onInput: (v) => { s.policyTemplate = v; }
+    });
+  }
+
   // A short, readable token derived from a name the user already chose.
   // "Cost Management Contributor" -> "CostMgmtContributor"; ".../subscriptions/x" -> its last segment.
   // 🪤 A SUGGESTION, NEVER AN IMPOSITION. It is offered in the picker and can be overtyped: these
@@ -14226,6 +14736,9 @@
             const refresh = () => { cnt.textContent = s.nestedIn.size + ' ' + dimNounPlural() + ' selected'; };
             f.appendChild(wuxPicklist({ items, multi:true, selected:s.nestedIn, onChange: refresh }));
             refresh(); f.appendChild(cnt);
+            // §71.5 -- Replication of the derived indirect permission group (MSP master only).
+            const rdEntity = s.target === 'azure' ? 'PIM-Assignments-Azure-Resources' : (s.target === 'entra' ? 'PIM-Definitions-Tasks' : 'PIM-Assignments-Workloads');
+            f.appendChild(wuxReplicationSection(s, { entity: rdEntity, kind: REPL_KIND[rdEntity], row: () => ({ GroupTag: s._replDerivedTag || '' }) }));
             return f;
           }
         }
@@ -14256,25 +14769,25 @@
           // Azure permission group -> PIM-Assignments-Azure-Resources (one row per role
           // at the scope), GroupTag/Name from the engine derivation.
           for (const role of roles) {
-            await wuxStage('PIM-Assignments-Azure-Resources', {
+            await wuxStage('PIM-Assignments-Azure-Resources', Object.assign({
               GroupName: d.groupName, GroupTag: d.groupName.replace(/^PIM-/, ''),
               AzScope: s.scopePath || '', AzScopePermission: role,
               Level: 'L' + d.level, TierLevel: 'T' + d.tier, Plane: d.plane,
               Owners: s.owners || '', Action: 'Assign',
               AssignmentType: ASG_TYPE, UpdateExisting:'FALSE', AutoExtend:'TRUE',
               NumOfDaysWhenExpire: ASG_DAYS, Permanent: ASG_PERM
-            });
+            }, wuxReplicationFields(s, 'resource')));
           }
         } else if (s.target === 'entra') {
           // Entra permission group: a Definitions row + one Roles-Groups row per role.
           const tag = d.groupName.replace(/^PIM-/, '');
-          await wuxStage('PIM-Definitions-Tasks', {
+          await wuxStage('PIM-Definitions-Tasks', Object.assign({
             GroupName: d.groupName, GroupDescription: roles.join(', '), GroupTag: tag,
             AdministrativeUnitTag: (d.au ? ('PIM-AU-' + d.au) : ''),
             IsRoleAssignable: 'TRUE',
             Workload: 'Entra-ID', Level: 'L' + d.level, TierLevel: 'T' + d.tier,
             Plane: d.plane, CPPlatform: d.domain, Owners: s.owners || ''
-          });
+          }, wuxReplicationFields(s, 'group')));
           for (const role of roles) {
             await wuxStage('PIM-Assignments-Roles-Groups', {
               GroupTag: tag, RoleDefinitionName: role,
@@ -14286,14 +14799,14 @@
           }
         } else { // workload
           const tag = d.groupName.replace(/^PIM-/, '');
-          await wuxStage('PIM-Assignments-Workloads', {
+          await wuxStage('PIM-Assignments-Workloads', Object.assign({
             GroupName: d.groupName, GroupTag: tag,
             Workload: s.workload, WorkloadScope: s.scope || '',
             Level: 'L' + d.level, TierLevel: 'T' + d.tier, Plane: d.plane,
             Roles: roles.join('|'), Owners: s.owners || '', Action:'Assign',
             AssignmentType: ASG_TYPE, UpdateExisting:'FALSE', AutoExtend:'TRUE',
             NumOfDaysWhenExpire: ASG_DAYS, Permanent: ASG_PERM
-          });
+          }, wuxReplicationFields(s, 'resource')));
         }
         // optional nesting into role groups.
         const srcTag = d.groupName.replace(/^PIM-/, '');
@@ -14319,6 +14832,7 @@
       adminTemplates = (r && r.templates) || [];
     } catch (_) {}
 
+    await pimTenantMode();   // the MSP fields below exist only on the MSP master
     const state = {
       first:'', last:'', initials:'',
       // Purpose drives the naming convention (v2.4.171): Day2Day (default) =
@@ -14479,6 +14993,8 @@
                 rerender();
               }
             }));
+            // §71 / operator 2026-09-15: ring, management mode and slave tags are MSP MASTER fields only.
+            if (pimIsMspMaster()) {
             f.appendChild(wuxField({ id:'wf-ring', label:'Deployment ring', required:true, type:'select', value:s.ring,
               sub:'Account-Definitions-Admins.Ring',
               hint:'MSP rollout staging. New hires start in ring 2 (test tenants only) and are promoted 2 → 1 → 0 by editing this one value centrally. Each tenant declares its own ring via $global:PIM_TenantRing.',
@@ -14515,6 +15031,7 @@
                 list.querySelectorAll('.wf-tag-chk').forEach(c => { c.onchange = () => { if (c.checked) s.slaveTags.add(c.value); else s.slaveTags.delete(c.value); }; });
               });
             }
+            }   // end: MSP master only
             f.appendChild(wuxAdminLivePreview(s));
             return f;
           }
@@ -14689,6 +15206,11 @@
                 environment: s.environment, highPriv: !!s.useLongForm
               }, (d) => { if (d && d.userName && d.userName !== userName) { s._engineUserName = d.userName; rerender(); } });
             }
+            // §71.5 -- Replication (MSP master only; renders nothing elsewhere). Replicate is the admin's
+            // ManagementMode (Yes = msp), so the two can never be staged disagreeing.
+            wrap.appendChild(wuxReplicationSection(s, { entity: 'Account-Definitions-Admins', kind: 'admin',
+              initialTarget: (s.slaveTags && s.slaveTags.size) ? [...s.slaveTags].map(t => 'tag:' + t).join(',') : '',
+              row: () => ({ UserName: userName, UserPrincipalName: upn, ManagementMode: s.managementMode }) }));
             return wrap;
           }
         }
@@ -14737,7 +15259,7 @@
           }
         }
 
-        await wuxStage('Account-Definitions-Admins', {
+        await wuxStage('Account-Definitions-Admins', Object.assign({
           FirstName: s.first.trim(), LastName: s.last.trim(), Initials: s.initials.toUpperCase(),
           Purpose: s.purpose, TargetUsage: s.usage, TargetPlatform: s.platform,
           AdminType: s.adminType, Environment: s.environment,
@@ -14750,11 +15272,11 @@
           TAPStartDate: s.createTap === 'TRUE' ? s.tapStartDate.trim() : '',
           TAPLifetimeHours: s.createTap === 'TRUE' ? String(s.tapLifetimeHours || '').trim() : '',
           AccountStatus: s.status, StatusChangeCode: '',
-          Ring: s.ring,
+          Ring: pimIsMspMaster() ? s.ring : '',   // off the master a ring means nothing and the server refuses it
           // 68.6 row 35: slave tags only mean something for an msp admin.
           Target: (s.managementMode === 'msp' && s.slaveTags && s.slaveTags.size) ? [...s.slaveTags].map(t => 'tag:' + t).join(';') : '',
           Template: s.templateId || ''
-        });
+        }, wuxReplicationFields(s, 'admin')));   // §71: Replicate/Ring/Target from the Replication section (master only)
         for (const tag of s.roleGroupSel) {
           await wuxStage('PIM-Assignments-Admins', {
             Username: upn, GroupTag: tag,
@@ -14935,6 +15457,9 @@
       auTag: 'PIM-L1',
       isRoleAssignable: 'TRUE',
       owners: '',
+      // 71.25: '' = "Use default" = a BLANK PolicyTemplate column, which the engine already reads as
+      // the 'default' template. Leaving it alone keeps today's behaviour byte-for-byte.
+      policyTemplate: '',
       grantedRoles: [],
       nestedIn: new Set()
     };
@@ -15152,7 +15677,7 @@
         },
         {
           label: 'Review',
-          render: (s) => {
+          render: (s, rerender) => {   // 71.25: rerender is used by the policy-template picker below
             const cat = PERM_CATEGORIES.find(c => c.key === s.category);
             const base = cat ? cat.base : 'PIM-Definitions-Tasks';
             const lvl = s.level.replace(/^L/,''); const tier = s.tier.replace(/^T/,'');
@@ -15163,13 +15688,19 @@
             const impact = [{ csv: base, adds: 1, what: tag }];
             if (rolesN) impact.push({ csv:'PIM-Assignments-Roles-Groups', adds: rolesN, what: s.grantedRoles.filter(g=>g.roleDefinitionName && g.roleDefinitionName.trim()).map(g=>g.roleDefinitionName).join(', ') });
             if (nestN)  impact.push({ csv:'PIM-Assignments-Groups',       adds: nestN,  what: [...s.nestedIn].join(', ') });
-            return wuxSummary(
+            const wrapE = document.createElement('div');
+            wrapE.appendChild(wuxSummary(
               'This creates a new permission group <b>' + escapeHtml(name) + '</b> in 1 row of <b>' + escapeHtml(base) + '</b>' +
               (rolesN ? ', grants it <b>' + rolesN + '</b> Entra ID role(s) via <b>' + rolesN + '</b> row(s) in <b>PIM-Assignments-Roles-Groups</b>' : '') +
               (nestN  ? ', and nests it into <b>' + nestN + '</b> ' + dimNounPlural() + ' via <b>' + nestN + '</b> row(s) in <b>PIM-Assignments-Groups</b>' : '') +
               '. No tenant changes happen until you click <b>Commit all</b> on the Review &amp; Save tab.',
               impact
-            );
+            ));
+            // 🔴 71.25 -- the activation policy for this INDIRECT permission delegation.
+            wrapE.appendChild(wuxPolicyTemplateField(s, rerender));
+            // §71.5 -- Replication of this INDIRECT permission group (MSP master only).
+            if (REPL_KIND[base]) wrapE.appendChild(wuxReplicationSection(s, { entity: base, kind: 'group', row: () => ({ GroupTag: tag, GroupName: name }) }));
+            return wrapE;
           }
         }
       ],
@@ -15179,13 +15710,16 @@
         const lvl = s.level.replace(/^L/,''); const tier = s.tier.replace(/^T/,'');
         const tag = buildPermGroupTag(s.workload, s.capability, lvl);
         const name = buildPermGroupName(s.workload, s.capability, lvl, tier, s.plane, s.platform);
-        await wuxStage(base, {
+        await wuxStage(base, Object.assign({
           GroupName: name, GroupDescription: s.description, GroupTag: tag,
           AdministrativeUnitTag: s.auTag,
           IsRoleAssignable: s.isRoleAssignable,
           Workload: s.workload, Level: s.level, TierLevel: s.tier,
-          Plane: s.plane, CPPlatform: s.platform, Owners: s.owners
-        });
+          Plane: s.plane, CPPlatform: s.platform, Owners: s.owners,
+          // 71.25: blank on "Use default" -- the engine reads a blank column as the 'default'
+          // template, so a wizard run that does not touch the field stages the same bytes as before.
+          PolicyTemplate: String(s.policyTemplate || '')
+        }, REPL_KIND[base] ? wuxReplicationFields(s, 'group') : {}));
         for (const g of s.grantedRoles.filter(g => g.roleDefinitionName && g.roleDefinitionName.trim())) {
           await wuxStage('PIM-Assignments-Roles-Groups', {
             GroupTag: tag, RoleDefinitionName: g.roleDefinitionName.trim(),
@@ -15349,6 +15883,7 @@
       azScope:'', azRole:'',
       description:'',
       tier:'T0', plane:'CP', platform:'ID',
+      policyTemplate: '',          // 71.25: '' = Use default (see wuxPolicyTemplateField)
       nestedIn: new Set()
     };
     wizSteps({
@@ -15433,6 +15968,8 @@
             f.appendChild(warFld);
             const warIn = warFld.querySelector('input');
             if (warIn && rbacItems.length) pimAttachCombo(warIn, () => rbacItems);
+            // 🔴 71.25 -- the activation policy for this Azure permission group.
+            f.appendChild(wuxPolicyTemplateField(s, rerender));
             f.appendChild(wuxAzurePreview(s));
             return f;
           },
@@ -15484,24 +16021,42 @@
             const nestN = s.nestedIn.size;
             const impact = [{ csv:'PIM-Assignments-Azure-Resources', adds:1, what: tag + ' @ ' + s.azScope }];
             if (nestN) impact.push({ csv:'PIM-Assignments-Groups', adds:nestN, what:[...s.nestedIn].join(', ') });
-            return wuxSummary(
+            const wrapZ = document.createElement('div');
+            wrapZ.appendChild(wuxSummary(
               'This creates an Azure permission group <b>' + escapeHtml(tag) + '</b> in 1 row of <b>PIM-Assignments-Azure-Resources</b>' +
               (nestN ? ', and nests it into <b>' + nestN + '</b> ' + dimNounPlural() + ' via <b>' + nestN + '</b> row(s) in <b>PIM-Assignments-Groups</b>' : '') +
               '. No tenant changes happen until you click <b>Commit all</b> on the Review &amp; Save tab.',
               impact
-            );
+            ));
+            // §71.5 -- an Azure scope lives in ONE tenant, so blank = not replicated; Follow/Yes carries it.
+            wrapZ.appendChild(wuxReplicationSection(s, { entity: 'PIM-Assignments-Azure-Resources', kind: 'resource', row: () => ({ GroupTag: tag, AzScope: s.azScope, AzScopePermission: s.azRole }) }));
+            return wrapZ;
           }
         }
       ],
       onFinish: async (s) => {
         const tag = buildAzureGroupTag(s.scopeAlias, s.roleAlias);
-        await wuxStage('PIM-Assignments-Azure-Resources', {
+        await wuxStage('PIM-Assignments-Azure-Resources', Object.assign({
           GroupTag: tag, AzScope: s.azScope.trim(), AzScopePermission: s.azRole.trim(),
           AssignmentType: 'Active', Action: 'Assign',
           UpdateExisting: 'FALSE', AutoExtend: 'TRUE',
           NumOfDaysWhenExpire: '90', Permanent: 'FALSE',
           CPPlatform: s.platform, Plane: s.plane, TierLevel: s.tier, PermissionScope: 'Scoped', SyncPlatform: ''
-        });
+        }, wuxReplicationFields(s, 'resource')));
+        // 🔴 71.25 -- an Azure permission group has NO definition row: the engine creates it from the
+        // assignment above, and the policy baseline then covers it with the 'default' template. So a
+        // non-default template needs somewhere to live, and that is a PIM-Definitions-Resources row
+        // carrying just the identity + the template (the policy provider reads that entity,
+        // Get-PimGroupPolicyDefinitionRows; group CREATION deliberately still does not).
+        // ⚠️ ONLY when a non-default template was chosen. "Use default" must stage the SAME rows as
+        // before, so an operator who does not touch the field cannot end up with a new row.
+        if (String(s.policyTemplate || '').trim()) {
+          await wuxStage('PIM-Definitions-Resources', {
+            GroupName: buildAzureGroupName(s.scopeAlias, s.roleAlias), GroupTag: tag,
+            GroupDescription: s.description, PolicyTemplate: String(s.policyTemplate).trim(),
+            TierLevel: s.tier, Plane: s.plane, CPPlatform: s.platform
+          });
+        }
         for (const rg of s.nestedIn) {
           await wuxStage('PIM-Assignments-Groups', {
             TargetGroupTag: rg, SourceGroupTag: tag,
@@ -15732,14 +16287,18 @@
             const impact = [{ csv:'PIM-Definitions-Roles', adds:1, what: tag }];
             if (s.permSel.size)  impact.push({ csv:'PIM-Assignments-Groups', adds:s.permSel.size, what:[...s.permSel].join(', ') });
             if (s.adminSel.size) impact.push({ csv:'PIM-Assignments-Admins', adds:s.adminSel.size, what:[...s.adminSel].join(', ') });
-            return wuxSummary(
+            const wrapP = document.createElement('div');
+            wrapP.appendChild(wuxSummary(
               'This creates a time-boxed ' + dimNoun() + ' <b>' + escapeHtml(tag) + '</b> in 1 row of <b>PIM-Definitions-Roles</b>' +
               (s.permSel.size  ? ', nests <b>' + s.permSel.size + '</b> permission group(s)' : '') +
               (s.adminSel.size ? ', and assigns <b>' + s.adminSel.size + '</b> admin(s)' : '') +
               '. All assignment rows get a <b>' + s.lifetimeDays + '-day</b> expiry and <b>AutoExtend=FALSE</b> so the access disappears unless renewed. ' +
               'No tenant changes happen until you click <b>Commit all</b> on the Review &amp; Save tab.',
               impact
-            );
+            ));
+            // §71.5 -- Replication of the project's direct group (MSP master only).
+            wrapP.appendChild(wuxReplicationSection(s, { entity: 'PIM-Definitions-Roles', kind: 'group', row: () => ({ GroupTag: tag, GroupName: buildRoleGroupName('Project-' + s.shortName) }) }));
+            return wrapP;
           }
         }
       ],
@@ -15747,12 +16306,12 @@
         const projShort = 'Project-' + s.shortName;
         const tag = buildRoleGroupTag(projShort);
         const name = buildRoleGroupName(projShort);
-        await wuxStage('PIM-Definitions-Roles', {
+        await wuxStage('PIM-Definitions-Roles', Object.assign({
           GroupName: name, GroupDescription: s.description, GroupTag: tag,
           AdministrativeUnitTag: 'PIM-ROLES',
           CPPlatform:'', Plane:'', TierLevel: s.tier, PermissionScope:'', SyncPlatform:'',
           IsRoleAssignable:'TRUE'
-        });
+        }, wuxReplicationFields(s, 'group')));
         for (const pTag of s.permSel) {
           await wuxStage('PIM-Assignments-Groups', {
             TargetGroupTag: tag, SourceGroupTag: pTag,
@@ -15958,13 +16517,19 @@
             const impact = [{ csv:'PIM-Definitions-Roles', adds:1, what:tag }];
             if (s.permSel.size)  impact.push({ csv:'PIM-Assignments-Groups', adds:s.permSel.size, what:[...s.permSel].join(', ') });
             if (s.adminSel.size) impact.push({ csv:'PIM-Assignments-Admins', adds:s.adminSel.size, what:[...s.adminSel].join(', ') });
-            return wuxSummary(
+            const wrapR = document.createElement('div');
+            wrapR.appendChild(wuxSummary(
               'This creates a ' + dimNoun() + ' <b>' + escapeHtml(name) + '</b> in 1 row of <b>PIM-Definitions-Roles</b>' +
               (s.permSel.size  ? ', nests <b>' + s.permSel.size + '</b> permission group(s) under it' : '') +
               (s.adminSel.size ? ', and assigns <b>' + s.adminSel.size + '</b> admin(s)' : '') +
               '. No tenant changes happen until you click <b>Commit all</b> on the Review &amp; Save tab.',
               impact
-            );
+            ));
+            // §71.5 -- Replication of this DIRECT group, whatever its type (role / org / dept / project / cross-org).
+            const dtR = directType(s.directType);
+            wrapR.appendChild(wuxReplicationSection(s, { entity: dtR.entity, kind: 'group',
+              row: () => ({ GroupTag: buildRoleGroupTag(s.shortName, s.directType), GroupName: buildRoleGroupName(s.shortName, s.directType), Department: (s.department || '').trim() }) }));
+            return wrapR;
           }
         }
       ],
@@ -16008,6 +16573,8 @@
           // approves for it and who gets mailed.
           Department:   (s.department || '').trim()
         });
+        // §71: the Replication section's fields, set on the direct group row just staged (master only).
+        { const rf = wuxReplicationFields(s, 'group'); if (Object.keys(rf).length) { const p = pendingChanges[dt.entity]; const last = p && p.rows[p.rows.length - 1]; if (last) { for (const k of Object.keys(rf)) { if (!p.header.includes(k)) p.header.push(k); last[k] = rf[k]; } } } }
         for (const pTag of s.permSel) {
           await wuxStage('PIM-Assignments-Groups', {
             TargetGroupTag: tag, SourceGroupTag: pTag,
@@ -16104,13 +16671,17 @@
           label: 'Review',
           render: (s) => {
             const newTag = computeCloneTag(s);
-            return wuxSummary(
+            const wrapC = document.createElement('div');
+            wrapC.appendChild(wuxSummary(
               'This duplicates the Definitions row for <b>' + escapeHtml(s.sourceTag) + '</b> as <b>' + escapeHtml(newTag) + '</b>' +
               (s.includeChildAssignments ? ', and copies every outgoing assignment row that references the source GroupTag (with the new tag substituted)' : '') +
               '. Open the Grid tab to edit the new rows before committing if anything needs tweaking. ' +
               'No tenant changes happen until you click <b>Commit all</b> on the Review &amp; Save tab.',
               null
-            );
+            ));
+            // §71.5 -- the clone keeps the source's replication fields unless changed here (MSP master only).
+            if (REPL_KIND[s.sourceBase]) wrapC.appendChild(wuxReplicationSection(s, { entity: s.sourceBase, kind: REPL_KIND[s.sourceBase], row: () => ({ GroupTag: newTag }) }));
+            return wrapC;
           }
         }
       ],
@@ -16136,6 +16707,8 @@
     else if (clone.GroupName) clone.GroupName = clone.GroupName + '-Clone';
     else clone.GroupName = 'PIM-' + newTag;
     if (clone.GroupDescription) clone.GroupDescription += ' (clone of ' + oldTag + ')';
+    // §71: the Replication section, when the operator used it, overrides the copied fields.
+    Object.assign(clone, wuxReplicationFields(s, REPL_KIND[s.sourceBase] || 'group'));
     await wuxStage(s.sourceBase, clone);
     if (!s.includeChildAssignments) return;
     const xrefs = [
@@ -18196,6 +18769,7 @@
   renderGridList();
   initGlobalSearch();   // header global search (REQUIREMENTS §26a)
   if (isServer) { try { renderTenantModeBadge(); } catch (e) { } }   // 68.6 row 36: tenant mode in the header
+  if (isServer) { try { mspReplicationContext(); } catch (e) { } }   // §71.5: is this the MSP master (Replication surface on/off)
   // Prime caches for any definition CSVs (so the GroupTag dropdowns have data).
   if (isServer) {
     (async () => {

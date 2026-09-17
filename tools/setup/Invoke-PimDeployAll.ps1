@@ -400,6 +400,23 @@ param(
     # nothing in Azure" lesson in framework §10.0b).
     [switch]$SkipAppReg,
 
+    # 71.18 (Friday build audit, 2026-09-15): the private-store bootstrap job's name. It was USED (infra probe, the
+    # updater hand-off and the access step) but never DECLARED, so it was always empty: on private SQL the access step
+    # asked `az containerapp job show -n ''` and reported a failure for a job that existed. Same default as
+    # Setup-PimContainers.ps1, which creates it.
+    [string]$DbInitJobName = 'ca-pim-dbinit',
+
+    # 71.18: forwarded to the prerequisites' SQL admin group step (they were not, so the group never got the
+    # troubleshooting identity and a non-default group name was ignored).
+    [string]$SqlAdminGroupName = 'grp-pim-sql-admins',
+    [string]$TroubleshootingAppId,
+
+    # 71.33 -- DEPLOY AS THE SIGNED-IN az USER (a customer administrator), not as a deploy application. No deploy
+    # identity is created, no PEM exists, no SQL admin application is used: every sub-step runs as the signed-in user,
+    # who is made a member of the SQL admin group before any SQL is touched. Refused together with any -Admin*/-SqlAdmin*
+    # credential (one identity per deploy). The user must be a USER in -TenantId for -SubscriptionId (asserted).
+    [switch]$UseSignedInAccount,
+
     # --- TEST seam: inject the per-step runner so the whole flow is offline-testable ---
     [scriptblock]$StepRunner
 )
@@ -530,7 +547,37 @@ if ($ValidateOnly) { $applyGate = $true }   # validate-only still "runs" its sin
 # The helper is idempotent, so a re-run reuses the registration and the certificate rather than
 # stacking duplicates.
 # =================================================================================================
-if (-not "$AdminAppId".Trim() -and -not $ValidateOnly -and -not $StepRunner) {
+$script:PimSignedInOid = ''
+$script:PimSignedInSqlChecked = $false
+if ($UseSignedInAccount) {
+    # 71.33 -- one identity per deploy: a signed-in deploy never also carries an application credential.
+    $mixed = @('AdminAppId', 'AdminSecret', 'AdminCertPem', 'SqlAdminClientId', 'SqlAdminClientSecret', 'SqlAdminCertThumbprint') | Where-Object { "$((Get-Variable -Name $_ -ValueOnly))".Trim() }
+    if (@($mixed).Count) { throw "Invoke-PimDeployAll: -UseSignedInAccount cannot be combined with -$(@($mixed) -join ', -') -- pick ONE deploy identity." }
+    if (-not "$TenantId".Trim() -or -not "$SubscriptionId".Trim()) { throw 'Invoke-PimDeployAll: -UseSignedInAccount needs -TenantId and -SubscriptionId (asserted against the signed-in az account).' }
+    . "$here\_PimSignedIn.ps1"
+    if (-not $StepRunner) {
+        $who = Get-PimSignedInIdentity -TenantId $TenantId -SubscriptionId $SubscriptionId
+        if (-not $who.ok) { throw "Invoke-PimDeployAll: REFUSED (nothing was touched) -- $($who.reason)" }
+        $script:PimSignedInOid = $who.objectId
+        Set-PimSignedInGlobals -TenantId $TenantId
+        Write-Host "    deploy identity: the SIGNED-IN user $($who.userName) ($($who.objectId)) -- no deploy application, no certificate" -ForegroundColor DarkGray
+    }
+}
+function Confirm-PimSignedInSqlAccess {
+    # 71.33 -- before the FIRST step that connects to SQL as the signed-in user: make that user a member of the SQL admin
+    # group (members-only). Returns '' when fine, else the reason the step must fail. Once per run.
+    if (-not $UseSignedInAccount -or $StepRunner -or $script:PimSignedInSqlChecked) { return '' }
+    if (-not "$SqlServerFqdn".Trim() -or $SqlPrivateEndpoint) { return '' }
+    $script:PimSignedInSqlChecked = $true
+    try {
+        $m = Invoke-PimSignedInSqlAdminMembership -SubscriptionId $(if ("$SqlSubscriptionId".Trim()) { $SqlSubscriptionId } else { $SubscriptionId }) -TenantId $TenantId `
+                -ResourceGroup $ResourceGroup -SqlServerName $SqlServerFqdn -UserObjectId $script:PimSignedInOid -GroupName $SqlAdminGroupName
+        if (-not $m.ok -or $m.blocked) { $script:PimSignedInSqlChecked = $false; return "the signed-in user cannot reach SQL: $($m.reason)" }
+        return ''
+    } catch { $script:PimSignedInSqlChecked = $false; return "the signed-in user's SQL admin group membership could not be ensured: $($_.Exception.Message)" }
+}
+
+if (-not "$AdminAppId".Trim() -and -not $ValidateOnly -and -not $StepRunner -and -not $UseSignedInAccount) {
     Step '0. deploy identity'
     if (-not "$TenantId".Trim() -or -not "$SubscriptionId".Trim()) {
         throw 'no -AdminAppId, and -TenantId/-SubscriptionId are missing -- cannot create a deploy identity either.'
@@ -623,6 +670,7 @@ if ("$SqlAdminClientId".Trim() -and ("$SqlAdminCertThumbprint".Trim() -or "$SqlA
     if     ("$SqlAdminCertThumbprint".Trim()) { $storeAdminArgs['AdminCertThumbprint'] = $SqlAdminCertThumbprint }
     else                                      { $storeAdminArgs['AdminSecret']         = $SqlAdminClientSecret }
 }
+if ($UseSignedInAccount) { $storeAdminArgs = @{ UseSignedInAccount = $true } }   # 71.33: the store-writing steps connect as the signed-in user
 if ($Scenario) {
     $sPlan = Get-PimScenarioEntryPlan -Scenario $Scenario
     $planSource = if ($sPlan.updateSource -eq 'from-master') { if ($sPlan.managedHosting -eq 'central') { 'sync-automateit' } else { 'git-pull' } }
@@ -1226,7 +1274,8 @@ function Invoke-DefaultStepRunner {
             }
             if ($PSCmdlet.ShouldProcess($eff.ResourceGroup, 'create hosting prerequisites (RG, VNet, ACR, Log Analytics, SQL, AcrPull identity)')) {
                 $prqId = @{}
-                if ($AdminAppId -and $AdminCertPem)   { $prqId['AdminAppId'] = $AdminAppId; $prqId['AdminCertPem'] = $AdminCertPem }
+                if ($UseSignedInAccount)              { $prqId['UseSignedInAccount'] = $true }
+                elseif ($AdminAppId -and $AdminCertPem)   { $prqId['AdminAppId'] = $AdminAppId; $prqId['AdminCertPem'] = $AdminCertPem }
                 elseif ($AdminAppId -and $AdminSecret){ $prqId['AdminAppId'] = $AdminAppId; $prqId['AdminSecret']  = $AdminSecret }
                 else {
                     # This script REQUIRES one of the two (-AdminAppId is Mandatory and it throws
@@ -1248,6 +1297,8 @@ function Invoke-DefaultStepRunner {
                 # The orchestrator carries the SQL server as an FQDN; prereq creates a server by
                 # NAME. Take the first label rather than making the caller pass the same thing twice.
                 if ("$SqlServerFqdn".Trim())              { $prqShape['SqlServerName']       = ("$SqlServerFqdn".Trim() -split '\.')[0] }
+                if ("$SqlAdminGroupName".Trim())          { $prqShape['SqlAdminGroupName']   = "$SqlAdminGroupName".Trim() }
+                if ("$TroubleshootingAppId".Trim())       { $prqShape['TroubleshootingAppId'] = "$TroubleshootingAppId".Trim() }
                 $global:LASTEXITCODE = 0
                 try {
                 & $prq @prqId @prqShape -TenantId $TenantId -SubscriptionId $SubscriptionId -Token $PrereqToken `
@@ -1306,7 +1357,12 @@ function Invoke-DefaultStepRunner {
             # caller gave neither -- "missing mandatory parameters" thrown from three scripts deep
             # is the least useful place to learn that a credential was not supplied.
             $sqlAdminCred = @{}
-            if ($SqlAdminCertThumbprint) { $sqlAdminCred['SqlAdminCertThumbprint'] = $SqlAdminCertThumbprint }
+            if ($UseSignedInAccount) {
+                $sqlAdminCred['UseSignedInAccount'] = $true
+                $why = Confirm-PimSignedInSqlAccess
+                if ($why) { return @{ ok=$false; ran=$true; detail="INFRA: $why" } }
+            }
+            elseif ($SqlAdminCertThumbprint) { $sqlAdminCred['SqlAdminCertThumbprint'] = $SqlAdminCertThumbprint }
             elseif ($SqlAdminClientSecret) { $sqlAdminCred['SqlAdminClientSecret'] = $SqlAdminClientSecret }
             elseif ($hosted) {
                 return @{ ok=$false; ran=$true; detail='INFRA needs a SQL Entra admin: pass -SqlAdminClientId plus -SqlAdminCertThumbprint (production) or -SqlAdminClientSecret.' }
@@ -1508,6 +1564,15 @@ function Invoke-DefaultStepRunner {
                 # prompt nobody was there to answer. A missing argument that THROWS is a bug; a
                 # missing argument that PROMPTS is a hang, and a hang in a nightly job is
                 # indistinguishable from a network outage until someone reads the console.
+                if ($UseSignedInAccount) {
+                    # 71.33 -- Initialize-PimMailSender provisions Exchange with an APPLICATION identity (app-only Exchange
+                    # token, a directory role for that app). A signed-in user's az token carries no Exchange scope, so this
+                    # step cannot run here. Loud and not fatal, exactly like the no-identity case below.
+                    Warn 'mail sender: NOT RUN -- a signed-in deploy has no application identity, and Exchange provisioning needs one.'
+                    Warn '  This environment is MAIL-MUTE until Initialize-PimMailSender.ps1 is run with an identity that holds Exchange Administrator,'
+                    Warn '  or the shared sender mailbox + scoped send right are created by an Exchange administrator by hand.'
+                    return @{ ok=$true; ran=$false; detail='DEGRADED: mail sender not run (signed-in deploy) -- environment is mail-mute' }
+                }
                 if (-not $storeAdminArgs.Count) {
                     Warn 'mail sender: SKIPPED -- no SQL admin identity was supplied, and this step cannot authenticate without one.'
                     Warn '  Pass -SqlAdminClientId with -SqlAdminCertThumbprint (or -SqlAdminClientSecret), or run Initialize-PimMailSender.ps1 yourself afterwards.'
@@ -1617,6 +1682,8 @@ function Invoke-DefaultStepRunner {
                         "Pass -SqlAdminClientId with -SqlAdminCertThumbprint (or -SqlAdminClientSecret). Refusing " +
                         "rather than running a step that can only answer 'supply -AdminSecret or -AdminCertThumbprint'.") }
                 }
+                $why = Confirm-PimSignedInSqlAccess
+                if ($why) { return @{ ok=$false; ran=$true; detail="features: $why" } }
                 $fbGates = @{}
                 if (@($FeatureGates).Count)        { $fbGates['Gates']   = @($FeatureGates) }
                 if (@($FeatureGatesDisable).Count) { $fbGates['Disable'] = @($FeatureGatesDisable) }
@@ -1747,6 +1814,8 @@ function Invoke-DefaultStepRunner {
                 # TWO rolls of the same version -- about four minutes wasted on every deploy,
                 # measured at a live customer 2026-09-09. -AcrName/-Apps stay because the updater
                 # still validates them, but they are no longer feeding a build that should not run.
+                $why = Confirm-PimSignedInSqlAccess
+                if ($why) { return @{ ok=$false; ran=$true; detail="schema: $why" } }
                 & $upd -Source $Source @scenarioArgs -Apply -SqlConnectionString $SqlConnectionString `
                     -ResourceGroup $ResourceGroup -ManagerApp $ManagerApp -ImageTag (Get-EffectiveImageTag) `
                     -AcrName $AcrName -ImageRepo $ImageRepo -Apps $Apps @sqlAuthArgs `
@@ -1799,6 +1868,8 @@ function Invoke-DefaultStepRunner {
                 # 🪤 THE AGENT POOL, or this rebuild is refused by the registry's own firewall while
                 # the deploy's `image` step (which DOES pass it) succeeded minutes earlier on the
                 # very same source. Splatted so an environment without a pool is unaffected.
+                $whyC = Confirm-PimSignedInSqlAccess
+                if ($whyC) { return @{ ok=$false; ran=$true; detail="code: $whyC" } }
                 $updPool = @{}
                 if ("$AcrAgentPoolName".Trim()) { $updPool['AcrAgentPool'] = "$AcrAgentPoolName".Trim() }
                 # Invoke-PimUpdate expresses the gate opt-out as -SkipVerify (it maps it onto the
@@ -1865,6 +1936,11 @@ function Invoke-DefaultStepRunner {
                 if ("$SqlAdminClientId".Trim())       { $upArgs['SqlAdminClientId']       = "$SqlAdminClientId".Trim() }
                 if ("$SqlAdminCertThumbprint".Trim()) { $upArgs['SqlAdminCertThumbprint'] = "$SqlAdminCertThumbprint".Trim() }
                 elseif ("$SqlAdminClientSecret".Trim()) { $upArgs['SqlAdminClientSecret'] = $SqlAdminClientSecret }
+                if ($UseSignedInAccount) {
+                    $upArgs['UseSignedInAccount'] = $true
+                    $why = Confirm-PimSignedInSqlAccess
+                    if ($why) { return @{ ok=$false; ran=$true; detail="updater: $why" } }
+                }
                 if ($SqlPrivateEndpoint)              { $upArgs['SqlPrivate']             = $true }
                 if ("$DbInitJobName".Trim())          { $upArgs['DbInitJobName']          = "$DbInitJobName".Trim() }
                 try { & $upj @upArgs | Out-Host }
@@ -1936,16 +2012,22 @@ function Invoke-DefaultStepRunner {
                     "administer this environment. Re-run with the INFRA step (it stamps the list onto the job and " +
                     "runs it), or set PIM_DBINIT_MANAGER_ACCESS on that job and start it.") }
             }
-            if (-not "$SqlAdminClientId".Trim()) {
+            if (-not "$SqlAdminClientId".Trim() -and -not $UseSignedInAccount) {
                 return @{ ok=$true; ran=$false; detail='no -SqlAdminClientId -- cannot write pim.Settings ManagerAccess; grant it by hand' }
             }
             $json = '{"managerAccess":[' + (($who | ForEach-Object { '{"identity":"' + $_ + '","role":"SuperAdmin"}' }) -join ',') + ']}'
             if ($PSCmdlet.ShouldProcess(($who -join ', '), 'grant Manager SuperAdmin')) {
                 $global:LASTEXITCODE = 0
+                if ($UseSignedInAccount) {
+                    $whyA = Confirm-PimSignedInSqlAccess
+                    if ($whyA) { return @{ ok=$false; ran=$true; detail="access: $whyA" } }
+                    $accArgs = @{ TenantId = $TenantId; SqlServerFqdn = $SqlServerFqdn; SqlDatabase = $SqlDatabase; UseSignedInAccount = $true; AccessJson = $json }
+                } else {
                 $accArgs = @{ TenantId = $TenantId; SqlServerFqdn = $SqlServerFqdn; SqlDatabase = $SqlDatabase
                               AdminAppId = $SqlAdminClientId; AccessJson = $json }
                 if ("$SqlAdminCertThumbprint".Trim()) { $accArgs['AdminCertThumbprint'] = $SqlAdminCertThumbprint }
                 elseif ("$SqlAdminClientSecret".Trim()) { $accArgs['AdminSecret'] = $SqlAdminClientSecret }
+                }
                 & $acc @accArgs | Out-Host
                 $ok = (-not $LASTEXITCODE) -or ($LASTEXITCODE -eq 0)
                 return @{ ok=$ok; ran=$true; detail="Manager SuperAdmin: $($who -join ', ')" }

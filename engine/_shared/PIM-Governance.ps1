@@ -148,7 +148,10 @@ function Get-PimDueScheduledCreations {
 
         $provExpr = Get-PimItemField -Item $r -Names $ProvisionFields -Default ''
         $tapExpr  = Get-PimItemField -Item $r -Names $TapStartFields  -Default ''
-        $createTap = Test-PimTruthy (Get-PimItemField -Item $r -Names $CreateTapFields -Default '')
+        # 71.17 -- TAP IS ON FOR ALL (operator 2026-09-13 "enforce tap to true", repeated 2026-09-15 "tap is on for all"):
+        # every Entra admin gets a TAP whatever CreateTAP says. Only an AD-only admin (TargetPlatform=AD) cannot hold one.
+        # $CreateTapFields is kept for callers that still pass it and is deliberately not read.
+        $createTap = ("$(Get-PimItemField -Item $r -Names @('TargetPlatform','Platform') -Default '')".Trim() -ine 'AD')
 
         $provUtc = $null; $tapUtc = $null
         if ("$provExpr".Trim() -and (Get-Command Resolve-PimDateExpression -ErrorAction SilentlyContinue)) {

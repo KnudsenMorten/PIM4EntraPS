@@ -104,24 +104,38 @@ param(
     [string]$SqlAdminClientId,
     [string]$SqlAdminClientSecret,
     [string]$SqlAdminCertThumbprint,
+    # 71.33: create the job identity's contained user as the SIGNED-IN az user (only needed off the SQL admin group model).
+    [switch]$UseSignedInAccount,
     # Deliberate escape hatch, e.g. when the contained user is created by another process.
     [switch]$SkipSqlGrant,
-    # BUG-84: fallback delivery address for a synced admin's Temporary Access Pass. The AdminTap
-    # guard REFUSES to mint a credential it cannot deliver (by design -- BUG-66/69), so a pull into
-    # a tenant whose admin rows carry no ManagerEmail creates accounts nobody can sign in as.
-    # Per-admin ManagerEmail from the bundle still wins; this is only the fallback.
-    [string]$DefaultManagerEmail,
+    # (71.19: -DefaultManagerEmail removed -- the pull resolves an admin's TAP recipient from its sponsor department's
+    # owners, which arrive in the same signed bundle.)
     # IMP-13 -- OPERATOR RULING 2026-09-03: "the MSP admin prefix is MANDATORY in a managed tenant;
     # onboarding refuses a tenant whose naming convention would hide synced admins."
     # These are the managed tenant's admin naming prefixes, e.g. 'admin-','x-admin'. Required
     # unless -AllowUncheckedAdminNaming is given.
     [string[]]$SlaveAdminPrefixes = @(),
+    # 71.35 TRUST ANCHOR: the master's signing key id(s) this tenant pins (PIM_BaselineTrustedKeys). Identifiers, not
+    # secrets -- given by the master's build output, never read from the bundle store. A bundle signed by a key that is
+    # not pinned is REFUSED. Several may be pinned (a key roll). A redeploy without it pins nothing again.
+    [string[]]$BaselineTrustedKeys = @(),
     # 🔒 The deliberate, greppable opt-out. Onboarding a tenant without declaring its convention
     # leaves the recognisability guard INERT, and the failure that follows is silent and
     # self-perpetuating -- so it must be an explicit choice someone can find later, not a default.
     [switch]$AllowUncheckedAdminNaming,
     [string]$SqlServerFqdn,
     [string]$SqlDatabase = 'PimPlatform',
+    # §71.10 (2026-09-15) -- NO SECRET: when no engine SPN secret is supplied the engine runs as the job's
+    # own SYSTEM identity (ca-pim-tick's shape). This deploy grants it the engine's Graph app-role set and
+    # makes it a member of the SQL admin group. -SkipGraphGrant / -SkipSqlAdminGroup are the deliberate
+    # escape hatches for an identity whose rights are managed elsewhere.
+    [string]$SqlAdminGroupName = 'grp-pim-sql-admins',
+    [switch]$SkipSqlAdminGroup,
+    [switch]$SkipGraphGrant,
+    # 71.14: the explicit, default-OFF retraction opt-in. Sets PIM_DOWNLINK_ALLOW_RETRACTION=true on the job, so a
+    # pull REMOVES rows that no longer reach this tenant (still within the removal budget). Omitted = report-only.
+    # A redeploy without it switches the job back to report-only.
+    [switch]$AllowRetraction,
     [string]$SyncRootCentral = '/sync/central',
     [string]$SyncRootLocal   = '/sync/local',
     [string]$EntryPath = '/app/PIM4EntraPS/tools/pim-engine/downlink-job-entry.ps1',
@@ -159,6 +173,17 @@ if (-not "$ImageTag".Trim()) {
 $placement = Get-PimDownlinkJobPlacement -Scenario $Scenario
 Step "Downlink cron Job: $JobName  ($($placement.scenarioId) $($placement.placement)-hosted, $($placement.spnModel))"
 Note $placement.reason
+
+# --- §71.10: WHICH IDENTITY THE ENGINE RUNS AS -------------------------------------------------------
+# 🔴 FOUND LIVE ON RIDE 2026-09-15. Without an engine SPN secret this job used to run as the user-assigned
+# MI it names in PIM_ManagedIdentityClientId -- an identity that holds NO Graph app-roles (it exists to
+# pull the first image). The pull therefore could not read the slave's own default domain, so no admin was
+# staged, and the engine apply had no directory rights: the only way to a working job was a client SECRET,
+# which the machine-wide rule forbids. ca-pim-tick has always run the engine as its SYSTEM identity with
+# the UAMI attached for the pull only; this job now does the same.
+$engineSystemMi = -not ("$EngineClientId".Trim() -and "$EngineClientSecret".Trim())
+if ($engineSystemMi) { Note "engine identity: the job's own SYSTEM managed identity (no secret) -- granted Graph app-roles + SQL admin group membership below" }
+else { Warn "engine identity: SPN client id + SECRET (-EngineClientSecret). Omit both to run the engine as the job's system managed identity instead." }
 
 # Helper: run an az arg set (or print it under -WhatIf).
 #
@@ -331,7 +356,10 @@ if ($exists -and -not $WhatIfPreference -and "$IdentityResourceId".Trim()) {
     # branch would read as "no identity attached" for the wrong reason.
     $curIdentity = az containerapp job show @subArgs -g $ResourceGroup -n $JobName --query identity -o json 2>$null
     $wantedName  = Split-Path "$IdentityResourceId".Trim() -Leaf
-    if (-not ("$curIdentity" -match [regex]::Escape($wantedName))) {
+    # §71.10: adding the SYSTEM identity to a job that has only the user-assigned one is an identity change
+    # too -- ACA refuses it on update just the same, so it takes the same delete + recreate.
+    $missingSystem = $engineSystemMi -and -not ("$curIdentity" -match 'SystemAssigned')
+    if ($missingSystem -or -not ("$curIdentity" -match [regex]::Escape($wantedName))) {
         Warn "existing job '$JobName' does not carry the intended user-assigned identity '$wantedName' -- ACA cannot swap an identity on update; deleting and recreating."
         $delArgs2 = Build-PimDownlinkJobArgs -Action delete -JobName $JobName -ResourceGroup $ResourceGroup
         Invoke-Az -AzArgs $delArgs2.args -What "delete job $JobName (identity change)" | Out-Null
@@ -347,7 +375,9 @@ if ($exists -and -not $WhatIfPreference -and "$IdentityResourceId".Trim()) {
 # no token at all and presents no credential to SQL. Resolved here (a live probe) and passed to
 # the pure planner as a fact, which is the same split the rest of this script uses.
 $miClientId = ''
-if (-not $WhatIfPreference -and "$IdentityResourceId".Trim()) {
+# §71.10: never name the user-assigned MI when the engine runs as the system identity -- a named client id
+# makes every token call pick the role-less UAMI again.
+if (-not $WhatIfPreference -and "$IdentityResourceId".Trim() -and -not $engineSystemMi) {
     $miClientId = az identity show @subArgs --ids "$IdentityResourceId" --query clientId -o tsv --only-show-errors 2>$null
     if ("$miClientId".Trim()) { Note "managed identity client id: $miClientId" }
     else { Warn "could not read the client id of '$IdentityResourceId' -- the container may be unable to obtain a managed-identity token." }
@@ -426,6 +456,11 @@ if (-not "$SqlServerFqdn".Trim()) {
            "Pass -SqlServerFqdn <the slave's own server>.database.windows.net.")
 }
 
+# 71.35: a pin that is not a key id is REFUSED here, not silently dropped by the env builder (a typo would pin nothing).
+$badPins = @(@($BaselineTrustedKeys) | ForEach-Object { "$_" -split '[,;\s]+' } | ForEach-Object { "$_".Trim() } | Where-Object { $_ -and $_ -cnotmatch '^[A-Za-z0-9_-]{43}$' })
+if ($badPins.Count) { throw "REFUSED: -BaselineTrustedKeys '$($badPins -join ', ')' is not a signing key id (43 characters of base64url, as the master's signingkey step prints)." }
+if (@($BaselineTrustedKeys | Where-Object { "$_".Trim() }).Count) { Note ("pinned master signing key(s): {0}" -f (@($BaselineTrustedKeys) -join ', ')) }
+else { Warn 'no -BaselineTrustedKeys: only bundles signed by the product''s embedded certificate will verify; a master publishing from its cloud job will be REFUSED.' }
 $plan = Get-PimDownlinkJobDeployPlan -Scenario $Scenario -TenantId $TenantId -SlaveRing $SlaveRing `
     -JobName $JobName -ResourceGroup $ResourceGroup -EnvName $EnvName -Image $image -AcrServer $acrServer `
     -Cron $Cron -EntryPath $EntryPath -BaselineUrl $BaselineUrl -BaselineDocPath $BaselineDocPath `
@@ -433,10 +468,14 @@ $plan = Get-PimDownlinkJobDeployPlan -Scenario $Scenario -TenantId $TenantId -Sl
     -IdentityResourceId $IdentityResourceId -RegistryIdentity $RegistryIdentity -Exists $exists `
     -YamlPath $yamlPath -Location $envLocation -EnvironmentId $envId `
     -EngineClientId $EngineClientId -EngineClientSecret $EngineClientSecret -BaselineSasUrl $BaselineSasUrl `
-    -ManagedIdentityClientId $miClientId -DefaultManagerEmail $DefaultManagerEmail `
-    -SlaveAdminPrefixes $SlaveAdminPrefixes
+    -ManagedIdentityClientId $miClientId `
+    -SlaveAdminPrefixes $SlaveAdminPrefixes -SystemAssigned:$engineSystemMi -AllowRetraction:$AllowRetraction `
+    -BaselineTrustedKeys $BaselineTrustedKeys
 
 if (-not $plan.ok) { throw "deploy plan invalid: $($plan.reason)" }
+if ($AllowRetraction) { Warn 'retraction: ALLOWED on this job (-AllowRetraction) -- pulls remove rows that no longer reach this tenant, within the removal budget.' }
+else { Note 'retraction: report-only (default; pass -AllowRetraction to let the pull remove rows that no longer reach this tenant)' }
+Note "engine identity in the plan: $($plan.engineIdentity)"
 if ($plan.jobArgs.hasInlineSecret) { throw "REFUSED: the arg set contains an inline secret (must use MI / secret-ref only)." }
 
 Step ("{0} job {1} (cron '{2}')" -f $plan.action, $JobName, $Cron)
@@ -529,8 +568,43 @@ if ($plan.action -eq 'create' -and -not $WhatIfPreference -and -not "$IdentityRe
 # having no check -- which is why this is an ACTION, and why it fails loudly instead.
 # 📌 Setup-PimContainers already does exactly this for ca-pim-manager and ca-pim-tick. The downlink
 # job was simply missing it, which is why those two reach SQL and this one never could.
-if (-not $WhatIfPreference -and -not $SkipSqlGrant -and "$SqlServerFqdn".Trim()) {
-    $sqlAdminGiven = "$SqlAdminClientId".Trim() -and ("$SqlAdminClientSecret".Trim() -or "$SqlAdminCertThumbprint".Trim())
+# --- §71.10: THE SYSTEM IDENTITY GETS WHAT THE TICK'S SYSTEM IDENTITY HAS ------------------------------------
+# Graph: the engine's app-role set (Grant-PimMiGraph throws on a role that did not land -- BUG-45).
+# SQL: membership of the SQL admin group, members-only (never creates the group, never moves the admin), the
+# same step Deploy-PimUpdateJob runs for the updater. A member needs no contained user.
+$sqlGroupMember = $false
+if (-not $WhatIfPreference -and $engineSystemMi) {
+    $jobOid = "$(az containerapp job show @subArgs -g $ResourceGroup -n $JobName --query identity.principalId -o tsv --only-show-errors 2>$null)".Trim()
+    if (-not $jobOid) { throw "$JobName has no SYSTEM identity after the deploy -- the engine could not authenticate; refusing to report success." }
+    if (Get-Command Resolve-PimMiAppId -ErrorAction SilentlyContinue) { [void](Resolve-PimMiAppId -ObjectId $jobOid -What $JobName) }   # BUG-44: wait for the SP to exist
+    if ($SkipGraphGrant) { Warn "-SkipGraphGrant: $JobName's system identity ($jobOid) gets NO Graph app-roles here -- the pull cannot read the tenant's domain and the engine apply cannot write the directory until they are granted." }
+    else {
+        Step "Graph app-roles for $JobName's system identity ($jobOid)"
+        $tidForGrant = "$(az account show @subArgs --query tenantId -o tsv 2>$null)".Trim()
+        Grant-PimMiGraph -MiObjectId $jobOid -SubscriptionId $SubscriptionId -ExpectedTenantId $tidForGrant -RoleSet Engine
+        Note "Graph app-roles ensured for $JobName"
+    }
+    if (-not $SkipSqlAdminGroup -and "$SqlServerFqdn".Trim()) {
+        Step "SQL admin group '$SqlAdminGroupName' -- $JobName's system identity"
+        try {
+            . (Join-Path $here '_PimSqlAdminGroup.ps1')
+            $inv = New-PimSqlAdminGroupInvokers -SubscriptionId $SubscriptionId
+            $srvRes = Resolve-PimSqlServerFromFqdn -Arm $inv.Arm -SubscriptionId $SubscriptionId -Server "$SqlServerFqdn"
+            if (-not $srvRes) { throw "SQL server '$SqlServerFqdn' is not in subscription $SubscriptionId." }
+            $gr = Invoke-PimSqlAdminGroupStep -Graph $inv.Graph -Arm $inv.Arm -TenantId $inv.TenantId -SubscriptionId $SubscriptionId `
+                      -ResourceGroup $ResourceGroup -SqlResourceGroup $srvRes.resourceGroup -SqlServerName $srvRes.name `
+                      -GroupName $SqlAdminGroupName -UpdateJobName '' -ExtraMembers @([pscustomobject]@{ objectId = $jobOid; label = "downlink job identity $JobName" }) `
+                      -Mode membersOnly -NoDiscovery
+            Write-PimSqlAdminGroupReport -Result $gr
+            if ($gr.ok -and -not $gr.blocked) { $sqlGroupMember = $true; Note "$JobName's identity is a member of '$SqlAdminGroupName', the Entra admin of $($srvRes.name) -- no contained user needed" }
+            elseif ($gr.ok) { Note "not on the group model -- $JobName reaches SQL through a contained database user (next step)" }
+            else { Warn "could not make $JobName's identity a member of '$SqlAdminGroupName' -- the contained-user step below still runs" }
+        } catch { Warn "SQL admin group step skipped: $($_.Exception.Message) -- the contained-user step below still runs" }
+    }
+}
+
+if (-not $WhatIfPreference -and -not $SkipSqlGrant -and -not $sqlGroupMember -and "$SqlServerFqdn".Trim()) {
+    $sqlAdminGiven = ("$SqlAdminClientId".Trim() -and ("$SqlAdminClientSecret".Trim() -or "$SqlAdminCertThumbprint".Trim())) -or [bool]$UseSignedInAccount
     if (-not $sqlAdminGiven) {
         throw ("REFUSING to finish: $JobName is configured for SQL ($SqlServerFqdn/$SqlDatabase) but no SQL admin " +
                'credential was supplied, so its identity cannot be granted a contained DB user -- and without one the ' +
@@ -540,13 +614,16 @@ if (-not $WhatIfPreference -and -not $SkipSqlGrant -and "$SqlServerFqdn".Trim())
     # WHICH identity actually connects: the user-assigned MI when one is attached (that is what the
     # container presents), else the job's system-assigned MI.
     $miAppId = ''
-    if ("$IdentityResourceId".Trim()) {
+    if ("$IdentityResourceId".Trim() -and -not $engineSystemMi) {
         $miAppId = az identity show @subArgs --ids "$IdentityResourceId" --query clientId -o tsv --only-show-errors 2>$null
     } else {
         $oid2 = az containerapp job show @subArgs -g $ResourceGroup -n $JobName --query identity.principalId -o tsv --only-show-errors 2>$null
         # BUG-44: a just-created identity is eventually consistent in the directory; this retries.
         if ("$oid2".Trim() -and (Get-Command Resolve-PimMiAppId -ErrorAction SilentlyContinue)) {
-            $miAppId = Resolve-PimMiAppId -PrincipalId "$oid2".Trim()
+            # 🪤 The parameter is -ObjectId (+ -What). This call named -PrincipalId, which does not exist, so the
+            # system-identity branch threw "A parameter cannot be found" the first time anything reached it
+            # (§71.10, 2026-09-15 -- unreachable before, because every deploy passed a user-assigned MI).
+            $miAppId = Resolve-PimMiAppId -ObjectId "$oid2".Trim() -What $JobName
         }
     }
     if (-not "$miAppId".Trim()) { throw "could not resolve the app id of $JobName's managed identity -- cannot grant it SQL, and the job would fail on every run." }
@@ -565,7 +642,8 @@ if (-not $WhatIfPreference -and -not $SkipSqlGrant -and "$SqlServerFqdn".Trim())
         SqlServerFqdn = $SqlServerFqdn; SqlDatabase = $SqlDatabase; TenantId = $TenantId
         SqlAdminClientId = $SqlAdminClientId
     }
-    if ("$SqlAdminClientSecret".Trim())    { $grant['SqlAdminClientSecret']   = $SqlAdminClientSecret }
+    if ($UseSignedInAccount) { $grant.Remove('SqlAdminClientId'); $grant['UseSignedInAccount'] = $true }
+    elseif ("$SqlAdminClientSecret".Trim())    { $grant['SqlAdminClientSecret']   = $SqlAdminClientSecret }
     elseif ("$SqlAdminCertThumbprint".Trim()) { $grant['SqlAdminCertThumbprint'] = $SqlAdminCertThumbprint }
     Grant-PimMiSql @grant
     Note "SQL contained user ensured for $JobName"
@@ -576,7 +654,8 @@ if ($Start) {
     $startArgs = Build-PimDownlinkJobArgs -Action start -JobName $JobName -ResourceGroup $ResourceGroup
     Step "Start one on-demand execution of $JobName"
     Invoke-Az -AzArgs $startArgs.args -What "start job $JobName" | Out-Null
-    Note "execution queued. Verify with: -Verify  (or `az containerapp job execution list -g $ResourceGroup -n $JobName`)"
+    # (no backticks inside this string: "`a" is the BELL escape, and it ate the 'a' of 'az' in the live log)
+    Note "execution queued. Verify with: -Verify  (or: az containerapp job execution list -g $ResourceGroup -n $JobName)"
 }
 
 Step 'Done.'

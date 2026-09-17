@@ -65,11 +65,8 @@ param(
     [string]$SqlServer   = $env:PIM_SqlServer,
     [string]$SqlDatabase = $env:PIM_SqlDatabase,
 
-    # BUG-84: fallback TAP delivery address for synced admins. The AdminTap guard refuses to mint a
-    # credential it cannot deliver, so without this a pull creates admin accounts that nobody can
-    # sign in as. Per-admin ManagerEmail from the bundle still wins; absent => the guard still
-    # refuses, which stays the correct behaviour rather than a silent downgrade.
-    [string]$DefaultManagerEmail = $env:PIM_DefaultManagerEmail,
+    # (71.19: -DefaultManagerEmail / PIM_DefaultManagerEmail removed -- a synced admin's TAP goes to its SPONSOR
+    # DEPARTMENT's owners, resolved in this tenant from the department rows the bundle carries.)
 
     # --- BUG-79: THE TWO DOWNLINK GATES, on the entry that had NEITHER ---------
     # This script reaches Invoke-PimManagedDownlink (via Invoke-PimScenarioDeploy) and for a long
@@ -91,6 +88,9 @@ param(
     # one resolves from the slave's own config. Absent => the plan reports admin recognisability as
     # NOT EVALUATED, which is the honest answer from a runner that may not be inside the slave.
     [string[]]$SlaveAdminPrefixes,
+    # 71.14: the downlink's removal opt-in (same name as Invoke-PimDownlinkSync.ps1). Default OFF = retraction is
+    # report-only ("WOULD REMOVE ..."); ON removes what no longer reaches this tenant, still within the removal budget.
+    [switch]$AllowRetraction,
 
     [int64]$LastVersion = 0,
     [switch]$WhatIfMode = $true
@@ -245,14 +245,23 @@ if ($srRingMap -and "$TenantId".Trim()) {
     Write-Host "  ring map: none supplied -- version gate INERT (pulls whatever version the master published)" -ForegroundColor DarkYellow
 }
 
+if ($AllowRetraction) {
+    $srArgs['AllowRetraction'] = $true
+    if ($run.runDownlink) { Write-Host '  retraction: ALLOWED (-AllowRetraction) -- rows that no longer reach this tenant are removed, within the removal budget' -ForegroundColor Yellow }
+} elseif ($run.runDownlink) {
+    Write-Host '  retraction: report-only (default) -- pass -AllowRetraction to remove what no longer reaches this tenant' -ForegroundColor DarkGray
+}
+
 $result = Invoke-PimScenarioDeploy -Scenario $sc -EngineScope $EngineScope -EngineMode $EngineMode `
     -Doc $doc -TenantId $TenantId -SlaveRing $SlaveRing `
     -CentralRoot $CentralRoot -LocalRoot $LocalRoot -SqlServer $SqlServer -SqlDatabase $SqlDatabase `
-    -LastVersion $LastVersion -DefaultManagerEmail $DefaultManagerEmail -WhatIfMode:$WhatIfMode @srArgs
+    -LastVersion $LastVersion -WhatIfMode:$WhatIfMode @srArgs
 
 Write-Host ""
 $col = if ($result.ok) { 'Green' } else { 'Red' }
-Write-Host ("SCENARIO RUN $($result.scenarioId): {0}" -f $(if ($result.ok) { 'OK' } else { 'FAILED' })) -ForegroundColor $col
+$held = [bool]($result.ok -and $result.PSObject.Properties['held'] -and $result.held)   # 71.13
+if ($held) { $col = 'Yellow' }
+Write-Host ("SCENARIO RUN $($result.scenarioId): {0}" -f $(if ($held) { 'OK -- HELD, NEEDS APPROVAL' } elseif ($result.ok) { 'OK' } else { 'FAILED' })) -ForegroundColor $col
 foreach ($s in @($result.steps)) {
     Write-Host ("  [{0}] {1} -- {2}" -f $(if ($s.ok) { 'OK' } else { 'XX' }), $s.step, $s.detail) -ForegroundColor $(if ($s.ok) { 'DarkGray' } else { 'Red' })
 }

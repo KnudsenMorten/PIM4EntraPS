@@ -50,11 +50,175 @@ function Get-PimManagerDownlinkTenants {
     [CmdletBinding()] param([string]$ConnectionString)
     if (-not $ConnectionString) { $ConnectionString = Get-PimSqlConnectionString }
     try {
+        # §71: Tags ride along when the registry has the column -- the reach preview evaluates targets
+        # against them. A registry predating the column still answers, untagged.
         return @(Invoke-PimSqlQuery -ConnectionString $ConnectionString -Sql @"
-SELECT CONVERT(nvarchar(50), TenantId) AS TenantId, DisplayName, Ring, Enabled
-FROM platform.Tenants WHERE Enabled = 1 ORDER BY DisplayName
+IF COL_LENGTH('platform.Tenants','Tags') IS NULL
+    SELECT CONVERT(nvarchar(50), TenantId) AS TenantId, DisplayName, Ring, Enabled, CAST(NULL AS nvarchar(400)) AS Tags
+    FROM platform.Tenants WHERE Enabled = 1 ORDER BY DisplayName
+ELSE
+    SELECT CONVERT(nvarchar(50), TenantId) AS TenantId, DisplayName, Ring, Enabled, Tags
+    FROM platform.Tenants WHERE Enabled = 1 ORDER BY DisplayName
 "@)
     } catch { return @() }
+}
+
+# --- §71: THE REPLICATION REACH PREVIEW ---------------------------------------
+#
+# 🔑 "THIS WILL REACH N TENANTS" IS THE SIGNED BUNDLE'S OWN ANSWER, NOT A SECOND OPINION. The preview
+# builds the payload with the producer's own Select-PimBaselineBundleContent, signs it with a throwaway
+# key, and runs the SAME Get-PimDownlinkPlan every managed tenant runs -- once per registered tenant.
+# A browser-side reach calculation could disagree with what the tenants then receive; this cannot,
+# because it is the same code on the same rows (framework MSP-4 SURFACE item 9).
+# PURE except for the clock and the ephemeral key: the caller supplies every row.
+
+function Get-PimReplicationRowId {
+    # A stable id for one replicable row, shared by the preview's input rows and the plan's output rows.
+    [CmdletBinding()] param([Parameter(Mandatory)][string]$Entity, [object]$Row)
+    $kind = Get-PimReplicationKindForEntity -Entity $Entity
+    $v = { param($k) "$(Get-PimDownlinkValue -Object $Row -Key $k)".Trim() }
+    $local = { param($u) $x = "$u".Trim(); $at = $x.IndexOf('@'); if ($at -gt 0) { $x.Substring(0, $at) } else { $x } }
+    $id = switch ($kind) {
+        'admin'      { $u = & $v 'UserName'; if (-not $u) { $u = & $local (& $v 'UserPrincipalName') }; "admin|$u" }
+        'membership' { $u = & $v 'Username'; if (-not $u) { $u = & $v 'UserName' }; "membership|$(& $local $u)|$(& $v 'GroupTag')" }
+        'group'      { "group|$(& $v 'GroupTag')" }
+        'nesting'    { "nesting|$(& $v 'TargetGroupTag')|$(& $v 'SourceGroupTag')" }
+        'binding'    { "binding|$(& $v 'GroupTag')|$(& $v 'RoleDefinitionName')" }
+        'resource'   {
+            $k = if (Get-Command Get-PimStoreRowKey -ErrorAction SilentlyContinue) { Get-PimStoreRowKey -Base $Entity -Row $Row } else { & $v 'GroupTag' }
+            "resource|$Entity|$k"
+        }
+        default      { '' }
+    }
+    return "$id".ToLowerInvariant()
+}
+
+function Get-PimReplicationPreview {
+    [CmdletBinding()]
+    param(
+        [AllowEmptyCollection()][object[]]$RegistryRows = @(),
+        [hashtable]$RegistryReplicate = @{},
+        [hashtable]$Entities = @{},
+        # @{ tenantId; name; ring; tags } -- the master's registered managed tenants
+        [AllowEmptyCollection()][object[]]$Tenants = @(),
+        # tenant id (lowercase) -> @( @{ Mode; GroupTag } ), as the bundle carries it
+        [object]$ProjectionPolicy = ([ordered]@{})
+    )
+    $content = Select-PimBaselineBundleContent -RegistryRows @($RegistryRows) -RegistryReplicate $RegistryReplicate -Entities $Entities
+    $tagMap = [ordered]@{}
+    $tlist = New-Object System.Collections.Generic.List[object]
+    foreach ($t in @($Tenants)) {
+        if ($null -eq $t) { continue }
+        $tid = "$(Get-PimDownlinkValue -Object $t -Key 'tenantId')".Trim(); if (-not $tid) { $tid = "$(Get-PimDownlinkValue -Object $t -Key 'TenantId')".Trim() }
+        if (-not $tid) { continue }
+        $name = "$(Get-PimDownlinkValue -Object $t -Key 'name')"; if (-not $name) { $name = "$(Get-PimDownlinkValue -Object $t -Key 'DisplayName')" }; if (-not $name) { $name = $tid }
+        $ringRaw = "$(Get-PimDownlinkValue -Object $t -Key 'ring')"; if (-not $ringRaw) { $ringRaw = "$(Get-PimDownlinkValue -Object $t -Key 'Ring')" }
+        $ring = 2; [void][int]::TryParse("$ringRaw".Trim(), [ref]$ring)
+        $tagsRaw = Get-PimDownlinkValue -Object $t -Key 'tags'; if ($null -eq $tagsRaw) { $tagsRaw = Get-PimDownlinkValue -Object $t -Key 'Tags' }
+        $tags = @(@($tagsRaw) | ForEach-Object { "$_" -split '[;,]' } | ForEach-Object { "$_".Trim() } | Where-Object { $_ })
+        if ($tags.Count) { $tagMap[$tid.ToLowerInvariant()] = $tags }
+        $tlist.Add([ordered]@{ tenantId = $tid; name = $name; ring = $ring; tags = $tags }) | Out-Null
+    }
+    $now = [datetime]::UtcNow
+    $payload = New-PimBaselinePayload -Content $content -ProjectionPolicy $ProjectionPolicy -TenantTags $tagMap -Version 1 `
+                 -GeneratedAtUtc $now.ToString('yyyy-MM-ddTHH:mm:ssZ') -ValidToUtc $now.AddDays(1).ToString('yyyy-MM-ddTHH:mm:ssZ')
+    $bytes = [System.Text.Encoding]::UTF8.GetBytes(($payload | ConvertTo-Json -Depth 8 -Compress))
+    $rsa = [System.Security.Cryptography.RSA]::Create(2048)
+    $reach = @{}; $warnings = New-Object System.Collections.Generic.List[object]; $errors = New-Object System.Collections.Generic.List[string]
+    try {
+        $sig = $rsa.SignData($bytes, [System.Security.Cryptography.HashAlgorithmName]::SHA256, [System.Security.Cryptography.RSASignaturePadding]::Pkcs1)
+        $doc = [pscustomobject]@{ product = 'PIM4EntraPS'; payloadB64 = [Convert]::ToBase64String($bytes); signature = [Convert]::ToBase64String($sig); keyThumbprint = 'REACH-PREVIEW' }
+        $add = { param($id, $tname) if (-not "$id".Trim()) { return }; if (-not $reach.ContainsKey($id)) { $reach[$id] = New-Object System.Collections.Generic.List[string] }; if (-not $reach[$id].Contains($tname)) { $reach[$id].Add($tname) } }
+        foreach ($t in $tlist.ToArray()) {
+            $plan = Get-PimDownlinkPlan -Scenario 'S6' -Doc $doc -PublicKey $rsa -TenantId $t.tenantId -SlaveRing ([int]$t.ring) `
+                        -LocalRoot ([System.IO.Path]::GetTempPath()) -TenantTags @($t.tags)
+            if (-not $plan.ok) { $errors.Add("$($t.name): $($plan.reason)") | Out-Null; continue }
+            foreach ($a in @($plan.admins))      { & $add ("admin|$(Get-PimDownlinkValue -Object $a -Key 'UserName')".ToLowerInvariant()) $t.name }
+            foreach ($a in @($plan.assignments)) { & $add ("membership|$(Get-PimDownlinkValue -Object $a -Key 'UserName')|$(Get-PimDownlinkValue -Object $a -Key 'GroupTag')".ToLowerInvariant()) $t.name }
+            if ($plan.definitions) {
+                foreach ($g in @($plan.definitions.create))       { & $add ("group|$(Get-PimDownlinkValue -Object $g -Key 'GroupTag')".ToLowerInvariant()) $t.name }
+                foreach ($n in @($plan.definitions.nestings))     { & $add ("nesting|$(Get-PimDownlinkValue -Object $n -Key 'TargetGroupTag')|$(Get-PimDownlinkValue -Object $n -Key 'SourceGroupTag')".ToLowerInvariant()) $t.name }
+                foreach ($b in @($plan.definitions.roleBindings)) { & $add ("binding|$(Get-PimDownlinkValue -Object $b -Key 'GroupTag')|$(Get-PimDownlinkValue -Object $b -Key 'RoleDefinitionName')".ToLowerInvariant()) $t.name }
+                foreach ($x in @($plan.definitions.resourceBindings)) {
+                    $e = "$(Get-PimDownlinkValue -Object $x -Key 'Entity')"
+                    & $add (Get-PimReplicationRowId -Entity $e -Row $x) $t.name
+                }
+            }
+            foreach ($w in @($plan.autoIncluded)) {
+                $warnings.Add([ordered]@{ tenantId = $t.tenantId; tenant = $t.name; kind = "$($w.kind)"; GroupTag = "$($w.GroupTag)"; dependent = "$($w.dependent)"
+                                          reason = ("$($w.reason)" -replace [regex]::Escape("tenant $($t.tenantId)"), "tenant $($t.name)") }) | Out-Null
+            }
+        }
+    } finally { $rsa.Dispose() }
+    $out = @{}
+    foreach ($k in $reach.Keys) { $out[$k] = @($reach[$k].ToArray() | Sort-Object) }
+    return [ordered]@{
+        tenantCount        = $tlist.Count
+        tenants            = @($tlist.ToArray())
+        reach              = $out
+        warnings           = @($warnings.ToArray())
+        notPublished       = @($content.report.notPublished)
+        dependencyIncluded = @($content.report.dependencyIncluded)
+        errors             = @($errors.ToArray())
+    }
+}
+
+function Get-PimReplicationRowReach {
+    # One row's line in "this will reach: N tenants" -- from a Get-PimReplicationPreview result.
+    [CmdletBinding()] param([Parameter(Mandatory)][object]$Preview, [Parameter(Mandatory)][string]$Entity, [object]$Row)
+    $id = Get-PimReplicationRowId -Entity $Entity -Row $Row
+    $names = @()
+    if ($id -and $Preview.reach.ContainsKey($id)) { $names = @($Preview.reach[$id]) }
+    $tag = "$(Get-PimDownlinkValue -Object $Row -Key 'GroupTag')".Trim().ToLowerInvariant()
+    $w = @(@($Preview.warnings) | Where-Object { $tag -and "$($_.GroupTag)".Trim().ToLowerInvariant() -eq $tag -and (Get-PimReplicationKindForEntity -Entity $Entity) -eq 'group' })
+    return [ordered]@{
+        id = $id; count = $names.Count; tenantCount = [int]$Preview.tenantCount; tenants = $names
+        summary = ("{0} of {1} tenant(s)" -f $names.Count, [int]$Preview.tenantCount)
+        warnings = @($w)
+    }
+}
+
+function Get-PimReplicationMasterModel {
+    <#
+      The master's store, read the way New-PimBaselineBundle reads it, for the reach preview: registry
+      rows (+ Replicate), every replicable entity, the projection policy and the tenant registry.
+      -Overlay: entity -> rows that REPLACE the stored rows of that entity (the grid's pending set).
+      -Draft:   @( @{ entity; row } ) upserted by natural key (a wizard's not-yet-staged row).
+    #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string]$ConnectionString, [hashtable]$Overlay = @{}, [object[]]$Draft = @())
+    $registry = @(); $repMap = @{}
+    try { $registry = @(Invoke-PimSqlQuery -ConnectionString $ConnectionString -Sql "SELECT UserName, DisplayName, FirstName, LastName, Initials, UsageLocation, Purpose, Ring, Template, Target FROM pim.CentralAdmins WHERE Owner='MSP' AND Enabled=1 ORDER BY Ring") }
+    catch {
+        # a registry predating Target still has admins; one with no registry at all has none
+        try { $registry = @(Invoke-PimSqlQuery -ConnectionString $ConnectionString -Sql "SELECT UserName, DisplayName, FirstName, LastName, Initials, UsageLocation, Purpose, Ring, Template FROM pim.CentralAdmins WHERE Owner='MSP' AND Enabled=1 ORDER BY Ring") } catch { $registry = @() }
+    }
+    try { foreach ($rr in @(Invoke-PimSqlQuery -ConnectionString $ConnectionString -Sql "SELECT UserName, Replicate FROM pim.CentralAdmins WHERE Owner='MSP' AND Enabled=1")) { if ("$($rr.Replicate)".Trim()) { $repMap["$($rr.UserName)".Trim().ToLowerInvariant()] = "$($rr.Replicate)".Trim() } } } catch { }
+    $entities = @{}
+    foreach ($e in @(Get-PimReplicationEntities) + @('PIM-Definitions-AU', 'PIM-Definitions')) {
+        if ($Overlay.ContainsKey($e)) { $entities[$e] = @(@($Overlay[$e]) | Where-Object { $null -ne $_ }); continue }
+        try { $entities[$e] = @(Get-PimSqlRows -ConnectionString $ConnectionString -Entity $e) } catch { $entities[$e] = @() }
+    }
+    foreach ($d in @($Draft)) {
+        $e = "$(Get-PimDownlinkValue -Object $d -Key 'entity')".Trim(); $row = Get-PimDownlinkValue -Object $d -Key 'row'
+        if (-not $e -or $null -eq $row) { continue }
+        $row = [pscustomobject]$row
+        $k = if (Get-Command Get-PimStoreRowKey -ErrorAction SilentlyContinue) { Get-PimStoreRowKey -Base $e -Row $row } else { '' }
+        $rest = @(@($entities[$e]) | Where-Object { -not $k -or (Get-PimStoreRowKey -Base $e -Row $_) -ne $k })
+        $entities[$e] = @($rest) + @($row)
+    }
+    $policy = [ordered]@{}
+    try {
+        foreach ($p in @(Invoke-PimSqlQuery -ConnectionString $ConnectionString -Sql "SELECT CONVERT(nvarchar(50), TenantId) AS TenantId, Mode, GroupTag FROM pim.TenantRoleProjection")) {
+            $tid = "$($p.TenantId)".Trim().ToLowerInvariant(); if (-not $tid) { continue }
+            if (-not $policy.Contains($tid)) { $policy[$tid] = @() }
+            $policy[$tid] = @($policy[$tid]) + @([ordered]@{ Mode = "$($p.Mode)"; GroupTag = "$($p.GroupTag)" })
+        }
+    } catch { }
+    $tenants = @(Get-PimManagerDownlinkTenants -ConnectionString $ConnectionString | ForEach-Object {
+        [ordered]@{ tenantId = "$($_.TenantId)"; name = "$($_.DisplayName)"; ring = [int]("0" + "$($_.Ring)"); tags = @("$($_.Tags)" -split '[;,]' | ForEach-Object { "$_".Trim() } | Where-Object { $_ }) }
+    })
+    return @{ RegistryRows = $registry; RegistryReplicate = $repMap; Entities = $entities; Tenants = $tenants; ProjectionPolicy = $policy }
 }
 
 function Get-PimManagerDownlinkPolicy {
@@ -186,6 +350,79 @@ function Get-PimManagerBaselineDoc {
     } catch { return @{ doc = $null; source = "$Path"; error = "baseline document is not valid JSON: $($_.Exception.Message)" } }
 }
 
+function Get-PimManagerBaselineTrustedKeyIds {
+    <#
+      71.35 -- the master signing key ids THIS Manager pins. Read EXACTLY as the managed tenant's pull job
+      reads them (tools/pim-engine/downlink-job-entry.ps1 -> Test-PimBaselineDoc -> Get-PimBaselineTrustedKeyIds):
+      $global:PIM_BaselineTrustedKeys when set, else $env:PIM_BaselineTrustedKeys; comma / semicolon / space
+      separated; anything that is not a 43-character base64url key id is ignored (never widened to "any key").
+      One reader, so the banner and the per-relationship plan (which verifies through the same function) can
+      never disagree about whether a bundle is trusted.
+    #>
+    [CmdletBinding()] param()
+    if (Get-Command Get-PimBaselineTrustedKeyIds -ErrorAction SilentlyContinue) { return @(Get-PimBaselineTrustedKeyIds) }
+    $raw = @()
+    if ("$(@($global:PIM_BaselineTrustedKeys) -join ',')".Trim()) { $raw = @($global:PIM_BaselineTrustedKeys) } else { $raw = @("$($env:PIM_BaselineTrustedKeys)") }
+    $out = New-Object System.Collections.Generic.List[string]
+    foreach ($r in $raw) { foreach ($x in @("$r" -split '[,;\s]+')) { $t = "$x".Trim(); if ($t -cmatch '^[A-Za-z0-9_-]{43}$' -and -not $out.Contains($t)) { $out.Add($t) } } }
+    return @($out.ToArray())
+}
+
+function Get-PimManagerBaselineVerification {
+    <#
+      The banner's verdict on the signed bundle, with the reason when it is NOT verified.
+      * A bundle carrying signingKey (the master's cloud publish job, Key Vault key) verifies only when its key id
+        is PINNED here (Get-PimManagerBaselineTrustedKeyIds) and RS256 checks out.
+      * A bundle without signingKey verifies against the embedded CN=PIM4EntraPS-Baseline certificate, exactly as
+        before -- no pin needed, and a pin does not change it.
+      Same verifier the pull job reaches (Test-PimBaselineDoc, with the pins passed EXPLICITLY), then the same
+      freshness gate (Test-PimDownlinkBaselineFinish). Returns
+      @{ verified; signer = 'key'|'certificate'|''; keyId; pinnedKeyIds; reason }. Never throws.
+    #>
+    [CmdletBinding()] param(
+        [Parameter(Mandatory)][object]$Doc,
+        [string[]]$TrustedKeyIds,
+        [datetime]$NowUtc = ([datetime]::UtcNow)
+    )
+    $pins = @()
+    if ($PSBoundParameters.ContainsKey('TrustedKeyIds')) { $pins = @(@($TrustedKeyIds) | Where-Object { "$_" -cmatch '^[A-Za-z0-9_-]{43}$' }) }
+    else { $pins = @(Get-PimManagerBaselineTrustedKeyIds) }
+    $res = [ordered]@{ verified = $false; signer = ''; keyId = ''; pinnedKeyIds = @($pins); reason = '' }
+
+    $sk = $null
+    if ($Doc -is [System.Collections.IDictionary]) { if ($Doc.Contains('signingKey')) { $sk = $Doc['signingKey'] } }
+    else { $skp = $Doc.PSObject.Properties['signingKey']; if ($skp) { $sk = $skp.Value } }
+    if ($null -ne $sk) {
+        $res.signer = 'key'
+        try {
+            $n = $null; $e = $null
+            if ($sk -is [System.Collections.IDictionary]) { $n = $sk['n']; $e = $sk['e'] } else { $n = $sk.n; $e = $sk.e }
+            if ("$n".Trim() -and "$e".Trim() -and (Get-Command Get-PimBaselineKeyId -ErrorAction SilentlyContinue)) { $res.keyId = "$(Get-PimBaselineKeyId -N "$n" -E "$e")" }
+        } catch { $res.keyId = '' }
+    } else { $res.signer = 'certificate' }
+
+    if (-not (Get-Command Test-PimBaselineDoc -ErrorAction SilentlyContinue)) {
+        $res.reason = 'the baseline verifier (PIM-Baseline.ps1) is not loaded in this Manager'
+        return $res
+    }
+    $payload = $null
+    try { $payload = Test-PimBaselineDoc -Doc $Doc -TrustedKeyIds @($pins) }
+    catch {
+        $msg = "$($_.Exception.Message)"
+        if ($res.signer -eq 'key' -and $msg -match '^UNTRUSTED SIGNING KEY') {
+            $res.reason = ("signed by Key Vault key {0}, which this Manager does not pin ({1} key id(s) in PIM_BaselineTrustedKeys). The managed tenants decide with their OWN pins; set the same id on the Manager to verify it here." -f $res.keyId, @($pins).Count)
+        } else { $res.reason = $msg }
+        return $res
+    }
+    if (Get-Command Test-PimDownlinkBaselineFinish -ErrorAction SilentlyContinue) {
+        $fin = Test-PimDownlinkBaselineFinish -PayloadObject $payload -NowUtc $NowUtc
+        if (-not $fin.ok) { $res.reason = "$($fin.reason)"; return $res }
+    }
+    $res.verified = $true
+    $res.reason = $(if ($res.signer -eq 'key') { "signed by pinned Key Vault key $($res.keyId)" } else { 'signed by the product baseline certificate' })
+    return $res
+}
+
 # --- the GUI payload ---------------------------------------------------------
 
 function Get-PimManagerDownlinkOverview {
@@ -274,9 +511,13 @@ function Get-PimManagerDownlinkOverview {
         # It was hardcoded $true, so a bundle with a broken signature still showed
         # "signature verified" in the banner while every relationship below it carried a
         # refusal. Derive it from an ACTUAL verify of the document.
-        $ok = $false
-        try { if (Get-Command Test-PimDownlinkBaseline -ErrorAction SilentlyContinue) { $ok = [bool](Test-PimDownlinkBaseline -Doc $bl.doc).ok } } catch { $ok = $false }
-        $blInfo = [ordered]@{ version = $ver; source = "$($bl.source)"; verified = $ok }
+        # 71.35: a Key Vault signed bundle verifies only against a PINNED key id, read the same way the pull job
+        # reads it (Get-PimManagerBaselineTrustedKeyIds); a certificate-signed bundle verifies as before. The
+        # reason travels with the verdict, so "NOT verified" says WHICH of the two it is.
+        $vf = [ordered]@{ verified = $false; signer = ''; keyId = ''; pinnedKeyIds = @(); reason = '' }
+        try { $vf = Get-PimManagerBaselineVerification -Doc $bl.doc } catch { $vf.reason = "verify failed: $($_.Exception.Message)" }
+        $blInfo = [ordered]@{ version = $ver; source = "$($bl.source)"; verified = [bool]$vf.verified
+                              signer = "$($vf.signer)"; keyId = "$($vf.keyId)"; pinnedKeyCount = @($vf.pinnedKeyIds).Count; verifyReason = "$($vf.reason)" }
     }
     return [ordered]@{
         relationships = @($out.ToArray())

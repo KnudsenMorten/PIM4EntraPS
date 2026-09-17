@@ -108,7 +108,13 @@ param(
     # Subscription ids to assert the context against. Optional, but STRONGLY recommended: without
     # them the script can only check that SOME context exists, not that it is the right one --
     # and on this host the default az context is routinely a different company's tenant.
-    [string]$MasterSubscriptionId
+    [string]$MasterSubscriptionId,
+    # 71.16 -- THE NO-SECRET UNATTENDED LOGIN. A machine-local JSON naming, for master and slave, ONLY
+    # { tenantId, clientId, certThumbprint, subscriptionId } (anything else is refused). Each certificate is read
+    # from Cert:\LocalMachine\My, az logs in with it into a per-run profile directory, and that directory (PEMs
+    # included) is deleted when the run ends. Supplies -MasterSubscriptionId / -SubscriptionId when they are not
+    # given. Mutually exclusive with -PreAuthScript / -AzureConfigDir. See tools/setup/_PimSasCertLogin.ps1.
+    [string]$CertLoginConfig
 )
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Off
@@ -133,12 +139,36 @@ if ($MintOnly) {
 # --- 0) REGISTER the recurring task, then exit. -------------------------------
 # Registration is a SEPARATE action from rotating: doing both in one run would mean the
 # schedule only ever exists on a box where a rotation also succeeded.
+. (Join-Path $PSScriptRoot '_PimSasCertLogin.ps1')
+if ("$CertLoginConfig".Trim() -and ("$PreAuthScript".Trim() -or "$AzureConfigDir".Trim())) {
+    Fail '-CertLoginConfig cannot be combined with -PreAuthScript / -AzureConfigDir -- pick ONE way to authenticate. Nothing was minted or written.'
+    exit 1
+}
+$certCfg = $null
+if ("$CertLoginConfig".Trim()) {
+    if (-not (Test-Path -LiteralPath $CertLoginConfig)) { Fail "-CertLoginConfig '$CertLoginConfig' not found. Nothing was minted or written."; exit 1 }
+    $rawCfg = $null
+    try { $rawCfg = Get-Content -Raw -LiteralPath $CertLoginConfig | ConvertFrom-Json } catch { Fail "-CertLoginConfig '$CertLoginConfig' is not valid JSON. Nothing was minted or written."; exit 1 }
+    $certCfg = Test-PimSasCertLoginConfig -Config $rawCfg
+    if (-not $certCfg.ok) { Fail "certificate-login config: $($certCfg.reason). Nothing was minted or written."; exit 1 }
+    if (-not "$MasterSubscriptionId".Trim()) { $MasterSubscriptionId = $certCfg.master.subscriptionId }
+    if (-not "$SubscriptionId".Trim())       { $SubscriptionId = $certCfg.slave.subscriptionId }
+    if ("$MasterSubscriptionId".Trim() -ne $certCfg.master.subscriptionId -or "$SubscriptionId".Trim() -ne $certCfg.slave.subscriptionId) {
+        Fail 'the -MasterSubscriptionId / -SubscriptionId given disagree with the certificate-login config -- refusing to guess which is right. Nothing was minted or written.'
+        exit 1
+    }
+}
+
 if ($Register) {
     $self = $MyInvocation.MyCommand.Path
     $exe  = (Get-Command powershell.exe -CommandType Application | Select-Object -First 1).Source
-    $argLine = ('-NoProfile -ExecutionPolicy Bypass -File "{0}" -StorageAccount {1} -Container {2} -Blob {3} -ResourceGroup {4} -JobName {5} -SecretName {6} -ValidDays {7}' -f `
-                $self, $StorageAccount, $Container, $Blob, $ResourceGroup, $JobName, $SecretName, $ValidDays)
-    if ("$SubscriptionId".Trim()) { $argLine += " -SubscriptionId $SubscriptionId" }
+    # 71.16: every context input travels into the task (they used to be dropped here, so an armed task could not log in).
+    $argLine = Get-PimSasRotationTaskArgLine -ScriptPath $self -StorageAccount $StorageAccount -Container $Container -Blob $Blob `
+        -ResourceGroup $ResourceGroup -JobName $JobName -SecretName $SecretName -ValidDays $ValidDays -SubscriptionId $SubscriptionId `
+        -MasterSubscriptionId $MasterSubscriptionId -CertLoginConfig $CertLoginConfig -PreAuthScript $PreAuthScript -AzureConfigDir $AzureConfigDir
+    if (-not ("$CertLoginConfig".Trim() -or "$PreAuthScript".Trim() -or "$AzureConfigDir".Trim())) {
+        Warn 'no -CertLoginConfig / -PreAuthScript / -AzureConfigDir: a scheduled task does not inherit an az login, so this task will fail every run until one is supplied.'
+    }
     Step "registering WEEKLY task '$TaskName' ($DayOfWeek $($AtHour):00, as $RunAsUser)"
     $a = New-ScheduledTaskAction -Execute $exe -Argument $argLine
     $t = New-ScheduledTaskTrigger -Weekly -DaysOfWeek $DayOfWeek -At ([datetime]::Today.AddHours($AtHour))
@@ -153,6 +183,23 @@ if ($Register) {
 # --- 0b) CONTEXT -- prove we can act, BEFORE we mint anything -------------------
 # A rotation that discovers halfway through that it cannot write the secret has already minted a
 # credential and learned nothing useful. Check first, fail with the fix, change nothing.
+# 71.16: the certificate login runs inside try/finally so its per-run profile (and the PEMs in it) is removed on
+# EVERY exit path -- `exit` inside a try still runs the finally block.
+$certLoginDir = $null
+try {
+if ($certCfg) {
+    $certLoginDir = Join-Path ([IO.Path]::GetTempPath()) ('pim-sas-rotation-' + [guid]::NewGuid().ToString('N'))
+    Step 'certificate login (no secret): managed tenant, then master'
+    $login = Invoke-PimSasCertLogin -Config $certCfg -ProfileDir $certLoginDir
+    if (-not $login.ok) { Fail "$($login.reason). Nothing was minted or written."; exit 1 }
+    Note $login.reason
+    # A certificate-authenticated az loads its crypto stack on every call and prints a harmless 32-bit-Python
+    # warning on stderr. Windows PowerShell 5.1 (the task's host) turns that line into a TERMINATING
+    # NativeCommandError under 'Stop' -- measured: the key read died on the warning, not on a failure. Every az call
+    # below is judged by $LASTEXITCODE, and every non-az step that must stop does so explicitly (-ErrorAction Stop /
+    # exit 1), so native stderr must not decide the outcome here.
+    $ErrorActionPreference = 'Continue'
+}
 if ("$AzureConfigDir".Trim()) {
     if (-not (Test-Path -LiteralPath $AzureConfigDir)) {
         Fail "-AzureConfigDir '$AzureConfigDir' does not exist. A scheduled task needs a prepared az profile; it does not inherit an interactive login."
@@ -299,3 +346,13 @@ if ($WarnWithinDays -gt 0) {
     Write-Host ("Next rotation should run well before {0} -- WEEKLY is the recommended cadence, so three missed runs still leave a working credential." -f $expiry) -ForegroundColor DarkGray
 }
 exit 0
+} finally {
+    if ($certLoginDir -and (Test-Path -LiteralPath $certLoginDir)) {
+        foreach ($wait in 0, 2, 5) {
+            if ($wait) { Start-Sleep -Seconds $wait }
+            Remove-Item -LiteralPath $certLoginDir -Recurse -Force -ErrorAction SilentlyContinue
+            if (-not (Test-Path -LiteralPath $certLoginDir)) { break }
+        }
+        if (Test-Path -LiteralPath $certLoginDir) { Write-Host "    WARNING: could not remove the per-run az profile $certLoginDir (it holds certificate PEMs) -- delete it." -ForegroundColor Yellow }
+    }
+}

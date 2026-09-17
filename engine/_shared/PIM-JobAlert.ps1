@@ -55,9 +55,10 @@ function Get-PimJobFailureAlert {
     $detail = "$(Get-PimJobAlertField -Item $Run -Name 'detail')".Trim()
     $scope  = "$(Get-PimJobAlertField -Item $Run -Name 'scope')".Trim()
 
-    # ONLY a real failure. 'skipped' (out of scope for this deployment) and
-    # 'unimplemented' (a placeholder handler) are not failures -- see the header.
-    if ($status -ne 'failed') {
+    # ONLY a real failure -- or a HOLD (71.13): a safety breaker stopped a change set and it needs an
+    # operator's approval, so someone must be told. 'skipped' (out of scope for this deployment) and
+    # 'unimplemented' (a placeholder handler) are neither -- see the header.
+    if ($status -notin @('failed', 'held')) {
         $out.reason = "status '$status' is not a failure"
         return $out
     }
@@ -67,7 +68,7 @@ function Get-PimJobFailureAlert {
     }
 
     $out.fire  = $true
-    $out.title = "Job '$name' FAILED"
+    $out.title = if ($status -eq 'held') { "Job '$name' HELD -- needs approval" } else { "Job '$name' FAILED" }
     $bits = New-Object System.Collections.Generic.List[string]
     if ($detail) { $bits.Add($detail) }
     if ($type)   { $bits.Add("type=$type") }

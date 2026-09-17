@@ -79,11 +79,14 @@ param(
     [Parameter(Mandatory)][string]$SqlServerFqdn,
     [string]$SqlDatabase    = 'PimPlatform',
     # SQL AAD-admin SPN (used ONLY here to CREATE the contained MI users; never stored in apps)
-    [Parameter(Mandatory)][string]$SqlAdminClientId,
+    # (71.33: no longer Mandatory -- -UseSignedInAccount is the other way. Missing both is refused below, not prompted.)
+    [string]$SqlAdminClientId,
     # ONE of these two -- see Grant-PimMiSql. A cert-only tenant (any real customer, per the
     # repo-root rule) could not deploy at all while the secret was Mandatory.
     [string]$SqlAdminClientSecret,
     [string]$SqlAdminCertThumbprint,
+    # 71.33: create the contained users as the SIGNED-IN az user (a member of the SQL admin group).
+    [switch]$UseSignedInAccount,
 
     # --- Support access to the store (operator, 2026-09-12) -------------------
     # The principal an operator uses to TROUBLESHOOT a customer's PIM store from outside:
@@ -710,6 +713,11 @@ function Grant-PimMiSqlHere {
         Note "db user '$DbUserName' queued for the in-cloud bootstrap (SQL is private; this host has no route)"
         return
     }
+    if ($UseSignedInAccount) {
+        Grant-PimMiSql -DbUserName $DbUserName -MiAppId $MiAppId -SqlServerFqdn $SqlServerFqdn -SqlDatabase $SqlDatabase -TenantId $TenantId -UseSignedInAccount
+        return
+    }
+    if (-not "$SqlAdminClientId".Trim()) { throw "db user '$DbUserName': no -SqlAdminClientId (with -SqlAdminCertThumbprint) and no -UseSignedInAccount -- nothing can create the contained user." }
     $cred = if ($SqlAdminCertThumbprint) { @{ SqlAdminCertThumbprint = $SqlAdminCertThumbprint } }
             else                          { @{ SqlAdminClientSecret   = $SqlAdminClientSecret } }
     Grant-PimMiSql -DbUserName $DbUserName -MiAppId $MiAppId `

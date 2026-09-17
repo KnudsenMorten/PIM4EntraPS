@@ -450,3 +450,78 @@ function Get-PimEngineItemFailures {
         return $list
     } catch { return @() }
 }
+
+# ---------------------------------------------------------------------------------------------
+# HELD FOR APPROVAL is its own outcome (REQUIREMENTS 71.13, operator 2026-09-15: "fix 1-3").
+#
+# A policy mass-change circuit breaker that HOLDS a plan is the safety net working: the engine wrote
+# nothing and recorded exactly what needs an operator's approval. Measured on RIDE 2026-09-15: every
+# pull of a freshly onboarded tenant ended "downlink JOB FAILED", and the tick's delta-policies job
+# was red, while the only "error" was the hold itself. A red FAILED teaches operators to ignore red.
+# A green would hide the approval. So: its own outcome -- ok, ran, 'held', amber, needs attention --
+# and a REAL item failure in the same run still fails the job.
+# ---------------------------------------------------------------------------------------------
+function Get-PimApprovalHoldProvider {
+    # PURE. The breaker provider a hold code belongs to, or '' when the code is not an approval hold.
+    param([string]$Code)
+    switch -Regex ("$Code".Trim().ToUpperInvariant()) {
+        '^GROUP-POLICY-MASS-HOLD$' { return 'GroupsPolicies' }
+        '^ENTRA-POLICY-MASS-HOLD$' { return 'EntraRolePolicies' }
+        '^AZ-POLICY-MASS-HOLD$'    { return 'AzResPolicies' }
+    }
+    return ''
+}
+
+function Test-PimEngineFailureIsApprovalHold {
+    # PURE. $true for an item the policy mass-change breaker HELD (awaiting an approval), never for a real failure.
+    param([AllowNull()][object]$Failure)
+    if ($null -eq $Failure) { return $false }
+    $code = if ($Failure -is [System.Collections.IDictionary]) { "$($Failure['code'])" } else { "$($Failure.code)" }
+    return [bool](Get-PimApprovalHoldProvider -Code $code)
+}
+
+function Get-PimEngineRunOutcome {
+    <#
+      PURE. Classify one engine run (the per-scope results of Invoke-PimEngine / Invoke-PimEngineScope, or
+      the perScope array of the engine summary) as:
+        ok     -- every scope ok
+        held   -- the ONLY errors are approval holds (policy mass-change breaker)
+        failed -- any real item failure, or a scope bound to no provider (even when holds are also present)
+      Returns @{ outcome; heldCount; failedCount; unboundCount; holds = @(@{ scope; provider; code; planHash;
+      changes; approve }); detail }. A scope result without a failures list counts every error as real
+      (fail closed: an unclassified error is never softened into a hold).
+    #>
+    param([AllowEmptyCollection()][object[]]$Results = @())
+    $held = New-Object System.Collections.Generic.List[object]
+    $failed = 0; $unbound = 0
+    foreach ($r in @($Results | Where-Object { $null -ne $_ })) {
+        $okProp = $r.PSObject.Properties['ok']
+        if (-not $okProp -or [bool]$r.ok) { continue }
+        if ("$($r.detail)" -match 'no provider for scope') { $unbound++; continue }
+        $errors = 0; try { $errors = [int]$r.errors } catch { $errors = 0 }
+        $items = @()
+        if ($r.PSObject.Properties['failures']) { $items = @(@($r.failures) | Where-Object { $null -ne $_ }) }
+        $holdItems = @($items | Where-Object { Test-PimEngineFailureIsApprovalHold $_ })
+        $real = [Math]::Max(0, $errors - $holdItems.Count)
+        # ok=$false with no counted error at all is not something we can call held
+        if ($errors -le 0 -and -not $holdItems.Count) { $real = 1 }
+        $failed += $real
+        foreach ($h in $holdItems) {
+            $msg = "$($h.message)"
+            $prov = Get-PimApprovalHoldProvider -Code "$($h.code)"
+            $hash = ''; $m = [regex]::Match($msg, 'planHash=([0-9a-fA-F]{64})'); if ($m.Success) { $hash = $m.Groups[1].Value.ToLowerInvariant() }
+            $n = 0; $m2 = [regex]::Match($msg, 'N=(\d+) polic'); if ($m2.Success) { $n = [int]$m2.Groups[1].Value }
+            if (@($held | Where-Object { $_.provider -eq $prov -and $_.planHash -eq $hash }).Count) { continue }
+            $held.Add([pscustomobject]@{ scope = "$($r.scope)"; provider = $prov; code = "$($h.code)"; planHash = $hash; changes = $n
+                approve = ("Approve-PimPolicyMassChange -Provider {0} -PlanHash {1} -By <you>" -f $prov, $(if ($hash) { $hash } else { '<hash>' })) }) | Out-Null
+        }
+    }
+    $holds = @($held.ToArray())
+    $outcome = if ($failed -gt 0 -or $unbound -gt 0) { 'failed' } elseif ($holds.Count) { 'held' } else { 'ok' }
+    $detail = ''
+    if ($holds.Count) {
+        $detail = 'HELD for approval (the engine wrote nothing for these): ' + ((@($holds | ForEach-Object {
+            "{0} -- {1} polic(ies) to change; {2}" -f $_.provider, $_.changes, $_.approve })) -join ' | ')
+    }
+    return [pscustomobject]@{ outcome = $outcome; heldCount = $holds.Count; failedCount = $failed; unboundCount = $unbound; holds = $holds; detail = $detail }
+}

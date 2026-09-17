@@ -1,4 +1,15 @@
 ﻿# =============================================================================
+# 🔴 71.23 -- Get-PimAdminAutoDisableDate (PIM-DateSafe.ps1) decides which column carries an admin's
+# auto-disable date, and REFUSES a row that carries both names with different dates. The downlink
+# publishes that decision into the bundle, so it must never fall back to reading a column itself --
+# a local fallback would be exactly the silent guess the resolver exists to prevent. The engine host
+# always has DateSafe loaded; an offline test that dot-sources only this file did not, so load it
+# here when it is missing rather than degrade.
+if (-not (Get-Command Get-PimAdminAutoDisableDate -ErrorAction SilentlyContinue)) {
+    $__dsPath = Join-Path $PSScriptRoot 'PIM-DateSafe.ps1'
+    if (Test-Path -LiteralPath $__dsPath) { . $__dsPath }
+}
+
 # PIM-Downlink.ps1 -- the PURE, offline-testable decision brain for the §31.3
 # master->managed (slave) admin/permission SYNC (downlink) + the scenario-bound
 # engine runner. Phase 2 of the §31 hosting/edition scenario matrix (S1-S6).
@@ -77,6 +88,23 @@ function Get-PimDownlinkValue {
     $p = $Object.PSObject.Properties[$Key]
     if ($p) { return $p.Value }
     return $null
+}
+
+# 71.15 (pure) -- a lifecycle DATE field as text, whatever the JSON parser made of it. pwsh 7's ConvertFrom-Json and
+# Invoke-RestMethod turn an ISO-8601 string ('2026-10-01T08:00:00Z') into a [datetime], and "$value" then renders it in
+# the host culture ('10/01/2026 08:00:00'), dropping the zone. The slave's copy of a master's ProvisionDate /
+# TAPStartDate / AutoDisableDate must stay the ISO text the master wrote, so a [datetime] is rendered back as ISO-8601
+# (UTC with Z when the parser knew it was UTC; without a zone when it did not). Anything else is the trimmed text.
+function ConvertTo-PimDownlinkLifecycleText {
+    param([object]$Value)
+    if ($null -eq $Value) { return '' }
+    if ($Value -is [datetime]) {
+        $inv = [Globalization.CultureInfo]::InvariantCulture
+        if ($Value.Kind -eq [DateTimeKind]::Unspecified) { return $Value.ToString('yyyy-MM-ddTHH:mm:ss', $inv) }
+        return $Value.ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ', $inv)
+    }
+    if ($Value -is [datetimeoffset]) { return $Value.UtcDateTime.ToString('yyyy-MM-ddTHH:mm:ssZ', [Globalization.CultureInfo]::InvariantCulture) }
+    return "$Value".Trim()
 }
 
 # ---------------------------------------------------------------------------
@@ -178,6 +206,15 @@ function Test-PimDownlinkAdminSynced {
     $has = $false
     if ($Admin -is [System.Collections.IDictionary]) { $has = $Admin.Contains('ManagementMode') }
     else { $has = [bool]$Admin.PSObject.Properties['ManagementMode'] }
+    # §71: an explicit Replicate on the row decides, through the one rule every other replicable row
+    # uses. Absent it, the pre-§71 reading below runs unchanged. (A Target=none row is left to the
+    # target gate, which reports it as MSP-local by declaration -- and since §71.7 (b) the producer
+    # no longer puts such a row in the bundle at all.)
+    $repRaw = "$(Get-PimDownlinkValue -Object $Admin -Key 'Replicate')".Trim()
+    if ($repRaw) {
+        $rm = Get-PimReplicateMode -Row $Admin -Kind 'admin'
+        return @{ synced = ($rm.mode -eq 'Yes'); reason = "$($rm.reason)" }
+    }
     if (-not $has) { return @{ synced = $true; reason = 'central registry row (MSP by construction)' } }
     $mode = "$(Get-PimDownlinkValue -Object $Admin -Key 'ManagementMode')".Trim()
     if ($mode -ieq 'msp') { return @{ synced = $true; reason = 'ManagementMode=msp at the master' } }
@@ -193,7 +230,7 @@ function Test-PimDownlinkAdminSynced {
 # derived or reshaped here. Every row that is NOT published is reported with its reason.
 # Returns @{ synced; notSynced; mspWithoutRing; adOnly } -- synced rows carry ManagementMode='msp'
 # so the slave-side gate (Test-PimDownlinkAdminSynced) reads the master's decision, plus the
-# governance fields (AccountStatus / OffboardDate) that must flow down from the source.
+# governance fields (AccountStatus / AutoDisableDate) that must flow down from the source.
 # ---------------------------------------------------------------------------
 function Get-PimCentralAdminsFromDefinitions {
     param([object[]]$Rows = @())
@@ -207,7 +244,15 @@ function Get-PimCentralAdminsFromDefinitions {
         if (-not $un) { $upn = "$(Get-PimDownlinkValue -Object $r -Key 'UserPrincipalName')".Trim(); if ($upn) { $un = ($upn -split '@')[0] } }
         if (-not $un) { continue }
         $mode = "$(Get-PimDownlinkValue -Object $r -Key 'ManagementMode')".Trim()
-        if ($mode -ine 'msp') {
+        # §71: Replicate must agree with ManagementMode, and Target=none keeps the admin MSP-local.
+        # Both are decided by the shared rule; a row carrying neither reads exactly as before.
+        $repRaw = "$(Get-PimDownlinkValue -Object $r -Key 'Replicate')".Trim()
+        $rm = Get-PimReplicateMode -Row $r -Kind 'admin'
+        if (($repRaw -or $mode -ieq 'msp') -and $rm.mode -ne 'Yes') {
+            $notSynced.Add([ordered]@{ UserName = $un; reason = "$($rm.reason) -- not synced" }) | Out-Null
+            continue
+        }
+        if ($mode -ine 'msp' -and -not $repRaw) {
             $notSynced.Add([ordered]@{ UserName = $un; reason = "ManagementMode=$(if ($mode) { $mode } else { '(blank)' }) -- not synced" }) | Out-Null
             continue
         }
@@ -221,7 +266,7 @@ function Get-PimCentralAdminsFromDefinitions {
             continue
         }
         $tapLife = "$(Get-PimDownlinkValue -Object $r -Key 'TAPLifetimeHours')".Trim()
-        $synced.Add([ordered]@{
+        $one = [ordered]@{
             UserName         = $un
             DisplayName      = "$(Get-PimDownlinkValue -Object $r -Key 'DisplayName')"
             FirstName        = "$(Get-PimDownlinkValue -Object $r -Key 'FirstName')"
@@ -232,12 +277,40 @@ function Get-PimCentralAdminsFromDefinitions {
             Ring             = [int]$ring
             Template         = "$(Get-PimDownlinkValue -Object $r -Key 'Template')"
             Target           = "$(Get-PimDownlinkValue -Object $r -Key 'Target')".Trim()
+            # 71.19: the SPONSOR DEPARTMENT travels with the admin -- it is what decides who receives its mail and TAP in
+            # the managed tenant (that department's row is auto-included as a dependency). ManagerEmail still travels as
+            # legacy data for a master that has not moved to departments yet.
+            Department       = "$(Get-PimDownlinkValue -Object $r -Key 'Department')".Trim()
             ManagerEmail     = "$(Get-PimDownlinkValue -Object $r -Key 'ManagerEmail')"
             TapLifetimeHours = $tapLife
             AccountStatus    = "$(Get-PimDownlinkValue -Object $r -Key 'AccountStatus')".Trim()
-            OffboardDate     = "$(Get-PimDownlinkValue -Object $r -Key 'OffboardDate')".Trim()
+            # 🔴 71.23 -- the bundle carries AutoDisableDate, NOT the legacy OffboardDate. The master
+            # resolves either column name on its own row (Get-PimAdminAutoDisableDate) and publishes
+            # ONE name, so a slave can never receive both and have to guess between them.
+            # UPGRADE ORDER: a slave older than 2.4.364 does not know this key, so master and slave
+            # must both be at 2.4.364+ (they are built together; ring 1 is the only live MSP pair).
+            AutoDisableDate  = ConvertTo-PimDownlinkLifecycleText (Get-PimAdminAutoDisableDate -Row $r).raw
             ManagementMode   = 'msp'
-        }) | Out-Null
+        }
+        # carried only when the master set it, so a row authored before §71 ships the same bytes
+        if ($repRaw) { $one['Replicate'] = 'Yes' }
+        # 71.15 -- THE ADMIN LIFECYCLE FIELDS the slave's engine reads, taken from the master's definition (governance
+        # follows the SOURCE, row 35). Only AccountStatus/AutoDisableDate/TAPLifetimeHours were published, so the slave apply
+        # filled the rest with its own defaults (ProvisionDate Now, no TAPStartDate).
+        #   ProvisionDate   -> when the account may be created (Test-PimAdminProvisionDue)
+        #   TAPStartDate    -> when its TAP starts / is deferred (Select-PimAdminTapCandidates)
+        # 🔴 NO retention/delete field (71.21, operator "we will newer delete an accounnt" + "i dont want it to be shown
+        # as it confuses"): PIM never deletes a user account anywhere, the field is not supported, and the bundle must
+        # not carry anything that implies a slave may delete.
+        # NOT CreateTAP (71.17, operator "tap is on for all"): nothing on either side may read it, so it is not published.
+        # NOT StatusChangeCode: that is the slave's own authorisation for a local status change, and a central row's
+        # status is authorised by the signed bundle instead. Each key is emitted ONLY when the master set it, so a row
+        # without them ships the same bytes as before.
+        foreach ($lf in 'ProvisionDate','TAPStartDate') {
+            $lv = ConvertTo-PimDownlinkLifecycleText (Get-PimDownlinkValue -Object $r -Key $lf)
+            if ($lv) { $one[$lf] = $lv }
+        }
+        $synced.Add($one) | Out-Null
     }
     return @{ synced = $synced.ToArray(); notSynced = $notSynced.ToArray(); mspWithoutRing = $noRing.ToArray(); adOnly = $adOnly.ToArray() }
 }
@@ -571,9 +644,16 @@ function Test-PimAdminTargetSelector {
             $bad.Add($tok); continue
         }
         $tag = if ($l -like 'tag:*') { $tok.Substring(4).Trim() } else { $tok }
-        if (-not $tag -or $tag -notmatch '^[A-Za-z0-9._-]+$') { $bad.Add($tok); continue }
-        $tags.Add($tag); $norm.Add("tag:$tag")
-        if ($TagsKnown -and -not $known.Contains($tag.ToLowerInvariant())) { $unknown.Add($tag) }
+        # §71 / framework MSP-4 SURFACE: a tag is a free `key:value` label (region:eu), and `a+b` is
+        # ALL-OF (the tenant must carry both). Each part is validated on its own, so `tag:eu+` is
+        # malformed rather than silently read as `tag:eu`.
+        $parts = @($tag -split '\+' | ForEach-Object { "$_".Trim() })
+        if (-not $tag -or @($parts | Where-Object { -not $_ -or $_ -notmatch '^[A-Za-z0-9._:-]+$' }).Count) { $bad.Add($tok); continue }
+        foreach ($p in $parts) {
+            $tags.Add($p)
+            if ($TagsKnown -and -not $known.Contains($p.ToLowerInvariant())) { $unknown.Add($p) }
+        }
+        $norm.Add("tag:$($parts -join '+')")
     }
     return @{
         ok          = ($bad.Count -eq 0 -and $unknown.Count -eq 0)
@@ -616,9 +696,526 @@ function Test-PimArtifactTarget {
         }
         $tag = $l
         if ($l -like 'tag:*') { $tag = $l.Substring(4).Trim() }
-        if ($tag -and $tags.Contains($tag)) { return @{ match = $true; reason = "tenant carries the tag '$tag'" } }
+        if (-not $tag) { continue }
+        # §71: `a+b` is ALL-OF. Tag terms stay ANY-OF across the list; within one term every part
+        # must be carried. An empty part (`eu+`) can never be satisfied -- a malformed term narrows
+        # to nothing rather than widening to its valid half.
+        if ($tag.Contains('+')) {
+            $parts = @($tag -split '\+' | ForEach-Object { "$_".Trim() })
+            if (@($parts | Where-Object { -not $_ }).Count) { continue }
+            if (-not @($parts | Where-Object { -not $tags.Contains($_) }).Count) {
+                return @{ match = $true; reason = "tenant carries all of the tags '$($parts -join "' + '")'" }
+            }
+            continue
+        }
+        if ($tags.Contains($tag)) { return @{ match = $true; reason = "tenant carries the tag '$tag'" } }
     }
     return @{ match = $false; reason = "tenant matches none of the target selectors ($($sel -join ', '))" }
+}
+
+# =============================================================================
+# §71 -- MSP REPLICATION TARGETING (framework DOCS/REQUIREMENTS.md MSP-4 -> "MSP-4 SURFACE --
+# THE REPLICATION TARGET CONTRACT"). PURE.
+#
+# Every replicable master row carries Replicate (No | Yes | Follow) + Ring + Target, and a
+# managed tenant T receives row R iff  Replicate != No  AND  ring(R) admits ring(T)  AND  Target
+# matches T. Ring AND target, never OR. A row another reaching row NEEDS is auto-included for T
+# even when its own fields would exclude it, and that inclusion is WARNED, naming the row, the
+# dependent and the tenant. Follow = "only as a dependency / follower".
+#
+# 🔒 BLANK = TODAY (v1->v2 no regression). Blank Replicate is the documented default for the row's
+# kind, and each default reproduces the behaviour before §71 byte for byte:
+#     admin       -> ManagementMode=msp => Yes (at its Ring), anything else => No; a pim.CentralAdmins
+#                    registry row (no ManagementMode field) is MSP by construction => Yes
+#     membership  -> Follow (follows its admin)
+#     group       -> Follow (included when a replicated row needs it)
+#     nesting     -> Follow (follows its role group)
+#     binding     -> Follow (an Entra role binding follows its group)
+#     resource    -> NOT replicated. PIM-Assignments-Roles-AUs / -Azure-Resources / -Workloads name
+#                    objects that live in ONE tenant (an AU, a subscription scope, a workspace); they
+#                    were never in the bundle, so blank keeps them out and only an EXPLICIT Follow/Yes
+#                    carries them. Reported as an operator decision in §71.
+# A non-admin row with a blank Ring is not narrowed by ring; an admin with no Ring still reaches no
+# slave (the pre-§71 rule, unchanged).
+# =============================================================================
+function Get-PimReplicationKindForEntity {
+    param([string]$Entity)
+    switch -Regex ("$Entity".Trim()) {
+        '^Account-Definitions-Admins$'                                          { return 'admin' }
+        '^PIM-Assignments-Admins$'                                              { return 'membership' }
+        '^PIM-Definitions-(Roles|Organization|Departments|Projects|CrossOrg|Processes|Tasks|Services)$' { return 'group' }
+        '^PIM-Assignments-Groups$'                                              { return 'nesting' }
+        '^PIM-Assignments-Roles-Groups$'                                        { return 'binding' }
+        '^PIM-Assignments-(Roles-AUs|Azure-Resources|Workloads)$'               { return 'resource' }
+    }
+    return ''
+}
+
+function Get-PimReplicationEntities {
+    # The entities that carry Replicate/Ring/Target (§71.4). Order = authoring order in the grid.
+    return @('Account-Definitions-Admins','PIM-Assignments-Admins',
+             'PIM-Definitions-Roles','PIM-Definitions-Organization','PIM-Definitions-Departments','PIM-Definitions-Projects','PIM-Definitions-CrossOrg',
+             'PIM-Definitions-Processes','PIM-Definitions-Tasks','PIM-Definitions-Services',
+             'PIM-Assignments-Groups','PIM-Assignments-Roles-Groups',
+             'PIM-Assignments-Roles-AUs','PIM-Assignments-Azure-Resources','PIM-Assignments-Workloads')
+}
+
+function Get-PimReplicateMode {
+    <#
+      The EFFECTIVE Replicate of one row. Returns @{ mode = Yes|No|Follow; explicit; valid; reason }.
+      `valid=$false` rows are FAIL-CLOSED to No, and the reason says why -- the validator and the PUT
+      gate refuse them, but a row that slips past both must narrow, never widen.
+    #>
+    param([object]$Row, [Parameter(Mandatory)][ValidateSet('admin','membership','group','nesting','binding','resource')][string]$Kind)
+    $raw = "$(Get-PimDownlinkValue -Object $Row -Key 'Replicate')".Trim()
+    $norm = ''
+    if ($raw) {
+        if ($raw -ieq 'yes') { $norm = 'Yes' } elseif ($raw -ieq 'no') { $norm = 'No' } elseif ($raw -ieq 'follow') { $norm = 'Follow' }
+        else { return @{ mode = 'No'; explicit = $true; valid = $false; reason = "Replicate='$raw' is not No, Yes or Follow -- treated as No (fail closed)" } }
+    }
+    $tgt = "$(Get-PimDownlinkValue -Object $Row -Key 'Target')"
+    $isNone = [bool](@($tgt -split '[;,]' | Where-Object { "$_".Trim() -ieq 'none' }).Count)
+
+    if ($Kind -eq 'admin') {
+        $hasMm = $false
+        if ($Row -is [System.Collections.IDictionary]) { $hasMm = $Row.Contains('ManagementMode') }
+        elseif ($null -ne $Row) { $hasMm = [bool]$Row.PSObject.Properties['ManagementMode'] }
+        $mm = "$(Get-PimDownlinkValue -Object $Row -Key 'ManagementMode')".Trim()
+        # no ManagementMode field = a pim.CentralAdmins registry row = MSP by construction
+        $mmMode = if (-not $hasMm) { 'Yes' } elseif ($mm -ieq 'msp') { 'Yes' } else { 'No' }
+        if ($norm -eq 'Follow') {
+            return @{ mode = 'No'; explicit = $true; valid = $false; reason = 'Replicate=Follow is not valid on an admin (nothing depends on an admin) -- use Yes or No' }
+        }
+        if ($norm -and $hasMm -and $norm -ne $mmMode) {
+            $shown = if ($mm) { $mm } else { '(blank)' }
+            return @{ mode = 'No'; explicit = $true; valid = $false; reason = "ManagementMode=$shown and Replicate=$norm disagree -- refused (msp goes with Yes, local/blank with No)" }
+        }
+        $mode = if ($norm) { $norm } else { $mmMode }
+        if ($mode -eq 'Yes' -and $isNone) { return @{ mode = 'No'; explicit = $true; valid = $true; reason = 'MSP-local by declaration (Target=none) -- never published' } }
+        $why = if ($norm) { "Replicate=$norm" } elseif (-not $hasMm) { 'central registry row (MSP by construction)' } elseif ($mode -eq 'Yes') { 'ManagementMode=msp' } else { "ManagementMode=$(if ($mm) { $mm } else { '(blank)' }) -- not replicated" }
+        return @{ mode = $mode; explicit = [bool]$norm; valid = $true; reason = $why }
+    }
+    if ($isNone -and $norm -ne 'No') { return @{ mode = 'No'; explicit = $true; valid = $true; reason = 'MSP-local by declaration (Target=none) -- never replicated' } }
+    if ($norm) {
+        $why = if ($norm -eq 'No') { 'Replicate=No -- not replicated' } else { "Replicate=$norm" }
+        return @{ mode = $norm; explicit = $true; valid = $true; reason = $why }
+    }
+    if ($Kind -eq 'resource') {
+        return @{ mode = 'No'; explicit = $false; valid = $true; reason = 'a tenant-scoped resource binding is not replicated unless Replicate is set to Follow or Yes' }
+    }
+    return @{ mode = 'Follow'; explicit = $false; valid = $true; reason = 'Replicate blank = Follow (replicated when a replicated row needs it)' }
+}
+
+function Test-PimReplicationRingAdmits {
+    param([object]$Row, [Parameter(Mandatory)][string]$Kind, [Parameter(Mandatory)][int]$TenantRing)
+    $r = "$(Get-PimDownlinkValue -Object $Row -Key 'Ring')".Trim()
+    if (-not $r) {
+        if ($Kind -eq 'admin') { return @{ admits = $false; reason = 'no Ring -- an admin without a ring reaches no slave' } }
+        return @{ admits = $true; reason = 'no Ring set -- not narrowed by ring' }
+    }
+    if ($r -notmatch '^\d+$') { return @{ admits = $false; reason = "Ring='$r' is not a ring number -- reaches no tenant (fail closed)" } }
+    if ([int]$r -le $TenantRing) { return @{ admits = $true; reason = "ring $r admits tenant ring $TenantRing" } }
+    return @{ admits = $false; reason = "its Ring $r is above this tenant's ring $TenantRing" }
+}
+
+function Test-PimReplicationReach {
+    <#
+      THE REACH RULE for one row and one tenant (framework MSP-4 SURFACE item 4). Returns
+      @{ reach; mode; axis = ''|replicate|ring|target; reason }. For a Follow row, reach=$true means
+      "it may follow here" -- its own Ring/Target do not exclude this tenant.
+    #>
+    param(
+        [object]$Row,
+        [Parameter(Mandatory)][ValidateSet('admin','membership','group','nesting','binding','resource')][string]$Kind,
+        [Parameter(Mandatory)][string]$TenantId,
+        [Parameter(Mandatory)][int]$TenantRing,
+        [string[]]$TenantTags = @()
+    )
+    $m = Get-PimReplicateMode -Row $Row -Kind $Kind
+    if ($m.mode -eq 'No') { return @{ reach = $false; mode = 'No'; axis = 'replicate'; reason = "$($m.reason)" } }
+    $rg = Test-PimReplicationRingAdmits -Row $Row -Kind $Kind -TenantRing $TenantRing
+    if (-not $rg.admits) { return @{ reach = $false; mode = $m.mode; axis = 'ring'; reason = "$($rg.reason)" } }
+    $tv = Test-PimArtifactTarget -Target "$(Get-PimDownlinkValue -Object $Row -Key 'Target')" -TenantId $TenantId -TenantTags @($TenantTags)
+    if (-not $tv.match) { return @{ reach = $false; mode = $m.mode; axis = 'target'; reason = "$($tv.reason)" } }
+    return @{ reach = $true; mode = $m.mode; axis = ''; reason = "$($tv.reason)" }
+}
+
+function Get-PimReplicationDependencyWarning {
+    # $null when a NEEDED row may simply follow here; otherwise the reason its own fields would have
+    # kept it out -- which is exactly what the auto-include warning has to say.
+    param([object]$Row, [Parameter(Mandatory)][string]$Kind, [Parameter(Mandatory)][string]$TenantId, [Parameter(Mandatory)][int]$TenantRing, [string[]]$TenantTags = @())
+    $r = Test-PimReplicationReach -Row $Row -Kind $Kind -TenantId $TenantId -TenantRing $TenantRing -TenantTags @($TenantTags)
+    if ($r.reach) { return $null }
+    return "$($r.reason)"
+}
+
+function Test-PimReplicationRowFields {
+    <#
+      AUTHORING CHECK (pure) for one row's replication fields -- shared by the validator, the Manager's
+      PUT gate and the reach preview, so the three can never disagree about what is acceptable.
+      Returns @{ ok; errors = @(); warnings = @() }. Errors refuse the write; warnings do not.
+    #>
+    param([object]$Row, [Parameter(Mandatory)][string]$Entity, [string[]]$KnownTags = @(), [switch]$TagsKnown)
+    $kind = Get-PimReplicationKindForEntity -Entity $Entity
+    $errors = New-Object System.Collections.Generic.List[string]
+    $warnings = New-Object System.Collections.Generic.List[string]
+    if (-not $kind) { return @{ ok = $true; errors = @(); warnings = @() } }
+    $m = Get-PimReplicateMode -Row $Row -Kind $kind
+    if (-not $m.valid) { $errors.Add("$($m.reason)") | Out-Null }
+    $ring = "$(Get-PimDownlinkValue -Object $Row -Key 'Ring')".Trim()
+    if ($ring -and $ring -notin @('0','1','2')) { $warnings.Add("Ring '$ring' is not 0, 1 or 2 -- it reaches no tenant") | Out-Null }
+    $tgt = "$(Get-PimDownlinkValue -Object $Row -Key 'Target')".Trim()
+    if ($tgt) {
+        $sel = Test-PimAdminTargetSelector -Target $tgt -KnownTags @($KnownTags) -TagsKnown:([bool]$TagsKnown)
+        if (@($sel.malformed).Count)   { $errors.Add("Target '$tgt' is malformed: $(@($sel.malformed) -join ', ') (use tag:<key:value>, tag:a+b, tenant:<id>, or leave blank)") | Out-Null }
+        if (@($sel.unknownTags).Count) { $warnings.Add("Target '$tgt' names tag(s) no managed tenant carries: $(@($sel.unknownTags) -join ', ')") | Out-Null }
+    }
+    return @{ ok = ($errors.Count -eq 0); errors = @($errors.ToArray()); warnings = @($warnings.ToArray()); kind = $kind; mode = $m.mode }
+}
+
+function Test-PimReplicationWriteAllowed {
+    <#
+      THE MASTER-ONLY GATE for a grid/wizard write (§71.5). Pure: the Manager passes the rows it is
+      about to commit, the rows currently stored, and whether this tenant is the MSP master.
+        * NOT the master -> a row may not INTRODUCE or CHANGE Replicate, nor Ring/Target on a non-admin
+          entity (an admin's Ring/Target predate §71 and keep working on every tenant). Managed tenants
+          never edit targets; single tenants have nothing to target.
+        * the master     -> every changed row must pass Test-PimReplicationRowFields (errors refuse).
+      Returns @{ allowed; reason; refused = @( @{ key; reason } ) }.
+    #>
+    param(
+        [Parameter(Mandatory)][string]$Entity,
+        [AllowEmptyCollection()][object[]]$Rows = @(),
+        [AllowEmptyCollection()][object[]]$CurrentRows = @(),
+        [bool]$IsMaster,
+        [string[]]$KnownTags = @(),
+        [switch]$TagsKnown
+    )
+    $kind = Get-PimReplicationKindForEntity -Entity $Entity
+    if (-not $kind) { return @{ allowed = $true; reason = ''; refused = @() } }
+    # Operator 2026-09-15: every MSP sync surface belongs to the MSP MASTER only -- "not relevant for single mode", and a
+    # managed tenant never edits what the master sends. So off the master an admin's Ring / Target are refused too
+    # (the v2 engine reads an admin's Ring only in the MSP downlink), and so is switching ManagementMode to msp.
+    $fields = @('Replicate','Ring','Target')
+    $keyOf = {
+        param($r)
+        if (Get-Command Get-PimStoreRowKey -ErrorAction SilentlyContinue) { return (Get-PimStoreRowKey -Base $Entity -Row $r) }
+        return "$(Get-PimDownlinkValue -Object $r -Key 'GroupTag')$(Get-PimDownlinkValue -Object $r -Key 'UserName')"
+    }
+    $cur = @{}
+    foreach ($c in @($CurrentRows)) { if ($null -eq $c) { continue }; $k = "$(& $keyOf $c)"; if ($k) { $cur[$k.ToLowerInvariant()] = $c } }
+    $refused = New-Object System.Collections.Generic.List[object]
+    foreach ($r in @($Rows)) {
+        if ($null -eq $r) { continue }
+        $k = "$(& $keyOf $r)"
+        $old = if ($k -and $cur.ContainsKey($k.ToLowerInvariant())) { $cur[$k.ToLowerInvariant()] } else { $null }
+        $changed = $false
+        foreach ($f in $fields) {
+            $nv = "$(Get-PimDownlinkValue -Object $r -Key $f)".Trim()
+            $ov = "$(Get-PimDownlinkValue -Object $old -Key $f)".Trim()
+            if ($nv -ne $ov) { $changed = $true; break }
+        }
+        if (-not $changed -and $kind -eq 'admin') {
+            $nm = "$(Get-PimDownlinkValue -Object $r -Key 'ManagementMode')".Trim()
+            $om = "$(Get-PimDownlinkValue -Object $old -Key 'ManagementMode')".Trim()
+            if ($nm -ine $om) {
+                # master: a ManagementMode change must still agree with Replicate; elsewhere only local/blank is allowed
+                if ($IsMaster -or ($nm -and $nm -ine 'local')) { $changed = $true }
+            }
+        }
+        if (-not $changed) { continue }
+        if (-not $IsMaster) {
+            $refused.Add([ordered]@{ key = $k; reason = "MSP sync / replication fields (Replicate, Ring, Target, ManagementMode=msp) can only be set on the MSP master -- this tenant is not the master" }) | Out-Null
+            continue
+        }
+        $chk = Test-PimReplicationRowFields -Row $r -Entity $Entity -KnownTags @($KnownTags) -TagsKnown:([bool]$TagsKnown)
+        if (-not $chk.ok) { $refused.Add([ordered]@{ key = $k; reason = (@($chk.errors) -join '; ') }) | Out-Null }
+    }
+    $arr = @($refused.ToArray())
+    return [ordered]@{
+        allowed = ($arr.Count -eq 0)
+        reason  = $(if ($arr.Count) { "$($arr.Count) row(s) refused: $((@($arr | Select-Object -First 3 | ForEach-Object { "$($_.key): $($_.reason)" })) -join ' | ')" } else { '' })
+        refused = $arr
+    }
+}
+
+function Select-PimBaselineBundleContent {
+    <#
+      §71.6 -- WHAT GOES INTO THE ONE SIGNED BUNDLE (the producer's decision, as a PURE function so it
+      is testable offline and shared with the Manager's reach preview). setup/New-PimBaselineBundle.ps1
+      does the SQL reads and the signing; this decides the rows.
+
+      🔒 BYTE-FOR-BYTE FOR BLANK DATA. Field lists, key order and sort order are the pre-§71 producer's
+      exactly; Replicate/Ring are added to a shipped row ONLY when the master set them. The MSP pair
+      sim compares the signed payload against a golden captured from the code before this change.
+
+      WHAT CHANGED, AND WHY:
+        * (71.7 a) group definitions are read from EVERY entity the engine creates groups from --
+          Departments, Processes, Projects and CrossOrg were missing, so a membership into a DEPT- /
+          PROJ- / CORG- group shipped without its group.
+        * (71.7 b) a row that is Replicate=No or Target=none is NOT put in the bundle -- unless another
+          shipped row depends on it (framework MSP-4 SURFACE item 6). An MSP-local admin must not sit in
+          a payload 28 customers can read.
+        * Replicate=Yes groups / nestings / bindings SEED the model on their own (a group can now go to
+          slaves without an admin needing it), and the nesting closure iterates to a FIXPOINT, so every
+          row any tenant could need is present; each tenant then decides for itself.
+        * tenant-scoped resource bindings (Roles-AUs / Azure-Resources / Workloads) ship only when
+          explicitly Follow/Yes, under `definitions.resourceBindings`, with the AU definitions the
+          Roles-AUs rows need under `definitions.aus`. Both keys are ABSENT when empty.
+
+      -RegistryRows      pim.CentralAdmins rows, already shaped by the caller's Select-Object.
+      -RegistryReplicate UserName(lowercase) -> the registry's Replicate column, when it exists.
+      -Entities          entity name -> parsed rows from pim.Rows.
+      Returns @{ rows; assignments; definitions; report }.
+    #>
+    [CmdletBinding()]
+    param(
+        [AllowEmptyCollection()][object[]]$RegistryRows = @(),
+        [hashtable]$RegistryReplicate = @{},
+        [hashtable]$Entities = @{}
+    )
+    $getEnt = { param($n) if ($Entities.ContainsKey($n)) { return @(@($Entities[$n]) | Where-Object { $null -ne $_ }) } else { return @() } }
+    $lc = { param($s) "$s".Trim().ToLowerInvariant() }
+    $notPublished = New-Object System.Collections.Generic.List[object]
+
+    # 1. admins -- the registry first (the explicit MSP list), then ManagementMode=msp definitions.
+    $rowList = New-Object System.Collections.Generic.List[object]
+    foreach ($r in @($RegistryRows)) {
+        if ($null -eq $r) { continue }
+        $un = "$(Get-PimDownlinkValue -Object $r -Key 'UserName')".Trim()
+        $rep = ''
+        if ($RegistryReplicate.ContainsKey($un.ToLowerInvariant())) { $rep = "$($RegistryReplicate[$un.ToLowerInvariant()])" }
+        $probe = [pscustomobject]@{ Replicate = $rep; Target = "$(Get-PimDownlinkValue -Object $r -Key 'Target')" }
+        $rm = Get-PimReplicateMode -Row $probe -Kind 'admin'
+        if ($rm.mode -ne 'Yes') { $notPublished.Add([ordered]@{ kind = 'admin'; name = $un; reason = "$($rm.reason)" }) | Out-Null; continue }
+        $rowList.Add($r) | Out-Null
+    }
+    $adminByLower = @{}
+    foreach ($r in $rowList.ToArray()) { $adminByLower["$(Get-PimDownlinkValue -Object $r -Key 'UserName')".Trim().ToLowerInvariant()] = "$(Get-PimDownlinkValue -Object $r -Key 'UserName')".Trim() }
+    $defAdmins = Get-PimCentralAdminsFromDefinitions -Rows @(& $getEnt 'Account-Definitions-Admins')
+    $added = 0
+    foreach ($d in @($defAdmins.synced)) {
+        $k = "$($d.UserName)".Trim().ToLowerInvariant()
+        if ($adminByLower.ContainsKey($k)) { continue }
+        $rowList.Add([pscustomobject]$d) | Out-Null
+        $adminByLower[$k] = "$($d.UserName)".Trim()
+        $added++
+    }
+    foreach ($x in @($defAdmins.notSynced)) {
+        if ("$($x.reason)" -match 'Replicate|Target=none|disagree') { $notPublished.Add([ordered]@{ kind = 'admin'; name = "$($x.UserName)"; reason = "$($x.reason)" }) | Out-Null }
+    }
+
+    # 2. memberships of the published admins
+    $assignObjs = New-Object System.Collections.Generic.List[object]
+    $skipped = 0
+    foreach ($j in (& $getEnt 'PIM-Assignments-Admins')) {
+        $u = "$($j.Username)"; if (-not $u) { $u = "$($j.UserName)" }
+        $u = $u.Trim(); if (-not $u) { continue }
+        if ("$($j.Action)" -eq 'Remove') { continue }
+        $local = $u; $at = $u.IndexOf('@'); if ($at -gt 0) { $local = $u.Substring(0, $at) }
+        $key = $local.ToLowerInvariant()
+        if (-not $adminByLower.ContainsKey($key)) { $skipped++; continue }
+        $mm = Get-PimReplicateMode -Row $j -Kind 'membership'
+        if ($mm.mode -eq 'No') { $notPublished.Add([ordered]@{ kind = 'membership'; name = "$($adminByLower[$key]) -> $($j.GroupTag)"; reason = "$($mm.reason)" }) | Out-Null; continue }
+        $a = [ordered]@{
+            UserName            = $adminByLower[$key]
+            GroupTag            = "$($j.GroupTag)"
+            AssignmentType      = "$($j.AssignmentType)"
+            Permanent           = "$($j.Permanent)"
+            NumOfDaysWhenExpire = "$($j.NumOfDaysWhenExpire)"
+            AutoExtend          = "$($j.AutoExtend)"
+            Target              = "$($j.Target)"
+        }
+        if ("$($j.Replicate)".Trim()) { $a['Replicate'] = "$($j.Replicate)".Trim() }
+        if ("$($j.Ring)".Trim())      { $a['Ring']      = "$($j.Ring)".Trim() }
+        $assignObjs.Add($a) | Out-Null
+    }
+    $assignArr = @($assignObjs.ToArray() | Sort-Object @{ e = { "$($_.UserName)".ToLowerInvariant() } }, @{ e = { "$($_.GroupTag)".ToLowerInvariant() } })
+
+    # 3. the group model: seeds, then the nesting closure to a fixpoint
+    $defEntities = @('PIM-Definitions-Roles','PIM-Definitions-Services','PIM-Definitions-Organization','PIM-Definitions-Tasks',
+                     'PIM-Definitions-Departments','PIM-Definitions-Processes','PIM-Definitions-Projects','PIM-Definitions-CrossOrg','PIM-Definitions')
+    $allDefs = New-Object System.Collections.Generic.List[object]
+    foreach ($e in $defEntities) {
+        foreach ($d in (& $getEnt $e)) {
+            Add-Member -InputObject $d -NotePropertyName '__srcEntity' -NotePropertyValue $e -Force
+            $allDefs.Add($d) | Out-Null
+        }
+    }
+    $opt = {
+        # the §71 fields, appended only when set (the no-regression rule)
+        param($target, $row)
+        foreach ($f in @('Replicate','Ring','Target')) {
+            $v = "$(Get-PimDownlinkValue -Object $row -Key $f)".Trim()
+            if ($v -and -not $target.Contains($f)) { $target[$f] = $v }
+        }
+    }
+    $need = @{}
+    $projTags = @{}
+    foreach ($a in $assignArr) { $projTags[(& $lc $a.GroupTag)] = $true; $need[(& $lc $a.GroupTag)] = $true }
+    foreach ($d in $allDefs.ToArray()) {
+        if ((Get-PimReplicateMode -Row $d -Kind 'group').mode -eq 'Yes' -and (& $lc $d.GroupTag)) { $need[(& $lc $d.GroupTag)] = $true }
+    }
+    $allNest = @(& $getEnt 'PIM-Assignments-Groups' | Where-Object { "$($_.Action)" -ne 'Remove' })
+    foreach ($n in $allNest) {
+        if ((Get-PimReplicateMode -Row $n -Kind 'nesting').mode -eq 'Yes') { $need[(& $lc $n.TargetGroupTag)] = $true; $need[(& $lc $n.SourceGroupTag)] = $true }
+    }
+    $allBind = @(& $getEnt 'PIM-Assignments-Roles-Groups' | Where-Object { "$($_.Action)" -ne 'Remove' })
+    foreach ($b in $allBind) { if ((Get-PimReplicateMode -Row $b -Kind 'binding').mode -eq 'Yes') { $need[(& $lc $b.GroupTag)] = $true } }
+    $resEntities = @('PIM-Assignments-Roles-AUs','PIM-Assignments-Azure-Resources','PIM-Assignments-Workloads')
+    $allRes = New-Object System.Collections.Generic.List[object]
+    foreach ($e in $resEntities) {
+        foreach ($rr in (& $getEnt $e)) {
+            if ("$($rr.Action)" -eq 'Remove') { continue }
+            $rmode = (Get-PimReplicateMode -Row $rr -Kind 'resource').mode
+            if ($rmode -eq 'No') { continue }
+            $allRes.Add(@{ Entity = $e; Row = $rr; Mode = $rmode }) | Out-Null
+            if ($rmode -eq 'Yes') { $need[(& $lc $rr.GroupTag)] = $true }
+        }
+    }
+    # 71.19 -- THE SPONSOR DEPARTMENT OF EVERY PUBLISHED ADMIN IS A DEPENDENCY. An admin's mail and TAP go to its
+    # department's OWNERS, and the slave resolves that from its own replicated PIM-Definitions-Departments rows -- so a
+    # department left behind by targeting means an admin nobody can deliver a credential to. Auto-included exactly like a
+    # group a replicated membership depends on (reported, never silent); an admin naming a department that has no row at
+    # all is reported too, because that is the same failure one step earlier.
+    $deptDeps = New-Object System.Collections.Generic.List[object]
+    $deptByName = @{}
+    foreach ($d in $allDefs.ToArray()) {
+        if ("$($d.__srcEntity)" -ne 'PIM-Definitions-Departments') { continue }
+        $dn = "$(Get-PimDownlinkValue -Object $d -Key 'Department')".Trim()
+        if ($dn) { $deptByName[(& $lc $dn)] = $d }
+    }
+    foreach ($ar in $rowList.ToArray()) {
+        $adn = "$(Get-PimDownlinkValue -Object $ar -Key 'Department')".Trim()
+        if (-not $adn) { continue }
+        $drow = $deptByName[(& $lc $adn)]
+        $an = "$(Get-PimDownlinkValue -Object $ar -Key 'UserName')".Trim()
+        if (-not $drow) {
+            $notPublished.Add([ordered]@{ kind = 'department'; name = $adn; reason = "sponsor department of '$an' has no PIM-Definitions-Departments row -- its mail/TAP recipient cannot be resolved in a managed tenant" }) | Out-Null
+            continue
+        }
+        $dtag = & $lc $drow.GroupTag
+        if ($dtag -and -not $need.ContainsKey($dtag)) {
+            $need[$dtag] = $true
+            $deptDeps.Add([ordered]@{ kind = 'department'; name = "$($drow.GroupTag)"; reason = "sponsor department '$adn' of admin '$an' -- carried so the managed tenant can resolve that admin's mail/TAP recipient from its owners" }) | Out-Null
+        }
+    }
+    $nestOk = @($allNest | Where-Object { (Get-PimReplicateMode -Row $_ -Kind 'nesting').mode -ne 'No' })
+    $guard = 0
+    do {
+        $grew = $false
+        foreach ($n in $nestOk) {
+            $t = & $lc $n.TargetGroupTag; $s = & $lc $n.SourceGroupTag
+            if ($s -and $need.ContainsKey($t) -and -not $need.ContainsKey($s)) { $need[$s] = $true; $grew = $true }
+        }
+        $guard++
+    } while ($grew -and $guard -le ($nestOk.Count + 1))
+    $need.Remove('') | Out-Null
+
+    $nestArr = @($nestOk | Where-Object { $need.ContainsKey((& $lc $_.TargetGroupTag)) } | ForEach-Object {
+        $o = [ordered]@{
+            TargetGroupTag = "$($_.TargetGroupTag)"; SourceGroupTag = "$($_.SourceGroupTag)"
+            AssignmentType = "$($_.AssignmentType)"; Permanent = "$($_.Permanent)"
+            NumOfDaysWhenExpire = "$($_.NumOfDaysWhenExpire)"; AutoExtend = "$($_.AutoExtend)"
+        }
+        & $opt $o $_
+        $o
+    } | Sort-Object @{ e = { "$($_.SourceGroupTag)".ToLowerInvariant() } }, @{ e = { "$($_.TargetGroupTag)".ToLowerInvariant() } })
+
+    $dependencyIncluded = New-Object System.Collections.Generic.List[object]
+    foreach ($dd in $deptDeps.ToArray()) { $dependencyIncluded.Add($dd) | Out-Null }   # 71.19 sponsor departments
+    $defArr = @($allDefs.ToArray() | Where-Object { $need.ContainsKey((& $lc $_.GroupTag)) } | ForEach-Object {
+        if ((Get-PimReplicateMode -Row $_ -Kind 'group').mode -eq 'No') {
+            $dependencyIncluded.Add([ordered]@{ kind = 'group'; name = "$($_.GroupTag)"; reason = 'Replicate=No, but a replicated row depends on it -- carried so each tenant can auto-include it (warned per tenant)' }) | Out-Null
+        }
+        $o = [ordered]@{
+            GroupTag = "$($_.GroupTag)"; GroupName = "$($_.GroupName)"; GroupDescription = "$($_.GroupDescription)"
+            IsRoleAssignable = "$($_.IsRoleAssignable)"; Workload = "$($_.Workload)"; Level = "$($_.Level)"
+            Plane = "$($_.Plane)"; CPPlatform = "$($_.CPPlatform)"; Department = "$($_.Department)"
+            PolicyTemplate = "$($_.PolicyTemplate)"
+            SourceEntity = "$($_.__srcEntity)"
+        }
+        # 71.19: the department's OWNERS travel with it -- they are who an admin's mail and TAP go to in the managed
+        # tenant. Emitted only when set, so a row without owners ships the same bytes as before.
+        $__own = "$(Get-PimDownlinkValue -Object $_ -Key 'Owners')".Trim()
+        if ($__own) { $o['Owners'] = $__own }
+        & $opt $o $_
+        $o
+    } | Sort-Object @{ e = { "$($_.GroupTag)".ToLowerInvariant() } })
+
+    $bindArr = @($allBind | Where-Object { (Get-PimReplicateMode -Row $_ -Kind 'binding').mode -ne 'No' -and $need.ContainsKey((& $lc $_.GroupTag)) } | ForEach-Object {
+        $o = [ordered]@{
+            GroupTag = "$($_.GroupTag)"; RoleDefinitionName = "$($_.RoleDefinitionName)"
+            AssignmentType = "$($_.AssignmentType)"; Permanent = "$($_.Permanent)"
+            NumOfDaysWhenExpire = "$($_.NumOfDaysWhenExpire)"; AutoExtend = "$($_.AutoExtend)"
+            Plane = "$($_.Plane)"; PermissionScope = "$($_.PermissionScope)"
+        }
+        & $opt $o $_
+        $o
+    } | Sort-Object @{ e = { "$($_.GroupTag)".ToLowerInvariant() } }, @{ e = { "$($_.RoleDefinitionName)".ToLowerInvariant() } })
+
+    $resArr = @($allRes.ToArray() | Where-Object { $need.ContainsKey((& $lc $_.Row.GroupTag)) } | ForEach-Object {
+        $o = [ordered]@{ Entity = "$($_.Entity)" }
+        foreach ($p in @($_.Row.PSObject.Properties)) {
+            if ($p.Name -in @('Owner', 'Origin', '__srcEntity')) { continue }
+            $o[$p.Name] = "$($p.Value)"
+        }
+        $o
+    } | Sort-Object @{ e = { "$($_.Entity)" } }, @{ e = { "$($_.GroupTag)".ToLowerInvariant() } })
+    $auNeed = @{}
+    foreach ($x in $resArr) { if ("$($x.Entity)" -eq 'PIM-Assignments-Roles-AUs' -and "$($x.AdministrativeUnitTag)".Trim()) { $auNeed[(& $lc $x.AdministrativeUnitTag)] = $true } }
+    $ausArr = @(& $getEnt 'PIM-Definitions-AU' | Where-Object { $auNeed.ContainsKey((& $lc $_.AdministrativeUnitTag)) } | ForEach-Object {
+        $o = [ordered]@{}
+        foreach ($p in @($_.PSObject.Properties)) { if ($p.Name -in @('Owner', 'Origin')) { continue }; $o[$p.Name] = "$($p.Value)" }
+        $o
+    } | Sort-Object @{ e = { "$($_.AdministrativeUnitTag)".ToLowerInvariant() } })
+
+    $definitions = [ordered]@{ groups = $defArr; nestings = $nestArr; roleBindings = $bindArr }
+    if ($resArr.Count) { $definitions['resourceBindings'] = $resArr }
+    if ($ausArr.Count) { $definitions['aus'] = $ausArr }
+
+    $orphan = @($projTags.Keys | Where-Object { $t = $_; -not @($defArr | Where-Object { "$($_.GroupTag)".Trim().ToLowerInvariant() -eq $t }).Count })
+    return @{
+        rows        = @($rowList.ToArray())
+        assignments = $assignArr
+        definitions = $definitions
+        report      = @{
+            defAdmins          = $defAdmins
+            addedFromDefinitions = $added
+            skippedAssignments = $skipped
+            notPublished       = @($notPublished.ToArray())
+            dependencyIncluded = @($dependencyIncluded.ToArray())
+            orphanTags         = $orphan
+        }
+    }
+}
+
+function New-PimBaselinePayload {
+    # The payload object, key order identical to the pre-§71 producer. Pure (the caller supplies the
+    # version and both timestamps), so the Manager's reach preview can build the very same thing.
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][hashtable]$Content,
+        [object]$ProjectionPolicy = ([ordered]@{}),
+        [object]$TenantTags = ([ordered]@{}),
+        [int64]$Version = 0,
+        [string]$Scope = 'fleet',
+        [string]$GeneratedAtUtc = '',
+        [string]$ValidToUtc = ''
+    )
+    return [ordered]@{
+        product          = 'PIM4EntraPS'
+        kind             = 'baseline'
+        version          = $Version
+        scope            = $Scope
+        generatedAtUtc   = $GeneratedAtUtc
+        validToUtc       = $ValidToUtc
+        rows             = $Content.rows
+        assignments      = $Content.assignments
+        definitions      = $Content.definitions
+        projectionPolicy = $ProjectionPolicy
+        tenantTags       = $TenantTags
+    }
 }
 
 # ---------------------------------------------------------------------------
@@ -746,6 +1343,9 @@ function New-PimAcceptanceRecord {
         [string[]]$BlockedCapabilities = @(),
         [string]$DecidedBy = '',
         [datetime]$NowUtc = ([datetime]::UtcNow),
+        # §71: the applies' retraction report (Invoke-PimDownlinkDefinitionApply/-AssignmentApply results).
+        # Optional; when given, what WOULD be removed and what WAS removed are recorded -- audited, never silent.
+        [object[]]$ApplyResults = @(),
         [switch]$WhatIfMode
     )
     # 🪤 A REFUSAL PLAN IS A DIFFERENT SHAPE. The early returns in Get-PimDownlinkPlan (ring hold,
@@ -798,6 +1398,10 @@ function New-PimAcceptanceRecord {
         # 🔒 Carried explicitly: a downlink never retracts. Without this the operator cannot tell a
         # narrowing from a revocation, which is the exact misreading MSP-4 was corrected for.
         retracts         = [bool]$Plan.retracts
+        # §71 -- dependencies included with a warning, and the retraction report (report-first).
+        autoIncludedCount = (& $countOf $Plan.autoIncluded)
+        wouldRetract     = @(@($ApplyResults) | Where-Object { $_ } | ForEach-Object { @($_.wouldRetract) + @($_.retractHeld) } | Where-Object { "$_".Trim() })
+        retracted        = [int]((@($ApplyResults) | Where-Object { $_ } | ForEach-Object { [int]$_.removed } | Measure-Object -Sum).Sum)
         decidedBy        = "$DecidedBy"
         decidedAtUtc     = $NowUtc.ToString('o')
     }
@@ -1083,23 +1687,62 @@ function Select-PimProjectedAssignments {
 # ---------------------------------------------------------------------------
 function Select-PimProjectedDefinitions {
     param(
-        # payload.definitions -> @{ groups; nestings; roleBindings }
+        # payload.definitions -> @{ groups; nestings; roleBindings [; resourceBindings; aus] }
         [object]$Definitions,
         # the tags actually projected AFTER ring + policy filtering (from
         # Select-PimProjectedAssignments .projected) -- never the master's whole model.
         [string[]]$ProjectedTags = @(),
         # tags that already exist in the slave (its own PIM-Definitions).
-        [string[]]$SlaveGroupTags = @()
+        [string[]]$SlaveGroupTags = @(),
+        # §71 -- THIS tenant, for the replication reach rule. ABSENT => no replication evaluation at all
+        # and the result is exactly the pre-§71 one (the parameter is the opt-in, like -RingPlan).
+        [string]$TenantId,
+        [int]$TenantRing = 0,
+        [string[]]$TenantTags = @(),
+        # §71 -- the projected memberships themselves, only to NAME the dependent in a warning.
+        [object[]]$ProjectedAssignments = @()
     )
     $lower = { param($s) "$s".Trim().ToLowerInvariant() }
-    $groups       = @(); $nestings = @(); $bindings = @()
+    $groups       = @(); $nestings = @(); $bindings = @(); $resBindings = @(); $aus = @()
     if ($Definitions) {
-        $g = Get-PimDownlinkValue -Object $Definitions -Key 'groups';       if ($g) { $groups   = @($g) }
-        $n = Get-PimDownlinkValue -Object $Definitions -Key 'nestings';     if ($n) { $nestings = @($n) }
-        $b = Get-PimDownlinkValue -Object $Definitions -Key 'roleBindings'; if ($b) { $bindings = @($b) }
+        $g = Get-PimDownlinkValue -Object $Definitions -Key 'groups';           if ($g) { $groups      = @($g) }
+        $n = Get-PimDownlinkValue -Object $Definitions -Key 'nestings';         if ($n) { $nestings    = @($n) }
+        $b = Get-PimDownlinkValue -Object $Definitions -Key 'roleBindings';     if ($b) { $bindings    = @($b) }
+        $rb = Get-PimDownlinkValue -Object $Definitions -Key 'resourceBindings'; if ($rb) { $resBindings = @($rb) }
+        $au = Get-PimDownlinkValue -Object $Definitions -Key 'aus';             if ($au) { $aus         = @($au) }
     }
     $slaveHas = New-Object System.Collections.Generic.HashSet[string]
     foreach ($t in @($SlaveGroupTags)) { [void]$slaveHas.Add((& $lower $t)) }
+
+    # §71 -- the replication rule, per row, for THIS tenant. Every helper below is a no-op when no
+    # tenant was given, which is what keeps an older caller byte-identical.
+    $evalRep = $PSBoundParameters.ContainsKey('TenantId') -and "$TenantId".Trim()
+    $groupByTag = @{}
+    foreach ($grp in $groups) { $lt = & $lower (Get-PimDownlinkValue -Object $grp -Key 'GroupTag'); if ($lt -and -not $groupByTag.ContainsKey($lt)) { $groupByTag[$lt] = $grp } }
+    $autoInc  = New-Object System.Collections.Generic.List[object]
+    $notRep   = New-Object System.Collections.Generic.List[object]
+    $warned   = New-Object System.Collections.Generic.HashSet[string]
+    $reachOf  = {
+        param($row, $kind)
+        if (-not $evalRep) { return @{ reach = $true; mode = 'Follow'; axis = ''; reason = '' } }
+        return (Test-PimReplicationReach -Row $row -Kind $kind -TenantId $TenantId -TenantRing $TenantRing -TenantTags @($TenantTags))
+    }
+    $warnGroup = {
+        # A group this tenant NEEDS is included regardless; if its own fields would have kept it out,
+        # say so -- naming the row, the dependent and the tenant (framework MSP-4 SURFACE item 5).
+        param($lt, $dependent)
+        if (-not $evalRep) { return }
+        if (-not $groupByTag.ContainsKey($lt)) { return }
+        $grp = $groupByTag[$lt]
+        $w = Get-PimReplicationDependencyWarning -Row $grp -Kind 'group' -TenantId $TenantId -TenantRing $TenantRing -TenantTags @($TenantTags)
+        if ($w -and $warned.Add($lt)) {
+            $tag = "$(Get-PimDownlinkValue -Object $grp -Key 'GroupTag')"
+            $autoInc.Add([ordered]@{
+                kind = 'group'; GroupTag = $tag; dependent = "$dependent"; tenantId = "$TenantId"
+                reason = "group '$tag' is AUTO-INCLUDED for tenant $TenantId because $dependent needs it, although $w"
+            }) | Out-Null
+        }
+    }
 
     # Closure: the projected role groups + every group reachable through nesting.
     #
@@ -1109,7 +1752,44 @@ function Select-PimProjectedDefinitions {
     # modelling choice the master makes, not something this code may cap. Bounded by
     # the tag count so a cycle in the master's model terminates instead of hanging.
     $need = New-Object System.Collections.Generic.HashSet[string]
-    foreach ($t in @($ProjectedTags)) { [void]$need.Add((& $lower $t)) }
+    foreach ($t in @($ProjectedTags)) {
+        $lt = & $lower $t
+        [void]$need.Add($lt)
+        if ($evalRep) {
+            $who = @(@($ProjectedAssignments) | Where-Object { (& $lower (Get-PimDownlinkValue -Object $_ -Key 'GroupTag')) -eq $lt } | Select-Object -First 1)
+            $dep = if ($who.Count) { "membership $(Get-PimDownlinkValue -Object $who[0] -Key 'UserName') -> $t" } else { "a membership into $t" }
+            & $warnGroup $lt $dep
+        }
+    }
+    if ($evalRep) {
+        # §71 SEEDS: a Replicate=Yes row that reaches this tenant stands up its part of the model on its
+        # own; one that does not is reported, so "not replicated here" is never silent.
+        foreach ($grp in $groups) {
+            if ((Get-PimReplicateMode -Row $grp -Kind 'group').mode -ne 'Yes') { continue }
+            $r = & $reachOf $grp 'group'
+            $lt = & $lower (Get-PimDownlinkValue -Object $grp -Key 'GroupTag')
+            if ($r.reach) { [void]$need.Add($lt) }
+            else { $notRep.Add([ordered]@{ kind = 'group'; GroupTag = "$(Get-PimDownlinkValue -Object $grp -Key 'GroupTag')"; axis = "$($r.axis)"; reason = "$($r.reason)" }) | Out-Null }
+        }
+        foreach ($nst in $nestings) {
+            if ((Get-PimReplicateMode -Row $nst -Kind 'nesting').mode -ne 'Yes') { continue }
+            $r = & $reachOf $nst 'nesting'
+            $tg = "$(Get-PimDownlinkValue -Object $nst -Key 'TargetGroupTag')"; $sg = "$(Get-PimDownlinkValue -Object $nst -Key 'SourceGroupTag')"
+            if (-not $r.reach) { $notRep.Add([ordered]@{ kind = 'nesting'; GroupTag = $tg; SourceGroupTag = $sg; axis = "$($r.axis)"; reason = "$($r.reason)" }) | Out-Null; continue }
+            foreach ($x in @($tg, $sg)) { $lx = & $lower $x; if ($lx) { [void]$need.Add($lx); & $warnGroup $lx "nesting $tg <- $sg" } }
+        }
+        foreach ($bnd in @($bindings) + @($resBindings)) {
+            $kind = if ("$(Get-PimDownlinkValue -Object $bnd -Key 'Entity')".Trim()) { 'resource' } else { 'binding' }
+            if ((Get-PimReplicateMode -Row $bnd -Kind $kind).mode -ne 'Yes') { continue }
+            $r = & $reachOf $bnd $kind
+            $gt = "$(Get-PimDownlinkValue -Object $bnd -Key 'GroupTag')"
+            if (-not $r.reach) { $notRep.Add([ordered]@{ kind = $kind; GroupTag = $gt; axis = "$($r.axis)"; reason = "$($r.reason)" }) | Out-Null; continue }
+            $lg = & $lower $gt; if ($lg) { [void]$need.Add($lg); & $warnGroup $lg "binding on $gt" }
+        }
+    }
+    $nestVerdict = @{}
+    $nestKey = { param($nst) "$(& $lower (Get-PimDownlinkValue -Object $nst -Key 'TargetGroupTag'))|$(& $lower (Get-PimDownlinkValue -Object $nst -Key 'SourceGroupTag'))" }
+    foreach ($nst in $nestings) { $nestVerdict[(& $nestKey $nst)] = (& $reachOf $nst 'nesting') }
     $guard = 0
     $maxRounds = [Math]::Max(1, @($nestings).Count + 1)
     do {
@@ -1118,9 +1798,14 @@ function Select-PimProjectedDefinitions {
             $src = & $lower (Get-PimDownlinkValue -Object $nst -Key 'SourceGroupTag')
             $tgt = & $lower (Get-PimDownlinkValue -Object $nst -Key 'TargetGroupTag')
             if (-not $src) { continue }
+            # §71: a nesting whose OWN fields keep it out of this tenant does not carry its source group in.
+            if (-not $nestVerdict[(& $nestKey $nst)].reach) { continue }
             # BUG-61: walk ROLE -> SERVICE. `need` starts as the projected ROLE tags, and a
             # nesting names its role group in TARGET, so the group to pull in is the SOURCE.
-            if ($need.Contains($tgt) -and -not $need.Contains($src)) { [void]$need.Add($src); $added = $true }
+            if ($need.Contains($tgt) -and -not $need.Contains($src)) {
+                [void]$need.Add($src); $added = $true
+                & $warnGroup $src "nesting $(Get-PimDownlinkValue -Object $nst -Key 'TargetGroupTag') <- $(Get-PimDownlinkValue -Object $nst -Key 'SourceGroupTag')"
+            }
         }
         $guard++
     } while ($added -and $guard -lt $maxRounds)
@@ -1149,6 +1834,12 @@ function Select-PimProjectedDefinitions {
     foreach ($nst in $nestings) {
         $tgt = & $lower (Get-PimDownlinkValue -Object $nst -Key 'TargetGroupTag')
         if (-not $need.Contains($tgt)) { continue }
+        $v = $nestVerdict[(& $nestKey $nst)]
+        if (-not $v.reach) {
+            $notRep.Add([ordered]@{ kind = 'nesting'; GroupTag = "$(Get-PimDownlinkValue -Object $nst -Key 'TargetGroupTag')"; SourceGroupTag = "$(Get-PimDownlinkValue -Object $nst -Key 'SourceGroupTag')"; axis = "$($v.axis)"; reason = "$($v.reason)" }) | Out-Null
+            $skip.Add([ordered]@{ GroupTag = "$(Get-PimDownlinkValue -Object $nst -Key 'TargetGroupTag')"; reason = "nesting NOT replicated to this tenant -- $($v.reason)" }) | Out-Null
+            continue
+        }
         if (-not $mine.Contains($tgt)) {
             $skip.Add([ordered]@{ GroupTag = "$(Get-PimDownlinkValue -Object $nst -Key 'TargetGroupTag')"; reason = 'nesting NOT applied -- the role group is customer-owned, and an MSP sync must not hand it further permissions' }) | Out-Null
             continue
@@ -1159,12 +1850,41 @@ function Select-PimProjectedDefinitions {
     foreach ($bnd in $bindings) {
         $gt = & $lower (Get-PimDownlinkValue -Object $bnd -Key 'GroupTag')
         if (-not $need.Contains($gt)) { continue }
+        $v = & $reachOf $bnd 'binding'
+        if (-not $v.reach) {
+            $notRep.Add([ordered]@{ kind = 'binding'; GroupTag = "$(Get-PimDownlinkValue -Object $bnd -Key 'GroupTag')"; RoleDefinitionName = "$(Get-PimDownlinkValue -Object $bnd -Key 'RoleDefinitionName')"; axis = "$($v.axis)"; reason = "$($v.reason)" }) | Out-Null
+            continue
+        }
         if (-not $mine.Contains($gt)) {
             $skip.Add([ordered]@{ GroupTag = "$(Get-PimDownlinkValue -Object $bnd -Key 'GroupTag')"; reason = 'role binding NOT applied -- the group is customer-owned, and its Entra roles are theirs to set' }) | Out-Null
             continue
         }
         $outBind.Add($bnd) | Out-Null
     }
+    # §71: tenant-scoped resource bindings (only ever present when the master explicitly replicated
+    # them). Same two guards; a tag with NO group definition at all (an Azure permission group is
+    # defined by its Azure-Resources rows) counts as ours unless the customer already has that tag.
+    $outRes = New-Object System.Collections.Generic.List[object]
+    foreach ($rbd in $resBindings) {
+        $gt = & $lower (Get-PimDownlinkValue -Object $rbd -Key 'GroupTag')
+        if (-not $need.Contains($gt)) { continue }
+        $v = & $reachOf $rbd 'resource'
+        if (-not $v.reach) {
+            $notRep.Add([ordered]@{ kind = 'resource'; GroupTag = "$(Get-PimDownlinkValue -Object $rbd -Key 'GroupTag')"; Entity = "$(Get-PimDownlinkValue -Object $rbd -Key 'Entity')"; axis = "$($v.axis)"; reason = "$($v.reason)" }) | Out-Null
+            continue
+        }
+        $ours = $mine.Contains($gt) -or (-not $groupByTag.ContainsKey($gt) -and -not $slaveHas.Contains($gt))
+        if (-not $ours) {
+            $skip.Add([ordered]@{ GroupTag = "$(Get-PimDownlinkValue -Object $rbd -Key 'GroupTag')"; reason = 'resource binding NOT applied -- the group is customer-owned' }) | Out-Null
+            continue
+        }
+        $outRes.Add($rbd) | Out-Null
+    }
+    $auNeed = New-Object System.Collections.Generic.HashSet[string]
+    foreach ($x in $outRes.ToArray()) {
+        if ("$(Get-PimDownlinkValue -Object $x -Key 'Entity')" -eq 'PIM-Assignments-Roles-AUs') { [void]$auNeed.Add((& $lower (Get-PimDownlinkValue -Object $x -Key 'AdministrativeUnitTag'))) }
+    }
+    $outAus = @(@($aus) | Where-Object { $auNeed.Contains((& $lower (Get-PimDownlinkValue -Object $_ -Key 'AdministrativeUnitTag'))) })
 
     $sortTag = { @($args[0] | Sort-Object @{ e = { "$(Get-PimDownlinkValue -Object $_ -Key 'GroupTag')".ToLowerInvariant() } }) }
     return @{
@@ -1173,6 +1893,13 @@ function Select-PimProjectedDefinitions {
         skipped      = @(& $sortTag $skip.ToArray())
         nestings     = @($outNest.ToArray() | Sort-Object @{ e = { "$(Get-PimDownlinkValue -Object $_ -Key 'SourceGroupTag')".ToLowerInvariant() } }, @{ e = { "$(Get-PimDownlinkValue -Object $_ -Key 'TargetGroupTag')".ToLowerInvariant() } })
         roleBindings = @($outBind.ToArray() | Sort-Object @{ e = { "$(Get-PimDownlinkValue -Object $_ -Key 'GroupTag')".ToLowerInvariant() } }, @{ e = { "$(Get-PimDownlinkValue -Object $_ -Key 'RoleDefinitionName')".ToLowerInvariant() } })
+        # §71 -- all four are EMPTY for a bundle authored without replication fields.
+        resourceBindings = @($outRes.ToArray())
+        aus              = @($outAus)
+        # Dependencies included although their own fields would have excluded them (the warning).
+        autoIncluded     = @($autoInc.ToArray())
+        # Rows whose own Replicate/Ring/Target keep them out of THIS tenant.
+        notReplicated    = @($notRep.ToArray())
     }
 }
 
@@ -1464,7 +2191,10 @@ function Get-PimDownlinkPlan {
         } else {
             $keepA = New-Object System.Collections.Generic.List[object]
             foreach ($a in @($srcAssign)) {
-                $tv = Test-PimArtifactTarget -Target "$(Get-PimDownlinkValue -Object $a -Key 'Target')" -TenantId $TenantId -TenantTags $effTags
+                # §71: the membership's own Replicate/Ring/Target (blank = Follow the admin). The reason for
+                # a plain Target miss is Test-PimArtifactTarget's own, word for word, as before.
+                $tv = Test-PimReplicationReach -Row $a -Kind 'membership' -TenantId $TenantId -TenantRing $SlaveRing -TenantTags $effTags
+                $tv['match'] = [bool]$tv.reach
                 if ($tv.match) { $keepA.Add($a) | Out-Null }
                 else { $targetSkips.Add([ordered]@{ kind = 'role'; name = "$(Get-PimDownlinkValue -Object $a -Key 'UserName') -> $(Get-PimDownlinkValue -Object $a -Key 'GroupTag')"; UserName = "$(Get-PimDownlinkValue -Object $a -Key 'UserName')"; GroupTag = "$(Get-PimDownlinkValue -Object $a -Key 'GroupTag')"; reason = $tv.reason }) | Out-Null }
             }
@@ -1526,6 +2256,13 @@ function Get-PimDownlinkPlan {
             $defArgs = @{
                 Definitions   = $defsIn
                 ProjectedTags = @(@($projection.projected) | ForEach-Object { "$($_.GroupTag)" })
+                # §71: THIS tenant evaluates the reach rule and its own dependency closure (framework
+                # MSP-4 SURFACE item 6). With a bundle that carries no replication fields every row is
+                # Follow and the result is the pre-§71 one.
+                TenantId      = $TenantId
+                TenantRing    = $SlaveRing
+                TenantTags    = @($effTags)
+                ProjectedAssignments = @($projection.projected)
             }
             if ($PSBoundParameters.ContainsKey('SlaveGroupTags') -and $null -ne $SlaveGroupTags) { $defArgs['SlaveGroupTags'] = $SlaveGroupTags }
             $definitionPlan = Select-PimProjectedDefinitions @defArgs
@@ -1562,6 +2299,9 @@ function Get-PimDownlinkPlan {
         $nC = @($definitionPlan.create).Count; $nD = @($definitionPlan.defer).Count
         if ($nC) { $reason += "; $nC group(s) to CREATE (Owner=MSP)" }
         if ($nD) { $reason += ", $nD already owned by the customer (left untouched)" }
+        # §71: a dependency included against its own fields is a WARNING the operator must see.
+        $nA = @($definitionPlan.autoIncluded).Count
+        if ($nA) { $reason += "; $nA dependenc(ies) AUTO-INCLUDED against their own Replicate/Ring/Target (see autoIncluded)" }
     }
     # MSP-4: report the two new narrowings SEPARATELY from the policy's. Four different
     # reasons a thing can be absent, four different fixes -- merging them would leave an
@@ -1607,6 +2347,10 @@ function Get-PimDownlinkPlan {
         projection      = $projection
         definitions     = $definitionPlan
         notTargeted     = @($targetSkips.ToArray())
+        # §71 -- FIELDS, like notTargeted: dependencies included with a warning, and group-model rows
+        # whose own replication fields keep them out of this tenant.
+        autoIncluded    = $(if ($null -ne $definitionPlan) { @($definitionPlan.autoIncluded) } else { @() })
+        notReplicated   = $(if ($null -ne $definitionPlan) { @($definitionPlan.notReplicated) } else { @() })
         # Row 35: admins the master does not mark ManagementMode=msp. A FIELD, like notTargeted.
         notSynced       = @($notSynced.ToArray())
         # A downlink plan NEVER removes access -- it only decides what is SENT. Stated as a
@@ -1780,14 +2524,18 @@ function Invoke-PimManagedDownlink {
         # admin's UPN on the S6 pull path. Omitted => resolved from the ambient tenant when
         # we are running inside it; never guessed.
         [string]$SlaveDefaultDomain,
-        # TAP intent for the synced admins (operator decision 2026-08-13 -- ON by default).
-        # Per-admin values in the bundle win; these are only the fallback for a master whose
-        # registry predates the columns. -DefaultManagerEmail is what stops a minted TAP from
-        # being delivered nowhere when the registry carries no manager address.
+        # TAP intent for the synced admins -- enforced ON (71.17). -CreateTapDefault is kept only so existing callers bind.
+        # 🔴 71.19: -DefaultManagerEmail is GONE. Who receives an admin's TAP is its SPONSOR DEPARTMENT's owners, resolved
+        # in the slave from the department rows the bundle carries (Get-PimAdminMailRecipientPlan) -- a fleet-wide fallback
+        # address was papering over a missing department link, and it is exactly the "manager on the person" the design
+        # forbids (REQUIREMENTS §62).
         [string]$CreateTapDefault = 'TRUE',
         [int]$TapLifetimeHoursDefault = 8,
-        [string]$DefaultManagerEmail = '',
         [switch]$AllowFullPrune,
+        # §71 / framework MSP-4 SURFACE item 8: synced rows that stop reaching this tenant are REPORTED
+        # ('would remove') and withdrawn only with this opt-in, inside the removal budget. Declared
+        # here AND on Sync-PimMasterToSlave -- PowerShell binds only declared names.
+        [switch]$AllowRetraction,
         [switch]$WhatIfMode = $true
     )
     # 1) PURE plan: verify + ring-filter + resolve paths + build content.
@@ -1918,9 +2666,9 @@ function Invoke-PimManagedDownlink {
             $adminApply = Invoke-PimDownlinkAdminApply -ConnectionString $SlaveStoreConnectionString `
                 -Admins @($plan.admins) -DefaultDomain $dom `
                 -CreateTapDefault $CreateTapDefault -TapLifetimeHoursDefault $TapLifetimeHoursDefault `
-                -DefaultManagerEmail $DefaultManagerEmail `
-                -AllowFullPrune:$AllowFullPrune -WhatIfMode:$WhatIfMode
+                -AllowFullPrune:$AllowFullPrune -AllowRetraction:$AllowRetraction -WhatIfMode:$WhatIfMode
             Write-Host "[downlink] admins (S6 pull, domain $dom): $($adminApply.detail)" -ForegroundColor $(if ($adminApply.ok) { 'Green' } else { 'Red' })
+            foreach ($x in @($adminApply.wouldRetract)) { if ("$x".Trim()) { Write-Host "[downlink]   WOULD REMOVE $x (no longer reaches this tenant; reported only -- pass -AllowRetraction)" -ForegroundColor Yellow } }
         } else {
             Write-Host "[downlink] admins NOT staged: no slave default domain (-SlaveDefaultDomain, or an ambient tenant to read it from). Refusing to build UPNs at a guessed domain." -ForegroundColor Yellow
         }
@@ -1943,19 +2691,22 @@ function Invoke-PimManagedDownlink {
             # assignments the engine could not act on until the following run.
             if ($null -ne $plan.definitions) {
                 $defApply = Invoke-PimDownlinkDefinitionApply -ConnectionString $SlaveStoreConnectionString `
-                    -DefinitionPlan $plan.definitions -AllowFullPrune:$AllowFullPrune -WhatIfMode:$WhatIfMode
+                    -DefinitionPlan $plan.definitions -AllowFullPrune:$AllowFullPrune -AllowRetraction:$AllowRetraction -WhatIfMode:$WhatIfMode
                 Write-Host "[downlink] groups: $($defApply.detail)" -ForegroundColor $(if ($defApply.ok) { 'Green' } else { 'Red' })
                 foreach ($d in @($plan.definitions.defer)) {
                     Write-Host "[downlink]   DEFERRED $($d.GroupTag): $($d.reason)" -ForegroundColor DarkGray
                 }
             }
             $assignApply = Invoke-PimDownlinkAssignmentApply -ConnectionString $SlaveStoreConnectionString `
-                -Assignments @($plan.assignments) -AllowFullPrune:$AllowFullPrune -WhatIfMode:$WhatIfMode
+                -Assignments @($plan.assignments) -AllowFullPrune:$AllowFullPrune -AllowRetraction:$AllowRetraction -WhatIfMode:$WhatIfMode
             $col = if ($assignApply.ok) { 'Green' } else { 'Red' }
             Write-Host "[downlink] roles: $($assignApply.detail)" -ForegroundColor $col
             foreach ($u in @($plan.projection.unresolved)) {
                 Write-Host "[downlink]   UNRESOLVED $($u.UserName) -> $($u.GroupTag): $($u.reason)" -ForegroundColor Yellow
             }
+            # §71: every dependency included against its own fields is a warning, named, never silent.
+            foreach ($w in @($plan.autoIncluded)) { Write-Host "[downlink]   [warn] $($w.reason)" -ForegroundColor Yellow }
+            foreach ($x in @($defApply.wouldRetract) + @($assignApply.wouldRetract)) { if ("$x".Trim()) { Write-Host "[downlink]   WOULD REMOVE $x (no longer reaches this tenant; reported only -- pass -AllowRetraction)" -ForegroundColor Yellow } }
         }
     } elseif ($null -ne $plan.projection -and @($plan.assignments).Count) {
         # staged but not applied -- say so, rather than letting a projected count in
@@ -1968,7 +2719,7 @@ function Invoke-PimManagedDownlink {
     # every managed run, WhatIf included (a plan is a decision too, and it is flagged as such in
     # the record). Best-effort: see Write-PimAcceptanceRecord for why this must never fail the run.
     $acceptance = New-PimAcceptanceRecord -Plan $plan -TenantId $TenantId -RingPlan $RingPlan `
-        -BlockedCapabilities $BlockedCapabilities -NowUtc $NowUtc -WhatIfMode:$WhatIfMode
+        -BlockedCapabilities $BlockedCapabilities -NowUtc $NowUtc -ApplyResults @($adminApply, $defApply, $assignApply) -WhatIfMode:$WhatIfMode
     $acceptancePath = $null
     if ($plan.sync -and "$($plan.sync.tenantFolder)".Trim()) {
         $acceptancePath = Write-PimAcceptanceRecord -Record $acceptance -Folder $plan.sync.tenantFolder
@@ -2017,12 +2768,17 @@ function Invoke-PimDownlinkAssignmentApply {
         [object[]]$Assignments = @(),                      # $plan.assignments (already projected+filtered)
         [string]$Owner = 'MSP',
         [switch]$AllowFullPrune,
+        # §71 / framework MSP-4 SURFACE item 8 -- RETRACTION IS REPORT-FIRST. A synced row that no
+        # longer reaches this tenant is reported as "would remove" and is removed ONLY with this opt-in,
+        # and then only inside the removal budget (PIM_RemoveMaxCount). -AllowFullPrune (the deliberate
+        # decouple) still withdraws everything.
+        [switch]$AllowRetraction,
         [switch]$WhatIfMode = $true
     )
     $entity = 'PIM-Assignments-Admins'
     $existing = @()
     try { $existing = @(Get-PimSqlRows -ConnectionString $ConnectionString -Entity $entity) }
-    catch { return @{ ok = $false; created = 0; updated = 0; removed = 0; skippedForeign = 0; wouldPrune = @(); detail = "could not read $entity from the slave store: $($_.Exception.Message)" } }
+    catch { return @{ ok = $false; created = 0; updated = 0; removed = 0; skippedForeign = 0; wouldPrune = @(); wouldRetract = @(); retractHeld = @(); detail = "could not read $entity from the slave store: $($_.Exception.Message)" } }
 
     $keyOf = { param($u, $t) "$u|$t" }
     # what the sync currently owns in this store. An UNSTAMPED row is Local by
@@ -2062,12 +2818,17 @@ function Invoke-PimDownlinkAssignmentApply {
         if (-not $WhatIfMode) { Set-PimSqlRow -ConnectionString $ConnectionString -Entity $entity -Key $k -Data $row }
     }
 
-    # prune only what THIS sync previously added and no longer projects
-    $stale = @($ownedKeys.Keys | Where-Object { -not $desiredKeys.ContainsKey($_) })
-    $removed = 0; $wouldPrune = @()
+    # only what THIS sync previously added and no longer projects is ever a candidate
+    $stale = @($ownedKeys.Keys | Where-Object { -not $desiredKeys.ContainsKey($_) } | Sort-Object)
+    $removed = 0; $wouldPrune = @(); $wouldRetract = @(); $retractHeld = @()
+    $budget = Get-PimDownlinkRetractionBudget
     if ($stale.Count) {
         if (@($Assignments).Count -eq 0 -and -not $AllowFullPrune) {
             $wouldPrune = $stale
+        } elseif (-not $AllowFullPrune -and -not $AllowRetraction) {
+            $wouldRetract = $stale
+        } elseif (-not $AllowFullPrune -and $stale.Count -gt $budget) {
+            $retractHeld = $stale
         } else {
             foreach ($k in $stale) {
                 if (-not $WhatIfMode) { Remove-PimSqlRow -ConnectionString $ConnectionString -Entity $entity -Key $k }
@@ -2078,8 +2839,10 @@ function Invoke-PimDownlinkAssignmentApply {
     # ${entity} braces are required: "$entity:" parses '$entity:' as a SCOPE qualifier.
     $detail = "${entity}: +$created ~$updated -$removed (left $foreign local row(s) untouched)"
     if ($wouldPrune.Count) { $detail += "; REFUSED to prune $($wouldPrune.Count) synced row(s) because the projection was EMPTY -- pass -AllowFullPrune to withdraw them" }
+    if ($wouldRetract.Count) { $detail += "; WOULD REMOVE $($wouldRetract.Count) synced row(s) that no longer reach this tenant -- reported only (retraction needs the removal opt-in)" }
+    if ($retractHeld.Count) { $detail += "; HELD: $($retractHeld.Count) retraction(s) exceed the removal budget of $budget -- NOTHING withdrawn" }
     if ($WhatIfMode) { $detail = "[whatif] $detail" }
-    return @{ ok = $true; created = $created; updated = $updated; removed = $removed; skippedForeign = $foreign; wouldPrune = $wouldPrune; detail = $detail }
+    return @{ ok = $true; created = $created; updated = $updated; removed = $removed; skippedForeign = $foreign; wouldPrune = $wouldPrune; wouldRetract = $wouldRetract; retractHeld = $retractHeld; retractionBudget = $budget; detail = $detail }
 }
 
 # ---------------------------------------------------------------------------
@@ -2105,6 +2868,8 @@ function Invoke-PimDownlinkDefinitionApply {
         [Parameter(Mandatory)][hashtable]$DefinitionPlan,   # Select-PimProjectedDefinitions result
         [string]$Owner = 'MSP',
         [switch]$AllowFullPrune,
+        # §71 / framework MSP-4 SURFACE item 8 -- retraction is REPORT-FIRST (see the membership apply).
+        [switch]$AllowRetraction,
         [switch]$WhatIfMode = $true
     )
     # entity -> (rows, natural-key property list). Mirrors Get-PimStoreRowKey exactly;
@@ -2131,31 +2896,56 @@ function Invoke-PimDownlinkDefinitionApply {
     # Prune has to look in EVERY definition entity we could ever have written -- including the
     # legacy 'PIM-Definitions' -- or a group this sync placed before the fix would become
     # unreachable garbage that nothing withdraws.
-    $defEntities = @('PIM-Definitions-Roles','PIM-Definitions-Services','PIM-Definitions-Organization','PIM-Definitions-Tasks','PIM-Definitions')
+    # §71.7 (a): Departments / Processes / Projects / CrossOrg groups now travel too, so they are
+    # written back to (and pruned from) their own entities like the other four.
+    $defEntities = @('PIM-Definitions-Roles','PIM-Definitions-Services','PIM-Definitions-Organization','PIM-Definitions-Tasks',
+                     'PIM-Definitions-Departments','PIM-Definitions-Processes','PIM-Definitions-Projects','PIM-Definitions-CrossOrg','PIM-Definitions')
     $work = @()
     foreach ($e in $defEntities) {
         $rows = if ($groupsByEntity.ContainsKey($e)) { @($groupsByEntity[$e].ToArray()) } else { @() }
-        $work += @{ Entity = $e; Rows = $rows; Keys = @('GroupTag'); IsGroupClass = $true }
+        # Departments is keyed the store's way (Department first -- Get-PimStoreRowKey), and it is ALSO
+        # the customer's department/owner store, so a row there that is not ours is NEVER taken over:
+        # an MSP DEPT- group sponsored by 'IT' must not overwrite the customer's own 'IT' owner row.
+        $isDept = ($e -eq 'PIM-Definitions-Departments')
+        $work += @{ Entity = $e; Rows = $rows; Keys = @('GroupTag'); IsGroupClass = $true; UseStoreKey = $isDept; NeverTakeOver = $isDept }
     }
     $work += @{ Entity = 'PIM-Assignments-Groups';       Rows = @($DefinitionPlan.nestings);     Keys = @('TargetGroupTag', 'SourceGroupTag') }
     $work += @{ Entity = 'PIM-Assignments-Roles-Groups'; Rows = @($DefinitionPlan.roleBindings); Keys = @('GroupTag', 'RoleDefinitionName') }
-    $created = 0; $updated = 0; $removed = 0; $foreign = 0; $parts = @()
+    # §71: tenant-scoped resource bindings + the AU definitions they need. Only ever non-empty when the
+    # master EXPLICITLY replicated them; a customer row carrying the same key is never taken over.
+    $resByEntity = @{ 'PIM-Assignments-Roles-AUs' = @(); 'PIM-Assignments-Azure-Resources' = @(); 'PIM-Assignments-Workloads' = @() }
+    foreach ($rb in @($DefinitionPlan.resourceBindings)) {
+        $e = "$(Get-PimDownlinkValue -Object $rb -Key 'Entity')".Trim()
+        if ($resByEntity.ContainsKey($e)) { $resByEntity[$e] = @($resByEntity[$e]) + @($rb) }
+    }
+    $work += @{ Entity = 'PIM-Assignments-Roles-AUs';       Rows = @($resByEntity['PIM-Assignments-Roles-AUs']);       Keys = @('GroupTag', 'AdministrativeUnitTag', 'RoleDefinitionName'); NeverTakeOver = $true }
+    $work += @{ Entity = 'PIM-Assignments-Azure-Resources'; Rows = @($resByEntity['PIM-Assignments-Azure-Resources']); Keys = @('GroupTag', 'AzScope', 'AzScopePermission'); NeverTakeOver = $true }
+    $work += @{ Entity = 'PIM-Assignments-Workloads';       Rows = @($resByEntity['PIM-Assignments-Workloads']);       Keys = @('GroupTag'); NeverTakeOver = $true }
+    $work += @{ Entity = 'PIM-Definitions-AU';              Rows = @($DefinitionPlan.aus);                             Keys = @('AdministrativeUnitTag'); NeverTakeOver = $true }
+
+    $created = 0; $updated = 0; $removed = 0; $foreign = 0; $parts = @(); $takeOverRefused = 0
     $wouldPrune = New-Object System.Collections.Generic.List[string]
+    $stalePending = New-Object System.Collections.Generic.List[object]   # @{ Entity; Key } -- decided after every entity is read
     foreach ($w in $work) {
         $entity = "$($w.Entity)"
         $existing = @()
         try { $existing = @(Get-PimSqlRows -ConnectionString $ConnectionString -Entity $entity) }
-        catch { return @{ ok = $false; created = $created; updated = $updated; removed = $removed; skippedForeign = $foreign; detail = "could not read $entity from the slave store: $($_.Exception.Message)" } }
+        catch { return @{ ok = $false; created = $created; updated = $updated; removed = $removed; skippedForeign = $foreign; wouldPrune = @(); wouldRetract = @(); retractHeld = @(); detail = "could not read $entity from the slave store: $($_.Exception.Message)" } }
 
         $keyFor = {
             param($row)
+            if ($w.UseStoreKey -and (Get-Command Get-PimStoreRowKey -ErrorAction SilentlyContinue)) { return "$(Get-PimStoreRowKey -Base $w.Entity -Row $row)" }
             $vals = @($w.Keys | ForEach-Object { "$(Get-PimDownlinkValue -Object $row -Key $_)" })
             ($vals -join '|')
         }
         $ownedKeys = @{}
+        $foreignKeys = @{}
         foreach ($e in $existing) {
-            if ("$(Get-PimDownlinkValue -Object $e -Key 'Owner')" -ne $Owner) { continue }
             $k = & $keyFor $e
+            if ("$(Get-PimDownlinkValue -Object $e -Key 'Owner')" -ne $Owner) {
+                if ("$k".Trim() -and "$k" -notmatch '^\|+$') { $foreignKeys[$k.ToLowerInvariant()] = $true }
+                continue
+            }
             # 🪤 A row that derives a BLANK key ('' or just separators) is one this entity
             # cannot address -- Get-PimStoreRowKey returns '' for exactly these, and the
             # write path below already skips them. The prune path must skip them too, or a
@@ -2167,26 +2957,30 @@ function Invoke-PimDownlinkDefinitionApply {
         $foreign += (@($existing).Count - $ownedKeys.Count)
 
         $desired = @{}
+        $wrote = 0
         foreach ($r in @($w.Rows)) {
             $k = & $keyFor $r
             if (-not "$k".Trim() -or "$k" -match '^\|+$') { continue }
             $desired[$k] = $true
+            if ($w.NeverTakeOver -and $foreignKeys.ContainsKey($k.ToLowerInvariant())) { $takeOverRefused++; continue }
             # rebuild as a plain ordered row + the Owner stamp; the bundle rows are
             # PSCustomObjects from JSON and must not be written back verbatim.
             $row = [ordered]@{}
-            foreach ($p in @($r.PSObject.Properties)) {
-                # SourceEntity is ROUTING for this function, not a column of the row. The
-                # engine derives its own SourceEntity when it reads the definitions back, so
-                # persisting ours would put two different meanings behind one name.
-                if ($p.Name -eq 'SourceEntity') { continue }
+            $props = if ($r -is [System.Collections.IDictionary]) { @($r.Keys | ForEach-Object { [pscustomobject]@{ Name = "$_"; Value = $r[$_] } }) } else { @($r.PSObject.Properties) }
+            foreach ($p in $props) {
+                # SourceEntity / Entity are ROUTING for this function, not columns of the row, and the
+                # §71 fields are the MASTER's authoring decision -- meaningless inside a managed tenant,
+                # whose own GUI neither shows nor accepts them.
+                if ($p.Name -in @('SourceEntity', 'Entity', 'Replicate', 'Ring', 'Target')) { continue }
                 $row[$p.Name] = "$($p.Value)"
             }
             $row['Owner'] = $Owner
-            if (-not $row.Contains('Action')) { $row['Action'] = 'Assign' }
+            if (-not $row.Contains('Action') -and ($w.IsGroupClass -or -not $w.NeverTakeOver)) { $row['Action'] = 'Assign' }
             if ($ownedKeys.ContainsKey($k)) { $updated++ } else { $created++ }
+            $wrote++
             if (-not $WhatIfMode) { Set-PimSqlRow -ConnectionString $ConnectionString -Entity $entity -Key $k -Data $row }
         }
-        $stale = @($ownedKeys.Keys | Where-Object { -not $desired.ContainsKey($_) })
+        $stale = @($ownedKeys.Keys | Where-Object { -not $desired.ContainsKey($_) } | Sort-Object)
         if ($stale.Count) {
             # The mass-revoke guard asks "did the master publish NOTHING of this KIND",
             # never "nothing in this one entity". Groups are spread over several definition
@@ -2201,20 +2995,46 @@ function Invoke-PimDownlinkDefinitionApply {
                 # refusal is the whole point of having one.
                 foreach ($k in $stale) { $wouldPrune.Add("$entity|$k") | Out-Null }
             } else {
-                foreach ($k in $stale) {
-                    if (-not $WhatIfMode) { Remove-PimSqlRow -ConnectionString $ConnectionString -Entity $entity -Key $k }
-                    $removed++
-                }
+                foreach ($k in $stale) { $stalePending.Add(@{ Entity = $entity; Key = $k }) | Out-Null }
             }
         }
         # Only report an entity that took part -- five empty group buckets in the detail line
         # would bury the one that did something.
-        if (@($w.Rows).Count -or $stale.Count) { $parts += ("{0}:+{1}" -f $entity.Replace('PIM-', ''), @($w.Rows).Count) }
+        if (@($w.Rows).Count -or $stale.Count) { $parts += ("{0}:+{1}" -f $entity.Replace('PIM-', ''), $wrote) }
+    }
+    # §71 -- RETRACTION, decided ONCE over every entity: report-first, opt-in, inside the budget.
+    $wouldRetract = @(); $retractHeld = @()
+    $budget = Get-PimDownlinkRetractionBudget
+    $staleArr = @($stalePending.ToArray())
+    if ($staleArr.Count) {
+        $labels = @($staleArr | ForEach-Object { "$($_.Entity)|$($_.Key)" })
+        if (-not $AllowFullPrune -and -not $AllowRetraction) { $wouldRetract = $labels }
+        elseif (-not $AllowFullPrune -and $staleArr.Count -gt $budget) { $retractHeld = $labels }
+        else {
+            foreach ($s in $staleArr) {
+                if (-not $WhatIfMode) { Remove-PimSqlRow -ConnectionString $ConnectionString -Entity $s.Entity -Key $s.Key }
+                $removed++
+            }
+        }
     }
     $detail = "definitions +$created ~$updated -$removed ($($parts -join ' ')); left $foreign customer-owned row(s) untouched"
+    if ($takeOverRefused) { $detail += "; $takeOverRefused row(s) NOT written -- the customer already has a row with that key" }
     if ($wouldPrune.Count) { $detail += "; REFUSED to prune $($wouldPrune.Count) synced row(s) because the master published none -- pass -AllowFullPrune to withdraw them" }
+    if ($wouldRetract.Count) { $detail += "; WOULD REMOVE $($wouldRetract.Count) synced row(s) that no longer reach this tenant -- reported only (retraction needs the removal opt-in)" }
+    if ($retractHeld.Count) { $detail += "; HELD: $($retractHeld.Count) retraction(s) exceed the removal budget of $budget -- NOTHING withdrawn" }
     if ($WhatIfMode) { $detail = "[whatif] $detail" }
-    return @{ ok = $true; created = $created; updated = $updated; removed = $removed; skippedForeign = $foreign; wouldPrune = @($wouldPrune.ToArray()); detail = $detail }
+    return @{ ok = $true; created = $created; updated = $updated; removed = $removed; skippedForeign = $foreign; wouldPrune = @($wouldPrune.ToArray()); wouldRetract = $wouldRetract; retractHeld = $retractHeld; retractionBudget = $budget; takeOverRefused = $takeOverRefused; detail = $detail }
+}
+
+function Get-PimDownlinkRetractionBudget {
+    # §71 -- the removal budget a downlink retraction runs under: the engine's own G4 budget when it is
+    # loaded (hard ceiling 5), else the same knob read directly, else 5. Never above the engine's.
+    if (Get-Command Get-PimRemoveBudget -ErrorAction SilentlyContinue) { try { return [int](Get-PimRemoveBudget) } catch { } }
+    $budget = 5
+    if (Get-Command Get-PimSafetyKnob -ErrorAction SilentlyContinue) {
+        $kb = 0; if ([int]::TryParse("$(Get-PimSafetyKnob -Name 'PIM_RemoveMaxCount')", [ref]$kb) -and $kb -ge 0 -and $kb -le 5) { $budget = $kb }
+    }
+    return $budget
 }
 
 # ---------------------------------------------------------------------------
@@ -2245,11 +3065,10 @@ function Invoke-PimDownlinkDefinitionApply {
 # credential did not make the privilege smaller; it only made it unusable while remaining fully
 # granted. The intent now travels from the master's registry (pim.CentralAdmins.CreateTap,
 # default 1) and this apply defaults ON when the bundle predates those columns.
-# 🪤 CreateTAP alone is NOT enough, and this is the half that fails silently: AdminTap mails the
-# code to ManagerEmail, so an empty ManagerEmail mints a TAP that is delivered NOWHERE and can
-# never be recovered (the code is readable only at creation). Carry it, or pass
-# -DefaultManagerEmail. Nothing here can compensate for a slave that cannot send mail at all --
-# that is the sender-mailbox half of the same gap.
+# 🪤 A TAP still needs somewhere to go, and 71.19 fixed WHERE: the admin's SPONSOR DEPARTMENT's owners. The synced row
+# therefore carries its Department, and the bundle carries that department's row (auto-included as a dependency), so the
+# slave resolves the recipient exactly as the master does. Nothing here can compensate for a slave that cannot send mail
+# at all -- that is the sender-mailbox half of the same gap.
 # ---------------------------------------------------------------------------
 function Invoke-PimDownlinkAdminApply {
     [CmdletBinding()]
@@ -2258,12 +3077,16 @@ function Invoke-PimDownlinkAdminApply {
         [object[]]$Admins = @(),                       # $plan.admins (ring-filtered baseline rows)
         [Parameter(Mandatory)][string]$DefaultDomain,  # the SLAVE's default domain
         [string]$Owner = 'MSP',
-        # The fleet-wide fallbacks, applied per row only when the bundle carries no value.
-        # $CreateTapDefault is the operator's "default ON"; pass 'FALSE' to opt a relationship out.
+        # 71.17 -- TAP IS ON FOR ALL (operator 2026-09-15 "tap is on for all"). -CreateTapDefault is kept so existing
+        # callers still bind, and has NO effect: every synced (Entra) admin row is stored CreateTAP=TRUE. A 'FALSE' is
+        # reported, never honoured.
         [string]$CreateTapDefault = 'TRUE',
         [int]$TapLifetimeHoursDefault = 8,
-        [string]$DefaultManagerEmail = '',
         [switch]$AllowFullPrune,
+        # §71 / framework MSP-4 SURFACE item 8 -- retraction is REPORT-FIRST for admins too (§71.11, found LIVE
+        # on RIDE 2026-09-15): an admin that stops reaching this tenant is reported as 'would remove' and its
+        # central row withdrawn only with this opt-in, inside the removal budget. -AllowFullPrune still wins.
+        [switch]$AllowRetraction,
         [switch]$WhatIfMode = $true
     )
     # 🔑 REQUIREMENTS 68.6 row 35 (operator 2026-09-13): "slaves ... have their own admins.
@@ -2308,30 +3131,32 @@ function Invoke-PimDownlinkAdminApply {
     # the slave's OWN admins: everything in its own entity that this sync did not plant
     $foreign = @($localRows | Where-Object { "$(Get-PimDownlinkValue -Object $_ -Key 'Owner')" -ne $Owner }).Count
 
-    $created = 0; $updated = 0; $desired = @{}; $tapOn = 0; $tapNoRecipient = 0
+    $created = 0; $updated = 0; $desired = @{}; $tapOn = 0; $tapNoRecipient = 0; $tapIgnored = 0
     foreach ($a in @($Admins)) {
         $un = "$(Get-PimDownlinkValue -Object $a -Key 'UserName')".Trim()
         if (-not $un) { continue }
         $desired[$un] = $true
 
-        # --- TAP intent: the bundle's value wins; absent/blank falls back to the default (ON).
-        # SQL BIT arrives as True/False, an older bundle as the string 'TRUE'/'FALSE', and a
-        # registry predating the column as nothing at all -- all three resolve here so the
-        # decision is made ONCE rather than at three call sites.
+        # --- 71.17 TAP IS ON FOR ALL. A synced admin is always an Entra admin (TargetPlatform=ID below), and every Entra
+        # admin gets a TAP -- the bundle's CreateTap (an older bundle, or a registry row) and -CreateTapDefault are NOT
+        # honoured. 2.4.362 briefly carried a master's CreateTAP=FALSE to the slave (71.15); stored there it silenced the
+        # "TAP on but nowhere to deliver it" warning while the engine still (correctly) planned the TAP.
         $tapRaw = "$(Get-PimDownlinkValue -Object $a -Key 'CreateTap')".Trim()
         if (-not $tapRaw) { $tapRaw = "$(Get-PimDownlinkValue -Object $a -Key 'CreateTAP')".Trim() }
-        $createTap = if ($tapRaw) { if ($tapRaw -match '(?i)^(true|1|yes)$') { 'TRUE' } else { 'FALSE' } }
-                     elseif ("$CreateTapDefault" -match '(?i)^(true|1|yes)$') { 'TRUE' } else { 'FALSE' }
+        if (($tapRaw -and $tapRaw -notmatch '(?i)^(true|1|yes)$') -or "$CreateTapDefault" -notmatch '(?i)^(true|1|yes)$') { $tapIgnored++ }
+        $createTap = 'TRUE'
 
         $lifeRaw = "$(Get-PimDownlinkValue -Object $a -Key 'TapLifetimeHours')".Trim()
         if (-not $lifeRaw) { $lifeRaw = "$(Get-PimDownlinkValue -Object $a -Key 'TAPLifetimeHours')".Trim() }
         $life = 0; [void][int]::TryParse($lifeRaw, [ref]$life)
         if ($life -le 0) { $life = $TapLifetimeHoursDefault }
 
+        # 71.19: the recipient is resolved IN THE SLAVE from the admin's sponsor department (the bundle carries both the
+        # admin's Department and that department's row). ManagerEmail travels only as legacy data. The count below reports
+        # the rows that would have NO recipient at all -- neither a department nor the legacy address.
         $mgr = "$(Get-PimDownlinkValue -Object $a -Key 'ManagerEmail')".Trim()
-        if (-not $mgr) { $mgr = "$DefaultManagerEmail".Trim() }
-
-        if ($createTap -eq 'TRUE') { $tapOn++; if (-not $mgr) { $tapNoRecipient++ } }
+        $dept = "$(Get-PimDownlinkValue -Object $a -Key 'Department')".Trim()
+        if ($createTap -eq 'TRUE') { $tapOn++; if (-not $mgr -and -not $dept) { $tapNoRecipient++ } }
 
         $row = [ordered]@{
             FirstName             = "$(Get-PimDownlinkValue -Object $a -Key 'FirstName')"
@@ -2346,24 +3171,34 @@ function Invoke-PimDownlinkAdminApply {
             UserPrincipalName     = "$un@$DefaultDomain"
             UsageLocation         = "$(Get-PimDownlinkValue -Object $a -Key 'UsageLocation')"
             Company               = ''
+            # 71.19: the SPONSOR DEPARTMENT is what decides this admin's mail/TAP recipient in THIS tenant -- the
+            # department's row (with its Owners) arrives in the same bundle.
+            Department            = $dept
             Notes                 = "MSP downlink (central admin ring $(Get-PimDownlinkValue -Object $a -Key 'Ring'))"
             ManagerEmail          = $mgr
             StartDate             = ''
-            ProvisionDate         = 'Now'
+            # 71.15: the master's lifecycle values win; absent = the previous defaults (Now / no TAP start / no delete).
+            ProvisionDate         = $(if (ConvertTo-PimDownlinkLifecycleText (Get-PimDownlinkValue -Object $a -Key 'ProvisionDate')) { ConvertTo-PimDownlinkLifecycleText (Get-PimDownlinkValue -Object $a -Key 'ProvisionDate') } else { 'Now' })
             CreateTAP             = $createTap
-            TAPStartDate          = ''
+            TAPStartDate          = ConvertTo-PimDownlinkLifecycleText (Get-PimDownlinkValue -Object $a -Key 'TAPStartDate')
             TAPLifetimeHours      = "$life"
             # Governance follows the SOURCE (row 35): the master's status and offboarding decision
             # flow down with the row. A bundle that predates these fields means Enabled / none.
-            AccountStatus         = $(if ("$(Get-PimDownlinkValue -Object $a -Key 'AccountStatus')".Trim()) { "$(Get-PimDownlinkValue -Object $a -Key 'AccountStatus')".Trim() } else { 'Enabled' })
+            # 🔴 71.20 -- THE MASTER'S STATUS, VERBATIM, INCLUDING BLANK. This defaulted to 'Enabled', and an explicit
+            # 'Enabled' is the ONE value that RE-ENABLES a disabled account (Get-PimAdminStatusDecision) -- so a master
+            # that simply left the column blank re-enabled an account the customer had disabled, on the next pull.
+            # Blank now stays blank: the slave then leaves the live account exactly as it is.
+            AccountStatus         = "$(Get-PimDownlinkValue -Object $a -Key 'AccountStatus')".Trim()
             StatusChangeCode      = ''
             Ring                  = "$(Get-PimDownlinkValue -Object $a -Key 'Ring')"
             Target                = "$(Get-PimDownlinkValue -Object $a -Key 'Target')".Trim()
             ManagementMode        = 'msp'
             AdminSource           = 'central'
             Template              = "$(Get-PimDownlinkValue -Object $a -Key 'Template')"
-            OffboardDate          = "$(Get-PimDownlinkValue -Object $a -Key 'OffboardDate')".Trim()
-            DeleteAfterDays       = ''
+            # 71.23: written under the NEW name only -- never both, so the slave row cannot conflict.
+            AutoDisableDate       = ConvertTo-PimDownlinkLifecycleText (Get-PimAdminAutoDisableDate -Row $a).raw
+            # 71.21: no DeleteAfterDays column at all -- PIM never deletes an account and the field is
+            # not supported, so a central row cannot carry anything that reads like "this slave deletes it".
             Owner                 = $Owner
         }
         if ($ownedKeys.ContainsKey($un)) { $updated++ } else { $created++ }
@@ -2372,17 +3207,21 @@ function Invoke-PimDownlinkAdminApply {
 
     # same empty-desired guard as the membership apply: "published nothing" and
     # "withdrew everyone" are indistinguishable here, and the safe reading is the first.
-    $stale = @($ownedKeys.Keys | Where-Object { -not $desired.ContainsKey($_) })
-    $removed = 0; $wouldPrune = @(); $retractHeld = @()
-    # Row 35: an admin the master stops marking msp (or narrows away) is WITHDRAWN here -- a
-    # cross-tenant retraction. It rides the same removal budget as every other removal
-    # (PIM_RemoveMaxCount, default 5): over budget, NOTHING is withdrawn and the run says why.
+    $stale = @($ownedKeys.Keys | Where-Object { -not $desired.ContainsKey($_) } | Sort-Object)
+    $removed = 0; $wouldPrune = @(); $retractHeld = @(); $wouldRetract = @()
+    # Row 35: an admin the master stops marking msp (or narrows away) is a cross-tenant retraction.
+    # 🔴 §71.11 -- IT USED TO BE WITHDRAWN AT ONCE (inside the budget), while the group and membership applies
+    # beside it were already report-first. Measured on RIDE 2026-09-15: re-targeting one SAMPLE admin away
+    # from the tenant removed its central row on the next pull while its membership stayed "WOULD REMOVE".
+    # Framework MSP-4 SURFACE item 8 is one rule for every row: reported, and removed only under the removal
+    # opt-in (-AllowRetraction) + the budget (PIM_RemoveMaxCount, default 5), or the decouple (-AllowFullPrune).
     $budget = 5
     if (Get-Command Get-PimSafetyKnob -ErrorAction SilentlyContinue) {
         $kb = 0; if ([int]::TryParse("$(Get-PimSafetyKnob -Name 'PIM_RemoveMaxCount')", [ref]$kb) -and $kb -ge 0) { $budget = $kb }
     }
     if ($stale.Count) {
         if (@($Admins).Count -eq 0 -and -not $AllowFullPrune) { $wouldPrune = $stale }
+        elseif (-not $AllowFullPrune -and -not $AllowRetraction) { $wouldRetract = $stale }
         elseif ($stale.Count -gt $budget -and -not $AllowFullPrune) { $retractHeld = $stale }
         else {
             foreach ($k in $stale) {
@@ -2393,13 +3232,15 @@ function Invoke-PimDownlinkAdminApply {
     }
     $detail = "${entity}: +$created ~$updated -$removed (left $foreign of the slave's own admin row(s) untouched); TAP on for $tapOn"
     if ($migrated) { $detail += "; MIGRATED $migrated central admin row(s) out of $localEntity into $entity (one-time)" }
+    if ($wouldRetract.Count) { $detail += "; WOULD REMOVE $($wouldRetract.Count) central admin(s) that no longer reach this tenant -- reported only (retraction needs the removal opt-in, -AllowRetraction)" }
     if ($retractHeld.Count) { $detail += "; HELD: would withdraw $($retractHeld.Count) central admin(s), over the retraction budget of $budget -- NOTHING withdrawn (check the master's ManagementMode / Ring / Target, then re-run with -AllowFullPrune or raise PIM_RemoveMaxCount)" }
     # Surfaced, never swallowed: a TAP with no recipient is minted, mailed nowhere, and the code
     # is unrecoverable afterwards. That must read as a WARNING in the sync output, not as success.
-    if ($tapNoRecipient) { $detail += "; WARNING $tapNoRecipient admin(s) have CreateTAP=TRUE but NO ManagerEmail -- their TAP would be minted and never delivered (pass -DefaultManagerEmail)" }
+    if ($tapNoRecipient) { $detail += "; WARNING $tapNoRecipient admin(s) get a TAP (enforced for every admin) but name NO sponsor department (and carry no legacy ManagerEmail) -- the engine REFUSES to issue a TAP it cannot deliver, so they cannot sign in: set the admin's Department at the master and give that department Owners" }
+    if ($tapIgnored) { $detail += "; NOTE CreateTAP=FALSE on $tapIgnored admin(s) was IGNORED -- a TAP is enforced for every Entra admin" }
     if ($wouldPrune.Count) { $detail += "; REFUSED to prune $($wouldPrune.Count) synced admin(s) on an EMPTY baseline -- pass -AllowFullPrune" }
     if ($WhatIfMode) { $detail = "[whatif] $detail" }
-    return @{ ok = $true; created = $created; updated = $updated; removed = $removed; skippedForeign = $foreign; wouldPrune = $wouldPrune; retractHeld = $retractHeld; migrated = $migrated; entity = $entity; tapEnabled = $tapOn; tapWithoutRecipient = $tapNoRecipient; detail = $detail }
+    return @{ ok = $true; created = $created; updated = $updated; removed = $removed; skippedForeign = $foreign; wouldPrune = $wouldPrune; wouldRetract = @($wouldRetract | ForEach-Object { "$entity|$_" }); retractHeld = $retractHeld; retractionBudget = $budget; migrated = $migrated; entity = $entity; tapEnabled = $tapOn; tapWithoutRecipient = $tapNoRecipient; tapFalseIgnored = $tapIgnored; detail = $detail }
 }
 
 # Sync-PimMasterToSlave -- alias-style entry the matrix also probes for. Thin
@@ -2439,6 +3280,8 @@ function Sync-PimMasterToSlave {
         # we are running inside it; never guessed.
         [string]$SlaveDefaultDomain,
         [switch]$AllowFullPrune,
+        # §71: declared, or @PSBoundParameters could never carry the retraction opt-in through.
+        [switch]$AllowRetraction,
         [switch]$WhatIfMode = $true
     )
     Invoke-PimManagedDownlink @PSBoundParameters
@@ -2491,14 +3334,12 @@ function Invoke-PimScenarioDeploy {
         # of auditing the chain instead of listing the instances.
         [string[]]$SlaveAdminPrefixes,
         [string]$SlaveDefaultDomain,
-        # BUG-84: the fallback delivery address for a synced admin's TAP. The AdminTap guard
-        # REFUSES to mint a credential it cannot deliver -- correctly, and by design (BUG-66/69) --
-        # so an admin row with no ManagerEmail produces an account nobody can sign in as. The
-        # downlink already says so ("... pass -DefaultManagerEmail"), and Invoke-PimManagedDownlink
-        # already accepts it; nothing forwarded it, so the advice named a parameter the caller had
-        # no way to supply. Per-admin ManagerEmail from the bundle still WINS -- this is only the
-        # fallback for a master registry that predates the column.
-        [string]$DefaultManagerEmail = '',
+        # (71.19 removed -DefaultManagerEmail here too: the slave resolves the recipient from the admin's sponsor
+        # department, which the bundle carries.)
+        # 71.14: the downlink's removal opt-in, declared on the scenario runner so the scheduled pull job can carry it
+        # (PIM_DOWNLINK_ALLOW_RETRACTION=true). Default OFF: retraction stays report-first, and ON is still capped by the
+        # removal budget inside the apply functions.
+        [switch]$AllowRetraction,
         [datetime]$NowUtc = ([datetime]::UtcNow),
         [int64]$LastVersion = 0,
         [switch]$WhatIfMode = $true
@@ -2579,13 +3420,13 @@ function Invoke-PimScenarioDeploy {
                 }
             }
             if ("$SlaveDefaultDomain".Trim())         { $dlPass['SlaveDefaultDomain']         = $SlaveDefaultDomain }
-            if ("$DefaultManagerEmail".Trim())        { $dlPass['DefaultManagerEmail']        = $DefaultManagerEmail }
             # Both gates forwarded on the same inert-when-absent rule the orchestrator uses:
             # bound-and-empty IS forwarded ("blocks nothing" is an answer; "nobody asked" is
             # not), unbound is not forwarded at all.
             if ($PSBoundParameters.ContainsKey('RingPlan') -and $null -ne $RingPlan) { $dlPass['RingPlan'] = $RingPlan }
             if ($PSBoundParameters.ContainsKey('BlockedCapabilities') -and $null -ne $BlockedCapabilities) { $dlPass['BlockedCapabilities'] = $BlockedCapabilities }
             if ($PSBoundParameters.ContainsKey('SlaveAdminPrefixes') -and $null -ne $SlaveAdminPrefixes) { $dlPass['SlaveAdminPrefixes'] = $SlaveAdminPrefixes }
+            if ($AllowRetraction) { $dlPass['AllowRetraction'] = $true }   # 71.14: only an explicit ON is forwarded
             $dl = Invoke-PimManagedDownlink -Scenario $Scenario -Doc $Doc -PublicKey $PublicKey `
                 -BaselineAdmins $BaselineAdmins -TenantId $TenantId -SlaveRing $SlaveRing `
                 -CentralRoot $CentralRoot -LocalRoot $LocalRoot -SqlServer $SqlServer -SqlDatabase $SqlDatabase `
@@ -2618,10 +3459,13 @@ function Invoke-PimScenarioDeploy {
             $uu = if ($summary) { [int]$summary.update } else { -1 }
             $ru = if ($summary) { [int]$summary.remove } else { -1 }
             $eu = if ($summary) { [int]$summary.errors } else { -1 }
-            $okEngine = if ($summary) { ($eu -eq 0) } else { $true }
-            $det = if ($summary) { "engine ran ($EngineScope/$EngineMode$(if($WhatIfMode){' whatif'})): create=$cu update=$uu remove=$ru errors=$eu" }
+            # 71.13: errors that are ONLY approval holds (policy mass-change breaker) do not fail the step -- it is
+            # 'held', needs an approval, and says which. A real item failure alongside a hold still fails it.
+            $engineHeld = [bool]($summary -and $summary.PSObject.Properties['outcome'] -and "$($summary.outcome)" -eq 'held')
+            $okEngine = if ($summary) { ($eu -eq 0) -or $engineHeld } else { $true }
+            $det = if ($summary) { "engine ran ($EngineScope/$EngineMode$(if($WhatIfMode){' whatif'})): create=$cu update=$uu remove=$ru errors=$eu$(if ($engineHeld) { " -- NEEDS APPROVAL: $($summary.heldDetail)" })" }
                    else { "engine ran ($EngineScope/$EngineMode$(if($WhatIfMode){' whatif'})) -- no structured summary returned" }
-            $results.Add([pscustomobject]@{ step = 'engine-apply'; ok = $okEngine; detail = $det; result = $engine; changeSummary = $summary }) | Out-Null
+            $results.Add([pscustomobject]@{ step = 'engine-apply'; ok = $okEngine; held = $engineHeld; detail = $det; result = $engine; changeSummary = $summary }) | Out-Null
             if (-not $okEngine) {
                 return ([pscustomobject]@{ ok = $false; scenarioId = $run.scenarioId; plan = $run; steps = @($results.ToArray()); changeSummary = $summary })
             }
@@ -2640,7 +3484,8 @@ function Invoke-PimScenarioDeploy {
     # idempotency (create+update+remove == 0 on a second pass) without re-digging the steps.
     $cs = $null
     foreach ($st in @($results.ToArray())) { if ($st.step -eq 'engine-apply' -and $st.changeSummary) { $cs = $st.changeSummary } }
-    return ([pscustomobject]@{ ok = [bool]$okAll; scenarioId = $run.scenarioId; plan = $run; steps = @($results.ToArray()); changeSummary = $cs })
+    $heldAll = [bool]$okAll -and [bool](@($results.ToArray()) | Where-Object { $_.PSObject.Properties['held'] -and $_.held })
+    return ([pscustomobject]@{ ok = [bool]$okAll; held = $heldAll; scenarioId = $run.scenarioId; plan = $run; steps = @($results.ToArray()); changeSummary = $cs })
 }
 
 # alias name the matrix also probes for.

@@ -22,10 +22,17 @@
 #>
 
 function Get-PimDeployIdentityGraphRoles {
+    # 71.18 (Friday build audit, 2026-09-15): + Group.Create + GroupMember.ReadWrite.All. The prereq step converges the
+    # SQL admin group (grp-pim-sql-admins: create it if absent, add the environment identities) AS the deploy identity;
+    # without these two it only WARNED ("permission denied") and a fresh environment kept a single-identity SQL admin,
+    # so the build could not run unattended. Least privilege on purpose: not Group.ReadWrite.All (that edits EVERY group).
+    # Ids read from the live Microsoft Graph service principal 2026-09-15.
     [ordered]@{
         'Directory.Read.All'              = '7ab1d382-f21e-4acd-a863-ba3e13f7da61'
         'AppRoleAssignment.ReadWrite.All' = '06b708a9-e830-4db3-a914-8e69da51d44f'
         'Application.Read.All'            = '9a5d68dd-52b0-4cc2-bd40-abcf44ac3a30'
+        'Group.Create'                    = 'bf7b1a76-6e77-406b-b258-bf5c7720e98f'
+        'GroupMember.ReadWrite.All'       = 'dbaae8cf-10b5-4b86-a4a1-f871c94c6695'
     }
 }
 

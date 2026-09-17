@@ -604,13 +604,13 @@ function Invoke-PimEngineScope {
                 $Scope, @($sel.breakGlass).Count, (($sel.breakGlass) -join ', ')) -ForegroundColor Yellow
         }
         if (@($sel.unmanaged).Count -gt 0) {
-            # Reported, never silent. These are admin accounts the desired set cannot
-            # attribute -- typically a different verified domain (BUG-13). Treating them
-            # as removals is what made Admin-PAW-* and the engine's own account look
-            # disposable.
+            # 🔴 71.22 -- A REPORT, AND ONLY A REPORT (operator, 2026-09-16: "i dont like flow 3
+            # and that should be removed"). These are live admin accounts the desired set does not
+            # contain. Seeing them is useful; acting on them is not, because "absent from the
+            # desired set" and "half the desired set failed to load" look exactly the same here.
             Write-Host ("[engine] {0}: {1} UNMANAGED admin account(s) are NOT in the desired set: {2}" -f `
                 $Scope, @($sel.unmanaged).Count, (($sel.unmanaged) -join ', ')) -ForegroundColor Yellow
-            Write-Host ("[engine] {0}: the desired set is AUTHORITATIVE (MSP model) -- an admin who has left is SUPPOSED to be deprovisioned here, so these remain removable, subject to the disable opt-in, the circuit breaker and the G4 budget. Set `$global:PIM_RemoveUnmanagedAdmins=`$false for report-only." -f $Scope) -ForegroundColor Yellow
+            Write-Host ("[engine] {0}: REPORT ONLY -- PIM never disables an account because it is absent from the desired set. To disable one of these, say so on its row (AccountStatus=Disabled, or an AutoDisableDate in the past); to stop seeing it, add it to the definitions." -f $Scope) -ForegroundColor Yellow
         }
         $diff = [pscustomobject]@{ create = @($diff.create); update = @($diff.update); remove = @($sel.remove); nochange = @($diff.nochange) }
     }

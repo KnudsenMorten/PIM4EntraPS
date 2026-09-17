@@ -166,10 +166,8 @@ function Get-PimDownlinkJobEnv {
         # cannot pick an identity on its own -- so without this the container gets NO token and
         # presents no credential to SQL.
         [string]$ManagedIdentityClientId,
-        # BUG-84: fallback TAP delivery address for synced admins. Not a secret -- an address --
-        # so it travels as a plain env value. Absent => the AdminTap guard still refuses, which is
-        # the correct behaviour and not a silent downgrade.
-        [string]$DefaultManagerEmail,
+        # (71.19: -DefaultManagerEmail / PIM_DefaultManagerEmail removed -- the recipient is the admin's sponsor
+        # department's owners, resolved inside the managed tenant from the replicated department rows.)
         # IMP-13 / operator ruling 2026-09-03: the managed tenant's admin naming prefixes.
         # 🔴 The recognisability guard (Select-PimUnrecognisableAdmins) is PURE and correct, and the
         # scheduled Job never passed this -- so it evaluated `checked = $false` on EVERY production
@@ -177,7 +175,13 @@ function Get-PimDownlinkJobEnv {
         # a clean bill of health. The guard existed and was never ARMED on the path that actually
         # runs: the BUG-29 shape verbatim.
         # A naming convention is not a secret, so it travels as a plain env value.
-        [AllowEmptyCollection()][string[]]$SlaveAdminPrefixes = @()
+        [AllowEmptyCollection()][string[]]$SlaveAdminPrefixes = @(),
+        # 71.14: the explicit, default-OFF retraction opt-in. Emitted ONLY when ON, as the exact value the entry
+        # accepts ('true'); absent means report-only.
+        [switch]$AllowRetraction,
+        # 71.35 TRUST ANCHOR: the master signing key ids this tenant pins (RFC 7638 thumbprints, comma-separated in one env
+        # value). Identifiers, not secrets. Absent => only bundles signed by the product's embedded certificate verify.
+        [AllowEmptyCollection()][string[]]$BaselineTrustedKeys = @()
     )
     $placement = Get-PimDownlinkJobPlacement -Scenario $Scenario
     $ev = New-Object System.Collections.Generic.List[string]
@@ -217,12 +221,37 @@ function Get-PimDownlinkJobEnv {
     if ("$BaselineUrlSecretRef".Trim()) { $ev.Add("PIM_BaselineUrl=secretref:$BaselineUrlSecretRef") | Out-Null }
     # BUG-76: name the identity the IDENTITY_ENDPOINT call must ask for. Not a secret -- a client id.
     if ("$ManagedIdentityClientId".Trim()) { $ev.Add("PIM_ManagedIdentityClientId=$ManagedIdentityClientId") | Out-Null }
-    # BUG-84: Invoke-PimScenarioRun defaults -DefaultManagerEmail from this env var.
-    if ("$DefaultManagerEmail".Trim()) { $ev.Add("PIM_DefaultManagerEmail=$DefaultManagerEmail") | Out-Null }
     # IMP-13: comma-separated, because an ACA env value is a single string.
     $__pref = @(@($SlaveAdminPrefixes) | ForEach-Object { "$_".Trim() } | Where-Object { $_ })
     if ($__pref.Count) { $ev.Add("PIM_SlaveAdminPrefixes=$($__pref -join ',')") | Out-Null }
+    if ($AllowRetraction) { $ev.Add('PIM_DOWNLINK_ALLOW_RETRACTION=true') | Out-Null }
+    $__pins = @(@($BaselineTrustedKeys) | ForEach-Object { "$_" -split '[,;\s]+' } | ForEach-Object { "$_".Trim() } | Where-Object { $_ -cmatch '^[A-Za-z0-9_-]{43}$' } | Select-Object -Unique)
+    if ($__pins.Count) { $ev.Add("PIM_BaselineTrustedKeys=$($__pins -join ',')") | Out-Null }
     return @($ev.ToArray())
+}
+
+# ---------------------------------------------------------------------------
+# 71.14 -- THE PULL JOB'S RETRACTION OPT-IN (pure). The scheduled downlink is report-first: a row that no longer
+# reaches this tenant is logged "WOULD REMOVE" and kept. An operator who wants the pull to withdraw such rows sets
+# PIM_DOWNLINK_ALLOW_RETRACTION=true on the job (Deploy-PimDownlinkJob -AllowRetraction), and the entry passes
+# -AllowRetraction down the runner chain, where the removal budget (PIM_RemoveMaxCount) still caps every apply.
+# 🔒 FAIL CLOSED: only an explicit true ('true' / '1' / 'yes' / 'on', any case) turns it on. Anything else --
+# absent, blank, 'false', a typo such as 'ture' -- is OFF, and a non-blank unrecognised value is reported so a typo
+# is visible rather than silently meaning "off". A destructive opt-in must never be inferred.
+# Returns @{ allow = [bool]; recognised = [bool]; reason = [string] }.
+# ---------------------------------------------------------------------------
+function Resolve-PimDownlinkRetractionOptIn {
+    param([AllowNull()][AllowEmptyString()][string]$Value)
+    $v = "$Value".Trim()
+    if (-not $v) { return @{ allow = $false; recognised = $true; reason = 'retraction: report-only (PIM_DOWNLINK_ALLOW_RETRACTION not set)' } }
+    $lv = $v.ToLowerInvariant()
+    if (@('true','1','yes','on') -contains $lv) {
+        return @{ allow = $true; recognised = $true; reason = "retraction: ALLOWED (PIM_DOWNLINK_ALLOW_RETRACTION=$v) -- rows that no longer reach this tenant are removed, within the removal budget" }
+    }
+    if (@('false','0','no','off') -contains $lv) {
+        return @{ allow = $false; recognised = $true; reason = "retraction: report-only (PIM_DOWNLINK_ALLOW_RETRACTION=$v)" }
+    }
+    return @{ allow = $false; recognised = $false; reason = "retraction: report-only -- PIM_DOWNLINK_ALLOW_RETRACTION='$v' is not a recognised value (use true to allow); treated as OFF" }
 }
 
 # ---------------------------------------------------------------------------
@@ -541,12 +570,25 @@ function Get-PimDownlinkJobDeployPlan {
         [string]$BaselineSasUrl,
         # BUG-76: client id of the user-assigned MI the container runs as.
         [string]$ManagedIdentityClientId,
-        # BUG-84: fallback TAP delivery address for synced admins (plain value, not a secret).
-        [string]$DefaultManagerEmail,
+        # (71.19: -DefaultManagerEmail removed; see Get-PimDownlinkJobEnv.)
         # IMP-13: forwarded to the env builder so the recognisability guard is armed on every
         # scheduled run. Without this hop the parameter stops here and the Job never learns it.
-        [AllowEmptyCollection()][string[]]$SlaveAdminPrefixes = @()
+        [AllowEmptyCollection()][string[]]$SlaveAdminPrefixes = @(),
+        # §71.10 (2026-09-15, found live on RIDE) -- THE ENGINE RUNS AS THE JOB'S OWN SYSTEM IDENTITY, like
+        # ca-pim-tick. The user-assigned MI stays attached ONLY to pull the first image (BUG-71); the
+        # SYSTEM identity is what gets the Graph app-roles and the SQL admin group membership. That is
+        # the tick's proven shape, and the only no-secret shape: a user-assigned MI named by
+        # PIM_ManagedIdentityClientId holds no Graph roles, so the pull could never resolve the slave's
+        # domain or apply anything, and the only alternative was an engine client SECRET.
+        # 🔒 With -SystemAssigned the MI client id is NEVER emitted: naming the user-assigned identity
+        # would make every token call pick it again, which is exactly the broken shape.
+        [switch]$SystemAssigned,
+        # 71.14: default OFF; ON emits PIM_DOWNLINK_ALLOW_RETRACTION=true for the entry.
+        [switch]$AllowRetraction,
+        # 71.35: the pinned master signing key ids (forwarded to the env builder).
+        [AllowEmptyCollection()][string[]]$BaselineTrustedKeys = @()
     )
+    if ($SystemAssigned) { $ManagedIdentityClientId = '' }
     $placement = Get-PimDownlinkJobPlacement -Scenario $Scenario
     # 🔒 BUG-73: when the baseline URL carries a SAS it must NOT reach the command line -- the job
     # definition is readable by anyone with Reader on the RG, and a SAS there is a standing
@@ -568,13 +610,17 @@ function Get-PimDownlinkJobDeployPlan {
     $command = Get-PimDownlinkJobCommand -EntryPath $EntryPath -Scenario $Scenario -TenantId $TenantId -SlaveRing $SlaveRing -BaselineUrl $cmdBaselineUrl -BaselineDocPath $BaselineDocPath
     $envVars = Get-PimDownlinkJobEnv -Scenario $Scenario -TenantId $TenantId -SqlServerFqdn $SqlServerFqdn -SqlDatabase $SqlDatabase -SyncRootCentral $SyncRootCentral -SyncRootLocal $SyncRootLocal `
         -EngineClientId $EngineClientId -EngineSecretRef $engineSecretRef -BaselineUrlSecretRef $baselineUrlRef `
-        -ManagedIdentityClientId $ManagedIdentityClientId -DefaultManagerEmail $DefaultManagerEmail `
-        -SlaveAdminPrefixes $SlaveAdminPrefixes
+        -ManagedIdentityClientId $ManagedIdentityClientId `
+        -SlaveAdminPrefixes $SlaveAdminPrefixes -AllowRetraction:$AllowRetraction -BaselineTrustedKeys $BaselineTrustedKeys
     $action = if ($Exists) { 'update' } else { 'create' }
     $jobArgs = Build-PimDownlinkJobArgs -Action $action -JobName $JobName -ResourceGroup $ResourceGroup `
         -EnvName $EnvName -Image $Image -AcrServer $AcrServer -Cron $Cron `
         -Command $command -EnvVars $envVars -IdentityResourceId $IdentityResourceId -RegistryIdentity $RegistryIdentity `
-        -YamlPath $YamlPath -Location $Location -EnvironmentId $EnvironmentId -Secrets @($secrets.ToArray())
+        -SystemAssigned:$SystemAssigned -YamlPath $YamlPath -Location $Location -EnvironmentId $EnvironmentId -Secrets @($secrets.ToArray())
+    $engineIdentity = if ("$EngineClientId".Trim() -and "$EngineClientSecret".Trim()) { 'engine-spn-secret' }
+                      elseif ($SystemAssigned) { 'system-managed-identity' }
+                      elseif ("$ManagedIdentityClientId".Trim()) { 'user-assigned-managed-identity' }
+                      else { 'default-managed-identity' }
     return @{
         ok        = [bool]$jobArgs.ok
         reason    = "$($placement.reason); $($jobArgs.reason)"
@@ -585,6 +631,8 @@ function Get-PimDownlinkJobDeployPlan {
         jobArgs   = $jobArgs
         exists    = [bool]$Exists
         action    = $action
+        engineIdentity = $engineIdentity
+        allowRetraction = [bool]$AllowRetraction
     }
 }
 
@@ -616,13 +664,16 @@ function Get-PimDownlinkJobExecutionVerdict {
     $synced  = ($log -match '(?i)(staged files:|sync files:)')
     $applied = ($log -match '(?i)(engine-apply|DOWNLINK APPLIED|SCENARIO RUN)')
     $verified = ($ran -and $succeeded -and $pulled -and $synced -and $applied)
+    # 71.13: a HELD execution succeeded -- and still needs an operator's approval, which the verdict must say.
+    $held = ($log -match '(?i)downlink JOB HELD')
     $reason =
         if (-not $ran) { 'NO execution found -- the job exists but has never run (deploy != run)' }
         elseif (-not $succeeded) { "last execution status='$st' (not Succeeded)" }
         elseif (-not ($pulled -and $synced -and $applied)) { "execution Succeeded but log lacks downlink evidence (pulled=$pulled synced=$synced applied=$applied)" }
+        elseif ($held) { "VERIFIED, HELD: the execution pulled + synced + applied the downlink, and a policy change set NEEDS APPROVAL (status=$st)" }
         else { "VERIFIED: a real execution pulled + synced + applied the downlink (status=$st)" }
     return @{
         ran = $ran; succeeded = $succeeded; pulled = [bool]$pulled; synced = [bool]$synced; applied = [bool]$applied
-        verified = [bool]$verified; reason = $reason
+        verified = [bool]$verified; held = [bool]$held; reason = $reason
     }
 }

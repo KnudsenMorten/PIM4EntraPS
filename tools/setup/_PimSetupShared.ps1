@@ -140,15 +140,23 @@ function Grant-PimMiSql {
         [Parameter(Mandatory)][string]$SqlServerFqdn,
         [Parameter(Mandatory)][string]$SqlDatabase,
         [Parameter(Mandatory)][string]$TenantId,
-        [Parameter(Mandatory)][string]$SqlAdminClientId,
+        [string]$SqlAdminClientId,
         # ONE of these. Secret was Mandatory, which made a CLIENT SECRET structurally required to
         # deploy -- against the repo-root rule ("authenticate as its SPN using a CERTIFICATE, never
         # a client secret") and impossible to satisfy in a tenant whose admin SPN is cert-only.
         # Get-PimRestToken has supported -CertThumbprint all along; only this signature forced the
         # secret. Added 2026-08-09 while deploying PIM §34.
         [string]$SqlAdminClientSecret,
-        [string]$SqlAdminCertThumbprint
+        [string]$SqlAdminCertThumbprint,
+        # 71.33: connect as the SIGNED-IN az user (a member of the SQL admin group) instead of an admin application.
+        [switch]$UseSignedInAccount
     )
+    if ($UseSignedInAccount) {
+        if ("$SqlAdminClientId".Trim() -or $SqlAdminClientSecret -or $SqlAdminCertThumbprint) { throw 'Grant-PimMiSql: -UseSignedInAccount cannot be combined with -SqlAdminClientId/-SqlAdminClientSecret/-SqlAdminCertThumbprint.' }
+        if (-not (Get-Command Connect-PimSignedInSql -ErrorAction SilentlyContinue)) { . (Join-Path $PSScriptRoot '_PimSignedIn.ps1') }
+        [void](Connect-PimSignedInSql -TenantId $TenantId)   # clears every application identity, asserts a user token for -TenantId
+    } else {
+    if (-not "$SqlAdminClientId".Trim()) { throw 'Grant-PimMiSql: -SqlAdminClientId (with -SqlAdminCertThumbprint) or -UseSignedInAccount is required.' }
     if ($SqlAdminClientSecret -and $SqlAdminCertThumbprint) { throw 'Grant-PimMiSql: pass EITHER -SqlAdminClientSecret OR -SqlAdminCertThumbprint, not both.' }
     if (-not $SqlAdminClientSecret -and -not $SqlAdminCertThumbprint) { throw 'Grant-PimMiSql: one of -SqlAdminClientSecret / -SqlAdminCertThumbprint is required.' }
     $global:PIM_TenantId = $TenantId
@@ -163,6 +171,7 @@ function Grant-PimMiSql {
     } else {
         $global:PIM_ClientSecret   = $SqlAdminClientSecret
         $global:PIM_SqlAccessToken = Get-PimRestToken -Resource 'https://database.windows.net' -ClientId $SqlAdminClientId -ClientSecret $SqlAdminClientSecret -Force
+    }
     }
     $sid = ConvertTo-PimSqlSidFromAppId -AppId $MiAppId
     $cs  = "Server=tcp:$SqlServerFqdn,1433;Database=$SqlDatabase;Encrypt=True;TrustServerCertificate=False;Connection Timeout=30"
@@ -443,7 +452,11 @@ function Grant-PimMiGraph {
 
     $failed = [System.Collections.Generic.List[string]]::new()
     $granted = 0
-    foreach ($r in $script:PimGraphAppRoles.GetEnumerator()) {
+    # 🔴 71.18 (found 2026-09-15 auditing the Friday build) -- THE LOOPS BELOW ITERATED $script:PimGraphAppRoles, THE ENGINE
+    # MAP, WHATEVER -RoleSet SAID. $roles was resolved and printed ("role set: Manager (15)") and then never used, so a
+    # deploy handed the read-only Manager identity every ReadWrite/Remove role in the engine set -- the widening §65.4
+    # exists to prevent, invisible because nothing fails. Every loop now uses the requested set.
+    foreach ($r in $roles.GetEnumerator()) {
         if ("$($r.Value)" -in $have) { continue }   # already assigned -- nothing to do
         try {
             Invoke-RestMethod -Method POST -Headers $gh -Uri $assignUri `
@@ -462,12 +475,12 @@ function Grant-PimMiGraph {
         # said. Only a role that is STILL absent is a real failure.
         $now = Get-PimAssignedRoleIds -Headers $gh -Uri $assignUri
         if ($null -ne $now) {
-            $stillMissing = @($script:PimGraphAppRoles.GetEnumerator() | Where-Object { "$($_.Value)" -notin $now })
+            $stillMissing = @($roles.GetEnumerator() | Where-Object { "$($_.Value)" -notin $now })
             if (-not $stillMissing.Count) {
-                Write-Host "    all $($script:PimGraphAppRoles.Count) Graph app-roles present (POST errors were duplicates)" -ForegroundColor DarkGray
+                Write-Host "    all $($roles.Count) Graph app-roles present (POST errors were duplicates)" -ForegroundColor DarkGray
                 return
             }
-            throw ("Grant-PimMiGraph: $($stillMissing.Count) of $($script:PimGraphAppRoles.Count) Graph app-roles are " +
+            throw ("Grant-PimMiGraph: $($stillMissing.Count) of $($roles.Count) Graph app-roles are " +
                    "MISSING on identity $MiObjectId after the grant, so it cannot read/write the directory. " +
                    "Missing: " + (($stillMissing | ForEach-Object { $_.Key }) -join ', ') + ". " +
                    "The deploying identity needs AppRoleAssignment.ReadWrite.All. Errors: " + ($failed -join ' | '))
