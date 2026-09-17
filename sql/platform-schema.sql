@@ -122,6 +122,14 @@ IF COL_LENGTH('pim.CentralAdmins', 'CreateTap') IS NULL
 IF COL_LENGTH('pim.CentralAdmins', 'Target') IS NULL
     ALTER TABLE pim.CentralAdmins ADD Target NVARCHAR(400) NULL;
 
+-- §71 / framework MSP-4 SURFACE (the replication target contract): Replicate = No | Yes | Follow.
+-- NULL = the documented default, which for a registry row is Yes (the registry holds MSP admins by
+-- construction) -- so every existing row keeps publishing exactly as before. 'No' keeps an admin in
+-- the registry but out of the signed bundle (New-PimBaselineBundle / Select-PimBaselineBundleContent).
+-- Additive only.
+IF COL_LENGTH('pim.CentralAdmins', 'Replicate') IS NULL
+    ALTER TABLE pim.CentralAdmins ADD Replicate NVARCHAR(10) NULL;
+
 -- MSP-2 / control #2: PER-RELATIONSHIP role projection policy.
 --
 -- The downlink reflects a master admin's PIM-group memberships into the managed
@@ -183,11 +191,54 @@ CREATE TABLE platform.AuditEvents (
 -- Select-PimAdminRowsByRing keeps rows where admin.Ring <= PIM_TenantRing,
 -- i.e. a RING-0 admin (Ring=0) deploys EVERYWHERE (0 <= every tenant ring),
 -- a ring-2 admin only reaches tenants whose ring is >= 2 (test tenants).
+--
+-- 🔴 §71.7 (d): THIS VIEW USED TO IGNORE Target AND Tags, so it OVERSTATED reach -- an admin targeted at
+-- 'tag:vip' was listed against every tenant its ring admitted, and the MSP fan-out (S5) reads exactly
+-- this view. It now applies the contract rule: ring AND target AND tags (framework MSP-4 SURFACE item 4):
+--   * Replicate='No' or a 'none' term       -> no tenant
+--   * Target blank / '*' / 'all'            -> every tenant the ring admits (unchanged for existing rows)
+--   * 'tenant:<id>'                         -> that tenant
+--   * 'tag:<key:value>' or a bare tag       -> tenants carrying it (terms are ANY-of)
+--   * 'tag:a+b'                             -> tenants carrying BOTH (ALL-of)
+-- The same grammar Test-PimArtifactTarget evaluates in the downlink, so the registry view and the
+-- signed-bundle plan cannot disagree about who reaches whom.
+-- STRING_SPLIT needs database compatibility level 130+ (Azure SQL / SQL Server 2016+). On an older
+-- level the view falls back to ring + Replicate + 'none' only -- narrower than before, never wider --
+-- rather than failing the whole schema apply and leaving no view at all.
 IF OBJECT_ID('pim.vw_AdminTenantTargets') IS NOT NULL DROP VIEW pim.vw_AdminTenantTargets;
 GO
-CREATE VIEW pim.vw_AdminTenantTargets AS
+IF (SELECT compatibility_level FROM sys.databases WHERE database_id = DB_ID()) >= 130
+EXEC('CREATE VIEW pim.vw_AdminTenantTargets AS
 SELECT a.UserName, a.Upn, a.Ring AS AdminRing, t.TenantId, t.DisplayName AS TenantName, t.Ring AS TenantRing
 FROM pim.CentralAdmins a
 JOIN platform.Tenants t ON a.Ring <= t.Ring
-WHERE a.Enabled = 1 AND t.Enabled = 1;
+WHERE a.Enabled = 1 AND t.Enabled = 1
+  AND ISNULL(LTRIM(RTRIM(a.Replicate)), '''') <> ''No''
+  AND NOT EXISTS (SELECT 1 FROM STRING_SPLIT(REPLACE(ISNULL(a.Target, ''''), '';'', '',''), '','') n
+                  WHERE LTRIM(RTRIM(n.value)) = ''none'')
+  AND ( LTRIM(RTRIM(ISNULL(a.Target, ''''))) = ''''
+        OR EXISTS (
+            SELECT 1 FROM STRING_SPLIT(REPLACE(a.Target, '';'', '',''), '','') term
+            WHERE LTRIM(RTRIM(term.value)) IN (''*'', ''all'')
+               OR LTRIM(RTRIM(term.value)) = ''tenant:'' + CONVERT(nvarchar(50), t.TenantId)
+               OR ( LTRIM(RTRIM(term.value)) <> ''''
+                    AND LTRIM(RTRIM(term.value)) NOT LIKE ''tenant:%''
+                    AND LTRIM(RTRIM(term.value)) NOT IN (''*'', ''all'', ''none'')
+                    AND NOT EXISTS (
+                        SELECT 1 FROM STRING_SPLIT(CASE WHEN LTRIM(RTRIM(term.value)) LIKE ''tag:%''
+                                                        THEN SUBSTRING(LTRIM(RTRIM(term.value)), 5, 400)
+                                                        ELSE LTRIM(RTRIM(term.value)) END, ''+'') part
+                        WHERE NOT EXISTS (
+                            SELECT 1 FROM STRING_SPLIT(REPLACE(ISNULL(t.Tags, ''''), '';'', '',''), '','') tt
+                            WHERE LTRIM(RTRIM(tt.value)) <> '''' AND LTRIM(RTRIM(tt.value)) = LTRIM(RTRIM(part.value))))))
+      )')
+ELSE
+EXEC('CREATE VIEW pim.vw_AdminTenantTargets AS
+SELECT a.UserName, a.Upn, a.Ring AS AdminRing, t.TenantId, t.DisplayName AS TenantName, t.Ring AS TenantRing
+FROM pim.CentralAdmins a
+JOIN platform.Tenants t ON a.Ring <= t.Ring
+WHERE a.Enabled = 1 AND t.Enabled = 1
+  AND ISNULL(LTRIM(RTRIM(a.Replicate)), '''') <> ''No''
+  AND '','' + REPLACE(REPLACE(ISNULL(a.Target, ''''), '' '', ''''), '';'', '','') + '','' NOT LIKE ''%,none,%''
+  AND LTRIM(RTRIM(ISNULL(a.Target, ''''))) IN ('''', ''*'', ''all'')');
 GO

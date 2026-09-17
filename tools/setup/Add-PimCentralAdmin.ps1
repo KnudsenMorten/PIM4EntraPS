@@ -24,10 +24,10 @@
     📌 IT ALSO ADDS THE OPTIONAL COLUMNS THE BUNDLE ALREADY EXPECTS. `New-PimBaselineBundle.ps1`
     selects `Target, CreateTap, TapLifetimeHours, ManagerEmail` and falls back with
     "(no CreateTap/TapLifetimeHours/ManagerEmail in pim.CentralAdmins -- the downlink will apply
-    its own default)" when they are absent. Absent ManagerEmail means every synced admin relies on
-    a single -DefaultManagerEmail, and without even that the engine refuses to mint their TAP
-    ("REFUSING to issue a TAP that cannot be delivered"). Per-admin delivery needs the column, so
-    this creates it when missing -- additive only, never destructive.
+    its own default)" when they are absent. 📌 71.19: ManagerEmail is LEGACY -- an admin's mail and TAP go to its
+    SPONSOR DEPARTMENT's owners (Account-Definitions-Admins.Department -> PIM-Definitions-Departments.Owners), which is
+    what survives an org change. The column is still created and read so existing data keeps working; prefer giving the
+    admin a Department. Additive only, never destructive.
 
 .PARAMETER Initials
     The owner token the convention renders (e.g. 'thpo'). The account name is derived from it.
@@ -142,6 +142,9 @@ Step "admin '$userName'  ring=$Ring  purpose=$Purpose  tap->$ManagerEmail"
 if (-not "$ManagerEmail".Trim()) {
     Warn 'no -ManagerEmail: the engine will REFUSE to mint this admin a TAP rather than mint one nobody receives.'
 }
+# 71.17 TAP IS ON FOR ALL (operator 2026-09-15): -CreateTap:$false is accepted for compatibility and NOT stored.
+if (-not $CreateTap) { Warn '-CreateTap:$false has no effect -- a TAP is enforced for every Entra admin; stored as 1.' }
+$CreateTap = $true
 
 # --- 3) upsert ---------------------------------------------------------------------------
 function Esc($s) { "$s".Replace("'","''") }

@@ -289,6 +289,15 @@ $engineHandler = {
     # Invoke-PimEngineScope sets ok=($errors -eq 0), so both land here -- but the message must
     # say which, or the next reader debugs the wrong thing.
     $bad = @(@($res) | Where-Object { $_ -and $_.PSObject.Properties['ok'] -and -not $_.ok })
+    # 71.13 -- a run whose ONLY errors are policy mass-change HOLDS is 'held' (needs approval), not failed.
+    # A real item failure or an unbound scope in the same run still falls through to the throw below.
+    $outcome = $null
+    if ($bad.Count -and (Get-Command Get-PimEngineRunOutcome -ErrorAction SilentlyContinue)) { $outcome = Get-PimEngineRunOutcome -Results @($res) }
+    if ($outcome -and $outcome.outcome -eq 'held') {
+        $sumH = @($res) | ForEach-Object { "$($_.scope):c$($_.create)/u$($_.update)/r$($_.remove)" }
+        return [pscustomobject]@{ ran=$true; held=$true; heldCount=[int]$outcome.heldCount; holds=@($outcome.holds)
+            detail=("engine $mode [$scope] " + ($sumH -join ' ') + " -- NEEDS APPROVAL: " + $outcome.detail); whatIf=[bool]$whatIf }
+    }
     if ($bad.Count) {
         $unbound = @($bad | Where-Object { "$($_.detail)" -match 'no provider for scope' })
         $failed  = @($bad | Where-Object { [int]$_.errors -gt 0 })

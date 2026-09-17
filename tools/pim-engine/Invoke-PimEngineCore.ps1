@@ -213,7 +213,16 @@ if (-not $FromQueue) {
 
 $tot = [pscustomobject]@{ kind='pim-engine-summary'; scope=$Scope; mode=$Mode; whatIf=[bool]$WhatIf; create=0; update=0; remove=0; applied=0; skipped=0; errors=0; perScope=@($res) }
 foreach ($r in @($res)) { $tot.create+=$r.create; $tot.update+=$r.update; $tot.remove+=$r.remove; $tot.applied+=$r.applied; $tot.skipped+=([int]$r.skipped); $tot.errors+=$r.errors }
-Write-Host ("==> Done. create={0} update={1} remove={2} applied={3} skipped={4} errors={5}" -f $tot.create,$tot.update,$tot.remove,$tot.applied,$tot.skipped,$tot.errors) -ForegroundColor $(if ($tot.errors) {'Yellow'} else {'Green'})
+# 71.13: approval HOLDS (policy mass-change breaker) are counted apart from real errors, so a caller can tell
+# "needs approval" from "failed". errors keeps its meaning (every item that did not apply, holds included).
+$__outcome = if (Get-Command Get-PimEngineRunOutcome -ErrorAction SilentlyContinue) { Get-PimEngineRunOutcome -Results @($res) } else { $null }
+$__heldItems = 0
+foreach ($r in @($res)) { if ($r.PSObject.Properties['failures'] -and (Get-Command Test-PimEngineFailureIsApprovalHold -ErrorAction SilentlyContinue)) { $__heldItems += @(@($r.failures) | Where-Object { Test-PimEngineFailureIsApprovalHold $_ }).Count } }
+$tot | Add-Member -NotePropertyName held -NotePropertyValue ([int]$__heldItems)
+$tot | Add-Member -NotePropertyName outcome -NotePropertyValue $(if ($__outcome) { "$($__outcome.outcome)" } elseif ($tot.errors) { 'failed' } else { 'ok' })
+$tot | Add-Member -NotePropertyName heldDetail -NotePropertyValue $(if ($__outcome) { "$($__outcome.detail)" } else { '' })
+Write-Host ("==> Done. create={0} update={1} remove={2} applied={3} skipped={4} errors={5}{6}" -f $tot.create,$tot.update,$tot.remove,$tot.applied,$tot.skipped,$tot.errors,$(if ($tot.held) { " (held for approval=$($tot.held))" } else { '' })) -ForegroundColor $(if ($tot.errors) {'Yellow'} else {'Green'})
+if ($tot.outcome -eq 'held') { Write-Host "    NEEDS APPROVAL: $($tot.heldDetail)" -ForegroundColor Yellow }
 Write-Host "    Log    : $logFile"
 if ($script:__transcript) { try { Stop-Transcript | Out-Null } catch {} }
 # Emit the structured run summary to the pipeline so callers (e.g. the scenario-bound
@@ -221,4 +230,5 @@ if ($script:__transcript) { try { Stop-Transcript | Out-Null } catch {} }
 # capture the REAL create/update/remove counts -- a second pass asserting zero changes
 # needs these numbers, not just a Write-Host. Tagged kind='pim-engine-summary'.
 $tot
-if ($tot.errors) { exit 1 }
+# 71.13: a run held ONLY for approval is not a failed run.
+if ($tot.errors -and $tot.outcome -ne 'held') { exit 1 }

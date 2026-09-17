@@ -46,9 +46,11 @@ param(
     [Parameter(Mandatory)][string]$TenantId,
     [Parameter(Mandatory)][string]$SqlServerFqdn,
     [string]$SqlDatabase = 'PimPlatform',
-    [Parameter(Mandatory)][string]$AdminAppId,
+    [string]$AdminAppId,
     [string]$AdminSecret,
     [string]$AdminCertThumbprint,
+    # 71.33: reach the store as the SIGNED-IN az user (a member of the SQL admin group) instead of -AdminAppId.
+    [switch]$UseSignedInAccount,
     [Parameter(Mandatory)][string]$AccessJson,
     [switch]$Replace,
     [switch]$AllowNoSuperAdmin,
@@ -89,13 +91,20 @@ foreach ($e in $incoming) {
 Note ("input: " + (($incoming | ForEach-Object { "$($_.identity)=$($_.role)" }) -join ', ')) 'DarkGray'
 
 # --- connect ----------------------------------------------------------------
-$global:PIM_TenantId    = $TenantId
-$global:PIM_ClientId    = $AdminAppId
 $global:PIM_SqlServer   = $SqlServerFqdn
 $global:PIM_SqlDatabase = $SqlDatabase
+if ($UseSignedInAccount) {
+    if ("$AdminAppId".Trim() -or "$AdminSecret".Trim() -or "$AdminCertThumbprint".Trim()) { Fail '-UseSignedInAccount cannot be combined with -AdminAppId/-AdminSecret/-AdminCertThumbprint' }
+    . (Join-Path $here '_PimSignedIn.ps1')
+    try { $who = Connect-PimSignedInSql -TenantId $TenantId; Note "store identity: signed-in user $($who.userName)" 'DarkGray' } catch { Fail "$($_.Exception.Message)" }
+} else {
+$global:PIM_TenantId    = $TenantId
+$global:PIM_ClientId    = $AdminAppId
 if ("$AdminSecret".Trim())         { $global:PIM_ClientSecret   = $AdminSecret }
 if ("$AdminCertThumbprint".Trim()) { $global:PIM_CertThumbprint = $AdminCertThumbprint }
+if (-not "$AdminAppId".Trim()) { Fail 'supply -AdminAppId with -AdminCertThumbprint, or -UseSignedInAccount' }
 if (-not "$AdminSecret".Trim() -and -not "$AdminCertThumbprint".Trim()) { Fail 'supply -AdminSecret or -AdminCertThumbprint' }
+}
 try { $cs = Get-PimSqlConnectionString -Server $SqlServerFqdn -Database $SqlDatabase }
 catch { Fail "could not build a connection string: $($_.Exception.Message)" }
 

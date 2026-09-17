@@ -52,9 +52,11 @@ param(
     [Parameter(Mandatory)][string]$SqlServerFqdn,
     [string]$SqlDatabase = 'PimPlatform',
     # Identity used to reach the store. The onboarding SPN is the SQL server's Entra admin.
-    [Parameter(Mandatory)][string]$AdminAppId,
+    [string]$AdminAppId,
     [string]$AdminSecret,
     [string]$AdminCertThumbprint,
+    # 71.33: reach the store as the SIGNED-IN az user (a member of the SQL admin group) instead of -AdminAppId.
+    [switch]$UseSignedInAccount,
     [string[]]$Gates   = @('scheduler.jobs','alerting.email','msp.downlink'),
     [string[]]$Disable = @(),
     [string]$OutFile
@@ -85,13 +87,26 @@ Write-Host ("=" * 78) -ForegroundColor Cyan
 # An EXPLICIT credential must beat ambient managed identity: mgmt1 has an MI of its own, and an MI
 # can only mint tokens for ITS OWN tenant, so an ambient token authenticates successfully against
 # the WRONG directory (BUG-34) and Azure SQL then reports it as a permissions problem.
-$global:PIM_TenantId    = $TenantId
-$global:PIM_ClientId    = $AdminAppId
 $global:PIM_SqlServer   = $SqlServerFqdn
 $global:PIM_SqlDatabase = $SqlDatabase
+if ($UseSignedInAccount) {
+    try {
+        if ("$AdminAppId".Trim() -or "$AdminSecret".Trim() -or "$AdminCertThumbprint".Trim()) { throw '-UseSignedInAccount cannot be combined with -AdminAppId/-AdminSecret/-AdminCertThumbprint' }
+        . (Join-Path $here '_PimSignedIn.ps1')
+        $who = Connect-PimSignedInSql -TenantId $TenantId
+        Note "store identity: signed-in user $($who.userName)" 'DarkGray'
+    } catch { $result.reason = "$($_.Exception.Message)"; Write-ResultFile; Write-Host "RESULT: FAILED -- $($result.reason)" -ForegroundColor Red; exit 1 }
+} else {
+$global:PIM_TenantId    = $TenantId
+$global:PIM_ClientId    = $AdminAppId
 if ("$AdminSecret".Trim())         { $global:PIM_ClientSecret   = $AdminSecret }
 if ("$AdminCertThumbprint".Trim()) { $global:PIM_CertThumbprint = $AdminCertThumbprint }
-if (-not "$AdminSecret".Trim() -and -not "$AdminCertThumbprint".Trim()) {
+if (-not "$AdminAppId".Trim()) {
+    $result.reason = 'no -AdminAppId (and no -UseSignedInAccount)'
+    Write-ResultFile; Write-Host "RESULT: FAILED -- supply -AdminAppId with -AdminCertThumbprint, or -UseSignedInAccount" -ForegroundColor Red; exit 1
+}
+}
+if (-not $UseSignedInAccount -and -not "$AdminSecret".Trim() -and -not "$AdminCertThumbprint".Trim()) {
     $result.reason = 'no -AdminSecret and no -AdminCertThumbprint'
     Write-ResultFile; Write-Host "RESULT: FAILED -- supply -AdminSecret or -AdminCertThumbprint" -ForegroundColor Red; exit 1
 }

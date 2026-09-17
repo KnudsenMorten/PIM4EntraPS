@@ -136,9 +136,9 @@ deployment is a supported choice) and no credentials lying around.
   would let the provider write into your tenant or let your data leave it.
 - **Signed baseline with an instant kill-switch.** ✅ 2026-06-15 The baseline you receive is
   cryptographically signed; your environment verifies the signature before applying anything,
-  so a tampered or forged baseline is rejected. If a signing key is ever compromised, the
-  provider **revokes it** and your environment immediately stops trusting anything signed by
-  it. A separately **signed central-kill instruction** lets an authorized owner disable or
+  so a tampered or forged baseline is rejected. If a signing key is ever compromised, it is
+  removed from the keys your tenant trusts and your environment refuses anything signed by it
+  from the next pull. A separately **signed central-kill instruction** lets an authorized owner disable or
   revoke a specific privileged account across every managed tenant at once — applied locally
   by your own engine through the same audited, authorized path as any other change (never a
   back-door write from outside).
@@ -146,11 +146,77 @@ deployment is a supported choice) and no credentials lying around.
   the managing (master) tenant, an admin is synced to managed tenants only when its own record
   is marked as MSP-managed, optionally narrowed to tenants carrying particular tags; every other
   admin stays local. Managed tenants keep their own local admins separately, and a synced admin
-  is governed by the master — including its status and offboarding date, which flow down with
+  is governed by the master — including its status and its auto-disable date, which flow down with
   it. Admins that are not synced are reported with the reason.
+- **A permission delegation can be given its own activation policy.** ✅ 2026-09-16 When you create a
+  permission group — for Entra ID or for an Azure resource — you choose the activation policy it uses,
+  including one that makes activation need **approval**. The choices are the policy templates *your
+  tenant* has, including any you added or edited yourself, and each is labelled with what it does.
+  **"Use default" is the first choice and changes nothing**, so a group created without touching the
+  field behaves exactly as before.
+- **The delegation table is in the menu, under the name of the job.** ✅ 2026-09-16 Access → *Delegations
+  — edit in a table* opens every existing delegation in one table, so changing an eligibility from 90 to
+  365 days, or switching a delegation to a policy that needs approval, is a couple of clicks. Edits queue
+  in Pending changes and commit like any other change. *All records* remains as the raw view of
+  everything, and the narrowed table says it is narrowed with one click back.
+- **Mail about an administrator goes to their sponsor department's owners.** ✅ 2026-09-16 When PIM sends
+  anything about an administrator account — the new-account notice, the Temporary Access Pass — it goes to
+  the **owners of the department that sponsors that administrator**, all of them, not to a manager recorded
+  on the person. Departments outlive reorganisations and people do not, so the mail keeps arriving when
+  somebody changes job. Two deliberate exceptions: an administrator may carry an explicit forwarding
+  address, which always wins because it is a decision written on that record; and a manager address on an
+  older record still works so existing data keeps running, but it is reported as legacy everywhere it is
+  used, so you can move it to the department. If none of those resolves, PIM **refuses to send** and tells
+  you exactly what to set — the administrator's department, or that department's owners — rather than
+  quietly mailing nobody.
+- **Each admin's sponsor department is on the Admin accounts screen.** ✅ 2026-09-16 The department that
+  sponsors an administrator is what decides who approves for them and where their mail — including
+  their Temporary Access Pass — is delivered. It now has its own column, with the department's owners
+  shown on hover, so you can see the whole sponsor chain from the list. Two gaps are called out
+  separately because they are fixed in different places: an administrator with **no department** (fix
+  the administrator) and a department with **no owners** (fix the department). If the owner list could
+  not be read at all, the column says *owners not checked* rather than claiming there are none.
+- **PIM never deletes an account, and never disables one just for being missing.** ✅ 2026-09-16
+  Two things the product deliberately will not do, on any tenant: it **never deletes a user
+  account** — offboarding disables the account, revokes its sessions and removes its privileged
+  access, and the account then stays in your directory, disabled, until a person removes it by
+  hand; and it **never disables an account merely because it is absent from your definitions** — a
+  live administrator account you have not defined is **reported** in every run so you can see it,
+  and switching it off is your decision, made on its record. The date that switches an account off
+  is called **Auto-disable date**, it is shown and editable on the Admin accounts screen, and it
+  does exactly what its name says.
 - **You can always see which mode a tenant runs in.** ✅ 2026-09-13 The Manager header shows the
   tenant's mode (for example single tenant, managing tenant, or managed tenant), so nobody has
   to guess whether a change made here is local or arrives from a managing tenant.
+- **The provider publishes the baseline from its own cloud environment.** ✅ 2026-09-17 A
+  scheduled job in the provider's environment builds and signs the baseline every day (and on demand)
+  with a signing key that never leaves the provider's key vault. It runs as its own managed identity
+  with no certificate, secret or storage key, checks the signature before it uploads and reads the
+  published baseline back the way your tenant will before it reports success. No management server or
+  scheduled task is involved.
+- **Your tenant decides which provider key it trusts.** ✅ 2026-09-17 You configure the
+  identifier of the provider's signing key once; a baseline signed by any other key is refused before
+  anything is applied. Several keys can be trusted at the same time, so the provider can change keys
+  without interrupting you, and you stop trusting a key by removing it from your configuration.
+- **No expiring links, no shared credentials.** ✅ 2026-09-17 Your tenant reads the provider's
+  signed baseline over the network: through a private endpoint when your private network is connected
+  to the provider's (no public access to the file at all), or, when it is not, as an anonymous read of
+  that one file from the networks the provider names. The signature — not the network — is what you
+  rely on, and nothing in that path expires.
+- **A fully private deployment on both sides.** ✅ 2026-09-17 Provider and managed tenant can each
+  run with no public entry point at all: a network-internal application environment, a baseline store
+  reachable only through a private endpoint, and a database that admits only that environment. Each
+  side publishes the name it reaches the other by in its own private DNS, so neither side needs rights
+  in the other's network. During a build the deploying machine gets a time-boxed database window that
+  is closed again when the build finishes.
+- **Deploy with your own administrator sign-in.** ✅ 2026-09-17 Both the provider and a managed
+  tenant can be built with one command while signed in as an administrator, without creating a
+  deployment application or certificate first. The build confirms it is running as a person in the
+  intended tenant and subscription before it changes anything.
+- **The baseline banner says why a baseline is not verified.** ✅ 2026-09-17 The Manager's
+  managed-service view names the key that signed the baseline and, when the baseline is not verified,
+  the reason — an untrusted key reads differently from a tampered or expired one — instead of a bare
+  "not verified".
 - **One shared platform for related tools.** ✅ 2026-06-15 The tenant/application registry is
   shared and **keyed by product**, so companion tooling (such as tenant management) reuses the
   exact same registry, authentication and storage model rather than a separate parallel
@@ -748,9 +814,10 @@ deployment is a supported choice) and no credentials lying around.
   unguarded click. One administrator **raises** an offboard request (with a justification and ticket); a
   **different** administrator **approves** it on the Approvals tab — **nobody can approve their own
   request**; and only then can an administrator **execute** it. Executing runs the **guided offboard
-  sequence** — disable the account, revoke its active access, and **schedule** (never immediately
-  perform) deletion — through the platform's existing account-status path, and the request is **consumed
-  once** so it can never run a second time. The flow **cannot run automatically** and refuses to act on
+  sequence** — disable the account and revoke its active access — through the platform's existing
+  account-status path, and the request is **consumed once** so it can never run a second time.
+  **The account itself is always kept:** PIM never deletes a user account (see *PIM never deletes an
+  account* below), so the sequence ends with a disabled, stripped account that stays in the directory. The flow **cannot run automatically** and refuses to act on
   an **empty** target outright or on a **bulk / multi-account** target without an explicit extra
   confirmation; the platform's mass-change safety brake and the protection for break-glass / emergency
   accounts **still apply and are never overridden** by an approval. *Why it matters:* offboarding is
@@ -1129,10 +1196,10 @@ deployment is a supported choice) and no credentials lying around.
   - **Accounts are created when due** (future provisioning dates are respected), with name, job title,
     company and usage location set and kept in step.
   - **Disabled and revoked admins stay disabled.** An account marked Disabled or Revoked, or past its
-    offboarding date, is disabled — with its sign-in sessions revoked when revoked — and is never
+    auto-disable date, is disabled — with its sign-in sessions revoked when revoked — and is never
     switched back on.
-  - **Offboarding runs on its own schedule**: disable, revoke sessions, remove access, notify, and delete
-    after the retention period, with progress kept so an interrupted run resumes where it stopped.
+  - **Auto-disable runs on its own schedule**: disable, revoke sessions, remove access, notify — and
+    stop, keeping the account. Progress is kept, so an interrupted run resumes where it stopped.
   - **Remove rows revoke.** Marking a delegation for removal revokes it (eligible and active); the row is
     then removed so nothing re-applies it. A removal that is held or fails keeps its row, and bulk
     removals are held for review.

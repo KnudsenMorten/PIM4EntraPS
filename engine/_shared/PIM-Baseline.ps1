@@ -33,23 +33,147 @@ function Get-PimBaselineStateFile {
     Join-Path $dir 'baseline-state.json'
 }
 
+# -----------------------------------------------------------------------------
+# 71.35 -- KEY VAULT SIGNED BUNDLES (the cloud publish job, ca-pim-publish).
+#
+# A bundle published by the master's Container Apps job is signed by an RSA key in the
+# master's Key Vault (non-exportable; RS256 = RSASSA-PKCS1-v1_5 over SHA-256, the SAME
+# primitive the certificate path uses). Such a bundle CARRIES its public key
+# (signingKey = { kty, n, e, kid }), and that is NOT what makes it trusted: the key's
+# RFC 7638 JWK thumbprint must be one this tenant PINS (PIM_BaselineTrustedKeys, a
+# config value given by the slave build -- never fetched from the bundle store). Several
+# keys may be pinned at once, so a key roll is: pin the new id everywhere, then switch.
+# A bundle WITHOUT signingKey is verified exactly as before, against the embedded
+# CN=PIM4EntraPS-Baseline certificate (legacy, still live on EFIF -> RIDE).
+# PS 5.1-safe: RSAParameters import, no ImportFromPem / ImportSubjectPublicKeyInfo.
+# -----------------------------------------------------------------------------
+function ConvertFrom-PimBaselineB64 {
+    # base64 OR base64url, padding optional -> [byte[]]
+    param([Parameter(Mandatory)][AllowEmptyString()][string]$Value)
+    $s = "$Value".Trim().TrimEnd('=').Replace('-', '+').Replace('_', '/')
+    switch ($s.Length % 4) { 2 { $s += '==' } 3 { $s += '=' } 1 { throw "not base64: length $($s.Length)" } }
+    return , ([Convert]::FromBase64String($s))
+}
+
+function ConvertTo-PimBaselineB64Url {
+    param([Parameter(Mandatory)][byte[]]$Bytes)
+    return ([Convert]::ToBase64String($Bytes)).TrimEnd('=').Replace('+', '-').Replace('/', '_')
+}
+
+function Get-PimBaselineUnsignedBytes {
+    # a big-endian unsigned integer without leading zero octets (JWK n/e form, RFC 7518 6.3.1)
+    param([Parameter(Mandatory)][byte[]]$Bytes)
+    $i = 0
+    while ($i -lt ($Bytes.Length - 1) -and $Bytes[$i] -eq 0) { $i++ }
+    if ($i -eq 0) { return , $Bytes }
+    $out = New-Object byte[] ($Bytes.Length - $i)
+    [Array]::Copy($Bytes, $i, $out, 0, $out.Length)
+    return , $out
+}
+
+function Get-PimBaselineKeyId {
+    # RFC 7638 JWK SHA-256 thumbprint of an RSA public key, base64url (43 chars). -N / -E may be base64 or base64url,
+    # with or without leading zero octets: the SAME key always yields the SAME id, whoever printed n and e.
+    param([Parameter(Mandatory)][string]$N, [Parameter(Mandatory)][string]$E)
+    $nB = Get-PimBaselineUnsignedBytes -Bytes (ConvertFrom-PimBaselineB64 -Value $N)
+    $eB = Get-PimBaselineUnsignedBytes -Bytes (ConvertFrom-PimBaselineB64 -Value $E)
+    $json = '{"e":"' + (ConvertTo-PimBaselineB64Url -Bytes $eB) + '","kty":"RSA","n":"' + (ConvertTo-PimBaselineB64Url -Bytes $nB) + '"}'
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    try { $h = $sha.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($json)) } finally { $sha.Dispose() }
+    return (ConvertTo-PimBaselineB64Url -Bytes $h)
+}
+
+function Test-PimBaselineKeyIdFormat {
+    param([string]$KeyId)
+    return [bool]("$KeyId".Trim() -cmatch '^[A-Za-z0-9_-]{43}$')
+}
+
+function Get-PimBaselineTrustedKeyIds {
+    # The signing keys THIS tenant pins. Explicit -TrustedKeyIds wins (an explicit empty list pins nothing); else
+    # $global:PIM_BaselineTrustedKeys; else $env:PIM_BaselineTrustedKeys (the pull job's env, comma-separated).
+    # Anything that is not a 43-char base64url thumbprint is ignored (never widened into "trust anything").
+    param([string[]]$TrustedKeyIds)
+    if ($PSBoundParameters.ContainsKey('TrustedKeyIds')) { $raw = @($TrustedKeyIds) }
+    elseif ("$(@($global:PIM_BaselineTrustedKeys) -join ',')".Trim()) { $raw = @($global:PIM_BaselineTrustedKeys) }
+    else { $raw = @("$($env:PIM_BaselineTrustedKeys)") }
+    $out = New-Object System.Collections.Generic.List[string]
+    foreach ($r in $raw) {
+        foreach ($x in @("$r" -split '[,;\s]+')) {
+            $t = "$x".Trim()
+            if ((Test-PimBaselineKeyIdFormat -KeyId $t) -and -not $out.Contains($t)) { $out.Add($t) }
+        }
+    }
+    return @($out.ToArray())
+}
+
+function New-PimBaselineRsaPublicKey {
+    param([Parameter(Mandatory)][string]$N, [Parameter(Mandatory)][string]$E)
+    $p = New-Object System.Security.Cryptography.RSAParameters
+    $p.Modulus  = Get-PimBaselineUnsignedBytes -Bytes (ConvertFrom-PimBaselineB64 -Value $N)
+    $p.Exponent = Get-PimBaselineUnsignedBytes -Bytes (ConvertFrom-PimBaselineB64 -Value $E)
+    $rsa = [System.Security.Cryptography.RSA]::Create()
+    $rsa.ImportParameters($p)
+    return $rsa
+}
+
+function Test-PimBaselineKeySignature {
+    # Verify a Key Vault signed document: the carried key must be PINNED, then RS256 must verify. Returns the key id.
+    param(
+        [Parameter(Mandatory)][object]$SigningKey,
+        [Parameter(Mandatory)][byte[]]$PayloadBytes,
+        [Parameter(Mandatory)][byte[]]$SignatureBytes,
+        [AllowEmptyCollection()][string[]]$TrustedKeyIds = @()
+    )
+    $get = { param($k) if ($SigningKey -is [System.Collections.IDictionary]) { $SigningKey[$k] } else { $p = $SigningKey.PSObject.Properties[$k]; if ($p) { $p.Value } else { $null } } }
+    $kty = "$(& $get 'kty')".Trim()
+    if ($kty -and $kty -notmatch '^RSA(-HSM)?$') { throw "unsupported signing key type '$kty' (RSA only)" }
+    $n = "$(& $get 'n')".Trim(); $e = "$(& $get 'e')".Trim()
+    if (-not $n -or -not $e) { throw 'signingKey carries no RSA public key (n/e missing)' }
+    $modBytes = Get-PimBaselineUnsignedBytes -Bytes (ConvertFrom-PimBaselineB64 -Value $n)
+    if (($modBytes.Length * 8) -lt 2048) { throw "signing key is $($modBytes.Length * 8) bits -- refused (2048 minimum)" }
+    $id = Get-PimBaselineKeyId -N $n -E $e
+    if (@($TrustedKeyIds) -cnotcontains $id) {
+        throw ("UNTRUSTED SIGNING KEY -- the bundle is signed by key $id, which this tenant does not pin " +
+               "($(@($TrustedKeyIds).Count) key(s) pinned in PIM_BaselineTrustedKeys). A bundle store is not a trust anchor: add the " +
+               "master's key id to this tenant's build config (master.signingKeyIds) if, and only if, the master gave it to you.")
+    }
+    $rsa = New-PimBaselineRsaPublicKey -N $n -E $e
+    try {
+        $ok = $rsa.VerifyData($PayloadBytes, $SignatureBytes, [System.Security.Cryptography.HashAlgorithmName]::SHA256, [System.Security.Cryptography.RSASignaturePadding]::Pkcs1)
+    } catch { $ok = $false }
+    finally { $rsa.Dispose() }
+    if (-not $ok) { throw "SIGNATURE INVALID -- bundle tampered or not signed by the pinned key $id" }
+    return $id
+}
+
 function Test-PimBaselineDoc {
     # Verify the signature + shape of a signed document. Returns the parsed
     # payload object on success; throws on any failure. The SAME crypto verifies
     # any artifact the MSP signs with the baseline key -- the baseline bundle
     # (default) and the central-kill manifest (-AllowedKind 'central-kill', see
-    # PIM-Substrate.ps1). The signer is always the embedded PUBLIC baseline cert.
+    # PIM-Substrate.ps1). Signer: the embedded PUBLIC baseline cert, or (71.35) a
+    # Key Vault key the document carries AND this tenant pins (-TrustedKeyIds, else
+    # $global:/$env:PIM_BaselineTrustedKeys).
     param(
         [Parameter(Mandatory)][object]$Doc,
-        [string[]]$AllowedKind = @('baseline')
+        [string[]]$AllowedKind = @('baseline'),
+        [string[]]$TrustedKeyIds
     )
     if (-not $Doc.payloadB64 -or -not $Doc.signature) { throw "not a signed bundle (payloadB64/signature missing)" }
     $payloadBytes = [Convert]::FromBase64String($Doc.payloadB64)
     $sigBytes     = [Convert]::FromBase64String($Doc.signature)
+    $signingKey = $null
+    if ($Doc -is [System.Collections.IDictionary]) { if ($Doc.Contains('signingKey')) { $signingKey = $Doc['signingKey'] } }
+    else { $skp = $Doc.PSObject.Properties['signingKey']; if ($skp) { $signingKey = $skp.Value } }
+    if ($null -ne $signingKey) {
+        $tk = @{}; if ($PSBoundParameters.ContainsKey('TrustedKeyIds')) { $tk['TrustedKeyIds'] = @($TrustedKeyIds) }
+        $null = Test-PimBaselineKeySignature -SigningKey $signingKey -PayloadBytes $payloadBytes -SignatureBytes $sigBytes -TrustedKeyIds @(Get-PimBaselineTrustedKeyIds @tk)
+    } else {
     $cert = [System.Security.Cryptography.X509Certificates.X509Certificate2]::new([Convert]::FromBase64String($script:PimBaselinePublicCertB64))
     $rsa  = [System.Security.Cryptography.X509Certificates.RSACertificateExtensions]::GetRSAPublicKey($cert)
     $ok   = $rsa.VerifyData($payloadBytes, $sigBytes, [System.Security.Cryptography.HashAlgorithmName]::SHA256, [System.Security.Cryptography.RSASignaturePadding]::Pkcs1)
     if (-not $ok) { throw "SIGNATURE INVALID -- bundle tampered or not signed by the PIM4EntraPS baseline key" }
+    }
     $p = [System.Text.Encoding]::UTF8.GetString($payloadBytes) | ConvertFrom-Json
     if ("$($p.product)" -ne 'PIM4EntraPS') { throw "unexpected bundle product '$($p.product)'" }
     if (@($AllowedKind) -notcontains "$($p.kind)") { throw "unexpected bundle kind '$($p.kind)' (allowed: $($AllowedKind -join ', '))" }

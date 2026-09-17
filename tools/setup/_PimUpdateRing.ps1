@@ -197,6 +197,10 @@ function New-PimSubscriptionArmInvoker {
     try { $tid = "$(([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($p)) | ConvertFrom-Json).tid)".Trim().ToLowerInvariant() } catch { $tid = '' }
     if (-not $want -or $tid -ne $want) { throw "New-PimSubscriptionArmInvoker: the ARM token is for tenant '$tid', not subscription $SubscriptionId's tenant '$want' -- REFUSING." }
     $token = "$($tokObj.accessToken)"
+    # Rehearsal 2026-09-17 (tests/Test-PimMspBuild.ps1 R1): GetNewClosure() binds this block to a new module that
+    # cannot see functions dot-sourced into a CALLER's script scope, so every ARM error (incl. the expected 404 of a key
+    # that does not exist yet) became "Hide-PimSasText is not recognized". Capture the function as a variable instead.
+    $hideSas = ${function:Hide-PimSasText}
     return {
         param([string]$Method = 'GET', [string]$Path, [object]$Body, [string]$ApiVersion, [switch]$All)
         $uri = "https://management.azure.com$Path" + $(if ($Path -match '\?') { '&' } else { '?' }) + "api-version=$ApiVersion"
@@ -208,7 +212,7 @@ function New-PimSubscriptionArmInvoker {
         } catch {
             $code = ''; try { $code = [int]$_.Exception.Response.StatusCode } catch { }
             $detail = "$($_.ErrorDetails.Message)"; if (-not $detail) { $detail = "$($_.Exception.Message)" }
-            throw ("$Method $Path -> HTTP $code : " + (Hide-PimSasText $detail))
+            throw ("$Method $Path -> HTTP $code : " + (& $hideSas $detail))
         }
     }.GetNewClosure()
 }

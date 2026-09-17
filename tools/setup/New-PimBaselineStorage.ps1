@@ -64,6 +64,22 @@ param(
     [string]$Container = 'baselines',
     [string]$PublisherObjectId,
     [string]$PublisherAppId,
+    # 71.33: the publisher may be a signed-in USER (a signed-in build) rather than an application.
+    [ValidateSet('ServicePrincipal', 'User', 'Group')][string]$PublisherPrincipalType = 'ServicePrincipal',
+    # 71.34 PUBLIC-BUT-SIGNED (DESIGN 13.7): anonymous read of the bundle BLOB (no listing), storage firewall Deny,
+    # and allow rules for the publishing host -- via Set-PimBaselineNetworkAccess.ps1 -EnsurePosture. No SAS anywhere.
+    # The publishing host must be named, or Deny locks the publish itself out: a subnet id when the host is in the
+    # storage account's region (IP rules do not apply to same-region traffic), otherwise its public egress IP.
+    [switch]$PublicSignedRead,
+    [string[]]$PublisherSubnetResourceIds = @(),
+    [string[]]$PublisherIpAddresses = @(),
+    # 71.35 CLOUD PUBLISH: the publisher is the master's own Container Apps job (ca-pim-publish), so the allowed publisher
+    # network is the subnet of THIS Container Apps environment (read from it; its storage service endpoint is set first by
+    # Initialize-PimBaselinePullNetwork.ps1). Its VNet rule is added BEFORE default-action Deny, in the same call.
+    [string]$PublisherEnvName,
+    # 71.35: the host running this script does not publish (the job's identity does; Deploy-PimBaselinePublishJob.ps1 grants
+    # it). No publisher role for the build identity and no write/read probe from this host -- its network is not allowed.
+    [switch]$NoHostPublisher,
     [ValidateRange(0, 30)][int]$VerifyTimeoutMinutes = 10
 )
 
@@ -117,7 +133,7 @@ $exists = az storage account show @subArgs -n $StorageAccount -g $ResourceGroup 
 if ("$exists".Trim()) { Note 'account exists (find-or-create)' }
 elseif ($PSCmdlet.ShouldProcess($StorageAccount, 'create storage account')) {
     az storage account create @subArgs -n $StorageAccount -g $ResourceGroup -l $Location `
-        --sku Standard_LRS --kind StorageV2 --allow-blob-public-access false -o none 2>&1 | Out-Null
+        --sku Standard_LRS --kind StorageV2 --allow-blob-public-access $(if ($PublicSignedRead) { 'true' } else { 'false' }) -o none 2>&1 | Out-Null
     if ($LASTEXITCODE -ne 0) { throw "az storage account create failed (exit $LASTEXITCODE)." }
     Note "created ($Location, Standard_LRS, public blob access DISABLED)"
 }
@@ -127,15 +143,28 @@ if (-not "$saId".Trim()) { throw "could not read the resource id of '$StorageAcc
 # 🔴 --auth-mode login, NOT an account key. A key would work and would also mean this script
 # handled a credential it never needs: container creation is an RBAC operation for the caller.
 Step "container $Container"
-$hasC = az storage container exists @subArgs -n $Container --account-name $StorageAccount --auth-mode login --query exists -o tsv 2>$null
-if ("$hasC" -eq 'true') { Note 'container exists' }
+# 71.35: CONTROL PLANE (container-rm). The data-plane form needs a data role for the caller AND a network the firewall
+# allows -- and once default-action is Deny, a re-run of this step from a build host would fail on a container that exists.
+$hasC = az storage container-rm exists @subArgs -g $ResourceGroup --storage-account $StorageAccount -n $Container --query exists -o tsv 2>$null
+if ("$hasC".Trim() -eq 'true') { Note 'container exists' }
 elseif ($PSCmdlet.ShouldProcess($Container, 'create container')) {
-    az storage container create @subArgs -n $Container --account-name $StorageAccount --auth-mode login -o none 2>&1 | Out-Null
-    if ($LASTEXITCODE -ne 0) { throw "az storage container create failed (exit $LASTEXITCODE). If this is a 403, the CALLER needs a data-plane role on $StorageAccount too." }
+    az storage container-rm create @subArgs -g $ResourceGroup --storage-account $StorageAccount -n $Container -o none 2>&1 | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw "az storage container-rm create failed (exit $LASTEXITCODE)." }
     Note 'created'
 }
 
+# 71.35: the master's own Container Apps subnet is the publisher network (the cloud publish job runs there).
+if ("$PublisherEnvName".Trim()) {
+    $pubSubnet = "$(az containerapp env show @subArgs -g $ResourceGroup -n $PublisherEnvName --query properties.vnetConfiguration.infrastructureSubnetId -o tsv 2>$null)".Trim()
+    if (-not $pubSubnet) { throw "the Container Apps environment '$PublisherEnvName' names no infrastructure subnet -- the publish job's network cannot be allowed on the store." }
+    Note "publisher network: the '$PublisherEnvName' subnet $pubSubnet (the cloud publish job)"
+    $PublisherSubnetResourceIds = @(@($PublisherSubnetResourceIds) + $pubSubnet | Where-Object { "$_".Trim() } | Select-Object -Unique)
+}
+
 # --- 3) data-plane rights for the PUBLISHER ------------------------------------
+if ($NoHostPublisher) {
+    Note 'publisher role: not granted here -- the publish job''s own identity gets Storage Blob Data Contributor on the container (Deploy-PimBaselinePublishJob.ps1)'
+} else {
 if (-not "$PublisherObjectId".Trim()) {
     if (-not "$PublisherAppId".Trim()) { throw 'pass -PublisherObjectId or -PublisherAppId (the master ENGINE SPN, not the bootstrap SPN).' }
     $PublisherObjectId = az ad sp show --id $PublisherAppId --query id -o tsv 2>$null
@@ -147,15 +176,32 @@ $have = az role assignment list @subArgs --assignee $PublisherObjectId --scope $
         --query "[?roleDefinitionName=='Storage Blob Data Contributor'].id" -o tsv 2>$null
 if ("$have".Trim()) { Note 'already assigned' }
 elseif ($PSCmdlet.ShouldProcess($StorageAccount, 'grant Storage Blob Data Contributor')) {
-    az role assignment create @subArgs --assignee-object-id $PublisherObjectId --assignee-principal-type ServicePrincipal `
+    az role assignment create @subArgs --assignee-object-id $PublisherObjectId --assignee-principal-type $PublisherPrincipalType `
         --role 'Storage Blob Data Contributor' --scope $saId -o none 2>&1 | Out-Null
     if ($LASTEXITCODE -ne 0) { throw "role assignment failed (exit $LASTEXITCODE)." }
     Note 'granted'
+}
+}
+
+if ($PublicSignedRead) {
+    Step 'public-but-signed posture: anonymous blob read, firewall Deny, the publishing host allowed (no SAS, nothing expires)'
+    if (-not (@($PublisherSubnetResourceIds | Where-Object { "$_".Trim() }).Count + @($PublisherIpAddresses | Where-Object { "$_".Trim() }).Count)) {
+        throw '-PublicSignedRead needs -PublisherSubnetResourceIds or -PublisherIpAddresses (or -PublisherEnvName, the cloud publish job''s environment): the firewall denies every network not named, including the publisher.'
+    }
+    & (Join-Path $PSScriptRoot 'Set-PimBaselineNetworkAccess.ps1') -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -StorageAccount $StorageAccount -Container $Container `
+        -SubnetResourceId $PublisherSubnetResourceIds -IpAddress $PublisherIpAddresses -EnsurePosture -WhatIf:$WhatIfPreference
 }
 
 # --- 4) VERIFY by actually writing and reading, as the publisher ---------------
 # A role assignment that exists in ARM is not the same as one the DATA plane honours yet.
 if ($WhatIfPreference) { Step 'WhatIf: skipping the write/read probe.'; return }
+if ($NoHostPublisher) {
+    # The proof that the store works is the FIRST PUBLISH: the job writes, then reads the blob back anonymously from its
+    # allowed subnet and verifies it (Start-PimBaselinePublish.ps1 waits for that execution to succeed).
+    Step 'Done (no probe from this host: its network is not an allowed source -- the first publish proves the store).'
+    [pscustomobject]@{ StorageAccount = $StorageAccount; Container = $Container; ResourceId = $saId; PublisherObjectId = '' }
+    return
+}
 Step 'verifying the publish target with a real write + read (RBAC can lag several minutes)'
 $probe   = "_publish-probe.json"
 $tmp     = Join-Path ([System.IO.Path]::GetTempPath()) "pim-baseline-probe-$PID.json"
@@ -184,6 +230,7 @@ while ((Get-Date) -lt $deadline) {
 Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue
 if (-not $ok) {
     throw ("could not write to $StorageAccount/$Container within $VerifyTimeoutMinutes minute(s). " +
+           $(if ($PublicSignedRead) { "With -PublicSignedRead a 403 'AuthorizationFailure' also means THIS host's network is not one of the allowed sources (same region as the account => a subnet rule, not an IP rule). " } else { '' }) +
            "If a DIRECT upload works but the publisher still 401s, the identity is wrong, not the role " +
            "(the bootstrap SPN is Key Vault data-plane only). Last error: $lastErr")
 }
@@ -191,6 +238,11 @@ Note "write OK$(if ($waited) { " after ${waited}s of RBAC propagation" })"
 $read = az storage blob download @subArgs --account-name $StorageAccount -c $Container -n $probe --file (Join-Path ([System.IO.Path]::GetTempPath()) "pim-probe-read-$PID.json") --auth-mode login -o none 2>&1
 if ($LASTEXITCODE -ne 0) { throw "wrote the probe but could not read it back: $(($read | Out-String).Trim())" }
 Remove-Item -LiteralPath (Join-Path ([System.IO.Path]::GetTempPath()) "pim-probe-read-$PID.json") -Force -ErrorAction SilentlyContinue
+if ($PublicSignedRead) {
+    # The reader's path, proven: an ANONYMOUS GET (no token, no SAS) of the blob from an allowed network.
+    try { $null = Invoke-RestMethod -Method GET -Uri ("https://{0}.blob.core.windows.net/{1}/{2}" -f $StorageAccount, $Container, $probe) -Headers @{ 'x-ms-version' = '2021-08-06' } -ErrorAction Stop; Note 'anonymous read OK (no credential)' }
+    catch { throw "anonymous read of the probe blob FAILED from an allowed network -- the public-but-signed posture is not effective: $($_.Exception.Message)" }
+}
 az storage blob delete @subArgs --account-name $StorageAccount -c $Container -n $probe --auth-mode login -o none 2>&1 | Out-Null
 Note 'read OK, probe removed'
 

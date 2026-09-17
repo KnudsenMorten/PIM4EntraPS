@@ -760,7 +760,7 @@ apply. They run in a fixed dependency **order**:
 | 70 | GroupsPolicies | definition `PolicyTemplate` | per-group PIM for Groups **member and owner** policy (approval, MFA/justification, durations, notifications) |
 | 75 | EntraRolePolicies | `PIM-Assignments-Roles-{Groups,AUs}` | directory-role PIM policy from the policy template |
 | 80 | AccessReviews | definition `ReviewCycle` | per-group access-review schedule (reviewers = owners) |
-| 90 | AdminOffboarding | `Account-Definitions-Admins` | offboarding on its own schedule: disable, revoke sessions, remove delegations, notify, delete after retention (see §6.2, §17.10) |
+| 90 | AdminOffboarding | `Account-Definitions-Admins` | auto-disable on its own schedule: disable, revoke sessions, remove delegations, notify — and stop. The account is never deleted (see §6.2, §17.10) |
 | 92 | GroupRetirement | `PIM-Definitions-*` | retires a group whose definition is marked for retirement |
 | 95 | HybridAdProvisioning | `Account-Definitions-Admins` (AD platform) | **PLANS** on-prem AD accounts + gMSA/sMSA; on-prem write is hybrid-worker-only (see §6.5) |
 
@@ -816,15 +816,33 @@ nudge** each run it finds direct rows, steering the data owner toward the group
 model. Existence-based (idempotent); `Action=Remove` rows and user-less rows are
 dropped from desired.
 
-### 6.2 Offboarding — per admin, on its own schedule (`AdminOffboarding`)
+### 6.2 Auto-disable — per admin, on its own schedule (`AdminOffboarding`)
 
-When an admin is due for offboarding — `Account-Definitions-Admins` carries an `OffboardDate`
-(date expression / ISO) that has been reached, or `Lifecycle=Retire` — the REST engine works
-through the **whole offboarding sequence for that admin**, in v1's order, not only the delegation
+> 🔴 **PIM never deletes a user account, and never disables one for being absent.** Two things this
+> sweep used to do, it no longer does anywhere in the product:
+> * **It does not delete.** There is no code path that deletes a user — not in a single tenant, not
+>   on an MSP master, not on a managed tenant, and not behind a setting. An offboarded admin ends as
+>   a **disabled account that stays in the directory**, with no sessions, no memberships and no
+>   eligibilities, until a person deletes it by hand. The retention field (`DeleteAfterDays`) is
+>   **removed and not supported** — no column, no parameter, no setting, no validator finding and no
+>   disabled switch; a row that still carries the value is accepted in silence and the schema preflight
+>   drops the column (dropping, rather than blanking, is what keeps re-adding it later a one-line change
+>   with no data to reconcile). `tests/Test-PimNoAccountDelete.ps1` fails the suite if a user-object
+>   delete — or the retention field — reappears.
+> * **It does not disable an account merely for being missing from the desired set.** That was a
+>   third disable flow (the "unmanaged admin" removal in the `Admins` provider); it is removed, with
+>   its setting. The run still **reports** every live admin account that is not in the definitions —
+>   seeing them is useful, acting on them is a decision taken on the row.
+>   `tests/Test-PimNoUnmanagedDisable.ps1` keeps the path out.
+
+When an admin is due — `Account-Definitions-Admins` carries an `AutoDisableDate`
+(date expression / ISO) that has been reached, or `Lifecycle=Retire`, which means the **same
+disable-only path** — the REST engine works
+through the **whole sequence for that admin**, in v1's order, not only the delegation
 half: disable the account, revoke sign-in sessions, cancel PIM schedules and remove every
 PIM-for-Groups membership (eligible + active), mail the `offboarding-notice` to the account
-owner's address (§10), and — once `DeleteAfterDays` has elapsed since the recorded revoke — delete
-the account. An admin with `AccountStatus=Revoked` but no offboarding gets the membership half
+owner's address (§10) — and stop. The account itself is kept.
+An admin with `AccountStatus=Revoked` but no auto-disable date gets the membership half
 (the `Admins` provider disables it and revokes its sessions). Each step is audited
 (`account.offboard.*`).
 
@@ -834,6 +852,32 @@ still owed (read from the tenant plus a SQL progress record), `Equal` means noth
 the update performs the owed steps. Progress is persisted after each step, so an interrupted run
 **resumes** where it stopped instead of repeating finished steps; a membership removal that keeps
 failing is retried a bounded number of times and then recorded for manual review.
+
+**The date column, and how an old one migrates.** `AutoDisableDate` replaced `OffboardDate`, because
+the old name promised removal and the sweep only disables. One shared resolver decides which column
+supplies the value, and every surface — the engine, the Manager and the validator — uses it:
+* the new name wins; the **old name is still read**, so no existing row breaks;
+* the schema preflight copies `OffboardDate` into `AutoDisableDate` and then drops the old column,
+  idempotently — one pass migrates a whole store;
+* a row carrying **both names with different dates** is **refused, not guessed**: that admin is
+  skipped entirely, the run says so naming both dates, and the Manager shows an error. Silently
+  picking one is how an account gets disabled on a date nobody chose. Both names set to the *same*
+  date is not a conflict — there is nothing to guess.
+* the MSP baseline carries `AutoDisableDate` only, never both, so a managed tenant can never be the
+  one that has to guess.
+
+**Access → Admin accounts also shows the SPONSOR DEPARTMENT** (§62: the sponsor is a department, not a
+person). Its own column, with the department's owners on hover — the same `PIM-Definitions-Departments.Owners`
+the engine resolves, read once per list. Three states, deliberately distinct because the two gaps are
+fixed in different places: **no department** (red, fix the admin's row), **a department with no owners**
+(red, fix the department under Access → Departments & owners), and **the owner index could not be read**
+→ *owners not checked*, never *no owners*. Reporting a gap that was never measured is how a screen gets
+ignored.
+
+The auto-disable date is visible and editable on the same screen: its own column showing the date,
+whether it has already passed, whether it falls inside the next 14 days, and whether the row still
+uses the old column name — and an editable field per admin whose help text states the effect
+(disable, never delete). Saving it clears the old column, so an edit cannot create a conflict.
 
 It runs on its own scheduler job (`admin-offboarding`, every 30 min) rather than only inside a
 daily prune. Gates, decided for the whole pass before anything is written:
@@ -1325,6 +1369,25 @@ for directory roles. Four ship today, in two families:
 **Activation always requires MFA + justification** — that is the control that
 protects the privilege at the point of use, and it is untouched by everything
 below.
+
+**Which rows get to choose one (§71.25).** The policy provider reads `PolicyTemplate` from every
+group-definition row — Roles, Services, Tasks, Processes, and now also `PIM-Definitions-Resources`
+(`Get-PimGroupPolicyDefinitionRows`). Resources is excluded from the group-**creation** source on
+purpose, because discovery auto-create writes every discovered Azure/Power BI resource there; that
+reason is about creating groups and says nothing about policy, so reading it here changes behaviour
+for exactly one kind of row — a Resources row whose template is **set**. A blank template still
+resolves to `default`, which is the same policy the baseline sweep already applies to a managed group
+with no definition row, so every existing row is unchanged.
+
+**Choosing one in the Manager.** Both permission-group wizards offer a picker built from the
+tenant's OWN template store (`catalogs.policyTemplate` on `/api/settings/operational-policy`, read
+from `pim.Settings['PolicyTemplates']` — never from the shipped files, so a customised or added
+template is offered and a template the engine could not find never is). **"Use default" is first and
+its value is empty**, which is what keeps a wizard run that does not touch the field byte-for-byte
+identical to before. A template is marked as needing approval from its own `Approval` rule, so no id
+is hard-coded in the page. An Azure permission group has no definition row of its own, so choosing a
+non-default template there stages a minimal `PIM-Definitions-Resources` row carrying the identity and
+the template — only when a non-default template was chosen.
 
 **Why `Admin_Eligibility` is empty on the standard family.** That rule governs what
 an admin must present when *granting* eligibility, and on a standard scope the
@@ -2585,12 +2648,16 @@ is decided by its **release ring**, never by "newest available":
   ring's `minFrom` floor is not jumped. Moves are forward-only.
 - **Then the normal lifecycle:** already running that version → nothing to roll; otherwise fetch that exact
   version's source archive, build it in the environment's **own** registry (no build machine, no credential
-  shipped between environments — only a read-only link to the archive), apply additive schema changes first
+  shipped between environments — only a read-only link to the archive), apply additive schema changes first (the
+  shipped schema files run on every store, every time — each object is guarded, so an existing store gains what a
+  release adds; a statement that would remove data, including a drop of a column the store still has, refuses the run)
   (never dropping a column on an unattended run), roll **every** Container App and Job running the product's
   image (discovered from the resource group; anything else is skipped and reported), verify health, and roll
   back to the recorded previous version on a failed verify — confirmed against what is actually running. A
   component left behind fails the update. An updater that cannot verify the database schema refuses a
-  version change.
+  version change. If the updater itself carries no database settings, it takes them from the running Manager
+  for that run and records them on itself (§27.10); if its identity cannot sign in to the database, the
+  refusal names that identity and the SQL admin group to add it to.
 - **One status record per run.** Each nightly run writes one short record (from-version, to-version, what it
   did, duration, error) to a write-only central store, so "is this site stuck?" and "is this release failing
   everywhere?" are both answerable. It carries nothing that identifies a person or a credential, and a failed
@@ -3463,6 +3530,115 @@ constraint was removed in v2.4.177 as over-reach.)
 8. On success it returns the Owner=MSP rows for the merge, and records the applied
    version.
 
+### 13.5a Replication targeting — which master rows reach which managed tenants (2.4.360, verified offline)
+
+The MSP master decides, **per row**, whether and where a row replicates. Managed tenants never edit this; they pull
+the one signed bundle and evaluate it for themselves.
+
+**Fields.** Every replicable row carries `Replicate` (`No` / `Yes` / `Follow`), `Ring` and `Target`:
+admins (`Account-Definitions-Admins`, `pim.CentralAdmins`), admin → direct group memberships
+(`PIM-Assignments-Admins`), direct groups (role, organisation, department, project, cross-org), indirect permission
+groups (tasks, services, processes), nestings (`PIM-Assignments-Groups`), Entra role bindings, and the tenant-scoped
+resource bindings (AU-scoped roles, Azure resources, workloads).
+`Target` is blank (every tenant the ring admits) or a comma list of `tag:<key:value>` (any-of), `tag:a+b` (the tenant
+must carry all) and `tenant:<id>`. Tenant tags are free `key:value` labels on the master's tenant registry, so a
+hierarchy is expressed as tags (`region:eu`, `region:eu-north`).
+
+**Blank = the behaviour before this feature.** An admin replicates when `ManagementMode=msp` (and must agree with
+`Replicate`); memberships, groups, nestings and Entra role bindings default to `Follow` — they travel when a replicated
+row needs them. Tenant-scoped resource bindings default to not replicated, because the AU, subscription scope or
+workspace they name exists in one tenant; an explicit `Follow` or `Yes` carries them.
+
+**Reach rule.** Tenant T receives row R when `Replicate` is not `No` **and** R's ring admits T's ring (`R.Ring ≤ T.Ring`;
+a group-model row with no ring is not narrowed) **and** R's `Target` is blank or matches T. Ring and target combine with
+AND, never OR. The master's registry view `pim.vw_AdminTenantTargets` applies the same rule.
+
+**Dependencies are auto-included, with a warning.** When a row that reaches T needs another row there — a membership
+needs its group, a nesting needs both groups, a binding needs its group — the needed row is included for T even if its
+own fields would exclude it, and the plan records a warning naming the row, the dependent and the tenant.
+
+**Producer.** `New-PimBaselineBundle.ps1` selects the bundle content through one pure function: the published admins,
+their memberships, `Yes` seeds, and the dependency closure (walked to a fixpoint) from every entity the engine builds
+groups from. `No`/`none` rows that nothing depends on are **not** put in the signed payload; the ones carried as a
+dependency are reported. With blank fields the payload is byte-identical to the previous producer's.
+
+**Per tenant.** `Get-PimDownlinkPlan` evaluates the rule for its own tenant, computes its own closure, reports
+`autoIncluded` and `notReplicated`, and still never retracts. The apply writes only rows the MSP owns, never takes over a
+customer row with the same key, and strips the replication fields (they mean nothing inside a managed tenant).
+**Retraction is report-first:** a synced row that no longer reaches the tenant is reported as "would remove" (and in the
+acceptance record) and is removed only with `-AllowRetraction`, inside the removal budget. The scheduled pull job carries
+the opt-in only when its environment sets `PIM_DOWNLINK_ALLOW_RETRACTION=true` (`Deploy-PimDownlinkJob.ps1
+-AllowRetraction`); the entry reads it fail-closed (only an explicit true value allows, a mistyped value is reported and
+treated as off) and passes it through the scenario runner to the orchestrator.
+
+**Admin lifecycle follows the source.** A published admin carries, besides its status and offboarding date, the master
+definition's provisioning date, TAP start date and delete-after-offboarding days — each only when the master set it, so
+an older row ships unchanged. The managed tenant stores them on the central admin row (falling back to its previous
+defaults when absent) and keeps dates as ISO-8601 text whatever the JSON parser made of them. A slave's own
+status-change code is never published.
+
+**A TAP is enforced for every Entra admin.** Single tenant, MSP master and managed tenant alike: the TAP scope issues one
+to every Entra admin (never to an AD-only one), and nothing keyed on the "create TAP" column can switch it off — the
+column is not published in the bundle, a managed tenant stores it as on, the fan-out ignores a registry "no", the
+scheduled-creation report treats the TAP as due, and the validator reports a "no" as having no effect (with a one-click
+fix). An admin still gets no TAP when there is nowhere to deliver it: the engine refuses to mint a credential nobody
+receives, and the readiness check requires a delivery address for every Entra admin.
+
+**One-shot MSP build.** `tools/setup/Invoke-PimMspBuild.ps1` builds an MSP master or a managed tenant from a
+machine-local file of ids and names (a file carrying anything resembling a credential is refused). The pure planner
+(`engine/_shared/PIM-MspBuild.ps1`) orders the steps:
+- **Both roles:** the tenant vault grant; hosting (`Invoke-PimDeployAll`, managed identity only); the SQL admin group,
+  with the scheduler and Manager identities; hosting access (the Engine and read-only Manager Graph sets, and the Manager's
+  right to start the scheduler); the scenario.
+- **Master:** the registry schema, the storage service endpoint on its own Container Apps subnet, the baseline store made
+  public-but-signed (§13.7 implementation notes), registering each managed tenant together with the storage network rule
+  for its subnet, the Key Vault signing key (the build prints its key id for the managed tenants to pin), the daily publish
+  job, and a first publish that waits for that job to succeed.
+- **Managed tenant:** the storage service endpoint on its own Container Apps subnet (the build prints the subnet id for
+  the master) and the pull job, which reads a plain blob address and verifies the signature against the master signing key(s) it pins. No link, no credential
+  from the master, nothing to renew.
+
+Values only known at run time — managed identity object ids, the signed-in user's object id — are placeholders that
+the runner resolves; an unresolved placeholder stops the build. Each step runs in its own process on the host it needs,
+with its arguments passed in a file inside a per-run directory that only SYSTEM, Administrators and the running account
+can read, removed when the run ends.
+
+**Who the build runs as** is decided by the config alone. Without a deploy identity it runs as the administrator signed
+in with `az login`: before anything is touched it asserts that the account is a person (not an application) in the
+config's tenant for the named subscription, and that no environment variable would make a step authenticate as someone
+else; every step then receives no application identity at all, and the store-writing steps connect to SQL as that
+person, who is made a member of the SQL admin group first. With a deploy identity (the MSP management host) it logs in
+by certificate into the per-run directory. A step that cannot run under the chosen identity — the unattended daily
+re-publish on a person's sign-in — is shown as not run and the build ends "incomplete" rather than "complete". The build
+stops at the first failure with the resume command, and ends by printing the steps that need a person. The first policy
+mass-change approval is one of them, and is deliberately not automated.
+
+**Manager (MSP master only).** Every MSP sync surface follows the tenant mode the header shows (Single, MSP Master,
+Slave): on the master it is shown and editable; on a managed tenant only a read-only "received from the MSP master"
+indicator appears on the Accounts list; in Single mode it is absent — including the admin's "Sync to slaves" column,
+its management mode, ring and slave-tag fields, and the grid's admin Ring / Target columns. Every Create wizard has a Replication section on its Review step (Replicate, Ring, tag
+chips with an all-of switch, a tenant picker, "This will reach: N of M tenant(s)" with names, and the dependency
+warnings); the grid shows `Replicate`/`Ring` pickers, a `Target` picker with a grammar check and a Reach count per row.
+Reach is computed by the server: it builds the bundle with the producer's selection, signs it with a throwaway key and
+runs the same plan every managed tenant runs, once per registered tenant. On a single tenant or a managed tenant the
+columns are removed from the grid, the section never renders, and the Manager refuses a save that introduces or changes
+the fields. The validator refuses a `Replicate` value that is not `No`/`Yes`/`Follow` or that disagrees with the admin's
+`ManagementMode`.
+
+**Verified on a live master / managed pair (2026-09-15).** A sample model on the master — admins targeted by one tag,
+by two tags together, by tenant id, one not replicated and one targeted at a tag the managed tenant does not carry, a
+role group (`Yes`), an organisation group (`No`) that a replicated membership needs, and two permission groups with
+nestings and an Entra role binding — was published, pulled by the managed tenant's scheduled job and applied: exactly
+the three reaching admins, the four groups (the organisation group auto-included with its warning in the job log), the
+memberships, nestings and role binding arrived and were created in the managed directory, the non-reaching admins did
+not, and the managed tenant's own row was untouched. Re-targeting one admin away from the tenant reported its
+membership as "would remove" and removed nothing from the directory.
+
+**The pull job's identity.** On a locally hosted managed tenant the scheduled pull job runs its work as its own
+system-assigned managed identity — the scheduler job's shape. The deploy grants that identity the engine's directory
+permissions and membership of the SQL admin group; the user-assigned identity stays attached only to pull the first
+container image. No client secret is needed.
+
 ### 13.6 Flow B — local apply (true env: local store → real accounts)
 
 1. `Invoke-PimLocalApply.ps1` runs for one tenant with that tenant's engine SPN
@@ -3531,6 +3707,108 @@ trust handshake; (3) the customer's `privatelink.blob.core.windows.net` resolves
 the PE in their own VNet and traffic rides the backbone. Revoke: customer deletes
 the PE, or MSP rejects / pulls RBAC. Content is signed regardless.
 
+#### Implementation note (2026-09-17) — public-but-signed is what the one-shot MSP build sets up
+
+An interim implementation handed each managed tenant a read-only SAS link to the bundle blob, renewed by a weekly
+scheduled task that needed a certificate identity in BOTH tenants. It expired, it put a master credential on the
+managed tenant's side, and it could not be deployed by a managed tenant's own administrator. It is removed from the
+build. The build now implements transport 2 above, with the network half made precise:
+
+- **Trust = the signature.** Every pull verifies the RSA signature against the public certificate embedded in the
+  product and refuses a bundle that does not verify, before anything is applied. The network never establishes trust.
+- **Access = the master storage firewall.** The bundle container allows anonymous read of **blobs only** (no
+  listing); the storage account's firewall default action is **Deny**; one allow rule names each reader:
+  - a **virtual network rule** for the managed tenant's Container Apps subnet — the default. Azure accepts a subnet
+    from any subscription in any Microsoft Entra tenant (by fully qualified subnet id; not selectable in the portal).
+    The subnet carries a storage service endpoint: `Microsoft.Storage` reaches accounts in the same region,
+    `Microsoft.Storage.Global` any region, and a subnet holds only one of the two. The managed tenant's build adds it
+    and prints the subnet id; that id is the only thing exchanged.
+  - an **IP rule** only for a reader with a fixed public egress address in **another region**: storage IP rules have
+    no effect on requests from the same Azure region as the account, and traffic from a subnet with a storage service
+    endpoint no longer arrives from a public address at all.
+  - the **publishing host** is named the same way, or Deny locks out the publish itself.
+- **Nothing expires in the access path.** No SAS, no stored access policy, no account key. A rule is set once per
+  managed tenant and removed when that tenant stops receiving. The bundle's own validity window (content freshness) is
+  unchanged and is renewed by the master's scheduled publish.
+- **Transport 1 (private endpoint by approval)** remains the alternative when a service endpoint cannot be used on the
+  managed tenant's subnet, or when the storage account must have no public endpoint at all.
+
+#### Implementation note (2026-09-17) — the master publishes from a cloud job, signed by a Key Vault key
+
+The bundle is no longer produced on a management host. The master runs a **Container Apps job** on its own environment
+(daily, and on demand) as its **system-assigned managed identity**. It holds no certificate, secret, SAS or account key:
+
+- **Read and build.** It reads the master store as a member of the SQL admin group and builds the payload with the same
+  producer function the host script uses, so what a managed tenant receives does not depend on the publisher.
+- **Sign.** It signs through the Key Vault `sign` operation with a **non-exportable RSA key** (HSM-protected on a premium
+  vault, software-protected on a standard vault; key operations limited to sign and verify). `RS256` is RSASSA-PKCS1-v1_5
+  with SHA-256 over the digest — the same primitive, byte for byte, as the certificate signature, so the verifier's
+  cryptography is unchanged. The identity may use only that key, and write only to the bundle container.
+- **Prove before and after.** Before uploading, it verifies the signature with the managed tenants' own verifier. After
+  uploading, it reads the bundle back **anonymously from its own subnet** — the managed tenants' read path — and verifies
+  it again. The execution succeeds only if all of that happened.
+- **Trust anchor.** A Key Vault signed bundle carries its public key, and that key is **not** what makes it trusted: each
+  managed tenant pins the key's RFC 7638 thumbprint in its own configuration, taken from the master's build output and never
+  from the bundle store. Several keys may be pinned at once, so a key roll is: give the new key id to every managed tenant,
+  then switch the job to the new key. A bundle signed by a key the tenant does not pin is refused; a bundle without a
+  carried key is verified against the embedded product certificate exactly as before, so certificate-signed bundles keep
+  working during a migration.
+- **Network.** The master's Container Apps subnet carries the storage service endpoint, and the store's firewall rule for
+  that subnet is created before the firewall's default action becomes Deny. The machine that runs the build is not an
+  allowed network and does not need to be.
+
+#### Implementation note (2026-09-17) — private-only pairs use transport 1, and the build sets it up
+
+When the master's and the managed tenant's private networks are **connected** (global VNet peering, created by the
+operators — a per-tenant deploy identity cannot authorise one), the build selects transport 1 instead of transport 2:
+
+- **One private endpoint, in the master's own network**, targeting the bundle store's blob subresource; the store's
+  public network access is **Disabled**, so the file has no public surface at all. The store name is published in the
+  master's `privatelink.blob` private DNS zone.
+- **Each managed tenant publishes the same name in ITS OWN zone**, as an address record for the private endpoint's
+  address. A private DNS zone cannot be linked across tenants, so each side resolves the name for itself; nothing in
+  one tenant is granted rights in the other.
+- **Anonymous blob read stays on** — a managed tenant's identity cannot be authorised cross-tenant, and a shared-access
+  signature is refused by design (it expires and it is a credential). Confidentiality of the baseline comes from the
+  network being private; integrity and authenticity come from the signature, exactly as in transport 2.
+- **The application environment may be network-internal** on either side. The hosted GUI smoke can then only SKIP from
+  outside that network — and a skip is never a pass.
+- **The database gets no private endpoint.** Measured: the `privatelink` name for the database does not resolve from a
+  machine outside the network, so a build run from such a machine fails outright. The server admits the environment's
+  own subnet, and the build **opens a time-boxed window** for the deploying machine's address and closes it again as a
+  final step.
+
+Transport 2 (public-but-signed) is unchanged and remains the default for managed tenants whose network is not connected
+to the master's. The trust anchor is the same in both: the bundle's signature and the pinned signing key.
+
+#### Implementation note (2026-09-17) — the one-shot MSP build, deployed by certificate or by a signed-in administrator
+
+The master and each managed tenant are built by one command per side, from a configuration file that carries
+identifiers only (a credential in the file is refused). The identity mode is decided by the file, not a switch:
+
+- **Certificate mode** — the file names a deployment application; the build signs in with its certificate into an
+  isolated profile for the run.
+- **Signed-in mode** — the file names no deployment identity. Before anything is touched the build asserts that the
+  current sign-in is a **user** of the configured tenant for the configured subscription, and that no application
+  credential (client secret, certificate path, federated token, managed-identity endpoint) is present in the session.
+  Every token minted from that sign-in is decoded and checked the same way. Steps receive no application identity; the
+  database steps make the signed-in user a member of the SQL administrators group before they connect.
+
+**Order of a new pair.** Each side needs one value the other side creates: the master's store rule names the managed
+tenant's subnet, and the managed tenant's pull job pins the master's signing key identifier. A new pair is therefore
+prepared with two single steps before the two builds — the managed tenant puts the storage service endpoint on its
+subnet and prints the subnet identifier; the master creates its signing key and prints the key identifier — and every
+step converges, so the full builds repeat them as no-ops. The two values travel between administrators, never through
+the bundle store.
+
+#### Implementation note (2026-09-17) — the provider's Manager verifies the bundle the way a managed tenant does
+
+The MSP view in the master's Manager plans against a signed bundle. Its banner verdict uses the managed tenant's
+verifier with the trusted key identifiers read from the same configuration value the pull job reads: a bundle carrying a
+Key Vault key verifies only when that key is trusted there, a certificate-signed bundle verifies against the embedded
+certificate as before, and an expired bundle is not verified. The verdict carries the signer, the key identifier and the
+reason for a refusal, so "not verified" distinguishes an untrusted key from a tampered or expired bundle.
+
 ### 13.8 Flow C — status rollup (local → MSP)
 
 The local engine emits a **signed summary** (drift/compliance counts, never raw
@@ -3557,7 +3835,7 @@ privileged data) — ideally into the customer's **own Log Analytics** (via
 | Threat | Control |
 |---|---|
 | Tamper with bundle in transit / at rest / on the distribution point | RSA-SHA256 signature → verify with embedded public key → rejected |
-| Forge a bundle | Impossible without the MSP private key (non-exportable, machine store) |
+| Forge a bundle | Impossible without the MSP private key (non-exportable: a Key Vault key, or the legacy machine-store certificate); a key the managed tenant does not pin is refused even with a valid signature |
 | Roll back to an old baseline | Version-monotonic check (`baseline-state.json`) |
 | Replay an expired baseline | `validToUtc` check |
 | Hacker reaches the SQL | Private endpoint / public-disabled + Entra-only (no SQL logins) + (cross-tenant) firewall to known IP |
@@ -4402,6 +4680,15 @@ group's **untouched Microsoft default** policy is not counted as weakening, so c
 does not trip the brake; ordinary drift below the thresholds is corrected straight away. On the
 batched group-policy read path the plan is built and held exactly like the per-item path.
 
+**A hold is its own job outcome: `held` (needs approval).** `Get-PimEngineRunOutcome` classifies a run's per-scope
+results: when every error is an approval hold (`GROUP-` / `ENTRA-` / `AZ-POLICY-MASS-HOLD`) the outcome is `held`, with
+the provider, the plan hash, the change count and the exact approve command; any other error — or an error it cannot
+attribute — makes it `failed`. The scheduler's engine handler returns a held result instead of throwing, the run record
+gets `status = held` (ok and ran true), the job alert fires titled "HELD — needs approval", and the Jobs view marks the
+job `needsApproval` (amber pill and badge, counted in the needs-attention banner and on Home) until a later completed run
+clears it — never green, never red. The same rule runs on a managed tenant's pull: the engine summary carries the
+outcome, the scenario step stays ok, and the job logs "downlink JOB HELD" and exits 0.
+
 **Policy changes are audited rule by rule.** Every applied policy change writes an audit event per
 changed rule with its value before and after, the template, and whether an approved mass-change plan
 applied it (§17.11).
@@ -4508,15 +4795,16 @@ primitives.
 The admin lifecycle follows the rule that **moving from v1 must never leave an environment worse
 off**: everything v1 enforced is on by default (same settings source), never opt-in.
 
-1. **Admin offboarding** — columns **`OffboardDate`** (date expression) and
-   **`DeleteAfterDays`** (blank = never delete). At/after OffboardDate the `AdminOffboarding`
-   provider (§6.2) runs v1's sequence on its own job: disable the account → revoke sessions →
-   remove ALL its PIM group memberships + eligibilities → notice mail → after `DeleteAfterDays`,
-   delete. Each step is audited and recorded in a SQL progress record
+1. **Admin auto-disable** — column **`AutoDisableDate`** (date expression; was `OffboardDate`, still
+   read, see §6.2). At/after that date the `AdminOffboarding` provider (§6.2) runs v1's sequence on
+   its own job: disable the account → revoke sessions → remove ALL its PIM group memberships +
+   eligibilities → notice mail → **stop**. Each step is audited and recorded in a SQL progress record
    (`pim.Settings['AdminOffboardState']`), so an interrupted run resumes.
+   🔴 The v1 retention-delete step and its `DeleteAfterDays` column are **removed from the product**:
+   PIM never deletes a user account, and the field is not supported (see §6.2).
 2. **Disabled and revoked stay disabled.** The `Admins` provider disables an account whose
-   `AccountStatus` is `Disabled` or `Revoked`, or that is past its `OffboardDate` (revoking its
-   sessions when revoked), and never re-enables it; the offboarding sweep adds the membership
+   `AccountStatus` is `Disabled` or `Revoked`, or that is past its `AutoDisableDate` (revoking its
+   sessions when revoked), and never re-enables it; the auto-disable sweep adds the membership
    half for a revoked admin.
 3. **Accounts created when due.** A row with a future provisioning date is held back until due;
    name, job title, company and usage location are set and kept in step. Every cloud admin gets
@@ -5383,7 +5671,7 @@ what the screen does, and an entry may deep-link to a *section* of a tab via `an
 | Menu | Entries |
 |---|---|
 | **Overview** | Home |
-| **Access** | Access map · Look up a role · Create access · Change existing access · Admin accounts & TAP · Invite a guest or consultant · Departments & owners (Settings section) · All records |
+| **Access** | Access map · Look up a role · Create access · Change existing access · Admin accounts & TAP · Invite a guest or consultant · Departments & owners (Settings section) · **Delegations — edit in a table** (§71.26: the records table scoped to the assignment entities) · All records (the raw view) |
 | **Pending changes** | Check for problems · Review & commit queue (§18.1f) |
 | **Jobs** | Jobs & status · Engine logs & errors · Job schedule (§11.3a) |
 | **Reviews & controls** | Review standing access · Approvals · Drift: live vs desired (§5.2) · Access reviews · Tenant conformance · Reports · Managed tenants |
@@ -5576,7 +5864,7 @@ other inputs, live-previewed).
 | StatusChangeCode | text + KV-validation status | — | only shown when status != Enabled; shows "verified vs KV" inline |
 
 (Plus the lifecycle columns from §17: `ProvisionDate`, `TAPLifetimeHours`,
-`Template`, `OffboardDate`, `DeleteAfterDays`, `Department`, `Ring`.)
+`Template`, `AutoDisableDate`, `Department`, `Ring`.)
 
 > **🔄 Current meaning (2026-09-12).** The pair names the admin
 > **owner's office user**. (1) Mail PIM sends about the admin (`new-admin`, `tap-delivery`) goes to
@@ -6668,3 +6956,44 @@ using the previous value, so a rotation that is never rolled looks applied and i
 The **operator** and **deploy** credentials (rows 4–5). A credential that rotates itself unattended
 is a way to lock yourself out of the environment you rotate it in. Those are reported by
 `Test-PimCredentialExpiry.ps1` and renewed deliberately.
+
+### 27.10 The SQL admin group — who administers the database
+
+Azure SQL has exactly **one** Microsoft Entra admin. When that slot holds a single principal, every other
+identity that must administer the database needs a contained user created by that one principal — and an
+environment whose admin cannot be used unattended can then never be fixed unattended. So the admin is a
+**security group** (default `grp-pim-sql-admins`) and membership is the access:
+
+| Member | Why |
+|---|---|
+| the nightly updater's managed identity (`ca-pim-update`) | applies additive schema changes before a roll |
+| the environment's user-assigned identity (`id-pim-<token>`) | the environment's own standing identity |
+| the in-network SQL identity (`id-pim-sql-<token>`), private SQL only | the in-cloud database bootstrap runs as it |
+| the deploy identity | creates contained users and applies the schema from the deploy host on public SQL |
+| the troubleshooting identity, when given | support access, used only for troubleshooting |
+| whoever was admin before converging | converging never takes access away |
+
+Entra-only authentication stays on. Contained users that already exist keep working.
+
+**Converging** is one idempotent step, `tools/setup/Initialize-PimSqlAdminGroup.ps1` (the logic lives in
+`tools/setup/_PimSqlAdminGroup.ps1`): read the group, its members, the current admin and Entra-only; plan;
+create the group if absent; add missing members; make the group the admin; then read all of it back. A second
+run reports no changes. Certificate or signed-in (certificate) context only — the step has no secret parameter.
+`-PlanOnly` shows the plan; `-MembersOnly` only adds members, and only when the group already is the admin.
+
+* **New environments:** `New-PimHostingPrerequisites.ps1` converges on the group for public and private SQL.
+  If Microsoft Graph refuses the deploy identity the group rights, the earlier single-principal admin is kept
+  and the command to converge later is printed; a group admin is never moved back to a single identity.
+* **Every updater deploy:** `Deploy-PimUpdateJob.ps1` adds the updater's identity to the group in
+  members-only mode — it never creates the group or moves an admin, so an environment still on a
+  single-principal admin is left as it is and keeps using its contained user.
+* **The updater itself** needs nothing but its managed identity. With no database settings of its own it
+  takes the Manager's server and database for the run and records them on its job (written, read back, and
+  never allowed to fail the update). A secret or vault pointer is never copied — that case, and an unreadable
+  Manager, still refuse a version change. When sign-in fails, the refusal names the identity's object id
+  (read from the token the database refused) and the group to add it to.
+
+Directory behaviours the step handles: reading a group's members without a type filter can omit service
+principals under app-only auth, so membership is read per type; adding a member that is already present
+returns an "already exist" error, which is success; setting the SQL admin is asynchronous, so the new admin
+is polled for; and the group is never added as a member of itself.

@@ -1219,12 +1219,56 @@ function Invoke-PimPreflightValidation {
                 $msg = "MailForwardAddress='$addr' is set for '$upn' but ForwardMailsToContact is not TRUE -- the office-user address is stored and never used."
                 $sug = "Set ForwardMailsToContact=TRUE to send this admin's mail to '$addr', or clear MailForwardAddress."
             } else {
-                $fallback = if ("$mgr".Trim()) { "ManagerEmail='$mgr'" } else { 'nobody (ManagerEmail is empty too)' }
-                $msg = "ForwardMailsToContact=TRUE for '$upn' but MailForwardAddress='$addr' is not an email address -- mail goes to $fallback instead."
-                $sug = "Enter the owner's office user email in MailForwardAddress, or set ForwardMailsToContact=FALSE."
+                $msg = "ForwardMailsToContact=TRUE for '$upn' but MailForwardAddress='$addr' is not an email address -- the per-admin override does nothing, so mail falls back to the sponsor department's owners."
+                $sug = "Enter the owner's office user email in MailForwardAddress, or set ForwardMailsToContact=FALSE and let the admin's sponsor department own the mail."
             }
             [void]$violations.Add((New-PimViolation -Severity 'warning' -Code 'PIM-DOMAIN-001' -Csv 'Account-Definitions-Admins' -Row $i -Column 'MailForwardAddress' `
                 -Message $msg -Suggestion $sug))
+        }
+    }
+
+    # ------------------------------------------------------------------
+    # PIM-MAIL-001 (71.19) -- WHO RECEIVES AN ADMIN'S MAIL IS THE SPONSOR DEPARTMENT, NOT A PERSON.
+    # Operator 2026-09-16: "the logic is that an admin is linked to a dept (sponsor) and the dept has owners";
+    # REQUIREMENTS §62: "we dont add a manager on the person ... whoever is the actual manager of the dept gets the
+    # emails ... otherwise you are vulnerable for org changes". The engine resolves an admin's recipient as
+    # per-admin override -> sponsor department owners -> ManagerEmail (legacy), and REFUSES to issue a TAP it cannot
+    # deliver. Everything this rule reports is therefore an admin who will end up without a credential, or one whose
+    # mail rides on a person's address that no org change will update.
+    #   no recipient at all                        -> WARNING (the TAP is refused; the account cannot be used)
+    #   only ManagerEmail (legacy)                 -> WARNING (works today; move it to the department)
+    # 🔑 SEVERITY IS WARNING, NOT ERROR, DELIBERATELY. An error blocks Commit in the Manager, and every environment that
+    # has not yet moved to sponsor departments would be unable to save ANY change until it had -- a migration gate
+    # disguised as a validation rule. The gap is already loud where it matters: the engine REFUSES the TAP and says why,
+    # Test-PimTenantReady FAILS the environment, and the Accounts screen shows the admin's recipient as "none".
+    # AD-only admins are skipped (they hold no TAP).
+    # ------------------------------------------------------------------
+    if ($loaded.ContainsKey('Account-Definitions-Admins') -and (Get-Command Get-PimAdminMailRecipientPlan -ErrorAction SilentlyContinue)) {
+        $deptIdx = @{}
+        if ($loaded.ContainsKey('PIM-Definitions-Departments')) {
+            foreach ($dr in @($loaded['PIM-Definitions-Departments'].rows)) {
+                $dn = ''; foreach ($k in @('Department', 'DepartmentName', 'Name')) { $v = (Get-PimRowValue -Row $dr -Column $k).Trim(); if ($v) { $dn = $v; break } }
+                if (-not $dn) { continue }
+                $dow = ''; foreach ($k in @('Owners', 'DeptOwner', 'DepartmentOwner', 'ManagerEmail')) { $v = (Get-PimRowValue -Row $dr -Column $k).Trim(); if ($v) { $dow = $v; break } }
+                $deptIdx[$dn.ToLowerInvariant()] = $dow
+            }
+        }
+        $rows = $loaded['Account-Definitions-Admins'].rows
+        for ($i = 0; $i -lt $rows.Count; $i++) {
+            $r = $rows[$i]
+            if (Test-PimRowIsBlank -Row $r) { continue }
+            if ((Get-PimRowValue -Row $r -Column 'TargetPlatform').Trim() -ieq 'AD') { continue }
+            $who = (Get-PimRowValue -Row $r -Column 'UserPrincipalName').Trim(); if (-not $who) { $who = (Get-PimRowValue -Row $r -Column 'UserName').Trim() }
+            $plan = Get-PimAdminMailRecipientPlan -Row $r -DepartmentOwners $deptIdx
+            if ("$($plan.source)" -eq 'none') {
+                [void]$violations.Add((New-PimViolation -Severity 'warning' -Code 'PIM-MAIL-001' -Csv 'Account-Definitions-Admins' -Row $i -Column 'Department' `
+                    -Message "'$who' has no mail recipient: $($plan.reason). A Temporary Access Pass is enforced for every Entra admin and the engine REFUSES to issue one it cannot deliver, so this admin would never be able to sign in." `
+                    -Suggestion "Set the admin's Department to its sponsor department and give that department Owners (Definitions > Departments). A per-admin override is ForwardMailsToContact=TRUE + MailForwardAddress."))
+            } elseif ("$($plan.source)" -eq 'manager-legacy') {
+                [void]$violations.Add((New-PimViolation -Severity 'warning' -Code 'PIM-MAIL-001' -Csv 'Account-Definitions-Admins' -Row $i -Column 'Department' `
+                    -Message "'$who' still receives its mail through ManagerEmail. The rule is the SPONSOR DEPARTMENT's owners -- a person on the row is not updated when the organisation changes." `
+                    -Suggestion "Set the admin's Department to its sponsor department and give that department Owners; ManagerEmail then stops being used."))
+            }
         }
     }
 
@@ -1289,9 +1333,94 @@ function Invoke-PimPreflightValidation {
         }
     }
 
+    # ------------------------------------------------------------------
+    # PIM-MSP-003 / 004 / 005 + PIM-MSP-002 on every replicable entity (REQUIREMENTS §71, framework
+    # MSP-4 SURFACE). One rule, shared with the wizard, the grid and the Manager's PUT gate
+    # (Test-PimReplicationRowFields), so the three can never disagree about what is acceptable.
+    #   003 ERROR   = Replicate is not No/Yes/Follow, is Follow on an admin, or DISAGREES with the admin's
+    #                 ManagementMode (msp <-> Yes, local/blank <-> No). The bundle fails such a row closed,
+    #                 so saving it would silently stop (or never start) replicating the admin.
+    #   004 warning = replication fields on a tenant that is NOT the MSP master -- they mean nothing here
+    #                 and the Manager refuses to change them. Only raised when the mode is KNOWN.
+    #   005 warning = a group-model row's Ring is not 0/1/2 -- it reaches no tenant.
+    #   002 warning = a group-model row's Target is malformed or names an unknown tag (admins: above).
+    # ------------------------------------------------------------------
+    if (Get-Command Test-PimReplicationRowFields -ErrorAction SilentlyContinue) {
+        $repTags = @{ known = $false; tags = @() }
+        if ($global:PIM_ValidatorKnownTenantTags -is [hashtable]) { $repTags = $global:PIM_ValidatorKnownTenantTags }
+        elseif (Get-Command Get-PimManagerKnownTenantTags -ErrorAction SilentlyContinue) { try { $repTags = Get-PimManagerKnownTenantTags } catch { } }
+        $repMaster = $null
+        if ($null -ne $global:PIM_ValidatorIsMspMaster) { $repMaster = [bool]$global:PIM_ValidatorIsMspMaster }
+        elseif (Get-Command Test-PimManagerIsMspMaster -ErrorAction SilentlyContinue) { try { $repMaster = [bool](Test-PimManagerIsMspMaster) } catch { $repMaster = $null } }
+        foreach ($repEnt in @(Get-PimReplicationEntities)) {
+            if (-not $loaded.ContainsKey($repEnt)) { continue }
+            $rows = $loaded[$repEnt].rows
+            $repKind = Get-PimReplicationKindForEntity -Entity $repEnt
+            for ($i = 0; $i -lt $rows.Count; $i++) {
+                $r = $rows[$i]
+                if (Test-PimRowIsBlank -Row $r) { continue }
+                $label = (Get-PimRowValue -Row $r -Column 'GroupTag')
+                if (-not $label) { $label = (Get-PimRowValue -Row $r -Column 'UserPrincipalName') }
+                if (-not $label) { $label = (Get-PimRowValue -Row $r -Column 'UserName') }
+                if (-not $label) { $label = (Get-PimRowValue -Row $r -Column 'Username') }
+                if (-not $label) { $label = "$((Get-PimRowValue -Row $r -Column 'TargetGroupTag')) <- $((Get-PimRowValue -Row $r -Column 'SourceGroupTag'))" }
+                $repVal = (Get-PimRowValue -Row $r -Column 'Replicate').Trim()
+                $ringVal = (Get-PimRowValue -Row $r -Column 'Ring').Trim()
+                $tgtVal = (Get-PimRowValue -Row $r -Column 'Target').Trim()
+                $hasFields = [bool]$repVal -or ($repKind -ne 'admin' -and ([bool]$ringVal -or [bool]$tgtVal))
+                if (-not $hasFields) { continue }
+                if ($repMaster -eq $false) {
+                    [void]$violations.Add((New-PimViolation -Severity 'warning' -Code 'PIM-MSP-004' -Csv $repEnt -Row $i -Column 'Replicate' `
+                        -Message "'$label' carries replication fields (Replicate/Ring/Target) but this tenant is not the MSP master -- they have no effect here." `
+                        -Suggestion "Clear them. Replication is authored only on the MSP master and pulled by managed tenants."))
+                    continue
+                }
+                $chk = Test-PimReplicationRowFields -Row $r -Entity $repEnt -KnownTags @($repTags.tags) -TagsKnown:([bool]$repTags.known)
+                foreach ($err in @($chk.errors)) {
+                    if ("$err" -match '^Target ') {
+                        if ($repKind -ne 'admin') {
+                            [void]$violations.Add((New-PimViolation -Severity 'warning' -Code 'PIM-MSP-002' -Csv $repEnt -Row $i -Column 'Target' -Message "'$label' -- $err" `
+                                -Suggestion "Use tag:<key:value>, tag:a+b (all of), tenant:<id>, or leave blank for every tenant the ring admits."))
+                        }
+                        continue
+                    }
+                    [void]$violations.Add((New-PimViolation -Severity 'error' -Code 'PIM-MSP-003' -Csv $repEnt -Row $i -Column 'Replicate' -Message "'$label' -- $err" `
+                        -Suggestion "Set Replicate to No, Yes or Follow. On an admin it must match ManagementMode: msp = Yes, local = No."))
+                }
+                if ($repKind -ne 'admin') {
+                    foreach ($w in @($chk.warnings)) {
+                        if ("$w" -match '^Ring ') {
+                            [void]$violations.Add((New-PimViolation -Severity 'warning' -Code 'PIM-MSP-005' -Csv $repEnt -Row $i -Column 'Ring' -Message "'$label' -- $w" -Suggestion 'Use Ring 0, 1 or 2, or leave it blank (not narrowed by ring).'))
+                        } elseif ("$w" -match 'no managed tenant carries') {
+                            [void]$violations.Add((New-PimViolation -Severity 'warning' -Code 'PIM-MSP-002' -Csv $repEnt -Row $i -Column 'Target' -Message "'$label' -- $w" -Suggestion "Pick tags from the managed tenants' tags."))
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     # PIM-TAP-001 (CreateTAP=TRUE on an AD-only admin) was RETIRED 2026-09-13: TAP is enforced for every
     # admin (operator "enforce tap to true"), CreateTAP is no longer read, and the engine simply issues no
     # TAP to an AD-only admin -- there is nothing left for the operator to fix.
+    # PIM-TAP-003 (71.17, operator 2026-09-15 "tap is on for all"): CreateTAP=FALSE on an ENTRA admin is a value the
+    # engine ignores -- every Entra admin gets a TAP. Accepting it silently lets the row claim a choice that does not
+    # exist, so it is reported (warning) with a one-click fix to TRUE. Blank is fine (means the enforced default).
+    if ($loaded.ContainsKey('Account-Definitions-Admins')) {
+        $tapRows = $loaded['Account-Definitions-Admins'].rows
+        for ($i = 0; $i -lt $tapRows.Count; $i++) {
+            $r = $tapRows[$i]
+            if (Test-PimRowIsBlank -Row $r) { continue }
+            if ((Get-PimRowValue -Row $r -Column 'TargetPlatform').Trim() -ieq 'AD') { continue }
+            $ct = (Get-PimRowValue -Row $r -Column 'CreateTAP').Trim()
+            if ($ct -and $ct -notmatch '(?i)^(true|1|yes)$') {
+                $who = (Get-PimRowValue -Row $r -Column 'UserPrincipalName').Trim(); if (-not $who) { $who = (Get-PimRowValue -Row $r -Column 'UserName').Trim() }
+                [void]$violations.Add((New-PimViolation -Severity 'warning' -Code 'PIM-TAP-003' -Csv 'Account-Definitions-Admins' -Row $i -Column 'CreateTAP' `
+                    -Message "'$who' -- CreateTAP='$ct' has NO effect: a Temporary Access Pass is enforced for every Entra admin (single tenant, MSP master and managed tenants alike)." `
+                    -Suggestion 'Set CreateTAP to TRUE (or leave it blank). To stop a TAP, the admin must not be an Entra admin (TargetPlatform=AD).'))
+            }
+        }
+    }
 
     # ------------------------------------------------------------------
     # PIM-SCHED-* + PIM-TAP-002: scheduling columns (LIFECYCLE-GOVERNANCE
@@ -1348,27 +1477,36 @@ function Invoke-PimPreflightValidation {
             }
 
             # Phase 5: offboarding columns
-            $offRaw = (Get-PimRowValue -Row $r -Column 'OffboardDate').Trim()
+            # 🔴 71.23 -- AutoDisableDate (legacy name: OffboardDate). Three cases, in order:
+            #   BOTH names set and different -> ERROR. The engine refuses the row rather than
+            #     guessing which date disables the account, so the Manager must say so too.
+            #   only the legacy name         -> WARNING to rename (the row still works).
+            #   unreadable date expression   -> ERROR (the sweep skips it: the account is NOT disabled).
+            $offPlan = Get-PimAdminAutoDisableDate -Row $r
+            if ($offPlan.conflict) {
+                [void]$violations.Add((New-PimViolation -Severity 'error' -Code 'PIM-OFF-002' -Csv 'Account-Definitions-Admins' -Row $i -Column 'AutoDisableDate' `
+                    -Message "'$upn' carries BOTH AutoDisableDate and the legacy OffboardDate, with different dates. PIM will NOT guess which one disables the account, so this admin is skipped entirely by the auto-disable sweep." `
+                    -Suggestion "Keep the date you mean in AutoDisableDate and clear OffboardDate."))
+            } elseif ($offPlan.source -eq 'legacy') {
+                [void]$violations.Add((New-PimViolation -Severity 'warning' -Code 'PIM-OFF-003' -Csv 'Account-Definitions-Admins' -Row $i -Column 'OffboardDate' `
+                    -Message "'$upn' still uses the old column name OffboardDate. It is read, so nothing is broken -- but the column is now AutoDisableDate, because the sweep only DISABLES the account (PIM never deletes an account)." `
+                    -Suggestion "Move the date to AutoDisableDate and clear OffboardDate."))
+            }
+            $offRaw = "$($offPlan.value)".Trim()
             if ($offRaw) {
+                $offCol = if ($offPlan.source -eq 'legacy') { 'OffboardDate' } else { 'AutoDisableDate' }
                 try { $null = Resolve-PimDateExpression -Expression $offRaw } catch {
-                    [void]$violations.Add((New-PimViolation -Severity 'error' -Code 'PIM-SCHED-001' -Csv 'Account-Definitions-Admins' -Row $i -Column 'OffboardDate' `
-                        -Message "OffboardDate '$offRaw' for '$upn' is not a valid date expression -- the offboarding sweep skips the row, so this admin will NOT be offboarded." `
+                    [void]$violations.Add((New-PimViolation -Severity 'error' -Code 'PIM-SCHED-001' -Csv 'Account-Definitions-Admins' -Row $i -Column $offCol `
+                        -Message "$offCol '$offRaw' for '$upn' is not a valid date expression -- the auto-disable sweep skips the row, so this admin's account will NOT be disabled." `
                         -Suggestion "Use the date-expression grammar, e.g. '2026-09-30' or 'FirstDayNextMonth'."))
                 }
             }
-            $delRaw = (Get-PimRowValue -Row $r -Column 'DeleteAfterDays').Trim()
-            if ($delRaw) {
-                $delNum = 0
-                if (-not [int]::TryParse($delRaw, [ref]$delNum) -or $delNum -lt 0) {
-                    [void]$violations.Add((New-PimViolation -Severity 'error' -Code 'PIM-OFF-001' -Csv 'Account-Definitions-Admins' -Row $i -Column 'DeleteAfterDays' `
-                        -Message "DeleteAfterDays '$delRaw' for '$upn' must be a non-negative integer (days between revoke and account deletion). The engine skips the delete step for invalid values." `
-                        -Suggestion "Set the retention in whole days, e.g. 30 -- or leave blank to never delete."))
-                } elseif (-not $offRaw) {
-                    [void]$violations.Add((New-PimViolation -Severity 'warning' -Code 'PIM-OFF-001' -Csv 'Account-Definitions-Admins' -Row $i -Column 'DeleteAfterDays' `
-                        -Message "DeleteAfterDays is set for '$upn' but OffboardDate is empty -- the retention only counts from the offboarding revoke, so nothing will happen." `
-                        -Suggestion "Set OffboardDate too, or clear DeleteAfterDays."))
-                }
-            }
+            # 🔴 71.21 -- THERE IS NO PIM-OFF-001 ANY MORE. It warned that DeleteAfterDays was inert.
+            # The field is no longer supported at all (operator, 2026-09-16: "nobody uses it yet, so
+            # dont worry about deleteafterdays, as i dont want it to be shown as it confuses"), so
+            # there is nothing left to warn about: a row that still carries the value is accepted in
+            # SILENCE and the schema preflight drops the column. Warning about a field the product
+            # does not have would be noise the operator cannot act on.
         }
     }
 

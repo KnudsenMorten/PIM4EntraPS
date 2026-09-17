@@ -99,8 +99,9 @@
 # Unset => env default (ON in test, OFF in protected). Explicit wins either way:
 # $global:PIM_AccountDisableEnabled = $false
 
-# Date-driven admin offboarding (revoke at OffboardDate, delete DeleteAfterDays
-# later) + the REST-engine AdminOffboarding membership-removal scope.
+# Date-driven admin offboarding (revoke at OffboardDate; the account is KEPT,
+# disabled -- PIM never deletes an account) + the REST-engine AdminOffboarding
+# membership-removal scope.
 # Unset => env default; explicit setting overrides:
 # $global:PIM_EnableAutomaticOffboarding = $false
 

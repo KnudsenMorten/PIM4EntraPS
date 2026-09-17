@@ -205,11 +205,17 @@ function Send-PimNotifyMail {
     }
     # Allowlist (REQUIREMENTS s29): when configured + non-empty, drop any recipient
     # not on it (after the redirect resolution above). Empty/unset = no restriction.
+    # 71.19: -Recipient may name SEVERAL addresses (a sponsor department can have more than one owner, and the operator's
+    # rule is that they all get the mail). They are carried as one ';'-joined string so every caller keeps its signature,
+    # and split here into one message with several toRecipients -- one mail, one TAP code, all the owners.
+    $rcptList = @("$rcpt" -split '[;,]' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
     $allow = @($global:PIM_MailAllowlist | Where-Object { "$_".Trim() })
-    if ($allow.Count -gt 0 -and $rcpt) {
-        $hit = $false
-        foreach ($a in $allow) { if ("$a".Trim().ToLowerInvariant() -eq "$rcpt".Trim().ToLowerInvariant()) { $hit = $true; break } }
-        if (-not $hit) { Write-Host "  [Mail] '$rcpt' not on allowlist -- not sent." -ForegroundColor DarkYellow; return @{ sent = $false; recipient = $rcpt; reason = 'recipient not on allowlist' } }
+    if ($allow.Count -gt 0 -and $rcptList.Count) {
+        $allowLc = @($allow | ForEach-Object { "$_".Trim().ToLowerInvariant() })
+        $kept = @($rcptList | Where-Object { $allowLc -contains "$_".ToLowerInvariant() })
+        if (-not $kept.Count) { Write-Host "  [Mail] '$rcpt' not on allowlist -- not sent." -ForegroundColor DarkYellow; return @{ sent = $false; recipient = $rcpt; reason = 'recipient not on allowlist' } }
+        if ($kept.Count -ne $rcptList.Count) { Write-Host "  [Mail] allowlist dropped $($rcptList.Count - $kept.Count) of $($rcptList.Count) recipient(s)." -ForegroundColor DarkYellow }
+        $rcptList = $kept; $rcpt = ($kept -join ';')
     }
     $tpl = Get-PimNotifyTemplateText -Type $Type
     if (-not $tpl) { return @{ sent = $false; recipient = $rcpt; reason = "no template '$Type'" } }
@@ -218,7 +224,9 @@ function Send-PimNotifyMail {
     if ($WhatIf -or $global:WhatIfMode) { return @{ sent = $false; recipient = $rcpt; subject = $r.Subject; rendered = $r; reason = 'whatif' } }
     if (-not $sender) { Write-Warning "  [Mail] `$global:PIM_MailSender not set -- rendered only, not sent."; return @{ sent = $false; recipient = $rcpt; subject = $r.Subject; rendered = $r; reason = 'no sender' } }
     if (-not $rcpt)   { return @{ sent = $false; subject = $r.Subject; rendered = $r; reason = 'no recipient' } }
-    $body = @{ message = @{ subject = $r.Subject; body = @{ contentType = 'HTML'; content = $r.BodyHtml }; toRecipients = @(@{ emailAddress = @{ address = $rcpt } }) }; saveToSentItems = $false }
+    if (-not $rcptList.Count) { $rcptList = @($rcpt) }
+    $body = @{ message = @{ subject = $r.Subject; body = @{ contentType = 'HTML'; content = $r.BodyHtml }
+                            toRecipients = @($rcptList | ForEach-Object { @{ emailAddress = @{ address = $_ } } }) }; saveToSentItems = $false }
     $sendAs = Resolve-PimMailSendIdentity
     # Splat the switch only when it is set: offline suites stub Invoke-PimGraph with a fixed
     # parameter list, and an unconditional -UseManagedIdentity would break every one of them.
@@ -259,10 +267,15 @@ function Test-PimTapMailReady {
       Returns @{ ok; reason }. Never throws -- a mail-readiness probe that
       throws would fail the request for a reason the operator cannot action.
     #>
-    param([string]$Recipient)
+    param([string]$Recipient, [string]$Reason)
 
     if (-not "$Recipient".Trim()) {
-        return @{ ok = $false; reason = 'this admin row has no forwarding address (MailForwardAddress) and no ManagerEmail, so there is nowhere to deliver the TAP -- set the forwarding email on the admin row' }
+        # 71.19: the rule is the SPONSOR DEPARTMENT's owners, so say that -- the old text sent people to ManagerEmail,
+        # which is not the mechanism any more. -Reason carries the resolver's own sentence (which admin, which
+        # department, what is missing) when the caller has it.
+        $why = "$Reason".Trim()
+        return @{ ok = $false; reason = ("there is nowhere to deliver the TAP: " + $(if ($why) { $why } else { "this admin has no resolvable recipient" }) +
+                                         " -- an admin's mail goes to its SPONSOR DEPARTMENT's owners, so set the admin's Department and set Owners on that department (PIM-Definitions-Departments); a per-admin override is ForwardMailsToContact=TRUE + MailForwardAddress") }
     }
     # 🔴 HYDRATE BEFORE JUDGING. Measured live on EFIF 2026-08-25: this guard refused ALL SIX admins
     # with "no notification sender is configured" while pim.Settings held a perfectly good

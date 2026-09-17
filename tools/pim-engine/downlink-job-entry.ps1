@@ -65,6 +65,9 @@ param(
     # production run -- "we did not look", which its own contract says must not be read as "they
     # are fine". The guard was correct and simply never armed on this path.
     [string[]]$SlaveAdminPrefixes = @(@("$env:PIM_SlaveAdminPrefixes" -split ',') | ForEach-Object { "$_".Trim() } | Where-Object { $_ }),
+    # 71.14: the explicit, default-OFF retraction opt-in (an ACA env value is a string, so this is one too). Only an
+    # explicit true turns it on -- see Resolve-PimDownlinkRetractionOptIn.
+    [string]$AllowRetraction = $env:PIM_DOWNLINK_ALLOW_RETRACTION,
     [switch]$WhatIfMode
 )
 
@@ -120,6 +123,10 @@ if (-not "$BaselineUrl".Trim() -and -not "$BaselineDocPath".Trim()) {
 # is not.
 if ("$BaselineUrl".Trim()) { JobLog ("baseline source: private URL {0}" -f ($BaselineUrl -replace '\?.*$', '?<redacted>')) }
 else { JobLog ("baseline source: mounted/pulled file {0}" -f $BaselineDocPath) }
+# 71.35: which master signing keys this tenant trusts (Test-PimBaselineDoc reads PIM_BaselineTrustedKeys from the env).
+$__pins = @("$env:PIM_BaselineTrustedKeys" -split '[,;\s]+' | Where-Object { "$_".Trim() })
+if ($__pins.Count) { JobLog ("trusted master signing key(s): {0} (a bundle signed by any other key is refused)" -f ($__pins -join ', ')) }
+else { JobLog 'trusted master signing keys: none pinned -- only bundles signed by the embedded product certificate verify' 'WARN' }
 
 # --- 2) COMPOSE downlink-sync THEN engine apply via the scenario runner --------
 # Invoke-PimScenarioRun.ps1 is the single scenario-bound runner: for S5/S6 it runs
@@ -148,6 +155,10 @@ if (@($SlaveAdminPrefixes).Count) {
 } else {
     JobLog 'slave admin prefixes: NOT SUPPLIED -- the recognisability guard is INERT for this run, so an admin the slave cannot see would be recreated every tick. Set PIM_SlaveAdminPrefixes (Deploy-PimDownlinkJob -SlaveAdminPrefixes).' 'WARN'
 }
+$retraction = Resolve-PimDownlinkRetractionOptIn -Value $AllowRetraction
+if ($retraction.allow) { $runArgs['AllowRetraction'] = $true; JobLog $retraction.reason 'WARN' }
+elseif (-not $retraction.recognised) { JobLog $retraction.reason 'WARN' }
+else { JobLog $retraction.reason }
 if ("$BaselineDocPath".Trim()) { $runArgs['BaselineDocPath'] = $BaselineDocPath }
 elseif ("$BaselineUrl".Trim()) {
     $runArgs['BaselineUrl'] = $BaselineUrl
@@ -190,6 +201,15 @@ if ($result) {
             }
         }
     }
+}
+$held = $false
+if ($result) { $held = [bool](Get-PimDownlinkJobValue -Object ($result | Select-Object -Last 1) -Key 'held') }
+if ($ok -and $held) {
+    # 71.13 -- HELD is not FAILED. The pull applied; the engine's policy mass-change breaker held a change set that
+    # needs an operator's approval (the plan hash + approve command are in the engine-apply step above, and the
+    # breaker raised its own alert). The execution succeeds, and this line says why it still needs attention.
+    JobLog ("==== downlink JOB HELD ({0}; NEEDS APPROVAL -- see the engine-apply step) ====" -f $(if ($WhatIfMode) { 'planned' } else { 'applied' })) 'WARN'
+    exit 0
 }
 if ($ok) {
     JobLog ("==== downlink JOB SUCCEEDED ({0}) ====" -f $(if ($WhatIfMode) { 'planned' } else { 'applied' }))

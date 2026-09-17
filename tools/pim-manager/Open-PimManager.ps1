@@ -1457,7 +1457,7 @@ $script:PimCsvBases = @(
     # In SQL mode this defaultHeader IS the grid's header (Read-PimRows returns $spec.defaultHeader
     # verbatim -- it is NOT derived from the rows), so a field missing here is invisible and
     # uneditable in All records no matter what the row actually carries.
-    # Missing were: AdminType, ManagerEmail, AccountStatus, OffboardDate, ManagementMode, Company,
+    # Missing were: AdminType, ManagerEmail, AccountStatus, AutoDisableDate, ManagementMode, Company,
     # Environment, TAPLifetimeHours -- every one of which /api/admin-accounts, /api/admin-tap and
     # the engine's Admins/AdminTap providers already read.
     # 🔑 THE USER-VISIBLE EFFECT, reported 2026-09-12: "admin is different types including internal
@@ -1470,7 +1470,7 @@ $script:PimCsvBases = @(
     # "no ManagerEmail on the row" and cannot be fixed from the grid.
     # 🪤 Unlike the JobSchedule case (BUG-136), this one DOES reach every environment on an image
     # roll: the header is shipped in code and never persisted per-deployment. No migration needed.
-    [ordered]@{ base = 'Account-Definitions-Admins';      group = 'Definitions';  defaultHeader = @('FirstName','LastName','Initials','Purpose','TargetUsage','TargetPlatform','UserType','AdminType','UserName','DisplayName','UserPrincipalName','UsageLocation','Company','Department','ManagerEmail','Environment','ForwardMailsToContact','MailForwardAddress','CreateTAP','TAPStartDate','TAPLifetimeHours','AccountStatus','OffboardDate','ManagementMode','Ring','Target') },
+    [ordered]@{ base = 'Account-Definitions-Admins';      group = 'Definitions';  defaultHeader = @('FirstName','LastName','Initials','Purpose','TargetUsage','TargetPlatform','UserType','AdminType','UserName','DisplayName','UserPrincipalName','UsageLocation','Company','Department','ManagerEmail','Environment','ForwardMailsToContact','MailForwardAddress','CreateTAP','TAPStartDate','TAPLifetimeHours','AccountStatus','AutoDisableDate','ManagementMode','Ring','Target','Replicate') },
     # 🔴 BUG-139 (same class) -- THE ACCOUNTABLE-OWNER FIELDS HAD NO COLUMN ON *ROLES*.
     # DESIGN.md §1268/§1502 defines the owner chain as: `Owners` (pipe-joined UPNs) -> `SponsorUpn`
     # (Roles) -> the group's **Department** contact. The ENGINE implements all three
@@ -1484,11 +1484,11 @@ $script:PimCsvBases = @(
     # three counts. The design and the engine were right; only the column was absent.
     # PolicyTemplate + ReviewCycle are read by the same provider block and were missing too;
     # SponsorNotes is the v2 companion field recorded in REQUIREMENTS §1451.
-    [ordered]@{ base = 'PIM-Definitions-Roles';           group = 'Definitions';  defaultHeader = @('GroupName','GroupDescription','GroupTag','AdministrativeUnitTag','CPPlatform','Plane','TierLevel','PermissionScope','SyncPlatform','IsRoleAssignable','Owners','SponsorUpn','SponsorNotes','Department','Organisation','Project','Team','BusinessUnit','PolicyTemplate','ReviewCycle') },
-    [ordered]@{ base = 'PIM-Definitions-Tasks';           group = 'Definitions';  defaultHeader = @('GroupName','GroupDescription','GroupTag','AdministrativeUnitTag','IsRoleAssignable','Workload','Level','TierLevel','Plane','CPPlatform','Owners') },
-    [ordered]@{ base = 'PIM-Definitions-Services';        group = 'Definitions';  defaultHeader = @('GroupName','GroupDescription','GroupTag','AdministrativeUnitTag','IsRoleAssignable','Workload','Level','TierLevel','Plane','CPPlatform','Owners') },
-    [ordered]@{ base = 'PIM-Definitions-Processes';       group = 'Definitions';  defaultHeader = @('GroupName','GroupDescription','GroupTag','AdministrativeUnitTag','IsRoleAssignable','Workload','Level','TierLevel','Plane','CPPlatform','Owners') },
-    [ordered]@{ base = 'PIM-Definitions-Resources';       group = 'Definitions';  defaultHeader = @('GroupName','GroupDescription','GroupTag','AdministrativeUnitTag','IsRoleAssignable','Workload','Level','TierLevel','Plane','CPPlatform','Owners') },
+    [ordered]@{ base = 'PIM-Definitions-Roles';           group = 'Definitions';  defaultHeader = @('GroupName','GroupDescription','GroupTag','AdministrativeUnitTag','CPPlatform','Plane','TierLevel','PermissionScope','SyncPlatform','IsRoleAssignable','Owners','SponsorUpn','SponsorNotes','Department','Organisation','Project','Team','BusinessUnit','PolicyTemplate','ReviewCycle','Replicate','Ring','Target') },
+    [ordered]@{ base = 'PIM-Definitions-Tasks';           group = 'Definitions';  defaultHeader = @('GroupName','GroupDescription','GroupTag','AdministrativeUnitTag','IsRoleAssignable','Workload','Level','TierLevel','Plane','CPPlatform','Owners','PolicyTemplate','Replicate','Ring','Target') },
+    [ordered]@{ base = 'PIM-Definitions-Services';        group = 'Definitions';  defaultHeader = @('GroupName','GroupDescription','GroupTag','AdministrativeUnitTag','IsRoleAssignable','Workload','Level','TierLevel','Plane','CPPlatform','Owners','PolicyTemplate','Replicate','Ring','Target') },
+    [ordered]@{ base = 'PIM-Definitions-Processes';       group = 'Definitions';  defaultHeader = @('GroupName','GroupDescription','GroupTag','AdministrativeUnitTag','IsRoleAssignable','Workload','Level','TierLevel','Plane','CPPlatform','Owners','PolicyTemplate','Replicate','Ring','Target') },
+    [ordered]@{ base = 'PIM-Definitions-Resources';       group = 'Definitions';  defaultHeader = @('GroupName','GroupDescription','GroupTag','AdministrativeUnitTag','IsRoleAssignable','Workload','Level','TierLevel','Plane','CPPlatform','Owners','PolicyTemplate','Replicate','Ring','Target') },
     # 🔴 BUG-140 -- THE SPONSOR-BY-DEPARTMENT MODEL WAS DEAD, because its KEY COLUMN was missing.
     # Get-PimDepartmentOwnerIndex (PIM-EngineProviders.ps1:551) builds Department -> Owners by
     # reading `Department` / `DepartmentName` / `Name` off each PIM-Definitions-Departments row.
@@ -1506,19 +1506,19 @@ $script:PimCsvBases = @(
     # the fragile model the design rejects.
     # `Department` leads the header because Get-PimStoreRowKey also keys Departments on it
     # (falling back to GroupTag only when it is blank).
-    [ordered]@{ base = 'PIM-Definitions-Departments';     group = 'Definitions';  defaultHeader = @('Department','GroupName','GroupDescription','GroupTag','AdministrativeUnitTag','IsRoleAssignable','Workload','Level','TierLevel','Plane','CPPlatform','Owners') },
-    [ordered]@{ base = 'PIM-Definitions-Organization';    group = 'Definitions';  defaultHeader = @('GroupName','GroupDescription','GroupTag','AdministrativeUnitTag','IsRoleAssignable','Workload','Level','TierLevel','Plane','CPPlatform','Owners') },
+    [ordered]@{ base = 'PIM-Definitions-Departments';     group = 'Definitions';  defaultHeader = @('Department','GroupName','GroupDescription','GroupTag','AdministrativeUnitTag','IsRoleAssignable','Workload','Level','TierLevel','Plane','CPPlatform','Owners','Replicate','Ring','Target') },
+    [ordered]@{ base = 'PIM-Definitions-Organization';    group = 'Definitions';  defaultHeader = @('GroupName','GroupDescription','GroupTag','AdministrativeUnitTag','IsRoleAssignable','Workload','Level','TierLevel','Plane','CPPlatform','Owners','Replicate','Ring','Target') },
     # Direct-group types Project (PROJ-, AU PIM-PROJECTS) and Cross-org (CORG-, AU PIM-CROSSORG) --
     # operator, 2026-09-12: "where is the project and cross-org direct group".
-    [ordered]@{ base = 'PIM-Definitions-Projects';        group = 'Definitions';  defaultHeader = @('GroupName','GroupDescription','GroupTag','AdministrativeUnitTag','IsRoleAssignable','Workload','Level','TierLevel','Plane','CPPlatform','Owners') },
-    [ordered]@{ base = 'PIM-Definitions-CrossOrg';        group = 'Definitions';  defaultHeader = @('GroupName','GroupDescription','GroupTag','AdministrativeUnitTag','IsRoleAssignable','Workload','Level','TierLevel','Plane','CPPlatform','Owners') },
+    [ordered]@{ base = 'PIM-Definitions-Projects';        group = 'Definitions';  defaultHeader = @('GroupName','GroupDescription','GroupTag','AdministrativeUnitTag','IsRoleAssignable','Workload','Level','TierLevel','Plane','CPPlatform','Owners','Replicate','Ring','Target') },
+    [ordered]@{ base = 'PIM-Definitions-CrossOrg';        group = 'Definitions';  defaultHeader = @('GroupName','GroupDescription','GroupTag','AdministrativeUnitTag','IsRoleAssignable','Workload','Level','TierLevel','Plane','CPPlatform','Owners','Replicate','Ring','Target') },
     [ordered]@{ base = 'PIM-Definitions-AU';              group = 'Definitions';  defaultHeader = @('AUDisplayName','AUDescription','AdministrativeUnitTag','Workload','Level','TierLevel','Visibility') },
-    [ordered]@{ base = 'PIM-Assignments-Admins';          group = 'Assignments';  defaultHeader = @('Username','GroupTag','AssignmentType','Action','UpdateExisting','AutoExtend','NumOfDaysWhenExpire','Permanent','CPPlatform','Plane','TierLevel','PermissionScope','SyncPlatform') },
-    [ordered]@{ base = 'PIM-Assignments-Groups';          group = 'Assignments';  defaultHeader = @('TargetGroupTag','SourceGroupTag','AssignmentType','Action','UpdateExisting','AutoExtend','NumOfDaysWhenExpire','Permanent','CPPlatform','Plane','TierLevel','PermissionScope','SyncPlatform') },
-    [ordered]@{ base = 'PIM-Assignments-Roles-Groups';    group = 'Assignments';  defaultHeader = @('GroupTag','RoleDefinitionName','AssignmentType','Action','UpdateExisting','AutoExtend','NumOfDaysWhenExpire','Permanent','CPPlatform','Plane','TierLevel','PermissionScope','SyncPlatform') },
-    [ordered]@{ base = 'PIM-Assignments-Roles-AUs';       group = 'Assignments';  defaultHeader = @('GroupTag','AdministrativeUnitTag','RoleDefinitionName','AssignmentType','Action','UpdateExisting','AutoExtend','NumOfDaysWhenExpire','Permanent','CPPlatform','Plane','TierLevel','PermissionScope','SyncPlatform') },
-    [ordered]@{ base = 'PIM-Assignments-Azure-Resources'; group = 'Assignments';  defaultHeader = @('GroupTag','AzScope','AzScopePermission','AssignmentType','Action','UpdateExisting','AutoExtend','NumOfDaysWhenExpire','Permanent','CPPlatform','Plane','TierLevel','PermissionScope','SyncPlatform') },
-    [ordered]@{ base = 'PIM-Assignments-Workloads';       group = 'Assignments';  defaultHeader = @('Workload','RoleName','GroupTag','Scope','Action','Notes') }
+    [ordered]@{ base = 'PIM-Assignments-Admins';          group = 'Assignments';  defaultHeader = @('Username','GroupTag','AssignmentType','Action','UpdateExisting','AutoExtend','NumOfDaysWhenExpire','Permanent','CPPlatform','Plane','TierLevel','PermissionScope','SyncPlatform','Replicate','Ring','Target') },
+    [ordered]@{ base = 'PIM-Assignments-Groups';          group = 'Assignments';  defaultHeader = @('TargetGroupTag','SourceGroupTag','AssignmentType','Action','UpdateExisting','AutoExtend','NumOfDaysWhenExpire','Permanent','CPPlatform','Plane','TierLevel','PermissionScope','SyncPlatform','Replicate','Ring','Target') },
+    [ordered]@{ base = 'PIM-Assignments-Roles-Groups';    group = 'Assignments';  defaultHeader = @('GroupTag','RoleDefinitionName','AssignmentType','Action','UpdateExisting','AutoExtend','NumOfDaysWhenExpire','Permanent','CPPlatform','Plane','TierLevel','PermissionScope','SyncPlatform','Replicate','Ring','Target') },
+    [ordered]@{ base = 'PIM-Assignments-Roles-AUs';       group = 'Assignments';  defaultHeader = @('GroupTag','AdministrativeUnitTag','RoleDefinitionName','AssignmentType','Action','UpdateExisting','AutoExtend','NumOfDaysWhenExpire','Permanent','CPPlatform','Plane','TierLevel','PermissionScope','SyncPlatform','Replicate','Ring','Target') },
+    [ordered]@{ base = 'PIM-Assignments-Azure-Resources'; group = 'Assignments';  defaultHeader = @('GroupTag','AzScope','AzScopePermission','AssignmentType','Action','UpdateExisting','AutoExtend','NumOfDaysWhenExpire','Permanent','CPPlatform','Plane','TierLevel','PermissionScope','SyncPlatform','Replicate','Ring','Target') },
+    [ordered]@{ base = 'PIM-Assignments-Workloads';       group = 'Assignments';  defaultHeader = @('Workload','RoleName','GroupTag','Scope','Action','Notes','Replicate','Ring','Target') }
 )
 
 # ---------------------------------------------------------------------------
@@ -2354,11 +2354,40 @@ function Get-PimAdminTapRecipient {
     # used (operator, 2026-09-12). One function now answers for both, so they cannot drift again.
     # 🪤 AN ADDRESS MUST LOOK LIKE ONE: live v1 rows hold 'FALSE'/'true' in MailForwardAddress; the
     # shared rule treats those as no recipient, and the caller refuses and says so.
-    if (-not (Get-Command Get-PimAdminMailRecipient -ErrorAction SilentlyContinue)) {
+    if (-not (Get-Command Get-PimAdminMailRecipientPlan -ErrorAction SilentlyContinue)) {
         Write-Warning 'Get-PimAdminTapRecipient: engine/_shared/PIM-Rest.ps1 is not loaded -- no recipient can be resolved, so TAP delivery is refused.'
         return ''
     }
-    return (Get-PimAdminMailRecipient -Row $Row)
+    # 71.19: the sponsor DEPARTMENT's owners, read from this Manager's own store (the engine's index is not loaded here).
+    return ((@((Get-PimAdminTapRecipientPlan -Row $Row).recipients)) -join ';')
+}
+
+function Get-PimManagerDepartmentOwnerIndex {
+    # 71.19: department (lower case) -> Owners string, from the SAME entity the engine reads
+    # (PIM-Definitions-Departments; Owners, with the legacy DeptOwner/DepartmentOwner/ManagerEmail spellings).
+    # Cached for the process; Reset-PimManagerDepartmentOwnerIndex clears it after a save.
+    if ($script:PimMgrDeptOwners -is [hashtable]) { return $script:PimMgrDeptOwners }
+    $h = @{}
+    try {
+        foreach ($r in @((Read-PimRows -BaseName 'PIM-Definitions-Departments' -NoScope).rows)) {
+            $n = ''; foreach ($k in @('Department', 'DepartmentName', 'Name')) { $v = "$(Get-PimCell $r $k)".Trim(); if ($v) { $n = $v; break } }
+            if (-not $n) { continue }
+            $own = ''; foreach ($k in @('Owners', 'DeptOwner', 'DepartmentOwner', 'ManagerEmail')) { $v = "$(Get-PimCell $r $k)".Trim(); if ($v) { $own = $v; break } }
+            $h[$n.ToLowerInvariant()] = $own
+        }
+    } catch { Write-Warning "  [tap] the department owner index could not be read ($($_.Exception.Message)) -- recipients fall back to the per-admin override / legacy ManagerEmail."; return $null }
+    $script:PimMgrDeptOwners = $h
+    return $h
+}
+function Reset-PimManagerDepartmentOwnerIndex { $script:PimMgrDeptOwners = $null }
+
+function Get-PimAdminTapRecipientPlan {
+    # 71.19: the full answer (recipients + source + why), so the screen can say WHERE it goes and WHY it does not.
+    param([Parameter(Mandatory)][object]$Row)
+    if (-not (Get-Command Get-PimAdminMailRecipientPlan -ErrorAction SilentlyContinue)) { return [ordered]@{ recipients = @(); recipient = ''; source = 'none'; reason = 'engine/_shared/PIM-Rest.ps1 is not loaded' } }
+    $idx = Get-PimManagerDepartmentOwnerIndex
+    if ($null -eq $idx) { return (Get-PimAdminMailRecipientPlan -Row $Row) }
+    return (Get-PimAdminMailRecipientPlan -Row $Row -DepartmentOwners $idx)
 }
 function Test-PimManagerAdminTapWanted {
     # Mirror of the engine's Test-PimAdminTapWanted (PIM-EngineProviders.ps1), which the Manager does not
@@ -2391,6 +2420,30 @@ function Get-PimManagerKnownTenantTags {
         $hasRegistry = [bool](@(Invoke-PimSqlQuery -ConnectionString $cs -Sql "SELECT CASE WHEN OBJECT_ID('platform.Tenants') IS NULL THEN 0 ELSE 1 END AS n")[0].n)
         return @{ known = $hasRegistry; tags = @($out.ToArray() | Sort-Object) }
     } catch { return @{ known = $false; tags = @() } }
+}
+function Test-PimManagerIsMspMaster {
+    # §71.5 -- the Replication surface exists ONLY on the MSP master (managing tenant). A single tenant has
+    # nothing to target and a managed tenant never edits targets (framework MSP-4 SURFACE item 1).
+    # Fail CLOSED: an unresolvable scenario is "not the master", which hides and refuses the fields.
+    if (Get-Variable -Name PIM_ManagerReplicationMasterOverride -Scope Global -ErrorAction SilentlyContinue) {
+        return [bool]$global:PIM_ManagerReplicationMasterOverride
+    }
+    if (-not (Get-Command Get-PimActiveScenario -ErrorAction SilentlyContinue)) { return $false }
+    try { $s = Get-PimActiveScenario; return ("$($s.role)" -eq 'msp-master') } catch { return $false }
+}
+function Get-PimManagerReplicationHeader {
+    # §71.5 -- the grid header a tenant is shown for one entity. On the master: the full shipped header.
+    # Anywhere else: Replicate, Ring and Target are removed on every replicable entity, and ManagementMode on the admin
+    # entity (operator 2026-09-15: sync surfaces are MSP-master only). The engine spec is unchanged,
+    # so Test-PimEntityFieldCoverage still sees every column the engine reads.
+    param([Parameter(Mandatory)][string]$Base, [AllowEmptyCollection()][string[]]$Header = @(), [bool]$IsMaster)
+    if ($IsMaster) { return @($Header) }
+    if (-not (Get-Command Get-PimReplicationKindForEntity -ErrorAction SilentlyContinue)) { return @($Header) }
+    $kind = Get-PimReplicationKindForEntity -Entity $Base
+    if (-not $kind) { return @($Header) }
+    # Operator 2026-09-15: "not relevant for single mode" -- off the master the admin's sync switch and ring go too.
+    $drop = if ($kind -eq 'admin') { @('Replicate', 'Ring', 'Target', 'ManagementMode') } else { @('Replicate', 'Ring', 'Target') }
+    return @(@($Header) | Where-Object { $drop -notcontains $_ })
 }
 function Get-PimAdminTapState {
     <#
@@ -2443,8 +2496,9 @@ function Get-PimAdminTapState {
         # one request at a time, so once two admins had a real recipient the TAP list hung and an
         # Edit > Save and the Departments load queued behind it. The list checks only what is free;
         # the per-admin Check ($liveCheck) runs the full readiness probe.
-        $mailChk = if ($liveCheck) { Test-PimTapMailReady -Recipient $mgr }
-                   elseif (-not "$mgr".Trim()) { @{ ok = $false; reason = 'no office user email (forwarding TRUE + address) and no ManagerEmail -- there is nowhere to deliver a TAP; set it with Edit on the admin above' } }
+        $__rp = Get-PimAdminTapRecipientPlan -Row $r      # 71.19: says WHERE it goes and WHY it does not
+        $mailChk = if ($liveCheck) { Test-PimTapMailReady -Recipient $mgr -Reason "$($__rp.reason)" }
+                   elseif (-not "$mgr".Trim()) { @{ ok = $false; reason = "$($__rp.reason) -- an admin's mail goes to its SPONSOR DEPARTMENT's owners: set the admin's Department and set Owners on that department (Definitions > Departments)" } }
                    else { @{ ok = $true; reason = '' } }
         $status = 'unknown'; $detail = ''; $created = ''
         if (-not $liveCheck) {
@@ -2488,6 +2542,11 @@ function Get-PimAdminTapState {
             userPrincipalName = $upn
             displayName       = "$($r.DisplayName)"
             managerEmail      = $mgr
+            # 71.19: WHERE the mail goes and WHY -- 'department' (the rule), 'forward' (per-admin override) or
+            # 'manager-legacy' (old data; the screen says to move it to the department).
+            recipientSource   = "$($__rp.source)"
+            recipientReason   = "$($__rp.reason)"
+            department        = "$($r.Department)".Trim()
             tapLifetimeHours  = $hrs
             status            = $status
             detail            = $detail
@@ -2618,8 +2677,56 @@ function Get-PimOperationalPolicy {
         catalogs = [ordered]@{
             activationDuration  = @(Get-PimActivationDurationCatalog)
             eligibilityDuration = @(Get-PimEligibilityDurationCatalog)
+            # 🔴 71.25 -- THE POLICY TEMPLATES, so a wizard can OFFER them instead of asking an
+            # operator to type an id (operator 2026-09-16: "i think we are missing the default policy
+            # for a permission (indirect) delegation in the wizards. I need to be able to select from
+            # the available templates for policies including Use default, approval policy template").
+            # Same store the ENGINE reads (pim.Settings 'PolicyTemplates'), so the picker can never
+            # offer a template the engine would then fail to find.
+            # Guarded: this endpoint answers three unrelated questions, and a host where the catalog
+            # helper is not loaded must still return the POLICY rather than 500 the whole settings
+            # surface. The fallback is the same one the helper itself uses -- 'default' only, never an
+            # empty list, because an empty picker reads as "this tenant has no templates".
+            policyTemplate      = @(if (Get-Command Get-PimManagerPolicyTemplateCatalog -ErrorAction SilentlyContinue) { Get-PimManagerPolicyTemplateCatalog }
+                                    else { [ordered]@{ id = 'default'; label = 'Use default'; hint = 'the tenant baseline'; approval = $false } })
         }
     }
+}
+
+function Get-PimManagerPolicyTemplateCatalog {
+    <#
+      71.25. The policy templates available to a definition row's PolicyTemplate column, as
+      @( @{ id; label; hint; approval } ), 'default' first. Read from the SAME place the engine
+      reads (pim.Settings 'PolicyTemplates'), never from the shipped files -- a customer may have
+      customised or added templates, and offering the shipped set would be confidently wrong.
+      `approval` says whether the template carries an Approval rule, so a surface can mark the
+      approval-required one without hard-coding its id.
+      An unreadable store returns JUST 'default': a picker that silently offers nothing would read
+      as "this tenant has no templates", which is a different (and usually wrong) statement.
+    #>
+    [CmdletBinding()] param()
+    $out = New-Object System.Collections.Generic.List[object]
+    $map = @{}
+    try {
+        $raw = Get-PimManagerSetting -Name 'PolicyTemplates'
+        if (Get-Command ConvertTo-PimPolicyTemplateMap -ErrorAction SilentlyContinue) { $map = ConvertTo-PimPolicyTemplateMap -Value $raw }
+    } catch { $map = @{} }
+    $ids = @(@($map.Keys) | Sort-Object { if ("$_" -eq 'default') { 0 } else { 1 } }, { "$_" })
+    if (-not $ids.Count) { $ids = @('default') }
+    foreach ($id in $ids) {
+        $tpl = $map["$id"]
+        $rules = $null
+        if ($tpl -is [System.Collections.IDictionary]) { $rules = $tpl['rules'] } elseif ($tpl -and $tpl.PSObject.Properties['rules']) { $rules = $tpl.rules }
+        $hasApproval = $false
+        if ($rules -is [System.Collections.IDictionary]) { $hasApproval = $rules.Contains('Approval') }
+        elseif ($rules -and $rules.PSObject.Properties['Approval']) { $hasApproval = $true }
+        $desc = ''
+        if ($tpl -is [System.Collections.IDictionary]) { $desc = "$($tpl['description'])" } elseif ($tpl -and $tpl.PSObject.Properties['description']) { $desc = "$($tpl.description)" }
+        $label = if ("$id" -eq 'default') { 'Use default' } else { "$id" }
+        $hint  = if ("$desc".Trim()) { "$desc".Trim() } elseif ("$id" -eq 'default') { 'the tenant baseline every managed group gets' } elseif ($hasApproval) { 'activation needs approval' } else { '' }
+        [void]$out.Add([ordered]@{ id = "$id"; label = $label; hint = $hint; approval = [bool]$hasApproval })
+    }
+    return $out.ToArray()
 }
 
 function Set-PimOperationalPolicy {
@@ -3756,7 +3863,7 @@ function Get-PimHomeOverview {
                     knownOk   = ($lastEngine.lastOk -ne $false)   # a failed reconcile can't assert "no drift"
                 }
             }
-            $status = if ($failed.Count -gt 0) { 'red' } elseif ($histCount -eq 0) { 'unknown' } else { 'green' }
+            $status = if ($failed.Count -gt 0) { 'red' } elseif (@($jobs | Where-Object { $_.needsApproval }).Count -gt 0) { 'amber' } elseif ($histCount -eq 0) { 'unknown' } else { 'green' }
             $tiles.jobs = [ordered]@{
                 ok            = $true
                 status        = $status
@@ -3774,6 +3881,9 @@ function Get-PimHomeOverview {
                 skippedCount  = @($jobs | Where-Object { "$($_.lastStatus)" -eq 'skipped' }).Count
                 skippedJobs   = @($jobs | Where-Object { "$($_.lastStatus)" -eq 'skipped' } | ForEach-Object { [ordered]@{ name = "$($_.name)"; type = "$($_.type)"; detail = "$($_.lastResult)" } } | Select-Object -First 12)
                 neverRunCount = @($jobs | Where-Object { $_.neverRun }).Count
+                # 71.13: a standing policy HOLD needs an approval -- amber attention, never counted as failed.
+                heldCount     = @($jobs | Where-Object { $_.needsApproval }).Count
+                heldJobs      = @($jobs | Where-Object { $_.needsApproval } | ForEach-Object { [ordered]@{ name = "$($_.name)"; type = "$($_.type)"; scope = "$($_.scope)"; detail = "$($_.heldDetail)"; runId = "$($_.lastRunId)" } } | Select-Object -First 12)
                 historyCount  = [int]$histCount
                 failedJobs    = @($failed  | ForEach-Object { [ordered]@{ name = "$($_.name)"; type = "$($_.type)"; scope = "$($_.scope)"; lastRunUtc = "$($_.lastRunUtc)"; detail = "$($_.lastResult)"; runId = "$($_.lastRunId)" } } | Select-Object -First 12)
                 runningJobs   = @($running | ForEach-Object { [ordered]@{ name = "$($_.name)"; type = "$($_.type)"; scope = "$($_.scope)"; runId = "$($_.runningRunId)" } } | Select-Object -First 12)
@@ -5207,11 +5317,11 @@ function New-PimManagerOffboardQueueInvoker {
       The approval gate's default action invoker called v1 account-status functions the REST engine
       does not load, so "Execute offboard" failed or did nothing in v2. The v2 path is the engine's
       AdminOffboarding provider (disable, sessions, memberships, notice mail, delete after N days;
-      progress in SQL), which acts on admin rows whose OffboardDate has passed
+      progress in SQL), which acts on admin rows whose AutoDisableDate has passed
       (Get-PimAdminOffboardCandidate / Test-PimAdminOffboarded).
 
       So the invoker performs NO directory write: on the first step it stages ONE desired-state
-      change on pim.ChangeQueue -- the admin's Account-Definitions-Admins row with OffboardDate = now
+      change on pim.ChangeQueue -- the admin's Account-Definitions-Admins row with AutoDisableDate = now
       -- which an operator commits in Pending changes; the engine performs the offboarding on its next
       run. Every later step of the guided plan reports that it is performed by the engine.
       Injectable seams: -ReadRows { param($entity) }, -Enqueue { param($change) }.
@@ -5242,7 +5352,7 @@ function New-PimManagerOffboardQueueInvoker {
         }
         $row = [ordered]@{}
         foreach ($p in $found.row.PSObject.Properties) { $row[$p.Name] = $p.Value }
-        $row['OffboardDate'] = $NowUtc.ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
+        $row['AutoDisableDate'] = $NowUtc.ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
         $key = Get-PimStoreRowKey -Base 'Account-Definitions-Admins' -Row ([pscustomobject]$row)
         if (-not $key) { $state.error = "the admin row for '$t' has no UserName -- it cannot be addressed in the store"; return [pscustomobject]@{ ok = $false; detail = $state.error } }
         $change = New-PimChange -Entity 'Account-Definitions-Admins' -Key $key -Op 'Update' -Payload ([pscustomobject]$row) `
@@ -5250,7 +5360,7 @@ function New-PimManagerOffboardQueueInvoker {
                     -Justification "approved offboard (approval request $RequestId): mark $t for offboarding"
         & $Enqueue $change
         $state.queued = $true; $state.queueId = "$($change.id)"
-        return [pscustomobject]@{ ok = $true; detail = "queued: OffboardDate set on the admin row (queue entry $($change.id)) -- commit it in Pending changes; the engine offboards on its next run" }
+        return [pscustomobject]@{ ok = $true; detail = "queued: AutoDisableDate set on the admin row (queue entry $($change.id)) -- commit it in Pending changes; the engine disables the account on its next run (PIM never deletes an account)" }
     }
     return [pscustomobject]@{ Invoker = $invoker; State = $state }
 }
@@ -5569,7 +5679,9 @@ function Handle-Request {
 
             if ($method -eq 'GET') {
                 $rows = @(Get-PimSqlRows -ConnectionString $script:PimSqlCs -Entity $base)
-                $payload = [ordered]@{ path = 'sql'; source = 'sql'; header = @($spec.defaultHeader) }
+                # §71.5 -- the replication columns are the MSP master's alone; everywhere else they are
+                # neither shown nor (see the PUT gate) accepted.
+                $payload = [ordered]@{ path = 'sql'; source = 'sql'; header = @(Get-PimManagerReplicationHeader -Base $base -Header @($spec.defaultHeader) -IsMaster (Test-PimManagerIsMspMaster)) }
                 # Portal-admin read scoping: a delegated GUI-manager (non-super,
                 # with a portal-admins profile) sees only the rows their tier/
                 # level/service/scope allows. Super-admins + users with no portal
@@ -5670,6 +5782,24 @@ function Handle-Request {
                         Write-JsonResponse -Response $resp -Status 409 -Body ([ordered]@{
                             ok = $false; base = $base; gate = "$($deltaGuard.rule)"; error = "$($deltaGuard.reason)"
                             confirmRequired = $true; removeCount = [int]$deltaGuard.removeCount; beforeCount = (@($current.rows).Count); afterCount = (@($rowsOrdered).Count)
+                        })
+                        return 409
+                    }
+                }
+
+                # §71.5 -- THE REPLICATION GATE, server-side, because the GUI is never the only gate. A
+                # tenant that is not the MSP master may not introduce or change Replicate (or Ring/Target on
+                # a non-admin entity); on the master every changed row must pass the same check the wizard
+                # and the validator use -- a ManagementMode/Replicate disagreement, a bad Replicate value or
+                # a malformed Target is refused before anything is written.
+                if (Get-Command Test-PimReplicationWriteAllowed -ErrorAction SilentlyContinue) {
+                    $repTags = @{ known = $false; tags = @() }
+                    try { $repTags = Get-PimManagerKnownTenantTags } catch { }
+                    $repGate = Test-PimReplicationWriteAllowed -Entity $base -Rows @($rowsOrdered) -CurrentRows @($current.rows) `
+                                 -IsMaster (Test-PimManagerIsMspMaster) -KnownTags @($repTags.tags) -TagsKnown:([bool]$repTags.known)
+                    if (-not $repGate.allowed) {
+                        Write-JsonResponse -Response $resp -Status 409 -Body ([ordered]@{
+                            ok = $false; base = $base; gate = 'replication'; error = "$($repGate.reason)"; refused = @($repGate.refused)
                         })
                         return 409
                     }
@@ -6305,7 +6435,7 @@ function Handle-Request {
                 $desired = @()
                 try { if (Get-Command Get-PimDesiredRows -ErrorAction SilentlyContinue) { $desired = @(Get-PimDesiredRows) } } catch {}
                 # v2: the Manager does NOT change the directory. The approved offboard is staged as ONE
-                # desired-state change (the admin row's OffboardDate) for an operator to commit; the
+                # desired-state change (the admin row's AutoDisableDate) for an operator to commit; the
                 # engine's AdminOffboarding provider performs it on its next run.
                 if (-not (Get-PimManagerStoreCs) -or -not (Get-Command Add-PimSqlQueueChange -ErrorAction SilentlyContinue)) {
                     Write-JsonResponse -Response $resp -Status 503 -Body @{ error = 'no SQL store is wired in this host, so the offboard cannot be queued -- and the Manager is not permitted to change the directory itself.' }
@@ -6631,6 +6761,7 @@ function Handle-Request {
                     runningCount = [int]$vm.runningCount
                     overdueCount = $(if ($vm.PSObject.Properties['overdueCount']) { [int]$vm.overdueCount } else { 0 })
                     failingCount = $(if ($vm.PSObject.Properties['failingCount']) { [int]$vm.failingCount } else { 0 })
+                    heldCount    = $(if ($vm.PSObject.Properties['heldCount']) { [int]$vm.heldCount } else { 0 })   # 71.13 needs approval
                     generatedUtc = "$($vm.generatedUtc)"
                     historyCount = [int]$histCount
                     canRun       = [bool](Test-PimManagerRoleAtLeast -Minimum 'Admin')
@@ -7486,6 +7617,74 @@ function Handle-Request {
             return 200
         }
 
+        # -------------------------------------------------------------------
+        # §71 -- MSP REPLICATION TARGETING (framework MSP-4 SURFACE).
+        #   GET  /api/msp/replication/context -- is this the master, which tenants/tags a target can name
+        #   POST /api/msp/replication/reach   -- "this will reach: N tenants", per row, plus the
+        #                                        dependency warnings. Body: { draft: [{entity,row}] } for a
+        #                                        wizard's unsaved row, and/or { pending: {entity: [rows]} }
+        #                                        for the grid's pending set (replaces that entity's rows).
+        # 🔒 MASTER ONLY. Anywhere else the context says master=false and the reach answers nothing -- the
+        # GUI hides the surface and the PUT gate refuses the fields. Reach is COMPUTED BY THE PLAN every
+        # managed tenant runs (Get-PimReplicationPreview), never estimated in the browser.
+        # -------------------------------------------------------------------
+        if ($path -eq '/api/msp/replication/context' -and $method -eq 'GET') {
+            $script:lastHeartbeat = Get-Date
+            $isMaster = Test-PimManagerIsMspMaster
+            $tenants = @(); $tags = @()
+            if ($isMaster) {
+                try {
+                    $tenants = @(Get-PimManagerDownlinkTenants -ConnectionString (Get-PimManagerStoreCs) | ForEach-Object {
+                        [ordered]@{ tenantId = "$($_.TenantId)"; name = "$($_.DisplayName)"; ring = [int]("0" + "$($_.Ring)"); tags = @("$($_.Tags)" -split '[;,]' | ForEach-Object { "$_".Trim() } | Where-Object { $_ }) }
+                    })
+                } catch { $tenants = @() }
+                try { $tags = @((Get-PimManagerKnownTenantTags).tags) } catch { $tags = @() }
+            }
+            $ents = [ordered]@{}
+            if (Get-Command Get-PimReplicationEntities -ErrorAction SilentlyContinue) { foreach ($e in @(Get-PimReplicationEntities)) { $ents[$e] = Get-PimReplicationKindForEntity -Entity $e } }
+            Write-JsonResponse -Response $resp -Status 200 -Body ([ordered]@{ master = [bool]$isMaster; tenants = @($tenants); tags = @($tags); entities = $ents })
+            return 200
+        }
+        if ($path -eq '/api/msp/replication/reach' -and $method -eq 'POST') {
+            $script:lastHeartbeat = Get-Date
+            if (-not (Test-PimManagerIsMspMaster)) {
+                Write-JsonResponse -Response $resp -Status 200 -Body ([ordered]@{ master = $false; reason = 'replication targeting exists only on the MSP master'; rows = @(); warnings = @() })
+                return 200
+            }
+            try {
+                $body = Read-RequestJson -Request $req
+                $overlay = @{}
+                if ($body -and $body.PSObject.Properties['pending'] -and $body.pending) { foreach ($p in $body.pending.PSObject.Properties) { $overlay["$($p.Name)"] = @($p.Value) } }
+                $draft = @()
+                if ($body -and $body.PSObject.Properties['draft'] -and $body.draft) { $draft = @($body.draft) }
+                $model = Get-PimReplicationMasterModel -ConnectionString (Get-PimManagerStoreCs) -Overlay $overlay -Draft $draft
+                $prev = Get-PimReplicationPreview -RegistryRows @($model.RegistryRows) -RegistryReplicate $model.RegistryReplicate -Entities $model.Entities -Tenants @($model.Tenants) -ProjectionPolicy $model.ProjectionPolicy
+                $rowsOut = New-Object System.Collections.Generic.List[object]
+                foreach ($d in $draft) {
+                    $e = "$($d.entity)"; $r = [pscustomobject]$d.row
+                    $one = Get-PimReplicationRowReach -Preview $prev -Entity $e -Row $r
+                    $chk = Test-PimReplicationRowFields -Row $r -Entity $e -KnownTags @((Get-PimManagerKnownTenantTags).tags) -TagsKnown
+                    $rowsOut.Add([ordered]@{ source = 'draft'; entity = $e; index = -1; id = $one.id; count = $one.count; tenantCount = $one.tenantCount; tenants = @($one.tenants); summary = $one.summary; warnings = @($one.warnings); errors = @($chk.errors); fieldWarnings = @($chk.warnings) }) | Out-Null
+                }
+                foreach ($e in $overlay.Keys) {
+                    $i = 0
+                    foreach ($r in @($overlay[$e])) {
+                        $one = Get-PimReplicationRowReach -Preview $prev -Entity $e -Row $r
+                        $rowsOut.Add([ordered]@{ source = 'pending'; entity = $e; index = $i; id = $one.id; count = $one.count; tenantCount = $one.tenantCount; tenants = @($one.tenants); summary = $one.summary; warnings = @($one.warnings) }) | Out-Null
+                        $i++
+                    }
+                }
+                Write-JsonResponse -Response $resp -Status 200 -Body ([ordered]@{
+                    master = $true; tenantCount = $prev.tenantCount; rows = @($rowsOut.ToArray()); warnings = @($prev.warnings)
+                    notPublished = @($prev.notPublished); dependencyIncluded = @($prev.dependencyIncluded); errors = @($prev.errors)
+                })
+                return 200
+            } catch {
+                Write-JsonResponse -Response $resp -Status 500 -Body @{ error = "replication reach failed: $($_.Exception.Message)" }
+                return 500
+            }
+        }
+
         if ($path -eq '/api/settings/scenario' -and $method -eq 'GET') {
             $script:lastHeartbeat = Get-Date
             try { Write-JsonResponse -Response $resp -Status 200 -Body (Get-PimScenarioConfig); return 200 }
@@ -7941,9 +8140,16 @@ function Handle-Request {
 
             # The fields a modify may touch. Everything else on the row is derived, a key, or
             # governed elsewhere (TAP lifetime by the TAP verb, AccountStatus by enable/disable,
-            # OffboardDate by the offboarding ceremony) -- an allow-list, so a new column is not
-            # silently made editable by adding it to the entity.
+            # AccountStatus by enable/disable) -- an allow-list, so a new column is not silently made
+            # editable by adding it to the entity.
+            # 🔴 71.23 -- AutoDisableDate IS editable here now (operator, 2026-09-16: "i need to have
+            # this field on the admin overview so i cna devine an AutoDisableDate"). It was reachable
+            # only through the approval-gated offboard ceremony, which is the right path for
+            # "offboard this person NOW" but the wrong one for "this contract ends on the 30th".
+            # Setting a FUTURE date changes nothing today; the engine acts when the date arrives, and
+            # the only thing it does is DISABLE (PIM never deletes an account).
             $editable = @{
+                autoDisableDate      = 'AutoDisableDate'
                 displayName          = 'DisplayName'
                 company              = 'Company'
                 department           = 'Department'
@@ -7990,6 +8196,22 @@ function Handle-Request {
                     $badField = "$mc must be an email address (got '$($changes[$mc])')."
                 }
             }
+            # 🔴 71.23 -- an AutoDisableDate must be a date the ENGINE can read, checked here rather
+            # than discovered by the sweep skipping the row weeks later. And writing it always CLEARS
+            # the legacy OffboardDate: leaving both would create the exact conflict the engine refuses.
+            if (-not $badField -and $changes.Contains('AutoDisableDate')) {
+                $adv = "$($changes['AutoDisableDate'])".Trim()
+                if ($adv) {
+                    $parsed = $null
+                    if (Get-Command Resolve-PimDateExpression -ErrorAction SilentlyContinue) { try { $parsed = Resolve-PimDateExpression -Expression $adv } catch { $parsed = $null } }
+                    if (-not $parsed) { $parsed = Get-PimUtcStamp $adv }
+                    if (-not $parsed) { $badField = "AutoDisableDate '$adv' is not a date the engine can read. Use yyyy-MM-dd (e.g. 2026-09-30) or a date expression such as FirstDayNextMonth." }
+                }
+                if (-not $badField -and "$($row.OffboardDate)".Trim()) {
+                    $changes['OffboardDate'] = ''
+                    $before['OffboardDate']  = "$($row.OffboardDate)".Trim()
+                }
+            }
             if (-not $badField -and $changes.Contains('Department') -and "$($changes['Department'])") {
                 # A department decides who approves and who is mailed, so it must be one the owner
                 # chain can resolve. Only enforced when departments are defined at all.
@@ -8019,6 +8241,19 @@ function Handle-Request {
             if ($badField) {
                 Write-JsonResponse -Response $resp -Status 400 -Body @{ error = $badField }
                 return 400
+            }
+            # Operator 2026-09-15: the MSP sync fields exist only on the MSP master. Refused, not ignored, so a caller that
+            # bypasses the GUI (which hides them in Single and managed mode) is told why nothing changed.
+            if (-not (Test-PimManagerIsMspMaster) -and @(@('ManagementMode', 'Ring', 'Target', 'Replicate') | Where-Object { $changes.Contains($_) }).Count) {
+                Write-JsonResponse -Response $resp -Status 409 -Body @{ error = 'Sync to slaves (ManagementMode / Ring / Target) can only be set on the MSP master -- this tenant is not the master.'; code = 'not-msp-master' }
+                return 409
+            }
+            # §71: a row that carries Replicate must keep AGREEING with ManagementMode (msp <-> Yes, local <-> No), or
+            # the validator and the bundle refuse it. This editor has no Replicate field, so the switch flipped here
+            # moves both, instead of leaving a contradiction for the next save to trip over.
+            if ($changes.Contains('ManagementMode') -and "$($row.Replicate)".Trim()) {
+                $before['Replicate'] = "$($row.Replicate)".Trim()
+                $changes['Replicate'] = $(if ("$($changes['ManagementMode'])" -eq 'msp') { 'Yes' } else { 'No' })
             }
             if ($changes.Count -eq 0) {
                 # Reporting "saved" for a no-op teaches operators the button lies.
@@ -8094,6 +8329,13 @@ function Handle-Request {
 
             $out = New-Object System.Collections.Generic.List[object]
             $hidden = 0
+            # 71.24: read the department -> owners index ONCE for the whole list, not per admin.
+            # $null means "could not be read" and is carried through as "not checked" rather than
+            # silently becoming "this department has no owners".
+            $__deptIdx = $null
+            if (Get-Command Get-PimManagerDepartmentOwnerIndex -ErrorAction SilentlyContinue) {
+                try { $__deptIdx = Get-PimManagerDepartmentOwnerIndex } catch { $__deptIdx = $null }
+            }
             foreach ($r in $rows) {
                 $upn = "$($r.UserPrincipalName)".Trim()
                 if (-not $upn) { continue }
@@ -8114,7 +8356,35 @@ function Handle-Request {
         # the person who owns the account and is the only correct recipient.
         # ManagerEmail stays as a fallback so rows that only have it keep working.
         $mgr = Get-PimAdminTapRecipient -Row $r
-                $offboard = "$($r.OffboardDate)".Trim()
+                # 🔴 71.23 -- AutoDisableDate (legacy name OffboardDate still read). The grid shows
+                # the date, whether it came from the legacy column, and whether it has already passed,
+                # so the operator can SEE what the engine will do and when.
+                $offPlan = Get-PimAdminAutoDisableDate -Row $r
+                $offboard = "$($offPlan.value)".Trim()
+                $offUtc = if ($offboard) { Get-PimUtcStamp $offboard } else { $null }
+                # 71.24: the sponsor department and ITS owners, from the same index the engine reads
+                # (Get-PimManagerDepartmentOwnerIndex -> PIM-Definitions-Departments.Owners).
+                # $__deptKnown is deliberately separate from "has owners": when the index cannot be
+                # read at all, the screen must say "not checked", never "no owners" -- reporting a gap
+                # that was never measured is how a screen trains people to ignore it.
+                $__dept = "$($r.Department)".Trim()
+                $__deptOwners = @()
+                $__deptKnown = $false
+                if ($__deptIdx -is [hashtable]) {
+                    $__deptKnown = $true
+                    if ($__dept -and $__deptIdx.ContainsKey($__dept.ToLowerInvariant())) {
+                        # 🪤 Split-PimOwners lives in PIM-EngineProviders.ps1, which is NOT guaranteed to
+                        # be dot-sourced in every Manager host. An unguarded call here would throw and take
+                        # the WHOLE Admin accounts screen down with a 500 -- the exact failure mode this
+                        # file already carries two notes about. Same separators as the engine: | ; ,
+                        $__ownRaw = "$($__deptIdx[$__dept.ToLowerInvariant()])"
+                        $__deptOwners = if (Get-Command Split-PimOwners -ErrorAction SilentlyContinue) {
+                            @(Split-PimOwners -Value $__ownRaw)
+                        } else {
+                            @($__ownRaw -split '[|;,]' | ForEach-Object { "$_".Trim() } | Where-Object { $_ })
+                        }
+                    }
+                }
                 $out.Add([pscustomobject]@{
                     userPrincipalName = $upn
                     displayName       = "$($r.DisplayName)".Trim()
@@ -8134,7 +8404,27 @@ function Handle-Request {
                     mailRecipient     = $mgr
                     accountStatus     = $(if ($status) { $status } else { 'Enabled' })
                     createTAP         = $tapWanted
-                    offboardDate      = $offboard
+                    # 🔴 §62 / 71.24 -- THE SPONSOR DEPARTMENT, ON THE OVERVIEW (operator 2026-09-16:
+                    # "in the admin overview i need to see which sponsor dept an admin is linked to.
+                    # this is considered the dept that sponsor him and define approval for example if
+                    # he must be enabled/disabled"). The department is not decoration: it decides who
+                    # approves for this admin and where its mail (including its TAP) goes. Both GAPS
+                    # have to be visible, and they are DIFFERENT gaps -- "no department" is the admin's
+                    # row, "department with no owners" is the department's row, and they are fixed in
+                    # different places.
+                    department        = $__dept
+                    departmentOwners  = @($__deptOwners)
+                    departmentKnown   = [bool]$__deptKnown
+                    offboardDate      = $offboard      # kept for older cached pages
+                    autoDisableDate   = $offboard
+                    autoDisableSource = "$($offPlan.source)"          # auto | legacy | none
+                    autoDisableLegacy = [bool]($offPlan.source -eq 'legacy')
+                    autoDisableConflict = [bool]$offPlan.conflict
+                    autoDisableWhy    = "$($offPlan.reason)"
+                    # past  = the engine should already have disabled it (or is refusing to -- see the status)
+                    # soon  = inside 14 days, so it is worth seeing before it happens
+                    autoDisablePast   = [bool]($offUtc -and $offUtc -le [datetime]::UtcNow)
+                    autoDisableSoon   = [bool]($offUtc -and $offUtc -gt [datetime]::UtcNow -and $offUtc -le [datetime]::UtcNow.AddDays(14))
                     # 🔑 The forwarding address is where a TAP is actually delivered (an admin
                     # account has no mailbox of its own), so the grid's inline editor has to be able
                     # to read it back and set it. Without these the operator could see
@@ -8177,6 +8467,10 @@ function Handle-Request {
                 hiddenByScope = $hidden
                 scoped      = [bool]($hidden -gt 0)
                 canRevokeSessions = [bool]$isAdmin
+                # 71.21: the verb is "mark for manual removal" (retire), never "flag for deletion" --
+                # PIM never deletes an account. canFlagDelete stays as an alias so a page cached from
+                # an older version keeps working; both carry the same permission.
+                canRetire         = [bool]$isAdmin
                 canFlagDelete     = [bool]$isAdmin
                 canCreate         = [bool]$isAdmin
                 role              = "$($role.role)"

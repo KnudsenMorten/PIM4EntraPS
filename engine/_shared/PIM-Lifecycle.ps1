@@ -1,6 +1,6 @@
 # IMP-02: the locale-safe stamp reader. Loaded defensively so this file stays correct
 # when a test dot-sources it on its own (PIM-Functions.psm1 also loads it up front).
-if (-not (Get-Command Get-PimUtcStamp -ErrorAction SilentlyContinue)) { . (Join-Path $PSScriptRoot 'PIM-DateSafe.ps1') }
+if (-not (Get-Command Get-PimUtcStamp -ErrorAction SilentlyContinue) -or -not (Get-Command Get-PimAdminAutoDisableDate -ErrorAction SilentlyContinue)) { . (Join-Path $PSScriptRoot 'PIM-DateSafe.ps1') }   # 71.23: probe BOTH -- a one-name probe for a multi-function library is a fail-OPEN
 # PIM4EntraPS -- lifecycle calendar: upcoming expirations, auto-renew, escalation.
 # Dot-sourced by PIM-Functions.psm1 (uses PIM-ChangeQueue.ps1 + Get-PimPolicySetting)
 # and the pim-manager.
@@ -20,7 +20,7 @@ function Get-PimLifecycleDateFields {
     $cfg = $null
     if (Get-Command Get-PimPolicySetting -ErrorAction SilentlyContinue) { $cfg = Get-PimPolicySetting -Name 'LifecycleDateFields' -Default $null }
     if ($cfg) { return @($cfg) }
-    return @('ExpiresUtc','expiresUtc','OffboardDate','ExpirationDate','ReviewDueUtc','DeleteDate')
+    return @('ExpiresUtc','expiresUtc','AutoDisableDate','OffboardDate','ExpirationDate','ReviewDueUtc','DeleteDate')
 }
 
 function Resolve-PimExpiryDate {
@@ -157,11 +157,10 @@ function Get-PimLifecycleItemsFromStore {
       ($global:PIM_LifecycleItems was never set by anything).
 
       What v1 had: no reminder job. Its lifecycle dates were acted on, not announced -- OffboardDate
-      (a date expression) triggered the revoke, DeleteAfterDays later the delete (PIM-Functions.psm1
-      ~L10569-10573, ~L11011-11028), and an assignment's live end date drove AutoExtend
+      (a date expression) triggered the revoke, and an assignment's live end date drove AutoExtend
       (~L4647-4677). The dates that live in DESIRED state are the admin ones, so those are the items:
-        * admin-offboard  -- Account-Definitions-Admins.OffboardDate
-        * admin-delete    -- OffboardDate + DeleteAfterDays
+        * admin-offboard  -- Account-Definitions-Admins.AutoDisableDate (legacy: OffboardDate)
+        (71.21: there is no 'admin-delete' item -- PIM never deletes an account.)
         * <entity>        -- any assignment row that carries an explicit lifecycle date column
                              (Get-PimLifecycleDateFields). NumOfDaysWhenExpire is a DURATION and the
                              real end date is only in the live schedule, so it is not guessed here.
@@ -184,7 +183,7 @@ function Get-PimLifecycleItemsFromStore {
     $unresolved = New-Object System.Collections.ArrayList
     $bad = 0
     $entities = @('Account-Definitions-Admins','PIM-Assignments-Admins','PIM-Assignments-Groups','PIM-Assignments-Roles-Groups','PIM-Assignments-Roles-AUs','PIM-Assignments-Azure-Resources','PIM-Assignments-Workloads')
-    $dateFields = @(Get-PimLifecycleDateFields | Where-Object { "$_" -notin @('OffboardDate','DeleteDate') })
+    $dateFields = @(Get-PimLifecycleDateFields | Where-Object { "$_" -notin @('AutoDisableDate','OffboardDate','DeleteDate') })
     foreach ($ent in $entities) {
         $rows = @(Get-PimDesiredRows -Entity $ent)
         $resolved = ($global:PIM_DesiredResolved -is [hashtable]) -and $global:PIM_DesiredResolved.ContainsKey($ent) -and [bool]$global:PIM_DesiredResolved[$ent]
@@ -195,7 +194,10 @@ function Get-PimLifecycleItemsFromStore {
             $get = { param($names) foreach ($n in $names) { if ($r -is [System.Collections.IDictionary]) { if ($r.Contains($n) -and "$($r[$n])".Trim()) { return "$($r[$n])".Trim() } } else { $p = $r.PSObject.Properties[$n]; if ($p -and "$($p.Value)".Trim()) { return "$($p.Value)".Trim() } } }; return '' }
             if ($ent -eq 'Account-Definitions-Admins') {
                 $user = & $get @('UserPrincipalName','UserName')
-                $off = & $get @('OffboardDate')
+                # 71.23: AutoDisableDate, with the legacy OffboardDate still read. A conflicting row
+                # (both names, different dates) resolves to '' and is therefore not reminded about --
+                # the engine reports the conflict; the calendar must not invent a date for it.
+                $off = if (Get-Command Get-PimAdminAutoDisableDate -ErrorAction SilentlyContinue) { "$((Get-PimAdminAutoDisableDate -Row $r).value)" } else { & $get @('AutoDisableDate','OffboardDate') }
                 if (-not $off) { continue }
                 $offUtc = ConvertTo-PimLifecycleUtc -Value $off
                 if ($null -eq $offUtc) { $bad++; continue }
@@ -203,14 +205,9 @@ function Get-PimLifecycleItemsFromStore {
                 if ($offUtc -ge $floor) {
                     [void]$items.Add([pscustomobject]@{ Id = "admin-offboard:$user"; Kind = 'admin-offboard'; UserName = $user; ExpiresUtc = $offUtc.ToString('o'); ManagerEmail = $mgr; Entity = $ent })
                 }
-                $dd = & $get @('DeleteAfterDays')
-                $n = 0
-                if ($dd -and [int]::TryParse($dd, [ref]$n) -and $n -gt 0) {
-                    $delUtc = $offUtc.AddDays($n)
-                    if ($delUtc -ge $floor) {
-                        [void]$items.Add([pscustomobject]@{ Id = "admin-delete:$user"; Kind = 'admin-delete'; UserName = $user; ExpiresUtc = $delUtc.ToString('o'); ManagerEmail = $mgr; Entity = $ent })
-                    }
-                }
+                # 🔴 71.21 -- NO 'admin-delete' REMINDER. It announced a date on which PIM would
+                # delete the account; PIM never deletes an account (operator, 2026-09-16), so the
+                # reminder was announcing something that cannot happen. The retention field is gone entirely.
                 continue
             }
             $dv = & $get $dateFields

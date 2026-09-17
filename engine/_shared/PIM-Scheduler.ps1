@@ -767,7 +767,7 @@ function Initialize-PimDefaultJobHandlers {
         # tick for as long as it existed: it read $global:PIM_LifecycleItems, which NOTHING sets, so
         # the calendar was always built over an empty list. "0 upcoming" was never a measurement.
         # Now the items come from the DESIRED rows in SQL (Get-PimLifecycleItemsFromStore): admin
-        # OffboardDate and OffboardDate+DeleteAfterDays, plus any assignment row with an explicit
+        # OffboardDate (71.21: NOT a delete date -- PIM never deletes an account), plus any assignment row with an explicit
         # lifecycle date. Three honest outcomes: cannot read the store -> unimplemented; nothing in the
         # window -> ran=false "nothing due"; something due -> ran=true, and the 'expiring-access' alert
         # is raised (debounced daily) through the scheduler's notify path, to the Alerting recipients.
@@ -1897,7 +1897,11 @@ function Get-PimJobsStatus {
         # are counted here from their own status. Before this they were indistinguishable from a
         # real converged run: the view called them "no-op".
         $unimplemented = @($recentWindow | Where-Object { "$($_.status)" -eq 'unimplemented' })
-        if ($outOfScope) { $recentFails = @(); $unackedFails = @(); $recoveredFails = @(); $unrunnable = @(); $unimplemented = @() }
+        # 71.13: a HELD run (a safety breaker awaiting approval) is neither a failure nor a success. It needs
+        # attention until a LATER completed run shows the approved plan applied -- the same recovery rule as a failure.
+        $heldRuns = @($recentWindow | Where-Object { "$($_.status)" -eq 'held' })
+        $standingHeld = @($heldRuns | Where-Object { -not (& $isRecovered $_) })
+        if ($outOfScope) { $recentFails = @(); $unackedFails = @(); $recoveredFails = @(); $unrunnable = @(); $unimplemented = @(); $heldRuns = @(); $standingHeld = @() }
         $rows.Add([pscustomobject]@{
             name            = $name
             type            = "$($j.type)"
@@ -1948,6 +1952,10 @@ function Get-PimJobsStatus {
             # (unrunnableCount) and "a handler that is a placeholder" (this) are different
             # deployment facts, and neither is a run that went wrong.
             unimplementedCount = $unimplemented.Count
+            # 71.13: held runs (awaiting an operator's approval), and whether one is still standing.
+            heldCount          = $heldRuns.Count
+            needsApproval      = [bool]($standingHeld.Count -gt 0)
+            heldDetail         = $(if ($standingHeld.Count) { "$(@($standingHeld)[0].detail)" } else { '' })
         })
     }
     # in-progress first, then by last activity (newest first), then name
@@ -1961,6 +1969,8 @@ function Get-PimJobsStatus {
         runningCount = @($rows | Where-Object { $_.inProgress }).Count
         overdueCount = @($rows | Where-Object { $_.overdue }).Count
         failingCount = @($rows | Where-Object { $_.unackedFailureCount -gt 0 }).Count
+        # 71.13: jobs with a standing HOLD (needs approval) -- counted under "needs attention", never under failing.
+        heldCount    = @($rows | Where-Object { $_.needsApproval }).Count
         total        = $rows.Count
     }
 }
@@ -2004,6 +2014,8 @@ function Write-PimJobRunRecord {
     # BUG-114: the handler declares this about itself; it is never inferred from the detail
     # string, because a message is prose and prose gets reworded.
     $unimplemented = $false; if ($inner -and $inner.PSObject.Properties['unimplemented']) { $unimplemented = [bool]$inner.unimplemented }
+    # 71.13: the handler declares a HOLD about itself (policy mass-change breaker awaiting approval) -- a FIFTH outcome.
+    $held = $false; if ($Result.ok -and $inner -and $inner.PSObject.Properties['held']) { $held = [bool]$inner.held }
     $rec = [pscustomobject]@{
         # §70.15 LOG-04: the run's id IS the correlation id the engine stamped on every change it audited.
         # -RunId (the tick's id, also on its 'running' record) wins, so an early return without a correlation id
@@ -2022,7 +2034,11 @@ function Write-PimJobRunRecord {
         # nothing -- so without this the record said 'completed' and the view said "no-op",
         # i.e. "there was nothing to do". Ordering is deliberate: outOfScope wins, because a job
         # this deployment does not run has nothing to answer for either way (BUG-112).
-        status      = $(if ($Result.PSObject.Properties['outOfScope'] -and $Result.outOfScope) { 'skipped' } elseif ($unimplemented) { 'unimplemented' } elseif ($Result.ok) { 'completed' } else { 'failed' })
+        # 71.13: 'held' is a FIFTH outcome -- the run did its work and a safety breaker HELD a change set for an
+        # operator's approval. Never 'completed' (that would hide the approval), never 'failed' (nothing broke).
+        status      = $(if ($Result.PSObject.Properties['outOfScope'] -and $Result.outOfScope) { 'skipped' } elseif ($unimplemented) { 'unimplemented' } elseif ($held) { 'held' } elseif ($Result.ok) { 'completed' } else { 'failed' })
+        held        = [bool]$held
+        heldCount   = $(if ($held -and $inner.PSObject.Properties['heldCount']) { [int]$inner.heldCount } else { 0 })
         detail      = "$($Result.detail)"
         trigger     = [bool]$Trigger
         reason      = "$Reason"
@@ -2149,6 +2165,7 @@ function Invoke-PimJobForceStart {
     # §70.19: the same fourth outcome Write-PimJobRunRecord already records (BUG-114). Run now on a worker with a
     # placeholder handler said "completed" -- measured on internal 2026-09-13, green for a run that did nothing.
     $unimpl = $false; if ($inner -and $inner.PSObject.Properties['unimplemented']) { $unimpl = [bool]$inner.unimplemented }
+    $heldF = $false; if ($res.ok -and $inner -and $inner.PSObject.Properties['held']) { $heldF = [bool]$inner.held }   # 71.13
     $rec = [pscustomobject]@{
         runId       = $runId
         name        = "$($Job.name)"
@@ -2156,7 +2173,9 @@ function Invoke-PimJobForceStart {
         scope       = $(if ($Job.PSObject.Properties['scope']) { "$($Job.scope)" } else { '' })
         ok          = [bool]$res.ok
         ran         = $ran
-        status      = $(if ($res.PSObject.Properties['outOfScope'] -and $res.outOfScope) { 'skipped' } elseif ($unimpl) { 'unimplemented' } elseif ($res.ok) { 'completed' } else { 'failed' })   # BUG-92 / BUG-114
+        status      = $(if ($res.PSObject.Properties['outOfScope'] -and $res.outOfScope) { 'skipped' } elseif ($unimpl) { 'unimplemented' } elseif ($heldF) { 'held' } elseif ($res.ok) { 'completed' } else { 'failed' })   # BUG-92 / BUG-114 / 71.13
+        held        = [bool]$heldF
+        heldCount   = $(if ($heldF -and $inner.PSObject.Properties['heldCount']) { [int]$inner.heldCount } else { 0 })
         detail      = "$($res.detail)"
         trigger     = $true
         reason      = 'force-start'

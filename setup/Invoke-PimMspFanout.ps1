@@ -208,16 +208,19 @@ foreach ($grp in $byTenant) {
 
     # Build the per-tenant Account-Definitions CSV from the registry rows.
     $rows = foreach ($a in $grp.Group) {
-        # TAP intent -- ON unless the registry says otherwise (operator decision 2026-08-13).
-        # Kept byte-for-byte equivalent to the S6 downlink's resolution so the two topologies
+        # 71.17 TAP IS ON FOR ALL (operator 2026-09-15 "tap is on for all"): every fanned-out (Entra) admin gets a TAP.
+        # The registry's CreateTap is NOT honoured -- same rule as the S6 downlink apply, so the two topologies
         # cannot drift: a customer must not get a different admin depending on how we reached it.
         $tapRaw = "$($a.CreateTap)".Trim()
-        $createTap = if ($tapRaw) { if ($tapRaw -match '(?i)^(true|1|yes)$') { 'TRUE' } else { 'FALSE' } } else { 'TRUE' }
+        if ($tapRaw -and $tapRaw -notmatch '(?i)^(true|1|yes)$') {
+            Write-Host "  [note] $($a.UserName): the registry says CreateTap=$tapRaw -- IGNORED, a TAP is enforced for every Entra admin." -ForegroundColor DarkYellow
+        }
+        $createTap = 'TRUE'
         $life = 0; [void][int]::TryParse("$($a.TapLifetimeHours)".Trim(), [ref]$life)
         if ($life -le 0) { $life = 8 }
         $mgr = "$($a.ManagerEmail)".Trim()
-        if ($createTap -eq 'TRUE' -and -not $mgr) {
-            Write-Host "  [warn] $($a.UserName): CreateTAP is ON but the registry carries no ManagerEmail -- the TAP will be minted and delivered NOWHERE (the code is readable only at creation)." -ForegroundColor Yellow
+        if (-not $mgr) {
+            Write-Host "  [warn] $($a.UserName): the registry carries no ManagerEmail -- the engine will REFUSE to issue a TAP it cannot deliver, so this admin cannot sign in until one is set." -ForegroundColor Yellow
         }
         [pscustomobject]@{
             FirstName             = "$($a.FirstName)"
@@ -249,8 +252,7 @@ foreach ($grp in $byTenant) {
             # it), and the fan-out then threw it away on arrival -- so the value could never
             # reach the slave no matter what the master published.
             Template              = "$($a.Template)"
-            OffboardDate          = ''
-            DeleteAfterDays       = ''
+            AutoDisableDate       = ''
         }
     }
     foreach ($r in $rows) {

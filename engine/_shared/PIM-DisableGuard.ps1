@@ -92,7 +92,10 @@ function Get-PimSafetyKnobNames {
         @{ name = 'PIM_DisableMaxCount';       env = 'PIM_DisableMaxCount';       what = 'G2 absolute blast-radius cap' }
         @{ name = 'PIM_DisableMaxPercent';     env = 'PIM_DisableMaxPercent';     what = 'G2 percentage blast-radius cap' }
         @{ name = 'PIM_RemoveMaxCount';        env = 'PIM_RemoveMaxCount';        what = 'G4 universal removal budget' }
-        @{ name = 'PIM_RemoveUnmanagedAdmins'; env = 'PIM_RemoveUnmanagedAdmins'; what = 'the report-only brake on unmanaged admin removal' }
+        # 🔴 71.22 -- PIM_RemoveUnmanagedAdmins IS GONE. It gated a capability that no longer
+        # exists: PIM never disables an account merely because it is absent from the desired set
+        # (operator, 2026-09-16). Nothing reads the knob, so listing it would advertise a switch
+        # that does nothing -- and a switch that does nothing is how it comes back.
         @{ name = 'PIM_TestTenantIds';         env = 'PIM_TestTenantIds';         what = 'which tenants classify as test' }
         @{ name = 'PIM_BreakGlassAccounts';    env = 'PIM_BREAKGLASS_ACCOUNTS';   what = 'accounts that may never be disabled' }
         @{ name = 'PIM_AlertRecipient';        env = 'PIM_AlertRecipient';        what = 'who is paged when a guard trips' }
@@ -349,7 +352,7 @@ function Test-PimDisablePassAllowed {
 #
 # The guards above were built for the INFERRED disable: "this live admin is not in my desired
 # set, so disable it" -- the path that disabled 53 users on 2026-06-15. A row that SAYS
-# AccountStatus=Disabled / Revoked, or carries a past OffboardDate, is a different thing: the
+# AccountStatus=Disabled / Revoked, or carries a past AutoDisableDate, is a different thing: the
 # operator asked for it, by name, on that row. v1 honoured it on every run with no opt-in, and a
 # kill switch that is OFF by default is not a kill switch -- a revoked admin would stay usable.
 #
@@ -460,22 +463,23 @@ function Get-PimUpnLocalPart {
 
 function Select-PimDisableRemovals {
     <#
-      BUG-13 + BUG-14. Decide which of a disable scope's proposed removals may actually
-      proceed. PURE. Returns @{ remove; breakGlass; unmanaged; reason }.
+      BUG-13 + BUG-14 + 🔴 71.22. Classify a disable scope's proposed account removals.
+      PURE. Returns @{ remove; breakGlass; unmanaged; attributable; reportOnly; reason }.
 
-      Two exclusions, both defaulting to SAFE:
-        * BREAK-GLASS (BUG-14) -- never removable. No opt-in, no override. It is the
-          account you reach for when everything else is locked out, and it is by design
-          absent from normal definitions, so it lands in the removal set by default.
-        * UNMANAGED (BUG-13) -- a live admin whose identity matches NO desired row. The
-          desired UPN is built from ONE default domain, so an admin on another verified
-          domain can never match and would be classed as a removal. Matching is now
-          domain-INDEPENDENT (local part), and anything still unattributable is treated
-          as unmanaged: reported, not removed, unless the operator explicitly opts in
-          with $global:PIM_RemoveUnmanagedAdmins.
+      🔴 71.22 -- `remove` IS ALWAYS EMPTY. PIM never disables a user account merely because
+      it is absent from the desired set (operator, 2026-09-16: "i dont like flow 3 and that
+      should be removed"). The three classes are now REPORTS, not decisions:
+        * BREAK-GLASS (BUG-14) -- the account you reach for when everything else is locked
+          out. By design absent from normal definitions, so it landed in the removal set.
+        * ATTRIBUTABLE (BUG-13) -- the identity IS desired but the KEY did not match (a
+          second verified domain). Matching is domain-independent (local part); anything
+          still reported here is a key defect to fix.
+        * UNMANAGED -- genuinely absent from the desired set. Reported so the operator can
+          SEE it. Disabling it is a human decision, taken on the row itself
+          (AccountStatus=Disabled, or an AutoDisableDate) -- never inferred from absence.
 
-      Deprovisioning genuinely rogue admin accounts is still possible -- it just has to
-      be asked for, rather than being the default reading of "not in my CSV".
+      Group and membership pruning is a DIFFERENT path and is unaffected: this function only
+      ever saw ACCOUNTS (isAccountDisable scopes).
     #>
     [CmdletBinding()]
     param(
@@ -498,20 +502,19 @@ function Select-PimDisableRemovals {
             }
         }
     }
-    # MSP MODEL (operator 2026-08-06): the desired set is AUTHORITATIVE. The same admin
-    # legitimately holds accounts across several tenants/domains, and when they stop
-    # working for the MSP those accounts MUST be disabled/deleted -- that is the
-    # deprovisioning flow, not an accident. So an unmanaged admin stays REMOVABLE by
-    # default; it is reported for visibility, and the real brakes are the existing gates
-    # (account-disable opt-in, empty-desired, mass-disable cap, G4 budget, break-glass).
-    # $global:PIM_RemoveUnmanagedAdmins = $false is available as an extra brake for an
-    # operator who wants reporting only.
-    $allowUnmanaged = $true
-    if (Get-Command Test-PimExplicitFlagValue -ErrorAction SilentlyContinue) {
-        $ex = Test-PimExplicitFlagValue -Value (Get-PimSafetyKnob -Name 'PIM_RemoveUnmanagedAdmins')   # SEC-07
-        if ($null -ne $ex) { $allowUnmanaged = [bool]$ex }
-    }
-
+    # 🔴 71.22 -- "ABSENT FROM THE DESIRED SET" IS NO LONGER A REASON TO TOUCH AN ACCOUNT.
+    # Operator, 2026-09-16: "i dont like flow 3 and that should be removed."
+    # The MSP reading (2026-08-06) was that the desired set is AUTHORITATIVE, so an admin who
+    # had left was SUPPOSED to be deprovisioned here -- which made "not in my CSV" a disable
+    # instruction, guarded only by opt-in + breaker + budget. Every one of those guards is a
+    # ceiling on how MANY accounts get disabled, not a check on WHETHER the reason is sound; a
+    # partial read, a renamed domain or a half-loaded desired set all look identical to "they
+    # left". The capability is REMOVED, not defaulted off, along with its PIM_RemoveUnmanagedAdmins
+    # knob -- a knob is one config mistake away from being back on.
+    # What remains is the REPORT: the run still says exactly which live admin accounts are not in
+    # the desired set, because seeing them is useful. Acting on them is a human decision, made
+    # through the row (AccountStatus / AutoDisableDate), which is flows 1 and 2 -- both untouched.
+    # tests/Test-PimNoUnmanagedDisable.ps1 fails the suite if this path ever comes back.
     $keep = New-Object System.Collections.Generic.List[object]
     $bgHit = New-Object System.Collections.Generic.List[string]
     $unmanaged = New-Object System.Collections.Generic.List[string]
@@ -533,21 +536,21 @@ function Select-PimDisableRemovals {
         $lp = Get-PimUpnLocalPart -Upn $upn
         if ($desiredLocals.ContainsKey($lp)) { [void]$attributable.Add($upn); continue }
 
-        # 3. UNMANAGED -- genuinely absent from the desired set. Deprovisioning these is
-        #    a real feature, but it must be ASKED FOR, not be the default reading of
-        #    "not in my CSV".
+        # 3. UNMANAGED -- genuinely absent from the desired set. 71.21/71.22: REPORTED ONLY.
+        #    It is never added to $keep, under any flag, in any mode, in any tenant.
         [void]$unmanaged.Add($upn)
-        if (-not $allowUnmanaged) { continue }
-        [void]$keep.Add($r)
     }
+    # $keep can only ever be EMPTY now: branch 1 excludes break-glass, branch 2 excludes an
+    # attributable key mismatch, branch 3 reports. It is still returned (rather than a bare @())
+    # so the caller's shape is unchanged and a future branch cannot silently bypass this comment.
     return [pscustomobject]@{
         remove       = $keep.ToArray()
         breakGlass   = $bgHit.ToArray()
         unmanaged    = $unmanaged.ToArray()
         attributable = $attributable.ToArray()
-        reason       = ("{0} kept, {1} break-glass excluded, {2} attributable-to-desired excluded (key mismatch), {3} unmanaged{4}" -f `
-                        $keep.Count, $bgHit.Count, $attributable.Count, $unmanaged.Count,
-                        $(if ($allowUnmanaged) { ' (opt-in ON: unmanaged ARE removable)' } else { ' excluded (set PIM_RemoveUnmanagedAdmins -- global or env -- to allow)' }))
+        reportOnly   = $true
+        reason       = ("{0} kept, {1} break-glass excluded, {2} attributable-to-desired excluded (key mismatch), {3} unmanaged REPORTED ONLY -- PIM never disables an account merely because it is absent from the desired set (71.22)" -f `
+                        $keep.Count, $bgHit.Count, $attributable.Count, $unmanaged.Count)
     }
 }
 

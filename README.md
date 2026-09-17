@@ -1023,10 +1023,17 @@ push** (MSP scenarios will be part of the paid edition — see
   identities, so the customer owns its Conditional Access, its audit attribution,
   its lifecycle and instant revocation. There is no GDAP and no foreign multi-tenant
   identity.
-- **Signed, not encrypted; no secret at the receiver.** Baselines are signed with a
-  private key held only by the provider and verified against a public certificate —
-  tamper, forge, roll-back and replay are rejected, and the customer can read
-  exactly what is shipped.
+- **Signed, not encrypted; no secret at the receiver.** The provider signs each baseline with a
+  non-exportable key in its own key vault, from a scheduled job in its own cloud environment — no
+  management server, no certificate on disk. Each customer verifies the signature against the key
+  identifier it has chosen to trust; tamper, forge, roll-back, replay and an untrusted key are
+  rejected, and the customer can read exactly what is shipped.
+- **Signed file, private where it can be, nothing expires.** Customers on a private network connected
+  to the provider's read the baseline through a private endpoint (no public access); others read that
+  one file anonymously from the networks the provider names. Trust comes from the signature, never the
+  network, and there are no expiring links or shared credentials to renew.
+- **Change keys without an outage.** A customer can trust several provider keys at once, so a key
+  change is announced first and switched second.
 - **Per-admin sync, tag-scoped.** Each provider administrator states whether, and
   to which tagged managed tenants, it is synced; the Manager shows each tenant's
   mode.
@@ -1034,6 +1041,8 @@ push** (MSP scenarios will be part of the paid edition — see
   instruction can disable a specific privileged account across every managed
   tenant — applied locally by the customer's own engine through the same audited
   path as any other change.
+- **Deploy with a signed-in administrator.** The provider and each customer are built with one command
+  each, either as a certificate-based deployment identity or as an administrator's own sign-in.
 
 See **[docs/DESIGN.md §13](docs/DESIGN.md)** for the full MSP architecture.
 

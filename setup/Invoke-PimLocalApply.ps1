@@ -101,8 +101,8 @@ $csvRows = foreach ($a in $rows) {
         UserName='' + $a.UserName; DisplayName='' + $a.DisplayName
         UserPrincipalName=('' + $a.UserName) + '@' + $domain; UsageLocation='' + $a.UsageLocation
         ForwardMailsToContact='FALSE'; MailForwardAddress=''; Company=''; Notes='local-plane apply (Owner=Local)'
-        ManagerEmail=''; StartDate=''; ProvisionDate=''; CreateTAP='FALSE'; TAPStartDate=''; TAPLifetimeHours=''
-        AccountStatus='Enabled'; StatusChangeCode=''; Ring='2'; Template=''; OffboardDate=''; DeleteAfterDays=''
+        ManagerEmail=''; StartDate=''; ProvisionDate=''; CreateTAP='TRUE'; TAPStartDate=''; TAPLifetimeHours=''
+        AccountStatus='Enabled'; StatusChangeCode=''; Ring='2'; Template=''; AutoDisableDate=''
     }
 }
 foreach ($r in $csvRows) { Write-Host ("  plan: {0,-22} {1,-9} -> {2}" -f $r.UserName, $r.Purpose, $r.UserPrincipalName) -ForegroundColor $(if ($WhatIfMode){'Yellow'}else{'Gray'}) }
