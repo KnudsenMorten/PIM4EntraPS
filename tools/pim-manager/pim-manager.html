@@ -629,6 +629,12 @@
   .rev-action-bar button.rev-danger:hover { background:#a40e26; border-color:#a40e26; }
   .rev-action-bar button.rev-danger:disabled { background:#eaeef2; border-color:#d0d7de; color:#57606a; cursor:not-allowed; }
   .rev-action-bar .rev-spacer { flex:1; }
+  /* BUG-165: the per-click status beside the button (busy / staged / refused / error). */
+  .rev-action-bar .rev-status { font-size:11.5px; color:#57606a; max-width:46%; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .rev-action-bar .rev-status.busy { color:#0969da; font-weight:600; }
+  .rev-action-bar .rev-status.ok   { color:#1a7f37; font-weight:600; }
+  .rev-action-bar .rev-status.warn { color:#bc4c00; font-weight:600; }
+  .rev-action-bar .rev-status.err  { color:#cf222e; font-weight:600; white-space:normal; }
 
   /* Per-row revoke result pane (after submit) */
   #revResultsPane { padding:12px 18px; background:#f6f8fa; border-top:1px solid #d0d7de; max-height:32vh; overflow:auto; flex:0 0 auto; }
@@ -1352,6 +1358,13 @@
       <span class="rev-label">Justification</span>
       <input type="text" id="revJustify" class="rev-justify" placeholder="Required: business reason for the bulk revoke" maxlength="500">
       <span class="rev-spacer"></span>
+      <!-- BUG-165. The ONLY feedback this action used to give was the results pane at the very
+           bottom of the panel, and nothing at all for the seconds/minutes the preview round-trip
+           takes on this single-threaded server. A click that produces no visible change IS a dead
+           button to the operator, whatever the code did. This status sits NEXT TO the button, is
+           written on every outcome (busy / staged N / refused N / named error) and is never left
+           blank after a click. -->
+      <span class="rev-status" id="revActionStatus" role="status" aria-live="polite"></span>
       <button id="revBtnRevoke" class="rev-danger" disabled>Revoke selected</button>
       <button id="revBtnClear">Clear</button>
     </div>
@@ -4666,6 +4679,178 @@
     b.textContent = md.label;
     g.title = 'This tenant runs as ' + md.label + (md.detail ? ' -- ' + md.detail : '');
     g.style.display = '';
+  }
+
+  // ===================================================================
+  // §71.43 -- WHICH UPDATE RING IS THIS ENVIRONMENT ON? (operator 2026-09-18:
+  // "include ring in gui in pim manager for actual env").
+  //
+  // The ring is an environment variable on the UPDATE JOB (ca-pim-update), not on the
+  // Manager container, so until now it was only visible by reading that job over `az`.
+  // The nightly update job records ring + approved version + outcome into the
+  // environment's own store; GET /api/update-ring serves the verdict over that record.
+  //
+  // 🔒 READ-ONLY. Neither the badge nor the panel offers any way to CHANGE a ring: a
+  // ring move is an operator act performed on the update job, never a click in a web page.
+  // 🔒 NEVER A GUESS. An environment whose updater has not reported shows "not recorded",
+  // not a default ring, and a record older than the staleness window is always labelled
+  // with WHEN it was recorded rather than shown as if it were live.
+  // ===================================================================
+  let PIM_UPDATE_RING_CACHE = null;
+
+  // The three not-healthy states, kept in ONE place so the badge and the panel cannot
+  // disagree about which colour an environment is. The SERVER decides which one applies
+  // (Get-PimUpdateStateVerdict); this map only decides how it looks. Precedence there is
+  // failing (red) > held (blue, deliberate) > behind (amber) > current (green), with
+  // unknown (grey) for an environment that has recorded nothing.
+  const PIM_RING_STATE_STYLE = {
+    failing: { fg: '#cf222e', bg: '#ffebe9', bd: '#ffcecb', word: 'last update FAILED' },
+    behind:  { fg: '#9a6700', bg: '#fff8c5', bd: '#d4a72c', word: 'BEHIND its ring' },
+    held:    { fg: '#0550ae', bg: '#ddf4ff', bd: '#54aeff', word: 'HELD (frozen)' },
+    current: { fg: '#1a7f37', bg: '#dafbe1', bd: '#1a7f37', word: 'up to date' },
+    unknown: { fg: '#57606a', bg: '#eaeef2', bd: '#d0d7de', word: 'not recorded yet' }
+  };
+  function ringStyle(state) { return PIM_RING_STATE_STYLE[state] || PIM_RING_STATE_STYLE.unknown; }
+
+  // The updater's own action vocabulary, in words. "none" is the NORMAL nightly outcome (the ring
+  // approved nothing new) and reading it as a bare "none" beside "outcome ok" looks like a fault.
+  const PIM_RING_ACTION_WORD = {
+    none: 'nothing to do', built: 'built the image', rolled: 'rolled the containers',
+    schema: 'schema step', failed: 'failed before doing anything'
+  };
+
+  // "recorded 3h ago" / "recorded 6 days ago" -- a value is never shown without saying
+  // when it was recorded, so a stale reading can never be mistaken for a live one.
+  function ringRecordedAgo(v) {
+    if (!v || !v.recorded) return '';
+    const h = v.recordedAgeHours;
+    if (h == null) return 'recorded at an unreadable time';
+    if (h < 1) return 'recorded less than an hour ago';
+    if (h < 48) return 'recorded ' + Math.round(h) + 'h ago';
+    return 'recorded ' + Math.round(h / 24) + ' days ago';
+  }
+
+  async function fetchUpdateRing(force) {
+    if (PIM_UPDATE_RING_CACHE && !force) return PIM_UPDATE_RING_CACHE;
+    const v = await api('GET', '/api/update-ring');
+    PIM_UPDATE_RING_CACHE = v;
+    return v;
+  }
+
+  // Header badge, beside the existing Mode badge. Short by design ("ring 2"): the header
+  // answers "which ring", the Jobs panel answers "and is it keeping up".
+  async function renderUpdateRingBadge() {
+    const right = document.getElementById('brandRight');
+    if (!right) return;
+    let g = document.getElementById('updateRingGroup');
+    if (!g) {
+      g = document.createElement('div');
+      g.id = 'updateRingGroup'; g.className = 'brand-group'; g.style.display = 'none';
+      g.innerHTML = '<span class="brand-cap">Update ring</span><span class="brand-val"><b id="updateRingBadge"></b><span id="updateRingFlag" style="margin-left:6px;font-size:10px;padding:0 6px;border-radius:9px;display:none;"></span></span>';
+      // After the Mode group when it exists, so the two environment facts sit together.
+      const mode = document.getElementById('tenantModeGroup');
+      if (mode && mode.nextSibling) right.insertBefore(g, mode.nextSibling);
+      else if (mode) right.appendChild(g);
+      else right.insertBefore(g, right.firstChild);
+    }
+    let v = null;
+    try { v = await fetchUpdateRing(true); } catch (_) { v = null; }
+    if (!v) { g.style.display = 'none'; return; }
+    const b = document.getElementById('updateRingBadge');
+    const flag = document.getElementById('updateRingFlag');
+    b.textContent = v.ringLabel || 'not recorded';
+    // The flag is shown ONLY when the environment is not simply healthy -- a permanent
+    // green chip in the header trains people to stop reading it.
+    const st = ringStyle(v.state);
+    if (v.state === 'current' || v.state === 'unknown') {
+      flag.style.display = 'none';
+    } else {
+      flag.textContent = (v.state === 'behind' ? 'behind' : (v.state === 'held' ? 'held' : 'failed'));
+      flag.style.display = '';
+      flag.style.color = st.fg; flag.style.background = st.bg; flag.style.border = '1px solid ' + st.bd;
+    }
+    const when = ringRecordedAgo(v);
+    g.title = (v.recorded
+        ? 'This environment is on ' + (v.ringLabel || 'an unrecorded ring') + ' -- ' + st.word +
+          (when ? ' (' + when + ')' : '') + (v.message ? '\n' + v.message : '')
+        : (v.message || 'This environment has not recorded an update run yet.')) +
+      '\n\nA ring is changed on the update job by an operator, never from this page. See Jobs for the full picture.';
+    g.style.display = '';
+  }
+
+  // The fuller picture, on the Jobs tab (where "did the scheduled work happen?" already
+  // lives). Rendered into a host element so it is drivable headlessly, exactly like the
+  // engine-failures panel.
+  async function renderUpdateRingPanelInto(host) {
+    if (!host) return;
+    const esc = escapeHtml;
+    host.innerHTML = '<div style="color:#57606a;font-size:12px;">Reading this environment\'s update ring…</div>';
+    let v;
+    try { v = await fetchUpdateRing(true); }
+    catch (ex) {
+      host.innerHTML = '<div class="updRingPanel" style="padding:10px 12px;border:1px solid #ffcecb;background:#ffebe9;border-radius:6px;color:#7d1a1a;font-size:12px;">' +
+        '<b>The update ring could not be read.</b> ' + esc(ex.message || String(ex)) + '</div>';
+      return;
+    }
+    const st = ringStyle(v.state);
+    const val = (x) => (x == null || x === '') ? '<span style="color:#8c959f;">not recorded</span>' : '<b>' + esc(String(x)) + '</b>';
+    const row = (label, html, cls) => '<tr class="' + (cls || '') + '"><td style="color:#57606a;padding:3px 14px 3px 0;white-space:nowrap;vertical-align:top;">' + esc(label) + '</td><td style="vertical-align:top;">' + html + '</td></tr>';
+
+    let h = '<div class="updRingPanel" style="border:1px solid ' + st.bd + ';background:' + st.bg + ';border-radius:6px;padding:10px 12px;margin-bottom:14px;">';
+    h += '<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:8px;">' +
+         '<span style="font-size:11px;text-transform:uppercase;letter-spacing:.5px;color:#0969da;font-weight:600;">Updates &amp; ring</span>' +
+         '<span class="updRingLabel" style="font-weight:600;color:' + st.fg + ';">' + esc(v.ringLabel || 'not recorded') + '</span>' +
+         '<span class="updRingState updRingState-' + esc(v.state) + '" style="font-size:10.5px;font-weight:600;padding:1px 8px;border-radius:10px;color:' + st.fg + ';background:#ffffff;border:1px solid ' + st.bd + ';">' + esc(st.word) + '</span>' +
+         '<span style="flex:1 1 auto;"></span>' +
+         '<button id="updRingRefresh" class="ghost" style="font-size:12px;">Refresh</button>' +
+         '</div>';
+
+    if (!v.recorded) {
+      // 🔒 The honest empty state. It says WHY there is nothing, and what makes it appear --
+      // never a ring number this page invented.
+      h += '<div class="updRingNotRecorded" style="font-size:12px;color:#57606a;">' +
+           esc(v.message || 'This environment has not recorded an update run yet, so its ring is not known here.') +
+           '</div>';
+      h += '<div style="font-size:11.5px;color:#57606a;margin-top:8px;">The update job records it on its next run. ' +
+           'Until then nothing here is a guess &mdash; no ring is assumed.</div>';
+    } else {
+      if (v.message) h += '<div class="updRingMessage" style="font-size:12px;color:' + st.fg + ';margin-bottom:8px;">' + esc(v.message) + '</div>';
+      h += '<table class="updRingTable" style="font-size:12px;border-collapse:collapse;">';
+      h += row('Update ring', val(v.ringLabel));
+      h += row('Version running now', val(v.runningVersion) + ' <span style="color:#8c959f;font-size:11px;">(this Manager process)</span>');
+      h += row('Version this ring approves', (v.approvedVersion ? val(v.approvedVersion) : '<span style="color:#8c959f;">not recorded</span>') +
+               (v.approvedReason ? ' <span style="color:#8c959f;font-size:11px;">' + esc(v.approvedReason) + '</span>' : ''), 'updRingApproved');
+      h += row('Last version built here', val(v.lastBuiltVersion));
+      h += row('Last update run', (v.lastRunUtc ? '<b>' + esc(v.lastRunUtc) + '</b>' : '<span style="color:#8c959f;">not recorded</span>') +
+               ' <span style="color:#8c959f;font-size:11px;">' + esc(ringRecordedAgo(v)) + '</span>' +
+               (v.lastOutcome ? ' &middot; outcome <b style="color:' + (v.failing ? '#cf222e' : '#1a7f37') + ';">' + esc(v.lastOutcome) + '</b>' : '') +
+               (v.lastAction ? ' <span style="color:#57606a;">(' + esc(PIM_RING_ACTION_WORD[v.lastAction] || v.lastAction) + ')</span>' : ''), 'updRingLastRun');
+      h += row('Last SUCCESSFUL update', (v.lastSuccessUtc ? '<b>' + esc(v.lastSuccessUtc) + '</b>' : '<span style="color:#8c959f;">none recorded</span>') +
+               (v.lastSuccessVersion ? ' &rarr; <b>' + esc(v.lastSuccessVersion) + '</b>' : ''), 'updRingLastSuccess');
+      h += row('Frozen (hold)', v.held
+               ? '<b class="updRingHeld" style="color:' + PIM_RING_STATE_STYLE.held.fg + ';">yes &mdash; PIM_UPDATE_HOLD is set, so this environment does not move</b>'
+               : '<span style="color:#57606a;">no</span>');
+      h += row('Behind its ring', v.behind
+               ? '<b class="updRingBehind" style="color:' + PIM_RING_STATE_STYLE.behind.fg + ';">yes &mdash; the ring approves a newer version than this environment runs</b>'
+               : '<span style="color:#57606a;">' + (v.approvedVersion ? 'no' : 'cannot be compared &mdash; no approved version was recorded') + '</span>');
+      if (v.failing && v.lastError) {
+        h += row('Last failure', '<span class="updRingError" style="color:#cf222e;">' + esc(v.lastError) + '</span>');
+      }
+      h += '</table>';
+      if (v.stale) {
+        // 🔴 NEVER SHOW A STALE VALUE AS CURRENT. Everything above is what was last RECORDED.
+        h += '<div class="updRingStale" style="margin-top:8px;font-size:11.5px;color:#7d4e00;background:#fff8c5;border:1px solid #d4a72c;border-radius:6px;padding:6px 8px;">' +
+             '&#9888; These are the values last <b>recorded</b> by the update job, not a live reading &mdash; it has not reported recently' +
+             (v.lastRunUtc ? ' (' + esc(ringRecordedAgo(v)) + ')' : '') + '.</div>';
+      }
+    }
+    // 🔒 Said in the panel, not just in code: this surface cannot move a ring.
+    h += '<div class="updRingReadOnly" style="margin-top:8px;font-size:11px;color:#57606a;">' +
+         'Read-only. The ring is set on the update job when the environment is deployed &mdash; it is not changed from this page.</div>';
+    h += '</div>';
+    host.innerHTML = h;
+    const rb = document.getElementById('updRingRefresh');
+    if (rb) rb.onclick = () => { PIM_UPDATE_RING_CACHE = null; renderUpdateRingPanelInto(host); try { renderUpdateRingBadge(); } catch (_) {} };
   }
   async function renderScenarioCard(canEdit) {
     const host = document.getElementById('setScenarioBody');
@@ -8512,11 +8697,23 @@
   // never be applied, so it is noise in the working list. Hidden unless the operator ticks "Show discarded".
   let queueShowDiscarded = false;
   // §70.20 (operator 2026-09-13: "it would be great to see the last committed changes - filter option for both type").
-  // 'open' = the working queue (as before); 'recent-all' / 'recent-config' / 'recent-actions' = what was committed lately:
+  // 'open' = the working queue only; 'recent-all' / 'recent-config' / 'recent-actions' = what was committed lately:
   // configuration commits (audit config.save, one sentence per row) and queued directory actions (committed/applied).
-  let queueView = 'open';
-  async function renderRecentCommitsInto(host, kind) {
-    const esc = escapeHtml;
+  //
+  // 🔴 §70.23 (operator 2026-09-18, live on internal, Manager v2.4.367). He staged a DELEGATION, pressed
+  // "Commit all", and then COULD NOT FIND IT. The commit had worked perfectly -- the audit trail carries both
+  // config.save events (PIM-Definitions-Departments 1 added, PIM-Assignments-Groups 2 added, 10:18:23/10:18:28
+  // UTC) -- but this list defaulted to 'open', which by design shows ONLY directory actions, so the screen
+  // after a successful configuration commit showed a handful of old TAP/revoke rows and the words "No
+  // configuration edits waiting". Switching Show to "Recent commits: all types" revealed his delegation at once.
+  // His verdict on having to do that: "that is wrong" -- "you dont show queue + commits, it must show all by default".
+  // 🔑 THE DEFAULT IS EVERYTHING. A person must never have to pick a filter to see the thing they just did;
+  // an empty-looking list right after a successful commit reads as "my change vanished", and no amount of
+  // correctness elsewhere survives that. 'open' remains available as a filter -- it is just not the landing view.
+  let queueView = 'all';
+  // One implementation of "what was committed lately", used by BOTH the recent-* filters and the merged
+  // default view -- so the two can never drift into showing different things.
+  async function fetchRecentCommitRows(kind) {
     const rows = [];
     if (kind !== 'recent-config') {
       try {
@@ -8534,6 +8731,25 @@
             who: ev.actor || '', state: String(ev.result || 'ok'), detail: '' }));
       } catch (e) { rows.push({ when: '', type: 'Configuration', what: 'Could not read the audit trail (Admin role required): ' + e.message, who: '', state: 'error', detail: '' }); }
     }
+    return rows;
+  }
+  // The configuration commits, shaped like queue entries so the ONE table in the default view can carry both
+  // kinds without a second renderer. They are history: never selectable, never committable.
+  async function fetchConfigCommitEntries() {
+    return (await fetchRecentCommitRows('recent-config')).map(function (r, i) {
+      return {
+        // 🪤 "could not read" is NOT "nothing" (the same rule the queue read follows above). A Reader cannot
+        // see the audit trail; say that in the row rather than showing an empty list, and do not dress it up
+        // as a FAILED change -- nothing failed, we simply could not look.
+        id: 'cfg-' + i, status: (r.state === 'error' ? 'unreadable' : 'saved'), kind: 'Configuration', origin: 'desired state',
+        committable: false, discardable: false, display: r.what, by: r.who, committedBy: r.who,
+        enqueuedUtc: r.when, lastError: (r.state === 'error' ? r.what : ''), __config: true
+      };
+    });
+  }
+  async function renderRecentCommitsInto(host, kind) {
+    const esc = escapeHtml;
+    const rows = await fetchRecentCommitRows(kind);
     rows.sort((a, b) => String(b.when).localeCompare(String(a.when)));
     const tone = { committed: '#0969da', applying: '#8250df', applied: '#1a7f37', failed: '#cf222e', ok: '#1a7f37', error: '#cf222e' };
     if (!rows.length) { host.innerHTML = '<div style="color:#57606a;font-size:12.5px;padding:18px 0;">Nothing committed recently.</div>'; return; }
@@ -8576,12 +8792,19 @@
     const badge = document.getElementById('queuePendBadge');
     if (badge) { if (pend > 0) { badge.textContent = pend; badge.style.display = ''; } else { badge.style.display = 'none'; } }
 
-    const tone = { pending: '#bc4c00', committed: '#0969da', applying: '#8250df', applied: '#1a7f37', failed: '#cf222e', discarded: '#8c959f' };
+    const tone = { pending: '#bc4c00', committed: '#0969da', applying: '#8250df', applied: '#1a7f37', saved: '#1a7f37', unreadable: '#8c959f', failed: '#cf222e', discarded: '#8c959f' };
     const discardedCount = entries.filter(function (e) { return String(e.status || '') === 'discarded'; }).length;
+    // §70.23: the DEFAULT view is queue + recent configuration commits in ONE list. A configuration commit is
+    // already saved to desired state, so it ranks with the history (4) and never carries a checkbox.
+    let configEntries = [];
+    if (queueView === 'all') {
+      try { configEntries = await fetchConfigCommitEntries(); } catch (_) { configEntries = []; }
+      for (const c of configEntries) entries.push(c);
+    }
     // §70.22 (operator 2026-09-14, screenshot: "pending should be highest, not applied"): what still needs a decision
     // or is still in flight comes first -- pending, failed, committed, applying -- then history (applied, discarded);
     // newest first within each state.
-    const queueStateRank = { pending: 0, failed: 1, committed: 2, applying: 3, applied: 4, discarded: 5 };
+    const queueStateRank = { pending: 0, failed: 1, committed: 2, applying: 3, applied: 4, saved: 4, discarded: 5 };
     const shownEntries = (queueShowDiscarded ? entries : entries.filter(function (e) { return String(e.status || '') !== 'discarded'; }))
       .slice().sort(function (a, b) {
         const ra = queueStateRank[String(a.status || '')], rb = queueStateRank[String(b.status || '')];
@@ -8589,16 +8812,26 @@
         return d !== 0 ? d : String(b.enqueuedUtc || '').localeCompare(String(a.enqueuedUtc || ''));
       });
     const h = [];
+    // 🔴 §70.23 (operator 2026-09-18, same screenshot): the heading read "CHANGE QUEUE 10 applied · 11 discarded"
+    // while the list underneath was showing two CONFIGURATION commits. The counter came from the server's queue
+    // counts and therefore described a different set of things than the rows below it. A count that disagrees
+    // with the list under it is worse than no count -- so the counter now counts WHAT IS ON SCREEN and says so.
+    const shownCounts = {};
+    for (const e of shownEntries) { const k = String(e.status || ''); if (k) shownCounts[k] = (shownCounts[k] || 0) + 1; }
+    const hiddenNote = (!queueShowDiscarded && discardedCount > 0) ? (' &middot; ' + discardedCount + ' discarded hidden') : '';
+    const countsHtml = (queueView === 'open' || queueView === 'all')
+      ? ('Showing ' + shownEntries.length + (shownEntries.length ? ': ' : '') +
+          Object.keys(shownCounts).sort().map(function (k) {
+            return '<span style="color:' + (tone[k] || '#57606a') + ';font-weight:600;">' + shownCounts[k] + ' ' + esc(k) + '</span>';
+          }).join(' &middot; ') + hiddenNote)
+      : 'Showing recent commits';
     h.push('<div style="display:flex;align-items:center;gap:10px;margin-bottom:10px;flex-wrap:wrap;">' +
-      '<span style="font-size:11px;text-transform:uppercase;letter-spacing:.5px;color:#0969da;font-weight:600;">Change queue</span>' +
-      '<span style="color:#57606a;font-size:11.5px;">' +
-        Object.keys(counts).sort().map(function (k) {
-          return '<span style="color:' + (tone[k] || '#57606a') + ';font-weight:600;">' + counts[k] + ' ' + esc(k) + '</span>';
-        }).join(' &middot; ') +
-      '</span>' +
+      '<span style="font-size:11px;text-transform:uppercase;letter-spacing:.5px;color:#0969da;font-weight:600;">' +
+        (queueView === 'all' ? 'Change queue &amp; recent commits' : 'Change queue') + '</span>' +
+      '<span id="queueCountsNote" style="color:#57606a;font-size:11.5px;">' + countsHtml + '</span>' +
       '<span style="flex:1 1 auto;"></span>' +
       '<label style="font-size:12px;color:#57606a;display:flex;align-items:center;gap:4px;">Show <select id="queueViewSel" style="font-size:12px;">' +
-        [['open', 'Open queue'], ['recent-all', 'Recent commits: all types'], ['recent-config', 'Recent commits: configuration'], ['recent-actions', 'Recent commits: directory actions']]
+        [['all', 'Everything (queue + recent commits)'], ['open', 'Open queue only'], ['recent-all', 'Recent commits: all types'], ['recent-config', 'Recent commits: configuration'], ['recent-actions', 'Recent commits: directory actions']]
           .map(function (o) { return '<option value="' + o[0] + '"' + (queueView === o[0] ? ' selected' : '') + '>' + o[1] + '</option>'; }).join('') +
       '</select></label>' +
       (discardedCount > 0
@@ -8612,9 +8845,12 @@
     h.push('<div style="color:#57606a;font-size:11.5px;margin-bottom:10px;">' +
       'The Manager does not change the directory itself. Select the entries you want applied and press ' +
       '<b>Commit selected</b> &mdash; the engine applies them on its next run, confirms the result, and puts anything that fails back in the queue.' +
+      (queueView === 'all'
+        ? ' This list shows <b>both</b> kinds: queued <i>directory actions</i> (state <i>pending</i> until you commit them) and the <i>configuration</i> changes already committed to desired state (state <i>saved</i>) &mdash; those are done, and the engine applies them on its next run.'
+        : '') +
       '</div>');
 
-    if (queueView !== 'open') {
+    if (queueView !== 'open' && queueView !== 'all') {
       h.push('<div id="queueRecentHost">' + stateLoading('Loading recent commits…', '') + '</div>');
       body.innerHTML = h.join('');
       wireQueue(body);
@@ -8622,7 +8858,8 @@
       return;
     }
     if (!shownEntries.length) {
-      h.push('<div style="color:#57606a;font-size:12.5px;padding:18px 0;">Nothing queued.' +
+      h.push('<div style="color:#57606a;font-size:12.5px;padding:18px 0;">' +
+        (queueView === 'all' ? 'Nothing queued, and no configuration commit in the last month.' : 'Nothing queued.') +
         (discardedCount > 0 ? ' <span style="font-size:11.5px;">(' + discardedCount + ' discarded entr' + (discardedCount === 1 ? 'y' : 'ies') + ' hidden)</span>' : '') + '</div>');
       body.innerHTML = h.join('');
       wireQueue(body);
@@ -8654,6 +8891,9 @@
       // table must actually show why -- a retained failure nobody can read is not an improvement.
       let result = '';
       if (st === 'failed')        { result = '<span style="color:#cf222e;">' + esc(e.lastError || 'failed') + '</span>'; }
+      // §70.23: a configuration commit is already in the store. Say that, and say what happens next -- the
+      // operator's question was exactly "where did it go and what now?".
+      else if (st === 'saved')    { result = '<span style="color:#1a7f37;">saved to desired state</span><div style="color:#57606a;font-size:11px;">the engine applies it on its next run</div>'; }
       else if (st === 'applied')  { result = '<span style="color:#1a7f37;">applied ' + esc(e.appliedUtc || '') + '</span>' + (e.appliedBy ? ('<div style="color:#57606a;font-size:11px;">by ' + esc(e.appliedBy) + '</div>') : ''); }
       else if (e.attempts > 0)    { result = '<span style="color:#bc4c00;">attempt ' + e.attempts + '</span>' + (e.lastError ? ('<div style="color:#57606a;font-size:11px;">' + esc(e.lastError) + '</div>') : ''); }
       h.push('<tr style="border-bottom:1px solid #eaeef2;">' +
@@ -8700,7 +8940,7 @@
     const showDiscarded = document.getElementById('queueShowDiscarded');
     if (showDiscarded) showDiscarded.addEventListener('change', function () { queueShowDiscarded = !!showDiscarded.checked; rerender(); });
     const viewSel = document.getElementById('queueViewSel');
-    if (viewSel) viewSel.addEventListener('change', function () { queueView = viewSel.value || 'open'; rerender(); });
+    if (viewSel) viewSel.addEventListener('change', function () { queueView = viewSel.value || 'all'; rerender(); });
     if (dbtn) dbtn.addEventListener('click', async function () {
       const ids = picked().filter(function (b) { return b.dataset.discardable === '1'; }).map(function (b) { return b.dataset.id; });
       if (!ids.length) return;
@@ -8762,6 +9002,12 @@
     if (badge) { if (running > 0) { badge.textContent = running; badge.style.display = ''; } else { badge.style.display = 'none'; } }
 
     const h = [];
+    // §71.43 -- the environment's UPDATE RING sits at the top of Jobs, above the scheduled
+    // jobs, because "is this environment being kept current, and by which ring?" is the same
+    // question as "did the scheduled work happen?" -- and the update job is the one scheduled
+    // job that does not appear in the list below (it runs in its own Container Apps Job).
+    // Filled asynchronously after the list renders so a slow/absent store never delays Jobs.
+    h.push('<div id="jobsUpdateRing"></div>');
     h.push('<div style="display:flex;align-items:center;gap:10px;margin-bottom:10px;flex-wrap:wrap;">' +
       '<span style="font-size:11px;text-transform:uppercase;letter-spacing:.5px;color:#0969da;font-weight:600;">Scheduled &amp; recent jobs</span>' +
       '<span style="color:#57606a;font-size:11.5px;">' + jobs.length + ' jobs' + (running ? (' &middot; <b style="color:#1a7f37;">' + running + ' running</b>') : '') + '</span>' +
@@ -8942,6 +9188,9 @@
       ])
     }));
 
+    // §71.43 -- fill the update-ring panel now that its host exists. Never awaited into the
+    // Jobs render: a store that is slow to answer must not hold up the jobs list.
+    try { renderUpdateRingPanelInto(document.getElementById('jobsUpdateRing')); } catch (_) {}
     const rf = document.getElementById('jobsRefresh'); if (rf) rf.onclick = () => renderJobs();
     const auto = document.getElementById('jobsAuto');
     if (auto) {
@@ -11482,8 +11731,21 @@
     // 2026-09-12, v2.4.335). Configuration edits are ONE of the two kinds of pending change; their
     // absence says nothing about the queue, so the text must not claim "no pending changes" either.
     if (bases.length === 0) {
-      wrap.innerHTML = '<div class="empty" style="padding:12px 20px;">No configuration edits waiting. Edit cells on the <b>Configuration</b> tab, or stage new objects from the <b>Create</b> tab. Queued directory actions are listed below.</div>';
-      const st = document.getElementById('saveStatus'); if (st) st.textContent = '';
+      // 🔴 §70.23 (operator 2026-09-18): "No configuration edits waiting" is TRUE and still reads as
+      // "nothing happened" -- it is the sentence you land on immediately after a SUCCESSFUL commit, which is
+      // exactly when you need to be told the opposite. Distinguish "nothing is WAITING" from "here is what you
+      // just committed", and point at where the committed work now shows.
+      wrap.innerHTML = '<div class="empty" style="padding:12px 20px;">' +
+        '<b>Nothing is waiting to be committed.</b> Anything you have just committed is already saved to the desired state &mdash; ' +
+        'it is listed below under <b>Change queue &amp; recent commits</b> (state <i>saved</i>), and the engine applies it on its next run. ' +
+        'To stage more, edit cells on the <b>Configuration</b> tab or stage new objects from the <b>Create</b> tab.' +
+        '</div>';
+      // 🔴 §70.23 / BUG-111 again: this BLANKED #saveStatus, and the blank happens on the very render that
+      // follows a successful commit (pendingChanges is empty by then) -- so "All commits succeeded" was wiped
+      // before the operator could read it. A commit result is STICKY: it stays until the next commit, a cancel,
+      // or a fresh reload clears it on purpose.
+      const st = document.getElementById('saveStatus');
+      if (st && st.dataset.sticky !== '1') { st.textContent = ''; st.className = ''; }
     }
     for (const base of bases) {
       const card = document.createElement('div');
@@ -11571,6 +11833,8 @@
     if (!isServer) return;
     const status = document.getElementById('saveStatus');
     status.className = '';
+    // §70.23: a new commit replaces the previous commit's sticky summary.
+    if (status && status.dataset) status.dataset.sticky = '0';
     const bases = Object.keys(pendingChanges).filter(b => isDirty(b));
     // 🔴 §70.20 (operator 2026-09-13, screenshot: "commit all results in nothing to commit"): a queued ACTION
     // (TAP re-issue, revoke) was pending in the Change queue right below, and "Commit all" ignored it -- it only
@@ -11588,7 +11852,8 @@
         status.textContent = 'Committed ' + ((r && r.committed != null) ? r.committed : queueIds.length) + ' queued action(s) -- ' + ((r && r.engine) ? r.engine : 'the engine applies them on its next run') + '.' +
           ((r && r.skipped > 0) ? ' ' + r.skipped + ' not committed (see the queue).' : '');
         status.className = (r && r.skipped > 0) ? 'err' : 'ok';
-      } catch (e) { status.textContent = 'Committing the queued actions FAILED: ' + e.message; status.className = 'err'; }
+        if (status.dataset) status.dataset.sticky = '1';
+      } catch (e) { status.textContent = 'Committing the queued actions FAILED: ' + e.message; status.className = 'err'; if (status.dataset) status.dataset.sticky = '1'; }
       try { renderQueueInto(document.getElementById('saveQueueHost')); refreshQueueBadge(); } catch (_) { }
       return;
     }
@@ -11639,11 +11904,17 @@
     }
     document.getElementById('btnCommit').disabled = true;
     document.getElementById('btnCancel').disabled = true;
+    // §70.23: remember WHAT each entity write actually did, so the commit can report it. The server's
+    // PUT /api/csv/<base> answers { rowCount, adds, removes, modifies } -- the same numbers the audit
+    // trail records -- so the sentence on screen and the sentence in the audit cannot disagree.
+    const wrote = [];
     for (const base of bases) {
       status.textContent = 'Writing ' + base + ' ...';
       try {
         const finalRows = pendingFinalRows(base);
         const r = await api('PUT', '/api/csv/' + encodeURIComponent(base), { rows: finalRows });
+        wrote.push({ base: base, adds: Number((r && r.adds) || 0), removes: Number((r && r.removes) || 0),
+                     modifies: Number((r && r.modifies) || 0), rowCount: Number((r && r.rowCount) || 0) });
         // Refresh local cache + reset pending.
         await loadCsv(base, true);
         delete pendingChanges[base];
@@ -11651,6 +11922,7 @@
       } catch (e) {
         status.textContent = 'FAILED on ' + base + ': ' + e.message;
         status.className = 'err';
+        if (status.dataset) status.dataset.sticky = '1';   // §70.23: a refusal must not be wiped either
         document.getElementById('btnCommit').disabled = false;
         document.getElementById('btnCancel').disabled = false;
         return;
@@ -11663,15 +11935,32 @@
     let engineNote = '';
     try {
       const k = await api('POST', '/api/scheduler/kick', { reason: 'commit:' + bases.join(',') });
-      engineNote = (k && k.detail) ? (' Engine: ' + k.detail + '.') : '';
+      engineNote = (k && k.detail) ? (' Engine: ' + escapeHtml(k.detail) + '.') : '';
     } catch (_) { engineNote = ''; }
-    if (engineNote) status.textContent = 'All commits succeeded.' + engineNote + ' Refreshing graph...';
+    // 🔴 §70.23 (operator 2026-09-18): "All commits succeeded" did not say WHAT was committed, WHERE it went or
+    // WHAT HAPPENS NEXT -- and the next render wiped it. Say all three, on the control the operator pressed
+    // (same place as the BUG-165 revoke status), and make it survive the re-render.
+    const totalChanges = wrote.reduce(function (n, w) { return n + w.adds + w.removes + w.modifies; }, 0);
+    const per = wrote.map(function (w) {
+      return '<li><b>' + escapeHtml(w.base) + '</b> &mdash; ' + w.adds + ' added, ' + w.removes + ' removed, ' +
+             w.modifies + ' changed (' + w.rowCount + ' rows now)</li>';
+    }).join('');
+    let summaryHtml = '<b>Committed ' + totalChanges + ' configuration change' + (totalChanges === 1 ? '' : 's') +
+      '</b> to the desired state across ' + wrote.length + ' entit' + (wrote.length === 1 ? 'y' : 'ies') + '.' +
+      (per ? '<ul style="margin:6px 0 4px 18px;">' + per + '</ul>' : ' ') +
+      'The engine applies ' + (totalChanges === 1 ? 'it' : 'them') + ' on its next run.' + engineNote +
+      ' <span style="color:#57606a">Listed below under <b>Change queue &amp; recent commits</b> (state <i>saved</i>).</span>';
     // §70.20: the queued actions shown below are part of "all" too.
     if (queueIds.length && confirm('Also commit ' + queueIds.length + ' queued action' + (queueIds.length === 1 ? '' : 's') + ' from the Change queue?\n\nThe engine applies them on its next run.')) {
-      try { const qr = await api('POST', '/api/queue/commit', { ids: queueIds }); status.textContent = 'All commits succeeded, plus ' + ((qr && qr.committed != null) ? qr.committed : queueIds.length) + ' queued action(s). Refreshing graph...'; }
-      catch (e) { status.textContent = 'Configuration committed; committing the queued actions FAILED: ' + e.message; status.className = 'err'; }
+      try {
+        const qr = await api('POST', '/api/queue/commit', { ids: queueIds });
+        summaryHtml += ' <b>Plus ' + ((qr && qr.committed != null) ? qr.committed : queueIds.length) + ' queued directory action(s)</b> committed.';
+      }
+      catch (e) { summaryHtml += ' <b style="color:#cf222e">Committing the queued actions FAILED: ' + escapeHtml(e.message) + '</b>'; status.className = 'err'; }
       try { renderQueueInto(document.getElementById('saveQueueHost')); refreshQueueBadge(); } catch (_) { }
     }
+    status.innerHTML = summaryHtml;
+    if (status.dataset) status.dataset.sticky = '1';
     // Pull fresh graph data.
     try {
       const fresh = await api('GET', '/api/config');
@@ -11691,6 +11980,8 @@
     markBadges();
     renderSaveTab();
     const status = document.getElementById('saveStatus');
+    // §70.23: discarding replaces the previous commit's sticky summary -- it is a new outcome.
+    if (status.dataset) status.dataset.sticky = '0';
     status.textContent = 'All pending changes discarded.';
     status.className = '';
   };
@@ -11723,7 +12014,15 @@
       markBadges();
       btn.textContent = '✓ Refreshed';
       setTimeout(() => { btn.textContent = orig; btn.disabled = false; }, 2500);
-      if (status) { status.textContent = 'Reloaded from the server and re-checked.'; status.className = 'ok'; }
+      // 🔴 §70.23 (operator 2026-09-18): this REPLACED the commit summary, and Refresh is exactly the button an
+      // operator presses when hunting for the change they just committed -- so pressing it destroyed the only
+      // record on screen of what the commit did. BUG-111's rule (feedback on the control you pressed) is already
+      // satisfied by the "✓ Refreshed" label above; here we APPEND rather than overwrite.
+      if (status) {
+        if (status.dataset && status.dataset.sticky === '1') {
+          status.innerHTML += ' <span style="color:#57606a">Reloaded from the server and re-checked.</span>';
+        } else { status.textContent = 'Reloaded from the server and re-checked.'; status.className = 'ok'; }
+      }
     } catch (e) {
       btn.textContent = orig; btn.disabled = false;
       if (status) { status.textContent = 'Refresh failed: ' + e.message; status.className = 'err'; }
@@ -17038,6 +17337,9 @@
   }
 
   async function openRevokeTab() {
+    // BUG-165: re-arm the tab's controls on every open. Idempotent (plain onclick assignment), and
+    // it is the guarantee that a "Revoke selected" the operator can see is a button that works.
+    try { wireRevokeTab(); } catch (_) { }
     // Await the (fast) workload-panel init BEFORE kicking the heavy
     // active-assignments load: the server is single-threaded, so firing the
     // big request first would starve the small one for minutes.
@@ -17105,6 +17407,7 @@
       (force ? 'Queueing a new read for the scheduler and loading the stored snapshot&hellip;' : 'Loading the stored snapshot of active assignments&hellip;') + '</div>';
     setRevChips(null);
     setRevBusy(true);
+    setRevStatus('');
     document.getElementById('revActionBar').classList.remove('active');
     document.getElementById('revResultsPane').style.display = 'none';
     try {
@@ -17395,44 +17698,160 @@
     btn.disabled = !(n > 0 && j.length > 0);
   }
 
+  // BUG-165 -- the status line NEXT TO the button. Every click writes one, every outcome
+  // replaces it, and it is never left blank while work is in flight. "Nothing visibly
+  // happened" was indistinguishable from "the button is dead" (reported live 2026-09-18).
+  function setRevStatus(text, kind) {
+    const el = document.getElementById('revActionStatus');
+    if (!el) return;
+    el.className = 'rev-status' + (kind ? ' ' + kind : '');
+    el.textContent = text || '';
+    el.title = text || '';
+  }
+
+  // BUG-165 -- WHAT THE SERVER NEEDS TO ADDRESS THE ASSIGNMENT, per type. The client used to
+  // post a hand-written subset of the row and drop the rest, so an azure-rbac row arrived at the
+  // queue builder WITHOUT roleAssignmentId / roleAssignmentName -- the one pair that addresses an
+  // ARM role assignment -- and every single azure-rbac revoke failed server-side with
+  //     "azure-rbac row has neither roleAssignmentId nor scope+roleAssignmentName"
+  // (Open-PimManager.ps1, Invoke-PimActiveAssignmentRevokeBatch). 514 of the 978 rows on the
+  // internal environment are azure-rbac. The whole snapshot row is posted now; this list is the
+  // explicit contract, and a row that cannot satisfy it is REFUSED HERE, per row, with a reason --
+  // never dropped quietly into a batch that will fail one call later.
+  const REV_PAYLOAD_FIELDS = [
+    'id', 'type', 'principal', 'principalId', 'principalKind',
+    'role', 'roleDefinitionId', 'roleAssignmentId', 'roleAssignmentName',
+    'scope', 'directoryScopeId', 'groupId', 'accessId',
+    'assignmentType', 'memberType', 'start', 'end'
+  ];
+  function revRowPayload(r) {
+    const o = {};
+    for (const k of REV_PAYLOAD_FIELDS) { if (r[k] !== undefined && r[k] !== null) o[k] = r[k]; }
+    return o;
+  }
+  // '' when the row CAN be addressed; otherwise the reason it cannot, in the operator's words.
+  function revRowBlockReason(r) {
+    const s = (v) => String(v == null ? '' : v).trim();
+    const eligible = /^elig/i.test(s(r.assignmentType) || s(r.memberType));
+    switch (s(r.type)) {
+      case 'entra-role':
+        if (!s(r.principalId))      return 'this row carries no principal id';
+        if (!s(r.roleDefinitionId)) return 'this row carries no role definition id';
+        return '';
+      case 'azure-rbac':
+        if (!s(r.principalId)) return 'this row carries no principal id';
+        if (eligible) {
+          if (!s(r.roleDefinitionId) || !s(r.scope)) return 'an eligible Azure assignment needs a role definition id and a scope';
+          return '';
+        }
+        if (!s(r.roleAssignmentId) && !(s(r.scope) && s(r.roleAssignmentName))) {
+          return 'the snapshot did not record this assignment\'s Azure role-assignment id, so it cannot be addressed -- press Refresh to rebuild the snapshot, then retry';
+        }
+        return '';
+      case 'pim-for-groups':
+        if (!s(r.principalId)) return 'this row carries no principal id';
+        if (!s(r.groupId))     return 'this row carries no group id';
+        return '';
+      default:
+        return "unsupported assignment type '" + s(r.type) + "' -- this Manager can stage entra-role, azure-rbac and pim-for-groups";
+    }
+  }
+
+  function renderRevPane(headline, lines) {
+    const pane = document.getElementById('revResultsPane');
+    if (!pane) return;
+    pane.style.display = '';
+    pane.innerHTML = '<div class="rev-rs-h">' + headline + '</div>' + (lines || []).join('');
+    try { pane.scrollIntoView({ block: 'nearest' }); } catch (_) { }
+  }
+  function revRefusedLine(r, why) {
+    return '<div class="rev-rs-row err"><span class="rev-rs-status">REFUSED</span><span class="rev-rs-body">' +
+           escapeHtml((r.principal || r.principalId || '?') + ' / ' + (r.role || '') + ' [' + (r.type || '') + ']') +
+           ' -- ' + escapeHtml(why) + '</span></div>';
+  }
+
+  // BUG-165. submitRevoke is async, so ANY throw inside it used to become an unhandled promise
+  // rejection: nothing on screen, nothing in the pane, only a console line the operator never
+  // opens. The wrapper guarantees three things for every click -- the button reports that it was
+  // pressed, exactly one outcome is written, and the control comes back.
   async function submitRevoke() {
+    const btn = document.getElementById('revBtnRevoke');
+    if (btn) btn.disabled = true;
+    setRevStatus('Working...', 'busy');
+    try {
+      await submitRevokeInner();
+    } catch (e) {
+      const msg = String((e && e.message) || e || 'unknown error');
+      setRevStatus('Could not stage the revoke: ' + msg, 'err');
+      renderRevPane('Could not stage the revoke',
+        ['<div class="rev-rs-row err"><span class="rev-rs-status">ERR</span><span class="rev-rs-body">' +
+         escapeHtml(msg) + '</span></div>']);
+    } finally {
+      refreshRevokeButtonState();
+    }
+  }
+
+  async function submitRevokeInner() {
     const justification = (document.getElementById('revJustify').value || '').trim();
-    if (!justification) return;
-    const selectedIds = Array.from(REV.selected);
-    const rows = REV.rows.filter(r => REV.selected.has(r.id) && !REV.revokeQueued.has(r.id));
-    if (rows.length === 0) return;
+    if (!justification) {
+      // Not reachable while the button gates on it -- but a silent return here is exactly how a
+      // button becomes "dead", so it says so instead.
+      setRevStatus('Type a justification first -- it is stored with the pending change.', 'warn');
+      return;
+    }
+    const selected  = REV.rows.filter(r => REV.selected.has(r.id));
+    const alreadyQ  = selected.filter(r => REV.revokeQueued.has(r.id));
+    const addressable = selected.filter(r => !REV.revokeQueued.has(r.id));
+    if (selected.length === 0) {
+      // The selection no longer matches any row in the loaded snapshot (a reload, a filter change
+      // or an id that moved). Say that -- it used to be a bare `return`.
+      setRevStatus('The ' + REV.selected.size + ' selected row(s) are no longer in the loaded snapshot. Press Refresh and select them again.', 'warn');
+      return;
+    }
+    // Per-row refusals, reported per row (never dropped).
+    const refused = [];
+    const rows = [];
+    for (const r of addressable) {
+      const why = revRowBlockReason(r);
+      if (why) refused.push({ row: r, why: why }); else rows.push(r);
+    }
+    if (rows.length === 0) {
+      const lines = refused.map(x => revRefusedLine(x.row, x.why));
+      if (alreadyQ.length) {
+        lines.push('<div class="rev-rs-row"><span class="rev-rs-status">i</span><span class="rev-rs-body">' +
+          alreadyQ.length + ' row(s) already have a revoke waiting in <b>Pending changes</b>.</span></div>');
+      }
+      setRevStatus('Nothing could be staged: ' + (refused.length ? refused.length + ' row(s) refused (see below)' : 'every selected row already has a revoke queued') + '.', 'err');
+      renderRevPane('Nothing was staged', lines);
+      return;
+    }
 
     // The full per-row payload. The server dispatches by `type`.
-    const rowPayload = rows.map(r => ({
-      id:               r.id,
-      type:             r.type,
-      principal:        r.principal,
-      principalId:      r.principalId,
-      roleDefinitionId: r.roleDefinitionId,
-      scope:            r.scope,
-      directoryScopeId: r.directoryScopeId,
-      groupId:          r.groupId,
-      accessId:         r.accessId
-    }));
+    const rowPayload = rows.map(revRowPayload);
 
     // SAFETY NET step 1 -- WHAT-IF: ask the server exactly what it would do
     // (break-glass accounts excluded, large-batch count-confirmation flagged)
     // BEFORE anything is fired. Never executes.
     let plan;
+    setRevStatus('Checking ' + rows.length + ' selected assignment(s) with the server...', 'busy');
     try {
       plan = await api('POST', '/api/revoke', { preview: true, rows: rowPayload });
     } catch (e) {
-      const pane = document.getElementById('revResultsPane');
-      pane.style.display = '';
-      pane.innerHTML = '<div class="rev-rs-h">Could not build revoke preview</div>' +
-        '<div class="rev-rs-row err"><span class="rev-rs-status">ERR</span><span class="rev-rs-body">' +
-        escapeHtml(String(e.message || e)) + '</span></div>';
+      const msg = String(e.message || e);
+      setRevStatus('Could not build the revoke preview: ' + msg, 'err');
+      renderRevPane('Could not build revoke preview',
+        ['<div class="rev-rs-row err"><span class="rev-rs-status">ERR</span><span class="rev-rs-body">' +
+         escapeHtml(msg) + '</span></div>']);
       return;
     }
     const toRevoke = (plan && typeof plan.toRevokeCount === 'number') ? plan.toRevokeCount : rows.length;
     const skipped  = (plan && Array.isArray(plan.skipped)) ? plan.skipped : [];
 
     if (toRevoke === 0) {
+      setRevStatus('Nothing staged -- every selected row is a protected break-glass account.', 'warn');
+      renderRevPane('Nothing was staged', refused.map(x => revRefusedLine(x.row, x.why)).concat(
+        ['<div class="rev-rs-row"><span class="rev-rs-status">i</span><span class="rev-rs-body">' +
+         'Every selected assignment is a protected <b>break-glass</b> account and was excluded.</span></div>']));
       await showConfirm('Nothing to revoke',
         '<p>Every selected assignment is a protected <b>break-glass</b> account and was excluded. Nothing will be revoked.</p>', false);
       return;
@@ -17467,18 +17886,30 @@
         'Separation of duties applies &mdash; you cannot approve your own request.</div>';
     }
 
+    // §65: the Manager does NOT revoke -- it STAGES. Saying "this will fire N admin-remove calls"
+    // here was the opposite of what the button does and of what the result pane says afterwards.
+    const refusedHtml = refused.length
+      ? ('<div style="margin-top:8px;padding:8px 10px;background:#ffebe9;border:1px solid #cf222e;border-radius:5px;font-size:11.5px;color:#cf222e;">' +
+         '&#9888; <b>' + refused.length + '</b> selected row' + (refused.length === 1 ? '' : 's') +
+         ' cannot be staged and ' + (refused.length === 1 ? 'is' : 'are') + ' listed below the table with the reason.</div>')
+      : '';
     const ok = await showRevokeConfirm(
-      'Revoke ' + toRevoke + ' active assignment' + (toRevoke === 1 ? '' : 's'),
-      '<p>This will fire <b>' + toRevoke + '</b> admin-remove call' + (toRevoke === 1 ? '' : 's') +
-      ' against Microsoft Graph / Azure Resource Manager. <b>This cannot be undone.</b></p>' +
-      '<p>The affected principals will need to re-activate via PIM if they need access.</p>' +
+      'Stage ' + toRevoke + ' revocation' + (toRevoke === 1 ? '' : 's'),
+      '<p>This stages <b>' + toRevoke + '</b> revocation' + (toRevoke === 1 ? '' : 's') +
+      ' as <b>pending changes</b>. <b>Nothing is revoked yet</b> &mdash; you commit them under ' +
+      '<b>Pending changes &rsaquo; Queue</b> and the engine applies them on its next run.</p>' +
+      '<p>Once committed and applied, the affected principals will need to re-activate via PIM if they need access.</p>' +
+      refusedHtml +
       skipHtml +
       '<p style="color:#57606a;font-size:11.5px">Justification: <code style="color:#1a1a1a">' +
       escapeHtml(justification) + '</code></p>' +
       confirmExtra,
       (plan && plan.confirmRequired) ? toRevoke : null
     );
-    if (!ok) return;
+    if (!ok) {
+      setRevStatus('Cancelled -- nothing was staged.', 'warn');
+      return;
+    }
 
     // Build the commit payload (server re-applies the guard authoritatively).
     const payload = {
@@ -17489,17 +17920,21 @@
 
     const pane = document.getElementById('revResultsPane');
     pane.style.display = '';
-    pane.innerHTML = '<div class="rev-rs-h">Submitting ' + rows.length + ' revoke request' +
-                     (rows.length === 1 ? '' : 's') + ' ...</div>';
+    setRevStatus('Staging ' + rows.length + ' revocation' + (rows.length === 1 ? '' : 's') + '...', 'busy');
+    pane.innerHTML = '<div class="rev-rs-h">Staging ' + rows.length + ' revocation' +
+                     (rows.length === 1 ? '' : 's') + ' as pending changes ...</div>';
 
     let resp;
     try {
       resp = await api('POST', '/api/revoke', payload);
       try { refreshQueueBadge(); } catch (_) {}
     } catch (e) {
-      pane.innerHTML = '<div class="rev-rs-h">Revoke batch failed</div>' +
+      const msg = String(e.message || e);
+      setRevStatus('Nothing was staged -- ' + msg, 'err');
+      pane.innerHTML = '<div class="rev-rs-h">Revoke batch failed &mdash; nothing was staged</div>' +
         '<div class="rev-rs-row err"><span class="rev-rs-status">ERR</span><span class="rev-rs-body">' +
-        escapeHtml(String(e.message || e)) + '</span></div>';
+        escapeHtml(msg) + '</span></div>' +
+        refused.map(x => revRefusedLine(x.row, x.why)).join('');
       return;
     }
     // 🔴 NEVER REPORT "0 ok, 0 failed" FOR WORK THE SERVER SAYS IT DID.
@@ -17554,7 +17989,23 @@
                  escapeHtml(label) + ' -- ' + escapeHtml(r.error || 'unknown error') + '</span></div>');
       }
     }
+    // BUG-165: a row this client refused to send is reported HERE, with the others, so the
+    // operator sees one complete account of what happened to every row they selected.
+    for (const x of refused) out.push(revRefusedLine(x.row, x.why));
     pane.innerHTML = out.join('');
+
+    // BUG-165: and the same account, in one line, next to the button that was pressed.
+    const staged = okCount;
+    const bits = [];
+    if (staged > 0) bits.push(staged + ' staged as pending change' + (staged === 1 ? '' : 's'));
+    if (errCount > 0) bits.push(errCount + ' failed');
+    if (refused.length > 0) bits.push(refused.length + ' refused');
+    if (staged > 0) {
+      setRevStatus(bits.join(', ') + ' -- nothing is revoked yet: commit under Pending changes > Queue.',
+                   (errCount || refused.length) ? 'warn' : 'ok');
+    } else {
+      setRevStatus('Nothing was staged (' + (bits.join(', ') || 'no rows accepted') + ') -- see the list below.', 'err');
+    }
 
     // §70.1b option 2: the table is the scheduler's SNAPSHOT and a revoke is only QUEUED here, so the row stays
     // in it until the engine applies the revoke and a newer snapshot is read (queue-apply queues that read).
@@ -17598,7 +18049,15 @@
   }
 
   // Wire Revoke tab controls (idempotent -- onclick assignment).
-  (function wireRevokeTab() {
+  // 🔴 BUG-165 -- THIS MUST NOT BE A ONE-SHOT. It used to run exactly once, as a top-level IIFE in
+  // an 18k-line script: if ANY earlier top-level statement threw (a lib that did not load, a data
+  // shape a panel did not expect), nothing here was ever bound -- while the button still ENABLED
+  // itself, because its enabled state is computed on a completely different path
+  // (renderRevokeTable -> updateActionBar -> refreshRevokeButtonState). The operator then sees a
+  // red, enabled "Revoke selected" that carries no handler at all: clicking it does nothing, with
+  // no request, no error and no toast. It is now a NAMED, IDEMPOTENT function, called at load AND
+  // every time the tab is opened, so the controls cannot stay unbound.
+  function wireRevokeTab() {
     const btnR = document.getElementById('revBtnRefresh');
     if (btnR) btnR.onclick = () => loadActiveAssignments(true);
 
@@ -17623,8 +18082,9 @@
     if (btnRev) btnRev.onclick = submitRevoke;
 
     const btnClr = document.getElementById('revBtnClear');
-    if (btnClr) btnClr.onclick = () => { REV.selected.clear(); renderRevokeTable(); };
-  })();
+    if (btnClr) btnClr.onclick = () => { REV.selected.clear(); setRevStatus(''); renderRevokeTable(); };
+  }
+  wireRevokeTab();
 
   // ===================================================================
   // Permission templates (Create tab) -- centrally maintained delegation
@@ -18769,6 +19229,7 @@
   renderGridList();
   initGlobalSearch();   // header global search (REQUIREMENTS §26a)
   if (isServer) { try { renderTenantModeBadge(); } catch (e) { } }   // 68.6 row 36: tenant mode in the header
+  if (isServer) { try { renderUpdateRingBadge(); } catch (e) { } }   // §71.43: the UPDATE RING this environment is on
   if (isServer) { try { mspReplicationContext(); } catch (e) { } }   // §71.5: is this the MSP master (Replication surface on/off)
   // Prime caches for any definition CSVs (so the GroupTag dropdowns have data).
   if (isServer) {

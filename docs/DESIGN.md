@@ -2675,6 +2675,30 @@ is decided by its **release ring**, never by "newest available":
   did, duration, error) to a write-only central store, so "is this site stuck?" and "is this release failing
   everywhere?" are both answerable. It carries nothing that identifies a person or a credential, and a failed
   status write never affects the update.
+- **The same run is also recorded into the environment's OWN store, so the Manager can show the ring**
+  (2026-09-18, §71.43). The central telemetry above is **write-only from the environment's side** — it
+  answers the vendor's fleet question and nothing the environment can read back — and `ca-pim-manager`
+  does not carry `PIM_UPDATE_RING` at all, so the GUI had no honest way to say which ring it is on.
+  `engine/_shared/PIM-UpdateState.ps1` adds the record (`New-PimUpdateStateRecord`), a **pure** verdict
+  (`Get-PimUpdateStateVerdict` → ring, running, approved, built, last run + outcome, last **success**,
+  held, behind, stale, malformed, not-recorded) and a never-throwing store read/write. It is **one bounded
+  JSON document in `pim.Settings['UpdateState']`** — same shape as `CutoverState` / `FeatureGates`, **no
+  file anywhere** (v2 is SQL-only). Semver parsing is duplicated locally rather than reaching into the
+  updater's library, per isolation-beats-DRY. `update-job-entry.ps1` writes it from the single
+  `Send-PimUpdateOutcome` helper every exit path already calls, best-effort in exactly the telemetry
+  direction: it can never fail, delay or refuse an update. The store env→globals copy became
+  `Use-PimUpdaterStoreEnv` (`PIM-UpdateSource.ps1`) and is now called **at the top of the job as well**,
+  because the refusals *above* the schema phase — no resource group, a ring with no source, nothing
+  approved, a refused downgrade — are exactly the runs an operator needs to see, and they previously ran
+  with no store resolved.
+- **`GET /api/update-ring` is read-only, and there is deliberately no writing counterpart.** It feeds the
+  header badge (`ring N` beside the Mode badge, with a `behind` / `held` / `failed` chip only when not
+  healthy) and the **Jobs → "Updates & ring"** panel. "Running now" is the Manager process's own version,
+  so the endpoint makes **no ARM call** to answer. Two rules it keeps: an environment that has recorded no
+  run shows **"not recorded"** and no ring number — never a guess; and a stale record is never presented
+  as current (everything is stamped with when it was recorded, with a banner past 48h). A ring move stays
+  an operator act on the update job; the panel says so, there is no write endpoint, and a test fails if
+  one appears.
 - **Where a feed is needed.** The in-cloud updater requires a published source feed (archives + `channel.json`).
   A community installation from the public repository has none and updates by `git pull` plus re-running the
   one-shot deploy (§11.7).
@@ -5849,6 +5873,33 @@ Queue entries move `pending → committed → applying → applied | failed`, or
   of the freshly loaded data after a reload (a colleague's commit made in the meantime is kept). The
   page warns before unloading with uncommitted edits, and the restart notice says staged changes are
   kept. Nothing is ever committed automatically.
+- **The default view is queue AND recent commits, in one table** (2026-09-18, §33.26 BUG-168). A
+  configuration commit and a directory action take **two different paths**: a configuration/delegation
+  edit committed with *Commit all* goes `PUT /api/csv/<base>` → `Invoke-PimManagerSafeCommit` → the
+  desired-state rows in SQL, audited as `config.save`, and **never becomes a `ChangeQueue` entry at
+  all**; only a directory action does. `queueView` defaulted to `'open'`, which renders queue entries
+  only — so the one screen an operator reaches after a successful configuration commit listed unrelated
+  older directory actions, under a counter describing *those*, beside *"No configuration edits
+  waiting"*. Every element was individually true and the whole read as *"my change vanished"*.
+  `queueView` now defaults to `'all'`: both kinds in one list, ranked the §70.22 way, with a **state**
+  column — `pending` / `failed` / `committed` / `applying` / `applied` / `discarded` for a directory
+  action, **`saved`** (at the same rank as `applied`) for a configuration commit, whose Result cell
+  reads *"saved to desired state · the engine applies it on its next run"*. A configuration commit
+  carries **no checkbox** — it is history, not work. One fetch helper (`fetchRecentCommitRows`) feeds
+  both the merged view and the `recent-*` filters, so the two cannot drift.
+- **The counter is computed from the rendered rows**, not from the server's queue counts, and names
+  what it hides: *"Showing 3: 1 applied · 2 saved · 1 discarded hidden"*. A count that disagrees with
+  the list under it is worse than no count.
+- **The commit's own report is sticky.** `renderSaveTab()` blanks `#saveStatus` whenever no
+  configuration edit is pending — which is precisely the state a successful commit leaves behind, so
+  the success line erased itself (BUG-111's mechanism a second time, in the place it costs most). The
+  commit now reports the per-entity numbers `PUT /api/csv/<base>` returns (`rowCount`, `adds`,
+  `removes`, `modifies`), names the destination and the next step, and survives the re-render;
+  **Refresh** *appends* *"Reloaded from the server and re-checked."* instead of overwriting it. The
+  empty-state line separates **"Nothing is waiting to be committed"** from *what was just committed is
+  already saved to desired state and listed below*. 🔑 The product rule was never at fault — the
+  Manager does not change the directory; the engine applies desired state on its next run. The defect
+  was that the GUI did not say so at the moment it was needed.
 - **Show filter.** *Open queue*, or *Recent commits* of configuration (from the `config.save` audit
   events), of directory actions (committed/applied/failed entries), or both. Discarded entries are
   hidden unless **Show discarded (N)** is ticked, which shows who discarded each and why.
@@ -5873,6 +5924,30 @@ no longer resolves are hidden by default; **show deleted principals (N)** reveal
 *deleted* chip selects only them for a bulk revoke (unticking removes them from the selection). A
 revoke is queued (§18.1f); the row shows **revoke queued** until a later snapshot no longer contains
 it, and a completed revoke queues a fresh snapshot.
+
+**The revoke click stages under an explicit field contract, and can never be silent** (2026-09-18,
+§33.24 BUG-165). The page used to build the `POST /api/revoke` body from a hand-written nine-field
+subset of the snapshot row, which dropped `roleAssignmentId` / `roleAssignmentName` (the only way an
+**active azure-rbac** assignment can be addressed — `Open-PimManager.ps1` refuses without it) and
+`role` (so every `entra-role` queue entry reached `New-PimQueueActionNames` with no target name). The
+whole row is now posted through a declared contract (`REV_PAYLOAD_FIELDS`), and:
+
+- Each selected row is **pre-checked before anything is posted**. A row that cannot be addressed — an
+  `azure-rbac` row with neither `roleAssignmentId` nor `scope`+`roleAssignmentName`, a row with no
+  `principalId`, an `entra-role` row with no `roleDefinitionId`, a `pim-for-groups` row with no
+  `groupId`, an unknown `type` — is **refused individually with its reason** while the addressable rows
+  still stage. Nothing is posted at all when no row can be addressed.
+- `submitRevokeInner` reports on **every** exit (7 exits, 0 silent — asserted statically by the suite,
+  scoped to that one function body rather than the whole page, §37.3); the outer `submitRevoke` wraps it in `try/catch` so a
+  throw inside an `async` handler cannot vanish as an unhandled promise rejection. The status element
+  `#revActionStatus` lives **in the action bar beside the button**, not in the results pane below a
+  978-row scroller, and carries busy / staged *N* / refused *N* / the named error.
+- `wireRevokeTab()` is a **named, idempotent** function called at load **and** from `openRevokeTab()`,
+  so a tab whose page-load wiring was lost re-arms on open — the "red, enabled, handler-less button"
+  shape that produces a click with no request, no error and no toast.
+- The confirm dialog states that the rows are **staged as pending changes** and nothing is revoked
+  until committed, instead of claiming it fires irreversible admin-remove calls — which has not been
+  what the button does since §65.
 
 ![Drift: live vs desired — one row per area, expanded to named differences](img/manager-drift.png)
 *Drift: live vs desired, one row per engine scope with desired, live and in-sync counts, expanded to the named items. (Synthetic demo data.)*

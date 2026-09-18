@@ -57,8 +57,18 @@ if (-not (Test-Path -LiteralPath (Join-Path $shared 'PIM-Rest.ps1'))) {
 . (Join-Path $solRoot 'engine\_shared\PIM-ChangeQueue.ps1')      # Initialize-PimSqlStore CALLS Get-PimChangeQueueDdl
 . (Join-Path $solRoot 'engine\_shared\PIM-SqlStore.ps1')         # connection + query/DDL, over the container's MI
 . (Join-Path $solRoot 'engine\_shared\PIM-UpdateTelemetry.ps1')  # §56.6 one record per run, write-only
+. (Join-Path $solRoot 'engine\_shared\PIM-UpdateState.ps1')      # §71.43 the SAME run, recorded IN the environment
 
 function Say($m, $c = 'Gray') { Write-Host ("[update] " + $m) -ForegroundColor $c }
+
+# 🔴 2026-09-18 (§71.43) -- THE STORE IS NEEDED BEFORE THE FIRST EXIT PATH, NOT ONLY AT THE SCHEMA STEP.
+# Every refusal below (no resource group, a ring with no source, nothing approved, a refused downgrade)
+# now RECORDS what it decided into pim.Settings so the Manager can show this environment's ring -- and
+# those are exactly the runs an operator most needs to see. Without the store resolved here they would
+# all have recorded nothing.
+# 🪤 Idempotent, and deliberately called again at the schema step: neither phase may depend on the
+# other's ordering. One implementation (PIM-UpdateSource.ps1), two call sites.
+[void](Use-PimUpdaterStoreEnv)
 
 $sub        = "$($env:PIM_SubscriptionId)".Trim()
 $rg         = "$($env:PIM_ResourceGroup)".Trim()
@@ -82,6 +92,12 @@ Say "environment $rg (subscription $sub)" 'Cyan'
 # precisely the runs that end early.
 $script:PimUpdateStartedUtc = [datetime]::UtcNow
 $script:PimTelemetrySent    = $false
+# §71.43 -- what the ring said THIS run, and what was running when it started. Filled in as the run
+# learns them; both start empty so a run that exits before reading the channel records '' rather than a
+# value carried over from something else.
+$script:PimRingApproved       = ''
+$script:PimRingApprovedReason = ''
+$script:PimRunningVersion     = ''
 function Send-PimUpdateOutcome {
     param(
         [ValidateSet('none','built','rolled','schema','failed')][string]$Action = 'none',
@@ -98,6 +114,52 @@ function Send-PimUpdateOutcome {
                     -DurationSeconds ([int]([datetime]::UtcNow - $script:PimUpdateStartedUtc).TotalSeconds)
         [void](Send-PimUpdateTelemetry -Record $rec -Log { param($m) Say $m 'DarkGray' })
     } catch { }                                      # telemetry can never break the update
+
+    # ---- §71.43 THE SAME FACTS, RECORDED IN THIS ENVIRONMENT'S OWN STORE ------------------------
+    # 🔑 The blob above is WRITE-ONLY from here (PIM-UpdateTelemetry.ps1, header): the environment
+    # cannot read back what it reported, so the Manager could never answer "which ring am I on?".
+    # This writes the same run to pim.Settings['UpdateState'], where the Manager already reads
+    # everything else -- and it is the ONLY place the ring exists inside the environment, because
+    # PIM_UPDATE_RING lives on THIS job and not on ca-pim-manager.
+    # 🔴 SAME FAIL-SAFE DIRECTION. Save-PimUpdateState never throws; a settings write that did not
+    # land is a note in the log and nothing more. An update that succeeded is never reported as
+    # failed, or refused, because a reporting write failed.
+    try {
+        if (-not (Get-Command New-PimUpdateStateRecord -ErrorAction SilentlyContinue)) { return }
+        $csState = $null
+        try { $csState = Get-PimSqlConnectionString } catch { $csState = $null }
+        if (-not "$csState".Trim()) {
+            # 🪤 UPD-15 AGAIN, ONE PHASE EARLIER. The store self-heal (Resolve-PimUpdaterStoreSettings)
+            # runs at the SCHEMA phase, so an updater that carries no PIM_SqlServer -- the EFIF/RIDE
+            # shape -- would record nothing on any run that refuses BEFORE it, which is precisely the
+            # run whose ring an operator wants to see. $app is the Manager this run already read; it
+            # is $null on the earliest exits and that simply yields no store, as before.
+            try {
+                $heal = Resolve-PimUpdaterStoreSettings -JobServer "$($global:PIM_SqlServer)" -JobDatabase "$($global:PIM_SqlDatabase)" `
+                            -ManagerStore (Get-PimAcaStoreSettings -Resource $app) -ManagerApp $managerApp
+                if ($heal.source -eq 'manager' -and "$($heal.server)".Trim()) {
+                    Set-Variable -Name 'PIM_SqlServer' -Scope Global -Value "$($heal.server)"
+                    if ("$($heal.database)".Trim()) { Set-Variable -Name 'PIM_SqlDatabase' -Scope Global -Value "$($heal.database)" }
+                    try { $csState = Get-PimSqlConnectionString } catch { $csState = $null }
+                }
+            } catch { }
+        }
+        if (-not "$csState".Trim()) {
+            Say 'update state: no store to record it in (the ring will show as "not recorded" in the Manager).' 'DarkGray'
+            return
+        }
+        $prev = Read-PimUpdateState -ConnectionString $csState
+        $stateRec = New-PimUpdateStateRecord -Environment $rg -Ring "$($env:PIM_UPDATE_RING)" `
+                        -Hold ("$($env:PIM_UPDATE_HOLD)".Trim() -eq '1') `
+                        -ApprovedVersion $script:PimRingApproved -ApprovedReason $script:PimRingApprovedReason `
+                        -RunningVersion $script:PimRunningVersion `
+                        -LastBuiltVersion "$($env:PIM_UPDATE_LAST_BUILT)" -TargetVersion $ToVersion `
+                        -Action $Action -Outcome $Outcome -ErrorText $ErrorText -Previous $prev `
+                        -DurationSeconds ([int]([datetime]::UtcNow - $script:PimUpdateStartedUtc).TotalSeconds)
+        $saved = Save-PimUpdateState -ConnectionString $csState -Record $stateRec
+        if ($saved.ok) { Say "update state: recorded ring '$($stateRec.ring)' / $Outcome in pim.Settings" 'DarkGray' }
+        else { Say "update state: NOT recorded (the update itself is unaffected): $($saved.reason)" 'DarkGray' }
+    } catch { }                                      # recording can never break the update
 }
 
 if (-not $sub -or -not $rg) {
@@ -138,7 +200,13 @@ try {
     $app = Get-PimAcaApp -SubscriptionId $sub -ResourceGroup $rg -Name $managerApp
     $cur = Get-PimAcaAppImage -App $app -ContainerName $container
     $ref = Split-PimImageReference -Image "$cur"
-    if ($ref) { $loginServer = $ref.loginServer; if ($ref.repository) { $imageRepo = $ref.repository } }
+    if ($ref) {
+        $loginServer = $ref.loginServer
+        if ($ref.repository) { $imageRepo = $ref.repository }
+        # §71.43 -- what this environment was RUNNING when the update run started. Recorded so a
+        # failed/no-op run still says which version it was looking at.
+        $script:PimRunningVersion = "$($ref.tag)"
+    }
     else { $resolveErr = "the Manager's image ('$cur') names no registry" }
 } catch { $resolveErr = "$($_.Exception.Message)" }
 if ($resolveErr) { Say "  could not read this environment's registry from $managerApp`: $resolveErr" 'Yellow' }
@@ -164,6 +232,9 @@ if (-not $targetVer -and $targetImg) {
 $ring = "$($env:PIM_UPDATE_RING)".Trim()
 if ("$($env:PIM_UPDATE_HOLD)".Trim() -eq '1') {
     Say "PIM_UPDATE_HOLD=1 -- this environment is frozen; the ring channel is not consulted." 'Yellow'
+    # §71.43 -- a held environment has NO approved version to show, and saying so is the point: the
+    # Manager must not display the last version some earlier run happened to read as if it still applied.
+    $script:PimRingApprovedReason = 'this environment is HELD (PIM_UPDATE_HOLD=1) -- the ring channel was not consulted'
 } elseif ($ring -and -not $srcUrlTpl) {
     # 🔴 2026-09-13 -- A RING WITH NO SOURCE USED TO BE SKIPPED IN SILENCE, AND THE PIN WON. The ring
     # branch below needs the source template to find channel.json, so `$ring -and $srcUrlTpl` was false
@@ -174,6 +245,7 @@ if ("$($env:PIM_UPDATE_HOLD)".Trim() -eq '1') {
     Say "PIM_UPDATE_RING=$ring is set but PIM_UPDATE_SOURCE_URL is NOT -- the ring channel (channel.json) cannot be read." 'Red'
     Say '  REFUSING to roll: a ring-managed environment moves only when its ring approves a version, never on its pin.' 'Red'
     Say '  Fix: re-run tools/setup/Deploy-PimUpdateJob.ps1 (it writes the source with the ring), or set PIM_UPDATE_SOURCE_URL.' 'Red'
+    $script:PimRingApprovedReason = 'this environment has a ring but no update source, so the ring channel cannot be read'
     Send-PimUpdateOutcome -Action 'none' -Outcome 'failed' -ErrorText "PIM_UPDATE_RING=$ring without PIM_UPDATE_SOURCE_URL -- ring not readable, nothing rolled"
     exit 1
 } elseif ($ring -and $srcUrlTpl) {
@@ -184,6 +256,10 @@ if ("$($env:PIM_UPDATE_HOLD)".Trim() -eq '1') {
         $channel = (Get-Content -LiteralPath $chFile -Raw) | ConvertFrom-Json
         $rv = Get-PimRingVersion -Channel $channel -Ring $ring -CurrentVersion $lastBuilt
         Say "ring $ring -- $($rv.reason)" 'DarkGray'
+        # §71.43 -- the ring's ANSWER, in the ring's own words, recorded for the Manager. This is the
+        # only moment it exists: the channel is fetched to a temp file and deleted below.
+        $script:PimRingApproved       = "$($rv.version)".Trim()
+        $script:PimRingApprovedReason = "$($rv.reason)".Trim()
         # 🪤 An unreadable or empty channel must NOT silently fall back to a local pin: that would
         # let an environment keep taking a version the ring has since withdrawn. No answer means
         # no move.
@@ -193,6 +269,11 @@ if ("$($env:PIM_UPDATE_HOLD)".Trim() -eq '1') {
         Say "  could not read the ring channel: $($_.Exception.Message)" 'Yellow'
         Say '  refusing to fall back to a local pin -- a ring-managed environment moves only when the ring says so.' 'Yellow'
         $targetVer = ''
+        # §71.43 -- an unreadable channel is a REPORTABLE state, not a blank. Recorded with no approved
+        # version (so the Manager never claims one) and the reason, redacted: the channel URL carries a SAS.
+        $script:PimRingApproved       = ''
+        $script:PimRingApprovedReason = 'the ring channel could not be read: ' +
+            $(if (Get-Command Remove-PimTelemetrySecret -ErrorAction SilentlyContinue) { Remove-PimTelemetrySecret -Text "$($_.Exception.Message)" } else { 'see the update job log' })
     } finally { Remove-Item -LiteralPath $chFile -Force -ErrorAction SilentlyContinue }
 }
 
@@ -353,11 +434,9 @@ function Get-PimJobDeployedColumns {
 # reads $global:PIM_SqlServer / $global:PIM_SqlDatabase, and nothing in this entry point copied the
 # container's env into them (Invoke-PimEngineCore does, with Use-Cfg). So even an updater that DID carry
 # PIM_SqlServer resolved no connection -- and said the environment had no store.
-foreach ($sqlName in @('PIM_SqlServer', 'PIM_SqlDatabase')) {
-    $ev = "$([Environment]::GetEnvironmentVariable($sqlName))".Trim()
-    $gv = "$(Get-Variable -Name $sqlName -Scope Global -ValueOnly -ErrorAction SilentlyContinue)".Trim()
-    if ($ev -and -not $gv) { Set-Variable -Name $sqlName -Scope Global -Value $ev }
-}
+# 📌 Also done at the TOP of this file (§71.43) so the earlier exit paths can record their state. It is
+# idempotent, and it stays HERE as well so the schema phase never depends on that having happened.
+[void](Use-PimUpdaterStoreEnv)   # SCHEMA-STEP STORE RESOLUTION
 
 # 🔴 2026-09-15 (UPD-15) -- SELF-HEAL THE STORE SETTINGS FROM THE MANAGER, DO NOT ASK A HUMAN.
 # EFIF and RIDE refused every release for two nights with "updater has no PIM_SqlServer ... re-run

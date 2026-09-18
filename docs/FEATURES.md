@@ -149,6 +149,17 @@ deployment is a supported choice) and no credentials lying around.
   ring is told which default it is getting and why; an unreadable ring value stops the installation
   instead of being guessed at; and the installation reads the ring back off the deployed update job and
   fails if it is not the ring that was asked for. A ring nobody verified is a version nobody chose.
+- **The Manager shows which update ring this environment is on.** ✅ 2026-09-18 The release ring that
+  decides which version an environment may move to used to be visible only to someone who could read the
+  update job's configuration. It now appears **beside the mode badge** in the Manager header — marked only
+  when it needs attention (behind the version its ring approves, held, or the last update failed) — with an
+  **Updates & ring** panel under **Jobs** giving the version running now, the version the ring approves,
+  the last update run and the last successful one. Each nightly update records its own run into the
+  environment's database, including the runs where it deliberately refused to move, and the Manager reads
+  that record: an environment that has not run an update since upgrading shows **"not recorded yet"**
+  rather than a guess, and a record older than two days is flagged as stale instead of being shown as
+  current. The panel is **read-only by design** — moving a ring stays a deliberate act on the update job,
+  and the Manager offers no control that writes one.
 
 ## 4. MSP
 - **Replication rings — roll a change to one wave of customers before the rest.** ✅ 2026-09-18
@@ -833,6 +844,20 @@ deployment is a supported choice) and no credentials lying around.
   - **See what was committed recently.** A Show filter switches between the open queue and recent
     commits of configuration, of directory actions, or both. Discarded entries are hidden unless you
     tick **Show discarded**, which shows who discarded them and why.
+  - **The page opens on the queue *and* your recent commits — you never have to pick a filter to find
+    your own change.** ✅ 2026-09-18 A configuration or delegation change is saved the moment you commit
+    it, but the list used to show open directory actions only — so a successful commit looked like a lost
+    one. **Change queue & recent commits** is now one table with a **state** column: a committed
+    configuration change shows as **saved**, with *"saved to desired state · the engine applies it on its
+    next run"*, alongside the pending, committed, applied and failed directory actions. The counter is
+    computed from the rows in front of you and names anything it hides, instead of counting something
+    else. *Open queue only* remains as a filter.
+  - **A commit says what it did, and the message stays.** ✅ 2026-09-18 Committing reports the per-item
+    numbers the server actually wrote (added / removed / changed, and the new row count), names where it
+    went and what happens next — and the message is no longer erased by the next screen refresh. Pressing
+    **Refresh** adds *"Reloaded from the server and re-checked."* to it rather than overwriting it. The
+    "nothing is waiting" line now separates **nothing is waiting to be committed** from *what you just
+    committed is already saved and listed below*.
   - **A refused commit explains itself where you are.** Commit re-checks your staged changes first (so a
     fix you just staged counts); if blocking errors remain, the page stays on Pending changes and lists
     each error with the rows it concerns and a link to its fix. Informational validation notes no longer
@@ -911,6 +936,16 @@ deployment is a supported choice) and no credentials lying around.
 - **Clean up access held by deleted accounts quickly.** ✅ 2026-09-14 Review standing access hides rows
   held by principals that no longer exist in the directory by default. Tick **show deleted principals**
   to list them, and a "deleted" filter selects only those rows for a bulk revoke.
+- **"Revoke selected" tells you what it staged — and refuses a row it cannot address, one row at a
+  time.** ✅ 2026-09-18 A bulk revoke now checks every selected row **before** anything is staged. A row
+  that genuinely cannot be addressed — an Azure resource assignment whose snapshot is missing the detail
+  that identifies it (press **Refresh** to rebuild the snapshot), a row with no principal, an Entra role
+  row with no role — is **refused individually, with its reason**, while every other selected row is still
+  staged. A short status line sits **beside the button** and is written on every outcome: working, staged
+  *N*, refused *N*, or the error in plain words — the click can never end in silence. Opening the tab
+  re-arms the button, so it is never present, enabled and inert. The confirmation says the rows are
+  **staged as pending changes**, not that access is being removed: nothing is revoked until you commit,
+  and the queued entries carry your justification and the real names of what they target.
 
   ![Review standing access — active assignments from the snapshot, with the revoke-queued marker](img/manager-standing-access.png)
   *Review standing access: who holds active privileged access, read from the scheduler's snapshot, with queued revokes marked. (Synthetic demo data.)*

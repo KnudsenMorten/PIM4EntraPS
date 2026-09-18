@@ -440,6 +440,32 @@ function Get-PimUpdateSchemaStoreDecision {
 # or names its store through a secret / vault pointer, still refuses -- guessing a store is worse than
 # not rolling.
 
+function Use-PimUpdaterStoreEnv {
+    <#
+      Copy the container's PIM_SqlServer / PIM_SqlDatabase ENVIRONMENT variables into the GLOBALS the
+      store library reads (Get-PimSqlConnectionString reads $global:PIM_SqlServer / $global:PIM_SqlDatabase).
+      Returns the names it set, so a caller can say so.
+
+      2026-09-13: nothing in update-job-entry did this (Invoke-PimEngineCore does it with Use-Cfg), so an
+      updater that DID carry PIM_SqlServer still resolved no connection -- and reported that the
+      environment had no store.
+
+      2026-09-18 (Sec.71.43): it is a FUNCTION, and it is called TWICE, on purpose. The update job needs
+      the store at the TOP -- every refusal above the schema phase now records what it decided into
+      pim.Settings, and those are exactly the runs an operator most needs to see -- and the schema phase
+      needs it too. Idempotent by construction (an already-set global is never overwritten), so calling
+      it in both places costs two environment reads and makes neither step depend on the other's order.
+      One implementation, two call sites: the shape this file's own history keeps arguing for.
+    #>
+    $set = @()
+    foreach ($sqlName in @('PIM_SqlServer', 'PIM_SqlDatabase')) {
+        $ev = "$([Environment]::GetEnvironmentVariable($sqlName))".Trim()
+        $gv = "$(Get-Variable -Name $sqlName -Scope Global -ValueOnly -ErrorAction SilentlyContinue)".Trim()
+        if ($ev -and -not $gv) { Set-Variable -Name $sqlName -Scope Global -Value $ev; $set += $sqlName }
+    }
+    return ,$set
+}
+
 function Resolve-PimUpdaterStoreSettings {
     <#
       PURE. Which SQL store this updater run uses, and whether it came from the job or the Manager.

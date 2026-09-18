@@ -339,6 +339,16 @@ if (Test-Path -LiteralPath $_cutoverLib) { . $_cutoverLib }
 $_schedLib = Join-Path $solutionRoot 'engine\_shared\PIM-Scheduler.ps1'
 if (Test-Path -LiteralPath $_schedLib) { . $_schedLib }
 
+# §71.43 -- UPDATE RING + update state (engine/_shared/PIM-UpdateState.ps1). The ring this environment
+# is on is an environment variable on the UPDATE JOB (ca-pim-update), not on this container, so the
+# Manager cannot read it directly and must never guess it. The nightly update job records ring,
+# approved version, built version, outcome and timestamp into pim.Settings['UpdateState']; this lib
+# holds the PURE verdict over that record (behind / held / failing / stale / not recorded yet) which
+# powers the header ring badge and the Jobs > "Updates & ring" panel. READ-ONLY: nothing here, and no
+# endpoint below, can change a ring -- a ring move is an operator act on the update job.
+$_updStateLib = Join-Path $solutionRoot 'engine\_shared\PIM-UpdateState.ps1'
+if (Test-Path -LiteralPath $_updStateLib) { . $_updStateLib }
+
 # Notifications / mailer (engine/_shared/PIM-Notify.ps1) -- the SAME render+send
 # path the engine uses (Send-PimNotifyMail -> Graph Mail.Send, gated on
 # $global:PIM_MailSender). Powers Home/Settings ALERTING (REQUIREMENTS §27 H2):
@@ -7681,6 +7691,61 @@ function Handle-Request {
                 return 200
             } catch {
                 Write-JsonResponse -Response $resp -Status 500 -Body @{ error = "replication reach failed: $($_.Exception.Message)" }
+                return 500
+            }
+        }
+
+        # -------------------------------------------------------------------
+        # §71.43 -- GET /api/update-ring. WHICH UPDATE RING IS THIS ENVIRONMENT ON?
+        #
+        # 🔴 THERE IS NO GET-THE-RING-FROM-AZURE HERE, AND THAT IS DELIBERATE. PIM_UPDATE_RING lives on
+        # ca-pim-update; reading it would mean an ARM call per page load, with the Manager's identity
+        # needing rights over a job it does not own, and it would still fail in every environment whose
+        # updater is not deployed. The environment RECORDS its own state instead (the update job writes
+        # pim.Settings['UpdateState'] on every run), and this endpoint reads that.
+        #
+        # 🔒 AN ENVIRONMENT THAT HAS NOT RECORDED ONE ANSWERS "not recorded yet". Never a default ring,
+        # never the ring some other environment uses. A guessed ring is worse than a blank one, because
+        # an operator would act on it.
+        #
+        # 🔒 READ-ONLY, PERMANENTLY. There is no PUT/POST counterpart and there must not be: moving an
+        # environment between rings is an operator act, performed on the update job, in the operator's
+        # own words. A button here would make a ring move a click.
+        #
+        # The version reported as RUNNING is this process's own (Get-PimSolutionVersion) -- the code
+        # answering the request, which is the only version reading that needs no Azure call and cannot
+        # be stale.
+        # -------------------------------------------------------------------
+        if ($path -eq '/api/update-ring' -and $method -eq 'GET') {
+            $script:lastHeartbeat = Get-Date
+            try {
+                if (-not (Get-Command Get-PimUpdateStateVerdict -ErrorAction SilentlyContinue)) {
+                    Write-JsonResponse -Response $resp -Status 200 -Body ([ordered]@{
+                        recorded = $false; readable = $false; ring = ''; ringLabel = 'not recorded'; state = 'unknown'
+                        runningVersion = (Get-PimSolutionVersion)
+                        message = 'This build of the Manager does not carry the update-state reader.'
+                    })
+                    return 200
+                }
+                $cs = ''
+                try { $cs = Get-PimManagerStoreCs } catch { $cs = '' }
+                # 🪤 "no store" and "no record" are DIFFERENT answers and must not collapse into one.
+                # A Manager with no store cannot say anything about the ring; one with a store and no
+                # record is telling the operator the updater has not reported yet. Both show as "not
+                # recorded", but only the first says the store could not be read.
+                $rec = $null
+                if ("$cs".Trim()) { $rec = Read-PimUpdateState -ConnectionString $cs }
+                $v = Get-PimUpdateStateVerdict -Record $rec -RunningVersion (Get-PimSolutionVersion)
+                $body = [ordered]@{ readable = [bool]("$cs".Trim()); settingName = (Get-PimUpdateStateSettingName) }
+                foreach ($p in $v.PSObject.Properties) { $body[$p.Name] = $p.Value }
+                if (-not $body.readable -and -not $body.recorded) {
+                    $body.message = 'The update state could not be read: this Manager has no SQL store wired, ' +
+                                    'so the ring this environment is on is not known here.'
+                }
+                Write-JsonResponse -Response $resp -Status 200 -Body $body
+                return 200
+            } catch {
+                Write-JsonResponse -Response $resp -Status 500 -Body @{ error = "update ring read failed: $($_.Exception.Message)" }
                 return 500
             }
         }

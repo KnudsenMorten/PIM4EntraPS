@@ -626,6 +626,14 @@ one and why. (Synthetic demo data.)*
 - **Nothing is lost on a reload.** Staged edits survive a page refresh and a
   Manager restart.
 - **The badge counts only what needs you**, and a filter shows recent commits.
+- **You land on the queue *and* your recent commits.** *(New in 2.4.369.)* A
+  configuration or delegation change is saved the moment you commit it, but it is
+  not a queued directory action — so the list used to show only the latter, and a
+  successful commit looked like a lost one. The page now opens on both in one
+  table with a **state** column: a committed configuration change reads **saved —
+  the engine applies it on its next run**. The counter describes the rows in front
+  of you and names anything it hides, and the commit's own report (added, removed,
+  changed) stays on screen instead of being wiped by the next refresh.
 - **A diff you can trust.** The preview is keyed by each row's natural identity,
   not its position — reordering rows correctly shows no change — and validation
   errors block the commit. A refused commit stays in the queue and lists the
@@ -658,6 +666,13 @@ Standing access, the revoke view and the Home "expiring access" tile read from a
 even in a large tenant. **Refresh** queues a new read. Revoking is staged through
 Pending changes and the row shows "revoke queued" until the engine has applied it;
 break-glass accounts are protected and large batches require a second approver.
+
+**Revoke selected says what it did.** *(New in 2.4.369.)* Every selected row is
+checked before anything is staged; a row that genuinely cannot be addressed is
+refused on its own, with the reason, while the rest still stage. A status line
+beside the button is written on every outcome — working, staged *N*, refused *N*,
+or the error in plain words — so the click can never end in silence, and the
+confirmation says the rows are **staged**, not removed.
 
 ### Reports — "who can do what", and the reverse
 
@@ -897,6 +912,13 @@ runs. The other decides **which definitions reach which managed tenants**.
 - **The ring you configure is the ring you get.** *(New in 2.4.368.)* The ring is
   read back off the deployed environment and the installation fails if it is not the
   one that was asked for.
+- **The Manager shows the ring the environment is on.** *(New in 2.4.369.)* The ring
+  appears beside the mode badge in the header — flagged only when it is behind, held
+  or the last update failed — with an **Updates & ring** panel under Jobs giving the
+  version running now, the version the ring approves, the last run and the last
+  success. Each update records its own run into the environment's database, so an
+  environment that has not updated yet shows "not recorded yet" rather than a guess.
+  The panel is read-only: moving a ring stays a deliberate act on the update job.
 
 ### The replication ring — which managed tenants a definition reaches
 
