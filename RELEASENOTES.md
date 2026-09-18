@@ -14,6 +14,62 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 
 <!-- next release entry goes here -->
 
+## v2.4.369 — three screens that did the work and did not say so
+
+This release is about **feedback**, not new capability. In each of the three cases below the product did
+exactly what it was designed to do — and the screen did not tell you, so it looked as though nothing had
+happened. Nothing was ever lost or wrongly applied. It is recommended for every installation that uses the
+PIM Manager; nothing in the product's behaviour towards your directory changes.
+
+- **"Revoke selected" on Review standing access now reports what it staged — and what it could not.** You
+  could select rows, type a justification, press **Revoke selected** and get no staged change, no error and
+  no message at all. Two things caused that. Some kinds of standing access — in particular Azure resource
+  role assignments — were being handed on to the queue without the one detail that identifies the
+  assignment to remove, so the queue refused them; and the refusal had nowhere to appear, because the
+  button had no message of its own and any failure further in was silently swallowed. Now the full details
+  of each selected row are carried through, every row is checked **before** anything is staged, and a row
+  that genuinely cannot be addressed is **refused on its own, with the reason**, while the rest are still
+  staged. A short status line sits **beside the button** and is written on every outcome — working,
+  staged *N*, refused *N*, or the error in plain words. Opening the tab re-arms the button, so it can never
+  be present, enabled and inert. The confirmation no longer claims the click removes access: it says the
+  rows are **staged as pending changes** and that nothing is revoked until you commit.
+  *Why it matters:* a bulk clean-up of standing access is one of the few screens where doing nothing and
+  succeeding looked identical.
+
+- **The change queue shows what you just committed, by default.** Commit a configuration or delegation
+  change and it is saved immediately — but the list underneath was showing **open directory actions only**,
+  under a counter describing those, beside a line reading "no configuration edits waiting". Everything on
+  the screen was true and the whole read as *"my change vanished"*; you had to know to switch a filter to
+  see your own commit. Now the page opens on **the queue and recent commits together, in one table**, with
+  a **state** column that says which is which — a committed configuration change shows as **saved**, with
+  *"saved to desired state · the engine applies it on its next run"*. The counter is computed from the rows
+  actually shown and names anything it is hiding. The message you get after committing reports the
+  server's own per-item numbers (added / removed / changed), says where it went and what happens next, and
+  **stays on screen** — including after you press **Refresh**, which now adds to it instead of erasing it.
+  The "nothing is waiting" line now separates *nothing is waiting to be committed* from *what you just
+  committed is already saved, and listed below*. **Open queue only** is still available as a filter; it is
+  simply no longer what you land on.
+  *Why it matters:* the one screen you go to after a successful commit was the screen that made a
+  successful commit look like a lost one.
+
+- **The Manager shows which update ring the environment is on.** Until now the release ring that decides
+  which version an environment may move to was only visible to someone who could read the update job's
+  configuration — the Manager itself never said it. The ring now appears **beside the mode badge** in the
+  header, marked only when it needs attention (behind, held, or the last update failed), with an
+  **Updates & ring** panel under **Jobs** giving the version running now, the version that ring approves,
+  the last update run and the last successful one. The nightly update records each of its runs — including
+  the runs where it deliberately refused to move — into the environment's own database, and the Manager
+  reads that. An environment that has not run an update since upgrading honestly shows **"not recorded
+  yet"** rather than a guess, and a record older than two days is flagged as stale instead of shown as
+  current. The panel is **read-only by design**: changing a ring stays a deliberate act on the environment's
+  update job, and the Manager offers no control that writes one.
+
+**Upgrade note:** none. The two Manager fixes take effect as soon as the new version is running. The ring
+display fills in after the environment's update job has run once — until then it correctly reads
+"not recorded yet".
+
+**Interested in the licensed (multi-tenant) edition?** Mail **mok@mortenknudsen.net** for information.
+
 ## v2.4.368 — an environment never updates itself backward, and the update ring you configure is the ring you get
 
 This release fixes two defects in the automatic update path of a hosted (subscription) environment. It
