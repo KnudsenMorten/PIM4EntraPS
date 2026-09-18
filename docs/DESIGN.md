@@ -2646,6 +2646,19 @@ is decided by its **release ring**, never by "newest available":
   the source archive, and moves only to that ring's version. A missing or unreadable channel, or a ring with
   no approved version, means **no move** — never a fallback to a local pin or to "latest". A version below the
   ring's `minFrom` floor is not jumped. Moves are forward-only.
+- **Forward-only is ENFORCED in the job, not assumed** (2026-09-18, §33.4 BUG-162). The ring gate answers
+  *"may this environment move?"*; it never answered *"is this even forward?"*, and a channel held at an old
+  version rolled a freshly-built environment 42 versions backward, unattended, breaking a component that only
+  the newer version contains. `Get-PimUpdateDowngradeDecision` (+ `ConvertTo-PimUpdateVersion`, pure, in
+  `engine/_shared/PIM-UpdateSource.ps1`) is called from `update-job-entry.ps1` **before the build, before the
+  schema step and before any roll**. It compares the ring's target with the HIGHEST comparable version the
+  environment is known to have reached — the running Manager image tag, `PIM_UPDATE_LAST_BUILT` and
+  `PIM_UPDATE_LAST_GOOD` — and REFUSES (exit 1, `Outcome=failed`, carried in telemetry) a target that is
+  behind it, or a target that is not a version at all while a comparable one exists. The refusal names both
+  versions, the ring that proposed the target and the two ways out. A deliberate rollback stays possible via
+  `PIM_UPDATE_ALLOW_DOWNGRADE=1` on the update job — **off by default**, and reported loudly when used.
+  Forward rolls and the same-version no-op are unchanged. The host-side rollers stay unguarded on purpose:
+  they are attended, and `Get-PimUpdateRingChannelReport` already prints `BACKWARD` there.
 - **Then the normal lifecycle:** already running that version → nothing to roll; otherwise fetch that exact
   version's source archive, build it in the environment's **own** registry (no build machine, no credential
   shipped between environments — only a read-only link to the archive), apply additive schema changes first (the
@@ -2667,6 +2680,16 @@ is decided by its **release ring**, never by "newest available":
   one-shot deploy (§11.7).
 - **Deploys set the ring** (`-UpdateRing`, default 2 for a new environment; an existing ring is kept on
   redeploy) together with the source link, written through ARM read-modify-write and read back.
+  The question *"was a ring asked for?"* is decided **once, at script scope**
+  (`$script:PimDeployRingExplicit`, set right after `Invoke-PimDeployAll.ps1`'s param block) — it used to be
+  asked with `$PSBoundParameters.ContainsKey('UpdateRing')` *inside* `Invoke-DefaultStepRunner`, whose own
+  parameters are `($Key, $Ctx)`, so the answer was always **false** and the configured ring was never
+  forwarded (§33.4 BUG-162). The MSP plan resolves the ring through the pure `Get-PimMspBuildUpdateRing`
+  instead of `[int](& $V 'updater.ring')`, because that cast turned a config with **no** ring into ring 0 —
+  the ring that takes every build; it now returns the documented default with a stated reason and **throws**
+  on a malformed value. The default is stated rather than silent (a WARNING from `Deploy-PimUpdateJob` and a
+  line in the step report). Finally, `Deploy-PimUpdateJob.ps1` **re-reads `PIM_UPDATE_RING` off the deployed
+  job over ARM and fails the step** when it is not the ring the run decided, or is absent.
 - **Host-side tools obey the ring.** `Invoke-PimUpdate`, `Update-PimContainers` and the deploy roll step refuse
   a version that a ring ≥ 2 environment's channel has not approved, unless an operator passes
   `-OverrideRingGate -Reason`, which is audited. A verified host-side roll of a ring 0/1 environment advances
@@ -2951,6 +2974,22 @@ solution can reuse the same descriptor and supply only its own bindings); only t
 | **S4** | MSP **master** | Community | GitHub | in master tenant | managed identity (hosted) / certificate | — | MSP — paid (Pro) edition, details to follow |
 | **S5** | MSP **managed** | Internal/AutomateIT | **from master, ring-gated** | **central** (MSP tenant) | **multi-tenant application** (crosses tenants) | admins + permissions | MSP — paid (Pro) edition, details to follow |
 | **S6** | MSP **managed** | Internal/AutomateIT | **from master, ring-gated** | **local** (managed tenant) | managed identity (hosted) | admins + permissions | MSP — paid (Pro) edition, details to follow |
+
+**Say the NAME, not the id.** Outside the scripts that still take `-Scenario`, a setup is named by
+**role + hosting**, because that is what actually differs and because `S5`/`S6` are both *managed*
+tenants (the provider is `S3`/`S4`) — a distinction the ids hide:
+
+| Name to use | Id(s) | What varies |
+|---|---|---|
+| **Single (tenant, local-hosted)** | S1, S2 | distribution edition only |
+| **Provider / master (MSP, local-hosted)** | S3, S4 | distribution edition only |
+| **Managed / slave (MSP, central-hosted)** | **S5** | portal + SQL live in the **provider's** tenant; multi-tenant application |
+| **Managed / slave (MSP, local-hosted)** | **S6** | portal + SQL live in the **managed** tenant; local identity |
+
+*local-hosted* = portal + SQL live in that tenant itself; *central-hosted* = they live in the
+provider's tenant. Single and provider are always local-hosted, so their hosting is stated rather
+than chosen. **The public docs carry no ids at all** — README describes the same six by role and
+hosting.
 
 Two distinct axes are easy to conflate and are kept separate on purpose:
 - **Distribution edition** (`Internal/AutomateIT` vs `Community`) — branding +
@@ -4044,6 +4083,36 @@ intents and are represented differently.
 it behaves exactly as it did before ring gating existed. Absence is *not* the broadest ring and is
 *not* an error. PIM applies the same rule inside itself: the managed downlink's version gate is
 **opt-in**, so a caller that supplies no ring plan gets precisely today's behaviour.
+
+#### 13.19a What the PUBLIC docs say about rings, and why (2026-09-18)
+
+README and `FEATURES.md` describe **two** of the three axes, deliberately:
+
+- **the software ring** (axis 1) — which product version an environment runs, in §11.6.0's terms:
+  approval per ring, the environment *asks* rather than being pushed to, forward-only as of
+  2.4.368, no approved version ⇒ no move, a held environment does not move.
+- **the replication ring** (axis 3) — which managed tenants a definition row reaches. Stated as the
+  full predicate, never as ring alone: `Replicate != No` **AND** `row.Ring <= tenant.Ring` **AND**
+  `Target` matches (`Test-PimReplicationReach`, `engine/_shared/PIM-Downlink.ps1`) — *ring AND
+  target, never OR* — plus target semantics (blank ⇒ every admitted tenant; a named tenant; tags
+  OR-ed across a list and AND-ed within one `+` term; `none` ⇒ never leaves the master), tenant tags
+  travelling **inside the signed bundle** so a tenant cannot re-tag itself into scope, the
+  dependency auto-include with its warning, and **withheld ≠ retracted** (`retracts = $false` on
+  every plan; retraction is a separate, opt-in, report-first, budgeted act).
+
+**Axis 2 (the template-version ring) is NOT in the public docs, on purpose.** It is implemented but
+**inert unless a ring map is supplied**, and the containerised scheduled downlink job carries no
+`-TemplateRingMap*` parameter at all — it is reachable only from the hand-run
+`setup/Invoke-PimDownlinkSync.ps1` / `Invoke-PimScenarioRun.ps1`. Documenting an opt-in gate that
+the scheduled path cannot even reach is exactly the failure BUG-29 already caused once. It goes in
+the public docs when the scheduled job can use it.
+
+🪤 **The conflation hazard the public text is written around:** the same digits run in **opposite
+directions** on the two axes it does describe. Update ring **2** is the most conservative
+environment and gets the *least*; replication tenant ring **2** admits *everything* (`Ring <= 2`).
+So README states plainly that the two are independent, that neither implies the other, and that
+they are **not the same scale** — rather than showing both number lines side by side and inviting
+the reader to map one onto the other.
 
 ### 13.20 Per-admin sync to managed tenants + the tenant mode badge — built
 
@@ -6518,6 +6587,25 @@ the kill switches via `GET/PUT /api/settings/feature-gates`, and email controls 
 Settings surface renders the catalog grouped into chapters; a disabled feature is
 dimmed + labelled “Disabled”, an unlicensed one shows a “Requires Pro” lock — never
 hidden. Dependency cross-references are surfaced (`Get-PimFeatureDependencyIssues`).
+
+#### 19a.1 The commercial shape, and what the code actually enforces (2026-09-18)
+
+The **commercial** split and the **technical** gate are two different things, and the public docs
+now say so explicitly rather than implying the second from the first.
+
+| | Commercially | In this release's code |
+|---|---|---|
+| **Free** — the community edition for a **single tenant**: the full portal, eligible time-boxed access with approval and audit, delegation by group, drift detection, reviews and reports, admin accounts + first-time access passes, self-updating from the public release, community support | free | not gated |
+| **Paid** — everything in free **plus the multi-tenant half**: define once and target tenants by tag and wave, signed definition sets verified on arrival, visibility of what reaches each tenant and what is withheld, per-customer rules, a read-only preview of what a tenant would receive, fleet conformance, rollout waves, central accounts whose lifecycle flows down, removals that stay the tenant's call, controlled release rings, the provider-hosted option, support with an agreed response time | paid | **not gated** |
+
+🔒 **Licence enforcement is switched OFF in the product.** `Test-PimFeatureLicensed` exists and is
+wired, but with no licence file present `Get-PimActiveEdition` reports `Core` and nothing is
+degraded, blocked or hidden. **The public docs must not imply a technical gate that does not
+exist** — README's "Editions" section and `FEATURES.md` §29 both state the enforcement status in
+the same paragraph as the split, deliberately. The call to action for the licensed edition is a
+single mail address (`mok@mortenknudsen.net`) and nothing else: no phone number, no company
+internal domain, no tenant name. The sanitization gate accepts that address; it is the one
+deliberate contact detail in the public set.
 
 ---
 

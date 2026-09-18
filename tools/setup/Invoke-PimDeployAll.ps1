@@ -423,6 +423,28 @@ param(
 $ErrorActionPreference = 'Stop'
 
 # =================================================================================================
+# BUG-162 (rehearsal master dp998, 2026-09-17) -- $PSBoundParameters IS PER FUNCTION, NOT PER SCRIPT,
+# AND THE UPDATE RING WAS DECIDED INSIDE A FUNCTION.
+#
+# The 'updater' step lives in Invoke-DefaultStepRunner, a function with param($Key,$Ctx). Its test
+#     if ($PSBoundParameters.ContainsKey('UpdateRing')) { $upArgs['UpdateRing'] = $UpdateRing }
+# therefore asked whether -UpdateRing was passed TO THAT FUNCTION -- which it never is, because the
+# function takes Key and Ctx. The answer was ALWAYS false. $UpdateRing itself resolved fine (a script
+# variable is visible in the function), so the value was right there and simply never forwarded:
+# Deploy-PimUpdateJob ran with its own default and the environment came up on ring 2.
+#
+# MEASURED: dp998-master.json carries "updater": { "ring": 1 }, PIM-MspBuild forwarded UpdateRing = 1,
+# and the deployed ca-pim-update carried PIM_UPDATE_RING=2. That ring then approved 2.4.324 against an
+# environment built at 2.4.366, and the nightly updater rolled all five containers 42 versions
+# BACKWARD -- which removed publish-job-entry.ps1 and stopped the master publishing.
+#
+# So the question is answered ONCE, HERE, at script scope, where $PSBoundParameters means what the
+# caller passed. Every later use reads this variable. A ring that was not passed keeps whatever ring
+# the updater already carries, and a NEW updater gets the documented default (-UpdateRing's own
+# default, stated on screen by Deploy-PimUpdateJob -- never silently).
+$script:PimDeployRingExplicit = $PSBoundParameters.ContainsKey('UpdateRing')
+
+# =================================================================================================
 # 🔴 DO NOT LEAVE THE OPERATOR'S az SESSION POINTING AT A SERVICE PRINCIPAL.
 #
 # The step scripts are invoked with `&`, which runs them IN THIS PROCESS -- and this script is
@@ -1927,7 +1949,9 @@ function Invoke-DefaultStepRunner {
                 $upArgs['LastBuiltVersion'] = $tag
                 # Forwarded ONLY when the operator passed it: an unpassed -UpdateRing must not overwrite
                 # the ring an existing environment already follows.
-                if ($PSBoundParameters.ContainsKey('UpdateRing')) { $upArgs['UpdateRing'] = $UpdateRing }
+                # BUG-162: read the SCRIPT-scope answer. $PSBoundParameters here is this FUNCTION's, and
+                # it can never contain UpdateRing -- see the capture at the top of this file.
+                if ($script:PimDeployRingExplicit) { $upArgs['UpdateRing'] = $UpdateRing }
                 if ("$RegistryIdentityResourceId".Trim()) { $upArgs['RegistryIdentityResourceId'] = $RegistryIdentityResourceId }
                 # 2026-09-13 -- the updater copies the Manager's PIM_SqlServer / PIM_SqlDatabase, and its
                 # identity needs a contained database user for the schema step: the same SQL-admin SPN
@@ -1946,7 +1970,7 @@ function Invoke-DefaultStepRunner {
                 try { & $upj @upArgs | Out-Host }
                 catch { return @{ ok=$false; ran=$true; detail="nightly updater NOT installed: $($_.Exception.Message)" } }
                 $ok = (-not $LASTEXITCODE) -or ($LASTEXITCODE -eq 0)
-                $ringTxt = if ($PSBoundParameters.ContainsKey('UpdateRing')) { "ring $UpdateRing" } else { 'ring kept (or default 2 on a new updater)' }
+                $ringTxt = if ($script:PimDeployRingExplicit) { "ring $UpdateRing (as configured)" } else { 'ring kept (or the DEFAULT ring 2 on a new updater -- pass -UpdateRing to decide it)' }
                 return @{ ok=$ok; ran=$true; detail="nightly updater '$UpdateJobName' installed ($UpdateCron UTC) -- builds its own images, $ringTxt" }
             }
             return @{ ok=$true; ran=$false; detail='skipped by ShouldProcess' }

@@ -640,6 +640,34 @@ if (-not $WhatIfPreference) {
                 --query "{name:name,trigger:properties.configuration.triggerType,cron:properties.configuration.scheduleTriggerConfig.cronExpression,image:properties.template.containers[0].image}" -o json 2>$null
     if (-not $back) { throw "Deploy-PimUpdateJob: '$JobName' cannot be read back after deployment -- do not treat this as installed." }
     Note "verified: $back"
+
+    # BUG-162 -- THE RING THE JOB ACTUALLY CARRIES, READ OFF THE DEPLOYED JOB.
+    # A silently different ring is a silently different VERSION: dp998 was built at 2.4.366 with
+    # `"updater": { "ring": 1 }` in its config and came up carrying PIM_UPDATE_RING=2, whose channel
+    # held 2.4.324 -- and its first nightly run rolled the whole environment 42 versions backward.
+    # The env writes above are already read back value-by-value, so this cannot fail for a value this
+    # script wrote; it catches the case the writes cannot see -- something else (a later YAML apply, a
+    # concurrent deploy, a hand edit) leaving a ring that is not the one this run decided. Cheap, and
+    # the alternative is finding out at 03:00.
+    $ringBack = ''
+    try {
+        $jobBack  = & $armInvoker -Method GET -Path $jobArmPath -ApiVersion $script:PimAcaApi
+        $envBack  = ConvertTo-PimJobEnvMap -Job $jobBack -ContainerName $JobName
+        if (-not $envBack.Count) { $envBack = ConvertTo-PimJobEnvMap -Job $jobBack }
+        if ($envBack.Contains('PIM_UPDATE_RING')) { $ringBack = "$($envBack['PIM_UPDATE_RING'])".Trim() }
+    } catch { Warn ("could not read the ring back over ARM: " + (Hide-PimSasText "$($_.Exception.Message)")) }
+    if (-not $ringBack) {
+        throw ("Deploy-PimUpdateJob: '$JobName' carries NO PIM_UPDATE_RING after this deploy. An updater with " +
+               'no ring is an updater nothing controls -- do not treat this as installed.')
+    }
+    if ($ringBack -ne "$($ringPlan.ring)") {
+        throw ("Deploy-PimUpdateJob: the DEPLOYED ring is not the ring this deploy decided -- '$JobName' carries " +
+               "PIM_UPDATE_RING=$ringBack, expected $($ringPlan.ring). A different ring approves a different " +
+               'VERSION, so this environment would move somewhere nobody asked for (BUG-162: a ring-2 job on an ' +
+               'environment built for ring 1 rolled it 42 versions BACKWARD overnight). Re-run this script with ' +
+               "-UpdateRing $($ringPlan.ring) and check nothing else is writing this job.")
+    }
+    Note "ring verified on the deployed job: PIM_UPDATE_RING=$ringBack"
 }
 
 # ---- 4. what does this ring APPROVE, read the way the job itself will read it -----------------

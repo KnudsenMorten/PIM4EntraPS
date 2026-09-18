@@ -14,6 +14,50 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 
 <!-- next release entry goes here -->
 
+## v2.4.368 — an environment never updates itself backward, and the update ring you configure is the ring you get
+
+This release fixes two defects in the automatic update path of a hosted (subscription) environment. It
+is recommended for every hosted installation. Nothing in the product's behaviour towards your directory
+changes.
+
+- **An automatic update never moves an environment to an older version.** Before it builds or rolls
+  anything, the nightly update compares the version its release ring approves with the highest version
+  the environment is known to have reached, and **refuses** to go backward — naming both versions, the
+  ring that proposed the older one and the two ways out. It also refuses a target that is not a version
+  number at all. A deliberate rollback is still possible, but only when it is explicitly switched on for
+  that environment; it is off by default, and a run that uses it says so loudly. Forward updates, the
+  "already on that version" no-op and the ring approval itself are unchanged — an environment still moves
+  only to what its ring approves.
+  *Why it matters:* an environment installed at a current version could previously be rolled backward by
+  its own nightly update to whatever older version its ring still held. Everything about that update
+  looks successful; what breaks is a component the newer version added, hours later, unattended, with
+  nothing to alert on it.
+
+- **The release ring you configure is the release ring that gets deployed.** The ring chosen for an
+  installation was not being passed on to the update job, so the job was created on the built-in default
+  ring instead — and a configuration that named no ring at all was read as the ring that takes every
+  build. The chosen ring is now carried through; an installation that does not name one is told which
+  default it is getting and why; an unreadable ring value stops the installation instead of being guessed
+  at; and the installation **reads the ring back off the deployed update job** and fails if it is not the
+  one that was asked for. A ring nobody verified is a version nobody chose.
+
+- **The documentation now says plainly how the product is set up, updated and licensed.** The README
+  describes the **six supported setups** by what they actually are — one tenant on its own, a service
+  provider's managing tenant, or a tenant that provider looks after, each with where the platform runs
+  and where its updates come from — and states that a tenant can start alone, be taken on later, and be
+  detached again with its definitions staying in its own database. It also separates the **two ring
+  systems** that were easy to confuse: the release ring that decides which *version* an environment
+  runs, and the replication ring that decides which *managed tenants a definition reaches*. They are
+  independent controls. Finally, the **free and paid editions** are set out in full, with the current
+  status stated honestly: licence enforcement is **not switched on**, so nothing is restricted in the
+  product today.
+
+**Upgrade note:** none — both changes take effect as soon as a hosted environment runs this version. If
+an environment has been running on a ring you did not intend, re-run the deployment naming the ring you
+want; it is now applied and verified rather than silently defaulted.
+
+**Interested in the licensed (multi-tenant) edition?** Mail **mok@mortenknudsen.net** for information.
+
 ## v2.4.367 — MSP: the provider publishes from the cloud, managed tenants read a signed baseline over the network, and both sides can be deployed by a signed-in administrator
 
 This release changes how a managed-service provider gets its signed baseline to its managed tenants.

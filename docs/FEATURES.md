@@ -13,6 +13,28 @@ deployment is a supported choice) and no credentials lying around.
 ---
 
 ## 1. Hosting / Runtime
+- **Six supported setups, and you are never locked into the one you start with.** ✅ 2026-09-18
+  A deployment is described by who runs it, where the platform runs and where its updates come
+  from — and the supported combinations are a fixed, named set rather than something improvised
+  per installation:
+  - **a single tenant, on our release** — portal, engine and database in that tenant's own
+    subscription, updating itself overnight from our release channel;
+  - **a single tenant, community edition** — the same shape, free, installed and kept current by
+    you from the public repository;
+  - **a provider (managing tenant), on our release** — a service provider's own tenant, with the
+    provider half on top: define once, sign it, roll it out in waves;
+  - **a provider (managing tenant), community edition** — the same, kept current from the public
+    repository;
+  - **a managed tenant hosted by the provider** — the portal and database run in the provider's
+    tenant and govern the customer's directory;
+  - **a managed tenant hosted in its own tenant** — the portal and database run in the customer's
+    own tenant.
+
+  In every one of them the model being applied lives in **that environment's own database**, and a
+  managed tenant always **pulls** — the provider never writes into it. So a tenant can start on its
+  own, be taken on by a provider later, and be detached again at any time: detaching removes the
+  provider's synced administrators and nothing else, the definitions stay where they are, and the
+  environment keeps running exactly as before.
 - **Run it where it fits you.** The Manager can run centrally for the whole team, or
   locally on an admin's PC straight against the database — no central web server
   required. A break-glass loopback edition runs on a client PC for the times your
@@ -115,8 +137,45 @@ deployment is a supported choice) and no credentials lying around.
   logged reason. *(The self-updating job needs a published source feed to pull from. A
   community installation from the public repository updates by pulling the new version and
   re-running the same one-command deploy, which is idempotent.)*
+- **Updates never go backward by themselves.** ✅ 2026-09-18 Before it builds or rolls anything, the
+  nightly update compares the version its ring approves with the highest version the environment is
+  known to have reached, and **refuses** to move backward — naming both versions, the ring that
+  proposed the older one and the ways out. A target that is not a version number at all is refused the
+  same way. A deliberate rollback stays possible, but only when it is explicitly switched on for that
+  environment; it is off by default, and a run that uses it says so loudly. Forward updates, the
+  "already on that version" no-op and the ring approval itself are unchanged.
+- **The update ring you configure is the ring you get.** ✅ 2026-09-18 The ring chosen for an
+  installation is carried through to the update job that enforces it; an installation that names no
+  ring is told which default it is getting and why; an unreadable ring value stops the installation
+  instead of being guessed at; and the installation reads the ring back off the deployed update job and
+  fails if it is not the ring that was asked for. A ring nobody verified is a version nobody chose.
 
 ## 4. MSP
+- **Replication rings — roll a change to one wave of customers before the rest.** ✅ 2026-09-18
+  Every definition row carries a ring and every managed tenant carries a ring; a row is admitted
+  when its own ring is at or below the tenant's. The ring is never the whole answer: a row reaches
+  a tenant only when it is marked for replication **and** the ring admits it **and** the tenant
+  matches what the row is aimed at — *ring AND target*, never either-or. Rows are aimed by name or
+  by tag: blank means every tenant the ring admits, a named tenant means just that one, several
+  tags listed together mean *any of these*, tags joined into one term mean *all of these at once*,
+  and a row can be marked as never leaving the provider. Tenant tags live in the provider's own
+  tenant record and travel inside the signed set, so a tenant cannot tag itself into scope.
+  **A row the ring does not admit is withheld, not retracted** — the tenant does not receive it and
+  whatever it already holds is untouched; widening the ring later releases it. Withdrawing access a
+  tenant already has is a separate, deliberate act: off by default, reported before it is done, and
+  stopped rather than exceeding a safety limit. If a reaching row depends on a row the ring or
+  target would have excluded, the dependency is included anyway and the run says so, naming the
+  row, what needed it and the tenant. **This is a different control from the release ring that
+  decides which software version an environment runs** (chapter 3) — same word, same small
+  numbers, not the same scale, and neither one implies the other.
+- **See what reaches each tenant, and what is held back, before you send it.** ✅ 2026-09-18 The
+  provider's Manager shows per row how many managed tenants it will reach and which ones, and per
+  role which tenants it is **withheld** from with the reason — the ring, the target, the
+  relationship policy, a capability the customer switched off, or something unresolved. The preview
+  builds the real set and runs **the same plan every managed tenant runs**, so it is the decision
+  itself rather than a separate estimate. Narrowing a relationship refuses to "let in" a tenant
+  that is actually held back by something else, and says which axis is really holding it, instead
+  of writing a rule that would change nothing and report success.
 - **Pull, never push.** In a managed-service setup, the provider never reaches into or
   writes to your tenant. Each tenant pulls a signed baseline into its own local database;
   your data never leaves your tenant and your local IT keeps full autonomy.
@@ -1410,14 +1469,33 @@ deployment is a supported choice) and no credentials lying around.
   a licence past its end date enters a clearly reported **grace period** before it is treated as expired, and
   one that is not yet valid is reported as such rather than silently accepted.
 
-### Licensing
+### Licensing — what is free and what is paid
 
-Licensing details for the Pro edition will be published soon. We can already say that the MSP
-scenarios — a managing (master) tenant and the managed customer tenants it looks after — will be part
-of the paid edition; details will follow. Single-tenant use of the community edition is free.
+This is the **current commercial shape**. Read it together with the note at the end: the product
+does **not** enforce any of it today.
 
-Licence enforcement is currently switched off, so nothing is restricted today: every capability
-described in this catalog is available to every installation.
+**Free — the community edition, for a single tenant.** Everything an organisation needs to govern
+its own tenant: the full portal; eligible, time-boxed access with approval and a complete audit
+trail; delegation by group, so access is granted by membership rather than by hand; drift detection;
+access reviews and reports; administrator accounts and first-time access passes; self-updating from
+the public release; and community support.
+
+**Paid — everything in free, plus the multi-tenant half.** For a service provider, or any
+organisation running more than one tenant: define once and target tenants by tag and by rollout
+wave; signed definition sets that are verified on arrival; a clear view of what reaches each tenant
+and what is held back; per-customer rules where one customer must differ; a read-only preview of
+exactly what a tenant would receive before it does; fleet conformance across tenants; rollout waves;
+central accounts whose lifecycle flows down to the tenants they belong to; removals that remain the
+tenant's own call; controlled release rings for the software itself; the provider-hosted option; and
+support with an agreed response time.
+
+> **Licence enforcement is not switched on in the product today.** Nothing is technically restricted
+> by edition: every capability described in this catalog is available to every installation. The
+> edition an environment runs is recorded so the commercial basis is clear, but there is no gate in
+> the code that would stop you.
+
+**Interested in the licensed (multi-tenant) edition?** Mail **mok@mortenknudsen.net** for
+information.
 
 ---
 

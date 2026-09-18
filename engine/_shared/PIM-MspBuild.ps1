@@ -332,6 +332,33 @@ function Get-PimMspBuildAuthMode {
     return 'Certificate'
 }
 
+function Get-PimMspBuildUpdateRing {
+    <#
+      PURE. BUG-162 -- WHICH UPDATE RING THIS BUILD ASKS FOR, said out loud instead of cast.
+      The plan used to build the hosting step with `UpdateRing = [int](& $V 'updater.ring')`, and
+      [int]$null is 0 -- so a config with no 'updater.ring' silently asked for RING 0, the ring that
+      takes every build. A cast is not a decision: the three cases are different and each is stated.
+        'updater.ring' 0..3     -> that ring, source 'config'
+        absent / empty          -> the DOCUMENTED default ring 2 (the safe customer ring), source 'default'
+        anything else           -> THROW, naming the value. Never 0 by accident, never guessed.
+      Returns { ring; source; message }. Test-PimMspBuildConfig still REFUSES a config without a ring;
+      this exists so the plan cannot invent one behind that check either.
+    #>
+    param([Parameter(Mandatory)][object]$Config)
+    $raw = Get-PimMspBuildValue -Object $Config -Path 'updater.ring'
+    $s = "$raw".Trim()
+    if (-not $s) {
+        return [pscustomobject]@{ ring = 2; source = 'default'
+            message = "no 'updater.ring' in the build config -- applying the DOCUMENTED default ring 2 (the safe customer ring). Internal and test environments set 'updater': { 'ring': 1 }." }
+    }
+    if ($s -notmatch '^(?i)(ring)?([0-3])$') {
+        throw ("Get-PimMspBuildUpdateRing: 'updater.ring' is '$s', which is not a ring (0..3). REFUSING to guess one -- " +
+               'a wrong ring approves a different VERSION, which is how an environment rolls somewhere nobody asked for.')
+    }
+    $r = [int]$Matches[2]
+    [pscustomobject]@{ ring = $r; source = 'config'; message = "update ring $r (from the build config)" }
+}
+
 function Test-PimMspBuildConfig {
     <#
       PURE. Validate a build config for one role. Returns @{ ok; errors; warnings; authMode }.
@@ -505,6 +532,8 @@ function Get-PimMspBuildPlan {
     # (-UseSignedInAccount, or no credential where the script already means "the signed-in az context"); the user's
     # object id is the run-time placeholder {{signed-in-user}}. CERTIFICATE MODE IS UNCHANGED, argument for argument.
     $signedIn = ((Get-PimMspBuildAuthMode -Config $Config) -eq 'SignedIn')
+    # BUG-162: the ring is DECIDED, not cast ([int]$null was 0 = the ring that takes every build).
+    $updRing = Get-PimMspBuildUpdateRing -Config $Config
     $storeArgs = if ($signedIn) { @{ TenantId = $tid } } else { $certArgs }
     $storeSwitches = if ($signedIn) { @('UseSignedInAccount') } else { @() }
     $steps = New-Object System.Collections.Generic.List[object]
@@ -534,7 +563,7 @@ function Get-PimMspBuildPlan {
         SqlConnectionString = "Server=tcp:$sqlFqdn,1433;Database=$db;Encrypt=True;TrustServerCertificate=False;Connection Timeout=30"
         AdminAppId = $cid; AdminCertPem = '{{pem:deploy}}'; SqlAdminClientId = $cid; SqlAdminCertThumbprint = $thumb
         ManagerSuperAdmins = "$(& $V 'managerSuperAdmins')".Trim()
-        UpdateRing = [int](& $V 'updater.ring'); SqlAdminGroupName = 'grp-pim-sql-admins'; TroubleshootingAppId = $cid
+        UpdateRing = $updRing.ring; SqlAdminGroupName = 'grp-pim-sql-admins'; TroubleshootingAppId = $cid
         Exposure = $(if ("$(& $V 'exposure')".Trim()) { "$(& $V 'exposure')".Trim() } else { 'external' })
     }
     if ("$(& $V 'logAnalyticsName')".Trim()) { $hosting['LogAnalyticsWorkspaceName'] = "$(& $V 'logAnalyticsName')".Trim() }
@@ -590,7 +619,7 @@ function Get-PimMspBuildPlan {
     }
     $steps.Add((New-PimMspBuildStep -Id 'hosting' -Title "hosting ($scenario): prerequisites, image, containers, schema, mail sender, Easy Auth, code, updater, access, smoke gate" `
         -Script 'tools\setup\Invoke-PimDeployAll.ps1' -Arguments $hosting -Switches $hostingSwitches `
-        -Why 'managed-identity only (no engine app registration, no secret); the smoke gate runs inside'))
+        -Why "managed-identity only (no engine app registration, no secret); the smoke gate runs inside; $($updRing.message)"))
 
     # (parenthesised: the comma operator binds tighter than +, so the unwrapped form built ONE string -- caught by B5)
     $members = @(("{{mi-job:$tick}}"), ("{{mi-app:$mgr}}"))
