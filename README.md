@@ -62,8 +62,12 @@ owns the detail. (Screenshot uses synthetic demo data.)*
   - [Settings — your operational policy in one place](#settings--your-operational-policy-in-one-place)
   - [Export everywhere](#export-everywhere)
 - [The PIM Activator (browser extension)](#the-pim-activator-browser-extension)
-- [Deployment scenarios — pick your topology](#deployment-scenarios--pick-your-topology)
-- [Editions and licensing](#editions-and-licensing)
+- [Supported setups — pick the shape that matches you](#supported-setups--pick-the-shape-that-matches-you)
+- [How updates reach an environment — the two ring systems](#how-updates-reach-an-environment--the-two-ring-systems)
+- [Editions — what is free and what is paid](#editions--what-is-free-and-what-is-paid)
+  - [Free — the community edition, for a single tenant](#free--the-community-edition-for-a-single-tenant)
+  - [Paid — everything in free, plus the multi-tenant half](#paid--everything-in-free-plus-the-multi-tenant-half)
+  - [Interested in the licensed (multi-tenant) edition?](#interested-in-the-licensed-multi-tenant-edition)
 - [Getting started — install the community edition](#getting-started--install-the-community-edition)
   - [What you need](#what-you-need)
   - [1. Get the code](#1-get-the-code)
@@ -816,52 +820,173 @@ conflict handling and backend setup).
 
 ---
 
-## Deployment scenarios — pick your topology
+## Supported setups — pick the shape that matches you
 
-PIM4EntraPS recognises a fixed set of **six deployment topologies**. They cover
-*who runs it* (a single tenant, an MSP provider's managing tenant, or a managed
-customer tenant), *which edition* you run, and *where updates come from*. In every
-topology the Manager, engine and database run **in the tenant they serve**.
+PIM4EntraPS supports **six setups**. They differ in three things only: **who runs
+it** (one organisation for itself, a service provider for the customers it looks
+after, or a tenant that provider looks after), **where the platform itself runs**,
+and **where its updates come from**. In every setup the portal, the engine and the
+database run in a tenant you can point at, and the model they apply lives in that
+environment's own database.
 
-| # | Who | Edition | Updates from | Manager + database | Licence |
-|---|-----|---------|--------------|--------------------|---------|
-| **S1** | Single tenant | Subscription | the maintainer's release channel | in your tenant | Subscription |
-| **S2** | Single tenant | **Community (this repository)** | **public GitHub** | **in your tenant** | **Free** |
-| **S3** | MSP **managing** tenant | Subscription | the maintainer's release channel | in the managing tenant | Paid (MSP) |
-| **S4** | MSP **managing** tenant | Community | public GitHub | in the managing tenant | Paid (MSP) |
-| **S5** | MSP **managed** customer | Subscription | from the managing tenant, by release stage | in the customer's tenant (managing admins synced in) | Paid (MSP) |
-| **S6** | MSP **managed** customer | Subscription | from the managing tenant, by release stage | in the customer's tenant (standalone) | Paid (MSP) |
+| Setup | Who runs it | Where the platform runs | Where updates come from |
+|---|---|---|---|
+| **Single tenant — on our release** | One organisation, for its own tenant | That tenant's own subscription | Our release channel — the environment updates itself, overnight |
+| **Single tenant — community (free)** | One organisation, for its own tenant | That tenant's own subscription | The public repository — you pull the new version and re-run the one-command install |
+| **Provider (managing tenant) — on our release** | A service provider, for the customers it looks after | The provider's own tenant | Our release channel |
+| **Provider (managing tenant) — community** | A service provider, for the customers it looks after | The provider's own tenant | The public repository |
+| **Managed tenant — hosted by the provider** | A customer a provider looks after | Portal and database in the **provider's** tenant, governing the customer's directory | From the provider, by replication ring |
+| **Managed tenant — hosted in its own tenant** | A customer a provider looks after | Portal and database in the **customer's own** tenant | From the provider, by replication ring |
 
-- **Single tenant (S1 / S2)** is the simplest shape — engine, Manager, database and
-  the governed tenant are all one tenant. This repository is **S2**: the free
-  community edition, installed and updated from GitHub by you.
-- **MSP managing tenant (S3 / S4)** adds provider-side authoring, signing and
-  staged rollout on top of a single-tenant deployment.
-- **MSP managed tenants (S5 / S6)** are real customer environments with their own
-  full stack. The only thing the managing relationship adds is that the provider's
-  administrators are synced in, **pulled** by the customer's own environment —
-  never pushed. Detaching a managed tenant removes those synced administrators and
-  nothing else; the customer's environment keeps running.
+- **Single tenant** is the simplest shape: portal, engine, database and the
+  directory being governed are all one tenant. There is no provider and nothing
+  crosses a tenant boundary. This repository is the **community** one — free for a
+  single tenant, installed and kept current by you.
+- **Provider (managing tenant)** adds the provider half on top of a single-tenant
+  installation: define once centrally, sign the definition set, and roll it out to
+  customers in waves. The provider's own tenant is governed the same way as any
+  other.
+- **A managed tenant is a real environment, not a remote-control session.** It has
+  its own engine, its own model and its own database, and it **pulls** the signed
+  definition set from the provider — the provider never reaches into it and never
+  pushes anything. The two hosting choices differ only in where the portal and the
+  database live: in the provider's tenant (so the provider runs the infrastructure
+  for the customer), or in the customer's own tenant (so the customer does).
+- **You can start alone, be taken on later, and leave again.** A tenant that starts
+  on its own can be brought under a provider afterwards, and a managed tenant can be
+  detached at any time. Detaching removes the provider's synced administrators and
+  nothing else: **the definitions stay in that tenant's own database**, so the
+  environment keeps running and keeps governing exactly as before. Nothing has to be
+  handed back, and nothing stops working.
 
-See **[docs/DESIGN.md §11.8](docs/DESIGN.md)** for the per-scenario topology and
+See **[docs/DESIGN.md §11.8](docs/DESIGN.md)** for the per-setup topology and
 process diagrams.
 
 ---
 
-## Editions and licensing
+## How updates reach an environment — the two ring systems
 
-**The community edition in this repository is free for single-tenant use (S2)** —
-install it in your own tenant and use it for your own organisation.
+PIM4EntraPS uses **rings** in two completely different places, and it is worth
+keeping them apart. One decides **which version of the software** an environment
+runs. The other decides **which definitions reach which managed tenants**.
 
-**Licensing details for the Pro edition will be published soon.** We can already
-say that the **MSP scenarios** — a managing (master) tenant and the managed customer
-tenants it looks after (S3–S6) — **will be part of the paid edition**; details will
-be shared soon.
+> **They are independent.** A managed tenant's software version and the rings that
+> decide which definitions reach it are separate controls, set separately and
+> changed separately. Moving a tenant to a later software version does not change
+> which definitions it receives, and moving a definition to a wider ring does not
+> change any tenant's software version.
 
-Today the product does not restrict anything by edition: licence enforcement is
-switched off, so every capability works in every install while licensing is
-finalised. The edition an environment runs is recorded so the commercial basis is
-clear. The terms that apply to this code are in **[LICENSE](LICENSE)**.
+### The software ring — which version an environment runs
+
+- **A version reaches a ring only when it is approved for that ring.** Approving is
+  a deliberate act by whoever maintains the release. Building a version, publishing
+  it, or approving it for one ring never moves it into another.
+- **Nothing is pushed.** Each night the environment **asks** which version its own
+  ring approves, fetches that version, builds it in its **own** container registry
+  and rolls to it. Nothing connects into the environment from outside to update it.
+- **An environment never moves backward.** *(New in 2.4.368.)* Before it builds
+  anything, the environment compares the version its ring approves with the highest
+  version it is known to have reached, and refuses to go backward — naming both
+  versions and the ring that proposed the older one. A deliberate rollback has to be
+  switched on for that environment, and a run that uses it says so.
+- **It never moves to a version nobody approved.** If the release channel cannot be
+  read, or the environment's ring names no version, the environment stays exactly
+  where it is — it never falls back to "whatever is newest".
+- **A held environment does not move at all.** Holding an environment is a supported
+  state, not a failure, and it is reported as such.
+- **The ring you configure is the ring you get.** *(New in 2.4.368.)* The ring is
+  read back off the deployed environment and the installation fails if it is not the
+  one that was asked for.
+
+### The replication ring — which managed tenants a definition reaches
+
+*This applies to a provider and the tenants it looks after. A single-tenant
+installation has no replication ring.*
+
+- **Every definition row carries a ring, and every managed tenant carries a ring.**
+  A row is admitted when its own ring is at or below the tenant's ring — so ring 0
+  rows reach every tenant, and a row on a higher ring reaches only the tenants that
+  have been moved up to it.
+- **The ring is never the whole answer.** A row reaches a tenant only when **all
+  three** hold: it is marked for replication at all, **and** the ring admits it,
+  **and** the tenant matches what the row is aimed at. It is *ring AND target*,
+  never either-or.
+- **A row is aimed at tenants by name or by tag.** Leave the target blank and it goes
+  to every tenant the ring admits; aim it at one named tenant; aim it at a tag; or
+  combine tags — several tags listed together mean *any of these*, while tags joined
+  into one term mean *all of these at once*. A row can also be marked as never
+  leaving the provider at all. Tags belong to the tenant record the provider keeps
+  and travel inside the signed set, so a tenant cannot tag itself into scope.
+- **A row the ring does not admit is withheld, not retracted.** The tenant simply
+  does not receive it, and **whatever that tenant already holds is left exactly as it
+  is**. Widening the ring later releases it; nothing is taken away in the meantime.
+  Withdrawing access that a tenant already has is a separate, deliberate act that is
+  **off by default**, reports what it would do before it does anything, and stops
+  rather than exceeding a safety limit.
+- **Nothing silently half-arrives.** If a row that *is* reaching a tenant depends on
+  another row that the ring or the target would have excluded, the dependency is
+  included anyway — and the run says so, naming the row, what needed it and which
+  tenant.
+- **You can see it before you send it.** The provider's Manager shows, per row, how
+  many tenants it will reach and which ones, and per role which tenants it is
+  **withheld** from and *why* — whether that is the ring, the target, the
+  relationship policy or something the customer has switched off. The preview runs
+  the same plan the managed tenant itself runs, so it is not a separate estimate.
+- **This is how a provider rolls a change to one wave of customers before the rest**
+  — and it is entirely separate from the software ring above. The two use the same
+  word and the same small numbers, but they are **not the same scale** and one never
+  implies the other.
+
+---
+
+## Editions — what is free and what is paid
+
+This is the **current commercial shape**. Read it together with the note at the end:
+the product does **not** enforce any of it today.
+
+### Free — the community edition, for a single tenant
+
+Everything an organisation needs to govern its own tenant:
+
+- the full **portal** — model, review, commit, and see what changed;
+- **eligible, time-boxed access** with approval and a complete audit trail;
+- **delegation by group** — permission groups and tiering, so access is granted by
+  membership rather than by hand;
+- **drift detection** — what exists in the directory versus what your model says;
+- **access reviews and reports**, including standing access and expiring access;
+- **administrator accounts and first-time access passes**, issued and tracked;
+- **self-updating from the public release**;
+- **community support**.
+
+### Paid — everything in free, plus the multi-tenant half
+
+For a service provider, or any organisation running more than one tenant:
+
+- **define once, target many** — target tenants by tag and by rollout wave rather
+  than editing each tenant;
+- **signed definition sets, verified on arrival** — a tenant applies a definition set
+  only if it verifies against a key that tenant trusts;
+- **see what reaches each tenant and what is held back**, per definition;
+- **per-customer rules** where one customer must differ;
+- **a read-only preview** of exactly what a tenant would receive, before it does;
+- **fleet conformance** — which tenants are on which version of which definition set;
+- **rollout waves** — reach one wave of customers before the rest;
+- **central accounts whose lifecycle flows down** to the tenants they belong to;
+- **removals remain the tenant's call** — the provider proposes, the tenant disposes;
+- **controlled release rings** for the software itself;
+- **the provider-hosted option** — the provider runs the portal and database for the
+  customer;
+- **support with an agreed response time**.
+
+> **Licence enforcement is not switched on in the product today.** Nothing is
+> technically restricted by edition in this release: every capability works in every
+> installation while licensing is finalised. The edition an environment runs is
+> recorded so the commercial basis is clear, but there is no gate in the code that
+> would stop you. The terms that apply to this code are in **[LICENSE](LICENSE)**.
+
+### Interested in the licensed (multi-tenant) edition?
+
+**Mail [mok@mortenknudsen.net](mailto:mok@mortenknudsen.net) for information.**
 
 ---
 
@@ -975,6 +1100,15 @@ failed health check rolls the Manager back to the previous version. (The unatten
 in-cloud updater used by subscription environments needs a published release feed,
 so the community edition updates on your schedule, from GitHub.)
 
+An environment that updates itself does so **only forward**: before it builds
+anything it compares the version its release ring approves with the highest version
+it is known to have reached, and refuses to move backward — naming both versions and
+the ring that proposed the older one. A deliberate rollback has to be switched on for
+that environment, and a run that uses it says so. And the release ring you configure
+is the one you get: it is carried through to the update job, an installation that
+names no ring is told which default it is getting, and the installation reads the
+ring back off the deployed job and fails if it did not take.
+
 ### What it costs to run
 
 The on-demand shape is deliberately small: the Manager costs nothing while idle
@@ -1014,8 +1148,8 @@ topology.
 ## MSP variant
 
 For consultancies managing many customer tenants, the model is **pull, never
-push** (MSP scenarios will be part of the paid edition — see
-[Editions and licensing](#editions-and-licensing)):
+push** (the multi-tenant half is the paid edition — see
+[Editions — what is free and what is paid](#editions--what-is-free-and-what-is-paid)):
 
 - **Each customer pulls a signed baseline** into its own database — the provider
   never writes to the customer tenant, and customer data never leaves it.

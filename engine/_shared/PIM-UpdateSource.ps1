@@ -201,6 +201,136 @@ function Get-PimRingVersion {
     @{ version = $v; reason = "'$r' approves $v" }
 }
 
+# ---- 2026-09-17 (BUG-162) -- AN UPDATE NEVER GOES BACKWARD BY ITSELF -----------------------------
+# MEASURED on the rehearsal MSP master dp998: built at 2.4.366, its own ca-pim-update ran once and
+# rolled all five containers -- Manager, tick, update, dbinit and ca-pim-publish -- to 2.4.324, the
+# version its (wrong, see BUG-162 part 1) ring held. 42 versions backward, while the job itself still
+# recorded PIM_UPDATE_LAST_GOOD=...:2.4.366. The next ca-pim-publish then failed outright, because
+# publish-job-entry.ps1 does not exist in 2.4.324 -- so the master silently STOPPED PUBLISHING and its
+# managed tenants kept serving the last bundle until it expired.
+#
+# A ROLL FORWARD IS AN UPDATE; A ROLL BACKWARD IS A ROLLBACK, AND A ROLLBACK IS AN ATTENDED ACT.
+# The updater cannot know which capability an older image lacks -- a file added in a newer version is
+# simply ABSENT, which is why the failure surfaces somewhere else entirely, hours later. So it refuses
+# to move backward and says exactly which two versions and which ring proposed it. A DELIBERATE
+# rollback stays possible: PIM_UPDATE_ALLOW_DOWNGRADE=1 on the update job, off by default, loud when on.
+#
+# THE COMPARISON IS AGAINST THE HIGHEST VERSION THIS ENVIRONMENT IS KNOWN TO HAVE REACHED, not just
+# the one running right now. dp998 was already half-rolled when this was found; taking only the running
+# version would have called the second night's identical roll a no-op.
+
+function ConvertTo-PimUpdateVersion {
+    <#
+      PURE. The comparable [version] of a version string, a tag, or a full image reference
+      ('acr.azurecr.io/pim-manager:2.4.366' -> 2.4.366; 'v2.4.366' -> 2.4.366). Returns $null when the
+      value is absent or is not a version number (a digest pin, 'latest', a branch name). NEVER throws:
+      "I cannot read this" is an answer the caller has to handle, not an error.
+    #>
+    param([AllowEmptyString()][AllowNull()][string]$Value)
+    $s = "$Value".Trim()
+    if (-not $s) { return $null }
+    if ($s -match '@') { $s = ($s -split '@')[0] }          # digest-pinned: the tag half, if any
+    if ($s -match '[:/]') { $s = ($s -split ':')[-1] }      # <server>/<repo>:<tag> -> <tag>
+    $s = $s -replace '^(?i)v', ''
+    if ($s -notmatch '^\d+(\.\d+){1,3}$') { return $null }
+    $v = $null
+    if ([version]::TryParse($s, [ref]$v)) { return $v }
+    return $null
+}
+
+function Get-PimUpdateDowngradeDecision {
+    <#
+      PURE. May this run move the environment to -TargetVersion? Returns
+        { allowed; direction; from; fromSource; to; overridden; message; detail; errorText; note }
+      direction: 'forward' | 'same' | 'backward' | 'unknown'.
+
+      Inputs are the three things an environment knows about itself, in the order they are trusted:
+        -RunningVersion    the tag the Manager app is on right now
+        -LastBuiltVersion  PIM_UPDATE_LAST_BUILT
+        -LastGoodImage     PIM_UPDATE_LAST_GOOD (a full image reference)
+      The HIGHEST comparable of the three is what the target is measured against.
+
+      REFUSALS (all overridable with -AllowDowngrade, which is PIM_UPDATE_ALLOW_DOWNGRADE=1):
+        * the target is BEHIND that version                        -> backward
+        * the target is not a version number while this environment
+          has a comparable one                                     -> unknown ("cannot prove it is
+          not a downgrade"). A malformed target must never pass silently -- that is how a channel
+          typo becomes an unattended roll to something nobody can name.
+      ALLOWED, and said so:
+        * forward, or exactly the same version (the normal no-op night)
+        * nothing comparable to measure against at all -- a first roll on a digest-pinned environment.
+          Allowed, but the caller is told it could not be checked rather than told it was fine.
+    #>
+    param(
+        [AllowEmptyString()][string]$TargetVersion,
+        [AllowEmptyString()][string]$RunningVersion,
+        [AllowEmptyString()][string]$LastBuiltVersion,
+        [AllowEmptyString()][string]$LastGoodImage,
+        [AllowEmptyString()][string]$Ring,
+        [switch]$AllowDowngrade,
+        [string]$UpdateJobName = 'ca-pim-update'
+    )
+    $to    = ConvertTo-PimUpdateVersion -Value $TargetVersion
+    $toRaw = "$TargetVersion".Trim()
+    $known = @(
+        [pscustomobject]@{ source = 'the running Manager image'; raw = "$RunningVersion".Trim(); v = (ConvertTo-PimUpdateVersion -Value $RunningVersion) }
+        [pscustomobject]@{ source = 'PIM_UPDATE_LAST_BUILT';     raw = "$LastBuiltVersion".Trim(); v = (ConvertTo-PimUpdateVersion -Value $LastBuiltVersion) }
+        [pscustomobject]@{ source = 'PIM_UPDATE_LAST_GOOD';      raw = "$LastGoodImage".Trim();   v = (ConvertTo-PimUpdateVersion -Value $LastGoodImage) }
+    )
+    $seen = @($known | Where-Object { $_.v })
+    $ringTxt = if ("$Ring".Trim()) { "ring $("$Ring".Trim())" } else { 'this environment' }
+    $whereTxt = (@($known | Where-Object { $_.raw } | ForEach-Object { "$($_.source)=$($_.raw)" }) -join '; ')
+    if (-not $whereTxt) { $whereTxt = 'nothing recorded' }
+    $ok = { param($dir, $from, $src, $note)
+            [pscustomobject]@{ allowed = $true; direction = $dir; from = $from; fromSource = $src; to = $toRaw
+                               overridden = $false; message = ''; detail = ''; errorText = ''; note = $note } }
+
+    if (-not $seen.Count) {
+        # Nothing comparable: allow, but never call it verified.
+        return (& $ok 'unknown' '' '' ("downgrade check: no comparable version for this environment ($whereTxt) -- " +
+                                       "the roll to '$toRaw' could NOT be checked for direction."))
+    }
+    $high = @($seen | Sort-Object -Property v -Descending)[0]
+    $from = $high.raw; $fromSrc = $high.source
+
+    $refuse = { param($dir, $head, $why)
+        $lead = if ($dir -eq 'backward') { 'REFUSING TO ROLL BACKWARD' } else { 'REFUSING TO ROLL' }
+        $act = ("Fix the channel (channel.json) so $ringTxt approves $from or newer, or -- for a DELIBERATE rollback -- " +
+                "set PIM_UPDATE_ALLOW_DOWNGRADE=1 on $UpdateJobName and run it again.")
+        if ($AllowDowngrade) {
+            return [pscustomobject]@{ allowed = $true; direction = $dir; from = $from; fromSource = $fromSrc; to = $toRaw
+                overridden = $true
+                message = "DOWNGRADE ALLOWED by PIM_UPDATE_ALLOW_DOWNGRADE=1: $head"
+                detail  = "$why This is an explicit operator opt-in on $UpdateJobName; nothing else in the update path permits it."
+                errorText = ''; note = '' }
+        }
+        [pscustomobject]@{ allowed = $false; direction = $dir; from = $from; fromSource = $fromSrc; to = $toRaw
+            overridden = $false
+            message = "$lead`: $head"
+            detail  = "$why $act"
+            errorText = "downgrade refused: $ringTxt proposed $toRaw, this environment is on $from ($fromSrc)"
+            note = '' }
+    }
+
+    if (-not $to) {
+        return (& $refuse 'unknown' `
+            "$ringTxt proposed '$toRaw', which is not a version number, and this environment is on $from ($fromSrc)." `
+            ("An unreadable target cannot be PROVEN to be a move forward, and an update that cannot prove its own " +
+             "direction is exactly the one that must not run unattended. Known here: $whereTxt."))
+    }
+    if ($to -eq $high.v) {
+        return (& $ok 'same' $from $fromSrc "already on $from -- the roll to $toRaw moves nothing.")
+    }
+    if ($to -gt $high.v) {
+        return (& $ok 'forward' $from $fromSrc "roll FORWARD $from -> $toRaw (highest known: $fromSrc).")
+    }
+    & $refuse 'backward' `
+        "$ringTxt approves $toRaw, but this environment is on $from ($fromSrc) -- that is BACKWARD." `
+        ("A roll backward is a ROLLBACK, and a rollback is an attended operation: an older image simply does not " +
+         "contain what a newer one added, so the damage surfaces somewhere else entirely (BUG-162: 2.4.324 has no " +
+         "publish-job-entry.ps1, so the master stopped publishing and nothing alerted). Known here: $whereTxt.")
+}
+
 # ---- 2026-09-13 -- DOES THE UPDATER REACH THIS ENVIRONMENT'S STORE? ------------------------------
 # 🔴 MEASURED ON FOUR LIVE ENVIRONMENTS: ca-pim-update carried no PIM_SqlServer / PIM_SqlDatabase
 # (ca-pim-manager and ca-pim-tick do), so every nightly schema step printed

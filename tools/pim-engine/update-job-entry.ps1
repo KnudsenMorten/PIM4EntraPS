@@ -211,6 +211,27 @@ if ($plan.action -eq 'none') {
     exit 0
 }
 
+# ---- 0a. BUG-162 -- NEVER ROLL BACKWARD UNATTENDED -----------------------------------------------
+# Checked BEFORE the build: building an older version is the same wasted 20 minutes as rolling to it,
+# and the refusal must name the two versions while nothing has changed yet. The ring still decides
+# WHETHER this environment moves (Sec.60, untouched above); this decides only that it never moves
+# DOWN on its own. PIM_UPDATE_ALLOW_DOWNGRADE=1 is the operator's way back, and it is stated loudly.
+$runningVer = if ($ref) { "$($ref.tag)" } else { '' }
+$dg = Get-PimUpdateDowngradeDecision -TargetVersion "$($plan.version)" -RunningVersion $runningVer `
+          -LastBuiltVersion $lastBuilt -LastGoodImage "$($env:PIM_UPDATE_LAST_GOOD)" -Ring $ring `
+          -AllowDowngrade:("$($env:PIM_UPDATE_ALLOW_DOWNGRADE)".Trim() -eq '1') -UpdateJobName $selfJob
+if ($dg.note) { Say "  $($dg.note)" 'DarkGray' }
+if (-not $dg.allowed) {
+    Say $dg.message 'Red'
+    Say "  $($dg.detail)" 'Red'
+    Send-PimUpdateOutcome -Action 'none' -Outcome 'failed' -ToVersion "$($plan.version)" -ErrorText $dg.errorText
+    exit 1
+}
+if ($dg.overridden) {
+    Say $dg.message 'Yellow'
+    Say "  $($dg.detail)" 'Yellow'
+}
+
 if ($plan.action -eq 'build') {
     $srcUrl = Resolve-PimUpdateSourceUrl -Template $srcUrlTpl -Version $plan.version
     $ctx    = Join-Path ([IO.Path]::GetTempPath()) ("pim-src-{0}.tar.gz" -f $plan.version)
