@@ -7431,18 +7431,18 @@ function New-PimDefenderXdrRolesProvider {
                 if (-not $rid) { throw "DefenderXdrRoles: Defender role '$rn' not found (Unified RBAC activated? role spelled correctly?)" }
             }
             $disp = Get-PimRowProp -Row $d -Names @('AssignmentName'); if (-not $disp) { $disp = "PIM4EntraPS - $rn" }
-            # 🔴 BUG-222 (§33.28), verified against the Graph beta reference "Create unifiedRoleAssignmentMultiple"
-            # (rbacapplicationmultiple-post-roleassignments, Example 4 = Defender): POST
-            # /beta/roleManagement/defender/roleAssignments takes a #microsoft.graph.unifiedRoleAssignmentMultiple.
-            # This sent '#microsoft.graph.unifiedRbacResourceNamespace' -- the type of a resource NAMESPACE, not of
-            # an assignment. appScopeIds '/' is correct as documented: "all and future workloads".
+            # BUG-222 (§33.28): this once sent '#microsoft.graph.unifiedRbacResourceNamespace' (a NAMESPACE type). The
+            # 2.4.370 fix replaced it with the Graph beta example's '#microsoft.graph.unifiedRoleAssignmentMultiple' --
+            # and the LIVE service refuses ANY '@odata.type' on this POST (proven 2026-09-19, see
+            # New-PimDefenderAssignmentBody), so the body now carries none. appScopeIds '/' = "all and future workloads".
             # REQ-U wave 2: a spec row assigns with ITS data sources (DataSources, blank = '/'), not a hardcoded '/'.
             $scopes = if ($spec) { @($spec.dataSources) } else { @('/') }
-            # 🔴 LIVE 2026-09-19 (RIDE, first real Defender assignment): without directoryScopeIds Graph answered 400 "The
-            # input was not valid. roleAssignment: The roleAssignment field is required." -- every live assignment the
-            # portal makes carries directoryScopeIds ['/'] (read on internal: 16 of 16), the data sources in appScopeIds.
+            # 🔴 LIVE 2026-09-19: Graph answered 400 "roleAssignment: The roleAssignment field is required." to every
+            # create while the body carried '@odata.type' (2.4.379 + 2.4.380, all three ring-1 tenants); without it the
+            # assignment is created and answered with an insecure redirect. Body: New-PimDefenderAssignmentBody (no type,
+            # directoryScopeIds ['/']); the POST + read-back: Invoke-PimDefenderAssignmentCreate.
             $body = New-PimDefenderAssignmentBody -DisplayName $disp -RoleDefinitionId $rid -PrincipalId $gid -AppScopeIds @($scopes)
-            Invoke-PimGraph -Beta -Method POST -Path '/roleManagement/defender/roleAssignments' -Body $body
+            Invoke-PimDefenderAssignmentCreate -Body $body
         }
         # REQ-U wave 2: a spec'd binding whose live role or assignment differs from the spec. The role's actions are
         # PATCHed; a data-source difference is a RE-ASSIGN, removal first (never wider than asked, even for a moment).
@@ -7468,7 +7468,7 @@ function New-PimDefenderXdrRolesProvider {
                 Invoke-PimGraph -Beta -Method DELETE -Path "/roleManagement/defender/roleAssignments/$($l.assignmentId)" | Out-Null
                 $disp = Get-PimRowProp -Row $d -Names @('AssignmentName'); if (-not $disp) { $disp = "PIM4EntraPS - $rn" }
                 $body = New-PimDefenderAssignmentBody -DisplayName $disp -RoleDefinitionId $rid -PrincipalId $gid -AppScopeIds @($spec.dataSources)
-                try { [void](Invoke-PimGraph -Beta -Method POST -Path '/roleManagement/defender/roleAssignments' -Body $body) }
+                try { [void](Invoke-PimDefenderAssignmentCreate -Body $body) }
                 catch { throw ("data sources: the old assignment of '{0}' was REMOVED, but creating it with [{1}] failed (the next run retries the create): {2}" -f $rn, (@($spec.dataSources) -join '; '), $_.Exception.Message) }
                 $out.reassigned = $true
             }

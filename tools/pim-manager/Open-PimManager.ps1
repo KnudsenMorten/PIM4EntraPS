@@ -273,6 +273,11 @@ if (Test-Path -LiteralPath $_permLib) { . $_permLib }
 # has run for a workload. The same definitions the setup script and tests\Test-PimWorkloadPrereqs.ps1 use.
 $_workloadPrereqLib = Join-Path $solutionRoot 'engine\_shared\PIM-WorkloadPrereqs.ps1'
 . $_workloadPrereqLib
+# REQ-X -- the permission-template pack planner (engine/_shared/PIM-TemplatePacks.ps1): GET /api/templates plans every
+# pack with the SAME Get-PimTemplatePackPlan tools\setup\Import-PimPermissionTemplate.ps1 uses, so the GUI and the script
+# offer the same rows and both ADOPT a group the store already defines.
+$_templatePacksLib = Join-Path $solutionRoot 'engine\_shared\PIM-TemplatePacks.ps1'
+. $_templatePacksLib
 
 # Approval-gated offboarding + revoke control plane (engine/_shared/PIM-ApprovalGate.ps1)
 # -- the MAKER/CHECKER approval queue (REQUIREMENTS §13/§27 H3/H4). Powers the new
@@ -11318,93 +11323,11 @@ function Handle-Request {
         }
         if ($path -eq '/api/templates' -and $method -eq 'GET') {
             $script:lastHeartbeat = Get-Date
-            function Get-PimTemplateRowKey {
-                param([string]$Base, [object]$Row)
-                $g = { param($p) $x = $Row.PSObject.Properties[$p]; if ($x -and $x.Value) { "$($x.Value)" } else { '' } }
-                switch -Wildcard ($Base) {
-                    'PIM-Definitions-AU'              { return (& $g 'AdministrativeUnitTag') }
-                    'PIM-Definitions-*'               { return (& $g 'GroupTag') }
-                    'Account-Definitions-Admins'      { return (& $g 'UserName') }
-                    'PIM-Assignments-Admins'          { return ((& $g 'Username') + '|' + (& $g 'GroupTag')) }
-                    'PIM-Assignments-Groups'          { return ((& $g 'TargetGroupTag') + '|' + (& $g 'SourceGroupTag')) }
-                    'PIM-Assignments-Roles-Groups'    { return ((& $g 'GroupTag') + '|' + (& $g 'RoleDefinitionName')) }
-                    'PIM-Assignments-Roles-AUs'       { return ((& $g 'GroupTag') + '|' + (& $g 'AdministrativeUnitTag') + '|' + (& $g 'RoleDefinitionName')) }
-                    'PIM-Assignments-Azure-Resources' { return ((& $g 'GroupTag') + '|' + (& $g 'AzScope') + '|' + (& $g 'AzScopePermission')) }
-                    # REQ-U (2026-09-19): the WORKLOAD BINDING entities, so a pack can carry a group AND its workload
-                    # role as one unit. Keyed by what makes one binding distinct (Get-PimStoreRowKey keys these on
-                    # GroupTag alone, which would hide a second role for the same group).
-                    'PIM-Assignments-Intune'          { return ((& $g 'GroupTag') + '|' + (& $g 'RoleDefinitionName')) }
-                    'PIM-Assignments-Defender'        { return ((& $g 'GroupTag') + '|' + (& $g 'RoleDefinitionName')) }
-                    'PIM-Assignments-Workloads'       { return ((& $g 'Workload') + '|' + (& $g 'GroupTag') + '|' + (& $g 'RoleName')) }
-                    default { return '' }
-                }
-            }
-            function Get-PimTemplateImportUnits {
-                # REQ-U wave 2 (design point 1) -- A GROUP AND ITS WORKLOAD ROLE ARE ONE UNIT. Operator: "otherwise we will
-                # end with orphaned permission groups that are not connected with the actual workload". PURE over the
-                # offered rows: every offered definition (PIM-Definitions-*, not AU) paired with the offered binding rows
-                # (PIM-Assignments-Workloads / -Intune / -Defender) of the SAME GroupTag:
-                #   @( @{ tag; groupName; definition = @{ base; i }; bindings = @( @{ base; i } ) } )
-                # i = the row's index in missing[base]. The GUI ticks / unticks a unit together and refuses to import
-                # half of one. A definition whose binding is already in the store (or a binding whose group is) is no unit.
-                param([System.Collections.IDictionary]$Missing)
-                $out = New-Object System.Collections.ArrayList
-                if (-not $Missing) { return @() }
-                $bindBases = @('PIM-Assignments-Workloads', 'PIM-Assignments-Intune', 'PIM-Assignments-Defender')
-                foreach ($db in @($Missing.Keys)) {
-                    if ("$db" -notlike 'PIM-Definitions-*' -or "$db" -eq 'PIM-Definitions-AU') { continue }
-                    $drows = @($Missing[$db])
-                    for ($i = 0; $i -lt $drows.Count; $i++) {
-                        $tag = "$($drows[$i].GroupTag)".Trim(); if (-not $tag) { continue }
-                        $binds = New-Object System.Collections.ArrayList
-                        foreach ($bb in $bindBases) {
-                            if (-not $Missing.Contains($bb)) { continue }
-                            $brows = @($Missing[$bb])
-                            for ($j = 0; $j -lt $brows.Count; $j++) {
-                                if ("$($brows[$j].GroupTag)".Trim() -ieq $tag -and "$($brows[$j].Action)".Trim() -ine 'Remove') { [void]$binds.Add([ordered]@{ base = $bb; i = $j }) }
-                            }
-                        }
-                        if ($binds.Count) { [void]$out.Add([ordered]@{ tag = $tag; groupName = "$($drows[$i].GroupName)"; definition = [ordered]@{ base = "$db"; i = $i }; bindings = @($binds.ToArray()) }) }
-                    }
-                }
-                return @($out.ToArray())
-            }
-            function ConvertTo-PimTemplatePackRow {
-                # REQ-U (2026-09-19) -- names from the TENANT, never the pack's generic 'PIM-'. Operator: "customer can
-                # have different naming convention so you must make sure code uses the actual naming per tenant and not
-                # generic". A pack is authored in the shipped convention (-PackPattern, default 'PIM-{Role}'); a
-                # definition row's GroupName is re-expressed under this tenant's PimGroupPattern
-                # (ConvertTo-PimTenantGroupName), and a row that carries only a GroupTag gets its name from the tag
-                # (Resolve-PimGroupNameFromTag). Returns a COPY; any other row is returned as it is.
-                param([string]$Base, [object]$Row, [string]$PackPattern = 'PIM-{Role}', [string]$TenantPattern, [hashtable]$PackGroupNameByTag = @{})
-                # REQ-U wave 2: a pack BINDING row may name its role '{GroupName}' -- "the custom role named exactly like
-                # this group" (Defender XDR). It is offered with the group's name under THIS tenant's pattern: the pack
-                # definition's GroupName for the tag re-expressed (ConvertTo-PimTenantGroupName), else the tag under the
-                # tenant pattern. The row key is taken from the converted row, so an imported binding reads as present.
-                if ($Base -in @('PIM-Assignments-Workloads', 'PIM-Assignments-Intune', 'PIM-Assignments-Defender')) {
-                    $rp = if ($Base -eq 'PIM-Assignments-Workloads') { 'RoleName' } else { 'RoleDefinitionName' }
-                    $rpv = $Row.PSObject.Properties[$rp]; $rv = if ($rpv) { "$($rpv.Value)" } else { '' }
-                    if ($rv.IndexOf('{GroupName}', [System.StringComparison]::OrdinalIgnoreCase) -lt 0) { return $Row }
-                    $bgt = "$($Row.GroupTag)".Trim(); $bgn = ''
-                    if ($bgt -and $PackGroupNameByTag -and $PackGroupNameByTag.ContainsKey($bgt.ToLowerInvariant())) {
-                        $bgn = "$($PackGroupNameByTag[$bgt.ToLowerInvariant()])"
-                        if (Get-Command ConvertTo-PimTenantGroupName -ErrorAction SilentlyContinue) { $bgn = ConvertTo-PimTenantGroupName -Name $bgn -FromPattern $PackPattern -ToPattern $TenantPattern }
-                    } elseif ($bgt -and (Get-Command Resolve-PimGroupNameFromTag -ErrorAction SilentlyContinue)) { $bgn = Resolve-PimGroupNameFromTag -Tag $bgt -Pattern $TenantPattern }
-                    if (-not "$bgn".Trim()) { return $Row }
-                    $bcopy = [ordered]@{}
-                    foreach ($p in $Row.PSObject.Properties) { $bcopy[$p.Name] = $p.Value }
-                    $bcopy[$rp] = [regex]::Replace($rv, '\{GroupName\}', { param($m) "$bgn" }, 'IgnoreCase')
-                    return [pscustomobject]$bcopy
-                }
-                if ($Base -notlike 'PIM-Definitions-*' -or $Base -eq 'PIM-Definitions-AU') { return $Row }
-                if (-not (Get-Command Resolve-PimGroupNameFromTag -ErrorAction SilentlyContinue)) { return $Row }
-                $copy = [ordered]@{}
-                foreach ($p in $Row.PSObject.Properties) { $copy[$p.Name] = $p.Value }
-                $gn = "$($copy['GroupName'])".Trim(); $gt = "$($copy['GroupTag'])".Trim()
-                if ($gn) { $copy['GroupName'] = ConvertTo-PimTenantGroupName -Name $gn -FromPattern $PackPattern -ToPattern $TenantPattern }
-                elseif ($gt) { $copy['GroupName'] = Resolve-PimGroupNameFromTag -Tag $gt -Pattern $TenantPattern }
-                return [pscustomobject]$copy
-            }
+            # REQ-X (2.4.381): the plan comes from engine\_shared\PIM-TemplatePacks.ps1 -- the SAME Get-PimTemplatePackPlan
+            # tools\setup\Import-PimPermissionTemplate.ps1 uses -- so the GUI ADOPTS a pack group the store already defines
+            # (same tag in another definition entity, or the same tenant GroupName under another tag) instead of offering a
+            # second definition of it. Measured on internal 2026-09-19: the route's own copy offered 9 duplicate Intune
+            # groups the script adopted. tests\Test-PimTemplateImport.ps1 B2 proves route == script for every shipped pack.
             # The tenant's group pattern as the Settings page stores it (pim.Settings['NamingConventions'] merged over
             # the shipped defaults) -- the Manager keeps it there, not flattened into $global:PIM_NamingConventions.
             $tenantGroupPattern = ''
@@ -11417,61 +11340,37 @@ function Handle-Request {
             # which of the pack's workload ASSIGNMENTS the engine would hold (Get-PimTemplateAssignmentGate over the same
             # view the chips show); the GUI shows it as an amber note.
             $__ps = Get-PimManagerWorkloadPrereqState
+            # The grid's entity list: a pack entity the grid does not know is skipped (Get-PimCsvSpec), as before.
+            $__known = @(Get-PimTemplatePackKnownBases | Where-Object { Get-PimCsvSpec -BaseName $_ })
+            # Each entity read at most once per request, shared by every pack (a pack only plans; nothing is written).
+            $__rowsCache = @{}
+            $__readBase = { param($b) if (-not $__rowsCache.ContainsKey($b)) { $__rowsCache[$b] = @((Read-PimRows -BaseName $b).rows) }; return $__rowsCache[$b] }
+            # EVERY group definition entity, for ADOPTION -- exactly what the import script hands the plan.
+            $__allDefs = New-Object System.Collections.Generic.List[object]
+            foreach ($db in @($__known | Where-Object { "$_" -like 'PIM-Definitions-*' -and "$_" -ne 'PIM-Definitions-AU' })) {
+                foreach ($r in @(& $__readBase $db)) { if ($null -ne $r) { $__allDefs.Add([pscustomobject]$r) } }
+            }
             $outList = New-Object System.Collections.ArrayList
             if (Test-Path -LiteralPath $tplDir) {
                 foreach ($f in (Get-ChildItem $tplDir -Filter '*.template.json' -File | Sort-Object Name)) {
                     try {
-                        $raw = [System.IO.File]::ReadAllText($f.FullName, [System.Text.UTF8Encoding]::new($false))
-                        if ($raw.Length -gt 0 -and [int][char]$raw[0] -eq 0xFEFF) { $raw = $raw.Substring(1) }
-                        $tpl = $raw | ConvertFrom-Json
-                        $missing = [ordered]@{}
-                        $missingCount = 0
-                        $totalCount = 0
-                        $placeholderSkipped = 0
-                        # REQ-U wave 2: the pack's own tag -> GroupName, for a binding row whose role is '{GroupName}'.
-                        $packTagToName = @{}
-                        foreach ($bp0 in $tpl.rows.PSObject.Properties) {
-                            if ($bp0.Name -notlike 'PIM-Definitions-*' -or $bp0.Name -eq 'PIM-Definitions-AU') { continue }
-                            foreach ($d0 in @($bp0.Value)) { $t0 = "$($d0.GroupTag)".Trim(); if ($t0 -and "$($d0.GroupName)".Trim()) { $packTagToName[$t0.ToLowerInvariant()] = "$($d0.GroupName)".Trim() } }
-                        }
-                        foreach ($baseProp in $tpl.rows.PSObject.Properties) {
-                            $base = $baseProp.Name
-                            if (-not (Get-PimCsvSpec -BaseName $base)) { continue }
-                            $current = Read-PimRows -BaseName $base
-                            $existing = @{}
-                            foreach ($r in $current.rows) {
-                                $k = Get-PimTemplateRowKey -Base $base -Row ([pscustomobject]$r)
-                                if ($k -and $k -ne '|' ) { $existing[$k.ToLowerInvariant()] = $true }
-                            }
-                            $miss = New-Object System.Collections.ArrayList
-                            foreach ($tr in @($baseProp.Value)) {
-                                $totalCount++
-                                # 🔴 §70.13 (operator 2026-09-13: "it makes no sense to have a sub with all 00000000", "why are
-                                # they there"): azure-rbac.template.json ships rows with the all-zero subscription for the
-                                # operator to fill in; offering them as "missing" imported them unchanged, and 4 such rows
-                                # blocked every commit on internal. A placeholder row is never offered for import.
-                                if ((@($tr.PSObject.Properties | ForEach-Object { "$($_.Value)" }) -join '|') -match '(?i)/subscriptions/0{8}-0{4}-0{4}-0{4}-0{12}') { $placeholderSkipped++; continue }
-                                $packPat = if ("$($tpl.groupNamePattern)".Trim()) { "$($tpl.groupNamePattern)" } else { 'PIM-{Role}' }
-                                # REQ-U wave 2: keyed on the row as it would be IMPORTED (a '{GroupName}' role resolved), so
-                                # a binding already in the store is not offered again.
-                                $conv = ConvertTo-PimTemplatePackRow -Base $base -Row $tr -PackPattern $packPat -TenantPattern $tenantGroupPattern -PackGroupNameByTag $packTagToName
-                                $k = Get-PimTemplateRowKey -Base $base -Row $conv
-                                if ($k -and -not $existing.ContainsKey($k.ToLowerInvariant())) {
-                                    [void]$miss.Add($conv)
-                                }
-                            }
-                            if ($miss.Count -gt 0) { $missing[$base] = $miss.ToArray(); $missingCount += $miss.Count }
-                        }
+                        $tpl = Read-PimTemplatePack -Path $f.FullName
+                        $current = @{}
+                        foreach ($b in @(Get-PimTemplatePackBases -Pack $tpl -KnownBases $__known)) { $current[$b] = @(& $__readBase $b | ForEach-Object { [pscustomobject]$_ }) }
+                        $plan = Get-PimTemplatePackPlan -Pack $tpl -CurrentRowsByBase $current -TenantGroupPattern $tenantGroupPattern -KnownBases $__known -ExistingDefinitionRows @($__allDefs.ToArray())
                         [void]$outList.Add([ordered]@{
-                            id = "$($tpl.id)"; name = "$($tpl.name)"; version = $tpl.version
-                            description = "$($tpl.description)"
-                            totalRows = $totalCount; missingCount = $missingCount; missing = $missing
+                            id = "$($plan.id)"; name = "$($plan.name)"; version = $plan.version
+                            description = "$($plan.description)"
+                            totalRows = $plan.totalRows; missingCount = $plan.missingCount; missing = $plan.missing
                             # REQ-U wave 2 (design point 1): a group definition and its workload binding row(s) = ONE unit.
-                            units = @(Get-PimTemplateImportUnits -Missing $missing)
-                            placeholderRowsSkipped = $placeholderSkipped
-                            disabled = [bool]($tplDisabled.ContainsKey("$($tpl.id)") -and $tplDisabled["$($tpl.id)"])
+                            units = @($plan.units)
+                            # §70.13: rows carrying the all-zero placeholder subscription are never offered.
+                            placeholderRowsSkipped = $plan.placeholderSkipped
+                            # Pack groups the store already defines; their rows were re-tagged to the store's tag.
+                            adopted = @($plan.adopted)
+                            disabled = [bool]($tplDisabled.ContainsKey("$($plan.id)") -and $tplDisabled["$($plan.id)"])
                             # REQ-W: which workload ASSIGNMENTS of this pack would be held -- never a refusal to stage.
-                            assignmentGate = (Get-PimTemplateAssignmentGate -TemplateId "$($tpl.id)" -View @($__ps.view) -StoreError "$($__ps.storeErr)")
+                            assignmentGate = (Get-PimTemplateAssignmentGate -TemplateId "$($plan.id)" -View @($__ps.view) -StoreError "$($__ps.storeErr)")
                         })
                     } catch {
                         [void]$outList.Add([ordered]@{ id = $f.Name; error = "$($_.Exception.Message)" })

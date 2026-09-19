@@ -20893,6 +20893,12 @@
           wrap.appendChild(card); continue;
         }
         const upToDate = t.missingCount === 0;
+        // REQ-X (2.4.381): pack groups the store already defines under ANOTHER tag (or found by tenant name) are ADOPTED --
+        // not defined a second time; their rows bind to the existing group. Same filter the import script prints.
+        const adoptedNames = ((t && t.adopted) || []).filter(a => a && (a.by === 'name' || a.packTag !== a.storeTag)).map(a => a.groupName);
+        const adoptedHtml = adoptedNames.length
+          ? '<div class="tpl-adopted" style="font-size:11.5px; color:#57606a; margin-top:2px;" title="' + escapeHtml(adoptedNames.join(', ')) + '">Adopts ' + adoptedNames.length + ' existing group(s) &mdash; not defined again</div>'
+          : '';
         // 🔴 REQ-W (2.4.380): the v2.4.379 "Import blocked" refusal is GONE -- a pack is ALWAYS stageable (operator:
         // "but it should be possible to deploy groups"). Where a workload's prerequisites are not green the card says, in
         // amber, that the groups are created and only that workload's role assignment is held (t.assignmentGate.held, the
@@ -20901,6 +20907,7 @@
           '<div style="flex:1; min-width:0;">' +
             '<div style="font-size:13px; font-weight:600;">' + escapeHtml(t.name) + ' <span style="font-size:10.5px; color:#57606a; font-weight:400;">v' + escapeHtml(String(t.version)) + ' &middot; ' + t.totalRows + ' row(s)</span></div>' +
             '<div style="font-size:11.5px; color:#57606a; margin-top:2px;">' + escapeHtml(t.description || '') + '</div>' +
+            adoptedHtml +
           '</div>' +
           (upToDate
             ? '<div style="color:#1a7f37; font-size:12px; white-space:nowrap;">&#x2713; Up to date</div>'
