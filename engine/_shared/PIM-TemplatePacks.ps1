@@ -11,9 +11,10 @@
   caller reads the store itself and hands the rows in.
     * tools\setup\Import-PimPermissionTemplate.ps1 -- plans with Get-PimTemplatePackPlan, then commits through the same
       snapshot -> transactional apply -> restore-on-failure -> prune path the Manager's Review & Save uses.
-    * tools\pim-manager\Open-PimManager.ps1 GET /api/templates -- today still carries its own copy of these functions
-      (route-local); tests\Test-PimTemplateImport.ps1 proves the two plan identically for every shipped pack, so the
-      route can switch to this file without a behaviour change.
+    * tools\pim-manager\Open-PimManager.ps1 GET /api/templates -- dot-sources this file and plans every pack with
+      Get-PimTemplatePackPlan, passing every group definition entity so the GUI ADOPTS exactly as the script does
+      (2.4.381; the route's own copy of these functions is gone). tests\Test-PimTemplateImport.ps1 B2 proves route ==
+      script for every shipped pack, B4 the adoption through the route.
 
   Moved here from the route, unchanged in behaviour:
     Get-PimTemplateRowKey          the key a pack row is matched on, per entity (binding entities keyed on role too)

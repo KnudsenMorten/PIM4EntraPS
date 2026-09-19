@@ -333,22 +333,55 @@ function Get-PimDefenderRoleWriteErrorText {
 
 function New-PimDefenderAssignmentBody {
     <#
-      PURE. The POST body of /beta/roleManagement/defender/roleAssignments (a #microsoft.graph.unifiedRoleAssignmentMultiple).
-      🔴 LIVE 2026-09-19 (RIDE): without directoryScopeIds Graph answers 400 "The input was not valid. roleAssignment: The
-      roleAssignment field is required." Every assignment the Defender portal makes carries directoryScopeIds ['/'] and
-      its data sources (Mde, Mdo, Mdi, Mdc, ...) in appScopeIds (read on internal, 16 of 16). Blank data sources = '/'.
+      PURE. The POST body of /beta/roleManagement/defender/roleAssignments (a unifiedRoleAssignmentMultiple).
+      🔴 NO '@odata.type'. PROVEN LIVE 2026-09-19 ~20:40Z on internal (operator-approved probe, one group): the SAME body
+      WITH "@odata.type": "#microsoft.graph.unifiedRoleAssignmentMultiple" -> 400 "The input was not valid.
+      roleAssignment: The roleAssignment field is required." (every Defender create on RIDE / EFIF / internal, 2.4.379 and
+      2.4.380); WITHOUT it -> the assignment is created (then the insecure redirect, see
+      Invoke-PimDefenderAssignmentCreate). The Graph beta example carries the annotation; the service refuses it.
+      The shipped connector body (workloads\connectors\defender-xdr.connector.json 'assign') never had one.
+      directoryScopeIds ['/'] as every portal-made assignment carries (read on internal, 16 of 16); the data sources
+      (Mde, Mdo, Mdi, Mdc, ...) in appScopeIds. Blank data sources = '/'.
     #>
     param([Parameter(Mandatory)][string]$DisplayName, [Parameter(Mandatory)][string]$RoleDefinitionId, [Parameter(Mandatory)][string]$PrincipalId, [string[]]$AppScopeIds = @())
     $apps = @($AppScopeIds | Where-Object { "$_".Trim() } | ForEach-Object { "$_".Trim() })
     if (-not $apps.Count) { $apps = @('/') }
     return @{
-        '@odata.type'     = '#microsoft.graph.unifiedRoleAssignmentMultiple'
         displayName       = $DisplayName
         roleDefinitionId  = "$RoleDefinitionId"
         principalIds      = @("$PrincipalId")
         directoryScopeIds = @('/')
         appScopeIds       = @($apps)
     }
+}
+
+function Invoke-PimDefenderAssignmentCreate {
+    <#
+      WRITES. POST one Defender XDR role assignment (the body from New-PimDefenderAssignmentBody) and return it.
+      🔴 LIVE 2026-09-19 (internal): like the role POST, Graph answers a SUCCESSFUL assignment POST with a redirect to an
+      http:// location, which pwsh 7 refuses to follow ("Cannot follow an insecure redirection") -- the assignment IS
+      created (read back: the group held it, dir '/', app '/'). So the insecure hop is never followed: the assignment is
+      READ BACK by group + role, and only a read-back that finds nothing is a failure.
+    #>
+    param([Parameter(Mandatory)][hashtable]$Body)
+    $redirected = $false; $res = $null
+    try { $res = Invoke-PimGraph -Beta -Method POST -Path '/roleManagement/defender/roleAssignments' -Body $Body }
+    catch {
+        $m = "$($_.Exception.Message)$(if ($_.ErrorDetails) { ' ' + $_.ErrorDetails.Message })"
+        if ($m -match '(?i)insecure redirection') { $redirected = $true } else { throw }
+    }
+    if (-not $redirected) { return $res }
+    $gid = "$(@($Body.principalIds)[0])"; $rid = "$($Body.roleDefinitionId)"
+    for ($i = 0; $i -lt 4; $i++) {
+        if ($i) { Start-Sleep -Seconds 3 }
+        $hit = $null
+        try {
+            $hit = @(Invoke-PimGraph -Beta -All -Path '/roleManagement/defender/roleAssignments') |
+                Where-Object { "$($_.roleDefinitionId)" -ieq $rid -and (@($_.principalIds) | Where-Object { "$_" -ieq $gid }) } | Select-Object -First 1
+        } catch { $hit = $null }
+        if ($hit) { return $hit }
+    }
+    throw "DefenderXdrRoles: the assignment of role $rid to group $gid was answered with a redirect Graph does not allow to follow, and it could not be read back -- the next run retries"
 }
 
 function Find-PimDefenderRoleIdByName {

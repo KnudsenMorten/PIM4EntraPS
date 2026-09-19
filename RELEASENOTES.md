@@ -14,6 +14,12 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 
 <!-- next release entry goes here -->
 
+## v2.4.381 — Defender XDR role assignments fixed (for real), and the Templates cards adopt existing groups
+
+**Defender XDR role assignments are created.** The v2.4.380 fix did not solve the problem: every new Defender XDR role assignment was still refused by Microsoft ("The roleAssignment field is required"). The cause was a type annotation in the request that the service rejects, even though Microsoft's own example includes it. It has been removed. Microsoft answers a successful assignment with a redirect that cannot be followed securely, so the assignment is now read back by group and role, and it counts as failed only when it cannot be found. After upgrading, the next engine run assigns every Defender XDR group that is waiting for its role.
+
+**The Templates cards adopt existing groups.** Importing a permission template from the portal now plans exactly as the import script does. A pack group that the environment already defines, under the same name or an older tag, or in another group type, is adopted instead of being offered a second time, and the card says how many groups it adopts. Before, the portal could offer duplicates of groups the environment already had.
+
 ## v2.4.380 — groups always deployable, workload assignments held per workload, templates imported by script, Defender assignments fixed, and the Pro edition enforced
 
 **Groups are always created; only the workload role assignment waits.**
