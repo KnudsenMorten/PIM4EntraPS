@@ -77,6 +77,155 @@ function ConvertTo-PimPolicyTemplateMap {
     return $out
 }
 
+# ---- TEMPLATE ID, NAME, ALIAS, PER-KIND DEFAULT (operator 2026-09-19) ------------------------------------------
+# "why dont we have 2 policy template for azure" / "and why not 2 for PIM4Groups" / "give policies an id so we can
+# rename them" / "set default in settings".
+#   * ID    -- the template's key in pim.Settings['PolicyTemplates'] (and its 'id' property). IMMUTABLE: a row's
+#              PolicyTemplate, a template's 'extends' and the per-kind defaults point at it. Shipped ids:
+#              Groups_Standard, Groups_RequireApproval, EntraIDRoles_Standard, EntraIDRoles_RequireApproval,
+#              AzureRoles_Standard, AzureRoles_RequireApproval.
+#   * NAME  -- the display label ('name'). Editable (Set-PimPolicyTemplateName, from the Policy templates page); a
+#              rename changes nothing a row points at, and is not desired state (the BUG-55 hash ignores it).
+#   * ALIAS -- a former id, still accepted (Get-PimPolicyTemplateAliases, PIM-PolicyBaseline.ps1):
+#              'default' -> Groups_Standard, 'approval-required' -> Groups_RequireApproval.
+# RESOLUTION ORDER (Resolve-PimPolicyTemplateKey; the engine, the validator, the catalog and the GUI resolve alike):
+#   1. the id (the stored key, case-insensitive); 2. the current name of exactly ONE stored template; 3. the alias
+#   twin -- former -> current, and current -> former for a store that was not renamed yet (an engine newer than its
+#   store), so a blank group PolicyTemplate keeps working in that window too.
+# Update-PimPolicyTemplateStore renames a stored former key to its current id ONCE (content and customisations kept,
+# audited 'policy.template.renamed') and gives every stored template that lacks one an 'id' equal to its key.
+# PER-KIND DEFAULTS: pim.Settings['PolicyTemplateDefaults'] = { group; directoryRole; azureRole } -- the template a
+# BLANK PolicyTemplate means for that kind of policy (Resolve-PimPolicyTemplateTypeDefaults). Unset = the built-in
+# defaults below, which ARE today's behaviour, so an environment that never sets it changes nothing.
+if (-not (Get-Command Get-PimPolicyTemplateAliases -ErrorAction SilentlyContinue)) {
+    $__ptBaselineLib = Join-Path $PSScriptRoot 'PIM-PolicyBaseline.ps1'
+    if (Test-Path -LiteralPath $__ptBaselineLib) { . $__ptBaselineLib }
+}
+
+function Resolve-PimPolicyTemplateKey {
+    <# PURE: the key under which -Map holds the template -Id names, in the order above: the id, then the current name
+       of exactly one template, then the alias twin. '' when none. Case-insensitive, like the engine's own lookup. #>
+    param([AllowNull()][System.Collections.IDictionary]$Map, [AllowNull()][string]$Id)
+    $t = "$Id".Trim()
+    if (-not $t -or $null -eq $Map) { return '' }
+    $keys = @(@($Map.Keys) | ForEach-Object { "$_" })
+    foreach ($k in $keys) { if ($k -ieq $t) { return $k } }
+    $byName = @($keys | Where-Object { "$(Get-PimTemplateProp $Map[$_] 'name')".Trim() -ieq $t })
+    if ($byName.Count -eq 1) { return $byName[0] }
+    if (Get-Command Get-PimPolicyTemplateAliasNames -ErrorAction SilentlyContinue) {
+        foreach ($n in @(Get-PimPolicyTemplateAliasNames $t)) { foreach ($k in $keys) { if ($k -ieq $n) { return $k } } }
+    }
+    return ''
+}
+
+function Get-PimPolicyTemplateDefaultsSettingName { return 'PolicyTemplateDefaults' }
+
+function Get-PimPolicyTemplateCodeDefaults {
+    <# PURE: the per-kind default when pim.Settings['PolicyTemplateDefaults'] sets none -- today's effective
+       behaviour (AzureRoles_Standard carries exactly the rules Azure policies had from EntraIDRoles_Standard). #>
+    return [ordered]@{ group = 'Groups_Standard'; directoryRole = 'EntraIDRoles_Standard'; azureRole = 'AzureRoles_Standard' }
+}
+
+function Resolve-PimPolicyTemplateTypeDefaults {
+    <#
+      PURE. What a BLANK PolicyTemplate means, per kind of policy.
+        -Setting  the stored pim.Settings['PolicyTemplateDefaults'] ({ group; directoryRole; azureRole }), or $null
+        -Map      the stored templates (id -> template). Optional: without it the ids are returned as named.
+      Per kind: the setting's value when set and (with a map) it resolves to a stored template; otherwise the built-in
+      default. With a map the answer is the STORED key it resolves to ('default' in a store not yet renamed). azureRole
+      falls back to EntraIDRoles_Standard when the store has no AzureRoles_Standard yet (an engine newer than its
+      store) -- the template Azure policies used until 2026-09-19, with identical rules.
+      Returns @{ defaults = [ordered]@{ group; directoryRole; azureRole }; source = @{ <kind> = setting|code|fallback };
+                 warnings = @() } -- a setting that names a template the store lacks is a WARNING, never silent.
+    #>
+    param([AllowNull()][object]$Setting, [AllowNull()][System.Collections.IDictionary]$Map)
+    $code = Get-PimPolicyTemplateCodeDefaults
+    $set = $Setting
+    if ($set -is [string]) { if ("$set".Trim()) { try { $set = $set | ConvertFrom-Json } catch { $set = $null } } else { $set = $null } }
+    $out = [ordered]@{}; $src = [ordered]@{}
+    $warn = New-Object System.Collections.Generic.List[string]
+    foreach ($kind in @($code.Keys)) {
+        $want = "$(Get-PimTemplateProp $set $kind)".Trim()
+        $pick = ''; $how = ''
+        if ($want) {
+            if ($null -eq $Map) { $pick = $want; $how = 'setting' }
+            else {
+                $k = Resolve-PimPolicyTemplateKey -Map $Map -Id $want
+                if ($k) { $pick = $k; $how = 'setting' }
+                else { [void]$warn.Add("pim.Settings 'PolicyTemplateDefaults' names '$want' as the $kind default, but the template store has no such template -- the built-in default '$($code[$kind])' is used instead") }
+            }
+        }
+        if (-not $pick) {
+            $cd = "$($code[$kind])"
+            $pick = $cd; $how = 'code'
+            if ($null -ne $Map) {
+                $k = Resolve-PimPolicyTemplateKey -Map $Map -Id $cd
+                if ($k) { $pick = $k }
+                elseif ($kind -eq 'azureRole') {
+                    $k2 = Resolve-PimPolicyTemplateKey -Map $Map -Id 'EntraIDRoles_Standard'
+                    if ($k2) { $pick = $k2; $how = 'fallback' }
+                }
+            }
+        }
+        $out[$kind] = $pick; $src[$kind] = $how
+    }
+    return @{ defaults = $out; source = $src; warnings = @($warn.ToArray()) }
+}
+
+function Set-PimPolicyTemplateName {
+    <#
+      RENAME a stored template: changes its display NAME only (operator 2026-09-19: "give policies an id so we can
+      rename them"). The id -- what every row, 'extends' and the per-kind defaults point at -- never changes, so no
+      reference moves and no rule changes: the BUG-55 fingerprint of the store is the same before and after (the hash
+      ignores 'name'). The template records '_renamed' { from; by; utc } so a later shipped upgrade keeps the name.
+      Refused (throws, nothing written): an unknown id, an empty / over-long / control-character name, or a name that
+      is already another template's id or name (a name is also accepted where an id is -- it must stay unambiguous).
+      Read back after the write. Returns @{ id; before; after; fingerprintBefore; fingerprintAfter }.
+    #>
+    [CmdletBinding()] param(
+        [Parameter(Mandatory)][string]$ConnectionString,
+        [Parameter(Mandatory)][string]$Id,
+        [Parameter(Mandatory)][AllowEmptyString()][string]$Name,
+        [string]$Actor = 'system:policy-template-store',
+        [datetime]$NowUtc = [datetime]::UtcNow
+    )
+    $new = "$Name".Trim()
+    if (-not $new) { throw 'Set-PimPolicyTemplateName: the name is empty.' }
+    if ($new.Length -gt 80) { throw "Set-PimPolicyTemplateName: the name is $($new.Length) characters; at most 80." }
+    if ($new -match '[\x00-\x1f\x7f]') { throw 'Set-PimPolicyTemplateName: the name contains a control character.' }
+    $existing = Get-PimSqlSetting -ConnectionString $ConnectionString -Name 'PolicyTemplates'
+    $v = $existing; if ($v -is [string]) { $v = $v | ConvertFrom-Json }
+    $map = ConvertTo-PimPolicyTemplateMap -Value $v
+    if (-not $map.Count) { throw 'Set-PimPolicyTemplateName: the template store is empty or unreadable -- nothing to rename.' }
+    $key = ''; foreach ($k in @($map.Keys)) { if ("$k" -ieq "$Id".Trim()) { $key = "$k" } }
+    if (-not $key) { throw "Set-PimPolicyTemplateName: no template with id '$Id' in the store (rename by id, never by name)." }
+    foreach ($k in @($map.Keys)) {
+        if ("$k" -ieq $key) { continue }
+        if ("$k" -ieq $new -or "$(Get-PimTemplateProp $map[$k] 'name')".Trim() -ieq $new) { throw "Set-PimPolicyTemplateName: '$new' is already the id or name of template '$k' -- a name must be unambiguous." }
+        if (@(Get-PimPolicyTemplateAliasNames "$k") -icontains $new) { throw "Set-PimPolicyTemplateName: '$new' is a former id of template '$k' and still resolves to it." }
+    }
+    $before = "$(Get-PimTemplateProp $map[$key] 'name')"
+    $fpBefore = (Get-PimPolicyTemplateStoreFingerprint -Value $v).hash
+    $tplObj = if ($v -is [System.Collections.IDictionary]) { $v['templates'] } else { $v.templates }
+    $t = if ($tplObj -is [System.Collections.IDictionary]) { $tplObj[$key] } else { $tplObj.PSObject.Properties[$key].Value }
+    if ($t -is [System.Collections.IDictionary]) { $t['name'] = $new; $t['_renamed'] = [ordered]@{ from = $before; by = $Actor; utc = $NowUtc.ToUniversalTime().ToString('o') } }
+    else {
+        $t | Add-Member -NotePropertyName name -NotePropertyValue $new -Force
+        $t | Add-Member -NotePropertyName _renamed -NotePropertyValue ([pscustomobject][ordered]@{ from = $before; by = $Actor; utc = $NowUtc.ToUniversalTime().ToString('o') }) -Force
+    }
+    if ($v -is [System.Collections.IDictionary]) { $v['updatedUtc'] = $NowUtc.ToUniversalTime().ToString('o') }
+    elseif ($v.PSObject.Properties['updatedUtc']) { $v.updatedUtc = $NowUtc.ToUniversalTime().ToString('o') }
+    Set-PimSqlSetting -ConnectionString $ConnectionString -Name 'PolicyTemplates' -Value $v
+    # Read back: a write that did not land must not report success.
+    $back = Get-PimSqlSetting -ConnectionString $ConnectionString -Name 'PolicyTemplates'
+    if ($back -is [string]) { $back = $back | ConvertFrom-Json }
+    $bm = ConvertTo-PimPolicyTemplateMap -Value $back
+    $bk = ''; foreach ($k in @($bm.Keys)) { if ("$k" -ieq $key) { $bk = "$k" } }
+    if (-not $bk -or "$(Get-PimTemplateProp $bm[$bk] 'name')" -cne $new -or $bm.Count -ne $map.Count) { throw "Set-PimPolicyTemplateName: read-back mismatch -- the store does not hold the new name for '$key'." }
+    $fpAfter = (Get-PimPolicyTemplateStoreFingerprint -Value $back).hash
+    return [ordered]@{ id = $key; before = $before; after = $new; fingerprintBefore = $fpBefore; fingerprintAfter = $fpAfter }
+}
+
 function Get-PimPolicyTemplateStoreMeta {
     <# PURE: the metadata half of a stored PolicyTemplates value as plain hashtables:
        @{ source; seededUtc; fingerprint; fileNames = @{id=file}; shipped = @{id=@{fingerprint;file;recordedUtc}}; hasShippedRecord } #>
@@ -134,7 +283,14 @@ function Get-PimPolicyTemplateChangeSummary {
         $lib = Join-Path $PSScriptRoot 'PIM-PolicyBaseline.ps1'
         if (Test-Path -LiteralPath $lib) { . $lib }
     }
-    $norm = { param($o) if ($null -eq $o) { $null } else { Remove-PimTemplateAnnotation -Node (($o | ConvertTo-Json -Depth 30 -Compress) | ConvertFrom-Json) } }
+    # id + name are identity / label, not content (as in Get-PimPolicyTemplateHash); 'extends' compares by current id.
+    $norm = { param($o) if ($null -eq $o) { $null } else {
+        $n = Remove-PimTemplateAnnotation -Node (($o | ConvertTo-Json -Depth 30 -Compress) | ConvertFrom-Json)
+        if ($n -is [System.Management.Automation.PSCustomObject]) {
+            foreach ($x in @('id', 'name')) { if ($n.PSObject.Properties[$x]) { $n.PSObject.Properties.Remove($x) } }
+            if ($n.PSObject.Properties['extends'] -and (Get-Command Get-PimPolicyTemplateCanonicalId -ErrorAction SilentlyContinue)) { $n.extends = Get-PimPolicyTemplateCanonicalId -Id "$($n.extends)" }
+        }
+        $n } }
     $a = & $norm $Stored; $b = & $norm $Shipped
     $out = New-Object System.Collections.Generic.List[string]
     $walk = $null
@@ -253,7 +409,7 @@ function Get-PimTemplateProp {
 function Resolve-PimPolicyTemplateMergeBase {
     <# PURE: for an operator-created template (no shipped twin), the shipped template its missing blocks come
        from. 'extends' -> none (it inherits them). Same appliesTo as a shipped root template -> that one.
-       Otherwise the shipped 'default'. Returns @{ baseId; reason } (baseId '' = nothing to merge). #>
+       Otherwise the shipped Groups_Standard (formerly 'default'). Returns @{ baseId; reason } (baseId '' = nothing to merge). #>
     param([Parameter(Mandatory)][object]$Template, [Parameter(Mandatory)][System.Collections.IDictionary]$Shipped)
     $ext = "$(Get-PimTemplateProp $Template 'extends')".Trim()
     if ($ext) { return @{ baseId = ''; reason = "extends '$ext' -- inherits its blocks" } }
@@ -264,7 +420,8 @@ function Resolve-PimPolicyTemplateMergeBase {
             if ("$(Get-PimTemplateProp $s 'appliesTo')".Trim() -ieq $ap -and -not "$(Get-PimTemplateProp $s 'extends')".Trim()) { return @{ baseId = "$id"; reason = "same appliesTo '$ap'" } }
         }
     }
-    if ($Shipped.Contains('default')) { return @{ baseId = 'default'; reason = 'shipped default' } }
+    $gs = Resolve-PimPolicyTemplateKey -Map $Shipped -Id 'Groups_Standard'
+    if ($gs) { return @{ baseId = $gs; reason = 'shipped group standard' } }
     return @{ baseId = ''; reason = 'no shipped base available' }
 }
 
@@ -345,6 +502,47 @@ function Update-PimPolicyTemplateStore {
     $upgraded = New-Object System.Collections.Generic.List[string]
     $currentIds = New-Object System.Collections.Generic.List[string]
     $customised = New-Object System.Collections.Generic.List[object]
+
+    # 2026-09-19 -- FORMER IDS (operator: "and why not 2 for PIM4Groups"). A store seeded before the PIM-for-Groups
+    # pair was renamed holds 'default' / 'approval-required'. Each is renamed to its current id ONCE, BEFORE the
+    # compare below, so the shipped Groups_* template is recognised as the SAME template -- never seeded next to it as
+    # a duplicate -- and a customised one keeps every rule the operator set (only its key and 'id' move; the BUG-55
+    # hash ignores both, so an unmodified one is simply "current"). Rows naming the former id keep resolving (alias).
+    $renamedIds = New-Object System.Collections.Generic.List[string]
+    $renamedFrom = @{}
+    $aliasTbl = Get-PimPolicyTemplateAliases
+    foreach ($old in @($aliasTbl.Keys)) {
+        $newId = "$($aliasTbl[$old])"
+        if (-not $shipped.Contains($newId)) { continue }
+        $oldKey = ''; $hasNew = $false
+        foreach ($k in @($newTpl.Keys)) { if ("$k" -ieq $old) { $oldKey = "$k" }; if ("$k" -ieq $newId) { $hasNew = $true } }
+        if (-not $oldKey) { continue }
+        if ($hasNew) { Write-Warning "  [policy] the store holds BOTH '$oldKey' and '$newId' -- '$oldKey' is left as its own template (a lookup of '$oldKey' finds it; '$newId' is the current id)."; continue }
+        $copy = Copy-PimTemplateNode $newTpl[$oldKey]
+        if ($copy -is [System.Management.Automation.PSCustomObject]) { $copy | Add-Member -NotePropertyName id -NotePropertyValue $newId -Force }
+        [void]$newTpl.Remove($oldKey); $newTpl[$newId] = $copy
+        if ($recorded.ContainsKey($oldKey)) { $recorded[$newId] = $recorded[$oldKey]; [void]$recorded.Remove($oldKey) }
+        if ($meta.shipped.ContainsKey($oldKey)) { $meta.shipped[$newId] = $meta.shipped[$oldKey]; [void]$meta.shipped.Remove($oldKey) }
+        if ($fileNames.ContainsKey($oldKey)) { [void]$fileNames.Remove($oldKey) }
+        [void]$renamedIds.Add("$oldKey -> $newId"); $renamedFrom[$newId] = $oldKey
+        Write-Host ("  [policy] template '{0}' renamed to its current id '{1}' (content kept; rows naming '{0}' keep resolving to it)" -f $oldKey, $newId)
+        if (Get-Command Write-PimSqlAuditEvent -ErrorAction SilentlyContinue) {
+            try { Write-PimSqlAuditEvent -ConnectionString $ConnectionString -Actor $Actor -ActorSource 'system' -Action 'policy.template.renamed' -Target "policytemplate:$newId" -Before ([ordered]@{ id = $oldKey }) -After ([ordered]@{ id = $newId; contentKept = $true; alias = $oldKey }) -Result 'ok' }
+            catch { Write-Warning "  [policy] template '$oldKey' renamed to '$newId', but the audit event could not be written: $($_.Exception.Message)" }
+        }
+    }
+    # An operator's rename (Set-PimPolicyTemplateName, recorded in '_renamed') survives a shipped upgrade: the new
+    # shipped content is taken, with the operator's NAME on it.
+    $keepName = {
+        param($Stored, $Incoming)
+        $rn = Get-PimTemplateProp $Stored '_renamed'
+        if ($null -eq $rn) { return $Incoming }
+        $c = Copy-PimTemplateNode $Incoming
+        $c | Add-Member -NotePropertyName name -NotePropertyValue "$(Get-PimTemplateProp $Stored 'name')" -Force
+        $c | Add-Member -NotePropertyName _renamed -NotePropertyValue (Copy-PimTemplateNode $rn) -Force
+        return $c
+    }
+
     foreach ($id in @($shipped.Keys | Sort-Object)) {
         $shipHash = Get-PimPolicyTemplateHash -Template $shipped[$id]
         $fileNames[$id] = $names[$id]
@@ -359,11 +557,14 @@ function Update-PimPolicyTemplateStore {
         if ($storedHash -eq $shipHash) {
             $keepUtc = if ($meta.shipped.ContainsKey($id) -and $rec -eq $shipHash -and "$($meta.shipped[$id].recordedUtc)") { "$($meta.shipped[$id].recordedUtc)" } else { $nowS }
             $newShipped[$id] = [ordered]@{ fingerprint = $shipHash; file = "$($names[$id])"; recordedUtc = $keepUtc }
+            # Renamed from a former id: same desired state, so its obsolete metadata (old name / description) is
+            # replaced by the shipped one -- an operator's own rename excepted.
+            if ($renamedFrom.ContainsKey($id)) { $newTpl[$id] = & $keepName $newTpl[$id] $shipped[$id] }
             [void]$currentIds.Add($id)
         } elseif ($rec -and $storedHash -eq $rec) {
             # UNMODIFIED since the shipped version it came from -> take the new shipped content.
             $changes = @(Get-PimPolicyTemplateChangeSummary -Stored $newTpl[$id] -Shipped $shipped[$id])
-            $newTpl[$id] = $shipped[$id]
+            $newTpl[$id] = & $keepName $newTpl[$id] $shipped[$id]
             $newShipped[$id] = [ordered]@{ fingerprint = $shipHash; file = "$($names[$id])"; recordedUtc = $nowS }
             [void]$upgraded.Add($id)
             Write-Host ("  [policy] template '{0}' upgraded to the shipped version ({1} -> {2}): {3}" -f $id, $storedHash.Substring(0,12), $shipHash.Substring(0,12), (($changes | Select-Object -First 8) -join ', '))
@@ -394,6 +595,20 @@ function Update-PimPolicyTemplateStore {
     }
     foreach ($c in $customised) {
         Write-Warning ("  [policy] TEMPLATE-UPGRADE-AVAILABLE: template '{0}' was customised in the store, so the new shipped version was NOT applied. It changes: {1}" -f $c.id, $(if (@($c.changes).Count) { (@($c.changes) | Select-Object -First 8) -join ', ' } else { '(annotations only)' }))
+    }
+
+    # 2026-09-19 ("give policies an id so we can rename them"): every stored template carries an 'id' equal to its
+    # key -- the immutable reference rows use. One that lacks it (an operator-created template) is given it; one
+    # that carries a DIFFERENT id is left as the operator wrote it (the key is what every reader resolves by).
+    $idsAssigned = New-Object System.Collections.Generic.List[string]
+    foreach ($id in @($newTpl.Keys)) {
+        $t = $newTpl[$id]
+        if ($t -isnot [System.Management.Automation.PSCustomObject]) { continue }
+        if ("$(Get-PimTemplateProp $t 'id')".Trim()) { continue }
+        $c = Copy-PimTemplateNode $t
+        $c | Add-Member -NotePropertyName id -NotePropertyValue "$id" -Force
+        $newTpl[$id] = $c
+        [void]$idsAssigned.Add("$id")
     }
 
     $fp = (Get-PimPolicyTemplateStoreFingerprint -Templates $newTpl -FileNames $fileNames).hash
@@ -428,6 +643,8 @@ function Update-PimPolicyTemplateStore {
     $parts = @()
     if ($fresh) { $parts += 'seeded from the shipped templates' }
     else {
+        if ($renamedIds.Count) { $parts += ("renamed to the current id (content kept, the former id still resolves): {0}" -f ($renamedIds -join ', ')) }
+        if ($idsAssigned.Count) { $parts += ("id assigned (= its key): {0}" -f ($idsAssigned -join ', ')) }
         if ($added.Count)      { $parts += ("new shipped template(s) seeded: {0}" -f ($added -join ', ')) }
         if ($upgraded.Count)   { $parts += ("upgraded to the shipped version: {0}" -f ($upgraded -join ', ')) }
         if ($merged.Count)     { $parts += ("missing shipped blocks/rules ADDED (nothing overwritten): {0}" -f (@($merged | ForEach-Object { "$($_.id) +$(@($_.added).Count)" }) -join ', ')) }
@@ -440,6 +657,7 @@ function Update-PimPolicyTemplateStore {
     $result.added = @($(if ($fresh) { @() } else { $added.ToArray() })); $result.upgraded = @($upgraded.ToArray()); $result.customised = @($customised.ToArray())
     $result.current = @($currentIds.ToArray()); $result.storeOnly = @($storeOnly); $result.reason = ($parts -join '; ')
     $result.merged = @($merged.ToArray()); $result.mergeRan = [bool]$doMerge; $result.shippedFingerprint = $shipFp
+    $result.renamed = @($renamedIds.ToArray()); $result.idsAssigned = @($idsAssigned.ToArray())
     return $result
 }
 

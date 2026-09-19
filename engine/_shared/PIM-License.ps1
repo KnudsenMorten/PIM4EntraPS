@@ -4,16 +4,16 @@
     PIM4EntraPS offline license verification (Core + Pro split).
 
 .DESCRIPTION
-    PIM4EntraPS Core is free. Pro features (MSP fan-out, workload connectors,
-    external intake, access reviews, self-service, contacts routing) require a
-    customer license file: config/<name>.pimlicense.
+    PIM4EntraPS Community is free for a single tenant. Pro (the licensed single-tenant features, and the
+    multi-tenant half: MSP master / managed tenants) requires a customer licence: the issued signed document,
+    stored in SQL pim.Settings[License] (IMP-42 -- no file). REQ-Y: an MSP master / slave is refused without one.
 
     The license is FULLY OFFLINE -- no online activation, no call-home, no
     public endpoint. It is a JSON payload signed with the maintainer's private
     RSA key (machine cert store on the management host, never distributed);
     this file embeds only the PUBLIC certificate and verifies the signature
     locally (RSA-SHA256). Customers on locked-down automation servers need
-    nothing but the file.
+    nothing but the stored document.
 
     File format (issued by the internal-only New-PimLicense.ps1 -- NOT shipped):
       { "product": "PIM4EntraPS", "payloadB64": "<b64 of payload JSON>", "signature": "<b64 RSA sig>" }
@@ -59,12 +59,16 @@ $script:PimProEditionName       = 'Pro'
 
 # Catalog of gateable Pro features. SQL data store is deliberately NOT here --
 # operator decision 2026-06-12: SQL is part of the free (Community) edition.
-$script:PimProFeatureCatalog = @(
-    'MspFanout', 'WorkloadConnectors', 'Intake', 'AccessReviews', 'SelfService', 'ContactsRouting',
-    # advanced capabilities added in the admin-interface epic (v2.4.187+):
-    'Conformance', 'Rings', 'ApproverMatrix', 'PawPolicy', 'Lifecycle', 'AzureDiscovery',
-    'DefinitionImport', 'PortalAdmins', 'PermissionWizard'
-)
+# 🔒 REQ-Y (operator 2026-09-19: "single tenant must be sep in free and pro"): the feature catalog
+# (engine/_shared/PIM-FeatureCatalog.ps1, license x scope per entry) is the ONE authoritative list. This list is the
+# gate's copy (this file is also loaded standalone, without the catalog) and must EQUAL Get-PimCatalogProFeatureNames:
+# tests/Test-PimMspLicense.ps1 fails on any drift. The single-tenant Pro set was decided 2026-09-19 ("i agree to your
+# proposals"): coverage + discovery, the connectors other than Intune / Defender XDR, revoke, access review campaigns,
+# the second approver, delegated administration ceilings, the tier-impact report and the evidence export. Dropped then
+# (free, and never gated by production code): Intake, SelfService, ContactsRouting, Conformance, Rings, ApproverMatrix,
+# PawPolicy, Lifecycle, AzureDiscovery (now 'Discovery'), DefinitionImport, PermissionWizard.
+$script:PimProFeatureCatalog = @('AccessReviews', 'Coverage', 'Discovery', 'EvidenceExport', 'MakerChecker', 'MspFanout',
+    'PortalAdmins', 'Revoke', 'TierReport', 'WorkloadConnectors')
 
 $script:PimLicenseCache = $null
 $script:PimLicenseWarned = @{}
@@ -96,14 +100,6 @@ Function Test-PimProLicenseEnforced {
     $false
 }
 
-Function Get-PimLicenseSearchDir {
-    if (Get-Command Get-PimConfigDir -ErrorAction SilentlyContinue) {
-        try { $d = Get-PimConfigDir; if ($d) { return $d } } catch { }
-    }
-    # _shared -> engine -> solution root -> config
-    Join-Path (Split-Path -Parent (Split-Path -Parent $PSScriptRoot)) 'config'
-}
-
 Function Test-PimLicenseSignature {
     <#
     .SYNOPSIS
@@ -132,10 +128,42 @@ Function Test-PimLicenseSignature {
     }
 }
 
+Function Get-PimLicenseFromStore {
+    # IMP-42: the stored licence document. Returns @{ ok; text; error }. ok=$false = a store that exists but
+    # could not be read (never read as "no licence"). No store wired = ok with no text (Core, as before).
+    $v = $null
+    try {
+        if (Get-Command Get-PimSetting -ErrorAction SilentlyContinue) { $v = Get-PimSetting -Name 'License' }
+        elseif ((Get-Command Get-PimSqlSetting -ErrorAction SilentlyContinue) -and "$($global:PIM_SqlConnectionString)".Trim()) { $v = Get-PimSqlSetting -ConnectionString "$($global:PIM_SqlConnectionString)" -Name 'License' }
+        # REQ-Y: the engine / jobs hold their store as $global:PIM_EngineSqlCs (the same store the feature gates read).
+        elseif ((Get-Command Get-PimSqlSetting -ErrorAction SilentlyContinue) -and "$($global:PIM_EngineSqlCs)".Trim()) { $v = Get-PimSqlSetting -ConnectionString "$($global:PIM_EngineSqlCs)" -Name 'License' }
+        else { return [pscustomobject]@{ ok = $true; text = ''; error = '' } }
+    } catch { return [pscustomobject]@{ ok = $false; text = ''; error = "$($_.Exception.Message)" } }
+    if ($null -eq $v) { return [pscustomobject]@{ ok = $true; text = ''; error = '' } }
+    $t = if ($v -is [string]) { $v } else { ConvertTo-Json -InputObject $v -Depth 6 -Compress }
+    return [pscustomobject]@{ ok = $true; text = $t; error = '' }
+}
+
+Function Set-PimLicense {
+    <#
+      IMP-42: store an issued licence in pim.Settings['License'] -- ONLY after it verifies (a tampered or
+      foreign document is refused, never stored). -LicenseText is the issued file's content. Returns the
+      verified licence object. THROWS on a failed verify or a failed write.
+    #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string]$LicenseText, [string]$PublicCertB64)
+    $chk = if ($PublicCertB64) { Get-PimLicense -LicenseText $LicenseText -PublicCertB64 $PublicCertB64 } else { Get-PimLicense -LicenseText $LicenseText }
+    if ($chk.Status -in @('Invalid','Missing')) { throw "licence NOT stored: $($chk.Reason)" }
+    if (-not (Get-Command Set-PimSetting -ErrorAction SilentlyContinue)) { throw 'licence NOT stored: no SQL settings store (Set-PimSetting) is wired -- PIM v2 keeps the licence in SQL only' }
+    Set-PimSetting -Name 'License' -Value $LicenseText
+    $script:PimLicenseCache = $null
+    return $chk
+}
+
 Function Get-PimLicense {
     <#
     .SYNOPSIS
-        Load + verify the customer's .pimlicense (offline). Cached per session.
+        Load + verify the customer's licence from pim.Settings[License] (offline). Cached per session.
     .PARAMETER PublicCertB64
         Internal/testing override of the trusted public certificate. When
         omitted, the embedded production licensing cert is used. Tests pass an
@@ -148,13 +176,21 @@ Function Get-PimLicense {
     param(
         [switch]$Refresh,
         [string]$PublicCertB64,
-        [string]$Path
+        [string]$Path,
+        # IMP-42: the licence DOCUMENT itself (JSON with payloadB64 + signature) -- what pim.Settings['License'] holds.
+        [string]$LicenseText
     )
 
     # An override (test) load is never cached -- it must not poison the real
     # session cache, and must always re-evaluate against the supplied inputs.
-    $useOverride = $PublicCertB64 -or $Path
-    if ($script:PimLicenseCache -and -not $Refresh -and -not $useOverride) { return $script:PimLicenseCache }
+    $useOverride = $PublicCertB64 -or $Path -or $LicenseText
+    # REQ-Y: the hard Pro gates read this cache on hot paths, so it lives 5 minutes -- a licence registered while a
+    # long-running process (the Manager, the tick) is up takes effect without a restart. A cache set with no stamp (a
+    # test seeding it directly) is honoured as fresh.
+    if ($script:PimLicenseCache -and -not $Refresh -and -not $useOverride) {
+        if (-not $script:PimLicenseCacheUtc -or (([datetime]::UtcNow - $script:PimLicenseCacheUtc).TotalMinutes -lt 5)) { return $script:PimLicenseCache }
+    }
+    if (-not $useOverride) { $script:PimLicenseCacheUtc = [datetime]::UtcNow }
 
     # LIC-1 -- accept EITHER signer. AutomateIT first (the going-forward framework key), then the
     # legacy PIM key so anything already issued keeps verifying. An explicit -PublicCertB64 still
@@ -164,7 +200,7 @@ Function Get-PimLicense {
 
     $result = [pscustomobject]@{
         Status     = 'Missing'      # Missing | Invalid | NotYetValid | Expired | Grace | Valid
-        Reason     = 'no .pimlicense / .aitlicense file found'
+        Reason     = 'no licence is stored (pim.Settings[''License'']) -- import the issued licence with tools/setup/Set-PimLicense.ps1'
         Customer   = ''
         Sku        = 'Core'
         Features   = @()
@@ -176,41 +212,25 @@ Function Get-PimLicense {
         Path       = $null
     }
 
-    $licPath = $null
-    if ($Path) {
-        if (Test-Path -LiteralPath $Path) { $licPath = $Path }
+    # 🔴 IMP-42 (§33.28) -- THE LICENCE LIVES IN SQL, NOT IN A FILE. It used to be found by scanning config/ for
+    # *.pimlicense / *.aitlicense -- a directory the container image EXCLUDES, so every hosted environment read
+    # "Missing" whatever had been issued. The signed document (payloadB64 + signature, byte-identical to the issued
+    # file) is now pim.Settings['License'] (Set-PimLicense stores it after verifying it). -Path / -LicenseText stay
+    # as EXPLICIT inputs (verify a file before importing it; the tests) -- they are never scanned for.
+    $docText = $null
+    if ($LicenseText) { $docText = "$LicenseText"; $result.Path = '(supplied text)' }
+    elseif ($Path) {
+        if (-not (Test-Path -LiteralPath $Path)) { $result.Reason = "no licence file at '$Path'"; return $result }
+        $docText = Get-Content -LiteralPath $Path -Raw -Encoding UTF8; $result.Path = $Path
     } else {
-        $dir = Get-PimLicenseSearchDir
-        if ($dir -and (Test-Path -LiteralPath $dir)) {
-            # 🔴 BOTH EXTENSIONS. The dual-signer work above made a FRAMEWORK-issued licence
-            # (TOOLS/New-AitLicense.ps1) verify here "with no cutover and no reissue" -- but that
-            # tool writes `<customer>.aitlicense`, and this search only ever looked for
-            # `*.pimlicense`. So a framework licence signed correctly, verified correctly, and was
-            # NEVER FOUND. Measured 2026-09-05 with a real issued file:
-            #     EFIF-Master.aitlicense -> Status=Missing, "no .pimlicense file found"
-            #     EFIF-Master.pimlicense -> Status=Valid,   Customer=EFIF-Master, Sku=Pro
-            # Same bytes, same signature; only the extension differed. The crypto half of the
-            # migration landed and the discovery half did not, which reads as "the customer has no
-            # licence" rather than as a bug -- indistinguishable from the unlicensed case that LIC-1
-            # deliberately makes silent.
-            # 🪤 .pimlicense is listed FIRST and wins a tie: an existing solution-specific licence
-            # must keep taking precedence, so this cannot change behaviour for anyone who already
-            # has one. LIC-1's licence is framework-wide by design (one format, every solution --
-            # SecurityInsight included), so accepting the framework extension is the direction of
-            # travel; renaming the issuer's output to .pimlicense would make a framework artifact
-            # carry one solution's name.
-            $file = Get-ChildItem -LiteralPath $dir -File -ErrorAction SilentlyContinue |
-                        Where-Object { $_.Extension -in @('.pimlicense', '.aitlicense') } |
-                        Sort-Object @{ Expression = { if ($_.Extension -eq '.pimlicense') { 0 } else { 1 } } }, Name |
-                        Select-Object -First 1
-            if ($file) { $licPath = $file.FullName }
-        }
+        $st = Get-PimLicenseFromStore
+        if (-not $st.ok) { $result.Status = 'Invalid'; $result.Reason = "the licence could not be read from the store: $($st.error)"; $script:PimLicenseCache = $result; return $result }
+        if (-not "$($st.text)".Trim()) { $script:PimLicenseCache = $result; return $result }
+        $docText = "$($st.text)"; $result.Path = "pim.Settings['License']"
     }
-    if (-not $licPath) { if (-not $useOverride) { $script:PimLicenseCache = $result }; return $result }
-    $result.Path = $licPath
 
     try {
-        $doc = Get-Content -LiteralPath $licPath -Raw -Encoding UTF8 | ConvertFrom-Json
+        $doc = $docText | ConvertFrom-Json
         if (-not $doc.payloadB64 -or -not $doc.signature) { throw "file is not a PIM4EntraPS license (payloadB64/signature missing)" }
 
         $payloadBytes = [Convert]::FromBase64String($doc.payloadB64)
@@ -286,6 +306,10 @@ Function Test-PimProFeature {
     # gate does not block and emits nothing customer-facing.
     if (-not (Test-PimProLicenseEnforced)) { return $true }
 
+    # REQ-Y: a feature that is not in the Pro list is free -- never gated, even when a harness enforces the switch.
+    # The list follows the feature catalog (see $script:PimProFeatureCatalog), so the list and the gate cannot disagree.
+    if (@(Get-PimProFeatureCatalog) -notcontains $Feature) { return $true }
+
     $lic = Get-PimLicense
     $blockReason = $null
 
@@ -336,5 +360,261 @@ Function Get-PimLicenseStatusText {
         'Valid'   { "Pro -- $($lic.Customer) -- $($lic.Reason)" }
         'Grace'   { "Pro (GRACE) -- $($lic.Customer) -- $($lic.Reason)" }
         default   { "Community (free) -- license $($lic.Status): $($lic.Reason)" }
+    }
+}
+
+# =====================================================================================================================
+# REQ-Y (operator 2026-09-19: "msp master slave require license pro" / "enforce in code" / "write text to contact
+# mok@mortenknudsen.net for license" / "msp license is req now"). A TARGETED enforcement: an environment that runs as an
+# MSP MASTER (publishes the signed baseline) or an MSP SLAVE (pulls it) needs a Pro licence bound to its tenant.
+#   * It does NOT read Test-PimProLicenseEnforced. The global switch stays OFF, so every OTHER Pro feature stays free.
+#   * Valid = run. Grace (the licence's own graceDays after validTo) = run, with a warning. Anything else = refuse.
+#   * No introduction grace: the requirement is immediate (operator 2026-09-19, "msp license is req now").
+# The MSP jobs (tools/pim-engine/publish-job-entry.ps1, downlink-job-entry.ps1) refuse through Invoke-PimMspLicenseGate;
+# the Manager serves the same verdict on GET /api/license (Get-PimLicenseApiBody) for the Settings > Licence section and
+# the MSP-page banners.
+# =====================================================================================================================
+$script:PimLicenseContact = 'mok@mortenknudsen.net'
+# The licence feature names that cover MSP: the Pro catalog's MspFanout, the feature catalog key msp.downlink, and 'Msp'.
+# '*' (all Pro features) covers it too.
+$script:PimMspLicenseFeatures = @('MspFanout', 'msp.downlink', 'Msp')
+
+Function Get-PimLicenseContact { "$script:PimLicenseContact" }
+
+Function Get-PimLicenseRegisterCommand {
+    <#
+      PURE. The supported way to register an issued licence file (tools/setup/Set-PimLicense.ps1), with this environment's
+      store server and tenant filled in when known; placeholders otherwise. Never carries a secret.
+    #>
+    param([string]$SqlServer, [string]$TenantId)
+    $srv = "$SqlServer".Trim(); if (-not $srv) { $srv = '<server>.database.windows.net' }
+    $tid = "$TenantId".Trim();  if (-not $tid) { $tid = '<tenant>' }
+    return ("pwsh -File tools\setup\Set-PimLicense.ps1 -LicensePath <file> -SqlServer {0} -TenantId {1} -AdminAppId <app id> -AdminCertThumbprint <thumbprint>" -f $srv, $tid)
+}
+
+Function ConvertFrom-PimLicenseSettingRaw {
+    <#
+      PURE. pim.Settings['License'] as the raw ValueJson column -> the licence DOCUMENT text Get-PimLicense verifies.
+      Set-PimLicense stores the issued text through Set-PimSetting, i.e. as a JSON string literal; a document stored as a
+      JSON object is accepted too (same rule as Get-PimLicenseFromStore). '' = nothing stored.
+    #>
+    param([AllowNull()][object]$Raw)
+    if ($null -eq $Raw -or $Raw -is [System.DBNull]) { return '' }
+    $t = "$Raw".Trim()
+    if (-not $t) { return '' }
+    try { $v = $t | ConvertFrom-Json } catch { return $t }
+    if ($null -eq $v) { return '' }
+    if ($v -is [string]) { return "$v" }
+    return (ConvertTo-Json -InputObject $v -Depth 6 -Compress)
+}
+
+Function Test-PimProLicence {
+    <#
+    .SYNOPSIS
+        REQ-Y. The ONE hard licence check: does this environment hold a Pro licence that covers -FeatureNames for its
+        tenant? Used by the MSP jobs (Test-PimMspLicense) and by every Pro feature of the catalog
+        (Test-PimFeatureProLicence in PIM-FeatureCatalog.ps1). Independent of the global switch.
+    .DESCRIPTION
+        Returns @{ ok; status; grace; customer; sku; validTo; graceUntil; tenantIds; tenantId; label; reason; message;
+        contact; command }.
+          ok     = licence Status Valid or Grace, sku Pro (Pro-<variant>, or the back-compat 'Core'), features '*' or one of
+                   -FeatureNames, and a tenant binding that includes -TenantId (or no binding at all).
+          grace  = ok, but in the licence's grace window: run, and say so.
+          reason = plain words ("no Pro licence is installed", "the licence expired 2027-09-19 ...", "the licence is for
+                   another tenant ...").
+          message= the one line a job logs, an API refusal carries and the GUI shows:
+                   "<Label> requires a PIM4EntraPS Pro licence -- <reason>. Contact <contact> for a licence; register it with: <command>"
+        It NEVER consults Test-PimProLicenseEnforced.
+    .PARAMETER LicenseText
+        The stored document (pim.Settings['License'] as text). When BOUND it is used as-is (empty = nothing stored). When
+        not bound, Get-PimLicense reads the store itself (-UseCache: its short-lived session cache, for hot paths).
+    .PARAMETER StoreError
+        The caller could not read the store: the licence cannot be verified, so the check is not ok (never "no licence").
+    .PARAMETER PublicCertB64
+        Test seam only (the same one Get-PimLicense has): the trusted licensing certificate.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string[]]$FeatureNames,
+        [Parameter(Mandatory)][string]$Label,
+        [string]$FeatureWord,
+        [string]$TenantId,
+        [AllowEmptyString()][AllowNull()][string]$LicenseText,
+        [string]$StoreError,
+        [string]$SqlServer,
+        [string]$PublicCertB64,
+        [switch]$UseCache
+    )
+    $tid = "$TenantId".Trim().ToLowerInvariant()
+    $word = if ("$FeatureWord".Trim()) { "$FeatureWord".Trim() } else { $Label }
+    $out = [ordered]@{
+        ok = $false; status = 'Missing'; grace = $false; customer = ''; sku = ''; validTo = ''; graceUntil = ''
+        tenantIds = @(); tenantId = $tid; label = "$Label"; reason = ''; message = ''
+        contact = "$script:PimLicenseContact"; command = (Get-PimLicenseRegisterCommand -SqlServer $SqlServer -TenantId $TenantId)
+    }
+    $lic = $null
+    if ("$StoreError".Trim()) {
+        $out.status = 'Invalid'
+        $out.reason = "the licence could not be read from the store ($("$StoreError".Trim()))"
+    } else {
+        $a = @{}
+        if (-not $UseCache) { $a['Refresh'] = $true }
+        if ($PublicCertB64) { $a['PublicCertB64'] = $PublicCertB64 }
+        if ($PSBoundParameters.ContainsKey('LicenseText')) {
+            if ("$LicenseText".Trim()) { $a['LicenseText'] = "$LicenseText" } else { $a = $null }
+        }
+        if ($null -ne $a) { $lic = Get-PimLicense @a }
+    }
+    if ($lic) {
+        $out.status   = "$($lic.Status)"
+        $out.customer = "$($lic.Customer)"
+        $out.sku      = "$($lic.Sku)"
+        $out.validTo    = $(if ($lic.ValidTo) { $lic.ValidTo.ToString('yyyy-MM-dd') } else { '' })
+        $out.graceUntil = $(if ($lic.GraceUntil) { $lic.GraceUntil.ToString('yyyy-MM-dd') } else { '' })
+        $out.tenantIds  = @($lic.TenantIds | ForEach-Object { "$_".Trim().ToLowerInvariant() } | Where-Object { $_ })
+        $features = @($lic.Features | ForEach-Object { "$_".Trim() })
+        $covers = ($features -contains '*')
+        foreach ($f in @($FeatureNames)) { if ("$f".Trim() -and ($features -contains "$f".Trim())) { $covers = $true } }
+        switch ("$($lic.Status)") {
+            'Missing'     { $out.reason = 'no Pro licence is installed' }
+            'Invalid'     { $out.reason = "the stored licence is not valid ($($lic.Reason))" }
+            'NotYetValid' { $out.reason = "the licence only starts $($lic.ValidFrom.ToString('yyyy-MM-dd'))" }
+            'Expired'     { $out.reason = "the licence expired $($out.validTo) (its grace period ended $($out.graceUntil))" }
+            default {
+                # Pro, Pro-<variant> (Pro-DesignPartner); 'Core' is the documented back-compat sku that maps to Pro
+                # (see the edition note at the top). Community or anything else is not Pro.
+                if ("$($lic.Sku)".Trim() -notmatch '^(?i)(pro(-.+)?|core)$') {
+                    $out.reason = "the licence is a '$("$($lic.Sku)".Trim())' licence, not Pro"
+                } elseif (-not $covers) {
+                    $out.reason = "the licence does not include $word (features: $(($features -join ', ')))"
+                } elseif (@($out.tenantIds).Count -gt 0 -and -not $tid) {
+                    $out.reason = "the licence is bound to tenant $(($out.tenantIds -join ', ')), and this environment's tenant id is not known"
+                } elseif (@($out.tenantIds).Count -gt 0 -and ($out.tenantIds -notcontains $tid)) {
+                    $out.reason = "the licence is for another tenant (bound to $(($out.tenantIds -join ', ')); this tenant is $tid)"
+                } else {
+                    $out.ok = $true
+                    if ("$($lic.Status)" -eq 'Grace') {
+                        $out.grace = $true
+                        $out.reason = "the licence expired $($out.validTo), grace until $($out.graceUntil)"
+                    } else {
+                        $out.reason = "Pro licence for '$($out.customer)', valid until $($out.validTo)"
+                    }
+                }
+            }
+        }
+    } elseif (-not $out.reason) {
+        $out.reason = 'no Pro licence is installed'
+    }
+    if (-not $out.ok) {
+        $out.message = ("{0} requires a PIM4EntraPS Pro licence -- {1}. Contact {2} for a licence; register it with: {3}" -f $Label, $out.reason, $out.contact, $out.command)
+    } elseif ($out.grace) {
+        $out.message = ("{0}: licence expired {1}, grace until {2} -- contact {3} to renew" -f $Label, $out.validTo, $out.graceUntil, $out.contact)
+    } else {
+        $out.message = ("{0}: {1}" -f $Label, $out.reason)
+    }
+    return [pscustomobject]$out
+}
+
+Function Test-PimMspLicense {
+    <#
+    .SYNOPSIS
+        REQ-Y. Does this MSP master / slave hold a Pro licence that covers MSP for its tenant? (Test-PimProLicence with
+        the MSP feature names, labelled "MSP master" / "MSP slave".) The result also carries role = master | slave.
+    #>
+    [CmdletBinding()]
+    param(
+        [string]$TenantId,
+        [ValidateSet('Master', 'Slave')][string]$Role = 'Master',
+        [AllowEmptyString()][AllowNull()][string]$LicenseText,
+        [string]$StoreError,
+        [string]$SqlServer,
+        [string]$PublicCertB64
+    )
+    $roleWord = if ($Role -eq 'Slave') { 'slave' } else { 'master' }
+    $a = @{ FeatureNames = $script:PimMspLicenseFeatures; Label = "MSP $roleWord"; FeatureWord = 'MSP'; TenantId = $TenantId; StoreError = $StoreError; SqlServer = $SqlServer }
+    if ($PublicCertB64) { $a['PublicCertB64'] = $PublicCertB64 }
+    if ($PSBoundParameters.ContainsKey('LicenseText')) { $a['LicenseText'] = "$LicenseText" }
+    $r = Test-PimProLicence @a
+    $r | Add-Member -NotePropertyName role -NotePropertyValue $roleWord -Force
+    return $r
+}
+Function Invoke-PimMspLicenseGate {
+    <#
+      REQ-Y. The MSP jobs' gate: runs Test-PimMspLicense and logs ONE line through -Log (param($message, $level)):
+        not ok -> ERROR  "MSP <role> requires a PIM4EntraPS Pro licence -- <reason>. Contact ... ; register it with: ..."
+        grace  -> WARN   "MSP <role>: licence expired <date>, grace until <date> -- contact ... to renew"
+        ok     -> INFO   "MSP <role>: Pro licence for '<customer>', valid until <date>"
+      Returns the Test-PimMspLicense result; the caller refuses (exit non-zero, nothing published / pulled) when not ok.
+      A check that THROWS is not ok (a gate that cannot decide never runs the MSP pipeline).
+    #>
+    param(
+        [Parameter(Mandatory)][ValidateSet('Master', 'Slave')][string]$Role,
+        [string]$TenantId,
+        [AllowEmptyString()][AllowNull()][string]$LicenseText,
+        [string]$StoreError,
+        [string]$SqlServer,
+        [scriptblock]$Log
+    )
+    $a = @{ Role = $Role; TenantId = $TenantId; StoreError = $StoreError; SqlServer = $SqlServer }
+    if ($PSBoundParameters.ContainsKey('LicenseText')) { $a['LicenseText'] = "$LicenseText" }
+    try { $r = Test-PimMspLicense @a }
+    catch {
+        $roleWord = if ($Role -eq 'Slave') { 'slave' } else { 'master' }
+        $cmd = Get-PimLicenseRegisterCommand -SqlServer $SqlServer -TenantId $TenantId
+        $r = [pscustomobject]@{ ok = $false; status = 'Invalid'; grace = $false; customer = ''; sku = ''; validTo = ''; graceUntil = ''; tenantIds = @(); tenantId = "$TenantId"; role = $roleWord
+            reason = "the licence check failed ($($_.Exception.Message))"; contact = "$script:PimLicenseContact"; command = $cmd
+            message = ("MSP {0} requires a PIM4EntraPS Pro licence -- the licence check failed ({1}). Contact {2} for a licence; register it with: {3}" -f $roleWord, $_.Exception.Message, $script:PimLicenseContact, $cmd) }
+    }
+    $lvl = if (-not $r.ok) { 'ERROR' } elseif ($r.grace) { 'WARN' } else { 'INFO' }
+    if ($Log) { & $Log $r.message $lvl }
+    return $r
+}
+
+Function Get-PimLicenseApiBody {
+    <#
+      REQ-Y. The body of the Manager's GET /api/license: the licence status in plain words, plus the MSP verdict for THIS
+      environment. -MspRole '' = single (non-MSP): mspRequired false and the GUI shows no MSP banner. Read-only.
+      mspState: none (single) | ok | grace | refused.
+    #>
+    param([ValidateSet('', 'Master', 'Slave')][string]$MspRole = '', [string]$TenantId, [string]$SqlServer, [string]$PublicCertB64)
+    $la = @{ Refresh = $true }; if ($PublicCertB64) { $la['PublicCertB64'] = $PublicCertB64 }
+    $lic = Get-PimLicense @la
+    $ma = @{ Role = $(if ($MspRole) { $MspRole } else { 'Master' }); TenantId = $TenantId; SqlServer = $SqlServer }
+    if ($PublicCertB64) { $ma['PublicCertB64'] = $PublicCertB64 }
+    $m = Test-PimMspLicense @ma
+    $pro = ("$($lic.Status)" -in @('Valid', 'Grace'))
+    $statusText = switch ("$($lic.Status)") {
+        'Missing' { 'Community (free) -- no Pro licence installed' }
+        'Valid'   { "Pro -- $($lic.Customer) -- valid until $($m.validTo)" }
+        'Grace'   { "Pro (grace) -- $($lic.Customer) -- expired $($m.validTo), grace until $($m.graceUntil)" }
+        default   { "Community (free) -- licence $($lic.Status): $($lic.Reason)" }
+    }
+    $state = 'none'
+    if ($MspRole) { $state = if (-not $m.ok) { 'refused' } elseif ($m.grace) { 'grace' } else { 'ok' } }
+    return [ordered]@{
+        status       = "$($lic.Status)"
+        statusText   = $statusText
+        edition      = $(if ($pro) { $script:PimProEditionName } else { $script:PimCommunityEditionName })
+        customer     = "$($lic.Customer)"
+        sku          = "$($lic.Sku)"
+        features     = @($lic.Features)
+        tenantIds    = @($lic.TenantIds)
+        boundTenant  = $(if (@($lic.TenantIds).Count) { (@($lic.TenantIds) -join ', ') } else { '' })
+        tenantId     = "$TenantId".Trim()
+        validTo      = $(if ($lic.ValidTo) { $lic.ValidTo.ToString('yyyy-MM-dd') } else { '' })
+        graceUntil   = $(if ($lic.GraceUntil) { $lic.GraceUntil.ToString('yyyy-MM-dd') } else { '' })
+        reason       = "$($lic.Reason)"
+        mspRequired  = [bool]$MspRole
+        mspRole      = $(if ($MspRole -eq 'Slave') { 'slave' } elseif ($MspRole) { 'master' } else { '' })
+        mspOk        = $(if ($MspRole) { [bool]$m.ok } else { $true })
+        mspState     = $state
+        mspReason    = $(if ($MspRole) { "$($m.reason)" } else { '' })
+        mspMessage   = $(if ($MspRole) { "$($m.message)" } else { '' })
+        contact      = "$script:PimLicenseContact"
+        command      = "$($m.command)"
+        editionLine  = "Free: the community edition for a single tenant. Pro: the licensed features for a single tenant, and the multi-tenant half (MSP master / managed tenants). Contact $script:PimLicenseContact."
+        # key -> { label; scope; ok; grace; state ok|grace|locked; reason; message } for every Pro feature of the catalog
+        # (the GUI's "Pro -- contact" notices). Empty when the catalog is not loaded in this process.
+        pro          = $(if (Get-Command Get-PimProFeatureStates -ErrorAction SilentlyContinue) { $pa = @{ TenantId = $TenantId; SqlServer = $SqlServer }; if ($PublicCertB64) { $pa['PublicCertB64'] = $PublicCertB64 }; Get-PimProFeatureStates @pa } else { [ordered]@{} })
     }
 }

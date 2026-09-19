@@ -5,13 +5,19 @@
 
 .DESCRIPTION
     Replaces the documented hand SQL step (§71 gap 2: "no product command registers a managed tenant"). The master's
-    bundle producer reads this row to decide which admins and groups reach which tenant (ring) and to sign the tenant's
-    tags into the bundle (targeting). Idempotent (MERGE on TenantId), READ BACK after the write, audited
-    ('msp.tenant.register') in pim.AuditEvents. Certificate identity only; the identity must be in the master store's
-    SQL admin group.
+    bundle producer reads this row's TAGS and signs them into the bundle (targeting). Idempotent (MERGE on TenantId),
+    READ BACK after the write, audited ('msp.tenant.register') in pim.AuditEvents. Certificate identity only; the
+    identity must be in the master store's SQL admin group.
+
+    BUG-175 -- THE RING HERE IS THE MASTER'S COPY, NOT THE TENANT'S RING. Every ring is LOCAL in the slave: the pull
+    is gated by the managed tenant's OWN -SlaveRing (its downlink job argument, set in the slave). The bundle producer
+    does NOT read this Ring (it reads only Tags), and nothing reconciles the two values. The master uses its copy only
+    for its own previews (the Manager's reach preview, overview and dry run, each labelled "master's copy") -- keep it
+    equal to the slave's -SlaveRing, or those previews describe a ring the tenant is not on.
 
 .PARAMETER ManagedTenantId / DisplayName / Ring / Tags
-    The managed tenant. Ring 0..2 (2 = test, 1 = pilot, 0 = broad). Tags: 'region:eu;wave:pilot' or an array.
+    The managed tenant. Ring 0..2 (2 = test, 1 = pilot, 0 = broad) -- the MASTER'S COPY of the ring the tenant set
+    locally (see above). Tags: 'region:eu;wave:pilot' or an array.
 
 .PARAMETER Disable
     Keep the row, set Enabled = 0 (the tenant stops receiving; nothing is deleted).
@@ -44,6 +50,8 @@ $ErrorActionPreference = 'Stop'
 $solRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 . (Join-Path $PSScriptRoot '_PimSetupSql.ps1')
 . (Join-Path $solRoot 'engine\_shared\PIM-MspBuild.ps1')
+# REQ-N: the ONE writer of a platform.Tenants row, shared with the Manager's "Managed tenant registry" page.
+. (Join-Path $solRoot 'engine\_shared\PIM-MspRegistry.ps1')
 function Step($m) { Write-Host "==> $m" -ForegroundColor Cyan }
 function Note($m) { Write-Host "    $m" -ForegroundColor DarkGray }
 
@@ -63,11 +71,15 @@ if (-not $reg.ok) { throw "REFUSED: $($reg.reason)" }
 $before = @(& $readRows | Where-Object { "$($_.TenantId)".ToLowerInvariant() -eq $reg.parameters.tid })[0]
 Step ("{0} managed tenant {1} ({2}) ring {3} tags '{4}'" -f $(if ($Disable) { 'DISABLE' } elseif ($before) { 'update' } else { 'register' }), $reg.parameters.name, $reg.parameters.tid, $Ring, $reg.parameters.tags)
 if ($PSCmdlet.ShouldProcess($reg.parameters.tid, 'MERGE platform.Tenants')) {
-    [void](Invoke-PimSqlNonQuery -ConnectionString $cs -Sql $reg.sql -Parameters $reg.parameters)
+    # REQ-N: the ONE writer (Set-PimManagedTenantRegistration) -- the same refusals, MERGE and read-back as the Manager's
+    # registry page. -TenantId here is the MASTER's tenant (the one this store belongs to), so it cannot be registered.
+    # -Notes only when given: re-running to change a tag no longer wipes the notes.
+    $wArgs = @{ ConnectionString = $cs; TenantId = $ManagedTenantId; DisplayName = $DisplayName; Ring = $Ring; Tags = $Tags; Enabled = (-not $Disable); Mode = 'Upsert'; MasterTenantId = $TenantId }
+    if ($PSBoundParameters.ContainsKey('Notes')) { $wArgs['Notes'] = $Notes }
+    $w = Set-PimManagedTenantRegistration @wArgs
+    if (-not $w.ok) { throw "REFUSED ($($w.status)): $($w.reason)" }
     $after = @(& $readRows | Where-Object { "$($_.TenantId)".ToLowerInvariant() -eq $reg.parameters.tid })[0]
-    $okBack = $after -and "$($after.DisplayName)" -eq $reg.parameters.name -and [int]$after.Ring -eq $Ring -and [bool]$after.Enabled -eq (-not $Disable) -and "$($after.Tags)" -eq $reg.parameters.tags
-    if (-not $okBack) { throw "read-back FAILED: platform.Tenants does not hold what was written for $($reg.parameters.tid) (got: $($after | ConvertTo-Json -Compress))" }
-    Write-PimSetupAudit -ConnectionString $cs -Action 'msp.tenant.register' -Target $reg.parameters.tid -Before $before -After $reg.parameters
-    Note "read back OK: ring $($after.Ring), enabled $($after.Enabled), tags '$($after.Tags)'"
-    Note 'next: publish the bundle (setup\New-PimBaselineBundle.ps1, or the scheduled publish) so the tenant''s ring and tags are signed into it.'
+    Write-PimSetupAudit -ConnectionString $cs -Action 'msp.tenant.register' -Target $reg.parameters.tid -Before $before -After $w.parameters
+    Note "read back OK: ring $($after.Ring) (the master's copy -- the tenant's own -SlaveRing gates its pull), enabled $($after.Enabled), tags '$($after.Tags)'"
+    Note 'next: publish the bundle (start the master''s ca-pim-publish job, Start-PimBaselinePublish.ps1) so the tenant''s tags are signed into it.'
 }

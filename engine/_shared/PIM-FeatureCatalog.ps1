@@ -1,6 +1,9 @@
 ﻿# IMP-03: the one visible way to swallow a non-fatal error (loaded defensively --
 # this file is dot-sourced standalone by tests and by the Manager).
 if (-not (Get-Command Write-PimSwallowed -ErrorAction SilentlyContinue)) { . (Join-Path $PSScriptRoot 'PIM-Swallow.ps1') }
+# REQ-Y: the hard Pro gate (Test-PimFeatureProLicence) verifies the licence with PIM-License.ps1 -- load it wherever the
+# catalog is loaded, so no process can end up with the gate but without the verifier (which would read "not licensed").
+if (-not (Get-Command Test-PimProLicence -ErrorAction SilentlyContinue)) { . (Join-Path $PSScriptRoot 'PIM-License.ps1') }
 
 # =============================================================================
 # PIM-FeatureCatalog.ps1 -- the SINGLE source of truth for customizable
@@ -60,6 +63,11 @@ $script:PimEditionNames = @('Core', 'Pro', 'Pro-DesignPartner')
 #                  'advanced'  = optional/side-effecting, gateable (kill switch)
 #   license        'free'      = available in every edition (incl. Core)
 #                  'pro'       = requires a Pro / Pro-DesignPartner edition
+#   scope          'single'    = acts on ONE tenant (this environment)
+#                  'multi'     = the multi-tenant half (MSP master / managed tenants)
+#                  REQ-Y (operator 2026-09-19: "single tenant must be sep in free and pro"): the edition is decided per
+#                  entry by license x scope, and THIS catalog is the one authoritative list -- PIM-License.ps1's
+#                  Get-PimProFeatureCatalog must equal Get-PimCatalogProFeatureNames (tests/Test-PimMspLicense.ps1).
 #   defaultEnabled advanced features default OFF (opt-in; an upgrade never springs
 #                  a new behaviour on a customer). Core is implicitly always-on.
 #   dependsOn      other feature keys that must be available for this to function.
@@ -72,9 +80,9 @@ $script:PimEditionNames = @('Core', 'Pro', 'Pro-DesignPartner')
 # ---------------------------------------------------------------------------
 $script:PimFeatureCatalog = @(
     # ---- Core PIM surface (always on, free, NOT gateable) ---------------------
-    [ordered]@{ key='engine.reconcile'; label='Engine reconcile';        group='Core PIM';     tier='core';     license='free'; defaultEnabled=$true;  dependsOn=@();                       proFeature='';                  description='Desired-vs-live reconcile of delegation (create/update). The essential engine; never disabled.' }
-    [ordered]@{ key='delegation.read';  label='Delegation map (read)';   group='Core PIM';     tier='core';     license='free'; defaultEnabled=$true;  dependsOn=@();                       proFeature='';                  description='Read/search the delegation model. Always available.' }
-    [ordered]@{ key='authoring';        label='Authoring / Review & Save';group='Core PIM';    tier='core';     license='free'; defaultEnabled=$true;  dependsOn=@();                       proFeature='';                  description='Author and commit delegation changes. Always available.' }
+    [ordered]@{ key='engine.reconcile'; label='Engine reconcile';        group='Core PIM';     tier='core';     license='free'; scope='single'; defaultEnabled=$true;  dependsOn=@();                       proFeature='';                  description='Desired-vs-live reconcile of delegation (create/update). The essential engine; never disabled.' }
+    [ordered]@{ key='delegation.read';  label='Delegation map (read)';   group='Core PIM';     tier='core';     license='free'; scope='single'; defaultEnabled=$true;  dependsOn=@();                       proFeature='';                  description='Read/search the delegation model. Always available.' }
+    [ordered]@{ key='authoring';        label='Authoring / Review & Save';group='Core PIM';    tier='core';     license='free'; scope='single'; defaultEnabled=$true;  dependsOn=@();                       proFeature='';                  description='Author and commit delegation changes. Always available.' }
     # 🔴 BUG-107. Second-approver (maker/checker) on sensitive changes. ADVANCED + defaultEnabled
     # =$false, because it requires TWO PEOPLE and shipped ON to deployments that have one.
     # A single-administrator tenant could not commit ANY privileged change: the 409 demands a
@@ -88,14 +96,14 @@ $script:PimFeatureCatalog = @(
     # off) for entirely the wrong reason: the operator could then never turn it ON.
     # tier='advanced' matters too -- a 'core' entry short-circuits to available and is
     # unswitchable, which would restore the exact bug this fixes.
-    [ordered]@{ key='makerchecker';     label='Second-approver on sensitive changes'; group='Core PIM'; tier='advanced'; license='free'; defaultEnabled=$false; dependsOn=@('authoring');            proFeature='';                  description='Require a SECOND administrator to approve a change that touches privileged access before it can be committed (separation of duties). Needs at least two administrators -- with one, nothing privileged can ever be committed. Off = changes are still classified as sensitive and fully audited, they just do not need a second approver.' }
+    [ordered]@{ key='makerchecker';     label='Second-approver on sensitive changes'; group='Core PIM'; tier='advanced'; license='pro'; scope='single'; defaultEnabled=$false; dependsOn=@('authoring');            proFeature='MakerChecker';      description='Require a SECOND administrator to approve a change that touches privileged access before it can be committed (separation of duties). Needs at least two administrators -- with one, nothing privileged can ever be committed. Off = changes are still classified as sensitive and fully audited, they just do not need a second approver.' }
 
     # ---- Discovery (advanced) -------------------------------------------------
-    [ordered]@{ key='discovery.sweep';  label='Discovery sweep';         group='Discovery';    tier='advanced'; license='free'; defaultEnabled=$false; dependsOn=@('engine.reconcile');     proFeature='AzureDiscovery';    description='End-of-run sweep that enumerates Azure scopes + Power BI workspaces and flags/auto-creates new resources. Off = no discovery, no auto-create.' }
+    [ordered]@{ key='discovery.sweep';  label='Discovery sweep';         group='Discovery';    tier='advanced'; license='pro';  scope='single'; defaultEnabled=$false; dependsOn=@('engine.reconcile');     proFeature='Discovery';         description='End-of-run sweep that enumerates Azure scopes + Power BI workspaces and flags/auto-creates new resources. Off = no discovery, no auto-create.' }
 
     # ---- Notifications / Email (advanced) -------------------------------------
-    [ordered]@{ key='alerting.email';   label='Email alerting';          group='Notifications';tier='advanced'; license='free'; defaultEnabled=$false; dependsOn=@();                       proFeature='';                  description='Email notifications for engine-failure / drift / expiring-access / break-glass and the daily/tier digests. Off = no mail is sent.' }
-    [ordered]@{ key='alerting.webhook'; label='Teams / webhook alerting';group='Notifications';tier='advanced'; license='free'; defaultEnabled=$false; dependsOn=@('alerting.email');       proFeature='';                  description='Post alerts to a Microsoft Teams / generic webhook in addition to email. Off = no webhook POST.' }
+    [ordered]@{ key='alerting.email';   label='Email alerting';          group='Notifications';tier='advanced'; license='free'; scope='single'; defaultEnabled=$false; dependsOn=@();                       proFeature='';                  description='Email notifications for engine-failure / drift / expiring-access / break-glass and the daily/tier digests. Off = no mail is sent.' }
+    [ordered]@{ key='alerting.webhook'; label='Teams / webhook alerting';group='Notifications';tier='advanced'; license='free'; scope='single'; defaultEnabled=$false; dependsOn=@('alerting.email');       proFeature='';                  description='Post alerts to a Microsoft Teams / generic webhook in addition to email. Off = no webhook POST.' }
 
     # ---- Workload connectors / integrations (advanced, Pro) -------------------
     # 🔴 v1 PARITY: v1 applied workload bindings whenever its PIM-Assignments-Workloads file existed
@@ -103,15 +111,30 @@ $script:PimFeatureCatalog = @(
     # and no deploy step turned it on, so a migrated customer's workload rows were imported and never
     # applied. autoEnableWhenData makes it EFFECTIVELY ON while any of these entities has rows, with no
     # deploy step and no GUI action; a deliberately stored `false` still wins (see Test-PimFeatureEnabled).
-    [ordered]@{ key='connectors.workload'; label='Workload connectors (app-role)'; group='Integrations'; tier='advanced'; license='pro'; defaultEnabled=$false; dependsOn=@('engine.reconcile'); proFeature='WorkloadConnectors'; autoEnableWhenData=@('PIM-Assignments-Workloads','PIM-Assignments-Defender','PIM-Assignments-Intune','PIM-Assignments-AppRole'); description='Enterprise-app app-role + workload-RBAC connectors (Defender XDR, Intune, generic app-role, Azure RBAC, Power BI, Azure DevOps, Dataverse, Business Central, Power Platform). On automatically while workload assignment rows exist; off = these providers no-op.' }
-    [ordered]@{ key='connectors.powerbi';  label='Power BI integration';            group='Integrations'; tier='advanced'; license='pro'; defaultEnabled=$false; dependsOn=@('discovery.sweep');   proFeature='WorkloadConnectors'; description='Power BI workspace discovery + role reconcile. Off = Power BI is skipped by the discovery sweep.' }
-    [ordered]@{ key='connectors.exo';      label='Exchange Online integration';     group='Integrations'; tier='advanced'; license='pro'; defaultEnabled=$false; dependsOn=@('engine.reconcile');  proFeature='WorkloadConnectors'; description='Exchange Online role-group delegation (ManageAsApp). Off = EXO delegation is not applied.' }
+    # REQ-Y (operator 2026-09-19: "intune and defender is free"): the connectors are SPLIT. connectors.workload keeps its key
+    # and its switch and is now FREE: Intune + Defender XDR (the IntuneRoles / DefenderXdrRoles providers, and the intune /
+    # defender connector rows of PIM-Assignments-Workloads). Every other connector is connectors.apps (Pro): the generic
+    # app-role provider and the WorkloadConnectors rows for Azure DevOps, Dataverse, Business Central, Power Platform, ...
+    [ordered]@{ key='connectors.workload'; label='Workload connectors: Intune + Defender XDR'; group='Integrations'; tier='advanced'; license='free'; scope='single'; defaultEnabled=$false; dependsOn=@('engine.reconcile'); proFeature=''; autoEnableWhenData=@('PIM-Assignments-Workloads','PIM-Assignments-Defender','PIM-Assignments-Intune'); description='Intune and Defender XDR role delegation (free). On automatically while their assignment rows exist; off = these providers no-op.' }
+    [ordered]@{ key='connectors.apps';     label='Workload connectors: app-role, Azure DevOps, Dataverse, Business Central, Power Platform'; group='Integrations'; tier='advanced'; license='pro'; scope='single'; defaultEnabled=$false; dependsOn=@('engine.reconcile'); proFeature='WorkloadConnectors'; autoEnableWhenData=@('PIM-Assignments-AppRole','PIM-Assignments-Workloads'); description='Enterprise-app app-role and the workload connectors other than Intune / Defender XDR (Pro). On automatically while their assignment rows exist; off or unlicensed = these connectors no-op.' }
+    [ordered]@{ key='connectors.powerbi';  label='Power BI integration';            group='Integrations'; tier='advanced'; license='pro'; scope='single'; defaultEnabled=$false; dependsOn=@('discovery.sweep');   proFeature='WorkloadConnectors'; description='Power BI workspace discovery + role reconcile. Off = Power BI is skipped by the discovery sweep.' }
+    [ordered]@{ key='connectors.exo';      label='Exchange Online integration';     group='Integrations'; tier='advanced'; license='pro'; scope='single'; defaultEnabled=$false; dependsOn=@('engine.reconcile');  proFeature='WorkloadConnectors'; description='Exchange Online role-group delegation (ManageAsApp). Off = EXO delegation is not applied.' }
+
+    # ---- Governance / reporting (Pro, single tenant; operator 2026-09-19 "i agree to your proposals") ---------------
+    # tier='core' + license='pro': not a kill switch (nothing to turn on), but inert without a Pro licence -- the engine,
+    # the jobs and the Manager refuse them with the licence reason (Test-PimFeatureProLicence).
+    [ordered]@{ key='coverage.gaps';     label='Coverage & gaps';                     group='Governance';   tier='core'; license='pro'; scope='single'; defaultEnabled=$true; dependsOn=@(); proFeature='Coverage';       description='Which roles, scopes and groups have no delegation, and the proposals that close the gap. Computed by the coverage job.' }
+    [ordered]@{ key='revoke.current';    label='Revoke current delegations';          group='Governance';   tier='core'; license='pro'; scope='single'; defaultEnabled=$true; dependsOn=@(); proFeature='Revoke';         description='Review current (standing) delegations and revoke them from the Manager.' }
+    [ordered]@{ key='reviews.campaigns'; label='Access review campaigns';             group='Governance';   tier='core'; license='pro'; scope='single'; defaultEnabled=$true; dependsOn=@(); proFeature='AccessReviews';  description='Scheduled access reviews with the decisions recorded and enforced.' }
+    [ordered]@{ key='access.delegated';  label='Delegated administration ceilings';   group='Governance';   tier='core'; license='pro'; scope='single'; defaultEnabled=$true; dependsOn=@(); proFeature='PortalAdmins';   description='Manager users limited by tier / level / service / scope with named capabilities.' }
+    [ordered]@{ key='reports.tier';      label='Tier-impact report';                  group='Governance';   tier='core'; license='pro'; scope='single'; defaultEnabled=$true; dependsOn=@(); proFeature='TierReport';     description='Everyone who can reach tier 0, including through nested groups.' }
+    [ordered]@{ key='reports.evidence';  label='Evidence / audit export';             group='Governance';   tier='core'; license='pro'; scope='single'; defaultEnabled=$true; dependsOn=@(); proFeature='EvidenceExport'; description='Who may hold what, who held it and who approved it -- the evidence report and its export.' }
 
     # ---- MSP (advanced, Pro) --------------------------------------------------
-    [ordered]@{ key='msp.downlink';     label='MSP downlink / fan-out';  group='MSP';          tier='advanced'; license='pro';  defaultEnabled=$false; dependsOn=@('engine.reconcile');     proFeature='MspFanout';         description='Fan a central admin baseline out to managed customer tenants (pull-not-push). Off = no fan-out runs.' }
+    [ordered]@{ key='msp.downlink';     label='MSP downlink / fan-out';  group='MSP';          tier='advanced'; license='pro';  scope='multi'; defaultEnabled=$false; dependsOn=@('engine.reconcile');     proFeature='MspFanout';         description='Fan a central admin baseline out to managed customer tenants (pull-not-push). Off = no fan-out runs.' }
 
     # ---- Scheduler / automated jobs (advanced) --------------------------------
-    [ordered]@{ key='scheduler.jobs';   label='Scheduled jobs';          group='Automation';   tier='advanced'; license='free'; defaultEnabled=$false; dependsOn=@();                       proFeature='';                  description='The in-container/VM scheduler that drives reminders, digests, discovery, queue-apply, tenant-cache and engine runs on a cadence. Off = no scheduled job runs (manual/commit triggers still work via their own gates).' }
+    [ordered]@{ key='scheduler.jobs';   label='Scheduled jobs';          group='Automation';   tier='advanced'; license='free'; scope='single'; defaultEnabled=$false; dependsOn=@();                       proFeature='';                  description='The in-container/VM scheduler that drives reminders, digests, discovery, queue-apply, tenant-cache and engine runs on a cadence. Off = no scheduled job runs (manual/commit triggers still work via their own gates).' }
 )
 
 function Get-PimFeatureCatalog {
@@ -127,6 +150,7 @@ function Get-PimFeatureCatalog {
             group          = "$($f.group)"
             tier           = "$($f.tier)"
             license        = "$($f.license)"
+            scope          = "$($f.scope)"
             defaultEnabled = [bool]$f.defaultEnabled
             dependsOn      = @($deps)
             proFeature     = "$($f.proFeature)"
@@ -138,6 +162,23 @@ function Get-PimFeatureCatalog {
     # PS 5.1: .ToArray() not @()-wrap -- @(List[object] of hashtables) throws
     # ArgumentException (the List[object] @()-wrap trap).
     return $out.ToArray()
+}
+
+function Get-PimCatalogProFeatureNames {
+    <#
+      REQ-Y. PURE. The Pro-feature names (PIM-License.ps1 vocabulary) that follow from THIS catalog: the distinct
+      proFeature of every license='pro' entry, sorted. PIM-License.ps1's Get-PimProFeatureCatalog must equal this list
+      (tests/Test-PimMspLicense.ps1 fails on any drift). -Scope narrows to 'single' or 'multi'.
+    #>
+    param([ValidateSet('', 'single', 'multi')][string]$Scope = '')
+    $names = @()
+    foreach ($f in $script:PimFeatureCatalog) {
+        if ("$($f.license)" -ne 'pro') { continue }
+        if ($Scope -and "$($f.scope)" -ne $Scope) { continue }
+        $n = "$($f.proFeature)".Trim()
+        if ($n -and $names -notcontains $n) { $names += $n }
+    }
+    return @($names | Sort-Object)
 }
 
 function Get-PimFeatureCatalogEntry {
@@ -491,18 +532,135 @@ function Test-PimFeatureLicensed {
     return (Test-PimEditionCoversLicense -License "$($entry.license)" -Edition $Edition)
 }
 
+$script:PimFeatureProGraceWarned = @{}
+
+function Test-PimFeatureProLicence {
+    <#
+      REQ-Y (operator 2026-09-19: "Hard, like MSP"). The HARD licence gate of ONE catalog feature, driven by the entry's
+      license: a license='free' entry is never gated (required=$false, ok=$true); a license='pro' entry needs a Pro
+      licence that covers its proFeature (or '*') for this tenant -- the same check the MSP jobs run
+      (Test-PimProLicence, PIM-License.ps1). Independent of the global switch ($global:PIM_EnforceProLicense keeps
+      meaning "the legacy edition gate"), and no SuperAdmin bypass: a licence is a fact about the environment.
+      Returns the Test-PimProLicence result plus key / required. The tenant defaults to $global:PIM_TenantId.
+      -PublicCertB64 / -LicenseText are the test seams Test-PimProLicence has.
+    #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string]$Key, [string]$TenantId, [string]$SqlServer, [string]$PublicCertB64, [AllowEmptyString()][AllowNull()][string]$LicenseText)
+    $entry = Get-PimFeatureCatalogEntry -Key $Key
+    if (-not $entry -or "$($entry.license)" -ne 'pro') {
+        return [pscustomobject]@{ key = $Key; required = $false; ok = $true; grace = $false; label = $(if ($entry) { "$($entry.label)" } else { $Key }); reason = 'free'; message = ''; contact = 'mok@mortenknudsen.net'; command = '' }
+    }
+    $tid = if ("$TenantId".Trim()) { "$TenantId".Trim() } elseif ("$($global:PIM_TenantId)".Trim()) { "$($global:PIM_TenantId)".Trim() } else { '' }
+    $srv = if ("$SqlServer".Trim()) { "$SqlServer".Trim() } elseif ("$($global:PIM_SqlServer)".Trim()) { "$($global:PIM_SqlServer)".Trim() } else { '' }
+    if (-not (Get-Command Test-PimProLicence -ErrorAction SilentlyContinue)) {
+        # A process that loaded the catalog without PIM-License.ps1 cannot verify a licence: Pro stays off, and says why.
+        $why = 'the licence verifier (PIM-License.ps1) is not loaded in this process'
+        return [pscustomobject]@{ key = $Key; required = $true; ok = $false; grace = $false; label = "$($entry.label)"; reason = $why
+            message = "$($entry.label) requires a PIM4EntraPS Pro licence -- $why. Contact mok@mortenknudsen.net for a licence."; contact = 'mok@mortenknudsen.net'; command = '' }
+    }
+    $a = @{ FeatureNames = @("$($entry.proFeature)"); Label = "$($entry.label)"; TenantId = $tid; SqlServer = $srv; UseCache = $true }
+    if ($PublicCertB64) { $a['PublicCertB64'] = $PublicCertB64 }
+    if ($PSBoundParameters.ContainsKey('LicenseText')) { $a['LicenseText'] = "$LicenseText" }
+    $r = Test-PimProLicence @a
+    $r | Add-Member -NotePropertyName key -NotePropertyValue $Key -Force
+    $r | Add-Member -NotePropertyName required -NotePropertyValue $true -Force
+    return $r
+}
+
+# REQ-Y (operator 2026-09-19: "intune and defender is free"): which catalog key licenses a PIM-Assignments-Workloads row,
+# by its connector id (the row's Workload, lower-cased -- workloads/connectors/*.connector.json). Intune, Defender XDR,
+# Azure RBAC and Entra roles are FREE; Power BI is connectors.powerbi; the other known connectors are connectors.apps.
+# An id not listed here is not gated (its own "unknown connector" error must surface, not be hidden as a licence hold).
+$script:PimWorkloadConnectorProKeys = @{
+    'powerbi' = 'connectors.powerbi'; 'power-bi' = 'connectors.powerbi'
+    'entra-approle' = 'connectors.apps'; 'approle' = 'connectors.apps'; 'azure-devops' = 'connectors.apps'
+    'dataverse' = 'connectors.apps'; 'business-central' = 'connectors.apps'; 'power-platform' = 'connectors.apps'
+}
+$script:PimWorkloadLicenceWarned = @{}
+
+function Get-PimWorkloadConnectorProKey {
+    <# PURE. The Pro catalog key a workload connector id needs, or '' (free / not gated). #>
+    param([AllowNull()][string]$Workload)
+    $w = "$Workload".Trim().ToLowerInvariant()
+    if ($w -and $script:PimWorkloadConnectorProKeys.ContainsKey($w)) { return "$($script:PimWorkloadConnectorProKeys[$w])" }
+    return ''
+}
+
+function Select-PimWorkloadRowsLicensed {
+    <#
+      REQ-Y. The PIM-Assignments-Workloads rows the generic connector dispatcher may act on: every row of a FREE connector,
+      and a Pro connector's rows only with a Pro licence (the hard gate, Test-PimFeatureProLicence -- never the kill
+      switch, which the provider's own feature already is). Held rows (assign AND remove -- inert, both ways) are named
+      ONCE per process in a scope warning with the licence line. -Warnings: the engine's per-scope warning list.
+    #>
+    param([object[]]$Rows = @(), [object]$Warnings)
+    $keep = New-Object System.Collections.Generic.List[object]
+    $held = @{}
+    $verdict = @{}
+    foreach ($r in @($Rows)) {
+        if ($null -eq $r) { continue }
+        $w = if ($r -is [System.Collections.IDictionary]) { "$($r['Workload'])" } else { $pp = $r.PSObject.Properties['Workload']; if ($pp) { "$($pp.Value)" } else { '' } }
+        $k = Get-PimWorkloadConnectorProKey -Workload $w
+        if (-not $k) { $keep.Add($r); continue }
+        if (-not $verdict.ContainsKey($k)) { $verdict[$k] = Test-PimFeatureProLicence -Key $k }
+        if ($verdict[$k].ok) { $keep.Add($r); continue }
+        $id = "$w".Trim().ToLowerInvariant()
+        if (-not $held.ContainsKey($id)) { $held[$id] = 0 }
+        $held[$id]++
+    }
+    foreach ($id in @($held.Keys | Sort-Object)) {
+        $k = Get-PimWorkloadConnectorProKey -Workload $id
+        $line = ("{0} row(s) for the '{1}' connector are held -- {2}" -f $held[$id], $id, $verdict[$k].message)
+        # $null -ne, not truthiness: an EMPTY warning list is falsy, and it is exactly the one the engine passes in.
+        if ($null -ne $Warnings -and ($Warnings -is [System.Collections.IList])) { [void]$Warnings.Add($line) }
+        if (-not $script:PimWorkloadLicenceWarned[$id]) { $script:PimWorkloadLicenceWarned[$id] = $true; Write-Warning ("  [WorkloadConnectors] " + $line) }
+    }
+    return @($keep.ToArray())
+}
+
+function Get-PimProFeatureStates {
+    <#
+      REQ-Y. Every license='pro' catalog entry with its hard-gate verdict, for GET /api/license and the GUI's
+      "Pro -- contact" notices: key -> @{ label; scope; ok; grace; state (ok|grace|locked); reason; message }.
+    #>
+    [CmdletBinding()] param([string]$TenantId, [string]$SqlServer, [string]$PublicCertB64)
+    $out = [ordered]@{}
+    foreach ($f in $script:PimFeatureCatalog) {
+        if ("$($f.license)" -ne 'pro') { continue }
+        $a = @{ Key = "$($f.key)"; TenantId = $TenantId; SqlServer = $SqlServer }
+        if ($PublicCertB64) { $a['PublicCertB64'] = $PublicCertB64 }
+        $r = Test-PimFeatureProLicence @a
+        $out["$($f.key)"] = [ordered]@{ label = "$($f.label)"; scope = "$($f.scope)"; proFeature = "$($f.proFeature)"; ok = [bool]$r.ok; grace = [bool]$r.grace
+            state = $(if (-not $r.ok) { 'locked' } elseif ($r.grace) { 'grace' } else { 'ok' }); reason = "$($r.reason)"; message = "$($r.message)" }
+    }
+    return $out
+}
+
 function Test-PimFeatureAvailable {
     # The combined gate side-effecting code calls: ENABLED *and* LICENSED. Core
     # features are always available. -SuperAdmin bypasses the LICENSE gate only
     # (never the kill switch -- a deliberately-off feature stays off even for an
     # admin, so a disabled integration performs no writes). -Quiet suppresses the
     # one-line "skipped" log. Returns $true = the feature may run.
+    # REQ-Y: a license='pro' entry ALSO needs a Pro licence (Test-PimFeatureProLicence) -- checked FIRST, for every tier,
+    # with no SuperAdmin bypass. So every engine scope, job and sweep that already asks this gate is inert without one.
     [CmdletBinding()]
     param([Parameter(Mandatory)][string]$Key, [string]$Edition, [switch]$SuperAdmin, [switch]$Quiet)
     $entry = Get-PimFeatureCatalogEntry -Key $Key
     if (-not $entry) {
         if (-not $Quiet) { Write-PimFeatureGateLog -Key $Key -Reason "unknown feature key" }
         return $false
+    }
+    if ("$($entry.license)" -eq 'pro') {
+        $pl = Test-PimFeatureProLicence -Key $Key
+        if (-not $pl.ok) {
+            if (-not $Quiet) { Write-PimFeatureGateLog -Key $Key -Reason ("is Pro -- " + $pl.message) }
+            return $false
+        }
+        if ($pl.grace -and -not $script:PimFeatureProGraceWarned[$Key]) {
+            $script:PimFeatureProGraceWarned[$Key] = $true
+            Write-Warning ("[licence] " + $pl.message)
+        }
     }
     if ("$($entry.tier)" -eq 'core') { return $true }
 

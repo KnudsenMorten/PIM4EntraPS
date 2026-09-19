@@ -42,6 +42,27 @@ $here    = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent $MyInv
 $shared  = Resolve-Path "$here\..\..\engine\_shared"
 . "$shared\PIM-Scheduler.ps1"
 
+function Test-PimSchedulerSeedTarget {
+    <#
+      PURE (IMP-49 e). May this seed REPLACE the scheduler state + run history of this store?
+      The seed overwrites SchedulerState and resets JobRunHistory to its fake runs, so pointed at a real
+      environment it WIPED that environment's run history (and every last/next-run stamp) -- and v2
+      never seeds sample data into a live store. Allowed only when BOTH hold:
+        * the server is an obviously throwaway LOCAL one (., localhost, (local), 127.0.0.1 -- the rule
+          tests/gui-headless/Seed-PimDocScreenshotData.ps1 already applies), and
+        * the store holds no run history except earlier SEEDS (runId 'seed-...' / 'doc-...').
+    #>
+    param([string]$ConnectionString, [object[]]$ExistingRuns = @())
+    if ($ConnectionString -notmatch '(?i)(Data Source|Server)\s*=\s*(tcp:)?(\.|localhost|\(local\)|127\.0\.0\.1)(\\|;|,|$)') {
+        return @{ ok = $false; reason = 'refusing a non-local SQL server -- this seed writes FAKE scheduler state and run history, and belongs in a throwaway local store only' }
+    }
+    $real = @(@($ExistingRuns) | Where-Object { $_ -and "$($_.runId)" -notmatch '^(seed|doc)-' })
+    if ($real.Count) {
+        return @{ ok = $false; reason = "refusing to overwrite: this store already holds $($real.Count) REAL job run record(s) (runId not seed-/doc-), which the seed would wipe" }
+    }
+    return @{ ok = $true; reason = '' }
+}
+
 $seedTarget = 'memory'
 if ("$ConnectionString".Trim()) {
     . "$shared\PIM-SqlStore.ps1"
@@ -50,6 +71,13 @@ if ("$ConnectionString".Trim()) {
     # Start-PimScheduler each define the same pair over their own store).
     function Get-PimSetting { param([Parameter(Mandatory)][string]$Name) Get-PimSqlSetting -ConnectionString $script:SeedCs -Name $Name }
     function Set-PimSetting { param([Parameter(Mandatory)][string]$Name, [object]$Value) Set-PimSqlSetting -ConnectionString $script:SeedCs -Name $Name -Value $Value }
+    # IMP-49 e: decide BEFORE anything is written. The existing history is read through the same
+    # library the seed writes with, so both see the same store.
+    $existingRuns = @()
+    try { $existingRuns = @(Get-PimJobRunHistory) } catch { throw "Seed-PimSchedulerRuns: could not read the existing run history, so refusing to overwrite it: $($_.Exception.Message)" }
+    $guard = Test-PimSchedulerSeedTarget -ConnectionString $ConnectionString -ExistingRuns $existingRuns
+    if (-not $guard.ok) { throw "Seed-PimSchedulerRuns: $($guard.reason). Nothing was written." }
+    $script:PimRunHistory = $null
     $seedTarget = 'sql'
 }
 

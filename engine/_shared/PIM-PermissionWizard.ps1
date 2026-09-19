@@ -11,6 +11,13 @@
 
 Set-StrictMode -Off
 
+# REQ-U: group names come from the tenant's naming pattern (PIM-Naming.ps1). Loaded here when the host has not
+# (the engine loads this file before PIM-HybridAd.ps1 pulls the naming helpers in).
+if (-not (Get-Command Resolve-PimGroupNameFromTag -ErrorAction SilentlyContinue)) {
+    $__pimNamingLibPw = Join-Path $PSScriptRoot 'PIM-Naming.ps1'
+    if (Test-Path -LiteralPath $__pimNamingLibPw) { . $__pimNamingLibPw }
+}
+
 # Entra roles that are tier-0 / L0 (control of identity). Overridable.
 function Get-PimPrivilegedEntraRoles {
     if ($global:PIM_PrivilegedEntraRoles) { return @($global:PIM_PrivilegedEntraRoles) }
@@ -76,7 +83,13 @@ function New-PimPermissionGroupName {
         [string]$Au
     )
     $auSeg = if ("$Au".Trim()) { "-AU-$($Au.Trim())" } else { '' }
-    return ("PIM-{0}-{1}{2}-L{3}-T{4}-{5}-{6}" -f $Service, $Name, $auSeg, $Level, $Tier, $Code, $Domain)
+    # REQ-U (2026-09-19): the grammar above is the tenant-neutral TAG part; the NAME is the tenant's own
+    # PimGroupPattern around it (PIM-Naming.ps1 Resolve-PimGroupNameFromTag). This used to hard-code 'PIM-', so
+    # Azure / Power BI / Power Platform discovery proposed 'PIM-...' groups on a tenant whose convention is
+    # 'GRP-{Role}'. The shipped default pattern ('PIM-{Role}-{Department}') still yields 'PIM-<tag>'.
+    $tagPart = ("{0}-{1}{2}-L{3}-T{4}-{5}-{6}" -f $Service, $Name, $auSeg, $Level, $Tier, $Code, $Domain)
+    if (Get-Command Resolve-PimGroupNameFromTag -ErrorAction SilentlyContinue) { return (Resolve-PimGroupNameFromTag -Tag $tagPart) }
+    return "PIM-$tagPart"
 }
 
 # --- ENTRA derivation -----------------------------------------------------------

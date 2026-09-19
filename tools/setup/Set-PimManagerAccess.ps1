@@ -142,6 +142,19 @@ if (-not $supers.Count -and -not $AllowNoSuperAdmin) {
 }
 Note ("resulting model: $($final.Count) entr(y/ies), $($supers.Count) SuperAdmin") 'Gray'
 
+# REQ-Y: a SCOPED Manager user (role Delegated) is Pro (hard). Only a Delegated grant that is NEW (the identity was not
+# Delegated before) needs a Pro licence; Reader / Admin / SuperAdmin grants, removals and unchanged entries stay free.
+$wasDelegated = @{}; foreach ($s in @($stored)) { if ("$($s.role)".Trim() -eq 'Delegated') { $wasDelegated["$($s.identity)".ToLowerInvariant()] = $true } }
+$newDelegated = @($final | Where-Object { "$($_.role)" -eq 'Delegated' -and -not $wasDelegated.ContainsKey("$($_.identity)".ToLowerInvariant()) })
+if ($newDelegated.Count) {
+    . (Join-Path $sol 'engine\_shared\PIM-License.ps1')
+    $licRaw = $null; $licErr = ''
+    try { $licRaw = Invoke-PimSqlScalar -ConnectionString $cs -Sql "SELECT ValueJson FROM pim.Settings WHERE Name = N'License'" } catch { $licErr = "$($_.Exception.Message)" }
+    $lic = Test-PimProLicence -FeatureNames @('PortalAdmins') -Label 'Delegated administration ceilings' -TenantId $TenantId -SqlServer $SqlServerFqdn -LicenseText (ConvertFrom-PimLicenseSettingRaw $licRaw) -StoreError $licErr
+    if (-not $lic.ok) { $result.reason = "$($lic.message)"; Write-ResultFile; Write-Host "RESULT: REFUSED -- $($lic.message)" -ForegroundColor Red; exit 2 }
+    if ($lic.grace) { Write-Host "WARNING: $($lic.message)" -ForegroundColor Yellow }
+}
+
 if ($WhatIfPreference) { $result.ok = $true; $result.reason = 'what-if -- nothing written'; Write-ResultFile; Write-Host "RESULT: WHAT-IF -- nothing written" -ForegroundColor Yellow; exit 0 }
 
 if ($PSCmdlet.ShouldProcess("pim.Settings['ManagerAccess']", "write $($final.Count) entr(y/ies)")) {

@@ -219,15 +219,19 @@ function Build-PimLifecycleCalendar {
         # escalation due now (honouring the per-item notify log)
         $logEntry = $null
         if ($NotifyLog -and $NotifyLog.ContainsKey("$key")) { $logEntry = $NotifyLog["$key"] }
-        $lastStage = $null; $lastUtc = ''
+        $lastStage = $null; $lastUtc = ''; $lastRem = 0
         if ($logEntry) {
             if ($logEntry.PSObject.Properties['stage'] -and "$($logEntry.stage)".Trim()) { $lastStage = [int]$logEntry.stage }
             elseif ($logEntry -is [System.Collections.IDictionary] -and $logEntry.Contains('stage') -and "$($logEntry['stage'])".Trim()) { $lastStage = [int]$logEntry['stage'] }
             $lastUtc = if ($logEntry.PSObject.Properties['notifiedUtc']) { "$($logEntry.notifiedUtc)" } elseif ($logEntry -is [System.Collections.IDictionary] -and $logEntry.Contains('notifiedUtc')) { "$($logEntry['notifiedUtc'])" } else { '' }
+            # BUG-191 (2.4.371): how many reminders of THIS stage already went out -- the reminder cadence is capped
+            # (Get-PimDueEscalation, policy maxRemindersPerStage / remindAfterExpiry).
+            $remRaw = if ($logEntry.PSObject.Properties['reminders']) { "$($logEntry.reminders)" } elseif ($logEntry -is [System.Collections.IDictionary] -and $logEntry.Contains('reminders')) { "$($logEntry['reminders'])" } else { '' }
+            if ("$remRaw".Trim()) { try { $lastRem = [int]$remRaw } catch { $lastRem = 0 } }
         }
-        $due = Get-PimDueEscalation -DaysLeft $days -NowUtc $now -Policy $EscalationPolicy -LastStageAtDays $lastStage -LastNotifiedUtc $lastUtc
+        $due = Get-PimDueEscalation -DaysLeft $days -NowUtc $now -Policy $EscalationPolicy -LastStageAtDays $lastStage -LastNotifiedUtc $lastUtc -ReminderCount $lastRem
         if ($due) {
-            $escalations.Add([pscustomobject]@{ key = "$key"; daysLeft = $days; stage = $due.stage; recipients = @($due.recipients); isReminder = [bool]$due.isReminder; expiryUtc = $u.expiryUtc; item = $it })
+            $escalations.Add([pscustomobject]@{ key = "$key"; daysLeft = $days; stage = $due.stage; recipients = @($due.recipients); isReminder = [bool]$due.isReminder; reminders = $(if ($due.isReminder) { $lastRem + 1 } else { 0 }); expiryUtc = $u.expiryUtc; item = $it })
         }
 
         # auto-renew (AutoExtend within the renew window)
@@ -268,39 +272,202 @@ function Get-PimLifecycleRenewalChanges {
     return @($changes.ToArray())
 }
 
+function Resolve-PimLifecycleEscalationRecipient {
+    <#
+      BUG-191 (§33.28): the DEFAULT resolver for the escalation policy's symbolic recipients. Nothing ever
+      set $global:PIM_LifecycleRecipientResolver, so every symbol resolved to nobody. Returns string[]:
+        owner / manager -> (2.4.371, §71.19) the admin's SPONSOR DEPARTMENT's owners via Get-PimAdminMailRecipientPlan
+                           (the per-admin forward override first), then the item's ManagerEmail as the LEGACY
+                           fallback; an item that resolves to nobody falls back to the Alerting recipients, so an
+                           escalation is never silently addressed to nobody
+        admin           -> the Manager's Alerting recipients (pim.Settings['Alerting'])
+      A symbol that already looks like an address is used as-is.
+    #>
+    [CmdletBinding()] param([string]$Symbol, [object]$Item)
+    $sym = "$Symbol".Trim()
+    if ($sym -match '@') { return @($sym) }
+    $alerting = @()
+    if (Get-Command Get-PimJobAlertingConfig -ErrorAction SilentlyContinue) {
+        try { $alerting = @((Get-PimJobAlertingConfig).recipients | Where-Object { "$_".Trim() }) } catch { $alerting = @() }
+    }
+    $mgr = ''
+    if ($null -ne $Item) {
+        if ($Item -is [System.Collections.IDictionary]) { if ($Item.Contains('ManagerEmail')) { $mgr = "$($Item['ManagerEmail'])".Trim() } }
+        elseif ($Item.PSObject.Properties['ManagerEmail']) { $mgr = "$($Item.ManagerEmail)".Trim() }
+    }
+    $s = $sym.ToLowerInvariant()
+    if ($s -eq 'admin') { return @($alerting) }
+    if ($s -in @('owner', 'manager', 'sponsor')) {
+        # 2.4.371 (§71.19): an admin's mail goes to its SPONSOR DEPARTMENT's owners (or the per-admin forward override),
+        # with ManagerEmail only as the legacy fallback -- the same resolver the TAP and every other admin mail use.
+        if ($null -ne $Item -and (Get-Command Get-PimAdminMailRecipientPlan -ErrorAction SilentlyContinue)) {
+            $pf = { param($n) if ($Item -is [System.Collections.IDictionary]) { if ($Item.Contains($n)) { return "$($Item[$n])" } } elseif ($Item.PSObject.Properties[$n]) { return "$($Item.$n)" }; return '' }
+            $like = [pscustomobject]@{ UserPrincipalName = (& $pf 'UserName'); Department = (& $pf 'Department'); ForwardMailsToContact = (& $pf 'ForwardMailsToContact')
+                                       MailForwardAddress = (& $pf 'MailForwardAddress'); ManagerEmail = $mgr }
+            $plan = $null
+            try { $plan = Get-PimAdminMailRecipientPlan -Row $like } catch { $plan = $null }
+            if ($plan -and @($plan.recipients | Where-Object { "$_".Trim() }).Count) { return @($plan.recipients | Where-Object { "$_".Trim() }) }
+        }
+        if ($mgr) { return @($mgr) }
+        return @($alerting)
+    }
+    return @()
+}
+
 function Send-PimLifecycleEscalations {
     <#
     .SYNOPSIS
-        Send the calendar's due escalation notifications via the existing
-        templated mail, resolving symbolic recipients (owner/manager/admin) with
-        a caller-supplied resolver. Returns a result per recipient and an updated
-        notify log (so the next pass honours the reminder cadence). Honours
-        -WhatIf (renders, does not send).
+        Send the calendar's due escalation notifications, resolving symbolic recipients
+        (owner/manager/admin) with a resolver (default: Resolve-PimLifecycleEscalationRecipient).
+        Returns a result per recipient and an updated notify log (so the next pass honours the
+        reminder cadence). Honours -WhatIf (renders, does not send).
+      🔴 BUG-191 (§33.28): this sent the SERIAL-APPROVAL escalation template ('approval-escalation',
+      tokens ApproverName/RequestorUpn/...) with tokens it does not use, to recipients nothing resolved.
+      It now uses 'alert-notice' (event 'expiring-access') with that template's own tokens, READS each
+      send result, and advances an item's notify log ONLY when a mail actually went out (or -WhatIf) --
+      a stage that reached nobody is re-tried next pass, never recorded as notified.
     #>
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)][object]$Calendar,
-        [scriptblock]$RecipientResolver,   # { param($symbol,$item) -> email or $null }
-        [string]$TemplateType = 'approval-escalation',
+        [scriptblock]$RecipientResolver,   # { param($symbol,$item) -> email(s) or $null }
+        [string]$TemplateType = 'alert-notice',
         [hashtable]$NotifyLog = @{},
         [switch]$WhatIf
     )
+    if (-not $RecipientResolver) { $RecipientResolver = { param($s, $i) Resolve-PimLifecycleEscalationRecipient -Symbol $s -Item $i } }
     $log = @{}; foreach ($k in @($NotifyLog.Keys)) { $log[$k] = $NotifyLog[$k] }
     $results = New-Object System.Collections.Generic.List[object]
     foreach ($e in @($Calendar.escalations)) {
-        foreach ($sym in @($e.recipients)) {
-            $rcpt = $null
-            if ($RecipientResolver) { try { $rcpt = & $RecipientResolver $sym $e.item } catch { $rcpt = $null } }
-            $sent = $null
-            if (Get-Command Send-PimNotifyMail -ErrorAction SilentlyContinue) {
-                $tokens = @{ Subject = "Access for $($e.key) expires in $($e.daysLeft) day(s)"; UserName = "$($e.key)"; DaysLeft = "$($e.daysLeft)"; ExpiresAtUtc = "$($e.expiryUtc)"; Stage = "$($e.stage)" }
-                $sent = Send-PimNotifyMail -Type $TemplateType -Tokens $tokens -Recipient $rcpt -WhatIf:$WhatIf
-            }
-            $results.Add([pscustomobject]@{ key = "$($e.key)"; symbol = "$sym"; recipient = $rcpt; stage = $e.stage; isReminder = $e.isReminder; sent = $sent })
+        $it = $e.item
+        $kind = if ($it -and $it.PSObject.Properties['Kind']) { "$($it.Kind)" } else { 'access' }
+        $what = if ($it -and $it.PSObject.Properties['GroupTag'] -and "$($it.GroupTag)") { " ($($it.GroupTag))" } else { '' }
+        $when = "$($e.expiryUtc)"; try { $when = ([datetime]$e.expiryUtc).ToUniversalTime().ToString('yyyy-MM-dd HH:mm') + ' UTC' } catch { }
+        $verb = if ([int]$e.daysLeft -lt 0) { 'expired' } else { 'expires' }
+        $tokens = @{
+            AlertTitle  = ("{0} for {1} {2} in {3} day(s)" -f $kind, "$($e.key)", $verb, [Math]::Abs([int]$e.daysLeft))
+            AlertEvent  = 'expiring-access'
+            AlertDetail = ("{0}{1}: lifecycle date {2}, escalation stage {3} day(s){4}." -f "$($e.key)", $what, $when, "$($e.stage)", $(if ($e.isReminder) { ' (reminder)' } else { '' }))
+            AlertTab    = 'admins'
+            TenantName  = "$($global:PIM_TenantName)"
+            Instance    = 'scheduler'
+            WhenUtc     = [datetime]::UtcNow.ToString('yyyy-MM-dd HH:mm:ss') + ' UTC'
         }
-        $log["$($e.key)"] = [pscustomobject]@{ stage = [int]$e.stage; notifiedUtc = $Calendar.generatedUtc }
+        $anySent = $false; $seenRcpt = @{}
+        foreach ($sym in @($e.recipients)) {
+            $rcpts = @()
+            try { $rcpts = @(& $RecipientResolver $sym $it | Where-Object { "$_".Trim() }) } catch { $rcpts = @() }
+            if (-not $rcpts.Count) {
+                $results.Add([pscustomobject]@{ key = "$($e.key)"; symbol = "$sym"; recipient = $null; stage = $e.stage; isReminder = $e.isReminder; sent = $false; held = $false; reason = "no recipient resolved for '$sym'" })
+                continue
+            }
+            foreach ($rcpt in $rcpts) {
+                $rk = "$rcpt".Trim().ToLowerInvariant(); if ($seenRcpt.ContainsKey($rk)) { continue }; $seenRcpt[$rk] = $true   # owner + manager can be the same person
+                $ok = $false; $why = ''
+                if (-not (Get-Command Send-PimNotifyMail -ErrorAction SilentlyContinue)) { $why = 'the mail sender is not loaded' }
+                else {
+                    try {
+                        $m = Send-PimNotifyMail -Type $TemplateType -Tokens $tokens -Recipient "$rcpt" -WhatIf:$WhatIf
+                        if ($m -is [hashtable]) { $ok = [bool]$m['sent']; $why = "$($m['reason'])" } elseif ($m) { $ok = [bool]$m.sent; $why = "$($m.reason)" }
+                    } catch { $why = "$($_.Exception.Message)" }
+                }
+                if ($ok -or $WhatIf) { $anySent = $true }
+                # BUG-191 (2.4.371): a DELIBERATE operator state (kill switch, feature off, allowlist, no sender) is a
+                # hold, not a failure -- the caller reports it as skipped and does not fail the job. It is still not
+                # recorded as notified, so the stage goes out once mail is enabled.
+                $held = (-not $ok) -and (-not $WhatIf) -and (Test-PimMailHoldReason -Reason $why)
+                $results.Add([pscustomobject]@{ key = "$($e.key)"; symbol = "$sym"; recipient = "$rcpt"; stage = $e.stage; isReminder = $e.isReminder; sent = [bool]$ok; held = [bool]$held; reason = $why })
+            }
+        }
+        $remN = if ($e.PSObject.Properties['reminders']) { [int]$e.reminders } else { 0 }
+        if ($anySent) { $log["$($e.key)"] = [pscustomobject]@{ stage = [int]$e.stage; notifiedUtc = $Calendar.generatedUtc; reminders = $remN } }
     }
     return [pscustomobject]@{ results = @($results.ToArray()); notifyLog = $log }
+}
+
+function Get-PimLifecycleEscalationLog {
+    # BUG-191: the per-item notify log lives in SQL (pim.Settings['LifecycleEscalationLog']). It used to be a
+    # process global, so in a cron tick -- a new process every run -- every stage looked un-notified every hour.
+    # THROWS when the store cannot be read (the caller must not re-send everything on a read failure).
+    [CmdletBinding()] param()
+    if (-not (Get-Command Get-PimSetting -ErrorAction SilentlyContinue)) { throw 'no SQL settings store (Get-PimSetting) is wired -- the escalation log cannot be read' }
+    $v = Get-PimSetting -Name 'LifecycleEscalationLog'
+    if ($v -is [string] -and "$v".Trim()) { $v = $v | ConvertFrom-Json }
+    $map = @{}
+    if ($null -ne $v) {
+        if ($v -is [System.Collections.IDictionary]) { foreach ($k in @($v.Keys)) { $map["$k"] = $v[$k] } }
+        else { foreach ($p in $v.PSObject.Properties) { $map["$($p.Name)"] = $p.Value } }
+    }
+    return $map
+}
+
+function Save-PimLifecycleEscalationLog {
+    # THROWS when the store rejects the write (the job must then report failure: an unsaved log re-sends).
+    [CmdletBinding()] param([hashtable]$Log = @{}, [datetime]$NowUtc = [datetime]::UtcNow, [int]$KeepDays = 120)
+    if (-not (Get-Command Set-PimSetting -ErrorAction SilentlyContinue)) { throw 'no SQL settings store (Set-PimSetting) is wired -- the escalation log cannot be saved' }
+    $cut = $NowUtc.ToUniversalTime().AddDays(-[Math]::Abs($KeepDays))
+    $o = [ordered]@{}
+    foreach ($k in @($Log.Keys | Sort-Object)) {
+        $e = $Log[$k]; $t = $null
+        try { $t = ([datetime]"$($e.notifiedUtc)").ToUniversalTime() } catch { $t = $null }
+        if ($null -ne $t -and $t -lt $cut) { continue }   # history, not state
+        $f = { param($n) if ($e -is [System.Collections.IDictionary]) { if ($e.Contains($n)) { return $e[$n] } } elseif ($e.PSObject.Properties[$n]) { return $e.$n }; return $null }
+        $rem = 0; $rv = & $f 'reminders'; if ($null -ne $rv -and "$rv".Trim()) { try { $rem = [int]"$rv" } catch { $rem = 0 } }
+        $row = [ordered]@{ stage = [int](& $f 'stage'); notifiedUtc = "$(& $f 'notifiedUtc')"; reminders = $rem }
+        if ("$(& $f 'seeded')" -match '^(?i)true$') { $row['seeded'] = $true }   # baseline, never mailed (BUG-191)
+        $o["$k"] = $row
+    }
+    Set-PimSetting -Name 'LifecycleEscalationLog' -Value (ConvertTo-Json -InputObject $o -Depth 4 -Compress)
+}
+
+function Test-PimMailHoldReason {
+    <#
+      BUG-191 (§33.28, 2.4.371). PURE. $true when a Send-PimNotifyMail refusal is a DELIBERATE operator state rather
+      than a delivery failure: the email kill switch, the 'alerting.email' feature switched off, a recipient not on the
+      allowlist, or no sender configured. Those are what the operator chose (or has not set up yet); reporting them as a
+      failed job every hour teaches people to ignore the Jobs column. The mail is still NOT recorded as sent -- it goes
+      out once mail is enabled. Keep in step with the reason strings Send-PimNotifyMail returns.
+    #>
+    param([string]$Reason)
+    return ("$Reason".Trim() -in @('email kill switch on', 'email feature disabled', 'recipient not on allowlist', 'no sender'))
+}
+
+function Get-PimLifecycleEscalationBaseline {
+    # BUG-191 (2.4.371): the first-run marker, pim.Settings['LifecycleEscalationBaseline'] = { seededUtc; seeded }.
+    # ABSENT means this environment has never baselined its escalations: the first run records every stage that is
+    # already due WITHOUT mailing it. A separate value, not "the log is empty": an environment whose log is empty only
+    # because nothing was ever due must mail the first stage that becomes due, not swallow it as a baseline.
+    # Returns $null when absent; THROWS when the store cannot be read (the caller must not send on a read failure).
+    [CmdletBinding()] param()
+    if (-not (Get-Command Get-PimSetting -ErrorAction SilentlyContinue)) { throw 'no SQL settings store (Get-PimSetting) is wired -- the escalation baseline cannot be read' }
+    $v = Get-PimSetting -Name 'LifecycleEscalationBaseline'
+    if ($v -is [string]) { if (-not "$v".Trim()) { return $null }; $v = $v | ConvertFrom-Json }
+    return $v
+}
+
+function Save-PimLifecycleEscalationBaseline {
+    [CmdletBinding()] param([datetime]$NowUtc = [datetime]::UtcNow, [int]$Seeded = 0)
+    if (-not (Get-Command Set-PimSetting -ErrorAction SilentlyContinue)) { throw 'no SQL settings store (Set-PimSetting) is wired -- the escalation baseline cannot be saved' }
+    Set-PimSetting -Name 'LifecycleEscalationBaseline' -Value (ConvertTo-Json -InputObject ([ordered]@{ seededUtc = $NowUtc.ToUniversalTime().ToString('o'); seeded = [int]$Seeded }) -Compress)
+}
+
+function Add-PimLifecycleEscalationSeed {
+    <#
+      BUG-191 (2.4.371). PURE. Record every escalation the calendar says is due NOW as already notified -- without
+      sending anything -- so the first run after an upgrade does not mail every stage that was already due (on an
+      environment with dozens of admins that is dozens of mails in one hour, to sponsors and the Alerting list, about
+      states nobody chose to be told about). Returns @{ notifyLog; seeded }. After this, only a NEW stage transition
+      (or a capped reminder) is due.
+    #>
+    [CmdletBinding()] param([Parameter(Mandatory)][object]$Calendar, [hashtable]$NotifyLog = @{})
+    $log = @{}; foreach ($k in @($NotifyLog.Keys)) { $log[$k] = $NotifyLog[$k] }
+    $n = 0
+    foreach ($e in @($Calendar.escalations)) {
+        # A due REMINDER of an already-logged stage is baselined the same way (counted as sent), so it cannot storm either.
+        $log["$($e.key)"] = [pscustomobject]@{ stage = [int]$e.stage; notifiedUtc = $Calendar.generatedUtc; reminders = $(if ($e.PSObject.Properties['reminders']) { [int]$e.reminders } else { 0 }); seeded = $true }
+        $n++
+    }
+    return [pscustomobject]@{ notifyLog = $log; seeded = $n }
 }
 
 # ===========================================================================
@@ -403,6 +570,54 @@ function Resolve-PimEmergencyExpectedHash {
     }
     if ("$LocalHash".Trim()) { return [pscustomobject]@{ hash = "$LocalHash".Trim().ToLowerInvariant(); source = 'local' } }
     return [pscustomobject]@{ hash = ''; source = 'none' }
+}
+
+function Get-PimEmergencyPassphraseStatus {
+    <#
+    .SYNOPSIS
+        REQ-F (2026-09-19): is an emergency passphrase configured -- WITHOUT ever returning it or its hash.
+
+    .DESCRIPTION
+        Same resolution order as Resolve-PimEmergencyExpectedHash (the key vault named by PIM_EmergencyVault
+        first, then a host-set in-memory hash), so the Settings card says exactly what an activation will find.
+        Measured 2026-09-19: no hosted Manager had PIM_EmergencyVault, so every activation was refused with
+        "no emergency passcode configured" -- and nothing on screen said so until somebody tried in an incident.
+        Returns @{ configured; source ('keyvault' | 'local' | 'none'); vault; secretName; reason }.
+        -SecretReader is the test seam (default: Get-PimSqlSecretFromKeyVault). PS 5.1-safe.
+    #>
+    [CmdletBinding()]
+    param(
+        [string]$VaultName  = "$($global:PIM_EmergencyVault)",
+        [string]$SecretName = $(if ($global:PIM_EmergencyPasscodeSecret) { "$($global:PIM_EmergencyPasscodeSecret)" } else { 'PIM-EmergencyPasscode' }),
+        [string]$LocalHash  = "$($global:PIM_EmergencyPasscodeHash)",
+        [scriptblock]$SecretReader
+    )
+    $v = "$VaultName".Trim(); $s = "$SecretName".Trim()
+    $vaultReason = ''
+    if ($v) {
+        $reader = $SecretReader
+        if (-not $reader) {
+            if (Get-Command Get-PimSqlSecretFromKeyVault -ErrorAction SilentlyContinue) { $reader = { param($vn, $sn) Get-PimSqlSecretFromKeyVault -VaultName $vn -SecretName $sn } }
+        }
+        if (-not $reader) {
+            $vaultReason = "PIM_EmergencyVault is '$v' but this runtime has no Key Vault reader loaded"
+        } else {
+            try {
+                $val = & $reader $v $s
+                if ("$val".Trim()) {
+                    return [pscustomobject]@{ configured = $true; source = 'keyvault'; vault = $v; secretName = $s; reason = "the passphrase is stored in key vault '$v' (secret $s)" }
+                }
+                $vaultReason = "secret '$s' in key vault '$v' is empty"
+            } catch {
+                $vaultReason = "secret '$s' in key vault '$v' could not be read: $($_.Exception.Message)"
+            }
+        }
+    }
+    if ("$LocalHash".Trim()) {
+        return [pscustomobject]@{ configured = $true; source = 'local'; vault = $v; secretName = $s; reason = $(if ($vaultReason) { "$vaultReason -- using the passphrase hash this host set in memory" } else { 'a passphrase hash is set in memory by this host (no key vault configured)' }) }
+    }
+    $why = if ($vaultReason) { $vaultReason } else { 'no key vault is configured for the emergency passphrase (PIM_EmergencyVault is not set on the Manager)' }
+    return [pscustomobject]@{ configured = $false; source = 'none'; vault = $v; secretName = $s; reason = $why }
 }
 
 function Resolve-PimEmergencyVerification {

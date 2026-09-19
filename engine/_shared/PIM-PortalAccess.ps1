@@ -16,6 +16,12 @@
 
 Set-StrictMode -Off
 
+# REQ-U: the name-grammar fallback in Get-PimGroupFacets reads names through the tenant's pattern (PIM-Naming.ps1).
+if (-not (Get-Command ConvertFrom-PimGroupNameToTag -ErrorAction SilentlyContinue)) {
+    $__pimNamingLibPa = Join-Path $PSScriptRoot 'PIM-Naming.ps1'
+    if (Test-Path -LiteralPath $__pimNamingLibPa) { . $__pimNamingLibPa }
+}
+
 # Capabilities a portal-admin profile may carry.
 $script:PimPortalCapabilities = @('manage-direct','manage-indirect','assign','assign-admin','enable-consultants','invite-guest','approve-assignment','access-review')
 
@@ -82,10 +88,21 @@ function Get-PimGroupFacets {
     if (-not $scope -and $name) { $ms = [regex]::Match($name, '(?i)-Scope-([A-Za-z0-9]+)-L\d'); if ($ms.Success) { $scope = $ms.Groups[1].Value } }
     $au       = & $get 'AdministrativeUnitTag'
 
-    # Name-grammar fallback: PIM-{Service}-{Name}-L{n}-T{n}-{Code}-{Domain}
-    if ((-not $workload -or -not $tierRaw -or -not $levelRaw -or -not $plane) -and $name) {
-        $m = [regex]::Match($name, '(?i)^PIM-(?<svc>[A-Za-z0-9]+(?:-[A-Za-z0-9]+)?)-.*-L(?<lvl>\d+)-T(?<tier>\d+)-(?<code>[A-Za-z]+)-(?<dom>[A-Za-z]+)')
-        if ($m.Success) {
+    # Name-grammar fallback: {Service}-{Name}-L{n}-T{n}-{Code}-{Domain}, read from the tenant-neutral part.
+    # 🔴 REQ-U (2026-09-19): this matched '^PIM-...' against the NAME, so on a tenant whose pattern is
+    # 'GRP-{Role}' no group ever yielded a service / tier / level and every delegated portal profile scoped by
+    # them silently matched nothing. The grammar is now read from the GroupTag, else from the name with the
+    # TENANT's pattern affixes stripped (ConvertFrom-PimGroupNameToTag) -- never from a hard-coded prefix.
+    if ((-not $workload -or -not $tierRaw -or -not $levelRaw -or -not $plane) -and ($name -or $tag)) {
+        $gram = '(?i)^(?<svc>[A-Za-z0-9]+(?:-[A-Za-z0-9]+)?)-.*-L(?<lvl>\d+)-T(?<tier>\d+)-(?<code>[A-Za-z]+)-(?<dom>[A-Za-z]+)'
+        $cands = New-Object System.Collections.Generic.List[string]
+        if ($tag) { $cands.Add("$tag") }
+        if ($name -and (Get-Command ConvertFrom-PimGroupNameToTag -ErrorAction SilentlyContinue)) {
+            $np = "$(ConvertFrom-PimGroupNameToTag -Name $name)"; if ($np) { $cands.Add($np) }
+        }
+        $m = $null
+        foreach ($c in $cands) { $mm = [regex]::Match($c, $gram); if ($mm.Success) { $m = $mm; break } }
+        if ($m -and $m.Success) {
             if (-not $workload) { $workload = $m.Groups['svc'].Value }
             if (-not $levelRaw) { $levelRaw = $m.Groups['lvl'].Value }
             if (-not $tierRaw)  { $tierRaw  = $m.Groups['tier'].Value }

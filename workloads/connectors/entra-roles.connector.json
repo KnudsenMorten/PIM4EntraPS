@@ -1,11 +1,14 @@
 {
   "id": "entra-roles",
-  "name": "Microsoft Entra ID (directory roles)",
+  "name": "Microsoft Entra ID (directory roles, ELIGIBLE through PIM)",
   "auth": "graph",
-  "permissionsNeeded": ["RoleManagement.Read.Directory (list)", "RoleManagement.ReadWrite.Directory (apply)"],
+  "pimModel": "eligible",
+  "permissionsNeeded": ["RoleManagement.Read.Directory (list)", "RoleEligibilitySchedule.ReadWrite.Directory (apply: an ELIGIBLE assignment through PIM)"],
   "prerequisites": {
-    "roleAssignableGroup": "The PIM group must be role-assignable (isAssignableToRole=true at creation; immutable afterward) to receive an Entra directory role. CreateUpdate-PIM-Group sets this for PIM- groups that map to directory roles.",
-    "noActivationNeeded": "Entra directory RBAC is always on; built-in roles always present. Only RoleManagement.ReadWrite.Directory is required to assign."
+    "roleAssignableGroup": "The PIM group must be role-assignable (isAssignableToRole=true at creation; immutable afterward) to be made eligible for an Entra directory role. CreateUpdate-PIM-Group sets this for PIM- groups that map to directory roles.",
+    "noActivationNeeded": "Entra directory RBAC is always on; built-in roles always present.",
+    "eligibleThroughPim": "SEC-45: this connector NEVER creates a permanent active directory-role assignment. It used to POST /roleManagement/directory/roleAssignments -- a standing assignment made OUTSIDE PIM, exactly what the product exists to prevent, and it was offered in the Manager's workload picker. The group is now made ELIGIBLE through a PIM eligibility schedule request (roleEligibilityScheduleRequests, action adminAssign); its members still ACTIVATE the role under the role's PIM policy (MFA, justification, approval, maximum duration). The role policy decides whether a no-expiry eligibility is allowed; if it is not, the request is refused and the engine reports the failure item.",
+    "removal": "A Remove row is REPORTED, not applied: an eligibility carries no 'created by PIM4EntraPS' marker, so the workload runtime never deletes it (the v1 rule for flat assignments). Remove it in Entra ID -> Privileged Identity Management, or manage directory-role delegation through PIM-Assignments-Roles-Groups, which the engine applies and prunes itself."
   },
   "api": {
     "baseUrl": "https://graph.microsoft.com/v1.0",
@@ -19,7 +22,7 @@
     },
     "listAssignments": {
       "method": "GET",
-      "path": "/roleManagement/directory/roleAssignments?$filter=roleDefinitionId eq '{roleId}'",
+      "path": "/roleManagement/directory/roleEligibilitySchedules?$filter=roleDefinitionId eq '{roleId}'",
       "itemsPath": "value",
       "assignmentId": "id",
       "roleId": "roleDefinitionId",
@@ -27,16 +30,28 @@
     },
     "assign": {
       "method": "POST",
-      "path": "/roleManagement/directory/roleAssignments",
+      "path": "/roleManagement/directory/roleEligibilityScheduleRequests",
       "body": {
+        "action": "adminAssign",
         "roleDefinitionId": "{roleId}",
         "principalId": "{groupId}",
-        "directoryScopeId": "{scope|/}"
+        "directoryScopeId": "{scope|/}",
+        "justification": "PIM4EntraPS workload connector: {groupTag} eligible for {roleName}",
+        "scheduleInfo": {
+          "expiration": { "type": "noExpiration" }
+        }
       }
     },
     "remove": {
-      "method": "DELETE",
-      "path": "/roleManagement/directory/roleAssignments/{assignmentId}"
+      "method": "POST",
+      "path": "/roleManagement/directory/roleEligibilityScheduleRequests",
+      "body": {
+        "action": "adminRemove",
+        "roleDefinitionId": "{roleId}",
+        "principalId": "{groupId}",
+        "directoryScopeId": "{scope|/}",
+        "justification": "PIM4EntraPS workload connector: remove {groupTag} from {roleName}"
+      }
     }
   }
 }

@@ -140,6 +140,24 @@ if ($Replace) {
 $final = @($byId.Values)
 Note ("resulting model: " + $final.Count + " profile(s)") 'Gray'
 
+# --- REQ-Y: delegated administration ceilings are Pro (hard) -------------------------------------------------------
+# A NEW or CHANGED profile needs a Pro licence bound to this tenant (pim.Settings['License'], verified offline). Removing
+# profiles (-Replace with fewer) and re-writing an unchanged one stay free: a ceiling only ever RESTRICTS, so nothing
+# here may widen anybody's access, and nobody is locked out of their own.
+$storedById = @{}; foreach ($s in @($stored)) { $storedById["$($s.identity)".ToLowerInvariant()] = (ConvertTo-Json -InputObject $s -Depth 8 -Compress) }
+$changedProfiles = @($incoming | Where-Object { $k = "$($_.identity)".ToLowerInvariant(); -not $storedById.ContainsKey($k) -or $storedById[$k] -ne (ConvertTo-Json -InputObject $_ -Depth 8 -Compress) })
+if ($changedProfiles.Count) {
+    . (Join-Path $sol 'engine\_shared\PIM-License.ps1')
+    $licRaw = $null; $licErr = ''
+    try { $licRaw = Invoke-PimSqlScalar -ConnectionString $cs -Sql "SELECT ValueJson FROM pim.Settings WHERE Name = N'License'" } catch { $licErr = "$($_.Exception.Message)" }
+    $lic = Test-PimProLicence -FeatureNames @('PortalAdmins') -Label 'Delegated administration ceilings' -TenantId $TenantId -SqlServer $SqlServerFqdn -LicenseText (ConvertFrom-PimLicenseSettingRaw $licRaw) -StoreError $licErr
+    if (-not $lic.ok) {
+        $result.reason = "$($lic.message)"
+        Write-ResultFile; Write-Host "RESULT: REFUSED -- $($lic.message)" -ForegroundColor Red; exit 2
+    }
+    if ($lic.grace) { Write-Host "WARNING: $($lic.message)" -ForegroundColor Yellow }
+}
+
 if ($WhatIfPreference) {
     $result.ok = $true; $result.reason = 'what-if -- nothing written'
     Write-ResultFile; Write-Host "RESULT: WHAT-IF -- nothing written" -ForegroundColor Yellow; exit 0

@@ -18,10 +18,13 @@
       (Register-PimDriftSnapshotHandler). The default handler in PIM-Scheduler.ps1 declares the job unimplemented,
       so the Manager -- which initialises the default handlers too -- can never run the plan.
 
-  The stored document:
-    { refreshedUtc; durationSeconds; total; counts{missing,changed,extra}; scopesFailed; ok; source; correlationId;
+  The stored document (REQ-U wave 2: + counts.warnings, scope.warnings, items of type 'warning' with kind/counted):
+    { refreshedUtc; durationSeconds; total; counts{missing,changed,extra,warnings}; scopesFailed; scopesChecked; scopesNotChecked;
+      ok; source; correlationId;
       scopes:[ { scope; entity; desired; live; nochange; missing; changed; extra; ok; error; skippedFeature;
-                 truncated; items:[ { type; key; label } ] } ] }
+                 checked; notCheckedReason; truncated; items:[ { type; key; label } ] } ] }
+  REQ-U: checked=$false for a failed scope AND for a skipped one (feature gated off, live read refused) -- neither
+  is ever counted as "checked, 0 drift".
 
   Classification is Get-PimDriftReport's (PIM-Governance.ps1) -- create=missing, update=changed, remove=extra -- never
   re-implemented here. Labels come from Get-PimFailureItemLabel (PIM-FailureCatalog.ps1), the same readable sentence
@@ -70,6 +73,7 @@ function ConvertTo-PimDriftSnapshotDocument {
     $scopeDocs = New-Object System.Collections.Generic.List[object]
     $diffs     = New-Object System.Collections.Generic.List[object]
     $payloads  = @{}   # "scope|key" -> the row the plan carried (desired for create/update, live for remove)
+    $findByScope = @{} # REQ-U wave 2: scope -> its live findings (warnings)
     foreach ($r in @($ScopeResults)) {
         if ($null -eq $r) { continue }
         $scope = "$(Get-PimDriftSnapshotField $r 'scope')".Trim()
@@ -88,7 +92,22 @@ function ConvertTo-PimDriftSnapshotDocument {
         }
         if ($err) {
             $scopeDocs.Add([ordered]@{ scope = $scope; entity = $entity; desired = $null; live = $null; nochange = $null
-                missing = $null; changed = $null; extra = $null; ok = $false; error = $err; skippedFeature = ''; truncated = 0; items = @() })
+                missing = $null; changed = $null; extra = $null; ok = $false; error = $err; skippedFeature = ''
+                checked = $false; notCheckedReason = $err; truncated = 0; items = @() })
+            continue
+        }
+        # 🔴 REQ-U (2026-09-19): a scope the engine SKIPPED (its feature gated off -- e.g. connectors.workload for
+        # DefenderXdrRoles / IntuneRoles) returned create=update=remove=nochange=0 and was stored as ok with 0 drift,
+        # so the page counted it among the "areas checked" and called it in sync. Nothing was compared. It is now
+        # NOT CHECKED, with its reason, and carries no counts (never "checked, 0 drift").
+        $skipF = "$(Get-PimDriftSnapshotField $r 'skippedFeature')".Trim()
+        $ncV = Get-PimDriftSnapshotField $r 'notChecked'
+        if ($skipF -or ($null -ne $ncV -and [bool]$ncV)) {
+            $why = "$(Get-PimDriftSnapshotField $r 'skippedReason')".Trim()
+            if (-not $why) { $why = if ($skipF) { "the feature '$skipF' is off for this run" } else { 'the engine did not compare this area' } }
+            $scopeDocs.Add([ordered]@{ scope = $scope; entity = $entity; desired = $null; live = $null; nochange = $null
+                missing = $null; changed = $null; extra = $null; ok = $true; error = ''; skippedFeature = $skipF
+                checked = $false; notCheckedReason = $why; truncated = 0; items = @() })
             continue
         }
         $cre = New-Object System.Collections.Generic.List[object]
@@ -105,6 +124,9 @@ function ConvertTo-PimDriftSnapshotDocument {
             $payloads["$scope|$k"] = Get-PimDriftSnapshotField $pc 'payload'
         }
         $diffs.Add([pscustomobject]@{ scope = $scope; entity = $entity; create = @($cre.ToArray()); update = @($upd.ToArray()); remove = @($rem.ToArray()) })
+        # REQ-U wave 2: the scope's live FINDINGS (the workload providers' orphan group / unmanaged binding / wrong
+        # permissions warnings, Invoke-PimEngineScope `findings`) -- listed as type 'warning' and counted as drift.
+        $findByScope[$scope] = @(@(Get-PimDriftSnapshotField $r 'findings') | Where-Object { $null -ne $_ })
         $nC = [int](Get-PimDriftSnapshotField $r 'create'); $nU = [int](Get-PimDriftSnapshotField $r 'update')
         $nR = [int](Get-PimDriftSnapshotField $r 'remove'); $nN = [int](Get-PimDriftSnapshotField $r 'nochange')
         # Invoke-PimEngineScope logs desired=/live= but does NOT return them. Derived from the diff instead:
@@ -117,9 +139,10 @@ function ConvertTo-PimDriftSnapshotDocument {
             desired  = $(if ($desiredN -is [int] -or $desiredN -is [long]) { [int]$desiredN } else { $nC + $nU + $nN })
             live     = $(if ($liveN -is [int] -or $liveN -is [long]) { [int]$liveN } else { $nU + $nR + $nN })
             nochange = $nN
-            missing = 0; changed = 0; extra = 0
+            missing = 0; changed = 0; extra = 0; warnings = 0
             ok = $true; error = ''
-            skippedFeature = "$(Get-PimDriftSnapshotField $r 'skippedFeature')"
+            skippedFeature = ''
+            checked = $true; notCheckedReason = ''
             truncated = 0; items = @()
         })
     }
@@ -135,8 +158,8 @@ function ConvertTo-PimDriftSnapshotDocument {
     }
     $labelFn = [bool](Get-Command Get-PimFailureItemLabel -ErrorAction SilentlyContinue)
     foreach ($sd in $scopeDocs) {
-        if (-not $sd.ok) { continue }
-        $list = if ($byScope.ContainsKey("$($sd.scope)")) { @($byScope["$($sd.scope)"].ToArray()) } else { @() }
+        if (-not $sd.ok -or -not $sd.checked) { continue }
+        $list =if ($byScope.ContainsKey("$($sd.scope)")) { @($byScope["$($sd.scope)"].ToArray()) } else { @() }
         $sd.missing = @($list | Where-Object { $_.type -eq 'missing' }).Count
         $sd.changed = @($list | Where-Object { $_.type -eq 'changed' }).Count
         $sd.extra   = @($list | Where-Object { $_.type -eq 'extra' }).Count
@@ -148,20 +171,45 @@ function ConvertTo-PimDriftSnapshotDocument {
             if (-not $label.Trim()) { $label = "$($it.key)" }
             $items.Add([ordered]@{ type = "$($it.type)"; key = "$($it.key)"; label = $label })
         }
+        # REQ-U wave 2 (design point 8): the area's live WARNINGS (orphan group, unmanaged binding, wrong permissions).
+        # They count toward drift -- EXCEPT a warning that names an item the plan already lists (its key, or one of its
+        # relatedKeys: a wrong-permissions warning IS the plan's 'changed' item), which is shown but counted once.
+        $wf = if ($findByScope.ContainsKey("$($sd.scope)")) { @($findByScope["$($sd.scope)"]) } else { @() }
+        $planKeys = New-Object System.Collections.Generic.HashSet[string] ([StringComparer]::OrdinalIgnoreCase)
+        foreach ($it in $list) { [void]$planKeys.Add("$($it.key)") }
+        $wn = 0
+        foreach ($f in $wf) {
+            $fk = "$(Get-PimDriftSnapshotField $f 'key')"
+            $dup = $planKeys.Contains($fk)
+            foreach ($rk in @(Get-PimDriftSnapshotField $f 'relatedKeys')) { if ("$rk" -and $planKeys.Contains("$rk")) { $dup = $true } }
+            # Lead decision 2026-09-19 (operator: "you decide"): an UNMANAGED binding -- a workload role held by a principal PIM
+            # does not define (hand-made assignments) -- is a REVIEW item, not drift: it is listed, never counted, so it cannot
+            # hold drift above zero and re-raise the drift alert every cycle. Orphan groups and wrong permissions still count.
+            $kind = "$(Get-PimDriftSnapshotField $f 'kind')"
+            $counts = (-not $dup) -and $kind -ne 'unmanaged-binding'
+            if ($counts) { $wn++ }
+            if ($items.Count -ge $ItemCap) { continue }
+            $items.Add([ordered]@{ type = 'warning'; key = $fk; label = "$(Get-PimDriftSnapshotField $f 'label')"; kind = $kind; counted = $counts; review = ($kind -eq 'unmanaged-binding') })
+        }
+        $sd.warnings = $wn
         $sd.items = @($items.ToArray())
-        $sd.truncated = [int]([math]::Max(0, $list.Count - $items.Count))
+        $sd.truncated = [int]([math]::Max(0, ($list.Count + $wf.Count) - $items.Count))
     }
 
-    $okScopes = @($scopeDocs | Where-Object { $_.ok })
-    $m = 0; $c = 0; $x = 0
-    foreach ($sd in $okScopes) { $m += [int]$sd.missing; $c += [int]$sd.changed; $x += [int]$sd.extra }
+    $okScopes = @($scopeDocs | Where-Object { $_.ok -and $_.checked })
+    $m = 0; $c = 0; $x = 0; $w = 0
+    foreach ($sd in $okScopes) { $m += [int]$sd.missing; $c += [int]$sd.changed; $x += [int]$sd.extra; $w += [int]$sd.warnings }
     $failed = @($scopeDocs | Where-Object { -not $_.ok }).Count
     return [ordered]@{
         refreshedUtc    = $NowUtc.ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ', [System.Globalization.CultureInfo]::InvariantCulture)
         durationSeconds = [math]::Round([double]$DurationSeconds, 1)
-        total           = ($m + $c + $x)
-        counts          = [ordered]@{ missing = $m; changed = $c; extra = $x }
+        total           = ($m + $c + $x + $w)
+        counts          = [ordered]@{ missing = $m; changed = $c; extra = $x; warnings = $w }
         scopesFailed    = $failed
+        # REQ-U: how many areas were really compared, and how many were NOT (failed + skipped), so no summary can
+        # present a skipped area as checked.
+        scopesChecked    = $okScopes.Count
+        scopesNotChecked = @($scopeDocs | Where-Object { -not $_.checked }).Count
         # ok = the check itself worked for every scope (NOT "no drift"). A partly-failed check is ok=$false.
         ok              = ($failed -eq 0 -and $scopeDocs.Count -gt 0)
         scopes          = @($scopeDocs.ToArray())
@@ -329,12 +377,13 @@ function Invoke-PimDriftSnapshotJob {
     $where = Set-PimTenantCacheEntry -Kind $kind -Value $doc
     $scopeDocs = @($doc.scopes)
     $failedNames = @($scopeDocs | Where-Object { -not $_.ok } | ForEach-Object { "$($_.scope)" })
-    $sum = "{0} drift item(s) (missing={1} changed={2} extra={3}) across {4} scope(s) in {5}s -> {6}" -f `
-        $doc.total, $doc.counts.missing, $doc.counts.changed, $doc.counts.extra, $scopeDocs.Count, $doc.durationSeconds, $where
+    # REQ-U wave 2: live workload warnings (orphan group / unmanaged binding / wrong permissions) are drift too.
+    $sum = "{0} drift item(s) (missing={1} changed={2} extra={3} warnings={7}) across {4} scope(s) in {5}s -> {6}" -f `
+        $doc.total, $doc.counts.missing, $doc.counts.changed, $doc.counts.extra, $scopeDocs.Count, $doc.durationSeconds, $where, [int]$doc.counts.warnings
 
     if ([int]$doc.total -gt 0) {
         $title = 'Configuration drift detected'
-        $detail = "missing={0} changed={1} extra={2}" -f $doc.counts.missing, $doc.counts.changed, $doc.counts.extra
+        $detail = "missing={0} changed={1} extra={2} warnings={3}" -f $doc.counts.missing, $doc.counts.changed, $doc.counts.extra, [int]$doc.counts.warnings
         try {
             if (Get-Command Send-PimManagerAlert -ErrorAction SilentlyContinue) {
                 [void](Send-PimManagerAlert -Event 'drift' -Title $title -Detail $detail -LinkTab 'drift')
@@ -349,6 +398,9 @@ function Invoke-PimDriftSnapshotJob {
             (@($scopeDocs | ForEach-Object { "[$($_.scope)] $($_.error)" }) -join '  |  '))
     }
     $partialTxt = if ($failedNames.Count) { " PARTIAL -- could not check: " + ($failedNames -join ', ') } else { '' }
+    # REQ-U: a skipped (gated) area is named too -- it was NOT checked, whatever the totals say.
+    $skippedDocs = @($scopeDocs | Where-Object { $_.ok -and -not $_.checked })
+    if ($skippedDocs.Count) { $partialTxt += " NOT CHECKED: " + (@($skippedDocs | ForEach-Object { "$($_.scope) ($($_.notCheckedReason))" }) -join '; ') }
     return [pscustomobject]@{ ran = $true; whatIf = $false; total = [int]$doc.total; scopesFailed = $failedNames.Count
         detail = "$type`: $sum$partialTxt" }
 }
@@ -434,7 +486,8 @@ function ConvertTo-PimDriftSnapshotView {
     foreach ($s in $scopes) {
         foreach ($it in @(@(Get-PimDriftSnapshotField $s 'items') | Where-Object { $null -ne $_ })) {
             $flat.Add([ordered]@{ scope = "$(Get-PimDriftSnapshotField $s 'scope')"; entity = "$(Get-PimDriftSnapshotField $s 'entity')"
-                type = "$(Get-PimDriftSnapshotField $it 'type')"; key = "$(Get-PimDriftSnapshotField $it 'key')"; label = "$(Get-PimDriftSnapshotField $it 'label')" })
+                type = "$(Get-PimDriftSnapshotField $it 'type')"; key = "$(Get-PimDriftSnapshotField $it 'key')"; label = "$(Get-PimDriftSnapshotField $it 'label')"
+                kind = "$(Get-PimDriftSnapshotField $it 'kind')" })   # REQ-U wave 2: a warning's kind (orphan-group / unmanaged-binding / wrong-permissions)
         }
     }
     $asOf = if ($refreshed) { $refreshed.ToString('HH:mm', [System.Globalization.CultureInfo]::InvariantCulture) + ' UTC' } else { "$refreshedIso" }
@@ -462,6 +515,10 @@ function ConvertTo-PimDriftSnapshotView {
         total           = [int](Get-PimDriftSnapshotField $Entry 'total')
         counts          = $counts
         scopesFailed    = [int](Get-PimDriftSnapshotField $Entry 'scopesFailed')
+        # REQ-U: an older document has no 'checked' -- a skipped (skippedFeature) or failed area is not checked.
+        scopesNotChecked = @($scopes | Where-Object {
+            $ck = Get-PimDriftSnapshotField $_ 'checked'; $okS = Get-PimDriftSnapshotField $_ 'ok'
+            ($null -ne $ck -and -not [bool]$ck) -or ($null -ne $okS -and -not [bool]$okS) -or "$(Get-PimDriftSnapshotField $_ 'skippedFeature')".Trim() }).Count
         scopes          = $scopes
         items           = @($flat.ToArray())
         source          = 'scheduler-snapshot'

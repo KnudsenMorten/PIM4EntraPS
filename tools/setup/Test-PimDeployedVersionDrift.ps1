@@ -1,8 +1,19 @@
 ﻿#requires -Version 5.1
 <#
 .SYNOPSIS
-    TEST-09 -- does what is RUNNING match what is MERGED? Reports version drift
-    between the deployed container images and SOLUTIONS/PIM4EntraPS/VERSION.
+    TEST-09 -- does what is RUNNING match what this environment is APPROVED to run? Reports
+    version drift between the deployed container images and the version the environment's
+    update RING approves in channel.json.
+
+    🔴 BUG-171 (2026-09-18): the expectation used to be the repo VERSION file. That contradicts
+    the ring design: a ring-2 customer held at 2.4.324 by the operator ALWAYS read DRIFT, and the
+    printed remedy was to roll it to the repo version -- exactly the release to ring 2 that only
+    the operator may make. The expectation is now the environment's ring entry (Get-PimRingVersion,
+    read through its own updater, the same way the in-cloud job reads it); the remedy only ever
+    names that approved version; and an environment with NO ring cannot be checked (exit 2) unless
+    the caller names the version with -ExpectedVersion. The defaults are v2: the resource group is
+    REQUIRED (it used to default to a v1 group), and the apps and jobs are DISCOVERED (they used to
+    be six v1 app names and no jobs, so every v2 environment exited 2).
 
 .DESCRIPTION
     WHY THIS EXISTS
@@ -28,10 +39,20 @@
     reports success while skipping apps leaves precisely this state.
 
 .PARAMETER ResourceGroup
-    Resource group holding the PIM container apps.
+    Resource group holding the PIM container apps. REQUIRED (or $env:PIM_HOSTED_RG): there is no
+    sensible default for somebody else's environment.
 
 .PARAMETER Apps
-    Container apps to check. Defaults to the full PIM set.
+    Container apps to check. Empty (default) = DISCOVER every ca-pim-* app in the group.
+
+.PARAMETER Jobs
+    Container Apps jobs to check. Empty (default) = DISCOVER every job that runs the Manager's
+    image repository (the same rule the rollers use), except the update job, which re-stamps
+    itself and legitimately lags one run.
+
+.PARAMETER ExpectedVersion
+    Check against THIS version instead of the ring's. The only way to check an environment that
+    carries no ring.
 
 .PARAMETER MaxAgeDays
     Also flag an app whose ACTIVE REVISION is older than this many days, even when the
@@ -42,8 +63,8 @@
     Suppress per-app output; print only the verdict line.
 
 .EXAMPLE
-    pwsh ./tools/setup/Test-PimDeployedVersionDrift.ps1
-    Exit 0 = every app matches VERSION. Exit 1 = drift. Exit 2 = COULD NOT CHECK.
+    pwsh ./tools/setup/Test-PimDeployedVersionDrift.ps1 -ResourceGroup <rg> -SubscriptionId <sub>
+    Exit 0 = everything runs what its ring approves. Exit 1 = drift. Exit 2 = COULD NOT CHECK.
 
 .NOTES
     Exit 2 is deliberately distinct from both: "I could not determine the answer" must
@@ -52,8 +73,9 @@
 #>
 [CmdletBinding()]
 param(
-    [string]$ResourceGroup = $(if ($env:PIM_HOSTED_RG) { $env:PIM_HOSTED_RG } else { 'rg-pim-manager-web' }),
-    [string[]]$Apps = @('ca-pim-manager','ca-pim-scheduler','ca-pim-engine','ca-pim-connector','ca-pim-deltaqueue','ca-pim-discovery'),
+    # BUG-171: no v1 default group, and no v1 app list. Empty = required / discovered (see .PARAMETER).
+    [string]$ResourceGroup = $(if ($env:PIM_HOSTED_RG) { $env:PIM_HOSTED_RG } else { '' }),
+    [string[]]$Apps = @(),
     # 🔴 EVERY az CALL BELOW USED TO RUN AGAINST THE AMBIENT DEFAULT CONTEXT, and on a machine
     # logged into more than one directory that is a coin flip. On mgmt1 it lands on a DIFFERENT
     # COMPANY'S subscription (CLAUDE.md: "often the DEFAULT context"), so this gate -- whose entire
@@ -71,7 +93,12 @@ param(
     # correctly says `unknown`. Given an ACR, the digest is resolved back to its tag so the answer
     # is a version instead of a shrug -- which is the difference between this gate answering the
     # question and merely declining to.
+    # Empty = read off each image's own registry host (<acr>.azurecr.io/...), so a digest-pinned v2
+    # environment (BUG-40 pins every roll by digest) still resolves to a version by default.
     [string]$AcrName = '',
+    [string]$ExpectedVersion = '',
+    [string]$UpdateJobName = 'ca-pim-update',
+    [string]$ManagerApp = 'ca-pim-manager',
     [int]$MaxAgeDays = 45,
     [switch]$Quiet
 )
@@ -166,6 +193,94 @@ function Get-PimVersionDriftReport {
     }
 }
 
+# The ring helpers (ConvertTo-PimUpdateRingNumber, Get-PimUpdateRingChannelReport ->
+# Get-PimRingVersion, Get-PimEnvironmentUpdaterEnv) and the rollers' same-repository job rule
+# (Get-PimAcaJobRollPlan). Loaded, not copied: "what the ring approves" must be decided by the same
+# code the in-cloud updater and the roll gate use. Side-effect free when loaded.
+. (Join-Path $here '_PimUpdateRing.ps1')
+
+function Resolve-PimDriftExpectedVersion {
+    <#
+      BUG-171. PURE (apart from the -Fetch seam). WHICH version this environment should be running.
+        -ExpectedVersion given        -> that (the caller named it)
+        updater unreadable            -> CANNOT CHECK (an unknown ring is not "no ring")
+        ring on the updater           -> ringN.version from channel.json, read through the updater's
+                                         own PIM_UPDATE_SOURCE_URL (a channel that cannot be read, or
+                                         approves nothing for the ring, is CANNOT CHECK -- never a guess)
+        no ring / no updater          -> CANNOT CHECK: nothing approves a version for it. Never the repo
+                                         VERSION -- that is what the build tree says, not what the
+                                         environment was approved for.
+      Returns @{ ok; expected; ring; source; reason }.
+    #>
+    param(
+        [AllowEmptyString()][string]$ExpectedVersion,
+        [object]$Updater,             # Get-PimEnvironmentUpdaterEnv result
+        [scriptblock]$Fetch
+    )
+    $mk = { param($ok, $exp, $ring, $src, $why) [pscustomobject]@{ ok = [bool]$ok; expected = "$exp"; ring = $ring; source = "$src"; reason = "$why" } }
+    $ev = ("$ExpectedVersion".Trim() -replace '^v', '')
+    if ($ev) { return (& $mk $true $ev $null 'the -ExpectedVersion parameter' '') }
+    if (-not $Updater -or -not $Updater.ok) {
+        return (& $mk $false '' $null '' ("the update job could not be read ($("$($Updater.reason)".Trim())) -- its ring, and so the approved version, is unknown"))
+    }
+    $uEnv = if ($Updater.found) { $Updater.env } else { [ordered]@{} }
+    $ringRaw = if ($uEnv.Contains('PIM_UPDATE_RING')) { "$($uEnv['PIM_UPDATE_RING'])".Trim() } else { '' }
+    if (-not $ringRaw) {
+        $pin = if ($uEnv.Contains('PIM_UPDATE_TARGET_VERSION')) { "$($uEnv['PIM_UPDATE_TARGET_VERSION'])".Trim() } else { '' }
+        $what = if ($Updater.found) { 'the updater carries no PIM_UPDATE_RING' } else { 'there is no update job' }
+        $hint = if ($pin) { " (its updater is pinned to $pin -- pass -ExpectedVersion $pin to check against that pin)" } else { ' -- pass -ExpectedVersion <version> to check it against a version you name' }
+        return (& $mk $false '' $null '' ("$what, so no ring approves any version for this environment$hint"))
+    }
+    $ring = ConvertTo-PimUpdateRingNumber $ringRaw
+    if ($null -eq $ring) { return (& $mk $false '' $ringRaw '' "PIM_UPDATE_RING='$ringRaw' is not a ring") }
+    $src = if ($uEnv.Contains('PIM_UPDATE_SOURCE_URL')) { "$($uEnv['PIM_UPDATE_SOURCE_URL'])".Trim() } else { '' }
+    $rep = Get-PimUpdateRingChannelReport -SourceUrlTemplate $src -Ring $ring -CurrentVersion '' -Fetch $Fetch
+    if (-not $rep.ok -or -not "$($rep.approved)".Trim()) { return (& $mk $false '' $ring '' $rep.message) }
+    return (& $mk $true "$($rep.approved)".Trim() $ring "ring$ring in channel.json" '')
+}
+
+function Get-PimDriftRemedy {
+    <#
+      BUG-171. PURE. What to tell the operator about each drifted row -- and what NEVER to tell them.
+      The only version ever named as a roll target is -Expected (what the ring approves). An
+      environment AHEAD of its ring is not "behind the repo": on ring >= 2 it is running a version the
+      operator never approved, and the advice is to stop and decide, not to roll anything.
+      Returns an array of lines.
+    #>
+    param([object[]]$Rows = @(), [AllowEmptyString()][string]$Expected, $Ring, [string]$ResourceGroup)
+    $lines = New-Object System.Collections.Generic.List[string]
+    $ev = $null; [void][version]::TryParse(("$Expected" -replace '^v', ''), [ref]$ev)
+    $ringTxt = if ($null -ne $Ring -and "$Ring" -ne '') { "ring $Ring" } else { 'the named version' }
+    $behind = @(); $ahead = @()
+    foreach ($r in @($Rows)) {
+        $tv = $null
+        if ($ev -and [version]::TryParse(("$($r.tag)" -replace '^v', ''), [ref]$tv) -and $tv -gt $ev) { $ahead += $r } else { $behind += $r }
+    }
+    if ($behind.Count) {
+        [void]$lines.Add(("{0} is BEHIND what {1} approves ({2}): {3}." -f $(if ($behind.Count -eq 1) { '1 target' } else { "$($behind.Count) targets" }), $ringTxt, $Expected, (@($behind | ForEach-Object { "$($_.app)=$($_.tag)" }) -join ', ')))
+        [void]$lines.Add("  The environment's own updater moves it to $Expected on its next run. To move it now (the ring gate allows exactly this version):")
+        [void]$lines.Add(("    pwsh ./tools/setup/Update-PimContainers.ps1 -ImageTag {0} -ResourceGroup {1} -AcrName <acr> -SubscriptionId <sub> -SkipBuild" -f $Expected, $ResourceGroup))
+    }
+    if ($ahead.Count) {
+        [void]$lines.Add(("{0} is AHEAD of what {1} approves ({2}): {3}." -f $(if ($ahead.Count -eq 1) { '1 target' } else { "$($ahead.Count) targets" }), $ringTxt, $Expected, (@($ahead | ForEach-Object { "$($_.app)=$($_.tag)" }) -join ', ')))
+        if ($null -ne $Ring -and "$Ring" -ne '' -and [int]$Ring -ge 2) {
+            [void]$lines.Add("  This environment runs a version its ring has NOT approved. Do not roll anything from here: the operator decides whether")
+            [void]$lines.Add("  to approve that version for ring $Ring in channel.json, or to roll it back to $Expected deliberately.")
+        } else {
+            [void]$lines.Add("  The channel entry is behind the build this environment verified. Advance it forward-only (Invoke-PimUpdate does this")
+            [void]$lines.Add("  after a verified roll); until then its updater will refuse to move it backward.")
+        }
+    }
+    return @($lines.ToArray())
+}
+
+function Get-PimAcrNameFromImage {
+    # PURE. 'acrx.azurecr.io/pim-manager@sha256:...' -> 'acrx'; anything else -> ''.
+    param([AllowEmptyString()][string]$Image)
+    if ("$Image".Trim() -match '^(?i)([a-z0-9]+)\.azurecr\.io/') { return $Matches[1].ToLowerInvariant() }
+    return ''
+}
+
 # Dot-sourced for the offline test -> stop before touching az.
 if ($MyInvocation.InvocationName -eq '.') { return }
 
@@ -178,13 +293,12 @@ if (Test-Path -LiteralPath $dateSafe) { . $dateSafe }
 
 Write-Host "=== PIM deployed-version drift ===" -ForegroundColor Cyan
 
-$verFile = Join-Path $solRoot 'VERSION'
-if (-not (Test-Path -LiteralPath $verFile)) {
-    Write-Host "  CANNOT CHECK: VERSION not found at $verFile" -ForegroundColor Red
+# BUG-171: the resource group is REQUIRED -- the old default was a v1 group, so an unconfigured run
+# checked something that is not this environment and reported on it with confidence.
+if (-not "$ResourceGroup".Trim()) {
+    Write-Host "  CANNOT CHECK: no -ResourceGroup (or `$env:PIM_HOSTED_RG). There is no default environment." -ForegroundColor Red
     exit 2
 }
-$expected = ([System.IO.File]::ReadAllText($verFile)).Trim()
-Write-Host ("  expected (VERSION): {0}" -f $expected) -ForegroundColor DarkGray
 
 if (-not (Get-Command az -ErrorAction SilentlyContinue)) {
     Write-Host "  CANNOT CHECK: azure CLI (az) not found." -ForegroundColor Red
@@ -212,6 +326,19 @@ if ("$SubscriptionId".Trim()) {
     Write-Host ("  subscription: AMBIENT DEFAULT '{0}' ({1}) -- pass -SubscriptionId to pin it" -f `
         "$($ctx.name)", "$($ctx.id)") -ForegroundColor Yellow
 }
+
+# --- WHAT this environment is approved to run (BUG-171) ------------------------------------------
+# The ring entry in channel.json, read through the environment's OWN updater -- never the repo
+# VERSION file. No ring, an unreadable updater or a channel that approves nothing => CANNOT CHECK.
+$updater = Get-PimEnvironmentUpdaterEnv -ResourceGroup $ResourceGroup -SubscriptionArgs $subArgs -UpdateJobName $UpdateJobName
+$exp = Resolve-PimDriftExpectedVersion -ExpectedVersion $ExpectedVersion -Updater $updater
+if (-not $exp.ok) {
+    Write-Host ("  CANNOT CHECK: {0}." -f $exp.reason) -ForegroundColor Red
+    Write-Host " RESULT: COULD NOT CHECK -- no approved version to compare against. This is NOT a pass." -ForegroundColor Red
+    exit 2
+}
+$expected = $exp.expected
+Write-Host ("  expected: {0} (from {1})" -f $expected, $exp.source) -ForegroundColor DarkGray
 
 $deployed = New-Object System.Collections.Generic.List[object]
 $queryFailed = New-Object System.Collections.Generic.List[string]
@@ -242,6 +369,34 @@ function Resolve-PimDigestTag {
     return $tag
 }
 
+# --- WHAT to check: discovered, v2 (BUG-171) -------------------------------------------------------
+# The defaults used to be six v1 app names and no jobs, so on every v2 environment the checker could
+# read nothing and exited 2. Empty -Apps = every ca-pim-* app in the group; empty -Jobs = every job
+# that runs the Manager's image repository (Get-PimAcaJobRollPlan -- the rule both rollers use), the
+# update job excepted (it re-stamps itself and lags one run by design). A listing that FAILS is an
+# open question (exit 2), never "nothing to check".
+if (-not @($Apps | Where-Object { "$_".Trim() }).Count) {
+    $global:LASTEXITCODE = 0
+    $appNames = @(& az containerapp list -g $ResourceGroup @subArgs --query "[].name" -o tsv 2>$null)
+    if ($LASTEXITCODE -ne 0) { Write-Host "  CANNOT CHECK: could not list the container apps in $ResourceGroup." -ForegroundColor Red; exit 2 }
+    $Apps = @($appNames | ForEach-Object { "$_".Trim() } | Where-Object { $_ -like 'ca-pim-*' })
+    Write-Host ("  apps (discovered): {0}" -f $(if ($Apps.Count) { $Apps -join ', ' } else { '(none)' })) -ForegroundColor DarkGray
+}
+if (-not @($Jobs | Where-Object { "$_".Trim() }).Count) {
+    $global:LASTEXITCODE = 0
+    $mgrImg = "$(& az containerapp show -g $ResourceGroup -n $ManagerApp @subArgs --query "properties.template.containers[0].image" -o tsv 2>$null)".Trim()
+    $global:LASTEXITCODE = 0
+    $jobsJson = (@(& az containerapp job list -g $ResourceGroup @subArgs -o json 2>$null) -join "`n")
+    if ($LASTEXITCODE -ne 0 -or -not $mgrImg) {
+        Write-Host ("  CANNOT CHECK: could not read {0} -- the jobs that must follow it cannot be determined." -f $(if (-not $mgrImg) { "$ManagerApp's image" } else { "the jobs in $ResourceGroup" })) -ForegroundColor Red
+        exit 2
+    }
+    $jobObjs = @(); try { $jobObjs = @((ConvertFrom-Json $jobsJson) | ForEach-Object { $_ }) } catch { }
+    $jobPlan = Get-PimAcaJobRollPlan -Jobs $jobObjs -TargetImage $mgrImg -Exclude @("$UpdateJobName".Trim())
+    $Jobs = @(@($jobPlan.roll) | ForEach-Object { "$($_.name)" })
+    Write-Host ("  jobs (discovered, same image repository as {0}): {1}" -f $ManagerApp, $(if ($Jobs.Count) { $Jobs -join ', ' } else { '(none)' })) -ForegroundColor DarkGray
+}
+
 # Apps and JOBS both drift, and both are read here. A fleet check that covers only the apps can
 # report "no drift" while the tick job runs last month's engine -- BUG-09's shape, one resource
 # type over.
@@ -266,7 +421,8 @@ foreach ($t in $targets) {
     $deployed.Add([pscustomobject]@{
         app = $app; image = $img; revision = $rev; createdUtc = $created
         # Resolved here rather than inside the pure core, which must stay network-free.
-        resolvedTag = (Resolve-PimDigestTag -Image $img -Acr $AcrName -SubArgs $subArgs)
+        # No -AcrName: the image names its own registry (BUG-171 -- every v2 roll is digest-pinned).
+        resolvedTag = (Resolve-PimDigestTag -Image $img -Acr $(if ("$AcrName".Trim()) { $AcrName } else { Get-PimAcrNameFromImage -Image $img }) -SubArgs $subArgs)
     })
 }
 
@@ -299,10 +455,13 @@ if ($r.rows.Count -eq 0) {
     Write-Host " RESULT: COULD NOT CHECK -- no apps were examined. 'Checked nothing' is not 'all good'." -ForegroundColor Red
     exit 2
 }
-foreach ($d in $r.drifted) { Write-Host ("  DRIFT   {0}: running {1}, expected {2}" -f $d.app, $d.tag, $expected) -ForegroundColor Red }
+foreach ($d in $r.drifted) { Write-Host ("  DRIFT   {0}: running {1}, expected {2} ({3})" -f $d.app, $d.tag, $expected, $exp.source) -ForegroundColor Red }
 foreach ($s in $r.stale)   { Write-Host ("  STALE   {0}: on {1} but its revision is {2} days old" -f $s.app, $s.tag, $s.ageDays) -ForegroundColor Yellow }
 foreach ($u in $r.unknown) { Write-Host ("  UNKNOWN {0}: could not parse an image tag" -f $u.app) -ForegroundColor Red }
 Write-Host ""
-Write-Host " Roll the fleet with:" -ForegroundColor Yellow
-Write-Host ("   pwsh ./tools/setup/Update-PimContainers.ps1 -ImageTag {0} -ResourceGroup {1} -AcrName <acr> -SkipBuild" -f $expected, $ResourceGroup) -ForegroundColor Yellow
+# BUG-171: the remedy names ONLY the version the ring approves, and never tells anyone to move a
+# ring-2 environment AHEAD of its ring (that was "roll it to the repo version" -- a release to ring 2).
+foreach ($ln in @(Get-PimDriftRemedy -Rows @($r.drifted) -Expected $expected -Ring $exp.ring -ResourceGroup $ResourceGroup)) {
+    Write-Host (" " + $ln) -ForegroundColor Yellow
+}
 exit 1

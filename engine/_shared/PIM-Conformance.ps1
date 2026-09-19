@@ -15,8 +15,11 @@ if (-not (Get-Command Get-PimUtcStamp -ErrorAction SilentlyContinue)) { . (Join-
 #
 # Pure reconcile core (time injected) + thin I/O wrappers, so every status
 # decision is testable without a tenant. A roll-forward-ROWS seam converts an
-# approved template into the workload-assignment rows that the existing,
-# tested Apply-PimWorkloadAssignments consumes -- no second apply path.
+# approved template into PIM-Assignments-Workloads DESIRED-STATE rows; the Manager
+# commits them through its normal safe-commit path and the ENGINE's workload
+# provider applies them (IMP-37: the v1 Apply-PimWorkloadAssignments + CSV path is gone).
+# The shipped *.template.json files are read-only; approvals and ring promotions live
+# in SQL (pim.Settings 'ConformanceTemplateOverlay', see Read-PimApprovedTemplates).
 
 Set-StrictMode -Off
 
@@ -77,14 +80,126 @@ function ConvertTo-PimTemplate {
     return ($raw | ConvertFrom-Json)
 }
 
+# --- the SQL OVERLAY over the shipped templates (BUG-180 / IMP-37, §33.28) -------------
+# The shipped workloads/templates/*.template.json files are the READ-ONLY catalog: they ship with the
+# image, are replaced by every update and are never written at runtime (they used to be -- approve and
+# promote rewrote them, on an ephemeral container filesystem, against the SQL-only rule). Everything an
+# operator DECIDES about a template lives in ONE pim.Settings document instead:
+#   pim.Settings['ConformanceTemplateOverlay'] =
+#     { "<templateId>": { "approval": { templateVersion; approvedBy; approvedUtc },
+#                         "rings":    { "<entryKey>": <int 0..9> } } }
+# Read-PimApprovedTemplates merges it over each file (Merge-PimTemplateOverlay), so the engine-facing
+# view, the Manager and the fleet matrix all see the same decision.
+#   * an approval is VERSION-BOUND: it approves exactly the templateVersion that was reviewed, so a new
+#     shipped version of a template is a draft again until someone approves THAT;
+#   * a ring override applies to an entry that still exists; an unknown key is ignored (a removed entry).
+$script:PimTemplateOverlayMem = $null
+function Get-PimTemplateOverlayStoreName { 'ConformanceTemplateOverlay' }
+
+function Get-PimTemplateOverlay {
+    # The whole overlay document as a PSCustomObject; absent -> empty. Never throws on read errors of the
+    # SHAPE, but a store that cannot be read at all THROWS (an unreadable overlay must not silently turn
+    # every approved template back into a draft, or vice versa).
+    [CmdletBinding()] param()
+    if (Get-Command Get-PimSetting -ErrorAction SilentlyContinue) {
+        return (ConvertTo-PimTemplateStateDocument (Get-PimSetting -Name (Get-PimTemplateOverlayStoreName)))
+    }
+    if ($null -ne $script:PimTemplateOverlayMem) { return (ConvertTo-PimTemplateStateDocument $script:PimTemplateOverlayMem) }
+    return [pscustomobject]@{}
+}
+
+function Save-PimTemplateOverlay {
+    # Persist the whole overlay. Returns 'sql' or 'memory' (offline only, and it says so). A store that
+    # rejects the write THROWS.
+    param([Parameter(Mandatory)][object]$Overlay)
+    $json = $Overlay | ConvertTo-Json -Depth 10 -Compress
+    if (Get-Command Set-PimSetting -ErrorAction SilentlyContinue) {
+        Set-PimSetting -Name (Get-PimTemplateOverlayStoreName) -Value $json | Out-Null
+        return 'sql'
+    }
+    $script:PimTemplateOverlayMem = $json
+    Write-Warning "  [conformance] template overlay kept in this process only -- no SQL settings store (Set-PimSetting) is wired (PIM v2 is SQL-only)."
+    return 'memory'
+}
+
+function Merge-PimTemplateOverlay {
+    # PURE. A shipped template + the overlay -> the effective template (a COPY; the input is untouched).
+    param([Parameter(Mandatory)][object]$Template, [AllowNull()][object]$Overlay)
+    $t = Copy-PimConfObject -Object $Template
+    if ($null -eq $Overlay) { return $t }
+    $id = "$($t.templateId)"
+    $entry = $null
+    if ($Overlay.PSObject -and $Overlay.PSObject.Properties[$id]) { $entry = $Overlay.PSObject.Properties[$id].Value }
+    if ($null -eq $entry) { return $t }
+    $appr = $null
+    if ($entry.PSObject.Properties['approval']) { $appr = $entry.approval }
+    if ($appr -and "$($appr.templateVersion)" -eq "$($t.templateVersion)") {
+        Set-PimConfProp -Object $t -Name 'status' -Value 'approved'
+        Set-PimConfProp -Object $t -Name 'approvedBy' -Value "$($appr.approvedBy)"
+        Set-PimConfProp -Object $t -Name 'approvedUtc' -Value "$($appr.approvedUtc)"
+        Set-PimConfProp -Object $t -Name 'approvalSource' -Value 'sql'
+    }
+    if ($entry.PSObject.Properties['rings'] -and $entry.rings) {
+        foreach ($p in @($entry.rings.PSObject.Properties)) {
+            $r = 0
+            if (-not [int]::TryParse("$($p.Value)", [ref]$r) -or $r -lt 0 -or $r -gt 9) { continue }
+            foreach ($e in @($t.entries)) { if ("$($e.key)" -ieq "$($p.Name)") { Set-PimConfProp -Object $e -Name 'ring' -Value $r } }
+        }
+    }
+    return $t
+}
+
+function Set-PimTemplateOverlayApproval {
+    # Record an approval of THIS template version in SQL. $ApprovedBy is the authenticated caller -- never
+    # a value from a request body. Returns the effective (merged) template.
+    param([Parameter(Mandatory)][object]$Template, [Parameter(Mandatory)][string]$ApprovedBy, [datetime]$NowUtc = [datetime]::UtcNow)
+    if (-not "$ApprovedBy".Trim()) { throw 'Set-PimTemplateOverlayApproval: ApprovedBy (the authenticated identity) is required.' }
+    $chk = Test-PimTemplateDoc -Template $Template
+    if (-not $chk.valid) { throw ("template '{0}' is invalid and cannot be approved: {1}" -f $Template.templateId, ($chk.errors -join '; ')) }
+    $ov = Get-PimTemplateOverlay
+    $id = "$($Template.templateId)"
+    if (-not $ov.PSObject.Properties[$id]) { Set-PimConfProp -Object $ov -Name $id -Value ([pscustomobject]@{}) }
+    $node = $ov.PSObject.Properties[$id].Value
+    Set-PimConfProp -Object $node -Name 'approval' -Value ([pscustomobject]@{
+        templateVersion = [int]("$($Template.templateVersion)" -as [int]); approvedBy = "$ApprovedBy"; approvedUtc = $NowUtc.ToString('o') })
+    [void](Save-PimTemplateOverlay -Overlay $ov)
+    return (Merge-PimTemplateOverlay -Template $Template -Overlay $ov)
+}
+
+function Set-PimTemplateOverlayRing {
+    # Record a per-entry ring promotion in SQL. Throws when the template has no such entry (same message as
+    # Set-PimEntryRing, so the endpoint's 400 stays). Returns the effective (merged) template.
+    param([Parameter(Mandatory)][object]$Template, [Parameter(Mandatory)][string]$Key, [Parameter(Mandatory)][ValidateRange(0,9)][int]$Ring)
+    if (-not (@($Template.entries) | Where-Object { "$($_.key)" -ieq "$Key" })) {
+        throw "Set-PimEntryRing: template '$($Template.templateId)' has no entry '$Key'."
+    }
+    $ov = Get-PimTemplateOverlay
+    $id = "$($Template.templateId)"
+    if (-not $ov.PSObject.Properties[$id]) { Set-PimConfProp -Object $ov -Name $id -Value ([pscustomobject]@{}) }
+    $node = $ov.PSObject.Properties[$id].Value
+    if (-not $node.PSObject.Properties['rings'] -or $null -eq $node.rings) { Set-PimConfProp -Object $node -Name 'rings' -Value ([pscustomobject]@{}) }
+    $canon = "$(@($Template.entries | Where-Object { "$($_.key)" -ieq "$Key" })[0].key)"
+    Set-PimConfProp -Object $node.rings -Name $canon -Value $Ring
+    [void](Save-PimTemplateOverlay -Overlay $ov)
+    return (Merge-PimTemplateOverlay -Template $Template -Overlay $ov)
+}
+
 function Read-PimApprovedTemplates {
+    # The shipped templates in -SourceDir (read-only) with the SQL overlay merged over each (see above).
+    # -Overlay supplies it (tests / a caller that already read it); omitted -> Get-PimTemplateOverlay.
+    # -NoOverlay reads the bare shipped files.
     [CmdletBinding()]
-    param([Parameter(Mandatory)][string]$SourceDir, [switch]$IncludeDrafts)
+    param([Parameter(Mandatory)][string]$SourceDir, [switch]$IncludeDrafts, [AllowNull()][object]$Overlay = $null, [switch]$NoOverlay)
     $out = New-Object System.Collections.Generic.List[object]
     if (-not (Test-Path -LiteralPath $SourceDir)) { Write-Warning "Template source dir not found: $SourceDir"; return $out.ToArray() }
+    $ov = $null
+    if (-not $NoOverlay) {
+        if ($PSBoundParameters.ContainsKey('Overlay')) { $ov = $Overlay } else { $ov = Get-PimTemplateOverlay }
+    }
     foreach ($f in Get-ChildItem -LiteralPath $SourceDir -Filter '*.template.json' -File | Sort-Object Name) {
         try { $t = ConvertTo-PimTemplate -Json ([System.IO.File]::ReadAllText($f.FullName, [System.Text.UTF8Encoding]::new($false))) }
         catch { Write-Warning ("Template {0} failed to parse: {1}" -f $f.Name, $_.Exception.Message); continue }
+        if ($null -ne $ov) { $t = Merge-PimTemplateOverlay -Template $t -Overlay $ov }
         $check = Test-PimTemplateDoc -Template $t
         if (-not $check.valid) { Write-Warning ("Template {0} invalid: {1}" -f $f.Name, ($check.errors -join '; ')); continue }
         if (-not $IncludeDrafts -and -not (Test-PimTemplateApproved -Template $t)) {
@@ -93,6 +208,55 @@ function Read-PimApprovedTemplates {
         $out.Add($t)
     }
     return $out.ToArray()
+}
+
+# --- WHERE THE TEMPLATE-CATALOG RING COMES FROM (BUG-179, operator decision 2026-09-18) --------------
+# The template rule is entryRing <= tenantRing: a HIGHER tenant ring receives MORE entries. The platform
+# UPDATE ring runs the other way: update ring 2 (customers) receives changes LAST. So the catalog ring is
+# the environment's update ring INVERTED:  tenantRing = 2 - updateRing
+#     update ring 2 (customers) -> 0   only fully promoted entries
+#     update ring 1 (internal)  -> 1
+#     update ring 0 (dev)       -> 2   everything, pilots included
+# Not recorded, unparseable or out of range -> 0 (the most restrictive), and the reason is reported.
+# 🪤 Get-PimTenantRing (PIM-Functions.psm1) is deliberately NOT used or changed: it also drives the
+# admin<->tenant ring filter (Select-PimAdminRowsByRing), which is a different axis.
+# The update ring is read from the record the UPDATE JOB writes (pim.Settings['UpdateState'].ring,
+# PIM-UpdateState.ps1) -- the ring is local to the environment, never set by a master.
+function ConvertTo-PimTemplateCatalogRing {
+    # PURE. Update ring ('2', 'ring2', 'Ring 1', ...) -> @{ ring; valid; updateRing; reason }.
+    [CmdletBinding()]
+    param([AllowEmptyString()][AllowNull()][string]$UpdateRing)
+    $raw = "$UpdateRing".Trim()
+    if (-not $raw) { return [pscustomobject]@{ ring = 0; valid = $false; updateRing = $raw; reason = 'update ring not recorded -- most restrictive template ring 0' } }
+    # Same normalisation as Get-PimUpdateRingLabel / the channel: 'ring2', 'ring 2', 'ring-2' and '2' are one ring.
+    $n = $raw -replace '^(?i)ring[\s_-]*', ''
+    $u = 0
+    if (-not [int]::TryParse($n, [ref]$u) -or $u -lt 0 -or $u -gt 2) {
+        return [pscustomobject]@{ ring = 0; valid = $false; updateRing = $raw; reason = "update ring '$raw' is not 0, 1 or 2 -- most restrictive template ring 0" }
+    }
+    return [pscustomobject]@{ ring = (2 - $u); valid = $true; updateRing = $raw; reason = "update ring $u" }
+}
+
+function Get-PimTemplateCatalogRing {
+    # The template-catalog ring for THIS environment: @{ ring; source; updateRing; reason }.
+    #   source = 'update-ring N' when the update job's record carries a usable ring, else 'not recorded'.
+    # -UpdateStateRecord injects the record (the Manager reads it with Read-PimUpdateState in its own
+    # scope); otherwise it is read here through Read-PimUpdateState when that is loaded. Never throws.
+    [CmdletBinding()]
+    param([AllowEmptyString()][AllowNull()][string]$ConnectionString, [AllowNull()][object]$UpdateStateRecord = $null)
+    $rec = $UpdateStateRecord
+    if ($null -eq $rec -and -not $PSBoundParameters.ContainsKey('UpdateStateRecord') -and (Get-Command Read-PimUpdateState -ErrorAction SilentlyContinue)) {
+        try { $rec = Read-PimUpdateState -ConnectionString $ConnectionString } catch { $rec = $null }
+    }
+    $ringRaw = ''
+    if ($null -ne $rec) {
+        if ($rec -is [System.Collections.IDictionary]) { if ($rec.Contains('ring')) { $ringRaw = "$($rec['ring'])" } }
+        elseif ($rec.PSObject -and $rec.PSObject.Properties['ring']) { $ringRaw = "$($rec.ring)" }
+    }
+    $m = ConvertTo-PimTemplateCatalogRing -UpdateRing $ringRaw
+    $src = if ($m.valid) { "update-ring $(2 - [int]$m.ring)" } else { 'not recorded' }
+    $why = if ($null -eq $rec) { 'no update record in pim.Settings[UpdateState] -- most restrictive template ring 0' } else { "$($m.reason)" }
+    return [pscustomobject]@{ ring = [int]$m.ring; source = $src; updateRing = "$ringRaw".Trim(); reason = $why }
 }
 
 # --- ring scope (self-contained; entryRing <= tenantRing) ------------------------
@@ -313,10 +477,14 @@ function New-PimTemplateDraft {
     foreach ($cap in @($Capabilities)) {
         if ($NewEntryFactory) { $entries.Add((& $NewEntryFactory $cap $newVer)) }
         else {
+            # REQ-U (2026-09-19): a GroupTag is tenant-neutral -- the tenant's PimGroupPattern turns it into a
+            # name. The placeholder used to be 'PIM-REVIEW-<cap>', i.e. it baked one tenant's 'PIM-' prefix into
+            # the TAG (a 'GRP-{Role}' tenant would get 'GRP-PIM-REVIEW-...'). The placeholder is now 'REVIEW-<cap>'.
+            $capTag = ("REVIEW-" + ("$cap" -replace '[^A-Za-z0-9.\-]', ''))
             $entries.Add([pscustomobject]@{
                 key = "role:$cap"; sinceVersion = $newVer; ring = 2
-                roleName = "$cap"; groupTag = "PIM-REVIEW-$cap"
-                value = [pscustomobject]@{ roleName = "$cap"; groupTag = "PIM-REVIEW-$cap"; note = 'AUTO-DRAFT: set groupTag + ring before approving' }
+                roleName = "$cap"; groupTag = $capTag
+                value = [pscustomobject]@{ roleName = "$cap"; groupTag = $capTag; note = 'AUTO-DRAFT: set groupTag + ring before approving' }
             })
         }
         if (-not ($known | Where-Object { $_ -ieq "$cap" })) { $known.Add("$cap") }
@@ -752,8 +920,8 @@ function Get-PimFleetConformance {
 # tenant whose rollout ring is >= R (entryRing <= tenantRing is the per-entry rule;
 # here we group tenants by ring so an MSP can drive a wave -- "roll v3 to ring 1 and
 # below" -- and see, per ring band, how many tenants are behind. This is the planning
-# rollup; the actual per-tenant deploy still goes through the proven, ring-gated
-# Get-PimRollForwardRows + Apply-PimWorkloadAssignments path (no second apply).
+# rollup; the actual per-tenant deploy still goes through the ring-gated
+# Get-PimRollForwardRows -> desired-state commit -> engine path (no second apply).
 #
 # Returns, for the template, one band per distinct tenant ring present in the fleet,
 # each with the tenants in that band + their behind/status, plus a fleet total. A
@@ -825,11 +993,12 @@ function Get-PimRingRolloutPlan {
 }
 
 # --- roll-forward ROWS seam -----------------------------------------------------
-# Converts an APPROVED template into the workload-assignment rows that the
-# existing Apply-PimWorkloadAssignments consumes (Workload;RoleName;GroupTag;
-# Scope;Resource;Action). Ring-gated to the tenant; exemptions skipped. No second
-# apply path -- the GUI/engine writes these rows to a CSV and calls the proven
-# Apply-PimWorkloadAssignments.
+# Converts an APPROVED template into PIM-Assignments-Workloads desired-state rows
+# (Workload;RoleName;GroupTag;Scope;Resource;Action). Ring-gated to the tenant;
+# exemptions skipped. IMP-37: these rows are DESIRED STATE -- the Manager commits them
+# into pim.Rows through its safe-commit path (POST /api/conformance/deploy) and the
+# engine's workload provider applies them on its next run. There is no CSV and no
+# Apply-PimWorkloadAssignments call (that v1 function does not exist in v2).
 function Get-PimRollForwardRows {
     [CmdletBinding()]
     param(

@@ -119,60 +119,7 @@ function New-PimPawAuBody {
     }
 }
 
-# --- live Graph wrappers (thin) -------------------------------------------------
-function New-PimPawAu {
-    param([string]$DisplayName = 'PIM-PAW-Devices-Restricted')
-    return Invoke-MgGraphRequest -Method POST -Uri 'https://graph.microsoft.com/v1.0/administrativeUnits' -Body ((New-PimPawAuBody -DisplayName $DisplayName) | ConvertTo-Json -Depth 6) -ContentType 'application/json' -ErrorAction Stop
-}
-
-function Add-PimGroupToAu {
-    # Place a group under an AU (membership). For the restricted-management AU this
-    # is what locks the PAW group down to scoped management only.
-    param([Parameter(Mandatory)][string]$AuId, [Parameter(Mandatory)][string]$GroupId)
-    [void](Invoke-MgGraphRequest -Method POST -Uri "https://graph.microsoft.com/v1.0/administrativeUnits/$AuId/members/`$ref" -Body (@{ "@odata.id" = "https://graph.microsoft.com/v1.0/groups/$GroupId" } | ConvertTo-Json) -ContentType 'application/json' -ErrorAction Stop)
-}
-
-function Get-PimPawGroupId {
-    # Resolve a per-level PAW group's object id by displayName (PIM-PAW-L<n>-Devices).
-    param([Parameter(Mandatory)][ValidateRange(0,2)][int]$Level)
-    $name = Get-PimPawGroupName -Level $Level
-    $r = Invoke-MgGraphRequest -Method GET -Uri ("https://graph.microsoft.com/v1.0/groups?`$filter=displayName eq '" + $name.Replace("'","''") + "'&`$select=id") -ErrorAction Stop
-    $first = @($r.value) | Select-Object -First 1
-    if ($first) { return "$($first.id)" }
-    return $null
-}
-
-function Get-PimPawGroupIds {
-    # Resolve all three level groups -> @{ 0=id; 1=id; 2=id } (missing levels omitted).
-    $map = @{}
-    foreach ($lvl in 0,1,2) { $id = Get-PimPawGroupId -Level $lvl; if ($id) { $map[$lvl] = $id } }
-    return $map
-}
-
-function New-PimPawGroup {
-    # Create one per-level PAW group and (when -RestrictedAuId given) place it in
-    # the restricted-management AU so it can't be managed outside this tool. Run
-    # for each of L0/L1/L2 to stand up all three.
-    param([Parameter(Mandatory)][ValidateRange(0,2)][int]$Level, [string]$RestrictedAuId)
-    $body = New-PimPawGroupBody -Level $Level
-    $g = Invoke-MgGraphRequest -Method POST -Uri 'https://graph.microsoft.com/v1.0/groups' -Body ($body | ConvertTo-Json -Depth 6) -ContentType 'application/json' -ErrorAction Stop
-    if ("$RestrictedAuId".Trim() -and $g.id) { Add-PimGroupToAu -AuId $RestrictedAuId -GroupId "$($g.id)" }
-    return $g
-}
-
-function Add-PimPawDevice {
-    # Tag a device as a PAW at a LEVEL: add it to that level's PAW group (primary)
-    # and optionally set the extensionAttribute to 'PAW-L<n>' (-ExtensionAttribute).
-    param(
-        [Parameter(Mandatory)][string]$DeviceObjectId,
-        [Parameter(Mandatory)][ValidateRange(0,2)][int]$Level,
-        [string]$PawGroupId,
-        [int]$ExtensionAttribute
-    )
-    $gid = if ("$PawGroupId".Trim()) { $PawGroupId } else { Get-PimPawGroupId -Level $Level }
-    if (-not $gid) { throw "Add-PimPawDevice: PAW L$Level group not found (create it first with New-PimPawGroup -Level $Level)." }
-    [void](Invoke-MgGraphRequest -Method POST -Uri "https://graph.microsoft.com/v1.0/groups/$gid/members/`$ref" -Body (@{ "@odata.id" = "https://graph.microsoft.com/v1.0/directoryObjects/$DeviceObjectId" } | ConvertTo-Json) -ContentType 'application/json' -ErrorAction Stop)
-    if ($ExtensionAttribute -ge 1) {
-        [void](Invoke-MgGraphRequest -Method PATCH -Uri "https://graph.microsoft.com/v1.0/devices/$DeviceObjectId" -Body ((New-PimPawDeviceTagBody -ExtensionAttribute $ExtensionAttribute -Value "PAW-L$Level") | ConvertTo-Json -Depth 6) -ContentType 'application/json' -ErrorAction Stop)
-    }
-}
+# --- live Graph wrappers: REMOVED (IMP-49 g, ss33.28) ---------------------------------
+# New-PimPawAu / Add-PimGroupToAu / Get-PimPawGroupId(s) / New-PimPawGroup / Add-PimPawDevice were Graph-SDK
+# (Invoke-MgGraphRequest) wrappers that nothing called -- the v2 container carries no Graph SDK, so they could
+# not have run there either. The pure builders above are what the solution uses.

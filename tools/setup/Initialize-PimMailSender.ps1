@@ -65,7 +65,20 @@
   return value cannot travel any other way. Initialize-PlatformEnvironment reads it and passes the
   UPN to Setup-PimContainers as -MailSender.
 
+.EXAMPLE
+  # From another process (a deploy step, a scheduled task): `pwsh -File` passes every argument as a
+  # STRING, so a PowerShell array literal ('a','b') arrives as ONE value. Pass several managed
+  # identities comma-separated with no quotes or spaces -- the script splits and validates them.
+  pwsh -NoProfile -File tools\setup\Initialize-PimMailSender.ps1 -TenantId <tid> -AdminAppId <appId> `
+       -AdminCertThumbprint <thumbprint> -ManagedIdentityObjectId <tickMiObjectId>,<managerMiObjectId> `
+       -SqlServerFqdn <server>.database.windows.net
+
 .NOTES
+  RE-RUNNING IS SAFE. Every step reads first and treats "already there" as success; a read that
+  FAILS (as opposed to finding nothing) stops the run instead of guessing that the object is absent.
+  A re-run on a fully configured tenant changes nothing in Exchange -- it only re-activates the
+  short-lived Exchange Administrator role (through PIM) it needs in order to read.
+
   🪤 An Application Access Policy can take up to ~30 minutes to take effect tenant-wide. A send
   attempted immediately after this script may still fail; that is Microsoft-side propagation, not a
   misconfiguration. The policy is verified as EXISTING here, which is what this script can honestly
@@ -122,7 +135,12 @@ param(
     [string]$OutFile,
     # Exchange provisioning after a licence lands is not instant, and neither is app-role
     # propagation. Bounded, and it reports what it waited for rather than hanging silently.
-    [int]$TimeoutSeconds  = 600
+    [int]$TimeoutSeconds  = 600,
+    # IMP-31 (2026-09-18): how long the onboarding SPN's Exchange Administrator role stays ACTIVE. The
+    # role is now granted THROUGH PIM as a time-bound assignment that expires on its own -- it used to be
+    # a permanent assignment outside PIM, which the SPN could not remove again (Graph refuses a self-
+    # removal) and which the tenant's alerting flagged. ISO 8601, PT15M..PT24H.
+    [string]$ExchangeAdminDuration = 'PT4H'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -138,13 +156,23 @@ $solRoot = Split-Path -Parent (Split-Path -Parent $here)   # ...\SOLUTIONS\PIM4E
 . (Join-Path $solRoot 'engine\_shared\PIM-Rest.ps1')
 . (Join-Path $here '_PimMailSenderPlan.ps1')          # pure planners (tested offline)
 
+# Both refusals happen BEFORE anything is touched: a malformed argument found halfway through leaves
+# a half-configured tenant.
+# BUG-167: `pwsh -File` delivers an array as one literal string -- normalise it, and name the
+# marshalling cause when a value is not an object id (it used to surface as a directory 400).
+$miParse = ConvertTo-PimObjectIdList -Value $ManagedIdentityObjectId
+if ($miParse.reason) { throw "Initialize-PimMailSender: -ManagedIdentityObjectId: $($miParse.reason)" }
+$ManagedIdentityObjectId = @($miParse.ids)
+$durCheck = Test-PimAssignmentDuration -Duration $ExchangeAdminDuration
+if (-not $durCheck.ok) { throw "Initialize-PimMailSender: -ExchangeAdminDuration: $($durCheck.reason)" }
+
 $graphResourceAppId = '00000003-0000-0000-c000-000000000000'   # Microsoft Graph
 $exoResourceAppId   = '00000002-0000-0ff1-ce00-000000000000'   # Office 365 Exchange Online
 
 $result = [ordered]@{
     ok = $false; sender = ''; tenantId = $TenantId; engineAppId = ''; sendIdentities = @()
     exchangePlan = ''; mailboxCreated = $false; mailSendGranted = $false
-    accessPolicyCreated = $false; steps = @(); reason = ''
+    accessPolicyCreated = $false; privilegedGrants = $null; steps = @(); reason = ''
 }
 function Note($m, $c = 'Gray') { Write-Host "    $m" -ForegroundColor $c }
 function Step($m) { Write-Host "`n--- $m ---" -ForegroundColor Cyan }
@@ -239,6 +267,22 @@ function Gr {
     if ($null -ne $Body) { $a.Body = ($Body | ConvertTo-Json -Depth 20) }
     Invoke-RestMethod @a
 }
+# 🔴 A COLLECTION READ MUST FOLLOW THE PAGES. Graph returns at most 100 items per page, and the
+# onboarding SPN this runs as holds ~100 Graph app roles on its own (measured on EFIF/RIDE 2026-09-18),
+# so a first-page-only read of its appRoleAssignments could miss Exchange.ManageAsApp, plan a grant,
+# and hit 400 "already exists" -- the fatal re-run of BUG-166 (a).
+function GrAll {
+    param([Parameter(Mandatory)][string]$Path)
+    $r = Gr -Path $Path
+    $items = @($r.value)
+    $pages = 1
+    while ($r.PSObject.Properties['@odata.nextLink'] -and "$($r.'@odata.nextLink')".Trim()) {
+        if (++$pages -gt 50) { throw "more than 50 pages reading $Path -- refusing to guess the rest" }
+        $r = Gr -Path "$($r.'@odata.nextLink')"
+        $items += @($r.value)
+    }
+    return $items
+}
 Note "onboarding SPN: $AdminAppId" 'DarkGray'
 
 # 🔴 THE ONBOARDING SPN CANNOT GRANT ITSELF. The header says this script's identity "already
@@ -265,6 +309,9 @@ function Invoke-PimGrant {
     catch {
         # BUG-131's lesson: the Graph error body is in ErrorDetails, NOT in Exception.Message.
         $m = "$($_.Exception.Message) $($_.ErrorDetails.Message)"
+        # BUG-166 (a): a grant that is ALREADY THERE is the goal reached, not a failure. It was fatal,
+        # so a second run died before the step that actually still needed doing.
+        if (Test-PimAlreadyExistsError -Text $m) { return 'already held (nothing granted)' }
         if ($m -notmatch 'Authorization_RequestDenied|Insufficient privileges|\b403\b|Forbidden') { throw }
         Note "$What refused for the onboarding SPN (it cannot grant itself) -- retrying with the signed-in az context" 'DarkYellow'
         $azTok = az account get-access-token --tenant $TenantId --resource https://graph.microsoft.com --query accessToken -o tsv 2>$null
@@ -273,9 +320,14 @@ function Invoke-PimGrant {
                    "Sign in as a Global Administrator (az login) and re-run, or grant $AdminAppId " +
                    "AppRoleAssignment.ReadWrite.All + RoleManagement.ReadWrite.Directory.")
         }
-        Invoke-RestMethod -Method POST -Uri "https://graph.microsoft.com/v1.0/$Path" `
-            -Headers @{ Authorization = "Bearer $azTok"; 'Content-Type' = 'application/json' } `
-            -Body ($Body | ConvertTo-Json -Depth 20) | Out-Null
+        try {
+            Invoke-RestMethod -Method POST -Uri "https://graph.microsoft.com/v1.0/$Path" `
+                -Headers @{ Authorization = "Bearer $azTok"; 'Content-Type' = 'application/json' } `
+                -Body ($Body | ConvertTo-Json -Depth 20) | Out-Null
+        } catch {
+            if (Test-PimAlreadyExistsError -Text "$($_.Exception.Message) $($_.ErrorDetails.Message)") { return 'already held (nothing granted)' }
+            throw
+        }
         return 'signed-in az context'
     }
 }
@@ -408,30 +460,56 @@ if (-not $exoSp) { Fail 'Office 365 Exchange Online service principal not found 
 $manageAsApp = $exoSp.appRoles | Where-Object { $_.value -eq 'Exchange.ManageAsApp' -and $_.allowedMemberTypes -contains 'Application' } | Select-Object -First 1
 if (-not $manageAsApp) { Fail 'Exchange.ManageAsApp app-role not found on the Exchange Online service principal' }
 
-$hasManage = @((Gr -Path "servicePrincipals/$($adminSp.id)/appRoleAssignments").value |
-    Where-Object { $_.resourceId -eq $exoSp.id -and $_.appRoleId -eq $manageAsApp.id })
+# Every page, not the first 100 (see GrAll) -- a missed page planned a duplicate grant.
+try {
+    $hasManage = @(GrAll -Path "servicePrincipals/$($adminSp.id)/appRoleAssignments" |
+        Where-Object { $_.resourceId -eq $exoSp.id -and $_.appRoleId -eq $manageAsApp.id })
+} catch { Fail "could not read the onboarding SPN's app-role assignments, so cannot tell whether Exchange.ManageAsApp is already held -- refusing to guess: $($_.Exception.Message)" }
+$manageAsAppState = if ($hasManage.Count) { 'held (already)' } else { '' }
 if ($hasManage.Count) { Note 'Exchange.ManageAsApp already held' 'DarkGray' }
 elseif ($PSCmdlet.ShouldProcess($AdminAppId, 'grant Exchange.ManageAsApp')) {
     try {
         $by = Invoke-PimGrant -Path "servicePrincipals/$($adminSp.id)/appRoleAssignments" `
                 -Body @{ principalId = $adminSp.id; resourceId = $exoSp.id; appRoleId = $manageAsApp.id } `
                 -What 'Exchange.ManageAsApp'
-        Note "Exchange.ManageAsApp granted (via the $by)" 'Green'
+        Note "Exchange.ManageAsApp: $by" 'Green'
+        $manageAsAppState = "held ($by)"
     } catch { Fail "could not grant Exchange.ManageAsApp to the onboarding SPN: $($_.Exception.Message)" }
 }
 
+# 🔒 THE EXCHANGE ADMINISTRATOR ROLE IS TIME-BOUND, AND GRANTED THROUGH PIM.
+# It used to be POSTed to roleManagement/directory/roleAssignments: a PERMANENT active assignment made
+# outside PIM. Measured 2026-09-18 on EFIF and RIDE: the tenants' own alerting flagged it ("assigned
+# outside of PIM"), and the SPN holding it could NOT remove it -- Graph refuses a self-removal
+# ("Removing self from ... built-in role is not allowed"). A privileged-access product must not leave
+# exactly the standing privilege it exists to prevent. Now: an active assignment through
+# roleAssignmentScheduleRequests that EXPIRES by itself after -ExchangeAdminDuration.
+$exchAdminTemplate = '29232cdf-9323-42fd-ade2-1d097af3e4de'   # built-in; definition id == template id
 $exchAdminRole = (Gr -Path "roleManagement/directory/roleDefinitions?`$filter=displayName eq 'Exchange Administrator'").value | Select-Object -First 1
-if (-not $exchAdminRole) { Fail "'Exchange Administrator' role definition not found" }
-$hasExchAdmin = @((Gr -Path "roleManagement/directory/roleAssignments?`$filter=principalId eq '$($adminSp.id)'").value |
-    Where-Object { $_.roleDefinitionId -eq $exchAdminRole.id })
-if ($hasExchAdmin.Count) { Note 'Exchange Administrator already assigned' 'DarkGray' }
-elseif ($PSCmdlet.ShouldProcess($AdminAppId, 'assign Exchange Administrator')) {
+$exchAdminRoleId = if ($exchAdminRole) { "$($exchAdminRole.id)" } else { $exchAdminTemplate }
+function Read-ExchAdminGrant {
+    # Active instances cover BOTH a permanent assignment and a PIM-activated/time-bound one.
+    $inst = @(GrAll -Path "roleManagement/directory/roleAssignmentScheduleInstances?`$filter=principalId eq '$($adminSp.id)'")
+    Select-PimActiveRoleGrant -Instances $inst -PrincipalId "$($adminSp.id)" -RoleDefinitionId $exchAdminRoleId
+}
+try { $exchAdminState = Read-ExchAdminGrant }
+catch { Fail "could not read the onboarding SPN's active directory roles, so cannot tell whether Exchange Administrator is already active -- refusing to guess: $($_.Exception.Message)" }
+if ($exchAdminState.active) {
+    if ($exchAdminState.kind -eq 'permanent') {
+        Note 'Exchange Administrator already active -- as a PERMANENT assignment (standing privilege; see the summary)' 'Yellow'
+    } else { Note "Exchange Administrator already active until $($exchAdminState.endDateTime.ToString('u')) (time-bound, reused)" 'DarkGray' }
+}
+elseif ($PSCmdlet.ShouldProcess($AdminAppId, "activate Exchange Administrator through PIM for $ExchangeAdminDuration")) {
     try {
-        $by = Invoke-PimGrant -Path 'roleManagement/directory/roleAssignments' `
-                -Body @{ principalId = $adminSp.id; roleDefinitionId = $exchAdminRole.id; directoryScopeId = '/' } `
-                -What 'Exchange Administrator'
-        Note "Exchange Administrator assigned (via the $by)" 'Green'
-    } catch { Fail "could not assign Exchange Administrator to the onboarding SPN: $($_.Exception.Message)" }
+        $body = New-PimRoleScheduleRequestBody -PrincipalId "$($adminSp.id)" -RoleDefinitionId $exchAdminRoleId -Duration $ExchangeAdminDuration
+        $by = Invoke-PimGrant -Path 'roleManagement/directory/roleAssignmentScheduleRequests' -Body $body -What 'Exchange Administrator (time-bound)'
+        Note "Exchange Administrator requested for $ExchangeAdminDuration through PIM (via the $by)" 'Green'
+    } catch { Fail "could not activate Exchange Administrator for the onboarding SPN through PIM: $($_.Exception.Message)" }
+    # READ BACK -- a request that was accepted is not yet an active role.
+    $seen = Confirm-Eventually -What 'time-bound Exchange Administrator' -Seconds 120 -Test { (Read-ExchAdminGrant).active }
+    if (-not $seen) { Fail 'the time-bound Exchange Administrator request was accepted but the role is not active on read-back' }
+    $exchAdminState = Read-ExchAdminGrant
+    Note "Exchange Administrator active until $(if ($exchAdminState.endDateTime) { $exchAdminState.endDateTime.ToString('u') } else { '(no end)' }) (verified by read-back)" 'Green'
 }
 
 if ($WhatIfPreference) {
@@ -445,6 +523,9 @@ if ($WhatIfPreference) {
 # minted BEFORE the grants above will carry an empty `roles` claim, so it is always minted fresh
 # (-Force) and retried while the grant propagates.
 $exoUri = "https://outlook.office365.com/adminapi/beta/$TenantId/InvokeCommand"
+# The tenant's INITIAL (*.onmicrosoft.com) domain. `$initialDomain` used to be read here and assigned nowhere, so the
+# anchor ended in "@" -- harmless only because EXO falls back when the anchor mailbox does not resolve.
+$initialDomain = "$(@(@($org.verifiedDomains) | Where-Object { $_.isInitial } | Select-Object -First 1).name)".Trim()
 $anchor = "UPN:SystemMailbox{bb558c35-97f1-4cb9-8ff7-d53741dc928c}@$initialDomain"
 function Invoke-Exo {
     param([Parameter(Mandatory)][string]$Cmdlet, [hashtable]$Parameters = @{})
@@ -453,6 +534,29 @@ function Invoke-Exo {
             'X-ResponseFormat' = 'json'; 'X-AnchorMailbox' = $anchor }
     $body = @{ CmdletInput = @{ CmdletName = $Cmdlet; Parameters = $Parameters } } | ConvertTo-Json -Depth 10
     Invoke-RestMethod -Method POST -Uri $exoUri -Headers $h -Body $body
+}
+
+function Read-ExoWithRetry {
+    <#
+      A READ that distinguishes the three answers the old code collapsed into one:
+        found / absent (a single-object -Lookup that Exchange says does not exist) / unreadable.
+      Transient failures (401/403 while the role propagates -- measured, 429, 5xx) are retried a
+      bounded number of times; what is still failing after that is 'unreadable', and the CALLER
+      refuses. Returns @{ outcome; value; error }.
+    #>
+    param([Parameter(Mandatory)][string]$Cmdlet, [hashtable]$Parameters = @{}, [switch]$Lookup, [int]$Attempts = 6, [int]$DelaySeconds = 15)
+    $err = ''
+    for ($i = 1; $i -le $Attempts; $i++) {
+        try { return @{ outcome = 'found'; value = (Invoke-Exo -Cmdlet $Cmdlet -Parameters $Parameters); error = '' } }
+        catch {
+            $err = ("$($_.Exception.Message) $($_.ErrorDetails.Message)" -replace '\s+', ' ').Trim()
+            if ($Lookup -and (Resolve-PimExoLookupOutcome -ErrorText $err) -eq 'absent') { return @{ outcome = 'absent'; value = $null; error = '' } }
+            if (-not (Test-PimTransientReadError -Text $err) -or $i -eq $Attempts) { break }
+            Note "$Cmdlet not readable yet (attempt $i/$Attempts): $(($err -split '\. ')[0])" 'DarkGray'
+            Start-Sleep -Seconds $DelaySeconds
+        }
+    }
+    return @{ outcome = 'unreadable'; value = $null; error = $err.Substring(0, [Math]::Min(300, $err.Length)) }
 }
 
 Step 'wait for Exchange administration to become usable'
@@ -481,10 +585,14 @@ Add-Result 'exchange-ready' 'ok' "$attempt attempt(s)"
 # --- 1. CREATE THE SHARED SENDER MAILBOX ---------------------------------------
 Step "[1] shared sender mailbox  $sender"
 $existingMbx = $null
-try {
-    $r = Invoke-Exo -Cmdlet 'Get-Mailbox' -Parameters @{ Identity = $sender }
-    $existingMbx = @($r.value) | Select-Object -First 1
-} catch { $existingMbx = $null }   # not-found is the normal first-run path, not an error
+# Not-found is the normal first-run path. ANY OTHER failure is "could not look", and it used to be
+# read as "absent" too -- which planned a create against a mailbox that existed. Refuse instead.
+$mbxRead = Read-ExoWithRetry -Cmdlet 'Get-Mailbox' -Parameters @{ Identity = $sender } -Lookup
+if ($mbxRead.outcome -eq 'unreadable') {
+    Add-Result 'mailbox' 'FAILED' "could not read: $($mbxRead.error)"
+    Fail "could not check whether the mailbox '$sender' exists ($($mbxRead.error)) -- refusing to create it on a guess. Re-run when Exchange answers."
+}
+if ($mbxRead.outcome -eq 'found') { $existingMbx = @($mbxRead.value.value) | Select-Object -First 1 }
 
 if ($existingMbx) {
     Note "mailbox already exists (RecipientTypeDetails=$($existingMbx.RecipientTypeDetails))" 'DarkGray'
@@ -548,21 +656,37 @@ try {
 } catch { Note "could not read organization config: $((($_.Exception.Message) -split "`n")[0])" 'DarkYellow' }
 
 function Invoke-ExoWhenHydrated {
-    # Run an EXO create, retrying for as long as the org still answers "dehydrated". Any OTHER
-    # error is returned immediately -- a real failure must not be hidden behind a long wait.
-    param([Parameter(Mandatory)][string]$Cmdlet, [hashtable]$Parameters = @{}, [int]$Seconds = 3600, [string]$What = 'object')
-    $stop = (Get-Date).AddSeconds($Seconds); $n = 0
+    # Run an EXO create. The outcome of a failure is decided by Resolve-PimExoCreateOutcome (pure,
+    # tested offline):
+    #   exists     -> SUCCESS (idempotent re-run; BUG-166 -- it used to be fatal)
+    #   dehydrated -> wait for organization customization (up to -Seconds)
+    #   retry      -> Exchange has not materialised a service principal created moments ago
+    #                 (New-ManagementRoleAssignment answers 404; measured on EFIF/RIDE) -- bounded wait
+    #   fail       -> returned at once: a real failure must not be hidden behind a long wait
+    param([Parameter(Mandatory)][string]$Cmdlet, [hashtable]$Parameters = @{}, [int]$Seconds = 3600, [string]$What = 'object',
+          [int]$MaterialiseSeconds = 600)
+    $stop = (Get-Date).AddSeconds($Seconds); $matStop = (Get-Date).AddSeconds($MaterialiseSeconds); $n = 0
     while ($true) {
         $n++
-        try { return @{ ok = $true; value = (Invoke-Exo -Cmdlet $Cmdlet -Parameters $Parameters) } }
+        try { return @{ ok = $true; existed = $false; value = (Invoke-Exo -Cmdlet $Cmdlet -Parameters $Parameters) } }
         catch {
             $e = $_
             $raw = "$($e.ErrorDetails.Message)"
-            $isDehydrated = $raw -like "*$dehydratedMarker*"
-            if (-not $isDehydrated) { return @{ ok = $false; error = ($e.Exception.Message -split "`n")[0]; detail = $raw } }
-            if ((Get-Date) -ge $stop) { return @{ ok = $false; error = 'organization still dehydrated'; detail = $raw } }
-            if ($n -eq 1 -or ($n % 5) -eq 0) { Note "waiting for organization customization to take effect ($What, attempt $n)" 'DarkGray' }
-            Start-Sleep -Seconds 60
+            $txt = "$($e.Exception.Message) $raw"
+            switch (Resolve-PimExoCreateOutcome -Cmdlet $Cmdlet -ErrorText $txt) {
+                'exists' { return @{ ok = $true; existed = $true; value = $null } }
+                'dehydrated' {
+                    if ((Get-Date) -ge $stop) { return @{ ok = $false; error = 'organization still dehydrated'; detail = $raw } }
+                    if ($n -eq 1 -or ($n % 5) -eq 0) { Note "waiting for organization customization to take effect ($What, attempt $n)" 'DarkGray' }
+                    Start-Sleep -Seconds 60
+                }
+                'retry' {
+                    if ((Get-Date) -ge $matStop) { return @{ ok = $false; error = "Exchange never made the new service principal usable within ${MaterialiseSeconds}s"; detail = $raw } }
+                    Note "Exchange has not made the new service principal usable yet ($What, attempt $n) -- waiting" 'DarkGray'
+                    Start-Sleep -Seconds 30
+                }
+                default { return @{ ok = $false; error = ($e.Exception.Message -split "`n")[0]; detail = $raw } }
+            }
         }
     }
 }
@@ -576,10 +700,27 @@ function Invoke-ExoWhenHydrated {
 #     sends as that managed identity, was refused with nothing in this log to say why. The plan
 #     matches assignments by ASSIGNEE.
 $scopeName = "PIM4EntraPS-Sender"
+# 🔴 BUG-166 (b) -- these three used to end in `catch { @() }`, so "I could not read the scopes" became
+# "there are no scopes": measured on EFIF/RIDE, Get-ManagementScope answered 401 during the Exchange
+# Administrator propagation, the plan said "create", and New-ManagementScope then failed with
+# ADObjectAlreadyExistsException. A plan is only as good as the reads under it: an unreadable one
+# STOPS the run (re-running is safe), it never plans a create.
 $exoSpList = $null; $scopes = $null; $assigns = $null
-try { $exoSpList = @((Invoke-Exo -Cmdlet 'Get-ServicePrincipal').value) } catch { $exoSpList = @() }
-try { $scopes = @((Invoke-Exo -Cmdlet 'Get-ManagementScope').value) } catch { $scopes = @() }
-try { $assigns = @((Invoke-Exo -Cmdlet 'Get-ManagementRoleAssignment' -Parameters @{ RoleAssigneeType = 'ServicePrincipal' }).value) } catch { $assigns = @() }
+$pre = [ordered]@{
+    'Get-ServicePrincipal'         = @{ }
+    'Get-ManagementScope'          = @{ }
+    'Get-ManagementRoleAssignment' = @{ RoleAssigneeType = 'ServicePrincipal' }
+}
+$preRead = @{}
+foreach ($c in $pre.Keys) {
+    $rr = Read-ExoWithRetry -Cmdlet $c -Parameters $pre[$c]
+    if ($rr.outcome -ne 'found') {
+        Add-Result "exo-read:$c" 'FAILED' $rr.error
+        Fail "could not read the existing Exchange configuration ($($c): $($rr.error)) -- refusing to plan changes on a partial picture. Nothing was changed; re-run when Exchange answers."
+    }
+    $preRead[$c] = @($rr.value.value)
+}
+$exoSpList = $preRead['Get-ServicePrincipal']; $scopes = $preRead['Get-ManagementScope']; $assigns = $preRead['Get-ManagementRoleAssignment']
 $engineOid = if ($engineSp) { "$($engineSp.id)" } else { '' }
 $exoPlan = @(New-PimMailSenderExoPlan -ExoServicePrincipals $exoSpList -Scopes $scopes -Assignments $assigns `
     -Principals $sendPrincipals -Sender $sender -ScopeName $scopeName -EngineAppId $EngineAppId -EngineObjectId $engineOid `
@@ -591,7 +732,8 @@ if (-not $exoPlan.Count) {
 foreach ($item in $exoPlan) {
     $r = Invoke-ExoWhenHydrated -Cmdlet $item.cmdlet -What $item.what -Parameters $item.parameters
     if (-not $r.ok) { Add-Result "exo:$($item.cmdlet)" 'FAILED' "$($r.error) $($r.detail)"; Fail "could not $($item.what): $($r.error)" }
-    Note "$($item.cmdlet): $($item.what)" 'Green'
+    if ($r.existed) { Note "$($item.cmdlet): $($item.what) -- already present, nothing changed" 'DarkGray' }
+    else { Note "$($item.cmdlet): $($item.what)" 'Green' }
 }
 if ($exoPlan.Count) {
     # Read back -- the whole reason RBAC was chosen over an Application Access Policy. EVERY sending
@@ -643,7 +785,10 @@ if ($engineSp -and -not @($tenantWideTargets | Where-Object { $_.spId -eq "$($en
 }
 $anyRevoked = $false
 foreach ($tgt in $tenantWideTargets) {
-    $existingGrant = @(Select-PimTenantWideMailSend -Assignments @((Gr -Path "servicePrincipals/$($tgt.spId)/appRoleAssignments").value) -GraphSpId $graphSp.id -MailSendRoleId $mailSendRole.id)
+    # Every page (GrAll): the engine SPN holds ~100 app roles, so a first-page read could miss the very
+    # consent this step exists to find -- and report the send right as scoped when it is not.
+    try { $existingGrant = @(Select-PimTenantWideMailSend -Assignments @(GrAll -Path "servicePrincipals/$($tgt.spId)/appRoleAssignments") -GraphSpId $graphSp.id -MailSendRoleId $mailSendRole.id) }
+    catch { Fail "could not read the app-role assignments of $($tgt.label), so cannot tell whether it holds a tenant-wide Mail.Send -- refusing to report the send right as scoped: $($_.Exception.Message)" }
     if (-not $existingGrant.Count) { Note "no tenant-wide Mail.Send on $($tgt.label) -- correct" 'Green'; continue }
     if (-not $PSCmdlet.ShouldProcess($tgt.label, 'REVOKE tenant-wide Graph Mail.Send')) { Add-Result 'mail-send-tenantwide' 'whatif' "would revoke on $($tgt.label)"; continue }
     Note "found $($existingGrant.Count) tenant-wide Mail.Send assignment(s) on $($tgt.label) -- REVOKING (they defeat the scope)" 'DarkYellow'
@@ -652,7 +797,7 @@ foreach ($tgt in $tenantWideTargets) {
         catch { Fail "could not revoke tenant-wide Mail.Send ($($a.id)) on $($tgt.label): $($_.Exception.Message)" }
     }
     $revoked = Confirm-Eventually -What 'Mail.Send revocation' -Test {
-        @(Select-PimTenantWideMailSend -Assignments @((Gr -Path "servicePrincipals/$($tgt.spId)/appRoleAssignments").value) -GraphSpId $graphSp.id -MailSendRoleId $mailSendRole.id).Count -eq 0
+        @(Select-PimTenantWideMailSend -Assignments @(GrAll -Path "servicePrincipals/$($tgt.spId)/appRoleAssignments") -GraphSpId $graphSp.id -MailSendRoleId $mailSendRole.id).Count -eq 0
     }
     if (-not $revoked) { Fail "tenant-wide Mail.Send was deleted on $($tgt.label) but is still present on read-back -- the send right is NOT scoped" }
     Note "tenant-wide Mail.Send revoked on $($tgt.label) (verified by read-back)" 'Green'
@@ -714,6 +859,23 @@ Write-Host "  send right    : Exchange RBAC 'Application Mail.Send' -> scope '$s
 foreach ($p in $sendPrincipals) { Write-Host "  sends as      : $($p.kind) $($p.appId)  (assignment $($p.assignmentName))" }
 Write-Host "  tenant-wide   : NO Graph Mail.Send on any sending identity or the engine SPN -- by design"
 Write-Host "  exchange plan : $($result.exchangePlan)"
+Write-Host ""
+# IMP-31 -- SAY WHAT PRIVILEGE IS LEFT BEHIND, AND UNTIL WHEN. The old run granted the provisioning
+# identity tenant-wide Exchange administration and never mentioned it again; the tenant's own alerting
+# was how anyone found out.
+try { $exchAdminNow = Read-ExchAdminGrant } catch { $exchAdminNow = $exchAdminState }
+$exAdminLine = if (-not $exchAdminNow.active) { 'not active (expired or never granted)' }
+               elseif ($exchAdminNow.kind -eq 'permanent') { 'ACTIVE, PERMANENT (standing privilege outside PIM -- remove it with a DIFFERENT administrator: an identity cannot remove its own directory role)' }
+               else { "active until $($exchAdminNow.endDateTime.ToString('u')), then expires on its own (granted through PIM)" }
+$result.privilegedGrants = [ordered]@{
+    identity = $AdminAppId
+    exchangeAdministrator = [ordered]@{ active = [bool]$exchAdminNow.active; kind = "$($exchAdminNow.kind)"; endUtc = $(if ($exchAdminNow.endDateTime) { $exchAdminNow.endDateTime.ToString('o') } else { '' }) }
+    exchangeManageAsApp = "$manageAsAppState"
+}
+$pc = if ($exchAdminNow.active -and $exchAdminNow.kind -eq 'permanent') { 'Red' } else { 'Yellow' }
+Write-Host "  PRIVILEGED GRANTS STILL HELD by the setup identity $AdminAppId :" -ForegroundColor $pc
+Write-Host "    Exchange Administrator (directory role) : $exAdminLine" -ForegroundColor $pc
+Write-Host "    Exchange.ManageAsApp (app role)         : $(if ($manageAsAppState) { $manageAsAppState } else { 'not held' }) -- no expiry; inert without the directory role" -ForegroundColor $pc
 Write-Host ""
 Write-Host "  NEXT: pass -MailSender '$sender' to Setup-PimContainers (Initialize-PlatformEnvironment"
 Write-Host "        does this automatically), or set a 'MailSender' value in pim.Settings."

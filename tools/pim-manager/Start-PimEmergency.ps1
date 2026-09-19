@@ -4,7 +4,7 @@
     PIM4EntraPS Manager -- EMERGENCY / break-glass edition (runs on a client PC).
 
 .DESCRIPTION
-    Failover for when the hosted Manager (native Azure App Service) is
+    Failover for when the hosted Manager (the ca-pim-manager Container App) is
     unreachable -- outage, network/GSA disruption, Easy Auth/identity problem,
     or a Sev-1 where the operator must drive PIM from their own workstation.
 
@@ -33,7 +33,18 @@
     Database name. Defaults to $env:PIM_SqlDatabase or 'PimPlatform'.
 
 .PARAMETER TenantId
-    Entra tenant for the interactive sign-in. Defaults to the internal tenant.
+    Entra tenant for the interactive sign-in. Defaults to $env:PIM_TenantId, else
+    'organizations' (the sign-in page then asks which work account).
+
+.PARAMETER Port
+    Loopback port for the console. 0 (default) picks a free one.
+
+    🔴 BUG-186 (§33.28): this used to pass -DesiredPort, a parameter of the Manager's INTERNAL
+    Invoke-Server function, not of Open-PimManager.ps1 -- so binding failed right after the SQL
+    preflight and the break-glass console never started. And once running, local mode resolved the
+    WINDOWS account name, so the operator landed as a Reader even when their Entra UPN was a
+    SuperAdmin. The console now forwards -Port, and the Manager takes the identity from the
+    interactive sign-in's own token (Get-PimManagerLocalIdentity) -- tests/Test-PimEmergencyConsole.ps1.
 
 .EXAMPLE
     .\Start-PimEmergency.ps1
@@ -102,8 +113,22 @@ if (Get-Command Get-PimSqlConnectionString -ErrorAction SilentlyContinue) {
     $tc = New-PimSqlConnection -ConnectionString $cs
     $tc.Open(); $tc.Close()
     Write-Host '   [preflight] SQL reachable + authenticated OK' -ForegroundColor Green
+    # BUG-186: say WHO the console will act as -- the Manager authorises on the UPN in this sign-in's
+    # token (not on the Windows account), so a mismatch shows here, before the browser opens.
+    $signedIn = ''
+    try {
+        $tokPayload = ("$($global:PIM_SqlAccessToken)" -split '\.')[1]
+        if ($tokPayload) {
+            $p = $tokPayload.Replace('-', '+').Replace('_', '/'); switch ($p.Length % 4) { 2 { $p += '==' } 3 { $p += '=' } }
+            $claims = [System.Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($p)) | ConvertFrom-Json
+            foreach ($c in @('preferred_username', 'upn', 'unique_name', 'email')) { if ("$($claims.$c)".Trim()) { $signedIn = "$($claims.$c)".Trim(); break } }
+        }
+    } catch { $signedIn = '' }
+    if ($signedIn) { Write-Host "   [preflight] signed in as $signedIn -- Manager access is resolved for THIS identity" -ForegroundColor Green }
+    else { Write-Host '   [preflight] could not read the signed-in UPN from the token -- the console will fall back to the Windows account name (Reader unless granted).' -ForegroundColor Yellow }
     Write-Host ''
 }
 
 # Launch the loopback Manager (NOT -Hosted: emergency runs on 127.0.0.1 only).
-& (Join-Path $here 'Open-PimManager.ps1') -DesiredPort $Port
+# 🔴 BUG-186: -Port is the SCRIPT's parameter; -DesiredPort belongs to its internal Invoke-Server.
+& (Join-Path $here 'Open-PimManager.ps1') -Server -Port $Port

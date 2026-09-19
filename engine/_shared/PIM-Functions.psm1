@@ -88,15 +88,18 @@ If ($global:PIM_UseGraphSdk) {
 # Own file so the Manager dot-sources it standalone; Core is never gated.
 . (Join-Path $PSScriptRoot 'PIM-License.ps1')
 
-# Baseline-courier consumer (§ 19) -- Get-PimBaselineBundle / Test-PimBaselineDoc /
-# Set-PimBaselineApplied. The local engine pulls + verifies the signed MSP baseline.
+# Baseline verification (§ 19 / 71.35) -- Test-PimBaselineDoc (signature against a PINNED Key Vault key id, or the
+# embedded legacy certificate; product/kind; expiry) and the anti-rollback floor Get-/Set-PimBaselineApplied, which
+# lives in this tenant's pim.Settings (SEC-24 -- never a state file). The PULL itself is the downlink job
+# (PIM-Downlink.ps1), which calls these; Get-PimBaselineBundle (a direct HTTPS pull) has no caller in v2.
 . (Join-Path $PSScriptRoot 'PIM-Baseline.ps1')
 
 # MSP shared substrate + multiple sync models + signed-baseline kill-switch (§ 4) --
 # Product-keyed registry (TenantManager reuse), Resolve-PimSyncModel (don't force one),
-# Test-PimBaselineSignerAllowed (revoke = kill-switch) + Resolve-PimCentralKill (signed
-# central kill -> AccountStatus flips the engine pipeline already applies). Loaded AFTER
-# PIM-Baseline because the kill manifest reuses Test-PimBaselineDoc's crypto.
+# Test-PimBaselineSignerAllowed (the revoked-signer list, pim.Settings 'BaselineRevokedSigners' -- SQL only) +
+# Resolve-PimCentralKill (verifies a signed central-kill manifest). On the pull path the downlink STOPS on an
+# active kill (Get-PimCentralKillState, PIM-Downlink.ps1); Resolve-PimCentralKill's AccountStatus flips have no
+# caller in v2. Loaded AFTER PIM-Baseline because the kill manifest reuses Test-PimBaselineDoc's crypto.
 . (Join-Path $PSScriptRoot 'PIM-Substrate.ps1')
 
 # Template versioning + fleet conformance -- Get-PimConformance (gap/exempt/drift/

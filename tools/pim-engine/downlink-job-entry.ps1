@@ -9,6 +9,12 @@
 .DESCRIPTION
     Runs ENTIRELY on cloud container compute. On each scheduled execution it:
 
+      0. DECIDES WHETHER THE PULL IS DUE (operator 2026-09-18: the cadence is set in the Manager's Job schedule). The cron
+         fires every 5 minutes; the gate reads this tenant's OWN pim.Settings (DownlinkSchedule / DownlinkRunNow /
+         DownlinkLastRun) and a not-due execution logs one "[cadence] SKIPPED:" line and exits 0 before the engine is
+         loaded. Nothing stored = daily, as before. See engine/_shared/PIM-JobCadence.ps1.
+     0b. REQ-Y: REFUSES (exit 2, nothing pulled or applied) unless this slave holds a Pro licence that covers MSP for
+         -TenantId (Invoke-PimMspLicenseGate, engine/_shared/PIM-License.ps1); in its grace window it pulls with a WARN.
       1. AUTHENTICATES the runtime identity (Managed Identity by default; an SPN
          certificate when $env:PIM_ENGINE_CERT_THUMBPRINT is set). REST-only, no
          PowerShell Az/Graph modules, never a secret, never device-code.
@@ -30,12 +36,19 @@
     local SPN). The cron Job's command always supplies this.
 
 .PARAMETER TenantId / SlaveRing
-    The managed/slave tenant id + its registry ring (default 2 = test).
+    The managed/slave tenant id + the slave's OWN ring (0..2, default 2 = test). The ring
+    is LOCAL: it is this job's argument, set in the slave, and it is authoritative. The
+    master's platform.Tenants.Ring is only the master's copy and is never read here.
 
 .PARAMETER BaselineUrl
-    Private-endpoint blob URL of the master's signed baseline bundle (HTTPS over the
-    private cross-tenant VNet -- never the public internet). Mutually exclusive with
-    -BaselineDocPath. Falls back to $env:PIM_BaselineUrl.
+    PLAIN blob URL of the master's signed baseline bundle (DESIGN 13.7: public-but-signed,
+    or a private endpoint over VNet peering). No query string: the SAS transport is
+    retired (SEC-27). Mutually exclusive with -BaselineDocPath. Falls back to
+    $env:PIM_BaselineUrl.
+
+.PARAMETER CentralKillUrl
+    SEC-25: the master's signed central-kill manifest. Falls back to $env:PIM_CentralKillUrl,
+    else the sibling of the bundle URL (<container>/central-kill.json). A 404 = no kill.
 
 .PARAMETER BaselineDocPath
     Container path to an already-pulled / mounted signed bundle JSON (skips the pull).
@@ -57,6 +70,7 @@ param(
     [string]$BaselineUrl     = $env:PIM_BaselineUrl,
     [string]$BaselineAccessToken = $env:PIM_BaselineAccessToken,
     [string]$BaselineDocPath = $env:PIM_BaselineDocPath,
+    [string]$CentralKillUrl = $env:PIM_CentralKillUrl,
     [string]$EngineScope = 'All',
     [ValidateSet('Full','Delta')][string]$EngineMode = 'Delta',
     # IMP-13 / operator ruling 2026-09-03. Comma-separated in the env because an ACA env value is
@@ -84,6 +98,63 @@ $shared  = Join-Path $solRoot 'engine\_shared'
 JobLog "==== PIM4EntraPS scheduled downlink JOB starting ===="
 JobLog ("scenario={0} tenant={1} ring={2} mode={3}" -f $Scenario, $TenantId, $SlaveRing, $(if ($WhatIfMode) { 'WHATIF' } else { 'APPLY' }))
 
+# --- baseline source (a configuration check, no I/O): refuse if neither is present (fail-safe) -----------------------
+if (-not "$BaselineUrl".Trim() -and -not "$BaselineDocPath".Trim()) {
+    JobLog 'no baseline source: supply -BaselineUrl (private-endpoint blob) or -BaselineDocPath (mounted bundle) / set PIM_BaselineUrl|PIM_BaselineDocPath' 'ERROR'
+    exit 2
+}
+
+# --- 0) THE CADENCE GATE (operator 2026-09-18: "i need to be able to control cadence" ... "gui must be made to control").
+# The job's cron fires every 5 minutes; whether THIS execution pulls is decided here, from THIS tenant's own store
+# (pim.Settings DownlinkSchedule / DownlinkRunNow / DownlinkLastRun -- set in the Manager's Job schedule). The cadence is
+# LOCAL to the managed tenant, like its ring. engine/_shared/PIM-JobCadence.ps1 has the rules; the ones that matter here:
+#   * nothing stored = the daily cadence this job always had, ENABLED;  * disabled in the GUI = no pull, and the log says so;
+#   * a store that cannot be read = PULL ANYWAY, loudly (the pull is signature-verified and safe to repeat).
+# 🔑 CHEAP ON PURPOSE: only the cadence core, the REST token layer and the SQL store are loaded before the decision. The
+# scenario profile (which pulls in PIM-Downlink.ps1) and the engine are loaded only when the pull is due.
+. (Join-Path $shared 'PIM-JobCadence.ps1')
+$cadenceCs = ''; $cadenceErr = ''
+try {
+    if (-not "$env:PIM_SqlServer".Trim()) { throw 'PIM_SqlServer is not set on this job' }
+    # BUG-80: the token provider BEFORE the store, or SQL is reached with no credential ("Login failed for user ''").
+    foreach ($__dep in @('PIM-Rest.ps1', 'PIM-SqlStore.ps1')) { . (Join-Path $shared $__dep) }
+    # The same identity the scenario runner uses for this store (BUG-83: never silently another one).
+    if ($env:PIM_TenantId -and -not $global:PIM_TenantId) { $global:PIM_TenantId = "$($env:PIM_TenantId)".Trim() }
+    if ($env:PIM_ClientId -and -not $global:PIM_ClientId) { $global:PIM_ClientId = "$($env:PIM_ClientId)".Trim() }
+    $cadenceCs = Get-PimSqlConnectionString -Server "$env:PIM_SqlServer".Trim() -Database $(if ("$env:PIM_SqlDatabase".Trim()) { "$env:PIM_SqlDatabase".Trim() } else { 'PimPlatform' })
+} catch { $cadenceErr = "$($_.Exception.Message)" }
+$cadenceLog = { param($m, $l) JobLog $m $l }
+$cadenceGate = Invoke-PimJobCadenceGate -Job 'pull' -StoreError $cadenceErr -Log $cadenceLog `
+    -ExecutionName "$env:CONTAINER_APP_JOB_EXECUTION_NAME" -DeployedUtc "$env:PIM_CadenceDeployedUtc" `
+    -ReadValues { param($names) Read-PimJobCadenceValues -ConnectionString $cadenceCs -Object 'pim.Settings' -Names $names } `
+    -CompareAndSet { param($n, $v, $e) Set-PimJobCadenceValueIfUnchanged -ConnectionString $cadenceCs -Object 'pim.Settings' -Name $n -NewJson $v -ExpectedJson $e }
+if (-not $cadenceGate.run) {
+    JobLog '==== downlink JOB: nothing to do on this trigger (see the cadence line above) ===='
+    exit 0
+}
+# Every exit after the gate records how the pull ended, so the Manager's Job schedule shows the last result.
+function Stop-DownlinkJob {
+    param([int]$Code, [ValidateSet('succeeded', 'failed', 'held')][string]$State, [string]$Detail)
+    [void](Complete-PimJobCadenceRun -Gate $cadenceGate -State $State -Detail $Detail -Log $cadenceLog `
+        -Write { param($n, $j) Write-PimJobCadenceValue -ConnectionString $cadenceCs -Object 'pim.Settings' -Name $n -Json $j })
+    exit $Code
+}
+
+# --- 0b) REQ-Y: AN MSP SLAVE NEEDS A PRO LICENCE (operator 2026-09-19: "msp master slave require license pro") ---------
+# After the cadence says the pull is due; BEFORE the scenario profile, the downlink and the engine are loaded -- nothing
+# is pulled or applied without it. The licence is THIS tenant's pim.Settings['License'], bound to -TenantId (the tenant
+# this job already pulls for). A store that cannot be read cannot prove a licence: refused, and the log says why.
+# Not ok = one ERROR line naming the contact and the register command, recorded as the pull's result, exit 2.
+# Grace = a WARN line, then pull. Independent of the global Pro switch, which stays off.
+. (Join-Path $shared 'PIM-License.ps1')
+$licText = ''; $licErr = "$cadenceErr"
+if (-not $licErr) {
+    try { $licText = ConvertFrom-PimLicenseSettingRaw ((Read-PimJobCadenceValues -ConnectionString $cadenceCs -Object 'pim.Settings' -Names @('License'))['License']) }
+    catch { $licErr = "$($_.Exception.Message)" }
+}
+$mspLic = Invoke-PimMspLicenseGate -Role Slave -TenantId $TenantId -LicenseText $licText -StoreError $licErr -SqlServer "$env:PIM_SqlServer".Trim() -Log $cadenceLog
+if (-not $mspLic.ok) { Stop-DownlinkJob -Code 2 -State failed -Detail "$($mspLic.message)" }
+
 # Load the scenario + downlink + downlink-job cores (placement / verdict helpers).
 . (Join-Path $shared 'PIM-ScenarioProfile.ps1')   # also dot-sources PIM-Downlink.ps1
 . (Join-Path $shared 'PIM-DownlinkJob.ps1')
@@ -108,20 +179,17 @@ if ($engineThumb) {
     JobLog ("identity model: Managed Identity ({0}) -- token acquired by the REST layer at call time" -f $placement.spnModel)
 }
 
-# --- baseline source resolution (private transport: a private-endpoint URL OR a
-#     mounted/pulled file). Refuse if neither is present (fail-safe). -----------
-if (-not "$BaselineUrl".Trim() -and -not "$BaselineDocPath".Trim()) {
-    JobLog 'no baseline source: supply -BaselineUrl (private-endpoint blob) or -BaselineDocPath (mounted bundle) / set PIM_BaselineUrl|PIM_BaselineDocPath' 'ERROR'
-    exit 2
+# --- baseline source resolution (private transport: a private-endpoint URL OR a mounted/pulled file). The refusal when
+#     neither is present runs BEFORE the cadence gate, above. ------------------------------------------------------
+# 🔴 REDACT THE QUERY STRING. This line used to log $BaselineUrl whole -- and when the cross-tenant
+# path carried a SAS, its `sig=` landed in Log Analytics in cleartext (MEASURED 2026-09-03 on RIDE's
+# first run). The SAS transport is retired (SEC-27: public-but-signed per DESIGN 13.7, no query string
+# at all), and Deploy-PimDownlinkJob now refuses a URL that carries one -- the redaction stays so an
+# older job definition still cannot print a credential.
+if ("$BaselineUrl".Trim()) {
+    if ("$BaselineUrl" -match '\?') { JobLog 'the baseline URL carries a QUERY STRING -- the SAS transport is retired; redeploy the job with the PLAIN blob URL (Deploy-PimDownlinkJob).' 'WARN' }
+    JobLog ("baseline source: URL {0}" -f ($BaselineUrl -replace '\?.*$', '?<redacted>'))
 }
-# 🔴 REDACT THE QUERY STRING. This line used to log $BaselineUrl whole -- and on the cross-tenant
-# path that URL carries a SAS, so its `sig=` landed in Log Analytics in cleartext, readable by
-# anyone with workspace access, for the workspace's whole retention period. MEASURED 2026-09-03 on
-# RIDE's first run. Deploy-PimDownlinkJob is scrupulous about this (it passes the SAS as an ACA
-# secret, and shreds the deploy yaml because it "carried secret values") -- and then the container
-# printed it anyway. The host and path are what a reader needs to diagnose a pull; the credential
-# is not.
-if ("$BaselineUrl".Trim()) { JobLog ("baseline source: private URL {0}" -f ($BaselineUrl -replace '\?.*$', '?<redacted>')) }
 else { JobLog ("baseline source: mounted/pulled file {0}" -f $BaselineDocPath) }
 # 71.35: which master signing keys this tenant trusts (Test-PimBaselineDoc reads PIM_BaselineTrustedKeys from the env).
 $__pins = @("$env:PIM_BaselineTrustedKeys" -split '[,;\s]+' | Where-Object { "$_".Trim() })
@@ -136,7 +204,7 @@ else { JobLog 'trusted master signing keys: none pinned -- only bundles signed b
 $runner = Join-Path $solRoot 'setup\Invoke-PimScenarioRun.ps1'
 if (-not (Test-Path -LiteralPath $runner)) {
     JobLog "scenario runner not found: $runner" 'ERROR'
-    exit 3
+    Stop-DownlinkJob -Code 3 -State failed -Detail "scenario runner not found: $runner"
 }
 
 $runArgs = @{
@@ -164,6 +232,9 @@ elseif ("$BaselineUrl".Trim()) {
     $runArgs['BaselineUrl'] = $BaselineUrl
     if ("$BaselineAccessToken".Trim()) { $runArgs['BaselineAccessToken'] = $BaselineAccessToken }
 }
+# SEC-24/25: the runner reads this tenant's anti-rollback floor + revoked signers from its OWN store and checks the
+# master's central kill; the kill URL defaults to the bundle's sibling, so only an explicit override is passed.
+if ("$CentralKillUrl".Trim()) { $runArgs['CentralKillUrl'] = "$CentralKillUrl".Trim() }
 
 JobLog "invoking scenario runner (downlink-sync -> engine-apply) ..."
 $result = $null
@@ -186,7 +257,7 @@ try {
     foreach ($f in @("$($_.ScriptStackTrace)" -split "`r?`n")) {
         if ("$f".Trim()) { JobLog ("  stack   : {0}" -f $f.Trim()) 'ERROR' }
     }
-    exit 4
+    Stop-DownlinkJob -Code 4 -State failed -Detail ("scenario run threw: {0}" -f $_.Exception.Message)
 }
 
 # --- 3) structured run summary to the log stream (observability) ---------------
@@ -209,12 +280,15 @@ if ($ok -and $held) {
     # needs an operator's approval (the plan hash + approve command are in the engine-apply step above, and the
     # breaker raised its own alert). The execution succeeds, and this line says why it still needs attention.
     JobLog ("==== downlink JOB HELD ({0}; NEEDS APPROVAL -- see the engine-apply step) ====" -f $(if ($WhatIfMode) { 'planned' } else { 'applied' })) 'WARN'
-    exit 0
+    Stop-DownlinkJob -Code 0 -State held -Detail ("{0}; a policy change set NEEDS APPROVAL (see the engine-apply step)" -f $(if ($WhatIfMode) { 'planned' } else { 'applied' }))
 }
+# The failing step, in the record the Manager shows (the first step that did not succeed).
+$failedStep = ''
+foreach ($r in @($result)) { foreach ($s in @(Get-PimDownlinkJobValue -Object $r -Key 'steps')) { if ($s -and -not $s.ok -and -not $failedStep) { $failedStep = ("{0}: {1}" -f $s.step, $s.detail) } } }
 if ($ok) {
     JobLog ("==== downlink JOB SUCCEEDED ({0}) ====" -f $(if ($WhatIfMode) { 'planned' } else { 'applied' }))
-    exit 0
+    Stop-DownlinkJob -Code 0 -State succeeded -Detail $(if ($WhatIfMode) { 'planned (WhatIf)' } else { 'pulled, verified and applied' })
 } else {
     JobLog "==== downlink JOB FAILED ====" 'ERROR'
-    exit 1
+    Stop-DownlinkJob -Code 1 -State failed -Detail $(if ($failedStep) { $failedStep } else { 'the scenario run reported failure (see the job log)' })
 }

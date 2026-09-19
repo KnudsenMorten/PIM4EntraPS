@@ -33,7 +33,11 @@ param(
     [string]$KeyName = 'pim-baseline-signing',
     [ValidateSet(2048, 3072, 4096)][int]$KeySize = 3072,
     [switch]$CreateVaultIfMissing,
-    [ValidateRange(1, 30)][int]$PropagationTimeoutMinutes = 10
+    [ValidateRange(1, 30)][int]$PropagationTimeoutMinutes = 10,
+    # §71.40 (2026-09-18) -- the MASTER's own Manager verifies its published bundle only against a pinned key id, and that
+    # id first exists HERE (hosting runs earlier). Name the Manager app and the id is MERGED into its
+    # PIM_BaselineTrustedKeys (existing pins kept -- a key roll pins the new id beside the old) and read back.
+    [string]$PinOnManagerApp
 )
 $ErrorActionPreference = 'Stop'
 $here = $PSScriptRoot
@@ -126,5 +130,25 @@ Write-Host '  SIGNING KEY ID -- give it to EVERY managed tenant (an identifier, 
 Write-Host "    master.signingKeyIds += $keyId" -ForegroundColor Yellow
 Write-Host "    key: $keyUriWithVersion ($($back.properties.kty) $($back.properties.keySize), sign+verify, not exportable)" -ForegroundColor DarkGray
 Write-Host '  A managed tenant REFUSES a bundle signed by a key it does not pin. Pin a new id everywhere BEFORE a key roll.' -ForegroundColor DarkGray
+
+# ---- 4. §71.40 -- pin it on this master's OWN Manager (merge, never replace; read back) ---------------------------------
+if ("$PinOnManagerApp".Trim()) {
+    . (Join-Path $solRoot 'engine\_shared\PIM-DownlinkManager.ps1')
+    Step "pin the key id on the Manager $PinOnManagerApp (PIM_BaselineTrustedKeys, merged)"
+    $cur = "$(@(az containerapp show --subscription $SubscriptionId -g $ResourceGroup -n $PinOnManagerApp --query "properties.template.containers[0].env[?name=='PIM_BaselineTrustedKeys'].value" -o tsv 2>$null) -join ',')".Trim()
+    $merge = Get-PimManagerBaselineEnvPlan -TrustedKeys @($cur, $keyId)
+    if (-not $merge.ok) { throw "the Manager's existing pins could not be merged: $($merge.reason)" }
+    $curKeys = @("$cur" -split '[,;\s]+' | ForEach-Object { "$_".Trim() } | Where-Object { $_ })
+    if ($curKeys -ccontains $keyId) {
+        Note "already pinned ($($merge.keys -join ', '))"
+    } elseif ($PSCmdlet.ShouldProcess($PinOnManagerApp, "set PIM_BaselineTrustedKeys=$($merge.keys -join ',')")) {
+        $pinEnv = @($merge.env | Where-Object { $_ -like 'PIM_BaselineTrustedKeys=*' })
+        az containerapp update --subscription $SubscriptionId -g $ResourceGroup -n $PinOnManagerApp --set-env-vars @pinEnv -o none --only-show-errors
+        if ($LASTEXITCODE -ne 0) { throw "could not set PIM_BaselineTrustedKeys on $PinOnManagerApp (az exit $LASTEXITCODE)." }
+        $back = "$(@(az containerapp show --subscription $SubscriptionId -g $ResourceGroup -n $PinOnManagerApp --query "properties.template.containers[0].env[?name=='PIM_BaselineTrustedKeys'].value" -o tsv 2>$null) -join ',')".Trim()
+        if ((@($back -split '[,;\s]+') -notcontains $keyId)) { throw "read-back FAILED: $PinOnManagerApp's PIM_BaselineTrustedKeys reads '$back', which does not contain $keyId." }
+        Note "pinned and read back: $back"
+    }
+}
 Write-Output $keyId
 exit 0

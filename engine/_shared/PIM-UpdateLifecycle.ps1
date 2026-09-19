@@ -5,7 +5,8 @@
   (SQL/Data) + sec.20 (Testing).
 
   This file only DECIDES + RENDERS PLANS. No az calls, no HTTP, no PowerShell modules, no
-  git, no file writes. The thin orchestrator (tools/setup/Invoke-PimUpdate.ps1) gathers the
+  git, no file writes. (The one disk READ is Get-PimSolutionContentHash, kept here so the three
+  callers that must agree on it load one copy.) The thin orchestrator (tools/setup/Invoke-PimUpdate.ps1) gathers the
   FACTS (pulled GUI content hash vs running image, pulled SQL schema spec vs deployed DB,
   health verdicts, whether the monitor is deployed) and ACTS on the plans this returns. That
   split keeps every risky decision -- "does this pulled update need a SQL upgrade?", "does it
@@ -20,6 +21,8 @@
 
   Public functions:
     * Get-PimContentHash             -- stable SHA256 over an ordered list of file digests
+    * Get-PimSolutionContentFiles    -- THE file set an image's content hash covers (BUG-174: one definition)
+    * Get-PimSolutionContentHash     -- the content hash of that file set (builder, roller stamp and detector)
     * Get-PimGuiUpdatePlan           -- does the pulled Manager web GUI differ from the running one?
     * Get-PimSqlUpdatePlan           -- does the pulled code need a SQL/schema upgrade vs the DB?
     * Get-PimUpdateDetection         -- the combined {SqlUpdateRequired; GuiUpdateRequired; details}
@@ -66,6 +69,53 @@ function Get-PimContentHash {
         $hash  = $sha.ComputeHash($bytes)
         return (($hash | ForEach-Object { $_.ToString('x2') }) -join '')
     } finally { $sha.Dispose() }
+}
+
+# ---- THE content file set (BUG-174) --------------------------------------
+# 🔴 ONE DEFINITION, THREE CALLERS. Build-PimManagerImage stamps this hash onto the image, Update-PimContainers
+# stamps it onto the Manager app (PIM_MANAGER_CONTENT_HASH, where the detector reads it) and Invoke-PimUpdate's
+# detector compares it with the pulled tree. They used to walk the disk themselves: the builder and the
+# detector hashed the whole solution while the roller's stamp hashed tools\pim-manager only, so the running
+# hash NEVER equalled the pulled one, GuiUpdateRequired was always True, and every host-side update rebuilt
+# an identical image. Their own comments said the copies "MUST agree"; three copies of a file walk do not.
+# 🪤 DENY-LIST, NOT ALLOW-LIST (the builder's lesson, 2026-09-12): the Dockerfile copies the WHOLE solution,
+# so everything that ships is hashed and only what cannot affect runtime is excluded -- a new directory is
+# covered by default, and the failure mode is an unnecessary rebuild rather than a missed one.
+# Excluded: documentation and screenshots (never executed), the test suites (not run in the container), build
+# output, VCS/editor noise, runtime caches, and per-customer *.custom.* files.
+$script:PimContentHashSkipDirs = '/(docs|tests|output|\.git|\.vs|\.vscode|node_modules|cache)/'
+
+function Get-PimSolutionContentFiles {
+    <#
+      The files whose content IS the Manager image, relative to the solution root (the folder the
+      Dockerfile copies). Returns @{ path; fullName } per file; an absent root returns nothing.
+      Directory exclusions are matched on the RELATIVE path, with either separator, so the answer does
+      not depend on where the tree is checked out or on the OS the caller runs on.
+    #>
+    param([Parameter(Mandatory)][string]$SolutionRoot)
+    if (-not (Test-Path -LiteralPath $SolutionRoot)) { return @() }
+    $root = (Resolve-Path -LiteralPath $SolutionRoot).Path.TrimEnd('\', '/')
+    foreach ($f in @(Get-ChildItem -LiteralPath $root -Recurse -File -ErrorAction SilentlyContinue)) {
+        $rel = $f.FullName.Substring($root.Length).TrimStart('\', '/')
+        $relN = $rel.Replace('\', '/')
+        $dir = if ($relN.Contains('/')) { $relN.Substring(0, $relN.LastIndexOf('/')) } else { '' }
+        if (("/$dir/") -match $script:PimContentHashSkipDirs) { continue }
+        if ($f.Name -match '\.custom\.') { continue }
+        [pscustomobject]@{ path = $rel; fullName = $f.FullName }
+    }
+}
+
+function Get-PimSolutionContentHash {
+    <#
+      Get-PimContentHash over Get-PimSolutionContentFiles -- THE content hash of a Manager image built
+      from -SolutionRoot. '' when the root does not exist (the caller treats blank as "unknown").
+    #>
+    param([Parameter(Mandatory)][string]$SolutionRoot)
+    if (-not (Test-Path -LiteralPath $SolutionRoot)) { return '' }
+    $digests = foreach ($f in @(Get-PimSolutionContentFiles -SolutionRoot $SolutionRoot)) {
+        [pscustomobject]@{ path = $f.path; sha256 = (Get-FileHash -LiteralPath $f.fullName -Algorithm SHA256).Hash }
+    }
+    Get-PimContentHash -FileDigests @($digests)
 }
 
 # ---- GUI update detection (pure) ------------------------------------------
@@ -152,6 +202,8 @@ function Get-PimSqlUpdatePlan {
     $needBecauseCols = $false
 
     $unknown = New-Object System.Collections.Generic.List[string]
+    # (The pim.LocalAdmins quoted below was the only locked table when those incidents were measured.
+    # Since 2026-09-18 (IMP-46) the locked set is every table sql/platform-schema.sql creates.)
     foreach ($table in @($LockedSqlSchema.Keys)) {
         $spec = $LockedSqlSchema[$table]
         $hasTable = $DeployedColumns.ContainsKey($table)
@@ -285,23 +337,44 @@ function Get-PimUpdateSourceProfile {
                               SET, never the version. The version gate now exists in
                               Get-PimDownlinkPlan but is OPT-IN via -RingPlan (inert without it, per
                               the non-breaking rule). See docs/REQUIREMENTS.md sec.33 BUG-29.
-      Returns { source; buildMode; deployMode; isHosted; ringGated } -- buildMode in {acr-build,
-      local-build}, deployMode in {aca-roll, local-relaunch}.
+      Returns { source; buildMode; deployMode; isHosted; ringGated; supported; unsupportedReason } --
+      buildMode in {acr-build, local-build}, deployMode in {aca-roll, local-relaunch}.
+      🔴 IMP-43: local-relaunch (a local/VM Manager: local build + relaunch, SQLEXPRESS) is NOT a
+      supported v2 runtime -- v2 runs on Container Apps only. The profile says so (supported=$false)
+      and the orchestrator REFUSES to apply it, instead of half-running it: before this, a git-pull
+      update of a hosted environment built an image, rolled nothing, and reported deployed=True.
+      The branch is kept (not deleted) so detection still reads, and so the refusal names itself.
+      A -Scenario (S1..S6, all Container Apps) corrects isHosted in the orchestrator, and that
+      corrected profile is the one that decides.
     #>
     param(
         [Parameter(Mandatory)][ValidateSet('git-pull','sync-automateit','from-master')][string]$Source,
         [ValidateSet('central','local')][string]$ManagedHosting = 'local'
     )
+    $no = 'the local/VM runtime (local build + relaunch of a local Manager, SQLEXPRESS) is not supported in PIM v2 -- v2 runs on Container Apps only'
     if ($Source -eq 'sync-automateit') {
-        return [pscustomobject]@{ source = 'sync-automateit'; buildMode = 'acr-build'; deployMode = 'aca-roll'; isHosted = $true; ringGated = $false }
+        return [pscustomobject]@{ source = 'sync-automateit'; buildMode = 'acr-build'; deployMode = 'aca-roll'; isHosted = $true; ringGated = $false; supported = $true; unsupportedReason = '' }
     }
     if ($Source -eq 'from-master') {
         if ($ManagedHosting -eq 'central') {
-            return [pscustomobject]@{ source = 'from-master'; buildMode = 'acr-build'; deployMode = 'aca-roll'; isHosted = $true; ringGated = $true }
+            return [pscustomobject]@{ source = 'from-master'; buildMode = 'acr-build'; deployMode = 'aca-roll'; isHosted = $true; ringGated = $true; supported = $true; unsupportedReason = '' }
         }
-        return [pscustomobject]@{ source = 'from-master'; buildMode = 'local-build'; deployMode = 'local-relaunch'; isHosted = $false; ringGated = $true }
+        return [pscustomobject]@{ source = 'from-master'; buildMode = 'local-build'; deployMode = 'local-relaunch'; isHosted = $false; ringGated = $true; supported = $false; unsupportedReason = $no }
     }
-    return [pscustomobject]@{ source = 'git-pull'; buildMode = 'local-build'; deployMode = 'local-relaunch'; isHosted = $false; ringGated = $false }
+    return [pscustomobject]@{ source = 'git-pull'; buildMode = 'local-build'; deployMode = 'local-relaunch'; isHosted = $false; ringGated = $false; supported = $false; unsupportedReason = $no }
+}
+
+function Assert-PimUpdateRuntimeSupported {
+    <#
+      IMP-43. THROWS when an update is about to be APPLIED on a runtime v2 does not support (the
+      local/VM relaunch path). -UpdateProfile is the orchestrator's FINAL profile (after any -Scenario
+      correction). Detect-only never calls this: reading is harmless, half-applying is not.
+    #>
+    param([Parameter(Mandatory)][object]$UpdateProfile, [string]$Caller = 'update')
+    if ([bool]$UpdateProfile.isHosted) { return }
+    $why = if ("$($UpdateProfile.unsupportedReason)".Trim()) { "$($UpdateProfile.unsupportedReason)" } else { 'this is not a Container Apps deployment' }
+    throw ("$Caller`: REFUSED -- $why. Nothing was built, rolled or upgraded. If this environment IS on Container Apps, " +
+           "run the update with -Scenario <S1..S6> or -Source sync-automateit so it takes the container path.")
 }
 
 # ---- build plan (pure) ----------------------------------------------------
@@ -405,20 +478,29 @@ function Get-PimVerifyVerdict {
       the captured pre-update revision.
         -ExitCode / -FailCount : the smoke result.
         -PreviousRevision      : the captured rollback target.
-      Returns { Healthy; rollback = <Get-PimSyncRollbackPlan> }.
+        -RollbackOnUnverified  : roll back when the smoke SKIPPED (exit 2) as well as when it failed.
+      Returns { Healthy; State = healthy|unverified|failed; rollback = <Get-PimSyncRollbackPlan> }.
+      BUG-172: exit 2 (the smoke skipped a check) is NEVER Healthy. Whether it also rolls back is the
+      caller's decision: a path whose roll was already gated by the roller's release gate may keep the
+      revision as UNVERIFIED (action 'none', said out loud) rather than roll back a deploy that passed.
     #>
-    param([int]$ExitCode = 0, [int]$FailCount = 0, [string]$PreviousRevision)
-    $healthy = if (Get-Command Test-PimSyncHealthVerdict -ErrorAction SilentlyContinue) {
-        Test-PimSyncHealthVerdict -ExitCode $ExitCode -FailCount $FailCount
-    } else { (($ExitCode -eq 0) -and ($FailCount -le 0)) }
+    param([int]$ExitCode = 0, [int]$FailCount = 0, [string]$PreviousRevision, [switch]$RollbackOnUnverified)
+    $state = if (Get-Command Get-PimSyncHealthState -ErrorAction SilentlyContinue) {
+        Get-PimSyncHealthState -ExitCode $ExitCode -FailCount $FailCount
+    } elseif ($FailCount -gt 0) { 'failed' } elseif ($ExitCode -eq 0) { 'healthy' } elseif ($ExitCode -eq 2) { 'unverified' } else { 'failed' }
+    $healthy = ($state -eq 'healthy')
+    if ($state -eq 'unverified' -and -not $RollbackOnUnverified) {
+        $rb = [pscustomobject]@{ action='none'; revision=''; reason='health check did NOT RUN in full (skipped) -- UNVERIFIED: not healthy, not rolled back' }
+        return [pscustomobject]@{ Healthy = $false; State = $state; rollback = $rb }
+    }
     $rb = if (Get-Command Get-PimSyncRollbackPlan -ErrorAction SilentlyContinue) {
-        Get-PimSyncRollbackPlan -Healthy $healthy -PreviousRevision $PreviousRevision
+        Get-PimSyncRollbackPlan -Healthy $healthy -PreviousRevision $PreviousRevision -Unverified:($state -eq 'unverified')
     } else {
         if ($healthy) { [pscustomobject]@{ action='none'; revision=''; reason='healthy' } }
         elseif ("$PreviousRevision".Trim()) { [pscustomobject]@{ action='rollback'; revision="$PreviousRevision".Trim(); reason='unhealthy -- roll back' } }
         else { [pscustomobject]@{ action='none'; revision=''; reason='unhealthy, no rollback target' } }
     }
-    return [pscustomobject]@{ Healthy = [bool]$healthy; rollback = $rb }
+    return [pscustomobject]@{ Healthy = [bool]$healthy; State = $state; rollback = $rb }
 }
 
 # ---- notify plan (pure) ---------------------------------------------------
@@ -430,7 +512,8 @@ function Get-PimNotifyPlan {
 
       Inputs:
         -Outcome      : 'success' | 'failure' | 'rolledback' | 'noop'
-        -Source       : 'git-pull' | 'sync-automateit'
+        -Source       : 'git-pull' | 'sync-automateit' | 'from-master' (IMP-43: every source the
+                        profile accepts; the orchestrator used to be unable to notify for from-master)
         -Detection    : Get-PimUpdateDetection result (what was needed).
         -Built/-Deployed/-SchemaUpgraded : what actually happened (bools).
         -ImageTag     : the tag built/deployed (when any).
@@ -440,7 +523,7 @@ function Get-PimNotifyPlan {
     #>
     param(
         [Parameter(Mandatory)][ValidateSet('success','failure','rolledback','noop')][string]$Outcome,
-        [Parameter(Mandatory)][ValidateSet('git-pull','sync-automateit')][string]$Source,
+        [Parameter(Mandatory)][ValidateSet('git-pull','sync-automateit','from-master')][string]$Source,
         [object]$Detection,
         [bool]$Built,
         [bool]$Deployed,

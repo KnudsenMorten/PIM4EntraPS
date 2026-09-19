@@ -14,7 +14,9 @@ time.
   - PIM for Groups → workload RBAC delegations (Defender XDR, Intune, Power BI workspaces, custom apps)
 - ★ **Favorites** — star the rows you click daily; they pin to the top of every section
 - **My Access** tab — see what's active right now, one-click deactivate
-- **No tenant config push** — each browser profile signs in once via the in-popup wizard
+- **Tenant catalog** pushed centrally (Intune / GPO / registry policy) or imported per browser profile
+- **Sign-in is kept for the browser session only** — tokens live in `chrome.storage.session` (memory), never on disk
+- **Talks only to** `login.microsoftonline.com`, `graph.microsoft.com`, `management.azure.com` and the update feed — those are its only host permissions
 
 Published CRX is auto-updated from
 `https://knudsenmorten.github.io/PIM4EntraPS/updates.xml`.
@@ -34,8 +36,8 @@ Deterministic extension id: `eheocihmlppcophaeakmdenhgcookkab`.
 │       browser auto-installs the extension on next launch             │
 │                                                                      │
 │ 3. Per browser profile (the user, first popup open):                 │
-│    -> on-screen wizard: type work email -> sign in once -> tenant    │
-│       + app reg auto-discovered -> Save -> ready to activate         │
+│    -> setup wizard: use the centrally deployed catalog, import a     │
+│       JSON catalog, or type tenant id + client id -> sign in -> go   │
 └──────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -51,14 +53,17 @@ sit at the top and the last-used justification + duration are remembered.
 | Script | Audience | Purpose |
 |---|---|---|
 | `Deploy-PimActivatorBackend.ps1` | Tenant admin | One-time per tenant — create the Entra app reg + grant delegated permissions |
-| `Deploy-PimActivatorClient.ps1`  | Endpoint admin | Per-machine or per-fleet — push `ExtensionInstallForcelist` so the extension auto-installs |
+| `Deploy-PimActivatorClient.ps1`  | Endpoint admin | Per machine — write the force-install policies + the tenant catalog into HKLM / HKCU |
+| `Deploy-PimActivatorIntune.ps1`  | Endpoint admin | Intune — the same client policies + tenant catalog as a configuration profile (ADMX-backed) |
+| `Deploy-PimActivatorHybrid.ps1`  | Endpoint admin | Without Intune — the same client policies as a domain GPO, local machine policy, or a JSON artifact |
 | `Update-PimActivator-Extension.ps1` | Extension maintainer | Dev loop — pack new CRX, push to `gh-pages`, flush local browser |
 | `Test-PimActivatorFlow.ps1`      | QA / smoke test | Headless verification of the end-to-end activation path |
 
-Files that USE to exist but have been removed in v1.2.0+ (config now lives
-in the browser profile, not in the Windows registry):
-`config.js`, `config.template.js`, `managed_schema.json`, `admx/`,
-`Setup-PimActivator.ps1`, `Deploy-PimActivatorIntune.ps1`,
+The tenant catalog reaches the extension through `chrome.storage.managed`
+(`managed-schema.json` documents the keys; `intune/` holds the ADMX/ADML the
+Intune profile uses), or is imported / typed per browser profile in the setup
+wizard. Removed long ago and not coming back: `config.js`,
+`config.template.js`, `Setup-PimActivator.ps1`,
 `Set-PimActivatorPolicy-Intune.ps1`, `Deploy-PimActivatorPolicy-Admx.ps1`.
 
 ---
@@ -94,6 +99,7 @@ Defaults wired into the script (since v2.4.57 / v2.4.58):
 | Parameter | Default | Override when |
 |---|---|---|
 | `-ExtensionId` | `eheocihmlppcophaeakmdenhgcookkab` | Only if forking the extension under a different key |
+| `-Channel` | `Released` | `Both` also registers the TEST build's redirect URIs — internal/dev tenant only, never a customer tenant (the app holds tenant-wide `RoleManagement.ReadWrite.Directory` consent) |
 | `-DisplayName` | `PIM Activator` | You want a per-env suffix (prod / staging / etc.) |
 | `-GrantConsent` | `$true` | Pass `:$false` to skip tenant-wide consent |
 | `-TenantId` | Active `Get-MgContext` tenant | Cross-check guard if you want a hard-fail on wrong tenant |
@@ -119,37 +125,48 @@ Required delegated permissions (auto-resolved + auto-consented by `-GrantConsent
 | Microsoft Graph | `RoleManagement.Read.Directory` | My Access — resolve Entra role assignments per group |
 | Microsoft Graph | `RoleManagement.ReadWrite.Directory` | Activate / deactivate direct Entra role assignments |
 | Microsoft Graph | `AdministrativeUnit.Read.All` | My Access — resolve AU displayNames |
-| Microsoft Graph | `Application.Read.All` | Onboarding wizard — discover the per-tenant app reg by display name |
+| Microsoft Graph | `Application.Read.All` | Still registered + consented by the script, but NOT used by the current popup (it served the retired auto-discover wizard) |
 | Azure Service Management | `user_impersonation` | Mint ARM token for Azure RBAC eligibility + activation |
 
-Script prints the resulting `tenantId` + `clientId`. You only need them if
-you want to pre-fill the onboarding wizard for users; otherwise the wizard
-discovers them automatically.
+Script prints the resulting `tenantId` + `clientId` — the pair that goes into
+the tenant catalog (the client deploy scripts can also look the app up by its
+exact display name, or take `-ClientId`).
 
 ---
 
 ## `Deploy-PimActivatorClient.ps1` — force-install on user machines
 
-Writes the `ExtensionInstallForcelist` Chromium enterprise policy so the
+Writes the Chromium enterprise policies (`ExtensionInstallForcelist`,
+`ExtensionInstallSources`, `ExtensionSettings`) plus the tenant catalog so the
 browser auto-installs the extension on next launch. Designed for unattended
-rollout via Intune / GPO / Configuration Manager.
+rollout via GPO / Configuration Manager (use `Deploy-PimActivatorIntune.ps1` on
+Intune-managed devices).
+
+**Your organisation's own extension policies are never overwritten.** Our
+forcelist / sources rows go into the slot that already holds our extension id,
+otherwise the lowest free slot; our `ExtensionSettings` entry is merged into the
+existing dictionary (the `'*'` defaults and every other extension's entry are
+kept). An `ExtensionSettings` value that is not valid JSON stops the run before
+anything is written. `Deploy-PimActivatorHybrid.ps1 -Target LocalGpo` uses the
+same code (`_PimActivatorHybridPolicy.ps1`, which must sit next to the script).
 
 Both the extension id and the update URL are pre-baked into the script
 (since v2.4.57) — vanilla invocation Just Works:
 
 ```powershell
-# Dev box, current user only, no admin required (default):
+# Per-machine (HKLM, admin required) -- the default:
 .\Deploy-PimActivatorClient.ps1
 
-# Per-machine (HKLM) on an isolated test machine or un-managed server
-# (admin required; do NOT use on Intune-managed devices -- HKLM conflicts
-# with Intune-pushed ExtensionInstallForcelist):
-.\Deploy-PimActivatorClient.ps1 -Scope Machine
+# Current user only (HKCU, no admin):
+.\Deploy-PimActivatorClient.ps1 -Scope User
 
 # Edge only (skip Chrome):
 .\Deploy-PimActivatorClient.ps1 -Browser Edge
 
-# Uninstall (removes the forcelist entry):
+# Pick the app registration explicitly (else: the one app named exactly 'PIM Activator'):
+.\Deploy-PimActivatorClient.ps1 -ClientId '00000000-0000-0000-0000-000000000000'
+
+# Uninstall (removes ONLY our rows + our ExtensionSettings entry + our catalog):
 .\Deploy-PimActivatorClient.ps1 -Uninstall
 
 # Forked the extension under your own key + own gh-pages mirror:
@@ -164,7 +181,8 @@ Defaults wired into the script:
 |---|---|---|
 | `-ExtensionId` | `eheocihmlppcophaeakmdenhgcookkab` | Forking under a different signing key |
 | `-UpdateUrl` | `https://knudsenmorten.github.io/PIM4EntraPS/updates.xml` | Self-hosting your own CRX mirror |
-| `-Scope` | `User` (HKCU) | `Machine` for un-managed servers / kiosk boxes |
+| `-Scope` | `Machine` (HKLM) | `User` (HKCU) for a single user without admin rights |
+| `-Channel` | `Released` | `Test` for the side-by-side TEST build (internal only) |
 | `-Browser` | `Both` | `Edge` or `Chrome` to skip the other |
 
 ### Override the org's activation defaults at deploy time (all deploy paths)
@@ -214,23 +232,22 @@ fleet-wide.
 ## First-run user experience
 
 On the **first** time a user opens the popup in a given browser profile,
-the **onboarding wizard** appears:
+the **setup wizard** offers three ways to configure it:
 
-1. **Welcome card** — *Let's set this up.*
-2. **Email field** — user types their work email (e.g.
-   `admin@contoso.com`). Used solely to look up the tenant id via
-   Microsoft's OpenID Connect discovery (`/{domain}/.well-known/openid-configuration`).
-3. **Sign in to auto-discover** — opens a normal Microsoft sign-in window
-   against the tenant-specific authorize endpoint. The sign-in flow runs
-   in the extension's MV3 service worker so it survives the popup losing
-   focus.
-4. **App registration auto-detected** — the extension queries Graph
-   `/applications?$filter=startswith(displayName,'PIM Activator')` and
-   pre-fills the client id. If multiple app regs match, a picker appears.
-5. **Defaults pre-filled** — Justification: *Change in infrastructure*,
-   Duration: *8h*. Editable.
-6. **Save and continue** — values persist to `chrome.storage.local` for
-   this browser profile.
+1. **Use centrally deployed** — the tenant catalog pushed by Intune / GPO /
+   the client deploy scripts (`chrome.storage.managed.tenantCatalog`). With
+   several tenants a picker appears.
+2. **Import JSON catalog** — paste a JSON array of tenants (MSP / multi-tenant).
+3. **Add single tenant** — type the tenant id + the PIM Activator app's client id.
+
+The user then signs in with a normal Microsoft sign-in window
+(`chrome.identity.launchWebAuthFlow` + PKCE, run from the popup). The chosen
+catalog / tenant and the user's preferences persist in `chrome.storage.local`
+for this browser profile; the **sign-in tokens are kept in
+`chrome.storage.session` only** — in memory, cleared when the browser closes —
+so the user signs in once per browser session. (Versions before this change
+kept the tokens in `chrome.storage.local`; the first popup open of the new
+version deletes them from there.)
 
 From then on, the popup boots straight to the **Activate** tab.
 
@@ -300,6 +317,19 @@ open downloads the fresh build.
 .\Update-PimActivator-Extension.ps1 -PackOnly
 ```
 
+Safety rails on the flush:
+
+- **Signing-key gate** — before any browser is closed, the CRX each flushed id
+  would re-download is fetched and its id derived; a mismatch **or a check that
+  cannot run** aborts the flush (evicting the cached binary behind a wrong-key
+  CRX bricks the installed extension). `-SkipCrxKeyCheck` overrides the
+  "could not verify" case only.
+- **Extension storage is kept** — `Local Extension Settings\<id>` (the
+  extension's saved catalog + preferences) is no longer deleted;
+  `-DangerouslyWipeExtensionStorage` opts in for a broken profile.
+- **Local State is backed up** before Edge is closed for `-Repack` / the flush,
+  and restored if the profile list regressed.
+
 Prereqs (one-time per dev box):
 
 - Edge installed (used as the CRX packer via `msedge.exe --pack-extension`).
@@ -329,30 +359,30 @@ catch regressions in the Graph + ARM contracts before publishing a CRX.
 └──────────────────────────┘
 
 ┌──────────────────────────┐   one-time per machine / fleet
-│Deploy-PimActivatorClient │ -------------------------> ExtensionInstallForcelist
-│       .ps1               │                            policy in HKCU / HKLM
-└──────────────────────────┘                                |
+│Deploy-PimActivatorClient │ -------------------------> force-install policies
+│ / -Intune / -Hybrid .ps1 │                            + tenantCatalog (managed
+└──────────────────────────┘                            storage) in HKLM / HKCU
+                                                            |
                                                             v
                                                     Edge / Chrome auto-installs
                                                     extension on next launch
 
-┌──────────────────────────┐   one-time per browser profile
-│  In-popup onboarding     │ -------------------------> chrome.storage.local
-│  wizard (popup.js +      │                            (this browser profile only)
-│  background.js)          │
-└──────────────────────────┘                                |
+┌──────────────────────────┐   per browser profile
+│  In-popup setup wizard   │ -------------------------> chrome.storage.local
+│  (popup.js)              │                            catalog choice + prefs
+└──────────────────────────┘                            (no secrets)
+                                                            |
                                                             v
-                                                    popup.js reads tenantId +
-                                                    clientId + defaults from
-                                                    chrome.storage.local on
-                                                    every popup open
+                                                    popup.js merges the managed
+                                                    catalog with any local one
+                                                    on every popup open; sign-in
+                                                    tokens -> chrome.storage.session
+                                                    (memory, this browser session)
 ```
 
-No registry-backed Group Policy / Intune managed-storage push is involved
-in the runtime config — every browser profile holds its own tenant id +
-client id locally. This is intentional for the MSP scenario where one
-Windows user has many Edge profiles each signed in to a different
-customer tenant.
+The managed catalog (`chrome.storage.managed.tenantCatalog`) and a catalog
+imported in the popup are merged, so an MSP admin can hold many tenants in
+one browser profile and switch between them from the header.
 
 ---
 
@@ -360,10 +390,15 @@ customer tenant.
 
 | File | Type | Purpose |
 |---|---|---|
-| `manifest.json`   | extension | MV3 manifest (version, permissions, service-worker registration) |
-| `popup.html`      | extension | Popup UI (Activate tab, My Access tab, onboarding wizard) |
+| `manifest.json`   | extension | MV3 manifest (version, permissions, host permissions, service-worker registration) |
+| `popup.html`      | extension | Popup UI (Activate tab, My Access tab, setup wizard) |
 | `popup.js`        | extension | Popup logic (sign-in, list, activate, deactivate, render) |
-| `background.js`   | extension | MV3 service worker (onboarding sign-in flow that survives popup death) |
+| `popup-storage.js` | extension | Which key lives where: tokens -> `chrome.storage.session`, the rest -> `chrome.storage.local` |
+| `popup-report.js` | extension | Scrubs ids / e-mails / tokens out of the public "Report bug" text |
+| `popup-config.js`, `popup-net.js`, `version-badge.js` | extension | Pure config helpers, fetch timeouts/watchdogs, version badge |
+| `background.js`   | extension | MV3 service worker — intentionally empty (sign-in runs in the popup) |
+| `managed-schema.json`, `intune/` | extension / policy | Managed-storage schema + the ADMX/ADML for the tenant catalog |
+| `_PimActivatorHybridPolicy.ps1` | endpoint setup | Shared slot / ExtensionSettings-merge logic of the Client + Hybrid deploys |
 | `icons/`          | extension | 16/32/128 px toolbar icons |
 | `extension-identity.txt` | extension | Public key + deterministic extension id |
 | `Deploy-PimActivatorBackend.ps1`     | tenant setup | App reg + admin consent |

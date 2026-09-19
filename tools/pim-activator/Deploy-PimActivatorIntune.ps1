@@ -687,9 +687,22 @@ if ($CatalogJsonPath) {
         # operator renamed the app to a variant like 'PIM Activator (prod)'
         # or '[2linkIT] PIM Activator'. Same pattern as the popup's
         # onboarding wizard uses.
+        # BUG-220 class: Graph returns no guaranteed order, so "the first match" is not a
+        # choice. One prefix match -> use it; several -> the one named EXACTLY
+        # 'PIM Activator' if there is exactly one; otherwise refuse and ask for -ClientId.
         $appName = 'PIM Activator'
         $appResp = Invoke-MgGraphRequest -Method GET -Uri ("https://graph.microsoft.com/v1.0/applications?`$filter=startswith(displayName,'$appName')")
-        $app = $appResp.value | Select-Object -First 1
+        $appMatches = @($appResp.value | Where-Object { $_ })
+        $app = $null
+        if ($appMatches.Count -eq 1) { $app = $appMatches[0] }
+        elseif ($appMatches.Count -gt 1) {
+            $exact = @($appMatches | Where-Object { "$($_.displayName)" -ceq $appName })
+            if ($exact.Count -eq 1) { $app = $exact[0] }
+            else {
+                $list = ($appMatches | ForEach-Object { "'$($_.displayName)' ($($_.appId))" }) -join ', '
+                throw "$($appMatches.Count) app registrations whose name starts with '$appName' exist in tenant '$tenantNameResolved' ($tenantIdResolved): $list. Ambiguous -- pass -ClientId <appId> to choose one."
+            }
+        }
         if (-not $app) {
             throw "No app registration with displayName starting with '$appName' found in tenant '$tenantNameResolved' ($tenantIdResolved). Run Deploy-PimActivatorBackend.ps1 once to create it, OR pass -ClientId <guid>, OR pass -CatalogJsonPath <file>."
         }

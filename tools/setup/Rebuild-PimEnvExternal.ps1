@@ -108,6 +108,11 @@ param(
     # capture will tell you.
     [switch]$SkipIdentityRepair,
 
+    # SEC-44 -- forwarded to Set-PimManagerEasyAuth: WHO may sign in (named principals, or every member
+    # account and never a guest). Required unless the Manager's application is already assignment-required.
+    [string[]]$EasyAuthAllowedPrincipals = @(),
+    [switch]$EasyAuthAllowAllTenantUsers,
+
     [switch]$Apply
 )
 
@@ -154,6 +159,75 @@ function LoadCap($name) {
     $p = Join-Path $CaptureDir "$Tag-$name.json"
     if (-not (Test-Path -LiteralPath $p)) { return $null }
     Get-Content -LiteralPath $p -Raw | ConvertFrom-Json
+}
+# =================================================================================================
+# 🔴 SEC-35 -- SECRET VALUES NEVER REACH THE DISK IN CLEAR TEXT, AND WHAT IS WRITTEN IS SHREDDED.
+# This used to save `secret list --show-values` as plain JSON in the capture directory (%TEMP% by
+# default, its path printed at the end) and embed the same values in the restore YAML -- and nothing
+# ever removed either: the Easy Auth client secret and any engine secret sat in a temp folder for good.
+#   * the secret CAPTURE is stored DPAPI-protected (ConvertFrom-SecureString: only this Windows user on
+#     this machine can read it back) -- still enough to RESUME after the delete, which is the only
+#     reason the values are kept at all;
+#   * a restore document (which must carry the values for `--yaml`) exists only for the one az call
+#     that consumes it, and is overwritten then deleted in a finally;
+#   * a COMPLETED rebuild shreds the protected captures too -- nothing is left to resume.
+# A capture written by the old version (plain text) is still read for a resume, and shredded with the rest.
+# =================================================================================================
+$script:SecretFilesToShred = New-Object System.Collections.Generic.List[string]
+function Remove-PimSecretFile([string]$Path) {
+    if (-not "$Path".Trim() -or -not (Test-Path -LiteralPath $Path)) { return }
+    try {
+        $len = (Get-Item -LiteralPath $Path).Length
+        if ($len -gt 0) {
+            $junk = New-Object byte[] $len
+            $rng = [System.Security.Cryptography.RandomNumberGenerator]::Create()
+            try { $rng.GetBytes($junk) } finally { $rng.Dispose() }
+            [System.IO.File]::WriteAllBytes($Path, $junk)
+        }
+    } catch { }
+    Remove-Item -LiteralPath $Path -Force -ErrorAction SilentlyContinue
+}
+# DPAPI (CurrentUser) straight from .NET: the same protection ConvertFrom-SecureString gives, without
+# depending on the Security module loading (it does not, in a Windows PowerShell spawned from pwsh 7).
+function Protect-PimCapValue([string]$Value) {
+    if (-not "$Value") { return '' }
+    try { Add-Type -AssemblyName System.Security -ErrorAction Stop } catch { }
+    $enc = [System.Security.Cryptography.ProtectedData]::Protect([Text.Encoding]::UTF8.GetBytes($Value), $null,
+               [System.Security.Cryptography.DataProtectionScope]::CurrentUser)
+    return [Convert]::ToBase64String($enc)
+}
+function Unprotect-PimCapValue([string]$Protected) {
+    if (-not "$Protected".Trim()) { return '' }
+    try { Add-Type -AssemblyName System.Security -ErrorAction Stop } catch { }
+    $dec = [System.Security.Cryptography.ProtectedData]::Unprotect([Convert]::FromBase64String($Protected), $null,
+               [System.Security.Cryptography.DataProtectionScope]::CurrentUser)
+    return [Text.Encoding]::UTF8.GetString($dec)
+}
+function SaveSecretCap($name, $secrets) {
+    $p = Join-Path $CaptureDir "$Tag-$name.protected.json"
+    $rows = @(@($secrets) | Where-Object { $null -ne $_ } | ForEach-Object {
+        [ordered]@{ name = "$($_.name)"; protectedValue = (Protect-PimCapValue "$($_.value)") } })
+    ConvertTo-Json -InputObject @($rows) -Depth 5 | Set-Content -LiteralPath $p -Encoding UTF8
+    [void]$script:SecretFilesToShred.Add($p)
+    return $p
+}
+function LoadSecretCap($name) {
+    $p = Join-Path $CaptureDir "$Tag-$name.protected.json"
+    if (Test-Path -LiteralPath $p) {
+        [void]$script:SecretFilesToShred.Add($p)
+        # PS 5.1: ConvertFrom-Json emits a JSON array as ONE object -- assign first, then enumerate.
+        $parsed = Get-Content -LiteralPath $p -Raw | ConvertFrom-Json
+        $rows = @($parsed)
+        return @($rows | Where-Object { $null -ne $_ -and "$($_.name)" } | ForEach-Object {
+            [pscustomobject]@{ name = "$($_.name)"; value = (Unprotect-PimCapValue "$($_.protectedValue)") } })
+    }
+    $legacy = Join-Path $CaptureDir "$Tag-$name.json"
+    if (Test-Path -LiteralPath $legacy) {
+        Warn "capture '$legacy' holds secret values in CLEAR TEXT (written by an older version) -- used for this resume, and shredded when the rebuild completes."
+        [void]$script:SecretFilesToShred.Add($legacy)
+        return (Get-Content -LiteralPath $legacy -Raw | ConvertFrom-Json)
+    }
+    return $null
 }
 function Strip($doc, [string[]]$top, [string[]]$props) {
     foreach ($p in $top)   { $doc.PSObject.Properties.Remove($p) }
@@ -291,7 +365,7 @@ if ($ResumeFromCapture) {
     Step "0. RESUME from the existing capture in $CaptureDir"
     $envCap = LoadCap 'env'
     $appCap = LoadCap "app-$ManagerApp-full"
-    $appSec = @(DropNulls (LoadCap "app-$ManagerApp-secrets"))
+    $appSec = @(DropNulls (LoadSecretCap "app-$ManagerApp-secrets"))
     $authCap = LoadCap "app-$ManagerApp-auth"
     $jobsCap = @(DropNulls (LoadCap 'jobs'))
     if (-not $envCap -or -not $appCap) { throw "the capture in '$CaptureDir' is missing the environment or the Manager -- cannot resume from it." }
@@ -350,7 +424,7 @@ $appCap = AzJson (@('containerapp','show') + $subG + @('-n',$ManagerApp))
 if (-not $appCap) { throw "Manager app '$ManagerApp' not found in $ResourceGroup." }
 [void](SaveCap "app-$ManagerApp-full" $appCap)
 $appSec = @(DropNulls (AzJson (@('containerapp','secret','list') + $subG + @('-n',$ManagerApp,'--show-values'))))
-[void](SaveCap "app-$ManagerApp-secrets" $appSec)
+[void](SaveSecretCap "app-$ManagerApp-secrets" $appSec)
 $authCap = AzJson (@('containerapp','auth','show') + $subG + @('-n',$ManagerApp))
 [void](SaveCap "app-$ManagerApp-auth" $authCap)
 $hadEasyAuth = [bool]($authCap.identityProviders.azureActiveDirectory.registration.clientId)
@@ -363,7 +437,7 @@ $jobsCap = @(DropNulls (AzJson (@('containerapp','job','list') + $subG)))
 [void](SaveCap 'jobs' $jobsCap)
 foreach ($j in $jobsCap) {
     [void](SaveCap "job-$($j.name)-full"    (AzJson (@('containerapp','job','show') + $subG + @('-n',$j.name))))
-    [void](SaveCap "job-$($j.name)-secrets" @(AzJson (@('containerapp','job','secret','list') + $subG + @('-n',$j.name,'--show-values'))))
+    [void](SaveSecretCap "job-$($j.name)-secrets" @(AzJson (@('containerapp','job','secret','list') + $subG + @('-n',$j.name,'--show-values'))))
 }
 Say "jobs         : $(if ($jobsCap.Count) { (@($jobsCap)|ForEach-Object{$_.name}) -join ', ' } else { '(none)' })"
 
@@ -602,8 +676,6 @@ $doc.properties.configuration.ingress.PSObject.Properties.Remove('fqdn')
 if ($appSec.Count) {
     $doc.properties.configuration.secrets = @($appSec | ForEach-Object { [ordered]@{ name = $_.name; value = $_.value } })
 }
-$appDoc = Join-Path $CaptureDir "$Tag-restore-$ManagerApp.json"
-$doc | ConvertTo-Json -Depth 40 | Set-Content -LiteralPath $appDoc -Encoding UTF8
 # 🔑 IDEMPOTENT ON RESUME, same reason as step 4: a run that failed at step 6 leaves a correctly
 # restored app behind, and re-creating it would discard it for no gain. Skipping is safe ONLY
 # because step 7 diffs whatever is live against the capture and refuses to expose a mismatch --
@@ -611,26 +683,34 @@ $doc | ConvertTo-Json -Depth 40 | Set-Content -LiteralPath $appDoc -Encoding UTF
 if (AzJson (@('containerapp','show') + $subG + @('-n',$ManagerApp))) {
     Say "'$ManagerApp' already exists -- reusing it (step 7 will diff it against the capture)" 'Green'
 } else {
-    Invoke-AzChecked "create app '$ManagerApp'" { az containerapp create @subG -n $ManagerApp --yaml $appDoc -o none }
+    # SEC-35: the document carries secret VALUES, so it lives only for the one call that reads it.
+    $appDoc = Join-Path $CaptureDir "$Tag-restore-$ManagerApp.json"
+    try {
+        $doc | ConvertTo-Json -Depth 40 | Set-Content -LiteralPath $appDoc -Encoding UTF8
+        Invoke-AzChecked "create app '$ManagerApp'" { az containerapp create @subG -n $ManagerApp --yaml $appDoc -o none }
+    } finally { Remove-PimSecretFile $appDoc }
     Say "restored (ingress INTERNAL, $($appSec.Count) secret(s))" 'Green'
 }
 
 Step '6. restore the jobs'
 foreach ($j in $jobsCap) {
     $n = $j.name
-    $jc = LoadCap "job-$n-full"; $js = @(DropNulls (LoadCap "job-$n-secrets"))
+    $jc = LoadCap "job-$n-full"; $js = @(DropNulls (LoadSecretCap "job-$n-secrets"))
     if (-not $jc) { Bad "no capture for job '$n' -- recreate it by hand"; continue }
     $jd = $jc | ConvertTo-Json -Depth 40 | ConvertFrom-Json
     $jd = Strip $jd @('id','name','systemData','resourceGroup','type') `
             @('provisioningState','runningState','outboundIpAddresses','eventStreamEndpoint')
     $jd.properties.environmentId = $newEnvId
     if ($js.Count) { $jd.properties.configuration.secrets = @($js | ForEach-Object { [ordered]@{ name = $_.name; value = $_.value } }) }
-    $jDoc = Join-Path $CaptureDir "$Tag-restore-job-$n.json"
-    $jd | ConvertTo-Json -Depth 40 | Set-Content -LiteralPath $jDoc -Encoding UTF8
     if (AzJson (@('containerapp','job','show') + $subG + @('-n',$n))) {
         Say "job '$n' already exists -- reusing it (verified below)" 'Green'
     } else {
-        Invoke-AzChecked "create job '$n'" { az containerapp job create @subG -n $n --yaml $jDoc -o none }
+        # SEC-35: same rule as the app -- the document with the values exists for one call only.
+        $jDoc = Join-Path $CaptureDir "$Tag-restore-job-$n.json"
+        try {
+            $jd | ConvertTo-Json -Depth 40 | Set-Content -LiteralPath $jDoc -Encoding UTF8
+            Invoke-AzChecked "create job '$n'" { az containerapp job create @subG -n $n --yaml $jDoc -o none }
+        } finally { Remove-PimSecretFile $jDoc }
         Say "restored job $n$(if ($js.Count) { " (+$($js.Count) secret(s))" })" 'Green'
     }
 }
@@ -864,7 +944,12 @@ if ($SkipEasyAuth) {
     $tid = $(if ("$EasyAuthTenantId".Trim()) { $EasyAuthTenantId } else { $authCap.identityProviders.azureActiveDirectory.registration.openIdIssuer -replace '^https://login\.microsoftonline\.com/','' -replace '/v2\.0$','' })
     # 🪤 The parameter is -App, NOT -AppName. Calling it wrong fails HERE -- after the environment
     # has been deleted and recreated -- which is the worst possible place to discover a typo.
-    & $easyAuth -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -App $ManagerApp -TenantId $tid
+    # SEC-44: who may sign in is an explicit choice there too -- forwarded, never defaulted here. An
+    # app that is already assignment-required keeps its assignments without either.
+    $eaChoice = @{}
+    if (@($EasyAuthAllowedPrincipals | Where-Object { "$_".Trim() }).Count) { $eaChoice['AllowedPrincipals'] = @($EasyAuthAllowedPrincipals | Where-Object { "$_".Trim() }) }
+    if ($EasyAuthAllowAllTenantUsers) { $eaChoice['AllowAllTenantUsers'] = $true }
+    & $easyAuth -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -App $ManagerApp -TenantId $tid @eaChoice
     if ($LASTEXITCODE -and $LASTEXITCODE -ne 0) { throw "Set-PimManagerEasyAuth failed (exit $LASTEXITCODE) -- NOT exposing this app." }
 
     # 🔒 PROVE IT before exposing. A failed auth attach that returns 0 would otherwise publish the
@@ -878,9 +963,13 @@ if ($SkipEasyAuth) {
     Say "Easy Auth bound to $boundId (unauth -> $($authNow.globalValidation.unauthenticatedClientAction))" 'Green'
 
     Step '9. expose the Manager (ingress -> external)'
-    az containerapp ingress update @subG -n $ManagerApp --type external -o none
-    $fq = az containerapp show @subG -n $ManagerApp --query "properties.configuration.ingress.fqdn" -o tsv 2>$null
-    Say "public FQDN  : https://$fq" 'Green'
+    # SEC-35: checked AND read back. This flip used to be a bare call whose failure nobody saw, so the
+    # run printed a "public FQDN" for an app that was still internal -- or, worse, never noticed which.
+    Invoke-AzChecked "switch '$ManagerApp' to external ingress" { az containerapp ingress update @subG -n $ManagerApp --type external -o none }
+    $extNow = "$(az containerapp show @subG -n $ManagerApp --query "properties.configuration.ingress.external" -o tsv 2>$null)".Trim()
+    $fq = "$(az containerapp show @subG -n $ManagerApp --query "properties.configuration.ingress.fqdn" -o tsv 2>$null)".Trim()
+    if ($extNow -notmatch '(?i)^true$' -or -not $fq) { throw "read-back: '$ManagerApp' ingress.external='$extNow' fqdn='$fq' after the switch -- the Manager is NOT exposed as intended." }
+    Say "public FQDN  : https://$fq (ingress external, read back)" 'Green'
 }
 
 # =================================================================================================
@@ -930,9 +1019,13 @@ if ($lost) {
 }
 Say 'every data-bearing resource that existed before this rebuild still exists.' 'Green'
 
+# SEC-35: the rebuild is complete, so nothing is left to resume -- the secret captures go too.
+foreach ($sf in @($script:SecretFilesToShred | Select-Object -Unique)) { Remove-PimSecretFile $sf }
+foreach ($sf in @(Get-ChildItem -LiteralPath $CaptureDir -File -ErrorAction SilentlyContinue | Where-Object { $_.Name -like "$Tag-restore-*" -or $_.Name -like "$Tag-*-secrets*.json" })) { Remove-PimSecretFile $sf.FullName }
+
 Step 'REBUILD COMPLETE'
 Say "old domain : $oldDomain"
 Say "new domain : $newDomain" 'Green'
-Say "capture    : $CaptureDir"
+Say "capture    : $CaptureDir (configuration only -- every file that held a secret value was shredded)"
 if (-not $SkipEasyAuth) { Say 'verify: the public FQDN should answer 302 to Entra, never 200.' 'Yellow' }
 

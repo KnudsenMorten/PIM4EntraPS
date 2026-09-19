@@ -1,0 +1,42 @@
+{
+  "_doc": "SAMPLE for tools\\setup\\Invoke-PimTenantPrep.ps1. Copy to tenant-prep.custom.json (gitignored) and put your real values there -- never in this file. Every id below is FAKE. identity: EITHER clientId + certThumbprint (certificate in LocalMachine\\My) OR keyVault + clientIdSecret + certThumbprintSecret (secret NAMES, read at run time with Get-AzKeyVaultSecret). privateStore: false = close the build window with Close-PimSqlSetupHostRule.ps1, true = Set-PimSqlBuildWindow.ps1 -Mode Close. prereqs[].options: EnableSentinel, GrantAzureUserAccessAdministrator, SkipDataOperations (true/false), ConfirmPortalStep [check ids], SentinelWorkspaceId, AzureScope [scopes]. templates: pack ids (templates\\<id>.template.json) or all-active.",
+  "environments": [
+    {
+      "name": "example-a",
+      "tenantId": "11111111-1111-1111-1111-111111111111",
+      "subscriptionId": "22222222-2222-2222-2222-222222222222",
+      "resourceGroup": "rg-example-a",
+      "sqlServerFqdn": "sql-example-a.database.windows.net",
+      "tickJobName": "ca-pim-tick",
+      "privateStore": false,
+      "identity": {
+        "clientId": "33333333-3333-3333-3333-333333333333",
+        "certThumbprint": "0000000000000000000000000000000000000000"
+      },
+      "prereqs": [
+        { "workload": "EntraRoles", "options": {} },
+        { "workload": "Intune", "options": {} },
+        { "workload": "DefenderXdr", "options": { "SkipDataOperations": true } }
+      ],
+      "templates": [ "entra-roles", "intune", "defender-xdr" ]
+    },
+    {
+      "name": "example-b",
+      "tenantId": "44444444-4444-4444-4444-444444444444",
+      "subscriptionId": "55555555-5555-5555-5555-555555555555",
+      "resourceGroup": "rg-example-b",
+      "sqlServerFqdn": "sql-example-b.database.windows.net",
+      "privateStore": true,
+      "identity": {
+        "keyVault": "kv-example-secrets",
+        "clientIdSecret": "example-b-spn-clientid",
+        "certThumbprintSecret": "example-b-spn-certificatethumbprint"
+      },
+      "prereqs": [
+        { "workload": "AzureRbac", "options": { "GrantAzureUserAccessAdministrator": false, "AzureScope": [ "/subscriptions/66666666-6666-6666-6666-666666666666" ] } },
+        { "workload": "DefenderXdr", "options": { "EnableSentinel": false, "ConfirmPortalStep": [ "defender.urbacWorkloads" ] } }
+      ],
+      "templates": [ "all-active" ]
+    }
+  ]
+}

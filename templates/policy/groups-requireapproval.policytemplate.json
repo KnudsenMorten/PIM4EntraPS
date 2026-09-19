@@ -1,0 +1,15 @@
+{
+  "id": "Groups_RequireApproval",
+  "name": "PIM for Groups -- approval required (high-privilege)",
+  "_formerly": "Named 'approval-required' (extending 'default') until 2026-09-19. 'approval-required' is still accepted everywhere a template id is read: it is an ALIAS of Groups_RequireApproval, and an existing store's 'approval-required' is renamed to this id once, content and customisations kept. The rules are byte-identical to the old template, so the rename changes nothing in any tenant; the approval-wins rule still matches it by the word 'approval' in its id.",
+  "description": "For high-privilege groups (Global Administrator role groups, tenant-root owner groups, Privileged Role Administrator) -- formerly 'approval-required': inherits the v1-parity baseline from Groups_Standard (formerly 'default') (Expiration PT8H/P365D/P365D; Enablement MFA + Justification on EndUser-Assignment, nothing on Admin-Eligibility or Admin-Assignment) AND additionally requires an approval and puts Justification on Admin-Eligibility (a human approver is in the loop). Activation requires MFA + Justification AND an approval -- unchanged, and that is the control that matters for a high-privilege group. Admin-Eligibility carries Justification but NOT MFA, for the BUG-21 reason recorded in the Groups_Standard template: the admin caller is the engine's app-only certificate SPN and can never present an MFA claim, so requiring one blocks every assignment and prevents nothing. Approvers = the definition row's Owners. Serial = first owner decides, escalates to the next after escalationHours; switch mode to 'Parallel' for any-one-of-the-owners-wins.",
+  "extends": "Groups_Standard",
+  "rules": {
+    "Enablement": {
+      "EndUser_Assignment": ["MultiFactorAuthentication", "Justification"],
+      "Admin_Eligibility":  ["Justification"],
+      "Admin_Assignment":   []
+    },
+    "Approval": { "mode": "Serial", "approversSource": "Owners", "escalationHours": 4 }
+  }
+}

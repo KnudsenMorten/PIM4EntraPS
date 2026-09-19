@@ -95,9 +95,14 @@ Add-Section $sb '1. RUN CONTEXT' {
     "PowerShell : $($PSVersionTable.PSVersion) ($($PSVersionTable.PSEdition))"
     "OS         : $([System.Environment]::OSVersion.VersionString)"
     "az CLI     : $(try { (az version --output json 2>$null | ConvertFrom-Json).'azure-cli' } catch { 'n/a' })"
-    $vf = Join-Path (Split-Path $here -Parent) 'VERSION'
+    # IMP-49 c: VERSION is at the SOLUTION root (tools\setup -> tools -> PIM4EntraPS). This read it from
+    # tools\, where it never exists, so every report said "unknown".
+    $vf = Join-Path (Split-Path (Split-Path $here -Parent) -Parent) 'VERSION'
     "PIM version: $(if (Test-Path $vf) { (Get-Content $vf -Raw).Trim() } else { 'unknown' })"
-    "az context : $(try { az account show --query '{name:name,tenant:tenantId,id:id}' -o json 2>$null } catch { 'not logged in' })"
+    # BUG-215: report the context of the subscription this report is ABOUT, and the default separately --
+    # a bare `az account show` described whichever subscription happened to be the default.
+    if ($sub) { "az context : $(try { az account show --subscription $sub --query '{name:name,tenant:tenantId,id:id}' -o json 2>$null } catch { 'not visible to this az login' })" }
+    "az default : $(try { az account show --query '{tenant:tenantId,id:id}' -o json 2>$null } catch { 'not logged in' })"
 }
 
 if (-not $CollectOnly) {
@@ -120,6 +125,8 @@ if (-not $CollectOnly) {
 
 Add-Section $sb '3. RESOURCE STATE' {
     if (-not $rg) { '<no -ResourceGroup in DeployArgs; skipping>' ; return }
+    # BUG-215: never read a resource group out of whatever the DEFAULT subscription is.
+    if (-not $sub) { '<no -SubscriptionId in DeployArgs; skipping -- the default az subscription may belong to another tenant>' ; return }
     "--- resource group inventory ---"
     az resource list -g $rg @subArg --query "[].{name:name,type:type,location:location}" -o table --only-show-errors 2>&1
     "`n--- container apps env ---"
@@ -136,6 +143,7 @@ Add-Section $sb '3. RESOURCE STATE' {
 # so the scriptblock lands on the wrong parameter and Body gets "+". Interpolate instead.
 Add-Section $sb "4. CONTAINER LOGS (last $TailLines lines per app)" {
     if (-not $rg) { '<no -ResourceGroup; skipping>' ; return }
+    if (-not $sub) { '<no -SubscriptionId; skipping -- the default az subscription may belong to another tenant>' ; return }
     $apps = @()
     try { $apps = az containerapp list -g $rg @subArg --query "[].name" -o tsv --only-show-errors 2>$null } catch { }
     if (-not $apps) { '<no container apps found>'; return }

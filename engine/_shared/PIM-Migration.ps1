@@ -42,6 +42,98 @@ function Get-PimV1RowValue {
 }
 
 # ---------------------------------------------------------------------------
+# IMP-49 h -- read a v1 PS DATA file WITHOUT executing it.
+# ---------------------------------------------------------------------------
+function Get-PimV1DataExpression {
+    # The expression a statement holds when it is ONE bare expression (no command, no pipeline), else $null.
+    param($Statement)
+    if ($null -eq $Statement) { return $null }
+    $n = $Statement.GetType().Name
+    if ($n -eq 'CommandExpressionAst') { return $Statement.Expression }
+    if ($n -eq 'PipelineAst' -and @($Statement.PipelineElements).Count -eq 1 -and $Statement.PipelineElements[0].GetType().Name -eq 'CommandExpressionAst') { return $Statement.PipelineElements[0].Expression }
+    return $null
+}
+
+function ConvertFrom-PimV1DataAst {
+    # PURE. A literal-data AST node -> its value. THROWS on anything that is not literal data.
+    param([Parameter(Mandatory)][System.Management.Automation.Language.Ast]$Ast)
+    switch ($Ast.GetType().Name) {
+        'ConstantExpressionAst'       { return $Ast.Value }
+        'StringConstantExpressionAst' { return $Ast.Value }
+        'ExpandableStringExpressionAst' {
+            if (@($Ast.NestedExpressions).Count) { throw "line $($Ast.Extent.StartLineNumber): a string with an embedded expression is not data" }
+            return $Ast.Value
+        }
+        'VariableExpressionAst' {
+            $n = "$($Ast.VariablePath.UserPath)".ToLowerInvariant()
+            if ($n -eq 'true') { return $true }; if ($n -eq 'false') { return $false }; if ($n -eq 'null') { return $null }
+            throw "line $($Ast.Extent.StartLineNumber): variable `$$($Ast.VariablePath.UserPath) is not data"
+        }
+        'ArrayLiteralAst'    { return ,@($Ast.Elements | ForEach-Object { ConvertFrom-PimV1DataAst -Ast $_ }) }
+        'ArrayExpressionAst' {
+            $out = New-Object System.Collections.Generic.List[object]
+            foreach ($st in @($Ast.SubExpression.Statements)) {
+                $ex = Get-PimV1DataExpression -Statement $st
+                if (-not $ex) { throw "line $($st.Extent.StartLineNumber): only literal data may appear inside @( ... )" }
+                $v = ConvertFrom-PimV1DataAst -Ast $ex
+                foreach ($x in @($v)) { $out.Add($x) }
+            }
+            return ,$out.ToArray()
+        }
+        'HashtableAst' {
+            $h = @{}
+            foreach ($kv in $Ast.KeyValuePairs) {
+                $k = ConvertFrom-PimV1DataAst -Ast $kv.Item1
+                $vs = $kv.Item2
+                $ex = Get-PimV1DataExpression -Statement $vs
+                if (-not $ex) { throw "line $($vs.Extent.StartLineNumber): a hashtable value must be literal data" }
+                $h["$k"] = ConvertFrom-PimV1DataAst -Ast $ex
+            }
+            return $h
+        }
+        'ConvertExpressionAst' {
+            $tn = "$($Ast.Type.TypeName.FullName)".ToLowerInvariant()
+            $v = ConvertFrom-PimV1DataAst -Ast $Ast.Child
+            if ($tn -in @('pscustomobject','psobject','system.management.automation.pscustomobject')) { return [pscustomobject]$v }
+            if ($tn -in @('ordered','hashtable')) { return $v }
+            if ($tn -in @('string','int','bool','datetime')) { return $v }
+            throw "line $($Ast.Extent.StartLineNumber): cast to [$($Ast.Type.TypeName.FullName)] is not allowed in a data file"
+        }
+        'ParenExpressionAst' {
+            $ex = Get-PimV1DataExpression -Statement $Ast.Pipeline
+            if (-not $ex) { throw "line $($Ast.Extent.StartLineNumber): only literal data may appear in ( ... )" }
+            return (ConvertFrom-PimV1DataAst -Ast $ex)
+        }
+        'UnaryExpressionAst' {
+            if ("$($Ast.TokenKind)" -eq 'Minus' -and $Ast.Child.GetType().Name -eq 'ConstantExpressionAst') { return -1 * $Ast.Child.Value }
+            throw "line $($Ast.Extent.StartLineNumber): expression is not data"
+        }
+        default { throw "line $($Ast.Extent.StartLineNumber): '$($Ast.GetType().Name)' is not literal data -- the file is PARSED, never run" }
+    }
+}
+
+function Read-PimV1DataFile {
+    # IMP-49 h. The rows held by top-level `$Name = <literal data>` assignments whose name looks like a v1 data
+    # variable (polic|assign|role|admin|custom|pim). Parsed via the AST; NOTHING in the file is executed.
+    # THROWS on a parse error or on a matching assignment whose value is not literal data.
+    param([Parameter(Mandatory)][string]$Path)
+    $tokens = $null; $errors = $null
+    $ast = [System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path -LiteralPath $Path).Path, [ref]$tokens, [ref]$errors)
+    if (@($errors).Count) { throw ("Import-PimV1Baseline: '{0}' does not parse: {1}" -f $Path, (@($errors | Select-Object -First 3 | ForEach-Object { "line $($_.Extent.StartLineNumber): $($_.Message)" }) -join '; ')) }
+    $out = New-Object System.Collections.Generic.List[object]
+    foreach ($st in @($ast.EndBlock.Statements)) {
+        if ($st.GetType().Name -ne 'AssignmentStatementAst') { continue }
+        if ($st.Left.GetType().Name -ne 'VariableExpressionAst') { continue }
+        $name = "$($st.Left.VariablePath.UserPath)"
+        if ($name -notmatch '(?i)polic|assign|role|admin|custom|pim') { continue }
+        $ex = Get-PimV1DataExpression -Statement $st.Right
+        if (-not $ex) { throw ("Import-PimV1Baseline: `${0} (line {1}) is not literal data -- the file is PARSED, never run" -f $name, $st.Extent.StartLineNumber) }
+        $val = ConvertFrom-PimV1DataAst -Ast $ex
+        foreach ($item in @($val)) { if ($item -is [pscustomobject] -or $item -is [System.Collections.IDictionary]) { $out.Add($item) } }
+    }
+    return $out.ToArray()
+}
+# ---------------------------------------------------------------------------
 # Read a v1 baseline into a normalised list of @{ User; Role; Scope; AssignmentType }.
 # ---------------------------------------------------------------------------
 function Import-PimV1Baseline {
@@ -57,21 +149,13 @@ function Import-PimV1Baseline {
         $raw = @(Import-Csv -LiteralPath $Path -Delimiter $delim)
         foreach ($r in $raw) { [void]$rows.Add($r) }
     } elseif ($ext -eq '.ps1') {
-        # Sandbox the dot-source: run in a child scope, harvest $PIM_* / $Custom_* /
-        # $*Polic* / $*Assignment* array variables, never touch the parent runspace.
-        $sb = [scriptblock]::Create((Get-Content -LiteralPath $Path -Raw))
+        # 🔴 IMP-49 h (ss33.28): this DOT-SOURCED the operator-supplied file -- "sandboxed" only in the sense of a
+        # child scope, which is not a sandbox: any command in the file (a download, a Remove-Item, a Connect-*)
+        # ran with the caller's identity. The file is now PARSED, never executed: only top-level assignments of
+        # LITERAL data ($PIM_X = @( [pscustomobject]@{...}, @{...} )) are read, through the AST. Anything that is
+        # not data (a command, a variable reference, a subexpression) is refused with the line it is on.
         $found = New-Object System.Collections.Generic.List[object]
-        & {
-            . $sb 4>$null 3>$null 2>$null
-            $vars = Get-Variable -Scope Local | Where-Object {
-                $_.Name -match '(?i)polic|assign|role|admin|custom|pim' -and $null -ne $_.Value
-            }
-            foreach ($v in $vars) {
-                foreach ($item in @($v.Value)) {
-                    if ($item -is [pscustomobject] -or $item -is [hashtable]) { [void]$found.Add($item) }
-                }
-            }
-        }
+        foreach ($item in @(Read-PimV1DataFile -Path $Path)) { [void]$found.Add($item) }
         foreach ($r in $found) { [void]$rows.Add($r) }
     } else {
         throw "Import-PimV1Baseline: unsupported extension '$ext' (expected .csv or .ps1)."

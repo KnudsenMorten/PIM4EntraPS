@@ -694,9 +694,12 @@ function Get-PimConnectivityCheck {
     if ($isAuth) {
         $hint = ''
         if ($Surface -eq 'sql') {
-            $hint = ("$label rejected the engine identity. Grant the engine MI/SPN as a contained DB user " +
-                     "(db_datareader + db_datawriter on the PIM database): " +
-                     "CREATE USER [<engine-app>] FROM EXTERNAL PROVIDER; then ALTER ROLE db_datareader/db_datawriter ADD MEMBER [<engine-app>].")
+            # DOC-17 h: the remedy used to say CREATE USER ... FROM EXTERNAL PROVIDER, which FAILS on these servers (SQL
+            # resolves the name through Graph as the server's own identity). The working form is the SID from the app id.
+            $hint = ("$label rejected the engine identity. Grant the engine MI/SPN a contained DB user on the PIM database " +
+                     "(db_datareader + db_datawriter + db_ddladmin), created from its APP ID as a SID -- not FROM EXTERNAL PROVIDER, which fails on these servers: " +
+                     "CREATE USER [<engine-app>] WITH SID = <0x + the app id's GUID bytes>, TYPE = E; then ALTER ROLE db_datareader/db_datawriter/db_ddladmin ADD MEMBER [<engine-app>]. " +
+                     "Or make the identity a member of the SQL admin group (grp-pim-sql-admins).")
         } else {
             $rh = Get-PimMissingRoleHint -Path $(if ("$ProbePath".Trim()) { $ProbePath } else { "/$Surface" }) -StatusCode $StatusCode -ErrorBody $ErrorMessage -AppOnly $true
             $hint = if ($rh) { $rh.Hint } else { "$label denied access -- grant the engine SPN the required app-role and re-consent." }

@@ -1,3 +1,0 @@
-# Live deployment parameters carry subscription / resource ids -- env-specific.
-# The .sample. file stays tracked as the template.
-main.parameters.json

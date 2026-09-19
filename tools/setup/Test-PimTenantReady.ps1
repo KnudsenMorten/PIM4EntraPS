@@ -42,7 +42,9 @@ param(
     [string]$SqlDatabase = 'PimPlatform',
     [string]$SubscriptionId,
     [string]$ResourceGroup,
-    [string]$TickJobName = 'pim-tick',
+    # BUG-197: the deploy names it 'ca-pim-tick' (Setup-PimContainers / Invoke-PimDeployAll). The old
+    # default 'pim-tick' asked ARM for a job that does not exist, so check 4 could never pass by default.
+    [string]$TickJobName = 'ca-pim-tick',
     # The engine identity used to read Graph + the store. Resolved from the ambient engine
     # globals when omitted (the normal in-container case).
     [string]$EngineClientId,
@@ -163,38 +165,101 @@ Invoke-Check -Name 'sender mailbox exists' -Body {
 # 4. THE ENGINE IDENTITY ON THE TICK JOB (IMP-08) -- deployed without it, the tick runs as a
 #    permissionless managed identity and every scope dies on 403.
 # =====================================================================================
+function Get-PimTickEngineIdentityVerdict {
+    <#
+      PURE (BUG-197). Which identity does the tick job's engine really run as, and can it work?
+      🔴 This check used to REQUIRE PIM_ClientId on the job -- but a MANAGED-IDENTITY deployment (the
+      design and the default: Setup-PimContainers emits NO client id and grants the job's own identity
+      the Graph app-roles) never has one, so every MI environment was reported NOT READY, and the
+      readiness gate blocked every MI deploy. The engine's token call takes the managed identity exactly
+      when there is NO client id (PIM-Rest.ps1), so that is judged here the same way:
+        * PIM_ClientId + a secret reference (AZURE_CLIENT_SECRET) -> the engine SPN        : ok
+        * PIM_ClientId WITHOUT a secret -> suppresses the managed identity and authenticates
+          as nothing (a container has no certificate store)                              : NOT ok
+        * no client id -> the job's managed identity, which must HOLD Graph app-roles       : ok if > 0
+      -GraphAppRoleCount $null = could not be read: "could not tell" is not "fine".
+    #>
+    param([object]$Job, [object]$GraphAppRoleCount = $null, [string]$JobName = 'ca-pim-tick')
+    if ($null -eq $Job) { return @{ ok = $false; detail = "job '$JobName' could not be read" } }
+    $envs  = @(@($Job.properties.template.containers) | ForEach-Object { @($_.env) } | Where-Object { $_ })
+    $names = @($envs | ForEach-Object { "$($_.name)" })
+    $cid   = "$(@($envs | Where-Object { "$($_.name)" -eq 'PIM_ClientId' } | ForEach-Object { $_.value }) | Select-Object -First 1)".Trim()
+    if ($cid) {
+        if ($names -contains 'AZURE_CLIENT_SECRET') { return @{ ok = $true; detail = "engine SPN $cid (client secret held as a Container Apps secret) on '$JobName'" } }
+        return @{ ok = $false; detail = ("'$JobName' sets PIM_ClientId=$cid with NO usable credential (no AZURE_CLIENT_SECRET; a container has no certificate store) -- " +
+                                         'that suppresses its managed identity, so the engine authenticates as nothing. Remove PIM_ClientId to use the managed identity.') }
+    }
+    $pick = Get-PimJobManagedIdentityPrincipalId -Job $Job
+    if (-not "$($pick.principalId)".Trim()) { return @{ ok = $false; detail = "'$JobName' has no client id AND no usable managed identity: $($pick.reason)" } }
+    if ($null -eq $GraphAppRoleCount) { return @{ ok = $false; detail = "'$JobName' runs as its $($pick.kind)-assigned managed identity $($pick.principalId), but its Graph app-roles could not be read -- not evaluated" } }
+    if ([int]$GraphAppRoleCount -le 0) { return @{ ok = $false; detail = "'$JobName' runs as its $($pick.kind)-assigned managed identity $($pick.principalId), which holds NO Microsoft Graph app-role -- every engine scope will 403. Re-run the deploy's infra step (it grants them)." } }
+    return @{ ok = $true; detail = "managed identity ($($pick.kind)-assigned $($pick.principalId)) with $GraphAppRoleCount Microsoft Graph app-role(s) on '$JobName'" }
+}
 Invoke-Check -Name 'tick job carries the engine identity' -Body {
     if (-not $SubscriptionId -or -not $ResourceGroup) { return @{ ok = $false; detail = 'pass -SubscriptionId and -ResourceGroup to evaluate the tick job' } }
     $arm = Get-PimRestToken -Resource arm
     $uri = "https://management.azure.com/subscriptions/$SubscriptionId/resourceGroups/$ResourceGroup/providers/Microsoft.App/jobs/$TickJobName`?api-version=2024-03-01"
     $job = Invoke-RestMethod -Headers @{ Authorization = "Bearer $arm" } -Uri $uri
-    $env = @($job.properties.template.containers[0].env)
-    $names = @($env | ForEach-Object { "$($_.name)" })
-    if ($names -notcontains 'PIM_ClientId') {
-        return @{ ok = $false; detail = "'$TickJobName' has no PIM_ClientId -- it runs as a permissionless identity and every engine scope will 403 (IMP-08). env: $($names -join ',')" }
+    $count = $null
+    $envNames = @(@($job.properties.template.containers) | ForEach-Object { @($_.env) } | ForEach-Object { "$($_.name)" })
+    if ($envNames -notcontains 'PIM_ClientId') {
+        # The managed-identity path: count what that identity actually holds on Microsoft Graph.
+        $pick = Get-PimJobManagedIdentityPrincipalId -Job $job
+        if ("$($pick.principalId)".Trim()) {
+            try {
+                $graphSp = Invoke-PimGraph -Path "/servicePrincipals(appId='00000003-0000-0000-c000-000000000000')?`$select=id"
+                $ra = Invoke-PimGraph -Path "/servicePrincipals/$($pick.principalId)/appRoleAssignments"
+                if ($graphSp.id -and $null -ne $ra) { $count = @(@($ra.value) | Where-Object { "$($_.resourceId)" -eq "$($graphSp.id)" }).Count }
+            } catch { $count = $null }
+        }
     }
-    return @{ ok = $true; detail = "PIM_ClientId present on '$TickJobName'" }
+    return (Get-PimTickEngineIdentityVerdict -Job $job -GraphAppRoleCount $count -JobName $TickJobName)
 }
 
 # =====================================================================================
 # 5. CONTROL #1 -- every admin the store DESIRES exists and is enabled in the tenant.
 # =====================================================================================
+function Get-PimDesiredAdminsVerdict {
+    # PURE (BUG-197, check 5). Only rows that were actually LOOKED UP can count as present.
+    param([int]$Total, [int]$Checked, [string[]]$Missing = @(), [string[]]$Unverifiable = @())
+    $m = @($Missing | Where-Object { "$_".Trim() }); $u = @($Unverifiable | Where-Object { "$_".Trim() })
+    $parts = @()
+    if ($m.Count) { $parts += "$($m.Count)/$Total desired admin(s) missing or disabled: $(($m | Select-Object -First 5) -join ', ')" }
+    if ($u.Count) { $parts += "$($u.Count)/$Total could NOT be verified (no address could be resolved): $(($u | Select-Object -First 5) -join ', ')" }
+    if ($parts.Count) { return @{ ok = $false; detail = ($parts -join '; ') } }
+    return @{ ok = $true; detail = "$Checked/$Total present and enabled" }
+}
 Invoke-Check -Name 'desired admin accounts exist and are enabled' -Body {
     if (-not $cs) { return @{ ok = $false; detail = 'store unreachable' } }
     $rows = @(Get-PimSqlRows -ConnectionString $cs -Entity 'Account-Definitions-Admins')
     # A tenant with no admin definitions yet is a legitimate fresh state, not a failure.
     if (-not $rows.Count) { return @{ ok = $true; detail = 'no admin definitions in the store yet (nothing to verify)' } }
-    $missing = @()
+    # 🔴 BUG-197 (check 5) -- A ROW THAT WAS SKIPPED WAS COUNTED AS PRESENT. A row with no
+    # UserPrincipalName was `continue`d past and the verdict still said "$n/$n present and enabled".
+    # The engine composes such an address from the row (UserPrincipalName, else UserName) and the
+    # tenant's default verified domain, so this resolves it the SAME way; a row that still yields no
+    # address is reported as NOT VERIFIED -- "could not tell" is not "present".
+    $defaultDomain = $null
+    $missing = @(); $unverifiable = @(); $checked = 0
     foreach ($r in $rows) {
         $upn = "$($r.UserPrincipalName)".Trim()
-        if (-not $upn) { continue }
+        if ($upn -notmatch '@') {
+            $local = $(if ($upn) { $upn } else { "$($r.UserName)".Trim() })
+            if ($local -and $null -eq $defaultDomain) {
+                $defaultDomain = ''
+                try { $org = Invoke-PimGraph -Path '/organization?$select=verifiedDomains'
+                      $defaultDomain = "$(@(@(@($org.value)[0].verifiedDomains) | Where-Object { $_.isDefault } | ForEach-Object { $_.name }) | Select-Object -First 1)".Trim() } catch { $defaultDomain = '' }
+            }
+            $upn = $(if ($local -and $defaultDomain) { "$local@$defaultDomain" } else { '' })
+        }
+        if (-not $upn) { $unverifiable += "(row: $("$($r.DisplayName)$($r.UserName)".Trim()))"; continue }
+        $checked++
         try {
             $u = Invoke-PimGraph -Path "/users/$upn`?`$select=id,accountEnabled"
             if (-not $u.id -or -not $u.accountEnabled) { $missing += $upn }
         } catch { $missing += $upn }
     }
-    if ($missing.Count) { return @{ ok = $false; detail = "$($missing.Count)/$($rows.Count) desired admin(s) missing or disabled: $(($missing | Select-Object -First 5) -join ', ')" } }
-    return @{ ok = $true; detail = "$($rows.Count)/$($rows.Count) present and enabled" }
+    return (Get-PimDesiredAdminsVerdict -Total $rows.Count -Checked $checked -Missing $missing -Unverifiable $unverifiable)
 }
 
 # =====================================================================================

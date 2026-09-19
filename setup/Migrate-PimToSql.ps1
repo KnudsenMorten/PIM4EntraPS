@@ -4,7 +4,26 @@
     Migrate a PIM4EntraPS instance's CSV config into the SQL store (the SQL-only
     data layer). NON-DESTRUCTIVE: the CSV files are read, never modified. Same
     code targets Azure SQL (prod, via -ConnectionString) or local SQL Express
-    (dev). Idempotent -- re-running re-syncs each entity (full-set replace).
+    (dev).
+
+    REQ-G (2026-09-19) -- VALIDATE FIRST, THEN ADD BY KEY, NEVER DELETE:
+      * Before ANYTHING is written (before SQL is even contacted) every file is checked by
+        engine/_shared/PIM-CsvImportCheck.ps1 -- the same check setup/Invoke-PimCsvImportCheck.ps1 runs:
+        encoding, delimiter, header vs the entity schema, keys, duplicate keys, the Manager's own
+        validator rules over the rows, and the replication each row would get on an MSP master.
+        Any ERROR refuses the import unless -AllowValidationErrors is passed. -ValidateOnly runs the
+        check and stops: no SQL, nothing written.
+      * The engine's STATE files (*_Delta.csv, *_LastApplied.csv) are never imported.
+      * Rows are ADDED by natural key. A key already in the store with the SAME content is left
+        alone; a key with DIFFERENT content is a collision and is reported -- by default the import
+        REFUSES, before writing any row (-OnKeyConflict KeepExisting keeps the store's row and imports
+        the rest; -OnKeyConflict Overwrite updates it from the file). Nothing is ever deleted.
+      * -ForceLocal: imported rows stay on the master (Replicate=No; admins ManagementMode=local)
+        unless the file sets the value explicitly.
+    (BUG-201 kept a whole entity out when the store already held rows for it -- so a store holding
+    the SAMPLE rows imported NOTHING for that entity, and said only "KEPT". Adding by key keeps what
+    BUG-201 protected -- Manager rows are never deleted or overwritten silently -- without that.)
+    -ReplaceExistingEntityRows remains the explicit, named full-set replace (it DELETES).
 
 .DESCRIPTION
     For each <base>.custom.csv in -ConfigDir: parse rows -> pim.Rows (entity =
@@ -16,7 +35,8 @@
     REST-migration note (REQUIREMENTS.md §19): this script is already pure
     SQL-data-plane -- it makes NO Microsoft.Graph or Az.* SDK calls. It uses
     SqlServer/ADO.NET via PIM-SqlStore.ps1 (Initialize-PimSqlStore /
-    Set-PimSqlEntityRows / Import-PimSettingsSeed). The only Az touch anywhere
+    Merge-PimSqlEntityRows -- add/update by key -- / Set-PimSqlEntityRowsTransactional
+    for -ReplaceExistingEntityRows / Import-PimSettingsSeed). The only Az touch anywhere
     underneath is an OPTIONAL Get-AzAccessToken fallback for a Key Vault secret
     read inside PIM-SqlStore; the primary path is the launcher-minted token. No
     conversion needed.
@@ -30,9 +50,28 @@
 .PARAMETER WhatIf
     Report what would migrate without writing.
 
+.PARAMETER ReplaceExistingEntityRows
+    BUG-201 override. A FULL-SET REPLACE of every imported entity: every row of that entity that is
+    NOT in the CSV -- including rows added or edited in the Manager since go-live -- is DELETED.
+    Only for a deliberate re-seed. Without it the import adds by key and never deletes.
+
+.PARAMETER ValidateOnly
+    Run the pre-import check and stop. No SQL connection, nothing written. Returns the check result.
+
+.PARAMETER AllowValidationErrors
+    The explicit, named override for importing files the check found ERRORS in. Warnings never block.
+
+.PARAMETER OnKeyConflict
+    A row whose key is already in the store with DIFFERENT content: Refuse (default -- nothing is
+    written), KeepExisting (the store's row wins, reported), or Overwrite (the file's row wins).
+
+.PARAMETER ForceLocal
+    Imported rows get Replicate=No (admins: ManagementMode=local) unless the file sets it explicitly,
+    so nothing imported onto an MSP master is published to managed tenants by default.
+
 .EXAMPLE
     # dev (Express)
-    .\Migrate-PimToSql.ps1 -ConfigDir ..\config -Server .\SQLEXPRESS -Database PIM4EntraPS
+    .\Migrate-PimToSql.ps1 -ConfigDir ..\config -Server .\SQLEXPRESS -Database PimPlatform
 .EXAMPLE
     # prod (Azure SQL; launcher pre-minted the MI token into $global:PIM_SqlAccessToken)
     .\Migrate-PimToSql.ps1 -ConfigDir E:\cust\config -ConnectionString $cs
@@ -42,8 +81,12 @@ param(
     [Parameter(Mandatory)][string]$ConfigDir,
     [string]$ConnectionString,
     [string]$Server,
-    [string]$Database = 'PIM4EntraPS',
+    # BUG-201: the v2 store's database is PimPlatform everywhere else (Setup-PimContainers, Invoke-PimDeployAll, every
+    # job); 'PIM4EntraPS' here imported into a database nothing reads.
+    [string]$Database = 'PimPlatform',
     [switch]$SeedSettings = $true,
+    # BUG-201: the explicit, NAMED override for re-importing an entity whose store already holds rows (see .PARAMETER).
+    [switch]$ReplaceExistingEntityRows,
     # Report which files WOULD be imported, and which are ignored, without touching SQL at all.
     # Answering "will this pick up my data?" should not require a database.
     [switch]$ListOnly,
@@ -51,7 +94,19 @@ param(
     # state, template-state, audit). Defaults to the 'output' folder next to -ConfigDir.
     [string]$OutputDir,
     # The folder holding <type>.mailtemplate.custom.html overrides. Defaults to the solution's templates\mail.
-    [string]$MailTemplateDir
+    [string]$MailTemplateDir,
+    # REQ-G: run the pre-import check only -- no SQL, nothing written (see .PARAMETER).
+    [switch]$ValidateOnly,
+    # REQ-G: the explicit, NAMED override for importing files the check found errors in.
+    [switch]$AllowValidationErrors,
+    # REQ-G: a key already in the store with different content. Refuse = write nothing (default).
+    [ValidateSet('Refuse','KeepExisting','Overwrite')][string]$OnKeyConflict = 'Refuse',
+    # REQ-G: imported rows stay on the master unless the file sets Replicate / ManagementMode.
+    [switch]$ForceLocal,
+    # REQ-G: the target is a single or managed tenant, not an MSP master (passed to the check).
+    [switch]$NotMspMaster,
+    # REQ-G: the target's default UPN domain, for admin rows without a UserPrincipalName (passed to the check).
+    [string]$DefaultDomain
 )
 $ErrorActionPreference = 'Stop'
 $shared = Join-Path (Split-Path -Parent $PSScriptRoot) 'engine\_shared'
@@ -223,21 +278,45 @@ function Import-PimMigrateFileStores {
     }
     return $rows.ToArray()
 }
+
+function Read-PimMigrateStoreRows {
+    # REQ-G: the rows the store ALREADY holds for one entity, WITH their stored [Key] -- read-only, before
+    # anything is written, so a key collision is found while it can still refuse cleanly. A store without
+    # pim.Rows yet (a fresh database) holds nothing. A read that FAILS throws; it is never "empty".
+    # Returns @( @{ key; row } ).
+    param([Parameter(Mandatory)][string]$ConnectionString, [Parameter(Mandatory)][string]$Entity)
+    $has = [int](Invoke-PimSqlScalar -ConnectionString $ConnectionString -Sql "SELECT CASE WHEN OBJECT_ID('pim.Rows') IS NULL THEN 0 ELSE 1 END")
+    if (-not $has) { return @() }
+    $raw = @(Invoke-PimSqlQuery -ConnectionString $ConnectionString -Sql "SELECT [Key], DataJson FROM pim.Rows WHERE Entity = @e" -Parameters @{ e = $Entity })
+    return @($raw | ForEach-Object { @{ key = "$($_.Key)"; row = $(if ("$($_.DataJson)".Trim()) { $_.DataJson | ConvertFrom-Json } else { [pscustomobject]@{} }) } })
+}
+
+# REQ-G: the WRITE (add / update by key, never delete, one transaction per entity) and the row COMPARE are the
+# store's own -- Merge-PimSqlEntityRows and Compare-PimSqlRowContent in engine/_shared/PIM-SqlStore.ps1. This
+# script carried a private MERGE copy (Invoke-PimMigrateUpsertRows) until the store had an upsert-only mode.
+
 . (Join-Path $shared 'PIM-ChangeQueue.ps1')
 . (Join-Path $shared 'PIM-Rest.ps1')
 . (Join-Path $shared 'PIM-SqlStore.ps1')
+. (Join-Path $shared 'PIM-CsvImportCheck.ps1')
+# 🧪 TEST SEAM ONLY. The dot-sources above (re)define the store functions in THIS script's scope, so a stub
+# a test defines beforehand would be shadowed. $global:PIM_MigrateStoreStub = @{ <function name> = <scriptblock> }
+# replaces those functions for this run (tests/Test-PimCsvImportCheck.ps1 drives the refuse / validate-only /
+# upsert paths offline with it). Announced every time, so it can never be active unnoticed.
+if ($global:PIM_MigrateStoreStub -is [hashtable] -and $global:PIM_MigrateStoreStub.Count) {
+    # A stub written for the removed private writer would stub NOTHING and let the real store write -- refuse it.
+    if ($global:PIM_MigrateStoreStub.ContainsKey('Invoke-PimMigrateUpsertRows') -and -not $global:PIM_MigrateStoreStub.ContainsKey('Merge-PimSqlEntityRows')) {
+        throw "Migrate-PimToSql TEST SEAM: 'Invoke-PimMigrateUpsertRows' no longer exists -- stub 'Merge-PimSqlEntityRows' (the store's upsert-only writer) instead. Refusing to run with the real writer unstubbed."
+    }
+    Write-Warning ("  [migrate] TEST SEAM ACTIVE -- store function(s) stubbed: {0}" -f (@($global:PIM_MigrateStoreStub.Keys) -join ', '))
+    foreach ($__n in @($global:PIM_MigrateStoreStub.Keys)) { Set-Item -Path "function:script:$__n" -Value $global:PIM_MigrateStoreStub[$__n] }
+}
 # Default only for the solution layout (<root>\config next to <root>\output): an arbitrary data folder
 # must not pick up whatever 'output' folder happens to sit beside it.
 if (-not "$OutputDir".Trim() -and (Split-Path -Leaf $ConfigDir) -like 'config*') { $OutputDir = Join-Path (Split-Path -Parent $ConfigDir) 'output' }
 if (-not "$MailTemplateDir".Trim()) { $MailTemplateDir = Join-Path (Split-Path -Parent $PSScriptRoot) 'templates\mail' }
-
-if (-not $ListOnly) {
-    if (-not $ConnectionString) { $ConnectionString = Get-PimSqlConnectionString -Server $Server -Database $Database }
-    if (-not (Test-PimSqlConnectivity -ConnectionString $ConnectionString)) { throw "SQL not reachable with the supplied connection." }
-
-    Write-Host "Initializing SQL store (idempotent) ..." -ForegroundColor Cyan
-    if ($PSCmdlet.ShouldProcess($Database, 'Initialize-PimSqlStore')) { Initialize-PimSqlStore -ConnectionString $ConnectionString }
-}
+# REQ-G: SQL is contacted only AFTER the files have been validated (below) -- a folder the check refuses
+# never opens a connection, and -ValidateOnly / -ListOnly never do.
 
 # 🔴 TAKE THE FILES AS THE CUSTOMER HAS THEM. This used to match ONLY '*.custom.csv', so a v1
 # data folder -- where the files are plainly 'PIM-Definitions-Roles.csv' -- imported NOTHING and
@@ -254,27 +333,26 @@ $PimEntityBases = @(
     'PIM-Definitions-Services','PIM-Definitions-Processes','PIM-Definitions-Resources',
     'PIM-Definitions-Departments','PIM-Definitions-Organization','PIM-Definitions-AU',
     'PIM-Assignments-Admins','PIM-Assignments-Groups','PIM-Assignments-Roles-Groups',
-    'PIM-Assignments-Roles-AUs','PIM-Assignments-Azure-Resources','PIM-Assignments-Workloads'
+    'PIM-Assignments-Roles-AUs','PIM-Assignments-Azure-Resources','PIM-Assignments-Workloads',
+    # REQ-G: the two direct-group types the Manager, validator and engine already support (2026-09-12).
+    'PIM-Definitions-Projects','PIM-Definitions-CrossOrg'
 )
 # 🪤 A v1 data folder holds much more than PIM's own entities -- CMDB, Device_Tagging,
 # Identity_Tagging, Onboarding-Groups, Azure-Tags-*, plus the engine's own _Delta and _LastApplied
 # working files. Importing those would create entities the Manager never reads; importing a
 # _LastApplied as if it were desired state would be worse. Only the known bases are taken, and
 # everything else is LISTED as skipped so the operator can see the decision rather than trust it.
+# REQ-G: ONE classifier (Get-PimCsvImportFileSet) for this import and for the pre-import check, so the
+# files that are validated are exactly the files that are imported.
+$fileSet = Get-PimCsvImportFileSet -Path $ConfigDir -Entities $PimEntityBases
 $byBase = [ordered]@{}
-$ignored = New-Object System.Collections.Generic.List[string]
-foreach ($f in (Get-ChildItem -LiteralPath $ConfigDir -Filter '*.csv' -File | Sort-Object Name)) {
-    $b = $f.BaseName -replace '\.(custom|locked)$', ''
-    $match = @($PimEntityBases | Where-Object { $_ -eq $b }) | Select-Object -First 1
-    if (-not $match) { [void]$ignored.Add($f.Name); continue }
-    $rank = if ($f.BaseName -match '\.custom$') { 0 } elseif ($f.BaseName -match '\.locked$') { 2 } else { 1 }
-    if (-not $byBase.Contains($match) -or $rank -lt $byBase[$match].rank) {
-        $byBase[$match] = @{ file = $f; rank = $rank }
-    } elseif ($byBase.Contains($match)) { [void]$ignored.Add("$($f.Name) (superseded by $($byBase[$match].file.Name))") }
-}
-if ($ignored.Count) {
-    Write-Host ("  [migrate] ignored {0} file(s) that are not PIM entity data:" -f $ignored.Count) -ForegroundColor DarkGray
-    $ignored | ForEach-Object { Write-Host "      $_" -ForegroundColor DarkGray }
+foreach ($b in $fileSet.entities.Keys) { $byBase[$b] = @{ file = $fileSet.entities[$b] } }
+if (@($fileSet.skipped).Count) {
+    Write-Host ("  [migrate] ignored {0} file(s) that are not PIM entity data:" -f @($fileSet.skipped).Count) -ForegroundColor DarkGray
+    foreach ($s in @($fileSet.skipped)) {
+        $why = switch ($s.status) { 'state' { 'state file, not imported' } 'superseded' { "$($s.reason)" } default { 'not a PIM entity' } }
+        Write-Host ("      {0} ({1})" -f $s.file, $why) -ForegroundColor DarkGray
+    }
 }
 if (-not $byBase.Count) {
     throw ("No PIM entity CSVs found in '$ConfigDir'. Expected one or more of: " + ($PimEntityBases -join ', ') +
@@ -294,41 +372,130 @@ if ($ListOnly) {
     return ,@($byBase.Keys)
 }
 
+# =====================================================================================================
+# REQ-G 1) VALIDATE THE FILES -- before SQL is contacted, before anything is written.
+# The rows imported below are the rows validated here (the check's parse: headers cleaned, trailing empty
+# columns and blank separator rows dropped, -ForceLocal applied) -- one parse, not a second Import-Csv that
+# could read the file differently (Import-Csv names an empty header column 'H<n>' and stores it).
+# =====================================================================================================
+$check = Invoke-PimCsvImportCheck -Path $ConfigDir -Entities $PimEntityBases -ForceLocal:$ForceLocal -NotMspMaster:$NotMspMaster -DefaultDomain $DefaultDomain
+Write-PimCsvImportReport -Result $check
+$script:PimMigrateValidation = $check
+if ($ValidateOnly) {
+    Write-Host ("VALIDATE ONLY -- {0}. SQL was not contacted and nothing was written." -f $(if ($check.errors) { "$($check.errors) error(s): an import would be REFUSED" } else { 'no errors: an import would proceed' })) -ForegroundColor Cyan
+    return $check
+}
+if ($check.errors -gt 0) {
+    if (-not $AllowValidationErrors) {
+        throw ("Migrate-PimToSql: the pre-import check found {0} error(s) (listed above) -- REFUSING to import. Nothing was written and SQL was not contacted. Fix the files, or pass -AllowValidationErrors to import them as they are." -f $check.errors)
+    }
+    Write-Warning ("  [migrate] -AllowValidationErrors: importing DESPITE {0} validation error(s) listed above." -f $check.errors)
+}
+
+# =====================================================================================================
+# REQ-G 2) READ WHAT THE STORE ALREADY HOLDS, for every entity, before ANY write -- so a key collision can
+# still refuse the whole import cleanly instead of after half of it has landed.
+# 🔴 BUG-201 still holds: a re-run must never delete what the Manager owns, nor silently revert its edits.
+# BUG-201's guard kept a whole ENTITY out once the store held rows for it; that also imported NOTHING into a
+# store holding sample rows (EFIF). Adding BY KEY keeps both promises: new keys are added, identical keys are
+# left alone, a key with DIFFERENT content is a collision (reported; refused by default), nothing is deleted.
+# A read that fails is a failed entity, never "assume empty".
+# =====================================================================================================
+if (-not $ConnectionString) { $ConnectionString = Get-PimSqlConnectionString -Server $Server -Database $Database }
+if (-not (Test-PimSqlConnectivity -ConnectionString $ConnectionString)) { throw "SQL not reachable with the supplied connection." }
+
 $report = New-Object System.Collections.Generic.List[object]
 $failedEntities = New-Object System.Collections.Generic.List[object]
+$keptEntities = New-Object System.Collections.Generic.List[object]
+$plans = [ordered]@{}
+$collisions = New-Object System.Collections.Generic.List[object]
 foreach ($base in $byBase.Keys) {
-    $f = $byBase[$base].file
+    $im = $check.import[$base]
+    try { $stored = @(Read-PimMigrateStoreRows -ConnectionString $ConnectionString -Entity $base) } catch {
+        Write-Warning "  [migrate] $base FAILED: could not read the rows the store already holds, so cannot tell what importing would change -- refusing it: $($_.Exception.Message)"
+        [void]$failedEntities.Add([pscustomobject]@{ entity = $base; error = "could not read the existing rows: $($_.Exception.Message)" })
+        continue
+    }
+    $byKey = @{}
+    foreach ($s in $stored) { if ("$($s.key)") { $byKey["$($s.key)".ToLowerInvariant()] = $s } }
+    $plan = @{ add = New-Object System.Collections.Generic.List[object]; update = New-Object System.Collections.Generic.List[object]
+               same = 0; collide = New-Object System.Collections.Generic.List[object]; existing = $stored.Count; file = $im.file; rows = @($im.rows) }
+    # The LAST row per key, as the store itself would keep it (two rows with one key are a CSVIMP-KEY-002 error).
+    $taken = [ordered]@{}
+    for ($i = 0; $i -lt @($im.rows).Count; $i++) { $k = "$($im.keys[$i])"; if ($k) { $taken[$k.ToLowerInvariant()] = $i } }
+    foreach ($lk in @($taken.Keys)) {
+        $i = $taken[$lk]
+        if (-not $byKey.ContainsKey($lk)) { $plan.add.Add(@{ key = "$($im.keys[$i])"; row = $im.rows[$i] }) | Out-Null; continue }
+        # Compared with the row AS THE FILE HAS IT (before -ForceLocal): an unchanged row is left alone.
+        $d = @(Compare-PimSqlRowContent -FileRow $im.rawRows[$i] -StoreRow $byKey[$lk].row)
+        if (-not $d.Count) { $plan.same++; continue }
+        $col = [pscustomobject]@{ entity = $base; key = "$($byKey[$lk].key)"; file = $im.file; row = $im.rowNumbers[$i]; line = $im.lines[$i]; columns = $d }
+        $plan.collide.Add($col) | Out-Null; $collisions.Add($col) | Out-Null
+        if ($OnKeyConflict -eq 'Overwrite') { $plan.update.Add(@{ key = "$($byKey[$lk].key)"; row = $im.rows[$i] }) | Out-Null }
+    }
+    $plans[$base] = $plan
+}
+$script:PimMigrateCollisions = $collisions.ToArray()
+if ($collisions.Count) {
+    Write-Host ''
+    Write-Host ("KEY COLLISIONS ({0}) -- the store already holds these keys with DIFFERENT content:" -f $collisions.Count) -ForegroundColor $(if ($OnKeyConflict -eq 'Refuse' -and -not $ReplaceExistingEntityRows) { 'Red' } else { 'Yellow' })
+    foreach ($c in $collisions) {
+        $what = @($c.columns | Select-Object -First 4 | ForEach-Object { "$($_.column): store '$($_.store)' / file '$($_.file)'" }) -join '; '
+        if (@($c.columns).Count -gt 4) { $what += " (+$(@($c.columns).Count - 4) more column(s))" }
+        Write-Host ("    {0} '{1}' ({2} row {3}, line {4}) -- {5}" -f $c.entity, $c.key, $c.file, $c.row, $c.line, $what) -ForegroundColor Yellow
+    }
+    if (-not $ReplaceExistingEntityRows) {
+        if ($OnKeyConflict -eq 'Refuse') {
+            throw ("Migrate-PimToSql: {0} key collision(s) with DIFFERENT content (listed above) -- REFUSING before writing anything. " -f $collisions.Count +
+                   "-OnKeyConflict KeepExisting keeps the store's rows and imports the rest; -OnKeyConflict Overwrite updates them from the files. Nothing is deleted either way.")
+        }
+        Write-Host ("  -OnKeyConflict {0}: {1}" -f $OnKeyConflict, $(if ($OnKeyConflict -eq 'Overwrite') { 'those rows are UPDATED from the files.' } else { "the store's rows are KEPT; the files' versions are NOT imported." })) -ForegroundColor Yellow
+    }
+}
+
+# =====================================================================================================
+# REQ-G 3) WRITE: add (and, only with -OnKeyConflict Overwrite, update) BY KEY. Never a delete.
+# =====================================================================================================
+Write-Host "Initializing SQL store (idempotent) ..." -ForegroundColor Cyan
+if ($PSCmdlet.ShouldProcess($Database, 'Initialize-PimSqlStore')) { Initialize-PimSqlStore -ConnectionString $ConnectionString }
+foreach ($base in $plans.Keys) {
+    $p = $plans[$base]
     try {
-        # 🪤 DETECT THE DELIMITER, do not assume ';'. A comma-separated export parsed with ';'
-        # yields ONE column per row -- no error, no warning, and every field lost. The header line
-        # answers the question, so ask it.
-        $head = (Get-Content -LiteralPath $f.FullName -TotalCount 1)
-        $delim = if ("$head".Split(';').Count -ge "$head".Split(',').Count) { ';' } else { ',' }
-        $rows = @(Import-Csv -Path $f.FullName -Delimiter $delim -Encoding UTF8)
-        Write-Host ("  [migrate] {0}  <- {1} (delimiter '{2}')" -f $base, $f.Name, $delim) -ForegroundColor DarkGray
-        if ($PSCmdlet.ShouldProcess("$base ($($rows.Count) rows)", 'migrate -> pim.Rows')) {
-            # 🔴 §52.18b -- ONE CONNECTION PER ENTITY, NOT ONE PER ROW.
-            # Set-PimSqlEntityRows calls Set-PimSqlRow once per row, and each of those opens and
-            # closes its own connection. Disposing them (the §52.18 fix) returns each to its pool,
-            # but a connection carrying an Entra ACCESS TOKEN cannot share a pool with one carrying
-            # a different token -- so every freshly-minted token is a NEW pool holding a NEW
-            # physical session, and the sessions sit there idle rather than closing.
-            # Measured at a live customer 2026-09-10, on a database already raised to 900 sessions:
-            #     PIM-Definitions-Tasks skipped: ... The session limit for the database is 900 and
-            #     has been reached.
-            # after twelve entities and ~565 rows had gone through. Raising the tier moved the
-            # number the import dies at; it did not change the shape.
-            # 🔑 The transactional variant has IDENTICAL semantics -- upsert by natural key, delete
-            # keys no longer submitted -- on ONE connection inside ONE transaction. Fifteen entities
-            # therefore cost fifteen sessions instead of six hundred, and an entity that fails
-            # part-way rolls back instead of leaving half its rows applied, which is what a re-run
-            # then has to reason about.
-            $res = Set-PimSqlEntityRowsTransactional -ConnectionString $ConnectionString -Entity $base -Base $base -Rows $rows
-            Write-Host ("  [migrate] {0}: {1} rows -> SQL" -f $base, $res.rowCount) -ForegroundColor Green
-            $report.Add([pscustomobject]@{ entity = $base; rows = $res.rowCount; removed = $res.removed })
+        # 🔴 §52.18b -- ONE CONNECTION PER ENTITY, NOT ONE PER ROW. Set-PimSqlRow opens a connection per
+        # row, and a connection carrying an Entra ACCESS TOKEN cannot share a pool with one carrying a
+        # different token -- measured at a live customer 2026-09-10: "The session limit for the database
+        # is 900 and has been reached" after twelve entities and ~565 rows. Both writers below run ONE
+        # connection inside ONE transaction per entity, so an entity that fails rolls back whole.
+        if ($ReplaceExistingEntityRows) {
+            if ($p.existing -gt 0) { Write-Host ("  [migrate] {0}: -ReplaceExistingEntityRows -- REPLACING {1} existing row(s); rows not in {2} will be DELETED" -f $base, $p.existing, $p.file) -ForegroundColor Red }
+            if ($PSCmdlet.ShouldProcess("$base ($(@($p.rows).Count) rows)", 'REPLACE -> pim.Rows')) {
+                $res = Set-PimSqlEntityRowsTransactional -ConnectionString $ConnectionString -Entity $base -Base $base -Rows @($p.rows)
+                Write-Host ("  [migrate] {0}: {1} rows -> SQL (full-set replace, {2} removed)" -f $base, $res.rowCount, $res.removed) -ForegroundColor Green
+                $report.Add([pscustomobject]@{ entity = $base; rows = $res.rowCount; added = $null; updated = $null; unchanged = $null; kept = 0; removed = $res.removed })
+            } else {
+                Write-Host ("  [migrate][WhatIf] {0}: {1} rows (full-set replace)" -f $base, @($p.rows).Count) -ForegroundColor Yellow
+                $report.Add([pscustomobject]@{ entity = $base; rows = @($p.rows).Count; added = $null; updated = $null; unchanged = $null; kept = 0; removed = 0 })
+            }
+            continue
+        }
+        $items = @($p.add.ToArray()) + @($p.update.ToArray())
+        $kept = if ($OnKeyConflict -eq 'KeepExisting') { $p.collide.Count } else { 0 }
+        if ($kept) { [void]$keptEntities.Add([pscustomobject]@{ entity = $base; existing = $kept; file = $p.file }) }
+        if (-not $items.Count) {
+            Write-Host ("  [migrate] {0}: nothing to add -- {1} row(s) already in the store unchanged{2}" -f $base, $p.same, $(if ($kept) { ", $kept collision(s) KEPT" } else { '' })) -ForegroundColor DarkGray
+            continue
+        }
+        if ($PSCmdlet.ShouldProcess("$base ($($items.Count) rows)", 'add/update by key -> pim.Rows')) {
+            # The store's upsert-only writer: ONE transaction for the entity, never a delete. It applies the plan above
+            # under the SAME -OnKeyConflict, so a row the Manager changed between that read and this write is judged by
+            # the operator's own policy (Refuse throws and rolls this entity back -> reported as FAILED below).
+            $mr = Merge-PimSqlEntityRows -ConnectionString $ConnectionString -Entity $base -Items $items -OnKeyConflict $OnKeyConflict
+            $n = [int]$mr.submitted
+            Write-Host ("  [migrate] {0} <- {1}: {2} added, {3} updated, {4} unchanged{5} (nothing deleted)" -f $base, $p.file, $p.add.Count, $p.update.Count, $p.same, $(if ($kept) { ", $kept collision(s) KEPT" } else { '' })) -ForegroundColor Green
+            $report.Add([pscustomobject]@{ entity = $base; rows = $n; added = $p.add.Count; updated = $p.update.Count; unchanged = $p.same; kept = $kept; removed = 0 })
         } else {
-            Write-Host ("  [migrate][WhatIf] {0}: {1} rows" -f $base, $rows.Count) -ForegroundColor Yellow
-            $report.Add([pscustomobject]@{ entity = $base; rows = $rows.Count; removed = 0 })
+            Write-Host ("  [migrate][WhatIf] {0}: {1} to add, {2} to update, {3} unchanged" -f $base, $p.add.Count, $p.update.Count, $p.same) -ForegroundColor Yellow
+            $report.Add([pscustomobject]@{ entity = $base; rows = $items.Count; added = $p.add.Count; updated = $p.update.Count; unchanged = $p.same; kept = $kept; removed = 0 })
         }
     } catch {
         # 🔴 A SKIPPED ENTITY IS A FAILED MIGRATION, NOT A WARNING.
@@ -397,6 +564,15 @@ if ($failedEntities.Count) {
     throw ("Migrate-PimToSql: {0} entit(ies) failed to import -- see above. Refusing to report a completed migration." -f $failedEntities.Count)
 }
 
-Write-Host ("`nMigration complete: {0} entities. The CSV files were NOT modified." -f $report.Count) -ForegroundColor Cyan
-Write-Host "Next: set StorageBackend=sql (or supply the connection) so the Manager runs in SQL mode." -ForegroundColor Cyan
+$nAdded = 0; $nUpdated = 0; $nSame = 0; $nKept = 0
+foreach ($r in $report) { if ($null -ne $r.added) { $nAdded += [int]$r.added }; if ($null -ne $r.updated) { $nUpdated += [int]$r.updated } }
+foreach ($p in @($plans.Values)) { $nSame += [int]$p.same }
+foreach ($k in $keptEntities) { $nKept += [int]$k.existing }
+$delNote = if ($ReplaceExistingEntityRows) { 'FULL-SET REPLACE (-ReplaceExistingEntityRows): rows not in the files were deleted.' } else { 'Nothing was deleted.' }
+Write-Host ("`nMigration complete: {0} entit(ies) written -- {1} row(s) added, {2} updated, {3} already in the store unchanged; {4} collision(s) KEPT. {5} The CSV files were NOT modified." -f $report.Count, $nAdded, $nUpdated, $nSame, $nKept, $delNote) -ForegroundColor Cyan
+if ($keptEntities.Count) {
+    Write-Host ("  KEPT (the store's row differs from the file's and was not overwritten): {0}. Re-run with -OnKeyConflict Overwrite to take the files' versions." -f (($keptEntities | ForEach-Object { "$($_.entity) ($($_.existing) row(s))" }) -join ', ')) -ForegroundColor Yellow
+}
+$script:PimMigrateKeptEntities = $keptEntities.ToArray()
+Write-Host "Next: point the Manager and the engine at this database (the v2 store is SQL-only)." -ForegroundColor Cyan
 return $report.ToArray()

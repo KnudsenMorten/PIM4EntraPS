@@ -105,4 +105,4 @@ foreach ($c in @('pim.CentralAdmins|Target','platform.Tenants|Tags')) {
 }
 
 Step 'Done.'
-Note 'next: tools/setup/Add-PimCentralAdmin.ps1 to add the MSP admins, then setup/New-PimBaselineBundle.ps1 to publish.'
+Note 'next: tools/setup/Add-PimCentralAdmin.ps1 to add the MSP admins, then tools/setup/Start-PimBaselinePublish.ps1 to publish (the ca-pim-publish job).'

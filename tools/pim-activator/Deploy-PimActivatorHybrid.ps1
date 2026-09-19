@@ -100,6 +100,27 @@
     Opt-in. Like -DefaultJustification but for the default activation length
     (whole hours, 1..24). OVERWRITES defaultDurationHours on every tenant entry.
 
+.PARAMETER Channel
+    Released (default) or Test. Test points at the TEST extension id + updates-test.xml
+    unless -ExtensionId / -UpdateUrl are passed explicitly (mirrors
+    Deploy-PimActivatorClient.ps1 / Deploy-PimActivatorIntune.ps1).
+
+.PARAMETER MinimumVersion
+    Optional ExtensionSettings minimum_version_required: an install BELOW it is disabled
+    and pushed to update. Name only a version that is already published and installable.
+
+.PARAMETER BulkThreshold
+    Optional tenant-wide bulk-activate confirm threshold (1..100), written as the
+    bulkActivateConfirmThreshold DWORD next to tenantCatalog. A per-tenant value inside
+    the catalog still wins for that tenant.
+
+.NOTES (existing policies)
+    The org's own extension policies are never overwritten: our forcelist /
+    sources rows go into the slot already holding our id, else the lowest free slot, and
+    our ExtensionSettings entry is MERGED into the org's dictionary. LocalGpo reads the
+    machine's HKLM policy keys first; DomainGpo reads the target GPO first and also treats
+    the slots in effect on THIS machine as taken (another GPO may own them).
+
 .EXAMPLE
     .\Deploy-PimActivatorHybrid.ps1 -TenantConfigJsonPath \\fs01\pim\tenants.json -Target Json
 
@@ -168,10 +189,30 @@ param(
     [int]$DefaultDurationHours,
 
     [Parameter()]
-    [int]$MaxTenants = 25
+    [int]$MaxTenants = 25,
+
+    # IMP-49 r: the channel, the minimum-version floor and the tenant-wide bulk threshold
+    # were documented / half-built in the builder but unreachable from this script.
+    [Parameter()]
+    [ValidateSet('Released','Test')]
+    [string]$Channel = 'Released',
+
+    [Parameter()]
+    [ValidatePattern('^$|^\d+(\.\d+){0,3}$')]
+    [string]$MinimumVersion,
+
+    [Parameter()]
+    [ValidateRange(1, 100)]
+    [int]$BulkThreshold
 )
 
 $ErrorActionPreference = 'Stop'
+
+# ---- Channel defaults (Test = the SEPARATE test id + update manifest) -------
+if ($Channel -eq 'Test') {
+    if (-not $PSBoundParameters.ContainsKey('ExtensionId')) { $ExtensionId = 'glldnbmjpdkjemcnficagdhgienfdpoo' }
+    if (-not $PSBoundParameters.ContainsKey('UpdateUrl'))   { $UpdateUrl   = 'https://knudsenmorten.github.io/PIM4EntraPS/updates-test.xml' }
+}
 
 # Run with no config path -> show syntax/usage instead of prompting for it.
 if ([string]::IsNullOrWhiteSpace($TenantConfigJsonPath)) {
@@ -253,19 +294,60 @@ if ($PSBoundParameters.ContainsKey('DefaultJustification') -or $PSBoundParameter
 }
 
 # ---- 3. Build the shared registry policy plan -----------------------------
-$plan = Get-PaHybridRegistryPlan -Catalog $catalog -Browser $Browser `
-    -ExtensionId $ExtensionId -UpdateUrl $UpdateUrl -SourcePattern $SourcePattern
+# Built once WITHOUT existing state (the Json artifact / previews), then rebuilt by
+# LocalGpo / DomainGpo against what is ALREADY in the target, so the org's own
+# forcelist rows and ExtensionSettings entries are kept (BUG-182).
+$planArgs = @{
+    Catalog = $catalog; Browser = $Browser
+    ExtensionId = $ExtensionId; UpdateUrl = $UpdateUrl; SourcePattern = $SourcePattern
+    MinimumVersion = $MinimumVersion
+}
+if ($PSBoundParameters.ContainsKey('BulkThreshold')) { $planArgs['BulkThreshold'] = $BulkThreshold }
+$plan = Get-PaHybridRegistryPlan @planArgs
 Write-Host ("Plan built   : {0} registry value(s) across {1}" -f $plan.Entries.Count, ($plan.Browsers -join ' + ')) -ForegroundColor Green
 Write-Host ("Forcelist    : {0}" -f $plan.ForcelistValue) -ForegroundColor Gray
 Write-Host ("Source       : {0}" -f $SourcePattern) -ForegroundColor Gray
+if ($Channel -ne 'Released') { Write-Host ("Channel      : {0}" -f $Channel) -ForegroundColor Yellow }
+if ($MinimumVersion)         { Write-Host ("Min version  : {0}  (installs below it are disabled until they update)" -f $MinimumVersion) -ForegroundColor Yellow }
+if ($PSBoundParameters.ContainsKey('BulkThreshold')) { Write-Host ("Bulk confirm : {0} (tenant-wide)" -f $BulkThreshold) -ForegroundColor Gray }
 Write-Host ''
 
 # ---- helper: pretty-print the plan (for -WhatIf + DomainGpo preview) -------
 function Write-PaPlan {
     param($Plan)
     foreach ($e in $Plan.Entries) {
-        $shown = if ($e.Value.Length -gt 90) { $e.Value.Substring(0,90) + '...' } else { $e.Value }
-        Write-Host ("  [{0}/{1}] HKLM\{2}  {3} ({4}) = {5}" -f $e.Browser, $e.Policy, $e.Key, $e.ValueName, $e.ValueKind, $shown) -ForegroundColor Gray
+        $v = "$($e.Value)"
+        $shown = if ($v.Length -gt 90) { $v.Substring(0,90) + '...' } else { $v }
+        $act = if ($e.PSObject.Properties['Action'] -and $e.Action -and $e.Action -ne 'Set') { " [$($e.Action)]" } else { '' }
+        Write-Host ("  [{0}/{1}]{6} HKLM\{2}  {3} ({4}) = {5}" -f $e.Browser, $e.Policy, $e.Key, $e.ValueName, $e.ValueKind, $shown, $act) -ForegroundColor Gray
+    }
+    foreach ($b in @($Plan.Slots.Keys)) {
+        $s = $Plan.Slots[$b]
+        Write-Host ("  [{0}] forcelist slot {1}{2}; sources slot {3}; ExtensionSettings layout {4}" -f $b, $s.Forcelist, $(if ($s.ForcelistReused) { ' (reused -- already held our id)' } else { ' (lowest free)' }), $s.Sources, $s.SettingsLayout) -ForegroundColor DarkGray
+    }
+}
+
+$browserLabels = @($plan.Browsers)
+
+# Read one browser's extension policies out of a DOMAIN GPO (GroupPolicy module).
+function Read-PaGpoPolicyState {
+    param([string]$Name, [string]$PolicyKey)
+    function Read-PaGpoValues([string]$Key) {
+        $h = @{}
+        $vals = @()
+        try { $vals = @(Get-GPRegistryValue -Name $Name -Key "HKLM\$Key" -ErrorAction Stop) } catch { $vals = @() }
+        foreach ($v in $vals) {
+            if ($v.ValueName -and "$($v.PolicyState)" -ne 'Delete') { $h["$($v.ValueName)"] = "$($v.Value)" }
+        }
+        return $h
+    }
+    $rootVals = Read-PaGpoValues $PolicyKey
+    return @{
+        Forcelist      = Read-PaGpoValues "$PolicyKey\ExtensionInstallForcelist"
+        Sources        = Read-PaGpoValues "$PolicyKey\ExtensionInstallSources"
+        Allowlist      = Read-PaGpoValues "$PolicyKey\ExtensionInstallAllowlist"
+        SettingsValue  = $(if ($rootVals.ContainsKey('ExtensionSettings')) { $rootVals['ExtensionSettings'] } else { $null })
+        SettingsSubkey = Read-PaGpoValues "$PolicyKey\ExtensionSettings"
     }
 }
 
@@ -311,19 +393,29 @@ switch ($Target) {
             }
         }
 
+        # Rebuild the plan against what is ALREADY in this machine's policy keys, so the
+        # org's forcelist rows keep their slots and its ExtensionSettings entries are
+        # merged, not replaced (BUG-182). Reading needs no elevation.
+        $existingState = @{}
+        foreach ($b in $browserLabels) {
+            $existingState[$b] = Read-PaPolicyRegistryState -PolicyRoot "HKLM:\SOFTWARE\Policies\$($script:PaHybridVendorPath[$b])"
+        }
+        $plan = Get-PaHybridRegistryPlan @planArgs -ExistingState $existingState
+
         foreach ($e in $plan.Entries) {
-            $regPath = "HKLM:\$($e.Key)"
-            $opLabel = ("HKLM\{0}  {1} = {2}" -f $e.Key, $e.ValueName, ($(if ($e.Value.Length -gt 60) { $e.Value.Substring(0,60) + '...' } else { $e.Value })))
-            if ($PSCmdlet.ShouldProcess($opLabel, "Set local machine policy")) {
-                if (-not (Test-Path -LiteralPath $regPath)) {
-                    New-Item -Path $regPath -Force | Out-Null
-                }
-                $propKind = if ($e.ValueKind -eq 'Dword') { 'DWord' } else { 'String' }
-                New-ItemProperty -LiteralPath $regPath -Name $e.ValueName -Value $e.Value -PropertyType $propKind -Force | Out-Null
-                Write-Host ("  [OK] {0}/{1} -> {2}\{3}" -f $e.Browser, $e.Policy, $e.Key, $e.ValueName) -ForegroundColor Green
+            $v = "$($e.Value)"
+            $opLabel = ("HKLM\{0}  {1} = {2}" -f $e.Key, $e.ValueName, ($(if ($v.Length -gt 60) { $v.Substring(0,60) + '...' } else { $v })))
+            $verb = switch ($e.Action) { 'Remove' { 'Remove local machine policy value' } 'RemoveKeyIfEmpty' { 'Remove empty local policy key' } default { 'Set local machine policy' } }
+            if ($PSCmdlet.ShouldProcess($opLabel, $verb)) {
+                $applied = @(Invoke-PaPolicyRegistryOps -Hive 'HKLM:' -Entries @($e))
+                foreach ($line in $applied) { Write-Host ("  [OK] {0}/{1}: {2}" -f $e.Browser, $e.Policy, $line) -ForegroundColor Green }
             } else {
-                Write-Host ("  [WhatIf] would set HKLM\{0}  {1} ({2})" -f $e.Key, $e.ValueName, $e.ValueKind) -ForegroundColor Yellow
+                Write-Host ("  [WhatIf] would {0} HKLM\{1}  {2} ({3})" -f $(if ($e.Action) { $e.Action.ToLower() } else { 'set' }), $e.Key, $e.ValueName, $e.ValueKind) -ForegroundColor Yellow
             }
+        }
+        foreach ($b in @($plan.Slots.Keys)) {
+            $s = $plan.Slots[$b]
+            Write-Host ("  [{0}] forcelist slot {1}{2}; ExtensionSettings {3}" -f $b, $s.Forcelist, $(if ($s.ForcelistReused) { ' (reused)' } else { ' (lowest free)' }), $(if ($s.SettingsLayout -eq 'Subkey') { "entry added to the org's per-id ExtensionSettings key" } else { 'merged into the ExtensionSettings dictionary' })) -ForegroundColor DarkGray
         }
         if (-not $WhatIfPreference) {
             Write-Host ''
@@ -370,14 +462,61 @@ switch ($Target) {
             Write-Host ("  GPO '{0}' already exists (id {1}) -- updating values." -f $GpoName, $gpo.Id) -ForegroundColor Gray
         }
 
+        # BUG-182: rebuild the plan against (a) what THIS GPO already carries and (b) the
+        # policy in effect on THIS machine, which is where the org's OTHER GPOs show up.
+        #   * list slots: reuse the GPO's slot holding our id, else the lowest slot free in
+        #     BOTH -- a slot another GPO owns is never taken (it would override that row).
+        #   * ExtensionSettings is ONE value per browser: the GPO with the higher precedence
+        #     replaces the other's WHOLE dictionary. If the GPO has none yet but the machine
+        #     has the org's entries, seed from them so this GPO does not drop the org's '*'
+        #     defaults where it wins -- and say loudly that it is a snapshot.
+        $existingState = @{}
+        foreach ($b in $browserLabels) {
+            $polKey = "SOFTWARE\Policies\$($script:PaHybridVendorPath[$b])"
+            $gpoState = Read-PaGpoPolicyState -Name $GpoName -PolicyKey $polKey
+            $local    = Read-PaPolicyRegistryState -PolicyRoot "HKLM:\$polKey"
+            $gpoState['ForcelistReserved'] = @($local.Forcelist.Keys | Where-Object { -not $gpoState.Forcelist.ContainsKey($_) -and ("$($local.Forcelist[$_])" -notlike "$ExtensionId;*") })
+            $gpoState['SourcesReserved']   = @($local.Sources.Keys   | Where-Object { -not $gpoState.Sources.ContainsKey($_) -and ("$($local.Sources[$_])" -ine $SourcePattern) })
+            $gpoHasSettings = ("$($gpoState.SettingsValue)".Trim()) -or $gpoState.SettingsSubkey.Count -gt 0
+            $localForeignSub = @($local.SettingsSubkey.Keys | Where-Object { $_ -ne $ExtensionId })
+            if (-not $gpoHasSettings -and $localForeignSub.Count -gt 0) {
+                # The org uses the per-id layout: values merge across GPOs by name. Adding
+                # only ours in the same layout keeps theirs.
+                $gpoState['SettingsSubkey'] = @{ '__pima_layout_probe__' = '{}' }
+            } elseif (-not $gpoHasSettings -and "$($local.SettingsValue)".Trim()) {
+                $gpoState['SettingsValue'] = $local.SettingsValue
+                Write-Warning ("[{0}] ExtensionSettings: this GPO has none yet; seeded it from the ExtensionSettings in effect on THIS machine so the org's entries are kept where this GPO wins precedence. It is a SNAPSHOT: a later change to the org's own ExtensionSettings GPO must keep the '{1}' entry (or re-run this script)." -f $b, $ExtensionId)
+            }
+            $existingState[$b] = $gpoState
+        }
+        $plan = Get-PaHybridRegistryPlan @planArgs -ExistingState $existingState
+        # The probe only chose the layout; it is not a real value and must never be written.
+        $plan.Entries = @($plan.Entries | Where-Object { $_.ValueName -ne '__pima_layout_probe__' })
+
         foreach ($e in $plan.Entries) {
             $fullKey = "HKLM\$($e.Key)"
             $regType = if ($e.ValueKind -eq 'Dword') { 'DWord' } else { 'String' }
-            if ($PSCmdlet.ShouldProcess(("{0}  {1}" -f $fullKey, $e.ValueName), "Set-GPRegistryValue")) {
-                Set-GPRegistryValue -Name $GpoName -Key $fullKey -ValueName $e.ValueName -Type $regType -Value $e.Value | Out-Null
-                Write-Host ("  [OK] {0}/{1} -> {2}\{3}" -f $e.Browser, $e.Policy, $e.Key, $e.ValueName) -ForegroundColor Green
+            switch ($e.Action) {
+                'Remove' {
+                    if ($PSCmdlet.ShouldProcess(("{0}  {1}" -f $fullKey, $e.ValueName), "Remove-GPRegistryValue")) {
+                        Remove-GPRegistryValue -Name $GpoName -Key $fullKey -ValueName $e.ValueName -ErrorAction SilentlyContinue | Out-Null
+                        Write-Host ("  [OK] {0}/{1} removed {2}\{3}" -f $e.Browser, $e.Policy, $e.Key, $e.ValueName) -ForegroundColor Green
+                    }
+                }
+                'RemoveKeyIfEmpty' { }   # an empty key in a GPO is inert -- nothing to do
+                default {
+                    if ($PSCmdlet.ShouldProcess(("{0}  {1}" -f $fullKey, $e.ValueName), "Set-GPRegistryValue")) {
+                        Set-GPRegistryValue -Name $GpoName -Key $fullKey -ValueName $e.ValueName -Type $regType -Value $e.Value | Out-Null
+                        Write-Host ("  [OK] {0}/{1} -> {2}\{3}" -f $e.Browser, $e.Policy, $e.Key, $e.ValueName) -ForegroundColor Green
+                    }
+                }
             }
         }
+        foreach ($b in @($plan.Slots.Keys)) {
+            $s = $plan.Slots[$b]
+            Write-Host ("  [{0}] forcelist slot {1}{2}; ExtensionSettings layout {3}" -f $b, $s.Forcelist, $(if ($s.ForcelistReused) { ' (reused)' } else { ' (lowest free in this GPO and on this machine)' }), $s.SettingsLayout) -ForegroundColor DarkGray
+        }
+        Write-Host "  Verify on a target machine: gpresult /h + edge://policy -- another GPO writing the SAME slot number would still win by precedence." -ForegroundColor Yellow
 
         if ($LinkToOu) {
             if ($PSCmdlet.ShouldProcess($LinkToOu, "New-GPLink '$GpoName'")) {

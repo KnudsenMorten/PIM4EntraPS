@@ -49,6 +49,27 @@
   Layer 1 is on by default because it can only reject requests a genuine edge would
   never send. Layer 2 is the real fix and should be enabled once verified live.
 
+  🔴 SEC-28 / SEC-31 (§33.28) -- LAYER 1 IS ONLY AS GOOD AS THE EDGE IN FRONT OF IT.
+  A client can build a consistent name header + principal blob itself; the pair is
+  trustworthy only because Easy Auth STRIPS client-supplied X-MS-* headers ("External
+  requests aren't allowed to set these headers" -- Container Apps / App Service docs).
+  Where no Easy Auth is in front (a VM from Setup-PimVM, a container app created before
+  its Easy Auth step) the headers are the caller's own words. So the AUTH LAYER in front
+  is now an explicit fact (Get-PimHostedAuthLayer):
+    easyauth      -- the platform edge strips + injects the headers (layer 1, + layer 2
+                     when PIM_HOSTED_REQUIRE_SIGNED_TOKEN is on).
+    signed-token  -- layer 2 is REQUIRED; with no edge headers at all the identity may
+                     come from the verified token alone, but only with the issuer AND
+                     audience pinned (an unpinned check accepts any tenant's token).
+    none          -- nothing strips the headers: every header identity is REFUSED.
+  PIM_HOSTED_AUTH_LAYER sets it explicitly. Unset, it is derived from the PLATFORM:
+  Container Apps (CONTAINER_APP_NAME) and App Service (WEBSITE_SITE_NAME) are the only
+  hosts that offer Easy Auth, so they keep 'easyauth' (every live Manager is one of them
+  -- nothing is locked out); anything else hosted is 'none'.
+  🪤 Layer 2 is deliberately NOT turned on by default: Set-PimManagerEasyAuth does not
+  enable the token store, so X-MS-TOKEN-AAD-ID-TOKEN is absent on every Manager except
+  the one where it was enabled by hand -- default-on would reject every sign-in there.
+
   PS 5.1-safe: no ?./??, no ternary, no RSA.ImportFromPem (JWKS n/e -> RSAParameters),
   null-guarded throughout. The decision functions are PURE (no I/O) so they are fully
   unit-testable offline and behave identically live -- tests/Test-PimHostedAuth.ps1.
@@ -357,9 +378,52 @@ function Test-PimEdgeHeadersConsistent {
 
 # ---- the composite decision ---------------------------------------------------
 
+function Get-PimHostedAuthLayer {
+    # PURE given its inputs: WHICH authentication layer stands in front of this hosted
+    # Manager -- 'easyauth' | 'signed-token' | 'none' (SEC-28/SEC-31, see the header).
+    #   * explicit PIM_HOSTED_AUTH_LAYER wins; an UNRECOGNISED value is 'none' (a typo in
+    #     a security setting must fail closed, never open);
+    #   * unset: Container Apps / App Service (the hosts that offer Easy Auth) -> 'easyauth',
+    #     any other host -> 'none'.
+    # -Value / -EnvMap are for tests; the defaults read the process environment.
+    [CmdletBinding()]
+    param(
+        [AllowNull()][object]$Value = $null,
+        [hashtable]$EnvMap = $null
+    )
+    $get = {
+        param($n)
+        if ($null -ne $EnvMap) { if ($EnvMap.ContainsKey($n)) { return "$($EnvMap[$n])" }; return '' }
+        return "$([Environment]::GetEnvironmentVariable($n))"
+    }
+    $raw = if ($null -ne $Value) { "$Value" } else { & $get 'PIM_HOSTED_AUTH_LAYER' }
+    $v = "$raw".Trim().ToLowerInvariant()
+    if ($v) {
+        switch -Regex ($v) {
+            '^(easyauth|easy-auth|edge)$'              { return 'easyauth' }
+            '^(signed-token|signedtoken|token|strict)$' { return 'signed-token' }
+            default                                    { return 'none' }
+        }
+    }
+    if ("$(& $get 'CONTAINER_APP_NAME')".Trim() -or "$(& $get 'WEBSITE_SITE_NAME')".Trim()) { return 'easyauth' }
+    return 'none'
+}
+
+function Get-PimHostedDefaultIssuers {
+    # PURE: the Entra issuers a token for THIS tenant carries (v2 + v1). Used to pin layer 2
+    # when PIM_HOSTED_AUTH_ISSUERS is unset. 🔴 Without a pin, "signature verified" proves
+    # only that SOME Entra tenant signed the token -- the signing keys are shared across
+    # tenants, so a token minted in an attacker's own tenant verifies too.
+    [CmdletBinding()] param([string]$TenantId = '')
+    $t = "$TenantId".Trim()
+    if (-not $t -or $t -eq 'common' -or $t -eq 'organizations') { return @() }
+    return @("https://login.microsoftonline.com/$t/v2.0", "https://sts.windows.net/$t/")
+}
+
 function Test-PimHostedSignedTokenRequired {
     # Is LAYER 2 (signed-token verification) required? Opt-in, because it needs the auth
-    # edge to store tokens. Explicit $Override wins (tests / callers).
+    # edge to store tokens. Explicit $Override wins (tests / callers). An auth layer of
+    # 'signed-token' (PIM_HOSTED_AUTH_LAYER) requires it too.
     [CmdletBinding()]
     param([object]$Override = $null)
     if ($null -ne $Override) {
@@ -369,7 +433,8 @@ function Test-PimHostedSignedTokenRequired {
         } elseif ($Override -is [bool]) { return [bool]$Override }
     }
     $v = "$env:PIM_HOSTED_REQUIRE_SIGNED_TOKEN".Trim().ToLowerInvariant()
-    return ($v -in @('1', 'true', 'yes', 'y', 'on', 'enable', 'enabled'))
+    if ($v -in @('1', 'true', 'yes', 'y', 'on', 'enable', 'enabled')) { return $true }
+    return ("$env:PIM_HOSTED_AUTH_LAYER".Trim() -and (Get-PimHostedAuthLayer) -eq 'signed-token')
 }
 
 function Resolve-PimHostedPrincipal {
@@ -389,11 +454,38 @@ function Resolve-PimHostedPrincipal {
         [string[]]$ExpectedIssuers = @(),
         [string[]]$ExpectedAudiences = @(),
         [object]$RequireSignedToken = $null,
-        [datetime]$NowUtc = ([datetime]::UtcNow)
+        [datetime]$NowUtc = ([datetime]::UtcNow),
+        # SEC-28: which auth layer is in front ('easyauth' | 'signed-token' | 'none'). The
+        # decision stays PURE: the caller (Get-PimEasyAuthPrincipal) resolves the layer from
+        # env/platform with Get-PimHostedAuthLayer and passes it. Empty = 'easyauth' (the
+        # pre-SEC-28 contract); an unrecognised value is 'none'.
+        [string]$AuthLayer = ''
     )
-    # LAYER 1 -- always.
-    $edge = Test-PimEdgeHeadersConsistent -PrincipalName $PrincipalName -PrincipalBlob $PrincipalBlob
-    $strict = Test-PimHostedSignedTokenRequired -Override $RequireSignedToken
+    $layerIn = "$AuthLayer".Trim().ToLowerInvariant()
+    if (-not $layerIn) { $layerIn = 'easyauth' }
+    elseif ($layerIn -notin @('easyauth', 'signed-token', 'none')) { $layerIn = Get-PimHostedAuthLayer -Value $layerIn }
+    if ($layerIn -eq 'none') {
+        # 🔴 SEC-28: nothing in front strips client-supplied X-MS-* headers, so a "consistent"
+        # header set is only the caller's own claim. Refuse -- never trust what anyone can write.
+        return @{ trusted = $false; identity = ''; layer = 'no-auth-edge'
+                  reason = 'no authentication edge is in front of this hosted Manager (auth layer = none), so identity headers are refused -- put Easy Auth in front, or a proxy that forwards a signed Entra ID token (PIM_HOSTED_AUTH_LAYER=signed-token)' }
+    }
+    $strict = ($layerIn -eq 'signed-token') -or (Test-PimHostedSignedTokenRequired -Override $RequireSignedToken)
+    $noEdgeHeaders = (-not "$PrincipalName".Trim() -and -not "$PrincipalBlob".Trim())
+    if ($layerIn -eq 'signed-token' -and $noEdgeHeaders) {
+        # A signed-token proxy with no Easy Auth headers: identity from the VERIFIED token only,
+        # and only with BOTH issuer and audience pinned -- otherwise any tenant's token verifies.
+        $pinIss = @($ExpectedIssuers | ForEach-Object { "$_".Trim() } | Where-Object { $_ })
+        $pinAud = @($ExpectedAudiences | ForEach-Object { "$_".Trim() } | Where-Object { $_ })
+        if ($pinIss.Count -eq 0 -or $pinAud.Count -eq 0) {
+            return @{ trusted = $false; identity = ''; layer = 'signed-token'
+                      reason = 'token-only sign-in needs BOTH the issuer (PIM_HOSTED_AUTH_ISSUERS or the tenant id) and the audience (PIM_HOSTED_EASYAUTH_AUD) pinned -- failing closed' }
+        }
+        $edge = @{ trusted = $true; identity = ''; reason = 'no edge headers (signed-token layer)' }
+    } else {
+        # LAYER 1 -- always when an edge is expected.
+        $edge = Test-PimEdgeHeadersConsistent -PrincipalName $PrincipalName -PrincipalBlob $PrincipalBlob
+    }
     if (-not $edge.trusted) {
         return @{ trusted = $false; identity = ''; layer = 'edge-consistency'; reason = $edge.reason }
     }
@@ -446,13 +538,31 @@ function Test-PimHostedAuthPosture {
     [CmdletBinding()]
     param(
         [bool]$Hosted = $false,
-        [object]$RequireSignedToken = $null
+        [object]$RequireSignedToken = $null,
+        # SEC-28: the layer in front, as Get-PimHostedAuthLayer resolved it (the Manager passes
+        # it). '' = 'easyauth', the same default Resolve-PimHostedPrincipal applies.
+        [string]$AuthLayer = ''
     )
     $strict = Test-PimHostedSignedTokenRequired -Override $RequireSignedToken
     if (-not $Hosted) {
         return @{ hosted = $false; strict = $false; level = 'local'; ok = $true
                   message = 'LOCAL mode: identity is the Windows user; the listener binds to loopback.' }
     }
+    $layer = "$AuthLayer".Trim().ToLowerInvariant()
+    if (-not $layer) { $layer = 'easyauth' }
+    elseif ($layer -notin @('easyauth', 'signed-token', 'none')) { $layer = Get-PimHostedAuthLayer -Value $layer }
+    if ($layer -eq 'none') {
+        return @{ hosted = $true; strict = $false; level = 'no-auth-edge'; ok = $false
+                  message = @(
+                      'HOSTED auth: NO AUTHENTICATION EDGE -- EVERY REQUEST IS REFUSED (401).'
+                      '  Nothing in front of this Manager strips client-supplied identity headers, so they'
+                      '  cannot be trusted (SEC-28). Put Easy Auth in front (Container Apps / App Service),'
+                      '  or a proxy that forwards a signed Entra ID token and set'
+                      '  PIM_HOSTED_AUTH_LAYER=signed-token + PIM_HOSTED_EASYAUTH_AUD. The local break-glass'
+                      '  console (Start-PimEmergency.ps1) still works on the host itself.'
+                  ) -join [Environment]::NewLine }
+    }
+    if ($layer -eq 'signed-token') { $strict = $true }
     if ($strict) {
         return @{ hosted = $true; strict = $true; level = 'signed-token'; ok = $true
                   message = 'HOSTED auth: STRICT -- the signed Entra token is verified (signature + issuer + audience + expiry) on every request.' }

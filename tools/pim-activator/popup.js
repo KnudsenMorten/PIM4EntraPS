@@ -11,11 +11,13 @@
 //   4. Multi-select + bulk POST assignmentScheduleRequests with the same
 //      justification + duration.
 //
-// Persisted in chrome.storage.local:
+// Persisted in chrome.storage.SESSION (SEC-40: memory only, cleared when the
+// browser closes -- see popup-storage.js):
 //   - refreshToken         (Entra-issued, used for silent reauth)
 //   - accessToken          (last access token; kept only until it expires)
 //   - accessTokenExpiry    (epoch ms; we refresh 60s before this)
 //   - account              ({ username, localAccountId, tenantId })
+// Persisted in chrome.storage.local (no secrets):
 //   - lastJustification    (per user)
 //   - lastDurationHours    (per user)
 //   - selectedIds          (group ids the user typically activates -- pre-checked on load)
@@ -49,6 +51,25 @@ import { resolveBulkActivateConfirmThreshold, BULK_ACTIVATE_CONFIRM_THRESHOLD_DE
 // has no timeout, so without these the popup can hang on "Loading..." forever
 // when a Graph/token/ARM request stalls on a locked-down PAW.
 import { LOAD_WATCHDOG_MS, SOURCE_WATCHDOG_MS, fetchWithTimeout, withWatchdog, settleWithin } from './popup-net.js'
+
+// SEC-40 (operator 2026-09-18): sign-in tokens are SESSION-ONLY. Every persisted
+// read/write goes through `store`, which sends the token keys (refresh/access
+// tokens, account, the per-tenant tenantTokens cache) to chrome.storage.session
+// -- memory only, gone when the browser closes -- and everything else (catalog,
+// active tenant, preferences) to chrome.storage.local. See popup-storage.js.
+import { makeStore } from './popup-storage.js'
+// SEC-41: scrub identifiers out of the PUBLIC "Report bug" issue text.
+import { redactForPublicReport, buildPublicReportBody } from './popup-report.js'
+const store = makeStore(typeof chrome !== 'undefined' ? chrome : null)
+// Migration: a previous version kept the tokens in chrome.storage.local (an
+// unencrypted file in the browser profile). Delete whatever it left behind, on
+// every load -- the first run of this version purges them, later runs are no-ops.
+try {
+  const purged = await withWatchdog(store.migrateTokensOutOfLocal(), 3000, 'token-migration')
+  if (purged.length) console.log('[PIM Activator] SEC-40: removed ' + purged.length + ' sign-in key(s) an earlier version left in chrome.storage.local (' + purged.join(', ') + '). Sign-in is now kept for the browser session only.')
+} catch (e) {
+  console.warn('[PIM Activator] SEC-40: could not purge sign-in keys from chrome.storage.local this time (will retry on next open): ' + ((e && e.message) || e))
+}
 
 // v1.6.0+ multi-tenant catalog support.
 // Catalog entry shape:
@@ -96,10 +117,11 @@ function _prefixToRegex(p, anchorStart) {
 // Active selection: chrome.storage.local.activeTenantId (tenantId of the
 // currently-active entry). Set by the header dropdown / wizard picker.
 //
-// Per-customer token cache: chrome.storage.local.tenantTokens (object,
-// keyed by tenantId) -- holds { refreshToken, accessToken, accessTokenExpiry,
-// armAccessToken, armAccessTokenExpiry, account } per customer so switching
-// back to a customer signed in earlier in the session is sub-second.
+// Per-customer token cache: tenantTokens (object, keyed by tenantId) in
+// chrome.storage.SESSION (SEC-40 -- never local) -- holds { refreshToken,
+// accessToken, accessTokenExpiry, armAccessToken, armAccessTokenExpiry, account }
+// per customer so switching back to a customer signed in earlier in the same
+// browser session is sub-second.
 // chrome.storage.<area>.get wrapped in a per-call timeout. On a non-Intune /
 // locked-down PAW, chrome.storage.managed.get's callback can NEVER fire (the
 // managed-storage provider doesn't respond) -- a bare `await new Promise(r =>
@@ -193,17 +215,22 @@ async function loadConfig() {
   const u = await storageGet('local',
     ['userTenantId','userClientId','userDefaultJustification','userDefaultDurationHours',
      'userGroupNameFilter','userEntraGroupRegex','userAzureGroupRegex',
-     'activeTenantId','tenantTokens'])
+     'activeTenantId'])
+  // SEC-40: the per-tenant token cache lives in chrome.storage.session, not local.
+  try {
+    const t = await withWatchdog(store.get(['tenantTokens']), 3000, 'session-read')
+    u.tenantTokens = t.tenantTokens
+  } catch (_) { u.tenantTokens = null }
 
   // Defensive purge of the known-bad legacy upstream clientId (see comment
   // on KNOWN_BAD_LEGACY_CLIENTIDS above).
   if (u.userClientId && KNOWN_BAD_LEGACY_CLIENTIDS.includes(String(u.userClientId).toLowerCase())) {
     console.warn('[PIM Activator] purging legacy bad userClientId ' + u.userClientId + ' from chrome.storage.local + reloading extension to evict stale MV3 service worker')
-    await new Promise(r => chrome.storage.local.remove([
+    await store.remove([
       'userTenantId','userClientId',
       'refreshToken','accessToken','accessTokenExpiry',
       'armAccessToken','armAccessTokenExpiry','account'
-    ], r))
+    ])
     try { chrome.runtime.reload() } catch (e) { /* fall through */ }
     return emptyConfig()
   }
@@ -266,20 +293,20 @@ async function loadConfig() {
       const tokens = (u.tenantTokens && typeof u.tenantTokens === 'object')
         ? u.tenantTokens[String(active.tenantId).toLowerCase()] : null
       if (tokens) {
-        await new Promise(r => chrome.storage.local.set({
+        await store.set({
           refreshToken:         tokens.refreshToken         || null,
           accessToken:          tokens.accessToken          || null,
           accessTokenExpiry:    tokens.accessTokenExpiry    || 0,
           armAccessToken:       tokens.armAccessToken       || null,
           armAccessTokenExpiry: tokens.armAccessTokenExpiry || 0,
           account:              tokens.account              || null,
-        }, r))
+        })
       } else {
         // No cached tokens for this customer -- clear stale ones from a
         // different customer's session so the sign-in flow runs cleanly.
-        await new Promise(r => chrome.storage.local.remove(
+        await store.remove(
           ['refreshToken','accessToken','accessTokenExpiry',
-           'armAccessToken','armAccessTokenExpiry','account'], r))
+           'armAccessToken','armAccessTokenExpiry','account'])
       }
       // Per-entry threshold wins; else the tenant-wide managed override; else default.
       const _entryThreshold = (active.bulkActivateConfirmThreshold != null && active.bulkActivateConfirmThreshold !== '')
@@ -470,14 +497,14 @@ function renderOnboarding(currentCfg) {
       const sel = document.getElementById('ob-catalog-pick')
       const tid = (sel && sel.value || '').toLowerCase()
       if (!tid) return
-      await new Promise(r => chrome.storage.local.set({ activeTenantId: tid }, r))
-      await new Promise(r => chrome.storage.local.remove(
-        ['refreshToken','accessToken','accessTokenExpiry','armAccessToken','armAccessTokenExpiry','account'], r))
+      await store.set({ activeTenantId: tid })
+      await store.remove(
+        ['refreshToken','accessToken','accessTokenExpiry','armAccessToken','armAccessTokenExpiry','account'])
       window.location.reload()
     }
     document.getElementById('ob-catalog-clear').onclick = async () => {
       if (!confirm('Clear the LOCAL customer catalog from this browser profile? Intune-pushed entries will be restored on next popup load.')) return
-      await new Promise(r => chrome.storage.local.remove(['tenantCatalog','activeTenantId','tenantTokens'], r))
+      await store.remove(['tenantCatalog','activeTenantId','tenantTokens'])
       window.location.reload()
     }
   }
@@ -515,10 +542,10 @@ function renderOnboarding(currentCfg) {
           azureGroupRegex:      typeof entry.azureGroupRegex      === 'string' ? entry.azureGroupRegex      : undefined,
         })
       }
-      await new Promise(r => chrome.storage.local.set({
+      await store.set({
         tenantCatalog: cleaned,
         activeTenantId: cleaned.length === 1 ? cleaned[0].tenantId : ''
-      }, r))
+      })
       window.location.reload()
     }
   })()
@@ -611,7 +638,7 @@ function renderOnboarding(currentCfg) {
         // the lone entry + reload. Multi-tenant case: show the catalog picker
         // (already rendered in catalogPanel via the catalog.length > 0 branch).
         if (catalog.length === 1) {
-          await new Promise(r => chrome.storage.local.set({ activeTenantId: String(catalog[0].tenantId).toLowerCase() }, r))
+          await store.set({ activeTenantId: String(catalog[0].tenantId).toLowerCase() })
           window.location.reload()
         } else {
           showSections('picker')   // show the 2+ entry picker
@@ -681,7 +708,7 @@ function renderOnboarding(currentCfg) {
     if (!isGuid(tenantId)) { showErr('Tenant id must be a GUID (e.g. 00000000-0000-0000-0000-000000000000).'); tenantInput.focus(); return }
     if (!isGuid(clientId)) { showErr('Client id must be a GUID. This is the Application (client) id of the PIM Activator app registration in your tenant.'); clientInput.focus(); return }
 
-    await new Promise(r => chrome.storage.local.set({
+    await store.set({
       userTenantId:             tenantId,
       userClientId:             clientId,
       userDefaultJustification: justification,
@@ -692,10 +719,10 @@ function renderOnboarding(currentCfg) {
       userGroupNameFilter:      '',
       userEntraGroupRegex:      '',
       userAzureGroupRegex:      '',
-    }, r))
+    })
     // Wipe any half-baked sign-in artifacts from a previous attempt so the
     // next boot signs in cleanly against the freshly-saved config.
-    await new Promise(r => chrome.storage.local.remove(['refreshToken','accessToken','accessTokenExpiry','armAccessToken','armAccessTokenExpiry','account'], r))
+    await store.remove(['refreshToken','accessToken','accessTokenExpiry','armAccessToken','armAccessTokenExpiry','account'])
     window.location.reload()
   }
 }
@@ -756,12 +783,12 @@ const AUTHORITY    = `https://login.microsoftonline.com/${cfg.tenantId}`
   if (link) link.onclick = async (e) => {
     e.preventDefault()
     if (!confirm('Clear PIM Activator config for THIS browser profile and start over? (Catalog + per-customer token cache will also be cleared.)')) return
-    await new Promise(r => chrome.storage.local.remove([
+    await store.remove([
       'userTenantId','userClientId','userDefaultJustification','userDefaultDurationHours',
       'userGroupNameFilter','userEntraGroupRegex','userAzureGroupRegex',
       'tenantCatalog','activeTenantId','tenantTokens',
       'refreshToken','accessToken','accessTokenExpiry','armAccessToken','armAccessTokenExpiry','account'
-    ], r))
+    ])
     window.location.reload()
   }
 })()
@@ -872,7 +899,7 @@ function logDiag(msg) {
     // Persist so the history survives a manual refresh (window.location.reload)
     // / popup reopen -- otherwise the in-memory log is wiped every refresh and
     // the Diagnostics panel always looks empty.
-    try { chrome.storage.local.set({ diagSessionLog: sessionLog.slice() }) } catch (_) {}
+    try { store.set({ diagSessionLog: sessionLog.slice() }).catch(() => {}) } catch (_) {}
     refreshDiagnosticsPanel()
   } catch (_) { /* never let diagnostics logging break a flow */ }
 }
@@ -1000,9 +1027,11 @@ function updateBulkDeactivateButton() {
 }
 
 // ---------- Persisted state ----------
-async function getStored(keys) { return new Promise(r => chrome.storage.local.get(keys, r)) }
-async function setStored(obj)  { return new Promise(r => chrome.storage.local.set(obj, r)) }
-async function clearStored(keys) { return new Promise(r => chrome.storage.local.remove(keys, r)) }
+// All three route through `store` (popup-storage.js): token keys -> chrome.storage
+// .session (SEC-40, memory only), everything else -> chrome.storage.local.
+async function getStored(keys) { return store.get(keys) }
+async function setStored(obj)  { return store.set(obj) }
+async function clearStored(keys) { return store.remove(keys) }
 
 // ---------- Token self-heal ----------
 // Required short-name Graph scopes (the `scp` claim contains short names,
@@ -1743,7 +1772,7 @@ async function signOut() {
   await clearStored(['refreshToken', 'accessToken', 'accessTokenExpiry',
                      'armAccessToken', 'armAccessTokenExpiry', 'account'])
   // v1.6.x: per-tenant token cache (tenantTokens[<tid>]) survives in
-  // chrome.storage.local so switching tenants from the header dropdown is
+  // chrome.storage.session (SEC-40; was local) so switching tenants from the header dropdown is
   // sub-second. On sign-out we MUST also evict the active tenant's entry
   // from that cache -- otherwise loadConfig on next popup load restores
   // its tokens into the legacy keys and the user is silently signed back
@@ -4147,7 +4176,14 @@ function showLoadFailure(phase, err, opts = {}) {
   }
   // Replace the (empty) list area with an actionable error card.
   if (els.list) {
-    const diag = `phase=${phase}; tenant=${cfg.tenantId || '(none)'}; v=${(chrome.runtime.getManifest && chrome.runtime.getManifest().version) || '?'}; error=${msg}`
+    // SEC-41: the report goes to a PUBLIC GitHub issue. It carries NO tenant id, the
+    // error text is scrubbed of ids / UPNs / e-mails / tokens (popup-report.js), and
+    // the user reviews (and can edit) the exact text before anything is opened.
+    const reportBody = buildPublicReportBody({
+      phase,
+      version: (chrome.runtime.getManifest && chrome.runtime.getManifest().version) || '?',
+      error: msg
+    })
     els.list.innerHTML =
       '<div style="margin:8px 4px;padding:12px 14px;background:#fff8f0;border:1px solid #f0c08a;border-radius:6px;font-size:12px;line-height:1.5;color:#7a3b00;">' +
         '<div style="font-weight:700;margin-bottom:6px;">' + escapeHtmlSafe(human) + '</div>' +
@@ -4155,17 +4191,34 @@ function showLoadFailure(phase, err, opts = {}) {
         '<div style="font-family:monospace;font-size:10.5px;color:#8a5a2a;background:#fff;border:1px solid #f0d8b8;border-radius:4px;padding:6px 7px;margin-bottom:10px;word-break:break-word;">' + escapeHtmlSafe(msg) + '</div>' +
         '<button id="load-retry" class="primary" style="font-size:12px;">Retry</button>' +
         '<a id="load-report" href="#" style="margin-left:10px;font-size:11.5px;color:#0969da;text-decoration:none;">Report bug</a>' +
+        '<div id="load-report-review" style="display:none;margin-top:10px;">' +
+          '<div style="font-weight:700;margin-bottom:4px;">This opens a PUBLIC GitHub issue.</div>' +
+          '<div style="margin-bottom:6px;">Tenant and object ids, e-mail addresses and tokens have been replaced with placeholders. Check the text below and remove anything else that identifies your organisation before you submit.</div>' +
+          '<textarea id="load-report-text" rows="7" style="width:100%;box-sizing:border-box;font-family:monospace;font-size:10.5px;border:1px solid #f0c08a;border-radius:4px;padding:6px 7px;margin-bottom:8px;resize:vertical;"></textarea>' +
+          '<button id="load-report-open" class="primary" style="font-size:12px;">Open public GitHub issue</button>' +
+          '<button id="load-report-cancel" style="font-size:11.5px;margin-left:8px;">Cancel</button>' +
+        '</div>' +
       '</div>'
     const retry = document.getElementById('load-retry')
     if (retry) retry.onclick = () => window.location.reload()
     const report = document.getElementById('load-report')
-    if (report) report.onclick = (e) => {
+    const review = document.getElementById('load-report-review')
+    const reviewText = document.getElementById('load-report-text')
+    if (report && review && reviewText) report.onclick = (e) => {
       e.preventDefault()
-      const title = encodeURIComponent('[PIM Activator] PIM assignments failed to load (' + phase + ')')
-      const bodyTxt = encodeURIComponent(
-        'What happened: your PIM assignments did not load.\n\n' +
-        'Diagnostic (auto-collected -- contains no secrets):\n' + diag + '\n\n' +
-        'Steps to reproduce / notes:\n')
+      // Step 1: SHOW the scrubbed text; nothing leaves the popup yet.
+      reviewText.value = reportBody
+      review.style.display = ''
+      try { reviewText.focus() } catch { /* */ }
+    }
+    const cancel = document.getElementById('load-report-cancel')
+    if (cancel && review) cancel.onclick = () => { review.style.display = 'none' }
+    const openBtn = document.getElementById('load-report-open')
+    if (openBtn && reviewText) openBtn.onclick = () => {
+      // Step 2: the user's reviewed text -- scrubbed once more in case something
+      // identifying was pasted in -- is what goes to the public issue.
+      const title = encodeURIComponent('[PIM Activator] PIM assignments failed to load (' + redactForPublicReport(phase) + ')')
+      const bodyTxt = encodeURIComponent(redactForPublicReport(reviewText.value))
       try {
         window.open('https://github.com/KnudsenMorten/PIM4EntraPS/issues/new?title=' + title + '&body=' + bodyTxt, '_blank')
       } catch { /* popups blocked -- the console diagnostic above is still available */ }
@@ -4422,7 +4475,21 @@ async function loaded(token) {
     return
   }
 
-  const filterRe = cfg.groupNameFilter ? new RegExp(cfg.groupNameFilter, 'i') : null
+  // IMP-49 q: groupNameFilter comes from the catalog (Intune / GPO / an imported
+  // JSON). An invalid pattern used to THROW here and fail the whole boot; now it is
+  // reported and the list is shown UNFILTERED -- loudly, so the admin fixes the
+  // catalog instead of wondering where the groups went.
+  let filterRe = null
+  let invalidGroupFilterNote = ''
+  if (cfg.groupNameFilter) {
+    try { filterRe = new RegExp(cfg.groupNameFilter, 'i') }
+    catch (e) {
+      filterRe = null
+      console.warn(`[PIM Activator] invalid groupNameFilter "${cfg.groupNameFilter}" -- showing all groups: ${e && e.message}`)
+      logDiag(`Invalid groupNameFilter in the tenant catalog -- list shown unfiltered (${e && e.message})`)
+      invalidGroupFilterNote = ' Group-name filter in the tenant catalog is not a valid pattern -- showing ALL groups; ask your admin to fix it.'
+    }
+  }
   const stored = await getStored(['selectedIds', 'lastJustification', 'lastDurationHours', 'justificationHistory'])
   const preSelected = new Set(stored.selectedIds || [])
 
@@ -4538,7 +4605,7 @@ async function loaded(token) {
   const readyCount  = eligibleRows.filter(r => !r.isActive).length
   const activeCount = eligibleRows.filter(r =>  r.isActive).length
   const activeNote  = activeCount > 0 ? ` (${activeCount} already active -- shown at bottom)` : ''
-  els.status.textContent = `${readyCount} ready to activate${activeNote}.`
+  els.status.textContent = `${readyCount} ready to activate${activeNote}.${invalidGroupFilterNote}`
   els.toolbar.style.display = 'flex'
   els.footer.style.display = ''
   els.tabs.style.display = 'flex'
@@ -4567,188 +4634,12 @@ async function loaded(token) {
   // paints first; fire-and-forget so a slow activation never blocks the UI.
   runAutoActivations(token)
 
-  // ---- Background bulk fetch: roles for every eligible group ----------
-  // UI is immediately interactive; rows re-render with role lines as data
-  // arrives. Entra + Azure fetched IN PARALLEL with each other AND each
-  // re-renders independently as soon as its data lands -- user sees Entra
-  // lines first (faster Graph call), then Azure lines appear as ARG returns.
-  //
-  // Cache hit (1h TTL) shows everything instantly with zero network calls.
-  ;(async () => {
-    const groupIds = eligibleRows.map(r => r.groupId)
-    if (!groupIds.length) return
-    // Plan A (lazy previews): do NOT eagerly fetch the transitive role preview
-    // for every eligible group at startup -- that was the 10-15s "Loading
-    // roles" cost on a list that renders collapsed anyway. Previews now load
-    // per group on first expand via loadRolePreviewForGroup() (see render() +
-    // the role-toggle handler). The eager machinery below is left intact but
-    // unreachable so the diff stays small + easy to revert if needed.
-    return
-
-    const cacheKey = `bulkRoles_v4_${currentAccount?.localAccountId || 'anon'}`
-    const cached = await getStored([cacheKey])
-    const fresh  = cached?.[cacheKey]?.ts && (Date.now() - cached[cacheKey].ts) < 60 * 60 * 1000
-
-    // Convert raw role-assignment items to display rows -- ONE row per
-    // (role, scope) pair so the user sees the FULL list of permissions the
-    // group transitively grants, not a rolled-up summary. PIM4EntraPS role
-    // groups commonly resolve to 10+ nested task groups, each scoped to a
-    // different AU; the user needs every one of those visible to evaluate
-    // "is this the right activation". Dedup identical (role, scope) pairs
-    // so the same assignment surfacing through two transitive paths only
-    // shows once.
-    function buildEntraPreview(items, roleDefsMap) {
-      const seen = new Set()
-      const out = []
-      for (const a of items) {
-        const roleName = roleDefsMap[a.roleDefinitionId] || a.roleDefinitionId
-        const scopeObj = parseDirectoryScopeSync(a.directoryScopeId)
-        const scopeKey = scopeObj.kind === 'au'     ? `au:${scopeObj.auId}` :
-                         scopeObj.kind === 'tenant' ? 'tenant' :
-                         scopeObj.kind === 'other'  ? `other:${scopeObj.raw}` : 'unknown'
-        const k = `${roleName}|${scopeKey}`
-        if (seen.has(k)) continue
-        seen.add(k)
-        out.push({ roleName, scope: summariseScopes([scopeObj]) })
-      }
-      // Stable display order: alphabetical by role, then by scope label.
-      out.sort((a, b) => (a.roleName || '').localeCompare(b.roleName || '')
-                       || (a.scope || '').localeCompare(b.scope || ''))
-      return out
-    }
-    async function attachEntra(bulkEntra, roleDefsMap) {
-      // Pre-resolve any unknown AU display names so the preview can render
-      // friendly labels instead of "scoped to N Administrative Units".
-      if (token) {
-        const auIds = new Set()
-        for (const items of bulkEntra.values()) {
-          for (const a of (items || [])) {
-            const m = a.directoryScopeId?.match(/^\/administrativeUnits\/([0-9a-fA-F-]{36})$/)
-            if (m && !(m[1] in auNameCache)) auIds.add(m[1])
-          }
-        }
-        if (auIds.size) {
-          await Promise.all([...auIds].map(id => resolveAuDisplayName(token, id).catch(() => null)))
-        }
-      }
-      for (const r of eligibleRows) {
-        const entra = bulkEntra.get(r.groupId) || []
-        r.previewEntraRoles = buildEntraPreview(entra, roleDefsMap)
-      }
-      render()
-    }
-    // v1.4.7+: same one-line-per-(role,scope) treatment as Entra. Dedup
-    // identical pairs (same role hit through 2 transitive paths). Format
-    // the ARM scope through describeArmScope() so the user sees
-    // "sub 'ACME Prod' / rg 'rg-platform-l1'" instead of a raw GUID path.
-    function buildAzurePreview(items, subNameById) {
-      const seen = new Set()
-      const out = []
-      for (const a of (items || [])) {
-        const roleName = a.roleName || '(unknown role)'
-        const rawScope = a.scope || '/'
-        const k = `${roleName}|${rawScope}`
-        if (seen.has(k)) continue
-        seen.add(k)
-        out.push({ roleName, scope: describeArmScope(rawScope, subNameById) })
-      }
-      out.sort((a, b) => (a.roleName || '').localeCompare(b.roleName || '')
-                       || (a.scope || '').localeCompare(b.scope || ''))
-      return out
-    }
-    function attachAzure(bulkAzure) {
-      const subNameById = Object.fromEntries((armSubscriptionsCache || []).map(s => [s.id, s.name]))
-      for (const r of eligibleRows) {
-        r.previewAzureRoles = buildAzurePreview(bulkAzure.get(r.groupId) || [], subNameById)
-      }
-      render()
-    }
-
-    if (fresh) {
-      // Cache hit: render both immediately, no network calls.
-      attachEntra(new Map(cached[cacheKey].entra), cached[cacheKey].roleDefs || {})
-      attachAzure(new Map(cached[cacheKey].azure))
-      return
-    }
-
-    // Cache miss / stale: fire both in parallel; render each as it lands.
-    let freshEntra = null, freshAzure = null, freshRoleDefs = null
-
-    // Wire the progress bar -- visible at the top of the Activate panel
-    // until both Entra + Azure complete.
-    const totalUnits = groupIds.length + 1   // N per-group Entra calls + 1 ARG call
-    // Track Entra + Azure counters separately and SUM them on every tick.
-    // The Entra callback sets entraDone = done (overwrites); if we shared a
-    // single doneUnits then Azure's "++" would be wiped by the next Entra
-    // callback, leaving the bar stuck at 50/51 forever. Separate counters
-    // make the order of completion irrelevant.
-    let entraDone = 0
-    let azureDone = 0
-    const bp = document.getElementById('bulk-progress')
-    const bpLabel = document.getElementById('bulk-progress-label')
-    const bpCount = document.getElementById('bulk-progress-count')
-    const bpBar   = document.getElementById('bulk-progress-bar')
-    const bpShownAt = Date.now()
-    function tickProgress(label) {
-      if (!bp) return
-      bp.style.display = ''
-      const doneUnits = entraDone + azureDone
-      const pct = totalUnits ? Math.round((doneUnits / totalUnits) * 100) : 0
-      if (bpLabel) bpLabel.textContent = label ? `${label} ${pct}%` : `Fetching role assignments... ${pct}%`
-      if (bpCount) bpCount.textContent = `${doneUnits} / ${totalUnits}`
-      if (bpBar)   bpBar.style.width   = `${pct}%`
-      if (doneUnits >= totalUnits) {
-        // Keep the bar visible at 100% for at least 1.5s after first appearance
-        // so the user actually SEES it (parallel fetches can finish in
-        // ~300ms on small tenants -- a flash they'd miss).
-        const elapsed = Date.now() - bpShownAt
-        const hideDelay = Math.max(800, 1500 - elapsed)
-        setTimeout(() => { if (bp) bp.style.display = 'none' }, hideDelay)
-      }
-    }
-    tickProgress('Fetching role assignments...')
-
-    const entraTask = (async () => {
-      try {
-        const [be, rd] = await Promise.all([
-          bulkLoadEntraRolesForGroups(token, groupIds, (done, total) => {
-            entraDone = done
-            tickProgress('Fetching Entra roles...')
-          }),
-          loadRoleDefinitions(token).catch(() => ({ idToName: {} }))
-        ])
-        freshEntra    = be
-        freshRoleDefs = rd.idToName || {}
-        attachEntra(be, freshRoleDefs)
-      } catch (e) { console.warn('[PIM Activator] bulk Entra fetch failed:', e?.message || e) }
-    })()
-
-    const azureTask = (async () => {
-      try {
-        const armToken = await getArmToken().catch(() => null)
-        const ba = await bulkLoadAzureRolesForGroups(armToken, groupIds)
-        freshAzure = ba
-        attachAzure(ba)
-      } catch (e) { console.warn('[PIM Activator] bulk Azure fetch failed:', e?.message || e) }
-      finally { azureDone = 1; tickProgress('Fetching Azure RBAC...') }
-    })()
-
-    await Promise.all([entraTask, azureTask])
-
-    // Persist combined snapshot (skip if either failed entirely)
-    if (freshEntra && freshAzure) {
-      try {
-        await setStored({
-          [cacheKey]: {
-            ts: Date.now(),
-            entra:    [...freshEntra],
-            azure:    [...freshAzure],
-            roleDefs: freshRoleDefs || {}
-          }
-        })
-      } catch { /* storage quota or shutdown; ignore */ }
-    }
-  })()
+  // Role previews: Plan A (lazy previews) -- NOT eagerly fetched for every eligible
+  // group at startup (that was the 10-15s "Loading roles" cost on a list that renders
+  // collapsed anyway). Each group loads its preview on first expand via
+  // loadRolePreviewForGroup() (see render() + the role-toggle handler). The old eager
+  // bulk-fetch block that used to sit here was unreachable (it began with `return`) and
+  // was removed (IMP-49 q); git history has it if the eager path is ever wanted back.
 
   // Tab switching -- switching to a tab REFRESHES its data so it reflects current
   // state (short TTL avoids hammering on rapid toggles). The user expects a switch

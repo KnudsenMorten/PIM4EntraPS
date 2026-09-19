@@ -758,15 +758,28 @@ function ConvertTo-PimReviewerScopeEntry {
     #   'user:<id>' / 'u:<id>'             -> /users/<id>
     #   'group:<id>' / 'g:<id>'            -> /groups/<id>
     #   a UPN (someone@domain)             -> /users/<upn>    (Graph resolves it)
-    #   'manager' / 'self' / 'lastReviewer'-> the managed special (empty query +
-    #                                         queryType=MicrosoftGraph, queryRoot set)
+    #   'manager'                          -> { query='./manager'; queryType='MicrosoftGraph';
+    #                                           queryRoot='decisions' } (each user's manager)
+    #   'self'                             -> the SELF-REVIEW marker: Graph expresses a self-review
+    #                                         as an EMPTY reviewers collection, so this entry is never
+    #                                         sent -- New-PimReviewerAssignmentPatch emits reviewers=[]
+    # 🔴 BUG-218 (verified against Microsoft Graph v1.0 docs, "Configure access reviewers" +
+    # accessReviewReviewerScope, 2026-09-18): 'manager' and 'self' used to map to query='/v1.0/me',
+    # which is not a reviewer query at all. People managers are the RELATIVE query './manager' with
+    # queryRoot 'decisions'; a self-review is `"reviewers": []`. 'lastReviewer' has no documented
+    # v1.0 reviewer query and is REFUSED rather than sent as something Graph will misread.
     # Throws on a blank/garbage spec (fail-closed -- never assign an empty reviewer).
     param([Parameter(Mandatory)][string]$Spec)
     $s = "$Spec".Trim()
     if (-not $s) { throw "ConvertTo-PimReviewerScopeEntry: blank reviewer spec." }
-    if ($s -match '(?i)^(manager|self|lastReviewer)$') {
-        $special = switch -Regex ($s) { '(?i)manager' { 'manager' } '(?i)last' { 'lastReviewer' } default { 'self' } }
-        return [pscustomobject]@{ query = '/v1.0/me'; queryType = 'MicrosoftGraph'; queryRoot = $null; special = $special }
+    if ($s -match '(?i)^manager$') {
+        return [pscustomobject]@{ query = './manager'; queryType = 'MicrosoftGraph'; queryRoot = 'decisions'; special = 'manager' }
+    }
+    if ($s -match '(?i)^self$') {
+        return [pscustomobject]@{ query = ''; queryType = 'MicrosoftGraph'; queryRoot = $null; special = 'self' }
+    }
+    if ($s -match '(?i)^lastReviewer$') {
+        throw "ConvertTo-PimReviewerScopeEntry: 'lastReviewer' has no Microsoft Graph v1.0 reviewer query -- pick a user, a group, 'manager' or 'self'."
     }
     if ($s -match '(?i)^(user|u):(.+)$')  { return [pscustomobject]@{ query = "/users/$($Matches[2].Trim())";  queryType = 'MicrosoftGraph' } }
     if ($s -match '(?i)^(group|g):(.+)$') { return [pscustomobject]@{ query = "/groups/$($Matches[2].Trim())"; queryType = 'MicrosoftGraph' } }
@@ -798,9 +811,14 @@ function New-PimReviewerAssignmentPatch {
         $labels.Add($t)
     }
     if ($entries.Count -eq 0) { throw "New-PimReviewerAssignmentPatch: at least one reviewer is required (a review with no reviewer can never be completed)." }
+    # BUG-218: a SELF-review is Graph's empty reviewers collection, so it cannot be combined with named reviewers.
+    $selfEntries = @($entries.ToArray() | Where-Object { "$($_.special)" -eq 'self' })
+    if ($selfEntries.Count -gt 0 -and $entries.Count -gt $selfEntries.Count) {
+        throw "New-PimReviewerAssignmentPatch: 'self' (users review their own access) cannot be combined with other reviewers -- Graph expresses a self-review as an empty reviewer list."
+    }
     # Strip our private 'special'/'queryRoot=null' helper fields from the wire body --
     # Graph only wants query + queryType (+ queryRoot when non-null).
-    $wire = @(@($entries.ToArray()) | ForEach-Object {
+    $wire = @(@($entries.ToArray()) | Where-Object { "$($_.special)" -ne 'self' } | ForEach-Object {
         $e = [ordered]@{ query = "$($_.query)"; queryType = "$($_.queryType)" }
         $qr = Get-PimArProp -Object $_ -Names @('queryRoot'); if ($null -ne $qr) { $e['queryRoot'] = "$qr" }
         [pscustomobject]$e
@@ -1021,6 +1039,31 @@ function Send-PimAccessReviewReminders {
         })
     }
     return @($results.ToArray())
+}
+
+function Update-PimReviewReminderMap {
+    # PURE (BUG-219). Fold the results of a REAL reminder send into the { instanceId -> lastRemindedUtc } map
+    # that Send-PimAccessReviewReminders -LastReminded reads, so the repeat window holds across presses and
+    # processes. Only rows that were actually sent move the clock; entries older than -KeepDays are dropped
+    # so the map cannot grow for ever. Returns a NEW hashtable (the input is not modified).
+    param([hashtable]$Map = @{}, [object[]]$Results = @(), [datetime]$NowUtc = ([datetime]::UtcNow), [int]$KeepDays = 120)
+    $out = @{}
+    $cut = $NowUtc.ToUniversalTime().AddDays(-1 * [Math]::Abs($KeepDays))
+    foreach ($k in @($Map.Keys)) {
+        $v = "$($Map[$k])".Trim()
+        $d = [datetime]::MinValue
+        $styles = [System.Globalization.DateTimeStyles]::AdjustToUniversal -bor [System.Globalization.DateTimeStyles]::AssumeUniversal
+        if ($v -and [datetime]::TryParse($v, [System.Globalization.CultureInfo]::InvariantCulture, $styles, [ref]$d) -and $d.ToUniversalTime() -ge $cut) { $out["$k"] = $v }
+    }
+    foreach ($r in @($Results)) {
+        if ($null -eq $r -or -not $r.sent) { continue }
+        $iid = "$($r.instanceId)".Trim()
+        if (-not $iid) { continue }
+        $at = "$($r.remindedUtc)".Trim()
+        if (-not $at) { $at = $NowUtc.ToUniversalTime().ToString('o') }
+        $out[$iid] = $at
+    }
+    return $out
 }
 
 # ---------------------------------------------------------------------------

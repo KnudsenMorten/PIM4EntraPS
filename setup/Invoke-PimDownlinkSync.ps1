@@ -8,9 +8,9 @@
 .DESCRIPTION
     For ONE managed/slave tenant (S5 central-hosted | S6 local-hosted):
 
-      1. PULL the master's SIGNED baseline bundle (HTTPS GET from private-endpoint
-         blob storage, OAuth bearer over REST) -- the SAME bundle New-PimBaselineBundle
-         publishes. -BaselineDocPath lets the main session feed a locally-pulled
+      1. PULL the master's SIGNED baseline bundle (HTTPS GET of the PLAIN blob URL:
+         public-but-signed or private endpoint, DESIGN 13.7) -- the bundle the master's
+         ca-pim-publish job publishes. -BaselineDocPath lets the main session feed a locally-pulled
          bundle instead (e.g. when the seeder produced it).
       2. VERIFY it offline (RSA-SHA256 against the embedded PUBLIC baseline cert;
          refuse on bad signature / expiry / anti-rollback) -- pull-not-push trust
@@ -36,7 +36,14 @@
     'S5' (central-hosted managed) or 'S6' (local-hosted managed).
 
 .PARAMETER TenantId / SlaveRing
-    The managed tenant id + its registry ring (default 2 = test).
+    The managed tenant id + its OWN ring (0..2, default 2 = test). The ring is LOCAL to the
+    slave and authoritative; the master's platform.Tenants.Ring is only the master's copy
+    and is never read here.
+
+.PARAMETER CentralKillUrl
+    SEC-25: the master's signed central-kill manifest. Default: the sibling of -BaselineUrl
+    (<container>/central-kill.json); 'none' disables the check (reported NOT CHECKED).
+    A 404 means no kill is published; any other read failure REFUSES the pull.
 
 .PARAMETER BaselineUrl
     HTTPS URL of the master's signed baseline bundle (baseline-latest.json).
@@ -53,16 +60,18 @@
     $env:PIM_SyncRootCentral / $env:PIM_SyncRootLocal.
 
 .PARAMETER SqlServer / SqlDatabase
-    The platform registry the fan-out reads. Default .\SQLEXPRESS / PimPlatform.
+    The store (defaults from env PIM_SqlServer / PIM_SqlDatabase, database 'PimPlatform').
+    There is NO local default: without a SQL server the run is REFUSED (BUG-178).
 
 .PARAMETER WhatIfMode
     Default ON: verify + stage files + PLAN the fan-out only. -WhatIfMode:$false applies.
 
 .EXAMPLE
-    # MAIN SESSION (creds from kv-automatit-dev), S6 local-hosted managed (2linkit):
+    # S6 local-hosted managed tenant (run inside the managed tenant, as its own identity):
     $env:PIM_SyncRootLocal = 'C:\ProgramData\PIM4EntraPS\sync'
-    .\Invoke-PimDownlinkSync.ps1 -Scenario S6 -TenantId <tenant-id-2linkit> -SlaveRing 2 `
-        -BaselineDocPath C:\TMP\baseline-latest.json -WhatIfMode:$false
+    .\Invoke-PimDownlinkSync.ps1 -Scenario S6 -TenantId <managed-tenant-id> -SlaveRing 2 `
+        -SqlServer <server>.database.windows.net -SlaveSqlServer <server>.database.windows.net `
+        -BaselineUrl https://<master-store>.blob.core.windows.net/baselines/baseline-latest.json -WhatIfMode:$false
 #>
 [CmdletBinding()]
 param(
@@ -73,6 +82,8 @@ param(
     [string]$BaselineUrl,
     [string]$BaselineAccessToken,
     [string]$BaselineDocPath,
+    # SEC-25: the master's signed central-kill manifest (default: the bundle's sibling central-kill.json).
+    [string]$CentralKillUrl = $env:PIM_CentralKillUrl,
 
     [string]$CentralRoot = $env:PIM_SyncRootCentral,
     [string]$LocalRoot   = $env:PIM_SyncRootLocal,
@@ -80,11 +91,15 @@ param(
     [string]$SqlServer   = $env:PIM_SqlServer,
     [string]$SqlDatabase = $env:PIM_SqlDatabase,
 
+    # SEC-24: an explicit EXTRA anti-rollback floor. The orchestrator always applies the floor stored in the
+    # slave's own pim.Settings (the last APPLIED version, needs -SlaveSqlServer); the higher of the two wins.
     [int64]$LastVersion = 0,
 
     # --- BUG-29: the master's TEMPLATE ring map (RING-1 plane 2) ---------------
-    # The master's answer to "which baseline VERSION may this managed tenant pull?".
-    # See config/template-ring-map.sample.json.
+    # The master's answer to "which baseline VERSION is approved for a ring?".
+    # See config/template-ring-map.sample.json. IMP-38: only its PROMOTIONS are used, keyed
+    # on this tenant's LOCAL -SlaveRing; its assignments/default (the master deciding a
+    # tenant's ring) are reported and ignored -- every ring is local in the slave.
     # 🔒 OPT-IN AND INERT WITHOUT IT. Omit both and this script behaves exactly as it
     # did when S5/S6 were VERIFIED -- no version restriction, ring used only to filter
     # the admin set. That mirrors the framework's own `default: null` non-breaking rule.
@@ -173,7 +188,11 @@ $shared = Join-Path (Split-Path -Parent $PSScriptRoot) 'engine\_shared'
 # "called by nobody", its functions were not even DEFINED in any runtime process.
 . (Join-Path $shared 'PIM-RingGate.ps1')
 
-if (-not $SqlServer)   { $SqlServer = '.\SQLEXPRESS' }
+# 🔴 BUG-178 -- NO `.\SQLEXPRESS` DEFAULT (operator 2026-08-28: "SQL Express is not used, anywhere"). It used to be set
+# here BEFORE the orchestrator ran, which silently defeated the orchestrator's own "no SQL server configured" refusal.
+if (-not "$SqlServer".Trim()) {
+    throw 'REFUSED: no SQL server configured -- pass -SqlServer or set PIM_SqlServer to the Azure SQL FQDN (<server>.database.windows.net). There is no local default: SQL Express is not a store this product uses.'
+}
 if (-not $SqlDatabase) { $SqlDatabase = 'PimPlatform' }
 $global:PIM_SqlServer   = $SqlServer
 $global:PIM_SqlDatabase = $SqlDatabase
@@ -223,13 +242,15 @@ if ("$TemplateRingMapPath".Trim()) {
     Write-Host "  ring map: pulled from $TemplateRingMapUrl" -ForegroundColor DarkGray
 }
 if ($ringMap) {
-    $ringPlan = Get-PimTemplateRingPlan -Template $TemplateName -TenantId $TenantId `
-        -Assignments $ringMap.assignments -Promotions $ringMap.promotions `
-        -Channel $TemplateChannel -DefaultRing $ringMap.default
+    # IMP-38: keyed on THIS tenant's LOCAL ring; the map's master-side assignments/default are reported, never obeyed.
+    $localRing = Get-PimLocalTemplateRingPlan -RingMap $ringMap -TenantId $TenantId -SlaveRing $SlaveRing `
+        -Template $TemplateName -Channel $TemplateChannel
+    $ringPlan = $localRing.plan
     Write-Host ("  ring plan: {0} -> {1}{2}{3}" -f $TemplateName, $ringPlan.Action,
         $(if ($null -ne $ringPlan.Ring)    { " (ring $($ringPlan.Ring))" } else { '' }),
         $(if ("$($ringPlan.Version)".Trim()){ " approves v$($ringPlan.Version)" } else { '' })) -ForegroundColor Cyan
     if ($ringPlan.Reason) { Write-Host "             $($ringPlan.Reason)" -ForegroundColor DarkGray }
+    Write-Host "             $($localRing.note)" -ForegroundColor $(if ($null -ne $localRing.ignoredMasterRing) { 'Yellow' } else { 'DarkGray' })
 } else {
     # Say so explicitly. A silent absence is how BUG-29 survived for months: the gate
     # was DOCUMENTED as active while no code path implemented it.
@@ -366,6 +387,9 @@ if ("$SlaveSqlServer".Trim()) {
 if ("$SlaveDefaultDomain".Trim()) { $dlArgs['SlaveDefaultDomain'] = "$SlaveDefaultDomain".Trim() }
 $dlArgs['CreateTapDefault']       = $CreateTapDefault
 $dlArgs['TapLifetimeHoursDefault'] = $TapLifetimeHoursDefault
+# SEC-25: the master's signed central-kill manifest (fetched here; verified by the orchestrator against this
+# tenant's own revoked-signer list). A -BaselineDocPath run has no URL to derive it from and says NOT CHECKED.
+$dlArgs['CentralKillSource'] = Get-PimCentralKillSource -CentralKillUrl $CentralKillUrl -BaselineUrl $BaselineUrl -AccessToken $BaselineAccessToken
 $result = Invoke-PimManagedDownlink -Scenario $Scenario -Doc $doc `
     -TenantId $TenantId -SlaveRing $SlaveRing `
     -CentralRoot $CentralRoot -LocalRoot $LocalRoot `

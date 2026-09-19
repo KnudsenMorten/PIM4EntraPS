@@ -31,6 +31,31 @@
     4. A naive "keep the current admin as a member" step added the group to ITSELF when the admin already
        was the group. The plan refuses any member whose object id is the group's.
 
+  SEC-32 -- THE GROUP IS ROLE-ASSIGNABLE (isAssignableToRole = true), because it IS tier 0.
+    It is the SQL server's Entra admin, and the database holds the desired state the engine applies with its
+    directory-role rights. A plain security group can be edited by any Groups Administrator / User Administrator /
+    group owner: such a person adds themselves, rewrites desired state, and the engine then grants them Global
+    Administrator -- tier 1 escalating to tier 0. Only Privileged Role Administrators / Global Administrators (or an
+    app holding RoleManagement.ReadWrite.Directory) can change the members of a role-assignable group.
+    * NEW group: created with isAssignableToRole = true. That property can ONLY be set at creation, and creating (and
+      later adding members to) such a group needs Graph RoleManagement.ReadWrite.Directory on top of Group.Create /
+      GroupMember.ReadWrite.All -- the deploy identity does NOT hold it (by operator decision, SEC-33). So an
+      unattended deploy is REFUSED here (permissionDenied, "needs RoleManagement.ReadWrite.Directory"), never quietly
+      given a plain group instead: the caller keeps the server's previous single-principal admin and prints the
+      command to converge with a privileged identity.
+    * EXISTING group that is NOT role-assignable: NOTHING is deleted or recreated automatically (the SQL admin and
+      every member's access hang on it). It is detected on every run and reported LOUDLY as a SECURITY finding
+      (result.securityFindings / notRoleAssignable), and the run otherwise proceeds as before.
+      ONE-TIME MIGRATION (operator, as a Privileged Role Administrator; order matters, nobody loses access):
+        1. create a NEW role-assignable security group, e.g. 'grp-pim-sql-admins-ra' (Entra admin center: Groups ->
+           New group -> "Microsoft Entra roles can be assigned to the group" = Yes; or this helper's converge run by
+           an identity that holds RoleManagement.ReadWrite.Directory, with -GroupName on the new name);
+        2. add the SAME members as the old group (the managed identities, the updater, the troubleshooting identity);
+        3. make the NEW group the SQL Entra admin: Initialize-PimSqlAdminGroup.ps1 -GroupObjectId <new group id>
+           (it keeps the previous admin as a member and reads the admin back);
+        4. only after the read-back, delete the OLD group; pass the new name (-SqlAdminGroupName) on later deploys.
+      Contained database users are keyed by SID, not by group, so none of them changes.
+
   Certificate or managed-identity auth only: the invokers take a token from the signed-in az context
   (which the deploy scripts sign in with a certificate) or mint one from a certificate in the local
   store. There is no client-secret parameter anywhere in this file.
@@ -141,7 +166,7 @@ function Get-PimSqlAdminGroupPlan {
 
     $create = ($Mode -eq 'converge' -and -not $gid)
     $setAdmin = ($Mode -eq 'converge' -and -not $adminIsGroup -and -not $blocked)
-    if ($create)   { [void]$msgs.Add("create security group '$GroupName'") }
+    if ($create)   { [void]$msgs.Add("create ROLE-ASSIGNABLE security group '$GroupName'") }
     foreach ($a in $add) { [void]$msgs.Add("add member $($a.label) ($($a.objectId))") }
     if ($setAdmin) { [void]$msgs.Add("make '$GroupName' the SQL server's Entra admin (was $(if ($adminLogin) { "'$adminLogin'" } else { 'none' }))") }
     $changes = [int]$create + $add.Count + [int]$setAdmin
@@ -248,7 +273,8 @@ function Invoke-PimSqlAdminGroup {
     )
     $problems = New-Object System.Collections.Generic.List[string]
     $notes    = New-Object System.Collections.Generic.List[string]
-    $state    = @{ denied = $false }
+    $findings = New-Object System.Collections.Generic.List[string]   # SEC-32: security findings the operator acts on (not failures)
+    $state    = @{ denied = $false; roleAssignable = $null }
     $srvPath  = "/subscriptions/$SubscriptionId/resourceGroups/$ResourceGroup/providers/Microsoft.Sql/servers/$SqlServerName"
     $result = {
         param($plan, $applied, $extra)
@@ -258,6 +284,8 @@ function Invoke-PimSqlAdminGroup {
             created = $false; added = @(); present = @(); refused = @(); adminChanged = $false
             adminBefore = ''; adminIsGroup = $false; adAuthOnlyBefore = $null; adAuthOnlyAfter = $null
             blocked = $(if ($plan) { "$($plan.blocked)" } else { '' }); plan = $plan
+            roleAssignable = $state.roleAssignable; notRoleAssignable = ($state.roleAssignable -eq $false)
+            securityFindings = @($findings.ToArray())
             problems = @($problems.ToArray()); notes = @($notes.ToArray())
         }
         foreach ($e in @($extra)) { if ($e) { foreach ($k in @($e.Keys)) { $o[$k] = $e[$k] } } }
@@ -274,11 +302,11 @@ function Invoke-PimSqlAdminGroup {
     $group = $null
     try {
         if ("$GroupObjectId".Trim()) {
-            $group = & $Graph -Method GET -Path ("/groups/$("$GroupObjectId".Trim())" + '?$select=id,displayName,securityEnabled')
+            $group = & $Graph -Method GET -Path ("/groups/$("$GroupObjectId".Trim())" + '?$select=id,displayName,securityEnabled,isAssignableToRole')
             if ($group -and "$($group.displayName)".Trim()) { $GroupName = "$($group.displayName)".Trim() }
         } else {
             $flt = [uri]::EscapeDataString("displayName eq '$($GroupName.Replace("'", "''"))'")
-            $found = @((& $Graph -Method GET -Path ('/groups?$filter=' + $flt + '&$select=id,displayName,securityEnabled')).value | Where-Object { $_ })
+            $found = @((& $Graph -Method GET -Path ('/groups?$filter=' + $flt + '&$select=id,displayName,securityEnabled,isAssignableToRole')).value | Where-Object { $_ })
             if ($found.Count -gt 1) {
                 [void]$problems.Add("$($found.Count) groups are named '$GroupName' -- ambiguous; pass -GroupObjectId")
                 return (& $result $null $false @{})
@@ -288,6 +316,20 @@ function Invoke-PimSqlAdminGroup {
         if ($group -and $group.PSObject.Properties['securityEnabled'] -and $group.securityEnabled -eq $false) {
             [void]$problems.Add("'$GroupName' ($($group.id)) is not a SECURITY group -- Azure SQL cannot use it as an admin")
             return (& $result $null $false @{})
+        }
+        # SEC-32: an EXISTING group that is not role-assignable is REPORTED, never deleted or recreated here (see the header).
+        if ($group) {
+            if ($group.PSObject.Properties['isAssignableToRole'] -and $null -ne $group.isAssignableToRole) {
+                $state.roleAssignable = [bool]$group.isAssignableToRole
+                if (-not $state.roleAssignable) {
+                    [void]$findings.Add(("SECURITY FINDING: '$GroupName' ($($group.id)) is the SQL admin group but is NOT role-assignable -- any Groups " +
+                        "Administrator, User Administrator or owner of it can add themselves, rewrite desired state and have the engine grant them " +
+                        "Global Administrator (tier 1 -> tier 0). isAssignableToRole can only be set at creation: migrate ONCE, as a Privileged Role " +
+                        "Administrator, to a new role-assignable group (the steps are in the header of tools/setup/_PimSqlAdminGroup.ps1). Nothing was changed."))
+                }
+            } else {
+                [void]$notes.Add("could not read isAssignableToRole of '$GroupName' -- whether it is protected as tier 0 is NOT known")
+            }
         }
     } catch { & $fail "read group '$GroupName'" $_.Exception.Message; return (& $result $null $false @{}) }
 
@@ -329,12 +371,16 @@ function Invoke-PimSqlAdminGroup {
         $nick = (($GroupName -replace '[^A-Za-z0-9]', '').ToLowerInvariant())
         if (-not $nick) { $nick = 'pimsqladmins' }
         try {
+            # SEC-32: ROLE-ASSIGNABLE, so only Privileged Role Administrators can change who administers the store.
+            # Settable ONLY here, at creation. Needs RoleManagement.ReadWrite.Directory on top of Group.Create.
             $g = & $Graph -Method POST -Path '/groups' -Body ([ordered]@{
                     displayName = $GroupName; mailEnabled = $false; mailNickname = $nick; securityEnabled = $true
-                    description = 'PIM4EntraPS: Entra admin of the environment SQL server (managed identities + troubleshooting identity).' })
+                    isAssignableToRole = $true
+                    description = 'PIM4EntraPS: Entra admin of the environment SQL server (managed identities + troubleshooting identity). Role-assignable: tier 0.' })
             $gid = "$($g.id)".Trim()
             if (-not $gid) { throw 'the create returned no id' }
             $created = $true
+            $state.roleAssignable = $true
             # A new group is not readable everywhere at once; wait until it is before adding members.
             $seenGroup = $false
             for ($i = 0; $i -lt $PollCount; $i++) {
@@ -343,7 +389,11 @@ function Invoke-PimSqlAdminGroup {
             }
             if (-not $seenGroup) { [void]$notes.Add("the new group $gid was not readable after $($PollCount * $PollSeconds)s -- continuing") }
         } catch {
-            & $fail "create group '$GroupName'" $_.Exception.Message
+            $why = "$($_.Exception.Message)"
+            if (Test-PimSqlAdminPermissionError $why) {
+                $why += ' -- creating a ROLE-ASSIGNABLE group needs Graph RoleManagement.ReadWrite.Directory in addition to Group.Create; a plain group is NOT created instead'
+            }
+            & $fail "create group '$GroupName'" $why
             return (& $result $plan $false @($base, @{ created = $false }))
         }
     }
@@ -364,6 +414,9 @@ function Invoke-PimSqlAdminGroup {
                 if (Test-PimSqlAdminPermissionError $last) { break }
                 if ($last -notmatch '(?i)HTTP 404\b|Request_ResourceNotFound|does not exist') { break }   # only replication lag is retried
             }
+        }
+        if (-not $ok -and $state.roleAssignable -eq $true -and (Test-PimSqlAdminPermissionError $last)) {
+            $last += ' -- members of a ROLE-ASSIGNABLE group can only be changed with RoleManagement.ReadWrite.Directory (or by a Privileged Role Administrator)'
         }
         if ($ok) { [void]$added.Add($m) } else { & $fail "add $($m.label) ($($m.objectId)) to '$GroupName'" $last }
     }
@@ -522,6 +575,56 @@ function Invoke-PimSqlAdminGroupStep {
     return $r
 }
 
+function Remove-PimSqlAdminGroupMember {
+    <#
+      SEC-39 -- take ONE identity OUT of the SQL admin group, and read it back. Used when an identity that only needs a
+      least-privilege database user (the baseline publish job) was made a member by an earlier version: membership of
+      the group is full server administration. The caller creates and VERIFIES the replacement access first.
+      Never throws for a Graph refusal. Returns { ok; wasMember; removed; groupId; problem }.
+        absent group / not a member -> ok, nothing written
+    #>
+    param(
+        [Parameter(Mandatory)][scriptblock]$Graph,
+        [Parameter(Mandatory)][string]$MemberObjectId,
+        [string]$GroupName = 'grp-pim-sql-admins',
+        [string]$GroupObjectId,
+        [string]$Label = 'member',
+        [int]$PollSeconds = 5,
+        [int]$PollCount = 24,
+        [scriptblock]$Sleep = { param([int]$Seconds) Start-Sleep -Seconds $Seconds }
+    )
+    $out = [ordered]@{ ok = $false; wasMember = $false; removed = $false; groupId = ''; problem = '' }
+    $oid = "$MemberObjectId".Trim()
+    if (-not (Test-PimSqlAdminGuid $oid)) { $out.problem = "'$MemberObjectId' is not an object id"; return [pscustomobject]$out }
+    try {
+        if ("$GroupObjectId".Trim()) { $grp = & $Graph -Method GET -Path ("/groups/$("$GroupObjectId".Trim())" + '?$select=id,displayName') }
+        else {
+            $flt = [uri]::EscapeDataString("displayName eq '$($GroupName.Replace("'", "''"))'")
+            $found = @((& $Graph -Method GET -Path ('/groups?$filter=' + $flt + '&$select=id,displayName')).value | Where-Object { $_ })
+            if ($found.Count -gt 1) { $out.problem = "$($found.Count) groups are named '$GroupName' -- ambiguous; pass -GroupObjectId"; return [pscustomobject]$out }
+            $grp = if ($found.Count) { $found[0] } else { $null }
+        }
+        if (-not $grp -or -not "$($grp.id)".Trim()) { $out.ok = $true; return [pscustomobject]$out }
+        $gid = "$($grp.id)".Trim(); $out.groupId = $gid
+        $ids = @(Get-PimGraphGroupMemberIds -Graph $Graph -GroupId $gid | ForEach-Object { "$_".ToLowerInvariant() })
+        if ($ids -notcontains $oid.ToLowerInvariant()) { $out.ok = $true; return [pscustomobject]$out }
+        $out.wasMember = $true
+        try { [void](& $Graph -Method DELETE -Path "/groups/$gid/members/$oid/`$ref") }
+        catch { if ("$($_.Exception.Message)" -notmatch '(?i)HTTP 404\b|Request_ResourceNotFound|does not exist') { throw } }
+        for ($i = 0; $i -lt [Math]::Max(1, $PollCount); $i++) {
+            $ids = @(Get-PimGraphGroupMemberIds -Graph $Graph -GroupId $gid | ForEach-Object { "$_".ToLowerInvariant() })
+            if ($ids -notcontains $oid.ToLowerInvariant()) { $out.removed = $true; $out.ok = $true; return [pscustomobject]$out }
+            & $Sleep $PollSeconds
+        }
+        $out.problem = "read-back: $Label ($oid) is STILL a member of '$GroupName' after the removal"
+    } catch {
+        $m = "$($_.Exception.Message)"
+        if (Test-PimSqlAdminPermissionError $m) { $m += ' -- removing a member needs GroupMember.ReadWrite.All (and, on a ROLE-ASSIGNABLE group, RoleManagement.ReadWrite.Directory)' }
+        $out.problem = "remove $Label ($oid) from '$GroupName': $m"
+    }
+    return [pscustomobject]$out
+}
+
 function Write-PimSqlAdminGroupReport {
     <# Print a result the same way from every caller. -Indent keeps it inside a deploy step. #>
     param([Parameter(Mandatory)][object]$Result, [string]$Indent = '    ')
@@ -537,9 +640,15 @@ function Write-PimSqlAdminGroupReport {
         elseif ($Result.adminIsGroup) { Write-Host "$Indent[OK] '$($Result.groupName)' is the Entra admin" -ForegroundColor DarkGray }
     }
     foreach ($x in @($Result.problems)) { Write-Host "$Indent[FAIL] $x" -ForegroundColor Red }
+    # SEC-32: a finding is not a failure (nothing was changed), but it must not be missable in a deploy log.
+    foreach ($x in @($Result.securityFindings)) {
+        Write-Host "$Indent[SECURITY FINDING] $x" -ForegroundColor Red
+    }
     if ($Result.permissionDenied) {
         Write-Host "${Indent}the identity running this was refused by Microsoft Graph or ARM. It needs Graph Group.Create + GroupMember.ReadWrite.All" -ForegroundColor Yellow
-        Write-Host "${Indent}(or Group.ReadWrite.All), Directory.Read.All, and rights to set the SQL server's Entra admin." -ForegroundColor Yellow
+        Write-Host "${Indent}(or Group.ReadWrite.All), Directory.Read.All, and rights to set the SQL server's Entra admin -- and, because the group is" -ForegroundColor Yellow
+        Write-Host "${Indent}ROLE-ASSIGNABLE, RoleManagement.ReadWrite.Directory to create it or change its members (or run it as a" -ForegroundColor Yellow
+        Write-Host "${Indent}Privileged Role Administrator)." -ForegroundColor Yellow
     }
 }
 

@@ -121,7 +121,8 @@ param(
     [string]$VnetResourceGroup,
     [string]$AcrName,
     # --- COST SHAPE (ESTATE-04). These were MISSING, and their absence was expensive ---------
-    # Setup-PimContainers defaults to WorkerMode 'always-on' + ManagerMinReplicas 1: six apps at
+    # (§33.28, 2.4.373: Setup-PimContainers now defaults to 'cron' as well; its ManagerMinReplicas default is still 1.)
+    # Setup-PimContainers defaulted to WorkerMode 'always-on' + ManagerMinReplicas 1: six apps at
     # ~3 vCPU / 6 GiB running 24/7, materially more per environment per month (never measured; do not quote a figure). This orchestrator could
     # not pass anything else, so "deploy everything" SILENTLY deployed the expensive shape --
     # including to a production tenant -- overriding the operator-approved on-demand design that
@@ -301,6 +302,10 @@ param(
     # reached to TEST it, and cannot be opened afterwards: the setting is immutable. Built
     # external, the Manager can still be locked down with one reversible `ingress update`.
     [ValidateSet('internal','external')][string]$Exposure = 'external',
+    # 71.40 -- forwarded to Setup-PimContainers for the MANAGER: the master signing key id(s) it pins and the plain URL
+    # the master publishes the signed bundle to (its Downlink view verifies against them). Validated there.
+    [string[]]$BaselineTrustedKeys = @(),
+    [string]$BaselineDocUrl,
     [string]$HubVnetName,
     [string]$HubVnetResourceGroup,
     [string]$HubVnetSubscriptionId,
@@ -359,6 +364,20 @@ param(
     # UPNs/groups, the deploy switches the enterprise application to assignment-required and
     # assigns them. Empty leaves it open to the whole tenant, and says so as a warning.
     [string[]]$EasyAuthAllowedPrincipals = @(),
+    # 🔴 SEC-44 -- the other explicit answer: every MEMBER account in the tenant, never a guest (a dynamic
+    # members-only group, assigned with assignment required -- see Set-PimManagerEasyAuth). A NEW
+    # environment with neither this nor -EasyAuthAllowedPrincipals is REFUSED before anything is created.
+    [switch]$EasyAuthAllowAllTenantUsers,
+    # 🔴 IMP-49 t -- THE SETUP-HOST FIREWALL WINDOW. Host-side SQL steps (schema, grants, feature
+    # gates, access) connect from THIS host, so the store must admit its public IP while they run
+    # ('AllowSetupHost'). That rule used to be created by prereq and left STANDING forever. Now this run
+    # removes the rule at its end when THIS run created it (or opened it); a rule that was already there
+    # when the run started belongs to someone else's window and is left alone.
+    # -KeepSetupHostRule: for an orchestrator that owns the window itself and closes it later
+    # (the MSP build's sqlopen/sqlclose). -SetupHostIp: this host's public IP, so no external lookup
+    # is made at all; without it the IP is read from https://api.ipify.org (a third-party service).
+    [switch]$KeepSetupHostRule,
+    [string]$SetupHostIp,
     # §53 -- the nightly updater installed by the `updater` step.
     [string]$UpdateJobName  = 'ca-pim-update',
     [string]$UpdateCron     = '0 3 * * *',   # UTC; stagger across an estate so 100 do not roll at once
@@ -444,6 +463,10 @@ $ErrorActionPreference = 'Stop'
 # default, stated on screen by Deploy-PimUpdateJob -- never silently).
 $script:PimDeployRingExplicit = $PSBoundParameters.ContainsKey('UpdateRing')
 
+# An array cannot cross `pwsh -File` (the S1 driver and the MSP build call this script that way), so
+# callers pass one comma-separated string -- which binds as ONE element. Split it here, once.
+$EasyAuthAllowedPrincipals = @(@($EasyAuthAllowedPrincipals) | ForEach-Object { "$_" -split '[,;]' } | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+
 # =================================================================================================
 # 🔴 DO NOT LEAVE THE OPERATOR'S az SESSION POINTING AT A SERVICE PRINCIPAL.
 #
@@ -498,7 +521,13 @@ $null = Register-EngineEvent -SourceIdentifier PowerShell.Exiting -SupportEvent 
 # 🪤 A BARE `throw` INSIDE A TRAP DISCARDS THE ERROR AND RAISES "ScriptHalted", so the one line
 # that says what actually went wrong is replaced by a word that says nothing. Measured at a customer
 # 2026-09-11: an infra failure surfaced only as "ScriptHalted" at this line. Rethrow $_.
-trap { Restore-PimCallerAzContext; Clear-PimEphemeralPem; throw $_ }
+trap {
+    Restore-PimCallerAzContext
+    # IMP-49 t: a run that dies still closes the setup-host window it opened (best effort, never masking $_).
+    if (Get-Command Close-PimSetupHostWindow -ErrorAction SilentlyContinue) { try { Close-PimSetupHostWindow } catch { } }
+    Clear-PimEphemeralPem
+    throw $_
+}
 $here    = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent $MyInvocation.MyCommand.Path }
 # Guarded `az` shadow -- see _PimAz.ps1. az writes ordinary WARNINGS to stderr and PowerShell 5.1
 # makes any such write terminating under $ErrorActionPreference='Stop'. Must precede the first az call.
@@ -816,6 +845,22 @@ Info "hosted=$hosted; tenant=$(if($TenantId){'set'}else{'(not set)'}); sub=$(if(
 # Each fact answers "is this step NEEDED?" ($true = run; $false = already current).
 # Absent / unknown => $true (fail-safe: run rather than skip a real change).
 # =============================================================================
+function Invoke-PimTenantGraphGet {
+    <#
+      🔴 BUG-215 -- A GRAPH READ PINNED TO -TenantId. `az rest` and `az ad` take no --subscription: they
+      use the DEFAULT az account's tenant, which on a host signed in to more than one directory is
+      regularly ANOTHER COMPANY's (the ExpertsLiveDK default recorded in the repo rules). The token is
+      minted for THIS tenant by name instead. $null = "could not read", never "empty".
+    #>
+    param([Parameter(Mandatory)][string]$Path)
+    if (-not "$TenantId".Trim() -or -not (Have 'az')) { return $null }
+    $tok = "$(az account get-access-token --tenant $TenantId --resource https://graph.microsoft.com --query accessToken -o tsv 2>$null)".Trim()
+    $global:LASTEXITCODE = 0
+    if (-not $tok) { return $null }
+    try { return (Invoke-RestMethod -Headers @{ Authorization = "Bearer $tok" } -Uri ("https://graph.microsoft.com/v1.0" + $Path) -ErrorAction Stop) }
+    catch { return $null }
+    finally { $tok = $null }
+}
 function Test-EngineAppRegPresent {
     # present when an app with the engine display name exists AND has a credential. Best-effort
     # via az; unknown (no az / not logged in) => NEEDED=$true (let the idempotent installer run).
@@ -829,8 +874,11 @@ function Test-EngineAppRegPresent {
     # 🔑 The installer downstream is what owns identity, and it is the place to key stably.
     if (-not (Have 'az')) { return $null }
     try {
-        $id = az ad app list --display-name $EngineAppDisplayName --query "[0].appId" -o tsv 2>$null
-        if ("$id".Trim()) { return $true }
+        # BUG-215: asked of -TenantId by name -- `az ad app list` would ask the DEFAULT account's tenant,
+        # and an app of the same name in another company's directory would read as "present here".
+        $apps = Invoke-PimTenantGraphGet -Path ("/applications?`$filter=displayName eq '" + "$EngineAppDisplayName".Replace("'", "''") + "'&`$select=appId")
+        if ($null -eq $apps) { return $null }
+        if (@(@($apps.value) | Where-Object { "$($_.appId)".Trim() }).Count) { return $true }
         return $false
     } catch { return $null }
 }
@@ -1064,8 +1112,9 @@ function Test-AcaEnvPresent {
         # ARM rights on the identity that actually reconciles: the tick Job in cron mode, the
         # Manager otherwise. Zero role assignments = PIM's Azure half is blind (BUG-51).
         if (-not $SkipAzureRbac -and "$SubscriptionId".Trim()) {
-            $rbacOid = $(if ($WorkerMode -eq 'cron') { az containerapp job show -g $ResourceGroup -n $TickJobName --query "identity.principalId" -o tsv 2>$null }
-                         else { az containerapp show -g $ResourceGroup -n $ManagerApp --query "identity.principalId" -o tsv 2>$null })
+            # BUG-215: --subscription on both -- a bare call read whatever subscription was the default.
+            $rbacOid = $(if ($WorkerMode -eq 'cron') { az containerapp job show @azSubArgs -g $ResourceGroup -n $TickJobName --query "identity.principalId" -o tsv 2>$null }
+                         else { az containerapp show @azSubArgs -g $ResourceGroup -n $ManagerApp --query "identity.principalId" -o tsv 2>$null })
             if ("$rbacOid".Trim()) {
                 $armRoles = @(az role assignment list @azSubArgs --assignee "$rbacOid".Trim() --scope "/subscriptions/$SubscriptionId" --query "[].id" -o tsv 2>$null | Where-Object { "$_".Trim() }).Count
                 if ("$armRoles".Trim() -and [int]"$armRoles".Trim() -eq 0) {
@@ -1084,8 +1133,12 @@ function Test-AcaEnvPresent {
             return $false
         }
         # The Job exists. Its GRANTS are the step's real output -- and they are what BUG-44 skipped.
-        $roles = @(az rest --method get --url "https://graph.microsoft.com/v1.0/servicePrincipals/$jobOid/appRoleAssignments" --query "value[].id" -o tsv 2>$null | Where-Object { "$_".Trim() }).Count
-        if (-not "$roles".Trim() -or [int]"$roles".Trim() -eq 0) {
+        # BUG-215: read in -TenantId by name, not in whatever tenant the default az account is in.
+        # Unreadable is "cannot tell" ($null -> NEEDED, the fail-safe), never "zero".
+        $ra = Invoke-PimTenantGraphGet -Path "/servicePrincipals/$("$jobOid".Trim())/appRoleAssignments"
+        if ($null -eq $ra) { return $null }
+        $roles = @(@($ra.value) | Where-Object { $_ -and "$($_.id)".Trim() }).Count
+        if ($roles -eq 0) {
             Write-Host "  infra: tick Job '$TickJobName' exists but its identity holds NO Graph app-roles -- the grant step never completed; re-running INFRA." -ForegroundColor Yellow
             return $false
         }
@@ -1198,6 +1251,103 @@ $i = 0
 foreach ($s in $plan.steps) { $i++; Write-Host ("    {0}. {1,-8} [{2,-20}] {3}" -f $i, $s.key, $s.action, $s.reason) }
 Write-Host ""
 
+# =================================================================================================
+# 🔴 IMP-49 t -- THE SETUP-HOST FIREWALL WINDOW: opened for this run, closed at its end.
+# Host-side SQL steps connect from THIS host's public IP. Prereq used to create 'AllowSetupHost' and
+# nothing ever removed it -- a standing hole for whichever machine last deployed. Now the run records
+# what it found, opens the window only if it has to, and removes at the end what IT created (a rule
+# that pre-dates the run belongs to another window -- the MSP build's -- and is left alone).
+# =================================================================================================
+$script:PimSetupHostWindow = $null
+function Get-PimSetupHostWindowPlan {
+    # PURE. What this run does with 'AllowSetupHost', decided from what exists when it starts.
+    param([bool]$Applicable, [bool]$ServerExists, [bool]$RuleExists, [bool]$Keep)
+    if (-not $Applicable) { return @{ open = $false; closeAtEnd = $false; reason = 'not applicable (not a hosted apply against a public SQL server)' } }
+    if ($ServerExists -and $RuleExists) { return @{ open = $false; closeAtEnd = $false; reason = "'AllowSetupHost' already existed when this run started -- another window owns it, so it is left exactly as found" } }
+    $closeWhy = $(if ($Keep) { 'kept at the end (-KeepSetupHostRule: the caller owns the window and closes it)' } else { 'removed at the end of this run' })
+    if ($ServerExists) { return @{ open = $true; closeAtEnd = (-not $Keep); reason = "this host is not allowed yet -- opened for this run, $closeWhy" } }
+    return @{ open = $false; closeAtEnd = (-not $Keep); reason = "the SQL server does not exist yet -- prereq creates it with this host allowed; that rule is this run's and is $closeWhy" }
+}
+function Get-PimSetupHostSqlTarget {
+    # The server's subscription + resource group, or $null when this identity cannot see it.
+    $srv = ("$SqlServerFqdn".Trim() -split '\.')[0]
+    $sqlSub = $(if ("$SqlSubscriptionId".Trim()) { "$SqlSubscriptionId".Trim() } else { "$SubscriptionId".Trim() })
+    if (-not $srv -or -not $sqlSub) { return $null }
+    $rg = "$(@(az sql server list --subscription $sqlSub --query "[?name=='$srv'].resourceGroup" -o tsv 2>$null) | Select-Object -First 1)".Trim()
+    $global:LASTEXITCODE = 0
+    if (-not $rg) { return @{ server = $srv; sub = $sqlSub; rg = ''; exists = $false } }
+    return @{ server = $srv; sub = $sqlSub; rg = $rg; exists = $true }
+}
+function Get-PimSetupHostRuleIp([hashtable]$T) {
+    $ip = "$(@(az sql server firewall-rule list --subscription $T.sub -g $T.rg -s $T.server --query "[?name=='AllowSetupHost'].startIpAddress" -o tsv 2>$null) | Select-Object -First 1)".Trim()
+    $global:LASTEXITCODE = 0
+    return $ip
+}
+function Open-PimSetupHostWindow {
+    $applicable = [bool]($hosted -and $applyGate -and -not $ValidateOnly -and -not $StepRunner -and "$SqlServerFqdn".Trim() -and
+                         -not $SqlPrivateEndpoint -and -not $PrereqSkipSql -and (Have 'az'))
+    $t = $(if ($applicable) { Get-PimSetupHostSqlTarget } else { $null })
+    if ($applicable -and -not $t) { $applicable = $false }
+    $ruleIp = $(if ($t -and $t.exists) { Get-PimSetupHostRuleIp $t } else { '' })
+    $p = Get-PimSetupHostWindowPlan -Applicable $applicable -ServerExists ([bool]($t -and $t.exists)) -RuleExists ([bool]$ruleIp) -Keep ([bool]$KeepSetupHostRule)
+    $script:PimSetupHostWindow = @{ plan = $p; target = $t; opened = $false }
+    if (-not $applicable) { return }
+    Info "sql setup-host window: $($p.reason)"
+    if (-not $p.open) { return }
+    $ip = "$SetupHostIp".Trim()
+    if (-not $ip) {
+        # Stated every time: the deploy asks a THIRD-PARTY web service for this host's public address.
+        try { $ip = "$((Invoke-RestMethod -Uri 'https://api.ipify.org?format=json' -TimeoutSec 20).ip)".Trim() } catch { $ip = '' }
+        Info "  this host's public IP: '$ip' -- read from https://api.ipify.org (a third-party service; pass -SetupHostIp to skip the lookup)"
+    } else { Info "  this host's public IP: $ip (from -SetupHostIp; no external lookup)" }
+    if ($ip -notmatch '^\d{1,3}(\.\d{1,3}){3}$') {
+        Warn "sql setup-host window NOT opened: this host's public IP could not be determined ('$ip'). Host-side SQL steps will be refused by the firewall; pass -SetupHostIp."
+        return
+    }
+    az sql server firewall-rule create --subscription $t.sub -g $t.rg -s $t.server -n AllowSetupHost --start-ip-address $ip --end-ip-address $ip -o none 2>$null
+    $global:LASTEXITCODE = 0
+    if ((Get-PimSetupHostRuleIp $t) -ne $ip) {
+        Warn "sql setup-host window NOT opened: 'AllowSetupHost' for $ip did not read back on $($t.server). Host-side SQL steps will be refused by the firewall."
+        return
+    }
+    $script:PimSetupHostWindow.opened = $true
+    Info "  OPENED: 'AllowSetupHost' = $ip on $($t.server) (read back; waiting 30s for the firewall to apply)"
+    Start-Sleep -Seconds 30
+}
+function Close-PimSetupHostWindow {
+    $w = $script:PimSetupHostWindow
+    if (-not $w -or -not $w.plan.closeAtEnd) { return }
+    $script:PimSetupHostWindow = $null           # once, whichever exit path gets here first
+    $t = $(if ($w.target -and $w.target.exists) { $w.target } else { Get-PimSetupHostSqlTarget })
+    if (-not $t -or -not $t.exists) { return }
+    if (-not (Get-PimSetupHostRuleIp $t)) { Info "sql setup-host window: nothing to close ('AllowSetupHost' is not on $($t.server))"; return }
+    az sql server firewall-rule delete --subscription $t.sub -g $t.rg -s $t.server -n AllowSetupHost -o none 2>$null
+    $global:LASTEXITCODE = 0
+    if (Get-PimSetupHostRuleIp $t) {
+        Warn "sql setup-host window NOT CLOSED: 'AllowSetupHost' is still on $($t.server) -- this host keeps SQL network access until it is removed:"
+        Warn "  az sql server firewall-rule delete --subscription $($t.sub) -g $($t.rg) -s $($t.server) -n AllowSetupHost"
+    } else { Info "sql setup-host window CLOSED: 'AllowSetupHost' removed from $($t.server) and read back" }
+}
+
+# 🔴 SEC-44 -- WHO MAY SIGN IN IS DECIDED AT THE FRONT DOOR, for a Manager that does not exist yet.
+# Without an answer the Easy Auth step refuses (it never again defaults to "every account in the
+# tenant, guests included"), and on a NEW environment that refusal would arrive after the
+# infrastructure had been built. So ask first. An EXISTING Manager is left to the step itself, which
+# keeps an application that is already assignment-required and refuses anything else.
+$easyAuthPlanned = @($plan.steps | Where-Object { "$($_.key)" -eq 'easyauth' -and $_.do }).Count -gt 0
+if ($easyAuthPlanned -and -not $plan.whatIf -and -not $StepRunner -and
+    -not @($EasyAuthAllowedPrincipals | Where-Object { "$_".Trim() }).Count -and -not $EasyAuthAllowAllTenantUsers) {
+    $mgrExistsNow = ''
+    if ((Have 'az') -and "$ResourceGroup".Trim()) { $mgrExistsNow = "$(az containerapp show @azSubArgs -g $ResourceGroup -n $ManagerApp --query name -o tsv 2>$null)".Trim() }
+    $global:LASTEXITCODE = 0
+    if (-not $mgrExistsNow) {
+        throw ("REFUSED before any deploy step ran: say who may sign in to the Manager. Pass -EasyAuthAllowedPrincipals " +
+               "<upn-or-group>[,...] to admit exactly those, or -EasyAuthAllowAllTenantUsers to admit every member account " +
+               "(guests are never admitted by that). A new Manager is not deployed open to every account in the tenant.")
+    }
+    Info "sign-in: no -EasyAuthAllowedPrincipals / -EasyAuthAllowAllTenantUsers -- the existing Manager's restriction is kept if it has one; the easyauth step refuses otherwise."
+}
+
 if ($plan.whatIf) {
     Step 'WHATIF / PLAN-ONLY -- no changes made. Re-run with -Apply to execute the plan above.'
     $global:LASTEXITCODE = 0   # a plan-only run is clean -- don't leak a best-effort az probe's exit code
@@ -1228,6 +1378,45 @@ if ($plan.whatIf) {
 # reads ok=True, and one that exits non-zero STILL reads ok=False -- real failures are not
 # masked. Every runner clears $LASTEXITCODE first so no step inherits an earlier probe's.
 # =============================================================================
+function Get-PimEasyAuthFailureAction {
+    <#
+      PURE (SEC-31). The Easy Auth step failed -- what happens to the Manager's ingress?
+        'already-closed'            the closing access restriction is on it (a NEW Manager): leave it.
+        'close'                     no working Easy Auth in front of it (disabled, or UNREADABLE -- could
+                                    not tell is not "protected"): close it now.
+        'keep-behind-existing-auth' Easy Auth is enabled from an earlier run: it keeps serving behind it.
+    #>
+    param([string]$AuthEnabled, $GatePresent)
+    if ($GatePresent -eq $true) { return 'already-closed' }
+    if ("$AuthEnabled".Trim() -match '(?i)^true$') { return 'keep-behind-existing-auth' }
+    return 'close'
+}
+function Close-PimManagerAfterEasyAuthFailure {
+    # SEC-31 -- the easyauth step failed: make sure the Manager is not left open. Returns one sentence
+    # for the step's detail; every branch is stated, none is silent.
+    param([string]$EaScript, [hashtable]$EaArgs)
+    $enabled = "$(@(az containerapp auth show @azSubArgs -g $ResourceGroup -n $ManagerApp --query platform.enabled -o tsv 2>$null) | Select-Object -First 1)".Trim()
+    $gateJson = (@(az containerapp ingress access-restriction list @azSubArgs -g $ResourceGroup -n $ManagerApp -o json 2>$null) -join "`n")
+    $global:LASTEXITCODE = 0
+    $gatePresent = $null
+    # PS 5.1: ConvertFrom-Json emits an array as ONE object -- assign first, then enumerate.
+    if ("$gateJson".Trim()) { try { $gateRules = ConvertFrom-Json -InputObject $gateJson; $gatePresent = [bool](@($gateRules) | Where-Object { "$($_.name)" -eq 'pim-closed-until-easyauth' }) } catch { $gatePresent = $null } }
+    switch (Get-PimEasyAuthFailureAction -AuthEnabled $enabled -GatePresent $gatePresent) {
+        'already-closed'            { return 'The Manager stays CLOSED: it still carries the closing access restriction, which only a successful Easy Auth run removes.' }
+        'keep-behind-existing-auth' { return "The Manager keeps serving behind the Easy Auth configuration it ALREADY had (platform.enabled=$enabled); it was not closed, because that would take a protected console offline over a failed re-run." }
+        default {
+            $closeArgs = @{ App = $ManagerApp; ResourceGroup = $ResourceGroup; TenantId = $TenantId; CloseIngressOnly = $true }
+            if ("$SubscriptionId".Trim()) { $closeArgs['SubscriptionId'] = $SubscriptionId }
+            try { & $EaScript @closeArgs | Out-Host; return "The Manager had NO working Easy Auth (platform.enabled='$enabled'), so it was CLOSED now (access restriction applied and read back)." }
+            catch {
+                Warn "COULD NOT CLOSE the Manager: $($_.Exception.Message)"
+                Warn "  Lock it down by hand NOW: az containerapp ingress update --subscription $SubscriptionId -g $ResourceGroup -n $ManagerApp --type internal"
+                return "The Manager has NO working Easy Auth and could NOT be closed ($($_.Exception.Message)) -- lock it down by hand: az containerapp ingress update --subscription $SubscriptionId -g $ResourceGroup -n $ManagerApp --type internal"
+            }
+        }
+    }
+}
+
 function Invoke-DefaultStepRunner {
     param([string]$Key,[hashtable]$Ctx)
     switch ($Key) {
@@ -1321,6 +1510,7 @@ function Invoke-DefaultStepRunner {
                 if ("$SqlServerFqdn".Trim())              { $prqShape['SqlServerName']       = ("$SqlServerFqdn".Trim() -split '\.')[0] }
                 if ("$SqlAdminGroupName".Trim())          { $prqShape['SqlAdminGroupName']   = "$SqlAdminGroupName".Trim() }
                 if ("$TroubleshootingAppId".Trim())       { $prqShape['TroubleshootingAppId'] = "$TroubleshootingAppId".Trim() }
+                if ("$SetupHostIp".Trim())                { $prqShape['SetupHostIp']         = "$SetupHostIp".Trim() }   # IMP-49 t: no external lookup
                 $global:LASTEXITCODE = 0
                 try {
                 & $prq @prqId @prqShape -TenantId $TenantId -SubscriptionId $SubscriptionId -Token $PrereqToken `
@@ -1438,6 +1628,9 @@ function Invoke-DefaultStepRunner {
             if ($AzureRbacManagementGroupId) { $reach['AzureRbacManagementGroupId'] = $AzureRbacManagementGroupId }
             if ($SkipAzureRbac)              { $reach['SkipAzureRbac']              = $true }
             if ($RequireAzureRbac)           { $reach['RequireAzureRbac']           = $true }
+            # 71.40 -- the Manager's baseline trust + document URL (absent unless set, so nothing changes for anyone else).
+            if (@($BaselineTrustedKeys | Where-Object { "$_".Trim() }).Count) { $reach['BaselineTrustedKeys'] = @($BaselineTrustedKeys | Where-Object { "$_".Trim() }) }
+            if ("$BaselineDocUrl".Trim())    { $reach['BaselineDocUrl']             = "$BaselineDocUrl".Trim() }
             # §38.2a -- the BUG-49 warning is about an ISOLATED VNet, so it only applies when the
             # environment is internal-only. Firing it on an external-capable deploy would be
             # false: that Manager is reachable without any peering, which is the whole point of
@@ -1541,7 +1734,7 @@ function Invoke-DefaultStepRunner {
                         -TickJobName $TickJobName -MailSender $MailSender `
                         -EngineClientId $EngineClientId -EngineCertThumbprint $EngineCertThumbprint -EngineClientSecret $EngineClientSecret `
                         -Exposure $Exposure `
-                        @dbInit @ringGateArgs -UpdateJobName $UpdateJobName `
+                        @dbInit @ringGateArgs @pendingRingArgs -UpdateJobName $UpdateJobName `
                         -SqlAdminClientId $SqlAdminClientId @sqlAdminCred @registryIdentity @reach | Out-Host
                     } finally { Restore-PimCallerAzContext }
                     $ok = (-not $LASTEXITCODE) -or ($LASTEXITCODE -eq 0)
@@ -1623,7 +1816,8 @@ function Invoke-DefaultStepRunner {
                 if (-not $engineForMail -and "$ResourceGroup".Trim() -and (Have 'az')) {
                     $mgrOid = az containerapp show @azSubArgs -g $ResourceGroup -n $ManagerApp --query identity.principalId -o tsv 2>$null
                     if ("$mgrOid".Trim()) {
-                        $mgrApp = az ad sp show --id "$mgrOid".Trim() --query appId -o tsv 2>$null
+                        # BUG-215: tenant-pinned (az ad reads the DEFAULT account's directory).
+                        $mgrApp = "$((Invoke-PimTenantGraphGet -Path "/servicePrincipals/$("$mgrOid".Trim())").appId)"
                         if ("$mgrApp".Trim() -match '^[0-9a-fA-F-]{36}$') {
                             $engineForMail = "$mgrApp".Trim()
                             Write-Host "    mail: scoping the send right to the Manager's managed identity $engineForMail (no engine app registration in this environment)" -ForegroundColor DarkGray
@@ -1817,7 +2011,7 @@ function Invoke-DefaultStepRunner {
                         return @{ ok=$false; ran=$true; detail=(
                             "no -SqlConnectionString, so the SQL schema CANNOT be applied -- the updater would only " +
                             "PRINT the DDL while reporting success. Pass -SqlConnectionString for " +
-                            "$SqlServerFqdn/$SqlDatabase, or apply sql/platform-schema.sql + sql/local-schema.sql " +
+                            "$SqlServerFqdn/$SqlDatabase, or apply sql/platform-schema.sql " +
                             "with your SQL deploy identity. Refusing to report a schema upgrade that did not happen.") }
                     }
                     Write-Host "  schema: no -SqlConnectionString and not hosted -- DDL plan only." -ForegroundColor Yellow
@@ -1860,16 +2054,25 @@ function Invoke-DefaultStepRunner {
                 if ("$SubscriptionId".Trim())      { $eaArgs['SubscriptionId'] = $SubscriptionId }
                 if ("$EasyAuthClientId".Trim())    { $eaArgs['ClientId']       = $EasyAuthClientId }
                 if ($EasyAuthAllowedPrincipals.Count) { $eaArgs['AllowedPrincipals'] = @($EasyAuthAllowedPrincipals) }
-                & $ea @eaArgs | Out-Host
-                $ok = (-not $LASTEXITCODE) -or ($LASTEXITCODE -eq 0)
+                if ($EasyAuthAllowAllTenantUsers)     { $eaArgs['AllowAllTenantUsers'] = $true }
+                # 🪤 A THROW IS A FAILURE TOO. Set-PimManagerEasyAuth reports most refusals by throwing, and
+                # an unhandled throw here escaped the runner before the Manager could be closed below.
+                $eaWhy = ''
+                try { & $ea @eaArgs | Out-Host } catch { $eaWhy = "$($_.Exception.Message)" }
+                $ok = (-not $eaWhy) -and ((-not $LASTEXITCODE) -or ($LASTEXITCODE -eq 0))
                 if (-not $ok) {
+                    # 🔴 SEC-31 -- LEAVE IT CLOSED, AND SAY WHICH. A NEW Manager still carries the closing
+                    # restriction (only a successful run of that script removes it). A Manager with NO Easy
+                    # Auth in front of it (an environment built before this safeguard) is closed NOW. One
+                    # that already had Easy Auth keeps serving behind it: closing a working, protected
+                    # console over a failed re-run (a transient consent read, say) would be an outage.
+                    $closed = Close-PimManagerAfterEasyAuthFailure -EaScript $ea -EaArgs $eaArgs
                     return @{ ok=$false; ran=$true; detail=(
-                        'Easy Auth could not be configured. The Manager is reachable WITHOUT ' +
-                        'authentication until it is, so this halts the deploy rather than leaving ' +
-                        'a privileged console open. Re-run, or pass -EasyAuthClientId to use an ' +
-                        'app registration you already control.') }
+                        "Easy Auth could not be configured$(if ($eaWhy) { ": $eaWhy" } else { '' }). $closed " +
+                        'This halts the deploy rather than leaving a privileged console open. Re-run, or pass ' +
+                        '-EasyAuthClientId to use an app registration you already control.') }
                 }
-                return @{ ok=$true; ran=$true; detail='Easy Auth configured + verified (sign-in required)' }
+                return @{ ok=$true; ran=$true; detail='Easy Auth configured + verified (sign-in required and restricted), then the Manager was opened' }
             }
             return @{ ok=$true; ran=$false; detail='skipped by ShouldProcess' }
         }
@@ -1904,7 +2107,7 @@ function Invoke-DefaultStepRunner {
                 }
                 & $upd -Source $Source @scenarioArgs -Apply -ResourceGroup $ResourceGroup -AcrName $AcrName -ImageRepo $ImageRepo `
                     -ManagerApp $ManagerApp -Apps $Apps -ImageTag (Get-EffectiveImageTag) -TickJobName $TickJobName `
-                    -SqlConnectionString $SqlConnectionString @sqlAuthArgs @updPool @ringGateArgs -UpdateJobName $UpdateJobName -SkipNotify | Out-Host
+                    -SqlConnectionString $SqlConnectionString @sqlAuthArgs @updPool @ringGateArgs @pendingRingArgs -UpdateJobName $UpdateJobName -SkipNotify | Out-Host
                 $ok = (-not $LASTEXITCODE) -or ($LASTEXITCODE -eq 0)
                 return @{ ok=$ok; ran=$true; detail='code built + deployed' }
             }
@@ -2151,6 +2354,8 @@ function Invoke-DeployValidation {
             # without it the smoke's console text becomes part of this function's return value.
             & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $smoke | Out-Host
             $smokeExit = $LASTEXITCODE
+            # BUG-216: the smoke's contract is 0 = passed, 1 = failed, 2 = SKIPPED checks (not a pass).
+            if ($smokeExit -eq 2) { Warn 'verify: the hosted smoke SKIPPED checks (exit 2) -- UNVERIFIED, not a pass; nothing is rolled back for it.' }
         }
     } else { Info 'verify: hosted smoke skipped (community/local or smoke not found)' }
 
@@ -2245,8 +2450,32 @@ function Invoke-DeployValidation {
 
     $script:smokeExit = $smokeExit
     $script:validationExit = $valExit
-    $ok = (($smokeExit -le 0) -and ($valExit -le 0))   # <=0 means passed or self-skipped (not a fail)
-    return @{ ok=$ok; ran=(($smokeExit -ge 0) -or ($valExit -ge 0)); detail="smoke=$smokeExit validation=$valExit" }
+    $v = Get-PimDeployValidationStepVerdict -SmokeExit $smokeExit -ValidationExit $valExit
+    if (-not $v.ok -and $v.unverified) {
+        Warn "verify: NOT VERIFIED -- $($v.detail)."
+        Warn '  A skip is not a pass: this deploy is reported as FAILED (verify), and nothing is rolled back for it.'
+    }
+    return @{ ok=$v.ok; ran=$true; detail=$v.detail }
+}
+function Get-PimDeployValidationStepVerdict {
+    <#
+      PURE (BUG-216). The verify STEP's own verdict. -1 = "did not run" (a self-skip / opted out / no
+      runner), 0 = passed, >0 = ran and failed.
+      🔴 It used to be ok=($smoke -le 0 -and $val -le 0) -- so -SkipHostedSmoke on a host without Pester 5
+      made verify ok=True with NOTHING checked, and the deploy exited 0 as a success.
+      Now: any layer that RAN and failed -> not ok; NEITHER layer ran -> not ok, and flagged UNVERIFIED
+      (the summary then reports the deploy failed, while the rollback verdict -- computed from the exit
+      codes -- still does not roll back a deploy nobody proved broken). One layer passing is evidence.
+    #>
+    param([int]$SmokeExit = -1, [int]$ValidationExit = -1)
+    # The smoke exits 2 when it SKIPPED checks: that is neither a pass nor a failure -- UNVERIFIED.
+    $smokeSkipped = ($SmokeExit -eq 2)
+    $ranAny = ($SmokeExit -ge 0) -or ($ValidationExit -ge 0)
+    $failed = (($SmokeExit -gt 0) -and -not $smokeSkipped) -or ($ValidationExit -gt 0)
+    if ($failed)       { return @{ ok = $false; unverified = $false; detail = "smoke=$SmokeExit validation=$ValidationExit (a layer that ran FAILED)" } }
+    if ($smokeSkipped) { return @{ ok = $false; unverified = $true;  detail = "smoke=$SmokeExit validation=$ValidationExit -- UNVERIFIED: the hosted smoke skipped checks (exit 2), and a skip is not a pass" } }
+    if (-not $ranAny)  { return @{ ok = $false; unverified = $true;  detail = "smoke=$SmokeExit validation=$ValidationExit -- UNVERIFIED: neither layer ran, and a skip is not a pass" } }
+    return @{ ok = $true; unverified = $false; detail = "smoke=$SmokeExit validation=$ValidationExit" }
 }
 
 # =============================================================================
@@ -2285,6 +2514,23 @@ if (-not $StepRunner -and $hosted -and -not $ValidateOnly -and (Have 'az') -and 
         $prevImage = "$(az containerapp show @azSubArgs -g $ResourceGroup -n $ManagerApp --query 'properties.template.containers[0].image' -o tsv 2>$null)".Trim()
     } catch { Write-Verbose "pre-deploy image read failed: $($_.Exception.Message)" }
     Info "pre-deploy image (rollback fallback): $(if($prevImage){$prevImage}else{'(unknown)'})"
+}
+
+Open-PimSetupHostWindow
+
+# BUG-170 (via agent C1): the host-side ring gate now REFUSES to roll a deployed environment that carries
+# no PIM_UPDATE_RING. The order here is infra -> code -> updater, so on a first install the code step (and
+# a re-run of infra) would be refused for want of the ring the updater step installs a moment later. When
+# that updater step WILL run in this same run with an explicit -UpdateRing, the gate is told the pending
+# ring (and its source) and judges the roll by it -- exactly as if it were already there. An existing ring
+# always wins inside the gate; without an explicit ring nothing is passed and the gate's refusal stands.
+$pendingRingArgs = @{}
+$updaterPlanned = @($plan.steps | Where-Object { "$($_.key)" -eq 'updater' -and $_.do }).Count -gt 0
+if ($script:PimDeployRingExplicit -and $updaterPlanned -and "$AcrName".Trim() -and "$EnvName".Trim() -and
+    (Get-PimUpdaterStepDecision -Scenario "$Scenario" -SourceUrlTemplate "$UpdateSourceUrlTemplate" -SkipUpdater:$SkipUpdater) -eq 'install') {
+    $pendingRingArgs['PendingUpdateRing']      = $UpdateRing
+    $pendingRingArgs['PendingUpdateSourceUrl'] = "$UpdateSourceUrlTemplate".Trim()
+    Info "ring gate: this run installs the updater on ring $UpdateRing -- infra/code are judged by that ring where the environment has none yet"
 }
 
 $outcomes = New-Object System.Collections.Generic.List[object]
@@ -2368,7 +2614,9 @@ if ($verifyResult -or $halted) {
 }
 
 $rolledBack = $false
-$needRollback = $halted -or ($verdict -and -not $verdict.Healthy)
+# BUG-216: only a verdict that FAILED rolls back. UNVERIFIED (the smoke exited 2 -- it skipped checks) is
+# not healthy and is reported as such, but nothing proved the deploy broken, so nothing is rolled back.
+$needRollback = $halted -or ($verdict -and "$($verdict.State)" -eq 'failed')
 if ($needRollback -and $codeRan) {
     $rbPlan = Get-PimDeployRollbackPlan -RanStepKeys @($ranKeys.ToArray()) -PreviousRevision $prevRev -Hosted $hosted
     foreach ($a in $rbPlan.actions) {
@@ -2455,11 +2703,12 @@ if ($hosted -and -not $WhatIfPreference -and $summary.status -eq 'success') {
     Write-Host ("          -ConnectionString `"{0}`" -WhatIf" -f $(if ("$SqlConnectionString".Trim()) { $SqlConnectionString } else { "Server=tcp:$SqlServerFqdn,1433;Initial Catalog=$SqlDatabase;Encrypt=True;TrustServerCertificate=False;Connection Timeout=60;" })) -ForegroundColor White
     Write-Host '      Run it with -WhatIf first: it prints the row count per entity, and it REPLACES' -ForegroundColor DarkGray
     Write-Host '      the full set of rows for every entity it imports. Drop -WhatIf to apply.' -ForegroundColor DarkGray
-    if (-not $EasyAuthAllowedPrincipals.Count) {
-        Write-Host ''
-        Write-Host '  RESTRICT WHO CAN SIGN IN (right now: anyone in the tenant, guests included)' -ForegroundColor Yellow
-        Write-Host "      $here\Set-PimManagerEasyAuth.ps1 -App $ManagerApp -ResourceGroup $ResourceGroup ``" -ForegroundColor White
-        Write-Host "          -TenantId $TenantId -AllowedPrincipals <upn-or-group>[,<upn-or-group>]" -ForegroundColor White
+    Write-Host ''
+    Write-Host '  WHO CAN SIGN IN' -ForegroundColor Green
+    if (@($EasyAuthAllowedPrincipals | Where-Object { "$_".Trim() }).Count) { Write-Host "      the named principal(s): $(@($EasyAuthAllowedPrincipals) -join ', ')" -ForegroundColor White }
+    if ($EasyAuthAllowAllTenantUsers) { Write-Host '      every member account in the tenant (guests are not admitted)' -ForegroundColor White }
+    if (-not @($EasyAuthAllowedPrincipals | Where-Object { "$_".Trim() }).Count -and -not $EasyAuthAllowAllTenantUsers) {
+        Write-Host "      unchanged: the Manager's existing assignments (the application is assignment-required)" -ForegroundColor White
     }
     Write-Host ''
 }
@@ -2468,7 +2717,9 @@ if ($hosted -and -not $WhatIfPreference -and $summary.status -eq 'success') {
 # covers success, which is the case that would otherwise leave the key sitting there after a run
 # that looked perfect.
 Restore-PimCallerAzContext
+Close-PimSetupHostWindow        # IMP-49 t -- in the CALLER's az context, where the window was opened
 Clear-PimEphemeralPem
 
 $summary
-if ($summary.status -eq 'failed' -or $summary.status -eq 'rolledback') { exit 1 }
+# BUG-216: 'unverified' is not success either -- a deploy nothing verified must not exit 0.
+if ($summary.status -eq 'failed' -or $summary.status -eq 'rolledback' -or $summary.status -eq 'unverified') { exit 1 }

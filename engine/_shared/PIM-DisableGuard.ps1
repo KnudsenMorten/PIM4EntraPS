@@ -415,39 +415,13 @@ function Test-PimExplicitDisablePassAllowed {
 # legacy Graph-module helper Get-PimAdminsFiltered does fall back to
 # `Get-MgUser -All`; that fallback must never be copied here.)
 # =============================================================================
-# --- BUG-14: break-glass, available to the ENGINE ----------------------------------
-# These existed only in PIM-ApprovalGate.ps1 (Manager revoke guard + approval-gated
-# offboarding), which the REST engine does NOT load -- so the path that actually sets
-# accountEnabled=$false had no break-glass exclusion at all. Defined here, guarded, so
-# whichever file loads first provides the ONE definition and the other skips: the engine
-# and the Manager must never disagree about what break-glass means.
-if (-not (Get-Command Get-PimBreakGlassIdentifiers -ErrorAction SilentlyContinue)) {
-    function Get-PimBreakGlassIdentifiers {
-        # Break-glass / emergency principals to NEVER auto-disable/revoke/offboard.
-        # UPNs and/or object ids; case-insensitive. $global:PIM_BreakGlassAccounts
-        # (string[] or ';'/',' separated) or $env:PIM_BREAKGLASS_ACCOUNTS.
-        # SEC-07: one reader for every knob. Behaviour is unchanged here -- this one
-        # already honoured the environment; routing it through Get-PimSafetyKnob is what
-        # lets Test-PimSafetyKnobs assert the whole inventory uniformly.
-        $raw = Get-PimSafetyKnob -Name 'PIM_BreakGlassAccounts' -EnvName 'PIM_BREAKGLASS_ACCOUNTS'
-        if (-not $raw) { return @() }
-        $list = if ($raw -is [string]) { $raw -split '[;,]' } else { @($raw) }
-        return @($list | ForEach-Object { "$_".Trim().ToLowerInvariant() } | Where-Object { $_ })
-    }
-}
-if (-not (Get-Command Test-PimRowIsBreakGlass -ErrorAction SilentlyContinue)) {
-    function Test-PimRowIsBreakGlass {
-        param([Parameter(Mandatory)]$Row, [string[]]$Identifiers)
-        if (-not $Identifiers -or $Identifiers.Count -eq 0) { return $false }
-        $cand = @()
-        foreach ($k in 'id','principalId','principal','principalUpn','principalName','target','userPrincipalName','UserPrincipalName','Username') {
-            $p = $Row.PSObject.Properties[$k]
-            if ($p -and "$($p.Value)".Trim()) { $cand += "$($p.Value)".Trim().ToLowerInvariant() }
-        }
-        foreach ($c in $cand) { if ($Identifiers -contains $c) { return $true } }
-        return $false
-    }
-}
+# --- BUG-14 / IMP-39: break-glass, available to the ENGINE ---------------------------
+# BUG-14: these existed only in PIM-ApprovalGate.ps1, which the REST engine does NOT load -- so the
+# path that actually sets accountEnabled=$false had no break-glass exclusion at all.
+# IMP-39 (§33.28): the list now lives in SQL (pim.Settings['BreakGlassAccounts'], unioned with the
+# legacy global/env), and the ONE definition of Get-PimBreakGlassIdentifiers / Test-PimRowIsBreakGlass
+# is PIM-BreakGlassAccounts.ps1. An unreadable store makes EVERY row read as break-glass (fail safe).
+if (-not (Get-Command Get-PimBreakGlassAccountList -ErrorAction SilentlyContinue)) { . (Join-Path $PSScriptRoot 'PIM-BreakGlassAccounts.ps1') }
 
 function Get-PimUpnLocalPart {
     # BUG-13. The identity-bearing half of a UPN, lower-cased. Admin accounts are named
@@ -553,6 +527,10 @@ function Select-PimDisableRemovals {
                         $keep.Count, $bgHit.Count, $attributable.Count, $unmanaged.Count)
     }
 }
+
+# IMP-33: the unmanaged-admin report functions live in their own file (the Manager loads ONLY that file -- loading this
+# one there changed its offboard gate). Loaded here so every engine path that has the guard has the report too.
+. (Join-Path $PSScriptRoot 'PIM-UnmanagedAdmins.ps1')
 
 function Get-PimAdminAccountPrefixes {
     <#
@@ -697,13 +675,153 @@ function Test-PimRemoveBudgetAllowed {
         toRemove=$ToRemove; budget=$budget; scope=$Scope; operation=$Operation; scanned=$Scanned }
 }
 
+# =============================================================================
+# 🔴 BUG-184 (§33.28) -- THE THREE SAFETY ALERTS WERE NEVER SENT.
+# The removal-budget trip, the account-disable circuit breaker and the policy mass-change HOLD all
+# called `Send-PimNotifyMail -Type 'alert'`. There is no 'alert' template -- only 'alert-notice' -- so
+# every send returned { sent=$false; reason="no template 'alert'" }, the result was piped to Out-Null,
+# and the budget path then printed "alert emailed to <x>" anyway. The token names (Subject/Body) did
+# not match the template's either (AlertTitle/AlertDetail/...).
+# ONE sender for all three now: the real template, the template's own tokens, the result READ, and a
+# failed or impossible send REPORTED as such -- never "emailed" unless it was.
+# Recipients: the PIM_AlertRecipient knob (';'/',' list) UNION the Manager's Alerting recipients
+# (pim.Settings['Alerting'], the same list the job-failure alert uses), so an environment configured
+# only in the Manager is paged too.
+# =============================================================================
+function Get-PimSafetyAlertRecipients {
+    [CmdletBinding()] param()
+    $out = New-Object System.Collections.Generic.List[string]
+    $add = { param($v) $t = "$v".Trim(); if ($t -and -not (@($out) | Where-Object { $_ -ieq $t })) { $out.Add($t) } }
+    foreach ($x in ("$(Get-PimSafetyKnob -Name 'PIM_AlertRecipient')" -split '[;,]')) { & $add $x }   # SEC-07: one reader
+    if (Get-Command Get-PimJobAlertingConfig -ErrorAction SilentlyContinue) {
+        try { foreach ($x in @((Get-PimJobAlertingConfig).recipients)) { & $add $x } }
+        catch { Write-Warning "[engine] the Manager's alert recipients (pim.Settings['Alerting']) could not be read: $($_.Exception.Message)" }
+    }
+    return $out.ToArray()
+}
+
+function Send-PimSafetyAlert {
+    <#
+      Send one safety alert through the 'alert-notice' template to every configured recipient.
+      NEVER throws (a failed alert must never mask the safe outcome it reports). Returns
+        @{ status = sent|partial|failed|no-recipient|no-mailer|debounced; sent; recipients; failures; detail }
+      and says on the console exactly which of those happened. -SwallowScope names the IMP-03 scope a
+      failure is recorded under, so each caller keeps its own.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$Title,
+        [Parameter(Mandatory)][string]$Detail,
+        [string]$Event = 'engine-failure',
+        [string]$Tab = 'jobs',
+        [string]$SwallowScope = 'safety-alert-mail',
+        [int]$DebounceMinutes = 60
+    )
+    $res = [ordered]@{ status = ''; sent = 0; recipients = @(); failures = @(); detail = '' }
+    try {
+        $to = @(Get-PimSafetyAlertRecipients)
+        $res.recipients = $to
+        if (-not $to.Count) {
+            $res.status = 'no-recipient'
+            $res.detail = "NO alert recipient is configured (PIM_AlertRecipient, or Manager > Alerting recipients) -- '$Title' could NOT be emailed"
+            try { Write-Host "  [engine] $($res.detail)" -ForegroundColor Red } catch { }
+            return [pscustomobject]$res
+        }
+        if (-not (Get-Command Send-PimNotifyMail -ErrorAction SilentlyContinue)) {
+            $res.status = 'no-mailer'
+            $res.detail = "the mail sender is not loaded in this runtime -- '$Title' was NOT emailed to $($to -join ', ')"
+            try { Write-Host "  [engine] $($res.detail)" -ForegroundColor Red } catch { }
+            if (Get-Command Write-PimSwallowed -ErrorAction SilentlyContinue) {
+                Write-PimSwallowed -Scope $SwallowScope -ErrorRecord $null -Consequence "the safety alert '$Title' was NOT sent (no mail sender loaded) -- nobody is being paged for this trip"
+            }
+            return [pscustomobject]$res
+        }
+        # Debounce against the shared alert feed, so a breaker that stays tripped does not mail every tick.
+        $cs = $null; $key = $null
+        if (Get-Command Get-PimSqlSettingsConnectionString -ErrorAction SilentlyContinue) { try { $cs = Get-PimSqlSettingsConnectionString } catch { $cs = $null } }
+        if ($DebounceMinutes -gt 0 -and $cs -and (Get-Command Test-PimAlertDebounced -ErrorAction SilentlyContinue) -and
+            (Get-Command Read-PimAlertFeedSql -ErrorAction SilentlyContinue) -and (Get-Command Get-PimAlertDedupeKey -ErrorAction SilentlyContinue)) {
+            try {
+                $key = Get-PimAlertDedupeKey -Event $Event -Title $Title -Detail $Detail
+                if (Test-PimAlertDebounced -Feed (Read-PimAlertFeedSql -ConnectionString $cs) -DedupeKey $key -DebounceMinutes $DebounceMinutes) {
+                    $res.status = 'debounced'
+                    $res.detail = "'$Title' was already alerted within the last $DebounceMinutes minute(s) -- not re-sent"
+                    try { Write-Host "  [engine] $($res.detail)" -ForegroundColor DarkYellow } catch { }
+                    return [pscustomobject]$res
+                }
+            } catch { }
+        }
+        $tokens = @{
+            AlertTitle  = $Title
+            AlertEvent  = $Event
+            AlertDetail = $Detail
+            AlertTab    = $Tab
+            TenantName  = "$($global:PIM_TenantName)"
+            Instance    = 'engine'
+            WhenUtc     = [datetime]::UtcNow.ToString('yyyy-MM-dd HH:mm:ss') + ' UTC'
+        }
+        $fails = New-Object System.Collections.Generic.List[string]
+        foreach ($r in $to) {
+            $why = ''
+            try {
+                $m = Send-PimNotifyMail -Type 'alert-notice' -Tokens $tokens -Recipient $r
+                $ok = $false
+                if ($m -is [hashtable]) { $ok = [bool]$m['sent']; $why = "$($m['reason'])" }
+                elseif ($m -and $m.PSObject.Properties['sent']) { $ok = [bool]$m.sent; $why = "$($m.reason)" }
+                else { $why = 'the mail sender returned no result' }
+                if ($ok) { $res.sent++ } else { $fails.Add("${r}: $(if ($why) { $why } else { 'not sent' })") }
+            } catch { $fails.Add("${r}: $($_.Exception.Message)") }
+        }
+        $res.failures = $fails.ToArray()
+        if ($res.sent -and -not $fails.Count) { $res.status = 'sent' } elseif ($res.sent) { $res.status = 'partial' } else { $res.status = 'failed' }
+        if ($res.sent) { try { Write-Host ("  [engine] safety alert emailed to {0} of {1} recipient(s)" -f $res.sent, $to.Count) -ForegroundColor Yellow } catch { } }
+        if ($fails.Count) {
+            $res.detail = "safety alert '$Title' was NOT sent to: " + ($fails -join '; ')
+            try { Write-Host "  [engine] $($res.detail)" -ForegroundColor Red } catch { }
+            try { Write-Warning $res.detail } catch { }
+            if (Get-Command Write-PimSwallowed -ErrorAction SilentlyContinue) {
+                $cons = if ($res.sent) { "the safety alert '$Title' reached only $($res.sent) of $($to.Count) recipient(s)" } else { "the safety alert '$Title' was NOT sent -- nobody is being paged for this trip" }
+                Write-PimSwallowed -Scope $SwallowScope -ErrorRecord $null -Consequence ($cons + ' (' + ($fails -join '; ') + ')')
+            }
+        }
+        # Record it in the shared alert feed (the proof, and what the debounce reads next tick).
+        if ($cs -and (Get-Command New-PimAlertRecord -ErrorAction SilentlyContinue) -and (Get-Command Write-PimAlertFeedSql -ErrorAction SilentlyContinue)) {
+            try {
+                $sr = [ordered]@{ event = $Event; fired = $true; sent = $res.sent; recipients = @($to); reason = ($fails -join '; ') }
+                [void](Write-PimAlertFeedSql -ConnectionString $cs -Record (New-PimAlertRecord -Event $Event -Title $Title -Detail $Detail -LinkTab $Tab -SendResult $sr -Instance 'engine'))
+            } catch { Write-Warning "[engine] safety alert '$Title' was raised but NOT recorded in the alert feed ($($_.Exception.Message))." }
+        }
+    } catch {
+        $res.status = 'failed'; $res.detail = "safety alert '$Title' failed: $($_.Exception.Message)"
+        try { Write-Warning $res.detail } catch { }
+        if (Get-Command Write-PimSwallowed -ErrorAction SilentlyContinue) {
+            Write-PimSwallowed -Scope $SwallowScope -ErrorRecord $_ -Consequence "the safety alert '$Title' was NOT sent -- nobody is being paged for this trip"
+        }
+    }
+    return [pscustomobject]$res
+}
+
+
 function Write-PimRemoveBudgetAlert {
     # Loud + EMAILED alert when G4 trips. NEVER throws (an alert failure must not mask the
     # abort). The recipient is CONFIGURED, never hardcoded: a real address in shipped
     # source is exactly what SEC-05 removed. Set $global:PIM_AlertRecipient (or
-    # $env:PIM_AlertRecipient) -- the real value lives in internal/ and the container env.
+    # $env:PIM_AlertRecipient), or the Manager's Alerting recipients.
+    # BUG-184: sent through Send-PimSafetyAlert ('alert-notice', result READ) -- the console says
+    # "emailed" only when a mail actually went out. -PassThru returns the send result.
+    # -PlanOnly: the run is a PLAN / verify (-WhatIf), which removes nothing whatever the budget says. It is
+    # logged as a plan finding and NEITHER audited as a trip NOR mailed. Incident 2026-09-18: once BUG-184 made
+    # these alerts really send, the read-only convergence check mailed "engine-failure: REMOVAL BUDGET tripped"
+    # on every full plan, although nothing had been, or could be, removed.
     [CmdletBinding()]
-    param([Parameter(Mandatory)][object]$Decision)
+    param([Parameter(Mandatory)][object]$Decision, [switch]$PassThru, [switch]$PlanOnly)
+    if ($PlanOnly) {
+        $pm = ("[engine] PLAN ONLY -- scope '{0}': {1} live item(s) are not in the desired set (budget {2}). This run removes nothing; no alert is sent for a plan." -f `
+                $Decision.scope, $Decision.toRemove, $Decision.budget)
+        try { Write-Host $pm -ForegroundColor DarkYellow } catch { }
+        if ($PassThru) { return [pscustomobject]@{ sent = $false; skipped = $true; reason = 'plan-only run: nothing is removed, so no alert' } }
+        return
+    }
     $msg = ("[engine] REMOVAL BUDGET EXCEEDED in scope '{0}': {1} would {2} {3} item(s), budget {4}. Removed NOTHING in this scope." -f `
             $Decision.scope, 'the engine', $Decision.operation, $Decision.toRemove, $Decision.budget)
     try { Write-Host $msg -ForegroundColor Red } catch { }
@@ -718,25 +836,10 @@ function Write-PimRemoveBudgetAlert {
             Write-PimSwallowed -Scope 'remove-budget-audit' -ErrorRecord $_ -Consequence 'the removal-budget trip was NOT written to the audit trail'
         }
     }
-    $to = "$(Get-PimSafetyKnob -Name 'PIM_AlertRecipient')".Trim()   # SEC-07: one reader
-    if (-not $to) {
-        # Not silent: an alert with nowhere to go is itself a finding the operator must see.
-        try { Write-Host "  [engine] NO PIM_AlertRecipient configured -- the removal-budget alert could not be EMAILED." -ForegroundColor Red } catch { }
-        return
-    }
-    try {
-        if (Get-Command Send-PimNotifyMail -ErrorAction SilentlyContinue) {
-            Send-PimNotifyMail -Type 'alert' -Recipient $to -Tokens @{
-                Subject = ("PIM REMOVAL BUDGET tripped -- scope '{0}' ({1} {2} blocked)" -f $Decision.scope, $Decision.toRemove, $Decision.operation)
-                Body    = ($msg + "`r`n`r`nScanned: $($Decision.scanned)`r`nBudget : $($Decision.budget)`r`nNothing was removed. Investigate the desired set before re-running.")
-            } | Out-Null
-            Write-Host ("  [engine] removal-budget alert emailed to {0}" -f $to) -ForegroundColor Yellow
-        }
-    } catch {
-        if (Get-Command Write-PimSwallowed -ErrorAction SilentlyContinue) {
-            Write-PimSwallowed -Scope 'remove-budget-alert-mail' -ErrorRecord $_ -Consequence "the removal-budget alert mail to $to was NOT sent -- nobody is being told about this trip"
-        }
-    }
+    $r = Send-PimSafetyAlert -SwallowScope 'remove-budget-alert-mail' `
+            -Title ("REMOVAL BUDGET tripped -- scope '{0}' ({1} {2} blocked)" -f $Decision.scope, $Decision.toRemove, $Decision.operation) `
+            -Detail ($msg + " Scanned: $($Decision.scanned). Budget: $($Decision.budget). Nothing was removed. Investigate the desired set before re-running.")
+    if ($PassThru) { return $r }
 }
 
 function Write-PimDisableAbortAlert {
@@ -745,14 +848,14 @@ function Write-PimDisableAbortAlert {
     # so the operator + monitoring see it. NEVER throws (an alert failure must not mask
     # the abort, which is the safe outcome).
     [CmdletBinding()]
-    param([Parameter(Mandatory)][string]$Scope, [Parameter(Mandatory)][object]$Decision)
+    param([Parameter(Mandatory)][string]$Scope, [Parameter(Mandatory)][object]$Decision, [switch]$PassThru)
     $msg = ("[engine] {0}: account-disable pass ABORTED by safety guard [{1}] -- {2}. Disabled NOTHING this run." -f $Scope, $Decision.tripped, $Decision.reason)
     Write-Host $msg -ForegroundColor Red
     try { if (Get-Command Write-Warning -ErrorAction SilentlyContinue) { Write-Warning $msg } } catch {}
-    # IMP-03: the two catches below stay non-rethrowing -- BUG-01's whole point is that
+    # IMP-03: the two channels below stay non-rethrowing -- BUG-01's whole point is that
     # a trip must be announced, and an alert-channel failure must not turn a safe abort
     # into an exception. But a channel that fails silently is the same as no alert at
-    # all, so each one now says so on the console/warning stream it still has.
+    # all, so each one says so on the console/warning stream it still has.
     try {
         if (Get-Command Write-PimAuditEvent -ErrorAction SilentlyContinue) {
             Write-PimAuditEvent -Action 'account.disable.aborted' -Target $Scope -After @{ tripped=$Decision.tripped; reason=$Decision.reason; toDisable=$Decision.toDisable; scanned=$Decision.scanned } | Out-Null
@@ -763,20 +866,10 @@ function Write-PimDisableAbortAlert {
                 -Consequence ("the circuit-breaker trip for '{0}' was NOT written to the audit trail (the console line above is the only record)" -f $Scope)
         }
     }
-    try {
-        # SEC-07 (same class). This read ONLY $global:PIM_AlertRecipient, while the G4
-        # budget alert reads $global: then $env:. The containers set PIM_AlertRecipient as
-        # an ENV VAR -- so in the deployed fleet the G4 trip emailed and this one, the
-        # ORIGINAL circuit breaker from the 2026-06-15 incident, never did. BUG-01's whole
-        # point is that a trip must be announced.
-        $to = "$(Get-PimSafetyKnob -Name 'PIM_AlertRecipient')".Trim()
-        if ((Get-Command Send-PimNotifyMail -ErrorAction SilentlyContinue) -and $to) {
-            Send-PimNotifyMail -Type 'alert' -Tokens @{ Subject='PIM account-disable circuit breaker tripped'; Body=$msg } -Recipient $to | Out-Null
-        }
-    } catch {
-        if (Get-Command Write-PimSwallowed -ErrorAction SilentlyContinue) {
-            Write-PimSwallowed -Scope 'disable-abort-alert-mail' -ErrorRecord $_ `
-                -Consequence 'the circuit-breaker alert mail was NOT sent -- nobody is being paged for this trip'
-        }
-    }
+    # SEC-07 (same class): the recipient is read $global: then $env: (the containers set it as an ENV
+    # VAR). BUG-184: through Send-PimSafetyAlert, so the send actually uses a template that exists and
+    # a failed send is reported under 'disable-abort-alert-mail' ("nobody is being paged").
+    $r = Send-PimSafetyAlert -SwallowScope 'disable-abort-alert-mail' `
+            -Title ("account-disable circuit breaker tripped -- {0} [{1}]" -f $Scope, $Decision.tripped) -Detail $msg
+    if ($PassThru) { return $r }
 }

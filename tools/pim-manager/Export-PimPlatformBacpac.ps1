@@ -1,7 +1,7 @@
 <#
 .SYNOPSIS
     6-hourly portable BACPAC export of the PimPlatform Azure SQL database, run from INSIDE the
-    PIM VNET (mgmt1 or a VNET-injected runner), with retention pruning. Cert-only auth.
+    PIM VNET (a management host or a VNET-injected runner), with retention pruning. Cert-only auth.
 
 .DESCRIPTION
     PimPlatform's logical server and its backup storage account both have
@@ -12,21 +12,24 @@
     will NOT make).
 
     This script instead exports with SqlPackage.exe from a host that IS on the allowed VNET
-    (mgmt1, or the ca-pim-scheduler container if SqlPackage is baked into its image). It:
-      1. Connects as the PIM management SPN via certificate (Connect-AzAccount).
-      2. Acquires an AAD access token for SQL (https://database.windows.net/) - no SQL password.
+    (the management host, or a VNET-injected runner). It:
+      1. Connects as the caller-supplied SPN via CERTIFICATE (Connect-AzAccount).
+      2. Acquires an Entra access token for SQL (https://database.windows.net/) - no SQL password.
       3. SqlPackage /a:Export writes a local .bacpac, authenticating with /AccessToken.
       4. Uploads the .bacpac to the private 'sqlbackups' container on the backup storage
-         account (mgmt1 reaches the private blob endpoint over the VNET), then prunes
-         anything older than RetentionDays.
+         account WITH ENTRA AUTH (New-AzStorageContext -UseConnectedAccount) -- never an
+         account key -- then prunes anything older than RetentionDays.
 
-    The running SPN must be a database user in PimPlatform (the management SPN is the AAD
-    admin on the server, so it already is). SqlPackage must be installed:
+    Rights the SPN needs: a database user in the PIM database (read), and 'Storage Blob Data
+    Contributor' on the backup storage account (or its container). SqlPackage must be installed:
         dotnet tool install --global microsoft.sqlpackage
     or downloaded from https://aka.ms/sqlpackage-windows .
 
 .NOTES
-    Auth model per CLAUDE.md: SPN + certificate; ids/thumbprint read from kv-automatit-dev.
+    IMP-49 j: SPN + certificate only, and BOTH values are passed in (-ApplicationId,
+    -CertificateThumbprint) -- the script no longer names any Key Vault or secret of the
+    environment it happens to be developed in, and it no longer reads a storage ACCOUNT KEY
+    (a key is full control of every container in the account, and it is not audited per caller).
     No secrets, no device-code. AccessToken is passed to SqlPackage in-process and not logged.
 #>
 [CmdletBinding()]
@@ -36,13 +39,15 @@ param(
     # Real values: internal/REAL-IDENTIFIERS.md (never published).
     [string] $TenantId            = "$($env:PIM_TenantId)",
     [string] $SubscriptionId      = "$($env:PIM_SqlSubscriptionId)",
-    [string] $ApplicationId,                 # PIM management SPN client id (from kv-automatit-dev)
-    [string] $CertificateThumbprint,         # its cert thumbprint (from kv-automatit-dev)
+    [string] $ApplicationId,                 # the exporting SPN's client id (from YOUR secret store; required)
+    [string] $CertificateThumbprint,         # its certificate thumbprint, in LocalMachine\My or CurrentUser\My (required)
     # SEC-02, same rule: a server FQDN / resource group / storage account name IS a real
     # environment identifier. Pass them, or set PIM_SqlServerFqdn / PIM_SqlResourceGroup /
     # PIM_BackupStorageAccount. Real values: internal/REAL-IDENTIFIERS.md (never published).
     [string] $ServerFqdn          = "$($env:PIM_SqlServerFqdn)",
     [string] $DatabaseName        = 'PimPlatform',
+    # IMP-49 j: no longer read (it only served the account-key lookup); accepted so existing callers still bind.
+    # audit:unused-ok ResourceGroupName
     [string] $ResourceGroupName   = "$($env:PIM_SqlResourceGroup)",
     [string] $StorageAccountName  = "$($env:PIM_BackupStorageAccount)",
     [string] $ContainerName       = 'sqlbackups',
@@ -52,13 +57,15 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-Disable-AzContextAutosave -Scope Process | Out-Null
 
-# If ids not supplied, read them from the central vault using the already-present Az login on mgmt1.
-if (-not $ApplicationId -or -not $CertificateThumbprint) {
-    $ApplicationId        = Get-AzKeyVaultSecret -VaultName kv-automatit-dev -Name management-spn-clientid-myfamilynetwork -AsPlainText
-    $CertificateThumbprint = Get-AzKeyVaultSecret -VaultName kv-automatit-dev -Name management-spn-certificatethumbprint-myfamilynetwork -AsPlainText
-}
+# IMP-49 j: every identity value is an INPUT. This used to fall back to reading two named secrets from one specific
+# internal Key Vault -- environment detail inside a solution file, and a silent switch to a different identity whenever
+# a caller forgot a parameter. Refuse instead, before anything is touched.
+$missingIn = @(foreach ($p in @(@('TenantId', $TenantId), @('SubscriptionId', $SubscriptionId), @('ApplicationId', $ApplicationId),
+                              @('CertificateThumbprint', $CertificateThumbprint), @('ServerFqdn', $ServerFqdn), @('StorageAccountName', $StorageAccountName))) {
+    if (-not "$($p[1])".Trim()) { "-$($p[0])" } })
+if ($missingIn.Count) { throw "Export-PimPlatformBacpac: $($missingIn -join ', ') required (SPN + certificate; no value is read from any vault by this script)." }
+Disable-AzContextAutosave -Scope Process | Out-Null
 
 Connect-AzAccount -ServicePrincipal -ApplicationId $ApplicationId -Tenant $TenantId `
     -CertificateThumbprint $CertificateThumbprint -SubscriptionId $SubscriptionId -WarningAction SilentlyContinue | Out-Null
@@ -82,9 +89,9 @@ Write-Output "[$(Get-Date -Format o)] SqlPackage export $ServerFqdn/$DatabaseNam
     /p:VerifyExtraction=true
 if ($LASTEXITCODE -ne 0) { throw "SqlPackage export failed with exit code $LASTEXITCODE" }
 
-# Upload to private blob (mgmt1 reaches the private endpoint over the VNET)
-$key   = (Get-AzStorageAccountKey -ResourceGroupName $ResourceGroupName -Name $StorageAccountName)[0].Value
-$stCtx = New-AzStorageContext -StorageAccountName $StorageAccountName -StorageAccountKey $key
+# Upload to private blob (this host reaches the private endpoint over the VNET).
+# IMP-49 j: ENTRA auth as the connected SPN (Storage Blob Data Contributor), never the account key.
+$stCtx = New-AzStorageContext -StorageAccountName $StorageAccountName -UseConnectedAccount
 if (-not (Get-AzStorageContainer -Name $ContainerName -Context $stCtx -ErrorAction SilentlyContinue)) {
     New-AzStorageContainer -Name $ContainerName -Context $stCtx -Permission Off | Out-Null
 }

@@ -380,6 +380,191 @@ function Get-PimGraphAppRoleMap {
     return $h
 }
 
+function Get-PimEngineSpnGraphRoles {
+    <#
+      BUG-181 -- THE ENGINE SPN'S Graph app-role list, DERIVED from the engine map above, never kept by hand.
+      setup/Grant-PimGraphAppRoles.ps1 and tools/setup/Install-PimEngineAppRegistration.ps1 each carried their
+      own literal list, and both had drifted BEHIND the map: no RoleManagement.ReadWrite.Directory (creates
+      role-assignable groups, 70.16), no UserAuthenticationMethod.ReadWrite.All (mints TAPs), no Domain.Read.All
+      (the downlink's default domain), no AppRoleAssignment / Application.Read / Defender / DeviceManagementRBAC.
+      An engine running AS THE SPN (the VM path, a master acting cross-tenant) therefore could not do what the
+      managed identity could, and nothing said so. One source now: the SPN is granted exactly the engine map.
+      Returns the sorted role NAMES. Mail.Send is REFUSED here, not merely absent (IMP-06e: a tenant-wide
+      Mail.Send defeats the per-mailbox Exchange RBAC scope).
+    #>
+    [CmdletBinding()] param()
+    $names = @((Get-PimGraphAppRoleMap -RoleSet Engine).Keys | Sort-Object)
+    if ($names -contains 'Mail.Send') { throw 'Get-PimEngineSpnGraphRoles: the engine map carries Mail.Send -- REFUSED (the send right is the scoped Exchange RBAC assignment, never tenant-wide).' }
+    return $names
+}
+
+function Get-PimSqlContainedUserSql {
+    <#
+      PURE. The T-SQL that converges ONE contained database user for an Entra application / managed identity,
+      created from its APP ID as a SID (WITH SID = <appId bytes>, TYPE = E). `FROM EXTERNAL PROVIDER` is NOT used:
+      it makes SQL resolve the name through Microsoft Graph AS THE SERVER's identity, which fails on these servers.
+      The SID form needs no directory lookup at all.
+        -Roles          fixed database roles the user must be a member of (added when missing)
+        -RevokeRoles    fixed database roles the user must NOT be a member of (dropped when present) -- least
+                        privilege is converged, not just granted, so an earlier broader grant is taken back
+        -SelectObjects  'schema.table' names the user may SELECT (GRANT SELECT ON OBJECT); a name that does not
+                        exist yet is skipped by OBJECT_ID, so a registry without an optional table still applies
+        -WriteObjects   'schema.object' names the user may INSERT + UPDATE (never DELETE) -- the publish job's one
+                        CHECK-OPTION view onto its own last-run row (PIM-JobCadence.ps1). Same OBJECT_ID skip.
+      Same-name-different-SID (the identity was rebuilt): owned schemas go to dbo, then the user is recreated --
+      the BUG-47 shape Grant-PimMiSql handles.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$DbUserName,
+        [Parameter(Mandatory)][string]$AppId,
+        [string[]]$Roles = @(),
+        [string[]]$RevokeRoles = @(),
+        [string[]]$SelectObjects = @(),
+        [string[]]$WriteObjects = @()
+    )
+    if ("$DbUserName" -notmatch '^[A-Za-z0-9][A-Za-z0-9 ._@-]{0,127}$') { throw "Get-PimSqlContainedUserSql: '$DbUserName' is not a safe database user name." }
+    foreach ($o in @($WriteObjects)) { if ("$o" -notmatch '^[A-Za-z_][A-Za-z0-9_]*\.[A-Za-z_][A-Za-z0-9_]*$') { throw "Get-PimSqlContainedUserSql: '$o' is not a schema.object name." } }
+    $okRoles = @('db_datareader', 'db_datawriter', 'db_ddladmin', 'db_owner', 'db_securityadmin', 'db_accessadmin', 'db_backupoperator', 'db_denydatareader', 'db_denydatawriter')
+    foreach ($r in @($Roles) + @($RevokeRoles)) { if ("$r" -and "$r" -notin $okRoles) { throw "Get-PimSqlContainedUserSql: '$r' is not a fixed database role this helper manages." } }
+    foreach ($r in @($Roles)) { if (@($RevokeRoles) -contains $r) { throw "Get-PimSqlContainedUserSql: '$r' is both granted and revoked." } }
+    foreach ($o in @($SelectObjects)) { if ("$o" -notmatch '^[A-Za-z_][A-Za-z0-9_]*\.[A-Za-z_][A-Za-z0-9_]*$') { throw "Get-PimSqlContainedUserSql: '$o' is not a schema.table name." } }
+    $sid = ConvertTo-PimSqlSidFromAppId -AppId $AppId
+    $n = "$DbUserName".Replace("'", "''")
+    $q = "[$("$DbUserName".Replace(']', ']]'))]"
+    $sb = New-Object System.Text.StringBuilder
+    [void]$sb.AppendLine("IF NOT EXISTS (SELECT 1 FROM sys.database_principals WHERE name = N'$n' AND sid = $sid)")
+    [void]$sb.AppendLine('BEGIN')
+    [void]$sb.AppendLine("    IF EXISTS (SELECT 1 FROM sys.database_principals WHERE name = N'$n')")
+    [void]$sb.AppendLine('    BEGIN')
+    [void]$sb.AppendLine('        DECLARE @reassign NVARCHAR(MAX);')
+    [void]$sb.AppendLine("        SELECT @reassign = STRING_AGG('ALTER AUTHORIZATION ON SCHEMA::' + QUOTENAME(s.name) + ' TO [dbo];', ' ')")
+    [void]$sb.AppendLine('        FROM sys.schemas s JOIN sys.database_principals p ON s.principal_id = p.principal_id')
+    [void]$sb.AppendLine("        WHERE p.name = N'$n';")
+    [void]$sb.AppendLine('        IF @reassign IS NOT NULL EXEC sp_executesql @reassign;')
+    [void]$sb.AppendLine("        DROP USER $q;")
+    [void]$sb.AppendLine('    END')
+    [void]$sb.AppendLine("    CREATE USER $q WITH SID = $sid, TYPE = E;")
+    [void]$sb.AppendLine('END')
+    foreach ($r in @($Roles | Where-Object { "$_" })) {
+        [void]$sb.AppendLine("IF IS_ROLEMEMBER('$r', N'$n') = 0 ALTER ROLE [$r] ADD MEMBER $q;")
+    }
+    foreach ($r in @($RevokeRoles | Where-Object { "$_" })) {
+        [void]$sb.AppendLine("IF IS_ROLEMEMBER('$r', N'$n') = 1 ALTER ROLE [$r] DROP MEMBER $q;")
+    }
+    foreach ($o in @($SelectObjects | Where-Object { "$_" })) {
+        $parts = "$o".Split('.')
+        [void]$sb.AppendLine("IF OBJECT_ID(N'$o') IS NOT NULL GRANT SELECT ON OBJECT::[$($parts[0])].[$($parts[1])] TO $q;")
+    }
+    foreach ($o in @($WriteObjects | Where-Object { "$_" })) {
+        $parts = "$o".Split('.')
+        [void]$sb.AppendLine("IF OBJECT_ID(N'$o') IS NOT NULL GRANT INSERT, UPDATE ON OBJECT::[$($parts[0])].[$($parts[1])] TO $q;")
+    }
+    return $sb.ToString()
+}
+
+function Get-PimSqlContainedUserReadBackSql {
+    <#
+      PURE. One-row read-back of what Get-PimSqlContainedUserSql converged, so the caller proves the outcome instead of
+      trusting the batch: sidOk (the user exists WITH that SID), one column per role (1 = member), one per object
+      (1 = SELECT granted, NULL = the object does not exist). Column names: role_<role>, sel_<schema>_<table>.
+    #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string]$DbUserName, [Parameter(Mandatory)][string]$AppId, [string[]]$Roles = @(), [string[]]$SelectObjects = @(), [string[]]$WriteObjects = @())
+    $sid = ConvertTo-PimSqlSidFromAppId -AppId $AppId
+    $n = "$DbUserName".Replace("'", "''")
+    $cols = New-Object System.Collections.Generic.List[string]
+    [void]$cols.Add("CASE WHEN EXISTS (SELECT 1 FROM sys.database_principals WHERE name = N'$n' AND sid = $sid) THEN 1 ELSE 0 END AS sidOk")
+    foreach ($r in @($Roles | Where-Object { "$_" } | Select-Object -Unique)) {
+        [void]$cols.Add(("CASE WHEN EXISTS (SELECT 1 FROM sys.database_role_members rm JOIN sys.database_principals rp ON rp.principal_id = rm.role_principal_id " +
+                         "JOIN sys.database_principals mp ON mp.principal_id = rm.member_principal_id WHERE rp.name = N'$r' AND mp.name = N'$n') THEN 1 ELSE 0 END AS [role_$r]"))
+    }
+    foreach ($o in @($SelectObjects | Where-Object { "$_" } | Select-Object -Unique)) {
+        $safe = "$o".Replace('.', '_')
+        [void]$cols.Add(("CASE WHEN OBJECT_ID(N'$o') IS NULL THEN NULL WHEN EXISTS (SELECT 1 FROM sys.database_permissions dp JOIN sys.database_principals gp ON gp.principal_id = dp.grantee_principal_id " +
+                         "WHERE gp.name = N'$n' AND dp.class = 1 AND dp.major_id = OBJECT_ID(N'$o') AND dp.permission_name = 'SELECT' AND dp.state IN ('G','W')) THEN 1 ELSE 0 END AS [sel_$safe]"))
+    }
+    foreach ($o in @($WriteObjects | Where-Object { "$_" } | Select-Object -Unique)) {
+        $safe = "$o".Replace('.', '_')
+        foreach ($perm in @('INSERT', 'UPDATE')) {
+            [void]$cols.Add(("CASE WHEN OBJECT_ID(N'$o') IS NULL THEN NULL WHEN EXISTS (SELECT 1 FROM sys.database_permissions dp JOIN sys.database_principals gp ON gp.principal_id = dp.grantee_principal_id " +
+                             "WHERE gp.name = N'$n' AND dp.class = 1 AND dp.major_id = OBJECT_ID(N'$o') AND dp.permission_name = '$perm' AND dp.state IN ('G','W')) THEN 1 ELSE 0 END AS [$($perm.Substring(0,3).ToLowerInvariant())_$safe]"))
+        }
+    }
+    return ('SELECT ' + ($cols -join ",`n       ") + ';')
+}
+
+function Test-PimSqlContainedUserReadBack {
+    <#
+      PURE. Judge a Get-PimSqlContainedUserReadBackSql row: every -Roles member, no -RevokeRoles member, every EXISTING
+      -SelectObjects object granted. Returns { ok; problems[] }. A missing row is a failure, never a pass.
+    #>
+    [CmdletBinding()]
+    param([object]$Row, [string[]]$Roles = @(), [string[]]$RevokeRoles = @(), [string[]]$SelectObjects = @(), [string[]]$WriteObjects = @(), [string]$DbUserName = 'the user')
+    $p = New-Object System.Collections.Generic.List[string]
+    if ($null -eq $Row) { return [pscustomobject]@{ ok = $false; problems = @('the read-back returned no row -- nothing is proven') } }
+    $get = { param($name) $pr = $Row.PSObject.Properties[$name]; if ($pr) { $pr.Value } else { $null } }
+    if ("$(& $get 'sidOk')" -ne '1') { [void]$p.Add("$DbUserName does not exist with the expected SID") }
+    foreach ($r in @($Roles | Where-Object { "$_" })) { if ("$(& $get "role_$r")" -ne '1') { [void]$p.Add("$DbUserName is NOT a member of $r") } }
+    foreach ($r in @($RevokeRoles | Where-Object { "$_" })) { if ("$(& $get "role_$r")" -eq '1') { [void]$p.Add("$DbUserName is STILL a member of $r (least privilege not converged)") } }
+    foreach ($o in @($SelectObjects | Where-Object { "$_" })) {
+        $v = & $get ("sel_" + "$o".Replace('.', '_'))
+        if ($null -eq $v -or $v -is [DBNull]) { continue }   # the object does not exist in this store: nothing to grant
+        if ("$v" -ne '1') { [void]$p.Add("$DbUserName has no SELECT on $o") }
+    }
+    foreach ($o in @($WriteObjects | Where-Object { "$_" })) {
+        foreach ($perm in @('ins', 'upd')) {
+            $v = & $get ("$($perm)_" + "$o".Replace('.', '_'))
+            if ($null -eq $v -or $v -is [DBNull]) { continue }
+            if ("$v" -ne '1') { [void]$p.Add("$DbUserName has no $(if ($perm -eq 'ins') { 'INSERT' } else { 'UPDATE' }) on $o") }
+        }
+    }
+    return [pscustomobject]@{ ok = ($p.Count -eq 0); problems = @($p.ToArray()) }
+}
+
+function Get-PimBaselinePublishSqlReads {
+    <#
+      SEC-39 -- the ONLY objects the signed-baseline publish job reads (engine/_shared/PIM-BaselinePublish.ps1,
+      Get-PimBaselineBundlePayload). Its database user is granted SELECT on these and nothing else.
+      tests/Test-PimBaselinePublishJob.ps1 parses every FROM in the producer and fails when it reads a table
+      that is not listed here, so a new read cannot land as a runtime "permission denied".
+    #>
+    [CmdletBinding()] param()
+    return @('pim.CentralAdmins', 'pim.Rows', 'pim.TenantRoleProjection', 'platform.Tenants')
+}
+
+function Update-PimLauncherIdentityBlock {
+    <#
+      PURE. IMP-49 p -- Install-PimEngineAppRegistration APPENDED its identity block to LauncherConfig.custom.ps1 on
+      every run, so a file grew one duplicate block per run (nine were found in one tree) and the LAST one silently
+      won. This returns -Existing with EVERY earlier block removed -- the marked form written now, and the legacy
+      unmarked form (the header line plus the `$global:AzureTenantID / `$global:HighPriv_Modern_* assignments under
+      it) -- and exactly ONE block of -Lines appended. Anything else in the file is kept verbatim.
+    #>
+    [CmdletBinding()]
+    param([AllowEmptyString()][AllowNull()][string]$Existing, [Parameter(Mandatory)][string[]]$Lines)
+    $begin = '# --- PIM4EntraPS engine identity (written by Install-PimEngineAppRegistration.ps1) ---'
+    $end   = '# --- end PIM4EntraPS engine identity ---'
+    $keep = New-Object System.Collections.Generic.List[string]
+    $state = 'out'
+    foreach ($ln in @("$Existing" -split "`r?`n")) {
+        $t = "$ln".Trim()
+        if ($state -eq 'in') {
+            if ($t -eq $end) { $state = 'out'; continue }
+            if ($t -match '^\$global:(AzureTenantID|HighPriv_Modern_[A-Za-z0-9_]+)\s*=') { continue }
+            if (-not $t) { continue }
+            $state = 'out'
+        }
+        if ($t -eq $begin) { $state = 'in'; continue }
+        if ($t -eq $end) { continue }
+        [void]$keep.Add($ln)
+    }
+    while ($keep.Count -and -not "$($keep[$keep.Count - 1])".Trim()) { $keep.RemoveAt($keep.Count - 1) }
+    $nl = [Environment]::NewLine
+    $out = if ($keep.Count) { (($keep.ToArray()) -join $nl) + $nl } else { '' }
+    return $out + $begin + $nl + ((@($Lines)) -join $nl) + $nl + $end + $nl
+}
+
 function Grant-PimMiGraph {
     <#
       BUG-45 -- a DENIED app-role assignment is not a warning, it is a broken deployment.
@@ -614,8 +799,14 @@ function Resolve-PimAcrImageDigest {
     # `az acr manifest show-metadata` is the current command; `az acr repository show` is the
     # older one that still ships. Try both before concluding the tag is absent -- an az version
     # difference must not read as "the image was never built".
+    # 🔴 IMP-49 o -- $digest WAS NEVER INITIALISED, and the show-metadata half this comment promises was missing. PowerShell
+    # scoping is DYNAMIC: an unset local reads the CALLER's variable of the same name, so a deploy script that already held
+    # a `$digest` (say, the previous image's) had it tested here, found well-formed, and RETURNED -- the registry was never
+    # asked, and the deploy wrote the wrong image's digest. Start empty; ask the registry, both commands.
+    $digest = ''
     $acrSubArgs = @(); if ("$SubscriptionId".Trim()) { $acrSubArgs = @('--subscription', "$SubscriptionId".Trim()) }
-    if (-not (Test-PimImageDigest -Digest "$digest".Trim())) {
+    $digest = "$(az acr manifest show-metadata @acrSubArgs -r $AcrName -n $ref --query digest -o tsv --only-show-errors 2>$null)".Trim()
+    if (-not (Test-PimImageDigest -Digest $digest)) {
         $digest = az acr repository show @acrSubArgs -n $AcrName --image $ref --query digest -o tsv --only-show-errors 2>$null
     }
     $digest = "$digest".Trim()
@@ -943,8 +1134,6 @@ and on-prem/peered clients resolve the private names. The Manager stays private
 2. Private-link DNS zones to add (link each to the spoke VNet, and forward from any
    custom/on-prem DNS so the VNet resolves them):
    * privatelink.database.windows.net   -- Azure SQL  (PRESENT in this env; keep it)
-   * privatelink.azurewebsites.net      -- ADD if the Manager runs on App Service
-                                           (App Service private endpoint web-app zone)
    * privatelink.blob.core.windows.net  -- run-staging storage / MSP signed-baseline pulls
    * privatelink.vaultcore.azure.net    -- Key Vault (app-only cert/secret over PE)
    NOTE: an ACA *internal* environment with --ingress external publishes the env's
@@ -954,7 +1143,7 @@ and on-prem/peered clients resolve the private names. The Manager stays private
 3. Custom-DNS VNets (on-prem domain controllers as the VNet DNS):
    custom-DNS VNets do NOT resolve Azure privatelink.* zones automatically. Production
    fix = a conditional forwarder (or Azure DNS Private Resolver) on the DCs sending
-   database.windows.net / azurewebsites.net / blob.core.windows.net / vaultcore.azure.net
+   database.windows.net / blob.core.windows.net / vaultcore.azure.net
    to 168.63.129.16. Hosts-file entries are a bootstrap stopgap ONLY.
 "@
 }

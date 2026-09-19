@@ -38,17 +38,11 @@
   PS 5.1-safe (no ?./??, no ImportFromPem).
 #>
 
-# Shared fallbacks -- guarded so a host that already defines these (the Manager,
-# PIM-ApprovalGate, PIM-DisableGuard) keeps ITS definition and we never shadow it
-# with a second, subtly-different matcher.
-if (-not (Get-Command Get-PimBreakGlassIdentifiers -ErrorAction SilentlyContinue)) {
-    function Get-PimBreakGlassIdentifiers {
-        $raw = $global:PIM_BreakGlassAccounts
-        if (-not $raw -and "$env:PIM_BREAKGLASS_ACCOUNTS") { $raw = "$env:PIM_BREAKGLASS_ACCOUNTS" }
-        if (-not $raw) { return @() }
-        $list = if ($raw -is [string]) { $raw -split '[;,]' } else { @($raw) }
-        return @($list | ForEach-Object { "$_".Trim().ToLowerInvariant() } | Where-Object { $_ })
-    }
+# IMP-39 (§33.28): the ONE break-glass reader + matcher (pim.Settings['BreakGlassAccounts'] unioned
+# with the legacy global/env). Loaded only when no host has loaded it yet.
+if (-not (Get-Command Get-PimBreakGlassAccountList -ErrorAction SilentlyContinue)) {
+    $__bgLib = Join-Path $PSScriptRoot 'PIM-BreakGlassAccounts.ps1'
+    if (Test-Path -LiteralPath $__bgLib) { . $__bgLib }
 }
 
 function Get-PimSessionRevokeDecision {
@@ -121,6 +115,14 @@ function Get-PimSessionRevokeDecision {
         $bg = @($BreakGlassIdentifiers)
     } else {
         $bg = @(Get-PimBreakGlassIdentifiers)
+    }
+
+    # IMP-39: a configured store whose break-glass list cannot be read is an UNVERIFIABLE guard --
+    # the same refusal as a missing predicate, not a pass.
+    if (@($bg) -contains '<break-glass-list-unreadable>') {
+        return (& $verdict $false 'guard-unavailable' `
+            'the break-glass account list could not be read from the store -- refusing rather than assuming the target is not a break-glass account' `
+            $upn $row)
     }
 
     if (Test-PimRowIsBreakGlass -Row $row -Identifiers $bg) {

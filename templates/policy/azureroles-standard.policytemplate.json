@@ -1,0 +1,39 @@
+{
+  "id": "AzureRoles_Standard",
+  "name": "Azure resource roles -- standard",
+  "appliesTo": "AzureRole",
+  "_origin": "Added 2026-09-19 (operator: 'why dont we have 2 policy template for azure'). Until then Azure resource role policies REUSED EntraIDRoles_Standard (AzResPolicies' blank default). The rules below are a COPY of EntraIDRoles_Standard's, byte for byte, so switching the Azure default to this template changes nothing in any tenant: the AzRes provider's planned PATCH for a blank Azure row is identical before and after (tests/Test-PimAzResPolicies.ps1). A row that still names EntraIDRoles_Standard for an Azure role keeps working (same rules); the Manager marks it 'written for Entra ID roles'.",
+  "description": "The EXPLICIT baseline for an AZURE RESOURCE ROLE policy (the ARM roleManagementPolicy of one role at one scope: management group, subscription, resource group or resource). Blank PolicyTemplate on a PIM-Assignments-Azure-Resources row links here. The engine verifies every (scope, role) the solution assigns against this on every run and PATCHes each drifting rule back on its own (one rule per request, ARM rejects a batch over one bad id). Activation (EndUser-Assignment) requires MFA + Justification and is capped at PT8H (8 hours) -- v1 set the same values on Azure resource roles as on directory roles. Admin-Eligibility and Admin-Assignment carry NO enablement rule, for the BUG-21 reason: the 'admin' creating the eligible/active assignment is the engine's own identity (app-only certificate SPN or managed identity), whose token can never carry an MFA claim, so an MFA rule there is unsatisfiable by anyone -- measured on ARM 2026-09-12: the assignment is refused with MfaRule -- and it blocks the delegation path the product exists to run while removing no risk, because activation MFA protects the privilege at the point of use. The AzRes provider REFUSES to write an Admin_* MFA rule for the same reason. Expiration: eligibility and admin assignment are bounded (P365D, required) so nothing is granted forever. Admin-Eligibility is EMPTY on the STANDARD templates (operator 2026-08-11: 'admin eligible is blank, no justification or mfa. app must be able to work'). Notifications: v1's nine rules, plus the opt-in NotifyUpns redirect of the activation notice. Carries NO Approval rule -- use AzureRoles_RequireApproval for roles that must be approved; a live approval this template does not declare is KEPT, never removed.",
+  "rules": {
+    "Expiration": {
+      "EndUser_Assignment": { "maximumDuration": "PT8H",  "isExpirationRequired": true },
+      "Admin_Assignment":   { "maximumDuration": "P365D", "isExpirationRequired": true },
+      "Admin_Eligibility":  { "maximumDuration": "P365D", "isExpirationRequired": true }
+    },
+    "Enablement": {
+      "EndUser_Assignment": ["MultiFactorAuthentication", "Justification"],
+      "Admin_Eligibility":  [],
+      "Admin_Assignment":   []
+    },
+    "_notificationV1": "PARITY AUDIT #5 (2026-09-13): the first NINE entries are v1's notification rules for every directory role, with v1's on/off values (engine/PIM-Baseline-Management-CSV/PIM-Baseline-Management-CSV.ps1 L615-694). Later entries override an earlier one for the same rule id ONLY when they resolve: the NotifyUpns redirect below replaces Admin/EndUser/Assignment for a role that names an audience, and a role without one keeps v1's value (default recipients on).",
+    "Notification": [
+      { "recipientType": "Admin",     "caller": "Admin",   "level": "Eligibility", "notificationLevel": "All", "defaultRecipientsEnabled": true },
+      { "recipientType": "Requestor", "caller": "Admin",   "level": "Eligibility", "notificationLevel": "All", "defaultRecipientsEnabled": false },
+      { "recipientType": "Approver",  "caller": "Admin",   "level": "Eligibility", "notificationLevel": "All", "defaultRecipientsEnabled": true },
+      { "recipientType": "Admin",     "caller": "Admin",   "level": "Assignment",  "notificationLevel": "All", "defaultRecipientsEnabled": false },
+      { "recipientType": "Requestor", "caller": "Admin",   "level": "Assignment",  "notificationLevel": "All", "defaultRecipientsEnabled": false },
+      { "recipientType": "Approver",  "caller": "Admin",   "level": "Assignment",  "notificationLevel": "All", "defaultRecipientsEnabled": false },
+      { "recipientType": "Admin",     "caller": "EndUser", "level": "Assignment",  "notificationLevel": "All", "defaultRecipientsEnabled": true },
+      { "recipientType": "Requestor", "caller": "EndUser", "level": "Assignment",  "notificationLevel": "All", "defaultRecipientsEnabled": false },
+      { "recipientType": "Approver",  "caller": "EndUser", "level": "Assignment",  "notificationLevel": "All", "defaultRecipientsEnabled": true },
+      {
+        "recipientType": "Admin",
+        "level": "Assignment",
+        "notificationLevel": "All",
+        "defaultRecipientsEnabled": false,
+        "recipientsSource": "NotifyUpns",
+        "_why": "ACTIVATION NOTICES MUST NOT GO TO EVERY GLOBAL ADMINISTRATOR (operator, 2026-08-10). Entra's default recipient set for the Admin notification is the tenant's privileged administrators, so every activation mails all of them -- noise that trains people to ignore PIM mail, and a needless broadcast of who activated what. Measured live: a PIM activation notice for this estate was delivered to an unrelated service mailbox by that default routing. OPT-IN BY DESIGN: recipients come from a NotifyUpns column on the role-assignment row, and the provider SKIPS this rule entirely when NotifyUpns resolves to nothing -- so a role with no declared audience keeps whatever Entra is doing today rather than being silently switched to mailing NOBODY. Only roles WITHOUT custom approvers can do this: on an approval-enabled role Graph rejects isDefaultRecipientsEnabled=false with 400 ActivationCustomApproversNotEmpty (see EntraIDRoles_RequireApproval)."
+      }
+    ]
+  }
+}

@@ -14,6 +14,380 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 
 <!-- next release entry goes here -->
 
+## v2.4.380 — groups always deployable, workload assignments held per workload, templates imported by script, Defender assignments fixed, and the Pro edition enforced
+
+**Groups are always created; only the workload role assignment waits.**
+- A permission group is created whether or not its workload is ready.
+- A *new* Intune, Defender XDR, Power BI or other workload role assignment is held while that workload's prerequisites are not green (failed, incomplete or never checked). The run reports it as held, with the command to run, and it is assigned on the first run after the prerequisites turn green.
+- Azure role assignments are held only when the prerequisite check ran and found a problem, never merely because it has not been run.
+- Existing assignments, removals and updates are never held.
+- Staging is never blocked: the Templates cards, the wizards and Coverage & gaps show an amber note where an assignment will wait.
+
+**Import permission templates by script (infrastructure as code).**
+- `Import-PimPermissionTemplate.ps1` imports named packs into an environment. It adds only what is missing, names groups by that tenant's own convention, keeps a group and its workload role together, takes a snapshot before every change and audits it. A second run changes nothing, and `-WhatIf` shows the plan.
+- A pack group that the environment already defines, under the same name or under an older tag, is **adopted** instead of being defined a second time.
+- `Invoke-PimTenantPrep.ps1 -Config` prepares many environments from one configuration file: the workload prerequisites with the options you choose, then the packs. One environment's failure does not stop the others, and it ends with a summary per environment.
+
+**Defender XDR role assignments work.** An assignment now carries the directory scope Microsoft requires, and a newly created custom role is read back by name when Microsoft answers with a redirect.
+
+**Licensing: the Pro edition.**
+- **Free:** everything for a single tenant, including Entra ID roles, PIM for Groups, administrative units, Azure RBAC, Intune and Defender XDR, policies, drift, the wizards and the template import.
+- **Pro, single tenant:** Coverage & gaps and discovery, the Power BI / Exchange Online / app-role / Azure DevOps / Dataverse / Business Central / Power Platform connectors, revoking current delegations, access review campaigns, the second approver, delegated administration scopes, the tier-impact report and the evidence export.
+- **Pro, multi tenant:** MSP managing and managed tenants (publishing, downlink, replication and the fleet views).
+- Without a valid Pro licence bound to the tenant these features are off in the engine, the jobs and the portal, which says why. **Settings › Licence** shows the licence status and the command to register a licence file. For a licence, contact mok@mortenknudsen.net.
+
+**Workload prerequisite script.** `-EnableSentinel` (opt-in) enables Microsoft Sentinel on a dedicated, empty security workspace, registering the Sentinel resource providers first. The Power BI and Data Operations checks read the right values.
+
+**Upgrade note.** Install your Pro licence **before** upgrading if you use MSP or any Pro feature listed above. Otherwise those features stop at the upgrade. Run the workload prerequisite script once for Intune, Defender XDR and Power BI, or their new role assignments are held.
+
+## v2.4.379 — two policy templates per kind with stable ids, per-kind defaults, and template imports gated on green prerequisites
+
+**Policy templates: one Standard and one RequireApproval for every kind.**
+- **PIM for Groups:** `Groups_Standard` and `Groups_RequireApproval`, formerly `default` and `approval-required`.
+- **Entra ID roles:** `EntraIDRoles_Standard` and `EntraIDRoles_RequireApproval`, unchanged.
+- **Azure roles:** new `AzureRoles_Standard` and `AzureRoles_RequireApproval`. Azure roles used the Entra ID templates until now; `AzureRoles_Standard` has exactly the same rules, so nothing changes in your tenants.
+
+**Stable ids, so you can rename a template.**
+- **Id and name:** every template has a fixed id and a display name you can edit on the Policy templates page (SuperAdmin).
+- **References:** rows refer to the id, so a rename changes nothing that is applied.
+- **Old references:** `default` and `approval-required` in existing rows keep working as permanent aliases. On first start your stored templates move to the new ids, keeping your changes.
+
+**A default template per kind, in Settings.** The Policy templates page has one default for groups, one for Entra ID roles and one for Azure roles (SuperAdmin). A row without a template uses its kind's default. The shipped defaults match what was applied before.
+
+**A template picker wherever you delegate.**
+- **Where:** every delegation wizard and the grid's PolicyTemplate column, for groups, Entra ID roles and Azure roles.
+- **What it offers:** only templates of the right kind, with "Use default" showing the current default.
+- **New:** the Project and Role-group wizards gained the picker, and the Departments, Organization, Projects and CrossOrg grids gained the column.
+
+**Permission-template imports are blocked until the workload's prerequisites are green.**
+- **The rule:** a pack whose workload prerequisites are red or amber (failed, incomplete, never checked, or older than 30 days) cannot be imported.
+- **What you see:** the card says why and gives the command to run.
+- **Packs with no prerequisite workload** are not affected.
+
+**Workload prerequisite script.**
+- **`-EnableSentinel` (opt-in):**
+  - **What it does:** enables Microsoft Sentinel for the Defender Data Operations roles, on a dedicated security workspace that it creates empty when missing.
+  - **Prerequisites it handles:** it registers the Sentinel resource providers first.
+  - **What it refuses:** PIM's own log workspace, where Sentinel would bill every log line.
+- **Power BI:** the engine identity's membership of the admin-API group is now read correctly. A managed identity was missing from the plain member list, so the check reported "not added" although it was.
+- **Replication delay:** a newly created group is read back with retries.
+- **Data Operations:** the permission check reads the permission id, not its display name. The guidance now says Data Operations follows Microsoft Sentinel.
+
+**Upgrade note.** The first start of this version renames the stored group policy templates to their new ids. An environment rolled back to an older version afterwards cannot find `default` and skips group policies with a warning; it changes nothing. Upgrade forward.
+
+## v2.4.378 — coverage and gaps across every workload, Defender roles managed end to end, and your MSP registry in the Manager
+
+**Coverage & gaps: one page for what is delegated and what is not** (Reviews & controls).
+- **Covers:** Entra ID roles, Intune, Defender XDR, Power BI, Azure subscriptions and management groups, and PIM for Groups.
+- **Status:** each item is *covered*, a *gap*, an *orphan group*, an *unmanaged binding*, *wrong permissions*, an *unmanaged privileged group*, or *not checked* (with the reason).
+- **Proposals:** every gap comes with a ready proposal (the group and its role, named by your own convention), all ticked. Stage the ones you want into Pending changes.
+- **PIM for Groups:** groups that PIM for Groups manages but PIM does not define (for example one gating an HR application) are shown for review with what they grant, and are never adopted automatically.
+- **Updates:** the page is refreshed by a scheduled check, and new gaps are mailed.
+
+**Defender XDR custom roles, managed by PIM.**
+- **Defining a role:** a Defender binding can carry the role's permissions and data sources.
+- **What PIM does:** it creates the custom role named like the group, corrects its permissions when they differ, and assigns it with the right data sources. It reports a role whose live permissions differ as *wrong permissions*.
+- **Defender template v3:** the Data Operations Operator and Reader groups, internal's Scope-Clients / Scope-Servers variants with their data sources, and the Security Posture Operator with posture (not security operations) permissions.
+- **When a tenant is not ready for Data Operations:** a role that needs Microsoft Sentinel connected to the Defender portal says so, and names the prerequisite script, instead of a bare Graph error.
+
+**A group and its workload role are imported together.** In a permission template, ticking a group ticks its role and the other way round, and an import never takes half of a pair. A new workload group is held back, never left without its role, while that workload's step is turned off or cannot be read.
+
+**Defender and Intune discovery.**
+- **The jobs:** new scheduled jobs read the live Defender and Intune role catalogs, and Microsoft's Defender permission catalog.
+- **What they report:** new roles and new permission groups that no template covers.
+- **Live orphan warnings:** a workload group with no role, and a role held by a group PIM does not define, are warnings on the drift page. A hand-made role assignment is shown for review and does not count as drift.
+
+**Workload prerequisites.**
+- **The script:** `Initialize-PimWorkloadPrereqs.ps1 -Workload DefenderXdr|Intune|PowerBI|AzureRbac|EntraRoles` checks each workload's prerequisites. It fixes what an API can fix and gives the exact portal step for what only a person can do.
+- **In the Manager:** every template card, the workload wizards and Coverage & gaps show a chip: green when the prerequisites were checked OK, amber when never checked or stale, red when something is missing. Each chip carries the command to run.
+
+**Managed tenant registry and replication overview** (MSP master).
+- **Managed tenant registry:** a page to register and edit your managed tenants (name, the master's copy of the ring, tags, enabled), instead of a setup script. The script and the page now share one writer.
+- **Replication overview:** lists every direct group, permission group, nesting, role binding and admin you replicate, with the tenants each one reaches. It is computed by the same plan every tenant runs. Filter it by tenant to see exactly what one customer gets.
+
+**Policy templates.**
+- **The page:** Audit & Settings → Policy templates lists every activation policy in plain words, with the delegations that use it.
+- **The delegations table:** it now has a policy column, so a delegation can be switched to a template that needs approval.
+- **Owners on Azure delegations:** these now take effect.
+
+**Fixed: Azure permission groups were never created.** The Azure wizards added the Azure role assignment without the group's own definition, so the engine could never create the group. The group definition and its assignment are now added together, as in v1. *Check for problems* now warns about an Azure delegation whose group is defined only by a discovered-resource row, because the engine never creates that group.
+
+**All three policy types in every wizard.**
+- **What the wizards now offer:** you choose the group's activation policy, and for an Entra or Azure delegation also the Entra role or Azure role activation policy. Each list shows only the policies of its own type.
+- **In the delegations table:** all three can be changed for existing delegations.
+
+**Also in this release:** workload groups stay connected to their workload, and "not checked" is never "in sync" (below).
+
+
+**A workload group and its role belong together.**
+- **The warning:** a group meant for Intune, Defender XDR or another workload now gets a warning when its role in that workload is not set up. It appears in *Check for problems* and on the engine job.
+- **The same check runs the other way:** a workload role given to a group that PIM does not define is flagged too.
+- **When the Intune or Defender step is turned off:** the engine says so, naming each group that is left without its role.
+
+**Intune template, version 2.**
+- **Contents:** the six classic roles plus Endpoint Privilege Manager, Endpoint Privilege Reader, Intune Role Administrator and Multi Admin Approval Policy Manager, on the WDP plane.
+- **Levels:** managers and administrators L3, operators L4, readers L5.
+- **Each group comes with its role:** every group ships together with its Intune role assignment, so an import never creates a group that holds nothing.
+- **Not included:** Cloud PC, Windows Autopatch and Organizational Messages roles. They are not Intune roles (they use their own role systems), so they were left out rather than shipped as groups that could never receive their role.
+
+**"Not checked" is never "in sync".**
+- **On the drift page:** an area that was skipped (the feature is off) or could not be read (no permission) now shows *not checked* with the reason, instead of counting as in sync.
+- **In the engine:** an Intune or Defender read that is refused now fails that area rather than planning changes on a blind read.
+
+**Your naming convention, everywhere.**
+- **The fix:** names built for discovered Azure, Power BI and Power Platform resources, template imports, the portal's group facets and group retirement now follow the tenant's own group-name pattern instead of assuming `PIM-`.
+- **Safer workload binding:** a workload connector no longer falls back to a partial name match that could bind the wrong group.
+
+**The replication preview and what is actually sent now agree for admins.** An admin with no management mode stays on the master tenant. It is shown that way in the preview and listed under *not published*, instead of being previewed as replicated but never sent.
+
+**Defender XDR discovery works.** It now reads Defender roles from the right Graph API version. A read that fails is reported as a failed job, instead of looking like "no roles".
+
+
+## v2.4.377 — admin account domain per tenant, and the engine now uses your naming
+
+**Admin account domain, per tenant.**
+- **The setting:** **Settings → Admin account domain** is a dropdown of this tenant's verified domains. The default is *Tenant default domain*, which is what v1 did.
+- **Who uses it:** the engine, the New admin account wizard and managed tenants all use this one value.
+- **On a managed tenant:** admins replicated from the MSP master are created at the managed tenant's *own* admin account domain. The master's domain is never carried over.
+- **In the wizard:** the New admin account wizard defaults its UPN suffix to this setting and lists the verified domains. On an MSP master it explains that a replicated admin gets each managed tenant's own domain.
+
+**Fixed: the engine ignored your naming conventions.**
+- **The bug:** naming set in Settings (group and admin name patterns, the admin domain) reached the Manager but not the engine. Names the engine builds itself, for example for discovered resources and hybrid AD accounts, used the shipped defaults.
+- **Now:** the engine reads the same settings the Manager shows.
+
+**Fixed: imported v1 admins showed as "not defined".**
+- **The bug:** the validator looked admins up only by their full sign-in name. A v1 admin row has only a user name; the domain is added when the account is created. So every membership of an imported v1 admin was refused as *not defined* and blocked Commit, although the admins were stored.
+- **Now:** the validator matches an admin by user name as well as by full sign-in name, the same way the engine does.
+- **The import check:** it no longer fills in a stand-in domain, so it sees exactly what the Manager sees.
+
+**Fixed: revoking an Entra role that was not assigned through PIM.**
+- **The bug:** revoke always asked PIM to remove the assignment. A permanent assignment made outside PIM (v1, the portal, or the older API) has nothing for PIM to remove, so the revoke failed with *The Role assignment does not exist* and the role stayed.
+- **Now:** revoke first reads what is live:
+  - **Assigned through PIM:** removed through PIM, at its real scope.
+  - **Permanent:** the assignment itself is deleted.
+  - **Held through a group:** refused, pointing at that group.
+  - **An activation of an eligible assignment:** refused, pointing at the eligibility.
+- **The result:** the queue entry says which kind of assignment it was.
+
+**Every wizard says whether a row is replicated.** On an MSP master, the Replication section is unchanged. On a managed tenant, each create wizard now shows a short note: *Local to this tenant — not replicated*.
+
+
+## v2.4.376 — replication that reaches its tenants, plain words, and pages instead of anchors
+
+**Fixed: a group set to *Replicate to managed tenants* reached no tenant.**
+- **When it happened:** the master replicated no admin memberships yet.
+- **What went wrong:** the managed tenant's plan skipped all group definitions in that case. Groups, nestings and role bindings set to replicate on their own were never sent, and the preview said "0 of N tenants".
+- **Now:** they reach every tenant their ring and tags admit. The preview and the real pull run the same code, so both are fixed.
+
+**Replication, in plain words.**
+- **Options:** *Follow (default) — sent only when a replicated row needs it*, *Replicate to managed tenants*, and *No replication to managed tenants — master tenant only*. The duplicate Follow entry and the "MSP-local" wording are gone.
+- **Rings say which way they narrow:** Ring 0 reaches every managed tenant, Ring 1 reaches rings 1 and 2, and Ring 2 reaches only ring-2 (pilot) tenants. Each tenant's ring is shown next to its name.
+
+**Every menu item opens its own page.**
+- **The change:** *Manager access & roles*, *Emergency access (break-glass)* and *Mail templates* are separate pages instead of links into Settings.
+- **Emergency access:** the break-glass accounts and the emergency override share one page.
+- **Renamed:** *Review standing access* is now **Review current delegations**.
+
+**Wizards:**
+- **Activation policy:** *Delegate a permission — Start here* now asks which activation policy the delegation uses (default, or a template, for example one that needs approval), like the advanced wizards.
+- **Role-assignable is locked to Yes** for a permission group that grants an Entra ID role, because Entra refuses the role otherwise. The validator's Fix-all and the define-group dialog follow the same rule.
+- **"Show roles that already have a delegation group"** now also counts delegations shown on the Delegation Map and ones you have just staged. It says so when the stored list could not be read.
+
+**Importing v1 CSV files is checked first.**
+- **The check:** `setup/Invoke-PimCsvImportCheck.ps1` validates a folder of v1 files before anything is written. It runs the same rules as the Manager's validator, plus file checks: encoding, delimiter, columns and duplicate keys. Engine state files are skipped.
+- **The import:** `Migrate-PimToSql.ps1` runs the check first and refuses on any error. `-ValidateOnly` changes nothing. The import adds and updates by key and never deletes. A row that differs from what is already stored is refused unless you choose `-OnKeyConflict`.
+- **Keeping rows on the master:** `-ForceLocal` imports everything as master-tenant-only.
+
+**Process is a permission group.** It is no longer offered as a direct group, and the wizard dialogs no longer scroll sideways.
+
+**Permission templates show what they add.** Each template card has a **Show** button. It lists every new permission (the group, what it grants and where), each with a tick box. **Import** stages only the ticked ones.
+
+**Menu badges only count work that needs you.**
+- **Pending changes:** the count disappears once you commit. Committed entries wait for the engine and are still listed on the page.
+- **Review current delegations:** no longer shows its row count in the menu.
+
+## v2.4.375 — break-glass needs two people, the emergency override works, and a tidier Manager
+
+**Break-glass accounts need a second SuperAdmin.**
+- **What it protects:** the break-glass list exempts accounts from being revoked, disabled or offboarded, so one person should never be able to change it alone.
+- **How a change works:** saving now raises a *request*, showing the change, your justification and a 72-hour expiry. A different SuperAdmin approves or rejects it; you can cancel your own.
+- **Checks on approval:** it applies only if the list has not changed in the meantime, and every step is audited.
+- **Always on:** it does not depend on the optional maker/checker setting.
+- **Only one SuperAdmin?** An environment with a single SuperAdmin uses the new operator script `Set-PimBreakGlassAccounts.ps1`, which is also audited.
+
+**The emergency override works, and says what it does.**
+- **What the card explains:** the passphrase is checked, then approval is switched off on the chosen groups within about a minute and their owners are notified. Nothing is granted: responders still activate through PIM. Approval comes back automatically at expiry.
+- **Passphrase status:** the card now shows whether a passphrase is configured, and it is refused clearly when not.
+- **Why it could not be used before:** the passphrase could not be read in the hosted Manager. That is fixed.
+- **New operator script:** `Set-PimEmergencyPassphrase.ps1` stores only a hash of the passphrase in your key vault and connects the Manager to it.
+
+**A tidier Manager:**
+- **All records** now has a compact entity list with a filter, and the table uses the full width.
+- **Departments & owners** has its own page under Access, instead of being buried in Settings.
+- **Approvers / owners removed:** that separate list was never used. Approvals always come from the department's owners. Anything stored in it is shown once on the new page.
+- **Organisational dimension removed:** that Settings choice is gone. Departments, organisations and projects are their own group types, and role groups are always called role groups.
+
+**Upgrade notes:**
+- To use the emergency override, choose a passphrase and run `Set-PimEmergencyPassphrase.ps1` once per environment.
+- To change break-glass accounts in the Manager, make sure each environment has at least two SuperAdmins.
+
+## v2.4.374 — missing admin sign-in methods are a warning, not a blocker
+
+Since v2.4.370 the Manager has checked each administrator's registered sign-in methods against the tenant.
+
+**The problem:** an administrator with no strong method yet, typically a newly created account that has not used its temporary access pass, was reported as an **error**. Validation errors block every commit, so a normal new-admin situation blocked all changes on the environment.
+
+**The fix:** both checks — "no required method" and "only weak methods" — are now **warnings**. They still appear on Validate, and they no longer block a commit. They describe the live directory, not the data you are saving, and nothing in the grid can fix them.
+
+**Upgrade note:** none.
+
+## v2.4.373 — one rule for disabling an admin, PIM-eligible Azure connector, and a hardened image
+
+**Security:**
+- **Disabling an administrator needs a second person on every path.** Saving a grid change that would disable an admin now holds only that change and raises an offboard approval instead of disabling the account on the next run. The trigger is AccountStatus Disabled or Revoked, a retire lifecycle, or a disable date that has already passed. The rest of the commit is saved as normal. The Manager shows what was held and lets you raise the approval. This is the same rule the account editor already follows.
+- **The Azure RBAC workload connector now creates PIM-eligible assignments.** It used to make permanent Azure role assignments outside PIM. Every shipped connector on a PIM-capable surface now creates eligibilities.
+- **The container image runs as a non-root user,** and its base images are pinned by digest.
+- **A master can publish a signed central-kill manifest.** Managed tenants already honour one. The new operator script signs it with the master's own key, and it can also withdraw one.
+
+**Other:**
+- **New environments** now use the scheduled (cron) job model by default. An existing environment that already runs always-on workers keeps them.
+- **App Service text removed:** the DNS guidance no longer mentions App Service, whose hosting path was retired.
+- **Faster test suite:** the whole offline suite now runs in about 7–10 minutes, down from about 30, with every assertion kept.
+
+**Upgrade note:** the image now runs as a non-root user. If you point log or sync folders somewhere other than the defaults, make sure that user can write there.
+
+## v2.4.372 — you control how often managed tenants update, and escalation mail is safe
+
+**Update cadence is now set in the Manager.**
+- **Managed tenants:** the Job schedule shows **Managed-tenant pull**, with an on/off switch, an interval from 5 minutes to a day, and **Run pull now**.
+- **Masters:** it shows **Publish to managed tenants**, with the same controls and **Publish now**.
+- **Where it lives:** each environment keeps its own setting in its own database. Nothing is set centrally.
+- **Publish on commit:** when you commit a change on a master that is replicated to managed tenants, a publish is requested automatically. Managed tenants can pick up a change within minutes instead of the next day.
+- **Unchanged until you change it:** an environment with no setting stays on the daily cadence.
+- **Failures:** a failed run is retried sooner, then backs off.
+- **Least privilege:** the publish job reads and writes only its own schedule rows.
+
+**Lifecycle escalation mail is safe to leave on.**
+- **Alert setting:** escalations follow your alert setting for expiring access. When it is off, nothing is sent.
+- **Mail off or no sender:** a turned-off mail switch or a missing sender is reported as held, not as a failed job. The mail goes out once mail is enabled.
+- **No backlog storm:** the first run after upgrading records what is already due without mailing it, so nothing arrives all at once.
+- **Reminder cap:** at most one reminder per stage, and none after the date has passed.
+- **Recipients:** mail goes to the owners of the sponsor department.
+
+**Other fixes:**
+- **Workload delegations:** a delegation with several workload roles is refused with a clear message (one role per delegation). It used to keep only the last role silently.
+- **Replication rings:** any whole number is now a valid replication ring. The validator no longer "fixes" a valid ring 3 down to 2.
+- **Ring labels:** on a master, the ring shown for a managed tenant is labelled as the master's copy. The managed tenant's own ring decides.
+- **Tenant-list refresh:** the Manager's refresh no longer reports a failed step it could not run.
+- **Stale secrets:** redeploying a managed tenant's pull job removes secrets it no longer uses.
+- **Job status:** a job that does not apply to an environment is shown as skipped, not as a clean run.
+
+**Upgrade note:** after upgrading, each pull and publish job runs once and then follows its schedule. The default is daily from that moment, instead of at a fixed hour. Set the interval you want in the Manager's Job schedule.
+
+## v2.4.371 — no false removal alarms, and the managed-tenant pull works again
+
+A corrective release for two problems that appeared once v2.4.370 was running. Nothing was removed, disabled or
+deleted by either one.
+
+- **A plan never raises a removal alert.** v2.4.370 fixed the safety alerts so that they are really sent. The nightly
+  read-only convergence check (a plan, which never changes anything) counts the live items that are not in the
+  desired state and runs them past the removal budget. It therefore mailed an "engine failure: removal budget
+  tripped" alert about a run that could not remove anything. A plan now only logs that finding. The alert is kept for
+  real runs, where the budget actually holds changes back.
+- **The managed-tenant pull no longer refuses when it cannot read a kill switch nobody configured.** By default the
+  pull looks for a central kill manifest next to the bundle. On a bundle store that is not publicly readable, that
+  location answers "unauthorized", and v2.4.370 treated that as "a kill might be in force" and refused every pull. It
+  now reports the check as not performed and says how to enforce it. A kill location you configure explicitly is
+  still checked strictly.
+- **The update-ring tools read the ring channel correctly** when it is served as a binary download. Before this, the
+  drift check, the sync and the updater installer reported "nothing approved".
+
+**Upgrade note:** none.
+
+## v2.4.370 — a full code review, and every finding closed
+
+This release is the result of a line-by-line review of the whole v2 product. It closes every finding that review
+produced. Most changes are about **safety features that must never quietly do nothing** and about **data that must
+never be lost by an edit**. It is recommended for every installation. Read the upgrade notes at the end. A few
+changes make the product refuse something it used to allow, and they say so when they do.
+
+**Security**
+- **The Manager page can no longer be made to run injected script.** Names written into desired state (group,
+  account, administrative unit or tenant names) are now escaped before they are placed in the page, so a crafted
+  name cannot run script in another administrator's browser.
+- **A hosted Manager trusts identity only from a real sign-in layer.** On hosts with no sign-in layer in front, the
+  identity headers are refused, and a request with no signed-in user gets *401 sign in required*. It used to get
+  read-only access. A new Manager is created closed and opens only after its sign-in is configured and verified.
+  Sign-in now also requires an explicit choice of who may use it: named people or groups, or all member users of
+  the tenant (never guests).
+- **An administrative-unit delegation stays scoped to its administrative unit.** The resource-delegation wizard
+  now stages an AU-scoped assignment. It used to stage a tenant-wide one, and the engine now refuses a tenant-wide
+  row that claims an AU scope.
+- **Delegated (portal-profile) administrators see and change only their own slice.** The data grid returns only
+  the rows in their scope. Their commit is merged into the full set, so rows outside their scope are never removed.
+- **Two administrators editing the same data at once can no longer overwrite each other.** A commit made against
+  data that changed since it was loaded is refused. You are offered a reload that keeps your staged edits.
+- **Alerting webhook addresses are no longer shown to read-only users.** Bug reports sent from the Manager or the
+  Activator no longer include your sign-in name, tenant id or raw error details unless you choose to include them.
+- **Master→managed-tenant bundles:** anti-rollback is enforced on the scheduled pull, with the last applied version
+  kept in the managed tenant's own store. A signing key can now be revoked. A central kill switch is honoured. The
+  publisher now refuses to publish when it cannot read a projection table; it used to treat that as "project
+  everything".
+- **PIM Activator:** the extension's site access is narrowed to the Microsoft sign-in, Graph and Azure endpoints it
+  uses, and its sign-in tokens are kept only for the browser session (the extension update ships separately).
+  Deploying the Activator's browser policy no longer overwrites your organisation's own extension policies.
+- **Least privilege in setup:** Exchange administration for the engine is activated through PIM and time-bound. It
+  used to be assigned permanently. Root-level User Access Administrator is opt-in. The bundle publisher gets a
+  read-only database user instead of database administrator. New installations create the SQL administrators
+  group as role-assignable, and an existing group that is not role-assignable is reported as a security finding.
+
+**Safety features that now do what they say**
+- **Break-glass (emergency override) is applied by the engine.** While an override is active, approval is switched
+  off on the scoped groups. When it expires, the linked policy is restored. Every step is audited.
+- **Break-glass accounts are managed in the Manager** (Settings), stored in SQL and read by both the Manager and the
+  engine. PIM never revokes, disables or offboards these accounts. If the list cannot be read, PIM protects
+  everyone and says so. It never guesses.
+- **The three safety alerts are really sent:** the removal budget, the account-disable circuit breaker and the
+  policy mass-change hold. A failed send is recorded as failed.
+- The offboard safety gate now applies every time, no matter which Manager page was opened first. Setting a
+  disable date in the past now raises an offboard approval instead of disabling the account on the next run.
+- Lifecycle escalations, the two authentication and activity checks, the ServiceNow intake and "Newly discovered
+  resources" are all SQL-backed now, and they act on what they find. Access-review screens show real data or say
+  *unavailable*. They never show sample data.
+- Revoking sessions shows *queued*, not done. "Mark for manual removal" works. Guest onboarding invites the guest's
+  real address, and failed invitations are reported.
+
+**Your data**
+- Saving departments in Settings keeps every other column of the department definition, including its ring,
+  target and replication settings.
+- Validation quick-fixes act on the row they name, including after an earlier fix removed a row. Staged edits
+  survive a reload, and the pending-change badge counts real changes.
+- Template approvals and ring promotions are stored in SQL. Deploying a template writes desired state for the
+  engine to apply.
+- Re-running the SQL migration can no longer delete rows added or edited in the Manager since go-live.
+
+**Updates and rings**
+- An environment with PIM deployed but no update ring configured is no longer rolled by host-side tools unless the
+  operator names an explicit override *and* a version.
+- The version drift check compares each environment with its own ring's approved version.
+- A skipped smoke test is no longer treated as a pass.
+- A deploy that would move an environment backward fails instead of printing a warning.
+- The template catalog follows the environment's update ring. Customer-ring environments receive only fully
+  promoted template entries.
+
+**Removed** (unused, superseded or unsafe): the proof-of-concept engine container, the SAS-based bundle transport and
+its helpers, the pre-v2 MSP and lab scripts, the App Service hosting templates, and the unused local-store tables
+(existing tables are left in place; nothing is dropped).
+
+**Upgrade notes**
+- A **new** Manager is created closed until its sign-in is configured, and it needs an access choice (named
+  principals, or all member users). Existing Managers keep serving behind their current sign-in.
+- Environments rolled from the deploy host must carry an update ring. Every environment deployed with the current
+  tools already does.
+- Break-glass accounts set through the old environment variable still count. Move them into Settings when
+  convenient.
+- Every managed-tenant pull now checks for a central kill manifest; "not present" is normal.
+
 ## v2.4.369 — three screens that did the work and did not say so
 
 This release is about **feedback**, not new capability. In each of the three cases below the product did

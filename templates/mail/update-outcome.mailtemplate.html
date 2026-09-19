@@ -2,8 +2,8 @@
 <!--
   update-outcome mail -- rendered + sent by Send-PimNotifyMail (engine/_shared/PIM-Notify.ps1),
   the SAME mailer the notifications + synthetic-monitor path uses. Tokens are filled from
-  Get-PimNotifyPlan (engine/_shared/PIM-UpdateLifecycle.ps1). Drop a .custom.html sibling to
-  override the look without touching this file.
+  Get-PimNotifyPlan (engine/_shared/PIM-UpdateLifecycle.ps1). Edit it in the Manager (Settings >
+  Mail templates) to change the look; the edited copy is kept in SQL.
 -->
 <div style="font-family:Segoe UI,Arial,sans-serif;font-size:14px;color:#1b1b1b;max-width:640px">
   <h2 style="margin:0 0 8px 0">PIM4EntraPS update &mdash; {{Outcome}}</h2>

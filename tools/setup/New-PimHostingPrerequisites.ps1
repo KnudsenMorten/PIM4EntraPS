@@ -130,7 +130,12 @@ param(
     # admin of earlier versions.
     [string]$SqlAdminGroupName = 'grp-pim-sql-admins',
     [string]$TroubleshootingAppId,
-    [switch]$SkipSqlAdminGroup
+    [switch]$SkipSqlAdminGroup,
+    # IMP-49 t -- THIS host's public IP for the setup-host firewall rule. Without it the IP is read from
+    # https://api.ipify.org, a third-party web service -- and that is now SAID on screen, every time.
+    # The rule is the SETUP window, not a standing grant: Invoke-PimDeployAll removes it when its run
+    # ends; run standalone, remove it yourself once the deploy's SQL steps are done (printed below).
+    [string]$SetupHostIp
 )
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot '_PimSqlAdminGroup.ps1')     # the SQL admin group (plan + converge + read-back)
@@ -342,7 +347,7 @@ if ("$acrExisting".Trim()) {
     # Only pass the flag when the caller chose one: on a tenant with no such policy the ARM default
     # is correct, and passing it explicitly would be a change nobody asked for.
     if ($AcrPublicAccess -ne 'Default') { $acrArgs += @('--public-network-enabled', $AcrPublicAccess) }
-    az @acrArgs --only-show-errors -o none 2>$null | Out-Null
+    az @acrArgs @subArgs --only-show-errors -o none 2>$null | Out-Null
 }
 $acrLogin = az acr show @subArgs -g $rg -n $acr --query loginServer -o tsv --only-show-errors
 $acrId    = az acr show @subArgs -g $rg -n $acr --query id -o tsv --only-show-errors
@@ -434,7 +439,7 @@ if ("$AcrAgentPoolName".Trim()) {
         $poolSubnetId = az network vnet subnet show @subArgs -g $rg --vnet-name $vnet -n $PrivateEndpointSubnetName --query id -o tsv --only-show-errors 2>$null
         $poolArgs = @('acr','agentpool','create','-r',$acr,'-n',$AcrAgentPoolName,'--tier',$AcrAgentPoolTier,'--count',"$AcrAgentPoolCount")
         if ("$poolSubnetId".Trim()) { $poolArgs += @('--subnet-id', $poolSubnetId) }
-        az @poolArgs --only-show-errors -o none 2>$null | Out-Null
+        az @poolArgs @subArgs --only-show-errors -o none 2>$null | Out-Null
         $poolState = az acr agentpool show @subArgs -r $acr -n $AcrAgentPoolName --query provisioningState -o tsv --only-show-errors 2>$null
         if (-not "$poolState".Trim()) { throw "the ACR agent pool '$AcrAgentPoolName' was NOT created -- see the failure above. Without it 'az acr build' cannot reach a private registry." }
     }
@@ -624,9 +629,20 @@ if ($SkipSql) {
     az sql server firewall-rule create @subArgs -g $rg -s $sqlSrv -n AllowAzureServices `
         --start-ip-address 0.0.0.0 --end-ip-address 0.0.0.0 --only-show-errors -o none 2>$null | Out-Null
     try {
-        $myIp = (Invoke-RestMethod -Uri 'https://api.ipify.org?format=json' -TimeoutSec 20).ip
+        # IMP-49 t: say WHERE the address comes from. It used to ask a third-party web service
+        # silently; an operator (or a customer's security review) is entitled to know that.
+        $myIp = "$SetupHostIp".Trim()
+        if ($myIp) { Write-Host "    setup host IP: $myIp (from -SetupHostIp; no external lookup)" }
+        else {
+            $myIp = "$((Invoke-RestMethod -Uri 'https://api.ipify.org?format=json' -TimeoutSec 20).ip)".Trim()
+            Write-Host "    setup host IP: $myIp -- read from https://api.ipify.org (a third-party service; pass -SetupHostIp to skip the lookup)"
+        }
+        if ($myIp -notmatch '^\d{1,3}(\.\d{1,3}){3}$') { throw "not an IPv4 address: '$myIp'" }
         az sql server firewall-rule create @subArgs -g $rg -s $sqlSrv -n AllowSetupHost `
             --start-ip-address $myIp --end-ip-address $myIp --only-show-errors -o none 2>$null | Out-Null
+        Write-Host ("    'AllowSetupHost' ($myIp) is the SETUP WINDOW for this deploy, not a standing grant: Invoke-PimDeployAll " +
+                    "removes it at the end of its run. Standalone, remove it when done: az sql server firewall-rule delete " +
+                    "--subscription $SubscriptionId -g $rg -s $sqlSrv -n AllowSetupHost") -ForegroundColor DarkGray
     } catch { Write-Warning "    could not add a setup-host firewall rule: $($_.Exception.Message)" }
     # Applied on EVERY run, not just at create: the policy is a property of an existing server, and
     # an environment that was built before this parameter existed must be able to acquire it by
@@ -744,14 +760,15 @@ if (-not $SkipSql) {
     # Reported, NOT failed: a deploy host INSIDE the VNet (private endpoint) is a legitimate and
     # policy-preferred topology, and prereq cannot tell from here whether this host is in it. So say
     # precisely what will break and how to fix it, and let the operator decide.
-    $pna     = "$(az sql server show -g $rg -n $sqlSrv --query publicNetworkAccess -o tsv --only-show-errors 2>$null)".Trim()
-    $fwSetup = "$(az sql server firewall-rule show -g $rg -s $sqlSrv -n AllowSetupHost --query name -o tsv --only-show-errors 2>$null)".Trim()
+    # BUG-215: --subscription on both (the only two calls in this script that relied on the default).
+    $pna     = "$(az sql server show @subArgs -g $rg -n $sqlSrv --query publicNetworkAccess -o tsv --only-show-errors 2>$null)".Trim()
+    $fwSetup = "$(az sql server firewall-rule show @subArgs -g $rg -s $sqlSrv -n AllowSetupHost --query name -o tsv --only-show-errors 2>$null)".Trim()
     if ($pna -eq 'Disabled') {
         Write-Host ("  {0,-22}: PUBLIC ACCESS DISABLED" -f 'sql reachability') -ForegroundColor Yellow
         Write-Warning ("SQL server '$sqlSrv' has publicNetworkAccess=Disabled, so THIS host cannot reach it. " +
                        "The next steps (contained users, schema) will fail with 'Deny Public Network Access is set to Yes'. " +
                        "Either run the deploy from inside the VNet, or enable it: " +
-                       "az sql server update -g $rg -n $sqlSrv --enable-public-network true " +
+                       "az sql server update --subscription $SubscriptionId -g $rg -n $sqlSrv --enable-public-network true " +
                        "(a Deny policy on Microsoft.Sql/servers/publicNetworkAccess must be exempted first -- and note the " +
                        "assignment governing it may be DISPLAYED as a 'SQL Databases' policy).")
     }
@@ -759,7 +776,7 @@ if (-not $SkipSql) {
         Write-Host ("  {0,-22}: NO AllowSetupHost RULE" -f 'sql reachability') -ForegroundColor Yellow
         Write-Warning ("public access is $pna but the AllowSetupHost firewall rule is missing -- its create was " +
                        "denied or failed. This host will be refused at the contained-user and schema steps. Add it: " +
-                       "az sql server firewall-rule create -g $rg -s $sqlSrv -n AllowSetupHost " +
+                       "az sql server firewall-rule create --subscription $SubscriptionId -g $rg -s $sqlSrv -n AllowSetupHost " +
                        "--start-ip-address <this host> --end-ip-address <this host>")
     }
     else {

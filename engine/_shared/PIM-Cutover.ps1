@@ -588,21 +588,25 @@ function Test-PimCutoverAbortAllowed {
 function Get-PimCutoverAbortPlan {
     param([AllowNull()][string[]]$Completed = @())
     $done = @{}; foreach ($c in @($Completed)) { if ("$c".Trim()) { $done["$c".ToLowerInvariant()] = $true } }
-    $revertSource = $done.ContainsKey('set-source')
+    # 🔴 IMP-42 (§33.28): abort used to REVERT StorageBackend to 'csv' -- a store PIM v2 does not have (v2 is SQL-only,
+    # no file fallback), so an aborted ceremony left a v2 install pointed at nothing. Abort now NEVER reverts the source:
+    # it clears the ceremony state, and the v1 CSV files -- read-only throughout -- are exactly as they were, so a
+    # customer who decides not to move keeps running v1 against them. revertSource is kept (always false) for callers.
+    $revertSource = $false
     $steps = New-Object System.Collections.Generic.List[string]
-    if ($revertSource) {
-        $steps.Add('Revert the configuration source to CSV (StorageBackend = csv) -- the Manager returns to the file store on the next boot.')
+    if ($done.ContainsKey('set-source')) {
+        $steps.Add('Keep the store on SQL -- PIM v2 is SQL-only and has no CSV store to return to. The v1 CSV files were never written and are unchanged: to stay on v1, keep running v1 against them.')
     }
     if ($done.ContainsKey('import')) {
-        $steps.Add('Leave the imported rows in SQL untouched (harmless once the source is CSV; a later re-attempt re-imports them). The CSV source was read-only and is unchanged.')
+        $steps.Add('Leave the imported rows in SQL untouched (v2 reads only SQL, and a customer who stays on v1 never reads them). A later re-attempt of the ceremony re-imports every entity from the v1 files, REPLACING what SQL holds for it. The v1 CSV files were read-only and are unchanged.')
     }
     $steps.Add('Clear the cutover ceremony state so the ceremony returns to its starting point.')
     return [pscustomobject]@{ revertSource = $revertSource; clearState = $true; steps = $steps.ToArray() }
 }
 
-# Perform the abort against the live store. Reverts StorageBackend -> csv when the
-# set-source flip happened, then clears the persisted CutoverState. Idempotent and
-# refuses a finalized ceremony. Returns @{ ok; revertedSource; clearedState; plan; storageBackend }.
+# Perform the abort against the live store: clears the persisted CutoverState (IMP-42: the source is never reverted
+# to a CSV store -- v2 has none). Idempotent and refuses a finalized ceremony.
+# Returns @{ ok; revertedSource (always false); clearedState; plan; storageBackend }.
 function Invoke-PimCutoverAbort {
     [CmdletBinding()]
     param([Parameter(Mandatory)][string]$ConnectionString)
@@ -610,11 +614,7 @@ function Invoke-PimCutoverAbort {
     $gate  = Test-PimCutoverAbortAllowed -Completed @($state.completed) -Final ([bool]$state.final)
     if (-not $gate.allowed) { throw $gate.reason }
     $plan = Get-PimCutoverAbortPlan -Completed @($state.completed)
-    $revertedSource = $false
-    if ($plan.revertSource) {
-        Set-PimSqlSetting -ConnectionString $ConnectionString -Name 'StorageBackend' -Value 'csv'
-        $revertedSource = $true
-    }
+    $revertedSource = $false   # IMP-42: never -- there is no CSV store in v2
     # Clear the ceremony state back to its starting point (idempotent).
     Set-PimCutoverState -ConnectionString $ConnectionString -State ([pscustomobject]@{ completed = @(); final = $false; audit = @{} })
     return [pscustomobject]@{
@@ -622,7 +622,7 @@ function Invoke-PimCutoverAbort {
         revertedSource = $revertedSource
         clearedState   = $true
         plan           = $plan
-        storageBackend = $(if ($revertedSource) { 'csv' } else { '(unchanged)' })
+        storageBackend = '(unchanged -- SQL)'
     }
 }
 

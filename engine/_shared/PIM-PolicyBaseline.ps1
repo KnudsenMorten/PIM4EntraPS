@@ -27,6 +27,42 @@
 
 Set-StrictMode -Off
 
+# ---- TEMPLATE ID ALIASES (operator 2026-09-19: "why dont we have 2 policy template for azure" / "and why not 2 for
+# PIM4Groups") ----------------------------------------------------------------------------------------------------
+# Every policy type ships ONE Standard + ONE RequireApproval template: Groups_*, EntraIDRoles_*, AzureRoles_*. The two
+# PIM-for-Groups templates were called 'default' and 'approval-required' before; those ids stay ACCEPTED everywhere a
+# template id is read (a row's PolicyTemplate, a template's 'extends', a stored template, the per-kind defaults) as
+# ALIASES of the current ids. Defined HERE, in the most basic policy lib, because the BUG-55 hash below needs them
+# (a template extending 'default' is the same desired state as one extending Groups_Standard) and this file is loaded
+# on its own by the roll gate (Update-PimContainers.ps1). The resolver that uses them is Resolve-PimPolicyTemplateKey
+# (PIM-PolicyTemplateStore.ps1).
+function Get-PimPolicyTemplateAliases {
+    <# PURE: former template id -> its current id. #>
+    return [ordered]@{ 'default' = 'Groups_Standard'; 'approval-required' = 'Groups_RequireApproval' }
+}
+
+function Get-PimPolicyTemplateCanonicalId {
+    <# PURE: a former id -> its current id; any other id unchanged (trimmed). #>
+    param([AllowNull()][string]$Id)
+    $t = "$Id".Trim()
+    $a = Get-PimPolicyTemplateAliases
+    foreach ($k in @($a.Keys)) { if ("$k" -ieq $t) { return "$($a[$k])" } }
+    return $t
+}
+
+function Get-PimPolicyTemplateAliasNames {
+    <# PURE: every OTHER id that means the same template as -Id ('Groups_Standard' -> 'default'; 'default' ->
+       'Groups_Standard'). Empty for an id without aliases. #>
+    param([AllowNull()][string]$Id)
+    $t = "$Id".Trim(); if (-not $t) { return @() }
+    $canon = Get-PimPolicyTemplateCanonicalId $t
+    $a = Get-PimPolicyTemplateAliases
+    $names = New-Object System.Collections.Generic.List[string]
+    if ($canon -ine $t) { [void]$names.Add($canon) }
+    foreach ($k in @($a.Keys)) { if ("$($a[$k])" -ieq $canon -and "$k" -ine $t) { [void]$names.Add("$k") } }
+    return @($names.ToArray())
+}
+
 function Get-PimPolicyTemplateHash {
     <#
       PURE: a stable hash of ONE template's meaningful content.
@@ -55,6 +91,16 @@ function Get-PimPolicyTemplateHash {
         (Get-Content -LiteralPath $Path -Raw -Encoding UTF8) | ConvertFrom-Json
     }
     $stripped = Remove-PimTemplateAnnotation -Node $obj
+    # 2026-09-19 (operator: "give policies an id so we can rename them"): the template's IDENTITY and its display
+    # NAME are not desired state either. `id` is carried by the per-file key of the fingerprint, and `name` is a
+    # label the operator may now edit -- neither changes a single rule the engine applies, so neither may read as
+    # a baseline change (a renamed template must stay "unmodified since shipped", and the roll gate must not fire
+    # on a label). 'extends' is compared by the CURRENT id of what it names, so a template extending the old alias
+    # 'default' hashes the same as one extending Groups_Standard. Top level only: rule bodies are untouched.
+    if ($stripped -is [System.Management.Automation.PSCustomObject]) {
+        foreach ($n in @('id', 'name')) { if ($stripped.PSObject.Properties[$n]) { $stripped.PSObject.Properties.Remove($n) } }
+        if ($stripped.PSObject.Properties['extends']) { $stripped.extends = Get-PimPolicyTemplateCanonicalId -Id "$($stripped.extends)" }
+    }
     # Depth 30: the deepest shipped template nests rules -> Notification[] -> object.
     $canon = $stripped | ConvertTo-Json -Depth 30 -Compress
     $sha = [System.Security.Cryptography.SHA256]::Create()

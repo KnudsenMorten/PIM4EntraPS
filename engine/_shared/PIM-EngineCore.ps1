@@ -498,9 +498,20 @@ function Invoke-PimEngineScope {
     # `feature` key and are never gated. The gate is fail-safe (unknown key => off).
     if ($p.feature -and (Get-Command Test-PimFeatureAvailable -ErrorAction SilentlyContinue)) {
         if (-not (Test-PimFeatureAvailable -Key "$($p.feature)")) {
-            return [pscustomobject]@{ scope=$Scope; mode=$Mode; whatIf=[bool]$WhatIf; create=0; update=0; remove=0; nochange=0; applied=0; skipped=0; errors=0; plan=@(); ok=$true; skippedFeature="$($p.feature)" }
+            # REQ-U (2026-09-19): the skip carries its REASON (skippedReason) so the drift snapshot can say
+            # "not checked -- <reason>" instead of counting a gated area as checked and clean.
+            return [pscustomobject]@{ scope=$Scope; mode=$Mode; whatIf=[bool]$WhatIf; create=0; update=0; remove=0; nochange=0; applied=0; skipped=0; errors=0; plan=@(); ok=$true
+                skippedFeature="$($p.feature)"; skippedReason=(Get-PimFeatureSkipReason -Key "$($p.feature)"); notChecked=$true }
         }
     }
+    # REQ-U: per-scope warnings a provider raises (e.g. the Groups provider keeping a workload group whose binding
+    # provider is gated off) travel back in the scope result, so the run's job log / alerting can name them.
+    $Context['__pimScopeWarnings'] = New-Object System.Collections.Generic.List[string]
+    $Context['__pimLiveReadError'] = $null
+    # REQ-U wave 2: structured live FINDINGS a provider raises from its own live read (the workload providers' orphan
+    # group / unmanaged binding / wrong permissions warnings). They travel back as the scope result's `findings`; the
+    # drift snapshot lists and counts them (PIM-DriftSnapshot.ps1).
+    $Context['__pimLiveFindings'] = New-Object System.Collections.Generic.List[object]
 
     # Assignment scopes depend on groups/AUs/admins an earlier scope may have just created.
     # INCREMENTAL refresh: those creates are appended to the directory cache by
@@ -523,6 +534,17 @@ function Invoke-PimEngineScope {
 
     $desired = @(& $p.GetDesired $Context)
     $live    = @(& $p.GetLive    $Context)
+    # REQ-U (2026-09-19): a provider whose LIVE read failed (a 403, a missing permission, an API that answered an
+    # error) says so in $Context['__pimLiveReadError'] instead of handing back an empty live set. An empty live set
+    # is NOT "nothing there": diffed, it reads as "everything missing" (and a create would duplicate what exists),
+    # and in a drift check it reads as checked. The scope is therefore NOT CHECKED and applies nothing.
+    $__lre = "$($Context['__pimLiveReadError'])".Trim()
+    if ($__lre) {
+        Write-Warning ("[engine] {0}: the live state could NOT be read -- nothing was compared and nothing applied (NOT CHECKED): {1}" -f $Scope, $__lre)
+        return [pscustomobject]@{ scope=$Scope; mode=$Mode; whatIf=[bool]$WhatIf; create=0; update=0; remove=0; nochange=0; applied=0; skipped=0; errors=0; plan=@()
+            ok=$false; notChecked=$true; error="the live state could not be read: $__lre"; detail="${Scope}: the live state could not be read -- not checked, nothing applied: $__lre"
+            warnings=@($Context['__pimScopeWarnings']) }
+    }
     # Destructive prune (remove live items not in desired) is gated TWICE:
     #   1. -Mode Full AND -Prune must BOTH be set (Full alone reconciles create/update only).
     #      A partial/non-authoritative desired set must never silently disable real admins.
@@ -615,6 +637,30 @@ function Invoke-PimEngineScope {
         $diff = [pscustomobject]@{ create = @($diff.create); update = @($diff.update); remove = @($sel.remove); nochange = @($diff.nochange) }
     }
 
+    # --- 🔴 IMP-33 (2026-09-18): THE UNMANAGED-ADMIN REPORT RUNS ON EVERY PASS, AND IS STORED ---------
+    # The block above only runs when the diff proposes removals, which a Delta pass never does -- so on EFIF
+    # `Admins desired=5 live=14` ran every 5 minutes and nothing ever named the nine accounts in between (six
+    # of them real admins with no TAP healing, no reminders, no review). Classify the WHOLE live set with the
+    # same pure classifier (desired identities fall out as attributable, break-glass is excluded) and store
+    # the result for the Manager. REPORT ONLY -- this touches no account. Logged only when the set CHANGES.
+    if ($p.isAccountDisable -and (Get-Command Save-PimUnmanagedAdminReport -ErrorAction SilentlyContinue)) {
+        try {
+            $__ent = if ($p.entity) { "$($p.entity)" } else { "$Scope" }
+            $__res = $null
+            if ($global:PIM_DesiredResolved -is [hashtable] -and $global:PIM_DesiredResolved.ContainsKey($__ent)) { $__res = [bool]$global:PIM_DesiredResolved[$__ent] }
+            $__all = Select-PimDisableRemovals -Remove @($live) -Desired @($desired)
+            $__cs = if ($global:PIM_EngineSqlCs) { $global:PIM_EngineSqlCs }
+                    elseif ($global:PIM_SqlConnectionString) { $global:PIM_SqlConnectionString }
+                    elseif ((Get-Command Get-PimSqlConnectionString -ErrorAction SilentlyContinue) -and ($global:PIM_SqlServer -or $global:PIM_SqlConnStringVault)) { Get-PimSqlConnectionString }
+                    else { $null }
+            $__sv = Save-PimUnmanagedAdminReport -Scope $Scope -Unmanaged @($__all.unmanaged) -BreakGlass @($__all.breakGlass) -DesiredResolved $__res -ConnectionString $__cs
+            if ($__sv.ok -and $__sv.changed) {
+                Write-Host ("[engine] {0}: unmanaged admin accounts now {1} (REPORT ONLY, shown in the Manager): {2}" -f `
+                    $Scope, @($__sv.accounts).Count, ((@($__sv.accounts)) -join ', ')) -ForegroundColor Yellow
+            }
+        } catch { }   # a report can never fail the pass
+    }
+
     if ($p.isAccountDisable -and @($diff.remove).Count -gt 0 -and (Get-Command Test-PimDisablePassAllowed -ErrorAction SilentlyContinue)) {
         $resolvedFlag = $null
         $ent = if ($p.entity) { "$($p.entity)" } else { "$Scope" }
@@ -649,7 +695,8 @@ function Invoke-PimEngineScope {
     if ($__rmTotal -gt 0 -and (Get-Command Test-PimRemoveBudgetAllowed -ErrorAction SilentlyContinue)) {
         $rb = Test-PimRemoveBudgetAllowed -ToRemove $__rmTotal -Scope $Scope -Scanned (@($live).Count) -Operation 'remove'
         if (-not $rb.allowed) {
-            if (Get-Command Write-PimRemoveBudgetAlert -ErrorAction SilentlyContinue) { Write-PimRemoveBudgetAlert -Decision $rb }
+            # A -WhatIf (plan / verify) run removes nothing: it is logged, never mailed as an engine failure.
+            if (Get-Command Write-PimRemoveBudgetAlert -ErrorAction SilentlyContinue) { Write-PimRemoveBudgetAlert -Decision $rb -PlanOnly:([bool]$WhatIf) }
             else { Write-Host ("[engine] {0}: REMOVAL BUDGET exceeded -- {1}" -f $Scope, $rb.reason) -ForegroundColor Red }
             $diff = [pscustomobject]@{ create = @($diff.create); update = $__keepUpdate; remove = @(); nochange = @($diff.nochange) }
             foreach ($__x in $__heldCand) { $__held.Add([pscustomobject]@{ item = $__x; budget = $rb.budget; toRemove = $__rmTotal }) }
@@ -823,7 +870,30 @@ function Invoke-PimEngineScope {
         failures=$script:__failures.ToArray()
         held=$__held.Count; absent=$__absent.Count; conflicts=$__conflicts.Count
         removeRowsDone=$__rowsDone
+        warnings=@($Context['__pimScopeWarnings'])
+        # .ToArray(), never @(): pwsh 7 throws "Argument types do not match" on @() over a List[object] from a hashtable.
+        findings=$(if ($Context['__pimLiveFindings'] -is [System.Collections.Generic.List[object]]) { $Context['__pimLiveFindings'].ToArray() } else { @() })
     }
+}
+
+function Get-PimFeatureSkipReason {
+    # REQ-U. The plain reason a gated scope did not run: the feature is switched off, or not licensed for this edition.
+    param([Parameter(Mandatory)][string]$Key)
+    $label = ''
+    if (Get-Command Get-PimFeatureCatalogEntry -ErrorAction SilentlyContinue) {
+        try { $e = Get-PimFeatureCatalogEntry -Key $Key; if ($e) { $label = "$($e.label)" } } catch { $label = '' }
+    }
+    $what = if ($label) { "the feature '$label' ($Key)" } else { "the feature '$Key'" }
+    # REQ-Y: a Pro feature without a Pro licence says so, with the contact and the register command.
+    if (Get-Command Test-PimFeatureProLicence -ErrorAction SilentlyContinue) {
+        try { $pl = Test-PimFeatureProLicence -Key $Key; if ($pl -and $pl.required -and -not $pl.ok) { return "$($pl.message)" } } catch { }
+    }
+    $enabled = $true
+    if (Get-Command Test-PimFeatureEnabled -ErrorAction SilentlyContinue) {
+        try { $enabled = [bool](Test-PimFeatureEnabled -Key $Key) } catch { $enabled = $false }
+    }
+    if (-not $enabled) { return "$what is turned off" }
+    return "$what is not licensed for this edition"
 }
 
 function Complete-PimRemoveRows {

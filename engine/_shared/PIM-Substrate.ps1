@@ -233,67 +233,74 @@ function Get-PimSyncModelPlan {
 # 3. Signed-baseline kill-switch (revocation + central kill)
 # ---------------------------------------------------------------------------
 
-function Get-PimRevokedSignerFile {
-    <# Local marker of revoked baseline-signer thumbprints (kill-switch state). #>
-    [CmdletBinding()] param()
-    $dir = if (Get-Command Get-PimBaselineStateFile -ErrorAction SilentlyContinue) {
-        try { Split-Path -Parent (Get-PimBaselineStateFile) } catch { $null }
-    } else { $null }
-    if (-not $dir) { $dir = Join-Path (Split-Path -Parent (Split-Path -Parent $PSScriptRoot)) 'output\state' }
-    if (-not (Test-Path $dir)) { New-Item -ItemType Directory -Force $dir | Out-Null }
-    Join-Path $dir 'baseline-revoked-signers.json'
-}
+# 🔒 SEC-25 (2026-09-18): the revoked-signer list is SQL -- this tenant's pim.Settings
+# 'BaselineRevokedSigners' -- never a file. It used to be output\state\baseline-revoked-signers.json,
+# which a container loses on every execution and which PIM v2 does not keep; and nothing on the pull
+# path read it, so a compromised signing key could not be revoked. The pull path now reads it
+# (Invoke-PimManagedDownlink) and refuses a revoked signer. The storage helpers are in PIM-Baseline.ps1
+# (Get-PimBaselineRevokedSignerIds / ConvertTo-PimBaselineSignerId) so the pull needs no second module.
+# A signer id is a certificate thumbprint (hex, case/separator-insensitive) OR a Key Vault signing key
+# id (71.35: 43 base64url characters, case-sensitive) -- the old hex-only normaliser mangled the second.
 
 function Get-PimRevokedSigners {
-    <# The set of revoked baseline-signer thumbprints (upper-cased, no separators). #>
-    [CmdletBinding()] param([string]$StateFile)
-    if (-not $StateFile) { $StateFile = Get-PimRevokedSignerFile }
-    if (-not (Test-Path $StateFile)) { return @() }
-    try {
-        $j = Get-Content $StateFile -Raw | ConvertFrom-Json
-        , @(@($j.thumbprints) | ForEach-Object { ("$_" -replace '[^0-9A-Fa-f]', '').ToUpperInvariant() } | Where-Object { $_ })
-    } catch { @() }
+    <# The revoked baseline-signer ids from this tenant's pim.Settings (throws when the store cannot be read). #>
+    [CmdletBinding()] param([Parameter(Mandatory)][string]$ConnectionString)
+    return @(Get-PimBaselineRevokedSignerIds -ConnectionString $ConnectionString)
 }
 
 function Set-PimRevokedSigners {
     <#
     .SYNOPSIS
-        Record the revoked baseline-signer thumbprints (the kill-switch).
+        Record the revoked baseline-signer ids (the kill-switch) in this tenant's pim.Settings.
     .DESCRIPTION
-        Revoking the signer thumbprint is the baseline kill-switch: once a
-        thumbprint is here, Test-PimBaselineSignerAllowed (and thus the consumer)
-        rejects every bundle signed by it. Normalizes to upper-hex, de-dups.
+        Revoking the signer is the baseline kill-switch: once an id is here, the pull path
+        (Invoke-PimManagedDownlink) refuses every bundle -- and every central-kill manifest -- it
+        signed. Normalises (hex thumbprints upper-cased, separators dropped; key ids kept exactly),
+        de-dups, REFUSES an entry that is neither kind (a typo must not revoke nothing), writes, and
+        reads back. Full-set: the list given IS the list.
     #>
     [CmdletBinding()]
-    param([Parameter(Mandatory)][string[]]$Thumbprints, [string]$StateFile)
-    if (-not $StateFile) { $StateFile = Get-PimRevokedSignerFile }
-    $clean = @($Thumbprints | ForEach-Object { ("$_" -replace '[^0-9A-Fa-f]', '').ToUpperInvariant() } | Where-Object { $_ } | Select-Object -Unique)
-    @{ thumbprints = $clean; updatedAtUtc = [datetime]::UtcNow.ToString('yyyy-MM-ddTHH:mm:ssZ') } |
-        ConvertTo-Json | Set-Content -LiteralPath $StateFile -Encoding UTF8
-    , @($clean)
+    param([Parameter(Mandatory)][AllowEmptyCollection()][string[]]$Thumbprints, [Parameter(Mandatory)][string]$ConnectionString)
+    $clean = New-Object System.Collections.Generic.List[string]
+    foreach ($x in @($Thumbprints)) {
+        if (-not "$x".Trim()) { continue }
+        $id = ConvertTo-PimBaselineSignerId -Value "$x"
+        if (-not $id) { throw "REFUSED: '$x' is not a certificate thumbprint or a signing key id -- nothing was written" }
+        if (-not $clean.Contains($id)) { $clean.Add($id) }
+    }
+    $name = Get-PimBaselineTrustSettingName -Kind Revoked
+    Set-PimSqlSetting -ConnectionString $ConnectionString -Name $name -Value ([ordered]@{
+        signers = @($clean.ToArray()); updatedAtUtc = [datetime]::UtcNow.ToString('yyyy-MM-ddTHH:mm:ssZ') })
+    $back = @(Get-PimBaselineRevokedSignerIds -ConnectionString $ConnectionString)
+    $missing = @($clean.ToArray() | Where-Object { $back -cnotcontains $_ })
+    if ($missing.Count -or $back.Count -ne $clean.Count) { throw "revoked-signer list read back as '$($back -join ', ')' after writing '$($clean.ToArray() -join ', ')'" }
+    , @($clean.ToArray())
 }
 
 function Test-PimBaselineSignerAllowed {
     <#
     .SYNOPSIS
-        Is a baseline bundle's signer thumbprint allowed (not revoked)?
+        Is a baseline bundle's signer allowed (not revoked)?
     .DESCRIPTION
-        The kill-switch check. $true unless the signer thumbprint is on the
-        local revoked-signers list. Thumbprint comparison is separator- and
-        case-insensitive. Used by the consumer BEFORE trusting a verified bundle.
+        The kill-switch check. $true unless the signer is on the revoked list. A certificate
+        thumbprint compares separator- and case-insensitively; a Key Vault key id exactly. An empty
+        or unrecognisable signer is NOT allowed. -Revoked supplies the list; otherwise it is read from
+        -ConnectionString's pim.Settings (there is no file fallback, and no list source is a refusal).
     #>
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)][AllowEmptyString()][string]$Thumbprint,
-        [string[]]$Revoked,
-        [string]$StateFile
+        [AllowEmptyCollection()][string[]]$Revoked,
+        [string]$ConnectionString
     )
-    if (-not $PSBoundParameters.ContainsKey('Revoked')) { $Revoked = Get-PimRevokedSigners -StateFile $StateFile }
-    # normalize BOTH sides (caller-supplied lists may carry colons / spaces / case)
-    $norm = @($Revoked | ForEach-Object { ("$_" -replace '[^0-9A-Fa-f]', '').ToUpperInvariant() } | Where-Object { $_ })
-    $t = ("$Thumbprint" -replace '[^0-9A-Fa-f]', '').ToUpperInvariant()
-    if (-not $t) { return $false }   # no signer thumbprint at all -> not allowed
-    -not (@($norm) -contains $t)
+    if (-not $PSBoundParameters.ContainsKey('Revoked')) {
+        if (-not "$ConnectionString".Trim()) { throw 'Test-PimBaselineSignerAllowed: no -Revoked list and no -ConnectionString to read it from (SQL only) -- refusing to answer "allowed" without looking' }
+        $Revoked = @(Get-PimBaselineRevokedSignerIds -ConnectionString $ConnectionString)
+    }
+    $norm = @(@($Revoked) | ForEach-Object { ConvertTo-PimBaselineSignerId -Value "$_" } | Where-Object { $_ })
+    $t = ConvertTo-PimBaselineSignerId -Value "$Thumbprint"
+    if (-not $t) { return $false }   # no (recognisable) signer at all -> not allowed
+    -not (@($norm) -ccontains $t)
 }
 
 function Resolve-PimCentralKill {
@@ -322,22 +329,32 @@ function Resolve-PimCentralKill {
     .PARAMETER Doc
         The signed manifest document (payloadB64/signature/keyThumbprint).
     .PARAMETER Revoked
-        Optional revoked-signer override (defaults to the local list) -- a kill
-        manifest signed by a revoked key is itself refused.
+        Optional revoked-signer list; otherwise read from -ConnectionString's
+        pim.Settings (SQL only -- no list source is a refusal). A kill manifest
+        signed by a revoked key is itself refused.
+    .NOTES
+        The signer checked is the key that VERIFIES the manifest
+        (Get-PimBaselineDocSignerId), not its keyThumbprint field -- that field
+        is an unauthenticated claim, so checking it let a revoked key's manifest
+        through by simply naming a different thumbprint.
     #>
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)][object]$Doc,
-        [string[]]$Revoked,
-        [string]$StateFile
+        [AllowEmptyCollection()][string[]]$Revoked,
+        [string]$ConnectionString
     )
     if (-not (Get-Command Test-PimBaselineDoc -ErrorAction SilentlyContinue)) {
         throw "Test-PimBaselineDoc not loaded -- PIM-Baseline.ps1 must be dot-sourced before PIM-Substrate.ps1"
     }
     # signer kill-switch: refuse a manifest signed by a revoked key
-    if (-not $PSBoundParameters.ContainsKey('Revoked')) { $Revoked = Get-PimRevokedSigners -StateFile $StateFile }
-    if (-not (Test-PimBaselineSignerAllowed -Thumbprint "$($Doc.keyThumbprint)" -Revoked $Revoked)) {
-        throw "central-kill manifest refused: signer $($Doc.keyThumbprint) is revoked (kill-switch)"
+    if (-not $PSBoundParameters.ContainsKey('Revoked')) {
+        if (-not "$ConnectionString".Trim()) { throw 'central-kill manifest refused: no -Revoked list and no -ConnectionString to read the revoked-signer list from (SQL only)' }
+        $Revoked = @(Get-PimBaselineRevokedSignerIds -ConnectionString $ConnectionString)
+    }
+    $signer = Get-PimBaselineDocSignerId -Doc $Doc
+    if (-not (Test-PimBaselineSignerAllowed -Thumbprint $signer -Revoked @($Revoked))) {
+        throw "central-kill manifest refused: signer $signer is revoked (kill-switch)"
     }
     # verify signature + shape (reuses the baseline crypto + public key); the
     # kind gate inside Test-PimBaselineDoc rejects anything but a kill manifest.

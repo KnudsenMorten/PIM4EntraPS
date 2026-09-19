@@ -281,6 +281,91 @@ function Resolve-PimGroupName {
     return $name
 }
 
+# ---------------------------------------------------------------------------
+# REQ-U (2026-09-19) -- GroupTag <-> group name through the TENANT's pattern.
+# Operator: "customer can have different naming convention so you must make sure code uses the actual naming
+# per tenant and not generic". A tag is tenant-neutral ('Intune-HelpDeskOperator-L4-T1-WDP-ID'); the NAME is
+# the tenant's PimGroupPattern around it ('PIM-{Role}' -> 'PIM-Intune-...', 'GRP-{Role}' -> 'GRP-Intune-...').
+# These mirror the Manager's pimGroupNameFromTag / pimGroupTagFromName (pim-manager.html) so the engine, the
+# Manager and the validator agree on one answer -- and nothing hard-codes a 'PIM-' prefix.
+# ---------------------------------------------------------------------------
+function Get-PimGroupNameAffixes {
+    # PURE. The literal text the tenant's PimGroupPattern puts BEFORE and AFTER the {Role} (tag) part, with every
+    # other token dropped and separators collapsed exactly like the GUI: 'PIM-{Role}-{Department}' -> PIM- / '',
+    # 'GRP-{Role}' -> GRP- / '', '{Role}-X' -> '' / -X. -Pattern overrides the stored convention.
+    [CmdletBinding()] param([string]$Pattern)
+    $pat = "$Pattern"
+    if (-not $pat.Trim()) { $pat = "$(Get-PimNamingConvention -Key 'PimGroupPattern')" }
+    if (-not $pat.Trim()) { $pat = 'PIM-{Role}-{Department}' }
+    $mark = [string][char]1
+    $p = [regex]::Replace($pat, '\{Role\}', $mark, 'IgnoreCase')
+    $p = $p -replace '\{[A-Za-z]+\}', ''
+    $p = $p -replace '-{2,}', '-'
+    $p = $p -replace '^-+|-+$', ''
+    # ORDINAL: a culture-aware IndexOf treats the control-character marker as ignorable and answers 0 (pwsh 7 / ICU).
+    $i = $p.IndexOf($mark, [System.StringComparison]::Ordinal)
+    if ($i -lt 0) {
+        # A pattern without {Role} spells the whole grammar in tokens ('PIM-{Service}-{Name}-L{Level}-...'): the tag
+        # IS that grammar, so the name is the literal text before the first token + the tag.
+        $b = $pat.IndexOf('{')
+        $pre = if ($b -lt 0) { $(if ($pat.Trim()) { $pat.Trim().TrimEnd('-') + '-' } else { '' }) } else { $pat.Substring(0, $b) }
+        return [pscustomobject]@{ prefix = $pre; suffix = ''; pattern = $pat }
+    }
+    return [pscustomobject]@{ prefix = $p.Substring(0, $i); suffix = $p.Substring($i + 1); pattern = $pat }
+}
+
+function Resolve-PimGroupNameFromTag {
+    # PURE. GroupTag -> the group NAME under the tenant's pattern (or -Pattern). The tag is kept verbatim (no
+    # sanitising: it is already the tenant's identifier). Blank tag -> ''.
+    [CmdletBinding()] param([AllowNull()][string]$Tag, [string]$Pattern)
+    $t = "$Tag".Trim()
+    if (-not $t) { return '' }
+    $a = Get-PimGroupNameAffixes -Pattern $Pattern
+    return ("{0}{1}{2}" -f $a.prefix, $t, $a.suffix)
+}
+
+function ConvertFrom-PimGroupNameToTag {
+    # PURE. The inverse: strip the pattern's literal prefix/suffix from a NAME. A name that does not carry them is
+    # NOT this pattern's -> '' (there is deliberately no 'strip a leading PIM-' fallback: that is the generic
+    # assumption REQ-U removes).
+    [CmdletBinding()] param([AllowNull()][string]$Name, [string]$Pattern)
+    $n = "$Name".Trim()
+    if (-not $n) { return '' }
+    $a = Get-PimGroupNameAffixes -Pattern $Pattern
+    $pre = "$($a.prefix)"; $suf = "$($a.suffix)"
+    if ($n.Length -le ($pre.Length + $suf.Length)) { return '' }
+    if ($pre -and -not $n.StartsWith($pre, [System.StringComparison]::OrdinalIgnoreCase)) { return '' }
+    if ($suf -and -not $n.EndsWith($suf, [System.StringComparison]::OrdinalIgnoreCase)) { return '' }
+    return $n.Substring($pre.Length, $n.Length - $pre.Length - $suf.Length)
+}
+
+function Get-PimGroupNamePrefix {
+    # PURE. The literal text before the first {Token} of the tenant's PimGroupPattern -- the same rule as
+    # Get-PimActiveAssignmentsGroupPrefix / Get-PimTenantSyncGroupPrefix. Returns '' when the pattern has no
+    # literal prefix of at least -MinLength characters: callers that select groups BY PREFIX must then select
+    # nothing, never fall back to a generic 'PIM-'.
+    [CmdletBinding()] param([string]$Pattern, [int]$MinLength = 3)
+    $pat = "$Pattern"
+    if (-not $pat.Trim()) { $pat = "$(Get-PimNamingConvention -Key 'PimGroupPattern')" }
+    if (-not $pat.Trim()) { $pat = 'PIM-{Role}-{Department}' }
+    $i = $pat.IndexOf('{')
+    $p = if ($i -lt 0) { $pat } else { $pat.Substring(0, $i) }
+    if ($p.Length -lt $MinLength) { return '' }
+    return $p
+}
+
+function ConvertTo-PimTenantGroupName {
+    # PURE. Re-express a group NAME authored under one pattern (-FromPattern, a shipped pack's 'PIM-{Role}') under
+    # the tenant's own pattern. A name that does not carry -FromPattern's affixes is returned unchanged -- it was
+    # not written in that convention, so there is nothing to translate.
+    [CmdletBinding()] param([AllowNull()][string]$Name, [string]$FromPattern = 'PIM-{Role}', [string]$ToPattern)
+    $n = "$Name".Trim()
+    if (-not $n) { return '' }
+    $tag = ConvertFrom-PimGroupNameToTag -Name $n -Pattern $FromPattern
+    if (-not $tag) { return $n }
+    return (Resolve-PimGroupNameFromTag -Tag $tag -Pattern $ToPattern)
+}
+
 function Resolve-PimResourceGroup {
     # Generate the Azure RG name. The default now follows the FULL PIM naming
     # convention (same token grammar as Resolve-PimGroupName):

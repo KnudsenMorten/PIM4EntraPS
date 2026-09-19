@@ -53,7 +53,7 @@ owns the detail. (Screenshot uses synthetic demo data.)*
   - [Create access the natural way round](#create-access-the-natural-way-round)
   - [Pending changes — one queue, reviewed before commit](#pending-changes--one-queue-reviewed-before-commit)
   - [Drift — is the tenant what PIM says it should be?](#drift--is-the-tenant-what-pim-says-it-should-be)
-  - [Review standing access](#review-standing-access)
+  - [Review current delegations](#review-current-delegations)
   - [Reports — "who can do what", and the reverse](#reports--who-can-do-what-and-the-reverse)
   - [Role Lookup — the questions every admin asks about roles](#role-lookup--the-questions-every-admin-asks-about-roles)
   - [Validate — catch problems before they ship](#validate--catch-problems-before-they-ship)
@@ -66,8 +66,11 @@ owns the detail. (Screenshot uses synthetic demo data.)*
 - [How updates reach an environment — the two ring systems](#how-updates-reach-an-environment--the-two-ring-systems)
 - [Editions — what is free and what is paid](#editions--what-is-free-and-what-is-paid)
   - [Free — the community edition, for a single tenant](#free--the-community-edition-for-a-single-tenant)
-  - [Paid — everything in free, plus the multi-tenant half](#paid--everything-in-free-plus-the-multi-tenant-half)
-  - [Interested in the licensed (multi-tenant) edition?](#interested-in-the-licensed-multi-tenant-edition)
+  - [Pro — licensed capabilities for a single tenant](#pro--licensed-capabilities-for-a-single-tenant)
+  - [Pro — the multi-tenant half](#pro--the-multi-tenant-half)
+  - [How licensing works](#how-licensing-works)
+  - [Defaults in this release](#defaults-in-this-release)
+  - [Getting a licence](#getting-a-licence)
 - [Getting started — install the community edition](#getting-started--install-the-community-edition)
   - [What you need](#what-you-need)
   - [1. Get the code](#1-get-the-code)
@@ -395,9 +398,14 @@ Security is layered through the whole product, not bolted on:
   sensitive it is and which plane it lives on, so the most powerful access is
   held to the strictest rules and over-exposure is visible.
 - **Fail-closed.** When the Manager can't determine what an operator is allowed
-  to do, it drops to **read-only** rather than assuming the best. The role tiers
+  to do, it drops to **read-only** rather than assuming the best, and a request
+  with no signed-in user is refused outright. The role tiers
   (Reader / Admin / Super-Admin / Delegated) gate exactly what each operator can
-  do.
+  do. *(New in 2.4.370.)* A new hosted Manager stays closed until its sign-in is
+  configured and verified. Names written into desired state are escaped before
+  they reach the page. Two administrators editing the same data cannot overwrite
+  each other, and a delegated administrator's commit can never remove rows outside
+  their scope.
 - **No stored passwords.** The hosted Manager and engine authenticate with their
   own managed identities — to Microsoft Graph, to Azure and to the database — and
   deployment tooling signs in with certificates. A client secret is used only where
@@ -457,6 +465,12 @@ wrong attempts and a bounded lifetime (defaults to 4 hours, capped at 24).
 Every step is audited, owners are notified, and normal policy is restored
 automatically when the window closes. Crucially, it **works from a client PC**,
 so senior admins are never locked out even if the central console is down.
+
+*(New in 2.4.370.)* The override is applied by the engine on its next run and
+reverted by the engine when it expires. **Break-glass accounts** are managed in
+**Settings**, stored in the database and read by both the Manager and the engine.
+PIM never revokes, disables or offboards them. If the list cannot be read, every
+account is protected until it can.
 
 ### Notifications and email
 
@@ -563,8 +577,8 @@ description. (Synthetic demo data.)*
 | **Access** | The Access map, Look up a role, Create access (guided wizards), Change existing access, Admin accounts & TAP, Invite a guest or consultant, Departments & owners, and All records. |
 | **Pending changes** | Check for problems (validation) and the Review & commit queue. |
 | **Jobs** | Jobs & status, Engine logs & errors, and the Job schedule. |
-| **Reviews & controls** | Review standing access, Approvals, Drift: live vs desired, Access reviews, Tenant conformance, Reports, and Managed tenants. |
-| **Audit & Settings** | Audit trail, Settings, Newly discovered resources, Manager access & roles, Emergency override (break-glass), Mail templates, and Support. |
+| **Reviews & controls** | Review current delegations, Approvals, Drift: live vs desired, **Coverage & gaps** (what every workload has delegated and what it has not), Access reviews, Tenant conformance, Reports, Managed tenants, and on an MSP master the **Managed tenant registry** and **Replication overview**. |
+| **Audit & Settings** | Audit trail, Settings, Newly discovered resources, Manager access & roles, Emergency access (break-glass), Mail templates, **Policy templates**, and Support. |
 
 A **global search box** in the header jumps to any person, group, role, scope or
 tag across the whole estate: a person or role opens its "who can do what" report;
@@ -654,10 +668,10 @@ admin who should be an eligible member of a group — rather than by object id. 
 area that could not be checked says so instead of pretending to be clean. **Check
 now** queues a fresh check.
 
-### Review standing access
+### Review current delegations
 
-![Review standing access — the current assignments snapshot with its timestamp](docs/img/manager-standing-access.png)
-*Review standing access lists who holds privileged access right now — Entra
+![Review current delegations — the current assignments snapshot with its timestamp](docs/img/manager-standing-access.png)
+*Review current delegations lists who holds privileged access right now — Entra
 roles, Azure RBAC and PIM for Groups — from a snapshot stamped with its time.
 (Synthetic demo data.)*
 
@@ -963,8 +977,11 @@ installation has no replication ring.*
 
 ## Editions — what is free and what is paid
 
-This is the **current commercial shape**. Read it together with the note at the end:
-the product does **not** enforce any of it today.
+The line is simple: **the community edition is free for a single tenant**, and a **Pro licence** adds a
+set of advanced single-tenant capabilities and the whole multi-tenant half. From v2.4.380 the product
+**enforces** this: a Pro capability without a valid licence is switched off in the engine, the scheduled
+jobs and the portal, and the portal says why. Everything in the free edition keeps working whatever the
+licence state.
 
 ### Free — the community edition, for a single tenant
 
@@ -972,15 +989,38 @@ Everything an organisation needs to govern its own tenant:
 
 - the full **portal** — model, review, commit, and see what changed;
 - **eligible, time-boxed access** with approval and a complete audit trail;
+- **Entra ID roles, PIM for Groups, administrative units and Azure RBAC**;
+- **Intune and Defender XDR** role delegation, including Defender custom roles;
 - **delegation by group** — permission groups and tiering, so access is granted by
   membership rather than by hand;
+- **policy templates** — a Standard and a RequireApproval template per kind, renameable, with a default per kind;
 - **drift detection** — what exists in the directory versus what your model says;
 - **access reviews and reports**, including standing access and expiring access;
 - **administrator accounts and first-time access passes**, issued and tracked;
+- **permission templates imported by script** (`Import-PimPermissionTemplate.ps1`) and tenant preparation from one
+  configuration file (`Invoke-PimTenantPrep.ps1`);
 - **self-updating from the public release**;
 - **community support**.
 
-### Paid — everything in free, plus the multi-tenant half
+### Pro — licensed capabilities for a single tenant
+
+On top of the free edition, a Pro licence adds:
+
+- **Coverage & gaps and discovery** — what is and is not delegated through PIM across every workload, and the
+  scheduled jobs that find new roles, groups and resources;
+- the **other workload connectors** — Power BI, Exchange Online, enterprise-app roles, Azure DevOps, Dataverse,
+  Business Central and Power Platform;
+- **revoking current delegations** from the portal;
+- **access review campaigns** with decisions recorded and enforced;
+- a **second approver** for sensitive changes (separation of duties);
+- **delegated administration** — portal users limited to a tier, level, service or scope;
+- the **tier-impact report** — everyone who can reach tier 0, including through nested groups;
+- the **evidence export** — who may hold what, who held it, and who approved.
+
+> ⚠️ Without a licence, the second approver is switched off too — sensitive changes then need one administrator,
+> not two. Install the licence before you rely on it.
+
+### Pro — the multi-tenant half
 
 For a service provider, or any organisation running more than one tenant:
 
@@ -1000,15 +1040,53 @@ For a service provider, or any organisation running more than one tenant:
   customer;
 - **support with an agreed response time**.
 
-> **Licence enforcement is not switched on in the product today.** Nothing is
-> technically restricted by edition in this release: every capability works in every
-> installation while licensing is finalised. The edition an environment runs is
-> recorded so the commercial basis is clear, but there is no gate in the code that
-> would stop you. The terms that apply to this code are in **[LICENSE](LICENSE)**.
+A managing (master) or managed (slave) tenant **requires** a Pro licence: without one, its publishing and
+downlink jobs refuse to run and the portal shows a red banner on its MSP pages.
 
-### Interested in the licensed (multi-tenant) edition?
+### How licensing works
 
-**Mail [mok@mortenknudsen.net](mailto:mok@mortenknudsen.net) for information.**
+- **A licence is one signed file.** It names you, the edition, the capabilities, the tenants it covers and the
+  dates it runs between.
+- **Verified offline.** The environment checks the signature against a key built into the product — no
+  activation server, no call home, no internet needed.
+- **Bound to your tenants.** A licence that names tenants is valid only there.
+- **Gentle expiry.** After the end date a grace period keeps the licensed capabilities running with a warning;
+  only afterwards do they switch off. The free capabilities are never affected.
+- **Settings › Licence** in the portal shows the status, the customer, the valid-until date and the tenant it is
+  bound to, and which Pro capabilities are on.
+
+**Register a licence file** (it is stored in the environment's database, verified first and read back):
+
+```powershell
+pwsh -File tools\setup\Set-PimLicense.ps1 -LicensePath <file> -SqlServer <server>.database.windows.net `
+     -TenantId <tenant> -AdminAppId <app id> -AdminCertThumbprint <thumbprint>
+```
+
+The running portal and jobs pick it up on their next start.
+
+### Defaults in this release
+
+What an environment does before anyone changes a setting (the full table is in
+[DESIGN.md › Defaults in v2.4.380](docs/DESIGN.md#19b-defaults-in-v24380--what-an-environment-does-before-anyone-changes-a-setting)):
+
+- **Always on (free):** the engine, the delegation map and Review & Save.
+- **Off until you switch them on (free):** email alerts, Teams / webhook alerts; scheduled jobs are switched on by the
+  hosted deploy.
+- **Switch themselves on when you have rows for them:** the Intune + Defender XDR connectors (free) and the
+  app-role / Azure DevOps / Dataverse / Business Central / Power Platform connectors (Pro).
+- **Pro, on when licensed:** Coverage & gaps, revoke, access review campaigns, delegated administration, the
+  tier-impact report and the evidence export. **Pro, off until switched on:** the second approver, discovery,
+  Power BI, Exchange Online, and MSP.
+- **Policy templates:** `Groups_Standard`, `EntraIDRoles_Standard` and `AzureRoles_Standard` are the defaults per kind.
+- **Workload assignments:** groups are always created; a new Intune / Defender / Power BI / connector assignment waits
+  until that workload's prerequisites are green; Azure waits only when a check found a problem.
+- **Prerequisite results** are re-checked after 30 days (they keep working meanwhile); **licences** have a 30-day grace
+  period unless the licence says otherwise.
+
+### Getting a licence
+
+**Mail [mok@mortenknudsen.net](mailto:mok@mortenknudsen.net) for a Pro licence** — for the advanced single-tenant
+capabilities, or for the multi-tenant edition. The terms that apply to this code are in **[LICENSE](LICENSE)**.
 
 ---
 
@@ -1248,7 +1326,6 @@ PIM4EntraPS/
   templates/                  # admin, mail and policy templates
   workloads/                  # workload connector definitions
   launcher/  legacy/          # v1-compatible launchers and reference engines
-  infra/                      # hosting templates
   docs/                       # FEATURES.md · DESIGN.md · img/
   FUNCTIONS/                  # bundled shared PowerShell modules
   README.md  RELEASENOTES.md  LICENSE  VERSION

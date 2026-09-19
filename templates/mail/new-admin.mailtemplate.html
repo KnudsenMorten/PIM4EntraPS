@@ -1,6 +1,6 @@
 <!-- subject: New privileged admin account created: {{UserPrincipalName}} -->
 <!-- tokens: DisplayName, UserPrincipalName, Company, ManagerEmail, TierLevel, Date -->
-<!-- To customize: copy this file to new-admin.mailtemplate.custom.html and edit. -->
+<!-- To customize: edit it in the Manager (Settings > Mail templates); the edited copy is kept in SQL and is never overwritten by updates. -->
 <html>
 <body style="font-family:Segoe UI,Arial,sans-serif; color:#24292f; font-size:14px;">
   <p>Hello,</p>
@@ -11,7 +11,7 @@
     <tr><td><b>Tier</b></td><td>{{TierLevel}}</td></tr>
     <tr><td><b>Company</b></td><td>{{Company}}</td></tr>
   </table>
-  <p>You are receiving this because you are registered as the responsible manager ({{ManagerEmail}}).
+  <p>You are receiving this as an owner of the admins sponsor department (or its registered office contact).
      Sign-in credentials are delivered separately (Temporary Access Pass or password log, per your onboarding flow).</p>
   <p style="color:#57606a;">If this account was not expected, contact your security operations team.</p>
 </body>

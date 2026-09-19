@@ -135,6 +135,12 @@ param(
     # Ring 2 and above are NEVER written automatically.
     [switch]$OverrideRingGate,
     [string]$Reason,
+    # BUG-170: an environment with NO ring is refused (it predates the ring). When the SAME deploy run
+    # installs the updater afterwards (Invoke-PimDeployAll with an explicit -UpdateRing), it passes that
+    # ring here and the gate judges the roll by it -- ring 0/1 get every build, ring >= 2 only what
+    # channel.json approves. -1 = none. Forwarded to Update-PimContainers.
+    [ValidateRange(-1,3)][int]$PendingUpdateRing = -1,
+    [string]$PendingUpdateSourceUrl = '',
     # Where channel.json lives is derived from the updater's own PIM_UPDATE_SOURCE_URL. WRITING it needs
     # that storage account's key, from its subscription -- often NOT the environment's (an estate host
     # is signed in to the environment's tenant). Optional isolated az profile for that one call.
@@ -225,6 +231,7 @@ function Have($cmd){ [bool](Get-Command $cmd -ErrorAction SilentlyContinue) }
 . (Join-Path $solRoot 'engine\_shared\PIM-Rest.ps1')                  # Get-PimRestToken (SQL/Graph tokens)
 . (Join-Path $solRoot 'engine\_shared\PIM-ChangeQueue.ps1')           # Get-PimChangeQueueDdl -- Initialize-PimSqlStore CALLS it
 . (Join-Path $solRoot 'engine\_shared\PIM-SqlStore.ps1')              # Initialize-PimSqlStore (core tables)
+. (Join-Path $solRoot 'engine\_shared\PIM-UpdateSource.ps1')          # Get-PimSchemaFileApplyPlan -- the SAME guard update-job-entry uses
 . (Join-Path $here '_PimUpdateRing.ps1')                               # ring gate + channel advance (2026-09-13)
 # the mailer (same path as the synthetic-monitor work). Loading PIM-Notify pulls in Send-PimNotifyMail.
 $notifyLib = Join-Path $solRoot 'engine\_shared\PIM-Notify.ps1'
@@ -280,6 +287,17 @@ if ($Scenario -and -not $profile.isHosted) {
 
 Write-Host "=== PIM4EntraPS UPDATE-LIFECYCLE ($Source; $(if($DetectOnly){'DETECT-ONLY'}else{'APPLY'})) ===" -ForegroundColor Cyan
 Info "build mode: $($profile.buildMode); deploy mode: $($profile.deployMode); hosted: $($profile.isHosted)"
+# 🔴 IMP-43 -- A RUNTIME v2 DOES NOT SUPPORT IS REFUSED, NOT HALF-RUN. The local/VM path (local build +
+# relaunch, SQLEXPRESS) has no v2 runtime; applied to a hosted environment it built an image, rolled
+# NOTHING ("community: ... Build relaunched it") and reported deployed=True. Detect-only still reads.
+# Checked against the FINAL profile, after the -Scenario correction above.
+if ($Apply) { Assert-PimUpdateRuntimeSupported -UpdateProfile $profile -Caller 'Invoke-PimUpdate' }
+elseif (-not $profile.isHosted) { Warn "note: $($profile.unsupportedReason) -- detection only; -Apply will refuse." }
+# BUG-170: an override lets exactly ONE named version through. Without -ImageTag the version would be
+# whatever the pulled tree says tonight -- a standing override, which is no gate at all.
+if ($OverrideRingGate -and -not "$ImageTag".Trim()) {
+    throw "Invoke-PimUpdate: -OverrideRingGate needs -ImageTag <version> -- an override names the one version it lets through, never 'whatever the pulled tree says'."
+}
 
 # =============================================================================
 # helpers to GATHER FACTS (the side-effecting reads; the decisions stay pure)
@@ -297,19 +315,12 @@ function Get-PulledManagerContentHash {
     # SEC-01 lockout fix in engine/_shared/PIM-HostedAuth.ps1 could not reach ANY environment,
     # including through the nightly in-cloud updater -- a self-updating system blind to its own
     # engine change is not self-updating.
-    # 🪤 AND THE TWO COPIES MUST AGREE. The detector decides whether to build; the builder stamps
-    # the hash onto the image. If they hash different sets, every run either rebuilds forever or
-    # never rebuilds -- so this is a deliberate duplicate of the builder's function, and changing
-    # one without the other is the bug it replaces.
-    if (-not (Test-Path $solRoot)) { return '' }
-    $skip = '\\(docs|tests|output|\.git|\.vs|\.vscode|node_modules|cache)\\'
-    $files = @(Get-ChildItem -Path $solRoot -Recurse -File -ErrorAction SilentlyContinue |
-        Where-Object { $_.FullName -notmatch $skip -and $_.Name -notmatch '\.custom\.' })
-    $digests = foreach ($f in $files) {
-        $rel = $f.FullName.Substring($solRoot.Length).TrimStart('\','/')
-        [pscustomobject]@{ path = $rel; sha256 = (Get-FileHash -LiteralPath $f.FullName -Algorithm SHA256).Hash }
-    }
-    Get-PimContentHash -FileDigests @($digests)
+    # 🪤 AND THE COPIES MUST AGREE. The detector decides whether to build; the builder stamps the
+    # hash onto the image and the roller stamps it onto the app, where this detector reads it back.
+    # 🔴 BUG-174: "a deliberate duplicate" of the walk was the bug -- the ROLLER's copy hashed
+    # tools\pim-manager only, so the running hash never matched and every update rebuilt an identical
+    # image. All three now call the ONE definition (PIM-UpdateLifecycle.ps1).
+    Get-PimSolutionContentHash -SolutionRoot $solRoot
 }
 function Get-RunningManagerInfo {
     # hosted: read the running image tag + its baked-in content hash label via az (best-effort).
@@ -401,6 +412,59 @@ function Invoke-PimSqlDdl {
             [void]$cmd.ExecuteNonQuery()
         }
     } finally { $conn.Close() }
+}
+
+# The COL_LENGTH probe the base-schema guard asks, over the SAME token path as Invoke-PimSqlDdl.
+# THROWS when it cannot answer -- Get-PimSchemaFileApplyPlan reads a throw as "unknown" and refuses.
+function Test-PimSqlColumnExists {
+    param([Parameter(Mandatory)][string]$ConnString, [Parameter(Mandatory)][string]$Table, [Parameter(Mandatory)][string]$Column)
+    $tok = Get-PimSqlAccessToken -ConnString $ConnString
+    $conn = New-Object System.Data.SqlClient.SqlConnection $ConnString
+    if ($tok) { $conn.AccessToken = $tok }
+    $conn.Open()
+    try {
+        $cmd = New-Object System.Data.SqlClient.SqlCommand 'SELECT CASE WHEN COL_LENGTH(@t, @c) IS NULL THEN 0 ELSE 1 END', $conn
+        [void]$cmd.Parameters.AddWithValue('@t', $Table)
+        [void]$cmd.Parameters.AddWithValue('@c', $Column)
+        $cmd.CommandTimeout = 60
+        return ([int]$cmd.ExecuteScalar() -eq 1)
+    } finally { $conn.Close() }
+}
+
+# 🔴 2026-09-18 (IMP-46) -- THE SHIPPED BASE SCHEMA, ON EVERY APPLY RUN, BEHIND THE STORE-AWARE GUARD.
+# This used to run only when a LOCKED table was absent -- and the only locked table was the dead
+# pim.LocalAdmins. It now mirrors update-job-entry exactly (2026-09-15): every file is checked by
+# Get-PimSchemaFileApplyPlan BEFORE any of them runs (a refusal applies nothing), and then applied.
+# Idempotent (every object is IF OBJECT_ID/SCHEMA_ID ... IS NULL) and non-destructive (no DROP TABLE /
+# TRUNCATE / DELETE / UPDATE; a DROP COLUMN only when guarded AND the column is absent here -- inert),
+# so running it on a populated store is a no-op, and guarded additions reach existing stores.
+# Returns the relative paths applied, in order. Throws on a missing file, a refusal or a SQL error.
+$script:PimBaseSchemaFiles = @('sql\platform-schema.sql')
+function Invoke-PimBaseSchemaApply {
+    param([Parameter(Mandatory)][string]$ConnString, [Parameter(Mandatory)][string]$SolutionRoot)
+    $colProbe = { param([string]$Table, [string]$Column) Test-PimSqlColumnExists -ConnString $ConnString -Table $Table -Column $Column }
+    $files = @()
+    foreach ($rel in @($script:PimBaseSchemaFiles)) {
+        $sf = Join-Path $SolutionRoot $rel
+        if (-not (Test-Path -LiteralPath $sf)) {
+            throw "the base schema file '$rel' is missing from this payload -- the store cannot be created."
+        }
+        $sqlText = [IO.File]::ReadAllText($sf)
+        $fPlan = Get-PimSchemaFileApplyPlan -Sql $sqlText -Name $rel -ColumnExists $colProbe
+        if (-not $fPlan.ok) {
+            throw ("shipped schema file '$rel' REFUSED for unattended apply: " + (@($fPlan.violations) -join '; ') +
+                   '. Nothing from the schema files was applied.')
+        }
+        $files += @{ rel = $rel; sql = $sqlText; drops = @($fPlan.guardedDrops) }
+    }
+    $applied = @()
+    foreach ($s in $files) {
+        Invoke-PimSqlDdl -ConnString $ConnString -Sql $s.sql
+        $inert = @($s.drops | ForEach-Object { "$($_.table).$($_.column)" })
+        Info ("  applied $($s.rel) (idempotent; guarded additions reach existing stores$(if ($inert.Count) { "; inert guarded drops: $($inert -join ', ')" }))")
+        $applied += $s.rel
+    }
+    return ,$applied
 }
 
 function Get-DeployedColumns {
@@ -579,7 +643,7 @@ try {
         Step "   RING GATE: may $ResourceGroup take $($buildPlan.imageTag)?"
         [void](Assert-PimRollRingGate -ResourceGroup $ResourceGroup -SubscriptionArgs $azSubArgs -TargetVersion "$($buildPlan.imageTag)" `
                   -UpdateJobName $UpdateJobName -OverrideRingGate:$OverrideRingGate -Reason $Reason -Caller 'Invoke-PimUpdate' `
-                  -SqlConnectionString $SqlConnectionString)
+                  -SqlConnectionString $SqlConnectionString -PendingUpdateRing $PendingUpdateRing -PendingUpdateSourceUrl $PendingUpdateSourceUrl)
     }
 
     # ---- STEP 2 -- BUILD (only if GUI update needed) -------------------------
@@ -632,6 +696,7 @@ try {
             # The roller re-checks the ring; forward the operator's override (and its reason) so an
             # audited override here is not refused one level down.
             if ($OverrideRingGate) { $rollGate['OverrideRingGate'] = $true; $rollGate['Reason'] = $Reason }
+            if ($PendingUpdateRing -ge 0) { $rollGate['PendingUpdateRing'] = $PendingUpdateRing; $rollGate['PendingUpdateSourceUrl'] = $PendingUpdateSourceUrl }
             if ("$SubscriptionId".Trim()) { $rollGate['SubscriptionId'] = "$SubscriptionId".Trim() }
             if ("$UpdateJobName".Trim()) { $rollGate['UpdateJobName'] = $UpdateJobName }
             if ($PSCmdlet.ShouldProcess("$($Apps -join ', ')", "roll -> $($buildPlan.imageTag)")) {
@@ -649,7 +714,7 @@ try {
     # `pim.Rows`, `pim.Settings` and `pim.AuditEvents` are created by `Initialize-PimSqlStore`
     # (PIM-SqlStore.ps1) -- not by either shipped .sql file, and not by the conformance plan, whose
     # locked schema does not list them. So a first install ended up with the tables from
-    # platform/local-schema.sql and NONE of these, and the next step died with
+    # the shipped .sql files and NONE of these, and the next step died with
     #     Invalid object name 'pim.Settings'
     # Measured at a live customer 2026-09-08, one step past the base-schema fix.
     # 🪤 THIS RUNS OUTSIDE the SqlUpdateRequired branch, deliberately. That branch is driven by the
@@ -679,6 +744,38 @@ try {
         }
     }
 
+    # ---- BASE SCHEMA (sql/platform-schema.sql) -- every apply run that has a store ---------------
+    # 🔴 2026-09-18 (IMP-46). Mirrors update-job-entry: the core tables first (above), then the shipped
+    # file(s) behind Get-PimSchemaFileApplyPlan, then re-plan against what is REALLY there. OUTSIDE the
+    # SqlUpdateRequired branch for the same reason as the core tables: a repair must not be gated on a
+    # condition that cannot observe it (2.4.360 lost a guarded ADD on every existing store that way).
+    # The locked schema is every table this file creates, so a store that had none of them is a FIRST
+    # INSTALL -- which is what drives the Manager restart further down.
+    $createdBaseSchema = $false
+    if ("$SqlConnectionString".Trim()) {
+        Step '   apply the shipped base schema (sql/platform-schema.sql; idempotent, store-aware guard)'
+        if ($PSCmdlet.ShouldProcess('deployed DB', 'apply the shipped base schema')) {
+            $absentBefore = @($sqlPlan.tables | Where-Object { $_.exists -eq $false })
+            if ($absentBefore.Count) {
+                Info ("base schema: {0} table(s) absent ({1}) -- this store is being CREATED" -f
+                      $absentBefore.Count, (@($absentBefore | ForEach-Object { $_.table }) -join ', '))
+            }
+            [void](Invoke-PimBaseSchemaApply -ConnString $SqlConnectionString -SolutionRoot $solRoot)
+            # Re-read and re-plan: the conformance pass below must run against what is now really in
+            # the database, not against the emptiness it was planned from.
+            $deployedCols = Get-DeployedColumns -ConnString $SqlConnectionString
+            $sqlPlan = Get-PimSqlUpdatePlan -DeployedColumns $deployedCols -LockedSqlSchema (Get-PimLockedSqlSchema) `
+                            -PulledSchemaVersion $pulledVersion -DeployedSchemaVersion $pulledVersion
+            $stillAbsent = @($sqlPlan.tables | Where-Object { $_.exists -eq $false })
+            if ($stillAbsent.Count) {
+                throw ("the base schema was applied but these tables are still absent: " +
+                       (@($stillAbsent | ForEach-Object { $_.table }) -join ', ') +
+                       " -- the identity applying the schema may lack CREATE TABLE on this database.")
+            }
+            if ($absentBefore.Count) { $createdBaseSchema = $true }
+        }
+    }
+
     if ($detection.SqlUpdateRequired) {
         Step '   SQL schema upgrade (preflight -> apply -> re-preflight; idempotent, never destructive)'
         if (-not "$SqlConnectionString".Trim()) {
@@ -688,7 +785,7 @@ try {
                     $cols = if ($deployedCols.ContainsKey($tp.table)) { @($deployedCols[$tp.table]) } else { @() }
                     $ddl = New-PimSqlConformanceDdl -Table $tp.table -Spec (Get-PimLockedSqlSchema)[$tp.table] -ActualColumns $cols
                     Write-Host $ddl.ddl
-                } else { Info "table $($tp.table) needs CREATE (run sql/local-schema.sql or platform-schema.sql)." }
+                } else { Warn "table $($tp.table) needs CREATE -- apply sql/platform-schema.sql with your SQL deploy identity." }
             }
             $schemaUpgraded = $false
         } else {
@@ -698,40 +795,12 @@ try {
             if ($PSCmdlet.ShouldProcess('deployed DB', 'apply idempotent schema upgrade')) {
                 # 🔴 CREATE BEFORE ALTER. Nothing in the deploy path had ever applied the SHIPPED
                 # base schema: this step only knew how to bring an EXISTING table into conformance,
-                # and a missing table was merely *reported* ("run sql/local-schema.sql"). On a first
-                # install -- the only case where it matters -- there is no operator standing by to
-                # run it, so the deploy failed at the first ALTER. Measured at a live customer
-                # 2026-09-08: "Cannot find the object pim.LocalAdmins".
-                # Safe on an existing store, which is why it can run unconditionally-when-missing:
-                # both files guard every object with IF OBJECT_ID(...) IS NULL / IF SCHEMA_ID(...)
-                # IS NULL, and neither contains a DROP, a TRUNCATE or a data statement. Applying
-                # them to a populated database is a no-op.
-                $createdBaseSchema = $false
-                $absent = @($sqlPlan.tables | Where-Object { $_.exists -eq $false })
-                if ($absent.Count) {
-                    Info ("base schema: {0} table(s) absent -- applying the shipped schema first ({1})" -f
-                          $absent.Count, (@($absent | ForEach-Object { $_.table }) -join ', '))
-                    foreach ($rel in @('sql\platform-schema.sql', 'sql\local-schema.sql')) {
-                        $sqlFile = Join-Path $solRoot $rel
-                        if (-not (Test-Path -LiteralPath $sqlFile)) {
-                            throw "the base schema file '$rel' is missing from this payload -- the store cannot be created."
-                        }
-                        Info "  applying $rel"
-                        Invoke-PimSqlDdl -ConnString $SqlConnectionString -Sql ([IO.File]::ReadAllText($sqlFile))
-                    }
-                    # Re-read and re-plan: the conformance pass below must run against what is now
-                    # really in the database, not against the emptiness it was planned from.
-                    $deployedCols = Get-DeployedColumns -ConnString $SqlConnectionString
-                    $sqlPlan = Get-PimSqlUpdatePlan -DeployedColumns $deployedCols -LockedSqlSchema (Get-PimLockedSqlSchema) `
-                                    -PulledSchemaVersion $pulledVersion -DeployedSchemaVersion $pulledVersion
-                    $createdBaseSchema = $true
-                    $stillAbsent = @($sqlPlan.tables | Where-Object { $_.exists -eq $false })
-                    if ($stillAbsent.Count) {
-                        throw ("the base schema was applied but these tables are still absent: " +
-                               (@($stillAbsent | ForEach-Object { $_.table }) -join ', ') +
-                               " -- the identity applying the schema may lack CREATE TABLE on this database.")
-                    }
-                }
+                # and a missing table was merely *reported*. On a first install -- the only case where
+                # it matters -- there is no operator standing by to run it, so the deploy failed at the
+                # first ALTER. Measured at a live customer 2026-09-08: "Cannot find the object
+                # pim.LocalAdmins". The CREATE now happens in the BASE SCHEMA step above
+                # (Invoke-PimBaseSchemaApply), on every apply run, before this conformance pass --
+                # and that step already re-planned $sqlPlan against what is really there.
                 foreach ($tp in @($sqlPlan.tables | Where-Object { $_.exists -and -not $_.conformant })) {
                     $cols = @($deployedCols[$tp.table])
                     $ddl = New-PimSqlConformanceDdl -Table $tp.table -Spec (Get-PimLockedSqlSchema)[$tp.table] -ActualColumns $cols
@@ -819,11 +888,17 @@ try {
             # Deliberately NOT adding -AsReleaseGate here: the roller already gates with it, and
             # making a skip fatal at this point would auto-roll-back a HEALTHY deploy whenever the
             # gate could not run for an environmental reason -- the BUG-102 failure, in reverse.
-            # NOTE no -SubscriptionId: this script has no such parameter, and inventing a passthrough
-            # for a value it never receives would just move the emptiness one level down. The roller's
-            # gate a few steps earlier is the one that carries subscription scoping (BUG-102).
+            # BUG-172: -SubscriptionId IS passed now -- the parameter exists (BUG-102, declared above), and
+            # an unscoped smoke on mgmt1 reads another company's subscription. So is the version this
+            # run rolled: the gate checks the app serves THAT, not whatever the working tree says.
+            # 🔑 The smoke now exits 2 for "skipped -- NOT a pass" (it used to exit 0, which read as
+            # Healthy). Still no -AsReleaseGate here, for the reason above: a skip is reported as
+            # UNVERIFIED and never called healthy, but it does not roll back a roll the roller's own
+            # release gate already passed.
             $smokeArgs = @('-App', $ManagerApp)
             if ("$ResourceGroup".Trim())  { $smokeArgs += @('-ResourceGroup', "$ResourceGroup".Trim()) }
+            if ("$SubscriptionId".Trim()) { $smokeArgs += @('-SubscriptionId', "$SubscriptionId".Trim()) }
+            if ("$($buildPlan.imageTag)".Trim() -match '^\d+\.\d+\.\d+') { $smokeArgs += @('-ExpectedVersion', "$($buildPlan.imageTag)".Trim()) }
             Info ("verify inputs: app={0} rg={1}" -f $ManagerApp, $(if ("$ResourceGroup".Trim()) { $ResourceGroup } else { '(NONE -- the gate cannot read the app)' }))
             & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $smoke @smokeArgs
             $code = $LASTEXITCODE
@@ -843,8 +918,15 @@ try {
         } else {
         $verdict = Get-PimVerifyVerdict -ExitCode $code -PreviousRevision $prevRev
         $verifyHealthy = $verdict.Healthy
-        Info "verify healthy=$verifyHealthy (smoke exit $code)"
+        if ($verdict.State -eq 'unverified') {
+            # BUG-172: exit 2 -- the smoke skipped a check. NOT a pass, and never reported as healthy.
+            $verifyHealthy = 'unverified'
+            Warn "verify: UNVERIFIED (smoke exit 2 -- a check was SKIPPED; a skip is not a pass). Not rolled back: the roll passed the roller's release gate. Verify the Manager before trusting this run."
+        } else {
+            Info "verify healthy=$verifyHealthy (smoke exit $code)"
         }
+        }
+        # 'unverified' (a string) is truthy, so a skipped smoke never takes the rollback branch below.
         if (($null -ne $code) -and -not $verifyHealthy) {
             $outcome = 'rolledback'; $errDetail = "post-deploy verification failed (smoke exit $code)"
             if ($verdict.rollback.action -eq 'rollback' -and $profile.isHosted) {
@@ -853,7 +935,7 @@ try {
                 $roller = Join-Path $here 'Update-PimContainers.ps1'
                 if ($PSCmdlet.ShouldProcess($ManagerApp, "rollback to $($verdict.rollback.revision)")) {
                     # §53.6: the image anchor rides along, and is used only if the revision is gone.
-                    $rbArgs = @{}; if ("$prevImage".Trim()) { $rbArgs['RollbackImage'] = "$prevImage".Trim() }
+                    $rbArgs = @{}; if ("$prevImage".Trim()) { $rbArgs['RollbackImage'] = "$prevImage".Trim() }; if ("$SubscriptionId".Trim()) { $rbArgs['SubscriptionId'] = "$SubscriptionId".Trim() }
                     & $roller -Rollback $verdict.rollback.revision -ResourceGroup $ResourceGroup -AcrName $AcrName -ImageRepo $ImageRepo -Apps $Apps @rbArgs
                 }
             } else {
@@ -872,7 +954,7 @@ catch {
         Warn "attempting auto-rollback to $(if ("$prevRev".Trim()) { $prevRev } else { $prevImage })"
         try {
             $roller = Join-Path $here 'Update-PimContainers.ps1'
-            $rbArgs = @{}; if ("$prevImage".Trim()) { $rbArgs['RollbackImage'] = "$prevImage".Trim() }
+            $rbArgs = @{}; if ("$prevImage".Trim()) { $rbArgs['RollbackImage'] = "$prevImage".Trim() }; if ("$SubscriptionId".Trim()) { $rbArgs['SubscriptionId'] = "$SubscriptionId".Trim() }
             & $roller -Rollback "$prevRev".Trim() -ResourceGroup $ResourceGroup -AcrName $AcrName -ImageRepo $ImageRepo -Apps $Apps @rbArgs
             $outcome = 'rolledback'
         } catch { Warn "auto-rollback also failed: $($_.Exception.Message)" }
@@ -983,13 +1065,15 @@ if ($Apply -and $profile.isHosted -and $deployed -and $outcome -eq 'success' -an
     try {
         $ringEnv = Get-PimEnvironmentUpdaterEnv -ResourceGroup $ResourceGroup -SubscriptionArgs $pinSub -UpdateJobName $UpdateJobName
         $ringRaw = if ($ringEnv.ok -and $ringEnv.found -and $ringEnv.env.Contains('PIM_UPDATE_RING')) { "$($ringEnv.env['PIM_UPDATE_RING'])".Trim() } else { '' }
+        # IMP-36: the ONE ring parser (_PimUpdateRing.ps1), not a local copy of the range.
+        $ringNum = ConvertTo-PimUpdateRingNumber $ringRaw
         if (-not $ringEnv.ok) { Warn "ring advance: could not read '$UpdateJobName' ($($ringEnv.reason)) -- channel.json NOT touched." }
         elseif (-not $ringRaw) { Info 'ring advance: this environment follows no ring -- channel.json not touched.' }
-        elseif ($ringRaw -notmatch '^(?i)(ring)?([0-3])$') { Warn "ring advance: PIM_UPDATE_RING='$ringRaw' is not a ring -- channel.json NOT touched." }
-        elseif ([int]$Matches[2] -ge 2) {
-            Info "ring advance: ring $([int]$Matches[2]) -- channel.json is NOT touched. Only the operator moves ring 2 and above."
+        elseif ($null -eq $ringNum) { Warn "ring advance: PIM_UPDATE_RING='$ringRaw' is not a ring -- channel.json NOT touched." }
+        elseif ($ringNum -ge 2) {
+            Info "ring advance: ring $ringNum -- channel.json is NOT touched. Only the operator moves ring 2 and above."
         } else {
-            $ringN = [int]$Matches[2]
+            $ringN = $ringNum
             $srcTpl = if ($ringEnv.env.Contains('PIM_UPDATE_SOURCE_URL')) { "$($ringEnv.env['PIM_UPDATE_SOURCE_URL'])".Trim() } else { '' }
             if (-not $srcTpl) { Warn "ring advance: ring $ringN but no PIM_UPDATE_SOURCE_URL on '$UpdateJobName' -- channel.json location unknown, NOT advanced." }
             elseif ($PSCmdlet.ShouldProcess("channel.json ring$ringN", "advance -> $($buildPlan.imageTag)")) {

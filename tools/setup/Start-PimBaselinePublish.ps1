@@ -44,13 +44,16 @@ for ($attempt = 1; $attempt -le $MaxAttempts; $attempt++) {
         $status = "$(az containerapp job execution show @sub -g $ResourceGroup -n $JobName --job-execution-name $exec --query properties.status -o tsv 2>$null)".Trim()
         if ($status -in @('Succeeded', 'Failed', 'Degraded', 'Stopped')) { break }
     }
-    $v = Get-PimBaselinePublishExecutionVerdict -Status $status -Attempt $attempt -MaxAttempts $MaxAttempts
-    Note $v.reason
     $ErrorActionPreference = 'Continue'
     $logs = @(az containerapp job logs show @sub -g $ResourceGroup -n $JobName --execution $exec --container $JobName --format text 2>$null)
     $ErrorActionPreference = 'Stop'
     if ($logs.Count) { $logs | Where-Object { "$_" -match '\[publish-job\]' } | Select-Object -Last 12 | ForEach-Object { Note "  $_" } }
     else { Note "  (console log not available from here yet: az containerapp job logs show -g $ResourceGroup -n $JobName --execution $exec $($sub -join ' '))" }
+    # The job gates itself on the cadence set in the Manager (PIM-JobCadence.ps1): a Succeeded execution may have SKIPPED.
+    # The deploy step just before this one stamps the job, so its first execution publishes; the log says which it was.
+    $v = Get-PimBaselinePublishExecutionVerdict -Status $status -Attempt $attempt -MaxAttempts $MaxAttempts -LogText (@($logs) -join "`n")
+    Note $v.reason
+    if ($v.action -eq 'done' -and -not $logs.Count) { Note '  (without the log this host cannot tell a publish from a cadence skip -- a skip happens only after an earlier publish SUCCEEDED, or when publishing is disabled in the Manager''s Job schedule)' }
     if ($v.action -eq 'done') {
         Write-Host "==> FIRST PUBLISH OK ($exec): baseline-latest.json is signed, uploaded, and was read back anonymously from the allowed subnet and verified." -ForegroundColor Green
         exit 0

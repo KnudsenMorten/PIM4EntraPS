@@ -21,10 +21,10 @@
     IMP-13, and the operator ruling of 2026-09-03 made the prefix mandatory. Typing the name by
     hand is precisely how it gets violated.
 
-    📌 IT ALSO ADDS THE OPTIONAL COLUMNS THE BUNDLE ALREADY EXPECTS. `New-PimBaselineBundle.ps1`
-    selects `Target, CreateTap, TapLifetimeHours, ManagerEmail` and falls back with
-    "(no CreateTap/TapLifetimeHours/ManagerEmail in pim.CentralAdmins -- the downlink will apply
-    its own default)" when they are absent. 📌 71.19: ManagerEmail is LEGACY -- an admin's mail and TAP go to its
+    📌 IT ALSO ADDS THE OPTIONAL COLUMNS THE BUNDLE ALREADY EXPECTS. The bundle producer
+    (Get-PimBaselineBundlePayload, engine/_shared/PIM-BaselinePublish.ps1, run by the master's ca-pim-publish job) selects `Target, TapLifetimeHours, ManagerEmail` (71.17: no longer CreateTap -- a
+    TAP is enforced for every Entra admin) and falls back with "(no TapLifetimeHours/ManagerEmail in
+    pim.CentralAdmins -- the downlink will apply its own default)" when they are absent. 📌 71.19: ManagerEmail is LEGACY -- an admin's mail and TAP go to its
     SPONSOR DEPARTMENT's owners (Account-Definitions-Admins.Department -> PIM-Definitions-Departments.Owners), which is
     what survives an org change. The column is still created and read so existing data keeps working; prefer giving the
     admin a Department. Additive only, never destructive.
@@ -33,9 +33,13 @@
     The owner token the convention renders (e.g. 'thpo'). The account name is derived from it.
 
 .PARAMETER ManagerEmail
-    Where this admin's TAP is delivered. 🔑 The account itself needs no mailbox: notification and
-    TAP mail is SENT FROM the shared sender mailbox TO this address. An empty value means the
-    engine will refuse to mint a TAP for them rather than mint one nobody receives.
+    OPTIONAL, LEGACY FALLBACK. 📌 71.19: an admin's TAP and mail go to the OWNERS of its SPONSOR DEPARTMENT
+    (Account-Definitions-Admins.Department -> PIM-Definitions-Departments.Owners), resolved in the managed tenant;
+    ManagerEmail is used only when no department resolves. 🔑 The account itself needs no mailbox: the mail is SENT
+    FROM the shared sender mailbox TO the recipient. 🪤 pim.CentralAdmins has no Department column, so for an admin
+    that exists ONLY in this registry ManagerEmail is still the only recipient that travels -- omit it only when the
+    admin's sponsor department is set where the master publishes it. With no recipient at all the engine REFUSES to
+    mint a TAP rather than mint one nobody receives.
 
 .PARAMETER Ring
     0 broad / 1 pilot / 2 test. Drives WHICH managed tenants receive this admin.
@@ -54,7 +58,8 @@ param(
     [Parameter(Mandatory)][string]$FirstName,
     [Parameter(Mandatory)][string]$LastName,
     [Parameter(Mandatory)][string]$Initials,
-    [Parameter(Mandatory)][string]$ManagerEmail,
+    # 71.19: legacy fallback recipient, no longer mandatory (see .PARAMETER ManagerEmail).
+    [string]$ManagerEmail = '',
     [ValidateRange(0,2)][int]$Ring = 2,
     [switch]$HighPriv,
     [ValidateSet('Day2Day','HighPriv')][string]$Purpose,
@@ -138,9 +143,13 @@ if (-not "$userName".Trim()) { throw "the naming convention rendered an empty na
 if (-not $Purpose) { $Purpose = if ($HighPriv) { 'HighPriv' } else { 'Day2Day' } }
 $display = "$FirstName $LastName" + $(if ($HighPriv) { ' (L0/T0)' } else { '' })
 $upn = if ("$MasterUpnDomain".Trim()) { "$userName@$MasterUpnDomain" } else { $userName }
-Step "admin '$userName'  ring=$Ring  purpose=$Purpose  tap->$ManagerEmail"
-if (-not "$ManagerEmail".Trim()) {
-    Warn 'no -ManagerEmail: the engine will REFUSE to mint this admin a TAP rather than mint one nobody receives.'
+$hasMgr = [bool]"$ManagerEmail".Trim()
+Step "admin '$userName'  ring=$Ring  purpose=$Purpose  tap->$(if ($hasMgr) { "$ManagerEmail (legacy fallback; the sponsor department's owners win)" } else { "the sponsor department's owners" })"
+if (-not $hasMgr) {
+    # 71.19: not an error any more -- but pim.CentralAdmins carries no Department, so say what decides delivery.
+    Warn ("no -ManagerEmail: this admin's TAP goes to its SPONSOR DEPARTMENT's owners in the managed tenant. If no department " +
+          "resolves there (and no ManagerEmail was stored earlier), the engine REFUSES to mint a TAP rather than mint one nobody receives. " +
+          "An existing ManagerEmail on this row is left as it is.")
 }
 # 71.17 TAP IS ON FOR ALL (operator 2026-09-15): -CreateTap:$false is accepted for compatibility and NOT stored.
 if (-not $CreateTap) { Warn '-CreateTap:$false has no effect -- a TAP is enforced for every Entra admin; stored as 1.' }
@@ -158,7 +167,7 @@ WHEN MATCHED THEN UPDATE SET
     Template=$(if ("$Template".Trim()) { "'$(Esc $Template)'" } else { 'NULL' }),
     Target=$(if ("$Target".Trim()) { "'$(Esc $Target)'" } else { 'NULL' }),
     CreateTap=$(if ($CreateTap) { 1 } else { 0 }), TapLifetimeHours=$TapLifetimeHours,
-    ManagerEmail='$(Esc $ManagerEmail)', Owner='MSP', UpdatedAtUtc=SYSUTCDATETIME()
+    $(if ($hasMgr) { "ManagerEmail='$(Esc $ManagerEmail.Trim())', " } else { '' })Owner='MSP', UpdatedAtUtc=SYSUTCDATETIME()
 WHEN NOT MATCHED THEN INSERT
     (UserName, DisplayName, Upn, Ring, Enabled, FirstName, LastName, Initials, UsageLocation,
      Purpose, Template, Target, CreateTap, TapLifetimeHours, ManagerEmail, Owner)
@@ -166,7 +175,7 @@ WHEN NOT MATCHED THEN INSERT
             '$(Esc $Initials)','$(Esc $UsageLocation)','$(Esc $Purpose)',
             $(if ("$Template".Trim()) { "'$(Esc $Template)'" } else { 'NULL' }),
             $(if ("$Target".Trim()) { "'$(Esc $Target)'" } else { 'NULL' }),
-            $(if ($CreateTap) { 1 } else { 0 }), $TapLifetimeHours, '$(Esc $ManagerEmail)', 'MSP');
+            $(if ($CreateTap) { 1 } else { 0 }), $TapLifetimeHours, $(if ($hasMgr) { "'$(Esc $ManagerEmail.Trim())'" } else { 'NULL' }), 'MSP');
 "@
 if ($PSCmdlet.ShouldProcess($userName, 'upsert central admin')) {
     Q $sql | Out-Null
@@ -176,4 +185,4 @@ if ($PSCmdlet.ShouldProcess($userName, 'upsert central admin')) {
 }
 Step 'Done.'
 Note 'next: republish the baseline so managed tenants receive this admin --'
-Note "  setup/New-PimBaselineBundle.ps1 -CentralServer $SqlServer -Database $Database -StorageAccount <master storage> -Container baselines -Scope fleet"
+Note "  tools/setup/Start-PimBaselinePublish.ps1 -SubscriptionId <master subscription> -ResourceGroup <master resource group>   (starts the ca-pim-publish job; it also runs daily)"
